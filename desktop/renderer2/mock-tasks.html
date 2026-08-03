@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>workass · rediseño de tareas (mock)</title>
+<style>
+  :root {
+    --bg: #151413; --side: #0f0e0d; --panel: #1d1c1a; --card: #1a1918;
+    --ink: #f2efe9; --ink2: #cfcbc4; --muted: #9c978f; --faint: #6f6b63;
+    --line: rgba(255,255,255,.075); --line2: rgba(255,255,255,.14);
+    --acc: #4fa583; --amber: #d8a05a; --del: #d96b5f; --shell: #0b0a09;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--shell); color: var(--ink); font: 13.5px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 22px; }
+  code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+  h1 { font-size: 15px; font-weight: 650; margin-bottom: 4px; }
+  .lede { color: var(--muted); font-size: 12.5px; margin-bottom: 20px; max-width: 78ch; }
+  .lede b { color: var(--ink2); font-weight: 600; }
+  .stage { display: grid; grid-template-columns: 1fr 320px; gap: 20px; align-items: start; }
+  .col-h { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin: 0 0 10px 2px; }
+  .before-after { font-size: 11px; color: var(--faint); }
+
+  /* ===== CHAT column ===== */
+  .doc { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; }
+  .amsg p { color: var(--ink2); margin: 8px 0; max-width: 70ch; }
+  .amsg p.lead { margin-top: 0; }
+
+  /* thinking row (unchanged, for context) */
+  .steprow { display: flex; align-items: flex-start; gap: 7px; color: var(--muted); font-size: 12.5px; margin: 12px 0; cursor: pointer; width: fit-content; }
+  .steprow .chev { font-size: 11px; margin-top: 2px; }
+
+  /* NEW: grouped, collapsible tool run (ported from old renderer) */
+  .toolgroup { border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--card) 82%, transparent); margin: 9px 0; overflow: hidden; }
+  .tg-summary { display: flex; align-items: center; gap: 9px; padding: 7px 11px; cursor: pointer; list-style: none; font-size: 12.5px; user-select: none; }
+  .tg-summary::-webkit-details-marker { display: none; }
+  .tg-summary:hover { background: color-mix(in srgb, var(--acc) 6%, transparent); }
+  .tg-caret { color: var(--faint); font-size: 10px; transition: transform .12s ease; flex: none; width: 10px; }
+  details[open] .tg-caret { transform: rotate(90deg); }
+  .tg-ic { flex: none; width: 15px; text-align: center; font-size: 12px; }
+  .tg-ic.done { color: var(--acc); }
+  .tg-ic.failed { color: var(--del); }
+  .tg-ic.running { color: var(--acc); }
+  .tg-title { color: var(--ink2); font-weight: 550; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tg-count { color: var(--muted); font-weight: 400; }
+  .tg-dur { margin-left: auto; color: var(--faint); font-size: 11px; font-family: ui-monospace, Menlo, monospace; flex: none; }
+  .tg-run { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 20%, transparent); flex: none; animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  .tg-body { border-top: 1px solid var(--line); padding: 3px 0; }
+  .evt { padding: 5px 11px 5px 34px; }
+  .evt-head { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .evt-ic { flex: none; font-size: 11px; width: 12px; text-align: center; }
+  .evt-ic.done { color: var(--acc); } .evt-ic.failed { color: var(--del); } .evt-ic.running { color: var(--muted); }
+  .evt-title { color: var(--ink2); }
+  .evt-loc { color: var(--faint); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+  .evt-st { margin-left: auto; color: var(--faint); font-size: 10.5px; font-family: ui-monospace, Menlo, monospace; }
+  .evt-out { margin: 4px 0 2px 20px; padding: 6px 9px; border-left: 2px solid var(--line2); color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; white-space: pre-wrap; }
+
+  /* OLD (spam) for the "before" strip */
+  .wcard { border: 1px solid var(--line); background: var(--card); border-radius: 10px; margin: 8px 0; padding: 6px 10px; display: flex; align-items: center; gap: 9px; font-size: 12.5px; }
+  .wcard .wi { color: var(--faint); }
+  .wcard .wt { font-weight: 600; }
+  .wcard .ws { margin-left: auto; color: var(--muted); font-size: 11px; font-family: ui-monospace, Menlo, monospace; }
+
+  /* ===== TAREAS rail column ===== */
+  .rail { background: var(--side); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  .ecard { border: 1px solid var(--line); border-radius: 11px; background: var(--panel); padding: 8px; margin-bottom: 12px; }
+  .ehead { display: flex; align-items: center; font-size: 12px; font-weight: 600; color: var(--ink2); padding: 2px 4px 8px; }
+  .ehead .sp { flex: 1; }
+  .ehead .live { font-size: 10.5px; color: var(--acc); font-weight: 500; display: inline-flex; align-items: center; gap: 5px; }
+  .ehead .live .d { width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 20%, transparent); animation: pulse 1.6s ease-in-out infinite; }
+
+  /* plan / todo list */
+  .plan { padding: 2px 4px 6px; }
+  .prow { display: flex; align-items: flex-start; gap: 9px; font-size: 12.5px; color: var(--ink2); padding: 3px 0; }
+  .prow .mk { flex: none; width: 14px; text-align: center; margin-top: 1px; color: var(--muted); }
+  .prow.done { color: var(--muted); } .prow.done .mk { color: var(--acc); }
+  .prow.done .tx { text-decoration: none; }
+  .prow.run .mk { color: var(--acc); }
+  .prow.run { color: var(--ink); }
+
+  /* live current-call row */
+  .callrow { display: flex; align-items: center; gap: 9px; border: 1px solid color-mix(in srgb, var(--acc) 32%, var(--line)); border-radius: 9px; background: color-mix(in srgb, var(--acc) 7%, var(--card)); padding: 7px 9px; margin: 8px 2px 4px; }
+  .callrow .ci { flex: none; color: var(--acc); }
+  .callrow .cinfo { min-width: 0; flex: 1; }
+  .callrow .cn { font-size: 12px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .callrow .cs { font-size: 10.5px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
+  .callrow .cd { width: 7px; height: 7px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 20%, transparent); flex: none; animation: pulse 1.6s ease-in-out infinite; }
+
+  /* completed calls, folded */
+  .donefold { margin: 6px 2px 2px; }
+  .donefold summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); padding: 5px 4px; }
+  .donefold summary::-webkit-details-marker { display: none; }
+  .donefold summary:hover { color: var(--ink2); }
+  .donefold .car { font-size: 9px; color: var(--faint); }
+  .donefold .dc { color: var(--acc); }
+  .donefold .list { padding: 2px 0 4px 6px; }
+  .dline { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); padding: 3px 4px; }
+  .dline .g { color: var(--acc); flex: none; width: 12px; text-align: center; }
+  .dline .dl { color: var(--faint); font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; margin-left: auto; }
+
+  /* engine → demoted to a quiet footer chip */
+  .engchip { display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: var(--faint); padding: 8px 6px 2px; border-top: 1px solid var(--line); margin-top: 6px; }
+  .engchip .ed { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex: none; }
+  .rail-empty { color: var(--muted); font-size: 12px; padding: 10px 6px; }
+
+  .note { margin-top: 18px; padding: 12px 14px; border: 1px solid var(--line); border-left: 3px solid var(--acc); border-radius: 8px; background: color-mix(in srgb, var(--acc) 5%, transparent); font-size: 12.5px; color: var(--ink2); max-width: 80ch; }
+  .note b { color: var(--ink); }
+</style>
+</head>
+<body>
+  <h1>Rediseño de tareas — mock (dark, tokens reales de la app)</h1>
+  <p class="lede">Dos arreglos: <b>(1)</b> las llamadas de herramienta en el chat se <b>agrupan en una línea plegable</b> (como tu app vieja / Claude Code), en vez de una tarjeta por llamada. <b>(2)</b> el panel <b>Tareas</b> deja de mostrar el proceso "Engine" del sistema y pasa a mostrar <b>el plan + la llamada en curso</b>, con lo terminado plegado. El engine baja a un chip callado abajo.</p>
+
+  <div class="stage">
+    <!-- ===================== CHAT ===================== -->
+    <div>
+      <div class="col-h">Chat · una respuesta del agente</div>
+      <div class="doc">
+        <div class="amsg">
+          <p class="lead">Voy a revisar el catálogo y ajustar cómo se advertisen los niveles de esfuerzo. Primero leo los archivos relevantes.</p>
+
+          <!-- collapsed done group -->
+          <details class="toolgroup">
+            <summary class="tg-summary">
+              <span class="tg-caret">▸</span>
+              <span class="tg-ic done">✓</span>
+              <span class="tg-title">Leí 3 archivos y busqué en el repo <span class="tg-count">· 4 llamadas</span></span>
+              <span class="tg-dur">3.2s</span>
+            </summary>
+            <div class="tg-body">
+              <div class="evt"><div class="evt-head"><span class="evt-ic done">✓</span><span class="evt-title">Read</span><span class="evt-loc">catalog.go</span><span class="evt-st">listo</span></div></div>
+              <div class="evt"><div class="evt-head"><span class="evt-ic done">✓</span><span class="evt-title">Read</span><span class="evt-loc">manager.go</span><span class="evt-st">listo</span></div></div>
+              <div class="evt"><div class="evt-head"><span class="evt-ic done">✓</span><span class="evt-title">Read</span><span class="evt-loc">provider.go</span><span class="evt-st">listo</span></div></div>
+              <div class="evt"><div class="evt-head"><span class="evt-ic done">✓</span><span class="evt-title">grep "thought_level"</span><span class="evt-st">listo</span></div></div>
+            </div>
+          </details>
+
+          <p>El slider se llena desde <code>model.Efforts</code>. Ahora corro los tests para confirmar.</p>
+
+          <!-- collapsed done group, single call keeps its own title -->
+          <details class="toolgroup">
+            <summary class="tg-summary">
+              <span class="tg-caret">▸</span>
+              <span class="tg-ic done">✓</span>
+              <span class="tg-title">go test ./internal/acp/...</span>
+              <span class="tg-dur">6.8s</span>
+            </summary>
+            <div class="tg-body">
+              <div class="evt"><div class="evt-head"><span class="evt-ic done">✓</span><span class="evt-title">go test ./internal/acp/...</span><span class="evt-st">listo</span></div>
+                <div class="evt-out">ok  internal/acp  6.812s</div></div>
+            </div>
+          </details>
+
+          <p>Todo pasa. Ahora aplico el cambio y vuelvo a construir el dist.</p>
+
+          <!-- running group (expanded by default, live) -->
+          <details class="toolgroup" open>
+            <summary class="tg-summary">
+              <span class="tg-caret">▸</span>
+              <span class="tg-ic running">◌</span>
+              <span class="tg-title">Editando archivos <span class="tg-count">· 2 llamadas</span></span>
+              <span class="tg-run"></span>
+            </summary>
+            <div class="tg-body">
+              <div class="evt"><div class="evt-head"><span class="evt-ic done">✓</span><span class="evt-title">Edit</span><span class="evt-loc">messages.tsx</span><span class="evt-st">listo</span></div></div>
+              <div class="evt"><div class="evt-head"><span class="evt-ic running">◌</span><span class="evt-title">Edit</span><span class="evt-loc">app.css</span><span class="evt-st">en curso</span></div></div>
+            </div>
+          </details>
+        </div>
+
+        <div style="margin-top:22px; border-top:1px dashed var(--line2); padding-top:12px;">
+          <div class="before-after">ANTES (actual) — una tarjeta por llamada, sin plegar:</div>
+          <div class="wcard"><span class="wi">▤</span><span class="wt">Read</span><span class="ws">listo</span></div>
+          <div class="wcard"><span class="wi">▤</span><span class="wt">Read</span><span class="ws">listo</span></div>
+          <div class="wcard"><span class="wi">▤</span><span class="wt">Read</span><span class="ws">listo</span></div>
+          <div class="wcard"><span class="wi">▤</span><span class="wt">grep "thought_level"</span><span class="ws">listo</span></div>
+          <div class="wcard"><span class="wi">▤</span><span class="wt">go test ./internal/acp/...</span><span class="ws">listo</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== TAREAS RAIL ===================== -->
+    <div>
+      <div class="col-h">Panel Tareas (rail)</div>
+      <div class="rail">
+        <div class="ecard">
+          <div class="ehead">Tareas<span class="sp"></span><span class="live"><span class="d"></span>en curso</span></div>
+
+          <!-- plan / todo list -->
+          <div class="plan">
+            <div class="prow done"><span class="mk">✓</span><span class="tx">Leer el catálogo y el mapeo de esfuerzos</span></div>
+            <div class="prow done"><span class="mk">✓</span><span class="tx">Confirmar con los tests de ACP</span></div>
+            <div class="prow run"><span class="mk">◐</span><span class="tx">Aplicar el cambio en el renderer y reconstruir el dist</span></div>
+            <div class="prow"><span class="mk">○</span><span class="tx">Verificar en vivo en la app</span></div>
+          </div>
+
+          <!-- live current call -->
+          <div class="callrow">
+            <span class="ci">▤</span>
+            <div class="cinfo">
+              <div class="cn">Edit · app.css</div>
+              <div class="cs">en curso · 2s</div>
+            </div>
+            <span class="cd"></span>
+          </div>
+
+          <!-- completed calls, folded -->
+          <details class="donefold">
+            <summary><span class="car">▸</span><span class="dc">✓</span> 5 llamadas terminadas</summary>
+            <div class="list">
+              <div class="dline"><span class="g">✓</span>Read · catalog.go<span class="dl">0.4s</span></div>
+              <div class="dline"><span class="g">✓</span>Read · manager.go<span class="dl">0.5s</span></div>
+              <div class="dline"><span class="g">✓</span>Read · provider.go<span class="dl">0.3s</span></div>
+              <div class="dline"><span class="g">✓</span>grep "thought_level"<span class="dl">0.2s</span></div>
+              <div class="dline"><span class="g">✓</span>go test ./internal/acp/...<span class="dl">6.8s</span></div>
+            </div>
+          </details>
+
+          <!-- engine demoted to quiet footer chip -->
+          <div class="engchip"><span class="ed"></span>Engine claude-agent-acp · 512 MB · 4m</div>
+        </div>
+
+        <div style="margin-top:14px;">
+          <div class="before-after">ANTES (actual) — el panel sólo mostraba esto:</div>
+          <div class="ecard" style="margin-top:8px;">
+            <div class="ehead">Tareas<span class="sp"></span></div>
+            <div class="callrow" style="border-color:var(--line); background:var(--card);">
+              <span class="ci" style="color:var(--faint)">▤</span>
+              <div class="cinfo"><div class="cn">claude-agent-acp</div><div class="cs">Engine · 4m · 512 MB</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>Lo que cambia, en concreto:</b><br>
+    · Chat: las llamadas consecutivas se pliegan en <b>una línea</b> ("Leí 3 archivos y busqué…"), plegada cuando termina, expandible al click. La que está en curso se muestra abierta con el punto vivo. — restaura el comportamiento de tu app vieja.<br>
+    · Panel Tareas: muestra <b>el plan (checklist)</b> + <b>la llamada en curso</b> + las terminadas plegadas. El proceso "Engine" del sistema pasa a un <b>chip callado</b> al pie (sigue existiendo para poder detenerlo, pero deja de ser el protagonista).<br>
+    · Datos 100% reales: plan = evento <code>plan</code>, llamadas = eventos <code>tool</code>, engine = <code>proc:list</code>. Nada inventado.
+  </div>
+</body>
+</html>

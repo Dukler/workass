@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Composer — comandos, agentes y estilos</title>
+<style>
+  /* Tokens verbatim from renderer2/src/styles/tokens.css (the approved set). */
+  :root {
+    color-scheme: dark;
+    --bg: #0f0e0d; --side: #151413; --panel: #1d1c1a; --card: #1a1918; --field: #252320;
+    --ink: #f2efe9; --ink2: #cfcbc4; --muted: #9c978f; --faint: #6f6b63;
+    --line: rgba(255,255,255,.075); --line2: rgba(255,255,255,.14);
+    --acc: #4fa583; --amber: #d8a05a; --shell: #0b0a09;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f2f0ed; --side: #faf9f7; --panel: #ffffff; --card: #ffffff; --field: #f1efeb;
+    --ink: #23211e; --ink2: #47443e; --muted: #7a756d; --faint: #a19c93;
+    --line: rgba(0,0,0,.08); --line2: rgba(0,0,0,.15);
+    --acc: #177353; --amber: #9a6a1d; --shell: #eceae6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { height: 100%; }
+  body {
+    min-height: 100%;
+    background: var(--shell); color: var(--ink);
+    font: 13.5px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 34px 40px 70px;
+  }
+  .mono, kbd { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+  /* ── page furniture ─────────────────────────────────────────────── */
+  header { max-width: 820px; margin: 0 auto 26px; position: relative; }
+  h1 { font-size: 19px; font-weight: 600; letter-spacing: -.01em; }
+  .lede { color: var(--muted); font-size: 13px; margin-top: 6px; max-width: 700px; }
+  .lede b { color: var(--ink2); font-weight: 550; }
+  #themeBtn {
+    position: absolute; top: 0; right: 0;
+    background: var(--panel); color: var(--ink2); border: 1px solid var(--line2);
+    border-radius: 999px; padding: 4px 13px; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  #themeBtn:hover { color: var(--ink); }
+  .stage { max-width: 820px; margin: 0 auto 30px; }
+  .cap { font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+  .cap b { color: var(--acc); font-weight: 600; letter-spacing: .09em; }
+  .stagenote { color: var(--muted); font-size: 11.5px; line-height: 1.55; margin-top: 9px; max-width: 700px; }
+  .stagenote b { color: var(--ink2); font-weight: 550; }
+  .stagenote kbd { font-size: 10px; border: 1px solid var(--line2); border-radius: 4px; padding: 0 4px; color: var(--muted); }
+
+  /* The chat floor: bottom slice of the transcript pane, bg --bg like the app. */
+  .floor { background: var(--bg); border: 1px solid var(--line); border-radius: 14px; padding: 34px 24px 16px; }
+
+  /* ── composer, class names verbatim from app.css ───────────────── */
+  .compwrap { max-width: 720px; margin: 0 auto; }
+  .comp { position: relative; background: var(--panel); border: 1px solid var(--line2); border-radius: 15px; padding: 11px 13px 9px; }
+  .ta { color: var(--ink); font-size: 13.5px; line-height: 1.5; min-height: 20px; padding-right: 34px;
+        white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ta .ph { color: var(--faint); }
+  .caret { display: inline-block; width: 1px; height: 14px; background: var(--ink); vertical-align: -2px; margin-left: 1px;
+           animation: blink 1.15s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .send { position: absolute; right: 9px; bottom: 8px; width: 26px; height: 26px; border-radius: 50%;
+          background: var(--ink); color: var(--bg); border: 0; display: grid; place-items: center;
+          cursor: pointer; font-size: 13px; flex: none; }
+  .comprow { margin: 8px auto 0; padding: 0 2px; display: flex; align-items: center; gap: 10px; }
+  .permchip { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent);
+              border-radius: 8px; padding: 3px 10px; font-size: 12px; cursor: pointer; border: 0; font-family: inherit; }
+  .cicon { color: var(--muted); cursor: pointer; display: flex; align-items: center; background: transparent; border: 0; padding: 0; }
+  .cicon:hover { color: var(--ink); }
+  .cicon svg { display: block; }
+  .sp { flex: 1; }
+  .selectorcluster { display: flex; align-items: center; gap: 12px; }
+  .modelsel, .effortsel { height: 20px; display: inline-flex; align-items: center; color: var(--ink2); font-size: 12.5px;
+                          cursor: pointer; background: transparent; border: 0; padding: 0; font-family: inherit; line-height: 20px; }
+  .modelsel { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+  .effortsel { gap: 6px; }
+  .effortsel .egauge { display: inline-flex; width: 17px; height: 17px; align-items: center; justify-content: center; color: var(--muted); }
+  .ctxring { display: grid; place-items: center; background: transparent; border: 0; padding: 0; cursor: pointer; height: 20px; }
+
+  /* ── the popup ("slashpop" grown up: tabs + fuzzy list + hints) ── */
+  .slashpop { background: var(--panel); border: 1px solid var(--line2); border-radius: 10px; padding: 5px;
+              margin-bottom: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.3); }
+  :root[data-theme="light"] .slashpop { box-shadow: 0 8px 30px rgba(0,0,0,.12); }
+  .slhead { display: flex; align-items: center; gap: 2px; padding: 2px 4px 6px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+  .sltab { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--faint);
+           background: transparent; border: 0; border-radius: 6px; padding: 3px 9px; cursor: pointer; font-family: inherit; }
+  .sltab:hover { color: var(--muted); }
+  .sltab.on { color: var(--ink); background: var(--field); }
+  .slist { max-height: 240px; overflow-y: auto; }
+  .pitem { display: flex; align-items: baseline; gap: 9px; padding: 6px 9px; border-radius: 7px; width: 100%;
+           text-align: left; border: 0; background: transparent; cursor: pointer; font-family: inherit; }
+  .pitem:hover { background: var(--line); }
+  .pitem.on { background: var(--line); }
+  /* Command / agent name: mono, ink, CLAMPED. The matched chars take the accent. */
+  .scmd { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--ink);
+          flex: none; max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .scmd .sig { color: var(--faint); }                 /* the leading "/" or "@" */
+  .scmd .m { color: var(--acc); font-weight: 600; }   /* fuzzy-matched chars    */
+  .sdesc { color: var(--muted); font-size: 11.5px; flex: 1; min-width: 0;
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .smodel { flex: none; margin-left: auto; color: var(--faint); font-family: ui-monospace, Menlo, monospace;
+            font-size: 10.5px; max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pk { flex: none; color: var(--faint); font-size: 10px; border: 1px solid var(--line2); border-radius: 4px;
+        padding: 0 4px; line-height: 1.5; font-family: ui-monospace, Menlo, monospace; }
+  .pitem .pk { margin-left: auto; }
+  .pitem .smodel + .pk { margin-left: 0; }
+  .slfoot { display: flex; align-items: center; gap: 14px; padding: 6px 9px 3px; border-top: 1px solid var(--line);
+            margin-top: 4px; color: var(--faint); font-size: 10.5px; }
+  .slfoot kbd { font-size: 10px; border: 1px solid var(--line2); border-radius: 4px; padding: 0 4px; color: var(--muted); margin-right: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Composer — comandos, agentes y estilos</h1>
+  <p class="lede">El Agent SDK reporta al inicio de sesión los <b>slash-commands</b>, los <b>subagentes</b> y los
+  <b>estilos de salida</b> del usuario; hoy el composer los ignora. Este mock agrega un popup arriba del composer:
+  <b>/</b> abre Comandos, <b>@</b> abre Agentes, y las pestañas cambian de catálogo. Elegir inserta texto — nunca envía.</p>
+  <button id="themeBtn" type="button">Ver claro</button>
+</header>
+
+<!-- ══ A: "/" recién tecleado — lista completa ══════════════════════ -->
+<section class="stage">
+  <div class="cap"><b>A</b> — "/" recién tecleado · catálogo completo, primera fila activa</div>
+  <div class="floor">
+    <div class="compwrap">
+      <div class="slashpop" role="listbox" aria-label="Comandos del agente">
+        <div class="slhead">
+          <button class="sltab on" type="button">Comandos</button>
+          <button class="sltab" type="button">Agentes</button>
+          <button class="sltab" type="button">Estilos</button>
+        </div>
+        <div class="slist">
+          <div class="pitem on" role="option" aria-selected="true">
+            <span class="scmd"><span class="sig">/</span>deploy</span>
+            <span class="sdesc">Compilá y promocioná el daemon a prod</span>
+            <span class="pk">⏎</span>
+          </div>
+          <div class="pitem" role="option"><span class="scmd"><span class="sig">/</span>revisar-pr</span><span class="sdesc">Revisá el PR abierto con la checklist del repo</span></div>
+          <div class="pitem" role="option"><span class="scmd"><span class="sig">/</span>buscar-bug</span><span class="sdesc">Rastreá un bug del síntoma al commit culpable</span></div>
+          <div class="pitem" role="option"><span class="scmd"><span class="sig">/</span>resumen-diario</span><span class="sdesc">Armá el resumen de Teams y Jira de hoy</span></div>
+          <div class="pitem" role="option"><span class="scmd"><span class="sig">/</span>probar-acp</span><span class="sdesc">Corré las sondas ACP contra el mock oracle</span></div>
+          <div class="pitem" role="option"><span class="scmd"><span class="sig">/</span>empaquetar-y-promocionar-daemon-a-la-laptop-de-prod</span><span class="sdesc">Firma, package y handoff, todo de una</span></div>
+          <div class="pitem" role="option"><span class="scmd"><span class="sig">/</span>recargar-ui</span><span class="sdesc">Recargá el renderer sin relanzar Electron</span></div>
+          <div class="pitem" role="option"><span class="scmd"><span class="sig">/</span>commit</span><span class="sdesc">Commit con recibos: comando + salida</span></div>
+        </div>
+        <div class="slfoot">
+          <span><kbd>↑</kbd><kbd>↓</kbd> navegar</span>
+          <span><kbd>⏎</kbd> usar</span>
+          <span><kbd>⇥</kbd> completar</span>
+          <span><kbd>esc</kbd> cerrar</span>
+        </div>
+      </div>
+      <div class="comp">
+        <div class="ta">/<span class="caret"></span></div>
+        <button class="send" type="button" title="Enviar">↑</button>
+      </div>
+      <div class="comprow">
+        <button class="permchip" type="button">Permitir todo</button>
+        <button class="cicon" type="button" title="Adjuntar imagen">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 3v10M3 8h10"/></svg>
+        </button>
+        <button class="cicon" type="button" title="Voz">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="6" y="2" width="4" height="8" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V15"/></svg>
+        </button>
+        <span class="sp"></span>
+        <div class="selectorcluster">
+          <button class="modelsel" type="button">Fable 5</button>
+          <button class="effortsel" type="button" title="Esfuerzo del modelo">
+            <span class="egauge"><svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2.8 11.2a5.2 5.2 0 0 1 10.4 0"/><path d="M8 11.2l2.6-2.4"/></svg></span>
+            <span>max</span>
+          </button>
+          <button class="ctxring" type="button" title="Uso del contexto">
+            <svg viewBox="0 0 16 16" width="17" height="17"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--line2)" stroke-width="2"/><circle cx="8" cy="8" r="6" fill="none" stroke="var(--acc)" stroke-width="2" stroke-linecap="round" stroke-dasharray="37.7" stroke-dashoffset="26.4" transform="rotate(-90 8 8)"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="stagenote">El popup vive adentro de <b>.compwrap</b>, pegado arriba del box y con su mismo ancho.
+  Con el popup abierto, <kbd>⏎</kbd> elige la fila activa (inserta <span class="mono">/deploy␣</span> y cierra) — <b>no envía</b>.
+  El nombre largo clampa con ellipsis; la descripción también.</p>
+</section>
+
+<!-- ══ B: "/re" — filtro fuzzy ═════════════════════════════════════ -->
+<section class="stage">
+  <div class="cap"><b>B</b> — "/re" tecleado · filtro fuzzy, navegado con ↓ a la segunda fila</div>
+  <div class="floor">
+    <div class="compwrap">
+      <div class="slashpop" role="listbox" aria-label="Comandos del agente">
+        <div class="slhead">
+          <button class="sltab on" type="button">Comandos</button>
+          <button class="sltab" type="button">Agentes</button>
+          <button class="sltab" type="button">Estilos</button>
+        </div>
+        <div class="slist">
+          <div class="pitem" role="option"><span class="scmd"><span class="sig">/</span><span class="m">re</span>visar-pr</span><span class="sdesc">Revisá el PR abierto con la checklist del repo</span></div>
+          <div class="pitem on" role="option" aria-selected="true">
+            <span class="scmd"><span class="sig">/</span><span class="m">re</span>cargar-ui</span>
+            <span class="sdesc">Recargá el renderer sin relanzar Electron</span>
+            <span class="pk">⏎</span>
+          </div>
+          <div class="pitem" role="option"><span class="scmd"><span class="sig">/</span><span class="m">re</span>sumen-diario</span><span class="sdesc">Armá el resumen de Teams y Jira de hoy</span></div>
+          <div class="pitem" role="option"><span class="scmd"><span class="sig">/</span>probar-<span class="m">re</span>moto</span><span class="sdesc">Probá la conexión con la fleet remota</span></div>
+        </div>
+        <div class="slfoot">
+          <span><kbd>↑</kbd><kbd>↓</kbd> navegar</span>
+          <span><kbd>⏎</kbd> usar</span>
+          <span><kbd>⇥</kbd> completar</span>
+          <span><kbd>esc</kbd> cerrar</span>
+        </div>
+      </div>
+      <div class="comp">
+        <div class="ta">/re<span class="caret"></span></div>
+        <button class="send" type="button" title="Enviar">↑</button>
+      </div>
+      <div class="comprow">
+        <button class="permchip" type="button">Permitir todo</button>
+        <button class="cicon" type="button" title="Adjuntar imagen">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 3v10M3 8h10"/></svg>
+        </button>
+        <button class="cicon" type="button" title="Voz">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="6" y="2" width="4" height="8" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V15"/></svg>
+        </button>
+        <span class="sp"></span>
+        <div class="selectorcluster">
+          <button class="modelsel" type="button">Fable 5</button>
+          <button class="effortsel" type="button" title="Esfuerzo del modelo">
+            <span class="egauge"><svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2.8 11.2a5.2 5.2 0 0 1 10.4 0"/><path d="M8 11.2l2.6-2.4"/></svg></span>
+            <span>max</span>
+          </button>
+          <button class="ctxring" type="button" title="Uso del contexto">
+            <svg viewBox="0 0 16 16" width="17" height="17"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--line2)" stroke-width="2"/><circle cx="8" cy="8" r="6" fill="none" stroke="var(--acc)" stroke-width="2" stroke-linecap="round" stroke-dasharray="37.7" stroke-dashoffset="26.4" transform="rotate(-90 8 8)"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="stagenote">Fuzzy por subsecuencia, no solo prefijo: <b>/re</b> también encuentra <span class="mono">probar-remoto</span>
+  por límite de palabra. Los caracteres matcheados llevan el acento verde (único uso del verde en el popup);
+  el resto del nombre queda en tinta. Sin resultados → el popup se cierra solo, no muestra un cascarón vacío.</p>
+</section>
+
+<!-- ══ C: "@" — picker de agentes ══════════════════════════════════ -->
+<section class="stage">
+  <div class="cap"><b>C</b> — "@" tecleado · picker de agentes (misma superficie, pestaña Agentes)</div>
+  <div class="floor">
+    <div class="compwrap">
+      <div class="slashpop" role="listbox" aria-label="Subagentes disponibles">
+        <div class="slhead">
+          <button class="sltab" type="button">Comandos</button>
+          <button class="sltab on" type="button">Agentes</button>
+          <button class="sltab" type="button">Estilos</button>
+        </div>
+        <div class="slist">
+          <div class="pitem on" role="option" aria-selected="true">
+            <span class="scmd"><span class="sig">@</span>general</span>
+            <span class="sdesc">Investiga en paralelo y te trae recibos</span>
+            <span class="smodel">Fable 5</span>
+            <span class="pk">⏎</span>
+          </div>
+          <div class="pitem" role="option">
+            <span class="scmd"><span class="sig">@</span>revisor-de-pr</span>
+            <span class="sdesc">Gate de revisión: bugs primero, estilo después</span>
+            <span class="smodel">Sol · xhigh</span>
+          </div>
+          <div class="pitem" role="option">
+            <span class="scmd"><span class="sig">@</span>explorador-repo</span>
+            <span class="sdesc">Recorre el código, solo lectura, cero riesgo</span>
+            <span class="smodel">Terra</span>
+          </div>
+          <div class="pitem" role="option">
+            <span class="scmd"><span class="sig">@</span>documentador</span>
+            <span class="sdesc">Mantiene docs y changelog al día</span>
+            <span class="smodel">Opus 4.8</span>
+          </div>
+          <div class="pitem" role="option">
+            <span class="scmd"><span class="sig">@</span>verificador-de-contratos-wire-y-landmines-acp</span>
+            <span class="sdesc">Chequea invoke/reply/event y las minas ACP</span>
+            <span class="smodel">Fable 5</span>
+          </div>
+        </div>
+        <div class="slfoot">
+          <span><kbd>↑</kbd><kbd>↓</kbd> navegar</span>
+          <span><kbd>⏎</kbd> usar</span>
+          <span><kbd>⇥</kbd> completar</span>
+          <span><kbd>esc</kbd> cerrar</span>
+        </div>
+      </div>
+      <div class="comp">
+        <div class="ta">@<span class="caret"></span></div>
+        <button class="send" type="button" title="Enviar">↑</button>
+      </div>
+      <div class="comprow">
+        <button class="permchip" type="button">Permitir todo</button>
+        <button class="cicon" type="button" title="Adjuntar imagen">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 3v10M3 8h10"/></svg>
+        </button>
+        <button class="cicon" type="button" title="Voz">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="6" y="2" width="4" height="8" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V15"/></svg>
+        </button>
+        <span class="sp"></span>
+        <div class="selectorcluster">
+          <button class="modelsel" type="button">Fable 5</button>
+          <button class="effortsel" type="button" title="Esfuerzo del modelo">
+            <span class="egauge"><svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2.8 11.2a5.2 5.2 0 0 1 10.4 0"/><path d="M8 11.2l2.6-2.4"/></svg></span>
+            <span>max</span>
+          </button>
+          <button class="ctxring" type="button" title="Uso del contexto">
+            <svg viewBox="0 0 16 16" width="17" height="17"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--line2)" stroke-width="2"/><circle cx="8" cy="8" r="6" fill="none" stroke="var(--acc)" stroke-width="2" stroke-linecap="round" stroke-dasharray="37.7" stroke-dashoffset="26.4" transform="rotate(-90 8 8)"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="stagenote">Cada fila trae el modelo del subagente a la derecha, mono y clampado a 12ch — un nombre de modelo
+  larguísimo no rompe la fila, y el nombre de agente kilométrico clampa igual que los comandos. Elegir inserta
+  <span class="mono">@general␣</span> y el resto del mensaje es la tarea para ese agente. Las pestañas también se
+  clickean: desde <b>/</b> podés saltar a Agentes sin borrar nada.</p>
+</section>
+
+<!-- ══ D: degradación — catálogo vacío ═════════════════════════════ -->
+<section class="stage">
+  <div class="cap"><b>D</b> — catálogo vacío · "/" es texto literal, no aparece nada</div>
+  <div class="floor">
+    <div class="compwrap">
+      <div class="comp">
+        <div class="ta">/deploy a la laptop de prod<span class="caret"></span></div>
+        <button class="send" type="button" title="Enviar">↑</button>
+      </div>
+      <div class="comprow">
+        <button class="permchip" type="button">Permitir todo</button>
+        <button class="cicon" type="button" title="Adjuntar imagen">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 3v10M3 8h10"/></svg>
+        </button>
+        <button class="cicon" type="button" title="Voz">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="6" y="2" width="4" height="8" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V15"/></svg>
+        </button>
+        <span class="sp"></span>
+        <div class="selectorcluster">
+          <button class="modelsel" type="button">Fable 5</button>
+          <button class="effortsel" type="button" title="Esfuerzo del modelo">
+            <span class="egauge"><svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2.8 11.2a5.2 5.2 0 0 1 10.4 0"/><path d="M8 11.2l2.6-2.4"/></svg></span>
+            <span>max</span>
+          </button>
+          <button class="ctxring" type="button" title="Uso del contexto">
+            <svg viewBox="0 0 16 16" width="17" height="17"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--line2)" stroke-width="2"/><circle cx="8" cy="8" r="6" fill="none" stroke="var(--acc)" stroke-width="2" stroke-linecap="round" stroke-dasharray="37.7" stroke-dashoffset="26.4" transform="rotate(-90 8 8)"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="stagenote">Si el provider no reporta comandos (mock, provider viejo, sesión fría), el composer queda
+  <b>exactamente como hoy</b>: sin popup, sin cascarón "Sin comandos", sin toast. <kbd>⏎</kbd> envía el texto tal cual.
+  Lo mismo por pestaña: sin agentes → la pestaña Agentes no existe y <b>@</b> es un arroba común.</p>
+</section>
+
+<script>
+  (function () {
+    var btn = document.getElementById('themeBtn');
+    var root = document.documentElement;
+    function apply(t) {
+      if (t === 'light') { root.setAttribute('data-theme', 'light'); btn.textContent = 'Ver oscuro'; }
+      else { root.removeAttribute('data-theme'); btn.textContent = 'Ver claro'; }
+    }
+    btn.addEventListener('click', function () {
+      apply(root.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
+    });
+    apply(location.hash === '#light' ? 'light' : 'dark');
+  })();
+</script>
+</body>
+</html>

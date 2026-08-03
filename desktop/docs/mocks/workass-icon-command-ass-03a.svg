@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Workass Command Ass icon — route 03A</title>
+  <desc id="desc">A warm black donkey rear silhouette with a white command knot on a green rounded square.</desc>
+  <rect x="4" y="4" width="120" height="120" rx="29" fill="#48bd89"/>
+  <path fill="#171715" d="M64 30c6-7 15-9 22-5 12 7 18 23 18 45 0 18-7 35-18 36-9 1-11-4-13-14-2-10-5-14-9-14s-7 4-9 14c-2 10-4 15-13 14-11-1-18-18-18-36 0-22 6-38 18-45 7-4 16-2 22 5Z"/>
+  <g fill="none" stroke="#f5f3ee" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M55 52h18v18H55z"/>
+    <path d="M55 52h-5.5c-7.2 0-7.2-10.5 0-10.5 3.7 0 5.5 2.7 5.5 6.4V75"/>
+    <path d="M73 52h5.5c7.2 0 7.2-10.5 0-10.5-3.7 0-5.5 2.7-5.5 6.4V75"/>
+    <path d="M55 70h-5.5c-7.2 0-7.2 10.5 0 10.5 3.7 0 5.5-2.7 5.5-6.4"/>
+    <path d="M73 70h5.5c7.2 0 7.2 10.5 0 10.5-3.7 0-5.5-2.7-5.5-6.4"/>
+  </g>
+</svg>

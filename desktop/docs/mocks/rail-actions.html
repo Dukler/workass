@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Acciones en el rail — subagentes y segundo plano</title>
+<style>
+  :root {
+    --bg: #0f0e0d; --card: #1a1918; --field: #252320;
+    --ink: #f2efe9; --ink2: #cfcbc4; --muted: #9c978f; --faint: #6f6b63;
+    --line: rgba(255,255,255,.075); --line2: rgba(255,255,255,.14); --acc: #4fa583;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--ink); font: 13.5px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 34px 40px 60px; }
+  h1 { font-size: 19px; font-weight: 600; letter-spacing: -.01em; }
+  .lede { color: var(--muted); font-size: 13px; margin: 6px 0 26px; max-width: 940px; }
+  .lede b { color: var(--ink2); font-weight: 550; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 20px; }
+  .panel { border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px 18px; background: var(--card); }
+  .cap { font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
+  .cap.ok { color: var(--acc); }
+  .note { color: var(--muted); font-size: 11.5px; line-height: 1.5; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .note b { color: var(--ink2); font-weight: 550; }
+  .rail { width: 300px; }
+  .wide .rail { width: 100%; max-width: 640px; }
+
+  /* ── the real rail rows, class names verbatim from app.css ── */
+  .bgr { display: flex; align-items: flex-start; gap: 9px; padding: 8px 3px; min-width: 0; }
+  .bgr-ic { flex: none; margin-top: 2px; color: var(--ink2); }
+  .bgr-ic svg { display: block; width: 14px; height: 14px; }
+  .bgr-info { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
+  .bgr-top { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+  .bgr-n { flex: 1 1 auto; min-width: 0; color: var(--ink); font-size: 12.5px; font-weight: 550; line-height: 1.28; }
+  .bgr-el { flex: none; margin-top: 2px; font: 10.5px/1 ui-monospace, Menlo, monospace; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .bgr-meta { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bgr-sum { color: var(--ink2); font-size: 11.5px; line-height: 1.34; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bgr-out { color: var(--faint); font: 10.5px/1 ui-monospace, Menlo, monospace; margin-top: 1px; }
+  .bgr-end { display: grid; flex: none; min-width: 12px; height: 16px; place-items: center; margin-top: 2px; }
+
+  /* NEW: the activity line becomes an action — glyph + nombre + evidencia mono */
+  .bgr-act { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+  .bgr-act .a-ic { flex: none; align-self: center; color: var(--faint); display: grid; place-items: center; }
+  .bgr-act .a-ic svg { display: block; width: 12px; height: 12px; }
+  .bgr-act .a-n { flex: none; color: var(--ink2); font-size: 11.5px; line-height: 1.34; }
+  .bgr-act .a-ev { flex: 1 1 auto; min-width: 0; font: 10.5px/1.4 ui-monospace, Menlo, monospace; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+  .bgr-act .a-tag { flex: none; color: var(--faint); font-size: 10.5px; }
+
+  .r-pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 0 rgba(79,165,131,.55); animation: p 1.8s ease-out infinite; }
+  @keyframes p { 70% { box-shadow: 0 0 0 6px rgba(79,165,131,0); } 100% { box-shadow: 0 0 0 0 rgba(79,165,131,0); } }
+
+  .r-sa > summary { list-style: none; display: flex; align-items: center; gap: 9px; padding: 7px 6px; margin: 0 -6px; border-radius: 8px; }
+  .r-sa .r-mi { flex: none; width: 22px; height: 22px; display: grid; place-items: center; color: var(--ink2); }
+  .r-sa .r-mi svg { width: 24px; height: 24px; }
+  .r-sa .r-said { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+  .r-sa .r-satop { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .r-sa .r-nm { flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .r-sa .r-el { flex: none; font: 10.5px/1 ui-monospace, Menlo, monospace; color: var(--faint); }
+  .r-sa .r-sasub { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .r-sa .r-mdl { flex: 0 1 auto; min-width: 0; font: 10.5px/1 ui-monospace, Menlo, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .r-sa .r-sep { flex: none; color: var(--line2); }
+  .r-sa .r-act { flex: 1 1 auto; min-width: 0; font-size: 10.5px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 5px; }
+  .r-sa .r-act svg { flex: none; width: 11px; height: 11px; }
+
+  .r-live-call { display: flex; align-items: center; gap: 9px; padding: 7px 2px; min-height: 47px; }
+  .r-lc-ic { flex: none; color: var(--ink2); display: grid; place-items: center; }
+  .r-lc-ic svg { width: 14px; height: 14px; }
+  .r-lc-info { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+  .r-lc-n { font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .r-lc-n .r-lc-loc { color: var(--faint); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+  .r-lc-s { font: 10.5px/1 ui-monospace, Menlo, monospace; color: var(--muted); }
+  .r-lc-end { flex: none; width: 12px; display: grid; place-items: center; }
+
+  .r-dline { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); padding: 3px 4px; min-width: 0; }
+  .r-dline .r-dt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .r-dline .r-dic { flex: none; display: grid; place-items: center; color: var(--faint); }
+  .r-dline .r-dic svg { width: 12px; height: 12px; }
+  .r-dline .r-dev { flex: 1 1 auto; min-width: 0; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .r-dline .r-dl { margin-left: auto; flex: none; color: var(--faint); font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; }
+
+  .hair { height: 1px; background: var(--line); margin: 10px 0; }
+  .r-lbl { font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+  .vocab { display: flex; flex-wrap: wrap; gap: 10px 22px; }
+  .vi { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink2); }
+  .vi svg { width: 14px; height: 14px; color: var(--faint); flex: none; }
+  .vi .vk { font: 10.5px/1 ui-monospace, Menlo, monospace; color: var(--faint); }
+  .scope { display: inline-block; margin-left: 8px; padding: 1px 7px; border: 1px solid var(--line2); border-radius: 999px; font-size: 10px; letter-spacing: .04em; color: var(--muted); vertical-align: 2px; }
+</style>
+</head>
+<body>
+
+<h1>Acciones en el rail — subagentes y segundo plano</h1>
+<p class="lede">
+  El vocabulario aprobado el 2026-07-25 (<b>toolrow-names</b>) sólo llegó a las filas del transcript.
+  El rail quedó afuera: los subagentes siguen mostrando el identificador crudo que manda el proveedor
+  (<b>Read</b>, <b>Bash</b>, <b>working</b>) y la palabra inglesa del tipo (<b>subagent</b>), sin ícono de acción.
+  Esto extiende <b>el mismo</b> mapa (<code>tool-names.ts</code>) a las tres filas del rail — un solo vocabulario,
+  el chat y el rail nunca en desacuerdo.
+</p>
+
+<!-- ══ 1. la fila del screenshot ══ -->
+<div class="cols">
+  <div class="panel">
+    <div class="cap">Antes · subagente en curso</div>
+    <div class="rail">
+      <div class="bgr">
+        <span class="bgr-ic"><svg viewBox="0 0 20 20" fill="none"><g stroke="#cc7a52" stroke-width="1.5" stroke-linecap="round"><line x1="10" y1="10" x2="10" y2="3.5"/><line x1="10" y1="10" x2="10" y2="16.5"/><line x1="10" y1="10" x2="16.5" y2="10"/><line x1="10" y1="10" x2="3.5" y2="10"/><line x1="10" y1="10" x2="14.6" y2="5.4"/><line x1="10" y1="10" x2="5.4" y2="14.6"/><line x1="10" y1="10" x2="14.6" y2="14.6"/><line x1="10" y1="10" x2="5.4" y2="5.4"/></g></svg></span>
+        <span class="bgr-info">
+          <span class="bgr-top"><span class="bgr-n">Fable: gate turn-disposition spec</span><span class="bgr-el">2m 56s</span></span>
+          <span class="bgr-meta">subagent</span>
+          <span class="bgr-sum">Read</span>
+        </span>
+        <span class="bgr-end"><span class="r-pulse"></span></span>
+      </div>
+      <div class="bgr">
+        <span class="bgr-ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M3 4.5l3.5 3.5L3 11.5"/><path d="M8.5 12h4.5"/></svg></span>
+        <span class="bgr-info">
+          <span class="bgr-top"><span class="bgr-n">streampace-probe</span><span class="bgr-el">14m 02s</span></span>
+          <span class="bgr-meta">bash · pid 31153</span>
+          <span class="bgr-sum">working</span>
+          <span class="bgr-out">ver salida</span>
+        </span>
+        <span class="bgr-end"><span class="r-pulse"></span></span>
+      </div>
+    </div>
+    <div class="note">
+      <b>subagent</b> y <b>Read</b> son crudos: uno es el enum del daemon, el otro el id de herramienta del
+      proveedor. Ninguna de las dos líneas dice qué está haciendo, y no hay ícono de acción.
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="cap ok">Después · subagente en curso</div>
+    <div class="rail">
+      <div class="bgr">
+        <span class="bgr-ic"><svg viewBox="0 0 20 20" fill="none"><g stroke="#cc7a52" stroke-width="1.5" stroke-linecap="round"><line x1="10" y1="10" x2="10" y2="3.5"/><line x1="10" y1="10" x2="10" y2="16.5"/><line x1="10" y1="10" x2="16.5" y2="10"/><line x1="10" y1="10" x2="3.5" y2="10"/><line x1="10" y1="10" x2="14.6" y2="5.4"/><line x1="10" y1="10" x2="5.4" y2="14.6"/><line x1="10" y1="10" x2="14.6" y2="14.6"/><line x1="10" y1="10" x2="5.4" y2="5.4"/></g></svg></span>
+        <span class="bgr-info">
+          <span class="bgr-top"><span class="bgr-n">Fable: gate turn-disposition spec</span><span class="bgr-el">2m 56s</span></span>
+          <span class="bgr-meta">subagente</span>
+          <span class="bgr-act">
+            <span class="a-ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M5 6h6M5 8.5h6M5 11h3.5"/></svg></span>
+            <span class="a-n">Leer un archivo</span>
+            <span class="a-ev">docs/specs/turn-disposition.md</span>
+          </span>
+        </span>
+        <span class="bgr-end"><span class="r-pulse"></span></span>
+      </div>
+      <div class="bgr">
+        <span class="bgr-ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M3 4.5l3.5 3.5L3 11.5"/><path d="M8.5 12h4.5"/></svg></span>
+        <span class="bgr-info">
+          <span class="bgr-top"><span class="bgr-n">streampace-probe</span><span class="bgr-el">14m 02s</span></span>
+          <span class="bgr-meta">comando · pid 31153</span>
+          <span class="bgr-act">
+            <span class="a-ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M4.6 6.4l2.2 1.9-2.2 1.9M8.6 10.6h3"/></svg></span>
+            <span class="a-n">Trabajando</span>
+          </span>
+          <span class="bgr-out">ver salida</span>
+        </span>
+        <span class="bgr-end"><span class="r-pulse"></span></span>
+      </div>
+    </div>
+    <div class="note">
+      La línea de actividad pasa a ser una <b>acción</b>: ícono + nombre legible + la evidencia exacta en mono,
+      que elide por el medio y nunca pierde el archivo. El tipo se dice en español. El id crudo sigue en el
+      tooltip de la fila.
+    </div>
+  </div>
+</div>
+
+<!-- ══ 2. subagente terminado (r-sa) ══ -->
+<div class="cols">
+  <div class="panel">
+    <div class="cap">Antes · subagente en el rail (fila expandible)</div>
+    <div class="rail">
+      <div class="r-sa"><div class="summary" style="display:flex;align-items:center;gap:9px;padding:7px 0">
+        <span class="r-mi"><svg viewBox="0 0 20 20" fill="none"><g stroke="#cc7a52" stroke-width="1.5" stroke-linecap="round"><line x1="10" y1="10" x2="10" y2="3.5"/><line x1="10" y1="10" x2="10" y2="16.5"/><line x1="10" y1="10" x2="16.5" y2="10"/><line x1="10" y1="10" x2="3.5" y2="10"/><line x1="10" y1="10" x2="14.6" y2="5.4"/><line x1="10" y1="10" x2="5.4" y2="14.6"/><line x1="10" y1="10" x2="14.6" y2="14.6"/><line x1="10" y1="10" x2="5.4" y2="5.4"/></g></svg></span>
+        <span class="r-said">
+          <span class="r-satop"><span class="r-nm">Sol: puerto del registro</span><span class="r-el">1m 12s</span></span>
+          <span class="r-sasub"><span class="r-mdl">GPT5.6-xhigh</span><span class="r-sep">·</span><span class="r-act">Ejecutando un comando</span></span>
+        </span>
+      </div></div>
+    </div>
+    <div class="note">
+      La frase sale de un <b>segundo clasificador</b> (<code>subagent-layout.ts</code>) que duplica el vocabulario
+      a mano y no lleva ícono: el rail puede decir «Ejecutando un comando» donde el chat dice «Ejecutar un comando».
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="cap ok">Después · misma fila, un solo vocabulario</div>
+    <div class="rail">
+      <div class="r-sa"><div class="summary" style="display:flex;align-items:center;gap:9px;padding:7px 0">
+        <span class="r-mi"><svg viewBox="0 0 20 20" fill="none"><g stroke="#cc7a52" stroke-width="1.5" stroke-linecap="round"><line x1="10" y1="10" x2="10" y2="3.5"/><line x1="10" y1="10" x2="10" y2="16.5"/><line x1="10" y1="10" x2="16.5" y2="10"/><line x1="10" y1="10" x2="3.5" y2="10"/><line x1="10" y1="10" x2="14.6" y2="5.4"/><line x1="10" y1="10" x2="5.4" y2="14.6"/><line x1="10" y1="10" x2="14.6" y2="14.6"/><line x1="10" y1="10" x2="5.4" y2="5.4"/></g></svg></span>
+        <span class="r-said">
+          <span class="r-satop"><span class="r-nm">Sol: puerto del registro</span><span class="r-el">1m 12s</span></span>
+          <span class="r-sasub"><span class="r-mdl">GPT5.6-xhigh</span><span class="r-sep">·</span><span class="r-act"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M4.6 6.4l2.2 1.9-2.2 1.9M8.6 10.6h3"/></svg>Ejecutar un comando</span></span>
+        </span>
+      </div></div>
+    </div>
+    <div class="note">
+      <code>subagentActivity()</code> se borra y la fila llama al mismo <code>toolPresentation()</code> del chat.
+      Un solo mapa que mantener; el gerundio inventado desaparece.
+    </div>
+  </div>
+</div>
+
+<!-- ══ 3. hilo principal — mismo mal, ¿mismo alcance? ══ -->
+<div class="panel wide">
+  <div class="cap">El hilo principal del rail tiene el mismo problema <span class="scope">decidís si entra</span></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:26px;margin-top:4px">
+    <div>
+      <div class="r-lbl" style="margin-bottom:6px">Antes</div>
+      <div class="r-live-call">
+        <span class="r-lc-ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M5 6h6M5 8.5h6M5 11h3.5"/></svg></span>
+        <span class="r-lc-info">
+          <span class="r-lc-n">Read<span class="r-lc-loc"> · internal/acp/subagents.go</span></span>
+          <span class="r-lc-s">en curso · 0.4s</span>
+        </span>
+        <span class="r-lc-end"><span class="r-pulse"></span></span>
+      </div>
+      <div class="hair"></div>
+      <div class="r-dline"><span class="r-dt">mcp__workass-agent__workass_list_subagents</span><span class="r-dl">0.3s</span></div>
+      <div class="r-dline"><span class="r-dt">Bash</span><span class="r-dl">2.4s</span></div>
+      <div class="r-dline"><span class="r-dt">/bin/zsh -lc "go test ./internal/acp -run Subagent"</span><span class="r-dl">6.0s</span></div>
+      <div class="note">El ícono ya es el correcto — el <b>nombre</b> nunca se conectó. La fila «Llamadas» ni ícono tiene.</div>
+    </div>
+    <div>
+      <div class="r-lbl ok" style="margin-bottom:6px;color:var(--acc)">Después</div>
+      <div class="r-live-call">
+        <span class="r-lc-ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M5 6h6M5 8.5h6M5 11h3.5"/></svg></span>
+        <span class="r-lc-info">
+          <span class="r-lc-n">Leer un archivo<span class="r-lc-loc"> · internal/acp/subagents.go</span></span>
+          <span class="r-lc-s">en curso · 0.4s</span>
+        </span>
+        <span class="r-lc-end"><span class="r-pulse"></span></span>
+      </div>
+      <div class="hair"></div>
+      <div class="r-dline"><span class="r-dic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M6 2.4v2.8M10 2.4v2.8"/><rect x="3.9" y="5.2" width="8.2" height="4.2" rx="1.5"/><path d="M8 9.4v4.2"/></svg></span><span class="r-dt">Ver los subagentes</span><span class="r-dev">· workass</span><span class="r-dl">0.3s</span></div>
+      <div class="r-dline"><span class="r-dic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M4.6 6.4l2.2 1.9-2.2 1.9M8.6 10.6h3"/></svg></span><span class="r-dt">Ejecutar un comando</span><span class="r-dev">go test ./internal/acp</span><span class="r-dl">2.4s</span></div>
+      <div class="r-dline"><span class="r-dic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M4.6 6.4l2.2 1.9-2.2 1.9M8.6 10.6h3"/></svg></span><span class="r-dt">Ejecutar un comando</span><span class="r-dev">go test ./internal/acp -run Subagent</span><span class="r-dl">6.0s</span></div>
+      <div class="note">Las mismas tres filas del rail leídas con el vocabulario del chat.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ 4. fases del daemon ══ -->
+<div class="panel wide" style="margin-top:20px">
+  <div class="cap">Las fases del daemon también son crudas (y en inglés)</div>
+  <p class="lede" style="margin:0 0 16px">
+    Cuando el subagente no está en una herramienta, el daemon manda una <b>fase</b>, no un nombre de tool:
+    <code>starting</code>, <code>working</code>, <code>thinking</code>, <code>waiting_permission</code>.
+    Hoy se imprimen tal cual. Cada una recibe su palabra y su marca — ninguna cae en un glifo comodín.
+  </p>
+  <div class="vocab">
+    <div class="vi"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><circle cx="8" cy="8" r="5.5"/><path d="M6.6 5.7l3.7 2.3-3.7 2.3z"/></svg><span>Arrancando</span><span class="vk">starting</span></div>
+    <div class="vi"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><circle cx="8" cy="8" r="5.5"/><path d="M6.6 5.7l3.7 2.3-3.7 2.3z"/></svg><span>Abriendo la sesión</span><span class="vk">initializing</span></div>
+    <div class="vi"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.3 3.3l1.4 1.4M11.3 11.3l1.4 1.4M12.7 3.3l-1.4 1.4M4.7 11.3l-1.4 1.4"/></svg><span>Ajustando controles</span><span class="vk">configuring</span></div>
+    <div class="vi"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M4.6 6.4l2.2 1.9-2.2 1.9M8.6 10.6h3"/></svg><span>Trabajando</span><span class="vk">working</span></div>
+    <div class="vi"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 2.4l1.5 3.4 3.4 1.5-3.4 1.5L8 12.2 6.5 8.8 3.1 7.3l3.4-1.5z"/></svg><span>Pensando</span><span class="vk">thinking</span></div>
+    <div class="vi"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M2.6 4.4l1.5 1.5 2.3-2.6M2.6 9.9l1.5 1.5 2.3-2.6"/><path d="M8.8 4.6h4.6M8.8 10.1h4.6"/></svg><span>Actualizando el plan</span><span class="vk">planning</span></div>
+    <div class="vi"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 2l5 2.5v4C13 11.5 10.8 13.4 8 14 5.2 13.4 3 11.5 3 8.5v-4z"/></svg><span>Esperando permiso</span><span class="vk">waiting_permission</span></div>
+    <div class="vi"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><circle cx="8" cy="5.2" r="2.4"/><path d="M3 13.2a5 5 0 0110 0"/></svg><span>Sin proceso</span><span class="vk">orphaned</span></div>
+  </div>
+  <div class="note">
+    Nada se sintetiza: si el daemon no manda fase ni herramienta, la fila no dice nada — no inventa una acción.
+  </div>
+</div>
+
+</body>
+</html>

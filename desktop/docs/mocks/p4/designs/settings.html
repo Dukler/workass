@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>workass — ajustes</title>
+<style>
+  /* ============ tokens — inherited verbatim from workass-one ============ */
+  :root { color-scheme: dark;
+    --bg:#151413; --side:#0f0e0d; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+    --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+    --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+    --acc:#4fa583; --link:#8fb0ea; --amber:#d8a05a; --add:#4cae7f; --del:#d96b5f;
+    --r-sm:7px; --r-md:9px; --r-lg:11px;
+  }
+  [data-theme="light"] { color-scheme: light;
+    --bg:#faf9f7; --side:#f2f0ed; --panel:#ffffff; --card:#ffffff; --field:#f1efeb;
+    --ink:#23211e; --ink2:#47443e; --muted:#7a756d; --faint:#a19c93;
+    --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.15);
+    --acc:#177353; --link:#3861b0; --amber:#9a6a1d; --add:#177347; --del:#bd4436;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; }
+  body { background:#0b0a09; color:var(--ink); font:13.5px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+         display:grid; grid-template-columns:264px 1fr; overflow:hidden; }
+  [data-theme="light"] body, body[data-theme="light"] { background:#eceae6; }
+  code,.mono { font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+  ::-webkit-scrollbar { width:9px; } ::-webkit-scrollbar-thumb { background:var(--line2); border-radius:5px; background-clip:padding-box; border:2px solid transparent; }
+  button { font:inherit; }
+
+  /* ============ left nav — settings sections (mirrors sidebar chrome) ============ */
+  aside.nav { background:var(--side); border-right:1px solid var(--line); display:flex; flex-direction:column; padding:0 9px 10px; overflow-y:auto; }
+  .titlebar { display:flex; align-items:center; gap:8px; height:60px; padding:0 5px 0 9px; flex:none; }
+  .tl { display:flex; gap:7px; }
+  .tl span { width:11px; height:11px; border-radius:50%; }
+  .tl span:nth-child(1){ background:#ff5f57; } .tl span:nth-child(2){ background:#febc2e; } .tl span:nth-child(3){ background:#28c840; }
+  .navhead { display:flex; align-items:center; gap:9px; padding:2px 9px 12px; }
+  .navhead svg { width:15px; height:15px; opacity:.7; }
+  .navhead b { font-size:15px; font-weight:600; letter-spacing:-.01em; }
+  .nrow { display:flex; align-items:center; gap:11px; padding:7px 10px; border-radius:8px; color:var(--ink2); font-size:13.5px; cursor:pointer;
+          border:1px solid transparent; transition:background .15s ease, color .15s ease; }
+  .nrow:hover { background:var(--line); color:var(--ink); }
+  .nrow.on { background:var(--field); border-color:var(--line2); color:var(--ink); font-weight:550; }
+  .nrow svg { width:15px; height:15px; opacity:.62; flex:none; }
+  .nrow.on svg { opacity:.85; }
+  .nav .foot { margin-top:auto; border-top:1px solid var(--line); padding:11px 9px 2px; }
+  .fleet { display:flex; align-items:center; gap:7px; font-size:12px; color:var(--muted); }
+  .fleet .fd { width:6px; height:6px; border-radius:50%; background:var(--acc); box-shadow:0 0 0 3px color-mix(in srgb, var(--acc) 20%, transparent); }
+  .fleet .mono { font-size:11px; }
+
+  /* ============ content pane ============ */
+  main { display:flex; flex-direction:column; min-width:0; min-height:0; background:var(--bg); }
+  .tbar { display:flex; align-items:center; gap:10px; padding:0 18px 0 24px; height:60px; flex:none; border-bottom:1px solid var(--line); }
+  .tbar .crumb { color:var(--faint); font-size:13px; }
+  .tbar .crumb b { color:var(--ink); font-weight:600; }
+  .tbar .sp { flex:1; }
+  .tico { width:30px; height:30px; border:0; background:transparent; color:var(--muted); border-radius:8px;
+          display:grid; place-items:center; cursor:pointer; transition:background .15s ease, color .15s ease; }
+  .tico:hover { background:var(--line); color:var(--ink); }
+  .tico svg { width:16px; height:16px; stroke-width:1.4; }
+  .tclose { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; padding-right:2px; }
+  .tclose kbd { font-size:10.5px; }
+  .scroll { flex:1; overflow-y:auto; }
+  .wrap { max-width:660px; margin:0 auto; padding:26px 32px 60px; }
+
+  /* panel + section heads */
+  .panel { display:none; }
+  .panel.on { display:block; animation:fade .18s ease; }
+  @keyframes fade { from{ opacity:0; transform:translateY(4px);} to{ opacity:1; transform:none; } }
+  .phead { margin-bottom:22px; }
+  .phead h2 { font-size:19px; font-weight:600; letter-spacing:-.015em; }
+  .phead p { color:var(--muted); font-size:13px; margin-top:3px; max-width:60ch; }
+  .gtitle { font-size:10.5px; font-weight:600; letter-spacing:.09em; color:var(--faint); text-transform:uppercase; margin:24px 2px 8px; }
+  .gtitle:first-of-type { margin-top:6px; }
+  .ghint { color:var(--muted); font-size:12px; margin:8px 2px 0; }
+  .ghint code { background:var(--field); border:1px solid var(--line); border-radius:5px; padding:.5px 5px; font-size:11px; color:var(--ink2); }
+  .ghint a { color:var(--link); text-decoration:none; } .ghint a:hover { text-decoration:underline; }
+
+  /* group card */
+  .group { background:var(--card); border:1px solid var(--line); border-radius:var(--r-lg); padding:0 16px; }
+  .set { display:flex; align-items:center; gap:16px; padding:13px 0; border-top:1px solid var(--line); min-height:52px; }
+  .set:first-child { border-top:0; }
+  .set.top { align-items:flex-start; }
+  .set .lbl { flex:1; min-width:0; }
+  .set .n { font-size:13px; color:var(--ink); font-weight:550; }
+  .set .d { font-size:12px; color:var(--muted); margin-top:1px; }
+  .set .d code { background:var(--field); border:1px solid var(--line); border-radius:5px; padding:.5px 5px; font-size:11px; color:var(--ink2); }
+  .set .ctl { flex:none; display:flex; align-items:center; gap:9px; }
+
+  /* controls */
+  .inp { background:var(--field); border:1px solid var(--line2); border-radius:var(--r-sm); padding:5px 10px; color:var(--ink); font:inherit; font-size:12.5px; outline:0; }
+  .inp:focus { border-color:var(--muted); }
+  .inp.num { width:66px; text-align:right; font-family:ui-monospace,Menlo,monospace; }
+  .inp.wide { width:200px; }
+  .suf { color:var(--muted); font-size:12px; }
+  .sel { display:inline-flex; align-items:center; gap:8px; background:var(--field); border:1px solid var(--line2); border-radius:var(--r-sm);
+         padding:5px 9px 5px 11px; color:var(--ink2); font-size:12.5px; cursor:pointer; transition:border-color .15s ease, color .15s ease; }
+  .sel:hover { border-color:var(--muted); color:var(--ink); }
+  .sel .chev { color:var(--faint); font-size:10px; }
+  .sel .eff { color:var(--muted); }
+  .btn { border:1px solid var(--line2); background:transparent; color:var(--ink2); border-radius:var(--r-sm); padding:5px 12px; font-size:12px; cursor:pointer; transition:background .15s ease, color .15s ease; }
+  .btn:hover { background:var(--line); color:var(--ink); }
+  .btn.pri { background:var(--field); }
+  .btn.danger:hover { background:color-mix(in srgb, var(--del) 16%, transparent); color:var(--del); border-color:color-mix(in srgb, var(--del) 45%, transparent); }
+  .btn.sm { padding:3px 9px; font-size:11.5px; }
+
+  /* toggle */
+  .sw { width:34px; height:20px; border-radius:11px; background:var(--field); border:1px solid var(--line2); position:relative; cursor:pointer; flex:none; transition:background .16s ease, border-color .16s ease; }
+  .sw::after { content:""; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:var(--muted); transition:transform .16s ease, background .16s ease; }
+  .sw.on { background:var(--acc); border-color:transparent; }
+  .sw.on::after { background:#fff; transform:translateX(14px); }
+
+  /* segmented */
+  .seg { display:inline-flex; background:var(--field); border:1px solid var(--line); border-radius:var(--r-md); padding:2px; gap:2px; }
+  .seg button { border:0; background:transparent; color:var(--muted); padding:4px 13px; border-radius:var(--r-sm); font-size:12.5px; cursor:pointer; transition:color .15s ease; }
+  .seg button:hover { color:var(--ink2); }
+  .seg button.on { background:var(--panel); color:var(--ink); font-weight:550; box-shadow:0 1px 2px rgba(0,0,0,.18); }
+  [data-theme="light"] .seg button.on { box-shadow:0 1px 2px rgba(0,0,0,.09); }
+
+  /* status dot + badges */
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--faint); flex:none; }
+  .dot.run { background:var(--acc); box-shadow:0 0 0 3px color-mix(in srgb, var(--acc) 22%, transparent); }
+  .dot.warn { background:var(--amber); box-shadow:0 0 0 3px color-mix(in srgb, var(--amber) 20%, transparent); }
+  .stat { display:inline-flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; }
+  .badge { font-size:10px; font-weight:600; letter-spacing:.02em; padding:2px 7px; border-radius:6px; border:1px solid var(--line2); color:var(--muted); white-space:nowrap; }
+  .badge.acc { color:var(--acc); border-color:color-mix(in srgb, var(--acc) 42%, transparent); background:color-mix(in srgb, var(--acc) 9%, transparent); }
+
+  /* provider / device rows */
+  .lrow { display:flex; align-items:center; gap:13px; padding:13px 0; border-top:1px solid var(--line); }
+  .lrow:first-child { border-top:0; }
+  .lrow .ic { width:30px; height:30px; border-radius:var(--r-md); background:var(--field); border:1px solid var(--line); display:grid; place-items:center; flex:none; }
+  .lrow .ic svg { width:15px; height:15px; opacity:.7; }
+  .lrow .ic.mono { font-size:12px; font-weight:600; color:var(--ink2); }
+  .lrow .body { flex:1; min-width:0; }
+  .lrow .nm { font-size:13px; color:var(--ink); font-weight:550; display:flex; align-items:center; gap:8px; }
+  .lrow .mt { font-size:11.5px; color:var(--muted); margin-top:1px; font-family:ui-monospace,Menlo,monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .lrow .act { flex:none; display:flex; align-items:center; gap:10px; }
+
+  /* custom-command config sub-row (the only agent that needs config) */
+  .defrow { display:flex; align-items:center; gap:10px; padding:9px 0 0; margin-top:8px; border-top:1px dashed var(--line); }
+  .defrow .dlbl { font-size:12px; color:var(--muted); white-space:nowrap; }
+  .defrow .inp.cmd { flex:1; min-width:0; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; }
+  .lrow.off .ic, .lrow.off .nm, .lrow.off .mt, .lrow.off .stat { opacity:.45; }
+  .lrow.off .defrow { display:none; }
+
+  /* access requests — raised approve */
+  .btn.acc { background:var(--acc); border-color:transparent; color:var(--bg); font-weight:600; }
+  .btn.acc:hover { background:color-mix(in srgb, var(--acc) 86%, var(--ink)); color:var(--bg); }
+  .lrow .empty { color:var(--faint); font-size:12.5px; }
+
+  /* shortcuts */
+  .kb { display:flex; align-items:center; gap:12px; padding:10px 0; border-top:1px solid var(--line); }
+  .kb:first-child { border-top:0; }
+  .kb .desc { flex:1; font-size:13px; color:var(--ink2); }
+  kbd { font-family:ui-monospace,Menlo,monospace; font-size:11.5px; background:var(--field); border:1px solid var(--line2);
+        border-bottom-width:2px; border-radius:6px; padding:2px 7px; color:var(--ink2); min-width:22px; display:inline-block; text-align:center; }
+
+  /* accent swatch */
+  .swatch { width:20px; height:20px; border-radius:6px; background:var(--acc); border:1px solid var(--line2); flex:none; }
+
+  .themebtn { position:fixed; right:14px; bottom:12px; border:1px solid var(--line2); background:var(--panel); color:var(--muted);
+              border-radius:8px; padding:4px 10px; font-size:11.5px; cursor:pointer; z-index:3; }
+  .themebtn:hover { color:var(--ink); }
+  @media (max-width:760px) { body { grid-template-columns:1fr; } aside.nav { display:none; } }
+</style>
+</head>
+<body>
+
+<!-- ================= LEFT NAV ================= -->
+<aside class="nav">
+  <div class="titlebar">
+    <span class="tl"><span></span><span></span><span></span></span>
+  </div>
+  <div class="navhead">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.3 3.3l1.4 1.4M11.3 11.3l1.4 1.4M12.7 3.3l-1.4 1.4M4.7 11.3l-1.4 1.4"/></svg>
+    <b>Ajustes</b>
+  </div>
+  <div class="nrow on" data-sec="agentes">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="2.5" y="3" width="11" height="8" rx="2"/><circle cx="6" cy="7" r="1"/><circle cx="10" cy="7" r="1"/><path d="M8 11v2M5 14h6"/></svg>Agentes
+  </div>
+  <div class="nrow" data-sec="dispositivos">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="2" y="3.5" width="9" height="6.5" rx="1.5"/><path d="M4 12.5h5"/><rect x="11.5" y="6" width="3" height="7" rx="1"/></svg>Dispositivos
+  </div>
+  <div class="nrow" data-sec="engines">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="2.5" y="2.5" width="11" height="4" rx="1.2"/><rect x="2.5" y="9.5" width="11" height="4" rx="1.2"/><circle cx="5" cy="4.5" r=".6" fill="currentColor"/><circle cx="5" cy="11.5" r=".6" fill="currentColor"/></svg>Engines
+  </div>
+  <div class="nrow" data-sec="apariencia">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11" /><path d="M8 8l4.8-2.7M8 8l-4.8 2.7"/></svg>Apariencia
+  </div>
+  <div class="nrow" data-sec="atajos">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="1.5" y="4" width="13" height="8" rx="1.8"/><path d="M4 6.5h.01M6.5 6.5h.01M9 6.5h.01M11.5 6.5h.01M4.5 9.5h7"/></svg>Atajos
+  </div>
+
+  <div class="foot">
+    <div class="fleet"><span class="fd"></span>3 engines<span class="mono">· 1.6 GB</span></div>
+  </div>
+</aside>
+
+<!-- ================= CONTENT PANE ================= -->
+<main>
+  <div class="tbar">
+    <span class="crumb">Ajustes / <b id="crumb">Agentes</b></span>
+    <span class="sp"></span>
+    <span class="tclose">Cerrar <kbd>Esc</kbd></span>
+    <button class="tico" title="Volver a los chats"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+  </div>
+
+  <div class="scroll"><div class="wrap">
+
+    <!-- ============ 1 · AGENTES ============ -->
+    <section class="panel on" data-sec="agentes">
+      <div class="phead">
+        <h2>Agentes</h2>
+        <p>workass se conecta a los agentes instalados en tu máquina; cada CLI trae su propia sesión. Todos los habilitados están disponibles a la vez — elegís el agente por conversación, en el compositor.</p>
+      </div>
+
+      <div class="gtitle">Agentes conectados</div>
+      <div class="group">
+        <div class="lrow">
+          <div class="ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="2.5" y="4" width="11" height="8" rx="2"/><path d="M8 2v2M6 8h.01M10 8h.01"/></svg></div>
+          <div class="body">
+            <div class="nm">Mock <span class="badge acc">Oráculo de pruebas</span></div>
+            <div class="mt">desktop/acp/mock-server.mjs · handshake 6 ms</div>
+          </div>
+          <div class="act"><span class="stat"><span class="dot run"></span>Conectado</span><button class="btn sm">Probar</button><div class="sw on" data-agent></div></div>
+        </div>
+
+        <div class="lrow">
+          <div class="ic mono">D</div>
+          <div class="body">
+            <div class="nm">Devin</div>
+            <div class="mt">devin acp · protocolo v1 · 210 ms</div>
+          </div>
+          <div class="act"><span class="stat"><span class="dot run"></span>Conectado</span><button class="btn sm">Probar</button><div class="sw on" data-agent></div></div>
+        </div>
+
+        <div class="lrow">
+          <div class="ic mono">C</div>
+          <div class="body">
+            <div class="nm">Claude</div>
+            <div class="mt">claude --acp · protocolo v1 · 180 ms</div>
+          </div>
+          <div class="act"><span class="stat"><span class="dot run"></span>Conectado</span><button class="btn sm">Probar</button><div class="sw on" data-agent></div></div>
+        </div>
+
+        <div class="lrow">
+          <div class="ic mono">Q</div>
+          <div class="body">
+            <div class="nm">Qwen Code <span class="badge">Local · canario</span></div>
+            <div class="mt">qwen --acp · LM Studio 127.0.0.1:1234 · workass-dev</div>
+          </div>
+          <div class="act"><span class="stat"><span class="dot warn"></span>Inactivo</span><button class="btn sm">Probar</button><div class="sw on" data-agent></div></div>
+        </div>
+
+        <div class="lrow">
+          <div class="ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M4 5l-2.5 3L4 11M12 5l2.5 3L12 11M9.5 3.5l-3 9"/></svg></div>
+          <div class="body">
+            <div class="nm">Comando personalizado</div>
+            <div class="mt">Ejecutable ACP propio · stdout JSON-RPC puro</div>
+            <div class="defrow">
+              <span class="dlbl">Comando</span>
+              <input class="inp cmd" value="node ./mi-agente/server.mjs --acp" spellcheck="false">
+            </div>
+            <div class="defrow" style="border-top:0; padding-top:6px; margin-top:0">
+              <span class="dlbl">Entorno</span>
+              <input class="inp cmd" value="OPENAI_BASE_URL=http://127.0.0.1:1234/v1" spellcheck="false">
+            </div>
+          </div>
+          <div class="act"><span class="stat"><span class="dot"></span>—</span><button class="btn sm">Probar</button><div class="sw on" data-agent></div></div>
+        </div>
+      </div>
+      <div class="ghint">Los modelos de todos los agentes habilitados aparecen agrupados en el selector del compositor. Probar lanza el candidato, envía <code>initialize</code> y reporta versión de protocolo, identidad, capacidades y latencia. <a href="#">Probar todos</a></div>
+    </section>
+
+    <!-- ============ 2 · DISPOSITIVOS ============ -->
+    <section class="panel" data-sec="dispositivos">
+      <div class="phead">
+        <h2>Dispositivos</h2>
+        <p>Equipos vinculados por el sistema de lease del controlador. Solo un dispositivo sostiene el control a la vez; el resto observa en modo espejo.</p>
+      </div>
+
+      <div class="gtitle">Solicitudes de acceso</div>
+      <div class="group" id="reqGroup">
+        <div class="lrow" id="reqRow">
+          <div class="ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="3" y="2.5" width="10" height="11" rx="1.5"/><path d="M6.5 12h3"/></svg></div>
+          <div class="body">
+            <div class="nm"><span class="dot warn"></span>iPad de Martin <span class="badge">Safari · LAN</span></div>
+            <div class="mt">192.168.1.77 · solicitó acceso hace 12 s</div>
+          </div>
+          <div class="act"><button class="btn sm acc" id="btnAprobar">Aprobar</button><button class="btn sm danger" id="btnRechazar">Rechazar</button></div>
+        </div>
+      </div>
+      <div class="ghint">Las solicitudes nuevas también llegan como notificación al dispositivo controlador.</div>
+
+      <div class="gtitle">Dispositivos aprobados</div>
+      <div class="group" id="devGroup">
+        <div class="lrow">
+          <div class="ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="2" y="3" width="12" height="8" rx="1.5"/><path d="M5.5 13.5h5M8 11v2.5"/></svg></div>
+          <div class="body">
+            <div class="nm">Este Mac <span class="badge acc">Controlador</span></div>
+            <div class="mt">192.168.1.34 · vinculado 12 mar 2026 · visto ahora</div>
+          </div>
+          <div class="act"><span class="stat"><span class="dot run"></span>Activo</span></div>
+        </div>
+        <div class="lrow">
+          <div class="ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="2" y="3" width="12" height="8" rx="1.5"/><path d="M5.5 13.5h5M8 11v2.5"/></svg></div>
+          <div class="body">
+            <div class="nm">Laptop trabajo <span class="badge">Windows</span></div>
+            <div class="mt">192.168.1.51 · vinculado 3 feb 2026 · visto hace 2 h</div>
+          </div>
+          <div class="act"><span class="stat"><span class="dot"></span>Espejo</span><button class="btn sm danger">Revocar</button></div>
+        </div>
+        <div class="lrow">
+          <div class="ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="4.5" y="2" width="7" height="12" rx="1.5"/><path d="M7 12.5h2"/></svg></div>
+          <div class="body">
+            <div class="nm">iPhone de Martin</div>
+            <div class="mt">192.168.1.62 · vinculado 28 ene 2026 · visto ayer 18:40</div>
+          </div>
+          <div class="act"><span class="stat"><span class="dot"></span>Espejo</span><button class="btn sm danger">Revocar</button></div>
+        </div>
+      </div>
+      <div class="ghint">La lista funciona como allow-list de IPs: solo las direcciones aprobadas acceden. No hay auth por usuario/contraseña — usá una red de confianza.</div>
+    </section>
+
+    <!-- ============ 3 · ENGINES ============ -->
+    <section class="panel" data-sec="engines">
+      <div class="phead">
+        <h2>Engines</h2>
+        <p>Ciclo de vida de los motores ACP: hibernación de chats inactivos, reciclado por memoria y una reserva templada para arranques instantáneos.</p>
+      </div>
+
+      <div class="gtitle">Flota</div>
+      <div class="group">
+        <div class="set">
+          <div class="lbl"><div class="n">Estado actual</div><div class="d">Engines vivos y memoria residente agregada.</div></div>
+          <div class="ctl"><span class="stat"><span class="dot run"></span>3 engines · <span class="mono" style="color:var(--ink2)">1.6 GB</span></span></div>
+        </div>
+      </div>
+
+      <div class="gtitle">Ciclo de vida</div>
+      <div class="group">
+        <div class="set">
+          <div class="lbl"><div class="n">TTL de hibernación</div><div class="d">Tiempo inactivo antes de que un chat suspenda su engine. Los prompts en vuelo se anclan.</div></div>
+          <div class="ctl"><input class="inp num" value="15"><span class="suf">min</span></div>
+        </div>
+        <div class="set">
+          <div class="lbl"><div class="n">Umbral de reciclado de RAM</div><div class="d">Cuando la flota supera este total, el engine ocioso más antiguo se recicla.</div></div>
+          <div class="ctl"><input class="inp num" value="24"><span class="suf">GB</span></div>
+        </div>
+        <div class="set">
+          <div class="lbl"><div class="n">Reserva templada</div><div class="d">Engines pre-calentados listos para el próximo chat sin costo de arranque frío.</div></div>
+          <div class="ctl"><input class="inp num" value="1"><span class="suf">engine</span></div>
+        </div>
+        <div class="set">
+          <div class="lbl"><div class="n">Intervalo del reaper</div><div class="d">Cada cuánto barre el reaper las sesiones inactivas.</div></div>
+          <div class="ctl"><input class="inp num" value="30"><span class="suf">s</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 4 · APARIENCIA ============ -->
+    <section class="panel" data-sec="apariencia">
+      <div class="phead">
+        <h2>Apariencia</h2>
+        <p>Tema, densidad y acento. workass sigue el lenguaje visual moderno-minimal de las apps de Claude Code y Codex.</p>
+      </div>
+
+      <div class="gtitle">Tema</div>
+      <div class="group">
+        <div class="set">
+          <div class="lbl"><div class="n">Modo de color</div><div class="d">Claro y oscuro con contraste AA. «Sistema» sigue a macOS.</div></div>
+          <div class="ctl"><div class="seg" id="segTheme">
+            <button data-theme-val="">Sistema</button>
+            <button data-theme-val="light">Claro</button>
+            <button data-theme-val="dark">Oscuro</button>
+          </div></div>
+        </div>
+        <div class="set">
+          <div class="lbl"><div class="n">Densidad</div><div class="d">Ritmo vertical del texto y las listas.</div></div>
+          <div class="ctl"><div class="seg">
+            <button class="on">Compacta</button>
+            <button>Cómoda</button>
+          </div></div>
+        </div>
+      </div>
+
+      <div class="gtitle">Acento</div>
+      <div class="group">
+        <div class="set">
+          <div class="lbl"><div class="n">Color de marca</div><div class="d">Verde, fijo. Se usa solo como acento — nunca en texto de cuerpo ni en fondos grandes.</div></div>
+          <div class="ctl"><span class="swatch"></span><span class="stat" style="font-family:ui-monospace,Menlo,monospace">#4fa583</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 5 · ATAJOS ============ -->
+    <section class="panel" data-sec="atajos">
+      <div class="phead">
+        <h2>Atajos</h2>
+        <p>Teclas rápidas globales de workass. Se muestran junto a sus acciones en toda la interfaz.</p>
+      </div>
+
+      <div class="gtitle">Teclado</div>
+      <div class="group">
+        <div class="kb"><span class="desc">Paleta de comandos · buscar</span><kbd>⌘</kbd><kbd>K</kbd></div>
+        <div class="kb"><span class="desc">Mostrar / ocultar conversaciones</span><kbd>⌘</kbd><kbd>B</kbd></div>
+        <div class="kb"><span class="desc">Enviar prompt al agente</span><kbd>⌘</kbd><kbd>↵</kbd></div>
+        <div class="kb"><span class="desc">Cancelar turno · cerrar panel</span><kbd>Esc</kbd></div>
+        <div class="kb"><span class="desc">Nueva conversación</span><kbd>⌘</kbd><kbd>N</kbd></div>
+        <div class="kb"><span class="desc">Abrir ajustes</span><kbd>⌘</kbd><kbd>,</kbd></div>
+      </div>
+    </section>
+
+  </div></div>
+</main>
+
+<button class="themebtn" onclick="const r=document.documentElement; r.dataset.theme = r.dataset.theme==='light'?'dark':'light'">Cambiar tema</button>
+
+<script>
+  const root = document.documentElement;
+  if (matchMedia('(prefers-color-scheme: light)').matches) root.dataset.theme = 'light';
+
+  // section nav
+  const nav = document.querySelectorAll('.nrow');
+  const panels = document.querySelectorAll('.panel');
+  const crumb = document.getElementById('crumb');
+  nav.forEach(n => n.onclick = () => {
+    const sec = n.dataset.sec;
+    nav.forEach(x => x.classList.toggle('on', x === n));
+    panels.forEach(p => p.classList.toggle('on', p.dataset.sec === sec));
+    crumb.textContent = n.textContent.trim();
+    document.querySelector('.scroll').scrollTop = 0;
+  });
+
+  // toggles
+  document.querySelectorAll('[data-toggle]').forEach(s => s.onclick = () => s.classList.toggle('on'));
+
+  // agent enable/disable — disabled agents dim and fold their config
+  document.querySelectorAll('[data-agent]').forEach(s => s.onclick = () => {
+    s.classList.toggle('on');
+    s.closest('.lrow').classList.toggle('off', !s.classList.contains('on'));
+  });
+
+  // generic segmented (density) — visual only
+  document.querySelectorAll('.seg').forEach(seg => {
+    if (seg.id === 'segTheme') return;
+    seg.querySelectorAll('button').forEach(b => b.onclick = () => {
+      seg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    });
+  });
+
+  // theme segmented — actually drives the theme
+  const segTheme = document.getElementById('segTheme');
+  const syncSegTheme = () => {
+    const cur = root.dataset.theme || '';
+    segTheme.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.themeVal === cur));
+  };
+  segTheme.querySelectorAll('button').forEach(b => b.onclick = () => {
+    const v = b.dataset.themeVal;
+    if (v) root.dataset.theme = v; else root.removeAttribute('data-theme');
+    if (!v && matchMedia('(prefers-color-scheme: light)').matches) root.dataset.theme = 'light';
+    if (!v && !matchMedia('(prefers-color-scheme: light)').matches) root.dataset.theme = 'dark';
+    syncSegTheme();
+  });
+  syncSegTheme();
+
+  // access requests — approve moves the device to the approved list, reject just clears
+  const reqRow = document.getElementById('reqRow'), devGroup = document.getElementById('devGroup');
+  const clearReq = () => { reqRow.innerHTML = '<div class="body"><span class="empty">Sin solicitudes pendientes</span></div>'; };
+  document.getElementById('btnAprobar').onclick = () => {
+    const row = document.createElement('div');
+    row.className = 'lrow';
+    row.innerHTML = '<div class="ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="3" y="2.5" width="10" height="11" rx="1.5"/><path d="M6.5 12h3"/></svg></div>' +
+      '<div class="body"><div class="nm">iPad de Martin</div><div class="mt">192.168.1.77 · vinculado recién · visto ahora</div></div>' +
+      '<div class="act"><span class="stat"><span class="dot"></span>Espejo</span><button class="btn sm danger">Revocar</button></div>';
+    devGroup.appendChild(row);
+    clearReq();
+  };
+  document.getElementById('btnRechazar').onclick = clearReq;
+
+  // Esc closes back to chats (mock: no-op flash)
+  addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelector('.tico').style.background = 'var(--line)'; });
+</script>
+</body>
+</html>

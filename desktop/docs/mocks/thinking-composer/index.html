@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>El pensamiento en el chat</title>
+<style>
+/* Tokens: verbatim from desktop/renderer2/src/styles/tokens.css (both themes). */
+:root{
+  color-scheme:dark;
+  --bg:#0f0e0d; --side:#151413; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+  --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --acc:#4fa583; --link:#8fb0ea; --del:#d96b5f; --shell:#0b0a09;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#f2f0ed; --side:#faf9f7; --panel:#ffffff; --card:#ffffff; --field:#f1efeb;
+  --ink:#23211e; --ink2:#47443e; --muted:#7a756d; --faint:#a19c93;
+  --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.15);
+  --acc:#177353; --link:#3861b0; --del:#bd4436; --shell:#eceae6;
+}
+*{box-sizing:border-box}
+[hidden]{display:none !important}
+html,body{margin:0}
+body{background:var(--shell); color:var(--ink);
+  font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased; padding:16px 16px 40px}
+:focus,:focus-visible{outline:none}
+.wrap{max-width:560px; margin:0 auto}
+
+.top .t{font-size:15px; font-weight:640; margin:0 0 3px}
+.top .d{font-size:12px; color:var(--muted); margin:0 0 12px}
+.bar{display:flex; gap:6px; flex-wrap:wrap; margin:0 0 10px}
+.tgl{font:inherit; font-size:12px; color:var(--ink2); background:var(--panel); border:1px solid var(--line2);
+  border-radius:8px; padding:4px 11px; cursor:pointer}
+.tgl:hover{color:var(--ink)}
+.tgl.on{color:var(--bg); background:var(--ink); border-color:transparent}
+.tgl.go{color:var(--bg); background:var(--acc); border-color:transparent; font-weight:600}
+.seg{display:inline-flex; background:var(--panel); border:1px solid var(--line2); border-radius:8px; overflow:hidden}
+.seg button{font:inherit; font-size:12px; color:var(--muted); background:transparent; border:0; padding:4px 11px; cursor:pointer}
+.seg button.on{color:var(--bg); background:var(--ink)}
+.diag{font:11px/1.5 var(--mono); color:var(--muted); margin:0 0 16px}
+.diag b{color:var(--del); font-weight:400}
+
+.frame{background:var(--bg); border:1px solid var(--line); border-radius:13px; padding:12px 4px 6px;
+  box-shadow:0 18px 50px -26px rgba(0,0,0,.6)}
+.view{height:250px; overflow-y:auto; overscroll-behavior:contain; padding:0 12px}
+.userpill{display:flex; justify-content:flex-end; margin:0 0 13px}
+.userpill span{background:var(--field); border:1px solid var(--line); border-radius:14px; padding:7px 13px;
+  max-width:84%; font-size:13px}
+.ans{font-size:13.5px; line-height:1.62; color:var(--ink); margin:0}
+.tcaret{display:inline-block; width:2px; height:1.05em; background:var(--ink2); vertical-align:-2px; margin-left:2px;
+  animation:breathe 1.6s ease-in-out infinite}
+@keyframes breathe{0%,100%{opacity:1}50%{opacity:.42}}
+
+/* ── the row ─────────────────────────────────────────────────────────────── */
+.steprow{display:flex; align-items:flex-start; gap:8px; color:var(--muted); font-size:12.5px;
+  cursor:pointer; border:0; background:transparent; font-family:inherit; text-align:left; padding:0; width:100%}
+.mk{flex:none; width:6px; height:6px; margin-top:6px; display:grid; place-items:center}
+.steprow .b{min-width:0; flex:1}
+.steprow .lbl{color:var(--ink2)}
+.steprow.done .lbl{text-decoration:underline dotted color-mix(in srgb,var(--faint) 65%,transparent);
+  text-underline-offset:3px}
+.steprow:hover .lbl{color:var(--ink)}
+.steprow .el{font:11px/1 var(--mono); font-variant-numeric:tabular-nums; color:var(--muted)}
+.chk{width:6px; height:6px; border-radius:50%; background:var(--line2)}
+
+/* ping — the marker. Literal duration: a var() in the shorthand voids it. */
+.ping{width:6px; height:6px; border-radius:50%; background:var(--acc); position:relative}
+.ping::after{content:''; position:absolute; inset:-1px; border-radius:50%; border:1.5px solid var(--acc);
+  animation:ping 1.9s cubic-bezier(.2,.6,.3,1) infinite}
+@keyframes ping{0%{transform:scale(1); opacity:.55} 70%,100%{transform:scale(3.4); opacity:0}}
+
+/* word by word — 34 ms apart. Opacity + blur only, NOTHING moves, so this is
+   appropriate under «menos movimiento» and runs there too. */
+.word{display:inline-block; white-space:pre; animation:wordin .5s cubic-bezier(.2,.7,.3,1) both}
+@keyframes wordin{
+  from{opacity:0; filter:blur(8px)}
+  to  {opacity:1; filter:blur(0)}
+}
+
+/* pinned: the live row is the last thing in the turn and holds the bottom edge */
+.livewrap{position:sticky; bottom:0; padding:9px 0 11px; margin-top:4px;
+  background:linear-gradient(to top, var(--bg) 62%, color-mix(in srgb,var(--bg) 88%,transparent) 86%, transparent)}
+
+.stexpand{margin:8px 0 13px; padding:2px 0 2px 13px; border-left:2px solid var(--line2);
+  color:var(--ink2); font-size:12.5px; line-height:1.68; white-space:pre-wrap}
+
+.foot{margin:20px 2px 0; font-size:12px; color:var(--muted); line-height:1.7}
+.foot b{color:var(--ink2); font-weight:600}
+.foot code{background:var(--field); border:1px solid var(--line); border-radius:5px; padding:.5px 5px;
+  font:11px var(--mono); color:var(--ink2)}
+.foot a{color:var(--link); text-decoration:none}
+.foot a:hover{text-decoration:underline}
+
+/* Only the ping actually MOVES (it scales), so that is the only thing dropped
+   when the system asks for less motion. The words keep fading in. */
+@media (prefers-reduced-motion:reduce){
+  .ping::after{animation:none; transform:scale(2.2); opacity:.28}
+  .tcaret{animation:none}
+}
+</style>
+</head>
+<body>
+<div class="wrap" id="wrap">
+
+<header class="top">
+  <div class="t">El pensamiento en el chat</div>
+  <div class="d">Ping + palabra por palabra, al final del turno y pegado abajo.</div>
+  <div class="bar">
+    <span class="seg" id="phase">
+      <button data-p="live" class="on">Mientras piensa</button>
+      <button data-p="done">Ya terminó</button>
+    </span>
+    <button class="tgl go" id="again">Repetir</button>
+    <button class="tgl" id="theme">Claro</button>
+  </div>
+  <div class="diag" id="diag"></div>
+</header>
+
+<div class="frame">
+  <div class="view" id="view">
+    <div class="userpill"><span>Revisá por qué se traba la cola y reportá.</span></div>
+    <p class="ans" id="ans"></p>
+
+    <div class="livewrap" data-live>
+      <button class="steprow">
+        <span class="mk"><span class="ping" aria-hidden="true"></span></span>
+        <span class="b"><span class="lbl" id="lbl">Pensando</span> <span class="el" id="el">0:00</span></span>
+      </button>
+    </div>
+
+    <div data-done hidden>
+      <button class="steprow done" id="doneRow" aria-expanded="false">
+        <span class="mk"><span class="chk" aria-hidden="true"></span></span>
+        <span class="b"><span class="lbl">Pensó</span> <span class="el">18s</span></span>
+      </button>
+      <div class="stexpand" id="doneFull" hidden></div>
+    </div>
+  </div>
+</div>
+
+<div class="foot">
+  <b>Un solo componente.</b> <code>messages.tsx</code> → <code>StepRow</code>. Hoy hace
+  <code>ev.text.split('\n')[0].slice(0, 90)</code>; pasa a tomar el último título cerrado con <code>**</code>,
+  lo parte en palabras y las entra de <code>blur(8px)</code> a nítido, 500 ms, 34 ms de diferencia entre una y
+  otra. El panel no se toca.
+  <br><br>
+  <b>Anda con «menos movimiento» activado.</b> Las palabras sólo cambian de opacidad y de foco: no se
+  desplazan, así que el ajuste del sistema no las bloquea. Lo único que se mueve de verdad es el anillo del
+  ping, y eso sí se apaga cuando el sistema lo pide — queda el punto con su halo quieto.
+  <br><br>
+  El botón de enviar centrado es otra cosa, aparte: <a href="composer-send-centrado.html">verlo acá →</a> ·
+  <a href="animacion.html">las otras animaciones →</a>
+</div>
+
+</div>
+<script>
+(function(){
+  var root=document.documentElement;
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  document.getElementById('diag').innerHTML = reduce
+    ? "el sistema pide <b>menos movimiento</b> — y esto igual anima, porque nada se desplaza"
+    : "el sistema no pide menos movimiento";
+
+  document.getElementById('theme').onclick=function(){
+    var light=root.getAttribute('data-theme')==='light';
+    root.setAttribute('data-theme', light?'dark':'light');
+    this.textContent=light?'Claro':'Oscuro';
+  };
+
+  var seg=document.getElementById('phase');
+  seg.addEventListener('click', function(e){
+    var b=e.target.closest('button'); if(!b) return;
+    seg.querySelectorAll('button').forEach(function(x){ x.classList.toggle('on', x===b); });
+    var done=b.dataset.p==='done';
+    document.querySelectorAll('[data-live]').forEach(function(el){ el.hidden=done; });
+    document.querySelectorAll('[data-done]').forEach(function(el){ el.hidden=!done; });
+  });
+
+  // Real step titles, lifted from the chat archive (codex + claude tabs).
+  var STEPS=[
+    "Planning safe process inspection",
+    "Parsing process tree with ps and awk",
+    "Assessing queue count discrepancy",
+    "Reporting chat recovery and queue issues",
+    "Identifying script bug in production rebuild workflow",
+    "Planning concise command reporting"
+  ];
+  var ANS="La cola se traba porque el head lo retiene el renderer: el daemon lo ve reservado y no promueve el "+
+          "siguiente turno. El drainer despierta, encuentra el head tomado por un job que ya no corre, y vuelve a "+
+          "dormirse sin tocar la cola. Por eso el chat queda con turnos encolados que nunca arrancan, y el botón de "+
+          "detener no hace nada: apunta a un jobId muerto.";
+  document.getElementById('doneFull').textContent=STEPS.join("\n");   // no numbers, no marks
+
+  var lbl=document.getElementById('lbl'), el=document.getElementById('el'),
+      ans=document.getElementById('ans'), view=document.getElementById('view');
+  function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+  function fmt(s){ var m=Math.floor(s/60), r=s%60; return m+":"+(r<10?"0":"")+r; }
+  function closed(buf){ var o=[],re=/\*\*([^*]+)\*\*/g,m; while((m=re.exec(buf))) o.push(m[1].trim()); return o; }
+
+  // split into words, each with its own staggered entry
+  function setWords(text){
+    lbl.innerHTML = text.split(' ').map(function(w,i){
+      return "<span class='word' style='animation-delay:"+(i*34)+"ms'>"+esc(w)+" </span>";
+    }).join('');
+  }
+  setWords('Pensando');
+  document.getElementById('again').onclick=function(){ setWords(shown||'Pensando'); };
+
+  function stick(){ if(view.scrollHeight-view.scrollTop-view.clientHeight < 40) view.scrollTop=view.scrollHeight; }
+
+  var buf="", si=0, ci=0, t0=0, shown="", ai=0;
+  setInterval(function(){
+    t0+=0.06;
+    var cur=STEPS[si];
+    if(ci===0) buf += (buf?" ":"") + "**";
+    ci += 1+Math.floor(Math.random()*3);
+    var head = buf + cur.slice(0,Math.min(ci,cur.length)) + (ci>=cur.length ? "**" : "");
+    if(ci>=cur.length){
+      buf=head; si++; ci=0;
+      if(si>=STEPS.length){ si=0; ci=0; buf=""; t0=0; shown=""; ai=0; ans.textContent=""; }
+    }
+    el.textContent=fmt(Math.floor(t0));
+    var cs=closed(head), next=cs.length?cs[cs.length-1]:"Pensando";
+    if(next!==shown){ shown=next; setWords(shown); }
+    ai=Math.min(ai+5, ANS.length);
+    ans.innerHTML=esc(ANS.slice(0,ai))+"<span class='tcaret'></span>";
+    stick();
+  },60);
+
+  var doneRow=document.getElementById('doneRow'), doneFull=document.getElementById('doneFull');
+  doneRow.onclick=function(){
+    var open=doneFull.hidden;
+    doneFull.hidden=!open;
+    doneRow.setAttribute('aria-expanded',String(open));
+  };
+})();
+</script>
+</body>
+</html>

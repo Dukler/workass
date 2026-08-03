@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>workass · P4 mock B — zen</title>
+<style>
+/* ============================================================
+   VARIANT B — "zen"
+   IA: NO persistent sidebar. One minimal top bar (conversation title
+   + ⌘K switcher + compact status + settings) over a single centered
+   reading column shared by transcript and composer. Everything else
+   is summoned on demand (⌘K). Maximal reading focus — the bravest one.
+   Green = accent only. Agent prose unboxed. 8px baseline grid.
+   ============================================================ */
+:root{
+  --bg-0:#1b1a18; --bg-1:#201f1d;
+  --panel:#232220; --panel-2:#262523; --sunk:#1d1c1a;
+  --line:rgba(255,255,255,.07); --line-2:rgba(255,255,255,.12); --line-3:rgba(255,255,255,.20);
+  --ink:#f0efec; --ink-2:#d8d6d1; --muted:#a8a69f; --label:#918f88;
+  --accent:#3ecf8e; --accent-ink:#0f1512;
+  --accent-soft:rgba(62,207,142,.12);
+  --warn:#d9a441; --risk:#e08a72;
+  --warn-soft:rgba(217,164,65,.10);
+  --tok-kw:#c8a0e8; --tok-typ:#69c3d6; --tok-fn:#e2e0da; --tok-num:#e5977f; --tok-str:#d9b877; --tok-cmt:#8b8981;
+  --add-ink:#83d9ab; --add-bg:rgba(62,207,142,.09);
+  --del-ink:#e6a48f; --del-bg:rgba(224,138,114,.09);
+  --shadow:0 1px 2px rgba(0,0,0,.24);
+}
+:root[data-theme="light"]{
+  --bg-0:#faf9f7; --bg-1:#f4f3f0;
+  --panel:#ffffff; --panel-2:#fbfaf8; --sunk:#f2f1ee;
+  --line:rgba(20,19,16,.08); --line-2:rgba(20,19,16,.13); --line-3:rgba(20,19,16,.24);
+  --ink:#1c1b18; --ink-2:#3f3e39; --muted:#5d5b55; --label:#6d6b64;
+  --accent:#0e7d56; --accent-ink:#ffffff;
+  --accent-soft:rgba(14,125,86,.10);
+  --warn:#8f6400; --risk:#a8442a;
+  --warn-soft:rgba(143,100,0,.08);
+  --tok-kw:#7a3fb0; --tok-typ:#0f6f86; --tok-fn:#3f3e39; --tok-num:#a8442a; --tok-str:#8a6d1f; --tok-cmt:#6d6b64;
+  --add-ink:#0e7d56; --add-bg:rgba(14,125,86,.09);
+  --del-ink:#a8442a; --del-bg:rgba(168,68,42,.08);
+  --shadow:0 1px 2px rgba(20,19,16,.05);
+}
+:root{
+  --font-ui:"Aptos","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",sans-serif;
+  --font-mono:"Cascadia Code","Cascadia Mono","Consolas",ui-monospace,"SF Mono",monospace;
+  /* the ONE reading axis, shared by transcript and composer */
+  --col:70ch; --col-pad:24px;
+  --r:12px; --r-sm:7px;               /* one radius scale */
+}
+
+*{box-sizing:border-box;}
+html{font-size:17px;}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
+body{
+  margin:0;height:100vh;overflow:hidden;display:flex;flex-direction:column;
+  font-family:var(--font-ui);font-size:1rem;line-height:1.7;
+  color:var(--ink);background:var(--bg-0);
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+}
+a{color:var(--accent);text-decoration:none;} a:hover{text-decoration:underline;}
+code,pre{font-family:var(--font-mono);}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;}
+:where(button,textarea):focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-sm);}
+::-webkit-scrollbar{width:10px;height:10px;}
+::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:99px;border:3px solid transparent;background-clip:padding-box;}
+::-webkit-scrollbar-thumb:hover{background:var(--line-3);}
+
+/* ===== top-level structure: bar / reader / composer — no asides ===== */
+
+/* ---- minimal top bar ---- */
+.bar{display:flex;align-items:center;gap:16px;height:56px;padding:0 24px;
+  border-bottom:1px solid var(--line);flex:none;}
+.bar-mark{width:14px;height:14px;border-radius:4px;background:var(--accent);flex:none;}
+.bar-title{display:flex;align-items:baseline;gap:10px;min-width:0;flex:1;}
+.bar-title h1{margin:0;font-size:.94rem;font-weight:700;letter-spacing:-.01em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+/* conversation metadata = hover-revealed secondary info */
+.bar-meta{font-size:.72rem;color:var(--muted);white-space:nowrap;opacity:0;}
+.bar-title:hover .bar-meta{opacity:1;}
+.bar-meta code{background:var(--line);padding:0 5px;border-radius:4px;color:var(--ink-2);font-size:.95em;}
+.bar-right{display:flex;align-items:center;gap:8px;flex:none;}
+/* the switcher: everything lives behind ⌘K */
+.kbd-pill{display:flex;align-items:center;gap:8px;font-size:.78rem;color:var(--muted);
+  border:1px solid var(--line-2);border-radius:99px;padding:5px 14px;}
+.kbd-pill:hover{border-color:var(--line-3);color:var(--ink-2);}
+.kbd-pill kbd{font-family:var(--font-mono);font-size:.72rem;color:var(--ink-2);
+  background:var(--line);border-radius:4px;padding:0 5px;}
+/* compact status affordance — not a bar, a chip; opens Actividad via ⌘K */
+.status-chip{display:flex;align-items:center;gap:7px;font-family:var(--font-mono);font-size:.7rem;
+  color:var(--muted);border:1px solid var(--line-2);border-radius:99px;padding:5px 12px;}
+.status-chip:hover{border-color:var(--line-3);color:var(--ink-2);}
+.status-dot{width:6px;height:6px;border-radius:99px;background:var(--warn);animation:pulse 1.6s infinite;}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+.bar-btn{font-size:.8rem;font-weight:600;color:var(--muted);padding:6px 12px;border-radius:var(--r-sm);}
+.bar-btn:hover{background:var(--line);color:var(--ink);}
+.bar-icon{width:32px;height:32px;border-radius:var(--r-sm);color:var(--muted);display:grid;place-items:center;}
+.bar-icon:hover{background:var(--line);color:var(--ink);}
+
+/* ---- reader ---- */
+.reader{flex:1;min-height:0;overflow:auto;scrollbar-gutter:stable both-edges;}
+.col{max-width:calc(var(--col) + var(--col-pad)*2);margin:0 auto;padding:0 var(--col-pad);width:100%;}
+.reader .col{padding-top:48px;padding-bottom:24px;}
+
+.turn{margin-bottom:40px;}
+.turn-head{display:flex;align-items:baseline;gap:12px;margin-bottom:10px;}
+.speaker{font-size:.7rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--label);}
+.turn.agent .speaker{color:var(--accent);}
+.turn-meta{margin-left:auto;font-family:var(--font-mono);font-size:.66rem;color:var(--label);opacity:0;}
+.turn:hover .turn-meta{opacity:1;}
+
+/* user message: quiet compact block */
+.u-block{background:var(--panel-2);border:1px solid var(--line);border-radius:var(--r);
+  padding:14px 18px;width:fit-content;max-width:100%;}
+.u-block p{margin:0;}
+.ctx-chip{display:inline-flex;align-items:center;gap:6px;margin-top:10px;font-size:.72rem;font-family:var(--font-mono);
+  color:var(--muted);background:var(--sunk);border:1px solid var(--line);padding:3px 9px;border-radius:var(--r-sm);}
+
+/* agent reply: UNBOXED */
+.think{margin:0 0 18px;font-size:.85rem;color:var(--muted);font-style:italic;}
+.plan{border:1px solid var(--line);border-radius:var(--r);background:var(--panel-2);padding:14px 18px;margin:0 0 28px;}
+.plan-title{font-size:.68rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--label);margin-bottom:10px;}
+.plan ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;}
+.plan li{display:flex;align-items:center;gap:12px;font-size:.88rem;color:var(--ink-2);}
+.plan-box{width:14px;height:14px;border-radius:4px;border:1.5px solid var(--line-3);flex:none;}
+.plan li[data-st="done"] .plan-box{background:var(--accent);border-color:var(--accent);}
+.plan li[data-st="done"]{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line-3);}
+.plan li[data-st="active"] .plan-box{border-color:var(--accent);box-shadow:inset 0 0 0 3px var(--accent-soft);}
+
+.prose p{margin:0 0 18px;}
+.prose h3{font-size:1.08rem;font-weight:700;letter-spacing:-.01em;margin:28px 0 10px;}
+.prose :not(pre)>code{font-size:.87em;background:var(--line);color:var(--ink-2);padding:1px 6px;border-radius:4px;}
+
+pre.code{background:var(--sunk);border:1px solid var(--line);border-radius:var(--r);
+  padding:18px 20px;overflow:auto;font-size:.8rem;line-height:1.65;margin:0 0 18px;color:var(--ink-2);}
+.tok-kw{color:var(--tok-kw);} .tok-typ{color:var(--tok-typ);} .tok-fn{color:var(--tok-fn);}
+.tok-num{color:var(--tok-num);} .tok-str{color:var(--tok-str);} .tok-cmt{color:var(--tok-cmt);font-style:italic;}
+
+.table-wrap{overflow-x:auto;margin:0 0 18px;border:1px solid var(--line);border-radius:var(--r);}
+table{border-collapse:collapse;width:100%;font-size:.88rem;}
+thead th{text-align:left;font-weight:700;color:var(--label);font-size:.68rem;text-transform:uppercase;
+  letter-spacing:.06em;padding:10px 18px;background:var(--panel-2);border-bottom:1px solid var(--line);}
+tbody td{padding:10px 18px;border-bottom:1px solid var(--line);color:var(--ink-2);}
+tbody tr:last-child td{border-bottom:none;}
+.pill{font-size:.68rem;font-weight:700;font-family:var(--font-mono);padding:1px 9px;border-radius:99px;}
+.pill.pin{color:var(--accent);background:var(--accent-soft);}
+.pill.keep{color:var(--warn);background:var(--warn-soft);}
+.pill.reap{color:var(--muted);background:var(--line);}
+
+pre.diff{background:var(--sunk);border:1px solid var(--line);border-radius:var(--r);overflow:auto;
+  font-size:.78rem;line-height:1.6;margin:0 0 18px;padding:8px 0;}
+pre.diff span{display:block;padding:1px 20px;white-space:pre;}
+.d-hunk{color:var(--muted);background:var(--panel-2);border-top:1px solid var(--line);border-bottom:1px solid var(--line);}
+.d-ctx{color:var(--ink-2);}
+.d-add{color:var(--add-ink);background:var(--add-bg);}
+.d-del{color:var(--del-ink);background:var(--del-bg);}
+
+.tool-card{border:1px solid var(--line-2);border-radius:var(--r);background:var(--panel);overflow:hidden;box-shadow:var(--shadow);}
+.tool-head{display:flex;align-items:center;gap:13px;padding:14px 18px;border-bottom:1px solid var(--line);}
+.tool-ic{width:30px;height:30px;border-radius:var(--r-sm);background:var(--accent-soft);color:var(--accent);
+  display:grid;place-items:center;font-size:.95rem;flex:none;}
+.tool-titles{flex:1;min-width:0;display:flex;flex-direction:column;}
+.tool-title{font-size:.88rem;font-weight:700;}
+.tool-sub{font-size:.74rem;color:var(--muted);}
+.tool-sub code{background:var(--line);padding:0 5px;border-radius:4px;}
+.tool-tag{font-size:.68rem;font-family:var(--font-mono);color:var(--muted);border:1px solid var(--line-2);
+  padding:2px 9px;border-radius:99px;flex:none;}
+.tool-cmd{margin:0;padding:14px 20px;font-size:.8rem;color:var(--ink-2);background:var(--sunk);
+  border-bottom:1px solid var(--line);overflow:auto;}
+.tool-actions{display:flex;gap:8px;padding:14px 18px;}
+.btn{font-size:.85rem;font-weight:600;padding:8px 16px;border-radius:var(--r-sm);border:1px solid var(--line-2);color:var(--ink);}
+.btn:hover{border-color:var(--line-3);}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent;}
+.btn.primary:hover{filter:brightness(1.05);}
+.btn.ghost{border-color:transparent;color:var(--muted);}
+.btn.ghost:hover{color:var(--risk);background:var(--line);}
+
+/* ---- composer: same axis, no chrome around it ---- */
+.compose{flex:none;padding:8px 0 24px;}
+.composer-box{border:1px solid var(--line-2);border-radius:var(--r);background:var(--panel);box-shadow:var(--shadow);}
+.composer-box:focus-within{border-color:var(--accent);}
+.compose textarea{display:block;width:100%;border:none;background:none;resize:none;color:var(--ink);
+  font:inherit;line-height:1.55;padding:14px 18px 4px;outline:none;}
+.compose textarea::placeholder{color:var(--muted);}
+.composer-row{display:flex;align-items:center;gap:4px;padding:6px 10px 10px;}
+.sel{display:flex;align-items:center;gap:7px;font-size:.8rem;font-weight:600;color:var(--ink-2);
+  padding:6px 11px;border-radius:var(--r-sm);}
+.sel:hover{background:var(--line);}
+.sel-dot{width:6px;height:6px;border-radius:99px;background:var(--accent);}
+.send{margin-left:auto;width:34px;height:34px;border-radius:99px;background:var(--accent);color:var(--accent-ink);
+  font-size:1rem;font-weight:700;display:grid;place-items:center;}
+.send:hover{filter:brightness(1.05);}
+</style>
+</head>
+<body>
+
+  <!-- minimal bar: title · ⌘K switcher · compact status · settings -->
+  <header class="bar">
+    <span class="bar-mark" aria-hidden="true"></span>
+    <div class="bar-title">
+      <h1>Reaper de hibernación</h1>
+      <span class="bar-meta">Devin · <code>fix/lease-pin</code> · 512 MB</span>
+    </div>
+    <div class="bar-right">
+      <button class="kbd-pill"><kbd>⌘K</kbd> Chats y acciones</button>
+      <button class="status-chip"><span class="status-dot"></span>3 · 1.6 GB</button>
+      <button class="bar-btn">Ajustes</button>
+      <button class="bar-icon" id="themeBtn" aria-label="Cambiar tema">◐</button>
+    </div>
+  </header>
+
+  <!-- single reading column -->
+  <main class="reader">
+    <div class="col">
+
+      <article class="turn user">
+        <div class="turn-head"><span class="speaker">Tú</span><span class="turn-meta">14:22</span></div>
+        <div class="u-block">
+          <p>El reaper está hibernando chats que todavía están trabajando. Encuentra la race y propón un fix concreto. Aquí el módulo:</p>
+          <span class="ctx-chip">daemon/reaper/reaper.go</span>
+        </div>
+      </article>
+
+      <article class="turn agent">
+        <div class="turn-head"><span class="speaker">Devin</span><span class="turn-meta">14:22 · 1.2k tokens · 512 MB</span></div>
+        <p class="think">Pensó 8 s — revisó el bucle del reaper y el registro de leases</p>
+
+        <div class="plan">
+          <div class="plan-title">Plan</div>
+          <ul>
+            <li data-st="done"><span class="plan-box"></span>Reproducir la race con un test de lease activo</li>
+            <li data-st="active"><span class="plan-box"></span>Localizar el chequeo de actividad en el barrido</li>
+            <li data-st="todo"><span class="plan-box"></span>Proponer fix: fijar (pin) el lease mientras hay prompt en vuelo</li>
+          </ul>
+        </div>
+
+        <div class="prose">
+          <p>La race ocurre entre el <strong>barrido del reaper</strong> y la comprobación de <code>lastActivity</code>. El reaper lee el timestamp, decide hibernar y <em>después</em> toma el lock — para entonces ya llegó un prompt nuevo, pero el engine se reap igual.</p>
+
+          <h3>La causa</h3>
+          <p>La comprobación y la acción no son atómicas. Entre el <code>RLock</code> de lectura y el <code>Lock</code> de escritura hay una ventana donde <code>markActive()</code> corre desde otra goroutine:</p>
+
+          <pre class="code"><span class="tok-cmt">// reaper.go — barrido cada 30 s</span>
+<span class="tok-kw">func</span> (r *<span class="tok-typ">Reaper</span>) <span class="tok-fn">sweep</span>() {
+  <span class="tok-kw">for</span> _, s := <span class="tok-kw">range</span> r.<span class="tok-fn">idleSessions</span>() {   <span class="tok-cmt">// lee bajo RLock</span>
+    <span class="tok-kw">if</span> time.<span class="tok-fn">Since</span>(s.lastActivity) &gt; <span class="tok-num">idleTTL</span> {
+      r.<span class="tok-fn">hibernate</span>(s)                     <span class="tok-cmt">// toma Lock — ¡tarde!</span>
+    }
+  }
+}</pre>
+
+          <p>Bajo carga (10+ chats) el reaper hiberna sesiones con prompt en vuelo. La política correcta ya está en el plan:</p>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Estado del chat</th><th>Política</th><th>Acción del reaper</th></tr></thead>
+              <tbody>
+                <tr><td>Prompt en vuelo</td><td><span class="pill pin">pin</span></td><td>Nunca hibernar</td></tr>
+                <tr><td>Idle &lt; TTL</td><td><span class="pill keep">keep</span></td><td>Mantener caliente</td></tr>
+                <tr><td>Idle &gt; TTL</td><td><span class="pill reap">reap</span></td><td>Hibernar y replay</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p>El fix revalida el lease dentro del <code>Lock</code> antes de expulsar:</p>
+
+          <pre class="diff"><span class="d-hunk">@@ daemon/reaper/reaper.go @@</span><span class="d-ctx"> func (r *Reaper) hibernate(s *Session) {</span><span class="d-ctx">   r.mu.Lock()</span><span class="d-ctx">   defer r.mu.Unlock()</span><span class="d-add">+  if s.pinned || s.inFlight() {</span><span class="d-add">+    return // lease activo: no reap</span><span class="d-add">+  }</span><span class="d-del">-  r.evict(s)</span><span class="d-add">+  r.evict(s) // seguro: revalidado bajo Lock</span><span class="d-ctx"> }</span></pre>
+
+          <p>Añadí <code>TestActiveLeasePin</code>, que reproduce la ventana con 200 goroutines. Pasa en verde en local.</p>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-head">
+            <span class="tool-ic">⌘</span>
+            <div class="tool-titles"><span class="tool-title">Devin quiere ejecutar un comando</span><span class="tool-sub">en <code>~/workass/daemon</code></span></div>
+            <span class="tool-tag">shell</span>
+          </div>
+          <pre class="tool-cmd">go test ./reaper -run TestActiveLeasePin -race</pre>
+          <div class="tool-actions">
+            <button class="btn primary">Permitir una vez</button>
+            <button class="btn">Permitir siempre</button>
+            <button class="btn ghost">Rechazar</button>
+          </div>
+        </div>
+      </article>
+
+    </div>
+  </main>
+
+  <!-- composer: exactly the same column as the transcript -->
+  <footer class="compose">
+    <div class="col">
+      <div class="composer-box">
+        <textarea rows="1" placeholder="Escribe un mensaje…  ⌘↵ para enviar"></textarea>
+        <div class="composer-row">
+          <button class="sel"><span class="sel-dot"></span>Devin ▾</button>
+          <button class="sel">Agent ▾</button>
+          <button class="send" aria-label="Enviar">↑</button>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+<script>
+(function(){
+  var root=document.documentElement;
+  function set(t){root.setAttribute('data-theme',t);}
+  set(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+  document.getElementById('themeBtn').addEventListener('click',function(){
+    set(root.getAttribute('data-theme')==='light'?'dark':'light');
+  });
+})();
+</script>
+</body>
+</html>

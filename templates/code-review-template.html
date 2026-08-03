@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{title}}</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #07100e;
+        --card: #101916;
+        --line: rgba(218, 237, 224, .14);
+        --ink: #f2f6ef;
+        --muted: #9fb1a7;
+        --accent: #28d0b7;
+        --warn: #f1c84b;
+        --bad: #ff6b35;
+      }
+      body {
+        margin: 0;
+        color: var(--ink);
+        font-family: "Aptos", "Segoe UI", sans-serif;
+        background: radial-gradient(circle at 10% 0, rgba(40, 208, 183, .18), transparent 28rem), var(--bg);
+      }
+      main { width: min(980px, calc(100vw - 28px)); margin: 0 auto; padding: 28px 0 56px; }
+      header, section { border: 1px solid var(--line); border-radius: 22px; background: rgba(16,25,22,.86); padding: 20px; margin: 14px 0; }
+      h1 { margin: 0; font-family: Georgia, serif; font-size: clamp(2rem, 6vw, 4rem); letter-spacing: -.06em; }
+      h2 { margin: 0 0 12px; font-size: 1rem; color: var(--accent); text-transform: uppercase; letter-spacing: .12em; }
+      .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; color: var(--muted); }
+      .pill { border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; }
+      .finding { border-left: 4px solid var(--bad); padding: 12px 14px; background: rgba(255, 107, 53, .08); border-radius: 12px; margin: 10px 0; }
+      .ok { border-left-color: var(--accent); background: rgba(40, 208, 183, .08); }
+      pre { white-space: pre-wrap; color: var(--ink); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>{{title}}</h1>
+        <div class="meta">
+          <span class="pill">{{jiraKey}}</span>
+          <span class="pill">{{repo}}</span>
+          <span class="pill">{{generatedAt}}</span>
+        </div>
+      </header>
+      <section>
+        <h2>Resumen</h2>
+        <p>{{summary}}</p>
+      </section>
+      <section>
+        <h2>Findings</h2>
+        {{findings}}
+      </section>
+      <section>
+        <h2>Respuesta sugerida Teams</h2>
+        <pre>{{teamsReply}}</pre>
+      </section>
+    </main>
+  </body>
+</html>

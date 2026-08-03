@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>workass · cola minimalista (mock)</title>
+<style>
+  :root {
+    --bg: #151413; --side: #0f0e0d; --panel: #1d1c1a; --card: #1a1918; --field: #232120;
+    --ink: #f2efe9; --ink2: #cfcbc4; --muted: #9c978f; --faint: #6f6b63;
+    --line: rgba(255,255,255,.075); --line2: rgba(255,255,255,.14);
+    --acc: #4fa583; --del: #d96b5f; --shell: #0b0a09;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--shell); color: var(--ink); font: 13.5px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 30px; }
+  h1 { font-size: 15px; font-weight: 650; margin-bottom: 4px; }
+  .lede { color: var(--muted); font-size: 12.5px; margin-bottom: 26px; max-width: 80ch; }
+  .lede b { color: var(--ink2); }
+  .col-h { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin: 0 0 12px 2px; }
+  .stage { width: 600px; }
+
+  /* ===== minimalist queue ===== */
+  .qlabel { font-size: 11px; color: var(--faint); margin: 0 4px 4px; letter-spacing: .02em; }
+  .qlist { margin-bottom: 10px; }
+  .qrow { display: flex; align-items: flex-start; gap: 10px; padding: 7px 8px 7px 10px; border-radius: 8px; cursor: grab; }
+  .qrow + .qrow { border-top: 1px solid var(--line); }
+  .qrow:hover { background: color-mix(in srgb, var(--ink) 3.5%, transparent); }
+  .qtext { flex: 1; min-width: 0; color: var(--ink2); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+  .qx { flex: none; width: 20px; height: 20px; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--faint); cursor: pointer; opacity: 0; transition: opacity .12s ease; margin-top: -1px; }
+  .qrow:hover .qx { opacity: 1; }
+  .qx:hover { background: var(--line); color: var(--del); }
+  .qx svg { width: 12px; height: 12px; }
+
+  /* dragging + drop target */
+  .qrow.dragging { opacity: .4; }
+  .qrow.over { border-top: 1px solid transparent; box-shadow: inset 0 2px 0 var(--acc); }
+
+  /* editing (double-click) — seamless, no buttons, saves as you type */
+  .qrow.editing { cursor: default; background: color-mix(in srgb, var(--acc) 5%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acc) 35%, transparent); }
+  .qrow.editing textarea { flex: 1; background: transparent; border: 0; color: var(--ink); font: inherit; font-size: 12.5px; resize: none; outline: none; padding: 0; }
+
+  /* ===== composer (context) ===== */
+  .comp { display: flex; align-items: flex-end; gap: 8px; background: var(--card); border: 1px solid var(--line2); border-radius: 14px; padding: 10px 10px 10px 14px; }
+  .comp textarea { flex: 1; background: transparent; border: 0; color: var(--ink); font: inherit; resize: none; min-height: 24px; }
+  .comp textarea:focus { outline: none; }
+  .send { width: 30px; height: 30px; border-radius: 50%; border: 0; background: var(--acc); color: #0b0a09; display: grid; place-items: center; cursor: pointer; flex: none; font-size: 15px; }
+  .comprow { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 0 4px; }
+  .chip2 { font-size: 11.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; padding: 3px 10px; }
+
+  .note { margin-top: 26px; padding: 12px 14px; border: 1px solid var(--line); border-left: 3px solid var(--acc); border-radius: 8px; background: color-mix(in srgb, var(--acc) 5%, transparent); font-size: 12.5px; color: var(--ink2); max-width: 82ch; }
+  .note b { color: var(--ink); }
+  kbd { font: 11px ui-monospace, Menlo, monospace; background: var(--field); border: 1px solid var(--line2); border-radius: 4px; padding: 0 5px; color: var(--ink2); }
+</style>
+</head>
+<body>
+  <h1>Cola de mensajes — minimalista</h1>
+  <p class="lede">Filas planas, nada más. <b>Doble clic</b> para editar (se guarda mientras escribís, sin botón). <b>Arrastrá</b> la fila para reordenar. La <b>✕</b> (sólo al pasar el mouse) la quita. Sin números, sin flechas, sin asas.</p>
+
+  <div class="col-h">Encima del compositor</div>
+  <div class="stage">
+    <div class="qlabel">En cola · 3</div>
+    <div class="qlist">
+      <div class="qrow">
+        <span class="qtext">Refactorizá el módulo de auth para usar el nuevo registro de proveedores</span>
+        <button class="qx" title="Quitar"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+      </div>
+      <div class="qrow editing">
+        <textarea rows="1">Después corré la suite de tests de ACP y arreglá lo que rompa</textarea>
+      </div>
+      <div class="qrow over">
+        <span class="qtext">Y actualizá el changelog con lo que cambió</span>
+        <button class="qx" title="Quitar"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+      </div>
+    </div>
+
+    <div class="comp">
+      <textarea rows="1" placeholder="Contale a tu agente qué sigue…">Al final, reconstruí el dist</textarea>
+      <button class="send">↑</button>
+    </div>
+    <div class="comprow"><span class="chip2">Preguntar permisos</span><span class="chip2">claude · opus</span></div>
+  </div>
+
+  <div class="note">
+    <b>Interacciones (nada visible de más):</b><br>
+    · <b>Doble clic</b> en una fila → se vuelve editable en el lugar; se guarda a medida que escribís. <kbd>Enter</kbd> o clic afuera cierra la edición (fila 2 arriba, en edición).<br>
+    · <b>Arrastrar</b> una fila con el mouse la reordena — la línea verde marca dónde va a caer (fila 3 arriba). Sin asa ni flechas.<br>
+    · <b>✕</b> aparece sólo al pasar el mouse; quita esa fila. Es el único botón.<br>
+    · Se envían uno por uno al terminar cada turno, en tu orden.
+  </div>
+</body>
+</html>

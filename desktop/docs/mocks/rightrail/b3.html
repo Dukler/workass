@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mock B · integrado (sin caja)</title>
+<style>
+:root{
+  --bg:#0f0e0d; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+  --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --acc:#4fa583; --add:#4cae7f; --del:#d96b5f; --shell:#0b0a09;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--shell); color:var(--ink);
+  font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; -webkit-font-smoothing:antialiased;
+  padding:28px; display:flex; gap:26px; align-items:flex-start; flex-wrap:wrap}
+svg{stroke-width:1.6; stroke:currentColor; fill:none; stroke-linecap:round; stroke-linejoin:round}
+.cap{width:210px; padding-top:6px}
+.cap .k{font:600 10px/1 var(--mono); letter-spacing:.13em; color:var(--acc); text-transform:uppercase}
+.cap .n{font-size:15px; font-weight:640; margin:7px 0 0}
+.cap p{font-size:12px; line-height:1.6; color:var(--muted); margin:12px 0 0}
+.cap b{color:var(--ink2)}
+.pulse{width:7px; height:7px; border-radius:50%; background:var(--acc); flex:none;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%,transparent); animation:bp 1.6s ease-in-out infinite}
+@keyframes bp{0%,100%{opacity:1}50%{opacity:.45}}
+
+/* the app window fragment: a bit of chat + the rail, one shared hairline */
+.stage{width:624px; height:604px; background:var(--bg); border:1px solid var(--line2); border-radius:14px;
+  overflow:hidden; display:flex; box-shadow:0 30px 80px -30px #000}
+
+/* chat sliver (dim, cropped) — establishes that the rail is part of the app */
+.main{width:288px; flex:none; display:flex; flex-direction:column; min-width:0; opacity:.72}
+.main .mt{height:38px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:6px; padding:0 14px}
+.main .mt i{width:9px; height:9px; border-radius:50%; background:var(--line2)}
+.main .chat{flex:1; padding:18px 0 12px 20px; display:flex; flex-direction:column; justify-content:flex-end; gap:12px; overflow:hidden}
+.main .u{align-self:flex-end; margin-right:16px; background:var(--field); color:var(--ink2); border-radius:12px 12px 4px 12px; padding:8px 11px; font-size:12.5px; max-width:80%}
+.main .a{color:var(--muted); font-size:12.5px; line-height:1.5; width:150%}
+.main .composer{margin:0 16px 16px 20px; border:1px solid var(--line2); border-radius:11px; padding:10px 12px;
+  display:flex; align-items:center; gap:8px; color:var(--faint); font-size:12.5px}
+.main .composer .snd{margin-left:auto; color:var(--muted)} .main .composer svg{width:14px;height:14px}
+
+/* rail — flush; the only frame is this left hairline it shares with the chat */
+.rail{flex:1; min-width:0; border-left:1px solid var(--line); display:flex; flex-direction:column}
+.rh{height:38px; display:flex; align-items:center; justify-content:flex-end; gap:4px; padding:0 10px}
+.rh .ic{width:24px; height:24px; display:grid; place-items:center; color:var(--faint)} .rh .ic svg{width:15px;height:15px}
+.rc{padding:2px 14px 14px; overflow:hidden}
+
+.ahora{display:flex; align-items:center; gap:8px; padding:1px}
+.ahora .lbl{font:600 10px/1 var(--mono); letter-spacing:.13em; text-transform:uppercase; color:var(--faint)}
+.ahora .live{margin-left:auto; display:flex; align-items:center; gap:6px; font:10.5px/1 var(--mono); color:var(--muted)}
+.say{font-size:15px; line-height:1.46; color:var(--ink); margin:10px 1px 0; letter-spacing:-.004em}
+.say .hl{color:var(--acc); font-weight:550}
+
+/* dots-only progress (no "Paso 3 de 4"); the row is the plan toggle */
+.dots{display:flex; align-items:center; gap:8px; padding:13px 1px 5px; cursor:pointer; list-style:none}
+.dots::-webkit-details-marker{display:none}
+.pdots{display:flex; gap:6px}
+.pdots i{width:9px; height:9px; border-radius:50%; background:var(--field)}
+.pdots i.done{background:var(--acc)}
+.pdots i.now{background:transparent; border:2px solid var(--acc); box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 16%,transparent); animation:bp 1.6s ease-in-out infinite}
+.dots .chev{margin-left:auto; color:var(--faint); opacity:.5; display:grid; place-items:center; transition:transform .15s}
+.dots .chev svg{width:12px;height:12px}
+details[open]>.dots .chev{transform:rotate(90deg); opacity:.8}
+.plan-b{padding:2px 1px 4px}
+.prow{display:flex; align-items:flex-start; gap:9px; padding:3px 4px; font-size:12.5px; color:var(--ink2)}
+.prow .mk{flex:none; width:14px; text-align:center; color:var(--muted); margin-top:1px}
+.prow.done{color:var(--muted)} .prow.done .mk{color:var(--acc)}
+.prow.now{color:var(--ink); font-weight:550} .prow.now .mk{color:var(--acc)}
+.prow.todo{color:var(--faint)}
+
+.hr{height:1px; background:var(--line); margin:9px -14px}
+
+.live{display:flex; align-items:center; gap:9px; padding:2px 1px}
+.live .li{flex:none; color:var(--acc); display:grid; place-items:center} .live .li svg{width:13px;height:13px}
+.live .lt{min-width:0; flex:1; font-size:12.5px; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.live .lt .g{color:var(--faint)}
+.live .lt code{font:11.5px/1 var(--mono)}
+.live .el{flex:none; font:10.5px/1 var(--mono); color:var(--muted)}
+
+.td{border:0}
+.td>summary{list-style:none; cursor:pointer}
+.td>summary::-webkit-details-marker{display:none}
+.chev{flex:none; color:var(--faint); display:grid; place-items:center; transition:transform .15s}
+.chev svg{width:12px;height:12px}
+.td[open]>summary .chev{transform:rotate(90deg)}
+
+.sa{margin:1px -6px}
+.sa>summary{display:flex; align-items:center; gap:9px; padding:7px 6px; border-radius:8px}
+.sa>summary:hover{background:var(--line)}
+.sa .mi{flex:none; width:18px; height:18px; border-radius:5px; display:grid; place-items:center; color:var(--muted); background:var(--field)}
+.sa.run .mi{color:var(--acc); background:color-mix(in srgb,var(--acc) 15%,var(--card))}
+.sa .mi svg{width:12px;height:12px}
+.sa .nm{min-width:0; flex:1; font-size:12px; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.sa .el{flex:none; font:10.5px/1 var(--mono); color:var(--faint)}
+.sa-b{padding:3px 6px 6px 33px}
+.sa-b .mdl{font:10.5px/1 var(--mono); color:var(--muted); margin:1px 0 5px}
+.cl{display:flex; align-items:center; gap:8px; padding:3px 0; font-size:11.5px; color:var(--ink2)}
+.cl .ci{flex:none; color:var(--faint)} .cl .ci svg{width:11px;height:11px}
+.cl.run .ci{color:var(--acc)} .cl.run{color:var(--ink)}
+.cl .cel{margin-left:auto; font:10px/1 var(--mono); color:var(--faint)}
+
+.meta{margin:0 -6px}
+.meta>summary{display:flex; align-items:center; gap:10px; padding:8px 6px; border-radius:8px}
+.meta>summary:hover{background:var(--line)}
+.meta .ml{font-size:12.5px; color:var(--ink2)}
+.meta .mc{margin-left:auto; flex:none; font:11px/1 var(--mono); color:var(--muted); display:flex; align-items:center; gap:6px}
+.meta .mc .pulse{width:6px;height:6px}
+.meta-b{padding:1px 6px 4px}
+.egh{display:flex; align-items:baseline; gap:7px; padding:3px 4px 3px 22px}
+.egh .egn{font:600 10px/1 var(--mono); letter-spacing:.06em; text-transform:uppercase; color:var(--muted)}
+.egh .egb{font:10px/1 var(--mono); color:var(--faint)}
+.ef{display:flex; align-items:baseline; gap:7px; padding:4px 4px 4px 22px; min-width:0}
+.ef .efn{flex:none; max-width:58%; font-size:12.5px; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.ef .efp{flex:0 1 auto; min-width:0; font:10.5px/1 var(--mono); color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.ef .sp{flex:1; min-width:6px}
+.ef .st{flex:none; font:10.5px/1 var(--mono)} .ef .st .a{color:var(--add)} .ef .st .d{color:var(--del)}
+.subfold{padding:4px 4px 2px 22px; font-size:11px; color:var(--faint)}
+@media (prefers-reduced-motion:reduce){ .pulse,.pdots i.now{animation:none} }
+</style>
+</head>
+<body>
+
+<div class="cap">
+  <div class="k">Mock B</div>
+  <div class="n">Integrado, sin caja</div>
+  <p>El panel <b>no es una tarjeta</b>: es la columna misma, separada del chat por una sola línea. Contenido a ras, sin borde ni sombra alrededor.</p>
+  <p>El progreso son <b>solo los puntos</b> — sin «Paso 3 de 4». La frase ya dice el paso.</p>
+  <p>Todo lo demás sigue a un toque.</p>
+</div>
+
+<div class="stage">
+  <!-- chat sliver (dim) so you see the rail belongs to the app -->
+  <div class="main">
+    <div class="mt"><i></i><i></i><i></i></div>
+    <div class="chat">
+      <div class="u">hacelo compacto e integrado</div>
+      <div class="a">Listo. El panel derecho ahora va a ras de la columna, con el detalle a un toque y el rumbo del turno siempre visible arriba…</div>
+    </div>
+    <div class="composer">Escribí para orientar al agente…<span class="snd"><svg viewBox="0 0 16 16"><path d="M2 8h10M8 4l4 4-4 4"/></svg></span></div>
+  </div>
+
+  <!-- rail: flush, de-carded -->
+  <div class="rail">
+    <div class="rh"><span class="ic"><svg viewBox="0 0 20 20"><path d="M12 4h4v4M8 16H4v-4M16 4l-5 5M4 16l5-5"/></svg></span><span class="ic"><svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg></span></div>
+    <div class="rc">
+      <div class="ahora"><span class="lbl">Ahora</span><span class="live"><span class="pulse"></span>1m 20s</span></div>
+      <div class="say">Rediseñando la <span class="hl">densidad del panel derecho</span> para quitar el espacio muerto.</div>
+
+      <details class="td">
+        <summary class="dots">
+          <span class="pdots"><i class="done"></i><i class="done"></i><i class="now"></i><i></i></span>
+          <span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span>
+        </summary>
+        <div class="plan-b">
+          <div class="prow done"><span class="mk">✓</span><span>Inventariar features del panel</span></div>
+          <div class="prow done"><span class="mk">✓</span><span>Extraer tokens y CSS reales</span></div>
+          <div class="prow now"><span class="mk">◐</span><span>Rediseñar la densidad del panel derecho</span></div>
+          <div class="prow todo"><span class="mk">○</span><span>Verificar en dev y promover a prod</span></div>
+        </div>
+      </details>
+
+      <div class="hr"></div>
+
+      <div class="live">
+        <span class="li"><svg viewBox="0 0 16 16"><path d="M11 2l3 3-8 8-3.5.5.5-3.5z"/></svg></span>
+        <span class="lt">Edit <span class="g">· RightRail.tsx · en curso</span></span>
+        <span class="el">8s</span><span class="pulse"></span>
+      </div>
+
+      <details class="td sa run">
+        <summary>
+          <span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span>
+          <span class="mi"><svg viewBox="0 0 16 16"><path d="M8 2l5 3v6l-5 3-5-3V5z"/></svg></span>
+          <span class="nm">auditoría de wire-protocol y lifecycle del daemon ACP</span>
+          <span class="el">1m 12s</span>
+        </summary>
+        <div class="sa-b">
+          <div class="mdl">gpt-5.6-sol · 9 llamadas</div>
+          <div class="cl"><span class="ci"><svg viewBox="0 0 16 16"><path d="M2 8s2.5-4 6-4 6 4 6 4-2.5 4-6 4-6-4-6-4z"/><circle cx="8" cy="8" r="1.6"/></svg></span><span>Read session_store.go</span><span class="cel">0.2s</span></div>
+          <div class="cl run"><span class="ci"><svg viewBox="0 0 16 16"><path d="M11 2l3 3-8 8-3.5.5.5-3.5z"/></svg></span><span>Edit session_store.go</span><span class="cel">en curso</span></div>
+        </div>
+      </details>
+
+      <details class="td sa run">
+        <summary>
+          <span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span>
+          <span class="mi"><svg viewBox="0 0 16 16"><path d="M8 2v12M2 8h12M3.8 3.8l8.4 8.4M12.2 3.8l-8.4 8.4"/></svg></span>
+          <span class="nm">revisión de UI del rail</span>
+          <span class="el">44s</span>
+        </summary>
+        <div class="sa-b">
+          <div class="mdl">claude-opus-4-8[1m][max] · 5 llamadas</div>
+          <div class="cl"><span class="ci"><svg viewBox="0 0 16 16"><path d="M2 8s2.5-4 6-4 6 4 6 4-2.5 4-6 4-6-4-6-4z"/><circle cx="8" cy="8" r="1.6"/></svg></span><span>Read TareasCard.tsx</span><span class="cel">0.1s</span></div>
+        </div>
+      </details>
+
+      <div class="hr"></div>
+
+      <details class="td meta">
+        <summary><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Archivos</span><span class="mc">3</span></summary>
+        <div class="meta-b">
+          <div class="egh"><span class="egn">workass</span><span class="egb">main</span></div>
+          <div class="ef"><span class="efn">AssistantMessage.tsx</span><span class="efp">desktop/renderer2/src/components</span><span class="sp"></span><span class="st"><span class="a">+48</span> <span class="d">−12</span></span></div>
+          <div class="ef"><span class="efn">app.css</span><span class="efp">styles</span><span class="sp"></span><span class="st"><span class="a">+58</span> <span class="d">−4</span></span></div>
+          <div class="subfold">▸ 1 archivo más</div>
+        </div>
+      </details>
+
+      <details class="td meta">
+        <summary><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Llamadas</span><span class="mc">14</span></summary>
+        <div class="meta-b">
+          <div class="ef" style="padding-left:22px"><span class="efn" style="max-width:none">Bash go test ./cmd/workass/…</span><span class="sp"></span><span class="st" style="color:var(--faint)">2.4s</span></div>
+          <div class="subfold">▸ 13 más · 2 subagentes terminados</div>
+        </div>
+      </details>
+
+      <details class="td meta">
+        <summary><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Segundo plano</span><span class="mc"><span class="pulse"></span>1</span></summary>
+        <div class="meta-b">
+          <div class="subfold" style="color:var(--ink2)">Rebuild-Relaunch.ps1 · esperando el gate · 2m 03s</div>
+          <div class="subfold">▸ 3 trabajos terminados</div>
+        </div>
+      </details>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

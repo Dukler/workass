@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mock B · Segundo plano inline (sin compact anidado)</title>
+<style>
+:root{
+  --bg:#0f0e0d; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+  --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --acc:#4fa583; --add:#4cae7f; --del:#d96b5f; --shell:#0b0a09;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--shell); color:var(--ink);
+  font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; -webkit-font-smoothing:antialiased;
+  padding:24px; display:flex; gap:26px; align-items:flex-start; flex-wrap:wrap}
+svg{stroke-width:1.6; stroke:currentColor; fill:none; stroke-linecap:round; stroke-linejoin:round}
+.wrapcol{width:340px}
+.ph{margin:0 2px 12px}
+.ph .k{font:600 10px/1 var(--mono); letter-spacing:.13em; color:var(--acc); text-transform:uppercase}
+.ph .n{font-size:15px; font-weight:640; margin:6px 0 0}
+.ph .s{font-size:11.5px; color:var(--muted); margin:4px 0 0; line-height:1.4}
+
+.frame{width:340px; background:var(--bg); border:1px solid var(--line); border-radius:14px;
+  padding:0 13px 13px; overflow:hidden; box-shadow:0 18px 50px -22px rgba(0,0,0,.7)}
+.rh{display:flex; align-items:center; justify-content:flex-end; gap:4px; height:38px}
+.rh .ic{width:24px; height:24px; display:grid; place-items:center; color:var(--faint)} .rh .ic svg{width:15px;height:15px}
+.pulse{width:7px; height:7px; border-radius:50%; background:var(--acc); flex:none;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%,transparent); animation:bp 1.6s ease-in-out infinite}
+@keyframes bp{0%,100%{opacity:1}50%{opacity:.45}}
+
+/* hero */
+.ahora{display:flex; align-items:center; gap:8px; padding:1px 2px 0}
+.ahora .lbl{font:600 10px/1 var(--mono); letter-spacing:.13em; text-transform:uppercase; color:var(--faint)}
+.ahora .live{margin-left:auto; display:flex; align-items:center; gap:6px; font:10.5px/1 var(--mono); color:var(--muted)}
+.say{font-size:14.5px; line-height:1.42; color:var(--ink); margin:8px 2px 0; letter-spacing:-.004em}
+.say .hl{color:var(--acc); font-weight:550}
+
+/* generic disclosure */
+.td{border:0}
+.td>summary{list-style:none; cursor:pointer; user-select:none}
+.td>summary::-webkit-details-marker{display:none}
+.chev{flex:none; color:var(--faint); display:grid; place-items:center; transition:transform .15s ease}
+.chev svg{width:12px; height:12px}
+.td[open]>summary .chev{transform:rotate(90deg)}
+
+/* progress (plan toggle) */
+.plan-t>summary{display:flex; align-items:center; gap:9px; padding:11px 2px 9px}
+.pdots{display:flex; gap:5px; flex:none}
+.pdots i{width:8px;height:8px;border-radius:50%;background:var(--field)}
+.pdots i.done{background:var(--acc)}
+.pdots i.now{background:transparent;border:2px solid var(--acc);box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 16%,transparent);animation:bp 1.6s ease-in-out infinite}
+.plan-t>summary .pl{font:11px/1 var(--mono); color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.plan-t>summary .chev{margin-left:auto}
+.plan-b{padding:2px 2px 6px}
+.prow{display:flex; align-items:flex-start; gap:9px; padding:3px 4px; font-size:12.5px; color:var(--ink2)}
+.prow .mk{flex:none; width:14px; text-align:center; color:var(--muted); margin-top:1px}
+.prow.done{color:var(--muted)} .prow.done .mk{color:var(--acc)}
+.prow.now{color:var(--ink); font-weight:550} .prow.now .mk{color:var(--acc)}
+.prow.todo{color:var(--faint)}
+
+.div{height:1px; background:var(--line); margin:2px 2px}
+.zone{font:600 9.5px/1 var(--mono); letter-spacing:.11em; text-transform:uppercase; color:var(--faint); margin:9px 3px 1px}
+
+/* live action (always visible) */
+.live{display:flex; align-items:center; gap:9px; padding:9px 3px 8px}
+.live .li{flex:none; color:var(--acc); display:grid; place-items:center} .live .li svg{width:13px;height:13px}
+.live .lt{min-width:0; flex:1; font-size:12.5px; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.live .lt .g{color:var(--faint)}
+.live .el{flex:none; font:10.5px/1 var(--mono); color:var(--muted)}
+
+/* subagent disclosure */
+.sa>summary{display:flex; align-items:center; gap:8px; padding:7px 6px; border-radius:8px}
+.sa>summary:hover{background:var(--line)}
+.sa .mi{flex:none; width:18px;height:18px;border-radius:5px;display:grid;place-items:center;color:var(--muted);background:var(--field)}
+.sa.run .mi{color:var(--acc); background:color-mix(in srgb,var(--acc) 15%,var(--card))}
+.sa .mi svg{width:12px;height:12px}
+.sa .nm{min-width:0; flex:1; font-size:12px; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.sa .el{flex:none; font:10.5px/1 var(--mono); color:var(--faint)}
+
+/* ── running background process: an INLINE row, always visible, same family as
+      the live call / subagent rows. Never behind a section fold. Numerous can
+      stack; each stays compact (title + meta + one live line). ─────────────── */
+.bgrun{display:flex; align-items:flex-start; gap:9px; padding:8px 3px}
+.bgrun .bi{flex:none; color:var(--acc); display:grid; place-items:center; margin-top:1px} .bgrun .bi svg{width:14px;height:14px}
+.bgrun .binfo{flex:1; min-width:0; display:flex; flex-direction:column; gap:3px}
+.bgrun .btop{display:flex; align-items:baseline; gap:8px; min-width:0}
+.bgrun .bn{flex:1; min-width:0; font-size:12.5px; font-weight:550; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.bgrun .bel{flex:none; font:10.5px/1 var(--mono); color:var(--muted)}
+.bgrun .bmeta{font:10.5px/1.2 var(--mono); color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.bgrun .bsum{font-size:11.5px; color:var(--ink2); line-height:1.34; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.bgrun .bout{align-self:flex-start; margin-top:1px; font:10.5px/1 var(--mono); color:var(--faint); background:transparent; border:0; padding:0; cursor:pointer}
+.bgrun .bout:hover{color:var(--ink2)}
+.bgrun .bend{flex:none; align-self:flex-start; margin-top:3px}
+
+/* meta rows (each ONE disclosure — never a fold inside a fold) */
+.meta>summary{display:flex; align-items:center; gap:9px; padding:8px 3px}
+.meta>summary:hover .ml{color:var(--ink)}
+.meta .ml{font-size:12.5px; color:var(--ink2)}
+.meta>summary .chev{order:-1}
+.meta .mc{margin-left:auto; flex:none; font:11px/1 var(--mono); color:var(--muted); display:flex; align-items:center; gap:6px}
+.meta .fail{color:var(--del); font:10.5px/1 var(--mono)}
+.meta-b{padding:1px 2px 6px}
+
+/* done-calls / done-jobs list — flat lines, one level, no per-row disclosure */
+.dl{display:flex; align-items:center; gap:8px; padding:3px 4px 3px 26px; font-size:11.5px; color:var(--muted); min-width:0}
+.dl .dg{flex:none; width:12px; text-align:center; color:var(--acc)}
+.dl.fail .dg{color:var(--del)}
+.dl .dt{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.dl .dd{margin-left:auto; flex:none; font:10px/1 var(--mono); color:var(--faint)}
+.subfold{padding:4px 4px 2px 26px; font-size:11px; color:var(--faint)}
+@media (prefers-reduced-motion:reduce){ .pulse,.pdots i.now{animation:none} }
+</style>
+</head>
+<body>
+
+<!-- ░░░ A · running work present ░░░ -->
+<div class="wrapcol">
+  <div class="ph">
+    <div class="k">Segundo plano · en curso</div>
+    <div class="n">Procesos vivos = filas inline, como las llamadas</div>
+    <div class="s">se ven sin abrir nada · varios a la vez · lo terminado se pliega una sola vez</div>
+  </div>
+  <div class="frame">
+    <div class="rh"><span class="ic"><svg viewBox="0 0 20 20"><path d="M12 4h4v4M8 16H4v-4M16 4l-5 5M4 16l5-5"/></svg></span><span class="ic"><svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg></span></div>
+
+    <div class="ahora"><span class="lbl">Ahora</span><span class="live"><span class="pulse"></span>2m 41s</span></div>
+    <div class="say">Promoviendo a prod y <span class="hl">auditando el lifecycle</span> del bridge en paralelo.</div>
+
+    <details class="td plan-t" open>
+      <summary>
+        <span class="pdots"><i class="done"></i><i class="done"></i><i class="now"></i><i></i></span>
+        <span class="pl">Paso 3 de 4 · Verificar en dev</span>
+        <span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span>
+      </summary>
+      <div class="plan-b">
+        <div class="prow done"><span class="mk">✓</span><span>Rediseñar el panel derecho</span></div>
+        <div class="prow done"><span class="mk">✓</span><span>Aplicar en RightRail.tsx</span></div>
+        <div class="prow now"><span class="mk">◐</span><span>Verificar en dev y promover a prod</span></div>
+        <div class="prow todo"><span class="mk">○</span><span>Gate final</span></div>
+      </div>
+    </details>
+
+    <div class="div"></div>
+    <div class="zone">En curso</div>
+
+    <!-- current main-thread call -->
+    <div class="live">
+      <span class="li"><svg viewBox="0 0 16 16"><path d="M11 2l3 3-8 8-3.5.5.5-3.5z"/></svg></span>
+      <span class="lt">Edit <span class="g">· SpawnedWorkCard.tsx · en curso</span></span>
+      <span class="el">6s</span><span class="pulse"></span>
+    </div>
+
+    <!-- running subagent -->
+    <details class="td sa run">
+      <summary>
+        <span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span>
+        <span class="mi"><svg viewBox="0 0 16 16"><path d="M8 2l5 3v6l-5 3-5-3V5z"/></svg></span>
+        <span class="nm">auditoría de wire-protocol del daemon</span>
+        <span class="el">1m 12s</span>
+      </summary>
+    </details>
+
+    <!-- ▼▼ THE CHANGE: running background processes as inline rows ▼▼ -->
+    <div class="bgrun">
+      <span class="bi"><svg viewBox="0 0 16 16"><path d="M3 4l4 4-4 4M9 12h4"/></svg></span>
+      <span class="binfo">
+        <span class="btop"><span class="bn">Rebuild-Relaunch.ps1</span><span class="bel">2m 03s</span></span>
+        <span class="bmeta">bash · pid 70201</span>
+        <span class="bsum">Recompilando el daemon y reempaquetando la app; esperando el gate.</span>
+        <button class="bout">ver salida</button>
+      </span>
+      <span class="bend"><span class="pulse"></span></span>
+    </div>
+
+    <div class="bgrun">
+      <span class="bi"><svg viewBox="0 0 16 16"><path d="M8 2l5 3v6l-5 3-5-3V5z"/></svg></span>
+      <span class="binfo">
+        <span class="btop"><span class="bn">codex · rescate del bridge ACP</span><span class="bel">1m 40s</span></span>
+        <span class="bmeta">agent · gpt-5.6-sol · pid 70233</span>
+        <span class="bsum">Revisando el lifecycle de sesiones y la entrega de eventos.</span>
+        <button class="bout">ver salida</button>
+      </span>
+      <span class="bend"><span class="pulse"></span></span>
+    </div>
+
+    <div class="div"></div>
+    <div class="zone">Historial</div>
+
+    <details class="td meta">
+      <summary><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Archivos</span><span class="mc">3</span></summary>
+    </details>
+
+    <details class="td meta">
+      <summary><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Llamadas</span><span class="mc">14</span></summary>
+    </details>
+
+    <!-- finished background work: ONE fold, opens straight to flat lines -->
+    <details class="td meta" open>
+      <summary><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Segundo plano</span><span class="fail">1 falló</span><span class="mc">3</span></summary>
+      <div class="meta-b">
+        <div class="dl"><span class="dg">·</span><span class="dt">Rebuild-Relaunch.ps1 · bundle previo</span><span class="dd">3m 12s</span></div>
+        <div class="dl"><span class="dg">·</span><span class="dt">go test ./cmd/workass/…</span><span class="dd">44s</span></div>
+        <div class="dl fail"><span class="dg">✕</span><span class="dt">notarize.sh</span><span class="dd">8s</span></div>
+      </div>
+    </details>
+  </div>
+</div>
+
+<!-- ░░░ B · nothing running (all finished) ░░░ -->
+<div class="wrapcol">
+  <div class="ph">
+    <div class="k">Segundo plano · nada vivo</div>
+    <div class="n">Sin procesos → una sola fila plegada</div>
+    <div class="s">un toque abre las líneas · nunca un pliegue dentro de otro</div>
+  </div>
+  <div class="frame">
+    <div class="rh"><span class="ic"><svg viewBox="0 0 20 20"><path d="M12 4h4v4M8 16H4v-4M16 4l-5 5M4 16l5-5"/></svg></span><span class="ic"><svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg></span></div>
+
+    <div class="ahora"><span class="lbl">Último turno</span><span class="live">hace 3 min</span></div>
+    <div class="say">Listo el rediseño del panel; todo verificado en dev.</div>
+
+    <div class="div"></div>
+    <div class="zone">Historial</div>
+
+    <details class="td meta">
+      <summary><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Archivos</span><span class="mc">5</span></summary>
+    </details>
+    <details class="td meta">
+      <summary><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Llamadas</span><span class="mc">31</span></summary>
+    </details>
+    <details class="td meta">
+      <summary><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Segundo plano</span><span class="mc">4</span></summary>
+    </details>
+    <div class="subfold" style="padding-left:3px">↑ cuando algo corre, sube como fila inline arriba — no dentro de este pliegue</div>
+  </div>
+</div>
+
+</body>
+</html>

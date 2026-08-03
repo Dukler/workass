@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Workass icon · route 03 refinement</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#11110f; --panel:#1b1a18; --panel2:#242320; --line:rgba(255,255,255,.09);
+    --ink:#f2f0eb; --muted:#aaa79f; --green:#48bd89; --green-hi:#68d2a4;
+    --black:#171715; --paper:#f5f3ee;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:38px; background:var(--bg); color:var(--ink);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  main { max-width:1320px; margin:auto; }
+  header { display:flex; justify-content:space-between; align-items:end; gap:24px; margin-bottom:26px; }
+  h1 { margin:0; font-size:28px; letter-spacing:-.025em; }
+  .lede { max-width:78ch; color:var(--muted); margin:7px 0 0; }
+  .route { flex:none; color:var(--green-hi); font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+    letter-spacing:.09em; text-transform:uppercase; padding:7px 10px; border:1px solid rgba(72,189,137,.34);
+    border-radius:999px; background:rgba(72,189,137,.08); }
+  .thesis { display:grid; grid-template-columns:110px 1fr; gap:18px; align-items:center;
+    padding:16px; margin-bottom:20px; border:1px solid var(--line); border-radius:18px; background:var(--panel); }
+  .thesis svg { width:96px; height:96px; }
+  .thesis b { display:block; margin-bottom:4px; font-size:16px; }
+  .thesis p { margin:0; color:var(--muted); }
+  .grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; }
+  .card { min-width:0; padding:15px; border:1px solid var(--line); border-radius:20px; background:var(--panel); }
+  .card[data-leading="true"] { border-color:rgba(72,189,137,.72); box-shadow:0 0 0 1px rgba(72,189,137,.12); }
+  .tag { display:inline-flex; margin-bottom:11px; color:var(--muted); font:700 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+    letter-spacing:.08em; text-transform:uppercase; }
+  [data-leading="true"] .tag { color:var(--green-hi); }
+  .hero { display:grid; place-items:center; aspect-ratio:1; border-radius:16px;
+    background:linear-gradient(145deg,#302e2a,#171614); box-shadow:inset 0 0 0 1px var(--line); }
+  .hero svg { width:84%; height:84%; filter:drop-shadow(0 14px 24px rgba(0,0,0,.35)); }
+  h2 { margin:14px 0 4px; font-size:17px; }
+  .desc { min-height:66px; margin:0; color:var(--muted); font-size:13px; }
+  .sizes { display:flex; align-items:end; gap:11px; min-height:88px; margin:15px 0 12px; }
+  .sample { display:grid; justify-items:center; gap:5px; color:#77736b; font:10px ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .s64 { width:64px;height:64px; } .s32 { width:32px;height:32px; } .s16 { width:16px;height:16px; }
+  .mono { display:flex; gap:8px; align-items:center; padding-top:12px; border-top:1px solid var(--line); }
+  .mono svg { width:34px; height:34px; filter:grayscale(1); }
+  .mono span { color:var(--muted); font-size:11px; }
+  .docktest { margin-top:22px; padding:16px 18px; border:1px solid var(--line); border-radius:18px; background:var(--panel); }
+  .docktest h2 { margin:0 0 12px; }
+  .docks { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .dock { display:flex; align-items:center; gap:12px; min-height:72px; padding:12px 14px; border-radius:15px; background:#252421; }
+  .dock.light { background:#e8e6e1; }
+  .dock svg { width:48px; height:48px; flex:none; }
+  .dock .fake { width:48px; height:48px; border-radius:12px; background:linear-gradient(145deg,#677789,#354353); box-shadow:0 5px 10px rgba(0,0,0,.28); }
+  .dock .fake.alt { background:linear-gradient(145deg,#db875a,#a74a36); }
+  .dock p { margin:0; color:#bbb8b0; font-size:12px; }
+  .dock.light p { color:#625f58; }
+  .note { margin-top:18px; padding:14px 16px; border-left:3px solid var(--green); border-radius:12px;
+    background:rgba(72,189,137,.07); color:#d5d2cb; }
+  @media(max-width:1050px){ .grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
+  @media(max-width:650px){ body{padding:20px}.grid{grid-template-columns:1fr}.docks{grid-template-columns:1fr}header{align-items:start;flex-direction:column}.desc{min-height:0} }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Route 03 — Command Ass</h1>
+      <p class="lede">The selected idea, refined rather than replaced. Every candidate keeps the same three-part brand sentence: <b>Workass green</b> + <b>donkey rear</b> + <b>command symbol</b>. The test is which silhouette reads fastest without becoming a ghost, bean, or generic shortcut tile.</p>
+    </div>
+    <span class="route">selected route · no production change</span>
+  </header>
+
+  <section class="thesis">
+    <svg viewBox="0 0 128 128" aria-hidden="true"><use href="#mark-a"/></svg>
+    <div><b>The ownable idea is the visual pun.</b><p>“Command” is the product category; “ass” is the brand. No face, gears, speech bubble, monogram, or literal work scene is needed. A short tail is the only optional species cue.</p></div>
+  </section>
+
+  <section class="grid">
+    <article class="card" id="variant-a" data-leading="true">
+      <span class="tag">03A · strongest read</span>
+      <div class="hero"><svg viewBox="0 0 128 128" role="img" aria-label="Black donkey rear and white command symbol on green"><use href="#mark-a"/></svg></div>
+      <h2>Pure mark</h2>
+      <p class="desc">The board winner, cleaned up: paired haunch lobes, a shallower leg split, and a custom-drawn command knot. Maximum simplicity.</p>
+      <div class="sizes">
+        <span class="sample"><svg class="s64" viewBox="0 0 128 128"><use href="#mark-a"/></svg>64</span>
+        <span class="sample"><svg class="s32" viewBox="0 0 128 128"><use href="#mark-a"/></svg>32</span>
+        <span class="sample"><svg class="s16" viewBox="0 0 128 128"><use href="#mark-a"/></svg>16</span>
+      </div>
+      <div class="mono"><svg viewBox="0 0 128 128"><use href="#mark-a"/></svg><span>Best brand / simplicity balance</span></div>
+    </article>
+
+    <article class="card" id="variant-b">
+      <span class="tag">03B · tail cue</span>
+      <div class="hero"><svg viewBox="0 0 128 128" role="img" aria-label="Donkey rear with a short tail and command symbol on green"><use href="#mark-b"/></svg></div>
+      <h2>Tail cue</h2>
+      <p class="desc">The same mark with one blunt, upright tail. It prevents the body from reading as a ghost while staying intact at 32px.</p>
+      <div class="sizes">
+        <span class="sample"><svg class="s64" viewBox="0 0 128 128"><use href="#mark-b"/></svg>64</span>
+        <span class="sample"><svg class="s32" viewBox="0 0 128 128"><use href="#mark-b"/></svg>32</span>
+        <span class="sample"><svg class="s16" viewBox="0 0 128 128"><use href="#mark-b"/></svg>16</span>
+      </div>
+      <div class="mono"><svg viewBox="0 0 128 128"><use href="#mark-b"/></svg><span>More animal, less iconic</span></div>
+    </article>
+
+    <article class="card" id="variant-c">
+      <span class="tag">03C · broad</span>
+      <div class="hero"><svg viewBox="0 0 128 128" role="img" aria-label="Wide donkey haunch silhouette and command symbol on green"><use href="#mark-c"/></svg></div>
+      <h2>Wide stance</h2>
+      <p class="desc">Wider and lower, with more obvious paired haunches. It says “ass” fastest, but carries less negative space around the command knot.</p>
+      <div class="sizes">
+        <span class="sample"><svg class="s64" viewBox="0 0 128 128"><use href="#mark-c"/></svg>64</span>
+        <span class="sample"><svg class="s32" viewBox="0 0 128 128"><use href="#mark-c"/></svg>32</span>
+        <span class="sample"><svg class="s16" viewBox="0 0 128 128"><use href="#mark-c"/></svg>16</span>
+      </div>
+      <div class="mono"><svg viewBox="0 0 128 128"><use href="#mark-c"/></svg><span>Most literal rear silhouette</span></div>
+    </article>
+
+    <article class="card" id="variant-d">
+      <span class="tag">03D · stencil</span>
+      <div class="hero"><svg viewBox="0 0 128 128" role="img" aria-label="Black donkey rear with green command cutout"><use href="#mark-d"/></svg></div>
+      <h2>Cutout knot</h2>
+      <p class="desc">The command symbol is punched out in brand green, making the mark strictly two-color and easier to reproduce as a monochrome stencil.</p>
+      <div class="sizes">
+        <span class="sample"><svg class="s64" viewBox="0 0 128 128"><use href="#mark-d"/></svg>64</span>
+        <span class="sample"><svg class="s32" viewBox="0 0 128 128"><use href="#mark-d"/></svg>32</span>
+        <span class="sample"><svg class="s16" viewBox="0 0 128 128"><use href="#mark-d"/></svg>16</span>
+      </div>
+      <div class="mono"><svg viewBox="0 0 128 128"><use href="#mark-d"/></svg><span>Strongest reproduction system</span></div>
+    </article>
+  </section>
+
+  <section class="docktest">
+    <h2>Dock context · leading refinement</h2>
+    <div class="docks">
+      <div class="dock"><span class="fake"></span><svg viewBox="0 0 128 128"><use href="#mark-a"/></svg><span class="fake alt"></span><p>Dark Dock / 48px</p></div>
+      <div class="dock light"><span class="fake"></span><svg viewBox="0 0 128 128"><use href="#mark-a"/></svg><span class="fake alt"></span><p>Light Dock / 48px</p></div>
+    </div>
+  </section>
+
+  <div class="note"><b>Recommendation before polish:</b> 03A. Its paired top lobes and deep lower split say “rear” without the tail’s extra animal gesture. If 03A wins, the production pass should tune only corner radius, green value, and 1–2px optical alignment—no new detail.</div>
+
+  <svg width="0" height="0" aria-hidden="true" style="position:absolute">
+    <defs>
+      <g id="command-white" fill="none" stroke="#f5f3ee" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M55 52h18v18H55z"/>
+        <path d="M55 52h-5.5c-7.2 0-7.2-10.5 0-10.5 3.7 0 5.5 2.7 5.5 6.4V75"/>
+        <path d="M73 52h5.5c7.2 0 7.2-10.5 0-10.5-3.7 0-5.5 2.7-5.5 6.4V75"/>
+        <path d="M55 70h-5.5c-7.2 0-7.2 10.5 0 10.5 3.7 0 5.5-2.7 5.5-6.4"/>
+        <path d="M73 70h5.5c7.2 0 7.2 10.5 0 10.5-3.7 0-5.5-2.7-5.5-6.4"/>
+      </g>
+      <g id="command-green" fill="none" stroke="#48bd89" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M55 52h18v18H55z"/>
+        <path d="M55 52h-5.5c-7.2 0-7.2-10.5 0-10.5 3.7 0 5.5 2.7 5.5 6.4V75"/>
+        <path d="M73 52h5.5c7.2 0 7.2-10.5 0-10.5-3.7 0-5.5 2.7-5.5 6.4V75"/>
+        <path d="M55 70h-5.5c-7.2 0-7.2 10.5 0 10.5 3.7 0 5.5-2.7 5.5-6.4"/>
+        <path d="M73 70h5.5c7.2 0 7.2 10.5 0 10.5-3.7 0-5.5-2.7-5.5-6.4"/>
+      </g>
+
+      <g id="mark-a">
+        <rect x="4" y="4" width="120" height="120" rx="29" fill="#48bd89"/>
+        <path fill="#171715" d="M64 30c6-7 15-9 22-5 12 7 18 23 18 45 0 18-7 35-18 36-9 1-11-4-13-14-2-10-5-14-9-14s-7 4-9 14c-2 10-4 15-13 14-11-1-18-18-18-36 0-22 6-38 18-45 7-4 16-2 22 5Z"/>
+        <use href="#command-white"/>
+      </g>
+
+      <g id="mark-b">
+        <rect x="4" y="4" width="120" height="120" rx="29" fill="#48bd89"/>
+        <path fill="none" stroke="#171715" stroke-width="8" stroke-linecap="round" d="M37 43c-8-2-13-8-12-15 5 6 11 8 18 7"/>
+        <path fill="#171715" d="M64 30c6-7 15-9 22-5 12 7 18 23 18 45 0 18-7 35-18 36-9 1-11-4-13-14-2-10-5-14-9-14s-7 4-9 14c-2 10-4 15-13 14-11-1-18-18-18-36 0-22 6-38 18-45 7-4 16-2 22 5Z"/>
+        <use href="#command-white"/>
+      </g>
+
+      <g id="mark-c">
+        <rect x="4" y="4" width="120" height="120" rx="29" fill="#48bd89"/>
+        <path fill="#171715" d="M64 27c29 0 45 18 45 44 0 21-9 36-21 37-10 1-13-6-15-16-2-9-5-13-9-13s-7 4-9 13c-2 10-5 17-15 16-12-1-21-16-21-37 0-26 16-44 45-44Z"/>
+        <g transform="translate(0 2)"><use href="#command-white"/></g>
+      </g>
+
+      <g id="mark-d">
+        <rect x="4" y="4" width="120" height="120" rx="29" fill="#48bd89"/>
+        <path fill="#171715" d="M64 30c6-7 15-9 22-5 12 7 18 23 18 45 0 18-7 35-18 36-9 1-11-4-13-14-2-10-5-14-9-14s-7 4-9 14c-2 10-4 15-13 14-11-1-18-18-18-36 0-22 6-38 18-45 7-4 16-2 22 5Z"/>
+        <use href="#command-green"/>
+      </g>
+    </defs>
+  </svg>
+</main>
+</body>
+</html>

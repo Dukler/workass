@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Work Assistant — Command Deck (línea de base)</title>
+<style>
+/* ============================================================
+   WORK ASSISTANT · "Command Deck" — mock estático fiel de la app actual.
+   Petrol-black + teal/ember/gold. Bahnschrift display, Cascadia mono.
+   Tokens y formas tomados de renderer/styles.css sin retoques.
+   ============================================================ */
+:root {
+  --bg-0: #05100d;
+  --bg-1: #08150f;
+  --panel: rgba(13, 24, 20, 0.72);
+  --glass: rgba(20, 34, 29, 0.55);
+  --line: rgba(150, 196, 178, 0.12);
+  --line-2: rgba(150, 196, 178, 0.22);
+  --ink: #eaf3ee;
+  --muted: #9db8ab;
+  --faint: #6e897c;
+  --teal: #2fe0c0;
+  --teal-deep: #15b89c;
+  --ember: #ff6b3d;
+  --gold: #f3c84b;
+  --font-display: "Bahnschrift", "Segoe UI Semibold", "Segoe UI", system-ui, sans-serif;
+  --font-ui: "Aptos", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "Cascadia Mono", "Consolas", ui-monospace, monospace;
+  --r-lg: 14px;
+  --r-md: 10px;
+  --r-sm: 8px;
+  --glow-teal: 0 0 0 1px rgba(47, 224, 192, 0.4), 0 0 18px rgba(47, 224, 192, 0.2);
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: grid;
+  grid-template-rows: 34px 1fr auto;
+  height: 100vh;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  -webkit-font-smoothing: antialiased;
+  background:
+    radial-gradient(900px 480px at 8% -10%, rgba(47, 224, 192, 0.14), transparent 60%),
+    radial-gradient(760px 420px at 102% -6%, rgba(255, 107, 61, 0.09), transparent 58%),
+    radial-gradient(700px 560px at 60% 116%, rgba(243, 200, 75, 0.07), transparent 60%),
+    linear-gradient(160deg, var(--bg-0), var(--bg-1) 55%, #060d0c);
+}
+/* Faint 40px grid, masked to a soft vignette — a signature of the deck. */
+body::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background-image:
+    linear-gradient(rgba(150, 196, 178, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(150, 196, 178, 0.04) 1px, transparent 1px);
+  background-size: 40px 40px;
+  -webkit-mask-image: radial-gradient(circle at 50% 30%, black, transparent 92%);
+  mask-image: radial-gradient(circle at 50% 30%, black, transparent 92%);
+}
+/* Static blurred auras (teal top-right, ember bottom-left). */
+.aura { position: fixed; border-radius: 50%; filter: blur(60px); opacity: 0.32; pointer-events: none; z-index: 0; }
+.aura-a { width: 320px; height: 320px; right: -80px; top: 16%; background: radial-gradient(circle, rgba(47, 224, 192, 0.5), transparent 70%); }
+.aura-b { width: 240px; height: 240px; left: 20px; bottom: -50px; background: radial-gradient(circle, rgba(255, 107, 61, 0.3), transparent 70%); }
+.grain { position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.4'/%3E%3C/svg%3E"); }
+
+/* ============ Titlebar / HUD ============ */
+.titlebar {
+  position: relative; z-index: 5;
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line); background: rgba(4, 10, 9, 0.75); backdrop-filter: blur(14px);
+}
+.brand { display: flex; align-items: center; gap: 8px; }
+.brand-mark { width: 13px; height: 13px; border-radius: 4px; background: conic-gradient(from 120deg, var(--teal), var(--gold), var(--ember), var(--teal)); box-shadow: var(--glow-teal); animation: spin 8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.brand-name { font-family: var(--font-display); font-weight: 700; letter-spacing: 0.15em; font-size: 0.72rem; }
+.brand-name em { color: var(--teal); font-style: normal; }
+.bar-divider { width: 1px; height: 13px; background: var(--line-2); margin: 0 3px; }
+.bar-title { margin: 0; font-family: var(--font-display); font-weight: 700; font-size: 0.84rem; letter-spacing: 0.01em; line-height: 1; color: var(--ink); }
+.appmode { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--line-2); border-radius: 999px; background: rgba(6, 12, 11, 0.7); }
+.appmode-btn { cursor: pointer; font: inherit; font-family: var(--font-display); font-weight: 700; letter-spacing: 0.04em; font-size: 0.7rem; color: var(--muted); background: none; border: 0; padding: 3px 13px; border-radius: 999px; transition: color .14s, background .14s; }
+.appmode-btn[aria-selected="true"] { color: #04110d; background: linear-gradient(120deg, var(--teal), var(--teal-deep)); box-shadow: 0 0 12px rgba(47, 224, 192, 0.3); }
+.hud { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 0.64rem; color: var(--muted); }
+.hud-reactor { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
+.hud-text { text-transform: uppercase; letter-spacing: 0.1em; }
+.hud-sep { width: 1px; height: 12px; background: var(--line-2); }
+
+/* ============ Frame (Agent mode: rail oculta, chat a pantalla completa) ============ */
+.frame { position: relative; z-index: 1; display: grid; grid-template-columns: 1fr; min-height: 0; }
+.stage { display: grid; grid-template-rows: 1fr; min-height: 0; padding: 8px 14px 0 4px; }
+
+/* ============ Chat view ============ */
+.chat-view { display: flex; flex-direction: row; min-height: 0; height: 100%; overflow: hidden; }
+.chat-main { flex: 1 1 0; min-width: 340px; display: flex; flex-direction: column; min-height: 0; }
+
+/* ---- Conversation sidebar (grupos) ---- */
+.chat-sidebar { flex: 0 0 214px; min-width: 0; overflow: hidden; display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); }
+.csb-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 8px 10px 0; display: flex; flex-direction: column; gap: 2px; }
+.csb-group { display: flex; flex-direction: column; margin-bottom: 2px; }
+.csb-ghead { display: flex; align-items: center; gap: 6px; padding: 6px 8px; margin: 2px 0 5px; border-radius: var(--r-sm); background: rgba(47, 224, 192, 0.12); border: 1px solid rgba(47, 224, 192, 0.28); }
+.csb-caret { flex: none; width: 12px; height: 14px; display: grid; place-items: center; color: rgba(47, 224, 192, 0.75); font-size: 0.56rem; }
+.csb-group[data-open="false"] .csb-caret { transform: rotate(-90deg); }
+.csb-group[data-open="false"] .csb-items { display: none; }
+.csb-gname { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 0.62rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--teal); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.csb-gcount { flex: none; font-family: var(--font-mono); font-size: 0.54rem; font-weight: 700; color: var(--teal); background: rgba(47, 224, 192, 0.16); border-radius: 999px; padding: 1px 6px; min-width: 17px; text-align: center; }
+.csb-items { display: flex; flex-direction: column; gap: 3px; padding-left: 8px; margin-bottom: 6px; }
+.csb-item { position: relative; display: grid; grid-template-columns: auto 1fr auto; gap: 6px; align-items: center; text-align: left; color: var(--ink); background: var(--glass); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 7px 9px; }
+.csb-item.active { border-color: var(--line-2); background: rgba(26, 43, 37, 0.9); }
+.csb-item.active::before { content: ""; position: absolute; left: -1px; top: 8px; bottom: 8px; width: 3px; border-radius: 999px; background: linear-gradient(var(--teal), var(--teal-deep)); box-shadow: 0 0 10px rgba(47, 224, 192, 0.6); }
+.csb-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+.csb-item.live .csb-dot { background: var(--teal); box-shadow: 0 0 7px rgba(47, 224, 192, 0.7); animation: pulse 1.2s ease-in-out infinite; }
+.csb-item.unread .csb-dot { background: var(--gold); }
+.csb-label { font-size: 0.78rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.csb-item.unread .csb-label { color: var(--ink); font-weight: 700; }
+.csb-time { font-family: var(--font-mono); font-size: 0.56rem; color: var(--faint); }
+.csb-addgroup { margin: 8px 2px 2px; font: inherit; font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.03em; color: var(--faint); border: 1px dashed var(--line-2); background: none; border-radius: var(--r-sm); padding: 6px 8px; text-align: left; }
+
+/* ---- Chat topbar ---- */
+.chat-topbar { display: flex; align-items: center; gap: 9px; padding: 0 2px 8px; }
+.panelbtn { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: var(--r-sm); background: rgba(150, 196, 178, 0.04); color: var(--muted); cursor: pointer; }
+.panelbtn svg { width: 17px; height: 17px; }
+.panelbtn.on { color: var(--teal); border-color: rgba(47, 224, 192, 0.4); background: rgba(47, 224, 192, 0.07); }
+.chat-crumb { font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.04em; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-topbar-sp { flex: 1; }
+
+/* ---- Chat log ---- */
+.chat-log { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding: 8px 4px 28px; }
+.cmsg { max-width: 780px; width: 100%; }
+.cmsg-text { color: var(--ink); font-family: var(--font-ui); font-size: 0.9rem; line-height: 1.62; }
+.cmsg.user .cmsg-text { color: var(--muted); border-left: 2px solid var(--line-2); padding: 2px 0 2px 12px; }
+.cmsg.assistant .cmsg-eyebrow { font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); margin-bottom: 5px; }
+
+/* File chip attached to the user turn */
+.cmsg-attach { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
+.att-chip.comp { width: auto; max-width: 300px; height: 44px; display: inline-flex; align-items: center; gap: 8px; padding: 0 12px 0 6px; border: 1px solid color-mix(in srgb, var(--teal) 45%, var(--line-2)); border-radius: var(--r-sm); background: color-mix(in srgb, var(--teal) 9%, rgba(6, 12, 11, 0.6)); }
+.att-chip.comp .att-ico { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border-radius: 4px; background: rgba(47, 224, 192, 0.14); color: var(--teal); font-size: 1.05rem; }
+.att-chip.comp .att-meta { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.att-chip.comp .att-name { font-family: var(--font-mono); font-size: 0.72rem; color: var(--teal); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.att-chip.comp .att-sub { font-size: 0.66rem; color: var(--muted); }
+
+/* ---- Thinking dock (línea de razonamiento) ---- */
+.think-dock { margin: 0 0 10px; border: 1px solid var(--line-2); border-radius: 12px; background: linear-gradient(180deg, rgba(20, 40, 34, 0.5), rgba(10, 20, 16, 0.66)); overflow: hidden; }
+.think-dock-line { display: flex; align-items: center; gap: 10px; padding: 8px 11px; cursor: pointer; }
+.td-bubble svg { width: 22px; height: 22px; display: block; overflow: visible; }
+.td-bubble .tb-cloud circle { fill: var(--teal); }
+.td-bubble .tb-cloud { transform-box: fill-box; transform-origin: center; animation: tbCloud 2.4s ease-in-out infinite; }
+.td-bubble .tb-dot { fill: var(--teal); transform-box: fill-box; transform-origin: center; animation: tbDot 1.7s ease-in-out infinite; }
+.td-bubble .tb-d2 { animation-delay: .26s; }
+.td-bubble .tb-d3 { animation-delay: .52s; }
+@keyframes tbCloud { 0%,100% { opacity: .85; } 50% { opacity: 1; } }
+@keyframes tbDot { 0% { opacity: 0; transform: scale(.3); } 25% { opacity: 1; transform: scale(1); } 70% { opacity: 1; transform: scale(1); } 100% { opacity: .1; transform: scale(.65); } }
+.td-now { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 0.78rem; }
+.td-el { font-family: var(--font-mono); font-size: 0.62rem; color: var(--faint); flex: none; }
+.td-chev { color: var(--faint); flex: none; font-size: 0.72rem; }
+
+/* ---- Plan card ---- */
+.cmsg-text.md .evt { border: 1px solid var(--line); border-radius: var(--r-sm); background: rgba(8, 16, 14, 0.5); font-size: 0.74rem; overflow: hidden; margin: 7px 0; }
+.evt-head { display: flex; align-items: center; gap: 8px; padding: 6px 9px; }
+.evt-ic { flex: none; width: 16px; text-align: center; color: var(--muted); }
+.evt-title { font-weight: 600; color: var(--ink); }
+.evt-plan .plan-list { list-style: none; margin: 0; padding: 0 9px 8px 9px; display: flex; flex-direction: column; gap: 4px; }
+.evt-plan .plan-list li { display: flex; align-items: center; gap: 9px; font-size: 0.78rem; color: var(--ink); }
+.evt-plan .plan-box { flex: none; width: 11px; height: 11px; border: 1px solid var(--line-2); border-radius: 3px; }
+.evt-plan .plan-list li[data-st="completed"] .plan-box { background: var(--teal); border-color: var(--teal); }
+.evt-plan .plan-list li[data-st="completed"] { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--faint); }
+.evt-plan .plan-list li[data-st="in_progress"] .plan-box { border-color: var(--gold); box-shadow: inset 0 0 0 2px var(--gold); }
+.evt-plan .plan-list li[data-st="pending"] { color: var(--muted); }
+
+/* ---- Tool group (línea colapsada) ---- */
+.evt-toolgroup { border: 1px solid var(--line); border-radius: var(--r-sm); background: rgba(8, 16, 14, 0.5); margin: 7px 0; overflow: hidden; }
+.tg-summary { display: flex; align-items: center; gap: 8px; padding: 6px 9px; cursor: pointer; font-size: 0.74rem; list-style: none; }
+.tg-summary::-webkit-details-marker { display: none; }
+.tg-caret { flex: none; color: var(--faint); font-size: 0.6rem; transition: transform .15s ease; }
+.evt-toolgroup[open] .tg-caret { transform: rotate(90deg); }
+.tg-ic { flex: none; width: 16px; text-align: center; color: var(--teal); }
+.tg-title { flex: 1 1 auto; min-width: 0; color: var(--ink); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tg-body { display: flex; flex-direction: column; gap: 6px; padding: 2px 9px 9px; }
+.tg-body .evt { background: rgba(6, 12, 11, 0.55); margin: 0; }
+.evt-body { padding: 0 9px 8px; display: flex; flex-direction: column; gap: 4px; }
+.evt-row { display: grid; grid-template-columns: 26px 1fr; gap: 6px; align-items: start; }
+.evt-k { font-family: var(--font-mono); font-size: 0.58rem; color: var(--faint); text-transform: uppercase; padding-top: 2px; }
+.evt-row code { font-family: var(--font-mono); font-size: 0.72rem; color: #cdeee1; }
+
+/* ---- Markdown prose ---- */
+.md-p { margin: 0 0 0.72em; }
+.md-p:last-child { margin-bottom: 0; }
+.md-code { font-family: var(--font-mono); font-size: 0.82em; padding: 0.1em 0.4em; border-radius: 5px; background: rgba(20, 34, 29, 0.85); border: 1px solid var(--line); color: #cdeee1; white-space: break-spaces; }
+.md-ul { margin: 0 0 0.72em; padding-left: 1.1em; list-style: none; }
+.md-ul .md-li { position: relative; margin: 0.24em 0; padding-left: 0.35em; }
+.md-ul .md-li::before { content: "▸"; position: absolute; left: -0.7em; color: var(--teal); font-size: 0.8em; }
+.md-pre-wrap { position: relative; margin: 0 0 0.85em; }
+.md-pre { margin: 0; padding: 11px 13px; border-radius: var(--r-sm); background: rgba(4, 10, 9, 0.85); border: 1px solid var(--line-2); overflow-x: auto; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.55; color: #cdeee1; }
+.md-pre .kw { color: var(--teal); }
+.md-pre .fn { color: var(--gold); }
+.md-pre .cm { color: var(--faint); }
+.md-pre .st { color: #a7d8b6; }
+.code-copy { position: absolute; top: 6px; right: 6px; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line-2); border-radius: 7px; background: rgba(9, 16, 14, 0.92); color: var(--muted); cursor: pointer; font-size: 0.72rem; }
+.code-lang { position: absolute; top: 9px; left: 12px; font-family: var(--font-mono); font-size: 0.56rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+.md-pre.with-lang { padding-top: 26px; }
+
+/* ---- Table ---- */
+.md-table { border-collapse: collapse; margin: 0 0 0.85em; font-size: 0.82rem; }
+.md-table th, .md-table td { border: 1px solid var(--line); padding: 5px 12px; text-align: left; }
+.md-table th { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); background: rgba(20, 34, 29, 0.5); }
+.md-table td { color: var(--ink); }
+.md-table code { font-family: var(--font-mono); font-size: 0.9em; color: #cdeee1; }
+
+/* ---- Diff block ---- */
+.md-diff { margin: 0 0 0.85em; border: 1px solid var(--line-2); border-radius: var(--r-sm); overflow: hidden; font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.6; }
+.md-diff .df-head { padding: 5px 12px; border-bottom: 1px solid var(--line); background: rgba(20, 34, 29, 0.5); color: var(--muted); font-size: 0.66rem; letter-spacing: 0.04em; }
+.md-diff pre { margin: 0; padding: 8px 0; background: rgba(4, 10, 9, 0.85); overflow-x: auto; }
+.md-diff .dl-line { display: block; padding: 0 12px; white-space: pre; color: #cdeee1; }
+.md-diff .dl-line .gutter { display: inline-block; width: 1.1em; color: var(--faint); user-select: none; }
+.md-diff .dl-del { background: rgba(255, 107, 61, 0.12); color: #f4c4b4; }
+.md-diff .dl-del .gutter { color: var(--ember); }
+.md-diff .dl-add { background: rgba(47, 224, 192, 0.12); color: #b9f0e2; }
+.md-diff .dl-add .gutter { color: var(--teal); }
+
+/* ---- Permission card ---- */
+.cmsg-perm { margin: 8px 0 2px; border: 1px solid rgba(243, 200, 75, 0.35); border-radius: var(--r-sm); background: linear-gradient(180deg, rgba(243, 200, 75, 0.08), rgba(8, 16, 14, 0.5)); overflow: hidden; }
+.perm-head { display: flex; align-items: center; gap: 8px; padding: 8px 11px; font-size: 0.82rem; color: var(--ink); }
+.perm-ic { flex: none; color: var(--gold); }
+.perm-cmd { font-family: var(--font-mono); color: #f0e2b0; }
+.perm-actions { display: flex; gap: 8px; padding: 0 11px 10px; flex-wrap: wrap; }
+.perm-btn { font: inherit; font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; border-radius: 999px; padding: 6px 15px; border: 1px solid var(--line-2); background: var(--glass); color: var(--muted); }
+.perm-allow { color: #04110d; background: linear-gradient(120deg, var(--teal), var(--teal-deep)); border-color: transparent; font-weight: 700; }
+.perm-always { background: none; color: var(--teal); border-color: rgba(47, 224, 192, 0.5); font-weight: 700; }
+.perm-deny { color: #f0b8a8; border-color: rgba(240, 110, 80, 0.4); }
+
+.cmsg-actions { display: flex; gap: 10px; margin-top: 10px; }
+.cmsg-btn { display: inline-flex; align-items: center; gap: 5px; font: inherit; cursor: pointer; padding: 3px 6px; border: 0; background: transparent; color: var(--faint); font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.04em; text-transform: uppercase; border-radius: 999px; }
+.cmsg-btn:hover { color: var(--teal); }
+
+/* ---- Dock: think + composer ---- */
+.chat-dock { padding: 10px 0 12px; }
+.composer { display: flex; align-items: flex-end; gap: 8px; border: 1px solid var(--line-2); border-radius: 14px; background: linear-gradient(180deg, rgba(8, 15, 13, 0.82), rgba(4, 9, 8, 0.78)); padding: 8px 8px 8px 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28); }
+.composer-input { flex: 1 1 auto; min-width: 0; color: var(--faint); font: inherit; font-size: 0.92rem; line-height: 1.55; padding: 3px 2px; }
+.composer-send { flex: 0 0 auto; width: 34px; height: 30px; display: inline-grid; place-items: center; border: 0; border-radius: 9px; background: linear-gradient(140deg, var(--teal), var(--teal-deep)); color: #04110d; cursor: pointer; box-shadow: 0 4px 14px rgba(47, 224, 192, 0.22); }
+.composer-send svg { width: 18px; height: 18px; }
+.composer-bottom { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 2px 0; }
+.composer-pick { position: relative; display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 22px 0 10px; border: 1px solid var(--line); border-radius: 999px; background: rgba(150, 196, 178, 0.04); color: var(--ink); font: inherit; cursor: pointer; }
+.composer-pick::after { content: ""; position: absolute; right: 9px; top: 50%; width: 6px; height: 6px; margin-top: -4px; border-right: 1.5px solid var(--faint); border-bottom: 1.5px solid var(--faint); transform: rotate(45deg); }
+.pick-tag { font-family: var(--font-mono); font-size: 0.53rem; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); }
+.pick-model .pick-tag { color: var(--teal); }
+.pick-val { font-size: 0.72rem; font-weight: 600; color: var(--ink); }
+.composer-sp { flex: 1 1 auto; min-width: 6px; }
+.ctx-meter { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 11px; border: 1px solid var(--line); border-radius: 999px; background: rgba(150, 196, 178, 0.04); color: var(--muted); cursor: pointer; }
+.ctx-ring { width: 16px; height: 16px; transform: rotate(-90deg); }
+.ctx-bg { fill: none; stroke: var(--line-2); stroke-width: 3; }
+.ctx-fg { fill: none; stroke: var(--teal); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 56.5; stroke-dashoffset: 40; }
+.ctx-pct { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); }
+
+/* ============ Console / telemetry strip (colapsada, en reposo) ============ */
+.console { position: relative; z-index: 4; border-top: 1px solid var(--line-2); background: linear-gradient(180deg, rgba(6, 13, 11, 0.96), rgba(4, 9, 8, 0.98)); backdrop-filter: blur(14px); box-shadow: 0 -16px 40px rgba(0, 0, 0, 0.4); }
+.console-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; height: 36px; padding: 0 12px; }
+.console-tabs { display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
+.console-lead { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); }
+.ctab { display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: rgba(150, 196, 178, 0.04); color: var(--muted); font-size: 0.66rem; }
+.ctab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 7px rgba(47, 224, 192, 0.7); animation: pulse 1.2s ease-in-out infinite; }
+.ctab-timer { font-family: var(--font-mono); font-size: 0.62rem; color: var(--faint); }
+.console-meta { display: flex; align-items: center; gap: 8px; flex: none; }
+.console-timer { font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink); letter-spacing: 0.05em; }
+.console-status { font-family: var(--font-mono); font-size: 0.64rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.07em; }
+.chip { padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px; background: rgba(150, 196, 178, 0.06); color: var(--muted); font-family: var(--font-ui); font-size: 0.68rem; font-weight: 700; cursor: pointer; }
+.chip.toggle { width: 26px; padding: 4px 0; text-align: center; }
+
+@media (max-width: 720px) {
+  .chat-sidebar { display: none; }
+  .stage { padding-left: 14px; }
+}
+</style>
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <div class="aura aura-a" aria-hidden="true"></div>
+  <div class="aura aura-b" aria-hidden="true"></div>
+
+  <!-- ===== Titlebar ===== -->
+  <header class="titlebar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">WORK<em>ASSISTANT</em></span>
+      <span class="bar-divider" aria-hidden="true"></span>
+      <h1 class="bar-title">Chat con Devin</h1>
+    </div>
+    <div class="appmode" role="tablist" aria-label="Modo">
+      <button class="appmode-btn" role="tab" aria-selected="true" type="button">Agent</button>
+      <button class="appmode-btn" role="tab" aria-selected="false" type="button">Assist</button>
+    </div>
+    <div class="hud">
+      <span class="hud-reactor" aria-hidden="true"></span>
+      <span class="hud-text">reactor · activo</span>
+      <span class="hud-sep" aria-hidden="true"></span>
+      <span>1 spawn</span>
+    </div>
+  </header>
+
+  <!-- ===== Frame ===== -->
+  <div class="frame">
+    <main class="stage">
+      <section class="chat-view">
+        <!-- Conversation sidebar with groups -->
+        <aside class="chat-sidebar" aria-label="Conversaciones">
+          <div class="csb-scroll">
+            <div class="csb-group" data-open="true">
+              <div class="csb-ghead">
+                <span class="csb-caret" aria-hidden="true">▾</span>
+                <span class="csb-gname">Daemon</span>
+                <span class="csb-gcount">3</span>
+              </div>
+              <div class="csb-items">
+                <div class="csb-item active live">
+                  <span class="csb-dot" aria-hidden="true"></span>
+                  <span class="csb-label">Race del reaper de hibernación</span>
+                  <span class="csb-time">ahora</span>
+                </div>
+                <div class="csb-item unread">
+                  <span class="csb-dot" aria-hidden="true"></span>
+                  <span class="csb-label">Backoff del scheduler</span>
+                  <span class="csb-time">14m</span>
+                </div>
+                <div class="csb-item">
+                  <span class="csb-dot" aria-hidden="true"></span>
+                  <span class="csb-label">Fuga de goroutines en watch</span>
+                  <span class="csb-time">2h</span>
+                </div>
+              </div>
+            </div>
+            <div class="csb-group" data-open="true">
+              <div class="csb-ghead">
+                <span class="csb-caret" aria-hidden="true">▾</span>
+                <span class="csb-gname">Reviews</span>
+                <span class="csb-gcount">2</span>
+              </div>
+              <div class="csb-items">
+                <div class="csb-item">
+                  <span class="csb-dot" aria-hidden="true"></span>
+                  <span class="csb-label">PR #482 · alta de perfilado</span>
+                  <span class="csb-time">1d</span>
+                </div>
+                <div class="csb-item">
+                  <span class="csb-dot" aria-hidden="true"></span>
+                  <span class="csb-label">PR #479 · límites de rate</span>
+                  <span class="csb-time">1d</span>
+                </div>
+              </div>
+            </div>
+            <div class="csb-group" data-open="false">
+              <div class="csb-ghead">
+                <span class="csb-caret" aria-hidden="true">▾</span>
+                <span class="csb-gname">Archivado</span>
+                <span class="csb-gcount">9</span>
+              </div>
+              <div class="csb-items"></div>
+            </div>
+            <button class="csb-addgroup" type="button">+ nuevo grupo</button>
+          </div>
+        </aside>
+
+        <!-- Chat main -->
+        <div class="chat-main">
+          <div class="chat-topbar">
+            <button class="panelbtn on" type="button" title="Conversaciones (Ctrl+B)" aria-label="Mostrar/ocultar conversaciones">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.6"/><line x1="9" y1="4" x2="9" y2="20"/><rect x="3.8" y="5.2" width="4.4" height="13.6" rx="1.4" fill="currentColor" stroke="none"/></svg>
+            </button>
+            <span class="chat-crumb">workspace/daemon · reaper · Claude Opus 4.8 · XHigh</span>
+            <span class="chat-topbar-sp"></span>
+            <button class="panelbtn" type="button" title="Herramientas (Ctrl+Shift+B)" aria-label="Panel de herramientas">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.6"/><line x1="14.5" y1="4" x2="14.5" y2="20"/><rect x="15.3" y="5.2" width="4.9" height="13.6" rx="1.4" fill="currentColor" stroke="none"/></svg>
+            </button>
+          </div>
+
+          <div class="chat-log">
+            <!-- USER -->
+            <div class="cmsg user" data-status="done">
+              <div class="cmsg-text">El reaper está hibernando chats que todavía están trabajando. Encontrá la race y proponé un fix.</div>
+              <div class="cmsg-attach">
+                <div class="att-chip comp">
+                  <span class="att-ico" aria-hidden="true">⌘</span>
+                  <span class="att-meta">
+                    <span class="att-name">daemon/reaper/reaper.go</span>
+                    <span class="att-sub">Go · 214 líneas</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- ASSISTANT -->
+            <div class="cmsg assistant" data-status="done">
+              <div class="cmsg-eyebrow">devin</div>
+
+              <!-- Thinking line -->
+              <div class="think-dock">
+                <div class="think-dock-line">
+                  <span class="td-bubble" role="img" aria-label="pensando">
+                    <svg viewBox="0 0 26 26" aria-hidden="true">
+                      <g class="tb-cloud">
+                        <circle cx="12" cy="9" r="4.4"/><circle cx="17.4" cy="8.2" r="3.6"/><circle cx="18.8" cy="12.2" r="3.1"/><circle cx="13.4" cy="12.7" r="3.7"/><circle cx="9" cy="12" r="3.1"/>
+                      </g>
+                      <circle class="tb-dot tb-d1" cx="7.4" cy="18" r="1.7"/>
+                      <circle class="tb-dot tb-d2" cx="4.9" cy="21" r="1.15"/>
+                      <circle class="tb-dot tb-d3" cx="3.1" cy="23.2" r="0.75"/>
+                    </svg>
+                  </span>
+                  <span class="td-now">Reviso el ciclo de vida del reaper y dónde decide hibernar frente a lastActivity…</span>
+                  <span class="td-el">8s</span>
+                  <span class="td-chev" aria-hidden="true">⌄</span>
+                </div>
+              </div>
+
+              <div class="cmsg-text md">
+                <!-- Plan -->
+                <div class="evt evt-plan">
+                  <div class="evt-head"><span class="evt-ic" aria-hidden="true">▤</span><span class="evt-title">Plan</span></div>
+                  <ul class="plan-list">
+                    <li data-st="completed"><span class="plan-box" aria-hidden="true"></span>Leer el bucle de barrido del reaper</li>
+                    <li data-st="in_progress"><span class="plan-box" aria-hidden="true"></span>Ubicar la race entre lastActivity y la marca de hibernación</li>
+                    <li data-st="pending"><span class="plan-box" aria-hidden="true"></span>Proponer un fix con un test que lo cubra</li>
+                  </ul>
+                </div>
+
+                <!-- Tool group (línea colapsada) -->
+                <details class="evt-toolgroup" data-status="done">
+                  <summary class="tg-summary">
+                    <span class="tg-caret" aria-hidden="true">▸</span>
+                    <span class="tg-ic" aria-hidden="true">✓</span>
+                    <span class="tg-title">Leer reaper.go · 120 líneas</span>
+                  </summary>
+                  <div class="tg-body">
+                    <div class="evt evt-tool" data-status="completed">
+                      <div class="evt-head"><span class="evt-ic" aria-hidden="true">✓</span><span class="evt-title">Leer daemon/reaper/reaper.go</span></div>
+                      <div class="evt-body">
+                        <div class="evt-row"><span class="evt-k">in</span><code>reaper.go · líneas 40–160</code></div>
+                        <div class="evt-row"><span class="evt-k">out</span><code>sweep() lee lastActivity sin tomar mu · marca hibernación fuera del lock</code></div>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+
+                <!-- Prose -->
+                <p class="md-p">La race está entre <code class="md-code">sweep()</code> y <code class="md-code">Touch()</code>. El barrido lee <code class="md-code">c.lastActivity</code> sin tomar <code class="md-code">mu</code>, decide que el chat está inactivo y recién entonces adquiere el lock para hibernarlo. Si <code class="md-code">Touch()</code> corre en esa ventana, el reaper hiberna un chat que <em>acaba</em> de recibir trabajo.</p>
+
+                <!-- Code block -->
+                <div class="md-pre-wrap">
+                  <span class="code-lang" aria-hidden="true">go</span>
+                  <button class="code-copy" type="button" title="Copiar" aria-label="Copiar código">⧉</button>
+<pre class="md-pre with-lang"><span class="cm">// sweep corre cada tick; la lectura de lastActivity queda FUERA del lock.</span>
+<span class="kw">func</span> (r *<span class="fn">Reaper</span>) <span class="fn">sweep</span>() {
+    now := time.<span class="fn">Now</span>()
+    <span class="kw">for</span> _, c := <span class="kw">range</span> r.<span class="fn">chats</span>() {
+        <span class="kw">if</span> now.<span class="fn">Sub</span>(c.lastActivity) &lt; idleTTL {
+            <span class="kw">continue</span>
+        }
+        c.<span class="fn">hibernate</span>() <span class="cm">// ← puede pisar un Touch() concurrente</span>
+    }
+}</pre>
+                </div>
+
+                <!-- Table -->
+                <table class="md-table">
+                  <thead><tr><th>Goroutine</th><th>Toma <code>mu</code></th><th>Lee/escribe</th></tr></thead>
+                  <tbody>
+                    <tr><td>reaper.sweep</td><td>no (en la lectura)</td><td>lee <code>lastActivity</code></td></tr>
+                    <tr><td>session.Touch</td><td>sí</td><td>escribe <code>lastActivity</code></td></tr>
+                    <tr><td>reaper.hibernate</td><td>sí</td><td>escribe <code>state</code></td></tr>
+                  </tbody>
+                </table>
+
+                <p class="md-p">Fix mínimo: leer <code class="md-code">lastActivity</code> bajo el mismo lock y revalidar la condición de ociosidad justo antes de hibernar, dentro de la sección crítica.</p>
+
+                <!-- Diff -->
+                <div class="md-diff">
+                  <div class="df-head">daemon/reaper/reaper.go</div>
+<pre><span class="dl-line">        c.mu.Lock()</span><span class="dl-line dl-del"><span class="gutter">-</span>        c.hibernate()</span><span class="dl-line dl-add"><span class="gutter">+</span>        if time.Now().Sub(c.lastActivity) >= idleTTL {</span><span class="dl-line dl-add"><span class="gutter">+</span>            c.hibernate() // revalidado bajo lock</span><span class="dl-line dl-add"><span class="gutter">+</span>        }</span><span class="dl-line">        c.mu.Unlock()</span></pre>
+                </div>
+
+                <p class="md-p">Antes de aplicarlo corramos la suite del reaper para confirmar que la doble comprobación no rompe el caso ocioso legítimo.</p>
+              </div>
+
+              <!-- Permission card -->
+              <div class="cmsg-perm">
+                <div class="perm-head">
+                  <span class="perm-ic" aria-hidden="true">▲</span>
+                  <span>Ejecutar <span class="perm-cmd">go test ./daemon/reaper</span></span>
+                </div>
+                <div class="perm-actions">
+                  <button class="perm-btn perm-allow" type="button">Permitir una vez</button>
+                  <button class="perm-btn perm-allow perm-always" type="button">Permitir siempre</button>
+                  <button class="perm-btn perm-deny" type="button">Rechazar</button>
+                </div>
+              </div>
+
+              <div class="cmsg-actions">
+                <button class="cmsg-btn" type="button">⧉ Copiar</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Dock: composer -->
+          <div class="chat-dock">
+            <div class="composer">
+              <div class="composer-input">Pedile algo a Devin…  (/ para skills)</div>
+              <button class="composer-send" type="button" title="Enviar" aria-label="Enviar">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+              </button>
+            </div>
+            <div class="composer-bottom">
+              <button class="composer-pick pick-model" type="button" title="Modelo del agente">
+                <span class="pick-tag">modelo</span><span class="pick-val">Claude Opus 4.8</span>
+              </button>
+              <button class="composer-pick pick-effort" type="button" title="Nivel de razonamiento">
+                <span class="pick-tag">thinking</span><span class="pick-val">XHigh</span>
+              </button>
+              <button class="composer-pick pick-mode" type="button" title="Permisos del agente">
+                <span class="pick-tag">permisos</span><span class="pick-val">Preguntar</span>
+              </button>
+              <button class="composer-pick pick-cwd" type="button" title="Carpeta de trabajo">
+                <span class="pick-tag">dir</span><span class="pick-val">workspace</span>
+              </button>
+              <span class="composer-sp"></span>
+              <button class="ctx-meter" type="button" title="Uso de contexto (estimado)" aria-label="Uso de contexto">
+                <svg class="ctx-ring" viewBox="0 0 24 24" aria-hidden="true"><circle class="ctx-bg" cx="12" cy="12" r="9"/><circle class="ctx-fg" cx="12" cy="12" r="9"/></svg>
+                <span class="ctx-pct">29%</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ===== Console / telemetry strip (colapsada, en reposo) ===== -->
+  <section class="console" aria-label="Consola de actividad">
+    <header class="console-bar">
+      <div class="console-tabs">
+        <span class="console-lead">consola</span>
+        <span class="ctab"><span class="ctab-dot" aria-hidden="true"></span><span>reaper · sweep-race</span><span class="ctab-timer">01:12</span></span>
+      </div>
+      <div class="console-meta">
+        <span class="console-timer">01:12</span>
+        <span class="console-status">corriendo</span>
+        <button class="chip" type="button">Copiar</button>
+        <button class="chip" type="button">Limpiar</button>
+        <button class="chip toggle" type="button" aria-label="Mostrar/ocultar">▴</button>
+      </div>
+    </header>
+  </section>
+</body>
+</html>

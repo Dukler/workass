@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Compositor · botón de envío centrado</title>
+<style>
+/* Tokens: verbatim from desktop/renderer2/src/styles/tokens.css (both themes). */
+:root{
+  color-scheme:dark;
+  --bg:#0f0e0d; --side:#151413; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+  --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --acc:#4fa583; --link:#8fb0ea; --amber:#d8a05a; --add:#4cae7f; --del:#d96b5f; --shell:#0b0a09;
+  /* Mock-scoped meta ink — light --muted is 4.03:1 on --bg, under AA at 12px. */
+  --meta:var(--muted);
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#f2f0ed; --side:#faf9f7; --panel:#ffffff; --card:#ffffff; --field:#f1efeb;
+  --ink:#23211e; --ink2:#47443e; --muted:#7a756d; --faint:#a19c93;
+  --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.15);
+  --acc:#177353; --link:#3861b0; --amber:#9a6a1d; --add:#177347; --del:#bd4436; --shell:#eceae6;
+  --meta:#6e6961;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--shell); color:var(--ink);
+  font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; -webkit-font-smoothing:antialiased; padding:22px 24px 44px}
+svg{stroke-width:1.6; stroke:currentColor; fill:none; stroke-linecap:round; stroke-linejoin:round}
+:focus,:focus-visible{outline:none}   /* user law 2026-07-10 — no focus rings */
+
+.top{display:flex; align-items:baseline; gap:14px; margin:0 2px 20px; flex-wrap:wrap}
+.top .t{font-size:15px; font-weight:640}
+.top .d{font-size:12px; color:var(--meta)}
+.top .sp{flex:1}
+.tgl{font:inherit; font-size:12px; color:var(--ink2); background:var(--panel); border:1px solid var(--line2);
+  border-radius:8px; padding:4px 11px; cursor:pointer; margin-left:8px}
+.tgl:hover{color:var(--ink)}
+.tgl.on{color:var(--bg); background:var(--ink); border-color:transparent}
+
+.cols{display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap}
+.col{width:520px}
+.ph{margin:0 2px 11px}
+.ph .k{font:600 10px/1 var(--mono); letter-spacing:.13em; color:var(--acc); text-transform:uppercase}
+.ph .n{font-size:14px; font-weight:620; margin:6px 0 0}
+.ph .s{font-size:11.5px; color:var(--meta); margin:4px 0 0; line-height:1.45}
+.ph.bad .k{color:var(--del)}
+
+.frame{background:var(--bg); border:1px solid var(--line); border-radius:14px; padding:18px;
+  box-shadow:0 18px 50px -26px rgba(0,0,0,.6)}
+.compwrap{padding:0}
+
+/* ── HOY ────────────────────────────────────────────────────────────────────
+   app.css: .comp is position:relative with asymmetric padding (11 top / 9
+   bottom); the button is taken OUT of flow (position:absolute; right:9;
+   bottom:8) and the textarea reserves room for it with padding-right:34px.
+   The button is therefore glued to the bottom edge: as the box grows the gap
+   above it grows and the button never re-centers. ──────────────────────── */
+.comp-hoy{position:relative; background:var(--panel); border:1px solid var(--line2); border-radius:15px; padding:11px 13px 9px}
+.comp-hoy textarea{width:100%; background:transparent; border:0; outline:0; color:var(--ink); font:inherit;
+  font-size:13.5px; resize:none; line-height:1.5; max-height:180px; display:block; padding-right:34px; overflow-y:hidden}
+.comp-hoy textarea::placeholder{color:var(--faint)}
+.comp-hoy .send{position:absolute; right:9px; bottom:8px}
+
+/* ── PROPUESTA ──────────────────────────────────────────────────────────────
+   The box becomes a flex ROW with align-items:center. Nothing is positioned;
+   the button is an ordinary flex item, so its vertical placement is DERIVED
+   from the box height by the layout engine on every single reflow — including
+   the reflow that the auto-grow itself causes. There is no JS that writes a
+   top/bottom/transform to the button, so there is nothing that can teleport,
+   lag, or overshoot. Growth of one line moves the button down by exactly half
+   a line, in the same frame the box grew.
+
+   Padding is 7/8/7/13 instead of 11/13/9 so the resting box height is
+   unchanged (26px button + 14px padding = 40px, same as today's 20px line +
+   20px padding). The textarea drops padding-right:34px — with the button as a
+   sibling instead of an overlay, reserving that space is no longer needed. ── */
+.comp-new{position:relative; display:flex; align-items:center; gap:9px;
+  background:var(--panel); border:1px solid var(--line2); border-radius:15px; padding:7px 8px 7px 13px}
+.comp-new textarea{flex:1 1 auto; min-width:0; background:transparent; border:0; outline:0; color:var(--ink);
+  font:inherit; font-size:13.5px; resize:none; line-height:1.5; max-height:180px; display:block; overflow-y:hidden}
+.comp-new textarea::placeholder{color:var(--faint)}
+.comp-new .send{flex:none}
+/* Optional easing: the transition lives on the TEXTAREA HEIGHT, never on the
+   button. Because centering is layout-derived, easing the box height carries
+   the button along in lockstep — it can never drift out of centre mid-tween. */
+.comp-new.smooth textarea{transition:height .12s cubic-bezier(.2,.7,.3,1)}
+
+/* mock-only measuring guide */
+.guide{position:relative}
+.guide::after{content:''; position:absolute; left:-10px; right:-10px; top:50%; z-index:3; pointer-events:none;
+  border-top:1px dashed color-mix(in srgb,var(--acc) 62%,transparent)}
+
+/* send button — verbatim from app.css */
+.send{width:26px; height:26px; border-radius:50%; background:var(--ink); color:var(--bg); border:0;
+  display:grid; place-items:center; cursor:pointer; font-size:13px; flex:none; font-family:inherit}
+.send:disabled{opacity:.4; cursor:default}
+.send.stop{background:var(--del); color:#fff}
+.send.steer{background:var(--ink2); color:var(--bg)}
+.send .stopsq{width:13px; height:13px; display:block; stroke:none}
+
+/* controls row below the box (kept for true proportions) */
+.comprow{margin:8px 2px 0; padding:0 2px; display:flex; align-items:center; gap:10px}
+.permchip{color:var(--amber); background:color-mix(in srgb,var(--amber) 12%,transparent); border-radius:8px;
+  padding:3px 10px; font-size:12px; border:0; font-family:inherit; cursor:pointer}
+.cicon{color:var(--meta); background:transparent; border:0; padding:0; cursor:pointer; display:flex; align-items:center}
+.cicon svg{width:15px; height:15px}
+.comprow .sp{flex:1}
+.modelsel,.effortsel{color:var(--ink2); font-size:12.5px; background:transparent; border:0; padding:0;
+  font-family:inherit; display:inline-flex; align-items:center; gap:6px; cursor:pointer}
+
+.metrics{margin:12px 2px 0; display:flex; gap:18px; flex-wrap:wrap; font:11px/1.6 var(--mono); color:var(--meta)}
+.metrics b{color:var(--ink2); font-weight:400}
+
+.states{margin:26px 2px 0}
+.states .mh{font:600 10px/1 var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--faint); margin:0 0 10px}
+.states .row{display:flex; gap:26px; align-items:center; flex-wrap:wrap}
+.states .st{display:flex; align-items:center; gap:9px; font-size:12px; color:var(--meta)}
+
+.note{margin:24px 2px 0; max-width:900px; font-size:12px; color:var(--meta); line-height:1.7}
+.note b{color:var(--ink2); font-weight:600}
+.note code{background:var(--field); border:1px solid var(--line); border-radius:5px; padding:.5px 5px; font-size:11px; color:var(--ink2)}
+.note ul{margin:8px 0 0; padding-left:18px}
+.note li{margin:0 0 5px}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div>
+    <div class="t">Compositor · botón de envío <b>centrado</b></div>
+    <div class="d">Escribí en las dos cajas (⇧Enter para más líneas) — crecen de verdad. La izquierda es el código de hoy.</div>
+  </div>
+  <span class="sp"></span>
+  <button class="tgl" id="guide">Guía de centro</button>
+  <button class="tgl" id="smooth">Altura suavizada</button>
+  <button class="tgl" id="theme">Claro</button>
+</header>
+
+<div class="cols">
+
+  <!-- ░░░ HOY ░░░ -->
+  <div class="col">
+    <div class="ph bad">
+      <div class="k">Hoy</div>
+      <div class="n">Anclado al borde inferior</div>
+      <div class="s"><code>position:absolute; right:9px; bottom:8px</code> — el botón sale del flujo y queda pegado abajo; con tres líneas escritas mira al último renglón, no a la caja</div>
+    </div>
+    <div class="frame">
+      <div class="compwrap">
+        <div class="comp-hoy" id="boxA">
+          <textarea id="taA" rows="1" placeholder="Contale a tu agente qué sigue…"></textarea>
+          <button class="send" title="Enviar">↑</button>
+        </div>
+        <div class="comprow">
+          <button class="permchip">Preguntar permisos</button>
+          <button class="cicon"><svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></button>
+          <span class="sp"></span>
+          <button class="modelsel">Opus 4.8</button>
+        </div>
+      </div>
+      <div class="metrics">
+        <span>alto de la caja <b id="hA">40</b> px</span>
+        <span>centro del botón <b id="cA">—</b> px</span>
+        <span>desvío del centro <b id="dA">—</b> px</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ░░░ PROPUESTA ░░░ -->
+  <div class="col">
+    <div class="ph">
+      <div class="k">Propuesta</div>
+      <div class="n">Centrado por layout, no por JS</div>
+      <div class="s"><code>display:flex; align-items:center</code> — el botón es un ítem más de la fila; el motor lo recentra en cada reflow, incluido el del auto-grow. Desvío: cero, en toda altura.</div>
+    </div>
+    <div class="frame">
+      <div class="compwrap">
+        <div class="comp-new" id="boxB">
+          <textarea id="taB" rows="1" placeholder="Contale a tu agente qué sigue…"></textarea>
+          <button class="send" title="Enviar">↑</button>
+        </div>
+        <div class="comprow">
+          <button class="permchip">Preguntar permisos</button>
+          <button class="cicon"><svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></button>
+          <span class="sp"></span>
+          <button class="modelsel">Opus 4.8</button>
+        </div>
+      </div>
+      <div class="metrics">
+        <span>alto de la caja <b id="hB">40</b> px</span>
+        <span>centro del botón <b id="cB">—</b> px</span>
+        <span>desvío del centro <b id="dB">—</b> px</span>
+        <span>escrituras de estilo al botón <b>0</b></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="states">
+  <div class="mh">Los tres estados existentes, ya centrados</div>
+  <div class="row">
+    <span class="st"><span class="comp-new" style="width:180px"><textarea rows="1" placeholder="Enviar"></textarea><button class="send">↑</button></span></span>
+    <span class="st"><span class="comp-new" style="width:180px"><textarea rows="1" placeholder="Detener"></textarea><button class="send stop"><svg class="stopsq" viewBox="0 0 16 16" fill="currentColor"><rect x="3.5" y="3.5" width="9" height="9" rx="2"/></svg></button></span></span>
+    <span class="st"><span class="comp-new" style="width:180px"><textarea rows="1" placeholder="Dirigir"></textarea><button class="send steer">⤴</button></span></span>
+    <span class="st"><span class="comp-new" style="width:180px"><textarea rows="1" placeholder="Sin conexión"></textarea><button class="send" disabled>↑</button></span></span>
+  </div>
+</div>
+
+<div class="note">
+  <b>Por qué no salta.</b> Un botón centrado con <code>top:50%; transform:translateY(-50%)</code> sobre un elemento absoluto
+  también "queda centrado", pero cualquier transición sobre esa transformada lo separa del borde de la caja durante el tween:
+  eso es el rebote. Acá el botón no tiene ninguna propiedad de posición, ninguna transformada y ninguna transición propia.
+  Su centro es una consecuencia del alto de la caja, resuelta por el motor de layout en el mismo frame en que la caja crece.
+  <ul>
+    <li>El único JS que sigue corriendo es el <code>autosize()</code> que ya existe: mide <code>scrollHeight</code> y escribe
+      <code>height</code> en el <i>textarea</i>. No toca el botón.</li>
+    <li>Con «altura suavizada» la transición va sobre <code>height</code> del textarea (120 ms). El botón la acompaña en
+      lockstep porque su centro se recalcula por frame — no es una animación paralela que pueda desfasarse.</li>
+    <li>Al llegar al tope de 180 px el textarea pasa a scrollear y la caja deja de crecer; el botón queda fijo, centrado.</li>
+    <li><code>padding-right:34px</code> del textarea se elimina: reservaba el hueco del botón superpuesto, y ahora el botón
+      ocupa su propio espacio en la fila.</li>
+  </ul>
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement;
+  function toggle(id, fn, label){
+    var b=document.getElementById(id), on=false;
+    b.onclick=function(){ on=!on; b.classList.toggle('on',on); fn(on); };
+  }
+  var themeBtn=document.getElementById('theme');
+  themeBtn.onclick=function(){
+    var light=root.getAttribute('data-theme')==='light';
+    root.setAttribute('data-theme', light?'dark':'light');
+    themeBtn.textContent=light?'Claro':'Oscuro';
+  };
+  toggle('guide', function(on){
+    document.getElementById('boxA').classList.toggle('guide',on);
+    document.getElementById('boxB').classList.toggle('guide',on);
+  });
+  toggle('smooth', function(on){
+    document.querySelectorAll('.comp-new').forEach(function(el){ el.classList.toggle('smooth',on); });
+  });
+
+  // The production autosize(), verbatim in behaviour (renderer2 Composer.tsx).
+  function autosize(el){
+    if(!el.value){ el.style.height=''; el.style.overflowY='hidden'; return; }
+    el.style.height='auto';
+    var full=el.scrollHeight;
+    el.style.height=Math.min(full,180)+'px';
+    el.style.overflowY = full>180 ? 'auto' : 'hidden';
+  }
+
+  function wire(taId, boxId, hId, cId, dId){
+    var ta=document.getElementById(taId), box=document.getElementById(boxId);
+    var h=document.getElementById(hId), c=document.getElementById(cId), d=document.getElementById(dId);
+    function measure(){
+      var br=box.getBoundingClientRect(), sr=box.querySelector('.send').getBoundingClientRect();
+      var boxMid=br.height/2, btnMid=(sr.top-br.top)+sr.height/2;
+      h.textContent=Math.round(br.height);
+      c.textContent=Math.round(btnMid);
+      var off=Math.round(btnMid-boxMid);
+      d.textContent=(off>0?'+':'')+off;
+      d.style.color = off===0 ? 'var(--acc)' : 'var(--del)';
+    }
+    ta.addEventListener('input', function(){ autosize(ta); measure(); });
+    ta.addEventListener('keydown', function(e){ if(e.key==='Enter' && !e.shiftKey) e.preventDefault(); });
+    new ResizeObserver(measure).observe(box);
+    measure();
+  }
+  wire('taA','boxA','hA','cA','dA');
+  wire('taB','boxB','hB','cB','dB');
+
+  // the small state strip: keep those textareas one line, no metrics
+  document.querySelectorAll('.states textarea').forEach(function(t){
+    t.addEventListener('input', function(){ autosize(t); });
+  });
+})();
+</script>
+</body>
+</html>

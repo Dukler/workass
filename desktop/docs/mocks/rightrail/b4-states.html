@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rail · estados en reposo</title>
+<style>
+:root{
+  --bg:#0f0e0d; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+  --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --acc:#4fa583; --add:#4cae7f; --del:#d96b5f; --shell:#0b0a09;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box} html,body{margin:0}
+body{background:var(--shell); color:var(--ink);
+  font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; -webkit-font-smoothing:antialiased;
+  padding:30px; display:flex; gap:30px; align-items:flex-start; flex-wrap:wrap}
+svg{stroke-width:1.6; stroke:currentColor; fill:none; stroke-linecap:round; stroke-linejoin:round}
+.col{width:300px}
+.cap{margin:0 2px 12px}
+.cap .k{font:600 10px/1 var(--mono); letter-spacing:.13em; color:var(--acc); text-transform:uppercase}
+.cap .n{font-size:15px; font-weight:640; margin:6px 0 0}
+.cap .s{font-size:11.5px; line-height:1.5; color:var(--muted); margin:5px 0 0}
+
+/* flush rail (de-carded): the only frame is the left hairline it shares w/ chat */
+.rail{width:300px; min-height:340px; background:var(--bg); border:1px solid var(--line); border-left:2px solid var(--line2);
+  border-radius:0 12px 12px 0; padding:0 13px 14px; overflow:hidden}
+.rh{height:38px; display:flex; align-items:center; justify-content:flex-end; gap:4px}
+.rh .ic{width:24px;height:24px;display:grid;place-items:center;color:var(--faint)} .rh .ic svg{width:15px;height:15px}
+.pulse{width:7px;height:7px;border-radius:50%;background:var(--acc);flex:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%,transparent)}
+
+/* idle empty state */
+.empty{display:flex; flex-direction:column; align-items:center; text-align:center; gap:10px; padding:54px 18px 0; color:var(--muted)}
+.empty .g{width:30px;height:30px;color:var(--faint)} .empty .g svg{width:30px;height:30px}
+.empty .t{font-size:13px; color:var(--ink2); font-weight:550}
+.empty .d{font-size:11.5px; line-height:1.5; color:var(--faint)}
+
+/* recap / settled */
+.lbl{font:600 10px/1 var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--faint)}
+.rechead{display:flex; align-items:center; padding:4px 2px 0}
+.rechead .when{margin-left:auto; font:10.5px/1 var(--mono); color:var(--faint)}
+.recsay{font-size:14px; line-height:1.4; color:var(--ink2); margin:9px 2px 2px}
+
+.planrow{display:flex; align-items:center; gap:10px; padding:11px 2px 9px; cursor:pointer}
+.pdots{display:flex; gap:6px; flex:none}
+.pdots i{width:8px;height:8px;border-radius:50%;background:var(--field)}
+.pdots i.done{background:var(--acc)}
+.pdots i.now{background:transparent;border:2px solid var(--acc);box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 16%,transparent)}
+.planrow .pl{font:11px/1 var(--mono); color:var(--muted)}
+.planrow .chev{margin-left:auto; color:var(--faint)} .planrow .chev svg{width:12px;height:12px}
+.planrow .ok{color:var(--acc); display:grid; place-items:center} .planrow .ok svg{width:13px;height:13px}
+
+.hair{height:1px; background:var(--line); margin:6px -13px}
+
+.meta{display:flex; align-items:center; gap:10px; padding:9px 4px; border-top:1px solid var(--line); cursor:pointer}
+.meta .chev{color:var(--faint); display:grid; place-items:center} .meta .chev svg{width:12px;height:12px}
+.meta .ml{font-size:12.5px; color:var(--ink2)}
+.meta .mc{margin-left:auto; font:11px/1 var(--mono); color:var(--muted); display:inline-flex; align-items:center; gap:6px}
+.meta .mc.ok{color:var(--acc)}
+.metaflat{display:flex; align-items:center; gap:10px; padding:9px 4px; border-top:1px solid var(--line)}
+.metaflat .ml{font-size:12.5px; color:var(--ink2)}
+.metaflat .note{margin-left:auto; font-size:11px; color:var(--faint)}
+</style>
+</head>
+<body>
+
+<!-- IDLE -->
+<div class="col">
+  <div class="cap"><div class="k">Estado A</div><div class="n">En reposo (sin turno)</div>
+    <div class="s">Chat nuevo o agente quieto. Una sola frase que explica el panel — nada de puntos sueltos ni filas «0».</div></div>
+  <div class="rail">
+    <div class="rh"><span class="ic"><svg viewBox="0 0 20 20"><path d="M12 4h4v4M8 16H4v-4M16 4l-5 5M4 16l5-5"/></svg></span><span class="ic"><svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg></span></div>
+    <div class="empty">
+      <span class="g"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></span>
+      <span class="t">Sin turno activo</span>
+      <span class="d">Cuando el agente trabaje, vas a ver acá su rumbo, sus archivos y sus tareas — en vivo.</span>
+    </div>
+  </div>
+</div>
+
+<!-- SETTLED A: recap sentence + labeled plan -->
+<div class="col">
+  <div class="cap"><div class="k">Estado B · opción 1</div><div class="n">Turno terminado · con recap</div>
+    <div class="s">Los puntos ya no flotan: arriba, la frase de lo que hizo; al lado, «Plan completado». Todo con etiqueta.</div></div>
+  <div class="rail">
+    <div class="rh"><span class="ic"><svg viewBox="0 0 20 20"><path d="M12 4h4v4M8 16H4v-4M16 4l-5 5M4 16l5-5"/></svg></span><span class="ic"><svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg></span></div>
+    <div class="rechead"><span class="lbl">Último turno</span><span class="when">hace 2 min</span></div>
+    <div class="recsay">Rediseñó la densidad del panel derecho.</div>
+    <div class="planrow">
+      <span class="pdots"><i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i></span>
+      <span class="pl">Plan completado</span>
+      <span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span>
+    </div>
+    <div class="meta"><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Llamadas</span><span class="mc">14</span></div>
+    <div class="meta"><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Archivos</span><span class="mc">3</span></div>
+    <div class="meta"><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Segundo plano</span><span class="mc ok"><svg viewBox="0 0 16 16" style="width:13px;height:13px"><path d="M3 8.5l3.5 3.5L13 5"/></svg></span></div>
+  </div>
+</div>
+
+<!-- SETTLED B: labeled plan toggle, no sentence -->
+<div class="col">
+  <div class="cap"><div class="k">Estado B · opción 2</div><div class="n">Turno terminado · mínimo</div>
+    <div class="s">Sin frase. Los puntos van con etiqueta «Plan · 4 de 4», y sólo las filas con contenido real.</div></div>
+  <div class="rail">
+    <div class="rh"><span class="ic"><svg viewBox="0 0 20 20"><path d="M12 4h4v4M8 16H4v-4M16 4l-5 5M4 16l5-5"/></svg></span><span class="ic"><svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg></span></div>
+    <div class="planrow" style="padding-top:6px">
+      <span class="chev" style="margin-left:0"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span>
+      <span class="pdots"><i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i></span>
+      <span class="pl">Plan · 4 de 4</span>
+    </div>
+    <div class="meta"><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Llamadas</span><span class="mc">14</span></div>
+    <div class="meta"><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Archivos</span><span class="mc">3</span></div>
+    <div class="meta"><span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span class="ml">Segundo plano</span><span class="mc ok"><svg viewBox="0 0 16 16" style="width:13px;height:13px"><path d="M3 8.5l3.5 3.5L13 5"/></svg></span></div>
+  </div>
+</div>
+
+</body>
+</html>

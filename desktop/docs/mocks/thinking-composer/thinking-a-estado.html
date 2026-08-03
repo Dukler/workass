@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pensamiento · Variante A — Estado</title>
+<style>
+/* Tokens: verbatim from desktop/renderer2/src/styles/tokens.css (both themes). */
+:root{
+  color-scheme:dark;
+  --bg:#0f0e0d; --side:#151413; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+  --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --acc:#4fa583; --link:#8fb0ea; --amber:#d8a05a; --add:#4cae7f; --del:#d96b5f; --shell:#0b0a09;
+  /* Mock-scoped meta ink. In light, the product's --muted (#7a756d on #f2f0ed)
+     measures 4.03:1 — under AA for 12.5px text — so the light value below is
+     darkened to 4.8:1. Flagged for the token file, not changed there. */
+  --meta:var(--muted);
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#f2f0ed; --side:#faf9f7; --panel:#ffffff; --card:#ffffff; --field:#f1efeb;
+  --ink:#23211e; --ink2:#47443e; --muted:#7a756d; --faint:#a19c93;
+  --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.15);
+  --acc:#177353; --link:#3861b0; --amber:#9a6a1d; --add:#177347; --del:#bd4436; --shell:#eceae6;
+  --meta:#6e6961;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--shell); color:var(--ink);
+  font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; -webkit-font-smoothing:antialiased; padding:22px 24px 40px}
+svg{stroke-width:1.6; stroke:currentColor; fill:none; stroke-linecap:round; stroke-linejoin:round}
+
+.top{display:flex; align-items:baseline; gap:14px; margin:0 2px 20px}
+.top .t{font-size:15px; font-weight:640}
+.top .d{font-size:12px; color:var(--meta)}
+.top .sp{flex:1}
+.tgl{font:inherit; font-size:12px; color:var(--ink2); background:var(--panel); border:1px solid var(--line2);
+  border-radius:8px; padding:4px 11px; cursor:pointer}
+.tgl:hover{color:var(--ink)}
+
+.cols{display:flex; gap:22px; align-items:flex-start; flex-wrap:wrap}
+.col{width:420px}
+.ph{margin:0 2px 11px}
+.ph .k{font:600 10px/1 var(--mono); letter-spacing:.13em; color:var(--acc); text-transform:uppercase}
+.ph .n{font-size:14px; font-weight:620; margin:6px 0 0}
+.ph .s{font-size:11.5px; color:var(--meta); margin:4px 0 0; line-height:1.45}
+.ph.bad .k{color:var(--del)}
+
+.frame{background:var(--bg); border:1px solid var(--line); border-radius:14px; padding:16px 18px 18px;
+  box-shadow:0 18px 50px -26px rgba(0,0,0,.6)}
+
+/* transcript pieces — grounded in renderer2/src/styles/app.css */
+.userpill{display:flex; flex-direction:column; align-items:flex-end; margin:0 0 18px}
+.userpill-text{background:var(--field); border:1px solid var(--line); border-radius:14px; padding:7px 13px;
+  max-width:78%; font-size:13px}
+.p{margin:0 0 13px; font-size:13.5px; line-height:1.62; color:var(--ink)}
+.p:last-child{margin-bottom:0}
+
+/* ── HOY (the broken behaviour, for comparison) ────────────────────────────── */
+.steprow{display:flex; align-items:flex-start; gap:7px; color:var(--meta); font-size:12.5px; margin:12px 0;
+  cursor:pointer; border:0; background:transparent; font-family:inherit; text-align:left; padding:0; width:fit-content}
+.steprow .stlbl{text-decoration:underline dotted color-mix(in srgb,var(--faint) 65%,transparent); text-underline-offset:3px}
+.steprow .stbody{min-width:0}
+
+/* ── VARIANTE A · ESTADO ───────────────────────────────────────────────────────
+   While the model is reasoning the row carries NO reasoning text at all: a
+   pulsing accent dot, the word "Pensando", and a live elapsed clock. There is
+   no fragment to cut, so a half sentence is structurally impossible. When the
+   turn's thinking closes the same row settles into "Pensó · 18s" and becomes
+   the disclosure for the complete text. Row geometry is identical in both
+   states, so the settle is a text swap, never a re-layout. ────────────────── */
+.think{display:flex; align-items:center; gap:8px; margin:12px 0; font-size:12.5px; width:fit-content; max-width:100%;
+  background:transparent; border:0; padding:0; font-family:inherit; color:var(--meta); text-align:left}
+.think .dot{width:6px; height:6px; border-radius:50%; background:var(--acc); flex:none;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 18%,transparent); animation:bp 1.5s ease-in-out infinite}
+.think .lbl{color:var(--ink2)}
+.think .el{font:11px/1 var(--mono); font-variant-numeric:tabular-nums; color:var(--meta)}
+@keyframes bp{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* settled state: same row, no dot, label becomes the click target */
+.think.done{cursor:pointer}
+.think.done .lbl{text-decoration:underline dotted color-mix(in srgb,var(--faint) 65%,transparent); text-underline-offset:3px}
+.think.done:hover .lbl{color:var(--ink); text-decoration-color:var(--faint)}
+.think .chk{width:6px; height:6px; border-radius:50%; background:var(--line2); flex:none}
+
+/* expanded reasoning: quiet, ruled, clearly not output */
+.tfull{margin:2px 0 16px; padding:2px 0 2px 13px; border-left:2px solid var(--line2);
+  color:var(--ink2); font-size:12.5px; line-height:1.62; white-space:pre-wrap; max-width:100%}
+
+/* ── mock scaffolding (not product chrome) ────────────────────────────────── */
+.mon{margin:26px 2px 0; max-width:1304px}
+.mon .mh{font:600 10px/1 var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--faint); margin:0 0 8px}
+.mon .mb{background:var(--panel); border:1px solid var(--line); border-radius:11px; padding:11px 13px;
+  font:11.5px/1.6 var(--mono); color:var(--meta); min-height:74px; white-space:pre-wrap}
+.mon .mb b{color:var(--ink2); font-weight:400}
+.mon .mb .cut{color:var(--del)}
+.note{margin:22px 2px 0; max-width:860px; font-size:12px; color:var(--meta); line-height:1.65}
+.note b{color:var(--ink2); font-weight:600}
+@media (prefers-reduced-motion:reduce){ .think .dot{animation:none} }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div>
+    <div class="t">Pensamiento · Variante A — <b>Estado</b></div>
+    <div class="d">La fila en curso no lleva texto de razonamiento. Sin fragmento, no hay frase partida.</div>
+  </div>
+  <span class="sp"></span>
+  <button class="tgl" id="theme">Claro</button>
+</header>
+
+<div class="cols">
+
+  <!-- ░░░ HOY ░░░ -->
+  <div class="col">
+    <div class="ph bad">
+      <div class="k">Hoy · el problema</div>
+      <div class="n">Corta a 90 caracteres, en vivo</div>
+      <div class="s">StepRow toma <code>text.split('\n')[0].slice(0,90)</code> y el store reemplaza el texto en cada evento: la fila muestra media palabra y cambia mientras el modelo escribe.</div>
+    </div>
+    <div class="frame">
+      <div class="userpill"><div class="userpill-text">Arreglá la fila de pensamiento, corta las frases.</div></div>
+      <button class="steprow"><span class="stbody"><span class="stlbl">Pensó</span> · <span id="hoy"></span></span></button>
+    </div>
+  </div>
+
+  <!-- ░░░ A · EN CURSO ░░░ -->
+  <div class="col">
+    <div class="ph">
+      <div class="k">Variante A · en curso</div>
+      <div class="n">Punto, «Pensando», reloj</div>
+      <div class="s">nada de texto en vivo · el reloj corre · la fila no cambia de ancho ni de contenido mientras dura el razonamiento</div>
+    </div>
+    <div class="frame">
+      <div class="userpill"><div class="userpill-text">Arreglá la fila de pensamiento, corta las frases.</div></div>
+      <div class="think" role="status" aria-live="polite">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="lbl">Pensando</span>
+        <span class="el" id="clock">0:07</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ░░░ A · TERMINADO ░░░ -->
+  <div class="col">
+    <div class="ph">
+      <div class="k">Variante A · terminado</div>
+      <div class="n">Misma fila, «Pensó · 18s»</div>
+      <div class="s">un clic abre el razonamiento completo, con regla izquierda para que nunca se lea como respuesta</div>
+    </div>
+    <div class="frame">
+      <div class="userpill"><div class="userpill-text">Arreglá la fila de pensamiento, corta las frases.</div></div>
+
+      <button class="think done" id="t1" aria-expanded="false">
+        <span class="chk" aria-hidden="true"></span>
+        <span class="lbl">Pensó</span>
+        <span class="el">18s</span>
+      </button>
+      <p class="p">La fila de hoy recorta el razonamiento a noventa caracteres, así que casi siempre parte una palabra al medio. Cambié el tratamiento: en curso no se muestra texto, y al cerrar queda una sola fila que abre el razonamiento completo.</p>
+
+      <div style="height:22px"></div>
+
+      <button class="think done" id="t2" aria-expanded="true">
+        <span class="chk" aria-hidden="true"></span>
+        <span class="lbl">Pensó</span>
+        <span class="el">18s</span>
+      </button>
+      <div class="tfull" id="t2b">Voy a revisar cómo se arma hoy la fila de pensamiento antes de tocar nada. El renderer corta el texto a noventa caracteres, así que la primera línea casi siempre queda partida a la mitad de una palabra. Eso explica por qué la fila cambia de contenido mientras el modelo sigue escribiendo. La opción más honesta es no mostrar fragmentos: o una frase completa, o nada.</div>
+      <p class="p">La fila de hoy recorta el razonamiento a noventa caracteres, así que casi siempre parte una palabra al medio.</p>
+    </div>
+  </div>
+</div>
+
+<div class="mon">
+  <div class="mh">Sólo el mock · búfer crudo que llega del modelo en este instante</div>
+  <div class="mb" id="raw"></div>
+</div>
+
+<div class="note">
+  <b>Qué cambia.</b> Hoy la fila es un recorte duro del búfer, y el búfer se reemplaza entero en cada evento
+  (<code>store.ts</code> → <code>existing.text = ev.text</code>), así que el usuario ve media frase que además muta.
+  En A la fila en curso no depende del búfer: sólo del hecho de que hay razonamiento abierto y de cuánto lleva.
+  El texto completo sigue estando, detrás de un clic, una vez que está completo.
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement, btn=document.getElementById('theme');
+  btn.onclick=function(){
+    var light=root.getAttribute('data-theme')==='light';
+    root.setAttribute('data-theme', light?'dark':'light');
+    btn.textContent=light?'Claro':'Oscuro';
+  };
+
+  var TXT="Voy a revisar cómo se arma hoy la fila de pensamiento antes de tocar nada. El renderer corta el texto a noventa caracteres, así que la primera línea casi siempre queda partida a la mitad de una palabra. Eso explica por qué la fila cambia de contenido mientras el modelo sigue escribiendo. La opción más honesta es no mostrar fragmentos: o una frase completa, o nada.";
+  var hoy=document.getElementById('hoy'), raw=document.getElementById('raw'), clock=document.getElementById('clock');
+  var i=0, t0=0;
+  function fmt(s){ var m=Math.floor(s/60); var r=s%60; return m+":"+(r<10?"0":"")+r; }
+  function tick(){
+    i+=2+Math.floor(Math.random()*4);
+    if(i>TXT.length){ i=0; t0=0; }
+    t0+=0.06;
+    var buf=TXT.slice(0,i);
+    // HOY: the exact production expression — a hard 90-char slice.
+    hoy.textContent=buf.split("\n")[0].slice(0,90);
+    // raw monitor: show the buffer, marking the part today's row would cut.
+    raw.innerHTML="<b>"+esc(buf.slice(0,90))+"</b><span class='cut'>"+esc(buf.slice(90))+"</span>";
+    clock.textContent=fmt(Math.floor(t0));
+  }
+  function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+  setInterval(tick,60); tick();
+
+  // disclosure demo
+  function bind(btnEl, bodyId, text){
+    btnEl.onclick=function(){
+      var open=btnEl.getAttribute('aria-expanded')==='true';
+      btnEl.setAttribute('aria-expanded', String(!open));
+      var body=document.getElementById(bodyId);
+      if(!open && !body){ body=document.createElement('div'); body.className='tfull'; body.id=bodyId; body.textContent=text; btnEl.after(body); }
+      else if(body){ body.remove(); }
+    };
+  }
+  bind(document.getElementById('t1'),'t1b',TXT);
+  document.getElementById('t2').onclick=function(){
+    var b=document.getElementById('t2b');
+    var open=this.getAttribute('aria-expanded')==='true';
+    this.setAttribute('aria-expanded',String(!open));
+    b.style.display=open?'none':'';
+  };
+})();
+</script>
+</body>
+</html>

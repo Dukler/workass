@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Voz · tap-to-toggle · dictado al composer</title>
+<style>
+/* ── tokens: verbatim de renderer2/src/styles/tokens.css ─────────────────── */
+:root{
+  color-scheme:dark;
+  --bg:#0f0e0d; --side:#151413; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+  --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --acc:#4fa583; --link:#8fb0ea; --amber:#d8a05a; --add:#4cae7f; --del:#d96b5f;
+  --shell:#0b0a09; --read:1040px;
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#f2f0ed; --side:#faf9f7; --panel:#ffffff; --card:#ffffff; --field:#f1efeb;
+  --ink:#23211e; --ink2:#47443e; --muted:#7a756d; --faint:#a19c93;
+  --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.15);
+  --acc:#177353; --link:#3861b0; --amber:#9a6a1d; --add:#177347; --del:#bd4436;
+  --shell:#eceae6;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--shell);color:var(--ink);
+  font:13.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+:focus,:focus-visible{outline:none}
+
+/* ── chrome del documento ────────────────────────────────────────────────── */
+.doc{max-width:1120px;margin:0 auto;padding:26px 30px 90px}
+.dochead{display:flex;align-items:baseline;gap:14px;margin-bottom:6px}
+h1{font-size:17px;font-weight:600;margin:0;letter-spacing:-.01em}
+.sub{font-size:12.5px;color:var(--muted);margin:0 0 6px}
+.sub code,.note code,.dec code,.cmp code{font-family:ui-monospace,Menlo,monospace;
+  font-size:11.5px;color:var(--ink2)}
+h2{font-size:12px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--faint);margin:38px 0 8px}
+.themebtn,.playbtn{background:transparent;border:1px solid var(--line2);color:var(--muted);
+  border-radius:8px;padding:5px 13px;font:inherit;font-size:12px;cursor:pointer}
+.themebtn{margin-left:auto}
+.themebtn:hover,.playbtn:hover{color:var(--ink)}
+.playbtn.on{color:var(--acc);border-color:color-mix(in srgb,var(--acc) 45%,transparent)}
+.note{font-size:12.5px;color:var(--muted);max-width:790px;margin:0 0 20px;line-height:1.62}
+.note b{color:var(--ink2);font-weight:600}
+
+/* ── las tres columnas comparadas ────────────────────────────────────────── */
+.cmp{display:grid;gap:13px;margin-bottom:8px}
+.pane{background:var(--bg);border:1px solid var(--line);border-radius:13px;
+  padding:14px 20px 12px;position:relative}
+.pane.pick{border-color:color-mix(in srgb,var(--acc) 40%,transparent)}
+.panehead{display:flex;align-items:baseline;gap:11px;margin-bottom:11px}
+.tag{font-size:11px;font-weight:600;color:var(--ink);background:var(--field);
+  border-radius:6px;padding:2px 8px;flex:none}
+.panename{font-size:12.5px;color:var(--ink2)}
+.paneverdict{font-size:12px;color:var(--faint);margin-left:auto;text-align:right;
+  max-width:47%;line-height:1.45}
+
+/* ── composer: CSS copiado de app.css ────────────────────────────────────── */
+.comp{position:relative;background:var(--panel);border:1px solid var(--line2);
+  border-radius:15px;padding:11px 13px 9px}
+.ta{width:100%;background:transparent;border:0;color:var(--ink);font:inherit;
+  font-size:13.5px;line-height:1.5;min-height:20px;padding-right:34px;
+  white-space:pre-wrap;word-break:break-word}
+.ta.empty::before{content:"Contale a tu agente qué sigue…";color:var(--faint)}
+.caret{display:inline-block;width:1px;height:15px;background:var(--ink);
+  vertical-align:-2px;margin-left:1px;animation:blink 1.06s step-end infinite}
+@keyframes blink{50%{opacity:0}}
+.comp .send{position:absolute;right:9px;bottom:8px}
+.send{width:26px;height:26px;border-radius:50%;background:var(--ink);color:var(--bg);
+  border:0;display:grid;place-items:center;cursor:pointer;font-size:13px;flex:none}
+.send:disabled{opacity:.4;cursor:default}
+.comprow{margin:8px 0 0;padding:0 2px;display:flex;align-items:center;gap:10px}
+.permchip{color:var(--amber);background:color-mix(in srgb,var(--amber) 12%,transparent);
+  border-radius:8px;padding:3px 10px;font-size:12px;cursor:pointer;border:0;font-family:inherit}
+.cicon{color:var(--muted);cursor:pointer;font-size:13px;display:flex;align-items:center;
+  background:transparent;border:0;padding:0}
+.cicon:hover{color:var(--ink)}
+.comprow .sp{flex:1}
+.modelsel{color:var(--ink2);font-size:12.5px;background:transparent;border:0;padding:0;
+  font-family:inherit;line-height:20px;cursor:pointer}
+
+/* ══ lo único NUEVO que este mock agrega ═════════════════════════════════════
+   .cicon.rec (mic en acento) · .vmeter (4 barras) · .prov (corrida provisional)
+   · .caption (subtítulo sobre la caja). Verde = acento only.                  */
+.cicon.rec{color:var(--acc)}
+.vmeter{display:inline-flex;align-items:flex-end;gap:2px;height:13px;margin-left:7px}
+.vmeter i{width:2px;background:var(--acc);border-radius:1px;height:3px;
+  transition:height .09s linear;display:block}
+.vmeter.off{visibility:hidden}
+.prov{color:var(--muted);font-style:italic}
+.caption{display:flex;align-items:flex-start;gap:8px;font-size:12.5px;color:var(--muted);
+  min-height:19px;line-height:1.5;margin-bottom:7px}
+.caption .livedot{width:5px;height:5px;border-radius:50%;background:var(--acc);
+  flex:none;margin-top:7px;animation:pulse 1.5s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}
+.caption.hidden{visibility:hidden}
+.finishing{color:var(--faint);font-style:italic}
+
+/* marcador de "acá está la diferencia" */
+.diffmark{position:absolute;left:0;top:0;bottom:0;width:2px;border-radius:2px;
+  background:var(--acc);opacity:.5}
+
+/* barra de reproducción */
+.playbar{display:flex;align-items:center;gap:13px;margin:0 0 18px}
+.playnote{font-size:12px;color:var(--faint)}
+.step{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--faint);
+  font-variant-numeric:tabular-nums}
+
+/* bloque de decisiones */
+.dec{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:18px 20px;max-width:880px}
+.dec h3{font-size:12.5px;font-weight:600;margin:0 0 11px;color:var(--ink)}
+.dec h3+h3{margin-top:22px}
+.dec ul{margin:0;padding-left:19px}
+.dec li{font-size:12.5px;color:var(--muted);margin-bottom:8px;line-height:1.6}
+.dec li b{color:var(--ink2);font-weight:600}
+.dec .q{color:var(--amber)}
+</style>
+</head>
+<body>
+<div class="doc">
+
+  <div class="dochead">
+    <h1>Voz — tap-to-toggle, el texto aterriza en el composer</h1>
+    <button class="themebtn" id="theme">Claro / Oscuro</button>
+  </div>
+  <p class="sub">El botón ya existe: <code>Composer.tsx:666</code> · <code>title="Voz"</code>, sin
+    handler. Un toque abre, otro cierra. Sin hold-to-talk, sin auto-enviar.</p>
+
+  <h2>1 · Los tres tratamientos, congelados en el mismo instante</h2>
+  <p class="note">Las tres columnas están detenidas en <b>el mismo momento del dictado</b>: ya
+    dijiste media frase, y las últimas palabras todavía no están confirmadas. Es el único instante
+    en que los tratamientos difieren — cuando el dictado termina, los tres quedan idénticos, y por
+    eso antes parecían iguales. La franja verde a la izquierda marca dónde está la diferencia.</p>
+
+  <div class="playbar">
+    <button class="playbtn" id="play">▶ Reproducir los tres en paralelo</button>
+    <span class="playnote">Corren en simultáneo, mismo audio, mismo instante.</span>
+    <span class="step" id="stepn"></span>
+  </div>
+
+  <div class="cmp" id="cmp">
+
+    <!-- ── A ────────────────────────────────────────────────────────────── -->
+    <div class="pane" id="paneA">
+      <span class="diffmark"></span>
+      <div class="panehead">
+        <span class="tag">A</span>
+        <span class="panename">Texto plano en la caja</span>
+        <span class="paneverdict">Todo se ve igual de firme. No podés distinguir lo confirmado de
+          lo que whisper todavía puede reescribir.</span>
+      </div>
+      <div class="caption hidden"><span class="livedot"></span><span></span></div>
+      <div class="comp">
+        <div class="ta" id="taA"></div>
+        <button class="send" id="sendA">
+          <svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 13V3M4 7l4-4 4 4"/></svg>
+        </button>
+      </div>
+      <div class="comprow">
+        <button class="permchip">Preguntar</button>
+        <button class="cicon"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 3v10M3 8h10"/></svg></button>
+        <button class="cicon rec" id="micA"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="6" y="2" width="4" height="8" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V15"/></svg></button>
+        <span class="vmeter" id="mA"><i></i><i></i><i></i><i></i></span>
+        <span class="sp"></span><button class="modelsel">opus[1m]</button>
+      </div>
+    </div>
+
+    <!-- ── B ────────────────────────────────────────────────────────────── -->
+    <div class="pane" id="paneB">
+      <span class="diffmark"></span>
+      <div class="panehead">
+        <span class="tag">B</span>
+        <span class="panename">Corrida provisional atenuada, dentro de la caja</span>
+        <span class="paneverdict">Lo confirmado en firme; lo provisional en itálica gris. Ves qué
+          puede cambiar todavía. Cuesta un overlay espejado.</span>
+      </div>
+      <div class="caption hidden"><span class="livedot"></span><span></span></div>
+      <div class="comp">
+        <div class="ta" id="taB"></div>
+        <button class="send" id="sendB">
+          <svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 13V3M4 7l4-4 4 4"/></svg>
+        </button>
+      </div>
+      <div class="comprow">
+        <button class="permchip">Preguntar</button>
+        <button class="cicon"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 3v10M3 8h10"/></svg></button>
+        <button class="cicon rec" id="micB"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="6" y="2" width="4" height="8" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V15"/></svg></button>
+        <span class="vmeter" id="mB"><i></i><i></i><i></i><i></i></span>
+        <span class="sp"></span><button class="modelsel">opus[1m]</button>
+      </div>
+    </div>
+
+    <!-- ── C ────────────────────────────────────────────────────────────── -->
+    <div class="pane" id="paneC">
+      <span class="diffmark"></span>
+      <div class="panehead">
+        <span class="tag">C</span>
+        <span class="panename">Subtítulo arriba; la caja recibe sólo texto final</span>
+        <span class="paneverdict">La caja nunca miente: sólo contiene texto confirmado. Lo que
+          hablás vive afuera hasta que se cierra. No toca el textarea.</span>
+      </div>
+      <div class="caption" id="capC"><span class="livedot"></span><span id="capCtext"></span></div>
+      <div class="comp">
+        <div class="ta" id="taC"></div>
+        <button class="send" id="sendC">
+          <svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 13V3M4 7l4-4 4 4"/></svg>
+        </button>
+      </div>
+      <div class="comprow">
+        <button class="permchip">Preguntar</button>
+        <button class="cicon"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 3v10M3 8h10"/></svg></button>
+        <button class="cicon rec" id="micC"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="6" y="2" width="4" height="8" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V15"/></svg></button>
+        <span class="vmeter" id="mC"><i></i><i></i><i></i><i></i></span>
+        <span class="sp"></span><button class="modelsel">opus[1m]</button>
+      </div>
+    </div>
+
+  </div>
+
+  <h2>2 · Por qué la distinción importa — la revisión del path</h2>
+  <p class="note">Whisper reescribe lo que ya dijo cuando le llega más audio. Acá está el caso real
+    de este repo: primero escucha el path como palabras y sólo lo cierra bien al final. En
+    <b>A</b> eso aparece como texto firme que de golpe salta. En <b>B</b> estaba marcado como
+    provisional desde el principio, así que el cambio no sorprende. En <b>C</b> nunca entró a la
+    caja hasta estar resuelto.</p>
+
+  <div class="cmp">
+    <div class="pane">
+      <div class="panehead">
+        <span class="tag">antes</span>
+        <span class="panename">lo que whisper oye primero — todavía provisional</span>
+      </div>
+      <div class="comp"><div class="ta">mirá por qué el cliente de teléfono llega a estado pero no dibuja la fila <span class="prov">del sidebar en internal http serve land bridge punto go</span><span class="caret"></span></div>
+        <button class="send"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 13V3M4 7l4-4 4 4"/></svg></button></div>
+    </div>
+    <div class="pane">
+      <div class="panehead">
+        <span class="tag">después</span>
+        <span class="panename">con el sesgo de vocabulario del daemon aplicado — confirmado</span>
+      </div>
+      <div class="comp"><div class="ta">mirá por qué el cliente de teléfono llega a estado pero no dibuja la fila del sidebar en internal/httpserve/lan_bridge.go<span class="caret"></span></div>
+        <button class="send"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 13V3M4 7l4-4 4 4"/></svg></button></div>
+    </div>
+  </div>
+
+  <h2>3 · Reposo y cierre — iguales en los tres</h2>
+  <div class="cmp">
+    <div class="pane">
+      <div class="panehead"><span class="tag">reposo</span>
+        <span class="panename">idéntico a hoy; micrófono gris, sin nivel</span></div>
+      <div class="comp"><div class="ta empty"></div>
+        <button class="send" disabled><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 13V3M4 7l4-4 4 4"/></svg></button></div>
+      <div class="comprow">
+        <button class="permchip">Preguntar</button>
+        <button class="cicon"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 3v10M3 8h10"/></svg></button>
+        <button class="cicon"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="6" y="2" width="4" height="8" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V15"/></svg></button>
+        <span class="sp"></span><button class="modelsel">opus[1m]</button>
+      </div>
+    </div>
+    <div class="pane">
+      <div class="panehead"><span class="tag">con borrador</span>
+        <span class="panename">el dictado entra en el caret, no pisa lo que tipeaste</span></div>
+      <div class="comp"><div class="ta">Revisá el reducer de la sidebar. <span class="prov">y decime si el fleet key llega</span><span class="caret"></span></div>
+        <button class="send"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 13V3M4 7l4-4 4 4"/></svg></button></div>
+    </div>
+    <div class="pane">
+      <div class="panehead"><span class="tag">listo</span>
+        <span class="panename">texto normal y editable, caret al final. Vos apretás enviar</span></div>
+      <div class="comp"><div class="ta">mirá por qué el cliente de teléfono llega a estado pero no dibuja la fila del sidebar en internal/httpserve/lan_bridge.go<span class="caret"></span></div>
+        <button class="send"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 13V3M4 7l4-4 4 4"/></svg></button></div>
+      <div class="comprow">
+        <button class="permchip">Preguntar</button>
+        <button class="cicon"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 3v10M3 8h10"/></svg></button>
+        <button class="cicon"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="6" y="2" width="4" height="8" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V15"/></svg></button>
+        <span class="sp"></span><button class="modelsel">opus[1m]</button>
+      </div>
+    </div>
+  </div>
+
+  <h2>4 · Lo que este mock fija, y lo que todavía no</h2>
+  <div class="dec">
+    <h3>Cerrado</h3>
+    <ul>
+      <li><b>Tap-to-toggle únicamente.</b> Un toque abre, otro cierra. Sin hold-to-talk y sin
+        <code>autoSubmit</code> — el equivalente de Claude Code queda descartado a propósito.</li>
+      <li><b>El audio no es el mensaje.</b> Se transcribe y el texto vuelve al composer como texto
+        normal y editable. Ningún turno sale sin que lo hayas leído.</li>
+      <li><b>Se inserta en el caret</b>, nunca reemplaza el borrador que ya escribiste.</li>
+      <li><b>El botón ya existe</b> (<code>Composer.tsx:666</code>): esto le da handler, no agrega
+        chrome nuevo a la fila.</li>
+      <li><b>Verde sólo como acento:</b> un icono, cuatro barras de 2px, un punto de 5px. Sin
+        fondos, sin texto de cuerpo teñido.</li>
+      <li><b>Sin etiquetas informativas.</b> No hay cronómetro, ni «Escuchando…», ni nombre de
+        motor en la fila.</li>
+    </ul>
+
+    <h3>Abierto — necesito que elijas</h3>
+    <ul>
+      <li><span class="q">Tratamiento del provisional: A, B o C.</span> No es sólo estético. El
+        composer es un <code>&lt;textarea&gt;</code>, y un textarea <b>no puede</b> estilar una
+        subcadena: <b>A</b> sale gratis, <b>B</b> necesita un overlay espejado con las mismas
+        métricas de fuente (la parte frágil), <b>C</b> no toca el textarea porque el provisional
+        vive afuera.</li>
+      <li><span class="q">¿El nivel de 4 barras se queda?</span> Es el único elemento nuevo en la
+        fila. Sin él, el micrófono en acento es la única señal de que está grabando.</li>
+    </ul>
+
+    <h3>Fuera de alcance, por pedido</h3>
+    <ul>
+      <li><b>Modo conversación.</b> La arquitectura queda abierta: el destino de la transcripción es
+        un parámetro, no está cableado al composer, así que después se le enchufa una ruta directa
+        al turno más el camino de vuelta de TTS. No se construye ahora.</li>
+      <li><b>Móvil.</b> El cliente RN comparte el mensaje de wire, no esta UI. Mock aparte.</li>
+    </ul>
+  </div>
+
+</div>
+
+<script>
+if (new URLSearchParams(location.search).get('theme') === 'light')
+  document.documentElement.dataset.theme = 'light';
+document.getElementById('theme').onclick = () => {
+  const r = document.documentElement;
+  r.dataset.theme = r.dataset.theme === 'light' ? '' : 'light';
+};
+
+/* Cada paso separa lo YA CONFIRMADO de lo PROVISIONAL. Es la distinción que los
+   tres tratamientos dibujan distinto — y la razón por la que el paso 6 es el
+   fotograma en el que el mock arranca detenido. */
+const STEPS = [
+  { c:'', p:'mirá' },
+  { c:'', p:'mirá por qué' },
+  { c:'mirá por qué', p:'el cliente de teléfono' },
+  { c:'mirá por qué el cliente de teléfono', p:'llega a estado pero' },
+  { c:'mirá por qué el cliente de teléfono llega a estado pero', p:'no dibuja la fila' },
+  { c:'mirá por qué el cliente de teléfono llega a estado pero no dibuja la fila',
+    p:'del sidebar en internal http serve land bridge punto go' },
+  { c:'mirá por qué el cliente de teléfono llega a estado pero no dibuja la fila del sidebar en internal/httpserve/lan_bridge.go',
+    p:'', done:true },
+];
+const FROZEN = 5;                    // el instante en que los tres difieren más
+
+const el = (id) => document.getElementById(id);
+const TA = { a:el('taA'), b:el('taB'), c:el('taC') };
+const SEND = { a:el('sendA'), b:el('sendB'), c:el('sendC') };
+const MET = { a:el('mA'), b:el('mB'), c:el('mC') };
+const MIC = { a:el('micA'), b:el('micB'), c:el('micC') };
+const esc = (s) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+
+function render(step, live){
+  const { c, p, done } = step;
+  const caret = '<span class="caret"></span>';
+
+  /* A — todo junto, mismo color: no hay forma de saber qué está firme */
+  TA.a.innerHTML = esc(c) + (p ? (c ? ' ' : '') + esc(p) : '') + caret;
+  TA.a.classList.toggle('empty', !c && !p);
+
+  /* B — confirmado firme + provisional en itálica atenuada */
+  TA.b.innerHTML = esc(c) + (p ? (c ? ' ' : '') + '<span class="prov">' + esc(p) + '</span>' : '') + caret;
+  TA.b.classList.toggle('empty', !c && !p);
+
+  /* C — la caja recibe SÓLO lo confirmado; el provisional va al subtítulo */
+  TA.c.innerHTML = esc(c) + (c ? caret : '');
+  TA.c.classList.toggle('empty', !c);
+  el('capCtext').textContent = p || (done ? '' : 'Escuchando…');
+  /* !!done, no `done`: con undefined, classList.toggle ignora el segundo
+     argumento y alterna — eso escondía el subtítulo, que es TODO el punto de C. */
+  el('capC').classList.toggle('hidden', !!done);
+
+  for (const k of ['a','b','c']){
+    SEND[k].disabled = !(k === 'c' ? c : (c || p));
+    MET[k].classList.toggle('off', !!done);
+    MIC[k].classList.toggle('rec', !done);
+  }
+  el('stepn').textContent = live ? `paso ${STEPS.indexOf(step)+1}/${STEPS.length}` : '';
+}
+
+let meterTimer = null, playTimer = null, i = 0;
+function meterOn(){
+  if (meterTimer) return;
+  meterTimer = setInterval(() => {
+    const h = [0,1,2,3].map(() => (3 + Math.random()*10).toFixed(1) + 'px');
+    for (const k of ['a','b','c'])
+      MET[k].querySelectorAll('i').forEach((b, n) => { b.style.height = h[n]; });
+  }, 110);
+}
+function meterOff(){ clearInterval(meterTimer); meterTimer = null; }
+
+const play = el('play');
+function stop(){
+  clearTimeout(playTimer); playTimer = null; meterOff();
+  play.classList.remove('on');
+  play.textContent = '▶ Reproducir los tres en paralelo';
+}
+function tick(){
+  render(STEPS[i], true);
+  if (i === STEPS.length - 1){ meterOff(); stop(); el('stepn').textContent = 'listo'; return; }
+  i++;
+  playTimer = setTimeout(tick, i === STEPS.length - 1 ? 950 : 640);
+}
+play.onclick = () => {
+  if (playTimer){ stop(); render(STEPS[FROZEN], false); return; }
+  i = 0; meterOn();
+  play.classList.add('on');
+  play.textContent = '■ Detener';
+  tick();
+};
+
+/* arranca detenido en el fotograma que importa, no vacío */
+render(STEPS[FROZEN], false);
+[0,1,2,3].forEach((n) => {
+  const h = [5,11,7,3][n] + 'px';
+  for (const k of ['a','b','c']) MET[k].querySelectorAll('i')[n].style.height = h;
+});
+</script>
+</body>
+</html>
