@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mock B · Intención — versión completa</title>
+<style>
+:root{
+  --bg:#0f0e0d; --side:#151413; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+  --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --acc:#4fa583; --link:#8fb0ea; --amber:#d8a05a; --add:#4cae7f; --del:#d96b5f;
+  --shell:#0b0a09; --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--shell); color:var(--ink);
+  font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; -webkit-font-smoothing:antialiased;
+  padding:24px; width:390px}
+svg{stroke-width:1.6; stroke:currentColor; fill:none; stroke-linecap:round; stroke-linejoin:round}
+.col{width:334px}
+.phead{margin:2px 2px 15px}
+.phead .k{font:600 10.5px/1 var(--mono); letter-spacing:.13em; color:var(--acc); text-transform:uppercase}
+.phead .n{font-size:16px; font-weight:650; margin:7px 0 0; letter-spacing:-.01em}
+.phead .s{font-size:12px; color:var(--muted); margin:5px 0 0}
+.note{width:300px; font-size:12px; line-height:1.6; color:var(--muted)}
+.note h4{color:var(--ink); font-size:12.5px; margin:0 0 8px}
+.note b{color:var(--ink2); font-weight:600}
+.note .g{color:var(--acc)}
+.note code{font-family:var(--mono); font-size:11px; color:var(--ink2)}
+.note ul{margin:0; padding-left:16px} .note li{margin:5px 0}
+
+/* ---------------- the pane ---------------- */
+.frame{width:334px; background:var(--bg); border:1px solid var(--line); border-radius:14px;
+  padding:0 13px 15px; overflow:hidden; box-shadow:0 18px 50px -22px rgba(0,0,0,.7)}
+.rh{display:flex; align-items:center; justify-content:flex-end; gap:4px; height:40px}
+.rh .ic{width:26px; height:26px; display:grid; place-items:center; color:var(--faint); border-radius:7px}
+.rh .ic svg{width:15px; height:15px}
+.pulse{width:7px; height:7px; border-radius:50%; background:var(--acc); flex:none;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%,transparent); animation:bp 1.6s ease-in-out infinite}
+@keyframes bp{0%,100%{opacity:1}50%{opacity:.45}}
+
+/* hero */
+.hero{padding:2px 2px 0}
+.ahora{display:flex; align-items:center; gap:8px}
+.ahora .lbl{font:600 10px/1 var(--mono); letter-spacing:.13em; text-transform:uppercase; color:var(--faint)}
+.ahora .live{margin-left:auto; display:flex; align-items:center; gap:6px; font:10.5px/1 var(--mono); color:var(--muted)}
+.say{font-size:15px; line-height:1.44; color:var(--ink); font-weight:450; margin:9px 0 0; letter-spacing:-.004em}
+.say .hl{color:var(--acc); font-weight:550}
+.prog{display:flex; align-items:center; gap:9px; margin:13px 0 3px}
+.pdots{display:flex; gap:5px; flex:none}
+.pdots i{width:8px; height:8px; border-radius:50%; background:var(--field)}
+.pdots i.done{background:var(--acc)}
+.pdots i.now{background:transparent; border:2px solid var(--acc); box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 16%,transparent); animation:bp 1.6s ease-in-out infinite}
+.prog .pl{font:11px/1 var(--mono); color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+
+/* section header */
+.sh{display:flex; align-items:baseline; gap:8px; padding:15px 2px 7px; margin-bottom:4px; border-bottom:1px solid var(--line)}
+.sh .sl{font:600 10px/1 var(--mono); letter-spacing:.1em; text-transform:uppercase; color:var(--faint); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.sh .rt{margin-left:auto; flex:none; font:10.5px/1 var(--mono); color:var(--faint)}
+.sh .cnt{margin-left:auto; flex:none; font-size:11px; font-weight:600; color:var(--muted); font-variant-numeric:tabular-nums}
+.sh .lv{margin-left:auto; flex:none; display:inline-flex; align-items:center; gap:5px; font-size:10.5px; font-weight:500; color:var(--acc)}
+
+/* plan checklist (text WRAPS — it is the content) */
+.plan{padding:1px 2px 2px}
+.prow{display:flex; align-items:flex-start; gap:9px; padding:4px 3px; font-size:12.5px; color:var(--ink2); min-width:0}
+.prow .mk{flex:none; width:14px; text-align:center; color:var(--muted); margin-top:1px}
+.prow .tx{min-width:0}
+.prow.done{color:var(--muted)} .prow.done .mk{color:var(--acc)}
+.prow.now{color:var(--ink); font-weight:550} .prow.now .mk{color:var(--acc)}
+.prow.todo{color:var(--faint)}
+
+/* live call */
+.call{display:flex; align-items:center; gap:9px; margin:6px 2px 4px; padding:8px 10px; border-radius:9px;
+  border:1px solid color-mix(in srgb,var(--acc) 30%,var(--line)); background:color-mix(in srgb,var(--acc) 7%,var(--card))}
+.call .ci{flex:none; color:var(--acc); display:grid; place-items:center} .call .ci svg{width:13px; height:13px}
+.call .cinfo{min-width:0; flex:1}
+.call .cn{font-size:12px; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.call .cn code{font:11px/1 var(--mono); color:var(--faint)}
+.call .cs{margin-top:2px; font:10.5px/1 var(--mono); color:var(--muted)}
+.call .cd{flex:none}
+
+/* subagents — model icon + name + elapsed / model + activity, all overflow-safe */
+.subs{display:flex; flex-direction:column; gap:3px; padding:4px 2px 2px}
+.sa{display:flex; align-items:center; gap:9px; padding:7px 9px; border-radius:8px; background:var(--card); border:1px solid transparent; min-width:0}
+.sa.run{border-color:color-mix(in srgb,var(--acc) 34%,var(--line2))}
+.sa .mi{flex:none; width:18px; height:18px; border-radius:5px; display:grid; place-items:center; color:var(--muted); background:var(--field)}
+.sa.run .mi{color:var(--acc); background:color-mix(in srgb,var(--acc) 15%,var(--card))}
+.sa .mi svg{width:12px; height:12px}
+.sa .said{min-width:0; flex:1; display:flex; flex-direction:column; gap:2px}
+.sa .satop{display:flex; align-items:baseline; gap:8px; min-width:0}
+.sa .nm{flex:1 1 auto; min-width:0; font-size:12px; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.sa .el{flex:none; font:10.5px/1 var(--mono); color:var(--faint)}
+.sa .sasub{display:flex; align-items:baseline; gap:6px; min-width:0}
+.sa .mdl{flex:0 1 auto; max-width:62%; min-width:0; font:10.5px/1 var(--mono); color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.sa .sep{flex:none; color:var(--faint)}
+.sa .act{flex:1 1 auto; min-width:0; font-size:10.5px; color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.sa .chev{flex:none; color:var(--faint)} .sa .chev svg{width:12px;height:12px}
+
+/* folds */
+.fold{display:flex; align-items:center; gap:8px; padding:7px 3px 4px; font-size:11.5px; color:var(--muted)}
+.fold .ch{flex:none; color:var(--faint); font-size:10px}
+
+/* archivos */
+.egh{display:flex; align-items:baseline; gap:7px; padding:5px 3px 3px; min-width:0}
+.egh .egn{font:600 10px/1.2 var(--mono); letter-spacing:.06em; text-transform:uppercase; color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.egh .egb{flex:none; font:10px/1 var(--mono); color:var(--faint)}
+.ef{display:flex; align-items:baseline; gap:7px; padding:4px 3px; border-radius:7px; min-width:0}
+.ef .efn{flex:none; max-width:62%; font-size:12.5px; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.ef .efp{flex:0 1 auto; min-width:0; font:10.5px/1 var(--mono); color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.ef .sp{flex:1; min-width:6px}
+.ef .st{flex:none; display:inline-flex; gap:6px; font:10.5px/1 var(--mono); font-variant-numeric:tabular-nums}
+.ef .st .a{color:var(--add)} .ef .st .d{color:var(--del)}
+
+/* segundo plano — expanded running item shows the full disclosure */
+.bg{margin:3px 2px; border-radius:9px; background:var(--card); border:1px solid color-mix(in srgb,var(--acc) 40%,var(--line2)); overflow:hidden}
+.bgs{display:flex; align-items:flex-start; gap:8px; padding:8px 9px}
+.bgs .ki{flex:none; width:15px; height:15px; margin-top:1px; color:var(--acc)} .bgs .ki svg{width:14px; height:14px}
+.bgs .bm{min-width:0; flex:1; display:flex; flex-direction:column; gap:2px}
+.bgs .bt{font-size:12.5px; font-weight:550; color:var(--ink); line-height:1.3; overflow-wrap:anywhere}
+.bgs .bsub{font:10.5px/1.2 var(--mono); color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.bgs .bend{flex:none; margin-top:3px}
+.bgbody{border-top:1px solid var(--line); margin:2px 9px 0; padding:7px 2px 8px 21px}
+.bgbody .bsum{font-size:11.5px; color:var(--ink2); line-height:1.35; margin-bottom:6px; overflow-wrap:anywhere}
+.bgbody .blast{font:10.5px/1.2 var(--mono); color:var(--muted); margin-bottom:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.bgbody .bkv{display:flex; align-items:baseline; gap:6px; min-width:0; margin:3px 0}
+.bgbody .bkv >span{flex:none; font:9.5px/1 var(--mono); text-transform:uppercase; color:var(--faint)}
+.bgbody .bkv code{min-width:0; font:10.5px/1 var(--mono); color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.bgbody .outbtn{margin-top:7px; font-size:11px; color:var(--ink2); background:transparent; border:0; padding:0; cursor:pointer}
+.bgbody .tail{margin:6px 0 0; padding:7px 9px; border-radius:6px; background:var(--field); color:var(--muted);
+  font:10.5px/1.4 var(--mono); white-space:pre-wrap; overflow-wrap:anywhere; max-height:120px; overflow:auto}
+@media (prefers-reduced-motion:reduce){ .pulse,.pdots i.now{animation:none} }
+</style>
+</head>
+<body>
+
+<div class="col">
+  <div class="phead">
+    <div class="k">Mock B · completo</div>
+    <div class="n">Intención</div>
+    <div class="s">panel derecho · turno en vivo · con nombres largos a propósito</div>
+  </div>
+
+  <div class="frame">
+    <div class="rh">
+      <span class="ic"><svg viewBox="0 0 20 20"><path d="M12 4h4v4M8 16H4v-4M16 4l-5 5M4 16l5-5"/></svg></span>
+      <span class="ic"><svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg></span>
+    </div>
+
+    <!-- HERO: intent sentence, no steer field -->
+    <div class="hero">
+      <div class="ahora"><span class="lbl">Ahora</span><span class="live"><span class="pulse"></span>1m 20s</span></div>
+      <div class="say">Rediseñando la <span class="hl">densidad del panel derecho</span> para quitar el espacio muerto y unificar la tipografía.</div>
+      <div class="prog">
+        <span class="pdots"><i class="done"></i><i class="done"></i><i class="now"></i><i></i></span>
+        <span class="pl">Paso 3 de 4 · Rediseñar densidad</span>
+      </div>
+    </div>
+
+    <!-- PLAN -->
+    <div class="sh"><span class="sl">Plan</span><span class="rt">3 / 4</span></div>
+    <div class="plan">
+      <div class="prow done"><span class="mk">✓</span><span class="tx">Inventariar features del panel</span></div>
+      <div class="prow done"><span class="mk">✓</span><span class="tx">Extraer tokens y CSS reales</span></div>
+      <div class="prow now"><span class="mk">◐</span><span class="tx">Rediseñar la densidad del panel derecho</span></div>
+      <div class="prow todo"><span class="mk">○</span><span class="tx">Verificar en dev y promover a prod</span></div>
+    </div>
+
+    <!-- EN CURSO: live call + subagents (icons + overflow-safe) -->
+    <div class="sh"><span class="sl">En curso</span><span class="lv"><span class="pulse"></span>3 activos</span></div>
+    <div class="call">
+      <span class="ci"><svg viewBox="0 0 16 16"><path d="M11 2l3 3-8 8-3.5.5.5-3.5z"/></svg></span>
+      <span class="cinfo">
+        <span class="cn">Edit <code>· RightRail.tsx</code></span>
+        <span class="cs">en curso · 8s</span>
+      </span>
+      <span class="cd pulse"></span>
+    </div>
+    <div class="subs">
+      <div class="sa run">
+        <span class="mi"><svg viewBox="0 0 16 16"><path d="M8 2l5 3v6l-5 3-5-3V5z"/></svg></span>
+        <span class="said">
+          <span class="satop"><span class="nm">auditoría de wire-protocol y lifecycle del daemon ACP</span><span class="el">1m 12s</span></span>
+          <span class="sasub"><span class="mdl">gpt-5.6-sol</span><span class="sep">·</span><span class="act">editando session_store.go</span></span>
+        </span>
+        <span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span>
+      </div>
+      <div class="sa run">
+        <span class="mi"><svg viewBox="0 0 16 16"><path d="M8 2v12M2 8h12M3.8 3.8l8.4 8.4M12.2 3.8l-8.4 8.4"/></svg></span>
+        <span class="said">
+          <span class="satop"><span class="nm">revisión de UI del rail</span><span class="el">44s</span></span>
+          <span class="sasub"><span class="mdl">claude-opus-4-8[1m][max]</span><span class="sep">·</span><span class="act">leyendo TareasCard.tsx</span></span>
+        </span>
+        <span class="chev"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span>
+      </div>
+    </div>
+    <div class="fold"><span class="ch">▸</span>2 subagentes terminados</div>
+    <div class="fold"><span class="ch">▸</span>14 llamadas terminadas</div>
+
+    <!-- ARCHIVOS -->
+    <div class="sh"><span class="sl">Archivos · este chat</span><span class="cnt">3</span></div>
+    <div class="egh"><span class="egn">workass</span><span class="egb">main</span></div>
+    <div class="ef"><span class="efn">AssistantMessage.tsx</span><span class="efp">desktop/renderer2/src/components</span><span class="sp"></span><span class="st"><span class="a">+48</span><span class="d">−12</span></span></div>
+    <div class="ef"><span class="efn">app.css</span><span class="efp">styles</span><span class="sp"></span><span class="st"><span class="a">+58</span><span class="d">−4</span></span></div>
+    <div class="ef"><span class="efn">session_store.go</span><span class="efp">cmd/workass</span><span class="sp"></span><span class="st"><span class="a">+12</span><span class="d">−2</span></span></div>
+    <div class="fold"><span class="ch">▸</span>2 archivos más</div>
+
+    <!-- SEGUNDO PLANO -->
+    <div class="sh"><span class="sl">Segundo plano</span><span class="lv"><span class="pulse"></span>1 en curso</span></div>
+    <div class="bg">
+      <div class="bgs">
+        <span class="ki"><svg viewBox="0 0 16 16"><path d="M2 4h12v8H2z"/><path d="M4.5 6.5l2.2 1.7-2.2 1.7M8.6 10h3"/></svg></span>
+        <span class="bm">
+          <span class="bt">Rebuild-Relaunch.ps1 · bundle de prod + firma y notarización</span>
+          <span class="bsub">bash · 2m 03s · pid 70201</span>
+        </span>
+        <span class="bend"><span class="pulse"></span></span>
+      </div>
+      <div class="bgbody">
+        <div class="bsum">Recompilando el daemon y reempaquetando la app; esperando el gate del repositorio.</div>
+        <div class="blast">go test ./cmd/workass/…</div>
+        <div class="bkv"><span>id</span><code>xwLP8tobeP_b7S</code></div>
+        <div class="bkv"><span>out</span><code>…/state/external-work/xwLP8tobeP_b7S.output</code></div>
+        <button class="outbtn">ver salida</button>
+        </div>
+    </div>
+    <div class="fold"><span class="ch">▸</span>3 trabajos terminados</div>
+  </div>
+</div>
+
+</body>
+</html>

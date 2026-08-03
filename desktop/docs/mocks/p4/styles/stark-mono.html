@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>workass · P4 estilo — Stark</title>
+<style>
+/* ============================================================
+   STYLE TEMPLATE — "Stark"
+   Hipótesis: escuela Vercel/Geist. Blanco y negro casi puros,
+   disciplina de contraste máximo, bordes hairline de 1px, cero
+   softness (radios diminutos), detalles en mono. El verde aparece
+   SÓLO en el foco interactivo y la acción primaria — nada más.
+   IA idéntica a las demás plantillas; sólo cambia el estilo.
+   ============================================================ */
+:root{
+  /* dark — near-pure black, grayscale ramp */
+  --bg-0:#000000; --bg-1:#0a0a0a;
+  --panel:#0a0a0a; --panel-2:#111111; --sunk:#050505;
+  --line:#242424; --line-2:#333333; --line-3:#484848;
+  --ink:#fafafa; --ink-2:#d4d4d4; --muted:#8f8f8f; --label:#6e6e6e;
+  --accent:#3ecf8e; --accent-ink:#04120b;
+  --accent-focus:#3ecf8e;
+  --tok-kw:#fafafa; --tok-typ:#d4d4d4; --tok-fn:#ededed; --tok-num:#b8b8b8; --tok-str:#a8a8a8; --tok-cmt:#5f5f5f;
+}
+:root[data-theme="light"]{
+  --bg-0:#ffffff; --bg-1:#fafafa;
+  --panel:#ffffff; --panel-2:#fafafa; --sunk:#f5f5f5;
+  --line:#eaeaea; --line-2:#dcdcdc; --line-3:#c4c4c4;
+  --ink:#0a0a0a; --ink-2:#2c2c2c; --muted:#666666; --label:#787878;
+  --accent:#0e7d56; --accent-ink:#ffffff;
+  --accent-focus:#0e7d56;
+  --tok-kw:#0a0a0a; --tok-typ:#2c2c2c; --tok-fn:#171717; --tok-num:#4a4a4a; --tok-str:#5a5a5a; --tok-cmt:#9a9a9a;
+}
+:root{
+  --font-ui:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+  --font-mono:ui-monospace,"SF Mono","Geist Mono","JetBrains Mono","Consolas",monospace;
+  --measure:72ch;
+  --r:2px;                 /* one radius — near-square */
+  --rail-w:56px; --list-w:260px;
+}
+*{box-sizing:border-box;}
+html{font-size:15px;}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
+body{
+  margin:0; height:100vh; overflow:hidden;
+  font-family:var(--font-ui); font-size:1rem; line-height:1.6;
+  color:var(--ink); background:var(--bg-0);
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+}
+code,pre,.mono{font-family:var(--font-mono);}
+button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer;padding:0;}
+:where(button,textarea,[tabindex],a):focus-visible{outline:2px solid var(--accent-focus);outline-offset:2px;border-radius:var(--r);}
+::-webkit-scrollbar{width:10px;height:10px;}
+::-webkit-scrollbar-thumb{background:var(--line-2);border:3px solid transparent;background-clip:padding-box;}
+::-webkit-scrollbar-thumb:hover{background:var(--line-3);}
+.app{display:grid;grid-template-columns:var(--rail-w) var(--list-w) 1fr;height:100vh;}
+.ic{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;display:block;}
+
+/* ============ RAIL ============ */
+.rail{display:flex;flex-direction:column;align-items:center;gap:4px;padding:12px 0;background:var(--bg-1);border-right:1px solid var(--line);}
+.rail-mono{width:32px;height:32px;border:1px solid var(--line-3);border-radius:var(--r);color:var(--ink);
+  display:grid;place-items:center;font-family:var(--font-mono);font-weight:700;font-size:.9rem;margin-bottom:8px;}
+.rail-btn{width:40px;height:40px;border-radius:var(--r);color:var(--muted);display:grid;place-items:center;position:relative;}
+.rail-btn:hover{color:var(--ink);background:var(--panel-2);}
+.rail-btn.active{color:var(--ink);}
+.rail-btn.active::before{content:"";position:absolute;left:-8px;top:8px;bottom:8px;width:2px;background:var(--ink);}
+.rail-btn .tip{position:absolute;left:48px;top:50%;transform:translateY(-50%);white-space:nowrap;background:var(--ink);
+  color:var(--bg-0);font-family:var(--font-mono);font-size:.7rem;padding:3px 8px;border-radius:var(--r);opacity:0;pointer-events:none;z-index:5;}
+.rail-btn:hover .tip{opacity:1;}
+.rail-spacer{flex:1;}
+.rail-avatar{width:32px;height:32px;border-radius:var(--r);border:1px solid var(--line-3);color:var(--ink-2);
+  display:grid;place-items:center;font-family:var(--font-mono);font-weight:700;font-size:.76rem;}
+
+/* ============ LIST ============ */
+.list{display:flex;flex-direction:column;min-height:0;background:var(--bg-0);border-right:1px solid var(--line);}
+.list-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:16px 14px 12px;}
+.engine-chip{display:inline-flex;align-items:center;gap:7px;font-family:var(--font-mono);font-size:.68rem;color:var(--muted);
+  border:1px solid var(--line-2);padding:4px 9px;border-radius:var(--r);letter-spacing:.03em;text-transform:uppercase;}
+.engine-chip .dot{width:6px;height:6px;border-radius:99px;background:var(--ink);animation:blink 1.4s infinite;}
+.theme-btn{width:30px;height:30px;border-radius:var(--r);color:var(--muted);display:grid;place-items:center;border:1px solid transparent;}
+.theme-btn:hover{color:var(--ink);border-color:var(--line-2);}
+.new-conv{display:flex;align-items:center;gap:9px;margin:0 14px 14px;padding:9px 12px;width:calc(100% - 28px);
+  font-size:.84rem;font-weight:600;color:var(--ink);border:1px solid var(--line-2);border-radius:var(--r);background:var(--panel);}
+.new-conv:hover{border-color:var(--line-3);}
+.new-conv svg{width:16px;height:16px;}
+.list-scroll{flex:1;min-height:0;overflow:auto;padding:0 8px 8px;}
+.group{margin-bottom:16px;}
+.group-label{display:flex;align-items:center;gap:6px;padding:6px 8px 8px;font-family:var(--font-mono);font-size:.64rem;
+  font-weight:600;letter-spacing:.12em;color:var(--label);text-transform:uppercase;border-bottom:1px solid var(--line);margin-bottom:4px;}
+.group-count{margin-left:auto;color:var(--muted);}
+.conv{display:flex;align-items:center;gap:11px;width:100%;text-align:left;padding:9px 10px;border-radius:var(--r);position:relative;}
+.conv:hover{background:var(--panel-2);}
+.conv.active{background:var(--panel-2);box-shadow:inset 2px 0 0 var(--ink);}
+.conv-dot{width:6px;height:6px;border-radius:99px;flex:none;background:var(--line-3);}
+.conv-dot.on{background:var(--ink);}
+.conv-dot.run{background:var(--ink);animation:blink 1.2s infinite;}
+.conv-dot.draft{background:var(--muted);}
+@keyframes blink{0%,100%{opacity:1;}50%{opacity:.2;}}
+.conv-text{display:flex;flex-direction:column;min-width:0;gap:2px;flex:1;}
+.conv-title{font-size:.84rem;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.conv-meta{font-family:var(--font-mono);font-size:.66rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.muted-row .conv-title{color:var(--muted);font-weight:500;}
+.badge{margin-left:auto;flex:none;font-family:var(--font-mono);font-size:.64rem;font-weight:700;color:var(--bg-0);
+  background:var(--ink);min-width:18px;height:18px;padding:0 5px;border-radius:var(--r);display:grid;place-items:center;}
+
+/* ============ MAIN ============ */
+.main{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--bg-0);}
+.transcript{flex:1;min-height:0;overflow:auto;padding:36px 24px 12px;}
+.thread{max-width:var(--measure);margin:0 auto;}
+
+/* user — quiet compact */
+.user-msg{border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;margin:0 0 28px;background:var(--panel-2);}
+.user-msg p{margin:0;color:var(--ink-2);font-size:.95rem;}
+.ctx-chip{display:inline-flex;align-items:center;gap:6px;margin-top:9px;font-family:var(--font-mono);font-size:.72rem;
+  color:var(--muted);border:1px solid var(--line-2);padding:3px 9px;border-radius:var(--r);}
+.ctx-chip svg{width:13px;height:13px;}
+
+/* agent — unboxed */
+.think{display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:.74rem;color:var(--muted);
+  margin-bottom:16px;text-transform:uppercase;letter-spacing:.06em;}
+.think svg{width:14px;height:14px;}
+.plan{border:1px solid var(--line-2);border-radius:var(--r);background:var(--panel);padding:12px 14px;margin-bottom:18px;}
+.plan-head{font-family:var(--font-mono);font-size:.64rem;font-weight:700;letter-spacing:.14em;color:var(--label);
+  text-transform:uppercase;margin-bottom:12px;padding-bottom:9px;border-bottom:1px solid var(--line);}
+.plan-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px;}
+.plan-list li{display:flex;align-items:center;gap:11px;font-size:.86rem;color:var(--ink-2);}
+.plan-box{width:14px;height:14px;border:1px solid var(--line-3);flex:none;position:relative;border-radius:1px;}
+.plan-list li[data-st="done"] .plan-box{background:var(--ink);border-color:var(--ink);}
+.plan-list li[data-st="done"] .plan-box::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;
+  border:solid var(--bg-0);border-width:0 2px 2px 0;transform:rotate(45deg);}
+.plan-list li[data-st="done"]{color:var(--muted);}
+.plan-list li[data-st="active"] .plan-box{box-shadow:inset 0 0 0 3px var(--bg-0),inset 0 0 0 4px var(--ink);border-color:var(--ink);}
+.tool-row{display:flex;align-items:center;gap:9px;font-family:var(--font-mono);font-size:.74rem;color:var(--muted);
+  padding:8px 11px;border:1px solid var(--line);border-radius:var(--r);background:var(--sunk);margin-bottom:18px;}
+.tool-row .ok{color:var(--ink);font-weight:700;}
+.prose{color:var(--ink);}
+.prose p{margin:0 0 15px;}
+.prose strong{font-weight:700;color:var(--ink);}
+.prose :not(pre)>code{font-family:var(--font-mono);font-size:.85em;border:1px solid var(--line-2);color:var(--ink);padding:1px 5px;border-radius:var(--r);}
+pre.code{background:var(--sunk);border:1px solid var(--line-2);border-radius:var(--r);padding:14px 16px;overflow:auto;
+  font-size:.82rem;line-height:1.7;margin:0 0 18px;color:var(--ink-2);}
+.tok-kw{color:var(--tok-kw);font-weight:700;}.tok-typ{color:var(--tok-typ);}.tok-fn{color:var(--tok-fn);}
+.tok-num{color:var(--tok-num);}.tok-str{color:var(--tok-str);}.tok-cmt{color:var(--tok-cmt);font-style:italic;}
+.table-wrap{overflow-x:auto;margin:0 0 18px;border:1px solid var(--line-2);border-radius:var(--r);}
+table{border-collapse:collapse;width:100%;font-size:.84rem;}
+thead th{text-align:left;font-family:var(--font-mono);font-weight:700;color:var(--label);font-size:.64rem;letter-spacing:.1em;
+  text-transform:uppercase;padding:10px 14px;border-bottom:1px solid var(--line-2);}
+tbody td{padding:10px 14px;border-bottom:1px solid var(--line);color:var(--ink-2);}
+tbody tr:last-child td{border-bottom:none;}
+.pill{font-family:var(--font-mono);font-size:.66rem;font-weight:700;padding:1px 8px;border:1px solid var(--line-3);border-radius:var(--r);color:var(--ink);text-transform:uppercase;}
+.pill.reap{color:var(--muted);border-color:var(--line-2);}
+pre.diff{border:1px solid var(--line-2);border-radius:var(--r);overflow:auto;font-size:.8rem;line-height:1.7;margin:0 0 18px;padding:6px 0;background:var(--sunk);}
+pre.diff span{display:block;padding:1px 16px 1px 30px;white-space:pre;position:relative;}
+pre.diff span::before{position:absolute;left:12px;color:var(--label);}
+.d-hunk{color:var(--muted);border-block:1px solid var(--line);}
+.d-ctx{color:var(--ink-2);}
+.d-ctx::before{content:" ";}
+.d-add{color:var(--ink);background:var(--panel-2);box-shadow:inset 3px 0 0 var(--ink);}
+.d-add::before{content:"+";color:var(--ink);}
+.d-del{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line-3);}
+.d-del::before{content:"−";color:var(--muted);}
+
+/* permission card */
+.perm{border:1px solid var(--line-3);border-radius:var(--r);background:var(--panel);overflow:hidden;margin-bottom:8px;}
+.perm-head{display:flex;align-items:center;gap:11px;padding:13px 14px;border-bottom:1px solid var(--line);}
+.perm-ic{width:28px;height:28px;border-radius:var(--r);border:1px solid var(--line-3);color:var(--ink);display:grid;place-items:center;flex:none;}
+.perm-ic svg{width:15px;height:15px;}
+.perm-titles{flex:1;min-width:0;}
+.perm-title{font-size:.86rem;font-weight:700;}
+.perm-sub{font-family:var(--font-mono);font-size:.72rem;color:var(--muted);margin-top:2px;}
+.perm-actions{display:flex;gap:8px;padding:13px 14px;}
+.btn{font-size:.82rem;font-weight:600;padding:8px 14px;border-radius:var(--r);border:1px solid var(--line-3);color:var(--ink);}
+.btn:hover{background:var(--panel-2);}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);}
+.btn.primary:hover{filter:brightness(1.06);}
+.btn.ghost{border-color:transparent;color:var(--muted);}
+.btn.ghost:hover{color:var(--ink);}
+
+/* composer */
+.composer{padding:10px 24px 16px;background:var(--bg-0);}
+.composer-inner{max-width:var(--measure);margin:0 auto;border:1px solid var(--line-2);border-radius:var(--r);background:var(--panel);overflow:hidden;}
+.composer-inner:focus-within{border-color:var(--accent);}
+.composer textarea{width:100%;border:none;background:none;resize:none;color:var(--ink);font-family:inherit;font-size:.95rem;line-height:1.5;padding:13px 15px 4px;outline:none;}
+.composer textarea::placeholder{color:var(--muted);}
+.composer-bar{display:flex;align-items:center;justify-content:space-between;padding:8px 10px 9px;border-top:1px solid var(--line);}
+.composer-left{display:flex;align-items:center;gap:4px;}
+.sel{display:flex;align-items:center;gap:7px;font-family:var(--font-mono);font-size:.74rem;font-weight:600;color:var(--ink-2);padding:6px 10px;border-radius:var(--r);}
+.sel:hover{background:var(--panel-2);}
+.sel .k{color:var(--label);text-transform:uppercase;letter-spacing:.06em;}
+.send{display:flex;align-items:center;gap:7px;font-size:.82rem;font-weight:700;color:var(--accent-ink);background:var(--accent);padding:8px 14px;border-radius:var(--r);}
+.send:hover{filter:brightness(1.06);}
+.send svg{width:15px;height:15px;stroke:var(--accent-ink);}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-chats" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
+  <symbol id="i-triage" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></symbol>
+  <symbol id="i-brain" viewBox="0 0 24 24"><path d="M9 3a3 3 0 0 0-3 3 3 3 0 0 0-1 5.8V17a3 3 0 0 0 6 0V6a3 3 0 0 0-2-3z"/></symbol>
+  <symbol id="i-term" viewBox="0 0 24 24"><path d="m4 7 5 5-5 5M12 19h8"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2 15 22l-4-9-9-4z"/></symbol>
+  <symbol id="i-theme" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></symbol>
+</defs></svg>
+
+<div class="app">
+  <nav class="rail" aria-label="Espacios">
+    <div class="rail-mono">w</div>
+    <button class="rail-btn active" aria-current="page"><svg class="ic"><use href="#i-chats"/></svg><span class="tip">Chats</span></button>
+    <button class="rail-btn"><svg class="ic"><use href="#i-triage"/></svg><span class="tip">Triage</span></button>
+    <button class="rail-btn"><svg class="ic"><use href="#i-activity"/></svg><span class="tip">Actividad</span></button>
+    <div class="rail-spacer"></div>
+    <button class="rail-avatar" title="Martin">M</button>
+    <button class="rail-btn" aria-labelledby="lbl-ajustes"><svg class="ic"><use href="#i-gear"/></svg><span class="tip" id="lbl-ajustes">Ajustes</span></button>
+  </nav>
+
+  <aside class="list" aria-label="Conversaciones">
+    <div class="list-head">
+      <span class="engine-chip"><span class="dot"></span>3 engines · 1.6 GB</span>
+      <button class="theme-btn" id="themeBtn" title="Cambiar tema" aria-label="Cambiar tema"><svg class="ic"><use href="#i-theme"/></svg></button>
+    </div>
+    <button class="new-conv"><svg><use href="#i-plus"/></svg> Nueva conversación</button>
+    <div class="list-scroll">
+      <div class="group">
+        <div class="group-label">Devin · activas <span class="group-count">3</span></div>
+        <button class="conv active"><span class="conv-dot on"></span><span class="conv-text"><span class="conv-title">Reaper de hibernación</span><span class="conv-meta">daemon/reaper · 2 min</span></span></button>
+        <button class="conv"><span class="conv-dot run"></span><span class="conv-text"><span class="conv-title">Reconnect WebSocket</span><span class="conv-meta">ejecutando · 00:41</span></span><span class="badge">3</span></button>
+        <button class="conv"><span class="conv-dot"></span><span class="conv-text"><span class="conv-title">Landmines del PORT-SPEC</span><span class="conv-meta">idle · hace 1 h</span></span></button>
+      </div>
+      <div class="group">
+        <div class="group-label">Assist · borradores <span class="group-count">2</span></div>
+        <button class="conv"><span class="conv-dot draft"></span><span class="conv-text"><span class="conv-title">Respuesta a Teams</span><span class="conv-meta">borrador · @infra</span></span></button>
+        <button class="conv"><span class="conv-dot"></span><span class="conv-text"><span class="conv-title">Review PR #482</span><span class="conv-meta">esperando CI</span></span></button>
+      </div>
+      <div class="group">
+        <div class="group-label">Archivados <span class="group-count">2</span></div>
+        <button class="conv muted-row"><span class="conv-dot"></span><span class="conv-text"><span class="conv-title">Migración al daemon Go</span><span class="conv-meta">cerrado ayer</span></span></button>
+        <button class="conv muted-row"><span class="conv-dot"></span><span class="conv-text"><span class="conv-title">Bench de Qwen local</span><span class="conv-meta">cerrado · lun</span></span></button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="transcript">
+      <div class="thread">
+        <div class="user-msg">
+          <p>El reaper está hibernando chats que todavía están trabajando. Encontrá la race y proponé un fix.</p>
+          <span class="ctx-chip"><svg class="ic" style="width:13px;height:13px"><use href="#i-file"/></svg>daemon/reaper/reaper.go</span>
+        </div>
+
+        <div class="think"><svg class="ic" style="width:14px;height:14px"><use href="#i-brain"/></svg>Pensó durante 8 s</div>
+
+        <div class="plan">
+          <div class="plan-head">Plan</div>
+          <ul class="plan-list">
+            <li data-st="done"><span class="plan-box"></span>Reproducir la race con un test de lease activo</li>
+            <li data-st="active"><span class="plan-box"></span>Localizar el chequeo de actividad en el barrido</li>
+            <li data-st="todo"><span class="plan-box"></span>Fijar (pin) el lease mientras hay prompt en vuelo</li>
+          </ul>
+        </div>
+
+        <div class="tool-row"><span class="ok">✓</span> Leer reaper.go · 120 líneas</div>
+
+        <div class="prose">
+          <p>La race ocurre entre el <strong>barrido del reaper</strong> y la comprobación de <code>lastActivity</code>. El reaper lee el timestamp, decide hibernar y <strong>después</strong> toma el lock — para entonces ya llegó un prompt nuevo, pero el engine se reap igual.</p>
+          <p>La comprobación y la acción no son atómicas. Entre el <code>RLock</code> de lectura y el <code>Lock</code> de escritura hay una ventana donde <code>markActive()</code> corre desde otra goroutine:</p>
+
+          <pre class="code"><span class="tok-cmt">// reaper.go — barrido cada 30 s</span>
+<span class="tok-kw">func</span> (r *<span class="tok-typ">Reaper</span>) <span class="tok-fn">sweep</span>() {
+  <span class="tok-kw">for</span> _, s := <span class="tok-kw">range</span> r.<span class="tok-fn">idleSessions</span>() {   <span class="tok-cmt">// lee bajo RLock</span>
+    <span class="tok-kw">if</span> time.<span class="tok-fn">Since</span>(s.lastActivity) &gt; <span class="tok-num">idleTTL</span> {
+      r.<span class="tok-fn">hibernate</span>(s)                     <span class="tok-cmt">// toma Lock — ¡tarde!</span>
+    }
+  }
+}</pre>
+
+          <p>Bajo carga (10+ chats) el reaper hiberna sesiones con prompt en vuelo. La política correcta:</p>
+
+          <div class="table-wrap"><table>
+            <thead><tr><th>Estado del chat</th><th>Política</th><th>Acción del reaper</th></tr></thead>
+            <tbody>
+              <tr><td>Prompt en vuelo</td><td><span class="pill pin">pin</span></td><td>Nunca hibernar</td></tr>
+              <tr><td>Idle &lt; TTL</td><td><span class="pill keep">keep</span></td><td>Mantener caliente</td></tr>
+              <tr><td>Idle &gt; TTL</td><td><span class="pill reap">reap</span></td><td>Hibernar y replay</td></tr>
+            </tbody>
+          </table></div>
+
+          <p>El fix revalida el lease dentro del <code>Lock</code> antes de expulsar:</p>
+
+          <pre class="diff"><span class="d-hunk">@@ daemon/reaper/reaper.go @@</span><span class="d-ctx">func (r *Reaper) hibernate(s *Session) {</span><span class="d-del">r.evict(s)</span><span class="d-add">if s.pinned || s.inFlight() { return }</span><span class="d-add">r.evict(s) // revalidado bajo Lock</span><span class="d-ctx">}</span></pre>
+
+          <p>Añadí <code>TestActiveLeasePin</code>, que reproduce la ventana con 200 goroutines. Falta correrlo con <code>-race</code> para confirmar.</p>
+        </div>
+
+        <div class="perm">
+          <div class="perm-head">
+            <span class="perm-ic"><svg class="ic" style="width:15px;height:15px"><use href="#i-term"/></svg></span>
+            <div class="perm-titles"><div class="perm-title">Ejecutar go test ./daemon/reaper</div><div class="perm-sub">go test ./daemon/reaper -run TestActiveLeasePin -race</div></div>
+          </div>
+          <div class="perm-actions">
+            <button class="btn primary">Permitir una vez</button>
+            <button class="btn">Permitir siempre</button>
+            <button class="btn ghost">Rechazar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="composer-inner">
+        <textarea rows="1" placeholder="Escribe un mensaje…"></textarea>
+        <div class="composer-bar">
+          <div class="composer-left">
+            <button class="sel"><span class="k">Modelo</span> Devin ▾</button>
+            <button class="sel"><span class="k">Permisos</span> Agent ▾</button>
+          </div>
+          <button class="send">Enviar <svg><use href="#i-send"/></svg></button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement;
+  function set(t){root.setAttribute('data-theme',t);}
+  set(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+  document.getElementById('themeBtn').addEventListener('click',function(){
+    set(root.getAttribute('data-theme')==='light'?'dark':'light');
+  });
+})();
+</script>
+</body>
+</html>

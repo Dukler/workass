@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>workass · P4 style — Dense Pro</title>
+<style>
+/* ============================================================
+   STYLE: DENSE PRO — the 10-concurrent-chats operator console.
+   Hypothesis: density is a feature, not a compromise. 13px base,
+   tight (AA-safe) leading, hairline borders, and per-chat status
+   metadata ALWAYS visible in the list (state · RAM · timer) so the
+   operator never opens a chat to learn if it's alive. Density comes
+   from information, never decoration. Green is accent ONLY:
+   run state, active row, primary action, send.
+   ============================================================ */
+:root{
+  --bg-0:#1a1917; --bg-1:#1e1d1b;
+  --panel:#222120; --panel-2:#262523; --sunk:#1c1b19;
+  --line:rgba(255,255,255,.06); --line-2:rgba(255,255,255,.11); --line-3:rgba(255,255,255,.19);
+  --ink:#f0efec; --ink-2:#d6d4cf; --muted:#a5a39c; --label:#8d8b84;
+  --accent:#42cf90; --accent-ink:#0e1310;
+  --accent-soft:rgba(66,207,144,.13); --accent-softer:rgba(66,207,144,.06);
+  --warn:#d9a441; --warn-soft:rgba(217,164,65,.12);
+  --idle:#7f8a86; --risk:#e58c72;
+  --tok-kw:#c8a0e8; --tok-typ:#6cc7db; --tok-fn:#e2e0da; --tok-num:#e59a80; --tok-str:#d9b877; --tok-cmt:#8b8981;
+  --add-ink:#83dbac; --add-bg:rgba(66,207,144,.10);
+  --del-ink:#e7a58e; --del-bg:rgba(229,140,114,.11);
+  --shadow:0 1px 2px rgba(0,0,0,.22);
+}
+:root[data-theme="light"]{
+  --bg-0:#faf9f7; --bg-1:#f3f2ef; --panel:#ffffff; --panel-2:#f8f7f4; --sunk:#f0efec;
+  --line:rgba(20,19,16,.08); --line-2:rgba(20,19,16,.13); --line-3:rgba(20,19,16,.22);
+  --ink:#1b1a17; --ink-2:#3d3c37; --muted:#5b5952; --label:#6b6961;
+  --accent:#0d7d55; --accent-ink:#ffffff;
+  --accent-soft:rgba(13,125,85,.11); --accent-softer:rgba(13,125,85,.05);
+  --warn:#8a6100; --warn-soft:rgba(138,97,0,.10);
+  --idle:#6f746f; --risk:#a8442a;
+  --tok-kw:#7a3fb0; --tok-typ:#0f6f86; --tok-fn:#3d3c37; --tok-num:#a8442a; --tok-str:#856a1c; --tok-cmt:#6b6961;
+  --add-ink:#0d7d55; --add-bg:rgba(13,125,85,.10);
+  --del-ink:#a8442a; --del-bg:rgba(168,68,42,.09);
+  --shadow:0 1px 2px rgba(20,19,16,.05);
+}
+:root{
+  --font-ui:"Aptos","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",sans-serif;
+  --font-mono:"Cascadia Code","Cascadia Mono","Consolas",ui-monospace,"SF Mono",monospace;
+  --measure:74ch;
+  --r-md:7px; --r-sm:5px;
+}
+*{box-sizing:border-box;}
+html{font-size:13px;}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
+body{
+  margin:0; height:100vh; overflow:hidden;
+  font-family:var(--font-ui); font-size:1rem; line-height:1.5;
+  color:var(--ink); background:var(--bg-0);
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+}
+code,pre{font-family:var(--font-mono);}
+button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer;}
+:where(button,textarea,[tabindex]):focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px;}
+::-webkit-scrollbar{width:9px;height:9px;}
+::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:99px;border:2px solid transparent;background-clip:padding-box;}
+
+.app{display:grid;grid-template-columns:52px 260px 1fr;height:100vh;background:var(--bg-0);}
+
+/* ============ ICON RAIL ============ */
+.rail{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 0;background:var(--bg-1);border-right:1px solid var(--line);}
+.rail-mono{width:28px;height:28px;border-radius:6px;background:var(--accent);color:var(--accent-ink);display:grid;place-items:center;font-weight:800;font-size:.85rem;margin-bottom:6px;}
+.rail-spaces{display:flex;flex-direction:column;gap:2px;flex:1;}
+.rail-btn{width:36px;height:34px;border-radius:7px;color:var(--muted);display:grid;place-items:center;font-size:1rem;position:relative;}
+.rail-btn:hover{background:var(--line);color:var(--ink);}
+.rail-btn.active{color:var(--ink);background:var(--panel);box-shadow:inset 0 0 0 1px var(--line-2);}
+.rail-btn.active::before{content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);width:2.5px;height:15px;border-radius:99px;background:var(--accent);}
+.rail-foot{display:flex;flex-direction:column;align-items:center;gap:6px;}
+.rail-avatar{width:28px;height:28px;border-radius:99px;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;font-size:.66rem;font-weight:800;}
+.rail-gear{width:36px;height:32px;border-radius:7px;color:var(--muted);display:grid;place-items:center;font-size:1.05rem;}
+.rail-gear:hover{background:var(--line);color:var(--ink);}
+
+/* ============ CONVERSATION LIST ============ */
+.list{display:flex;flex-direction:column;min-height:0;background:var(--bg-1);border-right:1px solid var(--line);}
+.list-head{display:flex;align-items:center;gap:8px;padding:9px 10px;border-bottom:1px solid var(--line);}
+.engine-chip{display:flex;align-items:center;gap:6px;font-size:.7rem;font-family:var(--font-mono);color:var(--muted);}
+.engine-chip .d{width:6px;height:6px;border-radius:99px;background:var(--warn);animation:pulse 1.6s infinite;}
+.engine-chip b{color:var(--ink-2);font-weight:600;}
+.new{margin-left:auto;display:flex;align-items:center;gap:5px;font-size:.72rem;font-weight:700;color:var(--ink-2);border:1px solid var(--line-2);padding:4px 9px;border-radius:var(--r-md);}
+.new:hover{border-color:var(--line-3);color:var(--ink);}
+.new .plus{color:var(--accent);font-size:.95rem;line-height:1;}
+.list-scroll{flex:1;min-height:0;overflow:auto;padding:2px 0 8px;}
+.group{margin-bottom:2px;}
+.group-label{display:flex;align-items:center;gap:6px;padding:9px 12px 5px;font-size:.62rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--label);}
+.group-count{margin-left:auto;font-family:var(--font-mono);color:var(--muted);}
+.conv{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px;width:100%;text-align:left;padding:6px 12px;position:relative;border-left:2px solid transparent;}
+.conv:hover{background:var(--panel-2);}
+.conv.active{background:var(--panel);border-left-color:var(--accent);}
+.dot{width:7px;height:7px;border-radius:99px;flex:none;background:var(--line-3);}
+.dot.on{background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
+.dot.run{background:var(--accent);animation:pulse 1.5s infinite;box-shadow:0 0 0 3px var(--accent-soft);}
+.dot.draft{background:var(--risk);}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}
+.conv-text{display:flex;flex-direction:column;min-width:0;gap:1px;}
+.conv-title{font-size:.82rem;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.conv-meta{display:flex;align-items:center;gap:7px;font-size:.66rem;font-family:var(--font-mono);color:var(--muted);white-space:nowrap;}
+.conv-meta .st{font-weight:700;}
+.conv-meta .st.run{color:var(--accent);}
+.conv-meta .st.idle{color:var(--idle);}
+.conv-meta .st.draft{color:var(--risk);}
+.conv-meta .sep{opacity:.4;}
+.muted-row .conv-title{color:var(--muted);font-weight:500;}
+.conv-right{display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex:none;}
+.badge{font-size:.6rem;font-weight:800;color:var(--accent-ink);background:var(--accent);padding:0 6px;border-radius:99px;line-height:1.5;}
+.ram{font-size:.62rem;font-family:var(--font-mono);color:var(--label);}
+
+/* ============ MAIN ============ */
+.main{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--bg-0);position:relative;}
+.stage{flex:1;min-height:0;overflow:auto;padding:20px 22px 14px;}
+.thread{max-width:min(780px,100%);margin:0 auto;}
+
+/* user — quiet compact block */
+.user-msg{margin:0 0 18px;padding:9px 12px;border-radius:var(--r-md);background:var(--panel-2);border:1px solid var(--line);max-width:var(--measure);}
+.user-msg p{margin:0;color:var(--ink-2);font-size:.92rem;}
+.chip{display:inline-flex;align-items:center;gap:5px;margin-top:7px;font-size:.7rem;font-family:var(--font-mono);color:var(--muted);background:var(--sunk);border:1px solid var(--line-2);padding:2px 7px;border-radius:5px;}
+.chip::before{content:"◫";opacity:.7;}
+
+/* agent turn — unboxed document */
+.turn{max-width:var(--measure);}
+.think{font-size:.78rem;color:var(--muted);font-style:italic;border-left:2px solid var(--line-2);padding:1px 0 1px 9px;margin-bottom:10px;}
+.plan{border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel-2);padding:8px 11px;margin-bottom:10px;}
+.plan-head{font-size:.62rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--label);margin-bottom:6px;}
+.plan-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;}
+.plan-list li{display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--ink-2);}
+.box{width:12px;height:12px;border-radius:3px;border:1.5px solid var(--line-3);flex:none;}
+.plan-list li[data-st="done"] .box{background:var(--accent);border-color:var(--accent);}
+.plan-list li[data-st="done"]{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line-3);}
+.plan-list li[data-st="active"] .box{border-color:var(--accent);box-shadow:inset 0 0 0 2.5px var(--accent-soft);}
+.tool-row{display:flex;align-items:center;gap:8px;font-size:.76rem;color:var(--muted);margin-bottom:10px;padding:4px 9px;border-radius:var(--r-sm);background:var(--sunk);border:1px solid var(--line);}
+.tool-row .ok{color:var(--accent);font-weight:800;}
+.tool-row code{font-family:var(--font-mono);color:var(--ink-2);}
+.tool-row .n{margin-left:auto;font-family:var(--font-mono);font-size:.7rem;color:var(--label);}
+.prose p{margin:0 0 10px;color:var(--ink);}
+.prose strong{font-weight:700;}
+.prose h3{font-size:.94rem;font-weight:700;letter-spacing:-.01em;margin:14px 0 7px;}
+.prose :not(pre)>code{font-size:.86em;background:var(--line);color:var(--ink-2);padding:1px 5px;border-radius:4px;}
+pre.code{background:var(--sunk);border:1px solid var(--line);border-radius:var(--r-md);padding:10px 13px;overflow:auto;font-size:.8rem;line-height:1.5;margin:0 0 11px;color:var(--ink-2);}
+.tok-kw{color:var(--tok-kw);}.tok-typ{color:var(--tok-typ);}.tok-fn{color:var(--tok-fn);}
+.tok-num{color:var(--tok-num);}.tok-str{color:var(--tok-str);}.tok-cmt{color:var(--tok-cmt);font-style:italic;}
+.table-wrap{overflow-x:auto;margin:0 0 11px;border:1px solid var(--line);border-radius:var(--r-md);}
+table{border-collapse:collapse;width:100%;font-size:.8rem;}
+thead th{text-align:left;font-weight:800;color:var(--label);font-size:.64rem;text-transform:uppercase;letter-spacing:.05em;padding:6px 12px;background:var(--panel-2);border-bottom:1px solid var(--line);}
+tbody td{padding:6px 12px;border-bottom:1px solid var(--line);color:var(--ink-2);}
+tbody tr:last-child td{border-bottom:none;}
+.pill{font-size:.62rem;font-weight:800;font-family:var(--font-mono);padding:0 7px;border-radius:99px;}
+.pill.pin{color:var(--accent);background:var(--accent-soft);}
+.pill.keep{color:var(--warn);background:var(--warn-soft);}
+.pill.reap{color:var(--muted);background:var(--line);}
+pre.diff{background:var(--sunk);border:1px solid var(--line);border-radius:var(--r-md);overflow:auto;font-size:.78rem;line-height:1.5;margin:0 0 11px;padding:4px 0;}
+pre.diff span{display:block;padding:0 13px;white-space:pre;}
+.d-ctx{color:var(--ink-2);}.d-add{color:var(--add-ink);background:var(--add-bg);}.d-del{color:var(--del-ink);background:var(--del-bg);}
+
+/* permission card */
+.perm{border:1px solid var(--line-2);border-radius:var(--r-md);background:var(--panel);overflow:hidden;max-width:var(--measure);box-shadow:var(--shadow);margin-top:12px;}
+.perm-head{display:flex;align-items:center;gap:9px;padding:8px 11px;border-bottom:1px solid var(--line);}
+.perm-ic{width:24px;height:24px;border-radius:6px;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;font-size:.8rem;flex:none;}
+.perm-t{font-size:.82rem;font-weight:700;flex:1;}
+.perm-t code{font-family:var(--font-mono);font-weight:600;color:var(--ink);}
+.perm-tag{font-size:.62rem;font-family:var(--font-mono);color:var(--muted);border:1px solid var(--line-2);padding:1px 7px;border-radius:99px;}
+.perm-actions{display:flex;gap:7px;padding:9px 11px;}
+.btn{font-size:.78rem;font-weight:600;padding:5px 12px;border-radius:var(--r-md);border:1px solid var(--line-2);color:var(--ink);}
+.btn:hover{border-color:var(--line-3);}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent;}
+.btn.primary:hover{filter:brightness(1.05);}
+.btn.ghost{border-color:transparent;color:var(--muted);}
+.btn.ghost:hover{color:var(--risk);background:var(--line);}
+
+/* ============ COMPOSER ============ */
+.composer{padding:9px 22px 12px;border-top:1px solid var(--line);background:var(--bg-0);}
+.composer-inner{max-width:min(780px,100%);margin:0 auto;border:1px solid var(--line-2);border-radius:var(--r-md);background:var(--panel);box-shadow:var(--shadow);overflow:hidden;}
+.composer-inner:focus-within{border-color:var(--accent);}
+.composer textarea{width:100%;border:none;background:none;resize:none;color:var(--ink);font-family:inherit;font-size:.92rem;line-height:1.45;padding:9px 12px 2px;outline:none;}
+.composer textarea::placeholder{color:var(--muted);}
+.composer-bar{display:flex;align-items:center;justify-content:space-between;padding:5px 8px 7px;}
+.sel-group{display:flex;align-items:center;gap:4px;}
+.sel{display:flex;align-items:center;gap:6px;font-size:.76rem;font-weight:600;color:var(--ink-2);padding:4px 8px;border-radius:var(--r-md);}
+.sel:hover{background:var(--line);}
+.sel .k{font-size:.62rem;color:var(--label);text-transform:uppercase;letter-spacing:.05em;font-weight:800;}
+.sel-dot{width:6px;height:6px;border-radius:99px;background:var(--line-3);}
+.sel-dot.on{background:var(--accent);}
+.send{font-size:.78rem;font-weight:700;color:var(--accent-ink);background:var(--accent);padding:5px 14px;border-radius:var(--r-md);}
+.send:hover{filter:brightness(1.05);}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ICON RAIL -->
+  <nav class="rail" aria-label="Navegación">
+    <div class="rail-mono">W</div>
+    <div class="rail-spaces">
+      <button class="rail-btn active" title="Chats" aria-current="page">💬</button>
+      <button class="rail-btn" title="Triage">⚑</button>
+      <button class="rail-btn" title="Actividad">📈</button>
+    </div>
+    <div class="rail-foot">
+      <span class="rail-avatar" title="Martin">M</span>
+      <button class="rail-gear" aria-label="Ajustes">⚙</button>
+    </div>
+  </nav>
+
+  <!-- CONVERSATION LIST -->
+  <aside class="list" aria-label="Conversaciones">
+    <div class="list-head">
+      <span class="engine-chip" title="Engines · RAM total"><span class="d"></span>3 eng <b>1.6 GB</b></span>
+      <button class="new"><span class="plus">+</span> Nueva</button>
+    </div>
+    <div class="list-scroll">
+      <div class="group">
+        <div class="group-label">Devin · activas <span class="group-count">3</span></div>
+        <button class="conv active">
+          <span class="dot on"></span>
+          <span class="conv-text">
+            <span class="conv-title">Reaper de hibernación</span>
+            <span class="conv-meta"><span class="st idle">idle</span><span class="sep">·</span>daemon/reaper<span class="sep">·</span>2 min</span>
+          </span>
+          <span class="conv-right"><span class="ram">512 MB</span></span>
+        </button>
+        <button class="conv">
+          <span class="dot run"></span>
+          <span class="conv-text">
+            <span class="conv-title">Reconnect WebSocket</span>
+            <span class="conv-meta"><span class="st run">run</span><span class="sep">·</span>go test<span class="sep">·</span>00:41</span>
+          </span>
+          <span class="conv-right"><span class="badge">3</span><span class="ram">733 MB</span></span>
+        </button>
+        <button class="conv">
+          <span class="dot"></span>
+          <span class="conv-text">
+            <span class="conv-title">Landmines del PORT-SPEC</span>
+            <span class="conv-meta"><span class="st idle">idle</span><span class="sep">·</span>1 h<span class="sep">·</span>hibernable</span>
+          </span>
+          <span class="conv-right"><span class="ram">0 MB</span></span>
+        </button>
+      </div>
+      <div class="group">
+        <div class="group-label">Assist · borradores <span class="group-count">2</span></div>
+        <button class="conv">
+          <span class="dot draft"></span>
+          <span class="conv-text">
+            <span class="conv-title">Respuesta a Teams</span>
+            <span class="conv-meta"><span class="st draft">draft</span><span class="sep">·</span>@canal-infra</span>
+          </span>
+          <span class="conv-right"><span class="ram">—</span></span>
+        </button>
+        <button class="conv">
+          <span class="dot"></span>
+          <span class="conv-text">
+            <span class="conv-title">Review PR #482</span>
+            <span class="conv-meta"><span class="st idle">wait</span><span class="sep">·</span>CI en cola</span>
+          </span>
+          <span class="conv-right"><span class="ram">—</span></span>
+        </button>
+      </div>
+      <div class="group">
+        <div class="group-label">Archivados</div>
+        <button class="conv muted-row"><span class="dot"></span><span class="conv-text"><span class="conv-title">Migración al daemon Go</span><span class="conv-meta">cerrado · ayer</span></span><span class="conv-right"></span></button>
+        <button class="conv muted-row"><span class="dot"></span><span class="conv-text"><span class="conv-title">Bench de Qwen local</span><span class="conv-meta">cerrado · lun</span></span><span class="conv-right"></span></button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <button id="themeBtn" title="Cambiar tema" aria-label="Cambiar tema"
+      style="position:absolute;top:10px;right:16px;z-index:5;width:28px;height:28px;border-radius:6px;color:var(--muted);font-size:.95rem;">◐</button>
+    <div class="stage">
+      <div class="thread">
+        <!-- (1) user -->
+        <div class="user-msg">
+          <p>El reaper está hibernando chats que todavía están trabajando. Encontrá la race y proponé un fix.</p>
+          <span class="chip">daemon/reaper/reaper.go</span>
+        </div>
+
+        <!-- (2) agent turn -->
+        <div class="turn">
+          <div class="think">Pensó durante 8 s · revisó el bucle del reaper y el registro de leases</div>
+
+          <div class="plan">
+            <div class="plan-head">Plan</div>
+            <ul class="plan-list">
+              <li data-st="done"><span class="box"></span>Reproducir la race con un test de lease activo</li>
+              <li data-st="active"><span class="box"></span>Localizar el chequeo de actividad en el barrido</li>
+              <li data-st="todo"><span class="box"></span>Fijar (pin) el lease mientras hay prompt en vuelo</li>
+            </ul>
+          </div>
+
+          <div class="tool-row"><span class="ok">✓</span> Leer <code>reaper.go</code><span class="n">120 líneas</span></div>
+
+          <div class="prose">
+            <p>La race ocurre entre el <strong>barrido del reaper</strong> y la comprobación de <code>lastActivity</code>. El reaper lee el timestamp, decide hibernar y <em>después</em> toma el lock: para entonces ya llegó un prompt nuevo, pero el engine se reap igual.</p>
+            <h3>La causa</h3>
+            <p>La comprobación y la acción no son atómicas. Entre el <code>RLock</code> de lectura y el <code>Lock</code> de escritura hay una ventana donde <code>markActive()</code> corre desde otra goroutine:</p>
+            <pre class="code"><span class="tok-cmt">// reaper.go — barrido cada 30 s</span>
+<span class="tok-kw">func</span> (r *<span class="tok-typ">Reaper</span>) <span class="tok-fn">sweep</span>() {
+  <span class="tok-kw">for</span> _, s := <span class="tok-kw">range</span> r.<span class="tok-fn">idleSessions</span>() {   <span class="tok-cmt">// lee bajo RLock</span>
+    <span class="tok-kw">if</span> time.<span class="tok-fn">Since</span>(s.lastActivity) &gt; <span class="tok-num">idleTTL</span> {
+      r.<span class="tok-fn">hibernate</span>(s)                     <span class="tok-cmt">// toma Lock — ¡tarde!</span>
+    }
+  }
+}</pre>
+            <p>Bajo carga (10+ chats) el reaper hiberna sesiones con prompt en vuelo. La política correcta:</p>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Estado del chat</th><th>Política</th><th>Acción del reaper</th></tr></thead>
+                <tbody>
+                  <tr><td>Prompt en vuelo</td><td><span class="pill pin">pin</span></td><td>Nunca hibernar</td></tr>
+                  <tr><td>Idle &lt; TTL</td><td><span class="pill keep">keep</span></td><td>Mantener caliente</td></tr>
+                  <tr><td>Idle &gt; TTL</td><td><span class="pill reap">reap</span></td><td>Hibernar y replay</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p>El fix revalida el lease dentro del <code>Lock</code> antes de expulsar:</p>
+            <pre class="diff"><span class="d-ctx"> func (r *Reaper) hibernate(s *Session) {</span><span class="d-del">-  r.evict(s)</span><span class="d-add">+  if s.pinned || s.inFlight() { return }</span><span class="d-add">+  r.evict(s) // seguro: revalidado bajo Lock</span><span class="d-ctx"> }</span></pre>
+            <p>Añadí <code>TestActiveLeasePin</code>, que reproduce la ventana con 200 goroutines. Pasa en verde en local.</p>
+          </div>
+
+          <!-- (3) permission card -->
+          <div class="perm">
+            <div class="perm-head">
+              <span class="perm-ic">▷</span>
+              <span class="perm-t">Ejecutar <code>go test ./daemon/reaper</code></span>
+              <span class="perm-tag">shell</span>
+            </div>
+            <div class="perm-actions">
+              <button class="btn primary">Permitir una vez</button>
+              <button class="btn">Permitir siempre</button>
+              <button class="btn ghost">Rechazar</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- COMPOSER -->
+    <div class="composer">
+      <div class="composer-inner">
+        <textarea rows="1" placeholder="Escribe un mensaje…"></textarea>
+        <div class="composer-bar">
+          <div class="sel-group">
+            <button class="sel"><span class="k">Modelo</span><span class="sel-dot on"></span>Devin ▾</button>
+            <button class="sel"><span class="k">Permisos</span>Agent ▾</button>
+          </div>
+          <button class="send">Enviar</button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<script>
+(function(){
+  var root=document.documentElement;
+  function set(t){root.setAttribute('data-theme',t);}
+  set(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+  document.getElementById('themeBtn').addEventListener('click',function(){
+    set(root.getAttribute('data-theme')==='light'?'dark':'light');
+  });
+})();
+</script>
+</body>
+</html>

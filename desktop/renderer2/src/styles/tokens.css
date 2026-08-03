@@ -1,0 +1,46 @@
+/* Design tokens — extracted verbatim from
+   desktop/docs/mocks/p4/designs/workass-one.html (the approved design).
+   Do not drift these values without a new approved mock. */
+
+:root {
+  color-scheme: dark;
+  --bg: #0f0e0d;
+  --side: #151413;
+  --panel: #1d1c1a;
+  --card: #1a1918;
+  --field: #252320;
+  --ink: #f2efe9;
+  --ink2: #cfcbc4;
+  --muted: #9c978f;
+  --faint: #6f6b63;
+  --line: rgba(255, 255, 255, .075);
+  --line2: rgba(255, 255, 255, .14);
+  --acc: #4fa583;
+  --link: #8fb0ea;
+  --amber: #d8a05a;
+  --add: #4cae7f;
+  --del: #d96b5f;
+  /* outer shell background (behind the floating panels) */
+  --shell: #0b0a09;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f2f0ed;
+  --side: #faf9f7;
+  --panel: #ffffff;
+  --card: #ffffff;
+  --field: #f1efeb;
+  --ink: #23211e;
+  --ink2: #47443e;
+  --muted: #7a756d;
+  --faint: #a19c93;
+  --line: rgba(0, 0, 0, .08);
+  --line2: rgba(0, 0, 0, .15);
+  --acc: #177353;
+  --link: #3861b0;
+  --amber: #9a6a1d;
+  --add: #177347;
+  --del: #bd4436;
+  --shell: #eceae6;
+}

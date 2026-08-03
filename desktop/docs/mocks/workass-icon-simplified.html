@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Workass icon simplification study</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#11110f; --panel:#1b1a18; --panel2:#242320; --line:rgba(255,255,255,.09);
+    --ink:#f0efec; --muted:#aaa79f; --green:#4fa583; --green-hi:#66bd98;
+    --muzzle:#c6ded3; --shadow:rgba(0,0,0,.45);
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:36px; background:var(--bg); color:var(--ink);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  main { max-width:1180px; margin:auto; }
+  h1 { margin:0; font-size:26px; letter-spacing:-.02em; }
+  .lede { max-width:76ch; color:var(--muted); margin:8px 0 28px; }
+  .rule { border-top:1px solid var(--line); margin:26px 0; }
+  .current { display:grid; grid-template-columns:136px 1fr; gap:22px; align-items:center;
+    padding:18px; border:1px solid var(--line); border-radius:18px; background:var(--panel); }
+  .current img { width:128px; height:128px; border-radius:28px; }
+  .current h2,.card h2 { margin:0 0 5px; font-size:17px; }
+  .current p,.card p { margin:0; color:var(--muted); }
+  .grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }
+  .card { padding:18px; border:1px solid var(--line); border-radius:20px; background:var(--panel); }
+  .card[data-pick="true"] { border-color:color-mix(in srgb,var(--green) 75%,white); box-shadow:0 0 0 1px rgba(79,165,131,.18); }
+  .pick { display:inline-flex; margin-bottom:12px; padding:3px 8px; border-radius:999px;
+    background:rgba(79,165,131,.14); color:var(--green-hi); font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
+  .hero { display:grid; place-items:center; min-height:230px; border-radius:16px;
+    background:linear-gradient(145deg,#302e2a,#171614); box-shadow:inset 0 0 0 1px var(--line); }
+  .hero svg { width:188px; height:188px; filter:drop-shadow(0 12px 22px var(--shadow)); }
+  .sizes { display:flex; align-items:flex-end; gap:12px; margin:16px 0; min-height:92px; }
+  .sample { display:grid; gap:6px; justify-items:center; color:#77736b; font:10px ui-monospace,monospace; }
+  .s64 { width:64px;height:64px; } .s32 { width:32px;height:32px; } .s16 { width:16px;height:16px; }
+  .dock { display:flex; align-items:center; gap:10px; margin-top:14px; padding:12px;
+    border-radius:14px; background:rgba(255,255,255,.055); }
+  .dock.light { background:#e8e6e1; }
+  .dock svg { width:42px;height:42px; flex:none; }
+  .dock span { color:var(--muted); font-size:12px; }
+  .dock.light span { color:#625f58; }
+  .spec { margin-top:14px; padding-top:13px; border-top:1px solid var(--line); font-size:12px; color:var(--muted); }
+  .spec b { color:var(--ink); }
+  .verdict { margin-top:22px; padding:18px 20px; border-left:3px solid var(--green); border-radius:12px;
+    background:rgba(79,165,131,.08); color:#d8d6d1; }
+  @media(max-width:850px){ body{padding:20px}.grid{grid-template-columns:1fr}.current{grid-template-columns:96px 1fr}.current img{width:88px;height:88px}.hero{min-height:200px} }
+</style>
+</head>
+<body>
+<main>
+  <h1>Workass — icon simplification study</h1>
+  <p class="lede">One test: can the mark be identified in under a second at 32px? The mechanical illustration fails because its gears, gradients, speech bubble, goggles, straps, and face all collapse into the same visual noise. These directions keep the donkey pun and remove everything that is not identity.</p>
+
+  <section class="current">
+    <img src="../../assets/workass-macos.png" alt="Current mechanical donkey icon">
+    <div><h2>Current — illustration, not icon</h2><p>Recognizable at 1024px, ambiguous below 64px, nearly unidentifiable at 32px. Too many equal-weight details and no dominant silhouette.</p></div>
+  </section>
+
+  <div class="rule"></div>
+  <section class="grid">
+    <article class="card" data-pick="true">
+      <span class="pick">Joint pick · unmistakable donkey</span>
+      <div class="hero">
+        <svg viewBox="0 0 128 128" role="img" aria-label="Simple frontal donkey head">
+          <rect x="4" y="4" width="120" height="120" rx="29" fill="#1b1a18" stroke="rgba(255,255,255,.08)"/>
+          <g transform="translate(0 -2)">
+            <path fill="#4fa583" d="M46 48C34 40 24 22 31 13c8-5 17 15 21 31l-6 4ZM82 48c12-8 22-26 15-35-8-5-17 15-21 31l6 4Z"/>
+            <path fill="#1b1a18" d="M43 43c-7-9-12-19-9-25 5 6 11 17 14 27l-5-2ZM85 43c7-9 12-19 9-25-5 6-11 17-14 27l5-2Z"/>
+            <path fill="#4fa583" d="M48 40c-9 4-13 15-11 27 2 17 13 35 27 40 14-5 25-23 27-40 2-12-2-23-11-27-9-4-23-4-32 0Z"/>
+            <path fill="#c6ded3" d="M50 85c0-8 28-8 28 0 4 9-3 20-14 22-11-2-18-13-14-22Z"/>
+            <circle cx="52" cy="64" r="5" fill="#1b1a18"/><circle cx="76" cy="64" r="5" fill="#1b1a18"/>
+            <ellipse cx="59" cy="95" rx="2.4" ry="3.2" fill="#1b1a18"/><ellipse cx="69" cy="95" rx="2.4" ry="3.2" fill="#1b1a18"/>
+          </g>
+        </svg>
+      </div>
+      <h2>01 · Burro</h2>
+      <p>Splayed ears kill the rabbit read; a tapered face kills the cow read; the large pale muzzle is the donkey signature.</p>
+      <div class="sizes">
+        <span class="sample"><svg class="s64" viewBox="0 0 128 128"><use href="#burro"/></svg>64</span>
+        <span class="sample"><svg class="s32" viewBox="0 0 128 128"><use href="#burro"/></svg>32</span>
+        <span class="sample"><svg class="s16" viewBox="0 0 128 128"><use href="#burro"/></svg>16</span>
+      </div>
+      <div class="spec"><b>One animal, one silhouette hierarchy.</b> Flat Workass green, pale muzzle, warm-neutral tile. The mark fills the tile and remains a donkey when its micro-detail disappears.</div>
+    </article>
+
+    <article class="card">
+      <span class="pick">Rejected · generic mammal</span>
+      <div class="hero">
+        <svg viewBox="0 0 128 128" role="img" aria-label="Minimal donkey head in profile">
+          <rect x="4" y="4" width="120" height="120" rx="29" fill="#1b1a18" stroke="rgba(255,255,255,.08)"/>
+          <path fill="#4fa583" d="M29 111c6-16 7-34 10-48-7-12-14-35-6-44 8-8 19 14 22 29 5-4 10-6 16-6l7-24c2-8 10-9 14-2 4 9 3 21-1 31 9 5 14 13 16 22 8 2 13 7 13 13 0 9-12 16-27 17-8 9-20 14-33 13-9-1-16-5-21-9l-4 12-6-4Z"/>
+          <circle cx="83" cy="61" r="4.5" fill="#1b1a18"/>
+          <circle cx="107" cy="83" r="3.5" fill="#1b1a18"/>
+        </svg>
+      </div>
+      <h2>02 · Profile</h2>
+      <p>A single 3/4-profile silhouette keeps the long ears and makes the muzzle unmistakably equine rather than rabbit-like.</p>
+      <div class="sizes">
+        <span class="sample"><svg class="s64" viewBox="0 0 128 128"><use href="#profile"/></svg>64</span>
+        <span class="sample"><svg class="s32" viewBox="0 0 128 128"><use href="#profile"/></svg>32</span>
+        <span class="sample"><svg class="s16" viewBox="0 0 128 128"><use href="#profile"/></svg>16</span>
+      </div>
+      <div class="spec"><b>4 visible shapes including the tile.</b> Reads “donkey” fastest, but its asymmetry needs careful optical centering.</div>
+    </article>
+
+    <article class="card">
+      <span class="pick">Rejected · cow/pig at small size</span>
+      <div class="hero">
+        <svg viewBox="0 0 128 128" role="img" aria-label="Donkey face shaped like a chat bubble">
+          <rect x="4" y="4" width="120" height="120" rx="29" fill="#1b1a18" stroke="rgba(255,255,255,.08)"/>
+          <path fill="#4fa583" d="M45 42C35 37 23 17 29 12c8-6 20 14 22 31l-6-1Zm38 0c10-5 22-25 16-30-8-6-20 14-22 31l6-1Z"/>
+          <path fill="#4fa583" d="M31 36h66c10 0 17 8 17 18v28c0 10-7 17-17 17H76l-18 14 4-14H31c-10 0-17-7-17-17V54c0-10 7-18 17-18Z"/>
+          <rect x="39" y="68" width="50" height="25" rx="13" fill="#c6ded3"/>
+          <circle cx="48" cy="58" r="5" fill="#1b1a18"/><circle cx="80" cy="58" r="5" fill="#1b1a18"/>
+          <circle cx="55" cy="81" r="3.5" fill="#1b1a18"/><circle cx="73" cy="81" r="3.5" fill="#1b1a18"/>
+        </svg>
+      </div>
+      <h2>03 · Chat Burro</h2>
+      <p>The donkey’s head is also a speech bubble. It explains agentic chat without adding a separate terminal badge.</p>
+      <div class="sizes">
+        <span class="sample"><svg class="s64" viewBox="0 0 128 128"><use href="#chatburro"/></svg>64</span>
+        <span class="sample"><svg class="s32" viewBox="0 0 128 128"><use href="#chatburro"/></svg>32</span>
+        <span class="sample"><svg class="s16" viewBox="0 0 128 128"><use href="#chatburro"/></svg>16</span>
+      </div>
+      <div class="spec"><b>8 visible shapes including the tile.</b> Most explicit about the product, but the speech-tail is a second concept and becomes subtle at 16px.</div>
+    </article>
+  </section>
+
+  <div class="verdict"><b>Design thesis:</b> own one silhouette. Warm-black squircle, Workass green donkey, pale muzzle. No gears, goggles, belts, glow, terminal bubble, metallic rendering, gradients inside the mark, or tiny outlines. The preferred icon should survive a one-color silhouette test before any polish is added.</div>
+
+  <svg width="0" height="0" aria-hidden="true" style="position:absolute">
+    <defs>
+      <g id="burro">
+        <rect x="4" y="4" width="120" height="120" rx="29" fill="#1b1a18" stroke="rgba(255,255,255,.08)"/>
+        <g transform="translate(0 -2)">
+          <path fill="#4fa583" d="M46 48C34 40 24 22 31 13c8-5 17 15 21 31l-6 4ZM82 48c12-8 22-26 15-35-8-5-17 15-21 31l6 4Z"/>
+          <path fill="#1b1a18" d="M43 43c-7-9-12-19-9-25 5 6 11 17 14 27l-5-2ZM85 43c7-9 12-19 9-25-5 6-11 17-14 27l5-2Z"/>
+          <path fill="#4fa583" d="M48 40c-9 4-13 15-11 27 2 17 13 35 27 40 14-5 25-23 27-40 2-12-2-23-11-27-9-4-23-4-32 0Z"/>
+          <path fill="#c6ded3" d="M50 85c0-8 28-8 28 0 4 9-3 20-14 22-11-2-18-13-14-22Z"/>
+          <circle cx="52" cy="64" r="5" fill="#1b1a18"/><circle cx="76" cy="64" r="5" fill="#1b1a18"/>
+          <ellipse cx="59" cy="95" rx="2.4" ry="3.2" fill="#1b1a18"/><ellipse cx="69" cy="95" rx="2.4" ry="3.2" fill="#1b1a18"/>
+        </g>
+      </g>
+      <g id="profile">
+        <rect x="4" y="4" width="120" height="120" rx="29" fill="#1b1a18" stroke="rgba(255,255,255,.08)"/>
+        <path fill="#4fa583" d="M29 111c6-16 7-34 10-48-7-12-14-35-6-44 8-8 19 14 22 29 5-4 10-6 16-6l7-24c2-8 10-9 14-2 4 9 3 21-1 31 9 5 14 13 16 22 8 2 13 7 13 13 0 9-12 16-27 17-8 9-20 14-33 13-9-1-16-5-21-9l-4 12-6-4Z"/>
+        <circle cx="83" cy="61" r="4.5" fill="#1b1a18"/>
+        <circle cx="107" cy="83" r="3.5" fill="#1b1a18"/>
+      </g>
+      <g id="chatburro">
+        <rect x="4" y="4" width="120" height="120" rx="29" fill="#1b1a18" stroke="rgba(255,255,255,.08)"/>
+        <path fill="#4fa583" d="M45 42C35 37 23 17 29 12c8-6 20 14 22 31l-6-1Zm38 0c10-5 22-25 16-30-8-6-20 14-22 31l6-1Z"/>
+        <path fill="#4fa583" d="M31 36h66c10 0 17 8 17 18v28c0 10-7 17-17 17H76l-18 14 4-14H31c-10 0-17-7-17-17V54c0-10 7-18 17-18Z"/>
+        <rect x="39" y="68" width="50" height="25" rx="13" fill="#c6ded3"/>
+        <circle cx="48" cy="58" r="5" fill="#1b1a18"/><circle cx="80" cy="58" r="5" fill="#1b1a18"/>
+        <circle cx="55" cy="81" r="3.5" fill="#1b1a18"/><circle cx="73" cy="81" r="3.5" fill="#1b1a18"/>
+      </g>
+    </defs>
+  </svg>
+</main>
+</body>
+</html>

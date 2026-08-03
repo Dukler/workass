@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>workass · P4 · galería de mocks (2ª ronda)</title>
+<style>
+:root{
+  --bg-0:#1b1a18; --bg-1:#201f1d; --panel:#232220; --panel-2:#262523;
+  --line:rgba(255,255,255,.07); --line-2:rgba(255,255,255,.12); --line-3:rgba(255,255,255,.20);
+  --ink:#f0efec; --ink-2:#d8d6d1; --muted:#a8a69f; --label:#918f88;
+  --accent:#3ecf8e; --accent-ink:#0f1512; --accent-soft:rgba(62,207,142,.12);
+  --shadow:0 1px 2px rgba(0,0,0,.24),0 10px 28px rgba(0,0,0,.20);
+  --font-ui:"Aptos","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",sans-serif;
+  --font-mono:"Cascadia Code","Cascadia Mono","Consolas",ui-monospace,"SF Mono",monospace;
+}
+:root[data-theme="light"]{
+  --bg-0:#faf9f7; --bg-1:#f4f3f0; --panel:#ffffff; --panel-2:#fbfaf8;
+  --line:rgba(20,19,16,.08); --line-2:rgba(20,19,16,.13); --line-3:rgba(20,19,16,.24);
+  --ink:#1c1b18; --ink-2:#3f3e39; --muted:#5d5b55; --label:#6d6b64;
+  --accent:#0e7d56; --accent-ink:#ffffff; --accent-soft:rgba(14,125,86,.10);
+  --shadow:0 1px 2px rgba(20,19,16,.05),0 10px 28px rgba(20,19,16,.07);
+}
+*{box-sizing:border-box;}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
+body{margin:0;min-height:100vh;font-family:var(--font-ui);color:var(--ink);
+  background:linear-gradient(180deg,var(--bg-0),var(--bg-1) 420px,var(--bg-0));
+  font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+a{color:var(--accent);text-decoration:none;}
+a:hover{text-decoration:underline;}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;}
+:where(a,button):focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px;}
+
+.top{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:16px 32px;border-bottom:1px solid var(--line);
+  background:color-mix(in srgb,var(--bg-0) 84%,transparent);backdrop-filter:blur(14px);}
+@supports not (background:color-mix(in srgb,red 50%,blue)){.top{background:var(--bg-0);}}
+.brand{display:flex;align-items:center;gap:12px;}
+.brand-mark{width:14px;height:14px;border-radius:4px;background:var(--accent);}
+.brand-sub{font-family:var(--font-mono);font-size:.72rem;color:var(--label);letter-spacing:.04em;}
+.theme-toggle{display:flex;align-items:center;gap:8px;font-size:.82rem;font-weight:600;color:var(--ink-2);
+  border:1px solid var(--line-2);padding:7px 13px;border-radius:10px;}
+.theme-toggle:hover{border-color:var(--line-3);}
+
+.intro{max-width:760px;margin:40px auto 8px;padding:0 32px;}
+.kicker{font-size:.72rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);margin-bottom:10px;}
+.intro h1{font-size:2rem;font-weight:700;letter-spacing:-.02em;margin:0 0 12px;}
+.intro p{margin:0 0 10px;color:var(--ink-2);}
+.intro .note{font-size:.9rem;color:var(--muted);}
+.intro code{font-family:var(--font-mono);font-size:.85em;background:var(--line);padding:1px 6px;border-radius:5px;color:var(--ink-2);}
+
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;max-width:1380px;margin:26px auto 60px;padding:0 32px;}
+@media (max-width:1120px){.grid{grid-template-columns:1fr;max-width:720px;}}
+.card{border:1px solid var(--line);border-radius:14px;background:var(--panel);box-shadow:var(--shadow);overflow:hidden;display:flex;flex-direction:column;}
+.card-head{display:flex;align-items:baseline;gap:10px;padding:16px 18px 12px;}
+.tag{font-family:var(--font-mono);font-size:.72rem;font-weight:700;color:var(--accent-ink);background:var(--accent);
+  padding:2px 9px;border-radius:6px;letter-spacing:.02em;}
+.card-name{font-size:1.12rem;font-weight:700;letter-spacing:-.01em;}
+.card-kind{margin-left:auto;font-size:.72rem;color:var(--muted);font-family:var(--font-mono);}
+
+.thumb{position:relative;height:300px;overflow:hidden;border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:var(--bg-1);}
+.thumb iframe{position:absolute;top:0;left:0;width:1360px;height:860px;border:0;
+  transform:scale(.34);transform-origin:top left;pointer-events:none;background:var(--bg-0);}
+.thumb-link{position:absolute;inset:0;z-index:2;display:block;}
+.thumb-open{position:absolute;right:10px;bottom:10px;z-index:3;font-size:.72rem;font-weight:700;
+  color:var(--ink);background:color-mix(in srgb,var(--panel) 88%,transparent);border:1px solid var(--line-2);
+  padding:5px 11px;border-radius:8px;backdrop-filter:blur(6px);}
+@supports not (background:color-mix(in srgb,red 50%,blue)){.thumb-open{background:var(--panel);}}
+.thumb-link:hover ~ .thumb-open,.thumb-open:hover{border-color:var(--accent);color:var(--accent);}
+
+.card-body{padding:16px 18px 18px;}
+.idea{margin:0 0 12px;font-size:.9rem;color:var(--ink-2);}
+.specs{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px;}
+.specs li{display:flex;gap:10px;font-size:.82rem;}
+.specs .k{flex:none;width:88px;font-weight:700;color:var(--label);text-transform:uppercase;font-size:.66rem;letter-spacing:.05em;padding-top:2px;}
+.specs .v{color:var(--ink-2);}
+.specs code{font-family:var(--font-mono);font-size:.9em;background:var(--line);padding:0 5px;border-radius:4px;}
+
+.foot{max-width:1380px;margin:0 auto;padding:0 32px 60px;color:var(--muted);font-size:.82rem;}
+.foot-row{border-top:1px solid var(--line);padding-top:16px;}
+.foot-row b{color:var(--ink-2);font-weight:700;}
+</style>
+</head>
+<body>
+  <div class="top">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-sub">P4 · galería de mocks · 2ª ronda · tres arquitecturas</span>
+    </div>
+    <button class="theme-toggle" id="themeBtn">◐ Cambiar tema</button>
+  </div>
+
+  <div class="intro">
+    <div class="kicker">Goal 4 · P4 — el usuario aprueba antes de implementar</div>
+    <h1>Tres arquitecturas para la superficie de chat</h1>
+    <p>Misma conversación y mismas capacidades en las tres (cambio de chat, modo, telemetría,
+      permisos, ajustes) — pero cada maqueta prueba una <strong>arquitectura de información distinta</strong>.
+      En todas: una sola columna de lectura centrada compartida por transcripción y redactor, prosa del
+      agente sin caja, cada control existe exactamente una vez, y la telemetría es una afordancia
+      compacta, nunca una barra inferior.</p>
+    <p class="note">Tema claro/oscuro en cada maqueta (respeta <code>prefers-color-scheme</code>);
+      el botón de arriba cambia galería y miniaturas a la vez. En la variante C el inspector se
+      expande al hacer clic. Todo lo demás es estático.</p>
+  </div>
+
+  <div class="grid">
+    <!-- A -->
+    <div class="card">
+      <div class="card-head">
+        <span class="tag">A</span>
+        <span class="card-name">Rail</span>
+        <span class="card-kind">espacios + lista</span>
+      </div>
+      <div class="thumb">
+        <iframe src="variant-a.html" title="Vista previa variante A" scrolling="no" tabindex="-1" aria-hidden="true"></iframe>
+        <a class="thumb-link" href="variant-a.html" aria-label="Abrir variante A"></a>
+        <a class="thumb-open" href="variant-a.html">Abrir ↗</a>
+      </div>
+      <div class="card-body">
+        <p class="idea">Prueba si los espacios de la app (Chats, Triage, Actividad) funcionan como un
+          rail de iconos con la lista de conversaciones como panel intermedio colapsable.</p>
+        <ul class="specs">
+          <li><span class="k">IA</span><span class="v">rail de iconos → lista colapsable → columna de lectura</span></li>
+          <li><span class="k">Medida</span><span class="v"><code>72ch</code> · base 15&nbsp;px · interlineado 1.65</span></li>
+          <li><span class="k">Ajustes</span><span class="v">abajo del rail, junto a la cuenta (única aparición)</span></li>
+          <li><span class="k">Telemetría</span><span class="v">punto en el icono Actividad + pie compacto de la lista</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- B -->
+    <div class="card">
+      <div class="card-head">
+        <span class="tag">B</span>
+        <span class="card-name">Zen</span>
+        <span class="card-kind">sin barra lateral</span>
+      </div>
+      <div class="thumb">
+        <iframe src="variant-b.html" title="Vista previa variante B" scrolling="no" tabindex="-1" aria-hidden="true"></iframe>
+        <a class="thumb-link" href="variant-b.html" aria-label="Abrir variante B"></a>
+        <a class="thumb-open" href="variant-b.html">Abrir ↗</a>
+      </div>
+      <div class="card-body">
+        <p class="idea">Prueba si el cambio entre 10+ chats puede vivir enteramente detrás de ⌘K,
+          dejando en pantalla solo la conversación: foco de lectura máximo.</p>
+        <ul class="specs">
+          <li><span class="k">IA</span><span class="v">una barra mínima (título · ⌘K · estado) sobre una única columna</span></li>
+          <li><span class="k">Medida</span><span class="v"><code>70ch</code> · base 17&nbsp;px · interlineado 1.7</span></li>
+          <li><span class="k">Ajustes</span><span class="v">botón de texto en la barra superior (única aparición)</span></li>
+          <li><span class="k">Telemetría</span><span class="v">chip de estado en la barra; el detalle se invoca con ⌘K</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- C -->
+    <div class="card">
+      <div class="card-head">
+        <span class="tag">C</span>
+        <span class="card-name">Cockpit</span>
+        <span class="card-kind">operador 10+ chats</span>
+      </div>
+      <div class="thumb">
+        <iframe src="variant-c.html" title="Vista previa variante C" scrolling="no" tabindex="-1" aria-hidden="true"></iframe>
+        <a class="thumb-link" href="variant-c.html" aria-label="Abrir variante C"></a>
+        <a class="thumb-open" href="variant-c.html">Abrir ↗</a>
+      </div>
+      <div class="card-body">
+        <p class="idea">Prueba si el estado vivo por engine (ejecutando/idle, timer, RAM) merece estar
+          siempre visible en el roster, con un inspector lateral derecho en vez de cualquier barra inferior.</p>
+        <ul class="specs">
+          <li><span class="k">IA</span><span class="v">roster fijo con estado vivo → columna → inspector derecho plegado</span></li>
+          <li><span class="k">Medida</span><span class="v"><code>74ch</code> · base 14&nbsp;px · interlineado 1.6</span></li>
+          <li><span class="k">Ajustes</span><span class="v">pie del roster, junto a la cuenta (única aparición)</span></li>
+          <li><span class="k">Telemetría</span><span class="v">RAM por fila + inspector (engines, procesos, Sync Teams)</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <div class="foot-row">
+      <span><b>Común a las tres:</b> superficies neutras cálidas AA en ambos temas, verde solo como acento,
+        prosa del agente sin caja, mensaje del usuario en bloque compacto, timestamps y RAM como metadatos
+        secundarios (hover), una escala de radios y un solo estilo de borde por variante, sin texturas.</span>
+    </div>
+  </div>
+
+<script>
+(function(){
+  var root=document.documentElement;
+  var frames=Array.prototype.slice.call(document.querySelectorAll('.thumb iframe'));
+  function apply(t){
+    root.setAttribute('data-theme',t);
+    frames.forEach(function(f){
+      try{ f.contentDocument.documentElement.setAttribute('data-theme',t); }catch(e){}
+    });
+  }
+  apply(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+  frames.forEach(function(f){ f.addEventListener('load',function(){
+    try{ f.contentDocument.documentElement.setAttribute('data-theme', root.getAttribute('data-theme')); }catch(e){}
+  });});
+  document.getElementById('themeBtn').addEventListener('click',function(){
+    apply(root.getAttribute('data-theme')==='light'?'dark':'light');
+  });
+})();
+</script>
+</body>
+</html>

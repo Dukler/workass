@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Vincular un teléfono · mock</title>
+<style>
+:root{
+  --bg:#0f0e0d; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+  --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --acc:#4fa583; --amber:#d8a05a; --del:#d96b5f;
+  --shell:#0b0a09; --mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --scrim:rgba(0,0,0,.55);
+}
+html[data-theme="light"]{
+  --bg:#ffffff; --panel:#faf9f7; --card:#ffffff; --field:#f1efec;
+  --ink:#1b1917; --ink2:#3f3b36; --muted:#6c665e; --faint:#928b82;
+  --line:rgba(0,0,0,.09); --line2:rgba(0,0,0,.16);
+  --acc:#2f7d5f; --amber:#96631f; --del:#a8412f; --shell:#efedea;
+  --scrim:rgba(20,18,16,.28);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--shell);color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.page{max-width:1180px;margin:0 auto;padding:28px 24px 64px}
+h1{font-size:15px;font-weight:600;letter-spacing:.01em;margin:0 0 4px}
+.sub{color:var(--muted);font-size:12.5px;margin:0 0 26px}
+.row{display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start}
+.col{flex:1 1 320px;min-width:300px}
+.caption{color:var(--faint);font-size:11.5px;text-transform:uppercase;
+  letter-spacing:.07em;margin:0 0 9px}
+.note{color:var(--muted);font-size:12px;margin:10px 2px 0;line-height:1.55}
+
+/* ---- the sheet ------------------------------------------------------ */
+.stage{position:relative;background:var(--bg);border:1px solid var(--line);
+  border-radius:12px;min-height:430px;display:grid;place-items:center;
+  overflow:hidden}
+.stage::before{content:"";position:absolute;inset:0;background:var(--scrim)}
+.sheet{position:relative;width:322px;background:var(--panel);
+  border:1px solid var(--line2);border-radius:14px;padding:20px 20px 16px;
+  box-shadow:0 18px 44px rgba(0,0,0,.42)}
+.sheet h2{font-size:14px;font-weight:600;margin:0 0 3px}
+.sheet .lead{color:var(--muted);font-size:12px;margin:0 0 16px}
+.x{position:absolute;top:12px;right:12px;width:24px;height:24px;border:0;
+  border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;
+  font-size:15px;line-height:1;display:grid;place-items:center}
+.x:hover{background:var(--field);color:var(--ink)}
+
+/* The tile is ALWAYS light. A QR themed for a dark UI is a QR many
+   scanners refuse, so this is the one surface that ignores the theme. */
+.tile{background:#fff;border-radius:10px;padding:12px;display:grid;
+  place-items:center;border:1px solid rgba(0,0,0,.08)}
+.tile svg{width:100%;height:auto;display:block}
+
+.addr{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  margin-top:13px;padding:8px 10px;background:var(--field);
+  border:1px solid var(--line);border-radius:8px}
+.addr .val{font-family:var(--mono);font-size:11.5px;color:var(--ink2)}
+.addr button{border:0;background:transparent;color:var(--acc);font-size:11.5px;
+  cursor:pointer;padding:2px 4px;border-radius:5px}
+.addr button:hover{background:var(--sv2-hover,rgba(255,255,255,.05))}
+
+.warn{display:flex;gap:8px;margin-top:13px;color:var(--amber);font-size:11.5px;
+  line-height:1.5}
+.warn svg{flex:0 0 auto;margin-top:2px}
+
+.typed{margin-top:13px;padding-top:12px;border-top:1px solid var(--line)}
+.typed .lbl{color:var(--faint);font-size:11px;margin-bottom:5px}
+.typed .key{font-family:var(--mono);font-size:12px;color:var(--ink2);
+  letter-spacing:.02em;word-break:break-all;filter:blur(4.5px);
+  transition:filter .12s}
+.typed:hover .key{filter:none}
+.typed .hint{color:var(--faint);font-size:10.5px;margin-top:5px}
+
+/* ---- joined state --------------------------------------------------- */
+.joined{text-align:center;padding:12px 4px 6px}
+.tick{width:38px;height:38px;border-radius:50%;background:var(--acc);
+  display:grid;place-items:center;margin:0 auto 13px}
+.joined .who{font-size:14px;font-weight:600;margin-bottom:3px}
+.joined .det{color:var(--muted);font-size:12px}
+.joined .closing{color:var(--faint);font-size:11px;margin-top:14px}
+
+/* ---- no key state --------------------------------------------------- */
+.empty{text-align:center;padding:6px 2px}
+.empty p{color:var(--muted);font-size:12.5px;margin:0 0 15px;line-height:1.6}
+.btn{border:1px solid var(--line2);background:var(--field);color:var(--ink);
+  font-size:12.5px;padding:7px 14px;border-radius:8px;cursor:pointer}
+.btn:hover{border-color:var(--acc)}
+.mono{font-family:var(--mono);font-size:11.5px;color:var(--ink2)}
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Vincular un teléfono</h1>
+  <p class="sub">Mock &middot; el QR es real y escaneable; la clave es de descarte, nunca la de producción.</p>
+
+  <div class="row">
+
+    <!-- 1 ------------------------------------------------------------ -->
+    <div class="col">
+      <p class="caption">Mostrando el código</p>
+      <div class="stage">
+        <div class="sheet">
+          <button class="x" title="Cerrar">&#10005;</button>
+          <h2>Vincular un teléfono</h2>
+          <p class="lead">Abrí Workass en el teléfono y apuntá la cámara.</p>
+          <div class="tile"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 45 45" shape-rendering="crispEdges" role="img" aria-label="Código de vinculación"><rect width="45" height="45" fill="#ffffff"/><path fill="#000000" d="M4 4h7v1H4zM13 4h1v1H13zM16 4h2v1H16zM22 4h2v1H22zM25 4h3v1H25zM29 4h1v1H29zM31 4h1v1H31zM34 4h7v1H34zM4 5h1v1H4zM10 5h1v1H10zM12 5h3v1H12zM17 5h1v1H17zM22 5h2v1H22zM26 5h4v1H26zM31 5h2v1H31zM34 5h1v1H34zM40 5h1v1H40zM4 6h1v1H4zM6 6h3v1H6zM10 6h1v1H10zM13 6h1v1H13zM15 6h4v1H15zM20 6h1v1H20zM22 6h3v1H22zM26 6h3v1H26zM30 6h2v1H30zM34 6h1v1H34zM36 6h3v1H36zM40 6h1v1H40zM4 7h1v1H4zM6 7h3v1H6zM10 7h1v1H10zM13 7h5v1H13zM23 7h1v1H23zM31 7h1v1H31zM34 7h1v1H34zM36 7h3v1H36zM40 7h1v1H40zM4 8h1v1H4zM6 8h3v1H6zM10 8h1v1H10zM12 8h2v1H12zM15 8h2v1H15zM20 8h4v1H20zM25 8h1v1H25zM27 8h3v1H27zM31 8h1v1H31zM34 8h1v1H34zM36 8h3v1H36zM40 8h1v1H40zM4 9h1v1H4zM10 9h1v1H10zM15 9h2v1H15zM18 9h2v1H18zM22 9h6v1H22zM29 9h1v1H29zM31 9h2v1H31zM34 9h1v1H34zM40 9h1v1H40zM4 10h7v1H4zM12 10h1v1H12zM14 10h1v1H14zM16 10h1v1H16zM18 10h1v1H18zM20 10h1v1H20zM22 10h1v1H22zM24 10h1v1H24zM26 10h1v1H26zM28 10h1v1H28zM30 10h1v1H30zM32 10h1v1H32zM34 10h7v1H34zM13 11h2v1H13zM21 11h2v1H21zM24 11h2v1H24zM27 11h1v1H27zM29 11h1v1H29zM32 11h1v1H32zM4 12h1v1H4zM6 12h1v1H6zM8 12h1v1H8zM10 12h1v1H10zM14 12h1v1H14zM16 12h6v1H16zM24 12h2v1H24zM27 12h3v1H27zM31 12h2v1H31zM36 12h1v1H36zM39 12h1v1H39zM5 13h1v1H5zM7 13h2v1H7zM12 13h1v1H12zM14 13h1v1H14zM16 13h2v1H16zM19 13h2v1H19zM23 13h3v1H23zM28 13h1v1H28zM32 13h1v1H32zM34 13h2v1H34zM37 13h1v1H37zM40 13h1v1H40zM4 14h2v1H4zM8 14h4v1H8zM13 14h1v1H13zM17 14h1v1H17zM19 14h2v1H19zM26 14h1v1H26zM33 14h1v1H33zM36 14h1v1H36zM39 14h2v1H39zM4 15h1v1H4zM6 15h1v1H6zM11 15h2v1H11zM18 15h1v1H18zM20 15h3v1H20zM25 15h1v1H25zM27 15h5v1H27zM34 15h1v1H34zM37 15h1v1H37zM40 15h1v1H40zM5 16h2v1H5zM10 16h2v1H10zM13 16h2v1H13zM16 16h2v1H16zM19 16h3v1H19zM25 16h2v1H25zM29 16h3v1H29zM34 16h1v1H34zM37 16h1v1H37zM39 16h1v1H39zM6 17h1v1H6zM8 17h2v1H8zM11 17h2v1H11zM20 17h1v1H20zM22 17h1v1H22zM24 17h2v1H24zM30 17h1v1H30zM33 17h3v1H33zM37 17h1v1H37zM40 17h1v1H40zM4 18h1v1H4zM7 18h6v1H7zM15 18h4v1H15zM21 18h1v1H21zM28 18h1v1H28zM30 18h1v1H30zM32 18h3v1H32zM40 18h1v1H40zM7 19h3v1H7zM11 19h3v1H11zM16 19h11v1H16zM28 19h3v1H28zM32 19h1v1H32zM35 19h2v1H35zM10 20h2v1H10zM13 20h1v1H13zM17 20h2v1H17zM20 20h2v1H20zM23 20h3v1H23zM29 20h1v1H29zM31 20h1v1H31zM33 20h3v1H33zM6 21h2v1H6zM12 21h2v1H12zM15 21h1v1H15zM17 21h1v1H17zM19 21h1v1H19zM21 21h1v1H21zM24 21h1v1H24zM26 21h1v1H26zM28 21h3v1H28zM32 21h4v1H32zM39 21h2v1H39zM4 22h1v1H4zM7 22h2v1H7zM10 22h1v1H10zM18 22h1v1H18zM22 22h1v1H22zM25 22h1v1H25zM28 22h1v1H28zM30 22h1v1H30zM32 22h2v1H32zM35 22h2v1H35zM38 22h3v1H38zM9 23h1v1H9zM11 23h1v1H11zM13 23h2v1H13zM18 23h1v1H18zM20 23h4v1H20zM25 23h1v1H25zM27 23h6v1H27zM34 23h2v1H34zM37 23h1v1H37zM40 23h1v1H40zM5 24h1v1H5zM8 24h1v1H8zM10 24h1v1H10zM12 24h4v1H12zM17 24h1v1H17zM19 24h3v1H19zM25 24h2v1H25zM29 24h7v1H29zM37 24h1v1H37zM39 24h2v1H39zM5 25h3v1H5zM14 25h2v1H14zM17 25h1v1H17zM20 25h1v1H20zM22 25h1v1H22zM25 25h2v1H25zM30 25h1v1H30zM32 25h4v1H32zM37 25h2v1H37zM40 25h1v1H40zM7 26h1v1H7zM9 26h6v1H9zM18 26h1v1H18zM21 26h2v1H21zM25 26h2v1H25zM30 26h1v1H30zM33 26h1v1H33zM35 26h1v1H35zM37 26h1v1H37zM39 26h2v1H39zM4 27h5v1H4zM11 27h4v1H11zM20 27h3v1H20zM25 27h1v1H25zM27 27h1v1H27zM29 27h3v1H29zM33 27h1v1H33zM35 27h1v1H35zM40 27h1v1H40zM6 28h2v1H6zM10 28h1v1H10zM12 28h1v1H12zM14 28h1v1H14zM16 28h2v1H16zM20 28h6v1H20zM28 28h7v1H28zM40 28h1v1H40zM6 29h1v1H6zM8 29h2v1H8zM11 29h3v1H11zM15 29h4v1H15zM20 29h2v1H20zM24 29h3v1H24zM28 29h1v1H28zM32 29h3v1H32zM37 29h1v1H37zM40 29h1v1H40zM4 30h1v1H4zM10 30h3v1H10zM20 30h3v1H20zM26 30h1v1H26zM30 30h1v1H30zM35 30h3v1H35zM39 30h2v1H39zM5 31h2v1H5zM9 31h1v1H9zM11 31h6v1H11zM18 31h1v1H18zM21 31h15v1H21zM37 31h1v1H37zM40 31h1v1H40zM4 32h1v1H4zM7 32h4v1H7zM14 32h1v1H14zM17 32h1v1H17zM20 32h2v1H20zM23 32h5v1H23zM29 32h2v1H29zM32 32h6v1H32zM40 32h1v1H40zM12 33h2v1H12zM15 33h3v1H15zM20 33h1v1H20zM24 33h3v1H24zM29 33h4v1H29zM36 33h2v1H36zM39 33h2v1H39zM4 34h7v1H4zM13 34h3v1H13zM17 34h2v1H17zM20 34h1v1H20zM24 34h3v1H24zM28 34h2v1H28zM31 34h2v1H31zM34 34h1v1H34zM36 34h5v1H36zM4 35h1v1H4zM10 35h1v1H10zM17 35h1v1H17zM19 35h4v1H19zM24 35h3v1H24zM28 35h2v1H28zM32 35h1v1H32zM36 35h1v1H36zM40 35h1v1H40zM4 36h1v1H4zM6 36h3v1H6zM10 36h1v1H10zM12 36h1v1H12zM14 36h1v1H14zM17 36h2v1H17zM24 36h4v1H24zM29 36h1v1H29zM32 36h6v1H32zM4 37h1v1H4zM6 37h3v1H6zM10 37h1v1H10zM13 37h1v1H13zM15 37h2v1H15zM18 37h1v1H18zM20 37h1v1H20zM22 37h4v1H22zM29 37h1v1H29zM32 37h1v1H32zM36 37h1v1H36zM4 38h1v1H4zM6 38h3v1H6zM10 38h1v1H10zM12 38h1v1H12zM17 38h2v1H17zM20 38h1v1H20zM25 38h2v1H25zM28 38h4v1H28zM35 38h2v1H35zM38 38h3v1H38zM4 39h1v1H4zM10 39h1v1H10zM13 39h4v1H13zM19 39h1v1H19zM21 39h6v1H21zM28 39h2v1H28zM32 39h1v1H32zM34 39h1v1H34zM36 39h1v1H36zM39 39h1v1H39zM4 40h7v1H4zM12 40h4v1H12zM18 40h1v1H18zM21 40h12v1H21zM36 40h1v1H36zM39 40h2v1H39z"/></svg></div>
+          <div class="addr">
+            <span class="val">192.168.0.13:8788 &middot; en0</span>
+            <button>Cambiar</button>
+          </div>
+          <div class="warn">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M8 1.8 1.4 13.4h13.2L8 1.8Z" stroke-linejoin="round"/>
+              <path d="M8 6.4v3.1M8 11.4v.1" stroke-linecap="round"/>
+            </svg>
+            <span>El c&oacute;digo <b>es</b> la clave. Quien le saque una foto a esta pantalla entra a la flota.</span>
+          </div>
+          <div class="typed">
+            <div class="lbl">O escribirla a mano</div>
+            <div class="key">wf-qsm4gekcy2434aa45lnulygxiy</div>
+            <div class="hint">Pas&aacute; el mouse para verla</div>
+          </div>
+        </div>
+      </div>
+      <p class="note"><b>La baldosa del QR es blanca siempre</b>, incluso en tema oscuro: un QR invertido lo rechazan muchos lectores. <b>&ldquo;Cambiar&rdquo;</b> existe porque esta m&aacute;quina responde en cuatro direcciones y tres son t&uacute;neles &mdash; el bug de anoche.</p>
+    </div>
+
+    <!-- 2 ------------------------------------------------------------ -->
+    <div class="col">
+      <p class="caption">Se vinculó — la hoja se cierra sola</p>
+      <div class="stage">
+        <div class="sheet">
+          <button class="x" title="Cerrar">&#10005;</button>
+          <div class="joined">
+            <div class="tick">
+              <svg width="19" height="19" viewBox="0 0 20 20" fill="none" stroke="#0f0e0d" stroke-width="2.1"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 10.4l3.5 3.4 7.3-7.6"/></svg>
+            </div>
+            <div class="who">iPhone 15 Pro Max</div>
+            <div class="det">se uni&oacute; a la flota</div>
+            <div class="closing">Cerrando&hellip;</div>
+          </div>
+        </div>
+      </div>
+      <p class="note">El daemon ya emite <span class="mono">fleet:enrolled</span> con el nombre del dispositivo. Us&aacute;ndolo, <b>la credencial se va de la pantalla en el momento en que se us&oacute;</b>, no cuando vos te acord&aacute;s de cerrar.</p>
+    </div>
+
+    <!-- 3 ------------------------------------------------------------ -->
+    <div class="col">
+      <p class="caption">Esta máquina no tiene clave</p>
+      <div class="stage">
+        <div class="sheet">
+          <button class="x" title="Cerrar">&#10005;</button>
+          <h2>Vincular un teléfono</h2>
+          <p class="lead">Todav&iacute;a no hay una flota en esta m&aacute;quina.</p>
+          <div class="empty">
+            <p>Una clave de flota define &ldquo;mis m&aacute;quinas&rdquo;. Se crea una vez ac&aacute; y se pega en las dem&aacute;s.</p>
+            <button class="btn">Crear la clave de esta flota</button>
+          </div>
+        </div>
+      </div>
+      <p class="note">Refleja lo que ya hace la CLI: <span class="mono">fleet qr</span> se niega y nombra la ruta en vez de crear una clave a escondidas. Crear una credencial es un bot&oacute;n que se aprieta, no algo que pasa solo.</p>
+    </div>
+
+  </div>
+</div>
+<script>
+  // Theme toggle for review only.
+  addEventListener('keydown', function (e) {
+    if (e.key === 't') {
+      var h = document.documentElement;
+      h.dataset.theme = h.dataset.theme === 'dark' ? 'light' : 'dark';
+    }
+  });
+</script>
+</body>
+</html>

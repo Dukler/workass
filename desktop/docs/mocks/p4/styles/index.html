@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>workass · P4 — galería de estilos</title>
+<style>
+:root{
+  --bg-0:#1b1a18; --bg-1:#201f1d; --panel:#232220; --panel-2:#262523; --sunk:#1d1c1a;
+  --line:rgba(255,255,255,.08); --line-2:rgba(255,255,255,.13); --line-3:rgba(255,255,255,.22);
+  --ink:#f0efec; --ink-2:#d8d6d1; --muted:#a8a69f; --label:#918f88;
+  --accent:#3ecf8e; --accent-ink:#0f1512; --accent-soft:rgba(62,207,142,.12);
+  --shadow:0 1px 2px rgba(0,0,0,.24); --shadow-2:0 6px 22px rgba(0,0,0,.30);
+}
+:root[data-theme="light"]{
+  --bg-0:#faf9f7; --bg-1:#f4f3f0; --panel:#ffffff; --panel-2:#fbfaf8; --sunk:#f4f3f0;
+  --line:rgba(20,19,16,.09); --line-2:rgba(20,19,16,.14); --line-3:rgba(20,19,16,.24);
+  --ink:#1c1b18; --ink-2:#3f3e39; --muted:#5d5b55; --label:#6d6b64;
+  --accent:#0e7d56; --accent-ink:#ffffff; --accent-soft:rgba(14,125,86,.10);
+  --shadow:0 1px 2px rgba(20,19,16,.05); --shadow-2:0 6px 22px rgba(20,19,16,.10);
+}
+@media (prefers-color-scheme: light){:root:not([data-theme]){
+  --bg-0:#faf9f7; --bg-1:#f4f3f0; --panel:#ffffff; --panel-2:#fbfaf8; --sunk:#f4f3f0;
+  --line:rgba(20,19,16,.09); --line-2:rgba(20,19,16,.14); --line-3:rgba(20,19,16,.24);
+  --ink:#1c1b18; --ink-2:#3f3e39; --muted:#5d5b55; --label:#6d6b64;
+  --accent:#0e7d56; --accent-ink:#ffffff; --accent-soft:rgba(14,125,86,.10);
+  --shadow:0 1px 2px rgba(20,19,16,.05); --shadow-2:0 6px 22px rgba(20,19,16,.10);
+}}
+:root{--font-ui:"Aptos","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",sans-serif;
+  --font-mono:"Cascadia Code","Consolas",ui-monospace,"SF Mono",monospace;}
+*{box-sizing:border-box;}
+html{font-size:15px;}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
+body{margin:0;min-height:100vh;font-family:var(--font-ui);color:var(--ink);background:var(--bg-0);
+  line-height:1.55;-webkit-font-smoothing:antialiased;}
+a{color:inherit;text-decoration:none;}
+button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer;}
+:where(a,button):focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px;}
+
+.wrap{max-width:1200px;margin:0 auto;padding:32px 28px 64px;}
+header.head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;
+  padding-bottom:20px;margin-bottom:28px;border-bottom:1px solid var(--line);}
+.head-left h1{margin:0;font-size:1.5rem;font-weight:800;letter-spacing:-.02em;}
+.head-left h1 em{color:var(--accent);font-style:normal;}
+.head-left p{margin:6px 0 0;color:var(--muted);font-size:.9rem;max-width:56ch;}
+.head-right{display:flex;align-items:center;gap:10px;}
+.theme-btn{display:flex;align-items:center;gap:8px;font-size:.82rem;font-weight:600;color:var(--ink-2);
+  border:1px solid var(--line-2);border-radius:9px;padding:8px 13px;}
+.theme-btn:hover{border-color:var(--line-3);}
+.theme-btn .glyph{font-size:1rem;}
+
+.section-label{display:flex;align-items:center;gap:10px;font-size:.7rem;font-weight:700;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--label);margin:0 0 16px;}
+.section-label::after{content:"";flex:1;height:1px;background:var(--line);}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:22px;margin-bottom:40px;}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;
+  box-shadow:var(--shadow);display:flex;flex-direction:column;transition:box-shadow .16s,transform .16s,border-color .16s;}
+.card:hover{box-shadow:var(--shadow-2);transform:translateY(-2px);border-color:var(--line-2);}
+.thumb{position:relative;height:236px;background:var(--sunk);border-bottom:1px solid var(--line);overflow:hidden;}
+.thumb iframe{position:absolute;top:0;left:0;width:1200px;height:786px;transform:scale(.315);
+  transform-origin:top left;border:0;background:var(--panel);opacity:0;transition:opacity .25s;pointer-events:none;}
+.thumb iframe.ready{opacity:1;}
+.thumb-fallback{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:8px;color:var(--muted);background:repeating-linear-gradient(45deg,var(--sunk),var(--sunk) 11px,var(--panel-2) 11px,var(--panel-2) 22px);}
+.thumb-fallback .fb-name{font-weight:700;color:var(--ink-2);font-size:.95rem;}
+.thumb-fallback .fb-note{font-size:.72rem;font-family:var(--font-mono);}
+.card-body{padding:14px 16px 16px;display:flex;flex-direction:column;gap:6px;flex:1;}
+.card-title{display:flex;align-items:center;gap:9px;}
+.card-title .name{font-size:1rem;font-weight:700;letter-spacing:-.01em;}
+.card-title .tag{margin-left:auto;font-size:.62rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--muted);border:1px solid var(--line-2);border-radius:99px;padding:2px 8px;}
+.card-title .tag.mine{color:var(--accent);border-color:var(--accent-soft);background:var(--accent-soft);}
+.card-desc{font-size:.82rem;color:var(--muted);line-height:1.5;}
+.card-foot{margin-top:auto;padding-top:8px;}
+.card-open{display:inline-flex;align-items:center;gap:6px;font-size:.78rem;font-weight:600;color:var(--accent);}
+.card-open::after{content:"→";}
+
+.variants{display:flex;flex-wrap:wrap;gap:12px;}
+.vbtn{display:flex;flex-direction:column;gap:2px;padding:12px 16px;border:1px solid var(--line-2);border-radius:11px;
+  background:var(--panel-2);min-width:180px;}
+.vbtn:hover{border-color:var(--line-3);}
+.vbtn .vname{font-size:.9rem;font-weight:700;}
+.vbtn .vsub{font-size:.72rem;color:var(--muted);}
+footer.foot{margin-top:44px;padding-top:18px;border-top:1px solid var(--line);color:var(--label);font-size:.74rem;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="head">
+    <div class="head-left">
+      <h1>workass · P4 — galería de <em>estilos</em></h1>
+      <p>Nueve plantillas de estilo sobre la misma pantalla fija (rail · lista · transcript). La estructura no cambia; cambia la piel. El verde es solo acento.</p>
+    </div>
+    <div class="head-right">
+      <button class="theme-btn" id="themeBtn"><span class="glyph">◐</span> Tema</button>
+    </div>
+  </header>
+
+  <div class="section-label">Plantillas de estilo · 9</div>
+  <div class="grid" id="grid"></div>
+
+  <div class="section-label">IA variants (estructura)</div>
+  <div class="variants">
+    <a class="vbtn" href="../variant-a.html"><span class="vname">Variant A</span><span class="vsub">estructura · quiet pro</span></a>
+    <a class="vbtn" href="../variant-b.html"><span class="vname">Variant B</span><span class="vsub">estructura</span></a>
+    <a class="vbtn" href="../variant-c.html"><span class="vname">Variant C</span><span class="vsub">estructura</span></a>
+  </div>
+
+  <footer class="foot">Vistas previas en vivo vía iframe. Las plantillas aún no construidas muestran un marcador de posición.</footer>
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement;
+  function setTheme(t){
+    root.setAttribute('data-theme',t);
+    // propagate to same-origin iframes so thumbnails follow the gallery theme
+    document.querySelectorAll('.thumb iframe').forEach(function(f){
+      try{ if(f.contentDocument) f.contentDocument.documentElement.setAttribute('data-theme',t); }catch(e){}
+    });
+  }
+  setTheme(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+  document.getElementById('themeBtn').addEventListener('click',function(){
+    setTheme(root.getAttribute('data-theme')==='light'?'dark':'light');
+  });
+
+  var styles=[
+    {f:'quiet-warm.html',n:'Quiet Warm',mine:true,
+     d:'Off-black cálido y crema con bordes de un pelo; la tipografía sostiene la jerarquía y el verde solo susurra.'},
+    {f:'editorial-serif.html',n:'Editorial',mine:true,
+     d:'Serif del sistema para la prosa del agente y los títulos sobre chrome sans; ritmo de lectura de revista.'},
+    {f:'paper-light.html',n:'Paper',mine:true,
+     d:'Light-first: superficies papel-blanco y sombras suaves en vez de bordes; calmo, aireado y luminoso.'},
+    {f:'terminal-modern.html',n:'Terminal Modern',
+     d:'Estética de terminal depurada: tipo con aire mono y señales de línea de comandos, moderna y no retro.'},
+    {f:'stark-mono.html',n:'Stark Mono',
+     d:'Monocromo de alto contraste y cantos nítidos; la estructura se lee solo por el peso del blanco y negro.'},
+    {f:'linear-crisp.html',n:'Linear Crisp',
+     d:'Precisión de app de producto: grilla apretada, bordes limpios y densidad de UI segura a pequeña escala.'},
+    {f:'glass-panels.html',n:'Glass Panels',
+     d:'Paneles translúcidos por capas con profundidad sutil; superficies que difuminan y flotan sobre el fondo.'},
+    {f:'soft-rounded.html',n:'Soft Rounded',
+     d:'Radios generosos y rellenos suaves para una interfaz cercana, amable y de baja tensión.'},
+    {f:'dense-pro.html',n:'Dense Pro',
+     d:'Layout profesional de alta densidad que maximiza el contenido en pantalla con espaciado eficiente.'}
+  ];
+
+  var grid=document.getElementById('grid');
+  styles.forEach(function(s){
+    var card=document.createElement('a');
+    card.className='card'; card.href=s.f;
+    card.innerHTML=
+      '<div class="thumb">'+
+        '<div class="thumb-fallback"><span class="fb-name">'+s.n+'</span><span class="fb-note">vista previa no disponible</span></div>'+
+        '<iframe loading="lazy" tabindex="-1" aria-hidden="true" src="'+s.f+'"></iframe>'+
+      '</div>'+
+      '<div class="card-body">'+
+        '<div class="card-title"><span class="name">'+s.n+'</span>'+
+          (s.mine?'<span class="tag mine">plantilla</span>':'<span class="tag">plantilla</span>')+'</div>'+
+        '<div class="card-desc">'+s.d+'</div>'+
+        '<div class="card-foot"><span class="card-open">Abrir</span></div>'+
+      '</div>';
+    grid.appendChild(card);
+
+    var ifr=card.querySelector('iframe');
+    ifr.addEventListener('load',function(){
+      try{
+        var doc=ifr.contentDocument;
+        if(doc && doc.querySelector('.app')){
+          var t=root.getAttribute('data-theme'); if(t) doc.documentElement.setAttribute('data-theme',t);
+          ifr.classList.add('ready');
+        }
+      }catch(e){ /* cross-origin: assume real doc, reveal */ ifr.classList.add('ready'); }
+    });
+  });
+})();
+</script>
+</body>
+</html>

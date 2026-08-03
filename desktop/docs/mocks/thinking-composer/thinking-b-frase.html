@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pensamiento · Variante B — Frase completa</title>
+<style>
+/* Tokens: verbatim from desktop/renderer2/src/styles/tokens.css (both themes). */
+:root{
+  color-scheme:dark;
+  --bg:#0f0e0d; --side:#151413; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+  --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --acc:#4fa583; --link:#8fb0ea; --amber:#d8a05a; --add:#4cae7f; --del:#d96b5f; --shell:#0b0a09;
+  /* See thinking-a-estado.html: light --muted is 4.03:1 on --bg, under AA for
+     12.5px text, so the mock darkens it here. Product tokens untouched. */
+  --meta:var(--muted);
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#f2f0ed; --side:#faf9f7; --panel:#ffffff; --card:#ffffff; --field:#f1efeb;
+  --ink:#23211e; --ink2:#47443e; --muted:#7a756d; --faint:#a19c93;
+  --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.15);
+  --acc:#177353; --link:#3861b0; --amber:#9a6a1d; --add:#177347; --del:#bd4436; --shell:#eceae6;
+  --meta:#6e6961;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--shell); color:var(--ink);
+  font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; -webkit-font-smoothing:antialiased; padding:22px 24px 40px}
+
+.top{display:flex; align-items:baseline; gap:14px; margin:0 2px 20px}
+.top .t{font-size:15px; font-weight:640}
+.top .d{font-size:12px; color:var(--meta)}
+.top .sp{flex:1}
+.tgl{font:inherit; font-size:12px; color:var(--ink2); background:var(--panel); border:1px solid var(--line2);
+  border-radius:8px; padding:4px 11px; cursor:pointer}
+.tgl:hover{color:var(--ink)}
+
+.cols{display:flex; gap:22px; align-items:flex-start; flex-wrap:wrap}
+.col{width:420px}
+.ph{margin:0 2px 11px}
+.ph .k{font:600 10px/1 var(--mono); letter-spacing:.13em; color:var(--acc); text-transform:uppercase}
+.ph .n{font-size:14px; font-weight:620; margin:6px 0 0}
+.ph .s{font-size:11.5px; color:var(--meta); margin:4px 0 0; line-height:1.45}
+.ph.bad .k{color:var(--del)}
+
+.frame{background:var(--bg); border:1px solid var(--line); border-radius:14px; padding:16px 18px 18px;
+  box-shadow:0 18px 50px -26px rgba(0,0,0,.6)}
+.userpill{display:flex; flex-direction:column; align-items:flex-end; margin:0 0 18px}
+.userpill-text{background:var(--field); border:1px solid var(--line); border-radius:14px; padding:7px 13px; max-width:78%; font-size:13px}
+.p{margin:0 0 13px; font-size:13.5px; line-height:1.62; color:var(--ink)}
+.p:last-child{margin-bottom:0}
+
+/* HOY */
+.steprow{display:flex; align-items:flex-start; gap:7px; color:var(--meta); font-size:12.5px; margin:12px 0;
+  cursor:pointer; border:0; background:transparent; font-family:inherit; text-align:left; padding:0; width:fit-content}
+.steprow .stlbl{text-decoration:underline dotted color-mix(in srgb,var(--faint) 65%,transparent); text-underline-offset:3px}
+
+/* ── VARIANTE B · FRASE COMPLETA ───────────────────────────────────────────────
+   The row does carry live reasoning, but only text the model has actually
+   finished: the renderer keeps a committed prefix and promotes it ONLY up to
+   the last sentence terminator in the buffer. The tail in flight is never
+   painted. Until the first sentence closes, the row reads "Pensando".
+   Sentence changes cross-fade (120ms) so the row updates every few seconds,
+   not every frame. The row is two lines tall at most and clamps — a long
+   sentence ends in an ellipsis, which is a truncation the reader can see,
+   not a cut that pretends to be the end. ──────────────────────────────────── */
+.think{display:flex; align-items:flex-start; gap:8px; margin:12px 0; font-size:12.5px; max-width:100%;
+  background:transparent; border:0; padding:0; font-family:inherit; color:var(--meta); text-align:left}
+.think.done{cursor:pointer}
+.think .dot{width:6px; height:6px; border-radius:50%; background:var(--acc); flex:none; margin-top:6px;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 18%,transparent); animation:bp 1.5s ease-in-out infinite}
+.think .chk{width:6px; height:6px; border-radius:50%; background:var(--line2); flex:none; margin-top:6px}
+.think .body{min-width:0; flex:1}
+.think .lbl{color:var(--ink2)}
+.think.done .lbl{text-decoration:underline dotted color-mix(in srgb,var(--faint) 65%,transparent); text-underline-offset:3px}
+.think.done:hover .lbl{color:var(--ink); text-decoration-color:var(--faint)}
+.think .el{font:11px/1 var(--mono); font-variant-numeric:tabular-nums; color:var(--meta)}
+/* the live sentence: clamped to 2 lines, cross-faded on change */
+.think .sent{margin-top:3px; color:var(--meta); line-height:1.5;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+  transition:opacity .12s ease}
+.think .sent.swap{opacity:0}
+@keyframes bp{0%,100%{opacity:1}50%{opacity:.4}}
+
+.tfull{margin:2px 0 16px; padding:2px 0 2px 13px; border-left:2px solid var(--line2);
+  color:var(--ink2); font-size:12.5px; line-height:1.62; white-space:pre-wrap}
+
+.mon{margin:26px 2px 0; max-width:1304px}
+.mon .mh{font:600 10px/1 var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--faint); margin:0 0 8px}
+.mon .mb{background:var(--panel); border:1px solid var(--line); border-radius:11px; padding:11px 13px;
+  font:11.5px/1.6 var(--mono); color:var(--meta); min-height:74px; white-space:pre-wrap}
+.mon .mb b{color:var(--ink2); font-weight:400}
+.mon .mb .cut{color:var(--del)}
+.note{margin:22px 2px 0; max-width:860px; font-size:12px; color:var(--meta); line-height:1.65}
+.note b{color:var(--ink2); font-weight:600}
+@media (prefers-reduced-motion:reduce){ .think .dot{animation:none} .think .sent{transition:none} }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div>
+    <div class="t">Pensamiento · Variante B — <b>Frase completa</b></div>
+    <div class="d">Muestra razonamiento en vivo, pero sólo hasta el último punto. La cola en vuelo nunca se pinta.</div>
+  </div>
+  <span class="sp"></span>
+  <button class="tgl" id="theme">Claro</button>
+</header>
+
+<div class="cols">
+
+  <div class="col">
+    <div class="ph bad">
+      <div class="k">Hoy · el problema</div>
+      <div class="n">Corta a 90 caracteres, en vivo</div>
+      <div class="s">el corte cae donde caiga · y como el store reemplaza el texto entero en cada evento, la fila muta letra a letra</div>
+    </div>
+    <div class="frame">
+      <div class="userpill"><div class="userpill-text">Arreglá la fila de pensamiento, corta las frases.</div></div>
+      <button class="steprow"><span class="stbody"><span class="stlbl">Pensó</span> · <span id="hoy"></span></span></button>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="ph">
+      <div class="k">Variante B · en curso</div>
+      <div class="n">La última frase terminada</div>
+      <div class="s">cambia cada pocos segundos, con un fundido de 120 ms · antes de la primera frase, sólo «Pensando»</div>
+    </div>
+    <div class="frame">
+      <div class="userpill"><div class="userpill-text">Arreglá la fila de pensamiento, corta las frases.</div></div>
+      <div class="think" role="status" aria-live="polite">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="body">
+          <span class="lbl">Pensando</span> <span class="el" id="clock">0:07</span>
+          <span class="sent" id="sent"></span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="ph">
+      <div class="k">Variante B · terminado</div>
+      <div class="n">Se pliega a una sola línea</div>
+      <div class="s">al cerrarse el razonamiento la frase en vivo desaparece y queda «Pensó · 18s», que abre el texto completo</div>
+    </div>
+    <div class="frame">
+      <div class="userpill"><div class="userpill-text">Arreglá la fila de pensamiento, corta las frases.</div></div>
+
+      <button class="think done" id="t1" aria-expanded="false">
+        <span class="chk" aria-hidden="true"></span>
+        <span class="body"><span class="lbl">Pensó</span> <span class="el">18s</span></span>
+      </button>
+      <p class="p">La fila de hoy recorta el razonamiento a noventa caracteres, así que casi siempre parte una palabra al medio. Cambié el tratamiento: en vivo sólo aparece la última frase terminada, y al cerrar queda una fila que abre el razonamiento completo.</p>
+
+      <div style="height:22px"></div>
+
+      <button class="think done" id="t2" aria-expanded="true">
+        <span class="chk" aria-hidden="true"></span>
+        <span class="body"><span class="lbl">Pensó</span> <span class="el">18s</span></span>
+      </button>
+      <div class="tfull" id="t2b">Voy a revisar cómo se arma hoy la fila de pensamiento antes de tocar nada. El renderer corta el texto a noventa caracteres, así que la primera línea casi siempre queda partida a la mitad de una palabra. Eso explica por qué la fila cambia de contenido mientras el modelo sigue escribiendo. La opción más honesta es no mostrar fragmentos: o una frase completa, o nada.</div>
+      <p class="p">La fila de hoy recorta el razonamiento a noventa caracteres, así que casi siempre parte una palabra al medio.</p>
+    </div>
+  </div>
+</div>
+
+<div class="mon">
+  <div class="mh">Sólo el mock · búfer crudo (en gris, lo ya comprometido; en rojo, la cola en vuelo que B nunca pinta)</div>
+  <div class="mb" id="raw"></div>
+</div>
+
+<div class="note">
+  <b>La regla.</b> Se busca en el búfer el último terminador de frase (<code>. ! ? …</code> o <code>:</code> seguido de espacio o fin)
+  y sólo se promueve hasta ahí. Todo lo que viene después queda retenido hasta que cierre. Si el modelo nunca cierra una frase,
+  la fila se queda en «Pensando» — que es la verdad. Contra el recorte de hoy: no hay ningún estado en el que se muestre
+  media palabra.
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement, btn=document.getElementById('theme');
+  btn.onclick=function(){
+    var light=root.getAttribute('data-theme')==='light';
+    root.setAttribute('data-theme', light?'dark':'light');
+    btn.textContent=light?'Claro':'Oscuro';
+  };
+
+  var TXT="Voy a revisar cómo se arma hoy la fila de pensamiento antes de tocar nada. El renderer corta el texto a noventa caracteres, así que la primera línea casi siempre queda partida a la mitad de una palabra. Eso explica por qué la fila cambia de contenido mientras el modelo sigue escribiendo. La opción más honesta es no mostrar fragmentos: o una frase completa, o nada.";
+  var hoy=document.getElementById('hoy'), raw=document.getElementById('raw'),
+      clock=document.getElementById('clock'), sent=document.getElementById('sent');
+  var i=0, t0=0, shown="";
+
+  // THE MECHANISM: commit only up to the last closed sentence.
+  function lastComplete(buf){
+    var all=buf.match(/[^.!?…:]*[.!?…:](?=\s|$)/g);
+    if(!all||!all.length) return "";
+    return all[all.length-1].trim();
+  }
+  function committedLen(buf){
+    var s=lastComplete(buf);
+    if(!s) return 0;
+    return buf.lastIndexOf(s)+s.length;
+  }
+  function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+  function fmt(s){ var m=Math.floor(s/60); var r=s%60; return m+":"+(r<10?"0":"")+r; }
+
+  function tick(){
+    i+=2+Math.floor(Math.random()*4);
+    if(i>TXT.length){ i=0; t0=0; shown=""; sent.textContent=""; }
+    t0+=0.06;
+    var buf=TXT.slice(0,i);
+    hoy.textContent=buf.split("\n")[0].slice(0,90);
+    var cut=committedLen(buf);
+    raw.innerHTML="<b>"+esc(buf.slice(0,cut))+"</b><span class='cut'>"+esc(buf.slice(cut))+"</span>";
+    clock.textContent=fmt(Math.floor(t0));
+    var next=lastComplete(buf);
+    if(next && next!==shown){
+      shown=next;
+      sent.classList.add('swap');
+      setTimeout(function(){ sent.textContent=shown; sent.classList.remove('swap'); },120);
+    }
+  }
+  setInterval(tick,60); tick();
+
+  document.getElementById('t1').onclick=function(){
+    var open=this.getAttribute('aria-expanded')==='true';
+    this.setAttribute('aria-expanded',String(!open));
+    var b=document.getElementById('t1b');
+    if(!open && !b){ b=document.createElement('div'); b.className='tfull'; b.id='t1b'; b.textContent=TXT; this.after(b); }
+    else if(b){ b.remove(); }
+  };
+  document.getElementById('t2').onclick=function(){
+    var b=document.getElementById('t2b');
+    var open=this.getAttribute('aria-expanded')==='true';
+    this.setAttribute('aria-expanded',String(!open));
+    b.style.display=open?'none':'';
+  };
+})();
+</script>
+</body>
+</html>

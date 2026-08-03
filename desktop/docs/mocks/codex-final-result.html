@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Workass · typed Codex result</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#151413; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+    --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+    --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+    --acc:#4fa583; --link:#8fb0ea; --shell:#0b0a09;
+    --read:760px;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg:#faf9f7; --panel:#fff; --card:#f6f4f1; --field:#f0eeea;
+    --ink:#23211e; --ink2:#4f4b45; --muted:#6f6a62; --faint:#938d84;
+    --line:rgba(35,33,30,.09); --line2:rgba(35,33,30,.16);
+    --acc:#177353; --link:#366da4; --shell:#eceae6;
+  }
+  * { box-sizing:border-box; }
+  html, body { min-height:100%; }
+  body {
+    margin:0; background:var(--shell); color:var(--ink);
+    font:13.5px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    padding:28px;
+  }
+  button { font:inherit; }
+  button:focus-visible, a:focus-visible {
+    outline:2px solid var(--acc); outline-offset:2px;
+  }
+  .frame {
+    width:min(940px,100%); margin:0 auto; background:var(--bg);
+    border:1px solid var(--line); border-radius:16px;
+    box-shadow:0 24px 70px rgba(0,0,0,.25); overflow:hidden;
+  }
+  .bar {
+    height:40px; display:flex; align-items:center; gap:8px; padding:0 13px;
+    border-bottom:1px solid var(--line); color:var(--muted);
+  }
+  .lights { display:flex; gap:7px; }
+  .lights i { width:10px; height:10px; border-radius:50%; display:block; }
+  .lights i:nth-child(1){background:#ff5f57}.lights i:nth-child(2){background:#febc2e}.lights i:nth-child(3){background:#28c840}
+  .bar-title { margin:auto; font-size:12px; }
+  .bar-actions { display:flex; gap:4px; }
+  .bar-btn {
+    height:27px; padding:0 9px; border:0; border-radius:7px; background:transparent;
+    color:var(--muted); cursor:pointer; font-size:11.5px;
+  }
+  .bar-btn:hover { color:var(--ink); background:var(--line); }
+  .doc { max-width:var(--read); margin:0 auto; padding:40px 28px 54px; }
+  .user { display:flex; justify-content:flex-end; margin-bottom:26px; }
+  .user span {
+    max-width:76%; background:var(--field); border:1px solid var(--line);
+    border-radius:14px 14px 4px 14px; padding:8px 12px; color:var(--ink2);
+  }
+  .assistant { max-width:var(--read); }
+  .commentary p { margin:0 0 14px; color:var(--ink2); }
+  .step { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:12.5px; margin:12px 0; }
+  .step .ok { color:var(--acc); font-size:12px; width:13px; text-align:center; }
+  .tools { border:1px solid var(--line); background:color-mix(in srgb,var(--card) 82%,transparent); border-radius:10px; margin:12px 0 18px; }
+  .tools summary { list-style:none; display:flex; align-items:center; gap:9px; padding:7px 11px; color:var(--ink2); cursor:pointer; }
+  .tools summary::-webkit-details-marker { display:none; }
+  .tools summary:hover { background:color-mix(in srgb,var(--acc) 6%,transparent); }
+  .tools .chev { color:var(--faint); font-size:10px; transition:transform .15s ease; }
+  .tools[open] .chev { transform:rotate(90deg); }
+  .tools .dur { margin-left:auto; color:var(--faint); font:11px ui-monospace,"SF Mono",Menlo,monospace; }
+  .tools-body { border-top:1px solid var(--line); padding:5px 11px 7px 32px; color:var(--muted); font-size:12px; }
+
+  /* Typed final_answer: a transcript-native conclusion, never a dashboard card. */
+  .result {
+    position:relative; margin-top:20px; padding-left:18px;
+    border-left:2px solid color-mix(in srgb,var(--acc) 55%,var(--line2));
+    animation:result-in .12s ease both;
+  }
+  .result-head { min-height:28px; display:flex; align-items:center; gap:7px; margin-bottom:9px; }
+  .result-toggle {
+    min-width:0; flex:1 1 auto; display:inline-flex; align-items:center; gap:7px; height:28px;
+    padding:0 4px 0 0; border:0; border-radius:6px; background:transparent;
+    color:var(--muted); cursor:pointer;
+  }
+  .result-toggle:hover { color:var(--ink2); }
+  .result-caret { width:10px; color:var(--muted); font-size:10px; transform:rotate(90deg); transition:transform .15s ease; }
+  .result-dot { width:4px; height:4px; border-radius:50%; background:var(--acc); flex:none; }
+  .result-label { font-size:11px; line-height:1; font-weight:600; letter-spacing:.08em; text-transform:uppercase; }
+  .result-preview { min-width:0; flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--ink2); font-size:12.5px; line-height:1.35; text-align:left; }
+  .result:not(.collapsed) .result-preview { display:none; }
+  .result-state { color:var(--muted); font-size:11px; }
+  .result-state:empty { display:none; }
+  .result-actions { margin-left:auto; display:flex; align-items:center; gap:2px; opacity:0; transition:opacity .12s ease; }
+  .result:hover .result-actions, .result-actions:focus-within { opacity:1; }
+  .icon-btn {
+    width:28px; height:28px; display:grid; place-items:center; flex:none;
+    color:var(--muted); background:transparent; border:0; border-radius:7px; cursor:pointer;
+  }
+  .icon-btn:hover { color:var(--ink); background:var(--line); }
+  .icon-btn svg { width:14px; height:14px; }
+  .result-body { position:relative; color:var(--ink); max-width:var(--read); }
+  .result-content { overflow:hidden; }
+  .result.clamped .result-content { max-height:330px; }
+  .result.clamped:not(.show-all) .result-content {
+    -webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 64px),transparent 100%);
+    mask-image:linear-gradient(to bottom,#000 calc(100% - 64px),transparent 100%);
+  }
+  .result-more {
+    display:none; margin-top:3px; border:0; background:transparent; color:var(--muted);
+    padding:3px 0; cursor:pointer; font-size:12px;
+  }
+  .result-more:hover { color:var(--ink); }
+  .result.clamped .result-more { display:inline-flex; }
+  .result.show-all .result-content { max-height:none; -webkit-mask-image:none; mask-image:none; }
+  .result.collapsed { padding-left:14px; }
+  .result.collapsed .result-head { margin-bottom:0; }
+  .result.collapsed .result-caret { transform:rotate(0); }
+  .result.collapsed .result-label, .result.collapsed .result-state, .result.collapsed .result-actions, .result.collapsed .result-body { display:none; }
+  .result.streaming .result-dot { animation:pulse 1.25s ease-in-out infinite; }
+
+  /* Same prose grammar as the real transcript. */
+  .p { margin:0 0 14px; }
+  .p b { font-weight:600; }
+  .p code, li code { background:var(--field); border:1px solid var(--line); border-radius:5px; padding:.5px 5px; font-size:11.5px; color:var(--ink2); }
+  .p a { color:var(--link); text-decoration:none; }
+  .p a:hover { text-decoration:underline; }
+  .mdh { margin:4px 0 12px; font-weight:600; line-height:1.35; }
+  .mdh2 { font-size:16px; }
+  ul.doclist { margin:0 0 14px 5px; list-style:none; padding:0; }
+  ul.doclist li { margin:0 0 7px; padding-left:17px; position:relative; }
+  ul.doclist li::before { content:"•"; position:absolute; left:2px; color:var(--muted); }
+  .codebox { border:1px solid var(--line); background:var(--field); border-radius:10px; padding:11px 13px; margin:0 0 14px; overflow-x:auto; white-space:pre; font:12px/1.6 ui-monospace,"SF Mono",Menlo,monospace; color:var(--ink2); }
+  .codebox .ok { color:var(--acc); }
+  .mdtable-wrap { overflow-x:auto; margin:0 0 14px; }
+  .mdtable { border-collapse:collapse; font-size:12.5px; min-width:390px; }
+  .mdtable th, .mdtable td { border:1px solid var(--line); padding:4px 10px; text-align:left; }
+  .mdtable th { background:var(--field); font-weight:600; }
+  .stamp { display:flex; align-items:center; gap:10px; color:var(--faint); font-size:11.5px; margin-top:13px; }
+  .stamp-copy { width:16px; height:16px; display:grid; place-items:center; border:0; background:transparent; color:var(--faint); cursor:pointer; }
+  .stamp-copy:hover { color:var(--ink2); }
+  .stamp-copy svg { width:13px; height:13px; }
+  .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+  @keyframes pulse { 0%,100% { opacity:1; box-shadow:0 0 0 0 color-mix(in srgb,var(--acc) 28%,transparent); } 50% { opacity:.45; box-shadow:0 0 0 4px transparent; } }
+  @keyframes result-in { from { opacity:0; transform:translateY(2px); } to { opacity:1; transform:none; } }
+  @media (prefers-reduced-motion:reduce) { *, *::before, *::after { animation:none !important; transition:none !important; scroll-behavior:auto !important; } }
+  @media (max-width:640px) {
+    body{padding:0}.frame{border:0;border-radius:0;box-shadow:none;min-height:100vh}.doc{padding:30px 18px 48px}
+    .result{padding-left:12px}.bar-title{display:none}.user span{max-width:88%}
+  }
+</style>
+</head>
+<body>
+<main class="frame">
+  <header class="bar">
+    <span class="lights"><i></i><i></i><i></i></span>
+    <span class="bar-title">Workass · typed final result</span>
+    <span class="bar-actions">
+      <button class="bar-btn" id="streamDemo" type="button">Replay stream</button>
+      <button class="bar-btn" id="themeToggle" type="button">Light</button>
+    </span>
+  </header>
+
+  <div class="doc">
+    <div class="user"><span>Can you implement this and verify it in dev?</span></div>
+
+    <article class="assistant">
+      <div class="commentary">
+        <p>I found the boundary in Codex’s native event stream. I’m preserving that phase through the daemon instead of trying to recognize headings in generated text.</p>
+        <div class="step"><span class="ok">✓</span><span>Confirmed <code>commentary</code> / <code>final_answer</code> metadata</span></div>
+        <details class="tools">
+          <summary><span class="chev">▸</span><span class="ok">✓</span><span>4 tool calls completed</span><span class="dur">18.4s</span></summary>
+          <div class="tools-body">Schema inspection · bridge regression · renderer test · dev activation</div>
+        </details>
+      </div>
+
+      <section class="result clamped collapsed" id="resultCard" role="region" aria-label="Resultado">
+        <div class="result-head">
+          <button class="result-toggle" id="resultToggle" type="button" aria-expanded="false">
+            <span class="result-caret" aria-hidden="true">▸</span>
+            <span class="result-dot" aria-hidden="true"></span>
+            <span class="result-label" id="resultLabel">Resultado</span>
+            <span class="result-preview"><b>Implemented and active in the isolated dev runtime.</b></span>
+          </button>
+          <span class="result-state" id="resultState"></span>
+          <span class="result-actions">
+            <button class="icon-btn" id="copyResult" type="button" title="Copiar resultado" aria-label="Copiar resultado">
+              <svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+              <svg class="check-icon" hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 4 4L19 6"/></svg>
+            </button>
+          </span>
+        </div>
+
+        <div class="result-body" id="resultBody">
+          <div class="result-content" id="resultContent">
+            <p class="p"><b>Implemented and active in the isolated dev runtime.</b></p>
+            <p class="p">Codex’s typed <code>final_answer</code> is now the turn’s conclusion instead of one more chunk in the working commentary.</p>
+            <h2 class="mdh mdh2">What changed</h2>
+            <ul class="doclist">
+              <li>The final output keeps full Markdown, links, code blocks, tables, and copy behavior.</li>
+              <li>Progress commentary remains calm and inline above it.</li>
+              <li>Older providers and phase-less messages keep the normal transcript layout.</li>
+            </ul>
+            <pre class="codebox"><span class="ok">✓</span> typecheck     clean
+<span class="ok">✓</span> renderer      121 passed
+<span class="ok">✓</span> production    untouched</pre>
+            <div class="mdtable-wrap">
+              <table class="mdtable">
+                <thead><tr><th>Surface</th><th>Behavior</th></tr></thead>
+                <tbody><tr><td>Commentary</td><td>Normal transcript</td></tr><tr><td>Final answer</td><td>One typed result</td></tr></tbody>
+              </table>
+            </div>
+            <p class="p">The result is stored with this turn and can be copied as raw Markdown. <a href="#">View the implementation receipt</a>.</p>
+          </div>
+          <button class="result-more" id="resultMore" type="button" aria-expanded="false">Mostrar más</button>
+        </div>
+      </section>
+
+      <div class="stamp">
+        <button class="stamp-copy" type="button" title="Copiar turno" aria-label="Copiar turno">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+        </button>
+        <span>just now</span>
+      </div>
+    </article>
+  </div>
+</main>
+
+<div class="sr-only" id="resultAnnouncement" aria-live="polite"></div>
+<script>
+  const RAW_RESULT = `**Implemented and active in the isolated dev runtime.**
+
+Codex's typed \`final_answer\` is now the turn's conclusion instead of one more chunk in the working commentary.
+
+## What changed
+
+- The final output keeps full Markdown, links, code blocks, tables, and copy behavior.
+- Progress commentary remains calm and inline above it.
+- Older providers and phase-less messages keep the normal transcript layout.`;
+
+  const COMPLETE_HTML = document.getElementById('resultContent').innerHTML;
+  const STREAM_FRAMES = [
+    '<p class="p"><b>Implemented and active',
+    '<p class="p"><b>Implemented and active in the isolated dev runtime.</b></p>',
+    '<p class="p"><b>Implemented and active in the isolated dev runtime.</b></p><p class="p">Codex’s typed <code>final_answer</code> is now the turn’s conclusion',
+    '<p class="p"><b>Implemented and active in the isolated dev runtime.</b></p><p class="p">Codex’s typed <code>final_answer</code> is now the turn’s conclusion instead of one more chunk in the working commentary.</p>',
+    COMPLETE_HTML,
+  ];
+
+  const root = document.documentElement;
+  const card = document.getElementById('resultCard');
+  const toggle = document.getElementById('resultToggle');
+  const content = document.getElementById('resultContent');
+  const state = document.getElementById('resultState');
+  const more = document.getElementById('resultMore');
+  const copy = document.getElementById('copyResult');
+  let streamTimer = null;
+  let userToggled = false;
+
+  toggle.addEventListener('click', () => {
+    userToggled = true;
+    card.classList.toggle('collapsed');
+    const expanded = !card.classList.contains('collapsed');
+    toggle.setAttribute('aria-expanded', String(expanded));
+  });
+
+  more.addEventListener('click', () => {
+    card.classList.toggle('show-all');
+    const expanded = card.classList.contains('show-all');
+    more.textContent = expanded ? 'Mostrar menos' : 'Mostrar más';
+    more.setAttribute('aria-expanded', String(expanded));
+  });
+
+  copy.addEventListener('click', async () => {
+    await navigator.clipboard?.writeText(RAW_RESULT);
+    copy.querySelector('.copy-icon').hidden = true;
+    copy.querySelector('.check-icon').hidden = false;
+    copy.style.color = 'var(--acc)';
+    document.getElementById('resultAnnouncement').textContent = 'Resultado copiado';
+    setTimeout(() => {
+      copy.querySelector('.copy-icon').hidden = false;
+      copy.querySelector('.check-icon').hidden = true;
+      copy.style.color = '';
+    }, 900);
+  });
+
+  document.getElementById('themeToggle').addEventListener('click', (event) => {
+    const light = root.getAttribute('data-theme') !== 'light';
+    root.setAttribute('data-theme', light ? 'light' : 'dark');
+    event.currentTarget.textContent = light ? 'Dark' : 'Light';
+  });
+
+  document.getElementById('streamDemo').addEventListener('click', () => {
+    clearInterval(streamTimer);
+    card.classList.remove('collapsed', 'show-all');
+    card.classList.add('streaming');
+    toggle.setAttribute('aria-expanded', 'true');
+    state.textContent = 'escribiendo';
+    more.style.visibility = 'hidden';
+    userToggled = false;
+    let frame = 0;
+    content.innerHTML = '';
+    const advance = () => {
+      content.innerHTML = STREAM_FRAMES[frame++];
+      if (frame >= STREAM_FRAMES.length) {
+        clearInterval(streamTimer);
+        card.classList.remove('streaming');
+        state.textContent = '';
+        more.style.visibility = '';
+        if (!userToggled) {
+          card.classList.add('collapsed');
+          toggle.setAttribute('aria-expanded', 'false');
+        }
+        document.getElementById('resultAnnouncement').textContent = 'Resultado listo';
+      }
+    };
+    advance();
+    streamTimer = setInterval(advance, 470);
+  });
+</script>
+</body>
+</html>

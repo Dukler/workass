@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><title>Mock — nombres + iconos de acciones singulares</title>
+<style>
+  :root{
+    --bg:#0f0e0d; --card:#1a1918; --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+    --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14); --acc:#4fa583; --del:#d96b5f;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0b0a09;color:var(--ink);font:13.5px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:26px 30px}
+  h1{font-size:15px;font-weight:600;margin-bottom:2px}
+  .sub{color:var(--muted);font-size:12px;margin-bottom:20px}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:26px;align-items:start}
+  .pane{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:14px 16px 16px}
+  .pane h2{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin-bottom:10px}
+  .pane.after h2{color:var(--acc)}
+
+  /* transcript rows — same metrics as app.css .toolsolo/.evt */
+  .toolsolo{margin:7px 0}
+  .evt{padding:2px 2px}
+  .evt-head{display:flex;align-items:center;gap:8px;font-size:12px;min-width:0}
+  .evt-title{color:var(--ink2);flex:0 0 auto;max-width:65%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+             text-decoration:underline dotted color-mix(in srgb,var(--faint) 65%,transparent);text-underline-offset:3px}
+  .evt-loc{color:var(--faint);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1 1 auto;
+           font-family:ui-monospace,Menlo,monospace}
+  .evt-dur-head{margin-left:auto;color:var(--faint);font-size:11px;font-family:ui-monospace,Menlo,monospace;flex:none}
+  .evt-run{margin-left:auto;width:7px;height:7px;border-radius:50%;background:var(--acc);box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%,transparent);flex:none}
+  .evt[data-status="failed"] .evt-loc{color:var(--del)}
+  /* NEW: leading action icon */
+  .evt-kic{flex:none;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;color:var(--faint)}
+  .evt-kic svg{width:14px;height:14px;stroke-width:1.35;stroke-linecap:round;stroke-linejoin:round;display:block}
+  .evt:hover .evt-kic{color:var(--muted)}
+  /* faint MCP server tag */
+  .evt-tag{flex:none;color:var(--faint);font-size:10.5px;opacity:.75}
+
+  /* group (unchanged — shown for context) */
+  .toolgroup{margin:7px 0}
+  .tg-summary{display:flex;align-items:center;gap:8px;width:100%;background:none;border:0;padding:2px;cursor:pointer;font:inherit;text-align:left}
+  .tg-title{color:var(--muted);font-size:12px;text-decoration:underline dotted color-mix(in srgb,var(--faint) 55%,transparent);text-underline-offset:3px}
+  .tg-count{color:var(--faint)}
+  .tg-body{border-left:2px solid var(--line2);margin:3px 0 2px 5px;padding:2px 0 2px 10px}
+  .tg-body .evt{padding:4px 8px 4px 6px}
+  .mico{flex:none;display:inline-flex;width:14px;height:14px;color:var(--ink2)}
+  .mico svg{width:14px;height:14px}
+  .evt-st{margin-left:auto;color:var(--faint);font-size:10.5px;font-family:ui-monospace,Menlo,monospace;flex:none}
+  .evt-sub .evt-title{font-weight:550;text-decoration:none}
+  .note{color:var(--faint);font-size:11px;margin-top:14px;border-top:1px solid var(--line);padding-top:10px}
+  .note b{color:var(--muted);font-weight:600}
+  .glyphs{display:flex;flex-wrap:wrap;gap:14px 22px;margin-top:10px}
+  .gl{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted)}
+  .gl .evt-kic{color:var(--ink2)}
+</style></head>
+<body>
+<h1>Acciones singulares — nombre legible + icono de la acción</h1>
+<div class="sub">Sólo cambian las filas individuales (sueltas y dentro de un grupo). El resumen plural “1 comando · 1 subagente · …” no se toca.</div>
+
+<div class="cols">
+  <div class="pane"><h2>Antes</h2>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-title">Bash</span>
+      <span class="evt-loc">go test ./internal/acp -run Subagent -count=1</span>
+      <span class="evt-dur-head">2.4s</span></div></div></div>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-title">mcp__workass-agent__workass_cancel_subagent</span>
+      <span class="evt-dur-head">0.3s</span></div></div></div>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-title">Read</span>
+      <span class="evt-loc">renderer2/src/components/messages.tsx</span>
+      <span class="evt-dur-head">0.1s</span></div></div></div>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-title">Editing files</span>
+      <span class="evt-loc">internal/acp/subagents.go</span>
+      <span class="evt-dur-head">1.1s</span></div></div></div>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-title">Web search</span>
+      <span class="evt-dur-head">3.8s</span></div></div></div>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-title">/bin/zsh -lc "ssh lagpc-vpn 'powershell -NoProfile -Command …'"</span>
+      <span class="evt-dur-head">6.0s</span></div></div></div>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-title">TodoWrite</span>
+      <span class="evt-dur-head">0.1s</span></div></div></div>
+
+    <div class="note">El nombre es el identificador crudo de la herramienta: <b>Bash</b>, <b>mcp__…__…</b>, o el comando entero de Codex ocupando toda la línea.</div>
+  </div>
+
+  <div class="pane after"><h2>Después</h2>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M4.6 6.4l2.2 1.9-2.2 1.9M8.6 10.6h3"/></svg></span>
+      <span class="evt-title">Ejecutar un comando</span>
+      <span class="evt-loc">go test ./internal/acp -run Subagent -count=1</span>
+      <span class="evt-dur-head">2.4s</span></div></div></div>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M6 2.4v2.8M10 2.4v2.8"/><rect x="3.9" y="5.2" width="8.2" height="4.2" rx="1.5"/><path d="M8 9.4v4.2"/></svg></span>
+      <span class="evt-title">Cancelar un subagente</span>
+      <span class="evt-tag">· workass</span>
+      <span class="evt-dur-head">0.3s</span></div></div></div>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="2.6" y="2.4" width="10.8" height="11.2" rx="1.6"/><path d="M5 5.6h6M5 8h6M5 10.4h3.6"/></svg></span>
+      <span class="evt-title">Leer un archivo</span>
+      <span class="evt-loc">renderer2/src/components/messages.tsx</span>
+      <span class="evt-dur-head">0.1s</span></div></div></div>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M10.9 2.3l2.8 2.8-8 8H2.9v-2.8z"/><path d="M9.4 3.8l2.8 2.8"/></svg></span>
+      <span class="evt-title">Editar un archivo</span>
+      <span class="evt-loc">internal/acp/subagents.go</span>
+      <span class="evt-dur-head">1.1s</span></div></div></div>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><circle cx="8" cy="8" r="5.7"/><path d="M2.3 8h11.4M8 2.3c1.6 1.5 2.6 3.5 2.6 5.7S9.6 12.2 8 13.7C6.4 12.2 5.4 10.2 5.4 8S6.4 3.8 8 2.3z"/></svg></span>
+      <span class="evt-title">Buscar en la web</span>
+      <span class="evt-loc">acp session/update tool kinds</span>
+      <span class="evt-dur-head">3.8s</span></div></div></div>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M4.6 6.4l2.2 1.9-2.2 1.9M8.6 10.6h3"/></svg></span>
+      <span class="evt-title">Ejecutar un comando</span>
+      <span class="evt-loc">ssh lagpc-vpn 'powershell -NoProfile -Command …'</span>
+      <span class="evt-dur-head">6.0s</span></div></div></div>
+
+    <div class="toolsolo"><div class="evt"><div class="evt-head">
+      <span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M2.6 4.4l1.5 1.5 2.3-2.6M2.6 9.9l1.5 1.5 2.3-2.6"/><path d="M8.8 4.6h4.6M8.8 10.1h4.6"/></svg></span>
+      <span class="evt-title">Actualizar el plan</span>
+      <span class="evt-dur-head">0.1s</span></div></div></div>
+
+    <div class="note">El nombre dice <b>qué se hizo</b>; la evidencia exacta (comando, ruta, consulta) pasa a la columna mono, que ya elide por el medio y nunca pierde el archivo. El identificador crudo sigue visible en el tooltip y al abrir la fila.</div>
+  </div>
+</div>
+
+<div class="pane" style="margin-top:22px">
+  <h2>Dentro de un grupo (mismas filas, mismo tratamiento)</h2>
+  <div class="toolgroup">
+    <div class="tg-summary"><span class="tg-title">1 comando · 1 subagente · 1 herramienta<span class="tg-count"> · 3 llamadas</span></span><span class="evt-dur-head">4.2s</span></div>
+    <div class="tg-body">
+      <div class="evt"><div class="evt-head">
+        <span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M6 2.4v2.8M10 2.4v2.8"/><rect x="3.9" y="5.2" width="8.2" height="4.2" rx="1.5"/><path d="M8 9.4v4.2"/></svg></span>
+        <span class="evt-title">Cancelar un subagente</span><span class="evt-tag">· workass</span></div></div>
+      <div class="evt evt-sub"><div class="evt-head">
+        <span class="mico"><svg viewBox="0 0 20 20" fill="none"><g stroke="#cc7a52" stroke-width="1.5" stroke-linecap="round"><line x1="10" y1="10" x2="10" y2="3.5"/><line x1="10" y1="10" x2="13.25" y2="4.37"/><line x1="10" y1="10" x2="15.63" y2="6.75"/><line x1="10" y1="10" x2="16.5" y2="10"/><line x1="10" y1="10" x2="15.63" y2="13.25"/><line x1="10" y1="10" x2="13.25" y2="15.63"/><line x1="10" y1="10" x2="10" y2="16.5"/><line x1="10" y1="10" x2="6.75" y2="15.63"/><line x1="10" y1="10" x2="4.37" y2="13.25"/><line x1="10" y1="10" x2="3.5" y2="10"/><line x1="10" y1="10" x2="4.37" y2="6.75"/><line x1="10" y1="10" x2="6.75" y2="4.37"/></g></svg></span>
+        <span class="evt-title">Subagente · floor: sub-1ms locks</span><span class="evt-st">listo</span></div></div>
+      <div class="evt"><div class="evt-head">
+        <span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M4.6 6.4l2.2 1.9-2.2 1.9M8.6 10.6h3"/></svg></span>
+        <span class="evt-title">Ejecutar un comando</span><span class="evt-loc">git -C . log -1 --oneline</span></div></div>
+    </div>
+  </div>
+</div>
+
+<div class="pane" style="margin-top:22px">
+  <h2>Vocabulario completo</h2>
+  <div class="glyphs">
+    <div class="gl"><span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M4.6 6.4l2.2 1.9-2.2 1.9M8.6 10.6h3"/></svg></span>Ejecutar un comando</div>
+    <div class="gl"><span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="2.6" y="2.4" width="10.8" height="11.2" rx="1.6"/><path d="M5 5.6h6M5 8h6M5 10.4h3.6"/></svg></span>Leer un archivo</div>
+    <div class="gl"><span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M10.9 2.3l2.8 2.8-8 8H2.9v-2.8z"/><path d="M9.4 3.8l2.8 2.8"/></svg></span>Editar un archivo</div>
+    <div class="gl"><span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M3.4 13.4V4a1.4 1.4 0 011.4-1.4h4l3.8 3.8v7a1.4 1.4 0 01-1.4 1.4H4.8a1.4 1.4 0 01-1.4-1.4z"/><path d="M8.6 2.8v3.4h3.8"/></svg></span>Escribir un archivo</div>
+    <div class="gl"><span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><circle cx="7.1" cy="7.1" r="4.4"/><path d="M10.4 10.4L13.8 13.8"/></svg></span>Buscar en el código</div>
+    <div class="gl"><span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><circle cx="8" cy="8" r="5.7"/><path d="M2.3 8h11.4M8 2.3c1.6 1.5 2.6 3.5 2.6 5.7S9.6 12.2 8 13.7C6.4 12.2 5.4 10.2 5.4 8S6.4 3.8 8 2.3z"/></svg></span>Buscar en la web</div>
+    <div class="gl"><span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 2.6v7.2M8 9.8L5.4 7.2M8 9.8l2.6-2.6"/><path d="M2.8 11.4v1.2a1 1 0 001 1h8.4a1 1 0 001-1v-1.2"/></svg></span>Abrir una página web</div>
+    <div class="gl"><span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M2.6 4.4l1.5 1.5 2.3-2.6M2.6 9.9l1.5 1.5 2.3-2.6"/><path d="M8.8 4.6h4.6M8.8 10.1h4.6"/></svg></span>Actualizar el plan</div>
+    <div class="gl"><span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M3.2 4.6h9.6M6.4 4.6V3.2h3.2v1.4M4.6 4.6l.6 8.2h5.6l.6-8.2"/></svg></span>Borrar un archivo</div>
+    <div class="gl"><span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M2.6 8h9.4M9.4 5.2L12.6 8l-3.2 2.8"/><path d="M2.6 3.4v9.2"/></svg></span>Mover un archivo</div>
+    <div class="gl"><span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M2.6 4.4a1.6 1.6 0 011.6-1.6h7.6a1.6 1.6 0 011.6 1.6v4.8a1.6 1.6 0 01-1.6 1.6H6.4l-3 2.4v-2.4H4.2a1.6 1.6 0 01-1.6-1.6z"/></svg></span>Ver / enviar un chat</div>
+    <div class="gl"><span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><circle cx="8" cy="5.2" r="2.4"/><path d="M3 13.2a5 5 0 0110 0"/></svg></span>Subagente</div>
+    <div class="gl"><span class="evt-kic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M6 2.4v2.8M10 2.4v2.8"/><rect x="3.9" y="5.2" width="8.2" height="4.2" rx="1.5"/><path d="M8 9.4v4.2"/></svg></span>Herramienta externa / MCP</div>
+  </div>
+  <div class="note">Sin glifo comodín: la llave inglesa se eliminó del código (2026-07-25) y cada acción lleva una marca que significa algo. Los MCP propios de Workass se traducen (“Cancelar un subagente · workass”). Cualquier otro MCP se humaniza desde su nombre: <b>mcp__linear__create_issue</b> → “Create issue · linear”.</div>
+</div>
+</body></html>

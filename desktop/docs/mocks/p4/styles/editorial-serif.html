@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>workass · P4 style — Editorial</title>
+<style>
+/* ============================================================
+   STYLE TEMPLATE — "Editorial"
+   System SERIF (ui-serif / New York / Georgia) for agent prose
+   and headings; sans for all UI chrome. Magazine reading rhythm,
+   strongest typographic hierarchy of the set.
+   Green is accent ONLY: live dot, links, focus, send, diff/UI.
+   ============================================================ */
+:root{
+  /* dark — warm ink */
+  --bg-0:#1a1917; --bg-1:#1f1e1b;
+  --panel:#232220; --panel-2:#262523; --sunk:#1c1b19;
+  --line:rgba(255,255,255,.08); --line-2:rgba(255,255,255,.13); --line-3:rgba(255,255,255,.22);
+  --ink:#f2f0ec; --ink-2:#dad7d0; --muted:#a6a49c; --label:#8f8d85;
+  --accent:#3ecf8e; --accent-ink:#0f1512;
+  --accent-soft:rgba(62,207,142,.12); --accent-softer:rgba(62,207,142,.06);
+  --warn:#dba545; --warn-soft:rgba(219,165,69,.10);
+  --risk:#e08a72;
+  --tok-kw:#c8a0e8; --tok-typ:#69c3d6; --tok-fn:#e2e0da; --tok-num:#e5977f; --tok-str:#d9b877; --tok-cmt:#8b8981;
+  --add-ink:#83d9ab; --add-bg:rgba(62,207,142,.09);
+  --del-ink:#e6a48f; --del-bg:rgba(224,138,114,.09);
+  --shadow:0 1px 2px rgba(0,0,0,.26);
+}
+:root[data-theme="light"]{
+  --bg-0:#f7f4ee; --bg-1:#f1ede5;
+  --panel:#fffdf9; --panel-2:#faf7f0; --sunk:#f1ede5;
+  --line:rgba(30,26,18,.09); --line-2:rgba(30,26,18,.15); --line-3:rgba(30,26,18,.26);
+  --ink:#201d16; --ink-2:#423d33; --muted:#5f5a4e; --label:#6e6959;
+  --accent:#0e7d56; --accent-ink:#ffffff;
+  --accent-soft:rgba(14,125,86,.10); --accent-softer:rgba(14,125,86,.05);
+  --warn:#8a5f00; --warn-soft:rgba(138,95,0,.08);
+  --risk:#a8442a;
+  --tok-kw:#7a3fb0; --tok-typ:#0f6f86; --tok-fn:#423d33; --tok-num:#a8442a; --tok-str:#836614; --tok-cmt:#6e6959;
+  --add-ink:#0e7d56; --add-bg:rgba(14,125,86,.09);
+  --del-ink:#a8442a; --del-bg:rgba(168,68,42,.08);
+  --shadow:0 1px 2px rgba(30,26,18,.06);
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme]){
+    --bg-0:#f7f4ee; --bg-1:#f1ede5;
+    --panel:#fffdf9; --panel-2:#faf7f0; --sunk:#f1ede5;
+    --line:rgba(30,26,18,.09); --line-2:rgba(30,26,18,.15); --line-3:rgba(30,26,18,.26);
+    --ink:#201d16; --ink-2:#423d33; --muted:#5f5a4e; --label:#6e6959;
+    --accent:#0e7d56; --accent-ink:#ffffff;
+    --accent-soft:rgba(14,125,86,.10); --accent-softer:rgba(14,125,86,.05);
+    --warn:#8a5f00; --warn-soft:rgba(138,95,0,.08); --risk:#a8442a;
+    --tok-kw:#7a3fb0; --tok-typ:#0f6f86; --tok-fn:#423d33; --tok-num:#a8442a; --tok-str:#836614; --tok-cmt:#6e6959;
+    --add-ink:#0e7d56; --add-bg:rgba(14,125,86,.09);
+    --del-ink:#a8442a; --del-bg:rgba(168,68,42,.08);
+    --shadow:0 1px 2px rgba(30,26,18,.06);
+  }
+}
+
+:root{
+  --font-ui:"Aptos","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",sans-serif;
+  --font-serif:ui-serif,"New York","Iowan Old Style","Palatino Linotype","Book Antiqua",Georgia,"Times New Roman",serif;
+  --font-mono:"Cascadia Code","Cascadia Mono","Consolas",ui-monospace,"SF Mono",monospace;
+  --fs-chat:1rem; --fs-sm:.84rem; --fs-xs:.75rem; --fs-2xs:.68rem;
+  --fs-prose:1.09rem; --fs-h3:1.34rem;
+  --lh-prose:1.72; --measure:70ch; --col-max:44rem;
+  --r-lg:12px; --r-md:9px; --r-sm:6px;
+  --rail-w:56px; --list-w:260px;
+}
+*{box-sizing:border-box;}
+html{font-size:15px;}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
+body{margin:0;height:100vh;overflow:hidden;font-family:var(--font-ui);font-size:var(--fs-chat);
+  line-height:1.6;color:var(--ink);background:var(--bg-0);
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;}
+a{color:var(--accent);text-decoration:none;} a:hover{text-decoration:underline;}
+code,pre{font-family:var(--font-mono);}
+button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer;}
+:where(button,textarea,[tabindex]):focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:5px;}
+::-webkit-scrollbar{width:10px;height:10px;}
+::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:99px;border:3px solid transparent;background-clip:padding-box;}
+::-webkit-scrollbar-thumb:hover{background:var(--line-3);}
+svg{display:block;}
+
+.app{display:grid;grid-template-columns:var(--rail-w) var(--list-w) 1fr;height:100vh;}
+
+/* ============ RAIL (sans chrome) ============ */
+.rail{display:flex;flex-direction:column;align-items:center;background:var(--bg-1);
+  border-right:1px solid var(--line);padding:12px 0;gap:6px;}
+.mono{width:32px;height:32px;border-radius:8px;background:var(--ink);color:var(--bg-0);
+  display:grid;place-items:center;font-family:var(--font-serif);font-weight:700;font-size:1.05rem;margin-bottom:8px;}
+.rail-spaces{display:flex;flex-direction:column;align-items:center;gap:4px;width:100%;}
+.space{width:44px;height:44px;border-radius:10px;color:var(--muted);display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:2px;position:relative;}
+.space svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;}
+.space .lbl{font-size:8.5px;font-weight:600;letter-spacing:.02em;}
+.space:hover{background:var(--line);color:var(--ink-2);}
+.space.active{color:var(--ink);}
+.space.active::before{content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);
+  width:3px;height:20px;border-radius:99px;background:var(--accent);}
+.rail-foot{margin-top:auto;display:flex;flex-direction:column;align-items:center;gap:6px;}
+.avatar-btn{width:30px;height:30px;border-radius:99px;background:var(--accent-soft);color:var(--accent);
+  display:grid;place-items:center;font-size:var(--fs-xs);font-weight:700;}
+.gear{width:38px;height:38px;border-radius:9px;color:var(--muted);display:grid;place-items:center;}
+.gear svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;}
+.gear:hover{background:var(--line);color:var(--ink);}
+
+/* ============ LIST (sans chrome) ============ */
+.list{display:flex;flex-direction:column;min-height:0;background:var(--bg-0);border-right:1px solid var(--line);}
+.list-head{display:flex;align-items:center;gap:8px;padding:16px 14px 8px;}
+.new-conv{flex:1;display:flex;align-items:center;gap:8px;padding:9px 12px;font-size:var(--fs-sm);
+  font-weight:600;color:var(--ink-2);border:1px solid var(--line-2);border-radius:9px;}
+.new-conv:hover{border-color:var(--line-3);color:var(--ink);}
+.new-conv svg{width:15px;height:15px;stroke:var(--accent);fill:none;stroke-width:2;stroke-linecap:round;}
+.theme-btn{width:34px;height:34px;border-radius:8px;color:var(--muted);font-size:1rem;display:grid;place-items:center;flex:none;}
+.theme-btn:hover{background:var(--line);color:var(--ink);}
+.engine-chip{display:flex;align-items:center;gap:7px;margin:0 14px 8px;padding:6px 11px;
+  font-size:var(--fs-2xs);font-family:var(--font-mono);color:var(--muted);
+  background:var(--panel-2);border:1px solid var(--line);border-radius:99px;}
+.engine-chip .dot{width:6px;height:6px;border-radius:99px;background:var(--warn);animation:pulse 1.6s infinite;}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+.list-scroll{flex:1;min-height:0;overflow:auto;padding:2px 8px 12px;}
+.group{margin-bottom:14px;}
+.group-label{display:flex;align-items:center;gap:6px;padding:8px 8px 5px;font-size:var(--fs-2xs);
+  font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--label);}
+.group-count{margin-left:auto;font-weight:600;color:var(--muted);background:var(--line);padding:1px 7px;border-radius:99px;}
+.conv{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:9px 10px;border-radius:8px;position:relative;}
+.conv:hover{background:var(--panel-2);}
+.conv.active{background:var(--panel);}
+.conv.active::before{content:"";position:absolute;left:2px;top:50%;transform:translateY(-50%);width:3px;height:16px;border-radius:99px;background:var(--accent);}
+.dot{width:7px;height:7px;border-radius:99px;flex:none;background:var(--line-3);}
+.dot.on{background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
+.dot.run{background:var(--warn);animation:pulse 1.6s infinite;}
+.dot.draft{background:var(--risk);}
+.conv-text{display:flex;flex-direction:column;min-width:0;gap:1px;flex:1;}
+.conv-title{font-size:var(--fs-sm);font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.conv-meta{font-size:var(--fs-2xs);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.muted-row .conv-title{color:var(--muted);font-weight:500;}
+.badge{display:inline-grid;place-items:center;min-width:17px;height:17px;padding:0 5px;font-size:var(--fs-2xs);
+  font-weight:700;color:var(--accent-ink);background:var(--accent);border-radius:99px;flex:none;}
+
+/* ============ MAIN ============ */
+.main{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--bg-0);}
+.scroll{flex:1;min-height:0;overflow:auto;padding:34px 24px 12px;}
+.col{max-width:var(--col-max);margin:0 auto;}
+
+/* user — quiet compact; serif body, sans label */
+.user-msg{margin:0 0 32px;}
+.user-label{font-family:var(--font-ui);font-size:var(--fs-2xs);font-weight:700;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--label);margin-bottom:8px;}
+.user-body{border-left:2px solid var(--line-3);padding:2px 0 2px 16px;}
+.user-body p{margin:0;color:var(--ink-2);font-family:var(--font-serif);font-size:1.02rem;line-height:1.6;}
+.ctx-chip{display:inline-flex;align-items:center;gap:6px;margin-top:10px;font-size:var(--fs-xs);
+  font-family:var(--font-mono);color:var(--muted);background:var(--sunk);border:1px solid var(--line);padding:3px 9px;border-radius:6px;}
+.ctx-chip svg{width:12px;height:12px;stroke:var(--muted);fill:none;stroke-width:1.7;}
+
+/* agent — the magazine column */
+.think{font-family:var(--font-serif);font-style:italic;font-size:1rem;color:var(--muted);
+  margin-bottom:16px;border-left:2px solid var(--line-2);padding:2px 0 2px 14px;}
+.plan{border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel-2);padding:13px 16px;margin-bottom:18px;}
+.plan-head{font-family:var(--font-ui);display:flex;align-items:center;gap:8px;font-size:var(--fs-xs);font-weight:700;
+  letter-spacing:.09em;text-transform:uppercase;color:var(--label);margin-bottom:10px;}
+.plan-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;}
+.plan-list li{display:flex;align-items:center;gap:11px;font-size:var(--fs-sm);color:var(--ink-2);}
+.plan-box{width:13px;height:13px;border-radius:4px;border:1.5px solid var(--line-3);flex:none;}
+.plan-list li[data-st="done"] .plan-box{background:var(--accent);border-color:var(--accent);}
+.plan-list li[data-st="done"]{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line-3);}
+.plan-list li[data-st="active"] .plan-box{border-color:var(--accent);box-shadow:inset 0 0 0 3px var(--accent-soft);}
+.toolrow{display:flex;align-items:center;gap:9px;font-size:var(--fs-sm);color:var(--muted);
+  font-family:var(--font-mono);margin-bottom:20px;padding-left:2px;}
+.toolrow .chk{color:var(--accent);font-weight:700;}
+
+.prose{max-width:var(--measure);font-family:var(--font-serif);}
+.prose p{margin:0 0 17px;color:var(--ink);font-size:var(--fs-prose);line-height:var(--lh-prose);}
+.prose strong{font-weight:700;}
+.prose em{font-style:italic;}
+.prose h3{font-family:var(--font-serif);font-size:var(--fs-h3);font-weight:700;letter-spacing:-.015em;
+  line-height:1.25;margin:26px 0 8px;color:var(--ink);padding-bottom:7px;border-bottom:1px solid var(--line);}
+.prose :not(pre)>code{font-family:var(--font-mono);font-size:.82em;background:var(--line);color:var(--ink-2);padding:1.5px 6px;border-radius:5px;}
+pre.code{font-family:var(--font-mono);background:var(--sunk);border:1px solid var(--line);border-radius:var(--r-md);
+  padding:14px 16px;overflow:auto;font-size:.85rem;line-height:1.62;margin:0 0 18px;color:var(--ink-2);}
+.tok-kw{color:var(--tok-kw);} .tok-typ{color:var(--tok-typ);} .tok-fn{color:var(--tok-fn);}
+.tok-num{color:var(--tok-num);} .tok-str{color:var(--tok-str);} .tok-cmt{color:var(--tok-cmt);font-style:italic;}
+.table-wrap{overflow-x:auto;margin:0 0 18px;border:1px solid var(--line);border-radius:var(--r-md);}
+table{border-collapse:collapse;width:100%;font-family:var(--font-ui);font-size:var(--fs-sm);}
+thead th{text-align:left;font-weight:700;color:var(--label);font-size:var(--fs-xs);text-transform:uppercase;
+  letter-spacing:.05em;padding:9px 14px;background:var(--panel-2);border-bottom:1px solid var(--line);}
+tbody td{padding:9px 14px;border-bottom:1px solid var(--line);color:var(--ink-2);}
+tbody tr:last-child td{border-bottom:none;}
+.pill{font-size:var(--fs-2xs);font-weight:700;font-family:var(--font-mono);padding:1px 8px;border-radius:99px;}
+.pill.pin{color:var(--accent);background:var(--accent-soft);}
+.pill.keep{color:var(--warn);background:var(--warn-soft);}
+.pill.reap{color:var(--muted);background:var(--line);}
+pre.diff{font-family:var(--font-mono);background:var(--sunk);border:1px solid var(--line);border-radius:var(--r-md);
+  overflow:auto;font-size:.83rem;line-height:1.55;margin:0 0 18px;padding:6px 0;}
+pre.diff span{display:block;padding:1px 16px;white-space:pre;}
+.d-hunk{color:var(--muted);background:var(--panel-2);border-bottom:1px solid var(--line);border-top:1px solid var(--line);}
+.d-ctx{color:var(--ink-2);} .d-add{color:var(--add-ink);background:var(--add-bg);} .d-del{color:var(--del-ink);background:var(--del-bg);}
+
+/* permission card (sans chrome) */
+.perm{font-family:var(--font-ui);border:1px solid var(--line-2);border-radius:var(--r-md);background:var(--panel);
+  overflow:hidden;max-width:var(--measure);box-shadow:var(--shadow);margin:22px 0 4px;}
+.perm-head{display:flex;align-items:center;gap:11px;padding:11px 14px;border-bottom:1px solid var(--line);}
+.perm-ic{width:26px;height:26px;border-radius:7px;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;flex:none;}
+.perm-ic svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;}
+.perm-titles{display:flex;flex-direction:column;flex:1;min-width:0;}
+.perm-title{font-size:var(--fs-sm);font-weight:700;}
+.perm-sub{font-size:var(--fs-xs);color:var(--muted);}
+.perm-cmd{margin:0;padding:12px 16px;font-size:.85rem;color:var(--ink-2);background:var(--sunk);border-bottom:1px solid var(--line);overflow:auto;}
+.perm-actions{display:flex;gap:8px;padding:11px 14px;}
+.btn{font-size:var(--fs-sm);font-weight:600;padding:7px 14px;border-radius:8px;border:1px solid var(--line-2);color:var(--ink);}
+.btn:hover{border-color:var(--line-3);}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent;}
+.btn.primary:hover{filter:brightness(1.05);}
+.btn.ghost{border-color:transparent;color:var(--muted);}
+.btn.ghost:hover{color:var(--risk);background:var(--line);}
+
+/* composer (sans chrome) */
+.composer{padding:10px 24px 16px;background:var(--bg-0);}
+.composer .col{max-width:var(--col-max);}
+.composer-box{border:1px solid var(--line-2);border-radius:var(--r-lg);background:var(--panel);box-shadow:var(--shadow);overflow:hidden;}
+.composer-box:focus-within{border-color:var(--accent);}
+.composer textarea{width:100%;border:none;background:none;resize:none;color:var(--ink);
+  font-family:var(--font-ui);font-size:var(--fs-chat);line-height:1.5;padding:13px 15px 4px;outline:none;}
+.composer textarea::placeholder{color:var(--muted);}
+.composer-bar{display:flex;align-items:center;justify-content:space-between;padding:7px 10px 9px;}
+.composer-left{display:flex;align-items:center;gap:4px;}
+.sel{display:flex;align-items:center;gap:6px;font-size:var(--fs-sm);font-weight:600;color:var(--ink-2);padding:5px 10px;border-radius:8px;}
+.sel:hover{background:var(--line);}
+.sel-dot{width:6px;height:6px;border-radius:99px;background:var(--line-3);}
+.sel-dot.on{background:var(--accent);}
+.send{display:flex;align-items:center;gap:7px;font-size:var(--fs-sm);font-weight:700;color:var(--accent-ink);
+  background:var(--accent);padding:7px 15px;border-radius:9px;}
+.send:hover{filter:brightness(1.05);}
+.send svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <nav class="rail" aria-label="Espacios">
+    <div class="mono" title="workass">W</div>
+    <div class="rail-spaces">
+      <button class="space active" aria-current="page">
+        <svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg>
+        <span class="lbl">Chats</span>
+      </button>
+      <button class="space">
+        <svg viewBox="0 0 24 24"><path d="M3 5h18l-7 8v5l-4-2v-3z"/></svg>
+        <span class="lbl">Triage</span>
+      </button>
+      <button class="space">
+        <svg viewBox="0 0 24 24"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg>
+        <span class="lbl">Actividad</span>
+      </button>
+    </div>
+    <div class="rail-foot">
+      <button class="avatar-btn" title="Martin">M</button>
+      <button class="gear" aria-label="Ajustes">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.1 5.1l2.1 2.1M16.8 16.8l2.1 2.1M18.9 5.1l-2.1 2.1M7.2 16.8l-2.1 2.1"/></svg>
+      </button>
+    </div>
+  </nav>
+
+  <aside class="list" aria-label="Conversaciones">
+    <div class="list-head">
+      <button class="new-conv"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg> Nueva conversación</button>
+      <button class="theme-btn" id="themeBtn" title="Cambiar tema" aria-label="Cambiar tema">◐</button>
+    </div>
+    <div class="engine-chip"><span class="dot"></span> 3 engines · 1.6 GB</div>
+    <div class="list-scroll">
+      <div class="group">
+        <div class="group-label">Devin · activas <span class="group-count">3</span></div>
+        <button class="conv active">
+          <span class="dot on"></span>
+          <span class="conv-text"><span class="conv-title">Reaper de hibernación</span><span class="conv-meta">daemon/reaper · hace 2 min</span></span>
+        </button>
+        <button class="conv">
+          <span class="dot run"></span>
+          <span class="conv-text"><span class="conv-title">Reconnect WebSocket</span><span class="conv-meta">ejecutando · 00:41</span></span>
+          <span class="badge">3</span>
+        </button>
+        <button class="conv">
+          <span class="dot"></span>
+          <span class="conv-text"><span class="conv-title">Landmines del PORT-SPEC</span><span class="conv-meta">idle · hace 1 h</span></span>
+        </button>
+      </div>
+      <div class="group">
+        <div class="group-label">Assist · borradores <span class="group-count">2</span></div>
+        <button class="conv">
+          <span class="dot draft"></span>
+          <span class="conv-text"><span class="conv-title">Respuesta a Teams</span><span class="conv-meta">borrador · @canal-infra</span></span>
+        </button>
+        <button class="conv">
+          <span class="dot"></span>
+          <span class="conv-text"><span class="conv-title">Review PR #482</span><span class="conv-meta">esperando CI</span></span>
+        </button>
+      </div>
+      <div class="group">
+        <div class="group-label">Archivados</div>
+        <button class="conv muted-row"><span class="dot"></span><span class="conv-text"><span class="conv-title">Migración al daemon Go</span><span class="conv-meta">cerrado ayer</span></span></button>
+        <button class="conv muted-row"><span class="dot"></span><span class="conv-text"><span class="conv-title">Bench de Qwen local</span><span class="conv-meta">cerrado · lun</span></span></button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="scroll">
+      <div class="col">
+
+        <section class="user-msg">
+          <div class="user-label">Martin</div>
+          <div class="user-body">
+            <p>El reaper está hibernando chats que todavía están trabajando. Encontrá la race y proponé un fix.</p>
+            <span class="ctx-chip"><svg viewBox="0 0 24 24"><path d="M14 3v5h5M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/></svg>daemon/reaper/reaper.go</span>
+          </div>
+        </section>
+
+        <section class="agent">
+          <div class="think">Pensó durante 8 s · revisó el bucle del reaper y el registro de leases</div>
+
+          <div class="plan">
+            <div class="plan-head">Plan</div>
+            <ul class="plan-list">
+              <li data-st="done"><span class="plan-box"></span>Reproducir la race con un test de lease activo</li>
+              <li data-st="active"><span class="plan-box"></span>Localizar el chequeo de actividad en el barrido</li>
+              <li data-st="todo"><span class="plan-box"></span>Proponer fix: fijar el lease mientras hay prompt en vuelo</li>
+            </ul>
+          </div>
+
+          <div class="toolrow"><span class="chk">✓</span> Leer reaper.go · 120 líneas</div>
+
+          <div class="prose">
+            <p>La race ocurre entre el <strong>barrido del reaper</strong> y la comprobación de <code>lastActivity</code>. El reaper lee el timestamp, decide hibernar y <em>después</em> toma el lock — para entonces ya llegó un prompt nuevo, pero el engine se reap igual.</p>
+
+            <h3>La causa</h3>
+            <p>La comprobación y la acción no son atómicas. Entre el <code>RLock</code> de lectura y el <code>Lock</code> de escritura hay una ventana donde <code>markActive()</code> corre desde otra goroutine:</p>
+
+            <pre class="code"><span class="tok-cmt">// reaper.go — barrido cada 30 s</span>
+<span class="tok-kw">func</span> (r *<span class="tok-typ">Reaper</span>) <span class="tok-fn">sweep</span>() {
+  <span class="tok-kw">for</span> _, s := <span class="tok-kw">range</span> r.<span class="tok-fn">idleSessions</span>() {   <span class="tok-cmt">// lee bajo RLock</span>
+    <span class="tok-kw">if</span> time.<span class="tok-fn">Since</span>(s.lastActivity) &gt; <span class="tok-num">idleTTL</span> {
+      r.<span class="tok-fn">hibernate</span>(s)                     <span class="tok-cmt">// toma Lock — ¡tarde!</span>
+    }
+  }
+}</pre>
+
+            <p>Bajo carga (10+ chats) el reaper hiberna sesiones con prompt en vuelo. La política correcta:</p>
+
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Estado del chat</th><th>Política</th><th>Acción del reaper</th></tr></thead>
+                <tbody>
+                  <tr><td>Prompt en vuelo</td><td><span class="pill pin">pin</span></td><td>Nunca hibernar</td></tr>
+                  <tr><td>Idle &lt; TTL</td><td><span class="pill keep">keep</span></td><td>Mantener caliente</td></tr>
+                  <tr><td>Idle &gt; TTL</td><td><span class="pill reap">reap</span></td><td>Hibernar y replay</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p>El fix revalida el lease dentro del <code>Lock</code> antes de expulsar:</p>
+
+            <pre class="diff"><span class="d-hunk">@@ daemon/reaper/reaper.go @@</span><span class="d-ctx"> func (r *Reaper) hibernate(s *Session) {</span><span class="d-ctx">   r.mu.Lock(); defer r.mu.Unlock()</span><span class="d-del">-  r.evict(s)</span><span class="d-add">+  if s.pinned || s.inFlight() { return }</span><span class="d-add">+  r.evict(s) // revalidado bajo Lock</span><span class="d-ctx"> }</span></pre>
+
+            <p>Añadí <code>TestActiveLeasePin</code>, que reproduce la ventana con 200 goroutines. Pasa en verde en local.</p>
+          </div>
+
+          <div class="perm">
+            <div class="perm-head">
+              <span class="perm-ic"><svg viewBox="0 0 24 24"><path d="M4 17l6-6-6-6M12 19h8"/></svg></span>
+              <div class="perm-titles"><span class="perm-title">Ejecutar go test ./daemon/reaper</span><span class="perm-sub">en ~/workass/daemon</span></div>
+            </div>
+            <pre class="perm-cmd">go test ./daemon/reaper -run TestActiveLeasePin -race</pre>
+            <div class="perm-actions">
+              <button class="btn primary">Permitir una vez</button>
+              <button class="btn">Permitir siempre</button>
+              <button class="btn ghost">Rechazar</button>
+            </div>
+          </div>
+
+        </section>
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="col">
+        <div class="composer-box">
+          <textarea rows="1" placeholder="Escribe un mensaje…"></textarea>
+          <div class="composer-bar">
+            <div class="composer-left">
+              <button class="sel"><span class="sel-dot on"></span>Modelo ▾</button>
+              <button class="sel">Permisos ▾</button>
+            </div>
+            <button class="send">Enviar <svg viewBox="0 0 24 24"><path d="M4 12l16-8-6 8 6 8z"/></svg></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement;
+  function set(t){root.setAttribute('data-theme',t);}
+  set(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+  document.getElementById('themeBtn').addEventListener('click',function(){
+    set(root.getAttribute('data-theme')==='light'?'dark':'light');
+  });
+})();
+</script>
+</body>
+</html>

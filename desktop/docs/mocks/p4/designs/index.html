@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workass — diseños</title>
+<style>
+  :root { color-scheme: dark;
+    --bg:#1b1a18; --panel:#232220; --ink:#f0efec; --muted:#a8a5a0; --line:rgba(255,255,255,.09); --accent:#34c98e; }
+  [data-theme="light"] { color-scheme: light;
+    --bg:#faf9f7; --panel:#ffffff; --ink:#1c1b18; --muted:#6b6862; --line:rgba(0,0,0,.10); --accent:#0d7d55; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--ink); font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; padding:40px clamp(20px,5vw,64px); }
+  header { display:flex; align-items:baseline; gap:16px; margin-bottom:8px; }
+  h1 { font-size:22px; font-weight:650; letter-spacing:-.01em; }
+  header button { margin-left:auto; background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:6px 14px; font:inherit; font-size:13px; cursor:pointer; }
+  header button:hover { border-color:var(--accent); }
+  p.sub { color:var(--muted); margin-bottom:28px; max-width:70ch; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(420px,1fr)); gap:24px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; display:flex; flex-direction:column; }
+  .thumb { aspect-ratio:16/9; position:relative; overflow:hidden; background:var(--bg); border-bottom:1px solid var(--line); }
+  .thumb iframe { width:1600px; height:900px; transform:scale(.30); transform-origin:0 0; border:0; pointer-events:none; position:absolute; }
+  @media (min-width:1px) { .thumb iframe { transform:scale(calc(var(--tw,480)/1600)); } }
+  .meta { padding:14px 16px 16px; display:flex; flex-direction:column; gap:6px; }
+  .meta b { font-size:15px; font-weight:600; }
+  .meta span { color:var(--muted); font-size:13.5px; }
+  .meta a { margin-top:8px; align-self:flex-start; color:var(--accent); text-decoration:none; font-size:13.5px; font-weight:550; border:1px solid var(--line); border-radius:8px; padding:5px 12px; }
+  .meta a:hover { border-color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Workass — diseños</h1>
+  <button id="tg" type="button">Cambiar tema</button>
+</header>
+<p class="sub">Cinco diseños de la misma app de chat agéntico, con la app actual como línea de base. Referencias: Claude Code, Codex, Cursor, T3 Chat, Grok build. Cada uno abre a pantalla completa con su propio toggle de tema.</p>
+<div class="grid" id="grid"></div>
+<script>
+(() => {
+  const designs = [
+    ['workass-one.html','Workass One — la síntesis','Lo mejor de cada referencia + lo que solo workass necesita: documento de Claude, cards y rail de Codex, engines con RAM e hibernación.'],
+    ['current-deck.html','La app actual','Línea de base — el command deck de hoy, fiel al renderer real.'],
+    ['claude-calm.html','Claude-calm','Calma tipo Claude Code: el chat como documento, cromo que desaparece.'],
+    ['codex-engine.html','Codex-engine','Precisión de ingeniería: metadata mono, ejecución como ledger.'],
+    ['cursor-panel.html','Cursor-panel','Contexto de trabajo: diffs aplicables y archivos como ciudadanos de primera.'],
+    ['swift-light.html','Swift-light','Ligereza T3/Grok: velocidad como valor de diseño, cromo mínimo.'],
+    ['reference-true.html','Codex-true','Construido por Fable desde el screenshot real de Codex: documento, cards de trabajo con diffstat, panel de entorno a la derecha.'],
+    ['claude-true.html','Claude-true','Construido por Fable desde el screenshot real de Claude Code: transcript como documento, filas de actividad ›, composer con chip de permisos.'],
+  ];
+  const grid = document.getElementById('grid');
+  for (const [file, name, desc] of designs) {
+    const card = document.createElement('div'); card.className = 'card';
+    card.innerHTML = `<div class="thumb"><iframe loading="lazy" src="${file}" title="${name}"></iframe></div>
+      <div class="meta"><b>${name}</b><span>${desc}</span><a href="${file}">Abrir a pantalla completa</a></div>`;
+    grid.appendChild(card);
+  }
+  const fit = () => { for (const t of document.querySelectorAll('.thumb')) t.style.setProperty('--tw', t.clientWidth); };
+  addEventListener('resize', fit); fit(); setTimeout(fit, 50);
+  const root = document.documentElement;
+  if (matchMedia('(prefers-color-scheme: light)').matches) root.dataset.theme = 'light';
+  document.getElementById('tg').onclick = () => {
+    root.dataset.theme = root.dataset.theme === 'light' ? '' : 'light';
+    for (const f of document.querySelectorAll('iframe')) { try { f.contentWindow.location.reload(); } catch {} }
+  };
+})();
+</script>
+</body>
+</html>

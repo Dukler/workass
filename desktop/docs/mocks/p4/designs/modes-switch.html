@@ -1,0 +1,541 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Assist | Chats — motion switch gallery</title>
+<style>
+  /* ============ tokens (copied from workass-one.html) ============ */
+  :root { color-scheme: dark;
+    --bg:#151413; --side:#0f0e0d; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+    --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+    --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+    --acc:#4fa583; --link:#8fb0ea; --amber:#d8a05a; --add:#4cae7f; --del:#d96b5f;
+    /* per-variant motion durations (1x). JS rewrites these as resolved seconds for
+       slow-mo — never calc(time * var()), which Chrome fails to substitute. */
+    --slide:0.22s; --fadeA:0.20s; --stagA:0.04s;
+    --dB:0.38s; --dC:0.34s; --dD:0.32s; --dE:0.40s; --dF:0.36s;
+  }
+  [data-theme="light"] { color-scheme: light;
+    --bg:#faf9f7; --side:#f2f0ed; --panel:#ffffff; --card:#ffffff; --field:#f1efeb;
+    --ink:#23211e; --ink2:#47443e; --muted:#7a756d; --faint:#a19c93;
+    --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.15);
+    --acc:#177353; --link:#3861b0; --amber:#9a6a1d; --add:#177347; --del:#bd4436;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; }
+  body { background:var(--bg); color:var(--ink);
+         font:13.5px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+         padding:30px 28px 46px; min-height:100%; }
+
+  /* ============ page chrome ============ */
+  .head { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin:0 auto 4px; max-width:1180px; }
+  .head h1 { font-size:19px; font-weight:600; letter-spacing:-.01em; }
+  .head p  { color:var(--muted); font-size:13px; }
+  .toolbar { display:flex; align-items:center; gap:8px; margin:14px auto 26px; max-width:1180px; flex-wrap:wrap;
+             color:var(--muted); font-size:12px; }
+  .toolbar .grp { display:inline-flex; gap:2px; padding:3px; background:color-mix(in srgb,var(--ink) 4%,transparent);
+                  border-radius:9px; }
+  .toolbar button { border:0; background:transparent; color:var(--muted); font:inherit; font-size:12px;
+                    padding:4px 11px; border-radius:7px; cursor:pointer; transition:color .15s ease, background .15s ease; }
+  .toolbar button.sel { background:var(--field); border:1px solid var(--line); color:var(--ink); box-shadow:0 1px 2px rgba(0,0,0,.16); }
+  .toolbar .sep { width:1px; height:18px; background:var(--line); margin:0 6px; }
+
+  /* ============ gallery grid ============ */
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:26px;
+          max-width:1180px; margin:0 auto; align-items:start; }
+  .cell { display:flex; flex-direction:column; gap:12px; }
+
+  /* faithful sidebar-top context strip */
+  .ctx { width:270px; background:var(--side); border:1px solid var(--line); border-radius:14px;
+         padding:0 9px 12px; overflow:hidden; }
+  .ctx .tbar { display:flex; align-items:center; gap:8px; height:38px; padding:0 5px 0 3px; }
+  .ctx .tl { display:flex; gap:7px; }
+  .ctx .tl i { width:11px; height:11px; border-radius:50%; display:block; }
+  .ctx .tl i:nth-child(1){ background:#ff5f57; } .ctx .tl i:nth-child(2){ background:#febc2e; } .ctx .tl i:nth-child(3){ background:#28c840; }
+  /* faint grounding rows below the switch */
+  .ctx .grow { display:flex; align-items:center; gap:10px; padding:5.5px 6px; border-radius:8px; color:var(--faint); }
+  .ctx .grow i { width:13px; height:13px; border-radius:4px; background:var(--line); flex:none; }
+  .ctx .grow span { height:8px; border-radius:4px; background:var(--line); }
+
+  /* ============ SHARED VISUAL BASE — the .modes treatment the user likes ============ */
+  .modes { position:relative; display:grid; grid-template-columns:1fr 1fr; gap:4px; margin:14px 2px 8px;
+           padding:3px; background:color-mix(in srgb, var(--ink) 4%, transparent); border-radius:11px;
+           cursor:pointer; user-select:none; -webkit-user-select:none; outline:none; }
+  .modes:focus-visible { box-shadow:0 0 0 2px color-mix(in srgb, var(--acc) 70%, transparent); }
+  /* NOTE: timing that comes from a var() must be set via LONGHAND — Chrome mis-parses
+     the `transition`/`animation` shorthand when the duration is a custom property. */
+  .modes-thumb { position:absolute; top:3px; bottom:3px; left:3px; width:calc((100% - 6px - 4px) / 2);
+                 pointer-events:none; z-index:0;
+                 transition-property:transform; transition-duration:var(--slide);
+                 transition-timing-function:cubic-bezier(.4,0,.2,1); }
+  .modes.on .modes-thumb { transform:translateX(calc(100% + 4px)); }
+  .modes-thumb .ti { display:block; width:100%; height:100%; border-radius:8px;
+                     background:var(--field); border:1px solid var(--line); box-shadow:0 1px 2.5px rgba(0,0,0,.16); }
+  .modes .half { position:relative; z-index:1; display:flex; align-items:center; justify-content:center; gap:7px;
+                 padding:7px 0; border-radius:9px; pointer-events:none; }
+  .modes .half .ico,
+  .modes .half .lbl { color:var(--muted); transition:color .15s ease; }
+  .modes .half .ico { display:inline-flex; transform-origin:center; }
+  .modes .half svg { width:13px; height:13px; display:block; }
+  .modes .half .lbl { font-size:13px; transform-origin:center; }
+  /* active-side ink (non-A variants) */
+  .modes[aria-checked="false"] .assist .ico, .modes[aria-checked="false"] .assist .lbl,
+  .modes[aria-checked="true"]  .chats  .ico, .modes[aria-checked="true"]  .chats  .lbl { color:var(--ink); }
+  /* press feedback (tactile, all variants) */
+  .modes { transition:transform .12s ease; }
+  .modes.pressed { transform:scale(.985); }
+
+  /* traveling ground shadow (only variant C paints it) */
+  .hopsh { position:absolute; left:3px; bottom:1px; width:calc((100% - 6px - 4px) / 2); height:5px;
+           border-radius:50%; background:rgba(0,0,0,.42); filter:blur(2px);
+           opacity:0; pointer-events:none; z-index:0; transform-origin:center; }
+
+  /* baton overlay that carries an icon across the track (only variant E uses it) */
+  .relay { position:absolute; top:3px; bottom:3px; left:3px; width:calc((100% - 6px - 4px) / 2);
+           display:flex; align-items:center; justify-content:center; pointer-events:none; z-index:3;
+           opacity:0; transform-origin:center; }
+  .relay .rico { display:inline-flex; color:var(--ink); }
+  .relay .rico svg { width:13px; height:13px; display:block; }
+
+  /* per-cell debug slow-mo slider */
+  .cap { color:var(--ink2); font-size:12.5px; line-height:1.5; max-width:270px; }
+  .cap b { color:var(--ink); font-weight:600; }
+  .dbg { display:flex; align-items:center; gap:8px; color:var(--faint); font-size:11px; max-width:270px; }
+  .dbg input[type=range] { flex:1; accent-color:var(--acc); height:3px; }
+  .dbg .spd { font-family:ui-monospace,Menlo,monospace; color:var(--muted); min-width:34px; text-align:right; }
+
+  /* ==================================================================== */
+  /* VARIANT A — Power crossfade (turn-off / turn-on, staggered)          */
+  /*   KEPT VERBATIM — the user's baseline pick from round 1              */
+  /* ==================================================================== */
+  .v-a .half .ico,
+  .v-a .half .lbl { transition-property:color, opacity, transform;
+                    transition-duration:var(--fadeA), var(--fadeA), var(--fadeA);
+                    transition-timing-function:ease; }
+  .v-a .half .lbl { transition-delay:var(--stagA); }          /* label lags the icon */
+  /* resting = OFF: dim to --faint, faded, scaled down */
+  .v-a .half .ico,
+  .v-a .half .lbl { color:var(--faint); opacity:.45; transform:scale(.96); transform-origin:center; }
+  /* active = ON */
+  .v-a[aria-checked="false"] .assist .ico, .v-a[aria-checked="false"] .assist .lbl,
+  .v-a[aria-checked="true"]  .chats  .ico, .v-a[aria-checked="true"]  .chats  .lbl {
+    color:var(--ink); opacity:1; transform:scale(1); }
+  /* luminance overshoot (turning on) / dip (turning off), retriggered via .anim */
+  @keyframes warm { 0%{filter:brightness(1)} 50%{filter:brightness(1.42)} 100%{filter:brightness(1)} }
+  @keyframes dip  { 0%{filter:brightness(1)} 35%{filter:brightness(.60)} 100%{filter:brightness(1)} }
+  .v-a.anim[aria-checked="true"]  .chats  .lbl,
+  .v-a.anim[aria-checked="false"] .assist .lbl { animation-name:warm; animation-duration:var(--fadeA); animation-timing-function:ease; }
+  .v-a.anim[aria-checked="true"]  .assist .lbl,
+  .v-a.anim[aria-checked="false"] .chats  .lbl { animation-name:dip;  animation-duration:var(--fadeA); animation-timing-function:ease; }
+
+  /* ==================================================================== */
+  /* VARIANT B — Elastic stretch (gooey scaleX reach + rubber settle)     */
+  /* ==================================================================== */
+  .v-b .modes-thumb { transition-property:transform; transition-duration:var(--dB);
+                      transition-timing-function:cubic-bezier(.34,1.3,.5,1); transform-origin:center; }
+  @keyframes bStretchR {
+    0%   { transform:translateX(0) scaleX(1); }
+    18%  { transform:translateX(calc((100% + 4px)*.10)) scaleX(1.34); }
+    42%  { transform:translateX(calc((100% + 4px)*.50)) scaleX(1.72); }   /* peak stretch mid-flight */
+    66%  { transform:translateX(calc(100% + 4px)) scaleX(.90); }          /* anchored far side, rubber compress */
+    82%  { transform:translateX(calc(100% + 4px)) scaleX(1.06); }         /* release wobble */
+    92%  { transform:translateX(calc(100% + 4px)) scaleX(.985); }
+    100% { transform:translateX(calc(100% + 4px)) scaleX(1); }
+  }
+  @keyframes bStretchL {
+    0%   { transform:translateX(calc(100% + 4px)) scaleX(1); }
+    18%  { transform:translateX(calc((100% + 4px)*.90)) scaleX(1.34); }
+    42%  { transform:translateX(calc((100% + 4px)*.50)) scaleX(1.72); }
+    66%  { transform:translateX(0) scaleX(.90); }
+    82%  { transform:translateX(0) scaleX(1.06); }
+    92%  { transform:translateX(0) scaleX(.985); }
+    100% { transform:translateX(0) scaleX(1); }
+  }
+  .v-b.anim[aria-checked="true"]  .modes-thumb { animation-name:bStretchR; animation-duration:var(--dB); animation-timing-function:cubic-bezier(.3,.7,.3,1); }
+  .v-b.anim[aria-checked="false"] .modes-thumb { animation-name:bStretchL; animation-duration:var(--dB); animation-timing-function:cubic-bezier(.3,.7,.3,1); }
+  /* labels swap ink near the crossing midpoint */
+  .v-b .half .ico,
+  .v-b .half .lbl { transition-property:color; transition-duration:.08s;
+                    transition-timing-function:linear; transition-delay:calc(var(--dB) * .48); }
+
+  /* ==================================================================== */
+  /* VARIANT C — Hop over (arc out of the groove, squash landing, shadow) */
+  /* ==================================================================== */
+  .v-c .modes-thumb { transition-property:transform; transition-duration:var(--dC);
+                      transition-timing-function:cubic-bezier(.34,1.4,.5,1); transform-origin:center bottom; }
+  @keyframes cHopR {
+    0%   { transform:translateX(0) translateY(0) rotate(0) scaleY(1); }
+    14%  { transform:translateX(calc((100% + 4px)*.12)) translateY(-4px) rotate(-3deg) scaleY(1.05); }
+    46%  { transform:translateX(calc((100% + 4px)*.52)) translateY(-6px) rotate(0deg)  scaleY(1.05); }  /* apex */
+    74%  { transform:translateX(calc(100% + 4px)) translateY(0) rotate(3deg)  scaleY(.85); }            /* land squash */
+    86%  { transform:translateX(calc(100% + 4px)) translateY(-2px) rotate(0deg) scaleY(1.03); }          /* bounce */
+    100% { transform:translateX(calc(100% + 4px)) translateY(0) rotate(0) scaleY(1); }
+  }
+  @keyframes cHopL {
+    0%   { transform:translateX(calc(100% + 4px)) translateY(0) rotate(0) scaleY(1); }
+    14%  { transform:translateX(calc((100% + 4px)*.88)) translateY(-4px) rotate(3deg) scaleY(1.05); }
+    46%  { transform:translateX(calc((100% + 4px)*.48)) translateY(-6px) rotate(0deg) scaleY(1.05); }
+    74%  { transform:translateX(0) translateY(0) rotate(-3deg) scaleY(.85); }
+    86%  { transform:translateX(0) translateY(-2px) rotate(0deg) scaleY(1.03); }
+    100% { transform:translateX(0) translateY(0) rotate(0) scaleY(1); }
+  }
+  .v-c.anim[aria-checked="true"]  .modes-thumb { animation-name:cHopR; animation-duration:var(--dC); animation-timing-function:cubic-bezier(.3,.6,.3,1); }
+  .v-c.anim[aria-checked="false"] .modes-thumb { animation-name:cHopL; animation-duration:var(--dC); animation-timing-function:cubic-bezier(.3,.6,.3,1); }
+  /* ground shadow: shrinks + fades airborne, widens + darkens on landing */
+  @keyframes cShadR {
+    0%   { transform:translateX(0) scaleX(.85); opacity:.22; }
+    14%  { transform:translateX(calc((100% + 4px)*.12)) scaleX(.6);  opacity:.08; }
+    46%  { transform:translateX(calc((100% + 4px)*.52)) scaleX(.5);  opacity:.05; }
+    74%  { transform:translateX(calc(100% + 4px)) scaleX(1.1); opacity:.4; }
+    100% { transform:translateX(calc(100% + 4px)) scaleX(.82); opacity:0; }
+  }
+  @keyframes cShadL {
+    0%   { transform:translateX(calc(100% + 4px)) scaleX(.85); opacity:.22; }
+    14%  { transform:translateX(calc((100% + 4px)*.88)) scaleX(.6);  opacity:.08; }
+    46%  { transform:translateX(calc((100% + 4px)*.48)) scaleX(.5);  opacity:.05; }
+    74%  { transform:translateX(0) scaleX(1.1); opacity:.4; }
+    100% { transform:translateX(0) scaleX(.82); opacity:0; }
+  }
+  .v-c.anim[aria-checked="true"]  .hopsh { animation-name:cShadR; animation-duration:var(--dC); animation-timing-function:ease-out; }
+  .v-c.anim[aria-checked="false"] .hopsh { animation-name:cShadL; animation-duration:var(--dC); animation-timing-function:ease-out; }
+
+  /* ==================================================================== */
+  /* VARIANT D — Knock-back (thumb bumps the incoming label; icon pops)   */
+  /* ==================================================================== */
+  .v-d .modes-thumb { transition-property:transform; transition-duration:var(--dD);
+                      transition-timing-function:cubic-bezier(.5,0,.75,.35); }
+  @keyframes dThumbR {
+    0%   { transform:translateX(0); }
+    46%  { transform:translateX(calc(100% + 4px)); }             /* hard, accelerating arrival = the bump */
+    56%  { transform:translateX(calc(100% + 4px - 2px)); }       /* micro recoil off the impact */
+    100% { transform:translateX(calc(100% + 4px)); }
+  }
+  @keyframes dThumbL {
+    0%   { transform:translateX(calc(100% + 4px)); }
+    46%  { transform:translateX(0); }
+    56%  { transform:translateX(2px); }
+    100% { transform:translateX(0); }
+  }
+  .v-d.anim[aria-checked="true"]  .modes-thumb { animation-name:dThumbR; animation-duration:var(--dD); animation-timing-function:cubic-bezier(.4,0,.7,.4); }
+  .v-d.anim[aria-checked="false"] .modes-thumb { animation-name:dThumbL; animation-duration:var(--dD); animation-timing-function:cubic-bezier(.4,0,.7,.4); }
+  /* incoming label recoils in the travel direction, then springs back */
+  @keyframes dRecoilR { 0%,42%{transform:translateX(0)} 50%{transform:translateX(5px)}  64%{transform:translateX(-2.5px)} 78%{transform:translateX(1px)}  100%{transform:translateX(0)} }
+  @keyframes dRecoilL { 0%,42%{transform:translateX(0)} 50%{transform:translateX(-5px)} 64%{transform:translateX(2.5px)}  78%{transform:translateX(-1px)} 100%{transform:translateX(0)} }
+  .v-d.anim[aria-checked="true"]  .chats  .lbl { animation-name:dRecoilR; animation-duration:var(--dD); animation-timing-function:cubic-bezier(.3,.7,.3,1.2); }
+  .v-d.anim[aria-checked="false"] .assist .lbl { animation-name:dRecoilL; animation-duration:var(--dD); animation-timing-function:cubic-bezier(.3,.7,.3,1.2); }
+  /* incoming icon quick pop */
+  @keyframes dPop { 0%,42%{transform:scale(1)} 54%{transform:scale(1.22)} 72%{transform:scale(.96)} 100%{transform:scale(1)} }
+  .v-d.anim[aria-checked="true"]  .chats  .ico { animation-name:dPop; animation-duration:var(--dD); animation-timing-function:ease-out; }
+  .v-d.anim[aria-checked="false"] .assist .ico { animation-name:dPop; animation-duration:var(--dD); animation-timing-function:ease-out; }
+  /* outgoing label 'left behind' — lags back and dims */
+  @keyframes dLeftR { 0%{transform:translateX(0);opacity:1} 40%{transform:translateX(-3px);opacity:.5} 100%{transform:translateX(0);opacity:1} }
+  @keyframes dLeftL { 0%{transform:translateX(0);opacity:1} 40%{transform:translateX(3px); opacity:.5} 100%{transform:translateX(0);opacity:1} }
+  .v-d.anim[aria-checked="true"]  .assist .lbl { animation-name:dLeftR; animation-duration:var(--dD); animation-timing-function:ease; }
+  .v-d.anim[aria-checked="false"] .chats  .lbl { animation-name:dLeftL; animation-duration:var(--dD); animation-timing-function:ease; }
+
+  /* ==================================================================== */
+  /* VARIANT E — Icon relay (the outgoing icon batons across the track)   */
+  /* ==================================================================== */
+  .v-e .modes-thumb { transition-property:transform; transition-duration:var(--dE);
+                      transition-timing-function:cubic-bezier(.34,1.1,.5,1); transition-delay:calc(var(--dE)*.08); }
+  /* the baton travels the full column, carrying the outgoing glyph */
+  @keyframes eBatonR {
+    0%   { opacity:0; transform:translateX(0) scale(.9); }
+    12%  { opacity:1; transform:translateX(0) scale(1.05); }
+    50%  { opacity:1; transform:translateX(calc((100% + 4px)*.5)) scale(1.1); }
+    82%  { opacity:1; transform:translateX(calc(100% + 4px)) scale(1.05); }
+    100% { opacity:0; transform:translateX(calc(100% + 4px)) scale(.9); }
+  }
+  @keyframes eBatonL {
+    0%   { opacity:0; transform:translateX(calc(100% + 4px)) scale(.9); }
+    12%  { opacity:1; transform:translateX(calc(100% + 4px)) scale(1.05); }
+    50%  { opacity:1; transform:translateX(calc((100% + 4px)*.5)) scale(1.1); }
+    82%  { opacity:1; transform:translateX(0) scale(1.05); }
+    100% { opacity:0; transform:translateX(0) scale(.9); }
+  }
+  .v-e.anim[aria-checked="true"]  .relay { animation-name:eBatonR; animation-duration:var(--dE); animation-timing-function:cubic-bezier(.4,.1,.3,1); }
+  .v-e.anim[aria-checked="false"] .relay { animation-name:eBatonL; animation-duration:var(--dE); animation-timing-function:cubic-bezier(.4,.1,.3,1); }
+  /* outgoing real icon ducks out while the baton carries it */
+  @keyframes eDuck { 0%{opacity:1} 12%{opacity:0} 88%{opacity:0} 100%{opacity:1} }
+  .v-e.anim[aria-checked="true"]  .assist .ico { animation-name:eDuck; animation-duration:var(--dE); animation-timing-function:ease; }
+  .v-e.anim[aria-checked="false"] .chats  .ico { animation-name:eDuck; animation-duration:var(--dE); animation-timing-function:ease; }
+  /* incoming icon + label spring-scale in as the baton arrives */
+  @keyframes eSpringIcon { 0%,60%{opacity:0;transform:scale(.4)} 80%{opacity:1;transform:scale(1.18)} 100%{opacity:1;transform:scale(1)} }
+  @keyframes eSpringLbl  { 0%,66%{opacity:0;transform:translateX(-4px) scale(.9)} 86%{opacity:1;transform:translateX(1px) scale(1.04)} 100%{opacity:1;transform:translateX(0) scale(1)} }
+  .v-e.anim[aria-checked="true"]  .chats  .ico { animation-name:eSpringIcon; animation-duration:var(--dE); animation-timing-function:cubic-bezier(.3,.8,.3,1.2); }
+  .v-e.anim[aria-checked="true"]  .chats  .lbl { animation-name:eSpringLbl;  animation-duration:var(--dE); animation-timing-function:cubic-bezier(.3,.8,.3,1.2); }
+  .v-e.anim[aria-checked="false"] .assist .ico { animation-name:eSpringIcon; animation-duration:var(--dE); animation-timing-function:cubic-bezier(.3,.8,.3,1.2); }
+  .v-e.anim[aria-checked="false"] .assist .lbl { animation-name:eSpringLbl;  animation-duration:var(--dE); animation-timing-function:cubic-bezier(.3,.8,.3,1.2); }
+
+  /* ==================================================================== */
+  /* VARIANT F — Inertia flick (overshoot the wall, squash, rebound)      */
+  /* ==================================================================== */
+  .v-f .modes-thumb { transition-property:transform; transition-duration:var(--dF);
+                      transition-timing-function:cubic-bezier(.5,0,.3,1); }
+  @keyframes fFlickR {
+    0%   { transform:translateX(0) scaleX(1); }
+    42%  { transform:translateX(calc(100% + 4px)) scaleX(1.06); }         /* arrives fast, speed-stretched */
+    58%  { transform:translateX(calc(100% + 4px + 12px)) scaleX(.84); }   /* overshoots + squashes on the wall */
+    74%  { transform:translateX(calc(100% + 4px - 3px)) scaleX(1.05); }   /* rebound */
+    88%  { transform:translateX(calc(100% + 4px + 1px)) scaleX(.99); }
+    100% { transform:translateX(calc(100% + 4px)) scaleX(1); }
+  }
+  @keyframes fFlickL {
+    0%   { transform:translateX(calc(100% + 4px)) scaleX(1); }
+    42%  { transform:translateX(0) scaleX(1.06); }
+    58%  { transform:translateX(-12px) scaleX(.84); }
+    74%  { transform:translateX(3px) scaleX(1.05); }
+    88%  { transform:translateX(-1px) scaleX(.99); }
+    100% { transform:translateX(0) scaleX(1); }
+  }
+  .v-f.anim[aria-checked="true"]  .modes-thumb { transform-origin:right center; animation-name:fFlickR; animation-duration:var(--dF); animation-timing-function:cubic-bezier(.42,0,.2,1); }
+  .v-f.anim[aria-checked="false"] .modes-thumb { transform-origin:left center;  animation-name:fFlickL; animation-duration:var(--dF); animation-timing-function:cubic-bezier(.42,0,.2,1); }
+  /* the whole control kicks 1-2px with the impact, then recovers */
+  @keyframes fKickR { 0%,42%{transform:translateX(0)} 58%{transform:translateX(2px)}  76%{transform:translateX(-1px)} 100%{transform:translateX(0)} }
+  @keyframes fKickL { 0%,42%{transform:translateX(0)} 58%{transform:translateX(-2px)} 76%{transform:translateX(1px)}  100%{transform:translateX(0)} }
+  .v-f.anim[aria-checked="true"]  { animation-name:fKickR; animation-duration:var(--dF); animation-timing-function:ease-out; }
+  .v-f.anim[aria-checked="false"] { animation-name:fKickL; animation-duration:var(--dF); animation-timing-function:ease-out; }
+
+  /* ==================================================================== */
+  /* prefers-reduced-motion → plain 120ms opacity swap, no transforms     */
+  /* ==================================================================== */
+  @media (prefers-reduced-motion: reduce) {
+    .modes-thumb, .modes-thumb .ti, .hopsh, .relay, .modes,
+    .modes .half, .modes .half .ico, .modes .half .lbl { transition:none !important; animation:none !important; }
+    .modes .half .ico, .modes .half .lbl { transition:opacity .12s linear, color .12s linear !important; transform:none !important; }
+    /* keep A's static dim/ink; strip A's scale */
+    .v-a .half .ico, .v-a .half .lbl { transform:none !important; opacity:.45; }
+    .v-a[aria-checked="false"] .assist .ico, .v-a[aria-checked="false"] .assist .lbl,
+    .v-a[aria-checked="true"]  .chats  .ico, .v-a[aria-checked="true"]  .chats  .lbl { opacity:1; transform:none !important; }
+    /* thumb repositions statically, no travel motion */
+    .modes-thumb { transform:none !important; }
+    .modes.on .modes-thumb { transform:translateX(calc(100% + 4px)) !important; }
+    .hopsh { opacity:0 !important; }
+    .relay { opacity:0 !important; }
+    .modes.pressed { transform:none !important; }
+  }
+
+  .foot { max-width:1180px; margin:38px auto 0; padding-top:18px; border-top:1px solid var(--line);
+          color:var(--muted); font-size:13px; }
+  .foot b { color:var(--ink); font-weight:600; letter-spacing:.02em; }
+</style>
+
+<div class="head">
+  <h1>Assist&nbsp;|&nbsp;Chats — motion switch gallery</h1>
+  <p>Same recessed groove &amp; raised thumb. One click anywhere flips it, like a real switch. The fun lives in the movement — six motion takes.</p>
+</div>
+
+<div class="toolbar">
+  <span>Tema</span>
+  <div class="grp" id="theme">
+    <button data-theme="dark" class="sel">Dark</button>
+    <button data-theme="light">Light</button>
+  </div>
+  <span class="sep"></span>
+  <span>Velocidad global</span>
+  <div class="grp" id="speed">
+    <button data-sp="1" class="sel">1×</button>
+    <button data-sp="2">2×</button>
+    <button data-sp="5">5×</button>
+  </div>
+  <span style="color:var(--faint)">— o usá el slider de cada tarjeta (debug slow-mo)</span>
+  <span class="sep"></span>
+  <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+    <input type="checkbox" id="force-motion" checked>
+    <span>Forzar animaciones <span style="color:var(--faint)">(tu macOS tiene "Reducir movimiento" activado — esta galería lo ignora para que puedas elegir)</span></span>
+  </label>
+</div>
+<script>
+  // Review-tool override: the OS "Reduce Motion" setting collapses all six
+  // variants to the same static fallback, which defeats the purpose of an
+  // animation PICKER. Checked (default) = delete the prefers-reduced-motion
+  // CSS block so the real motion plays; unchecked = restore OS behavior.
+  // The APP itself keeps honoring the OS setting — this is gallery-only.
+  (function () {
+    let removed = null, removedSheet = null;
+    function findRule() {
+      for (const sheet of document.styleSheets) {
+        for (let i = 0; i < sheet.cssRules.length; i++) {
+          const r = sheet.cssRules[i];
+          if (r.type === CSSRule.MEDIA_RULE && /prefers-reduced-motion/.test(r.conditionText)) return { sheet, i, css: r.cssText };
+        }
+      }
+      return null;
+    }
+    function apply(force) {
+      if (force && !removed) {
+        const hit = findRule();
+        if (hit) { removed = hit.css; removedSheet = hit.sheet; hit.sheet.deleteRule(hit.i); }
+      } else if (!force && removed && removedSheet) {
+        removedSheet.insertRule(removed, removedSheet.cssRules.length);
+        removed = null; removedSheet = null;
+      }
+    }
+    const box = document.getElementById('force-motion');
+    box.addEventListener('change', () => apply(box.checked));
+    apply(true); // default ON: this page exists to showcase motion
+  })();
+</script>
+
+<div class="grid" id="grid"></div>
+
+<div class="foot"><b>Elegí una: A · B · C · D · E · F</b></div>
+
+<script>
+  const ASSIST_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 8L8 3l5.5 5M4 7v6h8V7"/></svg>';
+  const CHATS_SVG  = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M5.5 5L2.5 8l3 3M10.5 5l3 3-3 3"/></svg>';
+
+  const VARIANTS = [
+    { id:'a', cls:'v-a', title:'A · Power crossfade',
+      cap:'The outgoing side <b>turns off</b> — icon dims first, label ~40ms after, with a luminance dip. The incoming side <b>turns on</b>, warming past ink then settling. The thumb rides the original curve.' },
+    { id:'b', cls:'v-b', title:'B · Elastic stretch',
+      cap:'The thumb <b>stretches across</b> the track — scaleX swells past 1.7 mid-flight — anchors on the far side, then the trailing edge snaps over with a rubber release and one settle wobble.' },
+    { id:'c', cls:'v-c', title:'C · Hop over',
+      cap:'The thumb <b>leaves the groove</b> in a small arc — lifts, tilts, floats across — and lands with a squash and a single bounce. A faint ground shadow shrinks airborne and widens on impact to sell the weight.' },
+    { id:'d', cls:'v-d', title:'D · Knock-back',
+      cap:'The thumb slides fast and physically <b>bumps the incoming label</b>: the label recoils in the travel direction with a spring-back, its icon pops 1→1.2→1. The outgoing label is left behind and dims.' },
+    { id:'e', cls:'v-e', title:'E · Icon relay',
+      cap:'The <b>icon stars</b>: the outgoing glyph detaches and slides along the track like a baton, the thumb following underneath, and the incoming icon + label spring-scale in the instant the baton arrives.' },
+    { id:'f', cls:'v-f', title:'F · Inertia flick',
+      cap:'The thumb accelerates hard, <b>overshoots the end wall</b> by ~10%, squashes against it, and rebounds into place. The whole control kicks 1–2px with the impact, then recovers. Fast and physical.' },
+  ];
+
+  // base 1x durations (seconds). Slow-mo writes resolved seconds — no calc(*var).
+  const DUR = { slide:.22, fadeA:.20, stagA:.04, dB:.38, dC:.34, dD:.32, dE:.40, dF:.36 };
+  function applySpeed(el, sp) {
+    for (const k in DUR) el.style.setProperty('--' + k, (DUR[k] * sp).toFixed(4) + 's');
+  }
+  window.__applySpeed = applySpeed;   // used by the verification driver
+
+  const grid = document.getElementById('grid');
+  window.__modes = {};
+
+  for (const v of VARIANTS) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.innerHTML = `
+      <div class="ctx">
+        <div class="tbar"><span class="tl"><i></i><i></i><i></i></span></div>
+        <div class="modes ${v.cls}" data-variant="${v.id}" role="switch" aria-checked="false"
+             tabindex="0" aria-label="Cambiar entre Assist y Chats">
+          <span class="hopsh" aria-hidden="true"></span>
+          <span class="modes-thumb" aria-hidden="true"><span class="ti"></span></span>
+          <span class="half assist"><span class="ico">${ASSIST_SVG}</span><span class="lbl">Assist</span></span>
+          <span class="half chats"><span class="ico">${CHATS_SVG}</span><span class="lbl">Chats</span></span>
+          <span class="relay" aria-hidden="true"><span class="rico">${ASSIST_SVG}</span></span>
+        </div>
+        <div class="grow"><i></i><span style="width:118px"></span></div>
+        <div class="grow"><i></i><span style="width:92px"></span></div>
+        <div class="grow"><i></i><span style="width:134px"></span></div>
+      </div>
+      <div class="cap"><b>${v.title}</b> — ${v.cap}</div>
+      <label class="dbg">slow-mo
+        <input type="range" min="1" max="8" step="0.5" value="1" data-for="${v.id}">
+        <span class="spd">1.0×</span>
+      </label>`;
+    grid.appendChild(cell);
+
+    const modes = cell.querySelector('.modes');
+    wire(modes, v.id);
+    window.__modes[v.id] = modes;
+
+    // per-card slow-mo slider
+    const rng = cell.querySelector('input[type=range]');
+    const spd = cell.querySelector('.spd');
+    rng.addEventListener('input', () => {
+      applySpeed(modes, +rng.value);
+      spd.textContent = (+rng.value).toFixed(1) + '×';
+    });
+  }
+
+  function wire(modes, id) {
+    let animTimer = null;
+    function retrigger() {
+      // restart the keyframe flourishes cleanly
+      modes.classList.remove('anim');
+      void modes.offsetWidth;                       // reflow
+      if (id === 'e') {
+        // the baton carries the OUTGOING glyph: turning on leaves Assist, turning off leaves Chats
+        const turningOn = modes.getAttribute('aria-checked') === 'true';
+        const rico = modes.querySelector('.rico');
+        if (rico) rico.innerHTML = turningOn ? ASSIST_SVG : CHATS_SVG;
+      }
+      modes.classList.add('anim');
+      clearTimeout(animTimer);
+      // long enough to never strip .anim mid-flight even at 8× slow-mo
+      animTimer = setTimeout(() => modes.classList.remove('anim'), 4500);
+    }
+    function setState(on) {
+      const cur = modes.getAttribute('aria-checked') === 'true';
+      modes.classList.toggle('on', on);
+      modes.setAttribute('aria-checked', on ? 'true' : 'false');
+      if (on !== cur) retrigger();
+    }
+    function toggle() { setState(modes.getAttribute('aria-checked') !== 'true'); }
+
+    // WHOLE control is one click target — physical-switch semantics
+    modes.addEventListener('click', toggle);
+    modes.addEventListener('keydown', (e) => {
+      if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(); }
+      else if (e.key === 'ArrowLeft')  { e.preventDefault(); setState(false); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); setState(true); }
+    });
+    // tactile press
+    modes.addEventListener('pointerdown', () => modes.classList.add('pressed'));
+    const release = () => modes.classList.remove('pressed');
+    window.addEventListener('pointerup', release);
+    modes.addEventListener('pointercancel', release);
+
+    // receipts API for the CDP driver
+    modes.__api = { setState, toggle };
+  }
+
+  // toolbar: theme
+  document.getElementById('theme').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    document.documentElement.setAttribute('data-theme', b.dataset.theme);
+    for (const x of e.currentTarget.children) x.classList.toggle('sel', x === b);
+  });
+  // toolbar: global speed
+  document.getElementById('speed').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    const sp = +b.dataset.sp;
+    // apply to every card + reset each card's own slider so global wins
+    for (const id in window.__modes) {
+      applySpeed(window.__modes[id], sp);
+      const cell = window.__modes[id].closest('.cell');
+      cell.querySelector('input[type=range]').value = sp;
+      cell.querySelector('.spd').textContent = sp.toFixed(1) + '×';
+    }
+    for (const x of e.currentTarget.children) x.classList.toggle('sel', x === b);
+  });
+
+  // ---- receipts harness (used by the CDP verification driver) ----
+  window.__sample = async function (id, side, ms, step) {
+    // toggle the given switch and sample computed transforms of a label/icon + thumb + baton
+    const modes = window.__modes[id];
+    const lbl = modes.querySelector('.' + side + ' .lbl');
+    const ico = modes.querySelector('.' + side + ' .ico');
+    const thumb = modes.querySelector('.modes-thumb');
+    const ti = modes.querySelector('.ti');
+    const relay = modes.querySelector('.relay');
+    const out = [];
+    const t0 = performance.now();
+    modes.__api.toggle();
+    return await new Promise((res) => {
+      const iv = setInterval(() => {
+        const t = Math.round(performance.now() - t0);
+        const cs = getComputedStyle(lbl);
+        out.push({
+          t,
+          op: +(+cs.opacity).toFixed(3),
+          lblTf: cs.transform,
+          icoTf: getComputedStyle(ico).transform,
+          thumbTf: getComputedStyle(thumb).transform,
+          tiTf: getComputedStyle(ti).transform,
+          relayTf: relay ? getComputedStyle(relay).transform : 'none',
+          aria: modes.getAttribute('aria-checked'),
+        });
+        if (t >= ms) { clearInterval(iv); res(out); }
+      }, step);
+    });
+  };
+</script>

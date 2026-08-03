@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>workass · seguimiento de subagentes (mock)</title>
+<style>
+  :root{
+    --bg:#151413; --side:#0f0e0d; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+    --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+    --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+    --acc:#4fa583; --amber:#d8a05a; --del:#d96b5f; --shell:#0b0a09;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--shell); color:var(--ink);
+    font:13.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+    padding:26px; -webkit-font-smoothing:antialiased;
+  }
+  .h1{font-size:15px;font-weight:600;margin:0 0 3px}
+  .sub{color:var(--muted);font-size:12px;margin:0 0 20px}
+  .sub b{color:var(--acc);font-weight:600}
+  .grid{display:grid;grid-template-columns:1fr 372px;gap:18px;align-items:start;max-width:1180px}
+  .panel{background:var(--bg);border:1px solid var(--line2);border-radius:14px;overflow:hidden}
+  .cap{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);padding:13px 16px 0}
+  .cap.now{color:var(--acc)}
+
+  /* ---------- CHAT column ---------- */
+  .chat{padding:6px 16px 18px}
+  .amsg{padding:12px 2px 4px;color:var(--ink2)}
+  .amsg p{margin:0 0 12px}
+
+  /* orchestration group = a group-of-groups */
+  .orch{border:1px solid var(--line);border-radius:11px;background:var(--card);margin:2px 0 14px;overflow:hidden}
+  .orch.run{border-color:color-mix(in srgb,var(--acc) 38%,var(--line2))}
+  .ohead{display:flex;align-items:center;gap:9px;padding:9px 12px;cursor:pointer;user-select:none}
+  .ohead:hover{background:var(--line)}
+  .chev{color:var(--faint);width:11px;flex:none;transition:transform .15s ease;display:inline-flex}
+  .orch.open>.ohead .chev,.sa.open>.sahead .chev{transform:rotate(90deg)}
+  .otitle{font-weight:600;color:var(--ink)}
+  .obadge{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);
+    border:1px solid var(--line2);border-radius:999px;padding:1px 8px}
+  .ospace{flex:1}
+  .odur{color:var(--faint);font-size:11.5px;font-variant-numeric:tabular-nums}
+  .obody{border-top:1px solid var(--line);padding:4px 6px 6px;display:none}
+  .orch.open>.obody{display:block}
+
+  /* one subagent node inside the orchestration */
+  .sa{border-radius:8px;margin:2px 0}
+  .sa.run{border:1px solid color-mix(in srgb,var(--acc) 40%,var(--line2))}
+  .sahead{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:8px;cursor:pointer;user-select:none}
+  .sahead:hover{background:var(--line)}
+  .sname{font-weight:550;color:var(--ink);white-space:nowrap}
+  .stype{color:var(--muted);font-size:11.5px}
+  .ssum{color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sabody{display:none;padding:2px 0 6px 30px}
+  .sa.open>.sabody{display:block}
+  .callrow{display:flex;align-items:center;gap:9px;padding:3px 8px;color:var(--ink2);font-size:12.5px;border-radius:6px}
+  .callrow .k{color:var(--faint);width:38px;flex:none;font-size:11px}
+  .callrow .f{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .callrow .cst{margin-left:auto;color:var(--faint);font-size:11px}
+
+  /* status marks */
+  .mk{width:14px;height:14px;flex:none;display:grid;place-items:center;font-size:11px}
+  .mk.ok{color:var(--acc)}
+  .mk.fail{color:var(--del)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--acc);flex:none;
+    box-shadow:0 0 0 0 color-mix(in srgb,var(--acc) 55%,transparent);animation:pulse 1.5s ease-out infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--acc) 45%,transparent)}70%{box-shadow:0 0 0 6px transparent}100%{box-shadow:0 0 0 0 transparent}}
+  .ring{width:12px;height:12px;border-radius:50%;border:2px solid var(--line2);border-top-color:var(--acc);flex:none;animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* model brand icon on each subagent — GPT (OpenAI) / Claude (Anthropic) */
+  .mico{width:15px;height:15px;flex:none;display:block}
+  .mico.gpt{color:var(--ink2)}
+
+  /* ANTES: flat spam */
+  .antes{margin-top:8px;padding:10px 12px;border:1px dashed var(--line2);border-radius:11px;background:color-mix(in srgb,var(--del) 5%,transparent)}
+  .antes .lbl{font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--del);text-transform:uppercase;margin-bottom:8px}
+  .flat{display:flex;align-items:center;gap:8px;padding:2.5px 0;color:var(--muted);font-size:11.5px;font-family:ui-monospace,Menlo,monospace;opacity:.85}
+  .flat .mk{color:var(--faint)}
+  .fade{color:var(--faint);font-size:11px;font-family:-apple-system,sans-serif;padding-top:5px}
+
+  /* ---------- RAIL column ---------- */
+  .rail{padding:14px 15px 18px}
+  .rtitle{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;margin-bottom:2px}
+  .rtitle .live{margin-left:auto;font-size:11px;color:var(--acc);display:inline-flex;align-items:center;gap:6px;font-weight:500}
+  .rsec{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);margin:16px 0 7px}
+
+  /* plan checklist (existing surface) */
+  .plan .pr{display:flex;align-items:center;gap:9px;padding:3px 2px;color:var(--ink2);font-size:12.5px}
+  .plan .pr.done{color:var(--muted)}
+  .plan .pm{width:14px;flex:none;display:grid;place-items:center}
+  .plan .pm .c{width:12px;height:12px;border-radius:50%;border:1.5px solid var(--line2)}
+  .plan .pr.done .pm{color:var(--acc)}
+  .plan .pr.cur .pm .c{border-color:var(--acc);border-right-color:transparent;animation:spin 1s linear infinite}
+
+  /* subagent tree in the rail */
+  .subs{display:flex;flex-direction:column;gap:2px}
+  .srow{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:8px;background:var(--card);border:1px solid transparent}
+  .srow.run{border-color:color-mix(in srgb,var(--acc) 45%,var(--line2))}
+  .srow .nm{font-weight:550;font-size:12.5px;color:var(--ink);white-space:nowrap}
+  .srow .act{color:var(--muted);font-size:11px;font-family:ui-monospace,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+  .srow .meta{margin-left:auto;color:var(--faint);font-size:11px;font-variant-numeric:tabular-nums;flex:none}
+  .donefold{display:flex;align-items:center;gap:9px;padding:6px 8px;color:var(--muted);font-size:12px;cursor:pointer;border-radius:8px}
+  .donefold:hover{background:var(--line)}
+  .rnote{color:var(--faint);font-size:11px;margin-top:12px;padding-top:11px;border-top:1px solid var(--line)}
+
+  .foot{max-width:1180px;margin:20px 0 0;color:var(--muted);font-size:12px;line-height:1.7}
+  .foot b{color:var(--ink)}
+  .kbd{font-family:ui-monospace,Menlo,monospace;font-size:11px;background:var(--field);border:1px solid var(--line);border-radius:5px;padding:1px 5px;color:var(--ink2)}
+</style>
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="ic-gpt" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997z"/>
+    </symbol>
+    <symbol id="ic-claude" viewBox="0 0 20 20">
+      <g stroke="#cc7a52" stroke-width="1.5" stroke-linecap="round">
+        <line x1="10" y1="10" x2="10" y2="3.5"/>
+        <line x1="10" y1="10" x2="13.25" y2="4.37"/>
+        <line x1="10" y1="10" x2="15.63" y2="6.75"/>
+        <line x1="10" y1="10" x2="16.5" y2="10"/>
+        <line x1="10" y1="10" x2="15.63" y2="13.25"/>
+        <line x1="10" y1="10" x2="13.25" y2="15.63"/>
+        <line x1="10" y1="10" x2="10" y2="16.5"/>
+        <line x1="10" y1="10" x2="6.75" y2="15.63"/>
+        <line x1="10" y1="10" x2="4.37" y2="13.25"/>
+        <line x1="10" y1="10" x2="3.5" y2="10"/>
+        <line x1="10" y1="10" x2="4.37" y2="6.75"/>
+        <line x1="10" y1="10" x2="6.75" y2="4.37"/>
+      </g>
+    </symbol>
+  </svg>
+  <div class="h1">Seguimiento de subagentes en workass</div>
+  <p class="sub">Cuando el agente lanza <b>subagentes</b> (Task / workflow), hoy sus llamadas se aplastan en el chat — <b>1204 en un solo turno</b>. Propuesta: un <b>grupo-de-grupos</b> plegable. Haz clic en cualquier fila para plegar/expandir.</p>
+
+  <div class="grid">
+
+    <!-- ============ CHAT ============ -->
+    <div class="panel">
+      <div class="cap">Chat · transcripción</div>
+      <div class="chat">
+        <div class="amsg">
+          <p>Voy a investigar cómo rastrear los subagentes. Lanzo la orquestación:</p>
+
+          <!-- RUNNING orchestration (auto-open) -->
+          <div class="orch run open" id="o1">
+            <div class="ohead" onclick="tog('o1')">
+              <span class="chev">▶</span>
+              <span class="otitle">Orquestando</span>
+              <span class="obadge"><span class="dot"></span> 4 subagentes · 2 activos</span>
+              <span class="ospace"></span>
+              <span class="odur">12.4s</span>
+            </div>
+            <div class="obody">
+
+              <!-- done subagent → folded -->
+              <div class="sa" id="s1">
+                <div class="sahead" onclick="tog('s1')">
+                  <span class="chev">▶</span>
+                  <svg class="mico gpt"><use href="#ic-gpt"/></svg>
+                  <span class="sname">acp-wire-truth</span>
+                  <span class="ssum">· leyó 8 archivos · 12 llamadas</span>
+                  <span class="ospace"></span>
+                  <span class="odur">4.1s</span>
+                </div>
+                <div class="sabody">
+                  <div class="callrow"><span class="mk ok">✓</span><span class="k">Read</span><span class="f">internal/acp/bridge.go</span><span class="cst">listo</span></div>
+                  <div class="callrow"><span class="mk ok">✓</span><span class="k">Read</span><span class="f">internal/acp/types.go</span><span class="cst">listo</span></div>
+                  <div class="callrow"><span class="mk ok">✓</span><span class="k">Grep</span><span class="f">"tool_call|_meta"</span><span class="cst">37 hits</span></div>
+                </div>
+              </div>
+
+              <!-- done subagent → folded -->
+              <div class="sa" id="s2">
+                <div class="sahead" onclick="tog('s2')">
+                  <span class="chev">▶</span>
+                  <svg class="mico claude"><use href="#ic-claude"/></svg>
+                  <span class="sname">claude-code-ux</span>
+                  <span class="ssum">· 3 búsquedas web · 9 llamadas</span>
+                  <span class="ospace"></span>
+                  <span class="odur">5.3s</span>
+                </div>
+                <div class="sabody">
+                  <div class="callrow"><span class="mk ok">✓</span><span class="k">Web</span><span class="f">claude code subagent UI</span><span class="cst">listo</span></div>
+                  <div class="callrow"><span class="mk ok">✓</span><span class="k">Fetch</span><span class="f">docs.claude.com/…/subagents</span><span class="cst">listo</span></div>
+                </div>
+              </div>
+
+              <!-- RUNNING subagent → auto-open, live -->
+              <div class="sa run open" id="s3">
+                <div class="sahead" onclick="tog('s3')">
+                  <span class="chev">▶</span>
+                  <svg class="mico claude"><use href="#ic-claude"/></svg>
+                  <span class="sname">renderer-integration</span>
+                  <span class="ssum">· editando timeline-layout…</span>
+                  <span class="ospace"></span>
+                </div>
+                <div class="sabody">
+                  <div class="callrow"><span class="mk ok">✓</span><span class="k">Read</span><span class="f">store/store.ts</span><span class="cst">listo</span></div>
+                  <div class="callrow"><span class="mk ok">✓</span><span class="k">Read</span><span class="f">components/messages.tsx</span><span class="cst">listo</span></div>
+                  <div class="callrow"><span class="ring"></span><span class="k">Grep</span><span class="f">"ToolGroup"</span></div>
+                </div>
+              </div>
+
+              <!-- RUNNING subagent → folded (running but collapsed) -->
+              <div class="sa run" id="s4">
+                <div class="sahead" onclick="tog('s4')">
+                  <span class="chev">▶</span>
+                  <svg class="mico gpt"><use href="#ic-gpt"/></svg>
+                  <span class="sname">daemon-plumbing</span>
+                  <span class="ssum">· go test ./internal/acp/…</span>
+                  <span class="ospace"></span>
+                </div>
+                <div class="sabody">
+                  <div class="callrow"><span class="mk ok">✓</span><span class="k">Read</span><span class="f">internal/wire/wire.go</span><span class="cst">listo</span></div>
+                  <div class="callrow"><span class="ring"></span><span class="k">Bash</span><span class="f">go test ./internal/acp/…</span></div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <p style="color:var(--faint);font-size:12px;margin:2px 0 6px">…y cuando termina, todo se compacta en una sola línea (como Claude Code):</p>
+
+          <!-- DONE orchestration → fully folded -->
+          <div class="orch" id="o2">
+            <div class="ohead" onclick="tog('o2')">
+              <span class="chev">▶</span>
+              <span class="mk ok">✓</span>
+              <span class="otitle">Orquestó 4 subagentes</span>
+              <span class="ssum">· 41 llamadas · síntesis lista</span>
+              <span class="ospace"></span>
+              <span class="odur">18.2s</span>
+            </div>
+            <div class="obody">
+              <div class="sa"><div class="sahead"><span class="chev" style="opacity:0">▶</span><svg class="mico gpt"><use href="#ic-gpt"/></svg><span class="sname">acp-wire-truth</span><span class="ssum">· 12 llamadas</span><span class="ospace"></span><span class="odur">4.1s</span></div></div>
+              <div class="sa"><div class="sahead"><span class="chev" style="opacity:0">▶</span><svg class="mico claude"><use href="#ic-claude"/></svg><span class="sname">claude-code-ux</span><span class="ssum">· 9 llamadas</span><span class="ospace"></span><span class="odur">5.3s</span></div></div>
+              <div class="sa"><div class="sahead"><span class="chev" style="opacity:0">▶</span><svg class="mico claude"><use href="#ic-claude"/></svg><span class="sname">renderer-integration</span><span class="ssum">· 11 llamadas</span><span class="ospace"></span><span class="odur">6.0s</span></div></div>
+              <div class="sa"><div class="sahead"><span class="chev" style="opacity:0">▶</span><svg class="mico gpt"><use href="#ic-gpt"/></svg><span class="sname">daemon-plumbing</span><span class="ssum">· 9 llamadas</span><span class="ospace"></span><span class="odur">7.4s</span></div></div>
+            </div>
+          </div>
+
+          <!-- ANTES -->
+          <div class="antes">
+            <div class="lbl">Antes · lo que hay hoy</div>
+            <div class="flat"><span class="mk">✓</span> Read file '/Users/dev/…/bridge.go'</div>
+            <div class="flat"><span class="mk">✓</span> Editing files</div>
+            <div class="flat"><span class="mk">✓</span> Guardian Review</div>
+            <div class="flat"><span class="mk">✓</span> Read File</div>
+            <div class="flat"><span class="mk">✓</span> mcp.node_repl.js</div>
+            <div class="flat"><span class="mk">✓</span> Editing files</div>
+            <div class="flat"><span class="mk">✓</span> Guardian Review</div>
+            <div class="flat"><span class="mk">✓</span> Web search</div>
+            <div class="fade">…1204 líneas planas, sin saber de qué subagente es cada una.</div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ TAREAS RAIL ============ -->
+    <div class="panel">
+      <div class="cap now">Turnos · en vivo</div>
+      <div class="rail">
+        <div class="rtitle">Turnos</div>
+
+        <div class="rsec">Plan</div>
+        <div class="plan">
+          <div class="pr done"><span class="pm mk ok">✓</span> Leer el bridge ACP y el store</div>
+          <div class="pr done"><span class="pm mk ok">✓</span> Confirmar el aplastamiento en el archivo</div>
+          <div class="pr cur"><span class="pm"><span class="c"></span></span> Diseñar el árbol de subagentes</div>
+          <div class="pr"><span class="pm"><span class="c"></span></span> Escribir el spec del daemon</div>
+        </div>
+
+        <div class="rsec">Subagentes · 2 activos · 2 listos</div>
+        <div class="subs">
+          <div class="srow run">
+            <svg class="mico claude"><use href="#ic-claude"/></svg>
+            <span class="nm">renderer-integration</span>
+            <span class="act">Grep "ToolGroup"</span>
+            <span class="meta">6.0s</span>
+          </div>
+          <div class="srow run">
+            <svg class="mico gpt"><use href="#ic-gpt"/></svg>
+            <span class="nm">daemon-plumbing</span>
+            <span class="act">go test ./internal/acp</span>
+            <span class="meta">7.4s</span>
+          </div>
+          <div class="donefold" onclick="tog('df')">
+            <span class="chev" id="dfchev">▶</span>
+            <span class="mk ok">✓</span> 2 subagentes terminados · 21 llamadas
+          </div>
+          <div id="df" style="display:none">
+            <div class="srow">
+              <svg class="mico gpt"><use href="#ic-gpt"/></svg><span class="nm">acp-wire-truth</span>
+              <span class="act">12 llamadas</span><span class="meta">4.1s</span>
+            </div>
+            <div class="srow">
+              <svg class="mico claude"><use href="#ic-claude"/></svg><span class="nm">claude-code-ux</span>
+              <span class="act">9 llamadas</span><span class="meta">5.3s</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <div class="foot">
+    <b>La idea, en una línea:</b> los subagentes son la capa de arriba de los grupos de llamadas que ya restauramos — un <b>grupo-de-grupos</b>. Corriendo → se abre solo; terminado → se pliega a una línea; clic para ver el detalle.<br>
+    <b>Lo que necesito del daemon</b> (los «tools» que me das): que <code class="kbd">emitToolEvent</code> deje de tirar la identidad del subagente y adjunte un <code class="kbd">subagentId</code> + <code class="kbd">subagentLabel</code> a cada evento de herramienta. Detalle exacto (campos, origen, línea) → en cuanto termine la investigación te lo paso como checklist.
+  </div>
+
+<script>
+  function tog(id){var el=document.getElementById(id);if(!el)return;
+    if(id==='df'){var open=el.style.display!=='none';el.style.display=open?'none':'block';
+      document.getElementById('dfchev').style.transform=open?'':'rotate(90deg)';return;}
+    el.classList.toggle('open');}
+</script>
+</body>
+</html>

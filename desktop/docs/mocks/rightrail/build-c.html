@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RightRail · redesign mocks</title>
+<style>
+/* Tokens copied verbatim from src/styles/tokens.css (dark). Green = accent only. */
+:root{
+  --bg:#0f0e0d; --side:#151413; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+  --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --acc:#4fa583; --link:#8fb0ea; --amber:#d8a05a; --add:#4cae7f; --del:#d96b5f;
+  --shell:#0b0a09;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--shell); color:var(--ink);
+  font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{display:flex; gap:30px; align-items:flex-start; padding:34px 34px 60px; overflow-x:auto}
+.col{width:334px; flex:none}
+.cap{margin:0 2px 14px}
+.cap .kx{font:600 10.5px/1 var(--mono); letter-spacing:.13em; color:var(--acc); text-transform:uppercase}
+.cap .n{font-size:16px; font-weight:650; color:var(--ink); margin:7px 0 0; letter-spacing:-.01em}
+.cap .th{font-size:12.5px; line-height:1.5; color:var(--muted); margin:6px 0 0}
+.cap .hero{font-size:12px; line-height:1.45; color:var(--ink2); margin:9px 0 0; padding-left:11px; border-left:2px solid color-mix(in srgb,var(--acc) 55%, transparent)}
+.cap .hero b{color:var(--ink); font-weight:600}
+
+/* ---- shared rail frame (mimics the app: floating panel on shell) ---- */
+.frame{
+  width:334px; background:var(--bg); border:1px solid var(--line);
+  border-radius:14px; padding:0 13px 15px; overflow:hidden;
+  box-shadow:0 18px 50px -22px rgba(0,0,0,.7);
+}
+.rh{display:flex; align-items:center; justify-content:flex-end; gap:4px; height:40px}
+.rh .ic{width:26px; height:26px; display:grid; place-items:center; color:var(--faint); border-radius:7px}
+.rh .ic svg{width:15px; height:15px}
+.mono{font-family:var(--mono)}
+.pulse{width:7px; height:7px; border-radius:50%; background:var(--acc); flex:none;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%, transparent); animation:bp 1.6s ease-in-out infinite}
+@keyframes bp{0%,100%{opacity:1}50%{opacity:.45}}
+svg{stroke-width:1.6; stroke:currentColor; fill:none; stroke-linecap:round; stroke-linejoin:round}
+
+/* section label used by several mocks */
+.lbl{font:600 10.5px/1 var(--mono); letter-spacing:.09em; text-transform:uppercase; color:var(--faint)}
+
+/* =======================================================================
+   MOCK A — "Trayectoria del turno"  (live timeline / no cards)
+   ======================================================================= */
+.m-a .turnhd{display:flex; align-items:center; gap:8px; padding:2px 2px 12px}
+.m-a .turnhd .st{font-size:13px; font-weight:600; color:var(--ink)}
+.m-a .turnhd .el{margin-left:auto; font:11px/1 var(--mono); color:var(--muted)}
+.m-a .turnhd .steer{font-size:11px; color:var(--faint)}
+.m-a .spine{position:relative; padding:2px 0}
+.m-a .step{position:relative; display:grid; grid-template-columns:16px 1fr; column-gap:10px; padding:0 0 12px}
+.m-a .step:last-child{padding-bottom:0}
+.m-a .step::before{content:""; position:absolute; left:7px; top:16px; bottom:-2px; width:1.5px; background:var(--line)}
+.m-a .step:last-child::before{display:none}
+.m-a .step .mk{position:relative; z-index:1; width:16px; height:16px; display:grid; place-items:center; background:var(--bg)}
+.m-a .step .dot{width:8px; height:8px; border-radius:50%; border:1.5px solid var(--faint)}
+.m-a .step.done .mk{color:var(--acc)}
+.m-a .step.now .ring{width:12px; height:12px; border-radius:50%; border:2px solid var(--acc);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 18%, transparent); animation:bp 1.6s ease-in-out infinite}
+.m-a .step .tx{font-size:12.5px; line-height:1.35; padding-top:.5px}
+.m-a .step.done .tx{color:var(--muted)}
+.m-a .step.now .tx{color:var(--ink); font-weight:600}
+.m-a .step.todo .tx{color:var(--faint)}
+.m-a .now-body{grid-column:2; margin-top:8px; display:flex; flex-direction:column; gap:7px}
+.m-a .act{display:flex; align-items:center; gap:8px; font-size:12px}
+.m-a .act .ai{color:var(--acc); display:grid; place-items:center}
+.m-a .act .ai svg{width:13px; height:13px}
+.m-a .act code{font:11.5px/1 var(--mono); color:var(--ink)}
+.m-a .act .el{margin-left:auto; font:10.5px/1 var(--mono); color:var(--muted)}
+.m-a .sub{display:flex; align-items:center; gap:8px; padding-left:1px; font-size:11.5px; color:var(--ink2)}
+.m-a .sub .pv{width:15px;height:15px;border-radius:5px;background:color-mix(in srgb,var(--acc) 16%,var(--card));
+  display:grid;place-items:center;color:var(--acc);flex:none}
+.m-a .sub .pv svg{width:10px;height:10px}
+.m-a .sub .sm{font:10.5px/1 var(--mono); color:var(--muted)}
+.m-a .sub .el{margin-left:auto; font:10.5px/1 var(--mono); color:var(--faint)}
+.m-a .fold{display:flex; align-items:center; gap:7px; margin-top:11px; padding:7px 2px 0; border-top:1px solid var(--line);
+  font-size:11px; color:var(--muted)}
+.m-a .fold .chev{color:var(--faint)}
+.m-a .strip{display:flex; align-items:baseline; gap:8px; padding:8px 2px 0; margin-top:12px; border-top:1px solid var(--line)}
+.m-a .strip .lbl{flex:none}
+.m-a .strip .files{display:flex; flex-direction:column; gap:0; flex:1; min-width:0}
+.m-a .frow{display:flex; align-items:baseline; gap:8px; padding:3px 0; min-width:0}
+.m-a .frow .fn{font-size:12px; color:var(--ink2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.m-a .frow .fp{font:10px/1 var(--mono); color:var(--faint)}
+.m-a .frow .df{margin-left:auto; font:10.5px/1 var(--mono)}
+.m-a .frow .a{color:var(--add)} .m-a .frow .d{color:var(--del)}
+.m-a .bgline{display:flex; align-items:center; gap:8px; padding:9px 2px 0; margin-top:11px; border-top:1px solid var(--line); font-size:11.5px; color:var(--ink2)}
+.m-a .bgline .el{margin-left:auto; font:10.5px/1 var(--mono); color:var(--muted)}
+
+/* =======================================================================
+   MOCK B — "Intención"  (self-stated intent + one-tap steer)
+   ======================================================================= */
+.m-b .intent{padding:2px 2px 0}
+.m-b .say{font-size:15px; line-height:1.42; color:var(--ink); font-weight:450; margin:8px 0 0; letter-spacing:-.005em}
+.m-b .say .hl{color:var(--acc); font-weight:550}
+.m-b .steer{margin:13px 0 4px; display:flex; align-items:center; gap:9px; border:1px solid var(--line2); border-radius:10px; padding:9px 11px; background:var(--card)}
+.m-b .steer .ph{color:var(--faint); font-size:12.5px; flex:1}
+.m-b .steer .ret{color:var(--acc); display:grid; place-items:center}
+.m-b .steer .ret svg{width:14px; height:14px}
+.m-b .prog{display:flex; align-items:center; gap:9px; padding:15px 2px 6px}
+.m-b .pdots{display:flex; gap:5px}
+.m-b .pdots i{width:8px; height:8px; border-radius:50%; background:var(--field); display:block}
+.m-b .pdots i.done{background:var(--acc)}
+.m-b .pdots i.now{background:transparent; border:2px solid var(--acc); box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 16%,transparent)}
+.m-b .prog .pl{font-size:11px; color:var(--muted); font-family:var(--mono)}
+.m-b .ev{padding:4px 2px 0}
+.m-b .ev .r{display:flex; align-items:center; gap:8px; padding:5px 0; font-size:12px; color:var(--ink2); border-top:1px solid var(--line)}
+.m-b .ev .r:first-child{border-top:0}
+.m-b .ev .r .ic{color:var(--acc); display:grid; place-items:center} .m-b .ev .r .ic svg{width:12px;height:12px}
+.m-b .ev .r code{font:11px/1 var(--mono); color:var(--ink2)}
+.m-b .ev .r .el{margin-left:auto; font:10.5px/1 var(--mono); color:var(--muted); display:flex; align-items:center; gap:7px}
+.m-b .ev .r .pv{width:14px;height:14px;border-radius:4px;background:color-mix(in srgb,var(--acc) 15%,var(--card));display:grid;place-items:center;color:var(--acc)}
+.m-b .ev .r .pv svg{width:9px;height:9px}
+.m-b .foot{display:flex; align-items:center; gap:10px; margin-top:13px; padding-top:9px; border-top:1px solid var(--line); font-size:11px; color:var(--muted)}
+.m-b .foot .tag{display:flex; align-items:center; gap:6px}
+.m-b .foot .tag b{color:var(--ink2); font-weight:600; font-family:var(--mono); font-size:11px}
+.m-b .foot .sep{color:var(--faint)}
+
+/* =======================================================================
+   MOCK C — "Consola"  (dense, no cards, sectioned hairlines)
+   ======================================================================= */
+.m-c .sec{margin-top:4px}
+.m-c .sh{display:flex; align-items:baseline; gap:8px; padding:11px 1px 6px; border-bottom:1px solid var(--line)}
+.m-c .sh .t{flex:1}
+.m-c .sh .c{font:10.5px/1 var(--mono); color:var(--faint)}
+.m-c .sh .live{display:flex; align-items:center; gap:5px; font:10px/1 var(--mono); color:var(--acc)}
+.m-c .row{display:flex; align-items:baseline; gap:9px; padding:4px 1px; min-width:0}
+.m-c .row .mk{flex:none; width:12px; text-align:center; color:var(--muted); font-size:11px}
+.m-c .row.done .mk{color:var(--acc)}
+.m-c .row .t{font-size:12.5px; color:var(--ink2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0}
+.m-c .row.done .t{color:var(--muted)}
+.m-c .row.now .t{color:var(--ink); font-weight:550}
+.m-c .row.todo .t{color:var(--faint)} .m-c .row.todo .mk{color:var(--faint)}
+.m-c .row .meta{margin-left:auto; font:10.5px/1 var(--mono); color:var(--faint); flex:none}
+.m-c .row .a{color:var(--add)} .m-c .row .d{color:var(--del)}
+.m-c .row .fp{font:10px/1 var(--mono); color:var(--faint)}
+.m-c .live-row{position:relative; margin:4px 0 4px; padding:6px 9px 6px 10px; border-radius:7px;
+  background:color-mix(in srgb,var(--acc) 6%,var(--card))}
+.m-c .live-row::before{content:""; position:absolute; left:0; top:6px; bottom:6px; width:2px; border-radius:2px; background:var(--acc)}
+.m-c .live-row .l1{display:flex; align-items:center; gap:8px; font-size:12px; color:var(--ink)}
+.m-c .live-row .l1 code{font:11px/1 var(--mono)}
+.m-c .live-row .l1 .el{margin-left:auto; font:10.5px/1 var(--mono); color:var(--muted)}
+.m-c .live-row .l2{margin-top:3px; padding-left:16px; font:10.5px/1.3 var(--mono); color:var(--muted)}
+.m-c .more{padding:5px 1px 2px; font:11px/1 var(--mono); color:var(--faint); display:flex; align-items:center; gap:6px}
+
+/* =======================================================================
+   MOCK D — "Foco fijo"  (pinned live zone + scrolling detail)
+   ======================================================================= */
+.m-d .focus{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px 13px 13px; margin-top:2px}
+.m-d .focus .top{display:flex; align-items:center; gap:8px}
+.m-d .focus .top .lbl{color:var(--acc)}
+.m-d .focus .top .el{margin-left:auto; font:10.5px/1 var(--mono); color:var(--muted)}
+.m-d .focus .big{display:flex; align-items:center; gap:9px; margin:10px 0 2px}
+.m-d .focus .big .ic{width:20px;height:20px;border-radius:6px;background:color-mix(in srgb,var(--acc) 15%,transparent);display:grid;place-items:center;color:var(--acc);flex:none}
+.m-d .focus .big .ic svg{width:12px;height:12px}
+.m-d .focus .big .tt{font-size:14px; color:var(--ink); font-weight:600}
+.m-d .focus .big .tt code{font:12.5px/1 var(--mono); font-weight:600}
+.m-d .focus .pbar{height:4px; border-radius:3px; background:var(--field); margin:12px 0 7px; overflow:hidden}
+.m-d .focus .pbar i{display:block; height:100%; width:50%; background:var(--acc); border-radius:3px}
+.m-d .focus .prow{display:flex; align-items:center; gap:8px}
+.m-d .focus .prow .p{font:10.5px/1 var(--mono); color:var(--muted)}
+.m-d .focus .prow .now{font-size:11.5px; color:var(--ink2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.m-d .focus .prow .btn{margin-left:auto; flex:none; display:flex; align-items:center; gap:5px; font-size:11px; color:var(--ink2);
+  border:1px solid var(--line2); border-radius:7px; padding:4px 8px; background:transparent}
+.m-d .focus .prow .btn svg{width:11px; height:11px; color:var(--acc)}
+.m-d .detail{padding:13px 1px 0}
+.m-d .detail .dh{display:flex; align-items:baseline; gap:8px; padding:9px 1px 5px}
+.m-d .detail .dh:first-child{padding-top:2px}
+.m-d .detail .dh .c{margin-left:auto; font:10.5px/1 var(--mono); color:var(--faint)}
+.m-d .sarow{display:flex; align-items:center; gap:8px; padding:5px 1px; font-size:12px; color:var(--ink2)}
+.m-d .sarow .pv{width:15px;height:15px;border-radius:5px;background:color-mix(in srgb,var(--acc) 15%,var(--card));display:grid;place-items:center;color:var(--acc);flex:none}
+.m-d .sarow .pv svg{width:10px;height:10px}
+.m-d .sarow .sm{margin-left:auto; font:10px/1 var(--mono); color:var(--faint)}
+.m-d .frow{display:flex; align-items:baseline; gap:8px; padding:4px 1px; min-width:0}
+.m-d .frow .fn{font-size:12px; color:var(--ink2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.m-d .frow .fp{font:10px/1 var(--mono); color:var(--faint)}
+.m-d .frow .df{margin-left:auto; font:10.5px/1 var(--mono)}
+.m-d .frow .a{color:var(--add)} .m-d .frow .d{color:var(--del)}
+.m-d .fold{display:flex; align-items:center; gap:7px; padding:6px 1px 0; font-size:11px; color:var(--faint)}
+
+/* =======================================================================
+   MOCK E — "Segmentos"  (segmented control, one system at full density)
+   ======================================================================= */
+.m-e .seg{display:flex; gap:3px; background:var(--field); border-radius:10px; padding:3px; margin:2px 0 4px}
+.m-e .seg button{flex:1; border:0; background:transparent; color:var(--muted); font:inherit; font-size:11.5px; font-weight:550;
+  padding:7px 6px; border-radius:7px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px}
+.m-e .seg button.on{background:var(--card); color:var(--ink); box-shadow:0 1px 2px rgba(0,0,0,.35)}
+.m-e .seg .b{font:10px/1 var(--mono); color:var(--faint)}
+.m-e .seg button.on .b{color:var(--muted)}
+.m-e .seg .gd{width:6px;height:6px;border-radius:50%;background:var(--acc);box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%,transparent)}
+.m-e .body{padding:10px 2px 0}
+.m-e .plan .p{display:flex; align-items:flex-start; gap:9px; padding:4px 2px; font-size:12.5px}
+.m-e .plan .p .mk{flex:none; width:14px; text-align:center; color:var(--muted); margin-top:1px}
+.m-e .plan .p.done{color:var(--muted)} .m-e .plan .p.done .mk{color:var(--acc)}
+.m-e .plan .p.now{color:var(--ink); font-weight:550} .m-e .plan .p.now .mk{color:var(--acc)}
+.m-e .plan .p.todo{color:var(--faint)}
+.m-e .callrow{display:flex; align-items:center; gap:9px; border:1px solid color-mix(in srgb,var(--acc) 32%,var(--line));
+  border-radius:9px; background:color-mix(in srgb,var(--acc) 7%,var(--card)); padding:8px 10px; margin:9px 2px 4px}
+.m-e .callrow .ci{color:var(--acc); display:grid; place-items:center} .m-e .callrow .ci svg{width:13px;height:13px}
+.m-e .callrow .cn{font-size:12px; color:var(--ink)} .m-e .callrow .cn code{font:11px/1 var(--mono)}
+.m-e .callrow .cs{font:10.5px/1 var(--mono); color:var(--muted); margin-top:2px}
+.m-e .callrow .cd{margin-left:auto}
+.m-e .sa{display:flex; align-items:center; gap:9px; border:1px solid color-mix(in srgb,var(--acc) 30%,var(--line2)); border-radius:8px; padding:8px 10px; margin:5px 2px}
+.m-e .sa .pv{width:16px;height:16px;border-radius:5px;background:color-mix(in srgb,var(--acc) 15%,var(--card));display:grid;place-items:center;color:var(--acc);flex:none}
+.m-e .sa .pv svg{width:11px;height:11px}
+.m-e .sa .nm{font-size:12px; color:var(--ink)}
+.m-e .sa .sm{font:10.5px/1 var(--mono); color:var(--muted); margin-top:2px}
+.m-e .sa .el{margin-left:auto; font:10.5px/1 var(--mono); color:var(--faint)}
+.m-e .fold{display:flex; align-items:center; gap:7px; margin-top:9px; padding-top:8px; border-top:1px solid var(--line); font-size:11px; color:var(--muted)}
+
+/* single-mock view (?m=a) centers one column */
+body.single .wrap{justify-content:center; min-height:100vh; align-items:center; padding:44px}
+body.single .col{display:none}
+body.single .col.sel{display:block}
+
+@media (prefers-reduced-motion:reduce){ .pulse,.m-a .step.now .ring,.m-b .pdots i.now{animation:none} }
+</style>
+<style>body.single .wrap{min-height:auto;justify-content:flex-start;align-items:flex-start;padding:24px}</style></head>
+<body class="single">
+<div class="wrap">
+
+  <!-- ============================ MOCK A ============================ -->
+  <section class="col" id="a">
+    <div class="cap">
+      <div class="kx">Mock A</div>
+      <div class="n">Trayectoria del turno</div>
+      <div class="th">El turno es todo el panel. Un hilo vertical: dónde estuvo, dónde está, a dónde va. Sin cajas.</div>
+      <div class="hero"><b>Atrae:</b> al que quiere leer el rumbo de un vistazo y frenar a tiempo. <b>Muestra:</b> la dirección en el tiempo.</div>
+    </div>
+    <div class="frame m-a">
+      <div class="rh"><span class="ic"><svg viewBox="0 0 20 20"><path d="M12 4h4v4M8 16H4v-4M16 4l-5 5M4 16l5-5"/></svg></span><span class="ic"><svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg></span></div>
+      <div class="turnhd">
+        <span class="pulse"></span>
+        <span class="st">Trabajando</span>
+        <span class="steer">· ⌘ para orientar</span>
+        <span class="el">1m 20s</span>
+      </div>
+      <div class="spine">
+        <div class="step done"><span class="mk">✓</span><span class="tx">Inventariar features del panel</span></div>
+        <div class="step done"><span class="mk">✓</span><span class="tx">Extraer tokens y CSS reales</span></div>
+        <div class="step now">
+          <span class="mk"><span class="ring"></span></span>
+          <span class="tx">Rediseñar la densidad del panel</span>
+          <div class="now-body">
+            <div class="act"><span class="ai"><svg viewBox="0 0 16 16"><path d="M11 2l3 3-8 8-3.5.5.5-3.5z"/></svg></span><span>Editando</span><code>RightRail.tsx</code><span class="el">8s</span></div>
+            <div class="sub"><span class="pv"><svg viewBox="0 0 16 16"><path d="M8 2l5 3v6l-5 3-5-3V5z"/></svg></span><span>lane de plumbing</span><span class="sm">gpt‑5.6‑sol · session_store.go</span><span class="el">1m 12s</span></div>
+          </div>
+        </div>
+        <div class="step todo"><span class="mk"><span class="dot"></span></span><span class="tx">Verificar en dev</span></div>
+      </div>
+      <div class="fold"><span class="chev">▸</span>2 subagentes · 14 llamadas terminadas</div>
+
+      <div class="strip">
+        <span class="lbl">Archivos&nbsp;·&nbsp;3</span>
+        <div class="files">
+          <div class="frow"><span class="fn">RightRail.tsx</span><span class="fp">components</span><span class="df"><span class="a">+24</span> <span class="d">−6</span></span></div>
+          <div class="frow"><span class="fn">app.css</span><span class="fp">styles</span><span class="df"><span class="a">+58</span> <span class="d">−4</span></span></div>
+          <div class="frow"><span class="fn">TareasCard.tsx</span><span class="fp">components</span><span class="df"><span class="a">+12</span> <span class="d">−2</span></span></div>
+        </div>
+      </div>
+      <div class="bgline"><span class="pulse"></span><span>Dev daemon rebuild</span><span class="el">2m 03s · pid 70201</span></div>
+    </div>
+  </section>
+
+  <!-- ============================ MOCK B ============================ -->
+  <section class="col" id="b">
+    <div class="cap">
+      <div class="kx">Mock B</div>
+      <div class="n">Intención</div>
+      <div class="th">Lo primero es la frase de lo que el agente cree que está haciendo, y un campo para orientarlo sin bajar.</div>
+      <div class="hero"><b>Atrae:</b> al que teme ser malinterpretado. <b>Muestra:</b> la intención en palabras + corrección a un toque.</div>
+    </div>
+    <div class="frame m-b">
+      <div class="rh"><span class="ic"><svg viewBox="0 0 20 20"><path d="M12 4h4v4M8 16H4v-4M16 4l-5 5M4 16l5-5"/></svg></span><span class="ic"><svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg></span></div>
+      <div class="intent">
+        <div class="lbl">Ahora</div>
+        <div class="say">Rediseñando la <span class="hl">densidad del panel derecho</span> para quitar el espacio muerto.</div>
+        <div class="steer">
+          <span class="ph">Orientar al agente…</span>
+          <span class="ret"><svg viewBox="0 0 16 16"><path d="M13 4v3a3 3 0 0 1-3 3H4M7 7L4 10l3 3"/></svg></span>
+        </div>
+      </div>
+      <div class="prog">
+        <span class="pdots"><i class="done"></i><i class="done"></i><i class="now"></i><i></i></span>
+        <span class="pl">Paso 3 de 4</span>
+      </div>
+      <div class="ev">
+        <div class="r"><span class="ic"><svg viewBox="0 0 16 16"><path d="M11 2l3 3-8 8-3.5.5.5-3.5z"/></svg></span><span>Editando</span><code>RightRail.tsx</code><span class="el"><span class="pulse"></span>8s</span></div>
+        <div class="r"><span class="pv"><svg viewBox="0 0 16 16"><path d="M8 2l5 3v6l-5 3-5-3V5z"/></svg></span><span>lane de plumbing</span><span class="el mono">gpt‑5.6‑sol · 1m 12s</span></div>
+      </div>
+      <div class="foot">
+        <span class="tag">Archivos <b>3</b></span><span class="sep">·</span>
+        <span class="tag"><span class="pulse"></span>2.º plano <b>1</b></span><span class="sep">·</span>
+        <span class="tag">terminado <b>14</b></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ MOCK C ============================ -->
+  <section class="col sel" id="c">
+    <div class="cap">
+      <div class="kx">Mock C</div>
+      <div class="n">Consola</div>
+      <div class="th">Cero cajas, cero bordes redondos. Secciones con hairline y metadatos mono alineados. Máxima densidad.</div>
+      <div class="hero"><b>Atrae:</b> al que odia el espacio muerto. <b>Muestra:</b> todo a la vez, sin peaje de chrome.</div>
+    </div>
+    <div class="frame m-c">
+      <div class="rh"><span class="ic"><svg viewBox="0 0 20 20"><path d="M12 4h4v4M8 16H4v-4M16 4l-5 5M4 16l5-5"/></svg></span><span class="ic"><svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg></span></div>
+
+      <div class="sec">
+        <div class="sh"><span class="lbl t">Turno</span><span class="live"><span class="pulse"></span>1m 20s</span></div>
+        <div class="row done"><span class="mk">✓</span><span class="t">Inventariar features del panel</span></div>
+        <div class="row done"><span class="mk">✓</span><span class="t">Extraer tokens y CSS reales</span></div>
+        <div class="live-row">
+          <div class="l1"><span class="mk" style="color:var(--acc)">◐</span><span>Rediseñar la densidad</span><span class="el">·</span><code>RightRail.tsx</code><span class="el">8s</span></div>
+          <div class="l2">↳ lane de plumbing · gpt‑5.6‑sol · session_store.go · 1m 12s</div>
+        </div>
+        <div class="row todo"><span class="mk">○</span><span class="t">Verificar en dev</span></div>
+        <div class="more"><span>▸</span>2 subagentes · 14 llamadas terminadas</div>
+      </div>
+
+      <div class="sec">
+        <div class="sh"><span class="lbl t">Archivos</span><span class="c">workass · main</span></div>
+        <div class="row"><span class="t">RightRail.tsx <span class="fp">components</span></span><span class="meta"><span class="a">+24</span> <span class="d">−6</span></span></div>
+        <div class="row"><span class="t">app.css <span class="fp">styles</span></span><span class="meta"><span class="a">+58</span> <span class="d">−4</span></span></div>
+        <div class="row"><span class="t">TareasCard.tsx <span class="fp">components</span></span><span class="meta"><span class="a">+12</span> <span class="d">−2</span></span></div>
+      </div>
+
+      <div class="sec">
+        <div class="sh"><span class="lbl t">2.º plano</span><span class="live"><span class="pulse"></span>1 en curso</span></div>
+        <div class="row"><span class="t">Dev daemon rebuild</span><span class="meta">2m 03s · pid 70201</span></div>
+        <div class="more"><span>▸</span>3 trabajos terminados</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ MOCK D ============================ -->
+  <section class="col" id="d">
+    <div class="cap">
+      <div class="kx">Mock D</div>
+      <div class="n">Foco fijo</div>
+      <div class="th">Zona superior fija con la acción viva (nunca se mueve ni cambia de tamaño). El detalle scrollea debajo.</div>
+      <div class="hero"><b>Atrae:</b> al que le molesta que las cajas salten. <b>Muestra:</b> un foco en vivo que no se mueve.</div>
+    </div>
+    <div class="frame m-d">
+      <div class="rh"><span class="ic"><svg viewBox="0 0 20 20"><path d="M12 4h4v4M8 16H4v-4M16 4l-5 5M4 16l5-5"/></svg></span><span class="ic"><svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg></span></div>
+      <div class="focus">
+        <div class="top"><span class="lbl">En curso</span><span class="el">1m 20s</span></div>
+        <div class="big"><span class="ic"><svg viewBox="0 0 16 16"><path d="M11 2l3 3-8 8-3.5.5.5-3.5z"/></svg></span><span class="tt">Editando <code>RightRail.tsx</code></span></div>
+        <div class="pbar"><i></i></div>
+        <div class="prow"><span class="p">2/4</span><span class="now">Rediseñar la densidad del panel</span>
+          <span class="btn"><svg viewBox="0 0 16 16"><path d="M13 4v3a3 3 0 0 1-3 3H4M7 7L4 10l3 3"/></svg>Orientar</span></div>
+      </div>
+      <div class="detail">
+        <div class="dh"><span class="lbl">Subagentes</span><span class="c">1 activo</span></div>
+        <div class="sarow"><span class="pv"><svg viewBox="0 0 16 16"><path d="M8 2l5 3v6l-5 3-5-3V5z"/></svg></span><span>lane de plumbing</span><span class="sm">gpt‑5.6‑sol · 1m 12s</span></div>
+        <div class="dh"><span class="lbl">Archivos</span><span class="c">3 · workass</span></div>
+        <div class="frow"><span class="fn">RightRail.tsx</span><span class="fp">components</span><span class="df"><span class="a">+24</span> <span class="d">−6</span></span></div>
+        <div class="frow"><span class="fn">app.css</span><span class="fp">styles</span><span class="df"><span class="a">+58</span> <span class="d">−4</span></span></div>
+        <div class="frow"><span class="fn">TareasCard.tsx</span><span class="fp">components</span><span class="df"><span class="a">+12</span> <span class="d">−2</span></span></div>
+        <div class="dh"><span class="lbl">2.º plano</span><span class="c">1 en curso</span></div>
+        <div class="sarow"><span class="pulse"></span><span>Dev daemon rebuild</span><span class="sm">2m 03s · pid 70201</span></div>
+        <div class="fold"><span>▸</span>3 trabajos terminados · 14 llamadas</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ MOCK E ============================ -->
+  <section class="col" id="e">
+    <div class="cap">
+      <div class="kx">Mock E</div>
+      <div class="n">Segmentos</div>
+      <div class="th">Un control segmentado: Turno · Archivos · 2.º plano. Un sistema a fondo en vez de tres apretujados.</div>
+      <div class="hero"><b>Atrae:</b> al que quiere foco limpio y baja a detalle a propósito. <b>Compromiso:</b> lo demás va a un toque, no simultáneo.</div>
+    </div>
+    <div class="frame m-e">
+      <div class="rh"><span class="ic"><svg viewBox="0 0 20 20"><path d="M12 4h4v4M8 16H4v-4M16 4l-5 5M4 16l5-5"/></svg></span><span class="ic"><svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg></span></div>
+      <div class="seg">
+        <button class="on">Turno <span class="b">3</span></button>
+        <button>Archivos <span class="b">3</span></button>
+        <button>2.º plano <span class="gd"></span></button>
+      </div>
+      <div class="body">
+        <div class="plan">
+          <div class="p done"><span class="mk">✓</span><span>Inventariar features del panel</span></div>
+          <div class="p done"><span class="mk">✓</span><span>Extraer tokens y CSS reales</span></div>
+          <div class="p now"><span class="mk">◐</span><span>Rediseñar la densidad del panel</span></div>
+          <div class="p todo"><span class="mk">○</span><span>Verificar en dev</span></div>
+        </div>
+        <div class="callrow">
+          <span class="ci"><svg viewBox="0 0 16 16"><path d="M11 2l3 3-8 8-3.5.5.5-3.5z"/></svg></span>
+          <div><div class="cn">Editando <code>RightRail.tsx</code></div><div class="cs">en curso · 8s</div></div>
+          <span class="cd pulse"></span>
+        </div>
+        <div class="sa">
+          <span class="pv"><svg viewBox="0 0 16 16"><path d="M8 2l5 3v6l-5 3-5-3V5z"/></svg></span>
+          <div><div class="nm">lane de plumbing</div><div class="sm">gpt‑5.6‑sol · session_store.go</div></div>
+          <span class="el">1m 12s</span>
+        </div>
+        <div class="fold"><span>▸</span>2 subagentes · 14 llamadas terminadas</div>
+      </div>
+    </div>
+  </section>
+
+</div>
+<script>
+  var m = new URLSearchParams(location.search).get('m');
+  if (m) {
+    document.body.className = 'single';
+    var el = document.getElementById(m);
+    if (el) el.classList.add('sel');
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><title>Thinking UI — mockups</title>
+<style>
+  :root{
+    --bg-0:#05100d; --bg-1:#08150f; --bg-2:#0b1a15;
+    --ink:#eaf3ee; --muted:#87a295; --faint:#5f786d;
+    --teal:#2fe0c0; --teal-deep:#15b89c; --ember:#ff6b3d; --gold:#f3c84b;
+    --line:#17352c; --line-2:#20493d; --glass:rgba(20,40,34,.5);
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --ui:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    --r:12px; --r-sm:8px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 30% -10%,#0a1a15,transparent),var(--bg-0);color:var(--ink);font-family:var(--ui);padding:34px 22px 80px}
+  h1{font-size:1.1rem;letter-spacing:.02em;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:.85rem;margin:0 0 26px;max-width:760px;line-height:1.5}
+  .lab{display:flex;align-items:baseline;gap:10px;margin:34px 0 10px}
+  .lab h2{font-size:.92rem;margin:0;letter-spacing:.02em}
+  .lab .rec{font-family:var(--mono);font-size:.56rem;letter-spacing:.1em;text-transform:uppercase;color:#04110d;background:linear-gradient(120deg,var(--teal),var(--teal-deep));padding:2px 8px;border-radius:999px}
+  .lab p{margin:0;color:var(--faint);font-size:.78rem}
+  /* ---- shared chat frame ---- */
+  .frame{width:560px;max-width:100%;height:420px;border:1px solid var(--line);border-radius:var(--r);background:linear-gradient(180deg,var(--bg-1),var(--bg-0));display:flex;flex-direction:column;overflow:hidden;box-shadow:0 18px 50px rgba(0,0,0,.45)}
+  .topbar{height:34px;flex:none;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;padding:0 12px;color:var(--faint);font-family:var(--mono);font-size:.6rem;letter-spacing:.14em;text-transform:uppercase}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--teal);box-shadow:0 0 8px var(--teal)}
+  .log{flex:1;min-height:0;overflow-y:auto;padding:16px 16px 8px;scroll-behavior:smooth}
+  .log::-webkit-scrollbar{width:8px}.log::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:8px}
+  .eyebrow{font-family:var(--mono);font-size:.56rem;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin:14px 0 5px}
+  .body{font-size:.9rem;line-height:1.6;color:var(--ink)}
+  .body p{margin:0 0 10px}
+  .composer{flex:none;border-top:1px solid var(--line);padding:10px 12px;display:flex;gap:8px;align-items:center}
+  .composer input{flex:1;background:rgba(6,12,11,.7);border:1px solid var(--line);border-radius:999px;color:var(--ink);font:inherit;font-size:.82rem;padding:9px 14px;outline:none}
+  .composer .send{width:32px;height:32px;flex:none;border-radius:50%;border:1px solid var(--line-2);background:var(--glass);color:var(--teal);cursor:pointer}
+  .caret{display:inline-block;width:2px;height:1.05em;margin-left:2px;vertical-align:text-bottom;border-radius:2px;background:var(--teal);box-shadow:0 0 7px rgba(47,224,192,.75);animation:cp 1.05s ease-in-out infinite}
+  @keyframes cp{0%,100%{opacity:1}50%{opacity:.2}}
+  /* tool group (from the app) */
+  .tg{border:1px solid var(--line);border-radius:var(--r-sm);background:rgba(8,16,14,.5);margin:8px 0}
+  .tg summary{list-style:none;display:flex;align-items:center;gap:8px;padding:6px 9px;cursor:pointer;font-size:.74rem}
+  .tg summary::-webkit-details-marker{display:none}
+  .tg .c{color:var(--faint);font-size:.6rem}
+  .tg[open] .c{transform:rotate(90deg)}
+  .tg .ic{color:var(--teal)}
+  .tg .t{flex:1;color:var(--ink);font-weight:600}
+  .tg .n{font-family:var(--mono);font-size:.56rem;color:var(--teal);background:rgba(47,224,192,.16);border-radius:999px;padding:1px 6px}
+  .tg .det{padding:2px 10px 9px;color:var(--muted);font-family:var(--mono);font-size:.68rem}
+  .spin{width:11px;height:11px;flex:none;border-radius:50%;border:2px solid rgba(47,224,192,.28);border-top-color:var(--teal);animation:sp .7s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .star{color:var(--teal);animation:cp 1.4s ease-in-out infinite}
+
+  /* ===== Variant A: pinned thinking dock (above composer) ===== */
+  .dockwrap{flex:none;padding:0 12px 10px}
+  .dock{border:1px solid var(--line-2);border-radius:12px;background:linear-gradient(180deg,rgba(20,40,34,.55),rgba(10,20,16,.7));overflow:hidden;transition:box-shadow .2s}
+  .dock:hover{box-shadow:0 0 0 1px rgba(47,224,192,.25)}
+  .dock-line{display:flex;align-items:center;gap:10px;padding:8px 11px;cursor:pointer}
+  .dock-line .lbl{font-family:var(--mono);font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;color:var(--teal);flex:none}
+  .dock-line .now{flex:1;min-width:0;color:var(--muted);font-size:.78rem;white-space:nowrap;overflow:hidden;-webkit-mask-image:linear-gradient(90deg,transparent,#000 22px);mask-image:linear-gradient(90deg,transparent,#000 22px)}
+  .dock-line .el{font-family:var(--mono);font-size:.62rem;color:var(--faint);flex:none}
+  .dock-line .chev{color:var(--faint);flex:none;transition:transform .2s;font-size:.7rem}
+  .dock.open .chev{transform:rotate(180deg)}
+  .dock-full{max-height:0;overflow:hidden;transition:max-height .25s ease}
+  .dock.open .dock-full{max-height:160px}
+  .dock-scroll{max-height:160px;overflow-y:auto;padding:2px 12px 11px;border-top:1px solid var(--line);color:var(--faint);font-size:.76rem;line-height:1.55}
+  .dock-scroll::-webkit-scrollbar{width:6px}.dock-scroll::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:6px}
+
+  /* ===== Variant B: sticky reasoning capsule (inside the message) ===== */
+  .cap{position:sticky;top:6px;z-index:3;border:1px solid var(--line-2);border-radius:10px;background:rgba(9,20,16,.92);backdrop-filter:blur(8px);margin:0 0 12px;overflow:hidden}
+  .cap summary{list-style:none;display:flex;align-items:center;gap:9px;padding:7px 10px;cursor:pointer}
+  .cap summary::-webkit-details-marker{display:none}
+  .cap .lbl{font-family:var(--mono);font-size:.56rem;letter-spacing:.1em;text-transform:uppercase;color:var(--teal)}
+  .cap .now{flex:1;min-width:0;color:var(--muted);font-size:.76rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cap .det{max-height:150px;overflow:auto;padding:2px 11px 10px;color:var(--faint);font-size:.75rem;line-height:1.55;border-top:1px solid var(--line)}
+
+  /* ===== Variant C: inline live tail (fades older, shows last lines) ===== */
+  .tail{border-left:2px solid var(--line-2);padding:2px 0 2px 12px;margin:2px 0 12px;position:relative}
+  .tail .lbl{font-family:var(--mono);font-size:.56rem;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);display:flex;align-items:center;gap:7px;margin-bottom:3px}
+  .tail .win{max-height:46px;overflow:hidden;color:var(--faint);font-size:.76rem;line-height:1.5;-webkit-mask-image:linear-gradient(180deg,transparent,#000 18px);mask-image:linear-gradient(180deg,transparent,#000 18px)}
+  .tail .more{font-family:var(--mono);font-size:.58rem;color:var(--teal);cursor:pointer;margin-top:3px;display:inline-block}
+</style></head>
+<body>
+  <h1>“Thinking” siempre visible — mockups</h1>
+  <p class="sub">Problema actual: la tarjeta de razonamiento vive arriba del mensaje y, cuando llegan
+  mucho texto y tool-calls, queda empujada fuera de vista. Estas son 3 formas de mantener el
+  pensamiento SIEMPRE visible sin robar protagonismo. Inspirado en Codex (resumen colapsable),
+  Claude Code (línea de estado viva con verbo + tiempo) y opencode / pi (tail compacto en su lugar).</p>
+
+  <div class="lab"><h2>A · Dock de pensamiento fijo</h2><span class="rec">recomendado</span><p>una línea viva fijada arriba del input; click para expandir el razonamiento completo.</p></div>
+  <div class="frame">
+    <div class="topbar"><span class="dot"></span> devin · chat</div>
+    <div class="log" id="logA">
+      <div class="eyebrow">devin</div>
+      <div class="body">
+        <p>Voy a revisar cómo se resuelven los reintentos en el cliente antes de tocar nada.</p>
+        <details class="tg"><summary><span class="c">▸</span><span class="ic">✓</span><span class="t">Ran command</span><span class="n">3</span></summary><div class="det">$ rg "retry" src/ …</div></details>
+        <p id="ansA">El backoff está hardcodeado en <code>client.ts</code>. Propongo<span class="caret"></span></p>
+      </div>
+    </div>
+    <div class="dockwrap">
+      <div class="dock" id="dockA">
+        <div class="dock-line" onclick="document.getElementById('dockA').classList.toggle('open')">
+          <span class="star">✶</span><span class="lbl">Pensando</span>
+          <span class="now" id="nowA">…</span>
+          <span class="el" id="elA">0s</span>
+          <span class="chev">⌄</span>
+        </div>
+        <div class="dock-full"><div class="dock-scroll" id="fullA"></div></div>
+      </div>
+    </div>
+    <div class="composer"><input placeholder="Pedile algo a Devin…"><button class="send">↑</button></div>
+  </div>
+
+  <div class="lab"><h2>B · Cápsula de razonamiento sticky</h2><p>vive en el mensaje pero queda pegada arriba del viewport mientras scrolleás; colapsable.</p></div>
+  <div class="frame">
+    <div class="topbar"><span class="dot"></span> devin · chat</div>
+    <div class="log" id="logB">
+      <div class="eyebrow">devin</div>
+      <div class="body">
+        <details class="cap" open><summary><span class="star">✶</span><span class="lbl">Pensando</span><span class="now" id="nowB">…</span><span class="spin"></span></summary><div class="det" id="fullB"></div></details>
+        <p>Voy a revisar cómo se resuelven los reintentos en el cliente antes de tocar nada.</p>
+        <details class="tg"><summary><span class="c">▸</span><span class="ic">✓</span><span class="t">Ran command</span><span class="n">3</span></summary><div class="det">$ rg "retry" src/ …</div></details>
+        <p>El backoff está hardcodeado en <code>client.ts</code>. Voy a extraer la config y sumar jitter, después corro los tests y te muestro el diff. Esto es relleno para poder scrollear y ver que la cápsula queda fija arriba mientras el contenido pasa por debajo, sin perder de vista el pensamiento.</p>
+        <p>Más texto de ejemplo para forzar scroll. Más texto de ejemplo para forzar scroll. Más texto de ejemplo para forzar scroll. Más texto de ejemplo para forzar scroll.</p>
+        <p>Y todavía más, así se ve el efecto sticky con el razonamiento siempre arriba.</p>
+      </div>
+    </div>
+    <div class="composer"><input placeholder="Pedile algo a Devin…"><button class="send">↑</button></div>
+  </div>
+
+  <div class="lab"><h2>C · Tail vivo en su lugar</h2><p>en el timeline, colapsado a las últimas líneas con degradé; compacto y no domina.</p></div>
+  <div class="frame">
+    <div class="topbar"><span class="dot"></span> devin · chat</div>
+    <div class="log" id="logC">
+      <div class="eyebrow">devin</div>
+      <div class="body">
+        <div class="tail">
+          <div class="lbl"><span class="star">✶</span> Pensando · <span id="elC">0s</span></div>
+          <div class="win" id="winC"></div>
+          <span class="more">ver razonamiento ▾</span>
+        </div>
+        <p>Voy a revisar cómo se resuelven los reintentos en el cliente antes de tocar nada.</p>
+        <details class="tg"><summary><span class="c">▸</span><span class="ic">✓</span><span class="t">Ran command</span><span class="n">3</span></summary><div class="det">$ rg "retry" src/ …</div></details>
+        <p>El backoff está hardcodeado en <code>client.ts</code>. Propongo extraer la config<span class="caret"></span></p>
+      </div>
+    </div>
+    <div class="composer"><input placeholder="Pedile algo a Devin…"><button class="send">↑</button></div>
+  </div>
+
+<script>
+  // Simulate a live reasoning stream feeding all three variants.
+  const THOUGHTS = [
+    'Reviso cómo el cliente maneja los 429 y dónde vive el backoff.',
+    'Parece hardcodeado; busco todas las referencias a "retry".',
+    'Encontré 3 usos: client.ts, queue.ts y un test viejo.',
+    'El test viejo asume 5 reintentos fijos — habrá que actualizarlo.',
+    'Mejor extraer la config de reintentos a un solo lugar.',
+    'Voy a sumar jitter exponencial para evitar thundering herd.',
+    'Corro los tests para confirmar que nada se rompe.',
+    'Todo verde; preparo el diff para mostrarlo.',
+  ];
+  let i = 0, buf = [], t0 = Date.now();
+  const nowA=document.getElementById('nowA'), fullA=document.getElementById('fullA');
+  const nowB=document.getElementById('nowB'), fullB=document.getElementById('fullB');
+  const winC=document.getElementById('winC');
+  function tick(){
+    const line = THOUGHTS[i % THOUGHTS.length]; i++;
+    buf.push(line); if (buf.length > 40) buf.shift();
+    nowA.textContent = line; nowB.textContent = line;
+    const joined = buf.join('  ·  ');
+    fullA.textContent = joined; fullA.scrollTop = fullA.scrollHeight;
+    fullB.textContent = joined; fullB.scrollTop = fullB.scrollHeight;
+    winC.textContent = buf.slice(-3).join('  ·  ');
+  }
+  tick(); setInterval(tick, 1600);
+  setInterval(()=>{ const s=Math.floor((Date.now()-t0)/1000);
+    document.getElementById('elA').textContent=s+'s';
+    document.getElementById('elC').textContent=s+'s'; }, 500);
+</script>
+</body></html>

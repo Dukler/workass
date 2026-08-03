@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>workass · P4 mock C — cockpit</title>
+<style>
+/* ============================================================
+   VARIANT C — "cockpit"
+   IA for the 10-concurrent-chats operator: pinned conversation
+   roster with ALWAYS-VISIBLE live status (state / timer / RAM per
+   engine) | centered transcript+composer column | RIGHT inspector
+   panel (collapsed by default; expands to procs, engines, RAM,
+   Sync Teams). No bottom bar anywhere. Density through information,
+   not decoration. Green = accent only. Agent prose unboxed.
+   ============================================================ */
+:root{
+  --bg-0:#1b1a18; --bg-1:#201f1d;
+  --panel:#232220; --panel-2:#262523; --sunk:#1d1c1a;
+  --line:rgba(255,255,255,.07); --line-2:rgba(255,255,255,.12); --line-3:rgba(255,255,255,.20);
+  --ink:#f0efec; --ink-2:#d8d6d1; --muted:#a8a69f; --label:#918f88;
+  --accent:#3ecf8e; --accent-ink:#0f1512;
+  --accent-soft:rgba(62,207,142,.12);
+  --warn:#d9a441; --risk:#e08a72;
+  --warn-soft:rgba(217,164,65,.10);
+  --tok-kw:#c8a0e8; --tok-typ:#69c3d6; --tok-fn:#e2e0da; --tok-num:#e5977f; --tok-str:#d9b877; --tok-cmt:#8b8981;
+  --add-ink:#83d9ab; --add-bg:rgba(62,207,142,.09);
+  --del-ink:#e6a48f; --del-bg:rgba(224,138,114,.09);
+  --shadow:0 1px 2px rgba(0,0,0,.24);
+}
+:root[data-theme="light"]{
+  --bg-0:#faf9f7; --bg-1:#f4f3f0;
+  --panel:#ffffff; --panel-2:#fbfaf8; --sunk:#f2f1ee;
+  --line:rgba(20,19,16,.08); --line-2:rgba(20,19,16,.13); --line-3:rgba(20,19,16,.24);
+  --ink:#1c1b18; --ink-2:#3f3e39; --muted:#5d5b55; --label:#6d6b64;
+  --accent:#0e7d56; --accent-ink:#ffffff;
+  --accent-soft:rgba(14,125,86,.10);
+  --warn:#8f6400; --risk:#a8442a;
+  --warn-soft:rgba(143,100,0,.08);
+  --tok-kw:#7a3fb0; --tok-typ:#0f6f86; --tok-fn:#3f3e39; --tok-num:#a8442a; --tok-str:#8a6d1f; --tok-cmt:#6d6b64;
+  --add-ink:#0e7d56; --add-bg:rgba(14,125,86,.09);
+  --del-ink:#a8442a; --del-bg:rgba(168,68,42,.08);
+  --shadow:0 1px 2px rgba(20,19,16,.05);
+}
+:root{
+  --font-ui:"Aptos","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",sans-serif;
+  --font-mono:"Cascadia Code","Cascadia Mono","Consolas",ui-monospace,"SF Mono",monospace;
+  --col:74ch; --col-pad:24px;         /* one reading axis */
+  --r:8px; --r-sm:5px;                /* one radius scale */
+}
+
+*{box-sizing:border-box;}
+html{font-size:14px;}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
+body{
+  margin:0;height:100vh;overflow:hidden;
+  font-family:var(--font-ui);font-size:1rem;line-height:1.6;
+  color:var(--ink);background:var(--bg-0);
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+}
+a{color:var(--accent);text-decoration:none;} a:hover{text-decoration:underline;}
+code,pre{font-family:var(--font-mono);}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;}
+:where(button,textarea):focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-sm);}
+::-webkit-scrollbar{width:9px;height:9px;}
+::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:99px;border:2px solid transparent;background-clip:padding-box;}
+::-webkit-scrollbar-thumb:hover{background:var(--line-3);}
+
+/* ===== top-level structure: roster | stage | inspector ===== */
+.app{display:grid;grid-template-columns:288px 1fr 48px;height:100vh;transition:grid-template-columns .15s ease;}
+.app.insp-open{grid-template-columns:288px 1fr 320px;}
+
+/* ---- roster: pinned, live status always visible ---- */
+.roster{display:flex;flex-direction:column;min-height:0;background:var(--bg-1);border-right:1px solid var(--line);}
+.roster-head{display:flex;align-items:center;gap:8px;height:48px;padding:0 10px 0 14px;border-bottom:1px solid var(--line);}
+.roster-mark{width:16px;height:16px;border-radius:5px;background:var(--accent);flex:none;}
+.roster-title{font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--label);flex:1;}
+.roster-count{font-family:var(--font-mono);font-size:.7rem;color:var(--muted);}
+.roster-new{width:26px;height:26px;border-radius:var(--r-sm);display:grid;place-items:center;color:var(--accent);font-size:1rem;}
+.roster-new:hover{background:var(--line);}
+.roster-scroll{flex:1;min-height:0;overflow:auto;padding:6px;}
+.group{padding:10px 8px 4px;font-size:.66rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--label);}
+.row{display:grid;grid-template-columns:10px 1fr auto;grid-template-rows:auto auto;column-gap:8px;
+  width:100%;text-align:left;padding:6px 8px;border-radius:var(--r-sm);align-items:center;position:relative;}
+.row:hover{background:var(--panel-2);}
+.row.active{background:var(--panel);box-shadow:inset 2px 0 0 var(--accent);}
+.dot{width:7px;height:7px;border-radius:99px;background:var(--line-3);grid-row:1 / span 2;}
+.dot.on{background:var(--accent);}
+.dot.run{background:var(--warn);animation:pulse 1.6s infinite;}
+.dot.draft{background:var(--risk);}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+.row-title{grid-column:2;grid-row:1;font-size:.86rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.35;}
+.row-ram{grid-column:3;grid-row:1;font-family:var(--font-mono);font-size:.66rem;color:var(--muted);text-align:right;}
+.row-state{grid-column:2 / 4;grid-row:2;font-size:.68rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--font-mono);}
+.row-x{grid-column:3;grid-row:2;justify-self:end;font-size:.64rem;font-weight:600;color:var(--muted);
+  background:var(--panel-2);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:0 6px;opacity:0;}
+.row:hover .row-x{opacity:1;}
+.row-x:hover{color:var(--risk);border-color:var(--risk);}
+.row.dim .row-title{color:var(--muted);font-weight:500;}
+/* account + settings: settings lives HERE and only here */
+.roster-foot{display:flex;align-items:center;gap:8px;height:48px;padding:0 14px;border-top:1px solid var(--line);}
+.avatar{width:24px;height:24px;border-radius:99px;background:var(--accent-soft);color:var(--accent);
+  display:grid;place-items:center;font-size:.68rem;font-weight:700;flex:none;}
+.foot-name{font-size:.8rem;font-weight:600;flex:1;}
+.foot-set{font-size:.74rem;font-weight:600;color:var(--muted);padding:4px 9px;border-radius:var(--r-sm);}
+.foot-set:hover{background:var(--line);color:var(--ink);}
+
+/* ---- stage ---- */
+.stage{display:flex;flex-direction:column;min-width:0;min-height:0;}
+.bar{display:flex;align-items:center;gap:12px;height:48px;padding:0 12px 0 24px;border-bottom:1px solid var(--line);}
+.bar-title{display:flex;align-items:baseline;gap:10px;min-width:0;flex:1;}
+.bar-title h1{margin:0;font-size:.95rem;font-weight:700;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.bar-meta{font-size:.72rem;color:var(--muted);white-space:nowrap;}
+.bar-meta code{background:var(--line);padding:0 4px;border-radius:3px;color:var(--ink-2);font-size:.95em;}
+.bar-icon{width:30px;height:30px;border-radius:var(--r-sm);color:var(--muted);display:grid;place-items:center;font-size:.9rem;flex:none;}
+.bar-icon:hover{background:var(--line);color:var(--ink);}
+
+.col{max-width:calc(var(--col) + var(--col-pad)*2);margin:0 auto;padding:0 var(--col-pad);width:100%;}
+.transcript{flex:1;min-height:0;overflow:auto;scrollbar-gutter:stable both-edges;}
+.transcript .col{padding-top:24px;padding-bottom:12px;}
+
+.turn{margin-bottom:24px;}
+.turn-head{display:flex;align-items:baseline;gap:10px;margin-bottom:6px;}
+.speaker{font-size:.68rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--label);}
+.turn.agent .speaker{color:var(--accent);}
+.turn-meta{margin-left:auto;font-family:var(--font-mono);font-size:.66rem;color:var(--label);opacity:0;}
+.turn:hover .turn-meta{opacity:1;}
+
+.u-block{background:var(--panel-2);border:1px solid var(--line);border-radius:var(--r);
+  padding:10px 14px;width:fit-content;max-width:100%;}
+.u-block p{margin:0;}
+.ctx-chip{display:inline-flex;align-items:center;gap:6px;margin-top:8px;font-size:.7rem;font-family:var(--font-mono);
+  color:var(--muted);background:var(--sunk);border:1px solid var(--line);padding:2px 8px;border-radius:var(--r-sm);}
+
+.think{margin:0 0 12px;font-size:.82rem;color:var(--muted);font-style:italic;}
+.plan{border:1px solid var(--line);border-radius:var(--r);background:var(--panel-2);padding:10px 14px;margin:0 0 18px;}
+.plan-title{font-size:.66rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--label);margin-bottom:6px;}
+.plan ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px;}
+.plan li{display:flex;align-items:center;gap:9px;font-size:.85rem;color:var(--ink-2);}
+.plan-box{width:12px;height:12px;border-radius:3px;border:1.5px solid var(--line-3);flex:none;}
+.plan li[data-st="done"] .plan-box{background:var(--accent);border-color:var(--accent);}
+.plan li[data-st="done"]{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line-3);}
+.plan li[data-st="active"] .plan-box{border-color:var(--accent);box-shadow:inset 0 0 0 3px var(--accent-soft);}
+
+.prose p{margin:0 0 12px;}
+.prose h3{font-size:.98rem;font-weight:700;margin:18px 0 6px;}
+.prose :not(pre)>code{font-size:.88em;background:var(--line);color:var(--ink-2);padding:1px 5px;border-radius:3px;}
+
+pre.code{background:var(--sunk);border:1px solid var(--line);border-radius:var(--r);
+  padding:12px 14px;overflow:auto;font-size:.82rem;line-height:1.55;margin:0 0 12px;color:var(--ink-2);}
+.tok-kw{color:var(--tok-kw);} .tok-typ{color:var(--tok-typ);} .tok-fn{color:var(--tok-fn);}
+.tok-num{color:var(--tok-num);} .tok-str{color:var(--tok-str);} .tok-cmt{color:var(--tok-cmt);font-style:italic;}
+
+.table-wrap{overflow-x:auto;margin:0 0 12px;border:1px solid var(--line);border-radius:var(--r);}
+table{border-collapse:collapse;width:100%;font-size:.85rem;}
+thead th{text-align:left;font-weight:700;color:var(--label);font-size:.66rem;text-transform:uppercase;
+  letter-spacing:.06em;padding:7px 14px;background:var(--panel-2);border-bottom:1px solid var(--line);}
+tbody td{padding:7px 14px;border-bottom:1px solid var(--line);color:var(--ink-2);}
+tbody tr:last-child td{border-bottom:none;}
+.pill{font-size:.66rem;font-weight:700;font-family:var(--font-mono);padding:0 7px;border-radius:99px;}
+.pill.pin{color:var(--accent);background:var(--accent-soft);}
+.pill.keep{color:var(--warn);background:var(--warn-soft);}
+.pill.reap{color:var(--muted);background:var(--line);}
+
+pre.diff{background:var(--sunk);border:1px solid var(--line);border-radius:var(--r);overflow:auto;
+  font-size:.8rem;line-height:1.5;margin:0 0 12px;padding:5px 0;}
+pre.diff span{display:block;padding:1px 14px;white-space:pre;}
+.d-hunk{color:var(--muted);background:var(--panel-2);border-top:1px solid var(--line);border-bottom:1px solid var(--line);}
+.d-ctx{color:var(--ink-2);}
+.d-add{color:var(--add-ink);background:var(--add-bg);}
+.d-del{color:var(--del-ink);background:var(--del-bg);}
+
+.tool-card{border:1px solid var(--line-2);border-radius:var(--r);background:var(--panel);overflow:hidden;box-shadow:var(--shadow);}
+.tool-head{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--line);}
+.tool-ic{width:24px;height:24px;border-radius:var(--r-sm);background:var(--accent-soft);color:var(--accent);
+  display:grid;place-items:center;font-size:.85rem;flex:none;}
+.tool-titles{flex:1;min-width:0;display:flex;flex-direction:column;}
+.tool-title{font-size:.85rem;font-weight:700;}
+.tool-sub{font-size:.72rem;color:var(--muted);}
+.tool-sub code{background:var(--line);padding:0 4px;border-radius:3px;}
+.tool-tag{font-size:.66rem;font-family:var(--font-mono);color:var(--muted);border:1px solid var(--line-2);
+  padding:1px 7px;border-radius:99px;flex:none;}
+.tool-cmd{margin:0;padding:9px 14px;font-size:.82rem;color:var(--ink-2);background:var(--sunk);
+  border-bottom:1px solid var(--line);overflow:auto;}
+.tool-actions{display:flex;gap:6px;padding:9px 14px;}
+.btn{font-size:.8rem;font-weight:600;padding:5px 12px;border-radius:var(--r-sm);border:1px solid var(--line-2);color:var(--ink);}
+.btn:hover{border-color:var(--line-3);}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent;}
+.btn.primary:hover{filter:brightness(1.05);}
+.btn.ghost{border-color:transparent;color:var(--muted);}
+.btn.ghost:hover{color:var(--risk);background:var(--line);}
+
+.composer{border-top:1px solid var(--line);padding:10px 0 12px;}
+.composer-box{border:1px solid var(--line-2);border-radius:var(--r);background:var(--panel);box-shadow:var(--shadow);}
+.composer-box:focus-within{border-color:var(--accent);}
+.composer textarea{display:block;width:100%;border:none;background:none;resize:none;color:var(--ink);
+  font:inherit;line-height:1.45;padding:10px 14px 2px;outline:none;}
+.composer textarea::placeholder{color:var(--muted);}
+.composer-row{display:flex;align-items:center;gap:4px;padding:4px 6px 6px;}
+.sel{display:flex;align-items:center;gap:6px;font-size:.78rem;font-weight:600;color:var(--ink-2);
+  padding:4px 9px;border-radius:var(--r-sm);}
+.sel:hover{background:var(--line);}
+.sel-dot{width:5px;height:5px;border-radius:99px;background:var(--accent);}
+.send{margin-left:auto;font-size:.78rem;font-weight:700;color:var(--accent);border:1px solid var(--accent);
+  padding:4px 14px;border-radius:var(--r-sm);}
+.send:hover{background:var(--accent-soft);}
+
+/* ---- inspector: collapsed strip by default, expands ---- */
+.inspector{display:flex;flex-direction:column;min-height:0;background:var(--bg-1);border-left:1px solid var(--line);}
+.insp-rail{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px 0;height:100%;}
+.insp-btn{position:relative;width:34px;height:34px;border-radius:var(--r-sm);color:var(--muted);
+  display:grid;place-items:center;font-size:.95rem;}
+.insp-btn:hover{background:var(--line);color:var(--ink);}
+.insp-dot{position:absolute;top:4px;right:4px;width:6px;height:6px;border-radius:99px;
+  background:var(--warn);border:2px solid var(--bg-1);animation:pulse 1.6s infinite;}
+.insp-ram{margin-top:auto;font-family:var(--font-mono);font-size:.62rem;color:var(--muted);
+  writing-mode:vertical-rl;letter-spacing:.06em;padding-bottom:8px;}
+.insp-panel{display:none;flex-direction:column;min-height:0;height:100%;}
+.app.insp-open .insp-rail{display:none;}
+.app.insp-open .insp-panel{display:flex;}
+.insp-head{display:flex;align-items:center;gap:8px;height:48px;padding:0 8px 0 16px;border-bottom:1px solid var(--line);}
+.insp-title{font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--label);flex:1;}
+.insp-scroll{flex:1;min-height:0;overflow:auto;padding:12px 16px;}
+.sec{margin-bottom:20px;}
+.sec-title{font-size:.66rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--label);margin-bottom:8px;}
+.eng{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:.8rem;}
+.eng-name{flex:1;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.eng-ram{font-family:var(--font-mono);font-size:.7rem;color:var(--muted);}
+.proc{border:1px solid var(--line);border-radius:var(--r-sm);background:var(--panel);padding:8px 10px;}
+.proc-cmd{font-family:var(--font-mono);font-size:.74rem;color:var(--ink-2);margin-bottom:6px;}
+.proc-row{display:flex;align-items:center;gap:8px;}
+.proc-time{font-family:var(--font-mono);font-size:.68rem;color:var(--warn);}
+.proc-x{margin-left:auto;font-size:.7rem;font-weight:600;color:var(--muted);border:1px solid var(--line-2);
+  border-radius:var(--r-sm);padding:1px 8px;}
+.proc-x:hover{color:var(--risk);border-color:var(--risk);}
+.feed{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;}
+.feed li{font-size:.74rem;color:var(--muted);display:flex;gap:8px;}
+.feed time{font-family:var(--font-mono);font-size:.68rem;color:var(--label);flex:none;}
+.sync-row{display:flex;align-items:center;gap:8px;}
+.sync-meta{font-size:.72rem;color:var(--muted);flex:1;}
+.sync-btn{font-size:.74rem;font-weight:700;color:var(--accent);border:1px solid var(--accent);
+  border-radius:var(--r-sm);padding:3px 10px;}
+.sync-btn:hover{background:var(--accent-soft);}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+
+  <!-- pinned roster: live status per engine, always visible -->
+  <aside class="roster">
+    <div class="roster-head">
+      <span class="roster-mark" aria-hidden="true"></span>
+      <span class="roster-title">Chats</span>
+      <span class="roster-count">9</span>
+      <button class="roster-new" aria-label="Nueva conversación">＋</button>
+    </div>
+    <div class="roster-scroll">
+      <div class="group">Activas</div>
+      <button class="row active">
+        <span class="dot on"></span><span class="row-title">Reaper de hibernación</span><span class="row-ram">512 MB</span>
+        <span class="row-state">respondió · hace 2 min</span><span class="row-x">Quitar</span>
+      </button>
+      <button class="row">
+        <span class="dot run"></span><span class="row-title">Reconnect WebSocket</span><span class="row-ram">640 MB</span>
+        <span class="row-state">ejecutando · 00:41</span><span class="row-x">Quitar</span>
+      </button>
+      <button class="row">
+        <span class="dot run"></span><span class="row-title">Flaky CI en win-runner</span><span class="row-ram">590 MB</span>
+        <span class="row-state">ejecutando · 03:12</span><span class="row-x">Quitar</span>
+      </button>
+      <button class="row">
+        <span class="dot"></span><span class="row-title">Landmines del PORT-SPEC</span><span class="row-ram">480 MB</span>
+        <span class="row-state">idle · hace 1 h</span><span class="row-x">Quitar</span>
+      </button>
+      <button class="row">
+        <span class="dot"></span><span class="row-title">Spec del Agent API v2</span><span class="row-ram">hibernado</span>
+        <span class="row-state">idle · hace 3 h</span><span class="row-x">Quitar</span>
+      </button>
+      <div class="group">Borradores</div>
+      <button class="row">
+        <span class="dot draft"></span><span class="row-title">Respuesta a Teams</span><span class="row-ram">—</span>
+        <span class="row-state">borrador · @canal-infra</span><span class="row-x">Quitar</span>
+      </button>
+      <button class="row">
+        <span class="dot"></span><span class="row-title">Review PR #482</span><span class="row-ram">—</span>
+        <span class="row-state">esperando CI</span><span class="row-x">Quitar</span>
+      </button>
+      <div class="group">Archivados</div>
+      <button class="row dim">
+        <span class="dot"></span><span class="row-title">Migración al daemon Go</span><span class="row-ram"></span>
+        <span class="row-state">cerrado ayer</span>
+      </button>
+      <button class="row dim">
+        <span class="dot"></span><span class="row-title">Bench de Qwen local</span><span class="row-ram"></span>
+        <span class="row-state">cerrado · lun</span>
+      </button>
+    </div>
+    <div class="roster-foot">
+      <span class="avatar">M</span>
+      <span class="foot-name">Martin</span>
+      <button class="foot-set">Ajustes</button>
+    </div>
+  </aside>
+
+  <!-- stage: centered reading column -->
+  <main class="stage">
+    <header class="bar">
+      <div class="bar-title">
+        <h1>Reaper de hibernación</h1>
+        <span class="bar-meta">Devin · <code>fix/lease-pin</code></span>
+      </div>
+      <button class="bar-icon" id="themeBtn" aria-label="Cambiar tema">◐</button>
+    </header>
+
+    <div class="transcript">
+      <div class="col">
+
+        <article class="turn user">
+          <div class="turn-head"><span class="speaker">Tú</span><span class="turn-meta">14:22</span></div>
+          <div class="u-block">
+            <p>El reaper está hibernando chats que todavía están trabajando. Encuentra la race y propón un fix concreto. Aquí el módulo:</p>
+            <span class="ctx-chip">daemon/reaper/reaper.go</span>
+          </div>
+        </article>
+
+        <article class="turn agent">
+          <div class="turn-head"><span class="speaker">Devin</span><span class="turn-meta">14:22 · 1.2k tokens · 512 MB</span></div>
+          <p class="think">Pensó 8 s — revisó el bucle del reaper y el registro de leases</p>
+
+          <div class="plan">
+            <div class="plan-title">Plan</div>
+            <ul>
+              <li data-st="done"><span class="plan-box"></span>Reproducir la race con un test de lease activo</li>
+              <li data-st="active"><span class="plan-box"></span>Localizar el chequeo de actividad en el barrido</li>
+              <li data-st="todo"><span class="plan-box"></span>Proponer fix: fijar (pin) el lease mientras hay prompt en vuelo</li>
+            </ul>
+          </div>
+
+          <div class="prose">
+            <p>La race ocurre entre el <strong>barrido del reaper</strong> y la comprobación de <code>lastActivity</code>. El reaper lee el timestamp, decide hibernar y <em>después</em> toma el lock — para entonces ya llegó un prompt nuevo, pero el engine se reap igual.</p>
+
+            <h3>La causa</h3>
+            <p>La comprobación y la acción no son atómicas. Entre el <code>RLock</code> de lectura y el <code>Lock</code> de escritura hay una ventana donde <code>markActive()</code> corre desde otra goroutine:</p>
+
+            <pre class="code"><span class="tok-cmt">// reaper.go — barrido cada 30 s</span>
+<span class="tok-kw">func</span> (r *<span class="tok-typ">Reaper</span>) <span class="tok-fn">sweep</span>() {
+  <span class="tok-kw">for</span> _, s := <span class="tok-kw">range</span> r.<span class="tok-fn">idleSessions</span>() {   <span class="tok-cmt">// lee bajo RLock</span>
+    <span class="tok-kw">if</span> time.<span class="tok-fn">Since</span>(s.lastActivity) &gt; <span class="tok-num">idleTTL</span> {
+      r.<span class="tok-fn">hibernate</span>(s)                     <span class="tok-cmt">// toma Lock — ¡tarde!</span>
+    }
+  }
+}</pre>
+
+            <p>Bajo carga (10+ chats) el reaper hiberna sesiones con prompt en vuelo. La política correcta ya está en el plan:</p>
+
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Estado del chat</th><th>Política</th><th>Acción del reaper</th></tr></thead>
+                <tbody>
+                  <tr><td>Prompt en vuelo</td><td><span class="pill pin">pin</span></td><td>Nunca hibernar</td></tr>
+                  <tr><td>Idle &lt; TTL</td><td><span class="pill keep">keep</span></td><td>Mantener caliente</td></tr>
+                  <tr><td>Idle &gt; TTL</td><td><span class="pill reap">reap</span></td><td>Hibernar y replay</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p>El fix revalida el lease dentro del <code>Lock</code> antes de expulsar:</p>
+
+            <pre class="diff"><span class="d-hunk">@@ daemon/reaper/reaper.go @@</span><span class="d-ctx"> func (r *Reaper) hibernate(s *Session) {</span><span class="d-ctx">   r.mu.Lock()</span><span class="d-ctx">   defer r.mu.Unlock()</span><span class="d-add">+  if s.pinned || s.inFlight() {</span><span class="d-add">+    return // lease activo: no reap</span><span class="d-add">+  }</span><span class="d-del">-  r.evict(s)</span><span class="d-add">+  r.evict(s) // seguro: revalidado bajo Lock</span><span class="d-ctx"> }</span></pre>
+
+            <p>Añadí <code>TestActiveLeasePin</code>, que reproduce la ventana con 200 goroutines. Pasa en verde en local.</p>
+          </div>
+
+          <div class="tool-card">
+            <div class="tool-head">
+              <span class="tool-ic">⌘</span>
+              <div class="tool-titles"><span class="tool-title">Devin quiere ejecutar un comando</span><span class="tool-sub">en <code>~/workass/daemon</code></span></div>
+              <span class="tool-tag">shell</span>
+            </div>
+            <pre class="tool-cmd">go test ./reaper -run TestActiveLeasePin -race</pre>
+            <div class="tool-actions">
+              <button class="btn primary">Permitir una vez</button>
+              <button class="btn">Permitir siempre</button>
+              <button class="btn ghost">Rechazar</button>
+            </div>
+          </div>
+        </article>
+
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="col">
+        <div class="composer-box">
+          <textarea rows="1" placeholder="Escribe un mensaje…  ⌘↵ para enviar"></textarea>
+          <div class="composer-row">
+            <button class="sel"><span class="sel-dot"></span>Devin ▾</button>
+            <button class="sel">Agent ▾</button>
+            <button class="send">Enviar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- inspector: collapsed by default; replaces any bottom strip -->
+  <aside class="inspector">
+    <div class="insp-rail">
+      <button class="insp-btn insp-toggle" aria-label="Abrir inspector">«</button>
+      <button class="insp-btn insp-toggle" aria-label="Procesos"><span class="insp-dot"></span>▦</button>
+      <button class="insp-btn insp-toggle" aria-label="Actividad">≋</button>
+      <span class="insp-ram">1.6 GB · 3 engines</span>
+    </div>
+    <div class="insp-panel">
+      <div class="insp-head">
+        <span class="insp-title">Inspector</span>
+        <button class="insp-btn insp-toggle" aria-label="Cerrar inspector">»</button>
+      </div>
+      <div class="insp-scroll">
+        <div class="sec">
+          <div class="sec-title">Engines · 1.6 GB</div>
+          <div class="eng"><span class="dot on"></span><span class="eng-name">Reaper de hibernación</span><span class="eng-ram">512 MB</span></div>
+          <div class="eng"><span class="dot run"></span><span class="eng-name">Reconnect WebSocket</span><span class="eng-ram">640 MB</span></div>
+          <div class="eng"><span class="dot"></span><span class="eng-name">Landmines del PORT-SPEC</span><span class="eng-ram">480 MB</span></div>
+        </div>
+        <div class="sec">
+          <div class="sec-title">Procesos</div>
+          <div class="proc">
+            <div class="proc-cmd">go test ./reaper -run TestActiveLeasePin -race</div>
+            <div class="proc-row"><span class="dot run"></span><span class="proc-time">00:07</span><button class="proc-x">Cancelar</button></div>
+          </div>
+        </div>
+        <div class="sec">
+          <div class="sec-title">Actividad</div>
+          <ul class="feed">
+            <li><time>14:22</time><span>Devin propuso un diff en reaper.go</span></li>
+            <li><time>14:20</time><span>Spawn devin -p terminó: triage de #4821</span></li>
+            <li><time>14:14</time><span>Nueva consulta de @canal-infra</span></li>
+          </ul>
+        </div>
+        <div class="sec">
+          <div class="sec-title">Teams</div>
+          <div class="sync-row">
+            <span class="sync-meta">sincronizado 14:20</span>
+            <button class="sync-btn">Sync Teams</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement;
+  function set(t){root.setAttribute('data-theme',t);}
+  set(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+  document.getElementById('themeBtn').addEventListener('click',function(){
+    set(root.getAttribute('data-theme')==='light'?'dark':'light');
+  });
+  var app=document.getElementById('app');
+  Array.prototype.forEach.call(document.querySelectorAll('.insp-toggle'),function(b){
+    b.addEventListener('click',function(){app.classList.toggle('insp-open');});
+  });
+})();
+</script>
+</body>
+</html>

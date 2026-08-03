@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>workass · P4 style — Glass</title>
+<style>
+/* ============================================================
+   STYLE: GLASS — Raycast school.
+   Hypothesis: a command-surface. Layered panels float over a soft
+   field with restrained backdrop-blur (material, not texture);
+   keyboard-first affordances (visible ⌘K, kbd chips); the composer
+   floats free of the frame. AA verified: prose ink never sits on a
+   blurred layer — the reading column rests on an opaque plate.
+   Green is accent ONLY: live dot, active rail space, ⌘K focus, send.
+   ============================================================ */
+:root{
+  --bg-0:#17161a; --bg-1:#1c1b20;
+  /* translucent glass fills (over --bg-0) */
+  --glass:rgba(38,37,44,.62); --glass-2:rgba(48,47,55,.55); --plate:#212027;
+  --sunk:rgba(10,10,12,.42);
+  --line:rgba(255,255,255,.08); --line-2:rgba(255,255,255,.14); --line-3:rgba(255,255,255,.22);
+  --ink:#f2f1ee; --ink-2:#d7d5d0; --muted:#a6a4ad; --label:#8d8b95;
+  --accent:#43d19a; --accent-ink:#0d1411;
+  --accent-soft:rgba(67,209,154,.14); --accent-softer:rgba(67,209,154,.07);
+  --warn:#d9a441; --warn-soft:rgba(217,164,65,.12);
+  --risk:#e58c72;
+  --tok-kw:#c8a0e8; --tok-typ:#6cc7db; --tok-fn:#e4e2dc; --tok-num:#e59a80; --tok-str:#d9b877; --tok-cmt:#8f8d95;
+  --add-ink:#84dcad; --add-bg:rgba(67,209,154,.10);
+  --del-ink:#e8a68f; --del-bg:rgba(229,140,114,.11);
+  --glow:0 0 0 1px rgba(255,255,255,.05), 0 8px 30px rgba(0,0,0,.42);
+  --field:radial-gradient(120% 90% at 15% 0%, #201f26 0%, #16151a 55%, #131217 100%);
+}
+:root[data-theme="light"]{
+  --bg-0:#eef0f3; --bg-1:#e7e9ee;
+  --glass:rgba(255,255,255,.66); --glass-2:rgba(255,255,255,.55); --plate:#ffffff;
+  --sunk:rgba(20,22,28,.05);
+  --line:rgba(20,22,28,.10); --line-2:rgba(20,22,28,.15); --line-3:rgba(20,22,28,.26);
+  --ink:#1a1b1f; --ink-2:#3c3d42; --muted:#5c5e66; --label:#6b6d75;
+  --accent:#0d7d55; --accent-ink:#ffffff;
+  --accent-soft:rgba(13,125,85,.12); --accent-softer:rgba(13,125,85,.06);
+  --warn:#8a6100; --warn-soft:rgba(138,97,0,.10);
+  --risk:#a8442a;
+  --tok-kw:#7a3fb0; --tok-typ:#0f6f86; --tok-fn:#3c3d42; --tok-num:#a8442a; --tok-str:#856a1c; --tok-cmt:#6b6d75;
+  --add-ink:#0d7d55; --add-bg:rgba(13,125,85,.10);
+  --del-ink:#a8442a; --del-bg:rgba(168,68,42,.09);
+  --glow:0 0 0 1px rgba(255,255,255,.6), 0 8px 30px rgba(20,22,28,.12);
+  --field:radial-gradient(120% 90% at 15% 0%, #f4f6f9 0%, #e9ebf0 60%, #e3e6ec 100%);
+}
+:root{
+  --font-ui:"Aptos","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",sans-serif;
+  --font-mono:"Cascadia Code","Cascadia Mono","Consolas",ui-monospace,"SF Mono",monospace;
+  --measure:70ch;
+  --r-lg:14px; --r-md:10px; --r-sm:7px;
+}
+*{box-sizing:border-box;}
+html{font-size:15px;}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
+body{
+  margin:0; height:100vh; overflow:hidden;
+  font-family:var(--font-ui); font-size:1rem; line-height:1.62;
+  color:var(--ink); background:var(--bg-0);
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+}
+code,pre{font-family:var(--font-mono);}
+button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer;}
+:where(button,textarea,[tabindex]):focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px;}
+::-webkit-scrollbar{width:10px;height:10px;}
+::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:99px;border:3px solid transparent;background-clip:padding-box;}
+kbd{font-family:var(--font-mono);font-size:.68rem;line-height:1;color:var(--muted);
+  background:var(--sunk);border:1px solid var(--line-2);border-bottom-width:2px;border-radius:5px;padding:2px 5px;}
+
+.app{display:grid;grid-template-columns:56px 260px 1fr;height:100vh;background:var(--field);}
+
+/* ============ ICON RAIL ============ */
+.rail{display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 0;
+  background:var(--glass);backdrop-filter:blur(22px) saturate(1.3);-webkit-backdrop-filter:blur(22px) saturate(1.3);
+  border-right:1px solid var(--line);}
+.rail-mono{width:30px;height:30px;border-radius:9px;background:var(--accent);color:var(--accent-ink);
+  display:grid;place-items:center;font-weight:800;font-size:.9rem;margin-bottom:6px;box-shadow:0 2px 8px rgba(0,0,0,.28);}
+.rail-spaces{display:flex;flex-direction:column;gap:4px;flex:1;}
+.rail-btn{width:38px;height:38px;border-radius:10px;color:var(--muted);display:grid;place-items:center;
+  font-size:1.05rem;position:relative;}
+.rail-btn:hover{background:var(--line);color:var(--ink);}
+.rail-btn.active{color:var(--ink);background:var(--glass-2);box-shadow:inset 0 0 0 1px var(--line-2);}
+.rail-btn.active::before{content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);
+  width:3px;height:18px;border-radius:99px;background:var(--accent);}
+.rail-foot{display:flex;flex-direction:column;align-items:center;gap:8px;}
+.rail-ram{font-size:.56rem;font-family:var(--font-mono);color:var(--muted);letter-spacing:.02em;
+  writing-mode:vertical-rl;transform:rotate(180deg);margin-bottom:2px;display:flex;align-items:center;gap:5px;}
+.rail-ram .dot{width:5px;height:5px;border-radius:99px;background:var(--warn);}
+.rail-avatar{width:30px;height:30px;border-radius:99px;background:var(--accent-soft);color:var(--accent);
+  display:grid;place-items:center;font-size:.72rem;font-weight:800;}
+.rail-gear{width:38px;height:38px;border-radius:10px;color:var(--muted);display:grid;place-items:center;font-size:1.15rem;}
+.rail-gear:hover{background:var(--line);color:var(--ink);}
+
+/* ============ CONVERSATION LIST ============ */
+.list{display:flex;flex-direction:column;min-height:0;
+  background:var(--glass);backdrop-filter:blur(22px) saturate(1.3);-webkit-backdrop-filter:blur(22px) saturate(1.3);
+  border-right:1px solid var(--line);}
+.list-head{padding:14px 14px 10px;}
+.cmd{display:flex;align-items:center;gap:9px;width:100%;padding:9px 11px;border-radius:var(--r-md);
+  background:var(--sunk);border:1px solid var(--line-2);color:var(--muted);font-size:.85rem;text-align:left;}
+.cmd:hover{border-color:var(--line-3);color:var(--ink-2);}
+.cmd .mag{opacity:.8;}
+.cmd .cmd-lbl{flex:1;}
+.new{display:flex;align-items:center;gap:8px;width:100%;margin-top:8px;padding:8px 11px;border-radius:var(--r-md);
+  font-size:.85rem;font-weight:600;color:var(--ink-2);border:1px solid var(--line-2);background:var(--glass-2);}
+.new:hover{border-color:var(--accent);color:var(--ink);}
+.new .plus{color:var(--accent);font-size:1.05rem;line-height:1;}
+.new kbd{margin-left:auto;}
+.list-scroll{flex:1;min-height:0;overflow:auto;padding:2px 8px 10px;}
+.group{margin-bottom:14px;}
+.group-label{display:flex;align-items:center;gap:6px;padding:8px 8px 6px;font-size:.62rem;font-weight:800;
+  letter-spacing:.09em;text-transform:uppercase;color:var(--label);}
+.group-count{margin-left:auto;font-family:var(--font-mono);color:var(--muted);}
+.conv{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:8px 10px;border-radius:var(--r-md);position:relative;}
+.conv:hover{background:var(--glass-2);box-shadow:inset 0 0 0 1px var(--line);}
+.conv.active{background:var(--glass-2);box-shadow:inset 0 0 0 1px var(--line-2), var(--glow);}
+.dot{width:7px;height:7px;border-radius:99px;flex:none;background:var(--line-3);}
+.dot.on{background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
+.dot.run{background:var(--accent);animation:pulse 1.6s infinite;box-shadow:0 0 0 3px var(--accent-soft);}
+.dot.draft{background:var(--risk);}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.32;}}
+.conv-text{display:flex;flex-direction:column;min-width:0;gap:1px;flex:1;}
+.conv-title{font-size:.85rem;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.conv-meta{font-size:.68rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.muted-row .conv-title{color:var(--muted);font-weight:500;}
+.badge{margin-left:auto;flex:none;font-size:.62rem;font-weight:800;color:var(--accent-ink);background:var(--accent);
+  padding:1px 7px;border-radius:99px;}
+
+/* ============ MAIN ============ */
+.main{display:flex;flex-direction:column;min-width:0;min-height:0;position:relative;}
+.stage{flex:1;min-height:0;overflow:auto;padding:30px 24px 150px;}
+.thread{max-width:min(760px,100%);margin:0 auto;}
+
+/* user — quiet compact block */
+.user-msg{margin:0 0 26px;padding:11px 14px;border-radius:var(--r-md);
+  background:var(--glass);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border:1px solid var(--line);max-width:var(--measure);}
+.user-msg p{margin:0;color:var(--ink-2);font-size:.95rem;}
+.chip{display:inline-flex;align-items:center;gap:6px;margin-top:9px;font-size:.74rem;font-family:var(--font-mono);
+  color:var(--muted);background:var(--sunk);border:1px solid var(--line-2);padding:3px 9px;border-radius:7px;}
+.chip::before{content:"◫";opacity:.7;}
+
+/* agent turn — unboxed document */
+.turn{max-width:var(--measure);}
+.think{font-size:.86rem;color:var(--muted);font-style:italic;border-left:2px solid var(--line-2);padding:2px 0 2px 12px;margin-bottom:14px;}
+.plan{border:1px solid var(--line);border-radius:var(--r-md);background:var(--glass);
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);padding:12px 14px;margin-bottom:14px;}
+.plan-head{display:flex;align-items:center;gap:7px;font-size:.66rem;font-weight:800;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--label);margin-bottom:9px;}
+.plan-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px;}
+.plan-list li{display:flex;align-items:center;gap:10px;font-size:.86rem;color:var(--ink-2);}
+.box{width:14px;height:14px;border-radius:5px;border:1.5px solid var(--line-3);flex:none;}
+.plan-list li[data-st="done"] .box{background:var(--accent);border-color:var(--accent);}
+.plan-list li[data-st="done"]{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line-3);}
+.plan-list li[data-st="active"] .box{border-color:var(--accent);box-shadow:inset 0 0 0 3px var(--accent-soft);}
+.tool-row{display:flex;align-items:center;gap:9px;font-size:.82rem;color:var(--muted);margin-bottom:14px;
+  padding:7px 11px;border-radius:var(--r-sm);background:var(--sunk);border:1px solid var(--line);}
+.tool-row .ok{color:var(--accent);font-weight:800;}
+.tool-row code{font-family:var(--font-mono);color:var(--ink-2);}
+.tool-row .n{margin-left:auto;font-family:var(--font-mono);font-size:.72rem;}
+.prose p{margin:0 0 14px;color:var(--ink);}
+.prose strong{font-weight:700;}
+.prose h3{font-size:1.02rem;font-weight:700;letter-spacing:-.01em;margin:20px 0 10px;}
+.prose :not(pre)>code{font-size:.86em;background:var(--sunk);color:var(--ink-2);padding:1.5px 6px;border-radius:5px;border:1px solid var(--line);}
+pre.code{background:var(--plate);border:1px solid var(--line-2);border-radius:var(--r-md);
+  padding:14px 16px;overflow:auto;font-size:.84rem;line-height:1.6;margin:0 0 16px;color:var(--ink-2);box-shadow:var(--glow);}
+.tok-kw{color:var(--tok-kw);}.tok-typ{color:var(--tok-typ);}.tok-fn{color:var(--tok-fn);}
+.tok-num{color:var(--tok-num);}.tok-str{color:var(--tok-str);}.tok-cmt{color:var(--tok-cmt);font-style:italic;}
+.table-wrap{overflow-x:auto;margin:0 0 16px;border:1px solid var(--line-2);border-radius:var(--r-md);background:var(--plate);}
+table{border-collapse:collapse;width:100%;font-size:.84rem;}
+thead th{text-align:left;font-weight:800;color:var(--label);font-size:.66rem;text-transform:uppercase;letter-spacing:.05em;
+  padding:9px 14px;border-bottom:1px solid var(--line);}
+tbody td{padding:9px 14px;border-bottom:1px solid var(--line);color:var(--ink-2);}
+tbody tr:last-child td{border-bottom:none;}
+.pill{font-size:.62rem;font-weight:800;font-family:var(--font-mono);padding:1px 8px;border-radius:99px;}
+.pill.pin{color:var(--accent);background:var(--accent-soft);}
+.pill.keep{color:var(--warn);background:var(--warn-soft);}
+.pill.reap{color:var(--muted);background:var(--line);}
+pre.diff{background:var(--plate);border:1px solid var(--line-2);border-radius:var(--r-md);overflow:auto;
+  font-size:.82rem;line-height:1.55;margin:0 0 16px;padding:6px 0;box-shadow:var(--glow);}
+pre.diff span{display:block;padding:1px 16px;white-space:pre;}
+.d-ctx{color:var(--ink-2);}.d-add{color:var(--add-ink);background:var(--add-bg);}.d-del{color:var(--del-ink);background:var(--del-bg);}
+
+/* permission card */
+.perm{border:1px solid var(--line-2);border-radius:var(--r-md);background:var(--glass);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);overflow:hidden;max-width:var(--measure);
+  box-shadow:var(--glow);margin-top:18px;}
+.perm-head{display:flex;align-items:center;gap:11px;padding:12px 14px;border-bottom:1px solid var(--line);}
+.perm-ic{width:28px;height:28px;border-radius:8px;background:var(--accent-soft);color:var(--accent);
+  display:grid;place-items:center;font-size:.85rem;flex:none;}
+.perm-t{font-size:.88rem;font-weight:700;flex:1;}
+.perm-t code{font-family:var(--font-mono);font-weight:600;color:var(--ink);}
+.perm-tag{font-size:.62rem;font-family:var(--font-mono);color:var(--muted);border:1px solid var(--line-2);padding:2px 8px;border-radius:99px;}
+.perm-actions{display:flex;gap:8px;padding:12px 14px;}
+.btn{font-size:.84rem;font-weight:600;padding:7px 14px;border-radius:8px;border:1px solid var(--line-2);color:var(--ink);}
+.btn:hover{border-color:var(--line-3);}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent;}
+.btn.primary:hover{filter:brightness(1.06);}
+.btn.ghost{border-color:transparent;color:var(--muted);}
+.btn.ghost:hover{color:var(--risk);background:var(--line);}
+
+/* ============ FLOATING COMPOSER ============ */
+.composer{position:absolute;left:0;right:0;bottom:0;padding:0 24px 20px;
+  background:linear-gradient(to top, var(--bg-0) 30%, transparent);}
+.composer-inner{max-width:min(760px,100%);margin:0 auto;border:1px solid var(--line-2);border-radius:var(--r-lg);
+  background:var(--glass);backdrop-filter:blur(24px) saturate(1.4);-webkit-backdrop-filter:blur(24px) saturate(1.4);
+  box-shadow:var(--glow);overflow:hidden;}
+.composer-inner:focus-within{border-color:var(--accent);}
+.composer textarea{width:100%;border:none;background:none;resize:none;color:var(--ink);
+  font-family:inherit;font-size:1rem;line-height:1.5;padding:14px 16px 4px;outline:none;}
+.composer textarea::placeholder{color:var(--muted);}
+.composer-bar{display:flex;align-items:center;justify-content:space-between;padding:8px 12px 10px;}
+.sel-group{display:flex;align-items:center;gap:6px;}
+.sel{display:flex;align-items:center;gap:6px;font-size:.82rem;font-weight:600;color:var(--ink-2);padding:5px 10px;border-radius:8px;}
+.sel:hover{background:var(--line);}
+.sel .k{font-size:.66rem;color:var(--label);text-transform:uppercase;letter-spacing:.05em;font-weight:700;}
+.sel-dot{width:6px;height:6px;border-radius:99px;background:var(--line-3);}
+.sel-dot.on{background:var(--accent);}
+.send{display:flex;align-items:center;gap:7px;font-size:.84rem;font-weight:700;color:var(--accent-ink);
+  background:var(--accent);padding:7px 14px;border-radius:8px;}
+.send:hover{filter:brightness(1.06);}
+.send kbd{background:rgba(0,0,0,.18);border-color:rgba(0,0,0,.25);color:inherit;opacity:.85;}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ICON RAIL -->
+  <nav class="rail" aria-label="Navegación">
+    <div class="rail-mono">W</div>
+    <div class="rail-spaces">
+      <button class="rail-btn active" title="Chats" aria-current="page">💬</button>
+      <button class="rail-btn" title="Triage">⚑</button>
+      <button class="rail-btn" title="Actividad">📈</button>
+    </div>
+    <div class="rail-foot">
+      <span class="rail-ram" title="Engine · RAM"><span class="dot"></span>512 MB · 3 eng</span>
+      <span class="rail-avatar" title="Martin">M</span>
+      <button class="rail-gear" aria-label="Ajustes">⚙</button>
+    </div>
+  </nav>
+
+  <!-- CONVERSATION LIST -->
+  <aside class="list" aria-label="Conversaciones">
+    <div class="list-head">
+      <button class="cmd"><span class="mag">⌕</span><span class="cmd-lbl">Buscar o saltar…</span><kbd>⌘K</kbd></button>
+      <button class="new"><span class="plus">+</span> Nueva conversación <kbd>⌘N</kbd></button>
+    </div>
+    <div class="list-scroll">
+      <div class="group">
+        <div class="group-label">Devin · activas <span class="group-count">3</span></div>
+        <button class="conv active">
+          <span class="dot on"></span>
+          <span class="conv-text"><span class="conv-title">Reaper de hibernación</span><span class="conv-meta">daemon/reaper · hace 2 min</span></span>
+        </button>
+        <button class="conv">
+          <span class="dot run"></span>
+          <span class="conv-text"><span class="conv-title">Reconnect WebSocket</span><span class="conv-meta">ejecutando · 00:41</span></span>
+          <span class="badge">3</span>
+        </button>
+        <button class="conv">
+          <span class="dot"></span>
+          <span class="conv-text"><span class="conv-title">Landmines del PORT-SPEC</span><span class="conv-meta">idle · hace 1 h</span></span>
+        </button>
+      </div>
+      <div class="group">
+        <div class="group-label">Assist · borradores <span class="group-count">2</span></div>
+        <button class="conv">
+          <span class="dot draft"></span>
+          <span class="conv-text"><span class="conv-title">Respuesta a Teams</span><span class="conv-meta">borrador · @canal-infra</span></span>
+        </button>
+        <button class="conv">
+          <span class="dot"></span>
+          <span class="conv-text"><span class="conv-title">Review PR #482</span><span class="conv-meta">esperando CI</span></span>
+        </button>
+      </div>
+      <div class="group">
+        <div class="group-label">Archivados</div>
+        <button class="conv muted-row"><span class="dot"></span><span class="conv-text"><span class="conv-title">Migración al daemon Go</span><span class="conv-meta">cerrado ayer</span></span></button>
+        <button class="conv muted-row"><span class="dot"></span><span class="conv-text"><span class="conv-title">Bench de Qwen local</span><span class="conv-meta">cerrado · lun</span></span></button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <button id="themeBtn" title="Cambiar tema" aria-label="Cambiar tema"
+      style="position:absolute;top:14px;right:18px;z-index:5;width:32px;height:32px;border-radius:8px;color:var(--muted);font-size:1rem;">◐</button>
+    <div class="stage">
+      <div class="thread">
+        <!-- (1) user -->
+        <div class="user-msg">
+          <p>El reaper está hibernando chats que todavía están trabajando. Encontrá la race y proponé un fix.</p>
+          <span class="chip">daemon/reaper/reaper.go</span>
+        </div>
+
+        <!-- (2) agent turn -->
+        <div class="turn">
+          <div class="think">Pensó durante 8 s · revisó el bucle del reaper y el registro de leases</div>
+
+          <div class="plan">
+            <div class="plan-head">Plan</div>
+            <ul class="plan-list">
+              <li data-st="done"><span class="box"></span>Reproducir la race con un test de lease activo</li>
+              <li data-st="active"><span class="box"></span>Localizar el chequeo de actividad en el barrido</li>
+              <li data-st="todo"><span class="box"></span>Fijar (pin) el lease mientras hay prompt en vuelo</li>
+            </ul>
+          </div>
+
+          <div class="tool-row"><span class="ok">✓</span> Leer <code>reaper.go</code><span class="n">120 líneas</span></div>
+
+          <div class="prose">
+            <p>La race ocurre entre el <strong>barrido del reaper</strong> y la comprobación de <code>lastActivity</code>. El reaper lee el timestamp, decide hibernar y <em>después</em> toma el lock: para entonces ya llegó un prompt nuevo, pero el engine se reap igual.</p>
+            <h3>La causa</h3>
+            <p>La comprobación y la acción no son atómicas. Entre el <code>RLock</code> de lectura y el <code>Lock</code> de escritura hay una ventana donde <code>markActive()</code> corre desde otra goroutine:</p>
+            <pre class="code"><span class="tok-cmt">// reaper.go — barrido cada 30 s</span>
+<span class="tok-kw">func</span> (r *<span class="tok-typ">Reaper</span>) <span class="tok-fn">sweep</span>() {
+  <span class="tok-kw">for</span> _, s := <span class="tok-kw">range</span> r.<span class="tok-fn">idleSessions</span>() {   <span class="tok-cmt">// lee bajo RLock</span>
+    <span class="tok-kw">if</span> time.<span class="tok-fn">Since</span>(s.lastActivity) &gt; <span class="tok-num">idleTTL</span> {
+      r.<span class="tok-fn">hibernate</span>(s)                     <span class="tok-cmt">// toma Lock — ¡tarde!</span>
+    }
+  }
+}</pre>
+            <p>Bajo carga (10+ chats) el reaper hiberna sesiones con prompt en vuelo. La política correcta:</p>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Estado del chat</th><th>Política</th><th>Acción del reaper</th></tr></thead>
+                <tbody>
+                  <tr><td>Prompt en vuelo</td><td><span class="pill pin">pin</span></td><td>Nunca hibernar</td></tr>
+                  <tr><td>Idle &lt; TTL</td><td><span class="pill keep">keep</span></td><td>Mantener caliente</td></tr>
+                  <tr><td>Idle &gt; TTL</td><td><span class="pill reap">reap</span></td><td>Hibernar y replay</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p>El fix revalida el lease dentro del <code>Lock</code> antes de expulsar:</p>
+            <pre class="diff"><span class="d-ctx"> func (r *Reaper) hibernate(s *Session) {</span><span class="d-del">-  r.evict(s)</span><span class="d-add">+  if s.pinned || s.inFlight() { return }</span><span class="d-add">+  r.evict(s) // seguro: revalidado bajo Lock</span><span class="d-ctx"> }</span></pre>
+            <p>Añadí <code>TestActiveLeasePin</code>, que reproduce la ventana con 200 goroutines. Pasa en verde en local.</p>
+          </div>
+
+          <!-- (3) permission card -->
+          <div class="perm">
+            <div class="perm-head">
+              <span class="perm-ic">▷</span>
+              <span class="perm-t">Ejecutar <code>go test ./daemon/reaper</code></span>
+              <span class="perm-tag">shell</span>
+            </div>
+            <div class="perm-actions">
+              <button class="btn primary">Permitir una vez</button>
+              <button class="btn">Permitir siempre</button>
+              <button class="btn ghost">Rechazar</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- FLOATING COMPOSER -->
+    <div class="composer">
+      <div class="composer-inner">
+        <textarea rows="1" placeholder="Escribe un mensaje…"></textarea>
+        <div class="composer-bar">
+          <div class="sel-group">
+            <button class="sel"><span class="k">Modelo</span><span class="sel-dot on"></span>Devin ▾</button>
+            <button class="sel"><span class="k">Permisos</span>Agent ▾</button>
+          </div>
+          <button class="send">Enviar <kbd>⌘↵</kbd></button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<script>
+(function(){
+  var root=document.documentElement;
+  function set(t){root.setAttribute('data-theme',t);}
+  set(window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+  document.getElementById('themeBtn').addEventListener('click',function(){
+    set(root.getAttribute('data-theme')==='light'?'dark':'light');
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,87 @@
+# ---------------------------------------------------------------------------
+# Workass public repo — keep personal data, secrets, and build/runtime output
+# OUT of version control. When in doubt, ignore it; source can be regenerated.
+# ---------------------------------------------------------------------------
+
+# Secrets & credentials — never commit anything shaped like these
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+.env
+*.env.local
+.env.*.local
+**/secrets/
+**/*_rsa
+**/id_ed25519
+config/environments/local/*.local.env
+!config/environments/local/*.example
+
+# Agent / AI-tool internal state (personal paths, scratchpads, local settings)
+.claude/
+.devin/
+CLAUDE.md
+AGENTS.md
+.agents/
+
+# Compiled daemon binaries (build artifacts; produced by scripts/build-daemon.sh)
+/workass
+/workass.exe
+/workass-agent
+/workass-agent.exe
+.vscode/
+.idea/
+*.code-workspace
+
+# Employer / personal integration catalogs — private, not for public repo
+deploy-apis.json
+read-unresolved-consultas.mjs
+providers.json
+app-config.json
+
+# Runtime data (app state, chats, reports, logs) — never source
+state/
+out/
+logs/
+drafts/
+tmp/
+*.log
+
+# Daemon checkpoints & captured fixtures (may embed absolute personal paths)
+**/checkpoints/
+
+# Spike/investigation receipt logs (personal paths, one-off findings)
+internal/workflows/FINDINGS.md
+
+# Vendored runtimes & build output
+vendor/
+dist/
+dist-bin/
+dist-release/
+node_modules/
+.dev/
+!cmd/workass/embedded/
+!cmd/workass/embedded/dist/
+!cmd/workass/embedded/dist/**
+# The Go module vendor tree is the opposite of the runtimes above: it is source,
+# it is small, and it is committed on purpose. Package fetching is blocked on the
+# Windows machine and `go build` uses vendor/ automatically when it is present,
+# so keeping it here is what makes an offline build work everywhere.
+!/vendor/
+!/vendor/**
+
+# Sync/update artifacts between machines
+.update-backups/
+.copy-report.json
+.remote-compare.json
+.update-report.json
+
+# Scratch / preview images and other local byproducts
+.tmp-*.png
+sim-*.png
+*-screenshot.png
+
+# OS noise
+.DS_Store
+Thumbs.db

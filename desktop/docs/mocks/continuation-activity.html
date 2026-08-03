@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Workass · continuación en segundo plano + subagentes adoptados</title>
+<style>
+  /* ============================================================
+     Tokens — verbatim from renderer2/src/styles/tokens.css.
+     Scoped to .theme-dark / .theme-light so both coexist on one page.
+     ============================================================ */
+  .theme-dark {
+    color-scheme: dark;
+    --bg:#151413; --side:#0f0e0d; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+    --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+    --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+    --acc:#4fa583; --link:#8fb0ea; --amber:#d8a05a; --add:#4cae7f; --del:#d96b5f;
+    --shell:#0b0a09;
+  }
+  .theme-light {
+    color-scheme: light;
+    --bg:#faf9f7; --side:#f2f0ed; --panel:#ffffff; --card:#ffffff; --field:#f1efeb;
+    --ink:#23211e; --ink2:#47443e; --muted:#7a756d; --faint:#a19c93;
+    --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.15);
+    --acc:#177353; --link:#3861b0; --amber:#9a6a1d; --add:#177347; --del:#bd4436;
+    --shell:#eceae6;
+  }
+
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html, body { min-height:100%; }
+  body {
+    background:#000; color:#e8e6e2;
+    font:13.5px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    padding:34px 24px 60px;
+  }
+
+  /* ---- page scaffolding (not part of the product; neutral, quiet) ---- */
+  .page-head { max-width:1120px; margin:0 auto 26px; }
+  .page-head h1 { font-size:18px; font-weight:650; color:#f2efe9; }
+  .page-head p { margin-top:7px; font-size:12.5px; color:#9c978f; max-width:78ch; }
+  .themewrap { max-width:1120px; margin:0 auto 30px; border-radius:18px; padding:22px; background:var(--shell); }
+  .themlabel { font-size:10.5px; font-weight:600; letter-spacing:.11em; text-transform:uppercase; color:var(--faint); margin-bottom:16px; }
+  .cols { display:grid; grid-template-columns:1fr 340px; gap:22px; align-items:start; }
+  @media (max-width:940px){ .cols { grid-template-columns:1fr; } }
+  .block { margin-bottom:26px; }
+  .block:last-child { margin-bottom:0; }
+  .blocktitle { font-size:12px; font-weight:600; color:var(--ink2); margin-bottom:5px; }
+  .blocknote { font-size:11.5px; color:var(--muted); margin-bottom:13px; max-width:64ch; }
+  .vlabel { display:inline-block; font-size:10px; font-weight:650; letter-spacing:.07em; text-transform:uppercase; color:var(--acc); border:1px solid color-mix(in srgb,var(--acc) 40%,transparent); border-radius:5px; padding:1px 6px; margin-bottom:9px; }
+  .vlabel.b { color:var(--muted); border-color:var(--line2); }
+
+  /* ============================================================
+     Chat column surface (main) — mirrors renderer .doc/.comp grammar
+     ============================================================ */
+  .chatcol { background:var(--bg); border:1px solid var(--line); border-radius:14px; padding:20px 22px 16px; }
+
+  .userpill { display:flex; justify-content:flex-end; margin:0 0 18px; }
+  .userpill span { max-width:76%; background:var(--field); border:1px solid var(--line); border-radius:14px 14px 4px 14px; padding:7px 12px; color:var(--ink2); font-size:13px; }
+
+  .p { margin:0 0 13px; color:var(--ink); }
+  .p b { font-weight:600; }
+  .p code { background:var(--field); border:1px solid var(--line); border-radius:5px; padding:.5px 5px; font-size:11.5px; color:var(--ink2); }
+
+  /* Finished tool group — quiet status line (renderer .toolgroup) */
+  .toolline { display:flex; align-items:center; gap:9px; font-size:12.5px; color:var(--muted); margin:9px 0; }
+  .toolline .tt { text-decoration:underline dotted color-mix(in srgb,var(--faint) 65%,transparent); text-underline-offset:3px; }
+  .toolline .dur { margin-left:auto; color:var(--faint); font:11px ui-monospace,Menlo,monospace; }
+
+  /* Terminal stamp (renderer .stamp) */
+  .stamp { display:flex; align-items:center; gap:12px; color:var(--faint); font-size:12px; margin:14px 0 0; }
+  .stamp .copy { width:15px; height:15px; display:grid; place-items:center; color:var(--faint); cursor:pointer; }
+  .stamp .copy svg { width:13px; height:13px; }
+  .stamp .copy:hover { color:var(--ink2); }
+
+  /* ---- STATE 1 · Variant B: continuation folded into the terminal stamp ---- */
+  .stamp .contnote {
+    display:inline-flex; align-items:center; gap:7px;
+    padding-left:12px; margin-left:0;
+    border-left:1px solid var(--line2);
+    color:var(--muted); font-size:11.5px;
+  }
+  .stamp .contnote .d,
+  .contbar .d {
+    width:6px; height:6px; border-radius:50%; background:var(--acc); flex:none;
+    box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%,transparent);
+    animation:bgpulse 1.7s ease-in-out infinite;
+  }
+
+  /* ---- STATE 1 · Variant A: quiet strip above the composer ---- */
+  .contbar {
+    display:flex; align-items:center; gap:10px;
+    max-width:760px; margin:0 auto 9px; padding:6px 8px 6px 12px;
+    border:1px solid var(--line); border-radius:10px; background:var(--panel);
+    color:var(--muted); font-size:12px;
+    animation:contbar-in .22s ease both;
+  }
+  .contbar .txt b { color:var(--ink2); font-weight:550; }
+  .contbar .cnt { color:var(--faint); }
+  .contbar .sp { flex:1; }
+  .contbar .see {
+    flex:none; border:0; background:transparent; color:var(--muted);
+    font:inherit; font-size:11.5px; padding:3px 8px; border-radius:7px; cursor:pointer;
+  }
+  .contbar .see:hover { background:var(--line); color:var(--ink); }
+
+  /* Composer at rest (renderer .comp) — steering/queue live, NO Stop button */
+  .comp { position:relative; max-width:760px; margin:0 auto; background:var(--panel); border:1px solid var(--line2); border-radius:15px; padding:11px 13px 9px; }
+  .comp .ph { color:var(--faint); font-size:13.5px; padding-right:34px; }
+  .comp .send { position:absolute; right:9px; bottom:8px; width:26px; height:26px; border-radius:50%; display:grid; place-items:center; background:var(--field); border:1px solid var(--line2); color:var(--muted); }
+  .comp .send svg { width:14px; height:14px; }
+  .comprow { max-width:760px; margin:8px auto 0; padding:0 2px; display:flex; align-items:center; gap:10px; font-size:12px; color:var(--muted); }
+  .comprow .chip { color:var(--muted); background:transparent; border:1px solid var(--line2); border-radius:8px; padding:2px 9px; font-size:11.5px; }
+  .comprow .sp { flex:1; }
+
+  /* ============================================================
+     Turnos rail card (right) — renderer .ecard / .subs / details.sa
+     ============================================================ */
+  .ecard { border:1px solid var(--line); border-radius:11px; background:var(--panel); padding:6px; }
+  .ehead { display:flex; align-items:center; padding:6px 8px 7px; font-weight:600; font-size:13px; color:var(--ink); }
+  .ehead .sp { flex:1; }
+  /* header "live" cluster reused for background-continuation truth (State 1 header variant) */
+  .ehead .tlive { font-size:10.5px; font-weight:500; color:var(--acc); display:inline-flex; align-items:center; gap:5px; }
+  .ehead .tlive .d { width:6px; height:6px; border-radius:50%; background:var(--acc); box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%,transparent); animation:bgpulse 1.7s ease-in-out infinite; }
+
+  .tplan { padding:2px 4px 4px; }
+  .tprow { display:flex; align-items:flex-start; gap:9px; font-size:12.5px; color:var(--ink2); padding:3px 4px; }
+  .tprow .mk { flex:none; width:14px; text-align:center; margin-top:1px; color:var(--muted); }
+  .tprow.done { color:var(--muted); } .tprow.done .mk { color:var(--acc); }
+  .tprow.run { color:var(--ink); } .tprow.run .mk { color:var(--acc); }
+
+  .subs { display:flex; flex-direction:column; gap:3px; padding:4px 2px 2px; }
+  .sa { background:var(--card); border:1px solid transparent; border-radius:8px; }
+  .sa > .row { display:flex; align-items:center; gap:9px; padding:6px 8px; border-radius:8px; }
+  .sa[data-status="running"] { border-color:color-mix(in srgb,var(--acc) 42%,var(--line2)); }
+  .sa .mico { flex:none; width:15px; height:15px; color:var(--ink2); display:inline-flex; align-items:center; justify-content:center; }
+  .sa .mico svg { width:15px; height:15px; display:block; }
+  .sa .nm { font-weight:550; font-size:12.5px; color:var(--ink); flex:1 1 auto; min-width:0; }
+  .sa .meta { color:var(--faint); font-size:11px; font-family:ui-monospace,Menlo,monospace; flex:none; }
+
+  /* --- adopted distinguisher · Variant A: dashed accent edge + faint tag --- */
+  .sa.adopted[data-status="running"] { border-style:dashed; border-color:color-mix(in srgb,var(--acc) 40%,var(--line2)); }
+  .adopttag { flex:none; font-size:10px; color:var(--faint); letter-spacing:.02em; }
+
+  /* --- adopted distinguisher · Variant B: solid edge + hollow anchor glyph --- */
+  .sa .anchor { flex:none; width:12px; height:12px; color:var(--muted); display:inline-flex; align-items:center; justify-content:center; }
+  .sa .anchor svg { width:12px; height:12px; }
+
+  /* permission-waiting (amber) — adopted keeps its dashed edge, amber-tinted */
+  .sa.perm[data-status="running"] { border-style:dashed; border-color:color-mix(in srgb,var(--amber) 46%,var(--line2)); }
+  .sa.perm .permchip {
+    flex:none; display:inline-flex; align-items:center; gap:5px;
+    color:var(--amber); background:color-mix(in srgb,var(--amber) 12%,transparent);
+    border-radius:7px; padding:1.5px 8px; font-size:11px; font-weight:550;
+  }
+  .sa.perm .permchip .pd { width:5px; height:5px; border-radius:50%; background:var(--amber); flex:none; }
+  /* a non-adopted, non-permission normal running row uses the plain solid edge */
+
+  /* finished fold (renderer .donefold) — settled adopted runs are indistinguishable here */
+  .donefold { margin:4px 2px 2px; }
+  .donefold > summary { list-style:none; cursor:pointer; display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--muted); padding:5px 4px; user-select:none; }
+  .donefold > summary::-webkit-details-marker { display:none; }
+  .donefold > summary:hover { color:var(--ink2); }
+  .donefold > summary .cv { color:var(--faint); font-size:9px; transition:transform .15s ease; }
+  .donefold[open] > summary .cv { transform:rotate(90deg); }
+  .donefold .dlist { padding:1px 0 4px 6px; }
+  .dline { display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--muted); padding:3px 4px; }
+  .dline .dt { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .dline .dl { margin-left:auto; flex:none; color:var(--faint); font:10.5px ui-monospace,Menlo,monospace; }
+
+  .rail-empty { color:var(--faint); font-size:11.5px; padding:4px 8px 6px; }
+
+  @keyframes bgpulse { 0%,100%{ opacity:1 } 50%{ opacity:.4 } }
+  @keyframes contbar-in { from{ opacity:0; transform:translateY(3px) } to{ opacity:1; transform:none } }
+  @media (prefers-reduced-motion:reduce) { *{ animation:none !important } }
+</style>
+</head>
+<body>
+
+<div class="page-head">
+  <h1>Continuación en segundo plano · subagentes adoptados</h1>
+  <p>El turno visible del modelo termina, pero el agente sigue: trabajo lanzado que corre, más texto por llegar.
+     Sin este tratamiento el chat parece del todo inactivo (sin spinner, compositor en reposo, sello «terminado»).
+     Aquí: una señal honesta y tranquila de que el trabajo continúa —sin fingir un turno en marcha, sin botón Detener
+     (el turno YA terminó; encolar y dirigir siguen disponibles)— y el distintivo mínimo de un subagente adoptado en Turnos.</p>
+</div>
+
+<!-- ============================== DARK ============================== -->
+<section class="themewrap theme-dark">
+  <div class="themlabel">Tema oscuro</div>
+  <div class="cols">
+
+    <!-- MAIN COLUMN · STATE 1 -->
+    <div>
+      <div class="block">
+        <div class="blocktitle">Estado 1 — Continuación activa · Variante A: franja sobre el compositor</div>
+        <div class="blocknote">Siempre a la vista, no se va con el scroll. El sello del turno dice «terminado»; la franja
+          aclara que el trabajo sigue. Un punto acento tenue que late, texto neutro, y un acceso «Ver» que revela Turnos.</div>
+        <div class="chatcol">
+          <div class="userpill"><span>Implementa esto y verifícalo en dev cuando puedas.</span></div>
+          <p class="p">Hecho. Encontré la frontera en el stream de eventos y la conservé a través del daemon en vez de
+             adivinar por el texto generado.</p>
+          <div class="toolline"><span class="tt">4 llamadas terminadas</span><span class="dur">18.4s</span></div>
+          <p class="p">Dejé la implementación activa en el runtime aislado y lancé la verificación end-to-end en segundo plano.</p>
+          <div class="stamp">
+            <span class="copy" title="Copiar turno"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg></span>
+            <span>hace un momento</span>
+          </div>
+
+          <div style="height:20px"></div>
+
+          <div class="contbar">
+            <span class="d" aria-hidden="true"></span>
+            <span class="txt"><b>Sigue trabajando en segundo plano</b> <span class="cnt">· 2 tareas activas</span></span>
+            <span class="sp"></span>
+            <button class="see" type="button">Ver</button>
+          </div>
+          <div class="comp">
+            <div class="ph">Escribe para encolar o dirigir…</div>
+            <div class="send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></div>
+          </div>
+          <div class="comprow"><span class="chip">Auto-aprobar</span><span class="sp"></span><span>Opus 4.8 · alto</span></div>
+        </div>
+      </div>
+
+      <div class="block">
+        <div class="blocktitle">Estado 1 — Continuación activa · Variante B: dentro del sello del turno</div>
+        <div class="blocknote">La continuación se pliega en el sello terminal, junto a «hace un momento», tras un separador
+          fino. Viaja con el turno en el transcript; el compositor queda limpio. Se lee al hojear, sin ocupar franja fija.</div>
+        <div class="chatcol">
+          <div class="userpill"><span>Implementa esto y verifícalo en dev cuando puedas.</span></div>
+          <p class="p">Hecho. La implementación quedó activa; la verificación corre aparte.</p>
+          <div class="toolline"><span class="tt">4 llamadas terminadas</span><span class="dur">18.4s</span></div>
+          <div class="stamp">
+            <span class="copy" title="Copiar turno"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg></span>
+            <span>hace un momento</span>
+            <span class="contnote"><span class="d" aria-hidden="true"></span>sigue en segundo plano · 2 tareas</span>
+          </div>
+          <div style="height:16px"></div>
+          <div class="comp">
+            <div class="ph">Escribe para encolar o dirigir…</div>
+            <div class="send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></div>
+          </div>
+          <div class="comprow"><span class="chip">Auto-aprobar</span><span class="sp"></span><span>Opus 4.8 · alto</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RAIL COLUMN · STATE 2 -->
+    <div>
+      <div class="block">
+        <div class="blocktitle">Estado 2 — Turnos · subagentes adoptados</div>
+        <div class="blocknote">Un run adoptado sobrevive a su turno. En marcha necesita un distintivo mínimo; al asentarse
+          entra en el pliegue normal «terminados», sin marca especial.</div>
+
+        <span class="vlabel">Variante A · borde punteado</span>
+        <div class="ecard">
+          <div class="ehead">Turnos<span class="sp"></span><span class="tlive"><span class="d"></span>2 activos</span></div>
+          <div class="tplan">
+            <div class="tprow done"><span class="mk">✓</span><span>Confirmar la frontera del stream</span></div>
+            <div class="tprow run"><span class="mk">◐</span><span>Verificar end-to-end en dev</span></div>
+          </div>
+          <div class="subs">
+            <!-- normal running (parent turn still active) -->
+            <div class="sa" data-status="running">
+              <div class="row">
+                <span class="mico" title="Claude"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3l2.4 6.1L21 11l-6.6 1.9L12 19l-2.4-6.1L3 11l6.6-1.9L12 3z"/></svg></span>
+                <span class="nm">Revisar regresión del bridge</span>
+                <span class="meta">0:34</span>
+              </div>
+            </div>
+            <!-- adopted running (parent turn ended, keeps going) -->
+            <div class="sa adopted" data-status="running">
+              <div class="row">
+                <span class="mico" title="Codex"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M12 8v8M8 12h8"/></svg></span>
+                <span class="nm">Verificación end-to-end en dev</span>
+                <span class="adopttag">adoptado</span>
+                <span class="meta">1:12</span>
+              </div>
+            </div>
+            <!-- adopted + waiting on permission (amber) -->
+            <div class="sa adopted perm" data-status="running">
+              <div class="row">
+                <span class="mico" title="Codex"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M12 8v8M8 12h8"/></svg></span>
+                <span class="nm">Aplicar migración de esquema</span>
+                <span class="permchip"><span class="pd"></span>Permiso</span>
+                <span class="meta">0:05</span>
+              </div>
+            </div>
+          </div>
+          <details class="donefold">
+            <summary><span class="cv">▸</span>3 subagentes terminados</summary>
+            <div class="dlist">
+              <div class="dline"><span class="dt">Inspección de esquema</span><span class="dl">7.1s</span></div>
+              <div class="dline"><span class="dt">Prueba del renderer</span><span class="dl">12.0s</span></div>
+              <div class="dline"><span class="dt">Activación en dev</span><span class="dl">9.3s</span></div>
+            </div>
+          </details>
+        </div>
+
+        <div style="height:16px"></div>
+
+        <span class="vlabel b">Variante B · glifo ancla</span>
+        <div class="ecard">
+          <div class="ehead">Turnos<span class="sp"></span><span class="tlive"><span class="d"></span>2 activos</span></div>
+          <div class="subs">
+            <div class="sa" data-status="running">
+              <div class="row">
+                <span class="mico" title="Claude"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3l2.4 6.1L21 11l-6.6 1.9L12 19l-2.4-6.1L3 11l6.6-1.9L12 3z"/></svg></span>
+                <span class="nm">Revisar regresión del bridge</span>
+                <span class="meta">0:34</span>
+              </div>
+            </div>
+            <div class="sa adopted-b" data-status="running">
+              <div class="row">
+                <span class="anchor" title="Adoptado — sigue tras el turno"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="5" r="2.4"/><path d="M12 7.4V21M6 13H4a8 8 0 0 0 16 0h-2"/></svg></span>
+                <span class="mico" title="Codex"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M12 8v8M8 12h8"/></svg></span>
+                <span class="nm">Verificación end-to-end en dev</span>
+                <span class="meta">1:12</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============================== LIGHT ============================== -->
+<section class="themewrap theme-light">
+  <div class="themlabel">Tema claro</div>
+  <div class="cols">
+
+    <div>
+      <div class="block">
+        <div class="blocktitle">Estado 1 — Continuación activa · Variante A: franja sobre el compositor</div>
+        <div class="blocknote">Contraste AA en claro: superficie neutra, el verde solo en el punto acento y el sello.</div>
+        <div class="chatcol">
+          <div class="userpill"><span>Implementa esto y verifícalo en dev cuando puedas.</span></div>
+          <p class="p">Hecho. Encontré la frontera en el stream de eventos y la conservé a través del daemon.</p>
+          <div class="toolline"><span class="tt">4 llamadas terminadas</span><span class="dur">18.4s</span></div>
+          <p class="p">Dejé la implementación activa y lancé la verificación end-to-end en segundo plano.</p>
+          <div class="stamp">
+            <span class="copy" title="Copiar turno"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg></span>
+            <span>hace un momento</span>
+          </div>
+          <div style="height:20px"></div>
+          <div class="contbar">
+            <span class="d" aria-hidden="true"></span>
+            <span class="txt"><b>Sigue trabajando en segundo plano</b> <span class="cnt">· 2 tareas activas</span></span>
+            <span class="sp"></span>
+            <button class="see" type="button">Ver</button>
+          </div>
+          <div class="comp">
+            <div class="ph">Escribe para encolar o dirigir…</div>
+            <div class="send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></div>
+          </div>
+          <div class="comprow"><span class="chip">Auto-aprobar</span><span class="sp"></span><span>Opus 4.8 · alto</span></div>
+        </div>
+      </div>
+
+      <div class="block">
+        <div class="blocktitle">Estado 1 — Continuación activa · Variante B: dentro del sello del turno</div>
+        <div class="chatcol">
+          <div class="userpill"><span>Implementa esto y verifícalo en dev cuando puedas.</span></div>
+          <p class="p">Hecho. La implementación quedó activa; la verificación corre aparte.</p>
+          <div class="toolline"><span class="tt">4 llamadas terminadas</span><span class="dur">18.4s</span></div>
+          <div class="stamp">
+            <span class="copy" title="Copiar turno"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg></span>
+            <span>hace un momento</span>
+            <span class="contnote"><span class="d" aria-hidden="true"></span>sigue en segundo plano · 2 tareas</span>
+          </div>
+          <div style="height:16px"></div>
+          <div class="comp">
+            <div class="ph">Escribe para encolar o dirigir…</div>
+            <div class="send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></div>
+          </div>
+          <div class="comprow"><span class="chip">Auto-aprobar</span><span class="sp"></span><span>Opus 4.8 · alto</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="block">
+        <div class="blocktitle">Estado 2 — Turnos · subagentes adoptados</div>
+        <span class="vlabel">Variante A · borde punteado</span>
+        <div class="ecard">
+          <div class="ehead">Turnos<span class="sp"></span><span class="tlive"><span class="d"></span>2 activos</span></div>
+          <div class="tplan">
+            <div class="tprow done"><span class="mk">✓</span><span>Confirmar la frontera del stream</span></div>
+            <div class="tprow run"><span class="mk">◐</span><span>Verificar end-to-end en dev</span></div>
+          </div>
+          <div class="subs">
+            <div class="sa" data-status="running">
+              <div class="row">
+                <span class="mico" title="Claude"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3l2.4 6.1L21 11l-6.6 1.9L12 19l-2.4-6.1L3 11l6.6-1.9L12 3z"/></svg></span>
+                <span class="nm">Revisar regresión del bridge</span>
+                <span class="meta">0:34</span>
+              </div>
+            </div>
+            <div class="sa adopted" data-status="running">
+              <div class="row">
+                <span class="mico" title="Codex"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M12 8v8M8 12h8"/></svg></span>
+                <span class="nm">Verificación end-to-end en dev</span>
+                <span class="adopttag">adoptado</span>
+                <span class="meta">1:12</span>
+              </div>
+            </div>
+            <div class="sa adopted perm" data-status="running">
+              <div class="row">
+                <span class="mico" title="Codex"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M12 8v8M8 12h8"/></svg></span>
+                <span class="nm">Aplicar migración de esquema</span>
+                <span class="permchip"><span class="pd"></span>Permiso</span>
+                <span class="meta">0:05</span>
+              </div>
+            </div>
+          </div>
+          <details class="donefold">
+            <summary><span class="cv">▸</span>3 subagentes terminados</summary>
+            <div class="dlist">
+              <div class="dline"><span class="dt">Inspección de esquema</span><span class="dl">7.1s</span></div>
+              <div class="dline"><span class="dt">Prueba del renderer</span><span class="dl">12.0s</span></div>
+              <div class="dline"><span class="dt">Activación en dev</span><span class="dl">9.3s</span></div>
+            </div>
+          </details>
+        </div>
+
+        <div style="height:16px"></div>
+
+        <span class="vlabel b">Variante B · glifo ancla</span>
+        <div class="ecard">
+          <div class="ehead">Turnos<span class="sp"></span><span class="tlive"><span class="d"></span>2 activos</span></div>
+          <div class="subs">
+            <div class="sa" data-status="running">
+              <div class="row">
+                <span class="mico" title="Claude"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3l2.4 6.1L21 11l-6.6 1.9L12 19l-2.4-6.1L3 11l6.6-1.9L12 3z"/></svg></span>
+                <span class="nm">Revisar regresión del bridge</span>
+                <span class="meta">0:34</span>
+              </div>
+            </div>
+            <div class="sa adopted-b" data-status="running">
+              <div class="row">
+                <span class="anchor" title="Adoptado — sigue tras el turno"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="5" r="2.4"/><path d="M12 7.4V21M6 13H4a8 8 0 0 0 16 0h-2"/></svg></span>
+                <span class="mico" title="Codex"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M12 8v8M8 12h8"/></svg></span>
+                <span class="nm">Verificación end-to-end en dev</span>
+                <span class="meta">1:12</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+</body>
+</html>

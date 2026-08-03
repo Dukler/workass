@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>workass — claude-true</title>
+<style>
+  :root { color-scheme: dark;
+    --bg:#262624; --side:#1e1d1b; --panel:#2e2c2a; --field:#33312e;
+    --ink:#ece9e3; --ink2:#c7c3bc; --muted:#9b968e; --faint:#726e66;
+    --line:rgba(255,255,255,.07); --line2:rgba(255,255,255,.13);
+    --link:#9db8e8; --amber:#d8a05a; --green:#56a884; --add:#4cae7f; --del:#d96b5f;
+  }
+  [data-theme="light"] { color-scheme: light;
+    --bg:#faf9f7; --side:#f1efec; --panel:#ffffff; --field:#f0eeea;
+    --ink:#23211e; --ink2:#48453f; --muted:#7b766e; --faint:#a09b92;
+    --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.15);
+    --link:#3861b0; --amber:#9a6a1d; --green:#177353; --add:#177347; --del:#bd4436;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; }
+  body { background:var(--bg); color:var(--ink); font:14px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+         display:grid; grid-template-columns:288px 1fr; overflow:hidden; }
+  code,.mono { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:12.5px; }
+  ::-webkit-scrollbar { width:9px; } ::-webkit-scrollbar-thumb { background:var(--line2); border-radius:5px; background-clip:padding-box; border:2px solid transparent; }
+
+  /* ---------- sidebar ---------- */
+  aside { background:var(--side); border-right:1px solid var(--line); padding:12px 10px 10px; display:flex; flex-direction:column; overflow-y:auto; }
+  .modes { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:0 2px 12px; }
+  .modes button { display:flex; align-items:center; justify-content:center; gap:7px; padding:7px 0; border-radius:9px;
+                  border:1px solid var(--line); background:transparent; color:var(--ink2); font:inherit; font-size:13px; cursor:pointer; }
+  .modes button.on { background:var(--panel); border-color:var(--line2); color:var(--ink); }
+  .srow { display:flex; align-items:center; gap:10px; padding:6px 10px; border-radius:8px; color:var(--ink2); font-size:13.5px; cursor:pointer; }
+  .srow:hover { background:var(--line); color:var(--ink); }
+  .srow svg { width:14px; height:14px; opacity:.6; flex:none; }
+  .srow .chev { margin-left:auto; color:var(--faint); font-size:11px; }
+  .proj { font-size:12.5px; color:var(--muted); padding:16px 10px 3px; display:flex; align-items:center; }
+  .proj .sp { flex:1; } .proj svg { width:12px; height:12px; opacity:.5; }
+  .sess { display:flex; align-items:center; gap:8px; padding:5.5px 10px; border-radius:8px; color:var(--ink2); font-size:13.5px;
+          cursor:pointer; white-space:nowrap; overflow:hidden; }
+  .sess span.t { overflow:hidden; text-overflow:ellipsis; }
+  .sess:hover { background:var(--line); }
+  .sess.on { background:var(--panel); color:var(--ink); }
+  .sess .dot { width:6px; height:6px; border-radius:50%; background:var(--green); flex:none; }
+  .sess .dot.idle { background:var(--faint); }
+  .ungrp { color:var(--muted); font-size:13px; padding:8px 10px; cursor:pointer; }
+  .relaunch { margin-top:auto; border:1px solid var(--line); background:var(--panel); border-radius:12px; padding:11px 12px;
+              display:flex; align-items:center; gap:11px; cursor:pointer; }
+  .relaunch .leaf { color:var(--green); }
+  .relaunch b { display:block; font-size:13px; font-weight:600; }
+  .relaunch small { color:var(--muted); font-size:11.5px; }
+  .relaunch .arr { margin-left:auto; color:var(--muted); }
+  .acct { display:flex; align-items:center; gap:9px; padding:12px 10px 4px; color:var(--ink2); font-size:13px; }
+  .acct .ava { width:22px; height:22px; border-radius:50%; background:var(--field); border:1px solid var(--line2); display:grid; place-items:center; font-size:10.5px; font-weight:600; }
+  .acct .chev { margin-left:auto; color:var(--faint); }
+
+  /* ---------- main ---------- */
+  main { display:flex; flex-direction:column; min-width:0; position:relative; }
+  .statuschip { position:absolute; top:14px; right:22px; background:var(--panel); border:1px solid var(--line); border-radius:9px;
+                padding:5px 11px; font-size:12px; color:var(--ink2); z-index:2; }
+  .scroll { flex:1; overflow-y:auto; }
+  .doc { max-width:820px; margin:0 auto; padding:52px 40px 24px; }
+  .p { margin:0 0 15px; max-width:72ch; }
+  .p b { font-weight:600; }
+  .p code, li code { background:var(--field); border-radius:6px; padding:1px 6px; font-size:12px; color:var(--ink2); }
+  .p a { color:var(--link); text-decoration:none; } .p a:hover { text-decoration:underline; }
+  ul.doclist { margin:2px 0 15px 6px; list-style:none; }
+  ul.doclist li { margin:0 0 8px; padding-left:18px; position:relative; max-width:72ch; }
+  ul.doclist li::before { content:"•"; position:absolute; left:2px; color:var(--muted); }
+  ul.doclist li b { font-weight:600; }
+  .toolrow { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:13px; margin:16px 0; cursor:pointer; }
+  .toolrow:hover { color:var(--ink2); }
+  .toolrow .chev { font-size:12px; }
+  .stamp { display:flex; align-items:center; gap:12px; color:var(--faint); font-size:12px; margin:18px 0 8px; }
+  .stamp svg { width:13px; height:13px; cursor:pointer; } .stamp svg:hover { color:var(--ink2); }
+
+  .banner { max-width:820px; margin:0 auto; width:100%; padding:0 40px; }
+  .banner > div { background:var(--panel); border:1px solid var(--line); border-radius:11px; padding:9px 14px;
+                  display:flex; align-items:center; gap:10px; color:var(--ink2); font-size:13px; }
+  .banner .x { margin-left:auto; color:var(--faint); cursor:pointer; }
+
+  /* ---------- composer ---------- */
+  .compwrap { padding:12px 40px 18px; max-width:820px; margin:0 auto; width:100%; }
+  .comp { background:var(--panel); border:1px solid var(--line2); border-radius:16px; padding:12px 14px 10px; }
+  .comp:focus-within { border-color:var(--muted); }
+  .attach { display:inline-flex; align-items:center; gap:8px; background:var(--field); border:1px solid var(--line);
+            border-radius:9px; padding:5px 9px; font-size:12px; color:var(--muted); margin-bottom:9px; }
+  .attach .th { width:26px; height:20px; border-radius:4px; background:var(--line2); }
+  .comp .inrow { display:flex; align-items:center; gap:10px; }
+  .comp input { flex:1; background:transparent; border:0; outline:0; color:var(--ink); font:inherit; font-size:14px; }
+  .comp input::placeholder { color:var(--faint); }
+  .comp .enter { color:var(--faint); border:1px solid var(--line); border-radius:6px; padding:1px 7px; font-size:12px; }
+  .comprow { display:flex; align-items:center; gap:11px; margin-top:11px; }
+  .permchip { color:var(--amber); background:color-mix(in srgb, var(--amber) 12%, transparent); border-radius:8px;
+              padding:3.5px 10px; font-size:12.5px; cursor:pointer; }
+  .cicon { color:var(--muted); cursor:pointer; display:flex; align-items:center; gap:3px; font-size:12px; }
+  .comprow .sp { flex:1; }
+  .modelsel { color:var(--ink2); font-size:12.5px; display:flex; gap:10px; align-items:center; }
+  .modelsel .eff { color:var(--muted); }
+  .spin { width:13px; height:13px; border:2px solid var(--line2); border-top-color:var(--amber); border-radius:50%; animation:sp 1s linear infinite; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+
+  .themebtn { position:fixed; right:14px; bottom:14px; border:1px solid var(--line2); background:var(--panel); color:var(--muted);
+              border-radius:8px; padding:4px 10px; font:inherit; font-size:11.5px; cursor:pointer; z-index:3; }
+
+  /* ---------- preview panel (Claude-style Launch preview) ---------- */
+  aside.prev { border-left:1px solid var(--line); background:var(--bg); padding:12px; display:flex; flex-direction:column; gap:10px; overflow-y:auto; }
+  .prevhead { display:flex; align-items:center; gap:8px; color:var(--ink2); font-size:13px; font-weight:600; padding:2px 2px 0; }
+  .prevhead .sp { flex:1; } .prevhead .pi { color:var(--faint); cursor:pointer; font-weight:400; }
+  .prevcard { border:1px solid var(--line); border-radius:12px; overflow:hidden; background:var(--panel); }
+  .prevbar { display:flex; align-items:center; gap:8px; padding:7px 9px; border-bottom:1px solid var(--line); background:var(--field); }
+  .prevbar .nav { color:var(--faint); font-size:11px; letter-spacing:2px; }
+  .prevurl { flex:1; background:var(--panel); border:1px solid var(--line); border-radius:7px; padding:3px 9px;
+             font-size:11px; color:var(--muted); font-family:ui-monospace,Menlo,monospace;
+             white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .prevbody { min-height:180px; padding:12px; display:flex; flex-direction:column; gap:8px; }
+  .psk { border-radius:5px; background:var(--field); height:10px; }
+  .psk.b { height:30px; border-radius:8px; border:1px solid var(--line); background:var(--panel); }
+  .psk.half { width:52%; } .psk.tq { width:78%; }
+  .prevfoot { display:flex; align-items:center; gap:9px; padding:7px 10px; border-top:1px solid var(--line); color:var(--muted); font-size:11.5px; }
+  .prevfoot .sp { flex:1; } .prevfoot .act { cursor:pointer; } .prevfoot .act:hover { color:var(--ink); }
+
+  @media (max-width:1160px) { body { grid-template-columns:288px 1fr; } aside.prev { display:none; } }
+  @media (max-width:820px) { body { grid-template-columns:1fr; } aside.side, aside.prev { display:none; } }
+</style>
+</head>
+<body>
+
+<aside>
+  <div class="modes">
+    <button><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M2.5 8L8 3l5.5 5M4 7v6h8V7"/></svg>Inicio</button>
+    <button class="on"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M5.5 5L2.5 8l3 3M10.5 5l3 3-3 3"/></svg>Código</button>
+  </div>
+  <div class="srow"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 3v10M3 8h10"/></svg>Nueva sesión</div>
+  <div class="srow"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M6 2h4M7 2v4.5L3.5 12a2 2 0 001.8 3h5.4a2 2 0 001.8-3L9 6.5V2"/></svg>Artefactos</div>
+  <div class="srow"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="1.5"/><path d="M8 2.5V5M8 11v2.5M2.5 8H5M11 8h2.5"/></svg>Personalizar</div>
+  <div class="srow"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M4 6l4 4 4-4"/></svg>Más</div>
+
+  <div class="proj">workass<span class="sp"></span><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M3 4h10M5 8h6M7 12h2"/></svg></div>
+  <div class="sess on"><span class="dot idle"></span><span class="t">Race del reaper de hibernación</span></div>
+  <div class="sess"><span class="dot"></span><span class="t">Reconnect del WebSocket</span></div>
+  <div class="sess"><span class="dot idle"></span><span class="t">Landmines del PORT-SPEC</span></div>
+  <div class="proj">network</div>
+  <div class="sess"><span class="dot idle"></span><span class="t">Mapear dispositivos y servicios</span></div>
+  <div class="proj">assist</div>
+  <div class="sess"><span class="dot idle"></span><span class="t">Respuesta a Teams · borrador</span></div>
+  <div class="sess"><span class="dot idle"></span><span class="t">Review PR #482 · esperando CI</span></div>
+  <div class="ungrp">Sin agrupar ›</div>
+
+  <div class="relaunch">
+    <svg class="leaf" width="18" viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M13 3C7 3 3.5 6.5 3.5 12.5 9.5 12.5 13 9 13 3z"/><path d="M3.5 12.5C5.5 9.5 8 7.5 10.5 6"/></svg>
+    <div><b>Relanzar para actualizar</b><small>v0.1.0 → daemon</small></div>
+    <span class="arr">→</span>
+  </div>
+  <div class="acct"><span class="ava">M</span>Martin · Devin<span class="chev">▾</span></div>
+</aside>
+
+<main>
+  <div class="statuschip">● ejecutando · 512 MB</div>
+  <div class="scroll"><div class="doc">
+
+    <p class="p">La race está confirmada — el barrido del reaper decide hibernar con una lectura vieja de <code>lastActivity</code> y recién después toma el candado de escritura. En esa ventana <code>markActive()</code> corre desde otra goroutine, pero el engine se hiberna igual.</p>
+
+    <div class="toolrow"><span class="chev">›</span>Leyó el bucle del reaper y el registro de leases</div>
+
+    <p class="p">Lo que encontré, en concreto:</p>
+    <ul class="doclist">
+      <li><b>Check-then-act sin atomicidad</b> — la comprobación corre bajo <code>RLock</code> y la hibernación bajo <code>Lock</code>, en dos pasos separados (<code>reaper.go:41-47</code>).</li>
+      <li><b>Bajo carga se cruza varias veces por hora</b> — con 10+ chats la ventana entre pasos queda expuesta en cada barrido de 30 s.</li>
+      <li><b>El fix correcto es un pin del lease</b> — fijar el lease mientras hay un prompt en vuelo y re-verificar <code>lastActivity</code> ya con el candado tomado.</li>
+    </ul>
+
+    <div class="toolrow"><span class="chev">›</span>Corrió 2 comandos, editó 2 archivos (+14 −3)</div>
+
+    <p class="p">Con el pin activo el barrido salta la sesión y el test de la race pasa <span class="mono">3/3</span>. Los cambios quedan en <a href="#">internal/acp/manager.go</a> y <a href="#">daemon/reaper/reaper.go</a> — pendiente que decidas el TTL para chats anclados manualmente.</p>
+
+    <div class="stamp">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V4a1 1 0 011-1h7"/></svg>
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 2l1.8 3.6 4 .6-2.9 2.8.7 4L8 11.1 4.4 13l.7-4L2.2 6.2l4-.6z"/></svg>
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M5 3l8 5-8 5z"/></svg>
+      hace 2 minutos
+    </div>
+
+  </div></div>
+
+  <div class="banner"><div>
+    <svg width="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" opacity=".6"><circle cx="8" cy="8" r="5.5"/><path d="M8 5.5V8.5M8 10.8v.4"/></svg>
+    El engine lleva 2 h activo — se recicla solo si lo hibernás o al pasar el umbral de RAM.
+    <span class="x">✕</span>
+  </div></div>
+
+  <div class="compwrap"><div class="comp">
+    <div class="attach"><span class="th"></span>captura-race.png</div>
+    <div class="inrow"><input placeholder="Contale a Devin qué sigue…"><span class="enter">⏎</span></div>
+    <div class="comprow">
+      <span class="permchip">Preguntar permisos</span>
+      <span class="cicon">＋</span>
+      <span class="cicon"><svg width="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="6" y="2" width="4" height="8" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V15"/></svg>▾</span>
+      <span class="sp"></span>
+      <span class="modelsel">Devin <span class="eff">High ▾</span></span>
+      <span class="spin"></span>
+    </div>
+  </div></div>
+</main>
+
+<button class="themebtn" onclick="const r=document.documentElement; r.dataset.theme = r.dataset.theme==='light'?'':'light'">Cambiar tema</button>
+<script>
+  if (matchMedia('(prefers-color-scheme: light)').matches) document.documentElement.dataset.theme = 'light';
+</script>
+</body>
+</html>

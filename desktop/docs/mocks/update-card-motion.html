@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Update card — motion review</title>
+<style>
+  /* Tokens: verbatim from renderer2/src/styles/tokens.css (dark). */
+  :root {
+    color-scheme: dark;
+    --bg: #151413; --side: #0f0e0d; --panel: #1d1c1a; --field: #252320;
+    --ink: #f2efe9; --ink2: #cfcbc4; --muted: #9c978f; --faint: #6f6b63;
+    --line: rgba(255,255,255,.075); --line2: rgba(255,255,255,.14);
+    --acc: #4fa583; --del: #d96b5f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center; gap: 34px;
+    grid-auto-flow: row; background: var(--shell, #0b0a09);
+    font-family: -apple-system, "SF Pro Text", system-ui, sans-serif; color: var(--ink);
+    padding: 40px;
+  }
+  h1 { font-size: 15px; font-weight: 600; color: var(--ink2); margin: 0 0 2px; letter-spacing: .01em; }
+  .cap { font-size: 12px; color: var(--muted); text-align: center; max-width: 340px; line-height: 1.5; }
+  /* A little slice of the sidebar footer so the card sits in context. */
+  .footer {
+    width: 268px; background: var(--side); border: 1px solid var(--line); border-radius: 14px;
+    padding: 12px 12px 10px;
+  }
+  .acct {
+    display: flex; align-items: center; gap: 9px; padding: 8px 9px; border-radius: 11px;
+    background: var(--panel); border: 1px solid var(--line); color: var(--ink2); font-size: 13px;
+  }
+  .acct .dot { width: 22px; height: 22px; border-radius: 50%; background: var(--field); flex: none; }
+  .replay { font: inherit; font-size: 12px; color: var(--acc); background: none; border: 1px solid color-mix(in srgb, var(--acc) 42%, transparent); border-radius: 8px; padding: 6px 14px; cursor: pointer; }
+
+  /* ==== verbatim from app.css (the shipped rules) ==== */
+  .updcards { display: flex; flex-direction: column; gap: 6px; margin: 0 -2px 8px; }
+  .updcard { display: flex; align-items: center; gap: 9px; width: 100%; box-sizing: border-box; padding: 7px 9px; background: var(--panel); border: 1px solid var(--line2); border-radius: 11px; color: var(--ink2); font-family: inherit; text-align: left; cursor: pointer; transition: background .15s ease, color .15s ease; }
+  .updcard:hover { background: var(--line); color: var(--ink); }
+  .updcard .uico { width: 22px; height: 22px; display: grid; place-items: center; color: var(--muted); flex: none; }
+  .updcard .uico svg { width: 16px; height: 16px; stroke-width: 1.3; }
+  .updcard .ubody { flex: 1; min-width: 0; }
+  .updcard .ut { display: block; font-size: 12.5px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .updcard .us { display: block; margin-top: 1px; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .updcard .uarrow { margin-left: auto; color: var(--faint); flex: none; font-size: 14px; line-height: 1; }
+  .updcard .us.mono { font-family: ui-monospace, Menlo, monospace; }
+  .updcard .uarrow.updo { font-size: 10.5px; font-weight: 600; letter-spacing: .02em; color: var(--acc); }
+  .mico { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; }
+  .mico svg { width: 15px; height: 15px; display: block; }
+  .updcard .uend { margin-left: auto; color: var(--muted); }
+  .updcard:hover .uend { color: var(--ink2); }
+  .updcard.upd-run { cursor: default; position: relative; }
+  .updcard.upd-run:hover { background: var(--panel); color: var(--ink2); }
+  .updcard.upd-run:hover .uico { color: var(--muted); }
+  .updcard .uspin { width: 13px; height: 13px; border-radius: 50%; border: 1.5px solid var(--line2); border-top-color: var(--acc); animation: conn-spin .7s linear infinite; }
+  @keyframes conn-spin { to { transform: rotate(360deg); } }
+  @property --updring { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+  .updcard .updring {
+    position: absolute; inset: 0; border-radius: inherit; padding: 1.6px; pointer-events: none;
+    background: conic-gradient(from var(--updring), transparent 0deg 250deg, color-mix(in srgb, var(--acc) 22%, transparent) 300deg, var(--acc) 342deg, transparent 360deg);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite: exclude;
+    filter: drop-shadow(0 0 2.5px color-mix(in srgb, var(--acc) 55%, transparent));
+    animation: updring 1.15s linear infinite;
+  }
+  @keyframes updring { to { --updring: 360deg; } }
+  /* Ring stays in the DOM (stable child order) but is hidden until running/done. */
+  .updcard:not(.upd-run):not(.upd-done) .updring { display: none; }
+  .updcard .uglyph { display: grid; place-items: center; }
+
+  /* Enter / exit slide (new). */
+  .updslot { animation: updslot-in .26s cubic-bezier(.16, .84, .44, 1) both; }
+  .updslot.card-exit { animation: updslot-out .34s cubic-bezier(.4, 0, 1, 1) both; overflow: hidden; pointer-events: none; }
+  @keyframes updslot-in { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
+  @keyframes updslot-out { from { opacity: 1; transform: translateX(0); max-height: 64px; } to { opacity: 0; transform: translateX(-20px); max-height: 0; } }
+
+  /* Done seal (new). */
+  @property --updseal { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+  .updcard.upd-done .updring {
+    background: conic-gradient(from -90deg, var(--acc) 0deg var(--updseal), color-mix(in srgb, var(--acc) 12%, transparent) var(--updseal) 360deg);
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--acc) 60%, transparent));
+    animation: upd-seal .5s cubic-bezier(.3, 0, .15, 1) forwards;
+  }
+  @keyframes upd-seal { from { --updseal: 0deg; } to { --updseal: 360deg; } }
+  .updcard.upd-done .ut { color: var(--acc); }
+  .updcard.upd-done .uico.udone { color: var(--acc); animation: upd-check-pop .34s cubic-bezier(.2, .9, .3, 1.35) .05s both; }
+  .updcard.upd-done .uico.udone svg { width: 15px; height: 15px; stroke-width: 1.6; }
+  @keyframes upd-check-pop { from { transform: scale(.4); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+</style>
+</head>
+<body>
+  <div style="text-align:center">
+    <h1>Update card — full motion sequence</h1>
+    <div class="cap">Slides in → spins while updating → the border seals into a full green ring as it flips to <b>Listo</b>, holds ½s → slides out to the left. Loops for review.</div>
+  </div>
+
+  <div class="footer">
+    <div class="updcards" id="cards"></div>
+    <div class="acct"><span class="dot"></span><div style="font-size:12.5px">you</div></div>
+  </div>
+
+  <button class="replay" onclick="run()">Replay sequence</button>
+
+<script>
+const CHECK = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M3.5 8.4l3 3 6-6.6" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7"/></svg>';
+const DL = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M8 2.5v7M5.2 6.8L8 9.6l2.8-2.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 11.5v1a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1" stroke-linecap="round"/></svg>';
+// Codex → the GPT knot brand mark (verbatim from renderer icons.tsx IcGpt).
+const GPT = '<span class="mico"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997z"/></svg></span>';
+const cards = document.getElementById('cards');
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// One stable slot + card that we MUTATE in place — exactly like the React
+// component. Only a fresh appearance recreates the slot (so the enter slide
+// plays once); state swaps just re-fade the glyph and body, matching the keyed
+// cross-fade in the app. This is why it no longer blinks between states.
+function makeCard() {
+  const slot = document.createElement('div');
+  slot.className = 'updslot';
+  slot.innerHTML =
+    `<div class="updcard" role="button">
+       <span class="updring"></span>
+       <span class="uico"><span class="uglyph">${DL}</span></span>
+       <span class="ubody"><span class="ut">codex 0.144.3</span><span class="us">instalada 0.144.1</span></span>
+       <span class="uend">${GPT}</span>
+     </div>`;
+  cards.replaceChildren(slot);
+  return slot;
+}
+const fade = (el) => el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: 'ease' });
+const pop = (el) => el.animate(
+  [{ transform: 'scale(.4)', opacity: 0 }, { transform: 'scale(1)', opacity: 1 }],
+  { duration: 340, easing: 'cubic-bezier(.2,.9,.3,1.35)' });
+
+function setGlyph(slot, html, popIt) {
+  const g = slot.querySelector('.uglyph'); g.innerHTML = html; (popIt ? pop : fade)(g);
+}
+function setBody(slot, html) {
+  const b = slot.querySelector('.ubody'); b.innerHTML = html; fade(b);
+}
+function running(slot, tail) {
+  // No glyph spinner — the border ring is the only spinner. The download stays,
+  // the provider mark stays on the right.
+  slot.querySelector('.updcard').className = 'updcard upd-run';
+  setBody(slot, `<span class="ut">Actualizando codex…</span><span class="us mono">${tail}</span>`);
+}
+function done(slot) {
+  const card = slot.querySelector('.updcard');
+  card.className = 'updcard upd-run upd-done';           // ring seals green via CSS
+  slot.querySelector('.uico').classList.add('udone');
+  setGlyph(slot, CHECK, true);                            // download → check (pops)
+  setBody(slot, '<span class="ut">Listo</span><span class="us">codex actualizado</span>');
+}
+
+// Freeze on a single phase for deterministic review screenshots (?frame=…).
+const frame = new URLSearchParams(location.search).get('frame');
+if (frame) {
+  const slot = makeCard();
+  if (frame === 'running') running(slot, 'installing 0.144.3');
+  else if (frame === 'done') done(slot);
+}
+
+async function run() {
+  if (frame) return;                          // frozen for review
+  cards.replaceChildren();                     // empty (nothing to update)
+  await sleep(500);
+  const slot = makeCard();                     // slides in (enter animation on slot)
+  await sleep(1500);
+  running(slot, 'reticulating…');              // click → spins, glyph+text cross-fade
+  await sleep(700);
+  setBody(slot, '<span class="ut">Actualizando codex…</span><span class="us mono">installing 0.144.3</span>');
+  await sleep(1100);
+  done(slot);                                  // border seals green, flips to "Listo"
+  await sleep(500);                            // …holds ½s…
+  slot.classList.add('card-exit');             // slides out to the left
+  await sleep(360);
+  cards.replaceChildren();
+  await sleep(700);
+  run();                                       // loop for review
+}
+run();
+</script>
+</body>
+</html>

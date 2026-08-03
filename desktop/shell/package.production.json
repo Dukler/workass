@@ -1,0 +1,9 @@
+{
+  "name": "workass",
+  "productName": "Workass",
+  "version": "0.1.0",
+  "description": "Workass production desktop shell",
+  "main": "main.js",
+  "private": true,
+  "license": "UNLICENSED"
+}

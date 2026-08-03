@@ -1,0 +1,1093 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>workass · Cursor-souled</title>
+<style>
+/* ============================================================
+   workass — Cursor-souled design
+   Single file · vanilla · zero external requests · both themes
+   ============================================================ */
+
+:root {
+  /* radius scale — one family */
+  --r-1: 5px;
+  --r-2: 8px;
+  --r-3: 12px;
+  --r-4: 16px;
+
+  /* 8px rhythm helpers */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+  --s-5: 24px; --s-6: 32px; --s-7: 48px;
+
+  /* green accent — the only chroma */
+  --green: #34c17a;
+  --green-strong: #2aa869;
+  --green-soft: rgba(52,193,122,.14);
+  --green-line: rgba(52,193,122,.36);
+
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---------- DARK (default) ---------- */
+:root, :root[data-theme="dark"] {
+  --bg: #0e0f11;
+  --bg-rail: #0b0c0d;
+  --panel: #141518;
+  --panel-2: #17191d;
+  --raised: #1b1e22;
+  --raised-hi: #21252a;
+  --line: #26292f;
+  --line-soft: #1e2126;
+  --line-strong: #33373e;
+
+  --ink: #e8eaed;         /* prose — AA on --bg */
+  --ink-2: #b9bdc4;       /* secondary */
+  --ink-3: #8b9199;       /* tertiary / meta */
+  --ink-4: #626871;       /* faint */
+
+  --code-bg: #0b0c0e;
+  --code-ink: #d5d9df;
+  --sel: rgba(52,193,122,.24);
+
+  --add-bg: rgba(52,193,122,.13);
+  --add-line: rgba(52,193,122,.42);
+  --add-ink: #7bd7a6;
+  --del-bg: rgba(233,90,92,.11);
+  --del-line: rgba(233,90,92,.34);
+  --del-ink: #e79597;
+
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 26px -12px rgba(0,0,0,.55);
+  --shadow-pop: 0 12px 40px -8px rgba(0,0,0,.6);
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--green);
+}
+
+/* ---------- LIGHT ---------- */
+:root[data-theme="light"] {
+  --bg: #f7f8f7;
+  --bg-rail: #f0f1f0;
+  --panel: #ffffff;
+  --panel-2: #fbfcfb;
+  --raised: #ffffff;
+  --raised-hi: #f4f5f4;
+  --line: #e4e6e4;
+  --line-soft: #ecedec;
+  --line-strong: #d3d6d3;
+
+  --ink: #1a1d1c;
+  --ink-2: #444a48;
+  --ink-3: #6b716e;
+  --ink-4: #969b98;
+
+  --code-bg: #f4f5f4;
+  --code-ink: #24282a;
+  --sel: rgba(52,193,122,.20);
+
+  --add-bg: rgba(42,168,105,.12);
+  --add-line: rgba(42,168,105,.40);
+  --add-ink: #1c8a54;
+  --del-bg: rgba(207,58,60,.09);
+  --del-line: rgba(207,58,60,.30);
+  --del-ink: #b53133;
+
+  --green: #1f9d5f;
+  --green-strong: #178a52;
+  --green-soft: rgba(31,157,95,.12);
+  --green-line: rgba(31,157,95,.30);
+
+  --shadow: 0 1px 2px rgba(16,24,20,.06), 0 10px 30px -16px rgba(16,24,20,.22);
+  --shadow-pop: 0 14px 44px -10px rgba(16,24,20,.28);
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--green);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg: #f7f8f7; --bg-rail: #f0f1f0; --panel: #ffffff; --panel-2: #fbfcfb;
+    --raised: #ffffff; --raised-hi: #f4f5f4; --line: #e4e6e4; --line-soft: #ecedec;
+    --line-strong: #d3d6d3; --ink: #1a1d1c; --ink-2: #444a48; --ink-3: #6b716e;
+    --ink-4: #969b98; --code-bg: #f4f5f4; --code-ink: #24282a; --sel: rgba(52,193,122,.20);
+    --add-bg: rgba(42,168,105,.12); --add-line: rgba(42,168,105,.40); --add-ink: #1c8a54;
+    --del-bg: rgba(207,58,60,.09); --del-line: rgba(207,58,60,.30); --del-ink: #b53133;
+    --green: #1f9d5f; --green-strong: #178a52; --green-soft: rgba(31,157,95,.12);
+    --green-line: rgba(31,157,95,.30);
+    --shadow: 0 1px 2px rgba(16,24,20,.06), 0 10px 30px -16px rgba(16,24,20,.22);
+    --shadow-pop: 0 14px 44px -10px rgba(16,24,20,.28);
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  letter-spacing: .1px;
+}
+::selection { background: var(--sel); }
+
+.mono {
+  font-family: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  font-feature-settings: "calt" 0;
+}
+
+/* styled scrollbars */
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--ink-4); background-clip: padding-box; }
+
+/* ============================================================
+   Shell
+   ============================================================ */
+.app {
+  display: grid;
+  grid-template-columns: 264px 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---------- Rail / conversation list ---------- */
+.rail {
+  background: var(--bg-rail);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.rail-head {
+  padding: var(--s-3) var(--s-3) var(--s-2);
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.brand {
+  display: flex; align-items: center; gap: 9px;
+  font-weight: 600; font-size: 13.5px; letter-spacing: .2px;
+  color: var(--ink);
+}
+.brand .glyph {
+  width: 22px; height: 22px; border-radius: 6px;
+  background: linear-gradient(150deg, var(--green), var(--green-strong));
+  display: grid; place-items: center;
+  color: #fff; font-size: 13px; font-weight: 800;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.25);
+}
+.brand .glyph span { transform: translateY(-.5px); }
+.icon-btn {
+  margin-left: auto;
+  width: 28px; height: 28px; border-radius: var(--r-1);
+  display: grid; place-items: center;
+  background: transparent; border: 1px solid transparent;
+  color: var(--ink-3); cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.icon-btn:hover { background: var(--raised); color: var(--ink); border-color: var(--line); }
+.icon-btn:focus-visible { outline: none; box-shadow: var(--focus); }
+
+.new-btn {
+  margin: 0 var(--s-3) var(--s-2);
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: 9px var(--s-3);
+  border-radius: var(--r-2);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 13px; font-weight: 550;
+  cursor: pointer; text-align: left;
+  transition: border-color .12s, background .12s;
+}
+.new-btn kbd {
+  margin-left: auto; font-size: 11px;
+  color: var(--ink-4);
+  border: 1px solid var(--line); border-radius: 4px;
+  padding: 1px 5px; background: var(--panel);
+  font-family: inherit;
+}
+.new-btn:hover { border-color: var(--green-line); background: var(--panel-2); }
+.new-btn .plus { color: var(--green); font-weight: 700; font-size: 15px; line-height: 1; }
+.new-btn:focus-visible { outline: none; box-shadow: var(--focus); }
+
+.rail-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s-1) var(--s-2) var(--s-3); }
+
+.sec-label {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-3) var(--s-2) var(--s-1) 10px;
+  font-size: 11px; font-weight: 650; letter-spacing: .6px;
+  text-transform: uppercase; color: var(--ink-4);
+}
+.sec-label .count {
+  margin-left: auto; font-weight: 550; letter-spacing: .2px;
+  color: var(--ink-4); font-size: 11px;
+}
+
+.conv {
+  position: relative;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 8px 10px 9px;
+  border-radius: var(--r-2);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background .1s, border-color .1s;
+}
+.conv:hover { background: var(--raised); }
+.conv:focus-visible { outline: none; box-shadow: var(--focus); }
+.conv.active { background: var(--raised); border-color: var(--line); }
+.conv.active::before {
+  content: ""; position: absolute; left: 0; top: 9px; bottom: 9px;
+  width: 2px; border-radius: 2px; background: var(--green);
+}
+.conv-top { display: flex; align-items: center; gap: 7px; }
+.conv-title {
+  font-size: 13px; font-weight: 550; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;
+}
+.conv.unread .conv-title { font-weight: 650; }
+.conv-time { font-size: 11px; color: var(--ink-4); flex-shrink: 0; }
+.conv-sub {
+  font-size: 12px; color: var(--ink-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  padding-right: 2px;
+}
+.conv.muted .conv-title { color: var(--ink-2); font-weight: 450; }
+.conv.muted .conv-sub { color: var(--ink-4); }
+
+.dot-run {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--green);
+  box-shadow: 0 0 0 0 var(--green-line);
+  animation: pulse 2.2s ease-out infinite;
+}
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(52,193,122,.5); }
+  70% { box-shadow: 0 0 0 6px rgba(52,193,122,0); }
+  100% { box-shadow: 0 0 0 0 rgba(52,193,122,0); }
+}
+.dot-unread { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+.badge-run {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .3px;
+  color: var(--green); background: var(--green-soft);
+  border: 1px solid var(--green-line); border-radius: 999px;
+  padding: 0 7px; height: 17px; display: inline-flex; align-items: center; gap: 4px;
+  flex-shrink: 0;
+}
+
+/* account footer */
+.rail-foot {
+  border-top: 1px solid var(--line);
+  padding: var(--s-2);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.foot-row {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: 7px 8px; border-radius: var(--r-2);
+  cursor: pointer; color: var(--ink-2);
+  background: transparent; border: 1px solid transparent;
+  font-size: 13px; width: 100%; text-align: left;
+  transition: background .1s, color .1s;
+}
+.foot-row:hover { background: var(--raised); color: var(--ink); }
+.foot-row:focus-visible { outline: none; box-shadow: var(--focus); }
+.avatar {
+  width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;
+  background: linear-gradient(140deg, #3a4048, #23262b);
+  color: var(--ink); font-size: 11px; font-weight: 650;
+  display: grid; place-items: center;
+  border: 1px solid var(--line-strong);
+}
+.foot-row .who { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+.foot-row .who b { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.foot-row .who span { font-size: 11px; color: var(--ink-4); }
+.foot-row .gear { margin-left: auto; color: var(--ink-4); }
+.foot-row.settings { color: var(--ink-2); }
+.foot-row.settings svg { color: var(--ink-3); }
+
+/* ============================================================
+   Main
+   ============================================================ */
+.main { display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
+
+.topbar {
+  height: 48px; flex-shrink: 0;
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: 0 var(--s-4);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.crumbs { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-3); min-width: 0; }
+.crumbs b { color: var(--ink); font-weight: 600; }
+.crumbs .sep { color: var(--ink-4); }
+.crumbs .repo {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--ink-2); font-size: 12.5px;
+  border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px;
+}
+.crumbs .repo .brdot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.top-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.top-tag {
+  font-size: 11.5px; color: var(--ink-3);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 3px 10px; display: inline-flex; align-items: center; gap: 6px;
+}
+.theme-toggle {
+  width: 30px; height: 30px; border-radius: var(--r-1);
+  border: 1px solid var(--line); background: var(--panel);
+  color: var(--ink-2); cursor: pointer; display: grid; place-items: center;
+  transition: border-color .12s, color .12s, background .12s;
+}
+.theme-toggle:hover { border-color: var(--green-line); color: var(--ink); }
+.theme-toggle:focus-visible { outline: none; box-shadow: var(--focus); }
+.theme-toggle .sun { display: none; }
+:root[data-theme="light"] .theme-toggle .sun { display: block; }
+:root[data-theme="light"] .theme-toggle .moon { display: none; }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) .theme-toggle .sun { display: block; }
+  :root:not([data-theme]) .theme-toggle .moon { display: none; }
+}
+
+/* transcript */
+.scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.axis { max-width: 760px; margin: 0 auto; padding: var(--s-6) var(--s-5) 140px; }
+
+/* user message — quiet compact block */
+.user-msg {
+  margin: var(--s-3) 0 var(--s-6);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  padding: var(--s-4) var(--s-4) var(--s-3);
+}
+.user-msg .um-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11.5px; color: var(--ink-3); font-weight: 600;
+  letter-spacing: .3px; margin-bottom: var(--s-2);
+}
+.user-msg .um-head .you {
+  width: 18px; height: 18px; border-radius: 5px;
+  background: var(--raised-hi); border: 1px solid var(--line);
+  display: grid; place-items: center; font-size: 10px; color: var(--ink-2);
+}
+.user-msg p { margin: 0; color: var(--ink); font-size: 14.5px; line-height: 1.5; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--s-3); }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--ink-2);
+  background: var(--raised); border: 1px solid var(--line);
+  border-radius: var(--r-1); padding: 3px 8px 3px 6px;
+  cursor: default;
+}
+.chip .fk { color: var(--green); font-size: 12px; }
+.chip .path { color: var(--ink-3); }
+.chip b { color: var(--ink); font-weight: 550; }
+
+/* agent turn */
+.turn { margin-bottom: var(--s-6); }
+.agent-head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: var(--s-3);
+}
+.agent-mark {
+  width: 22px; height: 22px; border-radius: 6px;
+  background: linear-gradient(150deg, var(--green), var(--green-strong));
+  display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 12px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.22);
+}
+.agent-name { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.agent-model { font-size: 11.5px; color: var(--ink-4); }
+
+/* context line */
+.context-line {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 12px; color: var(--ink-3);
+  padding: 7px 10px; border-radius: var(--r-2);
+  background: var(--panel-2); border: 1px solid var(--line-soft);
+  margin-bottom: var(--s-3);
+}
+.context-line .ctx-k { color: var(--ink-4); font-weight: 600; letter-spacing: .3px; }
+.ctx-file {
+  display: inline-flex; align-items: center; gap: 5px;
+  color: var(--ink-2); background: var(--raised);
+  border: 1px solid var(--line); border-radius: var(--r-1); padding: 1px 7px;
+  font-size: 11.5px;
+}
+.ctx-file .fk { color: var(--green); }
+.ctx-more { color: var(--ink-4); font-size: 11.5px; }
+
+/* thinking */
+.thinking {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; color: var(--ink-3);
+  margin-bottom: var(--s-4); font-style: italic;
+}
+.thinking .spin {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 1.5px solid var(--line-strong); border-top-color: var(--green);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* plan */
+.plan {
+  border: 1px solid var(--line); border-radius: var(--r-3);
+  background: var(--panel); margin-bottom: var(--s-4);
+  overflow: hidden;
+}
+.plan-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px var(--s-4); border-bottom: 1px solid var(--line-soft);
+  font-size: 12px; font-weight: 650; color: var(--ink-2); letter-spacing: .3px;
+}
+.plan-head .pcount { margin-left: auto; font-weight: 500; color: var(--ink-4); font-size: 11.5px; }
+.plan-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 9px var(--s-4);
+  font-size: 13.5px; color: var(--ink);
+}
+.plan-item + .plan-item { border-top: 1px solid var(--line-soft); }
+.pi-mark {
+  width: 17px; height: 17px; border-radius: 50%; flex-shrink: 0; margin-top: 1px;
+  display: grid; place-items: center; font-size: 11px; font-weight: 800;
+}
+.pi-done .pi-mark { background: var(--green); color: #fff; }
+.pi-done { color: var(--ink-3); }
+.pi-done .pi-text { text-decoration: line-through; text-decoration-color: var(--line-strong); }
+.pi-active .pi-mark {
+  background: var(--green-soft); color: var(--green);
+  border: 1px solid var(--green-line); position: relative;
+}
+.pi-active .pi-mark::after {
+  content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green);
+  animation: blink 1.4s ease-in-out infinite;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+.pi-active { font-weight: 550; }
+.pi-pending .pi-mark { border: 1.5px solid var(--line-strong); color: transparent; }
+.pi-pending { color: var(--ink-4); }
+.plan-item .pi-tag {
+  margin-left: auto; font-size: 11px; color: var(--ink-4);
+  border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; height: 18px;
+  display: inline-flex; align-items: center; flex-shrink: 0;
+}
+.pi-active .pi-tag { color: var(--green); border-color: var(--green-line); background: var(--green-soft); }
+
+/* tool row — collapsible */
+.tool {
+  border: 1px solid var(--line); border-radius: var(--r-2);
+  background: var(--panel-2); margin-bottom: var(--s-4);
+  overflow: hidden;
+}
+.tool-summary {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px var(--s-3); cursor: pointer;
+  font-size: 12.5px; color: var(--ink-2); list-style: none;
+  user-select: none;
+}
+.tool-summary::-webkit-details-marker { display: none; }
+.tool-summary:hover { background: var(--raised); }
+.tool-summary:focus-visible { outline: none; box-shadow: var(--focus); border-radius: var(--r-2); }
+.tool-check {
+  width: 16px; height: 16px; border-radius: 4px; flex-shrink: 0;
+  background: var(--green-soft); border: 1px solid var(--green-line);
+  color: var(--green); display: grid; place-items: center; font-size: 10px; font-weight: 800;
+}
+.tool-summary .tname { font-weight: 600; color: var(--ink); }
+.tool-summary .tfile { color: var(--green); }
+.tool-summary .tmeta { color: var(--ink-4); }
+.tool-summary .chev {
+  margin-left: auto; color: var(--ink-4); transition: transform .18s; flex-shrink: 0;
+}
+details[open] .tool-summary .chev { transform: rotate(90deg); }
+.tool-body {
+  border-top: 1px solid var(--line-soft);
+  background: var(--code-bg);
+  max-height: 168px; overflow: auto;
+}
+.tool-body pre { margin: 0; padding: var(--s-3) var(--s-4); font-size: 12px; line-height: 1.7; color: var(--ink-3); }
+.tool-body .ln { color: var(--ink-4); margin-right: 14px; user-select: none; display: inline-block; width: 22px; text-align: right; }
+
+/* prose */
+.prose { color: var(--ink); font-size: 14.5px; line-height: 1.62; }
+.prose p { margin: 0 0 var(--s-3); }
+.prose strong { color: var(--ink); font-weight: 650; }
+.prose code.inline {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px; color: var(--ink);
+  background: var(--code-bg); border: 1px solid var(--line-soft);
+  border-radius: var(--r-1); padding: 1px 6px;
+}
+.prose .em-file { color: var(--green); font-weight: 550; }
+
+/* code block */
+.codeblock {
+  border: 1px solid var(--line); border-radius: var(--r-2);
+  overflow: hidden; margin: 0 0 var(--s-4); background: var(--code-bg);
+}
+.cb-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px var(--s-3); border-bottom: 1px solid var(--line-soft);
+  font-size: 11.5px; color: var(--ink-3); background: var(--panel-2);
+}
+.cb-head .lang {
+  font-weight: 650; color: var(--ink-2); letter-spacing: .3px;
+  text-transform: uppercase; font-size: 10.5px;
+}
+.cb-head .copy {
+  margin-left: auto; font-size: 11.5px; color: var(--ink-3);
+  background: transparent; border: 1px solid var(--line); border-radius: var(--r-1);
+  padding: 2px 9px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px;
+  transition: border-color .12s, color .12s;
+}
+.cb-head .copy:hover { border-color: var(--green-line); color: var(--ink); }
+.cb-head .copy:focus-visible { outline: none; box-shadow: var(--focus); }
+.codeblock pre { margin: 0; padding: var(--s-3) var(--s-4); overflow-x: auto; }
+.codeblock code { font-size: 12.5px; line-height: 1.75; color: var(--code-ink); display: block; }
+/* naive token tints — chroma kept off prose, code allowed subtle */
+.tok-key { color: #c98af0; } .tok-fn { color: #6cb8ff; } .tok-str { color: #86d98f; }
+.tok-com { color: var(--ink-4); font-style: italic; } .tok-num { color: #e0a56b; }
+:root[data-theme="light"] .tok-key { color: #8b3fc4; }
+:root[data-theme="light"] .tok-fn { color: #1f6fd6; }
+:root[data-theme="light"] .tok-str { color: #1c8a54; }
+:root[data-theme="light"] .tok-num { color: #b7651c; }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) .tok-key { color: #8b3fc4; }
+  :root:not([data-theme]) .tok-fn { color: #1f6fd6; }
+  :root:not([data-theme]) .tok-str { color: #1c8a54; }
+  :root:not([data-theme]) .tok-num { color: #b7651c; }
+}
+
+/* ---------- reviewable EDIT CARD ---------- */
+.edit-card {
+  border: 1px solid var(--line-strong); border-radius: var(--r-3);
+  overflow: hidden; margin: 0 0 var(--s-4);
+  box-shadow: var(--shadow); background: var(--panel);
+}
+.ec-head {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px var(--s-3); background: var(--panel-2);
+  border-bottom: 1px solid var(--line-soft);
+}
+.ec-file {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12.5px; color: var(--ink); font-weight: 600;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.ec-file .fk { color: var(--green); }
+.ec-stat { display: inline-flex; align-items: center; gap: 8px; font-size: 11.5px; }
+.ec-stat .add { color: var(--add-ink); font-weight: 650; }
+.ec-stat .del { color: var(--del-ink); font-weight: 650; }
+.ec-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.btn {
+  font-size: 12px; font-weight: 600; letter-spacing: .2px;
+  border-radius: var(--r-1); padding: 5px 11px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--raised); color: var(--ink-2);
+  display: inline-flex; align-items: center; gap: 6px;
+  transition: border-color .12s, background .12s, color .12s;
+}
+.btn:hover { border-color: var(--line-strong); color: var(--ink); background: var(--raised-hi); }
+.btn:focus-visible { outline: none; box-shadow: var(--focus); }
+.btn.primary {
+  background: var(--green); border-color: var(--green-strong); color: #fff;
+}
+.btn.primary:hover { background: var(--green-strong); }
+.btn.ghost { background: transparent; }
+.diff {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px; line-height: 1.75; background: var(--code-bg);
+}
+.diff .row { display: flex; }
+.diff .gut {
+  width: 46px; flex-shrink: 0; text-align: right; padding: 0 10px 0 0;
+  color: var(--ink-4); user-select: none; border-right: 1px solid var(--line-soft);
+}
+.diff .code { padding: 0 var(--s-4); white-space: pre; overflow-x: auto; flex: 1; color: var(--code-ink); }
+.diff .row.add { background: var(--add-bg); }
+.diff .row.add .gut { border-right-color: var(--add-line); }
+.diff .row.add .sign { color: var(--add-ink); }
+.diff .row.del { background: var(--del-bg); }
+.diff .row.del .gut { border-right-color: var(--del-line); }
+.diff .row.del .sign { color: var(--del-ink); }
+.diff .sign { display: inline-block; width: 12px; }
+.ec-foot {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px var(--s-3); border-top: 1px solid var(--line-soft);
+  font-size: 11.5px; color: var(--ink-4); background: var(--panel-2);
+}
+.ec-foot .hint { display: inline-flex; align-items: center; gap: 6px; }
+
+/* table */
+.tbl-wrap { border: 1px solid var(--line); border-radius: var(--r-2); overflow: hidden; margin: 0 0 var(--s-4); }
+table.mini { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.mini th {
+  text-align: left; font-weight: 600; color: var(--ink-3);
+  padding: 7px var(--s-3); background: var(--panel-2);
+  border-bottom: 1px solid var(--line); font-size: 11px; letter-spacing: .3px; text-transform: uppercase;
+}
+table.mini td { padding: 7px var(--s-3); border-bottom: 1px solid var(--line-soft); color: var(--ink-2); }
+table.mini tr:last-child td { border-bottom: none; }
+table.mini td.mono, table.mini th.mono { font-family: ui-monospace, Menlo, monospace; }
+table.mini .ok { color: var(--green); font-weight: 600; }
+table.mini .warn { color: var(--del-ink); font-weight: 600; }
+
+/* permission card */
+.perm {
+  border: 1px solid var(--green-line); border-radius: var(--r-3);
+  background: linear-gradient(180deg, var(--green-soft), transparent 60%);
+  padding: var(--s-4); margin: 0 0 var(--s-3);
+}
+.perm-top { display: flex; align-items: flex-start; gap: 11px; }
+.perm-ico {
+  width: 30px; height: 30px; border-radius: var(--r-2); flex-shrink: 0;
+  background: var(--green-soft); border: 1px solid var(--green-line);
+  color: var(--green); display: grid; place-items: center;
+}
+.perm-body { flex: 1; min-width: 0; }
+.perm-label { font-size: 11px; font-weight: 650; letter-spacing: .4px; text-transform: uppercase; color: var(--green); }
+.perm-cmd {
+  margin-top: 5px; font-family: ui-monospace, Menlo, monospace;
+  font-size: 13px; color: var(--ink);
+  background: var(--code-bg); border: 1px solid var(--line);
+  border-radius: var(--r-1); padding: 7px 11px; display: block;
+  word-break: break-all;
+}
+.perm-cmd .prompt { color: var(--green); margin-right: 8px; user-select: none; }
+.perm-note { font-size: 12px; color: var(--ink-3); margin-top: 8px; }
+.perm-actions { display: flex; gap: 8px; margin-top: var(--s-3); flex-wrap: wrap; }
+.perm-actions .btn.primary { padding: 7px 14px; }
+.perm-actions .btn { padding: 7px 14px; }
+
+/* ============================================================
+   Composer
+   ============================================================ */
+.composer-wrap {
+  position: absolute; left: 264px; right: 0; bottom: 0;
+  padding: 0 var(--s-5) var(--s-5);
+  background: linear-gradient(180deg, transparent, var(--bg) 42%);
+  pointer-events: none;
+}
+.composer {
+  max-width: 760px; margin: 0 auto; pointer-events: auto;
+  border: 1px solid var(--line-strong); border-radius: var(--r-4);
+  background: var(--panel); box-shadow: var(--shadow-pop);
+  transition: border-color .15s, box-shadow .15s;
+}
+.composer:focus-within { border-color: var(--green-line); }
+.cmp-context {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  padding: 9px var(--s-4) 0;
+  font-size: 11.5px; color: var(--ink-4);
+}
+.cmp-context .at {
+  display: inline-flex; align-items: center; gap: 5px;
+  color: var(--ink-2); background: var(--raised);
+  border: 1px dashed var(--line-strong); border-radius: var(--r-1);
+  padding: 2px 8px; cursor: pointer; transition: border-color .12s, color .12s;
+}
+.cmp-context .at:hover { border-color: var(--green-line); color: var(--green); }
+.cmp-context .at .k { color: var(--green); font-weight: 700; }
+.cmp-context .pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  color: var(--ink-2); background: var(--raised);
+  border: 1px solid var(--line); border-radius: var(--r-1); padding: 2px 7px;
+}
+.cmp-context .pill .fk { color: var(--green); }
+.cmp-context .pill .x { color: var(--ink-4); cursor: pointer; margin-left: 2px; }
+.cmp-input {
+  padding: var(--s-3) var(--s-4) 6px;
+  font-size: 14.5px; color: var(--ink); min-height: 26px;
+  line-height: 1.5;
+}
+.cmp-input .ph { color: var(--ink-4); }
+.cmp-bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px var(--s-3) 10px var(--s-4);
+}
+.selector {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--ink-2);
+  background: transparent; border: 1px solid var(--line); border-radius: var(--r-1);
+  padding: 5px 10px; cursor: pointer;
+  transition: border-color .12s, background .12s, color .12s;
+}
+.selector:hover { border-color: var(--line-strong); color: var(--ink); background: var(--raised); }
+.selector:focus-visible { outline: none; box-shadow: var(--focus); }
+.selector .lbl { color: var(--ink-4); }
+.selector .dot-g { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.selector .chev { color: var(--ink-4); }
+.cmp-bar .spacer { flex: 1; }
+.cmp-bar .attach {
+  width: 30px; height: 30px; border-radius: var(--r-1);
+  border: 1px solid var(--line); background: transparent; color: var(--ink-3);
+  display: grid; place-items: center; cursor: pointer;
+  transition: border-color .12s, color .12s;
+}
+.cmp-bar .attach:hover { border-color: var(--line-strong); color: var(--ink); }
+.cmp-bar .attach:focus-visible { outline: none; box-shadow: var(--focus); }
+.send {
+  width: 32px; height: 32px; border-radius: var(--r-2);
+  background: var(--green); border: 1px solid var(--green-strong);
+  color: #fff; display: grid; place-items: center; cursor: pointer;
+  transition: background .12s, transform .06s;
+}
+.send:hover { background: var(--green-strong); }
+.send:active { transform: scale(.94); }
+.send:focus-visible { outline: none; box-shadow: var(--focus); }
+
+/* misc */
+svg { display: block; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ============== RAIL ============== -->
+  <aside class="rail" aria-label="Conversaciones">
+    <div class="rail-head">
+      <div class="brand"><span class="glyph"><span>w</span></span> workass</div>
+      <button class="icon-btn" title="Buscar conversaciones" aria-label="Buscar">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      </button>
+    </div>
+
+    <button class="new-btn">
+      <span class="plus">+</span> Nueva conversación
+      <kbd>⌘N</kbd>
+    </button>
+
+    <div class="rail-scroll">
+      <!-- ACTIVAS -->
+      <div class="sec-label">Activas <span class="count">2</span></div>
+
+      <div class="conv active unread" tabindex="0">
+        <div class="conv-top">
+          <span class="dot-run" aria-hidden="true"></span>
+          <span class="conv-title">Race en el reaper de hibernación</span>
+          <span class="badge-run">corriendo</span>
+        </div>
+        <div class="conv-sub">Ejecutando go test ./daemon/reaper…</div>
+      </div>
+
+      <div class="conv" tabindex="0">
+        <div class="conv-top">
+          <span class="dot-unread" aria-hidden="true"></span>
+          <span class="conv-title">Migrar wire-protocol a framing v2</span>
+          <span class="conv-time">14:02</span>
+        </div>
+        <div class="conv-sub">Te propuse 2 cambios en manager.go</div>
+      </div>
+
+      <!-- BORRADORES -->
+      <div class="sec-label">Borradores <span class="count">1</span></div>
+
+      <div class="conv muted" tabindex="0">
+        <div class="conv-top">
+          <span class="conv-title">Rate limiter para el gateway ACP</span>
+          <span class="conv-time">ayer</span>
+        </div>
+        <div class="conv-sub">Borrador · «necesito un token bucket que…»</div>
+      </div>
+
+      <!-- ARCHIVADOS -->
+      <div class="sec-label">Archivados <span class="count">3</span></div>
+
+      <div class="conv muted" tabindex="0">
+        <div class="conv-top">
+          <span class="conv-title">Refactor del scheduler de sesiones</span>
+          <span class="conv-time">lun</span>
+        </div>
+        <div class="conv-sub">Cerrada · 14 cambios aplicados</div>
+      </div>
+      <div class="conv muted" tabindex="0">
+        <div class="conv-top">
+          <span class="conv-title">Fuga de goroutines en el hub</span>
+          <span class="conv-time">6 jul</span>
+        </div>
+        <div class="conv-sub">Cerrada · fix mergeado en main</div>
+      </div>
+      <div class="conv muted" tabindex="0">
+        <div class="conv-top">
+          <span class="conv-title">Tests flaky de reconexión</span>
+          <span class="conv-time">2 jul</span>
+        </div>
+        <div class="conv-sub">Cerrada · quarantine + retry</div>
+      </div>
+    </div>
+
+    <div class="rail-foot">
+      <button class="foot-row settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        Ajustes
+      </button>
+      <button class="foot-row">
+        <span class="avatar">MA</span>
+        <span class="who"><b>Martín A.</b><span>Plan Pro · workass</span></span>
+        <span class="gear">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+        </span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ============== MAIN ============== -->
+  <main class="main">
+    <div class="topbar">
+      <div class="crumbs">
+        <b>Race en el reaper de hibernación</b>
+        <span class="sep">·</span>
+        <span class="repo"><span class="brdot"></span>lagspace/daemon</span>
+      </div>
+      <div class="top-actions">
+        <span class="top-tag">rama <b style="color:var(--ink-2)">fix/reaper-race</b></span>
+        <button class="theme-toggle" id="themeBtn" aria-label="Cambiar tema" title="Cambiar tema">
+          <svg class="moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+          <svg class="sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="scroll">
+      <div class="axis">
+
+        <!-- USER MESSAGE -->
+        <div class="user-msg">
+          <div class="um-head"><span class="you">TÚ</span> Martín</div>
+          <p>El reaper está hibernando chats que todavía están trabajando. Encontrá la race y proponé un fix.</p>
+          <div class="chips">
+            <span class="chip"><span class="fk">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+            </span><span class="path">daemon/reaper/</span><b>reaper.go</b></span>
+          </div>
+        </div>
+
+        <!-- AGENT TURN -->
+        <div class="turn">
+          <div class="agent-head">
+            <span class="agent-mark">w</span>
+            <span class="agent-name">workass</span>
+            <span class="agent-model">· Claude Opus 4.8</span>
+          </div>
+
+          <!-- context line -->
+          <div class="context-line">
+            <span class="ctx-k">CONTEXTO</span>
+            <span class="ctx-file"><span class="fk">◆</span>reaper.go</span>
+            <span class="ctx-file"><span class="fk">◆</span>manager.go</span>
+            <span class="ctx-more">· 2 más</span>
+          </div>
+
+          <!-- thinking -->
+          <div class="thinking"><span class="spin" aria-hidden="true"></span> Razonando sobre el ciclo de vida de la sesión y el candado del mapa…</div>
+
+          <!-- plan -->
+          <div class="plan">
+            <div class="plan-head">
+              PLAN
+              <span class="pcount">1 de 3 completado</span>
+            </div>
+            <div class="plan-item pi-done">
+              <span class="pi-mark">✓</span>
+              <span class="pi-text">Leer <code class="inline" style="padding:0 4px">reaper.go</code> y localizar el barrido de hibernación</span>
+            </div>
+            <div class="plan-item pi-active">
+              <span class="pi-mark"></span>
+              <span class="pi-text">Aislar la race entre <code class="inline" style="padding:0 4px">markActive()</code> y el sweep</span>
+              <span class="pi-tag">en curso</span>
+            </div>
+            <div class="plan-item pi-pending">
+              <span class="pi-mark"></span>
+              <span class="pi-text">Proponer el fix y correr la suite del reaper</span>
+            </div>
+          </div>
+
+          <!-- tool row collapsible -->
+          <details class="tool" open>
+            <summary class="tool-summary">
+              <span class="tool-check">✓</span>
+              <span class="tname">Leer</span>
+              <span class="tfile">reaper.go</span>
+              <span class="tmeta">· 120 líneas</span>
+              <span class="chev">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+              </span>
+            </summary>
+            <div class="tool-body">
+<pre class="mono"><span class="ln">41</span>func (r *Reaper) sweep(now time.Time) {
+<span class="ln">42</span>    r.mu.RLock()
+<span class="ln">43</span>    snapshot := make([]*Session, 0, len(r.sessions))
+<span class="ln">44</span>    for _, s := range r.sessions {
+<span class="ln">45</span>        snapshot = append(snapshot, s)
+<span class="ln">46</span>    }
+<span class="ln">47</span>    r.mu.RUnlock()
+<span class="ln">48</span>    for _, s := range snapshot {
+<span class="ln">49</span>        if now.Sub(s.lastSeen) &gt; r.idle {
+<span class="ln">50</span>            r.hibernate(s)   // ← usa s.lastSeen leído sin candado
+<span class="ln">51</span>        }
+<span class="ln">52</span>    }
+<span class="ln">53</span>}</pre>
+            </div>
+          </details>
+
+          <!-- prose -->
+          <div class="prose">
+            <p>Confirmado: hay una <strong>race de tiempo-de-uso vs tiempo-de-chequeo</strong> (TOCTOU) sobre <code class="inline">s.lastSeen</code>. El barrido toma un snapshot del mapa bajo <code class="inline">RLock</code>, pero después lee <code class="inline">s.lastSeen</code> <strong>fuera</strong> del candado. Si un turno del agente llama a <code class="inline">markActive()</code> justo entre el snapshot y el chequeo, <span class="em-file">sweep</span> ve un valor viejo e hiberna una sesión que sigue trabajando.</p>
+            <p>La escritura y la lectura de <code class="inline">lastSeen</code> no comparten sincronización, así que el fix mínimo es hacer atómico ese campo y decidir la hibernación con un <em>compare-and-swap</em> del estado:</p>
+          </div>
+
+          <!-- code block -->
+          <div class="codeblock">
+            <div class="cb-head">
+              <span class="lang">Go</span>
+              <span style="color:var(--ink-4)">daemon/reaper/reaper.go</span>
+              <button class="copy">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+                Copiar
+              </button>
+            </div>
+            <pre class="mono"><code><span class="tok-com">// lastSeen ahora es atómico (UnixNano)</span>
+<span class="tok-key">func</span> (s *Session) <span class="tok-fn">markActive</span>() {
+    atomic.<span class="tok-fn">StoreInt64</span>(&s.lastSeen, time.<span class="tok-fn">Now</span>().<span class="tok-fn">UnixNano</span>())
+    s.state.<span class="tok-fn">CompareAndSwap</span>(stateIdle, stateWorking)
+}
+
+<span class="tok-key">func</span> (s *Session) <span class="tok-fn">idleFor</span>(now time.Time) time.Duration {
+    last := atomic.<span class="tok-fn">LoadInt64</span>(&s.lastSeen)
+    <span class="tok-key">return</span> now.<span class="tok-fn">Sub</span>(time.<span class="tok-fn">Unix</span>(<span class="tok-num">0</span>, last))
+}</code></pre>
+          </div>
+
+          <!-- reviewable EDIT CARD -->
+          <div class="edit-card">
+            <div class="ec-head">
+              <span class="ec-file"><span class="fk">◆</span>daemon/reaper/reaper.go</span>
+              <span class="ec-stat"><span class="add">+2</span><span class="del">−1</span></span>
+              <span class="ec-actions">
+                <button class="btn ghost">Ver diff</button>
+                <button class="btn primary">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6L9 17l-5-5"/></svg>
+                  Aplicar
+                </button>
+              </span>
+            </div>
+            <div class="diff">
+              <div class="row del">
+                <span class="gut">49</span>
+                <span class="code"><span class="sign">−</span>        if now.Sub(s.lastSeen) &gt; r.idle {</span>
+              </div>
+              <div class="row add">
+                <span class="gut">49</span>
+                <span class="code"><span class="sign">+</span>        if s.idleFor(now) &gt; r.idle &amp;&amp;</span>
+              </div>
+              <div class="row add">
+                <span class="gut">50</span>
+                <span class="code"><span class="sign">+</span>            s.state.CompareAndSwap(stateIdle, stateHibernating) {</span>
+              </div>
+            </div>
+            <div class="ec-foot">
+              <span class="hint">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+                El CAS garantiza que solo hibernan sesiones que siguen ociosas al momento del barrido.
+              </span>
+            </div>
+          </div>
+
+          <!-- small table -->
+          <div class="tbl-wrap">
+            <table class="mini">
+              <thead>
+                <tr><th>Acceso a <span class="mono">lastSeen</span></th><th>Antes</th><th>Después</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Lectura en <span class="mono">sweep</span></td><td><span class="warn">sin candado</span></td><td class="mono"><span class="ok">atomic.Load</span></td></tr>
+                <tr><td>Escritura en <span class="mono">markActive</span></td><td><span class="warn">sin candado</span></td><td class="mono"><span class="ok">atomic.Store</span></td></tr>
+                <tr><td>Decisión de hibernar</td><td><span class="warn">lectura simple</span></td><td class="mono"><span class="ok">CAS de estado</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="prose">
+            <p>Antes de aplicar, quiero correr la suite del reaper con el detector de carreras para confirmar que la race desaparece:</p>
+          </div>
+
+          <!-- permission card -->
+          <div class="perm" role="group" aria-label="Solicitud de permiso">
+            <div class="perm-top">
+              <span class="perm-ico">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+              </span>
+              <div class="perm-body">
+                <div class="perm-label">Pide permiso para ejecutar</div>
+                <code class="perm-cmd mono"><span class="prompt">$</span>go test -race ./daemon/reaper</code>
+                <div class="perm-note">Se ejecuta en <span class="mono" style="color:var(--ink-2)">lagspace/daemon</span> · sin acceso a red · ~8s estimado</div>
+                <div class="perm-actions">
+                  <button class="btn primary">Permitir una vez</button>
+                  <button class="btn">Permitir siempre</button>
+                  <button class="btn ghost">Rechazar</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- COMPOSER -->
+    <div class="composer-wrap">
+      <div class="composer">
+        <div class="cmp-context">
+          <span class="at"><span class="k">@</span> Añadir contexto</span>
+          <span class="pill"><span class="fk">◆</span> reaper.go <span class="x">×</span></span>
+          <span class="pill"><span class="fk">◆</span> manager.go <span class="x">×</span></span>
+        </div>
+        <div class="cmp-input"><span class="ph">Preguntá algo, o pedí un cambio…  Usá @ para traer archivos, símbolos o docs</span></div>
+        <div class="cmp-bar">
+          <button class="selector">
+            <span class="dot-g"></span>
+            <span class="lbl">Modelo</span> Opus 4.8
+            <span class="chev"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
+          </button>
+          <button class="selector">
+            <span class="lbl">Permisos</span> Preguntar
+            <span class="chev"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
+          </button>
+          <span class="spacer"></span>
+          <button class="attach" title="Adjuntar" aria-label="Adjuntar archivo">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M21.4 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3 3 0 0 1 4.24 4.24l-9.2 9.19a1 1 0 0 1-1.41-1.41l8.49-8.49"/></svg>
+          </button>
+          <button class="send" title="Enviar (⏎)" aria-label="Enviar">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M7 11l5-5 5 5M12 6v13"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var btn = document.getElementById('themeBtn');
+  function current() {
+    if (root.hasAttribute('data-theme')) return root.getAttribute('data-theme');
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  }
+  btn.addEventListener('click', function () {
+    var next = current() === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+  });
+  // details keyboard focus niceties already native; nothing external.
+})();
+</script>
+</body>
+</html>

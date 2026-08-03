@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pensamiento · Variante C — Bloque en vivo</title>
+<style>
+/* Tokens: verbatim from desktop/renderer2/src/styles/tokens.css (both themes). */
+:root{
+  color-scheme:dark;
+  --bg:#0f0e0d; --side:#151413; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+  --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#6f6b63;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --acc:#4fa583; --link:#8fb0ea; --amber:#d8a05a; --add:#4cae7f; --del:#d96b5f; --shell:#0b0a09;
+  /* See thinking-a-estado.html: light --muted is 4.03:1 on --bg, under AA at
+     12.5px, so the mock darkens it here. Product tokens untouched. */
+  --meta:var(--muted);
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#f2f0ed; --side:#faf9f7; --panel:#ffffff; --card:#ffffff; --field:#f1efeb;
+  --ink:#23211e; --ink2:#47443e; --muted:#7a756d; --faint:#a19c93;
+  --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.15);
+  --acc:#177353; --link:#3861b0; --amber:#9a6a1d; --add:#177347; --del:#bd4436; --shell:#eceae6;
+  --meta:#6e6961;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--shell); color:var(--ink);
+  font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; -webkit-font-smoothing:antialiased; padding:22px 24px 40px}
+svg{stroke-width:1.6; stroke:currentColor; fill:none; stroke-linecap:round; stroke-linejoin:round}
+
+.top{display:flex; align-items:baseline; gap:14px; margin:0 2px 20px}
+.top .t{font-size:15px; font-weight:640}
+.top .d{font-size:12px; color:var(--meta)}
+.top .sp{flex:1}
+.tgl{font:inherit; font-size:12px; color:var(--ink2); background:var(--panel); border:1px solid var(--line2);
+  border-radius:8px; padding:4px 11px; cursor:pointer}
+.tgl:hover{color:var(--ink)}
+
+.cols{display:flex; gap:22px; align-items:flex-start; flex-wrap:wrap}
+.col{width:420px}
+.ph{margin:0 2px 11px}
+.ph .k{font:600 10px/1 var(--mono); letter-spacing:.13em; color:var(--acc); text-transform:uppercase}
+.ph .n{font-size:14px; font-weight:620; margin:6px 0 0}
+.ph .s{font-size:11.5px; color:var(--meta); margin:4px 0 0; line-height:1.45}
+.ph.bad .k{color:var(--del)}
+
+.frame{background:var(--bg); border:1px solid var(--line); border-radius:14px; padding:16px 18px 18px;
+  box-shadow:0 18px 50px -26px rgba(0,0,0,.6)}
+.userpill{display:flex; flex-direction:column; align-items:flex-end; margin:0 0 18px}
+.userpill-text{background:var(--field); border:1px solid var(--line); border-radius:14px; padding:7px 13px; max-width:78%; font-size:13px}
+.p{margin:0 0 13px; font-size:13.5px; line-height:1.62; color:var(--ink)}
+.p:last-child{margin-bottom:0}
+
+/* HOY */
+.steprow{display:flex; align-items:flex-start; gap:7px; color:var(--meta); font-size:12.5px; margin:12px 0;
+  cursor:pointer; border:0; background:transparent; font-family:inherit; text-align:left; padding:0; width:fit-content}
+.steprow .stlbl{text-decoration:underline dotted color-mix(in srgb,var(--faint) 65%,transparent); text-underline-offset:3px}
+
+/* shared collapsed row (identical in all three variants) */
+.think{display:flex; align-items:center; gap:8px; margin:12px 0; font-size:12.5px; width:fit-content;
+  background:transparent; border:0; padding:0; font-family:inherit; color:var(--meta); text-align:left; cursor:pointer}
+.think .dot{width:6px; height:6px; border-radius:50%; background:var(--acc); flex:none;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 18%,transparent); animation:bp 1.5s ease-in-out infinite}
+.think .chk{width:6px; height:6px; border-radius:50%; background:var(--line2); flex:none}
+.think .lbl{color:var(--ink2)}
+.think.done .lbl{text-decoration:underline dotted color-mix(in srgb,var(--faint) 65%,transparent); text-underline-offset:3px}
+.think.done:hover .lbl{color:var(--ink); text-decoration-color:var(--faint)}
+.think .el{font:11px/1 var(--mono); font-variant-numeric:tabular-nums; color:var(--meta)}
+.think .chev{color:var(--faint); display:inline-grid; place-items:center; transition:transform .15s ease}
+.think .chev svg{width:12px; height:12px}
+.think.open .chev{transform:rotate(90deg)}
+@keyframes bp{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* ── VARIANTE C · BLOQUE EN VIVO ───────────────────────────────────────────────
+   For the reader who wants to watch the model think. The reasoning streams into
+   a ruled, dimmed window separated from output by a left rule, its own color
+   ramp and a smaller size — it can never be mistaken for the answer. The window
+   is a fixed 5-line viewport: text is pinned to the BOTTOM and grows upward, so
+   older lines dissolve under a gradient at the top instead of being clipped.
+   The tail in flight ends in a blinking caret, which is what makes an unfinished
+   sentence legible AS unfinished rather than as a cut. Nothing is ever sliced
+   at a character count. When the thinking closes the block collapses into the
+   same one-line "Pensó · 18s" the other variants settle to. ────────────────── */
+.tstream{margin:10px 0 16px; padding-left:13px; border-left:2px solid var(--line2)}
+.twin{position:relative; height:100px; overflow:hidden}
+.twin .inner{position:absolute; left:0; right:0; bottom:0; color:var(--meta); font-size:12.5px; line-height:1.62}
+/* older text dissolves into the page instead of being clipped mid-line */
+.twin::before{content:''; position:absolute; left:0; right:0; top:0; height:46px; z-index:1; pointer-events:none;
+  background:linear-gradient(to bottom, var(--bg) 8%, color-mix(in srgb,var(--bg) 55%,transparent) 55%, transparent)}
+.caret{display:inline-block; width:2px; height:1.05em; background:var(--acc); vertical-align:-2px; margin-left:2px;
+  animation:blink 1.05s steps(1) infinite}
+@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+
+.tfull{margin:2px 0 16px; padding:2px 0 2px 13px; border-left:2px solid var(--line2);
+  color:var(--ink2); font-size:12.5px; line-height:1.62; white-space:pre-wrap}
+
+.mon{margin:26px 2px 0; max-width:1304px}
+.mon .mh{font:600 10px/1 var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--faint); margin:0 0 8px}
+.mon .mb{background:var(--panel); border:1px solid var(--line); border-radius:11px; padding:11px 13px;
+  font:11.5px/1.6 var(--mono); color:var(--meta); min-height:74px; white-space:pre-wrap}
+.mon .mb b{color:var(--ink2); font-weight:400}
+.mon .mb .cut{color:var(--del)}
+.note{margin:22px 2px 0; max-width:860px; font-size:12px; color:var(--meta); line-height:1.65}
+.note b{color:var(--ink2); font-weight:600}
+@media (prefers-reduced-motion:reduce){ .think .dot{animation:none} .caret{animation:none} }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div>
+    <div class="t">Pensamiento · Variante C — <b>Bloque en vivo</b></div>
+    <div class="d">Se lee el razonamiento entero mientras corre, en una ventana con cursor: la cola se ve inconclusa, no cortada.</div>
+  </div>
+  <span class="sp"></span>
+  <button class="tgl" id="theme">Claro</button>
+</header>
+
+<div class="cols">
+
+  <div class="col">
+    <div class="ph bad">
+      <div class="k">Hoy · el problema</div>
+      <div class="n">Corta a 90 caracteres, en vivo</div>
+      <div class="s">una línea, recortada por número de caracteres, que además cambia entera en cada evento del daemon</div>
+    </div>
+    <div class="frame">
+      <div class="userpill"><div class="userpill-text">Arreglá la fila de pensamiento, corta las frases.</div></div>
+      <button class="steprow"><span class="stbody"><span class="stlbl">Pensó</span> · <span id="hoy"></span></span></button>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="ph">
+      <div class="k">Variante C · en curso</div>
+      <div class="n">Ventana de cinco líneas, con cursor</div>
+      <div class="s">el texto se ancla abajo y crece hacia arriba · lo viejo se desvanece · el cursor marca que la frase sigue</div>
+    </div>
+    <div class="frame">
+      <div class="userpill"><div class="userpill-text">Arreglá la fila de pensamiento, corta las frases.</div></div>
+      <div class="think open" id="hdr" aria-expanded="true">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="lbl">Pensando</span>
+        <span class="el" id="clock">0:07</span>
+        <span class="chev" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span>
+      </div>
+      <div class="tstream" id="stream">
+        <div class="twin"><div class="inner" id="live"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="ph">
+      <div class="k">Variante C · terminado</div>
+      <div class="n">Se pliega solo</div>
+      <div class="s">al cerrar el razonamiento la ventana se colapsa a la misma fila de una línea; el texto queda a un clic</div>
+    </div>
+    <div class="frame">
+      <div class="userpill"><div class="userpill-text">Arreglá la fila de pensamiento, corta las frases.</div></div>
+
+      <button class="think done" id="t1" aria-expanded="false">
+        <span class="chk" aria-hidden="true"></span>
+        <span class="lbl">Pensó</span>
+        <span class="el">18s</span>
+      </button>
+      <p class="p">La fila de hoy recorta el razonamiento a noventa caracteres, así que casi siempre parte una palabra al medio. Cambié el tratamiento: el razonamiento corre en su propia ventana y al cerrar se pliega a una línea.</p>
+
+      <div style="height:22px"></div>
+
+      <button class="think done" id="t2" aria-expanded="true">
+        <span class="chk" aria-hidden="true"></span>
+        <span class="lbl">Pensó</span>
+        <span class="el">18s</span>
+      </button>
+      <div class="tfull" id="t2b">Voy a revisar cómo se arma hoy la fila de pensamiento antes de tocar nada. El renderer corta el texto a noventa caracteres, así que la primera línea casi siempre queda partida a la mitad de una palabra. Eso explica por qué la fila cambia de contenido mientras el modelo sigue escribiendo. La opción más honesta es no mostrar fragmentos: o una frase completa, o nada.</div>
+      <p class="p">La fila de hoy recorta el razonamiento a noventa caracteres, así que casi siempre parte una palabra al medio.</p>
+    </div>
+  </div>
+</div>
+
+<div class="mon">
+  <div class="mh">Sólo el mock · búfer crudo que llega del modelo (C lo muestra completo; hoy sólo se vería lo gris)</div>
+  <div class="mb" id="raw"></div>
+</div>
+
+<div class="note">
+  <b>Por qué no es un corte.</b> El recorte de hoy termina en la nada: el lector no sabe si la frase terminó o si el renderer
+  la cortó. Acá la cola siempre termina en un cursor que parpadea, dentro de un bloque con regla, color y tamaño distintos
+  del texto de respuesta. Una frase a medias se lee como una frase en curso, que es lo que es.
+  El costo es altura: son cinco líneas de chat mientras el modelo piensa. El encabezado se pliega con un clic y recuerda la elección.
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement, btn=document.getElementById('theme');
+  btn.onclick=function(){
+    var light=root.getAttribute('data-theme')==='light';
+    root.setAttribute('data-theme', light?'dark':'light');
+    btn.textContent=light?'Claro':'Oscuro';
+  };
+
+  var TXT="Voy a revisar cómo se arma hoy la fila de pensamiento antes de tocar nada. El renderer corta el texto a noventa caracteres, así que la primera línea casi siempre queda partida a la mitad de una palabra. Eso explica por qué la fila cambia de contenido mientras el modelo sigue escribiendo. La opción más honesta es no mostrar fragmentos: o una frase completa, o nada. Después reviso el compositor, que hoy ancla el botón al borde inferior de la caja.";
+  var hoy=document.getElementById('hoy'), raw=document.getElementById('raw'),
+      clock=document.getElementById('clock'), live=document.getElementById('live');
+  var i=0, t0=0;
+  function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+  function fmt(s){ var m=Math.floor(s/60); var r=s%60; return m+":"+(r<10?"0":"")+r; }
+  function tick(){
+    i+=2+Math.floor(Math.random()*4);
+    if(i>TXT.length){ i=0; t0=0; }
+    t0+=0.06;
+    var buf=TXT.slice(0,i);
+    hoy.textContent=buf.split("\n")[0].slice(0,90);
+    raw.innerHTML="<b>"+esc(buf.slice(0,90))+"</b><span class='cut'>"+esc(buf.slice(90))+"</span>";
+    clock.textContent=fmt(Math.floor(t0));
+    live.innerHTML=esc(buf)+"<span class='caret'></span>";
+  }
+  setInterval(tick,60); tick();
+
+  var hdr=document.getElementById('hdr'), stream=document.getElementById('stream');
+  hdr.onclick=function(){
+    var open=hdr.classList.toggle('open');
+    hdr.setAttribute('aria-expanded',String(open));
+    stream.style.display=open?'':'none';
+  };
+
+  document.getElementById('t1').onclick=function(){
+    var open=this.getAttribute('aria-expanded')==='true';
+    this.setAttribute('aria-expanded',String(!open));
+    var b=document.getElementById('t1b');
+    if(!open && !b){ b=document.createElement('div'); b.className='tfull'; b.id='t1b'; b.textContent=TXT; this.after(b); }
+    else if(b){ b.remove(); }
+  };
+  document.getElementById('t2').onclick=function(){
+    var b=document.getElementById('t2b');
+    var open=this.getAttribute('aria-expanded')==='true';
+    this.setAttribute('aria-expanded',String(!open));
+    b.style.display=open?'none':'';
+  };
+})();
+</script>
+</body>
+</html>
