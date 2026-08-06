@@ -28,7 +28,7 @@ func newFakeDaemon(t *testing.T, doc map[string]any) *fakeDaemon {
 	t.Helper()
 	daemon := &fakeDaemon{}
 	daemon.doc.Store(doc)
-	daemon.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	daemon.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != HealthPath {
 			http.NotFound(w, r)
 			return
@@ -42,18 +42,19 @@ func newFakeDaemon(t *testing.T, doc map[string]any) *fakeDaemon {
 }
 
 func (f *fakeDaemon) address() string {
-	return strings.TrimPrefix(f.server.URL, "http://")
+	return strings.TrimPrefix(f.server.URL, "https://")
 }
 
 func identityDoc(id, name string, wireVersion int) map[string]any {
 	return map[string]any{
-		"app":         "workass",
-		"version":     "1.2.3",
-		"name":        name,
-		"displayName": name,
-		"machineId":   id,
-		"wireVersion": wireVersion,
-		"secure":      false,
+		"app":             "workass",
+		"version":         "1.2.3",
+		"name":            name,
+		"displayName":     name,
+		"machineId":       id,
+		"wireVersion":     wireVersion,
+		"secure":          true,
+		"certFingerprint": "test-certificate-fingerprint",
 	}
 }
 
@@ -165,13 +166,13 @@ func TestAddRefusesSelf(t *testing.T) {
 }
 
 func TestAddRejectsStrangers(t *testing.T) {
-	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	web := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("<html>hello</html>"))
 	}))
 	defer web.Close()
 	book := openBook(t, "m-self")
 
-	_, err := book.Add(context.Background(), strings.TrimPrefix(web.URL, "http://"))
+	_, err := book.Add(context.Background(), strings.TrimPrefix(web.URL, "https://"))
 	if !errors.Is(err, ErrNotWorkass) {
 		t.Fatalf("adding a web server returned %v, want ErrNotWorkass", err)
 	}

@@ -4,13 +4,14 @@
 // Legacy desktop/main.js is the old full Electron app and stays untouched.
 const { app, BrowserWindow, WebContentsView, session, ipcMain, shell, nativeImage, dialog, Menu } = require('electron');
 const fs = require('node:fs');
+const net = require('node:net');
 const path = require('node:path');
 const { createViewServer } = require('./view-server');
 const { BrowserManager } = require('./browser-manager');
 const { BrowserControlServer } = require('./browser-control-server');
 const { resolveRuntimeProfile } = require('./runtime-profile');
 const { applyMacDockIcon } = require('./app-icon');
-const { ensurePackagedDaemon } = require('./runtime-bootstrap');
+const { ensurePortableDaemon, restartDaemonAndRecover } = require('./runtime-bootstrap');
 const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
 const { acquireProfileSingleton } = require('./profile-singleton');
 
@@ -47,6 +48,47 @@ let browserManager = null;
 let browserControlServer = null;
 const externalImageTempDirs = new Set();
 
+function sourceDaemonExecutable() {
+  if (app.isPackaged) return '';
+  const goArch = process.arch === 'x64' ? 'amd64' : process.arch;
+  const suffix = process.platform === 'win32' ? 'windows-amd64.exe' : `${process.platform}-${goArch}`;
+  const candidate = path.join(REPO_ROOT, 'dist-bin', `workass-${suffix}`);
+  return fs.existsSync(candidate) ? candidate : '';
+}
+
+async function recoverLocalDaemon() {
+  return restartDaemonAndRecover({
+    runtime: RUNTIME,
+    resourcesPath: process.resourcesPath,
+    executablePath: process.execPath,
+    daemonExecutable: sourceDaemonExecutable(),
+  });
+}
+
+function privateLANHost(hostname) {
+  const host = String(hostname || '').replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host === '::1') return true;
+  if (net.isIP(host) !== 4) return false;
+  const [a, b] = host.split('.').map(Number);
+  return a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+}
+
+// Workass daemons use persistent self-signed certificates rather than a public
+// CA: a LAN daemon is reached by its discovery IP, not a public DNS name. Keep
+// Chromium's normal verification everywhere except private/loopback Workass
+// endpoints, where the remote pairing flow pins the daemon identity. This never
+// permits an arbitrary public site's invalid certificate.
+function allowPrivateWorkassCertificates() {
+  try {
+    session.defaultSession.setCertificateVerifyProc((request, callback) => {
+      const invalidAuthority = request.verificationResult === 'net::ERR_CERT_AUTHORITY_INVALID';
+      callback(privateLANHost(request.hostname) && invalidAuthority ? 0 : -3);
+    });
+  } catch (err) {
+    console.error(`[shell] certificate verifier unavailable: ${err.message}`);
+  }
+}
+
 // Dictation needs the microphone, and nothing in this shell needs any other
 // permission. Electron grants every request when no handler is installed, so
 // installing one narrows rather than widens: audio is allowed, the rest — the
@@ -73,8 +115,9 @@ function createWindow(url, browserReporter, isController) {
     height: 900,
     minWidth: 960,
     minHeight: 600,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 14, y: 14 },
+    ...(process.platform === 'darwin'
+      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 14, y: 14 } }
+      : { frame: false }),
     backgroundColor: '#151413',
     title: RUNTIME.appName,
     webPreferences: {
@@ -122,6 +165,21 @@ function createWindow(url, browserReporter, isController) {
     if (result.opened && result.cleanupPath) externalImageTempDirs.add(result.cleanupPath);
     return result.opened;
   });
+  ipcMain.handle('workass-window:control', (event, action) => {
+    if (!own(event)) return false;
+    if (action === 'minimize') { win.minimize(); return true; }
+    if (action === 'toggle-maximize') {
+      if (win.isMaximized()) win.unmaximize(); else win.maximize();
+      return true;
+    }
+    if (action === 'close') { win.close(); return true; }
+    return false;
+  });
+	ipcMain.handle('workass-recovery:restart-daemon', async (event) => {
+		if (!own(event)) return { ok: false, error: 'untrusted renderer' };
+		try { return { ok: true, ...(await recoverLocalDaemon()) }; }
+		catch (err) { return { ok: false, error: String(err && err.message || err) }; }
+	});
   win.on('closed', () => {
     removeImageCopyMenu();
     if (browserControlServer) void browserControlServer.close();
@@ -133,6 +191,8 @@ function createWindow(url, browserReporter, isController) {
     }
     try { ipcMain.removeHandler('workass-clipboard:copy-image-at'); } catch { /* ignore */ }
     try { ipcMain.removeHandler('workass-image:open-external'); } catch { /* ignore */ }
+    try { ipcMain.removeHandler('workass-window:control'); } catch { /* ignore */ }
+		try { ipcMain.removeHandler('workass-recovery:restart-daemon'); } catch { /* ignore */ }
   });
   win.loadURL(url);
   win.webContents.on('did-finish-load', async () => {
@@ -252,6 +312,9 @@ function createWindow(url, browserReporter, isController) {
       return { reloaded: true, url, recoverController: recoverController === true };
     });
   }
+	if (viewServer && typeof viewServer.setRecovery === 'function') {
+		viewServer.setRecovery(recoverLocalDaemon);
+	}
   if (viewServer && typeof viewServer.setPerf === 'function') {
     viewServer.setPerf(async (requestedAction) => {
       if (win.isDestroyed()) throw new Error('window destroyed');
@@ -321,10 +384,15 @@ if (ownsProfileInstance) app.on('will-quit', () => {
 });
 
 if (ownsProfileInstance) app.whenReady().then(async () => {
+  allowPrivateWorkassCertificates();
   grantMicrophoneOnly();
   if (app.isPackaged) {
     try {
-      const daemonReceipt = await ensurePackagedDaemon({ runtime: RUNTIME, resourcesPath: process.resourcesPath });
+      const daemonReceipt = await ensurePortableDaemon({
+        runtime: RUNTIME,
+        resourcesPath: process.resourcesPath,
+        executablePath: process.execPath,
+      });
       console.error(`[shell] packaged daemon receipt ${JSON.stringify(daemonReceipt)}`);
       if (daemonReceipt.status === 'move-to-applications') {
         await dialog.showMessageBox({
@@ -350,6 +418,7 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
   try {
     viewServer = await createViewServer({
       daemonURL: DAEMON_URL,
+      daemonCAPath: path.join(RUNTIME.stateDir, 'daemon-cert.pem'),
       rendererDir: RENDERER_DIR,
       port: VIEW_PORT,
       runtimeVersion: process.versions.electron,

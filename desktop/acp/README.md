@@ -339,7 +339,20 @@ the development renderer port or development data root. See
 
 ### Windows development and production
 
-Keep using the existing no-npm vendored Electron workflow:
+The portable Windows package is staged on the Mac build host; Windows only
+extracts and launches the finished tree:
+
+```sh
+scripts/stage-windows-portable.sh --version X.Y.Z
+```
+
+Launch `Workass.exe` from the extracted directory. It finds
+`workass-daemon.exe` beside itself, starts it with `--headless` if the daemon
+health endpoint is unavailable, and connects to an already-running daemon when
+one exists. The package includes the pinned Electron runtime, renderer,
+portable Node, and native provider hosts, so Windows does not run npm.
+
+The legacy scripts remain available only for existing endpoint workflows:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File desktop\scripts\Dev-Launch.ps1
@@ -352,7 +365,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File desktop\scripts\Rebuild-
 ```
 
 Do not add Electron to `desktop/package.json`; the restricted Windows environment depends on its
-vendored runtime.
+vendored runtime. For daemon-only operation, use
+`workass-daemon.exe --prod --headless --install-service`; this installs a
+per-user Scheduled Task on Windows and a user LaunchAgent on macOS.
 
 ## Future Go Split
 

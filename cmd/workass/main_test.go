@@ -2311,7 +2311,7 @@ func TestWireProviderUpdatesAndMockAppUpdateReplayToLateClient(t *testing.T) {
 	}
 	update := updates[0].(map[string]any)
 	if update["providerId"] != "qwen" || update["cli"] != "qwen" || update["installed"] != "0.58.1" ||
-		update["latest"] != "0.58.10" || update["updateAvailable"] != true || update["hint"] != "npm i -g @qwen-code/qwen-code" {
+		update["latest"] != "0.58.10" || update["updateAvailable"] != true || update["hint"] != "qwen update" {
 		t.Fatalf("replayed qwen update = %#v", update)
 	}
 	t.Logf("trace replay providers:updates checkedAt=%s provider=%s installed=%s latest=%s updateAvailable=%v", updatesPayload["checkedAt"], update["providerId"], update["installed"], update["latest"], update["updateAvailable"])

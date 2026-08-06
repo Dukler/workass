@@ -59,6 +59,25 @@ Defaults:
 
 Daemon logs are written to stderr. Stdout is unused.
 
+## Startup recovery
+
+The Electron command `⌘,` → **Reiniciar daemon y reconectar** is the normal
+recovery path. It performs a graceful local daemon stop, preserves only
+malformed startup records beneath `state/recovery/`, starts the same sibling
+daemon again, and reloads the shell. It never deletes chats, credentials, or a
+valid machine identity.
+
+For a daemon-only diagnosis, run the same narrow repair manually before
+starting the daemon again:
+
+```sh
+workass --repair-startup --state-dir /absolute/path/to/state
+```
+
+If a malformed TLS certificate/key pair is repaired, Workass mints a new
+machine certificate on the next start. Existing remote peers must then pair
+again; the broken pair remains preserved under `state/recovery/`.
+
 To run explicitly against the mock:
 
 ```sh
@@ -83,7 +102,8 @@ Expected result: `ok: true`, protocol version `1`, and agent name `Workass Mock 
 
 ## LAN Access Approval and Controller Lease
 
-Device tokens are presented on WebSocket connect as a query parameter:
+Device tokens are presented on WebSocket connect as a query parameter after the
+one-time approval flow:
 
 ```text
 ws://<host>:8788/?deviceToken=<64-hex-token>&deviceName=<name>
@@ -127,8 +147,11 @@ Localhost dev ergonomics: when `--trust-localhost=true`, localhost WebSocket cli
 valid token are auto-approved and receive a token without host approval. Tests can force the real
 approval path on loopback with `--trust-localhost=false`.
 
-Exactly one approved device owns the controller lease. The first approved device to connect after
-daemon start gets it. Another approved device can call `lan:take-control`; takeover is immediate and
+Exactly one approved device owns the controller lease. The normal desktop pairing flow is: add the
+other machine by address, approve its `lan:access-request` from the other Workass window, and let
+the daemon issue the device-specific token automatically. No fleet key needs to be copied. The
+fleet key remains an optional unattended-enrolment mechanism. The first approved device to connect
+after daemon start gets the lease. Another approved device can call `lan:take-control`; takeover is immediate and
 broadcasts:
 
 ```json
@@ -216,15 +239,17 @@ for `--port 80` because a managed machine is reachable only on port 80. On Windo
 
 ## Service Wrappers
 
-Windows installs alongside the blessed Electron rebuild flow and does not replace or edit it:
+The portable Electron shell owns the normal lifecycle: it starts the sibling
+daemon when needed and connects to an existing healthy daemon. For daemon-only
+operation, install a per-user service from the daemon itself:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\windows\Install-WorkassService.ps1 -ExePath "C:\Program Files\Workass\workass.exe" -StartNow
+workass-daemon.exe --prod --headless --install-service
 ```
 
-The wrapper uses `schtasks.exe /SC ONSTART /RU SYSTEM`, not third-party service hosts. Keep the
-validated executable name and path stable for endpoint tooling; copy a new binary over the same
-path when upgrading.
+Windows uses a least-privilege Scheduled Task and macOS uses a user LaunchAgent;
+both launch the same daemon with an explicit state directory, port, and bind.
+The legacy Windows service wrapper remains for existing endpoint workflows.
 
 macOS user launchd install:
 

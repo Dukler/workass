@@ -24,8 +24,21 @@ test('the reload clears the controller marker, which is what a plain reload does
   assert.deepEqual(removed, [CONTROLLER_MIGRATION_KEY]);
   assert.equal(reloaded, 1);
   assert.deepEqual(receipt, {
-    markerCleared: true, takeControlAttempted: true, takeControlSettled: true, reloaded: true,
+    markerCleared: true, takeControlAttempted: true, takeControlSettled: true,
+    daemonRestartAttempted: false, daemonRestartSettled: false, reloaded: true,
   });
+});
+
+test('the recovery command restarts the local daemon before reloading', async () => {
+  const calls: string[] = [];
+  const receipt = await forceReconnect({
+    storage: { removeItem: () => {} }, takeControl: undefined,
+    restartDaemon: async () => { calls.push('restart'); return { ok: true }; },
+    reload: () => { calls.push('reload'); },
+  });
+  assert.deepEqual(calls, ['restart', 'reload']);
+  assert.equal(receipt.daemonRestartAttempted, true);
+  assert.equal(receipt.daemonRestartSettled, true);
 });
 
 // The state this is FOR is a wedged socket, so an invoke that never answers must

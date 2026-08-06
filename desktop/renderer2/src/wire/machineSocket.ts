@@ -283,6 +283,9 @@ export class MachineSocket {
         this.credentials = { ...this.credentials, deviceToken: undefined };
         this.opts.clearCredentials?.(this.opts.machineId);
       }
+      // Pairing is an explicit user action.  A terminal response must not make
+      // a rejected request silently reconnect forever in the background.
+      this.closedByCaller = true;
       this.setState('rejected', { reason: String(state.reason ?? state.state ?? '') });
     }
   }

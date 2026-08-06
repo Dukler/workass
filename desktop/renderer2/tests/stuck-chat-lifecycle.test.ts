@@ -245,6 +245,26 @@ test('a failed queued flush preserves the exact FIFO head object', async () => {
   assert.strictEqual(owner.queue?.[0], head);
 });
 
+test('a digest cannot erase a queue mutation while its save is in flight', () => {
+  const { subject, owner } = subjectWithChat();
+  owner.messages.push({
+    id: 'assistant-running', role: 'assistant', content: 'working', status: 'running',
+    at: null, events: [], jobId: 'job-running',
+  } as Msg);
+  subject.state.connection = 'connected';
+  subject.schedulePersist = () => {};
+
+  assert.equal(subject.queueDraftMessage(owner.id, 'must survive refresh', []), true);
+  assert.equal(owner.queue?.[0].text, 'must survive refresh');
+
+  // The server still has the pre-queue snapshot when the digest repair lands.
+  // The pending queue fence must keep the renderer's exact FIFO projection.
+  const staleServer = subject.toMirror(false);
+  staleServer.chats[0].queue = undefined;
+  assert.equal(subject.restoreSessionSnapshot(staleServer), true);
+  assert.equal(subject.chat(owner.id)?.queue?.[0].text, 'must survive refresh');
+});
+
 test('digest heartbeat falls back to app:meta after an old daemon rejects state:digest', async () => {
   const previousWindow = (globalThis as any).window;
   let digestCalls = 0;

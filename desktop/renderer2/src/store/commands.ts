@@ -26,6 +26,9 @@ export interface ReconnectDeps {
   /** The LOCAL bridge's lan:take-control. Never the machine router's: control of
    *  a remote daemon is not what a reload on this machine is asking for. */
   takeControl?: () => Promise<unknown>;
+	/** Shell-owned daemon restart + startup repair. It is local-only and may be
+	 * absent in a plain browser client, where reconnect still degrades safely. */
+	 restartDaemon?: () => Promise<unknown>;
   reload?: () => void;
   timeoutMs?: number;
 }
@@ -36,6 +39,8 @@ export interface ReconnectReceipt {
   markerCleared: boolean;
   takeControlAttempted: boolean;
   takeControlSettled: boolean;
+	 daemonRestartAttempted: boolean;
+	 daemonRestartSettled: boolean;
   reloaded: boolean;
 }
 
@@ -50,6 +55,13 @@ function defaultTakeControl(): (() => Promise<unknown>) | undefined {
     api?: { lanTakeControl?: () => Promise<unknown> };
   }).api?.lanTakeControl;
   return typeof fn === 'function' ? () => fn() : undefined;
+}
+
+function defaultRestartDaemon(): (() => Promise<unknown>) | undefined {
+	const fn = typeof window === 'undefined' ? undefined : (window as unknown as {
+		workassRecovery?: { restartDaemon?: () => Promise<unknown> };
+	}).workassRecovery?.restartDaemon;
+	return typeof fn === 'function' ? () => fn() : undefined;
 }
 
 /**
@@ -67,7 +79,8 @@ function defaultTakeControl(): (() => Promise<unknown>) | undefined {
  */
 export async function forceReconnect(deps: ReconnectDeps = {}): Promise<ReconnectReceipt> {
   const receipt: ReconnectReceipt = {
-    markerCleared: false, takeControlAttempted: false, takeControlSettled: false, reloaded: false,
+	markerCleared: false, takeControlAttempted: false, takeControlSettled: false,
+	daemonRestartAttempted: false, daemonRestartSettled: false, reloaded: false,
   };
 
   const storage = deps.storage ?? defaultStorage();
@@ -83,6 +96,16 @@ export async function forceReconnect(deps: ReconnectDeps = {}): Promise<Reconnec
     ]);
     receipt.takeControlSettled = settled;
   }
+
+	const restartDaemon = deps.restartDaemon ?? defaultRestartDaemon();
+	if (restartDaemon) {
+		receipt.daemonRestartAttempted = true;
+		const ms = deps.timeoutMs ?? TAKE_CONTROL_TIMEOUT_MS;
+		receipt.daemonRestartSettled = await Promise.race([
+			Promise.resolve().then(restartDaemon).then(() => true, () => true),
+			new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms)),
+		]);
+	}
 
   const reload = deps.reload ?? (typeof location === 'undefined' ? undefined : () => location.reload());
   if (reload) { receipt.reloaded = true; reload(); }

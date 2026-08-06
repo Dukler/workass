@@ -19,7 +19,8 @@ does not create identity, relax Gatekeeper, or overwrite live code.
   `config/macos/electron.version` and verified against Electron's published
   SHA-256;
 - the Go daemon;
-- the Claude and Codex ACP adapters;
+  - Workass-owned Claude/Codex native hosts plus Anthropic's checksum-pinned
+    official Claude Agent SDK (never vendor CLI binaries or credentials);
 - pinned Node.js LTS runtime bytes, fetched at build time from nodejs.org and
   checked against a committed SHA-256;
 - a first-launch user LaunchAgent bootstrap, so a clean Mac needs no clone,
@@ -108,19 +109,63 @@ The corresponding normal Windows artifact requires:
 
 Existing protected Windows rebuild scripts remain untouched.
 
-### Portable one-shot bundle — implemented
+### Portable Electron bundle — implemented
 
-For endpoint-managed Windows machines, a separate portable
-lane deliberately avoids the full installer above: no MSI, no services, no
-registry hives, no admin. `scripts/stage-windows-portable.sh --version X.Y.Z`
-builds and stages `dist-release/windows/X.Y.Z/` containing the Go daemon, the
-checksum-pinned portable `node.exe`, and the vendored Claude/Codex native
-hosts, plus `scripts/windows/Install-Workass.ps1` — a one-shot user-level
-installer that copies the bundle to a user-writable folder, removes
-Mark-of-the-Web once, and optionally registers a least-privilege per-user
-Scheduled Task for logon autostart. Signed upstream binaries are left
-byte-for-byte intact. This lane does not replace the signed-installer road; it
-trades the update feed and Authenticode identity for zero-touch portability.
+For endpoint-managed Windows machines, a separate portable lane deliberately
+avoids the full installer above: no MSI, no registry hives, and no admin. The
+Mac build host runs:
+
+```sh
+scripts/stage-windows-portable.sh --version X.Y.Z
+```
+
+The resulting zip contains `Workass.exe`, `workass-daemon.exe`, the renderer,
+the checksum-pinned portable `node.exe`, and the vendored Claude/Codex native
+hosts in one extracted directory. Launching `Workass.exe` starts the sibling
+daemon with `--headless` when its health endpoint is unavailable; otherwise the
+Electron shell connects to the already-running daemon. The same sibling-daemon
+handoff is used by the packaged macOS shell.
+
+For daemon-only operation, run the sibling executable directly:
+
+```powershell
+workass-daemon.exe --prod --headless --install-service
+```
+
+This creates a least-privilege per-user Scheduled Task on Windows or a user
+LaunchAgent on macOS. Signed upstream binaries are left byte-for-byte intact.
+This lane does not replace the signed-installer road; it trades the update feed
+and Authenticode identity for zero-touch portability.
+
+## Release checklist — Mac + Windows portable
+
+Use one version for both artifacts. Build from a clean, committed `main`; do
+not publish a ZIP from `dist-bin` or a loose renderer directory. The release
+must be self-contained at extraction time.
+
+1. Run the guarded dev recovery check. In Workass press `⌘,`, then Enter on
+   **Reiniciar daemon y reconectar**. It must replace the dev daemon process
+   and return with controller authority and a populated catalog. Recovery
+   preserves malformed startup files under `state/recovery/`; if it has to
+   replace the TLS certificate, remote machines must pair again.
+2. Build and notarize the Mac release using
+   `scripts/release-workass-macos.sh --version X.Y.Z --build-number N
+   --notary-profile PROFILE`. This produces the DMG and update ZIP.
+3. Build the Windows portable release on the Mac with
+   `scripts/stage-windows-portable.sh --version X.Y.Z --output-root
+   "$PWD/dist-release/windows"`.
+4. Inspect the Windows ZIP before publishing. Its top-level extracted folder
+   must contain `Workass.exe`, `workass-daemon.exe`, `resources/app`,
+   `resources/renderer`, `node/windows-amd64/node.exe`, and
+   `frontier-hosts/windows-amd64/`. If any is absent, the artifact is rejected.
+5. On a clean Windows test folder, launch only `Workass.exe`. It must start
+   the sibling daemon when none is healthy, connect when one is already
+   healthy, and survive **Reiniciar daemon y reconectar**. No Windows-side
+   npm, source checkout, PowerShell bootstrap, or installer script is part of
+   that test.
+6. Publish the Mac DMG + ZIP, Windows ZIP, and their `SHA256SUMS` files under
+   the same Git tag/release. Keep the release outputs immutable after checksums
+   are generated.
 
 ## Linux road
 

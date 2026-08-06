@@ -53,7 +53,7 @@ wait_http() {
   url="$1"
   attempts="$2"
   while [ "$attempts" -gt 0 ]; do
-    if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
+    if curl -kfsS --max-time 2 "$url" >/dev/null 2>&1; then
       return 0
     fi
     attempts=$((attempts - 1))
@@ -83,7 +83,7 @@ rebuild_electron() {
   [ -n "$daemon_port" ] || die "--daemon-url must include an explicit port"
   daemon_pid_before=$(listener_pid "$daemon_port")
   [ -n "$daemon_pid_before" ] || die "no daemon listener found on port $daemon_port"
-  curl -fsS --max-time 2 "$daemon_url/workass/health" >/dev/null || die "daemon health check failed before Electron rebuild"
+  curl -kfsS --max-time 2 "$daemon_url/workass/health" >/dev/null || die "daemon health check failed before Electron rebuild"
 
   mkdir -p "$log_root"
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -311,7 +311,13 @@ rebuild_daemon() {
   [ -n "$old_pid" ] || die "no daemon listener found on port $port"
   old_command=$(ps -p "$old_pid" -o command= 2>/dev/null || true)
   printf '%s' "$old_command" | grep -q 'workass' || die "port $port belongs to a non-Workass process: $old_command"
-  curl -fsS --max-time 2 "http://127.0.0.1:$port/workass/health" >/dev/null || die "current daemon health check failed"
+  # One release transition may begin against the old loopback HTTP daemon. It
+  # is accepted only as a pre-handoff liveness check; the candidate preflight,
+  # handoff, and every daemon built from this source require HTTPS.
+  if ! curl -kfsS --max-time 2 "https://127.0.0.1:$port/workass/health" >/dev/null 2>&1 && \
+     ! curl -fsS --max-time 2 "http://127.0.0.1:$port/workass/health" >/dev/null 2>&1; then
+    die "current daemon health check failed"
+  fi
   if [ "$view_port" -gt 0 ]; then
     client_status=$(curl -fsS --max-time 2 "http://127.0.0.1:$view_port/__workass-shell/status" 2>/dev/null || true)
     printf '%s' "$client_status" | grep -q '"controller":true' || die "Electron is not the active controller before daemon handoff; status=$client_status"
@@ -416,7 +422,7 @@ rebuild_daemon() {
   # death would orphan the candidate (observed: orphans surviving for hours).
   (cd "$repo_root" && exec "$candidate" --port "$preflight_port" --bind localhost --state-dir "$preflight_root/state") >"$preflight_log" 2>&1 &
   preflight_pid=$!
-  wait_http "http://127.0.0.1:$preflight_port/workass/health" 80 || die "candidate preflight failed; see $preflight_log"
+  wait_http "https://127.0.0.1:$preflight_port/workass/health" 80 || die "candidate preflight failed; see $preflight_log"
   kill -TERM "$preflight_pid" 2>/dev/null || true
   wait "$preflight_pid" 2>/dev/null || true
   preflight_pid=''

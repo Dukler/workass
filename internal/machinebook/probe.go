@@ -2,6 +2,7 @@ package machinebook
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,14 +29,15 @@ const maxCardBytes = 64 << 10
 // *public* document — the book reads a remote machine and a local one with the
 // same code.
 type Card struct {
-	App         string   `json:"app"`
-	Name        string   `json:"name"`
-	Label       string   `json:"displayName"`
-	MachineID   string   `json:"machineId"`
-	Version     string   `json:"version"`
-	WireVersion int      `json:"wireVersion"`
-	Secure      bool     `json:"secure"`
-	FleetIDs    []string `json:"fleetIds"`
+	App             string   `json:"app"`
+	Name            string   `json:"name"`
+	Label           string   `json:"displayName"`
+	MachineID       string   `json:"machineId"`
+	Version         string   `json:"version"`
+	WireVersion     int      `json:"wireVersion"`
+	Secure          bool     `json:"secure"`
+	CertFingerprint string   `json:"certFingerprint"`
+	FleetIDs        []string `json:"fleetIds"`
 }
 
 // DisplayName is the label to show, preferring the one the machine chose for
@@ -59,16 +61,25 @@ var ErrNoIdentity = errors.New("daemon has no machine id")
 
 // probe asks one address who it is.
 //
-// Plaintext for now, which is the whole reason `secure` rides on the card: E5
-// gives a daemon its own certificate and this becomes https-first, and until
-// then the flag is what lets a client say out loud that a machine is in the
-// clear rather than quietly assuming it is not.
+// Discovery is identity-only, but it is still a daemon request and therefore
+// HTTPS-only. Workass daemons use self-signed per-machine certificates: the
+// initial probe accepts that private PKI boundary so an approved user can pin
+// the machine; every payload beyond the multicast presence packet is encrypted.
 func (b *Book) probe(ctx context.Context, address string) (Card, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+address+HealthPath, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+address+HealthPath, nil)
 	if err != nil {
 		return Card{}, err
 	}
-	response, err := b.client.Do(request)
+	client := *b.client
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		transport = http.DefaultTransport.(*http.Transport).Clone()
+	} else {
+		transport = transport.Clone()
+	}
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true} // #nosec G402 -- pairing pins after explicit user approval; no plaintext is permitted.
+	client.Transport = transport
+	response, err := client.Do(request)
 	if err != nil {
 		return Card{}, fmt.Errorf("%s %s", address, whyItFailed(err))
 	}
@@ -90,6 +101,9 @@ func (b *Book) probe(ctx context.Context, address string) (Card, error) {
 	card.MachineID = strings.TrimSpace(card.MachineID)
 	if card.MachineID == "" {
 		return Card{}, fmt.Errorf("%s: %w — update it", address, ErrNoIdentity)
+	}
+	if !card.Secure || strings.TrimSpace(card.CertFingerprint) == "" {
+		return Card{}, fmt.Errorf("%s: Workass transport is not encrypted", address)
 	}
 	return card, nil
 }

@@ -26,3 +26,12 @@ contextBridge.exposeInMainWorld('workassClipboard', {
   copyImageAt: (payload) => ipcRenderer.invoke('workass-clipboard:copy-image-at', payload),
   openImageExternal: (payload) => ipcRenderer.invoke('workass-image:open-external', payload),
 });
+
+contextBridge.exposeInMainWorld('workassWindow', {
+  platform: process.platform,
+  control: (action) => ipcRenderer.invoke('workass-window:control', action),
+});
+
+contextBridge.exposeInMainWorld('workassRecovery', {
+  restartDaemon: () => ipcRenderer.invoke('workass-recovery:restart-daemon'),
+});

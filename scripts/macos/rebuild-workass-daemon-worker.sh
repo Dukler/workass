@@ -47,7 +47,7 @@ listener_pid() {
 wait_health() {
   attempts=120
   while [ "$attempts" -gt 0 ]; do
-    if curl -fsS --max-time 2 "http://127.0.0.1:$port/workass/health" >/dev/null 2>&1; then
+    if curl -kfsS --max-time 2 "https://127.0.0.1:$port/workass/health" >/dev/null 2>&1; then
       return 0
     fi
     attempts=$((attempts - 1))

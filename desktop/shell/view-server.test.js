@@ -283,3 +283,19 @@ test('reload endpoint reloads the window in place and can arm controller recover
   assert.equal((await fetch(view.url + '/__workass-shell/reload')).status, 405);
   assert.equal(calls.length, 2);
 });
+
+test('recovery endpoint invokes only the shell-owned daemon recovery transaction', async (t) => {
+  const renderer = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-view-recovery-'));
+  fs.writeFileSync(path.join(renderer, 'index.html'), '<!doctype html><head></head><body>x</body>');
+  t.after(() => fs.rmSync(renderer, { recursive: true, force: true }));
+  const view = await createViewServer({ daemonURL: 'http://127.0.0.1:9', rendererDir: renderer, port: 0 });
+  t.after(() => view.close());
+  assert.equal((await fetch(view.url + '/__workass-shell/recover', { method: 'POST' })).status, 503);
+  const calls = [];
+  view.setRecovery(async () => { calls.push('recover'); return { recovered: true }; });
+  const reply = await fetch(view.url + '/__workass-shell/recover', { method: 'POST' });
+  assert.equal(reply.status, 200);
+  assert.deepEqual(await reply.json(), { recovered: true });
+  assert.deepEqual(calls, ['recover']);
+  assert.equal((await fetch(view.url + '/__workass-shell/recover')).status, 405);
+});

@@ -37,6 +37,7 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?]> = [
   // machine; this client reads it and never writes it.
   ['archiveAppend', 'chat:archive-append', (a) => [{ tabId: a[0], messages: a[1] }]],
   ['archiveLoad', 'chat:archive-load'],
+  ['visualizeHost', 'visualize:host'],
   ['startJob', 'job:start'],
   ['cancelJob', 'job:cancel'],
   ['appChatReset', 'app-chat:reset'],

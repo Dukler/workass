@@ -139,6 +139,31 @@ func TestDetectProvidersMissingBinaryNotFound(t *testing.T) {
 	}
 }
 
+func TestDetectProvidersPersistsQwenCLIPathWhenModelServerIsInactive(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	installFakeAgentWrapperWithEnv(t, pathDir, "qwen", "echo-prompt", map[string]string{"WORKASS_FAKE_CLI_VERSION": "0.19.11"})
+	t.Setenv("PATH", pathDir)
+	providersFile := filepath.Join(t.TempDir(), "providers.json")
+	manager := NewManager(Options{
+		RootDir:             root,
+		ProviderConfigFile:  providersFile,
+		RSSSampleInterval:   time.Hour,
+		LocalModelEndpoints: []string{"http://127.0.0.1:1/v1/models"},
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	manager.DetectProviders(context.Background(), DetectOptions{ProviderID: "qwen"})
+	qwen := assertProviderListItem(t, manager.ProvidersList(), "qwen", providerStatusInactive, false)
+	if qwen["resolvedCommand"] != filepath.Join(pathDir, "qwen") {
+		t.Fatalf("inactive qwen resolved command = %#v", qwen)
+	}
+	saved := readProviderFile(t, providersFile)
+	if saved["qwen"]["resolvedCommand"] != filepath.Join(pathDir, "qwen") {
+		t.Fatalf("saved inactive qwen resolved command = %#v", saved["qwen"])
+	}
+}
+
 func TestStartupDetectProvidersRetriesOnlyStatusErrors(t *testing.T) {
 	root := repoRoot(t)
 	pathDir := t.TempDir()

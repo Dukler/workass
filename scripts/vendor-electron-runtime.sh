@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build-time-only fetch of the exact Electron runtime used by Workass on macOS.
+# Build-time-only fetch of the exact Electron runtimes used by Workass.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -15,10 +15,11 @@ offline=0
 
 usage() {
   cat <<'EOF'
-usage: scripts/vendor-electron-runtime.sh [--target darwin-arm64] [--output-root DIR] [--offline]
+usage: scripts/vendor-electron-runtime.sh [--target darwin-arm64|win32-x64] [--output-root DIR] [--offline]
 
 Downloads the pinned official Electron archive at build time, verifies its
-published SHA-256, and stages Electron.app outside the source dependency tree.
+published SHA-256, and stages the unpacked runtime outside the source
+dependency tree. Windows is deliberately staged without npm or electron-builder.
 EOF
 }
 
@@ -32,10 +33,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ "$(uname -s)" = Darwin ] || { echo "Electron runtime staging requires macOS" >&2; exit 1; }
-[ "$target" = darwin-arm64 ] || { echo "unsupported Electron target: $target" >&2; exit 2; }
 case "$output_root" in /*) ;; *) echo "--output-root must be absolute" >&2; exit 2 ;; esac
-for tool in curl ditto plutil shasum; do
+for tool in curl ditto shasum; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 1; }
 done
 
@@ -43,6 +42,13 @@ version=$(workass_electron_pinned_version)
 case "$version:$target" in
   43.1.1:darwin-arm64)
     expected=d6d0598d042ef4d146278d08d84deac9dde145eae31eb4f32ef46206d6bd6169
+    archive="electron-v$version-darwin-arm64.zip"
+    source_kind=darwin
+    ;;
+  43.1.1:win32-x64)
+    expected=b4e9995cd3f65785eb8818276aa9020f3165ab11da41b3c762616d4a0ad8c7ad
+    archive="electron-v$version-win32-x64.zip"
+    source_kind=windows
     ;;
   *)
     echo "no audited Electron checksum for $version ($target)" >&2
@@ -50,7 +56,6 @@ case "$version:$target" in
     ;;
 esac
 
-archive="electron-v$version-darwin-arm64.zip"
 cache="$repo_root/.dev/downloads/electron/$version"
 download="$cache/$archive"
 url="https://github.com/electron/electron/releases/download/v$version/$archive"
@@ -77,18 +82,27 @@ cleanup() { rm -rf "$stage_root"; }
 trap cleanup EXIT HUP INT TERM
 ditto -x -k "$download" "$stage_root"
 source_app="$stage_root/Electron.app"
-[ -d "$source_app" ] || { echo "Electron archive has unexpected layout" >&2; exit 1; }
-
-destination="$output_root/$target/Electron.app"
-incoming="$destination.incoming.$$"
-rm -rf "$incoming"
-mkdir -p "$(dirname -- "$destination")"
-ditto "$source_app" "$incoming"
-staged_version=$(workass_electron_app_version "$incoming")
-[ "$staged_version" = "$version" ] || {
-  echo "Electron archive version mismatch: expected $version, found $staged_version" >&2
-  exit 1
-}
+if [ "$source_kind" = darwin ]; then
+  [ -d "$source_app" ] || { echo "Electron archive has unexpected layout" >&2; exit 1; }
+  destination="$output_root/$target/Electron.app"
+  incoming="$destination.incoming.$$"
+  rm -rf "$incoming"
+  mkdir -p "$(dirname -- "$destination")"
+  ditto "$source_app" "$incoming"
+  staged_version=$(workass_electron_app_version "$incoming")
+  [ "$staged_version" = "$version" ] || {
+    echo "Electron archive version mismatch: expected $version, found $staged_version" >&2
+    exit 1
+  }
+else
+  [ -f "$stage_root/electron.exe" ] || { echo "Electron archive has unexpected layout" >&2; exit 1; }
+  destination="$output_root/$target"
+  incoming="$destination.incoming.$$"
+  rm -rf "$incoming"
+  mkdir -p "$(dirname -- "$destination")" "$incoming"
+  ditto "$stage_root/." "$incoming"
+  staged_version="$version"
+fi
 rm -rf "$destination"
 mv "$incoming" "$destination"
 

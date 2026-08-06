@@ -133,6 +133,13 @@ export class Store {
   private dirtyChats = new Set<string>();
   private dirtyChatVersions = new Map<string, number>();
   private dirtyChatRevision = 0;
+  // A queue edit is user-owned state, but its renderer save can overlap the
+  // periodic daemon digest. Keep the latest local queue projection fenced until
+  // the save containing that exact mutation is acknowledged; otherwise a digest
+  // can hydrate the previous server snapshot and make the row disappear.
+  private queueMutationRevision = 0;
+  private pendingQueueMutationVersions = new Map<string, number>();
+  private pendingQueueSnapshots = new Map<string, QueuedMsg[] | undefined>();
   // Membership/order changes and hydration boundaries must send one complete
   // tree. The revision protects a new force-full request from an older save's
   // acknowledgement in the same way dirtyChatVersions protects chat edits.
@@ -199,6 +206,20 @@ export class Store {
     if (!tabId) return;
     this.dirtyChats.add(tabId);
     this.dirtyChatVersions.set(tabId, ++this.dirtyChatRevision);
+  }
+  private markQueueMutation(chat: Pick<Chat, 'id' | 'queue'>) {
+    const version = ++this.queueMutationRevision;
+    this.pendingQueueMutationVersions.set(chat.id, version);
+    // Queue rows are already renderer-owned objects. Keep the array projection
+    // rather than copying image/File payloads; every later queue mutation calls
+    // this method again and receives a fresh projection.
+    this.pendingQueueSnapshots.set(chat.id, chat.queue);
+  }
+  private scheduleQueuePersist() {
+    // A running turn normally relaxes persistence to 3s to avoid mirroring its
+    // streaming transcript. Queue ownership is different: the user just made a
+    // durable FIFO decision, so it must beat the 5s state-digest repair window.
+    this.schedulePersist(250);
   }
   private markAllChatsDirty() {
     for (const chat of this.state.chats) this.touchChat(chat.id);
@@ -463,9 +484,12 @@ export class Store {
       ? [...snapshot._workassDeletedChatIds]
       : (!lean ? [...this.pendingChatDeletes] : []);
     const sentDirtyVersions = new Map<string, number>();
+    const sentQueueVersions = new Map<string, number>();
     for (const chat of snapshot.chats) {
       if (!this.dirtyChats.has(chat.id)) continue;
       sentDirtyVersions.set(chat.id, this.dirtyChatVersions.get(chat.id) ?? 0);
+      const queueVersion = this.pendingQueueMutationVersions.get(chat.id);
+      if (queueVersion !== undefined) sentQueueVersions.set(chat.id, queueVersion);
     }
     const saved = await call('saveSession', snapshot);
     if (lean) this.durableImagePayloads.acknowledge(snapshot, saved === true);
@@ -474,6 +498,11 @@ export class Store {
         if (this.dirtyChatVersions.get(id) !== version) continue;
         this.dirtyChats.delete(id);
         this.dirtyChatVersions.delete(id);
+      }
+      for (const [id, version] of sentQueueVersions) {
+        if (this.pendingQueueMutationVersions.get(id) !== version) continue;
+        this.pendingQueueMutationVersions.delete(id);
+        this.pendingQueueSnapshots.delete(id);
       }
       if (full && this.fullSaveRevision === fullRevision) this.fullSavePending = false;
     }
@@ -698,16 +727,16 @@ export class Store {
     try { await load; } finally { this.archiveLoads.delete(chatId); }
   }
 
-  private schedulePersist() {
+  private schedulePersist(delayOverride?: number) {
     // First-paint storage deliberately excludes event/image payloads. Text,
     // drafts and UI state remain instant; the authoritative daemon hydrates the
     // heavy timeline a moment later. This keeps keystrokes off a multi-MiB
     // JSON.stringify/localStorage path.
     this.scheduleLocalMirror();
     if (this.saveTimer) clearTimeout(this.saveTimer);
-    const delay = this.state.chats.some((chat) => chat.messages.some((message) => message.status === 'running'))
+    const delay = delayOverride ?? (this.state.chats.some((chat) => chat.messages.some((message) => message.status === 'running'))
       ? 3000
-      : 600;
+      : 600);
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
       const lean = this.state.meta?.sessionSaveMode === LEAN_SESSION_SAVE_MODE;
@@ -819,10 +848,18 @@ export class Store {
     this.durableImagePayloads.replaceFromServer(authoritative);
     const previousChats = this.state.chats;
     const previousWorkspaces = this.state.workspaces;
+    const pendingQueues = new Map(this.pendingQueueSnapshots);
     const restored = this.fromMirror(authoritative);
     this.preserveNewerLocalControls(previousChats, restored.chats);
     this.state.chats = this.carryRemoteChats(previousChats, restored.chats);
     this.restoreDraftImages(previousChats, this.state.chats);
+    // A digest can legitimately arrive before the renderer's queue save reply.
+    // Keep the exact local projection until that reply clears its fence; the
+    // daemon's next save reconciliation remains authoritative afterward.
+    for (const [chatId, queue] of pendingQueues) {
+      const chat = this.chat(chatId);
+      if (chat) chat.queue = queue;
+    }
     this.carryOpenPermissions(previousChats, this.state.chats);
     this.state.workspaces = normalizeWorkspaces([...previousWorkspaces, ...restored.workspaces]);
     // Which chat you are looking at is a LOCAL choice. This runs on reconnect and
@@ -1113,10 +1150,18 @@ export class Store {
       const reply = await callThrow('machinesAdd', typed) as { ok?: boolean; error?: string } | undefined;
       if (reply && reply.ok === false) return { ok: false, error: reply.error || 'No se pudo agregar' };
       await this.reloadMachines();
+      const added = this.state.machines.find((machine) => machine.address === typed || machine.address.endsWith(typed));
+      if (added) this.requestMachineAccess(added.machineId);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
+  }
+
+  requestMachineAccess(machineId: string): boolean {
+    const requested = this.machines?.requestAccess(machineId) ?? false;
+    if (requested) this.refreshMachineNames();
+    return requested;
   }
 
   /** Drop a machine: it leaves the list here and its credential is forgotten. */
@@ -2482,7 +2527,9 @@ export class Store {
     // and is what the dispatch eventually sends; store the same redacted bytes
     // locally so neither hydration nor dispatch changes the visible row.
     (chat.queue ??= []).push(queuedMessage(rid('q'), redactSensitiveText(prompt), messageImages(images)));
+    this.markQueueMutation(chat);
     this.bumpChat(chat);
+    this.scheduleQueuePersist();
   }
   queueDraftMessage(chatId: string, prompt: string, drafts: DraftImage[]): boolean {
     const chat = this.chat(chatId);
@@ -2500,7 +2547,9 @@ export class Store {
     }
     // The row and zero-copy previews paint now. Encoding starts only after that
     // commit and never allows the FIFO drainer to send a partial attachment.
+    this.markQueueMutation(chat);
     this.bumpChat(chat);
+    this.scheduleQueuePersist();
     if (owned.length) void this.prepareQueuedAttachments(chat.id, item.id);
     // The turn can end between the running check above and this push: job:end
     // already drained an empty FIFO, so nothing else would ever pick this row
@@ -2514,7 +2563,9 @@ export class Store {
     if (!initial || !drafts?.length) return;
     initial.attachmentState = 'preparing';
     initial.attachmentError = undefined;
+    this.markQueueMutation(this.chat(chatId) ?? { id: chatId, queue: undefined });
     this.bumpChat(chatId);
+    this.scheduleQueuePersist();
     try {
       await attachmentWorkBoundary();
       const images = await draftImagePayloads(drafts, undefined, attachmentWorkBoundary);
@@ -2525,7 +2576,9 @@ export class Store {
       item.images = messageImages(images);
       item.attachmentState = 'ready';
       item.attachmentError = undefined;
+      this.markQueueMutation(chat);
       this.bumpChat(chat);
+      this.scheduleQueuePersist();
       // Encoding completion is the durability boundary for a queued image. Do
       // not leave the only full-resolution bytes behind the 600ms debounce.
       void this.flushSession();
@@ -2535,7 +2588,9 @@ export class Store {
       if (!item || item.draftImages !== drafts) return;
       item.attachmentState = 'failed';
       item.attachmentError = error instanceof Error ? error.message : 'No se pudieron preparar los adjuntos.';
+      this.markQueueMutation(this.chat(chatId) ?? { id: chatId, queue: undefined });
       this.bumpChat(chatId);
+      this.scheduleQueuePersist();
     }
   }
   retryQueuedAttachments(chatId: string, id: string) {
@@ -2549,15 +2604,18 @@ export class Store {
     const item = this.chat(chatId)?.queue?.find((q) => q.id === id);
     if (!item) return;
     item.text = text;
+    this.markQueueMutation(this.chat(chatId) ?? { id: chatId, queue: undefined });
     this.touchChat(chatId);
-    this.schedulePersist();
+    this.scheduleQueuePersist();
   }
   removeQueued(chatId: string, id: string) {
     const chat = this.chat(chatId); if (!chat?.queue) return;
     const removed = chat.queue.find((q) => q.id === id);
     releaseDraftImages(removed?.draftImages ?? []);
     chat.queue = chat.queue.filter((q) => q.id !== id);
+    this.markQueueMutation(chat);
     this.bumpChat(chat);
+    this.scheduleQueuePersist();
     if (chat.queue.length && !this.isChatRunning(chat.id)) void this.flushNextQueued(chat);
   }
   // Drag-reorder: move `id` to `toIndex` (an index in the CURRENT array, before
@@ -2572,13 +2630,18 @@ export class Store {
     to = Math.max(0, Math.min(arr.length, to));
     arr.splice(to, 0, item);
     chat.queue = arr;
+    this.markQueueMutation(chat);
     this.bumpChat(chat);
+    this.scheduleQueuePersist();
     if (!this.isChatRunning(chat.id)) void this.flushNextQueued(chat);
   }
   cancelQueued(chatId: string) {
     const chat = this.chat(chatId); if (!chat?.queue?.length) return;
     for (const item of chat.queue) releaseDraftImages(item.draftImages ?? []);
-    chat.queue = []; this.bumpChat(chat);
+    chat.queue = [];
+    this.markQueueMutation(chat);
+    this.bumpChat(chat);
+    this.scheduleQueuePersist();
   }
   private async flushNextQueued(chat: Chat): Promise<void> {
     if (this.drainingQueues.has(chat.id) || this.isChatRunning(chat.id)) return;
@@ -2606,7 +2669,9 @@ export class Store {
       const remaining = afterQueuedAcceptance(current, next.id, true);
       live.queue = remaining.length ? remaining : undefined;
       releaseDraftImages(next.draftImages ?? []);
+      this.markQueueMutation(live);
       this.bumpChat(live);
+      this.scheduleQueuePersist();
     } finally {
       this.drainingQueues.delete(chat.id);
       // A deterministic/very fast agent may emit `end` before the job:start
@@ -3303,7 +3368,8 @@ export class Store {
     waiter.resolve(status);
   }
 
-  // Click-to-update: run the daemon's hardcoded updater for one provider and
+  // Click-to-update: run the daemon's provider-owned updater for one provider;
+  // the daemon resolves the installed executable path before launching it and
   // resolve with its terminal outcome. Optimistic 'running' flips the UI
   // instantly; the live progress stream then owns the state. Structured refusals
   // are handled without throwing to the UI.

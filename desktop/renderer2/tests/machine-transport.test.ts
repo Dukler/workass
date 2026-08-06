@@ -218,6 +218,9 @@ test('a rejected token is dropped so the next connect asks again', () => {
   h.last().onopen?.();
   h.last().access({ state: 'rejected', reason: 'invalid-token', instanceId: 'i-1' });
   assert.deepEqual(cleared, ['m-remote']);
+  h.last().close();
+  h.runTimers();
+  assert.equal(h.sockets.length, 1, 'a rejected request never retries until the user asks again');
   h.link.connect();
   assert.ok(!h.last().url.includes('deviceToken'), 'the stale token is gone from the next connect');
 });

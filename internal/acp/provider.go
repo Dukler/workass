@@ -68,6 +68,129 @@ type CatalogGroup struct {
 	Badge        string  `json:"badge,omitempty"`
 }
 
+// Provider is the small provider-specific seam used before any ACP/native
+// handshake starts.  A provider owns how its user-installed executable is
+// found; the manager owns the common detection, launch, update, and catalog
+// lifecycle around it.  Keeping executable discovery here means every later
+// operation uses the same absolute path that was found from the daemon's PATH
+// (or from the provider's explicit override).
+type Provider interface {
+	ID() string
+	ResolveExecutable(ProviderConfig) (string, error)
+}
+
+type cliProvider struct {
+	id             string
+	defaultCommand string
+	pathEnv        []string
+	pathNames      []string
+	knownPaths     func() []string
+}
+
+func (p cliProvider) ID() string { return p.id }
+
+func (p cliProvider) ResolveExecutable(cfg ProviderConfig) (string, error) {
+	for _, envName := range p.pathEnv {
+		if explicit := strings.TrimSpace(os.Getenv(envName)); explicit != "" {
+			return resolveProviderExecutablePath(explicit, envName)
+		}
+	}
+
+	command := strings.TrimSpace(cfg.Command)
+	if command != "" && command != p.defaultCommand {
+		return resolveProviderExecutablePath(command, "provider command")
+	}
+	// A successful detection stores the absolute path. Prefer it on later
+	// operations, but let a stale cache fall through to the current PATH so a
+	// CLI moved by the user is rediscovered rather than permanently wedged.
+	if cached := strings.TrimSpace(cfg.ResolvedCommand); cached != "" {
+		if resolved, err := resolveProviderExecutablePath(cached, "resolved provider command"); err == nil {
+			return resolved, nil
+		}
+	}
+	if p.knownPaths != nil {
+		for _, candidate := range p.knownPaths() {
+			if resolved, err := resolveProviderExecutablePath(candidate, "provider install path"); err == nil {
+				return resolved, nil
+			}
+		}
+	}
+	for _, name := range p.pathNames {
+		if resolved, err := resolveProviderExecutablePath(name, "provider PATH"); err == nil {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("%s not found on PATH", p.id)
+}
+
+func providerForID(id string) (Provider, bool) {
+	switch normalizeProviderID(id) {
+	case "devin":
+		return cliProvider{
+			id:             "devin",
+			defaultCommand: "devin",
+			pathEnv:        []string{"WORKASS_DEVIN", "ASSISTANT_DEVIN"},
+			pathNames:      []string{"devin.exe", "devin"},
+			knownPaths:     devinKnownPaths,
+		}, true
+	case "qwen":
+		return cliProvider{
+			id:             "qwen",
+			defaultCommand: "qwen",
+			pathEnv:        []string{"WORKASS_QWEN", "ASSISTANT_QWEN"},
+			pathNames:      []string{"qwen.cmd", "qwen.exe", "qwen"},
+		}, true
+	case "claude":
+		return cliProvider{
+			id:             "claude",
+			defaultCommand: "claude",
+			pathEnv:        []string{"WORKASS_CLAUDE_CODE"},
+			pathNames:      []string{"claude", "claude.exe", "claude.cmd"},
+		}, true
+	case "codex":
+		return cliProvider{
+			id:             "codex",
+			defaultCommand: "codex",
+			pathEnv:        []string{"WORKASS_CODEX"},
+			pathNames:      []string{"codex", "codex.exe", "codex.cmd"},
+		}, true
+	default:
+		return nil, false
+	}
+}
+
+func resolveProviderExecutable(cfg ProviderConfig) (string, error) {
+	if provider, ok := providerForID(cfg.ID); ok {
+		return provider.ResolveExecutable(cfg)
+	}
+	command := strings.TrimSpace(firstNonEmpty(cfg.ResolvedCommand, cfg.Command))
+	if command == "" {
+		return "", fmt.Errorf("provider %q has no executable command", cfg.ID)
+	}
+	return resolveProviderExecutablePath(command, "provider command")
+}
+
+func resolveProviderExecutablePath(command, label string) (string, error) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "", fmt.Errorf("%s is empty", label)
+	}
+	if filepath.IsAbs(command) || strings.ContainsAny(command, `/\\`) {
+		if executableFile(command) {
+			return command, nil
+		}
+		return "", fmt.Errorf("%s points to an unusable executable: %s", label, command)
+	}
+	resolved, err := exec.LookPath(command)
+	if err != nil {
+		return "", fmt.Errorf("%s %q was not found on PATH", label, command)
+	}
+	if !executableFile(resolved) {
+		return "", fmt.Errorf("%s resolved to an unusable executable: %s", label, resolved)
+	}
+	return resolved, nil
+}
+
 // BuiltInProviderConfigs returns the daemon's default ACP registry. Only the
 // deterministic mock is enabled by default for local daemon development.
 func BuiltInProviderConfigs(rootDir string) []ProviderConfig {
@@ -246,6 +369,7 @@ func mergeProviderConfig(base, raw ProviderConfig, rootDir string) ProviderConfi
 	provider.Detected = raw.Detected
 	provider.DetectedAt = strings.TrimSpace(raw.DetectedAt)
 	provider.ResolvedCommand = strings.TrimSpace(raw.ResolvedCommand)
+	provider.LastUpdateNotice = strings.TrimSpace(raw.LastUpdateNotice)
 	provider.DisabledByUser = raw.DisabledByUser
 	provider.enabledSet = raw.enabledSet
 	if cwd := strings.TrimSpace(raw.CWD); cwd != "" {
@@ -354,6 +478,7 @@ func normalizeProviderConfig(provider ProviderConfig, rootDir, fallbackID string
 		provider.AutoEnv = copyStringMap(provider.AutoEnv)
 	}
 	provider.ResolvedCommand = strings.TrimSpace(provider.ResolvedCommand)
+	provider.LastUpdateNotice = strings.TrimSpace(provider.LastUpdateNotice)
 	provider.DetectedAt = strings.TrimSpace(provider.DetectedAt)
 	if strings.TrimSpace(provider.CWD) == "" {
 		provider.CWD = rootDir
@@ -1068,14 +1193,10 @@ func (m *Manager) detectProvider(parent context.Context, cfg ProviderConfig) pro
 		m.logProviderDetection(result)
 		return result
 	}
-	cliVersion := m.startInstalledCLIVersionCheck(parent, cfg.ID)
-	if inactive != "" {
-		result.Status = providerStatusInactive
-		result.Message = inactive
-		result.CLIVersion = collectInstalledCLIVersion(cliVersion)
-		m.logProviderDetection(result)
-		return result
-	}
+	// Executable discovery is useful even when the provider cannot currently
+	// serve models (for example, Qwen with no local model server). Preserve the
+	// resolved path independently from readiness so Settings and later update
+	// commands can still address the installed CLI.
 	cfg.ResolvedCommand = resolved
 	cfg.Args = append([]string(nil), args...)
 	cfg.AutoEnv = autoEnv
@@ -1084,6 +1205,14 @@ func (m *Manager) detectProvider(parent context.Context, cfg ProviderConfig) pro
 	result.autoEnv = copyStringMap(autoEnv)
 	result.args = append([]string(nil), args...)
 	result.config = cfg
+	cliVersion := m.startInstalledCLIVersionCheck(parent, cfg.ID)
+	if inactive != "" {
+		result.Status = providerStatusInactive
+		result.Message = inactive
+		result.CLIVersion = collectInstalledCLIVersion(cliVersion)
+		m.logProviderDetection(result)
+		return result
+	}
 	timeout := providerProbeTimeout(cfg.ID)
 	probeCtx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
@@ -1147,13 +1276,13 @@ func (m *Manager) prepareDetectedProvider(ctx context.Context, cfg ProviderConfi
 		}
 		return node, append([]string(nil), cfg.Args...), nil, "", nil
 	case "devin":
-		resolved, err := resolveDevinBinary(cfg.Command)
+		resolved, err := resolveProviderExecutable(cfg)
 		if err != nil {
 			return "", nil, nil, "", err
 		}
 		return resolved, append([]string(nil), cfg.Args...), nil, "", nil
 	case "qwen":
-		resolved, err := resolveBinary(firstNonEmpty(cfg.Command, "qwen"), []string{"qwen.cmd", "qwen.exe", "qwen"}, nil)
+		resolved, err := resolveProviderExecutable(cfg)
 		if err != nil {
 			return "", nil, nil, "", err
 		}
@@ -1232,6 +1361,13 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 		runtime.Config.FixHint = result.FixHint
 		runtime.LatencyMs = result.LatencyMs
 		runtime.CLIVersion = copyCLIVersion(result.CLIVersion)
+		if result.ResolvedCommand != "" {
+			runtime.Config.ResolvedCommand = result.ResolvedCommand
+		}
+		if result.args != nil {
+			runtime.Config.Args = append([]string(nil), result.args...)
+		}
+		runtime.Config.AutoEnv = copyStringMap(result.autoEnv)
 		if result.OK {
 			runtime.Config.Enabled = true
 			runtime.Config.DisabledByUser = false
@@ -1241,10 +1377,6 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 			if isLocalProviderID(result.ProviderID) && result.ResolvedCommand != "" {
 				runtime.Config.Command = result.ResolvedCommand
 			}
-			if result.args != nil {
-				runtime.Config.Args = append([]string(nil), result.args...)
-			}
-			runtime.Config.AutoEnv = copyStringMap(result.autoEnv)
 			runtime.Probed = true
 			runtime.Status = providerStatusReady
 			runtime.Error = ""
@@ -1261,10 +1393,6 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 			runtime.Config.Detected = true
 			runtime.Config.DetectedAt = now
 			runtime.Config.ResolvedCommand = result.ResolvedCommand
-			if result.args != nil {
-				runtime.Config.Args = append([]string(nil), result.args...)
-			}
-			runtime.Config.AutoEnv = copyStringMap(result.autoEnv)
 			runtime.Probed = true
 			runtime.Models = nil
 			runtime.Modes = nil
@@ -1275,7 +1403,7 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 			runtime.Config.Enabled = false
 			runtime.Config.Detected = false
 			runtime.Config.DetectedAt = ""
-			runtime.Config.ResolvedCommand = ""
+			runtime.Config.ResolvedCommand = result.ResolvedCommand
 			runtime.Config.AutoEnv = nil
 			runtime.Config.FixHint = ""
 			runtime.FixHint = ""
@@ -1414,11 +1542,12 @@ func resolveBinary(command string, names []string, known []string) (string, erro
 }
 
 func resolveDevinBinary(command string) (string, error) {
+	return resolveProviderExecutable(ProviderConfig{ID: "devin", Command: command})
+}
+
+func devinKnownPaths() []string {
 	home, _ := os.UserHomeDir()
 	var known []string
-	if explicit := strings.TrimSpace(os.Getenv("ASSISTANT_DEVIN")); explicit != "" {
-		known = append(known, explicit)
-	}
 	if home != "" {
 		known = append(known,
 			filepath.Join(home, "AppData", "Local", "Programs", "Devin", "resources", "app", "extensions", "windsurf", "devin", "bin", "devin.exe"),
@@ -1429,7 +1558,7 @@ func resolveDevinBinary(command string) (string, error) {
 	if runtime.GOOS != "windows" {
 		known = append(known, "/opt/homebrew/bin/devin", "/usr/local/bin/devin")
 	}
-	return resolveBinary(firstNonEmpty(command, "devin"), []string{"devin.exe", "devin"}, known)
+	return known
 }
 
 type agentLaunch struct {
@@ -1483,27 +1612,11 @@ func resolveFrontierNativeLaunchWithExecutable(cfg ProviderConfig, daemonExecuta
 	if !ok {
 		return agentLaunch{}, fmt.Errorf("provider %q is not a native frontier provider", cfg.ID)
 	}
-	if override := strings.TrimSpace(os.Getenv(spec.OverrideEnv)); override != "" {
-		resolved, err := resolveFrontierNativeCommand(override, spec.OverrideEnv)
-		if err != nil {
-			return agentLaunch{}, err
-		}
-		return agentLaunch{Command: resolved, Args: append([]string(nil), cfg.Args...)}, nil
+	resolved, err := resolveProviderExecutable(cfg)
+	if err != nil {
+		return agentLaunch{}, fmt.Errorf("official %s executable not found: checked %s override and PATH", spec.ProviderID, spec.OverrideEnv)
 	}
-	command := strings.TrimSpace(cfg.Command)
-	if command != "" && command != spec.DefaultCommand {
-		resolved, err := resolveFrontierNativeCommand(command, "provider command override")
-		if err != nil {
-			return agentLaunch{}, err
-		}
-		return agentLaunch{Command: resolved, Args: append([]string(nil), cfg.Args...)}, nil
-	}
-	for _, name := range spec.PathNames {
-		if resolved, err := exec.LookPath(name); err == nil && executableFile(resolved) {
-			return agentLaunch{Command: resolved, Args: append([]string(nil), cfg.Args...)}, nil
-		}
-	}
-	return agentLaunch{}, fmt.Errorf("official %s executable not found: checked %s override and PATH", spec.ProviderID, spec.OverrideEnv)
+	return agentLaunch{Command: resolved, Args: append([]string(nil), cfg.Args...)}, nil
 }
 
 func resolveFrontierNativeCommand(command, label string) (string, error) {

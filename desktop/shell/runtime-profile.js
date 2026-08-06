@@ -50,7 +50,14 @@ function resolveRuntimeProfile({ env = process.env, isPackaged = false, resource
   const profileFile = env.WORKASS_PROFILE_FILE || (isPackaged
     ? path.join(resourcesPath, 'workass-profile.env')
     : path.join(repoRoot, 'config', 'environments', `${profile}.env`));
-  const seed = { HOME: env.HOME || os.homedir(), WORKASS_REPO_ROOT: repoRoot, WORKASS_TEST_ROOT: env.WORKASS_TEST_ROOT };
+  const home = env.HOME || env.USERPROFILE || os.homedir();
+  const seed = {
+    HOME: home,
+    USERPROFILE: env.USERPROFILE || home,
+    LOCALAPPDATA: env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'),
+    WORKASS_REPO_ROOT: repoRoot,
+    WORKASS_TEST_ROOT: env.WORKASS_TEST_ROOT,
+  };
   const fileValues = parseProfile(fs.readFileSync(profileFile, 'utf8'), seed);
   if (fileValues.WORKASS_PROFILE !== profile) throw new Error(`profile identity mismatch in ${profileFile}`);
 
@@ -67,7 +74,7 @@ function resolveRuntimeProfile({ env = process.env, isPackaged = false, resource
     bundleId: values.WORKASS_BUNDLE_ID,
     daemonPort,
     daemonBind: values.WORKASS_DAEMON_BIND,
-    daemonURL: env.WORKASS_URL || `http://127.0.0.1:${daemonPort}`,
+    daemonURL: env.WORKASS_URL || `https://127.0.0.1:${daemonPort}`,
     launchdLabel: values.WORKASS_LAUNCHD_LABEL,
     viewPort: env.WORKASS_VIEW_PORT != null && env.WORKASS_VIEW_PORT !== ''
       ? numericPort(env.WORKASS_VIEW_PORT, 'WORKASS_VIEW_PORT', profile === 'test') : viewPort,
