@@ -226,6 +226,7 @@ export interface ProviderRecord {
   badge?: string;
   detected?: boolean;
   latencyMs?: number;
+  // Absolute executable path selected from the provider override or daemon PATH.
   resolvedCommand?: string;
   cliVersion?: CliVersion;
 }
@@ -556,6 +557,7 @@ export interface WorkassApi {
   listDir?: (path: string | null) => Promise<DirListing>;
   archiveAppend?: (tabId: string, messages: unknown[]) => Promise<boolean>;
   archiveLoad?: (tabId: string) => Promise<unknown[]>;
+  visualizeHost?: (options: { tabId: string; chatId: string; path: string; mode?: 'wide'; title?: string }) => Promise<VisualizationRegistration>;
   appChatNewSession?: (opts: { cwd?: string | null; tabId?: string; chatId?: string; bridgeKey?: string; providerId?: string | null; sessionId?: string; refreshPlanUsage?: boolean; replaceSessionId?: string; workspaceRebind?: boolean; expectedWorkspaceRevision?: number }) => Promise<AcpSessionInfo>;
   // Account-scoped metadata read. It never binds/replaces a chat session and
   // never sends a provider prompt; the resulting snapshot arrives through the
@@ -601,7 +603,7 @@ export interface WorkassApi {
   appChatDetectAcp?: (opts?: Record<string, unknown>) => Promise<DetectAcpResult>;
   providersList?: () => Promise<ProviderRecord[]>;
   providersDetect?: (opts?: { provider?: string }) => Promise<DetectAcpResult>;
-  // Click-to-update: run the daemon's hardcoded updater for a provider
+  // Click-to-update: run the daemon's provider-owned updater for a provider
   // (WIRE-CONTRACT §4 providers:update). Resolves { ok, providerId } once the
   // update is accepted and progress starts; rejects with a structured JSON error
   // string (providers:update-unknown-provider | -no-pending | -in-progress).
@@ -673,9 +675,29 @@ export interface WorkassApi {
   chatCommandsGet?: (tabId: string, chatId: string) => Promise<ChatCommandsReply>;
 }
 
+export interface VisualizationRegistration {
+  id: string;
+  label: string;
+  entry: string;
+  contentType: string;
+  urlPath: string;
+  localUrl?: string;
+  markdown: string;
+  createdAt: string;
+  updatedAt: string;
+  mode?: '' | 'wide';
+  title?: string;
+}
+
+export interface WorkassWindowApi {
+  platform: string;
+  control(action: 'minimize' | 'toggle-maximize' | 'close'): Promise<boolean>;
+}
+
 declare global {
   interface Window {
     api?: WorkassApi;
+    workassWindow?: WorkassWindowApi;
     __workassSocketGen?: number;
   }
 }

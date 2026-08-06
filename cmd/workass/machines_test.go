@@ -29,24 +29,25 @@ func machineTestHub(t *testing.T, selfID string) *wire.Hub {
 
 func fakeDaemonServer(t *testing.T, machineID, name string) string {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != machinebook.HealthPath {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"app":         "workass",
-			"version":     daemonVersion,
-			"name":        name,
-			"displayName": name,
-			"machineId":   machineID,
-			"wireVersion": daemonWireVersion,
-			"secure":      false,
+			"app":             "workass",
+			"version":         daemonVersion,
+			"name":            name,
+			"displayName":     name,
+			"machineId":       machineID,
+			"wireVersion":     daemonWireVersion,
+			"secure":          true,
+			"certFingerprint": "test-certificate-fingerprint",
 		})
 	}))
 	t.Cleanup(server.Close)
-	return strings.TrimPrefix(server.URL, "http://")
+	return strings.TrimPrefix(server.URL, "https://")
 }
 
 func invokeMap(t *testing.T, hub *wire.Hub, channel string, args []any) map[string]any {
@@ -115,7 +116,7 @@ func TestMachinesAddAndForget(t *testing.T) {
 // it comes back beside the field as a result — never as a wire error.
 func TestMachinesAddReportsFailuresAsResults(t *testing.T) {
 	hub := machineTestHub(t, "m-self")
-	stranger := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	stranger := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("<html>not me</html>"))
 	}))
 	defer stranger.Close()
@@ -127,7 +128,7 @@ func TestMachinesAddReportsFailuresAsResults(t *testing.T) {
 		want    string
 	}{
 		{"empty", "  ", "type an address"},
-		{"stranger", strings.TrimPrefix(stranger.URL, "http://"), "not a workass daemon"},
+		{"stranger", strings.TrimPrefix(stranger.URL, "https://"), "not a workass daemon"},
 		{"self", self, "this machine"},
 		{"dead", "127.0.0.1:1", "refused the connection"},
 	}

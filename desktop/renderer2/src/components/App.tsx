@@ -18,6 +18,7 @@ import { CommandBar } from './CommandBar';
 import { ImageLightbox } from './ImageLightbox';
 import { ImageClipboardController } from './ImageClipboardController';
 import { IcSidebar } from '../icons';
+import { WindowControls } from './WindowControls';
 
 function AssistStub() {
   return (
@@ -56,7 +57,9 @@ export function App() {
   // titlebar; flag the document so CSS can hide the browser-mode stand-ins
   // and turn the titlebar rows into window drag regions.
   useEffect(() => {
-    document.documentElement.classList.toggle('electron', navigator.userAgent.includes('Electron'));
+    const electron = navigator.userAgent.includes('Electron');
+    document.documentElement.classList.toggle('electron', electron);
+    document.documentElement.classList.toggle('electron-windows', electron && window.workassWindow?.platform === 'win32');
   }, []);
 
   // Reflect pane / settings state onto #root (the grid host lives in index.html).
@@ -132,10 +135,11 @@ export function App() {
   // Settings takes the whole view over — but the command box has to survive that
   // takeover, because "I am in settings and the app is wedged" is exactly one of
   // the states it exists for.
-  if (app.settingsOpen) return <><Settings /><CommandBar /><Toasts /></>;
+  if (app.settingsOpen) return <><WindowControls /><Settings /><CommandBar /><Toasts /></>;
 
   return (
     <>
+      <WindowControls />
       {/* One sticky sidebar toggle, pinned to the right of the green traffic
           light. position:fixed keeps it in the SAME physical spot whether the
           sidebar is open or closed (user law 2026-07-11); ⌘B (above) mirrors it. */}

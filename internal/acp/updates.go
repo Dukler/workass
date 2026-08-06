@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,7 +20,11 @@ import (
 )
 
 const (
-	cliVersionTimeout              = 2 * time.Second
+	// Vendor CLIs can take a few seconds to initialize on a busy machine. This
+	// remains bounded, but must not discard an otherwise detected provider (and
+	// therefore hide its update) merely because the first version probe lost a
+	// short scheduler race.
+	cliVersionTimeout              = 5 * time.Second
 	mockUpdateEnv                  = "WORKASS_MOCK_UPDATE"
 	providerUpdateTailBytes        = 4 * 1024
 	providerUpdateProgressThrottle = time.Second
@@ -123,8 +128,8 @@ func defaultProviderUpdateSources() map[string]string {
 func defaultProviderUpdateCommands() map[string]ProviderUpdateCommand {
 	return map[string]ProviderUpdateCommand{
 		"claude": {Command: "claude", Args: []string{"update"}},
-		"codex":  {Command: "npm", Args: []string{"i", "-g", "@openai/codex"}},
-		"qwen":   {Command: "npm", Args: []string{"i", "-g", "@qwen-code/qwen-code"}},
+		"codex":  {Command: "codex", Args: []string{"update"}},
+		"qwen":   {Command: "qwen", Args: []string{"update"}},
 	}
 }
 
@@ -291,9 +296,9 @@ func cliUpdateSpecForProvider(id string, sources map[string]string) (providerUpd
 	case "claude":
 		return providerUpdateSpec{ProviderID: "claude", CLI: "claude", Source: source, Hint: "claude update"}, true
 	case "codex":
-		return providerUpdateSpec{ProviderID: "codex", CLI: "codex", Source: source, Hint: "npm i -g @openai/codex"}, true
+		return providerUpdateSpec{ProviderID: "codex", CLI: "codex", Source: source, Hint: "codex update"}, true
 	case "qwen":
-		return providerUpdateSpec{ProviderID: "qwen", CLI: "qwen", Source: source, Hint: "npm i -g @qwen-code/qwen-code"}, true
+		return providerUpdateSpec{ProviderID: "qwen", CLI: "qwen", Source: source, Hint: "qwen update"}, true
 	default:
 		return providerUpdateSpec{}, false
 	}
@@ -423,6 +428,13 @@ func (m *Manager) StartProviderUpdate(parent context.Context, providerID string)
 	}
 	if !m.providerExists(id) {
 		return nil, providerUpdateError("providers:update-unknown-provider", "unknown providerId", map[string]any{"providerId": id})
+	}
+	if cli, supported := cliVersionCommandForProvider(id); supported && sameExecutableName(command.Command, cli) {
+		resolved, err := m.providerCLIExecutable(id)
+		if err != nil {
+			return nil, providerUpdateError("providers:update-cli-not-found", err.Error(), map[string]any{"providerId": id})
+		}
+		command.Command = resolved
 	}
 	if m.providerUpdateRunning(id) {
 		return nil, providerUpdateError("providers:update-in-progress", "ya hay una actualización en curso", map[string]any{
@@ -696,9 +708,13 @@ func (m *Manager) detectInstalledCLIVersion(parent context.Context, providerID s
 }
 
 func (m *Manager) detectInstalledCLIVersionWithTimeout(parent context.Context, providerID string, timeout time.Duration) (*CLIVersion, error) {
-	cli, ok := cliVersionCommandForProvider(providerID)
+	_, ok := cliVersionCommandForProvider(providerID)
 	if !ok {
 		return nil, fmt.Errorf("unknown provider cli: %s", normalizeProviderID(providerID))
+	}
+	resolved, err := m.providerCLIExecutable(providerID)
+	if err != nil {
+		return nil, err
 	}
 	if parent == nil {
 		parent = context.Background()
@@ -708,7 +724,7 @@ func (m *Manager) detectInstalledCLIVersionWithTimeout(parent context.Context, p
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, cli, "--version")
+	cmd := exec.CommandContext(ctx, resolved, "--version")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -722,9 +738,33 @@ func (m *Manager) detectInstalledCLIVersionWithTimeout(parent context.Context, p
 	}
 	raw := redactSensitiveText(strings.TrimSpace(stdout.String()))
 	if raw == "" {
-		return nil, fmt.Errorf("%s --version returned empty output", cli)
+		return nil, fmt.Errorf("%s --version returned empty output", normalizeProviderID(providerID))
 	}
 	return &CLIVersion{Version: parseSemverToken(raw), Raw: raw}, nil
+}
+
+func (m *Manager) providerCLIExecutable(providerID string) (string, error) {
+	id := normalizeProviderID(providerID)
+	provider, ok := m.providerSnapshot(id)
+	if !ok {
+		return "", fmt.Errorf("unknown provider cli: %s", id)
+	}
+	return resolveProviderExecutable(provider)
+}
+
+func sameExecutableName(command, name string) bool {
+	command = strings.TrimSpace(command)
+	name = strings.TrimSpace(name)
+	if command == "" || name == "" {
+		return false
+	}
+	base := strings.ToLower(filepath.Base(command))
+	base = strings.TrimSuffix(base, ".exe")
+	base = strings.TrimSuffix(base, ".cmd")
+	want := strings.ToLower(filepath.Base(name))
+	want = strings.TrimSuffix(want, ".exe")
+	want = strings.TrimSuffix(want, ".cmd")
+	return base == want
 }
 
 func (m *Manager) detectInstalledCLIVersionAfterProviderUpdate(providerID string) (*CLIVersion, string) {
@@ -834,6 +874,7 @@ func (m *Manager) providerUpdatesPayload(ctx context.Context) (ProviderUpdatesPa
 		}
 		m.decorateProviderUpdateFailure(&update)
 		m.rememberProviderUpdate(update)
+		m.notifyProviderUpdateAvailable(update)
 		payload.Updates = append(payload.Updates, update)
 	}
 	return payload, len(candidates) > 0, hasFailures
@@ -906,6 +947,46 @@ func (m *Manager) rememberProviderUpdate(update ProviderUpdate) {
 	update.Tail = ""
 	update.RecheckError = ""
 	m.providerUpdateLastKnown[update.ProviderID] = update
+}
+
+// notifyProviderUpdateAvailable emits one user-facing availability event for a
+// provider/version pair. The renderer turns that into a desktop notification
+// when the user enabled them, or an in-app toast otherwise. The remembered
+// version lives in the daemon-owned provider cache so repeating an hourly check
+// (or restarting Workass) never produces notification spam.
+func (m *Manager) notifyProviderUpdateAvailable(update ProviderUpdate) {
+	if !update.UpdateAvailable || strings.TrimSpace(update.ProviderID) == "" || strings.TrimSpace(update.Latest) == "" {
+		return
+	}
+	providerID := normalizeProviderID(update.ProviderID)
+	latest := strings.TrimSpace(update.Latest)
+	m.mu.Lock()
+	runtime := m.providers[providerID]
+	if runtime == nil || runtime.Config.LastUpdateNotice == latest {
+		m.mu.Unlock()
+		return
+	}
+	name := strings.TrimSpace(runtime.Config.Name)
+	runtime.Config.LastUpdateNotice = latest
+	providers := m.providerRecordsLocked()
+	filePath := m.providerConfigFile
+	m.mu.Unlock()
+	if err := SaveProviderConfigs(filePath, providers); err != nil && m.opts.Logf != nil {
+		m.opts.Logf("provider update notice persist failed", map[string]any{
+			"provider": providerID,
+			"error":    redactSensitiveText(err.Error()),
+		})
+	}
+	if name == "" {
+		name = strings.TrimSpace(update.CLI)
+	}
+	if name == "" {
+		name = providerID
+	}
+	m.emit("notify", map[string]any{
+		"title": name + " tiene una actualización",
+		"body":  "Versión " + latest + " disponible (instalada " + update.Installed + ").",
+	})
 }
 
 func (m *Manager) setProviderUpdateRecheckError(providerID, errText string) {

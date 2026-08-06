@@ -79,6 +79,10 @@ type Entry struct {
 	Version     string     `json:"version,omitempty"`
 	WireVersion int        `json:"wireVersion,omitempty"`
 	Secure      bool       `json:"secure"`
+	// CertFingerprint is the public SHA-256 identity of this daemon's TLS
+	// certificate. It is never a credential; it lets clients surface a changed
+	// peer identity rather than silently downgrading transport.
+	CertFingerprint string `json:"certFingerprint,omitempty"`
 	// FleetIDs names which fleets that machine will accept an enrolment for. It
 	// is how a client tells "one of mine, enrol silently" from "someone else's
 	// machine on this network"; the ids are hashes, never the key.
@@ -268,6 +272,7 @@ func (b *Book) record(card Card, address, source string) (Entry, error) {
 	entry.Version = card.Version
 	entry.WireVersion = card.WireVersion
 	entry.Secure = card.Secure
+	entry.CertFingerprint = card.CertFingerprint
 	entry.FleetIDs = card.FleetIDs
 	entry.LastSeenAt = stamp
 	entry.Endpoints = mergeEndpoint(entry.Endpoints, Endpoint{Kind: KindLAN, Address: address})
@@ -339,13 +344,15 @@ func (b *Book) Refresh(ctx context.Context) ([]Entry, bool) {
 				entry.Version = card.Version
 				entry.WireVersion = card.WireVersion
 				entry.Secure = card.Secure
+				entry.CertFingerprint = card.CertFingerprint
 				entry.FleetIDs = card.FleetIDs
 				entry.LastSeenAt = b.now().UTC().Format(time.RFC3339)
 				entry.Status, entry.Reason = b.assess(card)
 			}
 			b.entries[target.MachineID] = entry
 			if entry.Status != before.Status || entry.Reason != before.Reason ||
-				entry.Name != before.Name || entry.Version != before.Version || entry.Secure != before.Secure {
+				entry.Name != before.Name || entry.Version != before.Version || entry.Secure != before.Secure ||
+				entry.CertFingerprint != before.CertFingerprint {
 				changed.Store(true)
 			}
 		}(target)

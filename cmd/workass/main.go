@@ -36,7 +36,9 @@ import (
 	"workass/internal/wire"
 )
 
-const daemonVersion = "0.0.1-dev"
+// daemonVersion is overridden by the release builders with -ldflags. Keep the
+// development value for source builds and tests.
+var daemonVersion = "0.0.1-dev"
 
 var secretKeyRE = regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|credential|bearer)`)
 
@@ -66,12 +68,15 @@ func main() {
 	port := flag.Int("port", 8788, "HTTP/WebSocket port")
 	bind := flag.String("bind", "localhost", "bind mode: localhost or lan")
 	beacon := flag.Bool("beacon", beaconDefault(), "announce this machine to others on the LAN; only applies under --bind lan")
-	useTLS := flag.Bool("tls", false, "serve https/wss with this machine's own certificate, minted once into the state dir")
+	useTLS := flag.Bool("tls", true, "required: serve https/wss with this machine's own certificate, minted once into the state dir")
 	rendererDir := flag.String("renderer-dir", "", "renderer directory override; empty serves embedded renderer2")
 	mocksDirFlag := flag.String("mocks-dir", "", "design mocks directory override")
 	acpCommand := flag.String("acp-command", "node", "ACP provider command")
 	acpArgsJSON := flag.String("acp-args", `["desktop/acp/mock-server.mjs"]`, "ACP provider args as a JSON array")
 	stateDirFlag := flag.String("state-dir", "state", "daemon state directory")
+	headless := flag.Bool("headless", false, "run only the daemon; do not expect an Electron shell")
+	installService := flag.Bool("install-service", false, "install and start the headless daemon as the current user's service")
+	repairStartup := flag.Bool("repair-startup", false, "back up malformed startup state so the daemon can start again")
 	trustLocalhost := flag.Bool("trust-localhost", true, "auto-approve localhost WebSocket clients")
 	hibernateTTL := flag.Duration("hibernate-ttl", 20*time.Minute, "idle ACP chat hibernate TTL; accepts Go durations such as 20m or 250ms")
 	rssSampleInterval := flag.Duration("rss-sample-interval", 30*time.Second, "ACP engine RSS sampling interval")
@@ -101,6 +106,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid --port: use 1-65535")
 		os.Exit(2)
 	}
+	if !*useTLS {
+		fmt.Fprintln(os.Stderr, "plaintext Workass transport is no longer supported; remove --tls=false")
+		os.Exit(2)
+	}
+	if *installService && !*headless {
+		fmt.Fprintln(os.Stderr, "--install-service requires --headless")
+		os.Exit(2)
+	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -115,6 +128,30 @@ func main() {
 	if !filepath.IsAbs(stateDir) {
 		stateDir = filepath.Join(cwd, stateDir)
 	}
+	if *repairStartup {
+		report, repairErr := repairStartupState(stateDir)
+		if repairErr != nil {
+			fmt.Fprintf(os.Stderr, "workass: repair startup state: %v\n", repairErr)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stdout, "Workass startup recovery complete (%d preserved files)\n", len(report.Moved))
+		return
+	}
+	if *installService {
+		if err := installHeadlessService(headlessServiceOptions{
+			Executable: currentExecutablePath(),
+			StateDir:   stateDir,
+			Port:       *port,
+			Bind:       *bind,
+			Profile:    workassRuntimeProfile(),
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "workass: install headless service: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stdout, "Workass headless service installed and started (%s)\n", serviceName())
+		return
+	}
+	_ = headless // The daemon is already UI-free; this flag documents the intended launch mode.
 	mocksDir := resolveMocksDir(*mocksDirFlag, os.Getenv("WORKASS_MOCKS_DIR"), cwd, currentExecutablePath())
 	flagEngine := engineConfig{
 		HibernateTTL:            *hibernateTTL,
@@ -206,12 +243,20 @@ func main() {
 		},
 	})
 	chatControl := newChatControlCoordinator(acpManager, sessionState, hub.Broadcast)
+	artifactHosting, err := artifacthost.New(stateDir, "https://"+net.JoinHostPort("127.0.0.1", strconv.Itoa(*port)))
+	if err != nil {
+		acpManager.Reset()
+		logger.Printf("[workass] initialize artifact hosting: %v", err)
+		os.Exit(1)
+	}
+	artifactHosting.SetLogger(logger.Printf)
 	channelCount := registerDaemonHandlers(hub, cwd, acpManager, daemonOptions{
 		StateDir:            stateDir,
 		ConfigPath:          appConfigPath,
 		Engine:              effectiveEngine,
 		EngineFlagOverrides: flagOverrides,
 		ChatControl:         chatControl,
+		Artifacts:           artifactHosting,
 	})
 	acpManager.StartProviderDetection(context.Background())
 
@@ -230,24 +275,9 @@ func main() {
 		scheme = "https"
 	}
 	logger.Printf("[workass] serving renderer %s on %s://%s", rendererSource, scheme, addr)
-	if *bind == "lan" && !*useTLS {
-		// The insecure window is something you can see rather than something you
-		// have to remember. Without --tls, everything on this port is readable by
-		// anyone on the network — prompts, agent output, the code in a diff, and
-		// the device token that grants control of it all.
-		logger.Printf("[workass] WARNING: bound to the LAN in the clear — http/ws, no TLS. " +
-			"Prompts, agent output, diffs and device tokens are readable by anyone on this network. Use --tls.")
-	}
 	logger.Printf("[workass] device state %s (trust-localhost=%v)", filepath.Join(stateDir, "devices.json"), *trustLocalhost)
 	logger.Printf("[workass] provider registry %s", providersFile)
 
-	artifactHosting, err := artifacthost.New(stateDir, "http://"+net.JoinHostPort("127.0.0.1", strconv.Itoa(*port)))
-	if err != nil {
-		acpManager.Reset()
-		logger.Printf("[workass] initialize artifact hosting: %v", err)
-		os.Exit(1)
-	}
-	artifactHosting.SetLogger(logger.Printf)
 	handler := httpserve.New(staticDir, hub, nil)
 	handler.MocksDir = mocksDir
 	handler.ArtifactHosts = artifactHosting
@@ -290,7 +320,7 @@ func main() {
 		logger.Printf("[workass] registered %d machine wire channels", registerMachineHandlers(hub, machineBook, identity))
 	}
 	handler.Metrics = func() map[string]any { return daemonMetrics(sessionState, stateDir, hub, acpManager) }
-	controlURL := "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(*port)) + agentControlPath
+	controlURL := "https://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(*port)) + agentControlPath
 	agentControl, err := newAgentControlHandler(acpManager, sessionState, hub.Broadcast, controlURL, agentControlFile, chatControl)
 	if err != nil {
 		acpManager.Reset()
@@ -309,7 +339,10 @@ func main() {
 		})
 	}
 	defer cleanup()
+	shutdownRoot, requestShutdown := context.WithCancel(context.Background())
+	defer requestShutdown()
 	mux := http.NewServeMux()
+	mux.HandleFunc("/workass/recovery/shutdown", localRecoveryShutdownHandler(requestShutdown))
 	mux.Handle(agentControlPath, agentControl)
 	mux.Handle(fleetQRPath, newFleetQRHandler(fleetKeys, *port, logger.Printf))
 	mux.Handle("/", handler)
@@ -331,7 +364,7 @@ func main() {
 		}
 		server.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{certificate.TLS},
-			MinVersion:   tls.VersionTLS12,
+			MinVersion:   tls.VersionTLS13,
 		}
 		listener = tls.NewListener(listener, server.TLSConfig)
 		hub.SetTLSFingerprint(certificate.Fingerprint)
@@ -341,7 +374,7 @@ func main() {
 		}
 		logger.Printf("[workass] serving https/wss · certificate %s", certificate.Fingerprint[:16])
 	}
-	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	signalCtx, stopSignals := signal.NotifyContext(shutdownRoot, os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 	startMachinePresence(signalCtx, machineBook, hub, identity, machinePresenceOptions{
 		Bind:   *bind,
@@ -352,6 +385,33 @@ func main() {
 		cleanup()
 		logger.Printf("[workass] server stopped: %v", err)
 		os.Exit(1)
+	}
+}
+
+// localRecoveryShutdownHandler is deliberately outside the frozen WebSocket
+// protocol.  It is a loopback-only shell recovery hook: after replying 202 it
+// cancels the daemon's root context, allowing the ordinary graceful shutdown
+// path to settle engines and release the listener.  A LAN peer can never use
+// it to stop another machine.
+func localRecoveryShutdownHandler(requestShutdown context.CancelFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil || !net.ParseIP(host).IsLoopback() {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"stopping":true}`))
+		go func() {
+			time.Sleep(25 * time.Millisecond)
+			requestShutdown()
+		}()
 	}
 }
 
@@ -581,6 +641,8 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 	count++
 	registerArchiveHandlers(hub, state)
 	count += 2
+	registerVisualizeHandler(hub, opts.Artifacts, sessionState, state.stateDir)
+	count++
 	registerNotifyHandlers(hub)
 	count++
 	registerConfigSettingsHandlers(hub, state, acpManager)

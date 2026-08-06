@@ -122,11 +122,9 @@ test('plan usage highlights provider rejection and utilization at eighty percent
 test('provider plan refresh is independent from chat session creation', () => {
   const store = readFileSync(new URL('../src/store/store.ts', import.meta.url), 'utf8');
   const types = readFileSync(new URL('../src/wire/types.ts', import.meta.url), 'utf8');
-  const preload = readFileSync(new URL('../../preload.js', import.meta.url), 'utf8');
-  const lan = readFileSync(new URL('../../lan-server.js', import.meta.url), 'utf8');
+  const bridge = readFileSync(new URL('../../../internal/httpserve/lan_bridge.go', import.meta.url), 'utf8');
   assert.match(store, /call\('appChatRefreshPlanUsage',\s*providerId\)/,
     'opening the plan popover must query the selected provider, not rebind the chat session');
   assert.match(types, /appChatRefreshPlanUsage\?:/);
-  assert.match(preload, /appChatRefreshPlanUsage:\s*\(providerId\)\s*=>\s*ipcRenderer\.invoke\('app-chat:refresh-plan-usage'/);
-  assert.match(lan, /appChatRefreshPlanUsage:\s*\(providerId\)\s*=>\s*invoke\('app-chat:refresh-plan-usage'/);
+  assert.match(bridge, /appChatRefreshPlanUsage:\s*\(providerId\)\s*=>\s*invoke\('app-chat:refresh-plan-usage'/);
 });

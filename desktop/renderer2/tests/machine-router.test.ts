@@ -116,10 +116,10 @@ function memoryStorage() {
 }
 
 function entry(id: string, name: string, address: string): MachineEntry {
-  return { machineId: id, name, endpoints: [{ kind: 'lan', address }], secure: false };
+  return { machineId: id, name, endpoints: [{ kind: 'lan', address }], secure: true, addedBy: 'beacon' };
 }
 
-test('the registry opens one socket per machine and never one to itself', () => {
+test('the registry keeps nearby machines passive until access is explicitly requested', () => {
   const opened: string[] = [];
   const storage = memoryStorage();
   const registry = new MachineRegistry({
@@ -130,8 +130,10 @@ test('the registry opens one socket per machine and never one to itself', () => 
     entry('m-self', 'este Mac', '127.0.0.1:8788'),
     entry('m-remote', 'builder', '192.168.1.50:18788'),
   ], 'm-self');
-  assert.deepEqual(opened, ['ws://192.168.1.50:18788/?deviceName=Mac'],
-    'the local machine is served by the injected bridge; a second socket would duplicate every chat');
+  assert.deepEqual(opened, [], 'a beacon must not open a socket or prompt a nearby machine');
+  assert.equal(registry.requestAccess('m-remote'), true);
+  assert.deepEqual(opened, ['wss://192.168.1.50:18788/?deviceName=Mac'],
+    'only the user request opens an encrypted socket; the local machine is never duplicated');
   assert.deepEqual(registry.names(), { 'm-remote': 'builder' });
 });
 
@@ -159,6 +161,8 @@ test('with nothing mounted the registry hands back no router at all', () => {
   assert.equal(registry.router(), undefined,
     'a single-machine install must take exactly the path it took before E3');
   registry.sync([entry('m-remote', 'builder', '192.168.1.50:18788')], 'm-self');
+  assert.equal(registry.router(), undefined, 'discovery alone does not mount a remote router');
+  registry.requestAccess('m-remote');
   assert.ok(registry.router());
 });
 

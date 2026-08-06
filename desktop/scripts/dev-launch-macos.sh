@@ -24,7 +24,7 @@ if [ ! -d "$ELECTRON_APP" ]; then
 fi
 
 mkdir -p "$WORKASS_STATE_DIR" "$WORKASS_USER_DATA_DIR" "$WORKASS_RUN_DIR" "$WORKASS_LOG_ROOT"
-if ! curl -fsS --max-time 2 "$WORKASS_DAEMON_URL/workass/health" >/dev/null 2>&1; then
+if ! curl -kfsS --max-time 2 "$WORKASS_DAEMON_URL/workass/health" >/dev/null 2>&1; then
   daemon="$ROOT_DIR/dist-bin/workass-darwin-arm64"
   [ -x "$daemon" ] || { echo "development daemon missing: $daemon" >&2; exit 1; }
   "$ROOT_DIR/scripts/macos/install-workass-launchd.sh" \
@@ -32,11 +32,11 @@ if ! curl -fsS --max-time 2 "$WORKASS_DAEMON_URL/workass/health" >/dev/null 2>&1
     "$WORKASS_LAUNCHD_LABEL" "$ROOT_DIR" "${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" "$HOME"
   attempts=80
   while [ "$attempts" -gt 0 ]; do
-    curl -fsS --max-time 2 "$WORKASS_DAEMON_URL/workass/health" >/dev/null 2>&1 && break
+    curl -kfsS --max-time 2 "$WORKASS_DAEMON_URL/workass/health" >/dev/null 2>&1 && break
     attempts=$((attempts - 1))
     sleep 0.25
   done
-  curl -fsS --max-time 2 "$WORKASS_DAEMON_URL/workass/health" >/dev/null
+  curl -kfsS --max-time 2 "$WORKASS_DAEMON_URL/workass/health" >/dev/null
 fi
 
 status_url="http://127.0.0.1:$WORKASS_VIEW_PORT/__workass-shell/status"

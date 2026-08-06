@@ -2,8 +2,10 @@
 
 const fs = require('node:fs');
 const http = require('node:http');
+const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 const { spawnSync } = require('node:child_process');
 
 function xmlEscape(value) {
@@ -62,7 +64,14 @@ ${envXML}
 
 function healthCheck(url, timeoutMs = 700) {
   return new Promise((resolve) => {
-    const request = http.get(`${url}/workass/health`, { timeout: timeoutMs }, (response) => {
+    const parsed = new URL(url);
+    const transport = parsed.protocol === 'https:' ? https : http;
+    const request = transport.get(`${url}/workass/health`, {
+      timeout: timeoutMs,
+      // The local shell starts before it can read a newly minted self-signed
+      // certificate. This probe is loopback-only; remote Workass links use WSS.
+      rejectUnauthorized: parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost' ? false : true,
+    }, (response) => {
       let body = '';
       response.setEncoding('utf8');
       response.on('data', (chunk) => {
@@ -92,6 +101,157 @@ async function waitForHealth(url, { attempts = 120, delayMs = 250, check = healt
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   return false;
+}
+
+function portableDaemonCandidates({ resourcesPath, executablePath, platform = process.platform } = {}) {
+  const names = platform === 'win32' ? ['workass-daemon.exe', 'workass.exe'] : ['workass'];
+  const candidates = [];
+  if (executablePath) {
+    for (const name of names) candidates.push(path.join(path.dirname(executablePath), name));
+  }
+  if (resourcesPath) {
+    for (const name of names) {
+      candidates.push(path.join(resourcesPath, 'runtime', name));
+      candidates.push(path.join(resourcesPath, name));
+    }
+  }
+  return [...new Set(candidates)];
+}
+
+function bundledPortableDaemon({ resourcesPath, executablePath, platform = process.platform } = {}) {
+  const candidates = portableDaemonCandidates({ resourcesPath, executablePath, platform });
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return '';
+}
+
+function spawnPortableDaemon({ runtime, executable, platform = process.platform, childSpawn = spawn } = {}) {
+  if (!runtime || !executable) throw new Error('runtime and executable are required');
+  fs.mkdirSync(runtime.stateDir, { recursive: true });
+  fs.mkdirSync(runtime.logRoot, { recursive: true });
+  const stdout = fs.openSync(path.join(runtime.logRoot, 'daemon.out.log'), 'a');
+  const stderr = fs.openSync(path.join(runtime.logRoot, 'daemon.err.log'), 'a');
+  const args = [
+    ...(runtime.profile === 'prod' ? ['--prod'] : []),
+    '--headless',
+    '--state-dir', runtime.stateDir,
+    '--port', String(runtime.daemonPort),
+    '--bind', runtime.daemonBind,
+  ];
+  const child = childSpawn(executable, args, {
+    cwd: path.dirname(executable),
+    env: {
+      ...process.env,
+      WORKASS_PROFILE: runtime.profile,
+      WORKASS_DATA_ROOT: runtime.dataRoot,
+      WORKASS_BROWSER_CONTROL_FILE: runtime.browserControlFile,
+      ...(runtime.profile === 'prod' ? { WORKASS_PROD: '1' } : {}),
+    },
+    detached: true,
+    windowsHide: platform === 'win32',
+    stdio: ['ignore', stdout, stderr],
+  });
+  if (typeof child.unref === 'function') child.unref();
+  return { child, args };
+}
+
+async function ensurePortableDaemon({
+  runtime,
+  resourcesPath,
+  executablePath = process.execPath,
+  platform = process.platform,
+  check = healthCheck,
+  childSpawn = spawn,
+  wait = waitForHealth,
+  daemonExecutable = '',
+} = {}) {
+  if (!runtime || !resourcesPath) throw new Error('runtime and resourcesPath are required');
+  if (await check(runtime.daemonURL)) return { status: 'already-running' };
+
+  const executable = daemonExecutable && fs.existsSync(daemonExecutable)
+    ? daemonExecutable
+    : bundledPortableDaemon({ resourcesPath, executablePath, platform });
+  if (!executable) return { status: 'no-bundled-runtime', candidates: portableDaemonCandidates({ resourcesPath, executablePath, platform }) };
+
+  const { child, args } = spawnPortableDaemon({ runtime, executable, platform, childSpawn });
+  if (!await wait(runtime.daemonURL, { check })) {
+    try { child.kill?.(); } catch { /* best effort */ }
+    throw new Error(`bundled Workass daemon did not become healthy: ${executable}`);
+  }
+  return { status: 'started-and-running', executable, args, pid: child.pid || null };
+}
+
+function postLocalRecoveryShutdown(url, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    let parsed;
+    try { parsed = new URL(url); } catch { resolve(false); return; }
+    if (!['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname)) { resolve(false); return; }
+    const transport = parsed.protocol === 'https:' ? https : http;
+    const request = transport.request({
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+      path: '/workass/recovery/shutdown', method: 'POST', timeout: timeoutMs,
+      rejectUnauthorized: false,
+    }, (response) => {
+      response.resume();
+      response.on('end', () => resolve(response.statusCode === 202));
+    });
+    request.on('timeout', () => { request.destroy(); resolve(false); });
+    request.on('error', () => resolve(false));
+    request.end();
+  });
+}
+
+async function waitForUnhealthy(url, { attempts = 40, delayMs = 100, check = healthCheck } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (!await check(url)) return true;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return false;
+}
+
+function repairDaemonStartup({ runtime, executable, platform = process.platform, repairSpawn = spawnSync } = {}) {
+  if (!runtime || !executable) throw new Error('runtime and executable are required');
+  const result = repairSpawn(executable, ['--repair-startup', '--state-dir', runtime.stateDir], {
+    cwd: path.dirname(executable), windowsHide: platform === 'win32', stdio: 'ignore',
+    env: { ...process.env, WORKASS_PROFILE: runtime.profile, WORKASS_DATA_ROOT: runtime.dataRoot },
+  });
+  if (result.error || result.status !== 0) throw new Error('Workass startup repair failed');
+}
+
+// This is the shell-owned recovery transaction behind ⌘, → Enter.  It is
+// intentionally local: it can stop only a daemon on loopback, preserves broken
+// startup files before recreating them, and then uses the exact sibling binary
+// the portable shell would use for a cold launch.
+async function restartDaemonAndRecover({
+  runtime, resourcesPath, executablePath = process.execPath, platform = process.platform,
+  daemonExecutable = '', check = healthCheck, childSpawn = spawn, wait = waitForHealth,
+  waitForDown = waitForUnhealthy, shutdown = postLocalRecoveryShutdown, repairSpawn = spawnSync,
+} = {}) {
+  if (!runtime || !resourcesPath) throw new Error('runtime and resourcesPath are required');
+  const executable = daemonExecutable && fs.existsSync(daemonExecutable)
+    ? daemonExecutable
+    : bundledPortableDaemon({ resourcesPath, executablePath, platform });
+  if (!executable) throw new Error('bundled Workass daemon was not found');
+
+  // Repair before requesting stop: when a file is malformed this is the only
+  // window in which a launchd/service-owned daemon cannot immediately restart
+  // and race the repair. Valid state is never changed.
+  repairDaemonStartup({ runtime, executable, platform, repairSpawn });
+  const wasHealthy = await check(runtime.daemonURL);
+  const shutdownAccepted = wasHealthy ? await shutdown(runtime.daemonURL) : false;
+  if (wasHealthy && !shutdownAccepted) throw new Error('daemon refused the local recovery shutdown');
+  // launchd and Task Scheduler can restart a healthy daemon in less than our
+  // 100 ms observation interval.  Missing that tiny down window is not a
+  // failure: the only user-visible requirement is a healthy daemon after the
+  // accepted graceful stop.  The subsequent ensure call verifies exactly that.
+  const stoppedObserved = wasHealthy ? await waitForDown(runtime.daemonURL, { check }) : true;
+  const receipt = await ensurePortableDaemon({
+    runtime, resourcesPath, executablePath, platform, daemonExecutable: executable, check, childSpawn, wait,
+  });
+  return { ...receipt, repaired: true, shutdownAccepted, stoppedObserved };
 }
 
 async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process.platform, home = os.homedir(), uid = process.getuid?.(), spawn = spawnSync, check = healthCheck } = {}) {
@@ -169,4 +329,18 @@ async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process
   return { status: 'installed-and-running', manifest, plistPath, executable };
 }
 
-module.exports = { ensurePackagedDaemon, healthCheck, launchAgentPlist, waitForHealth, xmlEscape };
+module.exports = {
+  bundledPortableDaemon,
+  ensurePackagedDaemon,
+  ensurePortableDaemon,
+  healthCheck,
+  launchAgentPlist,
+  portableDaemonCandidates,
+  postLocalRecoveryShutdown,
+  repairDaemonStartup,
+  restartDaemonAndRecover,
+  spawnPortableDaemon,
+  waitForUnhealthy,
+  waitForHealth,
+  xmlEscape,
+};

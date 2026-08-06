@@ -67,11 +67,16 @@ type ProviderConfig struct {
 	Detected        bool              `json:"detected,omitempty"`
 	DetectedAt      string            `json:"detectedAt,omitempty"`
 	ResolvedCommand string            `json:"resolvedCommand,omitempty"`
-	DisabledByUser  bool              `json:"disabledByUser,omitempty"`
-	FixHint         string            `json:"-"`
-	CWD             string            `json:"-"`
-	Label           string            `json:"-"`
-	enabledSet      bool              `json:"-"`
+	// LastUpdateNotice is daemon-owned update-check cache state. It records the
+	// newest CLI release for which Workass has already emitted an availability
+	// notice, so the hourly checker does not toast the same release forever or
+	// repeat it after a daemon restart. It is never user input or a credential.
+	LastUpdateNotice string `json:"lastUpdateNotice,omitempty"`
+	DisabledByUser   bool   `json:"disabledByUser,omitempty"`
+	FixHint          string `json:"-"`
+	CWD              string `json:"-"`
+	Label            string `json:"-"`
+	enabledSet       bool   `json:"-"`
 }
 
 // Options configures a bridge manager. Tests can shorten timeouts here.

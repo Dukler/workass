@@ -286,6 +286,8 @@ export interface MachineView {
   reason: string;
   secure: boolean;
   paired: boolean;
+  requested: boolean;
+  discovered: boolean;
 }
 
 /** One fleet key as it is safe to show: identity and provenance, never the secret. */

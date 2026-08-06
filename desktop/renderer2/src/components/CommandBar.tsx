@@ -23,8 +23,8 @@ export function CommandBar() {
   const commands = useMemo<Command[]>(() => [
     {
       id: 'reload',
-      title: 'Recargar y reconectar',
-      detail: 'Rehace la conexión con el daemon, recupera el control y recarga la ventana.',
+      title: 'Reiniciar daemon y reconectar',
+		detail: 'Reinicia el daemon local, repara archivos de inicio dañados y recarga la ventana.',
       keywords: 'reload reconectar reconnect refrescar refresh arreglar reparar control controller atascado colgado stuck',
       run: async () => {
         setBusy('Reconectando…');

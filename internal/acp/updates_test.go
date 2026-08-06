@@ -64,10 +64,83 @@ func TestProviderUpdateCheckFakeRegistry(t *testing.T) {
 			}
 			update := payload.Updates[0]
 			if update.ProviderID != "qwen" || update.CLI != "qwen" || update.Installed != parseSemverToken(tc.installed) ||
-				update.Latest != tc.latest || update.UpdateAvailable != tc.available || update.Hint != "npm i -g @qwen-code/qwen-code" {
+				update.Latest != tc.latest || update.UpdateAvailable != tc.available || update.Hint != "qwen update" {
 				t.Fatalf("qwen update = %#v", update)
 			}
 			t.Logf("trace providers:updates qwen installed=%s latest=%s updateAvailable=%v hint=%q", update.Installed, update.Latest, update.UpdateAvailable, update.Hint)
+		})
+	}
+}
+
+func TestProviderCLIExecutableUsesExplicitPathVariable(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	providerPath := filepath.Join(pathDir, "qwen-real")
+	writeExecutable(t, providerPath, "#!/bin/sh\nprintf 'qwen-code 0.19.11\\n'\n")
+	t.Setenv("WORKASS_QWEN", providerPath)
+
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "qwen", Name: "Qwen Code", Command: "qwen", Enabled: true,
+		}},
+		DefaultProviderID: "qwen",
+		RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	resolved, err := manager.providerCLIExecutable("qwen")
+	if err != nil {
+		t.Fatalf("resolve qwen path: %v", err)
+	}
+	if resolved != providerPath {
+		t.Fatalf("resolved qwen path = %q, want %q", resolved, providerPath)
+	}
+	version := manager.detectInstalledCLIVersion(context.Background(), "qwen")
+	if version == nil || version.Version != "0.19.11" {
+		t.Fatalf("qwen version through resolved path = %#v", version)
+	}
+}
+
+func TestProviderUpdateRunsResolvedProviderExecutable(t *testing.T) {
+	for _, providerID := range []string{"qwen", "claude"} {
+		t.Run(providerID, func(t *testing.T) {
+			root := repoRoot(t)
+			pathDir := t.TempDir()
+			marker := filepath.Join(t.TempDir(), providerID+"-update-ran")
+			// Deliberately give the executable a nonstandard filename. The updater
+			// must use the provider's detected absolute path, not a bare PATH name.
+			providerPath := filepath.Join(pathDir, providerID+"-user-install")
+			writeExecutable(t, providerPath, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '0.19.1\\n'; exit 0; fi\nif [ \"$1\" = \"update\" ]; then printf 'updated\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 1\n")
+
+			registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.19.2"})
+			}))
+			t.Cleanup(registry.Close)
+			events := newEventCollector()
+			manager := NewManager(Options{
+				RootDir: root,
+				Providers: []ProviderConfig{{
+					ID: providerID, Name: providerID, Command: providerID, ResolvedCommand: providerPath, Enabled: true,
+				}},
+				DefaultProviderID:        providerID,
+				Broadcast:                events.Broadcast,
+				RSSSampleInterval:        time.Hour,
+				ProviderUpdateSources:    map[string]string{providerID: registry.URL + "/latest"},
+				ProviderUpdateTimeout:    200 * time.Millisecond,
+				ProviderUpdateRunTimeout: time.Second,
+			})
+			t.Cleanup(func() { manager.Reset() })
+
+			if _, err := manager.StartProviderUpdate(context.Background(), providerID); err != nil {
+				t.Fatalf("start %s update: %v", providerID, err)
+			}
+			progress := waitProviderUpdateProgress(t, events, providerID, func(progress ProviderUpdateProgress) bool {
+				return progress.Status == "done" || progress.Status == "failed"
+			}, 2*time.Second)
+			if progress.Status != "done" || !fileExists(marker) {
+				t.Fatalf("%s update progress=%#v marker=%v", providerID, progress, fileExists(marker))
+			}
 		})
 	}
 }
@@ -84,6 +157,71 @@ func TestProviderUpdateSchedulerDefaultCadence(t *testing.T) {
 	for i := range want {
 		if opts.ProviderUpdateRetryBackoffs[i] != want[i] {
 			t.Fatalf("provider update retry backoffs = %v, want %v", opts.ProviderUpdateRetryBackoffs, want)
+		}
+	}
+}
+
+func TestProviderUpdateAvailabilityNotifiesOncePerVersionAcrossRestart(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	providerPath := filepath.Join(pathDir, "codex")
+	writeExecutable(t, providerPath, "#!/bin/sh\nprintf '0.146.1\\n'\n")
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.146.2"})
+	}))
+	t.Cleanup(registry.Close)
+	providerFile := filepath.Join(t.TempDir(), "providers.json")
+	configs := []ProviderConfig{{ID: "codex", Name: "Codex", Command: "codex", ResolvedCommand: providerPath, Enabled: true}}
+	if err := SaveProviderConfigs(providerFile, configs); err != nil {
+		t.Fatalf("seed provider cache: %v", err)
+	}
+
+	newManager := func(events *eventCollector) *Manager {
+		manager := NewManager(Options{
+			RootDir: root, Providers: configs, DefaultProviderID: "codex", ProviderConfigFile: providerFile,
+			Broadcast: events.Broadcast, RSSSampleInterval: time.Hour,
+			ProviderUpdateSources: map[string]string{"codex": registry.URL + "/latest"}, ProviderUpdateTimeout: time.Second,
+		})
+		manager.setProviderCLIVersion("codex", &CLIVersion{Version: "0.146.1", Raw: "0.146.1"})
+		return manager
+	}
+
+	firstEvents := newEventCollector()
+	first := newManager(firstEvents)
+	first.CheckProviderUpdates(context.Background())
+	firstNotice := firstEvents.waitChannel(t, "notify", time.Second).payload.(map[string]any)
+	if firstNotice["title"] != "Codex tiene una actualización" || firstNotice["body"] != "Versión 0.146.2 disponible (instalada 0.146.1)." {
+		t.Fatalf("first update notice = %#v", firstNotice)
+	}
+	firstEventCount := len(firstEvents.snapshot())
+	first.CheckProviderUpdates(context.Background())
+	for _, event := range firstEvents.snapshot()[firstEventCount:] {
+		if event.channel == "notify" {
+			t.Fatalf("duplicate update notice = %#v", event.payload)
+		}
+	}
+	first.Reset()
+
+	loaded, err := LoadProviderConfigs(providerFile, root)
+	if err != nil {
+		t.Fatalf("reload provider cache: %v", err)
+	}
+	loadedCodex, ok := providerFromSlice(loaded, "codex")
+	if !ok || loadedCodex.LastUpdateNotice != "0.146.2" {
+		t.Fatalf("persisted notice cache = %#v", loaded)
+	}
+	secondEvents := newEventCollector()
+	second := NewManager(Options{
+		RootDir: root, Providers: loaded, DefaultProviderID: "codex", ProviderConfigFile: providerFile,
+		Broadcast: secondEvents.Broadcast, RSSSampleInterval: time.Hour,
+		ProviderUpdateSources: map[string]string{"codex": registry.URL + "/latest"}, ProviderUpdateTimeout: time.Second,
+	})
+	t.Cleanup(func() { second.Reset() })
+	second.setProviderCLIVersion("codex", &CLIVersion{Version: "0.146.1", Raw: "0.146.1"})
+	second.CheckProviderUpdates(context.Background())
+	for _, event := range secondEvents.snapshot() {
+		if event.channel == "notify" {
+			t.Fatalf("restart repeated update notice = %#v", event.payload)
 		}
 	}
 }

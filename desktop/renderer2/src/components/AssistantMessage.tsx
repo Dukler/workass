@@ -87,6 +87,7 @@ function AssistantSliceBody({
   const parsedSegments = segs.map((segment) => 'prose' in segment ? parseBlocks(segment.prose) : null);
   const resultBlocks = msg.result ? parseBlocks(msg.result) : [];
   const media = assistantMediaResolver(msg.images);
+  const visualizeChatId = store.chat(tabId)?.chatId ?? '';
   const blockKeys = stableMarkdownBlockKeys(msg, parsedSegments.flatMap((blocks) => blocks?.map((block) => block.sig) ?? []));
   let blockIndex = 0;
   const running = terminal && msg.status === 'running';
@@ -114,10 +115,10 @@ function AssistantSliceBody({
       {segs.map((s, segmentIndex) => {
         if ('tools' in s) return <ToolGroup key={s.key} tools={s.tools} revision={s.revision} />;
         if ('event' in s) return s.event.key === thinkEv?.key ? null : <EventView key={s.event.key} ev={s.event} />;
-        return parsedSegments[segmentIndex]!.map((sb) => <MarkdownBlock key={blockKeys[blockIndex++]} sb={sb} media={media} />);
+        return parsedSegments[segmentIndex]!.map((sb) => <MarkdownBlock key={blockKeys[blockIndex++]} sb={sb} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} />);
       })}
 
-      {resultBlocks.map((block, index) => <MarkdownBlock key={`result-${index}-${block.sig}`} sb={block} media={media} />)}
+      {resultBlocks.map((block, index) => <MarkdownBlock key={`result-${index}-${block.sig}`} sb={block} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} />)}
       <StructuredAssistantImages images={msg.images} />
 
       {running ? <TurnPulse msg={msg} thinkEv={thinkEv} /> : thinkEv && <StepRow ev={thinkEv} />}

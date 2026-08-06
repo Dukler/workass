@@ -54,7 +54,7 @@ func registerMachineHandlers(hub *wire.Hub, book *machinebook.Book, identity mac
 		"machineId":   identity.MachineID,
 		"name":        identity.DisplayName,
 		"wireVersion": daemonWireVersion,
-		"secure":      false,
+		"secure":      true,
 		"self":        true,
 	}
 	snapshot := func() map[string]any {
@@ -163,7 +163,7 @@ func startMachinePresence(ctx context.Context, book *machinebook.Book, hub *wire
 				"machineId":   identity.MachineID,
 				"name":        identity.DisplayName,
 				"wireVersion": daemonWireVersion,
-				"secure":      false,
+				"secure":      true,
 				"self":        true,
 			},
 		})

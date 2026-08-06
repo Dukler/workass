@@ -295,6 +295,27 @@ test('a mutation arriving during a save acknowledgement remains dirty and is res
   assert.equal(isDirty(subject, 'tab-a'), false);
 });
 
+test('a successful queue save releases the refresh fence', async () => {
+  const owner = chat('tab-a');
+  owner.messages = [{
+    id: 'assistant-running', role: 'assistant', content: 'working', status: 'running',
+    at: null, events: [], jobId: 'job-running',
+  } as any];
+  const subject = subjectWithChats([owner]);
+  subject.schedulePersist = () => {};
+
+  await withWindowApi({ saveSession: async () => true }, async () => {
+    assert.equal(subject.queueDraftMessage(owner.id, 'persist exactly once', []), true);
+    await subject.flushSession();
+
+    const staleServer = subject.toMirror(false);
+    staleServer.chats[0].queue = undefined;
+    assert.equal(subject.restoreSessionSnapshot(staleServer), true);
+  });
+
+  assert.equal(subject.chat(owner.id)?.queue, undefined, 'a later server snapshot may apply after the save fence clears');
+});
+
 test('delete, structural, first-save, and post-restore boundaries force a complete save', async (t) => {
   await t.test('first save after boot', () => {
     const subject = new StoreCtor();

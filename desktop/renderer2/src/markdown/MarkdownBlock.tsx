@@ -1,10 +1,11 @@
 import { memo } from 'react';
 import type { SignedBlock } from './blocks';
 import { renderInline, renderCode, type InlineMediaResolver } from './inline';
+import { VisualizeBlock } from './VisualizeBlock';
 
 // One block. Memoized on its signature so a sealed block above the streaming
 // tail never re-renders while tokens flow into the last block.
-function BlockView({ sb, media }: { sb: SignedBlock; media?: InlineMediaResolver }) {
+function BlockView({ sb, media, visualizeTabId, visualizeChatId }: { sb: SignedBlock; media?: InlineMediaResolver; visualizeTabId?: string; visualizeChatId?: string }) {
   // Dev-only render probe: inert unless a global collector is present. Used to
   // verify that memo keeps sealed blocks from re-rendering during streaming.
   const probe = (globalThis as { __blockRenders?: string[] }).__blockRenders;
@@ -44,7 +45,14 @@ function BlockView({ sb, media }: { sb: SignedBlock; media?: InlineMediaResolver
           </table>
         </div>
       );
+    case 'visualize':
+      return <VisualizeBlock spec={b.spec} error={b.error} tabId={visualizeTabId} chatId={visualizeChatId} />;
   }
 }
 
-export const MarkdownBlock = memo(BlockView, (a, b) => a.sb.sig === b.sb.sig && a.media?.revision === b.media?.revision);
+export const MarkdownBlock = memo(BlockView, (a, b) => (
+  a.sb.sig === b.sb.sig
+  && a.media?.revision === b.media?.revision
+  && a.visualizeTabId === b.visualizeTabId
+  && a.visualizeChatId === b.visualizeChatId
+));

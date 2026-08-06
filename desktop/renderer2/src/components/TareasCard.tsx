@@ -130,6 +130,7 @@ function relTime(ms: number): string {
 function SubagentRow({ n, nowMs }: { n: SubagentNode; nowMs: number }) {
   const st = nodeState(n);
   const running = st === 'running';
+  const failed = st === 'failed';
   const dur = nodeDuration(n, nowMs);
   // The row says what it did, not how it ended: no outcome word, no red (user,
   // 2026-07-25). A settled subagent reads the same whatever its exit was.
@@ -156,7 +157,12 @@ function SubagentRow({ n, nowMs }: { n: SubagentNode; nowMs: number }) {
                   <span className="a-n">{activity.label}</span>
                 </span>
               )
-              : <span className="r-act"><span className="a-n">{settled}</span></span>}
+              : (
+                <span className="r-act">
+                  <span className="a-n">{settled}</span>
+                  {failed && <span className="dc-fail"> · falló</span>}
+                </span>
+              )}
           </span>
         </span>
       </summary>

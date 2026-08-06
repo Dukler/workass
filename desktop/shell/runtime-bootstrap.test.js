@@ -6,7 +6,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { ensurePackagedDaemon, healthCheck, launchAgentPlist } = require('./runtime-bootstrap');
+const { ensurePackagedDaemon, ensurePortableDaemon, healthCheck, launchAgentPlist, restartDaemonAndRecover } = require('./runtime-bootstrap');
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-runtime-bootstrap-'));
@@ -100,4 +100,58 @@ test('health probe rejects unrelated services occupying the Workass port', async
   assert.equal(await healthCheck(url), false);
   body = JSON.stringify({ app: 'workass' });
   assert.equal(await healthCheck(url), true);
+});
+
+test('portable bootstrap starts the sibling Windows daemon when no daemon is healthy', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-bootstrap-'));
+  const executablePath = path.join(root, 'Workass.exe');
+  const daemonPath = path.join(root, 'workass-daemon.exe');
+  fs.writeFileSync(executablePath, 'electron');
+  fs.writeFileSync(daemonPath, 'daemon');
+  const runtime = {
+    profile: 'prod', daemonURL: 'http://127.0.0.1:8788', daemonPort: 8788, daemonBind: 'localhost',
+    dataRoot: path.join(root, 'data'), stateDir: path.join(root, 'data', 'state'),
+    logRoot: path.join(root, 'data', 'logs'), browserControlFile: path.join(root, 'data', 'run', 'browser.json'),
+  };
+  const calls = [];
+  let unrefCalled = false;
+  const result = await ensurePortableDaemon({
+    runtime, resourcesPath: path.join(root, 'resources'), executablePath, platform: 'win32',
+    check: async () => false,
+    wait: async (_url, options) => { calls.push(options); return true; },
+    childSpawn: (exe, args, options) => {
+      calls.push({ exe, args, options });
+      return { pid: 1234, unref: () => { unrefCalled = true; } };
+    },
+  });
+  assert.equal(result.status, 'started-and-running');
+  assert.equal(result.executable, daemonPath);
+  assert.deepEqual(result.args.slice(0, 2), ['--prod', '--headless']);
+  assert.equal(unrefCalled, true);
+  assert.equal(calls[0].exe, daemonPath);
+  assert.equal(calls[0].options.cwd, root);
+  assert.equal(calls[0].options.windowsHide, true);
+});
+
+test('recovery stops, repairs, and starts the same sibling daemon', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-recovery-'));
+  const daemonPath = path.join(root, 'workass-daemon.exe');
+  fs.writeFileSync(daemonPath, 'daemon');
+  const runtime = { profile: 'prod', daemonURL: 'http://127.0.0.1:8788', daemonPort: 8788, daemonBind: 'localhost', dataRoot: root, stateDir: path.join(root, 'state'), logRoot: path.join(root, 'logs'), browserControlFile: path.join(root, 'run', 'browser.json') };
+  const calls = [];
+  let checks = 0;
+  const result = await restartDaemonAndRecover({
+    runtime, resourcesPath: path.join(root, 'resources'), executablePath: path.join(root, 'Workass.exe'), platform: 'win32', daemonExecutable: daemonPath,
+    check: async () => { checks += 1; return checks === 1; },
+    shutdown: async () => { calls.push('shutdown'); return true; },
+    waitForDown: async () => { calls.push('down'); return true; },
+    repairSpawn: (exe, args) => { calls.push({ repair: [exe, ...args] }); return { status: 0 }; },
+    wait: async () => true,
+    childSpawn: (exe, args) => { calls.push({ start: [exe, ...args] }); return { pid: 7, unref() {} }; },
+  });
+  assert.equal(result.repaired, true);
+  assert.equal(result.shutdownAccepted, true);
+	assert.equal(result.stoppedObserved, true);
+  assert.deepEqual(calls.slice(0, 3), [{ repair: [daemonPath, '--repair-startup', '--state-dir', runtime.stateDir] }, 'shutdown', 'down']);
+  assert.equal(calls[3].start[0], daemonPath);
 });

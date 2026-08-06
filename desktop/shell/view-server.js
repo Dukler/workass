@@ -105,6 +105,7 @@ function proxyHTTP(req, res, daemon) {
     method: req.method,
     path: req.url,
     headers: { ...req.headers, host: daemon.host },
+    ...(daemon.ca ? { ca: daemon.ca } : {}),
   }, (reply) => {
     res.writeHead(reply.statusCode || 502, reply.headers);
     reply.pipe(res);
@@ -120,7 +121,7 @@ function proxyUpgrade(req, socket, head, daemon) {
   const secure = daemon.protocol === 'https:';
   const port = Number(daemon.port || (secure ? 443 : 80));
   const upstream = secure
-    ? tls.connect({ host: daemon.hostname, port, servername: daemon.hostname })
+    ? tls.connect({ host: daemon.hostname, port, servername: daemon.hostname, ...(daemon.ca ? { ca: daemon.ca } : {}) })
     : net.connect({ host: daemon.hostname, port });
   const fail = () => { try { socket.destroy(); } catch (_) {} };
   upstream.once('error', fail);
@@ -141,10 +142,15 @@ function proxyUpgrade(req, socket, head, daemon) {
   });
 }
 
-function createViewServer({ daemonURL, rendererDir, host = '127.0.0.1', port = 8799, runtimeVersion = null, recoverController = false }) {
+function createViewServer({ daemonURL, daemonCAPath = '', rendererDir, host = '127.0.0.1', port = 8799, runtimeVersion = null, recoverController = false }) {
   const daemon = new URL(daemonURL);
   if (daemon.protocol !== 'http:' && daemon.protocol !== 'https:') {
     return Promise.reject(new Error(`unsupported daemon protocol: ${daemon.protocol}`));
+  }
+  if (daemon.protocol === 'https:' && daemonCAPath) {
+    try { daemon.ca = fs.readFileSync(daemonCAPath); } catch (err) {
+      return Promise.reject(new Error(`daemon certificate unavailable: ${err.message}`));
+    }
   }
   const root = path.resolve(rendererDir);
   const indexPath = path.join(root, 'index.html');
@@ -160,6 +166,7 @@ function createViewServer({ daemonURL, rendererDir, host = '127.0.0.1', port = 8
   let probeFn = null;
   let perfFn = null;
   let reloadFn = null;
+	let recoveryFn = null;
   const server = http.createServer((req, res) => {
     const parsedUrl = new URL(req.url || '/', 'http://shell.local');
     const pathname = parsedUrl.pathname;
@@ -227,6 +234,16 @@ function createViewServer({ daemonURL, rendererDir, host = '127.0.0.1', port = 8
         res.writeHead(200, { 'Cache-Control': 'no-store', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
         res.end(body);
       }).catch((err) => { if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' }); res.end(`reload failed: ${err && err.message || err}`); });
+      return;
+    }
+    if (pathname === '/__workass-shell/recover') {
+      if (req.method !== 'POST') { res.writeHead(405, { 'Allow': 'POST', 'Content-Type': 'text/plain' }); res.end('recovery requires POST'); return; }
+      if (typeof recoveryFn !== 'function') { res.writeHead(503, { 'Content-Type': 'text/plain' }); res.end('daemon recovery is not ready'); return; }
+      Promise.resolve().then(() => recoveryFn()).then((data) => {
+        const body = JSON.stringify(data || { recovered: true });
+        res.writeHead(200, { 'Cache-Control': 'no-store', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+        res.end(body);
+      }).catch((err) => { if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' }); res.end(`recovery failed: ${err && err.message || err}`); });
       return;
     }
     if (pathname === '/__workass-shell/status' && req.method === 'GET') {
@@ -361,6 +378,7 @@ function createViewServer({ daemonURL, rendererDir, host = '127.0.0.1', port = 8
         // a renderer promotion never needs the shell relaunch that can strand the
         // controller lease.
         setReload: (fn) => { reloadFn = typeof fn === 'function' ? fn : null; },
+		setRecovery: (fn) => { recoveryFn = typeof fn === 'function' ? fn : null; },
         close: () => new Promise((done) => {
           for (const socket of sockets) socket.destroy();
           server.close(() => done());

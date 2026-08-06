@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"workass/internal/acp"
+	"workass/internal/artifacthost"
 )
 
 type daemonOptions struct {
@@ -19,6 +20,7 @@ type daemonOptions struct {
 	Engine              engineConfig
 	EngineFlagOverrides map[string]bool
 	ChatControl         *chatControlCoordinator
+	Artifacts           *artifacthost.Registry
 }
 
 type daemonState struct {

@@ -34,6 +34,7 @@ var mutatingChannels = map[string]struct{}{
 	"config:set":                    {},
 	"session:save":                  {},
 	"chat:archive-append":           {},
+	"visualize:host":                {},
 	"chat:rewind":                   {},
 	"activity:clear":                {},
 	"teams:refresh":                 {},

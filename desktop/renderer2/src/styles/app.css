@@ -85,10 +85,10 @@ aside.side {
 .tl span:nth-child(1) { background: #ff5f57; }
 .tl span:nth-child(2) { background: #febc2e; }
 .tl span:nth-child(3) { background: #28c840; }
-/* Electron shell: the OS draws real traffic lights at (14,14) — hide the
-   browser-mode stand-ins, keep their footprint, and let the titlebar rows
-   drag the window (interactive children opt back out). */
-:root.electron .tl { visibility: hidden; width: 52px; }
+/* Electron shell: macOS draws real traffic lights at (14,14). Windows uses a
+   frameless window and receives the same controls from WindowControls.tsx. */
+:root.electron:not(.electron-windows) .tl { visibility: hidden; width: 52px; }
+:root.electron-windows .tl { display: none; }
 :root.electron .titlebar,
 :root.electron .tbar { -webkit-app-region: drag; }
 :root.electron .titlebar button,
@@ -96,6 +96,32 @@ aside.side {
 :root.electron .tbar button,
 :root.electron .tbar input { -webkit-app-region: no-drag; }
 .titlebar .sp { flex: 1; }
+
+.window-controls {
+  position: fixed;
+  top: 5px;
+  left: 14px;
+  z-index: 100;
+  display: flex;
+  gap: 7px;
+  height: 30px;
+  align-items: center;
+  -webkit-app-region: no-drag;
+}
+.window-control {
+  width: 11px;
+  height: 11px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.window-control-close { background: #ff5f57; }
+.window-control-minimize { background: #febc2e; }
+.window-control-maximize { background: #28c840; }
+.window-control:hover { filter: brightness(.9); }
+.window-control:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
 
 /* Assist|Chats switch — ONE control, one track (gallery variant E "Icon relay",
    user pick 2026-07-11). A visible recessed groove (hairline + quiet fill) holds
@@ -432,6 +458,18 @@ ul.doclist li b, ol.doclist li b { font-weight: 600; }
 table.mdtable { border-collapse: collapse; font-size: 12.5px; }
 table.mdtable th, table.mdtable td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; }
 table.mdtable th { background: var(--field); font-weight: 600; }
+.visualize-card { width: min(100%, 760px); margin: 4px 0 16px; overflow: hidden; border: 1px solid var(--line2); border-radius: 10px; background: var(--panel); }
+.visualize-card.visualize-wide { width: min(100%, 1024px); }
+.visualize-head { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 0 11px; border-bottom: 1px solid var(--line); }
+.visualize-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink2); font-size: 12px; font-weight: 600; }
+.visualize-open { margin-left: auto; flex: none; color: var(--link); font-size: 11.5px; text-decoration: none; }
+.visualize-open:hover { text-decoration: underline; }
+.visualize-frame { display: block; width: 100%; height: 360px; border: 0; background: transparent; }
+.visualize-wide .visualize-frame { height: 440px; }
+.visualize-status { display: flex; align-items: center; gap: 10px; min-height: 84px; padding: 12px; color: var(--muted); font-size: 12px; }
+.visualize-failure { color: var(--ink2); }
+.visualize-retry { flex: none; padding: 4px 9px; border: 1px solid var(--line2); border-radius: 7px; background: transparent; color: var(--link); font: inherit; font-size: 11.5px; cursor: pointer; }
+.visualize-retry:hover { background: var(--field); }
 
 .steprow { display: flex; align-items: flex-start; gap: 7px; color: var(--muted); font-size: 12.5px; margin: 12px 0; cursor: pointer; border: 0; background: transparent; font-family: inherit; text-align: left; padding: 0; width: fit-content; max-width: var(--read); }
 .steprow:hover { color: var(--ink2); }
@@ -1420,6 +1458,13 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs .gtag { font-weight: 500; letter-spacing: .02em; text-transform: none; color: var(--faint); }
 .stgs .ghint { color: var(--muted); font-size: 12px; margin: 8px 2px 0; max-width: 62ch; }
 .stgs .ghint code { background: var(--field); border: 1px solid var(--line); border-radius: 5px; padding: .5px 5px; font-size: 11px; color: var(--ink2); }
+.stgs .pairing-advanced { margin-top: 24px; border-top: 1px solid var(--line); padding-top: 12px; }
+.stgs .pairing-advanced > summary { list-style: none; cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+.stgs .pairing-advanced > summary::-webkit-details-marker { display: none; }
+.stgs .pairing-advanced > summary::before { content: '›'; display: inline-block; width: 16px; color: var(--faint); transition: transform .12s ease; }
+.stgs .pairing-advanced[open] > summary::before { transform: rotate(90deg); }
+.stgs .pairing-advanced > summary:hover { color: var(--ink2); }
+.stgs .pairing-advanced-body { padding-top: 4px; }
 
 .stgs .group { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-lg, 11px); padding: 0 16px; }
 .stgs .set { display: flex; align-items: center; gap: 16px; padding: 13px 0; border-top: 1px solid var(--line); min-height: 52px; }

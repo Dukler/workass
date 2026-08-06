@@ -28,6 +28,7 @@ const (
 	registryFilename       = "artifact-hosts.json"
 	legacyRegistryFilename = "html-hosts.json"
 	maxRegistryBytes       = 4 * 1024 * 1024
+	maxCapturedHTMLBytes   = 1 * 1024 * 1024
 	maxInspectedEntries    = 4000
 	maxWithheldReported    = 20
 	maxLoggedWithholds     = 512
@@ -368,6 +369,56 @@ func (r *Registry) Register(options RegisterOptions) (Registration, error) {
 		r.noteWithheld(registration.ID, asset.Path, asset.Reason)
 	}
 	return registration, nil
+}
+
+// RegisterCapturedHTML persists an already-read HTML document under the
+// daemon's state directory before registering it. Visualizations are emitted
+// from an executor-owned path that may disappear as soon as a turn ends, so
+// they must not use Register's live-source semantics.
+func (r *Registry) RegisterCapturedHTML(label string, content []byte) (Registration, error) {
+	if r == nil {
+		return Registration{}, errors.New("artifact hosting is unavailable")
+	}
+	if len(content) == 0 {
+		return Registration{}, errors.New("captured HTML is empty")
+	}
+	if len(content) > maxCapturedHTMLBytes {
+		return Registration{}, fmt.Errorf("captured HTML exceeds the %d-byte limit", maxCapturedHTMLBytes)
+	}
+
+	root := filepath.Join(filepath.Dir(r.path), "visualizations")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return Registration{}, fmt.Errorf("initialize captured visualization storage: %w", err)
+	}
+	seed := append([]byte(strings.TrimSpace(label)+"\x00"), content...)
+	sum := sha256.Sum256(seed)
+	name := "visualize-" + hex.EncodeToString(sum[:12]) + ".html"
+	sourcePath := filepath.Join(root, name)
+	if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
+		tmp, err := os.CreateTemp(root, ".visualize-*.tmp")
+		if err != nil {
+			return Registration{}, fmt.Errorf("create captured visualization: %w", err)
+		}
+		tmpName := tmp.Name()
+		defer os.Remove(tmpName)
+		if err := tmp.Chmod(0o600); err != nil {
+			_ = tmp.Close()
+			return Registration{}, fmt.Errorf("secure captured visualization: %w", err)
+		}
+		if _, err := tmp.Write(content); err != nil {
+			_ = tmp.Close()
+			return Registration{}, fmt.Errorf("write captured visualization: %w", err)
+		}
+		if err := tmp.Close(); err != nil {
+			return Registration{}, fmt.Errorf("close captured visualization: %w", err)
+		}
+		if err := os.Rename(tmpName, sourcePath); err != nil {
+			return Registration{}, fmt.Errorf("commit captured visualization: %w", err)
+		}
+	} else if err != nil {
+		return Registration{}, fmt.Errorf("inspect captured visualization: %w", err)
+	}
+	return r.Register(RegisterOptions{BaseDir: root, SourcePath: sourcePath, Label: label})
 }
 
 func (r *Registry) commit(record artifactRecord) (Registration, error) {

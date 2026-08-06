@@ -28,6 +28,8 @@ export interface MachineEntry {
   owner?: string;
   endpoints?: MachineEndpoint[];
   secure?: boolean;
+  certFingerprint?: string;
+  addedBy?: string;
   status?: string;
   reason?: string;
   fleetIds?: string[];
@@ -44,6 +46,9 @@ export interface MachineView {
   secure: boolean;
   /** True when this client holds a token for it. */
   paired: boolean;
+  /** Discovered machines remain passive until the user requests access. */
+  requested: boolean;
+  discovered: boolean;
 }
 
 /**
@@ -91,6 +96,7 @@ export class MachineRegistry {
   private readonly states = new Map<string, { link: MachineLinkState; reason: string }>();
   private readonly remoteSubs = new Map<string, Set<RemoteEventListener>>();
   private readonly replayed = new Map<string, Set<unknown>>();
+  private readonly requested = new Set<string>();
   private fleetKey = '';
 
   constructor(opts: MachineRegistryOptions) {
@@ -140,6 +146,8 @@ export class MachineRegistry {
         reason: state?.reason || entry.reason || '',
         secure: !!entry.secure,
         paired: !!this.credentials(entry.machineId).deviceToken,
+        requested: this.requested.has(entry.machineId),
+        discovered: entry.addedBy === 'beacon',
       };
     });
   }
@@ -184,7 +192,10 @@ export class MachineRegistry {
       if (!id || id === selfMachineId) continue;
       seen.add(id);
       this.entries.set(id, entry);
-      if (!this.sockets.has(id)) this.connect(entry);
+      // Seeing a beacon never opens a socket or prompts the other machine.
+      // A past approval reconnects automatically; a new request is always an
+      // explicit local action, except the separately opted-in fleet mechanism.
+      if (!this.sockets.has(id) && (this.credentials(id).deviceToken || this.requested.has(id) || this.fleetKey)) this.connect(entry);
     }
     for (const id of Array.from(this.sockets.keys())) {
       if (seen.has(id)) continue;
@@ -204,6 +215,7 @@ export class MachineRegistry {
     this.ready.delete(machineId);
     this.entries.delete(machineId);
     this.states.delete(machineId);
+    this.requested.delete(machineId);
     this.clearCredentials(machineId);
     this.opts.onChange?.(this.list());
   }
@@ -214,14 +226,25 @@ export class MachineRegistry {
     this.ready.clear();
   }
 
+  /** Open one TLS socket to a discovered candidate after the user clicks Request access. */
+  requestAccess(machineId: string): boolean {
+    const entry = this.entries.get(machineId);
+    if (!entry || !entry.secure) return false;
+    this.requested.add(machineId);
+    if (!this.sockets.has(machineId)) this.connect(entry);
+    this.opts.onChange?.(this.list());
+    return true;
+  }
+
   private connect(entry: MachineEntry): void {
     const address = firstAddress(entry);
     if (!address) return;
     const socket = new MachineSocket({
       machineId: entry.machineId,
-      // Plain ws until E5. `secure` on the card is what the badge reads, and it
-      // is what decides this, so an encrypted machine needs no client change.
-      url: (entry.secure ? 'wss://' : 'ws://') + address,
+      // There is no plaintext fallback. A stale/old discovery card is shown as
+      // unavailable rather than allowing a message, token, or transcript onto
+      // an unencrypted socket.
+      url: 'wss://' + address,
       deviceName: this.opts.deviceName,
       credentials: this.credentials(entry.machineId),
       fleetKey: this.fleetKey || undefined,
@@ -229,6 +252,7 @@ export class MachineRegistry {
       saveCredentials: (id, next) => this.saveCredentials(id, next),
       clearCredentials: (id) => this.clearCredentials(id),
       onState: (state, detail) => {
+        if (state === 'ready' || state === 'rejected') this.requested.delete(entry.machineId);
         this.states.set(entry.machineId, { link: state, reason: detail?.reason ?? '' });
         if (state === 'ready') this.ready.set(entry.machineId, socket);
         else this.ready.delete(entry.machineId);

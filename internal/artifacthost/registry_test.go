@@ -188,6 +188,42 @@ func TestArtifactHostRejectsOutsideWorkspaceAndSecretNamedFiles(t *testing.T) {
 	}
 }
 
+func TestRegisterCapturedHTMLIsDurableAndBounded(t *testing.T) {
+	stateDir := t.TempDir()
+	registry, err := New(stateDir, "http://127.0.0.1:8788")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("<section id=visual>captured</section>")
+	hosted, err := registry.RegisterCapturedHTML("Captured view", original)
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if hosted.LocalURL == "" || strings.Contains(hosted.URLPath, "/Users/") {
+		t.Fatalf("captured registration leaked a local path: %#v", hosted)
+	}
+
+	response := httptest.NewRecorder()
+	registry.ServeHTTP(response, httptest.NewRequest(http.MethodGet, hosted.URLPath+hosted.Entry, nil))
+	if response.Code != http.StatusOK || response.Body.String() != string(original) {
+		t.Fatalf("captured response status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	reloaded, err := New(stateDir, "http://127.0.0.1:8788")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	reloaded.ServeHTTP(response, httptest.NewRequest(http.MethodGet, hosted.URLPath+hosted.Entry, nil))
+	if response.Code != http.StatusOK || response.Body.String() != string(original) {
+		t.Fatalf("reloaded captured response status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	if _, err := registry.RegisterCapturedHTML("too large", make([]byte, maxCapturedHTMLBytes+1)); err == nil {
+		t.Fatal("oversized captured HTML was accepted")
+	}
+}
+
 // A design mock is most of what artifact hosting is for, and design vocabulary
 // collides with the redaction word list constantly. Reported 2026-07-26: an
 // index.html served 200 while its _tokens.css answered 403, so the page

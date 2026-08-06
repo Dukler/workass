@@ -94,7 +94,7 @@ echo "[release] renderer and repository gates"
 (cd "$repo_root" && go test ./...)
 
 echo "[release] isolated daemon and runtime staging"
-(cd "$repo_root" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o "$runtime_input/workass" ./cmd/workass)
+(cd "$repo_root" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-X main.daemonVersion=$version" -o "$runtime_input/workass" ./cmd/workass)
 if [ "$offline" -eq 1 ]; then
   "$repo_root/scripts/vendor-electron-runtime.sh" --target darwin-arm64 --output-root "$runtime_input/electron" --offline
   "$repo_root/scripts/vendor-node-runtime.sh" --target darwin-arm64 --output-root "$runtime_input/node" --offline
