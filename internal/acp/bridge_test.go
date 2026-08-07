@@ -1830,7 +1830,7 @@ func TestFailedSpareWarmTripsCircuitBreakerInsteadOfRespawning(t *testing.T) {
 	exits := 0
 	blocks := 0
 	blocked := make(chan struct{}, 1)
-	manager, _ := newFakeManager(t, "auth-stderr", Options{
+	manager, _ := newFakeManager(t, "crash-session-new", Options{
 		SpareSessions:      2,
 		SpareCheckInterval: 20 * time.Millisecond,
 		InitTimeout:        150 * time.Millisecond,
@@ -2600,6 +2600,10 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 			"authMethods":       []any{},
 		})
 	case "session/new":
+		if s.mode == "crash-session-new" {
+			_, _ = fmt.Fprint(os.Stderr, "authenticated ACP exited while creating a session")
+			os.Exit(9)
+		}
 		s.mu.Lock()
 		s.sessions++
 		sessionID := fmt.Sprintf("fake-session-%d-%d", os.Getpid(), s.sessions)
