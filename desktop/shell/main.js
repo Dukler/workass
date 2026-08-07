@@ -480,8 +480,12 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
   // retries. An automatic check here would immediately re-offer the exact
   // release that just failed its health gates and hide the recovery receipt.
   if (updateState.supported && !['rollback_healthy', 'failed'].includes(updateState.phase)) {
-    const timer = setTimeout(() => void updateManager?.check(), 15000);
-    timer.unref?.();
+    updateManager.startAutoChecks({
+      // The private feed is one bounded local-file read, so dogfood releases
+      // become visible promptly without restarting Electron. Public builds
+      // retain a quiet hourly HTTPS cadence.
+      intervalMs: RUNTIME.updateChannel === 'local' ? 30_000 : 60 * 60 * 1000,
+    });
   }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow(viewURL, browserReporter, isController);

@@ -224,6 +224,25 @@ rollback_install() {
   exit 1
 }
 
+# A launch wrapper can be retried by launchd after a successful install. Never
+# turn that wrapper mistake into a shell restart loop: once the exact signed
+# bundle is already installed and the joint runtime health gate passes, the
+# installer is complete and must not stop either process again.
+if [ -d "$installed" ] && workass_codesign_verify_stable "$installed" true >/dev/null 2>&1; then
+  candidate_cdhash=$(workass_codesign_cdhash "$candidate")
+  installed_cdhash=$(workass_codesign_cdhash "$installed")
+  if [ -n "$candidate_cdhash" ] && [ "$candidate_cdhash" = "$installed_cdhash" ] && new_release_healthy; then
+    echo "WORKASS_MACOS_INSTALL_ALREADY_CURRENT"
+    echo "app=$installed"
+    echo "version=$target_version"
+    echo "build=$target_build"
+    echo "daemon_url=$WORKASS_DAEMON_URL"
+    echo "view_port=$WORKASS_VIEW_PORT"
+    echo "log=$log_file"
+    exit 0
+  fi
+fi
+
 rm -rf "$incoming" "$backup"
 ditto "$candidate" "$incoming"
 workass_codesign_verify_stable "$incoming" true >> "$log_file" 2>&1

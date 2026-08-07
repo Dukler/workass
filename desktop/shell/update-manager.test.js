@@ -223,3 +223,30 @@ test('updater operations are serialized so two clicks cannot arm competing trans
   release(manifest());
   assert.equal((await first).phase, 'available');
 });
+
+test('automatic checks discover a newly published local release without restarting Electron', async () => {
+  const { manager } = managerFixture();
+  const scheduled = [];
+  const repeated = [];
+  const cancelled = [];
+  const releases = [manifest({ version: '1.1.0' }), manifest({ version: '1.2.0' })];
+  let fetches = 0;
+  manager.deps.fetchManifest = async () => { fetches += 1; return releases.shift(); };
+  manager.deps.schedule = (fn, delay) => { const handle = { fn, delay, unref() {} }; scheduled.push(handle); return handle; };
+  manager.deps.repeat = (fn, delay) => { const handle = { fn, delay, unref() {} }; repeated.push(handle); return handle; };
+  manager.deps.cancelSchedule = (handle) => cancelled.push(handle);
+  manager.deps.cancelRepeat = (handle) => cancelled.push(handle);
+  manager.publish({ phase: 'current', targetVersion: null, error: null });
+
+  manager.startAutoChecks({ initialDelayMs: 15, intervalMs: 30 });
+  assert.equal(scheduled[0].delay, 15);
+  assert.equal(repeated[0].delay, 30);
+  assert.equal((await scheduled[0].fn()).phase, 'current');
+  assert.equal((await repeated[0].fn()).phase, 'available');
+  assert.equal(fetches, 2);
+  await repeated[0].fn();
+  assert.equal(fetches, 2, 'an offered release was replaced by a background poll');
+
+  manager.dispose();
+  assert.deepEqual(cancelled, [scheduled[0], repeated[0]]);
+});
