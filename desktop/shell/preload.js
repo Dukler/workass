@@ -35,3 +35,15 @@ contextBridge.exposeInMainWorld('workassWindow', {
 contextBridge.exposeInMainWorld('workassRecovery', {
   restartDaemon: () => ipcRenderer.invoke('workass-recovery:restart-daemon'),
 });
+
+contextBridge.exposeInMainWorld('workassUpdater', {
+  getState: () => ipcRenderer.invoke('workass-updater:get-state'),
+  check: () => ipcRenderer.invoke('workass-updater:check'),
+  download: () => ipcRenderer.invoke('workass-updater:download'),
+  install: () => ipcRenderer.invoke('workass-updater:install'),
+  onState: (callback) => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('workass-updater:state', listener);
+    return () => ipcRenderer.removeListener('workass-updater:state', listener);
+  },
+});

@@ -62,7 +62,7 @@ ${envXML}
 `;
 }
 
-function healthCheck(url, timeoutMs = 700) {
+function healthCheck(url, timeoutMs = 700, expectedVersion = '') {
   return new Promise((resolve) => {
     const parsed = new URL(url);
     const transport = parsed.protocol === 'https:' ? https : http;
@@ -80,7 +80,8 @@ function healthCheck(url, timeoutMs = 700) {
       response.on('end', () => {
         try {
           const parsed = JSON.parse(body);
-          resolve(response.statusCode >= 200 && response.statusCode < 300 && parsed.app === 'workass');
+          resolve(response.statusCode >= 200 && response.statusCode < 300 && parsed.app === 'workass' &&
+            (!expectedVersion || parsed.version === expectedVersion));
         } catch {
           resolve(false);
         }
@@ -95,9 +96,9 @@ function runLaunchctl(args, spawn = spawnSync) {
   return spawn('/bin/launchctl', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
-async function waitForHealth(url, { attempts = 120, delayMs = 250, check = healthCheck } = {}) {
+async function waitForHealth(url, { attempts = 120, delayMs = 250, check = healthCheck, expectedVersion = '' } = {}) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (await check(url)) return true;
+    if (await check(url, 700, expectedVersion)) return true;
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   return false;
@@ -254,22 +255,34 @@ async function restartDaemonAndRecover({
   return { ...receipt, repaired: true, shutdownAccepted, stoppedObserved };
 }
 
-async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process.platform, home = os.homedir(), uid = process.getuid?.(), spawn = spawnSync, check = healthCheck } = {}) {
+async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process.platform, home = os.homedir(), uid = process.getuid?.(), spawn = spawnSync, check = healthCheck, forceInstall = false } = {}) {
   if (platform !== 'darwin') return { status: 'unsupported-platform' };
   if (!runtime || !resourcesPath) throw new Error('runtime and resourcesPath are required');
-  if (await check(runtime.daemonURL)) return { status: 'already-running' };
 
   const bundledRoot = path.join(resourcesPath, 'runtime');
   const manifestPath = path.join(bundledRoot, 'manifest.json');
-  if (!fs.existsSync(manifestPath)) return { status: 'no-bundled-runtime' };
+  if (!fs.existsSync(manifestPath)) {
+    if (!forceInstall && await check(runtime.daemonURL)) return { status: 'already-running' };
+    return { status: 'no-bundled-runtime' };
+  }
   const appRoot = path.resolve(resourcesPath, '..', '..');
   const durableRoots = ['/Applications', path.join(home, 'Applications')];
   if (!durableRoots.some((root) => appRoot === root || appRoot.startsWith(`${root}${path.sep}`))) {
     return { status: 'move-to-applications', appRoot };
   }
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  if (manifest.schemaVersion !== 1 || manifest.platform !== 'darwin' || !manifest.arch) {
+  if (manifest.schemaVersion !== 1 || manifest.platform !== 'darwin' || !manifest.arch || !manifest.version || !manifest.build) {
     throw new Error('invalid bundled runtime manifest');
+  }
+
+  const releaseMarkerPath = path.join(runtime.dataRoot, 'runtime-release.json');
+  let releaseMarker = null;
+  try { releaseMarker = JSON.parse(fs.readFileSync(releaseMarkerPath, 'utf8')); } catch { /* first self-contained launch */ }
+  const markerMatches = releaseMarker?.schemaVersion === 1 &&
+    releaseMarker.version === manifest.version && String(releaseMarker.build) === String(manifest.build) &&
+    releaseMarker.appRoot === appRoot;
+  if (!forceInstall && markerMatches && await check(runtime.daemonURL, 700, manifest.version)) {
+    return { status: 'already-running', manifest, releaseMarkerPath };
   }
 
   const executable = path.join(bundledRoot, 'workass');
@@ -325,8 +338,36 @@ async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process
   if (enable.status !== 0) throw new Error(`could not enable Workass LaunchAgent: ${(enable.stderr || '').trim() || `exit ${enable.status}`}`);
   const kickstart = runLaunchctl(['kickstart', '-k', `${domain}/${runtime.launchdLabel}`], spawn);
   if (kickstart.status !== 0) throw new Error(`could not start Workass LaunchAgent: ${(kickstart.stderr || '').trim() || `exit ${kickstart.status}`}`);
-  if (!await waitForHealth(runtime.daemonURL, { check })) throw new Error('bundled Workass daemon did not become healthy');
-  return { status: 'installed-and-running', manifest, plistPath, executable };
+  if (!await waitForHealth(runtime.daemonURL, { check, expectedVersion: manifest.version })) throw new Error('bundled Workass daemon did not become healthy');
+  fs.mkdirSync(runtime.dataRoot, { recursive: true });
+  const markerIncoming = `${releaseMarkerPath}.incoming-${process.pid}`;
+  fs.writeFileSync(markerIncoming, `${JSON.stringify({
+    schemaVersion: 1,
+    version: manifest.version,
+    build: manifest.build,
+    appRoot,
+  }, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(markerIncoming, releaseMarkerPath);
+  return { status: 'installed-and-running', manifest, plistPath, executable, releaseMarkerPath };
+}
+
+async function restartPackagedDaemonAndRecover({
+  runtime, resourcesPath, platform = process.platform, home = os.homedir(), uid = process.getuid?.(),
+  check = healthCheck, waitForDown = waitForUnhealthy, shutdown = postLocalRecoveryShutdown,
+  repairSpawn = spawnSync, launchctlSpawn = spawnSync,
+} = {}) {
+  if (platform !== 'darwin') throw new Error('packaged daemon recovery is supported on macOS only');
+  const executable = path.join(resourcesPath, 'runtime', 'workass');
+  if (!fs.existsSync(executable)) throw new Error('bundled Workass daemon was not found');
+  repairDaemonStartup({ runtime, executable, platform, repairSpawn });
+  const wasHealthy = await check(runtime.daemonURL);
+  const shutdownAccepted = wasHealthy ? await shutdown(runtime.daemonURL) : false;
+  if (wasHealthy && !shutdownAccepted) throw new Error('daemon refused the local recovery shutdown');
+  const stoppedObserved = wasHealthy ? await waitForDown(runtime.daemonURL, { check }) : true;
+  const receipt = await ensurePackagedDaemon({
+    runtime, resourcesPath, platform, home, uid, spawn: launchctlSpawn, check, forceInstall: true,
+  });
+  return { ...receipt, repaired: true, shutdownAccepted, stoppedObserved };
 }
 
 module.exports = {
@@ -339,6 +380,7 @@ module.exports = {
   postLocalRecoveryShutdown,
   repairDaemonStartup,
   restartDaemonAndRecover,
+  restartPackagedDaemonAndRecover,
   spawnPortableDaemon,
   waitForUnhealthy,
   waitForHealth,

@@ -170,6 +170,10 @@ func (m *Manager) AgentCatalog(ctx context.Context, ownerKey, parentChatID, pare
 // returns immediately. Status/wait/cancel are separate operations so a parent
 // can fan out sequential MCP calls without relying on parallel tool dispatch.
 func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) (SubagentRun, error) {
+	if err := m.beginWorkAdmission(); err != nil {
+		return SubagentRun{}, err
+	}
+	defer m.endWorkAdmission()
 	prompt := strings.TrimSpace(opts.Prompt)
 	if prompt == "" {
 		return SubagentRun{}, errors.New("subagent prompt is required")

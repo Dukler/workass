@@ -361,6 +361,10 @@ func (m *Manager) resolveExternalWorkOwner(ownerKey, parentChatID, parentTabID, 
 }
 
 func (m *Manager) RegisterExternalWork(opts ExternalWorkRegistrationOptions) (map[string]any, error) {
+	if err := m.beginWorkAdmission(); err != nil {
+		return nil, err
+	}
+	defer m.endWorkAdmission()
 	tabID, chatID, providerID, err := m.resolveExternalWorkOwner(opts.OwnerKey, opts.ParentChatID, opts.ParentTabID, opts.ChatID, opts.TabID)
 	if err != nil {
 		return nil, err

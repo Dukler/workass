@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -343,6 +344,10 @@ func main() {
 	defer requestShutdown()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/workass/recovery/shutdown", localRecoveryShutdownHandler(requestShutdown))
+	updateControl := newLocalUpdateControl(acpManager, requestShutdown)
+	mux.HandleFunc("/workass/update/prepare", updateControl.prepare)
+	mux.HandleFunc("/workass/update/commit", updateControl.commit)
+	mux.HandleFunc("/workass/update/cancel", updateControl.cancel)
 	mux.Handle(agentControlPath, agentControl)
 	mux.Handle(fleetQRPath, newFleetQRHandler(fleetKeys, *port, logger.Printf))
 	mux.Handle("/", handler)
@@ -413,6 +418,130 @@ func localRecoveryShutdownHandler(requestShutdown context.CancelFunc) http.Handl
 			requestShutdown()
 		}()
 	}
+}
+
+type appUpdateDrainGate interface {
+	BeginUpdateDrain() acp.AppUpdateReadiness
+	CancelUpdateDrain()
+}
+
+type localUpdateControl struct {
+	mu              sync.Mutex
+	gate            appUpdateDrainGate
+	requestShutdown context.CancelFunc
+	preparedID      string
+}
+
+func newLocalUpdateControl(gate appUpdateDrainGate, requestShutdown context.CancelFunc) *localUpdateControl {
+	return &localUpdateControl{gate: gate, requestShutdown: requestShutdown}
+}
+
+func updateRequestID(r *http.Request) string {
+	var body struct {
+		UpdateID string `json:"updateId"`
+	}
+	reader := io.LimitReader(r.Body, 4096)
+	if err := json.NewDecoder(reader).Decode(&body); err != nil {
+		return ""
+	}
+	id := strings.TrimSpace(body.UpdateID)
+	if len(id) < 8 || len(id) > 96 {
+		return ""
+	}
+	for _, char := range id {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '-' && char != '_' {
+			return ""
+		}
+	}
+	return id
+}
+
+func localUpdateRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return "", false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || !net.ParseIP(host).IsLoopback() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return "", false
+	}
+	id := updateRequestID(r)
+	if id == "" {
+		http.Error(w, "invalid update id", http.StatusBadRequest)
+		return "", false
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	return id, true
+}
+
+// prepare proves quiescence and fences all new work, but deliberately keeps
+// the daemon alive. The shell first arms an independent worker; only then does
+// commit stop the process. A worker launch failure can therefore cancel the
+// fence without interrupting the running app.
+func (control *localUpdateControl) prepare(w http.ResponseWriter, r *http.Request) {
+	id, ok := localUpdateRequest(w, r)
+	if !ok {
+		return
+	}
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	if control.preparedID != "" && control.preparedID != id {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"ready":false,"reason":"another update is prepared"}`))
+		return
+	}
+	if control.preparedID == id {
+		_, _ = w.Write([]byte(`{"ready":true,"prepared":true}`))
+		return
+	}
+	readiness := control.gate.BeginUpdateDrain()
+	if !readiness.Ready {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(readiness)
+		return
+	}
+	control.preparedID = id
+	_ = json.NewEncoder(w).Encode(readiness)
+}
+
+func (control *localUpdateControl) cancel(w http.ResponseWriter, r *http.Request) {
+	id, ok := localUpdateRequest(w, r)
+	if !ok {
+		return
+	}
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	if control.preparedID != id {
+		http.Error(w, "update is not prepared", http.StatusConflict)
+		return
+	}
+	control.gate.CancelUpdateDrain()
+	control.preparedID = ""
+	_, _ = w.Write([]byte(`{"cancelled":true}`))
+}
+
+func (control *localUpdateControl) commit(w http.ResponseWriter, r *http.Request) {
+	id, ok := localUpdateRequest(w, r)
+	if !ok {
+		return
+	}
+	control.mu.Lock()
+	if control.preparedID != id {
+		control.mu.Unlock()
+		http.Error(w, "update is not prepared", http.StatusConflict)
+		return
+	}
+	control.preparedID = ""
+	control.mu.Unlock()
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = w.Write([]byte(`{"stopping":true}`))
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		control.requestShutdown()
+	}()
 }
 
 func serveDaemonHTTP(ctx context.Context, server *http.Server, listener net.Listener, cleanup func()) error {

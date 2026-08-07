@@ -8,6 +8,7 @@ import { buildWorkspaceGroups, normalizeWorkspacePath, type WorkspaceGroup } fro
 import { nextUpdatePhase, brandForProvider, DONE_HOLD_MS, EXIT_MS, type UpdatePhase } from '../update-card';
 import { availableRateLimitReset, prepareRateLimitResetAttempt, rateLimitResetExpiry, type RateLimitResetAttempt } from '../plan-usage';
 import { chatHasLiveActivity } from '../chat-activity';
+import { appUpdaterPhaseText, appUpdaterReceiptIsRecent, useAppUpdater } from '../app-updater';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
 
 // What is currently being dragged in the sidebar. `id` is the chat.id for a
@@ -351,17 +352,9 @@ export function Sidebar() {
 // (mocked self-update) + `providers:updates` (real installed-vs-latest CLI
 // versions), both replayed to fresh clients so a reload repaints with no turn.
 // Cards use the .acctpop panel family (hairline, 11px radius); NO green fill,
-// icon muted, hover lifts like .acct. Notify-only — the app card just toasts;
-// the provider card routes to Ajustes·Agentes. Renders nothing when neither
-// payload is present (older bridge / nothing to update).
-function IcSpark() {
-  return (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor">
-      <path d="M8 2.5v4M8 9.5v4M2.5 8h4M9.5 8h4" strokeLinecap="round" />
-      <path d="M8 6.2l.9 1.9 1.9.9-1.9.9L8 11.8l-.9-1.9L5.2 9l1.9-.9z" fill="currentColor" stroke="none" />
-    </svg>
-  );
-}
+// icon muted, hover lifts like .acct. Both Workass and provider updates use the
+// same resting → running ring → sealed success / inline retry lifecycle. Renders
+// nothing when neither updater has work to show.
 function IcDownload() {
   return (
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor">
@@ -401,8 +394,9 @@ function copyUpdateHint(hint: string) {
 // never interrupted. Per-CLI management lives in Ajustes·Agentes.
 export function FooterUpdateCards() {
   const app = useApp();
+  const selfUpdater = useAppUpdater();
+  const selfUpdate = selfUpdater.state;
   const provUpdates = app.providersUpdates.filter((u) => u.updateAvailable);
-  const appUpd = app.appUpdate;
   const running = store.runningUpdate();
   const chain = app.updateChain;
   const failedId = chain?.failedId ?? null;
@@ -446,8 +440,42 @@ export function FooterUpdateCards() {
   }, [phase]);
 
   const sealing = phase === 'done' || phase === 'exiting';
+  const selfActive = ['checking', 'downloading', 'staging', 'installing'].includes(selfUpdate.phase);
+  const selfPending = ['available', 'ready', 'busy'].includes(selfUpdate.phase);
+  const selfFailed = selfUpdate.phase === 'failed' || selfUpdate.phase === 'rollback_healthy';
+  const [selfPhase, setSelfPhase] = useState<UpdatePhase>('hidden');
+  const [selfActionBusy, setSelfActionBusy] = useState(false);
+
+  // Mirror the provider card's one-element lifecycle. A fresh terminal receipt
+  // may seal after the updater restarts Electron; an old receipt stays hidden so
+  // reopening Workass never replays a stale success animation.
+  useEffect(() => {
+    if (selfFailed) { setSelfPhase('hidden'); return; }
+    if (selfActive) { setSelfPhase('running'); return; }
+    if (selfUpdate.phase === 'healthy') {
+      setSelfPhase((prev) => prev === 'running' || appUpdaterReceiptIsRecent(selfUpdate.receipt) ? 'done' : 'hidden');
+      return;
+    }
+    if (selfPending) { setSelfPhase('resting'); return; }
+    setSelfPhase('hidden');
+  }, [selfActive, selfFailed, selfPending, selfUpdate.phase, selfUpdate.receipt]);
+
+  useEffect(() => {
+    if (selfPhase === 'done') {
+      const timer = setTimeout(() => setSelfPhase('exiting'), DONE_HOLD_MS);
+      return () => clearTimeout(timer);
+    }
+    if (selfPhase === 'exiting') {
+      const timer = setTimeout(() => setSelfPhase('hidden'), EXIT_MS);
+      return () => clearTimeout(timer);
+    }
+    return undefined;
+  }, [selfPhase]);
+
+  const selfSealing = selfPhase === 'done' || selfPhase === 'exiting';
   const showProvider = !!failedId || !!running || pending > 0 || sealing;
-  if (!appUpd && !showProvider) return null;
+  const showSelfUpdate = selfUpdate.supported && (selfFailed || selfPhase !== 'hidden');
+  if (!showSelfUpdate && !showProvider) return null;
 
   const one = pending === 1 ? provUpdates[0] : null;
   const provTitle = one ? `${one.cli} ${one.latest}` : 'Actualizaciones de agentes';
@@ -468,21 +496,84 @@ export function FooterUpdateCards() {
   const restOpen = canUpdate ? () => void store.startUpdateChain() : () => store.openSettings('agentes');
   const restDisabled = canUpdate && !connected;
 
+  const selfRunning = selfPhase === 'running';
+  const selfAction = selfUpdate.phase === 'available'
+    ? selfUpdater.download
+    : selfUpdate.phase === 'ready' || selfUpdate.phase === 'busy'
+      ? selfUpdater.install
+      : selfUpdate.phase === 'failed' || selfUpdate.phase === 'rollback_healthy'
+        ? selfUpdater.check
+        : null;
+  const selfTitle = selfUpdate.phase === 'available'
+    ? `Workass ${selfUpdate.targetVersion}`
+    : selfUpdate.phase === 'ready'
+      ? `Workass ${selfUpdate.targetVersion || selfUpdate.currentVersion}`
+      : selfUpdate.phase === 'busy'
+        ? 'La actualización está esperando'
+        : selfUpdate.phase === 'rollback_healthy'
+          ? 'Workass volvió a la versión anterior'
+          : selfUpdate.phase === 'failed'
+            ? 'No se pudo actualizar Workass'
+            : selfUpdate.phase === 'healthy'
+              ? 'Listo'
+              : 'Actualizando Workass';
+  const selfActionLabel = selfUpdate.phase === 'ready'
+    ? 'Reiniciar'
+    : selfUpdate.phase === 'busy'
+      ? 'Reintentar'
+      : 'Actualizar';
+  const runSelfAction = async () => {
+    if (!selfAction || selfActionBusy) return;
+    setSelfActionBusy(true);
+    try {
+      await selfAction();
+    } catch (error) {
+      store.addToast('No se pudo actualizar', String((error as Error)?.message || error));
+    } finally {
+      setSelfActionBusy(false);
+    }
+  };
+
   return (
     <div className="updcards">
-      {appUpd && (
-        <button
-          className="updcard"
-          onClick={() => store.addToast('Actualización simulada', 'El servidor de updates llega después.')}
-          title="Actualización simulada — el servidor de updates llega después"
-        >
-          <span className="uico" aria-hidden="true"><IcSpark /></span>
-          <span className="ubody">
-            <span className="ut">Reiniciá para actualizar</span>
-            <span className="us">v{appUpd.version}{appUpd.mocked && <span className="utag">simulada</span>}</span>
-          </span>
-          <span className="uarrow" aria-hidden="true">›</span>
-        </button>
+      {showSelfUpdate && (
+        <div className={`updslot${selfPhase === 'exiting' ? ' card-exit' : ''}`}>
+          {selfFailed ? (
+            <div className="updcard upd-fail" title={appUpdaterPhaseText(selfUpdate)}>
+              <span className="uico ufail" aria-hidden="true"><IcDownload /></span>
+              <span className="ubody">
+                <span className="ut">{selfTitle}</span>
+                <span className="us">{appUpdaterPhaseText(selfUpdate)}</span>
+                <span className="ufail-act">
+                  <button className="uretry" disabled={selfActionBusy} onClick={() => void runSelfAction()}>{selfActionBusy ? 'Reintentando…' : 'Reintentar'}</button>
+                </span>
+              </span>
+            </div>
+          ) : (
+            <div
+              className={`updcard${selfRunning ? ' upd-run' : ''}${selfSealing ? ' upd-run upd-done' : ''}${selfActionBusy ? ' upd-off' : ''}`}
+              {...(selfRunning || selfSealing || !selfAction || selfActionBusy ? {} : {
+                role: 'button',
+                tabIndex: 0,
+                onClick: () => void runSelfAction(),
+                onKeyDown: (e: ReactKeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void runSelfAction(); } },
+              })}
+              title={appUpdaterPhaseText(selfUpdate)}
+            >
+              <span className="updring" aria-hidden="true" />
+              <span className={`uico${selfSealing ? ' udone' : ''}`} aria-hidden="true">
+                <span className="uglyph" key={selfSealing ? 'check' : 'dl'}>
+                  {selfSealing ? <IcCheck /> : <IcDownload />}
+                </span>
+              </span>
+              <span className="ubody" key={selfRunning ? selfUpdate.phase : selfSealing ? 'done' : 'rest'}>
+                <span className="ut">{selfTitle}</span>
+                <span className="us">{appUpdaterPhaseText(selfUpdate)}</span>
+              </span>
+              {selfAction && !selfRunning && !selfSealing && <span className="uarrow updo" aria-hidden="true">{selfActionLabel}</span>}
+            </div>
+          )}
+        </div>
       )}
       {showProvider && (
         <div className={`updslot${phase === 'exiting' ? ' card-exit' : ''}`}>

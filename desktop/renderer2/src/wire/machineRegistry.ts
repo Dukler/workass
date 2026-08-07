@@ -192,6 +192,17 @@ export class MachineRegistry {
       if (!id || id === selfMachineId) continue;
       seen.add(id);
       this.entries.set(id, entry);
+      // The explicit request path already refuses an endpoint that did not
+      // prove TLS. Automatic reconnect must enforce the same gate: otherwise a
+      // previously paired machine that later becomes stale/insecure opens a
+      // doomed wss:// socket every 1.5s forever. Keep its book entry and
+      // credential so a later secure refresh reconnects without re-pairing.
+      if (!entry.secure) {
+        this.sockets.get(id)?.close();
+        this.sockets.delete(id);
+        this.ready.delete(id);
+        continue;
+      }
       // Seeing a beacon never opens a socket or prompts the other machine.
       // A past approval reconnects automatically; a new request is always an
       // explicit local action, except the separately opted-in fleet mechanism.

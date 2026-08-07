@@ -11,6 +11,7 @@ repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 builder="$repo_root/scripts/build-daemon.sh"
 runner="$repo_root/scripts/rebuild-workass-macos.sh"
 packager="$repo_root/scripts/package-workass-macos.sh"
+installer="$repo_root/scripts/install-workass-macos.sh"
 profile_lib="$repo_root/scripts/lib/workass-profile.sh"
 
 sh -n "$builder"
@@ -35,10 +36,14 @@ grep -Fq 'workass_codesign_cdhash' "$runner"
 # Finished handoff jobs are swept so each rebuild is not one more launchd item.
 grep -Fq 'com\.workass\.rebuild\.' "$runner"
 
-# The runtime binary is staged and swapped, never overwritten in place: the
-# kernel kills a running process whose mapped image stops matching its
-# signature.
-grep -Fq 'runtime_incoming' "$packager"
+# The complete app/runtime release is staged and swapped, never overwritten in
+# place: the kernel kills a running process whose mapped image stops matching
+# its signature.
+grep -Fq 'incoming="$install_root/.Workass.app.incoming-' "$installer"
+grep -Fq 'backup="$install_root/.Workass.app.previous-' "$installer"
+grep -Fq 'mv "$incoming" "$installed"' "$installer"
+grep -Fq -- '--repair-broken-installed-seal' "$installer"
+grep -Fq '[ "$installed_requirement" = "$candidate_requirement" ]' "$installer"
 if grep -Fq 'cp "$repo_root/dist-bin/workass-darwin-arm64" "$WORKASS_DATA_ROOT/runtime/workass"' "$packager"; then
   echo "packager still copies onto the live daemon binary" >&2
   exit 1

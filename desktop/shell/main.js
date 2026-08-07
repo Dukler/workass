@@ -11,7 +11,8 @@ const { BrowserManager } = require('./browser-manager');
 const { BrowserControlServer } = require('./browser-control-server');
 const { resolveRuntimeProfile } = require('./runtime-profile');
 const { applyMacDockIcon } = require('./app-icon');
-const { ensurePortableDaemon, restartDaemonAndRecover } = require('./runtime-bootstrap');
+const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
+const { UpdateManager } = require('./update-manager');
 const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
 const { acquireProfileSingleton } = require('./profile-singleton');
 
@@ -43,9 +44,11 @@ const RENDERER_DIR = process.env.WORKASS_RENDERER_DIR || (app.isPackaged
   ? path.join(process.resourcesPath, 'renderer')
   : path.join(__dirname, '..', 'renderer2', 'dist'));
 const VIEW_PORT = RUNTIME.viewPort;
+const APP_VERSION = app.isPackaged ? app.getVersion() : 'development';
 let viewServer = null;
 let browserManager = null;
 let browserControlServer = null;
+let updateManager = null;
 const externalImageTempDirs = new Set();
 
 function sourceDaemonExecutable() {
@@ -57,6 +60,12 @@ function sourceDaemonExecutable() {
 }
 
 async function recoverLocalDaemon() {
+  if (app.isPackaged && process.platform === 'darwin') {
+    return restartPackagedDaemonAndRecover({
+      runtime: RUNTIME,
+      resourcesPath: process.resourcesPath,
+    });
+  }
   return restartDaemonAndRecover({
     runtime: RUNTIME,
     resourcesPath: process.resourcesPath,
@@ -180,6 +189,10 @@ function createWindow(url, browserReporter, isController) {
 		try { return { ok: true, ...(await recoverLocalDaemon()) }; }
 		catch (err) { return { ok: false, error: String(err && err.message || err) }; }
 	});
+  ipcMain.handle('workass-updater:get-state', (event) => own(event) ? updateManager?.snapshot() || null : null);
+  ipcMain.handle('workass-updater:check', async (event) => own(event) ? updateManager?.check() || null : null);
+  ipcMain.handle('workass-updater:download', async (event) => own(event) ? updateManager?.download() || null : null);
+  ipcMain.handle('workass-updater:install', async (event) => own(event) ? updateManager?.install() || null : null);
   win.on('closed', () => {
     removeImageCopyMenu();
     if (browserControlServer) void browserControlServer.close();
@@ -193,9 +206,13 @@ function createWindow(url, browserReporter, isController) {
     try { ipcMain.removeHandler('workass-image:open-external'); } catch { /* ignore */ }
     try { ipcMain.removeHandler('workass-window:control'); } catch { /* ignore */ }
 		try { ipcMain.removeHandler('workass-recovery:restart-daemon'); } catch { /* ignore */ }
+    for (const channel of ['get-state', 'check', 'download', 'install']) {
+      try { ipcMain.removeHandler(`workass-updater:${channel}`); } catch { /* ignore */ }
+    }
   });
   win.loadURL(url);
   win.webContents.on('did-finish-load', async () => {
+    if (updateManager) win.webContents.send('workass-updater:state', updateManager.snapshot());
     try {
       await browserManager.probe();
       const receipt = await win.webContents.executeJavaScript(`({
@@ -377,6 +394,7 @@ function createWindow(url, browserReporter, isController) {
 }
 
 if (ownsProfileInstance) app.on('will-quit', () => {
+  updateManager?.dispose();
   for (const dir of externalImageTempDirs) {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
   }
@@ -388,11 +406,9 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
   grantMicrophoneOnly();
   if (app.isPackaged) {
     try {
-      const daemonReceipt = await ensurePortableDaemon({
-        runtime: RUNTIME,
-        resourcesPath: process.resourcesPath,
-        executablePath: process.execPath,
-      });
+      const daemonReceipt = process.platform === 'darwin'
+        ? await ensurePackagedDaemon({ runtime: RUNTIME, resourcesPath: process.resourcesPath })
+        : await ensurePortableDaemon({ runtime: RUNTIME, resourcesPath: process.resourcesPath, executablePath: process.execPath });
       console.error(`[shell] packaged daemon receipt ${JSON.stringify(daemonReceipt)}`);
       if (daemonReceipt.status === 'move-to-applications') {
         await dialog.showMessageBox({
@@ -422,6 +438,7 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
       rendererDir: RENDERER_DIR,
       port: VIEW_PORT,
       runtimeVersion: process.versions.electron,
+      appVersion: APP_VERSION,
       recoverController: RECOVER_CONTROLLER,
     });
     viewURL = viewServer.url;
@@ -436,7 +453,30 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
   }
   const browserReporter = viewServer && viewServer.reportBrowserState;
   const isController = viewServer && viewServer.isController;
+  updateManager = new UpdateManager({
+    app,
+    runtime: RUNTIME,
+    resourcesPath: process.resourcesPath,
+    executablePath: process.execPath,
+    currentVersion: APP_VERSION,
+    platform: process.platform,
+    arch: process.arch,
+    isPackaged: app.isPackaged,
+    onState: (state) => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (!window.isDestroyed()) window.webContents.send('workass-updater:state', state);
+      }
+    },
+  });
+  const updateState = updateManager.init();
   createWindow(viewURL, browserReporter, isController);
+  // A rolled-back/failed transaction stays visible until the user explicitly
+  // retries. An automatic check here would immediately re-offer the exact
+  // release that just failed its health gates and hide the recovery receipt.
+  if (updateState.supported && !['rollback_healthy', 'failed'].includes(updateState.phase)) {
+    const timer = setTimeout(() => void updateManager?.check(), 15000);
+    timer.unref?.();
+  }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow(viewURL, browserReporter, isController);
   });

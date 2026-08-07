@@ -38,10 +38,33 @@ function fixture() {
 
 test('packaged bootstrap is a no-op while the daemon is already healthy', async () => {
   const { runtime, resourcesPath, home } = fixture();
+  fs.mkdirSync(runtime.dataRoot, { recursive: true });
+  fs.writeFileSync(path.join(runtime.dataRoot, 'runtime-release.json'), JSON.stringify({
+    schemaVersion: 1,
+    version: '1.2.3',
+    build: '7',
+    appRoot: path.resolve(resourcesPath, '..', '..'),
+  }));
   const calls = [];
   const result = await ensurePackagedDaemon({ runtime, resourcesPath, home, uid: 501, check: async () => true, spawn: (_bin, args) => { calls.push(args); return { status: 0 }; } });
   assert.equal(result.status, 'already-running');
   assert.deepEqual(calls, []);
+});
+
+test('a healthy daemon without this exact app release marker is replaced by the bundled daemon', async () => {
+  const { runtime, resourcesPath, home } = fixture();
+  const calls = [];
+  let checks = 0;
+  const result = await ensurePackagedDaemon({
+    runtime, resourcesPath, home, uid: 501,
+    check: async (_url, _timeout, expectedVersion) => { checks += 1; return checks > 1 && expectedVersion === '1.2.3'; },
+    spawn: (_bin, args) => { calls.push(args); return { status: 0, stdout: '', stderr: '' }; },
+  });
+  assert.equal(result.status, 'installed-and-running');
+  assert.deepEqual(calls.map((args) => args[0]), ['bootout', 'bootstrap', 'enable', 'kickstart']);
+  const marker = JSON.parse(fs.readFileSync(result.releaseMarkerPath, 'utf8'));
+  assert.equal(marker.version, '1.2.3');
+  assert.equal(marker.build, '7');
 });
 
 test('clean-Mac bootstrap installs the bundled runtime as a user LaunchAgent', async () => {
@@ -100,6 +123,9 @@ test('health probe rejects unrelated services occupying the Workass port', async
   assert.equal(await healthCheck(url), false);
   body = JSON.stringify({ app: 'workass' });
   assert.equal(await healthCheck(url), true);
+  assert.equal(await healthCheck(url, 700, '9.9.9'), false);
+  body = JSON.stringify({ app: 'workass', version: '9.9.9' });
+  assert.equal(await healthCheck(url, 700, '9.9.9'), true);
 });
 
 test('portable bootstrap starts the sibling Windows daemon when no daemon is healthy', async () => {

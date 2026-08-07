@@ -117,11 +117,22 @@ function proxyHTTP(req, res, daemon) {
   req.pipe(upstream);
 }
 
+function tlsConnectOptions(daemon, port) {
+  const options = { host: daemon.hostname, port, ...(daemon.ca ? { ca: daemon.ca } : {}) };
+  // SNI is a DNS-name extension. Node 25 rejects an IP literal here, while
+  // Electron 43 still accepts it with a deprecation warning before the
+  // connection fails later. Omitting SNI for an IP keeps normal certificate
+  // verification: checkServerIdentity still validates the certificate's IP
+  // subjectAltName against `host`.
+  if (net.isIP(daemon.hostname) === 0) options.servername = daemon.hostname;
+  return options;
+}
+
 function proxyUpgrade(req, socket, head, daemon) {
   const secure = daemon.protocol === 'https:';
   const port = Number(daemon.port || (secure ? 443 : 80));
   const upstream = secure
-    ? tls.connect({ host: daemon.hostname, port, servername: daemon.hostname, ...(daemon.ca ? { ca: daemon.ca } : {}) })
+    ? tls.connect(tlsConnectOptions(daemon, port))
     : net.connect({ host: daemon.hostname, port });
   const fail = () => { try { socket.destroy(); } catch (_) {} };
   upstream.once('error', fail);
@@ -142,7 +153,7 @@ function proxyUpgrade(req, socket, head, daemon) {
   });
 }
 
-function createViewServer({ daemonURL, daemonCAPath = '', rendererDir, host = '127.0.0.1', port = 8799, runtimeVersion = null, recoverController = false }) {
+function createViewServer({ daemonURL, daemonCAPath = '', rendererDir, host = '127.0.0.1', port = 8799, runtimeVersion = null, appVersion = null, recoverController = false }) {
   const daemon = new URL(daemonURL);
   if (daemon.protocol !== 'http:' && daemon.protocol !== 'https:') {
     return Promise.reject(new Error(`unsupported daemon protocol: ${daemon.protocol}`));
@@ -254,6 +265,7 @@ function createViewServer({ daemonURL, daemonCAPath = '', rendererDir, host = '1
         claude: shellStatus.claude,
         browser: shellStatus.browser,
         electronVersion: runtimeVersion,
+        appVersion,
         rendererDir: root,
         daemonOrigin: daemon.origin,
       });
@@ -388,4 +400,4 @@ function createViewServer({ daemonURL, daemonCAPath = '', rendererDir, host = '1
   });
 }
 
-module.exports = { createViewServer, injectBridge, safeStaticPath };
+module.exports = { createViewServer, injectBridge, safeStaticPath, tlsConnectOptions };
