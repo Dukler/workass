@@ -44,6 +44,7 @@ export interface MachineView {
   /** Why it is not usable, in words, when it is not. */
   reason: string;
   secure: boolean;
+	reachable: boolean;
   /** True when this client holds a token for it. */
   paired: boolean;
   /** Discovered machines remain passive until the user requests access. */
@@ -83,6 +84,10 @@ export interface MachineRegistryOptions {
   onChange?(machines: MachineView[]): void;
   /** A machine reconnected. `restarted` means it lost everything it was holding. */
   onOpen?(machineId: string, info: { generation: number; restarted: boolean }): void;
+	/** Deterministic scheduler seam used by transport lifecycle tests. */
+	setTimer?(fn: () => void, ms: number): unknown;
+	clearTimer?(handle: unknown): void;
+	trustEndpoint?(address: string, certFingerprint: string): boolean;
 }
 
 /** An event from one machine, with the machine it came from so ids can be tagged. */
@@ -145,6 +150,7 @@ export class MachineRegistry {
         link: state?.link ?? 'idle',
         reason: state?.reason || entry.reason || '',
         secure: !!entry.secure,
+		reachable: !entry.status || entry.status === 'ok',
         paired: !!this.credentials(entry.machineId).deviceToken,
         requested: this.requested.has(entry.machineId),
         discovered: entry.addedBy === 'beacon',
@@ -192,12 +198,26 @@ export class MachineRegistry {
       if (!id || id === selfMachineId) continue;
       seen.add(id);
       this.entries.set(id, entry);
+		const credentials = this.credentials(id);
+		const fingerprint = normalizeFingerprint(entry.certFingerprint);
+		if (credentials.deviceToken && (!credentials.certFingerprint || credentials.certFingerprint !== fingerprint)) {
+			// Old releases did not persist the TLS identity. Never send their token
+			// under TOFU after an upgrade, and never follow a changed certificate.
+			// Keep the discovered machine row so one explicit approval can pair it
+			// again under the fingerprint it currently proves.
+			this.sockets.get(id)?.close();
+			this.sockets.delete(id);
+			this.ready.delete(id);
+			this.clearCredentials(id);
+			this.states.set(id, { link: 'idle', reason: credentials.certFingerprint ? 'la identidad TLS cambió; volvé a aprobarla' : 'volvé a aprobarla para fijar su identidad TLS' });
+			continue;
+		}
       // The explicit request path already refuses an endpoint that did not
       // prove TLS. Automatic reconnect must enforce the same gate: otherwise a
       // previously paired machine that later becomes stale/insecure opens a
       // doomed wss:// socket every 1.5s forever. Keep its book entry and
       // credential so a later secure refresh reconnects without re-pairing.
-      if (!entry.secure) {
+		if (!entry.secure || (entry.status && entry.status !== 'ok')) {
         this.sockets.get(id)?.close();
         this.sockets.delete(id);
         this.ready.delete(id);
@@ -240,7 +260,7 @@ export class MachineRegistry {
   /** Open one TLS socket to a discovered candidate after the user clicks Request access. */
   requestAccess(machineId: string): boolean {
     const entry = this.entries.get(machineId);
-    if (!entry || !entry.secure) return false;
+	if (!entry || !entry.secure || (entry.status && entry.status !== 'ok')) return false;
     this.requested.add(machineId);
     if (!this.sockets.has(machineId)) this.connect(entry);
     this.opts.onChange?.(this.list());
@@ -250,6 +270,13 @@ export class MachineRegistry {
   private connect(entry: MachineEntry): void {
     const address = firstAddress(entry);
     if (!address) return;
+	const fingerprint = normalizeFingerprint(entry.certFingerprint);
+	const trust = this.opts.trustEndpoint ?? trustMachineEndpoint;
+	if (!fingerprint || !trust(address, fingerprint)) {
+		this.states.set(entry.machineId, { link: 'idle', reason: 'no se pudo fijar la identidad TLS' });
+		this.opts.onChange?.(this.list());
+		return;
+	}
     const socket = new MachineSocket({
       machineId: entry.machineId,
       // There is no plaintext fallback. A stale/old discovery card is shown as
@@ -258,6 +285,7 @@ export class MachineRegistry {
       url: 'wss://' + address,
       deviceName: this.opts.deviceName,
       credentials: this.credentials(entry.machineId),
+		certFingerprint: fingerprint,
       fleetKey: this.fleetKey || undefined,
       open: this.opts.open ?? browserSocket,
       saveCredentials: (id, next) => this.saveCredentials(id, next),
@@ -270,6 +298,8 @@ export class MachineRegistry {
         this.opts.onChange?.(this.list());
       },
       onOpen: (info) => this.opts.onOpen?.(entry.machineId, info),
+		setTimer: this.opts.setTimer,
+		clearTimer: this.opts.clearTimer,
       // Every event from every machine funnels here, so a subscription outlives
       // the socket that happened to exist when it was made. Subscribing to the
       // link directly is what broke: the store subscribes at boot, no machine is
@@ -319,6 +349,26 @@ export class MachineRegistry {
   private clearCredentials(machineId: string): void {
     try { this.storage()?.removeItem(CREDENTIAL_PREFIX + machineId); } catch { /* private mode */ }
   }
+}
+
+function normalizeFingerprint(value: unknown): string {
+	const fingerprint = String(value ?? '').replaceAll(':', '').trim().toLowerCase();
+	return /^[a-f0-9]{64}$/.test(fingerprint) ? fingerprint : '';
+}
+
+function trustMachineEndpoint(address: string, certFingerprint: string): boolean {
+	try {
+		const bridge = typeof window !== 'undefined' ? window.workassMachines : undefined;
+		return bridge ? bridge.trustEndpoint({ address, certFingerprint }) : true;
+	} catch {
+		return false;
+	}
+}
+
+declare global {
+	interface Window {
+		workassMachines?: { trustEndpoint(payload: { address: string; certFingerprint: string }): boolean };
+	}
 }
 
 function firstAddress(entry: MachineEntry): string {

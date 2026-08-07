@@ -99,7 +99,7 @@ fi
   exit 1
 }
 ditto "$repo_root/desktop/renderer2/dist/." "$stage/resources/renderer"
-for shell_file in main.js preload.js view-server.js browser-manager.js browser-control-server.js runtime-profile.js runtime-bootstrap.js app-icon.js image-copy.js profile-singleton.js update-manager.js update-worker.js; do
+for shell_file in main.js preload.js view-server.js browser-manager.js browser-control-server.js runtime-profile.js runtime-bootstrap.js certificate-pins.js app-icon.js image-copy.js profile-singleton.js update-manager.js update-worker.js; do
   cp "$repo_root/desktop/shell/$shell_file" "$stage/resources/app/$shell_file"
 done
 cp "$repo_root/desktop/shell/package.production.json" "$stage/resources/app/package.json"

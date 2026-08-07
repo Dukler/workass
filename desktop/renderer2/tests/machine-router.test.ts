@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createMachineRouter, routeOf, ROUTED_EVENTS, ROUTED_METHODS } from '../src/wire/machineRouter.ts';
 import { MachineRegistry, type MachineEntry } from '../src/wire/machineRegistry.ts';
 import { tagId } from '../src/wire/machineIds.ts';
-import type { MachineSocket } from '../src/wire/machineSocket.ts';
+import type { MachineSocket, MachineSocketLike } from '../src/wire/machineSocket.ts';
 
 // A stand-in for a ready link: it records what it was asked and answers with
 // whatever the test queued.
@@ -115,8 +115,10 @@ function memoryStorage() {
   };
 }
 
+const CERT_FINGERPRINT = 'ab'.repeat(32);
+
 function entry(id: string, name: string, address: string): MachineEntry {
-  return { machineId: id, name, endpoints: [{ kind: 'lan', address }], secure: true, addedBy: 'beacon' };
+	return { machineId: id, name, endpoints: [{ kind: 'lan', address }], secure: true, certFingerprint: CERT_FINGERPRINT, addedBy: 'beacon' };
 }
 
 test('the registry keeps nearby machines passive until access is explicitly requested', () => {
@@ -137,10 +139,45 @@ test('the registry keeps nearby machines passive until access is explicitly requ
   assert.deepEqual(registry.names(), { 'm-remote': 'builder' });
 });
 
+test('approval persists the discovered certificate pin before later token reconnects', () => {
+	const storage = memoryStorage();
+	let socket: MachineSocketLike | undefined;
+	const trusted: Array<[string, string]> = [];
+	const registry = new MachineRegistry({
+		local: () => ({}) as never, deviceName: 'Mac', storage,
+		trustEndpoint: (address, fingerprint) => { trusted.push([address, fingerprint]); return true; },
+		open: (() => (socket = { send() {}, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null })) as never,
+	});
+	registry.sync([entry('m-remote', 'builder', '192.168.1.71:80')], 'm-self');
+	assert.equal(registry.requestAccess('m-remote'), true);
+	assert.deepEqual(trusted, [['192.168.1.71:80', CERT_FINGERPRINT]]);
+	socket?.onopen?.();
+	socket?.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+		state: 'approved', deviceToken: 'paired-token', deviceId: 'device-1', name: 'Mac', instanceId: 'instance-1',
+	} }));
+	const saved = JSON.parse(storage.getItem('workass.machine.m-remote') || '{}');
+	assert.equal(saved.deviceToken, 'paired-token');
+	assert.equal(saved.certFingerprint, CERT_FINGERPRINT);
+});
+
+test('a changed certificate never receives a stored device token', () => {
+	const storage = memoryStorage();
+	storage.setItem('workass.machine.m-remote', JSON.stringify({ deviceToken: 'paired-token', certFingerprint: CERT_FINGERPRINT }));
+	const opened: string[] = [];
+	const registry = new MachineRegistry({
+		local: () => ({}) as never, deviceName: 'Mac', storage,
+		open: ((url: string) => { opened.push(url); return { send() {}, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null }; }) as never,
+	});
+	registry.sync([{ ...entry('m-remote', 'builder', '192.168.1.71:80'), certFingerprint: 'cd'.repeat(32) }], 'm-self');
+	assert.deepEqual(opened, []);
+	assert.equal(storage.getItem('workass.machine.m-remote'), null, 'identity change requires a fresh explicit approval');
+	assert.equal(registry.list()[0].paired, false);
+});
+
 test('a machine leaving the book is disconnected, and forgetting it drops its token', () => {
   const closed: number[] = [];
   const storage = memoryStorage();
-  storage.setItem('workass.machine.m-remote', JSON.stringify({ deviceToken: 't' }));
+	storage.setItem('workass.machine.m-remote', JSON.stringify({ deviceToken: 't', certFingerprint: CERT_FINGERPRINT }));
   const registry = new MachineRegistry({
     local: () => ({}) as never, deviceName: 'Mac', storage,
     open: (() => ({ send() {}, close() { closed.push(1); }, onopen: null, onclose: null, onmessage: null, onerror: null })) as never,
@@ -157,7 +194,7 @@ test('an insecure paired endpoint stays parked without losing its credential', (
   const opened: string[] = [];
   const closed: number[] = [];
   const storage = memoryStorage();
-  storage.setItem('workass.machine.m-remote', JSON.stringify({ deviceToken: 'paired-token' }));
+	storage.setItem('workass.machine.m-remote', JSON.stringify({ deviceToken: 'paired-token', certFingerprint: CERT_FINGERPRINT }));
   const registry = new MachineRegistry({
     local: () => ({}) as never, deviceName: 'Mac', storage,
     open: ((url: string) => {
@@ -181,6 +218,37 @@ test('an insecure paired endpoint stays parked without losing its credential', (
 
   registry.sync([secure], 'm-self');
   assert.equal(opened.length, 2, 'a later secure refresh reconnects without re-pairing');
+});
+
+test('an unreachable paired endpoint cancels retries and reconnects only after a reachable refresh', () => {
+	const opened: MachineSocketLike[] = [];
+	const timers: { fn: () => void; cleared: boolean }[] = [];
+	const storage = memoryStorage();
+	storage.setItem('workass.machine.m-remote', JSON.stringify({ deviceToken: 'paired-token', certFingerprint: CERT_FINGERPRINT }));
+	const registry = new MachineRegistry({
+		local: () => ({}) as never, deviceName: 'Mac', storage,
+		open: (() => {
+			const socket: MachineSocketLike = { send() {}, close() { socket.onclose?.(); }, onopen: null, onclose: null, onmessage: null, onerror: null };
+			opened.push(socket);
+			return socket;
+		}) as never,
+		setTimer: (fn) => { timers.push({ fn, cleared: false }); return timers.length - 1; },
+		clearTimer: (handle) => { if (timers[handle as number]) timers[handle as number].cleared = true; },
+	});
+	const reachable = { ...entry('m-remote', 'builder', '192.168.1.71:80'), status: 'ok' };
+	const unreachable = { ...reachable, status: 'unreachable', reason: 'did not answer' };
+
+	registry.sync([reachable], 'm-self');
+	assert.equal(opened.length, 1);
+	opened[0].close();
+	registry.sync([unreachable], 'm-self');
+	for (const timer of timers) if (!timer.cleared) timer.fn();
+	assert.equal(opened.length, 1, 'parking an unreachable machine cancels its already-scheduled reconnect');
+	assert.equal(registry.list()[0].paired, true, 'parking preserves the device token');
+	assert.equal(registry.list()[0].reachable, false);
+
+	registry.sync([reachable], 'm-self');
+	assert.equal(opened.length, 2, 'a later healthy probe reconnects exactly once');
 });
 
 test('with nothing mounted the registry hands back no router at all', () => {

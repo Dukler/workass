@@ -63,6 +63,7 @@ export interface MachineCredentials {
   deviceToken?: string;
   deviceId?: string;
   deviceName?: string;
+	certFingerprint?: string;
 }
 
 export interface MachineSocketOptions {
@@ -71,6 +72,8 @@ export interface MachineSocketOptions {
   url: string;
   deviceName: string;
   credentials?: MachineCredentials;
+	/** Certificate identity proven by discovery before this socket is opened. */
+	certFingerprint?: string;
   /** Held only in memory by the caller; used once, when the daemon parks us. */
   fleetKey?: string;
   open(url: string): MachineSocketLike;
@@ -120,6 +123,7 @@ export class MachineSocket {
   private lastInstanceId = '';
   private enrolling = false;
   private state: MachineLinkState = 'idle';
+	private reconnectTimer: unknown = null;
 
   private readonly opts: MachineSocketOptions;
 
@@ -134,6 +138,7 @@ export class MachineSocket {
   get instanceId(): string { return this.lastInstanceId; }
 
   connect(): void {
+	this.cancelReconnect();
     this.closedByCaller = false;
     // A superseded socket's in-flight invokes are rejected, never resolved by
     // whatever the new socket happens to answer (lan_bridge.go:64).
@@ -162,7 +167,12 @@ export class MachineSocket {
       this.opened = false;
       this.ready = false;
       this.setState('closed');
-      if (!this.closedByCaller) this.later(() => this.connect(), RECONNECT_DELAY_MS);
+		if (!this.closedByCaller) {
+			this.reconnectTimer = this.later(() => {
+				this.reconnectTimer = null;
+				if (!this.closedByCaller) this.connect();
+			}, RECONNECT_DELAY_MS);
+		}
     };
     socket.onerror = () => { /* onclose follows; nothing useful to add here */ };
     socket.onmessage = (data) => {
@@ -173,6 +183,7 @@ export class MachineSocket {
 
   close(): void {
     this.closedByCaller = true;
+	this.cancelReconnect();
     this.rejectPending('socket-closed');
     const socket = this.socket;
     this.socket = null;
@@ -263,6 +274,7 @@ export class MachineSocket {
       if (typeof state.deviceToken === 'string' && state.deviceToken) next.deviceToken = state.deviceToken;
       if (typeof state.deviceId === 'string' && state.deviceId) next.deviceId = state.deviceId;
       if (typeof state.name === 'string' && state.name) next.deviceName = state.name;
+		if (this.opts.certFingerprint) next.certFingerprint = this.opts.certFingerprint;
       this.commitCredentials(next);
       this.ready = true;
       this.setState('ready');
@@ -331,7 +343,8 @@ export class MachineSocket {
   private commitCredentials(next: MachineCredentials): void {
     const changed = next.deviceToken !== this.credentials.deviceToken
       || next.deviceId !== this.credentials.deviceId
-      || next.deviceName !== this.credentials.deviceName;
+		|| next.deviceName !== this.credentials.deviceName
+		|| next.certFingerprint !== this.credentials.certFingerprint;
     this.credentials = next;
     if (changed) this.opts.saveCredentials?.(this.opts.machineId, { ...next });
   }
@@ -378,4 +391,11 @@ export class MachineSocket {
     if (this.opts.setTimer) return this.opts.setTimer(fn, ms);
     return setTimeout(fn, ms);
   }
+
+	private cancelReconnect(): void {
+		if (this.reconnectTimer === null) return;
+		if (this.opts.clearTimer) this.opts.clearTimer(this.reconnectTimer);
+		else clearTimeout(this.reconnectTimer as ReturnType<typeof setTimeout>);
+		this.reconnectTimer = null;
+	}
 }

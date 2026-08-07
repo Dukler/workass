@@ -623,7 +623,7 @@ function MachineRow({ m }: { m: MachineView }) {
         <div className="mt">{m.address || '—'}{m.reason ? ` · ${m.reason}` : (live ? ' · conectada' : m.requested ? ' · esperando aprobación' : ' · disponible en la red')}</div>
       </div>
       <div className="act">
-        {!m.paired && !m.requested && <button className="btn sm acc" disabled={!m.secure} onClick={() => void store.requestMachineAccess(m.machineId)}>Solicitar conexión</button>}
+		{!m.paired && !m.requested && <button className="btn sm acc" disabled={!m.secure || !m.reachable} onClick={() => void store.requestMachineAccess(m.machineId)}>Solicitar conexión</button>}
         {!m.paired && m.requested && <span className="badge">solicitud enviada</span>}
         {m.paired && <button className="btn sm danger" onClick={() => void store.forgetMachine(m.machineId)}>Desconectar</button>}
       </div>

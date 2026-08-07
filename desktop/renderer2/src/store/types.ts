@@ -285,6 +285,7 @@ export interface MachineView {
   link: 'idle' | 'connecting' | 'open' | 'ready' | 'closed' | 'rejected';
   reason: string;
   secure: boolean;
+	reachable: boolean;
   paired: boolean;
   requested: boolean;
   discovered: boolean;

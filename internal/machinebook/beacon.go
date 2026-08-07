@@ -49,7 +49,7 @@ type announcement struct {
 	At        string `json:"at"`
 }
 
-// Beacon announces this daemon and listens for others.
+// Beacon listens for other daemons and optionally announces this one.
 type Beacon struct {
 	Book      *Book
 	MachineID string
@@ -65,14 +65,18 @@ type Beacon struct {
 	// the suite writes invented machines into the book of every daemon on the
 	// LAN, including someone else's.
 	Group string
+	// ReceiveOnly joins the multicast group and records reachable announcers
+	// without advertising this daemon. A loopback-bound controller uses this
+	// mode to discover LAN-reachable machines without exposing itself.
+	ReceiveOnly bool
 
-	mu        sync.Mutex
-	listeners map[int]*net.UDPConn
+	mu         sync.Mutex
+	listeners  map[int]*net.UDPConn
+	announceFn func(*net.UDPAddr)
 }
 
-// Run announces on a ticker and listens until ctx ends. It is the caller's job
-// not to start it on a loopback-bound daemon: a machine that is not reachable
-// should not be advertising an address.
+// Run listens until ctx ends and, unless ReceiveOnly is set, announces on a
+// ticker. Receive-only mode is safe for a loopback-bound daemon.
 func (b *Beacon) Run(ctx context.Context) error {
 	if strings.TrimSpace(b.MachineID) == "" {
 		return errors.New("beacon needs a machine id")
@@ -96,7 +100,9 @@ func (b *Beacon) Run(ctx context.Context) error {
 		group = resolved
 	}
 	b.refreshListeners(ctx, group)
-	b.announce(group)
+	if !b.ReceiveOnly {
+		b.sendAnnouncement(group)
+	}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -109,9 +115,19 @@ func (b *Beacon) Run(ctx context.Context) error {
 			// up, VPNs attach, docks appear. One packet per interface per
 			// interval is cheap enough to pay for never needing a restart.
 			b.refreshListeners(ctx, group)
-			b.announce(group)
+			if !b.ReceiveOnly {
+				b.sendAnnouncement(group)
+			}
 		}
 	}
+}
+
+func (b *Beacon) sendAnnouncement(group *net.UDPAddr) {
+	if b.announceFn != nil {
+		b.announceFn(group)
+		return
+	}
+	b.announce(group)
 }
 
 // announce sends one packet per usable interface. The kernel picks the egress
@@ -198,15 +214,14 @@ func (b *Beacon) read(ctx context.Context, conn *net.UDPConn, ifaceName string) 
 			window = time.Now()
 			probed = 0
 		}
-		if probed >= maxNewPerInterval {
-			b.logf("[machines] %s: too many new announcements this interval, ignoring the rest", ifaceName)
-			continue
-		}
-
 		// The address is the packet's source, never a field inside it. A
 		// payload-supplied address would let anyone on this network point us
 		// at a third party and have us connect to it.
 		address := net.JoinHostPort(src.IP.String(), strconv.Itoa(heard.Port))
+		if !reserveProbe(b.Book.sightingNeedsProbe(heard.MachineID, address), &probed) {
+			b.logf("[machines] %s: too many new announcements this interval, ignoring the rest", ifaceName)
+			continue
+		}
 		entry, changed, sightErr := b.Book.Sighted(ctx, heard.MachineID, address)
 		if sightErr != nil {
 			if !errors.Is(sightErr, ErrSelf) {
@@ -215,13 +230,23 @@ func (b *Beacon) read(ctx context.Context, conn *net.UDPConn, ifaceName string) 
 			continue
 		}
 		if changed {
-			probed++
 			b.logf("[machines] %s (%s) at %s", entry.Name, entry.MachineID, address)
 			if b.OnChange != nil {
 				b.OnChange(entry)
 			}
 		}
 	}
+}
+
+func reserveProbe(required bool, used *int) bool {
+	if !required {
+		return true
+	}
+	if *used >= maxNewPerInterval {
+		return false
+	}
+	*used++
+	return true
 }
 
 func (b *Beacon) closeListeners() {

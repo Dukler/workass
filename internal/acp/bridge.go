@@ -1432,7 +1432,7 @@ func (b *Bridge) Close(intentional bool, cause error) {
 		_ = stdin.Close()
 	}
 	if child != nil && child.Process != nil {
-		_ = child.Process.Kill()
+		_ = stopProcessTree(child.Process)
 	}
 	if b.manager != nil {
 		b.manager.orphanInProcessSpawnedWorkForChat(tabID, chatID, firstNonEmpty(errString(cause), "bridge-close"))

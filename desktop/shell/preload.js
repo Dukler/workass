@@ -36,6 +36,10 @@ contextBridge.exposeInMainWorld('workassRecovery', {
   restartDaemon: () => ipcRenderer.invoke('workass-recovery:restart-daemon'),
 });
 
+contextBridge.exposeInMainWorld('workassMachines', {
+	trustEndpoint: (payload) => ipcRenderer.sendSync('workass-machines:trust-endpoint', payload),
+});
+
 contextBridge.exposeInMainWorld('workassUpdater', {
   getState: () => ipcRenderer.invoke('workass-updater:get-state'),
   check: () => ipcRenderer.invoke('workass-updater:check'),

@@ -678,6 +678,63 @@ func TestDetectProvidersExplicitDisableSurvivesRedetection(t *testing.T) {
 	assertProviderListItem(t, manager2.ProvidersList(), "devin", providerStatusInactive, false)
 }
 
+func TestFailedDetectionDisablesPreviouslyReadyProviderWithoutUserDisable(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	installFakeAgentWrapper(t, pathDir, "devin", "crash-stderr")
+	t.Setenv("PATH", pathDir)
+	t.Setenv("ASSISTANT_DEVIN", filepath.Join(pathDir, "devin"))
+	providers := BuiltInProviderConfigs(root)
+	for i := range providers {
+		if providers[i].ID == "devin" {
+			providers[i].Enabled = true
+			providers[i].Detected = true
+			providers[i].DetectedAt = "2026-08-01T00:00:00Z"
+		}
+	}
+	providersFile := filepath.Join(t.TempDir(), "providers.json")
+	manager := NewManager(Options{
+		RootDir: root, Providers: providers, ProviderConfigFile: providersFile,
+		InitTimeout: 300 * time.Millisecond, RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	manager.DetectProviders(context.Background(), DetectOptions{ProviderID: "devin"})
+	devin := assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusError, false)
+	if devin["detected"] != true {
+		t.Fatalf("failed provider should retain install detection metadata: %#v", devin)
+	}
+	reloaded, err := LoadProviderConfigs(providersFile, root)
+	if err != nil {
+		t.Fatalf("reload providers: %v", err)
+	}
+	cfg, ok := providerFromSlice(reloaded, "devin")
+	if !ok || cfg.Enabled || cfg.DisabledByUser {
+		t.Fatalf("persisted failed Devin config = %#v", cfg)
+	}
+}
+
+func TestDevinAuthenticationFailureBecomesNeedsLoginWithoutRetryLoop(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	installFakeAgentWrapper(t, pathDir, "devin", "auth-stderr")
+	t.Setenv("PATH", pathDir)
+	t.Setenv("ASSISTANT_DEVIN", filepath.Join(pathDir, "devin"))
+	manager := NewManager(Options{
+		RootDir: root, InitTimeout: 300 * time.Millisecond, RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	manager.DetectProviders(context.Background(), DetectOptions{ProviderID: "devin"})
+	devin := assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusNeedsLogin, false)
+	if devin["fixHint"] != providerLoginFixHint("devin") || devin["detected"] != true {
+		t.Fatalf("logged-out Devin state = %#v", devin)
+	}
+	if retryable := retryableProviderDetectionIDs([]providerDetectionResult{{ProviderID: "devin", Status: providerStatusNeedsLogin}}); len(retryable) != 0 {
+		t.Fatalf("needs-login Devin was scheduled for startup retry: %v", retryable)
+	}
+}
+
 func TestDetectProvidersLocalServerRegistersNativeProviderAndStreamsThroughAgent(t *testing.T) {
 	root := repoRoot(t)
 	fake := newFakeLocalOpenAI(t, "local-first", "local-second")
