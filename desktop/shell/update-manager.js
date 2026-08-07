@@ -12,6 +12,8 @@ const DEFAULT_FEED_ROOT = 'https://github.com/Dukler/workass/releases/latest/dow
 const MAX_MANIFEST_BYTES = 256 * 1024;
 const MAX_UPDATE_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 120000;
+const DEFAULT_INITIAL_CHECK_DELAY_MS = 15_000;
+const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 function releaseArch(platform = process.platform, arch = process.arch) {
   if (arch === 'x64') return 'amd64';
@@ -409,6 +411,9 @@ class UpdateManager {
       stageRelease,
       verifyRelease,
       schedule: setTimeout,
+      cancelSchedule: clearTimeout,
+      repeat: setInterval,
+      cancelRepeat: clearInterval,
       ...deps,
     };
     this.updateRoot = path.join(runtime.dataRoot, 'updates');
@@ -417,6 +422,8 @@ class UpdateManager {
     this.manifest = null;
     this.prepared = null;
     this.receiptTimer = null;
+    this.initialCheckTimer = null;
+    this.periodicCheckTimer = null;
     this.activeOperation = null;
     this.state = {
       supported: false,
@@ -535,6 +542,37 @@ class UpdateManager {
     }
   }
 
+  async autoCheck() {
+    if (!this.state.supported || this.activeOperation) return this.snapshot();
+    // An offered/staged update and every failure receipt belong to the user.
+    // Background polling must not replace them or race download/install.
+    if (!['idle', 'current', 'healthy'].includes(this.state.phase)) return this.snapshot();
+    try { return await this.check(); }
+    catch { return this.snapshot(); }
+  }
+
+  startAutoChecks({
+    initialDelayMs = DEFAULT_INITIAL_CHECK_DELAY_MS,
+    intervalMs = DEFAULT_CHECK_INTERVAL_MS,
+  } = {}) {
+    this.stopAutoChecks();
+    if (!this.state.supported || !Number.isFinite(initialDelayMs) || initialDelayMs < 0 ||
+        !Number.isFinite(intervalMs) || intervalMs <= 0) return this.snapshot();
+    const run = () => this.autoCheck();
+    this.initialCheckTimer = this.deps.schedule(run, initialDelayMs);
+    this.initialCheckTimer?.unref?.();
+    this.periodicCheckTimer = this.deps.repeat(run, intervalMs);
+    this.periodicCheckTimer?.unref?.();
+    return this.snapshot();
+  }
+
+  stopAutoChecks() {
+    if (this.initialCheckTimer) this.deps.cancelSchedule(this.initialCheckTimer);
+    if (this.periodicCheckTimer) this.deps.cancelRepeat(this.periodicCheckTimer);
+    this.initialCheckTimer = null;
+    this.periodicCheckTimer = null;
+  }
+
   async download() {
     this.beginOperation('download');
     try {
@@ -649,6 +687,7 @@ class UpdateManager {
   }
 
   dispose() {
+    this.stopAutoChecks();
     if (this.receiptTimer) clearInterval(this.receiptTimer);
     this.receiptTimer = null;
   }

@@ -147,6 +147,15 @@ test('production update stops old code before swapping the bundle and can roll b
   assert.match(installer, /Workass install rolled back/);
 });
 
+test('replaying the exact healthy signed release cannot restart Workass', () => {
+  assert.match(installer, /candidate_cdhash=\$\(workass_codesign_cdhash "\$candidate"\)/);
+  assert.match(installer, /installed_cdhash=\$\(workass_codesign_cdhash "\$installed"\)/);
+  assert.match(installer, /"\$candidate_cdhash" = "\$installed_cdhash".*new_release_healthy/);
+  const noOpReceipt = installer.indexOf('WORKASS_MACOS_INSTALL_ALREADY_CURRENT');
+  const stopLiveShell = installer.indexOf('if ! stop_installed_shell;');
+  assert.ok(noOpReceipt >= 0 && noOpReceipt < stopLiveShell, 'identical healthy release was not fenced before the live shell stop');
+});
+
 test('candidate building fails fast on missing tools and produces a complete source artifact', () => {
   const toolCheck = script.indexOf('missing build tool before package gate');
   const gate = script.indexOf('[package] repository gate');
@@ -168,4 +177,9 @@ test('candidate installer has no build tool or repository gate dependency', () =
   assert.match(installer, /cdpAttached/);
   assert.match(installer, /agentControl/);
   assert.match(installer, /WORKASS_MACOS_INSTALL_HEALTHY/);
+});
+
+test('production package and installer never create persistent submitted jobs', () => {
+  assert.doesNotMatch(script, /launchctl\s+submit/);
+  assert.doesNotMatch(installer, /launchctl\s+submit/);
 });

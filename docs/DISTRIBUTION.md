@@ -154,6 +154,11 @@ the transactional daemon/controller/catalog/browser health gates. This local
 signature preserves the bundle identity and macOS privacy grants without an
 Apple account.
 
+The packaged shell checks once shortly after launch and then polls this local
+manifest every 30 seconds. Publishing a dogfood build therefore makes the
+existing production app's update card appear without restarting Electron.
+Public GitHub builds use the same state machine with an hourly check instead.
+
 `scripts/release-workass-macos.sh` remains the public lane. Its
 `--release-signing` package automatically carries
 `WORKASS_UPDATE_CHANNEL=github`, so after Developer ID and notarization are

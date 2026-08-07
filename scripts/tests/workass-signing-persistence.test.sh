@@ -33,6 +33,12 @@ fi
 grep -Fq 'DAEMON_ALREADY_CURRENT' "$runner"
 grep -Fq 'workass_codesign_cdhash' "$runner"
 
+# Replaying an already-installed complete app release must not restart either
+# the shell or daemon, even when an external launch wrapper retries it.
+grep -Fq 'WORKASS_MACOS_INSTALL_ALREADY_CURRENT' "$installer"
+grep -Fq 'candidate_cdhash=$(workass_codesign_cdhash "$candidate")' "$installer"
+grep -Fq '[ "$candidate_cdhash" = "$installed_cdhash" ] && new_release_healthy' "$installer"
+
 # Finished handoff jobs are swept so each rebuild is not one more launchd item.
 grep -Fq 'com\.workass\.rebuild\.' "$runner"
 
