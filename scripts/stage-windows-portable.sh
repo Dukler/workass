@@ -54,7 +54,7 @@ bundle="Workass-$version-$target"
 release_dir="$output_root/$version"
 stage="$release_dir/$bundle"
 
-for tool in go curl shasum ditto; do
+for tool in go curl shasum ditto node npm; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 1; }
 done
 
@@ -99,10 +99,17 @@ fi
   exit 1
 }
 ditto "$repo_root/desktop/renderer2/dist/." "$stage/resources/renderer"
-for shell_file in main.js preload.js view-server.js browser-manager.js browser-control-server.js runtime-profile.js runtime-bootstrap.js app-icon.js image-copy.js profile-singleton.js; do
+for shell_file in main.js preload.js view-server.js browser-manager.js browser-control-server.js runtime-profile.js runtime-bootstrap.js app-icon.js image-copy.js profile-singleton.js update-manager.js update-worker.js; do
   cp "$repo_root/desktop/shell/$shell_file" "$stage/resources/app/$shell_file"
 done
 cp "$repo_root/desktop/shell/package.production.json" "$stage/resources/app/package.json"
+node - "$stage/resources/app/package.json" "$version" <<'NODE'
+const fs = require('node:fs');
+const [file, version] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+manifest.version = version;
+fs.writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`);
+NODE
 cp "$repo_root/config/environments/windows-prod.env" "$stage/resources/workass-profile.env"
 
 # Sanity: the exact files the daemon's native lookup requires.
@@ -126,9 +133,28 @@ rm -f "$release_dir/$bundle.zip" "$release_dir/SHA256SUMS"
   zip -q -r -X "$bundle.zip" "$bundle"
   shasum -a 256 "$bundle.zip" > "SHA256SUMS"
 )
+zip_sha=$(shasum -a 256 "$release_dir/$bundle.zip" | awk '{print $1}')
+zip_size=$(stat -f '%z' "$release_dir/$bundle.zip")
+node - "$release_dir/workass-windows-amd64-release.json" "$version" "$bundle.zip" "$zip_sha" "$zip_size" <<'NODE'
+const fs = require('node:fs');
+const [file, version, artifactName, sha256, size] = process.argv.slice(2);
+const release = {
+  schemaVersion: 1,
+  product: 'Workass',
+  version,
+  platform: 'windows',
+  arch: 'amd64',
+  // The portable build remains deliberately ineligible for automatic install
+  // until both Workass.exe and workass-daemon.exe carry one Authenticode signer.
+  authenticode: false,
+  artifacts: { update: { name: artifactName, url: artifactName, sha256, size: Number(size) } },
+};
+fs.writeFileSync(file, `${JSON.stringify(release, null, 2)}\n`);
+NODE
 
 echo "WORKASS_WINDOWS_PORTABLE_READY"
 echo "version=$version"
 echo "bundle=$stage"
 echo "zip=$release_dir/$bundle.zip"
 echo "sha256sums=$release_dir/SHA256SUMS"
+echo "update_feed=$release_dir/workass-windows-amd64-release.json"

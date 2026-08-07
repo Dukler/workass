@@ -176,8 +176,9 @@ else
   dmg_url="$dmg_name"
 fi
 requirement=$(workass_codesign_requirement "$app")
+feed_name="workass-darwin-$arch-release.json"
 
-node - "$stage_root/release.json" "$stage_root/RELEASES.json" \
+node - "$stage_root/$feed_name" "$stage_root/RELEASES.json" \
   "$version" "$build" "$arch" "$published_at" "$zip_name" "$zip_url" "$zip_sha" "$zip_size" \
   "$dmg_name" "$dmg_url" "$dmg_sha" "$dmg_size" "$requirement" <<'NODE'
 const fs = require('node:fs');
@@ -207,10 +208,11 @@ const updates = {
 fs.writeFileSync(releasePath, `${JSON.stringify(release, null, 2)}\n`);
 fs.writeFileSync(updatesPath, `${JSON.stringify(updates, null, 2)}\n`);
 NODE
+cp "$stage_root/$feed_name" "$stage_root/release.json"
 
 rm -rf "$output_root"
 mkdir -p "$output_root"
-mv "$zip" "$dmg" "$notary_app" "$notary_dmg" "$stage_root/release.json" "$stage_root/RELEASES.json" "$output_root/"
+mv "$zip" "$dmg" "$notary_app" "$notary_dmg" "$stage_root/$feed_name" "$stage_root/release.json" "$stage_root/RELEASES.json" "$output_root/"
 (cd "$output_root" && shasum -a 256 "$zip_name" "$dmg_name" > SHA256SUMS)
 
 echo "WORKASS_MACOS_RELEASE_HEALTHY"

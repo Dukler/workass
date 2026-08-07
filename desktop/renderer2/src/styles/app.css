@@ -1458,6 +1458,12 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs .gtag { font-weight: 500; letter-spacing: .02em; text-transform: none; color: var(--faint); }
 .stgs .ghint { color: var(--muted); font-size: 12px; margin: 8px 2px 0; max-width: 62ch; }
 .stgs .ghint code { background: var(--field); border: 1px solid var(--line); border-radius: 5px; padding: .5px 5px; font-size: 11px; color: var(--ink2); }
+.stgs .pairing-flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch; gap: 10px; margin: 18px 0 4px; }
+.stgs .pairing-step { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--field); padding: 12px; display: grid; grid-template-columns: 22px 1fr; column-gap: 8px; align-items: center; }
+.stgs .pairing-step > span { grid-row: 1 / 3; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; background: var(--acc); color: #fff; font-size: 11px; font-weight: 700; }
+.stgs .pairing-step > b { color: var(--ink); font-size: 12.5px; }
+.stgs .pairing-step > small { min-width: 0; color: var(--muted); font-size: 10.5px; white-space: normal; }
+.stgs .pairing-arrow { align-self: center; color: var(--faint); font-size: 15px; }
 .stgs .pairing-advanced { margin-top: 24px; border-top: 1px solid var(--line); padding-top: 12px; }
 .stgs .pairing-advanced > summary { list-style: none; cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
 .stgs .pairing-advanced > summary::-webkit-details-marker { display: none; }

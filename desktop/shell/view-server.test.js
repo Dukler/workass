@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
-const { createViewServer, injectBridge, safeStaticPath } = require('./view-server');
+const { createViewServer, injectBridge, safeStaticPath, tlsConnectOptions } = require('./view-server');
 
 test('injects bridge and one-time controller migration', () => {
   const html = injectBridge('<!doctype html><head></head><body></body>');
@@ -118,6 +118,16 @@ test('rejects renderer path traversal', () => {
   const root = path.join(os.tmpdir(), 'renderer-root');
   assert.equal(safeStaticPath(root, '/../../outside'), '');
   assert.equal(safeStaticPath(root, '/assets/app.js'), path.join(root, 'assets', 'app.js'));
+});
+
+test('TLS proxy never sends an IP literal as SNI', () => {
+  const ca = Buffer.from('test-ca');
+  assert.deepEqual(tlsConnectOptions({ hostname: '127.0.0.1', ca }, 18788), {
+    host: '127.0.0.1', port: 18788, ca,
+  });
+  assert.deepEqual(tlsConnectOptions({ hostname: 'workass.local', ca }, 18788), {
+    host: 'workass.local', port: 18788, ca, servername: 'workass.local',
+  });
 });
 
 test('serves local renderer, proxies HTTP, and tunnels WebSocket upgrade', async (t) => {

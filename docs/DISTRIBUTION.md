@@ -9,7 +9,27 @@ Workass has two intentionally separate packaging lanes:
   platform verification gate.
 
 An updater is downstream of this contract. It consumes a signed release; it
-does not create identity, relax Gatekeeper, or overwrite live code.
+does not create identity, relax Gatekeeper, overwrite live code, or run a
+compiler/test suite during activation.
+
+For local Mac dogfood, build and install are deliberately separate:
+
+```sh
+scripts/package-workass-macos.sh \
+  --artifact-only "$PWD/.dev/package/candidates/Workass.app" \
+  --version X.Y.Z
+
+scripts/install-workass-macos.sh \
+  --candidate "$PWD/.dev/package/candidates/Workass.app"
+```
+
+The first command owns the repository gate, renderer build, runtime staging,
+and signing. The second command consumes only those immutable app bytes. It
+does not call Go, Node package tools, or the repository gate, so an activation
+or rollback retry never rebuilds the candidate. It verifies the stable signing
+identity and shell/daemon version match before stopping the old shell, then
+requires the new TLS daemon, Electron version, controller, catalog, and browser
+control to recover before deleting the previous app.
 
 ## macOS milestone 1 — implemented
 
@@ -36,6 +56,7 @@ dist-release/macos/X.Y.Z/
   Workass-X.Y.Z-darwin-arm64.dmg
   Workass-X.Y.Z-darwin-arm64.zip
   RELEASES.json
+  workass-darwin-arm64-release.json
   release.json
   SHA256SUMS
   notary-app.json
@@ -76,22 +97,35 @@ Before broad distribution, prune only adapter files proven unnecessary by the
 ACP initialize/turn canaries and record a compressed DMG/ZIP budget; do not
 remove dependency files by guesswork.
 
-## macOS milestone 2 — updater, not yet enabled
+## App-owned transactional updater — implemented
 
-The release already emits a Squirrel-compatible update ZIP and release
-metadata. Before Workass enables Electron's `autoUpdater`, the daemon handoff
-must meet these acceptance gates:
+Packaged Workass includes its own updater manager and an independent update
+worker. It consumes `workass-darwin-arm64-release.json` from the GitHub release
+feed and treats Electron, the renderer, Go daemon, pinned Node runtime, and
+native agent hosts as one indivisible release. There is no supported
+shell-only or daemon-only automatic update path.
 
-1. Download only over HTTPS and validate the platform's signed update.
-2. Never replace a running app or daemon in place.
-3. Wait for foreground turns and tracked asynchronous work to become
-   quiescent, or ask the user to defer the update.
-4. Stop the LaunchAgent, atomically activate the new signed release, restart,
-   and roll back on failed health/controller/catalog recovery.
-5. Preserve the same bundle ID, Developer ID team, and designated requirement.
+The updater:
 
-Until that exists, updates are manual release installs. That is safer than an
-updater which terminates background agents.
+1. downloads only over HTTPS and enforces the manifest's exact size and SHA-256;
+2. inspects archive paths before extraction and stages beside the installed app;
+3. verifies the incoming app's platform signature, version, bundled daemon,
+   runtime manifest, and mutual designated requirement with the installed app;
+4. asks the daemon for a quiescent handoff. The daemon atomically blocks new
+   turns, subagents, tracked external work, and provider updates while it checks
+   that all existing work has finished;
+5. starts an updater worker outside the code being replaced, stops the daemon,
+   atomically swaps the complete release, and launches the new Workass;
+6. keeps the previous release until daemon health, controller authority,
+   non-empty provider catalog, and shell version all match the target; and
+7. automatically restores and health-checks the previous release if any
+   activation gate fails. A durable receipt under the Workass state directory
+   records `healthy`, `rollback_healthy`, or `failed`.
+
+The UI exposes this through the same compact sidebar update card used for
+provider updates; it does not add a separate Settings section. Workass never
+kills active work to update: it shows the blockers and lets the user retry after
+they finish.
 
 ## Windows road
 
@@ -134,8 +168,13 @@ workass-daemon.exe --prod --headless --install-service
 
 This creates a least-privilege per-user Scheduled Task on Windows or a user
 LaunchAgent on macOS. Signed upstream binaries are left byte-for-byte intact.
-This lane does not replace the signed-installer road; it trades the update feed
-and Authenticode identity for zero-touch portability.
+The bundle contains the same updater code and emits
+`workass-windows-amd64-release.json`, but automatic Windows activation remains
+disabled while the portable executables are unsigned. This is intentional:
+Workass will not accept an unsigned replacement or create a downgrade path.
+Once `Workass.exe` and `workass-daemon.exe` are Authenticode-signed by the same
+publisher, set the release manifest's `authenticode` gate from the signing
+pipeline and run the transaction/rollback smoke test before publishing.
 
 ## Release checklist — Mac + Windows portable
 
@@ -163,9 +202,10 @@ must be self-contained at extraction time.
    healthy, and survive **Reiniciar daemon y reconectar**. No Windows-side
    npm, source checkout, PowerShell bootstrap, or installer script is part of
    that test.
-6. Publish the Mac DMG + ZIP, Windows ZIP, and their `SHA256SUMS` files under
-   the same Git tag/release. Keep the release outputs immutable after checksums
-   are generated.
+6. Publish the Mac DMG + ZIP, Windows ZIP, both platform feed manifests, and
+   their `SHA256SUMS` files under the same Git tag/release. The manifest asset
+   names are fixed because packaged Workass checks GitHub's `latest/download`
+   URLs. Keep all release outputs immutable after checksums are generated.
 
 ## Linux road
 

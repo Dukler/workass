@@ -145,6 +145,89 @@ func TestProviderUpdateRunsResolvedProviderExecutable(t *testing.T) {
 	}
 }
 
+func TestClaudeUpdateReresolvesTransientShimAndAtomicInstallSwap(t *testing.T) {
+	restore := stubProviderUpdateRecheckTiming(t)
+	defer restore()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	installDir := filepath.Join(home, ".local", "bin")
+	versionsDir := filepath.Join(home, ".local", "share", "claude", "versions")
+	if err := os.MkdirAll(installDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(versionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(installDir, "claude")
+	oldTarget := filepath.Join(versionsDir, "2.1.223")
+	newTarget := filepath.Join(versionsDir, "2.1.224")
+	marker := filepath.Join(home, "claude-update-ran")
+	writeExecutable(t, newTarget, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '2.1.224 (Claude Code)\\n'; exit 0; fi\nexit 1\n")
+	writeExecutable(t, oldTarget, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '2.1.223 (Claude Code)\\n'; exit 0; fi\nif [ \"$1\" = \"update\" ]; then ln -s "+shellQuote(newTarget)+" "+shellQuote(linkPath+".next")+" && mv -f "+shellQuote(linkPath+".next")+" "+shellQuote(linkPath)+" && rm -f "+shellQuote(oldTarget)+" && printf 'done\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 1\n")
+	if err := os.Symlink(oldTarget, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	shimDir := filepath.Join(t.TempDir(), "terminal-cli-shims", "session")
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staleShim := filepath.Join(shimDir, "claude")
+	writeExecutable(t, staleShim, "#!/bin/sh\nprintf 'transient shim must not run\\n' >&2\nexit 97\n")
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+installDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": "2.1.224"})
+	}))
+	t.Cleanup(registry.Close)
+	deadRoot := filepath.Join(t.TempDir(), "removed-app-runtime")
+	if err := os.MkdirAll(deadRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	events := newEventCollector()
+	providerFile := filepath.Join(t.TempDir(), "providers.json")
+	manager := NewManager(Options{
+		RootDir:  deadRoot,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+		Providers: []ProviderConfig{{
+			ID: "claude", Name: "Claude Code", Command: "claude", ResolvedCommand: staleShim, Enabled: true,
+		}},
+		DefaultProviderID:        "claude",
+		ProviderConfigFile:       providerFile,
+		Broadcast:                events.Broadcast,
+		RSSSampleInterval:        time.Hour,
+		ProviderUpdateSources:    map[string]string{"claude": registry.URL + "/latest"},
+		ProviderUpdateTimeout:    time.Second,
+		ProviderUpdateRunTimeout: 2 * time.Second,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	if err := os.RemoveAll(deadRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.StartProviderUpdate(context.Background(), "claude"); err != nil {
+		t.Fatalf("start Claude update: %v", err)
+	}
+	progress := waitProviderUpdateProgress(t, events, "claude", func(progress ProviderUpdateProgress) bool {
+		return progress.Status == "done" || progress.Status == "failed"
+	}, 3*time.Second)
+	if progress.Status != "done" || !fileExists(marker) {
+		t.Fatalf("Claude update progress=%#v marker=%v", progress, fileExists(marker))
+	}
+	if fileExists(oldTarget) {
+		t.Fatal("old Claude version target still exists after atomic swap")
+	}
+	version := manager.detectInstalledCLIVersion(context.Background(), "claude")
+	if version == nil || version.Version != "2.1.224" {
+		t.Fatalf("post-update Claude version = %#v", version)
+	}
+	provider, ok := manager.providerSnapshot("claude")
+	if !ok || provider.ResolvedCommand != linkPath {
+		t.Fatalf("refreshed Claude executable = %#v, want %q", provider, linkPath)
+	}
+}
+
 func TestProviderUpdateSchedulerDefaultCadence(t *testing.T) {
 	opts := (Options{}).withDefaults()
 	if opts.ProviderUpdateInterval != time.Hour {
@@ -482,6 +565,68 @@ func TestProviderUpdateInvokeProgressNoProcRegistryAndReplay(t *testing.T) {
 		t.Fatalf("providers:update-progress was not replayed for qwen")
 	}
 	t.Logf("trace providers:update progress running startedAt=%s done exitCode=%d tail=%q installed=%s latest=%s updateAvailable=%v", running.StartedAt, *done.ExitCode, done.Tail, update.Installed, update.Latest, update.UpdateAvailable)
+}
+
+func TestProviderUpdateTerminalReceiptDoesNotWaitForRegistryRefresh(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	versionFile := filepath.Join(t.TempDir(), "claude-version")
+	if err := os.WriteFile(versionFile, []byte("2.1.223\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	claudePath := filepath.Join(pathDir, "claude")
+	writeExecutable(t, claudePath, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nif [ \"$1\" = \"update\" ]; then printf '2.1.224\\n' > "+shellQuote(versionFile)+"; exit 0; fi\nexit 1\n")
+
+	var requestsMu sync.Mutex
+	requests := 0
+	refreshStarted := make(chan struct{})
+	refreshRelease := make(chan struct{})
+	var startedOnce sync.Once
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(refreshRelease) }) })
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsMu.Lock()
+		requests++
+		n := requests
+		requestsMu.Unlock()
+		if n > 1 {
+			startedOnce.Do(func() { close(refreshStarted) })
+			<-refreshRelease
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": "2.1.224"})
+	}))
+	t.Cleanup(registry.Close)
+
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "claude", Name: "Claude Code", Command: "claude", ResolvedCommand: claudePath, Enabled: true,
+		}},
+		DefaultProviderID:        "claude",
+		Broadcast:                events.Broadcast,
+		RSSSampleInterval:        time.Hour,
+		ProviderUpdateSources:    map[string]string{"claude": registry.URL + "/latest"},
+		ProviderUpdateTimeout:    2 * time.Second,
+		ProviderUpdateRunTimeout: 2 * time.Second,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	if _, err := manager.StartProviderUpdate(context.Background(), "claude"); err != nil {
+		t.Fatal(err)
+	}
+	progress := waitProviderUpdateProgress(t, events, "claude", func(progress ProviderUpdateProgress) bool {
+		return progress.Status == "done" || progress.Status == "failed"
+	}, time.Second)
+	if progress.Status != "done" {
+		t.Fatalf("Claude terminal progress = %#v", progress)
+	}
+	select {
+	case <-refreshStarted:
+	case <-time.After(time.Second):
+		t.Fatal("post-update registry refresh did not start")
+	}
+	releaseOnce.Do(func() { close(refreshRelease) })
 }
 
 func TestProviderUpdateInvokeFailureKeepsCardWithRedactedTail(t *testing.T) {

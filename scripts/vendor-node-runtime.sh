@@ -107,6 +107,15 @@ rm -rf "$incoming"
 mkdir -p "$(dirname -- "$destination")"
 ditto "$source_root" "$incoming"
 rm -rf "$incoming/include" "$incoming/share" "$incoming/lib/node_modules"
+# Workass embeds Node as a JavaScript runtime for its own native hosts. npm,
+# npx, and corepack are deliberately not shipped, so their launchers would be
+# broken links/scripts after lib/node_modules is pruned. Remove those exact
+# non-runtime entrypoints instead of signing a bundle with dangling paths.
+rm -f \
+  "$incoming/bin/npm" "$incoming/bin/npx" "$incoming/bin/corepack" \
+  "$incoming/npm" "$incoming/npm.cmd" \
+  "$incoming/npx" "$incoming/npx.cmd" \
+  "$incoming/corepack" "$incoming/corepack.cmd"
 if [ -f "$incoming/bin/node" ]; then chmod 755 "$incoming/bin/node"; fi
 if [ -f "$incoming/node.exe" ]; then chmod 755 "$incoming/node.exe"; fi
 rm -rf "$destination"

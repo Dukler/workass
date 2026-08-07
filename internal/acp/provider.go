@@ -100,11 +100,18 @@ func (p cliProvider) ResolveExecutable(cfg ProviderConfig) (string, error) {
 	if command != "" && command != p.defaultCommand {
 		return resolveProviderExecutablePath(command, "provider command")
 	}
-	// A successful detection stores the absolute path. Prefer it on later
-	// operations, but let a stale cache fall through to the current PATH so a
-	// CLI moved by the user is rediscovered rather than permanently wedged.
+	// A successful detection stores the absolute path. Revalidate it on every
+	// operation, but never promote a terminal-injection shim into durable provider
+	// state: those paths live below a temporary directory and can outlive neither
+	// the terminal nor an app update. The official user-owned install is resolved
+	// below and the manager refreshes ResolvedCommand with that stable entrypoint.
 	if cached := strings.TrimSpace(cfg.ResolvedCommand); cached != "" {
-		if resolved, err := resolveProviderExecutablePath(cached, "resolved provider command"); err == nil {
+		if resolved, err := resolveProviderExecutablePath(cached, "resolved provider command"); err == nil && !isTransientProviderShim(resolved) {
+			return resolved, nil
+		}
+	}
+	for _, name := range p.pathNames {
+		if resolved, err := resolveProviderExecutableOnPATH(name); err == nil {
 			return resolved, nil
 		}
 	}
@@ -113,11 +120,6 @@ func (p cliProvider) ResolveExecutable(cfg ProviderConfig) (string, error) {
 			if resolved, err := resolveProviderExecutablePath(candidate, "provider install path"); err == nil {
 				return resolved, nil
 			}
-		}
-	}
-	for _, name := range p.pathNames {
-		if resolved, err := resolveProviderExecutablePath(name, "provider PATH"); err == nil {
-			return resolved, nil
 		}
 	}
 	return "", fmt.Errorf("%s not found on PATH", p.id)
@@ -157,6 +159,51 @@ func providerForID(id string) (Provider, bool) {
 	default:
 		return nil, false
 	}
+}
+
+func isTransientProviderShim(path string) bool {
+	candidate, err := filepath.Abs(strings.TrimSpace(path))
+	if err != nil || candidate == "" {
+		return false
+	}
+	// Terminal launchers may prepend short-lived CLI wrapper directories to
+	// PATH. Treat that shape as discovery noise only when it is also rooted in
+	// the operating system's temporary directory.
+	clean := strings.ToLower(filepath.ToSlash(filepath.Clean(candidate)))
+	if !strings.Contains(clean, "cli-shims/") {
+		return false
+	}
+	tempRoot, err := filepath.Abs(strings.TrimSpace(os.TempDir()))
+	if err != nil || tempRoot == "" {
+		return false
+	}
+	rel, err := filepath.Rel(tempRoot, candidate)
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+func resolveProviderExecutableOnPATH(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || filepath.IsAbs(name) || strings.ContainsAny(name, `/\`) {
+		return "", fmt.Errorf("provider PATH name is invalid: %q", name)
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
+			dir = "."
+		}
+		candidate := filepath.Join(dir, name)
+		if !executableFile(candidate) || isTransientProviderShim(candidate) {
+			continue
+		}
+		resolved, err := filepath.Abs(candidate)
+		if err != nil {
+			return candidate, nil
+		}
+		return resolved, nil
+	}
+	return "", fmt.Errorf("provider PATH %q was not found", name)
 }
 
 func resolveProviderExecutable(cfg ProviderConfig) (string, error) {

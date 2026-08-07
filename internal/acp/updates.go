@@ -418,6 +418,10 @@ func collectInstalledCLIVersion(ch <-chan *CLIVersion) *CLIVersion {
 }
 
 func (m *Manager) StartProviderUpdate(parent context.Context, providerID string) (map[string]any, error) {
+	if err := m.beginWorkAdmission(); err != nil {
+		return nil, err
+	}
+	defer m.endWorkAdmission()
 	id := normalizeProviderID(providerID)
 	if id == "" {
 		return nil, providerUpdateError("providers:update-unknown-provider", "providerId is required", nil)
@@ -482,7 +486,7 @@ func (m *Manager) startProviderUpdateRun(providerID string, run *providerUpdateR
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	cmd := exec.CommandContext(ctx, command.Command, command.Args...)
-	cmd.Dir = m.opts.RootDir
+	cmd.Dir = m.providerCLIWorkingDir(providerID)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
@@ -585,8 +589,11 @@ func (m *Manager) finishProviderUpdateRun(providerID string, run *providerUpdate
 	}
 	list := m.ProvidersList()
 	m.emit("providers:list", list)
-	m.CheckProviderUpdates(context.Background())
+	// The vendor process and local version verification are the terminal oracle.
+	// Publish that receipt before the registry refresh: a slow/offline registry
+	// must never leave the UI spinner running after the CLI has already exited.
 	m.emitProviderUpdateProgress(run.snapshot())
+	m.CheckProviderUpdates(context.Background())
 }
 
 func (m *Manager) providerExists(providerID string) bool {
@@ -725,6 +732,7 @@ func (m *Manager) detectInstalledCLIVersionWithTimeout(parent context.Context, p
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, resolved, "--version")
+	cmd.Dir = m.providerCLIWorkingDir(providerID)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -749,7 +757,56 @@ func (m *Manager) providerCLIExecutable(providerID string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("unknown provider cli: %s", id)
 	}
-	return resolveProviderExecutable(provider)
+	resolved, err := resolveProviderExecutable(provider)
+	if err != nil {
+		return "", err
+	}
+	// Discovery is a cache, not authority. Refresh it whenever the system now
+	// resolves a different executable (for example after a vendor updater swaps a
+	// symlink, or after a transient terminal shim disappears).
+	if strings.TrimSpace(provider.ResolvedCommand) != resolved {
+		m.mu.Lock()
+		if runtime := m.providers[id]; runtime != nil {
+			runtime.Config.ResolvedCommand = resolved
+		}
+		providers := m.providerRecordsLocked()
+		filePath := m.providerConfigFile
+		m.mu.Unlock()
+		if strings.TrimSpace(filePath) != "" {
+			if saveErr := SaveProviderConfigs(filePath, providers); saveErr != nil && m.opts.Logf != nil {
+				m.opts.Logf("provider executable refresh persist failed", map[string]any{
+					"provider": id,
+					"error":    redactSensitiveText(saveErr.Error()),
+				})
+			}
+		}
+	}
+	return resolved, nil
+}
+
+// Provider CLI maintenance is machine-level work, not workspace work. Never
+// inherit a package staging directory as cwd: installers may atomically remove
+// it while the daemon remains alive. No directory is created here; Workass picks
+// the first existing system/user location on every invocation.
+func (m *Manager) providerCLIWorkingDir(providerID string) string {
+	if home, err := os.UserHomeDir(); err == nil && directoryExists(home) {
+		return home
+	}
+	if provider, ok := m.providerSnapshot(normalizeProviderID(providerID)); ok && directoryExists(provider.CWD) {
+		return provider.CWD
+	}
+	if directoryExists(m.opts.RootDir) {
+		return m.opts.RootDir
+	}
+	if cwd, err := os.Getwd(); err == nil && directoryExists(cwd) {
+		return cwd
+	}
+	return ""
+}
+
+func directoryExists(path string) bool {
+	info, err := os.Stat(strings.TrimSpace(path))
+	return err == nil && info.IsDir()
 }
 
 func sameExecutableName(command, name string) bool {

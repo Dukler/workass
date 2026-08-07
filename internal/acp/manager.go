@@ -101,6 +101,13 @@ type Manager struct {
 	resetMu               sync.Mutex
 	jobWG                 sync.WaitGroup
 	resetting             bool
+	// updateGateMu is the admission barrier for an app-owned release handoff.
+	// A release may begin only after every foreground turn and tracked unit of
+	// work is terminal. Once BeginUpdateDrain succeeds, no new work can enter
+	// while the shell shuts this daemon down and swaps the complete release.
+	updateGateMu     sync.Mutex
+	updateDraining   bool
+	updateAdmissions int
 	// Serializes the short turn-boundary claim for one exact logical chat.
 	// Workspace rebinds hold this lock while invalidating/recreating the session;
 	// job:start holds it until the running job is registered. Different chats do
@@ -821,7 +828,34 @@ func (m *Manager) Steer(sessionID, promptText string, images []any, clientUserMe
 // into FIFO without first manufacturing a failed canonical transcript turn.
 var ErrChatBusy = errors.New("Ya hay una respuesta en curso en esta conversación.")
 
+// ErrUpdateDraining is deliberately distinct from ErrChatBusy: the renderer
+// may retry a busy chat into its durable FIFO, but it must never enqueue a new
+// turn after the daemon has granted an atomic app-update handoff.
+var ErrUpdateDraining = errors.New("Workass is preparing a verified app update; try again after it restarts.")
+
+func (m *Manager) beginWorkAdmission() error {
+	m.updateGateMu.Lock()
+	defer m.updateGateMu.Unlock()
+	if m.updateDraining {
+		return ErrUpdateDraining
+	}
+	m.updateAdmissions++
+	return nil
+}
+
+func (m *Manager) endWorkAdmission() {
+	m.updateGateMu.Lock()
+	if m.updateAdmissions > 0 {
+		m.updateAdmissions--
+	}
+	m.updateGateMu.Unlock()
+}
+
 func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[string]any, error) {
+	if err := m.beginWorkAdmission(); err != nil {
+		return nil, err
+	}
+	defer m.endWorkAdmission()
 	if opts.Kind != "app-chat" {
 		return nil, errors.New("not implemented until P2")
 	}

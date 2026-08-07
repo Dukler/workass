@@ -151,6 +151,70 @@ func TestServeDaemonHTTPStopsAcceptingAndRunsCleanup(t *testing.T) {
 	}
 }
 
+type fakeAppUpdateGate struct {
+	readiness acp.AppUpdateReadiness
+	cancelled bool
+}
+
+func (gate *fakeAppUpdateGate) BeginUpdateDrain() acp.AppUpdateReadiness { return gate.readiness }
+func (gate *fakeAppUpdateGate) CancelUpdateDrain()                       { gate.cancelled = true }
+
+func updateControlRequest(t *testing.T, handler http.HandlerFunc, remoteAddr, updateID string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "https://workass.local/workass/update", strings.NewReader(`{"updateId":"`+updateID+`"}`))
+	request.RemoteAddr = remoteAddr
+	recorder := httptest.NewRecorder()
+	handler(recorder, request)
+	return recorder
+}
+
+func TestLocalUpdateControlRequiresQuiescenceAndExactCommit(t *testing.T) {
+	gate := &fakeAppUpdateGate{readiness: acp.AppUpdateReadiness{ForegroundTurns: 1}}
+	stopped := make(chan struct{}, 1)
+	control := newLocalUpdateControl(gate, func() { stopped <- struct{}{} })
+
+	busy := updateControlRequest(t, control.prepare, "127.0.0.1:41000", "update-busy-1234")
+	if busy.Code != http.StatusConflict || !strings.Contains(busy.Body.String(), `"foregroundTurns":1`) {
+		t.Fatalf("busy prepare = %d %s", busy.Code, busy.Body.String())
+	}
+
+	gate.readiness = acp.AppUpdateReadiness{Ready: true}
+	prepared := updateControlRequest(t, control.prepare, "127.0.0.1:41000", "update-ready-1234")
+	if prepared.Code != http.StatusOK || !strings.Contains(prepared.Body.String(), `"ready":true`) {
+		t.Fatalf("ready prepare = %d %s", prepared.Code, prepared.Body.String())
+	}
+	wrong := updateControlRequest(t, control.commit, "127.0.0.1:41000", "update-wrong-1234")
+	if wrong.Code != http.StatusConflict {
+		t.Fatalf("wrong commit = %d", wrong.Code)
+	}
+	committed := updateControlRequest(t, control.commit, "127.0.0.1:41000", "update-ready-1234")
+	if committed.Code != http.StatusAccepted {
+		t.Fatalf("commit = %d %s", committed.Code, committed.Body.String())
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("committed update did not request daemon shutdown")
+	}
+}
+
+func TestLocalUpdateControlIsLoopbackOnlyAndCanCancel(t *testing.T) {
+	gate := &fakeAppUpdateGate{readiness: acp.AppUpdateReadiness{Ready: true}}
+	control := newLocalUpdateControl(gate, func() {})
+	remote := updateControlRequest(t, control.prepare, "192.168.1.44:41000", "update-remote-1234")
+	if remote.Code != http.StatusForbidden {
+		t.Fatalf("remote prepare = %d", remote.Code)
+	}
+	prepared := updateControlRequest(t, control.prepare, "[::1]:41000", "update-cancel-1234")
+	if prepared.Code != http.StatusOK {
+		t.Fatalf("prepare = %d %s", prepared.Code, prepared.Body.String())
+	}
+	cancelled := updateControlRequest(t, control.cancel, "[::1]:41000", "update-cancel-1234")
+	if cancelled.Code != http.StatusOK || !gate.cancelled {
+		t.Fatalf("cancel = %d gate=%v", cancelled.Code, gate.cancelled)
+	}
+}
+
 func TestWireListDirBrowsesDaemonFilesystem(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{"beta", "Alpha"} {

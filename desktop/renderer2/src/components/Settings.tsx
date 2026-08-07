@@ -10,7 +10,6 @@
 //    defaults shown read-only (no channel exposes them — no fake persistence).
 //  - Apariencia: theme + density, persisted locally.
 
-import { useState } from 'react';
 import type { ReactNode } from 'react';
 import type { MachineView, SettingsSection } from '../store/types';
 import type { LanDevice, AccessRequest, ProcessSummary, ProviderRecord, ProviderUpdate } from '../wire/types';
@@ -23,7 +22,7 @@ import {
 } from '../model-scores';
 
 const SECTION_NAME: Record<SettingsSection, string> = {
-  agentes: 'Agentes', modelos: 'Modelos', maquinas: 'Máquinas', dispositivos: 'Dispositivos', engines: 'Engines',
+  agentes: 'Agentes', modelos: 'Modelos', maquinas: 'Conectar Workass', dispositivos: 'Acceso aprobado', engines: 'Engines',
   apariencia: 'Apariencia', atajos: 'Atajos',
 };
 
@@ -354,7 +353,7 @@ function DeviceRow({ d }: { d: LanDevice }) {
       <div className="act">
         {d.controller
           ? <span className="stat"><span className="dot run" />Activo</span>
-          : <><span className="stat"><span className="dot" />Espejo</span><button className="btn sm danger" onClick={() => void store.revokeDevice(d.deviceId)}>Revocar</button></>}
+          : <><span className="stat"><span className="dot" />Aprobado</span><button className="btn sm danger" onClick={() => void store.revokeDevice(d.deviceId)}>Revocar</button></>}
       </div>
     </div>
   );
@@ -380,34 +379,26 @@ function DispositivosPanel() {
   if (!app.hasDeviceChannels) {
     return (
       <section className="stgs-panel">
-        <div className="phead"><h2>Dispositivos</h2><p>Equipos vinculados por el sistema de lease del controlador.</p></div>
+        <div className="phead"><h2>Acceso aprobado</h2><p>Clientes que ya pueden abrir esta Workass.</p></div>
         <div className="group"><div className="lrow"><div className="body"><span className="empty">Este bridge no expone los canales de dispositivos (lan:devices).</span></div></div></div>
       </section>
     );
   }
-  const { devices, accessRequests } = app;
+  const { devices } = app;
   return (
     <section className="stgs-panel">
       <div className="phead">
-        <h2>Dispositivos</h2>
-        <p>Equipos vinculados por el sistema de lease del controlador. Solo un dispositivo sostiene el control a la vez; el resto observa en modo espejo.</p>
+        <h2>Acceso aprobado</h2>
+        <p>Clientes que ya pueden abrir esta Workass. Las solicitudes nuevas se aceptan desde <b>Conectar Workass</b>; acá solo administrás quién conserva acceso.</p>
       </div>
 
-      <div className="gtitle">Solicitudes de acceso</div>
-      <div className="group">
-        {accessRequests.length === 0
-          ? <div className="lrow"><div className="body"><span className="empty">Sin solicitudes pendientes</span></div></div>
-          : accessRequests.map((r) => <RequestRow key={r.requestId} r={r} />)}
-      </div>
-      <div className="ghint">Las solicitudes nuevas llegan solo al dispositivo controlador.</div>
-
-      <div className="gtitle">Dispositivos aprobados</div>
+      <div className="gtitle">Clientes con acceso</div>
       <div className="group">
         {devices.length === 0
           ? <div className="lrow"><div className="body"><span className="empty">Sin dispositivos aprobados todavía.</span></div></div>
           : devices.map((d) => <DeviceRow key={d.deviceId} d={d} />)}
       </div>
-      <div className="ghint">La lista funciona como allow-list de IPs: solo las direcciones aprobadas acceden. No hay auth por usuario/contraseña — usá una red de confianza.</div>
+      <div className="ghint">Cada cliente aprobado recibe su propio acceso. Revocar elimina únicamente ese cliente; no se administran usuarios, contraseñas ni direcciones manuales.</div>
     </section>
   );
 }
@@ -551,33 +542,20 @@ function AtajosPanel() {
 
 
 // ---- máquinas (remote-plan E3) -------------------------------------------
-// The normal pairing ceremony is human approval on the other Workass machine:
-// add its address here, then approve the access request there. No shared key
-// needs to be copied between computers. Fleet-key enrolment remains available
-// below as an advanced option for unattended fleets.
+// One visible ceremony only: discovery finds the other Workass, this client
+// requests access, and the controller on the other machine approves it. The
+// compatibility wire still understands manual/fleet enrolment, but ordinary
+// users never need to choose between those implementation paths.
 function MaquinasPanel() {
   const app = useApp();
-  const [address, setAddress] = useState('');
-  const [key, setKey] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
   const paired = app.machines.filter((machine) => machine.paired);
   const nearby = app.machines.filter((machine) => !machine.paired);
-
-  const add = async () => {
-    setBusy(true); setError('');
-    const result = await store.addMachine(address);
-    setBusy(false);
-    if (result.ok) setAddress('');
-    // The reason belongs next to the field you typed it into, not in a toast
-    // that outlives the mistake.
-    else setError(result.error || 'No se pudo agregar');
-  };
+  const incoming = app.accessRequests;
 
   if (!app.hasMachineChannels) {
     return (
       <section className="stgs-panel">
-        <div className="phead"><h2>Máquinas</h2><p>Tus daemons, en una sola lista de conversaciones.</p></div>
+        <div className="phead"><h2>Conectar Workass</h2><p>Tus daemons, en una sola lista de conversaciones.</p></div>
         <div className="group"><div className="lrow"><div className="body">
           <span className="empty">Este daemon todavía no tiene libreta de máquinas (machines:list).</span>
         </div></div></div>
@@ -588,155 +566,48 @@ function MaquinasPanel() {
   return (
     <section className="stgs-panel">
       <div className="phead">
-        <h2>Máquinas</h2>
-        <p>Los agentes corren en cada daemon; este cliente es una ventana a todos los que tengas conectados.
-          Las Workass cercanas aparecen solas; pedí acceso con un clic y aprobalo desde la otra máquina.</p>
+        <h2>Conectar Workass</h2>
+        <p>Una sola forma de vincularlas: Workass las descubre en la red, enviás la solicitud y la aprobás en la otra máquina. Sin direcciones, PIN ni claves.</p>
       </div>
 
-      <div className="gtitle">Emparejadas</div>
+      <div className="pairing-flow" aria-label="Flujo para conectar otra Workass">
+        <div className="pairing-step"><span>1</span><b>Descubrir</b><small>Ambas Workass abiertas en la misma red</small></div>
+        <div className="pairing-arrow" aria-hidden>→</div>
+        <div className="pairing-step"><span>2</span><b>Solicitar</b><small>Un clic desde la lista de abajo</small></div>
+        <div className="pairing-arrow" aria-hidden>→</div>
+        <div className="pairing-step"><span>3</span><b>Aprobar</b><small>Confirmar en la otra Workass</small></div>
+      </div>
+
+      <div className="gtitle">Solicitudes recibidas</div>
+      <div className="group">
+        {incoming.length === 0
+          ? <div className="lrow"><div className="body"><span className="empty">Ninguna solicitud esperando aprobación.</span></div></div>
+          : incoming.map((r) => <RequestRow key={r.requestId} r={r} />)}
+      </div>
+      <div className="ghint">Una solicitud aparece acá únicamente en la Workass que debe conceder el acceso.</div>
+
+      <div className="gtitle">Workass descubiertas en esta red</div>
+      <div className="group">
+        {nearby.length === 0
+          ? <div className="lrow"><div className="body"><span className="empty">No se detectó otra Workass. Abrila en la otra máquina y verificá que ambas estén en la misma red.</span></div></div>
+          : nearby.map((m) => <MachineRow key={m.machineId} m={m} />)}
+      </div>
+      <div className="ghint">El descubrimiento no concede acceso por sí solo. “Solicitar conexión” abre una única aprobación cifrada en la otra Workass.</div>
+
+      <div className="gtitle">Workass conectadas</div>
       <div className="group">
         <div className="lrow">
           <div className="ic"><Svg><rect x="3" y="2" width="10" height="12" rx="1.5" /><path d="M5.5 5h5M5.5 8h5M5.5 11h3" /></Svg></div>
           <div className="body">
-            <div className="nm">esta máquina</div>
-            <div className="mt">acá corre el cliente que estás mirando</div>
+            <div className="nm">Esta Workass</div>
+            <div className="mt">el cliente que estás mirando</div>
           </div>
         </div>
         {paired.length === 0
-          ? <div className="lrow"><div className="body"><span className="empty">Ninguna otra máquina todavía.</span></div></div>
+          ? <div className="lrow"><div className="body"><span className="empty">Ninguna otra Workass conectada.</span></div></div>
           : paired.map((m) => <MachineRow key={m.machineId} m={m} />)}
       </div>
-
-      <div className="gtitle">Workass cercanas</div>
-      <div className="group">
-        {nearby.length === 0
-          ? <div className="lrow"><div className="body"><span className="empty">No hay otra Workass anunciándose en esta red.</span></div></div>
-          : nearby.map((m) => <MachineRow key={m.machineId} m={m} />)}
-      </div>
-      <div className="ghint">Descubrir una máquina no abre una conexión ni envía una solicitud. Eso ocurre solo al tocar “Solicitar acceso”. La conexión usa TLS cifrado.</div>
-
-      <details className="pairing-advanced">
-        <summary>Conectar una dirección manualmente</summary>
-        <div className="pairing-advanced-body group">
-          <div className="lrow">
-            <div className="body">
-              <input
-                className="inp" style={{ width: '100%' }} value={address} spellCheck={false}
-                placeholder="192.168.1.50:8788"
-                onChange={(e) => { setAddress(e.target.value); setError(''); }}
-                onKeyDown={(e) => { if (e.key === 'Enter' && !busy) void add(); }}
-              />
-              {error && <div className="mt" style={{ color: 'var(--del)' }}>{error}</div>}
-            </div>
-            <div className="act">
-              <button className="btn sm acc" disabled={busy || !address.trim()} onClick={() => void add()}>
-                {busy ? 'Buscando…' : 'Solicitar acceso'}
-              </button>
-            </div>
-          </div>
-        </div>
-      </details>
-
-      {app.hasFleetKeyChannels && <details className="pairing-advanced">
-        <summary>Opcional: emparejamiento automático avanzado</summary>
-        <div className="pairing-advanced-body">
-          <p className="ghint">Usalo solo para máquinas desatendidas. Para el uso normal, la aprobación en la otra Workass es más simple y no requiere copiar secretos.</p>
-          <div className="gtitle">Clave de flota</div>
-          <div className="group">
-            <div className="lrow">
-              <div className="body">
-                <input
-                  className="inp" style={{ width: '100%' }} value={key} spellCheck={false} type="password"
-                  placeholder={app.hasFleetKey ? 'guardada en este dispositivo' : 'wf-…'}
-                  onChange={(e) => setKey(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && key.trim()) { store.setFleetKey(key.trim()); setKey(''); } }}
-                />
-                <div className="mt">
-                  {app.hasFleetKey ? 'Este cliente se autoriza solo en cada máquina de la flota.' : 'Clave opcional para enrolamiento automático.'}
-                </div>
-              </div>
-              <div className="act">
-                <button className="btn sm acc" disabled={!key.trim()} onClick={() => { store.setFleetKey(key.trim()); setKey(''); }}>Usar</button>
-                {app.hasFleetKey && <button className="btn sm" onClick={() => store.setFleetKey('')}>Olvidar</button>}
-              </div>
-            </div>
-          </div>
-          <div className="ghint">La clave nunca sale de este dispositivo. No es necesaria para el emparejamiento normal.</div>
-          <FleetKeyOfThisMachine />
-        </div>
-      </details>}
     </section>
-  );
-}
-
-/**
- * The key this machine holds — the one thing you carry to the next machine.
- *
- * It used to be readable only by running `workass fleet key` in a terminal,
- * against a binary inside an application-support directory that is on nobody's
- * PATH. The pane even said so, which made the single ceremony this design has
- * available only to someone with a shell.
- *
- * Hidden until asked for, and only askable from the machine that holds it: the
- * daemon refuses `fleet:reveal` to anything that is not local, so the secret
- * never crosses the network even to a device already approved.
- */
-function FleetKeyOfThisMachine() {
-  const app = useApp();
-  const [shown, setShown] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-
-  if (!app.hasFleetKeyChannels) return null;
-
-  const run = async (op: () => Promise<{ ok: boolean; secret?: string; error?: string }>) => {
-    setBusy(true); setError('');
-    const result = await op();
-    setBusy(false);
-    if (result.ok) setShown(result.secret || '');
-    else setError(result.error || 'No se pudo');
-  };
-
-  const own = app.fleetKeys[0];
-  return (
-    <>
-      <div className="gtitle">La clave de esta máquina</div>
-      <div className="group">
-        <div className="lrow">
-          <div className="ic"><Svg><path d="M9.5 3a3.5 3.5 0 1 0-3.3 4.65L3 11v2h2v-1.5h1.5V10H8l1.2-1.2A3.5 3.5 0 0 0 9.5 3z" /><circle cx="10.5" cy="5.5" r=".9" /></Svg></div>
-          <div className="body">
-            <div className="nm">{own ? (shown || '••••••••••••••••••••••••••••') : 'Todavía no hay clave acá'}</div>
-            <div className="mt">
-              {error ? <span style={{ color: 'var(--del)' }}>{error}</span>
-                : own ? `${own.keyId.slice(0, 8)} · desde ${(own.createdAt || '').slice(0, 10) || '—'}`
-                  : 'Generala una vez y esta máquina pasa a ser el origen de tu flota.'}
-            </div>
-          </div>
-          <div className="act">
-            {!own && <button className="btn sm acc" disabled={busy} onClick={() => void run(() => store.mintFleetKey())}>Generar</button>}
-            {own && !shown && <button className="btn sm" disabled={busy || !app.fleetCanReveal} onClick={() => void run(() => store.revealFleetKey(own.keyId))}>Mostrar</button>}
-            {own && shown && <button className="btn sm" onClick={() => { void navigator.clipboard?.writeText(shown); }}>Copiar</button>}
-            {own && shown && <button className="btn sm" onClick={() => setShown('')}>Ocultar</button>}
-          </div>
-        </div>
-        {app.fleetKeys.slice(1).map((k) => (
-          <div className="lrow" key={k.keyId}>
-            <div className="body">
-              <div className="nm">{k.keyId.slice(0, 8)}<span className="badge">además</span></div>
-              <div className="mt">esta máquina también deja entrar con esta clave{k.createdAt ? ` · desde ${k.createdAt.slice(0, 10)}` : ''}</div>
-            </div>
-            <div className="act">
-              <button className="btn sm danger" disabled={busy} onClick={() => void run(async () => store.retireFleetKey(k.keyId))}>Retirar</button>
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="ghint">
-        {app.fleetCanReveal
-          ? 'Copiala una vez y pegala en la próxima máquina. Retirar una clave cierra la puerta a dispositivos nuevos; los que ya entraron siguen andando.'
-          : 'Sólo se lee desde la máquina que la tiene, así que nunca viaja por la red.'}
-      </div>
-    </>
   );
 }
 
@@ -752,9 +623,9 @@ function MachineRow({ m }: { m: MachineView }) {
         <div className="mt">{m.address || '—'}{m.reason ? ` · ${m.reason}` : (live ? ' · conectada' : m.requested ? ' · esperando aprobación' : ' · disponible en la red')}</div>
       </div>
       <div className="act">
-        {!m.paired && !m.requested && <button className="btn sm acc" disabled={!m.secure} onClick={() => void store.requestMachineAccess(m.machineId)}>Solicitar acceso</button>}
-        {!m.paired && m.requested && <span className="badge">esperando aprobación</span>}
-        <button className="btn sm danger" onClick={() => void store.forgetMachine(m.machineId)}>Quitar</button>
+        {!m.paired && !m.requested && <button className="btn sm acc" disabled={!m.secure} onClick={() => void store.requestMachineAccess(m.machineId)}>Solicitar conexión</button>}
+        {!m.paired && m.requested && <span className="badge">solicitud enviada</span>}
+        {m.paired && <button className="btn sm danger" onClick={() => void store.forgetMachine(m.machineId)}>Desconectar</button>}
       </div>
     </div>
   );
@@ -770,7 +641,12 @@ const ORDER: SettingsSection[] = ['agentes', 'modelos', 'maquinas', 'dispositivo
 export function Settings() {
   const app = useApp();
   useProc();
-  const sec = app.settingsSection;
+  // A renderer replacement can reconnect while an older in-memory shell still
+  // names a section removed by the new bundle. Never let that stale value blank
+  // the Settings surface; the canonical default remains Agentes.
+  const sec: SettingsSection = Object.prototype.hasOwnProperty.call(PANELS, app.settingsSection)
+    ? app.settingsSection
+    : 'agentes';
   const Panel = PANELS[sec];
   const fleet = fleetLabel(app.processes);
 

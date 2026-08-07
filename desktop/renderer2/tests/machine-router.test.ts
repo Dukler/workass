@@ -153,6 +153,36 @@ test('a machine leaving the book is disconnected, and forgetting it drops its to
   assert.ok(closed.length >= 1);
 });
 
+test('an insecure paired endpoint stays parked without losing its credential', () => {
+  const opened: string[] = [];
+  const closed: number[] = [];
+  const storage = memoryStorage();
+  storage.setItem('workass.machine.m-remote', JSON.stringify({ deviceToken: 'paired-token' }));
+  const registry = new MachineRegistry({
+    local: () => ({}) as never, deviceName: 'Mac', storage,
+    open: ((url: string) => {
+      opened.push(url);
+      return { send() {}, close() { closed.push(1); }, onopen: null, onclose: null, onmessage: null, onerror: null };
+    }) as never,
+  });
+  const secure = entry('m-remote', 'builder', '192.168.1.50:18788');
+  const insecure = { ...secure, secure: false, reason: 'TLS unavailable' };
+
+  registry.sync([insecure], 'm-self');
+  assert.deepEqual(opened, [], 'automatic reconnect must not hammer an endpoint that did not prove TLS');
+  assert.equal(registry.list()[0].paired, true, 'parking the endpoint preserves its pairing credential');
+
+  registry.sync([secure], 'm-self');
+  assert.equal(opened.length, 1, 'the saved pairing reconnects when the endpoint proves TLS again');
+
+  registry.sync([insecure], 'm-self');
+  assert.equal(closed.length, 1, 'a live reconnect is closed when a refresh marks the endpoint insecure');
+  assert.equal(storage.getItem('workass.machine.m-remote') !== null, true, 'the credential survives a security downgrade');
+
+  registry.sync([secure], 'm-self');
+  assert.equal(opened.length, 2, 'a later secure refresh reconnects without re-pairing');
+});
+
 test('with nothing mounted the registry hands back no router at all', () => {
   const registry = new MachineRegistry({
     local: () => ({}) as never, deviceName: 'Mac', storage: memoryStorage(),
