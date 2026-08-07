@@ -143,6 +143,11 @@ cp "$repo_root/desktop/shell/package.production.json" "$stage/Contents/Resources
 plutil -replace version -string "$bundle_version" "$stage/Contents/Resources/app/package.json"
 ditto "$repo_root/desktop/renderer2/dist" "$stage/Contents/Resources/renderer"
 cp "$repo_root/config/environments/prod.env" "$stage/Contents/Resources/workass-profile.env"
+if [ "$release_signing" -eq 1 ]; then
+  printf '%s\n' 'WORKASS_UPDATE_CHANNEL=github' >> "$stage/Contents/Resources/workass-profile.env"
+else
+  printf '%s\n' 'WORKASS_UPDATE_CHANNEL=local' >> "$stage/Contents/Resources/workass-profile.env"
+fi
 cp "$icon_source" "$stage/Contents/Resources/Workass.png"
 
 for spec in '16 icon_16x16.png' '32 icon_16x16@2x.png' '32 icon_32x32.png' \

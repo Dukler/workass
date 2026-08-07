@@ -8,6 +8,7 @@ const ALLOWED = new Set([
   'WORKASS_PROFILE', 'WORKASS_APP_NAME', 'WORKASS_BUNDLE_ID',
   'WORKASS_DAEMON_PORT', 'WORKASS_DAEMON_BIND', 'WORKASS_VIEW_PORT',
   'WORKASS_LAUNCHD_LABEL', 'WORKASS_DATA_ROOT', 'WORKASS_LOG_ROOT',
+  'WORKASS_UPDATE_CHANNEL',
 ]);
 
 function expandValue(value, vars) {
@@ -67,6 +68,8 @@ function resolveRuntimeProfile({ env = process.env, isPackaged = false, resource
   const daemonPort = numericPort(values.WORKASS_DAEMON_PORT, 'WORKASS_DAEMON_PORT', profile === 'test');
   const viewPort = numericPort(values.WORKASS_VIEW_PORT, 'WORKASS_VIEW_PORT', profile === 'test');
   if (!['localhost', 'lan'].includes(values.WORKASS_DAEMON_BIND)) throw new Error('WORKASS_DAEMON_BIND must be localhost or lan');
+  const updateChannel = String(values.WORKASS_UPDATE_CHANNEL || 'github').trim().toLowerCase();
+  if (!['github', 'local'].includes(updateChannel)) throw new Error('WORKASS_UPDATE_CHANNEL must be github or local');
 
   return {
     profile,
@@ -84,6 +87,7 @@ function resolveRuntimeProfile({ env = process.env, isPackaged = false, resource
     runDir: path.join(dataRoot, 'run'),
     browserControlFile: env.WORKASS_BROWSER_CONTROL_FILE || path.join(dataRoot, 'run', 'browser-control.json'),
     logRoot: path.resolve(values.WORKASS_LOG_ROOT),
+    updateChannel,
     profileFile,
   };
 }

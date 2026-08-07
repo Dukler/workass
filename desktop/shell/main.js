@@ -12,7 +12,7 @@ const { BrowserControlServer } = require('./browser-control-server');
 const { resolveRuntimeProfile } = require('./runtime-profile');
 const { applyMacDockIcon } = require('./app-icon');
 const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
-const { UpdateManager } = require('./update-manager');
+const { UpdateManager, resolveUpdateFeed } = require('./update-manager');
 const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
 const { acquireProfileSingleton } = require('./profile-singleton');
 
@@ -462,6 +462,12 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
     platform: process.platform,
     arch: process.arch,
     isPackaged: app.isPackaged,
+    feedURL: resolveUpdateFeed({
+      channel: RUNTIME.updateChannel,
+      dataRoot: RUNTIME.dataRoot,
+      platform: process.platform,
+      arch: process.arch,
+    }),
     onState: (state) => {
       for (const window of BrowserWindow.getAllWindows()) {
         if (!window.isDestroyed()) window.webContents.send('workass-updater:state', state);

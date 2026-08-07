@@ -127,6 +127,39 @@ provider updates; it does not add a separate Settings section. Workass never
 kills active work to update: it shows the blockers and lets the user retry after
 they finish.
 
+### macOS local update channel
+
+Dogfood builds on the development Mac do not require GitHub, Apple Developer
+ID, or notarization. A locally packaged app carries
+`WORKASS_UPDATE_CHANNEL=local` and reads its platform manifest from:
+
+```text
+~/Library/Application Support/Workass/update-feed/
+  workass-darwin-arm64-release.json
+  Workass-X.Y.Z-darwin-arm64.zip
+  SHA256SUMS
+```
+
+Publish one complete update to that folder with:
+
+```sh
+scripts/stage-macos-local-update.sh --version X.Y.Z
+```
+
+The command runs the normal candidate gate, creates one self-contained app,
+signs it with Workass's persistent machine-local certificate, checksums the
+archive, and publishes the manifest last. The installed app reads and copies
+those local bytes directly; it never starts an HTTP server and never weakens
+the transactional daemon/controller/catalog/browser health gates. This local
+signature preserves the bundle identity and macOS privacy grants without an
+Apple account.
+
+`scripts/release-workass-macos.sh` remains the public lane. Its
+`--release-signing` package automatically carries
+`WORKASS_UPDATE_CHANNEL=github`, so after Developer ID and notarization are
+configured, public builds resume the platform-specific GitHub feed without a
+source change.
+
 ## Windows road
 
 The corresponding normal Windows artifact requires:
