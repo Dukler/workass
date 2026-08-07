@@ -23,8 +23,23 @@ function releasePlatform(platform = process.platform) {
   return platform === 'win32' ? 'windows' : platform;
 }
 
+function releaseFeedName(platform = process.platform, arch = process.arch) {
+  return `workass-${releasePlatform(platform)}-${releaseArch(platform, arch)}-release.json`;
+}
+
 function defaultFeedURL(platform = process.platform, arch = process.arch) {
-  return new URL(`workass-${releasePlatform(platform)}-${releaseArch(platform, arch)}-release.json`, DEFAULT_FEED_ROOT).href;
+  return new URL(releaseFeedName(platform, arch), DEFAULT_FEED_ROOT).href;
+}
+
+function localFeedPath(dataRoot, platform = process.platform, arch = process.arch) {
+  if (!path.isAbsolute(String(dataRoot || ''))) throw new Error('local update data root must be absolute');
+  return path.join(dataRoot, 'update-feed', releaseFeedName(platform, arch));
+}
+
+function resolveUpdateFeed({ channel = 'github', dataRoot = '', platform = process.platform, arch = process.arch } = {}) {
+  if (channel === 'github') return defaultFeedURL(platform, arch);
+  if (channel === 'local' && platform === 'darwin') return localFeedPath(dataRoot, platform, arch);
+  throw new Error('local Workass updates are supported only on macOS dogfood builds');
 }
 
 function parseVersion(value) {
@@ -94,14 +109,64 @@ function httpsRequest(url, { timeoutMs = 15000, maxBytes = MAX_MANIFEST_BYTES, r
   });
 }
 
-async function fetchReleaseManifest(url, options) {
+async function fetchReleaseManifest(url, options = {}) {
+  if (path.isAbsolute(String(url || ''))) {
+    const info = await fs.promises.stat(url);
+    if (!info.isFile()) throw new Error('local update manifest is not a regular file');
+    if (info.size <= 0 || info.size > MAX_MANIFEST_BYTES) throw new Error('local update manifest has an invalid size');
+    const bytes = await fs.promises.readFile(url);
+    let parsed;
+    try { parsed = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('update manifest is not valid JSON'); }
+    return parsed;
+  }
   const bytes = await httpsRequest(url, { ...options, maxBytes: MAX_MANIFEST_BYTES });
   let parsed;
   try { parsed = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('update manifest is not valid JSON'); }
   return parsed;
 }
 
+function copyLocalArtifact(source, destination, artifact, { onProgress = () => {} } = {}) {
+  return new Promise((resolve, reject) => {
+    let info;
+    try { info = fs.statSync(source); } catch (err) { reject(err); return; }
+    if (!info.isFile()) { reject(new Error('local update artifact is not a regular file')); return; }
+    if (info.size !== artifact.size || info.size > MAX_UPDATE_BYTES) { reject(new Error('local update size does not match the release manifest')); return; }
+    const partial = `${destination}.partial`;
+    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+    const input = fs.createReadStream(source);
+    const output = fs.createWriteStream(partial, { flags: 'wx', mode: 0o600 });
+    const hash = crypto.createHash('sha256');
+    let received = 0;
+    let settled = false;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      try { input.destroy(); } catch { /* best effort */ }
+      try { output.destroy(); } catch { /* best effort */ }
+      try { fs.rmSync(partial, { force: true }); } catch { /* best effort */ }
+      reject(error);
+    };
+    input.on('data', (chunk) => {
+      received += chunk.length;
+      hash.update(chunk);
+      onProgress(received, artifact.size);
+    });
+    input.on('error', fail);
+    output.on('error', fail);
+    output.on('finish', () => {
+      if (settled) return;
+      if (received !== artifact.size) { fail(new Error('local update size does not match the release manifest')); return; }
+      if (hash.digest('hex').toLowerCase() !== artifact.sha256.toLowerCase()) { fail(new Error('local update checksum does not match the release manifest')); return; }
+      settled = true;
+      fs.renameSync(partial, destination);
+      resolve(destination);
+    });
+    input.pipe(output);
+  });
+}
+
 function downloadArtifact(url, destination, artifact, { onProgress = () => {}, redirects = 5 } = {}) {
+  if (path.isAbsolute(String(url || ''))) return copyLocalArtifact(url, destination, artifact, { onProgress });
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     if (parsed.protocol !== 'https:') { reject(new Error('updates require HTTPS')); return; }
@@ -150,6 +215,17 @@ function downloadArtifact(url, destination, artifact, { onProgress = () => {}, r
     request.on('timeout', () => request.destroy(new Error('update download timed out')));
     request.on('error', reject);
   });
+}
+
+function resolveArtifactSource(artifactURL, feedURL) {
+  if (path.isAbsolute(String(feedURL || ''))) {
+    const name = String(artifactURL || '').trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/.test(name)) throw new Error('local update artifact name is invalid');
+    return path.join(path.dirname(feedURL), name);
+  }
+  const source = new URL(artifactURL, feedURL);
+  if (source.protocol !== 'https:') throw new Error('updates require HTTPS');
+  return source.href;
 }
 
 function archiveEntries(archive, platform = process.platform) {
@@ -450,7 +526,7 @@ class UpdateManager {
       // platform yet. That means there is no applicable update, not that the
       // installed app is broken. Signature, checksum, parse, and network
       // failures remain explicit failures.
-      if (err?.statusCode === 404) {
+      if (err?.statusCode === 404 || err?.code === 'ENOENT') {
         return this.publish({ phase: 'current', targetVersion: null, checkedAt: new Date().toISOString(), error: null });
       }
       return this.publish({ phase: 'failed', checkedAt: new Date().toISOString(), error: String(err && err.message || err) });
@@ -469,11 +545,10 @@ class UpdateManager {
     const archive = path.join(transactionRoot, 'release.zip');
     const extracted = path.join(transactionRoot, 'extracted');
     const artifact = this.manifest.artifacts.update;
-    const artifactURL = new URL(artifact.url, this.feedURL);
-    if (artifactURL.protocol !== 'https:') throw new Error('updates require HTTPS');
+    const artifactSource = resolveArtifactSource(artifact.url, this.feedURL);
     this.publish({ phase: 'downloading', progress: 0, error: null, blockers: null });
     try {
-      await this.deps.downloadArtifact(artifactURL.href, archive, artifact, {
+      await this.deps.downloadArtifact(artifactSource, archive, artifact, {
         onProgress: (received, total) => this.publish({ progress: total > 0 ? Math.min(1, received / total) : 0 }),
       });
       this.publish({ phase: 'staging', progress: 1 });
@@ -585,6 +660,7 @@ module.exports = {
   atomicJSON,
   bundledNode,
   compareVersions,
+  copyLocalArtifact,
   defaultFeedURL,
   downloadArtifact,
   extractArchive,
@@ -592,11 +668,15 @@ module.exports = {
   findExtractedRoot,
   httpsRequest,
   installedRoot,
+  localFeedPath,
   macRequirement,
   parseVersion,
   postLocalUpdate,
   releaseArch,
+  releaseFeedName,
   releasePlatform,
+  resolveArtifactSource,
+  resolveUpdateFeed,
   stageRelease,
   validateReleaseManifest,
   verifyRelease,

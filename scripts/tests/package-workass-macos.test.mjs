@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const script = fs.readFileSync(path.join(repoRoot, 'scripts', 'package-workass-macos.sh'), 'utf8');
 const installer = fs.readFileSync(path.join(repoRoot, 'scripts', 'install-workass-macos.sh'), 'utf8');
+const localUpdater = fs.readFileSync(path.join(repoRoot, 'scripts', 'stage-macos-local-update.sh'), 'utf8');
 const electronPin = fs.readFileSync(path.join(repoRoot, 'config', 'macos', 'electron.version'), 'utf8').trim();
 
 test('macOS package keeps both bundle and runtime Dock icon resources', () => {
@@ -59,6 +60,22 @@ test('public artifact mode is self-contained and never installs into the live pr
   assert.match(script, /workass_codesign_prepare distribution/);
   assert.match(script, /workass_codesign_sign_app_distribution/);
   assert.match(script, /WORKASS_MACOS_APP_ARTIFACT_READY/);
+});
+
+test('local Mac packages use the filesystem feed and public signed packages use GitHub', () => {
+  assert.match(script, /WORKASS_UPDATE_CHANNEL=local/);
+  assert.match(script, /WORKASS_UPDATE_CHANNEL=github/);
+  assert.match(script, /if \[ "\$release_signing" -eq 1 \]; then/);
+});
+
+test('the local Mac feed is a complete locally signed archive published manifest-last', () => {
+  assert.match(localUpdater, /package-workass-macos\.sh/);
+  assert.match(localUpdater, /--artifact-only/);
+  assert.match(localUpdater, /codesign -d -r-/);
+  assert.match(localUpdater, /shasum -a 256/);
+  assert.match(localUpdater, /url: archiveName/);
+  assert.ok(localUpdater.indexOf('mv -f "$archive_incoming" "$archive"') < localUpdater.indexOf('mv -f "$feed_incoming" "$feed"'));
+  assert.doesNotMatch(localUpdater, /notarytool|stapler|github\.com/);
 });
 
 test('every installed macOS app is one self-contained shell and daemon release', () => {

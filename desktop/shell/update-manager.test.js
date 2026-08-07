@@ -8,8 +8,13 @@ const test = require('node:test');
 const {
   UpdateManager,
   compareVersions,
+  copyLocalArtifact,
   defaultFeedURL,
+  fetchReleaseManifest,
+  localFeedPath,
   parseVersion,
+  resolveArtifactSource,
+  resolveUpdateFeed,
   validateReleaseManifest,
 } = require('./update-manager');
 
@@ -106,6 +111,56 @@ test('platform feed names cannot collide in one GitHub release', () => {
   assert.equal(defaultFeedURL('win32', 'x64'), 'https://github.com/Dukler/workass/releases/latest/download/workass-windows-amd64-release.json');
 });
 
+test('macOS dogfood resolves one stable local feed while public builds stay on GitHub', () => {
+  const dataRoot = '/Users/test/Library/Application Support/Workass';
+  assert.equal(localFeedPath(dataRoot, 'darwin', 'arm64'), path.join(dataRoot, 'update-feed', 'workass-darwin-arm64-release.json'));
+  assert.equal(resolveUpdateFeed({ channel: 'local', dataRoot, platform: 'darwin', arch: 'arm64' }), localFeedPath(dataRoot, 'darwin', 'arm64'));
+  assert.equal(resolveUpdateFeed({ channel: 'github', dataRoot, platform: 'darwin', arch: 'arm64' }), defaultFeedURL('darwin', 'arm64'));
+  assert.throws(() => resolveUpdateFeed({ channel: 'local', dataRoot: 'C:\\Workass', platform: 'win32', arch: 'x64' }), /only on macOS/);
+});
+
+test('local feed reads and copies are bounded by the same manifest checksum', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-local-feed-'));
+  const feed = path.join(root, 'workass-darwin-arm64-release.json');
+  const artifactName = 'Workass-1.2.0-darwin-arm64.zip';
+  const source = path.join(root, artifactName);
+  const bytes = Buffer.from('local-update-fixture');
+  const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  const localManifest = manifest({ artifacts: { update: { name: artifactName, url: artifactName, sha256, size: bytes.length } } });
+  fs.writeFileSync(feed, `${JSON.stringify(localManifest)}\n`);
+  fs.writeFileSync(source, bytes);
+  assert.equal((await fetchReleaseManifest(feed)).version, '1.2.0');
+  assert.equal(resolveArtifactSource(artifactName, feed), source);
+  assert.throws(() => resolveArtifactSource('../outside.zip', feed), /name is invalid/);
+  const destination = path.join(root, 'transaction', 'release.zip');
+  let progress = 0;
+  await copyLocalArtifact(source, destination, localManifest.artifacts.update, { onProgress: (received) => { progress = received; } });
+  assert.deepEqual(fs.readFileSync(destination), bytes);
+  assert.equal(progress, bytes.length);
+  await assert.rejects(() => copyLocalArtifact(source, path.join(root, 'bad', 'release.zip'), { ...localManifest.artifacts.update, sha256: '0'.repeat(64) }), /checksum/);
+});
+
+test('the manager checks and stages a local Mac release without any network request', async () => {
+  const { manager } = managerFixture();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-local-manager-'));
+  const feed = path.join(root, 'workass-darwin-arm64-release.json');
+  const artifactName = 'Workass-1.2.0-darwin-arm64.zip';
+  const bytes = Buffer.from('local-manager-archive');
+  const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  const localManifest = manifest({ artifacts: { update: { name: artifactName, url: artifactName, sha256, size: bytes.length } } });
+  fs.writeFileSync(feed, `${JSON.stringify(localManifest)}\n`);
+  fs.writeFileSync(path.join(root, artifactName), bytes);
+  manager.feedURL = feed;
+  manager.deps.extractArchive = (_archive, destination) => fs.mkdirSync(path.join(destination, 'Workass.app'), { recursive: true });
+  manager.deps.stageRelease = (_source, target) => fs.mkdirSync(target, { recursive: true });
+  manager.deps.verifyRelease = () => localManifest.designatedRequirement;
+  assert.equal((await manager.check()).phase, 'available');
+  const state = await manager.download();
+  assert.equal(state.phase, 'ready');
+  assert.equal(manager.prepared.designatedRequirement, localManifest.designatedRequirement);
+  assert.deepEqual(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'release.zip')), bytes);
+});
+
 test('manifest validation requires the exact platform, checksum, size, and signing law', () => {
   assert.equal(validateReleaseManifest(manifest(), { platform: 'darwin', arch: 'arm64' }).version, '1.2.0');
   assert.throws(() => validateReleaseManifest(manifest({ arch: 'amd64' }), { platform: 'darwin', arch: 'arm64' }), /another platform/);
@@ -144,6 +199,19 @@ test('a missing platform asset means current while real feed failures stay visib
   const state = await broken.manager.check();
   assert.equal(state.phase, 'failed');
   assert.match(state.error, /TLS failed/);
+});
+
+test('an empty local feed means current while malformed local metadata stays visible', async () => {
+  const empty = managerFixture();
+  empty.manager.feedURL = path.join(os.tmpdir(), `missing-workass-feed-${Date.now()}`, 'workass-darwin-arm64-release.json');
+  assert.equal((await empty.manager.check()).phase, 'current');
+  const broken = managerFixture();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'broken-workass-feed-'));
+  broken.manager.feedURL = path.join(root, 'workass-darwin-arm64-release.json');
+  fs.writeFileSync(broken.manager.feedURL, '{');
+  const state = await broken.manager.check();
+  assert.equal(state.phase, 'failed');
+  assert.match(state.error, /valid JSON/);
 });
 
 test('updater operations are serialized so two clicks cannot arm competing transactions', async () => {

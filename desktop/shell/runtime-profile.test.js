@@ -38,3 +38,24 @@ test('profile parser rejects executable and unknown assignments', () => {
   assert.throws(() => parseProfile('WORKASS_PROFILE=$(id)'), /unsafe/);
   assert.throws(() => parseProfile('WORKASS_TOKEN=nope'), /invalid profile assignment/);
 });
+
+test('packaged update channels are explicit and limited to local or GitHub', () => {
+  assert.equal(parseProfile('WORKASS_UPDATE_CHANNEL=local').WORKASS_UPDATE_CHANNEL, 'local');
+  const resourcesPath = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-profile-packaged-'));
+  fs.writeFileSync(path.join(resourcesPath, 'workass-profile.env'), [
+    'WORKASS_PROFILE=prod',
+    'WORKASS_APP_NAME=Workass',
+    'WORKASS_BUNDLE_ID=com.workass.app',
+    'WORKASS_DAEMON_PORT=8788',
+    'WORKASS_DAEMON_BIND=localhost',
+    'WORKASS_VIEW_PORT=8798',
+    'WORKASS_LAUNCHD_LABEL=com.workass.daemon',
+    'WORKASS_DATA_ROOT="${HOME}/Library/Application Support/Workass"',
+    'WORKASS_LOG_ROOT="${HOME}/Library/Logs/Workass/prod"',
+    'WORKASS_UPDATE_CHANNEL=local',
+  ].join('\n'));
+  const local = resolveRuntimeProfile({ env: { HOME: '/Users/test', WORKASS_PROFILE: 'prod' }, isPackaged: true, resourcesPath });
+  assert.equal(local.updateChannel, 'local');
+  fs.appendFileSync(path.join(resourcesPath, 'workass-profile.env'), '\nWORKASS_UPDATE_CHANNEL=anything\n');
+  assert.throws(() => resolveRuntimeProfile({ env: { HOME: '/Users/test', WORKASS_PROFILE: 'prod' }, isPackaged: true, resourcesPath }), /github or local/);
+});
