@@ -25,6 +25,27 @@ test('production and development profiles isolate every mutable runtime root and
   assert.equal(dev.appName, 'Workass Dev');
 });
 
+test('packaged Windows production is LAN-reachable and announces on the default port', () => {
+  const resourcesPath = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-profile-windows-'));
+  fs.copyFileSync(
+    path.join(repoRoot, 'config', 'environments', 'windows-prod.env'),
+    path.join(resourcesPath, 'workass-profile.env'),
+  );
+  const profile = resolveRuntimeProfile({
+    env: {
+      HOME: '/Users/test',
+      USERPROFILE: 'C:/Users/test',
+      LOCALAPPDATA: 'C:/Users/test/AppData/Local',
+      WORKASS_PROFILE: 'prod',
+    },
+    isPackaged: true,
+    resourcesPath,
+  });
+  assert.equal(profile.daemonPort, 80);
+  assert.equal(profile.daemonBind, 'lan');
+  assert.equal(profile.daemonURL, 'https://127.0.0.1:80');
+});
+
 test('test profile requires an isolated temporary root', () => {
   assert.throws(() => resolveRuntimeProfile({ env: { HOME: '/Users/test', WORKASS_PROFILE: 'test' }, repoRoot }), /WORKASS_TEST_ROOT/);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-profile-test-'));

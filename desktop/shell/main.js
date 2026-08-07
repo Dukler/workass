@@ -4,7 +4,6 @@
 // Legacy desktop/main.js is the old full Electron app and stays untouched.
 const { app, BrowserWindow, WebContentsView, session, ipcMain, shell, nativeImage, dialog, Menu } = require('electron');
 const fs = require('node:fs');
-const net = require('node:net');
 const path = require('node:path');
 const { createViewServer } = require('./view-server');
 const { BrowserManager } = require('./browser-manager');
@@ -15,6 +14,7 @@ const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, res
 const { UpdateManager, resolveUpdateFeed } = require('./update-manager');
 const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
 const { acquireProfileSingleton } = require('./profile-singleton');
+const { CertificatePins } = require('./certificate-pins');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const RUNTIME = resolveRuntimeProfile({
@@ -50,6 +50,7 @@ let browserManager = null;
 let browserControlServer = null;
 let updateManager = null;
 const externalImageTempDirs = new Set();
+const certificatePins = new CertificatePins();
 
 function sourceDaemonExecutable() {
   if (app.isPackaged) return '';
@@ -74,24 +75,15 @@ async function recoverLocalDaemon() {
   });
 }
 
-function privateLANHost(hostname) {
-  const host = String(hostname || '').replace(/^\[|\]$/g, '');
-  if (host === 'localhost' || host === '::1') return true;
-  if (net.isIP(host) !== 4) return false;
-  const [a, b] = host.split('.').map(Number);
-  return a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
-}
-
 // Workass daemons use persistent self-signed certificates rather than a public
-// CA: a LAN daemon is reached by its discovery IP, not a public DNS name. Keep
-// Chromium's normal verification everywhere except private/loopback Workass
-// endpoints, where the remote pairing flow pins the daemon identity. This never
-// permits an arbitrary public site's invalid certificate.
+// CA. Chromium may reject the current DHCP address even though the certificate
+// is the same machine. Accept only the exact SHA-256 identity that discovery
+// handed to the renderer; an arbitrary self-signed private endpoint stays
+// rejected and never receives a stored device token.
 function allowPrivateWorkassCertificates() {
   try {
     session.defaultSession.setCertificateVerifyProc((request, callback) => {
-      const invalidAuthority = request.verificationResult === 'net::ERR_CERT_AUTHORITY_INVALID';
-      callback(privateLANHost(request.hostname) && invalidAuthority ? 0 : -3);
+		callback(certificatePins.verify(request) ? 0 : -3);
     });
   } catch (err) {
     console.error(`[shell] certificate verifier unavailable: ${err.message}`);
@@ -184,6 +176,9 @@ function createWindow(url, browserReporter, isController) {
     if (action === 'close') { win.close(); return true; }
     return false;
   });
+	ipcMain.on('workass-machines:trust-endpoint', (event, payload) => {
+		event.returnValue = own(event) && certificatePins.trustEndpoint(payload?.address, payload?.certFingerprint);
+	});
 	ipcMain.handle('workass-recovery:restart-daemon', async (event) => {
 		if (!own(event)) return { ok: false, error: 'untrusted renderer' };
 		try { return { ok: true, ...(await recoverLocalDaemon()) }; }
@@ -205,6 +200,7 @@ function createWindow(url, browserReporter, isController) {
     try { ipcMain.removeHandler('workass-clipboard:copy-image-at'); } catch { /* ignore */ }
     try { ipcMain.removeHandler('workass-image:open-external'); } catch { /* ignore */ }
     try { ipcMain.removeHandler('workass-window:control'); } catch { /* ignore */ }
+		try { ipcMain.removeAllListeners('workass-machines:trust-endpoint'); } catch { /* ignore */ }
 		try { ipcMain.removeHandler('workass-recovery:restart-daemon'); } catch { /* ignore */ }
     for (const channel of ['get-state', 'check', 'download', 'install']) {
       try { ipcMain.removeHandler(`workass-updater:${channel}`); } catch { /* ignore */ }

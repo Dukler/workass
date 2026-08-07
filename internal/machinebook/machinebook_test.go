@@ -400,13 +400,14 @@ func TestBeaconFindsPeer(t *testing.T) {
 
 	found := make(chan Entry, 4)
 	listener := &Beacon{
-		Book:      book,
-		MachineID: "m-listener",
-		Name:      "listener",
-		Port:      remote.port,
-		Interval:  200 * time.Millisecond,
-		Group:     testGroup,
-		OnChange:  func(entry Entry) { found <- entry },
+		Book:        book,
+		MachineID:   "m-listener",
+		Name:        "listener",
+		Port:        remote.port,
+		Interval:    200 * time.Millisecond,
+		Group:       testGroup,
+		ReceiveOnly: true,
+		OnChange:    func(entry Entry) { found <- entry },
 	}
 	announcer := &Beacon{
 		MachineID: "m-peer",
@@ -472,6 +473,51 @@ func TestUsableInterfaceExcludesTunnels(t *testing.T) {
 		if got := usableInterface(net.Interface{Flags: tc.flags}); got != tc.want {
 			t.Fatalf("%s: usableInterface = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestBeaconBoundsFailedUnknownProbesWithoutThrottlingKnownPeers(t *testing.T) {
+	used := 0
+	for range maxNewPerInterval {
+		if !reserveProbe(true, &used) {
+			t.Fatalf("unknown probe %d was rejected before the interval limit", used+1)
+		}
+	}
+	if reserveProbe(true, &used) {
+		t.Fatal("unknown probe beyond the interval limit was accepted")
+	}
+	for range maxNewPerInterval * 2 {
+		if !reserveProbe(false, &used) {
+			t.Fatal("known peer refresh was throttled by the unknown-peer limit")
+		}
+	}
+}
+
+func TestReceiveOnlyBeaconNeverAnnounces(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		receiveOnly bool
+		want        int
+	}{
+		{name: "receive only", receiveOnly: true, want: 0},
+		{name: "announcer", want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			announcements := 0
+			beacon := &Beacon{
+				Book: openBook(t, "m-self"), MachineID: "m-self", Name: "self", Port: 80,
+				ReceiveOnly: tc.receiveOnly, Interval: time.Hour,
+				announceFn: func(*net.UDPAddr) { announcements++ },
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if err := beacon.Run(ctx); err != nil {
+				t.Fatalf("beacon run: %v", err)
+			}
+			if announcements != tc.want {
+				t.Fatalf("announcements = %d, want %d", announcements, tc.want)
+			}
+		})
 	}
 }
 

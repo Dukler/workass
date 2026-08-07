@@ -859,7 +859,7 @@ func (m *Manager) ProvidersList() []map[string]any {
 	return out
 }
 
-// markProviderNeedsLogin handles frontier adapters whose initialize/catalog
+// markProviderNeedsLogin handles authenticated providers whose initialize/catalog
 // handshake succeeds but whose first real prompt reveals that the vendor CLI is
 // logged out. A false "ready" state leaves a dead model in the composer; move it
 // to the spec-defined needs-login state, remove its unusable catalog, and replay
@@ -870,10 +870,10 @@ func (m *Manager) markProviderNeedsLogin(ctx context.Context, providerID string,
 	if cause != nil {
 		message = redactSensitiveText(cause.Error())
 	}
-	if !isFrontierProviderID(id) || !isAuthShapedError(message) {
+	if !isLoginProviderID(id) || !isAuthShapedError(message) {
 		return ""
 	}
-	hint := frontierFixHint(id)
+	hint := providerLoginFixHint(id)
 	m.mu.Lock()
 	runtime := m.providers[id]
 	if runtime == nil {
@@ -910,7 +910,8 @@ func (m *Manager) markProviderNeedsLogin(ctx context.Context, providerID string,
 // disablement. A completed prompt is stronger evidence than an earlier
 // session-level auth-shaped error, so it must restore the provider immediately
 // instead of leaving it absent until a daemon restart or manual detection.
-// Explicit user disables remain authoritative.
+// Devin shares this authenticated-provider recovery path. Explicit user
+// disables remain authoritative.
 func (m *Manager) recoverFrontierProviderAfterSuccessfulTurn(ctx context.Context, b *Bridge) {
 	if b == nil {
 		return
@@ -928,7 +929,7 @@ func (m *Manager) recoverFrontierProviderAfterSuccessfulTurn(ctx context.Context
 		knownEffortModels[strings.TrimSpace(modelID)] = true
 	}
 	b.mu.Unlock()
-	if !isFrontierProviderID(providerID) {
+	if !isLoginProviderID(providerID) {
 		return
 	}
 
@@ -993,6 +994,7 @@ func (m *Manager) ToggleProvider(ctx context.Context, id string, enabled bool) (
 		runtime.Status = providerStatusInactive
 		runtime.Config.DisabledByUser = true
 	}
+	delete(m.spareBlocked, id)
 	providers := m.providerRecordsLocked()
 	filePath := m.providerConfigFile
 	if !enabled {
@@ -1275,9 +1277,9 @@ func (m *Manager) detectProvider(parent context.Context, cfg ProviderConfig) pro
 	if err != nil {
 		message := redactSensitiveText(err.Error())
 		result.CLIVersion = collectInstalledCLIVersion(cliVersion)
-		if isFrontierProviderID(cfg.ID) && isAuthShapedError(message) {
+		if isLoginProviderID(cfg.ID) && isAuthShapedError(message) {
 			result.Status = providerStatusNeedsLogin
-			result.FixHint = frontierFixHint(cfg.ID)
+			result.FixHint = providerLoginFixHint(cfg.ID)
 			result.Detected = true
 		} else {
 			result.Status = providerStatusError
@@ -1416,6 +1418,7 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 		}
 		runtime.Config.AutoEnv = copyStringMap(result.autoEnv)
 		if result.OK {
+			delete(m.spareBlocked, result.ProviderID)
 			runtime.Config.Enabled = true
 			runtime.Config.DisabledByUser = false
 			runtime.Config.Detected = true
@@ -1461,9 +1464,11 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 			runtime.CLIVersion = nil
 		}
 		if result.Status == providerStatusError {
-			if isLocalProviderID(result.ProviderID) {
-				runtime.Config.Enabled = false
-			}
+			// Enabled is runtime readiness, not durable user intent. Leaving a
+			// previously detected provider enabled after its ACP probe fails lets
+			// the warm-spare loop keep launching a broken executable. Detection
+			// retries can promote it back to ready; DisabledByUser remains false.
+			runtime.Config.Enabled = false
 			runtime.FixHint = ""
 			runtime.Config.FixHint = ""
 			runtime.Probed = true
@@ -1697,6 +1702,17 @@ func frontierFixHint(id string) string {
 		return spec.FixHint
 	}
 	return ""
+}
+
+func isLoginProviderID(id string) bool {
+	return normalizeProviderID(id) == "devin" || isFrontierProviderID(id)
+}
+
+func providerLoginFixHint(id string) string {
+	if normalizeProviderID(id) == "devin" {
+		return "Ejecuta `devin auth login`"
+	}
+	return frontierFixHint(id)
 }
 
 func isAuthShapedError(text string) bool {

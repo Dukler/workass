@@ -127,6 +127,29 @@ function bundledPortableDaemon({ resourcesPath, executablePath, platform = proce
   return '';
 }
 
+function portableReleaseManifest(resourcesPath) {
+  const manifestPath = path.resolve(resourcesPath, '..', 'manifest.json');
+  try {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    if (manifest.schemaVersion !== 2 || manifest.platform !== 'windows' || !String(manifest.version || '').trim()) return null;
+    return manifest;
+  } catch {
+    return null;
+  }
+}
+
+function legacyPortableDaemonURLs(runtime, platform) {
+  if (platform !== 'win32' || runtime.profile !== 'prod' || runtime.daemonPort === 8788) return [];
+  try {
+    const legacy = new URL(runtime.daemonURL);
+    legacy.hostname = '127.0.0.1';
+    legacy.port = '8788';
+    return [legacy.toString().replace(/\/$/, '')];
+  } catch {
+    return [];
+  }
+}
+
 function spawnPortableDaemon({ runtime, executable, platform = process.platform, childSpawn = spawn } = {}) {
   if (!runtime || !executable) throw new Error('runtime and executable are required');
   fs.mkdirSync(runtime.stateDir, { recursive: true });
@@ -165,22 +188,37 @@ async function ensurePortableDaemon({
   check = healthCheck,
   childSpawn = spawn,
   wait = waitForHealth,
+	waitForDown = waitForUnhealthy,
+	shutdown = postLocalRecoveryShutdown,
   daemonExecutable = '',
 } = {}) {
   if (!runtime || !resourcesPath) throw new Error('runtime and resourcesPath are required');
-  if (await check(runtime.daemonURL)) return { status: 'already-running' };
 
   const executable = daemonExecutable && fs.existsSync(daemonExecutable)
     ? daemonExecutable
     : bundledPortableDaemon({ resourcesPath, executablePath, platform });
   if (!executable) return { status: 'no-bundled-runtime', candidates: portableDaemonCandidates({ resourcesPath, executablePath, platform }) };
 
+	const manifest = portableReleaseManifest(resourcesPath);
+	const expectedVersion = manifest?.version || '';
+	for (const legacyURL of legacyPortableDaemonURLs(runtime, platform)) {
+		if (!await check(legacyURL)) continue;
+		if (!await shutdown(legacyURL)) throw new Error(`legacy Workass daemon refused shutdown: ${legacyURL}`);
+		if (!await waitForDown(legacyURL, { check })) throw new Error(`legacy Workass daemon did not stop: ${legacyURL}`);
+	}
+
+	if (await check(runtime.daemonURL, 700, expectedVersion)) return { status: 'already-running', manifest };
+	if (expectedVersion && await check(runtime.daemonURL)) {
+		if (!await shutdown(runtime.daemonURL)) throw new Error('stale Workass daemon refused shutdown');
+		if (!await waitForDown(runtime.daemonURL, { check })) throw new Error('stale Workass daemon did not stop');
+	}
+
   const { child, args } = spawnPortableDaemon({ runtime, executable, platform, childSpawn });
-  if (!await wait(runtime.daemonURL, { check })) {
+	if (!await wait(runtime.daemonURL, { check, expectedVersion })) {
     try { child.kill?.(); } catch { /* best effort */ }
     throw new Error(`bundled Workass daemon did not become healthy: ${executable}`);
   }
-  return { status: 'started-and-running', executable, args, pid: child.pid || null };
+	return { status: 'started-and-running', executable, args, pid: child.pid || null, manifest };
 }
 
 function postLocalRecoveryShutdown(url, timeoutMs = 1500) {
@@ -377,6 +415,7 @@ module.exports = {
   healthCheck,
   launchAgentPlist,
   portableDaemonCandidates,
+	portableReleaseManifest,
   postLocalRecoveryShutdown,
   repairDaemonStartup,
   restartDaemonAndRecover,

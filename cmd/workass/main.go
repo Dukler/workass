@@ -68,7 +68,7 @@ func main() {
 	prod := flag.Bool("prod", prodModeDefault(), "use production daemon defaults where applicable; on Windows this defaults --port 80 and --bind lan")
 	port := flag.Int("port", 8788, "HTTP/WebSocket port")
 	bind := flag.String("bind", "localhost", "bind mode: localhost or lan")
-	beacon := flag.Bool("beacon", beaconDefault(), "announce this machine to others on the LAN; only applies under --bind lan")
+	beacon := flag.Bool("beacon", beaconDefault(), "enable automatic LAN discovery; LAN binds announce and loopback binds listen without announcing")
 	useTLS := flag.Bool("tls", true, "required: serve https/wss with this machine's own certificate, minted once into the state dir")
 	rendererDir := flag.String("renderer-dir", "", "renderer directory override; empty serves embedded renderer2")
 	mocksDirFlag := flag.String("mocks-dir", "", "design mocks directory override")

@@ -147,11 +147,9 @@ type machinePresenceOptions struct {
 
 // startMachinePresence runs discovery and liveness until ctx ends.
 //
-// The beacon only runs on a LAN-bound daemon. A daemon listening on loopback is
-// not reachable by anyone, so announcing an address for it would be advertising
-// a door that does not exist. Liveness runs either way: machines added by hand
-// are ones the user asked about, and their status is owed regardless of whether
-// this daemon announces itself.
+// A LAN-bound daemon listens and announces. A loopback-bound daemon listens
+// without announcing: it can discover a reachable managed machine without
+// advertising a door that does not exist. Liveness runs either way.
 func startMachinePresence(ctx context.Context, book *machinebook.Book, hub *wire.Hub, identity machineid.Identity, opts machinePresenceOptions, logger *log.Logger) {
 	if book == nil {
 		return
@@ -184,26 +182,27 @@ func startMachinePresence(ctx context.Context, book *machinebook.Book, hub *wire
 		}
 	}()
 
-	switch {
-	case opts.Bind != "lan":
-		logger.Printf("[workass] machine beacon off (bind=%s); machines can still be added by address", opts.Bind)
-		return
-	case !opts.Beacon:
-		logger.Printf("[workass] machine beacon off (--beacon=false); this machine is reachable but does not announce itself")
+	if !opts.Beacon {
+		logger.Printf("[workass] machine beacon off (--beacon=false); automatic discovery is disabled")
 		return
 	}
 	beacon := &machinebook.Beacon{
-		Book:      book,
-		MachineID: identity.MachineID,
-		Name:      identity.DisplayName,
-		Port:      opts.Port,
-		OnChange:  func(machinebook.Entry) { broadcast() },
-		Logf:      logger.Printf,
+		Book:        book,
+		MachineID:   identity.MachineID,
+		Name:        identity.DisplayName,
+		Port:        opts.Port,
+		ReceiveOnly: opts.Bind != "lan",
+		OnChange:    func(machinebook.Entry) { broadcast() },
+		Logf:        logger.Printf,
 	}
 	go func() {
 		if err := beacon.Run(ctx); err != nil {
 			logger.Printf("[workass] machine beacon stopped: %v", err)
 		}
 	}()
-	logger.Printf("[workass] machine beacon announcing %s on %s:%d", identity.MachineID, machinebook.GroupIP, machinebook.GroupPort)
+	if beacon.ReceiveOnly {
+		logger.Printf("[workass] machine beacon listening on %s:%d (loopback daemon is not announced)", machinebook.GroupIP, machinebook.GroupPort)
+	} else {
+		logger.Printf("[workass] machine beacon announcing %s on %s:%d", identity.MachineID, machinebook.GroupIP, machinebook.GroupPort)
+	}
 }

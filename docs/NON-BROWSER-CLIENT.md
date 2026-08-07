@@ -22,10 +22,11 @@ it, because that machine is a reach-into machine by design.
 
 Two things ride with it:
 
-- `--beacon` (default on under `--bind lan`, `WORKASS_DAEMON_BEACON=0` to
-  disable) announces the machine on `239.87.87.88:48788` so other daemons can
-  find it. It never sweeps a subnet; it announces, and probes only the source
-  address of a packet it received.
+- `--beacon` (default on, `WORKASS_DAEMON_BEACON=0` to disable) uses
+  `239.87.87.88:48788` so daemons can find each other. A LAN-bound daemon
+  listens and announces; a loopback-bound controller listens without
+  announcing an unreachable endpoint. It never sweeps a subnet and probes only
+  the source address of a packet it received.
 - Binding LAN now logs a warning naming exactly what is readable on that
   network. `secure: false` in the health card is truthful and stays false until
   E5 puts a certificate on the port. Badge it.

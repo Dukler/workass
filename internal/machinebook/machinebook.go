@@ -184,6 +184,17 @@ func (b *Book) List() []Entry {
 	return out
 }
 
+func (b *Book) sightingNeedsProbe(machineID, address string) bool {
+	normalized, err := NormalizeAddress(address)
+	if err != nil {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	entry, known := b.entries[strings.TrimSpace(machineID)]
+	return !known || entry.Status != StatusOK || !hasEndpoint(entry.Endpoints, Endpoint{Kind: KindLAN, Address: normalized})
+}
+
 // Add probes an address and records what answered. Probing a machine already
 // in the book adds the endpoint to that entry rather than creating a second
 // one — the same machine on a second network is one machine.

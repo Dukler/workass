@@ -1825,6 +1825,57 @@ func TestLifecycleTraceResurrectReplayExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestFailedSpareWarmTripsCircuitBreakerInsteadOfRespawning(t *testing.T) {
+	var mu sync.Mutex
+	exits := 0
+	blocks := 0
+	blocked := make(chan struct{}, 1)
+	manager, _ := newFakeManager(t, "auth-stderr", Options{
+		SpareSessions:      2,
+		SpareCheckInterval: 20 * time.Millisecond,
+		InitTimeout:        150 * time.Millisecond,
+		RSSSampleInterval:  time.Hour,
+		Logf: func(message string, _ map[string]any) {
+			mu.Lock()
+			defer mu.Unlock()
+			switch message {
+			case "acp engine exited":
+				exits++
+			case "acp spare warming disabled":
+				blocks++
+				select {
+				case blocked <- struct{}{}:
+				default:
+				}
+			}
+		},
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	select {
+	case <-blocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("failed spare warm did not trip its circuit breaker")
+	}
+	// More than five retry intervals must pass without another process launch.
+	time.Sleep(150 * time.Millisecond)
+	mu.Lock()
+	gotExits, gotBlocks := exits, blocks
+	mu.Unlock()
+	if gotExits != 1 || gotBlocks != 1 {
+		t.Fatalf("failed spare launches=%d circuit logs=%d, want one bounded attempt", gotExits, gotBlocks)
+	}
+	manager.mu.Lock()
+	providerID := manager.defaultProviderID
+	isBlocked := manager.spareBlocked[providerID]
+	warming := manager.spareWarming[providerID]
+	spares := manager.spareCountLocked(providerID)
+	manager.mu.Unlock()
+	if !isBlocked || warming != 0 || spares != 0 {
+		t.Fatalf("spare breaker blocked=%v warming=%d spares=%d", isBlocked, warming, spares)
+	}
+}
+
 func TestLifecycleIdleCrashResurrectsOnNextUse(t *testing.T) {
 	manager, events := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })

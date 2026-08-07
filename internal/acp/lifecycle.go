@@ -213,7 +213,7 @@ func (m *Manager) hibernateBridgeIfEligible(b *Bridge, reason string, ttl time.D
 		_ = stdin.Close()
 	}
 	if child != nil && child.Process != nil {
-		_ = child.Process.Kill()
+		_ = stopProcessTree(child.Process)
 	}
 	m.orphanInProcessSpawnedWorkForChat(tabID, chatID, reason)
 	if spare {
@@ -364,15 +364,19 @@ func (m *Manager) WarmSpareSessions() {
 	m.mu.Lock()
 	target := m.opts.SpareSessions
 	for _, providerID := range m.enabledProviderIDsLocked() {
-		for m.spareCountLocked(providerID)+m.spareWarming[providerID] < target {
-			m.spareWarming[providerID]++
-			m.spareSeq++
-			seq := m.spareSeq
-			gen := m.spareGen
-			m.mu.Unlock()
-			go m.warmOneSpare(providerID, gen, seq)
-			m.mu.Lock()
+		// One failed prewarm must never become a process respawn loop. Keep at
+		// most one launch in flight per provider and trip a circuit breaker on
+		// failure. A successful provider detection or explicit toggle resets it.
+		if m.spareBlocked[providerID] || m.spareWarming[providerID] > 0 || m.spareCountLocked(providerID) >= target {
+			continue
 		}
+		m.spareWarming[providerID] = 1
+		m.spareSeq++
+		seq := m.spareSeq
+		gen := m.spareGen
+		m.mu.Unlock()
+		go m.warmOneSpare(providerID, gen, seq)
+		m.mu.Lock()
 	}
 	m.mu.Unlock()
 }
@@ -407,12 +411,23 @@ func (m *Manager) warmOneSpare(providerID string, gen, seq int64) {
 		m.spareWarming[providerID]--
 	}
 	current := gen == m.spareGen
+	blocked := false
 	if err == nil && current && info.SessionID != "" {
+		delete(m.spareBlocked, providerID)
 		m.spareSessions = append(m.spareSessions, spareRecord{info: info, bridgeKey: key, providerID: providerID, createdAt: time.Now(), agentOwnerKey: ownerKey})
+	} else if err != nil && current && !m.spareBlocked[providerID] {
+		m.spareBlocked[providerID] = true
+		blocked = true
 	}
 	m.mu.Unlock()
 	if err != nil {
 		bridge.Close(true, err)
+		if blocked {
+			m.opts.Logf("acp spare warming disabled", map[string]any{
+				"provider": providerID,
+				"error":    redactSensitiveText(err.Error()),
+			})
+		}
 		return
 	}
 	if !current {

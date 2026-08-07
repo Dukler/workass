@@ -52,6 +52,7 @@ type Manager struct {
 	providerUpdateProgress  map[string]ProviderUpdateProgress
 	spareSessions           []spareRecord
 	spareWarming            map[string]int
+	spareBlocked            map[string]bool
 	usageBySession          map[string]contextUsage
 	compactedSeeds          map[string]compactedSeed
 	crashRecoveries         map[string]time.Time
@@ -212,6 +213,7 @@ func NewManager(opts Options) *Manager {
 		providerUpdateLastKnown: make(map[string]ProviderUpdate),
 		providerUpdateProgress:  make(map[string]ProviderUpdateProgress),
 		spareWarming:            make(map[string]int),
+		spareBlocked:            make(map[string]bool),
 		usageBySession:          make(map[string]contextUsage),
 		planUsageByProvider:     make(map[string]PlanUsageSnapshot),
 		planUsageRefreshes:      make(map[string]*planUsageRefreshRun),
