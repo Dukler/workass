@@ -95,6 +95,27 @@ test('native Codex host drives app-server directly with turns, steering, permiss
   assert.equal(limits.result.rateLimits.primary.usedPercent, 17);
 });
 
+test('native Codex host opts URL servers into stateless MCP 2026 per session', async (t) => {
+  const peer = startHost({ WORKASS_CODEX_FIXTURE_REQUIRE_MCP_2026: '1' });
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({
+    jsonrpc: '2.0', id: 2, method: 'session/new', params: {
+      cwd: repoRoot,
+      mcpServers: [{
+        name: 'workass agent',
+        url: 'https://mcp.localhost:18788/workass/mcp/agent',
+        headers: [{ name: 'Authorization', value: 'Bearer fixture-owner' }],
+      }],
+    },
+  });
+  const opened = await peer.waitFor((message) => message.id === 2);
+  assert.equal(opened.error, undefined, JSON.stringify(opened));
+  assert.equal(opened.result.sessionId, 'fixture-codex-thread');
+});
+
 test('native Codex host preserves image blocks on prompts and live steering', async (t) => {
   const peer = startHost();
   t.after(() => peer.child.kill('SIGKILL'));

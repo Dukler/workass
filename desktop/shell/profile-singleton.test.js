@@ -42,6 +42,7 @@ test('a second launch restores and focuses the existing profile window', () => {
     focus: () => calls.push('focus'),
   };
   const app = new FakeApp(true);
+  app.focus = (options) => calls.push(`app-focus:${options?.steal === true}`);
   const acquired = acquireProfileSingleton({
     app,
     profile: 'dev',
@@ -51,5 +52,5 @@ test('a second launch restores and focuses the existing profile window', () => {
 
   assert.equal(acquired, true);
   app.emit('second-instance');
-  assert.deepEqual(calls, ['restore', 'show', 'focus']);
+  assert.deepEqual(calls, ['restore', 'show', 'app-focus:true', 'focus']);
 });

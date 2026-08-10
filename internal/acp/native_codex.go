@@ -32,6 +32,11 @@ func codexNativeHostLaunch(provider ProviderConfig, opts Options, daemonExecutab
 		env = make(map[string]string)
 	}
 	env["WORKASS_CODEX_EXECUTABLE"] = launchCommand(provider)
+	if caFile := strings.TrimSpace(opts.WorkassMCPCACertFile); caFile != "" {
+		// Codex layers CODEX_CA_CERTIFICATE onto its native root store. This is
+		// scoped to the provider process and does not modify system trust.
+		env["CODEX_CA_CERTIFICATE"] = caFile
+	}
 	provider.Command = node
 	provider.ResolvedCommand = ""
 	provider.Args = []string{host}

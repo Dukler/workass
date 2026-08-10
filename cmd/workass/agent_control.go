@@ -1,16 +1,9 @@
 package main
 
 import (
-	"crypto/rand"
-	"crypto/subtle"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"io"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,14 +11,11 @@ import (
 	"workass/internal/artifacthost"
 )
 
-const agentControlPath = "/workass/agent-control"
-
 type agentControlHandler struct {
 	manager   *acp.Manager
 	chats     *chatControlCoordinator
 	state     *sessionStore
 	artifacts *artifacthost.Registry
-	token     string
 }
 
 type agentControlRequest struct {
@@ -33,22 +23,9 @@ type agentControlRequest struct {
 	Params map[string]any `json:"params"`
 }
 
-func newAgentControlHandler(manager *acp.Manager, state *sessionStore, broadcast func(string, any), url, descriptorPath string, coordinators ...*chatControlCoordinator) (*agentControlHandler, error) {
+func newAgentControlHandler(manager *acp.Manager, state *sessionStore, broadcast func(string, any), coordinators ...*chatControlCoordinator) (*agentControlHandler, error) {
 	if manager == nil {
 		return nil, errors.New("agent control requires an ACP manager")
-	}
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		return nil, err
-	}
-	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	descriptor := browserControlDescriptor{Version: 1, URL: strings.TrimSpace(url), Token: token}
-	data, err := json.Marshal(descriptor)
-	if err != nil {
-		return nil, err
-	}
-	if err := writeAgentControlDescriptor(descriptorPath, data); err != nil {
-		return nil, err
 	}
 	var chats *chatControlCoordinator
 	if len(coordinators) > 0 {
@@ -57,67 +34,9 @@ func newAgentControlHandler(manager *acp.Manager, state *sessionStore, broadcast
 	if chats == nil {
 		chats = newChatControlCoordinator(manager, state, broadcast)
 	}
-	handler := &agentControlHandler{manager: manager, chats: chats, state: state, token: token}
+	handler := &agentControlHandler{manager: manager, chats: chats, state: state}
 	chats.resumeQueues()
 	return handler, nil
-}
-
-func writeAgentControlDescriptor(path string, data []byte) error {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return errors.New("agent control descriptor path is empty")
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".agent-control-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	// Windows os.Rename does not replace an existing file. The descriptor is a
-	// transient daemon-owned capability and is rewritten on every healthy boot.
-	_ = os.Remove(path)
-	return os.Rename(tmpName, path)
-}
-
-func (h *agentControlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL == nil || r.URL.Path != agentControlPath || r.Method != http.MethodPost || !localRemoteAddr(r.RemoteAddr) {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if len(provided) != len(h.token) || subtle.ConstantTimeCompare([]byte(provided), []byte(h.token)) != 1 {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(browserControlReply{Error: "unauthorized"})
-		return
-	}
-	var request agentControlRequest
-	dec := json.NewDecoder(io.LimitReader(r.Body, 4*1024*1024))
-	dec.UseNumber()
-	if err := dec.Decode(&request); err != nil {
-		_ = json.NewEncoder(w).Encode(browserControlReply{Error: "invalid agent control request"})
-		return
-	}
-	result, err := h.call(r, request)
-	if err != nil {
-		_ = json.NewEncoder(w).Encode(browserControlReply{Error: acp.RedactSensitiveText(err.Error())})
-		return
-	}
-	_ = json.NewEncoder(w).Encode(browserControlReply{Result: redactSessionValue(result)})
 }
 
 func (h *agentControlHandler) call(r *http.Request, request agentControlRequest) (any, error) {

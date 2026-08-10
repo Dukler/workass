@@ -59,6 +59,49 @@ func TestHalfAPairIsAnErrorRatherThanASilentReMint(t *testing.T) {
 	}
 }
 
+func TestLoopbackServerCertificateChainsToPermanentRoot(t *testing.T) {
+	root, err := Ensure(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafPair, err := IssueLoopbackServerCertificate(root, "mcp.localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leafPair.Certificate) != 2 {
+		t.Fatalf("certificate chain length = %d, want leaf + root", len(leafPair.Certificate))
+	}
+	leaf, err := x509.ParseCertificate(leafPair.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaf.IsCA {
+		t.Fatal("loopback server certificate is a CA")
+	}
+	roots := x509.NewCertPool()
+	rootCertificate, err := x509.ParseCertificate(root.TLS.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots.AddCert(rootCertificate)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "mcp.localhost"}); err != nil {
+		t.Fatalf("verify loopback leaf: %v", err)
+	}
+	if FingerprintOf(root.TLS.Certificate[0]) != root.Fingerprint {
+		t.Fatal("issuing a loopback leaf changed the permanent root identity")
+	}
+}
+
+func TestLoopbackServerCertificateRejectsNonLocalhostName(t *testing.T) {
+	root, err := Ensure(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := IssueLoopbackServerCertificate(root, "example.com"); err == nil {
+		t.Fatal("issued a loopback certificate for a non-localhost name")
+	}
+}
+
 // It has to actually serve. A certificate that loads but cannot complete a
 // handshake is the failure that only shows up on the network.
 func TestItServesAndThePinnedFingerprintIsWhatArrives(t *testing.T) {

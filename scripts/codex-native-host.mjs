@@ -410,6 +410,11 @@ function sessionConfig(cwd, mcpServers) {
   }
   return {
     projects: { [cwd]: { trust_level: 'trusted' } },
+    // Codex 0.147 ships MCP 2026-07-28 behind an explicit feature while
+    // retaining the stateful legacy lifecycle by default. Workass endpoints
+    // implement only the released stateless lifecycle, so opt this session in
+    // without mutating the user's global Codex configuration.
+    features: { mcp_2026_07_28: true },
     ...(Object.keys(servers).length ? { mcp_servers: servers } : {}),
   };
 }

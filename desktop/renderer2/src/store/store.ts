@@ -146,6 +146,13 @@ export class Store {
   private queueMutationRevision = 0;
   private pendingQueueMutationVersions = new Map<string, number>();
   private pendingQueueSnapshots = new Map<string, QueuedMsg[] | undefined>();
+  // Draft edits have the same renderer-versus-digest race as queue edits. In
+  // particular, submission clears the composer before archive/session work is
+  // allowed to await; a digest carrying the pre-send text must not put that
+  // already-owned prompt back into the box while its save is still in flight.
+  private draftMutationRevision = 0;
+  private pendingDraftMutationVersions = new Map<string, number>();
+  private pendingDraftSnapshots = new Map<string, string>();
   // Membership/order changes and hydration boundaries must send one complete
   // tree. The revision protects a new force-full request from an older save's
   // acknowledgement in the same way dirtyChatVersions protects chat edits.
@@ -491,11 +498,14 @@ export class Store {
       : (!lean ? [...this.pendingChatDeletes] : []);
     const sentDirtyVersions = new Map<string, number>();
     const sentQueueVersions = new Map<string, number>();
+    const sentDraftVersions = new Map<string, number>();
     for (const chat of snapshot.chats) {
       if (!this.dirtyChats.has(chat.id)) continue;
       sentDirtyVersions.set(chat.id, this.dirtyChatVersions.get(chat.id) ?? 0);
       const queueVersion = this.pendingQueueMutationVersions.get(chat.id);
       if (queueVersion !== undefined) sentQueueVersions.set(chat.id, queueVersion);
+      const draftVersion = this.pendingDraftMutationVersions.get(chat.id);
+      if (draftVersion !== undefined) sentDraftVersions.set(chat.id, draftVersion);
     }
     const saved = await call('saveSession', snapshot);
     if (lean) this.durableImagePayloads.acknowledge(snapshot, saved === true);
@@ -509,6 +519,11 @@ export class Store {
         if (this.pendingQueueMutationVersions.get(id) !== version) continue;
         this.pendingQueueMutationVersions.delete(id);
         this.pendingQueueSnapshots.delete(id);
+      }
+      for (const [id, version] of sentDraftVersions) {
+        if (this.pendingDraftMutationVersions.get(id) !== version) continue;
+        this.pendingDraftMutationVersions.delete(id);
+        this.pendingDraftSnapshots.delete(id);
       }
       if (full && this.fullSaveRevision === fullRevision) this.fullSavePending = false;
     }
@@ -789,6 +804,13 @@ export class Store {
     }
   }
 
+  private restorePendingDrafts(restored: Chat[]) {
+    for (const chat of restored) {
+      const draft = this.pendingDraftSnapshots.get(chat.id);
+      if (draft !== undefined) chat.draft = draft;
+    }
+  }
+
   private preserveNewerLocalControls(previous: Chat[], restored: Chat[]) {
     const localByID = new Map(previous.map((chat) => [chat.id, chat]));
     for (const chat of restored) {
@@ -882,6 +904,7 @@ export class Store {
       this.carryPendingCreatedChats(previousChats, restored.chats),
     );
     this.restoreDraftImages(previousChats, this.state.chats);
+    this.restorePendingDrafts(this.state.chats);
     // A digest can legitimately arrive before the renderer's queue save reply.
     // Keep the exact local projection until that reply clears its fence; the
     // daemon's next save reconciliation remains authoritative afterward.
@@ -1488,6 +1511,7 @@ export class Store {
       this.state.chats = this.carryRemoteChats(live.chats, this.state.chats);
       this.preserveNewerLocalControls(live.chats, this.state.chats);
       this.restoreDraftImages(live.chats, this.state.chats);
+      this.restorePendingDrafts(this.state.chats);
       // Permission events are subscribed before this await, so a card raised
       // during boot is already in `live` and would be wiped by the replacement.
       this.carryOpenPermissions(live.chats, this.state.chats);
@@ -2228,6 +2252,8 @@ export class Store {
     const chat = this.chat(id);
     if (!chat) return;
     chat.draft = text;
+    this.pendingDraftMutationVersions.set(chat.id, ++this.draftMutationRevision);
+    this.pendingDraftSnapshots.set(chat.id, text);
     this.touchChat(chat.id);
     this.schedulePersist(); // no re-render; textarea owns its value
   }
@@ -2448,9 +2474,14 @@ export class Store {
   }
 
   // ---- send / cancel ---------------------------------------------------
-  async sendTo(chatId: string, prompt: string, images?: StartJobOpts['images']): Promise<boolean> {
+  async sendTo(chatId: string, prompt: string, images?: StartJobOpts['images'], submittedDraft = prompt): Promise<boolean> {
     const chat = this.chat(chatId);
     if (!chat) return false;
+    // Claim the exact composer value synchronously, before `_send` can suspend
+    // on archive hydration. This is the ownership boundary: after it, the user
+    // row (or failed-send row) owns the prompt, so a fast tab switch must see an
+    // empty draft. Do not erase text typed while attachments were preparing.
+    if (chat.draft === submittedDraft) this.setDraft(chat.id, '');
     return this._send(chat, prompt, images);
   }
   // Steer the running turn if the bridge supports it, else queue locally and
@@ -2503,7 +2534,7 @@ export class Store {
         : insertChronologicalSteer(chat.messages, pendingUser, continuation);
       if (!inserted) return false;
       if (!stagedNativeBoundary) this.rebuildJobRefs();
-      chat.draft = '';
+      this.setDraft(chat.id, '');
       this.bumpChat(chat);
       return this.steerDispatches.run(chat.id, async () => {
         // The daemon persists the same staged ownership before turn/steer. For
@@ -2571,7 +2602,7 @@ export class Store {
       ? queuedDraftMessage(rid('q'), redactSensitiveText(prompt), owned)
       : queuedMessage(rid('q'), redactSensitiveText(prompt));
     (chat.queue ??= []).push(item);
-    chat.draft = '';
+    this.setDraft(chat.id, '');
     if (owned.length) {
       const remaining = withoutDraftImages(chat.draftImages, selected);
       chat.draftImages = remaining.length ? remaining : undefined;
@@ -2735,7 +2766,6 @@ export class Store {
       const user: Msg = { id: rid('u'), role: 'user', content: display, status: 'done', at: now, events: [], images: messageImages(images) };
       const asst: Msg = { id: rid('a'), role: 'assistant', content: '', status: 'failed', at: now, events: [], interrupted: true, retryPrompt: prompt };
       chat.messages.push(user, asst);
-      chat.draft = '';
       if (!chat.titleLocked) { chat.title = display.trim().slice(0, 34) || chat.title; chat.titleLocked = true; }
       this.bumpChat(chat);
       return false;
@@ -2747,7 +2777,6 @@ export class Store {
     const asst: Msg = { id: rid('a'), role: 'assistant', content: '', status: 'running', at: null, events: [], turnStartedAt: Date.now() };
     const history = providerHistoryMessages(chat.messages);
     chat.messages.push(user, asst);
-    chat.draft = '';
     if (!chat.titleLocked) { chat.title = display.trim().slice(0, 34) || chat.title; chat.titleLocked = true; }
     this.bumpChat(chat);
 

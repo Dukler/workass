@@ -805,7 +805,6 @@ class ClaudeSession {
 
   async enqueuePrompt(blocks) {
     if (this.activePrompt) throw new Error('A Claude turn is already running');
-    await this.ensureQuery();
     const uuid = randomUUID();
     const message = sdkUserMessage(this.sessionId, blocks, uuid);
     this.startedTurns = true;
@@ -825,9 +824,26 @@ class ClaudeSession {
         bufferedText: '',
         substantiveOutput: false,
         establishedBeforePrompt: this.conversation.snapshotEstablished(),
+        inputSubmitted: false,
+        earlySteers: [],
       };
     });
-    this.input.push(message);
+    const active = this.activePrompt;
+    try {
+      // Reserve the turn before the first await. JSON-RPC requests are handled
+      // concurrently so a steer can arrive in the same event-loop window as
+      // session/prompt; exposing no active prompt here rejected a direction
+      // that was ordered after the prompt on stdin.
+      await this.ensureQuery();
+      if (this.activePrompt !== active || this.closed) return response;
+      this.input.push(message);
+      active.inputSubmitted = true;
+      // The original prompt must enter the SDK queue first. Steers accepted
+      // while ensureQuery was reopening the provider follow it in wire order.
+      for (const earlySteer of active.earlySteers.splice(0)) this.input.push(earlySteer);
+    } catch (error) {
+      if (this.activePrompt === active) this.settlePrompt(null, error);
+    }
     return response;
   }
 
@@ -844,7 +860,8 @@ class ClaudeSession {
     // before the model said anything, it is the message we have to ask again
     // (see redriveSteersAfterEmptyAbort).
     this.steers.retain(uuid, { clientUserMessageId: clientUserMessageId || '', message });
-    this.input.push(message);
+    if (this.activePrompt.inputSubmitted) this.input.push(message);
+    else this.activePrompt.earlySteers.push(message);
     return { turnId: uuid, receipt: Boolean(clientUserMessageId) };
   }
 

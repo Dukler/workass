@@ -2,23 +2,39 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DirListing } from '../src/wire/types.ts';
 import {
-  canSelectFolder, errorListing, folderCountLabel, isFolderClickThrough, isServerRoots, normalizeEntries, normalizeListing,
+  canSelectFolder, errorListing, folderCountLabel, folderNameError, isFolderClickThrough, isServerRoots,
+  normalizeCreatedDirectory, normalizeEntries, normalizeListing,
   pathLabel, SERVER_ROOTS_LABEL,
 } from '../src/workspace-picker.ts';
 
-test('the roots reply keeps its null path and is never selectable', () => {
+test('the default request resolves to the server user home and is selectable', () => {
+  const home = normalizeListing(
+    { path: '/Users/me', parent: '/Users', entries: [{ name: 'Documents', path: '/Users/me/Documents' }, { name: 'Workspace', path: '/Users/me/Workspace' }] },
+    null,
+  );
+  assert.equal(home.path, '/Users/me');
+  assert.equal(home.parent, '/Users');
+  assert.equal(home.error, undefined);
+  assert.deepEqual(home.entries.map((entry) => entry.path), ['/Users/me/Documents', '/Users/me/Workspace']);
+  assert.equal(isServerRoots(home), false);
+  assert.equal(canSelectFolder(home), true);
+  assert.equal(pathLabel(home), '/Users/me');
+  assert.equal(folderCountLabel(home), '2 carpetas');
+});
+
+test('a legacy roots reply keeps its null path and is never selectable', () => {
   const roots = normalizeListing(
-    { path: null, parent: null, entries: [{ name: 'Inicio', path: '/Users/me' }, { name: 'Workspace', path: '/Users/me/Workspace' }] },
+    { path: null, parent: null, entries: [{ name: 'Inicio', path: '/Users/me' }] },
     null,
   );
   assert.equal(roots.path, null);
   assert.equal(roots.parent, null);
   assert.equal(roots.error, undefined);
-  assert.deepEqual(roots.entries.map((entry) => entry.path), ['/Users/me', '/Users/me/Workspace']);
+  assert.deepEqual(roots.entries.map((entry) => entry.path), ['/Users/me']);
   assert.equal(isServerRoots(roots), true);
   assert.equal(canSelectFolder(roots), false, 'the roots are shortcuts, not a folder to confirm');
   assert.equal(pathLabel(roots), SERVER_ROOTS_LABEL);
-  assert.equal(folderCountLabel(roots), '2 carpetas');
+  assert.equal(folderCountLabel(roots), '1 carpeta');
 });
 
 test('a directory reply carries the absolute server path, its parent and its folders', () => {
@@ -104,4 +120,46 @@ test('nothing is selectable before the first listing lands', () => {
   assert.equal(isServerRoots(null), false);
   assert.equal(pathLabel(null), SERVER_ROOTS_LABEL);
   assert.equal(folderCountLabel(null), 'Sin subcarpetas');
+});
+
+test('new folder names are one direct child, never a path', () => {
+  assert.equal(folderNameError('Project Alpha'), null);
+  assert.equal(folderNameError('  Project Alpha  '), null);
+  assert.match(String(folderNameError('  ')), /nombre/i);
+  for (const unsafe of ['.', '..', 'nested/child', `nested\\child`, 'nul\0byte']) {
+    assert.match(String(folderNameError(unsafe)), /separadores/i, unsafe);
+  }
+});
+
+test('a create reply must confirm the exact parent and trimmed name before navigation', () => {
+  assert.deepEqual(
+    normalizeCreatedDirectory(
+      { parent: '/Users/me/Projects', name: 'New App', path: '/Users/me/Projects/New App' },
+      '/Users/me/Projects',
+      '  New App  ',
+    ),
+    { parent: '/Users/me/Projects', name: 'New App', path: '/Users/me/Projects/New App' },
+  );
+
+  for (const raw of [
+    null,
+    { parent: '/Users/me/Elsewhere', name: 'New App', path: '/Users/me/Elsewhere/New App' },
+    { parent: '/Users/me/Projects', name: 'Other', path: '/Users/me/Projects/Other' },
+    { parent: '/Users/me/Projects', name: 'New App' },
+  ]) {
+    const result = normalizeCreatedDirectory(raw, '/Users/me/Projects', 'New App');
+    assert.equal(result.path, null);
+    assert.ok(result.error);
+  }
+});
+
+test('a create failure stays anchored to the requested parent', () => {
+  const result = normalizeCreatedDirectory(
+    { parent: '/wrong', name: 'New App', path: null, error: 'permission denied' },
+    '/Users/me/Projects',
+    'New App',
+  );
+  assert.deepEqual(result, {
+    parent: '/Users/me/Projects', name: 'New App', path: null, error: 'permission denied',
+  });
 });

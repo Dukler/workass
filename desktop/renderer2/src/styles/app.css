@@ -215,7 +215,7 @@ aside.side {
 .acctmenu { position: relative; }
 .acct { display: flex; align-items: center; gap: 9px; width: calc(100% + 12px); box-sizing: border-box; margin: 0 -6px; padding: 5px 6px; color: var(--ink2); font-size: 13px; border: 0; background: transparent; font-family: inherit; text-align: left; border-radius: 8px; cursor: pointer; transition: background .15s ease, color .15s ease; }
 .acct:hover, .acct.on { background: var(--line); color: var(--ink); }
-.acct .ava { width: 22px; height: 22px; border-radius: 50%; background: var(--field); border: 1px solid var(--line2); display: grid; place-items: center; font-size: 10.5px; font-weight: 600; flex: none; }
+.acct .ava { width: 22px; height: 22px; border-radius: 6px; background: url('../../../assets/workass-macos.png') center / cover no-repeat; flex: none; }
 .acct .acct-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acct .chev { margin-left: auto; color: var(--faint); flex: none; }
 
@@ -362,9 +362,11 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
 .tbar .bgchip:hover { background: var(--line); color: var(--ink); }
 .tbar .bgchip svg { width: 12px; height: 12px; color: var(--acc); }
 
-/* "↓ N mensajes nuevos" pill — floats above the composer when the user has
-   scrolled up during streaming (SCROLL CONTRACT). Click jumps to bottom. */
-.newpill { position: absolute; left: 50%; transform: translateX(-50%); bottom: 92px; z-index: 6; display: inline-flex; align-items: center; gap: 6px; padding: 5px 13px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line2); color: var(--ink2); font: inherit; font-size: 12px; cursor: pointer; box-shadow: 0 6px 20px rgba(0, 0, 0, .35); animation: toast-in .18s ease; }
+/* "↓ N mensajes nuevos" pill — floats above the transcript floor when the
+   user has scrolled up during streaming (SCROLL CONTRACT). Click jumps to
+   bottom; a live pulse raises it by exactly that dock's reserved height. */
+.newpill { position: absolute; left: 50%; transform: translateX(-50%); bottom: 14px; z-index: 6; display: inline-flex; align-items: center; gap: 6px; padding: 5px 13px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line2); color: var(--ink2); font: inherit; font-size: 12px; cursor: pointer; box-shadow: 0 6px 20px rgba(0, 0, 0, .35); animation: toast-in .18s ease; }
+.newpill.with-live { bottom: calc(var(--thinklive-h) + 14px); }
 .newpill:hover { background: var(--field); color: var(--ink); }
 .newpill .arr { color: var(--acc); font-size: 12px; line-height: 1; }
 .tbar { display: flex; align-items: center; gap: 10px; padding: 0 20px 0 24px; height: 40px; flex: none; }
@@ -406,8 +408,11 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
 /* stable both-edges reserves the 9px classic-scrollbar gutter symmetrically, so
    the centered .doc stays on the same centerline as the (scrollbar-free)
    composer below it — and doesn't shift 4.5px when the scrollbar appears. */
+.transcriptviewport { position: relative; flex: 1; min-height: 0; --thinklive-h: 40px; }
+.transcriptviewport > .scroll { height: 100%; }
 .scroll { flex: 1; overflow-y: auto; min-height: 0; scrollbar-gutter: stable both-edges; }
 .doc { max-width: var(--read); margin: 0 auto; padding: 26px 36px var(--doc-pad-b); }
+.transcriptviewport.has-live .doc { padding-bottom: calc(var(--doc-pad-b) + var(--thinklive-h)); }
 
 .userpill { display: flex; flex-direction: column; align-items: flex-end; margin: 12px 0 20px; }
 .userpill-text { background: var(--field); border: 1px solid var(--line); border-radius: 14px; padding: 7px 13px; max-width: 78%; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
@@ -480,19 +485,14 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .steprow .stexpand { margin-top: 5px; color: var(--ink2); white-space: pre-wrap; font-size: 12px; }
 
 /* ── the live thinking row (approved mock thinking-composer, 2026-07-24) ──────
-   It is the newest event of a running turn, so it renders at the TAIL of the
-   turn and sticks to the bottom of the scrollport: a long answer scrolls behind
-   it instead of pushing it out of sight. When the turn closes it stops being
-   pinned and settles into the ordinary one-line "Pensó" row, in place.
-
-   A sticky child cannot leave its containing block, so `.doc`'s bottom padding
-   was parking this row 30px short of the scrollport floor — a dead band between
-   the live word and the composer that only ever appeared mid-turn (2026-07-29).
-   Cancelling that padding is what lets `bottom: 0` actually mean the bottom; the
-   row's own 11px is the breathing room. Nothing follows it inside .doc, so the
-   negative margin just hands the settled-message gutter to the live row. */
-.thinklive { position: sticky; bottom: 0; margin-top: 4px; margin-bottom: calc(-1 * var(--doc-pad-b));
-  padding: 9px 0 11px; max-width: var(--read);
+   It is transient scrollport chrome, not a child of the growing assistant
+   message. Absolute positioning against `.transcriptviewport` makes `bottom:0`
+   a real physical anchor on both short and long transcripts; the live doc
+   padding above reserves the same height so its final row is never obscured.
+   When the turn closes this dock disappears and the ordinary one-line "Pensó"
+   row settles into transcript chronology. */
+.thinklive { position: absolute; left: 0; right: 0; bottom: 0; z-index: 5; margin: 0 auto;
+  width: 100%; height: var(--thinklive-h); padding: 9px 36px 11px; max-width: var(--read); pointer-events: none;
   background: linear-gradient(to top, var(--bg) 62%, color-mix(in srgb, var(--bg) 88%, transparent) 86%, transparent); }
 .thinklive .steprow { margin: 0; width: 100%; }
 
@@ -1614,6 +1614,13 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
    stays readable: an RTL box ellipsizes at the start, and the U+200E prefix
    (LTR_MARK in WorkspaceBrowser.tsx) keeps the path itself left-to-right. */
 .wbpath { flex: 1; min-width: 0; direction: rtl; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: var(--field); border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px; color: var(--ink2); font-size: 11.5px; }
+.wbnew { display: grid; grid-template-columns: auto minmax(120px, 1fr) auto auto; align-items: center; gap: 7px; padding: 9px 12px; background: var(--bg); border-bottom: 1px solid var(--line); flex: none; }
+.wbnew label { color: var(--muted); font-size: 11.5px; }
+.wbnew input { min-width: 0; height: 28px; box-sizing: border-box; border: 1px solid var(--line2); border-radius: 7px; background: var(--field); color: var(--ink); font: inherit; font-size: 12px; padding: 4px 8px; outline: 0; }
+.wbnew input:focus { border-color: color-mix(in srgb, var(--acc) 58%, var(--line2)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acc) 30%, transparent); }
+.wbnew input[aria-invalid="true"] { border-color: color-mix(in srgb, var(--del) 62%, var(--line2)); }
+.wbnew .btn { padding: 4px 10px; }
+.wbnewerr { grid-column: 2 / -1; color: var(--del); font-size: 11.5px; word-break: break-word; }
 .wblist { flex: 1; min-height: 130px; overflow-y: auto; padding: 6px; }
 .wbrow { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 9px; border: 0; border-radius: 9px; background: transparent; color: var(--ink2); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .wbrow:hover { background: var(--line); color: var(--ink); }
@@ -1633,9 +1640,18 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .wbfoot .sp { flex: 1; }
 .wbfoot .wbcount { color: var(--faint); font-size: 11.5px; }
 .wbfoot .btn { padding: 4px 12px; }
+.wbfoot .wbnewbtn { display: inline-flex; align-items: center; gap: 6px; }
+.wbfoot .wbnewbtn svg { width: 14px; height: 14px; stroke-width: 1.3; }
 .wbfoot .btn:focus-visible { background: var(--line); color: var(--ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acc) 50%, transparent); }
 .wbfoot .btn:disabled { opacity: .5; cursor: default; }
 .wbfoot .btn:disabled:hover { background: var(--field); color: var(--ink2); }
+@media (max-width: 430px) {
+  .wbnew { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .wbnew > .btn.pri { grid-column: 2; grid-row: 2; justify-self: end; }
+  .wbnew > .btn:not(.pri) { grid-column: 3; grid-row: 2; }
+  .wbnewerr { grid-column: 1 / -1; }
+  .wbfoot .wbcount { display: none; }
+}
 
 /* per-turn Deshacer/Revisar affordance (revealed on message hover) */
 .turnacts { display: inline-flex; gap: 4px; margin-left: auto; opacity: 0; transition: opacity .12s ease; }

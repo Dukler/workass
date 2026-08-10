@@ -102,7 +102,7 @@ func TestClaudeBridgeLaunchUsesWorkassSDKHostAndOfficialExecutable(t *testing.T)
 	writeExecutable(t, claude, nativeNoopScript())
 	launch, err := claudeNativeHostLaunch(ProviderConfig{
 		ID: "claude", Command: claude, CWD: root, Env: map[string]string{"FIXTURE": "yes"},
-	}, Options{RootDir: root}, filepath.Join(t.TempDir(), "workass"))
+	}, Options{RootDir: root, WorkassMCPCACertFile: "/workass/public-mcp-ca.pem"}, filepath.Join(t.TempDir(), "workass"))
 	if err != nil {
 		t.Fatalf("resolve Claude SDK host: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestClaudeBridgeLaunchUsesWorkassSDKHostAndOfficialExecutable(t *testing.T)
 		t.Fatalf("host launch = %#v", launch)
 	}
 	if launch.Env["WORKASS_CLAUDE_EXECUTABLE"] != claude || launch.Env["WORKASS_CLAUDE_SDK_MODULE"] != sdk ||
-		launch.Env["FIXTURE"] != "yes" {
+		launch.Env["FIXTURE"] != "yes" || launch.Env["NODE_EXTRA_CA_CERTS"] != "/workass/public-mcp-ca.pem" {
 		t.Fatalf("host env = %#v", launch.Env)
 	}
 }
@@ -238,15 +238,19 @@ func TestCodexBridgeLaunchUsesWorkassAppServerHostAndOfficialExecutable(t *testi
 	writeExecutable(t, codex, nativeNoopScript())
 	launch, err := codexNativeHostLaunch(ProviderConfig{
 		ID: "codex", Command: codex, CWD: root, Env: map[string]string{"FIXTURE": "yes"},
-	}, Options{RootDir: root}, filepath.Join(t.TempDir(), "workass"))
+	}, Options{RootDir: root, WorkassMCPCACertFile: "/workass/public-mcp-ca.pem"}, filepath.Join(t.TempDir(), "workass"))
 	if err != nil {
 		t.Fatalf("resolve Codex app-server host: %v", err)
 	}
 	if launch.Command != node || len(launch.Args) != 1 || launch.Args[0] != host {
 		t.Fatalf("host launch = %#v", launch)
 	}
-	if launch.Env["WORKASS_CODEX_EXECUTABLE"] != codex || launch.Env["FIXTURE"] != "yes" {
+	if launch.Env["WORKASS_CODEX_EXECUTABLE"] != codex || launch.Env["FIXTURE"] != "yes" ||
+		launch.Env["CODEX_CA_CERTIFICATE"] != "/workass/public-mcp-ca.pem" {
 		t.Fatalf("host env = %#v", launch.Env)
+	}
+	if _, ok := launch.Env["SSL_CERT_FILE"]; ok {
+		t.Fatalf("host env replaces native roots through SSL_CERT_FILE: %#v", launch.Env)
 	}
 }
 

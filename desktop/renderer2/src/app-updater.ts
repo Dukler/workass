@@ -4,6 +4,7 @@ export type AppUpdaterPhase =
   | 'unavailable'
   | 'idle'
   | 'checking'
+  | 'check_failed'
   | 'current'
   | 'available'
   | 'downloading'
@@ -85,6 +86,7 @@ export function appUpdaterPhaseText(state: AppUpdaterState): string {
     case 'unavailable': return 'Esta compilación no admite actualizaciones automáticas.';
     case 'idle': return 'Listo para buscar una versión verificada de Workass.';
     case 'checking': return 'Buscando una versión verificada…';
+    case 'check_failed': return state.error || 'No se pudo consultar GitHub para buscar actualizaciones.';
     case 'current': return 'Workass está al día.';
     case 'available': return `Workass ${state.targetVersion || ''} está disponible.`.trim();
     case 'downloading': return `Descargando la versión verificada… ${Math.round(state.progress * 100)}%`;

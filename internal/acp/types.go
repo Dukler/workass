@@ -90,11 +90,16 @@ type Options struct {
 	// RuntimeProfile is set explicitly by the Workass daemon. Empty is kept
 	// unfiltered for package/test callers; the production binary always passes
 	// "prod", while isolated development passes "dev" or "test".
-	RuntimeProfile                 string
-	BrowserMCPCommand              string
-	BrowserMCPControlFile          string
-	AgentMCPCommand                string
-	AgentMCPControlFile            string
+	RuntimeProfile string
+	// WorkassMCPBaseURL is the daemon-owned HTTPS origin that serves the
+	// stateless 2026-07-28 Workass MCP endpoints. The provider harness receives
+	// only per-session bearer headers; there is no MCP helper subprocess or
+	// callback descriptor.
+	WorkassMCPBaseURL string
+	// WorkassMCPCACertFile is the public certificate providers add to their TLS
+	// trust store for the daemon's self-signed, pinned Workass identity. It is
+	// never the private key and verification is never disabled.
+	WorkassMCPCACertFile           string
 	LocalModelEndpoints            []string
 	ProviderDetectionRetryBackoffs []time.Duration
 	Version                        string

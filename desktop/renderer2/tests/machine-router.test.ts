@@ -35,6 +35,15 @@ test('an untagged call goes local and a tagged one goes to its machine', async (
   assert.equal(localCalls.length, 1, 'the local bridge saw only the untagged call');
 });
 
+test('server folder creation uses the additive fs:create-dir payload', async () => {
+  const calls: unknown[][] = [];
+  const local = { createDir: (...args: unknown[]) => { calls.push(args); return Promise.resolve({ path: '/Users/me/New App' }); } };
+  const router = createMachineRouter({ local: () => local as never, links: () => new Map(), subscribeRemote: () => {} }) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+  await router.createDir('/Users/me', 'New App');
+  assert.deepEqual(calls, [['/Users/me', 'New App']]);
+  assert.ok(ROUTED_METHODS.includes('createDir'));
+});
+
 test('a tagged id is found wherever it sits in the arguments', () => {
   assert.equal(routeOf([]), '');
   assert.equal(routeOf(['chat-1']), '');

@@ -2,29 +2,26 @@ package acp
 
 import (
 	"context"
-	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestAgentMCPIsInjectedIntoSpareSessionsWithOpaqueOwnerKey(t *testing.T) {
-	command := filepath.Join(t.TempDir(), "workass")
 	servers := agentMCPServers(Options{
-		AgentMCPCommand:     command,
-		AgentMCPControlFile: "/tmp/workass-agent-control.json",
+		WorkassMCPBaseURL: "https://localhost:8788",
 	}, SessionOptions{Spare: true, AgentOwnerKey: "owner-spare-1"})
 	if len(servers) != 1 {
 		t.Fatalf("agent MCP servers = %#v, want one for spare session", servers)
 	}
 	server := mapFromAny(servers[0])
-	joined := fmt.Sprint(server["args"])
-	if server["name"] != "workass-agent" || server["command"] != command ||
-		!strings.Contains(joined, "--owner-key owner-spare-1") {
+	headers, _ := server["headers"].(map[string]string)
+	if server["name"] != "workass-agent" || server["type"] != "http" ||
+		server["url"] != "https://localhost:8788/workass/mcp/agent" ||
+		headers["Authorization"] != "Bearer owner-spare-1" || server["command"] != nil {
 		t.Fatalf("agent MCP descriptor = %#v", server)
 	}
-	if got := agentMCPServers(Options{AgentMCPCommand: command}, SessionOptions{Ephemeral: true, AgentOwnerKey: "probe"}); len(got) != 0 {
+	if got := agentMCPServers(Options{WorkassMCPBaseURL: "https://localhost:8788"}, SessionOptions{Ephemeral: true, AgentOwnerKey: "probe"}); len(got) != 0 {
 		t.Fatalf("catalog probe received agent MCP: %#v", got)
 	}
 }
@@ -32,8 +29,7 @@ func TestAgentMCPIsInjectedIntoSpareSessionsWithOpaqueOwnerKey(t *testing.T) {
 func TestSpareAdoptionRebindsInjectedAgentOwnerToRealChat(t *testing.T) {
 	manager, _ := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
-	manager.opts.AgentMCPCommand = filepath.Join(t.TempDir(), "workass")
-	manager.opts.AgentMCPControlFile = filepath.Join(t.TempDir(), "agent-control.json")
+	manager.opts.WorkassMCPBaseURL = "https://localhost:8788"
 	manager.mu.Lock()
 	providerID := manager.defaultProviderID
 	gen := manager.spareGen
@@ -65,7 +61,7 @@ func TestSpareAdoptionRebindsInjectedAgentOwnerToRealChat(t *testing.T) {
 }
 
 func TestEnvironmentBriefAdvertisesAgentCatalogAndSpawnTools(t *testing.T) {
-	manager := NewManager(Options{AgentMCPCommand: filepath.Join(t.TempDir(), "workass")})
+	manager := NewManager(Options{WorkassMCPBaseURL: "https://localhost:8788"})
 	t.Cleanup(func() { manager.Reset() })
 	brief := manager.buildEnvironmentBrief(false)
 	for _, want := range []string{

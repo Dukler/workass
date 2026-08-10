@@ -279,15 +279,16 @@ test('one apply action stages and commits an available release without a second 
   assert.deepEqual(steps, ['download', 'install']);
 });
 
-test('a missing platform asset means current while real feed failures stay visible', async () => {
+test('a missing platform asset means current while a feed failure cannot impersonate an attempted update', async () => {
   const missing = managerFixture();
   missing.manager.deps.fetchManifest = async () => { throw Object.assign(new Error('HTTP 404'), { statusCode: 404 }); };
   assert.equal((await missing.manager.check()).phase, 'current');
   const broken = managerFixture();
   broken.manager.deps.fetchManifest = async () => { throw new Error('TLS failed'); };
   const state = await broken.manager.check();
-  assert.equal(state.phase, 'failed');
+  assert.equal(state.phase, 'check_failed');
   assert.match(state.error, /TLS failed/);
+  assert.equal(state.receipt, null);
 });
 
 test('an empty local feed means current while malformed local metadata stays visible', async () => {
@@ -299,8 +300,21 @@ test('an empty local feed means current while malformed local metadata stays vis
   broken.manager.feedURL = path.join(root, 'workass-darwin-arm64-release.json');
   fs.writeFileSync(broken.manager.feedURL, '{');
   const state = await broken.manager.check();
-  assert.equal(state.phase, 'failed');
+  assert.equal(state.phase, 'check_failed');
   assert.match(state.error, /valid JSON/);
+});
+
+test('retrying a failed availability check cannot download or install when the current release is latest', async () => {
+  const { manager } = managerFixture();
+  const actions = [];
+  manager.deps.fetchManifest = async () => manifest({ version: '1.1.0' });
+  manager.download = async () => { actions.push('download'); return manager.snapshot(); };
+  manager.install = async () => { actions.push('install'); return manager.snapshot(); };
+  manager.publish({ phase: 'check_failed', error: 'offline' });
+
+  const state = await manager.apply();
+  assert.equal(state.phase, 'current');
+  assert.deepEqual(actions, []);
 });
 
 test('updater operations are serialized so two clicks cannot arm competing transactions', async () => {
@@ -338,4 +352,27 @@ test('automatic checks discover a newly published local release without restarti
 
   manager.dispose();
   assert.deepEqual(cancelled, [scheduled[0], repeated[0]]);
+});
+
+test('an automatic availability-check failure remains retryable without becoming an update transaction', async () => {
+  const { manager } = managerFixture();
+  const scheduled = [];
+  const repeated = [];
+  let fetches = 0;
+  manager.deps.fetchManifest = async () => {
+    fetches += 1;
+    if (fetches === 1) throw new Error('offline');
+    return manifest({ version: '1.1.0' });
+  };
+  manager.deps.schedule = (fn) => { const handle = { fn, unref() {} }; scheduled.push(handle); return handle; };
+  manager.deps.repeat = (fn) => { const handle = { fn, unref() {} }; repeated.push(handle); return handle; };
+  manager.publish({ phase: 'idle', targetVersion: null, error: null, receipt: null });
+
+  manager.startAutoChecks({ initialDelayMs: 15, intervalMs: 30 });
+  const failedCheck = await scheduled[0].fn();
+  assert.equal(failedCheck.phase, 'check_failed');
+  assert.equal(failedCheck.receipt, null);
+  assert.equal((await repeated[0].fn()).phase, 'current');
+  assert.equal(fetches, 2);
+  manager.dispose();
 });

@@ -453,17 +453,25 @@ export interface AgentApply {
   error?: string;
 }
 
-// ---- Server-owned directory browsing (frozen fs:list-dir channel) -----------
+// ---- Server-owned directory browsing ---------------------------------------
 // The daemon lists ITS OWN filesystem: `path`/`parent` are absolute paths on the
-// machine that runs Workass, never on the viewing device. `listDir(null)` returns
-// the server roots (home, workspace, drives) with `path: null`. `entries` holds
-// directories only, already sorted. A folder the server could not read comes back
-// with a redacted `error` and no entries.
+// machine that runs Workass, never on the viewing device. `listDir(null)` opens
+// that machine's current user home and returns its absolute path. `entries`
+// holds directories only, already sorted. A folder the server could not read
+// comes back with a redacted `error` and no entries. `createDir` is additive: it
+// creates one direct child of the exact displayed parent without changing the
+// frozen fs:list-dir semantics.
 export interface DirEntry { name: string; path: string; }
 export interface DirListing {
   path: string | null;
   parent: string | null;
   entries: DirEntry[];
+  error?: string;
+}
+export interface DirCreateResult {
+  name: string;
+  path: string | null;
+  parent: string | null;
   error?: string;
 }
 
@@ -555,6 +563,7 @@ export interface WorkassApi {
   // deliberately NOT declared here — the user rejected it (2026-07-12) because a
   // remote client would otherwise pick a path off its own device.
   listDir?: (path: string | null) => Promise<DirListing>;
+  createDir?: (parent: string, name: string) => Promise<DirCreateResult>;
   archiveAppend?: (tabId: string, messages: unknown[]) => Promise<boolean>;
   archiveLoad?: (tabId: string) => Promise<unknown[]>;
   visualizeHost?: (options: { tabId: string; chatId: string; path: string; mode?: 'wide'; title?: string }) => Promise<VisualizationRegistration>;

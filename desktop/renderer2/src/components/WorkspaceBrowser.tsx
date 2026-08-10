@@ -7,12 +7,13 @@
 // added to the store until the user confirms with "Usar esta carpeta".
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react';
+import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react';
 import { createPortal } from 'react-dom';
 import type { DirListing } from '../wire/types';
 import { callThrow, has } from '../wire/api';
 import {
-  canSelectFolder, errorListing, folderCountLabel, isFolderClickThrough, isServerRoots, normalizeListing, pathLabel,
+  canSelectFolder, errorListing, folderCountLabel, folderNameError, isFolderClickThrough, isServerRoots,
+  normalizeCreatedDirectory, normalizeListing, pathLabel,
   type FolderPointerNavigation,
 } from '../workspace-picker';
 import { IcFolder } from '../icons';
@@ -31,12 +32,16 @@ const IcUp = () => (
     <path d="M8 12.5V4M4.5 7.5L8 4l3.5 3.5" strokeLinecap="round" strokeLinejoin="round" />
   </svg>
 );
-// Server roots: a two-unit rack, to say "the machine that runs Workass".
-const IcServer = () => (
+// The default location is the current user's home on the server machine.
+const IcHome = () => (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor">
-    <rect x="2.5" y="3" width="11" height="4" rx="1.2" />
-    <rect x="2.5" y="9" width="11" height="4" rx="1.2" />
-    <path d="M4.8 5h.01M4.8 11h.01" strokeLinecap="round" />
+    <path d="M2.7 7.2L8 2.8l5.3 4.4v5.6H9.7V9.4H6.3v3.4H2.7z" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+const IcNewFolder = () => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor">
+    <path d="M2 4.5h4l1.5 1.5H14v6.5H2z" strokeLinecap="round" strokeLinejoin="round" />
+    <path d="M10.5 7.6v3M9 9.1h3" strokeLinecap="round" />
   </svg>
 );
 
@@ -50,6 +55,7 @@ export function WorkspaceBrowser({ onSelect, onClose }: WorkspaceBrowserProps) {
   const subId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
   // Only the newest navigation may paint: a slow parent listing must not land on
   // top of the child the user already clicked into.
   const request = useRef(0);
@@ -57,9 +63,15 @@ export function WorkspaceBrowser({ onSelect, onClose }: WorkspaceBrowserProps) {
   const lastPointerNavigation = useRef<FolderPointerNavigation | null>(null);
 
   const [supported] = useState(() => has('listDir'));
+  const [createSupported] = useState(() => has('createDir'));
   const [listing, setListing] = useState<DirListing | null>(null);
   const [loading, setLoading] = useState(supported);
   const [trail, setTrail] = useState<Array<string | null>>([]);
+  const [homePath, setHomePath] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [folderName, setFolderName] = useState('');
+  const [createPending, setCreatePending] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   const load = useCallback(async (target: string | null) => {
     const seq = ++request.current;
@@ -71,26 +83,35 @@ export function WorkspaceBrowser({ onSelect, onClose }: WorkspaceBrowserProps) {
       next = errorListing(target, err);
     }
     if (seq !== request.current) return;
+    if (target === null && next.path) setHomePath(next.path);
     setListing(next);
     setLoading(false);
   }, []);
 
-  // Open on the server roots; an older bridge without fs:list-dir says so instead.
+  // Open on the server user's home; an older bridge without fs:list-dir says so instead.
   useEffect(() => { if (supported) void load(null); }, [supported, load]);
 
+  const cancelCreate = useCallback(() => {
+    setCreating(false);
+    setFolderName('');
+    setCreateError(null);
+  }, []);
+
   const open = (target: string | null, event?: ReactMouseEvent<HTMLElement>) => {
-    if (loading) return;
+    if (loading || createPending) return;
     if (event && event.detail > 0) {
       const gesture = { x: event.clientX, y: event.clientY, at: event.timeStamp };
       if (isFolderClickThrough(lastPointerNavigation.current, gesture)) return;
       lastPointerNavigation.current = gesture;
     }
+    cancelCreate();
     focusList.current = true;
     setTrail((prev) => [...prev, listing?.path ?? null]);
     void load(target);
   };
   const back = () => {
-    if (trail.length === 0) return;
+    if (trail.length === 0 || loading || createPending) return;
+    cancelCreate();
     focusList.current = true;
     const previous = trail[trail.length - 1] ?? null;
     setTrail((prev) => prev.slice(0, -1));
@@ -98,8 +119,48 @@ export function WorkspaceBrowser({ onSelect, onClose }: WorkspaceBrowserProps) {
   };
 
   const atRoots = isServerRoots(listing);
-  const selectable = canSelectFolder(listing) && !loading;
+  const atHome = !!listing?.path && !!homePath && listing.path === homePath;
+  const busy = loading || createPending;
+  const selectable = canSelectFolder(listing) && !busy;
+  const canCreate = createSupported && canSelectFolder(listing) && !busy;
   const currentPath = pathLabel(listing);
+
+  const beginCreate = () => {
+    if (!canCreate) return;
+    setFolderName('');
+    setCreateError(null);
+    setCreating(true);
+  };
+
+  const createFolder = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const parent = listing?.path;
+    const name = folderName.trim();
+    const invalid = folderNameError(folderName);
+    if (!parent || !createSupported || createPending) return;
+    if (invalid) {
+      setCreateError(invalid);
+      return;
+    }
+    setCreatePending(true);
+    setCreateError(null);
+    try {
+      const created = normalizeCreatedDirectory(await callThrow('createDir', parent, name), parent, name);
+      if (created.error || !created.path) {
+        setCreateError(created.error ?? 'No pude crear la carpeta.');
+        return;
+      }
+      setCreating(false);
+      setFolderName('');
+      focusList.current = true;
+      setTrail((prev) => [...prev, parent]);
+      await load(created.path);
+    } catch (err) {
+      setCreateError(errorListing(parent, err).error ?? 'No pude crear la carpeta.');
+    } finally {
+      setCreatePending(false);
+    }
+  };
 
   // Real modality: the app behind the dialog goes inert (unfocusable and hidden
   // from assistive tech) while it is open — the dialog is portaled to <body>, so
@@ -123,25 +184,28 @@ export function WorkspaceBrowser({ onSelect, onClose }: WorkspaceBrowserProps) {
       if (e.key !== 'Escape') return;
       e.preventDefault();
       e.stopPropagation();
-      onClose();
+      if (creating) {
+        if (!createPending) cancelCreate();
+      }
+      else onClose();
     };
     document.addEventListener('keydown', onKey, true);
     return () => document.removeEventListener('keydown', onKey, true);
-  }, [onClose]);
+  }, [cancelCreate, createPending, creating, onClose]);
 
   // After a navigation the row that was clicked no longer exists, so move focus
   // to the top of the new listing (or back to the dialog when it has no rows).
   useEffect(() => {
-    if (loading || !focusList.current) return;
+    if (busy || !focusList.current) return;
     focusList.current = false;
     const first = listRef.current?.querySelector<HTMLButtonElement>('.wbrow');
-    (first ?? panelRef.current)?.focus();
-  }, [loading, listing]);
+    (first ?? confirmRef.current ?? panelRef.current)?.focus();
+  }, [busy, listing]);
 
   // Keep Tab inside the dialog (aria-modal is a promise to assistive tech, not a trap).
   const onPanelKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
     if (e.key !== 'Tab') return;
-    const stops = panelRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])');
+    const stops = panelRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled])');
     if (!stops || stops.length === 0) return;
     const first = stops[0];
     const last = stops[stops.length - 1];
@@ -169,7 +233,7 @@ export function WorkspaceBrowser({ onSelect, onClose }: WorkspaceBrowserProps) {
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={subId}
-        aria-busy={loading}
+        aria-busy={busy}
         tabIndex={-1}
         onKeyDown={onPanelKeyDown}
       >
@@ -185,18 +249,41 @@ export function WorkspaceBrowser({ onSelect, onClose }: WorkspaceBrowserProps) {
         <div className="wbbar">
           <button
             className="wbnav" type="button" title="Atrás" aria-label="Atrás"
-            disabled={trail.length === 0 || loading} onClick={back}
+            disabled={trail.length === 0 || busy} onClick={back}
           ><IcBack /></button>
           <button
             className="wbnav" type="button" title="Subir un nivel" aria-label="Subir un nivel"
-            disabled={!listing?.parent || loading} onClick={(event) => open(listing?.parent ?? null, event)}
+            disabled={!listing?.parent || busy} onClick={(event) => open(listing?.parent ?? null, event)}
           ><IcUp /></button>
           <button
-            className="wbnav" type="button" title="Carpetas del servidor" aria-label="Carpetas del servidor"
-            disabled={!supported || atRoots || loading} onClick={(event) => open(null, event)}
-          ><IcServer /></button>
+            className="wbnav" type="button" title="Carpeta de usuario" aria-label="Carpeta de usuario"
+            disabled={!supported || atRoots || atHome || busy} onClick={(event) => open(null, event)}
+          ><IcHome /></button>
           <div className="wbpath mono" title={currentPath} aria-live="polite">{LTR_MARK + currentPath}</div>
         </div>
+
+        {creating && listing?.path && (
+          <form className="wbnew" onSubmit={(event) => void createFolder(event)}>
+            <label htmlFor={`${titleId}-new-folder`}>Nombre</label>
+            <input
+              id={`${titleId}-new-folder`}
+              value={folderName}
+              autoFocus
+              disabled={createPending}
+              maxLength={255}
+              autoComplete="off"
+              placeholder="Nueva carpeta"
+              aria-invalid={!!createError}
+              aria-describedby={createError ? `${titleId}-new-folder-error` : undefined}
+              onChange={(event) => { setFolderName(event.target.value); setCreateError(null); }}
+            />
+            <button className="btn pri" type="submit" disabled={createPending || !folderName.trim()}>
+              {createPending ? 'Creando…' : 'Crear'}
+            </button>
+            <button className="btn" type="button" disabled={createPending} onClick={cancelCreate}>Cancelar</button>
+            {createError && <span className="wbnewerr" id={`${titleId}-new-folder-error`} role="alert">{createError}</span>}
+          </form>
+        )}
 
         {!supported ? (
           <div className="wberr" role="alert">
@@ -236,12 +323,20 @@ export function WorkspaceBrowser({ onSelect, onClose }: WorkspaceBrowserProps) {
         )}
 
         <div className="wbfoot">
+          <button
+            className="btn wbnewbtn"
+            type="button"
+            disabled={!canCreate || creating}
+            title={createSupported ? 'Crear una carpeta dentro de la ubicación actual' : 'Este servidor no permite crear carpetas desde Workass'}
+            onClick={beginCreate}
+          ><IcNewFolder />Nueva carpeta</button>
           <span className="wbcount">
             {loading ? 'Cargando…' : !supported || listing?.error ? '' : folderCountLabel(listing)}
           </span>
           <span className="sp" />
           <button className="btn" type="button" onClick={onClose}>Cancelar</button>
           <button
+            ref={confirmRef}
             className="btn pri"
             type="button"
             disabled={!selectable}

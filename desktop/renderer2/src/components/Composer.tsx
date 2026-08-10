@@ -754,7 +754,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
       setPreparingImages(false);
       return;
     }
-    void store.sendTo(chat.id, t, images).then((accepted) => {
+    void store.sendTo(chat.id, t, images, submittedDraft).then((accepted) => {
       if (accepted && sentChatID) store.removeDraftImages(sentChatID, sentImageIDs);
     }).finally(() => setPreparingImages(false));
     setText('');

@@ -55,8 +55,12 @@ test('earned reset UI belongs to the account menu, not the composer context cont
   assert.match(sidebar, /className="acctcredit-mark"[^>]*><ModelIcon provider="gpt" \/>/);
   assert.match(sidebar, /className="acctcredit-title">Codex reset<\/span>/);
   assert.doesNotMatch(sidebar, /className="acctcredit-title">\{reset\.credit\?\.title/);
+  assert.match(sidebar, /const label = 'workass';/);
+  assert.match(sidebar, /<span className="ava" aria-hidden="true" \/>/);
+  assert.doesNotMatch(sidebar, /<span className="ava">W<\/span>/);
   assert.doesNotMatch(composer, /plancredit|availableRateLimitReset|useRateLimitReset|inlinePlanResets|planreset-inline/);
   assert.doesNotMatch(styles, /planreset-inline|planreset-item|planreset-name|planreset-time/);
+  assert.match(styles, /\.acct \.ava\s*\{[^}]*workass-macos\.png[^}]*cover no-repeat/);
   assert.match(styles, /\.acctcredit-use\s*\{[^}]*border:\s*1px solid var\(--acc\)[^}]*background:\s*var\(--acc\)[^}]*cursor:\s*pointer/);
   assert.match(styles, /\.acctcredit-use:disabled\s*\{[^}]*background:\s*transparent[^}]*color:\s*var\(--muted\)[^}]*cursor:\s*default/);
   assert.match(composer, /<ContextRing usage=/);

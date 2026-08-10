@@ -14,6 +14,7 @@
 package tlscert
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -29,6 +30,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -118,6 +120,63 @@ func load(certPEM, keyPEM []byte) (Certificate, error) {
 func FingerprintOf(der []byte) string {
 	sum := sha256.Sum256(der)
 	return hex.EncodeToString(sum[:])
+}
+
+// IssueLoopbackServerCertificate creates a conventional end-entity certificate
+// beneath the daemon's permanent self-signed root. It is intentionally kept in
+// memory: clients trust the stable root while this leaf may rotate on restart.
+// The daemon uses it only for loopback-only protocol clients selected by SNI;
+// ordinary LAN clients continue to see and pin the permanent daemon certificate.
+func IssueLoopbackServerCertificate(root Certificate, dnsName string) (tls.Certificate, error) {
+	dnsName = strings.TrimSpace(strings.ToLower(dnsName))
+	if dnsName == "" || !strings.HasSuffix(dnsName, ".localhost") {
+		return tls.Certificate{}, errors.New("loopback server certificate requires a .localhost DNS name")
+	}
+	if len(root.TLS.Certificate) == 0 {
+		return tls.Certificate{}, errors.New("daemon root certificate is empty")
+	}
+	rootCert, err := x509.ParseCertificate(root.TLS.Certificate[0])
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("parse daemon root certificate: %w", err)
+	}
+	rootKey, ok := root.TLS.PrivateKey.(crypto.Signer)
+	if !ok || rootKey == nil {
+		return tls.Certificate{}, errors.New("daemon root private key cannot sign certificates")
+	}
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("mint loopback server key: %w", err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	now := time.Now()
+	notAfter := now.Add(24 * time.Hour)
+	if rootCert.NotAfter.Before(notAfter) {
+		notAfter = rootCert.NotAfter
+	}
+	template := x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: dnsName},
+		NotBefore:             now.Add(-time.Minute),
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+		DNSNames:              []string{dnsName},
+		AuthorityKeyId:        append([]byte(nil), rootCert.SubjectKeyId...),
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, &template, rootCert, &leafKey.PublicKey, rootKey)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("mint loopback server certificate: %w", err)
+	}
+	return tls.Certificate{
+		Certificate: [][]byte{leafDER, root.TLS.Certificate[0]},
+		PrivateKey:  leafKey,
+		Leaf:        nil,
+	}, nil
 }
 
 func mint() ([]byte, []byte, error) {

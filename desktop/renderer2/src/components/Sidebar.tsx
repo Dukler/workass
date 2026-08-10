@@ -442,6 +442,7 @@ export function FooterUpdateCards() {
   const sealing = phase === 'done' || phase === 'exiting';
   const selfActive = ['checking', 'downloading', 'staging', 'installing'].includes(selfUpdate.phase);
   const selfPending = ['available', 'ready', 'busy'].includes(selfUpdate.phase);
+  const selfCheckFailed = selfUpdate.phase === 'check_failed';
   const selfFailed = selfUpdate.phase === 'failed' || selfUpdate.phase === 'rollback_healthy';
   const [selfPhase, setSelfPhase] = useState<UpdatePhase>('hidden');
   const [selfActionBusy, setSelfActionBusy] = useState(false);
@@ -450,7 +451,7 @@ export function FooterUpdateCards() {
   // may seal after the updater restarts Electron; an old receipt stays hidden so
   // reopening Workass never replays a stale success animation.
   useEffect(() => {
-    if (selfFailed) { setSelfPhase('hidden'); return; }
+    if (selfCheckFailed || selfFailed) { setSelfPhase('hidden'); return; }
     if (selfActive) { setSelfPhase('running'); return; }
     if (selfUpdate.phase === 'healthy') {
       setSelfPhase((prev) => prev === 'running' || appUpdaterReceiptIsRecent(selfUpdate.receipt) ? 'done' : 'hidden');
@@ -458,7 +459,7 @@ export function FooterUpdateCards() {
     }
     if (selfPending) { setSelfPhase('resting'); return; }
     setSelfPhase('hidden');
-  }, [selfActive, selfFailed, selfPending, selfUpdate.phase, selfUpdate.receipt]);
+  }, [selfActive, selfCheckFailed, selfFailed, selfPending, selfUpdate.phase, selfUpdate.receipt]);
 
   useEffect(() => {
     if (selfPhase === 'done') {
@@ -474,7 +475,7 @@ export function FooterUpdateCards() {
 
   const selfSealing = selfPhase === 'done' || selfPhase === 'exiting';
   const showProvider = !!failedId || !!running || pending > 0 || sealing;
-  const showSelfUpdate = selfUpdate.supported && (selfFailed || selfPhase !== 'hidden');
+  const showSelfUpdate = selfUpdate.supported && (selfCheckFailed || selfFailed || selfPhase !== 'hidden');
   if (!showSelfUpdate && !showProvider) return null;
 
   const one = pending === 1 ? provUpdates[0] : null;
@@ -497,20 +498,22 @@ export function FooterUpdateCards() {
   const restDisabled = canUpdate && !connected;
 
   const selfRunning = selfPhase === 'running';
-  const selfAction = selfPending || selfFailed ? selfUpdater.apply : null;
+  const selfAction = selfPending || selfCheckFailed || selfFailed ? selfUpdater.apply : null;
   const selfTitle = selfUpdate.phase === 'available'
     ? `Workass ${selfUpdate.targetVersion}`
     : selfUpdate.phase === 'ready'
       ? `Workass ${selfUpdate.targetVersion || selfUpdate.currentVersion}`
       : selfUpdate.phase === 'busy'
         ? 'La actualización está esperando'
-        : selfUpdate.phase === 'rollback_healthy'
-          ? 'Workass volvió a la versión anterior'
-          : selfUpdate.phase === 'failed'
-            ? 'No se pudo actualizar Workass'
-            : selfUpdate.phase === 'healthy'
-              ? 'Listo'
-              : 'Actualizando Workass';
+        : selfUpdate.phase === 'check_failed'
+          ? 'No se pudo buscar actualizaciones'
+          : selfUpdate.phase === 'rollback_healthy'
+            ? 'Workass volvió a la versión anterior'
+            : selfUpdate.phase === 'failed'
+              ? 'No se pudo actualizar Workass'
+              : selfUpdate.phase === 'healthy'
+                ? 'Listo'
+                : 'Actualizando Workass';
   const selfActionLabel = selfUpdate.phase === 'busy'
     ? 'Reintentar'
     : 'Actualizar';
@@ -530,7 +533,7 @@ export function FooterUpdateCards() {
     <div className="updcards">
       {showSelfUpdate && (
         <div className={`updslot${selfPhase === 'exiting' ? ' card-exit' : ''}`}>
-          {selfFailed ? (
+          {selfCheckFailed || selfFailed ? (
             <div className="updcard upd-fail" title={appUpdaterPhaseText(selfUpdate)}>
               <span className="uico ufail" aria-hidden="true"><IcDownload /></span>
               <span className="ubody">
@@ -685,7 +688,7 @@ export function AccountMenu() {
     return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey, true); };
   }, [open]);
 
-  const label = app.meta?.workspaceDir ? shortDir(app.meta.workspaceDir) : 'workass';
+  const label = 'workass';
   const reset = availableRateLimitReset(app.planUsageByProvider.codex?.rateLimitResetCredits);
   const active = app.chats.find((chat) => chat.id === app.activeId);
   const codexSessionId = active?.providerId === 'codex' ? active.sessionId : undefined;
@@ -763,12 +766,10 @@ export function AccountMenu() {
         </div>
       )}
       <button className={`acct ${open ? 'on' : ''}`} onClick={() => setOpen((v) => !v)} aria-haspopup="menu" aria-expanded={open}>
-        <span className="ava">W</span>
+        <span className="ava" aria-hidden="true" />
         <span className="acct-name">{label}</span>
         <span className="chev">▾</span>
       </button>
     </div>
   );
 }
-
-function shortDir(p: string): string { return p.split('/').filter(Boolean).slice(-1)[0] || p; }

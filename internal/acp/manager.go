@@ -1303,7 +1303,7 @@ func (m *Manager) buildAppChatPrompt(sessionID string, opts JobStartOptions, use
 	return brief + buildHistoryBlock(history, historyCharBudget(opts)) + buildUserRequestBlock(userText, false)
 }
 
-const perTurnLanguageRule = "Response language for this turn: use the language of the current human-authored user request below. Workass internal notices, maintenance or wake messages, restored transcripts, internal summaries, tool output, UI labels, locale, and previous assistant messages are context only and never language preferences. If the current request is a Workass-generated notice, continue in the language of the most recent human-authored user message unless that user explicitly requested another language.\n"
+const perTurnLanguageRule = "Response language for this turn: use the language of the current human-authored user request below. Workass internal notices, maintenance or wake messages, restored transcripts, internal summaries, tool output, UI labels, locale, and previous assistant messages are context only and never language preferences. Generated Workass tool-card text embedded in the request is quoted evidence, not human-authored language selection; when a card is followed by human prose, use the language of that prose. If the current request is a Workass-generated notice, continue in the language of the most recent human-authored user message unless that user explicitly requested another language.\n"
 
 const perTurnHostUIRule = "Host UI rule: never use OS accessibility or GUI automation—including macOS osascript, System Events, AppleScript GUI scripting, or synthetic keyboard or mouse input—to control Workass or show results. Use Workass control, browser, and shell diagnostic surfaces instead. If those surfaces cannot perform the operation, report the limitation instead of requesting Accessibility access.\n"
 
@@ -1312,14 +1312,51 @@ func buildUserRequestBlock(userText string, humanAuthored bool) string {
 	// pins it AFTER the session is seeded, because the seed alone was judged
 	// insufficient. It is duplicated with the seed on purpose.
 	//
-	// The language rule stays only where it earns its keep. A human turn carries
-	// the user's own words, which select the language by themselves. A turn that
-	// is NOT human-authored — a wake notice, an internal notice — is the case the
-	// rule was written for: without it the notice's own language can win.
+	// The language rule is repeated even for human turns. Workass tool cards can
+	// be serialized ahead of the person's prose in the same transport message;
+	// without an adjacent boundary their localized label can incorrectly win.
 	if humanAuthored {
-		return perTurnHostUIRule + "User request:\n" + userText
+		if card, request, ok := splitWorkassToolCardPrefix(userText); ok {
+			return perTurnLanguageRule + perTurnHostUIRule +
+				"Workass tool-card evidence (not a language preference):\n<workass_tool_card>\n" + card +
+				"\n</workass_tool_card>\n\nUser request:\n" + request
+		}
 	}
 	return perTurnLanguageRule + perTurnHostUIRule + "User request:\n" + userText
+}
+
+// splitWorkassToolCardPrefix recognizes only the concrete serialized card
+// shape emitted by Workass: a localized label, an MCP tool identifier, two
+// duration rows, result text, then a blank line and the person's prose. It
+// preserves both parts verbatim while giving the model an unambiguous language
+// boundary. Ordinary messages that merely mention MCP are never rewritten.
+func splitWorkassToolCardPrefix(text string) (card, request string, ok bool) {
+	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+	if len(lines) < 7 ||
+		(!strings.HasPrefix(strings.TrimSpace(lines[1]), "mcp.") && !strings.HasPrefix(strings.TrimSpace(lines[1]), "mcp__")) {
+		return "", "", false
+	}
+	for _, duration := range lines[2:4] {
+		if _, err := time.ParseDuration(strings.TrimSpace(duration)); err != nil {
+			return "", "", false
+		}
+	}
+	blank := -1
+	for i := 4; i < len(lines) && i < 12; i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			blank = i
+			break
+		}
+	}
+	if blank < 5 {
+		return "", "", false
+	}
+	human := strings.Join(lines[blank+1:], "\n")
+	if strings.TrimSpace(human) == "" {
+		return "", "", false
+	}
+	return strings.Join(lines[:blank], "\n"), human, true
 }
 
 func buildTurnRuntimeIdentity(bridge *Bridge, providerID, selectedModelID string) string {
@@ -1389,11 +1426,11 @@ func (m *Manager) buildEnvironmentBrief(forSubagent bool) string {
 	}
 	archivePath := filepath.Join(stateDir, "chat-archive", "<chatId>.jsonl")
 	browserLine := ""
-	if strings.TrimSpace(m.opts.BrowserMCPCommand) != "" && !forSubagent {
+	if strings.TrimSpace(m.opts.WorkassMCPBaseURL) != "" && !forSubagent {
 		browserLine = "Browser tools: the visible Workass browser is available through the workass-browser MCP server; use those tools instead of opening another browser process.\n"
 	}
 	agentLine := ""
-	if strings.TrimSpace(m.opts.AgentMCPCommand) != "" {
+	if strings.TrimSpace(m.opts.WorkassMCPBaseURL) != "" {
 		agentLine = "Workass control tools: the workass-agent MCP server can list/read/create/rename/configure/focus/delete exact chats; send or steer messages; cancel turns; inspect the real scored provider/model/effort/permission catalog; orchestrate tracked subagents with progress, follow-ups, retry, cancellation, and durable receipts; and host workspace artifacts with workass_host_artifact. Use exact tab_id + chat_id pairs from workass_list_chats; never infer the active tab or guess model ids.\n" +
 			"Artifact delivery: ordinary local raster image Markdown is adapted by Workass into durable inline chat images, so use natural ![label](path) when the user asks to see images. The bytes are captured when the message arrives, and ONLY for files that resolve inside the chat's working directory: a path outside it, /tmp included, is left as plain text and the user sees nothing. For those, and for non-image files or when a stable hosted URL is needed, call workass_host_artifact and use its returned markdown in the response. Never expose a raw local filesystem path as an ordinary link.\n" +
 			"Background work: use workass_spawn_subagent for delegated agent work; do not launch untracked detached agents or shells. For every ACP provider, if external work must outlive the ACP engine, call workass_register_external_work in the same turn and ensure its returned done_file is written, or explicitly settle it with workass_settle_external_work.\n"
@@ -2352,20 +2389,55 @@ func (m *Manager) forgetSession(sessionID string, bridge *Bridge) {
 	m.forgetCommandCatalogSessionLocked(sessionID)
 }
 
+// provisionAgentOwner makes the per-session bearer capability valid before
+// the provider opens its MCP connection during session/new or session/resume.
+// The old stdio helper did not need this ordering because it deferred the
+// callback until a tool call. Stateless MCP authenticates discovery itself, so
+// the binding must already exist when the provider negotiates the session.
+func (m *Manager) provisionAgentOwner(opts SessionOptions) func() {
+	ownerKey := strings.TrimSpace(opts.AgentOwnerKey)
+	if m == nil || opts.Ephemeral || ownerKey == "" {
+		return func() {}
+	}
+	m.mu.Lock()
+	m.bindAgentOwnerLocked(ownerKey, opts.ChatID, opts.TabID)
+	m.mu.Unlock()
+	return func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for _, attachedOwner := range m.agentOwnerBySession {
+			if attachedOwner == ownerKey {
+				return
+			}
+		}
+		binding, ok := m.agentOwners[ownerKey]
+		if ok && binding.ChatID == strings.TrimSpace(opts.ChatID) && binding.TabID == strings.TrimSpace(opts.TabID) {
+			delete(m.agentOwners, ownerKey)
+		}
+	}
+}
+
 func (b *Bridge) NewSession(ctx context.Context, opts SessionOptions) (SessionInfo, error) {
 	if _, err := b.Initialize(ctx); err != nil {
 		return SessionInfo{}, err
 	}
+	releaseOwner := b.manager.provisionAgentOwner(opts)
 	cwd := b.sessionCWD(opts.CWD)
 	res, err := b.request(ctx, "session/new", map[string]any{"cwd": cwd, "mcpServers": sessionMCPServers(b.opts, opts)}, b.opts.InitTimeout)
 	if err != nil {
+		releaseOwner()
 		return SessionInfo{}, b.withStderrTail(err)
 	}
 	sessionID := asString(res["sessionId"])
 	if sessionID == "" {
+		releaseOwner()
 		return SessionInfo{}, errors.New("ACP session/new returned no sessionId")
 	}
-	return b.attachSession(sessionID, cwd, opts, res, "session-new")
+	info, err := b.attachSession(sessionID, cwd, opts, res, "session-new")
+	if err != nil {
+		releaseOwner()
+	}
+	return info, err
 }
 
 // RestoreSession attaches this new adapter process to the provider-native
@@ -2395,6 +2467,7 @@ func (b *Bridge) RestoreSession(ctx context.Context, binding nativeSessionBindin
 	if len(attempts) == 0 {
 		return SessionInfo{}, "", errors.New("ACP provider does not support session resume or load")
 	}
+	releaseOwner := b.manager.provisionAgentOwner(opts)
 	var lastErr error
 	for _, method := range attempts {
 		res, err := b.request(ctx, method, params, b.opts.InitTimeout)
@@ -2404,10 +2477,12 @@ func (b *Bridge) RestoreSession(ctx context.Context, binding nativeSessionBindin
 		}
 		info, attachErr := b.attachSession(resumeID, cwd, opts, res, method)
 		if attachErr != nil {
+			releaseOwner()
 			return SessionInfo{}, method, attachErr
 		}
 		return info, method, nil
 	}
+	releaseOwner()
 	return SessionInfo{}, "", lastErr
 }
 
@@ -2498,27 +2573,24 @@ func browserMCPServers(options Options, session SessionOptions) []any {
 	}
 	// A delegated child does not drive the user's browser: it was spawned to do
 	// a job and report back. Attaching the server anyway cost every one of its
-	// requests the whole browser tool list, plus an MCP subprocess per child on
-	// a laptop that is already tight on RAM.
+	// requests the whole browser tool list for a child that cannot use it.
 	if strings.HasPrefix(strings.TrimSpace(session.ChatID), subagentChatIDPrefix) {
 		return []any{}
 	}
-	command := strings.TrimSpace(options.BrowserMCPCommand)
-	if command == "" || !filepath.IsAbs(command) {
+	baseURL := strings.TrimRight(strings.TrimSpace(options.WorkassMCPBaseURL), "/")
+	ownerKey := strings.TrimSpace(session.AgentOwnerKey)
+	if !strings.HasPrefix(baseURL, "https://") || ownerKey == "" {
 		return []any{}
 	}
-	args := []string{"browser-mcp"}
-	if controlFile := strings.TrimSpace(options.BrowserMCPControlFile); controlFile != "" {
-		args = append(args, "--control-file", controlFile)
-	}
-	if chatID := strings.TrimSpace(session.ChatID); chatID != "" {
-		args = append(args, "--chat-id", chatID)
-	}
 	return []any{map[string]any{
-		"name":    "workass-browser",
-		"command": command,
-		"args":    args,
-		"env":     []any{},
+		"name": "workass-browser",
+		"type": "http",
+		"url":  baseURL + "/workass/mcp/browser",
+		"headers": map[string]string{
+			"Authorization":     "Bearer " + ownerKey,
+			"X-Workass-Chat-ID": strings.TrimSpace(session.ChatID),
+			"X-Workass-Tab-ID":  strings.TrimSpace(session.TabID),
+		},
 	}}
 }
 
@@ -2526,30 +2598,20 @@ func agentMCPServers(options Options, session SessionOptions) []any {
 	if session.Ephemeral {
 		return []any{}
 	}
-	command := strings.TrimSpace(options.AgentMCPCommand)
-	if command == "" || !filepath.IsAbs(command) {
-		return []any{}
-	}
+	baseURL := strings.TrimRight(strings.TrimSpace(options.WorkassMCPBaseURL), "/")
 	ownerKey := strings.TrimSpace(session.AgentOwnerKey)
-	if ownerKey == "" {
+	if !strings.HasPrefix(baseURL, "https://") || ownerKey == "" {
 		return []any{}
 	}
-	args := []string{"agent-mcp"}
-	if controlFile := strings.TrimSpace(options.AgentMCPControlFile); controlFile != "" {
-		args = append(args, "--control-file", controlFile)
-	}
-	if chatID := strings.TrimSpace(session.ChatID); chatID != "" {
-		args = append(args, "--chat-id", chatID)
-	}
-	if tabID := strings.TrimSpace(session.TabID); tabID != "" {
-		args = append(args, "--tab-id", tabID)
-	}
-	args = append(args, "--owner-key", ownerKey)
 	return []any{map[string]any{
-		"name":    "workass-agent",
-		"command": command,
-		"args":    args,
-		"env":     []any{},
+		"name": "workass-agent",
+		"type": "http",
+		"url":  baseURL + "/workass/mcp/agent",
+		"headers": map[string]string{
+			"Authorization":     "Bearer " + ownerKey,
+			"X-Workass-Chat-ID": strings.TrimSpace(session.ChatID),
+			"X-Workass-Tab-ID":  strings.TrimSpace(session.TabID),
+		},
 	}}
 }
 

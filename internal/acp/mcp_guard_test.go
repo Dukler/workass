@@ -12,7 +12,7 @@ func TestRawMCPDockerCommandLineMatchesOnlyBlockedDirectImages(t *testing.T) {
 		{`docker run docker.io/acuvity/mcp-github`, true},
 		{`docker ps`, false},
 		{`docker run ubuntu:latest`, false},
-		{`node workass agent-mcp`, false},
+		{`node workass fleet`, false},
 	}
 	for _, test := range tests {
 		if got := isRawMCPDockerCommandLine(test.command); got != test.want {
