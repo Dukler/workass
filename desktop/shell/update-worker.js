@@ -13,6 +13,31 @@ const { spawn, spawnSync } = require('node:child_process');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// The worker is forked by the release being replaced. Runtime values inherited
+// from that old shell must not override the profile inside the newly installed
+// app (for example, during a localhost -> LAN bind migration).
+const STALE_RUNTIME_ENV_KEYS = new Set([
+  'WORKASS_PROFILE', 'WORKASS_PROFILE_FILE', 'WORKASS_APP_NAME',
+  'WORKASS_BUNDLE_ID', 'WORKASS_DAEMON_PORT', 'WORKASS_DAEMON_BIND',
+  'WORKASS_VIEW_PORT', 'WORKASS_LAUNCHD_LABEL', 'WORKASS_DATA_ROOT',
+  'WORKASS_LOG_ROOT', 'WORKASS_UPDATE_CHANNEL', 'WORKASS_URL',
+  'WORKASS_BROWSER_CONTROL_FILE', 'WORKASS_REPO_ROOT',
+  'WORKASS_TEST_ROOT', 'WORKASS_PROD',
+]);
+
+function targetRuntimeEnv(source = process.env) {
+  const clean = { ...source };
+  for (const key of STALE_RUNTIME_ENV_KEYS) delete clean[key];
+  return clean;
+}
+
+function runtimeIsHealthy({ daemon, shell, expectedVersion, expectedBind = '' }) {
+  return daemon?.app === 'workass' && daemon?.version === expectedVersion &&
+    (!expectedBind || daemon?.bind === expectedBind) &&
+    shell?.controller === true && Number(shell?.catalog?.readyModelCount || 0) > 0 &&
+    shell?.appVersion === expectedVersion;
+}
+
 function atomicJSON(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const incoming = `${file}.incoming-${process.pid}`;
@@ -196,7 +221,7 @@ async function startInstalledRuntime(transaction, dependencies = {}) {
   const ensurePackagedDaemon = dependencies.ensurePackagedDaemon ||
     require(path.join(appCode, 'runtime-bootstrap.js')).ensurePackagedDaemon;
   const runtime = resolveRuntimeProfile({
-    env: process.env,
+    env: targetRuntimeEnv(process.env),
     isPackaged: true,
     resourcesPath,
     repoRoot: '',
@@ -209,13 +234,14 @@ async function startInstalledRuntime(transaction, dependencies = {}) {
   if (!['installed-and-running', 'already-running'].includes(receipt?.status)) {
     throw new Error('installed Workass runtime did not start');
   }
-  return receipt;
+  return { ...receipt, runtime };
 }
 
 function defaultOperations(transaction) {
   const launchAgentPath = String(transaction.launchAgentPath || '');
   const launchdDomain = String(transaction.launchdDomain || '');
   let launchedPID = 0;
+  let expectedDaemonBind = '';
   return {
     shellExited: () => !pidAlive(transaction.shellPID),
     stopDaemonService: async () => {
@@ -238,7 +264,11 @@ function defaultOperations(transaction) {
         throw err;
       }
     },
-    startRuntime: async () => startInstalledRuntime(transaction),
+    startRuntime: async () => {
+      const receipt = await startInstalledRuntime(transaction);
+      expectedDaemonBind = String(receipt?.runtime?.daemonBind || '');
+      return receipt;
+    },
     launchInstalled: async () => {
       const executable = transaction.platform === 'darwin'
         ? path.join(transaction.installTarget, 'Contents', 'MacOS', 'Workass')
@@ -249,7 +279,7 @@ function defaultOperations(transaction) {
         windowsHide: true,
         stdio: 'ignore',
         env: {
-          ...process.env,
+          ...targetRuntimeEnv(process.env),
           WORKASS_CONTROLLER_RECOVERY: '1',
           WORKASS_UPDATE_RELAUNCH: '1',
         },
@@ -261,9 +291,7 @@ function defaultOperations(transaction) {
       const [daemon, shell] = await Promise.all([
         requestJSON(transaction.daemonHealthURL), requestJSON(transaction.shellStatusURL),
       ]);
-      return daemon?.app === 'workass' && daemon?.version === expectedVersion &&
-        shell?.controller === true && Number(shell?.catalog?.readyModelCount || 0) > 0 &&
-        shell?.appVersion === expectedVersion;
+      return runtimeIsHealthy({ daemon, shell, expectedVersion, expectedBind: expectedDaemonBind });
     },
     stopLaunched: async () => {
       if (launchedPID > 1 && pidAlive(launchedPID)) {
@@ -385,7 +413,9 @@ module.exports = {
   requestJSON,
   requestDaemonShutdown,
   runTransaction,
+  runtimeIsHealthy,
   startInstalledRuntime,
+  targetRuntimeEnv,
   updateReceipt,
   validateTransaction,
   verifyMacIncoming,
