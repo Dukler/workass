@@ -17,7 +17,7 @@ import (
 // first, per E1: the book is provable from a CLI before a pixel exists.
 const machineChannelCount = 4
 
-// machineRefreshInterval matches the beacon's, so a machine that dies is marked
+// machineRefreshInterval matches discovery, so a machine that dies is marked
 // unreachable within one interval rather than one of two competing clocks.
 const machineRefreshInterval = machinebook.DefaultInterval
 
@@ -122,13 +122,9 @@ func machineAddError(err error) string {
 	}
 }
 
-// beaconDefault reads the profile's presence setting.
-//
-// Reachable and announcing are two different decisions. On a managed machine,
-// endpoint security watches for processes that start speaking to the network
-// on their own, so being able to open the port without also broadcasting is
-// worth a flag. Announcing stays the default everywhere else — a machine you
-// opened deliberately is one you want found.
+// beaconDefault reads the compatibility profile switch for automatic machine
+// discovery. The historical flag name remains stable, but discovery itself is
+// now the PORT-SPEC-required private-LAN TCP port-80 probe, not a UDP beacon.
 func beaconDefault() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("WORKASS_DAEMON_BEACON"))) {
 	case "0", "false", "off", "no":
@@ -145,11 +141,9 @@ type machinePresenceOptions struct {
 	Beacon bool
 }
 
-// startMachinePresence runs discovery and liveness until ctx ends.
-//
-// A LAN-bound daemon listens and announces. A loopback-bound daemon listens
-// without announcing: it can discover a reachable managed machine without
-// advertising a door that does not exist. Liveness runs either way.
+// startMachinePresence runs TCP-port-80 discovery and liveness until ctx ends.
+// It never sends multicast or broadcast traffic. Bind controls whether this
+// daemon itself is reachable; discovery is client-side and works either way.
 func startMachinePresence(ctx context.Context, book *machinebook.Book, hub *wire.Hub, identity machineid.Identity, opts machinePresenceOptions, logger *log.Logger) {
 	if book == nil {
 		return
@@ -183,26 +177,18 @@ func startMachinePresence(ctx context.Context, book *machinebook.Book, hub *wire
 	}()
 
 	if !opts.Beacon {
-		logger.Printf("[workass] machine beacon off (--beacon=false); automatic discovery is disabled")
+		logger.Printf("[workass] automatic port-80 discovery is disabled (--beacon=false)")
 		return
 	}
-	beacon := &machinebook.Beacon{
-		Book:        book,
-		MachineID:   identity.MachineID,
-		Name:        identity.DisplayName,
-		Port:        opts.Port,
-		ReceiveOnly: opts.Bind != "lan",
-		OnChange:    func(machinebook.Entry) { broadcast() },
-		Logf:        logger.Printf,
+	scanner := &machinebook.Scanner{
+		Book:     book,
+		OnChange: func(machinebook.Entry) { broadcast() },
+		Logf:     logger.Printf,
 	}
 	go func() {
-		if err := beacon.Run(ctx); err != nil {
-			logger.Printf("[workass] machine beacon stopped: %v", err)
+		if err := scanner.Run(ctx); err != nil {
+			logger.Printf("[workass] automatic port-80 discovery stopped: %v", err)
 		}
 	}()
-	if beacon.ReceiveOnly {
-		logger.Printf("[workass] machine beacon listening on %s:%d (loopback daemon is not announced)", machinebook.GroupIP, machinebook.GroupPort)
-	} else {
-		logger.Printf("[workass] machine beacon announcing %s on %s:%d", identity.MachineID, machinebook.GroupIP, machinebook.GroupPort)
-	}
+	logger.Printf("[workass] automatic machine discovery probing private LAN hosts on TCP port %d", machinebook.DiscoveryPort)
 }
