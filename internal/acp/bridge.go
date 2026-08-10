@@ -129,6 +129,8 @@ type acpError struct {
 	Msg  string
 }
 
+var errBridgeHibernated = errors.New("ACP bridge hibernated; session restore required")
+
 func (e *acpError) Error() string {
 	if e.Msg != "" {
 		return e.Msg
@@ -208,6 +210,10 @@ func (b *Bridge) Initialize(ctx context.Context) (InitResult, error) {
 	defer b.initializingMu.Unlock()
 
 	b.mu.Lock()
+	if b.state == StateHibernated {
+		b.mu.Unlock()
+		return InitResult{}, errBridgeHibernated
+	}
 	if b.initialized && !b.closed {
 		res := InitResult{ProtocolVersion: ProtocolVersion, AgentName: b.agentName}
 		b.mu.Unlock()
@@ -280,6 +286,10 @@ func (b *Bridge) Initialize(ctx context.Context) (InitResult, error) {
 
 func (b *Bridge) start() error {
 	b.mu.Lock()
+	if b.state == StateHibernated {
+		b.mu.Unlock()
+		return errBridgeHibernated
+	}
 	if b.child != nil && !b.closed {
 		b.mu.Unlock()
 		return nil

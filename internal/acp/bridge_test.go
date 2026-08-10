@@ -1653,6 +1653,55 @@ func TestLifecycleIdleReapFires(t *testing.T) {
 	_ = waitProcState(t, manager, StateHibernated, time.Second)
 }
 
+// Regression: a control write aimed at a hibernated chat must not restart the
+// old bridge process by itself. The replacement process has no provider-side
+// session until session/resume or session/new runs; reviving the bridge in
+// place leaves Workass's retained session id pointing at nothing and bricks
+// every later prompt with "session not found".
+func TestHibernatedControlWriteDoesNotReviveBridgeWithoutSessionRestore(t *testing.T) {
+	manager, events := newFakeManager(t, "strict-sessions", Options{
+		Provider:               ProviderConfig{ID: "codex"},
+		HibernateTTL:           25 * time.Millisecond,
+		LifecycleCheckInterval: 10 * time.Millisecond,
+		RSSSampleInterval:      time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	const tabID = "hibernated-control-tab"
+	const chatID = "hibernated-control-chat"
+	session, err := manager.NewSession(ctx, SessionOptions{TabID: tabID, ChatID: chatID, ProviderID: "codex"})
+	if err != nil {
+		t.Fatalf("new strict session: %v", err)
+	}
+	first, err := manager.StartJob(ctx, JobStartOptions{
+		Kind: "app-chat", SessionID: session.SessionID, TabID: tabID, ChatID: chatID,
+		ProviderID: "codex", Prompt: "finish before hibernation",
+	})
+	if err != nil {
+		t.Fatalf("start first strict turn: %v", err)
+	}
+	assertJobStatus(t, events.waitJobEnd(t, jobID(first), 2*time.Second), "done", 0, "end_turn")
+	_ = waitProcState(t, manager, StateHibernated, time.Second)
+
+	if _, err := manager.SetModel(ctx, session.SessionID, "fake-model[high]"); err == nil || !strings.Contains(strings.ToLower(err.Error()), "hibernat") {
+		t.Fatalf("hibernated control write error = %v, want a hibernated bridge rejection", err)
+	}
+	if !procHasState(manager, StateHibernated) {
+		t.Fatalf("control write revived the hibernated bridge: %#v", manager.Processes())
+	}
+
+	second, err := manager.StartJob(ctx, JobStartOptions{
+		Kind: "app-chat", SessionID: session.SessionID, TabID: tabID, ChatID: chatID,
+		ProviderID: "codex", ModelID: "fake-model[high]", Prompt: "resume through the lifecycle path",
+	})
+	if err != nil {
+		t.Fatalf("start recovered strict turn: %v", err)
+	}
+	assertJobStatus(t, events.waitJobEnd(t, jobID(second), 3*time.Second), "done", 0, "end_turn")
+}
+
 func TestWorkspaceMoveInvalidatesEveryBindingAndFreshSessionReplaysCanonicalHistory(t *testing.T) {
 	manager, events := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
@@ -2474,14 +2523,15 @@ func TestFakeACPHelper(t *testing.T) {
 }
 
 type fakeACP struct {
-	mode     string
-	mu       sync.Mutex
-	writeMu  sync.Mutex
-	sessions int
-	pending  map[string]chan map[string]any
-	active   bool
-	steerCh  chan string
-	cancelCh chan struct{}
+	mode       string
+	mu         sync.Mutex
+	writeMu    sync.Mutex
+	sessions   int
+	sessionIDs map[string]struct{}
+	pending    map[string]chan map[string]any
+	active     bool
+	steerCh    chan string
+	cancelCh   chan struct{}
 	// The Claude effort fixture changes its config-option surface with the
 	// selected model, matching the real adapter (Haiku has no effort option).
 	currentModel      string
@@ -2491,7 +2541,7 @@ type fakeACP struct {
 }
 
 func runFakeACP(mode string) {
-	s := &fakeACP{mode: mode, pending: make(map[string]chan map[string]any), steerCh: make(chan string, 1), cancelCh: make(chan struct{}, 1), resetCredits: 1, redeemedResetKeys: make(map[string]bool)}
+	s := &fakeACP{mode: mode, sessionIDs: make(map[string]struct{}), pending: make(map[string]chan map[string]any), steerCh: make(chan string, 1), cancelCh: make(chan struct{}, 1), resetCredits: 1, redeemedResetKeys: make(map[string]bool)}
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -2607,6 +2657,7 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 		s.mu.Lock()
 		s.sessions++
 		sessionID := fmt.Sprintf("fake-session-%d-%d", os.Getpid(), s.sessions)
+		s.sessionIDs[sessionID] = struct{}{}
 		s.mu.Unlock()
 		configOptions := fakeConfigOptions("fake-model", "ask")
 		result := map[string]any{"sessionId": sessionID, "configOptions": configOptions}
@@ -2642,6 +2693,15 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 		}
 		s.respond(id, result)
 	case "session/set_config_option":
+		if s.mode == "strict-sessions" {
+			s.mu.Lock()
+			_, exists := s.sessionIDs[asString(params["sessionId"])]
+			s.mu.Unlock()
+			if !exists {
+				s.fail(id, -32000, "Fake session not found")
+				return
+			}
+		}
 		recordFakeConfigCall(asString(params["configId"]), asString(params["value"]))
 		if s.mode == "control-reject" {
 			s.fail(id, -32602, "Invalid params")
@@ -2697,8 +2757,20 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 		}
 		s.respond(id, map[string]any{"configOptions": fakeConfigOptions(asString(params["value"]), asString(params["value"]))})
 	case "session/close":
+		s.mu.Lock()
+		delete(s.sessionIDs, asString(params["sessionId"]))
+		s.mu.Unlock()
 		s.respond(id, map[string]any{})
 	case "session/prompt":
+		if s.mode == "strict-sessions" {
+			s.mu.Lock()
+			_, exists := s.sessionIDs[asString(params["sessionId"])]
+			s.mu.Unlock()
+			if !exists {
+				s.fail(id, -32000, "Fake session not found")
+				return
+			}
+		}
 		s.handlePrompt(id, params)
 	case "_workass/codex/steer":
 		if !strings.HasPrefix(s.mode, "codex-steer") {
