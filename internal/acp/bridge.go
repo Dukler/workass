@@ -317,7 +317,7 @@ func (b *Bridge) start() error {
 		provider = nativeProvider
 	}
 
-	cmd := exec.Command(provider.Command, provider.Args...)
+	cmd := managedCommand(provider.Command, provider.Args...)
 	cmd.Dir = provider.CWD
 	env := provider.Env
 	if strings.HasPrefix(strings.TrimSpace(b.chatID), subagentChatIDPrefix) {

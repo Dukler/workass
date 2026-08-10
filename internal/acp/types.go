@@ -41,7 +41,7 @@ const (
 var (
 	secretTextRE                          = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:api[_-]?key|token|secret|password|credential)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)`)
 	secretKeyRE                           = regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|credential|bearer)`)
-	defaultProviderDetectionRetryBackoffs = []time.Duration{15 * time.Second, 60 * time.Second, 5 * time.Minute}
+	defaultProviderDetectionRetryBackoffs = []time.Duration{5 * time.Minute, 15 * time.Minute, 30 * time.Minute}
 	defaultProviderUpdateRetryBackoffs    = []time.Duration{5 * time.Minute, 15 * time.Minute, 30 * time.Minute}
 )
 

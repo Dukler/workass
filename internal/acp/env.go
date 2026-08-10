@@ -796,7 +796,7 @@ func gitOutputAllowExit(ctx context.Context, repo string, allowed map[int]struct
 	gitCtx, cancel := context.WithTimeout(ctx, chatEnvGitTimeout)
 	defer cancel()
 	cmdArgs := append([]string{"-C", repo}, args...)
-	cmd := exec.CommandContext(gitCtx, "git", cmdArgs...)
+	cmd := managedCommandContext(gitCtx, "git", cmdArgs...)
 	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
 	out, err := cmd.Output()
 	if gitCtx.Err() != nil {
