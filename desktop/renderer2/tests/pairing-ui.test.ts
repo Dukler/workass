@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 const settings = readFileSync(new URL('../src/components/Settings.tsx', import.meta.url), 'utf8');
 const commandBar = readFileSync(new URL('../src/components/CommandBar.tsx', import.meta.url), 'utf8');
 
-test('the pairing UI exposes one discovery-and-approval flow', () => {
+test('the pairing UI exposes discovery approval and a local phone QR', () => {
   const start = settings.indexOf('function MaquinasPanel()');
   const end = settings.indexOf('function MachineRow', start);
   assert.ok(start >= 0 && end > start, 'machine settings panel exists');
@@ -13,8 +13,21 @@ test('the pairing UI exposes one discovery-and-approval flow', () => {
 
   assert.match(panel, /Workass descubiertas en esta red/);
   assert.match(panel, /incoming\.map\(\(r\) => <RequestRow/);
-  assert.match(panel, /Sin direcciones, PIN ni claves/);
+  assert.match(panel, /Vincular teléfono/);
+  assert.match(panel, /Mostrar QR/);
+  assert.match(panel, /\/workass\/fleet-qr\.svg/);
+  assert.match(panel, /app\.fleetCanReveal/);
   assert.doesNotMatch(panel, /addMachine|setFleetKey|FleetKeyOfThisMachine|192\.168\.|type="password"/);
+});
+
+test('the phone QR remains daemon-rendered and never reads the fleet secret into React', () => {
+  const start = settings.indexOf('function MaquinasPanel()');
+  const end = settings.indexOf('function MachineRow', start);
+  const panel = settings.slice(start, end);
+
+  assert.match(panel, /<img[\s\S]*fleet-qr\.svg/);
+  assert.doesNotMatch(panel, /revealFleetKey|mintFleetKey|\.secret/);
+  assert.match(panel, /El código contiene la clave de acceso/);
 });
 
 test('an unpaired discovered machine has one action and cannot be deleted accidentally', () => {

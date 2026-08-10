@@ -10,7 +10,7 @@
 //    defaults shown read-only (no channel exposes them — no fake persistence).
 //  - Apariencia: theme + density, persisted locally.
 
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import type { MachineView, SettingsSection } from '../store/types';
 import type { LanDevice, AccessRequest, ProcessSummary, ProviderRecord, ProviderUpdate } from '../wire/types';
 import { store, useApp, useProc } from '../store/store';
@@ -548,9 +548,19 @@ function AtajosPanel() {
 // users never need to choose between those implementation paths.
 function MaquinasPanel() {
   const app = useApp();
+  const [showPhoneQR, setShowPhoneQR] = useState(false);
+  const [phoneQRError, setPhoneQRError] = useState(false);
+  const [phoneQRNonce, setPhoneQRNonce] = useState(0);
   const paired = app.machines.filter((machine) => machine.paired);
   const nearby = app.machines.filter((machine) => !machine.paired);
   const incoming = app.accessRequests;
+
+  const togglePhoneQR = () => {
+    if (!app.fleetCanReveal) return;
+    setPhoneQRError(false);
+    setPhoneQRNonce((value) => value + 1);
+    setShowPhoneQR((value) => !value);
+  };
 
   if (!app.hasMachineChannels) {
     return (
@@ -567,7 +577,46 @@ function MaquinasPanel() {
     <section className="stgs-panel">
       <div className="phead">
         <h2>Conectar Workass</h2>
-        <p>Una sola forma de vincularlas: Workass las descubre en la red, enviás la solicitud y la aprobás en la otra máquina. Sin direcciones, PIN ni claves.</p>
+        <p>Workass descubre otras computadoras en la red. Para vincular tu teléfono, escaneá el QR desde Workass Mobile.</p>
+      </div>
+
+      <div className="group phone-pairing">
+        <div className="lrow">
+          <div className="ic"><Svg><rect x="4" y="1.5" width="8" height="13" rx="1.6" /><path d="M6.5 4.5h3M7.5 12h1" /></Svg></div>
+          <div className="body">
+            <div className="nm">Vincular teléfono</div>
+            <div className="mt">Escaneá el código desde Workass Mobile</div>
+          </div>
+          <div className="act">
+            <button
+              type="button"
+              className="btn sm acc"
+              disabled={!app.fleetCanReveal}
+              title={app.fleetCanReveal ? undefined : 'El QR solo puede mostrarse desde la computadora que guarda la clave'}
+              aria-expanded={showPhoneQR}
+              onClick={togglePhoneQR}
+            >
+              {showPhoneQR ? 'Ocultar QR' : 'Mostrar QR'}
+            </button>
+          </div>
+        </div>
+        {showPhoneQR && (
+          <div className="phone-qr-sheet">
+            {phoneQRError ? (
+              <div className="phone-qr-error">
+                <span>No se pudo generar el QR.</span>
+                <button type="button" className="btn sm" onClick={() => { setPhoneQRError(false); setPhoneQRNonce((value) => value + 1); }}>Reintentar</button>
+              </div>
+            ) : (
+              <img
+                src={`/workass/fleet-qr.svg?v=${phoneQRNonce}`}
+                alt="Código QR para vincular Workass Mobile"
+                onError={() => setPhoneQRError(true)}
+              />
+            )}
+            <p>El código contiene la clave de acceso. Mostralo solo al teléfono que querés vincular.</p>
+          </div>
+        )}
       </div>
 
       <div className="pairing-flow" aria-label="Flujo para conectar otra Workass">

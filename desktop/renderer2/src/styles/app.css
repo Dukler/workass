@@ -1471,6 +1471,13 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs .pairing-advanced[open] > summary::before { transform: rotate(90deg); }
 .stgs .pairing-advanced > summary:hover { color: var(--ink2); }
 .stgs .pairing-advanced-body { padding-top: 4px; }
+.stgs .phone-pairing { overflow: hidden; }
+.stgs .phone-pairing .btn:disabled { opacity: .5; cursor: default; }
+.stgs .phone-pairing .btn:disabled:hover { background: var(--acc); color: var(--bg); }
+.stgs .phone-qr-sheet { border-top: 1px solid var(--line); padding: 18px 0 16px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.stgs .phone-qr-sheet img { display: block; width: min(260px, 80vw); aspect-ratio: 1; background: #fff; border: 10px solid #fff; border-radius: 10px; }
+.stgs .phone-qr-sheet p { max-width: 44ch; color: var(--muted); font-size: 11.5px; line-height: 1.45; text-align: center; }
+.stgs .phone-qr-error { min-height: 180px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--del); font-size: 12px; }
 
 .stgs .group { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-lg, 11px); padding: 0 16px; }
 .stgs .set { display: flex; align-items: center; gap: 16px; padding: 13px 0; border-top: 1px solid var(--line); min-height: 52px; }
