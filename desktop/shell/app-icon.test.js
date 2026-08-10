@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { applyMacDockIcon, resolveAppIconPath } = require('./app-icon');
+const { applyMacDockIcon, resolveAppIconPath, resolveWindowIconPath } = require('./app-icon');
 
 test('packaged icon resolution prefers the original PNG used for the Dock', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-icon-test-'));
@@ -47,4 +47,16 @@ test('non-macOS platforms do not attempt a Dock mutation', () => {
   });
   assert.equal(called, false);
   assert.deepEqual(receipt, { applied: false, reason: 'unsupported-platform' });
+});
+
+test('Windows resolves the packaged ICO used by the frameless window and taskbar', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-icon-test-'));
+  const iconPath = path.join(root, 'Workass.ico');
+  fs.writeFileSync(iconPath, 'ico');
+  assert.equal(resolveWindowIconPath({ platform: 'win32', isPackaged: true, resourcesPath: root, repoRoot: '/unused' }), iconPath);
+  assert.equal(resolveWindowIconPath({ platform: 'darwin', isPackaged: true, resourcesPath: root, repoRoot: '/unused' }), null);
+
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.match(main, /setAppUserModelId\(RUNTIME\.bundleId\)/);
+  assert.match(main, /resolveWindowIconPath\(\{[\s\S]{0,500}icon:\s*windowIcon/);
 });

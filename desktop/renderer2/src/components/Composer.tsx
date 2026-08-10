@@ -15,6 +15,7 @@ import { composerSubmitIntent, type ComposerSubmitIntent } from '../composer-sub
 import { insertAtCaret, startRecording, transcribe, voiceStatus, type Recorder, type VoiceState } from '../voice';
 import { clampPlanUsagePercent, formatCountdown, formatPlanUsagePercent, isExpiredPlanReset, isHotRateLimit, isLiveReset, rateLimitLabel, relativePlanReset } from '../plan-usage';
 import { imageDraftCapability } from '../model-controls';
+import { autosizeComposerTextarea, observeComposerTextareaWidth, syncComposerTextareaFade } from '../composer-autosize';
 import {
   compactContextTokens,
   contextUsageForProvider,
@@ -490,6 +491,14 @@ export function Composer({ chat }: { chat: Chat | null }) {
   // actually rendered, so the box never collapses on a multi-line draft nor
   // balloons on an empty one when switching tabs.
   useLayoutEffect(() => { autosize(); }, [text]);
+  // The selected chat can change the per-chat right column after this keyed
+  // composer mounts. Re-measure when that layout change alters the actual text
+  // width, otherwise wrapped drafts keep the previous chat's too-short height.
+  useLayoutEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    return observeComposerTextareaWidth(el, autosize);
+  }, []);
 
   // The popup's data: a chat without a catalog asks the daemon once when the
   // composer lands on it (boot never fires switchChat for the already-active
@@ -587,18 +596,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
 
   function autosize() {
     const el = taRef.current; if (!el) return;
-    // Empty box: drop the inline height entirely and let CSS collapse it —
-    // never trust a measurement that can only make an empty field taller.
-    if (!el.value) { el.style.height = ''; el.style.overflowY = 'hidden'; fade(); return; }
-    el.style.height = 'auto';
-    const full = el.scrollHeight;
-    el.style.height = Math.min(full, 180) + 'px';
-    // Below the cap the box always grows to fit, so it must NOT scroll — a
-    // scrolling textarea hides the first line at the wrap boundary until the
-    // next keystroke grows it (the "sentence disappears for one char" bug).
-    // Only once we hit the 180px cap do we allow scrolling.
-    el.style.overflowY = full > 180 ? 'auto' : 'hidden';
-    fade();
+    autosizeComposerTextarea(el);
   }
   // The composer draws no scrollbar, so the top fade is the ONLY sign that text
   // is hidden above the edge — it has to follow the real scroll position, not
@@ -606,7 +604,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
   // the DOM node directly: this fires on every scroll tick and must not re-render.
   function fade() {
     const el = taRef.current; if (!el) return;
-    el.parentElement?.classList.toggle('scrolled', el.scrollTop > 1);
+    syncComposerTextareaFade(el);
   }
   // Height is handled by the useLayoutEffect on `text` above — just update state.
   function change(v: string) { setText(v); if (chat) store.setDraft(chat.id, v); }

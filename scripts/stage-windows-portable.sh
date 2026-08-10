@@ -85,6 +85,7 @@ rm -rf "$stage"
 mkdir -p "$stage" "$stage/resources/app" "$stage/resources/renderer" "$stage/node" "$stage/frontier-hosts"
 ditto "$repo_root/.dev/runtime/electron/win32-x64/." "$stage"
 mv "$stage/electron.exe" "$stage/Workass.exe"
+node "$repo_root/desktop/scripts/stamp-windows-icon.mjs" --exe "$stage/Workass.exe" --icon "$repo_root/desktop/assets/icon.ico"
 rm -f "$stage/resources/default_app.asar"
 cp "$repo_root/dist-bin/workass-windows-amd64.exe" "$stage/workass-daemon.exe"
 ditto "$repo_root/dist-bin/node/$target" "$stage/node/$target"
@@ -111,6 +112,7 @@ manifest.version = version;
 fs.writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`);
 NODE
 cp "$repo_root/config/environments/windows-prod.env" "$stage/resources/workass-profile.env"
+cp "$repo_root/desktop/assets/icon.ico" "$stage/resources/Workass.ico"
 
 # Sanity: the exact files the daemon's native lookup requires.
 [ -f "$stage/node/$target/node.exe" ] || { echo "staged node.exe missing" >&2; exit 1; }
@@ -123,6 +125,7 @@ cp "$repo_root/config/environments/windows-prod.env" "$stage/resources/workass-p
 git_rev=$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo unknown)
 printf '{"schemaVersion":2,"platform":"windows","arch":"amd64","version":"%s","revision":"%s","portable":true,"electron":true}\n' \
   "$version" "$git_rev" > "$stage/manifest.json"
+node "$repo_root/desktop/scripts/stamp-windows-icon.mjs" --verify --exe "$stage/Workass.exe" --icon "$repo_root/desktop/assets/icon.ico"
 
 # 4. Zip + checksums. Use zip (not ditto) so no __MACOSX resource-fork entries
 #    leak into the archive a Windows user extracts. -X strips extra file attrs.

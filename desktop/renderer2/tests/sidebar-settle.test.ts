@@ -15,6 +15,7 @@ let vite: ViteDevServer;
 let StoreCtor: new () => any;
 let resolveSettled: (chat: unknown, status: string, active: boolean, now: number, touched: number) => boolean;
 let canSettle: (status: string) => boolean;
+let resolveStatus: (chat: Chat, live: boolean, active: boolean, obligation?: { state: string }) => string;
 
 before(async () => {
   vite = await createServer({
@@ -27,6 +28,7 @@ before(async () => {
   const sidebar = await vite.ssrLoadModule('/src/components/SidebarV2.tsx');
   resolveSettled = sidebar.resolveSettled;
   canSettle = sidebar.canSettle;
+  resolveStatus = sidebar.resolveStatus;
 });
 
 after(async () => { await vite.close(); });
@@ -75,12 +77,12 @@ test('the explicit overrides beat the age rule in both directions', () => {
   assert.equal(resolveSettled(chat({ settled: 'active' }), 'ready', false, now, now - 40 * DAY), false);
 });
 
-test('nothing that needs a human or is alive can sit on the shelf', () => {
+test('nothing still alive, awaiting approval, parked, unread, or active can sit on the shelf', () => {
   const now = Date.parse('2026-07-25T12:00:00Z');
   const old = now - 40 * DAY;
   const filed = chat({ settled: 'settled' });
 
-  for (const status of ['approval', 'working', 'failed', 'done']) {
+  for (const status of ['approval', 'working', 'parked']) {
     assert.equal(resolveSettled(filed, status, false, now, old), false, status);
   }
   assert.equal(resolveSettled(chat({ settled: 'settled', unread: true }), 'ready', false, now, old), false);
@@ -111,6 +113,23 @@ test('a chat with work in flight is not a settle target', () => {
   // A finished or broken chat is filable — that is the usual "seen it, put it
   // away" gesture, and the acknowledgement below is what lets it land.
   for (const status of ['done', 'failed', 'ready']) assert.equal(canSettle(status), true, status);
+});
+
+test('attention from a terminal error can be acknowledged and settled', () => {
+  const now = Date.parse('2026-08-10T12:00:00Z');
+  const acknowledged = chat({ settled: 'settled' });
+
+  assert.equal(canSettle('attention'), true, 'attention is terminal user-facing news, not live work');
+  assert.equal(resolveSettled(acknowledged, 'attention', false, now, now - 1000), true);
+  assert.equal(
+    resolveStatus(acknowledged, false, false, { state: 'needs_input' }),
+    'ready',
+    'filing the chat acknowledges the attention pill until new work reactivates it',
+  );
+
+  for (const status of ['approval', 'working', 'parked']) {
+    assert.equal(canSettle(status), false, status);
+  }
 });
 
 test('filing a finished chat acknowledges it, so the click actually lands', () => {

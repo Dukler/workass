@@ -6,6 +6,7 @@ const http = require('node:http');
 const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
+const tls = require('node:tls');
 const { spawn, spawnSync } = require('node:child_process');
 
 const DEFAULT_FEED_ROOT = 'https://github.com/Dukler/workass/releases/latest/download/';
@@ -74,19 +75,47 @@ function validateReleaseManifest(raw, { platform = process.platform, arch = proc
   return raw;
 }
 
-function httpsRequest(url, { timeoutMs = 15000, maxBytes = MAX_MANIFEST_BYTES, redirects = 5 } = {}) {
+function updaterTrustedCAs(platform = process.platform, tlsModule = tls) {
+  if (platform !== 'win32' || typeof tlsModule?.getCACertificates !== 'function') return undefined;
+  // Electron's browser process already follows the Windows trust store, but
+  // Node HTTPS defaults to its bundled roots. Corporate firewalls and antivirus
+  // products commonly install their inspection root only in Windows, which made
+  // the updater report SELF_SIGNED_CERT_IN_CHAIN while the same URL worked in
+  // the visible app. Keep verification enabled and combine both trusted stores.
+  try {
+    const defaults = tlsModule.getCACertificates('default');
+    const system = tlsModule.getCACertificates('system');
+    const combined = [...new Set([...(defaults || []), ...(system || [])].filter(Boolean))];
+    return combined.length ? combined : undefined;
+  } catch {
+    // Older embedded Node runtimes do not expose the system store. Falling back
+    // to Node's ordinary verified HTTPS behavior is safer than weakening TLS.
+    return undefined;
+  }
+}
+
+function httpsRequest(url, {
+  timeoutMs = 15000,
+  maxBytes = MAX_MANIFEST_BYTES,
+  redirects = 5,
+  trustedCAs = updaterTrustedCAs(),
+} = {}) {
   return new Promise((resolve, reject) => {
     let parsed;
     try { parsed = new URL(url); } catch { reject(new Error('invalid update URL')); return; }
     if (parsed.protocol !== 'https:') { reject(new Error('updates require HTTPS')); return; }
-    const request = https.get(parsed, { timeout: timeoutMs, headers: { 'user-agent': 'Workass-Updater/1', accept: 'application/json' } }, (response) => {
+    const request = https.get(parsed, {
+      timeout: timeoutMs,
+      ...(trustedCAs ? { ca: trustedCAs } : {}),
+      headers: { 'user-agent': 'Workass-Updater/1', accept: 'application/json' },
+    }, (response) => {
       const status = response.statusCode || 500;
       if ([301, 302, 303, 307, 308].includes(status)) {
         response.resume();
         if (redirects <= 0 || !response.headers.location) { reject(new Error('too many update redirects')); return; }
         let next;
         try { next = new URL(response.headers.location, parsed).href; } catch { reject(new Error('invalid update redirect')); return; }
-        httpsRequest(next, { timeoutMs, maxBytes, redirects: redirects - 1 }).then(resolve, reject);
+        httpsRequest(next, { timeoutMs, maxBytes, redirects: redirects - 1, trustedCAs }).then(resolve, reject);
         return;
       }
       if (status < 200 || status >= 300) {
@@ -167,19 +196,27 @@ function copyLocalArtifact(source, destination, artifact, { onProgress = () => {
   });
 }
 
-function downloadArtifact(url, destination, artifact, { onProgress = () => {}, redirects = 5 } = {}) {
+function downloadArtifact(url, destination, artifact, {
+  onProgress = () => {},
+  redirects = 5,
+  trustedCAs = updaterTrustedCAs(),
+} = {}) {
   if (path.isAbsolute(String(url || ''))) return copyLocalArtifact(url, destination, artifact, { onProgress });
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     if (parsed.protocol !== 'https:') { reject(new Error('updates require HTTPS')); return; }
-    const request = https.get(parsed, { timeout: 30000, headers: { 'user-agent': 'Workass-Updater/1', accept: 'application/octet-stream' } }, (response) => {
+    const request = https.get(parsed, {
+      timeout: 30000,
+      ...(trustedCAs ? { ca: trustedCAs } : {}),
+      headers: { 'user-agent': 'Workass-Updater/1', accept: 'application/octet-stream' },
+    }, (response) => {
       const status = response.statusCode || 500;
       if ([301, 302, 303, 307, 308].includes(status)) {
         response.resume();
         if (redirects <= 0 || !response.headers.location) { reject(new Error('too many update redirects')); return; }
         let next;
         try { next = new URL(response.headers.location, parsed).href; } catch { reject(new Error('invalid update redirect')); return; }
-        downloadArtifact(next, destination, artifact, { onProgress, redirects: redirects - 1 }).then(resolve, reject);
+        downloadArtifact(next, destination, artifact, { onProgress, redirects: redirects - 1, trustedCAs }).then(resolve, reject);
         return;
       }
       if (status < 200 || status >= 300) { response.resume(); reject(new Error(`update download returned HTTP ${status}`)); return; }
@@ -760,6 +797,7 @@ module.exports = {
   resolveArtifactSource,
   resolveUpdateFeed,
   stageRelease,
+  updaterTrustedCAs,
   validateReleaseManifest,
   verifyRelease,
   verifyMacRelease,

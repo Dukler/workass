@@ -9,7 +9,7 @@ const { createViewServer } = require('./view-server');
 const { BrowserManager } = require('./browser-manager');
 const { BrowserControlServer } = require('./browser-control-server');
 const { resolveRuntimeProfile } = require('./runtime-profile');
-const { applyMacDockIcon } = require('./app-icon');
+const { applyMacDockIcon, resolveWindowIconPath } = require('./app-icon');
 const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
 const { UpdateManager, resolveUpdateFeed } = require('./update-manager');
 const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
@@ -26,6 +26,7 @@ const RUNTIME = resolveRuntimeProfile({
 fs.mkdirSync(RUNTIME.userDataDir, { recursive: true });
 fs.mkdirSync(RUNTIME.runDir, { recursive: true });
 app.setName(RUNTIME.appName);
+if (process.platform === 'win32') app.setAppUserModelId(RUNTIME.bundleId);
 app.setPath('userData', RUNTIME.userDataDir);
 const ownsProfileInstance = acquireProfileSingleton({
   app,
@@ -123,6 +124,12 @@ function grantMicrophoneOnly() {
 function createWindow(url, browserReporter, isController) {
   const isUpdateRelaunch = revealUpdateRelaunch;
   revealUpdateRelaunch = false;
+  const windowIcon = resolveWindowIconPath({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    repoRoot: REPO_ROOT,
+  });
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -133,6 +140,7 @@ function createWindow(url, browserReporter, isController) {
       : { frame: false }),
     backgroundColor: '#151413',
     title: RUNTIME.appName,
+    ...(windowIcon ? { icon: windowIcon } : {}),
     show: !isUpdateRelaunch,
     webPreferences: {
       contextIsolation: true,
