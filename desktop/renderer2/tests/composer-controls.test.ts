@@ -17,3 +17,8 @@ test('effort gauge is a full-size peer of the context ring', () => {
   assert.match(styles, /\.effortsel \.egauge\s*\{[^}]*width:\s*17px;[^}]*height:\s*17px;/s);
   assert.match(styles, /\.effortsel \.egauge svg\s*\{[^}]*width:\s*17px;[^}]*height:\s*17px;/s);
 });
+
+test('composer remeasures a wrapped draft when a chat switch changes its rendered width', () => {
+  assert.match(composer, /observeComposerTextareaWidth/);
+  assert.match(composer, /return observeComposerTextareaWidth\(el, autosize\)/);
+});

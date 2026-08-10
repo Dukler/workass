@@ -117,8 +117,13 @@ function encodePNG(N, rgba) {
   ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
   const raw = Buffer.alloc(N * (N * 4 + 1));
   for (let y = 0; y < N; y++) {
-    raw[y * (N * 4 + 1)] = 0; // filter: none
-    rgba.copy(raw, y * (N * 4 + 1) + 1, y * N * 4, (y + 1) * N * 4);
+    const row = y * (N * 4 + 1);
+    raw[row] = 1; // Sub: preserves the exact pixels and compresses gradients.
+    for (let x = 0; x < N * 4; x++) {
+      const current = rgba[y * N * 4 + x];
+      const left = x >= 4 ? rgba[y * N * 4 + x - 4] : 0;
+      raw[row + 1 + x] = (current - left + 256) & 0xff;
+    }
   }
   const idat = zlib.deflateSync(raw, { level: 9 });
   return Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', idat), chunk('IEND', Buffer.alloc(0))]);

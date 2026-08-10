@@ -15,6 +15,7 @@ const {
   parseVersion,
   resolveArtifactSource,
   resolveUpdateFeed,
+  updaterTrustedCAs,
   validateReleaseManifest,
   verifyWindowsRelease,
 } = require('./update-manager');
@@ -152,7 +153,28 @@ test('platform feed names cannot collide in one GitHub release', () => {
 test('the Windows publisher marks the unsigned portable feed as updater-compatible', () => {
   const publisher = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'stage-windows-portable.sh'), 'utf8');
   assert.match(publisher, /platform:\s*'windows',[\s\S]{0,160}portable:\s*true,[\s\S]{0,240}authenticode:\s*false/);
+  assert.match(publisher, /stamp-windows-icon\.mjs["']? --exe ["']?\$stage\/Workass\.exe["']? --icon ["']?\$repo_root\/desktop\/assets\/icon\.ico/);
+  assert.match(publisher, /stamp-windows-icon\.mjs["']? --verify --exe ["']?\$stage\/Workass\.exe["']? --icon ["']?\$repo_root\/desktop\/assets\/icon\.ico/);
+  assert.match(publisher, /desktop\/assets\/icon\.ico["']? ["']?\$stage\/resources\/Workass\.ico/);
   assert.doesNotMatch(publisher, /ineligible for automatic install/);
+});
+
+test('Windows updater HTTPS combines bundled/default and Windows system roots without disabling verification', () => {
+  const calls = [];
+  const fakeTLS = {
+    getCACertificates(kind) {
+      calls.push(kind);
+      if (kind === 'default') return ['bundled-root', 'shared-root'];
+      if (kind === 'system') return ['system-root', 'shared-root'];
+      throw new Error(`unexpected CA source: ${kind}`);
+    },
+  };
+  assert.deepEqual(updaterTrustedCAs('win32', fakeTLS), ['bundled-root', 'shared-root', 'system-root']);
+  assert.deepEqual(calls, ['default', 'system']);
+  assert.equal(updaterTrustedCAs('darwin', fakeTLS), undefined);
+
+  const source = fs.readFileSync(path.join(__dirname, 'update-manager.js'), 'utf8');
+  assert.doesNotMatch(source, /NODE_TLS_REJECT_UNAUTHORIZED|rejectUnauthorized:\s*false[\s\S]{0,300}httpsRequest/);
 });
 
 test('the renderer has one owned apply IPC for the complete update intent', () => {

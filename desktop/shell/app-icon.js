@@ -13,6 +13,14 @@ function resolveAppIconPath({ isPackaged, resourcesPath, repoRoot }) {
   return candidates.find((candidate) => fs.existsSync(candidate)) || null;
 }
 
+function resolveWindowIconPath({ platform = process.platform, isPackaged, resourcesPath, repoRoot }) {
+  if (platform !== 'win32') return null;
+  const candidates = isPackaged
+    ? [path.join(resourcesPath, 'Workass.ico')]
+    : [path.join(repoRoot, 'desktop', 'assets', 'icon.ico')];
+  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
 function applyMacDockIcon({ app, nativeImage, isPackaged, resourcesPath, repoRoot, platform = process.platform }) {
   if (platform !== 'darwin' || !app || !app.dock || typeof app.dock.setIcon !== 'function') {
     return { applied: false, reason: 'unsupported-platform' };
@@ -25,4 +33,4 @@ function applyMacDockIcon({ app, nativeImage, isPackaged, resourcesPath, repoRoo
   return { applied: true, iconPath };
 }
 
-module.exports = { applyMacDockIcon, resolveAppIconPath };
+module.exports = { applyMacDockIcon, resolveAppIconPath, resolveWindowIconPath };

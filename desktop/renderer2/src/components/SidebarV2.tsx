@@ -103,7 +103,11 @@ export function resolveStatus(chat: Chat, live: boolean, active: boolean, obliga
   // — the finished cue fired most confidently exactly when it was most wrong.
   // Absent against an older daemon, in which case everything below is
   // unchanged.
-  if (obligation?.state === 'needs_input' || obligation?.state === 'stalled') return 'attention';
+  // Filing is the user's acknowledgement of terminal attention. It does not
+  // erase the daemon's obligation receipt; it only quiets that pill until a
+  // later job:start clears the settle override. Unread/failed cues below remain
+  // independent, so "Marcar como no leída" still does exactly what it says.
+  if ((obligation?.state === 'needs_input' || obligation?.state === 'stalled') && chat.settled !== 'settled') return 'attention';
   if (obligation?.state === 'parked') return 'parked';
   // T3 reads `session.status === "error"` — a property of the LIVE session, not
   // of transcript history, so an error stops being one as soon as the thread
@@ -198,14 +202,14 @@ type Row = {
   status: Status; since: number; bg: number; error: string;
 };
 
-// Port of T3's effectiveSettled. The guards come first and outrank the user's
-// own override exactly as they do there: work that needs a human, is running,
-// or came back unseen is never filed away, however you left it. Only then does
-// the explicit override decide, and only then does age.
+// Port of T3's effectiveSettled. Live work, pending approval, parked work, the
+// active chat, and unseen news cannot be filed. Terminal attention is different:
+// it is news the user can explicitly acknowledge, but it never auto-files by age.
 export function resolveSettled(chat: Chat, status: Status, active: boolean, now: number, touched: number): boolean {
-  if (status !== 'ready' || active || chat.unread) return false;
+  if (active || chat.unread || status === 'approval' || status === 'working' || status === 'parked') return false;
   if (chat.settled === 'settled') return true;
   if (chat.settled === 'active') return false;
+  if (status !== 'ready') return false;
   // T3 returns false outright when a thread has no activity to date. A chat
   // with no messages has a zero timestamp, and treating that as "last touched
   // in 1970" would drop every freshly created chat straight onto the shelf.
@@ -219,9 +223,9 @@ export function resolveSettled(chat: Chat, status: Status, active: boolean, now:
 // ask, so the affordance is withheld instead — and it has to be, because a chat
 // with a live turn wipes the override on its very next job event.
 export function canSettle(status: Status): boolean {
-  // A chat that is waiting on you, or that will resume by itself, is not
-  // history — it must not be shelvable out of sight.
-  return status !== 'approval' && status !== 'attention' && status !== 'working' && status !== 'parked';
+  // Approval, live work, and work that will resume by itself are not history.
+  // Attention is terminal user-facing news, so filing it is the acknowledgement.
+  return status !== 'approval' && status !== 'working' && status !== 'parked';
 }
 
 type Tip = { row: Row; top: number } | null;
