@@ -316,6 +316,42 @@ test('a successful queue save releases the refresh fence', async () => {
   assert.equal(subject.chat(owner.id)?.queue, undefined, 'a later server snapshot may apply after the save fence clears');
 });
 
+test('a stale background refresh cannot remove a newly created active chat before its save', () => {
+  const running = chat('tab-running', {
+    messages: [{
+      id: 'assistant-running', role: 'assistant', content: 'working', status: 'running',
+      at: null, events: [], jobId: 'job-running',
+    } as Msg],
+  });
+  const subject = subjectWithChats([running]);
+  const staleServer = subject.toMirror(false);
+
+  const created = subject.newChat(true, '/tmp/workass-mobile');
+  assert.equal(subject.state.activeId, created.id);
+
+  // The running chat can trigger session repair before the create's delayed
+  // full save reaches the daemon. The new row must stay mounted so an inline
+  // rename keeps both its DOM focus and the user's selected chat.
+  assert.equal(subject.restoreSessionSnapshot(staleServer), true);
+  assert.strictEqual(subject.chat(created.id), created);
+  assert.equal(subject.state.activeId, created.id);
+});
+
+test('the create fence releases after the daemon echoes the new chat', () => {
+  const running = chat('tab-running');
+  const subject = subjectWithChats([running]);
+  const beforeCreate = subject.toMirror(false);
+  const created = subject.newChat(true, '/tmp/workass-mobile');
+  const afterCreate = subject.toMirror(false);
+
+  assert.equal(subject.restoreSessionSnapshot(afterCreate), true);
+  assert.ok(subject.chat(created.id));
+
+  assert.equal(subject.restoreSessionSnapshot(beforeCreate), true);
+  assert.equal(subject.chat(created.id), null);
+  assert.equal(subject.state.activeId, running.id);
+});
+
 test('delete, structural, first-save, and post-restore boundaries force a complete save', async (t) => {
   await t.test('first save after boot', () => {
     const subject = new StoreCtor();

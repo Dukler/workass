@@ -127,6 +127,12 @@ export class Store {
   // The daemon owns chat durability. Omission from a renderer snapshot is never
   // a delete signal; only ids placed here by closeChat cross the v2 capability.
   private pendingChatDeletes = new Set<string>();
+  // Creating a chat is also a renderer-owned structural mutation. While another
+  // turn is running, its full save is deliberately debounced; a digest repair
+  // can therefore return the daemon's pre-create snapshot first. Keep that row
+  // mounted until an authoritative snapshot has echoed its id, or inline rename
+  // loses focus and the older active chat appears to steal the screen.
+  private pendingChatCreates = new Set<string>();
   // Lean v2 saves are chat deltas. Track exact tab ids plus a per-id mutation
   // revision so an acknowledgement cannot clear a second edit that arrived
   // while the first snapshot was crossing the wire.
@@ -817,6 +823,22 @@ export class Store {
     return [...next, ...remote.filter((chat) => !present.has(chat.id))];
   }
 
+  private carryPendingCreatedChats(previous: Chat[], next: Chat[]): Chat[] {
+    if (!this.pendingChatCreates.size) return next;
+    const previousIndex = new Map(previous.map((chat, index) => [chat.id, index]));
+    const pending = previous.filter((chat) => !chat.machineId && this.pendingChatCreates.has(chat.id));
+    if (!pending.length) return next;
+    const merged = [...next];
+    for (const chat of pending) {
+      if (merged.some((candidate) => candidate.id === chat.id)) continue;
+      const at = previousIndex.get(chat.id) ?? previous.length;
+      const following = previous.slice(at + 1).find((candidate) => merged.some((item) => item.id === candidate.id));
+      if (following) merged.splice(merged.findIndex((candidate) => candidate.id === following.id), 0, chat);
+      else merged.push(chat);
+    }
+    return merged;
+  }
+
   /**
    * Carry unanswered permission/question cards across a wholesale restore.
    *
@@ -849,9 +871,16 @@ export class Store {
     const previousChats = this.state.chats;
     const previousWorkspaces = this.state.workspaces;
     const pendingQueues = new Map(this.pendingQueueSnapshots);
+    const authoritativeChatIDs = new Set(authoritative.chats.map((chat) => chat.id));
+    for (const id of this.pendingChatCreates) {
+      if (authoritativeChatIDs.has(id)) this.pendingChatCreates.delete(id);
+    }
     const restored = this.fromMirror(authoritative);
     this.preserveNewerLocalControls(previousChats, restored.chats);
-    this.state.chats = this.carryRemoteChats(previousChats, restored.chats);
+    this.state.chats = this.carryRemoteChats(
+      previousChats,
+      this.carryPendingCreatedChats(previousChats, restored.chats),
+    );
     this.restoreDraftImages(previousChats, this.state.chats);
     // A digest can legitimately arrive before the renderer's queue save reply.
     // Keep the exact local projection until that reply clears its fence; the
@@ -1957,6 +1986,7 @@ export class Store {
       pending: true, messages: [], draft: '',
     };
     this.state.chats.unshift(chat);
+    this.pendingChatCreates.add(chat.id);
     // Recorded here, not at the button: "Nueva aquí", the per-folder + in the
     // scope menu and addWorkspace all land here, and each of them is the user
     // telling us which project new chats should default to next.
@@ -2186,6 +2216,7 @@ export class Store {
     void browserApi()?.close(id);
     releaseDraftImages(chat.draftImages ?? []);
     for (const item of chat.queue ?? []) releaseDraftImages(item.draftImages ?? []);
+    this.pendingChatCreates.delete(id);
     this.pendingChatDeletes.add(id);
     this.state.chats = this.state.chats.filter((c) => c.id !== id);
     if (this.state.activeId === id) this.state.activeId = this.state.chats[0]?.id ?? null;
