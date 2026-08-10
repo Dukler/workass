@@ -5,7 +5,14 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { runTransaction, startInstalledRuntime, validateTransaction, verifyWindowsIncoming } = require('./update-worker');
+const {
+  runTransaction,
+  runtimeIsHealthy,
+  startInstalledRuntime,
+  targetRuntimeEnv,
+  validateTransaction,
+  verifyWindowsIncoming,
+} = require('./update-worker');
 
 function writeFakeWindowsPE(file) {
   const bytes = Buffer.alloc(256);
@@ -99,6 +106,8 @@ test('the swapped macOS daemon is healthy before the shell is launched', async (
     resolveRuntimeProfile: (options) => {
       assert.equal(options.isPackaged, true);
       assert.equal(options.resourcesPath, path.join(tx.installTarget, 'Contents', 'Resources'));
+      assert.equal(options.env.WORKASS_DAEMON_BIND, undefined);
+      assert.equal(options.env.WORKASS_PROFILE_FILE, undefined);
       return runtime;
     },
     ensurePackagedDaemon: async (options) => {
@@ -107,8 +116,48 @@ test('the swapped macOS daemon is healthy before the shell is launched', async (
     },
   });
   assert.equal(receipt.status, 'installed-and-running');
+  assert.equal(receipt.runtime, runtime);
   assert.equal(ensured.runtime, runtime);
   assert.equal(ensured.forceInstall, true);
+});
+
+test('the target app profile replaces stale runtime settings inherited from the old shell', () => {
+  const env = targetRuntimeEnv({
+    HOME: '/Users/tester',
+    PATH: '/usr/bin',
+    WORKASS_PROFILE: 'prod',
+    WORKASS_PROFILE_FILE: '/old/profile.env',
+    WORKASS_DAEMON_BIND: 'localhost',
+    WORKASS_DAEMON_PORT: '8788',
+    WORKASS_URL: 'https://127.0.0.1:8788',
+    WORKASS_BROWSER_CONTROL_FILE: '/old/browser-control.json',
+    VENDOR_SETTING: 'preserved',
+  });
+  assert.equal(env.HOME, '/Users/tester');
+  assert.equal(env.PATH, '/usr/bin');
+  assert.equal(env.VENDOR_SETTING, 'preserved');
+  assert.equal(env.WORKASS_PROFILE, undefined);
+  assert.equal(env.WORKASS_PROFILE_FILE, undefined);
+  assert.equal(env.WORKASS_DAEMON_BIND, undefined);
+  assert.equal(env.WORKASS_DAEMON_PORT, undefined);
+  assert.equal(env.WORKASS_URL, undefined);
+  assert.equal(env.WORKASS_BROWSER_CONTROL_FILE, undefined);
+});
+
+test('activation health rejects a daemon that retained the previous bind mode', () => {
+  const shell = { controller: true, catalog: { readyModelCount: 2 }, appVersion: '1.1.0' };
+  assert.equal(runtimeIsHealthy({
+    daemon: { app: 'workass', version: '1.1.0', bind: 'lan' },
+    shell,
+    expectedVersion: '1.1.0',
+    expectedBind: 'lan',
+  }), true);
+  assert.equal(runtimeIsHealthy({
+    daemon: { app: 'workass', version: '1.1.0', bind: 'localhost' },
+    shell,
+    expectedVersion: '1.1.0',
+    expectedBind: 'lan',
+  }), false);
 });
 
 test('runtime prestart rejects a profile outside the prepared update transaction', async () => {
