@@ -13,7 +13,7 @@ const { applyMacDockIcon } = require('./app-icon');
 const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
 const { UpdateManager, resolveUpdateFeed } = require('./update-manager');
 const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
-const { acquireProfileSingleton } = require('./profile-singleton');
+const { acquireProfileSingleton, focusPrimaryWindow } = require('./profile-singleton');
 const { CertificatePins } = require('./certificate-pins');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -40,6 +40,7 @@ if (!ownsProfileInstance) {
 
 const DAEMON_URL = RUNTIME.daemonURL;
 const RECOVER_CONTROLLER = process.env.WORKASS_CONTROLLER_RECOVERY === '1';
+let revealUpdateRelaunch = process.env.WORKASS_UPDATE_RELAUNCH === '1';
 const RENDERER_DIR = process.env.WORKASS_RENDERER_DIR || (app.isPackaged
   ? path.join(process.resourcesPath, 'renderer')
   : path.join(__dirname, '..', 'renderer2', 'dist'));
@@ -111,6 +112,8 @@ function grantMicrophoneOnly() {
 }
 
 function createWindow(url, browserReporter, isController) {
+  const isUpdateRelaunch = revealUpdateRelaunch;
+  revealUpdateRelaunch = false;
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -121,6 +124,7 @@ function createWindow(url, browserReporter, isController) {
       : { frame: false }),
     backgroundColor: '#151413',
     title: RUNTIME.appName,
+    show: !isUpdateRelaunch,
     webPreferences: {
       contextIsolation: true,
       sandbox: true,
@@ -186,6 +190,7 @@ function createWindow(url, browserReporter, isController) {
 	});
   ipcMain.handle('workass-updater:get-state', (event) => own(event) ? updateManager?.snapshot() || null : null);
   ipcMain.handle('workass-updater:check', async (event) => own(event) ? updateManager?.check() || null : null);
+  ipcMain.handle('workass-updater:apply', async (event) => own(event) ? updateManager?.apply() || null : null);
   ipcMain.handle('workass-updater:download', async (event) => own(event) ? updateManager?.download() || null : null);
   ipcMain.handle('workass-updater:install', async (event) => own(event) ? updateManager?.install() || null : null);
   win.on('closed', () => {
@@ -202,10 +207,24 @@ function createWindow(url, browserReporter, isController) {
     try { ipcMain.removeHandler('workass-window:control'); } catch { /* ignore */ }
 		try { ipcMain.removeAllListeners('workass-machines:trust-endpoint'); } catch { /* ignore */ }
 		try { ipcMain.removeHandler('workass-recovery:restart-daemon'); } catch { /* ignore */ }
-    for (const channel of ['get-state', 'check', 'download', 'install']) {
+    for (const channel of ['get-state', 'check', 'apply', 'download', 'install']) {
       try { ipcMain.removeHandler(`workass-updater:${channel}`); } catch { /* ignore */ }
     }
   });
+  if (isUpdateRelaunch) {
+    let revealed = false;
+    let fallback = null;
+    const reveal = () => {
+      if (revealed || win.isDestroyed()) return;
+      revealed = true;
+      if (fallback) clearTimeout(fallback);
+      focusPrimaryWindow(() => [win], process.platform === 'darwin' ? app : null);
+    };
+    win.once('ready-to-show', reveal);
+    win.webContents.once('did-fail-load', reveal);
+    fallback = setTimeout(reveal, 5000);
+    fallback.unref?.();
+  }
   win.loadURL(url);
   win.webContents.on('did-finish-load', async () => {
     if (updateManager) win.webContents.send('workass-updater:state', updateManager.snapshot());

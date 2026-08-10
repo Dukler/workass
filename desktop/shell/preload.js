@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld('workassMachines', {
 contextBridge.exposeInMainWorld('workassUpdater', {
   getState: () => ipcRenderer.invoke('workass-updater:get-state'),
   check: () => ipcRenderer.invoke('workass-updater:check'),
+  apply: () => ipcRenderer.invoke('workass-updater:apply'),
   download: () => ipcRenderer.invoke('workass-updater:download'),
   install: () => ipcRenderer.invoke('workass-updater:install'),
   onState: (callback) => {

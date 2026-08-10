@@ -30,6 +30,8 @@ test('busy update text names every daemon-owned blocker without exposing task co
 
 test('download progress and rollback are explicit user-facing states', () => {
   assert.match(appUpdaterPhaseText(state('downloading', { progress: 0.42 })), /42%/);
+  assert.match(appUpdaterPhaseText(state('checking')), /versión verificada/);
+  assert.doesNotMatch(appUpdaterPhaseText(state('staging')), /firma/);
   assert.match(appUpdaterPhaseText(state('rollback_healthy')), /restauró la versión anterior/);
 });
 
@@ -51,6 +53,9 @@ test('Workass updater uses the existing footer update-card lifecycle and never a
   assert.match(selfCard, /upd-run upd-done/);
   assert.match(selfCard, /updcard upd-fail/);
   assert.match(selfCard, /className="uretry"/);
+  assert.match(sidebar, /const selfAction = selfPending \|\| selfFailed \? selfUpdater\.apply : null/);
+  assert.doesNotMatch(sidebar, /selfUpdater\.(download|install)/);
+  assert.doesNotMatch(sidebar, /const selfActionLabel[\s\S]{0,180}'Reiniciar'/);
   assert.doesNotMatch(settings, /WorkassPanel|useAppUpdater|appUpdaterPhaseText/);
   assert.doesNotMatch(settingsTypes, /SettingsSection\s*=\s*[^;]*'workass'/);
 });

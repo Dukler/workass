@@ -144,8 +144,9 @@ const release = {
   version,
   platform: 'windows',
   arch: 'amd64',
-  // The portable build remains deliberately ineligible for automatic install
-  // until both Workass.exe and workass-daemon.exe carry one Authenticode signer.
+  portable: true,
+  // Informational only. Portable Windows updates trust the immutable GitHub
+  // release manifest over HTTPS plus the archive's exact SHA-256 and size.
   authenticode: false,
   artifacts: { update: { name: artifactName, url: artifactName, sha256, size: Number(size) } },
 };

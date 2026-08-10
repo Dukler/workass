@@ -5,7 +5,39 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { runTransaction, validateTransaction } = require('./update-worker');
+const { runTransaction, startInstalledRuntime, validateTransaction, verifyWindowsIncoming } = require('./update-worker');
+
+function writeFakeWindowsPE(file) {
+  const bytes = Buffer.alloc(256);
+  bytes.write('MZ', 0, 'ascii');
+  bytes.writeUInt32LE(128, 0x3c);
+  bytes.write('PE\0\0', 128, 'ascii');
+  bytes.writeUInt16LE(0x8664, 132);
+  bytes.writeUInt16LE(0x20b, 152);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, bytes);
+}
+
+function writeWindowsRelease(root, version = '1.1.0') {
+  const write = (relative, value) => {
+    const file = path.join(root, ...relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, value);
+  };
+  write(['manifest.json'], `${JSON.stringify({ schemaVersion: 2, platform: 'windows', arch: 'amd64', version, portable: true, electron: true })}\n`);
+  write(['resources', 'app', 'package.json'], `${JSON.stringify({ version })}\n`);
+  for (const relative of [
+    ['resources', 'app', 'update-manager.js'],
+    ['resources', 'app', 'update-worker.js'],
+    ['resources', 'renderer', 'index.html'],
+    ['frontier-hosts', 'windows-amd64', 'claude-native-host.mjs'],
+    ['frontier-hosts', 'windows-amd64', 'codex-native-host.mjs'],
+    ['frontier-hosts', 'windows-amd64', 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'sdk.mjs'],
+  ]) write(relative, 'fixture');
+  writeFakeWindowsPE(path.join(root, 'Workass.exe'));
+  writeFakeWindowsPE(path.join(root, 'workass-daemon.exe'));
+  writeFakeWindowsPE(path.join(root, 'node', 'windows-amd64', 'node.exe'));
+}
 
 function transactionFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-worker-'));
@@ -38,6 +70,7 @@ function operations(overrides = {}) {
     daemonDown: async () => true,
     verifyIncoming: async () => { calls.push('verify'); },
     activate: async () => { calls.push('activate'); },
+    startRuntime: async () => { calls.push('start-runtime'); },
     launchInstalled: async () => { calls.push('launch'); },
     healthy: async (version) => { calls.push(`healthy:${version}`); return true; },
     stopLaunched: async () => { calls.push('stop-launched'); },
@@ -55,6 +88,55 @@ test('transaction validation requires one same-parent atomic swap', () => {
   assert.throws(() => validateTransaction({ ...tx, designatedRequirement: '' }), /invalid macOS/);
 });
 
+test('the swapped macOS daemon is healthy before the shell is launched', async () => {
+  const tx = transactionFixture();
+  let ensured = null;
+  const runtime = {
+    daemonURL: 'https://127.0.0.1:8788',
+    viewPort: 8798,
+  };
+  const receipt = await startInstalledRuntime(tx, {
+    resolveRuntimeProfile: (options) => {
+      assert.equal(options.isPackaged, true);
+      assert.equal(options.resourcesPath, path.join(tx.installTarget, 'Contents', 'Resources'));
+      return runtime;
+    },
+    ensurePackagedDaemon: async (options) => {
+      ensured = options;
+      return { status: 'installed-and-running' };
+    },
+  });
+  assert.equal(receipt.status, 'installed-and-running');
+  assert.equal(ensured.runtime, runtime);
+  assert.equal(ensured.forceInstall, true);
+});
+
+test('runtime prestart rejects a profile outside the prepared update transaction', async () => {
+  const tx = transactionFixture();
+  await assert.rejects(() => startInstalledRuntime(tx, {
+    resolveRuntimeProfile: () => ({ daemonURL: 'https://127.0.0.1:9999', viewPort: 8798 }),
+    ensurePackagedDaemon: async () => ({ status: 'installed-and-running' }),
+  }), /does not match/);
+});
+
+test('the independent worker accepts the checksum-staged unsigned Windows portable tree', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-worker-windows-'));
+  const incomingTarget = path.join(root, '.Workass.incoming-fixture');
+  writeWindowsRelease(incomingTarget);
+  assert.doesNotThrow(() => verifyWindowsIncoming({ incomingTarget, targetVersion: '1.1.0' }));
+  const worker = fs.readFileSync(path.join(__dirname, 'update-worker.js'), 'utf8');
+  assert.doesNotMatch(worker, /Get-AuthenticodeSignature|powershell\.exe/);
+});
+
+test('the update relaunch asks the existing Workass window to reveal itself only when ready', () => {
+  const worker = fs.readFileSync(path.join(__dirname, 'update-worker.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.match(worker, /WORKASS_UPDATE_RELAUNCH:\s*'1'/);
+  assert.match(main, /show:\s*!isUpdateRelaunch/);
+  assert.match(main, /win\.once\('ready-to-show', reveal\)/);
+  assert.match(main, /focusPrimaryWindow\(\(\) => \[win\]/);
+});
+
 test('healthy activation deletes the backup only after all runtime gates pass', async () => {
   const tx = transactionFixture();
   const ops = operations();
@@ -62,7 +144,7 @@ test('healthy activation deletes the backup only after all runtime gates pass', 
   assert.equal(receipt.phase, 'healthy');
   assert.equal(receipt.activated, true);
   assert.deepEqual(ops.calls, [
-    'stop-service', 'verify', 'activate', 'launch', 'healthy:1.1.0', 'cleanup',
+    'stop-service', 'verify', 'activate', 'start-runtime', 'launch', 'healthy:1.1.0', 'cleanup',
   ]);
   assert.equal(JSON.parse(fs.readFileSync(tx.receiptPath, 'utf8')).phase, 'healthy');
 });
@@ -79,8 +161,8 @@ test('failed new runtime is rolled back and the old version must pass the same g
   assert.equal(receipt.phase, 'rollback_healthy');
   assert.equal(receipt.rolledBack, true);
   assert.deepEqual(ops.calls, [
-    'stop-service', 'verify', 'activate', 'launch', 'healthy:1.1.0',
-    'stop-launched', 'rollback', 'launch', 'healthy:1.0.0', 'cleanup-failed',
+    'stop-service', 'verify', 'activate', 'start-runtime', 'launch', 'healthy:1.1.0',
+    'stop-launched', 'rollback', 'start-runtime', 'launch', 'healthy:1.0.0', 'cleanup-failed',
   ]);
 });
 
@@ -97,10 +179,10 @@ test('daemon stop failure relaunches the untouched app instead of leaving Workas
   assert.deepEqual(ops.calls, ['stop-service', 'launch', 'healthy:1.0.0']);
 });
 
-test('signature failure relaunches the untouched previous release without a bogus rollback swap', async () => {
+test('incoming verification failure relaunches the untouched previous release without a bogus rollback swap', async () => {
   const tx = transactionFixture();
   const ops = operations({
-    verifyIncoming: async () => { ops.calls.push('verify'); throw new Error('bad signature'); },
+    verifyIncoming: async () => { ops.calls.push('verify'); throw new Error('bad incoming release'); },
     healthy: async (version) => { ops.calls.push(`healthy:${version}`); return version === tx.currentVersion; },
   });
   const receipt = await runTransaction(tx, ops);
@@ -108,7 +190,7 @@ test('signature failure relaunches the untouched previous release without a bogu
   assert.equal(receipt.activated, false);
   assert.equal(receipt.rolledBack, false);
   assert.deepEqual(ops.calls, [
-    'stop-service', 'verify', 'stop-launched', 'launch', 'healthy:1.0.0', 'cleanup-failed',
+    'stop-service', 'verify', 'stop-launched', 'start-runtime', 'launch', 'healthy:1.0.0', 'cleanup-failed',
   ]);
 });
 

@@ -16,7 +16,45 @@ const {
   resolveArtifactSource,
   resolveUpdateFeed,
   validateReleaseManifest,
+  verifyWindowsRelease,
 } = require('./update-manager');
+
+function writeFakeWindowsPE(file) {
+  const bytes = Buffer.alloc(256);
+  bytes.write('MZ', 0, 'ascii');
+  bytes.writeUInt32LE(128, 0x3c);
+  bytes.write('PE\0\0', 128, 'ascii');
+  bytes.writeUInt16LE(0x8664, 132);
+  bytes.writeUInt16LE(0x20b, 152);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, bytes);
+}
+
+function writeWindowsRelease(root, version = '1.2.0') {
+  const json = (relative, value) => {
+    const file = path.join(root, ...relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `${JSON.stringify(value)}\n`);
+  };
+  const regular = (relative) => {
+    const file = path.join(root, ...relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'fixture');
+  };
+  json(['manifest.json'], { schemaVersion: 2, platform: 'windows', arch: 'amd64', version, portable: true, electron: true });
+  json(['resources', 'app', 'package.json'], { version });
+  for (const relative of [
+    ['resources', 'app', 'update-manager.js'],
+    ['resources', 'app', 'update-worker.js'],
+    ['resources', 'renderer', 'index.html'],
+    ['frontier-hosts', 'windows-amd64', 'claude-native-host.mjs'],
+    ['frontier-hosts', 'windows-amd64', 'codex-native-host.mjs'],
+    ['frontier-hosts', 'windows-amd64', 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'sdk.mjs'],
+  ]) regular(relative);
+  writeFakeWindowsPE(path.join(root, 'Workass.exe'));
+  writeFakeWindowsPE(path.join(root, 'workass-daemon.exe'));
+  writeFakeWindowsPE(path.join(root, 'node', 'windows-amd64', 'node.exe'));
+}
 
 function manifest(overrides = {}) {
   return {
@@ -111,6 +149,19 @@ test('platform feed names cannot collide in one GitHub release', () => {
   assert.equal(defaultFeedURL('win32', 'x64'), 'https://github.com/Dukler/workass/releases/latest/download/workass-windows-amd64-release.json');
 });
 
+test('the Windows publisher marks the unsigned portable feed as updater-compatible', () => {
+  const publisher = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'stage-windows-portable.sh'), 'utf8');
+  assert.match(publisher, /platform:\s*'windows',[\s\S]{0,160}portable:\s*true,[\s\S]{0,240}authenticode:\s*false/);
+  assert.doesNotMatch(publisher, /ineligible for automatic install/);
+});
+
+test('the renderer has one owned apply IPC for the complete update intent', () => {
+  const preload = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.match(preload, /apply:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('workass-updater:apply'\)/);
+  assert.match(main, /ipcMain\.handle\('workass-updater:apply',[\s\S]{0,160}own\(event\)[\s\S]{0,160}updateManager\?\.apply\(\)/);
+});
+
 test('macOS dogfood resolves one stable local feed while public builds stay on GitHub', () => {
   const dataRoot = '/Users/test/Library/Application Support/Workass';
   assert.equal(localFeedPath(dataRoot, 'darwin', 'arm64'), path.join(dataRoot, 'update-feed', 'workass-darwin-arm64-release.json'));
@@ -161,13 +212,33 @@ test('the manager checks and stages a local Mac release without any network requ
   assert.deepEqual(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'release.zip')), bytes);
 });
 
-test('manifest validation requires the exact platform, checksum, size, and signing law', () => {
+test('manifest validation requires the exact platform, checksum, size, and platform trust law', () => {
   assert.equal(validateReleaseManifest(manifest(), { platform: 'darwin', arch: 'arm64' }).version, '1.2.0');
   assert.throws(() => validateReleaseManifest(manifest({ arch: 'amd64' }), { platform: 'darwin', arch: 'arm64' }), /another platform/);
   assert.throws(() => validateReleaseManifest(manifest({ designatedRequirement: '' }), { platform: 'darwin', arch: 'arm64' }), /signing requirement/);
   const windows = manifest({ platform: 'windows', arch: 'amd64', designatedRequirement: undefined });
-  assert.throws(() => validateReleaseManifest(windows, { platform: 'win32', arch: 'x64' }), /Authenticode/);
-  assert.equal(validateReleaseManifest({ ...windows, authenticode: true }, { platform: 'win32', arch: 'x64' }).platform, 'windows');
+  assert.throws(() => validateReleaseManifest(windows, { platform: 'win32', arch: 'x64' }), /portable release/);
+  assert.equal(validateReleaseManifest({ ...windows, portable: true, authenticode: false }, { platform: 'win32', arch: 'x64' }).platform, 'windows');
+});
+
+test('packaged unsigned Windows builds enable the GitHub updater without PowerShell', () => {
+  const { manager } = managerFixture({ platform: 'win32', arch: 'x64' });
+  assert.equal(manager.snapshot().supported, true);
+  const source = fs.readFileSync(path.join(__dirname, 'update-manager.js'), 'utf8');
+  assert.doesNotMatch(source, /Get-AuthenticodeSignature|powershell\.exe/);
+});
+
+test('unsigned Windows staging verifies the complete portable x86-64 runtime', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-windows-release-'));
+  const incoming = path.join(root, 'incoming');
+  writeWindowsRelease(incoming);
+  assert.doesNotThrow(() => verifyWindowsRelease(path.join(root, 'current'), incoming, '1.2.0', 'x64'));
+
+  fs.writeFileSync(path.join(incoming, 'resources', 'app', 'package.json'), '{"version":"9.9.9"}\n');
+  assert.throws(() => verifyWindowsRelease(path.join(root, 'current'), incoming, '1.2.0', 'x64'), /shell version/);
+  fs.writeFileSync(path.join(incoming, 'resources', 'app', 'package.json'), '{"version":"1.2.0"}\n');
+  fs.writeFileSync(path.join(incoming, 'workass-daemon.exe'), 'not-a-pe');
+  assert.throws(() => verifyWindowsRelease(path.join(root, 'current'), incoming, '1.2.0', 'x64'), /Windows executable|PE32/);
 });
 
 test('busy daemon leaves the verified release staged and never starts the worker', async () => {
@@ -188,6 +259,24 @@ test('committed handoff arms one worker, then quits only after daemon commit', a
   assert.equal(state.phase, 'installing');
   assert.deepEqual(calls, ['prepare', 'spawn:update-worker.js', 'commit']);
   assert.equal(didQuit(), true);
+});
+
+test('one apply action stages and commits an available release without a second click', async () => {
+  const { manager } = managerFixture();
+  const steps = [];
+  manager.publish({ phase: 'available', targetVersion: '1.2.0' });
+  manager.download = async () => {
+    steps.push('download');
+    return manager.publish({ phase: 'ready', progress: 1 });
+  };
+  manager.install = async () => {
+    steps.push('install');
+    return manager.publish({ phase: 'installing' });
+  };
+
+  const state = await manager.apply();
+  assert.equal(state.phase, 'installing');
+  assert.deepEqual(steps, ['download', 'install']);
 });
 
 test('a missing platform asset means current while real feed failures stay visible', async () => {

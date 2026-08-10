@@ -70,7 +70,7 @@ function validateReleaseManifest(raw, { platform = process.platform, arch = proc
   if (!Number.isSafeInteger(artifact.size) || artifact.size <= 0 || artifact.size > MAX_UPDATE_BYTES) throw new Error('release manifest has an invalid update size');
   if (!String(artifact.url || '').trim()) throw new Error('release manifest has no update URL');
   if (platform === 'darwin' && !String(raw.designatedRequirement || '').trim()) throw new Error('macOS release has no signing requirement');
-  if (platform === 'win32' && raw.authenticode !== true) throw new Error('Windows automatic updates require Authenticode-signed releases');
+  if (platform === 'win32' && raw.portable !== true) throw new Error('Windows automatic updates require a portable release');
   return raw;
 }
 
@@ -198,7 +198,7 @@ function downloadArtifact(url, destination, artifact, { onProgress = () => {}, r
       };
       response.on('data', (chunk) => {
         received += chunk.length;
-        if (received > artifact.size || received > MAX_UPDATE_BYTES) { response.destroy(new Error('update exceeded its signed size')); return; }
+        if (received > artifact.size || received > MAX_UPDATE_BYTES) { response.destroy(new Error('update exceeded its declared size')); return; }
         hash.update(chunk);
         onProgress(received, artifact.size);
       });
@@ -286,22 +286,59 @@ function verifyMacRelease(currentApp, incomingApp, targetVersion) {
   return currentRequirement;
 }
 
-function powershellSignature(executable) {
-  const quoted = String(executable).replaceAll("'", "''");
-  const script = `$s=Get-AuthenticodeSignature -LiteralPath '${quoted}'; [Console]::Out.Write(($s.Status.ToString())+'|'+($s.SignerCertificate.Thumbprint))`;
-  const value = runChecked('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], 'Authenticode verification');
-  const [status, thumbprint] = value.split('|');
-  if (status !== 'Valid' || !thumbprint) throw new Error('Authenticode signature is not valid');
-  return thumbprint.toUpperCase();
+function requiredRegularFile(file, label) {
+  const stat = fs.statSync(file, { throwIfNoEntry: false });
+  if (!stat?.isFile() || stat.size <= 0) throw new Error(`incoming Windows release has no ${label}`);
+  return stat;
 }
 
-function verifyWindowsRelease(currentRoot, incomingRoot, targetVersion) {
-  const currentSigner = powershellSignature(path.join(currentRoot, 'Workass.exe'));
-  for (const executable of [path.join(incomingRoot, 'Workass.exe'), path.join(incomingRoot, 'workass-daemon.exe')]) {
-    if (powershellSignature(executable) !== currentSigner) throw new Error('incoming executable signer does not match the installed app');
+function verifyWindowsPE(file, label) {
+  const stat = requiredRegularFile(file, label);
+  const descriptor = fs.openSync(file, 'r');
+  try {
+    const dos = Buffer.alloc(64);
+    if (fs.readSync(descriptor, dos, 0, dos.length, 0) !== dos.length || dos.toString('ascii', 0, 2) !== 'MZ') {
+      throw new Error(`incoming ${label} is not a Windows executable`);
+    }
+    const peOffset = dos.readUInt32LE(0x3c);
+    if (peOffset < 64 || peOffset + 26 > stat.size || peOffset > 1024 * 1024) {
+      throw new Error(`incoming ${label} has an invalid PE header`);
+    }
+    const pe = Buffer.alloc(26);
+    if (fs.readSync(descriptor, pe, 0, pe.length, peOffset) !== pe.length ||
+        pe.toString('ascii', 0, 4) !== 'PE\0\0' || pe.readUInt16LE(4) !== 0x8664 || pe.readUInt16LE(24) !== 0x20b) {
+      throw new Error(`incoming ${label} is not PE32+ x86-64`);
+    }
+  } finally {
+    fs.closeSync(descriptor);
   }
-  const manifest = JSON.parse(fs.readFileSync(path.join(incomingRoot, 'manifest.json'), 'utf8'));
-  if (manifest.version !== targetVersion || manifest.platform !== 'windows') throw new Error('incoming portable runtime does not match the manifest');
+}
+
+function readReleaseJSON(file, label) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch { throw new Error(`incoming Windows ${label} is invalid`); }
+}
+
+function verifyWindowsRelease(_currentRoot, incomingRoot, targetVersion, arch = 'x64') {
+  const expectedArch = releaseArch('win32', arch);
+  const manifest = readReleaseJSON(path.join(incomingRoot, 'manifest.json'), 'runtime manifest');
+  if (manifest.schemaVersion !== 2 || manifest.version !== targetVersion || manifest.platform !== 'windows' ||
+      manifest.arch !== expectedArch || manifest.portable !== true || manifest.electron !== true) {
+    throw new Error('incoming portable runtime does not match the release manifest');
+  }
+  const packageManifest = readReleaseJSON(path.join(incomingRoot, 'resources', 'app', 'package.json'), 'shell manifest');
+  if (packageManifest.version !== targetVersion) throw new Error('incoming Windows shell version does not match the release manifest');
+  verifyWindowsPE(path.join(incomingRoot, 'Workass.exe'), 'Workass.exe');
+  verifyWindowsPE(path.join(incomingRoot, 'workass-daemon.exe'), 'workass-daemon.exe');
+  verifyWindowsPE(path.join(incomingRoot, 'node', `windows-${expectedArch}`, 'node.exe'), 'portable node.exe');
+  for (const [relative, label] of [
+    [['resources', 'app', 'update-manager.js'], 'update manager'],
+    [['resources', 'app', 'update-worker.js'], 'update worker'],
+    [['resources', 'renderer', 'index.html'], 'renderer'],
+    [['frontier-hosts', `windows-${expectedArch}`, 'claude-native-host.mjs'], 'Claude host'],
+    [['frontier-hosts', `windows-${expectedArch}`, 'codex-native-host.mjs'], 'Codex host'],
+    [['frontier-hosts', `windows-${expectedArch}`, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'sdk.mjs'], 'Claude Agent SDK'],
+  ]) requiredRegularFile(path.join(incomingRoot, ...relative), label);
 }
 
 function stageRelease(source, incomingTarget, platform = process.platform) {
@@ -313,9 +350,9 @@ function stageRelease(source, incomingTarget, platform = process.platform) {
   fs.cpSync(source, incomingTarget, { recursive: true, errorOnExist: true });
 }
 
-function verifyRelease(currentRoot, incomingRoot, targetVersion, platform = process.platform) {
+function verifyRelease(currentRoot, incomingRoot, targetVersion, platform = process.platform, arch = process.arch) {
   if (platform === 'darwin') return verifyMacRelease(currentRoot, incomingRoot, targetVersion);
-  verifyWindowsRelease(currentRoot, incomingRoot, targetVersion);
+  verifyWindowsRelease(currentRoot, incomingRoot, targetVersion, arch);
   return '';
 }
 
@@ -460,13 +497,6 @@ class UpdateManager {
     const platformSupported = this.platform === 'darwin' || this.platform === 'win32';
     let supported = this.isPackaged && platformSupported && fs.existsSync(node);
     let unsupportedReason = this.isPackaged ? 'This build does not include the verified updater runtime.' : 'App updates are available in packaged Workass builds.';
-    if (supported && this.platform === 'win32') {
-      try { powershellSignature(this.executablePath); }
-      catch {
-        supported = false;
-        unsupportedReason = 'Automatic Windows updates require an Authenticode-signed Workass release.';
-      }
-    }
     this.publish({
       supported,
       phase: supported ? 'idle' : 'unavailable',
@@ -598,7 +628,7 @@ class UpdateManager {
       const backupTarget = path.join(parent, `${this.platform === 'darwin' ? '.Workass.app' : '.Workass'}.previous-${updateId}`);
       if (fs.existsSync(incomingTarget) || fs.existsSync(backupTarget)) throw new Error('update staging target already exists');
       this.deps.stageRelease(source, incomingTarget, this.platform);
-      const designatedRequirement = this.deps.verifyRelease(installTarget, incomingTarget, this.manifest.version, this.platform);
+      const designatedRequirement = this.deps.verifyRelease(installTarget, incomingTarget, this.manifest.version, this.platform, this.arch);
       this.prepared = { updateId, transactionRoot, installTarget, incomingTarget, backupTarget, designatedRequirement };
       return this.publish({ phase: 'ready', progress: 1, error: null });
     } catch (err) {
@@ -686,6 +716,19 @@ class UpdateManager {
     }
   }
 
+  // One user intent owns the complete ordinary update path. The lower-level
+  // methods remain separate for recovery/tests, but the renderer never asks the
+  // user to click once to stage and again to activate the same verified release.
+  async apply() {
+    let state = this.snapshot();
+    if (state.phase === 'failed' || state.phase === 'rollback_healthy') {
+      state = await this.check();
+    }
+    if (state.phase === 'available') state = await this.download();
+    if (state.phase === 'ready' || state.phase === 'busy') state = await this.install();
+    return state;
+  }
+
   dispose() {
     this.stopAutoChecks();
     if (this.receiptTimer) clearInterval(this.receiptTimer);
@@ -720,5 +763,6 @@ module.exports = {
   validateReleaseManifest,
   verifyRelease,
   verifyMacRelease,
+  verifyWindowsPE,
   verifyWindowsRelease,
 };
