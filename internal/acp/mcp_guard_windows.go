@@ -75,7 +75,7 @@ func (m *Manager) guardAcpMCPFanout(reason string) {
 		for _, child := range children {
 			commands = append(commands, compactText(redactSensitiveText(child.CommandLine), 500))
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			err := exec.CommandContext(ctx, "taskkill.exe", "/PID", strconv.Itoa(child.ProcessID), "/T", "/F").Run()
+			err := managedCommandContext(ctx, "taskkill.exe", "/PID", strconv.Itoa(child.ProcessID), "/T", "/F").Run()
 			cancel()
 			if err == nil {
 				killed = append(killed, child.ProcessID)
@@ -101,7 +101,7 @@ func rawMCPDockerChildren(bridges map[int]*Bridge) (map[int][]windowsDockerProce
 	script := fmt.Sprintf(`$ErrorActionPreference='SilentlyContinue'; $ids=@(%s); Get-CimInstance Win32_Process -Filter "name = 'docker.exe'" | Where-Object { $ids -contains [int]$_.ParentProcessId } | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress -Depth 3`, strings.Join(ids, ","))
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+	cmd := managedCommandContext(ctx, powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
 	var stdout limitedOutputBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &limitedOutputBuffer{}

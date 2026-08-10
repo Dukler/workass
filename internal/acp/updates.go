@@ -485,7 +485,7 @@ func (m *Manager) startProviderUpdateRun(providerID string, run *providerUpdateR
 		timeout = defaultProviderUpdateRunTimeout
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	cmd := exec.CommandContext(ctx, command.Command, command.Args...)
+	cmd := managedCommandContext(ctx, command.Command, command.Args...)
 	cmd.Dir = m.providerCLIWorkingDir(providerID)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -731,7 +731,7 @@ func (m *Manager) detectInstalledCLIVersionWithTimeout(parent context.Context, p
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, resolved, "--version")
+	cmd := managedCommandContext(ctx, resolved, "--version")
 	cmd.Dir = m.providerCLIWorkingDir(providerID)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

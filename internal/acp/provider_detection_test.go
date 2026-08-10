@@ -12,12 +12,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestProviderDetectionDefaultRetryCadenceMatchesPortContract(t *testing.T) {
+	got := (Options{}).withDefaults().ProviderDetectionRetryBackoffs
+	want := []time.Duration{5 * time.Minute, 15 * time.Minute, 30 * time.Minute}
+	if !slices.Equal(got, want) {
+		t.Fatalf("provider detection retry cadence = %v, want %v", got, want)
+	}
+}
 
 func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *testing.T) {
 	root := repoRoot(t)

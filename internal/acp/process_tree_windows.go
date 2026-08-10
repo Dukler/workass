@@ -5,7 +5,6 @@ package acp
 import (
 	"context"
 	"os"
-	"os/exec"
 	"strconv"
 	"time"
 )
@@ -19,7 +18,7 @@ func stopProcessTree(process *os.Process) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := exec.CommandContext(ctx, "taskkill.exe", "/PID", strconv.Itoa(process.Pid), "/T", "/F").Run(); err == nil {
+	if err := managedCommandContext(ctx, "taskkill.exe", "/PID", strconv.Itoa(process.Pid), "/T", "/F").Run(); err == nil {
 		return nil
 	}
 	return process.Kill()
