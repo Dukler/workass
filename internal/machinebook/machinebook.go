@@ -58,6 +58,7 @@ const (
 const (
 	SourceManual = "manual"
 	SourceBeacon = "beacon"
+	SourceProbe  = "port-80-probe"
 )
 
 // DefaultPort is assumed when an address names a host and no port.
@@ -215,6 +216,42 @@ func (b *Book) Add(ctx context.Context, address string) (Entry, error) {
 		return Entry{}, ErrSelf
 	}
 	return b.record(card, normalized, SourceManual)
+}
+
+// Discover records a daemon found by automatic TCP port-80 probing. It avoids
+// a disk write and UI broadcast when the same healthy endpoint answers again.
+func (b *Book) Discover(ctx context.Context, address string) (Entry, bool, error) {
+	normalized, err := NormalizeAddress(address)
+	if err != nil {
+		return Entry{}, false, err
+	}
+	if !isPort80Address(normalized) {
+		return Entry{}, false, errors.New("automatic discovery probes only TCP port 80")
+	}
+	card, probeErr := b.probe(ctx, normalized)
+	if probeErr != nil {
+		return Entry{}, false, probeErr
+	}
+	if b.selfID != "" && card.MachineID == b.selfID {
+		return Entry{}, false, ErrSelf
+	}
+
+	b.mu.Lock()
+	entry, known := b.entries[card.MachineID]
+	unchanged := known && entry.Status == StatusOK && entry.Name == card.DisplayName() &&
+		entry.Version == card.Version && entry.WireVersion == card.WireVersion &&
+		entry.Secure == card.Secure && entry.CertFingerprint == card.CertFingerprint &&
+		hasEndpoint(entry.Endpoints, Endpoint{Kind: KindLAN, Address: normalized})
+	if unchanged {
+		entry.LastSeenAt = b.now().UTC().Format(time.RFC3339)
+		b.entries[card.MachineID] = entry
+		b.mu.Unlock()
+		return entry, false, nil
+	}
+	b.mu.Unlock()
+
+	recorded, err := b.record(card, normalized, SourceProbe)
+	return recorded, err == nil, err
 }
 
 // Sighted records a beacon announcement from machineID at address.
