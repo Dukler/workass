@@ -33,6 +33,7 @@ var mutatingChannels = map[string]struct{}{
 	"settings:set":                  {},
 	"config:set":                    {},
 	"session:save":                  {},
+	"fs:create-dir":                 {},
 	"chat:archive-append":           {},
 	"visualize:host":                {},
 	"chat:rewind":                   {},
@@ -62,11 +63,11 @@ var mutatingChannels = map[string]struct{}{
 	// Stopping background work kills processes on this machine, so it belongs
 	// with proc:kill rather than with the read-only spawned-work channels an
 	// approved device may call while another device holds the lease.
-	"spawned-work:stop":             {},
-	"agent-proc:kill":               {},
-	"code:unlock":                   {},
-	"code:lock":                     {},
-	"chat:permission-decide":        {},
+	"spawned-work:stop":      {},
+	"agent-proc:kill":        {},
+	"code:unlock":            {},
+	"code:lock":              {},
+	"chat:permission-decide": {},
 	// `chat:permissions-pending` used to sit here, on the reasoning that
 	// permission titles belong to the surface that can answer them. That
 	// conflated seeing with deciding. An approved device already reads every
@@ -195,25 +196,25 @@ type Hub struct {
 }
 
 type client struct {
-	conn             net.Conn
-	outMu            sync.Mutex
-	outbound         chan outboundFrame
-	outboundBytes    int
+	conn          net.Conn
+	outMu         sync.Mutex
+	outbound      chan outboundFrame
+	outboundBytes int
 	// Bytes of the queued bulk frame, if any; see outboundFrameIsBulk.
 	outboundBulkBytes int
-	done             chan struct{}
-	closeOnce        sync.Once
-	stateMu          sync.RWMutex
-	ip               string
-	deviceName       string
-	userAgent        string
-	device           *lease.Device
-	issuedToken      string
-	pendingRequestID string
-	access           accessState
-	fleetNonce       string
-	fleetNonceAt     time.Time
-	fleetFailures    int
+	done              chan struct{}
+	closeOnce         sync.Once
+	stateMu           sync.RWMutex
+	ip                string
+	deviceName        string
+	userAgent         string
+	device            *lease.Device
+	issuedToken       string
+	pendingRequestID  string
+	access            accessState
+	fleetNonce        string
+	fleetNonceAt      time.Time
+	fleetFailures     int
 	// Set when acting on this socket moved the controller lease, so the reply
 	// path announces the handover the same way an explicit lan:take-control does.
 	tookControl atomic.Bool

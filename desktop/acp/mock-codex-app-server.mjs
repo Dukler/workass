@@ -86,6 +86,14 @@ async function handle(message) {
     if (process.env.WORKASS_CODEX_FIXTURE_AUTH_ERROR === '1') {
       return write({ id, error: { code: -32000, message: 'Authentication required: run codex login' } });
     }
+    if (process.env.WORKASS_CODEX_FIXTURE_REQUIRE_MCP_2026 === '1') {
+      const server = params.config?.mcp_servers?.workass_agent;
+      if (params.config?.features?.mcp_2026_07_28 !== true
+          || server?.url !== 'https://mcp.localhost:18788/workass/mcp/agent'
+          || server?.http_headers?.Authorization !== 'Bearer fixture-owner') {
+        return write({ id, error: { code: -32602, message: 'missing stateless MCP session configuration' } });
+      }
+    }
     return respond(id, {
     thread: { id: 'fixture-codex-thread', preview: '', modelProvider: 'openai', createdAt: 1, updatedAt: 1, status: { type: 'idle' }, path: null, cwd: params.cwd, cliVersion: 'fixture', source: 'appServer', agentNickname: null, agentRole: null, gitInfo: null, name: null, turns: [] },
     model: model.id, reasoningEffort: 'high', modelProvider: 'openai', cwd: params.cwd,

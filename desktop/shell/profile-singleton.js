@@ -1,6 +1,6 @@
 'use strict';
 
-function focusPrimaryWindow(getWindows) {
+function focusPrimaryWindow(getWindows, app = null) {
   const windows = typeof getWindows === 'function' ? getWindows() : [];
   const win = Array.isArray(windows)
     ? windows.find((candidate) => candidate && !candidate.isDestroyed?.())
@@ -8,6 +8,7 @@ function focusPrimaryWindow(getWindows) {
   if (!win) return false;
   if (win.isMinimized?.()) win.restore?.();
   win.show?.();
+  app?.focus?.({ steal: true });
   win.focus?.();
   return true;
 }
@@ -19,7 +20,7 @@ function acquireProfileSingleton({ app, profile, dataRoot, getWindows }) {
     workassDataRoot: String(dataRoot || ''),
   });
   if (!acquired) return false;
-  app.on('second-instance', () => { focusPrimaryWindow(getWindows); });
+  app.on('second-instance', () => { focusPrimaryWindow(getWindows, app); });
   return true;
 }
 

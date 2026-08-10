@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type browserRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -102,27 +103,21 @@ func TestBrowserMCPListsToolsAndRoutesProviderNeutralCalls(t *testing.T) {
 		body, _ := json.Marshal(map[string]any{"id": payload["id"], "result": result})
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
 	})}
-	input := strings.Join([]string{
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`,
-		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
-		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"workass_browser_snapshot","arguments":{"tab_id":42}}}`,
-		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"workass_browser_screenshot","arguments":{"tab_id":42}}}`,
-	}, "\n") + "\n"
-	var output bytes.Buffer
-	if err := serveBrowserMCP(strings.NewReader(input), &output, browserMCPOptions{ControlFile: controlFile, ChatID: "chat-a", HTTPClient: client}); err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 4 {
-		t.Fatalf("responses = %d\n%s", len(lines), output.String())
-	}
-	var listed map[string]any
-	if err := json.Unmarshal([]byte(lines[1]), &listed); err != nil {
-		t.Fatal(err)
-	}
-	tools := mapFromAnyMain(listed["result"])["tools"].([]any)
+	tools := browserMCPTools()
 	if len(tools) != 11 {
 		t.Fatalf("tool count = %d", len(tools))
+	}
+	snapshot, err := callBrowserMCPTool(browserMCPCallParams{
+		Name: "workass_browser_snapshot", Arguments: map[string]any{"tab_id": 42},
+	}, browserMCPOptions{ControlFile: controlFile, ChatID: "chat-a", HTTPClient: client}, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	screenshot, err := callBrowserMCPTool(browserMCPCallParams{
+		Name: "workass_browser_screenshot", Arguments: map[string]any{"tab_id": 42},
+	}, browserMCPOptions{ControlFile: controlFile, ChatID: "chat-a", HTTPClient: client}, client)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(requests) != 2 || requests[0]["method"] != "browser.snapshot" || requests[1]["method"] != "browser.screenshot" {
 		t.Fatalf("requests = %#v", requests)
@@ -134,25 +129,24 @@ func TestBrowserMCPListsToolsAndRoutesProviderNeutralCalls(t *testing.T) {
 	if _, leaked := params["tab_id"]; leaked {
 		t.Fatalf("wire-internal snake_case tab id leaked to the shell: %#v", params)
 	}
-	if strings.Contains(output.String(), "test-control-value") {
-		t.Fatal("control credential leaked to MCP stdout")
+	if mapFromAnyMain(snapshot)["isError"] == true {
+		t.Fatalf("snapshot result = %#v", snapshot)
 	}
-	if !strings.Contains(lines[3], `"type":"image"`) || !strings.Contains(lines[3], `"data":"ZmFrZS1wbmc="`) {
-		t.Fatalf("screenshot response = %s", lines[3])
+	encoded, _ := json.Marshal(screenshot)
+	if !strings.Contains(string(encoded), `"type":"image"`) || !strings.Contains(string(encoded), `"data":"ZmFrZS1wbmc="`) {
+		t.Fatalf("screenshot response = %s", encoded)
 	}
 }
 
-func TestBrowserMCPStdoutStaysJSONRPCOnlyWhenBrowserIsUnavailable(t *testing.T) {
-	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workass_browser_list","arguments":{}}}` + "\n"
-	var output bytes.Buffer
-	if err := serveBrowserMCP(strings.NewReader(input), &output, browserMCPOptions{ControlFile: filepath.Join(t.TempDir(), "missing.json")}); err != nil {
+func TestBrowserMCPReturnsToolErrorWhenBrowserIsUnavailable(t *testing.T) {
+	client := &http.Client{Timeout: time.Second}
+	response, err := callBrowserMCPTool(browserMCPCallParams{
+		Name: "workass_browser_list", Arguments: map[string]any{},
+	}, browserMCPOptions{ControlFile: filepath.Join(t.TempDir(), "missing.json"), HTTPClient: client}, client)
+	if err != nil {
 		t.Fatal(err)
 	}
-	var response map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &response); err != nil {
-		t.Fatalf("stdout is not JSON-RPC: %v\n%s", err, output.String())
-	}
-	result := mapFromAnyMain(response["result"])
+	result := mapFromAnyMain(response)
 	if result["isError"] != true {
 		t.Fatalf("result = %#v", result)
 	}

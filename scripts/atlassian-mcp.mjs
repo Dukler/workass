@@ -10,6 +10,7 @@ import path from 'node:path';
 const oauthDir = path.join(os.homedir(), 'AppData', 'Roaming', 'devin', 'mcp', 'oauth');
 const refreshHelper = path.join(os.homedir(), '.config', 'devin', 'scripts', 'Refresh-AtlassianMcpOAuth.ps1');
 const JIRA_SITE = process.env.ASSISTANT_JIRA_SITE || 'https://san-sar-basic.atlassian.net';
+const MCP_PROTOCOL_VERSION = '2026-07-28';
 
 export function refreshAtlassianOAuth() {
   if (!fs.existsSync(refreshHelper)) return;
@@ -50,17 +51,16 @@ export function adfToText(node) {
 export class AtlassianMcpClient {
   constructor(oauth) {
     this.oauth = oauth;
-    this.sessionId = null;
     this.nextId = 1;
   }
 
   async initialize() {
-    const response = await this.post({
-      jsonrpc: '2.0', id: this.nextId++, method: 'initialize',
-      params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'work-assistant', version: '0.1.0' } },
-    });
-    this.sessionId = response.sessionId;
-    await this.post({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }, { expectNoJson: true });
+    const response = await this.request('server/discover', {});
+    const supported = Array.isArray(response.result?.supportedVersions) ? response.result.supportedVersions : [];
+    if (!supported.includes(MCP_PROTOCOL_VERSION)) {
+      throw new Error(`Atlassian MCP does not support ${MCP_PROTOCOL_VERSION}`);
+    }
+    return response.result;
   }
 
   async getCloudId() {
@@ -102,31 +102,50 @@ export class AtlassianMcpClient {
   }
 
   async callTool(name, args) {
-    const payload = await this.post({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/call', params: { name, arguments: args } });
+    const payload = await this.request('tools/call', { name, arguments: args });
     const result = payload.result;
     if (result?.isError) throw new Error(`${name} failed: ${JSON.stringify(result.content)}`);
     const text = result?.content?.find((item) => item.type === 'text')?.text;
     return text ? JSON.parse(text) : result;
   }
 
-  async post(body, { expectNoJson = false } = {}) {
+  async request(method, params) {
+    const body = {
+      jsonrpc: '2.0',
+      id: this.nextId++,
+      method,
+      params: {
+        ...params,
+        _meta: {
+          'io.modelcontextprotocol/protocolVersion': MCP_PROTOCOL_VERSION,
+          'io.modelcontextprotocol/clientCapabilities': {},
+          'io.modelcontextprotocol/clientInfo': { name: 'workass-jira', version: '1.0.0' },
+        },
+      },
+    };
     const headers = {
       authorization: `Bearer ${this.oauth.access_token}`,
       accept: 'application/json, text/event-stream',
       'content-type': 'application/json',
+      'mcp-protocol-version': MCP_PROTOCOL_VERSION,
+      'mcp-method': method,
     };
-    if (this.sessionId) headers['mcp-session-id'] = this.sessionId;
+    if (method === 'tools/call') headers['mcp-name'] = encodeMcpHeaderValue(params.name);
 
     const response = await fetch(this.oauth.url, { method: 'POST', headers, body: JSON.stringify(body) });
     const text = await response.text();
     if (!response.ok) throw new Error(`MCP HTTP ${response.status}: ${text.slice(0, 500)}`);
-    if (expectNoJson || response.status === 202 || !text.trim()) {
-      return { sessionId: response.headers.get('mcp-session-id') };
-    }
+    if (response.status === 202 || !text.trim()) throw new Error('MCP request returned no JSON-RPC response');
     const data = parseSseOrJson(text);
     if (data.error) throw new Error(`MCP error ${data.error.code}: ${data.error.message}`);
-    return { ...data, sessionId: response.headers.get('mcp-session-id') || this.sessionId };
+    return data;
   }
+}
+
+function encodeMcpHeaderValue(value) {
+  const text = String(value ?? '');
+  const plain = /^[\x21-\x7e]+$/u.test(text) && !text.startsWith('=?base64?') && !text.endsWith('?=');
+  return plain ? text : `=?base64?${Buffer.from(text, 'utf8').toString('base64')}?=`;
 }
 
 function parseSseOrJson(text) {

@@ -1,127 +1,16 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
-	"flag"
-	"fmt"
-	"io"
 	"net/http"
-	"os"
-	"strings"
-	"sync"
-	"time"
 
 	"workass/internal/acp"
 )
 
-const agentMCPProtocolVersion = "2024-11-05"
-
 type agentMCPOptions struct {
-	ControlFile string
-	ChatID      string
-	TabID       string
-	OwnerKey    string
-	HTTPClient  *http.Client
-}
-
-func runAgentMCPCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("agent-mcp", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	controlFile := flags.String("control-file", "", "Workass agent control descriptor")
-	chatID := flags.String("chat-id", "", "Owning Workass chat id")
-	tabID := flags.String("tab-id", "", "Owning Workass tab id")
-	ownerKey := flags.String("owner-key", "", "Opaque Workass ACP-session owner key")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if strings.TrimSpace(*controlFile) == "" {
-		return errors.New("--control-file is required")
-	}
-	return serveAgentMCP(stdin, stdout, agentMCPOptions{ControlFile: *controlFile, ChatID: *chatID, TabID: *tabID, OwnerKey: *ownerKey})
-}
-
-func serveAgentMCP(stdin io.Reader, stdout io.Writer, options agentMCPOptions) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	client := options.HTTPClient
-	if client == nil {
-		// Intentionally no client-wide timeout: wait is a long-running operation.
-		// Spawn itself returns immediately; the ACP client can terminate this MCP
-		// process, and explicit cancel is a separate tool.
-		client = &http.Client{}
-	}
-	enc := json.NewEncoder(stdout)
-	var writeMu sync.Mutex
-	var workers sync.WaitGroup
-	scanner := bufio.NewScanner(stdin)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := append([]byte(nil), bytes.TrimSpace(scanner.Bytes())...)
-		if len(line) == 0 {
-			continue
-		}
-		var request browserMCPRequest
-		if err := json.Unmarshal(line, &request); err != nil || request.ID == nil {
-			continue
-		}
-		workers.Add(1)
-		go func(request browserMCPRequest) {
-			defer workers.Done()
-			result, err := handleAgentMCPRequest(ctx, request, options, client)
-			response := map[string]any{"jsonrpc": "2.0", "id": request.ID}
-			if err != nil {
-				response["error"] = map[string]any{"code": -32000, "message": acp.RedactSensitiveText(err.Error())}
-			} else {
-				response["result"] = result
-			}
-			writeMu.Lock()
-			_ = enc.Encode(response)
-			writeMu.Unlock()
-		}(request)
-	}
-	scanErr := scanner.Err()
-	drained := make(chan struct{})
-	go func() {
-		workers.Wait()
-		close(drained)
-	}()
-	select {
-	case <-drained:
-	case <-time.After(100 * time.Millisecond):
-		// The ACP host closed stdin. Give quick catalog/spawn calls a brief drain
-		// window, then cancel long-running wait HTTP requests so this helper cannot
-		// outlive its owning engine for minutes.
-		cancel()
-		<-drained
-	}
-	return scanErr
-}
-
-func handleAgentMCPRequest(ctx context.Context, request browserMCPRequest, options agentMCPOptions, client *http.Client) (any, error) {
-	switch request.Method {
-	case "initialize":
-		return map[string]any{
-			"protocolVersion": agentMCPProtocolVersion,
-			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "workass-agent", "version": daemonVersion},
-		}, nil
-	case "ping":
-		return map[string]any{}, nil
-	case "tools/list":
-		return map[string]any{"tools": agentMCPTools()}, nil
-	case "tools/call":
-		var params browserMCPCallParams
-		if err := json.Unmarshal(request.Params, &params); err != nil {
-			return nil, errors.New("invalid tools/call parameters")
-		}
-		return callAgentMCPTool(ctx, params, options, client)
-	default:
-		return nil, fmt.Errorf("unknown MCP method: %s", request.Method)
-	}
+	ChatID   string
+	TabID    string
+	OwnerKey string
 }
 
 func agentMCPTools() []map[string]any {
@@ -284,7 +173,7 @@ func agentMCPTools() []map[string]any {
 	}
 }
 
-func callAgentMCPTool(ctx context.Context, call browserMCPCallParams, options agentMCPOptions, client *http.Client) (any, error) {
+func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options agentMCPOptions, control *agentControlHandler) (any, error) {
 	method := ""
 	params := copyAnyMap(call.Arguments)
 	switch call.Name {
@@ -362,7 +251,7 @@ func callAgentMCPTool(ctx context.Context, call browserMCPCallParams, options ag
 	params["parent_chat_id"] = options.ChatID
 	params["parent_tab_id"] = options.TabID
 	params["owner_key"] = options.OwnerKey
-	result, err := invokeAgentControl(ctx, options.ControlFile, method, params, client)
+	result, err := control.call(request, agentControlRequest{Method: method, Params: params})
 	if err != nil {
 		return agentMCPErrorResult(err.Error()), nil
 	}
@@ -375,49 +264,4 @@ func agentMCPErrorResult(message string) map[string]any {
 		"isError": true,
 		"content": []any{map[string]any{"type": "text", "text": acp.RedactSensitiveText(message)}},
 	}
-}
-
-func invokeAgentControl(ctx context.Context, controlFile, method string, params map[string]any, client *http.Client) (any, error) {
-	data, err := readBoundedFile(controlFile, 64*1024)
-	if err != nil {
-		return nil, errors.New("Workass agent coordinator is not running")
-	}
-	var descriptor browserControlDescriptor
-	if err := json.Unmarshal(data, &descriptor); err != nil || descriptor.Version != 1 || descriptor.URL == "" || descriptor.Token == "" {
-		return nil, errors.New("Workass agent control descriptor is invalid")
-	}
-	body, _ := json.Marshal(map[string]any{"method": method, "params": params})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, descriptor.URL, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+descriptor.Token)
-	req.Header.Set("Content-Type", "application/json")
-	reply, err := client.Do(req)
-	if err != nil {
-		return nil, errors.New("Workass agent coordinator is unavailable")
-	}
-	defer reply.Body.Close()
-	if reply.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Workass agent coordinator rejected the request (%d)", reply.StatusCode)
-	}
-	var out browserControlReply
-	dec := json.NewDecoder(io.LimitReader(reply.Body, 16*1024*1024))
-	dec.UseNumber()
-	if err := dec.Decode(&out); err != nil {
-		return nil, errors.New("Workass agent coordinator returned invalid JSON")
-	}
-	if out.Error != "" {
-		return nil, errors.New(out.Error)
-	}
-	return out.Result, nil
-}
-
-func readBoundedFile(path string, max int64) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, max))
 }

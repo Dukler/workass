@@ -39,6 +39,12 @@ test('failed state surfaces the bounded updater error', () => {
   assert.equal(appUpdaterPhaseText(state('failed', { error: 'checksum inválido' })), 'checksum inválido');
 });
 
+test('availability-check failure is distinct from an attempted update failure', () => {
+  assert.equal(appUpdaterPhaseText(state('check_failed', { error: 'GitHub no disponible' })), 'GitHub no disponible');
+  assert.match(sidebar, /No se pudo buscar actualizaciones/);
+  assert.match(sidebar, /selfUpdate\.phase === 'check_failed'/);
+});
+
 test('only a fresh terminal receipt can replay the success seal after an app restart', () => {
   const now = Date.parse('2026-08-06T20:00:00.000Z');
   assert.equal(appUpdaterReceiptIsRecent({ updatedAt: '2026-08-06T19:59:30.000Z' }, now), true);
@@ -53,7 +59,7 @@ test('Workass updater uses the existing footer update-card lifecycle and never a
   assert.match(selfCard, /upd-run upd-done/);
   assert.match(selfCard, /updcard upd-fail/);
   assert.match(selfCard, /className="uretry"/);
-  assert.match(sidebar, /const selfAction = selfPending \|\| selfFailed \? selfUpdater\.apply : null/);
+  assert.match(sidebar, /const selfAction = selfPending \|\| selfCheckFailed \|\| selfFailed \? selfUpdater\.apply : null/);
   assert.doesNotMatch(sidebar, /selfUpdater\.(download|install)/);
   assert.doesNotMatch(sidebar, /const selfActionLabel[\s\S]{0,180}'Reiniciar'/);
   assert.doesNotMatch(settings, /WorkassPanel|useAppUpdater|appUpdaterPhaseText/);

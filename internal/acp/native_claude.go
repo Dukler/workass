@@ -55,6 +55,12 @@ func claudeNativeHostLaunch(provider ProviderConfig, opts Options, daemonExecuta
 	}
 	env["WORKASS_CLAUDE_EXECUTABLE"] = launchCommand(provider)
 	env["WORKASS_CLAUDE_SDK_MODULE"] = sdkModule
+	if caFile := strings.TrimSpace(opts.WorkassMCPCACertFile); caFile != "" {
+		// Claude Code/Bun treats NODE_EXTRA_CA_CERTS as additional trust
+		// material. Verification remains enabled and the daemon private key is
+		// never exposed to the provider process.
+		env["NODE_EXTRA_CA_CERTS"] = caFile
+	}
 	provider.Command = node
 	provider.ResolvedCommand = ""
 	provider.Args = []string{host}

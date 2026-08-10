@@ -16,6 +16,15 @@ import (
 	"time"
 )
 
+func TestServerFolderChannelsKeepReadsPassiveAndCreationMutating(t *testing.T) {
+	if _, ok := mutatingChannels["fs:list-dir"]; ok {
+		t.Fatal("listing server folders must remain a passive approved-device read")
+	}
+	if _, ok := mutatingChannels["fs:create-dir"]; !ok {
+		t.Fatal("creating a server folder must take the controller lease")
+	}
+}
+
 func TestFrameDecoderVectors(t *testing.T) {
 	t.Run("masked short frame", func(t *testing.T) {
 		dec := &frameDecoder{}

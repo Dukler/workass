@@ -44,23 +44,9 @@ var daemonVersion = "0.0.1-dev"
 var secretKeyRE = regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|credential|bearer)`)
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "browser-mcp" {
-		if err := runBrowserMCPCommand(os.Args[2:], os.Stdin, os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintf(os.Stderr, "workass browser-mcp: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
 	if len(os.Args) > 1 && os.Args[1] == "fleet" {
 		if err := runFleetCommand(os.Args[2:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintf(os.Stderr, "workass fleet: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "agent-mcp" {
-		if err := runAgentMCPCommand(os.Args[2:], os.Stdin, os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintf(os.Stderr, "workass agent-mcp: %v\n", err)
 			os.Exit(1)
 		}
 		return
@@ -215,15 +201,22 @@ func main() {
 	if err := sessionState.LoadError(); err != nil {
 		logger.Printf("[workass] load session state %s: %v", filepath.Join(stateDir, sessionStateFilename), err)
 	}
-	agentControlFile := filepath.Join(stateDir, "agent-control.json")
+	certificate, certErr := tlscert.Ensure(stateDir)
+	if certErr != nil {
+		logger.Printf("[workass] tls: %v", certErr)
+		os.Exit(1)
+	}
+	legacyAgentControlFile := filepath.Join(stateDir, "agent-control.json")
+	if err := os.Remove(legacyAgentControlFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		logger.Printf("[workass] remove legacy agent control descriptor: %v", err)
+	}
+	mcpBaseURL := "https://mcp.localhost:" + strconv.Itoa(*port)
 	acpManager := acp.NewManager(acp.Options{
 		RootDir:                 cwd,
 		StateDir:                stateDir,
 		RuntimeProfile:          workassRuntimeProfile(),
-		BrowserMCPCommand:       currentExecutablePath(),
-		BrowserMCPControlFile:   defaultBrowserControlFile(stateDir),
-		AgentMCPCommand:         currentExecutablePath(),
-		AgentMCPControlFile:     agentControlFile,
+		WorkassMCPBaseURL:       mcpBaseURL,
+		WorkassMCPCACertFile:    filepath.Join(stateDir, tlscert.CertFileName),
 		Version:                 daemonVersion,
 		Providers:               providers,
 		DefaultProviderID:       defaultProviderID,
@@ -321,8 +314,7 @@ func main() {
 		logger.Printf("[workass] registered %d machine wire channels", registerMachineHandlers(hub, machineBook, identity))
 	}
 	handler.Metrics = func() map[string]any { return daemonMetrics(sessionState, stateDir, hub, acpManager) }
-	controlURL := "https://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(*port)) + agentControlPath
-	agentControl, err := newAgentControlHandler(acpManager, sessionState, hub.Broadcast, controlURL, agentControlFile, chatControl)
+	agentControl, err := newAgentControlHandler(acpManager, sessionState, hub.Broadcast, chatControl)
 	if err != nil {
 		acpManager.Reset()
 		logger.Printf("[workass] initialize agent control: %v", err)
@@ -336,7 +328,6 @@ func main() {
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			acpManager.Reset()
-			_ = os.Remove(agentControlFile)
 		})
 	}
 	defer cleanup()
@@ -348,7 +339,8 @@ func main() {
 	mux.HandleFunc("/workass/update/prepare", updateControl.prepare)
 	mux.HandleFunc("/workass/update/commit", updateControl.commit)
 	mux.HandleFunc("/workass/update/cancel", updateControl.cancel)
-	mux.Handle(agentControlPath, agentControl)
+	mux.Handle(agentMCPPath, newAgentStatelessMCPHandler(acpManager, agentControl))
+	mux.Handle(browserMCPPath, newBrowserStatelessMCPHandler(acpManager, defaultBrowserControlFile(stateDir)))
 	mux.Handle(fleetQRPath, newFleetQRHandler(fleetKeys, *port, logger.Printf))
 	mux.Handle("/", handler)
 	listener, err := net.Listen("tcp", addr)
@@ -361,15 +353,21 @@ func main() {
 	// E5. TLS is not a port: the daemon keeps listening exactly where the
 	// firewall already allows it, and only the bytes change.
 	if *useTLS {
-		certificate, certErr := tlscert.Ensure(stateDir)
-		if certErr != nil {
+		mcpCertificate, err := tlscert.IssueLoopbackServerCertificate(certificate, "mcp.localhost")
+		if err != nil {
 			cleanup()
-			logger.Printf("[workass] tls: %v", certErr)
+			logger.Printf("[workass] mint MCP loopback certificate: %v", err)
 			os.Exit(1)
 		}
 		server.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{certificate.TLS},
 			MinVersion:   tls.VersionTLS13,
+			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				if strings.EqualFold(strings.TrimSpace(hello.ServerName), "mcp.localhost") {
+					return &mcpCertificate, nil
+				}
+				return &certificate.TLS, nil
+			},
 		}
 		listener = tls.NewListener(listener, server.TLSConfig)
 		hub.SetTLSFingerprint(certificate.Fingerprint)
@@ -755,7 +753,12 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 		if len(args) > 0 && args[0] != nil {
 			requested = strings.TrimSpace(fmt.Sprint(args[0]))
 		}
-		return listServerDirectories(cwd, requested), nil
+		return listServerDirectories(requested), nil
+	})
+	count++
+	hub.Register("fs:create-dir", func(args []any) (any, error) {
+		arg := firstMapArg(args)
+		return createServerDirectory(fieldString(arg, "parent"), fieldString(arg, "name")), nil
 	})
 	count++
 
@@ -1660,7 +1663,7 @@ func daemonStubs() []stubDef {
 // listServerDirectories implements the frozen fs:list-dir channel on the
 // daemon host. Clients receive directory metadata only; they never browse the
 // filesystem of the Electron/LAN viewing device.
-func listServerDirectories(rootDir, requested string) map[string]any {
+func listServerDirectories(requested string) map[string]any {
 	type directoryEntry struct {
 		Name string `json:"name"`
 		Path string `json:"path"`
@@ -1672,47 +1675,16 @@ func listServerDirectories(rootDir, requested string) map[string]any {
 		}
 		return result
 	}
-	if strings.TrimSpace(requested) == "" {
-		entries := make([]directoryEntry, 0, 30)
-		seen := map[string]struct{}{}
-		add := func(name, candidate string) {
-			if strings.TrimSpace(candidate) == "" {
-				return
-			}
-			abs, err := filepath.Abs(candidate)
-			if err != nil {
-				return
-			}
-			abs = filepath.Clean(abs)
-			info, err := os.Stat(abs)
-			if err != nil || !info.IsDir() {
-				return
-			}
-			key := abs
-			if runtime.GOOS == "windows" {
-				key = strings.ToLower(abs)
-			}
-			if _, exists := seen[key]; exists {
-				return
-			}
-			seen[key] = struct{}{}
-			entries = append(entries, directoryEntry{Name: name, Path: abs})
+	target := requested
+	if strings.TrimSpace(target) == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return empty(nil, nil, []directoryEntry{}, err)
 		}
-		if home, err := os.UserHomeDir(); err == nil {
-			add("Inicio", home)
-		}
-		add("Workspace", workspaceDirectory(rootDir))
-		add("App", rootDir)
-		if runtime.GOOS == "windows" {
-			for letter := 'C'; letter <= 'Z'; letter++ {
-				root := fmt.Sprintf("%c:%c", letter, os.PathSeparator)
-				add(root, root)
-			}
-		}
-		return empty(nil, nil, entries, nil)
+		target = home
 	}
 
-	abs, err := filepath.Abs(requested)
+	abs, err := filepath.Abs(target)
 	if err != nil {
 		return empty(requested, nil, []directoryEntry{}, err)
 	}
@@ -1740,6 +1712,48 @@ func listServerDirectories(rootDir, requested string) map[string]any {
 		parent = candidate
 	}
 	return empty(abs, parent, entries, nil)
+}
+
+// createServerDirectory creates one direct child of the exact server directory
+// currently shown by the picker. It deliberately accepts a name rather than a
+// client-composed path so a LAN/browser client cannot smuggle traversal through
+// a path separator that means something different on the daemon's OS.
+func createServerDirectory(parentDir, requestedName string) map[string]any {
+	name := strings.TrimSpace(requestedName)
+	result := func(parent, path any, err error) map[string]any {
+		out := map[string]any{"name": name, "path": path, "parent": parent}
+		if err != nil {
+			out["error"] = acp.RedactSensitiveText(err.Error())
+		}
+		return out
+	}
+	if name == "" {
+		return result(parentDir, nil, errors.New("Escribí un nombre para la carpeta."))
+	}
+	if name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+		return result(parentDir, nil, errors.New("Usá un solo nombre, sin separadores de ruta."))
+	}
+	parentDir = strings.TrimSpace(parentDir)
+	if parentDir == "" {
+		return result(nil, nil, errors.New("Elegí primero la carpeta contenedora."))
+	}
+	parent, err := filepath.Abs(parentDir)
+	if err != nil {
+		return result(parentDir, nil, err)
+	}
+	parent = filepath.Clean(parent)
+	info, err := os.Stat(parent)
+	if err != nil {
+		return result(parent, nil, err)
+	}
+	if !info.IsDir() {
+		return result(parent, nil, fmt.Errorf("%s no es una carpeta", parent))
+	}
+	target := filepath.Join(parent, name)
+	if err := os.Mkdir(target, 0o755); err != nil {
+		return result(parent, nil, err)
+	}
+	return result(parent, target, nil)
 }
 
 func appMeta(cwd string) map[string]any {

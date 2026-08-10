@@ -84,8 +84,8 @@ export function StepRow({ ev, live = false, fallbackLabel }: { ev: ThinkingEvent
 
   // Live: the step it is on right now. Nothing closed yet falls back to the
   // turn's whimsy word (Claude Code's spinner idiom) rather than a fragment.
-  // Rendered pinned at the tail of the turn by AssistantMessage, never inline,
-  // so a growing answer can't scroll it away.
+  // Rendered as scrollport chrome by Transcript, never inline, so a growing
+  // answer or a newly inserted tool row cannot move it.
   if (live) {
     const current = titles[titles.length - 1] ?? fallbackLabel ?? 'Pensando';
     return (

@@ -69,6 +69,7 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?]> = [
   // E4 — listing paths on the machine that runs the agent, which is the only
   // machine where they mean anything.
   ['listDir', 'fs:list-dir'],
+  ['createDir', 'fs:create-dir', (a) => [{ parent: a[0], name: a[1] }]],
 ];
 
 /** [method, channel] for every event a remote machine may raise. */

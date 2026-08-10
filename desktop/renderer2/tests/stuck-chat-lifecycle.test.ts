@@ -265,6 +265,38 @@ test('a digest cannot erase a queue mutation while its save is in flight', () =>
   assert.equal(subject.chat(owner.id)?.queue?.[0].text, 'must survive refresh');
 });
 
+test('a submitted draft is released before async send work and cannot reappear on refresh', async () => {
+  const { subject, owner } = subjectWithChat();
+  owner.draft = 'already sent';
+  subject.schedulePersist = () => {};
+  let release!: (accepted: boolean) => void;
+  subject._send = () => new Promise<boolean>((resolve) => { release = resolve; });
+
+  const delivery = subject.sendTo(owner.id, 'already sent', undefined, 'already sent');
+  assert.equal(owner.draft, '', 'the next tab mount must see the draft already released');
+
+  // Model the periodic digest arriving before the draft-clear save. It still
+  // carries the pre-send value and must not re-own text now represented by the
+  // submitted turn.
+  const staleServer = subject.toMirror(false);
+  staleServer.chats[0].draft = 'already sent';
+  assert.equal(subject.restoreSessionSnapshot(staleServer), true);
+  assert.equal(subject.chat(owner.id)?.draft, '');
+
+  release(true);
+  assert.equal(await delivery, true);
+});
+
+test('submission does not clear text typed after attachment preparation began', async () => {
+  const { subject, owner } = subjectWithChat();
+  owner.draft = 'newer text';
+  subject.schedulePersist = () => {};
+  subject._send = async () => true;
+
+  assert.equal(await subject.sendTo(owner.id, 'older text', undefined, 'older text'), true);
+  assert.equal(owner.draft, 'newer text');
+});
+
 test('digest heartbeat falls back to app:meta after an old daemon rejects state:digest', async () => {
   const previousWindow = (globalThis as any).window;
   let digestCalls = 0;

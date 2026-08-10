@@ -566,7 +566,7 @@ class UpdateManager {
       if (err?.statusCode === 404 || err?.code === 'ENOENT') {
         return this.publish({ phase: 'current', targetVersion: null, checkedAt: new Date().toISOString(), error: null });
       }
-      return this.publish({ phase: 'failed', checkedAt: new Date().toISOString(), error: String(err && err.message || err) });
+      return this.publish({ phase: 'check_failed', checkedAt: new Date().toISOString(), error: String(err && err.message || err) });
     } finally {
       this.endOperation('check');
     }
@@ -576,7 +576,7 @@ class UpdateManager {
     if (!this.state.supported || this.activeOperation) return this.snapshot();
     // An offered/staged update and every failure receipt belong to the user.
     // Background polling must not replace them or race download/install.
-    if (!['idle', 'current', 'healthy'].includes(this.state.phase)) return this.snapshot();
+    if (!['idle', 'current', 'healthy', 'check_failed'].includes(this.state.phase)) return this.snapshot();
     try { return await this.check(); }
     catch { return this.snapshot(); }
   }
@@ -721,7 +721,7 @@ class UpdateManager {
   // user to click once to stage and again to activate the same verified release.
   async apply() {
     let state = this.snapshot();
-    if (state.phase === 'failed' || state.phase === 'rollback_healthy') {
+    if (state.phase === 'check_failed' || state.phase === 'failed' || state.phase === 'rollback_healthy') {
       state = await this.check();
     }
     if (state.phase === 'available') state = await this.download();

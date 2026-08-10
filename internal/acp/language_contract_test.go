@@ -45,6 +45,38 @@ func TestWorkassOwnedHistoryScaffoldingIsLanguageNeutral(t *testing.T) {
 	}
 }
 
+func TestLocalizedWorkassToolCardCannotSelectHumanReplyLanguage(t *testing.T) {
+	request := "Usar una herramienta\n" +
+		"mcp.workass-agent.workass_agent_catalog\n" +
+		"0.0s\n" +
+		"0.0s\n" +
+		"Workass agent coordinator is unavailable\n\n" +
+		"???? what is this why"
+	prompt := buildUserRequestBlock(request, true)
+	ruleAt := strings.Index(prompt, expectedPerTurnLanguageRule)
+	cardAt := strings.Index(prompt, "<workass_tool_card>\nUsar una herramienta")
+	humanAt := strings.Index(prompt, "User request:\n???? what is this why")
+	if ruleAt < 0 || cardAt < 0 || humanAt < 0 || ruleAt > cardAt || cardAt > humanAt {
+		t.Fatalf("localized tool card was not isolated from human prose: %q", prompt)
+	}
+	if strings.Count(prompt, "Usar una herramienta") != 1 ||
+		strings.Count(prompt, "Workass agent coordinator is unavailable") != 1 {
+		t.Fatalf("tool-card evidence was lost or duplicated: %q", prompt)
+	}
+	if !strings.Contains(prompt[ruleAt:humanAt], "not human-authored language selection") ||
+		!strings.Contains(prompt[ruleAt:humanAt], "use the language of that prose") {
+		t.Fatalf("language boundary does not neutralize generated card text: %q", prompt[ruleAt:humanAt])
+	}
+}
+
+func TestOrdinaryMCPMentionIsNotMisclassifiedAsToolCard(t *testing.T) {
+	request := "Please inspect mcp.workass-agent.workass_agent_catalog and answer in English."
+	prompt := buildUserRequestBlock(request, true)
+	if strings.Contains(prompt, "<workass_tool_card>") || !strings.Contains(prompt, "User request:\n"+request) {
+		t.Fatalf("ordinary request was rewritten as a tool card: %q", prompt)
+	}
+}
+
 func TestWorkassOwnedCompactionScaffoldingCannotSetReplyLanguage(t *testing.T) {
 	seed := buildCompactedSeedBlock(compactedSeed{
 		Summary:  "Internal summary.",

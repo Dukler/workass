@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import type { Chat } from '../store/types';
 import { store, useApp, useProc } from '../store/store';
 import { chatPane } from '../store/right-pane';
-import { AssistantMessage } from './AssistantMessage';
+import { AssistantMessage, LiveTurnPulse } from './AssistantMessage';
 import { UserPill } from './messages';
 import { IcDoc, IcTerminal, IcChanges, IcPreview, IcRail, IcBrowser, IcChevron } from '../icons';
 import { normalizeWorkspacePath, rememberLastProject, workspaceName } from '../workspaces';
@@ -139,6 +139,11 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const total = visibleMessages.length;
   const shown = visibleMessages.slice(Math.max(0, total - reveal));
   const hidden = total - shown.length;
+  const runningMessage = [...shown].reverse().find((message) => (
+    message.role === 'assistant'
+    && message.status === 'running'
+    && message.turnTerminal !== false
+  ));
   const profile = app.meta?.profile ?? 'prod';
   const turnBlocks = assistantTurnBlockRanges(shown);
   const turnBlockMessageIds = turnBlocks.flatMap(({ start, end }) => shown.slice(start, end).map((message) => message.id));
@@ -309,50 +314,53 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   return (
     <>
       <Topbar chat={chat} />
-      <div
-        className="scroll"
-        ref={scrollRef}
-        onScroll={onScroll}
-        onWheel={onWheel}
-        onPointerDown={onPointerDown}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-        onTouchStart={onTouchStart}
-        onTouchEnd={onTouchEnd}
-        onTouchCancel={onTouchEnd}
-      >
-        <div className="doc" ref={docRef}>
-          {!chat || total === 0 ? (
-            <EmptyChat chat={chat} />
-          ) : (
-            <>
-              {hidden > 0 && (
-                <button className="btn" style={{ margin: '4px auto 16px', display: 'block' }} onClick={revealOlder}>
-                  Ver {Math.min(WINDOW, hidden)} mensajes anteriores
-                </button>
-              )}
-              {shown.map((m) => {
-                if (m.role === 'user') return <UserPill key={m.id} text={m.content} images={m.images} steerState={m.steerState} />;
-                return (
-                  <AssistantMessage
-                    key={m.id}
-                    tabId={chat.id}
-                    msg={m}
-                    turnSeq={store.checkpointForJob(chat, m.jobId)?.turnSeq}
-                    profile={profile}
-                    coalescedSegments={coalescedSegments.get(m.id)}
-                  />
-                );
-              })}
-            </>
-          )}
+      <div className={`transcriptviewport${runningMessage ? ' has-live' : ''}`}>
+        <div
+          className="scroll"
+          ref={scrollRef}
+          onScroll={onScroll}
+          onWheel={onWheel}
+          onPointerDown={onPointerDown}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          onTouchStart={onTouchStart}
+          onTouchEnd={onTouchEnd}
+          onTouchCancel={onTouchEnd}
+        >
+          <div className="doc" ref={docRef}>
+            {!chat || total === 0 ? (
+              <EmptyChat chat={chat} />
+            ) : (
+              <>
+                {hidden > 0 && (
+                  <button className="btn" style={{ margin: '4px auto 16px', display: 'block' }} onClick={revealOlder}>
+                    Ver {Math.min(WINDOW, hidden)} mensajes anteriores
+                  </button>
+                )}
+                {shown.map((m) => {
+                  if (m.role === 'user') return <UserPill key={m.id} text={m.content} images={m.images} steerState={m.steerState} />;
+                  return (
+                    <AssistantMessage
+                      key={m.id}
+                      tabId={chat.id}
+                      msg={m}
+                      turnSeq={store.checkpointForJob(chat, m.jobId)?.turnSeq}
+                      profile={profile}
+                      coalescedSegments={coalescedSegments.get(m.id)}
+                    />
+                  );
+                })}
+              </>
+            )}
+          </div>
         </div>
+        {runningMessage && <LiveTurnPulse msg={runningMessage} />}
+        {newCount > 0 && (
+          <button className={`newpill${runningMessage ? ' with-live' : ''}`} onClick={jumpToBottom}>
+            <span className="arr">↓</span>{newCount} {newCount === 1 ? 'mensaje nuevo' : 'mensajes nuevos'}
+          </button>
+        )}
       </div>
-      {newCount > 0 && (
-        <button className="newpill" onClick={jumpToBottom}>
-          <span className="arr">↓</span>{newCount} {newCount === 1 ? 'mensaje nuevo' : 'mensajes nuevos'}
-        </button>
-      )}
     </>
   );
 }

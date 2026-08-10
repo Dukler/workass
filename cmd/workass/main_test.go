@@ -103,7 +103,7 @@ func TestServeDaemonHTTPStopsAcceptingAndRunsCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	marker := filepath.Join(t.TempDir(), "agent-control.json")
+	marker := filepath.Join(t.TempDir(), "daemon-transient.json")
 	if err := os.WriteFile(marker, []byte("transient"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -217,10 +217,21 @@ func TestLocalUpdateControlIsLoopbackOnlyAndCanCancel(t *testing.T) {
 
 func TestWireListDirBrowsesDaemonFilesystem(t *testing.T) {
 	root := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	for _, name := range []string{"beta", "Alpha"} {
 		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", name, err)
 		}
+	}
+	for _, name := range []string{"Downloads", "Documents"} {
+		if err := os.Mkdir(filepath.Join(home, name), 0o755); err != nil {
+			t.Fatalf("mkdir home %s: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, "not-a-folder.txt"), []byte("ignored"), 0o644); err != nil {
+		t.Fatalf("write home file: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "not-a-folder.txt"), []byte("ignored"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
@@ -261,22 +272,21 @@ func TestWireListDirBrowsesDaemonFilesystem(t *testing.T) {
 
 	raw, err = hub.Invoke("fs:list-dir", []any{nil})
 	if err != nil {
-		t.Fatalf("fs:list-dir roots invoke: %v", err)
+		t.Fatalf("fs:list-dir home invoke: %v", err)
 	}
-	roots := normalize(raw)
-	foundWorkspace := false
-	foundApp := false
-	for _, entry := range anySlice(roots["entries"]) {
-		item := mapFromAnyMain(entry)
-		if item["name"] == "Workspace" && filepath.Clean(fmt.Sprint(item["path"])) == filepath.Dir(filepath.Clean(root)) {
-			foundWorkspace = true
-		}
-		if item["name"] == "App" && filepath.Clean(fmt.Sprint(item["path"])) == filepath.Clean(root) {
-			foundApp = true
-		}
+	homeListing := normalize(raw)
+	if filepath.Clean(fmt.Sprint(homeListing["path"])) != filepath.Clean(home) || filepath.Clean(fmt.Sprint(homeListing["parent"])) != filepath.Dir(filepath.Clean(home)) {
+		t.Fatalf("server home location = %#v", homeListing)
 	}
-	if roots["path"] != nil || roots["parent"] != nil || !foundWorkspace || !foundApp {
-		t.Fatalf("server roots = %#v", roots)
+	homeEntries := anySlice(homeListing["entries"])
+	if len(homeEntries) != 2 || mapFromAnyMain(homeEntries[0])["name"] != "Documents" || mapFromAnyMain(homeEntries[1])["name"] != "Downloads" {
+		t.Fatalf("server home directories = %#v", homeEntries)
+	}
+	for _, entry := range homeEntries {
+		name := fmt.Sprint(mapFromAnyMain(entry)["name"])
+		if name == "Inicio" || name == "Workspace" || name == "App" {
+			t.Fatalf("server home contains synthetic shortcut %q: %#v", name, homeEntries)
+		}
 	}
 
 	raw, err = hub.Invoke("app:meta", nil)
@@ -295,6 +305,90 @@ func TestWireListDirBrowsesDaemonFilesystem(t *testing.T) {
 	failure := normalize(raw)
 	if strings.TrimSpace(fmt.Sprint(failure["error"])) == "" || len(anySlice(failure["entries"])) != 0 {
 		t.Fatalf("non-directory failure = %#v", failure)
+	}
+}
+
+func TestWireCreateDirCreatesOneExactChild(t *testing.T) {
+	parent := t.TempDir()
+	hub := wire.NewHub()
+	registerDaemonHandlers(hub, t.TempDir(), nil)
+
+	raw, err := hub.Invoke("fs:create-dir", []any{map[string]any{"parent": parent, "name": "  New Project  "}})
+	if err != nil {
+		t.Fatalf("fs:create-dir invoke: %v", err)
+	}
+	created := mapFromAnyMain(raw)
+	want := filepath.Join(parent, "New Project")
+	if created["error"] != nil || filepath.Clean(fmt.Sprint(created["parent"])) != filepath.Clean(parent) || filepath.Clean(fmt.Sprint(created["path"])) != want || created["name"] != "New Project" {
+		t.Fatalf("created folder reply = %#v", created)
+	}
+	if info, err := os.Stat(want); err != nil || !info.IsDir() {
+		t.Fatalf("created folder stat = %#v, %v", info, err)
+	}
+
+	listedRaw, err := hub.Invoke("fs:list-dir", []any{parent})
+	if err != nil {
+		t.Fatalf("fs:list-dir after create: %v", err)
+	}
+	encoded, err := json.Marshal(listedRaw)
+	if err != nil {
+		t.Fatalf("marshal listing after create: %v", err)
+	}
+	var listed map[string]any
+	if err := json.Unmarshal(encoded, &listed); err != nil {
+		t.Fatalf("decode listing after create: %v", err)
+	}
+	entries := anySlice(listed["entries"])
+	if len(entries) != 1 || mapFromAnyMain(entries[0])["name"] != "New Project" {
+		t.Fatalf("created folder listing = %#v", entries)
+	}
+}
+
+func TestWireCreateDirRejectsTraversalDuplicatesAndNonDirectoryParents(t *testing.T) {
+	parent := t.TempDir()
+	fileParent := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(fileParent, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hub := wire.NewHub()
+	registerDaemonHandlers(hub, t.TempDir(), nil)
+
+	for _, tc := range []struct {
+		name   string
+		parent string
+		child  string
+	}{
+		{name: "missing parent", parent: "", child: "child"},
+		{name: "blank", parent: parent, child: "  "},
+		{name: "dot", parent: parent, child: "."},
+		{name: "parent traversal", parent: parent, child: ".."},
+		{name: "slash traversal", parent: parent, child: "nested/child"},
+		{name: "windows traversal", parent: parent, child: `nested\child`},
+		{name: "file parent", parent: fileParent, child: "child"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := hub.Invoke("fs:create-dir", []any{map[string]any{"parent": tc.parent, "name": tc.child}})
+			if err != nil {
+				t.Fatalf("invoke: %v", err)
+			}
+			result := mapFromAnyMain(raw)
+			if strings.TrimSpace(fmt.Sprint(result["error"])) == "" || result["path"] != nil {
+				t.Fatalf("unsafe create result = %#v", result)
+			}
+		})
+	}
+
+	existing := filepath.Join(parent, "Existing")
+	if err := os.Mkdir(existing, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := hub.Invoke("fs:create-dir", []any{map[string]any{"parent": parent, "name": "Existing"}})
+	if err != nil {
+		t.Fatalf("duplicate invoke: %v", err)
+	}
+	result := mapFromAnyMain(raw)
+	if strings.TrimSpace(fmt.Sprint(result["error"])) == "" || result["path"] != nil {
+		t.Fatalf("duplicate create result = %#v", result)
 	}
 }
 
@@ -2998,11 +3092,16 @@ func TestWireTraceNotifyControllerOnlyRedactionAndNoTurnEndBacklog(t *testing.T)
 	defer server.Close()
 	controller := dialTestWSPath(t, server.URL, "/?deviceToken="+controllerToken+"&deviceName=notify-controller")
 	defer controller.conn.Close()
-	viewer := dialTestWSPath(t, server.URL, "/?deviceToken="+viewerToken+"&deviceName=notify-viewer")
-	defer viewer.conn.Close()
 	if state := controller.waitChannelEvent(t, "lan:access-state", 2*time.Second).Payload.(map[string]any); state["controller"] != true {
 		t.Fatalf("controller state = %#v", state)
 	}
+	// The lease belongs to the first approved client that finishes attaching,
+	// not the first goroutine that called Dial. Under the race detector the
+	// viewer handshake could overtake the controller handshake and invalidate
+	// the fixture's own premise. Observe the controller lease before admitting
+	// the viewer whose controller-only delivery we are testing.
+	viewer := dialTestWSPath(t, server.URL, "/?deviceToken="+viewerToken+"&deviceName=notify-viewer")
+	defer viewer.conn.Close()
 	if state := viewer.waitChannelEvent(t, "lan:access-state", 2*time.Second).Payload.(map[string]any); state["controller"] == true {
 		t.Fatalf("viewer state = %#v", state)
 	}

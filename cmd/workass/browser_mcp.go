@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,19 +13,10 @@ import (
 	"time"
 )
 
-const browserMCPProtocolVersion = "2024-11-05"
-
 type browserControlDescriptor struct {
 	Version int    `json:"version"`
 	URL     string `json:"url"`
 	Token   string `json:"token"`
-}
-
-type browserMCPRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      any             `json:"id,omitempty"`
-	Method  string          `json:"method,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
 }
 
 type browserMCPCallParams struct {
@@ -58,78 +47,10 @@ func legacyBrowserControlFile() string {
 	return filepath.Join(home, ".workass", "browser-control.json")
 }
 
-func runBrowserMCPCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("browser-mcp", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	controlFile := flags.String("control-file", defaultBrowserControlFile(), "Workass browser control descriptor")
-	chatID := flags.String("chat-id", "", "Workass chat id")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	return serveBrowserMCP(stdin, stdout, browserMCPOptions{ControlFile: *controlFile, ChatID: *chatID})
-}
-
 type browserMCPOptions struct {
 	ControlFile string
 	ChatID      string
 	HTTPClient  *http.Client
-}
-
-func serveBrowserMCP(stdin io.Reader, stdout io.Writer, options browserMCPOptions) error {
-	client := options.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
-	}
-	enc := json.NewEncoder(stdout)
-	scanner := bufio.NewScanner(stdin)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var request browserMCPRequest
-		if err := json.Unmarshal(line, &request); err != nil {
-			continue
-		}
-		if request.ID == nil {
-			continue
-		}
-		result, err := handleBrowserMCPRequest(request, options, client)
-		response := map[string]any{"jsonrpc": "2.0", "id": request.ID}
-		if err != nil {
-			response["error"] = map[string]any{"code": -32000, "message": err.Error()}
-		} else {
-			response["result"] = result
-		}
-		if err := enc.Encode(response); err != nil {
-			return err
-		}
-	}
-	return scanner.Err()
-}
-
-func handleBrowserMCPRequest(request browserMCPRequest, options browserMCPOptions, client *http.Client) (any, error) {
-	switch request.Method {
-	case "initialize":
-		return map[string]any{
-			"protocolVersion": browserMCPProtocolVersion,
-			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "workass-browser", "version": daemonVersion},
-		}, nil
-	case "ping":
-		return map[string]any{}, nil
-	case "tools/list":
-		return map[string]any{"tools": browserMCPTools()}, nil
-	case "tools/call":
-		var params browserMCPCallParams
-		if err := json.Unmarshal(request.Params, &params); err != nil {
-			return nil, errors.New("invalid tools/call parameters")
-		}
-		return callBrowserMCPTool(params, options, client)
-	default:
-		return nil, fmt.Errorf("unknown MCP method: %s", request.Method)
-	}
 }
 
 func browserMCPTools() []map[string]any {

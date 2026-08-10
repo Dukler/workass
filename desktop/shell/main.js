@@ -52,6 +52,7 @@ let browserControlServer = null;
 let updateManager = null;
 const externalImageTempDirs = new Set();
 const certificatePins = new CertificatePins();
+const loggedCertificateDecisions = new Set();
 
 function sourceDaemonExecutable() {
   if (app.isPackaged) return '';
@@ -84,7 +85,15 @@ async function recoverLocalDaemon() {
 function allowPrivateWorkassCertificates() {
   try {
     session.defaultSession.setCertificateVerifyProc((request, callback) => {
-		callback(certificatePins.verify(request) ? 0 : -3);
+		const decision = certificatePins.decision(request);
+		if (!decision.accepted && decision.privateLAN && decision.pinKnown) {
+			const receipt = JSON.stringify(decision);
+			if (!loggedCertificateDecisions.has(receipt)) {
+				loggedCertificateDecisions.add(receipt);
+				console.error(`[shell] pinned certificate rejected ${receipt}`);
+			}
+		}
+		callback(decision.accepted ? 0 : -3);
     });
   } catch (err) {
     console.error(`[shell] certificate verifier unavailable: ${err.message}`);

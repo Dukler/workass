@@ -242,6 +242,10 @@ func TestLanBridgeServed(t *testing.T) {
 		!strings.Contains(string(body), "appChatDetectAcp: (opts) => invoke('app-chat:detect-acp'") {
 		t.Fatalf("bridge missing app-chat steer/detect-acp methods")
 	}
+	if !strings.Contains(string(body), "listDir: (p) => invoke('fs:list-dir', p)") ||
+		!strings.Contains(string(body), "createDir: (parent, name) => invoke('fs:create-dir', { parent, name })") {
+		t.Fatalf("bridge missing server-owned folder methods")
+	}
 }
 
 func TestLanBridgeRejectsPendingInvokeWhenSocketCloses(t *testing.T) {

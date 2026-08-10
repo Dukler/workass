@@ -91,9 +91,9 @@ function AssistantSliceBody({
   const blockKeys = stableMarkdownBlockKeys(msg, parsedSegments.flatMap((blocks) => blocks?.map((block) => block.sig) ?? []));
   let blockIndex = 0;
   const running = terminal && msg.status === 'running';
-  // The thinking row renders at the TAIL of the turn, never inline where the
-  // event landed. Inline, a growing answer pushed it out of view while it kept
-  // changing where the reader couldn't see it (user 2026-07-24).
+  // The settled thinking row renders at the TAIL of the turn, never inline
+  // where the event landed. While running, Transcript owns the live pulse as
+  // scrollport chrome so tool/prose growth cannot move it (user 2026-08-08).
   //
   // It is pulled out in BOTH states, not just while running: the store keeps a
   // single thinking event per message anchored at `at: msg.content.length` from
@@ -121,7 +121,7 @@ function AssistantSliceBody({
       {resultBlocks.map((block, index) => <MarkdownBlock key={`result-${index}-${block.sig}`} sb={block} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} />)}
       <StructuredAssistantImages images={msg.images} />
 
-      {running ? <TurnPulse msg={msg} thinkEv={thinkEv} /> : thinkEv && <StepRow ev={thinkEv} />}
+      {!running && thinkEv && <StepRow ev={thinkEv} />}
 
       {interrupted && (
         <div className="connfail" role="status">
@@ -198,6 +198,17 @@ function fmtElapsed(ms: number): string {
 function fmtTokens(n: number): string {
   if (n < 1000) return String(n);
   return `${(n / 1000).toFixed(1).replace('.', ',')}k`;
+}
+
+// The live pulse is deliberately rendered by Transcript outside `.doc`.
+// Subscribing here preserves the message-isolated streaming path: thought,
+// heartbeat and phase updates repaint this one row without coupling Transcript
+// or the whole app to every token.
+export function LiveTurnPulse({ msg }: { msg: Msg }) {
+  useMsgVersion(msg.id);
+  const thinkEv = [...msg.events].reverse().find((e): e is ThinkingEvent => e.kind === 'thinking') ?? null;
+  if (msg.status !== 'running' || msg.turnTerminal === false) return null;
+  return <TurnPulse msg={msg} thinkEv={thinkEv} />;
 }
 
 // The turn pulse: the tail row is alive for the WHOLE turn, not only while

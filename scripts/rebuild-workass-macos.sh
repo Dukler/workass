@@ -162,7 +162,10 @@ rebuild_electron() {
   if [ "$WORKASS_PROFILE" = "prod" ]; then
     installed_app="${WORKASS_INSTALLED_APP:-/Applications/Workass.app}"
     [ -d "$installed_app" ] || die "installed Workass app not found: $installed_app"
+    installed_profile="$installed_app/Contents/Resources/workass-profile.env"
+    [ -f "$installed_profile" ] || die "installed Workass profile not found: $installed_profile"
     open -na "$installed_app" --stdout "$shell_log" --stderr "$shell_log" \
+      --env "WORKASS_PROFILE_FILE=$installed_profile" \
       --env "WORKASS_CONTROLLER_RECOVERY=1"
   else
     electron_app=$(workass_electron_resolve) || die "stage the pinned runtime with scripts/vendor-electron-runtime.sh"
