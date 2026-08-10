@@ -703,6 +703,7 @@ func newSessionStore(path string) *sessionStore {
 		store.loadErr = errors.Join(store.loadErr, &sessionJournalQuarantineError{Count: quarantined})
 	}
 	planLatestMigrated := migratePlanLatest(store.snapshot, filepath.Dir(store.path))
+	agentQueueEchoesMigrated := migrateAgentQueueEchoes(store.snapshot)
 	store.materializeLiveOutputsLocked()
 	orphaned := store.interruptOrphanedTurnsLocked()
 	store.finalizeRecoveredOrphansLocked(recovered)
@@ -734,7 +735,7 @@ func newSessionStore(path string) *sessionStore {
 		store.loadErr = normalizeErr
 		return store
 	}
-	if len(recovered) > 0 || orphaned || needsRewrite || tombstonesPruned || internalChatsPruned || assistantImagesMigrated || terminalToolsMigrated || planLatestMigrated {
+	if len(recovered) > 0 || orphaned || needsRewrite || tombstonesPruned || internalChatsPruned || assistantImagesMigrated || terminalToolsMigrated || planLatestMigrated || agentQueueEchoesMigrated {
 		store.ensureSnapshotLocked()
 		if err := store.writeLocked(); err != nil {
 			store.loadErr = err
@@ -2922,7 +2923,7 @@ func (s *sessionStore) AgentAdoptRendererQueueHead(
 	return copyHead(), true, true, nil
 }
 
-func (s *sessionStore) AgentParkQueuedTurn(tabID, chatID, queueID, detail string, enqueueNotice bool) error {
+func (s *sessionStore) AgentParkQueuedTurn(tabID, chatID, queueID, detail string) error {
 	s.mu.Lock()
 	tx := s.beginSessionMutationLocked()
 	defer func() {
@@ -2949,16 +2950,6 @@ func (s *sessionStore) AgentParkQueuedTurn(tabID, chatID, queueID, detail string
 	item[queueParkedField] = true
 	item["parkedAt"] = now
 	item["parkReason"] = safeDetail
-	if enqueueNotice {
-		notice := map[string]any{
-			"id": nextSessionID("q"), "source": "agent", "delivery": "queue",
-			"queuedAt": now, "queueNotice": true,
-			"text": "[workass internal notice]\nA queued turn was parked after three bounded start attempts and was not discarded. Queue id: " +
-				fieldString(item, "id") + ". Start error: " + safeDetail,
-		}
-		queue = append([]any{notice}, queue...)
-		chat["queue"] = queue
-	}
 	bumpAgentQueueRevision(chat)
 	if err := s.writeLocked(); err != nil {
 		s.snapshot = before
@@ -5823,6 +5814,15 @@ func mergeAgentQueueMessageRows(clientMessages, serverMessages []any) []any {
 		if fieldString(serverMessage, agentQueueMessageField) == "" {
 			continue
 		}
+		// A renderer can optimistically paint the human row just before the
+		// daemon adopts that same submission from its durable FIFO. The promoted
+		// row has a new server id plus agentQueueId; a stale renderer save can
+		// therefore leave its unowned local echo beside the canonical turn. Match
+		// only a near-simultaneous orphan user row. A deliberate repeated prompt
+		// followed by its own assistant remains a separate turn.
+		if echo := agentQueueEchoPosition(out, serverMessage); echo >= 0 {
+			out = append(out[:echo], out[echo+1:]...)
+		}
 		id := fieldString(serverMessage, "id")
 		if id == "" {
 			continue
@@ -5853,6 +5853,70 @@ func mergeAgentQueueMessageRows(clientMessages, serverMessages []any) []any {
 		out[insertAt] = raw
 	}
 	return out
+}
+
+func agentQueueEchoPosition(messages []any, canonical map[string]any) int {
+	if fieldString(canonical, "role") != "user" || fieldString(canonical, agentQueueMessageField) == "" {
+		return -1
+	}
+	canonicalAt, err := time.Parse(time.RFC3339Nano, fieldString(canonical, "at"))
+	if err != nil {
+		return -1
+	}
+	best, bestGap := -1, time.Duration(1<<63-1)
+	for index, raw := range messages {
+		message := mapFromAnyMain(raw)
+		if fieldString(message, "id") == fieldString(canonical, "id") ||
+			fieldString(message, "role") != "user" ||
+			fieldString(message, "status") != "done" ||
+			fieldString(message, agentQueueMessageField) != "" ||
+			fieldString(message, "steerState") != "" ||
+			fieldString(message, "turnRootId") != "" ||
+			fieldString(message, "content") != fieldString(canonical, "content") ||
+			!reflect.DeepEqual(anySlice(message["images"]), anySlice(canonical["images"])) {
+			continue
+		}
+		// An ordinary user row followed by an assistant is a complete turn, even
+		// when its text repeats. Only a row stranded without its own assistant is
+		// an optimistic echo eligible for replacement.
+		if index+1 < len(messages) && fieldString(mapFromAnyMain(messages[index+1]), "role") == "assistant" {
+			continue
+		}
+		messageAt, parseErr := time.Parse(time.RFC3339Nano, fieldString(message, "at"))
+		if parseErr != nil {
+			continue
+		}
+		gap := canonicalAt.Sub(messageAt)
+		if gap < 0 {
+			gap = -gap
+		}
+		if gap <= time.Second && gap < bestGap {
+			best, bestGap = index, gap
+		}
+	}
+	return best
+}
+
+// Older snapshots may already contain both the daemon-promoted FIFO row and
+// the renderer echo it superseded. Repair those once at the disk boundary so a
+// corrected build does not need a later renderer save before the duplicate
+// disappears from the transcript.
+func migrateAgentQueueEchoes(snapshot map[string]any) bool {
+	if snapshot == nil {
+		return false
+	}
+	changed := false
+	for _, rawChat := range anySlice(snapshot["chats"]) {
+		chat := mapFromAnyMain(rawChat)
+		messages := messageSlice(chat)
+		merged := mergeAgentQueueMessageRows(messages, messages)
+		if len(merged) == len(messages) {
+			continue
+		}
+		chat["messages"] = merged
+		changed = true
+	}
+	return changed
 }
 
 type stagedDroppedChatTombstone struct {

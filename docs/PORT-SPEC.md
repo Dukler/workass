@@ -232,7 +232,12 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
      become idle, and settles as soon as every record is terminal. It MUST NOT
      mix these items into the global proc/engine surface or require optional
      explicit registration. Agent MCP exposes exact-pair read-only list and
-     receipt tools; a pair mismatch is rejected.
+     receipt tools; a pair mismatch is rejected. TERMINAL DELIVERY (user law
+     2026-08-10): those receipts remain internal state only. Settling background
+     work MUST NOT enqueue a synthetic chat message, start or resume an agent
+     turn, create pending wake state, hold an obligation open, or block an app
+     update. The user or an explicitly running coordinator may read receipts on
+     demand; completion never speaks as the user.
   10. PERMISSION CARD TERMINALITY (user correction 2026-07-15): a permission
       request has one transcript owner only while its daemon resolver is live.
       Every terminal path—explicit decision, timeout fallback, session cancel,
@@ -251,6 +256,10 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   auxiliary workspace processes are first-class (Goal 6/7 dependency).
 - **LAN server** — HTTP + WebSocket speaking the frozen wire protocol (§2);
   serves the embedded renderer (`go:embed`).
+  PHONE QR REACHABILITY (user correction 2026-08-10): a production Mac that
+  offers the phone-pairing QR MUST bind its authenticated TLS listener to the
+  LAN. A loopback-only daemon MUST refuse to draw the QR; it must never encode
+  a private-LAN address that the running listener cannot accept.
   Renderer note (decision 2026-07-10): the legacy renderer
   (`desktop/renderer/`, vanilla) stays frozen and working against both
   backends. The NEW renderer (`desktop/renderer2/`) is React 19 + Vite + TS —

@@ -1566,6 +1566,98 @@ func TestSessionStoreRepeatedPromptCreatesNewTurn(t *testing.T) {
 	}
 }
 
+func TestAgentQueuePromotionReplacesNearSimultaneousOrphanEcho(t *testing.T) {
+	canonical := map[string]any{
+		"id": "srv-u-canonical", "role": "user", "content": "same submission", "status": "done",
+		"at": "2026-08-10T21:24:07.156054Z", agentQueueMessageField: "q-promoted",
+	}
+	assistant := map[string]any{
+		"id": "srv-a-canonical", "role": "assistant", "content": "", "status": "running", "at": nil,
+	}
+	echo := map[string]any{
+		"id": "u-optimistic", "role": "user", "content": "same submission", "status": "done",
+		"at": "2026-08-10T21:24:07.046Z",
+	}
+
+	merged := mergeAgentQueueMessageRows(
+		[]any{canonical, assistant, echo},
+		[]any{canonical, assistant},
+	)
+	if len(merged) != 2 || fieldString(mapFromAnyMain(merged[0]), "id") != "srv-u-canonical" || fieldString(mapFromAnyMain(merged[1]), "id") != "srv-a-canonical" {
+		t.Fatalf("promoted queue echo was not replaced: %#v", merged)
+	}
+}
+
+func TestAgentQueuePromotionPreservesDeliberateRepeatedTurn(t *testing.T) {
+	canonical := map[string]any{
+		"id": "srv-u-canonical", "role": "user", "content": "repeat me", "status": "done",
+		"at": "2026-08-10T21:24:07.156054Z", agentQueueMessageField: "q-promoted",
+	}
+	firstAssistant := map[string]any{
+		"id": "srv-a-canonical", "role": "assistant", "content": "first", "status": "done", "at": "2026-08-10T21:24:07.180Z",
+	}
+	repeated := map[string]any{
+		"id": "u-deliberate", "role": "user", "content": "repeat me", "status": "done",
+		"at": "2026-08-10T21:24:07.200Z",
+	}
+	secondAssistant := map[string]any{
+		"id": "a-deliberate", "role": "assistant", "content": "second", "status": "done", "at": "2026-08-10T21:24:07.250Z",
+	}
+
+	merged := mergeAgentQueueMessageRows(
+		[]any{canonical, firstAssistant, repeated, secondAssistant},
+		[]any{canonical, firstAssistant},
+	)
+	if len(merged) != 4 || fieldString(mapFromAnyMain(merged[2]), "id") != "u-deliberate" {
+		t.Fatalf("deliberate repeated turn was deduplicated: %#v", merged)
+	}
+}
+
+func TestSessionStoreMigratesPersistedAgentQueueEchoAtBoot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), sessionStateFilename)
+	snapshot := map[string]any{"chats": []any{map[string]any{
+		"id": "echo-tab", "chatId": "echo-chat", "title": "Echo",
+		"messages": []any{
+			map[string]any{
+				"id": "srv-u-canonical", "role": "user", "content": "same submission", "status": "done",
+				"at": "2026-08-10T21:24:07.156054Z", agentQueueMessageField: "q-promoted", "events": []any{},
+			},
+			map[string]any{
+				"id": "srv-a-canonical", "role": "assistant", "content": "answer", "status": "done",
+				"at": "2026-08-10T21:24:08Z", "events": []any{},
+			},
+			map[string]any{
+				"id": "u-optimistic", "role": "user", "content": "same submission", "status": "done",
+				"at": "2026-08-10T21:24:07.046Z", "events": []any{},
+			},
+		},
+	}}}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := newSessionStore(path)
+	if err := store.LoadError(); err != nil {
+		t.Fatal(err)
+	}
+	chat := chatFromSnapshot(store.Get().(map[string]any), "echo-tab")
+	messages := messageSlice(chat)
+	if len(messages) != 2 || fieldString(mapFromAnyMain(messages[0]), "id") != "srv-u-canonical" {
+		t.Fatalf("boot migration retained duplicate echo: %#v", messages)
+	}
+	reloaded := newSessionStore(path)
+	if err := reloaded.LoadError(); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(messageSlice(chatFromSnapshot(reloaded.Get().(map[string]any), "echo-tab"))); got != 2 {
+		t.Fatalf("boot migration was not durable: %d messages", got)
+	}
+}
+
 func TestSessionStoreAdoptsRendererTurnIDsWithoutCrossChatDuplication(t *testing.T) {
 	store := newSessionStore(filepath.Join(t.TempDir(), sessionStateFilename))
 	store.PrepareTurn(map[string]any{

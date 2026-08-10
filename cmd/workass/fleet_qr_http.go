@@ -22,7 +22,7 @@ const fleetQRPath = "/workass/fleet-qr.svg"
 // image of the key is the key. Serving it to the LAN would hand the fleet to
 // anyone who could reach the port — which is every device this design exists to
 // keep OUT until it has enrolled.
-func newFleetQRHandler(keys *fleet.Store, port int, logf func(format string, args ...any)) http.Handler {
+func newFleetQRHandler(keys *fleet.Store, port int, bind string, logf func(format string, args ...any)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
@@ -35,6 +35,14 @@ func newFleetQRHandler(keys *fleet.Store, port int, logf func(format string, arg
 		}
 		if ip := net.ParseIP(strings.Trim(host, "[]")); ip == nil || !ip.IsLoopback() {
 			http.Error(w, "a fleet key is only readable on the machine that holds it", http.StatusForbidden)
+			return
+		}
+		// A QR is a promise that the encoded endpoint is reachable from another
+		// device. A loopback-only daemon cannot keep that promise; drawing a LAN
+		// address anyway makes the phone report a fictitious code rejection even
+		// though no TCP connection ever reached this daemon.
+		if strings.TrimSpace(bind) != "lan" {
+			http.Error(w, "phone pairing requires this daemon to listen on the LAN", http.StatusConflict)
 			return
 		}
 		if keys == nil {

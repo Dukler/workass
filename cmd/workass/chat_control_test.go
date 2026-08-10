@@ -418,93 +418,6 @@ func TestT4ModelControlKeysMigrateToBaseAndCompositeCreateValidation(t *testing.
 	}
 }
 
-func TestT8EnqueueServerNoticeDrainsAutoQueueAndResumesHibernatedEngine(t *testing.T) {
-	root := repoRoot(t)
-	stateDir := t.TempDir()
-	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
-	created, err := store.AgentCreateChat("Wake target", root, "mock", "mock-deterministic", "ask", true)
-	if err != nil {
-		t.Fatalf("create wake target: %v", err)
-	}
-	tabID, chatID := fieldString(created, "tabId"), fieldString(created, "chatId")
-	jobEnds := make(chan map[string]any, 4)
-	broadcast := daemonEventBroadcaster(store, func(channel string, payload any) {
-		if channel != "job:event" {
-			return
-		}
-		event := mapFromAnyMain(payload)
-		if fieldString(event, "type") != "end" {
-			return
-		}
-		jobEnds <- mapFromAnyMain(event["job"])
-	})
-	manager := acp.NewManager(acp.Options{
-		RootDir: root, StateDir: filepath.Join(stateDir, "acp"), RuntimeProfile: "dev",
-		Provider: acp.ProviderConfig{
-			ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
-			CWD: root, Enabled: true, Label: "Workass Mock ACP",
-		},
-		DefaultProviderID:            "mock",
-		HibernateTTL:                 10 * time.Millisecond,
-		LifecycleCheckInterval:       10 * time.Millisecond,
-		RSSSampleInterval:            time.Hour,
-		SpawnedWorkReconcileInterval: time.Hour,
-		Broadcast:                    broadcast,
-	})
-	t.Cleanup(func() { manager.Reset() })
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	session, err := manager.NewSession(ctx, acp.SessionOptions{TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: root})
-	if err != nil {
-		t.Fatalf("new wake session: %v", err)
-	}
-	warmup, err := manager.StartJob(ctx, acp.JobStartOptions{Kind: "app-chat", TabID: tabID, ChatID: chatID, SessionID: session.SessionID, Prompt: "warm up before hibernate"})
-	if err != nil {
-		t.Fatalf("warmup start: %v", err)
-	}
-	warmupEnd := waitCmdJobEnd(t, jobEnds, fieldString(warmup, "id"), 5*time.Second)
-	if fieldString(warmupEnd, "status") != "done" {
-		t.Fatalf("warmup end = %#v", warmupEnd)
-	}
-	waitCmdProcessState(t, manager, chatID, string(acp.StateHibernated), 3*time.Second)
-	if _, live := manager.LiveSession(session.SessionID); live {
-		t.Fatalf("old session still live after hibernation: %#v", manager.LiveSessions())
-	}
-
-	coordinator := newChatControlCoordinator(manager, store, nil)
-	notice := spawnedWorkServerNoticeText([]acp.SpawnedWorkItem{{
-		TaskID: "xw-notice", Label: "Lane done", Status: "exited", OutputFile: filepath.Join(stateDir, "lane.output"),
-	}})
-	if err := coordinator.EnqueueServerNotice(tabID, chatID, notice); err != nil {
-		t.Fatalf("enqueue server notice: %v", err)
-	}
-	noticeEnd := waitAnyCmdJobEndExcept(t, jobEnds, fieldString(warmup, "id"), 6*time.Second)
-	if fieldString(noticeEnd, "status") != "done" || fieldString(noticeEnd, "chatId") != chatID || fieldString(noticeEnd, "tabId") != tabID {
-		t.Fatalf("notice turn end = %#v", noticeEnd)
-	}
-	if _, _, queued := store.AgentQueueHead(tabID, chatID); queued {
-		t.Fatal("server notice remained queued after drain")
-	}
-	read, err := store.AgentReadChat(tabID, chatID, 20, false)
-	if err != nil {
-		t.Fatalf("read wake chat: %v", err)
-	}
-	foundNotice := false
-	for _, raw := range anySlice(read["messages"]) {
-		message := mapFromAnyMain(raw)
-		if fieldString(message, "role") == "user" && strings.Contains(fieldString(message, "content"), "Background work completed while no turn was active") &&
-			strings.Contains(fieldString(message, "content"), "Lane done — exited") {
-			foundNotice = true
-		}
-	}
-	if !foundNotice {
-		t.Fatalf("server notice was not committed into chat history: %#v", read["messages"])
-	}
-	if len(manager.LiveSessions()) == 0 {
-		t.Fatal("server notice did not resume a live session")
-	}
-}
-
 func TestDaemonQueueStaysDurableWhenAnotherTurnAlreadyOwnsStart(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()
@@ -706,7 +619,7 @@ func TestRendererQueueAdoptionSkipsPendingAttachments(t *testing.T) {
 	}
 }
 
-func TestAgentQueueStartFailureRetriesThenParksAndEnqueuesNotice(t *testing.T) {
+func TestAgentQueueStartFailureRetriesThenParksWithoutSyntheticMessage(t *testing.T) {
 	stateDir := t.TempDir()
 	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
 	created, err := store.AgentCreateChat("Park failed queue", stateDir, "mock", "mock-deterministic", "ask", false)
@@ -723,13 +636,7 @@ func TestAgentQueueStartFailureRetriesThenParksAndEnqueuesNotice(t *testing.T) {
 	coordinator := newChatControlCoordinator(manager, store, nil)
 	coordinator.queueRetryBase = 5 * time.Millisecond
 	var failedAttempts atomic.Int32
-	var noticeAttempts atomic.Int32
 	coordinator.startQueuedTurnOverride = func(_ context.Context, gotTabID, gotChatID string, item map[string]any) error {
-		if item["queueNotice"] == true {
-			noticeAttempts.Add(1)
-			_, prepareErr := store.AgentPrepareQueuedTurn(gotTabID, gotChatID, fieldString(item, "id"), "native-session")
-			return prepareErr
-		}
 		failedAttempts.Add(1)
 		return errors.New("provider start failed")
 	}
@@ -737,7 +644,7 @@ func TestAgentQueueStartFailureRetriesThenParksAndEnqueuesNotice(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		head, _, queued := store.AgentQueueHead(tabID, chatID)
-		if queued && fieldString(head, "id") == fieldString(receipt, "queueId") && head[queueParkedField] == true && noticeAttempts.Load() == 1 {
+		if queued && fieldString(head, "id") == fieldString(receipt, "queueId") && head[queueParkedField] == true {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -753,15 +660,11 @@ func TestAgentQueueStartFailureRetriesThenParksAndEnqueuesNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	foundNotice := false
 	for _, raw := range anySlice(read["messages"]) {
 		message := mapFromAnyMain(raw)
-		if fieldString(message, "role") == "user" && strings.Contains(fieldString(message, "content"), "queued turn was parked") {
-			foundNotice = true
+		if fieldString(message, "role") == "user" && strings.Contains(fieldString(message, "content"), "workass internal notice") {
+			t.Fatalf("parking a queue injected a synthetic message: %#v", message)
 		}
-	}
-	if !foundNotice {
-		t.Fatalf("parked queue did not enqueue a server notice: %#v", read["messages"])
 	}
 }
 

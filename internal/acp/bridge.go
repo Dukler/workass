@@ -26,6 +26,7 @@ type Bridge struct {
 
 	mu                sync.Mutex
 	child             *exec.Cmd
+	processTree       processTreeHandle
 	stdin             io.WriteCloser
 	nextID            int64
 	pending           map[string]*pendingRequest
@@ -347,12 +348,17 @@ func (b *Bridge) start() error {
 	if err != nil {
 		return err
 	}
-	if err := cmd.Start(); err != nil {
-		return err
+	processTree, err := startProcessTree(cmd)
+	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		return fmt.Errorf("attach ACP process tree: %w", err)
 	}
 
 	b.mu.Lock()
 	b.child = cmd
+	b.processTree = processTree
 	b.stdin = stdin
 	b.startedAt = time.Now()
 	b.finishedAt = time.Time{}
@@ -429,14 +435,20 @@ func (b *Bridge) waitChild(cmd *exec.Cmd) {
 	err := cmd.Wait()
 	code, signal := exitCodeSignal(cmd.ProcessState, err)
 	uptime := time.Duration(0)
+	processTree := processTreeHandle{}
 	b.mu.Lock()
 	if !b.startedAt.IsZero() {
 		uptime = time.Since(b.startedAt)
 	}
 	tail := redactSensitiveText(string(b.stderrTail))
 	alreadyClosed := b.closed || b.child != cmd || b.state == StateHibernated
+	if b.child == cmd {
+		processTree = b.processTree
+		b.processTree = processTreeHandle{}
+	}
 	rssKb := b.rssKb
 	b.mu.Unlock()
+	_ = releaseProcessTree(processTree)
 
 	fields := map[string]any{
 		"key":      b.key,
@@ -1415,8 +1427,10 @@ func (b *Bridge) Close(intentional bool, cause error) {
 	pending := b.pending
 	b.pending = make(map[string]*pendingRequest)
 	child := b.child
+	processTree := b.processTree
 	stdin := b.stdin
 	b.child = nil
+	b.processTree = processTreeHandle{}
 	b.stdin = nil
 	b.finishedAt = time.Now()
 	b.pinned = false
@@ -1442,7 +1456,7 @@ func (b *Bridge) Close(intentional bool, cause error) {
 		_ = stdin.Close()
 	}
 	if child != nil && child.Process != nil {
-		_ = stopProcessTree(child.Process)
+		_ = stopProcessTree(child.Process, processTree)
 	}
 	if b.manager != nil {
 		b.manager.orphanInProcessSpawnedWorkForChat(tabID, chatID, firstNonEmpty(errString(cause), "bridge-close"))

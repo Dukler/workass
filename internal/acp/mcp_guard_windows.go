@@ -70,20 +70,15 @@ func (m *Manager) guardAcpMCPFanout(reason string) {
 		if bridge == nil || len(children) == 0 {
 			continue
 		}
-		killed := make([]int, 0, len(children))
+		blocked := make([]int, 0, len(children))
 		commands := make([]string, 0, len(children))
 		for _, child := range children {
 			commands = append(commands, compactText(redactSensitiveText(child.CommandLine), 500))
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			err := managedCommandContext(ctx, "taskkill.exe", "/PID", strconv.Itoa(child.ProcessID), "/T", "/F").Run()
-			cancel()
-			if err == nil {
-				killed = append(killed, child.ProcessID)
-			}
+			blocked = append(blocked, child.ProcessID)
 		}
 		m.opts.Logf("blocked raw MCP docker fanout", map[string]any{
 			"reason": reason, "bridgeKey": bridge.Key(), "enginePid": parentPID,
-			"count": len(children), "killed": killed, "commands": commands,
+			"count": len(children), "blocked": blocked, "commands": commands,
 		})
 		bridge.Close(true, errors.New("raw Docker MCP fan-out blocked; Workass requires shared MCP proxy config"))
 	}

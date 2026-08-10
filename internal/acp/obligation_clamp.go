@@ -34,14 +34,6 @@ func (m *Manager) chatHasLiveParkEvidence(tabID, chatID string) bool {
 		if rec == nil || rec.Item.TabID != tabID || rec.Item.ChatID != chatID {
 			continue
 		}
-		// A settled row with an undelivered wake is the settled-work gap: the
-		// work is over but the chat has not been told yet, so something IS
-		// still coming. Checked before the running filter because by
-		// construction these rows are no longer running.
-		if rec.Item.Wake == "pending" {
-			m.spawnedWorkMu.Unlock()
-			return true
-		}
 		if rec.Item.Status != "running" || isServiceSpawnedWork(rec.Item) {
 			continue
 		}

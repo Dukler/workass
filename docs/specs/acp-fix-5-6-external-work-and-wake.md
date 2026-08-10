@@ -1,9 +1,9 @@
-# Fix 5+6 — tracked external lanes + wake-on-settle (closed spec)
+# Fix 5+6 — tracked external lanes (wake-on-settle removed)
 
-Status: approved for build (Sol lane). Scope: Go daemon (`internal/acp`,
+Status: Fix 6 remains built. Fix 5 was superseded by user law 2026-08-10.
+Scope: Go daemon (`internal/acp`,
 `cmd/workass`) + one new shell script. NO renderer changes (external kind
-renders via the existing generic fallback in `SpawnedWorkCard.tsx`; the new
-`wake` JSON field is additive and ignored by old renderers).
+renders via the existing generic fallback in `SpawnedWorkCard.tsx`).
 
 ## Problem (receipts in chat 2026-07-18)
 
@@ -11,10 +11,10 @@ A. **Untracked spawns.** Detached kill-isolated lanes (setsid/start_new_session
    double-forks) emit no Claude task wire events. Only the seconds-long
    *launcher* Bash is tracked; the hour-long lane is invisible to the registry,
    the rail, receipts, and lifecycle decisions.
-B. **No wake on completion.** When spawned work settles while the chat has no
-   running turn (engine hibernated, recycled, or handoff), nothing wakes the
-   agent to collect results. a remote machine stalled overnight exactly this way:
-   kill-isolated chunks survived and finished; nobody was woken to continue.
+B. **Historical behavior, now removed.** Workass briefly woke an idle chat on
+   completion by injecting a synthetic user message. The user rejected that
+   behavior. Terminal records now remain internal receipts until explicitly
+   read.
 
 ## Binding laws (restate: executors do not inherit memory)
 
@@ -29,12 +29,6 @@ B. **No wake on completion.** When spawned work settles while the chat has no
 ## Fix 6 — external work registration
 
 ### New registry kind: `external`
-
-`SpawnedWorkItem` unchanged in shape except one additive field:
-
-```go
-Wake string `json:"wake,omitempty"` // "", "pending", "delivered"
-```
 
 External records live in the same per-chat registry, persist in the same
 snapshots, produce the same receipts, and emit the same
@@ -109,68 +103,20 @@ is persisted or returned anywhere.
   `hasRunningSpawnedWorkForChat` gains a kind filter excluding `external`
   (in-process kinds bash/agent/workflow/background keep pinning exactly as
   fix 1 shipped). Rationale: external lanes survive engine death by
-  construction; wake-on-settle (fix 5) closes the loop.
+  construction; their durable receipt and explicit status card close the loop.
 - `orphanInProcessSpawnedWorkForChat` remains workflow/agent only — external
   records are never orphaned by engine exit.
 - `touchSpawnedWorkBridgeActivity` on external changes is fine (harmless
   activity refresh on register/settle).
 
-## Fix 5 — wake-on-settle
+## Fix 5 — removed: no automatic wake or synthetic message
 
-### Trigger rules (exhaustive)
-
-Set `rec.Item.Wake = "pending"` inside the same lock where the settle
-happens, when:
-
-- kind == `external` settles (any status, any path: probe, explicit settle);
-- ANY kind settles to `orphaned` (fix-1 seams: bridge close, hibernate-kill
-  backstop) — this is the engine-died-mid-flight replay case.
-
-Never for normal in-process exits (the live engine's own harness
-notification covers those). Never for records already `Wake != ""`.
-
-### Dispatcher
-
-- New manager hook: `SetSpawnedWorkWakeFunc(fn func(tabID, chatID string,
-  items []SpawnedWorkItem) error)`; wiring lives in `cmd/workass/main.go`.
-- Dispatch scan runs (a) once after registry load at daemon start, (b) after
-  every `commitSpawnedWorkChange`, (c) on a 15s ticker (covers enqueue
-  retries). Per chat: collect all `wake == "pending"` records, call the hook
-  ONCE with the batch. On nil error: mark each `delivered` + persist
-  snapshot. On error: leave pending, log once per item transition (not per
-  tick — track a logged flag in the in-memory record only).
-- Coalescing: min 30s between successful wake deliveries per chat (in-memory
-  last-delivery map; pending items just ride the next allowed dispatch).
-
-### Wake delivery (cmd/workass wiring)
-
-The hook implementation uses the existing durable chat-control machinery —
-NOT a new path: `state.AgentEnqueueChat(tabID, chatID, message, "auto")`
-followed by the coordinator's `scheduleDrain(tabID, chatID)`. That already:
-queues durably, starts a turn when idle, and resumes a hibernated engine via
-`startQueuedTurn`→`NewSession`. Refactor `chatControlCoordinator` minimally
-so main.go can reach an exported `EnqueueServerNotice(tabID, chatID, text)
-error` that performs enqueue+drain (do not export scheduleDrain itself).
-
-Message format (single message per batch, plain text):
-
-```
-[workass internal notice]
-Background work completed while no turn was active:
-- <label> — <status>[, exit <code>][, salida: <outputFile>]
-(1+ lines, one per item)
-This notice is not a user language preference. Resume the work that depended on this completion. Receipts: workass_list_spawned_work_receipts.
-```
-
-No prompts, ids beyond taskId/label/paths, or output content in the message.
-
-### Exactly-once
-
-`Wake` persists in the snapshot, so restarts cannot double-deliver
-(`pending` survives a crash before enqueue → retried; `delivered` survives →
-skipped). Enqueue+mark ordering: enqueue first, then mark delivered; a crash
-between the two may deliver twice across a daemon restart — accepted and
-documented (duplicate notice is harmless; missing notice is not).
+Settling external work, observed background work, or a tracked subagent writes
+its bounded durable receipt and emits the ordinary spawned-work state update.
+It does not enqueue text, start or resume a chat turn, or retain a pending wake
+flag. Older snapshot `wake` fields are ignored during JSON decoding. The
+background-work card and owner-authenticated receipt tools remain the only
+completion surfaces.
 
 ## Wrapper script (new): `scripts/spawn-tracked-lane.sh`
 
@@ -201,17 +147,15 @@ In `internal/acp` unless noted. Each new test FAILS on pre-fix code.
 - T3 done-file settle: exit 0 → exited; exit 3 → failed, ExitCode 3; receipt
   written with redacted tail from output file.
 - T4 pid settle: dead pid + grace → exited with the no-marker summary.
-- T5 wake marking: external settle and orphaned settle set Wake pending;
-  normal bash exit does not.
-- T6 dispatcher: batch per chat, single hook call, delivered persisted;
-  simulated restart (reload snapshot) re-delivers pending, skips delivered;
-  hook error leaves pending and retries on ticker.
+- T5 terminal delivery: settled work exposes no `wake` field, creates no
+  synthetic message, and does not count as live park evidence.
+- T6 migration: an older snapshot containing `wake:"pending"` loads as an
+  ordinary terminal receipt and cannot reactivate the removed mechanism.
 - T7 explicit settle: idempotent second call; owner validation rejects a
   non-owning key (HTTP-level test in cmd/workass mirroring existing
   agent_control tests).
-- T8 (cmd/workass) EnqueueServerNotice: enqueues delivery=auto and drains
-  into a turn on the mock provider; hibernated-engine path exercises
-  NewSession resume (reuse existing chat-control test harness).
+- T8 (cmd/workass): a queue that exhausts its bounded start retries parks the
+  original row without inserting a synthetic user message.
 - T9 path validation: rejects relative, symlinked, out-of-root and
   traversal paths; accepts tmp + state roots.
 - Script test `scripts/tests/spawn-tracked-lane.test.sh`: lane survives

@@ -27,6 +27,24 @@ func TestWindowsManagedProcessBoundaryOwnsEveryPortableCommand(t *testing.T) {
 			t.Fatalf("Windows managed-process policy is missing %q", required)
 		}
 	}
+	processTreeSource, err := os.ReadFile(filepath.Join(dir, "process_tree_windows.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeText := string(processTreeSource)
+	for _, required := range []string{
+		"CreateJobObjectW",
+		"SetInformationJobObject",
+		"AssignProcessToJobObject",
+		"JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE",
+		"cmd.SysProcAttr.CreationFlags |= createSuspended",
+		"ResumeThread",
+		"TerminateJobObject",
+	} {
+		if !strings.Contains(treeText, required) {
+			t.Fatalf("Windows process-tree ownership is missing %q", required)
+		}
+	}
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -43,6 +61,10 @@ func TestWindowsManagedProcessBoundaryOwnsEveryPortableCommand(t *testing.T) {
 			t.Fatal(readErr)
 		}
 		source := string(data)
+		legacyTreeKiller := strings.Join([]string{"task", "kill"}, "")
+		if strings.Contains(strings.ToLower(source), legacyTreeKiller) {
+			t.Errorf("%s launches or references the legacy shell tree killer instead of native process ownership", name)
+		}
 		if strings.Contains(source, "exec.Command(") || strings.Contains(source, "exec.CommandContext(") {
 			t.Errorf("%s bypasses the managed subprocess boundary", name)
 		}

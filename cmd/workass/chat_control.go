@@ -333,67 +333,6 @@ func (c *chatControlCoordinator) send(params map[string]any) (map[string]any, er
 	return receipt, nil
 }
 
-func (c *chatControlCoordinator) EnqueueServerNotice(tabID, chatID, text string) error {
-	if c == nil || c.manager == nil || c.state == nil {
-		return errors.New("Workass chat control is unavailable")
-	}
-	if _, err := c.state.AgentEnqueueChat(tabID, chatID, text, "auto"); err != nil {
-		return err
-	}
-	c.refreshBackground(tabID, chatID)
-	c.scheduleDrain(tabID, chatID)
-	return nil
-}
-
-func spawnedWorkServerNoticeText(items []acp.SpawnedWorkItem) string {
-	var b strings.Builder
-	b.WriteString("[workass internal notice]\nBackground work completed while no turn was active:")
-	hasSubagent := false
-	for _, item := range items {
-		label := strings.TrimSpace(acp.RedactSensitiveText(item.Label))
-		if label == "" {
-			label = item.TaskID
-		}
-		status := strings.TrimSpace(item.Status)
-		if status == "" {
-			status = "exited"
-		}
-		b.WriteString("\n- ")
-		b.WriteString(label)
-		b.WriteString(" — ")
-		b.WriteString(status)
-		if item.ExitCode != nil {
-			b.WriteString(fmt.Sprintf(", exit %d", *item.ExitCode))
-		}
-		if model := strings.TrimSpace(acp.RedactSensitiveText(item.ModelLabel)); model != "" {
-			b.WriteString(", model: ")
-			b.WriteString(model)
-		}
-		if output := strings.TrimSpace(acp.RedactSensitiveText(item.OutputFile)); output != "" {
-			b.WriteString(", output: ")
-			b.WriteString(output)
-		}
-		// The result excerpt exists so a woken coordinator can act on the child's
-		// answer immediately; the full text stays in the durable receipt.
-		if excerpt := strings.TrimSpace(acp.RedactSensitiveText(item.ResultExcerpt)); excerpt != "" {
-			b.WriteString("\n  result: ")
-			b.WriteString(strings.Join(strings.Fields(excerpt), " "))
-		}
-		if item.Kind == "subagent" {
-			hasSubagent = true
-		}
-	}
-	b.WriteString("\nThis notice is not a user language preference. Resume the work that depended on this completion. Receipts: ")
-	if hasSubagent {
-		// The spawned-work receipt carries the lane's output tail; only the
-		// subagent receipt carries the delegated agent's actual result.
-		b.WriteString("workass_list_subagent_receipts for subagent results; workass_list_spawned_work_receipts for lane output.")
-	} else {
-		b.WriteString("workass_list_spawned_work_receipts.")
-	}
-	return b.String()
-}
-
 func (c *chatControlCoordinator) cancel(params map[string]any) (map[string]any, error) {
 	tabID, chatID, err := exactAgentTarget(params)
 	if err != nil {
@@ -504,15 +443,11 @@ func (c *chatControlCoordinator) scheduleDrain(tabID, chatID string) {
 				time.Sleep(retryBase << attempt)
 			}
 		}
-		enqueueNotice := item["queueNotice"] != true
-		if err := c.state.AgentParkQueuedTurn(tabID, chatID, fieldString(item, "id"), startErr.Error(), enqueueNotice); err != nil {
+		if err := c.state.AgentParkQueuedTurn(tabID, chatID, fieldString(item, "id"), startErr.Error()); err != nil {
 			c.refreshBackground(tabID, chatID)
 			return
 		}
 		c.refreshBackground(tabID, chatID)
-		if enqueueNotice {
-			c.scheduleDrain(tabID, chatID)
-		}
 	}()
 }
 
@@ -611,11 +546,10 @@ func (c *chatControlCoordinator) startQueuedTurn(ctx context.Context, tabID, cha
 	}
 	jobOpts := parseJobStartOptions(queuedOpts)
 	// A queued row records who put it there: "host" is the user's own message,
-	// while "agent" covers wake notices and agent-sent text
-	// (session_store.go:2712, :2804). Only the former is a new request; a wake
-	// resumes the request the chat already had. Anything unrecognised is
-	// treated as a resumption, which can under-count obligations but can never
-	// invent a finished one.
+	// while "agent" covers agent-sent text (session_store.go:2712, :2804).
+	// Only the former is a new request. Anything unrecognised is treated as a
+	// resumption, which can under-count obligations but can never invent a
+	// finished one.
 	humanAuthored := fieldString(item, "source") == "host"
 	jobOpts.HumanAuthored = humanAuthored
 	prepared := false

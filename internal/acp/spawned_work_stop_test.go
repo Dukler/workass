@@ -87,11 +87,6 @@ func TestStopSpawnedWorkSignalsEveryProcessHoldingTheLaneOpen(t *testing.T) {
 	if stopped.FinishedAt == "" || stopped.Summary == "" {
 		t.Fatalf("stopped row = %#v", stopped)
 	}
-	// No wake: the human who pressed stop does not need the chat woken to be
-	// told what they just did. Same reasoning tracked-subagent cancels follow.
-	if stopped.Wake == "pending" {
-		t.Fatalf("a user-initiated stop must not arm a wake: %#v", stopped)
-	}
 }
 
 // The ghost this button most needs to answer: a lane whose process died without

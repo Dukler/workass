@@ -428,11 +428,9 @@ type JobStartOptions struct {
 	ModeID            string
 	ProviderID        string
 	ForceFresh        bool
-	// HumanAuthored separates a request from a resumption. Both arrive through
-	// the same queue — a wake notice is enqueued exactly like a typed message
-	// (session_store.go:2712) — so only the caller knows which this is, and
-	// getting it wrong would either lose the user's request or invent a new one
-	// every time a lane settles.
+	// HumanAuthored separates a request from a resumption. Both can arrive
+	// through the same queue, so only the caller knows which this is; getting it
+	// wrong would either lose the user's request or invent a new one.
 	HumanAuthored      bool
 	UserMessageID      string
 	AssistantMessageID string

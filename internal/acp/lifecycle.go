@@ -170,6 +170,7 @@ func (m *Manager) hibernateBridgeIfEligible(b *Bridge, reason string, ttl time.D
 	}
 
 	child := b.child
+	processTree := b.processTree
 	stdin := b.stdin
 	pending := b.pending
 	sessions := make([]string, 0, len(b.sessions))
@@ -188,6 +189,7 @@ func (m *Manager) hibernateBridgeIfEligible(b *Bridge, reason string, ttl time.D
 
 	b.pending = make(map[string]*pendingRequest)
 	b.child = nil
+	b.processTree = processTreeHandle{}
 	b.stdin = nil
 	b.initialized = false
 	b.state = StateHibernated
@@ -213,7 +215,7 @@ func (m *Manager) hibernateBridgeIfEligible(b *Bridge, reason string, ttl time.D
 		_ = stdin.Close()
 	}
 	if child != nil && child.Process != nil {
-		_ = stopProcessTree(child.Process)
+		_ = stopProcessTree(child.Process, processTree)
 	}
 	m.orphanInProcessSpawnedWorkForChat(tabID, chatID, reason)
 	if spare {

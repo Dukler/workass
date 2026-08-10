@@ -45,9 +45,7 @@ spawned work (`chat-activity.ts:16`). Three cases escape that and produce a
 false "Listo":
 
 1. Harness-internal waits with no registry record (self-scheduled wakeups).
-2. The settled-work gap: `Wake == "pending"` armed (`spawned_work.go:726`) but
-   nothing running; the wake is delivered only while idle.
-3. Prose parks — a turn that ends asking a question, which is really
+2. Prose parks — a turn that ends asking a question, which is really
    needs-input wearing done's clothes.
 
 ACP already carries a turn-end signal: `session/prompt` returns `stopReason`,
@@ -226,10 +224,6 @@ Live park evidence for a chat is any of:
     protection intact on Unix;
   - liveness `subagent`: the in-memory subagent registry still holds the run;
   - liveness `in-process`: the owning engine is not exited.
-- A record with `Wake == "pending"` not yet delivered (`spawned_work.go:726`) —
-  the settled-work gap. Disjoint from the running-row bullets by construction:
-  `markSpawnedWorkWakePendingLocked` only arms on non-running records.
-
 **A probe that fails this collection** (timeout ⇒ `ok == false`,
 `spawned_work_probe_unix.go:55`) preserves the prior verdict rather than reading
 as absence — mirror `classifySpawnedWorkServices` (`spawned_work.go:1149`).
@@ -347,7 +341,7 @@ behaves exactly as today.
   Inference may never produce `needs_input` from silence — only a pending
   permission, a non-zero exit, or an explicit native `refusal`/`max_tokens`.
 - **Model forgets to declare:** silence tier. No penalty.
-- **Model declares `done` while a wake is armed:** clamped to `parked`.
+- **Model declares `done` while background work is live:** clamped to `parked`.
 - **Model declares `parked` forever:** `stalledGrace` → `stalled`.
 - **Model declares `done` and the work is wrong:** undetectable by
   construction. The receipt records "declared done at T" so the failure is
@@ -378,7 +372,7 @@ Go, in `internal/acp/disposition_test.go` unless noted:
 2. `refusal` and `max_tokens` map to `needs_input`.
 3. User cancel (`cancelled` / code 130) closes the obligation `cancelled` and
    leaves **no** `working` record.
-4. Declared `done` + armed wake ⇒ `parked` (demotion).
+4. Declared `done` + live background-work evidence ⇒ `parked` (demotion).
 5a. Declared `done` + a `running` row whose **supported** probe returns empty
     ⇒ `done`. *(The stuck-queue pin: a stale row must never veto.)*
 5b. Declared `done` + a `running` row whose probe is **unsupported** ⇒ `parked`.
@@ -746,7 +740,7 @@ may keep rejecting, but loudly. `turnStatus` must not report the previous
 turn's `completed` during an adopted turn.
 
 **D3 — Immediate stall also requires no daemon-side park evidence.** The
-harness cannot see the daemon's wake machinery. A chat parked on a registered
+harness cannot see the daemon's background-work registry. A chat parked on a registered
 external lane — the blessed `spawn-tracked-lane.sh` workflow — ends its SDK
 turn with both arrays empty and `terminal_reason: completed`, and §V3.5 as
 written stalls it instantly: a false alarm on the most sanctioned park in the
