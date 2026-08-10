@@ -311,6 +311,17 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   prove foreground turns and tracked asynchronous work are quiescent, stop the
   shell and daemon before replacement, and roll back after failed health,
   controller, or catalog recovery.
+- **Windows portable updates** (user law 2026-08-10): extracted Windows builds
+  update from the platform-specific manifest on the latest stable GitHub
+  Release. Authenticode is not required for this private portable lane. The
+  shell accepts only an HTTPS feed for the exact Windows/amd64 portable target,
+  verifies the archive's declared size and SHA-256 before extraction, rejects
+  unsafe archive paths, revalidates the embedded release/shell versions and
+  required PE32+ x86-64 runtime files, then uses the same quiescent daemon
+  handoff, sibling-directory swap, health/controller/catalog gates, and
+  rollback contract. Release tags and assets are immutable. Builds predating
+  this law require one manual portable replacement before in-app updates can
+  bootstrap themselves.
 
 Zero third-party Go dependencies unless this spec grants them. WebSocket is
 hand-rolled RFC 6455 exactly as `desktop/lan-server.js` already proves

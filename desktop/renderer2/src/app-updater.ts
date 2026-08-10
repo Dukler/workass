@@ -48,6 +48,7 @@ export interface AppUpdaterState {
 interface WorkassUpdaterApi {
   getState(): Promise<AppUpdaterState>;
   check(): Promise<AppUpdaterState>;
+  apply(): Promise<AppUpdaterState>;
   download(): Promise<AppUpdaterState>;
   install(): Promise<AppUpdaterState>;
   onState(callback: (state: AppUpdaterState) => void): () => void;
@@ -82,12 +83,12 @@ export function appUpdaterBlockerText(blockers: AppUpdaterBlockers | null): stri
 export function appUpdaterPhaseText(state: AppUpdaterState): string {
   switch (state.phase) {
     case 'unavailable': return 'Esta compilación no admite actualizaciones automáticas.';
-    case 'idle': return 'Listo para buscar una versión firmada de Workass.';
-    case 'checking': return 'Buscando una versión firmada…';
+    case 'idle': return 'Listo para buscar una versión verificada de Workass.';
+    case 'checking': return 'Buscando una versión verificada…';
     case 'current': return 'Workass está al día.';
     case 'available': return `Workass ${state.targetVersion || ''} está disponible.`.trim();
     case 'downloading': return `Descargando la versión verificada… ${Math.round(state.progress * 100)}%`;
-    case 'staging': return 'Verificando firma, checksum y daemon incluido…';
+    case 'staging': return 'Verificando checksum, plataforma y daemon incluido…';
     case 'ready': return `Workass ${state.targetVersion || ''} está verificado y listo.`.trim();
     case 'busy': return appUpdaterBlockerText(state.blockers);
     case 'installing': return `Instalando Workass ${state.targetVersion || ''} de forma segura…`.trim();
@@ -118,7 +119,7 @@ export function useAppUpdater() {
     return () => { mounted = false; unsubscribe?.(); };
   }, [bridge]);
 
-  const run = useCallback(async (action: 'check' | 'download' | 'install') => {
+  const run = useCallback(async (action: 'check' | 'apply' | 'download' | 'install') => {
     if (!bridge) return state;
     const next = await bridge[action]();
     setState(next);
@@ -128,6 +129,7 @@ export function useAppUpdater() {
   return {
     state,
     check: useCallback(() => run('check'), [run]),
+    apply: useCallback(() => run('apply'), [run]),
     download: useCallback(() => run('download'), [run]),
     install: useCallback(() => run('install'), [run]),
   };

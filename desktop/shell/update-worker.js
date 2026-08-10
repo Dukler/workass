@@ -112,27 +112,59 @@ function verifyMacIncoming(transaction) {
   if (!fs.existsSync(path.join(runtimeRoot, 'workass'))) throw new Error('incoming release has no bundled daemon');
 }
 
-function powershellSignature(executable) {
-  const quoted = String(executable).replaceAll("'", "''");
-  const script = `$s=Get-AuthenticodeSignature -LiteralPath '${quoted}'; [Console]::Out.Write(($s.Status.ToString())+'|'+($s.SignerCertificate.Thumbprint))`;
-  const value = runChecked('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], 'Authenticode verification');
-  const [status, thumbprint] = value.split('|');
-  if (status !== 'Valid' || !thumbprint) throw new Error('Authenticode signature is not valid');
-  return thumbprint.toUpperCase();
+function requiredRegularFile(file, label) {
+  const stat = fs.statSync(file, { throwIfNoEntry: false });
+  if (!stat?.isFile() || stat.size <= 0) throw new Error(`incoming Windows release has no ${label}`);
+  return stat;
+}
+
+function verifyWindowsPE(file, label) {
+  const stat = requiredRegularFile(file, label);
+  const descriptor = fs.openSync(file, 'r');
+  try {
+    const dos = Buffer.alloc(64);
+    if (fs.readSync(descriptor, dos, 0, dos.length, 0) !== dos.length || dos.toString('ascii', 0, 2) !== 'MZ') {
+      throw new Error(`incoming ${label} is not a Windows executable`);
+    }
+    const peOffset = dos.readUInt32LE(0x3c);
+    if (peOffset < 64 || peOffset + 26 > stat.size || peOffset > 1024 * 1024) {
+      throw new Error(`incoming ${label} has an invalid PE header`);
+    }
+    const pe = Buffer.alloc(26);
+    if (fs.readSync(descriptor, pe, 0, pe.length, peOffset) !== pe.length ||
+        pe.toString('ascii', 0, 4) !== 'PE\0\0' || pe.readUInt16LE(4) !== 0x8664 || pe.readUInt16LE(24) !== 0x20b) {
+      throw new Error(`incoming ${label} is not PE32+ x86-64`);
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function readReleaseJSON(file, label) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch { throw new Error(`incoming Windows ${label} is invalid`); }
 }
 
 function verifyWindowsIncoming(transaction) {
-  const currentSigner = powershellSignature(path.join(transaction.installTarget, 'Workass.exe'));
-  for (const executable of [
-    path.join(transaction.incomingTarget, 'Workass.exe'),
-    path.join(transaction.incomingTarget, 'workass-daemon.exe'),
-  ]) {
-    if (powershellSignature(executable) !== currentSigner) throw new Error('incoming executable signer does not match the installed app');
-  }
-  const manifest = JSON.parse(fs.readFileSync(path.join(transaction.incomingTarget, 'manifest.json'), 'utf8'));
-  if (manifest.version !== transaction.targetVersion || manifest.platform !== 'windows') {
+  const root = transaction.incomingTarget;
+  const manifest = readReleaseJSON(path.join(root, 'manifest.json'), 'runtime manifest');
+  if (manifest.schemaVersion !== 2 || manifest.version !== transaction.targetVersion || manifest.platform !== 'windows' ||
+      manifest.arch !== 'amd64' || manifest.portable !== true || manifest.electron !== true) {
     throw new Error('incoming Windows runtime does not match the release manifest');
   }
+  const packageManifest = readReleaseJSON(path.join(root, 'resources', 'app', 'package.json'), 'shell manifest');
+  if (packageManifest.version !== transaction.targetVersion) throw new Error('incoming Windows shell version does not match the release manifest');
+  verifyWindowsPE(path.join(root, 'Workass.exe'), 'Workass.exe');
+  verifyWindowsPE(path.join(root, 'workass-daemon.exe'), 'workass-daemon.exe');
+  verifyWindowsPE(path.join(root, 'node', 'windows-amd64', 'node.exe'), 'portable node.exe');
+  for (const [relative, label] of [
+    [['resources', 'app', 'update-manager.js'], 'update manager'],
+    [['resources', 'app', 'update-worker.js'], 'update worker'],
+    [['resources', 'renderer', 'index.html'], 'renderer'],
+    [['frontier-hosts', 'windows-amd64', 'claude-native-host.mjs'], 'Claude host'],
+    [['frontier-hosts', 'windows-amd64', 'codex-native-host.mjs'], 'Codex host'],
+    [['frontier-hosts', 'windows-amd64', 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'sdk.mjs'], 'Claude Agent SDK'],
+  ]) requiredRegularFile(path.join(root, ...relative), label);
 }
 
 function validateTransaction(transaction) {
@@ -153,6 +185,31 @@ function validateTransaction(transaction) {
     throw new Error(`unsupported update platform: ${transaction.platform}`);
   }
   return transaction;
+}
+
+async function startInstalledRuntime(transaction, dependencies = {}) {
+  if (transaction.platform !== 'darwin') return { status: 'not-required' };
+  const resourcesPath = path.join(transaction.installTarget, 'Contents', 'Resources');
+  const appCode = path.join(resourcesPath, 'app');
+  const resolveRuntimeProfile = dependencies.resolveRuntimeProfile ||
+    require(path.join(appCode, 'runtime-profile.js')).resolveRuntimeProfile;
+  const ensurePackagedDaemon = dependencies.ensurePackagedDaemon ||
+    require(path.join(appCode, 'runtime-bootstrap.js')).ensurePackagedDaemon;
+  const runtime = resolveRuntimeProfile({
+    env: process.env,
+    isPackaged: true,
+    resourcesPath,
+    repoRoot: '',
+  });
+  if (`${runtime.daemonURL}/workass/health` !== transaction.daemonHealthURL ||
+      `http://127.0.0.1:${runtime.viewPort}/__workass-shell/status` !== transaction.shellStatusURL) {
+    throw new Error('installed runtime profile does not match the prepared update transaction');
+  }
+  const receipt = await ensurePackagedDaemon({ runtime, resourcesPath, forceInstall: true });
+  if (!['installed-and-running', 'already-running'].includes(receipt?.status)) {
+    throw new Error('installed Workass runtime did not start');
+  }
+  return receipt;
 }
 
 function defaultOperations(transaction) {
@@ -181,6 +238,7 @@ function defaultOperations(transaction) {
         throw err;
       }
     },
+    startRuntime: async () => startInstalledRuntime(transaction),
     launchInstalled: async () => {
       const executable = transaction.platform === 'darwin'
         ? path.join(transaction.installTarget, 'Contents', 'MacOS', 'Workass')
@@ -190,7 +248,11 @@ function defaultOperations(transaction) {
         detached: true,
         windowsHide: true,
         stdio: 'ignore',
-        env: { ...process.env, WORKASS_CONTROLLER_RECOVERY: '1' },
+        env: {
+          ...process.env,
+          WORKASS_CONTROLLER_RECOVERY: '1',
+          WORKASS_UPDATE_RELAUNCH: '1',
+        },
       });
       launchedPID = child.pid || 0;
       child.unref();
@@ -268,6 +330,7 @@ async function runTransaction(rawTransaction, operations) {
     updateReceipt(transaction, 'activating');
     await ops.activate();
     activated = true;
+    await ops.startRuntime?.();
     await ops.launchInstalled();
     if (await wait(() => ops.healthy(transaction.targetVersion), { attempts: 240, delayMs: 250 })) {
       await ops.cleanup();
@@ -278,6 +341,7 @@ async function runTransaction(rawTransaction, operations) {
     try {
       await ops.stopLaunched();
       if (activated) await ops.rollback();
+      await ops.startRuntime?.();
       await ops.launchInstalled();
       const recovered = await wait(() => ops.healthy(transaction.currentVersion), { attempts: 240, delayMs: 250 });
       if (recovered) await ops.cleanupFailed?.();
@@ -321,9 +385,11 @@ module.exports = {
   requestJSON,
   requestDaemonShutdown,
   runTransaction,
+  startInstalledRuntime,
   updateReceipt,
   validateTransaction,
   verifyMacIncoming,
+  verifyWindowsPE,
   verifyWindowsIncoming,
   waitUntil,
 };

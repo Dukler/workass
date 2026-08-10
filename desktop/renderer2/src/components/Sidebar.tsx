@@ -497,13 +497,7 @@ export function FooterUpdateCards() {
   const restDisabled = canUpdate && !connected;
 
   const selfRunning = selfPhase === 'running';
-  const selfAction = selfUpdate.phase === 'available'
-    ? selfUpdater.download
-    : selfUpdate.phase === 'ready' || selfUpdate.phase === 'busy'
-      ? selfUpdater.install
-      : selfUpdate.phase === 'failed' || selfUpdate.phase === 'rollback_healthy'
-        ? selfUpdater.check
-        : null;
+  const selfAction = selfPending || selfFailed ? selfUpdater.apply : null;
   const selfTitle = selfUpdate.phase === 'available'
     ? `Workass ${selfUpdate.targetVersion}`
     : selfUpdate.phase === 'ready'
@@ -517,11 +511,9 @@ export function FooterUpdateCards() {
             : selfUpdate.phase === 'healthy'
               ? 'Listo'
               : 'Actualizando Workass';
-  const selfActionLabel = selfUpdate.phase === 'ready'
-    ? 'Reiniciar'
-    : selfUpdate.phase === 'busy'
-      ? 'Reintentar'
-      : 'Actualizar';
+  const selfActionLabel = selfUpdate.phase === 'busy'
+    ? 'Reintentar'
+    : 'Actualizar';
   const runSelfAction = async () => {
     if (!selfAction || selfActionBusy) return;
     setSelfActionBusy(true);

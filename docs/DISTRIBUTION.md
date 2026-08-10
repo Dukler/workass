@@ -206,13 +206,16 @@ workass-daemon.exe --prod --headless --install-service
 
 This creates a least-privilege per-user Scheduled Task on Windows or a user
 LaunchAgent on macOS. Signed upstream binaries are left byte-for-byte intact.
-The bundle contains the same updater code and emits
-`workass-windows-amd64-release.json`, but automatic Windows activation remains
-disabled while the portable executables are unsigned. This is intentional:
-Workass will not accept an unsigned replacement or create a downgrade path.
-Once `Workass.exe` and `workass-daemon.exe` are Authenticode-signed by the same
-publisher, set the release manifest's `authenticode` gate from the signing
-pipeline and run the transaction/rollback smoke test before publishing.
+The bundle contains the transactional updater and emits
+`workass-windows-amd64-release.json`. Portable Windows builds update through
+GitHub without requiring Authenticode: Workass verifies the latest stable
+release manifest over HTTPS, the archive's exact size and SHA-256, safe ZIP
+paths, the embedded platform/version metadata, and the required PE32+ x86-64
+runtime files before the quiescent swap. A failed health/controller/catalog
+recovery rolls back to the previous extracted directory. Authenticode remains
+recommended for reducing Windows reputation warnings, but it is not an update
+gate for this private portable lane. Builds that predate this capability need
+one manual portable replacement before future in-app updates can work.
 
 ## Release checklist — Mac + Windows portable
 
@@ -241,9 +244,10 @@ must be self-contained at extraction time.
    npm, source checkout, PowerShell bootstrap, or installer script is part of
    that test.
 6. Publish the Mac DMG + ZIP, Windows ZIP, both platform feed manifests, and
-   their `SHA256SUMS` files under the same Git tag/release. The manifest asset
-   names are fixed because packaged Workass checks GitHub's `latest/download`
-   URLs. Keep all release outputs immutable after checksums are generated.
+   their `SHA256SUMS` files under the same Git tag/release. A Windows-only
+   portable release is also valid, but it must be a stable GitHub Release so
+   GitHub's `latest/download` URL resolves its fixed manifest asset name. Keep
+   all release outputs immutable after checksums are generated.
 
 ## Linux road
 
