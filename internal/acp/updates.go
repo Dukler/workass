@@ -931,7 +931,6 @@ func (m *Manager) providerUpdatesPayload(ctx context.Context) (ProviderUpdatesPa
 		}
 		m.decorateProviderUpdateFailure(&update)
 		m.rememberProviderUpdate(update)
-		m.notifyProviderUpdateAvailable(update)
 		payload.Updates = append(payload.Updates, update)
 	}
 	return payload, len(candidates) > 0, hasFailures
@@ -1004,46 +1003,6 @@ func (m *Manager) rememberProviderUpdate(update ProviderUpdate) {
 	update.Tail = ""
 	update.RecheckError = ""
 	m.providerUpdateLastKnown[update.ProviderID] = update
-}
-
-// notifyProviderUpdateAvailable emits one user-facing availability event for a
-// provider/version pair. The renderer turns that into a desktop notification
-// when the user enabled them, or an in-app toast otherwise. The remembered
-// version lives in the daemon-owned provider cache so repeating an hourly check
-// (or restarting Workass) never produces notification spam.
-func (m *Manager) notifyProviderUpdateAvailable(update ProviderUpdate) {
-	if !update.UpdateAvailable || strings.TrimSpace(update.ProviderID) == "" || strings.TrimSpace(update.Latest) == "" {
-		return
-	}
-	providerID := normalizeProviderID(update.ProviderID)
-	latest := strings.TrimSpace(update.Latest)
-	m.mu.Lock()
-	runtime := m.providers[providerID]
-	if runtime == nil || runtime.Config.LastUpdateNotice == latest {
-		m.mu.Unlock()
-		return
-	}
-	name := strings.TrimSpace(runtime.Config.Name)
-	runtime.Config.LastUpdateNotice = latest
-	providers := m.providerRecordsLocked()
-	filePath := m.providerConfigFile
-	m.mu.Unlock()
-	if err := SaveProviderConfigs(filePath, providers); err != nil && m.opts.Logf != nil {
-		m.opts.Logf("provider update notice persist failed", map[string]any{
-			"provider": providerID,
-			"error":    redactSensitiveText(err.Error()),
-		})
-	}
-	if name == "" {
-		name = strings.TrimSpace(update.CLI)
-	}
-	if name == "" {
-		name = providerID
-	}
-	m.emit("notify", map[string]any{
-		"title": name + " tiene una actualización",
-		"body":  "Versión " + latest + " disponible (instalada " + update.Installed + ").",
-	})
 }
 
 func (m *Manager) setProviderUpdateRecheckError(providerID, errText string) {

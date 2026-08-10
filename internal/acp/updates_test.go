@@ -244,7 +244,7 @@ func TestProviderUpdateSchedulerDefaultCadence(t *testing.T) {
 	}
 }
 
-func TestProviderUpdateAvailabilityNotifiesOncePerVersionAcrossRestart(t *testing.T) {
+func TestProviderUpdateAvailabilityUsesCardWithoutNotify(t *testing.T) {
 	root := repoRoot(t)
 	pathDir := t.TempDir()
 	providerPath := filepath.Join(pathDir, "codex")
@@ -272,15 +272,14 @@ func TestProviderUpdateAvailabilityNotifiesOncePerVersionAcrossRestart(t *testin
 	firstEvents := newEventCollector()
 	first := newManager(firstEvents)
 	first.CheckProviderUpdates(context.Background())
-	firstNotice := firstEvents.waitChannel(t, "notify", time.Second).payload.(map[string]any)
-	if firstNotice["title"] != "Codex tiene una actualización" || firstNotice["body"] != "Versión 0.146.2 disponible (instalada 0.146.1)." {
-		t.Fatalf("first update notice = %#v", firstNotice)
+	firstUpdate := firstEvents.waitChannel(t, "providers:updates", time.Second).payload.(ProviderUpdatesPayload)
+	if len(firstUpdate.Updates) != 1 || !firstUpdate.Updates[0].UpdateAvailable || firstUpdate.Updates[0].Latest != "0.146.2" {
+		t.Fatalf("provider update card payload = %#v", firstUpdate)
 	}
-	firstEventCount := len(firstEvents.snapshot())
 	first.CheckProviderUpdates(context.Background())
-	for _, event := range firstEvents.snapshot()[firstEventCount:] {
+	for _, event := range firstEvents.snapshot() {
 		if event.channel == "notify" {
-			t.Fatalf("duplicate update notice = %#v", event.payload)
+			t.Fatalf("provider update emitted duplicate notification = %#v", event.payload)
 		}
 	}
 	first.Reset()
@@ -288,10 +287,6 @@ func TestProviderUpdateAvailabilityNotifiesOncePerVersionAcrossRestart(t *testin
 	loaded, err := LoadProviderConfigs(providerFile, root)
 	if err != nil {
 		t.Fatalf("reload provider cache: %v", err)
-	}
-	loadedCodex, ok := providerFromSlice(loaded, "codex")
-	if !ok || loadedCodex.LastUpdateNotice != "0.146.2" {
-		t.Fatalf("persisted notice cache = %#v", loaded)
 	}
 	secondEvents := newEventCollector()
 	second := NewManager(Options{
@@ -304,7 +299,7 @@ func TestProviderUpdateAvailabilityNotifiesOncePerVersionAcrossRestart(t *testin
 	second.CheckProviderUpdates(context.Background())
 	for _, event := range secondEvents.snapshot() {
 		if event.channel == "notify" {
-			t.Fatalf("restart repeated update notice = %#v", event.payload)
+			t.Fatalf("restart emitted duplicate update notification = %#v", event.payload)
 		}
 	}
 }

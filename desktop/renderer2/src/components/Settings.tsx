@@ -501,7 +501,7 @@ function AparienciaPanel() {
           </div>
         </div>
       </div>
-      <div className="ghint">Los avisos cubren actualizaciones de agentes, notificaciones explícitas del agente y solicitudes de permisos. Terminar un turno no genera ningún aviso.</div>
+      <div className="ghint">Los avisos cubren notificaciones explícitas del agente y solicitudes de permisos. Las actualizaciones aparecen una sola vez en el panel izquierdo; terminar un turno no genera ningún aviso.</div>
     </section>
   );
 }

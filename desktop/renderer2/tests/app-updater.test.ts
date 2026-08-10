@@ -65,3 +65,14 @@ test('Workass updater uses the existing footer update-card lifecycle and never a
   assert.doesNotMatch(settings, /WorkassPanel|useAppUpdater|appUpdaterPhaseText/);
   assert.doesNotMatch(settingsTypes, /SettingsSection\s*=\s*[^;]*'workass'/);
 });
+
+test('provider updates keep the left footer card as their only renderer surface', () => {
+  const providerStart = sidebar.indexOf('{showProvider && (');
+  const providerEnd = sidebar.indexOf('// Account menu', providerStart);
+  assert.ok(providerStart >= 0 && providerEnd > providerStart);
+  const providerCard = sidebar.slice(providerStart, providerEnd);
+  assert.match(sidebar, /<div className="foot">[\s\S]*<FooterUpdateCards \/>/);
+  assert.match(providerCard, /className=\{`updslot/);
+  assert.match(providerCard, /className=\{`updcard/);
+  assert.doesNotMatch(providerCard, /addToast|fireNotify|<Toasts/);
+});
