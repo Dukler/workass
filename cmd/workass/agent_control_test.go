@@ -221,7 +221,7 @@ func TestT7AgentControlExternalSettleIsIdempotentAndOwnerValidated(t *testing.T)
 		t.Fatalf("non-owning key error = %v", err)
 	}
 	item := manager.ListSpawnedWork("external-control-tab", "external-control-chat")[0]
-	if item.Status != "failed" || item.ExitCode == nil || *item.ExitCode != 7 || item.Wake != "pending" ||
+	if item.Status != "failed" || item.ExitCode == nil || *item.ExitCode != 7 ||
 		strings.Contains(item.Summary, "hidden") || !strings.Contains(item.Summary, "[redacted]") {
 		t.Fatalf("settled external item = %#v", item)
 	}

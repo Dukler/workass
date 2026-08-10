@@ -153,22 +153,6 @@ func TestUnsupportedProbeKeepsTheLaneAsEvidence(t *testing.T) {
 	}
 }
 
-func TestUndeliveredWakeCountsAsEvidence(t *testing.T) {
-	manager := obligationManager(t, "", func([]string) (map[string][]int, bool) {
-		return map[string][]int{}, true
-	})
-	output := seedLiveLane(t, manager, "bash-wake")
-	_ = output
-	manager.spawnedWorkMu.Lock()
-	rec := manager.spawnedWork[spawnedWorkKey("tab-1", "chat-1", "bash-wake")]
-	rec.Item.Status = "exited"
-	rec.Item.Wake = "pending"
-	manager.spawnedWorkMu.Unlock()
-	if !manager.chatHasLiveParkEvidence("tab-1", "chat-1") {
-		t.Fatal("work that finished but has not woken the chat yet is still something coming")
-	}
-}
-
 func TestParkedWithoutEvidenceStalls(t *testing.T) {
 	manager := obligationManager(t, "", func([]string) (map[string][]int, bool) {
 		return map[string][]int{}, true

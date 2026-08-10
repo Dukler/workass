@@ -958,22 +958,7 @@ func (m *Manager) ListSubagents(ownerKey, parentChatID, parentTabID string) []Su
 		}
 		return out[i].StartedAt < out[j].StartedAt
 	})
-	m.noteSubagentResultsObserved(tabID, chatID, out)
 	return out
-}
-
-// noteSubagentResultsObserved records that the owning coordinator has already
-// read these children's terminal results, so their deferred wake is redundant.
-// It deliberately runs with the manager lock released: cancelling a wake takes
-// the spawned-work lock, and the two are never nested.
-func (m *Manager) noteSubagentResultsObserved(tabID, chatID string, runs []SubagentRun) {
-	for _, run := range runs {
-		switch run.Status {
-		case "", "running":
-			continue
-		}
-		m.markSpawnedWorkWakeConsumed(tabID, chatID, run.ID)
-	}
 }
 
 func (m *Manager) WaitSubagent(ctx context.Context, ownerKey, parentChatID, parentTabID, id string, timeout time.Duration) (SubagentRun, error) {
@@ -1000,9 +985,6 @@ func (m *Manager) WaitSubagent(ctx context.Context, ownerKey, parentChatID, pare
 			run.attentionDeliveredSequence = run.Attention.Sequence
 		}
 		m.mu.Unlock()
-		if settled {
-			m.noteSubagentResultsObserved(tabID, chatID, []SubagentRun{snapshot})
-		}
 		if settled || snapshot.NeedsAttention {
 			return snapshot, nil
 		}
@@ -1065,7 +1047,6 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 		attention := subagentsNeedingAttention(running)
 		ready := len(attention) > 0 || returnWhen == "first" && len(completed) > 0 || returnWhen == "all" && len(running) == 0
 		if ready {
-			m.noteSubagentResultsObserved(tabID, chatID, completed)
 			return map[string]any{
 				"completed": completed, "running": running, "attention": attention,
 				"needsAttention": len(attention) > 0, "timedOut": false,
@@ -1073,7 +1054,6 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			m.noteSubagentResultsObserved(tabID, chatID, completed)
 			return map[string]any{
 				"completed": completed, "running": running, "attention": attention,
 				"needsAttention": len(attention) > 0, "timedOut": true,

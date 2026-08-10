@@ -14,6 +14,7 @@ test('production and development profiles isolate every mutable runtime root and
   const prod = resolveRuntimeProfile({ env: { ...env, WORKASS_PROFILE: 'prod' }, repoRoot });
   const dev = resolveRuntimeProfile({ env: { ...env, WORKASS_PROFILE: 'dev' }, repoRoot });
   assert.equal(prod.daemonPort, 8788);
+	assert.equal(prod.daemonBind, 'lan');
   assert.equal(prod.viewPort, 8798);
   assert.equal(prod.launchdLabel, 'com.workass.daemon');
   assert.equal(dev.daemonPort, 18788);

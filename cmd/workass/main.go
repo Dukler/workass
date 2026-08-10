@@ -321,9 +321,6 @@ func main() {
 		os.Exit(1)
 	}
 	agentControl.artifacts = artifactHosting
-	acpManager.SetSpawnedWorkWakeFunc(func(tabID, chatID string, items []acp.SpawnedWorkItem) error {
-		return agentControl.chats.EnqueueServerNotice(tabID, chatID, spawnedWorkServerNoticeText(items))
-	})
 	var cleanupOnce sync.Once
 	cleanup := func() {
 		cleanupOnce.Do(func() {
@@ -341,7 +338,7 @@ func main() {
 	mux.HandleFunc("/workass/update/cancel", updateControl.cancel)
 	mux.Handle(agentMCPPath, newAgentStatelessMCPHandler(acpManager, agentControl))
 	mux.Handle(browserMCPPath, newBrowserStatelessMCPHandler(acpManager, defaultBrowserControlFile(stateDir)))
-	mux.Handle(fleetQRPath, newFleetQRHandler(fleetKeys, *port, logger.Printf))
+	mux.Handle(fleetQRPath, newFleetQRHandler(fleetKeys, *port, *bind, logger.Printf))
 	mux.Handle("/", handler)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {

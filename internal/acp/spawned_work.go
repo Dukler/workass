@@ -25,8 +25,6 @@ const (
 	defaultSpawnedWorkTailBytes = 12 * 1024
 	spawnedWorkMissingGrace     = 4 * time.Second
 	externalWorkMissingGrace    = 10 * time.Second
-	spawnedWorkWakeInterval     = 15 * time.Second
-	spawnedWorkWakeCoalesce     = 30 * time.Second
 	maxSpawnedWorkResultExcerpt = 600
 	// A pathless record restored without a live ACP-session owner cannot be
 	// reconciled after a daemon restart. Mark only that ownerless record
@@ -101,10 +99,8 @@ type SpawnedWorkItem struct {
 	ExitCode     *int   `json:"exitCode,omitempty"`
 	Summary      string `json:"summary,omitempty"`
 	LastToolName string `json:"lastToolName,omitempty"`
-	Wake         string `json:"wake,omitempty"`
 	// ModelLabel and ResultExcerpt are additive and populated only for tracked
-	// subagents, so a woken coordinator can act on the child's answer without a
-	// second round trip. Both are redacted and bounded before they are stored.
+	// subagents. Both are redacted and bounded before they are stored.
 	ModelLabel    string `json:"modelLabel,omitempty"`
 	ResultExcerpt string `json:"resultExcerpt,omitempty"`
 }
@@ -139,7 +135,6 @@ type spawnedWorkRecord struct {
 	SawPID           bool
 	ReceiptWritten   bool
 	ExternalDoneFile string
-	WakeErrorLogged  bool
 	// Service classification evidence, deliberately not persisted: after a
 	// daemon restart the dwell simply restarts, which costs one window of a
 	// wrong pill and can never resurrect a stale verdict.
@@ -723,52 +718,7 @@ func (m *Manager) settleSpawnedWorkLocked(rec *spawnedWorkRecord, status string,
 	rec.Item.FinishedAt = isoNow()
 	rec.Item.UpdatedAt = rec.Item.FinishedAt
 	rec.Item.ExitCode = exitCode
-	if rec.Item.Kind == "external" || status == "orphaned" {
-		m.markSpawnedWorkWakePendingLocked(rec)
-	}
 	return true
-}
-
-// markSpawnedWorkWakePendingLocked arms exactly one wake for a settled record.
-// It is the single writer of the pending state so no caller can arm a wake for
-// a still-running row, re-arm one that was already delivered or consumed, or
-// resurrect a row that a restart already orphaned.
-func (m *Manager) markSpawnedWorkWakePendingLocked(rec *spawnedWorkRecord) {
-	if rec == nil || rec.Item.Status == "running" || rec.Item.Wake != "" {
-		return
-	}
-	rec.Item.Wake = "pending"
-	rec.WakeErrorLogged = false
-}
-
-// markSpawnedWorkWakeConsumed cancels a deferred wake once the coordinator has
-// already read that tracked subagent's terminal result through an
-// owner-authenticated path. Without it, a coordinator that waits for its own
-// child inside one turn is told about that same completion again as soon as the
-// turn ends. Only an undelivered pending wake is cancellable: a delivered wake
-// is never rewritten, so this can neither double-notify nor un-notify.
-func (m *Manager) markSpawnedWorkWakeConsumed(tabID, chatID, id string) {
-	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
-	id = normalizeSpawnedWorkTaskID(id)
-	if tabID == "" || chatID == "" || id == "" {
-		return
-	}
-	changed := false
-	m.spawnedWorkMu.Lock()
-	rec := m.spawnedWork[spawnedWorkKey(tabID, chatID, id)]
-	if rec != nil && rec.Item.Kind == trackedSubagentSpawnedWorkKind && rec.Item.Wake == "pending" && rec.Item.Status != "running" {
-		rec.Item.Wake = "consumed"
-		rec.Item.UpdatedAt = isoNow()
-		rec.WakeErrorLogged = false
-		changed = true
-	}
-	m.spawnedWorkMu.Unlock()
-	if changed {
-		// Durability only: the wake state is not rendered, and re-entering the
-		// full commit path here would re-dispatch and rewrite receipts for a
-		// change no client can see.
-		m.persistSpawnedWorkSnapshot(tabID, chatID)
-	}
 }
 
 func (m *Manager) registerSubagentSpawnedWork(tabID, chatID string, run SubagentRun) {
@@ -839,11 +789,6 @@ func (m *Manager) settleSubagentSpawnedWork(tabID, chatID string, run SubagentRu
 	lastToolName := compactText(redactSensitiveText(run.Phase), 120)
 	modelLabel := compactText(redactSensitiveText(run.ModelLabel), 120)
 	excerpt := compactText(redactSensitiveText(firstNonEmpty(run.Result, run.Error)), maxSpawnedWorkResultExcerpt)
-	// A cancellation is never news: every path that cancels a tracked subagent —
-	// the coordinator's own cancel call, parent-turn teardown, chat stop, daemon
-	// shutdown — is driven by an actor that already knows. Waking on it would
-	// re-open a chat the user just stopped.
-	wakes := run.Status != "cancelled"
 	changed := false
 	m.spawnedWorkMu.Lock()
 	rec := m.spawnedWork[spawnedWorkKey(tabID, chatID, id)]
@@ -855,9 +800,6 @@ func (m *Manager) settleSubagentSpawnedWork(tabID, chatID string, run SubagentRu
 			rec.Item.ModelLabel = modelLabel
 			rec.Item.ResultExcerpt = excerpt
 			rec.Item.UpdatedAt = rec.Item.FinishedAt
-			if wakes {
-				m.markSpawnedWorkWakePendingLocked(rec)
-			}
 		}
 	}
 	m.spawnedWorkMu.Unlock()
@@ -1241,132 +1183,6 @@ func (m *Manager) commitSpawnedWorkChange(tabID, chatID string) {
 		payload["obligation"] = obligation
 	}
 	m.emit("spawned-work:changed", payload)
-	m.dispatchSpawnedWorkWake()
-}
-
-func (m *Manager) SetSpawnedWorkWakeFunc(fn func(tabID, chatID string, items []SpawnedWorkItem) error) {
-	m.spawnedWorkMu.Lock()
-	m.spawnedWakeFunc = fn
-	m.spawnedWorkMu.Unlock()
-	m.dispatchSpawnedWorkWake()
-}
-
-func (m *Manager) spawnedWorkWakeLoop() {
-	ticker := time.NewTicker(spawnedWorkWakeInterval)
-	defer ticker.Stop()
-	for range ticker.C {
-		m.dispatchSpawnedWorkWake()
-	}
-}
-
-func (m *Manager) dispatchSpawnedWorkWake() {
-	// Single-flight: a full cycle must finish (including mark-delivered) before
-	// the next trigger may snapshot pending items, or concurrent triggers
-	// double-deliver the same wake.
-	m.spawnedWakeDispatchMu.Lock()
-	defer m.spawnedWakeDispatchMu.Unlock()
-	type batch struct {
-		tabID  string
-		chatID string
-		items  []SpawnedWorkItem
-	}
-	now := time.Now()
-	m.spawnedWorkMu.Lock()
-	hook := m.spawnedWakeFunc
-	if hook == nil {
-		m.spawnedWorkMu.Unlock()
-		return
-	}
-	batchesByKey := map[string]*batch{}
-	for _, rec := range m.spawnedWork {
-		if rec == nil || rec.Item.Wake != "pending" || rec.Item.TabID == "" || rec.Item.ChatID == "" {
-			continue
-		}
-		key := rec.Item.TabID + "\x00" + rec.Item.ChatID
-		if last := m.spawnedWakeLast[key]; !last.IsZero() && now.Sub(last) < spawnedWorkWakeCoalesce {
-			continue
-		}
-		if batchesByKey[key] == nil {
-			batchesByKey[key] = &batch{tabID: rec.Item.TabID, chatID: rec.Item.ChatID}
-		}
-		batchesByKey[key].items = append(batchesByKey[key].items, publicSpawnedWorkItem(rec.Item))
-	}
-	batches := make([]batch, 0, len(batchesByKey))
-	for _, pending := range batchesByKey {
-		sort.SliceStable(pending.items, func(i, j int) bool {
-			return pending.items[i].StartedAt < pending.items[j].StartedAt
-		})
-		batches = append(batches, *pending)
-	}
-	m.spawnedWorkMu.Unlock()
-
-	// A wake is a queued coordinator turn, so it is only ever honest while the
-	// chat is idle: a live turn either observes the completion itself or is
-	// handed a notice it never asked for. Deferring leaves the record
-	// Wake=="pending" and spawnedWorkWakeLoop re-dispatches it after the turn
-	// ends, so nothing is dropped and a storm of settles that landed under one
-	// turn coalesces into a single notice. The running-turn probe takes the
-	// manager lock, so it must stay outside spawnedWorkMu; no caller of
-	// commitSpawnedWorkChange holds the manager lock, which keeps it
-	// reentrancy-free.
-	deliverable := make([]batch, 0, len(batches))
-	for _, pending := range batches {
-		if _, running := m.RunningJobForChat(pending.tabID, pending.chatID); running {
-			continue
-		}
-		deliverable = append(deliverable, pending)
-	}
-
-	for _, pending := range deliverable {
-		if len(pending.items) == 0 {
-			continue
-		}
-		if err := hook(pending.tabID, pending.chatID, append([]SpawnedWorkItem(nil), pending.items...)); err != nil {
-			m.logSpawnedWorkWakeError(pending.tabID, pending.chatID, pending.items, err)
-			continue
-		}
-		m.markSpawnedWorkWakeDelivered(pending.tabID, pending.chatID, pending.items, now)
-	}
-}
-
-func (m *Manager) logSpawnedWorkWakeError(tabID, chatID string, items []SpawnedWorkItem, err error) {
-	if err == nil {
-		return
-	}
-	errorText := redactSensitiveText(err.Error())
-	m.spawnedWorkMu.Lock()
-	for _, item := range items {
-		rec := m.spawnedWork[spawnedWorkKey(tabID, chatID, item.TaskID)]
-		if rec == nil || rec.Item.Wake != "pending" || rec.WakeErrorLogged {
-			continue
-		}
-		rec.WakeErrorLogged = true
-		m.opts.Logf("spawned work wake delivery failed", map[string]any{
-			"tabID": tabID, "chatID": chatID, "taskID": rec.Item.TaskID, "kind": rec.Item.Kind, "error": errorText,
-		})
-	}
-	m.spawnedWorkMu.Unlock()
-}
-
-func (m *Manager) markSpawnedWorkWakeDelivered(tabID, chatID string, items []SpawnedWorkItem, deliveredAt time.Time) {
-	changed := false
-	m.spawnedWorkMu.Lock()
-	key := tabID + "\x00" + chatID
-	m.spawnedWakeLast[key] = deliveredAt
-	for _, item := range items {
-		rec := m.spawnedWork[spawnedWorkKey(tabID, chatID, item.TaskID)]
-		if rec == nil || rec.Item.Wake != "pending" {
-			continue
-		}
-		rec.Item.Wake = "delivered"
-		rec.Item.UpdatedAt = isoNow()
-		rec.WakeErrorLogged = false
-		changed = true
-	}
-	m.spawnedWorkMu.Unlock()
-	if changed {
-		m.persistSpawnedWorkSnapshot(tabID, chatID)
-	}
 }
 
 func (m *Manager) touchSpawnedWorkBridgeActivity(tabID, chatID string, now time.Time) {
@@ -1512,13 +1328,6 @@ func (m *Manager) StopSpawnedWork(tabID, chatID, id string) map[string]any {
 		if changed {
 			rec.Item.Summary = summary
 			rec.Item.UpdatedAt = rec.Item.FinishedAt
-			// No wake. The same reasoning tracked-subagent cancellation already
-			// follows: a stop is never news to the chat that asked for it, and
-			// waking an agent to tell it what the human just did would turn one
-			// button press into a turn.
-			if rec.Item.Wake == "pending" {
-				rec.Item.Wake = ""
-			}
 		}
 		item = rec.Item
 	}
@@ -1807,9 +1616,6 @@ func (m *Manager) listSpawnedWorkSnapshotItems(tabID, chatID string) []spawnedWo
 		}
 	}
 	m.spawnedWorkMu.Unlock()
-	// Wake-pending settles sort with running rows: an undelivered wake must
-	// survive the snapshot cap regardless of how old its StartedAt is, or a
-	// restart in the delivery window silently drops the notice.
 	sort.SliceStable(out, func(i, j int) bool {
 		if durableSpawnedWorkPriority(out[i].SpawnedWorkItem) != durableSpawnedWorkPriority(out[j].SpawnedWorkItem) {
 			return durableSpawnedWorkPriority(out[i].SpawnedWorkItem)
@@ -1820,7 +1626,7 @@ func (m *Manager) listSpawnedWorkSnapshotItems(tabID, chatID string) []spawnedWo
 }
 
 func durableSpawnedWorkPriority(item SpawnedWorkItem) bool {
-	return item.Status == "running" || item.Wake == "pending"
+	return item.Status == "running"
 }
 
 func capSpawnedWorkItemsPreservingRunning(items []SpawnedWorkItem) []SpawnedWorkItem {
@@ -2026,9 +1832,6 @@ func mergeMissingSpawnedWorkFields(dst *SpawnedWorkItem, src SpawnedWorkItem) {
 	}
 	if dst.ResultExcerpt == "" {
 		dst.ResultExcerpt = src.ResultExcerpt
-	}
-	if dst.Wake == "" {
-		dst.Wake = src.Wake
 	}
 	if dst.Status != "running" && dst.FinishedAt == "" {
 		dst.FinishedAt = src.FinishedAt

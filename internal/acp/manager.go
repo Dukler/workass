@@ -92,16 +92,9 @@ type Manager struct {
 	spawnedWorkMu      sync.Mutex
 	spawnedWork        map[string]*spawnedWorkRecord
 	spawnedCandidates  map[string]spawnedWorkCandidate
-	spawnedWakeFunc    func(tabID, chatID string, items []SpawnedWorkItem) error
-	spawnedWakeLast    map[string]time.Time
-	// spawnedWakeDispatchMu serializes whole dispatch cycles (collect -> hook ->
-	// mark-delivered). Without it a commit-triggered dispatch and the ticker can
-	// both snapshot the same pending item before either marks it, double-
-	// delivering the wake notice (observed live in prod 2026-07-18).
-	spawnedWakeDispatchMu sync.Mutex
-	resetMu               sync.Mutex
-	jobWG                 sync.WaitGroup
-	resetting             bool
+	resetMu            sync.Mutex
+	jobWG              sync.WaitGroup
+	resetting          bool
 	// updateGateMu is the admission barrier for an app-owned release handoff.
 	// A release may begin only after every foreground turn and tracked unit of
 	// work is terminal. Once BeginUpdateDrain succeeds, no new work can enter
@@ -222,7 +215,6 @@ func NewManager(opts Options) *Manager {
 		harnessTurns:            newHarnessTurnStore(),
 		spawnedWork:             make(map[string]*spawnedWorkRecord),
 		spawnedCandidates:       make(map[string]spawnedWorkCandidate),
-		spawnedWakeLast:         make(map[string]time.Time),
 		compactedSeeds:          make(map[string]compactedSeed),
 		crashRecoveries:         make(map[string]time.Time),
 		commandCatalogs:         make(map[string]*commandCatalogEntry),
@@ -240,13 +232,11 @@ func NewManager(opts Options) *Manager {
 	// reloaded, so a park whose lane genuinely survived is left alone.
 	m.loadObligationSnapshots()
 	m.reconcileObligationsAtBoot()
-	go m.dispatchSpawnedWorkWake()
 	go m.lifecycleLoop()
 	go m.rssLoop()
 	go m.providerUpdateLoop()
 	go m.planUsageLoop()
 	go m.spawnedWorkLoop()
-	go m.spawnedWorkWakeLoop()
 	go m.mcpFanoutLoop()
 	if opts.SpareSessions > 0 {
 		m.WarmSpareSessions()

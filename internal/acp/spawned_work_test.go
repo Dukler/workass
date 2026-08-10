@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -438,7 +437,7 @@ func TestTrackedSubagentParentEngineExitDoesNotOrphan(t *testing.T) {
 		t.Fatal("parent engine exit classified tracked subagent as in-process work")
 	}
 	engineItem := spawnedWorkItemsByTaskID(manager.ListSpawnedWork("tab-subagent-engine", "chat-subagent-engine"))["child-engine"]
-	if engineItem.Status != "running" || engineItem.FinishedAt != "" || engineItem.Wake != "" {
+	if engineItem.Status != "running" || engineItem.FinishedAt != "" {
 		t.Fatalf("parent engine exit settled tracked subagent: %#v", engineItem)
 	}
 }
@@ -455,7 +454,7 @@ func TestTrackedSubagentReconcileSilenceDoesNotOrphan(t *testing.T) {
 	manager.spawnedWorkMu.Unlock()
 	manager.reconcileSpawnedWork()
 	reconcileItem := spawnedWorkItemsByTaskID(manager.ListSpawnedWork("tab-subagent-reconcile", "chat-subagent-reconcile"))["child-reconcile"]
-	if reconcileItem.Status != "running" || reconcileItem.FinishedAt != "" || reconcileItem.Wake != "" {
+	if reconcileItem.Status != "running" || reconcileItem.FinishedAt != "" {
 		t.Fatalf("pathless reconcile silence settled tracked subagent: %#v", reconcileItem)
 	}
 }
@@ -488,7 +487,7 @@ func TestTrackedSubagentSnapshotRestartsAsOrphanedInsteadOfPhantomRunning(t *tes
 	manager := NewManager(Options{StateDir: stateDir, SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	restored := spawnedWorkItemsByTaskID(manager.ListSpawnedWork(tabID, chatID))[runID]
-	if restored.Status != "orphaned" || restored.FinishedAt == "" || restored.Wake != "pending" ||
+	if restored.Status != "orphaned" || restored.FinishedAt == "" ||
 		!strings.Contains(restored.Summary, "daemon restart") || restored.LastToolName != "orphaned" {
 		t.Fatalf("restored tracked subagent remained a phantom: %#v", restored)
 	}
@@ -506,18 +505,6 @@ func TestTrackedSubagentSnapshotRestartsAsOrphanedInsteadOfPhantomRunning(t *tes
 	}
 	if !strings.Contains(string(receiptData), `"status":"orphaned"`) {
 		t.Fatalf("restart orphan receipt = %s", receiptData)
-	}
-
-	var wakeCalls atomic.Int32
-	manager.SetSpawnedWorkWakeFunc(func(gotTabID, gotChatID string, wakeItems []SpawnedWorkItem) error {
-		wakeCalls.Add(1)
-		if gotTabID != tabID || gotChatID != chatID || len(wakeItems) != 1 || wakeItems[0].TaskID != runID {
-			t.Fatalf("restart orphan wake target=%s/%s items=%#v", gotTabID, gotChatID, wakeItems)
-		}
-		return nil
-	})
-	if got := wakeCalls.Load(); got != 1 {
-		t.Fatalf("restart orphan wake calls = %d, want one", got)
 	}
 }
 
@@ -789,7 +776,7 @@ func TestT1ExternalWorkRegisterDesignatesOutputAndPersistsSnapshot(t *testing.T)
 	}
 }
 
-func TestExternalWorkRegistrationIsProviderNeutralAndWakeSurvivesRestart(t *testing.T) {
+func TestExternalWorkRegistrationIsProviderNeutralAndSettlementSurvivesRestart(t *testing.T) {
 	stateDir := t.TempDir()
 	outputFile := externalWorkTestPath(t, "codex-handoff.output")
 	manager := NewManager(Options{StateDir: stateDir, RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour})
@@ -821,19 +808,11 @@ func TestExternalWorkRegistrationIsProviderNeutralAndWakeSurvivesRestart(t *test
 	}
 	restored := NewManager(Options{StateDir: stateDir, RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { restored.Reset() })
-	wakeCalls := 0
-	restored.SetSpawnedWorkWakeFunc(func(tabID, chatID string, wakeItems []SpawnedWorkItem) error {
-		wakeCalls++
-		if tabID != "tab-codex-handoff" || chatID != "chat-codex-handoff" || len(wakeItems) != 1 || wakeItems[0].TaskID != workID {
-			t.Fatalf("Codex handoff wake target=%s/%s items=%#v", tabID, chatID, wakeItems)
-		}
-		return nil
-	})
 	restored.reconcileSpawnedWork()
 
 	items = restored.ListSpawnedWork("tab-codex-handoff", "chat-codex-handoff")
-	if wakeCalls != 1 || len(items) != 1 || items[0].Status != "exited" || items[0].Wake != "delivered" || items[0].ProviderID != "codex" {
-		t.Fatalf("Codex handoff after restart calls=%d items=%#v", wakeCalls, items)
+	if len(items) != 1 || items[0].Status != "exited" || items[0].ProviderID != "codex" {
+		t.Fatalf("Codex handoff after restart items=%#v", items)
 	}
 }
 
@@ -912,7 +891,7 @@ func TestT3ExternalDoneFileSettlesAndWritesRedactedReceiptTail(t *testing.T) {
 	}
 	manager.reconcileSpawnedWork()
 	zero := spawnedWorkItemsByTaskID(manager.ListSpawnedWork("tab-done", "chat-done"))[zeroRaw["workId"].(string)]
-	if zero.Status != "exited" || zero.ExitCode == nil || *zero.ExitCode != 0 || zero.Wake != "pending" || zero.Summary != "Done marker written (exit 0)" {
+	if zero.Status != "exited" || zero.ExitCode == nil || *zero.ExitCode != 0 || zero.Summary != "Done marker written (exit 0)" {
 		t.Fatalf("exit zero item = %#v", zero)
 	}
 
@@ -972,121 +951,8 @@ func TestT4ExternalDeadPIDSettlesAfterMissingGrace(t *testing.T) {
 	manager.spawnedWorkMu.Unlock()
 	manager.reconcileSpawnedWork()
 	item = spawnedWorkItemsByTaskID(manager.ListSpawnedWork("tab-pid", "chat-pid"))["xw-pid"]
-	if item.Status != "exited" || item.Summary != "Process exited without a done marker" || item.Wake != "pending" {
+	if item.Status != "exited" || item.Summary != "Process exited without a done marker" {
 		t.Fatalf("pid record did not settle after grace: %#v", item)
-	}
-}
-
-func TestT5WakeMarkingRules(t *testing.T) {
-	manager := NewManager(Options{StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour})
-	t.Cleanup(func() { manager.Reset() })
-	addSpawnedWorkRecordForTest(t, manager, "tab-wake", "chat-wake", "xw-wake", "external", "running")
-	addSpawnedWorkRecordForTest(t, manager, "tab-wake", "chat-wake", "wf-wake", "workflow", "running")
-	addSpawnedWorkRecordForTest(t, manager, "tab-wake", "chat-wake", "bash-wake", "bash", "running")
-
-	manager.spawnedWorkMu.Lock()
-	if !manager.settleSpawnedWorkLocked(manager.spawnedWork[spawnedWorkKey("tab-wake", "chat-wake", "xw-wake")], "exited", nil) {
-		t.Fatal("external settle returned false")
-	}
-	if !manager.settleSpawnedWorkLocked(manager.spawnedWork[spawnedWorkKey("tab-wake", "chat-wake", "bash-wake")], "exited", nil) {
-		t.Fatal("bash settle returned false")
-	}
-	manager.spawnedWorkMu.Unlock()
-	if !manager.orphanInProcessSpawnedWorkForChat("tab-wake", "chat-wake", "bridge-close") {
-		t.Fatal("workflow orphan returned false")
-	}
-
-	items := spawnedWorkItemsByTaskID(manager.ListSpawnedWork("tab-wake", "chat-wake"))
-	if items["xw-wake"].Wake != "pending" {
-		t.Fatalf("external wake = %#v", items["xw-wake"])
-	}
-	if items["wf-wake"].Wake != "pending" || items["wf-wake"].Status != "orphaned" {
-		t.Fatalf("orphan wake = %#v", items["wf-wake"])
-	}
-	if items["bash-wake"].Wake != "" {
-		t.Fatalf("normal bash exit should not wake: %#v", items["bash-wake"])
-	}
-}
-
-func TestT6SpawnedWorkWakeDispatcherBatchesPersistsAndRetries(t *testing.T) {
-	stateDir := t.TempDir()
-	manager := NewManager(Options{StateDir: stateDir, SpawnedWorkReconcileInterval: time.Hour})
-	t.Cleanup(func() { manager.Reset() })
-	addExternalRecordForTest(manager, "tab-dispatch", "chat-dispatch", "xw-a", "external a", nil, "", "", "exited", "pending")
-	addExternalRecordForTest(manager, "tab-dispatch", "chat-dispatch", "xw-b", "external b", nil, "", "", "failed", "pending")
-	manager.persistSpawnedWorkSnapshot("tab-dispatch", "chat-dispatch")
-
-	var batches [][]SpawnedWorkItem
-	manager.SetSpawnedWorkWakeFunc(func(tabID, chatID string, items []SpawnedWorkItem) error {
-		if tabID != "tab-dispatch" || chatID != "chat-dispatch" {
-			t.Fatalf("wake target = %s/%s", tabID, chatID)
-		}
-		batches = append(batches, append([]SpawnedWorkItem(nil), items...))
-		return nil
-	})
-	if len(batches) != 1 || len(batches[0]) != 2 {
-		t.Fatalf("wake batches = %#v", batches)
-	}
-	for _, item := range manager.ListSpawnedWork("tab-dispatch", "chat-dispatch") {
-		if item.Wake != "delivered" {
-			t.Fatalf("wake was not delivered: %#v", item)
-		}
-	}
-	restored := NewManager(Options{StateDir: stateDir, SpawnedWorkReconcileInterval: time.Hour})
-	t.Cleanup(func() { restored.Reset() })
-	restored.SetSpawnedWorkWakeFunc(func(string, string, []SpawnedWorkItem) error {
-		t.Fatal("delivered wake was re-dispatched after restart")
-		return nil
-	})
-
-	restartDir := t.TempDir()
-	restartManager := NewManager(Options{StateDir: restartDir, SpawnedWorkReconcileInterval: time.Hour})
-	addExternalRecordForTest(restartManager, "tab-restart", "chat-restart", "xw-pending", "pending", nil, "", "", "exited", "pending")
-	addExternalRecordForTest(restartManager, "tab-restart", "chat-restart", "xw-delivered", "delivered", nil, "", "", "exited", "delivered")
-	restartManager.persistSpawnedWorkSnapshot("tab-restart", "chat-restart")
-	restartManager.Reset()
-	reloaded := NewManager(Options{StateDir: restartDir, SpawnedWorkReconcileInterval: time.Hour})
-	t.Cleanup(func() { reloaded.Reset() })
-	var restarted []SpawnedWorkItem
-	reloaded.SetSpawnedWorkWakeFunc(func(tabID, chatID string, items []SpawnedWorkItem) error {
-		restarted = append(restarted, items...)
-		return nil
-	})
-	if len(restarted) != 1 || restarted[0].TaskID != "xw-pending" {
-		t.Fatalf("restart wake delivery = %#v", restarted)
-	}
-
-	logs := &spawnedWorkLifecycleLog{}
-	retryDir := t.TempDir()
-	retryManager := NewManager(Options{StateDir: retryDir, SpawnedWorkReconcileInterval: time.Hour, Logf: logs.Logf})
-	t.Cleanup(func() { retryManager.Reset() })
-	time.Sleep(50 * time.Millisecond)
-	addExternalRecordForTest(retryManager, "tab-retry", "chat-retry", "xw-retry", "retry", nil, "", "", "exited", "pending")
-	retryManager.persistSpawnedWorkSnapshot("tab-retry", "chat-retry")
-	calls := 0
-	retried := make(chan struct{})
-	retryManager.SetSpawnedWorkWakeFunc(func(tabID, chatID string, items []SpawnedWorkItem) error {
-		calls++
-		if calls == 1 {
-			return errors.New("queue failed token=do-not-log")
-		}
-		close(retried)
-		return nil
-	})
-	select {
-	case <-retried:
-	case <-time.After(spawnedWorkWakeInterval + 3*time.Second):
-		t.Fatalf("wake hook was not retried by ticker; calls=%d items=%#v", calls, retryManager.ListSpawnedWork("tab-retry", "chat-retry"))
-	}
-	retryItems := spawnedWorkItemsByTaskID(retryManager.ListSpawnedWork("tab-retry", "chat-retry"))
-	if retryItems["xw-retry"].Wake != "delivered" || calls != 2 {
-		t.Fatalf("wake retry state calls=%d item=%#v", calls, retryItems["xw-retry"])
-	}
-	entries := logs.entriesSnapshot()
-	if len(entries) != 1 || entries[0].message != "spawned work wake delivery failed" ||
-		strings.Contains(asString(entries[0].fields["error"]), "do-not-log") ||
-		!strings.Contains(asString(entries[0].fields["error"]), "[redacted]") {
-		t.Fatalf("wake error logs = %#v", entries)
 	}
 }
 
@@ -1201,17 +1067,6 @@ func TestT11ExternalWorkPublicPayloadsRedactSecretShapedOutputPath(t *testing.T)
 		t.Fatalf("receipt file leaked output path: %s", receiptBytes)
 	}
 
-	var woken []SpawnedWorkItem
-	manager.SetSpawnedWorkWakeFunc(func(gotTabID, gotChatID string, wakeItems []SpawnedWorkItem) error {
-		if gotTabID != tabID || gotChatID != chatID {
-			t.Fatalf("wake target = %s/%s", gotTabID, gotChatID)
-		}
-		woken = append(woken, wakeItems...)
-		return nil
-	})
-	if len(woken) != 1 || strings.Contains(woken[0].OutputFile, "lane-secret") || !strings.Contains(woken[0].OutputFile, "api_key=[redacted]") {
-		t.Fatalf("wake payload leaked output path: %#v", woken)
-	}
 }
 
 func bindExternalWorkOwnerForTest(manager *Manager, ownerKey, chatID, tabID, providerID string) {
@@ -1231,7 +1086,7 @@ func externalWorkTestPath(t *testing.T, name string) string {
 	return filepath.Join(root, name)
 }
 
-func addExternalRecordForTest(manager *Manager, tabID, chatID, taskID, label string, pid *int, outputFile, doneFile, status, wake string) {
+func addExternalRecordForTest(manager *Manager, tabID, chatID, taskID, label string, pid *int, outputFile, doneFile, status, _ string) {
 	now := time.Now().UTC()
 	if label == "" {
 		label = taskID
@@ -1241,7 +1096,7 @@ func addExternalRecordForTest(manager *Manager, tabID, chatID, taskID, label str
 		Kind: "external", Label: label, Status: status,
 		StartedAt:  now.Add(-time.Minute).Format(time.RFC3339Nano),
 		UpdatedAt:  now.Format(time.RFC3339Nano),
-		OutputFile: outputFile, PID: pid, Wake: wake,
+		OutputFile: outputFile, PID: pid,
 	}
 	if item.Status == "" {
 		item.Status = "running"
@@ -1359,41 +1214,4 @@ func bridgeStateForTest(bridge *Bridge) EngineState {
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
 	return bridge.state
-}
-
-// Concurrent dispatch triggers (commit hook, ticker, startup) must deliver a
-// pending wake exactly once: the whole cycle is single-flight, so a second
-// trigger entering while the hook is still running cannot re-snapshot the
-// same pending item (observed double-delivery live in prod 2026-07-18).
-func TestSpawnedWorkWakeDispatchIsSingleFlight(t *testing.T) {
-	stateDir := t.TempDir()
-	manager := NewManager(Options{StateDir: stateDir, SpawnedWorkReconcileInterval: time.Hour})
-	t.Cleanup(func() { manager.Reset() })
-	addExternalRecordForTest(manager, "tab-sf", "chat-sf", "xw-sf", "single flight", nil, "", "", "exited", "pending")
-
-	var calls atomic.Int32
-	release := make(chan struct{})
-	manager.spawnedWorkMu.Lock()
-	manager.spawnedWakeFunc = func(tabID, chatID string, items []SpawnedWorkItem) error {
-		calls.Add(1)
-		<-release
-		return nil
-	}
-	manager.spawnedWorkMu.Unlock()
-
-	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() { defer wg.Done(); manager.dispatchSpawnedWorkWake() }()
-	}
-	time.Sleep(200 * time.Millisecond) // let one dispatch enter the hook
-	close(release)
-	wg.Wait()
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("wake hook calls = %d, want exactly 1", got)
-	}
-	items := spawnedWorkItemsByTaskID(manager.ListSpawnedWork("tab-sf", "chat-sf"))
-	if items["xw-sf"].Wake != "delivered" {
-		t.Fatalf("wake state = %#v", items["xw-sf"])
-	}
 }

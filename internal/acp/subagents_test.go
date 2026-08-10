@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -62,17 +61,11 @@ func TestTrackedSubagentAppearsAndUpdatesInOwningSpawnedWorkFeed(t *testing.T) {
 	waitForSubagentTerminal(t, manager, ownerKey, session, run.ID, 5*time.Second)
 }
 
-func TestTrackedSubagentTerminalStatusesDoNotDoubleWake(t *testing.T) {
+func TestTrackedSubagentTerminalStatusesSettleWithoutSyntheticWake(t *testing.T) {
 	manager, _, session, ownerKey, root, _ := newSubagentLifecycleFixture(t, "spawned-work-terminal")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	startSubagentParent(t, manager, session, root, "[mock:active-without-terminal] keep terminal owner alive")
-
-	var wakeCalls atomic.Int32
-	manager.SetSpawnedWorkWakeFunc(func(string, string, []SpawnedWorkItem) error {
-		wakeCalls.Add(1)
-		return nil
-	})
 
 	t.Run("cancelled maps to exited", func(t *testing.T) {
 		run, err := manager.SpawnSubagent(ctx, SubagentSpawnOptions{
@@ -90,9 +83,7 @@ func TestTrackedSubagentTerminalStatusesDoNotDoubleWake(t *testing.T) {
 		if cancelled.Status != "cancelled" {
 			t.Fatalf("cancelled run = %#v", cancelled)
 		}
-		// A cancellation is driven by an actor that already knows, so it never
-		// arms a wake at all.
-		assertTerminalSubagentSpawnedWorkItem(t, manager, session, run.ID, "exited", "Cancelled", "cancelled", "")
+		assertTerminalSubagentSpawnedWorkItem(t, manager, session, run.ID, "exited", "Cancelled", "cancelled")
 	})
 
 	t.Run("done maps to exited", func(t *testing.T) {
@@ -108,10 +99,7 @@ func TestTrackedSubagentTerminalStatusesDoNotDoubleWake(t *testing.T) {
 		if completed.Status != "done" {
 			t.Fatalf("completed run = %#v", completed)
 		}
-		// The wake was armed, deferred while the parent turn ran, and then
-		// cancelled because waitForSubagentTerminal is the coordinator reading
-		// its own child's result.
-		assertTerminalSubagentSpawnedWorkItem(t, manager, session, run.ID, "exited", "Completed", "done", "consumed")
+		assertTerminalSubagentSpawnedWorkItem(t, manager, session, run.ID, "exited", "Completed", "done")
 	})
 
 	t.Run("failure maps to failed", func(t *testing.T) {
@@ -127,15 +115,8 @@ func TestTrackedSubagentTerminalStatusesDoNotDoubleWake(t *testing.T) {
 		if failed.Status != "failed" {
 			t.Fatalf("failed run = %#v", failed)
 		}
-		assertTerminalSubagentSpawnedWorkItem(t, manager, session, run.ID, "failed", "Failed", "failed", "consumed")
+		assertTerminalSubagentSpawnedWorkItem(t, manager, session, run.ID, "failed", "Failed", "failed")
 	})
-
-	// A live coordinator that read every child's result must never be handed a
-	// notice about those same completions: the wake exists for the coordinator
-	// that ended its turn, not for the one still holding it.
-	if got := wakeCalls.Load(); got != 0 {
-		t.Fatalf("settlement observed by the live coordinator still notified through spawned-work wake: %d calls", got)
-	}
 }
 
 func assertRunningSubagentSpawnedWorkItem(t *testing.T, manager *Manager, session subagentParentSession, run SubagentRun, label string) {
@@ -148,11 +129,11 @@ func assertRunningSubagentSpawnedWorkItem(t *testing.T, manager *Manager, sessio
 	}
 }
 
-func assertTerminalSubagentSpawnedWorkItem(t *testing.T, manager *Manager, session subagentParentSession, id, status, summary, phase, wake string) {
+func assertTerminalSubagentSpawnedWorkItem(t *testing.T, manager *Manager, session subagentParentSession, id, status, summary, phase string) {
 	t.Helper()
 	item := spawnedWorkItemsByTaskID(manager.ListSpawnedWork(session.TabID, session.ChatID))[id]
 	if item.Status != status || item.Summary != summary || item.LastToolName != phase ||
-		item.FinishedAt == "" || item.Wake != wake {
+		item.FinishedAt == "" {
 		t.Fatalf("terminal subagent spawned-work item = %#v", item)
 	}
 }
