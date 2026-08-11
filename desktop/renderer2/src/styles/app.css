@@ -85,8 +85,8 @@ aside.side {
 .tl span:nth-child(1) { background: #ff5f57; }
 .tl span:nth-child(2) { background: #febc2e; }
 .tl span:nth-child(3) { background: #28c840; }
-/* Electron shell: macOS draws real traffic lights at (14,14). Windows uses a
-   frameless window and receives the same controls from WindowControls.tsx. */
+/* Electron shell: macOS draws traffic lights at (14,14), while Windows owns a
+   standard native frame. Hide the browser-only stand-ins on both platforms. */
 :root.electron:not(.electron-windows) .tl { visibility: hidden; width: 52px; }
 :root.electron-windows .tl { display: none; }
 :root.electron .titlebar,
@@ -96,32 +96,6 @@ aside.side {
 :root.electron .tbar button,
 :root.electron .tbar input { -webkit-app-region: no-drag; }
 .titlebar .sp { flex: 1; }
-
-.window-controls {
-  position: fixed;
-  top: 5px;
-  left: 14px;
-  z-index: 100;
-  display: flex;
-  gap: 7px;
-  height: 30px;
-  align-items: center;
-  -webkit-app-region: no-drag;
-}
-.window-control {
-  width: 11px;
-  height: 11px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  cursor: pointer;
-  -webkit-app-region: no-drag;
-}
-.window-control-close { background: #ff5f57; }
-.window-control-minimize { background: #febc2e; }
-.window-control-maximize { background: #28c840; }
-.window-control:hover { filter: brightness(.9); }
-.window-control:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
 
 /* Assist|Chats switch — ONE control, one track (gallery variant E "Icon relay",
    user pick 2026-07-11). A visible recessed groove (hairline + quiet fill) holds

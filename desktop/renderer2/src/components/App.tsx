@@ -18,7 +18,6 @@ import { CommandBar } from './CommandBar';
 import { ImageLightbox } from './ImageLightbox';
 import { ImageClipboardController } from './ImageClipboardController';
 import { IcSidebar } from '../icons';
-import { WindowControls } from './WindowControls';
 
 function AssistStub() {
   return (
@@ -53,9 +52,9 @@ export function App() {
     return () => removeEventListener('resize', onResize);
   }, []);
 
-  // Inside the Electron shell the OS draws real traffic lights over the
-  // titlebar; flag the document so CSS can hide the browser-mode stand-ins
-  // and turn the titlebar rows into window drag regions.
+  // Inside the Electron shell the OS owns the real macOS and Windows caption
+  // controls. Flag the document so CSS can hide the browser-mode stand-ins and
+  // turn the titlebar rows into drag regions where the frame permits it.
   useEffect(() => {
     const electron = navigator.userAgent.includes('Electron');
     document.documentElement.classList.toggle('electron', electron);
@@ -135,11 +134,10 @@ export function App() {
   // Settings takes the whole view over — but the command box has to survive that
   // takeover, because "I am in settings and the app is wedged" is exactly one of
   // the states it exists for.
-  if (app.settingsOpen) return <><WindowControls /><Settings /><CommandBar /><Toasts /></>;
+  if (app.settingsOpen) return <><Settings /><CommandBar /><Toasts /></>;
 
   return (
     <>
-      <WindowControls />
       {/* One sticky sidebar toggle, pinned to the right of the green traffic
           light. position:fixed keeps it in the SAME physical spot whether the
           sidebar is open or closed (user law 2026-07-11); ⌘B (above) mirrors it. */}

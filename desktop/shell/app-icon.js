@@ -21,6 +21,18 @@ function resolveWindowIconPath({ platform = process.platform, isPackaged, resour
   return candidates.find((candidate) => fs.existsSync(candidate)) || null;
 }
 
+function resolveWindowFrameOptions({ platform = process.platform } = {}) {
+  if (platform === 'darwin') {
+    return { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 14, y: 14 } };
+  }
+  if (platform === 'win32') {
+    // Windows owns its caption buttons. Keeping the standard frame avoids a
+    // renderer/preload/IPC dependency for minimize, maximize, and close.
+    return { frame: true, autoHideMenuBar: true };
+  }
+  return { frame: false };
+}
+
 function applyMacDockIcon({ app, nativeImage, isPackaged, resourcesPath, repoRoot, platform = process.platform }) {
   if (platform !== 'darwin' || !app || !app.dock || typeof app.dock.setIcon !== 'function') {
     return { applied: false, reason: 'unsupported-platform' };
@@ -33,4 +45,4 @@ function applyMacDockIcon({ app, nativeImage, isPackaged, resourcesPath, repoRoo
   return { applied: true, iconPath };
 }
 
-module.exports = { applyMacDockIcon, resolveAppIconPath, resolveWindowIconPath };
+module.exports = { applyMacDockIcon, resolveAppIconPath, resolveWindowFrameOptions, resolveWindowIconPath };

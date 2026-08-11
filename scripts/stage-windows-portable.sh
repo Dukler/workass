@@ -66,7 +66,19 @@ offline_flags=''
 "$repo_root/scripts/vendor-node-runtime.sh" --target "$target" $offline_flags
 "$repo_root/scripts/vendor-frontier-hosts.sh" --target "$target" $offline_flags
 
-# 2. Windows daemon. Cross-compile is CGO-free and stdlib-only per spec; the
+# 2. Build the renderer first and sync the exact static bundle into the Go
+#    daemon. Windows never runs npm; both copies are produced on this Mac host.
+if [ "$skip_build" -eq 0 ]; then
+  echo "building renderer"
+  (cd "$repo_root" && npm run build --prefix desktop/renderer2)
+  "$repo_root/scripts/sync-renderer2.sh"
+fi
+[ -f "$repo_root/desktop/renderer2/dist/index.html" ] || {
+  echo "renderer build is missing: desktop/renderer2/dist/index.html" >&2
+  exit 1
+}
+
+# 3. Windows daemon. Cross-compile is CGO-free and stdlib-only per spec; the
 #    existing build-daemon.sh also signs darwin artifacts, which is irrelevant
 #    to the windows-amd64 output, so we build just the windows binary here.
 if [ "$skip_build" -eq 0 ]; then
@@ -79,7 +91,7 @@ fi
   exit 1
 }
 
-# 3. Stage Electron, the shell, renderer, and the portable tree the daemon
+# 4. Stage Electron, the shell, renderer, and the portable tree the daemon
 #    auto-discovers beside its executable.
 rm -rf "$stage"
 mkdir -p "$stage" "$stage/resources/app" "$stage/resources/renderer" "$stage/node" "$stage/frontier-hosts"
@@ -91,14 +103,6 @@ cp "$repo_root/dist-bin/workass-windows-amd64.exe" "$stage/workass-daemon.exe"
 ditto "$repo_root/dist-bin/node/$target" "$stage/node/$target"
 ditto "$repo_root/dist-bin/frontier-hosts/$target" "$stage/frontier-hosts/$target"
 
-if [ "$skip_build" -eq 0 ]; then
-  echo "building renderer"
-  (cd "$repo_root" && npm run build --prefix desktop/renderer2)
-fi
-[ -f "$repo_root/desktop/renderer2/dist/index.html" ] || {
-  echo "renderer build is missing: desktop/renderer2/dist/index.html" >&2
-  exit 1
-}
 ditto "$repo_root/desktop/renderer2/dist/." "$stage/resources/renderer"
 for shell_file in main.js preload.js view-server.js browser-manager.js browser-control-server.js runtime-profile.js runtime-bootstrap.js certificate-pins.js app-icon.js image-copy.js profile-singleton.js update-manager.js update-worker.js; do
   cp "$repo_root/desktop/shell/$shell_file" "$stage/resources/app/$shell_file"
@@ -127,7 +131,7 @@ printf '{"schemaVersion":2,"platform":"windows","arch":"amd64","version":"%s","r
   "$version" "$git_rev" > "$stage/manifest.json"
 node "$repo_root/desktop/scripts/stamp-windows-icon.mjs" --verify --exe "$stage/Workass.exe" --icon "$repo_root/desktop/assets/icon.ico"
 
-# 4. Zip + checksums. Use zip (not ditto) so no __MACOSX resource-fork entries
+# 5. Zip + checksums. Use zip (not ditto) so no __MACOSX resource-fork entries
 #    leak into the archive a Windows user extracts. -X strips extra file attrs.
 command -v zip >/dev/null 2>&1 || { echo "zip is required" >&2; exit 1; }
 rm -f "$release_dir/$bundle.zip" "$release_dir/SHA256SUMS"
