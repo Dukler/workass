@@ -50,8 +50,18 @@ func stopTestItem(t *testing.T, manager *Manager) SpawnedWorkItem {
 func TestStopSpawnedWorkSignalsEveryProcessHoldingTheLaneOpen(t *testing.T) {
 	output := externalWorkTestPath(t, "lane.output")
 	signals := [][2]int{}
-	manager := stopTestManager(t, map[string][]int{output: {4101, 4102, 4103}}, &signals)
-	pid := 4101
+	// These are intentionally outside the ordinary host PID range. The signal
+	// hook is fake, but the post-SIGTERM liveness check is real; small fixture
+	// values can collide with an unrelated process and spuriously exercise the
+	// separate forced-kill path.
+	pids := []int{2_000_000_101, 2_000_000_102, 2_000_000_103}
+	for _, candidate := range pids {
+		if externalPIDAlive(candidate) {
+			t.Fatalf("spawned-work stop fixture PID is unexpectedly live: %d", candidate)
+		}
+	}
+	manager := stopTestManager(t, map[string][]int{output: pids}, &signals)
+	pid := pids[0]
 	if _, err := manager.RegisterExternalWork(ExternalWorkRegistrationOptions{
 		OwnerKey: "owner-stop", ParentChatID: "chat-stop", ParentTabID: "tab-stop",
 		Label: "expo start", Role: "service", PID: &pid, OutputFile: output,
@@ -76,7 +86,7 @@ func TestStopSpawnedWorkSignalsEveryProcessHoldingTheLaneOpen(t *testing.T) {
 	}
 	// The registration's own pid is inside the probe result here; it must be
 	// signalled once, not twice.
-	if !seen[4101] || !seen[4102] || !seen[4103] {
+	if !seen[pids[0]] || !seen[pids[1]] || !seen[pids[2]] {
 		t.Fatalf("signalled pids = %#v", signals)
 	}
 
