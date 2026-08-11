@@ -1,9 +1,11 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { Readable } = require('node:stream');
 const test = require('node:test');
 const {
   UpdateManager,
@@ -57,6 +59,47 @@ function writeWindowsRelease(root, version = '1.2.0') {
   writeFakeWindowsPE(path.join(root, 'node', 'windows-amd64', 'node.exe'));
 }
 
+function fakeSystemNetwork(routes, requests = [], visited = []) {
+  return (options) => {
+    requests.push(options);
+    const request = new EventEmitter();
+    let aborted = false;
+    let pendingRedirect = null;
+    const dispatch = (url) => {
+      if (aborted) return;
+      visited.push(url);
+      const route = routes.get(url);
+      if (!route) { request.emit('error', new Error(`unexpected system-network URL: ${url}`)); return; }
+      if ([301, 302, 303, 307, 308].includes(route.status)) {
+        pendingRedirect = route.location;
+        request.emit('redirect', route.status, 'GET', route.location, { location: [route.location] });
+        if (pendingRedirect) {
+          pendingRedirect = null;
+          request.emit('error', new Error('Redirect was cancelled'));
+        }
+        return;
+      }
+      const response = Readable.from(route.body == null ? [] : [route.body]);
+      response.statusCode = route.status;
+      request.emit('response', response);
+    };
+    request.followRedirect = () => {
+      if (!pendingRedirect) throw new Error('no pending redirect');
+      const next = pendingRedirect;
+      pendingRedirect = null;
+      queueMicrotask(() => dispatch(next));
+    };
+    request.abort = () => {
+      if (aborted) return;
+      aborted = true;
+      request.emit('abort');
+      request.emit('close');
+    };
+    request.end = () => queueMicrotask(() => dispatch(options.url));
+    return request;
+  };
+}
+
 function manifest(overrides = {}) {
   return {
     schemaVersion: 1,
@@ -82,7 +125,7 @@ function manifest(overrides = {}) {
 function managerFixture({
   replies = [],
   platform = 'darwin',
-  networkFetch = async () => { throw new Error('fixture network fetch was not expected'); },
+  networkRequest = () => { throw new Error('fixture network request was not expected'); },
 } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-manager-'));
   const resourcesPath = platform === 'darwin'
@@ -116,7 +159,7 @@ function managerFixture({
     isPackaged: true,
     quit: () => { quit = true; },
     deps: {
-      ...(networkFetch ? { networkFetch } : {}),
+      ...(networkRequest ? { networkRequest } : {}),
       postLocalUpdate: async (_url, action) => {
         calls.push(action);
         return replies.shift() || { status: 500, body: {} };
@@ -173,9 +216,9 @@ test('Windows updater uses Electron Chromium networking without weakening HTTPS 
   const source = fs.readFileSync(path.join(__dirname, 'update-manager.js'), 'utf8');
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
   assert.match(main, /\bnet\b[\s\S]{0,120}require\('electron'\)/);
-  assert.match(main, /deps:\s*\{\s*networkFetch:\s*\(\.\.\.args\)\s*=>\s*net\.fetch\(\.\.\.args\)\s*\}/);
+  assert.match(main, /deps:\s*\{\s*networkRequest:\s*\(options\)\s*=>\s*net\.request\(options\)\s*\}/);
   assert.doesNotMatch(source, /getCACertificates|NODE_TLS_REJECT_UNAUTHORIZED/);
-  assert.doesNotMatch(source, /networkFetch[\s\S]{0,500}rejectUnauthorized:\s*false/);
+  assert.doesNotMatch(source, /networkRequest[\s\S]{0,500}rejectUnauthorized:\s*false/);
 });
 
 test('system-network updater follows only HTTPS redirects and preserves size and SHA-256 verification', async () => {
@@ -191,46 +234,42 @@ test('system-network updater follows only HTTPS redirects and preserves size and
     authenticode: false,
     artifacts: { update: { name: 'release.zip', url: 'https://downloads.example.test/release.zip', sha256, size: archive.length } },
   });
-  const calls = [];
-  const networkFetch = async (url, options) => {
-    calls.push({ url, options });
-    if (url === 'https://updates.example.test/latest.json') {
-      return new Response(null, { status: 302, headers: { location: 'https://downloads.example.test/release.json' } });
-    }
-    if (url === 'https://downloads.example.test/release.json') {
-      return new Response(JSON.stringify(release), { status: 200 });
-    }
-    if (url === 'https://downloads.example.test/release.zip') {
-      return new Response(archive, { status: 200 });
-    }
-    throw new Error(`unexpected system-network URL: ${url}`);
-  };
+  const requests = [];
+  const visited = [];
+  const routes = new Map([
+    ['https://updates.example.test/latest.json', { status: 302, location: 'https://downloads.example.test/release.json' }],
+    ['https://downloads.example.test/release.json', { status: 200, body: Buffer.from(JSON.stringify(release)) }],
+    ['https://downloads.example.test/release.zip', { status: 200, body: archive }],
+  ]);
+  const networkRequest = fakeSystemNetwork(routes, requests, visited);
 
-  assert.equal((await fetchReleaseManifest('https://updates.example.test/latest.json', { networkFetch })).version, '1.2.0');
+  assert.equal((await fetchReleaseManifest('https://updates.example.test/latest.json', { networkRequest })).version, '1.2.0');
   let progressed = 0;
   await downloadArtifact(release.artifacts.update.url, destination, release.artifacts.update, {
-    networkFetch,
+    networkRequest,
     onProgress: (received) => { progressed = received; },
   });
   assert.deepEqual(fs.readFileSync(destination), archive);
   assert.equal(progressed, archive.length);
-  assert.deepEqual(calls.map((call) => call.url), [
+  assert.deepEqual(visited, [
     'https://updates.example.test/latest.json',
     'https://downloads.example.test/release.json',
     'https://downloads.example.test/release.zip',
   ]);
-  for (const call of calls) {
-    assert.equal(call.options.redirect, 'manual');
-    assert.equal(call.options.method, 'GET');
-    assert.ok(call.options.signal instanceof AbortSignal);
+  for (const options of requests) {
+    assert.equal(options.redirect, 'manual');
+    assert.equal(options.method, 'GET');
   }
   await assert.rejects(
-    () => fetchReleaseManifest('http://updates.example.test/latest.json', { networkFetch }),
+    () => fetchReleaseManifest('http://updates.example.test/latest.json', { networkRequest }),
     /updates require HTTPS/,
   );
+  const downgradeRequest = fakeSystemNetwork(new Map([
+    ['https://updates.example.test/downgrade.json', { status: 302, location: 'http://downloads.example.test/release.json' }],
+  ]));
   await assert.rejects(
     () => fetchReleaseManifest('https://updates.example.test/downgrade.json', {
-      networkFetch: async () => new Response(null, { status: 302, headers: { location: 'http://downloads.example.test/release.json' } }),
+      networkRequest: downgradeRequest,
     }),
     /updates require HTTPS/,
   );
@@ -239,7 +278,7 @@ test('system-network updater follows only HTTPS redirects and preserves size and
     () => downloadArtifact(release.artifacts.update.url, badDestination, {
       ...release.artifacts.update,
       sha256: '0'.repeat(64),
-    }, { networkFetch }),
+    }, { networkRequest }),
     /checksum/,
   );
   assert.equal(fs.existsSync(badDestination), false);
@@ -315,7 +354,7 @@ test('manifest validation requires the exact platform, checksum, size, and platf
 test('packaged unsigned Windows builds enable the GitHub updater without PowerShell', () => {
   const { manager } = managerFixture({ platform: 'win32', arch: 'x64' });
   assert.equal(manager.snapshot().supported, true);
-  const { manager: missingSystemNetwork } = managerFixture({ platform: 'win32', arch: 'x64', networkFetch: null });
+  const { manager: missingSystemNetwork } = managerFixture({ platform: 'win32', arch: 'x64', networkRequest: null });
   assert.equal(missingSystemNetwork.snapshot().supported, false);
   assert.match(missingSystemNetwork.snapshot().error, /verified system-network updater/);
   const source = fs.readFileSync(path.join(__dirname, 'update-manager.js'), 'utf8');
