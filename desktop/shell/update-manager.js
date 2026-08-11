@@ -7,6 +7,8 @@ const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
+const { Transform } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 
 const DEFAULT_FEED_ROOT = 'https://github.com/Dukler/workass/releases/latest/download/';
 const MAX_MANIFEST_BYTES = 256 * 1024;
@@ -118,93 +120,137 @@ function httpsRequest(url, {
   });
 }
 
-async function networkFetchResponse(url, {
+function networkRequestResponse(url, {
   timeoutMs,
   redirects,
-  networkFetch,
+  networkRequest,
   accept,
 }) {
-  let parsed;
-  try { parsed = new URL(url); } catch { throw new Error('invalid update URL'); }
-  if (parsed.protocol !== 'https:') throw new Error('updates require HTTPS');
-  if (typeof networkFetch !== 'function') throw new Error('verified system-network updater is unavailable');
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try { parsed = new URL(url); } catch { reject(new Error('invalid update URL')); return; }
+    if (parsed.protocol !== 'https:') { reject(new Error('updates require HTTPS')); return; }
+    if (typeof networkRequest !== 'function') { reject(new Error('verified system-network updater is unavailable')); return; }
 
-  const controller = new AbortController();
-  let timer = null;
-  const touch = () => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => controller.abort(), timeoutMs);
-    timer.unref?.();
-  };
-  const finish = () => {
-    if (timer) clearTimeout(timer);
-    timer = null;
-  };
-  touch();
-  let response;
-  try {
-    response = await networkFetch(parsed.href, {
-      method: 'GET',
-      redirect: 'manual',
-      signal: controller.signal,
-      headers: { 'user-agent': 'Workass-Updater/1', accept },
+    let request;
+    try {
+      request = networkRequest({
+        method: 'GET',
+        url: parsed.href,
+        redirect: 'manual',
+        headers: { 'user-agent': 'Workass-Updater/1', accept },
+      });
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    let remainingRedirects = redirects;
+    let timer = null;
+    let settled = false;
+    let timedOut = false;
+    const finish = () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+    };
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      finish();
+      reject(err);
+    };
+    const abort = () => {
+      try { request.abort(); } catch { /* best effort */ }
+    };
+    const touch = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timedOut = true;
+        fail(new Error('update request timed out'));
+        abort();
+      }, timeoutMs);
+      timer.unref?.();
+    };
+
+    request.on('redirect', (_statusCode, _method, redirectURL) => {
+      if (remainingRedirects <= 0) {
+        fail(new Error('too many update redirects'));
+        abort();
+        return;
+      }
+      let next;
+      try { next = new URL(redirectURL); } catch {
+        fail(new Error('invalid update redirect'));
+        abort();
+        return;
+      }
+      if (next.protocol !== 'https:') {
+        fail(new Error('updates require HTTPS'));
+        abort();
+        return;
+      }
+      remainingRedirects -= 1;
+      touch();
+      // Electron requires this call synchronously inside the redirect event.
+      try { request.followRedirect(); } catch (err) {
+        fail(err);
+        abort();
+      }
+    });
+    request.on('response', (response) => {
+      if (settled) return;
+      const status = Number(response?.statusCode || 0);
+      if (status < 200 || status >= 300) {
+        response.on?.('data', () => {});
+        const error = new Error(`update server returned HTTP ${status || 500}`);
+        error.statusCode = status || 500;
+        fail(error);
+        return;
+      }
+      settled = true;
+      touch();
+      resolve({ response, request, touch, finish, timedOut: () => timedOut });
+    });
+    request.on('error', (err) => fail(err));
+    request.on('abort', () => {
+      if (!settled) fail(new Error(timedOut ? 'update request timed out' : 'update request was aborted'));
     });
     touch();
-  } catch (err) {
-    finish();
-    if (controller.signal.aborted) throw new Error('update request timed out');
-    throw err;
-  }
-
-  const status = Number(response?.status || 0);
-  if ([301, 302, 303, 307, 308].includes(status)) {
-    finish();
-    try { await response.body?.cancel?.(); } catch { /* best effort */ }
-    const location = response.headers?.get?.('location');
-    if (redirects <= 0 || !location) throw new Error('too many update redirects');
-    let next;
-    try { next = new URL(location, parsed).href; } catch { throw new Error('invalid update redirect'); }
-    return networkFetchResponse(next, { timeoutMs, redirects: redirects - 1, networkFetch, accept });
-  }
-  if (status < 200 || status >= 300) {
-    finish();
-    try { await response.body?.cancel?.(); } catch { /* best effort */ }
-    const error = new Error(`update server returned HTTP ${status || 500}`);
-    error.statusCode = status || 500;
-    throw error;
-  }
-  return { response, controller, touch, finish };
+    request.end();
+  });
 }
 
-async function networkFetchBytes(url, {
+async function networkRequestBytes(url, {
   timeoutMs = 15000,
   maxBytes = MAX_MANIFEST_BYTES,
   redirects = 5,
-  networkFetch,
+  networkRequest,
   accept = 'application/json',
 } = {}) {
-  const request = await networkFetchResponse(url, { timeoutMs, redirects, networkFetch, accept });
-  const chunks = [];
-  let total = 0;
-  const reader = request.response.body?.getReader?.();
+  const active = await networkRequestResponse(url, { timeoutMs, redirects, networkRequest, accept });
   try {
-    if (!reader) return Buffer.alloc(0);
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      request.touch();
-      const chunk = Buffer.from(value);
-      total += chunk.length;
-      if (total > maxBytes) throw new Error('update response is too large');
-      chunks.push(chunk);
-    }
-    return Buffer.concat(chunks, total);
+    return await new Promise((resolve, reject) => {
+      const chunks = [];
+      let total = 0;
+      active.response.on('data', (value) => {
+        active.touch();
+        const chunk = Buffer.from(value);
+        total += chunk.length;
+        if (total > maxBytes) {
+          active.request.abort();
+          reject(new Error('update response is too large'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      active.response.on('end', () => resolve(Buffer.concat(chunks, total)));
+      active.response.on('error', reject);
+      active.response.on('aborted', () => reject(new Error('update response was aborted')));
+    });
   } catch (err) {
-    try { await reader?.cancel?.(); } catch { /* best effort */ }
-    if (request.controller.signal.aborted) throw new Error('update request timed out');
+    if (active.timedOut()) throw new Error('update request timed out');
     throw err;
   } finally {
-    request.finish();
+    active.finish();
   }
 }
 
@@ -218,8 +264,8 @@ async function fetchReleaseManifest(url, options = {}) {
     try { parsed = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('update manifest is not valid JSON'); }
     return parsed;
   }
-  const bytes = typeof options.networkFetch === 'function'
-    ? await networkFetchBytes(url, { ...options, maxBytes: MAX_MANIFEST_BYTES })
+  const bytes = typeof options.networkRequest === 'function'
+    ? await networkRequestBytes(url, { ...options, maxBytes: MAX_MANIFEST_BYTES })
     : await httpsRequest(url, { ...options, maxBytes: MAX_MANIFEST_BYTES });
   let parsed;
   try { parsed = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('update manifest is not valid JSON'); }
@@ -269,11 +315,11 @@ function copyLocalArtifact(source, destination, artifact, { onProgress = () => {
 function downloadArtifact(url, destination, artifact, {
   onProgress = () => {},
   redirects = 5,
-  networkFetch,
+  networkRequest,
 } = {}) {
   if (path.isAbsolute(String(url || ''))) return copyLocalArtifact(url, destination, artifact, { onProgress });
-  if (typeof networkFetch === 'function') {
-    return downloadArtifactWithNetworkFetch(url, destination, artifact, { onProgress, redirects, networkFetch });
+  if (typeof networkRequest === 'function') {
+    return downloadArtifactWithNetworkRequest(url, destination, artifact, { onProgress, redirects, networkRequest });
   }
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -328,67 +374,49 @@ function downloadArtifact(url, destination, artifact, {
   });
 }
 
-async function downloadArtifactWithNetworkFetch(url, destination, artifact, {
+async function downloadArtifactWithNetworkRequest(url, destination, artifact, {
   onProgress = () => {},
   redirects = 5,
-  networkFetch,
+  networkRequest,
 } = {}) {
-  const request = await networkFetchResponse(url, {
+  const active = await networkRequestResponse(url, {
     timeoutMs: 30000,
     redirects,
-    networkFetch,
+    networkRequest,
     accept: 'application/octet-stream',
   });
   const partial = `${destination}.partial`;
   fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
   const output = fs.createWriteStream(partial, { flags: 'wx', mode: 0o600 });
-  const reader = request.response.body?.getReader?.();
   const hash = crypto.createHash('sha256');
   let received = 0;
-  const waitForDrain = () => new Promise((resolve, reject) => {
-    const done = () => { output.off('error', failed); resolve(); };
-    const failed = (err) => { output.off('drain', done); reject(err); };
-    output.once('drain', done);
-    output.once('error', failed);
-  });
-  const closeOutput = () => new Promise((resolve, reject) => {
-    const closed = () => { output.off('error', failed); resolve(); };
-    const failed = (err) => { output.off('close', closed); reject(err); };
-    output.once('error', failed);
-    output.once('close', closed);
-    output.end();
-  });
-  try {
-    if (!reader) throw new Error('update download returned no body');
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      request.touch();
+  const verifier = new Transform({
+    transform(value, _encoding, callback) {
+      active.touch();
       const chunk = Buffer.from(value);
       received += chunk.length;
-      if (received > artifact.size || received > MAX_UPDATE_BYTES) throw new Error('update exceeded its declared size');
+      if (received > artifact.size || received > MAX_UPDATE_BYTES) {
+        callback(new Error('update exceeded its declared size'));
+        return;
+      }
       hash.update(chunk);
-      if (!output.write(chunk)) await waitForDrain();
       onProgress(received, artifact.size);
-    }
-    await closeOutput();
+      callback(null, chunk);
+    },
+  });
+  try {
+    await pipeline(active.response, verifier, output);
     if (received !== artifact.size) throw new Error('update size does not match the release manifest');
     if (hash.digest('hex').toLowerCase() !== artifact.sha256.toLowerCase()) throw new Error('update checksum does not match the release manifest');
     fs.renameSync(partial, destination);
     return destination;
   } catch (err) {
-    try { await reader?.cancel?.(); } catch { /* best effort */ }
-    if (!output.destroyed) {
-      await new Promise((resolve) => {
-        output.once('close', resolve);
-        output.destroy();
-      });
-    }
+    try { active.request.abort(); } catch { /* best effort */ }
     try { fs.rmSync(partial, { force: true }); } catch { /* best effort */ }
-    if (request.controller.signal.aborted) throw new Error('update download timed out');
+    if (active.timedOut()) throw new Error('update download timed out');
     throw err;
   } finally {
-    request.finish();
+    active.finish();
   }
 }
 
@@ -612,14 +640,14 @@ class UpdateManager {
     this.feedURL = feedURL;
     this.onState = onState;
     this.quit = quit;
-    const networkFetch = typeof deps.networkFetch === 'function' ? deps.networkFetch : null;
+    const networkRequest = typeof deps.networkRequest === 'function' ? deps.networkRequest : null;
     const dependencyOverrides = { ...deps };
-    delete dependencyOverrides.networkFetch;
-    this.networkFetchAvailable = Boolean(networkFetch);
+    delete dependencyOverrides.networkRequest;
+    this.networkRequestAvailable = Boolean(networkRequest);
     this.deps = {
-      fetchManifest: (url, options = {}) => fetchReleaseManifest(url, { ...options, networkFetch }),
+      fetchManifest: (url, options = {}) => fetchReleaseManifest(url, { ...options, networkRequest }),
       downloadArtifact: (url, destination, artifact, options = {}) => downloadArtifact(
-        url, destination, artifact, { ...options, networkFetch },
+        url, destination, artifact, { ...options, networkRequest },
       ),
       extractArchive,
       postLocalUpdate,
@@ -674,7 +702,7 @@ class UpdateManager {
   init() {
     const node = bundledNode(this.resourcesPath, this.executablePath, this.platform, this.arch);
     const platformSupported = this.platform === 'darwin' || this.platform === 'win32';
-    const verifiedNetworkAvailable = this.platform !== 'win32' || this.networkFetchAvailable;
+    const verifiedNetworkAvailable = this.platform !== 'win32' || this.networkRequestAvailable;
     let supported = this.isPackaged && platformSupported && fs.existsSync(node) && verifiedNetworkAvailable;
     let unsupportedReason = this.isPackaged ? 'This build does not include the verified updater runtime.' : 'App updates are available in packaged Workass builds.';
     if (this.isPackaged && this.platform === 'win32' && !verifiedNetworkAvailable) {

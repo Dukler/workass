@@ -501,7 +501,7 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
     // Chromium owns the Windows trust store, enterprise proxy policy, and
     // authenticated proxy negotiation. Keep HTTPS verification enabled while
     // making updater traffic follow the same OS network path as the app.
-    deps: { networkFetch: (...args) => net.fetch(...args) },
+    deps: { networkRequest: (options) => net.request(options) },
     onState: (state) => {
       for (const window of BrowserWindow.getAllWindows()) {
         if (!window.isDestroyed()) window.webContents.send('workass-updater:state', state);
