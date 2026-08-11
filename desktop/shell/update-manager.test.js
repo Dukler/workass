@@ -10,12 +10,12 @@ const {
   compareVersions,
   copyLocalArtifact,
   defaultFeedURL,
+  downloadArtifact,
   fetchReleaseManifest,
   localFeedPath,
   parseVersion,
   resolveArtifactSource,
   resolveUpdateFeed,
-  updaterTrustedCAs,
   validateReleaseManifest,
   verifyWindowsRelease,
 } = require('./update-manager');
@@ -79,7 +79,11 @@ function manifest(overrides = {}) {
   };
 }
 
-function managerFixture({ replies = [], platform = 'darwin' } = {}) {
+function managerFixture({
+  replies = [],
+  platform = 'darwin',
+  networkFetch = async () => { throw new Error('fixture network fetch was not expected'); },
+} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-manager-'));
   const resourcesPath = platform === 'darwin'
     ? path.join(root, 'Applications', 'Workass.app', 'Contents', 'Resources')
@@ -112,6 +116,7 @@ function managerFixture({ replies = [], platform = 'darwin' } = {}) {
     isPackaged: true,
     quit: () => { quit = true; },
     deps: {
+      ...(networkFetch ? { networkFetch } : {}),
       postLocalUpdate: async (_url, action) => {
         calls.push(action);
         return replies.shift() || { status: 500, body: {} };
@@ -164,22 +169,81 @@ test('the Windows publisher marks the unsigned portable feed as updater-compatib
   assert.doesNotMatch(publisher, /ineligible for automatic install/);
 });
 
-test('Windows updater HTTPS combines bundled/default and Windows system roots without disabling verification', () => {
-  const calls = [];
-  const fakeTLS = {
-    getCACertificates(kind) {
-      calls.push(kind);
-      if (kind === 'default') return ['bundled-root', 'shared-root'];
-      if (kind === 'system') return ['system-root', 'shared-root'];
-      throw new Error(`unexpected CA source: ${kind}`);
-    },
-  };
-  assert.deepEqual(updaterTrustedCAs('win32', fakeTLS), ['bundled-root', 'shared-root', 'system-root']);
-  assert.deepEqual(calls, ['default', 'system']);
-  assert.equal(updaterTrustedCAs('darwin', fakeTLS), undefined);
-
+test('Windows updater uses Electron Chromium networking without weakening HTTPS verification', () => {
   const source = fs.readFileSync(path.join(__dirname, 'update-manager.js'), 'utf8');
-  assert.doesNotMatch(source, /NODE_TLS_REJECT_UNAUTHORIZED|rejectUnauthorized:\s*false[\s\S]{0,300}httpsRequest/);
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.match(main, /\bnet\b[\s\S]{0,120}require\('electron'\)/);
+  assert.match(main, /deps:\s*\{\s*networkFetch:\s*\(\.\.\.args\)\s*=>\s*net\.fetch\(\.\.\.args\)\s*\}/);
+  assert.doesNotMatch(source, /getCACertificates|NODE_TLS_REJECT_UNAUTHORIZED/);
+  assert.doesNotMatch(source, /networkFetch[\s\S]{0,500}rejectUnauthorized:\s*false/);
+});
+
+test('system-network updater follows only HTTPS redirects and preserves size and SHA-256 verification', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-system-network-'));
+  const destination = path.join(root, 'release.zip');
+  const archive = Buffer.from('verified portable archive');
+  const sha256 = require('node:crypto').createHash('sha256').update(archive).digest('hex');
+  const release = manifest({
+    platform: 'windows',
+    arch: 'amd64',
+    designatedRequirement: undefined,
+    portable: true,
+    authenticode: false,
+    artifacts: { update: { name: 'release.zip', url: 'https://downloads.example.test/release.zip', sha256, size: archive.length } },
+  });
+  const calls = [];
+  const networkFetch = async (url, options) => {
+    calls.push({ url, options });
+    if (url === 'https://updates.example.test/latest.json') {
+      return new Response(null, { status: 302, headers: { location: 'https://downloads.example.test/release.json' } });
+    }
+    if (url === 'https://downloads.example.test/release.json') {
+      return new Response(JSON.stringify(release), { status: 200 });
+    }
+    if (url === 'https://downloads.example.test/release.zip') {
+      return new Response(archive, { status: 200 });
+    }
+    throw new Error(`unexpected system-network URL: ${url}`);
+  };
+
+  assert.equal((await fetchReleaseManifest('https://updates.example.test/latest.json', { networkFetch })).version, '1.2.0');
+  let progressed = 0;
+  await downloadArtifact(release.artifacts.update.url, destination, release.artifacts.update, {
+    networkFetch,
+    onProgress: (received) => { progressed = received; },
+  });
+  assert.deepEqual(fs.readFileSync(destination), archive);
+  assert.equal(progressed, archive.length);
+  assert.deepEqual(calls.map((call) => call.url), [
+    'https://updates.example.test/latest.json',
+    'https://downloads.example.test/release.json',
+    'https://downloads.example.test/release.zip',
+  ]);
+  for (const call of calls) {
+    assert.equal(call.options.redirect, 'manual');
+    assert.equal(call.options.method, 'GET');
+    assert.ok(call.options.signal instanceof AbortSignal);
+  }
+  await assert.rejects(
+    () => fetchReleaseManifest('http://updates.example.test/latest.json', { networkFetch }),
+    /updates require HTTPS/,
+  );
+  await assert.rejects(
+    () => fetchReleaseManifest('https://updates.example.test/downgrade.json', {
+      networkFetch: async () => new Response(null, { status: 302, headers: { location: 'http://downloads.example.test/release.json' } }),
+    }),
+    /updates require HTTPS/,
+  );
+  const badDestination = path.join(root, 'bad.zip');
+  await assert.rejects(
+    () => downloadArtifact(release.artifacts.update.url, badDestination, {
+      ...release.artifacts.update,
+      sha256: '0'.repeat(64),
+    }, { networkFetch }),
+    /checksum/,
+  );
+  assert.equal(fs.existsSync(badDestination), false);
+  assert.equal(fs.existsSync(`${badDestination}.partial`), false);
 });
 
 test('the renderer has one owned apply IPC for the complete update intent', () => {
@@ -251,6 +315,9 @@ test('manifest validation requires the exact platform, checksum, size, and platf
 test('packaged unsigned Windows builds enable the GitHub updater without PowerShell', () => {
   const { manager } = managerFixture({ platform: 'win32', arch: 'x64' });
   assert.equal(manager.snapshot().supported, true);
+  const { manager: missingSystemNetwork } = managerFixture({ platform: 'win32', arch: 'x64', networkFetch: null });
+  assert.equal(missingSystemNetwork.snapshot().supported, false);
+  assert.match(missingSystemNetwork.snapshot().error, /verified system-network updater/);
   const source = fs.readFileSync(path.join(__dirname, 'update-manager.js'), 'utf8');
   assert.doesNotMatch(source, /Get-AuthenticodeSignature|powershell\.exe/);
 });

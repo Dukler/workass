@@ -2,7 +2,7 @@
 // The daemon owns state/agents; the shell-owned loopback view server owns only
 // renderer bytes so Electron can rebuild/restart without touching ACP turns.
 // Legacy desktop/main.js is the old full Electron app and stays untouched.
-const { app, BrowserWindow, WebContentsView, session, ipcMain, shell, nativeImage, dialog, Menu } = require('electron');
+const { app, BrowserWindow, WebContentsView, session, net, ipcMain, shell, nativeImage, dialog, Menu } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createViewServer } = require('./view-server');
@@ -498,6 +498,10 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
       platform: process.platform,
       arch: process.arch,
     }),
+    // Chromium owns the Windows trust store, enterprise proxy policy, and
+    // authenticated proxy negotiation. Keep HTTPS verification enabled while
+    // making updater traffic follow the same OS network path as the app.
+    deps: { networkFetch: (...args) => net.fetch(...args) },
     onState: (state) => {
       for (const window of BrowserWindow.getAllWindows()) {
         if (!window.isDestroyed()) window.webContents.send('workass-updater:state', state);
