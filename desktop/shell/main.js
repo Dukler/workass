@@ -9,7 +9,7 @@ const { createViewServer } = require('./view-server');
 const { BrowserManager } = require('./browser-manager');
 const { BrowserControlServer } = require('./browser-control-server');
 const { resolveRuntimeProfile } = require('./runtime-profile');
-const { applyMacDockIcon, resolveWindowIconPath } = require('./app-icon');
+const { applyMacDockIcon, resolveWindowFrameOptions, resolveWindowIconPath } = require('./app-icon');
 const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
 const { UpdateManager, resolveUpdateFeed } = require('./update-manager');
 const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
@@ -135,9 +135,7 @@ function createWindow(url, browserReporter, isController) {
     height: 900,
     minWidth: 960,
     minHeight: 600,
-    ...(process.platform === 'darwin'
-      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 14, y: 14 } }
-      : { frame: false }),
+    ...resolveWindowFrameOptions({ platform: process.platform }),
     backgroundColor: '#151413',
     title: RUNTIME.appName,
     ...(windowIcon ? { icon: windowIcon } : {}),

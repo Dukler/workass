@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { applyMacDockIcon, resolveAppIconPath, resolveWindowIconPath } = require('./app-icon');
+const { applyMacDockIcon, resolveAppIconPath, resolveWindowFrameOptions, resolveWindowIconPath } = require('./app-icon');
 
 test('packaged icon resolution prefers the original PNG used for the Dock', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-icon-test-'));
@@ -49,7 +49,7 @@ test('non-macOS platforms do not attempt a Dock mutation', () => {
   assert.deepEqual(receipt, { applied: false, reason: 'unsupported-platform' });
 });
 
-test('Windows resolves the packaged ICO used by the frameless window and taskbar', () => {
+test('Windows resolves the packaged ICO used by the native window and taskbar', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-icon-test-'));
   const iconPath = path.join(root, 'Workass.ico');
   fs.writeFileSync(iconPath, 'ico');
@@ -59,4 +59,19 @@ test('Windows resolves the packaged ICO used by the frameless window and taskbar
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
   assert.match(main, /setAppUserModelId\(RUNTIME\.bundleId\)/);
   assert.match(main, /resolveWindowIconPath\(\{[\s\S]{0,500}icon:\s*windowIcon/);
+});
+
+test('Windows uses native caption buttons while macOS keeps hidden-inset traffic lights', () => {
+  assert.deepEqual(resolveWindowFrameOptions({ platform: 'win32' }), {
+    frame: true,
+    autoHideMenuBar: true,
+  });
+  assert.deepEqual(resolveWindowFrameOptions({ platform: 'darwin' }), {
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 14, y: 14 },
+  });
+  assert.deepEqual(resolveWindowFrameOptions({ platform: 'linux' }), { frame: false });
+
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.match(main, /\.\.\.resolveWindowFrameOptions\(\{\s*platform:\s*process\.platform\s*}\)/);
 });

@@ -156,6 +156,11 @@ test('the Windows publisher marks the unsigned portable feed as updater-compatib
   assert.match(publisher, /stamp-windows-icon\.mjs["']? --exe ["']?\$stage\/Workass\.exe["']? --icon ["']?\$repo_root\/desktop\/assets\/icon\.ico/);
   assert.match(publisher, /stamp-windows-icon\.mjs["']? --verify --exe ["']?\$stage\/Workass\.exe["']? --icon ["']?\$repo_root\/desktop\/assets\/icon\.ico/);
   assert.match(publisher, /desktop\/assets\/icon\.ico["']? ["']?\$stage\/resources\/Workass\.ico/);
+  const rendererBuild = publisher.indexOf('npm run build --prefix desktop/renderer2');
+  const rendererSync = publisher.indexOf('scripts/sync-renderer2.sh');
+  const daemonBuild = publisher.indexOf('CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build');
+  assert.ok(rendererBuild >= 0 && rendererBuild < rendererSync && rendererSync < daemonBuild,
+    'the current renderer must be embedded before the Windows daemon is cross-compiled');
   assert.doesNotMatch(publisher, /ineligible for automatic install/);
 });
 
