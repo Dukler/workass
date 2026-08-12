@@ -737,19 +737,32 @@ type managerLane struct {
 	closed     bool
 	jobs       map[string]providercontract.OperationID
 
-	durableCommits bool
-	commitWait     map[uint64]chan error
-	protocolFailed bool
+	// durableCommits is armed before the lane is registered so provider
+	// callbacks emitted in the Create/Resume -> LaneOpened window cannot reach
+	// Manager.emit without waiting for the actor's acknowledgement. Lifecycle
+	// cleanup commits are enabled when the coordinator reaches its normal
+	// post-LaneOpened start boundary.
+	durableCommits          bool
+	durableLifecycleCommits bool
+	commitWait              map[uint64]chan error
+	protocolFailed          bool
 }
 
 func newManagerLane(manager *Manager, identity providercontract.LaneIdentity, owner providercontract.AttachmentOwner, info SessionInfo, thread providercontract.ThreadRef) *managerLane {
 	lane := &managerLane{
 		manager: manager, identity: identity.Normalize(), owner: owner, info: info,
 		thread: thread.Normalize(), events: make(chan providercontract.Event, 128),
-		detachDone: make(chan struct{}), jobs: make(map[string]providercontract.OperationID), commitWait: make(map[uint64]chan error),
+		detachDone: make(chan struct{}), jobs: make(map[string]providercontract.OperationID),
+		commitWait: make(map[uint64]chan error), durableCommits: true,
 	}
+	// Registration exposes the lane to provider callbacks. Hold emitMu across
+	// registration and the initial queueing so a callback cannot overtake the
+	// LaneAttached sequence, while the initial lifecycle event itself does not
+	// wait for the coordinator that is only started after LaneOpened.
+	lane.emitMu.Lock()
 	manager.registerProviderLane(lane)
-	_ = lane.emit(providercontract.Event{Kind: providercontract.EventLaneAttached, Thread: &lane.thread})
+	_ = lane.emitLocked(providercontract.Event{Kind: providercontract.EventLaneAttached, Thread: &lane.thread}, false)
+	lane.emitMu.Unlock()
 	return lane
 }
 
@@ -831,6 +844,7 @@ func (l *managerLane) RequireDurableEventCommits() {
 	}
 	l.mu.Lock()
 	l.durableCommits = true
+	l.durableLifecycleCommits = true
 	l.mu.Unlock()
 }
 
@@ -991,6 +1005,14 @@ func (m *Manager) providerLaneForSessionID(sessionID string) *managerLane {
 func (l *managerLane) emit(event providercontract.Event) error {
 	l.emitMu.Lock()
 	defer l.emitMu.Unlock()
+	return l.emitLocked(event, true)
+}
+
+// emitLocked normalizes and queues one provider event while emitMu is held.
+// waitForCommit is false only for the constructor's LaneAttached event: that
+// event must be queued before the coordinator can start its forwarder, while
+// every provider callback remains durably backpressured from registration.
+func (l *managerLane) emitLocked(event providercontract.Event, waitForCommit bool) error {
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
@@ -1003,6 +1025,11 @@ func (l *managerLane) emit(event providercontract.Event) error {
 	if l.protocolFailed && event.Kind == providercontract.EventLaneDetached {
 		l.mu.Unlock()
 		return nil
+	}
+	if event.Kind != providercontract.EventTurnTerminal && event.Identity.TurnID != "" &&
+		l.manager != nil && l.manager.providerLaneClosedJob(event.Identity.TurnID) {
+		l.mu.Unlock()
+		return fmt.Errorf("provider event arrived after terminal job cleanup: %s", event.Identity.TurnID)
 	}
 	l.sequence++
 	event.Identity = providercontract.EventIdentity{
@@ -1020,7 +1047,14 @@ func (l *managerLane) emit(event providercontract.Event) error {
 		return err
 	}
 	var wait chan error
-	if l.durableCommits {
+	shouldWait := waitForCommit && l.durableCommits
+	if event.Kind == providercontract.EventLaneDetached && !l.durableLifecycleCommits {
+		// Direct manager-lane users can tear down a lane before a coordinator has
+		// reached LaneOpened. Production coordinators arm lifecycle commits at that
+		// boundary; provider semantic callbacks are still durable from registration.
+		shouldWait = false
+	}
+	if shouldWait {
 		wait = make(chan error, 1)
 		l.commitWait[event.Identity.Sequence] = wait
 	}

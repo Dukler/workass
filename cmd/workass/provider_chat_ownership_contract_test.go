@@ -35,7 +35,8 @@ func TestProductionDoesNotCallLegacySessionSemanticAuthority(t *testing.T) {
 		"Get": {}, "GlobalSnapshot": {}, "ActivateActorCutover": {},
 		"SaveActorGlobalSnapshot": {}, "SaveGlobalActiveTab": {},
 		"PersistProviderAttachments": {}, "ResolveProviderAttachment": {},
-		"LoadError": {}, "enabled": {},
+		"PlanProviderAttachments": {},
+		"LoadError":               {}, "enabled": {},
 	}
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -85,6 +86,64 @@ func TestProductionDoesNotCallLegacySessionSemanticAuthority(t *testing.T) {
 	if len(violations) != 0 {
 		sort.Strings(violations)
 		t.Fatalf("legacy session semantic authority escaped its one-time migration boundary:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestSessionStoreRetiredRuntimeSurfaceIsPhysicallyAbsent(t *testing.T) {
+	raw, err := os.ReadFile("session_store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(raw)
+	forbidden := []string{
+		"type sessionJob struct",
+		"jobs           map[string]*sessionJob",
+		"pending        []*sessionJob",
+		"jobOrder       []string",
+		"recoveredSessionJournal",
+		"sessionJournalQuarantineError",
+		"replaySessionJournalsLocked",
+		"applySessionJournalLocked",
+		"beginLiveSteerLocked",
+		"stageLiveSteerLocked",
+		"commitStagedSteerLocked",
+		"rejectLiveSteerLocked",
+		"markSteerConsumedLocked",
+		"settleJobSteersLocked",
+		"interruptOrphanedTurnsLocked",
+		"writeLocked",
+		"stageSnapshotBytesLocked",
+	}
+	for _, token := range forbidden {
+		if strings.Contains(source, token) {
+			t.Errorf("retired pre-actor session-store symbol remains: %q", token)
+		}
+	}
+}
+
+func TestLegacySpawnedWorkMigrationSurfaceHasNoRuntimeCallers(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || name == "provider_chat_migration.go" {
+			continue
+		}
+		raw, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		source := string(raw)
+		for _, token := range []string{
+			"LegacySpawnedWorkPairsForMigration(",
+			"PruneSpawnedWorkForMigration(",
+		} {
+			if strings.Contains(source, token) {
+				t.Errorf("migration-only spawned-work surface is called from runtime file %q: %s", name, token)
+			}
+		}
 	}
 }
 

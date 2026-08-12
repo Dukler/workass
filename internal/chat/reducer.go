@@ -149,6 +149,29 @@ type CancelTurn struct{ OperationID provider.OperationID }
 
 func (CancelTurn) chatCommand() {}
 
+// RecordCancelReceipt commits a terminal chat.cancel result that did not have
+// a provider turn to address. The command intentionally produces no provider
+// effect; the actor operation reservation is the durable idempotency boundary.
+type RecordCancelReceipt struct {
+	OperationID provider.OperationID
+	Cancelled   bool
+	Reason      string
+}
+
+func (RecordCancelReceipt) chatCommand() {}
+
+// RecordAgentWaitObservation reserves one exact agent wait/read request in
+// the actor before the transient Manager is allowed to observe it. Only the
+// request digest is durable; the executor's output remains ephemeral and is
+// reconciled through the existing actor background snapshot ingress.
+type RecordAgentWaitObservation struct {
+	OperationID provider.OperationID
+	TabID       string
+	Digest      string
+}
+
+func (RecordAgentWaitObservation) chatCommand() {}
+
 type CancelAcknowledged struct{ OperationID provider.OperationID }
 
 func (CancelAcknowledged) chatCommand() {}
@@ -272,6 +295,72 @@ type HostLost struct {
 
 func (HostLost) chatCommand() {}
 
+// DetachTarget is the exact disposable attachment that a close request is
+// authorized to detach. It is also embedded in a workspace transaction so the
+// reducer can validate the complete detach group before changing any actor
+// state. The operation id is derived from this immutable target, because the
+// frozen app-chat:close-session wire command has no operation-id field of its
+// own.
+type DetachTarget struct {
+	OperationID          provider.OperationID
+	LaneID               provider.LaneID
+	Owner                provider.AttachmentOwner
+	ConnectionID         string
+	ConnectionGeneration uint64
+}
+
+func (DetachTarget) chatCommand() {}
+
+// DetachLane is the compatibility name for the standalone actor command. A
+// target is deliberately the same immutable typed value whether it is
+// journaled by close-session or by ChangeWorkspace.
+type DetachLane = DetachTarget
+
+// DetachLaneFailed is the provider-side failure receipt for a durable detach
+// effect. Ambiguous delivery never becomes an automatic retry: the exact
+// attachment remains fenced by its generation and the operation is surfaced
+// as uncertain in durable state.
+type DetachLaneFailed struct {
+	OperationID          provider.OperationID
+	LaneID               provider.LaneID
+	ConnectionID         string
+	ConnectionGeneration uint64
+	Kind                 provider.ErrorKind
+	Ambiguous            bool
+}
+
+func (DetachLaneFailed) chatCommand() {}
+
+// RecordExternalMutation is the provider-neutral actor ingress for a mutation
+// whose executor lives outside the daemon process. Only the immutable target
+// metadata and a safe request digest cross the actor boundary; raw request
+// arguments remain in the short-lived executor call and are never persisted.
+type RecordExternalMutation struct {
+	OperationID provider.OperationID
+	Kind        string
+	Method      string
+	TabID       string
+	Digest      string
+}
+
+func (RecordExternalMutation) chatCommand() {}
+
+// ExternalMutationReceipt is the only command that can advance an external
+// mutation after its durable dispatch claim. A dispatched mutation that has no
+// receipt is marked ambiguous and is never returned to Pending automatically.
+type ExternalMutationReceipt struct {
+	OperationID provider.OperationID
+	Kind        string
+	Method      string
+	TabID       string
+	Digest      string
+	Failed      bool
+	Ambiguous   bool
+	ErrorKind   provider.ErrorKind
+}
+
+func (ExternalMutationReceipt) chatCommand() {}
+
 type LaneProtocolFailed struct {
 	LaneID               provider.LaneID
 	ConnectionGeneration uint64
@@ -360,6 +449,27 @@ type ResolvePermissionEffect struct {
 
 func (ResolvePermissionEffect) chatEffect() {}
 
+type DetachLaneEffect struct {
+	OperationID          provider.OperationID
+	LaneID               provider.LaneID
+	Owner                provider.AttachmentOwner
+	ConnectionID         string
+	ConnectionGeneration uint64
+}
+
+func (DetachLaneEffect) chatEffect() {}
+
+type ExternalMutationEffect struct {
+	OperationID provider.OperationID
+	ChatID      string
+	Kind        string
+	Method      string
+	TabID       string
+	Digest      string
+}
+
+func (ExternalMutationEffect) chatEffect() {}
+
 // RestoreCheckpoint is a destructive chat-scoped action. Its stable operation
 // id is committed before filesystem mutation, so a lost reply can return the
 // original receipt and a crash after dispatch fails closed instead of running
@@ -368,6 +478,8 @@ type RestoreCheckpoint struct {
 	OperationID      provider.OperationID
 	TurnSequence     int
 	ObservedAtUnixMS int64
+	Checkpoint       json.RawMessage
+	CheckpointDigest string
 }
 
 func (RestoreCheckpoint) chatCommand() {}
@@ -392,6 +504,8 @@ type RestoreCheckpointEffect struct {
 	OperationID      provider.OperationID
 	TurnSequence     int
 	ObservedAtUnixMS int64
+	Checkpoint       json.RawMessage
+	CheckpointDigest string
 }
 
 func (RestoreCheckpointEffect) chatEffect() {}
@@ -400,14 +514,16 @@ func (RestoreCheckpointEffect) chatEffect() {}
 // provider attachments and exact native bindings owned by one tombstoned chat.
 // It deliberately has no LaneID: deletion covers every provider lane.
 type DeleteChatEffect struct {
-	ChatID string
-	TabID  string
+	OperationID provider.OperationID
+	ChatID      string
+	TabID       string
 }
 
 func (DeleteChatEffect) chatEffect() {}
 
 type ChatDeletionCompleted struct {
-	ChatID string
+	OperationID provider.OperationID
+	ChatID      string
 }
 
 func (ChatDeletionCompleted) chatCommand() {}
@@ -435,10 +551,12 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 	}
 	if current.Migration.BlockedError != "" {
 		switch command.(type) {
-		case MigrateLegacyChat, MigrateLegacyObligation, MigrateLegacyBackground, QuarantineLegacyMigration, UpdatePresentation, AttachTab, DeleteChat:
+		case MigrateLegacyChat, MigrateLegacyObligation, MigrateLegacyBackground, QuarantineLegacyMigration, UpdatePresentation, AttachTab, DeleteChat, RecoverOutbox, ClaimEffect:
 			// Quarantined chats remain visible and deletable, and the exact same
-			// migration transaction may be retried. Provider/runtime operations
-			// fail closed until an explicit repair command exists.
+			// migration transaction may be retried. Recovery is required to open
+			// the durable actor, and claiming is required only for its deletion
+			// effect; the engine's executable-effect fence below prevents every
+			// provider/runtime effect while the quarantine remains active.
 		default:
 			return current, nil, &provider.Error{
 				Kind:    current.Migration.BlockedError,
@@ -469,7 +587,7 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 	case SavePresentation:
 		err = reduceSavePresentation(&next, command)
 	case ChangeWorkspace:
-		err = reduceChangeWorkspace(&next, command)
+		effects, err = reduceChangeWorkspace(&next, command)
 	case UpdateEnvironment:
 		err = reduceUpdateEnvironment(&next, command)
 	case ReplaceStagedQueue:
@@ -512,6 +630,10 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 		effects, err = reduceSteerFailed(&next, command)
 	case CancelTurn:
 		effects, err = reduceCancelTurn(&next, command)
+	case RecordCancelReceipt:
+		err = reduceRecordCancelReceipt(&next, command)
+	case RecordAgentWaitObservation:
+		err = reduceRecordAgentWaitObservation(&next, command)
 	case CancelAcknowledged:
 		err = reduceCancelAcknowledged(&next, command)
 	case CancelFailed:
@@ -554,6 +676,14 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 		effects, err = reduceProviderEvent(&next, command)
 	case HostLost:
 		effects, err = reduceHostLost(&next, command)
+	case DetachLane:
+		effects, err = reduceDetachLane(&next, command)
+	case DetachLaneFailed:
+		err = reduceDetachLaneFailed(&next, command)
+	case RecordExternalMutation:
+		effects, err = reduceRecordExternalMutation(&next, command)
+	case ExternalMutationReceipt:
+		err = reduceExternalMutationReceipt(&next, command)
 	case LaneProtocolFailed:
 		err = reduceLaneProtocolFailed(&next, command)
 	case ClaimEffect:
@@ -620,6 +750,11 @@ func reduceInitializeFork(state *State, command InitializeFork) error {
 	if err := presentation.Validate(); err != nil {
 		return err
 	}
+	operationID := provider.NormalizeOperationID(string(command.OperationID))
+	digest := strings.TrimSpace(command.Digest)
+	if operationID == "" || digest == "" {
+		return errors.New("fork initialization requires immutable operation identity and digest")
+	}
 	operationIDs := make(map[provider.OperationID]provider.OperationID)
 	ledger := make([]LedgerEvent, 0, len(command.Messages))
 	seenMessages := make(map[string]struct{}, len(command.Messages))
@@ -652,6 +787,8 @@ func reduceInitializeFork(state *State, command InitializeFork) error {
 	state.Presentation = presentation
 	state.Ledger = ledger
 	state.ContextFloor = uint64(len(ledger))
+	state.CreationOperationID = operationID
+	state.CreationDigest = digest
 	for _, operationID := range operationIDs {
 		state.Operations[operationID] = struct{}{}
 	}
@@ -954,36 +1091,55 @@ func sameOptionalString(left, right *string) bool {
 	return *left == *right
 }
 
-func reduceChangeWorkspace(state *State, command ChangeWorkspace) error {
+func reduceChangeWorkspace(state *State, command ChangeWorkspace) ([]Effect, error) {
 	if !state.Initialized {
-		return errors.New("workspace change requires an initialized chat actor")
+		return nil, errors.New("workspace change requires an initialized chat actor")
 	}
 	operationID := provider.NormalizeOperationID(string(command.OperationID))
 	digest := strings.TrimSpace(command.Digest)
 	if operationID == "" || digest == "" {
-		return errors.New("workspace change requires immutable operation identity and digest")
+		return nil, errors.New("workspace change requires immutable operation identity and digest")
+	}
+	targetOperationIDs, err := workspaceDetachOperationIDs(command.DetachTargets)
+	if err != nil {
+		return nil, err
 	}
 	if receipt, exists := state.WorkspaceMutationReceipts[operationID]; exists {
-		if receipt.Digest != digest {
-			return errors.New("workspace operation id was reused for different content")
+		if receipt.Digest != digest || !sameOperationIDSequence(receipt.DetachOperationIDs, targetOperationIDs) {
+			return nil, errors.New("workspace operation id was reused for different content")
 		}
-		return nil
+		if err := validateWorkspaceDetachReceiptTargets(*state, command.DetachTargets); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	_, targetOperationIDs, effects, err := validateWorkspaceDetachTargets(*state, command.DetachTargets)
+	if err != nil {
+		return nil, err
 	}
 	if command.ExpectedRevision != state.Presentation.WorkspaceRevision {
-		return errors.New("workspace changed in another controller; reload before moving")
+		return nil, errors.New("workspace changed in another controller; reload before moving")
 	}
 	cwd := strings.TrimSpace(command.CWD)
 	if cwd == "" {
-		return errors.New("workspace change requires a concrete cwd")
+		return nil, errors.New("workspace change requires a concrete cwd")
 	}
 	if state.Foreground != nil || state.PendingSteer != nil || state.PendingCancel != nil {
-		return errors.New("workspace cannot change while a foreground operation is active")
+		return nil, errors.New("workspace cannot change while a foreground operation is active")
+	}
+	// All target validation, including operation-id, lane, owner, connection,
+	// and generation fencing, completed above before any workspace field is
+	// touched. The effects are returned to Reduce so recordEffects persists the
+	// entire detach group in this same actor/store transition.
+	for _, detachOperationID := range targetOperationIDs {
+		state.Operations[detachOperationID] = struct{}{}
 	}
 	if state.Presentation.CWD != nil && strings.TrimSpace(*state.Presentation.CWD) == cwd {
 		state.WorkspaceMutationReceipts[operationID] = WorkspaceMutationReceipt{
 			Digest: digest, Revision: state.Presentation.WorkspaceRevision, CWD: cwd,
+			DetachOperationIDs: append([]provider.OperationID(nil), targetOperationIDs...),
 		}
-		return nil
+		return effects, nil
 	}
 	state.Presentation.CWD = &cwd
 	state.Presentation.WorkspaceRevision++
@@ -994,8 +1150,113 @@ func reduceChangeWorkspace(state *State, command ChangeWorkspace) error {
 	state.DesiredLaneID = ""
 	state.WorkspaceMutationReceipts[operationID] = WorkspaceMutationReceipt{
 		Digest: digest, Revision: state.Presentation.WorkspaceRevision, CWD: cwd,
+		DetachOperationIDs: append([]provider.OperationID(nil), targetOperationIDs...),
+	}
+	return effects, nil
+}
+
+func workspaceDetachOperationIDs(targets []DetachTarget) ([]provider.OperationID, error) {
+	operationIDs := make([]provider.OperationID, 0, len(targets))
+	seen := make(map[provider.OperationID]struct{}, len(targets))
+	for _, target := range targets {
+		operationID := provider.NormalizeOperationID(string(target.OperationID))
+		if operationID == "" || operationID != target.OperationID {
+			return nil, errors.New("workspace detach group contains an invalid operation identity")
+		}
+		if _, duplicate := seen[operationID]; duplicate {
+			return nil, errors.New("workspace detach group contains duplicate operation identities")
+		}
+		seen[operationID] = struct{}{}
+		operationIDs = append(operationIDs, operationID)
+	}
+	return operationIDs, nil
+}
+
+func validateWorkspaceDetachTargets(state State, rawTargets []DetachTarget) ([]DetachTarget, []provider.OperationID, []Effect, error) {
+	targets := make([]DetachTarget, 0, len(rawTargets))
+	operationIDs := make([]provider.OperationID, 0, len(rawTargets))
+	effects := make([]Effect, 0, len(rawTargets))
+	seen := make(map[provider.OperationID]struct{}, len(rawTargets))
+	for _, rawTarget := range rawTargets {
+		target := rawTarget
+		target.OperationID = provider.NormalizeOperationID(string(target.OperationID))
+		target.LaneID = provider.LaneID(strings.TrimSpace(string(target.LaneID)))
+		target.Owner.TabID = strings.TrimSpace(target.Owner.TabID)
+		target.Owner.AgentOwnerKey = strings.TrimSpace(target.Owner.AgentOwnerKey)
+		target.ConnectionID = strings.TrimSpace(target.ConnectionID)
+		if target.OperationID == "" || target.LaneID == "" || target.ConnectionID == "" || target.ConnectionGeneration == 0 {
+			return nil, nil, nil, errors.New("workspace detach target requires immutable operation, lane, connection, and generation")
+		}
+		expectedOperationID := DetachOperationID(state.ChatID, target.LaneID, target.ConnectionID, target.ConnectionGeneration)
+		if target.OperationID != expectedOperationID {
+			return nil, nil, nil, errors.New("workspace detach operation identity does not match its exact target")
+		}
+		if _, duplicate := seen[target.OperationID]; duplicate {
+			return nil, nil, nil, errors.New("workspace detach group contains duplicate operation identities")
+		}
+		seen[target.OperationID] = struct{}{}
+		if _, reserved := state.Operations[target.OperationID]; reserved {
+			return nil, nil, nil, errors.New("workspace detach operation id conflicts with another actor operation")
+		}
+		for _, entry := range state.Outbox {
+			if entry.OperationID == target.OperationID {
+				return nil, nil, nil, errors.New("workspace detach operation id conflicts with an existing durable effect")
+			}
+		}
+		lane, ok := state.Lanes[target.LaneID]
+		if !ok || lane.Identity.ID != target.LaneID || lane.Identity.ChatID != state.ChatID {
+			return nil, nil, nil, errors.New("workspace detach target lane is unknown")
+		}
+		if lane.Attachment == nil || lane.ConnectionGeneration != target.ConnectionGeneration ||
+			strings.TrimSpace(lane.Attachment.ConnectionID) != target.ConnectionID {
+			return nil, nil, nil, errors.New("workspace detach target attachment changed")
+		}
+		if target.Owner != lane.Owner || target.Owner.TabID == "" {
+			return nil, nil, nil, errors.New("workspace detach target owner changed")
+		}
+		targets = append(targets, target)
+		operationIDs = append(operationIDs, target.OperationID)
+		effects = append(effects, DetachLaneEffect{
+			OperationID: target.OperationID, LaneID: target.LaneID, Owner: target.Owner,
+			ConnectionID: target.ConnectionID, ConnectionGeneration: target.ConnectionGeneration,
+		})
+	}
+	return targets, operationIDs, effects, nil
+}
+
+func validateWorkspaceDetachReceiptTargets(state State, rawTargets []DetachTarget) error {
+	for _, rawTarget := range rawTargets {
+		target := rawTarget
+		target.OperationID = provider.NormalizeOperationID(string(target.OperationID))
+		target.LaneID = provider.LaneID(strings.TrimSpace(string(target.LaneID)))
+		target.Owner.TabID = strings.TrimSpace(target.Owner.TabID)
+		target.Owner.AgentOwnerKey = strings.TrimSpace(target.Owner.AgentOwnerKey)
+		target.ConnectionID = strings.TrimSpace(target.ConnectionID)
+		if target.OperationID == "" || target.LaneID == "" || target.ConnectionID == "" || target.ConnectionGeneration == 0 {
+			return errors.New("workspace detach retry contains an invalid immutable target")
+		}
+		if target.OperationID != DetachOperationID(state.ChatID, target.LaneID, target.ConnectionID, target.ConnectionGeneration) {
+			return errors.New("workspace detach retry operation identity does not match its exact target")
+		}
+		entry, ok := detachEntryForOperation(state, target.OperationID)
+		if !ok || entry.LaneID != target.LaneID || entry.Owner != target.Owner ||
+			entry.ConnectionID != target.ConnectionID || entry.Generation != target.ConnectionGeneration {
+			return errors.New("workspace detach retry changed its durable target")
+		}
 	}
 	return nil
+}
+
+func sameOperationIDSequence(left, right []provider.OperationID) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func reduceUpdateEnvironment(state *State, command UpdateEnvironment) error {
@@ -1285,11 +1546,14 @@ func reduceDeleteChat(state *State, command DeleteChat) ([]Effect, error) {
 	}
 	state.ActiveLaneID = ""
 	state.DesiredLaneID = ""
-	return []Effect{DeleteChatEffect{ChatID: state.ChatID, TabID: state.Presentation.TabID}}, nil
+	return []Effect{DeleteChatEffect{
+		OperationID: operationID, ChatID: state.ChatID, TabID: state.Presentation.TabID,
+	}}, nil
 }
 
 func reduceChatDeletionCompleted(state *State, command ChatDeletionCompleted) error {
-	if !state.Deleted || strings.TrimSpace(command.ChatID) != state.ChatID {
+	operationID := provider.NormalizeOperationID(string(command.OperationID))
+	if !state.Deleted || strings.TrimSpace(command.ChatID) != state.ChatID || operationID != state.DeletionOperationID {
 		return errors.New("chat cleanup receipt does not match the durable tombstone")
 	}
 	if !updateOutbox(state, deleteChatEffectID(state.ChatID), OutboxCompleted, "") {
@@ -1417,6 +1681,54 @@ func reduceAdoptLaneBinding(state *State, command AdoptLaneBinding) error {
 		state.ActiveLaneID = identity.ID
 		state.DesiredLaneID = identity.ID
 	}
+	if command.Selected && command.BlockedError == "" {
+		if err := adoptLegacyPendingPermissions(state, &lane); err != nil {
+			return err
+		}
+		state.Lanes[identity.ID] = lane
+	}
+	return nil
+}
+
+// adoptLegacyPendingPermissions restores the actor-owned permission index only
+// after migration has selected an exact native lane. The legacy ledger remains
+// the source of the rich card, while this index is the durable routing record
+// used for replay and decisions after a restart.
+func adoptLegacyPendingPermissions(state *State, lane *LaneState) error {
+	if lane == nil || lane.Identity.ID == "" {
+		return errors.New("legacy permission adoption requires a provider lane")
+	}
+	for _, event := range state.Ledger {
+		permission := event.Permission
+		if permission == nil || strings.ToLower(strings.TrimSpace(permission.Status)) != "pending" {
+			continue
+		}
+		requestID := strings.TrimSpace(permission.RequestID)
+		if requestID == "" {
+			return errors.New("legacy permission is missing its provider identity")
+		}
+		if lane.ConnectionGeneration == 0 {
+			// Pre-actor native bindings did not persist an attachment generation.
+			// Generation one is the same reserved historical epoch used by
+			// legacy background ownership; it makes the owner valid without
+			// claiming a later live connection.
+			lane.ConnectionGeneration = 1
+		}
+		owner := ProviderActivityOwner{
+			LaneID: lane.Identity.ID, OperationID: event.OperationID,
+			TurnID: event.NativeTurnID, ConnectionGeneration: lane.ConnectionGeneration,
+		}
+		if existing, ok := state.Permissions[requestID]; ok {
+			if existing.Owner.LaneID != owner.LaneID || existing.Owner.OperationID != owner.OperationID || existing.Owner.TurnID != owner.TurnID {
+				return errors.New("legacy permission conflicts with durable provider ownership")
+			}
+			if existing.Event.Status == "resolved" || existing.Event.Status == "failed" {
+				return errors.New("legacy pending permission conflicts with a terminal durable decision")
+			}
+			continue
+		}
+		state.Permissions[requestID] = PermissionState{Owner: owner, Event: *clonePermission(permission)}
+	}
 	return nil
 }
 
@@ -1449,6 +1761,9 @@ func reduceSelectLane(state *State, command SelectLane) ([]Effect, error) {
 	}
 	if identity.ChatID != state.ChatID {
 		return nil, errors.New("selected lane belongs to another chat")
+	}
+	if pendingDetachForLane(*state, identity.ID) {
+		return nil, errors.New("provider lane has a detach operation in flight")
 	}
 	if existing, ok := state.Lanes[identity.ID]; ok {
 		if existing.Identity != identity {
@@ -1983,6 +2298,59 @@ func reduceCancelTurn(state *State, command CancelTurn) ([]Effect, error) {
 	return []Effect{CancelTurnEffect{
 		LaneID: state.Foreground.LaneID, OperationID: operationID, Turn: state.Foreground.Turn,
 	}}, nil
+}
+
+func reduceRecordCancelReceipt(state *State, command RecordCancelReceipt) error {
+	operationID := provider.NormalizeOperationID(string(command.OperationID))
+	reason := strings.ToLower(strings.TrimSpace(command.Reason))
+	if operationID == "" {
+		return errors.New("cancel receipt requires operation id")
+	}
+	if receipt, exists := state.CancelMutationReceipts[operationID]; exists {
+		if receipt.Cancelled != command.Cancelled || receipt.Reason != reason {
+			return errors.New("cancel receipt operation was reused for a different result")
+		}
+		return nil
+	}
+	if reason == "" {
+		return errors.New("cancel receipt requires a reason")
+	}
+	if command.Cancelled || reason != "idle" {
+		return errors.New("cancel receipt may only commit the provider-neutral idle result")
+	}
+	if _, exists := state.Operations[operationID]; exists {
+		return errors.New("cancel receipt operation id conflicts with another actor operation")
+	}
+	state.Operations[operationID] = struct{}{}
+	state.CancelMutationReceipts[operationID] = CancelMutationReceipt{Cancelled: false, Reason: reason}
+	return nil
+}
+
+func reduceRecordAgentWaitObservation(state *State, command RecordAgentWaitObservation) error {
+	operationID := provider.NormalizeOperationID(string(command.OperationID))
+	tabID := strings.TrimSpace(command.TabID)
+	digest := strings.ToLower(strings.TrimSpace(command.Digest))
+	if operationID == "" || len(operationID) > 256 || tabID == "" || len(tabID) > 256 || !validAgentWaitObservationDigest(digest) {
+		return errors.New("agent wait observation requires bounded operation, tab, and digest identity")
+	}
+	if !state.Initialized {
+		return errors.New("agent wait observation requires an initialized chat")
+	}
+	if tabID != strings.TrimSpace(state.Presentation.TabID) {
+		return errors.New("agent wait observation tab attachment is stale")
+	}
+	if receipt, exists := state.AgentWaitObservationReceipts[operationID]; exists {
+		if receipt.Digest != digest {
+			return errors.New("agent wait operation id was reused for a different request")
+		}
+		return nil
+	}
+	if _, exists := state.Operations[operationID]; exists {
+		return errors.New("agent wait operation id conflicts with another actor operation")
+	}
+	state.Operations[operationID] = struct{}{}
+	state.AgentWaitObservationReceipts[operationID] = AgentWaitObservationReceipt{Digest: digest}
+	return nil
 }
 
 func reduceCancelAcknowledged(state *State, command CancelAcknowledged) error {
@@ -2684,6 +3052,14 @@ func reduceProviderEvent(state *State, command ProviderEventReceived) ([]Effect,
 		return nil, errors.New("provider event belongs to an unknown lane")
 	}
 	if command.ConnectionGeneration == 0 || command.ConnectionGeneration != lane.ConnectionGeneration {
+		// A detach executor may use HostLost as the synchronous fallback when a
+		// provider closes without publishing its receipt. If the provider then
+		// delivers the matching LaneDetached event, acknowledge that exact old
+		// generation without touching a newer attachment. Other stale events stay
+		// hard failures.
+		if event.Kind == provider.EventLaneDetached && detachReceiptForGeneration(*state, event.Identity.LaneID, command.ConnectionGeneration) {
+			return nil, nil
+		}
 		return nil, errors.New("provider event belongs to a stale host connection")
 	}
 	expectedSequence := lane.LastEventSequence + 1
@@ -2868,6 +3244,232 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
+func pendingDetachForLane(state State, laneID provider.LaneID) bool {
+	for _, entry := range state.Outbox {
+		if entry.Kind == EffectDetachLane && entry.LaneID == laneID &&
+			(entry.Status == OutboxPending || entry.Status == OutboxDispatched) {
+			return true
+		}
+	}
+	return false
+}
+
+func detachReceiptForGeneration(state State, laneID provider.LaneID, generation uint64) bool {
+	if laneID == "" || generation == 0 {
+		return false
+	}
+	for _, entry := range state.Outbox {
+		if entry.Kind == EffectDetachLane && entry.LaneID == laneID && entry.Generation == generation &&
+			entry.Status == OutboxCompleted {
+			return true
+		}
+	}
+	return false
+}
+
+func detachEntryForOperation(state State, operationID provider.OperationID) (*OutboxEntry, bool) {
+	operationID = provider.NormalizeOperationID(string(operationID))
+	for index := range state.Outbox {
+		entry := &state.Outbox[index]
+		if entry.Kind == EffectDetachLane && entry.OperationID == operationID {
+			return entry, true
+		}
+	}
+	return nil, false
+}
+
+func reduceDetachLane(state *State, command DetachLane) ([]Effect, error) {
+	operationID := provider.NormalizeOperationID(string(command.OperationID))
+	laneID := provider.LaneID(strings.TrimSpace(string(command.LaneID)))
+	connectionID := strings.TrimSpace(command.ConnectionID)
+	if operationID == "" || laneID == "" || connectionID == "" || command.ConnectionGeneration == 0 {
+		return nil, errors.New("lane detach requires immutable operation, lane, connection, and generation")
+	}
+	expectedOperationID := DetachOperationID(state.ChatID, laneID, connectionID, command.ConnectionGeneration)
+	if operationID != expectedOperationID {
+		return nil, errors.New("lane detach operation identity does not match its exact target")
+	}
+	if existing, ok := detachEntryForOperation(*state, operationID); ok {
+		if existing.LaneID != laneID || existing.ConnectionID != connectionID ||
+			existing.Generation != command.ConnectionGeneration || existing.Owner != command.Owner {
+			return nil, errors.New("lane detach operation was reused for a different attachment")
+		}
+		return nil, nil
+	}
+	if _, exists := state.Operations[operationID]; exists {
+		return nil, errors.New("lane detach operation id conflicts with another actor operation")
+	}
+	lane, ok := state.Lanes[laneID]
+	if !ok {
+		return nil, errors.New("lane detach target is unknown")
+	}
+	if lane.ConnectionGeneration != command.ConnectionGeneration || lane.Attachment == nil ||
+		strings.TrimSpace(lane.Attachment.ConnectionID) != connectionID {
+		return nil, errors.New("lane detach target changed")
+	}
+	if command.Owner != lane.Owner {
+		return nil, errors.New("lane detach owner changed")
+	}
+	if state.Operations == nil {
+		state.Operations = make(map[provider.OperationID]struct{})
+	}
+	state.Operations[operationID] = struct{}{}
+	return []Effect{DetachLaneEffect{
+		OperationID: operationID, LaneID: laneID, Owner: lane.Owner,
+		ConnectionID: connectionID, ConnectionGeneration: command.ConnectionGeneration,
+	}}, nil
+}
+
+func reduceDetachLaneFailed(state *State, command DetachLaneFailed) error {
+	operationID := provider.NormalizeOperationID(string(command.OperationID))
+	entry, ok := detachEntryForOperation(*state, operationID)
+	if !ok {
+		return errors.New("lane detach failure has no durable operation")
+	}
+	if entry.LaneID != command.LaneID || entry.ConnectionID != strings.TrimSpace(command.ConnectionID) ||
+		entry.Generation != command.ConnectionGeneration {
+		return errors.New("lane detach failure changed its immutable target")
+	}
+	if entry.Status == OutboxPending {
+		return errors.New("lane detach failure arrived before durable dispatch")
+	}
+	if entry.Status == OutboxCompleted || entry.Status == OutboxFailed || entry.Status == OutboxAmbiguous {
+		return nil
+	}
+	kind := command.Kind
+	if kind == "" {
+		kind = provider.ErrorTransientTransport
+	}
+	entry.LastError = kind
+	if command.Ambiguous {
+		entry.Status = OutboxAmbiguous
+	} else {
+		entry.Status = OutboxFailed
+	}
+	return nil
+}
+
+func externalMutationEntryForOperation(state State, operationID provider.OperationID) *OutboxEntry {
+	operationID = provider.NormalizeOperationID(string(operationID))
+	for index := range state.Outbox {
+		entry := &state.Outbox[index]
+		if entry.Kind == EffectExternalMutation && entry.OperationID == operationID {
+			return entry
+		}
+	}
+	return nil
+}
+
+func normalizeExternalMutationFields(command RecordExternalMutation) (provider.OperationID, string, string, string, string, error) {
+	operationID := provider.NormalizeOperationID(string(command.OperationID))
+	kind := strings.TrimSpace(command.Kind)
+	method := strings.TrimSpace(command.Method)
+	tabID := strings.TrimSpace(command.TabID)
+	digest := strings.ToLower(strings.TrimSpace(command.Digest))
+	if operationID == "" || len(operationID) > 256 || kind == "" || len(kind) > 128 || method == "" || len(method) > 128 || tabID == "" || len(tabID) > 256 {
+		return "", "", "", "", "", errors.New("external mutation is missing bounded immutable identity")
+	}
+	if digest == "" || len(digest) > 256 {
+		return "", "", "", "", "", errors.New("external mutation requires a bounded request digest")
+	}
+	for _, char := range digest {
+		if char < 0x21 || char > 0x7e {
+			return "", "", "", "", "", errors.New("external mutation request digest is invalid")
+		}
+	}
+	return operationID, kind, method, tabID, digest, nil
+}
+
+func reduceRecordExternalMutation(state *State, command RecordExternalMutation) ([]Effect, error) {
+	if !state.Initialized || state.Deleted {
+		return nil, errors.New("external mutation requires an active initialized chat")
+	}
+	operationID, kind, method, tabID, digest, err := normalizeExternalMutationFields(command)
+	if err != nil {
+		return nil, err
+	}
+	if tabID != strings.TrimSpace(state.Presentation.TabID) {
+		return nil, errors.New("external mutation tab attachment is stale")
+	}
+	if existing := externalMutationEntryForOperation(*state, operationID); existing != nil {
+		if existing.ChatID != state.ChatID || existing.MutationKind != kind || existing.MutationMethod != method ||
+			existing.TabID != tabID || existing.MutationDigest != digest {
+			return nil, errors.New("external mutation operation was reused with a different request")
+		}
+		return nil, nil
+	}
+	if _, exists := state.Operations[operationID]; exists {
+		return nil, errors.New("external mutation operation id conflicts with another actor operation")
+	}
+	state.Operations[operationID] = struct{}{}
+	return []Effect{ExternalMutationEffect{
+		OperationID: operationID, ChatID: state.ChatID, Kind: kind, Method: method, TabID: tabID, Digest: digest,
+	}}, nil
+}
+
+func reduceExternalMutationReceipt(state *State, command ExternalMutationReceipt) error {
+	record := RecordExternalMutation{
+		OperationID: command.OperationID, Kind: command.Kind, Method: command.Method,
+		TabID: command.TabID, Digest: command.Digest,
+	}
+	operationID, kind, method, tabID, digest, err := normalizeExternalMutationFields(record)
+	if err != nil {
+		return err
+	}
+	if command.Ambiguous && command.Failed {
+		return errors.New("external mutation receipt cannot be both failed and ambiguous")
+	}
+	entry := externalMutationEntryForOperation(*state, operationID)
+	if entry == nil {
+		return errors.New("external mutation receipt has no durable operation")
+	}
+	if entry.ChatID != state.ChatID || entry.MutationKind != kind || entry.MutationMethod != method ||
+		entry.TabID != tabID || entry.MutationDigest != digest {
+		return errors.New("external mutation receipt changed its immutable request")
+	}
+	if command.Ambiguous {
+		if entry.Status == OutboxPending {
+			return errors.New("external mutation receipt arrived before durable dispatch")
+		}
+		if entry.Status == OutboxCompleted || entry.Status == OutboxFailed {
+			return errors.New("external mutation receipt conflicts with a terminal result")
+		}
+		entry.Status = OutboxAmbiguous
+		entry.LastError = provider.ErrorAcceptanceAmbiguous
+		return nil
+	}
+	if entry.Status == OutboxPending {
+		return errors.New("external mutation receipt arrived before durable dispatch")
+	}
+	if entry.Status == OutboxCompleted {
+		if command.Failed {
+			return errors.New("external mutation receipt conflicts with a completed result")
+		}
+		return nil
+	}
+	if entry.Status == OutboxFailed {
+		if !command.Failed {
+			return errors.New("external mutation receipt conflicts with a failed result")
+		}
+		return nil
+	}
+	if entry.Status != OutboxDispatched && entry.Status != OutboxAmbiguous {
+		return fmt.Errorf("external mutation receipt cannot advance outbox status %q", entry.Status)
+	}
+	if command.Failed {
+		kind := command.ErrorKind
+		if kind == "" {
+			kind = provider.ErrorAdmissionRejected
+		}
+		entry.Status = OutboxFailed
+		entry.LastError = kind
+		return nil
+	}
+	entry.Status = OutboxCompleted
+	entry.LastError = ""
+	return nil
+}
+
 func reduceHostLost(state *State, command HostLost) ([]Effect, error) {
 	lane, ok := state.Lanes[command.LaneID]
 	if !ok {
@@ -2875,6 +3477,13 @@ func reduceHostLost(state *State, command HostLost) ([]Effect, error) {
 	}
 	if command.ConnectionGeneration != lane.ConnectionGeneration {
 		return nil, nil
+	}
+	for index := range state.Outbox {
+		entry := &state.Outbox[index]
+		if entry.Kind == EffectDetachLane && entry.LaneID == command.LaneID && entry.Generation == command.ConnectionGeneration {
+			entry.Status = OutboxCompleted
+			entry.LastError = ""
+		}
 	}
 	lane.Attachment = nil
 	if lane.Thread.IsZero() {
@@ -3428,7 +4037,9 @@ func upsertCompactionTimeline(foreground *ForegroundTurn, kind provider.EventKin
 
 func reduceRestoreCheckpoint(state *State, command RestoreCheckpoint) ([]Effect, error) {
 	operationID := provider.NormalizeOperationID(string(command.OperationID))
-	if operationID == "" || command.TurnSequence <= 0 || command.ObservedAtUnixMS <= 0 {
+	checkpoint := append(json.RawMessage(nil), command.Checkpoint...)
+	checkpointDigest := strings.ToLower(strings.TrimSpace(command.CheckpointDigest))
+	if operationID == "" || command.TurnSequence <= 0 || command.ObservedAtUnixMS <= 0 || len(checkpoint) == 0 || checkpointDigest == "" {
 		return nil, errors.New("checkpoint restore requires stable operation, turn, and observed time")
 	}
 	for i := range state.Outbox {
@@ -3436,7 +4047,8 @@ func reduceRestoreCheckpoint(state *State, command RestoreCheckpoint) ([]Effect,
 		if entry.OperationID != operationID {
 			continue
 		}
-		if entry.Kind != EffectCheckpointRestore || entry.TurnSequence != command.TurnSequence {
+		if entry.Kind != EffectCheckpointRestore || entry.TurnSequence != command.TurnSequence ||
+			entry.CheckpointDigest != checkpointDigest || !bytes.Equal(entry.Checkpoint, checkpoint) {
 			return nil, errors.New("checkpoint restore operation conflicts with its durable request")
 		}
 		return nil, nil
@@ -3457,10 +4069,73 @@ func reduceRestoreCheckpoint(state *State, command RestoreCheckpoint) ([]Effect,
 	if !foundAssistant {
 		return nil, errors.New("checkpoint restore requires a completed assistant turn")
 	}
+	observedCheckpoint, observedDigest, err := checkpointRestoreTarget(state.Environment.Checkpoints, command.TurnSequence)
+	if err != nil {
+		return nil, err
+	}
+	if observedDigest != checkpointDigest || !bytes.Equal(observedCheckpoint, checkpoint) {
+		return nil, errors.New("checkpoint restore target is stale or was not observed by the actor")
+	}
 	state.Operations[operationID] = struct{}{}
 	return []Effect{RestoreCheckpointEffect{
 		OperationID: operationID, TurnSequence: command.TurnSequence, ObservedAtUnixMS: command.ObservedAtUnixMS,
+		Checkpoint: checkpoint, CheckpointDigest: checkpointDigest,
 	}}, nil
+}
+
+// checkpointRestoreTarget returns the exact JSON object observed in the
+// actor-owned checkpoint list. The raw object, rather than a re-marshaled
+// manager struct, is the immutable filesystem target for a restore effect.
+func checkpointRestoreTarget(checkpoints json.RawMessage, turnSequence int) (json.RawMessage, string, error) {
+	if turnSequence <= 0 || len(checkpoints) == 0 || !json.Valid(checkpoints) {
+		return nil, "", errors.New("checkpoint restore requires an actor-observed checkpoint")
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(checkpoints, &entries); err != nil {
+		return nil, "", errors.New("actor checkpoint observation is not a JSON list")
+	}
+	var target json.RawMessage
+	for _, entry := range entries {
+		var identity struct {
+			TurnSequence int `json:"turnSeq"`
+		}
+		if err := json.Unmarshal(entry, &identity); err != nil {
+			return nil, "", errors.New("actor checkpoint observation contains invalid JSON")
+		}
+		if identity.TurnSequence != turnSequence {
+			continue
+		}
+		if len(target) != 0 {
+			return nil, "", errors.New("actor checkpoint observation has colliding turn sequence")
+		}
+		target = append(json.RawMessage(nil), entry...)
+	}
+	if len(target) == 0 {
+		return nil, "", fmt.Errorf("checkpoint turn %d was not observed by the actor", turnSequence)
+	}
+	sum := sha256.Sum256(target)
+	return target, hex.EncodeToString(sum[:]), nil
+}
+
+func validateCheckpointRestorePayload(payload json.RawMessage, turnSequence int, digest string) error {
+	if len(payload) == 0 || !json.Valid(payload) || turnSequence <= 0 {
+		return errors.New("checkpoint restore payload is invalid")
+	}
+	var identity struct {
+		TurnSequence int `json:"turnSeq"`
+	}
+	if err := json.Unmarshal(payload, &identity); err != nil || identity.TurnSequence != turnSequence {
+		return errors.New("checkpoint restore payload has the wrong turn sequence")
+	}
+	digest = strings.ToLower(strings.TrimSpace(digest))
+	if len(digest) != sha256.Size*2 {
+		return errors.New("checkpoint restore payload digest is invalid")
+	}
+	sum := sha256.Sum256(payload)
+	if hex.EncodeToString(sum[:]) != digest {
+		return errors.New("checkpoint restore payload digest does not match its bytes")
+	}
+	return nil
 }
 
 func reduceCheckpointRestored(state *State, command CheckpointRestored) error {
@@ -3474,6 +4149,9 @@ func reduceCheckpointRestored(state *State, command CheckpointRestored) error {
 			return errors.New("checkpoint restore receipt changed its immutable turn")
 		}
 		if entry.Status == OutboxCompleted {
+			if len(command.Result) > 0 && !bytes.Equal(command.Result, entry.Result) {
+				return errors.New("checkpoint restore receipt conflicts with its durable result")
+			}
 			return nil
 		}
 		if entry.Status != OutboxDispatched {
@@ -3650,6 +4328,10 @@ func checkpointRestoreEffectID(operationID provider.OperationID) string {
 	return "checkpoint-restore:" + string(provider.NormalizeOperationID(string(operationID)))
 }
 
+func externalMutationEffectID(operationID provider.OperationID) string {
+	return "external-mutation:" + string(provider.NormalizeOperationID(string(operationID)))
+}
+
 func outboxEntryForEffect(effect Effect) (OutboxEntry, bool, error) {
 	switch effect := effect.(type) {
 	case CreateLaneEffect:
@@ -3712,14 +4394,29 @@ func outboxEntryForEffect(effect Effect) (OutboxEntry, bool, error) {
 			LaneID: action.Owner.LaneID, OperationID: action.OperationID, Background: &action,
 		}, true, nil
 	case RestoreCheckpointEffect:
+		checkpoint := append(json.RawMessage(nil), effect.Checkpoint...)
 		return OutboxEntry{
 			ID: checkpointRestoreEffectID(effect.OperationID), Kind: EffectCheckpointRestore, Status: OutboxPending,
 			OperationID: effect.OperationID, TurnSequence: effect.TurnSequence, ObservedAtUnixMS: effect.ObservedAtUnixMS,
+			Checkpoint: checkpoint, CheckpointDigest: effect.CheckpointDigest,
+		}, true, nil
+	case DetachLaneEffect:
+		return OutboxEntry{
+			ID: detachEffectID(effect.OperationID), Kind: EffectDetachLane, Status: OutboxPending,
+			LaneID: effect.LaneID, OperationID: effect.OperationID, Owner: effect.Owner,
+			ConnectionID: strings.TrimSpace(effect.ConnectionID), Generation: effect.ConnectionGeneration,
+		}, true, nil
+	case ExternalMutationEffect:
+		return OutboxEntry{
+			ID: externalMutationEffectID(effect.OperationID), Kind: EffectExternalMutation, Status: OutboxPending,
+			OperationID: effect.OperationID, ChatID: strings.TrimSpace(effect.ChatID),
+			TabID: strings.TrimSpace(effect.TabID), MutationKind: strings.TrimSpace(effect.Kind),
+			MutationMethod: strings.TrimSpace(effect.Method), MutationDigest: strings.TrimSpace(effect.Digest),
 		}, true, nil
 	case DeleteChatEffect:
 		return OutboxEntry{
 			ID: deleteChatEffectID(effect.ChatID), Kind: EffectDeleteChat, Status: OutboxPending,
-			OperationID: provider.OperationID(deleteChatEffectID(effect.ChatID)), ChatID: strings.TrimSpace(effect.ChatID), TabID: strings.TrimSpace(effect.TabID),
+			OperationID: effect.OperationID, ChatID: strings.TrimSpace(effect.ChatID), TabID: strings.TrimSpace(effect.TabID),
 		}, true, nil
 	default:
 		return OutboxEntry{}, false, nil
@@ -3771,10 +4468,11 @@ func outboxHas(state *State, effectID string, status OutboxStatus) bool {
 
 func effectFromOutbox(state State, entry OutboxEntry) (Effect, error) {
 	if entry.Kind == EffectDeleteChat {
-		if !state.Deleted || strings.TrimSpace(entry.ChatID) != state.ChatID {
+		operationID := provider.NormalizeOperationID(string(entry.OperationID))
+		if !state.Deleted || strings.TrimSpace(entry.ChatID) != state.ChatID || operationID == "" || operationID != state.DeletionOperationID {
 			return nil, errors.New("delete-chat outbox entry lost its tombstone identity")
 		}
-		return DeleteChatEffect{ChatID: entry.ChatID, TabID: entry.TabID}, nil
+		return DeleteChatEffect{OperationID: operationID, ChatID: entry.ChatID, TabID: entry.TabID}, nil
 	}
 	if entry.Kind == EffectBackground {
 		if entry.Background == nil || entry.Background.OperationID != entry.OperationID {
@@ -3787,11 +4485,36 @@ func effectFromOutbox(state State, entry OutboxEntry) (Effect, error) {
 		return BackgroundActionEffect{Action: action}, nil
 	}
 	if entry.Kind == EffectCheckpointRestore {
-		if entry.OperationID == "" || entry.TurnSequence <= 0 || entry.ObservedAtUnixMS <= 0 {
+		if entry.OperationID == "" || entry.TurnSequence <= 0 || entry.ObservedAtUnixMS <= 0 ||
+			validateCheckpointRestorePayload(entry.Checkpoint, entry.TurnSequence, entry.CheckpointDigest) != nil {
 			return nil, errors.New("checkpoint-restore outbox entry lost its immutable request")
 		}
 		return RestoreCheckpointEffect{
 			OperationID: entry.OperationID, TurnSequence: entry.TurnSequence, ObservedAtUnixMS: entry.ObservedAtUnixMS,
+			Checkpoint: append(json.RawMessage(nil), entry.Checkpoint...), CheckpointDigest: entry.CheckpointDigest,
+		}, nil
+	}
+	if entry.Kind == EffectExternalMutation {
+		if !state.Initialized || state.Deleted || strings.TrimSpace(entry.ChatID) != state.ChatID ||
+			entry.OperationID == "" || strings.TrimSpace(entry.MutationKind) == "" ||
+			strings.TrimSpace(entry.MutationMethod) == "" || strings.TrimSpace(entry.TabID) == "" ||
+			strings.TrimSpace(entry.MutationDigest) == "" {
+			return nil, errors.New("external mutation outbox entry lost its immutable request")
+		}
+		return ExternalMutationEffect{
+			OperationID: entry.OperationID, ChatID: entry.ChatID, Kind: entry.MutationKind,
+			Method: entry.MutationMethod, TabID: entry.TabID, Digest: entry.MutationDigest,
+		}, nil
+	}
+	if entry.Kind == EffectDetachLane {
+		lane, ok := state.Lanes[entry.LaneID]
+		if !ok || lane.ConnectionGeneration != entry.Generation || lane.Attachment == nil ||
+			strings.TrimSpace(lane.Attachment.ConnectionID) != strings.TrimSpace(entry.ConnectionID) || lane.Owner != entry.Owner {
+			return nil, errors.New("lane-detach outbox entry changed its exact attachment")
+		}
+		return DetachLaneEffect{
+			OperationID: entry.OperationID, LaneID: entry.LaneID, Owner: entry.Owner,
+			ConnectionID: entry.ConnectionID, ConnectionGeneration: entry.Generation,
 		}, nil
 	}
 	lane, ok := state.Lanes[entry.LaneID]
@@ -3889,9 +4612,27 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 			continue
 		case OutboxDispatched:
 			switch entry.Kind {
+			case EffectExternalMutation:
+				// The browser call may already have escaped the daemon. Without its
+				// exact shell receipt, replaying the mutation could duplicate the
+				// visible side effect. Recovery therefore fails closed forever.
+				entry.Status = OutboxAmbiguous
+				entry.LastError = provider.ErrorAcceptanceAmbiguous
 			case EffectBackground, EffectCheckpointRestore:
 				entry.Status = OutboxAmbiguous
 				entry.LastError = provider.ErrorAcceptanceAmbiguous
+			case EffectDetachLane:
+				if detachReceiptForGeneration(*state, entry.LaneID, entry.Generation) {
+					entry.Status = OutboxCompleted
+					entry.LastError = ""
+				} else {
+					// Detach has no provider-level idempotency/readback contract. A
+					// crash after dispatch may have closed the transport even when the
+					// saved attachment still looks unchanged, so it must never be sent
+					// again automatically.
+					entry.Status = OutboxAmbiguous
+					entry.LastError = provider.ErrorAcceptanceAmbiguous
+				}
 			case EffectResumeLane, EffectReconcileTurn, EffectCancelTurn, EffectDeleteChat:
 				// Exact resume and readback are non-creating operations. Returning
 				// them to Pending lets the executor claim them again safely.

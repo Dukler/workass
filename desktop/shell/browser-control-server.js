@@ -10,6 +10,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_MUTATION_RECEIPTS = 256;
 const MUTATING_METHODS = new Set([
   'browser.open', 'browser.navigate', 'browser.back', 'browser.forward',
   'browser.reload', 'browser.click', 'browser.type',
@@ -58,8 +59,108 @@ class BrowserControlServer {
     this.port = Number(port) || 0;
     this.token = token || crypto.randomBytes(32).toString('hex');
     this.isController = typeof isController === 'function' ? isController : () => false;
+    // This is an executor-side receipt cache, not actor state. It contains
+    // only the immutable operation identity and the returned receipt; browser
+    // arguments are kept on the in-flight call stack and never persisted here.
+    this.mutationReceipts = new Map();
     this.server = null;
     this.url = '';
+  }
+
+  async dispatchMutation(request) {
+    const operationId = String(request.operationId || '').trim();
+    const requestDigest = String(request.requestDigest || '').trim();
+    const method = String(request.method || '').trim();
+    if (!operationId || operationId.length > 256 || !requestDigest || requestDigest.length > 256) {
+      return {
+        id: request.id ?? null, operationId, requestDigest, receipt: true,
+        error: 'browser mutation requires bounded operation identity and request digest',
+      };
+    }
+    const existing = this.mutationReceipts.get(operationId);
+    if (existing) {
+      if (existing.method !== method || existing.requestDigest !== requestDigest) {
+        return {
+          id: request.id ?? null, operationId, requestDigest, receipt: true,
+          error: 'browser mutation operation was reused with a different request',
+        };
+      }
+      const response = existing.promise ? await existing.promise : existing.response;
+      return { ...response, id: request.id ?? null };
+    }
+
+    this.pruneMutationReceipts();
+    if (this.mutationReceipts.size >= MAX_MUTATION_RECEIPTS && !this.hasSettledMutationReceipt()) {
+      return {
+        id: request.id ?? null, operationId, requestDigest, receipt: true,
+        error: 'browser mutation receipt capacity is busy',
+      };
+    }
+
+    const promise = Promise.resolve()
+      .then(() => this.manager.browserControl(method, request.params || {}))
+      .then(
+        (result) => ({ id: request.id ?? null, operationId, requestDigest, receipt: true, result }),
+        (err) => ({
+          id: request.id ?? null, operationId, requestDigest, receipt: true,
+          error: String(err && err.message || err),
+        }),
+      );
+    const record = { method, requestDigest, promise, response: null };
+    this.mutationReceipts.set(operationId, record);
+    this.pruneMutationReceipts();
+    const response = await promise;
+    record.response = response;
+    record.promise = null;
+    this.pruneMutationReceipts();
+    return { ...response, id: request.id ?? null };
+  }
+
+  pruneMutationReceipts() {
+    // Map insertion order gives deterministic oldest-first eviction. A live
+    // dispatch is never evicted; if every record is in flight, the temporary
+    // size may exceed the settled-record bound until one completes.
+    while (this.mutationReceipts.size > MAX_MUTATION_RECEIPTS) {
+      let evict;
+      for (const [operationId, record] of this.mutationReceipts) {
+        if (!record.promise) {
+          evict = operationId;
+          break;
+        }
+      }
+      if (evict === undefined) break;
+      this.mutationReceipts.delete(evict);
+    }
+  }
+
+  hasSettledMutationReceipt() {
+    for (const record of this.mutationReceipts.values()) {
+      if (!record.promise) return true;
+    }
+    return false;
+  }
+
+  async readMutationReceipt(request) {
+    const operationId = String(request.operationId || '').trim();
+    const requestDigest = String(request.requestDigest || '').trim();
+    if (!operationId || operationId.length > 256 || !requestDigest || requestDigest.length > 256) {
+      return {
+        id: request.id ?? null, operationId, requestDigest, receipt: false,
+        error: 'browser receipt requires bounded operation identity and request digest',
+      };
+    }
+    const existing = this.mutationReceipts.get(operationId);
+    if (!existing) {
+      return { id: request.id ?? null, operationId, requestDigest, receipt: false };
+    }
+    if (existing.requestDigest !== requestDigest) {
+      return {
+        id: request.id ?? null, operationId, requestDigest, receipt: true,
+        error: 'browser mutation operation was reused with a different request',
+      };
+    }
+    const response = existing.promise ? await existing.promise : existing.response;
+    return { ...response, id: request.id ?? null };
   }
 
   async start() {
@@ -80,8 +181,23 @@ class BrowserControlServer {
         if (MUTATING_METHODS.has(request.method) && !this.isController()) {
           throw new Error('Workass browser control requires the active controller');
         }
-        const result = await this.manager.browserControl(request.method, request.params || {});
-        writeJSON(res, 200, { id: request.id ?? null, result });
+        if (request.method === 'browser.receipt') {
+          if (!String(request.operationId || '').trim() || !String(request.requestDigest || '').trim()) {
+            throw new Error('browser receipt requires operationId and requestDigest');
+          }
+          writeJSON(res, 200, await this.readMutationReceipt(request));
+        } else if (MUTATING_METHODS.has(request.method) &&
+          (String(request.operationId || '').trim() || String(request.requestDigest || '').trim())) {
+          if (!String(request.operationId || '').trim() || !String(request.requestDigest || '').trim()) {
+            throw new Error('browser mutation requires operationId and requestDigest');
+          }
+          writeJSON(res, 200, await this.dispatchMutation(request));
+        } else {
+          // Keep the direct shell surface byte-compatible for older local
+          // callers. The MCP actor path always supplies the journal metadata.
+          const result = await this.manager.browserControl(request.method, request.params || {});
+          writeJSON(res, 200, { id: request.id ?? null, result });
+        }
       } catch (err) {
         writeJSON(res, 200, { id: request && request.id || null, error: String(err && err.message || err) });
       }
@@ -119,4 +235,4 @@ class BrowserControlServer {
   }
 }
 
-module.exports = { BrowserControlServer, defaultControlFile };
+module.exports = { BrowserControlServer, MAX_MUTATION_RECEIPTS, defaultControlFile };

@@ -101,3 +101,74 @@ func TestProviderChatCloseSessionDetachesCurrentAttachmentPreservingThread(t *te
 		t.Fatalf("current close did not durably detach actor attachment: %#v", closedLane)
 	}
 }
+
+func TestProviderChatCloseSessionRetryCannotCloseExactResumedAttachment(t *testing.T) {
+	runtime, manager, root := newCloseSessionTestRuntime(t)
+	first := attachCloseSessionTestChat(t, runtime, root)
+	before, ok := runtime.Snapshot("close-chat")
+	if !ok {
+		t.Fatal("missing close-session actor before retry")
+	}
+	oldLane := before.Lanes[before.ActiveLaneID]
+	if !runtime.CloseSession(context.Background(), first.SessionID) {
+		t.Fatal("initial close did not settle")
+	}
+
+	resumed, err := runtime.Select(context.Background(), acp.SessionOptions{
+		TabID: "close-tab", ChatID: "close-chat", ProviderID: "mock", CWD: root,
+	})
+	if err != nil {
+		t.Fatalf("exact resume after close: %v", err)
+	}
+	if resumed.SessionID == "" {
+		t.Fatal("exact resume returned an empty session id")
+	}
+	if got, ok := manager.LiveSession(resumed.SessionID); !ok || got.ChatID != "close-chat" {
+		t.Fatalf("exact resumed attachment is not live: %#v %v", got, ok)
+	}
+
+	// The frozen handler can only receive the old session id on a lost-reply
+	// retry. It must return the durable old receipt and leave the newer exact
+	// resume live, even when the provider reused the same native id.
+	if !runtime.CloseSession(context.Background(), first.SessionID) {
+		t.Fatal("lost-reply retry did not replay the durable close receipt")
+	}
+	if _, ok := manager.LiveSession(resumed.SessionID); !ok {
+		t.Fatalf("lost-reply retry closed the newer attachment: resumed=%#v", resumed)
+	}
+	after, ok := runtime.Snapshot("close-chat")
+	if !ok {
+		t.Fatal("actor disappeared after close retry")
+	}
+	newLane := after.Lanes[after.ActiveLaneID]
+	if newLane.Thread != oldLane.Thread || newLane.Attachment == nil {
+		t.Fatalf("retry changed or removed the exact resumed lane: old=%#v new=%#v", oldLane.Thread, newLane)
+	}
+}
+
+func TestProviderChatCloseSessionChangedActorTargetFailsClosed(t *testing.T) {
+	runtime, manager, root := newCloseSessionTestRuntime(t)
+	info := attachCloseSessionTestChat(t, runtime, root)
+	actor, err := runtime.actor("close-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, ok := runtime.Snapshot("close-chat")
+	if !ok {
+		t.Fatal("missing actor before target change")
+	}
+	lane := state.Lanes[state.ActiveLaneID]
+	actor.mu.Lock()
+	err = actor.engine.Apply(chat.HostLost{LaneID: lane.Identity.ID, ConnectionGeneration: lane.ConnectionGeneration})
+	actor.mu.Unlock()
+	if err != nil {
+		t.Fatalf("change actor attachment target: %v", err)
+	}
+
+	if runtime.CloseSession(context.Background(), info.SessionID) {
+		t.Fatal("close accepted a manager target that no longer matched actor state")
+	}
+	if _, ok := manager.LiveSession(info.SessionID); !ok {
+		t.Fatal("changed-target close touched the manager attachment")
+	}
+}

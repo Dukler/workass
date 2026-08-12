@@ -25,12 +25,25 @@ var errActorChatNotFound = errors.New("durable chat actor does not exist")
 const legacyChatCutoverReceiptFilename = "provider-chat-cutover-v5.json"
 const previousLegacyChatCutoverReceiptFilename = "provider-chat-cutover-v4.json"
 const olderLegacyChatCutoverReceiptFilename = "provider-chat-cutover-v3.json"
+const legacyChatCleanupReceiptFilename = "provider-chat-cutover-cleanup-v1.json"
+const legacyChatCleanupVersion uint32 = 1
 
 type legacyChatCutoverReceipt struct {
 	Version     uint32   `json:"version"`
 	Complete    bool     `json:"complete"`
 	CompletedAt string   `json:"completedAt"`
 	ChatIDs     []string `json:"chatIds"`
+}
+
+// legacyChatCleanupReceipt is a separate, narrow maintenance receipt. The v5
+// cutover receipt is the immutable migration inventory and is never rewritten
+// after its actor commit. This receipt only records that the derived legacy
+// filesystem cleanup completed for that exact inventory.
+type legacyChatCleanupReceipt struct {
+	Version       uint32 `json:"version"`
+	Complete      bool   `json:"complete"`
+	CompletedAt   string `json:"completedAt"`
+	CutoverDigest string `json:"cutoverDigest"`
 }
 
 // completeLegacyChatCutover is the only runtime allowed to consume the old
@@ -46,8 +59,11 @@ func (r *providerChatRuntime) completeLegacyChatCutover() error {
 	if receipt, ok, err := readLegacyChatCutoverReceipt(receiptPath); err != nil {
 		return err
 	} else if ok {
-		if receipt.Version != legacyChatCutoverVersion || !receipt.Complete {
-			return fmt.Errorf("unsupported or incomplete provider chat cutover receipt v%d", receipt.Version)
+		if err := validateLegacyChatCutoverReceipt(receipt); err != nil {
+			return err
+		}
+		if err := r.repairInterruptedCutoverActors(receipt); err != nil {
+			return err
 		}
 		seenReceipt := make(map[string]struct{}, len(receipt.ChatIDs))
 		for _, chatID := range receipt.ChatIDs {
@@ -65,6 +81,9 @@ func (r *providerChatRuntime) completeLegacyChatCutover() error {
 			if !known {
 				return fmt.Errorf("provider chat cutover receipt references missing actor %q", chatID)
 			}
+		}
+		if err := r.cleanupVerifiedLegacyCutoverArtifacts(receipt); err != nil {
+			return err
 		}
 		// ChatIDs is the immutable inventory consumed by the one-time migration,
 		// not a permanent actor index. Actor-native chats created after cutover
@@ -89,13 +108,7 @@ func (r *providerChatRuntime) completeLegacyChatCutover() error {
 			Version: legacyChatCutoverVersion, Complete: true,
 			CompletedAt: time.Now().UTC().Format(time.RFC3339Nano), ChatIDs: known,
 		}
-		if err := writeLegacyChatCutoverReceipt(receiptPath, receipt); err != nil {
-			return fmt.Errorf("commit provider chat cutover upgrade: %w", err)
-		}
-		if err := os.Remove(previousPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove superseded provider chat cutover receipt: %w", err)
-		}
-		if err := removeLegacyObligationStore(r.stateDir); err != nil {
+		if err := r.commitLegacyChatCutover(receipt); err != nil {
 			return err
 		}
 		return r.sessions.ActivateActorCutover()
@@ -121,13 +134,7 @@ func (r *providerChatRuntime) completeLegacyChatCutover() error {
 			Version: legacyChatCutoverVersion, Complete: true,
 			CompletedAt: time.Now().UTC().Format(time.RFC3339Nano), ChatIDs: known,
 		}
-		if err := writeLegacyChatCutoverReceipt(receiptPath, receipt); err != nil {
-			return fmt.Errorf("commit provider chat cutover upgrade: %w", err)
-		}
-		if err := os.Remove(olderPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove superseded provider chat cutover receipt: %w", err)
-		}
-		if err := removeLegacyObligationStore(r.stateDir); err != nil {
+		if err := r.commitLegacyChatCutover(receipt); err != nil {
 			return err
 		}
 		return r.sessions.ActivateActorCutover()
@@ -207,13 +214,228 @@ func (r *providerChatRuntime) completeLegacyChatCutover() error {
 		Version: legacyChatCutoverVersion, Complete: true,
 		CompletedAt: time.Now().UTC().Format(time.RFC3339Nano), ChatIDs: ids,
 	}
-	if err := writeLegacyChatCutoverReceipt(receiptPath, receipt); err != nil {
+	if err := r.commitLegacyChatCutover(receipt); err != nil {
+		return err
+	}
+	return r.sessions.ActivateActorCutover()
+}
+
+// repairInterruptedCutoverActors handles the one invalid historical boundary
+// where the global v5 inventory was committed after discovering an actor file
+// but before that orphan native chat was initialized. The receipt remains
+// immutable: repair is allowed only from the exact native binding inventory
+// that originally caused the chat id to enter it, and the actor is always
+// quarantined rather than adopted or attached.
+func (r *providerChatRuntime) repairInterruptedCutoverActors(receipt legacyChatCutoverReceipt) error {
+	var inventory map[string]acp.LegacyProviderChatInventoryItem
+	for _, rawChatID := range receipt.ChatIDs {
+		chatID := strings.TrimSpace(rawChatID)
+		actorPath := providerChatStatePath(r.stateDir, chatID)
+		if _, statErr := os.Stat(actorPath); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				return fmt.Errorf("provider chat cutover receipt references missing actor %q", chatID)
+			}
+			return fmt.Errorf("stat cutover actor %q: %w", chatID, statErr)
+		}
+		engine, err := chat.NewDurableEngine(chatID, chat.FileStore{Path: actorPath})
+		if err != nil {
+			return fmt.Errorf("read cutover actor %q: %w", chatID, err)
+		}
+		if engine.Snapshot().Initialized {
+			continue
+		}
+		precutover := engine.Snapshot()
+		if len(precutover.Ledger) != 0 || len(precutover.Lanes) != 0 || len(precutover.Outbox) != 0 || len(precutover.Operations) != 0 {
+			command, buildErr := legacyMigrationFromPrecutoverActor(precutover, chatID)
+			if buildErr != nil {
+				return buildErr
+			}
+			if applyErr := engine.Apply(command); applyErr != nil {
+				return fmt.Errorf("repair pre-cutover actor %q: %w", chatID, applyErr)
+			}
+			if applyErr := engine.Apply(chat.MigrateLegacyObligation{Obligation: precutover.Obligation}); applyErr != nil {
+				return fmt.Errorf("repair pre-cutover obligation %q: %w", chatID, applyErr)
+			}
+			background := make([]chat.BackgroundState, 0, len(precutover.Background))
+			for _, item := range precutover.Background {
+				background = append(background, item)
+			}
+			if applyErr := engine.Apply(chat.MigrateLegacyBackground{Items: background}); applyErr != nil {
+				return fmt.Errorf("repair pre-cutover background %q: %w", chatID, applyErr)
+			}
+			if applyErr := engine.Apply(chat.QuarantineLegacyMigration{Error: providercontract.ErrorNativeIdentityConflict}); applyErr != nil {
+				return fmt.Errorf("quarantine pre-cutover actor %q: %w", chatID, applyErr)
+			}
+			if _, actorErr := r.actor(chatID); actorErr != nil {
+				return fmt.Errorf("open repaired pre-cutover actor %q: %w", chatID, actorErr)
+			}
+			continue
+		}
+		if inventory == nil {
+			items, inventoryErr := r.manager.LegacyProviderChatInventory()
+			if inventoryErr != nil {
+				return inventoryErr
+			}
+			inventory = make(map[string]acp.LegacyProviderChatInventoryItem, len(items))
+			for _, item := range items {
+				inventory[strings.TrimSpace(item.ChatID)] = item
+			}
+		}
+		item := inventory[chatID]
+		tabID := strings.TrimSpace(item.TabID)
+		if tabID == "" {
+			digest := sha256.Sum256([]byte(chatID))
+			tabID = "quarantined-native-" + hex.EncodeToString(digest[:8])
+		}
+		source := map[string]any{
+			"id": tabID, "chatId": chatID, "title": "Quarantined recovered chat",
+			"titleLocked": true, "providerId": item.ProviderID, "cwd": item.CWD,
+			"messages": []any{}, "queue": []any{},
+		}
+		actor, actorErr := r.actorFromLegacy(chatID, source)
+		if actorErr != nil {
+			return fmt.Errorf("repair interrupted cutover actor %q: %w", chatID, actorErr)
+		}
+		if actorErr = r.migrateLegacyBackground(actor.engine); actorErr != nil {
+			return fmt.Errorf("repair interrupted cutover background %q: %w", chatID, actorErr)
+		}
+		if actorErr = actor.engine.Apply(chat.QuarantineLegacyMigration{Error: providercontract.ErrorNativeIdentityConflict}); actorErr != nil {
+			return fmt.Errorf("quarantine interrupted cutover actor %q: %w", chatID, actorErr)
+		}
+		state := actor.engine.Snapshot()
+		if !state.Initialized || state.ChatID != chatID || state.Migration.BlockedError != providercontract.ErrorNativeIdentityConflict {
+			return fmt.Errorf("interrupted cutover actor %q failed quarantine readback", chatID)
+		}
+	}
+	return nil
+}
+
+func legacyMigrationFromPrecutoverActor(state chat.State, chatID string) (chat.MigrateLegacyChat, error) {
+	presentation := state.Presentation.Clone()
+	if strings.TrimSpace(presentation.TabID) == "" {
+		digest := sha256.Sum256([]byte(chatID))
+		presentation.TabID = "quarantined-native-" + hex.EncodeToString(digest[:8])
+	}
+	if strings.TrimSpace(presentation.Title) == "" {
+		presentation.Title = "Quarantined recovered chat"
+		presentation.TitleLocked = true
+	}
+	messages := make([]chat.LegacyMessage, 0, len(state.Ledger))
+	for _, event := range state.Ledger {
+		messages = append(messages, chat.LegacyMessage{
+			MessageID: event.MessageID, OperationID: event.OperationID, Role: event.Role,
+			Text: event.Text, Result: event.Result, Status: event.Status, At: event.At,
+			Attachments: event.Attachments, TerminalState: event.TerminalState, NativeTurnID: event.NativeTurnID, QueueID: event.QueueID,
+			SteerState: event.SteerState, SteerAnchor: event.SteerAnchor, SteerBoundary: event.SteerBoundary,
+			SteerContinuationID: event.SteerContinuationID, SteerContinuationFor: event.SteerContinuationFor,
+			TurnRootID: event.TurnRootID, TurnTerminal: event.TurnTerminal, TurnStartedAt: event.TurnStartedAt,
+			Interrupted: event.Interrupted, RetryPrompt: event.RetryPrompt, Timeline: event.Timeline, Permission: event.Permission,
+		})
+	}
+	command := chat.MigrateLegacyChat{
+		Version: legacyChatMigrationVersion, Presentation: presentation, Messages: messages,
+		StagedQueue: append([]chat.StagedQueueEntry(nil), state.StagedQueue...),
+	}
+	if err := sealLegacyChatMigration(&command); err != nil {
+		return chat.MigrateLegacyChat{}, err
+	}
+	return command, nil
+}
+
+func (r *providerChatRuntime) commitLegacyChatCutover(receipt legacyChatCutoverReceipt) error {
+	if err := validateLegacyChatCutoverReceipt(receipt); err != nil {
+		return err
+	}
+	path := filepath.Join(r.stateDir, legacyChatCutoverReceiptFilename)
+	if err := writeLegacyChatCutoverReceipt(path, receipt); err != nil {
 		return fmt.Errorf("commit provider chat cutover receipt: %w", err)
+	}
+	// The immutable v5 receipt is the actor migration commit. Derived cleanup
+	// gets its own durable marker so a crash between these two commits retries
+	// safe, exact-pair cleanup without rewriting migration history.
+	return r.cleanupVerifiedLegacyCutoverArtifacts(receipt)
+}
+
+// cleanupVerifiedLegacyCutoverArtifacts runs only after the v5 receipt and all
+// of its actor references have been verified. The manager loads background
+// snapshots before this migration boundary, so dropping each exact pair is
+// required in addition to removing its obsolete disk artifacts. No actor file
+// is touched: provider-chats remains the sole current-chat authority.
+func (r *providerChatRuntime) cleanupVerifiedLegacyCutoverArtifacts(cutover legacyChatCutoverReceipt) error {
+	if r == nil || r.manager == nil {
+		return errors.New("verified provider chat cutover cleanup is unavailable")
+	}
+	if err := validateLegacyChatCutoverReceipt(cutover); err != nil {
+		return err
+	}
+	cleanupPath := filepath.Join(r.stateDir, legacyChatCleanupReceiptFilename)
+	cleanupReceipt, cleanupRecorded, err := readLegacyChatCleanupReceipt(cleanupPath)
+	if err != nil {
+		return err
+	}
+	if cleanupRecorded {
+		if cleanupReceipt.Version != legacyChatCleanupVersion || !cleanupReceipt.Complete ||
+			cleanupReceipt.CutoverDigest != legacyChatCutoverDigest(cutover) {
+			return errors.New("provider chat legacy cleanup receipt does not match the immutable v5 cutover")
+		}
+		// The durable cleanup receipt is the one-time boundary. Once the
+		// verified cleanup has committed, later boots must not reread or prune
+		// legacy executor/obligation artifacts that may have been recreated by
+		// an external process. Actor projection remains authoritative.
+		return nil
+	}
+	currentTabs := make(map[string]string, len(cutover.ChatIDs))
+	for _, rawChatID := range cutover.ChatIDs {
+		chatID := strings.TrimSpace(rawChatID)
+		if chatID == "" {
+			return errors.New("verified provider chat cutover cleanup contains an empty chat id")
+		}
+		engine, err := chat.NewDurableEngine(chatID, chat.FileStore{Path: providerChatStatePath(r.stateDir, chatID)})
+		if err != nil {
+			return fmt.Errorf("read verified actor %q for cutover cleanup: %w", chatID, err)
+		}
+		state := engine.Snapshot()
+		if !state.Initialized || state.ChatID != chatID {
+			return fmt.Errorf("verified actor %q failed cutover cleanup readback", chatID)
+		}
+		currentTabID := strings.TrimSpace(state.Presentation.TabID)
+		if currentTabID == "" {
+			return fmt.Errorf("verified actor %q has no tab attachment for cutover cleanup", chatID)
+		}
+		currentTabs[chatID] = currentTabID
+	}
+	// spawned-work remains a live executor/liveness cache after actor cutover;
+	// deleting the whole store would orphan valid current background processes
+	// on the next crash. Remove only loaded/saved pairs for cutover chats whose
+	// saved tab no longer matches the verified actor attachment. Actor-native
+	// chats created after the immutable cutover inventory are deliberately
+	// untouched.
+	for _, pair := range r.manager.LegacySpawnedWorkPairsForMigration() {
+		currentTabID, migrated := currentTabs[strings.TrimSpace(pair.ChatID)]
+		if migrated && strings.TrimSpace(pair.TabID) != currentTabID {
+			if err := r.manager.PruneSpawnedWorkForMigration(pair.TabID, pair.ChatID); err != nil {
+				return err
+			}
+		}
+	}
+	for _, filename := range []string{previousLegacyChatCutoverReceiptFilename, olderLegacyChatCutoverReceiptFilename} {
+		path := filepath.Join(r.stateDir, filename)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove superseded provider chat cutover receipt %q: %w", filename, err)
+		}
 	}
 	if err := removeLegacyObligationStore(r.stateDir); err != nil {
 		return err
 	}
-	return r.sessions.ActivateActorCutover()
+	cleanupReceipt = legacyChatCleanupReceipt{
+		Version: legacyChatCleanupVersion, Complete: true,
+		CompletedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+		CutoverDigest: legacyChatCutoverDigest(cutover),
+	}
+	if err := writeLegacyChatCleanupReceipt(cleanupPath, cleanupReceipt); err != nil {
+		return fmt.Errorf("commit provider chat legacy cleanup receipt: %w", err)
+	}
+	return nil
 }
 
 func (r *providerChatRuntime) upgradeLegacyObligations(chatIDs []string) error {
@@ -279,6 +501,7 @@ func (r *providerChatRuntime) migrateLegacyBackground(engine *chat.Engine) error
 	}
 	items := r.manager.ListSpawnedWork(tabID, state.ChatID)
 	background := make([]chat.BackgroundState, 0, len(items))
+	ambiguousOwnership := false
 	for _, item := range items {
 		workID := firstNonEmptyString(strings.TrimSpace(item.ID), strings.TrimSpace(item.TaskID))
 		if workID == "" {
@@ -289,12 +512,23 @@ func (r *providerChatRuntime) migrateLegacyBackground(engine *chat.Engine) error
 			owner, ok = legacyBackgroundOwner(state, item, workID)
 		}
 		if !ok {
-			return fmt.Errorf("legacy background work %q has ambiguous provider ownership", workID)
+			// The row was genuinely consumed by this exact chat's one-time
+			// migration, but it cannot be assigned to a provider operation without
+			// guessing. Quarantine only this actor before acknowledging the
+			// background snapshot so a crash can never expose a partially migrated
+			// usable chat. Unrelated chats and daemon startup continue.
+			ambiguousOwnership = true
+			continue
 		}
 		if owner.ConnectionGeneration == 0 {
 			owner.ConnectionGeneration = 1
 		}
 		background = append(background, chat.BackgroundState{Owner: owner, Event: backgroundEvent(item, workID)})
+	}
+	if ambiguousOwnership {
+		if err := engine.Apply(chat.QuarantineLegacyMigration{Error: providercontract.ErrorNativeIdentityConflict}); err != nil {
+			return fmt.Errorf("quarantine ambiguous legacy background ownership: %w", err)
+		}
 	}
 	if err := engine.Apply(chat.MigrateLegacyBackground{Items: background}); err != nil {
 		return err
@@ -305,29 +539,11 @@ func (r *providerChatRuntime) migrateLegacyBackground(engine *chat.Engine) error
 	return nil
 }
 
-// legacyBackgroundOwner is migration-only. Runtime snapshots are forbidden
-// from calling it: after the cutover receipt every work row must carry exact
-// lane/operation ownership or be rejected.
-func legacyBackgroundOwner(state chat.State, item acp.SpawnedWorkItem, workID string) (chat.ProviderActivityOwner, bool) {
-	providerID := providercontract.NormalizeID(item.ProviderID)
-	var candidate chat.ProviderActivityOwner
-	for laneID, lane := range state.Lanes {
-		if providerID != "" && lane.Identity.Realm.ProviderID != providerID {
-			continue
-		}
-		if candidate.LaneID != "" {
-			return chat.ProviderActivityOwner{}, false
-		}
-		generation := lane.ConnectionGeneration
-		if generation == 0 {
-			generation = 1
-		}
-		candidate = chat.ProviderActivityOwner{
-			LaneID: laneID, OperationID: providercontract.OperationID("migrated-background:" + workID),
-			TurnID: strings.TrimSpace(item.OriginTurnID), ConnectionGeneration: generation,
-		}
-	}
-	return candidate, candidate.LaneID != ""
+// legacyBackgroundOwner is migration-only. It may resolve a pre-actor row
+// whose persisted origin is exact, but it never invents an operation id from
+// the work id. Rows without an actor-owned origin remain quarantined.
+func legacyBackgroundOwner(state chat.State, item acp.SpawnedWorkItem, _ string) (chat.ProviderActivityOwner, bool) {
+	return exactBackgroundOwner(state, item)
 }
 
 type legacyObligationRecord struct {
@@ -402,6 +618,12 @@ func (r *providerChatRuntime) adoptLegacyProviderBindings(actor *providerChatAct
 		return errors.New("legacy provider lane migration is unavailable")
 	}
 	state := actor.engine.Snapshot()
+	if state.Migration.BlockedError != "" {
+		// A prior migration attempt already committed the only safe result for
+		// this chat. Retrying the global cutover reads that receipt back; it must
+		// not try another lane adoption against a quarantined actor.
+		return nil
+	}
 	history := make([]acp.LegacyCoverageMessage, 0, len(state.Ledger))
 	for _, event := range state.Ledger {
 		content := strings.TrimSpace(event.Text)
@@ -556,6 +778,101 @@ func readLegacyChatCutoverReceipt(path string) (legacyChatCutoverReceipt, bool, 
 	return receipt, true, nil
 }
 
+func validateLegacyChatCutoverReceipt(receipt legacyChatCutoverReceipt) error {
+	if receipt.Version != legacyChatCutoverVersion || !receipt.Complete {
+		return fmt.Errorf("unsupported or incomplete provider chat cutover receipt v%d", receipt.Version)
+	}
+	seen := make(map[string]struct{}, len(receipt.ChatIDs))
+	for _, rawChatID := range receipt.ChatIDs {
+		chatID := strings.TrimSpace(rawChatID)
+		if chatID == "" {
+			return errors.New("provider chat cutover receipt contains an empty chat id")
+		}
+		if _, duplicate := seen[chatID]; duplicate {
+			return fmt.Errorf("provider chat cutover receipt contains duplicate chatId %q", chatID)
+		}
+		seen[chatID] = struct{}{}
+	}
+	return nil
+}
+
+func legacyChatCutoverDigest(receipt legacyChatCutoverReceipt) string {
+	ids := make([]string, 0, len(receipt.ChatIDs))
+	for _, rawChatID := range receipt.ChatIDs {
+		ids = append(ids, strings.TrimSpace(rawChatID))
+	}
+	sort.Strings(ids)
+	raw, _ := json.Marshal(struct {
+		Version uint32   `json:"version"`
+		ChatIDs []string `json:"chatIds"`
+	}{Version: receipt.Version, ChatIDs: ids})
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
+}
+
+func readLegacyChatCleanupReceipt(path string) (legacyChatCleanupReceipt, bool, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return legacyChatCleanupReceipt{}, false, nil
+	}
+	if err != nil {
+		return legacyChatCleanupReceipt{}, false, err
+	}
+	var receipt legacyChatCleanupReceipt
+	if err := json.Unmarshal(raw, &receipt); err != nil {
+		return legacyChatCleanupReceipt{}, false, fmt.Errorf("decode provider chat legacy cleanup receipt: %w", err)
+	}
+	return receipt, true, nil
+}
+
+func writeLegacyChatCleanupReceipt(path string, receipt legacyChatCleanupReceipt) error {
+	if receipt.Version != legacyChatCleanupVersion || !receipt.Complete || strings.TrimSpace(receipt.CutoverDigest) == "" {
+		return errors.New("provider chat legacy cleanup receipt is incomplete")
+	}
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".provider-chat-cleanup-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	removeTemp := true
+	defer func() {
+		_ = tmp.Close()
+		if removeTemp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	removeTemp = false
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
+}
+
 func writeLegacyChatCutoverReceipt(path string, receipt legacyChatCutoverReceipt) error {
 	raw, err := json.Marshal(receipt)
 	if err != nil {
@@ -617,7 +934,27 @@ func (r *providerChatRuntime) migrateLegacyChatFromSource(chatID string, engine 
 	if err != nil {
 		return err
 	}
-	if err := engine.Apply(command); err != nil {
+	if _, _, previewErr := chat.Reduce(engine.Snapshot(), command); previewErr != nil {
+		// A malformed pre-actor steering/segmentation relation must not make one
+		// old chat prevent daemon startup, and it must not make that nonempty chat
+		// look empty. Preserve all visible typed rows, discard only relationships
+		// whose ownership cannot be proven, and quarantine the resulting actor.
+		// Store failures are still fatal because this preview is reducer-only.
+		quarantined, err := quarantinedLegacyChatMigration(command)
+		if err != nil {
+			return fmt.Errorf("prepare quarantined legacy chat %q: %w", chatID, err)
+		}
+		if _, _, quarantinePreviewErr := chat.Reduce(engine.Snapshot(), quarantined); quarantinePreviewErr != nil {
+			return fmt.Errorf("migrate legacy chat %q: %w", chatID, previewErr)
+		}
+		if err := engine.Apply(quarantined); err != nil {
+			return fmt.Errorf("migrate quarantined legacy chat %q: %w", chatID, err)
+		}
+		if err := engine.Apply(chat.QuarantineLegacyMigration{Error: providercontract.ErrorNativeIdentityConflict}); err != nil {
+			return fmt.Errorf("quarantine legacy chat %q: %w", chatID, err)
+		}
+		command = quarantined
+	} else if err := engine.Apply(command); err != nil {
 		return fmt.Errorf("migrate legacy chat %q: %w", chatID, err)
 	}
 	obligation, err := legacyObligationFor(filepath.Dir(r.sessions.path), command.Presentation.TabID, chatID)
@@ -632,6 +969,29 @@ func (r *providerChatRuntime) migrateLegacyChatFromSource(chatID string, engine 
 		return errors.New("legacy chat migration failed durable readback verification")
 	}
 	return nil
+}
+
+func quarantinedLegacyChatMigration(source chat.MigrateLegacyChat) (chat.MigrateLegacyChat, error) {
+	command := source
+	command.Messages = append([]chat.LegacyMessage(nil), source.Messages...)
+	for index := range command.Messages {
+		// These fields are presentation relationships, not message content. An
+		// old row without explicit ownership cannot safely participate in typed
+		// steering/segmentation, but its identity/text/media/timeline remain part
+		// of the immutable semantic ledger and visible quarantine projection.
+		command.Messages[index].SteerState = ""
+		command.Messages[index].SteerAnchor = nil
+		command.Messages[index].SteerBoundary = ""
+		command.Messages[index].SteerContinuationID = ""
+		command.Messages[index].SteerContinuationFor = ""
+		command.Messages[index].TurnRootID = ""
+		command.Messages[index].TurnTerminal = nil
+	}
+	command.Digest = ""
+	if err := sealLegacyChatMigration(&command); err != nil {
+		return chat.MigrateLegacyChat{}, err
+	}
+	return command, nil
 }
 
 func buildLegacyChatMigration(source map[string]any, stateDir string, sessions *sessionStore) (chat.MigrateLegacyChat, error) {
@@ -725,6 +1085,16 @@ func buildLegacyChatMigration(source map[string]any, stateDir string, sessions *
 	command := chat.MigrateLegacyChat{
 		Version: legacyChatMigrationVersion, Presentation: presentation, Messages: messages, StagedQueue: stagedQueue,
 	}
+	if err := sealLegacyChatMigration(&command); err != nil {
+		return chat.MigrateLegacyChat{}, err
+	}
+	return command, nil
+}
+
+func sealLegacyChatMigration(command *chat.MigrateLegacyChat) error {
+	if command == nil {
+		return errors.New("legacy chat migration command is nil")
+	}
 	digestSource := struct {
 		Version      uint32
 		Presentation chat.PresentationState
@@ -733,11 +1103,11 @@ func buildLegacyChatMigration(source map[string]any, stateDir string, sessions *
 	}{command.Version, command.Presentation, command.Messages, command.StagedQueue}
 	raw, err := json.Marshal(digestSource)
 	if err != nil {
-		return chat.MigrateLegacyChat{}, err
+		return err
 	}
 	digest := sha256.Sum256(raw)
 	command.Digest = hex.EncodeToString(digest[:])
-	return command, nil
+	return nil
 }
 
 var legacyMessageKeys = map[string]struct{}{

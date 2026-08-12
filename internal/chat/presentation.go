@@ -102,6 +102,8 @@ type InitializeFork struct {
 	Presentation PresentationState
 	SourceChatID string
 	Messages     []LedgerEvent
+	OperationID  provider.OperationID
+	Digest       string
 }
 
 func (InitializeFork) chatCommand() {}
@@ -152,10 +154,10 @@ type MigrateLegacyObligation struct{ Obligation *ObligationState }
 
 func (MigrateLegacyObligation) chatCommand() {}
 
-// MigrateLegacyBackground is the only command allowed to synthesize ownership
-// for pre-actor spawned-work rows. The daemon builds its typed items during
-// the versioned startup migration; ordinary runtime snapshots must already
-// carry exact actor ownership and use ReconcileBackgroundSnapshot instead.
+// MigrateLegacyBackground is the one-time ingress for pre-actor spawned-work
+// rows. The daemon builds typed items during versioned startup migration, but
+// every item must still carry exact actor ownership; ordinary runtime snapshots
+// use ReconcileBackgroundSnapshot instead.
 type MigrateLegacyBackground struct{ Items []BackgroundState }
 
 func (MigrateLegacyBackground) chatCommand() {}
@@ -196,6 +198,11 @@ type ChangeWorkspace struct {
 	Digest           string
 	CWD              string
 	ExpectedRevision uint64
+	// DetachTargets are the complete, ordered set of old disposable
+	// attachments proved by the caller. The reducer validates every target
+	// before mutating the workspace, then journals all resulting effects in the
+	// same actor/store commit as the workspace receipt and epoch change.
+	DetachTargets []DetachTarget
 }
 
 func (ChangeWorkspace) chatCommand() {}

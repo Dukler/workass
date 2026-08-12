@@ -877,7 +877,7 @@ func TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCW
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if cwd, _, ok, err := providerChats.ChatWorkspace(chatID); err != nil || !ok || filepath.Clean(cwd) != filepath.Clean(targetCWD) {
+	if cwd, _, ok, err := providerChats.ChatWorkspaceForExactPair(tabID, chatID); err != nil || !ok || filepath.Clean(cwd) != filepath.Clean(targetCWD) {
 		t.Fatalf("committed workspace cwd=%q ok=%v, want %q", cwd, ok, targetCWD)
 	}
 	// A second drag is legitimate while the renderer is sessionless, but still
@@ -901,7 +901,7 @@ func TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCW
 	if staleMoveReply.Error != nil || fieldString(staleMove, "error") == "" || staleMove["workspaceCommitted"] != false {
 		t.Fatalf("stale competing move reply = %+v %#v", staleMoveReply, staleMove)
 	}
-	if cwd, _, ok, err := providerChats.ChatWorkspace(chatID); err != nil || !ok || filepath.Clean(cwd) != filepath.Clean(secondTargetCWD) {
+	if cwd, _, ok, err := providerChats.ChatWorkspaceForExactPair(tabID, chatID); err != nil || !ok || filepath.Clean(cwd) != filepath.Clean(secondTargetCWD) {
 		t.Fatalf("stale move changed cwd=%q ok=%v, want %q", cwd, ok, secondTargetCWD)
 	}
 	if err := first.conn.Close(); err != nil {
@@ -3215,10 +3215,11 @@ func TestWireTraceForkChatSeedsPrefixAndDiverges(t *testing.T) {
 	secondResult := runWireChatTurn(t, client, 4, sourceChatID, sourceTabID, sourceSessionID, "source second")
 	appendWireArchiveTurn(t, client, 5, sourceTabID, "source second", secondResult, "2026-07-10T00:00:02Z")
 
-	client.invoke(t, 6, "app-chat:fork", map[string]any{
+	forkRequest := map[string]any{
 		"tabId": sourceTabID, "chatId": sourceChatID, "newTabId": forkTabID,
-		"newChatId": "chat-wire-fork-child", "cwd": root, "atTurn": 1,
-	})
+		"newChatId": "chat-wire-fork-child", "cwd": root, "atTurn": 1, "operationId": "wire-fork-once",
+	}
+	client.invoke(t, 6, "app-chat:fork", forkRequest)
 	forkReply := client.waitReply(t, 6, 5*time.Second)
 	if forkReply.Error != nil {
 		t.Fatalf("fork reply error: %s", *forkReply.Error)
@@ -3228,6 +3229,24 @@ func TestWireTraceForkChatSeedsPrefixAndDiverges(t *testing.T) {
 	forkedFrom := forkSession["forkedFrom"].(map[string]any)
 	if forkSessionID == "" || forkSessionID == sourceSessionID || forkSession["providerId"] != "mock" || forkedFrom["tabId"] != sourceTabID || fmt.Sprint(forkedFrom["atTurn"]) != "1" {
 		t.Fatalf("fork reply = %#v", forkSession)
+	}
+	thirdResult := runWireChatTurn(t, client, 7, sourceChatID, sourceTabID, sourceSessionID, "source after fork")
+	appendWireArchiveTurn(t, client, 8, sourceTabID, "source after fork", thirdResult, "2026-07-10T00:00:03Z")
+	client.invoke(t, 9, "app-chat:fork", forkRequest)
+	forkRetryReply := client.waitReply(t, 9, 5*time.Second)
+	if forkRetryReply.Error != nil {
+		t.Fatalf("fork retry error: %s", *forkRetryReply.Error)
+	}
+	forkRetry := forkRetryReply.Result.(map[string]any)
+	if forkRetry["sessionId"] != forkSessionID {
+		t.Fatalf("fork lost-reply retry changed native attachment: first=%#v retry=%#v", forkSession, forkRetry)
+	}
+	forkConflict := cloneJSON(forkRequest).(map[string]any)
+	forkConflict["cwd"] = t.TempDir()
+	client.invoke(t, 10, "app-chat:fork", forkConflict)
+	forkConflictReply := client.waitReply(t, 10, 5*time.Second)
+	if forkConflictReply.Error == nil {
+		t.Fatalf("fork creation operation id was reused for different content: %#v", forkConflictReply.Result)
 	}
 	t.Logf("trace reply app-chat:fork source=%s fork=%s atTurn=%v session=%s", sourceTabID, forkTabID, forkedFrom["atTurn"], forkSessionID)
 
@@ -3240,7 +3259,7 @@ func TestWireTraceForkChatSeedsPrefixAndDiverges(t *testing.T) {
 	}
 	sourceArchive := anySlice(sourceArchiveReply.Result)
 	forkArchive := anySlice(forkArchiveReply.Result)
-	if len(sourceArchive) != 4 || len(forkArchive) != 2 {
+	if len(sourceArchive) != 6 || len(forkArchive) != 2 {
 		t.Fatalf("archive lengths source=%d fork=%d source=%#v fork=%#v", len(sourceArchive), len(forkArchive), sourceArchive, forkArchive)
 	}
 	if !archiveContainsText(forkArchive, "source first") || archiveContainsText(forkArchive, "source second") {
@@ -3248,18 +3267,18 @@ func TestWireTraceForkChatSeedsPrefixAndDiverges(t *testing.T) {
 	}
 	t.Logf("trace actor fork prefix sourceMessages=%d forkMessages=%d", len(sourceArchive), len(forkArchive))
 
-	client.invoke(t, 7, "job:start", map[string]any{
+	client.invoke(t, 11, "job:start", map[string]any{
 		"kind": "app-chat", "chatId": sourceChatID, "sessionId": sourceSessionID, "tabId": sourceTabID,
-		"operationId": "wire-fork-source-turn-3", "userMessageId": "wire-fork-source-user-3", "assistantMessageId": "wire-fork-source-assistant-3",
+		"operationId": "wire-fork-source-turn-4", "userMessageId": "wire-fork-source-user-4", "assistantMessageId": "wire-fork-source-assistant-4",
 		"prompt": "source third unique",
 	})
-	client.invoke(t, 8, "job:start", map[string]any{
+	client.invoke(t, 12, "job:start", map[string]any{
 		"kind": "app-chat", "chatId": "chat-wire-fork-child", "sessionId": forkSessionID, "tabId": forkTabID,
 		"operationId": "wire-fork-child-turn-2", "userMessageId": "wire-fork-child-user-2", "assistantMessageId": "wire-fork-child-assistant-2",
 		"prompt": "fork continuation unique",
 	})
-	sourceStartReply := client.waitReply(t, 7, 5*time.Second)
-	forkStartReply := client.waitReply(t, 8, 5*time.Second)
+	sourceStartReply := client.waitReply(t, 11, 5*time.Second)
+	forkStartReply := client.waitReply(t, 12, 5*time.Second)
 	if sourceStartReply.Error != nil || forkStartReply.Error != nil {
 		t.Fatalf("post-fork job replies source=%s fork=%s", wireReplyError(sourceStartReply), wireReplyError(forkStartReply))
 	}
@@ -3274,7 +3293,7 @@ func TestWireTraceForkChatSeedsPrefixAndDiverges(t *testing.T) {
 	if sourceEndJob["status"] != "done" || forkEndJob["status"] != "done" || sourceResult == forkResult {
 		t.Fatalf("post-fork results source=%#v fork=%#v", sourceEndJob, forkEndJob)
 	}
-	if !strings.Contains(sourceResult, "Mock ACP turn 3: Active Workass runtime for this turn:") ||
+	if !strings.Contains(sourceResult, "Mock ACP turn 4: Active Workass runtime for this turn:") ||
 		!strings.Contains(sourceResult, "User request:\nsource third unique") ||
 		!strings.Contains(forkResult, "User request:\nfork continuation unique") ||
 		strings.Contains(forkResult, "source first") || strings.Contains(forkResult, "source second") ||

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,89 @@ func (r *providerChatRuntime) agentOwnerAuthorized(ownerKey, tabID, chatID strin
 	return r != nil && r.manager != nil && r.manager.ValidateAgentOwner(ownerKey, chatID, tabID)
 }
 
+func (r *providerChatRuntime) agentWaitFence(ownerKey, tabID, chatID string) (*providerChatActor, chat.State, error) {
+	actor, state, err := r.exactActor(tabID, chatID)
+	if err != nil {
+		return nil, chat.State{}, err
+	}
+	if !r.agentOwnerAuthorized(ownerKey, tabID, chatID) {
+		return nil, chat.State{}, errors.New(agentOwnerReadError)
+	}
+	return actor, state, nil
+}
+
+// agentWaitObservationDigest is the only request identity that crosses the
+// actor boundary for a wait. It binds the exact pair, wait kind, target order,
+// return condition, and caller timeout intent without persisting any target
+// text, provider output, or output tail.
+func agentWaitObservationDigest(kind, tabID, chatID string, ids []string, returnWhen string, timeout time.Duration) string {
+	payload := struct {
+		Kind       string   `json:"kind"`
+		TabID      string   `json:"tab_id"`
+		ChatID     string   `json:"chat_id"`
+		IDs        []string `json:"ids"`
+		ReturnWhen string   `json:"return_when"`
+		TimeoutMS  int64    `json:"timeout_ms"`
+	}{
+		Kind: kind, TabID: strings.TrimSpace(tabID), ChatID: strings.TrimSpace(chatID),
+		IDs: append([]string(nil), ids...), ReturnWhen: returnWhen, TimeoutMS: timeout.Milliseconds(),
+	}
+	raw, _ := json.Marshal(payload)
+	digest := sha256.Sum256(append([]byte("agent-wait-v1\x00"), raw...))
+	return fmt.Sprintf("%x", digest[:])
+}
+
+// recordAgentWaitObservation is the actor-owned command boundary for the
+// transient Manager wait. Target proof, exact-pair fencing, and operation
+// idempotency all happen while the actor is serialized. A retry with the same
+// digest is a no-op readback; reusing the id for changed wait intent fails
+// before the Manager can be consulted.
+func (r *providerChatRuntime) recordAgentWaitObservation(actor *providerChatActor, tabID, chatID string, operationID providercontract.OperationID, digest string, ids []string) (chat.State, error) {
+	if actor == nil {
+		return chat.State{}, errors.New("agent wait requires the durable chat actor")
+	}
+	operationID = providercontract.NormalizeOperationID(string(operationID))
+	digest = strings.ToLower(strings.TrimSpace(digest))
+	if operationID == "" {
+		return chat.State{}, errors.New("agent wait requires a stable operation id")
+	}
+	if digest == "" {
+		return chat.State{}, errors.New("agent wait requires an immutable request digest")
+	}
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	state := actor.engine.Snapshot()
+	if !state.Initialized || state.Deleted || strings.TrimSpace(state.ChatID) != strings.TrimSpace(chatID) || strings.TrimSpace(state.Presentation.TabID) != strings.TrimSpace(tabID) {
+		return chat.State{}, errors.New("agent wait chat attachment is stale")
+	}
+	// The durable receipt is the first authority after exact actor attachment.
+	// A retry must therefore compare immutable intent before consulting the
+	// transient subagent inventory: the observed child may have disappeared
+	// after the original reply was lost, but changed intent must still conflict
+	// deterministically instead of degrading into "not found".
+	if receipt, exists := state.AgentWaitObservationReceipts[operationID]; exists {
+		if receipt.Digest != digest {
+			return chat.State{}, errors.New("agent wait operation id was reused for a different request")
+		}
+		return state, nil
+	}
+	for _, id := range ids {
+		background, ok := actorBackgroundByID(state, id)
+		if !ok || !isActorSubagent(background.Event) {
+			return chat.State{}, errors.New("subagent not found for this owner")
+		}
+	}
+	if err := actor.engine.Apply(chat.RecordAgentWaitObservation{OperationID: operationID, TabID: tabID, Digest: digest}); err != nil {
+		return chat.State{}, err
+	}
+	state = actor.engine.Snapshot()
+	receipt, exists := state.AgentWaitObservationReceipts[operationID]
+	if !exists || receipt.Digest != digest {
+		return chat.State{}, errors.New("agent wait observation failed durable readback")
+	}
+	return state, nil
+}
+
 func (r *providerChatRuntime) ListSubagents(ownerKey, tabID, chatID string) ([]acp.SubagentRun, error) {
 	state, err := r.agentReadFence(ownerKey, tabID, chatID)
 	if err != nil {
@@ -65,8 +149,18 @@ func (r *providerChatRuntime) ListSubagentReceipts(ownerKey, tabID, chatID strin
 	return trimActorReceipts(receipts, limit), nil
 }
 
-func (r *providerChatRuntime) WaitSubagent(ctx context.Context, ownerKey, tabID, chatID, id string, timeout time.Duration) (acp.SubagentRun, error) {
-	state, err := r.agentReadFence(ownerKey, tabID, chatID)
+func (r *providerChatRuntime) WaitSubagent(ctx context.Context, ownerKey, tabID, chatID string, operationID providercontract.OperationID, id string, timeout time.Duration) (acp.SubagentRun, error) {
+	actor, _, err := r.agentWaitFence(ownerKey, tabID, chatID)
+	if err != nil {
+		return acp.SubagentRun{}, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return acp.SubagentRun{}, errors.New("subagent id is required")
+	}
+	operationID = providercontract.NormalizeOperationID(string(operationID))
+	digest := agentWaitObservationDigest("single", tabID, chatID, []string{id}, "single", timeout)
+	state, err := r.recordAgentWaitObservation(actor, tabID, chatID, operationID, digest, []string{id})
 	if err != nil {
 		return acp.SubagentRun{}, err
 	}
@@ -80,15 +174,17 @@ func (r *providerChatRuntime) WaitSubagent(ctx context.Context, ownerKey, tabID,
 	if r.manager == nil {
 		return acp.SubagentRun{}, errors.New("subagent wait runtime is unavailable")
 	}
-	run, waitErr := r.manager.WaitSubagent(ctx, ownerKey, chatID, tabID, strings.TrimSpace(id), timeout)
-	if reconcileErr := r.reconcileAgentBackground(tabID, chatID); waitErr == nil && reconcileErr != nil {
-		return acp.SubagentRun{}, fmt.Errorf("reconcile subagent state: %w", reconcileErr)
+	run, waitErr := r.manager.WaitSubagent(ctx, ownerKey, chatID, tabID, id, timeout)
+	if waitErr == nil && !run.NeedsAttention && strings.TrimSpace(run.Status) != "running" {
+		if reconcileErr := r.reconcileAgentBackground(tabID, chatID); reconcileErr != nil {
+			return acp.SubagentRun{}, fmt.Errorf("reconcile subagent state: %w", reconcileErr)
+		}
 	}
 	return run, waitErr
 }
 
-func (r *providerChatRuntime) WaitSubagents(ctx context.Context, ownerKey, tabID, chatID string, ids []string, returnWhen string, timeout time.Duration) (map[string]any, error) {
-	state, err := r.agentReadFence(ownerKey, tabID, chatID)
+func (r *providerChatRuntime) WaitSubagents(ctx context.Context, ownerKey, tabID, chatID string, operationID providercontract.OperationID, ids []string, returnWhen string, timeout time.Duration) (map[string]any, error) {
+	actor, _, err := r.agentWaitFence(ownerKey, tabID, chatID)
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +198,12 @@ func (r *providerChatRuntime) WaitSubagents(ctx context.Context, ownerKey, tabID
 	cleanIDs := uniqueAgentIDs(ids)
 	if len(cleanIDs) == 0 {
 		return nil, errors.New("at least one subagent id is required")
+	}
+	operationID = providercontract.NormalizeOperationID(string(operationID))
+	digest := agentWaitObservationDigest("many", tabID, chatID, cleanIDs, returnWhen, timeout)
+	state, err := r.recordAgentWaitObservation(actor, tabID, chatID, operationID, digest, cleanIDs)
+	if err != nil {
+		return nil, err
 	}
 	completed := make([]acp.SubagentRun, 0, len(cleanIDs))
 	running := make([]string, 0, len(cleanIDs))
@@ -135,8 +237,12 @@ func (r *providerChatRuntime) WaitSubagents(ctx context.Context, ownerKey, tabID
 		return nil, errors.New("subagent wait runtime is unavailable")
 	}
 	result, waitErr := r.manager.WaitSubagents(ctx, ownerKey, chatID, tabID, running, returnWhen, timeout)
-	if reconcileErr := r.reconcileAgentBackground(tabID, chatID); waitErr == nil && reconcileErr != nil {
-		return nil, fmt.Errorf("reconcile subagent state: %w", reconcileErr)
+	timedOut, _ := result["timedOut"].(bool)
+	needsAttention, _ := result["needsAttention"].(bool)
+	if waitErr == nil && !timedOut && !needsAttention {
+		if reconcileErr := r.reconcileAgentBackground(tabID, chatID); reconcileErr != nil {
+			return nil, fmt.Errorf("reconcile subagent state: %w", reconcileErr)
+		}
 	}
 	if waitErr != nil {
 		return nil, waitErr

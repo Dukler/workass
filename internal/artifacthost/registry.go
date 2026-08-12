@@ -32,6 +32,7 @@ const (
 	maxInspectedEntries    = 4000
 	maxWithheldReported    = 20
 	maxLoggedWithholds     = 512
+	maxReceiptFieldBytes   = 4096
 )
 
 // A hosted name is filtered by the SHAPE of a credential file, never by
@@ -135,14 +136,35 @@ var artifactMIMEByExtension = map[string]string{
 }
 
 type artifactRecord struct {
-	ID         string `json:"id"`
-	Label      string `json:"label"`
-	SourcePath string `json:"sourcePath"`
-	RootPath   string `json:"rootPath"`
-	Entry      string `json:"entry"`
-	Kind       string `json:"kind"`
-	CreatedAt  string `json:"createdAt"`
-	UpdatedAt  string `json:"updatedAt"`
+	ID         string            `json:"id"`
+	Label      string            `json:"label"`
+	SourcePath string            `json:"sourcePath"`
+	RootPath   string            `json:"rootPath"`
+	Entry      string            `json:"entry"`
+	Kind       string            `json:"kind"`
+	CreatedAt  string            `json:"createdAt"`
+	UpdatedAt  string            `json:"updatedAt"`
+	Receipts   []artifactReceipt `json:"receipts,omitempty"`
+}
+
+// artifactReceipt is the safe readback projection for an operation-backed
+// registration. It deliberately contains no source or root path and stores
+// only the one-way operation key plus the bounded public registration fields.
+// The live artifactRecord remains the serving authority for the source path.
+type artifactReceipt struct {
+	Key          string          `json:"key"`
+	ID           string          `json:"id"`
+	Label        string          `json:"label"`
+	Entry        string          `json:"entry"`
+	Kind         string          `json:"kind"`
+	ContentType  string          `json:"contentType"`
+	URLPath      string          `json:"urlPath"`
+	LocalURL     *string         `json:"localUrl,omitempty"`
+	Markdown     string          `json:"markdown"`
+	CreatedAt    string          `json:"createdAt"`
+	UpdatedAt    string          `json:"updatedAt"`
+	Withheld     []WithheldAsset `json:"withheld,omitempty"`
+	WithheldMore int             `json:"withheldMore,omitempty"`
 }
 
 type registryFile struct {
@@ -191,6 +213,7 @@ type Registration struct {
 // bytes read-only. It never copies or rewrites an agent-authored artifact.
 type Registry struct {
 	mu         sync.RWMutex
+	receiptMu  sync.Mutex
 	path       string
 	legacyPath string
 	origin     string
@@ -269,6 +292,61 @@ func New(stateDir, origin string) (*Registry, error) {
 }
 
 func (r *Registry) Register(options RegisterOptions) (Registration, error) {
+	return r.register(options, "")
+}
+
+// RegisterForOperation performs one operation-backed registration. The
+// operation id and request digest are reduced to a one-way receipt key before
+// they enter the registry; neither raw request paths nor raw results are
+// stored for readback. Repeating the exact operation returns the stored public
+// registration without re-inspecting the filesystem or rewriting the
+// registry.
+func (r *Registry) RegisterForOperation(options RegisterOptions, operationID, requestDigest string) (Registration, error) {
+	if r == nil {
+		return Registration{}, errors.New("artifact hosting is unavailable")
+	}
+	key, err := artifactReceiptKey(operationID, requestDigest)
+	if err != nil {
+		return Registration{}, err
+	}
+	r.receiptMu.Lock()
+	defer r.receiptMu.Unlock()
+	if registration, found := r.readOperationKey(key); found {
+		return registration, nil
+	}
+	return r.register(options, key)
+}
+
+// ReadOperation returns the exact safe registration receipt for an operation.
+// It never touches the source path and never mutates the registry. A missing
+// receipt is a normal false result so callers can preserve an ambiguous actor
+// operation without replaying its external effect.
+func (r *Registry) ReadOperation(operationID, requestDigest string) (Registration, bool, error) {
+	if r == nil {
+		return Registration{}, false, errors.New("artifact hosting is unavailable")
+	}
+	key, err := artifactReceiptKey(operationID, requestDigest)
+	if err != nil {
+		return Registration{}, false, err
+	}
+	registration, found := r.readOperationKey(key)
+	return registration, found, nil
+}
+
+func (r *Registry) readOperationKey(key string) (Registration, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, record := range r.artifacts {
+		for _, receipt := range record.Receipts {
+			if receipt.Key == key {
+				return r.registrationFromReceipt(receipt), true
+			}
+		}
+	}
+	return Registration{}, false
+}
+
+func (r *Registry) register(options RegisterOptions, receiptKey string) (Registration, error) {
 	if r == nil {
 		return Registration{}, errors.New("artifact hosting is unavailable")
 	}
@@ -360,11 +438,15 @@ func (r *Registry) Register(options RegisterOptions) (Registration, error) {
 	if record.Kind == "directory" {
 		withheld, withheldMore = inspectDirectory(record.RootPath)
 	}
-	registration, err := r.commit(record)
+	registration, err := r.commit(record, receiptKey, withheld, withheldMore)
 	if err != nil {
 		return Registration{}, err
 	}
-	registration.Withheld, registration.WithheldMore = withheld, withheldMore
+	// The bounded safety projection is part of the public registration for both
+	// ordinary calls and operation-backed calls. Operation readback must return
+	// the same fields as the first response, including withheld diagnostics.
+	registration.Withheld = append([]WithheldAsset(nil), withheld...)
+	registration.WithheldMore = withheldMore
 	for _, asset := range withheld {
 		r.noteWithheld(registration.ID, asset.Path, asset.Reason)
 	}
@@ -379,16 +461,57 @@ func (r *Registry) RegisterCapturedHTML(label string, content []byte) (Registrat
 	if r == nil {
 		return Registration{}, errors.New("artifact hosting is unavailable")
 	}
+	if err := validateCapturedHTML(content); err != nil {
+		return Registration{}, err
+	}
+	root, sourcePath, err := r.captureHTML(label, content)
+	if err != nil {
+		return Registration{}, err
+	}
+	return r.Register(RegisterOptions{BaseDir: root, SourcePath: sourcePath, Label: label})
+}
+
+// RegisterCapturedHTMLForOperation is the operation-backed boundary for a
+// captured visualization. It checks the durable registry receipt before
+// touching the capture file, then commits the bounded public Registration with
+// the same one-way operation key used by ReadOperation.
+func (r *Registry) RegisterCapturedHTMLForOperation(label string, content []byte, operationID, requestDigest string) (Registration, error) {
+	if r == nil {
+		return Registration{}, errors.New("artifact hosting is unavailable")
+	}
+	key, err := artifactReceiptKey(operationID, requestDigest)
+	if err != nil {
+		return Registration{}, err
+	}
+	r.receiptMu.Lock()
+	defer r.receiptMu.Unlock()
+	if registration, found := r.readOperationKey(key); found {
+		return registration, nil
+	}
+	if err := validateCapturedHTML(content); err != nil {
+		return Registration{}, err
+	}
+	root, sourcePath, err := r.captureHTML(label, content)
+	if err != nil {
+		return Registration{}, err
+	}
+	return r.register(RegisterOptions{BaseDir: root, SourcePath: sourcePath, Label: label}, key)
+}
+
+func validateCapturedHTML(content []byte) error {
 	if len(content) == 0 {
-		return Registration{}, errors.New("captured HTML is empty")
+		return errors.New("captured HTML is empty")
 	}
 	if len(content) > maxCapturedHTMLBytes {
-		return Registration{}, fmt.Errorf("captured HTML exceeds the %d-byte limit", maxCapturedHTMLBytes)
+		return fmt.Errorf("captured HTML exceeds the %d-byte limit", maxCapturedHTMLBytes)
 	}
+	return nil
+}
 
+func (r *Registry) captureHTML(label string, content []byte) (string, string, error) {
 	root := filepath.Join(filepath.Dir(r.path), "visualizations")
 	if err := os.MkdirAll(root, 0o700); err != nil {
-		return Registration{}, fmt.Errorf("initialize captured visualization storage: %w", err)
+		return "", "", fmt.Errorf("initialize captured visualization storage: %w", err)
 	}
 	seed := append([]byte(strings.TrimSpace(label)+"\x00"), content...)
 	sum := sha256.Sum256(seed)
@@ -397,37 +520,47 @@ func (r *Registry) RegisterCapturedHTML(label string, content []byte) (Registrat
 	if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
 		tmp, err := os.CreateTemp(root, ".visualize-*.tmp")
 		if err != nil {
-			return Registration{}, fmt.Errorf("create captured visualization: %w", err)
+			return "", "", fmt.Errorf("create captured visualization: %w", err)
 		}
 		tmpName := tmp.Name()
 		defer os.Remove(tmpName)
 		if err := tmp.Chmod(0o600); err != nil {
 			_ = tmp.Close()
-			return Registration{}, fmt.Errorf("secure captured visualization: %w", err)
+			return "", "", fmt.Errorf("secure captured visualization: %w", err)
 		}
 		if _, err := tmp.Write(content); err != nil {
 			_ = tmp.Close()
-			return Registration{}, fmt.Errorf("write captured visualization: %w", err)
+			return "", "", fmt.Errorf("write captured visualization: %w", err)
 		}
 		if err := tmp.Close(); err != nil {
-			return Registration{}, fmt.Errorf("close captured visualization: %w", err)
+			return "", "", fmt.Errorf("close captured visualization: %w", err)
 		}
 		if err := os.Rename(tmpName, sourcePath); err != nil {
-			return Registration{}, fmt.Errorf("commit captured visualization: %w", err)
+			return "", "", fmt.Errorf("commit captured visualization: %w", err)
 		}
 	} else if err != nil {
-		return Registration{}, fmt.Errorf("inspect captured visualization: %w", err)
+		return "", "", fmt.Errorf("inspect captured visualization: %w", err)
 	}
-	return r.Register(RegisterOptions{BaseDir: root, SourcePath: sourcePath, Label: label})
+	return root, sourcePath, nil
 }
 
-func (r *Registry) commit(record artifactRecord) (Registration, error) {
+func (r *Registry) commit(record artifactRecord, receiptKey string, withheld []WithheldAsset, withheldMore int) (Registration, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if receiptKey != "" {
+		for _, existing := range r.artifacts {
+			for _, receipt := range existing.Receipts {
+				if receipt.Key == receiptKey {
+					return r.registrationFromReceipt(receipt), nil
+				}
+			}
+		}
+	}
 	for id, existing := range r.artifacts {
 		if existing.SourcePath == record.SourcePath && existing.Entry == record.Entry && existing.Kind == record.Kind {
 			record.ID = id
 			record.CreatedAt = existing.CreatedAt
+			record.Receipts = append([]artifactReceipt(nil), existing.Receipts...)
 			break
 		}
 	}
@@ -436,6 +569,19 @@ func (r *Registry) commit(record artifactRecord) (Registration, error) {
 		record.CreatedAt = r.now().UTC().Format(time.RFC3339Nano)
 	}
 	record.UpdatedAt = r.now().UTC().Format(time.RFC3339Nano)
+	if receiptKey != "" {
+		registration := r.registration(record)
+		registration.Withheld = append([]WithheldAsset(nil), withheld...)
+		registration.WithheldMore = withheldMore
+		localURL := registration.LocalURL
+		record.Receipts = append(record.Receipts, artifactReceipt{
+			Key: receiptKey, ID: record.ID, Label: record.Label, Entry: record.Entry, Kind: record.Kind,
+			ContentType: registration.ContentType, URLPath: registration.URLPath, LocalURL: &localURL,
+			Markdown:  registration.Markdown,
+			CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
+			Withheld: append([]WithheldAsset(nil), withheld...), WithheldMore: withheldMore,
+		})
+	}
 	previous, existed := r.artifacts[record.ID]
 	r.artifacts[record.ID] = record
 	if err := r.persistLocked(); err != nil {
@@ -446,7 +592,25 @@ func (r *Registry) commit(record artifactRecord) (Registration, error) {
 		}
 		return Registration{}, err
 	}
-	return r.registration(record), nil
+	registration := r.registration(record)
+	registration.Withheld = append([]WithheldAsset(nil), withheld...)
+	registration.WithheldMore = withheldMore
+	return registration, nil
+}
+
+func artifactReceiptKey(operationID, requestDigest string) (string, error) {
+	operationID = strings.TrimSpace(operationID)
+	requestDigest = strings.ToLower(strings.TrimSpace(requestDigest))
+	if operationID == "" || len(operationID) > 256 || requestDigest == "" || len(requestDigest) > 256 {
+		return "", errors.New("artifact operation readback identity is invalid")
+	}
+	for _, char := range requestDigest {
+		if char < '0' || char > 'f' || (char > '9' && char < 'a') {
+			return "", errors.New("artifact operation readback digest is invalid")
+		}
+	}
+	sum := sha256.Sum256([]byte("workass-artifact-receipt-v1\x00" + operationID + "\x00" + requestDigest))
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (r *Registry) ServeHTTP(w http.ResponseWriter, request *http.Request) {
@@ -575,16 +739,39 @@ func isTextualArtifact(extension string) bool {
 }
 
 func (r *Registry) registration(record artifactRecord) Registration {
-	path := PathPrefix + "/" + record.ID + "/"
+	return r.registrationFields(record.ID, record.Label, record.Kind, record.Entry, record.CreatedAt, record.UpdatedAt)
+}
+
+func (r *Registry) registrationFromReceipt(receipt artifactReceipt) Registration {
+	registration := r.registrationFields(receipt.ID, receipt.Label, receipt.Kind, receipt.Entry, receipt.CreatedAt, receipt.UpdatedAt)
+	if receipt.ContentType != "" {
+		registration.ContentType = receipt.ContentType
+	}
+	if receipt.URLPath != "" {
+		registration.URLPath = receipt.URLPath
+	}
+	if receipt.LocalURL != nil {
+		registration.LocalURL = *receipt.LocalURL
+	}
+	if receipt.Markdown != "" {
+		registration.Markdown = receipt.Markdown
+	}
+	registration.Withheld = append([]WithheldAsset(nil), receipt.Withheld...)
+	registration.WithheldMore = receipt.WithheldMore
+	return registration
+}
+
+func (r *Registry) registrationFields(id, label, kind, entry, createdAt, updatedAt string) Registration {
+	path := PathPrefix + "/" + id + "/"
 	localURL := ""
 	if r.origin != "" {
 		localURL = r.origin + path
 	}
 	return Registration{
-		ID: record.ID, Label: record.Label, Kind: record.Kind, Entry: record.Entry,
-		ContentType: artifactContentType(record.Entry), URLPath: path, LocalURL: localURL,
-		Markdown:  artifactMarkdown(record.Label, record.Entry, path),
-		CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
+		ID: id, Label: label, Kind: kind, Entry: entry,
+		ContentType: artifactContentType(entry), URLPath: path, LocalURL: localURL,
+		Markdown:  artifactMarkdown(label, entry, path),
+		CreatedAt: createdAt, UpdatedAt: updatedAt,
 	}
 }
 
@@ -701,9 +888,38 @@ func validStoredRecord(record artifactRecord) bool {
 	source := filepath.Clean(record.SourcePath)
 	root := filepath.Clean(record.RootPath)
 	if record.Kind == "file" {
-		return filepath.Dir(source) == root && filepath.Base(source) == entry
+		if filepath.Dir(source) != root || filepath.Base(source) != entry {
+			return false
+		}
+	} else if source != root {
+		return false
 	}
-	return source == root
+	for _, receipt := range record.Receipts {
+		if len(receipt.Key) != sha256.Size*2 || safeID(receipt.Key) != receipt.Key ||
+			receipt.ID != record.ID || receipt.Label == "" || receipt.Entry != record.Entry || receipt.Kind != record.Kind {
+			return false
+		}
+		if _, err := hex.DecodeString(receipt.Key); err != nil {
+			return false
+		}
+		if (receipt.ContentType != "" && !validReceiptField(receipt.ContentType)) ||
+			(receipt.URLPath != "" && (receipt.URLPath != PathPrefix+"/"+record.ID+"/" || strings.Contains(receipt.URLPath, "://"))) ||
+			(receipt.LocalURL != nil && !validReceiptField(*receipt.LocalURL)) ||
+			(receipt.Markdown != "" && !validReceiptField(receipt.Markdown)) ||
+			len(receipt.Withheld) > maxWithheldReported || receipt.WithheldMore < 0 || receipt.WithheldMore > maxInspectedEntries {
+			return false
+		}
+		for _, asset := range receipt.Withheld {
+			if !validReceiptField(asset.Path) || !validReceiptField(asset.Reason) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validReceiptField(value string) bool {
+	return len([]byte(value)) <= maxReceiptFieldBytes && !strings.ContainsAny(value, "\x00\r\n")
 }
 
 func canonicalDirectory(path string) (string, error) {

@@ -16,23 +16,32 @@ import (
 type Manager struct {
 	opts Options
 
-	mu                          sync.Mutex
-	stream                      streamStats
-	bridges                     map[string]*Bridge
-	sessionBridge               map[string]*Bridge
-	sessionProvider             map[string]string
-	chatProviders               map[string]string
-	nativeSessions              *nativeSessionLedger
-	agentOwners                 map[string]agentOwnerBinding
-	agentOwnerBySession         map[string]string
-	providers                   map[string]*providerRuntime
-	providerOrder               []string
-	providerRegistry            *providercontract.Registry
-	providerRegistryErr         error
-	providerLaneMu              sync.RWMutex
-	providerLanesBySession      map[string]*managerLane
-	providerLanesByJob          map[string]*managerLane
-	providerLaneManagedJobs     map[string]struct{}
+	mu                      sync.Mutex
+	stream                  streamStats
+	bridges                 map[string]*Bridge
+	sessionBridge           map[string]*Bridge
+	sessionProvider         map[string]string
+	chatProviders           map[string]string
+	nativeSessions          *nativeSessionLedger
+	agentOwners             map[string]agentOwnerBinding
+	agentOwnerBySession     map[string]string
+	providers               map[string]*providerRuntime
+	providerOrder           []string
+	providerRegistry        *providercontract.Registry
+	providerRegistryErr     error
+	providerLaneMu          sync.RWMutex
+	providerLanesBySession  map[string]*managerLane
+	providerLanesByJob      map[string]*managerLane
+	providerLaneManagedJobs map[string]struct{}
+	// providerLaneClosedJobs retains only immutable ids, never lane/bridge
+	// pointers. Late provider callbacks must remain fail-closed for the daemon
+	// lifetime, but terminal tombstones must not pin every historical lane.
+	providerLaneClosedJobs map[string]struct{}
+	// providerPublicationMu spans normalized observation, durable ACK, and the
+	// frozen Broadcast call. It is deliberately non-reentrant: a publication
+	// callback must not synchronously re-enter Manager.emit, or it could publish
+	// a later sequence ahead of the callback that owns this boundary.
+	providerPublicationMu       sync.Mutex
 	providerAdmissionMu         sync.Mutex
 	providerAdmissions          map[string]map[string]any
 	providerAdmissionOrder      []string
@@ -64,6 +73,7 @@ type Manager struct {
 	spareSessions               []spareRecord
 	spareWarming                map[string]int
 	spareBlocked                map[string]bool
+	providerStartupReady        bool
 	usageBySession              map[string]contextUsage
 	crashRecoveries             map[string]time.Time
 	// commandCatalogs is the memory-only Claude command-catalog cache, keyed by
@@ -77,25 +87,29 @@ type Manager struct {
 	subagentSeq     int64
 	agentOwnerSeq   int64
 
-	jobMu                 sync.Mutex
-	jobEndMu              sync.RWMutex
-	jobEndFunc            func(tabID, chatID string)
-	sessionRefreshMu      sync.RWMutex
-	sessionRefreshFunc    func(payload map[string]any)
-	updateMu              sync.Mutex
-	updateCheckMu         sync.Mutex
-	updateCheckRunning    bool
-	updateCheckCancel     context.CancelFunc
-	updateCheckWG         sync.WaitGroup
-	planUsageRefreshMu    sync.Mutex
-	planUsageRefreshes    map[string]*planUsageRefreshRun
-	planUsageRefreshWG    sync.WaitGroup
-	receiptMu             sync.Mutex
-	harnessTurns          *harnessTurnStore
-	spawnedWorkMu         sync.Mutex
-	spawnedWorkCommitMu   sync.Mutex
-	spawnedWork           map[string]*spawnedWorkRecord
-	spawnedCandidates     map[string]spawnedWorkCandidate
+	jobMu               sync.Mutex
+	jobEndMu            sync.RWMutex
+	jobEndFunc          func(tabID, chatID string)
+	sessionRefreshMu    sync.RWMutex
+	sessionRefreshFunc  func(payload map[string]any)
+	updateMu            sync.Mutex
+	updateCheckMu       sync.Mutex
+	updateCheckRunning  bool
+	updateCheckCancel   context.CancelFunc
+	updateCheckWG       sync.WaitGroup
+	planUsageRefreshMu  sync.Mutex
+	planUsageRefreshes  map[string]*planUsageRefreshRun
+	planUsageRefreshWG  sync.WaitGroup
+	receiptMu           sync.Mutex
+	harnessTurns        *harnessTurnStore
+	spawnedWorkMu       sync.Mutex
+	spawnedWorkCommitMu sync.Mutex
+	spawnedWork         map[string]*spawnedWorkRecord
+	spawnedCandidates   map[string]spawnedWorkCandidate
+	// spawnedWorkPruned fences a legacy/exact chat pair after its executor
+	// evidence has been retired. A late provider callback must not recreate a
+	// cache file after the cutover cleanup receipt has committed.
+	spawnedWorkPruned     map[[2]string]struct{}
 	spawnedWorkObserverMu sync.RWMutex
 	spawnedWorkObserver   func(string, string, []SpawnedWorkItem) (SpawnedWorkActorProjection, error)
 	resetMu               sync.Mutex
@@ -202,6 +216,7 @@ func NewManager(opts Options) *Manager {
 		providerLanesBySession:  make(map[string]*managerLane),
 		providerLanesByJob:      make(map[string]*managerLane),
 		providerLaneManagedJobs: make(map[string]struct{}),
+		providerLaneClosedJobs:  make(map[string]struct{}),
 		providerAdmissions:      make(map[string]map[string]any),
 		jobs:                    make(map[string]*Job),
 		finishedJobIDs:          make(map[string]struct{}),
@@ -215,12 +230,14 @@ func NewManager(opts Options) *Manager {
 		providerUpdateProgress:  make(map[string]ProviderUpdateProgress),
 		spareWarming:            make(map[string]int),
 		spareBlocked:            make(map[string]bool),
+		providerStartupReady:    !opts.DeferProviderStartup,
 		usageBySession:          make(map[string]contextUsage),
 		planUsageByProvider:     make(map[string]PlanUsageSnapshot),
 		planUsageRefreshes:      make(map[string]*planUsageRefreshRun),
 		harnessTurns:            newHarnessTurnStore(),
 		spawnedWork:             make(map[string]*spawnedWorkRecord),
 		spawnedCandidates:       make(map[string]spawnedWorkCandidate),
+		spawnedWorkPruned:       make(map[[2]string]struct{}),
 		crashRecoveries:         make(map[string]time.Time),
 		commandCatalogs:         make(map[string]*commandCatalogEntry),
 		envBySession:            make(map[string]*chatEnvTracker),
@@ -241,11 +258,32 @@ func NewManager(opts Options) *Manager {
 	go m.planUsageLoop()
 	go m.spawnedWorkLoop()
 	go m.mcpFanoutLoop()
-	if opts.SpareSessions > 0 {
+	if opts.SpareSessions > 0 && m.providerStartupReady {
 		m.WarmSpareSessions()
 		go m.spareLoop()
 	}
 	return m
+}
+
+// StartProviderStartup releases provider-owned startup work after the daemon's
+// own HTTPS/MCP listener is ready. It is deliberately idempotent so failure
+// cleanup and supervised handoffs can safely call the release boundary once.
+func (m *Manager) StartProviderStartup() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	if m.providerStartupReady {
+		m.mu.Unlock()
+		return
+	}
+	m.providerStartupReady = true
+	startSpareLoop := m.opts.SpareSessions > 0
+	m.mu.Unlock()
+	if startSpareLoop {
+		m.WarmSpareSessions()
+		go m.spareLoop()
+	}
 }
 
 func (m *Manager) SetJobEndFunc(fn func(tabID, chatID string)) {
@@ -775,9 +813,10 @@ func (m *Manager) CloseSessionAndForget(ctx context.Context, sessionID string) b
 // provider bridge and removes every hibernated native provider binding for the
 // immutable tab+conversation pair; deleting only the currently live session
 // would let an older provider thread reappear later.
-func (m *Manager) ForgetChat(ctx context.Context, tabID, chatID string) bool {
+func (m *Manager) ForgetChat(ctx context.Context, tabID, chatID string, operationID providercontract.OperationID) bool {
 	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
-	if tabID == "" || chatID == "" {
+	operationID = providercontract.NormalizeOperationID(string(operationID))
+	if tabID == "" || chatID == "" || operationID == "" {
 		return false
 	}
 	m.cancelAndDrainSubagentsForChat(chatID, tabID, 5*time.Second)
@@ -832,10 +871,16 @@ func (m *Manager) Reset() bool {
 	m.crashRecoveries = make(map[string]time.Time)
 	m.commandCatalogs = make(map[string]*commandCatalogEntry)
 	m.mu.Unlock()
+	m.spawnedWorkMu.Lock()
+	m.spawnedWork = make(map[string]*spawnedWorkRecord)
+	m.spawnedCandidates = make(map[string]spawnedWorkCandidate)
+	m.spawnedWorkPruned = make(map[[2]string]struct{})
+	m.spawnedWorkMu.Unlock()
 	m.providerLaneMu.Lock()
 	m.providerLanesBySession = make(map[string]*managerLane)
 	m.providerLanesByJob = make(map[string]*managerLane)
 	m.providerLaneManagedJobs = make(map[string]struct{})
+	m.providerLaneClosedJobs = make(map[string]struct{})
 	m.providerLaneMu.Unlock()
 	m.resetChatEnv()
 	for _, bridge := range bridges {
@@ -1251,7 +1296,6 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		})
 	}
 	if controlResult.CurrentModelID != "" {
-		job.startOpts.ModelID = controlResult.CurrentModelID
 		if controlsErr == nil && m.nativeSessions != nil {
 			m.nativeSessions.updateControls(job.TabID, job.ChatID, job.ProviderID, job.SessionID, controlResult.CurrentModelID, "")
 		}
@@ -1266,7 +1310,6 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		opts.ModelID = controlResult.AppliedModelID
 	}
 	if controlResult.CurrentModeID != "" {
-		job.startOpts.ModeID = controlResult.CurrentModeID
 		opts.ModeID = controlResult.CurrentModeID
 	}
 	if activeBridge.markSeeded(job.SessionID) {
@@ -1957,6 +2000,15 @@ func (m *Manager) cancelPermissionsForSession(sessionID string) {
 }
 
 func (m *Manager) emit(channel string, payload any) {
+	if m == nil {
+		return
+	}
+	// Keep normalized observation, its durable actor ACK, and frozen publication
+	// in one non-reentrant critical section. Without this boundary a later
+	// provider callback can receive its ACK and enter Broadcast while an earlier
+	// callback is still finishing its own publication.
+	m.providerPublicationMu.Lock()
+	defer m.providerPublicationMu.Unlock()
 	if err := m.observeProviderLaneEvent(channel, payload); err != nil {
 		m.opts.Logf("provider event rejected before frozen-wire publication", map[string]any{
 			"channel": channel, "error": redactSensitiveText(err.Error()),

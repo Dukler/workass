@@ -374,6 +374,10 @@ func (m *Manager) allBridges() []*Bridge {
 
 func (m *Manager) WarmSpareSessions() {
 	m.mu.Lock()
+	if !m.providerStartupReady {
+		m.mu.Unlock()
+		return
+	}
 	target := m.opts.SpareSessions
 	for _, providerID := range m.enabledProviderIDsLocked() {
 		// One failed prewarm must never become a process respawn loop. Keep at

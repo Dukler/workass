@@ -19,7 +19,7 @@ type StateStore interface {
 
 type FileStore struct{ Path string }
 
-const currentStateEnvelopeVersion = 16
+const currentStateEnvelopeVersion = 19
 
 type stateEnvelope struct {
 	Version int   `json:"v"`
@@ -104,6 +104,12 @@ func (s FileStore) Load(chatID string) (State, bool, error) {
 	if strings.TrimSpace(envelope.State.ChatID) != strings.TrimSpace(chatID) {
 		return State{}, false, errors.New("chat state file belongs to another chat")
 	}
+	if envelope.Version <= 16 {
+		// Schema v17 adds the provider-neutral terminal chat.cancel receipt map.
+		// Older actors have no such field; initialize it without inferring any
+		// historical result from transient manager state.
+		normalizeCancelMutationReceipts(&envelope.State)
+	}
 	normalizeStateMaps(&envelope.State)
 	if envelope.Version == 1 {
 		normalizeVersionOneState(&envelope.State)
@@ -142,6 +148,9 @@ func (s FileStore) Load(chatID string) (State, bool, error) {
 	}
 	if envelope.Version <= 15 && envelope.State.WorkspaceMutationReceipts == nil {
 		envelope.State.WorkspaceMutationReceipts = make(map[provider.OperationID]WorkspaceMutationReceipt)
+	}
+	if envelope.Version <= 17 && envelope.State.AgentWaitObservationReceipts == nil {
+		envelope.State.AgentWaitObservationReceipts = make(map[provider.OperationID]AgentWaitObservationReceipt)
 	}
 	if err := envelope.State.Validate(); err != nil {
 		return State{}, false, fmt.Errorf("validate chat state: %w", err)
@@ -250,6 +259,10 @@ func normalizeStateMaps(state *State) {
 	if state.LaneSelectionMutationReceipts == nil {
 		state.LaneSelectionMutationReceipts = make(map[provider.OperationID]LaneSelectionMutationReceipt)
 	}
+	if state.AgentWaitObservationReceipts == nil {
+		state.AgentWaitObservationReceipts = make(map[provider.OperationID]AgentWaitObservationReceipt)
+	}
+	normalizeCancelMutationReceipts(state)
 	if state.Tools == nil {
 		state.Tools = make(map[string]ToolState)
 	}
@@ -270,6 +283,12 @@ func normalizeStateMaps(state *State) {
 	}
 	if state.Transport == nil {
 		state.Transport = make(map[provider.LaneID]provider.TransportHealthEvent)
+	}
+}
+
+func normalizeCancelMutationReceipts(state *State) {
+	if state.CancelMutationReceipts == nil {
+		state.CancelMutationReceipts = make(map[provider.OperationID]CancelMutationReceipt)
 	}
 }
 

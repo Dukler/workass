@@ -226,6 +226,18 @@ func spawnedWorkKey(tabID, chatID, taskID string) string {
 	return strings.TrimSpace(tabID) + "\x00" + strings.TrimSpace(chatID) + "\x00" + normalizeSpawnedWorkTaskID(taskID)
 }
 
+func spawnedWorkPair(tabID, chatID string) [2]string {
+	return [2]string{strings.TrimSpace(tabID), strings.TrimSpace(chatID)}
+}
+
+func (m *Manager) spawnedWorkPairPrunedLocked(tabID, chatID string) bool {
+	if m == nil {
+		return false
+	}
+	_, pruned := m.spawnedWorkPruned[spawnedWorkPair(tabID, chatID)]
+	return pruned
+}
+
 func spawnedCandidateKey(sessionID, toolCallID string) string {
 	return strings.TrimSpace(sessionID) + "\x00" + strings.TrimSpace(toolCallID)
 }
@@ -379,6 +391,12 @@ func (m *Manager) RegisterExternalWork(opts ExternalWorkRegistrationOptions) (ma
 	if err != nil {
 		return nil, err
 	}
+	m.spawnedWorkMu.Lock()
+	pruned := m.spawnedWorkPairPrunedLocked(tabID, chatID)
+	m.spawnedWorkMu.Unlock()
+	if pruned {
+		return nil, errors.New("external work belongs to a retired chat attachment")
+	}
 	label := compactText(redactSensitiveText(opts.Label), 240)
 	if label == "" {
 		return nil, errors.New("external work label is required")
@@ -395,7 +413,11 @@ func (m *Manager) RegisterExternalWork(opts ExternalWorkRegistrationOptions) (ma
 		}
 		m.spawnedWorkMu.Lock()
 		_, exists := m.spawnedWork[spawnedWorkKey(tabID, chatID, workID)]
+		pruned = m.spawnedWorkPairPrunedLocked(tabID, chatID)
 		m.spawnedWorkMu.Unlock()
+		if pruned {
+			return nil, errors.New("external work belongs to a retired chat attachment")
+		}
 		if !exists {
 			break
 		}
@@ -458,6 +480,10 @@ func (m *Manager) RegisterExternalWork(opts ExternalWorkRegistrationOptions) (ma
 	}
 	rec := &spawnedWorkRecord{Item: item, ExternalDoneFile: doneFile, SawPID: opts.PID != nil}
 	m.spawnedWorkMu.Lock()
+	if m.spawnedWorkPairPrunedLocked(tabID, chatID) {
+		m.spawnedWorkMu.Unlock()
+		return nil, errors.New("external work belongs to a retired chat attachment")
+	}
 	m.spawnedWork[spawnedWorkKey(tabID, chatID, workID)] = rec
 	m.spawnedWorkMu.Unlock()
 	m.commitSpawnedWorkChange(tabID, chatID)
@@ -664,6 +690,9 @@ func (m *Manager) upsertSpawnedWorkLocked(candidate spawnedWorkCandidate, taskID
 	if candidate.TabID == "" || candidate.ChatID == "" || taskID == "" {
 		return nil, false
 	}
+	if m.spawnedWorkPairPrunedLocked(candidate.TabID, candidate.ChatID) {
+		return nil, false
+	}
 	key := spawnedWorkKey(candidate.TabID, candidate.ChatID, taskID)
 	rec := m.spawnedWork[key]
 	changed := false
@@ -779,6 +808,10 @@ func (m *Manager) registerSubagentSpawnedWork(tabID, chatID string, run Subagent
 		item.OriginOperationID = string(lane.operationForJob(run.RootJobID))
 	}
 	m.spawnedWorkMu.Lock()
+	if m.spawnedWorkPairPrunedLocked(tabID, chatID) {
+		m.spawnedWorkMu.Unlock()
+		return
+	}
 	m.spawnedWork[spawnedWorkKey(tabID, chatID, run.ID)] = &spawnedWorkRecord{Item: item}
 	m.spawnedWorkMu.Unlock()
 	m.commitSpawnedWorkChange(tabID, chatID)
@@ -1211,6 +1244,12 @@ func (m *Manager) commitSpawnedWorkChange(tabID, chatID string) {
 	// older snapshot after a newer one.
 	m.spawnedWorkCommitMu.Lock()
 	defer m.spawnedWorkCommitMu.Unlock()
+	m.spawnedWorkMu.Lock()
+	pruned := m.spawnedWorkPairPrunedLocked(tabID, chatID)
+	m.spawnedWorkMu.Unlock()
+	if pruned {
+		return
+	}
 	m.persistSpawnedWorkSnapshot(tabID, chatID)
 	m.persistNewSpawnedWorkReceipts(tabID, chatID)
 	m.touchSpawnedWorkBridgeActivity(tabID, chatID, time.Now())
@@ -1252,6 +1291,87 @@ type ChatObligationProjection struct {
 	PromptID string `json:"promptId,omitempty"`
 }
 
+// SpawnedWorkPair is an executor-cache identity exposed only so the one-time
+// chat cutover can remove records whose persisted tab attachment no longer
+// matches the verified actor. It is not chat-state authority.
+type SpawnedWorkPair struct {
+	TabID  string
+	ChatID string
+}
+
+// LegacySpawnedWorkPairsForMigration returns the exact identities currently
+// loaded from the executor cache, plus identities still present in its durable
+// snapshot/receipt files. The migration boundary compares these pairs with
+// verified actor attachments; ordinary runtime code must use the actor
+// observer/read surfaces instead.
+func (m *Manager) LegacySpawnedWorkPairsForMigration() []SpawnedWorkPair {
+	if m == nil {
+		return nil
+	}
+	seen := make(map[[2]string]struct{})
+	add := func(tabID, chatID string) {
+		tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
+		if tabID != "" && chatID != "" {
+			seen[spawnedWorkPair(tabID, chatID)] = struct{}{}
+		}
+	}
+	m.spawnedWorkMu.Lock()
+	for _, rec := range m.spawnedWork {
+		if rec == nil {
+			continue
+		}
+		add(rec.Item.TabID, rec.Item.ChatID)
+	}
+	for _, candidate := range m.spawnedCandidates {
+		add(candidate.TabID, candidate.ChatID)
+	}
+	m.spawnedWorkMu.Unlock()
+	if strings.TrimSpace(m.opts.StateDir) != "" {
+		if paths, err := filepath.Glob(filepath.Join(m.opts.StateDir, "spawned-work", "*.json")); err == nil {
+			for _, path := range paths {
+				data, err := os.ReadFile(path)
+				if err != nil || len(data) > maxSpawnedWorkReceiptBytes {
+					continue
+				}
+				var items []spawnedWorkSnapshotItem
+				if json.Unmarshal(data, &items) != nil {
+					continue
+				}
+				for _, item := range items {
+					add(item.TabID, item.ChatID)
+				}
+			}
+		}
+		m.receiptMu.Lock()
+		if paths, err := filepath.Glob(filepath.Join(m.opts.StateDir, "spawned-work-receipts", "*.jsonl")); err == nil {
+			for _, path := range paths {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					continue
+				}
+				for _, line := range boundedSpawnedReceiptLines(data) {
+					var receipt SpawnedWorkReceipt
+					if json.Unmarshal(line, &receipt) == nil {
+						add(receipt.TabID, receipt.ChatID)
+					}
+				}
+			}
+		}
+		m.receiptMu.Unlock()
+	}
+	out := make([]SpawnedWorkPair, 0, len(seen))
+	for pair := range seen {
+		out = append(out, SpawnedWorkPair{TabID: pair[0], ChatID: pair[1]})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ChatID == out[j].ChatID {
+			return out[i].TabID < out[j].TabID
+		}
+		return out[i].ChatID < out[j].ChatID
+	})
+	return out
+}
+
 // InstallSpawnedWorkObserver installs the authoritative actor ingress once.
 // records remain executor/liveness details; their frozen event is published
 // only after the owning chat actor durably commits the complete snapshot.
@@ -1273,13 +1393,32 @@ func (m *Manager) InstallSpawnedWorkObserver(observer func(string, string, []Spa
 // authority, but leaving them behind would let startup reconciliation
 // resurrect work belonging to a deleted actor.
 func (m *Manager) DropSpawnedWorkForChat(tabID, chatID string) {
+	_ = m.dropSpawnedWorkPair(tabID, chatID)
+}
+
+// PruneSpawnedWorkForMigration is the one-time migration cleanup entry point.
+// It has an error-returning surface so the cutover receipt cannot claim that
+// disk cleanup completed after a failed rewrite. It is intentionally called
+// only by provider_chat_migration.go; runtime reads use actor projections.
+func (m *Manager) PruneSpawnedWorkForMigration(tabID, chatID string) error {
+	return m.dropSpawnedWorkPair(tabID, chatID)
+}
+
+func (m *Manager) dropSpawnedWorkPair(tabID, chatID string) error {
+	if m == nil {
+		return errors.New("spawned-work cleanup manager is unavailable")
+	}
 	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
 	if tabID == "" || chatID == "" {
-		return
+		return nil
 	}
 	m.spawnedWorkCommitMu.Lock()
 	defer m.spawnedWorkCommitMu.Unlock()
 	m.spawnedWorkMu.Lock()
+	if m.spawnedWorkPruned == nil {
+		m.spawnedWorkPruned = make(map[[2]string]struct{})
+	}
+	m.spawnedWorkPruned[spawnedWorkPair(tabID, chatID)] = struct{}{}
 	for key, rec := range m.spawnedWork {
 		if rec != nil && rec.Item.TabID == tabID && rec.Item.ChatID == chatID {
 			delete(m.spawnedWork, key)
@@ -1291,20 +1430,28 @@ func (m *Manager) DropSpawnedWorkForChat(tabID, chatID string) {
 		}
 	}
 	m.spawnedWorkMu.Unlock()
-	m.persistSpawnedWorkSnapshot(tabID, chatID)
-	m.dropSpawnedWorkReceipts(tabID, chatID)
+	if err := m.persistSpawnedWorkSnapshot(tabID, ""); err != nil {
+		return fmt.Errorf("persist surviving spawned-work cache for tab %q: %w", tabID, err)
+	}
+	if err := m.dropSpawnedWorkReceipts(tabID, chatID); err != nil {
+		return fmt.Errorf("remove spawned-work receipts for tab %q: %w", tabID, err)
+	}
+	return nil
 }
 
-func (m *Manager) dropSpawnedWorkReceipts(tabID, chatID string) {
+func (m *Manager) dropSpawnedWorkReceipts(tabID, chatID string) error {
 	path := m.spawnedWorkReceiptPath(tabID)
 	if path == "" {
-		return
+		return nil
 	}
 	m.receiptMu.Lock()
 	defer m.receiptMu.Unlock()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
 	}
 	kept := make([][]byte, 0)
 	for _, line := range boundedSpawnedReceiptLines(data) {
@@ -1317,13 +1464,13 @@ func (m *Manager) dropSpawnedWorkReceipts(tabID, chatID string) {
 	payload := []byte{}
 	if len(kept) > 0 {
 		payload = append(bytes.Join(kept, []byte("\n")), '\n')
-	}
-	tmp := path + ".tmp"
-	if os.WriteFile(tmp, payload, 0o600) == nil {
-		if os.Rename(tmp, path) != nil {
-			_ = os.Remove(tmp)
+	} else {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
+		return syncSpawnedWorkDirectory(filepath.Dir(path))
 	}
+	return writeSpawnedWorkFile(path, payload)
 }
 
 func (m *Manager) touchSpawnedWorkBridgeActivity(tabID, chatID string, now time.Time) {
@@ -1727,34 +1874,41 @@ func (m *Manager) spawnedWorkSnapshotPath(tabID string) string {
 	return filepath.Join(m.opts.StateDir, "spawned-work", safeArchiveName(tabID)+".json")
 }
 
-func (m *Manager) persistSpawnedWorkSnapshot(tabID, chatID string) {
+func (m *Manager) persistSpawnedWorkSnapshot(tabID, chatID string) error {
 	path := m.spawnedWorkSnapshotPath(tabID)
 	if path == "" {
-		return
+		return nil
 	}
 	items := m.listSpawnedWorkSnapshotItems(tabID, chatID)
 	data, err := json.Marshal(items)
 	if err != nil {
-		return
+		return err
 	}
-	_ = os.MkdirAll(filepath.Dir(path), 0o700)
-	tmp := path + ".tmp"
-	if os.WriteFile(tmp, data, 0o600) == nil {
-		_ = os.Rename(tmp, path)
+	if len(items) == 0 {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return syncSpawnedWorkDirectory(filepath.Dir(path))
 	}
+	return writeSpawnedWorkFile(path, data)
 }
 
 func (m *Manager) listSpawnedWorkSnapshotItems(tabID, chatID string) []spawnedWorkSnapshotItem {
 	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
-	if tabID == "" || chatID == "" {
+	if tabID == "" {
 		return []spawnedWorkSnapshotItem{}
 	}
+	// The file is tab-scoped, not chat-scoped. Keep every surviving chat pair
+	// when one pair changes; filtering by chat here would silently delete a
+	// current cache that shares a reused renderer tab.
+	_ = chatID
 	m.spawnedWorkMu.Lock()
 	out := make([]spawnedWorkSnapshotItem, 0)
 	for _, rec := range m.spawnedWork {
-		if rec.Item.TabID == tabID && rec.Item.ChatID == chatID {
-			out = append(out, spawnedWorkSnapshotItem{SpawnedWorkItem: rec.Item, DoneFile: rec.ExternalDoneFile})
+		if rec == nil || rec.Item.TabID != tabID {
+			continue
 		}
+		out = append(out, spawnedWorkSnapshotItem{SpawnedWorkItem: rec.Item, DoneFile: rec.ExternalDoneFile})
 	}
 	m.spawnedWorkMu.Unlock()
 	sort.SliceStable(out, func(i, j int) bool {
@@ -1764,6 +1918,60 @@ func (m *Manager) listSpawnedWorkSnapshotItems(tabID, chatID string) []spawnedWo
 		return out[i].StartedAt > out[j].StartedAt
 	})
 	return capSpawnedWorkSnapshotItemsPreservingRunning(out)
+}
+
+func syncSpawnedWorkDirectory(dir string) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return nil
+	}
+	file, err := os.Open(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		// Removing an already-absent snapshot is idempotent. There is no
+		// directory entry to flush when the tab has never had a snapshot.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
+}
+
+func writeSpawnedWorkFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".spawned-work-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	removeTemp := true
+	defer func() {
+		_ = tmp.Close()
+		if removeTemp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	removeTemp = false
+	return syncSpawnedWorkDirectory(dir)
 }
 
 func durableSpawnedWorkPriority(item SpawnedWorkItem) bool {

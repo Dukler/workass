@@ -138,6 +138,39 @@ func TestBrowserMCPListsToolsAndRoutesProviderNeutralCalls(t *testing.T) {
 	}
 }
 
+func TestBrowserMCPMutationCarriesOperationIdentityAndDigest(t *testing.T) {
+	dir := t.TempDir()
+	controlFile := filepath.Join(dir, "browser-control.json")
+	if err := os.WriteFile(controlFile, []byte(`{"version":1,"url":"http://workass-browser.invalid/rpc","token":"test-control-value"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	client := &http.Client{Transport: browserRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		body, _ := json.Marshal(map[string]any{
+			"id": payload["id"], "operationId": payload["operationId"], "requestDigest": payload["requestDigest"],
+			"receipt": true, "result": map[string]any{"clicked": true},
+		})
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+	result, err := callBrowserMCPTool(browserMCPCallParams{
+		Name: "workass_browser_click", Arguments: map[string]any{"operation_id": "agent-mcp:click-once", "tab_id": 42, "selector": "#save"},
+	}, browserMCPOptions{
+		ControlFile: controlFile, ChatID: "chat-a", HTTPClient: client,
+	}, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapFromAnyMain(result)["isError"] == true {
+		t.Fatalf("mutation result = %#v", result)
+	}
+	if payload["operationId"] != "agent-mcp:click-once" || len(browserString(payload["requestDigest"])) != 64 {
+		t.Fatalf("mutation identity = %#v", payload)
+	}
+}
+
 func TestBrowserMCPReturnsToolErrorWhenBrowserIsUnavailable(t *testing.T) {
 	client := &http.Client{Timeout: time.Second}
 	response, err := callBrowserMCPTool(browserMCPCallParams{

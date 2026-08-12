@@ -34,7 +34,7 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	schema := mapFromAnyMain(spawn["inputSchema"])
 	required := schema["required"].([]string)
 	properties := mapFromAnyMain(schema["properties"])
-	if len(required) != 1 || required[0] != "task" || properties["profile"] == nil ||
+	if len(required) != 2 || required[0] != "task" || required[1] != "operation_id" || properties["profile"] == nil ||
 		properties["permission_intent"] == nil || properties["cwd"] == nil {
 		t.Fatalf("spawn schema = %#v", schema)
 	}

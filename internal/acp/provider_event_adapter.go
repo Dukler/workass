@@ -70,6 +70,41 @@ func (m *Manager) providerLaneManagedJob(jobID string) bool {
 	return ok
 }
 
+// closeProviderLaneJob leaves a non-owning tombstone after the active job maps
+// are removed. Provider callbacks can outlive the manager Job and bridge maps;
+// a closed tombstone keeps their semantic identity fail-closed at the adapter
+// boundary instead of letting them fall through to raw frozen-wire publication.
+func (m *Manager) closeProviderLaneJob(lane *managerLane, jobID string) {
+	if m == nil || lane == nil {
+		return
+	}
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return
+	}
+	m.providerLaneMu.Lock()
+	m.providerLaneClosedJobs[jobID] = struct{}{}
+	m.providerLaneMu.Unlock()
+}
+
+func (m *Manager) providerLaneClosedJob(jobID string) bool {
+	if m == nil {
+		return false
+	}
+	m.providerLaneMu.RLock()
+	_, closed := m.providerLaneClosedJobs[strings.TrimSpace(jobID)]
+	m.providerLaneMu.RUnlock()
+	return closed
+}
+
+func (m *Manager) rejectClosedProviderLaneJob(jobID, eventFamily string) error {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" || !m.providerLaneClosedJob(jobID) {
+		return nil
+	}
+	return fmt.Errorf("late actor-owned %s event for closed provider job %q", eventFamily, jobID)
+}
+
 func (m *Manager) forgetProviderLaneManagedJob(jobID string) {
 	if m == nil {
 		return
@@ -241,12 +276,16 @@ func (m *Manager) payloadBelongsToProviderLane(payload map[string]any) bool {
 	if m == nil {
 		return false
 	}
-	if jobID := firstNonEmpty(asString(payload["jobId"]), asString(payload["id"])); jobID != "" && m.providerLaneManagedJob(jobID) {
-		return true
+	if jobID := firstNonEmpty(asString(payload["jobId"]), asString(payload["id"])); jobID != "" {
+		if m.providerLaneManagedJob(jobID) || m.providerLaneClosedJob(jobID) {
+			return true
+		}
 	}
 	if job := mapFromAny(payload["job"]); len(job) > 0 {
-		if jobID := asString(job["id"]); jobID != "" && m.providerLaneManagedJob(jobID) {
-			return true
+		if jobID := asString(job["id"]); jobID != "" {
+			if m.providerLaneManagedJob(jobID) || m.providerLaneClosedJob(jobID) {
+				return true
+			}
 		}
 		if m.providerLaneForSession(asString(job["sessionId"])) != nil {
 			return true
@@ -277,10 +316,21 @@ func (m *Manager) providerLaneForFrozenPayload(payload map[string]any) *managerL
 		if lane := m.providerLaneForJob(jobID); lane != nil {
 			return lane
 		}
+		// A closed job is deliberately not returned as a live lane here. The
+		// observe error still suppresses raw publication, but it must not try to
+		// emit a second protocol-failure event through an attachment whose job
+		// owner has already terminally settled.
+		if m.providerLaneClosedJob(jobID) {
+			return nil
+		}
 	}
 	if job := mapFromAny(payload["job"]); len(job) > 0 {
-		if lane := m.providerLaneForJob(asString(job["id"])); lane != nil {
+		jobID := strings.TrimSpace(asString(job["id"]))
+		if lane := m.providerLaneForJob(jobID); lane != nil {
 			return lane
+		}
+		if jobID != "" && m.providerLaneClosedJob(jobID) {
+			return nil
 		}
 		if lane := m.providerLaneForSession(asString(job["sessionId"])); lane != nil {
 			return lane
@@ -320,23 +370,30 @@ func (m *Manager) ProviderLaneOwnsFrozenEvent(channel string, raw any) bool {
 		if m.providerLaneForJob(asString(job["id"])) != nil {
 			return true
 		}
+		if m.providerLaneClosedJob(asString(job["id"])) {
+			return true
+		}
 		return m.providerLaneForSession(asString(job["sessionId"])) != nil
 	}
-	return m.providerLaneForJob(asString(payload["id"])) != nil
+	jobID := asString(payload["id"])
+	return m.providerLaneForJob(jobID) != nil || m.providerLaneClosedJob(jobID)
 }
 
 func (m *Manager) observeProviderLaneJobEvent(payload map[string]any) error {
 	switch strings.TrimSpace(asString(payload["type"])) {
 	case "start":
 		job := mapFromAny(payload["job"])
+		jobID := strings.TrimSpace(asString(job["id"]))
+		if err := m.rejectClosedProviderLaneJob(jobID, "start"); err != nil {
+			return err
+		}
 		lane := m.providerLaneForSession(asString(job["sessionId"]))
 		if lane == nil || lane.owner.TabID != strings.TrimSpace(asString(job["tabId"])) || lane.identity.ChatID != strings.TrimSpace(asString(job["chatId"])) {
-			if m.providerLaneManagedJob(asString(job["id"])) {
+			if m.providerLaneManagedJob(jobID) {
 				return errors.New("actor-owned start event lost its provider lane")
 			}
 			return nil
 		}
-		jobID := asString(job["id"])
 		// Actor-owned admissions bind the immutable operation before the public
 		// start event. Preserve it; UserMessageID is only the visible row id.
 		if lane.operationForJob(jobID) == "" {
@@ -346,6 +403,9 @@ func (m *Manager) observeProviderLaneJobEvent(payload map[string]any) error {
 		return nil
 	case "data":
 		jobID := strings.TrimSpace(asString(payload["id"]))
+		if err := m.rejectClosedProviderLaneJob(jobID, "data"); err != nil {
+			return err
+		}
 		lane := m.providerLaneForJob(jobID)
 		if lane == nil {
 			if m.providerLaneManagedJob(jobID) {
@@ -376,6 +436,9 @@ func (m *Manager) observeProviderLaneJobEvent(payload map[string]any) error {
 		})
 	case "assistant-media":
 		jobID := strings.TrimSpace(asString(payload["id"]))
+		if err := m.rejectClosedProviderLaneJob(jobID, "assistant-media"); err != nil {
+			return err
+		}
 		lane := m.providerLaneForJob(jobID)
 		if lane == nil {
 			if m.providerLaneManagedJob(jobID) {
@@ -416,6 +479,9 @@ func (m *Manager) observeProviderLaneJobEvent(payload map[string]any) error {
 	case "end":
 		job := mapFromAny(payload["job"])
 		jobID := strings.TrimSpace(asString(job["id"]))
+		if err := m.rejectClosedProviderLaneJob(jobID, "terminal"); err != nil {
+			return err
+		}
 		lane := m.providerLaneForJob(jobID)
 		if lane == nil {
 			lane = m.providerLaneForSession(asString(job["sessionId"]))
@@ -426,6 +492,11 @@ func (m *Manager) observeProviderLaneJobEvent(payload map[string]any) error {
 			}
 			return nil
 		}
+		m.closeProviderLaneJob(lane, jobID)
+		defer func() {
+			m.unbindProviderLaneJob(lane, jobID)
+			m.forgetProviderLaneManagedJob(jobID)
+		}()
 		operationID := lane.operationForJob(jobID)
 		if operationID == "" {
 			operationID = providercontract.NormalizeOperationID(asString(job["userMessageId"]))
@@ -460,14 +531,15 @@ func (m *Manager) observeProviderLaneJobEvent(payload map[string]any) error {
 				ConsumedSteerIDs: consumedSteerIDs, Attachments: attachments,
 			},
 		})
-		m.unbindProviderLaneJob(lane, jobID)
-		m.forgetProviderLaneManagedJob(jobID)
 		return err
 	case "turn-heartbeat":
 		// Explicitly transient liveness. It is never persisted or reconstructed.
 		return nil
 	}
 	jobID := strings.TrimSpace(firstNonEmpty(asString(payload["id"]), asString(mapFromAny(payload["job"])["id"])))
+	if err := m.rejectClosedProviderLaneJob(jobID, "unknown"); err != nil {
+		return err
+	}
 	if m.providerLaneManagedJob(jobID) {
 		return fmt.Errorf("actor-owned job event has unknown type %q", asString(payload["type"]))
 	}
@@ -476,6 +548,9 @@ func (m *Manager) observeProviderLaneJobEvent(payload map[string]any) error {
 
 func (m *Manager) observeProviderLaneACPEvent(payload map[string]any) error {
 	jobID := strings.TrimSpace(asString(payload["id"]))
+	if err := m.rejectClosedProviderLaneJob(jobID, "ACP"); err != nil {
+		return err
+	}
 	lane := m.providerLaneForJob(jobID)
 	if lane == nil {
 		if m.providerLaneManagedJob(jobID) {

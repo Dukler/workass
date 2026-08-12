@@ -172,7 +172,11 @@ const (
 
 // Hub owns the invoke handler registry and connected WebSocket clients.
 type Hub struct {
-	mu                sync.RWMutex
+	mu sync.RWMutex
+	// broadcastMu preserves one global event admission order. A saturated
+	// client applies backpressure at this boundary; later semantic frames may
+	// not overtake the frame currently waiting for queue capacity.
+	broadcastMu       sync.Mutex
 	handlers          map[string]Handler
 	clients           map[*client]struct{}
 	pending           map[string]*pendingAccess
@@ -197,8 +201,10 @@ type Hub struct {
 
 type client struct {
 	conn          net.Conn
+	enqueueMu     sync.Mutex
 	outMu         sync.Mutex
 	outbound      chan outboundFrame
+	outboundSpace chan struct{}
 	outboundBytes int
 	// Bytes of the queued bulk frame, if any; see outboundFrameIsBulk.
 	outboundBulkBytes int
@@ -362,10 +368,14 @@ func (h *Hub) Invoke(channel string, args []any) (result any, err error) {
 }
 
 // Broadcast sends an event frame to every approved client. Ordinary delivery
-// is queue-only, so one stalled socket cannot hold the daemon's visible stream;
-// controller-only delivery waits for the actual write to preserve authorization
-// and notification durability semantics.
+// is asynchronous while every bounded client queue has capacity. Saturation
+// applies lossless backpressure to the provider stream; it never disconnects a
+// healthy client merely to discard a typed event. Controller-only delivery
+// additionally waits for the actual write to preserve authorization and
+// notification durability semantics.
 func (h *Hub) Broadcast(channel string, payload any) {
+	h.broadcastMu.Lock()
+	defer h.broadcastMu.Unlock()
 	if _, ok := controllerOnlyEventChannels[channel]; ok && h.lease != nil {
 		delivered, enqueueElapsed := h.broadcastToController(channel, payload)
 		h.recordEventEnqueue(enqueueElapsed)
@@ -574,7 +584,7 @@ func (h *Hub) broadcastToController(channel string, payload any) (int, time.Dura
 		pending := make([]pendingWrite, 0, len(clients))
 		for _, c := range clients {
 			written := make(chan error, 1)
-			err := c.enqueueFrame(outboundFrame{payload: encoded, written: written, controllerOnly: true})
+			err := c.enqueueFrameWithBackpressure(outboundFrame{payload: encoded, written: written, controllerOnly: true})
 			if err != nil {
 				frames, bytes := c.outboundSnapshot()
 				h.logf("[wire] controller event dropped before write channel=%s queuedFrames=%d queuedBytes=%d", channel, frames, bytes)
@@ -618,7 +628,11 @@ func (h *Hub) broadcastWhere(channel string, payload any, include func(*client) 
 	}
 	h.mu.RUnlock()
 
-	delivered := 0
+	type admission struct {
+		client *client
+		err    error
+	}
+	selected := make([]*client, 0, len(clients))
 	for _, c := range clients {
 		if !c.readySnapshot() {
 			continue
@@ -626,9 +640,21 @@ func (h *Hub) broadcastWhere(channel string, payload any, include func(*client) 
 		if include != nil && !include(c) {
 			continue
 		}
-		if err := c.enqueue(encoded); err != nil {
+		selected = append(selected, c)
+	}
+	results := make(chan admission, len(selected))
+	for _, c := range selected {
+		go func(c *client) {
+			results <- admission{client: c, err: c.enqueueFrameWithBackpressure(outboundFrame{payload: encoded})}
+		}(c)
+	}
+	delivered := 0
+	for range selected {
+		result := <-results
+		if result.err != nil {
+			c := result.client
 			frames, bytes := c.outboundSnapshot()
-			h.logf("[wire] slow client dropped channel=%s queuedFrames=%d queuedBytes=%d", channel, frames, bytes)
+			h.logf("[wire] client event admission failed channel=%s queuedFrames=%d queuedBytes=%d err=%v", channel, frames, bytes, result.err)
 			h.drop(c)
 			continue
 		}
@@ -743,12 +769,13 @@ func AcceptKey(key string) string {
 
 func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 	c := &client{
-		conn:       conn,
-		outbound:   make(chan outboundFrame, outboundQueueFrameLimit),
-		done:       make(chan struct{}),
-		ip:         clientIP(r.RemoteAddr),
-		deviceName: deviceNameFromRequest(r),
-		userAgent:  strings.TrimSpace(r.UserAgent()),
+		conn:          conn,
+		outbound:      make(chan outboundFrame, outboundQueueFrameLimit),
+		outboundSpace: make(chan struct{}, 1),
+		done:          make(chan struct{}),
+		ip:            clientIP(r.RemoteAddr),
+		deviceName:    deviceNameFromRequest(r),
+		userAgent:     strings.TrimSpace(r.UserAgent()),
 	}
 	if h.lease == nil {
 		c.setAccessState(accessState{State: "approved"})
@@ -1419,6 +1446,7 @@ func (h *Hub) writeLoop(c *client) {
 			if outboundFrameIsBulk(len(frame.payload)) {
 				c.outboundBulkBytes -= len(frame.payload)
 			}
+			c.signalOutboundSpaceLocked()
 			c.outMu.Unlock()
 			if frame.written != nil {
 				frame.written <- err
@@ -1433,20 +1461,45 @@ func (h *Hub) writeLoop(c *client) {
 	}
 }
 
-// enqueue preserves per-client wire order without letting a slow or stale
-// connection delay healthy clients. A client that falls more than a bounded
-// backlog behind is disconnected and can recover from the authoritative
-// session snapshot on reconnect. A bulk frame (larger than the regular byte
-// budget — session:get in real profiles) is admitted one at a time alongside
-// that budget rather than against it: charging it to the shared budget made a
-// draining snapshot and live events evict each other, which is how a slow
-// client could never finish hydrating. No individual frame may exceed
-// outboundFrameByteLimit.
+// enqueue preserves per-client wire order for non-semantic frames. Semantic
+// event publication uses enqueueFrameWithBackpressure below: a full bounded
+// queue slows the producer and never becomes permission to discard an event.
+// A bulk frame (larger than the regular byte budget — session:get in real
+// profiles) is admitted one at a time alongside that budget. No individual
+// frame may exceed outboundFrameByteLimit.
 func (c *client) enqueue(frame []byte) error {
 	return c.enqueueFrame(outboundFrame{payload: frame})
 }
 
 func (c *client) enqueueFrame(frame outboundFrame) error {
+	c.enqueueMu.Lock()
+	defer c.enqueueMu.Unlock()
+	return c.tryEnqueueFrame(frame)
+}
+
+func (c *client) enqueueFrameWithBackpressure(frame outboundFrame) error {
+	c.enqueueMu.Lock()
+	defer c.enqueueMu.Unlock()
+	c.outMu.Lock()
+	if c.outboundSpace == nil {
+		c.outboundSpace = make(chan struct{}, 1)
+	}
+	space := c.outboundSpace
+	c.outMu.Unlock()
+	for {
+		err := c.tryEnqueueFrame(frame)
+		if !errors.Is(err, errOutboundQueueFull) {
+			return err
+		}
+		select {
+		case <-c.done:
+			return errClientClosed
+		case <-space:
+		}
+	}
+}
+
+func (c *client) tryEnqueueFrame(frame outboundFrame) error {
 	c.outMu.Lock()
 	defer c.outMu.Unlock()
 	select {
@@ -1476,6 +1529,16 @@ func (c *client) enqueueFrame(frame outboundFrame) error {
 		return nil
 	default:
 		return errOutboundQueueFull
+	}
+}
+
+func (c *client) signalOutboundSpaceLocked() {
+	if c.outboundSpace == nil {
+		return
+	}
+	select {
+	case c.outboundSpace <- struct{}{}:
+	default:
 	}
 }
 
@@ -1629,10 +1692,10 @@ func (c *client) sendEventWithScope(channel string, payload any, controllerOnly,
 	}
 	encoded := encodeTextFrame(frame)
 	if !wait {
-		return c.enqueueFrame(outboundFrame{payload: encoded, controllerOnly: controllerOnly})
+		return c.enqueueFrameWithBackpressure(outboundFrame{payload: encoded, controllerOnly: controllerOnly})
 	}
 	written := make(chan error, 1)
-	if err := c.enqueueFrame(outboundFrame{payload: encoded, written: written, controllerOnly: controllerOnly}); err != nil {
+	if err := c.enqueueFrameWithBackpressure(outboundFrame{payload: encoded, written: written, controllerOnly: controllerOnly}); err != nil {
 		return err
 	}
 	return c.waitForWrite(written)

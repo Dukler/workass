@@ -3,6 +3,8 @@ package acp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	providercontract "workass/internal/provider"
 )
 
 const (
@@ -91,7 +95,17 @@ func (m *Manager) restoreChatCheckpoint(ctx context.Context, chatID string, turn
 	if !ok {
 		return nil, structuredChatError("chat:rewind-not-found", "checkpoint not found", map[string]any{"chatId": chatID, "turnSeq": turnSeq})
 	}
+	return m.restoreChatCheckpointTarget(ctx, chatID, turnSeq, checkpoint)
+}
 
+func (m *Manager) restoreChatCheckpointTarget(ctx context.Context, chatID string, turnSeq int, checkpoint ChatCheckpoint) (map[string]any, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" || turnSeq <= 0 || checkpoint.TurnSeq != turnSeq {
+		return nil, structuredChatError("chat:rewind-invalid", "checkpoint target does not match the requested turn", map[string]any{"chatId": chatID, "turnSeq": turnSeq})
+	}
 	restorable := make([]ChatCheckpointRepo, 0, len(checkpoint.Repos))
 	for _, repo := range checkpoint.Repos {
 		if repo.Skipped || repo.Ref == "" || strings.TrimSpace(repo.Path) == "" {
@@ -144,10 +158,30 @@ func (m *Manager) restoreChatCheckpoint(ctx context.Context, chatID string, turn
 }
 
 // RestoreChatCheckpoint is the executor-only filesystem boundary used by the
-// durable chat actor. It emits no semantic event; the actor commits the result
-// before any renderer invalidation is published.
-func (m *Manager) RestoreChatCheckpoint(ctx context.Context, chatID string, turnSeq int) (map[string]any, error) {
-	return m.restoreChatCheckpoint(ctx, chatID, turnSeq)
+// durable chat actor. It consumes the exact checkpoint bytes selected by the
+// actor; it never reloads the manager checkpoint file by turn sequence. It
+// emits no semantic event; the actor commits the result before any renderer
+// invalidation is published.
+func (m *Manager) RestoreChatCheckpoint(ctx context.Context, chatID string, turnSeq int, checkpointPayload json.RawMessage, checkpointDigest string, operationID providercontract.OperationID) (map[string]any, error) {
+	operationID = providercontract.NormalizeOperationID(string(operationID))
+	checkpointDigest = strings.ToLower(strings.TrimSpace(checkpointDigest))
+	if operationID == "" || len(checkpointPayload) == 0 || checkpointDigest == "" {
+		return nil, errors.New("checkpoint restore requires a stable operation and immutable target")
+	}
+	sum := sha256.Sum256(checkpointPayload)
+	if hex.EncodeToString(sum[:]) != checkpointDigest {
+		return nil, errors.New("checkpoint restore target digest does not match its bytes")
+	}
+	var checkpoint ChatCheckpoint
+	if err := json.Unmarshal(checkpointPayload, &checkpoint); err != nil {
+		return nil, fmt.Errorf("decode checkpoint restore target: %w", err)
+	}
+	result, err := m.restoreChatCheckpointTarget(ctx, chatID, turnSeq, checkpoint)
+	if err != nil {
+		return nil, err
+	}
+	result["operationId"] = string(operationID)
+	return result, nil
 }
 
 // ChatRewind remains only for package-level compatibility tests while the old

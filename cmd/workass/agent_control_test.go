@@ -13,6 +13,7 @@ import (
 
 	"workass/internal/acp"
 	"workass/internal/artifacthost"
+	"workass/internal/chat"
 )
 
 func TestAgentControlIsInProcessAndCreatesNoLegacyDescriptor(t *testing.T) {
@@ -335,6 +336,96 @@ func TestAgentControlInvalidOwnerKeepsSubagentOwnershipError(t *testing.T) {
 	}
 }
 
+func TestAgentControlRejectsDeletedActorBeforeLiveManagerAuthorization(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := filepath.Join(t.TempDir(), "state")
+	const tabID, chatID, ownerKey = "deleted-owner-tab", "deleted-owner-chat", "deleted-owner-key"
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir,
+		Provider: acp.ProviderConfig{
+			ID: "mock", Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")},
+			CWD: root, Enabled: true, Label: "Workass Mock ACP",
+		},
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "deleted-owner-create",
+		"title": "Deleted owner", "cwd": root, "providerId": "mock",
+	}); err != nil {
+		t.Fatalf("create actor: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if _, err := manager.NewSession(ctx, acp.SessionOptions{
+		TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: root, AgentOwnerKey: ownerKey,
+	}); err != nil {
+		t.Fatalf("create live manager owner: %v", err)
+	}
+	if !manager.ValidateAgentOwner(ownerKey, chatID, tabID) {
+		t.Fatal("test manager owner was not live before actor deletion")
+	}
+	registry, err := artifacthost.New(filepath.Join(t.TempDir(), "artifacts"), "http://127.0.0.1:8788")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &agentControlHandler{
+		manager: manager, artifacts: registry,
+		chats: newChatControlCoordinator(manager, nil, runtime),
+	}
+	ownerValidations := 0
+	handler.validateOwner = func(string, string, string) bool {
+		ownerValidations++
+		return true
+	}
+	request := httptest.NewRequest(http.MethodPost, agentMCPPath, nil)
+	base := map[string]any{"owner_key": ownerKey, "parent_chat_id": chatID, "parent_tab_id": tabID}
+	if _, err := handler.call(request, agentControlRequest{Method: "chat.list", Params: copyAnyMap(base)}); err != nil {
+		t.Fatalf("live actor control read: %v", err)
+	}
+	if ownerValidations != 1 {
+		t.Fatalf("agent control owner-validation hook count = %d, want 1 for the live actor", ownerValidations)
+	}
+	ownerValidations = 0
+	actor, err := runtime.actor(chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := actor.engine.Apply(chat.DeleteChat{OperationID: "deleted-owner-tombstone", Force: true}); err != nil {
+		t.Fatalf("tombstone actor: %v", err)
+	}
+	if !manager.ValidateAgentOwner(ownerKey, chatID, tabID) {
+		t.Fatal("manager owner disappeared; test no longer covers a stale live session")
+	}
+	for _, test := range []struct {
+		name string
+		call agentControlRequest
+	}{
+		{name: "chat read", call: agentControlRequest{Method: "chat.list", Params: copyAnyMap(base)}},
+		{name: "chat mutation", call: agentControlRequest{Method: "chat.rename", Params: func() map[string]any {
+			params := copyAnyMap(base)
+			params["tab_id"], params["chat_id"], params["title"], params["operation_id"] = tabID, chatID, "should not commit", "deleted-owner-rename"
+			return params
+		}()}},
+		{name: "catalog read", call: agentControlRequest{Method: "agent.catalog", Params: copyAnyMap(base)}},
+		{name: "artifact workspace", call: agentControlRequest{Method: "artifact.host", Params: func() map[string]any {
+			params := copyAnyMap(base)
+			params["source_path"] = filepath.Join(root, "desktop", "acp", "README.md")
+			return params
+		}()}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := handler.call(request, test.call); err == nil {
+				t.Fatalf("stale live manager owner authorized %s", test.name)
+			}
+		})
+	}
+	if ownerValidations != 0 {
+		t.Fatalf("agent control validated the transient owner %d time(s) after actor deletion", ownerValidations)
+	}
+}
+
 func TestAgentControlHostsArtifactsOnlyFromTheCallingAgentWorkspace(t *testing.T) {
 	repo := repoRoot(t)
 	workspace := t.TempDir()
@@ -376,7 +467,7 @@ func TestAgentControlHostsArtifactsOnlyFromTheCallingAgentWorkspace(t *testing.T
 		Method: "artifact.host",
 		Params: map[string]any{
 			"owner_key": "artifact-owner", "parent_chat_id": "artifact-chat", "parent_tab_id": "artifact-tab",
-			"source_path": "review.pdf", "name": "Review",
+			"operation_id": "artifact-host-once", "source_path": "review.pdf", "name": "Review",
 		},
 	})
 	if err != nil {
@@ -391,7 +482,7 @@ func TestAgentControlHostsArtifactsOnlyFromTheCallingAgentWorkspace(t *testing.T
 		Method: "html.host",
 		Params: map[string]any{
 			"owner_key": "artifact-owner", "parent_chat_id": "artifact-chat", "parent_tab_id": "artifact-tab",
-			"source_path": "review.pdf", "name": "Review",
+			"operation_id": "artifact-host-once", "source_path": "review.pdf", "name": "Review",
 		},
 	})
 	if err != nil {
@@ -401,6 +492,25 @@ func TestAgentControlHostsArtifactsOnlyFromTheCallingAgentWorkspace(t *testing.T
 	if !ok || legacyHosted.ID != hosted.ID || !strings.HasPrefix(legacyHosted.URLPath, artifacthost.PathPrefix+"/") {
 		t.Fatalf("legacy html.host result = %#v", legacyResult)
 	}
+	changedSource := filepath.Join(workspace, "changed.pdf")
+	if err := os.WriteFile(changedSource, []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
+		Method: "artifact.host",
+		Params: map[string]any{
+			"owner_key": "artifact-owner", "parent_chat_id": "artifact-chat", "parent_tab_id": "artifact-tab",
+			"operation_id": "artifact-host-once", "source_path": "changed.pdf", "name": "Review",
+		},
+	}); err == nil || !strings.Contains(err.Error(), "different request") {
+		t.Fatalf("changed artifact.host request error = %v", err)
+	}
+	changedDigest := artifactHostRequestDigest("artifact-tab", "artifact-chat", "changed.pdf", "", "Review")
+	if _, found, err := registry.ReadOperation("artifact-host-once", changedDigest); err != nil {
+		t.Fatal(err)
+	} else if found {
+		t.Fatal("changed operation request created an artifact receipt")
+	}
 	outside := filepath.Join(t.TempDir(), "outside.pdf")
 	if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
 		t.Fatal(err)
@@ -409,10 +519,79 @@ func TestAgentControlHostsArtifactsOnlyFromTheCallingAgentWorkspace(t *testing.T
 		Method: "artifact.host",
 		Params: map[string]any{
 			"owner_key": "artifact-owner", "parent_chat_id": "artifact-chat", "parent_tab_id": "artifact-tab",
-			"source_path": outside,
+			"operation_id": "artifact-host-outside", "source_path": outside,
 		},
 	}); err == nil || !strings.Contains(err.Error(), "working directory") {
 		t.Fatalf("outside artifact.host error = %v", err)
+	}
+}
+
+func TestArtifactValidationFailureIsTerminalAndRetryDoesNotInspectSource(t *testing.T) {
+	repo := repoRoot(t)
+	workspace := t.TempDir()
+	stateDir := t.TempDir()
+	manager := acp.NewManager(acp.Options{
+		RootDir: repo, StateDir: stateDir,
+		Provider: acp.ProviderConfig{
+			ID: "mock", Command: "node", Args: []string{filepath.Join(repo, "desktop", "acp", "mock-server.mjs")},
+			CWD: repo, Enabled: true, Label: "Workass Mock ACP",
+		},
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	const tabID, chatID, ownerKey = "artifact-validation-tab", "artifact-validation-chat", "artifact-validation-owner"
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "artifact-validation-create",
+		"title": "Artifact validation", "cwd": workspace, "providerId": "mock",
+	}); err != nil {
+		t.Fatalf("create artifact actor: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if _, err := manager.NewSession(ctx, acp.SessionOptions{
+		TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: workspace, AgentOwnerKey: ownerKey,
+	}); err != nil {
+		t.Fatalf("new owner session: %v", err)
+	}
+	registry, err := artifacthost.New(filepath.Join(t.TempDir(), "artifacts"), "http://127.0.0.1:8788")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime), artifacts: registry}
+	const operationID = "artifact-validation-once"
+	params := func() map[string]any {
+		return map[string]any{
+			"owner_key": ownerKey, "parent_chat_id": chatID, "parent_tab_id": tabID,
+			"operation_id": operationID, "source_path": "appears-later.pdf", "name": "Appears later",
+		}
+	}
+	if _, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
+		Method: "artifact.host", Params: params(),
+	}); err == nil || !strings.Contains(err.Error(), "artifact source is not readable") {
+		t.Fatalf("initial validation failure = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "appears-later.pdf"), []byte("now valid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
+		Method: "artifact.host", Params: params(),
+	}); err == nil || err.Error() != "browser mutation was rejected" {
+		t.Fatalf("retry after source appeared = %v, want terminal rejection", err)
+	}
+	digest := artifactHostRequestDigest(tabID, chatID, "appears-later.pdf", "", "Appears later")
+	if _, found, err := registry.ReadOperation(operationID, digest); err != nil {
+		t.Fatal(err)
+	} else if found {
+		t.Fatal("failed validation created an artifact receipt on retry")
+	}
+	state, ok := runtime.Snapshot(chatID)
+	if !ok {
+		t.Fatal("artifact validation actor disappeared")
+	}
+	entry, ok := externalBrowserMutationEntry(state, operationID)
+	if !ok || entry.Status != chat.OutboxFailed {
+		t.Fatalf("validation operation entry = %#v, want terminal failed", entry)
 	}
 }
 

@@ -48,6 +48,17 @@ func TestRendererChatCreationIsDurableIdempotentAndIndependentFromProviderAttach
 	if fieldString(first, "operationId") != "create-op" || intValue(first["actorRevision"]) != intValue(second["actorRevision"]) {
 		t.Fatalf("stable create receipts differ: first=%#v second=%#v", first, second)
 	}
+	if active := fieldString(store.GlobalSnapshot(), "activeId"); active != "create-tab" {
+		t.Fatalf("focused create did not commit global active tab: %q", active)
+	}
+	focusConflict := cloneJSON(raw).(map[string]any)
+	focusConflict["focus"] = false
+	if _, err := runtime.CreateRendererChat(focusConflict); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("changed focus reused a committed create operation: %v", err)
+	}
+	if active := fieldString(store.GlobalSnapshot(), "activeId"); active != "create-tab" {
+		t.Fatalf("conflicting create changed global focus: %q", active)
+	}
 	projection, err := runtime.ProjectSession()
 	if err != nil {
 		t.Fatal(err)
@@ -68,6 +79,207 @@ func TestRendererChatCreationIsDurableIdempotentAndIndependentFromProviderAttach
 		"tabId": "missing-tab", "chatId": "missing-chat", "providerId": "codex",
 	}); err == nil || (!strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "does not exist")) {
 		t.Fatalf("provider attachment manufactured a missing chat: %v", err)
+	}
+}
+
+func TestForkRetryAfterChildActorCommitAttachesExactlyOnce(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := t.TempDir()
+	store := sharedSessionStore(stateDir)
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{
+			ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
+			CWD: root, Enabled: true,
+		},
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": "fork-source-tab", "chatId": "fork-source-chat", "operationId": "create-fork-source",
+		"title": "Fork source", "cwd": root, "providerId": "mock", "currentModelId": "mock-deterministic",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := map[string]any{
+		"tabId": "fork-source-tab", "chatId": "fork-source-chat", "newTabId": "fork-child-tab",
+		"newChatId": "fork-child-chat", "operationId": "fork-child-once", "cwd": root,
+	}
+	digest, err := forkInitializationDigest(request, "fork-source-tab", "fork-source-chat", "fork-child-tab", "fork-child-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	childCWD := root
+	child, err := runtime.actorForFork("fork-child-chat", chat.InitializeFork{
+		Presentation: chat.PresentationState{
+			TabID: "fork-child-tab", Title: "Fork source", CWD: &childCWD,
+			ProviderID: "mock", CurrentModelID: "mock-deterministic",
+		},
+		SourceChatID: "fork-source-chat", OperationID: "fork-child-once", Digest: digest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := child.engine.Snapshot(); len(state.Lanes) != 0 || state.CreationOperationID != "fork-child-once" {
+		t.Fatalf("pre-attachment child actor = %#v", state)
+	}
+	result, err := runtime.Fork(context.Background(), request)
+	if err != nil {
+		t.Fatalf("retry after child actor commit: %v", err)
+	}
+	if fieldString(result, "sessionId") == "" || fieldString(result, "providerId") != "mock" {
+		t.Fatalf("fork retry receipt = %#v", result)
+	}
+	state := child.engine.Snapshot()
+	if len(state.Lanes) != 1 || len(state.LaneSelectionMutationReceipts) != 1 {
+		t.Fatalf("fork retry did not attach exactly one lane: lanes=%#v receipts=%#v", state.Lanes, state.LaneSelectionMutationReceipts)
+	}
+}
+
+func TestForkRetryAfterChildCommitDoesNotReadSourceOrRecreateLane(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := t.TempDir()
+	store := sharedSessionStore(stateDir)
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{
+			ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
+			CWD: root, Enabled: true,
+		},
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": "fork-source-delete-tab", "chatId": "fork-source-delete-chat", "operationId": "create-fork-source-delete",
+		"title": "Fork source", "cwd": root, "providerId": "mock", "currentModelId": "mock-deterministic",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := map[string]any{
+		"tabId": "fork-source-delete-tab", "chatId": "fork-source-delete-chat", "newTabId": "fork-child-delete-tab",
+		"newChatId": "fork-child-delete-chat", "operationId": "fork-child-delete-once", "cwd": root,
+	}
+	digest, err := forkInitializationDigest(request, "fork-source-delete-tab", "fork-source-delete-chat", "fork-child-delete-tab", "fork-child-delete-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	childCWD := root
+	if _, err := runtime.actorForFork("fork-child-delete-chat", chat.InitializeFork{
+		Presentation: chat.PresentationState{
+			TabID: "fork-child-delete-tab", Title: "Fork source", CWD: &childCWD,
+			ProviderID: "mock", CurrentModelID: "mock-deterministic",
+		},
+		SourceChatID: "fork-source-delete-chat", OperationID: "fork-child-delete-once", Digest: digest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runtime.DeleteChat(context.Background(), "fork-source-delete-tab", "fork-source-delete-chat", "delete-fork-source", true); err != nil {
+		t.Fatalf("delete fork source after child commit: %v", err)
+	}
+	if err := os.Remove(providerChatStatePath(stateDir, "fork-source-delete-chat")); err != nil {
+		t.Fatalf("remove deleted source actor state: %v", err)
+	}
+	runtime.mu.Lock()
+	delete(runtime.actors, "fork-source-delete-chat")
+	delete(runtime.known, "fork-source-delete-chat")
+	runtime.mu.Unlock()
+
+	first, err := runtime.Fork(context.Background(), request)
+	if err != nil {
+		t.Fatalf("exact fork retry required source actor: %v", err)
+	}
+	second, err := runtime.Fork(context.Background(), request)
+	if err != nil {
+		t.Fatalf("second exact fork retry: %v", err)
+	}
+	if fieldString(first, "sessionId") == "" || fieldString(first, "sessionId") != fieldString(second, "sessionId") {
+		t.Fatalf("fork retries created different native sessions: first=%#v second=%#v", first, second)
+	}
+	childState, ok := runtime.Snapshot("fork-child-delete-chat")
+	if !ok || len(childState.Lanes) != 1 || len(childState.LaneSelectionMutationReceipts) != 1 {
+		t.Fatalf("fork retry did not preserve one durable child lane: %#v", childState)
+	}
+
+	changed := cloneJSON(request).(map[string]any)
+	changed["cwd"] = filepath.Join(root, "changed")
+	if _, err := runtime.Fork(context.Background(), changed); err == nil {
+		t.Fatal("changed fork request reused the child creation operation")
+	}
+	unchanged, _ := runtime.Snapshot("fork-child-delete-chat")
+	if len(unchanged.Lanes) != 1 || len(unchanged.LaneSelectionMutationReceipts) != 1 {
+		t.Fatalf("changed fork retry mutated child attachment: %#v", unchanged)
+	}
+}
+
+func TestForkProviderFailureCommitsChildBeforeSelectionAndRetryIsDurable(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := t.TempDir()
+	store := sharedSessionStore(stateDir)
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{
+			ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
+			CWD: root, Enabled: true,
+		},
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": "fork-fail-source-tab", "chatId": "fork-fail-source-chat", "operationId": "create-fork-fail-source",
+		"title": "Fork source", "cwd": root, "providerId": "provider-that-is-not-configured",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := map[string]any{
+		"tabId": "fork-fail-source-tab", "chatId": "fork-fail-source-chat", "newTabId": "fork-fail-child-tab",
+		"newChatId": "fork-fail-child-chat", "operationId": "fork-fail-child-once", "cwd": root,
+	}
+	if _, err := runtime.Fork(context.Background(), request); err == nil {
+		t.Fatal("fork unexpectedly selected an unavailable provider")
+	}
+	firstState, ok := runtime.Snapshot("fork-fail-child-chat")
+	if !ok || !firstState.Initialized {
+		t.Fatalf("provider failure did not leave a durable initialized child receipt: ok=%v state=%#v", ok, firstState)
+	}
+	if firstState.CreationOperationID != "fork-fail-child-once" || firstState.CreationDigest == "" {
+		t.Fatalf("child creation receipt = operation=%q digest=%q", firstState.CreationOperationID, firstState.CreationDigest)
+	}
+	if len(firstState.Lanes) != 0 || len(firstState.LaneSelectionMutationReceipts) != 0 {
+		t.Fatalf("provider failure attached a child lane before a successful retry: lanes=%#v receipts=%#v", firstState.Lanes, firstState.LaneSelectionMutationReceipts)
+	}
+	childActor, err := runtime.actor("fork-fail-child-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Fork(context.Background(), request); err == nil {
+		t.Fatal("lost fork retry unexpectedly selected an unavailable provider")
+	}
+	secondState, ok := runtime.Snapshot("fork-fail-child-chat")
+	if !ok || secondState.CreationOperationID != firstState.CreationOperationID || secondState.CreationDigest != firstState.CreationDigest {
+		t.Fatalf("lost retry changed the durable child receipt: first=%#v second=%#v", firstState, secondState)
+	}
+	secondActor, err := runtime.actor("fork-fail-child-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if childActor != secondActor {
+		t.Fatal("lost fork retry recreated the child actor")
+	}
+	if len(secondState.Lanes) != 0 || len(secondState.LaneSelectionMutationReceipts) != 0 {
+		t.Fatalf("lost retry changed child attachment state: lanes=%#v receipts=%#v", secondState.Lanes, secondState.LaneSelectionMutationReceipts)
+	}
+	changed := cloneJSON(request).(map[string]any)
+	changed["cwd"] = filepath.Join(root, "changed-fork-request")
+	if _, err := runtime.Fork(context.Background(), changed); err == nil {
+		t.Fatal("changed fork retry reused the child creation operation")
+	}
+	unchanged, ok := runtime.Snapshot("fork-fail-child-chat")
+	if !ok || unchanged.CreationDigest != firstState.CreationDigest || len(unchanged.Lanes) != 0 {
+		t.Fatalf("changed retry mutated child receipt or attachment: %#v", unchanged)
 	}
 }
 
@@ -532,6 +744,127 @@ func TestProviderChatRuntimeMigratesExactLegacyBindingAndContinuesSameThread(t *
 	if len(providerDisk.Sessions) != 1 || providerDisk.Sessions[0].ID != nativeSessionID || providerDisk.Sessions[0].Turn != 2 {
 		t.Fatalf("cutover created or changed provider thread: %#v", providerDisk.Sessions)
 	}
+}
+
+func TestLegacyPendingPermissionRehydratesAcrossCutoverAndRestart(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := t.TempDir()
+	const tabID, chatID = "legacy-permission-tab", "legacy-permission-chat"
+	const nativeSessionID = "mock-session-with-legacy-permission"
+	const permissionID = "legacy-permission-request"
+	const turnID = "legacy-permission-turn"
+
+	snapshot := sessionMirrorFixture(tabID, chatID, "continue the existing thread")
+	legacyChat := chatFromSnapshot(snapshot, tabID)
+	legacyChat["title"] = "Legacy pending permission"
+	legacyChat["sessionId"] = nativeSessionID
+	legacyChat["sessionProviderId"] = "mock"
+	legacyChat["providerId"] = "mock"
+	legacyChat["cwd"] = root
+	legacyChat["currentModelId"] = "mock-deterministic"
+	legacyChat["currentModeId"] = "ask"
+	legacyChat["queue"] = []any{}
+	legacyChat["messages"] = []any{
+		map[string]any{
+			"id": "legacy-permission-user", "role": "user", "content": "continue the existing thread",
+			"status": "done", "at": "2026-08-11T00:00:00Z", "events": []any{},
+		},
+		map[string]any{
+			"id": "legacy-permission-assistant", "role": "assistant", "content": "waiting for approval",
+			"result": "waiting for approval", "status": "running", "jobId": turnID,
+			"at": "2026-08-11T00:00:01Z", "events": []any{},
+			"permission": map[string]any{
+				"id": permissionID, "title": "Choose an action", "kind": "question",
+				"options": []any{map[string]any{"optionId": "allow", "name": "Allow", "kind": "allow"}},
+				"question": map[string]any{
+					"question": "Continue?", "header": "Approval", "multiSelect": false,
+					"options": []any{map[string]any{"label": "Allow", "description": "Continue the native turn"}},
+				},
+			},
+		},
+	}
+	writeLegacySessionSnapshot(t, stateDir, snapshot)
+	writeJSONTestFile(t, filepath.Join(stateDir, "native-sessions.json"), map[string]any{
+		"v": 2,
+		"bindings": []any{map[string]any{
+			"tabId": tabID, "chatId": chatID, "providerId": "mock", "sessionId": nativeSessionID,
+			"cwd": root, "modelId": "mock-deterministic", "modeId": "ask",
+			"syncedMessages": 0, "generation": 1, "resumeSafe": true,
+		}},
+	})
+	providerState := filepath.Join(stateDir, "mock-native-sessions.json")
+	writeJSONTestFile(t, providerState, map[string]any{
+		"v": 1,
+		"sessions": []any{map[string]any{
+			"id": nativeSessionID, "cwd": root, "model": "mock-deterministic", "mode": "ask", "turn": 1,
+			"operations": map[string]any{}, "contextImports": map[string]any{},
+		}},
+	})
+
+	newManager := func() *acp.Manager {
+		return acp.NewManager(acp.Options{
+			RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+			Provider: acp.ProviderConfig{
+				ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
+				CWD: root, Enabled: true, Env: map[string]string{
+					"WORKASS_MOCK_ACP_DELAY_MS": "0", "WORKASS_MOCK_ACP_SESSION_STORE": providerState,
+				},
+			},
+			DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+		})
+	}
+	boot := func() (*providerChatRuntime, *acp.Manager) {
+		manager := newManager()
+		runtime := newProviderChatRuntime(manager, newSessionStore(filepath.Join(stateDir, sessionStateFilename)), stateDir)
+		if err := runtime.StartupError(); err != nil {
+			manager.Reset()
+			t.Fatalf("legacy permission cutover boot: %v", err)
+		}
+		return runtime, manager
+	}
+	assertPending := func(runtime *providerChatRuntime) {
+		t.Helper()
+		pending, err := runtime.PendingPermissions()
+		if err != nil {
+			t.Fatalf("read pending permission: %v", err)
+		}
+		if len(pending) != 1 {
+			t.Fatalf("pending permissions after actor boot = %#v", pending)
+		}
+		projected := mapFromAnyMain(pending[0])
+		if fieldString(projected, "id") != permissionID || fieldString(projected, "jobId") != turnID ||
+			fieldString(projected, "tabId") != tabID || fieldString(projected, "chatId") != chatID ||
+			fieldString(projected, "sessionId") != nativeSessionID || fieldString(projected, "title") != "Choose an action" ||
+			fieldString(projected, "kind") != "question" || len(anySlice(projected["options"])) != 1 {
+			t.Fatalf("rehydrated permission projection = %#v", projected)
+		}
+		question := mapFromAnyMain(projected["question"])
+		if fieldString(question, "question") != "Continue?" || fieldString(question, "header") != "Approval" {
+			t.Fatalf("rehydrated permission question = %#v", question)
+		}
+		state, ok := runtime.Snapshot(chatID)
+		if !ok {
+			t.Fatal("migrated permission actor is missing")
+		}
+		permission, ok := state.Permissions[permissionID]
+		if !ok || permission.Owner.OperationID != "legacy-permission-user" || permission.Owner.TurnID != turnID {
+			t.Fatalf("durable permission owner = %#v state=%#v", permission, state)
+		}
+	}
+
+	first, firstManager := boot()
+	assertPending(first)
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	firstManager.Reset()
+
+	second, secondManager := boot()
+	t.Cleanup(func() {
+		_ = second.Close(context.Background())
+		secondManager.Reset()
+	})
+	assertPending(second)
 }
 
 func writeJSONTestFile(t *testing.T, path string, value any) {
@@ -1019,11 +1352,12 @@ func TestProviderChatRuntimeSwitchesAndReturnsThroughVerifiedContextImport(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runtime.Start(context.Background(), map[string]any{
+	firstTurnRequest := map[string]any{
 		"kind": "app-chat", "title": "Multi-provider lanes", "tabId": tabID, "chatId": chatID,
 		"providerId": "mock", "sessionId": first.SessionID, "cwd": root, "prompt": "turn on provider one",
 		"userMessageId": "multi-user-1", "assistantMessageId": "multi-assistant-1",
-	}, "human"); err != nil {
+	}
+	if _, err := runtime.Start(context.Background(), firstTurnRequest, "human"); err != nil {
 		t.Fatal(err)
 	}
 	waitProviderChatLedger(t, runtime, chatID, 2, 5*time.Second)
@@ -1055,6 +1389,18 @@ func TestProviderChatRuntimeSwitchesAndReturnsThroughVerifiedContextImport(t *te
 	afterRetry, _ := runtime.Snapshot(chatID)
 	if afterRetry.DesiredLaneID != state.DesiredLaneID || afterRetry.ActiveLaneID != state.ActiveLaneID || afterRetry.Revision != state.Revision {
 		t.Fatalf("old selection retry mutated newer selection: before=%#v after=%#v", state, afterRetry)
+	}
+	if _, err := runtime.Start(context.Background(), firstTurnRequest, "human"); err != nil {
+		t.Fatalf("retry first turn after selecting second provider: %v", err)
+	}
+	afterTurnRetry, _ := runtime.Snapshot(chatID)
+	if afterTurnRetry.DesiredLaneID != state.DesiredLaneID || afterTurnRetry.ActiveLaneID != state.ActiveLaneID || afterTurnRetry.Revision != state.Revision {
+		t.Fatalf("old turn retry mutated newer provider selection: before=%#v after=%#v", state, afterTurnRetry)
+	}
+	changedFirstTurn := cloneJSON(firstTurnRequest).(map[string]any)
+	changedFirstTurn["prompt"] = "different content under old operation"
+	if _, err := runtime.Start(context.Background(), changedFirstTurn, "human"); err == nil {
+		t.Fatal("old turn operation accepted different retry content")
 	}
 	if _, err := runtime.Start(context.Background(), map[string]any{
 		"kind": "app-chat", "title": "Multi-provider lanes", "tabId": tabID, "chatId": chatID,
@@ -1106,4 +1452,483 @@ func waitProviderChatLedger(t *testing.T, runtime *providerChatRuntime, chatID s
 	}
 	state, _ := runtime.Snapshot(chatID)
 	t.Fatalf("provider chat ledger did not reach %d events: %#v", want, state)
+}
+
+func newSteerRegressionFixture(t *testing.T) (*providerChatRuntime, *acp.Manager, string, string, acp.SessionInfo) {
+	t.Helper()
+	root := repoRoot(t)
+	stateDir := t.TempDir()
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{
+			ID: "mock", Name: "Mock", Command: "node",
+			Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")}, CWD: root,
+			Env: map[string]string{"WORKASS_MOCK_ACP_DELAY_MS": "1"}, Enabled: true,
+		},
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": "steer-regression-tab", "chatId": "steer-regression-chat", "operationId": "steer-regression-create",
+		"title": "Steer regression", "cwd": root, "providerId": "mock", "currentModelId": "mock-deterministic",
+	}); err != nil {
+		t.Fatalf("create steer regression chat: %v", err)
+	}
+	info, err := runtime.Select(context.Background(), acp.SessionOptions{
+		TabID: "steer-regression-tab", ChatID: "steer-regression-chat", ProviderID: "mock", CWD: root,
+	})
+	if err != nil {
+		t.Fatalf("attach steer regression lane: %v", err)
+	}
+	return runtime, manager, root, stateDir, info
+}
+
+func steerRegressionImage(data, name string) map[string]any {
+	return map[string]any{"mimeType": "image/png", "name": name, "data": data}
+}
+
+func sessionImageFileCount(t *testing.T, stateDir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(stateDir, sessionImageDirname))
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("read session image sidecars: %v", err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			count++
+		}
+	}
+	return count
+}
+
+func startSteerRegressionTurn(t *testing.T, runtime *providerChatRuntime, info acp.SessionInfo) {
+	t.Helper()
+	if _, err := runtime.Start(context.Background(), map[string]any{
+		"kind": "app-chat", "title": "Steer regression", "tabId": "steer-regression-tab", "chatId": "steer-regression-chat",
+		"providerId": "mock", "sessionId": info.SessionID, "prompt": "[mock:hold-until-steer] [mock:steer] base turn",
+		"userMessageId": "steer-regression-base-user", "assistantMessageId": "steer-regression-base-assistant",
+	}, "human"); err != nil {
+		t.Fatalf("start steer regression turn: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		state, ok := runtime.Snapshot("steer-regression-chat")
+		if ok && state.Foreground != nil && state.Foreground.Status == chat.ForegroundRunning {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	state, _ := runtime.Snapshot("steer-regression-chat")
+	t.Fatalf("steer regression turn did not reach running state: %#v", state)
+}
+
+func TestProviderChatSteerRejectsStaleDurableAttachmentBeforeManagerOrSidecars(t *testing.T) {
+	runtime, _, _, stateDir, info := newSteerRegressionFixture(t)
+	actor, err := runtime.actor("steer-regression-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, ok := runtime.Snapshot("steer-regression-chat")
+	if !ok || state.ActiveLaneID == "" {
+		t.Fatalf("missing steer regression lane: %#v", state)
+	}
+	lane := state.Lanes[state.ActiveLaneID]
+	// Retire the actor's exact disposable attachment without touching the
+	// manager's old live row. The old implementation treated that manager row
+	// as enough authority and queued a steer after writing its image sidecar.
+	actor.mu.Lock()
+	err = actor.engine.Apply(chat.HostLost{LaneID: lane.Identity.ID, ConnectionGeneration: lane.ConnectionGeneration})
+	actor.mu.Unlock()
+	if err != nil {
+		t.Fatalf("retire durable steer attachment: %v", err)
+	}
+	_, handled, err := runtime.Steer(context.Background(), map[string]any{
+		"sessionId": info.SessionID, "tabId": "steer-regression-tab", "chatId": "steer-regression-chat",
+		"prompt": "must reject the stale session", "clientUserMessageId": "stale-steer-operation",
+		"continuationAssistantMessageId": "stale-steer-assistant",
+		"images":                         []any{steerRegressionImage("stale-sidecar-must-not-exist", "stale.png")},
+	})
+	if !handled || err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("stale durable attachment was accepted: handled=%v err=%v", handled, err)
+	}
+	if got := sessionImageFileCount(t, stateDir); got != 0 {
+		t.Fatalf("stale steer wrote %d attachment sidecars before admission", got)
+	}
+	after, _ := runtime.Snapshot("steer-regression-chat")
+	if _, exists := after.Operations["stale-steer-operation"]; exists || len(after.Queue) != 0 {
+		t.Fatalf("stale steer changed actor ownership: %#v", after)
+	}
+}
+
+func TestProviderChatSteerDuplicateAndChangedRetryAreDurableReadbackOnly(t *testing.T) {
+	runtime, _, _, stateDir, info := newSteerRegressionFixture(t)
+	startSteerRegressionTurn(t, runtime, info)
+	image := steerRegressionImage("same-steer-image", "same.png")
+	request := map[string]any{
+		"sessionId": info.SessionID, "prompt": "steer exactly once", "clientUserMessageId": "steer-once-operation",
+		"continuationAssistantMessageId": "steer-once-assistant", "images": []any{image},
+	}
+	if _, handled, err := runtime.Steer(context.Background(), request); !handled || err != nil {
+		t.Fatalf("initial steer admission failed: handled=%v err=%v", handled, err)
+	}
+	firstCount := sessionImageFileCount(t, stateDir)
+	if firstCount != 1 {
+		t.Fatalf("initial steer sidecar count=%d, want 1", firstCount)
+	}
+	if _, handled, err := runtime.Steer(context.Background(), cloneJSON(request).(map[string]any)); !handled || err != nil {
+		t.Fatalf("identical steer retry was not durable readback: handled=%v err=%v", handled, err)
+	}
+	if got := sessionImageFileCount(t, stateDir); got != firstCount {
+		t.Fatalf("identical steer retry wrote sidecars: before=%d after=%d", firstCount, got)
+	}
+	changedPrompt := cloneJSON(request).(map[string]any)
+	changedPrompt["prompt"] = "changed steer content"
+	if _, handled, err := runtime.Steer(context.Background(), changedPrompt); !handled || err == nil || !strings.Contains(err.Error(), "different content") {
+		t.Fatalf("changed steer prompt was accepted: handled=%v err=%v", handled, err)
+	}
+	changedImage := cloneJSON(request).(map[string]any)
+	changedImage["images"] = []any{steerRegressionImage("different-steer-image", "same.png")}
+	if _, handled, err := runtime.Steer(context.Background(), changedImage); !handled || err == nil || !strings.Contains(err.Error(), "different content") {
+		t.Fatalf("changed steer attachment was accepted: handled=%v err=%v", handled, err)
+	}
+	if got := sessionImageFileCount(t, stateDir); got != firstCount {
+		t.Fatalf("changed steer retry wrote sidecars: before=%d after=%d", firstCount, got)
+	}
+}
+
+func TestProviderChatStartChangedImageRetryDoesNotPersistSidecar(t *testing.T) {
+	runtime, _, _, stateDir, info := newSteerRegressionFixture(t)
+	request := map[string]any{
+		"kind": "app-chat", "title": "Steer regression", "tabId": "steer-regression-tab", "chatId": "steer-regression-chat",
+		"providerId": "mock", "sessionId": info.SessionID, "prompt": "turn with an image",
+		"operationId": "turn-image-once", "userMessageId": "turn-image-once-user", "assistantMessageId": "turn-image-once-assistant",
+		"images": []any{steerRegressionImage("turn-image-original", "turn.png")},
+	}
+	if _, err := runtime.Start(context.Background(), request, "human"); err != nil {
+		t.Fatalf("initial turn with image failed: %v", err)
+	}
+	firstCount := sessionImageFileCount(t, stateDir)
+	if firstCount != 1 {
+		t.Fatalf("initial turn sidecar count=%d, want 1", firstCount)
+	}
+	changed := cloneJSON(request).(map[string]any)
+	changed["images"] = []any{steerRegressionImage("turn-image-changed", "turn.png")}
+	if _, err := runtime.Start(context.Background(), changed, "human"); err == nil || !strings.Contains(err.Error(), "different content") {
+		t.Fatalf("changed same-operation image was accepted: %v", err)
+	}
+	if got := sessionImageFileCount(t, stateDir); got != firstCount {
+		t.Fatalf("changed same-operation retry wrote sidecars: before=%d after=%d", firstCount, got)
+	}
+}
+
+func TestReplaceStagedQueueStaleRevisionDoesNotPersistAttachmentSidecar(t *testing.T) {
+	runtime, _, _, stateDir, _ := newSteerRegressionFixture(t)
+	_, err := runtime.ReplaceStagedQueue(
+		"steer-regression-tab", "steer-regression-chat", "stale-queue-replacement", 1,
+		[]any{map[string]any{
+			"id": "stale-queue-row", "text": "must not persist", "source": "human", "delivery": "queue",
+			"images": []any{steerRegressionImage("stale-queue-sidecar", "stale-queue.png")},
+		}},
+	)
+	if err == nil || !strings.Contains(err.Error(), "revision is stale") {
+		t.Fatalf("stale queue revision was accepted: %v", err)
+	}
+	if got := sessionImageFileCount(t, stateDir); got != 0 {
+		t.Fatalf("stale queue replacement wrote %d attachment sidecars", got)
+	}
+	state, _ := runtime.Snapshot("steer-regression-chat")
+	if _, exists := state.QueueMutationReceipts["stale-queue-replacement"]; exists {
+		t.Fatal("stale queue replacement entered the actor receipt ledger")
+	}
+}
+
+func TestSteerAttachmentInputIdentityMatchesPersistedAttachment(t *testing.T) {
+	stateDir := t.TempDir()
+	sessions := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
+	data := "pure-attachment-identity"
+	inline := []any{steerRegressionImage(data, "identity.png")}
+	pure, err := steerAttachmentInputIdentity(inline)
+	if err != nil {
+		t.Fatalf("compute pure inline attachment identity: %v", err)
+	}
+	if got := sessionImageFileCount(t, stateDir); got != 0 {
+		t.Fatalf("pure identity computation wrote %d sidecars", got)
+	}
+	persisted, err := sessions.PersistProviderAttachments(inline)
+	if err != nil {
+		t.Fatalf("persist inline attachment: %v", err)
+	}
+	if !reflect.DeepEqual(pure, persisted) {
+		t.Fatalf("pure inline identity differs from persisted attachment: pure=%#v persisted=%#v", pure, persisted)
+	}
+
+	refImage := map[string]any{
+		"mimeType": pure[0].MIMEType, "name": pure[0].Name,
+		sessionImageDataRefField: sessionImageDirname + "/" + pure[0].Digest,
+		"digest":                 pure[0].Digest, "size": pure[0].Size,
+	}
+	pureRef, err := steerAttachmentInputIdentity([]any{refImage})
+	if err != nil {
+		t.Fatalf("compute pure ref attachment identity: %v", err)
+	}
+	persistedRef, err := sessions.PersistProviderAttachments([]any{refImage})
+	if err != nil {
+		t.Fatalf("persist ref attachment: %v", err)
+	}
+	if !reflect.DeepEqual(pureRef, persistedRef) {
+		t.Fatalf("pure ref identity differs from persisted attachment: pure=%#v persisted=%#v", pureRef, persistedRef)
+	}
+}
+
+func TestProviderChatSteerRejectedInputDoesNotPersistAttachmentSidecar(t *testing.T) {
+	runtime, _, _, stateDir, info := newSteerRegressionFixture(t)
+	_, handled, err := runtime.Steer(context.Background(), map[string]any{
+		"sessionId": info.SessionID, "prompt": "invalid attachment must fail before admission", "clientUserMessageId": "invalid-steer-operation",
+		"continuationAssistantMessageId": "invalid-steer-assistant",
+		"images":                         []any{map[string]any{"mimeType": "text/plain", "name": "not-an-image", "data": "must-not-be-written"}},
+	})
+	if !handled || err == nil || !strings.Contains(err.Error(), "MIME") {
+		t.Fatalf("invalid steer attachment was not rejected before admission: handled=%v err=%v", handled, err)
+	}
+	if got := sessionImageFileCount(t, stateDir); got != 0 {
+		t.Fatalf("rejected steer wrote %d attachment sidecars", got)
+	}
+	state, _ := runtime.Snapshot("steer-regression-chat")
+	if _, exists := state.Operations["invalid-steer-operation"]; exists {
+		t.Fatal("rejected steer entered the actor mailbox")
+	}
+}
+
+func TestProviderChatSteerForegroundEndUsesDurableQueueExactlyOnce(t *testing.T) {
+	runtime, _, _, stateDir, info := newSteerRegressionFixture(t)
+	request := map[string]any{
+		"sessionId": info.SessionID, "prompt": "queue after foreground end", "clientUserMessageId": "race-steer-operation",
+		"continuationAssistantMessageId": "race-steer-assistant", "images": []any{steerRegressionImage("race-sidecar", "race.png")},
+	}
+	result, handled, err := runtime.Steer(context.Background(), request)
+	if !handled || err != nil || result["daemonQueued"] != true || result["queued"] != true {
+		t.Fatalf("foreground-end steer did not use durable queue: handled=%v err=%v result=%#v", handled, err, result)
+	}
+	state, _ := runtime.Snapshot("steer-regression-chat")
+	if _, exists := state.Operations["race-steer-operation"]; !exists {
+		t.Fatal("queued foreground-end steer is missing its actor operation")
+	}
+	if owners := countSteerOwners(state, "race-steer-operation"); owners != 1 {
+		t.Fatalf("foreground-end steer has %d durable owners, want exactly one", owners)
+	}
+	count := sessionImageFileCount(t, stateDir)
+	retry, handled, err := runtime.Steer(context.Background(), cloneJSON(request).(map[string]any))
+	if !handled || err != nil || retry["operationId"] != "race-steer-operation" {
+		t.Fatalf("queued foreground-end retry was not durable readback: handled=%v err=%v result=%#v", handled, err, retry)
+	}
+	if got := sessionImageFileCount(t, stateDir); got != count {
+		t.Fatalf("queued foreground-end retry wrote sidecars: before=%d after=%d", count, got)
+	}
+	state, _ = runtime.Snapshot("steer-regression-chat")
+	if owners := countSteerOwners(state, "race-steer-operation"); owners != 1 {
+		t.Fatalf("foreground-end retry duplicated durable ownership %d times", owners)
+	}
+}
+
+func TestProviderChatSteerForegroundEndRaceUsesDurableQueueExactlyOnce(t *testing.T) {
+	runtime, _, _, _, info := newSteerRegressionFixture(t)
+	actor, err := runtime.actor("steer-regression-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseState, ok := runtime.Snapshot("steer-regression-chat")
+	if !ok || baseState.ActiveLaneID == "" {
+		t.Fatalf("missing synthetic race lane: %#v", baseState)
+	}
+	request := map[string]any{
+		"sessionId": info.SessionID, "tabId": "steer-regression-tab", "chatId": "steer-regression-chat",
+		"prompt": "queue the concurrent foreground end", "clientUserMessageId": "race-steer-concurrent-operation",
+		"continuationAssistantMessageId": "race-steer-concurrent-assistant",
+	}
+	type steerResponse struct {
+		result  map[string]any
+		handled bool
+		err     error
+	}
+	responses := make(chan steerResponse, 1)
+	// Hold the actor-facing mutex while the request resolves its exact durable
+	// attachment. The provider cancellation and terminal commit below can still
+	// advance the engine, forcing the request to recheck the foreground boundary
+	// before it can admit the steer. Build the synthetic foreground directly in
+	// the actor to avoid an unrelated provider job from owning this race test.
+	actor.mu.Lock()
+	if err := actor.engine.Apply(chat.Submit{
+		OperationID: "race-steer-base-operation", LaneID: baseState.ActiveLaneID, Text: "synthetic foreground",
+		Presentation: providercontract.TurnPresentation{
+			UserMessageID: "race-steer-base-user", AssistantMessageID: "race-steer-base-assistant", Origin: "human",
+		},
+	}); err != nil {
+		actor.mu.Unlock()
+		t.Fatalf("create synthetic foreground: %v", err)
+	}
+	foregroundState := actor.engine.Snapshot()
+	if foregroundState.Foreground == nil {
+		actor.mu.Unlock()
+		t.Fatalf("synthetic submit did not create foreground: %#v", foregroundState)
+	}
+	foregroundOperationID := foregroundState.Foreground.OperationID
+	if err := actor.engine.Apply(chat.TurnAdmitted{
+		OperationID: foregroundOperationID,
+		Turn:        providercontract.TurnRef{OperationID: foregroundOperationID, NativeID: "synthetic-native-turn"},
+		Accepted:    true,
+	}); err != nil {
+		actor.mu.Unlock()
+		t.Fatalf("admit synthetic foreground: %v", err)
+	}
+	go func() {
+		result, handled, err := runtime.Steer(context.Background(), request)
+		responses <- steerResponse{result: result, handled: handled, err: err}
+	}()
+	time.Sleep(10 * time.Millisecond)
+	state := actor.engine.Snapshot()
+	if state.Foreground == nil {
+		actor.mu.Unlock()
+		t.Fatal("steer regression foreground ended before the concurrent boundary")
+	}
+	terminalErr := actor.engine.Apply(chat.TurnTerminated{OperationID: state.Foreground.OperationID, Status: "completed"})
+	actor.mu.Unlock()
+	if terminalErr != nil {
+		t.Fatalf("commit concurrent foreground terminal: %v", terminalErr)
+	}
+	response := <-responses
+	if !response.handled || response.err != nil || response.result["daemonQueued"] != true || response.result["queued"] != true {
+		t.Fatalf("concurrent foreground-end steer did not queue exactly once: handled=%v err=%v result=%#v", response.handled, response.err, response.result)
+	}
+	after, _ := runtime.Snapshot("steer-regression-chat")
+	if _, exists := after.Operations["race-steer-concurrent-operation"]; !exists {
+		t.Fatal("concurrent foreground-end steer lost its actor operation")
+	}
+	if owners := countSteerOwners(after, "race-steer-concurrent-operation"); owners != 1 {
+		t.Fatalf("concurrent foreground-end steer has %d durable owners, want exactly one", owners)
+	}
+}
+
+func TestProviderChatRuntimeCheckpointExecutorCarriesOperationToReceipt(t *testing.T) {
+	stateDir := t.TempDir()
+	store := sharedSessionStore(stateDir)
+	manager := acp.NewManager(acp.Options{StateDir: stateDir, RuntimeProfile: "dev"})
+	chatID := "runtime-checkpoint-operation-chat"
+	tabID := "runtime-checkpoint-operation-tab"
+	const operationID = providercontract.OperationID("runtime-checkpoint-operation")
+	var published any
+	publishedBeforeReceipt := false
+	var runtime *providerChatRuntime
+	runtime = newProviderChatRuntime(manager, store, stateDir, func(channel string, payload any) {
+		if channel != "chat:checkpoint-restored" {
+			return
+		}
+		if state, ok := runtime.Snapshot(chatID); ok {
+			for _, entry := range state.Outbox {
+				if entry.Kind == chat.EffectCheckpointRestore && entry.OperationID == operationID && entry.Status != chat.OutboxCompleted {
+					publishedBeforeReceipt = true
+				}
+			}
+		}
+		published = payload
+	})
+	if err := runtime.StartupError(); err != nil {
+		t.Fatalf("start authoritative provider chat runtime: %v", err)
+	}
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
+
+	checkpointPath := filepath.Join(stateDir, "checkpoints", chatID+".json")
+	if err := os.MkdirAll(filepath.Dir(checkpointPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := json.Marshal(map[string]any{
+		"version": 1, "chatId": chatID, "checkpoints": []any{
+			map[string]any{"turnSeq": 1, "repos": []any{}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(checkpointPath, checkpoint, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	actor, err := runtime.actorForFork(chatID, chat.InitializeFork{
+		Presentation: chat.PresentationState{TabID: tabID}, SourceChatID: "runtime-checkpoint-source",
+		OperationID: "runtime-checkpoint-create", Digest: "runtime-checkpoint-create-digest",
+		Messages: []chat.LedgerEvent{{
+			EventID: "runtime-checkpoint-assistant-event", MessageID: "runtime-checkpoint-assistant",
+			Role: "assistant", Text: "completed", Status: "done", OperationID: "runtime-checkpoint-turn",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checkpointList := json.RawMessage(`[{"turnSeq":1,"repos":[]}]`)
+	actor.mu.Lock()
+	if err := actor.engine.Apply(chat.UpdateEnvironment{
+		ExpectedTabID: tabID, Payload: json.RawMessage(`{"chatId":"runtime-checkpoint-operation-chat"}`),
+		Checkpoints: checkpointList, Reference: json.RawMessage(`null`),
+	}); err != nil {
+		actor.mu.Unlock()
+		t.Fatal(err)
+	}
+	checkpointTarget, checkpointDigest, err := actor.engine.Snapshot().CheckpointRestoreTarget(1)
+	if err != nil {
+		actor.mu.Unlock()
+		t.Fatal(err)
+	}
+	if err := actor.engine.Apply(chat.RestoreCheckpoint{
+		OperationID: operationID, TurnSequence: 1, ObservedAtUnixMS: 1000,
+		Checkpoint: checkpointTarget, CheckpointDigest: checkpointDigest,
+	}); err != nil {
+		actor.mu.Unlock()
+		t.Fatal(err)
+	}
+	actor.mu.Unlock()
+	// The manager checkpoint file is mutable executor state. The pending actor
+	// effect must continue using checkpointTarget even when that file changes
+	// before dispatch.
+	if err := os.WriteFile(checkpointPath, []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := actor.coordinator.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if publishedBeforeReceipt {
+		t.Fatal("runtime published checkpoint before actor receipt commit")
+	}
+	payload, ok := published.(map[string]any)
+	if !ok || payload["operationId"] != string(operationID) {
+		t.Fatalf("checkpoint publication lost operation identity: %#v", published)
+	}
+	state := actor.engine.Snapshot()
+	if len(state.Outbox) != 1 || state.Outbox[0].Status != chat.OutboxCompleted || string(state.Outbox[0].Checkpoint) != string(checkpointTarget) || state.Outbox[0].CheckpointDigest != checkpointDigest {
+		t.Fatalf("checkpoint actor receipt = %#v", state.Outbox)
+	}
+	if err := actor.engine.Apply(chat.RestoreCheckpoint{OperationID: operationID, TurnSequence: 2, ObservedAtUnixMS: 2000, Checkpoint: checkpointTarget, CheckpointDigest: checkpointDigest}); err == nil {
+		t.Fatal("changed checkpoint request reused the committed operation")
+	}
+}
+
+func countSteerOwners(state chat.State, operationID string) int {
+	count := 0
+	for _, entry := range state.Queue {
+		if string(entry.OperationID) == operationID {
+			count++
+		}
+	}
+	if state.Foreground != nil && string(state.Foreground.OperationID) == operationID {
+		count++
+	}
+	if state.PendingSteer != nil && string(state.PendingSteer.OperationID) == operationID {
+		count++
+	}
+	return count
 }

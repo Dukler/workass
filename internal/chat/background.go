@@ -137,6 +137,22 @@ func (a BackgroundAction) Clone() BackgroundAction {
 	return out
 }
 
+// SameRequest compares the immutable caller intent for an exact-once
+// background mutation. Provider ownership is deliberately excluded: a lost
+// reply may be retried after the foreground turn has advanced, but the durable
+// outbox retains the original owner. Chat/tab identity, operation identity,
+// kind, and the complete typed payload must remain byte-for-byte equivalent.
+func (a BackgroundAction) SameRequest(other BackgroundAction) bool {
+	left, right := a.Clone(), other.Clone()
+	left.Owner = ProviderActivityOwner{}
+	right.Owner = ProviderActivityOwner{}
+	left.OperationID = provider.NormalizeOperationID(string(left.OperationID))
+	right.OperationID = provider.NormalizeOperationID(string(right.OperationID))
+	left.TabID, right.TabID = strings.TrimSpace(left.TabID), strings.TrimSpace(right.TabID)
+	left.ChatID, right.ChatID = strings.TrimSpace(left.ChatID), strings.TrimSpace(right.ChatID)
+	return reflect.DeepEqual(left, right)
+}
+
 func (a BackgroundAction) Validate(state State) error {
 	a.OperationID = provider.NormalizeOperationID(string(a.OperationID))
 	if a.OperationID == "" || strings.TrimSpace(a.ChatID) == "" || strings.TrimSpace(a.TabID) == "" {
@@ -184,7 +200,7 @@ func (a BackgroundAction) Validate(state State) error {
 		if !ok {
 			return fmt.Errorf("background work %q is not actor-owned", target)
 		}
-		if existing.Owner.LaneID != a.Owner.LaneID || existing.Owner.OperationID != a.Owner.OperationID {
+		if existing.Owner != a.Owner {
 			return errors.New("background action changed immutable work ownership")
 		}
 	}
@@ -192,16 +208,7 @@ func (a BackgroundAction) Validate(state State) error {
 }
 
 func backgroundOwnerExists(state State, owner ProviderActivityOwner) bool {
-	if state.Foreground != nil && state.Foreground.LaneID == owner.LaneID && state.Foreground.OperationID == owner.OperationID {
-		return true
-	}
-	for i := len(state.Ledger) - 1; i >= 0; i-- {
-		event := state.Ledger[i]
-		if event.LaneID == owner.LaneID && event.OperationID == owner.OperationID {
-			return owner.TurnID == "" || event.NativeTurnID == "" || event.NativeTurnID == owner.TurnID
-		}
-	}
-	return false
+	return validateProviderActivityOwner(state, owner) == nil
 }
 
 func (a BackgroundAction) TargetWorkID() string {
@@ -265,7 +272,16 @@ func reduceRequestBackgroundAction(state *State, command RequestBackgroundAction
 		return nil, err
 	}
 	if _, exists := state.Operations[action.OperationID]; exists {
-		return nil, nil
+		for _, entry := range state.Outbox {
+			if entry.Kind != EffectBackground || entry.OperationID != action.OperationID {
+				continue
+			}
+			if entry.Background == nil || !entry.Background.SameRequest(action) {
+				return nil, errors.New("background operation id was reused for different content")
+			}
+			return nil, nil
+		}
+		return nil, errors.New("background operation id is already owned by another actor command")
 	}
 	state.Operations[action.OperationID] = struct{}{}
 	return []Effect{BackgroundActionEffect{Action: action}}, nil

@@ -246,7 +246,16 @@ func TestNodeProbeAgainstGoRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repo root: %v", err)
 	}
-	cmd := exec.Command("node", "desktop/scripts/probe-acp.mjs", "go", "run", "./cmd/workass-agent")
+	// Keep compilation outside the Node probe's five-second initialize deadline.
+	// The probe must start the real agent executable, rather than the in-process
+	// test helper, so this remains an end-to-end ACP initialize oracle.
+	agentPath := filepath.Join(t.TempDir(), "workass-agent")
+	build := exec.Command("go", "build", "-o", agentPath, "./cmd/workass-agent")
+	build.Dir = root
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build workass-agent for ACP probe: %v\n%s", err, output)
+	}
+	cmd := exec.Command("node", "desktop/scripts/probe-acp.mjs", agentPath)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
 		"OPENAI_BASE_URL="+fake.URL()+"/v1",
@@ -254,7 +263,7 @@ func TestNodeProbeAgainstGoRun(t *testing.T) {
 		"OPENAI_API_KEY=test-secret",
 	)
 	out, err := cmd.CombinedOutput()
-	t.Logf("node desktop/scripts/probe-acp.mjs go run ./cmd/workass-agent\n%s", out)
+	t.Logf("node desktop/scripts/probe-acp.mjs %s\n%s", agentPath, out)
 	if err != nil {
 		t.Fatalf("node probe failed: %v", err)
 	}
@@ -266,6 +275,12 @@ func TestNodeProbeAgainstGoRun(t *testing.T) {
 	}
 	if result["ok"] != true {
 		t.Fatalf("probe result = %#v", result)
+	}
+	if intField(result["protocolVersion"]) != 1 {
+		t.Fatalf("probe protocolVersion = %#v, want 1", result["protocolVersion"])
+	}
+	if stringField(asMap(result["agentInfo"])["name"]) != "workass-agent" {
+		t.Fatalf("probe agentInfo = %#v", result["agentInfo"])
 	}
 }
 
