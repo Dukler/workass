@@ -14,6 +14,7 @@ import (
 
 	"workass/internal/acp"
 	"workass/internal/chat"
+	"workass/internal/durablefs"
 	providercontract "workass/internal/provider"
 )
 
@@ -865,12 +866,7 @@ func writeLegacyChatCleanupReceipt(path string, receipt legacyChatCleanupReceipt
 		return err
 	}
 	removeTemp = false
-	directory, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
+	return durablefs.SyncDirectory(dir)
 }
 
 func writeLegacyChatCutoverReceipt(path string, receipt legacyChatCutoverReceipt) error {
@@ -910,12 +906,7 @@ func writeLegacyChatCutoverReceipt(path string, receipt legacyChatCutoverReceipt
 		return err
 	}
 	removeTemp = false
-	directory, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
+	return durablefs.SyncDirectory(dir)
 }
 
 func (r *providerChatRuntime) migrateLegacyChatFromSource(chatID string, engine *chat.Engine, source map[string]any) error {
@@ -930,10 +921,11 @@ func (r *providerChatRuntime) migrateLegacyChatFromSource(chatID string, engine 
 	if strings.TrimSpace(fieldString(source, "chatId")) != strings.TrimSpace(chatID) {
 		return errors.New("legacy migration source belongs to another chat")
 	}
-	command, err := buildLegacyChatMigration(source, filepath.Dir(r.sessions.path), r.sessions)
+	command, sourceConflict, err := buildLegacyChatMigration(source, filepath.Dir(r.sessions.path), r.sessions)
 	if err != nil {
 		return err
 	}
+	quarantine := sourceConflict
 	if _, _, previewErr := chat.Reduce(engine.Snapshot(), command); previewErr != nil {
 		// A malformed pre-actor steering/segmentation relation must not make one
 		// old chat prevent daemon startup, and it must not make that nonempty chat
@@ -947,15 +939,16 @@ func (r *providerChatRuntime) migrateLegacyChatFromSource(chatID string, engine 
 		if _, _, quarantinePreviewErr := chat.Reduce(engine.Snapshot(), quarantined); quarantinePreviewErr != nil {
 			return fmt.Errorf("migrate legacy chat %q: %w", chatID, previewErr)
 		}
-		if err := engine.Apply(quarantined); err != nil {
-			return fmt.Errorf("migrate quarantined legacy chat %q: %w", chatID, err)
-		}
+		command = quarantined
+		quarantine = true
+	}
+	if err := engine.Apply(command); err != nil {
+		return fmt.Errorf("migrate legacy chat %q: %w", chatID, err)
+	}
+	if quarantine {
 		if err := engine.Apply(chat.QuarantineLegacyMigration{Error: providercontract.ErrorNativeIdentityConflict}); err != nil {
 			return fmt.Errorf("quarantine legacy chat %q: %w", chatID, err)
 		}
-		command = quarantined
-	} else if err := engine.Apply(command); err != nil {
-		return fmt.Errorf("migrate legacy chat %q: %w", chatID, err)
 	}
 	obligation, err := legacyObligationFor(filepath.Dir(r.sessions.path), command.Presentation.TabID, chatID)
 	if err != nil {
@@ -969,6 +962,69 @@ func (r *providerChatRuntime) migrateLegacyChatFromSource(chatID string, engine 
 		return errors.New("legacy chat migration failed durable readback verification")
 	}
 	return nil
+}
+
+// reconcileUncommittedLegacyActor repairs the only safe changed-source case:
+// a previous daemon committed one or more staging actors, then failed before
+// the global v5 receipt. Until that receipt commits, the legacy mirror/archive
+// remains the authority and may continue advancing under the rolled-back app.
+// Rebuild is forbidden once the global receipt exists or for actor-native and
+// deleted chats; those states are authoritative and must fail closed instead.
+func (r *providerChatRuntime) reconcileUncommittedLegacyActor(chatID string, engine *chat.Engine, source map[string]any) (*chat.Engine, error) {
+	if r == nil || r.sessions == nil || engine == nil {
+		return nil, errors.New("interrupted legacy actor reconciliation is unavailable")
+	}
+	state := engine.Snapshot()
+	if !state.Initialized || !state.Migration.Complete {
+		return engine, nil
+	}
+	command, sourceConflict, err := buildLegacyChatMigration(source, filepath.Dir(r.sessions.path), r.sessions)
+	if err != nil {
+		return nil, err
+	}
+	if state.Migration.Version == command.Version && state.Migration.Digest == command.Digest {
+		return engine, nil
+	}
+	if _, committed, receiptErr := readLegacyChatCutoverReceipt(filepath.Join(r.stateDir, legacyChatCutoverReceiptFilename)); receiptErr != nil {
+		return nil, receiptErr
+	} else if committed {
+		return nil, errors.New("legacy chat changed after the authoritative cutover receipt")
+	}
+	if state.CreationOperationID != "" || state.CreationDigest != "" || state.Deleted || state.DeletionOperationID != "" {
+		return nil, errors.New("changed legacy source conflicts with an actor-native or deleted chat")
+	}
+
+	fresh, err := chat.NewState(chatID)
+	if err != nil {
+		return nil, err
+	}
+	fresh, _, err = chat.Reduce(fresh, command)
+	if err != nil {
+		return nil, fmt.Errorf("rebuild interrupted legacy migration %q: %w", chatID, err)
+	}
+	if sourceConflict {
+		fresh, _, err = chat.Reduce(fresh, chat.QuarantineLegacyMigration{Error: providercontract.ErrorNativeIdentityConflict})
+		if err != nil {
+			return nil, fmt.Errorf("quarantine rebuilt legacy migration %q: %w", chatID, err)
+		}
+	}
+	obligation, err := legacyObligationFor(filepath.Dir(r.sessions.path), command.Presentation.TabID, chatID)
+	if err != nil {
+		return nil, err
+	}
+	fresh, _, err = chat.Reduce(fresh, chat.MigrateLegacyObligation{Obligation: obligation})
+	if err != nil {
+		return nil, fmt.Errorf("rebuild interrupted legacy obligation %q: %w", chatID, err)
+	}
+	store := chat.FileStore{Path: providerChatStatePath(r.stateDir, chatID)}
+	if err := store.Save(fresh); err != nil {
+		return nil, fmt.Errorf("commit rebuilt legacy staging actor %q: %w", chatID, err)
+	}
+	reopened, err := chat.NewDurableEngine(chatID, store)
+	if err != nil {
+		return nil, fmt.Errorf("read rebuilt legacy staging actor %q: %w", chatID, err)
+	}
+	return reopened, nil
 }
 
 func quarantinedLegacyChatMigration(source chat.MigrateLegacyChat) (chat.MigrateLegacyChat, error) {
@@ -994,20 +1050,20 @@ func quarantinedLegacyChatMigration(source chat.MigrateLegacyChat) (chat.Migrate
 	return command, nil
 }
 
-func buildLegacyChatMigration(source map[string]any, stateDir string, sessions *sessionStore) (chat.MigrateLegacyChat, error) {
+func buildLegacyChatMigration(source map[string]any, stateDir string, sessions *sessionStore) (chat.MigrateLegacyChat, bool, error) {
 	chatID := strings.TrimSpace(fieldString(source, "chatId"))
 	tabID := strings.TrimSpace(fieldString(source, "id"))
 	if chatID == "" || tabID == "" {
-		return chat.MigrateLegacyChat{}, errors.New("legacy chat is missing immutable chat or tab identity")
+		return chat.MigrateLegacyChat{}, false, errors.New("legacy chat is missing immutable chat or tab identity")
 	}
 	presentation, err := presentationFromLegacyChat(source)
 	if err != nil {
-		return chat.MigrateLegacyChat{}, err
+		return chat.MigrateLegacyChat{}, false, err
 	}
 
-	messageSources, err := completeLegacyMessages(source, stateDir)
+	messageSources, sourceConflict, err := completeLegacyMessages(source, stateDir)
 	if err != nil {
-		return chat.MigrateLegacyChat{}, err
+		return chat.MigrateLegacyChat{}, false, err
 	}
 	messages := make([]chat.LegacyMessage, 0, len(messageSources))
 	var currentOperation providercontract.OperationID
@@ -1016,7 +1072,7 @@ func buildLegacyChatMigration(source map[string]any, stateDir string, sessions *
 		messageID := strings.TrimSpace(fieldString(message, "id"))
 		role := strings.ToLower(strings.TrimSpace(fieldString(message, "role")))
 		if messageID == "" || (role != "user" && role != "assistant") {
-			return chat.MigrateLegacyChat{}, fmt.Errorf("legacy message %d has no stable id or supported role", index)
+			return chat.MigrateLegacyChat{}, false, fmt.Errorf("legacy message %d has no stable id or supported role", index)
 		}
 		if role == "user" {
 			currentOperation = providercontract.NormalizeOperationID(messageID)
@@ -1026,23 +1082,23 @@ func buildLegacyChatMigration(source map[string]any, stateDir string, sessions *
 		}
 		attachments, attachErr := sessions.PersistProviderAttachments(anySlice(message["images"]))
 		if attachErr != nil {
-			return chat.MigrateLegacyChat{}, fmt.Errorf("persist legacy message %q attachments: %w", messageID, attachErr)
+			return chat.MigrateLegacyChat{}, false, fmt.Errorf("persist legacy message %q attachments: %w", messageID, attachErr)
 		}
 		// The actor stores only content-addressed image references. This walk also
 		// covers tool-result media nested below the message event list.
 		if err := makeSessionValueRefNative(message, stateDir); err != nil {
-			return chat.MigrateLegacyChat{}, fmt.Errorf("externalize legacy message %q media: %w", messageID, err)
+			return chat.MigrateLegacyChat{}, false, fmt.Errorf("externalize legacy message %q media: %w", messageID, err)
 		}
 		timeline, err := legacyTimeline(messageID, anySlice(message["events"]), sessions)
 		if err != nil {
-			return chat.MigrateLegacyChat{}, err
+			return chat.MigrateLegacyChat{}, false, err
 		}
 		permission, err := legacyPermission(message["permission"])
 		if err != nil {
-			return chat.MigrateLegacyChat{}, fmt.Errorf("legacy message %q permission: %w", messageID, err)
+			return chat.MigrateLegacyChat{}, false, fmt.Errorf("legacy message %q permission: %w", messageID, err)
 		}
 		if err := requireOnlyKeys(message, legacyMessageKeys, "legacy message "+messageID); err != nil {
-			return chat.MigrateLegacyChat{}, err
+			return chat.MigrateLegacyChat{}, false, err
 		}
 		status := strings.ToLower(strings.TrimSpace(fieldString(message, "status")))
 		if status == "" {
@@ -1069,7 +1125,7 @@ func buildLegacyChatMigration(source map[string]any, stateDir string, sessions *
 		if message["steerAnchor"] != nil {
 			rawAnchor := mapFromAnyMain(message["steerAnchor"])
 			if err := requireOnlyKeys(rawAnchor, map[string]struct{}{"assistantMessageId": {}, "contentOffset": {}, "resultOffset": {}, "eventCount": {}}, "legacy steer anchor"); err != nil {
-				return chat.MigrateLegacyChat{}, err
+				return chat.MigrateLegacyChat{}, false, err
 			}
 			legacy.SteerAnchor = &chat.SteerAnchor{
 				AssistantMessageID: fieldString(rawAnchor, "assistantMessageId"), ContentOffset: intValue(rawAnchor["contentOffset"]),
@@ -1080,15 +1136,15 @@ func buildLegacyChatMigration(source map[string]any, stateDir string, sessions *
 	}
 	stagedQueue, err := stagedQueueFromLegacyChat(source, sessions)
 	if err != nil {
-		return chat.MigrateLegacyChat{}, err
+		return chat.MigrateLegacyChat{}, false, err
 	}
 	command := chat.MigrateLegacyChat{
 		Version: legacyChatMigrationVersion, Presentation: presentation, Messages: messages, StagedQueue: stagedQueue,
 	}
 	if err := sealLegacyChatMigration(&command); err != nil {
-		return chat.MigrateLegacyChat{}, err
+		return chat.MigrateLegacyChat{}, false, err
 	}
-	return command, nil
+	return command, sourceConflict, nil
 }
 
 func sealLegacyChatMigration(command *chat.MigrateLegacyChat) error {
@@ -1351,10 +1407,11 @@ func stagedQueueFromLegacyChat(source map[string]any, sessions *sessionStore) ([
 // older completed rows. Migration combines both by stable row id, never by
 // content similarity. A truly pre-id row is ambiguous (two identical repeated
 // messages are legal), so it quarantines instead of receiving a guessed id.
-func completeLegacyMessages(source map[string]any, stateDir string) ([]any, error) {
+func completeLegacyMessages(source map[string]any, stateDir string) ([]any, bool, error) {
 	tabID := fieldString(source, "id")
 	combined := make([]any, 0)
 	position := make(map[string]int)
+	conflicted := false
 	appendSource := func(items []any, sourceName string) error {
 		for index, raw := range items {
 			message := mapFromAnyMain(cloneJSON(raw))
@@ -1367,7 +1424,7 @@ func completeLegacyMessages(source map[string]any, stateDir string) ([]any, erro
 				for _, key := range []string{"role", "content", "result"} {
 					left, right := fieldString(existing, key), fieldString(message, key)
 					if left != "" && right != "" && left != right {
-						return fmt.Errorf("legacy message %q conflicts between archive and mirror", id)
+						conflicted = true
 					}
 				}
 				// The inline mirror is newer and may contain richer terminal/event
@@ -1383,12 +1440,12 @@ func completeLegacyMessages(source map[string]any, stateDir string) ([]any, erro
 		return nil
 	}
 	if err := appendSource(loadChatArchive(stateDir, tabID), "archive"); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := appendSource(messageSlice(source), "mirror"); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return combined, nil
+	return combined, conflicted, nil
 }
 
 func optionalStringPointer(source map[string]any, key string) *string {

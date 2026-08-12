@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"workass/internal/durablefs"
 )
 
 const (
@@ -1925,7 +1927,7 @@ func syncSpawnedWorkDirectory(dir string) error {
 	if dir == "" {
 		return nil
 	}
-	file, err := os.Open(dir)
+	_, err := os.Stat(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		// Removing an already-absent snapshot is idempotent. There is no
 		// directory entry to flush when the tab has never had a snapshot.
@@ -1934,8 +1936,7 @@ func syncSpawnedWorkDirectory(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	return file.Sync()
+	return durablefs.SyncDirectory(dir)
 }
 
 func writeSpawnedWorkFile(path string, data []byte) error {

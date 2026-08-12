@@ -275,6 +275,187 @@ func TestLegacySteerWithoutExplicitTurnOwnerQuarantinesOnlyThatChat(t *testing.T
 	}
 }
 
+func TestConflictingArchiveAndMirrorMessageQuarantinesOnlyThatChat(t *testing.T) {
+	stateDir := t.TempDir()
+	const badTabID, badChatID = "conflict-tab", "conflict-chat"
+	const goodTabID, goodChatID = "unaffected-tab", "unaffected-chat"
+	legacy := map[string]any{"activeId": goodTabID, "chats": []any{
+		map[string]any{
+			"id": badTabID, "chatId": badChatID, "title": "Conflicting legacy row",
+			"messages": []any{map[string]any{
+				"id": "shared-message", "role": "assistant", "content": "newer mirror content", "status": "done",
+			}},
+			"queue": []any{},
+		},
+		map[string]any{
+			"id": goodTabID, "chatId": goodChatID, "title": "Unaffected",
+			"messages": []any{map[string]any{
+				"id": "good-user", "role": "user", "content": "keep me", "status": "done",
+			}},
+			"queue": []any{},
+		},
+	}}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, sessionStateFilename), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := chatArchivePath(stateDir, badTabID)
+	if err := os.MkdirAll(filepath.Dir(archivePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	archiveRow, err := json.Marshal(map[string]any{
+		"id": "shared-message", "role": "assistant", "content": "older archive content", "status": "done",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archivePath, append(archiveRow, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := acp.NewManager(acp.Options{StateDir: stateDir, RuntimeProfile: "test", SpawnedWorkReconcileInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newProviderChatRuntime(manager, newSessionStore(filepath.Join(stateDir, sessionStateFilename)), stateDir)
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
+	if err := runtime.StartupError(); err != nil {
+		t.Fatalf("one conflicting legacy chat blocked daemon startup: %v", err)
+	}
+
+	badEngine, err := chat.NewDurableEngine(badChatID, chat.FileStore{Path: providerChatStatePath(stateDir, badChatID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := badEngine.Snapshot()
+	if bad.Migration.BlockedError != providercontract.ErrorNativeIdentityConflict || len(bad.Ledger) != 1 {
+		t.Fatalf("conflicting chat was not durably quarantined: blocked=%q ledger=%d", bad.Migration.BlockedError, len(bad.Ledger))
+	}
+	if bad.Ledger[0].MessageID != "shared-message" || bad.Ledger[0].Text != "newer mirror content" {
+		t.Fatalf("quarantine did not preserve the renderer-visible mirror row: %#v", bad.Ledger[0])
+	}
+
+	goodEngine, err := chat.NewDurableEngine(goodChatID, chat.FileStore{Path: providerChatStatePath(stateDir, goodChatID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := goodEngine.Snapshot()
+	if good.Migration.BlockedError != "" || len(good.Ledger) != 1 || good.Ledger[0].Text != "keep me" {
+		t.Fatalf("unrelated chat did not migrate normally: %#v", good)
+	}
+	if receipt, ok, err := readLegacyChatCutoverReceipt(filepath.Join(stateDir, legacyChatCutoverReceiptFilename)); err != nil || !ok || !receipt.Complete {
+		t.Fatalf("global cutover did not complete after quarantining one conflict: receipt=%#v ok=%v err=%v", receipt, ok, err)
+	}
+}
+
+func TestCompletedCutoverIgnoresUnacceptedEmptyActorFile(t *testing.T) {
+	stateDir := t.TempDir()
+	const ghostChatID = "unaccepted-create-ghost"
+	ghost, err := chat.NewState(ghostChatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (chat.FileStore{Path: providerChatStatePath(stateDir, ghostChatID)}).Save(ghost); err != nil {
+		t.Fatal(err)
+	}
+	discovered, err := chat.DiscoverFileStates(filepath.Join(stateDir, "provider-chats"))
+	if err != nil || len(discovered) != 1 {
+		t.Fatalf("discover unaccepted actor fixture: states=%d err=%v", len(discovered), err)
+	}
+	if !unacceptedEmptyActorState(discovered[0]) {
+		t.Fatalf("fixture is not classified as an unaccepted empty actor: %#v", discovered[0])
+	}
+	receipt := legacyChatCutoverReceipt{
+		Version: legacyChatCutoverVersion, Complete: true,
+		CompletedAt: time.Now().UTC().Format(time.RFC3339Nano), ChatIDs: []string{},
+	}
+	if err := writeLegacyChatCutoverReceipt(filepath.Join(stateDir, legacyChatCutoverReceiptFilename), receipt); err != nil {
+		t.Fatal(err)
+	}
+	cleanup := legacyChatCleanupReceipt{
+		Version: legacyChatCleanupVersion, Complete: true,
+		CompletedAt: time.Now().UTC().Format(time.RFC3339Nano), CutoverDigest: legacyChatCutoverDigest(receipt),
+	}
+	if err := writeLegacyChatCleanupReceipt(filepath.Join(stateDir, legacyChatCleanupReceiptFilename), cleanup); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := acp.NewManager(acp.Options{StateDir: stateDir, RuntimeProfile: "test", SpawnedWorkReconcileInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newProviderChatRuntime(manager, newSessionStore(filepath.Join(stateDir, sessionStateFilename)), stateDir)
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
+	if err := runtime.StartupError(); err != nil {
+		t.Fatalf("unaccepted empty actor file blocked startup: %v", err)
+	}
+	ids, err := runtime.knownChatIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("unaccepted empty actor became a known chat: %v", ids)
+	}
+}
+
+func TestInterruptedCutoverRebuildsStagingActorFromCurrentLegacyAuthority(t *testing.T) {
+	stateDir := t.TempDir()
+	const tabID, chatID = "interrupted-authority-tab", "interrupted-authority-chat"
+	initial := map[string]any{
+		"id": tabID, "chatId": chatID, "title": "Interrupted migration", "titleLocked": true,
+		"messages": []any{map[string]any{
+			"id": "initial-user", "role": "user", "content": "initial", "status": "done",
+		}},
+		"queue": []any{},
+	}
+	sessions := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
+	command, _, err := buildLegacyChatMigration(initial, stateDir, sessions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := chat.NewDurableEngine(chatID, chat.FileStore{Path: providerChatStatePath(stateDir, chatID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Apply(command); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := readLegacyChatCutoverReceipt(filepath.Join(stateDir, legacyChatCutoverReceiptFilename)); err != nil || ok {
+		t.Fatalf("interrupted fixture unexpectedly has a global receipt: ok=%v err=%v", ok, err)
+	}
+
+	updated := mapFromAnyMain(cloneJSON(initial))
+	updated["messages"] = []any{
+		map[string]any{"id": "initial-user", "role": "user", "content": "initial", "status": "done"},
+		map[string]any{"id": "later-assistant", "role": "assistant", "content": "arrived while rollback was active", "status": "done"},
+	}
+	raw, err := json.Marshal(map[string]any{"activeId": tabID, "chats": []any{updated}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, sessionStateFilename), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := acp.NewManager(acp.Options{StateDir: stateDir, RuntimeProfile: "test", SpawnedWorkReconcileInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newProviderChatRuntime(manager, newSessionStore(filepath.Join(stateDir, sessionStateFilename)), stateDir)
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
+	if err := runtime.StartupError(); err != nil {
+		t.Fatalf("interrupted staging actor blocked current legacy migration: %v", err)
+	}
+	reopened, err := chat.NewDurableEngine(chatID, chat.FileStore{Path: providerChatStatePath(stateDir, chatID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := reopened.Snapshot()
+	if !state.Initialized || len(state.Ledger) != 2 || state.Ledger[1].MessageID != "later-assistant" {
+		t.Fatalf("interrupted staging actor did not rebuild from the current legacy source: %#v", state.Ledger)
+	}
+	if receipt, ok, err := readLegacyChatCutoverReceipt(filepath.Join(stateDir, legacyChatCutoverReceiptFilename)); err != nil || !ok || !receipt.Complete {
+		t.Fatalf("global cutover did not commit after rebuilding staging actor: receipt=%#v ok=%v err=%v", receipt, ok, err)
+	}
+}
+
 func TestInterruptedV5ReceiptRepairsUninitializedOrphanFromExactNativeInventory(t *testing.T) {
 	stateDir := t.TempDir()
 	const chatID, tabID = "receipt-orphan-chat", "receipt-orphan-tab"

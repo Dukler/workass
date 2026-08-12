@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +20,7 @@ import (
 	"unicode/utf16"
 
 	"workass/internal/acp"
+	"workass/internal/durablefs"
 	providercontract "workass/internal/provider"
 )
 
@@ -1600,16 +1600,7 @@ func markSessionImageVerified(path string, info os.FileInfo) {
 }
 
 func syncDirectory(path string) error {
-	// Windows does not support Sync on an os.File opened as a directory; its
-	// rename durability boundary is provided by the filesystem/MoveFileEx path.
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	dir, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	return errors.Join(dir.Sync(), dir.Close())
+	return durablefs.SyncDirectory(path)
 }
 
 func rehydrateExternalSessionImages(value any, stateDir string) error {
