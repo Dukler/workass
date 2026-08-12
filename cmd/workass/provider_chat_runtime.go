@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -72,6 +73,16 @@ func newProviderChatRuntimeWithStartupMode(manager *acp.Manager, sessions *sessi
 		runtime.bootErr = err
 	} else {
 		for _, state := range states {
+			// FileStore may contain a schema-upgraded empty envelope from a
+			// chat:create attempt that never committed InitializeChat. It has no
+			// accepted chat identity and is not part of the immutable cutover
+			// inventory, so discovery must not turn it into a runtime chat. A
+			// referenced interrupted-cutover actor is repaired separately from
+			// the receipt; any nonempty pre-initialization state still fails
+			// closed through actor construction.
+			if unacceptedEmptyActorState(state) {
+				continue
+			}
 			runtime.known[state.ChatID] = struct{}{}
 		}
 	}
@@ -108,6 +119,43 @@ func newProviderChatRuntimeWithStartupMode(manager *acp.Manager, sessions *sessi
 		go runtime.runObligationReconciliation(ctx)
 	}
 	return runtime
+}
+
+func unacceptedEmptyActorState(state chat.State) bool {
+	if state.Initialized || state.Deleted ||
+		state.CreationOperationID != "" || strings.TrimSpace(state.CreationDigest) != "" || state.DeletionOperationID != "" ||
+		state.ContextFloor != 0 || state.ActiveLaneID != "" || state.DesiredLaneID != "" ||
+		state.Foreground != nil || state.PendingSteer != nil || state.PendingCancel != nil || state.Obligation != nil ||
+		len(state.Ledger) != 0 || len(state.Lanes) != 0 || len(state.StagedQueue) != 0 || len(state.Queue) != 0 ||
+		len(state.QueueMutationReceipts) != 0 || len(state.PresentationMutationReceipts) != 0 || len(state.RuntimeControlMutationReceipts) != 0 ||
+		len(state.WorkspaceMutationReceipts) != 0 || len(state.LaneSelectionMutationReceipts) != 0 || len(state.CancelMutationReceipts) != 0 ||
+		len(state.AgentWaitObservationReceipts) != 0 || len(state.Operations) != 0 || len(state.Outbox) != 0 || len(state.Tools) != 0 ||
+		len(state.Plans) != 0 || len(state.Permissions) != 0 || len(state.Background) != 0 || len(state.Usage) != 0 ||
+		len(state.Compactions) != 0 || len(state.Transport) != 0 || state.Migration != (chat.MigrationState{}) {
+		return false
+	}
+	presentation := state.Presentation.Clone()
+	if !emptyActorRawJSON(presentation.ModelControls) || !emptyActorRawJSON(presentation.ContextUsageByProvider) ||
+		!emptyActorRawJSON(presentation.LegacyUsage) || len(presentation.PlanLatest) != 0 {
+		return false
+	}
+	presentation.ModelControls = nil
+	presentation.ContextUsageByProvider = nil
+	presentation.LegacyUsage = nil
+	presentation.PlanLatest = nil
+	environment := state.Environment.Clone()
+	if !emptyActorRawJSON(environment.Payload) || !emptyActorRawJSON(environment.Checkpoints) || !emptyActorRawJSON(environment.Reference) {
+		return false
+	}
+	environment.Payload = nil
+	environment.Checkpoints = nil
+	environment.Reference = nil
+	return reflect.DeepEqual(presentation, chat.PresentationState{}) && reflect.DeepEqual(environment, chat.EnvironmentState{})
+}
+
+func emptyActorRawJSON(raw json.RawMessage) bool {
+	value := strings.TrimSpace(string(raw))
+	return value == "" || value == "null"
 }
 
 func (r *providerChatRuntime) StartupError() error {
@@ -274,6 +322,12 @@ func (r *providerChatRuntime) actorFromSource(chatID string, legacy map[string]a
 	engine, err := chat.NewDurableEngine(chatID, chat.FileStore{Path: providerChatStatePath(r.stateDir, chatID)})
 	if err != nil {
 		return nil, fmt.Errorf("open provider chat actor: %w", err)
+	}
+	if legacy != nil {
+		engine, err = r.reconcileUncommittedLegacyActor(chatID, engine, legacy)
+		if err != nil {
+			return nil, err
+		}
 	}
 	state := engine.Snapshot()
 	if state.Deleted && (legacy != nil || initialize != nil) {

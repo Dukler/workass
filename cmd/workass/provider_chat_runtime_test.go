@@ -1260,7 +1260,7 @@ func TestInterruptedV2ActorMigrationUpgradesObligationExactlyOnceAcrossBoots(t *
 		t.Fatal(err)
 	}
 	preCutoverStore := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
-	command, err := buildLegacyChatMigration(legacyChat, stateDir, preCutoverStore)
+	command, _, err := buildLegacyChatMigration(legacyChat, stateDir, preCutoverStore)
 	if err != nil {
 		t.Fatal(err)
 	}

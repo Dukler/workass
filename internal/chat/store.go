@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"workass/internal/durablefs"
 	"workass/internal/provider"
 )
 
@@ -332,11 +333,5 @@ func (s FileStore) Save(state State) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return err
 	}
-	if dirHandle, err := os.Open(dir); err == nil {
-		defer dirHandle.Close()
-		if err := dirHandle.Sync(); err != nil {
-			return err
-		}
-	}
-	return nil
+	return durablefs.SyncDirectory(dir)
 }
