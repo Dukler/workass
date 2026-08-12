@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"strings"
 
 	"workass/internal/acp"
+	"workass/internal/chat"
 	providercontract "workass/internal/provider"
 )
 
@@ -71,6 +74,11 @@ func (c *chatControlCoordinator) authorize(ownerKey, parentChatID, parentTabID s
 	if c == nil || c.manager == nil || c.providerChats == nil {
 		return errors.New("Workass chat control is unavailable")
 	}
+	// The durable actor pair is the identity fence. Manager capabilities are
+	// disposable execution state and must not be consulted for a stale pair.
+	if _, _, err := c.providerChats.exactActor(parentTabID, parentChatID); err != nil {
+		return err
+	}
 	if !c.manager.ValidateAgentOwner(ownerKey, parentChatID, parentTabID) {
 		return errors.New("Workass chat control caller is not an owned ACP session")
 	}
@@ -94,6 +102,165 @@ func exactAgentTarget(params map[string]any) (string, string, error) {
 		return "", "", errors.New("exact tab_id and chat_id are required; call workass_list_chats first")
 	}
 	return tabID, chatID, nil
+}
+
+func requiredChatOperation(params map[string]any, method string) (providercontract.OperationID, error) {
+	operationID, err := providercontract.ValidateOperationID(fieldString(params, "operation_id"))
+	if err != nil {
+		return "", fmt.Errorf("chat.%s requires a valid caller-stable operation_id", method)
+	}
+	return operationID, nil
+}
+
+// validateMutationTarget is the fail-first boundary for agent chat control.
+// It validates the stable logical operation and the durable actor identity
+// before catalog lookup, foreground inspection, cancellation, or provider
+// execution. The actor-owned mutation methods retain responsibility for
+// receipt readback and concurrent revision checks after this boundary.
+func (c *chatControlCoordinator) validateMutationTarget(tabID, chatID string, operationID providercontract.OperationID, method string) error {
+	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
+	if tabID == "" || chatID == "" {
+		return errors.New("exact tab_id and chat_id are required; call workass_list_chats first")
+	}
+	if providercontract.NormalizeOperationID(string(operationID)) == "" {
+		return fmt.Errorf("chat.%s requires a stable operation_id", method)
+	}
+	if c == nil || c.providerChats == nil {
+		return errors.New("Workass chat actor is unavailable")
+	}
+	if _, _, err := c.providerChats.exactActor(tabID, chatID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *chatControlCoordinator) validateMutation(params map[string]any, method string) (string, string, providercontract.OperationID, error) {
+	tabID, chatID, err := exactAgentTarget(params)
+	if err != nil {
+		return "", "", "", err
+	}
+	operationID, err := requiredChatOperation(params, method)
+	if err != nil {
+		return "", "", "", err
+	}
+	if err := c.validateMutationTarget(tabID, chatID, operationID, method); err != nil {
+		return "", "", "", err
+	}
+	return tabID, chatID, operationID, nil
+}
+
+func cancelReceiptForOperation(state chat.State, operationID providercontract.OperationID) (chat.OutboxEntry, bool) {
+	for _, entry := range state.Outbox {
+		if entry.Kind == chat.EffectCancelTurn && entry.OperationID == operationID {
+			return entry, true
+		}
+	}
+	return chat.OutboxEntry{}, false
+}
+
+func cancelResultFromReceipt(entry chat.OutboxEntry) (acp.JobCancelResult, bool) {
+	switch entry.Status {
+	case chat.OutboxAccepted, chat.OutboxConsumed, chat.OutboxCompleted:
+		return acp.JobCancelResult{Cancelled: true, Reason: "cancelled"}, true
+	case chat.OutboxAmbiguous:
+		return acp.JobCancelResult{Cancelled: false, Reason: "uncertain"}, true
+	case chat.OutboxFailed:
+		return acp.JobCancelResult{Cancelled: false, Reason: "not-owned"}, true
+	default:
+		return acp.JobCancelResult{Cancelled: false, Reason: "pending"}, false
+	}
+}
+
+func cancelResultFromActorReceipt(receipt chat.CancelMutationReceipt) acp.JobCancelResult {
+	return acp.JobCancelResult{Cancelled: receipt.Cancelled, Reason: receipt.Reason}
+}
+
+// cancelChatTurn is the actor-backed chat.cancel boundary. The caller's
+// operation id is the durable CancelTurn identity; native job ids are only
+// receipts. A terminal receipt is read back without re-draining the provider,
+// and reusing that operation for a different foreground turn is rejected.
+func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID string, operationID providercontract.OperationID) (string, acp.JobCancelResult, bool, error) {
+	operationID = providercontract.NormalizeOperationID(string(operationID))
+	if operationID == "" {
+		return "", acp.JobCancelResult{}, true, errors.New("chat.cancel requires a stable operation_id")
+	}
+	actor, _, err := r.exactActor(tabID, chatID)
+	if err != nil {
+		return "", acp.JobCancelResult{}, false, err
+	}
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+
+	state := actor.engine.Snapshot()
+	if receipt, ok := state.CancelMutationReceipts[operationID]; ok {
+		// A terminal actor receipt wins over current foreground state. This is the
+		// idempotency fence for an idle cancel that was acknowledged before a
+		// later foreground turn began.
+		return "", cancelResultFromActorReceipt(receipt), true, nil
+	}
+	receipt, hasReceipt := cancelReceiptForOperation(state, operationID)
+	if hasReceipt {
+		jobID := strings.TrimSpace(receipt.Turn.NativeID)
+		if jobID == "" {
+			return "", acp.JobCancelResult{}, true, errors.New("chat cancel receipt is missing its native turn id")
+		}
+		if state.Foreground != nil && state.Foreground.Turn != receipt.Turn {
+			return "", acp.JobCancelResult{}, true, errors.New("chat cancel operation id was reused for a different foreground turn")
+		}
+		if result, done := cancelResultFromReceipt(receipt); done {
+			return jobID, result, true, nil
+		}
+		if state.PendingCancel == nil || state.PendingCancel.OperationID != operationID || state.PendingCancel.Turn != receipt.Turn {
+			return jobID, acp.JobCancelResult{Cancelled: false, Reason: "pending"}, true, nil
+		}
+		if err := actor.coordinator.Drain(ctx); err != nil {
+			return jobID, acp.JobCancelResult{}, true, err
+		}
+		state = actor.engine.Snapshot()
+		receipt, ok := cancelReceiptForOperation(state, operationID)
+		if !ok {
+			return jobID, acp.JobCancelResult{}, true, errors.New("chat cancel receipt disappeared from actor state")
+		}
+		if result, done := cancelResultFromReceipt(receipt); done {
+			return jobID, result, true, nil
+		}
+		return jobID, acp.JobCancelResult{Cancelled: false, Reason: "pending"}, true, nil
+	}
+	if _, used := state.Operations[operationID]; used {
+		return "", acp.JobCancelResult{}, true, errors.New("chat cancel operation id was reused for a different chat action")
+	}
+	if state.Foreground == nil {
+		if err := actor.engine.Apply(chat.RecordCancelReceipt{
+			OperationID: operationID, Cancelled: false, Reason: "idle",
+		}); err != nil {
+			return "", acp.JobCancelResult{}, true, err
+		}
+		state = actor.engine.Snapshot()
+		idleReceipt, ok := state.CancelMutationReceipts[operationID]
+		if !ok {
+			return "", acp.JobCancelResult{}, true, errors.New("idle cancel did not produce an actor receipt")
+		}
+		return "", cancelResultFromActorReceipt(idleReceipt), true, nil
+	}
+	jobID := strings.TrimSpace(state.Foreground.Turn.NativeID)
+	if jobID == "" {
+		return "", acp.JobCancelResult{}, true, errors.New("chat foreground turn is not yet cancellable")
+	}
+	if err := actor.engine.Apply(chat.CancelTurn{OperationID: operationID}); err != nil {
+		return jobID, acp.JobCancelResult{}, true, err
+	}
+	if err := actor.coordinator.Drain(ctx); err != nil {
+		return jobID, acp.JobCancelResult{}, true, err
+	}
+	state = actor.engine.Snapshot()
+	receipt, ok := cancelReceiptForOperation(state, operationID)
+	if !ok {
+		return jobID, acp.JobCancelResult{}, true, errors.New("chat cancel did not produce an actor receipt")
+	}
+	if result, done := cancelResultFromReceipt(receipt); done {
+		return jobID, result, true, nil
+	}
+	return jobID, acp.JobCancelResult{Cancelled: false, Reason: "pending"}, true, nil
 }
 
 func (c *chatControlCoordinator) read(params map[string]any) (map[string]any, error) {
@@ -122,9 +289,24 @@ func (c *chatControlCoordinator) read(params map[string]any) (map[string]any, er
 }
 
 func (c *chatControlCoordinator) create(ctx context.Context, parentTabID, parentChatID string, params map[string]any) (map[string]any, error) {
-	operationID := providercontract.NormalizeOperationID(fieldString(params, "operation_id"))
-	if operationID == "" {
-		return nil, errors.New("chat.create requires a stable operation_id")
+	operationID, err := requiredChatOperation(params, "create")
+	if err != nil {
+		return nil, err
+	}
+	if err := c.validateMutationTarget(parentTabID, parentChatID, operationID, "create"); err != nil {
+		return nil, err
+	}
+	focus, _ := boolField(params, "focus")
+	intentDigest, err := headlessCreateIntentDigest(parentTabID, parentChatID, params)
+	if err != nil {
+		return nil, err
+	}
+	if existing, found, err := c.providerChats.existingHeadlessCreate(operationID, intentDigest, focus); found {
+		if err != nil {
+			return nil, err
+		}
+		c.refresh(fieldString(existing, "tabId"), fieldString(existing, "chatId"), focus)
+		return existing, nil
 	}
 	parent, err := c.providerChats.ReadChat(parentTabID, parentChatID, 1, false)
 	if err != nil {
@@ -141,8 +323,7 @@ func (c *chatControlCoordinator) create(ctx context.Context, parentTabID, parent
 	if err := validateChatCWD(cwd); err != nil {
 		return nil, err
 	}
-	focus, _ := boolField(params, "focus")
-	created, err := c.providerChats.CreateChat(fieldString(params, "title"), cwd, controls, focus, operationID)
+	created, err := c.providerChats.CreateChatWithIntentDigest(fieldString(params, "title"), cwd, controls, focus, operationID, intentDigest)
 	if err != nil {
 		return nil, err
 	}
@@ -155,14 +336,42 @@ func (c *chatControlCoordinator) create(ctx context.Context, parentTabID, parent
 	return created, nil
 }
 
+func headlessCreateIntentDigest(parentTabID, parentChatID string, params map[string]any) (string, error) {
+	cwd := strings.TrimSpace(fieldString(params, "cwd"))
+	if cwd == "" || cwd == "inherit" {
+		cwd = "inherit"
+	}
+	focus, _ := boolField(params, "focus")
+	payload := struct {
+		Version          string `json:"version"`
+		ParentTabID      string `json:"parentTabId"`
+		ParentChatID     string `json:"parentChatId"`
+		Title            string `json:"title"`
+		CWD              string `json:"cwd"`
+		ProviderID       string `json:"providerId"`
+		ModelID          string `json:"modelId"`
+		Effort           string `json:"effort"`
+		ModeID           string `json:"modeId"`
+		PermissionIntent string `json:"permissionIntent"`
+		Focus            bool   `json:"focus"`
+	}{
+		Version: "headless-create-v1", ParentTabID: strings.TrimSpace(parentTabID), ParentChatID: strings.TrimSpace(parentChatID),
+		Title: normalizedHeadlessChatTitle(fieldString(params, "title")), CWD: cwd,
+		ProviderID: fieldString(params, "provider_id"), ModelID: fieldString(params, "model_id"), Effort: fieldString(params, "effort"),
+		ModeID: fieldString(params, "mode_id"), PermissionIntent: fieldString(params, "permission_intent"), Focus: focus,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(raw)
+	return fmt.Sprintf("headless-create-v1:%x", digest[:]), nil
+}
+
 func (c *chatControlCoordinator) rename(params map[string]any) (map[string]any, error) {
-	tabID, chatID, err := exactAgentTarget(params)
+	tabID, chatID, operationID, err := c.validateMutation(params, "rename")
 	if err != nil {
 		return nil, err
-	}
-	operationID := providercontract.NormalizeOperationID(fieldString(params, "operation_id"))
-	if operationID == "" {
-		return nil, errors.New("chat.rename requires a stable operation_id")
 	}
 	if err := c.providerChats.RenameChat(tabID, chatID, fieldString(params, "title"), operationID); err != nil {
 		return nil, err
@@ -172,7 +381,7 @@ func (c *chatControlCoordinator) rename(params map[string]any) (map[string]any, 
 }
 
 func (c *chatControlCoordinator) configure(ctx context.Context, params map[string]any) (map[string]any, error) {
-	tabID, chatID, err := exactAgentTarget(params)
+	tabID, chatID, operationID, err := c.validateMutation(params, "configure")
 	if err != nil {
 		return nil, err
 	}
@@ -203,10 +412,6 @@ func (c *chatControlCoordinator) configure(ctx context.Context, params map[strin
 	if running && (providerChanged || cwdChanged) {
 		return nil, fmt.Errorf("cannot change provider or cwd while job %s is running", jobID)
 	}
-	operationID := providercontract.NormalizeOperationID(fieldString(params, "operation_id"))
-	if operationID == "" {
-		return nil, errors.New("chat.configure requires a stable operation_id")
-	}
 	if err := c.providerChats.ConfigureChat(ctx, tabID, chatID, cwd, controls, operationID); err != nil {
 		return nil, err
 	}
@@ -219,13 +424,9 @@ func (c *chatControlCoordinator) configure(ctx context.Context, params map[strin
 }
 
 func (c *chatControlCoordinator) focus(params map[string]any) (map[string]any, error) {
-	tabID, chatID, err := exactAgentTarget(params)
+	tabID, chatID, operationID, err := c.validateMutation(params, "focus")
 	if err != nil {
 		return nil, err
-	}
-	operationID := providercontract.NormalizeOperationID(fieldString(params, "operation_id"))
-	if operationID == "" {
-		return nil, errors.New("chat.focus requires a stable operation_id")
 	}
 	if err := c.providerChats.FocusChat(tabID, chatID, operationID); err != nil {
 		return nil, err
@@ -235,7 +436,7 @@ func (c *chatControlCoordinator) focus(params map[string]any) (map[string]any, e
 }
 
 func (c *chatControlCoordinator) delete(params map[string]any) (map[string]any, error) {
-	tabID, chatID, err := exactAgentTarget(params)
+	tabID, chatID, operationID, err := c.validateMutation(params, "delete")
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +457,7 @@ func (c *chatControlCoordinator) delete(params map[string]any) (map[string]any, 
 			return nil, errors.New("running chat cancellation is not actor-owned")
 		}
 	}
-	if err := c.providerChats.DeleteChat(context.Background(), tabID, chatID, providercontract.NormalizeOperationID(fieldString(params, "operation_id")), force); err != nil {
+	if err := c.providerChats.DeleteChat(context.Background(), tabID, chatID, operationID, force); err != nil {
 		return nil, err
 	}
 	c.refresh(tabID, chatID, false)
@@ -264,7 +465,7 @@ func (c *chatControlCoordinator) delete(params map[string]any) (map[string]any, 
 }
 
 func (c *chatControlCoordinator) send(params map[string]any) (map[string]any, error) {
-	tabID, chatID, err := exactAgentTarget(params)
+	tabID, chatID, operationID, err := c.validateMutation(params, "send")
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +485,7 @@ func (c *chatControlCoordinator) send(params map[string]any) (map[string]any, er
 	}
 	receipt, err := c.providerChats.QueueAgentMessage(
 		context.Background(), tabID, chatID,
-		providercontract.NormalizeOperationID(fieldString(params, "operation_id")),
+		operationID,
 		fieldString(params, "message"), delivery,
 	)
 	if err != nil {
@@ -295,21 +496,11 @@ func (c *chatControlCoordinator) send(params map[string]any) (map[string]any, er
 }
 
 func (c *chatControlCoordinator) cancel(params map[string]any) (map[string]any, error) {
-	tabID, chatID, err := exactAgentTarget(params)
+	tabID, chatID, operationID, err := c.validateMutation(params, "cancel")
 	if err != nil {
 		return nil, err
 	}
-	jobID, running, err := c.providerChats.Foreground(tabID, chatID)
-	if err != nil {
-		return nil, err
-	}
-	if !running {
-		return map[string]any{"ok": false, "tabId": tabID, "chatId": chatID, "cancelled": false, "reason": "idle"}, nil
-	}
-	if jobID == "" {
-		return nil, errors.New("chat foreground turn is not yet cancellable")
-	}
-	result, handled, cancelErr := c.providerChats.Cancel(context.Background(), jobID)
+	jobID, result, handled, cancelErr := c.providerChats.cancelChatTurn(context.Background(), tabID, chatID, operationID)
 	if cancelErr != nil {
 		return nil, cancelErr
 	}
@@ -317,7 +508,14 @@ func (c *chatControlCoordinator) cancel(params map[string]any) (map[string]any, 
 		return nil, errors.New("running chat cancellation is not actor-owned")
 	}
 	ok := result.Cancelled
-	return map[string]any{"ok": ok, "tabId": tabID, "chatId": chatID, "jobId": jobID, "cancelled": ok}, nil
+	response := map[string]any{"ok": ok, "tabId": tabID, "chatId": chatID, "cancelled": ok, "operationId": string(operationID)}
+	if jobID != "" {
+		response["jobId"] = jobID
+	}
+	if result.Reason != "" {
+		response["reason"] = result.Reason
+	}
+	return response, nil
 }
 
 func (c *chatControlCoordinator) refresh(tabID, chatID string, focus bool) {

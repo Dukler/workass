@@ -1,10 +1,13 @@
 package chat
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"workass/internal/provider"
@@ -82,6 +85,138 @@ func TestDurableEnginePersistsDispatchBeforeReturningEffect(t *testing.T) {
 	}
 }
 
+func TestDurableEnginePreparedCommitRunsOnlyAfterReducerAcceptance(t *testing.T) {
+	store := &memoryStateStore{}
+	engine, err := NewDurableEngine("prepared-chat", store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	presentation := PresentationState{TabID: "prepared-tab", Title: "Prepared"}
+	prepared := 0
+	if err := engine.ApplyPrepared(InitializeChat{
+		Presentation: presentation, OperationID: "prepared-create", Digest: "prepared-digest",
+	}, func() error {
+		prepared++
+		return nil
+	}); err != nil {
+		t.Fatalf("accepted prepared commit: %v", err)
+	}
+	if prepared != 1 || !engine.Snapshot().Initialized {
+		t.Fatalf("accepted preparation count=%d initialized=%v", prepared, engine.Snapshot().Initialized)
+	}
+
+	if err := engine.ApplyPrepared(InitializeChat{
+		Presentation: presentation, OperationID: "prepared-create", Digest: "changed-digest",
+	}, func() error {
+		prepared++
+		return nil
+	}); err == nil {
+		t.Fatal("conflicting command was accepted")
+	}
+	if prepared != 1 {
+		t.Fatalf("reducer rejection ran durable preparation %d times", prepared)
+	}
+}
+
+func TestDurableEnginePreparationFailureDoesNotPublishActorState(t *testing.T) {
+	store := &memoryStateStore{}
+	engine, err := NewDurableEngine("prepared-failure-chat", store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := engine.Snapshot()
+	storedRevision := store.state.Revision
+	wantErr := errors.New("injected attachment preparation failure")
+	err = engine.ApplyPrepared(InitializeChat{
+		Presentation: PresentationState{TabID: "prepared-failure-tab"},
+		OperationID:  "prepared-failure-create", Digest: "prepared-failure-digest",
+	}, func() error { return wantErr })
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("prepared failure = %v, want %v", err, wantErr)
+	}
+	if state := engine.Snapshot(); state.Initialized || state.Revision != before.Revision {
+		t.Fatalf("failed preparation published actor state: %#v", state)
+	}
+	if !store.ok || store.state.Initialized || store.state.Revision != storedRevision {
+		t.Fatalf("failed preparation changed persisted actor state: %#v", store.state)
+	}
+}
+
+func TestExternalMutationJournalClaimsBeforeEffectAndFailsClosedOnRecovery(t *testing.T) {
+	store := &memoryStateStore{}
+	engine, err := NewDurableEngine("browser-chat", store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Apply(InitializeChat{
+		Presentation: PresentationState{TabID: "tab-a"}, OperationID: "create-browser", Digest: "create-browser-digest",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rawBrowserInput := `{"selector":"#save","text":"password=do-not-persist"}`
+	rawDigest := sha256.Sum256([]byte(rawBrowserInput))
+	digest := hex.EncodeToString(rawDigest[:])
+	command := RecordExternalMutation{
+		OperationID: "agent-mcp:browser-once", Kind: "workass_browser_click", Method: "browser.click",
+		TabID: "tab-a", Digest: digest,
+	}
+	if err := engine.Apply(command); err != nil {
+		t.Fatal(err)
+	}
+	state := engine.Snapshot()
+	if len(state.Outbox) != 1 || state.Outbox[0].Status != OutboxPending {
+		t.Fatalf("external mutation journal = %#v", state.Outbox)
+	}
+	if encoded, err := json.Marshal(state); err != nil {
+		t.Fatal(err)
+	} else if strings.Contains(string(encoded), rawBrowserInput) || strings.Contains(string(encoded), "do-not-persist") {
+		t.Fatalf("raw browser input reached durable state: %s", encoded)
+	}
+	if _, claimed, err := engine.ClaimNext(); err != nil || claimed {
+		t.Fatalf("generic coordinator claimed external mutation: claimed=%v err=%v", claimed, err)
+	}
+	effect, claimed, err := engine.ClaimEffect(state.Outbox[0].ID)
+	if err != nil || !claimed {
+		t.Fatalf("exact external claim: claimed=%v err=%v", claimed, err)
+	}
+	if _, ok := effect.(ExternalMutationEffect); !ok {
+		t.Fatalf("exact external claim returned %T", effect)
+	}
+	if got := store.state.Outbox[0].Status; got != OutboxDispatched {
+		t.Fatalf("stored external status before effect = %q", got)
+	}
+	if err := engine.Apply(RecordExternalMutation{
+		OperationID: command.OperationID, Kind: command.Kind, Method: command.Method, TabID: command.TabID,
+		Digest: strings.Repeat("b", 64),
+	}); err == nil {
+		t.Fatal("changed request was accepted for an existing operation")
+	}
+
+	restarted, err := NewDurableEngine("browser-chat", store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := restarted.Snapshot()
+	if recovered.Outbox[0].Status != OutboxAmbiguous || recovered.Outbox[0].LastError != provider.ErrorAcceptanceAmbiguous {
+		t.Fatalf("dispatched external mutation did not become ambiguous: %#v", recovered.Outbox[0])
+	}
+	if _, claimed, err := restarted.ClaimEffect(recovered.Outbox[0].ID); err != nil || claimed {
+		t.Fatalf("ambiguous external mutation became replayable: claimed=%v err=%v", claimed, err)
+	}
+	if err := restarted.Apply(command); err != nil {
+		t.Fatalf("same operation retry was not idempotent: %v", err)
+	}
+	if err := restarted.Apply(ExternalMutationReceipt{
+		OperationID: command.OperationID, Kind: command.Kind, Method: command.Method, TabID: command.TabID,
+		Digest: digest,
+	}); err != nil {
+		t.Fatalf("readback receipt did not resolve ambiguity: %v", err)
+	}
+	if got := restarted.Snapshot().Outbox[0].Status; got != OutboxCompleted {
+		t.Fatalf("resolved external mutation status = %q", got)
+	}
+}
+
 func TestCrashAfterTurnDispatchBlocksWithoutResend(t *testing.T) {
 	store := &memoryStateStore{}
 	engine, err := NewDurableEngine("chat", store)
@@ -122,12 +257,32 @@ func initializeCheckpointActor(t *testing.T, engine *Engine) {
 	t.Helper()
 	if err := engine.Apply(InitializeFork{
 		SourceChatID: "source-chat", Presentation: PresentationState{TabID: "tab"},
+		OperationID: "checkpoint-fork", Digest: "checkpoint-fork-digest",
 		Messages: []LedgerEvent{{
 			EventID: "source-assistant-event", MessageID: "source-assistant", Role: "assistant",
 			Text: "completed turn", Status: "done", OperationID: "source-turn",
 		}},
 	}); err != nil {
 		t.Fatal(err)
+	}
+	if err := engine.Apply(UpdateEnvironment{
+		ExpectedTabID: "tab", Payload: json.RawMessage(`{"chatId":"checkpoint-chat"}`),
+		Checkpoints: json.RawMessage(`[ {"turnSeq":1,"repos":[]}, {"turnSeq":2,"repos":[]} ]`),
+		Reference:   json.RawMessage(`null`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func checkpointRestoreCommand(t *testing.T, engine *Engine, operationID provider.OperationID, turnSequence int, observedAt int64) RestoreCheckpoint {
+	t.Helper()
+	payload, digest, err := engine.Snapshot().CheckpointRestoreTarget(turnSequence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return RestoreCheckpoint{
+		OperationID: operationID, TurnSequence: turnSequence, ObservedAtUnixMS: observedAt,
+		Checkpoint: payload, CheckpointDigest: digest,
 	}
 }
 
@@ -138,7 +293,7 @@ func TestCheckpointRestorePendingSurvivesRestartButDispatchedNeverRepeats(t *tes
 		t.Fatal(err)
 	}
 	initializeCheckpointActor(t, engine)
-	command := RestoreCheckpoint{OperationID: "restore-once", TurnSequence: 1, ObservedAtUnixMS: 1000}
+	command := checkpointRestoreCommand(t, engine, "restore-once", 1, 1000)
 	if err := engine.Apply(command); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +337,7 @@ func TestCheckpointRestoreReceiptIsIdempotentAndOwnsTimeline(t *testing.T) {
 		t.Fatal(err)
 	}
 	initializeCheckpointActor(t, engine)
-	command := RestoreCheckpoint{OperationID: "restore-receipt", TurnSequence: 2, ObservedAtUnixMS: 2000}
+	command := checkpointRestoreCommand(t, engine, "restore-receipt", 2, 2000)
 	if err := engine.Apply(command); err != nil {
 		t.Fatal(err)
 	}

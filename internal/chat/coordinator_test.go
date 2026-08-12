@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -569,4 +570,133 @@ func TestProviderEventUnionRejectsWrongTypedPayload(t *testing.T) {
 	if err := event.Validate(); err == nil {
 		t.Fatal("provider event accepted a payload belonging to another event kind")
 	}
+}
+
+func TestCoordinatorRuntimeCallbacksReceiveExactActorOperation(t *testing.T) {
+	t.Run("delete cleanup", func(t *testing.T) {
+		engine, err := NewEngine("delete-callback-chat")
+		if err != nil {
+			t.Fatal(err)
+		}
+		coordinator, err := NewCoordinator(engine, coordinatorRegistry(t, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+
+		var received provider.OperationID
+		if err := coordinator.SetChatCleanup(func(_ context.Context, tabID, chatID string, operationID provider.OperationID) error {
+			if tabID != "delete-callback-tab" || chatID != "delete-callback-chat" {
+				t.Fatalf("cleanup target = tab=%q chat=%q", tabID, chatID)
+			}
+			received = operationID
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := engine.Apply(InitializeChat{
+			Presentation: PresentationState{TabID: "delete-callback-tab"},
+			OperationID:  "delete-callback-create", Digest: "delete-callback-create-digest",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := engine.Apply(DeleteChat{OperationID: "delete-callback-operation", Force: true}); err != nil {
+			t.Fatal(err)
+		}
+		if executed, err := coordinator.ExecuteNext(context.Background()); err != nil || !executed {
+			t.Fatalf("execute delete cleanup: executed=%v err=%v", executed, err)
+		}
+		if received != "delete-callback-operation" {
+			t.Fatalf("cleanup operation = %q, want exact actor operation", received)
+		}
+		state := engine.Snapshot()
+		if len(state.Outbox) != 1 || state.Outbox[0].Status != OutboxCompleted {
+			t.Fatalf("delete cleanup receipt = %#v", state.Outbox)
+		}
+		if err := engine.Apply(DeleteChat{OperationID: "delete-callback-operation", Force: true}); err != nil {
+			t.Fatal("same delete operation retry should be idempotent: ", err)
+		}
+		if err := engine.Apply(DeleteChat{OperationID: "delete-callback-reused", Force: true}); err == nil {
+			t.Fatal("changed delete operation was accepted against the tombstone")
+		}
+	})
+
+	t.Run("checkpoint restore", func(t *testing.T) {
+		engine, err := NewEngine("checkpoint-callback-chat")
+		if err != nil {
+			t.Fatal(err)
+		}
+		coordinator, err := NewCoordinator(engine, coordinatorRegistry(t, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+
+		var received provider.OperationID
+		publishedBeforeCommit := false
+		if err := coordinator.SetCheckpointRestoreExecutor(func(_ context.Context, chatID string, turnSequence int, checkpoint json.RawMessage, checkpointDigest string, operationID provider.OperationID) (json.RawMessage, error) {
+			if chatID != "checkpoint-callback-chat" || turnSequence != 1 {
+				t.Fatalf("checkpoint target = chat=%q turn=%d", chatID, turnSequence)
+			}
+			if len(checkpoint) == 0 || checkpointDigest == "" {
+				t.Fatal("checkpoint executor received no immutable target")
+			}
+			received = operationID
+			return json.RawMessage(`{"ok":true,"chatId":"checkpoint-callback-chat","turnSeq":1}`), nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := coordinator.SetLifecycleObserver(func(receipt LifecycleReceipt) {
+			if receipt.Kind != LifecycleCheckpointRestored || receipt.OperationID != "checkpoint-callback-operation" {
+				t.Fatalf("checkpoint lifecycle receipt = %#v", receipt)
+			}
+			state := engine.Snapshot()
+			for _, entry := range state.Outbox {
+				if entry.Kind == EffectCheckpointRestore && entry.OperationID == receipt.OperationID && entry.Status != OutboxCompleted {
+					publishedBeforeCommit = true
+				}
+			}
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := engine.Apply(InitializeFork{
+			Presentation: PresentationState{TabID: "checkpoint-callback-tab"}, SourceChatID: "checkpoint-source",
+			OperationID: "checkpoint-callback-create", Digest: "checkpoint-callback-create-digest",
+			Messages: []LedgerEvent{{
+				EventID: "checkpoint-callback-assistant-event", MessageID: "checkpoint-callback-assistant",
+				Role: "assistant", Text: "completed", Status: "done", OperationID: "checkpoint-callback-turn",
+			}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := engine.Apply(UpdateEnvironment{
+			ExpectedTabID: "checkpoint-callback-tab", Payload: json.RawMessage(`{"chatId":"checkpoint-callback-chat"}`),
+			Checkpoints: json.RawMessage(`[{"turnSeq":1,"repos":[]}]`), Reference: json.RawMessage(`null`),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		command := checkpointRestoreCommand(t, engine, "checkpoint-callback-operation", 1, 1000)
+		if err := engine.Apply(command); err != nil {
+			t.Fatal(err)
+		}
+		if executed, err := coordinator.ExecuteNext(context.Background()); err != nil || !executed {
+			t.Fatalf("execute checkpoint restore: executed=%v err=%v", executed, err)
+		}
+		if received != "checkpoint-callback-operation" {
+			t.Fatalf("checkpoint operation = %q, want exact actor operation", received)
+		}
+		if publishedBeforeCommit {
+			t.Fatal("checkpoint lifecycle publication raced ahead of actor receipt commit")
+		}
+		state := engine.Snapshot()
+		if len(state.Outbox) != 1 || state.Outbox[0].Status != OutboxCompleted {
+			t.Fatalf("checkpoint restore receipt = %#v", state.Outbox)
+		}
+		changedCommand := command
+		changedCommand.TurnSequence = 2
+		changedCommand.ObservedAtUnixMS = 2000
+		if err := engine.Apply(changedCommand); err == nil {
+			t.Fatal("changed checkpoint request reused the original operation")
+		}
+	})
 }

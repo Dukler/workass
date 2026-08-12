@@ -141,6 +141,11 @@ export class Store {
   private pendingChatCreates = new Set<string>();
   private pendingChatCreateOperations = new Map<string, { operationId: string; focus: boolean }>();
   private pendingChatCreatePromises = new Map<string, Promise<boolean>>();
+  // A delete is a durable tombstone command, not a UI removal. Keep its one
+  // logical operation id until the actor returns the matching receipt: a lost
+  // reply must be retried as the same delete, because the actor rejects a new
+  // operation id once the tombstone exists.
+  private pendingChatDeleteOperations = new Map<string, { chatId: string; operationId: string }>();
   // Lean v2 saves are chat deltas. Track exact tab ids plus a per-id mutation
   // revision so an acknowledgement cannot clear a second edit that arrived
   // while the first snapshot was crossing the wire.
@@ -497,6 +502,7 @@ export class Store {
       if (draftVersion !== undefined) sentDraftVersions.set(chat.id, draftVersion);
     }
     const failedCreateTabs = new Set<string>();
+    const failedQueueTabs = new Set<string>();
     for (const projected of snapshot.chats) {
       if (!this.pendingChatCreates.has(projected.id)) continue;
       const live = this.chat(projected.id);
@@ -512,7 +518,8 @@ export class Store {
         expectedRevision: live.agentQueueRevision ?? 0,
         queue: projected.queue ?? [],
       });
-      if (!receipt?.ok) {
+      if (!receipt?.ok || receipt.operationId !== operationId) {
+        failedQueueTabs.add(tabId);
         this.scheduleScopedRepair(['session']);
         continue;
       }
@@ -547,7 +554,7 @@ export class Store {
         title: live.title, titleLocked: live.titleLocked, group: live.group,
         draft: live.draft ?? '', unread: !!live.unread, settled: live.settled ?? '', pane: live.pane ?? null,
       });
-      if (!receipt?.ok) {
+      if (!receipt?.ok || receipt.operationId !== pending.operationId) {
         failedPresentationTabs.add(tabId);
         this.scheduleScopedRepair(['session']);
         continue;
@@ -579,7 +586,7 @@ export class Store {
     if (lean) this.durableImagePayloads.acknowledge(snapshot, savedOK);
     if (savedOK) {
       for (const [id, version] of sentDirtyVersions) {
-        if (failedPresentationTabs.has(id)) continue;
+        if (failedPresentationTabs.has(id) || failedQueueTabs.has(id)) continue;
         if (this.dirtyChatVersions.get(id) !== version) continue;
         this.dirtyChats.delete(id);
         this.dirtyChatVersions.delete(id);
@@ -591,7 +598,7 @@ export class Store {
       }
       if (full && this.fullSaveRevision === fullRevision) this.fullSavePending = false;
     }
-    if (failedPresentationTabs.size || [...sentQueueVersions].some(([id, version]) => this.pendingQueueMutationVersions.get(id) === version)) {
+    if (failedPresentationTabs.size || failedQueueTabs.size || [...sentQueueVersions].some(([id, version]) => this.pendingQueueMutationVersions.get(id) === version)) {
       this.schedulePersist(250);
     }
   }
@@ -1876,11 +1883,12 @@ export class Store {
     const prompt = msg.retryPrompt;
     if (!prompt) return;
     const idx = chat.messages.indexOf(msg);
+    const priorUser = [...chat.messages.slice(0, idx)].reverse().find((candidate) => candidate.role === 'user');
     const remove = new Set<string>([msg.id]);
     for (let j = idx - 1; j >= 0; j--) { if (chat.messages[j].role === 'user') { remove.add(chat.messages[j].id); break; } }
     chat.messages = chat.messages.filter((m) => !remove.has(m.id));
     this.bumpChat(chat);
-    await this._send(chat, prompt);
+    await this._send(chat, prompt, undefined, undefined, priorUser ? { userId: priorUser.id, assistantId: msg.id } : undefined);
   }
 
   // ---- theme / density / panes -----------------------------------------
@@ -2401,15 +2409,22 @@ export class Store {
       return;
     }
     if (!(await this.ensureChatCreated(chat))) return;
-    const operationId = rid('delete-op');
+    let pending = this.pendingChatDeleteOperations.get(id);
+    if (!pending || pending.chatId !== chat.chatId) {
+      pending = { chatId: chat.chatId, operationId: rid('delete-op') };
+      this.pendingChatDeleteOperations.set(id, pending);
+    }
+    const operationId = pending.operationId;
     const receipt = await call('chatDelete', { tabId: chat.id, chatId: chat.chatId, operationId, force: true });
-    if (!receipt?.ok || this.chat(id) !== chat) {
+    const live = this.chat(id);
+    if (!receipt?.ok || receipt.operationId !== operationId || !live || live.id !== chat.id || live.chatId !== chat.chatId) {
       if (this.chat(id) === chat) this.addToast('No se cerró la conversación', 'El daemon no confirmó la eliminación durable.');
       return;
     }
-    void browserApi()?.close(id);
-    releaseDraftImages(chat.draftImages ?? []);
-    for (const item of chat.queue ?? []) releaseDraftImages(item.draftImages ?? []);
+    if (this.pendingChatDeleteOperations.get(id)?.operationId === operationId) this.pendingChatDeleteOperations.delete(id);
+    void browserApi()?.close(live.id);
+    releaseDraftImages(live.draftImages ?? []);
+    for (const item of live.queue ?? []) releaseDraftImages(item.draftImages ?? []);
     this.pendingChatCreates.delete(id);
     this.pendingChatCreateOperations.delete(id);
     this.pendingChatCreatePromises.delete(id);
@@ -2421,8 +2436,8 @@ export class Store {
     this.pendingQueueMutationVersions.delete(id);
     this.pendingQueueSnapshots.delete(id);
     this.pendingQueueOperationIds.delete(id);
-    this.state.chats = this.state.chats.filter((c) => c.id !== id);
-    if (this.state.activeId === id) this.state.activeId = this.state.chats[0]?.id ?? null;
+    this.state.chats = this.state.chats.filter((c) => c.id !== live.id);
+    if (this.state.activeId === live.id) this.state.activeId = this.state.chats[0]?.id ?? null;
     if (this.state.chats.length === 0) this.newChat();
     else this.bumpApp();
     void this.flushSession(true);
@@ -2692,41 +2707,48 @@ export class Store {
         // native hosts it advances that boundary on the canonical consumption
         // receipt; older/generic adapters retain acknowledgement-time behavior.
         const r = await call('appChatSteer', steerSessionId, prompt, images ?? [], pendingUser.id, continuation.id, boundary);
-        if (this.chat(chatId) !== chat) return false;
+        // Queue persistence and the actor digest may replace the renderer Chat
+        // object while this native acknowledgement is in flight. Identity is
+        // the immutable tab+chat pair, not the JavaScript object reference: the
+        // replacement carries the same stable steer ids and is now the only
+        // visible owner. Returning false here made Composer restore the already-
+        // delivered text beside the send button after a delayed queue -> steer.
+        const live = this.chat(chatId);
+        if (!live || live.chatId !== chat.chatId) return false;
         if (r?.strategy === 'uncertain') {
           this.addToast('Steering no confirmado', r.error ?? 'El agente no confirmó el steer; no se reenvió para evitar duplicarlo.');
           // A timeout is explicitly not a rejection. Keep the same visible owner,
           // settle its spinner, and let a late client-id receipt upgrade it.
-          markPendingSteerUncertain(chat.messages, pendingUser.id);
-          this.bumpChat(chat);
+          markPendingSteerUncertain(live.messages, pendingUser.id);
+          this.bumpChat(live);
           await this.flushSession();
           return true;
         }
         if (stagedNativeBoundary && !hasSteerConsumptionReceipt(r)) {
           // Compatibility with older patched adapters that cannot echo the
           // canonical client id: acknowledgement is their strongest boundary.
-          if (commitChronologicalSteer(chat.messages, pendingUser.id)) this.rebuildJobRefs();
+          if (commitChronologicalSteer(live.messages, pendingUser.id)) this.rebuildJobRefs();
         }
         const destination = steeringDestination(r);
         if (destination === 'queue') {
           // An explicit rejection transfers ownership in one structural commit:
           // remove the pending chronological row, rejoin adjacent assistant
           // segments, then create exactly one FIFO row.
-          const removed = rejectChronologicalSteer(chat.messages, pendingUser.id);
+          const removed = rejectChronologicalSteer(live.messages, pendingUser.id);
           // A receipt/acknowledgement may have beaten a late response. Once that
           // happens the transcript row owns delivery and cannot be duplicated.
           if (!removed) return true;
           this.rebuildJobRefs();
-          if (r?.daemonQueued !== true) this.enqueue(chat, prompt, images);
+          if (r?.daemonQueued !== true) this.enqueue(live, prompt, images);
           await this.flushSession();
-          if (!this.isChatRunning(chat.id)) void this.flushNextQueued(chat);
+          if (!this.isChatRunning(live.id)) void this.flushNextQueued(live);
           return true;
         }
         // {turnId} proves admission and permanently owns delivery. The later
         // userMessage.clientId receipt chooses the transcript boundary and
         // upgrades feedback; neither outcome is ever replayed through FIFO.
-        acceptPendingSteer(chat.messages, pendingUser.id);
-        this.bumpChat(chat);
+        acceptPendingSteer(live.messages, pendingUser.id);
+        this.bumpChat(live);
         await this.flushSession();
         return true;
       });
@@ -2870,7 +2892,10 @@ export class Store {
       const payload = queuedJob(next);
       // Keep the exact FIFO owner until job:start has accepted the turn. A
       // failed/throwing send leaves the same object at the head for retry.
-      accepted = await this._send(chat, payload.prompt, payload.images, next.id);
+      accepted = await this._send(chat, payload.prompt, payload.images, next.id, {
+        userId: next.id,
+        assistantId: `queue-assistant-${next.id}`,
+      });
       if (!accepted) return;
       // A hydration during the send replaces every chat object wholesale
       // (restoreSessionSnapshot). Removing the accepted row from the captured
@@ -2895,7 +2920,13 @@ export class Store {
       if (accepted && tail.queue?.length && !this.isChatRunning(tail.id)) void this.flushNextQueued(tail);
     }
   }
-  private async _send(chat: Chat, prompt: string, images?: StartJobOpts['images'], queueId?: string): Promise<boolean> {
+  private async _send(
+    chat: Chat,
+    prompt: string,
+    images?: StartJobOpts['images'],
+    queueId?: string,
+    identity?: { userId: string; assistantId: string },
+  ): Promise<boolean> {
     // providerHistoryMessages below IS the conversation the agent receives, so a
     // send into a chat whose archive has not landed yet must wait for it rather
     // than start the turn with a truncated history.
@@ -2913,9 +2944,11 @@ export class Store {
     // paint the same bytes locally or the next hydration/reload visibly
     // rewrites the sentence. The provider still receives the raw prompt.
     const display = redactSensitiveText(prompt);
+    const userId = identity?.userId ?? rid('u');
+    const assistantId = identity?.assistantId ?? rid('a');
     if (!this.isConnected()) {
-      const user: Msg = { id: rid('u'), role: 'user', content: display, status: 'done', at: now, events: [], images: messageImages(images) };
-      const asst: Msg = { id: rid('a'), role: 'assistant', content: '', status: 'failed', at: now, events: [], interrupted: true, retryPrompt: prompt };
+      const user: Msg = { id: userId, role: 'user', content: display, status: 'done', at: now, events: [], images: messageImages(images) };
+      const asst: Msg = { id: assistantId, role: 'assistant', content: '', status: 'failed', at: now, events: [], interrupted: true, retryPrompt: prompt };
       chat.messages.push(user, asst);
       if (!chat.titleLocked) { chat.title = display.trim().slice(0, 34) || chat.title; chat.titleLocked = true; }
       this.bumpChat(chat);
@@ -2924,10 +2957,34 @@ export class Store {
     // Kick the heartbeat so a send into a just-dropped socket is caught fast
     // (the health poll alone could lag a few seconds).
     this.monitor?.probeNow();
-    const user: Msg = { id: rid('u'), role: 'user', content: display, status: 'done', at: now, events: [], images: messageImages(images) };
-    const asst: Msg = { id: rid('a'), role: 'assistant', content: '', status: 'running', at: null, events: [], turnStartedAt: Date.now() };
-    const history = providerHistoryMessages(chat.messages);
-    chat.messages.push(user, asst);
+    const priorUser = chat.messages.find((message) => message.id === userId && message.role === 'user');
+    const priorAssistant = chat.messages.find((message) => message.id === assistantId && message.role === 'assistant');
+    const user: Msg = priorUser ?? { id: userId, role: 'user', content: display, status: 'done', at: now, events: [], images: messageImages(images) };
+    const asst: Msg = priorAssistant ?? { id: assistantId, role: 'assistant', content: '', status: 'running', at: null, events: [], turnStartedAt: Date.now() };
+    if (priorUser) {
+      user.content = display;
+      user.status = 'done';
+      user.images = messageImages(images);
+    }
+    if (priorAssistant?.status === 'failed') {
+      asst.content = '';
+      asst.result = undefined;
+      asst.status = 'running';
+      asst.at = null;
+      asst.events = [];
+      asst.interrupted = undefined;
+      asst.retryPrompt = undefined;
+      asst.jobId = undefined;
+      asst.turnStartedAt = Date.now();
+    }
+    // A retry may still have its optimistic pair mounted (the FIFO path keeps
+    // the failed head in place). That pair is the operation being admitted,
+    // not provider context; feeding it back as history would duplicate the
+    // prompt on a definite rejection retry. Ordinary retries remove the pair,
+    // so this exclusion is deliberately a no-op for their existing behavior.
+    const history = providerHistoryMessages(chat.messages.filter((message) => message.id !== userId && message.id !== assistantId));
+    if (!priorUser) chat.messages.push(user);
+    if (!priorAssistant) chat.messages.push(asst);
     if (!chat.titleLocked) { chat.title = display.trim().slice(0, 34) || chat.title; chat.titleLocked = true; }
     this.bumpChat(chat);
 
@@ -2935,6 +2992,7 @@ export class Store {
     if (!chat.sessionId) {
       asst.status = 'failed';
       asst.content = chat.sessionError ? `No hay sesión ACP disponible (${chat.sessionError}).` : 'No hay sesión ACP disponible.';
+      asst.retryPrompt = prompt;
       this.bumpChat(chat);
       return false;
     }
@@ -2945,7 +3003,7 @@ export class Store {
     const chatId = chat.chatId ?? (chat.chatId = newChatConvId());
     this.chatJobs.set(chatId, { tabId: chat.id, msgId: asst.id });
     const job = await call('startJob', {
-      kind: 'app-chat', operationId: user.id, title: `Devin · ${chat.title}`, chatId, tabId: chat.id,
+      kind: 'app-chat', operationId: userId, title: `Devin · ${chat.title}`, chatId, tabId: chat.id,
       sessionId: chat.sessionId, cwd: chat.cwd ?? null,
       // providerId rides every turn: when it differs from the session's bound
       // provider, the daemon treats it as a desired-lane selection. It starts
@@ -2954,7 +3012,7 @@ export class Store {
       providerId: chat.providerId ?? undefined,
       modelId: chat.currentModelId, modeId: chat.currentModeId,
       prompt, history, images: images && images.length ? images : undefined,
-      userMessageId: user.id, assistantMessageId: asst.id,
+      userMessageId: userId, assistantMessageId: assistantId,
       queueId,
       busyMode: 'queue-v1',
     });
@@ -2976,7 +3034,12 @@ export class Store {
       this.jobRef.set(job.id, { tabId: chat.id, msgId: asst.id });
       return true;
     }
-    if (!job) { asst.status = 'failed'; asst.content = 'startJob no disponible.'; this.bumpChat(chat); }
+    if (!job) {
+      asst.status = 'failed';
+      asst.content = 'startJob no disponible.';
+      asst.retryPrompt = prompt;
+      this.bumpChat(chat);
+    }
     return false;
   }
   cancelActive() {

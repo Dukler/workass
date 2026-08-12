@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"workass/internal/provider"
@@ -56,9 +57,9 @@ type Coordinator struct {
 	drainMu                   sync.Mutex
 	effectWake                chan struct{}
 	effectWG                  sync.WaitGroup
-	chatCleanup               func(context.Context, string, string) error
+	chatCleanup               func(context.Context, string, string, provider.OperationID) error
 	backgroundExecutor        func(context.Context, BackgroundAction) (json.RawMessage, error)
-	checkpointRestoreExecutor func(context.Context, string, int) (json.RawMessage, error)
+	checkpointRestoreExecutor func(context.Context, string, int, json.RawMessage, string, provider.OperationID) (json.RawMessage, error)
 	lifecycleObserver         func(LifecycleReceipt)
 }
 
@@ -84,7 +85,7 @@ func NewCoordinator(engine *Engine, registry DefinitionResolver) (*Coordinator, 
 // boundary used by the durable chat tombstone effect. It is configured before
 // Wake and is intentionally separate from provider adapters because deletion
 // covers every lane in the chat.
-func (c *Coordinator) SetChatCleanup(cleanup func(context.Context, string, string) error) error {
+func (c *Coordinator) SetChatCleanup(cleanup func(context.Context, string, string, provider.OperationID) error) error {
 	if c == nil || cleanup == nil {
 		return errors.New("chat coordinator requires a cleanup executor")
 	}
@@ -113,7 +114,7 @@ func (c *Coordinator) SetBackgroundExecutor(execute func(context.Context, Backgr
 	return nil
 }
 
-func (c *Coordinator) SetCheckpointRestoreExecutor(execute func(context.Context, string, int) (json.RawMessage, error)) error {
+func (c *Coordinator) SetCheckpointRestoreExecutor(execute func(context.Context, string, int, json.RawMessage, string, provider.OperationID) (json.RawMessage, error)) error {
 	if c == nil || execute == nil {
 		return errors.New("chat coordinator requires a checkpoint-restore executor")
 	}
@@ -372,6 +373,8 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 			OperationID: receipt.OperationID, RequestID: receipt.RequestID, OptionID: receipt.OptionID,
 			Accepted: receipt.Accepted, Ambiguous: receipt.Ambiguous,
 		})
+	case DetachLaneEffect:
+		return true, c.executeDetach(ctx, effect)
 	case DeleteChatEffect:
 		c.mu.Lock()
 		cleanup := c.chatCleanup
@@ -379,10 +382,10 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 		if cleanup == nil {
 			return true, errors.New("durable chat deletion has no cleanup executor")
 		}
-		if err := cleanup(ctx, effect.TabID, effect.ChatID); err != nil {
+		if err := cleanup(ctx, effect.TabID, effect.ChatID, effect.OperationID); err != nil {
 			return true, err
 		}
-		return true, c.engine.Apply(ChatDeletionCompleted{ChatID: effect.ChatID})
+		return true, c.engine.Apply(ChatDeletionCompleted{OperationID: effect.OperationID, ChatID: effect.ChatID})
 	case BackgroundActionEffect:
 		c.mu.Lock()
 		execute := c.backgroundExecutor
@@ -411,7 +414,8 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 				OperationID: effect.OperationID, Kind: provider.ErrorProtocolViolation,
 			})
 		}
-		result, err := execute(ctx, c.engine.Snapshot().ChatID, effect.TurnSequence)
+		result, err := execute(ctx, c.engine.Snapshot().ChatID, effect.TurnSequence,
+			append(json.RawMessage(nil), effect.Checkpoint...), effect.CheckpointDigest, effect.OperationID)
 		if err != nil {
 			// The executor may have restored an earlier repository before a later
 			// repository failed. Without authoritative readback, any dispatched
@@ -437,6 +441,86 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 	default:
 		return true, fmt.Errorf("chat coordinator cannot execute effect %T", effect)
 	}
+}
+
+// ExecuteDetach claims and executes one exact detach effect without draining
+// older outbox entries. The frozen close handler uses this targeted path so a
+// close request cannot dispatch unrelated queued provider work.
+func (c *Coordinator) ExecuteDetach(ctx context.Context, operationID provider.OperationID) (bool, error) {
+	if c == nil {
+		return false, errors.New("chat coordinator is unavailable")
+	}
+	// Serialize the targeted claim with the generic outbox drain. A wake that
+	// was already queued may otherwise claim this detach first; returning while
+	// that local execution is still in flight would expose a durable Dispatched
+	// receipt even though the exact provider attachment has not finished
+	// closing. Holding drainMu means either this call owns the claim, or it waits
+	// for the in-process owner to durably settle it before reporting readback.
+	c.drainMu.Lock()
+	defer c.drainMu.Unlock()
+	effect, ok, err := c.engine.ClaimEffect(string(provider.NormalizeOperationID(string(operationID))))
+	if err != nil || !ok {
+		return ok, err
+	}
+	detach, ok := effect.(DetachLaneEffect)
+	if !ok {
+		return true, fmt.Errorf("close operation claimed non-detach effect %T", effect)
+	}
+	return true, c.executeDetach(ctx, detach)
+}
+
+func (c *Coordinator) executeDetach(ctx context.Context, effect DetachLaneEffect) error {
+	c.mu.Lock()
+	lane := c.lanes[effect.LaneID]
+	generation := c.generations[effect.LaneID]
+	c.mu.Unlock()
+	if lane == nil || generation != effect.ConnectionGeneration || lane.Identity() != laneIdentityForEffect(c.engine.Snapshot(), effect.LaneID) {
+		return c.failDetach(effect, provider.ErrorNativeIdentityConflict, false, "provider lane attachment changed before detach")
+	}
+	if attachment := laneAttachmentSnapshot(lane); attachment != nil && strings.TrimSpace(attachment.ConnectionID) != strings.TrimSpace(effect.ConnectionID) {
+		return c.failDetach(effect, provider.ErrorNativeIdentityConflict, false, "provider lane connection changed before detach")
+	}
+	if err := lane.Detach(ctx); err != nil {
+		state := c.engine.Snapshot()
+		if detachReceiptForGeneration(state, effect.LaneID, effect.ConnectionGeneration) {
+			return nil
+		}
+		// ClaimEffect durably moved this non-idempotent detach to Dispatched
+		// before the provider call. Without a same-generation HostLost or
+		// LaneDetached receipt, no provider error can prove the call did not
+		// escape. Preserve the original error for diagnostics, but settle the
+		// actor operation as acceptance-ambiguous so recovery can never replay it.
+		return errors.Join(err, c.failDetach(effect, provider.ErrorAcceptanceAmbiguous, true, "provider lane detach failed without a durable receipt"))
+	}
+	// A compliant lane publishes LaneDetached and the event forwarder commits
+	// HostLost before Detach returns. A small compatibility lane may only close
+	// its transport; settle the same exact generation synchronously in that case.
+	if !detachReceiptForGeneration(c.engine.Snapshot(), effect.LaneID, effect.ConnectionGeneration) {
+		if err := c.engine.Apply(HostLost{LaneID: effect.LaneID, ConnectionGeneration: effect.ConnectionGeneration}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Coordinator) failDetach(effect DetachLaneEffect, kind provider.ErrorKind, ambiguous bool, message string) error {
+	if kind == "" {
+		kind = provider.ErrorNativeIdentityConflict
+	}
+	if err := c.engine.Apply(DetachLaneFailed{
+		OperationID: effect.OperationID, LaneID: effect.LaneID, ConnectionID: effect.ConnectionID,
+		ConnectionGeneration: effect.ConnectionGeneration, Kind: kind, Ambiguous: ambiguous,
+	}); err != nil {
+		return errors.Join(errors.New(message), err)
+	}
+	return errors.New(message)
+}
+
+func laneIdentityForEffect(state State, laneID provider.LaneID) provider.LaneIdentity {
+	if lane, ok := state.Lanes[laneID]; ok {
+		return lane.Identity
+	}
+	return provider.LaneIdentity{}
 }
 
 func laneAttachmentSnapshot(lane provider.Lane) *provider.LaneAttachmentSnapshot {

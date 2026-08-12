@@ -189,9 +189,10 @@ type RuntimeControlMutationReceipt struct {
 // has moved the chat again.  Reusing the operation id with another digest is a
 // fail-closed protocol violation.
 type WorkspaceMutationReceipt struct {
-	Digest   string
-	Revision uint64
-	CWD      string
+	Digest             string
+	Revision           uint64
+	CWD                string
+	DetachOperationIDs []provider.OperationID
 }
 
 // LaneSelectionMutationReceipt records the durable result of one provider
@@ -202,6 +203,22 @@ type LaneSelectionMutationReceipt struct {
 	Digest   string
 	Revision uint64
 	LaneID   provider.LaneID
+}
+
+// CancelMutationReceipt records a terminal chat.cancel result that did not
+// have a provider turn to address. It is deliberately provider-neutral: an
+// idle result has no lane, native turn, or external effect receipt to retain.
+type CancelMutationReceipt struct {
+	Cancelled bool
+	Reason    string
+}
+
+// AgentWaitObservationReceipt is the durable idempotency fence for an agent
+// wait/read operation. The request's exact target and timeout intent live only
+// in the bounded digest; raw subagent output, tails, prompts, and credentials
+// never enter actor state.
+type AgentWaitObservationReceipt struct {
+	Digest string
 }
 
 type ForegroundStatus string
@@ -270,7 +287,81 @@ type ProviderActivityOwner struct {
 	ConnectionGeneration uint64
 }
 
+// ResolveProviderActivityOwner resolves a provider activity origin against
+// the actor's current foreground turn or immutable historical ledger. Empty
+// arguments are treated as omitted origin fields so callers can resolve a
+// provider-supplied partial origin, but the returned owner is always complete.
+// The returned owner itself is still subject to the empty-native historical
+// rule enforced by validateProviderActivityOwner.
+func (s State) ResolveProviderActivityOwner(laneID provider.LaneID, operationID provider.OperationID, turnID string) (ProviderActivityOwner, bool) {
+	laneID = provider.LaneID(strings.TrimSpace(string(laneID)))
+	operationID = provider.NormalizeOperationID(string(operationID))
+	turnID = strings.TrimSpace(turnID)
+
+	type candidateKey struct {
+		laneID      provider.LaneID
+		operationID provider.OperationID
+		turnID      string
+	}
+	candidates := make(map[candidateKey]ProviderActivityOwner)
+	add := func(candidate ProviderActivityOwner) {
+		candidate.LaneID = provider.LaneID(strings.TrimSpace(string(candidate.LaneID)))
+		candidate.OperationID = provider.NormalizeOperationID(string(candidate.OperationID))
+		candidate.TurnID = strings.TrimSpace(candidate.TurnID)
+		if candidate.LaneID == "" || candidate.OperationID == "" {
+			return
+		}
+		if laneID != "" && candidate.LaneID != laneID || operationID != "" && candidate.OperationID != operationID || turnID != "" && candidate.TurnID != turnID {
+			return
+		}
+		lane, ok := s.Lanes[candidate.LaneID]
+		if !ok {
+			return
+		}
+		candidate.ConnectionGeneration = lane.ConnectionGeneration
+		candidates[candidateKey{candidate.LaneID, candidate.OperationID, candidate.TurnID}] = candidate
+	}
+
+	if foreground := s.Foreground; foreground != nil {
+		add(ProviderActivityOwner{
+			LaneID: foreground.LaneID, OperationID: foreground.OperationID,
+			TurnID: foreground.Turn.NativeID,
+		})
+	}
+	for _, event := range s.Ledger {
+		if !providerActivityLedgerOwnsLane(s, laneID, event) {
+			continue
+		}
+		candidateLaneID := event.LaneID
+		if candidateLaneID == "" {
+			candidateLaneID = laneID
+		}
+		add(ProviderActivityOwner{
+			LaneID: candidateLaneID, OperationID: event.OperationID,
+			TurnID: event.NativeTurnID,
+		})
+	}
+
+	var resolved ProviderActivityOwner
+	for _, candidate := range candidates {
+		if !providerActivityOwnerMatches(s, candidate) {
+			continue
+		}
+		if resolved.LaneID != "" {
+			// A partial provider origin is usable only when it identifies one
+			// exact actor turn. Multiple candidates are ambiguous, even when
+			// they happen to share a lane.
+			return ProviderActivityOwner{}, false
+		}
+		resolved = candidate
+	}
+	return resolved, resolved.LaneID != ""
+}
+
 func validateProviderActivityOwner(state State, owner ProviderActivityOwner) error {
+	owner.LaneID = provider.LaneID(strings.TrimSpace(string(owner.LaneID)))
+	owner.OperationID = provider.NormalizeOperationID(string(owner.OperationID))
+	owner.TurnID = strings.TrimSpace(owner.TurnID)
 	if owner.LaneID == "" {
 		return errors.New("provider activity is missing lane ownership")
 	}
@@ -281,7 +372,85 @@ func validateProviderActivityOwner(state State, owner ProviderActivityOwner) err
 	if owner.ConnectionGeneration == 0 || owner.ConnectionGeneration > lane.ConnectionGeneration {
 		return errors.New("provider activity has an invalid connection generation")
 	}
+	if owner.OperationID == "" {
+		return errors.New("provider activity is missing operation ownership")
+	}
+	if !providerActivityOwnerMatches(state, owner) {
+		return errors.New("provider activity does not match an exact current or historical actor turn")
+	}
 	return nil
+}
+
+func providerActivityOwnerMatches(state State, owner ProviderActivityOwner) bool {
+	laneID := provider.LaneID(strings.TrimSpace(string(owner.LaneID)))
+	operationID := provider.NormalizeOperationID(string(owner.OperationID))
+	turnID := strings.TrimSpace(owner.TurnID)
+	if laneID == "" || operationID == "" {
+		return false
+	}
+	if _, ok := state.Lanes[laneID]; !ok {
+		return false
+	}
+
+	if foreground := state.Foreground; foreground != nil &&
+		foreground.LaneID == laneID && provider.NormalizeOperationID(string(foreground.OperationID)) == operationID {
+		// A live turn with no native identity is not an ownership proof. It
+		// becomes eligible only after admission supplies the exact native id.
+		return turnID != "" && strings.TrimSpace(foreground.Turn.NativeID) == turnID
+	}
+
+	found := false
+	knownNativeTurn := false
+	matchedNativeTurn := false
+	for _, event := range state.Ledger {
+		if !providerActivityLedgerOwnsLane(state, laneID, event) ||
+			provider.NormalizeOperationID(string(event.OperationID)) != operationID {
+			continue
+		}
+		found = true
+		eventTurnID := strings.TrimSpace(event.NativeTurnID)
+		if eventTurnID != "" {
+			knownNativeTurn = true
+		}
+		if turnID != "" && eventTurnID == turnID {
+			matchedNativeTurn = true
+		}
+	}
+	if turnID != "" {
+		return matchedNativeTurn
+	}
+	// An empty native turn is valid only for a historical operation for which
+	// the actor has no native turn id at all. It must never wildcard through a
+	// row that does know its native turn.
+	return found && !knownNativeTurn
+}
+
+func providerActivityLedgerOwnsLane(state State, laneID provider.LaneID, event LedgerEvent) bool {
+	laneID = provider.LaneID(strings.TrimSpace(string(laneID)))
+	if event.ContextExcluded {
+		return false
+	}
+	if laneID == "" {
+		return event.LaneID != ""
+	}
+	if event.LaneID == laneID {
+		return true
+	}
+	if event.LaneID != "" || !event.Legacy {
+		return false
+	}
+	// Legacy rows intentionally retain unknown inline lane attribution. A
+	// selected migrated lane may still prove ownership through its immutable
+	// coverage record; excluded coverage is not provider ownership.
+	lane, ok := state.Lanes[laneID]
+	if !ok {
+		return false
+	}
+	record, ok := lane.Coverage[event.Sequence]
+	if !ok || record.EventID != event.EventID {
+		return false
+	}
+	return record.Status == CoverageNativeSeen || record.Status == CoverageImported
 }
 
 type ToolState struct {
@@ -342,6 +511,14 @@ func (e EnvironmentState) Validate() error {
 		return errors.New("chat environment reference is invalid json")
 	}
 	return nil
+}
+
+// CheckpointRestoreTarget returns the exact checkpoint object from the
+// actor-owned environment observation. Callers must pass its returned bytes
+// and digest into RestoreCheckpoint; the manager's mutable checkpoint cache is
+// not a valid source for an already-observed actor command.
+func (s State) CheckpointRestoreTarget(turnSequence int) (json.RawMessage, string, error) {
+	return checkpointRestoreTarget(s.Environment.Checkpoints, turnSequence)
 }
 
 // ObligationState is the actor-owned answer to "what does this chat still owe
@@ -407,6 +584,8 @@ const (
 	EffectPermission        EffectKind = "resolve_permission"
 	EffectBackground        EffectKind = "background_action"
 	EffectCheckpointRestore EffectKind = "checkpoint_restore"
+	EffectDetachLane        EffectKind = "detach_lane"
+	EffectExternalMutation  EffectKind = "external_mutation"
 	EffectDeleteChat        EffectKind = "delete_chat"
 )
 
@@ -420,6 +599,10 @@ type OutboxEntry struct {
 	LaneID           provider.LaneID
 	OperationID      provider.OperationID
 	Owner            provider.AttachmentOwner
+	ConnectionID     string
+	MutationKind     string
+	MutationMethod   string
+	MutationDigest   string
 	CWD              string
 	ModelID          string
 	ModeID           string
@@ -437,6 +620,8 @@ type OutboxEntry struct {
 	Background       *BackgroundAction
 	TurnSequence     int
 	ObservedAtUnixMS int64
+	Checkpoint       json.RawMessage
+	CheckpointDigest string
 	Result           json.RawMessage
 	Batch            *ContextBatch
 	LastError        provider.ErrorKind
@@ -479,6 +664,8 @@ type State struct {
 	RuntimeControlMutationReceipts map[provider.OperationID]RuntimeControlMutationReceipt
 	WorkspaceMutationReceipts      map[provider.OperationID]WorkspaceMutationReceipt
 	LaneSelectionMutationReceipts  map[provider.OperationID]LaneSelectionMutationReceipt
+	CancelMutationReceipts         map[provider.OperationID]CancelMutationReceipt
+	AgentWaitObservationReceipts   map[provider.OperationID]AgentWaitObservationReceipt
 	Queue                          []QueueEntry
 	Foreground                     *ForegroundTurn
 	PendingSteer                   *PendingSteer
@@ -509,6 +696,8 @@ func NewState(chatID string) (State, error) {
 		RuntimeControlMutationReceipts: make(map[provider.OperationID]RuntimeControlMutationReceipt),
 		WorkspaceMutationReceipts:      make(map[provider.OperationID]WorkspaceMutationReceipt),
 		LaneSelectionMutationReceipts:  make(map[provider.OperationID]LaneSelectionMutationReceipt),
+		CancelMutationReceipts:         make(map[provider.OperationID]CancelMutationReceipt),
+		AgentWaitObservationReceipts:   make(map[provider.OperationID]AgentWaitObservationReceipt),
 		Tools:                          make(map[string]ToolState),
 		Plans:                          make(map[provider.OperationID]PlanState),
 		Permissions:                    make(map[string]PermissionState),
@@ -552,11 +741,20 @@ func (s State) Clone() State {
 	}
 	out.WorkspaceMutationReceipts = make(map[provider.OperationID]WorkspaceMutationReceipt, len(s.WorkspaceMutationReceipts))
 	for operationID, receipt := range s.WorkspaceMutationReceipts {
+		receipt.DetachOperationIDs = append([]provider.OperationID(nil), receipt.DetachOperationIDs...)
 		out.WorkspaceMutationReceipts[operationID] = receipt
 	}
 	out.LaneSelectionMutationReceipts = make(map[provider.OperationID]LaneSelectionMutationReceipt, len(s.LaneSelectionMutationReceipts))
 	for operationID, receipt := range s.LaneSelectionMutationReceipts {
 		out.LaneSelectionMutationReceipts[operationID] = receipt
+	}
+	out.CancelMutationReceipts = make(map[provider.OperationID]CancelMutationReceipt, len(s.CancelMutationReceipts))
+	for operationID, receipt := range s.CancelMutationReceipts {
+		out.CancelMutationReceipts[operationID] = receipt
+	}
+	out.AgentWaitObservationReceipts = make(map[provider.OperationID]AgentWaitObservationReceipt, len(s.AgentWaitObservationReceipts))
+	for operationID, receipt := range s.AgentWaitObservationReceipts {
+		out.AgentWaitObservationReceipts[operationID] = receipt
 	}
 	out.Outbox = make([]OutboxEntry, len(s.Outbox))
 	for i, entry := range s.Outbox {
@@ -573,6 +771,7 @@ func (s State) Clone() State {
 			action := entry.Background.Clone()
 			entry.Background = &action
 		}
+		entry.Checkpoint = append(json.RawMessage(nil), entry.Checkpoint...)
 		entry.Result = append(json.RawMessage(nil), entry.Result...)
 		out.Outbox[i] = entry
 	}
@@ -753,8 +952,16 @@ func (s State) Validate() error {
 	if strings.TrimSpace(s.ChatID) == "" {
 		return errors.New("chat state requires chat id")
 	}
-	if s.Lanes == nil || s.Operations == nil || s.QueueMutationReceipts == nil || s.PresentationMutationReceipts == nil || s.RuntimeControlMutationReceipts == nil || s.WorkspaceMutationReceipts == nil || s.LaneSelectionMutationReceipts == nil || s.Tools == nil || s.Plans == nil || s.Permissions == nil || s.Background == nil || s.Usage == nil || s.Compactions == nil || s.Transport == nil {
+	if s.Lanes == nil || s.Operations == nil || s.QueueMutationReceipts == nil || s.PresentationMutationReceipts == nil || s.RuntimeControlMutationReceipts == nil || s.WorkspaceMutationReceipts == nil || s.LaneSelectionMutationReceipts == nil || s.CancelMutationReceipts == nil || s.AgentWaitObservationReceipts == nil || s.Tools == nil || s.Plans == nil || s.Permissions == nil || s.Background == nil || s.Usage == nil || s.Compactions == nil || s.Transport == nil {
 		return errors.New("chat state maps are not initialized")
+	}
+	if s.Deleted {
+		deletionOperationID := provider.NormalizeOperationID(string(s.DeletionOperationID))
+		if deletionOperationID == "" || deletionOperationID != s.DeletionOperationID {
+			return errors.New("deleted chat tombstone has an invalid deletion operation id")
+		}
+	} else if s.DeletionOperationID != "" {
+		return errors.New("active chat has a deletion operation id")
 	}
 	if (s.CreationOperationID == "") != (strings.TrimSpace(s.CreationDigest) == "") {
 		return errors.New("chat creation receipt is incomplete")
@@ -778,6 +985,20 @@ func (s State) Validate() error {
 		if operationID == "" || strings.TrimSpace(receipt.Digest) == "" || strings.TrimSpace(receipt.CWD) == "" || receipt.Revision > s.Presentation.WorkspaceRevision {
 			return errors.New("chat workspace mutation receipt is invalid")
 		}
+		seenDetachOperations := make(map[provider.OperationID]struct{}, len(receipt.DetachOperationIDs))
+		for _, rawDetachOperationID := range receipt.DetachOperationIDs {
+			detachOperationID := provider.NormalizeOperationID(string(rawDetachOperationID))
+			if detachOperationID == "" || detachOperationID != rawDetachOperationID {
+				return errors.New("chat workspace mutation receipt has an invalid detach operation identity")
+			}
+			if _, duplicate := seenDetachOperations[detachOperationID]; duplicate {
+				return errors.New("chat workspace mutation receipt contains duplicate detach operations")
+			}
+			seenDetachOperations[detachOperationID] = struct{}{}
+			if !workspaceReceiptHasDetachEntry(s, detachOperationID) {
+				return errors.New("chat workspace mutation receipt is missing a durable detach effect")
+			}
+		}
 	}
 	for operationID, receipt := range s.LaneSelectionMutationReceipts {
 		if operationID == "" || strings.TrimSpace(receipt.Digest) == "" || receipt.LaneID == "" || receipt.Revision > s.Revision {
@@ -785,6 +1006,22 @@ func (s State) Validate() error {
 		}
 		if _, exists := s.Lanes[receipt.LaneID]; !exists {
 			return errors.New("chat lane-selection mutation receipt references an unknown lane")
+		}
+	}
+	for operationID, receipt := range s.CancelMutationReceipts {
+		if operationID == "" || receipt.Cancelled || strings.TrimSpace(receipt.Reason) != "idle" {
+			return errors.New("chat cancel mutation receipt is invalid")
+		}
+		if _, exists := s.Operations[operationID]; !exists {
+			return errors.New("chat cancel mutation receipt is not reserved")
+		}
+	}
+	for operationID, receipt := range s.AgentWaitObservationReceipts {
+		if operationID == "" || !validAgentWaitObservationDigest(receipt.Digest) {
+			return errors.New("chat agent wait observation receipt is invalid")
+		}
+		if _, exists := s.Operations[operationID]; !exists {
+			return errors.New("chat agent wait observation receipt is not reserved")
 		}
 	}
 	if err := s.Presentation.Validate(); err != nil {
@@ -1041,6 +1278,7 @@ func (s State) Validate() error {
 		}
 	}
 	seenEffects := make(map[string]struct{}, len(s.Outbox))
+	deleteEffectSeen := false
 	for _, effect := range s.Outbox {
 		if strings.TrimSpace(effect.ID) == "" || effect.Kind == "" || effect.Status == "" {
 			return errors.New("chat outbox contains an incomplete effect")
@@ -1050,12 +1288,50 @@ func (s State) Validate() error {
 		}
 		seenEffects[effect.ID] = struct{}{}
 		if effect.Kind == EffectDeleteChat {
-			if !s.Deleted || strings.TrimSpace(effect.ChatID) != s.ChatID || effect.LaneID != "" {
-				return errors.New("delete-chat outbox effect lost its tombstone identity")
+			if deleteEffectSeen {
+				return errors.New("chat outbox contains duplicate delete-chat effects")
+			}
+			deleteEffectSeen = true
+			if !s.Deleted ||
+				effect.ID != deleteChatEffectID(s.ChatID) ||
+				effect.OperationID != s.DeletionOperationID ||
+				effect.ChatID != s.ChatID ||
+				effect.TabID != s.Presentation.TabID ||
+				effect.LaneID != "" {
+				return errors.New("delete-chat outbox effect lost its exact tombstone identity")
 			}
 		} else if effect.Kind == EffectCheckpointRestore {
-			if effect.LaneID != "" || effect.OperationID == "" || effect.TurnSequence <= 0 || effect.ObservedAtUnixMS <= 0 {
+			if effect.LaneID != "" || effect.OperationID == "" || effect.TurnSequence <= 0 || effect.ObservedAtUnixMS <= 0 ||
+				validateCheckpointRestorePayload(effect.Checkpoint, effect.TurnSequence, effect.CheckpointDigest) != nil {
 				return errors.New("checkpoint-restore outbox effect lost its immutable request")
+			}
+		} else if effect.Kind == EffectDetachLane {
+			lane, ok := s.Lanes[effect.LaneID]
+			if !ok || effect.OperationID == "" || strings.TrimSpace(effect.ConnectionID) == "" || effect.Generation == 0 {
+				return errors.New("lane-detach outbox effect lost its immutable request")
+			}
+			if lane.Identity.ID != effect.LaneID || lane.Identity.ChatID != s.ChatID ||
+				effect.Owner.TabID == "" ||
+				effect.OperationID != DetachOperationID(s.ChatID, effect.LaneID, effect.ConnectionID, effect.Generation) ||
+				effect.ID != detachEffectID(effect.OperationID) {
+				return errors.New("lane-detach outbox effect changed its lane identity")
+			}
+			// A Pending effect must still fence the exact live attachment before the
+			// coordinator is allowed to claim it. A Dispatched effect may instead
+			// observe a changed attachment after a crash; recovery must be able to
+			// convert that unknown-acceptance window to Ambiguous without resending.
+			if effect.Status == OutboxPending {
+				if effect.Owner != lane.Owner || lane.ConnectionGeneration != effect.Generation || lane.Attachment == nil ||
+					strings.TrimSpace(lane.Attachment.ConnectionID) != strings.TrimSpace(effect.ConnectionID) {
+					return errors.New("lane-detach outbox effect changed its exact attachment")
+				}
+			}
+		} else if effect.Kind == EffectExternalMutation {
+			if effect.LaneID != "" || strings.TrimSpace(effect.ChatID) != s.ChatID ||
+				effect.OperationID == "" || strings.TrimSpace(effect.MutationKind) == "" ||
+				strings.TrimSpace(effect.MutationMethod) == "" || strings.TrimSpace(effect.MutationDigest) == "" ||
+				strings.TrimSpace(effect.TabID) == "" {
+				return errors.New("external mutation outbox effect lost its immutable request")
 			}
 		} else {
 			if effect.LaneID == "" {
@@ -1066,7 +1342,7 @@ func (s State) Validate() error {
 			}
 		}
 		switch effect.Kind {
-		case EffectCreateLane, EffectResumeLane, EffectImportContext, EffectStartTurn, EffectReconcileTurn, EffectSteerTurn, EffectCancelTurn, EffectPermission, EffectBackground, EffectCheckpointRestore, EffectDeleteChat:
+		case EffectCreateLane, EffectResumeLane, EffectImportContext, EffectStartTurn, EffectReconcileTurn, EffectSteerTurn, EffectCancelTurn, EffectPermission, EffectBackground, EffectCheckpointRestore, EffectDetachLane, EffectExternalMutation, EffectDeleteChat:
 		default:
 			return fmt.Errorf("chat outbox contains unknown effect kind %q", effect.Kind)
 		}
@@ -1102,7 +1378,31 @@ func (s State) Validate() error {
 			return errors.New("checkpoint-restore outbox receipt is not valid json")
 		}
 	}
+	if s.Deleted && !deleteEffectSeen {
+		return errors.New("deleted chat tombstone has no durable delete-chat effect")
+	}
 	return nil
+}
+
+func validAgentWaitObservationDigest(digest string) bool {
+	if digest == "" || len(digest) > 256 {
+		return false
+	}
+	for index := 0; index < len(digest); index++ {
+		if digest[index] < 0x21 || digest[index] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func workspaceReceiptHasDetachEntry(state State, operationID provider.OperationID) bool {
+	for _, entry := range state.Outbox {
+		if entry.Kind == EffectDetachLane && entry.OperationID == operationID {
+			return true
+		}
+	}
+	return false
 }
 
 func validateTimeline(entries []TimelineEntry) error {

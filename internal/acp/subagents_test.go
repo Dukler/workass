@@ -703,7 +703,36 @@ func TestSubagentSurvivesCancelledParentSettlesAndWritesReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn child: %v", err)
 	}
-	if !manager.CancelJob(asString(parent["id"])) {
+	// Cancel an actually active provider turn. StartJob publishes its receipt
+	// before session/prompt is dispatched, so cancelling immediately here races
+	// the fixture's request queue and can cancel "nothing" before the prompt is
+	// active. The fixture's completed plan is emitted synchronously immediately
+	// before it parks the prompt, making it the deterministic protocol boundary
+	// this test needs.
+	parentID := asString(parent["id"])
+	activeDeadline := time.Now().Add(4 * time.Second)
+	for {
+		providerParked := false
+		for _, payload := range events.jobEvents(parentID, "acp") {
+			event := mapFromAny(payload["event"])
+			if asString(event["kind"]) != "plan" {
+				continue
+			}
+			entries, _ := event["entries"].([]any)
+			if len(entries) == 2 && asString(mapFromAny(entries[0])["status"]) == "completed" && asString(mapFromAny(entries[1])["status"]) == "completed" {
+				providerParked = true
+				break
+			}
+		}
+		if providerParked {
+			break
+		}
+		if time.Now().After(activeDeadline) {
+			t.Fatalf("parent provider turn did not reach its deterministic parked boundary before cancellation")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !manager.CancelJob(parentID) {
 		t.Fatal("parent cancellation was not accepted")
 	}
 	waitForSubagentAdoption(t, manager, run.ID, 4*time.Second)
@@ -1014,7 +1043,7 @@ func TestExplicitChatDeletionStillCancelsAdoptedSubagents(t *testing.T) {
 	manager.mu.Lock()
 	manager.subagents[run.ID] = run
 	manager.mu.Unlock()
-	manager.ForgetChat(context.Background(), "delete-tab", "delete-chat")
+	manager.ForgetChat(context.Background(), "delete-tab", "delete-chat", "delete-chat-test-operation")
 	select {
 	case <-done:
 	case <-time.After(time.Second):

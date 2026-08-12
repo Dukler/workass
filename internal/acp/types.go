@@ -126,26 +126,30 @@ type Options struct {
 	EngineMaxAge                   time.Duration
 	EngineMaxRSSKB                 int
 	SpareSessions                  int
-	SpareTTL                       time.Duration
-	SpareCheckInterval             time.Duration
-	ProviderUpdateInterval         time.Duration
-	PlanUsageRefreshInterval       time.Duration
-	SpawnedWorkReconcileInterval   time.Duration
-	SpawnedWorkPIDProbe            func(paths []string) (map[string][]int, bool)
-	SpawnedWorkListenProbe         func(pids []int) (map[int]bool, bool)
-	SpawnedWorkSignal              func(pid int, force bool) bool
-	ProviderUpdateRetryBackoffs    []time.Duration
-	ProviderUpdateTimeout          time.Duration
-	ProviderUpdateSources          map[string]string
-	ProviderUpdateRunTimeout       time.Duration
-	ProviderUpdateCommands         map[string]ProviderUpdateCommand
-	CompactionEnabled              bool
-	CompactionThresholdPct         int
-	CompactionKeepLastTurns        int
-	CrashRecoveryBackoff           time.Duration
-	CrashRecoveryWindow            time.Duration
-	Broadcast                      func(channel string, payload any)
-	Logf                           func(message string, fields map[string]any)
+	// DeferProviderStartup keeps provider-owned session work, including spare
+	// prewarming, stopped until the daemon has published its MCP listener.
+	// Normal embedders retain the historical eager behavior.
+	DeferProviderStartup         bool
+	SpareTTL                     time.Duration
+	SpareCheckInterval           time.Duration
+	ProviderUpdateInterval       time.Duration
+	PlanUsageRefreshInterval     time.Duration
+	SpawnedWorkReconcileInterval time.Duration
+	SpawnedWorkPIDProbe          func(paths []string) (map[string][]int, bool)
+	SpawnedWorkListenProbe       func(pids []int) (map[int]bool, bool)
+	SpawnedWorkSignal            func(pid int, force bool) bool
+	ProviderUpdateRetryBackoffs  []time.Duration
+	ProviderUpdateTimeout        time.Duration
+	ProviderUpdateSources        map[string]string
+	ProviderUpdateRunTimeout     time.Duration
+	ProviderUpdateCommands       map[string]ProviderUpdateCommand
+	CompactionEnabled            bool
+	CompactionThresholdPct       int
+	CompactionKeepLastTurns      int
+	CrashRecoveryBackoff         time.Duration
+	CrashRecoveryWindow          time.Duration
+	Broadcast                    func(channel string, payload any)
+	Logf                         func(message string, fields map[string]any)
 }
 
 func (o Options) withDefaults() Options {
@@ -528,9 +532,13 @@ type Job struct {
 	// never runs for it and it is ended only by the host's turn-ended update.
 	harnessTurn bool
 
-	cancelled         bool
-	output            strings.Builder
-	internal          bool
+	cancelled bool
+	output    strings.Builder
+	internal  bool
+	// startOpts is the immutable admission snapshot. Runtime control
+	// reconciliation belongs to the provider bridge/native binding; keeping the
+	// admitted request immutable lets catalog and subagent readers safely inherit
+	// it while the provider turn is running.
 	startOpts         JobStartOptions
 	crashRecoveryDone chan struct{}
 	// actorRecoveryPending is set only when an actor-managed provider host dies.

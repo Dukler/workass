@@ -515,22 +515,22 @@ No intermediate phase is production-ready by itself.
 ### Phase C — chat actor and durable effects
 
 - [x] Add provider-neutral `ChatState`, commands, events, reducer, and effects.
-- [ ] Route all ChatID-bearing input surfaces through stable `OperationID`
+- [x] Route all ChatID-bearing input surfaces through stable `OperationID`
       commands; addressless compatibility bootstrap remains non-owning.
-- [ ] Move queue, steer ownership, permission, and background ownership into the
+- [x] Move queue, steer ownership, permission, and background ownership into the
       reducer.
 - [x] Add durable delivery/import outbox and generation fencing.
-- [ ] Make chat-scoped presentation state actor-owned and daemon-global UI state
+- [x] Make chat-scoped presentation state actor-owned and daemon-global UI state
       the only non-chat application authority.
-- [ ] Preserve the complete renderer-visible typed event contract in actor
+- [x] Preserve the complete renderer-visible typed event contract in actor
       state.
-- [ ] Commit provider events durably before publication, with backpressure and
+- [x] Commit provider events durably before publication, with backpressure and
       contiguous sequence enforcement.
-- [ ] Migrate every legacy nonempty chat before lane selection; quarantine
+- [x] Migrate every legacy nonempty chat before lane selection; quarantine
       ambiguous state and never treat it as empty.
-- [ ] Derive the frozen renderer snapshot from authoritative state and make
+- [x] Derive the frozen renderer snapshot from authoritative state and make
       renderer saves presentation-command-only.
-- [ ] Remove legacy runtime dual writes and every direct manager/session-store
+- [x] Remove legacy runtime dual writes and every direct manager/session-store
       bypass for ChatID-bearing mutations.
 
 ### Phase D — lane storage and exact resume
@@ -554,9 +554,9 @@ No intermediate phase is production-ready by itself.
 
 ### Phase F — rollout
 
-- [ ] Pass focused, package, race, mock handshake, renderer, and frozen-wire
+- [x] Pass focused, package, race, mock handshake, renderer, and frozen-wire
       gates.
-- [ ] Activate the reconciled daemon in isolated `dev` and exercise migrated,
+- [x] Activate the reconciled daemon in isolated `dev` and exercise migrated,
       newly-created, rich-event, reconnect, and event-saturation chats through
       the rebuilt renderer.
 <!-- Historical note: the provider/lane-core smoke below passed before the
@@ -568,9 +568,9 @@ No intermediate phase is production-ready by itself.
      Cross-provider and crash-boundary behavior remain covered by deterministic
      conformance suites until the complete renderer projection gate passes.
 -->
-- [ ] Prove source-contract ownership: no ChatID-bearing mutation bypasses the
+- [x] Prove source-contract ownership: no ChatID-bearing mutation bypasses the
       actor and no renderer save can mutate semantic/runtime state.
-- [ ] Prove crash consistency, migration idempotency, rich snapshot parity,
+- [x] Prove crash consistency, migration idempotency, rich snapshot parity,
       contiguous event delivery, and zero-loss saturation.
 - [ ] Audit existing production bindings read-only and produce a migration
       report before requesting any production activation.

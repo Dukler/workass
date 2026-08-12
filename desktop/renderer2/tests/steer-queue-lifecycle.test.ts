@@ -168,3 +168,45 @@ test('a hydration during the drain cannot strand the accepted row in the live qu
   assert.equal(store.chat('tab-1'), replacement);
   assert.equal(replacement.queue, undefined, 'the accepted row leaves the live chat, not the orphan');
 });
+
+test('a delayed queue save cannot strand a later accepted steer beside the composer', async () => {
+  let replacement: Chat | null = null;
+  const { store, owner } = subject({
+    appChatSteer: async () => {
+      // A persisted queue mutation is followed by an actor/session digest. That
+      // hydration replaces the renderer Chat object while the steer request is
+      // awaiting its native acknowledgement, but preserves the daemon-owned
+      // pending pair and the older FIFO row by stable id.
+      replacement = {
+        ...owner,
+        queue: owner.queue?.map((item) => ({ ...item })),
+        messages: owner.messages.map((message) => ({ ...message, events: [...message.events] })),
+      };
+      store.state.chats = [replacement];
+      await Promise.resolve();
+      return { ok: true, live: true, strategy: 'codex-live', turnId: 'turn-1', receipt: true };
+    },
+  }, 'codex');
+  running(owner);
+
+  assert.equal(store.queueDraftMessage(owner.id, 'first, keep this queued', []), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(await store.steerOrQueue(owner.id, 'now steer the running turn'), true);
+  assert.ok(replacement, 'the queue digest replaced the renderer chat');
+  assert.equal(store.chat(owner.id), replacement);
+  assert.deepEqual(replacement!.queue?.map((item) => item.text), ['first, keep this queued']);
+  const steer = replacement!.messages.find((message) => message.role === 'user' && message.content === 'now steer the running turn');
+  assert.ok(steer, 'the accepted steer keeps its stable owner after hydration');
+  assert.equal(steer!.steerState, 'accepted');
+  assert.equal(steer!.steerBoundary, 'waiting', 'only the native consumption receipt may commit it into chronology');
+
+  store.rebuildJobRefs();
+  store.onJobEvent({
+    type: 'acp', id: 'job-1',
+    event: { kind: 'steer-consumed', clientUserMessageId: steer!.id },
+  });
+  assert.equal(steer!.steerState, 'applied');
+  assert.equal(steer!.steerBoundary, undefined, 'the receipt moves the same row out of the composer-adjacent preview');
+  assert.deepEqual(replacement!.queue?.map((item) => item.text), ['first, keep this queued'], 'the older FIFO owner remains independent');
+});

@@ -378,8 +378,11 @@ func (m *Manager) runSubagent(runCtx context.Context, run *SubagentRun, prompt, 
 	m.jobs[jobID] = job
 	run.JobID = jobID
 	m.mu.Unlock()
-	m.updateSubagentActivity(id, "working", "Running delegated task")
+	// Publish the working phase only after live steering can resolve this exact
+	// job. Otherwise a controller can observe "working", send a message, and
+	// have it fall back to the next-turn FIFO in the tiny gap before this bind.
 	bridge.setJobForSession(info.SessionID, job)
+	m.updateSubagentActivity(id, "working", "Running delegated task")
 	defer func() {
 		bridge.flushJobBuffers(job)
 		bridge.clearJobForSession(info.SessionID, job)

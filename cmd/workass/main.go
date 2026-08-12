@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -238,6 +239,7 @@ func main() {
 		EngineMaxAge:            effectiveEngine.MaxAge,
 		EngineMaxRSSKB:          effectiveEngine.MaxRSSKB,
 		SpareSessions:           effectiveEngine.SpareSessions,
+		DeferProviderStartup:    true,
 		SpareTTL:                *spareTTL,
 		CompactionEnabled:       effectiveEngine.CompactionEnabled,
 		CompactionThresholdPct:  effectiveEngine.CompactionThresholdPct,
@@ -247,7 +249,7 @@ func main() {
 			logger.Printf("[acp] %s %s", message, data)
 		},
 	})
-	providerChats := newProviderChatRuntime(acpManager, sessionState, stateDir, hub.Broadcast)
+	providerChats := newProviderChatRuntimeBeforeProviderStartup(acpManager, sessionState, stateDir, hub.Broadcast)
 	if err := providerChats.StartupError(); err != nil {
 		acpManager.Reset()
 		logger.Printf("[workass] initialize authoritative chat runtime: %v", err)
@@ -270,8 +272,6 @@ func main() {
 		ProviderChats:       providerChats,
 		Artifacts:           artifactHosting,
 	})
-	acpManager.StartProviderDetection(context.Background())
-
 	host := "127.0.0.1"
 	if *bind == "lan" {
 		host = "0.0.0.0"
@@ -323,7 +323,7 @@ func main() {
 		logger.Printf("[workass] registered %d machine wire channels", registerMachineHandlers(hub, machineBook, identity))
 	}
 	handler.Metrics = func() map[string]any { return daemonMetrics(providerChats, stateDir, hub, acpManager) }
-	agentControl, err := newAgentControlHandler(acpManager, hub.Broadcast, chatControl)
+	agentControl, err := newAgentControlHandlerBeforeProviderStartup(acpManager, hub.Broadcast, chatControl)
 	if err != nil {
 		acpManager.Reset()
 		logger.Printf("[workass] initialize agent control: %v", err)
@@ -354,7 +354,7 @@ func main() {
 	mux.HandleFunc("/workass/update/commit", updateControl.commit)
 	mux.HandleFunc("/workass/update/cancel", updateControl.cancel)
 	mux.Handle(agentMCPPath, newAgentStatelessMCPHandler(acpManager, agentControl))
-	mux.Handle(browserMCPPath, newBrowserStatelessMCPHandler(acpManager, defaultBrowserControlFile(stateDir)))
+	mux.Handle(browserMCPPath, newBrowserStatelessMCPHandler(acpManager, defaultBrowserControlFile(stateDir), providerChats))
 	mux.Handle(fleetQRPath, newFleetQRHandler(fleetKeys, *port, *bind, logger.Printf))
 	mux.Handle("/", handler)
 	listener, err := net.Listen("tcp", addr)
@@ -393,12 +393,30 @@ func main() {
 	}
 	signalCtx, stopSignals := signal.NotifyContext(shutdownRoot, os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
+	serveErr := startDaemonHTTP(server, listener)
+	readinessTLS, readinessErr := daemonReadinessTLSConfig(certificate, *useTLS)
+	if readinessErr != nil {
+		stopStartedDaemonHTTP(server, listener)
+		cleanup()
+		logger.Printf("[workass] prepare listener readiness probe: %v", readinessErr)
+		os.Exit(1)
+	}
+	if err := releaseProviderStartupAfterHTTPReady(signalCtx, listener, readinessTLS, serveErr, func() error {
+		acpManager.StartProviderStartup()
+		acpManager.StartProviderDetection(signalCtx)
+		return providerChats.ResumeActors()
+	}); err != nil {
+		stopStartedDaemonHTTP(server, listener)
+		cleanup()
+		logger.Printf("[workass] release provider startup after MCP readiness: %v", err)
+		os.Exit(1)
+	}
 	startMachinePresence(signalCtx, machineBook, hub, identity, machinePresenceOptions{
 		Bind:   *bind,
 		Port:   *port,
 		Beacon: *beacon,
 	}, logger)
-	if err := serveDaemonHTTP(signalCtx, server, listener, cleanup); err != nil {
+	if err := serveDaemonHTTPWithServeError(signalCtx, server, listener, cleanup, serveErr); err != nil {
 		cleanup()
 		logger.Printf("[workass] server stopped: %v", err)
 		os.Exit(1)
@@ -556,9 +574,111 @@ func (control *localUpdateControl) commit(w http.ResponseWriter, r *http.Request
 	}()
 }
 
-func serveDaemonHTTP(ctx context.Context, server *http.Server, listener net.Listener, cleanup func()) error {
+func startDaemonHTTP(server *http.Server, listener net.Listener) chan error {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
+	return serveErr
+}
+
+func stopStartedDaemonHTTP(server *http.Server, listener net.Listener) {
+	if listener != nil {
+		_ = listener.Close()
+	}
+	if server != nil {
+		_ = server.Close()
+	}
+}
+
+func daemonReadinessTLSConfig(certificate tlscert.Certificate, useTLS bool) (*tls.Config, error) {
+	if !useTLS {
+		return nil, nil
+	}
+	if len(certificate.TLS.Certificate) == 0 {
+		return nil, errors.New("daemon certificate has no leaf")
+	}
+	root, err := x509.ParseCertificate(certificate.TLS.Certificate[0])
+	if err != nil {
+		return nil, fmt.Errorf("parse daemon certificate for readiness probe: %w", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(root)
+	return &tls.Config{
+		RootCAs:    roots,
+		ServerName: "mcp.localhost",
+		MinVersion: tls.VersionTLS13,
+	}, nil
+}
+
+func waitForDaemonHTTP(ctx context.Context, listener net.Listener, readinessTLS *tls.Config, serveErr <-chan error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if listener == nil {
+		return errors.New("daemon listener is nil")
+	}
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil || port == "" {
+		return fmt.Errorf("daemon listener address is invalid: %v", listener.Addr())
+	}
+	scheme := "http"
+	if readinessTLS != nil {
+		scheme = "https"
+	}
+	probeURL := scheme + "://" + net.JoinHostPort("127.0.0.1", port) + agentMCPPath
+	transport := &http.Transport{TLSClientConfig: readinessTLS}
+	client := &http.Client{Transport: transport, Timeout: 250 * time.Millisecond}
+	defer transport.CloseIdleConnections()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		request, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
+		if requestErr != nil {
+			return requestErr
+		}
+		response, requestErr := client.Do(request)
+		if requestErr == nil {
+			_ = response.Body.Close()
+			return nil
+		}
+		select {
+		case err := <-serveErr:
+			if err == nil {
+				return errors.New("daemon HTTP server stopped before readiness")
+			}
+			return fmt.Errorf("daemon HTTP server stopped before readiness: %w", err)
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("daemon listener readiness probe failed: %w", requestErr)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func releaseProviderStartupAfterHTTPReady(
+	ctx context.Context,
+	listener net.Listener,
+	readinessTLS *tls.Config,
+	serveErr <-chan error,
+	release func() error,
+) error {
+	if err := waitForDaemonHTTP(ctx, listener, readinessTLS, serveErr); err != nil {
+		return err
+	}
+	if release == nil {
+		return errors.New("provider startup release is unavailable")
+	}
+	// Provider sessions receive the stateless MCP descriptors during
+	// session/new/session/resume. Nothing provider-owned may be released until
+	// the exact listener those descriptors name has answered this probe.
+	return release()
+}
+
+func serveDaemonHTTP(ctx context.Context, server *http.Server, listener net.Listener, cleanup func()) error {
+	return serveDaemonHTTPWithServeError(ctx, server, listener, cleanup, startDaemonHTTP(server, listener))
+}
+
+func serveDaemonHTTPWithServeError(ctx context.Context, server *http.Server, listener net.Listener, cleanup func(), serveErr <-chan error) error {
 	select {
 	case err := <-serveErr:
 		if cleanup != nil {
@@ -1024,7 +1144,11 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 			return map[string]any{"error": "app-chat:new-session requires the durable chat actor", "models": []any{}, "modes": []any{}}, nil
 		}
 		if oldSessionID != "" || workspaceRebind {
-			return providerChats.MoveWorkspace(context.Background(), arg)
+			result, err := providerChats.MoveWorkspace(context.Background(), arg)
+			if err != nil {
+				return map[string]any{"error": err.Error(), "models": []any{}, "modes": []any{}, "workspaceCommitted": false, "workspaceRebound": false}, nil
+			}
+			return result, nil
 		}
 		if fieldString(arg, "tabId") == "" || fieldString(arg, "chatId") == "" {
 			return map[string]any{"error": "app-chat:new-session requires exact tabId and chatId", "models": []any{}, "modes": []any{}}, nil
@@ -1033,7 +1157,7 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		// stale/reconnected controller may still ask to create the replacement
 		// session using its pre-move cwd; never let that recreate the provider
 		// thread in the old directory.
-		if cwd, _, ok, workspaceErr := providerChats.ChatWorkspace(fieldString(arg, "chatId")); workspaceErr != nil {
+		if cwd, _, ok, workspaceErr := providerChats.ChatWorkspaceForExactPair(fieldString(arg, "tabId"), fieldString(arg, "chatId")); workspaceErr != nil {
 			return map[string]any{"error": workspaceErr.Error(), "models": []any{}, "modes": []any{}}, nil
 		} else if ok {
 			arg["cwd"] = cwd
@@ -1164,7 +1288,7 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		// Workspace cwd is daemon-authoritative after a transactional sidebar
 		// move. A stale controller may still submit the previous value, but it
 		// can never make the next job execute there.
-		if cwd, _, ok, err := providerChats.ChatWorkspace(fieldString(arg, "chatId")); err != nil {
+		if cwd, _, ok, err := providerChats.ChatWorkspaceForExactPair(fieldString(arg, "tabId"), fieldString(arg, "chatId")); err != nil {
 			return nil, err
 		} else if ok {
 			arg["cwd"] = cwd

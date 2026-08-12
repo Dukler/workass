@@ -54,11 +54,25 @@ type storeError struct{ message string }
 func (e *storeError) Error() string { return e.message }
 
 func (e *Engine) Apply(command Command) error {
+	return e.ApplyPrepared(command, nil)
+}
+
+// ApplyPrepared validates a command against the exact locked actor state,
+// performs local durable preparation, and only then publishes the new actor
+// snapshot. Preparation is reserved for content-addressed attachment writes;
+// provider calls and other externally visible effects must remain in the
+// durable outbox and execute through Coordinator after this commit.
+func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	next, _, err := Reduce(e.state, command)
 	if err != nil {
 		return err
+	}
+	if prepare != nil {
+		if err := prepare(); err != nil {
+			return err
+		}
 	}
 	if e.store != nil {
 		if err := e.store.Save(next); err != nil {
@@ -97,6 +111,38 @@ func (e *Engine) ClaimNext() (Effect, bool, error) {
 	return nil, false, nil
 }
 
+// ClaimEffect claims one exact durable effect without draining older effects
+// from the chat outbox. Close requests use this narrow boundary so a detach
+// cannot accidentally dispatch an unrelated queued provider operation first.
+// A false result means the requested effect is not currently pending and
+// executable; callers must not attempt the provider call themselves.
+func (e *Engine) ClaimEffect(effectID string) (Effect, bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	effectID = strings.TrimSpace(effectID)
+	for index := range e.state.Outbox {
+		entry := e.state.Outbox[index]
+		if entry.ID != effectID || entry.Status != OutboxPending || !outboxEntryDirectClaimable(e.state, entry) {
+			continue
+		}
+		next, effects, err := Reduce(e.state, ClaimEffect{EffectID: effectID})
+		if err != nil {
+			return nil, false, err
+		}
+		if len(effects) != 1 {
+			return nil, false, &storeError{"claim did not produce exactly one provider effect"}
+		}
+		if e.store != nil {
+			if err := e.store.Save(next); err != nil {
+				return nil, false, err
+			}
+		}
+		e.state = next
+		return effects[0], true, nil
+	}
+	return nil, false, nil
+}
+
 // outboxEntryExecutable encodes effect dependencies in one place. Persistence
 // order alone is insufficient after restart: an older Pending prompt can
 // precede the newly required exact-resume receipt in the file. The lane phase
@@ -105,11 +151,20 @@ func outboxEntryExecutable(state State, entry OutboxEntry) bool {
 	if entry.Kind == EffectDeleteChat {
 		return state.Deleted && strings.TrimSpace(entry.ChatID) == state.ChatID
 	}
+	if state.Migration.BlockedError != "" {
+		return false
+	}
 	if entry.Kind == EffectBackground {
 		return !state.Deleted && entry.Background != nil && entry.Background.OperationID == entry.OperationID
 	}
 	if entry.Kind == EffectCheckpointRestore {
 		return !state.Deleted && entry.OperationID != "" && entry.TurnSequence > 0
+	}
+	// External browser mutations are claimed by their exact MCP actor boundary,
+	// never by the provider coordinator's generic drain. The caller must retain
+	// the actor lock across the claim and the transient browser dispatch.
+	if entry.Kind == EffectExternalMutation {
+		return false
 	}
 	lane, ok := state.Lanes[entry.LaneID]
 	if !ok {
@@ -140,9 +195,25 @@ func outboxEntryExecutable(state State, entry OutboxEntry) bool {
 	case EffectPermission:
 		permission, exists := state.Permissions[entry.RequestID]
 		return exists && permission.Owner.LaneID == entry.LaneID
+	case EffectDetachLane:
+		return lane.ConnectionGeneration == entry.Generation && lane.Attachment != nil &&
+			strings.TrimSpace(lane.Attachment.ConnectionID) == strings.TrimSpace(entry.ConnectionID) &&
+			lane.Owner == entry.Owner
 	default:
 		return false
 	}
+}
+
+func outboxEntryDirectClaimable(state State, entry OutboxEntry) bool {
+	if state.Migration.BlockedError != "" && entry.Kind != EffectDeleteChat {
+		return false
+	}
+	if entry.Kind == EffectExternalMutation {
+		return !state.Deleted && state.Initialized &&
+			strings.TrimSpace(entry.ChatID) == state.ChatID &&
+			strings.TrimSpace(entry.TabID) != "" && entry.TabID == state.Presentation.TabID
+	}
+	return outboxEntryExecutable(state, entry)
 }
 
 func (e *Engine) Recover() error {

@@ -41,7 +41,9 @@ func TestWorkspaceMutationReceiptReplaysWithoutApplyingEpochTwice(t *testing.T) 
 		t.Fatalf("same workspace operation retry: %v", err)
 	}
 	retried := retry.WorkspaceMutationReceipts[operationID]
-	if retried != receipt || retry.Presentation.WorkspaceRevision != first.Presentation.WorkspaceRevision || retry.Presentation.CWD == nil || *retry.Presentation.CWD != receipt.CWD {
+	if retried.Digest != receipt.Digest || retried.Revision != receipt.Revision || retried.CWD != receipt.CWD ||
+		!sameOperationIDSequence(retried.DetachOperationIDs, receipt.DetachOperationIDs) ||
+		retry.Presentation.WorkspaceRevision != first.Presentation.WorkspaceRevision || retry.Presentation.CWD == nil || *retry.Presentation.CWD != receipt.CWD {
 		t.Fatalf("workspace retry changed the committed result: first=%#v retry=%#v", first.Presentation, retry.Presentation)
 	}
 

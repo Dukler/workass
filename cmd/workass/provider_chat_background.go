@@ -134,7 +134,19 @@ func (r *providerChatRuntime) RunBackgroundAction(ctx context.Context, tabID, ch
 
 	actor.mu.Lock()
 	state = actor.engine.Snapshot()
-	if _, exists := state.Operations[action.OperationID]; !exists {
+	if _, exists := state.Operations[action.OperationID]; exists {
+		matched := false
+		for _, entry := range state.Outbox {
+			if entry.Kind != chat.EffectBackground || entry.OperationID != action.OperationID {
+				continue
+			}
+			matched = entry.Background != nil && entry.Background.SameRequest(action)
+			break
+		}
+		if !matched {
+			err = errors.New("background operation id was reused for different content")
+		}
+	} else {
 		err = actor.engine.Apply(chat.RequestBackgroundAction{Action: action})
 	}
 	actor.mu.Unlock()
@@ -234,6 +246,12 @@ func (r *providerChatRuntime) syncSpawnedWorkSnapshots() error {
 			return err
 		}
 		state := actor.engine.Snapshot()
+		if state.Deleted || state.Migration.BlockedError != "" {
+			// Quarantine is the durable reconciliation result for ambiguous legacy
+			// ownership. Re-reading the same executor cache cannot add evidence and
+			// must not turn one blocked chat back into a daemon-wide startup error.
+			continue
+		}
 		tabID := strings.TrimSpace(state.Presentation.TabID)
 		if tabID == "" {
 			return fmt.Errorf("background reconciliation chat %q has no tab attachment", chatID)
@@ -249,45 +267,56 @@ func (r *providerChatRuntime) syncSpawnedWorkSnapshots() error {
 func exactBackgroundOwner(state chat.State, item acp.SpawnedWorkItem) (chat.ProviderActivityOwner, bool) {
 	workID := firstNonEmptyString(strings.TrimSpace(item.ID), strings.TrimSpace(item.TaskID))
 	if existing, ok := state.Background[workID]; ok {
-		return existing.Owner, true
-	}
-	if tool := state.Tools[strings.TrimSpace(item.ToolCallID)]; strings.TrimSpace(item.ToolCallID) != "" && tool.Owner.OperationID != "" {
-		return tool.Owner, true
+		if backgroundOwnerIsExact(state, existing.Owner) {
+			return existing.Owner, true
+		}
+		return chat.ProviderActivityOwner{}, false
 	}
 	laneID := providercontract.LaneID(strings.TrimSpace(item.OriginLaneID))
 	operationID := providercontract.NormalizeOperationID(item.OriginOperationID)
-	if lane, ok := state.Lanes[laneID]; ok && operationID != "" {
-		return chat.ProviderActivityOwner{LaneID: laneID, OperationID: operationID, TurnID: strings.TrimSpace(item.OriginTurnID), ConnectionGeneration: lane.ConnectionGeneration}, true
-	}
 	turnID := strings.TrimSpace(item.OriginTurnID)
-	// A ledger scan is legal only when the runtime supplied an immutable origin
-	// identity. Empty origins must never attach an item to the first historical
-	// row merely because one exists.
-	if operationID == "" && turnID == "" {
-		return chat.ProviderActivityOwner{}, false
+	// A direct origin is authoritative. Resolve it against the foreground or
+	// immutable ledger before consulting the tool-call fallback; a mismatched
+	// direct origin must never be hidden by another candidate.
+	hasDirectOrigin := laneID != "" || operationID != "" || turnID != ""
+	if hasDirectOrigin {
+		owner, ok := state.ResolveProviderActivityOwner(laneID, operationID, turnID)
+		if !ok || !backgroundOwnerProviderMatches(state, owner, item.ProviderID) {
+			return chat.ProviderActivityOwner{}, false
+		}
+		return owner, true
 	}
-	if state.Foreground != nil &&
-		(operationID == "" || state.Foreground.OperationID == operationID) &&
-		(turnID == "" || state.Foreground.Turn.NativeID == turnID) {
-		lane := state.Lanes[state.Foreground.LaneID]
-		providerID := providercontract.NormalizeID(item.ProviderID)
-		if providerID == "" || lane.Identity.Realm.ProviderID == providerID {
-			return chat.ProviderActivityOwner{
-				LaneID: state.Foreground.LaneID, OperationID: state.Foreground.OperationID,
-				TurnID: state.Foreground.Turn.NativeID, ConnectionGeneration: lane.ConnectionGeneration,
-			}, true
+	if toolCallID := strings.TrimSpace(item.ToolCallID); toolCallID != "" {
+		if tool := state.Tools[toolCallID]; backgroundOwnerIsExact(state, tool.Owner) && backgroundOwnerProviderMatches(state, tool.Owner, item.ProviderID) {
+			return tool.Owner, true
 		}
 	}
-	for _, event := range state.Ledger {
-		if (operationID != "" && event.OperationID != operationID) || (turnID != "" && event.NativeTurnID != turnID) {
-			continue
-		}
-		if event.LaneID != "" && event.OperationID != "" {
-			lane := state.Lanes[event.LaneID]
-			return chat.ProviderActivityOwner{LaneID: event.LaneID, OperationID: event.OperationID, TurnID: event.NativeTurnID, ConnectionGeneration: lane.ConnectionGeneration}, true
-		}
-	}
+	// Empty origins must never attach an item to the first historical row merely
+	// because one exists.
 	return chat.ProviderActivityOwner{}, false
+}
+
+func backgroundOwnerIsExact(state chat.State, owner chat.ProviderActivityOwner) bool {
+	lane, ok := state.Lanes[owner.LaneID]
+	if !ok || owner.ConnectionGeneration == 0 || owner.ConnectionGeneration > lane.ConnectionGeneration {
+		return false
+	}
+	resolved, ok := state.ResolveProviderActivityOwner(owner.LaneID, owner.OperationID, owner.TurnID)
+	if !ok {
+		return false
+	}
+	return resolved.LaneID == owner.LaneID &&
+		resolved.OperationID == providercontract.NormalizeOperationID(string(owner.OperationID)) &&
+		resolved.TurnID == strings.TrimSpace(owner.TurnID)
+}
+
+func backgroundOwnerProviderMatches(state chat.State, owner chat.ProviderActivityOwner, rawProviderID string) bool {
+	providerID := providercontract.NormalizeID(rawProviderID)
+	if providerID == "" {
+		return true
+	}
+	lane, ok := state.Lanes[owner.LaneID]
+	return ok && lane.Identity.Realm.ProviderID == providerID
 }
 
 func backgroundEvent(item acp.SpawnedWorkItem, workID string) providercontract.BackgroundEvent {

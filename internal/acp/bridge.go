@@ -593,7 +593,6 @@ func (b *Bridge) request(ctx context.Context, method string, params any, timeout
 		}
 		return nil, err
 	}
-
 	select {
 	case <-ctx.Done():
 		b.mu.Lock()

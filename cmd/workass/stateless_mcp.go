@@ -1,11 +1,9 @@
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -13,6 +11,7 @@ import (
 	"time"
 
 	"workass/internal/acp"
+	providercontract "workass/internal/provider"
 )
 
 const (
@@ -35,6 +34,8 @@ type statelessMCPHandler struct {
 	name               string
 	manager            *acp.Manager
 	agentControl       *agentControlHandler
+	providerChats      *providerChatRuntime
+	validateOwner      func(ownerKey, chatID, tabID string) bool
 	browserControlFile string
 	browserClient      *http.Client
 }
@@ -46,17 +47,80 @@ type statelessMCPRequest struct {
 	Params  json.RawMessage `json:"params"`
 }
 
-func newAgentStatelessMCPHandler(manager *acp.Manager, control *agentControlHandler) http.Handler {
-	return &statelessMCPHandler{
-		kind: agentMCPKind, path: agentMCPPath, name: "workass-agent",
-		manager: manager, agentControl: control,
+// statelessMCPToolMutates is the ingress manifest for the logical-operation
+// boundary. It is intentionally separate from the JSON-RPC transport id: a
+// caller may retry one logical mutation with any number of transport ids.
+func statelessMCPToolMutates(kind statelessMCPKind, name string) bool {
+	if kind == browserMCPKind {
+		switch name {
+		case "workass_browser_open", "workass_browser_navigate", "workass_browser_click",
+			"workass_browser_type", "workass_browser_scroll", "workass_browser_key",
+			"workass_browser_batch", "workass_browser_history":
+			return true
+		default:
+			return false
+		}
+	}
+	switch name {
+	case "workass_create_chat", "workass_rename_chat", "workass_configure_chat", "workass_focus_chat",
+		"workass_delete_chat", "workass_send_chat_message", "workass_cancel_chat_turn", "workass_host_artifact",
+		"workass_host_html", "workass_spawn_subagent", "workass_wait_subagent", "workass_wait_subagents",
+		"workass_message_subagent", "workass_retry_subagent", "workass_register_external_work",
+		"workass_settle_external_work", "workass_cancel_subagent", "workass_decide_subagent_permission":
+		return true
+	default:
+		return false
 	}
 }
 
-func newBrowserStatelessMCPHandler(manager *acp.Manager, controlFile string) http.Handler {
+func requiredStatelessMCPOperationID(kind statelessMCPKind, call browserMCPCallParams) (providercontract.OperationID, error) {
+	if !statelessMCPToolMutates(kind, call.Name) {
+		return "", nil
+	}
+	if call.Arguments == nil {
+		return "", errors.New("mutating MCP tool requires a caller-stable operation_id")
+	}
+	var operationID providercontract.OperationID
+	seen := false
+	for _, key := range []string{"operation_id", "operationId"} {
+		raw, present := call.Arguments[key]
+		if !present {
+			continue
+		}
+		value, ok := raw.(string)
+		if !ok {
+			return "", errors.New("MCP operation_id must be a string")
+		}
+		validated, err := providercontract.ValidateOperationID(value)
+		if err != nil {
+			return "", err
+		}
+		if seen && operationID != validated {
+			return "", errors.New("operation_id and operationId must identify the same operation")
+		}
+		operationID, seen = validated, true
+	}
+	if !seen {
+		return "", errors.New("mutating MCP tool requires a caller-stable operation_id")
+	}
+	return operationID, nil
+}
+
+func newAgentStatelessMCPHandler(manager *acp.Manager, control *agentControlHandler) http.Handler {
+	var providerChats *providerChatRuntime
+	if control != nil && control.chats != nil {
+		providerChats = control.chats.providerChats
+	}
+	return &statelessMCPHandler{
+		kind: agentMCPKind, path: agentMCPPath, name: "workass-agent",
+		manager: manager, agentControl: control, providerChats: providerChats,
+	}
+}
+
+func newBrowserStatelessMCPHandler(manager *acp.Manager, controlFile string, providerChats *providerChatRuntime) http.Handler {
 	return &statelessMCPHandler{
 		kind: browserMCPKind, path: browserMCPPath, name: "workass-browser",
-		manager: manager, browserControlFile: controlFile,
+		manager: manager, providerChats: providerChats, browserControlFile: controlFile,
 		browserClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -88,7 +152,23 @@ func (h *statelessMCPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	ownerKey, ok := bearerCredential(r.Header.Get("Authorization"))
 	chatID := strings.TrimSpace(r.Header.Get("X-Workass-Chat-ID"))
 	tabID := strings.TrimSpace(r.Header.Get("X-Workass-Tab-ID"))
-	if !ok || h.manager == nil || !h.manager.ValidateAgentOwner(ownerKey, chatID, tabID) {
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, nil, -32000, "unauthorized", nil)
+		return
+	}
+	if h.manager == nil || h.providerChats == nil {
+		h.writeError(w, http.StatusServiceUnavailable, nil, -32001, "authoritative chat state is unavailable", nil)
+		return
+	}
+	// The durable actor is the authority for whether this exact attachment is
+	// still alive. Only after it fences the pair may the short-lived Manager
+	// owner capability participate in authorization; a deleted chat must not
+	// remain usable merely because its provider session is still live.
+	if _, _, err := h.providerChats.exactActor(tabID, chatID); err != nil {
+		h.writeError(w, http.StatusUnauthorized, nil, -32000, "unauthorized", nil)
+		return
+	}
+	if !h.ownerAuthorized(ownerKey, chatID, tabID) {
 		h.writeError(w, http.StatusUnauthorized, nil, -32000, "unauthorized", nil)
 		return
 	}
@@ -165,7 +245,7 @@ func (h *statelessMCPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			h.writeError(w, http.StatusBadRequest, request.ID, -32602, "invalid tools/call parameters", nil)
 			return
 		}
-		result, err := h.callTool(r, call, ownerKey, chatID, tabID, stableMCPRequestOperationID(request.ID, call.Name, tabID, chatID))
+		result, err := h.callTool(r, call, ownerKey, chatID, tabID)
 		if err != nil {
 			h.writeError(w, http.StatusInternalServerError, request.ID, -32603, acp.RedactSensitiveText(err.Error()), nil)
 			return
@@ -177,6 +257,16 @@ func (h *statelessMCPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	default:
 		h.writeError(w, http.StatusNotFound, request.ID, -32601, "method not found", nil)
 	}
+}
+
+func (h *statelessMCPHandler) ownerAuthorized(ownerKey, chatID, tabID string) bool {
+	if h == nil {
+		return false
+	}
+	if h.validateOwner != nil {
+		return h.validateOwner(ownerKey, chatID, tabID)
+	}
+	return h.manager != nil && h.manager.ValidateAgentOwner(ownerKey, chatID, tabID)
 }
 
 func (h *statelessMCPHandler) tools() []map[string]any {
@@ -201,25 +291,62 @@ func (h *statelessMCPHandler) resultMeta() map[string]any {
 	}
 }
 
-func stableMCPRequestOperationID(requestID any, toolName, tabID, chatID string) string {
-	raw, _ := json.Marshal(requestID)
-	digest := sha256.Sum256([]byte(strings.Join([]string{
-		"agent-mcp-v1", strings.TrimSpace(toolName), strings.TrimSpace(tabID), strings.TrimSpace(chatID), string(raw),
-	}, "\x00")))
-	return fmt.Sprintf("agent-mcp:%x", digest[:16])
-}
-
-func (h *statelessMCPHandler) callTool(r *http.Request, call browserMCPCallParams, ownerKey, chatID, tabID, operationID string) (any, error) {
+func (h *statelessMCPHandler) callTool(r *http.Request, call browserMCPCallParams, ownerKey, chatID, tabID string) (any, error) {
 	if h.kind == browserMCPKind {
-		return callBrowserMCPTool(call, browserMCPOptions{
-			ControlFile: h.browserControlFile, ChatID: chatID, HTTPClient: h.browserClient,
-		}, h.browserClient)
+		if h.providerChats == nil {
+			return nil, errors.New("authoritative chat state is unavailable")
+		}
+		prepared, err := prepareBrowserMCPCall(call)
+		if err != nil {
+			return browserMCPErrorResult(err.Error()), nil
+		}
+		operationID, err := requiredStatelessMCPOperationID(h.kind, call)
+		if err != nil {
+			return browserMCPErrorResult(err.Error()), nil
+		}
+		params := prepared.Params
+		params["chatId"] = chatID
+		if !prepared.Mutating {
+			actor, _, err := h.providerChats.exactActor(tabID, chatID)
+			if err != nil {
+				return browserMCPErrorResult("browser chat attachment is stale"), nil
+			}
+			actor.mu.Lock()
+			defer actor.mu.Unlock()
+			state := actor.engine.Snapshot()
+			if state.Deleted || !state.Initialized || strings.TrimSpace(state.Presentation.TabID) != strings.TrimSpace(tabID) {
+				return browserMCPErrorResult("browser chat attachment is stale"), nil
+			}
+			result, err := invokeBrowserControl(h.browserControlFile, prepared.Method, params, h.browserClient)
+			if err != nil {
+				return browserMCPErrorResult(err.Error()), nil
+			}
+			return formatBrowserMCPResult(call, prepared, result)
+		}
+		digest := browserMCPRequestDigest(prepared.Method, params)
+		reply, err := h.providerChats.executeBrowserMutation(
+			r.Context(), tabID, chatID, providercontract.OperationID(operationID), call.Name, prepared.Method, digest,
+			func() (browserControlReply, error) {
+				return invokeBrowserControlMutation(h.browserControlFile, prepared.Method, params, string(operationID), digest, h.browserClient)
+			},
+			func() (browserControlReply, error) {
+				return invokeBrowserControlReceipt(h.browserControlFile, string(operationID), digest, h.browserClient)
+			},
+		)
+		if err != nil {
+			return browserMCPErrorResult(acp.RedactSensitiveText(err.Error())), nil
+		}
+		return formatBrowserMCPReply(call, prepared, reply)
 	}
 	if h.agentControl == nil {
 		return nil, errors.New("Workass agent control is unavailable")
 	}
+	operationID, err := requiredStatelessMCPOperationID(h.kind, call)
+	if err != nil {
+		return agentMCPErrorResult(err.Error()), nil
+	}
 	return callAgentMCPTool(r, call, agentMCPOptions{
-		ChatID: chatID, TabID: tabID, OwnerKey: ownerKey, OperationID: operationID,
+		ChatID: chatID, TabID: tabID, OwnerKey: ownerKey, OperationID: string(operationID),
 	}, h.agentControl)
 }
 

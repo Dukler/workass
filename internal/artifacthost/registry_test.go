@@ -1,6 +1,7 @@
 package artifacthost
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -333,6 +335,87 @@ func TestArtifactHostPublishesDesignVocabularyAndWithholdsCredentialShapes(t *te
 	}
 	if len(logged) == 0 {
 		t.Fatal("nothing reached the daemon log; silence is what made this cost a round trip")
+	}
+}
+
+func TestOperationReadbackPreservesExactWithheldRegistrationAcrossRestart(t *testing.T) {
+	stateDir := t.TempDir()
+	workspace := t.TempDir()
+	site := filepath.Join(workspace, "site")
+	if err := os.MkdirAll(site, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(site, "index.html"), []byte("<h1>safe</h1>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < maxWithheldReported+5; index++ {
+		name := fmt.Sprintf("credential-%02d.json", index)
+		if err := os.WriteFile(filepath.Join(site, name), []byte(`{"secret":"not-public"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	registry, err := New(stateDir, "http://127.0.0.1:8788")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationID := "artifact-withheld-parity"
+	digest := strings.Repeat("a", sha256.Size*2)
+	first, err := registry.RegisterForOperation(RegisterOptions{
+		BaseDir: workspace, SourcePath: "site", Entry: "index.html", Label: "Site",
+	}, operationID, digest)
+	if err != nil {
+		t.Fatalf("first operation-backed registration: %v", err)
+	}
+	if len(first.Withheld) != maxWithheldReported || first.WithheldMore != 5 {
+		t.Fatalf("first withheld projection = %d entries, more=%d; want %d and 5", len(first.Withheld), first.WithheldMore, maxWithheldReported)
+	}
+
+	restarted, err := New(stateDir, "http://127.0.0.1:8788")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readback, found, err := restarted.ReadOperation(operationID, digest)
+	if err != nil {
+		t.Fatalf("restart readback: %v", err)
+	}
+	if !found {
+		t.Fatal("restart readback did not find the operation receipt")
+	}
+	if !reflect.DeepEqual(readback, first) {
+		t.Fatalf("restart readback = %#v, first result = %#v", readback, first)
+	}
+}
+
+func TestOperationCapturedHTMLReadbackPreservesFullRegistrationAcrossRestart(t *testing.T) {
+	stateDir := t.TempDir()
+	content := []byte(`<html><body>captured</body></html>`)
+	digest := strings.Repeat("b", sha256.Size*2)
+	registry, err := New(stateDir, "http://first-origin.invalid:8788")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := registry.RegisterCapturedHTMLForOperation("Captured", content, "visualize-operation", digest)
+	if err != nil {
+		t.Fatalf("first captured registration: %v", err)
+	}
+	if first.LocalURL == "" {
+		t.Fatalf("first captured registration lost LocalURL: %#v", first)
+	}
+
+	restarted, err := New(stateDir, "http://different-origin.invalid:8788")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readback, found, err := restarted.ReadOperation("visualize-operation", digest)
+	if err != nil {
+		t.Fatalf("captured HTML restart readback: %v", err)
+	}
+	if !found {
+		t.Fatal("captured HTML operation receipt was not found after restart")
+	}
+	if !reflect.DeepEqual(readback, first) {
+		t.Fatalf("captured HTML restart readback = %#v, first result = %#v", readback, first)
 	}
 }
 

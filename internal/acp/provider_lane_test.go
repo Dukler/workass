@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -43,6 +44,7 @@ func TestManagerLaneBackpressuresInsteadOfDroppingNormalizedEvents(t *testing.T)
 			sequences = append(sequences, event.Identity.Sequence)
 			kinds = append(kinds, event.Kind)
 			mu.Unlock()
+			lane.AcknowledgeDurableEvent(event.Identity.Sequence, nil)
 		}
 	}()
 	for index := 0; index < total; index++ {
@@ -128,6 +130,248 @@ func TestFrozenWirePublicationWaitsForDurableActorCommit(t *testing.T) {
 	}()
 	lane.attachmentClosed()
 	<-detached
+}
+
+func TestProviderLaneArmsDurableCommitsBeforeLaneOpened(t *testing.T) {
+	published := make(chan struct{}, 1)
+	manager := NewManager(Options{
+		RSSSampleInterval: time.Hour,
+		Broadcast: func(channel string, _ any) {
+			if channel == "job:event" {
+				published <- struct{}{}
+			}
+		},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	lane := newUnopenedManagerLaneForTest(t, manager, "startup-window-chat", "startup-window-thread")
+	if attached := <-lane.Events(); attached.Kind != providercontract.EventLaneAttached {
+		t.Fatalf("first event = %q, want lane attached", attached.Kind)
+	}
+
+	emitted := make(chan struct{})
+	go func() {
+		manager.emit("job:event", map[string]any{
+			"type": "usage", "sessionId": "startup-window-thread", "used": 1, "size": 10,
+		})
+		close(emitted)
+	}()
+
+	var event providercontract.Event
+	select {
+	case event = <-lane.Events():
+	case <-time.After(time.Second):
+		t.Fatal("provider callback did not enter the lane before LaneOpened")
+	}
+	select {
+	case <-published:
+		t.Fatal("provider callback was published before its durable commit")
+	case <-time.After(100 * time.Millisecond):
+	}
+	select {
+	case <-emitted:
+		t.Fatal("provider callback returned before its durable commit")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	lane.AcknowledgeDurableEvent(event.Identity.Sequence, nil)
+	select {
+	case <-emitted:
+	case <-time.After(time.Second):
+		t.Fatal("provider callback did not resume after its durable commit")
+	}
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("provider callback was not published after its durable commit")
+	}
+
+	lane.RequireDurableEventCommits()
+	detached := make(chan struct{})
+	go func() {
+		defer close(detached)
+		for event := range lane.Events() {
+			lane.AcknowledgeDurableEvent(event.Identity.Sequence, nil)
+		}
+	}()
+	lane.attachmentClosed()
+	select {
+	case <-detached:
+	case <-time.After(time.Second):
+		t.Fatal("provider lane did not close after startup-window test")
+	}
+}
+
+func TestManagedProviderJobRejectsLateEventsAfterTerminalCleanup(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		published []string
+	)
+	manager := NewManager(Options{
+		RSSSampleInterval: time.Hour,
+		Broadcast: func(channel string, payload any) {
+			if channel != "job:event" {
+				return
+			}
+			mu.Lock()
+			published = append(published, strings.TrimSpace(asString(mapFromAny(payload)["type"])))
+			mu.Unlock()
+		},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	lane := newUnopenedManagerLaneForTest(t, manager, "terminal-fence-chat", "terminal-fence-thread")
+	<-lane.Events()
+	lane.RequireDurableEventCommits()
+	manager.bindProviderLaneJob(lane, "terminal-fence-job", "terminal-fence-operation")
+
+	terminalDone := make(chan struct{})
+	go func() {
+		manager.emit("job:event", map[string]any{
+			"type": "end",
+			"job": map[string]any{
+				"id": "terminal-fence-job", "sessionId": "terminal-fence-thread",
+				"tabId": "terminal-fence-tab", "chatId": "terminal-fence-chat",
+				"status": "done", "result": "terminal",
+			},
+		})
+		close(terminalDone)
+	}()
+	terminal := <-lane.Events()
+	if terminal.Kind != providercontract.EventTurnTerminal {
+		t.Fatalf("terminal event = %q, want turn terminal", terminal.Kind)
+	}
+	lane.AcknowledgeDurableEvent(terminal.Identity.Sequence, nil)
+	select {
+	case <-terminalDone:
+	case <-time.After(time.Second):
+		t.Fatal("terminal provider event did not publish")
+	}
+	if manager.providerLaneForJob("terminal-fence-job") != nil || manager.providerLaneManagedJob("terminal-fence-job") {
+		t.Fatal("terminal provider job remained in active lane maps")
+	}
+	if !manager.providerLaneClosedJob("terminal-fence-job") {
+		t.Fatal("terminal provider job did not retain a closed-job fence")
+	}
+
+	lateEvents := []map[string]any{
+		{"type": "data", "id": "terminal-fence-job", "stream": "stdout", "chunk": "late data"},
+		{"type": "start", "job": map[string]any{
+			"id": "terminal-fence-job", "sessionId": "terminal-fence-thread",
+			"tabId": "terminal-fence-tab", "chatId": "terminal-fence-chat", "status": "running",
+		}},
+		{"type": "acp", "id": "terminal-fence-job", "event": map[string]any{
+			"kind": "future-semantic-kind", "text": "late unknown semantic event",
+		}},
+	}
+	for _, late := range lateEvents {
+		manager.emit("job:event", late)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(published) != 1 || published[0] != "end" {
+		t.Fatalf("late terminal callbacks escaped frozen publication: %#v", published)
+	}
+}
+
+func TestManagerEmitSerializesDurableObserveAckAndPublication(t *testing.T) {
+	firstBroadcastEntered := make(chan struct{})
+	secondBroadcastEntered := make(chan struct{}, 1)
+	releaseFirst := make(chan struct{})
+	visible := make(chan string, 2)
+	manager := NewManager(Options{
+		RSSSampleInterval: time.Hour,
+		Broadcast: func(channel string, payload any) {
+			if channel != "job:event" {
+				return
+			}
+			chunk := asString(mapFromAny(payload)["chunk"])
+			switch chunk {
+			case "first":
+				close(firstBroadcastEntered)
+				<-releaseFirst
+			case "second":
+				secondBroadcastEntered <- struct{}{}
+			}
+			visible <- chunk
+		},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	lane := newUnopenedManagerLaneForTest(t, manager, "publication-order-chat", "publication-order-thread")
+	<-lane.Events()
+	lane.RequireDurableEventCommits()
+	manager.bindProviderLaneJob(lane, "publication-order-job", "publication-order-operation")
+
+	acknowledge := make(chan struct{})
+	go func() {
+		defer close(acknowledge)
+		for event := range lane.Events() {
+			lane.AcknowledgeDurableEvent(event.Identity.Sequence, nil)
+		}
+	}()
+
+	firstDone := make(chan struct{})
+	go func() {
+		manager.emit("job:event", map[string]any{
+			"type": "data", "id": "publication-order-job", "stream": "stdout", "chunk": "first",
+		})
+		close(firstDone)
+	}()
+	select {
+	case <-firstBroadcastEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first callback did not reach the frozen broadcaster")
+	}
+
+	secondDone := make(chan struct{})
+	go func() {
+		manager.emit("job:event", map[string]any{
+			"type": "data", "id": "publication-order-job", "stream": "stdout", "chunk": "second",
+		})
+		close(secondDone)
+	}()
+	select {
+	case <-secondBroadcastEntered:
+		t.Fatal("second callback published while the first callback was blocked after observe")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first callback did not finish after release")
+	}
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("second callback did not finish after first publication")
+	}
+	if got := <-visible; got != "first" {
+		t.Fatalf("first visible durable callback = %q, want first", got)
+	}
+	if got := <-visible; got != "second" {
+		t.Fatalf("second visible durable callback = %q, want second", got)
+	}
+
+	lane.attachmentClosed()
+	select {
+	case <-acknowledge:
+	case <-time.After(time.Second):
+		t.Fatal("provider lane did not close after publication-order test")
+	}
+}
+
+func newUnopenedManagerLaneForTest(t *testing.T, manager *Manager, chatID, sessionID string) *managerLane {
+	t.Helper()
+	identity := providercontract.LaneIdentity{
+		ChatID: chatID,
+		Realm: providercontract.Realm{
+			ProviderID: "custom", MachineID: "machine", AccountScope: "account", InstallScope: "install",
+		},
+		WorkspaceEpoch: "workspace",
+	}.Normalize()
+	return newManagerLane(manager, identity, providercontract.AttachmentOwner{TabID: "tab-" + chatID}, SessionInfo{
+		SessionID: sessionID, ProviderID: "custom",
+	}, providercontract.ThreadRef{ProviderID: "custom", RootID: sessionID, HeadID: sessionID, Lineage: 1})
 }
 
 func TestProviderAdmissionReceiptIsOwnedByChatNotDisposableTab(t *testing.T) {

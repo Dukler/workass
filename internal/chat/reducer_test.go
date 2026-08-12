@@ -103,6 +103,14 @@ func TestBackgroundActionJournalPreservesPendingAndNeverReplaysDispatched(t *tes
 	if len(state.Outbox) == 0 || state.Outbox[len(state.Outbox)-1].Status != OutboxPending {
 		t.Fatalf("background command was not durably pending: %#v", state.Outbox)
 	}
+	if _, _, err := Reduce(state, RequestBackgroundAction{Action: action}); err != nil {
+		t.Fatalf("same background operation retry was rejected: %v", err)
+	}
+	changed := action.Clone()
+	changed.Spawn.Prompt = "different review"
+	if _, _, err := Reduce(state, RequestBackgroundAction{Action: changed}); err == nil {
+		t.Fatal("background operation id was reused for different content")
+	}
 	state, _ = apply(t, state, RecoverOutbox{})
 	entry := OutboxEntry{}
 	for _, candidate := range state.Outbox {
@@ -142,7 +150,11 @@ func TestBackgroundReconciliationPreservesTerminalRowsAndOrphansMissingLiveWork(
 		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
 	})
-	owner := ProviderActivityOwner{LaneID: lane.ID, OperationID: "turn", TurnID: "native-turn", ConnectionGeneration: 1}
+	state, _ = apply(t, state, Submit{OperationID: "turn", LaneID: lane.ID, Text: "background owner"})
+	state, _ = apply(t, state, TurnAdmitted{
+		OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"},
+	})
+	owner := ProviderActivityOwner{LaneID: lane.ID, OperationID: "turn", TurnID: "native-turn", ConnectionGeneration: state.Lanes[lane.ID].ConnectionGeneration}
 	state.Background["running"] = BackgroundState{Owner: owner, Event: provider.BackgroundEvent{WorkID: "running", Status: "running"}}
 	state.Background["done"] = BackgroundState{Owner: owner, Event: provider.BackgroundEvent{WorkID: "done", Status: "exited", FinishedAt: "2026-08-11T11:00:00Z"}}
 
@@ -226,7 +238,7 @@ func TestDeleteChatPersistsIdempotentCleanupBeforeNativeDeletion(t *testing.T) {
 		t.Fatalf("delete transition = deleted:%v effects:%#v", state.Deleted, effects)
 	}
 	cleanup, ok := effects[0].(DeleteChatEffect)
-	if !ok || cleanup.ChatID != "delete-chat" || cleanup.TabID != "delete-tab" {
+	if !ok || cleanup.OperationID != "delete-op" || cleanup.ChatID != "delete-chat" || cleanup.TabID != "delete-tab" {
 		t.Fatalf("delete effect = %#v", effects[0])
 	}
 	state, effects = apply(t, state, ClaimEffect{EffectID: deleteChatEffectID("delete-chat")})
@@ -238,7 +250,7 @@ func TestDeleteChatPersistsIdempotentCleanupBeforeNativeDeletion(t *testing.T) {
 		t.Fatalf("idempotent delete was not retryable after crash: %#v", state.Outbox[0])
 	}
 	state, _ = apply(t, state, ClaimEffect{EffectID: deleteChatEffectID("delete-chat")})
-	state, _ = apply(t, state, ChatDeletionCompleted{ChatID: "delete-chat"})
+	state, _ = apply(t, state, ChatDeletionCompleted{OperationID: "delete-op", ChatID: "delete-chat"})
 	if state.Outbox[0].Status != OutboxCompleted {
 		t.Fatalf("delete cleanup receipt = %#v", state.Outbox[0])
 	}

@@ -11,6 +11,7 @@ test('closing a chat flushes its daemon delete capability immediately', () => {
   assert.match(closeChat, /void this\.closeChatDurably\(id\)/);
   const durableClose = source.match(/private async closeChatDurably\(id: string\) \{([\s\S]*?)\n  \}\n  setDraft/)?.[1] ?? '';
   assert.match(durableClose, /call\('chatDelete'/);
+  assert.match(durableClose, /pendingChatDeleteOperations/);
+  assert.match(durableClose, /receipt\.operationId !== operationId/);
   assert.match(durableClose, /void this\.flushSession\(true\)/);
-  assert.doesNotMatch(source, /pendingChatDeletes/);
 });

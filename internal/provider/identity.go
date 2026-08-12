@@ -185,3 +185,40 @@ func (r ThreadRef) IsZero() bool {
 func NormalizeOperationID(raw string) OperationID {
 	return OperationID(strings.TrimSpace(raw))
 }
+
+// ValidateOperationID accepts the caller's stable logical operation identity
+// after harmless outer-whitespace normalization. Transport ids are deliberately
+// not accepted here: an operation id must be supplied by the caller and must
+// be safe to retain in durable actor state and bounded receipts.
+func ValidateOperationID(raw string) (OperationID, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", errors.New("operation id is required")
+	}
+	if len(value) > 256 {
+		return "", errors.New("operation id is too long")
+	}
+	lower := strings.ToLower(value)
+	for _, marker := range []string{"api_key", "apikey", "token", "secret", "password", "credential", "bearer"} {
+		if strings.Contains(lower, marker) {
+			return "", errors.New("operation id has a forbidden secret-shaped value")
+		}
+	}
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
+			continue
+		}
+		switch char {
+		case '-', '_', '.', ':', '/', '+', '=', '@':
+			continue
+		default:
+			return "", errors.New("operation id contains invalid characters")
+		}
+	}
+	first := value[0]
+	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || (first >= '0' && first <= '9')) {
+		return "", errors.New("operation id must start with a letter or digit")
+	}
+	return OperationID(value), nil
+}
