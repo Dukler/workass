@@ -7,43 +7,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
-	"time"
 
 	"workass/internal/acp"
+	providercontract "workass/internal/provider"
 )
 
 // chatControlCoordinator is the daemon-owned parity surface between the visible
 // React controls and the injected workass-agent MCP server. It never addresses
 // an implicit active tab: every read/mutation carries the immutable pair
-// (tabId, chatId), and the session store remains the canonical UI authority.
+// (tabId, chatId), and every chat-scoped operation enters the durable actor.
 type chatControlCoordinator struct {
-	manager   *acp.Manager
-	state     *sessionStore
-	refreshes *sessionRefreshCoordinator
-
-	mu           sync.Mutex
-	draining     map[string]bool
-	drainPending map[string]bool
-	drainTimers  map[string]*time.Timer
-	drainBackoff map[string]time.Duration
-
-	queueStartTimeout       time.Duration
-	queueRetryBase          time.Duration
-	rendererRecheckBase     time.Duration
-	rendererRecheckMax      time.Duration
-	rendererAdoptionAge     time.Duration
-	startQueuedTurnOverride func(context.Context, string, string, map[string]any) error
+	manager       *acp.Manager
+	refreshes     *sessionRefreshCoordinator
+	providerChats *providerChatRuntime
 }
-
-const (
-	agentQueueStartTimeout      = 2 * time.Minute
-	agentQueueRetryBase         = time.Second
-	rendererQueueRecheckBase    = time.Second
-	rendererQueueRecheckMax     = 30 * time.Second
-	rendererQueueAdoptionAge    = 60 * time.Second
-	agentQueueStartAttemptLimit = 3
-)
 
 type resolvedChatControls struct {
 	ProviderID string
@@ -53,35 +30,31 @@ type resolvedChatControls struct {
 	ModeID     string
 }
 
-func newChatControlCoordinator(manager *acp.Manager, state *sessionStore, broadcast func(string, any)) *chatControlCoordinator {
+func newChatControlCoordinator(manager *acp.Manager, broadcast func(string, any), runtime *providerChatRuntime) *chatControlCoordinator {
 	managerRefreshEnabled := broadcast != nil
 	if broadcast == nil {
 		broadcast = func(string, any) {}
 	}
 	coordinator := &chatControlCoordinator{
-		manager: manager, state: state,
+		manager:   manager,
 		refreshes: newSessionRefreshCoordinator(broadcast),
-		draining:  map[string]bool{}, drainPending: map[string]bool{},
-		drainTimers: map[string]*time.Timer{}, drainBackoff: map[string]time.Duration{},
-		queueStartTimeout: agentQueueStartTimeout, queueRetryBase: agentQueueRetryBase,
-		rendererRecheckBase: rendererQueueRecheckBase, rendererRecheckMax: rendererQueueRecheckMax,
-		rendererAdoptionAge: rendererQueueAdoptionAge,
 	}
-	if state != nil {
-		state.SetQueueWakeFunc(coordinator.wakeDrain)
-	}
+	coordinator.providerChats = runtime
 	if manager != nil {
-		manager.SetJobEndFunc(coordinator.wakeDrain)
 		if managerRefreshEnabled {
 			manager.SetSessionRefreshFunc(func(payload map[string]any) {
 				// Adapter corrections carry the authoritative controls. Commit
 				// them before the immediate global invalidation so hydration
 				// observes the corrected visible selection.
-				persistAgentApplyControls(state, payload)
-				coordinator.refreshes.Request(
-					fieldString(payload, "tabId"), fieldString(payload, "chatId"),
-					state.RefreshGeneration(), refreshImmediate,
-				)
+				if coordinator.providerChats != nil {
+					if err := coordinator.providerChats.ApplySessionRefresh(payload); err != nil {
+						// A refresh for a chat that is not actor-owned has no safe
+						// generation to publish. Do not fall back to the retired
+						// session mirror: the actor is the only authority here.
+						return
+					}
+				}
+				coordinator.refresh(fieldString(payload, "tabId"), fieldString(payload, "chatId"), false)
 			})
 		}
 	}
@@ -89,13 +62,13 @@ func newChatControlCoordinator(manager *acp.Manager, state *sessionStore, broadc
 }
 
 func (c *chatControlCoordinator) resumeQueues() {
-	for _, target := range c.state.AgentQueueTargets() {
-		c.scheduleDrain(target[0], target[1])
+	if c != nil && c.providerChats != nil {
+		_ = c.providerChats.ResumeActors()
 	}
 }
 
 func (c *chatControlCoordinator) authorize(ownerKey, parentChatID, parentTabID string) error {
-	if c == nil || c.manager == nil || c.state == nil {
+	if c == nil || c.manager == nil || c.providerChats == nil {
 		return errors.New("Workass chat control is unavailable")
 	}
 	if !c.manager.ValidateAgentOwner(ownerKey, parentChatID, parentTabID) {
@@ -104,16 +77,15 @@ func (c *chatControlCoordinator) authorize(ownerKey, parentChatID, parentTabID s
 	return nil
 }
 
-func (c *chatControlCoordinator) list() map[string]any {
-	chats := c.state.AgentChatList()
-	for _, chat := range chats {
-		job, running := c.manager.RunningJobForChat(fieldString(chat, "tabId"), fieldString(chat, "chatId"))
-		chat["running"] = running
-		if running {
-			chat["jobId"] = fieldString(job, "id")
-		}
+func (c *chatControlCoordinator) list() (map[string]any, error) {
+	if c == nil || c.providerChats == nil {
+		return nil, errors.New("Workass chat actor is unavailable")
 	}
-	return map[string]any{"chats": chats}
+	chats, err := c.providerChats.ListChats()
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"chats": chats}, nil
 }
 
 func exactAgentTarget(params map[string]any) (string, string, error) {
@@ -134,20 +106,27 @@ func (c *chatControlCoordinator) read(params map[string]any) (map[string]any, er
 		return nil, errors.New("limit must be between 1 and 200")
 	}
 	includeEvents, _ := boolField(params, "include_events")
-	result, err := c.state.AgentReadChat(tabID, chatID, limit, includeEvents)
+	result, err := c.providerChats.ReadChat(tabID, chatID, limit, includeEvents)
 	if err != nil {
 		return nil, err
 	}
-	job, running := c.manager.RunningJobForChat(tabID, chatID)
+	jobID, running, err := c.providerChats.Foreground(tabID, chatID)
+	if err != nil {
+		return nil, err
+	}
 	result["running"] = running
 	if running {
-		result["jobId"] = fieldString(job, "id")
+		result["jobId"] = jobID
 	}
 	return result, nil
 }
 
 func (c *chatControlCoordinator) create(ctx context.Context, parentTabID, parentChatID string, params map[string]any) (map[string]any, error) {
-	parent, err := c.state.AgentReadChat(parentTabID, parentChatID, 1, false)
+	operationID := providercontract.NormalizeOperationID(fieldString(params, "operation_id"))
+	if operationID == "" {
+		return nil, errors.New("chat.create requires a stable operation_id")
+	}
+	parent, err := c.providerChats.ReadChat(parentTabID, parentChatID, 1, false)
 	if err != nil {
 		return nil, errors.New("calling chat no longer exists")
 	}
@@ -163,17 +142,11 @@ func (c *chatControlCoordinator) create(ctx context.Context, parentTabID, parent
 		return nil, err
 	}
 	focus, _ := boolField(params, "focus")
-	created, err := c.state.AgentCreateChat(fieldString(params, "title"), cwd, controls.ProviderID, controls.ModelID, controls.ModeID, focus)
+	created, err := c.providerChats.CreateChat(fieldString(params, "title"), cwd, controls, focus, operationID)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.state.AgentConfigureChat(
-		fieldString(created, "tabId"), fieldString(created, "chatId"), cwd,
-		controls.ProviderID, controls.ModelID, controls.BaseModel, controls.Effort, controls.ModeID,
-	); err != nil {
-		return nil, err
-	}
-	if _, err := c.state.AgentReadChat(fieldString(created, "tabId"), fieldString(created, "chatId"), 1, false); err != nil {
+	if _, err := c.providerChats.ReadChat(fieldString(created, "tabId"), fieldString(created, "chatId"), 1, false); err != nil {
 		return nil, fmt.Errorf("created chat is not addressable: %w", err)
 	}
 	c.refresh(fieldString(created, "tabId"), fieldString(created, "chatId"), focus)
@@ -187,7 +160,11 @@ func (c *chatControlCoordinator) rename(params map[string]any) (map[string]any, 
 	if err != nil {
 		return nil, err
 	}
-	if err := c.state.AgentRenameChat(tabID, chatID, fieldString(params, "title")); err != nil {
+	operationID := providercontract.NormalizeOperationID(fieldString(params, "operation_id"))
+	if operationID == "" {
+		return nil, errors.New("chat.rename requires a stable operation_id")
+	}
+	if err := c.providerChats.RenameChat(tabID, chatID, fieldString(params, "title"), operationID); err != nil {
 		return nil, err
 	}
 	c.refresh(tabID, chatID, false)
@@ -199,7 +176,7 @@ func (c *chatControlCoordinator) configure(ctx context.Context, params map[strin
 	if err != nil {
 		return nil, err
 	}
-	current, err := c.state.AgentReadChat(tabID, chatID, 1, false)
+	current, err := c.providerChats.ReadChat(tabID, chatID, 1, false)
 	if err != nil {
 		return nil, err
 	}
@@ -217,33 +194,21 @@ func (c *chatControlCoordinator) configure(ctx context.Context, params map[strin
 	if err := validateChatCWD(cwd); err != nil {
 		return nil, err
 	}
-	job, running := c.manager.RunningJobForChat(tabID, chatID)
+	jobID, running, err := c.providerChats.Foreground(tabID, chatID)
+	if err != nil {
+		return nil, err
+	}
 	providerChanged := controls.ProviderID != "" && controls.ProviderID != fieldString(current, "providerId")
 	cwdChanged := cwd != fieldString(current, "cwd")
 	if running && (providerChanged || cwdChanged) {
-		return nil, fmt.Errorf("cannot change provider or cwd while job %s is running", fieldString(job, "id"))
+		return nil, fmt.Errorf("cannot change provider or cwd while job %s is running", jobID)
 	}
-	if err := c.state.AgentConfigureChat(tabID, chatID, cwd, controls.ProviderID, controls.ModelID, controls.BaseModel, controls.Effort, controls.ModeID); err != nil {
+	operationID := providercontract.NormalizeOperationID(fieldString(params, "operation_id"))
+	if operationID == "" {
+		return nil, errors.New("chat.configure requires a stable operation_id")
+	}
+	if err := c.providerChats.ConfigureChat(ctx, tabID, chatID, cwd, controls, operationID); err != nil {
 		return nil, err
-	}
-	for _, live := range c.manager.LiveSessions() {
-		if live.TabID != tabID || live.ChatID != chatID {
-			continue
-		}
-		if providerChanged || cwdChanged {
-			c.manager.CloseSession(context.Background(), live.Info.SessionID)
-			continue
-		}
-		if controls.ModelID != "" && stringPointerValue(live.Info.CurrentModelID) != controls.ModelID {
-			if _, setErr := c.manager.SetModel(ctx, live.Info.SessionID, controls.ModelID); setErr != nil {
-				return nil, setErr
-			}
-		}
-		if controls.ModeID != "" && stringPointerValue(live.Info.CurrentModeID) != controls.ModeID {
-			if _, setErr := c.manager.SetMode(ctx, live.Info.SessionID, controls.ModeID); setErr != nil {
-				return nil, setErr
-			}
-		}
 	}
 	c.refresh(tabID, chatID, false)
 	return map[string]any{
@@ -258,7 +223,11 @@ func (c *chatControlCoordinator) focus(params map[string]any) (map[string]any, e
 	if err != nil {
 		return nil, err
 	}
-	if err := c.state.AgentFocusChat(tabID, chatID); err != nil {
+	operationID := providercontract.NormalizeOperationID(fieldString(params, "operation_id"))
+	if operationID == "" {
+		return nil, errors.New("chat.focus requires a stable operation_id")
+	}
+	if err := c.providerChats.FocusChat(tabID, chatID, operationID); err != nil {
 		return nil, err
 	}
 	c.refresh(tabID, chatID, true)
@@ -271,14 +240,23 @@ func (c *chatControlCoordinator) delete(params map[string]any) (map[string]any, 
 		return nil, err
 	}
 	force, _ := boolField(params, "force")
-	if job, running := c.manager.RunningJobForChat(tabID, chatID); running {
+	if jobID, running, foregroundErr := c.providerChats.Foreground(tabID, chatID); foregroundErr != nil {
+		return nil, foregroundErr
+	} else if running {
 		if !force {
-			return nil, fmt.Errorf("chat has running job %s; pass force only when cancellation and deletion are intended", fieldString(job, "id"))
+			return nil, fmt.Errorf("chat has running job %s; pass force only when cancellation and deletion are intended", jobID)
 		}
-		c.manager.CancelJob(fieldString(job, "id"))
+		if jobID == "" {
+			return nil, errors.New("chat foreground turn is not yet cancellable")
+		}
+		if _, handled, cancelErr := c.providerChats.Cancel(context.Background(), jobID); cancelErr != nil || !handled {
+			if cancelErr != nil {
+				return nil, cancelErr
+			}
+			return nil, errors.New("running chat cancellation is not actor-owned")
+		}
 	}
-	c.manager.ForgetChat(context.Background(), tabID, chatID)
-	if err := c.state.AgentDeleteChat(tabID, chatID); err != nil {
+	if err := c.providerChats.DeleteChat(context.Background(), tabID, chatID, providercontract.NormalizeOperationID(fieldString(params, "operation_id")), force); err != nil {
 		return nil, err
 	}
 	c.refresh(tabID, chatID, false)
@@ -297,39 +275,22 @@ func (c *chatControlCoordinator) send(params map[string]any) (map[string]any, er
 	if delivery != "auto" && delivery != "queue" && delivery != "steer" {
 		return nil, errors.New("delivery must be auto, queue, or steer")
 	}
-	_, running := c.manager.RunningJobForChat(tabID, chatID)
-	if delivery == "steer" && !running {
-		return nil, errors.New("cannot steer an idle chat; use auto or queue")
-	}
-	receipt, err := c.state.AgentEnqueueChat(tabID, chatID, fieldString(params, "message"), delivery)
+	_, running, err := c.providerChats.Foreground(tabID, chatID)
 	if err != nil {
 		return nil, err
 	}
-	queueID := fieldString(receipt, "queueId")
-	c.refresh(tabID, chatID, false)
-	if delivery == "steer" {
-		live, ok := c.liveSession(tabID, chatID)
-		if !ok {
-			c.scheduleDrain(tabID, chatID)
-			return nil, errors.New("running chat has no live ACP session; the message remains durably queued")
-		}
-		result := c.manager.Steer(live.Info.SessionID, fieldString(params, "message"), nil, "")
-		strategy := fieldString(result, "strategy")
-		if result["live"] == true || strategy == "uncertain" {
-			if err := c.state.AgentCommitLiveSteer(tabID, chatID, queueID); err != nil {
-				return nil, err
-			}
-			receipt["delivery"] = strategy
-			receipt["acceptedLive"] = result["live"] == true
-			delete(receipt, "position")
-			c.refresh(tabID, chatID, false)
-			return receipt, nil
-		}
-		receipt["delivery"] = strategy
-		receipt["interrupted"] = result["interrupted"]
-		receipt["steerError"] = result["error"]
+	if delivery == "steer" && !running {
+		return nil, errors.New("cannot steer an idle chat; use auto or queue")
 	}
-	c.scheduleDrain(tabID, chatID)
+	receipt, err := c.providerChats.QueueAgentMessage(
+		context.Background(), tabID, chatID,
+		providercontract.NormalizeOperationID(fieldString(params, "operation_id")),
+		fieldString(params, "message"), delivery,
+	)
+	if err != nil {
+		return nil, err
+	}
+	c.refresh(tabID, chatID, false)
 	return receipt, nil
 }
 
@@ -338,12 +299,24 @@ func (c *chatControlCoordinator) cancel(params map[string]any) (map[string]any, 
 	if err != nil {
 		return nil, err
 	}
-	job, running := c.manager.RunningJobForChat(tabID, chatID)
+	jobID, running, err := c.providerChats.Foreground(tabID, chatID)
+	if err != nil {
+		return nil, err
+	}
 	if !running {
 		return map[string]any{"ok": false, "tabId": tabID, "chatId": chatID, "cancelled": false, "reason": "idle"}, nil
 	}
-	jobID := fieldString(job, "id")
-	ok := c.manager.CancelJob(jobID)
+	if jobID == "" {
+		return nil, errors.New("chat foreground turn is not yet cancellable")
+	}
+	result, handled, cancelErr := c.providerChats.Cancel(context.Background(), jobID)
+	if cancelErr != nil {
+		return nil, cancelErr
+	}
+	if !handled {
+		return nil, errors.New("running chat cancellation is not actor-owned")
+	}
+	ok := result.Cancelled
 	return map[string]any{"ok": ok, "tabId": tabID, "chatId": chatID, "jobId": jobID, "cancelled": ok}, nil
 }
 
@@ -351,233 +324,14 @@ func (c *chatControlCoordinator) refresh(tabID, chatID string, focus bool) {
 	if c == nil || c.refreshes == nil {
 		return
 	}
-	c.refreshes.Request(tabID, chatID, c.state.RefreshGeneration(), refreshImmediate)
-}
-
-func (c *chatControlCoordinator) refreshBackground(tabID, chatID string) {
-	if c == nil || c.refreshes == nil {
+	if c.providerChats == nil {
 		return
 	}
-	c.refreshes.Request(tabID, chatID, c.state.RefreshGeneration(), refreshBackground)
-}
-
-func (c *chatControlCoordinator) liveSession(tabID, chatID string) (acp.LiveSession, bool) {
-	for _, live := range c.manager.LiveSessions() {
-		if live.TabID == tabID && live.ChatID == chatID {
-			return live, true
-		}
-	}
-	return acp.LiveSession{}, false
-}
-
-func (c *chatControlCoordinator) scheduleDrain(tabID, chatID string) {
-	key := tabID + "\x00" + chatID
-	c.mu.Lock()
-	if c.draining[key] {
-		// A queue mutation can land while this chat's worker is blocked in a
-		// provider startup. Remember that wake so the worker's eventual exit
-		// cannot strand a newly deliverable row with no drainer.
-		c.drainPending[key] = true
-		c.mu.Unlock()
-		return
-	}
-	c.draining[key] = true
-	c.mu.Unlock()
-	go func() {
-		defer func() {
-			c.mu.Lock()
-			retry := c.drainPending[key]
-			delete(c.drainPending, key)
-			delete(c.draining, key)
-			c.mu.Unlock()
-			if retry {
-				c.scheduleDrain(tabID, chatID)
-			}
-		}()
-		if _, running := c.manager.RunningJobForChat(tabID, chatID); running {
-			return
-		}
-		item, agentFirst, hasQueue := c.state.AgentQueueHead(tabID, chatID)
-		if !hasQueue || item[queueParkedField] == true {
-			return
-		}
-		if !agentFirst {
-			var err error
-			item, agentFirst, hasQueue, err = c.state.AgentAdoptRendererQueueHead(
-				tabID, chatID, time.Now().UTC(), c.rendererAdoptionAge,
-			)
-			if err != nil {
-				c.refreshBackground(tabID, chatID)
-				return
-			}
-			if !hasQueue || item[queueParkedField] == true {
-				return
-			}
-			if !agentFirst {
-				c.scheduleRendererHeadRecheck(tabID, chatID)
-				return
-			}
-		}
-
-		timeout := c.queueStartTimeout
-		if timeout <= 0 {
-			timeout = agentQueueStartTimeout
-		}
-		retryBase := c.queueRetryBase
-		if retryBase <= 0 {
-			retryBase = agentQueueRetryBase
-		}
-		var startErr error
-		for attempt := 0; attempt < agentQueueStartAttemptLimit; attempt++ {
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			startErr = c.startQueuedTurnForDrain(ctx, tabID, chatID, item)
-			cancel()
-			if startErr == nil {
-				c.refreshBackground(tabID, chatID)
-				return
-			}
-			if errors.Is(startErr, acp.ErrChatBusy) {
-				return
-			}
-			if attempt+1 < agentQueueStartAttemptLimit {
-				time.Sleep(retryBase << attempt)
-			}
-		}
-		if err := c.state.AgentParkQueuedTurn(tabID, chatID, fieldString(item, "id"), startErr.Error()); err != nil {
-			c.refreshBackground(tabID, chatID)
-			return
-		}
-		c.refreshBackground(tabID, chatID)
-	}()
-}
-
-func (c *chatControlCoordinator) wakeDrain(tabID, chatID string) {
-	key := tabID + "\x00" + chatID
-	c.mu.Lock()
-	if timer := c.drainTimers[key]; timer != nil {
-		timer.Stop()
-		delete(c.drainTimers, key)
-	}
-	delete(c.drainBackoff, key)
-	c.mu.Unlock()
-	c.scheduleDrain(tabID, chatID)
-}
-
-func (c *chatControlCoordinator) scheduleRendererHeadRecheck(tabID, chatID string) {
-	key := tabID + "\x00" + chatID
-	c.mu.Lock()
-	if c.drainTimers[key] != nil {
-		c.mu.Unlock()
-		return
-	}
-	delay := c.drainBackoff[key]
-	if delay <= 0 {
-		delay = c.rendererRecheckBase
-	}
-	if delay <= 0 {
-		delay = rendererQueueRecheckBase
-	}
-	maxDelay := c.rendererRecheckMax
-	if maxDelay <= 0 {
-		maxDelay = rendererQueueRecheckMax
-	}
-	next := delay * 2
-	if next > maxDelay {
-		next = maxDelay
-	}
-	c.drainBackoff[key] = next
-	c.drainTimers[key] = time.AfterFunc(delay, func() {
-		c.mu.Lock()
-		delete(c.drainTimers, key)
-		c.mu.Unlock()
-		c.scheduleDrain(tabID, chatID)
-	})
-	c.mu.Unlock()
-}
-
-func (c *chatControlCoordinator) startQueuedTurnForDrain(ctx context.Context, tabID, chatID string, item map[string]any) error {
-	if c.startQueuedTurnOverride != nil {
-		return c.startQueuedTurnOverride(ctx, tabID, chatID, item)
-	}
-	return c.startQueuedTurn(ctx, tabID, chatID, item)
-}
-
-func (c *chatControlCoordinator) startQueuedTurn(ctx context.Context, tabID, chatID string, item map[string]any) error {
-	chat, err := c.state.AgentReadChat(tabID, chatID, 1, false)
-	if err != nil {
-		return err
-	}
-	desiredProvider := fieldString(chat, "providerId")
-	desiredModel := hydratableStoredModelID(fieldString(chat, "modelId"))
-	desiredMode := fieldString(chat, "modeId")
-	live, ok := c.liveSession(tabID, chatID)
+	state, ok := c.providerChats.Snapshot(chatID)
 	if !ok {
-		info, newErr := c.manager.NewSession(ctx, acp.SessionOptions{
-			TabID: tabID, ChatID: chatID, CWD: fieldString(chat, "cwd"),
-			ProviderID: desiredProvider, ModelID: desiredModel, ModeID: desiredMode,
-		})
-		if newErr != nil {
-			return newErr
-		}
-		live = acp.LiveSession{TabID: tabID, ChatID: chatID, Info: info}
+		return
 	}
-	if desiredProvider == "" {
-		desiredProvider = live.Info.ProviderID
-	}
-	// Same-provider controls can be applied before the turn. Cross-provider
-	// selection is intentionally left to StartJob's tested serial handover path.
-	if desiredProvider == live.Info.ProviderID {
-		if desiredModel != "" && desiredModel != stringPointerValue(live.Info.CurrentModelID) {
-			if _, err := c.manager.SetModel(ctx, live.Info.SessionID, desiredModel); err != nil {
-				return err
-			}
-		}
-		if desiredMode != "" && desiredMode != stringPointerValue(live.Info.CurrentModeID) {
-			if _, err := c.manager.SetMode(ctx, live.Info.SessionID, desiredMode); err != nil {
-				return err
-			}
-		}
-	}
-	queuedOpts := map[string]any{
-		"kind": "app-chat", "title": fieldString(chat, "title"), "tabId": tabID, "chatId": chatID,
-		"sessionId": live.Info.SessionID, "cwd": fieldString(chat, "cwd"), "providerId": desiredProvider,
-		"modelId": desiredModel, "modeId": desiredMode, "permissionMode": desiredMode,
-		"prompt": fieldString(item, "text"), "images": cloneJSON(item["images"]), "queueId": fieldString(item, "id"),
-	}
-	jobOpts := parseJobStartOptions(queuedOpts)
-	// A queued row records who put it there: "host" is the user's own message,
-	// while "agent" covers agent-sent text (session_store.go:2712, :2804).
-	// Only the former is a new request. Anything unrecognised is treated as a
-	// resumption, which can under-count obligations but can never invent a
-	// finished one.
-	humanAuthored := fieldString(item, "source") == "host"
-	jobOpts.HumanAuthored = humanAuthored
-	prepared := false
-	jobOpts.BeforeStart = func(target *acp.JobStartOptions) error {
-		opts, prepareErr := c.state.AgentPrepareQueuedTurn(tabID, chatID, fieldString(item, "id"), live.Info.SessionID)
-		if prepareErr != nil {
-			return prepareErr
-		}
-		if desiredProvider != "" {
-			opts["providerId"] = desiredProvider
-		}
-		resolved := parseJobStartOptions(opts)
-		resolved.BeforeStart = nil
-		// AgentPrepareQueuedTurn rebuilds the options wholesale, so the origin
-		// has to be re-applied or every drained turn would look like a wake.
-		resolved.HumanAuthored = humanAuthored
-		*target = resolved
-		prepared = true
-		return nil
-	}
-	// The drain context bounds only cold session/control convergence. A queued
-	// turn that has been admitted owns its normal independent lifetime; canceling
-	// the startup timer after StartJob returns must not cancel the model turn.
-	_, err = c.manager.StartJob(context.Background(), jobOpts)
-	if err != nil && prepared {
-		c.state.FailPreparedTurn(tabID, "Error: "+err.Error())
-	}
-	return err
+	c.refreshes.Request(tabID, chatID, state.Revision, refreshImmediate)
 }
 
 func (c *chatControlCoordinator) resolveControls(ctx context.Context, current, params map[string]any) (resolvedChatControls, error) {

@@ -2,7 +2,7 @@
 // change so a reload paints instantly (before state:get / session:get resolves),
 // then reconciles with the authoritative server snapshot. Same shape both sides.
 
-import type { Panes, RightPane, ThemePref, Density, Workspace, QueuedMsg, MessageImage, SteerAnchor, PlanEntry } from './types';
+import type { Panes, RightPane, ThemePref, Density, Workspace, QueuedMsg, MessageImage, SteerAnchor, PlanEntry, PermissionState } from './types';
 import type { AcpSessionInfo } from '../wire/types';
 import type { ModelControlMemory } from '../model-controls';
 import type { ContextUsageByProvider, ContextUsageSnapshot } from '../context-usage';
@@ -19,11 +19,15 @@ export interface MirrorMsg {
   turnRootId?: string;
   turnTerminal?: boolean;
   jobId?: string;
+  permission?: PermissionState;
+  turnStartedAt?: number;
+  interrupted?: boolean;
+  retryPrompt?: string;
   images?: MessageImage[];
   events: unknown[];
 }
 export interface MirrorChat {
-  id: string; chatId?: string; title: string; titleLocked: boolean; group: string | null; cwd: string | null;
+  id: string; chatId?: string; actorRevision?: number; title: string; titleLocked: boolean; group: string | null; cwd: string | null;
   currentModelId: string | null; currentModeId: string | null; draft: string; unread?: boolean;
   settled?: 'settled' | 'active';
   pane?: RightPane | null;      // per-chat right-column occupant (rail/browser/closed)
@@ -34,6 +38,7 @@ export interface MirrorChat {
   contextUsageByProvider?: ContextUsageByProvider;
   usage?: ContextUsageSnapshot; // legacy single-provider snapshot; migrated on load
   workspaceRevision?: number;
+  presentationRevision?: number;
   // Daemon-issued CAS token for source:"agent" queue rows. It lets an exact
   // current renderer remove one deliberately while preventing an older save
   // request from resurrecting a row the daemon already consumed.
@@ -53,13 +58,11 @@ export interface MirrorChat {
   messages: MirrorMsg[];
 }
 export interface Mirror {
-  v: number; activeId: string | null; seq: number;
+  v: number; activeId: string | null; seq: number; globalRevision?: number;
+  _workassGlobalOperationId?: string;
   // Capability-gated transient marker. The Go daemon strips this before disk;
   // older hosts never receive a lean snapshot.
   _workassSave?: 'lean-payload-v2';
-  // Capability-gated and transient: only exact ids explicitly closed by the
-  // user may be removed from the daemon-owned session snapshot.
-  _workassDeletedChatIds?: string[];
   workspaces?: Workspace[];
   collapsedWorkspaces?: string[];
   removedWorkspaces?: string[];
@@ -84,7 +87,7 @@ export function leanSessionEvents(events: readonly unknown[]): unknown[] {
   for (const raw of events) {
     if (!raw || typeof raw !== 'object') continue;
     const event = raw as Record<string, unknown>;
-    if (event.kind === 'thinking' || event.kind === 'bgproc') continue;
+    if (event.kind === 'thinking') continue;
     if (event.kind !== 'tool') {
       out.push(raw);
       continue;
@@ -197,7 +200,6 @@ export function skeletonEvents(events: readonly unknown[]): unknown[] {
   for (const raw of events.slice(-SKELETON_EVENTS)) {
     if (!raw || typeof raw !== 'object') continue;
     const event = raw as Record<string, unknown>;
-    if (event.kind === 'bgproc') continue; // transient, never persisted
     if (event.kind === 'tool') {
       const lean: Record<string, unknown> = {
         kind: 'tool', input: null, output: null,
@@ -223,11 +225,9 @@ export function skeletonEvents(events: readonly unknown[]): unknown[] {
 // localStorage budget. The local mirror still paints text instantly; images
 // reappear when session:get hydrates from the daemon a moment later.
 export function localMirror(m: Mirror): Mirror {
-  const {
-    _workassSave: _saveMode,
-    _workassDeletedChatIds: _deletedChatIds,
-    ...durable
-  } = m;
+  const durable: Mirror & Record<string, unknown> = { ...m };
+  delete durable._workassSave;
+  delete durable._workassDeletedChatIds;
   return {
     ...durable,
     chats: m.chats.map((chat) => ({

@@ -570,7 +570,7 @@ func (m *Manager) RefreshProviderPlanUsage(ctx context.Context, providerID strin
 		m.mu.Unlock()
 		return errors.New("ACP manager is resetting")
 	}
-	if m.isProductionRuntime() && providerID == "mock" {
+	if m.isProductionRuntime() && providerIsFixture(providerID) {
 		m.mu.Unlock()
 		return errors.New("development fixture provider is unavailable in production")
 	}
@@ -578,7 +578,11 @@ func (m *Manager) RefreshProviderPlanUsage(ctx context.Context, providerID strin
 		m.mu.Unlock()
 		return err
 	}
-	providerOptions := m.optionsForProviderLocked(providerID)
+	providerOptions, err := m.optionsForProviderLocked(providerID)
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
 	m.bridgeSeq++
 	bridgeKey := fmt.Sprintf("plan-usage:%s:%d", providerID, m.bridgeSeq)
 	m.mu.Unlock()
@@ -706,28 +710,11 @@ func (m *Manager) stopPlanUsageRefreshes() {
 }
 
 func (b *Bridge) supportsNativePlanUsage() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	switch steeringProviderFamily(b.providerID) {
-	case "codex":
-		return boolMapField(b.agentMeta, "workassCodexRateLimitsRequest") ||
-			boolMapField(b.agentCaps, "workassCodexRateLimitsRequest")
-	case "claude":
-		return boolMapField(b.agentMeta, "workassClaudeUsageRequest") ||
-			boolMapField(b.agentCaps, "workassClaudeUsageRequest")
-	default:
-		return false
-	}
+	return providerAdapterForID(b.ProviderID()).planUsage.Supported(b)
 }
 
-func (b *Bridge) supportsCodexRateLimitReset() bool {
-	if steeringProviderFamily(b.ProviderID()) != "codex" {
-		return false
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return boolMapField(b.agentMeta, "workassCodexRateLimitResetRequest") ||
-		boolMapField(b.agentCaps, "workassCodexRateLimitResetRequest")
+func (b *Bridge) supportsPlanUsageReset() bool {
+	return providerAdapterForID(b.ProviderID()).planUsage.SupportsReset(b)
 }
 
 // ConsumeRateLimitResetCredit spends one provider-issued Codex reset credit.
@@ -739,9 +726,6 @@ func (m *Manager) ConsumeRateLimitResetCredit(ctx context.Context, providerID, s
 	sessionID = strings.TrimSpace(sessionID)
 	idempotencyKey = strings.TrimSpace(idempotencyKey)
 	creditID = strings.TrimSpace(creditID)
-	if providerID != "codex" {
-		return nil, errors.New("earned rate-limit resets require the Codex provider")
-	}
 	if idempotencyKey == "" || len(idempotencyKey) > 200 {
 		return nil, errors.New("a bounded idempotency key is required")
 	}
@@ -752,7 +736,7 @@ func (m *Manager) ConsumeRateLimitResetCredit(ctx context.Context, providerID, s
 	if sessionID != "" {
 		b = m.bridgeForSession(sessionID, SessionOptions{SessionID: sessionID, ProviderID: providerID})
 	}
-	if b == nil || !b.supportsCodexRateLimitReset() {
+	if b == nil || !b.supportsPlanUsageReset() {
 		m.mu.Lock()
 		candidates := make([]*Bridge, 0, len(m.bridges))
 		for _, candidate := range m.bridges {
@@ -760,7 +744,9 @@ func (m *Manager) ConsumeRateLimitResetCredit(ctx context.Context, providerID, s
 		}
 		m.mu.Unlock()
 		for _, candidate := range candidates {
-			if candidate != nil && !candidate.Closed() && !candidate.Hibernated() && candidate.supportsCodexRateLimitReset() {
+			if candidate != nil &&
+				normalizeProviderID(candidate.ProviderID()) == providerID &&
+				!candidate.Closed() && !candidate.Hibernated() && candidate.supportsPlanUsageReset() {
 				b = candidate
 				break
 			}
@@ -769,23 +755,16 @@ func (m *Manager) ConsumeRateLimitResetCredit(ctx context.Context, providerID, s
 	if b == nil {
 		return nil, errors.New("no initialized Codex account bridge is available")
 	}
-	if !b.supportsCodexRateLimitReset() {
+	if !b.supportsPlanUsageReset() {
 		return nil, errors.New("this provider does not expose earned rate-limit resets")
 	}
-	params := map[string]any{"idempotencyKey": idempotencyKey}
-	if creditID != "" {
-		params["creditId"] = creditID
-	}
-	result, err := b.request(ctx, "_workass/codex/rate-limit-reset/consume", params, planUsageRefreshTimeout)
+	strategy := providerAdapterForID(providerID).planUsage
+	result, capture, err := strategy.ConsumeReset(ctx, b, idempotencyKey, creditID)
 	if err != nil {
 		return nil, err
 	}
-	rateLimits := mapFromAny(result["rateLimits"])
-	if len(rateLimits) == 0 {
-		return nil, errors.New("Codex reset response omitted the refreshed rate limits")
-	}
 	snapshot, ok := m.recordPlanUsageCapture(sessionID, providerID, map[string]any{
-		"_meta": map[string]any{"workass.codex/rateLimits": rateLimits},
+		"_meta": map[string]any{capture.metaKey: capture.result},
 	})
 	if !ok {
 		return nil, errors.New("Codex reset response contained no usable rate-limit snapshot")
@@ -796,26 +775,16 @@ func (m *Manager) ConsumeRateLimitResetCredit(ctx context.Context, providerID, s
 
 func (b *Bridge) refreshNativePlanUsage(ctx context.Context, sessionID string) error {
 	providerID := b.ProviderID()
-	var (
-		result map[string]any
-		err    error
-		key    string
-	)
-	switch steeringProviderFamily(providerID) {
-	case "codex":
-		result, err = b.request(ctx, "_workass/codex/rate-limits", map[string]any{}, planUsageRefreshTimeout)
-		key = "workass.codex/rateLimits"
-	case "claude":
-		result, err = b.request(ctx, "_workass/claude/usage", map[string]any{"sessionId": sessionID}, planUsageRefreshTimeout)
-		key = "workass.claude/usage"
-	default:
+	strategy := providerAdapterForID(providerID).planUsage
+	if !strategy.Supported(b) {
 		return nil
 	}
+	capture, err := strategy.Refresh(ctx, b, sessionID)
 	if err != nil {
 		return err
 	}
 	b.manager.recordPlanUsageCapture(sessionID, providerID, map[string]any{
-		"_meta": map[string]any{key: result},
+		"_meta": map[string]any{capture.metaKey: capture.result},
 	})
 	return nil
 }

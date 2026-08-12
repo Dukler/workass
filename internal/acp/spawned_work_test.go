@@ -117,7 +117,7 @@ func TestClaudeSteerCancelLeavesSpawnedWorkRunning(t *testing.T) {
 func TestProductionMockProviderCannotInjectSpawnedWork(t *testing.T) {
 	manager := NewManager(Options{StateDir: t.TempDir(), RuntimeProfile: "prod", SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
-	if manager.acceptsClaudeSpawnedWorkProvider("mock") {
+	if manager.acceptsNativeSpawnedWorkProvider("mock") {
 		t.Fatal("production accepted mock spawned-work provider")
 	}
 	manager.observeSpawnToolEvent(spawnToolObservation{
@@ -174,6 +174,11 @@ func TestSpawnedWorkPassivelyTracksBackgroundBashAndWritesReceipt(t *testing.T) 
 			}
 		},
 	})
+	if err := manager.InstallSpawnedWorkObserver(func(string, string, []SpawnedWorkItem) (SpawnedWorkActorProjection, error) {
+		return SpawnedWorkActorProjection{ActorRevision: 1}, nil
+	}); err != nil {
+		t.Fatalf("install spawned-work actor fixture: %v", err)
+	}
 
 	manager.observeSpawnToolEvent(spawnToolObservation{
 		SessionID: "session-1", TabID: "tab-1", ChatID: "chat-1", ProviderID: "claude", ToolCallID: "tool-1",

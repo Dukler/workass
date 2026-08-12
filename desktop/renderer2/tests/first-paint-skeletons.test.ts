@@ -14,7 +14,6 @@ function mirrorWith(activeId: string): Mirror {
       subagentId: 'sub-1', subagentLabel: 'review-lane', subagentProvider: 'gpt', subagentModel: 'GPT-5.6-Terra-high',
     },
     { kind: 'plan', key: 'plan-1', at: 20, entries: [{ status: 'completed', content: 'step one' }] },
-    { kind: 'bgproc', key: 'bg-1', at: 30, procId: 'p1', label: 'engine', startedAt: 'now', status: 'running' },
   ];
   const message = (id: string) => ({
     id, role: 'assistant' as const, content: `body ${id}`, status: 'done' as const, at: null,
@@ -58,7 +57,7 @@ test('skeletons keep collapsed-line text and keys, never payloads', () => {
   const source = mirrorWith('tab-active').chats[0].messages[13].events;
   const lean = skeletonEvents(source) as Array<Record<string, unknown>>;
   const kinds = lean.map((event) => event.kind);
-  assert.deepEqual(kinds, ['thinking', 'tool', 'plan'], 'bgproc is transient and never persisted');
+  assert.deepEqual(kinds, ['thinking', 'tool', 'plan']);
 
   const thinking = lean[0];
   assert.equal(typeof thinking.text, 'string');

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"workass/internal/agentserver"
@@ -52,10 +53,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return nil
 	}
 	server, err := agentserver.New(agentserver.Options{
-		Client:       client,
-		ClientConfig: cfg,
-		Stdout:       stdout,
-		Stderr:       stderr,
+		Client:           client,
+		ClientConfig:     cfg,
+		Stdout:           stdout,
+		Stderr:           stderr,
+		SessionStorePath: strings.TrimSpace(os.Getenv("WORKASS_AGENT_SESSION_STORE")),
 	})
 	if err != nil {
 		return err

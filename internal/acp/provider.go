@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	providercontract "workass/internal/provider"
 )
 
 const (
@@ -126,39 +128,12 @@ func (p cliProvider) ResolveExecutable(cfg ProviderConfig) (string, error) {
 }
 
 func providerForID(id string) (Provider, bool) {
-	switch normalizeProviderID(id) {
-	case "devin":
-		return cliProvider{
-			id:             "devin",
-			defaultCommand: "devin",
-			pathEnv:        []string{"WORKASS_DEVIN", "ASSISTANT_DEVIN"},
-			pathNames:      []string{"devin.exe", "devin"},
-			knownPaths:     devinKnownPaths,
-		}, true
-	case "qwen":
-		return cliProvider{
-			id:             "qwen",
-			defaultCommand: "qwen",
-			pathEnv:        []string{"WORKASS_QWEN", "ASSISTANT_QWEN"},
-			pathNames:      []string{"qwen.cmd", "qwen.exe", "qwen"},
-		}, true
-	case "claude":
-		return cliProvider{
-			id:             "claude",
-			defaultCommand: "claude",
-			pathEnv:        []string{"WORKASS_CLAUDE_CODE"},
-			pathNames:      []string{"claude", "claude.exe", "claude.cmd"},
-		}, true
-	case "codex":
-		return cliProvider{
-			id:             "codex",
-			defaultCommand: "codex",
-			pathEnv:        []string{"WORKASS_CODEX"},
-			pathNames:      []string{"codex", "codex.exe", "codex.cmd"},
-		}, true
-	default:
+	registration, ok := providerRegistrationForID(id)
+	if !ok || registration.Discovery == nil {
 		return nil, false
 	}
+	provider := *registration.Discovery
+	return provider, true
 }
 
 func isTransientProviderShim(path string) bool {
@@ -241,17 +216,19 @@ func resolveProviderExecutablePath(command, label string) (string, error) {
 // BuiltInProviderConfigs returns the daemon's default ACP registry. Only the
 // deterministic mock is enabled by default for local daemon development.
 func BuiltInProviderConfigs(rootDir string) []ProviderConfig {
-	mockPath := filepath.Join("desktop", "acp", "mock-server.mjs")
-	return []ProviderConfig{
-		{ID: "mock", Name: "Workass Mock ACP", Command: "node", Args: []string{mockPath}, Enabled: fileExists(filepath.Join(rootDir, mockPath)), Badge: "dev", CWD: rootDir},
-		{ID: "devin", Name: "Devin ACP", Command: "devin", Args: []string{"acp"}, Enabled: false, Badge: "agent", CWD: rootDir},
-		{ID: "qwen", Name: "Qwen Code ACP", Command: "qwen", Args: []string{"--acp"}, Enabled: false, Badge: "agent", CWD: rootDir},
-		{ID: "claude", Name: "Claude Code", Command: "claude", Args: []string{}, Enabled: false, Badge: "native", CWD: rootDir},
-		{ID: "codex", Name: "Codex", Command: "codex", Args: []string{}, Enabled: false, Badge: "native", CWD: rootDir},
-		{ID: localLMStudioProviderID, Name: "LM Studio (local)", Command: "workass-agent", Args: []string{}, Enabled: false, Badge: "native", CWD: rootDir},
-		{ID: localOllamaProviderID, Name: "Ollama (local)", Command: "workass-agent", Args: []string{}, Enabled: false, Badge: "native", CWD: rootDir},
-		{ID: "custom", Name: "Custom ACP", Args: []string{}, Enabled: false, Badge: "custom", CWD: rootDir},
+	configs := make([]ProviderConfig, 0, len(providerRegistrationOrder))
+	for _, id := range providerRegistrationOrder {
+		registration, ok := providerRegistrationForID(id)
+		if !ok {
+			continue
+		}
+		config := builtInProviderConfig(registration, rootDir)
+		if registration.FixtureOnly {
+			config.Args = []string{filepath.Join("desktop", "acp", "mock-server.mjs")}
+		}
+		configs = append(configs, config)
 	}
+	return configs
 }
 
 func LoadProviderConfigs(filePath, rootDir string) ([]ProviderConfig, error) {
@@ -418,6 +395,7 @@ func mergeProviderConfig(base, raw ProviderConfig, rootDir string) ProviderConfi
 	provider.ResolvedCommand = strings.TrimSpace(raw.ResolvedCommand)
 	provider.LastUpdateNotice = strings.TrimSpace(raw.LastUpdateNotice)
 	provider.DisabledByUser = raw.DisabledByUser
+	provider.NeedsLogin = raw.NeedsLogin
 	provider.enabledSet = raw.enabledSet
 	if cwd := strings.TrimSpace(raw.CWD); cwd != "" {
 		provider.CWD = cwd
@@ -432,7 +410,8 @@ func mergeProviderConfig(base, raw ProviderConfig, rootDir string) ProviderConfi
 func resetDeadFrontierDefaults(provider, base ProviderConfig) ProviderConfig {
 	legacyAdapter := legacyFrontierAdapterCommand(provider.ID, provider.Command) ||
 		legacyFrontierAdapterCommand(provider.ID, provider.ResolvedCommand)
-	if provider.ID == "claude" && strings.TrimSpace(provider.Command) == "claude" && len(provider.Args) == 1 && provider.Args[0] == "--acp" {
+	registration, _ := providerRegistrationForID(provider.ID)
+	if registration.Native != nil && strings.TrimSpace(provider.Command) == registration.DefaultCommand && len(provider.Args) == 1 && provider.Args[0] == "--acp" {
 		legacyAdapter = true
 	}
 	if legacyAdapter {
@@ -443,7 +422,7 @@ func resetDeadFrontierDefaults(provider, base ProviderConfig) ProviderConfig {
 		provider.DetectedAt = ""
 		provider.AutoEnv = nil
 		provider.Badge = base.Badge
-		if provider.Name == "Claude Code ACP" || provider.Name == "Codex ACP" || strings.TrimSpace(provider.Name) == "" {
+		if strings.HasSuffix(strings.TrimSpace(provider.Name), " ACP") || strings.TrimSpace(provider.Name) == "" {
 			provider.Name = base.Name
 			provider.Label = base.Name
 		}
@@ -455,14 +434,16 @@ func legacyFrontierAdapterCommand(providerID, command string) bool {
 	base := strings.ToLower(filepath.Base(strings.TrimSpace(command)))
 	base = strings.TrimSuffix(base, ".exe")
 	base = strings.TrimSuffix(base, ".cmd")
-	switch normalizeProviderID(providerID) {
-	case "claude":
-		return base == "claude-agent-acp" || base == "claude-code-acp"
-	case "codex":
-		return base == "codex-acp"
-	default:
+	registration, ok := providerRegistrationForID(providerID)
+	if !ok {
 		return false
 	}
+	for _, legacy := range registration.LegacyNames {
+		if base == legacy {
+			return true
+		}
+	}
+	return false
 }
 
 func (o Options) withProviderDefaults() Options {
@@ -534,24 +515,7 @@ func normalizeProviderConfig(provider ProviderConfig, rootDir, fallbackID string
 }
 
 func normalizeProviderID(raw string) string {
-	raw = strings.ToLower(strings.TrimSpace(raw))
-	if raw == "" {
-		return ""
-	}
-	var b strings.Builder
-	for _, r := range raw {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '_' || r == '-':
-			b.WriteRune(r)
-		case r == ' ' || r == '.' || r == '/':
-			b.WriteByte('-')
-		}
-	}
-	return strings.Trim(b.String(), "-_")
+	return string(providercontract.NormalizeID(raw))
 }
 
 func copyStringMap(in map[string]string) map[string]string {
@@ -629,7 +593,7 @@ func providerFromSlice(providers []ProviderConfig, id string) (ProviderConfig, b
 
 func defaultProviderID(providers []ProviderConfig) string {
 	for _, provider := range providers {
-		if provider.Enabled && provider.ID == "mock" {
+		if provider.Enabled && providerIsFixture(provider.ID) {
 			return provider.ID
 		}
 	}
@@ -641,7 +605,7 @@ func defaultProviderID(providers []ProviderConfig) string {
 	if len(providers) > 0 {
 		return providers[0].ID
 	}
-	return "mock"
+	return defaultFixtureProviderID()
 }
 
 func (m *Manager) initProviders(opts Options) {
@@ -650,7 +614,13 @@ func (m *Manager) initProviders(opts Options) {
 	for _, provider := range opts.Providers {
 		provider = normalizeProviderConfig(provider, opts.RootDir, provider.ID)
 		status := providerStatusInactive
-		m.providers[provider.ID] = &providerRuntime{Config: provider, Status: status}
+		probed := false
+		if provider.NeedsLogin && !provider.DisabledByUser {
+			provider.Enabled = false
+			status = providerStatusNeedsLogin
+			probed = true
+		}
+		m.providers[provider.ID] = &providerRuntime{Config: provider, Status: status, Probed: probed}
 		m.providerOrder = append(m.providerOrder, provider.ID)
 	}
 	m.defaultProviderID = normalizeProviderID(opts.DefaultProviderID)
@@ -664,7 +634,7 @@ func (m *Manager) initProviders(opts Options) {
 			m.providers[provider.ID] = &providerRuntime{Config: provider, Status: status}
 			m.providerOrder = append(m.providerOrder, provider.ID)
 		}
-		m.defaultProviderID = "mock"
+		m.defaultProviderID = defaultFixtureProviderID()
 	}
 }
 
@@ -679,9 +649,15 @@ func (m *Manager) providerConfigLocked(providerID string) (ProviderConfig, error
 	if id == "" {
 		id = m.defaultProviderID
 	}
+	if _, err := m.ProviderDefinition(id); err != nil {
+		return ProviderConfig{}, fmt.Errorf("provider definition is unavailable: %w", err)
+	}
 	runtime := m.providers[id]
 	if runtime == nil {
 		return ProviderConfig{}, fmt.Errorf("unknown ACP provider: %s", id)
+	}
+	if runtime.Config.NeedsLogin {
+		return ProviderConfig{}, m.providerNeedsLoginError(id)
 	}
 	if !runtime.Config.Enabled {
 		return ProviderConfig{}, fmt.Errorf("ACP provider disabled: %s", id)
@@ -692,33 +668,28 @@ func (m *Manager) providerConfigLocked(providerID string) (ProviderConfig, error
 	return runtime.Config, nil
 }
 
-func (m *Manager) optionsForProviderLocked(providerID string) Options {
+func (m *Manager) optionsForProviderLocked(providerID string) (Options, error) {
 	opts := m.opts
-	if cfg, err := m.providerConfigLocked(providerID); err == nil {
-		opts.Provider = cfg
-		opts.Providers = []ProviderConfig{cfg}
-		opts.DefaultProviderID = cfg.ID
-		return opts
+	cfg, err := m.providerConfigLocked(providerID)
+	if err != nil {
+		return Options{}, err
 	}
-	if cfg, err := m.providerConfigLocked(m.defaultProviderID); err == nil {
-		opts.Provider = cfg
-		opts.Providers = []ProviderConfig{cfg}
-		opts.DefaultProviderID = cfg.ID
-		return opts
-	}
-	return opts
+	opts.Provider = cfg
+	opts.Providers = []ProviderConfig{cfg}
+	opts.DefaultProviderID = cfg.ID
+	return opts, nil
 }
 
 func (m *Manager) resolveSessionProviderLocked(opts SessionOptions) (string, error) {
 	if id := normalizeProviderID(opts.ProviderID); id != "" {
-		if m.isProductionRuntime() && id == "mock" {
+		if m.isProductionRuntime() && providerIsFixture(id) {
 			return "", errors.New("development fixture provider is unavailable in production")
 		}
 		bound := m.boundProviderForChatLocked(opts)
-		if m.isProductionRuntime() && bound == "mock" {
+		if m.isProductionRuntime() && providerIsFixture(bound) {
 			bound = ""
 		}
-		if bound != "" && bound != id {
+		if !opts.ProviderLaneManaged && bound != "" && bound != id {
 			return "", fmt.Errorf("chat is already bound to ACP provider %q", bound)
 		}
 		if _, err := m.providerConfigLocked(id); err != nil {
@@ -727,22 +698,28 @@ func (m *Manager) resolveSessionProviderLocked(opts SessionOptions) (string, err
 		return id, nil
 	}
 	if id := normalizeProviderID(m.sessionProvider[opts.SessionID]); id != "" {
-		if !m.isProductionRuntime() || id != "mock" {
+		if !m.isProductionRuntime() || !providerIsFixture(id) {
+			if _, err := m.providerConfigLocked(id); err != nil {
+				return "", err
+			}
 			return id, nil
 		}
 	}
 	if id := m.boundProviderForChatLocked(opts); id != "" {
-		if !m.isProductionRuntime() || id != "mock" {
+		if !m.isProductionRuntime() || !providerIsFixture(id) {
+			if _, err := m.providerConfigLocked(id); err != nil {
+				return "", err
+			}
 			return id, nil
 		}
 	}
-	if !m.isProductionRuntime() || normalizeProviderID(m.defaultProviderID) != "mock" {
+	if !m.isProductionRuntime() || !providerIsFixture(m.defaultProviderID) {
 		if _, err := m.providerConfigLocked(m.defaultProviderID); err == nil {
 			return m.defaultProviderID, nil
 		}
 	}
 	for _, id := range m.providerOrder {
-		if m.isProductionRuntime() && normalizeProviderID(id) == "mock" {
+		if m.isProductionRuntime() && providerIsFixture(id) {
 			continue
 		}
 		if _, err := m.providerConfigLocked(id); err == nil {
@@ -787,7 +764,10 @@ func chatProviderKeys(opts SessionOptions) []string {
 func (m *Manager) enabledProviderIDsLocked() []string {
 	out := make([]string, 0, len(m.providerOrder))
 	for _, id := range m.providerOrder {
-		if runtime := m.providers[id]; runtime != nil && runtime.Config.Enabled {
+		if runtime := m.providers[id]; runtime != nil && runtime.Config.Enabled && !runtime.Config.NeedsLogin {
+			if _, err := m.ProviderDefinition(id); err != nil {
+				continue
+			}
 			out = append(out, id)
 		}
 	}
@@ -809,7 +789,7 @@ func (m *Manager) ProvidersList() []map[string]any {
 	defer m.mu.Unlock()
 	out := make([]map[string]any, 0, len(m.providerOrder))
 	for _, id := range m.providerOrder {
-		if m.isProductionRuntime() && normalizeProviderID(id) == "mock" {
+		if m.isProductionRuntime() && providerIsFixture(id) {
 			continue
 		}
 		runtime := m.providers[id]
@@ -842,6 +822,9 @@ func (m *Manager) ProvidersList() []map[string]any {
 		if runtime.Config.ResolvedCommand != "" {
 			item["resolvedCommand"] = runtime.Config.ResolvedCommand
 		}
+		if runtime.Config.NeedsLogin {
+			item["needsLogin"] = true
+		}
 		if runtime.Config.Badge != "" {
 			item["badge"] = runtime.Config.Badge
 		}
@@ -859,38 +842,74 @@ func (m *Manager) ProvidersList() []map[string]any {
 	return out
 }
 
-// markProviderNeedsLogin handles authenticated providers whose initialize/catalog
-// handshake succeeds but whose first real prompt reveals that the vendor CLI is
-// logged out. A false "ready" state leaves a dead model in the composer; move it
-// to the spec-defined needs-login state, remove its unusable catalog, and replay
-// the fix hint immediately. Login remains exclusively in the vendor CLI.
-func (m *Manager) markProviderNeedsLogin(ctx context.Context, providerID string, cause error) string {
+// initializePersistedProviderAuthenticationState resolves durable needs-login
+// hints through the registered definition after the registry exists. Runtime
+// code never falls back to provider registration metadata.
+func (m *Manager) initializePersistedProviderAuthenticationState() {
+	for _, id := range m.providerOrder {
+		m.mu.Lock()
+		runtime := m.providers[id]
+		needsLogin := runtime != nil && runtime.Config.NeedsLogin && !runtime.Config.DisabledByUser
+		m.mu.Unlock()
+		if !needsLogin {
+			continue
+		}
+		strategy, err := m.providerAuthenticationStrategy(id)
+		if err != nil {
+			continue
+		}
+		m.mu.Lock()
+		if runtime = m.providers[id]; runtime != nil && runtime.Config.NeedsLogin && !runtime.Config.DisabledByUser {
+			runtime.FixHint = strings.TrimSpace(strategy.LoginHint())
+			runtime.Config.FixHint = runtime.FixHint
+		}
+		m.mu.Unlock()
+	}
+}
+
+// markProviderNeedsLogin applies the one definition-owned authentication
+// policy. A policy lookup error is returned so callers fail closed instead of
+// continuing into retry, replacement, prompt, or recovery behavior.
+func (m *Manager) markProviderNeedsLogin(ctx context.Context, providerID string, cause error) (string, error) {
 	id := normalizeProviderID(providerID)
 	message := ""
 	if cause != nil {
 		message = redactSensitiveText(cause.Error())
 	}
-	if !isLoginProviderID(id) || !isAuthShapedError(message) {
-		return ""
+	strategy, err := m.providerAuthenticationStrategy(id)
+	if err != nil {
+		return "", fmt.Errorf("provider authentication policy is unavailable: %w", err)
 	}
-	hint := providerLoginFixHint(id)
+	if !strategy.IsAuthenticationFailure(cause) {
+		return "", nil
+	}
+	hint := strings.TrimSpace(strategy.LoginHint())
+	if hint == "" {
+		return "", fmt.Errorf("provider authentication policy %q has no external login hint", id)
+	}
 	m.mu.Lock()
 	runtime := m.providers[id]
 	if runtime == nil {
 		m.mu.Unlock()
-		return ""
+		return "", fmt.Errorf("provider authentication policy references unknown provider %q", id)
+	}
+	if runtime.Config.NeedsLogin && runtime.Status == providerStatusNeedsLogin && !runtime.Config.Enabled {
+		m.mu.Unlock()
+		return hint, nil
 	}
 	runtime.Status = providerStatusNeedsLogin
 	runtime.Error = message
 	runtime.FixHint = hint
 	runtime.Config.Enabled = false
 	runtime.Config.DisabledByUser = false
+	runtime.Config.NeedsLogin = true
 	runtime.Config.Detected = true
 	runtime.Config.FixHint = hint
 	runtime.Probed = true
 	runtime.Models = nil
 	runtime.Modes = nil
 	runtime.AgentName = ""
+	m.spareBlocked[id] = true
 	providers := m.providerRecordsLocked()
 	filePath := m.providerConfigFile
 	m.mu.Unlock()
@@ -903,71 +922,19 @@ func (m *Manager) markProviderNeedsLogin(ctx context.Context, providerID string,
 	if m.opts.Logf != nil {
 		m.opts.Logf("provider requires login", map[string]any{"provider": id, "status": providerStatusNeedsLogin})
 	}
-	return hint
+	return hint, nil
 }
 
-// recoverFrontierProviderAfterSuccessfulTurn reverses only transient runtime
-// disablement. A completed prompt is stronger evidence than an earlier
-// session-level auth-shaped error, so it must restore the provider immediately
-// instead of leaving it absent until a daemon restart or manual detection.
-// Devin shares this authenticated-provider recovery path. Explicit user
-// disables remain authoritative.
-func (m *Manager) recoverFrontierProviderAfterSuccessfulTurn(ctx context.Context, b *Bridge) {
-	if b == nil {
-		return
+func providerAuthenticationFailureError(providerID string, cause error, hint string) error {
+	message := redactSensitiveText(errString(cause))
+	if message == "" {
+		message = fmt.Sprintf("ACP provider needs login: %s", normalizeProviderID(providerID))
 	}
-	b.mu.Lock()
-	providerID := normalizeProviderID(b.providerID)
-	models := append([]Model(nil), b.models...)
-	modes := append([]Mode(nil), b.modes...)
-	agentName := b.agentName
-	knownEffortModels := make(map[string]bool, len(b.axisEffortsByModel)+len(b.variantEffortsByModel))
-	for modelID := range b.axisEffortsByModel {
-		knownEffortModels[strings.TrimSpace(modelID)] = true
+	if hint = strings.TrimSpace(hint); hint != "" && !strings.Contains(message, hint) {
+		message += ". " + hint
 	}
-	for modelID := range b.variantEffortsByModel {
-		knownEffortModels[strings.TrimSpace(modelID)] = true
-	}
-	b.mu.Unlock()
-	if !isLoginProviderID(providerID) {
-		return
-	}
-
-	m.mu.Lock()
-	runtime := m.providers[providerID]
-	if runtime == nil || runtime.Config.DisabledByUser ||
-		(runtime.Config.Enabled && runtime.Status == providerStatusReady && runtime.Error == "" && runtime.FixHint == "") {
-		m.mu.Unlock()
-		return
-	}
-	runtime.Config.Enabled = true
-	runtime.Config.DisabledByUser = false
-	runtime.Config.Detected = true
-	runtime.Config.DetectedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	runtime.Config.FixHint = ""
-	runtime.Probed = true
-	runtime.Status = providerStatusReady
-	runtime.Error = ""
-	runtime.FixHint = ""
-	incomingModels := normalizeProviderCatalogModels(providerID, models)
-	runtime.Models = preserveUnknownModelEfforts(runtime.Models, incomingModels, knownEffortModels)
-	runtime.Modes = modes
-	runtime.AgentName = agentName
-	providers := m.providerRecordsLocked()
-	filePath := m.providerConfigFile
-	m.mu.Unlock()
-
-	if err := SaveProviderConfigs(filePath, providers); err != nil && m.opts.Logf != nil {
-		m.opts.Logf("provider recovery persist failed", map[string]any{"provider": providerID, "error": redactSensitiveText(err.Error())})
-	}
-	list := m.ProvidersList()
-	m.emit("providers:list", list)
-	m.EmitCatalog(ctx)
-	if m.opts.Logf != nil {
-		m.opts.Logf("provider recovered after successful turn", map[string]any{"provider": providerID, "status": providerStatusReady})
-	}
+	return &providercontract.Error{Kind: providercontract.ErrorAuthenticationRequired, Message: message}
 }
-
 func (m *Manager) ToggleProvider(ctx context.Context, id string, enabled bool) ([]map[string]any, error) {
 	id = normalizeProviderID(id)
 	if id == "" {
@@ -988,6 +955,7 @@ func (m *Manager) ToggleProvider(ctx context.Context, id string, enabled bool) (
 	runtime.FixHint = ""
 	runtime.LatencyMs = nil
 	if enabled {
+		runtime.Config.NeedsLogin = false
 		runtime.Status = providerStatusInactive
 		runtime.Config.DisabledByUser = false
 	} else {
@@ -1054,6 +1022,7 @@ type providerDetectionResult struct {
 	CLIVersion       *CLIVersion       `json:"cliVersion,omitempty"`
 	Detected         bool              `json:"detected,omitempty"`
 	ExplicitDisabled bool              `json:"explicitDisabled,omitempty"`
+	Terminal         bool              `json:"-"`
 	autoEnv          map[string]string
 	args             []string
 	config           ProviderConfig
@@ -1064,12 +1033,19 @@ type providerDetectionStatusError struct {
 	message string
 }
 
+type providerDetectionIntent uint8
+
+const (
+	providerDetectionExplicit providerDetectionIntent = iota
+	providerDetectionStartup
+)
+
 func (e *providerDetectionStatusError) Error() string {
 	return e.message
 }
 
 func (m *Manager) DetectProviders(ctx context.Context, opts DetectOptions) map[string]any {
-	pass := m.runProviderDetectionPass(ctx, []string{opts.ProviderID}, true)
+	pass := m.runProviderDetectionPass(ctx, []string{opts.ProviderID}, true, providerDetectionExplicit)
 	return map[string]any{"ok": true, "detected": pass.detected, "results": pass.results, "providers": pass.providers}
 }
 
@@ -1079,14 +1055,14 @@ type providerDetectionPass struct {
 	providers []map[string]any
 }
 
-func (m *Manager) runProviderDetectionPass(ctx context.Context, providerIDs []string, clearReplay bool) providerDetectionPass {
+func (m *Manager) runProviderDetectionPass(ctx context.Context, providerIDs []string, clearReplay bool, intent providerDetectionIntent) providerDetectionPass {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if clearReplay {
 		m.clearProviderReplayEvents()
 	}
-	candidates := m.providerDetectionCandidates(providerIDs...)
+	candidates := m.providerDetectionCandidates(intent, providerIDs...)
 	results := make([]providerDetectionResult, len(candidates))
 	var wg sync.WaitGroup
 	for i, cfg := range candidates {
@@ -1115,7 +1091,7 @@ func (m *Manager) runProviderDetectionPass(ctx context.Context, providerIDs []st
 
 func (m *Manager) StartProviderDetection(ctx context.Context) {
 	go func() {
-		pass := m.runProviderDetectionPass(ctx, nil, true)
+		pass := m.runProviderDetectionPass(ctx, nil, true, providerDetectionStartup)
 		m.retryStartupProviderDetection(ctx, retryableProviderDetectionIDs(pass.results))
 	}()
 }
@@ -1150,7 +1126,7 @@ func (m *Manager) retryStartupProviderDetection(ctx context.Context, providerIDs
 			"delayMs":   delay.Milliseconds(),
 			"providers": append([]string(nil), pending...),
 		})
-		pass := m.runProviderDetectionPass(ctx, pending, false)
+		pass := m.runProviderDetectionPass(ctx, pending, false, providerDetectionStartup)
 		pending = retryableProviderDetectionIDs(pass.results)
 	}
 }
@@ -1158,7 +1134,7 @@ func (m *Manager) retryStartupProviderDetection(ctx context.Context, providerIDs
 func retryableProviderDetectionIDs(results []providerDetectionResult) []string {
 	ids := make([]string, 0, len(results))
 	for _, result := range results {
-		if result.Status == providerStatusError && !result.ExplicitDisabled {
+		if result.Status == providerStatusError && !result.ExplicitDisabled && !result.Terminal {
 			ids = append(ids, result.ProviderID)
 		}
 	}
@@ -1179,7 +1155,7 @@ func normalizeProviderIDList(providerIDs []string) []string {
 	return out
 }
 
-func (m *Manager) providerDetectionCandidates(providerIDs ...string) []ProviderConfig {
+func (m *Manager) providerDetectionCandidates(intent providerDetectionIntent, providerIDs ...string) []ProviderConfig {
 	wants := make(map[string]bool)
 	for _, providerID := range providerIDs {
 		if id := normalizeProviderID(providerID); id != "" {
@@ -1199,6 +1175,9 @@ func (m *Manager) providerDetectionCandidates(providerIDs ...string) []ProviderC
 			continue
 		}
 		if runtime := m.providers[id]; runtime != nil {
+			if intent == providerDetectionStartup && runtime.Config.NeedsLogin {
+				continue
+			}
 			out = append(out, runtime.Config)
 			seen[id] = true
 		}
@@ -1223,6 +1202,15 @@ func (m *Manager) detectProvider(parent context.Context, cfg ProviderConfig) pro
 		Label:      firstNonEmpty(cfg.Name, cfg.Label, cfg.ID),
 		Status:     providerStatusInactive,
 		config:     cfg,
+	}
+	authentication, policyErr := m.providerAuthenticationStrategy(cfg.ID)
+	if policyErr != nil {
+		result.Status = providerStatusError
+		result.Message = redactSensitiveText(policyErr.Error())
+		result.Error = result.Message
+		result.Terminal = true
+		m.logProviderDetection(result)
+		return result
 	}
 	if cfg.DisabledByUser {
 		result.Message = "disabled by user"
@@ -1277,9 +1265,17 @@ func (m *Manager) detectProvider(parent context.Context, cfg ProviderConfig) pro
 	if err != nil {
 		message := redactSensitiveText(err.Error())
 		result.CLIVersion = collectInstalledCLIVersion(cliVersion)
-		if isLoginProviderID(cfg.ID) && isAuthShapedError(message) {
+		if authentication.IsAuthenticationFailure(err) {
 			result.Status = providerStatusNeedsLogin
-			result.FixHint = providerLoginFixHint(cfg.ID)
+			result.FixHint = strings.TrimSpace(authentication.LoginHint())
+			if result.FixHint == "" {
+				result.Status = providerStatusError
+				result.Terminal = true
+				result.Message = fmt.Sprintf("provider authentication policy %q has no external login hint", cfg.ID)
+				result.Error = result.Message
+				m.logProviderDetection(result)
+				return result
+			}
 			result.Detected = true
 		} else {
 			result.Status = providerStatusError
@@ -1302,77 +1298,19 @@ func (m *Manager) detectProvider(parent context.Context, cfg ProviderConfig) pro
 }
 
 func providerProbeTimeout(providerID string) time.Duration {
-	switch normalizeProviderID(providerID) {
-	case "devin":
-		return devinProbeTimeout
-	case "claude", "codex":
-		return frontierProbeTimeout
-	default:
-		return defaultProbeTimeout
+	registration, ok := providerRegistrationForID(providerID)
+	if ok && registration.ProbeTimeout > 0 {
+		return registration.ProbeTimeout
 	}
+	return defaultProbeTimeout
 }
 
 func (m *Manager) prepareDetectedProvider(ctx context.Context, cfg ProviderConfig) (string, []string, map[string]string, string, error) {
-	switch cfg.ID {
-	case "mock":
-		mockPath := filepath.Join(m.opts.RootDir, "desktop", "acp", "mock-server.mjs")
-		if !fileExists(mockPath) {
-			return "", nil, nil, "", fmt.Errorf("mock ACP fixture not found: %s", mockPath)
-		}
-		node, err := resolveBinary(firstNonEmpty(cfg.Command, "node"), []string{"node.exe", "node"}, nil)
-		if err != nil {
-			return "", nil, nil, "", err
-		}
-		return node, append([]string(nil), cfg.Args...), nil, "", nil
-	case "devin":
-		resolved, err := resolveProviderExecutable(cfg)
-		if err != nil {
-			return "", nil, nil, "", err
-		}
-		return resolved, append([]string(nil), cfg.Args...), nil, "", nil
-	case "qwen":
-		resolved, err := resolveProviderExecutable(cfg)
-		if err != nil {
-			return "", nil, nil, "", err
-		}
-		model, baseURL, err := m.detectQwenLocalModel(ctx)
-		if err != nil {
-			return resolved, append([]string(nil), cfg.Args...), nil, err.Error(), nil
-		}
-		return resolved, append([]string(nil), cfg.Args...), map[string]string{
-			"OPENAI_BASE_URL": baseURL,
-			"OPENAI_API_KEY":  "local",
-			"OPENAI_MODEL":    model,
-		}, "", nil
-	case "claude":
-		launch, err := resolveFrontierNativeLaunch(cfg)
-		if err != nil {
-			return "", nil, nil, "", err
-		}
-		return launch.Command, launch.Args, nil, "", nil
-	case "codex":
-		launch, err := resolveFrontierNativeLaunch(cfg)
-		if err != nil {
-			return "", nil, nil, "", err
-		}
-		return launch.Command, launch.Args, nil, "", nil
-	case localLMStudioProviderID, localOllamaProviderID:
-		models, baseURL, err := m.detectLocalModelServer(ctx, cfg.ID)
-		if err != nil {
-			return "", nil, nil, err.Error(), nil
-		}
-		launch, err := resolveWorkassAgentLaunch(m.opts.RootDir)
-		if err != nil {
-			return "", nil, nil, "", &providerDetectionStatusError{status: providerStatusError, message: err.Error()}
-		}
-		return launch.Command, launch.Args, map[string]string{
-			"OPENAI_BASE_URL": baseURL,
-			"OPENAI_API_KEY":  "local",
-			"OPENAI_MODEL":    models[0].ModelID,
-		}, "", nil
-	default:
+	registration, ok := providerRegistrationForID(cfg.ID)
+	if !ok || registration.Detection == nil {
 		return "", nil, nil, "", fmt.Errorf("provider %q is not auto-detectable", cfg.ID)
 	}
+	return registration.Detection.Prepare(ctx, m, cfg)
 }
 
 func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
@@ -1395,6 +1333,7 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 		if runtime == nil {
 			continue
 		}
+		wasNeedsLogin := runtime.Config.NeedsLogin
 		if runtime.Config.DisabledByUser || result.ExplicitDisabled {
 			runtime.Config.Enabled = false
 			runtime.Status = providerStatusInactive
@@ -1421,6 +1360,7 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 			delete(m.spareBlocked, result.ProviderID)
 			runtime.Config.Enabled = true
 			runtime.Config.DisabledByUser = false
+			runtime.Config.NeedsLogin = false
 			runtime.Config.Detected = true
 			runtime.Config.DetectedAt = now
 			runtime.Config.ResolvedCommand = result.ResolvedCommand
@@ -1440,6 +1380,7 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 		if result.Status == providerStatusNeedsLogin {
 			runtime.Config.Enabled = false
 			runtime.Config.DisabledByUser = false
+			runtime.Config.NeedsLogin = true
 			runtime.Config.Detected = true
 			runtime.Config.DetectedAt = now
 			runtime.Config.ResolvedCommand = result.ResolvedCommand
@@ -1447,6 +1388,22 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 			runtime.Models = nil
 			runtime.Modes = nil
 			runtime.AgentName = ""
+			m.spareBlocked[result.ProviderID] = true
+			continue
+		}
+		// A failed explicit probe cannot silently erase a durable authentication
+		// barrier. Only a successful probe or explicit re-enable may clear it.
+		if wasNeedsLogin {
+			runtime.Config.Enabled = false
+			runtime.Config.NeedsLogin = true
+			runtime.Status = providerStatusNeedsLogin
+			runtime.FixHint = firstNonEmpty(runtime.FixHint, runtime.Config.FixHint)
+			runtime.Config.FixHint = runtime.FixHint
+			runtime.Probed = true
+			runtime.Models = nil
+			runtime.Modes = nil
+			runtime.AgentName = ""
+			m.spareBlocked[result.ProviderID] = true
 			continue
 		}
 		if result.Status == providerStatusNotFound || result.Status == providerStatusInactive {
@@ -1487,21 +1444,12 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 }
 
 func isAutoDetectableProviderID(id string) bool {
-	switch normalizeProviderID(id) {
-	case "mock", "devin", "qwen", "claude", "codex", localLMStudioProviderID, localOllamaProviderID:
-		return true
-	default:
-		return false
-	}
+	registration, ok := providerRegistrationForID(id)
+	return ok && registration.Detection != nil
 }
 
 func isLocalProviderID(id string) bool {
-	switch normalizeProviderID(id) {
-	case localLMStudioProviderID, localOllamaProviderID:
-		return true
-	default:
-		return false
-	}
+	return providerIsLocal(id)
 }
 
 func (m *Manager) localModelServersLocked() []localModelServer {
@@ -1563,7 +1511,7 @@ func (m *Manager) logProviderDetection(result providerDetectionResult) {
 
 func resolveBinary(command string, names []string, known []string) (string, error) {
 	command = strings.TrimSpace(command)
-	if command != "" && command != "devin" && command != "qwen" && command != "claude" && command != "node" {
+	if command != "" {
 		if filepath.IsAbs(command) || strings.ContainsAny(command, `/\`) {
 			if fileExists(command) {
 				return command, nil
@@ -1593,26 +1541,6 @@ func resolveBinary(command string, names []string, known []string) (string, erro
 	return "", errors.New("binary not found on PATH")
 }
 
-func resolveDevinBinary(command string) (string, error) {
-	return resolveProviderExecutable(ProviderConfig{ID: "devin", Command: command})
-}
-
-func devinKnownPaths() []string {
-	home, _ := os.UserHomeDir()
-	var known []string
-	if home != "" {
-		known = append(known,
-			filepath.Join(home, "AppData", "Local", "Programs", "Devin", "resources", "app", "extensions", "windsurf", "devin", "bin", "devin.exe"),
-			filepath.Join(home, "AppData", "Local", "devin", "cli", "bin", "devin.exe"),
-			filepath.Join(home, ".local", "bin", "devin"),
-		)
-	}
-	if runtime.GOOS != "windows" {
-		known = append(known, "/opt/homebrew/bin/devin", "/usr/local/bin/devin")
-	}
-	return known
-}
-
 type agentLaunch struct {
 	Command string
 	Args    []string
@@ -1626,31 +1554,15 @@ type frontierNativeSpec struct {
 	ProviderID     string
 	DefaultCommand string
 	OverrideEnv    string
-	FixHint        string
 	PathNames      []string
 }
 
 func frontierNativeSpecForProvider(id string) (frontierNativeSpec, bool) {
-	switch normalizeProviderID(id) {
-	case "claude":
-		return frontierNativeSpec{
-			ProviderID:     "claude",
-			DefaultCommand: "claude",
-			OverrideEnv:    "WORKASS_CLAUDE_CODE",
-			FixHint:        "Ejecuta `claude auth login`",
-			PathNames:      []string{"claude", "claude.exe", "claude.cmd"},
-		}, true
-	case "codex":
-		return frontierNativeSpec{
-			ProviderID:     "codex",
-			DefaultCommand: "codex",
-			OverrideEnv:    "WORKASS_CODEX",
-			FixHint:        "Ejecuta `codex login`",
-			PathNames:      []string{"codex", "codex.exe", "codex.cmd"},
-		}, true
-	default:
+	registration, ok := providerRegistrationForID(id)
+	if !ok || registration.Native == nil {
 		return frontierNativeSpec{}, false
 	}
+	return *registration.Native, true
 }
 
 func resolveFrontierNativeLaunch(cfg ProviderConfig) (agentLaunch, error) {
@@ -1697,22 +1609,18 @@ func isFrontierProviderID(id string) bool {
 	return ok
 }
 
-func frontierFixHint(id string) string {
-	if spec, ok := frontierNativeSpecForProvider(id); ok {
-		return spec.FixHint
+func (m *Manager) providerNeedsLoginError(id string) error {
+	hint := ""
+	if strategy, err := m.providerAuthenticationStrategy(id); err == nil {
+		hint = strings.TrimSpace(strategy.LoginHint())
+	} else {
+		return fmt.Errorf("provider authentication policy is unavailable: %w", err)
 	}
-	return ""
-}
-
-func isLoginProviderID(id string) bool {
-	return normalizeProviderID(id) == "devin" || isFrontierProviderID(id)
-}
-
-func providerLoginFixHint(id string) string {
-	if normalizeProviderID(id) == "devin" {
-		return "Ejecuta `devin auth login`"
+	message := fmt.Sprintf("ACP provider needs login: %s", normalizeProviderID(id))
+	if hint != "" {
+		message += ". " + hint
 	}
-	return frontierFixHint(id)
+	return &providercontract.Error{Kind: providercontract.ErrorAuthenticationRequired, Message: message}
 }
 
 func isAuthShapedError(text string) bool {
@@ -2059,16 +1967,12 @@ func (m *Manager) updateProviderCatalogFromBridge(b *Bridge, models []Model, mod
 	}
 	b.mu.Unlock()
 	m.mu.Lock()
-	if runtime := m.providers[providerID]; runtime != nil {
+	if runtime := m.providers[providerID]; runtime != nil && runtime.Config.Enabled && !runtime.Config.NeedsLogin {
 		runtime.Probed = true
 		runtime.Status = providerStatusReady
 		runtime.Error = ""
 		incomingModels := normalizeProviderCatalogModels(providerID, append([]Model(nil), models...))
-		if normalizeProviderID(providerID) == "claude" {
-			runtime.Models, knownEffortModels = reconcileClaudeLiveCatalog(runtime.Models, incomingModels, knownEffortModels)
-		} else {
-			runtime.Models = preserveUnknownModelEfforts(runtime.Models, incomingModels, knownEffortModels)
-		}
+		runtime.Models, knownEffortModels = providerAdapterForID(providerID).catalog.Reconcile(runtime.Models, incomingModels, knownEffortModels)
 		runtime.Modes = append([]Mode(nil), modes...)
 		runtime.AgentName = agentName
 	}
@@ -2094,6 +1998,22 @@ func (m *Manager) catalogGroup(ctx context.Context, id string) CatalogGroup {
 	start := time.Now()
 	models, modes, agentName, err := m.probeProviderCatalog(ctx, cfg)
 	latencyMs := time.Since(start).Milliseconds()
+	if err != nil {
+		hint, policyErr := m.markProviderNeedsLogin(ctx, id, err)
+		if policyErr != nil {
+			err = policyErr
+		} else if hint != "" {
+			m.mu.Lock()
+			runtime = m.providers[id]
+			if runtime == nil {
+				m.mu.Unlock()
+				return CatalogGroup{ProviderID: id, ProviderName: id, Models: []Model{}, Modes: []Mode{}, Status: providerStatusError, Error: "unknown provider"}
+			}
+			group := runtime.catalogGroupLocked()
+			m.mu.Unlock()
+			return group
+		}
+	}
 
 	m.mu.Lock()
 	runtime = m.providers[id]
@@ -2174,8 +2094,8 @@ func (m *Manager) probeProviderCatalogWithInitTimeout(ctx context.Context, cfg P
 		bridge.Close(true, err)
 		return nil, nil, "", err
 	}
-	providerID := normalizeProviderID(cfg.ID)
-	if providerID == "claude" || (providerID == "codex" && isOfficialNativeCommand(cfg, "codex")) {
+	modelPolicy := providerAdapterForID(cfg.ID).model
+	if modelPolicy.InspectAllEfforts != nil && modelPolicy.InspectAllEfforts(cfg) {
 		m.probeFrontierModelEfforts(catalogCtx, bridge, info.SessionID, info.Models)
 		bridge.mu.Lock()
 		info.Models = append([]Model(nil), bridge.models...)

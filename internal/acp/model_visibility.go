@@ -17,7 +17,7 @@ func (m *Manager) isProductionRuntime() bool {
 // catalog entries and must never be hidden by prose heuristics.
 func isInternalFixtureModel(providerID, modelID, name string) bool {
 	provider := normalizeProviderID(providerID)
-	if provider == "mock" {
+	if providerIsFixture(provider) {
 		return true
 	}
 	id := strings.ToLower(strings.TrimSpace(modelID))
@@ -40,7 +40,7 @@ func (m *Manager) validateProductionModelSelection(providerID, modelID string) e
 		return nil
 	}
 	providerID = normalizeProviderID(providerID)
-	if providerID == "mock" {
+	if providerIsFixture(providerID) {
 		return errors.New("development fixture provider is unavailable in production")
 	}
 	modelID = strings.TrimSpace(modelID)
@@ -79,7 +79,7 @@ func (m *Manager) userFacingCatalogGroups(groups []CatalogGroup) []CatalogGroup 
 	}
 	visible := make([]CatalogGroup, 0, len(groups))
 	for _, group := range groups {
-		if normalizeProviderID(group.ProviderID) == "mock" {
+		if providerIsFixture(group.ProviderID) {
 			continue
 		}
 		models := make([]Model, 0, len(group.Models))

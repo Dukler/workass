@@ -18,7 +18,19 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	providercontract "workass/internal/provider"
 )
+
+type testProviderAuthenticationStrategy struct {
+	hint string
+}
+
+func (strategy testProviderAuthenticationStrategy) IsAuthenticationFailure(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Authentication required")
+}
+
+func (strategy testProviderAuthenticationStrategy) LoginHint() string { return strategy.hint }
 
 func TestProviderDetectionDefaultRetryCadenceMatchesPortContract(t *testing.T) {
 	got := (Options{}).withDefaults().ProviderDetectionRetryBackoffs
@@ -478,7 +490,7 @@ func TestFrontierTurnAuthFailureMarksProviderNeedsLogin(t *testing.T) {
 		t.Fatalf("claude auth failure job = %#v", endJob)
 	}
 	claude := assertProviderListItem(t, manager.ProvidersList(), "claude", providerStatusNeedsLogin, false)
-	if claude["enabled"] != false || claude["fixHint"] != frontierFixHint("claude") {
+	if claude["enabled"] != false || claude["fixHint"] != "Ejecuta `claude auth login`" {
 		t.Fatalf("claude runtime did not transition to needs-login: %#v", claude)
 	}
 	if group := findCatalogGroup(manager.Catalog(context.Background())["groups"].([]CatalogGroup), "claude"); group != nil {
@@ -494,6 +506,9 @@ func TestFrontierTurnAuthFailureMarksProviderNeedsLogin(t *testing.T) {
 	}
 	if reloadedClaude.DisabledByUser {
 		t.Fatalf("needs-login state became an explicit user disable after reload: %#v", reloadedClaude)
+	}
+	if !reloadedClaude.NeedsLogin {
+		t.Fatalf("needs-login state was not persisted: %#v", reloadedClaude)
 	}
 	t.Logf("trace turn auth transition provider=%s status=%s hint=%q", claude["id"], claude["status"], claude["fixHint"])
 }
@@ -519,7 +534,126 @@ func TestAuthShapedErrorDoesNotMatchAuthSubstringInsideOrdinaryWords(t *testing.
 	}
 }
 
-func TestFrontierSuccessfulTurnRecoversTransientNeedsLogin(t *testing.T) {
+func TestAuthenticatedProvidersShareProviderContractStrategy(t *testing.T) {
+	manager := NewManager(Options{RootDir: repoRoot(t), RSSSampleInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	wants := map[string]string{
+		"claude": "claude auth login",
+		"codex":  "codex login",
+		"devin":  "devin auth login",
+	}
+	for providerID, hintFragment := range wants {
+		definition, err := manager.ProviderDefinition(providerID)
+		if err != nil {
+			t.Fatalf("provider definition %s: %v", providerID, err)
+		}
+		strategy := definition.Authentication
+		if strategy == nil || !strategy.IsAuthenticationFailure(fmt.Errorf("Authentication required")) ||
+			strategy.IsAuthenticationFailure(fmt.Errorf("authoritative catalog unavailable")) ||
+			!strings.Contains(strategy.LoginHint(), hintFragment) {
+			t.Fatalf("provider %s authentication strategy = %#v hint=%q", providerID, strategy, func() string {
+				if strategy == nil {
+					return ""
+				}
+				return strategy.LoginHint()
+			}())
+		}
+	}
+}
+
+func TestProviderAuthenticationRuntimeUsesDefinitionWithoutRegistrationFallback(t *testing.T) {
+	root := repoRoot(t)
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "devin", Name: "Devin ACP", Command: os.Args[0],
+			Args: []string{"-test.run=TestFakeACPHelper", "--"}, CWD: root,
+			Env:     map[string]string{"WORKASS_FAKE_ACP": "1", "WORKASS_FAKE_ACP_MODE": "auth-on-session"},
+			Enabled: true,
+		}},
+		DefaultProviderID: "devin", InitTimeout: time.Second, RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	definition, err := manager.ProviderDefinition("devin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const definitionHint = "Run the definition-owned external login"
+	definition.Authentication = testProviderAuthenticationStrategy{hint: definitionHint}
+	registry := providercontract.NewRegistry()
+	if err := registry.Register(definition); err != nil {
+		t.Fatal(err)
+	}
+	manager.providerRegistry = registry
+	manager.providerRegistryErr = nil
+
+	_, err = manager.NewSession(context.Background(), SessionOptions{
+		TabID: "definition-auth-tab", ChatID: "definition-auth-chat", ProviderID: "devin",
+	})
+	if err == nil || !strings.Contains(err.Error(), definitionHint) || strings.Contains(err.Error(), "devin auth login") {
+		t.Fatalf("runtime authentication did not use the definition strategy: %v", err)
+	}
+	state := assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusNeedsLogin, false)
+	if state["fixHint"] != definitionHint {
+		t.Fatalf("definition-owned login hint was not persisted in runtime state: %#v", state)
+	}
+}
+
+func TestMissingProviderDefinitionFailsClosedBeforeBridgeSpawn(t *testing.T) {
+	root := repoRoot(t)
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "devin", Name: "Devin ACP", Command: os.Args[0],
+			Args: []string{"-test.run=TestFakeACPHelper", "--"}, CWD: root,
+			Env:     map[string]string{"WORKASS_FAKE_ACP": "1", "WORKASS_FAKE_ACP_MODE": "echo-prompt"},
+			Enabled: true,
+		}},
+		DefaultProviderID: "devin", InitTimeout: time.Second, RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	manager.providerRegistry = providercontract.NewRegistry()
+	manager.providerRegistryErr = nil
+
+	_, err := manager.NewSession(context.Background(), SessionOptions{
+		TabID: "missing-definition-tab", ChatID: "missing-definition-chat", ProviderID: "devin",
+	})
+	if err == nil || !strings.Contains(err.Error(), "provider definition") {
+		t.Fatalf("missing provider definition did not fail closed: %v", err)
+	}
+	if bridges := manager.allBridges(); len(bridges) != 0 {
+		t.Fatalf("missing provider definition spawned %d bridges", len(bridges))
+	}
+}
+
+func TestAuthenticationDemotionRedactsReturnedAndCatalogErrors(t *testing.T) {
+	root := repoRoot(t)
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "devin", Name: "Devin ACP", Command: os.Args[0],
+			Args: []string{"-test.run=TestFakeACPHelper", "--"}, CWD: root,
+			Env:     map[string]string{"WORKASS_FAKE_ACP": "1", "WORKASS_FAKE_ACP_MODE": "auth-on-session-secret"},
+			Enabled: true,
+		}},
+		DefaultProviderID: "devin", InitTimeout: time.Second, RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	_, err := manager.NewSession(context.Background(), SessionOptions{
+		TabID: "redacted-auth-tab", ChatID: "redacted-auth-chat", ProviderID: "devin",
+	})
+	if err == nil || strings.Contains(err.Error(), "raw-sensitive-value") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("authentication error was not redacted: %v", err)
+	}
+	state := assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusNeedsLogin, false)
+	if message := fmt.Sprint(state["message"]); strings.Contains(message, "raw-sensitive-value") {
+		t.Fatalf("provider state leaked authentication diagnostics: %#v", state)
+	}
+}
+
+func TestNeedsLoginBlocksStaleSessionUntilExplicitReenable(t *testing.T) {
 	root := repoRoot(t)
 	events := newEventCollector()
 	providersFile := filepath.Join(t.TempDir(), "providers.json")
@@ -545,56 +679,50 @@ func TestFrontierSuccessfulTurnRecoversTransientNeedsLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new Claude recovery session: %v", err)
 	}
-	if hint := manager.markProviderNeedsLogin(context.Background(), "claude", fmt.Errorf("Authentication required")); hint == "" {
+	if hint, err := manager.markProviderNeedsLogin(context.Background(), "claude", fmt.Errorf("Authentication required")); err != nil || hint == "" {
 		t.Fatal("auth-shaped turn failure did not mark Claude needs-login")
 	}
 	assertProviderListItem(t, manager.ProvidersList(), "claude", providerStatusNeedsLogin, false)
 
+	if _, err := manager.StartJob(context.Background(), JobStartOptions{
+		Kind: "app-chat", SessionID: session.SessionID, TabID: "claude-recovery-tab", ChatID: "claude-recovery-chat",
+		ProviderID: "claude", Prompt: "must not bypass needs-login",
+	}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "login") {
+		t.Fatalf("stale Claude session bypassed needs-login: %v", err)
+	}
+	blocked := assertProviderListItem(t, manager.ProvidersList(), "claude", providerStatusNeedsLogin, false)
+	if blocked["enabled"] != false {
+		t.Fatalf("blocked Claude provider was re-enabled by stale session: %#v", blocked)
+	}
+
+	if _, err := manager.ToggleProvider(context.Background(), "claude", true); err != nil {
+		t.Fatalf("explicitly re-enable Claude provider: %v", err)
+	}
+	manager.mu.Lock()
+	if got := manager.providers["claude"].Config.NeedsLogin; got {
+		manager.mu.Unlock()
+		t.Fatal("explicit re-enable did not clear needs-login")
+	}
+	manager.mu.Unlock()
 	job, err := manager.StartJob(context.Background(), JobStartOptions{
 		Kind: "app-chat", SessionID: session.SessionID, TabID: "claude-recovery-tab", ChatID: "claude-recovery-chat",
-		ProviderID: "claude", Prompt: "successful retry",
+		ProviderID: "claude", Prompt: "successful explicit retry",
 	})
 	if err != nil {
-		t.Fatalf("start Claude recovery job: %v", err)
+		t.Fatalf("start explicitly re-enabled Claude job: %v", err)
 	}
 	end := events.waitJobEnd(t, jobID(job), 2*time.Second)
 	if got := jobFromEnd(end)["status"]; got != "done" {
-		t.Fatalf("successful retry status = %v, want done", got)
-	}
-	claude := assertProviderListItem(t, manager.ProvidersList(), "claude", providerStatusReady, true)
-	if claude["enabled"] != true {
-		t.Fatalf("successful Claude turn did not re-enable provider: %#v", claude)
-	}
-	if group := findCatalogGroup(manager.Catalog(context.Background())["groups"].([]CatalogGroup), "claude"); group == nil || len(group.Models) == 0 {
-		t.Fatalf("successful Claude turn did not restore catalog: %#v", group)
-	}
-	reloaded, err := LoadProviderConfigs(providersFile, root)
-	if err != nil {
-		t.Fatalf("reload recovered provider cache: %v", err)
-	}
-	reloadedClaude, ok := providerFromSlice(reloaded, "claude")
-	if !ok || !reloadedClaude.Enabled || reloadedClaude.DisabledByUser {
-		t.Fatalf("recovered Claude state was not durable: %#v", reloadedClaude)
+		t.Fatalf("explicitly re-enabled retry status = %v, want done", got)
 	}
 
-	if _, err := manager.ToggleProvider(context.Background(), "claude", false); err != nil {
-		t.Fatalf("explicitly disable recovered Claude provider: %v", err)
-	}
-	bridge := manager.bridgeForSession(session.SessionID, SessionOptions{
-		TabID: "claude-recovery-tab", ChatID: "claude-recovery-chat", ProviderID: "claude",
-	})
-	manager.recoverFrontierProviderAfterSuccessfulTurn(context.Background(), bridge)
-	disabled := assertProviderListItem(t, manager.ProvidersList(), "claude", providerStatusInactive, false)
-	if disabled["enabled"] != false {
-		t.Fatalf("late successful turn overrode explicit user disable: %#v", disabled)
-	}
-	reloaded, err = LoadProviderConfigs(providersFile, root)
+	reloaded, err := LoadProviderConfigs(providersFile, root)
 	if err != nil {
-		t.Fatalf("reload explicitly disabled provider cache: %v", err)
+		t.Fatalf("reload re-enabled provider cache: %v", err)
 	}
-	reloadedClaude, ok = providerFromSlice(reloaded, "claude")
-	if !ok || reloadedClaude.Enabled || !reloadedClaude.DisabledByUser {
-		t.Fatalf("explicit user disable was not durable after late turn: %#v", reloadedClaude)
+	reloadedClaude, ok := providerFromSlice(reloaded, "claude")
+	if !ok || !reloadedClaude.Enabled || reloadedClaude.DisabledByUser || reloadedClaude.NeedsLogin {
+		t.Fatalf("explicitly re-enabled Claude state was not durable: %#v", reloadedClaude)
 	}
 }
 
@@ -736,12 +864,243 @@ func TestDevinAuthenticationFailureBecomesNeedsLoginWithoutRetryLoop(t *testing.
 
 	manager.DetectProviders(context.Background(), DetectOptions{ProviderID: "devin"})
 	devin := assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusNeedsLogin, false)
-	if devin["fixHint"] != providerLoginFixHint("devin") || devin["detected"] != true {
+	if devin["fixHint"] != "Ejecuta `devin auth login`" || devin["detected"] != true {
 		t.Fatalf("logged-out Devin state = %#v", devin)
 	}
 	if retryable := retryableProviderDetectionIDs([]providerDetectionResult{{ProviderID: "devin", Status: providerStatusNeedsLogin}}); len(retryable) != 0 {
 		t.Fatalf("needs-login Devin was scheduled for startup retry: %v", retryable)
 	}
+}
+
+func TestDevinSessionAuthenticationFailureDemotesOnceWithoutReplacement(t *testing.T) {
+	root := repoRoot(t)
+	methodLog := filepath.Join(t.TempDir(), "methods.log")
+	providersFile := filepath.Join(t.TempDir(), "providers.json")
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "devin", Name: "Devin ACP", Command: os.Args[0],
+			Args: []string{"-test.run=TestFakeACPHelper", "--"}, CWD: root,
+			Env: map[string]string{
+				"WORKASS_FAKE_ACP":            "1",
+				"WORKASS_FAKE_ACP_MODE":       "auth-on-session",
+				"WORKASS_FAKE_ACP_METHOD_LOG": methodLog,
+			},
+			Enabled: true,
+		}},
+		DefaultProviderID:  "devin",
+		ProviderConfigFile: providersFile,
+		Broadcast:          events.Broadcast,
+		InitTimeout:        time.Second,
+		RSSSampleInterval:  time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	manager.mu.Lock()
+	manager.providers["devin"].Models = []Model{{ModelID: "stale-model", Name: "Stale"}}
+	manager.providers["devin"].Modes = []Mode{{ID: "stale-mode", Name: "Stale"}}
+	manager.providers["devin"].AgentName = "Stale Devin"
+	manager.mu.Unlock()
+
+	_, err := manager.NewSession(context.Background(), SessionOptions{
+		TabID: "devin-auth-tab", ChatID: "devin-auth-chat", ProviderID: "devin",
+	})
+	if err == nil || !strings.Contains(err.Error(), "Authentication required") || !strings.Contains(err.Error(), "devin auth login") {
+		t.Fatalf("Devin session auth error = %v", err)
+	}
+	if got := countMethod(readMethodLog(t, methodLog), "session/new"); got != 1 {
+		t.Fatalf("Devin session/new attempts = %d, want exactly 1", got)
+	}
+	devin := assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusNeedsLogin, false)
+	if devin["enabled"] != false || devin["fixHint"] != "Ejecuta `devin auth login`" {
+		t.Fatalf("Devin needs-login provider = %#v", devin)
+	}
+	manager.mu.Lock()
+	runtime := manager.providers["devin"]
+	if !runtime.Config.NeedsLogin || len(runtime.Models) != 0 || len(runtime.Modes) != 0 || runtime.AgentName != "" {
+		manager.mu.Unlock()
+		t.Fatalf("Devin demotion retained usable catalog: %#v", runtime)
+	}
+	manager.mu.Unlock()
+	reloaded, err := LoadProviderConfigs(providersFile, root)
+	if err != nil {
+		t.Fatalf("reload Devin needs-login config: %v", err)
+	}
+	reloadedDevin, ok := providerFromSlice(reloaded, "devin")
+	if !ok || !reloadedDevin.NeedsLogin || reloadedDevin.Enabled || reloadedDevin.DisabledByUser {
+		t.Fatalf("persisted Devin needs-login config = %#v", reloadedDevin)
+	}
+	channels := map[string]bool{}
+	for _, event := range events.snapshot() {
+		channels[event.channel] = true
+	}
+	if !channels["providers:list"] || !channels["chat:catalog"] {
+		t.Fatalf("Devin demotion events = %#v", channels)
+	}
+
+	_, secondErr := manager.NewSession(context.Background(), SessionOptions{
+		TabID: "devin-auth-tab-2", ChatID: "devin-auth-chat-2", ProviderID: "devin",
+	})
+	if secondErr == nil || !strings.Contains(strings.ToLower(secondErr.Error()), "login") {
+		t.Fatalf("second Devin session did not fail closed: %v", secondErr)
+	}
+	if got := countMethod(readMethodLog(t, methodLog), "session/new"); got != 1 {
+		t.Fatalf("disabled Devin was spawned again; session/new attempts = %d", got)
+	}
+}
+
+func TestStartupDetectionDoesNotRetryDevinNeedsLogin(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	methodLog := filepath.Join(t.TempDir(), "methods.log")
+	installFakeAgentWrapperWithEnv(t, pathDir, "devin", "auth-stderr", map[string]string{
+		"WORKASS_FAKE_ACP_METHOD_LOG": methodLog,
+	})
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "devin", Name: "Devin ACP", Command: filepath.Join(pathDir, "devin"), Args: []string{"acp"}, Enabled: true,
+		}},
+		DefaultProviderID:              "devin",
+		ProviderConfigFile:             filepath.Join(t.TempDir(), "providers.json"),
+		InitTimeout:                    300 * time.Millisecond,
+		ProviderDetectionRetryBackoffs: []time.Duration{10 * time.Millisecond, 20 * time.Millisecond},
+		RSSSampleInterval:              time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	manager.StartProviderDetection(context.Background())
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var item map[string]any
+		for _, candidate := range manager.ProvidersList() {
+			if candidate["id"] == "devin" {
+				item = candidate
+				break
+			}
+		}
+		if item != nil && item["status"] == providerStatusNeedsLogin {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("startup detection never reached needs-login: %#v", item)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(80 * time.Millisecond)
+	if got := countMethod(readMethodLog(t, methodLog), "initialize"); got != 1 {
+		t.Fatalf("startup retried logged-out Devin %d times, want 1", got)
+	}
+}
+
+func TestStartupDetectionSkipsPersistedNeedsLoginUntilExplicitProbeSucceeds(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	methodLog := filepath.Join(t.TempDir(), "methods.log")
+	installFakeAgentWrapperWithEnv(t, pathDir, "devin", "echo-prompt", map[string]string{
+		"WORKASS_FAKE_ACP_METHOD_LOG": methodLog,
+	})
+	providersFile := filepath.Join(t.TempDir(), "providers.json")
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "devin", Name: "Devin ACP", Command: filepath.Join(pathDir, "devin"), Args: []string{"acp"},
+			Enabled: false, NeedsLogin: true, Detected: true, ResolvedCommand: filepath.Join(pathDir, "devin"),
+		}},
+		DefaultProviderID:              "devin",
+		ProviderConfigFile:             providersFile,
+		InitTimeout:                    300 * time.Millisecond,
+		ProviderDetectionRetryBackoffs: []time.Duration{10 * time.Millisecond},
+		RSSSampleInterval:              time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	manager.StartProviderDetection(context.Background())
+	time.Sleep(100 * time.Millisecond)
+	if methods := readMethodLog(t, methodLog); len(methods) != 0 {
+		t.Fatalf("startup spawned persisted needs-login Devin: %v", methods)
+	}
+	assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusNeedsLogin, false)
+
+	manager.DetectProviders(context.Background(), DetectOptions{ProviderID: "devin"})
+	devin := assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusReady, true)
+	if devin["enabled"] != true {
+		t.Fatalf("successful explicit Devin probe did not enable provider: %#v", devin)
+	}
+	manager.mu.Lock()
+	needsLogin := manager.providers["devin"].Config.NeedsLogin
+	manager.mu.Unlock()
+	if needsLogin {
+		t.Fatal("successful explicit Devin probe did not clear needs-login")
+	}
+}
+
+func TestNeedsLoginRejectsStaleSessionAndChatProviderBindings(t *testing.T) {
+	root := repoRoot(t)
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{
+			{ID: "devin", Name: "Devin ACP", Command: "devin", Enabled: false, NeedsLogin: true},
+			{ID: "custom", Name: "Fallback", Command: os.Args[0], Args: []string{"-test.run=TestFakeACPHelper", "--"}, Env: map[string]string{"WORKASS_FAKE_ACP": "1"}, Enabled: true},
+		},
+		DefaultProviderID: "custom", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	manager.mu.Lock()
+	manager.sessionProvider["stale-devin-session"] = "devin"
+	_, sessionErr := manager.resolveSessionProviderLocked(SessionOptions{SessionID: "stale-devin-session"})
+	manager.chatProviders["chat:stale-devin-chat"] = "devin"
+	_, chatErr := manager.resolveSessionProviderLocked(SessionOptions{ChatID: "stale-devin-chat"})
+	_, configErr := manager.providerConfigLocked("devin")
+	manager.mu.Unlock()
+	for label, err := range map[string]error{"session": sessionErr, "chat": chatErr, "config": configErr} {
+		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "login") {
+			t.Fatalf("%s binding bypassed needs-login: %v", label, err)
+		}
+	}
+}
+
+func TestSpareWarmingDemotesDevinAuthenticationFailureAndStops(t *testing.T) {
+	root := repoRoot(t)
+	methodLog := filepath.Join(t.TempDir(), "methods.log")
+	providersFile := filepath.Join(t.TempDir(), "providers.json")
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "devin", Name: "Devin ACP", Command: os.Args[0],
+			Args: []string{"-test.run=TestFakeACPHelper", "--"}, CWD: root,
+			Env: map[string]string{
+				"WORKASS_FAKE_ACP":            "1",
+				"WORKASS_FAKE_ACP_MODE":       "auth-on-session",
+				"WORKASS_FAKE_ACP_METHOD_LOG": methodLog,
+			},
+			Enabled: true,
+		}},
+		DefaultProviderID: "devin", ProviderConfigFile: providersFile,
+		SpareSessions: 1, InitTimeout: time.Second, RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		manager.mu.Lock()
+		needsLogin := manager.providers["devin"].Config.NeedsLogin
+		manager.mu.Unlock()
+		if needsLogin {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("spare authentication failure did not demote Devin")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	manager.WarmSpareSessions()
+	time.Sleep(100 * time.Millisecond)
+	if got := countMethod(readMethodLog(t, methodLog), "session/new"); got != 1 {
+		t.Fatalf("spare warming retried logged-out Devin %d times, want 1", got)
+	}
+	assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusNeedsLogin, false)
 }
 
 func TestDetectProvidersLocalServerRegistersNativeProviderAndStreamsThroughAgent(t *testing.T) {

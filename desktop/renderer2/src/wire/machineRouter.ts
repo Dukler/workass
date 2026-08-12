@@ -29,6 +29,11 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?]> = [
   ['getSettings', 'settings:get'],
   ['getConfig', 'config:get'],
   ['getSession', 'session:get'],
+  ['chatCreate', 'chat:create'],
+  ['chatQueueReplace', 'chat:queue-replace'],
+  ['chatPresentationSave', 'chat:presentation-save'],
+  ['chatRuntimeControlsSave', 'chat:runtime-controls-save'],
+  ['chatDelete', 'chat:delete'],
   // `saveSession` is deliberately ABSENT. It is a whole-store write with no
   // single addressee, so there is no id that could route it correctly — and
   // routing it by "some tagged id in the payload" sent this Mac's entire chat
@@ -48,8 +53,6 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?]> = [
     sessionId: a[0], prompt: a[1], images: a[2], clientUserMessageId: a[3],
     continuationAssistantMessageId: a[4], boundary: a[5],
   }]],
-  ['appChatSetModel', 'app-chat:set-model', (a) => [{ sessionId: a[0], modelId: a[1] }]],
-  ['appChatSetMode', 'app-chat:set-mode', (a) => [{ sessionId: a[0], modeId: a[1] }]],
   ['chatCheckpoints', 'chat:checkpoints'],
   ['chatRewind', 'chat:rewind'],
   ['chatDiff', 'chat:diff'],

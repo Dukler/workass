@@ -1,61 +1,71 @@
 package acp
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	providercontract "workass/internal/provider"
 )
 
 type Manager struct {
 	opts Options
 
-	mu                      sync.Mutex
-	stream                  streamStats
-	bridges                 map[string]*Bridge
-	sessionBridge           map[string]*Bridge
-	sessionProvider         map[string]string
-	chatProviders           map[string]string
-	nativeSessions          *nativeSessionLedger
-	agentOwners             map[string]agentOwnerBinding
-	agentOwnerBySession     map[string]string
-	providers               map[string]*providerRuntime
-	providerOrder           []string
-	defaultProviderID       string
-	providerConfigFile      string
-	latestProvidersList     any
-	hasLatestProvidersList  bool
-	latestChatCatalog       any
-	hasLatestChatCatalog    bool
-	latestProviderUpdates   any
-	hasProviderUpdates      bool
-	latestAppUpdate         any
-	hasAppUpdate            bool
-	planUsageByProvider     map[string]PlanUsageSnapshot
-	jobs                    map[string]*Job
-	finishedJobIDs          map[string]struct{}
-	finishedJobOrder        []string
-	permissions             map[string]*permissionResolver
-	subagents               map[string]*SubagentRun
-	modelScores             ModelScores
-	providerUpdateRuns      map[string]*providerUpdateRun
-	providerUpdateFailures  map[string]providerUpdateFailure
-	providerUpdateRechecks  map[string]string
-	providerUpdateLastKnown map[string]ProviderUpdate
-	providerUpdateProgress  map[string]ProviderUpdateProgress
-	spareSessions           []spareRecord
-	spareWarming            map[string]int
-	spareBlocked            map[string]bool
-	usageBySession          map[string]contextUsage
-	compactedSeeds          map[string]compactedSeed
-	crashRecoveries         map[string]time.Time
+	mu                          sync.Mutex
+	stream                      streamStats
+	bridges                     map[string]*Bridge
+	sessionBridge               map[string]*Bridge
+	sessionProvider             map[string]string
+	chatProviders               map[string]string
+	nativeSessions              *nativeSessionLedger
+	agentOwners                 map[string]agentOwnerBinding
+	agentOwnerBySession         map[string]string
+	providers                   map[string]*providerRuntime
+	providerOrder               []string
+	providerRegistry            *providercontract.Registry
+	providerRegistryErr         error
+	providerLaneMu              sync.RWMutex
+	providerLanesBySession      map[string]*managerLane
+	providerLanesByJob          map[string]*managerLane
+	providerLaneManagedJobs     map[string]struct{}
+	providerAdmissionMu         sync.Mutex
+	providerAdmissions          map[string]map[string]any
+	providerAdmissionOrder      []string
+	providerAttachmentMu        sync.RWMutex
+	providerAttachmentResolver  func(context.Context, providercontract.Attachment) (any, error)
+	providerAttachmentPersister func([]any) ([]providercontract.Attachment, error)
+	defaultProviderID           string
+	providerConfigFile          string
+	latestProvidersList         any
+	hasLatestProvidersList      bool
+	latestChatCatalog           any
+	hasLatestChatCatalog        bool
+	latestProviderUpdates       any
+	hasProviderUpdates          bool
+	latestAppUpdate             any
+	hasAppUpdate                bool
+	planUsageByProvider         map[string]PlanUsageSnapshot
+	jobs                        map[string]*Job
+	finishedJobIDs              map[string]struct{}
+	finishedJobOrder            []string
+	permissions                 map[string]*permissionResolver
+	subagents                   map[string]*SubagentRun
+	modelScores                 ModelScores
+	providerUpdateRuns          map[string]*providerUpdateRun
+	providerUpdateFailures      map[string]providerUpdateFailure
+	providerUpdateRechecks      map[string]string
+	providerUpdateLastKnown     map[string]ProviderUpdate
+	providerUpdateProgress      map[string]ProviderUpdateProgress
+	spareSessions               []spareRecord
+	spareWarming                map[string]int
+	spareBlocked                map[string]bool
+	usageBySession              map[string]contextUsage
+	crashRecoveries             map[string]time.Time
 	// commandCatalogs is the memory-only Claude command-catalog cache, keyed by
 	// tab/chat (commandCatalogKey). Never persisted; see command_catalog.go.
 	commandCatalogs map[string]*commandCatalogEntry
@@ -67,34 +77,30 @@ type Manager struct {
 	subagentSeq     int64
 	agentOwnerSeq   int64
 
-	jobMu              sync.Mutex
-	jobEndMu           sync.RWMutex
-	jobEndFunc         func(tabID, chatID string)
-	sessionRefreshMu   sync.RWMutex
-	sessionRefreshFunc func(payload map[string]any)
-	updateMu           sync.Mutex
-	updateCheckMu      sync.Mutex
-	updateCheckRunning bool
-	updateCheckCancel  context.CancelFunc
-	updateCheckWG      sync.WaitGroup
-	planUsageRefreshMu sync.Mutex
-	planUsageRefreshes map[string]*planUsageRefreshRun
-	planUsageRefreshWG sync.WaitGroup
-	receiptMu          sync.Mutex
-	// obligationMu guards the per-chat record of what the chat still owes the
-	// user. It is deliberately separate from spawnedWorkMu: the clamp reads
-	// spawned work while holding neither, so sharing one lock would invite a
-	// cycle between the evidence collection and the settle it feeds.
-	obligationMu       sync.Mutex
-	obligations        map[string]*ObligationRecord
-	obligationReceipts map[string][]ObligationRecord
-	harnessTurns       *harnessTurnStore
-	spawnedWorkMu      sync.Mutex
-	spawnedWork        map[string]*spawnedWorkRecord
-	spawnedCandidates  map[string]spawnedWorkCandidate
-	resetMu            sync.Mutex
-	jobWG              sync.WaitGroup
-	resetting          bool
+	jobMu                 sync.Mutex
+	jobEndMu              sync.RWMutex
+	jobEndFunc            func(tabID, chatID string)
+	sessionRefreshMu      sync.RWMutex
+	sessionRefreshFunc    func(payload map[string]any)
+	updateMu              sync.Mutex
+	updateCheckMu         sync.Mutex
+	updateCheckRunning    bool
+	updateCheckCancel     context.CancelFunc
+	updateCheckWG         sync.WaitGroup
+	planUsageRefreshMu    sync.Mutex
+	planUsageRefreshes    map[string]*planUsageRefreshRun
+	planUsageRefreshWG    sync.WaitGroup
+	receiptMu             sync.Mutex
+	harnessTurns          *harnessTurnStore
+	spawnedWorkMu         sync.Mutex
+	spawnedWorkCommitMu   sync.Mutex
+	spawnedWork           map[string]*spawnedWorkRecord
+	spawnedCandidates     map[string]spawnedWorkCandidate
+	spawnedWorkObserverMu sync.RWMutex
+	spawnedWorkObserver   func(string, string, []SpawnedWorkItem) (SpawnedWorkActorProjection, error)
+	resetMu               sync.Mutex
+	jobWG                 sync.WaitGroup
+	resetting             bool
 	// updateGateMu is the admission barrier for an app-owned release handoff.
 	// A release may begin only after every foreground turn and tracked unit of
 	// work is terminal. Once BeginUpdateDrain succeeds, no new work can enter
@@ -112,10 +118,14 @@ type Manager struct {
 	// workspace the provider originally owned.
 	workspaceInvalidatedSessions sync.Map // map[sessionID]struct{}
 
-	envMu        sync.Mutex
-	envBySession map[string]*chatEnvTracker
-	envByChatID  map[string]*chatEnvTracker
-	envByTabID   map[string]*chatEnvTracker
+	envMu             sync.Mutex
+	envBySession      map[string]*chatEnvTracker
+	envByChatID       map[string]*chatEnvTracker
+	envByTabID        map[string]*chatEnvTracker
+	chatEnvObserverMu sync.RWMutex
+	chatEnvObserver   func(ChatEnvPayload) error
+	chatEnvRestorerMu sync.RWMutex
+	chatEnvRestorer   func(string, string) error
 
 	checkpointMu sync.Mutex
 }
@@ -141,12 +151,6 @@ type contextUsage struct {
 	OutputTokens     any
 	CachedReadTokens any
 	UpdatedAt        time.Time
-}
-
-type compactedSeed struct {
-	Summary   string
-	Messages  []historyMessage
-	KeepTurns int
 }
 
 type providerReplayEvent struct {
@@ -192,9 +196,13 @@ func NewManager(opts Options) *Manager {
 		sessionBridge:           make(map[string]*Bridge),
 		sessionProvider:         make(map[string]string),
 		chatProviders:           make(map[string]string),
-		nativeSessions:          newNativeSessionLedger(opts.StateDir),
+		nativeSessions:          newNativeSessionLedger(opts.StateDir, opts.MachineID),
 		agentOwners:             make(map[string]agentOwnerBinding),
 		agentOwnerBySession:     make(map[string]string),
+		providerLanesBySession:  make(map[string]*managerLane),
+		providerLanesByJob:      make(map[string]*managerLane),
+		providerLaneManagedJobs: make(map[string]struct{}),
+		providerAdmissions:      make(map[string]map[string]any),
 		jobs:                    make(map[string]*Job),
 		finishedJobIDs:          make(map[string]struct{}),
 		permissions:             make(map[string]*permissionResolver),
@@ -210,12 +218,9 @@ func NewManager(opts Options) *Manager {
 		usageBySession:          make(map[string]contextUsage),
 		planUsageByProvider:     make(map[string]PlanUsageSnapshot),
 		planUsageRefreshes:      make(map[string]*planUsageRefreshRun),
-		obligations:             make(map[string]*ObligationRecord),
-		obligationReceipts:      make(map[string][]ObligationRecord),
 		harnessTurns:            newHarnessTurnStore(),
 		spawnedWork:             make(map[string]*spawnedWorkRecord),
 		spawnedCandidates:       make(map[string]spawnedWorkCandidate),
-		compactedSeeds:          make(map[string]compactedSeed),
 		crashRecoveries:         make(map[string]time.Time),
 		commandCatalogs:         make(map[string]*commandCatalogEntry),
 		envBySession:            make(map[string]*chatEnvTracker),
@@ -226,12 +231,10 @@ func NewManager(opts Options) *Manager {
 		m.opts.Logf("native session ledger unreadable; native resume disabled", map[string]any{"error": m.nativeSessions.loadErr.Error()})
 	}
 	m.initProviders(opts)
+	m.initProviderRegistry()
+	m.initializePersistedProviderAuthenticationState()
 	m.emitMockAppUpdateFromEnv()
 	m.loadSpawnedWorkSnapshots()
-	// Order matters: obligations are judged against the spawned work that just
-	// reloaded, so a park whose lane genuinely survived is left alone.
-	m.loadObligationSnapshots()
-	m.reconcileObligationsAtBoot()
 	go m.lifecycleLoop()
 	go m.rssLoop()
 	go m.providerUpdateLoop()
@@ -266,6 +269,69 @@ func (m *Manager) SetSessionRefreshFunc(fn func(payload map[string]any)) {
 	m.sessionRefreshMu.Unlock()
 }
 
+// SetChatEnvObserver installs the actor ingress for actor-managed chats. The
+// observer must durably commit the typed Entorno snapshot before returning;
+// Manager then publishes no chat:env event for that snapshot. Unmanaged ACP
+// fixtures retain the historical direct event path when no observer is set.
+func (m *Manager) SetChatEnvObserver(fn func(ChatEnvPayload) error) {
+	if m == nil {
+		return
+	}
+	m.chatEnvObserverMu.Lock()
+	m.chatEnvObserver = fn
+	m.chatEnvObserverMu.Unlock()
+}
+
+// SetChatEnvRestorer lets the actor runtime rehydrate a previously committed
+// Git baseline before Manager initializes a disposable provider attachment.
+// It is deliberately a narrow reference restore, not a session/chat lookup.
+func (m *Manager) SetChatEnvRestorer(fn func(string, string) error) {
+	if m == nil {
+		return
+	}
+	m.chatEnvRestorerMu.Lock()
+	m.chatEnvRestorer = fn
+	m.chatEnvRestorerMu.Unlock()
+}
+
+func (m *Manager) restoreActorChatEnvReference(chatID, tabID string, actorManaged bool) {
+	if m == nil || !actorManaged {
+		return
+	}
+	m.chatEnvRestorerMu.RLock()
+	restorer := m.chatEnvRestorer
+	m.chatEnvRestorerMu.RUnlock()
+	if restorer == nil {
+		return
+	}
+	if err := restorer(strings.TrimSpace(chatID), strings.TrimSpace(tabID)); err != nil {
+		m.opts.Logf("actor-managed chat:env reference restore failed", map[string]any{
+			"chatId": chatID, "tabId": tabID, "error": redactSensitiveText(err.Error()),
+		})
+	}
+}
+
+func (m *Manager) observeChatEnv(payload ChatEnvPayload, actorManaged bool) bool {
+	if m == nil || !actorManaged {
+		return false
+	}
+	m.chatEnvObserverMu.RLock()
+	observer := m.chatEnvObserver
+	m.chatEnvObserverMu.RUnlock()
+	if observer == nil {
+		m.opts.Logf("actor-managed chat:env suppressed: no actor observer", map[string]any{
+			"chatId": payload.ChatID, "tabId": payload.TabID,
+		})
+		return true
+	}
+	if err := observer(payload); err != nil {
+		m.opts.Logf("actor-managed chat:env rejected before frozen-wire publication", map[string]any{
+			"chatId": payload.ChatID, "tabId": payload.TabID, "error": redactSensitiveText(err.Error()),
+		})
+	}
+	return true
+}
+
 func (m *Manager) requestSessionRefresh(payload map[string]any) {
 	if m == nil {
 		return
@@ -298,7 +364,11 @@ func (m *Manager) StateDir() string {
 }
 
 func (m *Manager) InitializeBridge(ctx context.Context, key string) (InitResult, error) {
-	return m.BridgeForKey(key).Initialize(ctx)
+	bridge := m.BridgeForKey(key)
+	if bridge == nil {
+		return InitResult{}, errors.New("no enabled ACP provider")
+	}
+	return bridge.Initialize(ctx)
 }
 
 func (m *Manager) NewSession(ctx context.Context, opts SessionOptions) (SessionInfo, error) {
@@ -326,12 +396,21 @@ func (m *Manager) NewSession(ctx context.Context, opts SessionOptions) (SessionI
 
 	unlockNative := func() {}
 	if m.nativeSessions != nil && m.nativeSessions.enabledFor(opts) {
-		unlockNative = m.nativeSessions.lock(opts.TabID, providerID)
+		unlockNative = m.nativeSessions.lock(opts.TabID, opts.ChatID, providerID, opts.CWD)
 	}
 	defer unlockNative()
+	if opts.ProviderLaneCreate && m.nativeSessions != nil && m.nativeSessions.enabledFor(opts) {
+		if binding, exists := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD); exists {
+			message := "an established provider lane cannot enter session/new"
+			if binding.Quarantined {
+				message = firstNonEmpty(binding.QuarantineReason, message)
+			}
+			return SessionInfo{}, nativeLaneError(providercontract.ErrorNativeIdentityConflict, message, nil)
+		}
+	}
 
-	info, attempted, fallbackReason, restoreErr := m.tryRestoreNativeSession(ctx, opts)
-	if attempted && restoreErr == nil && fallbackReason == "" {
+	info, bindingFound, restoreErr := m.tryRestoreNativeSession(ctx, opts)
+	if bindingFound && restoreErr == nil {
 		info, err = m.applySessionStartupControls(ctx, opts, info)
 		if err != nil {
 			m.CloseSession(context.Background(), info.SessionID)
@@ -345,40 +424,44 @@ func (m *Manager) NewSession(ctx context.Context, opts SessionOptions) (SessionI
 		m.WarmSpareSessions()
 		return info, nil
 	}
-	if fallbackReason != "" {
-		m.opts.Logf("acp native session restore unavailable; using canonical replay fallback", map[string]any{
-			"tabID": opts.TabID, "providerID": providerID, "reason": string(fallbackReason),
-		})
-		if attempted && restoreErr != nil {
-			if stale := m.getBridge(opts); stale != nil {
-				stale.Close(false, restoreErr)
-			}
-		}
-	} else if attempted && restoreErr != nil {
+	if bindingFound && restoreErr != nil {
 		if stale := m.getBridge(opts); stale != nil {
 			stale.Close(false, restoreErr)
 		}
+		if hint, policyErr := m.markProviderNeedsLogin(ctx, providerID, restoreErr); policyErr != nil {
+			return SessionInfo{}, policyErr
+		} else if hint != "" {
+			return SessionInfo{}, providerAuthenticationFailureError(providerID, restoreErr, hint)
+		}
 		return SessionInfo{}, restoreErr
 	}
-	if info, ok := m.adoptSpareSession(opts); ok {
-		info, err = m.applySessionStartupControls(ctx, opts, info)
-		if err != nil {
-			m.CloseSession(context.Background(), info.SessionID)
-			return SessionInfo{}, err
+	if !opts.ProviderLaneCreate {
+		if info, ok := m.adoptSpareSession(opts); ok {
+			info, err = m.applySessionStartupControls(ctx, opts, info)
+			if err != nil {
+				m.CloseSession(context.Background(), info.SessionID)
+				return SessionInfo{}, err
+			}
+			if err := m.rememberNewNativeSession(opts, info); err != nil {
+				m.CloseSession(context.Background(), info.SessionID)
+				return SessionInfo{}, err
+			}
+			m.mu.Lock()
+			m.bindChatProviderLocked(opts, providerID)
+			m.bindAgentOwnerLocked(m.agentOwnerBySession[info.SessionID], opts.ChatID, opts.TabID)
+			m.mu.Unlock()
+			m.initChatEnvForSession(ctx, opts, info)
+			m.WarmSpareSessions()
+			return info, nil
 		}
-		if err := m.rememberNewNativeSession(opts, info); err != nil {
-			m.CloseSession(context.Background(), info.SessionID)
-			return SessionInfo{}, err
-		}
-		m.mu.Lock()
-		m.bindChatProviderLocked(opts, providerID)
-		m.bindAgentOwnerLocked(m.agentOwnerBySession[info.SessionID], opts.ChatID, opts.TabID)
-		m.mu.Unlock()
-		m.initChatEnvForSession(ctx, opts, info)
-		m.WarmSpareSessions()
-		return info, nil
 	}
 	bridge := m.getBridge(opts)
+	if bridge == nil {
+		if _, configErr := m.providerConfig(providerID); configErr != nil {
+			return SessionInfo{}, configErr
+		}
+		return SessionInfo{}, fmt.Errorf("ACP provider bridge is unavailable: %s", providerID)
+	}
 	info, err = bridge.NewSession(ctx, opts)
 	if err == nil {
 		if !opts.Spare {
@@ -400,8 +483,31 @@ func (m *Manager) NewSession(ctx context.Context, opts SessionOptions) (SessionI
 		}
 		return info, nil
 	}
+	hint, policyErr := m.markProviderNeedsLogin(ctx, providerID, err)
+	if policyErr != nil {
+		bridge.Close(false, err)
+		return SessionInfo{}, policyErr
+	}
+	if hint != "" {
+		bridge.Close(false, err)
+		return SessionInfo{}, providerAuthenticationFailureError(providerID, err, hint)
+	}
+	if opts.ProviderLaneCreate {
+		bridge.Close(false, err)
+		return SessionInfo{}, nativeLaneError(
+			providercontract.ErrorAcceptanceAmbiguous,
+			"provider thread creation did not produce a durable acceptance receipt; Workass will not issue another create",
+			err,
+		)
+	}
 	bridge.Close(false, err)
 	bridge = m.replaceBridge(opts)
+	if bridge == nil {
+		if _, configErr := m.providerConfig(providerID); configErr != nil {
+			return SessionInfo{}, configErr
+		}
+		return SessionInfo{}, fmt.Errorf("ACP provider became unavailable after session failure: %s", providerID)
+	}
 	info, err = bridge.NewSession(ctx, opts)
 	if err == nil && !opts.Spare {
 		info, err = m.applySessionStartupControls(ctx, opts, info)
@@ -427,7 +533,7 @@ func (m *Manager) withNativeSessionControls(opts SessionOptions) SessionOptions 
 	if m == nil || m.nativeSessions == nil || !m.nativeSessions.enabledFor(opts) {
 		return opts
 	}
-	binding, ok := m.nativeSessions.get(opts.TabID, opts.ChatID, opts.ProviderID)
+	binding, ok := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, opts.ProviderID, opts.CWD)
 	if !ok {
 		return opts
 	}
@@ -487,6 +593,13 @@ func (m *Manager) applySessionStartupControls(ctx context.Context, opts SessionO
 	}
 	controls, err := bridge.ensureSessionControls(ctx, info.SessionID, modelID, modeID)
 	if err != nil {
+		hint, policyErr := m.markProviderNeedsLogin(ctx, info.ProviderID, err)
+		if policyErr != nil {
+			return info, policyErr
+		}
+		if hint != "" {
+			return info, providerAuthenticationFailureError(info.ProviderID, err, hint)
+		}
 		return skip("apply-failed", err)
 	}
 	if modelID != "" && controls.CurrentModelID != "" {
@@ -526,15 +639,14 @@ func (m *Manager) lockChatLifecycle(tabID, chatID string) func() {
 
 // InvalidateChatWorkspace moves one initialized logical chat to a different
 // workspace at an idle turn boundary. Provider-native threads commonly retain
-// their original cwd even when resume accepts another one, so every live and
-// hibernated binding for this exact tab+conversation is invalidated. No session
-// is created here: the next renderer ensureSession performs session/new at the
-// target cwd, and its first real turn canonical-replays Workass history.
+// their original cwd even when resume accepts another one, so the current
+// implementation closes the old epoch before a new lane is created at the
+// target cwd. Workass transcript text is never replayed into that lane.
 //
 // commitTarget runs while the exact chat lifecycle lock is held and before the
 // old sessions are invalidated. It durably records the requested workspace; a
-// crash after that commit is therefore recovered as a target-cwd fresh session,
-// never as execution under the old directory.
+// crash after that commit therefore cannot resume execution under the old
+// directory.
 func (m *Manager) InvalidateChatWorkspace(
 	ctx context.Context,
 	oldSessionID string,
@@ -566,7 +678,7 @@ func (m *Manager) InvalidateChatWorkspace(
 		if !owned {
 			return false, errors.New("La sesión ACP ya no pertenece a esta conversación; recargá antes de moverla.")
 		}
-	} else if len(liveSessions) > 0 || (m.nativeSessions != nil && m.nativeSessions.hasChat(opts.TabID, opts.ChatID)) {
+	} else if len(liveSessions) > 0 {
 		return false, errors.New("La conversación todavía tiene una sesión ACP; recargá antes de moverla.")
 	}
 	m.mu.Lock()
@@ -588,9 +700,6 @@ func (m *Manager) InvalidateChatWorkspace(
 	}
 	if oldSessionID != "" {
 		m.workspaceInvalidatedSessions.Store(oldSessionID, struct{}{})
-	}
-	if m.nativeSessions != nil {
-		m.nativeSessions.deleteChat(opts.TabID, opts.ChatID)
 	}
 	return true, nil
 }
@@ -632,10 +741,16 @@ func (m *Manager) ForkSession(ctx context.Context, opts ForkOptions) (SessionInf
 func (m *Manager) CloseSession(ctx context.Context, sessionID string) bool {
 	bridge := m.bridgeForSession(sessionID, SessionOptions{SessionID: sessionID})
 	if bridge == nil {
+		if lane := m.providerLaneForSessionID(sessionID); lane != nil {
+			lane.attachmentClosed()
+		}
 		return false
 	}
 	closed := bridge.CloseSession(ctx, sessionID)
 	if closed {
+		if lane := m.providerLaneForSessionID(sessionID); lane != nil {
+			lane.attachmentClosed()
+		}
 		m.forgetChatEnvSession(sessionID)
 	}
 	return closed
@@ -666,6 +781,7 @@ func (m *Manager) ForgetChat(ctx context.Context, tabID, chatID string) bool {
 		return false
 	}
 	m.cancelAndDrainSubagentsForChat(chatID, tabID, 5*time.Second)
+	m.DropSpawnedWorkForChat(tabID, chatID)
 	changed := false
 	for _, live := range m.LiveSessions() {
 		if live.TabID == tabID && live.ChatID == chatID {
@@ -713,10 +829,14 @@ func (m *Manager) Reset() bool {
 	m.spareWarming = make(map[string]int)
 	m.usageBySession = make(map[string]contextUsage)
 	m.planUsageByProvider = make(map[string]PlanUsageSnapshot)
-	m.compactedSeeds = make(map[string]compactedSeed)
 	m.crashRecoveries = make(map[string]time.Time)
 	m.commandCatalogs = make(map[string]*commandCatalogEntry)
 	m.mu.Unlock()
+	m.providerLaneMu.Lock()
+	m.providerLanesBySession = make(map[string]*managerLane)
+	m.providerLanesByJob = make(map[string]*managerLane)
+	m.providerLaneManagedJobs = make(map[string]struct{})
+	m.providerLaneMu.Unlock()
 	m.resetChatEnv()
 	for _, bridge := range bridges {
 		bridge.Close(true, errors.New("ACP session reset"))
@@ -875,6 +995,9 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 		return nil, errors.New("La sesión ACP pertenece a otra conversación; se rechazó para proteger el contexto.")
 	}
 	providerID := bridge.ProviderID()
+	if _, err := m.providerConfig(providerID); err != nil {
+		return nil, err
+	}
 	targetProviderID := providerID
 	if requested := normalizeProviderID(opts.ProviderID); requested != "" {
 		targetProviderID = requested
@@ -895,28 +1018,20 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 	if existing := bridge.jobForSession(opts.SessionID); liveSession && existing != nil && existing.Status == "running" {
 		return nil, ErrChatBusy
 	}
-	// Cross-provider handover (user law 2026-07-11): picking another agent's
-	// model mid-chat switches the chat's engine on the next turn. Same
-	// primitive as hibernate→resurrect: detach the live session here (fast,
-	// synchronous — the slow engine-side close happens in the background),
-	// and runAppChatJob resurrects it on opts.ProviderID, seeding the tab's
-	// shared transcript exactly once — the new agent inherits the chat
-	// context. The one-engine-per-chat landmine still holds: engines swap
-	// serially (turn-boundary only, guarded above), never multiplexed.
+	// Switching providers is a lane transaction, not a session replacement.
+	// Until the lane coordinator can create/restore the target provider lane and
+	// verify a non-sampling context import, fail before detaching the active lane.
 	if opts.ProviderID != "" && opts.ProviderID != providerID {
-		if liveSession {
-			bridge.detachSessionForHandover(opts.SessionID)
-			m.forgetChatEnvSession(opts.SessionID)
-			liveSession = false
+		return nil, &providercontract.Error{
+			Kind:      providercontract.ErrorUnsupportedCapability,
+			Operation: providercontract.OperationID("switch-provider-lane"),
+			Message:   "provider switching is blocked until the target lane can import context without transcript replay",
 		}
-		// Rebind the chat to the requested provider — the chat↔provider bond
-		// is per-conversation state, not a lifetime sentence.
-		m.mu.Lock()
-		m.bindChatProviderLocked(SessionOptions{TabID: opts.TabID, ChatID: opts.ChatID}, opts.ProviderID)
-		delete(m.sessionProvider, opts.SessionID)
-		m.mu.Unlock()
-		providerID = opts.ProviderID
 	}
+	// Carry the resolved provider into the durable job input. Once a host exits,
+	// sessionProvider is intentionally gone; recovery must use the immutable lane
+	// identity captured at admission rather than guess the default provider.
+	opts.ProviderID = providerID
 
 	now := time.Now().UTC()
 	m.mu.Lock()
@@ -963,6 +1078,17 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 		startOpts:      opts,
 	}
 	job.touchActivity()
+	// The actor must own the immutable provider turn before any manager state or
+	// frozen event can expose it. This callback persists the admission receipt;
+	// if it fails, no job is registered and no provider prompt is started.
+	public := job.Public()
+	if commitAdmission := opts.CommitAdmission; commitAdmission != nil {
+		opts.CommitAdmission = nil
+		job.startOpts.CommitAdmission = nil
+		if err := commitAdmission(public); err != nil {
+			return nil, err
+		}
+	}
 
 	m.mu.Lock()
 	if m.resetting {
@@ -976,26 +1102,19 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 	if liveSession {
 		bridge.setJobForSession(opts.SessionID, job)
 	}
-	m.beginChatTurnCheckpoint(context.Background(), job)
-	// A typed request opens what the chat owes the user; anything else — a wake
-	// delivering settled work, an agent-sent message — resumes what it already
-	// owed. Resuming is what retroactively rescinds a close: a chat that starts
-	// working again on its own was never finished, whatever the last turn's end
-	// looked like.
-	// A subagent runs in its own child chat (subagents.go:285) and answers to
-	// its coordinator, not to a person. Only chats a human can address carry an
-	// obligation.
-	if !job.internal && job.SubagentID == "" {
-		if opts.HumanAuthored {
-			m.openObligation(opts.TabID, opts.ChatID, opts.UserMessageID)
-		} else {
-			m.resumeObligation(opts.TabID, opts.ChatID)
+	// Actor operation identity must own the provider lane before the frozen
+	// start event is published. Fast providers can request permission or emit
+	// output immediately; binding after publication would leave those events
+	// briefly keyed by the unrelated renderer message id.
+	if operationID := providercontract.NormalizeOperationID(opts.OperationID); operationID != "" {
+		if lane := m.providerLaneForSession(opts.SessionID); lane != nil {
+			m.bindProviderLaneJob(lane, job.ID, operationID)
 		}
 	}
+	m.beginChatTurnCheckpoint(context.Background(), job)
 	// Snapshot the public start state before the worker can mutate the job. The
 	// old order launched runAppChatJob and then called job.Public(), racing fast
 	// providers that completed while the start reply was still being built.
-	public := job.Public()
 	m.emit("job:event", map[string]any{"type": "start", "job": public})
 
 	go m.runAppChatJob(ctx, bridge, job, opts)
@@ -1032,17 +1151,18 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		delete(m.jobs, job.ID)
 		m.mu.Unlock()
 		m.refreshChatEnvAfterJob(context.Background(), job)
-		// Persist the provider-native cursor before the terminal event can tell a
-		// client that this turn is complete. A stale generation is rejected by the
-		// ledger, so a concurrent replacement/compaction cannot be overwritten.
-		m.finishNativeTurn(job)
-		if job.Status == "done" {
+		actorRecovery := job.actorRecoveryPending.Load()
+		if job.Status == "done" && !actorRecovery {
 			m.maybeCompactAfterTurn(context.Background(), activeBridge, job)
 		}
-		m.settleObligationForJob(job)
-		m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})
+		if !actorRecovery {
+			m.classifyDispositionForJob(job)
+			m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})
+		}
 		activeBridge.clearJobForSession(job.SessionID, job)
-		m.notifyJobEnd(job.TabID, job.ChatID)
+		if !actorRecovery {
+			m.notifyJobEnd(job.TabID, job.ChatID)
+		}
 	}()
 
 	promptText := strings.TrimSpace(opts.Prompt)
@@ -1050,6 +1170,17 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		promptText = strings.TrimSpace(opts.Message)
 	}
 	if !activeBridge.hasLiveSession(job.SessionID) {
+		if opts.ProviderLaneManaged {
+			job.CrashInterrupted = true
+			job.actorRecoveryPending.Store(true)
+			if lane := m.providerLaneForSessionID(job.SessionID); lane != nil {
+				lane.attachmentClosed()
+			}
+			job.Status = "failed"
+			job.StopReason = "engine-crash"
+			job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			return
+		}
 		oldSessionID := job.SessionID
 		info, err := m.resurrectSession(ctx, opts)
 		if err != nil {
@@ -1077,54 +1208,15 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		job.SessionID = info.SessionID
 		job.ProviderID = info.ProviderID
 		activeBridge.setJobForSession(job.SessionID, job)
-		m.emit("chat:session-replaced", map[string]any{"chatId": nullableString(job.ChatID), "oldSessionId": oldSessionID, "session": info})
+		if oldSessionID != info.SessionID {
+			// Legacy renderer channel name: this is a provider-proven alias advance
+			// within the same native lineage, never a replacement thread.
+			m.emit("chat:session-replaced", map[string]any{
+				"chatId": nullableString(job.ChatID), "oldSessionId": oldSessionID,
+				"session": info, "sameNativeLineage": true,
+			})
+		}
 		m.emit("job:event", map[string]any{"type": "data", "id": job.ID, "stream": "system", "chunk": "\n[acp] sesión reconectada automáticamente; continuando…\n"})
-	}
-	if err := m.prepareNativeTurn(ctx, activeBridge, job, opts); err != nil {
-		// A native session whose Workass cursor diverged is never guessed-merged.
-		// Replace it with a fresh session and let the existing replay-once seed path
-		// rebuild from the canonical archive.
-		oldSessionID := job.SessionID
-		activeBridge.CloseSession(context.Background(), oldSessionID)
-		freshOpts := opts
-		freshOpts.SessionID = oldSessionID
-		freshOpts.ForceFresh = true
-		info, freshErr := m.resurrectSession(ctx, freshOpts)
-		if freshErr != nil {
-			job.Error += "\n[acp error] No se pudo reconstruir la sesión desde el historial canónico: " + freshErr.Error() + "\n"
-			job.Result = cleanDraft(job.Error)
-			code := 1
-			job.Code = &code
-			job.Status = "failed"
-			job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			return
-		}
-		activeBridge = m.bridgeForSession(info.SessionID, SessionOptions{TabID: opts.TabID, ChatID: opts.ChatID, SessionID: info.SessionID, ProviderID: info.ProviderID})
-		if activeBridge == nil {
-			job.Error += "\n[acp error] No se pudo enlazar la sesión reconstruida.\n"
-			job.Result = cleanDraft(job.Error)
-			code := 1
-			job.Code = &code
-			job.Status = "failed"
-			job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			return
-		}
-		job.SessionID = info.SessionID
-		job.ProviderID = info.ProviderID
-		activeBridge.setJobForSession(job.SessionID, job)
-		m.emit("chat:session-replaced", map[string]any{"chatId": nullableString(job.ChatID), "tabId": nullableString(job.TabID), "oldSessionId": oldSessionID, "session": info})
-		m.opts.Logf("acp native session restore unavailable; using canonical replay fallback", map[string]any{
-			"tabID": job.TabID, "providerID": job.ProviderID, "reason": string(nativeRestoreFallbackHistoryDivergence),
-		})
-		if prepareErr := m.prepareNativeTurn(ctx, activeBridge, job, freshOpts); prepareErr != nil {
-			job.Error += "\n[acp error] No se pudo preparar la sesión reconstruida: " + prepareErr.Error() + "\n"
-			job.Result = cleanDraft(job.Error)
-			code := 1
-			job.Code = &code
-			job.Status = "failed"
-			job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			return
-		}
 	}
 	// The renderer sends the selected controls on every turn. Reconcile them
 	// against THIS chat's bridge immediately before prompting so a reconnect,
@@ -1139,7 +1231,20 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		// the next turn. This is the same recoverability rule used during
 		// session startup and prevents one bad set_config_option from bricking a
 		// chat forever.
-		m.markProviderNeedsLogin(ctx, job.ProviderID, controlsErr)
+		hint, policyErr := m.markProviderNeedsLogin(ctx, job.ProviderID, controlsErr)
+		if policyErr != nil || hint != "" {
+			displayErr := policyErr
+			if displayErr == nil {
+				displayErr = providerAuthenticationFailureError(job.ProviderID, controlsErr, hint)
+			}
+			job.Error += "\n[acp error] " + redactSensitiveText(displayErr.Error()) + "\n"
+			job.Result = cleanDraft(firstNonEmpty(m.outputForJob(job), job.Error))
+			code := 1
+			job.Code = &code
+			job.Status = "failed"
+			job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			return
+		}
 		m.opts.Logf("turn control restore skipped", map[string]any{
 			"tabID": job.TabID, "providerID": job.ProviderID,
 			"error": redactSensitiveText(controlsErr.Error()),
@@ -1165,7 +1270,7 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		opts.ModeID = controlResult.CurrentModeID
 	}
 	if activeBridge.markSeeded(job.SessionID) {
-		promptText = m.buildAppChatPrompt(job.SessionID, opts, promptText)
+		promptText = m.buildAppChatPrompt(opts, promptText)
 	} else {
 		promptText = buildUserRequestBlock(promptText, opts.HumanAuthored)
 	}
@@ -1179,11 +1284,15 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	// forget, and "only on change" degrades to "once, ever" the first time a
 	// conversation compacts.
 	promptText = buildTurnRuntimeIdentity(activeBridge, job.ProviderID, opts.ModelID) + promptText
-	res, err := activeBridge.promptForJob(ctx, job.SessionID, job, promptText, opts.Images)
+	operationID := strings.TrimSpace(firstNonEmpty(opts.OperationID, opts.UserMessageID, job.ID))
+	res, err := activeBridge.promptForJob(ctx, job.SessionID, job, operationID, promptText, opts.Images)
 	if err != nil {
-		displayError := err.Error()
-		if hint := m.markProviderNeedsLogin(ctx, job.ProviderID, err); hint != "" {
-			displayError += ". " + hint
+		displayError := redactSensitiveText(err.Error())
+		hint, policyErr := m.markProviderNeedsLogin(ctx, job.ProviderID, err)
+		if policyErr != nil {
+			displayError = redactSensitiveText(policyErr.Error())
+		} else if hint != "" {
+			displayError = providerAuthenticationFailureError(job.ProviderID, err, hint).Error()
 		}
 		if job.CrashInterrupted && job.crashRecoveryDone != nil {
 			<-job.crashRecoveryDone
@@ -1208,7 +1317,6 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		return
 	}
-	m.recoverFrontierProviderAfterSuccessfulTurn(ctx, activeBridge)
 	job.StopReason = res.StopReason
 	job.Result = cleanDraft(m.outputForJob(job))
 	code := 0
@@ -1230,10 +1338,28 @@ func (m *Manager) resurrectSession(ctx context.Context, opts JobStartOptions) (S
 		providerID = m.sessionProvider[opts.SessionID]
 		m.mu.Unlock()
 	}
-	sessionOpts := SessionOptions{CWD: opts.CWD, TabID: opts.TabID, ChatID: opts.ChatID, ProviderID: providerID, ForceFresh: opts.ForceFresh}
+	if _, err := m.providerConfig(providerID); err != nil {
+		return SessionInfo{}, err
+	}
+	if m.nativeSessions == nil {
+		return SessionInfo{}, nativeLaneError(providercontract.ErrorNativeThreadMissing, "the chat has no durable provider lane to resume", nil)
+	}
+	binding, ok := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD)
+	if !ok {
+		return SessionInfo{}, nativeLaneError(providercontract.ErrorNativeThreadMissing, "the chat has no exact provider-native thread binding", nil)
+	}
+	expectedThreadID := firstNonEmpty(binding.ProviderSessionID, binding.SessionID)
+	sessionOpts := SessionOptions{CWD: opts.CWD, TabID: opts.TabID, ChatID: opts.ChatID, ProviderID: providerID}
 	info, err := m.NewSession(ctx, sessionOpts)
 	if err != nil {
 		return SessionInfo{}, err
+	}
+	if info.SessionID != expectedThreadID {
+		return SessionInfo{}, nativeLaneError(
+			providercontract.ErrorNativeIdentityConflict,
+			"provider resume returned a different native thread",
+			fmt.Errorf("expected %q, got %q", expectedThreadID, info.SessionID),
+		)
 	}
 	bridge := m.bridgeForSession(info.SessionID, SessionOptions{TabID: opts.TabID, ChatID: opts.ChatID, SessionID: info.SessionID})
 	if bridge == nil {
@@ -1273,24 +1399,12 @@ func cleanDraft(text string) string {
 	return strings.TrimSpace(text)
 }
 
-func (m *Manager) buildAppChatPrompt(sessionID string, opts JobStartOptions, userText string) string {
-	brief := m.buildEnvironmentBrief(false)
-	// Where restored or compacted text is about to sit next to the user's own
-	// words, the language rule is load-bearing and is sent regardless of who
-	// authored the turn — that foreign text is exactly what it exists to stop
-	// from selecting the reply language.
-	if seed, ok := m.takeCompactedSeed(sessionID); ok {
-		block := buildCompactedSeedBlock(seed)
-		if block == "" {
-			return brief + buildUserRequestBlock(userText, opts.HumanAuthored)
-		}
-		return brief + block + buildUserRequestBlock(userText, false)
-	}
-	history := promptHistoryForTab(m.opts.StateDir, opts)
-	if len(history) == 0 {
-		return brief + buildUserRequestBlock(userText, opts.HumanAuthored)
-	}
-	return brief + buildHistoryBlock(history, historyCharBudget(opts)) + buildUserRequestBlock(userText, false)
+func (m *Manager) buildAppChatPrompt(opts JobStartOptions, userText string) string {
+	// Workass history is a UI/audit projection. It is never replayed into a
+	// provider thread. Established lanes resume their native context; a new lane
+	// starts empty unless its ContextStrategy performs a verified non-sampling
+	// import before this function is reached.
+	return m.buildEnvironmentBrief(false) + buildUserRequestBlock(userText, opts.HumanAuthored)
 }
 
 const perTurnLanguageRule = "Response language for this turn: use the language of the current human-authored user request below. Workass internal notices, maintenance or wake messages, restored transcripts, internal summaries, tool output, UI labels, locale, and previous assistant messages are context only and never language preferences. Generated Workass tool-card text embedded in the request is quoted evidence, not human-authored language selection; when a card is followed by human prose, use the language of that prose. If the current request is a Workass-generated notice, continue in the language of the most recent human-authored user message unless that user explicitly requested another language.\n"
@@ -1391,19 +1505,6 @@ func buildTurnRuntimeIdentity(bridge *Bridge, providerID, selectedModelID string
 	)
 }
 
-func (m *Manager) takeCompactedSeed(sessionID string) (compactedSeed, bool) {
-	if sessionID == "" {
-		return compactedSeed{}, false
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	seed, ok := m.compactedSeeds[sessionID]
-	if ok {
-		delete(m.compactedSeeds, sessionID)
-	}
-	return seed, ok
-}
-
 // buildEnvironmentBrief describes the session it is actually being sent to.
 // forSubagent matters because a delegated child does not get the browser
 // server: telling it otherwise costs a fruitless tool hunt on claude and an
@@ -1436,147 +1537,6 @@ func (m *Manager) buildEnvironmentBrief(forSubagent bool) string {
 		"Each line is one JSON message {role, content, status, at}; to read another conversation the user references, read that file.\n\n"
 }
 
-type historyMessage struct {
-	ID      string
-	Role    string
-	Content string
-	At      string
-}
-
-func promptHistoryForTab(stateDir string, opts JobStartOptions) []historyMessage {
-	visible := dedupePromptHistory(opts.History)
-	if opts.TabID == "" {
-		return visible
-	}
-	archived := readChatArchive(stateDir, opts.TabID, historyCharBudget(opts))
-	if len(archived) == 0 {
-		return visible
-	}
-	if len(visible) == 0 {
-		return archived
-	}
-	max := len(archived)
-	if len(visible) < max {
-		max = len(visible)
-	}
-	overlap := 0
-	for k := max; k > 0; k-- {
-		ok := true
-		for i := 0; i < k; i++ {
-			if historyMsgKey(archived[len(archived)-k+i]) != historyMsgKey(visible[i]) {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			overlap = k
-			break
-		}
-	}
-	if overlap > 0 {
-		out := append([]historyMessage{}, archived...)
-		return append(out, visible[overlap:]...)
-	}
-	if len(archived) >= len(visible) {
-		return archived
-	}
-	return visible
-}
-
-func dedupePromptHistory(raw []any) []historyMessage {
-	seen := map[string]struct{}{}
-	var out []historyMessage
-	for _, item := range raw {
-		msg, ok := historyMessageFromMap(mapFromAny(item))
-		if !ok {
-			continue
-		}
-		key := historyMsgKey(msg)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, msg)
-	}
-	return out
-}
-
-func historyMessageFromMap(m map[string]any) (historyMessage, bool) {
-	content := strings.TrimSpace(asString(m["content"]))
-	if content == "" {
-		return historyMessage{}, false
-	}
-	role := "assistant"
-	if asString(m["role"]) == "user" {
-		role = "user"
-	}
-	return historyMessage{ID: strings.TrimSpace(asString(m["id"])), Role: role, Content: content, At: asString(m["at"])}, true
-}
-
-func historyMsgKey(m historyMessage) string {
-	if m.ID != "" {
-		return "id\x00" + m.ID
-	}
-	prefix := m.Content
-	if len(prefix) > 200 {
-		prefix = prefix[:200]
-	}
-	if m.At != "" {
-		return m.Role + "\x00" + m.At + "\x00" + prefix
-	}
-	return m.Role + "\x00" + m.Content
-}
-
-func readChatArchive(stateDir, tabID string, budget int) []historyMessage {
-	file := filepath.Join(stateDir, "chat-archive", safeArchiveName(tabID)+".jsonl")
-	f, err := os.Open(file)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-	limit := archiveReadCharCap(budget)
-	var out []historyMessage
-	seen := map[string]struct{}{}
-	used := 0
-	_ = visitJSONLRecords(f, func(line []byte) {
-		var item map[string]any
-		dec := json.NewDecoder(bytes.NewReader(line))
-		dec.UseNumber()
-		if err := dec.Decode(&item); err != nil {
-			return
-		}
-		msg, ok := historyMessageFromMap(item)
-		if !ok {
-			return
-		}
-		key := historyMsgKey(msg)
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		out = append(out, msg)
-		used += historyMessageCost(msg)
-		for used > limit && len(out) > 1 {
-			old := out[0]
-			delete(seen, historyMsgKey(old))
-			used -= historyMessageCost(old)
-			out = out[1:]
-		}
-	})
-	return out
-}
-
-func archiveReadCharCap(budget int) int {
-	if budget <= 0 {
-		budget = 120000
-	}
-	return clampInt(budget*2, 24000, 1000000)
-}
-
-func historyMessageCost(msg historyMessage) int {
-	return len(msg.Content) + len(msg.Role) + len(msg.At) + 16
-}
-
 func safeArchiveName(tabID string) string {
 	var b strings.Builder
 	for _, r := range tabID {
@@ -1592,17 +1552,6 @@ func safeArchiveName(tabID string) string {
 	return b.String()
 }
 
-func historyCharBudget(opts JobStartOptions) int {
-	raw := opts.HistoryCharBudget
-	if raw > 0 {
-		return clampInt(raw, 24000, 500000)
-	}
-	if opts.ContextSize > 0 {
-		return clampInt(int(float64(opts.ContextSize)*1.2), 120000, 500000)
-	}
-	return 120000
-}
-
 func clampInt(v, min, max int) int {
 	if v < min {
 		return min
@@ -1611,61 +1560,6 @@ func clampInt(v, min, max int) int {
 		return max
 	}
 	return v
-}
-
-func buildHistoryBlock(history []historyMessage, budget int) string {
-	if len(history) == 0 {
-		return ""
-	}
-	var lines []string
-	used := 0
-	for i := len(history) - 1; i >= 0; i-- {
-		content := sanitizeReplayContent(history[i].Content)
-		if content == "" {
-			continue
-		}
-		who := "User"
-		if history[i].Role == "assistant" {
-			who = "Assistant"
-		}
-		line := who + ": " + content
-		if used+len(line) > budget {
-			if len(lines) > 0 {
-				break
-			}
-			line = trimHistoryLine(line, budget)
-			if strings.TrimSpace(line) == "" {
-				break
-			}
-		}
-		lines = append(lines, line)
-		used += len(line) + 2
-	}
-	for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
-		lines[i], lines[j] = lines[j], lines[i]
-	}
-	if len(lines) == 0 {
-		return ""
-	}
-	return "Previous conversation (restored after the Workass app or ACP engine restarted). Use it only as task context and continue from where the work stopped; do not greet or restart from scratch. The language of this restored text is not a reply-language instruction.\n\n<conversation_transcript>\n" + strings.Join(lines, "\n\n") + "\n</conversation_transcript>\n\n"
-}
-
-func trimHistoryLine(line string, budget int) string {
-	if budget <= 0 {
-		return ""
-	}
-	if len(line) <= budget {
-		return line
-	}
-	const marker = "\n[history truncated]\n"
-	if budget <= len(marker) {
-		return line[:budget]
-	}
-	keep := budget - len(marker)
-	if keep <= 0 {
-		return line[:budget]
-	}
-	return marker + line[len(line)-keep:]
 }
 
 const finishedJobReceiptLimit = 256
@@ -1722,6 +1616,19 @@ func (m *Manager) CancelJobResult(id string) JobCancelResult {
 
 func (m *Manager) CancelJob(id string) bool {
 	return m.CancelJobResult(id).Cancelled
+}
+
+// JobChatID is a read-only compatibility fence. Actor-aware handlers use it to
+// distinguish an addressless legacy/internal job from a logical chat whose
+// mutation must never fall back around the actor.
+func (m *Manager) JobChatID(id string) string {
+	id = strings.TrimSpace(id)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if job := m.jobs[id]; job != nil {
+		return strings.TrimSpace(job.ChatID)
+	}
+	return ""
 }
 
 // RunningJobForChat returns the exact active app-chat job, if any. It is used by
@@ -1805,6 +1712,19 @@ func (m *Manager) PermissionDecide(id, optionID string) bool {
 	return true
 }
 
+// PermissionChatID is the read-only counterpart to JobChatID. A non-empty
+// value means the request is actor-owned and may not use manager mutation as a
+// recovery fallback.
+func (m *Manager) PermissionChatID(id string) string {
+	id = strings.TrimSpace(id)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rec := m.permissions[id]; rec != nil {
+		return strings.TrimSpace(asString(rec.payload["chatId"]))
+	}
+	return ""
+}
+
 // PendingPermissions returns reconnect-safe copies of unresolved permission
 // requests. The wire hub replays them only to the current controller.
 func (m *Manager) PendingPermissions() []any {
@@ -1848,6 +1768,14 @@ func (m *Manager) requestPermission(req permissionRequest) string {
 		"title":     firstNonEmpty(asString(req.ToolCall["title"]), asString(req.ToolCall["kind"]), "acción"),
 		"kind":      nullableString(asString(req.ToolCall["kind"])),
 		"options":   permissionOptions(req.Options),
+	}
+	for _, job := range m.jobs {
+		if job == nil || (job.ID != req.JobID && job.VisibleJobID != req.JobID) {
+			continue
+		}
+		payload["tabId"] = nullableString(job.TabID)
+		payload["chatId"] = nullableString(job.ChatID)
+		break
 	}
 	// A question is not a permission: AskUserQuestion reaches us down this same
 	// channel because the SDK has no other one (see claude-native-host.mjs), and
@@ -2029,6 +1957,15 @@ func (m *Manager) cancelPermissionsForSession(sessionID string) {
 }
 
 func (m *Manager) emit(channel string, payload any) {
+	if err := m.observeProviderLaneEvent(channel, payload); err != nil {
+		m.opts.Logf("provider event rejected before frozen-wire publication", map[string]any{
+			"channel": channel, "error": redactSensitiveText(err.Error()),
+		})
+		if lane := m.providerLaneForFrozenPayload(mapFromAny(payload)); lane != nil {
+			lane.rejectFrozenProtocol(err)
+		}
+		return
+	}
 	m.cacheProviderReplayEvent(channel, payload)
 	m.opts.Broadcast(channel, payload)
 }
@@ -2181,6 +2118,23 @@ func (m *Manager) LiveSessions() []LiveSession {
 	return out
 }
 
+// LiveSessionByID returns the exact disposable bridge attachment for one
+// provider-native session. Unlike LiveSessions it does not collapse several
+// provider lanes that currently share one renderer tab; actor projection must
+// overlay only the lane selected by authoritative chat state.
+func (m *Manager) LiveSessionByID(sessionID string) (LiveSession, bool) {
+	if m == nil || strings.TrimSpace(sessionID) == "" {
+		return LiveSession{}, false
+	}
+	m.mu.Lock()
+	bridge := m.sessionBridge[strings.TrimSpace(sessionID)]
+	m.mu.Unlock()
+	if bridge == nil {
+		return LiveSession{}, false
+	}
+	return bridge.liveSession(strings.TrimSpace(sessionID))
+}
+
 // LiveSession returns the runtime binding for one ACP session without exposing
 // manager internals to the wire/session persistence layer.
 func (m *Manager) LiveSession(sessionID string) (LiveSession, bool) {
@@ -2200,13 +2154,18 @@ func (m *Manager) getBridge(opts SessionOptions) *Bridge {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	providerID, err := m.resolveSessionProviderLocked(opts)
-	if err == nil {
-		opts.ProviderID = providerID
+	if err != nil {
+		return nil
+	}
+	opts.ProviderID = providerID
+	providerOptions, err := m.optionsForProviderLocked(opts.ProviderID)
+	if err != nil {
+		return nil
 	}
 	key := m.normalizeBridgeKeyLocked(opts)
 	bridge := m.bridges[key]
 	if bridge == nil || bridge.Closed() || bridge.Hibernated() {
-		bridge = newBridge(key, m.optionsForProviderLocked(opts.ProviderID), m)
+		bridge = newBridge(key, providerOptions, m)
 		m.bridges[key] = bridge
 	}
 	return bridge
@@ -2216,11 +2175,16 @@ func (m *Manager) replaceBridge(opts SessionOptions) *Bridge {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	providerID, err := m.resolveSessionProviderLocked(opts)
-	if err == nil {
-		opts.ProviderID = providerID
+	if err != nil {
+		return nil
+	}
+	opts.ProviderID = providerID
+	providerOptions, err := m.optionsForProviderLocked(opts.ProviderID)
+	if err != nil {
+		return nil
 	}
 	key := m.normalizeBridgeKeyLocked(opts)
-	bridge := newBridge(key, m.optionsForProviderLocked(opts.ProviderID), m)
+	bridge := newBridge(key, providerOptions, m)
 	m.bridges[key] = bridge
 	return bridge
 }
@@ -2375,7 +2339,6 @@ func (m *Manager) forgetSession(sessionID string, bridge *Bridge) {
 		delete(m.agentOwners, ownerKey)
 	}
 	delete(m.usageBySession, sessionID)
-	delete(m.compactedSeeds, sessionID)
 	m.forgetCommandCatalogSessionLocked(sessionID)
 }
 
@@ -2430,10 +2393,10 @@ func (b *Bridge) NewSession(ctx context.Context, opts SessionOptions) (SessionIn
 	return info, err
 }
 
-// RestoreSession attaches this new adapter process to the provider-native
-// thread saved for the chat. session/resume is preferred because it does not
-// replay provider history into Workass; session/load is the capability fallback
-// and its history notifications are intentionally ignored while no job exists.
+// RestoreSession attaches a new adapter host to the exact provider-native
+// thread saved for the lane. Established lanes use session/resume exclusively:
+// session/load may hydrate a transcript, but it is not proof that the same
+// native lineage was resumed and therefore cannot be a recovery fallback.
 func (b *Bridge) RestoreSession(ctx context.Context, binding nativeSessionBinding, opts SessionOptions) (SessionInfo, string, error) {
 	if _, err := b.Initialize(ctx); err != nil {
 		return SessionInfo{}, "", err
@@ -2447,33 +2410,22 @@ func (b *Bridge) RestoreSession(ctx context.Context, binding nativeSessionBindin
 		"cwd":        cwd,
 		"mcpServers": sessionMCPServers(b.opts, opts),
 	}
-	var attempts []string
-	if b.supportsSessionResume() {
-		attempts = append(attempts, "session/resume")
-	}
-	if b.supportsSessionLoad() {
-		attempts = append(attempts, "session/load")
-	}
-	if len(attempts) == 0 {
-		return SessionInfo{}, "", errors.New("ACP provider does not support session resume or load")
+	if !b.supportsSessionResume() {
+		return SessionInfo{}, "", errors.New("ACP provider does not support exact session/resume")
 	}
 	releaseOwner := b.manager.provisionAgentOwner(opts)
-	var lastErr error
-	for _, method := range attempts {
-		res, err := b.request(ctx, method, params, b.opts.InitTimeout)
-		if err != nil {
-			lastErr = b.withStderrTail(err)
-			continue
-		}
-		info, attachErr := b.attachSession(resumeID, cwd, opts, res, method)
-		if attachErr != nil {
-			releaseOwner()
-			return SessionInfo{}, method, attachErr
-		}
-		return info, method, nil
+	const method = "session/resume"
+	res, err := b.request(ctx, method, params, b.opts.InitTimeout)
+	if err != nil {
+		releaseOwner()
+		return SessionInfo{}, method, b.withStderrTail(err)
 	}
-	releaseOwner()
-	return SessionInfo{}, "", lastErr
+	info, attachErr := b.attachSession(resumeID, cwd, opts, res, method)
+	if attachErr != nil {
+		releaseOwner()
+		return SessionInfo{}, method, attachErr
+	}
+	return info, method, nil
 }
 
 func (b *Bridge) sessionCWD(raw string) string {
@@ -2499,13 +2451,6 @@ func (b *Bridge) supportsSessionResume() bool {
 	return ok
 }
 
-func (b *Bridge) supportsSessionLoad() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	value, ok := b.agentCaps["loadSession"].(bool)
-	return ok && value
-}
-
 func (b *Bridge) attachSession(sessionID, cwd string, opts SessionOptions, res map[string]any, reason string) (SessionInfo, error) {
 	if !opts.Ephemeral {
 		if err := b.manager.rememberSession(sessionID, b, opts.AgentOwnerKey); err != nil {
@@ -2522,33 +2467,34 @@ func (b *Bridge) attachSession(sessionID, cwd string, opts SessionOptions, res m
 	b.pinned = false
 	b.lastActivity = time.Now()
 	b.sessions[sessionID] = struct{}{}
-	if reason == "session/resume" || reason == "session/load" {
-		b.restoredSessions[sessionID] = struct{}{}
-	} else {
-		delete(b.restoredSessions, sessionID)
-	}
 	b.jobsBySession[sessionID] = nil
 	b.mu.Unlock()
 	b.applyConfigOptionsForSession(sessionID, res["configOptions"], false, false)
 	b.applyAvailableModels(res["availableModels"])
 	b.applySessionModels(res["models"])
 	commandCatalog := b.applyCommandCatalog(sessionID, res["commandCatalog"])
+	commandCatalogSupported := b.supportsProviderCommandCatalog()
 	b.manager.bridgeChanged(b, reason)
 
 	b.mu.Lock()
 	currentModelID := b.currentModelSelectionLocked()
+	realmMeta := mapFromAny(mapFromAny(res["_meta"])["workassProviderRealm"])
 	info := SessionInfo{
-		SessionID:      sessionID,
-		CWD:            cwd,
-		Agent:          b.agentName,
-		ProviderID:     b.providerID,
-		ProviderName:   b.providerName,
-		Models:         append([]Model(nil), b.models...),
-		CurrentModelID: currentModelID,
-		Modes:          append([]Mode(nil), b.modes...),
-		CurrentModeID:  copyStringPtr(b.currentMode),
-		ImageSupport:   b.imageSupport,
-		CommandCatalog: commandCatalog,
+		SessionID:               sessionID,
+		CWD:                     cwd,
+		Agent:                   b.agentName,
+		ProviderID:              b.providerID,
+		ProviderName:            b.providerName,
+		ProviderAccountScope:    strings.TrimSpace(asString(realmMeta["accountScope"])),
+		ProviderInstallScope:    strings.TrimSpace(asString(realmMeta["installScope"])),
+		ProviderRealmVerified:   boolFromMap(realmMeta, "verified"),
+		Models:                  append([]Model(nil), b.models...),
+		CurrentModelID:          currentModelID,
+		Modes:                   append([]Mode(nil), b.modes...),
+		CurrentModeID:           copyStringPtr(b.currentMode),
+		ImageSupport:            b.imageSupport,
+		CommandCatalogSupported: commandCatalogSupported,
+		CommandCatalog:          commandCatalog,
 	}
 	b.mu.Unlock()
 	if !opts.Ephemeral {
@@ -2656,37 +2602,6 @@ func (b *Bridge) claimLegacyChatID(sessionID, tabID, chatID string) bool {
 	return true
 }
 
-// detachSessionForHandover synchronously removes a session from the bridge —
-// hasLiveSession turns false immediately, which is what the cross-provider
-// switch needs so the next turn resurrects on the new provider — while the
-// slow engine-side close (session/close RPC, engine shutdown) runs in the
-// background. The turn that triggered the switch must never wait on it.
-func (b *Bridge) detachSessionForHandover(sessionID string) {
-	if sessionID == "" {
-		return
-	}
-	b.manager.cancelPermissionsForSession(sessionID)
-	b.mu.Lock()
-	delete(b.sessions, sessionID)
-	delete(b.seededSessions, sessionID)
-	delete(b.restoredSessions, sessionID)
-	delete(b.jobsBySession, sessionID)
-	delete(b.durableModelSelection, sessionID)
-	remaining := len(b.sessions)
-	b.mu.Unlock()
-	b.manager.forgetSession(sessionID, b)
-	go func() {
-		if !b.Closed() && !b.Hibernated() {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			_, _ = b.request(ctx, "session/close", map[string]any{"sessionId": sessionID}, 8*time.Second)
-		}
-		if remaining == 0 {
-			b.Close(true, errors.New("ACP session closed (provider switch)"))
-		}
-	}()
-}
-
 // releaseSession removes a session from this bridge's internal ownership maps
 // without touching manager state or the engine process. Used when a
 // replacement bridge takes over a session that this (hibernated or closed)
@@ -2695,7 +2610,6 @@ func (b *Bridge) releaseSession(sessionID string) {
 	b.mu.Lock()
 	delete(b.sessions, sessionID)
 	delete(b.seededSessions, sessionID)
-	delete(b.restoredSessions, sessionID)
 	delete(b.jobsBySession, sessionID)
 	delete(b.durableModelSelection, sessionID)
 	b.mu.Unlock()
@@ -2709,7 +2623,6 @@ func (b *Bridge) CloseSession(ctx context.Context, sessionID string) bool {
 	b.mu.Lock()
 	delete(b.sessions, sessionID)
 	delete(b.seededSessions, sessionID)
-	delete(b.restoredSessions, sessionID)
 	delete(b.jobsBySession, sessionID)
 	delete(b.durableModelSelection, sessionID)
 	remaining := len(b.sessions)
@@ -3003,7 +2916,7 @@ func (b *Bridge) resolveModelWriteLocked(modelID string) modelWriteResolution {
 		// Claude and Codex own a separate effort axis, so trust the canonical
 		// split and let the adapter judge the base id — apply is best-effort,
 		// and the write's configOptions echo completes discovery.
-		if providerID := normalizeProviderID(b.providerID); providerID == "claude" || providerID == "codex" {
+		if providerAdapterForID(b.providerID).model.SeparateEffortAxis {
 			out.modelValue = base
 			out.separateAxis = true
 		}
@@ -3017,11 +2930,11 @@ func (b *Bridge) resolveModelWriteLocked(modelID string) modelWriteResolution {
 		out.separateAxis = true
 		return out
 	}
-	frontierAxisProvider := normalizeProviderID(b.providerID) == "claude" || normalizeProviderID(b.providerID) == "codex"
-	if !frontierAxisProvider {
+	separateAxisProvider := providerAdapterForID(b.providerID).model.SeparateEffortAxis
+	if !separateAxisProvider {
 		for _, levels := range b.axisEffortsByModel {
 			if len(levels) > 0 {
-				frontierAxisProvider = true
+				separateAxisProvider = true
 				break
 			}
 		}
@@ -3031,12 +2944,12 @@ func (b *Bridge) resolveModelWriteLocked(modelID string) modelWriteResolution {
 	// adapter that has never exposed a separate effort axis. Codex and Claude
 	// also advertise composite catalog rows, but their config write contract is
 	// base model first followed by the provider's effort option.
-	if variantEffort := matchingStringFold(b.variantEffortsByModel[base], canonical); variantEffort != "" && !frontierAxisProvider {
+	if variantEffort := matchingStringFold(b.variantEffortsByModel[base], canonical); variantEffort != "" && !separateAxisProvider {
 		out.effort = variantEffort
 		out.variantMatched = true
 		return out
 	}
-	if !frontierAxisProvider {
+	if !separateAxisProvider {
 		// A custom adapter that has never exposed an effort axis owns its model ids
 		// byte-for-byte. Preserve unknown canonical brackets for compatibility.
 		return out
@@ -3071,7 +2984,7 @@ func (b *Bridge) currentModelSelectionLocked() *string {
 	if b.currentModel == nil {
 		return nil
 	}
-	modelID := b.canonicalClaudeModelIDLocked(*b.currentModel)
+	modelID := b.canonicalProviderModelIDLocked(*b.currentModel)
 	if modelID == "" {
 		return nil
 	}
@@ -3091,7 +3004,7 @@ func (b *Bridge) currentModelSelectionLocked() *string {
 }
 
 func (b *Bridge) Prompt(ctx context.Context, sessionID, promptText string) (PromptResult, error) {
-	return b.promptForJob(ctx, sessionID, nil, promptText, nil)
+	return b.promptForJob(ctx, sessionID, nil, "", promptText, nil)
 }
 
 func (b *Bridge) promptSystem(ctx context.Context, sessionID, promptText string) (PromptResult, error) {
@@ -3102,67 +3015,15 @@ func (b *Bridge) promptSystem(ctx context.Context, sessionID, promptText string)
 		b.flushJobBuffers(job)
 		b.clearJobForSession(sessionID, job)
 	}()
-	return b.promptForJob(ctx, sessionID, job, promptText, nil)
-}
-
-func (b *Bridge) supportsMidTurnSteering() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return boolMapField(b.agentMeta, "steerNotification") ||
-		boolMapField(b.agentMeta, "sessionSteer") ||
-		boolMapField(b.agentCaps, "steerNotification") ||
-		boolMapField(b.agentCaps, "sessionSteer")
-}
-
-func (b *Bridge) supportsNativeCodexSteering() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return boolMapField(b.agentMeta, "workassCodexSteerRequest") ||
-		boolMapField(b.agentCaps, "workassCodexSteerRequest")
-}
-
-func (b *Bridge) supportsNativeCodexSteerReceipt() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return boolMapField(b.agentMeta, "workassCodexSteerReceipt") ||
-		boolMapField(b.agentCaps, "workassCodexSteerReceipt")
-}
-
-func (b *Bridge) supportsNativeClaudeSteering() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return boolMapField(b.agentMeta, "workassClaudeSteerRequest") ||
-		boolMapField(b.agentCaps, "workassClaudeSteerRequest")
-}
-
-func (b *Bridge) supportsNativeClaudeSteerReceipt() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return boolMapField(b.agentMeta, "workassClaudeSteerReceipt") ||
-		boolMapField(b.agentCaps, "workassClaudeSteerReceipt")
+	return b.promptForJob(ctx, sessionID, job, "", promptText, nil)
 }
 
 func (b *Bridge) supportsPromptReconciliation() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return boolMapField(b.agentMeta, "workassTurnReconcileRequest") ||
-		boolMapField(b.agentCaps, "workassTurnReconcileRequest")
+	return b.hasProviderCapability("workassTurnReconcileRequest")
 }
 
 func (b *Bridge) interruptForQueuedSteer(sessionID string) bool {
 	return b.notify("session/cancel", map[string]any{"sessionId": sessionID})
-}
-
-func steeringProviderFamily(providerID string) string {
-	id := strings.ToLower(strings.TrimSpace(providerID))
-	switch {
-	case id == "codex", id == "codex-acp", strings.Contains(id, "codex"):
-		return "codex"
-	case id == "claude", id == "claude-agent-acp", id == "claude-code-acp", strings.Contains(id, "claude"):
-		return "claude"
-	default:
-		return ""
-	}
 }
 
 func boolMapField(m map[string]any, key string) bool {
@@ -3269,174 +3130,14 @@ func (b *Bridge) Steer(sessionID, promptText string, images []any, clientUserMes
 	if promptErr != nil {
 		return map[string]any{"ok": false, "live": false, "queued": false, "error": promptErr.Error()}
 	}
-	// Preserve the legacy/default ACP extension exactly for agents that announce
-	// it (including the deterministic mock). Explicit capability always wins.
-	if b.supportsMidTurnSteering() {
-		if !b.notify("_session/steer", map[string]any{"sessionId": sessionID, "prompt": prompt}) {
-			return map[string]any{"ok": false, "queued": false, "error": "No pude enviar el steer al agente ACP."}
-		}
-		return map[string]any{"ok": true, "live": true, "queued": false, "strategy": "generic-live"}
+	request := providerSteerRequest{
+		sessionID:           sessionID,
+		prompt:              prompt,
+		clientUserMessageID: strings.TrimSpace(clientUserMessageID),
 	}
-
-	switch steeringProviderFamily(b.ProviderID()) {
-	case "codex":
-		// The Codex bridge contract does NOT define concurrent session/prompt as steering. Workass's
-		// packaged adapter adds a narrow request extension backed by app-server's
-		// real turn/steer RPC and advertises it explicitly. Wait for the accepting
-		// turn id: a frame merely written to stdin is not proof that steering landed.
-		if b.supportsNativeCodexSteering() {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			params := map[string]any{
-				"sessionId": sessionID,
-				"prompt":    prompt,
-			}
-			clientUserMessageID = strings.TrimSpace(clientUserMessageID)
-			if clientUserMessageID != "" {
-				params["clientUserMessageId"] = clientUserMessageID
-			}
-			result, err := b.request(ctx, "_workass/codex/steer", params, 15*time.Second)
-			if err == nil {
-				switch strings.TrimSpace(asString(result["disposition"])) {
-				case "queue":
-					// Official Codex preserves input submitted during review or
-					// manual compaction for the next regular turn without cancelling
-					// the non-steerable operation that is already active.
-					return map[string]any{
-						"ok": false, "live": false, "queued": false,
-						"strategy": "queue", "reason": asString(result["reason"]),
-						"error": "El turno activo de Codex no acepta steering; la indicacion se conservara para el siguiente turno.",
-					}
-				case "next-turn":
-					// App-server has no active native turn, but the outer ACP prompt
-					// may still be unwinding. Cancel that stale wrapper when possible;
-					// its terminal immediately drains the one persisted FIFO owner.
-					interrupted := b.interruptForQueuedSteer(sessionID)
-					strategy := "queue"
-					if interrupted {
-						strategy = "interrupt-queue"
-					}
-					return map[string]any{
-						"ok": false, "live": false, "queued": false,
-						"interrupted": interrupted, "strategy": strategy,
-						"reason": asString(result["reason"]),
-						"error":  "El turno nativo ya termino; la indicacion se enviara como el siguiente turno.",
-					}
-				}
-			}
-			if err == nil && strings.TrimSpace(asString(result["turnId"])) != "" {
-				accepted := map[string]any{
-					"ok": true, "live": true, "queued": false,
-					"strategy": "codex-live", "turnId": asString(result["turnId"]),
-				}
-				if clientUserMessageID != "" && b.supportsNativeCodexSteerReceipt() {
-					accepted["receipt"] = true
-				}
-				return accepted
-			}
-			if err == nil {
-				err = errors.New("el adapter no devolvio el turnId que acepto el steer")
-			}
-			if strings.Contains(err.Error(), "ACP timeout:") || errors.Is(err, context.DeadlineExceeded) {
-				// Delivery is uncertain after a transport timeout: app-server may still
-				// accept the already-written request. Never interrupt+requeue here, which
-				// could apply the user's direction twice.
-				b.opts.Logf("native Codex steer acknowledgement timed out", map[string]any{
-					"key": b.key, "error": err.Error(),
-				})
-				uncertain := map[string]any{
-					"ok": false, "live": false, "queued": false,
-					"strategy": "uncertain",
-					"error":    "Codex no confirmo el steer a tiempo; no lo reenvie para evitar duplicarlo.",
-				}
-				if clientUserMessageID != "" && b.supportsNativeCodexSteerReceipt() {
-					uncertain["receipt"] = true
-				}
-				return uncertain
-			}
-			b.opts.Logf("native Codex steer rejected; interrupting for queued follow-up", map[string]any{
-				"key": b.key, "error": err.Error(),
-			})
-		}
-		if !b.interruptForQueuedSteer(sessionID) {
-			return map[string]any{"ok": false, "queued": false, "error": "Codex no acepto steering nativo y tampoco pude interrumpir el turno."}
-		}
-		return map[string]any{
-			"ok": false, "live": false, "queued": false, "interrupted": true,
-			"unsupported": true, "strategy": "interrupt-queue",
-			"error": "El adapter Codex activo no expone turn/steer; interrumpi el turno para enviar la indicacion inmediatamente despues.",
-		}
-	case "claude":
-		// Workass's packaged Claude adapter exposes a narrow request extension
-		// backed by the Agent SDK's live streaming-input path. Wait for the adapter's
-		// accepted prompt UUID: a frame merely written to stdin is not proof that the
-		// live query accepted the direction.
-		if b.supportsNativeClaudeSteering() {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			params := map[string]any{
-				"sessionId": sessionID,
-				"prompt":    prompt,
-			}
-			clientUserMessageID = strings.TrimSpace(clientUserMessageID)
-			if clientUserMessageID != "" {
-				params["clientUserMessageId"] = clientUserMessageID
-			}
-			result, err := b.request(ctx, "_workass/claude/steer", params, 15*time.Second)
-			if err == nil && strings.TrimSpace(asString(result["turnId"])) != "" {
-				accepted := map[string]any{
-					"ok": true, "live": true, "queued": false,
-					"strategy": "claude-live", "turnId": asString(result["turnId"]),
-				}
-				if clientUserMessageID != "" && b.supportsNativeClaudeSteerReceipt() {
-					accepted["receipt"] = true
-				}
-				return accepted
-			}
-			if err == nil {
-				err = errors.New("el adapter no devolvio el turnId que acepto el steer")
-			}
-			if strings.Contains(err.Error(), "ACP timeout:") || errors.Is(err, context.DeadlineExceeded) {
-				b.opts.Logf("native Claude steer acknowledgement timed out", map[string]any{
-					"key": b.key, "error": err.Error(),
-				})
-				uncertain := map[string]any{
-					"ok": false, "live": false, "queued": false,
-					"strategy": "uncertain",
-					"error":    "Claude no confirmo el steer a tiempo; no lo reenvie para evitar duplicarlo.",
-				}
-				if clientUserMessageID != "" && b.supportsNativeClaudeSteerReceipt() {
-					uncertain["receipt"] = true
-				}
-				return uncertain
-			}
-			b.opts.Logf("native Claude steer rejected", map[string]any{
-				"key": b.key, "error": err.Error(),
-			})
-			return map[string]any{
-				"ok": false, "live": false, "queued": false,
-				"strategy": "claude-live",
-				"error":    "Claude no confirmo el steer nativo; no interrumpi el turno porque la entrega es incierta.",
-			}
-		}
-		// Older Claude adapters expose only the persistent prompt queue and
-		// cancellation. The renderer durably queues the direction BEFORE invoking
-		// this method; interrupt the active SDK query now so job:end drains that
-		// FIFO immediately instead of waiting for natural completion.
-		if !b.interruptForQueuedSteer(sessionID) {
-			return map[string]any{"ok": false, "queued": false, "error": "No pude interrumpir el turno de Claude para redirigirlo."}
-		}
-		return map[string]any{
-			"ok": false, "live": false, "queued": false, "interrupted": true,
-			"unsupported": true, "strategy": "interrupt-queue",
-			"error": "Claude fue interrumpido; la indicacion persistida se enviara como el siguiente turno.",
-		}
-	default:
-		return map[string]any{"ok": false, "queued": false, "unsupported": true, "strategy": "queue", "error": "El agente ACP no anuncio steering mid-turn estandar."}
-	}
+	return providerAdapterForID(b.ProviderID()).delivery.Steer(b, request).payload()
 }
-
-func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, promptText string, images []any) (PromptResult, error) {
+func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, operationID, promptText string, images []any) (PromptResult, error) {
 	b.mu.Lock()
 	_, ok := b.sessions[sessionID]
 	state := b.state
@@ -3458,14 +3159,25 @@ func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, p
 	if promptErr != nil {
 		return PromptResult{}, promptErr
 	}
-	res, err := b.requestPrompt(ctx, sessionID, job, map[string]any{
+	dispatch, dispatchErr := b.manager.prepareNativeTurn(job, operationID, prompt)
+	if dispatchErr != nil {
+		return PromptResult{}, dispatchErr
+	}
+	params := map[string]any{
 		"sessionId": sessionID,
 		"prompt":    prompt,
-	})
+	}
+	if operationID = strings.TrimSpace(operationID); operationID != "" {
+		params["clientUserMessageId"] = operationID
+	}
+	res, err := b.requestPrompt(ctx, sessionID, job, params)
 	if directJob != nil {
 		b.clearJobForSession(sessionID, directJob)
 	}
 	if err != nil {
+		return PromptResult{}, err
+	}
+	if err := b.manager.finishNativeTurn(job, dispatch, res); err != nil {
 		return PromptResult{}, err
 	}
 	b.manager.recordPlanUsageCapture(sessionID, b.ProviderID(), res)
@@ -3497,19 +3209,6 @@ func (b *Bridge) isSeeded(sessionID string) bool {
 	defer b.mu.Unlock()
 	_, ok := b.seededSessions[sessionID]
 	return ok
-}
-
-func (b *Bridge) needsNativeSync(sessionID string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	_, ok := b.restoredSessions[sessionID]
-	return ok
-}
-
-func (b *Bridge) finishNativeSync(sessionID string) {
-	b.mu.Lock()
-	delete(b.restoredSessions, sessionID)
-	b.mu.Unlock()
 }
 
 func (b *Bridge) promptBlocks(promptText string, images []any) ([]any, error) {
@@ -3576,16 +3275,16 @@ func (b *Bridge) applyConfigOptions(raw any, broadcast bool) {
 	b.applyConfigOptionsForSession("", raw, broadcast, false)
 }
 
-// canonicalClaudeModelIDLocked resolves only the synthetic default alias proven
-// by the current adapter catalog. Caller must hold b.mu.
-func (b *Bridge) canonicalClaudeModelIDLocked(modelID string) string {
+// canonicalProviderModelIDLocked resolves a synthetic default alias only when
+// the registered adapter declares that semantic. Caller must hold b.mu.
+func (b *Bridge) canonicalProviderModelIDLocked(modelID string) string {
 	modelID = strings.TrimSpace(modelID)
-	if normalizeProviderID(b.providerID) != "claude" ||
+	if !providerAdapterForID(b.providerID).model.SyntheticDefaultAlias ||
 		!strings.EqualFold(modelID, "default") ||
-		strings.TrimSpace(b.claudeDefaultModelAlias) == "" {
+		strings.TrimSpace(b.syntheticDefaultModelAlias) == "" {
 		return modelID
 	}
-	return strings.TrimSpace(b.claudeDefaultModelAlias)
+	return strings.TrimSpace(b.syntheticDefaultModelAlias)
 }
 
 func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadcast bool, workassWrite bool) {
@@ -3659,10 +3358,10 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 			}
 		}
 	}
-	claudeProvider := normalizeProviderID(b.providerID) == "claude"
-	claudeDefaultAlias, claudeDefaultAliasProven := "", false
-	if claudeProvider && modelSeen {
-		claudeDefaultAlias, claudeDefaultAliasProven = resolveClaudeSyntheticDefaultAlias(models)
+	syntheticAliasProvider := providerAdapterForID(b.providerID).model.SyntheticDefaultAlias
+	syntheticDefaultAlias, syntheticDefaultAliasProven := "", false
+	if syntheticAliasProvider && modelSeen {
+		syntheticDefaultAlias, syntheticDefaultAliasProven = providerAdapterForID(b.providerID).catalog.ResolveSyntheticDefault(models)
 	}
 	changed := false
 	b.mu.Lock()
@@ -3672,20 +3371,20 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 	if b.variantEffortsByModel == nil {
 		b.variantEffortsByModel = make(map[string][]string)
 	}
-	if claudeProvider && modelSeen {
-		if claudeDefaultAliasProven {
-			b.claudeDefaultModelAlias = claudeDefaultAlias
+	if syntheticAliasProvider && modelSeen {
+		if syntheticDefaultAliasProven {
+			b.syntheticDefaultModelAlias = syntheticDefaultAlias
 		} else {
-			b.claudeDefaultModelAlias = ""
+			b.syntheticDefaultModelAlias = ""
 		}
 	}
 	effectiveModel := ""
 	if currentModel != nil {
-		effectiveModel = b.canonicalClaudeModelIDLocked(*currentModel)
+		effectiveModel = b.canonicalProviderModelIDLocked(*currentModel)
 	} else if b.currentModel != nil {
-		effectiveModel = b.canonicalClaudeModelIDLocked(*b.currentModel)
+		effectiveModel = b.canonicalProviderModelIDLocked(*b.currentModel)
 	}
-	if claudeProvider && strings.EqualFold(effectiveModel, "default") {
+	if syntheticAliasProvider && strings.EqualFold(effectiveModel, "default") {
 		// An unresolved synthetic alias is not an explicit model capability.
 		// Keep the current selection literal, but never invent an effort owner.
 		effectiveModel = ""

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"workass/internal/fleet"
 )
@@ -99,6 +100,54 @@ func TestLoopbackServerCertificateRejectsNonLocalhostName(t *testing.T) {
 	}
 	if _, err := IssueLoopbackServerCertificate(root, "example.com"); err == nil {
 		t.Fatal("issued a loopback certificate for a non-localhost name")
+	}
+}
+
+func TestLoopbackServerCertificateRotatesBeforeExpiryWithoutMovingRoot(t *testing.T) {
+	root, err := Ensure(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootCertificate, err := x509.ParseCertificate(root.TLS.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := rootCertificate.NotBefore.Add(2 * time.Hour)
+	rotator, err := newLoopbackServerCertificateRotator(root, "mcp.localhost", func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPair, err := rotator.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := x509.ParseCertificate(firstPair.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now = first.NotAfter.Add(-loopbackLeafRenewAhead).Add(time.Second)
+	secondPair, err := rotator.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := x509.ParseCertificate(secondPair.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SerialNumber.Cmp(second.SerialNumber) == 0 {
+		t.Fatal("loopback leaf was not rotated before expiry")
+	}
+	if !now.Before(second.NotAfter) {
+		t.Fatalf("rotator served an expired leaf: now=%s notAfter=%s", now, second.NotAfter)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(rootCertificate)
+	if _, err := second.Verify(x509.VerifyOptions{Roots: roots, DNSName: "mcp.localhost", CurrentTime: now}); err != nil {
+		t.Fatalf("verify rotated loopback leaf: %v", err)
+	}
+	if FingerprintOf(root.TLS.Certificate[0]) != root.Fingerprint {
+		t.Fatal("rotating the loopback leaf changed the permanent root identity")
 	}
 }
 

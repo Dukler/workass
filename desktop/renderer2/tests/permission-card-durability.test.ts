@@ -1,9 +1,6 @@
-// An open permission/question card is client-owned state: it arrives on
-// `chat:permission-request` and appears in no session mirror. `restoreSessionSnapshot`
-// rebuilds every message from the mirror, so the card was dropped on each restore —
-// and restore runs on the connection heartbeat, not just on reconnect. The card was
-// re-fetched a moment later by the `permissions` repair, one await behind, so what
-// the user saw was a question blinking shut and open on a five-second beat.
+// An open permission/question card is actor-owned semantic state. The daemon's
+// session projection must carry it, and a wholesale restore must neither drop
+// an authoritative card nor resurrect a stale renderer-local one.
 //
 // The trigger was the count on the other side of the same digest: another machine's
 // chats are carried across every restore but appear in no digest THIS daemon can
@@ -43,12 +40,15 @@ function chat(id: string, messages: Msg[], extra: Partial<Chat> = {}): Chat {
   } as Chat;
 }
 
-/** What the daemon's session:get returns: the same transcript, with no permission field. */
 function mirrorOf(chats: Chat[]) {
   return {
     chats: chats.map((c) => ({
       id: c.id, chatId: c.chatId, title: c.title, cwd: c.cwd, providerId: c.providerId,
-      messages: c.messages.map((m) => ({ id: m.id, role: m.role, content: m.content, status: m.status, at: m.at })),
+      messages: c.messages.map((m) => ({
+        id: m.id, role: m.role, content: m.content, result: m.result, status: m.status, at: m.at,
+        jobId: m.jobId, permission: m.permission, turnStartedAt: m.turnStartedAt,
+        interrupted: m.interrupted, retryPrompt: m.retryPrompt, events: m.events,
+      })),
     })),
     activeId: chats[0]?.id ?? null, seq: 0,
   };
@@ -80,18 +80,31 @@ test('a session restore keeps the question card the user is reading', () => {
 });
 
 test('a restore does not resurrect a card on a message that no longer holds one', () => {
-  const answered = chat('tab-1', [message('m-1'), message('m-2', { permission: ASK as never })]);
-  const store = subject([answered]);
+  const local = chat('tab-1', [message('m-1', { permission: ASK as never })]);
+  const authoritative = chat('tab-1', [message('m-1')]);
+  const store = subject([local]);
 
-  assert.equal(store.restoreSessionSnapshot(mirrorOf([answered])), true);
+  assert.equal(store.restoreSessionSnapshot(mirrorOf([authoritative])), true);
 
-  assert.equal(store.state.chats[0].messages[0].permission, undefined);
-  assert.equal(store.state.chats[0].messages[1].permission?.id, 'perm-ask-1');
+	assert.equal(store.state.chats[0].messages[0].permission, undefined);
+});
+
+test('actor hydration preserves terminal recovery and running-start fields', () => {
+  const authoritative = chat('tab-1', [message('m-1', {
+    status: 'failed', interrupted: true, retryPrompt: 'try again', turnStartedAt: 1234,
+  })]);
+  const store = subject([]);
+
+  assert.equal(store.restoreSessionSnapshot(mirrorOf([authoritative])), true);
+  const restored = store.state.chats[0].messages[0];
+  assert.equal(restored.interrupted, true);
+  assert.equal(restored.retryPrompt, 'try again');
+  assert.equal(restored.turnStartedAt, 1234);
 });
 
 function digestChat(c: Chat, extra: Partial<StateDigestChat> = {}): StateDigestChat {
   return {
-    tabId: c.id, chatId: c.chatId!, runningJobId: null, lastMessageId: c.messages.at(-1)?.id ?? null,
+    tabId: c.id, chatId: c.chatId!, actorRevision: c.actorRevision ?? 0, runningJobId: null, lastMessageId: c.messages.at(-1)?.id ?? null,
     messageCount: c.messages.length, queueLen: 0, queueHeadId: null,
     agentQueueRevision: 0, runtimeControlRevision: 0,
     providerId: c.providerId ?? null, currentModelId: null, currentModeId: null,
@@ -100,7 +113,7 @@ function digestChat(c: Chat, extra: Partial<StateDigestChat> = {}): StateDigestC
 }
 
 function digestOf(chats: StateDigestChat[]): StateDigest {
-  return { chats, catalogHash: {}, settingsRevision: '', procHash: '' };
+  return { chats, globalRevision: 0, catalogHash: {}, settingsRevision: '', procHash: '' };
 }
 
 test('a mounted machine does not make this daemon look permanently diverged', () => {
@@ -125,4 +138,14 @@ test('a chat this daemon really lost still forces a session repair', () => {
   const scopes = store.digestRepairScopes(digestOf([digestChat(kept)]));
 
   assert.equal(scopes.has('session'), true, 'a real chat-count divergence no longer repairs');
+});
+
+test('transcript drift repairs even when queue and controls still match', () => {
+  const local = chat('tab-1', [message('m-1', { status: 'done' })]);
+  const store = subject([local]);
+  store.localProcHash = '';
+  store.localSettingsRevision = '';
+
+  assert.equal(store.digestRepairScopes(digestOf([digestChat(local, { messageCount: 2 })])).has('session'), true);
+  assert.equal(store.digestRepairScopes(digestOf([digestChat(local, { lastMessageId: 'different' })])).has('session'), true);
 });

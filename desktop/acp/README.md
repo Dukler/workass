@@ -15,10 +15,12 @@ legacy fixture receipts from the transcript and Turnos rail.
 
 ## Architecture
 
-Workass keeps one provider bridge per chat and communicates over newline-delimited JSON-RPC on
-stdin/stdout. Ordinary ACP agents speak that protocol directly. Claude and Codex instead use
-Workass-owned native hosts so their official transports can preserve the same daemon/renderer
-contract without a compatibility adapter.
+Workass keeps one durable provider-neutral actor per immutable chat. A chat may
+own several provider lanes; each lane retains one exact provider-native thread,
+while its ACP/native-host process attachment is disposable. Ordinary ACP agents
+speak newline-delimited JSON-RPC on stdin/stdout. Claude and Codex instead use
+Workass-owned native hosts so their official transports satisfy the same lane
+contract without leaking vendor behavior into chat code.
 
 The launcher in `desktop/main.js` supports these providers through `app-config.json`:
 
@@ -31,8 +33,10 @@ The launcher in `desktop/main.js` supports these providers through `app-config.j
 | `codex` | Installed `codex app-server` | Native Codex session |
 | `custom` | `acp.command` plus `acp.args` | Future Go agent or another ACP server |
 
-Existing chat sessions keep the process they started with. New sessions use the current provider.
-Changing the provider drains and rebuilds the pre-warmed spare-session pool.
+Selecting another provider chooses another lane inside the same Workass chat.
+Returning to a provider resumes that lane's exact native thread. Cross-provider
+history moves only through the versioned, non-sampling context-import contract;
+missing import support blocks the switch rather than replaying the transcript.
 
 ## Deterministic Mock
 
@@ -50,7 +54,10 @@ The mock supports:
 
 - ACP `initialize`
 - `session/new`, `session/prompt`, `session/set_config_option`, and `session/close`
-- deterministic native `session/resume` / `session/load` when `WORKASS_MOCK_ACP_SESSION_STORE` points to a durable fixture file; select `both`, `resume`, `load`, or `none` with `WORKASS_MOCK_ACP_SESSION_CAPABILITY`
+- deterministic exact `session/resume` when
+  `WORKASS_MOCK_ACP_SESSION_STORE` points to a durable fixture file; select
+  `resume` or `none` with `WORKASS_MOCK_ACP_SESSION_CAPABILITY` (`both` remains
+  a legacy alias for `resume` in old fixtures)
 - plan updates
 - thought chunks
 - tool-call start and completion updates
@@ -96,16 +103,13 @@ on subsequent waits. The current Workass controller still owns the decision.
 
 ## Provider context compaction
 
-Codex and Claude Code own context compaction inside their provider-native
-sessions. Even when daemon fallback compaction is enabled, Workass never sends
-its summary prompt, closes the session, reseeds a fresh session, or emits a
-synthetic zero-usage reset for provider ids `codex` or `claude`. Their native
-usage and compaction behavior remain authoritative, and manual `/compact`
-continues to route to the provider.
-
-The Workass summary + fresh-session path remains a turn-boundary fallback for
-providers without known native context management, including the deterministic
-mock used by `[mock:bigusage]`.
+Every provider owns context compaction inside its exact native thread. Workass
+never sends a summary prompt, closes the session to create another thread,
+loads another thread, replays transcript text, or emits a synthetic zero-usage
+reset. Native usage and compaction events are authoritative, and manual
+`/compact` continues to route to the selected provider. A provider without
+verified in-place compaction reaches a visible context-limit state; it does not
+receive a Workass fallback.
 
 Provider-authored context `used/size` readings are separate from compaction and
 subscription plan limits. Workass stores the latest reading per exact
@@ -173,7 +177,9 @@ Special prompt markers:
 - `[mock:permission]` emits a deterministic `session/request_permission` with `allow-once` and `reject` options, waits for the client response, and streams the selected/cancelled outcome in the assistant text.
 - `[mock:tool-image]` returns a valid tiny PNG beside the deterministic tool's text result, proving that structured tool media survives the bridge, durable mirror, folded tool row, and lightbox path.
 - `[mock:assistant-image]` writes a valid tiny PNG inside the mock session cwd and returns the ordinary `[Open](path)` plus `![Preview](path)` Markdown used naturally by ACP agents. It proves the provider-neutral terminal importer, durable assistant attachment, collapse of the redundant Open link into the clickable image, and reload path without teaching the fixture a Workass-specific media syntax.
-- `[mock:bigusage]` completes normally but reports `used:85, size:100` so daemon auto-compaction can be tested deterministically.
+- `[mock:bigusage]` completes normally but reports `used:85, size:100` so the
+  visible context-limit path can be tested without mutating or replacing the
+  provider lane.
 - `[mock:burst]` emits 4,096 deterministic 128-byte answer chunks with a zero-delay event-loop yield between them. It stress-tests ACP ingestion, 16 ms daemon coalescing, WebSocket delivery, and renderer streaming without using model quality as an oracle. Override the volume with `WORKASS_MOCK_ACP_BURST_CHUNKS` and `WORKASS_MOCK_ACP_BURST_CHUNK_BYTES`.
 - `[mock:phases]` emits one `commentary` assistant chunk followed by one
   `final_answer` chunk through the provider-neutral
@@ -196,12 +202,6 @@ Special prompt markers:
 - `[mock:lost-terminal]` streams a complete response, settles its tool/plan, and withholds the original `session/prompt` response until `_workass/turn/reconcile` repairs it.
 - `[mock:lost-terminal-unreleased]` reports a terminal provider turn but deliberately refuses to release the ACP prompt, exercising the bounded bridge-recycle fallback.
 - `[mock:active-without-terminal]` goes quiet while still reporting an authoritative active turn, proving that silence is never guessed to mean completion.
-
-When the prompt starts with the Workass auto-compaction preamble, the mock returns the deterministic summary:
-
-```text
-DETERMINISTIC WORKASS MOCK SUMMARY: context compacted and ready to reseed.
-```
 
 Run the handshake probe from the repository root:
 

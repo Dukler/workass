@@ -8,7 +8,12 @@ package acp
 // chat. Nothing here is ever persisted: not into session-state.json, not into
 // chat archives (the 64 MiB hydration lesson).
 
-import "strings"
+import (
+	"errors"
+	"strings"
+
+	providercontract "workass/internal/provider"
+)
 
 // §2 clamps — identical numbers on the host (scripts/claude-native-host.mjs).
 const (
@@ -117,32 +122,41 @@ func parseCommandCatalog(raw any) *CommandCatalog {
 // commandCatalog field (attachSession) and a mid-session
 // _workass_claude_commands update: parse + re-clamp + redact, replace the
 // chat's memory-only cache entry wholesale, and announce it. Gated on the
-// claude provider (precedent: claudeProvider in applyConfigOptionsForSession)
-// — other providers never emit the field, and a stray payload must not invent
-// a surface for them. A missing/invalid payload stores nil (UNKNOWN, never
-// proven-empty) and announces nothing.
+// registered provider command-catalog facet. Other providers never emit the
+// field, and a stray payload must not invent a surface for them. A
+// missing/invalid payload stores nil (UNKNOWN, never proven-empty) and
+// announces nothing.
 func (b *Bridge) applyCommandCatalog(sessionID string, raw any) *CommandCatalog {
-	if normalizeProviderID(b.ProviderID()) != "claude" {
-		return nil
-	}
-	catalog := parseCommandCatalog(raw)
-	tabID, chatID := b.chatIdentity()
-	b.manager.storeCommandCatalog(tabID, chatID, sessionID, catalog)
-	return catalog
+	return providerAdapterForID(b.ProviderID()).commands.Apply(b, sessionID, raw)
 }
 
-// storeCommandCatalog replaces the chat's cache entry and emits the additive
-// chat:commands event. The event is deliberately NOT in the sticky replay set
-// (that cache is one-payload-per-channel — wrong for per-chat data); late
-// clients ask chat:commands-get instead. Hibernation keeps the entry (a
-// hibernated chat still answers with its cached snapshot); a daemon restart
-// starts empty; forgetting/closing the chat's session deletes it.
+// storeCommandCatalog first commits the complete capability snapshot through
+// the chat actor, then updates the manager's replaceable runtime cache and
+// emits the frozen additive event. The manager cache is never recovery
+// authority: late clients and restarted daemons project the actor lane.
 func (m *Manager) storeCommandCatalog(tabID, chatID, sessionID string, catalog *CommandCatalog) {
 	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
 	if tabID == "" && chatID == "" {
 		// A spare or ephemeral attach has no chat identity to key or notify;
 		// the catalog still rides its SessionInfo and is published at adoption.
 		return
+	}
+	if lane := m.providerLaneForSession(sessionID); lane != nil {
+		lane.mu.Lock()
+		lane.info.CommandCatalog = cloneCommandCatalog(catalog)
+		lane.mu.Unlock()
+		snapshot := lane.AttachmentSnapshot()
+		if err := lane.emit(providercontract.Event{
+			Kind:       providercontract.EventLaneCapabilities,
+			Attachment: &snapshot,
+		}); err != nil {
+			m.opts.Logf("provider command catalog rejected before publication", map[string]any{
+				"chatId": chatID, "sessionId": sessionID, "error": redactSensitiveText(err.Error()),
+			})
+			return
+		}
+		// The frozen event and manager cache use the exact post-commit snapshot.
+		catalog = cloneCommandCatalog(lane.info.CommandCatalog)
 	}
 	m.mu.Lock()
 	m.commandCatalogs[commandCatalogKey(tabID, chatID)] = &commandCatalogEntry{sessionID: sessionID, catalog: catalog}
@@ -157,6 +171,42 @@ func (m *Manager) storeCommandCatalog(tabID, chatID, sessionID string, catalog *
 		"sessionId":      sessionID,
 		"commandCatalog": catalog,
 	})
+}
+
+func cloneCommandCatalog(catalog *CommandCatalog) *CommandCatalog {
+	if catalog == nil {
+		return nil
+	}
+	out := *catalog
+	out.Commands = append([]CommandCatalogCommand(nil), catalog.Commands...)
+	for i := range out.Commands {
+		out.Commands[i].Aliases = append([]string(nil), catalog.Commands[i].Aliases...)
+	}
+	out.Agents = append([]CommandCatalogAgent(nil), catalog.Agents...)
+	out.AvailableOutputStyles = append([]string(nil), catalog.AvailableOutputStyles...)
+	return &out
+}
+
+// verifyProviderLaneCommandCatalog makes chat:commands an explicitly
+// classified post-commit projection. A lane-owned command event can never be
+// used as an alternate semantic ingress.
+func (m *Manager) verifyProviderLaneCommandCatalog(payload map[string]any) error {
+	sessionID := strings.TrimSpace(asString(payload["sessionId"]))
+	lane := m.providerLaneForSession(sessionID)
+	if lane == nil {
+		return nil // Unmanaged manager fixture/ephemeral provider probe.
+	}
+	if lane.identity.ChatID != strings.TrimSpace(asString(payload["chatId"])) || lane.owner.TabID != strings.TrimSpace(asString(payload["tabId"])) {
+		return errors.New("command catalog event changed its actor lane owner")
+	}
+	catalog, _ := payload["commandCatalog"].(*CommandCatalog)
+	lane.mu.Lock()
+	committed := lane.info.CommandCatalog
+	lane.mu.Unlock()
+	if catalog == nil || committed == nil || catalog.AsOf != committed.AsOf {
+		return errors.New("command catalog event was not committed through the actor lane")
+	}
+	return nil
 }
 
 // forgetCommandCatalogSessionLocked drops cache entries owned by a forgotten/
@@ -181,19 +231,42 @@ func (m *Manager) forgetCommandCatalogChatLocked(tabID string) {
 	}
 }
 
-// supportsClaudeCommandCatalog reports whether the host behind this bridge
-// advertised the catalog surface at initialize time. Absent advertisement is
-// an old host: UNKNOWN, never proven-empty (precedent:
-// supportsNativeClaudeSteering).
-func (b *Bridge) supportsClaudeCommandCatalog() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return boolMapField(b.agentMeta, "workassClaudeCommandCatalog") ||
-		boolMapField(b.agentCaps, "workassClaudeCommandCatalog")
+type providerCommandCatalogStrategy interface {
+	Supported(*Bridge) bool
+	Apply(*Bridge, string, any) *CommandCatalog
+}
+
+type unsupportedCommandCatalogStrategy struct{}
+
+func (unsupportedCommandCatalogStrategy) Supported(*Bridge) bool { return false }
+func (unsupportedCommandCatalogStrategy) Apply(*Bridge, string, any) *CommandCatalog {
+	return nil
+}
+
+type capabilityCommandCatalogStrategy struct {
+	capability string
+}
+
+func (s capabilityCommandCatalogStrategy) Supported(bridge *Bridge) bool {
+	return bridge != nil && bridge.hasProviderCapability(s.capability)
+}
+
+func (s capabilityCommandCatalogStrategy) Apply(bridge *Bridge, sessionID string, raw any) *CommandCatalog {
+	if bridge == nil {
+		return nil
+	}
+	catalog := parseCommandCatalog(raw)
+	tabID, chatID := bridge.chatIdentity()
+	bridge.manager.storeCommandCatalog(tabID, chatID, sessionID, catalog)
+	return catalog
+}
+
+func (b *Bridge) supportsProviderCommandCatalog() bool {
+	return providerAdapterForID(b.ProviderID()).commands.Supported(b)
 }
 
 // ChatCommands answers the additive chat:commands-get invoke:
-// supported:false for non-claude providers, for chats this daemon has never
+// supported:false for providers without the registered facet, for chats this daemon has never
 // attached, or when the host never advertised workassClaudeCommandCatalog;
 // live:false when the chat's engine is hibernated or gone (the catalog, if
 // any, is a cached snapshot); commandCatalog null = UNKNOWN. An old daemon
@@ -206,7 +279,7 @@ func (m *Manager) ChatCommands(tabID, chatID string) map[string]any {
 	bridge := m.bridgeForFallbackLocked(SessionOptions{TabID: tabID, ChatID: chatID})
 	m.mu.Unlock()
 	reply := map[string]any{"supported": false, "live": false, "commandCatalog": nil}
-	if bridge == nil || normalizeProviderID(bridge.ProviderID()) != "claude" || !bridge.supportsClaudeCommandCatalog() {
+	if bridge == nil || !bridge.supportsProviderCommandCatalog() {
 		return reply
 	}
 	reply["supported"] = true

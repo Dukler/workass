@@ -118,19 +118,29 @@ type lenientSemver struct {
 }
 
 func defaultProviderUpdateSources() map[string]string {
-	return map[string]string{
-		"claude": "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
-		"codex":  "https://registry.npmjs.org/@openai/codex/latest",
-		"qwen":   "https://registry.npmjs.org/@qwen-code/qwen-code/latest",
+	out := make(map[string]string)
+	for _, id := range registeredProviderIDs() {
+		registration, ok := providerRegistrationForID(id)
+		if ok && strings.TrimSpace(registration.Update.Source) != "" {
+			out[id] = strings.TrimSpace(registration.Update.Source)
+		}
 	}
+	return out
 }
 
 func defaultProviderUpdateCommands() map[string]ProviderUpdateCommand {
-	return map[string]ProviderUpdateCommand{
-		"claude": {Command: "claude", Args: []string{"update"}},
-		"codex":  {Command: "codex", Args: []string{"update"}},
-		"qwen":   {Command: "qwen", Args: []string{"update"}},
+	out := make(map[string]ProviderUpdateCommand)
+	for _, id := range registeredProviderIDs() {
+		registration, ok := providerRegistrationForID(id)
+		if !ok || strings.TrimSpace(registration.Update.Command.Command) == "" {
+			continue
+		}
+		out[id] = ProviderUpdateCommand{
+			Command: strings.TrimSpace(registration.Update.Command.Command),
+			Args:    append([]string(nil), registration.Update.Command.Args...),
+		}
 	}
+	return out
 }
 
 func copyProviderUpdateCommands(in map[string]ProviderUpdateCommand) map[string]ProviderUpdateCommand {
@@ -292,29 +302,24 @@ func cliUpdateSpecForProvider(id string, sources map[string]string) (providerUpd
 	if source == "" {
 		return providerUpdateSpec{}, false
 	}
-	switch id {
-	case "claude":
-		return providerUpdateSpec{ProviderID: "claude", CLI: "claude", Source: source, Hint: "claude update"}, true
-	case "codex":
-		return providerUpdateSpec{ProviderID: "codex", CLI: "codex", Source: source, Hint: "codex update"}, true
-	case "qwen":
-		return providerUpdateSpec{ProviderID: "qwen", CLI: "qwen", Source: source, Hint: "qwen update"}, true
-	default:
+	registration, ok := providerRegistrationForID(id)
+	if !ok || strings.TrimSpace(registration.Update.Command.Command) == "" {
 		return providerUpdateSpec{}, false
 	}
+	return providerUpdateSpec{
+		ProviderID: id,
+		CLI:        strings.TrimSpace(registration.Update.Command.Command),
+		Source:     source,
+		Hint:       strings.TrimSpace(registration.Update.Hint),
+	}, true
 }
 
 func cliVersionCommandForProvider(id string) (string, bool) {
-	switch normalizeProviderID(id) {
-	case "claude":
-		return "claude", true
-	case "codex":
-		return "codex", true
-	case "qwen":
-		return "qwen", true
-	default:
+	registration, ok := providerRegistrationForID(id)
+	if !ok || strings.TrimSpace(registration.Update.Command.Command) == "" {
 		return "", false
 	}
+	return strings.TrimSpace(registration.Update.Command.Command), true
 }
 
 func (m *Manager) providerUpdateLoop() {

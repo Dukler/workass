@@ -206,6 +206,16 @@ test('hostile: compact_boundary frames pass through without corrupting the turn'
   assert.ok(phases.includes('compacting'), `heartbeat phases: ${JSON.stringify(phases)}`);
   assert.ok(phases.includes('waiting'), 'the boundary must flip the pulse back');
 
+  const compaction = peer.messages
+    .filter((message) => message.method === 'session/update'
+      && message.params?.update?.sessionUpdate === '_workass_compaction')
+    .map((message) => message.params.update);
+  assert.equal(compaction[0]?.phase, 'started');
+  assert.equal(compaction[1]?.phase, 'checkpoint');
+  assert.ok(compaction[1]?.checkpointId);
+  assert.match(compaction[1]?.digest || '', /^[a-f0-9]{64}$/);
+  assert.deepEqual(answerChunks(peer).filter((text) => /context compact/i.test(text)), []);
+
   peer.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: {
     sessionId, prompt: [{ type: 'text', text: 'follow-up after compaction' }],
   } });
@@ -255,6 +265,9 @@ test('hostile: fork-on-resume — the host adopts the forked id, so no turns fal
     && message.params?.update?.sessionUpdate === '_workass_claude_provider_session');
   assert.ok(announced.length >= 1, 'the forked id must be announced');
   assert.match(String(announced.at(-1).params.update.providerSessionId), /-fork-/);
+	assert.equal(announced.at(-1).params.update.previousProviderSessionId, 'fixture-claude-session');
+	assert.equal(announced.at(-1).params.update.lineageGeneration, 2);
+	assert.match(String(announced.at(-1).params.update.lineageProof), /^[0-9a-f]{64}$/);
   assert.ok(peer.messages
     .filter((message) => message.method === 'session/update')
     .every((message) => message.params.sessionId === 'fixture-claude-session'));

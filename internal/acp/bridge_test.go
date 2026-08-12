@@ -23,24 +23,26 @@ func TestProviderTypedMessagePhaseBoundarySurvivesStdoutCoalescing(t *testing.T)
 
 	commentary := map[string]any{"_meta": map[string]any{"workassAssistantPhase": "commentary"}}
 	final := map[string]any{"_meta": map[string]any{"workassAssistantPhase": "final_answer"}}
-	if got := agentMessagePhase(commentary); got != "commentary" {
+	generic := providerAdapterForID("descriptor-only").delivery
+	codex := providerAdapterForID("codex").delivery
+	if got := generic.AssistantPhase(commentary); got != "commentary" {
 		t.Fatalf("commentary phase = %q", got)
 	}
-	if got := agentMessagePhase(final); got != "final_answer" {
+	if got := generic.AssistantPhase(final); got != "final_answer" {
 		t.Fatalf("final phase = %q", got)
 	}
-	if got := agentMessagePhase(map[string]any{"_meta": map[string]any{"workassAssistantPhase": "future"}}); got != "" {
+	if got := generic.AssistantPhase(map[string]any{"_meta": map[string]any{"workassAssistantPhase": "future"}}); got != "" {
 		t.Fatalf("unknown phase = %q, want legacy empty phase", got)
 	}
-	if got := agentMessagePhase(map[string]any{"_meta": map[string]any{"codex": map[string]any{"phase": "final_answer"}}}); got != "final_answer" {
+	if got := codex.AssistantPhase(map[string]any{"_meta": map[string]any{"codex": map[string]any{"phase": "final_answer"}}}); got != "final_answer" {
 		t.Fatalf("Codex compatibility phase = %q", got)
 	}
-	if got := agentMessagePhase(map[string]any{"providerId": "codex", "result": "looks final"}); got != "" {
+	if got := codex.AssistantPhase(map[string]any{"providerId": "codex", "result": "looks final"}); got != "" {
 		t.Fatalf("untyped provider output synthesized phase = %q", got)
 	}
 
-	bridge.queueStdout(job, "working notes", agentMessagePhase(commentary))
-	bridge.queueStdout(job, "final report", agentMessagePhase(final))
+	bridge.queueStdout(job, "working notes", generic.AssistantPhase(commentary))
+	bridge.queueStdout(job, "final report", generic.AssistantPhase(final))
 	bridge.flushJobBuffers(job)
 	data := events.jobEvents(job.ID, "data")
 	if len(data) != 2 {
@@ -1187,7 +1189,7 @@ func TestT1cUndiscoveredBaseRowStillRoutesEffortComposite(t *testing.T) {
 	}
 }
 
-func TestClaudeProviderSessionAdoptionAndHeartbeatForwarding(t *testing.T) {
+func TestUnownedClaudeProviderSessionCannotMutateNativeLineage(t *testing.T) {
 	manager, events := newFakeManager(t, "claude-effort", Options{
 		RSSSampleInterval: time.Hour,
 		Provider:          ProviderConfig{ID: "claude"},
@@ -1226,8 +1228,45 @@ func TestClaudeProviderSessionAdoptionAndHeartbeatForwarding(t *testing.T) {
 	}
 
 	binding, ok := manager.nativeSessions.get("fork-adopt-tab", "fork-adopt-chat", "claude")
-	if !ok || binding.ProviderSessionID != session.SessionID+"-forked-1" {
-		t.Fatalf("provider session not adopted: ok=%v binding=%#v", ok, binding)
+	if !ok {
+		t.Fatal("native binding disappeared")
+	}
+	if binding.ProviderSessionID != "" || binding.ThreadLineage != 1 || binding.LineageProof != "" {
+		t.Fatalf("chat-scoped lineage bypassed the actor: %#v", binding)
+	}
+}
+
+func TestOrdinaryPromptCarriesStableWorkassOperationID(t *testing.T) {
+	manager, events := newFakeManager(t, "input-receipt", Options{RSSSampleInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	session, err := manager.NewSession(ctx, SessionOptions{TabID: "stable-input-tab", ChatID: "stable-input-chat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := manager.StartJob(ctx, JobStartOptions{
+		Kind: "app-chat", SessionID: session.SessionID, TabID: "stable-input-tab", ChatID: "stable-input-chat",
+		Prompt: "exactly once", UserMessageID: "workass-operation-stable-1", HumanAuthored: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID := jobID(job)
+	events.waitJobEnd(t, jobID, 5*time.Second)
+	var consumed string
+	for _, event := range events.snapshot() {
+		if event.channel != "job:event" {
+			continue
+		}
+		payload, _ := event.payload.(map[string]any)
+		inner, _ := payload["event"].(map[string]any)
+		if payload["id"] == jobID && asString(inner["kind"]) == "input-consumed" {
+			consumed = asString(inner["clientUserMessageId"])
+		}
+	}
+	if consumed != "workass-operation-stable-1" {
+		t.Fatalf("provider received operation id %q", consumed)
 	}
 }
 
@@ -1402,7 +1441,7 @@ func TestT6NewSessionConvergesNativeBindingModelWithoutRendererReapply(t *testin
 	logPath := filepath.Join(t.TempDir(), "native-startup-controls.log")
 	t.Setenv("WORKASS_FAKE_ACP_CONFIG_LOG", logPath)
 	stateDir := t.TempDir()
-	manager, _ := newFakeManager(t, "claude-cold-effort", Options{
+	manager, _ := newFakeManager(t, "claude-cold-effort-resume", Options{
 		StateDir:          stateDir,
 		RSSSampleInterval: time.Hour,
 		Provider:          ProviderConfig{ID: "claude"},
@@ -1411,7 +1450,7 @@ func TestT6NewSessionConvergesNativeBindingModelWithoutRendererReapply(t *testin
 	requested := "claude-fable-5[1m][xhigh]"
 	if err := manager.nativeSessions.put(nativeSessionBinding{
 		TabID: "native-controls-tab", ChatID: "native-controls-chat", ProviderID: "claude",
-		SessionID: "native-controls-provider-session", ModelID: requested,
+		SessionID: "native-controls-provider-session", ModelID: requested, CWD: stateDir,
 		HistoryHash: historyDigest(nil), HistoryVersion: nativeHistoryDigestVersion, ResumeSafe: true,
 	}); err != nil {
 		t.Fatalf("seed native binding: %v", err)
@@ -1595,7 +1634,7 @@ func TestFakePromptSerializationQueuesPerBridge(t *testing.T) {
 	}
 }
 
-func TestFakeHistoryReplayExactlyOnce(t *testing.T) {
+func TestFakeHistoryIsNeverReplayedIntoProviderPrompt(t *testing.T) {
 	manager, events := newFakeManager(t, "echo-prompt", Options{})
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "history-tab")
@@ -1606,8 +1645,8 @@ func TestFakeHistoryReplayExactlyOnce(t *testing.T) {
 		t.Fatalf("first job: %v", err)
 	}
 	firstEnd := events.waitJobEnd(t, jobID(first), 2*time.Second)
-	if result := jobFromEnd(firstEnd)["result"].(string); !strings.Contains(result, "User: earlier request") || !strings.Contains(result, "User request:\nfirst live request") {
-		t.Fatalf("first result did not replay history once: %q", result)
+	if result := jobFromEnd(firstEnd)["result"].(string); strings.Contains(result, "User: earlier request") || !strings.Contains(result, "User request:\nfirst live request") {
+		t.Fatalf("first provider prompt replayed Workass history: %q", result)
 	}
 
 	second, err := manager.StartJob(context.Background(), JobStartOptions{Kind: "app-chat", SessionID: session.SessionID, TabID: "history-tab", Prompt: "second live request", History: history})
@@ -1699,10 +1738,14 @@ func TestHibernatedControlWriteDoesNotReviveBridgeWithoutSessionRestore(t *testi
 	if err != nil {
 		t.Fatalf("start recovered strict turn: %v", err)
 	}
-	assertJobStatus(t, events.waitJobEnd(t, jobID(second), 3*time.Second), "done", 0, "end_turn")
+	end := events.waitJobEnd(t, jobID(second), 3*time.Second)
+	if job := jobFromEnd(end); asString(job["status"]) != "failed" || !strings.Contains(asString(job["result"]), "exact native-thread resume") || strings.Contains(strings.ToLower(asString(job["result"])), "session not found") {
+		t.Fatalf("hibernated non-resumable lane did not fail closed: %#v", job)
+	}
+	events.expectNoChannel(t, "chat:session-replaced", 100*time.Millisecond)
 }
 
-func TestWorkspaceMoveInvalidatesEveryBindingAndFreshSessionReplaysCanonicalHistory(t *testing.T) {
+func TestWorkspaceMoveCreatesFreshEpochWithoutTranscriptReplay(t *testing.T) {
 	manager, events := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	oldCWD := t.TempDir()
@@ -1715,8 +1758,8 @@ func TestWorkspaceMoveInvalidatesEveryBindingAndFreshSessionReplaysCanonicalHist
 	if err != nil {
 		t.Fatalf("new old-cwd session: %v", err)
 	}
-	// A hibernated binding from another provider must not survive a workspace
-	// move and reappear on a later provider switch.
+	// Historical lanes for every provider remain available at their immutable
+	// workspace epoch; moving the chat only detaches live transports.
 	other := nativeSessionBinding{
 		TabID: tabID, ChatID: chatID, ProviderID: "other-provider", SessionID: "other-native-session", CWD: oldCWD,
 		HistoryHash: historyDigest(nil), HistoryVersion: nativeHistoryDigestVersion, Generation: 1, ResumeSafe: true,
@@ -1734,11 +1777,11 @@ func TestWorkspaceMoveInvalidatesEveryBindingAndFreshSessionReplaysCanonicalHist
 	if _, ok := manager.LiveSession(old.SessionID); ok {
 		t.Fatalf("old live session survived workspace invalidation")
 	}
-	if _, ok := manager.nativeSessions.get(tabID, chatID, old.ProviderID); ok {
-		t.Fatalf("current-provider native binding survived workspace invalidation")
+	if binding, ok := manager.nativeSessions.getForWorkspace(tabID, chatID, old.ProviderID, oldCWD); !ok || binding.SessionID != old.SessionID {
+		t.Fatalf("current-provider historical lane was deleted: %#v ok=%v", binding, ok)
 	}
-	if _, ok := manager.nativeSessions.get(tabID, chatID, other.ProviderID); ok {
-		t.Fatalf("other-provider native binding survived workspace invalidation")
+	if binding, ok := manager.nativeSessions.getForWorkspace(tabID, chatID, other.ProviderID, oldCWD); !ok || binding.SessionID != other.SessionID {
+		t.Fatalf("other-provider historical lane was deleted: %#v ok=%v", binding, ok)
 	}
 	if _, err := manager.StartJob(context.Background(), JobStartOptions{
 		Kind: "app-chat", SessionID: old.SessionID, TabID: tabID, ChatID: chatID, CWD: oldCWD, Prompt: "stale",
@@ -1753,6 +1796,12 @@ func TestWorkspaceMoveInvalidatesEveryBindingAndFreshSessionReplaysCanonicalHist
 	if fresh.SessionID == old.SessionID || !sameFilesystemPath(fresh.CWD, targetCWD) {
 		t.Fatalf("fresh session=%+v old=%s target=%s", fresh, old.SessionID, targetCWD)
 	}
+	if binding, ok := manager.nativeSessions.getForWorkspace(tabID, chatID, old.ProviderID, targetCWD); !ok || binding.SessionID != fresh.SessionID {
+		t.Fatalf("target workspace lane = %#v ok=%v, want %q", binding, ok, fresh.SessionID)
+	}
+	if ambiguous, ok := manager.nativeSessions.get(tabID, chatID, old.ProviderID); !ok || !ambiguous.Quarantined {
+		t.Fatalf("workspace-free lookup selected one of multiple epochs: %#v ok=%v", ambiguous, ok)
+	}
 	history := []any{map[string]any{"role": "user", "content": "canonical earlier turn", "at": "2026-07-13T00:00:00Z"}}
 	job, err := manager.StartJob(context.Background(), JobStartOptions{
 		Kind: "app-chat", SessionID: fresh.SessionID, TabID: tabID, ChatID: chatID, CWD: targetCWD,
@@ -1764,8 +1813,8 @@ func TestWorkspaceMoveInvalidatesEveryBindingAndFreshSessionReplaysCanonicalHist
 	end := events.waitJobEnd(t, jobID(job), 2*time.Second)
 	assertJobStatus(t, end, "done", 0, "end_turn")
 	result := jobFromEnd(end)["result"].(string)
-	if !strings.Contains(result, "User: canonical earlier turn") || !strings.Contains(result, "User request:\nrun after move") {
-		t.Fatalf("fresh target session did not canonical-replay history: %q", result)
+	if strings.Contains(result, "User: canonical earlier turn") || strings.Contains(result, "Previous conversation") || !strings.Contains(result, "User request:\nrun after move") {
+		t.Fatalf("new workspace epoch replayed history or lost the current request: %q", result)
 	}
 }
 
@@ -1825,7 +1874,7 @@ func TestWorkspaceMoveWriteFailureKeepsLiveAndNativeBinding(t *testing.T) {
 	}
 }
 
-func TestLifecycleTraceResurrectReplayExactlyOnce(t *testing.T) {
+func TestLifecycleWithoutExactResumeFailsClosedAfterHibernation(t *testing.T) {
 	manager, events := newFakeManager(t, "slow-prompt", Options{
 		HibernateTTL:           80 * time.Millisecond,
 		LifecycleCheckInterval: 10 * time.Millisecond,
@@ -1841,8 +1890,8 @@ func TestLifecycleTraceResurrectReplayExactlyOnce(t *testing.T) {
 	t.Logf("trace lifecycle active(pinned) pid=%v rssKb=%v", active["pid"], active["rssKb"])
 	firstEnd := events.waitJobEnd(t, jobID(first), 2*time.Second)
 	assertJobStatus(t, firstEnd, "done", 0, "end_turn")
-	if result := jobFromEnd(firstEnd)["result"].(string); !strings.Contains(result, "User: earlier request") || !strings.Contains(result, "User request:\nfirst live request") {
-		t.Fatalf("first result did not replay history once: %q", result)
+	if result := jobFromEnd(firstEnd)["result"].(string); strings.Contains(result, "User: earlier request") || strings.Contains(result, "Previous conversation") || !strings.Contains(result, "User request:\nfirst live request") {
+		t.Fatalf("first turn replayed Workass history or lost the request: %q", result)
 	}
 	idle := waitProcState(t, manager, StateIdle, 500*time.Millisecond)
 	t.Logf("trace lifecycle idle lastLine=%q", idle["lastLine"])
@@ -1850,28 +1899,11 @@ func TestLifecycleTraceResurrectReplayExactlyOnce(t *testing.T) {
 	t.Logf("trace lifecycle hibernated pid=%v", hibernated["pid"])
 
 	second := startAppChatJobWithHistory(t, manager, session.SessionID, "resurrect-tab", "second live request", history)
-	replaced := events.waitChannel(t, "chat:session-replaced", 2*time.Second).payload.(map[string]any)
-	replacement := replacedSessionInfo(t, replaced["session"])
-	if replaced["oldSessionId"] != session.SessionID || replacement.SessionID == "" || replacement.SessionID == session.SessionID {
-		t.Fatalf("replacement payload = %#v", replaced)
-	}
-	t.Logf("trace lifecycle resurrect old=%s new=%s", session.SessionID, replacement.SessionID)
-	active = waitProcState(t, manager, StateActive, 500*time.Millisecond)
-	t.Logf("trace lifecycle active(pinned) resurrected pid=%v", active["pid"])
 	secondEnd := events.waitJobEnd(t, jobID(second), 2*time.Second)
-	assertJobStatus(t, secondEnd, "done", 0, "end_turn")
-	if result := jobFromEnd(secondEnd)["result"].(string); !strings.Contains(result, "User: earlier request") || !strings.Contains(result, "User request:\nsecond live request") {
-		t.Fatalf("resurrected result did not seed exactly once: %q", result)
+	if job := jobFromEnd(secondEnd); asString(job["status"]) != "failed" || !strings.Contains(asString(job["result"]), "exact native-thread resume") {
+		t.Fatalf("non-resumable provider did not fail closed: %#v", job)
 	}
-
-	third := startAppChatJobWithHistory(t, manager, replacement.SessionID, "resurrect-tab", "third live request", history)
-	thirdEnd := events.waitJobEnd(t, jobID(third), 2*time.Second)
-	assertJobStatus(t, thirdEnd, "done", 0, "end_turn")
-	if result := jobFromEnd(thirdEnd)["result"].(string); strings.Contains(result, "User: earlier request") ||
-		!strings.Contains(result, `Active Workass runtime for this turn: provider "custom"`) ||
-		!strings.Contains(result, "User request:\nthird live request") {
-		t.Fatalf("third result should not replay history again: %q", result)
-	}
+	events.expectNoChannel(t, "chat:session-replaced", 100*time.Millisecond)
 }
 
 func TestFailedSpareWarmTripsCircuitBreakerInsteadOfRespawning(t *testing.T) {
@@ -1925,7 +1957,7 @@ func TestFailedSpareWarmTripsCircuitBreakerInsteadOfRespawning(t *testing.T) {
 	}
 }
 
-func TestLifecycleIdleCrashResurrectsOnNextUse(t *testing.T) {
+func TestLifecycleIdleCrashWithoutExactResumeFailsClosed(t *testing.T) {
 	manager, events := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "idle-crash-tab")
@@ -1951,18 +1983,13 @@ func TestLifecycleIdleCrashResurrectsOnNextUse(t *testing.T) {
 
 	history := []any{map[string]any{"role": "user", "content": "pre-crash history", "at": "2026-07-10T00:00:00Z"}}
 	second := startAppChatJobWithHistory(t, manager, session.SessionID, "idle-crash-tab", "after idle crash", history)
-	replaced := events.waitChannel(t, "chat:session-replaced", 2*time.Second).payload.(map[string]any)
-	replacement := replacedSessionInfo(t, replaced["session"])
-	if replaced["oldSessionId"] != session.SessionID || replacement.SessionID == "" || replacement.SessionID == session.SessionID {
-		t.Fatalf("idle crash replacement payload = %#v", replaced)
-	}
 	secondEnd := events.waitJobEnd(t, jobID(second), 2*time.Second)
-	assertJobStatus(t, secondEnd, "done", 0, "end_turn")
-	if result := jobFromEnd(secondEnd)["result"].(string); !strings.Contains(result, "User: pre-crash history") || !strings.Contains(result, "User request:\nafter idle crash") {
-		t.Fatalf("idle crash resurrect result = %q", result)
+	if job := jobFromEnd(secondEnd); asString(job["status"]) != "failed" || !strings.Contains(asString(job["result"]), "exact native-thread resume") || strings.Contains(asString(job["result"]), "pre-crash history") {
+		t.Fatalf("idle crash did not fail closed: %#v", job)
 	}
+	events.expectNoChannel(t, "chat:session-replaced", 100*time.Millisecond)
 	events.expectNoChannel(t, "chat:engine-recovered", 100*time.Millisecond)
-	t.Logf("trace idle crash resurrected old=%s new=%s", session.SessionID, replacement.SessionID)
+	t.Logf("trace idle crash preserved lane=%s and refused replacement", session.SessionID)
 }
 
 func TestLifecycleRSSSampledForLiveChild(t *testing.T) {
@@ -2116,6 +2143,13 @@ func newFakeManager(t *testing.T, mode string, overrides Options) (*Manager, *ev
 	if overrides.Logf != nil {
 		opts.Logf = overrides.Logf
 	}
+	if overrides.Broadcast != nil {
+		observer := overrides.Broadcast
+		opts.Broadcast = func(channel string, payload any) {
+			events.Broadcast(channel, payload)
+			observer(channel, payload)
+		}
+	}
 	if overrides.Provider.ID != "" {
 		opts.Provider.ID = overrides.Provider.ID
 	}
@@ -2135,7 +2169,7 @@ func newFakeSession(t *testing.T, manager *Manager, tabID string) SessionInfo {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	session, err := manager.NewSession(ctx, SessionOptions{TabID: tabID})
+	session, err := manager.NewSession(ctx, SessionOptions{TabID: tabID, ChatID: "chat-" + tabID})
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -2146,7 +2180,7 @@ func newMockSession(t *testing.T, manager *Manager, tabID string) SessionInfo {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	session, err := manager.NewSession(ctx, SessionOptions{TabID: tabID})
+	session, err := manager.NewSession(ctx, SessionOptions{TabID: tabID, ChatID: "chat-" + tabID})
 	if err != nil {
 		t.Fatalf("new mock session: %v", err)
 	}
@@ -2616,6 +2650,9 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 		capabilities := map[string]any{
 			"promptCapabilities": map[string]any{"image": imageSupport},
 		}
+		if strings.HasSuffix(s.mode, "-resume") {
+			capabilities["sessionCapabilities"] = map[string]any{"resume": map[string]any{}, "close": map[string]any{}}
+		}
 		if strings.HasPrefix(s.mode, "codex-steer") {
 			capabilities["_meta"] = map[string]any{
 				"workassCodexSteerRequest": true,
@@ -2650,7 +2687,15 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 			"authMethods":       []any{},
 		})
 	case "session/new":
-		if s.mode == "crash-session-new" {
+		if s.mode == "auth-on-session" || s.mode == "auth-on-session-secret" {
+			message := "Authentication required"
+			if s.mode == "auth-on-session-secret" {
+				message += "; credential=raw-sensitive-value"
+			}
+			s.fail(id, -32001, message)
+			return
+		}
+		if strings.HasPrefix(s.mode, "crash-session-new") {
 			_, _ = fmt.Fprint(os.Stderr, "authenticated ACP exited while creating a session")
 			os.Exit(9)
 		}
@@ -2675,7 +2720,7 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 			s.mu.Unlock()
 			result["configOptions"] = fakeClaudeEffortConfigOptions(currentModel, "default", "default")
 		}
-		if s.mode == "claude-cold-effort" {
+		if strings.HasPrefix(s.mode, "claude-cold-effort") {
 			s.mu.Lock()
 			s.currentModel = "claude-fable-5[1m]"
 			s.mu.Unlock()
@@ -2692,6 +2737,19 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 			result["commandCatalog"] = fakeClaudeCommandCatalogResult(s.mode)
 		}
 		s.respond(id, result)
+	case "session/resume":
+		if !strings.HasSuffix(s.mode, "-resume") {
+			s.fail(id, -32601, "Fake session/resume is not enabled")
+			return
+		}
+		sessionID := asString(params["sessionId"])
+		s.mu.Lock()
+		s.sessionIDs[sessionID] = struct{}{}
+		s.currentModel = "claude-fable-5[1m]"
+		s.mu.Unlock()
+		s.respond(id, map[string]any{
+			"availableModels": fakeClaudeAvailableModels(),
+		})
 	case "session/set_config_option":
 		if s.mode == "strict-sessions" {
 			s.mu.Lock()
@@ -2739,7 +2797,7 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 			s.respond(id, map[string]any{"configOptions": fakeClaudeEffortConfigOptions(model, "default", "default")})
 			return
 		}
-		if s.mode == "claude-cold-effort" {
+		if strings.HasPrefix(s.mode, "claude-cold-effort") {
 			if asString(params["configId"]) == "effort" {
 				s.respond(id, map[string]any{"configOptions": []any{fakeClaudeEffortOption(asString(params["value"]))}})
 				return
@@ -2903,7 +2961,9 @@ func (s *fakeACP) handlePrompt(id json.RawMessage, params map[string]any) {
 	}
 	if strings.Contains(fakePromptText(params["prompt"]), "[fake:claude-updates]") {
 		s.notify(sessionID, map[string]any{
-			"sessionUpdate": "_workass_claude_provider_session", "providerSessionId": sessionID + "-forked-1",
+			"sessionUpdate":             "_workass_claude_provider_session",
+			"previousProviderSessionId": sessionID, "providerSessionId": sessionID + "-forked-1",
+			"lineageGeneration": float64(2), "lineageProof": "fixture-provider-attestation",
 		})
 		s.notify(sessionID, map[string]any{
 			"sessionUpdate": "_workass_claude_turn_heartbeat",
@@ -2917,6 +2977,15 @@ func (s *fakeACP) handlePrompt(id json.RawMessage, params map[string]any) {
 		return
 	}
 	switch s.mode {
+	case "input-receipt":
+		s.notify(sessionID, map[string]any{
+			"sessionUpdate": "_workass_input_consumed", "clientUserMessageId": asString(params["clientUserMessageId"]),
+		})
+		s.notify(sessionID, map[string]any{
+			"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "done"},
+		})
+		s.respond(id, map[string]any{"stopReason": "end_turn"})
+		return
 	case "image-echo":
 		s.notify(sessionID, map[string]any{
 			"sessionUpdate": "agent_message_chunk",
@@ -3084,7 +3153,8 @@ func (s *fakeACP) handlePrompt(id json.RawMessage, params map[string]any) {
 		s.respond(id, map[string]any{"stopReason": "end_turn"})
 		return
 	}
-	if s.mode == "echo-prompt" || s.mode == "claude-cold-effort" {
+	baseMode := strings.TrimSuffix(s.mode, "-resume")
+	if baseMode == "echo-prompt" || baseMode == "claude-cold-effort" {
 		s.notify(sessionID, map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": fakePromptText(params["prompt"])}})
 		s.respond(id, map[string]any{"stopReason": "end_turn"})
 		return
@@ -3459,7 +3529,7 @@ func TestEmitToolEventForwardsSubagentLinkage(t *testing.T) {
 		}
 	}})
 	t.Cleanup(func() { mgr.Reset() })
-	b := &Bridge{providerID: "claude-agent-acp", manager: mgr}
+	b := &Bridge{providerID: "claude", manager: mgr}
 	job := &Job{ID: "job-1"}
 
 	// The spawning Task tool call runs on the main thread — no parent id.
@@ -3570,9 +3640,8 @@ func TestMetaParentToolUseID(t *testing.T) {
 
 func TestBrandForProvider(t *testing.T) {
 	cases := map[string]string{
-		"claude-agent-acp": "claude", "anthropic": "claude", "opus": "claude",
-		"codex-acp": "gpt", "gpt-5": "gpt", "openai": "gpt",
-		"workass.mock": "", "cognition.devin": "",
+		"claude": "claude", "codex": "gpt",
+		"claude-agent-acp": "", "gpt-5": "", "workass.mock": "", "cognition.devin": "",
 	}
 	for in, want := range cases {
 		if got := brandForProvider(in); got != want {

@@ -519,21 +519,6 @@ table.mdtable th { background: var(--field); font-weight: 600; }
   .ping::after { animation: none; transform: scale(2.2); opacity: .28; }
 }
 
-/* Inline background-process marker (Claude-Code style): a quiet step-like row.
-   Accent shows only on the glyph + the live pulse dot. Settles to a faded
-   done/failed state. */
-.bgprocrow { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; margin: 12px 0; max-width: var(--read); }
-.bgprocrow .bgic { display: grid; place-items: center; color: var(--faint); flex: none; }
-.bgprocrow .bgic svg { width: 13px; height: 13px; }
-.bgprocrow.run .bgic { color: var(--acc); }
-.bgprocrow .bgtext b { color: var(--ink2); font-weight: 550; }
-.bgprocrow .bgsep { color: var(--faint); }
-.bgprocrow .bgfail { color: var(--del); }
-.bgprocrow.done, .bgprocrow.fail { opacity: .72; }
-.bgprocrow .bgdot { width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 20%, transparent); flex: none; animation: bgpulse 1.6s ease-in-out infinite; }
-@keyframes bgpulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
-@media (prefers-reduced-motion: reduce) { .bgprocrow .bgdot { animation: none; } }
-
 .codebox { border: 1px solid var(--line); background: var(--field); border-radius: 10px; padding: 12px 14px; margin: 0 0 14px; overflow-x: auto; white-space: pre; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.6; color: var(--ink2); }
 .codebox .cm { color: var(--faint); }
 .codebox .kw { color: var(--ink); font-weight: 600; }

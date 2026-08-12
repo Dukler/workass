@@ -8,9 +8,10 @@ import (
 )
 
 type agentMCPOptions struct {
-	ChatID   string
-	TabID    string
-	OwnerKey string
+	ChatID      string
+	TabID       string
+	OwnerKey    string
+	OperationID string
 }
 
 func agentMCPTools() []map[string]any {
@@ -251,6 +252,7 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 	params["parent_chat_id"] = options.ChatID
 	params["parent_tab_id"] = options.TabID
 	params["owner_key"] = options.OwnerKey
+	params["operation_id"] = options.OperationID
 	result, err := control.call(request, agentControlRequest{Method: method, Params: params})
 	if err != nil {
 		return agentMCPErrorResult(err.Error()), nil

@@ -10,7 +10,9 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,25 +28,28 @@ const (
 )
 
 type Options struct {
-	Client        *lmstudio.Client
-	ClientConfig  lmstudio.Config
-	Stdout        io.Writer
-	Stderr        io.Writer
-	FlushInterval time.Duration
-	Version       string
+	Client           *lmstudio.Client
+	ClientConfig     lmstudio.Config
+	Stdout           io.Writer
+	Stderr           io.Writer
+	FlushInterval    time.Duration
+	Version          string
+	SessionStorePath string
 }
 
 type Server struct {
-	client        *lmstudio.Client
-	stdout        io.Writer
-	logger        *log.Logger
-	flushInterval time.Duration
-	version       string
+	client           *lmstudio.Client
+	stdout           io.Writer
+	logger           *log.Logger
+	flushInterval    time.Duration
+	version          string
+	sessionStorePath string
 
 	mu         sync.Mutex
 	sessions   map[string]*session
 	sessionSeq int64
 	writeMu    sync.Mutex
+	persistMu  sync.Mutex
 }
 
 type session struct {
@@ -84,14 +89,19 @@ func New(opts Options) (*Server, error) {
 	if version == "" {
 		version = "0.1.0"
 	}
-	return &Server{
-		client:        client,
-		stdout:        stdout,
-		logger:        log.New(stderr, "workass-agent: ", log.LstdFlags),
-		flushInterval: flush,
-		version:       version,
-		sessions:      make(map[string]*session),
-	}, nil
+	server := &Server{
+		client:           client,
+		stdout:           stdout,
+		logger:           log.New(stderr, "workass-agent: ", log.LstdFlags),
+		flushInterval:    flush,
+		version:          version,
+		sessionStorePath: strings.TrimSpace(opts.SessionStorePath),
+		sessions:         make(map[string]*session),
+	}
+	if err := server.loadSessions(); err != nil {
+		return nil, err
+	}
+	return server, nil
 }
 
 func (s *Server) Serve(ctx context.Context, r io.Reader) error {
@@ -165,6 +175,8 @@ func (s *Server) handleRequest(ctx context.Context, id json.RawMessage, method s
 		result = s.initialize(params)
 	case "session/new":
 		result, rpcErr = s.newSession(ctx, params)
+	case "session/resume":
+		result, rpcErr = s.resumeSession(ctx, params)
 	case "session/prompt":
 		result, rpcErr = s.prompt(ctx, params)
 	case "session/cancel":
@@ -197,6 +209,10 @@ func (s *Server) handleNotification(method string, rawParams json.RawMessage) {
 }
 
 func (s *Server) initialize(_ map[string]any) map[string]any {
+	sessionCapabilities := map[string]any{"close": map[string]any{}}
+	if s.sessionStorePath != "" {
+		sessionCapabilities["resume"] = map[string]any{}
+	}
 	return map[string]any{
 		"protocolVersion": ProtocolVersion,
 		"agentInfo": map[string]any{
@@ -204,7 +220,8 @@ func (s *Server) initialize(_ map[string]any) map[string]any {
 			"version": s.version,
 		},
 		"agentCapabilities": map[string]any{
-			"loadSession": false,
+			"loadSession":         false,
+			"sessionCapabilities": sessionCapabilities,
 			"promptCapabilities": map[string]any{
 				"image":           false,
 				"audio":           false,
@@ -243,10 +260,40 @@ func (s *Server) newSession(ctx context.Context, params map[string]any) (map[str
 	s.mu.Lock()
 	s.sessions[sess.id] = sess
 	s.mu.Unlock()
+	if err := s.persistSessions(); err != nil {
+		s.mu.Lock()
+		delete(s.sessions, sess.id)
+		s.mu.Unlock()
+		return nil, &rpcError{Code: -32001, Message: RedactSensitiveText(err.Error())}
+	}
 	return map[string]any{
 		"sessionId":     sess.id,
 		"configOptions": s.configOptions(sess, models),
 	}, nil
+}
+
+func (s *Server) resumeSession(ctx context.Context, params map[string]any) (map[string]any, *rpcError) {
+	if s.sessionStorePath == "" {
+		return nil, &rpcError{Code: -32601, Message: "session/resume is unavailable without durable session storage"}
+	}
+	sessionID := strings.TrimSpace(asString(params["sessionId"]))
+	if sessionID == "" {
+		return nil, &rpcError{Code: -32602, Message: "sessionId is required"}
+	}
+	sess := s.getSession(sessionID)
+	if sess == nil {
+		return nil, &rpcError{Code: -32000, Message: "Unknown durable ACP session."}
+	}
+	if cwd := strings.TrimSpace(asString(params["cwd"])); cwd != "" {
+		sess.mu.Lock()
+		sess.cwd = cwd
+		sess.mu.Unlock()
+		if err := s.persistSessions(); err != nil {
+			return nil, &rpcError{Code: -32001, Message: RedactSensitiveText(err.Error())}
+		}
+	}
+	models, _ := s.listModels(ctx)
+	return map[string]any{"sessionId": sessionID, "configOptions": s.configOptions(sess, models)}, nil
 }
 
 func (s *Server) setConfigOption(ctx context.Context, params map[string]any) (map[string]any, *rpcError) {
@@ -273,6 +320,9 @@ func (s *Server) setConfigOption(ctx context.Context, params map[string]any) (ma
 	sess.mu.Lock()
 	sess.model = value
 	sess.mu.Unlock()
+	if err := s.persistSessions(); err != nil {
+		return nil, &rpcError{Code: -32001, Message: RedactSensitiveText(err.Error())}
+	}
 	return map[string]any{"configOptions": s.configOptions(sess, models)}, nil
 }
 
@@ -283,7 +333,9 @@ func (s *Server) closeSession(params map[string]any) (map[string]any, *rpcError)
 	}
 	s.mu.Lock()
 	sess := s.sessions[sessionID]
-	delete(s.sessions, sessionID)
+	if s.sessionStorePath == "" {
+		delete(s.sessions, sessionID)
+	}
 	s.mu.Unlock()
 	if sess != nil {
 		sess.mu.Lock()
@@ -382,7 +434,115 @@ func (s *Server) prompt(ctx context.Context, params map[string]any) (map[string]
 	sess.mu.Lock()
 	sess.messages = append(sess.messages, userMsg, lmstudio.Message{Role: "assistant", Content: assistant.String()})
 	sess.mu.Unlock()
+	if err := s.persistSessions(); err != nil {
+		return nil, &rpcError{Code: -32001, Message: RedactSensitiveText(err.Error())}
+	}
 	return map[string]any{"stopReason": "end_turn"}, nil
+}
+
+type persistedSession struct {
+	ID       string             `json:"id"`
+	CWD      string             `json:"cwd"`
+	Model    string             `json:"model"`
+	Messages []lmstudio.Message `json:"messages"`
+}
+
+type persistedSessionFile struct {
+	Version  int                `json:"v"`
+	Sessions []persistedSession `json:"sessions"`
+}
+
+func (s *Server) loadSessions() error {
+	if s == nil || s.sessionStorePath == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(s.sessionStorePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read durable ACP sessions: %w", err)
+	}
+	var file persistedSessionFile
+	if err := json.Unmarshal(raw, &file); err != nil {
+		return fmt.Errorf("decode durable ACP sessions: %w", err)
+	}
+	if file.Version != 1 {
+		return fmt.Errorf("unsupported durable ACP session schema %d", file.Version)
+	}
+	for _, record := range file.Sessions {
+		id := strings.TrimSpace(record.ID)
+		if id == "" {
+			return errors.New("durable ACP session is missing its identity")
+		}
+		if _, exists := s.sessions[id]; exists {
+			return fmt.Errorf("duplicate durable ACP session %q", id)
+		}
+		s.sessions[id] = &session{
+			id: id, cwd: strings.TrimSpace(record.CWD), model: strings.TrimSpace(record.Model),
+			messages: append([]lmstudio.Message(nil), record.Messages...),
+		}
+	}
+	return nil
+}
+
+func (s *Server) persistSessions() error {
+	if s == nil || s.sessionStorePath == "" {
+		return nil
+	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	s.mu.Lock()
+	items := make([]*session, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		items = append(items, sess)
+	}
+	s.mu.Unlock()
+	sort.Slice(items, func(i, j int) bool { return items[i].id < items[j].id })
+	file := persistedSessionFile{Version: 1, Sessions: make([]persistedSession, 0, len(items))}
+	for _, sess := range items {
+		sess.mu.Lock()
+		record := persistedSession{
+			ID: sess.id, CWD: sess.cwd, Model: sess.model,
+			Messages: append([]lmstudio.Message(nil), sess.messages...),
+		}
+		sess.mu.Unlock()
+		file.Sessions = append(file.Sessions, record)
+	}
+	raw, err := json.Marshal(file)
+	if err != nil {
+		return fmt.Errorf("encode durable ACP sessions: %w", err)
+	}
+	dir := filepath.Dir(s.sessionStorePath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create durable ACP session directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(dir, ".workass-agent-sessions-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create durable ACP session file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	committed := false
+	defer func() {
+		_ = temporary.Close()
+		if !committed {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		return fmt.Errorf("protect durable ACP sessions: %w", err)
+	}
+	if _, err := temporary.Write(raw); err != nil {
+		return fmt.Errorf("write durable ACP sessions: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close durable ACP sessions: %w", err)
+	}
+	if err := os.Rename(temporaryPath, s.sessionStorePath); err != nil {
+		return fmt.Errorf("commit durable ACP sessions: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 func (s *Server) notifyUsage(sessionID string, usage *lmstudio.Usage) {

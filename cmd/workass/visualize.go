@@ -19,7 +19,7 @@ const (
 
 const visualizeCSP = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com https://esm.sh https://cdn.jsdelivr.net https://unpkg.com; style-src 'unsafe-inline' https://cdnjs.cloudflare.com https://esm.sh https://cdn.jsdelivr.net https://unpkg.com https://fonts.googleapis.com https://fonts.gstatic.com https://fonts.bunny.net; font-src https://fonts.googleapis.com https://fonts.gstatic.com https://fonts.bunny.net; img-src data: blob: https://cdnjs.cloudflare.com https://esm.sh https://cdn.jsdelivr.net https://unpkg.com https://fonts.googleapis.com https://fonts.gstatic.com https://fonts.bunny.net; media-src data: blob:; connect-src 'none'; frame-src 'none'; navigate-to 'none'"
 
-func registerVisualizeHandler(hub *wire.Hub, registry *artifacthost.Registry, sessionState *sessionStore, stateDir string) {
+func registerVisualizeHandler(hub *wire.Hub, registry *artifacthost.Registry, providerChats *providerChatRuntime, stateDir string) {
 	hub.Register("visualize:host", func(args []any) (any, error) {
 		if registry == nil {
 			return nil, fmt.Errorf("visualization hosting is unavailable")
@@ -30,11 +30,11 @@ func registerVisualizeHandler(hub *wire.Hub, registry *artifacthost.Registry, se
 		if tabID == "" || chatID == "" {
 			return nil, fmt.Errorf("visualize:host requires tabId and chatId")
 		}
-		if sessionState == nil {
+		if providerChats == nil {
 			return nil, fmt.Errorf("visualization chat ownership is unavailable")
 		}
-		if _, ok := sessionState.ChatWorkspace(tabID, chatID); !ok {
-			return nil, fmt.Errorf("visualization chat is not known to this daemon")
+		if _, _, err := providerChats.exactActor(tabID, chatID); err != nil {
+			return nil, fmt.Errorf("visualization chat is not known to this daemon: %w", err)
 		}
 
 		sourcePath, err := resolveVisualizationPath(fieldString(arg, "path"), stateDir)

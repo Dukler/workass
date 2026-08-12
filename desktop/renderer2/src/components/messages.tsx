@@ -1,7 +1,7 @@
 import { memo, useEffect, useState, type ReactNode } from 'react';
-import type { ThinkingEvent, PlanEvent, ToolEvent, PermissionState, RestoredEvent, BgProcEvent, MessageImage, SteerState } from '../store/types';
+import type { ThinkingEvent, PlanEvent, ToolEvent, PermissionState, RestoredEvent, MessageImage, SteerState } from '../store/types';
 import { renderInline } from '../markdown/inline';
-import { IcShield, IcBgProc, ModelIcon, ActionGlyph } from '../icons';
+import { IcShield, ModelIcon, ActionGlyph } from '../icons';
 import { store } from '../store/store';
 import { messageImageSrc } from '../image-drafts';
 import { isSubagentHeader, type SubagentNode } from '../subagent-layout';
@@ -124,47 +124,6 @@ export function RestoredRow({ ev }: { ev: RestoredEvent }) {
     <div className="steprow compactrow" style={{ cursor: 'default' }}>
       <span className="chev">↺</span>
       <span className="stbody">Estado restaurado a antes del turno {ev.turnSeq} ›</span>
-    </div>
-  );
-}
-
-// Live inline row for a background process tied to this chat (its ACP engine /
-// spawned aux processes). Ticks elapsed while running; settles with a gentle
-// fade when the process ends. No controls here — stopping stays in the Tareas
-// card. Reduced-motion is honored in CSS.
-function bgDuration(startIso: string, endMs: number): string {
-  const start = new Date(startIso).getTime();
-  if (Number.isNaN(start)) return '';
-  let s = Math.max(0, Math.round((endMs - start) / 1000));
-  const h = Math.floor(s / 3600); s -= h * 3600;
-  const m = Math.floor(s / 60); s -= m * 60;
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
-}
-export function BgProcRow({ ev }: { ev: BgProcEvent }) {
-  const running = ev.status === 'running';
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    if (!running) return;
-    const iv = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(iv);
-  }, [running]);
-  const endMs = running ? now : (ev.endedAt ? new Date(ev.endedAt).getTime() : now);
-  const dur = bgDuration(ev.startedAt, endMs);
-  const cls = running ? 'run' : ev.status === 'failed' ? 'fail' : 'done';
-  return (
-    <div className={`bgprocrow ${cls}`}>
-      <span className="bgic"><IcBgProc /></span>
-      <span className="bgtext">
-        Proceso en segundo plano: <b>{ev.label}</b><span className="bgsep"> · </span>
-        {running
-          ? <>en curso · {dur}</>
-          : ev.status === 'failed'
-            ? <span className="bgfail">falló{ev.code != null ? ` · código ${ev.code}` : ''} · {dur}</span>
-            : <>terminó · {dur}</>}
-      </span>
-      {running && <span className="bgdot" aria-hidden="true" />}
     </div>
   );
 }

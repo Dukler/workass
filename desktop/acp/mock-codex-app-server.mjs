@@ -4,6 +4,7 @@ const pending = new Map();
 let requestSequence = 0;
 let turnSequence = 0;
 let activeTurn = null;
+const turnRecords = [];
 
 function write(message) { process.stdout.write(`${JSON.stringify(message)}\n`); }
 function respond(id, result) { write({ id, result }); }
@@ -30,6 +31,8 @@ const secondaryModel = {
 
 function completeTurn(turnId, status = 'completed') {
   activeTurn = null;
+	const record = turnRecords.find((turn) => turn.id === turnId);
+	if (record) record.status = status;
   notify('turn/completed', {
     threadId: 'fixture-codex-thread',
     turn: { id: turnId, status, items: [] },
@@ -38,13 +41,30 @@ function completeTurn(turnId, status = 'completed') {
 
 async function runTurn(id, params) {
   const turnId = `fixture-turn-${++turnSequence}`;
+	const turnRecord = { id: turnId, status: 'inProgress', items: [] };
+	turnRecords.push(turnRecord);
   activeTurn = turnId;
   respond(id, { turn: { id: turnId, status: 'inProgress', items: [] } });
   notify('turn/started', { threadId: params.threadId, turn: { id: turnId, status: 'inProgress', items: [] } });
+	if (params.clientUserMessageId) {
+	  const userItem = { type: 'userMessage', id: `prompt-user-${turnId}`, clientId: params.clientUserMessageId, content: params.input };
+	  turnRecord.items.push(userItem);
+	  notify('item/started', {
+		threadId: params.threadId, turnId, startedAtMs: Date.now(),
+		item: userItem,
+	  });
+	}
   const text = (params.input || []).filter((item) => item.type === 'text').map((item) => item.text).join('\n');
   const images = (params.input || []).filter((item) => item.type === 'image');
   notify('item/reasoning/summaryTextDelta', { threadId: params.threadId, turnId, itemId: 'reasoning-fixture', summaryIndex: 0, delta: 'Fixture reasoning' });
   if (text.includes('keep running')) return;
+  if (text.includes('[fixture:compact]')) {
+    notify('thread/compacted', {
+      threadId: params.threadId,
+      turnId,
+      checkpointId: `fixture-checkpoint-${turnId}`,
+    });
+  }
   if (text.includes('exercise permission')) {
     notify('item/started', {
       threadId: params.threadId, turnId, startedAtMs: Date.now(),
@@ -128,7 +148,11 @@ async function handle(message) {
     return;
   }
   if (method === 'turn/interrupt') { respond(id, {}); completeTurn(params.turnId, 'interrupted'); return; }
-  if (method === 'thread/read') return respond(id, { thread: { id: params.threadId, turns: activeTurn ? [{ id: activeTurn, status: 'inProgress', items: [] }] : [] } });
+	if (method === 'thread/read') return respond(id, { thread: { id: params.threadId, turns: turnRecords } });
+	if (method === 'thread/items/list') {
+	  const data = turnRecords.flatMap((turn) => turn.items.map((item) => ({ turnId: turn.id, item }))).reverse();
+	  return respond(id, { data, nextCursor: null, backwardsCursor: null });
+	}
   if (method === 'account/rateLimits/read') return respond(id, { rateLimits: { planType: 'plus', primary: { usedPercent: 17, resetsAt: 1, windowDurationMins: 300 } } });
   if (method === 'account/rateLimitResetCredit/consume') return respond(id, { consumed: true });
   if (method === 'thread/unsubscribe') return respond(id, {});

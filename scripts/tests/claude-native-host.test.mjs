@@ -60,12 +60,18 @@ test('official Claude SDK host provides session, streaming, steering, and permis
   peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'test', version: '1' } } });
   const initialized = await peer.waitFor((message) => message.id === 1);
   assert.equal(initialized.result.agentInfo.name, 'Claude Code');
+  assert.equal(initialized.result.agentCapabilities.loadSession, undefined);
+  assert.deepEqual(initialized.result.agentCapabilities.sessionCapabilities.resume, {});
   assert.equal(initialized.result._meta.workassClaudeSteerRequest, true);
+	assert.equal(initialized.result._meta.workassStableTurnInputV1, true);
 
   peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
   const opened = await peer.waitFor((message) => message.id === 2);
   const sessionId = opened.result.sessionId;
   assert.equal(sessionId, 'fixture-claude-session');
+  assert.equal(opened.result._meta.workassProviderRealm.verified, true);
+  assert.match(opened.result._meta.workassProviderRealm.accountScope, /^account-[0-9a-f]{32}$/);
+  assert.equal(JSON.stringify(opened.result._meta).includes('fixture@example.test'), false);
   assert.deepEqual(opened.result.configOptions.map((option) => option.id), ['model', 'mode', 'effort']);
   assert.equal(opened.result.configOptions[0].options[0].name, 'Claude Opus Fixture');
 
@@ -90,7 +96,11 @@ test('official Claude SDK host provides session, streaming, steering, and permis
   peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
     sessionId,
     prompt: [{ type: 'text', text: 'exercise permission' }],
+	clientUserMessageId: 'workass-operation-1',
   } });
+	const consumed = await peer.waitFor((message) => message.method === 'session/update'
+	&& message.params.update.sessionUpdate === '_workass_input_consumed');
+	assert.equal(consumed.params.update.clientUserMessageId, 'workass-operation-1');
   const permission = await peer.waitFor((message) => message.method === 'session/request_permission');
   assert.equal(permission.params.sessionId, sessionId);
   peer.send({ jsonrpc: '2.0', id: permission.id, result: { outcome: { outcome: 'selected', optionId: 'allow_once' } } });
@@ -372,28 +382,18 @@ test('official Claude SDK host replaces a dead between-turn transport before acc
   assert.equal(second.result.stopReason, 'end_turn');
 });
 
-test('official Claude SDK host replaces a missing resumed conversation transparently', async (t) => {
+test('official Claude SDK host fails closed when the exact resumed conversation is missing', async (t) => {
   const peer = startHost({ WORKASS_CLAUDE_FIXTURE_MISSING_RESUME: '1' });
   t.after(() => peer.child.kill('SIGKILL'));
 
   peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
   await peer.waitFor((message) => message.id === 1);
-  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/load', params: {
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: {
     sessionId: 'fixture-missing-resume', cwd: repoRoot, mcpServers: [],
   } });
   const resumed = await peer.waitFor((message) => message.id === 2);
-  assert.equal(resumed.error, undefined);
-
-  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/set_config_option', params: {
-    sessionId: 'fixture-missing-resume', configId: 'mode', value: 'bypassPermissions',
-  } });
-  assert.equal((await peer.waitFor((message) => message.id === 3)).error, undefined);
-  peer.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: {
-    sessionId: 'fixture-missing-resume',
-    prompt: [{ type: 'text', text: 'first turn after missing resume recovery' }],
-  } });
-  const completed = await peer.waitFor((message) => message.id === 4);
-  assert.equal(completed.result.stopReason, 'end_turn');
+  assert.match(resumed.error?.message || '', /no conversation found with session id/i);
+  assert.equal(resumed.result, undefined);
 });
 
 test('real official Claude SDK host completes two turns after pre-prompt controls', {

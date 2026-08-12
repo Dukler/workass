@@ -140,8 +140,12 @@ func normalizeCatalogModels(models []Model) []Model {
 // catalog. Model IDs remain byte-for-byte unchanged; only display order is
 // provider-specific here.
 func normalizeProviderCatalogModels(providerID string, models []Model) []Model {
+	return providerAdapterForID(providerID).catalog.Normalize(models)
+}
+
+func normalizeClaudeCatalogModels(models []Model) []Model {
 	models = normalizeCatalogModels(models)
-	if normalizeProviderID(providerID) != "claude" || len(models) < 2 {
+	if len(models) < 2 {
 		return models
 	}
 	// The adapter's `default` entry is only an alias for one of the explicit
@@ -236,8 +240,8 @@ func preserveUnknownModelEfforts(previous, current []Model, known map[string]boo
 // provider detection rebuilds the catalog. That detection remains the boundary
 // for removing models that the provider no longer advertises.
 func reconcileClaudeLiveCatalog(previous, current []Model, known map[string]bool) ([]Model, map[string]bool) {
-	previous = normalizeProviderCatalogModels("claude", append([]Model(nil), previous...))
-	current = normalizeProviderCatalogModels("claude", append([]Model(nil), current...))
+	previous = normalizeClaudeCatalogModels(append([]Model(nil), previous...))
+	current = normalizeClaudeCatalogModels(append([]Model(nil), current...))
 
 	literalByRoot := make(map[string][]Model)
 	for _, model := range previous {
@@ -282,7 +286,7 @@ func reconcileClaudeLiveCatalog(previous, current []Model, known map[string]bool
 	}
 
 	adjusted = preserveUnknownModelEfforts(previous, adjusted, adjustedKnown)
-	return normalizeProviderCatalogModels("claude", adjusted), adjustedKnown
+	return normalizeClaudeCatalogModels(adjusted), adjustedKnown
 }
 
 func literalContextModelRoot(modelID string) (string, bool) {
@@ -306,9 +310,10 @@ func literalContextModelRoot(modelID string) (string, bool) {
 // versioned label shown by Workass. The adapter's value remains the selection
 // ID; this function never invents or rewrites it.
 func providerCatalogModel(providerID string, model Model, description string) Model {
-	if normalizeProviderID(providerID) != "claude" {
-		return model
-	}
+	return providerAdapterForID(providerID).catalog.Present(model, description)
+}
+
+func presentClaudeCatalogModel(model Model, description string) Model {
 	description = strings.TrimSpace(description)
 	match := claudeModelVersionPattern.FindStringSubmatch(description)
 	if match == nil {

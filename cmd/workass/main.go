@@ -28,10 +28,12 @@ import (
 
 	"workass/internal/acp"
 	"workass/internal/artifacthost"
+	"workass/internal/chat"
 	"workass/internal/fleet"
 	"workass/internal/httpserve"
 	"workass/internal/lease"
 	"workass/internal/machineid"
+	providercontract "workass/internal/provider"
 	"workass/internal/tlscert"
 	"workass/internal/voice"
 	"workass/internal/wire"
@@ -184,6 +186,14 @@ func main() {
 	}
 
 	logger := log.New(os.Stderr, "", log.LstdFlags)
+	identity, identityErr := machineid.Load(stateDir)
+	if identityErr != nil {
+		// A daemon with no provable identity still serves its own client; it
+		// cannot own portable provider-lane or pairing identities.
+		logger.Printf("[workass] machine identity unavailable: %v", identityErr)
+	} else {
+		logger.Printf("[workass] machine %s (%s)", identity.MachineID, identity.DisplayName)
+	}
 	leaseManager, err := lease.NewManager(lease.Options{
 		StateDir: stateDir,
 		Logf:     logger.Printf,
@@ -214,6 +224,7 @@ func main() {
 	acpManager := acp.NewManager(acp.Options{
 		RootDir:                 cwd,
 		StateDir:                stateDir,
+		MachineID:               identity.MachineID,
 		RuntimeProfile:          workassRuntimeProfile(),
 		WorkassMCPBaseURL:       mcpBaseURL,
 		WorkassMCPCACertFile:    filepath.Join(stateDir, tlscert.CertFileName),
@@ -236,7 +247,13 @@ func main() {
 			logger.Printf("[acp] %s %s", message, data)
 		},
 	})
-	chatControl := newChatControlCoordinator(acpManager, sessionState, hub.Broadcast)
+	providerChats := newProviderChatRuntime(acpManager, sessionState, stateDir, hub.Broadcast)
+	if err := providerChats.StartupError(); err != nil {
+		acpManager.Reset()
+		logger.Printf("[workass] initialize authoritative chat runtime: %v", err)
+		os.Exit(1)
+	}
+	chatControl := newChatControlCoordinator(acpManager, hub.Broadcast, providerChats)
 	artifactHosting, err := artifacthost.New(stateDir, "https://"+net.JoinHostPort("127.0.0.1", strconv.Itoa(*port)))
 	if err != nil {
 		acpManager.Reset()
@@ -250,6 +267,7 @@ func main() {
 		Engine:              effectiveEngine,
 		EngineFlagOverrides: flagOverrides,
 		ChatControl:         chatControl,
+		ProviderChats:       providerChats,
 		Artifacts:           artifactHosting,
 	})
 	acpManager.StartProviderDetection(context.Background())
@@ -279,15 +297,6 @@ func main() {
 		handler.RendererFS = embeddedRendererFS()
 	}
 	handler.Version = daemonVersion
-	identity, identityErr := machineid.Load(stateDir)
-	if identityErr != nil {
-		// A daemon with no provable identity still serves its own client; it
-		// just cannot be paired with or announced, so say so rather than
-		// minting a replacement id behind the user's back.
-		logger.Printf("[workass] machine identity unavailable: %v", identityErr)
-	} else {
-		logger.Printf("[workass] machine %s (%s)", identity.MachineID, identity.DisplayName)
-	}
 	// The fleet key is loaded, never minted here. A daemon that starts fresh must
 	// not invent a fleet of one behind your back: `workass fleet key` mints, and
 	// `workass fleet join` accepts the key another machine already holds.
@@ -313,8 +322,8 @@ func main() {
 	if machineBook != nil {
 		logger.Printf("[workass] registered %d machine wire channels", registerMachineHandlers(hub, machineBook, identity))
 	}
-	handler.Metrics = func() map[string]any { return daemonMetrics(sessionState, stateDir, hub, acpManager) }
-	agentControl, err := newAgentControlHandler(acpManager, sessionState, hub.Broadcast, chatControl)
+	handler.Metrics = func() map[string]any { return daemonMetrics(providerChats, stateDir, hub, acpManager) }
+	agentControl, err := newAgentControlHandler(acpManager, hub.Broadcast, chatControl)
 	if err != nil {
 		acpManager.Reset()
 		logger.Printf("[workass] initialize agent control: %v", err)
@@ -324,6 +333,14 @@ func main() {
 	var cleanupOnce sync.Once
 	cleanup := func() {
 		cleanupOnce.Do(func() {
+			// Durable chat actors own the disposable provider-lane attachments.
+			// Detach those actors before the manager tears down its bridge maps so
+			// shutdown preserves the exact native-thread bindings for resume.
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := providerChats.Close(closeCtx); err != nil {
+				logger.Printf("[workass] detach provider chat actors: %v", err)
+			}
+			cancel()
 			acpManager.Reset()
 		})
 	}
@@ -350,7 +367,7 @@ func main() {
 	// E5. TLS is not a port: the daemon keeps listening exactly where the
 	// firewall already allows it, and only the bytes change.
 	if *useTLS {
-		mcpCertificate, err := tlscert.IssueLoopbackServerCertificate(certificate, "mcp.localhost")
+		mcpCertificates, err := tlscert.NewLoopbackServerCertificateRotator(certificate, "mcp.localhost")
 		if err != nil {
 			cleanup()
 			logger.Printf("[workass] mint MCP loopback certificate: %v", err)
@@ -361,7 +378,7 @@ func main() {
 			MinVersion:   tls.VersionTLS13,
 			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 				if strings.EqualFold(strings.TrimSpace(hello.ServerName), "mcp.localhost") {
-					return &mcpCertificate, nil
+					return mcpCertificates.GetCertificate(hello)
 				}
 				return &certificate.TLS, nil
 			},
@@ -607,67 +624,22 @@ func resolveMocksDir(flagValue, envValue, cwd, executable string) string {
 	return candidate
 }
 
-// daemonEventBroadcaster makes the generation Store the visibility boundary for
-// every job event. Non-terminal journal writes finish outside the session mutex
-// before delivery; terminal canonical/archive persistence continues without the
-// global dispatch lock so unrelated chats remain able to publish and stream.
-func daemonEventBroadcaster(sessionState *sessionStore, broadcast func(string, any)) func(string, any) {
+// daemonEventBroadcaster preserves manager emission order at the frozen wire
+// boundary. Chat semantics have already crossed the durable actor ingress in
+// Manager.emit; this function must never recover an unowned event by writing it
+// into the retired renderer/session mirror. Non-chat executor events remain
+// transient publications and acquire no chat persistence here.
+func daemonEventBroadcaster(_ *sessionStore, broadcast func(string, any)) func(string, any) {
 	var dispatchMu sync.Mutex
 	return func(channel string, payload any) {
-		// Manager timers/provider callbacks may emit concurrently. Keep queue
-		// admission and visible delivery in one order so the recovery mirror can
-		// never persist A→B while clients observed B→A.
+		// Manager timers/provider callbacks may emit concurrently. Keep visible
+		// delivery ordered without manufacturing another semantic owner.
 		dispatchMu.Lock()
-		if channel != "job:event" {
-			if channel == "agent:apply" {
-				persistAgentApplyControls(sessionState, payload)
-			}
-			if broadcast != nil {
-				broadcast(channel, payload)
-			}
-			dispatchMu.Unlock()
-			return
-		}
-		published := make(chan struct{})
-		done := make(chan struct{})
-		go func() {
-			sessionState.recordJobEvent(channel, payload, func() { close(published) })
-			close(done)
-		}()
-		<-published
-		terminal := fieldString(mapFromAnyMain(payload), "type") == "end"
-		if !terminal {
-			if broadcast != nil {
-				broadcast(channel, payload)
-			}
-			dispatchMu.Unlock()
-			return
-		}
-		dispatchMu.Unlock()
-		<-done
 		if broadcast != nil {
 			broadcast(channel, payload)
 		}
+		dispatchMu.Unlock()
 	}
-}
-
-func persistAgentApplyControls(sessionState *sessionStore, payload any) {
-	if sessionState == nil {
-		return
-	}
-	item := mapFromAnyMain(payload)
-	if fieldString(item, "action") != "session-refresh" {
-		return
-	}
-	tabID, chatID := fieldString(item, "tabId"), fieldString(item, "chatId")
-	if tabID == "" || chatID == "" {
-		return
-	}
-	sessionState.UpdateChatControls(
-		tabID, chatID, fieldString(item, "providerId"),
-		firstNonEmptyString(fieldString(item, "modelId"), fieldString(item, "currentModelId")),
-		firstNonEmptyString(fieldString(item, "modeId"), fieldString(item, "currentModeId")),
-	)
 }
 
 // hydratableStoredModelID filters durable ids that are placeholders, not real
@@ -679,26 +651,6 @@ func hydratableStoredModelID(modelID string) string {
 		return ""
 	}
 	return modelID
-}
-
-func applyStoredChatRuntimeControls(sessionState *sessionStore, arg map[string]any) {
-	if sessionState == nil || arg == nil {
-		return
-	}
-	providerID, modelID, modeID, ok := sessionState.ChatRuntimeControls(fieldString(arg, "tabId"), fieldString(arg, "chatId"))
-	if !ok {
-		return
-	}
-	modelID = hydratableStoredModelID(modelID)
-	if fieldString(arg, "providerId") == "" && providerID != "" {
-		arg["providerId"] = providerID
-	}
-	if firstNonEmptyString(fieldString(arg, "modelId"), fieldString(arg, "currentModelId"), fieldString(arg, "model")) == "" && modelID != "" {
-		arg["modelId"] = modelID
-	}
-	if firstNonEmptyString(fieldString(arg, "modeId"), fieldString(arg, "currentModeId"), fieldString(arg, "mode")) == "" && modeID != "" {
-		arg["modeId"] = modeID
-	}
 }
 
 func prodModeDefault() bool {
@@ -764,13 +716,14 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 		count++
 	}
 	sessionState := sharedSessionStore(state.stateDir)
-	registerSessionHandlers(hub, sessionState, acpManager)
+	providerChats := opts.ProviderChats
+	registerSessionHandlersWithActor(hub, sessionState, acpManager, providerChats)
 	count += 2
-	registerStateDigestHandler(hub, sessionState, acpManager, state.setting)
+	registerStateDigestHandler(hub, providerChats, acpManager, state.setting)
 	count++
-	registerArchiveHandlers(hub, state)
+	registerArchiveHandlers(hub, state, providerChats)
 	count += 2
-	registerVisualizeHandler(hub, opts.Artifacts, sessionState, state.stateDir)
+	registerVisualizeHandler(hub, opts.Artifacts, providerChats, state.stateDir)
 	count++
 	registerNotifyHandlers(hub)
 	count++
@@ -781,15 +734,16 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 	if acpManager != nil {
 		chatControl := opts.ChatControl
 		if chatControl == nil {
-			chatControl = newChatControlCoordinator(acpManager, sessionState, hub.Broadcast)
+			chatControl = newChatControlCoordinator(acpManager, hub.Broadcast, providerChats)
 		}
-		registerAcpHandlers(hub, acpManager, state.stateDir, sessionState, chatControl)
+		chatControl.providerChats = providerChats
+		registerAcpHandlers(hub, acpManager, state.stateDir, sessionState, chatControl, providerChats)
 		count += 23
 	}
 	return count
 }
 
-func registerStateDigestHandler(hub *wire.Hub, store *sessionStore, manager *acp.Manager, settings *appSettingsStore) {
+func registerStateDigestHandler(hub *wire.Hub, providerChats *providerChatRuntime, manager *acp.Manager, settings *appSettingsStore) {
 	hub.Register("state:digest", func(args []any) (any, error) {
 		catalogHashes := map[string]string{}
 		processes := any([]map[string]any{})
@@ -803,7 +757,10 @@ func registerStateDigestHandler(hub *wire.Hub, store *sessionStore, manager *acp
 		if settings != nil {
 			settingsValue = settings.get()
 		}
-		return store.StateDigest(manager, catalogHashes, stateDigestHash(settingsValue), stateDigestHash(processes)), nil
+		if providerChats == nil {
+			return nil, errors.New("state digest requires the authoritative chat actor runtime")
+		}
+		return providerChats.StateDigest(catalogHashes, stateDigestHash(settingsValue), stateDigestHash(processes))
 	})
 }
 
@@ -816,15 +773,14 @@ func stateDigestHash(value any) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
-func registerSessionHandlers(hub *wire.Hub, store *sessionStore, managers ...*acp.Manager) {
-	var manager *acp.Manager
-	if len(managers) > 0 {
-		manager = managers[0]
-	}
+func registerSessionHandlersWithActor(hub *wire.Hub, store *sessionStore, manager *acp.Manager, providerChats *providerChatRuntime) {
 	hub.Register("session:get", func(args []any) (any, error) {
-		raw := store.GetRawWithLiveSessions(manager)
-		if raw == nil {
-			return nil, nil
+		if providerChats == nil {
+			return nil, errors.New("session:get requires the authoritative chat actor runtime")
+		}
+		raw, err := providerChats.ProjectSessionRaw()
+		if err != nil {
+			return nil, err
 		}
 		return wire.RawResult(raw), nil
 	})
@@ -833,14 +789,72 @@ func registerSessionHandlers(hub *wire.Hub, store *sessionStore, managers ...*ac
 		if len(args) > 0 && args[0] != nil {
 			snapshot = args[0]
 		}
-		saved := store.Save(snapshot)
-		if saved && manager != nil {
-			// ReconcileNativeSessionOwners only reads chat id/chatId pairs. Passing
-			// store.Get() cloned the whole multi-megabyte mirror a second time on
-			// every save, inside the invoke that also gates later renderer frames.
-			manager.ReconcileNativeSessionOwners(store.ChatIdentitySnapshot())
+		saved := false
+		var err error
+		if providerChats == nil {
+			return false, errors.New("session:save requires the authoritative chat actor runtime")
 		}
-		return saved, nil
+		saved, err = providerChats.ApplyRendererSnapshot(snapshot)
+		if err != nil {
+			return false, err
+		}
+		if saved {
+			hub.Broadcast("agent:apply", map[string]any{"action": "session-refresh"})
+		}
+		if !saved {
+			return map[string]any{"ok": false}, nil
+		}
+		global := store.GlobalSnapshot()
+		return map[string]any{"ok": true, globalPresentationRevisionField: intValue(global[globalPresentationRevisionField])}, nil
+	})
+	hub.Register("chat:queue-replace", func(args []any) (any, error) {
+		if providerChats == nil {
+			return nil, errors.New("chat queue requires the authoritative actor runtime")
+		}
+		arg := firstMapArg(args)
+		return providerChats.ReplaceStagedQueue(
+			fieldString(arg, "tabId"), fieldString(arg, "chatId"),
+			providercontract.NormalizeOperationID(fieldString(arg, "operationId")), uint64(max(0, intValue(arg["expectedRevision"]))),
+			anySlice(arg["queue"]),
+		)
+	})
+	hub.Register("chat:create", func(args []any) (any, error) {
+		if providerChats == nil {
+			return nil, errors.New("chat creation requires the authoritative actor runtime")
+		}
+		return providerChats.CreateRendererChat(firstMapArg(args))
+	})
+	hub.Register("chat:presentation-save", func(args []any) (any, error) {
+		if providerChats == nil {
+			return nil, errors.New("chat presentation requires the authoritative actor runtime")
+		}
+		arg := firstMapArg(args)
+		return providerChats.SavePresentation(
+			fieldString(arg, "tabId"), fieldString(arg, "chatId"),
+			providercontract.NormalizeOperationID(fieldString(arg, "operationId")), uint64(max(0, intValue(arg["expectedRevision"]))), arg,
+		)
+	})
+	hub.Register("chat:runtime-controls-save", func(args []any) (any, error) {
+		if providerChats == nil {
+			return nil, errors.New("chat runtime controls require the authoritative actor runtime")
+		}
+		arg := firstMapArg(args)
+		return providerChats.SaveRuntimeControls(
+			fieldString(arg, "tabId"), fieldString(arg, "chatId"),
+			providercontract.NormalizeOperationID(fieldString(arg, "operationId")), uint64(max(0, intValue(arg["expectedRevision"]))), arg,
+		)
+	})
+	hub.Register("chat:delete", func(args []any) (any, error) {
+		if providerChats == nil {
+			return nil, errors.New("chat deletion requires the authoritative actor runtime")
+		}
+		arg := firstMapArg(args)
+		operationID := providercontract.NormalizeOperationID(fieldString(arg, "operationId"))
+		force, _ := boolField(arg, "force")
+		if err := providerChats.DeleteChat(context.Background(), fieldString(arg, "tabId"), fieldString(arg, "chatId"), operationID, force); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true, "operationId": string(operationID)}, nil
 	})
 }
 
@@ -985,7 +999,7 @@ func registerConfigSettingsHandlers(hub *wire.Hub, state *daemonState, manager *
 	})
 }
 
-func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, sessionState *sessionStore, chatControl *chatControlCoordinator) {
+func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, sessionState *sessionStore, chatControl *chatControlCoordinator, providerChats *providerChatRuntime) {
 	if strings.TrimSpace(stateDir) == "" {
 		stateDir = manager.StateDir()
 	}
@@ -994,58 +1008,39 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		_ = send("agent:apply", map[string]any{"action": "session-refresh"})
 	})
 	hub.SetOnControllerReady(func(send func(channel string, payload any) error) {
-		manager.ReplayPendingPermissions(send)
+		if providerChats == nil {
+			return
+		}
+		_ = providerChats.ReplayPendingPermissions(send)
 	})
 	hub.Register("app-chat:new-session", func(args []any) (any, error) {
 		arg := firstMapArg(args)
 		if refresh, _ := boolField(arg, "refreshPlanUsage"); refresh {
-			return manager.RefreshPlanUsageSession(context.Background(), parseSessionOptions(arg))
+			return nil, errors.New("chat-scoped plan refresh is unavailable after actor cutover; use app-chat:refresh-plan-usage")
 		}
 		oldSessionID := fieldString(arg, "replaceSessionId")
 		workspaceRebind, _ := boolField(arg, "workspaceRebind")
+		if providerChats == nil {
+			return map[string]any{"error": "app-chat:new-session requires the durable chat actor", "models": []any{}, "modes": []any{}}, nil
+		}
 		if oldSessionID != "" || workspaceRebind {
-			expectedRevision, ok := intFieldPresent(arg, "expectedWorkspaceRevision")
-			if !ok || expectedRevision < 0 || sessionState == nil {
-				return map[string]any{"error": "workspace rebind requires daemon revision authority", "workspaceCommitted": false}, nil
-			}
-			workspaceRevision := expectedRevision
-			committed, err := manager.InvalidateChatWorkspace(context.Background(), oldSessionID, parseSessionOptions(arg), func() error {
-				next, moved := sessionState.MoveChatWorkspace(
-					fieldString(arg, "tabId"), fieldString(arg, "chatId"), fieldString(arg, "cwd"), expectedRevision,
-				)
-				if moved {
-					workspaceRevision = next
-					return nil
-				}
-				return errors.New("workspace changed in another controller; reload before moving")
-			})
-			if err != nil {
-				return map[string]any{"error": err.Error(), "workspaceCommitted": committed}, nil
-			}
-			return map[string]any{
-				"sessionId": "", "cwd": fieldString(arg, "cwd"), "models": []any{}, "modes": []any{},
-				"workspaceCommitted": true, "workspaceRebound": true, "workspaceRevision": workspaceRevision,
-			}, nil
+			return providerChats.MoveWorkspace(context.Background(), arg)
+		}
+		if fieldString(arg, "tabId") == "" || fieldString(arg, "chatId") == "" {
+			return map[string]any{"error": "app-chat:new-session requires exact tabId and chatId", "models": []any{}, "modes": []any{}}, nil
 		}
 		// Once a workspace move has committed, the daemon snapshot owns cwd. A
 		// stale/reconnected controller may still ask to create the replacement
 		// session using its pre-move cwd; never let that recreate the provider
 		// thread in the old directory.
-		if sessionState != nil {
-			if cwd, ok := sessionState.ChatWorkspace(fieldString(arg, "tabId"), fieldString(arg, "chatId")); ok {
-				arg["cwd"] = cwd
-			}
-			applyStoredChatRuntimeControls(sessionState, arg)
+		if cwd, _, ok, workspaceErr := providerChats.ChatWorkspace(fieldString(arg, "chatId")); workspaceErr != nil {
+			return map[string]any{"error": workspaceErr.Error(), "models": []any{}, "modes": []any{}}, nil
+		} else if ok {
+			arg["cwd"] = cwd
 		}
-		info, err := manager.NewSession(context.Background(), parseSessionOptions(arg))
+		info, err := providerChats.SelectNewChat(context.Background(), arg)
 		if err != nil {
 			return map[string]any{"error": err.Error(), "models": []any{}, "modes": []any{}}, nil
-		}
-		if sessionState != nil {
-			sessionState.UpdateChatControls(
-				fieldString(arg, "tabId"), fieldString(arg, "chatId"), info.ProviderID,
-				stringPointerValue(info.CurrentModelID), stringPointerValue(info.CurrentModeID),
-			)
 		}
 		return info, nil
 	})
@@ -1058,121 +1053,42 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 	})
 	hub.Register("app-chat:fork", func(args []any) (any, error) {
 		arg := firstMapArg(args)
-		sourceTabID := fieldString(arg, "tabId")
-		newTabID := fieldString(arg, "newTabId")
-		if sourceTabID == "" || newTabID == "" {
-			return nil, fmt.Errorf("app-chat:fork requires {tabId, newTabId}")
+		if providerChats == nil {
+			return nil, errors.New("app-chat:fork requires the durable chat actor")
 		}
-		if sourceTabID == newTabID {
-			return nil, fmt.Errorf("app-chat:fork requires a distinct newTabId")
-		}
-		atTurn, hasAtTurn := intFieldPresent(arg, "atTurn")
-		info, err := manager.ForkSession(context.Background(), acp.ForkOptions{
-			TabID:     sourceTabID,
-			NewTabID:  newTabID,
-			ChatID:    fieldString(arg, "chatId"),
-			NewChatID: firstNonEmptyString(fieldString(arg, "newChatId"), fieldString(arg, "chatIdNew")),
-			CWD:       fieldString(arg, "cwd"),
-		})
-		if err != nil {
-			return map[string]any{"error": err.Error(), "models": []any{}, "modes": []any{}}, nil
-		}
-		effectiveTurn, err := copyChatArchivePrefix(stateDir, sourceTabID, newTabID, atTurn, hasAtTurn)
-		if err != nil {
-			manager.CloseSessionAndForget(context.Background(), info.SessionID)
-			return nil, err
-		}
-		if sessionState != nil {
-			sessionState.UpdateChatControls(
-				newTabID, firstNonEmptyString(fieldString(arg, "newChatId"), fieldString(arg, "chatIdNew")), info.ProviderID,
-				stringPointerValue(info.CurrentModelID), stringPointerValue(info.CurrentModeID),
-			)
-		}
-		return sessionInfoWithFork(info, sourceTabID, effectiveTurn), nil
+		return providerChats.Fork(context.Background(), arg)
 	})
 	hub.Register("app-chat:close-session", func(args []any) (any, error) {
-		return manager.CloseSessionAndForget(context.Background(), stringArg(args, 0)), nil
+		// Closing the disposable host attachment never deletes the immutable
+		// provider lane. Exact resume remains the only later reattachment path.
+		if providerChats == nil {
+			return nil, errors.New("app-chat:close-session requires the durable chat actor")
+		}
+		return providerChats.CloseSession(context.Background(), stringArg(args, 0)), nil
 	})
 	hub.Register("app-chat:reset", func(args []any) (any, error) {
-		return manager.Reset(), nil
+		return nil, errors.New("global session reset is unavailable after durable chat cutover")
 	})
 	hub.Register("app-chat:set-model", func(args []any) (any, error) {
-		arg := firstMapArg(args)
-		sessionID := fieldString(arg, "sessionId")
-		modelID := fieldString(arg, "modelId")
-		result, err := manager.SetModel(context.Background(), sessionID, modelID)
-		if err == nil && sessionState != nil {
-			if binding, ok := manager.LiveSession(sessionID); ok {
-				persistedModelID := strings.TrimSpace(fieldString(result, "currentModelId"))
-				if persistedModelID == "" {
-					persistedModelID = modelID
-				}
-				sessionState.UpdateChatControls(binding.TabID, binding.ChatID, binding.Info.ProviderID, persistedModelID, "")
-			}
-		}
-		return result, err
+		return nil, errors.New("session-addressed model changes are retired; use chat:runtime-controls-save with exact tabId, chatId, revision, and operationId")
 	})
 	hub.Register("app-chat:set-mode", func(args []any) (any, error) {
-		arg := firstMapArg(args)
-		sessionID := fieldString(arg, "sessionId")
-		modeID := fieldString(arg, "modeId")
-		result, err := manager.SetMode(context.Background(), sessionID, modeID)
-		if err == nil && sessionState != nil {
-			if binding, ok := manager.LiveSession(sessionID); ok {
-				sessionState.UpdateChatControls(binding.TabID, binding.ChatID, binding.Info.ProviderID, "", modeID)
-			}
-		}
-		return result, err
+		return nil, errors.New("session-addressed mode changes are retired; use chat:runtime-controls-save with exact tabId, chatId, revision, and operationId")
 	})
 	hub.Register("app-chat:steer", func(args []any) (any, error) {
 		arg := firstMapArg(args)
-		sessionID := fieldString(arg, "sessionId")
-		prompt := fieldString(arg, "prompt")
-		clientUserMessageID := fieldString(arg, "clientUserMessageId")
-		continuationAssistantMessageID := fieldString(arg, "continuationAssistantMessageId")
-		boundary := mapFromAnyMain(arg["boundary"])
-		binding, bound := manager.LiveSession(sessionID)
-		if sessionState != nil && clientUserMessageID != "" && bound && binding.ChatID != "" {
-			if err := sessionState.BeginLiveSteer(binding.TabID, binding.ChatID, clientUserMessageID, prompt, continuationAssistantMessageID, sliceArg(arg["images"]), boundary); err != nil {
-				return map[string]any{
-					"ok": false, "queued": true, "strategy": "queue",
-					"error": "steer could not be written into chronological history",
-				}, nil
-			}
+		if providerChats == nil {
+			return nil, errors.New("steering requires the durable chat actor")
 		}
-		result := manager.Steer(sessionID, prompt, sliceArg(arg["images"]), clientUserMessageID)
-		strategy := fieldString(result, "strategy")
-		if sessionState != nil && clientUserMessageID != "" && (result["live"] == true || strategy == "uncertain") {
-			if bound && binding.ChatID != "" {
-				outcome := "accepted"
-				if strategy == "uncertain" {
-					outcome = "uncertain"
-				}
-				if err := sessionState.AcknowledgeLiveSteer(binding.TabID, binding.ChatID, clientUserMessageID, prompt, outcome); err != nil {
-					// Native delivery already happened (or is uncertain). Never turn a
-					// persistence failure into an explicit rejection that the renderer
-					// would replay through FIFO and potentially duplicate.
-					result["persistenceError"] = "steer acknowledgement could not be persisted"
-				}
-				deferred, _ := boundary["deferUntilConsumed"].(bool)
-				receipt, _ := result["receipt"].(bool)
-				if outcome == "accepted" && deferred && !receipt {
-					if err := sessionState.CommitLiveSteerBoundary(binding.TabID, binding.ChatID, clientUserMessageID); err != nil {
-						result["persistenceError"] = "steer boundary could not be persisted"
-					}
+		if result, handled, err := providerChats.Steer(context.Background(), arg); handled {
+			if err == nil && boolFieldValue(result, "daemonQueued") && chatControl != nil {
+				if live, ok := manager.LiveSession(fieldString(arg, "sessionId")); ok {
+					chatControl.refresh(live.TabID, live.ChatID, false)
 				}
 			}
-		} else if sessionState != nil && clientUserMessageID != "" && bound && binding.ChatID != "" {
-			if err := sessionState.RejectLiveSteer(binding.TabID, binding.ChatID, clientUserMessageID); err != nil {
-				// The native provider rejected the input, but the durable transcript
-				// could not safely transfer ownership to FIFO. Keep one unconfirmed
-				// row rather than risking a duplicate replay.
-				result["strategy"] = "uncertain"
-				result["queued"] = false
-				result["persistenceError"] = "steer rejection could not be reconciled"
-			}
+			return result, err
 		}
-		return result, nil
+		return nil, errors.New("steer does not belong to an actor-owned session")
 	})
 	hub.Register("app-chat:use-rate-limit-reset", func(args []any) (any, error) {
 		arg := firstMapArg(args)
@@ -1188,7 +1104,7 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 	// for late clients — the chat:commands event covers the live ones.
 	hub.Register("chat:commands-get", func(args []any) (any, error) {
 		arg := firstMapArg(args)
-		return manager.ChatCommands(fieldString(arg, "tabId"), fieldString(arg, "chatId")), nil
+		return providerChats.ChatCommands(fieldString(arg, "tabId"), fieldString(arg, "chatId"))
 	})
 	hub.Register("spawned-work:list", func(args []any) (any, error) {
 		arg := firstMapArg(args)
@@ -1196,13 +1112,19 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		if tabID == "" || chatID == "" {
 			return nil, errors.New("spawned-work:list requires {tabId, chatId}")
 		}
-		reply := map[string]any{"items": manager.ListSpawnedWork(tabID, chatID)}
-		// The obligation rides the same reply for the same reason it rides
-		// spawned-work:changed: it is derived from this exact state. Without it
-		// a freshly attached client (renderer reload, a phone joining) would
-		// only learn what the chat owes on the next background change, which
-		// for a quiet chat never comes.
-		if obligation := manager.ObligationFor(tabID, chatID); obligation != nil {
+		if providerChats == nil {
+			return nil, errors.New("spawned-work:list requires the durable chat actor")
+		}
+		items, err := providerChats.ListBackground(tabID, chatID)
+		if err != nil {
+			return nil, err
+		}
+		reply := map[string]any{"items": items}
+		obligation, err := providerChats.Obligation(tabID, chatID)
+		if err != nil {
+			return nil, err
+		}
+		if obligation != nil {
 			reply["obligation"] = obligation
 		}
 		return reply, nil
@@ -1213,7 +1135,10 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		if tabID == "" || chatID == "" || id == "" {
 			return nil, errors.New("spawned-work:read requires {tabId, chatId, id}")
 		}
-		return manager.ReadSpawnedWork(tabID, chatID, id, intField(arg, "tailBytes")), nil
+		if providerChats == nil {
+			return nil, errors.New("spawned-work:read requires the durable chat actor")
+		}
+		return providerChats.ReadBackground(tabID, chatID, id, intField(arg, "tailBytes"))
 	})
 	// The stop square. Mutating, so the wire already requires the controller
 	// lease before this handler is reached — the same bar proc:kill sits behind.
@@ -1223,67 +1148,43 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		if tabID == "" || chatID == "" || id == "" {
 			return nil, errors.New("spawned-work:stop requires {tabId, chatId, id}")
 		}
-		return manager.StopSpawnedWork(tabID, chatID, id), nil
+		if providerChats == nil {
+			return nil, errors.New("spawned-work:stop requires the durable chat actor")
+		}
+		return providerChats.RunBackgroundAction(context.Background(), tabID, chatID, chat.BackgroundAction{
+			Kind: chat.BackgroundStopWork, OperationID: stableBackgroundOperationID(chat.BackgroundStopWork, tabID, chatID, id),
+			Stop: &chat.StopWorkAction{WorkID: id},
+		})
 	})
 	hub.Register("job:start", func(args []any) (any, error) {
 		arg := firstMapArg(args)
-		if sessionState != nil {
-			// Workspace cwd is daemon-authoritative after a transactional sidebar
-			// move. A stale controller may still submit the previous value, but it
-			// can never make the next job execute there.
-			if cwd, ok := sessionState.ChatWorkspace(fieldString(arg, "tabId"), fieldString(arg, "chatId")); ok {
-				arg["cwd"] = cwd
-			}
-			applyStoredChatRuntimeControls(sessionState, arg)
+		if providerChats == nil || fieldString(arg, "tabId") == "" || fieldString(arg, "chatId") == "" {
+			return nil, errors.New("job:start requires an exact durable chat actor")
 		}
-		jobOpts := parseJobStartOptions(arg)
-		// job:start is the controller submitting what the user typed, so this
-		// path is human-authored by construction.
-		jobOpts.HumanAuthored = true
-		prepared := false
-		if sessionState != nil {
-			jobOpts.BeforeStart = func(target *acp.JobStartOptions) error {
-				if !sessionState.PrepareTurn(arg) && jobOpts.QueueID != "" {
-					if _, adopted := sessionState.AdoptedQueueReceipt(fieldString(arg, "tabId"), fieldString(arg, "chatId"), jobOpts.QueueID); adopted {
-						return errQueueRowAdopted
-					}
-				}
-				if fields, ok := sessionState.PreparedTurnPublicFields(fieldString(arg, "tabId")); ok {
-					target.PromptText = fields["promptText"]
-					target.UserMessageID = fields["userMessageId"]
-					target.AssistantMessageID = fields["assistantMessageId"]
-				}
-				target.HumanAuthored = true
-				prepared = true
-				return nil
-			}
+		// Workspace cwd is daemon-authoritative after a transactional sidebar
+		// move. A stale controller may still submit the previous value, but it
+		// can never make the next job execute there.
+		if cwd, _, ok, err := providerChats.ChatWorkspace(fieldString(arg, "chatId")); err != nil {
+			return nil, err
+		} else if ok {
+			arg["cwd"] = cwd
 		}
-		job, err := manager.StartJob(context.Background(), jobOpts)
-		if err != nil && errors.Is(err, errQueueRowAdopted) && sessionState != nil {
-			return sessionState.QueueRendererStartCollision(arg)
-		}
-		if err != nil && errors.Is(err, acp.ErrChatBusy) && fieldString(arg, "busyMode") == "queue-v1" && sessionState != nil {
-			receipt, queueErr := sessionState.QueueRendererStartCollision(arg)
-			if queueErr != nil {
-				return nil, queueErr
-			}
-			if chatControl != nil {
-				tabID, chatID := fieldString(arg, "tabId"), fieldString(arg, "chatId")
-				chatControl.refresh(tabID, chatID, false)
-				chatControl.scheduleDrain(tabID, chatID)
-			}
-			return receipt, nil
-		}
-		if err != nil && sessionState != nil {
-			if !prepared {
-				sessionState.PrepareTurn(arg)
-			}
-			sessionState.FailPreparedTurn(fieldString(arg, "tabId"), "Error: "+err.Error())
+		job, err := providerChats.Start(context.Background(), arg, "human")
+		if err == nil && boolFieldValue(job, "queued") && chatControl != nil {
+			tabID, chatID := fieldString(arg, "tabId"), fieldString(arg, "chatId")
+			chatControl.refresh(tabID, chatID, false)
 		}
 		return job, err
 	})
 	hub.Register("job:cancel", func(args []any) (any, error) {
-		return manager.CancelJobResult(stringArg(args, 0)), nil
+		jobID := stringArg(args, 0)
+		if providerChats == nil {
+			return nil, errors.New("job:cancel requires the durable chat actor")
+		}
+		if result, handled, err := providerChats.Cancel(context.Background(), jobID); handled {
+			return result, err
+		}
+		return nil, errors.New("job cancellation does not belong to an actor-owned turn")
 	})
 	hub.Register("chat:permission-decide", func(args []any) (any, error) {
 		arg := firstMapArg(args)
@@ -1291,10 +1192,20 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		if id == "" {
 			return map[string]any{"ok": false}, nil
 		}
-		return map[string]any{"ok": manager.PermissionDecide(id, fieldString(arg, "optionId"))}, nil
+		if providerChats == nil {
+			return nil, errors.New("permission decisions require the durable chat actor")
+		}
+		if accepted, handled, err := providerChats.ResolvePermission(context.Background(), id, fieldString(arg, "optionId")); handled {
+			return map[string]any{"ok": accepted}, err
+		}
+		return nil, errors.New("permission does not belong to an actor-owned request")
 	})
 	hub.Register("chat:permissions-pending", func(args []any) (any, error) {
-		return map[string]any{"permissions": manager.PendingPermissions()}, nil
+		if providerChats == nil {
+			return nil, errors.New("permission replay requires the durable chat actor")
+		}
+		permissions, err := providerChats.PendingPermissions()
+		return map[string]any{"permissions": permissions}, err
 	})
 	hub.Register("chat:env-get", func(args []any) (any, error) {
 		arg := firstMapArg(args)
@@ -1303,7 +1214,10 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		if chatID == "" && tabID == "" {
 			chatID = stringArg(args, 0)
 		}
-		return manager.ChatEnvGet(chatID, tabID), nil
+		if providerChats == nil {
+			return nil, errors.New("chat:env-get requires the durable chat actor")
+		}
+		return providerChats.ChatEnvGet(tabID, chatID)
 	})
 	hub.Register("chat:checkpoints", func(args []any) (any, error) {
 		arg := firstMapArg(args)
@@ -1312,15 +1226,28 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		if chatID == "" && tabID == "" {
 			chatID = stringArg(args, 0)
 		}
-		return manager.ChatCheckpoints(chatID, tabID), nil
+		if providerChats == nil {
+			return nil, errors.New("chat:checkpoints requires the durable chat actor")
+		}
+		return providerChats.ChatCheckpoints(tabID, chatID)
 	})
 	hub.Register("chat:rewind", func(args []any) (any, error) {
 		arg := firstMapArg(args)
-		return manager.ChatRewind(context.Background(), fieldString(arg, "chatId"), intField(arg, "turnSeq"))
+		result, err := providerChats.Rewind(
+			context.Background(), fieldString(arg, "tabId"), fieldString(arg, "chatId"), intField(arg, "turnSeq"),
+			providercontract.OperationID(fieldString(arg, "operationId")),
+		)
+		if err == nil && chatControl != nil {
+			chatControl.refresh(fieldString(arg, "tabId"), fieldString(arg, "chatId"), false)
+		}
+		return result, err
 	})
 	hub.Register("chat:diff", func(args []any) (any, error) {
 		arg := firstMapArg(args)
-		return manager.ChatDiff(context.Background(), fieldString(arg, "chatId"), fieldString(arg, "repo"), fieldString(arg, "path"))
+		if providerChats == nil {
+			return nil, errors.New("chat:diff requires the durable chat actor")
+		}
+		return providerChats.ChatDiff(context.Background(), fieldString(arg, "tabId"), fieldString(arg, "chatId"), fieldString(arg, "repo"), fieldString(arg, "path"))
 	})
 	hub.Register("providers:list", func(args []any) (any, error) {
 		return manager.ProvidersList(), nil
@@ -1456,14 +1383,15 @@ func boolField(m map[string]any, key string) (bool, bool) {
 
 func parseSessionOptions(m map[string]any) acp.SessionOptions {
 	return acp.SessionOptions{
-		CWD:        fieldString(m, "cwd"),
-		BridgeKey:  fieldString(m, "bridgeKey"),
-		TabID:      firstNonEmptyString(fieldString(m, "tabId"), fieldString(m, "chatTabId")),
-		ChatID:     fieldString(m, "chatId"),
-		SessionID:  fieldString(m, "sessionId"),
-		ProviderID: fieldString(m, "providerId"),
-		ModelID:    firstNonEmptyString(fieldString(m, "modelId"), fieldString(m, "currentModelId"), fieldString(m, "model")),
-		ModeID:     firstNonEmptyString(fieldString(m, "modeId"), fieldString(m, "currentModeId"), fieldString(m, "mode")),
+		CWD:         fieldString(m, "cwd"),
+		BridgeKey:   fieldString(m, "bridgeKey"),
+		TabID:       firstNonEmptyString(fieldString(m, "tabId"), fieldString(m, "chatTabId")),
+		ChatID:      fieldString(m, "chatId"),
+		SessionID:   fieldString(m, "sessionId"),
+		OperationID: providercontract.NormalizeOperationID(fieldString(m, "operationId")),
+		ProviderID:  fieldString(m, "providerId"),
+		ModelID:     firstNonEmptyString(fieldString(m, "modelId"), fieldString(m, "currentModelId"), fieldString(m, "model")),
+		ModeID:      firstNonEmptyString(fieldString(m, "modeId"), fieldString(m, "currentModeId"), fieldString(m, "mode")),
 	}
 }
 

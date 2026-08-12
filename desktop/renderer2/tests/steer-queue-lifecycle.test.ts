@@ -111,6 +111,24 @@ test('only an adapter rejection moves a Claude steer into the FIFO, exactly once
   );
 });
 
+test('an actor-owned rejected steer does not create a second renderer FIFO row', async () => {
+  const { store, owner } = subject({
+    appChatSteer: async () => ({
+      ok: false, live: false, interrupted: true, strategy: 'interrupt-queue',
+      daemonQueued: true, error: 'the durable chat actor owns the follow-up',
+    }),
+  });
+  running(owner);
+
+  assert.equal(await store.steerOrQueue(owner.id, 'queue this once'), true);
+  assert.equal(owner.queue, undefined, 'the daemon-owned FIFO must not be mirrored a second time in renderer state');
+  assert.equal(
+    owner.messages.filter((message) => message.role === 'user' && message.content === 'queue this once').length,
+    0,
+    'ownership transferred out of the transcript exactly once',
+  );
+});
+
 test('a follow-up queued as the turn ends still drains instead of parking', async () => {
   const started: string[] = [];
   const { store, owner } = subject({

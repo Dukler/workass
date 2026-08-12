@@ -80,9 +80,45 @@ func TestProviderNativeCompactionBypassesWorkassFallback(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read mock trace: %v", err)
 			}
-			if strings.Contains(string(trace), compactionPromptPreamble) {
-				t.Fatalf("Workass fallback compaction prompt reached native provider %q", providerID)
+			if strings.Contains(string(trace), "WORKASS AUTO-COMPACTION") || strings.Contains(string(trace), "Previous conversation") {
+				t.Fatalf("Workass replay/compaction prompt reached native provider %q", providerID)
 			}
 		})
+	}
+}
+
+func TestProviderWithoutNativeCompactionNeverReplacesOrReseedsLane(t *testing.T) {
+	root := repoRoot(t)
+	traceFile := filepath.Join(t.TempDir(), "mock-prompts.jsonl")
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root,
+		Provider: ProviderConfig{
+			ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
+			CWD: root, Env: map[string]string{"WORKASS_MOCK_ACP_TRACE_FILE": traceFile}, Enabled: true,
+		},
+		Broadcast: events.Broadcast, StdoutFlushInterval: 5 * time.Millisecond,
+		ThoughtFlushInterval: 5 * time.Millisecond, RSSSampleInterval: time.Hour,
+		CompactionEnabled: true, CompactionThresholdPct: 80,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	session := newMockSession(t, manager, "generic-context-limit")
+	job := startAppChatJob(t, manager, session.SessionID, "generic-context-limit", "[mock:bigusage] keep exact lane")
+	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 5*time.Second), "done", 0, "end_turn")
+	limit := events.waitChannel(t, "chat:context-limit", 2*time.Second).payload.(map[string]any)
+	if asString(limit["sessionId"]) != session.SessionID {
+		t.Fatalf("context-limit session = %#v, want %s", limit, session.SessionID)
+	}
+	if bridge := manager.bridgeForSession(session.SessionID, SessionOptions{SessionID: session.SessionID, ProviderID: "mock"}); bridge == nil || !bridge.hasLiveSession(session.SessionID) {
+		t.Fatal("generic context-limit path replaced or closed the provider lane")
+	}
+	events.expectNoChannel(t, "chat:session-replaced", 100*time.Millisecond)
+	trace, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(trace), "WORKASS AUTO-COMPACTION") || strings.Contains(string(trace), "Previous conversation") {
+		t.Fatalf("context-limit path sampled/replayed provider text: %s", trace)
 	}
 }

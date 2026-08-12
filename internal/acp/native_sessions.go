@@ -14,12 +14,34 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	providercontract "workass/internal/provider"
 )
 
 const (
-	nativeSessionLedgerFilename = "native-sessions.json"
-	nativeHistoryDigestVersion  = 2
+	nativeSessionLedgerFilename       = "provider-lanes.json"
+	legacyNativeSessionLedgerFilename = "native-sessions.json"
+	currentNativeLaneStoreVersion     = 6
 )
+
+type nativeOperationState string
+
+const (
+	nativeOperationDispatched nativeOperationState = "dispatched"
+	nativeOperationConsumed   nativeOperationState = "consumed"
+	nativeOperationTerminal   nativeOperationState = "terminal"
+	nativeOperationAbsent     nativeOperationState = "absent"
+)
+
+type nativeOperationRecord struct {
+	OperationID  string               `json:"operationId"`
+	PromptDigest string               `json:"promptDigest"`
+	State        nativeOperationState `json:"state"`
+	NativeTurnID string               `json:"nativeTurnId,omitempty"`
+	Status       string               `json:"status,omitempty"`
+	ResultDigest string               `json:"resultDigest,omitempty"`
+	UpdatedAt    string               `json:"updatedAt"`
+}
 
 // nativeSessionBinding is daemon-owned recovery metadata. It deliberately
 // lives outside the renderer mirror: session:save may replace that mirror, but
@@ -28,21 +50,38 @@ type nativeSessionBinding struct {
 	TabID      string `json:"tabId"`
 	ChatID     string `json:"chatId,omitempty"`
 	ProviderID string `json:"providerId"`
-	SessionID  string `json:"sessionId"`
+	LaneID     string `json:"laneId"`
+	MachineID  string `json:"machineId"`
+	// AccountScope and InstallScope are opaque, non-secret realm identifiers.
+	// Legacy records are marked unverified rather than guessed across accounts.
+	AccountScope   string `json:"accountScope,omitempty"`
+	InstallScope   string `json:"installScope,omitempty"`
+	RealmVerified  bool   `json:"realmVerified,omitempty"`
+	WorkspaceEpoch string `json:"workspaceEpoch"`
+	SessionID      string `json:"sessionId"`
+	ThreadLineage  uint64 `json:"threadLineage"`
+	LineageProof   string `json:"lineageProof,omitempty"`
 	// The id the provider currently speaks under when it diverged from
 	// SessionID (Claude's fork family: /clear, forkSession). Alias, never a
 	// mutation of SessionID — live-session guards key on SessionID, and the
 	// next successful restore folds this back into it.
-	ProviderSessionID string `json:"providerSessionId,omitempty"`
-	CWD               string `json:"cwd,omitempty"`
-	ModelID           string `json:"modelId,omitempty"`
-	ModeID            string `json:"modeId,omitempty"`
-	SyncedMessages    int    `json:"syncedMessages"`
-	HistoryHash       string `json:"historyHash"`
-	HistoryVersion    int    `json:"historyVersion,omitempty"`
-	Generation        uint64 `json:"generation"`
-	ResumeSafe        bool   `json:"resumeSafe"`
-	UpdatedAt         string `json:"updatedAt"`
+	ProviderSessionID string                 `json:"providerSessionId,omitempty"`
+	CWD               string                 `json:"cwd,omitempty"`
+	ModelID           string                 `json:"modelId,omitempty"`
+	ModeID            string                 `json:"modeId,omitempty"`
+	PendingOperation  *nativeOperationRecord `json:"pendingOperation,omitempty"`
+	LastOperation     *nativeOperationRecord `json:"lastOperation,omitempty"`
+	// Legacy cursor fields are migration evidence only. Admission and recovery
+	// use PendingOperation plus provider-native readback; renderer history never
+	// decides whether an exact native thread may resume.
+	SyncedMessages   int    `json:"syncedMessages,omitempty"`
+	HistoryHash      string `json:"historyHash,omitempty"`
+	HistoryVersion   int    `json:"historyVersion,omitempty"`
+	Generation       uint64 `json:"generation"`
+	ResumeSafe       bool   `json:"resumeSafe,omitempty"`
+	Quarantined      bool   `json:"quarantined,omitempty"`
+	QuarantineReason string `json:"quarantineReason,omitempty"`
+	UpdatedAt        string `json:"updatedAt"`
 }
 
 type nativeSessionLedgerFile struct {
@@ -51,17 +90,26 @@ type nativeSessionLedgerFile struct {
 }
 
 type nativeSessionLedger struct {
-	mu       sync.Mutex
-	path     string
-	bindings map[string]nativeSessionBinding
-	locks    map[string]*sync.Mutex
-	loadErr  error
+	mu        sync.Mutex
+	path      string
+	bindings  map[string]nativeSessionBinding
+	locks     map[string]*sync.Mutex
+	machineID string
+	loadErr   error
 }
 
-func newNativeSessionLedger(stateDir string) *nativeSessionLedger {
+func newNativeSessionLedger(stateDir string, machineIDs ...string) *nativeSessionLedger {
+	machineID := ""
+	if len(machineIDs) > 0 {
+		machineID = strings.TrimSpace(machineIDs[0])
+	}
+	if machineID == "" {
+		machineID = fallbackNativeMachineScope(stateDir)
+	}
 	ledger := &nativeSessionLedger{
-		bindings: make(map[string]nativeSessionBinding),
-		locks:    make(map[string]*sync.Mutex),
+		bindings:  make(map[string]nativeSessionBinding),
+		locks:     make(map[string]*sync.Mutex),
+		machineID: machineID,
 	}
 	stateDir = strings.TrimSpace(stateDir)
 	if stateDir == "" {
@@ -69,11 +117,20 @@ func newNativeSessionLedger(stateDir string) *nativeSessionLedger {
 	}
 	ledger.path = filepath.Join(stateDir, nativeSessionLedgerFilename)
 	raw, err := os.ReadFile(ledger.path)
+	legacySource := false
 	if err != nil {
 		if !os.IsNotExist(err) {
 			ledger.loadErr = err
+			return ledger
 		}
-		return ledger
+		raw, err = os.ReadFile(filepath.Join(stateDir, legacyNativeSessionLedgerFilename))
+		if err != nil {
+			if !os.IsNotExist(err) {
+				ledger.loadErr = err
+			}
+			return ledger
+		}
+		legacySource = true
 	}
 	var disk nativeSessionLedgerFile
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -83,57 +140,265 @@ func newNativeSessionLedger(stateDir string) *nativeSessionLedger {
 		return ledger
 	}
 	ownerBySessionID := make(map[string]string)
-	for _, binding := range disk.Bindings {
+	for index, binding := range disk.Bindings {
 		if binding.HistoryVersion == 0 && disk.Version <= 1 {
 			binding.HistoryVersion = 1
 		}
-		binding = normalizeNativeBinding(binding)
+		binding = ledger.normalizeBinding(binding)
 		if binding.TabID == "" || binding.ChatID == "" || binding.ProviderID == "" || binding.SessionID == "" {
 			continue
 		}
-		key := nativeSessionKey(binding.TabID, binding.ProviderID)
+		key := nativeLaneStorageKey(binding.LaneID)
 		if prior, exists := ledger.bindings[key]; exists {
-			ledger.loadErr = fmt.Errorf("duplicate native binding for tab %q provider %q (sessions %q and %q)", binding.TabID, binding.ProviderID, prior.SessionID, binding.SessionID)
-			ledger.bindings = make(map[string]nativeSessionBinding)
-			return ledger
+			prior.Quarantined = true
+			prior.ResumeSafe = false
+			prior.QuarantineReason = "multiple native threads claim the same immutable lane"
+			binding.Quarantined = true
+			binding.ResumeSafe = false
+			binding.QuarantineReason = prior.QuarantineReason
+			ledger.bindings[key] = prior
+			ledger.bindings[fmt.Sprintf("%s\x00collision:%d", key, index)] = binding
+			continue
 		}
-		if owner, exists := ownerBySessionID[binding.SessionID]; exists && owner != key {
-			ledger.loadErr = fmt.Errorf("provider-native session %q has multiple chat owners", binding.SessionID)
-			ledger.bindings = make(map[string]nativeSessionBinding)
-			return ledger
+		for _, providerThreadID := range bindingThreadIDs(binding) {
+			providerSessionKey := binding.ProviderID + "\x00" + providerThreadID
+			if owner, exists := ownerBySessionID[providerSessionKey]; exists && owner != key {
+				binding.Quarantined = true
+				binding.ResumeSafe = false
+				binding.QuarantineReason = "provider-native thread has multiple Workass lane owners"
+				if prior, ok := ledger.bindings[owner]; ok {
+					prior.Quarantined = true
+					prior.ResumeSafe = false
+					prior.QuarantineReason = binding.QuarantineReason
+					ledger.bindings[owner] = prior
+				}
+			}
+			ownerBySessionID[providerSessionKey] = key
 		}
-		ownerBySessionID[binding.SessionID] = key
 		ledger.bindings[key] = binding
 	}
-	ledger.reconcileAuthoritativeMirror(stateDir)
+	if legacySource || disk.Version != currentNativeLaneStoreVersion {
+		// The legacy file remains intact until the complete lane store is written,
+		// fsynced, renamed, decoded, and identity-checked. A failed migration never
+		// leaves recovery dependent on partially converted bytes.
+		if err := ledger.writeLocked(); err != nil {
+			ledger.loadErr = fmt.Errorf("migrate provider lane ledger: %w", err)
+			return ledger
+		}
+		if err := ledger.verifyPersistedLaneStore(); err != nil {
+			ledger.loadErr = fmt.Errorf("verify migrated provider lane store: %w", err)
+			return ledger
+		}
+	}
 	return ledger
 }
 
-func normalizeNativeBinding(binding nativeSessionBinding) nativeSessionBinding {
+func (l *nativeSessionLedger) verifyPersistedLaneStore() error {
+	raw, err := os.ReadFile(l.path)
+	if err != nil {
+		return err
+	}
+	var disk nativeSessionLedgerFile
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		return err
+	}
+	if disk.Version != currentNativeLaneStoreVersion || len(disk.Bindings) != len(l.bindings) {
+		return fmt.Errorf("lane store receipt mismatch: version=%d bindings=%d want=%d", disk.Version, len(disk.Bindings), len(l.bindings))
+	}
+	signature := func(binding nativeSessionBinding) string {
+		return strings.Join([]string{binding.TabID, binding.ChatID, binding.ProviderID, binding.LaneID, binding.SessionID, fmt.Sprint(binding.Quarantined)}, "\x00")
+	}
+	seen := make(map[string]int, len(disk.Bindings))
+	for _, binding := range disk.Bindings {
+		binding = l.normalizeBinding(binding)
+		seen[signature(binding)]++
+	}
+	for _, expected := range l.bindings {
+		key := signature(expected)
+		if seen[key] == 0 {
+			return fmt.Errorf("persisted lane %q failed ownership readback", expected.LaneID)
+		}
+		seen[key]--
+	}
+	return nil
+}
+
+func (l *nativeSessionLedger) normalizeBinding(binding nativeSessionBinding) nativeSessionBinding {
 	binding.TabID = strings.TrimSpace(binding.TabID)
 	binding.ChatID = strings.TrimSpace(binding.ChatID)
 	binding.ProviderID = normalizeProviderID(binding.ProviderID)
+	binding.MachineID = strings.TrimSpace(firstNonEmpty(binding.MachineID, l.machineID))
+	binding.AccountScope = strings.TrimSpace(binding.AccountScope)
+	binding.InstallScope = strings.TrimSpace(binding.InstallScope)
+	binding.WorkspaceEpoch = strings.TrimSpace(binding.WorkspaceEpoch)
 	binding.SessionID = strings.TrimSpace(binding.SessionID)
+	binding.LineageProof = strings.TrimSpace(binding.LineageProof)
+	binding.ProviderSessionID = strings.TrimSpace(binding.ProviderSessionID)
 	binding.CWD = strings.TrimSpace(binding.CWD)
 	binding.ModelID = strings.TrimSpace(binding.ModelID)
 	binding.ModeID = strings.TrimSpace(binding.ModeID)
+	normalizeOperation := func(operation *nativeOperationRecord) *nativeOperationRecord {
+		if operation == nil {
+			return nil
+		}
+		copy := *operation
+		copy.OperationID = strings.TrimSpace(copy.OperationID)
+		copy.PromptDigest = strings.TrimSpace(copy.PromptDigest)
+		copy.NativeTurnID = strings.TrimSpace(copy.NativeTurnID)
+		copy.Status = strings.TrimSpace(copy.Status)
+		copy.ResultDigest = strings.TrimSpace(copy.ResultDigest)
+		copy.UpdatedAt = strings.TrimSpace(copy.UpdatedAt)
+		if copy.OperationID == "" || copy.PromptDigest == "" {
+			binding.Quarantined = true
+			binding.QuarantineReason = "provider lane contains an incomplete delivery operation"
+		}
+		switch copy.State {
+		case nativeOperationDispatched, nativeOperationConsumed, nativeOperationTerminal, nativeOperationAbsent:
+		default:
+			binding.Quarantined = true
+			binding.QuarantineReason = "provider lane contains an unknown delivery state"
+		}
+		return &copy
+	}
+	binding.PendingOperation = normalizeOperation(binding.PendingOperation)
+	binding.LastOperation = normalizeOperation(binding.LastOperation)
+	if binding.PendingOperation != nil && binding.PendingOperation.State != nativeOperationDispatched && binding.PendingOperation.State != nativeOperationConsumed {
+		binding.Quarantined = true
+		binding.QuarantineReason = "provider lane pending slot contains a terminal delivery operation"
+	}
+	if binding.LastOperation != nil && binding.LastOperation.State != nativeOperationTerminal && binding.LastOperation.State != nativeOperationAbsent {
+		binding.Quarantined = true
+		binding.QuarantineReason = "provider lane settled slot contains an unfinished delivery operation"
+	}
 	if binding.SyncedMessages < 0 {
-		binding.SyncedMessages = 0
-	}
-	if binding.HistoryHash == "" && binding.SyncedMessages == 0 {
-		binding.HistoryHash = historyDigest(nil)
-	}
-	if binding.HistoryVersion == 0 {
-		binding.HistoryVersion = nativeHistoryDigestVersion
+		binding.Quarantined = true
+		binding.QuarantineReason = "legacy provider cursor contains an invalid message count"
 	}
 	if binding.Generation == 0 {
 		binding.Generation = 1
 	}
+	if binding.ThreadLineage == 0 {
+		binding.ThreadLineage = 1
+	}
+	if binding.WorkspaceEpoch == "" && binding.CWD != "" {
+		binding.WorkspaceEpoch = string(nativeWorkspaceEpoch(binding.CWD))
+	}
+	if binding.AccountScope == "" {
+		binding.AccountScope = "unverified-account"
+	}
+	if binding.InstallScope == "" {
+		binding.InstallScope = "registered-" + binding.ProviderID
+	}
+	if l.machineID != "" && binding.MachineID != "" && binding.MachineID != l.machineID {
+		binding.Quarantined = true
+		binding.ResumeSafe = false
+		binding.QuarantineReason = "provider-native thread belongs to another machine"
+	}
+	identity := bindingLaneIdentity(binding)
+	if err := identity.Validate(); err != nil {
+		binding.Quarantined = true
+		binding.ResumeSafe = false
+		binding.QuarantineReason = "incomplete immutable lane identity: " + err.Error()
+	} else if binding.LaneID == "" {
+		binding.LaneID = string(identity.ID)
+	} else if binding.LaneID != string(identity.ID) {
+		binding.Quarantined = true
+		binding.ResumeSafe = false
+		binding.QuarantineReason = "stored lane id does not match immutable lane identity"
+	}
 	return binding
 }
 
-func nativeSessionKey(tabID, providerID string) string {
-	return strings.TrimSpace(tabID) + "\x00" + normalizeProviderID(providerID)
+func fallbackNativeMachineScope(stateDir string) string {
+	abs, err := filepath.Abs(strings.TrimSpace(stateDir))
+	if err != nil || strings.TrimSpace(abs) == "" {
+		abs = "ephemeral"
+	}
+	digest := sha256.Sum256([]byte(filepath.Clean(abs)))
+	return "state-" + hex.EncodeToString(digest[:8])
+}
+
+func nativeWorkspaceEpoch(cwd string) providercontract.WorkspaceEpoch {
+	clean := filepath.Clean(strings.TrimSpace(cwd))
+	if abs, err := filepath.Abs(clean); err == nil {
+		clean = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+		clean = resolved
+	}
+	digest := sha256.Sum256([]byte(clean))
+	return providercontract.WorkspaceEpoch("ws-" + hex.EncodeToString(digest[:16]))
+}
+
+func bindingLaneIdentity(binding nativeSessionBinding) providercontract.LaneIdentity {
+	return providercontract.LaneIdentity{
+		ID:     providercontract.LaneID(strings.TrimSpace(binding.LaneID)),
+		ChatID: strings.TrimSpace(binding.ChatID),
+		Realm: providercontract.Realm{
+			ProviderID: providercontract.ID(binding.ProviderID), MachineID: binding.MachineID,
+			AccountScope: binding.AccountScope, InstallScope: binding.InstallScope, Verified: binding.RealmVerified,
+		},
+		WorkspaceEpoch: providercontract.WorkspaceEpoch(binding.WorkspaceEpoch),
+	}.Normalize()
+}
+
+// nativeLaneStorageKey deliberately excludes TabID. A tab is a disposable
+// renderer/transport attachment; the immutable lane id already binds the
+// conversation, provider realm, machine, and workspace epoch.
+func nativeLaneStorageKey(laneID string) string {
+	return strings.TrimSpace(laneID)
+}
+
+func bindingCurrentThreadID(binding nativeSessionBinding) string {
+	return firstNonEmpty(strings.TrimSpace(binding.ProviderSessionID), strings.TrimSpace(binding.SessionID))
+}
+
+func bindingThreadIDs(binding nativeSessionBinding) []string {
+	root := strings.TrimSpace(binding.SessionID)
+	head := bindingCurrentThreadID(binding)
+	if root == "" {
+		return nil
+	}
+	if head == "" || head == root {
+		return []string{root}
+	}
+	return []string{root, head}
+}
+
+func (l *nativeSessionLedger) matchingBindingsLocked(tabID, chatID, providerID, sessionID string) []struct {
+	key     string
+	binding nativeSessionBinding
+} {
+	_ = strings.TrimSpace(tabID) // compatibility parameter; never lane identity.
+	chatID = strings.TrimSpace(chatID)
+	providerID = normalizeProviderID(providerID)
+	sessionID = strings.TrimSpace(sessionID)
+	var matches []struct {
+		key     string
+		binding nativeSessionBinding
+	}
+	for key, binding := range l.bindings {
+		if binding.ChatID != chatID || binding.ProviderID != providerID {
+			continue
+		}
+		if sessionID != "" && binding.SessionID != sessionID && bindingCurrentThreadID(binding) != sessionID {
+			continue
+		}
+		matches = append(matches, struct {
+			key     string
+			binding nativeSessionBinding
+		}{key: key, binding: binding})
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].key < matches[j].key })
+	return matches
+}
+
+func ambiguousNativeBinding(tabID, chatID, providerID string) nativeSessionBinding {
+	return nativeSessionBinding{
+		TabID: strings.TrimSpace(tabID), ChatID: strings.TrimSpace(chatID), ProviderID: normalizeProviderID(providerID),
+		Quarantined: true, ResumeSafe: false,
+		QuarantineReason: "multiple provider lanes match this chat selection; explicit repair is required",
+	}
 }
 
 func (l *nativeSessionLedger) enabledFor(opts SessionOptions) bool {
@@ -146,11 +411,11 @@ func (l *nativeSessionLedger) ownsSession(tabID, chatID, sessionID string) bool 
 	if l == nil {
 		return false
 	}
-	tabID, chatID, sessionID = strings.TrimSpace(tabID), strings.TrimSpace(chatID), strings.TrimSpace(sessionID)
+	_, chatID, sessionID = strings.TrimSpace(tabID), strings.TrimSpace(chatID), strings.TrimSpace(sessionID)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, binding := range l.bindings {
-		if binding.TabID == tabID && binding.ChatID == chatID && binding.SessionID == sessionID {
+		if binding.ChatID == chatID && (binding.SessionID == sessionID || bindingCurrentThreadID(binding) == sessionID) && !binding.Quarantined {
 			return true
 		}
 	}
@@ -161,11 +426,11 @@ func (l *nativeSessionLedger) hasChat(tabID, chatID string) bool {
 	if l == nil {
 		return false
 	}
-	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
+	_, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, binding := range l.bindings {
-		if binding.TabID == tabID && binding.ChatID == chatID {
+		if binding.ChatID == chatID {
 			return true
 		}
 	}
@@ -175,11 +440,19 @@ func (l *nativeSessionLedger) hasChat(tabID, chatID string) bool {
 // lock serializes resume/new decisions for one logical chat+provider. Without
 // it, two reconnecting views could both restore/create a native thread and the
 // later disk write would silently orphan the first.
-func (l *nativeSessionLedger) lock(tabID, providerID string) func() {
+func (l *nativeSessionLedger) lock(tabID, chatID, providerID, cwd string) func() {
 	if l == nil {
 		return func() {}
 	}
-	key := nativeSessionKey(tabID, providerID)
+	identity := providercontract.LaneIdentity{
+		ChatID: strings.TrimSpace(chatID),
+		Realm: providercontract.Realm{
+			ProviderID: providercontract.ID(normalizeProviderID(providerID)), MachineID: l.machineID,
+			AccountScope: "unverified-account", InstallScope: "registered-" + normalizeProviderID(providerID),
+		},
+		WorkspaceEpoch: nativeWorkspaceEpoch(cwd),
+	}.Normalize()
+	key := nativeLaneStorageKey(string(identity.ID))
 	l.mu.Lock()
 	lock := l.locks[key]
 	if lock == nil {
@@ -197,39 +470,142 @@ func (l *nativeSessionLedger) get(tabID, chatID, providerID string) (nativeSessi
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	binding, ok := l.bindings[nativeSessionKey(tabID, providerID)]
-	if !ok || binding.TabID != strings.TrimSpace(tabID) || binding.ChatID != strings.TrimSpace(chatID) {
+	matches := l.matchingBindingsLocked(tabID, chatID, providerID, "")
+	if len(matches) == 0 {
+		return nativeSessionBinding{}, false
+	}
+	if len(matches) != 1 {
+		return ambiguousNativeBinding(tabID, chatID, providerID), true
+	}
+	return matches[0].binding, true
+}
+
+// getForWorkspace resolves one immutable lane epoch. A chat may retain several
+// historical lanes for the same provider, so chat+provider alone is
+// intentionally ambiguous once the workspace changes. Callers that are about
+// to create or resume always have a canonical cwd and must use this lookup.
+func (l *nativeSessionLedger) getForWorkspace(tabID, chatID, providerID, cwd string) (nativeSessionBinding, bool) {
+	if l == nil {
+		return nativeSessionBinding{}, false
+	}
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return l.get(tabID, chatID, providerID)
+	}
+	wanted := string(nativeWorkspaceEpoch(cwd))
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	matches := l.matchingBindingsLocked(tabID, chatID, providerID, "")
+	filtered := matches[:0]
+	for _, match := range matches {
+		if match.binding.WorkspaceEpoch == wanted {
+			filtered = append(filtered, match)
+		}
+	}
+	if len(filtered) == 0 {
+		return nativeSessionBinding{}, false
+	}
+	if len(filtered) != 1 {
+		binding := ambiguousNativeBinding(tabID, chatID, providerID)
+		binding.WorkspaceEpoch = wanted
+		binding.QuarantineReason = "multiple provider lanes match this chat workspace epoch; explicit repair is required"
+		return binding, true
+	}
+	return filtered[0].binding, true
+}
+
+func (l *nativeSessionLedger) getForLane(identity providercontract.LaneIdentity) (nativeSessionBinding, bool) {
+	if l == nil {
+		return nativeSessionBinding{}, false
+	}
+	identity = identity.Normalize()
+	if identity.ID == "" {
+		return nativeSessionBinding{}, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	binding, ok := l.bindings[nativeLaneStorageKey(string(identity.ID))]
+	if !ok || bindingLaneIdentity(binding) != identity {
 		return nativeSessionBinding{}, false
 	}
 	return binding, true
+}
+
+func (l *nativeSessionLedger) bindingsForChat(chatID string) []nativeSessionBinding {
+	if l == nil || strings.TrimSpace(chatID) == "" {
+		return nil
+	}
+	chatID = strings.TrimSpace(chatID)
+	l.mu.Lock()
+	bindings := make([]nativeSessionBinding, 0)
+	for _, binding := range l.bindings {
+		if binding.ChatID == chatID {
+			bindings = append(bindings, binding)
+		}
+	}
+	l.mu.Unlock()
+	sort.Slice(bindings, func(i, j int) bool {
+		left, right := nativeLaneStorageKey(bindings[i].LaneID), nativeLaneStorageKey(bindings[j].LaneID)
+		if left != right {
+			return left < right
+		}
+		return bindingCurrentThreadID(bindings[i]) < bindingCurrentThreadID(bindings[j])
+	})
+	return bindings
+}
+
+// allBindings is exposed only through the one-time actor cutover inventory.
+// Runtime chat resolution must address an exact actor lane and never enumerate
+// this legacy ledger as a fallback authority.
+func (l *nativeSessionLedger) allBindings() []nativeSessionBinding {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	bindings := make([]nativeSessionBinding, 0, len(l.bindings))
+	for _, binding := range l.bindings {
+		bindings = append(bindings, binding)
+	}
+	l.mu.Unlock()
+	sort.Slice(bindings, func(i, j int) bool {
+		if bindings[i].ChatID != bindings[j].ChatID {
+			return bindings[i].ChatID < bindings[j].ChatID
+		}
+		return nativeLaneStorageKey(bindings[i].LaneID) < nativeLaneStorageKey(bindings[j].LaneID)
+	})
+	return bindings
 }
 
 func (l *nativeSessionLedger) put(binding nativeSessionBinding) error {
 	if l == nil {
 		return nil
 	}
-	binding = normalizeNativeBinding(binding)
+	binding = l.normalizeBinding(binding)
 	if binding.TabID == "" || binding.ProviderID == "" || binding.SessionID == "" {
 		return errors.New("native session binding requires tab, provider, and session ids")
 	}
 	if binding.ChatID == "" {
 		return errors.New("native session binding requires a conversation id")
 	}
+	if binding.Quarantined {
+		return nativeLaneError(providercontract.ErrorNativeIdentityConflict, binding.QuarantineReason, nil)
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	key := nativeSessionKey(binding.TabID, binding.ProviderID)
+	key := nativeLaneStorageKey(binding.LaneID)
 	for ownerKey, existing := range l.bindings {
-		if ownerKey != key && existing.SessionID == binding.SessionID {
-			return fmt.Errorf("provider-native session %q is already owned by tab %q conversation %q", binding.SessionID, existing.TabID, existing.ChatID)
+		if ownerKey == key || existing.ProviderID != binding.ProviderID {
+			continue
+		}
+		for _, candidateID := range bindingThreadIDs(binding) {
+			for _, existingID := range bindingThreadIDs(existing) {
+				if candidateID == existingID {
+					return fmt.Errorf("provider-native session %q is already owned by conversation %q", candidateID, existing.ChatID)
+				}
+			}
 		}
 	}
 	if previous, ok := l.bindings[key]; ok && binding.Generation <= previous.Generation {
-		if previous.ChatID != binding.ChatID && previous.SessionID == binding.SessionID {
-			return fmt.Errorf("provider reused native session %q for a different conversation owner", binding.SessionID)
-		}
-		// A mismatched conversation owner is never resumed (get requires an exact
-		// match), but once a fresh provider session has been created for the
-		// authoritative owner it replaces the stale slot with a new generation.
 		binding.Generation = previous.Generation + 1
 	}
 	binding.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -237,50 +613,39 @@ func (l *nativeSessionLedger) put(binding nativeSessionBinding) error {
 	return l.writeLocked()
 }
 
-func (l *nativeSessionLedger) updateCursor(tabID, chatID, providerID, sessionID string, generation uint64, history []historyMessage, modelID, modeID string, resumeSafe bool) bool {
-	if l == nil {
-		return false
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	key := nativeSessionKey(tabID, providerID)
-	binding, ok := l.bindings[key]
-	if !ok || binding.ChatID != strings.TrimSpace(chatID) || binding.SessionID != strings.TrimSpace(sessionID) || binding.Generation != generation {
-		return false
-	}
-	binding.SyncedMessages = len(history)
-	binding.HistoryHash = historyDigest(history)
-	binding.HistoryVersion = nativeHistoryDigestVersion
-	if strings.TrimSpace(modelID) != "" {
-		binding.ModelID = strings.TrimSpace(modelID)
-	}
-	if strings.TrimSpace(modeID) != "" {
-		binding.ModeID = strings.TrimSpace(modeID)
-	}
-	binding.ResumeSafe = resumeSafe
-	binding.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	l.bindings[key] = binding
-	return l.writeLocked() == nil
-}
-
 // adoptProviderSession records the provider's announced session id (Claude's
 // fork family: /clear, forkSession, conversation_reset). Resuming the OLD id
 // after a fork silently freezes context at the fork point — turns answered
 // under the forked id fall out of the model's memory (hostile-fixture
 // finding, 2026-07-28).
-func (l *nativeSessionLedger) adoptProviderSession(tabID, chatID, providerID, sessionID, providerSessionID string) bool {
+func (l *nativeSessionLedger) adoptProviderSession(
+	tabID, chatID, providerID, sessionID, previousProviderSessionID, providerSessionID string,
+	lineageGeneration uint64,
+	lineageProof string,
+) bool {
 	if l == nil {
 		return false
 	}
 	providerSessionID = strings.TrimSpace(providerSessionID)
-	if providerSessionID == "" {
+	previousProviderSessionID = strings.TrimSpace(previousProviderSessionID)
+	lineageProof = strings.TrimSpace(lineageProof)
+	if providerSessionID == "" || previousProviderSessionID == "" || lineageGeneration == 0 || lineageProof == "" {
 		return false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	key := nativeSessionKey(tabID, providerID)
-	binding, ok := l.bindings[key]
-	if !ok || binding.ChatID != strings.TrimSpace(chatID) || (strings.TrimSpace(sessionID) != "" && binding.SessionID != strings.TrimSpace(sessionID)) {
+	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	if len(matches) != 1 || matches[0].binding.Quarantined {
+		return false
+	}
+	key, binding := matches[0].key, matches[0].binding
+	current := firstNonEmpty(binding.ProviderSessionID, binding.SessionID)
+	if previousProviderSessionID != current || lineageGeneration != binding.ThreadLineage+1 || providerSessionID == current {
+		binding.Quarantined = true
+		binding.QuarantineReason = "unverified-provider-lineage-transition"
+		binding.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		l.bindings[key] = binding
+		_ = l.writeLocked()
 		return false
 	}
 	next := providerSessionID
@@ -291,10 +656,55 @@ func (l *nativeSessionLedger) adoptProviderSession(tabID, chatID, providerID, se
 		return false
 	}
 	binding.ProviderSessionID = next
+	binding.ThreadLineage = lineageGeneration
+	binding.LineageProof = lineageProof
 	binding.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	l.bindings[key] = binding
 	_ = l.writeLocked()
 	return true
+}
+
+// materializeActorLineage updates the adapter lookup only after the chat actor
+// has durably accepted the exact lineage edge. It is deliberately not an
+// independent authority: the lane identity and both thread endpoints must
+// match the existing binding byte-for-byte.
+func (l *nativeSessionLedger) materializeActorLineage(identity providercontract.LaneIdentity, from, to providercontract.ThreadRef) error {
+	if l == nil {
+		return errors.New("native session ledger is unavailable")
+	}
+	identity, from, to = identity.Normalize(), from.Normalize(), to.Normalize()
+	if err := identity.Validate(); err != nil {
+		return err
+	}
+	if !from.CanAdvanceTo(to) {
+		return nativeLaneError(providercontract.ErrorNativeIdentityConflict, "actor lineage materialization is not monotonic", nil)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := nativeLaneStorageKey(string(identity.ID))
+	binding, ok := l.bindings[key]
+	if !ok || bindingLaneIdentity(binding) != identity || binding.Quarantined {
+		return nativeLaneError(providercontract.ErrorNativeIdentityConflict, "actor lineage materialization does not match the native lane", nil)
+	}
+	current := bindingThreadRef(binding)
+	if current.Equal(to) {
+		return nil
+	}
+	if !current.Equal(from) {
+		return nativeLaneError(providercontract.ErrorNativeIdentityConflict, "native lineage materialization starts at another head", nil)
+	}
+	binding.ProviderSessionID = to.HeadID
+	if to.HeadID == binding.SessionID {
+		binding.ProviderSessionID = ""
+	}
+	binding.ThreadLineage = to.Lineage
+	binding.LineageProof = to.Proof
+	binding.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	l.bindings[key] = binding
+	if err := l.writeLocked(); err != nil {
+		return fmt.Errorf("persist actor lineage materialization: %w", err)
+	}
+	return nil
 }
 
 func (l *nativeSessionLedger) updateControls(tabID, chatID, providerID, sessionID, modelID, modeID string) {
@@ -303,11 +713,11 @@ func (l *nativeSessionLedger) updateControls(tabID, chatID, providerID, sessionI
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	key := nativeSessionKey(tabID, providerID)
-	binding, ok := l.bindings[key]
-	if !ok || binding.ChatID != strings.TrimSpace(chatID) || (strings.TrimSpace(sessionID) != "" && binding.SessionID != strings.TrimSpace(sessionID)) {
+	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	if len(matches) != 1 || matches[0].binding.Quarantined {
 		return
 	}
+	key, binding := matches[0].key, matches[0].binding
 	if strings.TrimSpace(modelID) != "" {
 		binding.ModelID = strings.TrimSpace(modelID)
 	}
@@ -319,15 +729,53 @@ func (l *nativeSessionLedger) updateControls(tabID, chatID, providerID, sessionI
 	_ = l.writeLocked()
 }
 
-func (l *nativeSessionLedger) markInFlight(tabID, chatID, providerID, sessionID string, generation uint64, modelID, modeID string) bool {
+// updateAttachment changes only disposable routing metadata for an immutable
+// lane. It deliberately does not advance Generation: moving the same ChatID to
+// another renderer tab is not a provider operation and must not invalidate a
+// pending delivery receipt.
+func (l *nativeSessionLedger) updateAttachment(tabID, chatID, providerID, sessionID string) bool {
+	if l == nil || strings.TrimSpace(tabID) == "" {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	if len(matches) != 1 || matches[0].binding.Quarantined {
+		return false
+	}
+	key, binding := matches[0].key, matches[0].binding
+	if binding.TabID == strings.TrimSpace(tabID) {
+		return true
+	}
+	previous := binding
+	binding.TabID = strings.TrimSpace(tabID)
+	binding.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	l.bindings[key] = binding
+	if err := l.writeLocked(); err != nil {
+		l.bindings[key] = previous
+		return false
+	}
+	return true
+}
+
+func (l *nativeSessionLedger) markInFlight(
+	tabID, chatID, providerID, sessionID string,
+	generation uint64,
+	modelID, modeID, operationID, promptDigest string,
+) bool {
 	if l == nil {
 		return false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	key := nativeSessionKey(tabID, providerID)
-	binding, ok := l.bindings[key]
-	if !ok || binding.ChatID != strings.TrimSpace(chatID) || binding.SessionID != strings.TrimSpace(sessionID) || binding.Generation != generation {
+	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	if len(matches) != 1 || matches[0].binding.Generation != generation || matches[0].binding.Quarantined {
+		return false
+	}
+	key, binding := matches[0].key, matches[0].binding
+	operationID = strings.TrimSpace(operationID)
+	promptDigest = strings.TrimSpace(promptDigest)
+	if operationID == "" || promptDigest == "" || binding.PendingOperation != nil {
 		return false
 	}
 	if strings.TrimSpace(modelID) != "" {
@@ -336,10 +784,140 @@ func (l *nativeSessionLedger) markInFlight(tabID, chatID, providerID, sessionID 
 	if strings.TrimSpace(modeID) != "" {
 		binding.ModeID = strings.TrimSpace(modeID)
 	}
-	binding.ResumeSafe = false
-	binding.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	binding.PendingOperation = &nativeOperationRecord{
+		OperationID: operationID, PromptDigest: promptDigest, State: nativeOperationDispatched, UpdatedAt: now,
+	}
+	binding.UpdatedAt = now
 	l.bindings[key] = binding
-	return l.writeLocked() == nil
+	if err := l.writeLocked(); err != nil {
+		l.bindings[key] = matches[0].binding
+		return false
+	}
+	return true
+}
+
+func (l *nativeSessionLedger) markOperationConsumed(tabID, chatID, providerID, sessionID, operationID, nativeTurnID string) bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	if len(matches) != 1 || matches[0].binding.Quarantined {
+		return false
+	}
+	key, binding := matches[0].key, matches[0].binding
+	if binding.PendingOperation == nil || binding.PendingOperation.OperationID != strings.TrimSpace(operationID) {
+		return false
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	operation := *binding.PendingOperation
+	operation.State = nativeOperationConsumed
+	operation.NativeTurnID = strings.TrimSpace(firstNonEmpty(nativeTurnID, operation.NativeTurnID))
+	operation.UpdatedAt = now
+	binding.PendingOperation = &operation
+	binding.UpdatedAt = now
+	l.bindings[key] = binding
+	if err := l.writeLocked(); err != nil {
+		l.bindings[key] = matches[0].binding
+		return false
+	}
+	return true
+}
+
+func (l *nativeSessionLedger) settleOperation(
+	tabID, chatID, providerID, sessionID, operationID, status, resultDigest, modelID, modeID string,
+) bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	if len(matches) != 1 || matches[0].binding.Quarantined {
+		return false
+	}
+	key, binding := matches[0].key, matches[0].binding
+	if binding.PendingOperation == nil || binding.PendingOperation.OperationID != strings.TrimSpace(operationID) {
+		return false
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	operation := *binding.PendingOperation
+	operation.State = nativeOperationTerminal
+	operation.Status = strings.TrimSpace(status)
+	operation.ResultDigest = strings.TrimSpace(resultDigest)
+	operation.UpdatedAt = now
+	binding.PendingOperation = nil
+	binding.LastOperation = &operation
+	if strings.TrimSpace(modelID) != "" {
+		binding.ModelID = strings.TrimSpace(modelID)
+	}
+	if strings.TrimSpace(modeID) != "" {
+		binding.ModeID = strings.TrimSpace(modeID)
+	}
+	binding.UpdatedAt = now
+	l.bindings[key] = binding
+	if err := l.writeLocked(); err != nil {
+		l.bindings[key] = matches[0].binding
+		return false
+	}
+	return true
+}
+
+func (l *nativeSessionLedger) recordOperationReadback(
+	tabID, chatID, providerID, sessionID, operationID, nativeTurnID, status string,
+	found, consumed, terminal bool,
+) bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	if len(matches) != 1 || matches[0].binding.Quarantined {
+		return false
+	}
+	key, binding := matches[0].key, matches[0].binding
+	if binding.PendingOperation == nil || binding.PendingOperation.OperationID != strings.TrimSpace(operationID) {
+		return false
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	operation := *binding.PendingOperation
+	if (!found && (consumed || terminal)) || (terminal && !consumed) {
+		return false
+	}
+	if operation.State == nativeOperationConsumed && (!found || !consumed) {
+		return false
+	}
+	if operation.NativeTurnID != "" && strings.TrimSpace(nativeTurnID) != "" && operation.NativeTurnID != strings.TrimSpace(nativeTurnID) {
+		return false
+	}
+	operation.NativeTurnID = strings.TrimSpace(firstNonEmpty(nativeTurnID, operation.NativeTurnID))
+	operation.Status = strings.TrimSpace(status)
+	operation.UpdatedAt = now
+	switch {
+	case !found:
+		operation.State = nativeOperationAbsent
+		binding.PendingOperation = nil
+		binding.LastOperation = &operation
+	case terminal:
+		operation.State = nativeOperationTerminal
+		binding.PendingOperation = nil
+		binding.LastOperation = &operation
+	case consumed:
+		operation.State = nativeOperationConsumed
+		binding.PendingOperation = &operation
+	default:
+		binding.PendingOperation = &operation
+	}
+	binding.UpdatedAt = now
+	l.bindings[key] = binding
+	if err := l.writeLocked(); err != nil {
+		l.bindings[key] = matches[0].binding
+		return false
+	}
+	return true
 }
 
 func (l *nativeSessionLedger) delete(tabID, chatID, providerID, sessionID string) {
@@ -348,12 +926,11 @@ func (l *nativeSessionLedger) delete(tabID, chatID, providerID, sessionID string
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	key := nativeSessionKey(tabID, providerID)
-	binding, ok := l.bindings[key]
-	if !ok || binding.ChatID != strings.TrimSpace(chatID) || (strings.TrimSpace(sessionID) != "" && binding.SessionID != strings.TrimSpace(sessionID)) {
+	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	if len(matches) != 1 {
 		return
 	}
-	delete(l.bindings, key)
+	delete(l.bindings, matches[0].key)
 	_ = l.writeLocked()
 }
 
@@ -361,12 +938,12 @@ func (l *nativeSessionLedger) deleteChat(tabID, chatID string) {
 	if l == nil {
 		return
 	}
-	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
+	_, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	changed := false
 	for key, binding := range l.bindings {
-		if binding.TabID == tabID && binding.ChatID == chatID {
+		if binding.ChatID == chatID {
 			delete(l.bindings, key)
 			changed = true
 		}
@@ -385,7 +962,7 @@ func (l *nativeSessionLedger) writeLocked() error {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	disk := nativeSessionLedgerFile{Version: 2, Bindings: make([]nativeSessionBinding, 0, len(keys))}
+	disk := nativeSessionLedgerFile{Version: currentNativeLaneStoreVersion, Bindings: make([]nativeSessionBinding, 0, len(keys))}
 	for _, key := range keys {
 		disk.Bindings = append(disk.Bindings, l.bindings[key])
 	}
@@ -420,190 +997,231 @@ func (l *nativeSessionLedger) writeLocked() error {
 	return os.Rename(tmpName, l.path)
 }
 
-// reconcileAuthoritativeMirror removes bindings for tabs that no longer exist
-// and bindings whose immutable Workass conversation id no longer matches. It is
-// intentionally provider-agnostic: one chat may retain separate native threads
-// for Codex and Claude, but every one must belong to the same tab+conversation.
-// A missing/unreadable mirror is left untouched so native recovery can still be
-// used in isolated embeddings and deterministic fixtures.
-func (l *nativeSessionLedger) reconcileAuthoritativeMirror(stateDir string) {
-	path := filepath.Join(strings.TrimSpace(stateDir), "session-state.json")
-	raw, err := os.ReadFile(path)
+func nativeLaneError(kind providercontract.ErrorKind, message string, cause error) error {
+	return &providercontract.Error{
+		Kind:      kind,
+		Operation: providercontract.OperationID("resume-native-thread"),
+		Message:   message,
+		Cause:     cause,
+	}
+}
+
+func nativeResumeError(err error) error {
+	kind := providercontract.ErrorTransientTransport
+	var rpcErr *acpError
+	if errors.As(err, &rpcErr) && rpcErr.Code == -32000 {
+		kind = providercontract.ErrorNativeThreadMissing
+	}
+	return nativeLaneError(kind, "could not resume the chat's exact provider-native thread", err)
+}
+
+type nativeOperationReadback struct {
+	Found        bool
+	Consumed     bool
+	Terminal     bool
+	NativeTurnID string
+	Status       string
+}
+
+// supportsOperationReadback requires both halves of the exactly-once
+// contract. A provider that can look up turns but did not durably bind the
+// Workass operation id to its native input cannot reconcile the right input.
+func (b *Bridge) supportsOperationReadback() bool {
+	return b != nil && b.hasProviderCapability(
+		"workassStableTurnInputV1",
+	) && b.hasProviderCapability(
+		"workassOperationReadbackV1",
+	) && b.hasProviderCapability(
+		"workassTurnReconcileRequest",
+	)
+}
+
+func (b *Bridge) readbackOperation(ctx context.Context, sessionID, operationID string) (nativeOperationReadback, error) {
+	if !b.supportsOperationReadback() {
+		return nativeOperationReadback{}, providercontract.Unsupported(
+			providercontract.OperationID(operationID),
+			"the provider does not expose authoritative operation-specific readback",
+		)
+	}
+	timeout := b.opts.PromptReconcileTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	readCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := b.request(readCtx, "_workass/turn/reconcile", map[string]any{
+		"sessionId": sessionID, "clientUserMessageId": operationID,
+	}, timeout)
 	if err != nil {
-		return
+		return nativeOperationReadback{}, err
 	}
-	var snapshot map[string]any
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	if err := dec.Decode(&snapshot); err != nil {
-		return
+	found, foundOK := result["found"].(bool)
+	consumed, consumedOK := result["consumed"].(bool)
+	terminal, terminalOK := result["terminal"].(bool)
+	if !foundOK || !consumedOK || !terminalOK {
+		return nativeOperationReadback{}, errors.New("provider operation readback omitted required boolean receipts")
 	}
-	l.reconcileOwners(nativeChatOwners(snapshot))
+	if (!found && (consumed || terminal)) || (terminal && !consumed) {
+		return nativeOperationReadback{}, errors.New("provider operation readback returned contradictory receipts")
+	}
+	readback := nativeOperationReadback{
+		Found: found, Consumed: consumed, Terminal: terminal,
+		NativeTurnID: strings.TrimSpace(asString(result["turnId"])),
+		Status:       strings.TrimSpace(asString(result["status"])),
+	}
+	if found && readback.NativeTurnID == "" {
+		return nativeOperationReadback{}, errors.New("provider operation readback found input without a native turn id")
+	}
+	return readback, nil
 }
 
-func nativeChatOwners(snapshot map[string]any) map[string]string {
-	owners := make(map[string]string)
-	for _, raw := range anySlice(snapshot["chats"]) {
-		chat := mapFromAny(raw)
-		tabID := strings.TrimSpace(asString(chat["id"]))
-		chatID := strings.TrimSpace(asString(chat["chatId"]))
-		if tabID != "" && chatID != "" {
-			owners[tabID] = chatID
-		}
+func (m *Manager) reconcilePendingNativeOperation(
+	ctx context.Context,
+	bridge *Bridge,
+	binding nativeSessionBinding,
+) (bool, error) {
+	pending := binding.PendingOperation
+	if pending == nil {
+		return true, nil
 	}
-	return owners
+	currentThreadID := bindingCurrentThreadID(binding)
+	readback, err := bridge.readbackOperation(ctx, currentThreadID, pending.OperationID)
+	if err != nil {
+		return false, err
+	}
+	if pending.State == nativeOperationConsumed && (!readback.Found || !readback.Consumed) {
+		return false, errors.New("provider readback contradicted a durable input-consumed receipt")
+	}
+	if pending.NativeTurnID != "" && readback.NativeTurnID != "" && pending.NativeTurnID != readback.NativeTurnID {
+		return false, errors.New("provider readback changed the native turn owner for one operation")
+	}
+	if !m.nativeSessions.recordOperationReadback(
+		binding.TabID, binding.ChatID, binding.ProviderID, currentThreadID,
+		pending.OperationID, readback.NativeTurnID, readback.Status,
+		readback.Found, readback.Consumed, readback.Terminal,
+	) {
+		return false, errors.New("could not durably commit provider operation readback")
+	}
+	return !readback.Found || readback.Terminal, nil
 }
 
-func (l *nativeSessionLedger) reconcileOwners(owners map[string]string) {
-	if l == nil || l.path == "" || l.loadErr != nil || owners == nil {
-		return
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	changed := false
-	for key, binding := range l.bindings {
-		if chatID, exists := owners[binding.TabID]; !exists || chatID != binding.ChatID {
-			delete(l.bindings, key)
-			changed = true
-		}
-	}
-	if changed {
-		_ = l.writeLocked()
-	}
-}
-
-func historyDigest(history []historyMessage) string {
-	hash := sha256.New()
-	for _, message := range history {
-		hash.Write([]byte(message.ID))
-		hash.Write([]byte{0xfe})
-		hash.Write([]byte(message.Role))
-		hash.Write([]byte{0})
-		hash.Write([]byte(message.Content))
-		hash.Write([]byte{0xff})
-	}
-	return hex.EncodeToString(hash.Sum(nil))
-}
-
-func legacyHistoryDigest(history []historyMessage) string {
-	hash := sha256.New()
-	for _, message := range history {
-		hash.Write([]byte(message.Role))
-		hash.Write([]byte{0})
-		hash.Write([]byte(message.Content))
-		hash.Write([]byte{0xff})
-	}
-	return hex.EncodeToString(hash.Sum(nil))
-}
-
-func bindingMatchesHistoryPrefix(binding nativeSessionBinding, history []historyMessage) bool {
-	if binding.SyncedMessages < 0 || binding.SyncedMessages > len(history) {
-		return false
-	}
-	digest := historyDigest(history[:binding.SyncedMessages])
-	if binding.HistoryVersion <= 1 {
-		digest = legacyHistoryDigest(history[:binding.SyncedMessages])
-	}
-	return binding.HistoryHash == digest
-}
-
-func (m *Manager) tryRestoreNativeSession(ctx context.Context, opts SessionOptions) (SessionInfo, bool, nativeRestoreFallbackReason, error) {
+func (m *Manager) tryRestoreNativeSession(ctx context.Context, opts SessionOptions) (SessionInfo, bool, error) {
 	ledger := m.nativeSessions
-	if !ledger.enabledFor(opts) || opts.ForceFresh {
-		return SessionInfo{}, false, "", nil
+	if !ledger.enabledFor(opts) {
+		return SessionInfo{}, false, nil
 	}
-	binding, ok := ledger.get(opts.TabID, opts.ChatID, opts.ProviderID)
+	binding, ok := ledger.getForWorkspace(opts.TabID, opts.ChatID, opts.ProviderID, opts.CWD)
 	if !ok {
-		state := nativeRestoreFallbackReadyState()
-		state.BindingFound = false
-		return SessionInfo{}, false, nativeRestoreFallbackReasonFor(state), nil
+		return SessionInfo{}, false, nil
 	}
-	if !binding.ResumeSafe || binding.SessionID == "" {
-		state := nativeRestoreFallbackReadyState()
-		state.ResumeSafe = false
-		return SessionInfo{}, false, nativeRestoreFallbackReasonFor(state), nil
+	if binding.Quarantined {
+		return SessionInfo{}, true, nativeLaneError(
+			providercontract.ErrorNativeIdentityConflict,
+			firstNonEmpty(binding.QuarantineReason, "the provider lane identity is ambiguous and requires explicit repair"),
+			nil,
+		)
+	}
+	if binding.SessionID == "" {
+		return SessionInfo{}, true, nativeLaneError(
+			providercontract.ErrorNativeThreadMissing,
+			"the chat's provider-native thread reference is empty",
+			nil,
+		)
 	}
 	// The provider-native thread was created in binding.CWD. Adapters commonly
 	// accept a cwd on resume while continuing to execute in the original one, so
-	// a requested workspace change must never resume this binding. Start fresh;
-	// the normal first-turn seed rebuilds context from canonical Workass history.
+	// a requested workspace change must never be disguised as a resume. Workspace
+	// moves create a new lane transaction; this established lane stays immutable.
 	if requested := strings.TrimSpace(opts.CWD); requested != "" && strings.TrimSpace(binding.CWD) != "" && !sameFilesystemPath(requested, binding.CWD) {
-		state := nativeRestoreFallbackReadyState()
-		state.CWDMatches = false
-		return SessionInfo{}, false, nativeRestoreFallbackReasonFor(state), nil
+		return SessionInfo{}, true, nativeLaneError(
+			providercontract.ErrorNativeIdentityConflict,
+			"the requested workspace does not match the provider lane's workspace epoch",
+			nil,
+		)
 	}
-	if live, ok := m.LiveSession(binding.SessionID); ok && live.TabID == opts.TabID && live.Info.ProviderID == opts.ProviderID {
-		return live.Info, true, "", nil
+	currentThreadID := bindingCurrentThreadID(binding)
+	if live, ok := m.LiveSession(currentThreadID); ok {
+		if live.TabID == opts.TabID && live.ChatID == opts.ChatID && live.Info.ProviderID == opts.ProviderID {
+			return live.Info, true, nil
+		}
+		return SessionInfo{}, true, nativeLaneError(
+			providercontract.ErrorNativeIdentityConflict,
+			"the provider-native thread is already attached to a different chat lane",
+			nil,
+		)
 	}
 
 	bridge := m.getBridge(opts)
-	if _, err := bridge.Initialize(ctx); err != nil {
-		return SessionInfo{}, true, "", err
+	if bridge == nil {
+		if _, configErr := m.providerConfig(opts.ProviderID); configErr != nil {
+			return SessionInfo{}, true, configErr
+		}
+		return SessionInfo{}, true, &providercontract.Error{
+			Kind: providercontract.ErrorProviderUnavailable, Message: "provider bridge is unavailable for exact resume",
+		}
 	}
-	if !bridge.supportsSessionResume() && !bridge.supportsSessionLoad() {
-		state := nativeRestoreFallbackReadyState()
-		state.RestoreSupported = false
-		return SessionInfo{}, true, nativeRestoreFallbackReasonFor(state), errors.New("ACP provider does not support session resume or load")
+	if _, err := bridge.Initialize(ctx); err != nil {
+		return SessionInfo{}, true, nativeLaneError(providercontract.ErrorTransientTransport, "could not start the provider host for exact resume", err)
+	}
+	if !bridge.supportsSessionResume() {
+		return SessionInfo{}, true, nativeLaneError(
+			providercontract.ErrorUnsupportedCapability,
+			"the provider does not support exact native-thread resume",
+			nil,
+		)
 	}
 	info, method, err := bridge.RestoreSession(ctx, binding, opts)
 	if err != nil {
-		// Whether the resume RPC itself failed or a later attach step did, the
-		// chat must degrade to the canonical replay fallback rather than hard-
-		// fail the send; the caller closes this bridge, so a provider-side
-		// attachment from a successful resume RPC dies with the process.
-		state := nativeRestoreFallbackReadyState()
-		state.RestoreAttempted = true
-		state.RestoreFailed = true
-		return SessionInfo{}, true, nativeRestoreFallbackReasonFor(state), err
+		return SessionInfo{}, true, nativeResumeError(err)
 	}
-	history, historyErr := readAllChatHistory(m.opts.StateDir, opts.TabID)
-	if historyErr != nil {
-		bridge.CloseSession(context.Background(), info.SessionID)
-		return SessionInfo{}, true, "", fmt.Errorf("read canonical Workass history: %w", historyErr)
+	if info.SessionID != currentThreadID {
+		bridge.Close(false, errors.New("provider exact resume returned a different native head"))
+		return SessionInfo{}, true, nativeLaneError(
+			providercontract.ErrorNativeIdentityConflict,
+			"the provider exact-resume reply changed the lane's native head without an attested lineage event",
+			fmt.Errorf("expected %q, got %q", currentThreadID, info.SessionID),
+		)
 	}
-	if !bindingMatchesHistoryPrefix(binding, history) {
-		bridge.CloseSession(context.Background(), info.SessionID)
-		state := nativeRestoreFallbackReadyState()
-		state.HistoryMatches = false
-		return SessionInfo{}, true, nativeRestoreFallbackReasonFor(state), errors.New("provider-native history diverged from the Workass archive")
-	}
-	missing := history[binding.SyncedMessages:]
-	if len(missing) > 0 {
-		prompt, ok := buildNativeDeltaSeed(missing, historyCharBudget(JobStartOptions{}))
-		if !ok {
-			bridge.CloseSession(context.Background(), info.SessionID)
-			state := nativeRestoreFallbackReadyState()
-			state.HistoryMatches = false
-			return SessionInfo{}, true, nativeRestoreFallbackReasonFor(state), errors.New("provider-native history delta exceeds the safe context budget")
-		}
-		if strings.TrimSpace(prompt) != "" {
-			if _, err := bridge.promptSystem(ctx, info.SessionID, prompt); err != nil {
-				bridge.CloseSession(context.Background(), info.SessionID)
-				return SessionInfo{}, true, "", fmt.Errorf("provider-native delta sync failed: %w", err)
-			}
-		}
+	if binding.RealmVerified && info.ProviderRealmVerified &&
+		(binding.AccountScope != strings.TrimSpace(info.ProviderAccountScope) || binding.InstallScope != strings.TrimSpace(info.ProviderInstallScope)) {
+		bridge.Close(false, errors.New("provider realm changed during exact resume"))
+		return SessionInfo{}, true, nativeLaneError(
+			providercontract.ErrorNativeIdentityConflict,
+			"the provider account or installation no longer matches this chat lane",
+			nil,
+		)
 	}
 	bridge.markSeeded(info.SessionID)
+	binding.TabID = opts.TabID
 	binding.ChatID = firstNonEmpty(opts.ChatID, binding.ChatID)
-	binding.SessionID = info.SessionID
-	// The restore ran against the freshest id, so the alias is folded.
-	binding.ProviderSessionID = ""
 	binding.CWD = info.CWD
 	binding.ModelID = firstNonEmpty(strings.TrimSpace(opts.ModelID), binding.ModelID, stringPointer(info.CurrentModelID))
 	binding.ModeID = firstNonEmpty(strings.TrimSpace(opts.ModeID), binding.ModeID, stringPointer(info.CurrentModeID))
-	binding.SyncedMessages = len(history)
-	binding.HistoryHash = historyDigest(history)
-	binding.HistoryVersion = nativeHistoryDigestVersion
-	binding.ResumeSafe = true
 	if err := ledger.put(binding); err != nil {
-		bridge.CloseSession(context.Background(), info.SessionID)
-		return SessionInfo{}, true, "", fmt.Errorf("persist restored native session binding: %w", err)
+		bridge.Close(false, err)
+		return SessionInfo{}, true, nativeLaneError(providercontract.ErrorProtocolViolation, "could not persist the exact resumed thread binding", err)
+	}
+	operationState := "clear"
+	if binding.PendingOperation != nil {
+		operationState = string(binding.PendingOperation.State)
+		cleared, readbackErr := m.reconcilePendingNativeOperation(ctx, bridge, binding)
+		if readbackErr != nil {
+			m.opts.Logf("provider lane operation readback unavailable", map[string]any{
+				"tabId": opts.TabID, "chatId": opts.ChatID, "providerId": opts.ProviderID,
+				"operationId": binding.PendingOperation.OperationID,
+				"error":       redactSensitiveText(readbackErr.Error()),
+			})
+		} else if cleared {
+			operationState = "reconciled"
+		} else {
+			operationState = "provider-active"
+		}
 	}
 	m.opts.Logf("acp native session restored", map[string]any{
 		"tabId": opts.TabID, "providerId": opts.ProviderID, "method": method,
-		"syncedMessages": len(history), "deltaMessages": len(missing),
+		"operationState": operationState,
 	})
-	return info, true, "", nil
+	return info, true, nil
 }
 
 func (m *Manager) rememberNewNativeSession(opts SessionOptions, info SessionInfo) error {
@@ -614,21 +1232,14 @@ func (m *Manager) rememberNewNativeSession(opts SessionOptions, info SessionInfo
 	binding := nativeSessionBinding{
 		TabID: opts.TabID, ChatID: opts.ChatID, ProviderID: info.ProviderID,
 		SessionID: info.SessionID, CWD: info.CWD,
-		ModelID:     firstNonEmpty(stringPointer(info.CurrentModelID)),
-		ModeID:      firstNonEmpty(stringPointer(info.CurrentModeID)),
-		HistoryHash: historyDigest(nil), HistoryVersion: nativeHistoryDigestVersion, ResumeSafe: true,
+		MachineID:     m.nativeSessions.machineID,
+		AccountScope:  firstNonEmpty(strings.TrimSpace(info.ProviderAccountScope), "unverified-account"),
+		InstallScope:  firstNonEmpty(strings.TrimSpace(info.ProviderInstallScope), "registered-"+normalizeProviderID(info.ProviderID)),
+		RealmVerified: info.ProviderRealmVerified,
+		ModelID:       firstNonEmpty(stringPointer(info.CurrentModelID)),
+		ModeID:        firstNonEmpty(stringPointer(info.CurrentModeID)),
 	}
 	return ledger.put(binding)
-}
-
-// ReconcileNativeSessionOwners is called after the daemon accepts a renderer
-// session snapshot. It removes durable provider threads for deleted chats and
-// refuses to carry a binding across an immutable conversation-id change.
-func (m *Manager) ReconcileNativeSessionOwners(snapshot any) {
-	if m == nil || m.nativeSessions == nil {
-		return
-	}
-	m.nativeSessions.reconcileOwners(nativeChatOwners(mapFromAny(snapshot)))
 }
 
 func stringPointer(value *string) string {
@@ -638,126 +1249,92 @@ func stringPointer(value *string) string {
 	return strings.TrimSpace(*value)
 }
 
-func (m *Manager) prepareNativeTurn(ctx context.Context, bridge *Bridge, job *Job, opts JobStartOptions) error {
-	if m.nativeSessions == nil || m.nativeSessions.path == "" || bridge == nil || job == nil || job.TabID == "" || job.ProviderID == "" {
+type nativeTurnDispatch struct {
+	TabID        string
+	ChatID       string
+	ProviderID   string
+	SessionID    string
+	OperationID  string
+	PromptDigest string
+}
+
+func digestProviderPrompt(prompt []any) (string, error) {
+	raw, err := json.Marshal(prompt)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+// prepareNativeTurn is the write-ahead admission boundary. It runs after the
+// provider payload has been validated but before session/prompt is written to
+// the host. Workass history is deliberately absent from this decision.
+func (m *Manager) prepareNativeTurn(job *Job, operationID string, prompt []any) (*nativeTurnDispatch, error) {
+	if m.nativeSessions == nil || m.nativeSessions.path == "" || job == nil || job.internal || job.TabID == "" || job.ProviderID == "" {
+		return nil, nil
+	}
+	binding, ok := m.nativeSessions.getForWorkspace(job.TabID, job.ChatID, job.ProviderID, job.CWD)
+	if !ok || bindingCurrentThreadID(binding) != job.SessionID {
+		return nil, nil
+	}
+	if binding.Quarantined {
+		return nil, nativeLaneError(providercontract.ErrorNativeIdentityConflict, binding.QuarantineReason, nil)
+	}
+	if binding.PendingOperation != nil {
+		return nil, &providercontract.Error{
+			Kind:      providercontract.ErrorAcceptanceAmbiguous,
+			Operation: providercontract.OperationID(binding.PendingOperation.OperationID),
+			Message:   "the exact provider thread has an unresolved delivery operation; Workass will not resend or admit another prompt",
+		}
+	}
+	operationID = strings.TrimSpace(operationID)
+	if operationID == "" {
+		return nil, errors.New("provider-native turn requires a stable Workass operation id")
+	}
+	promptDigest, err := digestProviderPrompt(prompt)
+	if err != nil {
+		return nil, fmt.Errorf("digest provider-native prompt: %w", err)
+	}
+	if !m.nativeSessions.markInFlight(
+		job.TabID, job.ChatID, job.ProviderID, job.SessionID, binding.Generation,
+		job.startOpts.ModelID, job.startOpts.ModeID, operationID, promptDigest,
+	) {
+		return nil, errors.New("could not durably persist provider-native operation before dispatch")
+	}
+	return &nativeTurnDispatch{
+		TabID: job.TabID, ChatID: job.ChatID, ProviderID: job.ProviderID,
+		SessionID: job.SessionID, OperationID: operationID, PromptDigest: promptDigest,
+	}, nil
+}
+
+func (m *Manager) finishNativeTurn(job *Job, dispatch *nativeTurnDispatch, result map[string]any) error {
+	if m.nativeSessions == nil || dispatch == nil {
 		return nil
 	}
-	binding, ok := m.nativeSessions.get(job.TabID, job.ChatID, job.ProviderID)
-	if !ok || binding.SessionID != job.SessionID {
-		return nil
+	resultReceipt := map[string]any{
+		"stopReason": strings.TrimSpace(asString(result["stopReason"])),
+		"output":     strings.TrimSpace(m.outputForJob(job)),
 	}
-	history := promptHistoryForTab(m.opts.StateDir, opts)
-	job.nativeGeneration = binding.Generation
-	job.nativeHistoryBefore = append([]historyMessage(nil), history...)
-	if bridge.needsNativeSync(job.SessionID) {
-		if !bindingMatchesHistoryPrefix(binding, history) {
-			return errors.New("provider-native history cursor diverged from Workass")
-		}
-		missing := history[binding.SyncedMessages:]
-		if len(missing) > 0 {
-			prompt, fits := buildNativeDeltaSeed(missing, historyCharBudget(opts))
-			if !fits {
-				return errors.New("provider-native history delta exceeds the safe context budget")
-			}
-			if strings.TrimSpace(prompt) != "" {
-				if _, err := bridge.promptSystem(ctx, job.SessionID, prompt); err != nil {
-					return fmt.Errorf("provider-native delta sync failed: %w", err)
-				}
-			}
-			if !m.nativeSessions.updateCursor(job.TabID, job.ChatID, job.ProviderID, job.SessionID, binding.Generation, history, opts.ModelID, opts.ModeID, true) {
-				return errors.New("provider-native session generation changed during delta sync")
-			}
-		}
-		bridge.finishNativeSync(job.SessionID)
+	raw, err := json.Marshal(resultReceipt)
+	if err != nil {
+		return fmt.Errorf("digest provider-native terminal receipt: %w", err)
 	}
-	// Write-ahead dirty bit: if the daemon dies after session/prompt reaches the
-	// provider but before the terminal cursor commit, the next daemon must not
-	// resume a provider thread that may be ahead of Workass's durable transcript.
-	if !m.nativeSessions.markInFlight(job.TabID, job.ChatID, job.ProviderID, job.SessionID, job.nativeGeneration, opts.ModelID, opts.ModeID) {
-		return errors.New("could not persist provider-native in-flight guard")
+	digest := sha256.Sum256(raw)
+	status := firstNonEmpty(asString(result["stopReason"]), "terminal")
+	modelID, modeID := "", ""
+	if job != nil {
+		modelID, modeID = job.startOpts.ModelID, job.startOpts.ModeID
+	}
+	if !m.nativeSessions.settleOperation(
+		dispatch.TabID, dispatch.ChatID, dispatch.ProviderID, dispatch.SessionID,
+		dispatch.OperationID, status, hex.EncodeToString(digest[:]), modelID, modeID,
+	) {
+		return nativeLaneError(
+			providercontract.ErrorProtocolViolation,
+			"the provider completed the turn, but Workass could not durably settle its delivery operation",
+			nil,
+		)
 	}
 	return nil
-}
-
-func (m *Manager) finishNativeTurn(job *Job) {
-	if m.nativeSessions == nil || job == nil || job.nativeGeneration == 0 || job.TabID == "" || job.ProviderID == "" {
-		return
-	}
-	history := append([]historyMessage(nil), job.nativeHistoryBefore...)
-	resumeSafe := job.Status == "done" && strings.TrimSpace(job.Result) != ""
-	if resumeSafe {
-		prompt := strings.TrimSpace(firstNonEmpty(job.startOpts.Prompt, job.startOpts.Message))
-		if prompt != "" {
-			history = append(history, historyMessage{ID: job.startOpts.UserMessageID, Role: "user", Content: prompt, At: job.StartedAt})
-		}
-		history = append(history, historyMessage{ID: job.startOpts.AssistantMessageID, Role: "assistant", Content: strings.TrimSpace(job.Result), At: job.FinishedAt})
-	}
-	m.nativeSessions.updateCursor(
-		job.TabID, job.ChatID, job.ProviderID, job.SessionID, job.nativeGeneration, history,
-		job.startOpts.ModelID, job.startOpts.ModeID, resumeSafe,
-	)
-}
-
-func buildNativeDeltaSeed(history []historyMessage, budget int) (string, bool) {
-	if len(history) == 0 {
-		return "", true
-	}
-	used := 0
-	var lines []string
-	for _, message := range history {
-		content := sanitizeReplayContent(message.Content)
-		if content == "" {
-			continue
-		}
-		who := "User"
-		if message.Role == "assistant" {
-			who = "Assistant"
-		}
-		line := who + ": " + content
-		used += len(line) + 2
-		if used > budget {
-			return "", false
-		}
-		lines = append(lines, line)
-	}
-	if len(lines) == 0 {
-		return "", true
-	}
-	return "WORKASS HISTORY DELTA SYNC v1\n" +
-		"The following finalized messages exist in Workass after the last turn this native session saw. " +
-		"Absorb them as conversation context. Do not continue the task and do not address the user; reply only with OK.\n\n" +
-		"<workass_history_delta>\n" + strings.Join(lines, "\n\n") + "\n</workass_history_delta>", true
-}
-
-func readAllChatHistory(stateDir, tabID string) ([]historyMessage, error) {
-	file := filepath.Join(strings.TrimSpace(stateDir), "chat-archive", safeArchiveName(tabID)+".jsonl")
-	f, err := os.Open(file)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer f.Close()
-	var out []historyMessage
-	seen := make(map[string]struct{})
-	err = visitJSONLRecords(f, func(line []byte) {
-		var item map[string]any
-		dec := json.NewDecoder(bytes.NewReader(line))
-		dec.UseNumber()
-		if err := dec.Decode(&item); err != nil {
-			return
-		}
-		message, ok := historyMessageFromMap(item)
-		if !ok {
-			return
-		}
-		key := historyMsgKey(message)
-		if _, duplicate := seen[key]; duplicate {
-			return
-		}
-		seen[key] = struct{}{}
-		out = append(out, message)
-	})
-	return out, err
 }

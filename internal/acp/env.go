@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +50,42 @@ type ChatEnvRepo struct {
 }
 
 type ChatEnvFile struct {
+	Path string `json:"path"`
+	Adds int    `json:"adds"`
+	Dels int    `json:"dels"`
+}
+
+// chatEnvReference is the durable manager-side observation needed to rebuild
+// a Git baseline after a daemon restart. The actor stores this opaque reference
+// alongside its public payload; Manager only rehydrates it as a filesystem
+// observer and never uses it to select a chat.
+type chatEnvReference struct {
+	Version        int                    `json:"version"`
+	ChatID         string                 `json:"chatId"`
+	TabID          string                 `json:"tabId"`
+	CWD            string                 `json:"cwd"`
+	Payload        ChatEnvPayload         `json:"payload"`
+	ReposTruncated bool                   `json:"reposTruncated"`
+	TurnSeq        int                    `json:"turnSeq"`
+	Repos          []chatEnvRepoReference `json:"repos"`
+}
+
+type chatEnvRepoReference struct {
+	Name    string                    `json:"name"`
+	Path    string                    `json:"path"`
+	Branch  string                    `json:"branch"`
+	Tree    string                    `json:"tree"`
+	Status  []chatEnvStatusReference  `json:"status"`
+	Numstat []chatEnvNumstatReference `json:"numstat"`
+}
+
+type chatEnvStatusReference struct {
+	Code string `json:"code"`
+	Path string `json:"path"`
+	Orig string `json:"orig,omitempty"`
+}
+
+type chatEnvNumstatReference struct {
 	Path string `json:"path"`
 	Adds int    `json:"adds"`
 	Dels int    `json:"dels"`
@@ -123,6 +161,11 @@ func (m *Manager) initChatEnvForSession(ctx context.Context, opts SessionOptions
 	if opts.Spare || info.SessionID == "" {
 		return
 	}
+	// Hibernation and host recycling may discard the disposable tracker while
+	// the actor retains the immutable baseline reference. Rehydrate it before
+	// calculating the next payload so a resume never resets the chat's diff
+	// baseline to the current worktree.
+	m.restoreActorChatEnvReference(opts.ChatID, opts.TabID, opts.ProviderLaneManaged)
 	cwd := strings.TrimSpace(info.CWD)
 	if cwd == "" {
 		cwd = strings.TrimSpace(opts.CWD)
@@ -133,8 +176,11 @@ func (m *Manager) initChatEnvForSession(ctx context.Context, opts SessionOptions
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if reused := m.reuseChatEnvTrackerForSession(opts, info, cwd); reused != nil {
-		m.emit("chat:env", reused)
+	if reused := m.reuseChatEnvTrackerForSession(opts, info, cwd); reused.ChatID != "" {
+		if m.observeChatEnv(reused, opts.ProviderLaneManaged) {
+			return
+		}
+		m.emit("chat:env", cloneChatEnvPayload(reused))
 		return
 	}
 	repos, reposTruncated := discoverChatEnvRepos(ctx, cwd)
@@ -151,22 +197,32 @@ func (m *Manager) initChatEnvForSession(ctx context.Context, opts SessionOptions
 	m.envMu.Lock()
 	m.storeChatEnvTrackerLocked(tracker)
 	m.envMu.Unlock()
-	m.emit("chat:env", cloneChatEnvPayload(tracker.payload))
+	initial := cloneChatEnvPayload(tracker.payload)
+	if m.observeChatEnv(initial, opts.ProviderLaneManaged) {
+		return
+	}
+	m.emit("chat:env", initial)
 }
 
-func (m *Manager) reuseChatEnvTrackerForSession(opts SessionOptions, info SessionInfo, cwd string) map[string]any {
+func (m *Manager) reuseChatEnvTrackerForSession(opts SessionOptions, info SessionInfo, cwd string) ChatEnvPayload {
 	chatID := strings.TrimSpace(opts.ChatID)
 	tabID := strings.TrimSpace(opts.TabID)
 	if info.SessionID == "" || (chatID == "" && tabID == "") {
-		return nil
+		return ChatEnvPayload{}
 	}
 	m.envMu.Lock()
 	defer m.envMu.Unlock()
 	tracker := m.chatEnvTrackerLocked("", chatID, tabID)
-	if tracker == nil || tracker.sessionID == "" || tracker.sessionID == info.SessionID {
-		return nil
+	if tracker == nil {
+		return ChatEnvPayload{}
 	}
-	delete(m.envBySession, tracker.sessionID)
+	// Exact resume intentionally reuses the same provider-native session id.
+	// Reinitializing its environment tracker would reset the checkpoint turn
+	// counter and baseline at every hibernation. Rebind only when the disposable
+	// session id actually changed; otherwise preserve the existing tracker.
+	if tracker.sessionID != info.SessionID {
+		delete(m.envBySession, tracker.sessionID)
+	}
 	tracker.sessionID = info.SessionID
 	if chatID != "" {
 		tracker.chatID = chatID
@@ -182,18 +238,7 @@ func (m *Manager) reuseChatEnvTrackerForSession(opts SessionOptions, info Sessio
 	tracker.payload.CWD = tracker.cwd
 	m.storeChatEnvTrackerLocked(tracker)
 	payload := cloneChatEnvPayload(tracker.payload)
-	return map[string]any{
-		"chatId":         payload.ChatID,
-		"tabId":          payload.TabID,
-		"cwd":            payload.CWD,
-		"repos":          payload.Repos,
-		"unchanged":      payload.Unchanged,
-		"reposTruncated": payload.ReposTruncated,
-		"filesTruncated": payload.FilesTruncated,
-		"repoLimit":      payload.RepoLimit,
-		"fileLimit":      payload.FileLimit,
-		"approximation":  payload.Approximation,
-	}
+	return payload
 }
 
 func (m *Manager) bindChatEnvToJob(sessionID, chatID, tabID, cwd string) {
@@ -250,6 +295,9 @@ func (m *Manager) refreshChatEnvAfterJob(ctx context.Context, job *Job) {
 	m.envMu.Unlock()
 
 	m.recordCheckpointAfterTurn(ctx, snapshot, payload, currentRepos)
+	if m.observeChatEnv(payload, job.startOpts.ProviderLaneManaged) {
+		return
+	}
 	m.emit("chat:env", payload)
 }
 
@@ -262,6 +310,84 @@ func (m *Manager) ChatEnvGet(chatID, tabID string) ChatEnvPayload {
 		return cloneChatEnvPayload(tracker.payload)
 	}
 	return emptyChatEnvPayload(chatID, tabID, "")
+}
+
+// ChatEnvReference exports only the manager's filesystem observation needed by
+// the actor to restore an Entorno baseline after restart. It is intentionally
+// not a chat lookup authority: callers must already have passed the actor tab
+// fence, and an absent tracker simply means there is no reference yet.
+func (m *Manager) ChatEnvReference(chatID, tabID string) ([]byte, error) {
+	chatID, tabID = strings.TrimSpace(chatID), strings.TrimSpace(tabID)
+	if chatID == "" || tabID == "" {
+		return nil, nil
+	}
+	m.envMu.Lock()
+	tracker := m.chatEnvTrackerLocked("", chatID, tabID)
+	if tracker == nil {
+		m.envMu.Unlock()
+		return nil, nil
+	}
+	ref := chatEnvReference{
+		Version: 1, ChatID: tracker.chatID, TabID: tracker.tabID, CWD: tracker.cwd,
+		Payload: cloneChatEnvPayload(tracker.payload), ReposTruncated: tracker.reposTruncated,
+		TurnSeq: tracker.turnSeq, Repos: make([]chatEnvRepoReference, 0, len(tracker.repos)),
+	}
+	for _, repo := range tracker.repos {
+		entry := chatEnvRepoReference{
+			Name: repo.name, Path: repo.path, Branch: repo.branch, Tree: repo.tree,
+			Status:  make([]chatEnvStatusReference, 0, len(repo.status)),
+			Numstat: make([]chatEnvNumstatReference, 0, len(repo.numstat)),
+		}
+		for _, status := range repo.status {
+			entry.Status = append(entry.Status, chatEnvStatusReference{Code: status.code, Path: status.path, Orig: status.orig})
+		}
+		for path, stat := range repo.numstat {
+			entry.Numstat = append(entry.Numstat, chatEnvNumstatReference{Path: path, Adds: stat.adds, Dels: stat.dels})
+		}
+		sort.Slice(entry.Numstat, func(i, j int) bool { return entry.Numstat[i].Path < entry.Numstat[j].Path })
+		ref.Repos = append(ref.Repos, entry)
+	}
+	m.envMu.Unlock()
+	return json.Marshal(ref)
+}
+
+// RestoreChatEnvReference rehydrates only the manager's disposable observer
+// cache from an actor-owned reference. It performs no publication and does
+// not create a provider/session binding.
+func (m *Manager) RestoreChatEnvReference(raw []byte) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var ref chatEnvReference
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		return fmt.Errorf("decode chat environment reference: %w", err)
+	}
+	if ref.Version != 1 || strings.TrimSpace(ref.ChatID) == "" || strings.TrimSpace(ref.TabID) == "" {
+		return errors.New("chat environment reference has invalid immutable ownership")
+	}
+	tracker := &chatEnvTracker{
+		chatID: strings.TrimSpace(ref.ChatID), tabID: strings.TrimSpace(ref.TabID), cwd: strings.TrimSpace(ref.CWD),
+		reposTruncated: ref.ReposTruncated, turnSeq: ref.TurnSeq, payload: cloneChatEnvPayload(ref.Payload),
+		pendingTurns: make(map[string]chatTurnCheckpoint), repos: make([]gitRepoBaseline, 0, len(ref.Repos)),
+	}
+	for _, repo := range ref.Repos {
+		baseline := gitRepoBaseline{
+			name: repo.Name, path: repo.Path, branch: repo.Branch, tree: repo.Tree,
+			status: make([]gitStatusEntry, 0, len(repo.Status)), numstat: make(map[string]gitNumstat, len(repo.Numstat)),
+		}
+		for _, status := range repo.Status {
+			baseline.status = append(baseline.status, gitStatusEntry{code: status.Code, path: status.Path, orig: status.Orig})
+		}
+		baseline.statusKeys = statusKeySet(baseline.status)
+		for _, stat := range repo.Numstat {
+			baseline.numstat[stat.Path] = gitNumstat{path: stat.Path, adds: stat.Adds, dels: stat.Dels}
+		}
+		tracker.repos = append(tracker.repos, baseline)
+	}
+	m.envMu.Lock()
+	m.storeChatEnvTrackerLocked(tracker)
+	m.envMu.Unlock()
+	return nil
 }
 
 func (m *Manager) forgetChatEnvSession(sessionID string) {

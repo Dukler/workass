@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	providercontract "workass/internal/provider"
 )
 
 const (
@@ -72,10 +74,14 @@ type ProviderConfig struct {
 	// the replayable sidebar card, never a generic notification/toast.
 	LastUpdateNotice string `json:"lastUpdateNotice,omitempty"`
 	DisabledByUser   bool   `json:"disabledByUser,omitempty"`
-	FixHint          string `json:"-"`
-	CWD              string `json:"-"`
-	Label            string `json:"-"`
-	enabledSet       bool   `json:"-"`
+	// NeedsLogin is durable provider readiness, not Workass-owned credentials.
+	// It suppresses automatic probing/spawning until an explicit re-enable or a
+	// successful explicit provider probe proves the vendor CLI is authenticated.
+	NeedsLogin bool   `json:"needsLogin,omitempty"`
+	FixHint    string `json:"-"`
+	CWD        string `json:"-"`
+	Label      string `json:"-"`
+	enabledSet bool   `json:"-"`
 }
 
 // Options configures a bridge manager. Tests can shorten timeouts here.
@@ -86,6 +92,10 @@ type Options struct {
 	ProviderConfigFile string
 	RootDir            string
 	StateDir           string
+	// MachineID is the immutable identity of the daemon that owns provider-native
+	// threads. Production always supplies it; isolated callers get a deterministic
+	// state-directory scope rather than an invented cross-machine identity.
+	MachineID string
 	// RuntimeProfile is set explicitly by the Workass daemon. Empty is kept
 	// unfiltered for package/test callers; the production binary always passes
 	// "prod", while isolated development passes "dev" or "test".
@@ -302,18 +312,29 @@ func defaultLifecycleCheckInterval(ttl time.Duration) time.Duration {
 
 // SessionOptions are the app-chat session creation inputs used by the wire handler.
 type SessionOptions struct {
-	CWD           string
-	BridgeKey     string
-	TabID         string
-	ChatID        string
-	SessionID     string
+	CWD       string
+	BridgeKey string
+	TabID     string
+	ChatID    string
+	SessionID string
+	// OperationID is the stable Workass user-action identity for a provider
+	// lane selection. It is separate from SessionID, which names a disposable
+	// transport attachment.
+	OperationID   providercontract.OperationID
 	ProviderID    string
 	ModelID       string
 	ModeID        string
 	AgentOwnerKey string
-	ForceFresh    bool
 	Spare         bool
 	Ephemeral     bool
+	// ProviderLaneManaged means provider selection is owned by the durable chat
+	// actor. A chat may retain multiple provider lanes, so the legacy one-provider
+	// chat binding must not reject an explicit lane selection.
+	ProviderLaneManaged bool
+	// ProviderLaneCreate is the fail-closed create path used by the durable
+	// provider-neutral coordinator. It forbids spare adoption, exact-resume of a
+	// concurrently established binding, and the legacy second session/new retry.
+	ProviderLaneCreate bool
 }
 
 type ForkOptions struct {
@@ -326,19 +347,23 @@ type ForkOptions struct {
 
 // SessionInfo mirrors the AcpSessionInfo wire contract.
 type SessionInfo struct {
-	SessionID      string  `json:"sessionId"`
-	CWD            string  `json:"cwd"`
-	Agent          string  `json:"agent"`
-	ProviderID     string  `json:"providerId,omitempty"`
-	ProviderName   string  `json:"providerName,omitempty"`
-	Models         []Model `json:"models"`
-	CurrentModelID *string `json:"currentModelId"`
-	Modes          []Mode  `json:"modes"`
-	CurrentModeID  *string `json:"currentModeId"`
-	ImageSupport   bool    `json:"imageSupport"`
+	SessionID               string  `json:"sessionId"`
+	CWD                     string  `json:"cwd"`
+	Agent                   string  `json:"agent"`
+	ProviderID              string  `json:"providerId,omitempty"`
+	ProviderName            string  `json:"providerName,omitempty"`
+	ProviderAccountScope    string  `json:"-"`
+	ProviderInstallScope    string  `json:"-"`
+	ProviderRealmVerified   bool    `json:"-"`
+	Models                  []Model `json:"models"`
+	CurrentModelID          *string `json:"currentModelId"`
+	Modes                   []Mode  `json:"modes"`
+	CurrentModeID           *string `json:"currentModeId"`
+	ImageSupport            bool    `json:"imageSupport"`
+	CommandCatalogSupported bool    `json:"-"`
 	// CommandCatalog is the additive Claude commands surface
 	// (docs/specs/claude-commands-surface.md). Absent = UNKNOWN (old host or
-	// non-claude provider); it is never persisted anywhere durable.
+	// non-claude provider). The actor persists the normalized snapshot.
 	CommandCatalog *CommandCatalog `json:"commandCatalog,omitempty"`
 }
 
@@ -426,11 +451,19 @@ type JobStartOptions struct {
 	ModelID           string
 	ModeID            string
 	ProviderID        string
-	ForceFresh        bool
 	// HumanAuthored separates a request from a resumption. Both can arrive
 	// through the same queue, so only the caller knows which this is; getting it
 	// wrong would either lose the user's request or invent a new one.
-	HumanAuthored      bool
+	HumanAuthored bool
+	// ProviderLaneManaged fences crash/session recovery. The durable chat actor
+	// owns exact resume and readback for these jobs; Manager must never launch
+	// its legacy recovery/replacement path for them.
+	ProviderLaneManaged bool
+	// OperationID is the actor-owned, immutable delivery identity. It is
+	// deliberately distinct from UserMessageID, which identifies the visible
+	// renderer row. Provider readback, normalized events, and native stable-input
+	// receipts use OperationID; the frozen wire projection keeps UserMessageID.
+	OperationID        string
 	UserMessageID      string
 	AssistantMessageID string
 	QueueID            string
@@ -441,6 +474,11 @@ type JobStartOptions struct {
 	// failed turn when another start already owns the chat. It is host-internal
 	// and never crosses ACP or the frozen wire shape.
 	BeforeStart func(*JobStartOptions) error
+	// CommitAdmission runs after the public job id is fixed but before the job is
+	// registered, published, checkpointed, or sent to the provider. Actor-backed
+	// callers use it to durably bind the native turn identity. A failure aborts
+	// the start without exposing a job that the actor does not own.
+	CommitAdmission func(map[string]any) error
 }
 
 type Job struct {
@@ -466,6 +504,7 @@ type Job struct {
 	// a park and a finished request both end with end_turn.
 	DispositionState  string
 	DispositionSource string
+	DispositionNote   string
 	CrashInterrupted  bool
 	// A turn the daemon itself ended (restart/handoff) is not an agent error.
 	// The failure is real — the turn did stop — but the cause is ours, so the
@@ -487,18 +526,21 @@ type Job struct {
 	// harnessTurn marks a job adopted for a turn the harness started on its
 	// own. Such a job holds no session/prompt RPC, so the ordinary turn-end path
 	// never runs for it and it is ended only by the host's turn-ended update.
-	harnessTurn         bool
-	nativeGeneration    uint64
-	nativeHistoryBefore []historyMessage
+	harnessTurn bool
 
 	cancelled         bool
 	output            strings.Builder
 	internal          bool
 	startOpts         JobStartOptions
 	crashRecoveryDone chan struct{}
-	lastActivityNanos atomic.Int64
-	waitingPermission atomic.Bool
-	consumedSteerIDs  sync.Map // map[string]struct{}
+	// actorRecoveryPending is set only when an actor-managed provider host dies.
+	// The actor owns exact resume/readback, so the legacy manager worker must
+	// clean up its process-local job without publishing a false terminal failure
+	// or starting its own replacement/recovery session.
+	actorRecoveryPending atomic.Bool
+	lastActivityNanos    atomic.Int64
+	waitingPermission    atomic.Bool
+	consumedSteerIDs     sync.Map // map[string]struct{}
 
 	stdoutBuf   strings.Builder
 	stdoutPhase string
@@ -597,7 +639,11 @@ func (j *Job) Public() map[string]any {
 	// Public() feeds both start (manager.go:925) and end (manager.go:968), and
 	// a starting turn has no verdict yet.
 	if j.DispositionState != "" {
-		out["disposition"] = map[string]any{"state": j.DispositionState, "source": j.DispositionSource}
+		disposition := map[string]any{"state": j.DispositionState, "source": j.DispositionSource}
+		if strings.TrimSpace(j.DispositionNote) != "" {
+			disposition["note"] = redactSensitiveText(j.DispositionNote)
+		}
+		out["disposition"] = disposition
 	}
 	return out
 }

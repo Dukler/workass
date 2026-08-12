@@ -172,69 +172,6 @@ func TestHarnessOneShotCronParks(t *testing.T) {
 	}
 }
 
-// A quiet report stalls a park immediately: the grace existed only because the
-// wake was invisible, and it is not invisible any more.
-func TestHarnessQuietParkStallsWithoutGrace(t *testing.T) {
-	manager := NewManager(Options{StateDir: t.TempDir()})
-	t.Cleanup(func() { manager.Reset() })
-
-	manager.openObligation("tab-1", "chat-1", "u-1")
-	manager.settleObligation("tab-1", "chat-1", CompletionSignal{
-		Disposition: DispositionParked, Source: dispositionSourceNative,
-	}, true)
-	recordHarnessEnd(manager, "tab-1", "chat-1", "sess-1",
-		harnessEndedUpdate("p-1", []any{}, []any{}, "completed"))
-
-	manager.sweepStalledObligations(time.Now())
-
-	got := manager.ObligationFor("tab-1", "chat-1")
-	if got == nil || got["state"] != obligationStalled {
-		t.Fatalf("obligation = %#v, want stalled immediately on a quiet harness report", got)
-	}
-}
-
-// A scheduled wake keeps the 90-minute grace as the outer bound: a schedule can
-// still die with the engine, but it must not stall while it stands.
-func TestHarnessScheduledWakeKeepsTheGrace(t *testing.T) {
-	manager := NewManager(Options{StateDir: t.TempDir()})
-	t.Cleanup(func() { manager.Reset() })
-
-	manager.openObligation("tab-1", "chat-1", "u-1")
-	manager.settleObligation("tab-1", "chat-1", CompletionSignal{
-		Disposition: DispositionParked, Source: dispositionSourceNative,
-	}, true)
-	recordHarnessEnd(manager, "tab-1", "chat-1", "sess-1",
-		harnessEndedUpdate("p-1", []any{}, []any{
-			map[string]any{"schedule": "at 20:00", "recurring": false},
-		}, "completed"))
-
-	manager.sweepStalledObligations(time.Now())
-
-	got := manager.ObligationFor("tab-1", "chat-1")
-	if got == nil || got["state"] != obligationParked {
-		t.Fatalf("obligation = %#v, want it still parked while a wake is scheduled", got)
-	}
-}
-
-// A chat with no harness evidence at all — codex, qwen, mock, an older CLI —
-// must behave exactly as it did before v3.
-func TestParkWithoutHarnessEvidenceKeepsTheGrace(t *testing.T) {
-	manager := NewManager(Options{StateDir: t.TempDir()})
-	t.Cleanup(func() { manager.Reset() })
-
-	manager.openObligation("tab-1", "chat-1", "u-1")
-	manager.settleObligation("tab-1", "chat-1", CompletionSignal{
-		Disposition: DispositionParked, Source: dispositionSourceNative,
-	}, true)
-
-	manager.sweepStalledObligations(time.Now())
-
-	got := manager.ObligationFor("tab-1", "chat-1")
-	if got == nil || got["state"] != obligationParked {
-		t.Fatalf("obligation = %#v, want the pre-v3 grace for a provider with no harness signal", got)
-	}
-}
-
 // The clamp's capability rules: the harness may demote a done, and may resolve
 // an unknown, but must never overrule a needs_input. A refusal read as done is
 // the exact lie this record exists to prevent.
@@ -242,7 +179,6 @@ func TestHarnessNeverOverrulesNeedsInput(t *testing.T) {
 	manager := NewManager(Options{StateDir: t.TempDir()})
 	t.Cleanup(func() { manager.Reset() })
 
-	manager.openObligation("tab-1", "chat-1", "u-1")
 	recordHarnessEnd(manager, "tab-1", "chat-1", "sess-1",
 		harnessEndedUpdate("p-1", []any{}, []any{}, "completed"))
 
@@ -250,11 +186,9 @@ func TestHarnessNeverOverrulesNeedsInput(t *testing.T) {
 		TabID: "tab-1", ChatID: "chat-1", SessionID: "sess-1",
 		ProviderID: "claude", StopReason: "refusal", Status: "done",
 	}
-	manager.settleObligationForJob(job)
-
-	got := manager.ObligationFor("tab-1", "chat-1")
-	if got == nil || got["state"] != obligationNeedsInput {
-		t.Fatalf("obligation = %#v, want a refusal to stay needs_input", got)
+	manager.classifyDispositionForJob(job)
+	if job.DispositionState != string(DispositionNeedsInput) {
+		t.Fatalf("disposition = %q, want needs_input", job.DispositionState)
 	}
 }
 
@@ -264,7 +198,6 @@ func TestHarnessResolvesUnknownToDone(t *testing.T) {
 	manager := NewManager(Options{StateDir: t.TempDir()})
 	t.Cleanup(func() { manager.Reset() })
 
-	manager.openObligation("tab-1", "chat-1", "u-1")
 	recordHarnessEnd(manager, "tab-1", "chat-1", "sess-1",
 		harnessEndedUpdate("p-1", []any{}, []any{}, "completed"))
 
@@ -272,14 +205,12 @@ func TestHarnessResolvesUnknownToDone(t *testing.T) {
 		TabID: "tab-1", ChatID: "chat-1", SessionID: "sess-1",
 		ProviderID: "claude", StopReason: "end_turn", Status: "done",
 	}
-	manager.settleObligationForJob(job)
-
-	got := manager.ObligationFor("tab-1", "chat-1")
-	if got == nil || got["state"] != obligationDone {
-		t.Fatalf("obligation = %#v, want the harness to resolve end_turn to done", got)
+	manager.classifyDispositionForJob(job)
+	if job.DispositionState != string(DispositionDone) {
+		t.Fatalf("disposition = %q, want done", job.DispositionState)
 	}
-	if got["source"] != dispositionSourceHarness {
-		t.Fatalf("source = %v, want harness", got["source"])
+	if job.DispositionSource != dispositionSourceHarness {
+		t.Fatalf("source = %v, want harness", job.DispositionSource)
 	}
 }
 
@@ -289,7 +220,6 @@ func TestClampDemotesDoneOnHarnessParkEvidence(t *testing.T) {
 	manager := NewManager(Options{StateDir: t.TempDir()})
 	t.Cleanup(func() { manager.Reset() })
 
-	manager.openObligation("tab-1", "chat-1", "u-1")
 	recordHarnessEnd(manager, "tab-1", "chat-1", "sess-1",
 		harnessEndedUpdate("p-1", []any{harnessTask("bg-1", "shell", "running")}, []any{}, "completed"))
 
@@ -297,14 +227,12 @@ func TestClampDemotesDoneOnHarnessParkEvidence(t *testing.T) {
 		TabID: "tab-1", ChatID: "chat-1", SessionID: "sess-1",
 		ProviderID: "claude", StopReason: "end_turn", Status: "done",
 	}
-	manager.settleObligationForJob(job)
-
-	got := manager.ObligationFor("tab-1", "chat-1")
-	if got == nil || got["state"] != obligationParked {
-		t.Fatalf("obligation = %#v, want a clean end demoted to parked", got)
+	manager.classifyDispositionForJob(job)
+	if job.DispositionState != string(DispositionParked) {
+		t.Fatalf("disposition = %q, want parked", job.DispositionState)
 	}
-	if got["source"] != dispositionSourceHarness {
-		t.Fatalf("source = %v, want harness", got["source"])
+	if job.DispositionSource != dispositionSourceHarness {
+		t.Fatalf("source = %v, want harness", job.DispositionSource)
 	}
 }
 
@@ -326,11 +254,6 @@ func TestAdoptedHarnessTurnStartsAndEnds(t *testing.T) {
 		jobsBySession: map[string]*Job{},
 	}
 
-	manager.openObligation("tab-1", "chat-1", "u-1")
-	manager.settleObligation("tab-1", "chat-1", CompletionSignal{
-		Disposition: DispositionParked, Source: dispositionSourceNative,
-	}, true)
-
 	manager.observeClaudeTurn(bridge, "tab-1", "chat-1", "sess-1", map[string]any{
 		"phase": harnessTurnPhaseStarted, "promptId": "p-2", "humanAuthored": false,
 	})
@@ -342,22 +265,14 @@ func TestAdoptedHarnessTurnStartsAndEnds(t *testing.T) {
 	if !job.harnessTurn || job.Status != "running" {
 		t.Fatalf("adopted job = %+v, want a running harness turn", job)
 	}
-	if state := manager.ObligationFor("tab-1", "chat-1")["state"]; state != obligationWorking {
-		t.Fatalf("obligation state = %v, want working while the adopted turn runs", state)
-	}
-	if got := manager.ObligationFor("tab-1", "chat-1")["promptId"]; got != "u-1" {
-		t.Fatalf("promptId = %v, want the human's prompt: a harness turn resumes, never opens", got)
-	}
-
 	manager.observeClaudeTurn(bridge, "tab-1", "chat-1", "sess-1",
 		harnessEndedUpdate("p-2", []any{}, []any{}, "completed"))
 
 	if remaining := bridge.jobForSession("sess-1"); remaining != nil {
 		t.Fatalf("adopted job survived its turn (%+v); every later prompt queues behind it", remaining)
 	}
-	settled := manager.ObligationFor("tab-1", "chat-1")
-	if settled == nil || settled["state"] != obligationDone {
-		t.Fatalf("obligation = %#v, want the adopted turn to settle it", settled)
+	if job.DispositionState != string(DispositionDone) {
+		t.Fatalf("adopted turn disposition = %q, want done", job.DispositionState)
 	}
 }
 
@@ -390,7 +305,6 @@ func TestAdoptedHarnessTurnEndsWhenEngineDies(t *testing.T) {
 		opts: Options{StdoutFlushInterval: time.Hour}, jobsBySession: map[string]*Job{},
 	}
 
-	manager.openObligation("tab-1", "chat-1", "u-1")
 	manager.observeClaudeTurn(bridge, "tab-1", "chat-1", "sess-1", map[string]any{
 		"phase": harnessTurnPhaseStarted, "promptId": "p-2", "humanAuthored": false,
 	})

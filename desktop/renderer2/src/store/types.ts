@@ -50,16 +50,7 @@ export interface CompactionEvent { key: string; at: number; kind: 'compaction'; 
 // Quiet step row emitted after a successful rewind (R4/D3): "Estado restaurado
 // a antes del turno N ›". Also used to render an honest rewind refusal inline.
 export interface RestoredEvent { key: string; at: number; kind: 'restored'; turnSeq: number; }
-// Live in-transcript marker for a background process associated with this chat
-// (its ACP engine / spawned aux processes). Fed by proc:changed; transient —
-// never persisted (like thinking). `status` settles when the process ends.
-export interface BgProcEvent {
-  key: string; at: number; kind: 'bgproc';
-  procId: string; label: string; startedAt: string;
-  status: 'running' | 'ended' | 'failed';
-  endedAt?: string | null; code?: number | null;
-}
-export type TimelineEvent = ThinkingEvent | PlanEvent | ToolEvent | CompactionEvent | RestoredEvent | BgProcEvent;
+export type TimelineEvent = ThinkingEvent | PlanEvent | ToolEvent | CompactionEvent | RestoredEvent;
 
 export interface PermissionState {
   id: string; title: string; kind: string | null;
@@ -187,6 +178,7 @@ export interface Chat {
   // accumulates checkpoints + increments turnSeq under one chatId. Distinct from
   // `id` (the UI tab). Older mirrors lack it → backfilled on load.
   chatId?: string;
+  actorRevision?: number;
   sessionId: string | null;
   // Provider that owns `sessionId` right now. It can intentionally differ from
   // providerId while a different agent is staged for the next turn. Keeping
@@ -201,6 +193,7 @@ export interface Chat {
   // every later drag must use the transactional rebind channel, even while the
   // chat is temporarily sessionless between move and next send.
   workspaceRevision?: number;
+  presentationRevision?: number;
   // Daemon-issued revision for agent-control queue rows. Renderer saves echo
   // it unchanged; the daemon owns increments on enqueue/consume and accepts a
   // user edit/removal only from the current revision.
@@ -259,6 +252,10 @@ export interface Chat {
   // one at a time at each turn's end, in order. Editable/reorderable/removable.
   queue?: QueuedMsg[];
   _initPromise?: Promise<void>;
+  // Stable until the daemon returns a receipt for this exact provider-lane
+  // selection. A lost app-chat:new-session reply must retry the same actor
+  // operation instead of committing a second control mutation.
+  _sessionOperationId?: string;
   // Monotonic runtime-only picker epoch. Session initialization snapshots it
   // so an older inherited-provider response cannot overwrite a newer explicit
   // model/provider/effort/permission selection.
@@ -314,6 +311,7 @@ export interface AppState {
   removedWorkspaces: string[];
   activeId: string | null;
   seq: number;
+  globalRevision: number;
   models: ModelOption[];
   modes: ModeOption[];
   // Provider-grouped catalog (P4). Empty against an older daemon → the composer
@@ -436,6 +434,8 @@ export interface RewindState {
   error?: string;              // structured refusal or "unavailable" note
   focusTurn?: number;          // turn to highlight when opened from a turn affordance
   busyTurn?: number;           // a rewind is in flight for this turnSeq
+  operationId?: string;        // stable until this exact rewind has a receipt
+  operationTurn?: number;
 }
 
 export interface ReviewState {

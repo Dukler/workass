@@ -6,7 +6,7 @@
 // (message list, running state, tabs, catalog) bump `app`.
 
 import { useSyncExternalStore } from 'react';
-import type { AppState, Chat, Msg, TimelineEvent, ToolEvent, BgProcEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
+import type { AppState, Chat, Msg, TimelineEvent, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
 import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, SessionReplaced, ModelOption, ModeOption, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, EngineRecovered, NotifyEvent, NotifyBacklog, AgentApply, ChatCommandsEvent, ChatStructuredError, StartJobOpts, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
 import { call, callThrow, has, on, bridgeReady } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
@@ -36,7 +36,7 @@ import {
 import {
   compatibleEffortId, compatibleModeId, composeModelSelection,
   imageDraftCapability,
-  modelControlsChangedDuringInit, nextModelControlRevision, providerSwitchRequiresHandover,
+  modelControlsChangedDuringInit, nextModelControlRevision,
   normalizeModelControlMemory, rememberModelControls, rememberedModelControls,
   restoredControlSelection, restoredProviderBinding,
 } from '../model-controls';
@@ -80,16 +80,27 @@ const AGENT_REFRESH_TIMEOUT = 20000;
 const DIGEST_REPAIR_DEBOUNCE = 250;
 const UPDATE_TERMINAL_TIMEOUT = 11 * 60 * 1000;
 
-type RepairScope = 'session' | 'permissions' | 'catalog' | 'settings' | 'processes';
+type RepairScope = 'session' | 'background' | 'permissions' | 'catalog' | 'settings' | 'processes';
 
-interface ModelWriteFence {
-  tabId: string;
-  chatId: string;
-  chat: Chat;
-  sessionId: string | null;
-  providerId: string | null;
-  requestedModelId: string;
-  controlRevision: number;
+function presentationFingerprint(chat: Pick<Chat, 'title' | 'titleLocked' | 'group' | 'draft' | 'unread' | 'settled' | 'pane'>): string {
+  return JSON.stringify([
+    chat.title, chat.titleLocked, chat.group ?? null, chat.draft ?? '', !!chat.unread,
+    chat.settled ?? '', chat.pane ?? null,
+  ]);
+}
+
+function runtimeControlsFingerprint(chat: Pick<Chat, 'providerId' | 'currentModelId' | 'currentModeId' | 'modelControls'>): string {
+  return JSON.stringify([
+    chat.providerId ?? null, chat.currentModelId ?? null, chat.currentModeId ?? null,
+    normalizeModelControlMemory(chat.modelControls) ?? null,
+  ]);
+}
+
+function globalPresentationFingerprint(value: Pick<AppState, 'activeId' | 'seq' | 'workspaces' | 'collapsedWorkspaces' | 'removedWorkspaces' | 'theme' | 'themePref' | 'density' | 'panes' | 'mode' | 'notifEnabled'>): string {
+  return JSON.stringify([
+    value.activeId, value.seq, value.workspaces, value.collapsedWorkspaces, value.removedWorkspaces,
+    value.theme, value.themePref, value.density, value.panes, value.mode, value.notifEnabled,
+  ]);
 }
 
 export class Store {
@@ -101,7 +112,6 @@ export class Store {
   // dropped at job end. The transcript tail row reads them for its vitals.
   private turnHeartbeats = new Map<string, { elapsedMs: number; outputTokens: number; phase: string; toolName?: string; retry?: { code?: number; attempt?: number } | null; at: number }>();
   private chatJobs = new Map<string, { tabId: string; msgId: string }>(); // chatId -> {tabId,msgId}
-  private procEvents = new Map<string, { tabId: string; msgId: string }>(); // procId -> anchor msg
   private drainingQueues = new Set<string>();
   // Preserve submission order for rapid explicit steers. Persistence and native
   // acknowledgement are part of the same lane, so a slower first RPC cannot let
@@ -124,15 +134,13 @@ export class Store {
   private archivesLoaded = new Set<string>();
   private archiveLoads = new Map<string, Promise<void>>();
   private durableImagePayloads = new DurableImagePayloads();
-  // The daemon owns chat durability. Omission from a renderer snapshot is never
-  // a delete signal; only ids placed here by closeChat cross the v2 capability.
-  private pendingChatDeletes = new Set<string>();
-  // Creating a chat is also a renderer-owned structural mutation. While another
-  // turn is running, its full save is deliberately debounced; a digest repair
-  // can therefore return the daemon's pre-create snapshot first. Keep that row
-  // mounted until an authoritative snapshot has echoed its id, or inline rename
-  // loses focus and the older active chat appears to steal the screen.
+  // Chat creation is an immediate actor command. Keep only the optimistic row
+  // mounted until the authoritative snapshot echoes its id; the operation id
+  // and in-flight promise ensure every later draft/queue/session operation waits
+  // for that durable receipt rather than treating React as chat authority.
   private pendingChatCreates = new Set<string>();
+  private pendingChatCreateOperations = new Map<string, { operationId: string; focus: boolean }>();
+  private pendingChatCreatePromises = new Map<string, Promise<boolean>>();
   // Lean v2 saves are chat deltas. Track exact tab ids plus a per-id mutation
   // revision so an acknowledgement cannot clear a second edit that arrived
   // while the first snapshot was crossing the wire.
@@ -146,6 +154,14 @@ export class Store {
   private queueMutationRevision = 0;
   private pendingQueueMutationVersions = new Map<string, number>();
   private pendingQueueSnapshots = new Map<string, QueuedMsg[] | undefined>();
+  private pendingQueueOperationIds = new Map<string, string>();
+  private committedPresentationFingerprints = new Map<string, string>();
+  private pendingPresentationOperations = new Map<string, { fingerprint: string; operationId: string }>();
+  private committedRuntimeControlFingerprints = new Map<string, string>();
+  private pendingRuntimeControlOperations = new Map<string, { fingerprint: string; operationId: string }>();
+  private pendingRuntimeControlSaves = new Map<string, Promise<boolean>>();
+  private committedGlobalPresentationFingerprint = '';
+  private pendingGlobalPresentationOperation: { fingerprint: string; operationId: string } | null = null;
   // Draft edits have the same renderer-versus-digest race as queue edits. In
   // particular, submission clears the composer before archive/session work is
   // allowed to await; a digest carrying the pre-send text must not put that
@@ -184,6 +200,10 @@ export class Store {
   constructor() {
     const mirror = loadMirror();
     this.state = this.fromMirror(mirror);
+    for (const chat of this.state.chats) {
+      this.committedPresentationFingerprints.set(chat.id, presentationFingerprint(chat));
+    }
+    this.committedGlobalPresentationFingerprint = globalPresentationFingerprint(this.state);
     this.markAllChatsDirty();
     this.rebuildJobRefs();
   }
@@ -227,6 +247,7 @@ export class Store {
     // rather than copying image/File payloads; every later queue mutation calls
     // this method again and receives a fresh projection.
     this.pendingQueueSnapshots.set(chat.id, chat.queue);
+    this.pendingQueueOperationIds.set(chat.id, rid('queue-op'));
   }
   private scheduleQueuePersist() {
     // A running turn normally relaxes persistence to 3s to avoid mirroring its
@@ -356,39 +377,6 @@ export class Store {
     return chat.currentModelId !== previousModel || chat.currentModeId !== previousMode;
   }
 
-  private modelWriteFence(chat: Chat, requestedModelId: string): ModelWriteFence {
-    return {
-      tabId: chat.id,
-      chatId: chat.chatId ?? '',
-      chat,
-      sessionId: chat.sessionId,
-      providerId: chat.providerId ?? null,
-      requestedModelId,
-      controlRevision: chat._controlRevision ?? 0,
-    };
-  }
-
-  private modelWriteFenceMatches(fence: ModelWriteFence): boolean {
-    const current = this.chat(fence.tabId);
-    return current === fence.chat
-      && (current.chatId ?? '') === fence.chatId
-      && current.sessionId === fence.sessionId
-      && (current.providerId ?? null) === fence.providerId
-      && current.currentModelId === fence.requestedModelId
-      && (current._controlRevision ?? 0) === fence.controlRevision;
-  }
-
-  private acceptAppliedModel(chat: Chat, result: unknown, fence: ModelWriteFence): boolean {
-    if (!this.modelWriteFenceMatches(fence) || fence.chat !== chat) return false;
-    if (!result || typeof result !== 'object') return false;
-    const value = (result as { currentModelId?: unknown }).currentModelId;
-    const applied = typeof value === 'string' ? value.trim() : '';
-    if (!applied || applied === chat.currentModelId) return false;
-    chat.currentModelId = applied;
-    this.rememberCurrentControls(chat);
-    return true;
-  }
-
   // ---- persistence -----------------------------------------------------
   private toMirror(leanMessages = false, localOnly = false, onlyDirty?: ReadonlySet<string>): Mirror {
     // A chat that lives on another machine is that machine's to persist. This
@@ -398,16 +386,14 @@ export class Store {
     // (remote-plan E3).
     const owned = this.state.chats.filter((chat) => !chat.machineId);
     const chats = onlyDirty && leanMessages && !localOnly
-      ? owned.filter((chat) => onlyDirty.has(chat.id) || this.pendingChatDeletes.has(chat.id))
+      ? owned.filter((chat) => onlyDirty.has(chat.id))
       : owned;
     const snapshot: Mirror = {
       v: 1,
       _workassSave: leanMessages && !localOnly ? LEAN_SESSION_SAVE_MODE : undefined,
-      _workassDeletedChatIds: leanMessages && !localOnly && this.pendingChatDeletes.size
-        ? [...this.pendingChatDeletes]
-        : undefined,
       activeId: this.state.activeId,
       seq: this.state.seq,
+      globalRevision: this.state.globalRevision,
       workspaces: this.state.workspaces,
       collapsedWorkspaces: this.state.collapsedWorkspaces,
       removedWorkspaces: this.state.removedWorkspaces,
@@ -420,8 +406,9 @@ export class Store {
       // modelScores are NOT mirrored here — they persist through the daemon
       // app-settings blob (settings:get / settings:set), hydrated separately.
       chats: chats.map((c) => ({
-        id: c.id, chatId: c.chatId, title: c.title, titleLocked: c.titleLocked, group: c.group, cwd: c.cwd,
+        id: c.id, chatId: c.chatId, actorRevision: c.actorRevision, title: c.title, titleLocked: c.titleLocked, group: c.group, cwd: c.cwd,
         workspaceRevision: c.workspaceRevision,
+        presentationRevision: c.presentationRevision,
         agentQueueRevision: c.agentQueueRevision,
         runtimeControlRevision: c.runtimeControlRevision,
         planLatest: c.planLatest,
@@ -449,6 +436,10 @@ export class Store {
           turnTerminal: m.turnTerminal,
           at: m.at,
           jobId: m.jobId,
+          permission: m.permission,
+          turnStartedAt: m.turnStartedAt,
+          interrupted: m.interrupted,
+          retryPrompt: m.retryPrompt,
           // The Go daemon already owns sent attachments and timeline events via
           // PrepareTurn/RecordJobEvent. Renderer session saves only need the
           // message shell there; resending multi-megabyte image/tool payloads on
@@ -460,7 +451,7 @@ export class Store {
             ? []
             : leanMessages
             ? leanSessionEvents(m.events)
-            : m.events.filter((e) => e.kind !== 'thinking' && e.kind !== 'bgproc'),
+            : m.events.filter((e) => e.kind !== 'thinking'),
         })),
       })),
     };
@@ -474,7 +465,7 @@ export class Store {
     full: boolean;
     fullRevision: number;
   } {
-    const full = !lean || this.fullSavePending || this.pendingChatDeletes.size > 0;
+    const full = !lean || this.fullSavePending;
     const onlyDirty = lean && !full ? new Set(this.dirtyChats) : undefined;
     return {
       snapshot: this.toMirror(lean, false, onlyDirty),
@@ -489,36 +480,109 @@ export class Store {
     full: boolean,
     fullRevision: number,
   ): Promise<void> {
-    // Against a pre-v2 daemon this is a legacy full snapshot, where omission is
-    // still the explicit close signal. Capture only the ids present when this
-    // exact request starts so a slower acknowledgement cannot clear a later
-    // concurrent close.
-    const deleteIDs = snapshot._workassDeletedChatIds
-      ? [...snapshot._workassDeletedChatIds]
-      : (!lean ? [...this.pendingChatDeletes] : []);
     const sentDirtyVersions = new Map<string, number>();
     const sentQueueVersions = new Map<string, number>();
+    const sentQueueOperations = new Map<string, string>();
     const sentDraftVersions = new Map<string, number>();
     for (const chat of snapshot.chats) {
       if (!this.dirtyChats.has(chat.id)) continue;
       sentDirtyVersions.set(chat.id, this.dirtyChatVersions.get(chat.id) ?? 0);
       const queueVersion = this.pendingQueueMutationVersions.get(chat.id);
-      if (queueVersion !== undefined) sentQueueVersions.set(chat.id, queueVersion);
+      if (queueVersion !== undefined) {
+        sentQueueVersions.set(chat.id, queueVersion);
+        const operationId = this.pendingQueueOperationIds.get(chat.id);
+        if (operationId) sentQueueOperations.set(chat.id, operationId);
+      }
       const draftVersion = this.pendingDraftMutationVersions.get(chat.id);
       if (draftVersion !== undefined) sentDraftVersions.set(chat.id, draftVersion);
     }
+    const failedCreateTabs = new Set<string>();
+    for (const projected of snapshot.chats) {
+      if (!this.pendingChatCreates.has(projected.id)) continue;
+      const live = this.chat(projected.id);
+      if (!live || !(await this.ensureChatCreated(live))) failedCreateTabs.add(projected.id);
+    }
+    for (const [tabId, version] of sentQueueVersions) {
+      const operationId = sentQueueOperations.get(tabId);
+      const projected = snapshot.chats.find((chat) => chat.id === tabId);
+      const live = this.chat(tabId);
+      if (!operationId || !projected?.chatId || !live || failedCreateTabs.has(tabId)) continue;
+      const receipt = await call('chatQueueReplace', {
+        tabId, chatId: projected.chatId, operationId,
+        expectedRevision: live.agentQueueRevision ?? 0,
+        queue: projected.queue ?? [],
+      });
+      if (!receipt?.ok) {
+        this.scheduleScopedRepair(['session']);
+        continue;
+      }
+      const current = this.chat(tabId);
+      if (current && current.chatId === projected.chatId) {
+        current.agentQueueRevision = receipt.agentQueueRevision;
+        current.actorRevision = receipt.actorRevision;
+      }
+      if (this.pendingQueueMutationVersions.get(tabId) !== version || this.pendingQueueOperationIds.get(tabId) !== operationId) continue;
+      this.pendingQueueMutationVersions.delete(tabId);
+      this.pendingQueueSnapshots.delete(tabId);
+      this.pendingQueueOperationIds.delete(tabId);
+    }
+    const failedPresentationTabs = new Set<string>();
+    for (const [tabId] of sentDirtyVersions) {
+      const projected = snapshot.chats.find((chat) => chat.id === tabId);
+      const live = this.chat(tabId);
+      if (!projected?.chatId || !live || failedCreateTabs.has(tabId)) {
+        if (failedCreateTabs.has(tabId)) failedPresentationTabs.add(tabId);
+        continue;
+      }
+      const fingerprint = presentationFingerprint(live);
+      if (this.committedPresentationFingerprints.get(tabId) === fingerprint) continue;
+      let pending = this.pendingPresentationOperations.get(tabId);
+      if (!pending || pending.fingerprint !== fingerprint) {
+        pending = { fingerprint, operationId: rid('presentation-op') };
+        this.pendingPresentationOperations.set(tabId, pending);
+      }
+      const receipt = await call('chatPresentationSave', {
+        tabId, chatId: projected.chatId, operationId: pending.operationId,
+        expectedRevision: live.presentationRevision ?? 0,
+        title: live.title, titleLocked: live.titleLocked, group: live.group,
+        draft: live.draft ?? '', unread: !!live.unread, settled: live.settled ?? '', pane: live.pane ?? null,
+      });
+      if (!receipt?.ok) {
+        failedPresentationTabs.add(tabId);
+        this.scheduleScopedRepair(['session']);
+        continue;
+      }
+      const current = this.chat(tabId);
+      if (current && current.chatId === projected.chatId) {
+        current.presentationRevision = receipt.presentationRevision;
+        current.actorRevision = receipt.actorRevision;
+      }
+      this.committedPresentationFingerprints.set(tabId, pending.fingerprint);
+      if (this.pendingPresentationOperations.get(tabId)?.operationId === pending.operationId) {
+        this.pendingPresentationOperations.delete(tabId);
+      }
+    }
+    const globalFingerprint = globalPresentationFingerprint(this.state);
+    const globalChanged = this.committedGlobalPresentationFingerprint !== globalFingerprint;
+    if (!this.pendingGlobalPresentationOperation || this.pendingGlobalPresentationOperation.fingerprint !== globalFingerprint) {
+      this.pendingGlobalPresentationOperation = { fingerprint: globalFingerprint, operationId: rid(globalChanged ? 'global-op' : 'global-noop') };
+    }
+    snapshot.globalRevision = this.state.globalRevision;
+    snapshot._workassGlobalOperationId = this.pendingGlobalPresentationOperation.operationId;
     const saved = await call('saveSession', snapshot);
-    if (lean) this.durableImagePayloads.acknowledge(snapshot, saved === true);
-    if (saved === true) {
+    const savedOK = saved === true || (!!saved && typeof saved === 'object' && saved.ok === true);
+    if (saved && typeof saved === 'object' && saved.ok === true) this.state.globalRevision = saved.globalRevision;
+    if (savedOK && this.pendingGlobalPresentationOperation?.fingerprint === globalFingerprint) {
+      this.committedGlobalPresentationFingerprint = globalFingerprint;
+      this.pendingGlobalPresentationOperation = null;
+    }
+    if (lean) this.durableImagePayloads.acknowledge(snapshot, savedOK);
+    if (savedOK) {
       for (const [id, version] of sentDirtyVersions) {
+        if (failedPresentationTabs.has(id)) continue;
         if (this.dirtyChatVersions.get(id) !== version) continue;
         this.dirtyChats.delete(id);
         this.dirtyChatVersions.delete(id);
-      }
-      for (const [id, version] of sentQueueVersions) {
-        if (this.pendingQueueMutationVersions.get(id) !== version) continue;
-        this.pendingQueueMutationVersions.delete(id);
-        this.pendingQueueSnapshots.delete(id);
       }
       for (const [id, version] of sentDraftVersions) {
         if (this.pendingDraftMutationVersions.get(id) !== version) continue;
@@ -527,37 +591,14 @@ export class Store {
       }
       if (full && this.fullSaveRevision === fullRevision) this.fullSavePending = false;
     }
-    let confirmedDeletes = saved === true ? deleteIDs : [];
-    if (saved === true && lean && deleteIDs.length) {
-      // A live turn can temporarily protect its chat from deletion. Confirm the
-      // exact ids are actually absent before dropping their capability, so the
-      // next save retries after cancellation settles instead of preserving the
-      // chat forever as an ordinary omission.
-      confirmedDeletes = [];
-      try {
-        const server = has('getSession') ? await call('getSession') : undefined;
-        if (server && typeof server === 'object' && Array.isArray((server as Mirror).chats)) {
-          const present = new Set((server as Mirror).chats.map((chat) => chat.id));
-          confirmedDeletes = deleteIDs.filter((id) => !present.has(id));
-        }
-      } catch { /* retain pending delete capability and retry on the next save */ }
-    }
-    for (const id of confirmedDeletes) {
-      this.pendingChatDeletes.delete(id);
+    if (failedPresentationTabs.size || [...sentQueueVersions].some(([id, version]) => this.pendingQueueMutationVersions.get(id) === version)) {
+      this.schedulePersist(250);
     }
   }
 
-  private withoutPendingChatDeletes(snapshot: Mirror): Mirror {
-    if (!this.pendingChatDeletes.size) return snapshot;
-    const chats = snapshot.chats.filter((chat) => !this.pendingChatDeletes.has(chat.id));
-    const activeId = chats.some((chat) => chat.id === snapshot.activeId)
-      ? snapshot.activeId
-      : (chats[0]?.id ?? null);
-    return { ...snapshot, activeId, chats };
-  }
   private fromMirror(m: Mirror | null): AppState {
     const base: AppState = {
-      chats: [], workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, models: [], modes: [], groups: [], providers: [], modelScores: {}, modelFavorites: [], planUsageByProvider: {}, planUsageLoadingByProvider: {},
+      chats: [], workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, models: [], modes: [], groups: [], providers: [], modelScores: {}, modelFavorites: [], planUsageByProvider: {}, planUsageLoadingByProvider: {},
       theme: prefersLight() ? 'light' : 'dark',
       themePref: 'system', density: 'compact',
       panes: { side: true, railWide: false, sideW: 288, railW: 312 },
@@ -582,6 +623,7 @@ export class Store {
     base.removedWorkspaces = Array.isArray(m.removedWorkspaces) ? m.removedWorkspaces.filter((p): p is string => typeof p === 'string').map(normalizeWorkspacePath) : [];
     base.activeId = m.activeId ?? null;
     base.seq = m.seq ?? 0;
+    base.globalRevision = Number.isInteger(m.globalRevision) ? m.globalRevision ?? 0 : 0;
     base.notifEnabled = !!m.notifEnabled;
     // Model scores/favorites are hydrated from the daemon app-settings blob
     // (hydrateSettings), not this session mirror, so defaults stay untouched.
@@ -619,11 +661,12 @@ export class Store {
         contextUsageByProvider = withContextUsage(contextUsageByProvider, providerId, legacyUsage);
       }
       return {
-        id: c.id, chatId: c.chatId ?? newChatConvId(), sessionId: c.liveSession?.sessionId ?? null,
+        id: c.id, chatId: c.chatId ?? newChatConvId(), actorRevision: Number.isInteger(c.actorRevision) ? c.actorRevision : 0, sessionId: c.liveSession?.sessionId ?? null,
         sessionProviderId: binding.sessionProviderId,
         title: c.title, titleLocked: !!c.titleLocked,
         group: c.group ?? null, cwd: c.liveSession?.cwd ?? c.cwd ?? null,
         workspaceRevision: Number.isInteger(c.workspaceRevision) ? c.workspaceRevision : 0,
+        presentationRevision: Number.isInteger(c.presentationRevision) ? c.presentationRevision : 0,
         agentQueueRevision: Number.isInteger(c.agentQueueRevision) ? c.agentQueueRevision : 0,
         runtimeControlRevision: Number.isInteger(c.runtimeControlRevision) ? c.runtimeControlRevision : 0,
         // An explicit [] means "no current plan" and must survive as [], not be
@@ -675,7 +718,11 @@ export class Store {
             steerContinuationFor: mm.steerContinuationFor,
             turnRootId: mm.turnRootId,
             turnTerminal: mm.turnTerminal,
-            at: mm.at, jobId: mm.jobId, images: mm.images, events: (mm.events as TimelineEvent[]) ?? [],
+            at: mm.at, jobId: mm.jobId, permission: mm.permission,
+            turnStartedAt: mm.turnStartedAt,
+            interrupted: mm.interrupted,
+            retryPrompt: mm.retryPrompt,
+            images: mm.images, events: (mm.events as TimelineEvent[]) ?? [],
           };
         }))),
         _archivedCount: (c.messages ?? []).length,
@@ -754,6 +801,10 @@ export class Store {
     // heavy timeline a moment later. This keeps keystrokes off a multi-MiB
     // JSON.stringify/localStorage path.
     this.scheduleLocalMirror();
+    // Unit/SSR surfaces and a renderer whose preload bridge is absent have no
+    // daemon persistence authority. Retrying server writes in that state keeps
+    // the event loop alive forever and cannot make progress.
+    if (!bridgeReady()) return;
     if (this.saveTimer) clearTimeout(this.saveTimer);
     const delay = delayOverride ?? (this.state.chats.some((chat) => chat.messages.some((message) => message.status === 'running'))
       ? 3000
@@ -770,7 +821,67 @@ export class Store {
   // UI preferences. Flush those picks to the daemon immediately: a renderer
   // reconnect/tab handoff must never race the normal 600ms coalescing window and
   // restore another chat's/default controls over the user's selection.
-  private async persistControlsNow() { await this.flushSession(); }
+  private async persistControlsNow() {
+    for (const chat of this.state.chats) {
+      if (chat.machineId || !chat.chatId || !chat.providerId) continue;
+      await this.persistRuntimeControls(chat);
+    }
+  }
+
+  private async persistRuntimeControls(chat: Chat): Promise<boolean> {
+    const existing = this.pendingRuntimeControlSaves.get(chat.id);
+    if (existing) return existing;
+    const tabId = chat.id;
+    const chatId = chat.chatId;
+    if (!chatId || !chat.providerId) return false;
+    const save = (async () => {
+      if (!(await this.ensureChatCreated(chat))) return false;
+      for (;;) {
+        const current = this.chat(tabId);
+        if (!current || current !== chat || current.chatId !== chatId || !current.providerId) return false;
+        const fingerprint = runtimeControlsFingerprint(current);
+        if (this.committedRuntimeControlFingerprints.get(tabId) === fingerprint) return true;
+        let pending = this.pendingRuntimeControlOperations.get(tabId);
+        if (!pending || pending.fingerprint !== fingerprint) {
+          pending = { fingerprint, operationId: rid('runtime-controls-op') };
+          this.pendingRuntimeControlOperations.set(tabId, pending);
+        }
+        const receipt = await call('chatRuntimeControlsSave', {
+          tabId, chatId, operationId: pending.operationId,
+          expectedRevision: current.runtimeControlRevision ?? 0,
+          providerId: current.providerId,
+          currentModelId: current.currentModelId,
+          currentModeId: current.currentModeId,
+          modelControls: current.modelControls,
+        });
+        if (!receipt?.ok || receipt.operationId !== pending.operationId) {
+          this.scheduleScopedRepair(['session']);
+          return false;
+        }
+        const latest = this.chat(tabId);
+        if (!latest || latest !== chat || latest.chatId !== chatId) return false;
+        latest.runtimeControlRevision = receipt.runtimeControlRevision;
+        latest.actorRevision = receipt.actorRevision;
+        this.committedRuntimeControlFingerprints.set(tabId, pending.fingerprint);
+        if (runtimeControlsFingerprint(latest) === pending.fingerprint) {
+          latest.providerId = receipt.providerId;
+          latest.providerName = this.providerName(receipt.providerId) ?? latest.providerName ?? null;
+          latest.currentModelId = receipt.currentModelId;
+          latest.currentModeId = receipt.currentModeId;
+          latest.modelControls = normalizeModelControlMemory(receipt.modelControls);
+          this.committedRuntimeControlFingerprints.set(tabId, runtimeControlsFingerprint(latest));
+        }
+        if (this.pendingRuntimeControlOperations.get(tabId)?.operationId === pending.operationId) {
+          this.pendingRuntimeControlOperations.delete(tabId);
+        }
+        if (this.committedRuntimeControlFingerprints.get(tabId) === runtimeControlsFingerprint(latest)) return true;
+      }
+    })().finally(() => {
+      this.pendingRuntimeControlSaves.delete(tabId);
+    });
+    this.pendingRuntimeControlSaves.set(tabId, save);
+    return save;
+  }
   // Immediate full-session flush to the daemon (clears the 600ms debounce). Used
   // for changes that MUST survive a quick restart: model/permission identity and
   // structural sidebar edits (rename, remove/reorder/collapse folder, move chat).
@@ -861,34 +972,9 @@ export class Store {
     return merged;
   }
 
-  /**
-   * Carry unanswered permission/question cards across a wholesale restore.
-   *
-   * `msg.permission` is client-owned: it arrives on `chat:permission-request`
-   * and is never written to the session mirror, so `fromMirror` rebuilds every
-   * message without it. Restore runs on the periodic digest as well as on
-   * reconnect, so an open card was destroyed and re-fetched on a repeating
-   * beat — the question card visibly blinked shut and open while the user was
-   * reading it. Nothing here can resurrect a stale card: `refreshPendingPermissions`
-   * still clears anything the daemon no longer lists.
-   */
-  private carryOpenPermissions(previous: Chat[], next: Chat[]) {
-    const previousByID = new Map(previous.map((chat) => [chat.id, chat]));
-    for (const chat of next) {
-      const local = previousByID.get(chat.id);
-      if (!local) continue;
-      const open = new Map(local.messages.filter((message) => message.permission).map((message) => [message.id, message.permission]));
-      if (!open.size) continue;
-      for (const message of chat.messages) {
-        const permission = open.get(message.id);
-        if (permission) message.permission = permission;
-      }
-    }
-  }
-
   private restoreSessionSnapshot(server: unknown): boolean {
     if (!server || typeof server !== 'object' || !Array.isArray((server as Mirror).chats)) return false;
-    const authoritative = this.withoutPendingChatDeletes(server as Mirror);
+    const authoritative = server as Mirror;
     this.durableImagePayloads.replaceFromServer(authoritative);
     const previousChats = this.state.chats;
     const previousWorkspaces = this.state.workspaces;
@@ -903,6 +989,14 @@ export class Store {
       previousChats,
       this.carryPendingCreatedChats(previousChats, restored.chats),
     );
+    for (const chat of restored.chats) {
+      if (!this.pendingPresentationOperations.has(chat.id)) {
+        this.committedPresentationFingerprints.set(chat.id, presentationFingerprint(chat));
+      }
+      if (!this.pendingRuntimeControlOperations.has(chat.id)) {
+        this.committedRuntimeControlFingerprints.set(chat.id, runtimeControlsFingerprint(chat));
+      }
+    }
     this.restoreDraftImages(previousChats, this.state.chats);
     this.restorePendingDrafts(this.state.chats);
     // A digest can legitimately arrive before the renderer's queue save reply.
@@ -912,8 +1006,21 @@ export class Store {
       const chat = this.chat(chatId);
       if (chat) chat.queue = queue;
     }
-    this.carryOpenPermissions(previousChats, this.state.chats);
-    this.state.workspaces = normalizeWorkspaces([...previousWorkspaces, ...restored.workspaces]);
+    if (this.pendingGlobalPresentationOperation) {
+      this.state.workspaces = normalizeWorkspaces([...previousWorkspaces, ...restored.workspaces]);
+    } else {
+      this.state.workspaces = restored.workspaces;
+      this.state.collapsedWorkspaces = restored.collapsedWorkspaces;
+      this.state.removedWorkspaces = restored.removedWorkspaces;
+      this.state.theme = restored.theme;
+      this.state.themePref = restored.themePref;
+      this.state.density = restored.density;
+      this.state.panes = restored.panes;
+      this.state.mode = restored.mode;
+      this.state.notifEnabled = restored.notifEnabled;
+      this.state.globalRevision = restored.globalRevision;
+      this.committedGlobalPresentationFingerprint = globalPresentationFingerprint(restored);
+    }
     // Which chat you are looking at is a LOCAL choice. This runs on reconnect and
     // on the periodic session digest, so adopting the server's activeId here
     // yanks the selection out from under you every time the daemon happens to
@@ -1014,10 +1121,14 @@ export class Store {
   private digestRepairScopes(digest: StateDigest): Set<RepairScope> {
     const scopes = new Set<RepairScope>();
     if (this.sessionHydrationPending) scopes.add('session');
+    if (digest.globalRevision !== this.state.globalRevision) scopes.add('session');
     const localByPair = new Map(this.state.chats.map((chat) => [`${chat.id}\u0000${chat.chatId ?? ''}`, chat]));
     for (const remote of digest.chats) {
       const chat = localByPair.get(`${remote.tabId}\u0000${remote.chatId}`);
-      if (!chat || digestChatSessionDiverged(chat, remote)) scopes.add('session');
+      if (!chat || digestChatSessionDiverged(chat, remote)) {
+        scopes.add('session');
+        scopes.add('background');
+      }
       if ((!chat && remote.pendingPermissionIds.length)
         || (chat && !sameStrings(localPendingPermissionIDs(chat), remote.pendingPermissionIds))) scopes.add('permissions');
     }
@@ -1058,6 +1169,9 @@ export class Store {
     if (scopes.has('permissions')) {
       await this.guardedStep('digest permissions', () => this.refreshPendingPermissions());
     }
+    if (scopes.has('background')) {
+      await this.guardedStep('digest background', async () => { this.refreshAllSpawnedWork(); });
+    }
     if (scopes.has('catalog')) {
       await this.guardedStep('digest catalog', () => this.refreshCatalogSnapshot());
     }
@@ -1097,7 +1211,6 @@ export class Store {
     this.state.processes = result.processes;
     this.captureProcHash(result.processes);
     this.bump(PROC);
-    this.syncBgProcEvents();
   }
 
   private captureCatalogHashes(groups: CatalogGroup[]) {
@@ -1500,7 +1613,7 @@ export class Store {
       this.monitor?.markDisconnected();
     }
     if (server && typeof server === 'object' && Array.isArray((server as Mirror).chats) && (server as Mirror).chats.length) {
-      const authoritative = this.withoutPendingChatDeletes(server as Mirror);
+      const authoritative = server as Mirror;
       this.durableImagePayloads.replaceFromServer(authoritative);
       const live = this.state;
       this.state = this.fromMirror(authoritative);
@@ -1512,9 +1625,6 @@ export class Store {
       this.preserveNewerLocalControls(live.chats, this.state.chats);
       this.restoreDraftImages(live.chats, this.state.chats);
       this.restorePendingDrafts(this.state.chats);
-      // Permission events are subscribed before this await, so a card raised
-      // during boot is already in `live` and would be wiped by the replacement.
-      this.carryOpenPermissions(live.chats, this.state.chats);
       this.state.meta = live.meta;
       this.state.groups = live.groups;
       this.state.models = live.models.length ? live.models : this.state.models;
@@ -2011,6 +2121,7 @@ export class Store {
     };
     this.state.chats.unshift(chat);
     this.pendingChatCreates.add(chat.id);
+    this.pendingChatCreateOperations.set(chat.id, { operationId: rid('chat-create'), focus: activate });
     // Recorded here, not at the button: "Nueva aquí", the per-folder + in the
     // scope menu and addWorkspace all land here, and each of them is the user
     // telling us which project new chats should default to next.
@@ -2018,8 +2129,52 @@ export class Store {
     if (activate) { this.state.activeId = chat.id; this.state.mode = 'chats'; }
     this.requireFullSave();
     this.bumpApp();
+    void this.ensureChatCreated(chat);
     if (activate) this.refreshPlanUsage(chat.id);
     return chat;
+  }
+  private async ensureChatCreated(chat: Chat): Promise<boolean> {
+    if (!this.pendingChatCreates.has(chat.id)) return true;
+    const chatId = chat.chatId;
+    if (!chatId) {
+      chat.sessionError = 'La conversación no tiene una identidad durable.';
+      return false;
+    }
+    const existing = this.pendingChatCreatePromises.get(chat.id);
+    if (existing) return existing;
+    let operation = this.pendingChatCreateOperations.get(chat.id);
+    if (!operation) {
+      operation = { operationId: rid('chat-create'), focus: this.state.activeId === chat.id };
+      this.pendingChatCreateOperations.set(chat.id, operation);
+    }
+    const creation = operation;
+    const pending = (async (): Promise<boolean> => {
+      const receipt = await call('chatCreate', {
+        tabId: chat.id, chatId, operationId: creation.operationId, focus: creation.focus,
+        title: chat.title, titleLocked: chat.titleLocked, group: chat.group ?? null, cwd: chat.cwd ?? null,
+        providerId: chat.providerId ?? null, currentModelId: chat.currentModelId ?? null,
+        currentModeId: chat.currentModeId ?? null, modelControls: chat.modelControls,
+      });
+      if (!receipt?.ok || receipt.tabId !== chat.id || receipt.chatId !== chatId || receipt.operationId !== creation.operationId) {
+        chat.sessionError = 'El daemon no confirmó la creación durable de la conversación.';
+        this.bumpApp(false);
+        return false;
+      }
+      chat.actorRevision = receipt.actorRevision;
+      chat.presentationRevision = receipt.presentationRevision;
+      this.committedRuntimeControlFingerprints.set(chat.id, runtimeControlsFingerprint(chat));
+      if (creation.focus && receipt.globalRevision > 0) this.state.globalRevision = receipt.globalRevision;
+      chat.sessionError = undefined;
+      this.pendingChatCreateOperations.delete(chat.id);
+      // Keep pendingChatCreates until session:get echoes the actor id. This is
+      // an in-flight display fence only; the actor is already durable here.
+      this.scheduleScopedRepair(['session']);
+      return true;
+    })().finally(() => {
+      this.pendingChatCreatePromises.delete(chat.id);
+    });
+    this.pendingChatCreatePromises.set(chat.id, pending);
+    return pending;
   }
   addWorkspace(path: string): Chat | null {
     const workspace = workspaceFromPath(path);
@@ -2090,24 +2245,27 @@ export class Store {
         this.addToast('No se movió la conversación', 'Elegí una carpeta de trabajo concreta para una conversación iniciada.');
         return false;
       }
+      const operationId = chat._sessionOperationId ?? (chat._sessionOperationId = rid('workspace-move'));
       const result = await call('appChatNewSession', {
         cwd: targetCwd,
         tabId: chat.id,
         chatId: chat.chatId,
+        operationId,
         providerId: chat.providerId ?? null,
         replaceSessionId: chat.sessionId ?? undefined,
         workspaceRebind: true,
         expectedWorkspaceRevision: currentRevision,
       });
-      if (!workspaceMoveAccepted(result, currentRevision)) {
+      if (!workspaceMoveAccepted(result, currentRevision, operationId)) {
         this.addToast('No se movió la conversación', result?.error ?? 'El motor no confirmó el cambio de carpeta.');
         return false;
       }
-      // The daemon has durably committed targetCwd and invalidated every exact
-      // native/live binding for this chat. Keep it sessionless until the next
-      // real need; ensureSession will create fresh and canonical-replay history.
+      // The daemon has durably committed a new workspace epoch and invalidated
+      // the previous attachment. Keep it sessionless until the next real need;
+      // ensureSession creates the explicit new lane without transcript replay.
       chat.sessionId = null;
       chat.pending = true;
+      chat._sessionOperationId = undefined;
       chat.workspaceRevision = result!.workspaceRevision;
       chat.sessionError = undefined;
       chat.imageSupport = false;
@@ -2233,15 +2391,36 @@ export class Store {
     this.bumpChat(chat);
   }
   closeChat(id: string) {
+    void this.closeChatDurably(id);
+  }
+  private async closeChatDurably(id: string) {
     const chat = this.chat(id);
     if (!chat) return;
-    for (const m of chat.messages) if (m.status === 'running' && m.jobId) void call('cancelJob', m.jobId);
-    if (chat.sessionId) void call('appChatCloseSession', chat.sessionId);
+    if (!chat.chatId) {
+      this.addToast('No se cerró la conversación', 'La conversación no tiene una identidad durable.');
+      return;
+    }
+    if (!(await this.ensureChatCreated(chat))) return;
+    const operationId = rid('delete-op');
+    const receipt = await call('chatDelete', { tabId: chat.id, chatId: chat.chatId, operationId, force: true });
+    if (!receipt?.ok || this.chat(id) !== chat) {
+      if (this.chat(id) === chat) this.addToast('No se cerró la conversación', 'El daemon no confirmó la eliminación durable.');
+      return;
+    }
     void browserApi()?.close(id);
     releaseDraftImages(chat.draftImages ?? []);
     for (const item of chat.queue ?? []) releaseDraftImages(item.draftImages ?? []);
     this.pendingChatCreates.delete(id);
-    this.pendingChatDeletes.add(id);
+    this.pendingChatCreateOperations.delete(id);
+    this.pendingChatCreatePromises.delete(id);
+    this.committedPresentationFingerprints.delete(id);
+    this.pendingPresentationOperations.delete(id);
+    this.committedRuntimeControlFingerprints.delete(id);
+    this.pendingRuntimeControlOperations.delete(id);
+    this.pendingRuntimeControlSaves.delete(id);
+    this.pendingQueueMutationVersions.delete(id);
+    this.pendingQueueSnapshots.delete(id);
+    this.pendingQueueOperationIds.delete(id);
     this.state.chats = this.state.chats.filter((c) => c.id !== id);
     if (this.state.activeId === id) this.state.activeId = this.state.chats[0]?.id ?? null;
     if (this.state.chats.length === 0) this.newChat();
@@ -2291,17 +2470,21 @@ export class Store {
   private async ensureSession(chat: Chat, refreshPlanUsage = false): Promise<void> {
     if (chat.sessionId && !refreshPlanUsage) return;
     if (chat._initPromise) return chat._initPromise;
+    if (!(await this.ensureChatCreated(chat))) return;
     const controlRevision = chat._controlRevision ?? 0;
+    const operationId = chat._sessionOperationId ?? (chat._sessionOperationId = rid('lane-select'));
     chat._initPromise = (async () => {
       const info = await call('appChatNewSession', {
         cwd: chat.cwd ?? null,
         tabId: chat.id,
         chatId: chat.chatId,
+        operationId,
         providerId: chat.providerId ?? null,
         sessionId: refreshPlanUsage ? chat.sessionId ?? undefined : undefined,
         refreshPlanUsage,
       });
       if (!info || info.error) { chat.sessionError = info?.error ?? 'no bridge'; this.bumpApp(false); return; }
+      chat._sessionOperationId = undefined;
       chat.sessionId = info.sessionId;
       chat.sessionProviderId = info.providerId ?? chat.providerId ?? null;
       chat.cwd = info.cwd ?? chat.cwd;
@@ -2344,21 +2527,12 @@ export class Store {
         if (!chat.currentModelId) chat.currentModelId = info.currentModelId;
         if (!chat.currentModeId) chat.currentModeId = info.currentModeId;
       }
-      // Re-apply the exact cached setup only after validating it against THIS
-      // freshly initialized provider. Await both writes so job:start cannot race
-      // a still-pending permission/effort change.
-      if (chat.currentModelId && chat.currentModelId !== info.currentModelId) {
-        const requestedModelId = chat.currentModelId;
-        const fence = this.modelWriteFence(chat, requestedModelId);
-        const result = await call('appChatSetModel', chat.sessionId, requestedModelId);
-        if (this.acceptAppliedModel(chat, result, fence)) controlsChanged = true;
-      }
-      if (chat.currentModeId && chat.currentModeId !== info.currentModeId) {
-        await call('appChatSetMode', chat.sessionId, chat.currentModeId);
-      }
+      // Desired controls are actor-owned. The provider lane applies them inside
+      // the next actor-owned turn effect; initializing a disposable session is
+      // never permission to mutate native controls outside that journal.
       if (controlsChanged) {
         this.touchChat(chat.id);
-        await this.persistControlsNow();
+        await this.persistRuntimeControls(chat);
       }
       this.bumpApp(false);
     })();
@@ -2399,7 +2573,6 @@ export class Store {
     const previous = this.rememberCurrentControls(chat);
     const group = this.providerGroup(chat.providerId);
     const selected = resolveModelSelection(group ? [group] : [], group?.models ?? this.state.models, modelId);
-    const previousMode = chat.currentModeId;
     if (chat.providerId && selected.base) {
       this.applyControlsForModel(chat, chat.providerId, selected.base, group?.models ?? this.state.models, group?.modes ?? this.state.modes, {
         fallbackEffort: previous.effort,
@@ -2411,17 +2584,7 @@ export class Store {
     }
     chat._controlRevision = nextModelControlRevision(chat._controlRevision);
     this.bumpChat(chat);
-    await this.persistControlsNow();
-    if (chat.sessionId && chat.currentModelId) {
-      const requestedModelId = chat.currentModelId;
-      const fence = this.modelWriteFence(chat, requestedModelId);
-      const result = await call('appChatSetModel', chat.sessionId, requestedModelId);
-      if (this.acceptAppliedModel(chat, result, fence)) {
-        this.bumpChat(chat);
-        await this.persistControlsNow();
-      }
-    }
-    if (chat.sessionId && chat.currentModeId && chat.currentModeId !== previousMode) await call('appChatSetMode', chat.sessionId, chat.currentModeId);
+    await this.persistRuntimeControls(chat);
   }
   // Grouped picker selection. On a NEW chat (no session yet) the picked group's
   // providerId binds the chat and rides app-chat:new-session at creation. On an
@@ -2429,14 +2592,13 @@ export class Store {
   // the next turn (existing semantics).
   async pickModel(chatId: string, providerId: string, modelId: string) {
     const chat = this.chat(chatId); if (!chat) return;
-    const previousProvider = chat.providerId;
     const previous = this.rememberCurrentControls(chat);
     // Chats are NOT bound to one agent for life (user law 2026-07-11): picking
-    // another provider's model rebinds the chat — the daemon performs the
-    // engine handover on the next turn (startJob carries providerId) and seeds
-    // the new agent with the conversation history. Only a same-provider pick
-    // on a live session applies immediately via set-model.
-    const switching = providerSwitchRequiresHandover(previousProvider, providerId);
+    // another provider's model selects another lane — the daemon performs the
+    // transaction on the next turn (startJob carries providerId), resuming that
+    // provider's exact thread and importing only through a verified non-sampling
+    // capability. The native control is applied only inside that actor-owned
+    // turn effect, never as an unjournaled session-id side write.
     chat.providerId = providerId || chat.providerId || null;
     chat.providerName = this.providerName(chat.providerId) ?? chat.providerName ?? null;
     const group = this.providerGroup(chat.providerId);
@@ -2450,17 +2612,7 @@ export class Store {
     }
     chat._controlRevision = nextModelControlRevision(chat._controlRevision);
     this.bumpChat(chat);
-    await this.persistControlsNow();
-    if (chat.sessionId && !switching && chat.currentModelId) {
-      const requestedModelId = chat.currentModelId;
-      const fence = this.modelWriteFence(chat, requestedModelId);
-      const result = await call('appChatSetModel', chat.sessionId, requestedModelId);
-      if (this.acceptAppliedModel(chat, result, fence)) {
-        this.bumpChat(chat);
-        await this.persistControlsNow();
-      }
-    }
-    if (chat.sessionId && !switching && chat.currentModeId) await call('appChatSetMode', chat.sessionId, chat.currentModeId);
+    await this.persistRuntimeControls(chat);
     this.refreshPlanUsage(chat.id);
   }
   async setModeSel(chatId: string, modeId: string) {
@@ -2469,8 +2621,7 @@ export class Store {
     this.rememberCurrentControls(chat);
     chat._controlRevision = nextModelControlRevision(chat._controlRevision);
     this.bumpChat(chat);
-    await this.persistControlsNow();
-    if (chat.sessionId) await call('appChatSetMode', chat.sessionId, modeId);
+    await this.persistRuntimeControls(chat);
   }
 
   // ---- send / cancel ---------------------------------------------------
@@ -2566,7 +2717,7 @@ export class Store {
           // happens the transcript row owns delivery and cannot be duplicated.
           if (!removed) return true;
           this.rebuildJobRefs();
-          this.enqueue(chat, prompt, images);
+          if (r?.daemonQueued !== true) this.enqueue(chat, prompt, images);
           await this.flushSession();
           if (!this.isChatRunning(chat.id)) void this.flushNextQueued(chat);
           return true;
@@ -2794,11 +2945,12 @@ export class Store {
     const chatId = chat.chatId ?? (chat.chatId = newChatConvId());
     this.chatJobs.set(chatId, { tabId: chat.id, msgId: asst.id });
     const job = await call('startJob', {
-      kind: 'app-chat', title: `Devin · ${chat.title}`, chatId, tabId: chat.id,
+      kind: 'app-chat', operationId: user.id, title: `Devin · ${chat.title}`, chatId, tabId: chat.id,
       sessionId: chat.sessionId, cwd: chat.cwd ?? null,
       // providerId rides every turn: when it differs from the session's bound
-      // provider the daemon swaps engines (context-seeded handover) and emits
-      // chat:session-replaced. Same provider → daemon no-ops on it.
+      // provider, the daemon treats it as a desired-lane selection. It starts
+      // only after a verified non-sampling context import; unsupported switches
+      // fail before the active provider lane is detached.
       providerId: chat.providerId ?? undefined,
       modelId: chat.currentModelId, modeId: chat.currentModeId,
       prompt, history, images: images && images.length ? images : undefined,
@@ -3122,7 +3274,7 @@ export class Store {
           this.bump('msg:' + msg.id);
         }
         this.chatJobs.delete(e.job.chatId ?? '');
-        if (jobChat && reattached) void this.applyStagedSessionControls(jobChat, e.job);
+        void reattached;
         const endedChat = (rec ? this.chat(rec.tabId) : null) ?? jobChat;
         if (endedChat) this.touchChat(endedChat.id);
         this.bumpApp(false);
@@ -3174,23 +3326,6 @@ export class Store {
       chat.providerName = this.providerName(chat.providerId) ?? chat.providerName ?? null;
     }
     return attached;
-  }
-  private async applyStagedSessionControls(chat: Chat, job: PublicJob) {
-    if (!chat.sessionId) return;
-    // A cross-provider model pick is intentionally applied by job:start at the
-    // next turn boundary. Same-provider picks can be applied immediately now
-    // that the reconnecting view has learned the still-live session id.
-    if (chat.providerId && job.providerId && chat.providerId !== job.providerId) return;
-    if (chat.currentModelId) {
-      const requestedModelId = chat.currentModelId;
-      const fence = this.modelWriteFence(chat, requestedModelId);
-      const result = await call('appChatSetModel', chat.sessionId, requestedModelId);
-      if (this.acceptAppliedModel(chat, result, fence)) {
-        this.bumpChat(chat);
-        await this.persistControlsNow();
-      }
-    }
-    if (chat.currentModeId) await call('appChatSetMode', chat.sessionId, chat.currentModeId);
   }
   private applyAcp(msg: Msg, ev: AcpEvent) {
     if (ev.kind === 'thinking') {
@@ -3305,9 +3440,15 @@ export class Store {
   }
   private onSpawnedWorkChanged(s: SpawnedWorkChanged) {
     if (!s || !s.tabId || !s.chatId || !Array.isArray(s.items)) return;
-    this.state.spawnedWorkByChat[spawnedWorkChatKey(s.tabId, s.chatId)] = s.items;
-    if (s.obligation?.state) {
-      this.state.obligationByChat[spawnedWorkChatKey(s.tabId, s.chatId)] = s.obligation;
+    const key = spawnedWorkChatKey(s.tabId, s.chatId);
+    this.state.spawnedWorkByChat[key] = s.items;
+    // `obligation` is additive. An older daemon omits the key entirely, and
+    // that reply must not erase a receipt hydrated from the actor. A present
+    // key is authoritative: a real obligation replaces the prior one, while
+    // an explicit empty value clears it after the actor has settled it.
+    if (Object.prototype.hasOwnProperty.call(s, 'obligation')) {
+      if (s.obligation?.state) this.state.obligationByChat[key] = s.obligation;
+      else delete this.state.obligationByChat[key];
     }
     this.bump(SPAWNED);
   }
@@ -3315,9 +3456,11 @@ export class Store {
     if (!chat || !chat.chatId || !this.state.hasSpawnedWorkChannels) return;
     const result = await call('spawnedWorkList', chat.id, chat.chatId);
     if (Array.isArray(result?.items)) {
-      this.onSpawnedWorkChanged({
-        tabId: chat.id, chatId: chat.chatId, items: result.items, obligation: result.obligation,
-      });
+      const update: SpawnedWorkChanged = { tabId: chat.id, chatId: chat.chatId, items: result.items };
+      if (result && Object.prototype.hasOwnProperty.call(result, 'obligation')) {
+        update.obligation = result.obligation;
+      }
+      this.onSpawnedWorkChanged(update);
     }
   }
   private refreshAllSpawnedWork() {
@@ -3592,84 +3735,6 @@ export class Store {
       this.state.processes = e.processes;
       this.captureProcHash(e.processes);
       this.bump(PROC);
-      this.syncBgProcEvents();
-    }
-  }
-
-  // ---- background-process inline visibility (Claude-Code style) ---------
-  // Which chat (if any) a process belongs to. The daemon keys each engine bridge
-  // by tabId (== chat.id) and embeds it in the label as "<agent> (<key>)"; it may
-  // also carry the daemon chatId. Match either. This is the only association the
-  // daemon exposes today (engines); non-engine spawned processes are covered too
-  // when they carry a matching chatId/label, but the mock reports none.
-  private chatForProc(p: ProcessSummary): Chat | null {
-    for (const c of this.state.chats) {
-      if (p.chatId && (p.chatId === c.id || p.chatId === c.chatId)) return c;
-      if (p.label && p.label.includes(`(${c.id})`)) return c;
-    }
-    return null;
-  }
-  // True if a process's tabId/chatId/label associates it with the given chat.
-  procMatchesChat(p: ProcessSummary, chat: Chat | null): boolean {
-    if (!chat) return false;
-    if (p.chatId && (p.chatId === chat.id || p.chatId === chat.chatId)) return true;
-    return !!p.label && p.label.includes(`(${chat.id})`);
-  }
-  // Count live bg processes associated with a chat (drives the header chip).
-  bgProcCount(chat: Chat | null): number {
-    if (!chat) return 0;
-    return this.state.processes.filter((p) => (p.status === 'running' || p.status === 'killing') && this.procMatchesChat(p, chat)).length;
-  }
-  private bgEventFor(rec: { tabId: string; msgId: string }, procId: string): BgProcEvent | undefined {
-    return this.msgForRef(rec)?.events.find((e): e is BgProcEvent => e.kind === 'bgproc' && e.procId === procId);
-  }
-  // Reconcile the current proc list into inline bgproc timeline events. A new
-  // associated process drops a quiet step-row on its chat's last message; status
-  // changes (idle/hibernated/closed/vanished) settle it. Transient — never
-  // mirrored, so a reload starts clean.
-  private syncBgProcEvents() {
-    for (const p of this.state.processes) {
-      // ACP engines are daemon-managed lifecycle plumbing; the user does not want
-      // them surfaced in the UI (2026-07-12). Never turn an engine into an inline
-      // "background process" row — only genuine spawned aux processes qualify.
-      if (p.engine) continue;
-      const running = p.status === 'running' || p.status === 'killing' || p.status === 'starting';
-      const rec = this.procEvents.get(p.id);
-      if (!rec) {
-        if (!running) continue;                         // don't resurrect already-ended procs
-        const chat = this.chatForProc(p);
-        if (!chat) continue;
-        const last = chat.messages[chat.messages.length - 1];
-        if (!last) continue;
-        last.events.push({
-          key: rid('bg'), at: last.content.length, kind: 'bgproc',
-          procId: p.id, label: bgProcLabel(p), startedAt: p.startedAt || new Date().toISOString(),
-          status: 'running',
-        });
-        this.procEvents.set(p.id, { tabId: chat.id, msgId: last.id });
-        this.bump('msg:' + last.id);
-        continue;
-      }
-      const ev = this.bgEventFor(rec, p.id);
-      if (!ev) continue;
-      const next = running ? 'running' : (p.code != null && p.code !== 0 ? 'failed' : 'ended');
-      if (ev.status !== next) {
-        ev.status = next;
-        ev.endedAt = running ? null : (p.finishedAt || new Date().toISOString());
-        ev.code = p.code ?? null;
-        this.bump('msg:' + rec.msgId);
-      }
-    }
-    // Processes that dropped out of the list entirely → settle as ended.
-    const live = new Set(this.state.processes.map((p) => p.id));
-    for (const [pid, rec] of this.procEvents) {
-      if (live.has(pid)) continue;
-      const ev = this.bgEventFor(rec, pid);
-      if (ev && ev.status === 'running') {
-        ev.status = 'ended';
-        ev.endedAt = new Date().toISOString();
-        this.bump('msg:' + rec.msgId);
-      }
     }
   }
   async killProc(id: string) {
@@ -3710,7 +3775,7 @@ export class Store {
     // running list rendered by the Tareas card.
     if (has('procList')) {
       const r = await call('procList');
-      if (r?.processes) { this.state.processes = r.processes; this.bump(PROC); this.syncBgProcEvents(); }
+      if (r?.processes) { this.state.processes = r.processes; this.bump(PROC); }
     } else {
       // No proc:list to reconcile against: drop the row optimistically.
       this.state.processes = this.state.processes.filter((x) => x.id !== p.id);
@@ -3815,11 +3880,14 @@ export class Store {
   closeRewind() { this.state.rewind = { ...this.state.rewind, open: false, error: undefined }; this.bumpApp(false); }
   async rewindTo(turnSeq: number) {
     const chatId = this.state.rewind.chatId ?? this.active()?.chatId ?? null;
-    if (!chatId) return;
-    this.state.rewind = { ...this.state.rewind, busyTurn: turnSeq, error: undefined };
+    const tabId = this.state.rewind.tabId ?? this.active()?.id ?? null;
+    if (!chatId || !tabId) return;
+    const operationId = this.state.rewind.operationTurn === turnSeq && this.state.rewind.operationId
+      ? this.state.rewind.operationId : rid('checkpoint-restore');
+    this.state.rewind = { ...this.state.rewind, busyTurn: turnSeq, operationId, operationTurn: turnSeq, error: undefined };
     this.bumpApp(false);
     try {
-      const res = await callThrow('chatRewind', { chatId, turnSeq });
+      const res = await callThrow('chatRewind', { tabId, chatId, turnSeq, operationId });
       if (res === undefined) {
         this.state.rewind = { ...this.state.rewind, busyTurn: undefined, error: 'chat:rewind no está disponible en este bridge.' };
         this.bumpApp(false);
@@ -3828,10 +3896,10 @@ export class Store {
       // Success → the daemon emits chat:checkpoint-restored, which closes the
       // menu and drops the "Estado restaurado…" step row. Clear busy defensively
       // in case that event is not delivered (older bridge).
-      this.state.rewind = { ...this.state.rewind, busyTurn: undefined };
+      this.state.rewind = { ...this.state.rewind, busyTurn: undefined, operationId: undefined, operationTurn: undefined, open: false };
       this.bumpApp(false);
     } catch (err) {
-      this.state.rewind = { ...this.state.rewind, busyTurn: undefined, error: rewindErrorMessage(err) };
+      this.state.rewind = { ...this.state.rewind, busyTurn: undefined, operationId, error: rewindErrorMessage(err) };
       this.bumpApp(false);
     }
   }
@@ -3876,13 +3944,14 @@ export class Store {
   closeReview() { this.state.review = { ...this.state.review, open: false }; this.bumpApp(false); }
   async selectDiffFile(repo: string, path: string) {
     const chatId = this.state.review.chatId;
+    const tabId = this.state.review.tabId;
     this.state.review = { ...this.state.review, active: { repo, path }, diffLoading: true, diff: undefined, error: undefined };
     this.bumpApp(false);
-    if (!chatId || !has('chatDiff')) {
+    if (!chatId || !tabId || !has('chatDiff')) {
       this.state.review = { ...this.state.review, diffLoading: false, error: 'chat:diff no está disponible en este bridge.' };
       this.bumpApp(false); return;
     }
-    const diff = await call('chatDiff', { chatId, repo, path });
+    const diff = await call('chatDiff', { chatId, tabId, repo, path });
     this.state.review = { ...this.state.review, diffLoading: false, diff: diff ?? undefined, error: diff ? undefined : 'No se pudo cargar el diff.' };
     this.bumpApp(false);
   }
@@ -3957,7 +4026,7 @@ export class Store {
       const already = chat._archivedCount ?? 0;
       const fresh = finalized.slice(already);
       if (fresh.length) {
-        const ok = await call('archiveAppend', chat.id, fresh.map((m) => ({ id: m.id, jobId: m.jobId, role: m.role, content: m.content, result: m.result, status: m.status, at: m.at, steerState: m.steerState, steerAnchor: m.steerAnchor, steerBoundary: m.steerBoundary, steerContinuationId: m.steerContinuationId, steerContinuationFor: m.steerContinuationFor, turnRootId: m.turnRootId, turnTerminal: m.turnTerminal, images: m.images, events: m.events.filter((e) => e.kind !== 'thinking' && e.kind !== 'bgproc') })));
+        const ok = await call('archiveAppend', chat.id, fresh.map((m) => ({ id: m.id, jobId: m.jobId, role: m.role, content: m.content, result: m.result, status: m.status, at: m.at, steerState: m.steerState, steerAnchor: m.steerAnchor, steerBoundary: m.steerBoundary, steerContinuationId: m.steerContinuationId, steerContinuationFor: m.steerContinuationFor, turnRootId: m.turnRootId, turnTerminal: m.turnTerminal, images: m.images, events: m.events.filter((e) => e.kind !== 'thinking') })));
         if (ok !== false) chat._archivedCount = finalized.length;
       }
     }
@@ -4031,11 +4100,6 @@ function spawnedWorkChatKey(tabId: string, chatId: string): string { return `${t
 // Same composite key shape as spawnedWorkChatKey — the Entorno snapshot is also
 // scoped to an exact immutable tabId+chatId pair.
 function chatEnvKey(tabId: string, chatId: string): string { return spawnedWorkChatKey(tabId, chatId); }
-// Display label for a bg-process row: strip the daemon's trailing " (bridgeKey)".
-function bgProcLabel(p: ProcessSummary): string {
-  const base = (p.label || p.command || p.id || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
-  return base || (p.engine ? 'Engine' : 'Proceso');
-}
 function normalizeCatalogGroups(groups: CatalogGroup[]): CatalogGroup[] {
   const claudeRank: Record<string, number> = { 'claude-fable-5[1m]': 0, 'opus[1m]': 1, sonnet: 2, haiku: 3 };
   return groups.map((group) => {
@@ -4095,7 +4159,10 @@ function localRunningJobID(chat: Chat): string | null {
 }
 function digestChatSessionDiverged(chat: Chat, digest: StateDigestChat): boolean {
   const queue = chat.queue ?? [];
-  return localRunningJobID(chat) !== (digest.runningJobId ?? null)
+  return (chat.actorRevision ?? 0) !== digest.actorRevision
+    || localRunningJobID(chat) !== (digest.runningJobId ?? null)
+    || chat.messages.length !== digest.messageCount
+    || (chat.messages.at(-1)?.id ?? null) !== (digest.lastMessageId ?? null)
     || queue.length !== digest.queueLen
     || (queue[0]?.id ?? null) !== (digest.queueHeadId ?? null)
     || (chat.agentQueueRevision ?? 0) !== digest.agentQueueRevision
@@ -4130,6 +4197,7 @@ function isStateDigest(value: unknown): value is StateDigest {
   if (!value || typeof value !== 'object') return false;
   const digest = value as Partial<StateDigest>;
   return Array.isArray(digest.chats)
+    && Number.isInteger(digest.globalRevision)
     && !!digest.catalogHash
     && typeof digest.catalogHash === 'object'
     && typeof digest.settingsRevision === 'string'

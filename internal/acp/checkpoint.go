@@ -75,7 +75,7 @@ func (m *Manager) ChatCheckpoints(chatID, tabID string) []ChatCheckpoint {
 	return cloneChatCheckpoints(state.Checkpoints)
 }
 
-func (m *Manager) ChatRewind(ctx context.Context, chatID string, turnSeq int) (map[string]any, error) {
+func (m *Manager) restoreChatCheckpoint(ctx context.Context, chatID string, turnSeq int) (map[string]any, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -140,16 +140,30 @@ func (m *Manager) ChatRewind(ctx context.Context, chatID string, turnSeq int) (m
 	}
 
 	m.updateTrackedReposAfterRewind(ctx, chatID, restored)
-	payload := map[string]any{
-		"chatId":  chatID,
-		"turnSeq": turnSeq,
-		"repos":   checkpointReposPublic(restored),
+	return map[string]any{"ok": true, "chatId": chatID, "turnSeq": turnSeq, "repos": checkpointReposPublic(restored)}, nil
+}
+
+// RestoreChatCheckpoint is the executor-only filesystem boundary used by the
+// durable chat actor. It emits no semantic event; the actor commits the result
+// before any renderer invalidation is published.
+func (m *Manager) RestoreChatCheckpoint(ctx context.Context, chatID string, turnSeq int) (map[string]any, error) {
+	return m.restoreChatCheckpoint(ctx, chatID, turnSeq)
+}
+
+// ChatRewind remains only for package-level compatibility tests while the old
+// direct manager surface is removed. Production handlers use the actor effect.
+func (m *Manager) ChatRewind(ctx context.Context, chatID string, turnSeq int) (map[string]any, error) {
+	result, err := m.restoreChatCheckpoint(ctx, chatID, turnSeq)
+	if err != nil {
+		return nil, err
 	}
-	m.emit("chat:checkpoint-restored", payload)
+	m.emit("chat:checkpoint-restored", map[string]any{
+		"chatId": result["chatId"], "turnSeq": result["turnSeq"], "repos": result["repos"],
+	})
 	if env := m.ChatEnvGet(chatID, ""); env.ChatID != "" {
 		m.emit("chat:env", env)
 	}
-	return map[string]any{"ok": true, "chatId": chatID, "turnSeq": turnSeq, "repos": checkpointReposPublic(restored)}, nil
+	return result, nil
 }
 
 func (m *Manager) ChatDiff(ctx context.Context, chatID, repoName, relPath string) (map[string]any, error) {
@@ -183,6 +197,51 @@ func (m *Manager) ChatDiff(ctx context.Context, chatID, repoName, relPath string
 		"path":      rel,
 		"text":      diff,
 		"truncated": truncated,
+	}, nil
+}
+
+// ChatDiffFromCheckpoints is the narrow filesystem executor used by the
+// actor-owned chat runtime. The caller supplies the actor-selected metadata;
+// Manager does not resolve a chat, tab, or latest checkpoint from its caches.
+func (m *Manager) ChatDiffFromCheckpoints(ctx context.Context, chatID string, checkpoints []ChatCheckpoint, repoName, relPath string) (map[string]any, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	chatID = strings.TrimSpace(chatID)
+	repoName = strings.TrimSpace(repoName)
+	rel, err := cleanGitRelPath(relPath)
+	if err != nil {
+		return nil, structuredChatError("chat:diff-invalid-path", err.Error(), nil)
+	}
+	var repo ChatCheckpointRepo
+	baseTurn := 0
+	found := false
+	for i := len(checkpoints) - 1; i >= 0 && !found; i-- {
+		checkpoint := checkpoints[i]
+		for _, candidate := range checkpoint.Repos {
+			if candidate.Skipped || candidate.Ref == "" || !repoMatches(candidate, repoName) {
+				continue
+			}
+			repo, baseTurn, found = candidate, checkpoint.TurnSeq, true
+			break
+		}
+	}
+	if !found {
+		return nil, structuredChatError("chat:diff-not-found", "checkpoint repo not found", map[string]any{"chatId": chatID, "repo": repoName})
+	}
+	diff, err := diffPathFromTreeish(ctx, repo.Path, repo.Ref, rel)
+	if err != nil {
+		return nil, err
+	}
+	diff = redactSensitiveText(diff)
+	truncated := false
+	if len(diff) > chatDiffByteLimit {
+		diff = diff[:chatDiffByteLimit]
+		truncated = true
+	}
+	return map[string]any{
+		"chatId": chatID, "turnSeq": baseTurn, "repo": repo.Name,
+		"path": rel, "text": diff, "truncated": truncated,
 	}, nil
 }
 

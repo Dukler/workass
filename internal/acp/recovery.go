@@ -19,6 +19,24 @@ type crashRecoveryTarget struct {
 }
 
 func (m *Manager) handleUnexpectedBridgeExit(b *Bridge, cause error) {
+	if b == nil {
+		return
+	}
+	hint, policyErr := m.markProviderNeedsLogin(context.Background(), b.ProviderID(), cause)
+	if hint != "" || policyErr != nil {
+		m.abandonAdoptedHarnessTurns(b)
+		closeCause := cause
+		reason := providerStatusNeedsLogin
+		if policyErr != nil {
+			closeCause = policyErr
+			reason = "authentication-policy-invalid"
+		}
+		b.Close(false, closeCause)
+		m.opts.Logf("acp crash recovery suppressed", map[string]any{
+			"provider": b.ProviderID(), "reason": reason,
+		})
+		return
+	}
 	// A job adopted for a harness-born turn holds no prompt to re-drive, so it
 	// is ended here rather than recovered. Without this the engine's death would
 	// leave it running forever and every later human prompt would queue behind
@@ -29,14 +47,30 @@ func (m *Manager) handleUnexpectedBridgeExit(b *Bridge, cause error) {
 		b.Close(false, cause)
 		return
 	}
+	legacyTargets := make([]crashRecoveryTarget, 0, len(targets))
+	for _, target := range targets {
+		if target.opts.ProviderLaneManaged {
+			target.job.CrashInterrupted = true
+			target.job.actorRecoveryPending.Store(true)
+			continue
+		}
+		legacyTargets = append(legacyTargets, target)
+	}
+	// Bridge.Close emits the typed LaneDetached event for every actor-managed
+	// attachment. Its durable reducer transition is the only code allowed to
+	// schedule exact resume and turn readback.
+	if len(legacyTargets) == 0 {
+		b.Close(false, cause)
+		return
+	}
 
-	key := crashRecoveryKey(b, targets[0])
+	key := crashRecoveryKey(b, legacyTargets[0])
 	shouldRecover := m.reserveCrashRecovery(key, time.Now())
 	var done chan struct{}
 	if shouldRecover {
 		done = make(chan struct{})
 	}
-	for _, target := range targets {
+	for _, target := range legacyTargets {
 		target.job.CrashInterrupted = true
 		target.job.StopReason = "engine-crash"
 		if done != nil {
@@ -48,7 +82,7 @@ func (m *Manager) handleUnexpectedBridgeExit(b *Bridge, cause error) {
 		m.opts.Logf("acp crash recovery suppressed", map[string]any{"key": key, "reason": "recent-crash"})
 		return
 	}
-	go m.recoverCrashedBridge(targets, done)
+	go m.recoverCrashedBridge(legacyTargets, done)
 }
 
 func (b *Bridge) crashRecoveryTargets() []crashRecoveryTarget {
@@ -105,7 +139,11 @@ func (m *Manager) recoverCrashedBridge(targets []crashRecoveryTarget, done chan 
 	time.Sleep(m.opts.CrashRecoveryBackoff)
 
 	target := targets[0]
-	ctx, cancel := context.WithTimeout(context.Background(), maxDuration(m.opts.InitTimeout*2, 90*time.Second))
+	timeout := m.opts.InitTimeout * 2
+	if timeout < 90*time.Second {
+		timeout = 90 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	info, err := m.resurrectSession(ctx, target.opts)
 	if err != nil {
@@ -118,16 +156,10 @@ func (m *Manager) recoverCrashedBridge(targets []crashRecoveryTarget, done chan 
 		return
 	}
 
-	seedPrompt := buildReplaySeedPrompt(m.opts.RootDir, target.opts)
-	if strings.TrimSpace(seedPrompt) != "" {
-		if _, err := bridge.promptSystem(ctx, info.SessionID, seedPrompt); err != nil {
-			m.opts.Logf("acp crash recovery replay failed", map[string]any{"oldSessionId": target.oldSessionID, "newSessionId": info.SessionID, "error": err.Error()})
-			return
-		}
-	}
+	// The host process changed; the provider-native thread did not. Resume is
+	// the entire recovery operation—never replay Workass transcript text and
+	// never manufacture a replacement session.
 	bridge.markSeeded(info.SessionID)
-
-	m.emit("chat:session-replaced", map[string]any{"chatId": nullableString(target.chatID), "tabId": nullableString(target.tabID), "oldSessionId": target.oldSessionID, "session": info})
 	for _, item := range targets {
 		if item.job != nil && item.job.ID != "" {
 			m.emit("job:event", map[string]any{"type": "data", "id": item.job.ID, "stream": "system", "chunk": engineRecoveredChunk})

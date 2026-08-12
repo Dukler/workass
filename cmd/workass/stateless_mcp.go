@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -163,7 +165,7 @@ func (h *statelessMCPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			h.writeError(w, http.StatusBadRequest, request.ID, -32602, "invalid tools/call parameters", nil)
 			return
 		}
-		result, err := h.callTool(r, call, ownerKey, chatID, tabID)
+		result, err := h.callTool(r, call, ownerKey, chatID, tabID, stableMCPRequestOperationID(request.ID, call.Name, tabID, chatID))
 		if err != nil {
 			h.writeError(w, http.StatusInternalServerError, request.ID, -32603, acp.RedactSensitiveText(err.Error()), nil)
 			return
@@ -199,7 +201,15 @@ func (h *statelessMCPHandler) resultMeta() map[string]any {
 	}
 }
 
-func (h *statelessMCPHandler) callTool(r *http.Request, call browserMCPCallParams, ownerKey, chatID, tabID string) (any, error) {
+func stableMCPRequestOperationID(requestID any, toolName, tabID, chatID string) string {
+	raw, _ := json.Marshal(requestID)
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		"agent-mcp-v1", strings.TrimSpace(toolName), strings.TrimSpace(tabID), strings.TrimSpace(chatID), string(raw),
+	}, "\x00")))
+	return fmt.Sprintf("agent-mcp:%x", digest[:16])
+}
+
+func (h *statelessMCPHandler) callTool(r *http.Request, call browserMCPCallParams, ownerKey, chatID, tabID, operationID string) (any, error) {
 	if h.kind == browserMCPKind {
 		return callBrowserMCPTool(call, browserMCPOptions{
 			ControlFile: h.browserControlFile, ChatID: chatID, HTTPClient: h.browserClient,
@@ -209,7 +219,7 @@ func (h *statelessMCPHandler) callTool(r *http.Request, call browserMCPCallParam
 		return nil, errors.New("Workass agent control is unavailable")
 	}
 	return callAgentMCPTool(r, call, agentMCPOptions{
-		ChatID: chatID, TabID: tabID, OwnerKey: ownerKey,
+		ChatID: chatID, TabID: tabID, OwnerKey: ownerKey, OperationID: operationID,
 	}, h.agentControl)
 }
 

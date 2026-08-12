@@ -20,6 +20,7 @@ type daemonOptions struct {
 	Engine              engineConfig
 	EngineFlagOverrides map[string]bool
 	ChatControl         *chatControlCoordinator
+	ProviderChats       *providerChatRuntime
 	Artifacts           *artifacthost.Registry
 }
 

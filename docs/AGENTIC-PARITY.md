@@ -9,14 +9,12 @@ token budgets, remote pairing). ACP note: model/agent features live
 agent-side; workass owns the CLIENT/DAEMON side listed here.
 
 ## Daemon features (Sol lanes, serialized)
-D1. **Fallback auto-compaction** — usage% tracked per session (normalize usage
-    meta keys incl. workass.mock/*). Codex and Claude own context compaction
-    natively and are never summarized, session-replaced, or usage-reset by
-    Workass. For providers without known native context management, at threshold
-    (config, default 80%) and ONLY at a turn boundary: ask the chat's own agent
-    for a structured summary turn, then re-seed a fresh session with summary (+
-    last N turns verbatim) via the existing replay machinery. Emits
-    chat:compacted event. Never mid-turn; pinned chats compact at next boundary.
+D1. **Provider-owned compaction** — usage% is tracked per lane (normalize usage
+    meta keys incl. workass.mock/*). Native compaction advances the same
+    provider thread and reports a verified checkpoint through its adapter.
+    Providers without native compaction receive a visible context-limit event;
+    Workass never asks a model to summarize itself, replaces the thread, resets
+    usage, or replays transcript text.
 D2. **Steer / queue** — port app-chat:steer (legacy channel) with provider
     semantics: Codex routes concurrent input into the active app-server turn;
     Claude persists it as a distinct FIFO follow-up without cancelling the
@@ -27,10 +25,12 @@ D3. **Turn checkpoints + rewind (git-based)** — at each turn end with
     snapshot refs per touched repo; invokes chat:checkpoints (list per chat)
     and chat:rewind {turnId} restoring the pre-turn state (guard: refuses if
     repo dirtied outside the chat since). Makes work-card "Deshacer" real.
-D4. **Crash auto-recovery** — engine exit mid-turn → auto-respawn once with
-    backoff + replay + resume notice event; second crash → surfaced error.
-D5. **Fork chat** — app-chat:fork {tabId, atTurn?} → new session seeded with
-    transcript prefix (replay machinery), new tab payload returned.
+D4. **Crash recovery** — engine exit → bounded host restart and exact native
+    thread resume. Ambiguous in-flight acceptance blocks new admission until
+    reconciliation; no replay or replacement thread.
+D5. **Fork chat** — app-chat:fork {tabId, atTurn?} creates an explicit new lane
+    epoch only through a provider-native fork or verified non-sampling context
+    import; transcript prompt seeding is forbidden.
 D6. **Daemon polish (gap punch list)** — proc:changed on bridge close;
     config:set real persistence (app-config.json semantics + hot reload);
     lifecycle values read channel (config:get gains engine section);

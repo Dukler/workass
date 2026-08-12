@@ -169,6 +169,11 @@ const LANBridgeJS = `(() => {
     deployCatalog: () => invoke('deploy:catalog'), deployVersions: (o) => invoke('deploy:versions', o), deployPreflight: (o) => invoke('deploy:preflight', o),
     listSkills: () => invoke('skills:list'), appMeta: () => invoke('app:meta'), stateDigest: () => invoke('state:digest'), getSettings: () => invoke('settings:get'), setSettings: (s) => invoke('settings:set', s),
     getConfig: () => invoke('config:get'), setConfig: (p) => invoke('config:set', p), getSession: () => invoke('session:get'), saveSession: (s) => invoke('session:save', s),
+    chatQueueReplace: (o) => invoke('chat:queue-replace', o),
+    chatCreate: (o) => invoke('chat:create', o),
+    chatPresentationSave: (o) => invoke('chat:presentation-save', o),
+    chatRuntimeControlsSave: (o) => invoke('chat:runtime-controls-save', o),
+    chatDelete: (o) => invoke('chat:delete', o),
     // Dictation. The microphone belongs to the machine the human is sitting at,
     // so a remote view records here and sends the audio to whichever daemon owns
     // the chat — the reverse would record a machine with nobody in front of it.
@@ -190,7 +195,6 @@ const LANBridgeJS = `(() => {
     providersList: () => invoke('providers:list'), providersDetect: (o) => invoke('providers:detect', o || {}), providersUpdate: (providerId) => invoke('providers:update', { providerId }), providersToggle: (id, enabled) => invoke('providers:toggle', { id, enabled }),
     pickDirectory: () => invoke('dialog:pick-directory'), listDir: (p) => invoke('fs:list-dir', p), createDir: (parent, name) => invoke('fs:create-dir', { parent, name }), appChatCloseSession: (s) => invoke('app-chat:close-session', s),
     codeUnlock: (pin) => invoke('code:unlock', pin), codeLock: () => invoke('code:lock'), codeTree: () => invoke('code:tree'), codeRead: (rel) => invoke('code:read', rel),
-    appChatSetModel: (s, m) => invoke('app-chat:set-model', { sessionId: s, modelId: m }), appChatSetMode: (s, m) => invoke('app-chat:set-mode', { sessionId: s, modeId: m }),
     chatPermissionDecide: (id, optionId) => invoke('chat:permission-decide', { id, optionId }),
     chatPendingPermissions: () => invoke('chat:permissions-pending'),
     saveDraft: (k, t) => invoke('draft:save', { key: k, text: t }), setStatus: (k, st) => invoke('status:set', { key: k, status: st }),

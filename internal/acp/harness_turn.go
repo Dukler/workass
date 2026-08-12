@@ -382,7 +382,6 @@ func (m *Manager) adoptHarnessTurn(bridge *Bridge, tabID, chatID, sessionID, pro
 	bridge.setJobForSession(sessionID, job)
 	// A turn nobody asked for resumes the chat's existing obligation; it never
 	// opens a new one, because the user asked for nothing here.
-	m.resumeObligation(tabID, chatID)
 	m.emit("job:event", map[string]any{"type": "start", "job": job.Public()})
 }
 
@@ -407,7 +406,7 @@ func (m *Manager) endAdoptedHarnessTurn(bridge *Bridge, sessionID string) {
 	delete(m.jobs, job.ID)
 	m.mu.Unlock()
 	bridge.flushJobBuffers(job)
-	m.settleObligationForJob(job)
+	m.classifyDispositionForJob(job)
 	m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})
 	bridge.clearJobForSession(sessionID, job)
 	m.notifyJobEnd(job.TabID, job.ChatID)
@@ -429,7 +428,7 @@ func (m *Manager) abandonAdoptedHarnessTurn(bridge *Bridge, sessionID string) {
 	m.rememberFinishedJobLocked(job.ID)
 	delete(m.jobs, job.ID)
 	m.mu.Unlock()
-	m.settleObligationForJob(job)
+	m.classifyDispositionForJob(job)
 	m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})
 	bridge.clearJobForSession(sessionID, job)
 	m.notifyJobEnd(job.TabID, job.ChatID)

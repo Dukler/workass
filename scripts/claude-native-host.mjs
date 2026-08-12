@@ -5,7 +5,7 @@
 // the user's installed Claude Code executable underneath. stdout is protocol
 // JSON only; diagnostics go to stderr.
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import process from 'node:process';
 import readline from 'node:readline';
@@ -39,21 +39,23 @@ function safeErrorText(value) {
     .slice(0, 2000);
 }
 
-function diagnostic(label, error) {
-  process.stderr.write(`${label}: ${safeErrorText(error)}\n`);
+function opaqueRealmScope(kind, value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+  return `${kind}-${createHash('sha256').update(normalized).digest('hex').slice(0, 32)}`;
 }
 
-function isMissingConversationError(error) {
-  return /no conversation found with session id/i.test(String(error?.message || error || ''));
+function diagnostic(label, error) {
+  process.stderr.write(`${label}: ${safeErrorText(error)}\n`);
 }
 
 function isSessionInUseError(error) {
   return /session id .* is already in use/i.test(String(error?.message || error || ''));
 }
 
-function isRecoverableQueryControlError(error) {
+function isRecoverableQueryTransportError(error) {
   const text = String(error?.message || error || '');
-  return isMissingConversationError(error) || /ProcessTransport is not ready for writing/i.test(text);
+  return /ProcessTransport is not ready for writing/i.test(text);
 }
 
 function claudeResultError(result) {
@@ -245,6 +247,16 @@ function sdkUserMessage(sessionId, blocks, uuid = randomUUID(), priority) {
   };
 }
 
+function stableMessageUUID(sessionId, operationId) {
+  const value = String(operationId || '').trim();
+  if (!value) return randomUUID();
+  const bytes = Buffer.from(createHash('sha256').update(`${sessionId}\0${value}`).digest().subarray(0, 16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function mcpServerMap(rawServers) {
   const result = {};
   for (const raw of Array.isArray(rawServers) ? rawServers : []) {
@@ -338,13 +350,6 @@ class ConversationLedger {
 
   noteMaterialized() { this.materialized = true; }
 
-  // Claude Code says there is no conversation behind this id.
-  noteConversationMissing() {
-    this.established = false;
-    this.materialized = false;
-    this.resumeRequested = false;
-  }
-
   snapshotEstablished() { return this.established; }
   restoreEstablished(value) { this.established = Boolean(value); }
 }
@@ -394,6 +399,7 @@ class ClaudeSession {
     // new id while our ACP identity stays put; resuming the old id would
     // freeze context at the fork point (hostile-fixture finding, 2026-07-28).
     this.providerSessionId = sessionId;
+	this.providerLineage = 1;
     this.cwd = cwd;
     this.mcpServers = mcpServers;
     this.conversation = new ConversationLedger(resume);
@@ -442,6 +448,7 @@ class ClaudeSession {
     this.answeredQuestions = new Set();
     this.partialTextSeen = false;
     this.partialThoughtSeen = false;
+    this.providerRealm = null;
   }
 
   async start() {
@@ -449,19 +456,13 @@ class ClaudeSession {
     try {
       return await this.openQuery(resumeExisting);
     } catch (error) {
-      if (resumeExisting && isMissingConversationError(error)) {
-        this.conversation.noteConversationMissing();
-        this.providerSessionId = this.sessionId;
-        const previous = this.query;
-        if (previous) this.retireQuery(previous, true);
-        return this.openQuery(false);
-      }
       if (!resumeExisting && isSessionInUseError(error)) {
         // session/new promised a fresh empty session, so adopting the disk
         // history behind the collided id would smuggle unknown context under
         // a canonical replay. Rotate to an id nothing has used.
         this.sessionId = randomUUID();
         this.providerSessionId = this.sessionId;
+		this.providerLineage = 1;
         const previous = this.query;
         if (previous) this.retireQuery(previous, true);
         return this.openQuery(false);
@@ -632,6 +633,13 @@ class ClaudeSession {
     this.queryNeedsRestart = false;
     void this.consume(query, generation);
     const initialized = await query.initializationResult();
+    const accountIdentity = initialized?.account?.email || initialized?.account?.id || '';
+    const executable = String(process.env.WORKASS_CLAUDE_EXECUTABLE || '').trim();
+    this.providerRealm = {
+      accountScope: opaqueRealmScope('account', accountIdentity) || 'unverified-account',
+      installScope: opaqueRealmScope('install', executable),
+      verified: Boolean(accountIdentity),
+    };
     this.models = modelRows(initialized?.models);
     if (!this.currentModel && this.models.length) this.currentModel = this.models[0].value;
     if (initialized && typeof initialized === 'object') {
@@ -803,9 +811,9 @@ class ClaudeSession {
     return { behavior: 'deny', message: 'Permission was denied', toolUseID: options.toolUseID };
   }
 
-  async enqueuePrompt(blocks) {
-    if (this.activePrompt) throw new Error('A Claude turn is already running');
-    const uuid = randomUUID();
+  async enqueuePrompt(blocks, clientUserMessageId = '') {
+	if (this.activePrompt) throw new Error('A Claude turn is already running');
+	const uuid = stableMessageUUID(this.sessionId, clientUserMessageId);
     const message = sdkUserMessage(this.sessionId, blocks, uuid);
     this.startedTurns = true;
     this.turnStatus = 'active';
@@ -824,7 +832,8 @@ class ClaudeSession {
         bufferedText: '',
         substantiveOutput: false,
         establishedBeforePrompt: this.conversation.snapshotEstablished(),
-        inputSubmitted: false,
+      inputSubmitted: false,
+	  clientUserMessageId: String(clientUserMessageId || '').trim(),
         earlySteers: [],
       };
     });
@@ -1096,9 +1105,6 @@ class ClaudeSession {
     } catch (error) {
       if (this.closed || generation !== this.generation) return;
       diagnostic('Claude SDK stream failed', error);
-      if (isMissingConversationError(error)) {
-        this.conversation.noteConversationMissing();
-      }
       this.settlePrompt(null, error);
       this.retireQuery(query, false);
     }
@@ -1110,8 +1116,16 @@ class ClaudeSession {
     this.retryState = null;
     const announced = typeof message.session_id === 'string' ? message.session_id.trim() : '';
     if (announced && announced !== this.providerSessionId) {
+	  const previousProviderSessionId = this.providerSessionId;
+	  const lineageGeneration = ++this.providerLineage;
+	  const lineageProof = createHash('sha256')
+		.update(`${this.sessionId}\0${previousProviderSessionId}\0${announced}\0${lineageGeneration}`)
+		.digest('hex');
       this.providerSessionId = announced;
-      notify(this.sessionId, { sessionUpdate: '_workass_claude_provider_session', providerSessionId: announced });
+	  notify(this.sessionId, {
+		sessionUpdate: '_workass_claude_provider_session',
+		previousProviderSessionId, providerSessionId: announced, lineageGeneration, lineageProof,
+	  });
     }
     if (message.session_id && (message.type === 'user'
         || (message.type === 'result' && message.is_error !== true))) {
@@ -1122,10 +1136,14 @@ class ClaudeSession {
       // client sees dead air exactly when patience is scarcest.
       this.noteTurnPhase('compacting');
       this.emitTurnPulse();
+	  notify(this.sessionId, { sessionUpdate: '_workass_compaction', phase: 'started' });
     }
     if (message.type === 'system' && message.subtype === 'compact_boundary') {
       this.noteTurnPhase('waiting');
       this.emitTurnPulse();
+	  const checkpointId = String(message.uuid || message.session_id || this.providerSessionId || this.sessionId || '').trim();
+	  const digest = createHash('sha256').update(JSON.stringify({ checkpointId, compactMetadata: message.compact_metadata || null })).digest('hex');
+	  notify(this.sessionId, { sessionUpdate: '_workass_compaction', phase: 'checkpoint', checkpointId, digest });
     }
     if (message.type === 'system' && message.subtype === 'commands_changed' && Array.isArray(message.commands)) {
       // Full-list REPLACE semantics (SDKCommandsChangedMessage): swap the
@@ -1153,7 +1171,12 @@ class ClaudeSession {
     if (message.type === 'user') {
       // The echoed user message does not carry the uuid we pushed, so it is not
       // the receipt boundary; the terminal result of the pre-steer segment is.
-      this.acceptActivePrompt(String(message.uuid || ''));
+	  const echoedUUID = String(message.uuid || '');
+	  const active = this.activePrompt;
+	  if (active && active.clientUserMessageId && echoedUUID === active.uuid) {
+		notify(this.sessionId, { sessionUpdate: '_workass_input_consumed', clientUserMessageId: active.clientUserMessageId });
+	  }
+	  this.acceptActivePrompt(echoedUUID);
       this.completeToolResults(message);
       return;
     }
@@ -1353,10 +1376,7 @@ class ClaudeSession {
     try {
       await apply();
     } catch (error) {
-      if (!isRecoverableQueryControlError(error)) throw error;
-      if (isMissingConversationError(error)) {
-        this.conversation.noteConversationMissing();
-      }
+      if (!isRecoverableQueryTransportError(error)) throw error;
       this.invalidateQueryForOptions();
     }
   }
@@ -1533,6 +1553,9 @@ function spawnedWorkEvent(message) {
 
 async function openSession(params, resume) {
   const requested = String(params?.sessionId || '').trim();
+  if (resume && !requested) {
+    throw new Error('Claude session/resume requires the exact provider thread id');
+  }
   const injected = String(process.env.WORKASS_CLAUDE_SESSION_ID || '').trim();
   const sessionId = requested || injected || randomUUID();
   const existing = sessions.get(sessionId);
@@ -1560,7 +1583,6 @@ async function handleRequest(message) {
       protocolVersion: Number(params.protocolVersion || 1),
       agentInfo: { name: 'Claude Code', version: 'official-agent-sdk' },
       agentCapabilities: {
-        loadSession: true,
         sessionCapabilities: { resume: {}, close: {} },
         promptCapabilities: { image: true, audio: false, embeddedContext: false },
         mcpCapabilities: { http: true, sse: true },
@@ -1570,7 +1592,8 @@ async function handleRequest(message) {
         workassClaudeSteerRequest: true,
         workassClaudeSteerReceipt: true,
         workassClaudeUsageRequest: true,
-        workassTurnReconcileRequest: true,
+		workassTurnReconcileRequest: true,
+		workassStableTurnInputV1: true,
         // Advertised so the daemon can tell "old host" (absent commandCatalog
         // = UNKNOWN) apart from "proven empty" ([] from a host that looked).
         workassClaudeCommandCatalog: true,
@@ -1578,13 +1601,14 @@ async function handleRequest(message) {
     });
     return;
   }
-  if (method === 'session/new' || method === 'session/resume' || method === 'session/load') {
+  if (method === 'session/new' || method === 'session/resume') {
     const session = await openSession(params, method !== 'session/new');
     respond(id, {
       ...(method === 'session/new' ? { sessionId: session.sessionId } : {}),
       configOptions: session.configOptions(),
       availableModels: session.availableModels(),
       ...(session.commandCatalog ? { commandCatalog: session.commandCatalog } : {}),
+      _meta: { workassProviderRealm: session.providerRealm },
     });
     return;
   }
@@ -1592,7 +1616,7 @@ async function handleRequest(message) {
   const session = sessions.get(sessionId);
   if (!session) throw Object.assign(new Error('Claude session not found'), { rpcCode: -32000 });
   if (method === 'session/prompt') {
-    respond(id, await session.enqueuePrompt(params.prompt));
+	respond(id, await session.enqueuePrompt(params.prompt, String(params.clientUserMessageId || '').trim()));
     return;
   }
   if (method === 'session/set_config_option') {
