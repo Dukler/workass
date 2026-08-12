@@ -28,10 +28,31 @@ func TestSpawnedWorkListCarriesTheObligation(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stateDir, "obligations", "tab-1.json"), []byte(snapshot), 0o600); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
+	legacySession := map[string]any{
+		"activeId": "tab-1",
+		"chats": []any{
+			map[string]any{"id": "tab-1", "chatId": "chat-1", "title": "Needs input", "messages": []any{}, "queue": []any{}},
+			map[string]any{"id": "tab-2", "chatId": "chat-2", "title": "Quiet", "messages": []any{}, "queue": []any{}},
+		},
+	}
+	rawSession, err := json.Marshal(legacySession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, sessionStateFilename), rawSession, 0o600); err != nil {
+		t.Fatalf("write legacy session snapshot: %v", err)
+	}
 
 	manager := acp.NewManager(acp.Options{StateDir: stateDir})
+	t.Cleanup(func() { manager.Reset() })
+	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
+	runtime := newProviderChatRuntime(manager, store, stateDir)
+	if err := runtime.StartupError(); err != nil {
+		t.Fatalf("migrate actor obligation: %v", err)
+	}
+	t.Cleanup(func() { _ = runtime.Close(t.Context()) })
 	hub := wire.NewHub()
-	registerAcpHandlers(hub, manager, stateDir, nil, nil)
+	registerAcpHandlers(hub, manager, stateDir, store, nil, runtime)
 
 	reply := invokeSpawnedWorkList(t, hub, "tab-1", "chat-1")
 	obligation, ok := reply["obligation"].(map[string]any)
@@ -45,7 +66,7 @@ func TestSpawnedWorkListCarriesTheObligation(t *testing.T) {
 	// A chat that owes nothing must produce exactly the pre-obligation reply
 	// shape: the field is additive, so its absence is what an older daemon
 	// sends and what a client falling back to its previous behaviour reads.
-	quiet := invokeSpawnedWorkList(t, hub, "tab-1", "chat-none")
+	quiet := invokeSpawnedWorkList(t, hub, "tab-2", "chat-2")
 	if _, present := quiet["obligation"]; present {
 		t.Fatalf("quiet chat reply = %#v, want no obligation key", quiet)
 	}

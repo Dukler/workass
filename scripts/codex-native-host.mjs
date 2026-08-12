@@ -5,6 +5,7 @@
 // Zed compatibility package participates in this process tree.
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { open } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
@@ -15,6 +16,7 @@ const pendingWorkassRequests = new Map();
 let workassRequestSequence = 0;
 let app;
 let initializePromise;
+let providerRealm;
 let modelCatalog = [];
 
 function safeErrorText(value) {
@@ -140,16 +142,28 @@ function appServerArgs() {
   return parsed;
 }
 
+function opaqueRealmScope(kind, value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+  return `${kind}-${createHash('sha256').update(normalized).digest('hex').slice(0, 32)}`;
+}
+
 async function ensureInitialized() {
   if (!initializePromise) {
     initializePromise = (async () => {
       const executable = String(process.env.WORKASS_CODEX_EXECUTABLE || '').trim();
       if (!executable) throw new Error('WORKASS_CODEX_EXECUTABLE is required');
       app = new AppServerPeer(executable, appServerArgs());
-      await app.request('initialize', {
+      const initialized = await app.request('initialize', {
         clientInfo: { name: 'workass', title: 'Workass', version: String(process.env.WORKASS_VERSION || 'dev') },
         capabilities: { experimentalApi: true },
       });
+      const accountIdentity = initialized?.account?.email || initialized?.account?.id || initialized?.user?.email || '';
+      providerRealm = {
+        accountScope: opaqueRealmScope('account', accountIdentity) || 'unverified-account',
+        installScope: opaqueRealmScope('install', `${executable}\0${initialized?.codexHome || ''}`),
+        verified: Boolean(accountIdentity),
+      };
       app.notify('initialized');
       modelCatalog = await fetchModels();
       if (!modelCatalog.length) throw new Error('Codex app-server returned no models');
@@ -208,6 +222,7 @@ class CodexSession {
     this.mode = 'agent';
     this.mcpServers = mcpServers;
     this.activeTurnId = '';
+	this.activePromptClientId = '';
     this.activePrompt = null;
     this.turnStatus = 'idle';
     this.lastUsage = null;
@@ -221,9 +236,40 @@ class CodexSession {
 
   modelRow() { return modelCatalog.find((row) => row.id === this.model) || modelCatalog[0]; }
 
-  startPrompt(blocks) {
+  async reconcileOperation(clientUserMessageId) {
+    const clientId = String(clientUserMessageId || '').trim();
+    if (!clientId) throw new Error('operation reconciliation requires clientUserMessageId');
+    if (this.activePromptClientId === clientId && this.activeTurnId) {
+      return {
+        found: true, consumed: true, turnId: this.activeTurnId, status: this.turnStatus,
+        terminal: ['completed', 'failed', 'interrupted'].includes(this.turnStatus),
+      };
+    }
+    let cursor = null;
+    let matched = null;
+    for (let page = 0; page < 8 && !matched; page += 1) {
+      const response = await app.request('thread/items/list', {
+        threadId: this.threadId, cursor, limit: 256, sortDirection: 'desc',
+      });
+      matched = (Array.isArray(response?.data) ? response.data : [])
+        .find((entry) => entry?.item?.type === 'userMessage' && entry.item.clientId === clientId) || null;
+      cursor = response?.nextCursor || null;
+      if (!cursor) break;
+    }
+    if (!matched) return { found: false, consumed: false, status: 'absent', terminal: false };
+    const response = await app.request('thread/read', { threadId: this.threadId, includeTurns: true });
+    const turn = (response?.thread?.turns || []).find((candidate) => candidate.id === matched.turnId);
+    const status = turn?.status || 'unknown';
+    return {
+      found: true, consumed: true, turnId: matched.turnId, status,
+      terminal: ['completed', 'failed', 'interrupted'].includes(status),
+    };
+  }
+
+  startPrompt(blocks, clientUserMessageId = '') {
     if (this.activePrompt) throw new Error('A Codex turn is already running');
     this.turnStatus = 'starting';
+	this.activePromptClientId = String(clientUserMessageId || '').trim();
     this.turnError = null;
     this.turnStartedPromise = new Promise((resolve, reject) => {
       this.resolveTurnStarted = resolve;
@@ -237,6 +283,7 @@ class CodexSession {
     void app.request('turn/start', {
       threadId: this.threadId,
       input: codexInput(blocks),
+	  ...(clientUserMessageId ? { clientUserMessageId } : {}),
       cwd: this.cwd,
       model: this.model,
       effort: this.effort,
@@ -423,11 +470,18 @@ async function openSession(params, resume) {
   await ensureInitialized();
   const cwd = String(params.cwd || process.cwd());
   const common = { cwd, config: sessionConfig(cwd, params.mcpServers) };
+  const requestedThreadId = String(params.sessionId || '').trim();
+  if (resume && !requestedThreadId) {
+    throw new Error('Codex session/resume requires the exact provider thread id');
+  }
   const response = resume
-    ? await app.request('thread/resume', { ...common, threadId: params.sessionId })
+    ? await app.request('thread/resume', { ...common, threadId: requestedThreadId })
     : await app.request('thread/start', common);
-  const threadId = String(response?.thread?.id || params.sessionId || '');
+  const threadId = String(response?.thread?.id || requestedThreadId || '');
   if (!threadId) throw new Error('Codex app-server returned no thread id');
+  if (resume && threadId !== requestedThreadId) {
+    throw new Error('Codex session/resume returned a different provider thread id');
+  }
   let session = sessions.get(threadId);
   if (!session) {
     const defaultModel = modelCatalog.find((model) => model.isDefault) || modelCatalog[0];
@@ -553,7 +607,10 @@ async function handleAppNotification(method, params) {
     return;
   }
   if (method === 'thread/compacted') {
-    notify(session.threadId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '*Context compacted to fit the model\'s context window.*\n\n' } });
+	const checkpointId = String(params.threadId || session.threadId || '').trim();
+	const digest = createHash('sha256').update(JSON.stringify({ checkpointId, compacted: params })).digest('hex');
+	notify(session.threadId, { sessionUpdate: '_workass_compaction', phase: 'checkpoint', checkpointId, digest });
+	return;
   }
 }
 
@@ -561,8 +618,13 @@ async function emitItem(session, item, completed) {
   if (!item || typeof item !== 'object') return;
   if (item.type === 'agentMessage') { session.agentPhases.set(item.id, item.phase); return; }
   if (item.type === 'userMessage') {
-    if (item.clientId) notify(session.threadId, { sessionUpdate: '_workass_codex_steer_consumed', clientUserMessageId: item.clientId });
-    return;
+	if (item.clientId && item.clientId === session.activePromptClientId) {
+	  notify(session.threadId, { sessionUpdate: '_workass_input_consumed', clientUserMessageId: item.clientId });
+	  session.activePromptClientId = '';
+	} else if (item.clientId) {
+	  notify(session.threadId, { sessionUpdate: '_workass_codex_steer_consumed', clientUserMessageId: item.clientId });
+	}
+	return;
   }
   if (item.type === 'reasoning' && completed && Array.isArray(item.summary) && item.summary.length) {
     notify(session.threadId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: item.summary.join('\n\n') } });
@@ -669,7 +731,7 @@ async function handleWorkassRequest(message) {
       protocolVersion: Number(params.protocolVersion || 1),
       agentInfo: { name: 'Codex', version: 'official-app-server' },
       agentCapabilities: {
-        loadSession: true, sessionCapabilities: { resume: {}, close: {} },
+        sessionCapabilities: { resume: {}, close: {} },
         promptCapabilities: { image: true, audio: false, embeddedContext: false },
         mcpCapabilities: { http: true, sse: false },
       },
@@ -677,16 +739,17 @@ async function handleWorkassRequest(message) {
       _meta: {
         workassCodexSteerRequest: true, workassCodexSteerReceipt: true, workassCodexSteerRaceV1: true,
         workassCodexRateLimitsRequest: true, workassCodexRateLimitResetRequest: true,
-        workassTurnReconcileRequest: true,
+		workassTurnReconcileRequest: true, workassStableTurnInputV1: true, workassOperationReadbackV1: true,
       },
     });
     return;
   }
-  if (method === 'session/new' || method === 'session/resume' || method === 'session/load') {
+  if (method === 'session/new' || method === 'session/resume') {
     const session = await openSession(params, method !== 'session/new');
     respond(id, {
       ...(method === 'session/new' ? { sessionId: session.threadId } : {}),
       configOptions: configOptions(session), availableModels: availableModels(),
+      _meta: { workassProviderRealm: providerRealm },
     });
     return;
   }
@@ -694,7 +757,10 @@ async function handleWorkassRequest(message) {
   if (!session && !method.startsWith('_workass/codex/rate-limit')) {
     throw Object.assign(new Error('Codex session not found'), { rpcCode: -32000 });
   }
-  if (method === 'session/prompt') { respond(id, await session.startPrompt(params.prompt)); return; }
+  if (method === 'session/prompt') {
+	respond(id, await session.startPrompt(params.prompt, String(params.clientUserMessageId || '').trim()));
+	return;
+	}
   if (method === 'session/set_config_option') { respond(id, session.setConfig(String(params.configId || ''), params.value)); return; }
   if (method === '_workass/codex/steer') { respond(id, await session.steer(params.prompt, String(params.clientUserMessageId || ''))); return; }
   if (method === '_workass/codex/rate-limits') { await ensureInitialized(); respond(id, await app.request('account/rateLimits/read', {})); return; }
@@ -709,6 +775,10 @@ async function handleWorkassRequest(message) {
     return;
   }
   if (method === '_workass/turn/reconcile') {
+	if (params.clientUserMessageId) {
+	  respond(id, await session.reconcileOperation(params.clientUserMessageId));
+	  return;
+	}
     if (session.activeTurnId) {
       const response = await app.request('thread/read', { threadId: session.threadId, includeTurns: true });
       const turn = (response.thread?.turns || []).find((candidate) => candidate.id === session.activeTurnId);

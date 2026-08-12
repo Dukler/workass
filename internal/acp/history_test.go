@@ -2,68 +2,11 @@ package acp
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
-
-func TestBuildHistoryBlockTruncatesSingleOversizedRecentMessage(t *testing.T) {
-	history := []historyMessage{
-		{Role: "assistant", Content: strings.Repeat("x", 80000), At: "2026-07-10T00:00:00Z"},
-	}
-
-	block := buildHistoryBlock(history, 24000)
-
-	if len(block) > 26000 {
-		t.Fatalf("history block length = %d, want bounded near budget", len(block))
-	}
-	if !strings.Contains(block, "history truncated") {
-		t.Fatalf("history block did not mark truncation")
-	}
-}
-
-func TestPromptHistoryForTabReadsBoundedArchiveWindow(t *testing.T) {
-	stateDir := t.TempDir()
-	archiveDir := filepath.Join(stateDir, "chat-archive")
-	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
-		t.Fatalf("mkdir archive: %v", err)
-	}
-	file, err := os.Create(filepath.Join(archiveDir, "large-tab.jsonl"))
-	if err != nil {
-		t.Fatalf("create archive: %v", err)
-	}
-	enc := json.NewEncoder(file)
-	for i := 0; i < 100; i++ {
-		record := map[string]any{
-			"role":    "assistant",
-			"content": strings.Repeat("x", 5000) + " tail",
-			"at":      fmt.Sprintf("2026-07-10T00:00:%02dZ", i),
-		}
-		if err := enc.Encode(record); err != nil {
-			t.Fatalf("encode archive: %v", err)
-		}
-	}
-	if err := file.Close(); err != nil {
-		t.Fatalf("close archive: %v", err)
-	}
-
-	history := promptHistoryForTab(stateDir, JobStartOptions{TabID: "large-tab", HistoryCharBudget: 24000})
-
-	total := 0
-	for _, msg := range history {
-		total += len(msg.Content)
-	}
-	if total > archiveReadCharCap(24000)+6000 {
-		t.Fatalf("archive history content = %d, want bounded", total)
-	}
-	if len(history) >= 100 {
-		t.Fatalf("history messages = %d, want bounded tail window", len(history))
-	}
-}
 
 func TestEnvironmentBriefIncludesChatArchivePath(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -100,13 +43,13 @@ func TestEnvironmentBriefCurrentRequestLanguageOverridesRestoredTranscript(t *te
 	rule := expectedPerTurnLanguageRule
 	if !strings.Contains(result, rule) ||
 		!strings.Contains(result, "restored transcripts") ||
-		!strings.Contains(result, "Respuesta anterior en español.") ||
+		strings.Contains(result, "Respuesta anterior en español.") ||
+		strings.Contains(result, "Previous conversation") ||
 		!strings.Contains(result, "User request:\nContinue this work in English.") {
-		t.Fatalf("language precedence brief missing from restored-history prompt:\n%s", result)
+		t.Fatalf("Workass history was replayed or the current-request boundary is missing:\n%s", result)
 	}
-	if strings.Index(result, rule) < strings.Index(result, "Respuesta anterior en español.") ||
-		strings.Index(result, rule) > strings.Index(result, "User request:\nContinue this work in English.") {
-		t.Fatalf("per-turn language rule must follow restored transcript and immediately govern the current request:\n%s", result)
+	if strings.Index(result, rule) > strings.Index(result, "User request:\nContinue this work in English.") {
+		t.Fatalf("per-turn language rule must govern the current request:\n%s", result)
 	}
 
 	spanishSession := newFakeSession(t, manager, "language-tab-spanish")
@@ -117,9 +60,10 @@ func TestEnvironmentBriefCurrentRequestLanguageOverridesRestoredTranscript(t *te
 	spanishEnd := events.waitJobEnd(t, jobID(spanishJob), 2*time.Second)
 	spanishResult := jobFromEnd(spanishEnd)["result"].(string)
 	if !strings.Contains(spanishResult, rule) ||
-		!strings.Contains(spanishResult, "Previous assistant response in English.") ||
+		strings.Contains(spanishResult, "Previous assistant response in English.") ||
+		strings.Contains(spanishResult, "Previous conversation") ||
 		!strings.Contains(spanishResult, "User request:\nContinuá este trabajo en español.") {
-		t.Fatalf("current Spanish request did not retain dynamic language precedence:\n%s", spanishResult)
+		t.Fatalf("current Spanish request replayed history or lost its language boundary:\n%s", spanishResult)
 	}
 }
 
@@ -132,9 +76,9 @@ func TestEnvironmentBriefIncludesActiveModelOnEveryTurn(t *testing.T) {
 		job, err := manager.StartJob(context.Background(), JobStartOptions{
 			Kind:       "app-chat",
 			SessionID:  session.SessionID,
-			ChatID:     "chat-model-identity",
+			ChatID:     "chat-model-identity-tab",
 			TabID:      "model-identity-tab",
-			ProviderID: "mock",
+			ProviderID: session.ProviderID,
 			ModelID:    modelID,
 			Prompt:     prompt,
 		})
@@ -146,7 +90,7 @@ func TestEnvironmentBriefIncludesActiveModelOnEveryTurn(t *testing.T) {
 	}
 
 	first := start("model-alpha", "what model are you?")
-	if !strings.Contains(first, `provider "mock"`) ||
+	if !strings.Contains(first, `provider "`+session.ProviderID+`"`) ||
 		!strings.Contains(first, `model "model-alpha"`) ||
 		!strings.Contains(first, "answer with this exact Workass runtime identity") ||
 		!strings.Contains(first, "User request:\nwhat model are you?") {
@@ -169,7 +113,7 @@ func TestCompletedAppChatJobsArePruned(t *testing.T) {
 	job, err := manager.StartJob(context.Background(), JobStartOptions{
 		Kind:      "app-chat",
 		SessionID: session.SessionID,
-		ChatID:    "chat-prune",
+		ChatID:    "chat-prune-tab",
 		TabID:     "prune-tab",
 		Prompt:    "prune completed job",
 	})

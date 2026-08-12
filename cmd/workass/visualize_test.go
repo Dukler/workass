@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"workass/internal/acp"
 	"workass/internal/artifacthost"
+	"workass/internal/chat"
 	"workass/internal/wire"
 )
 
@@ -27,13 +31,16 @@ func TestVisualizeHostCapturesAllowedExecutorHTML(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
-	created, err := store.AgentCreateChat("Visualization", t.TempDir(), "mock", "mock", "ask", true)
-	if err != nil {
+	manager := acp.NewManager(acp.Options{StateDir: stateDir, RSSSampleInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newProviderChatRuntime(manager, store, stateDir)
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
+	const tabID, chatID = "visual-tab", "visual-chat"
+	if _, err := runtime.actorForNewChat(chatID, chat.PresentationState{TabID: tabID, Title: "Visualization"}); err != nil {
 		t.Fatal(err)
 	}
-	tabID, chatID := fieldString(created, "tabId"), fieldString(created, "chatId")
 	hub := wire.NewHub()
-	registerVisualizeHandler(hub, registry, store, stateDir)
+	registerVisualizeHandler(hub, registry, runtime, stateDir)
 
 	result, err := hub.Invoke("visualize:host", []any{map[string]any{
 		"tabId": tabID, "chatId": chatID, "path": source, "mode": "wide", "title": "Signals",

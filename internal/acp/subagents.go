@@ -96,6 +96,27 @@ func (m *Manager) ValidateAgentOwner(ownerKey, chatID, tabID string) bool {
 	return ok && boundChat == strings.TrimSpace(chatID) && boundTab == strings.TrimSpace(tabID)
 }
 
+// WithActorOwner executes one already-authorized durable chat effect through
+// the existing agent/background runtime without persisting or logging a bearer
+// capability. The actor's immutable chat/lane/operation owner is the authority;
+// this short-lived key is only an adapter for legacy executor internals.
+func (m *Manager) WithActorOwner(chatID, tabID string, execute func(string) (any, error)) (any, error) {
+	chatID, tabID = strings.TrimSpace(chatID), strings.TrimSpace(tabID)
+	if m == nil || chatID == "" || tabID == "" || execute == nil {
+		return nil, errors.New("actor background execution requires chat, tab, and executor")
+	}
+	m.mu.Lock()
+	ownerKey := m.newAgentOwnerKeyLocked()
+	m.bindAgentOwnerLocked(ownerKey, chatID, tabID)
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.agentOwners, ownerKey)
+		m.mu.Unlock()
+	}()
+	return execute(ownerKey)
+}
+
 // SubagentRun is a snapshot-safe record. cancel is daemon-private and never
 // crosses a log/UI/API boundary.
 type SubagentRun struct {
@@ -371,11 +392,14 @@ func (m *Manager) runSubagent(runCtx context.Context, run *SubagentRun, prompt, 
 	nextPrompt := buildTurnRuntimeIdentity(bridge, providerID, selectedModel) +
 		m.buildEnvironmentBrief(true) + "Subagent task:\n" + prompt
 	var result PromptResult
+	promptSequence := int64(0)
 	for {
 		var promptErr error
-		result, promptErr = bridge.promptForJob(runCtx, info.SessionID, job, nextPrompt, nil)
+		operationID := fmt.Sprintf("%s:prompt:%d", job.ID, promptSequence)
+		result, promptErr = bridge.promptForJob(runCtx, info.SessionID, job, operationID, nextPrompt, nil)
 		followup, hasFollowup := m.popSubagentFollowupOrSeal(id)
 		if hasFollowup {
+			promptSequence = followup.ID
 			m.updateSubagentActivity(id, "working", "Applying coordinator follow-up")
 			// Same session, same engine: the identity line and the environment
 			// brief were sent with the original task and are still in context.

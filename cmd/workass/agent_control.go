@@ -9,12 +9,13 @@ import (
 
 	"workass/internal/acp"
 	"workass/internal/artifacthost"
+	"workass/internal/chat"
+	providercontract "workass/internal/provider"
 )
 
 type agentControlHandler struct {
 	manager   *acp.Manager
 	chats     *chatControlCoordinator
-	state     *sessionStore
 	artifacts *artifacthost.Registry
 }
 
@@ -23,18 +24,14 @@ type agentControlRequest struct {
 	Params map[string]any `json:"params"`
 }
 
-func newAgentControlHandler(manager *acp.Manager, state *sessionStore, broadcast func(string, any), coordinators ...*chatControlCoordinator) (*agentControlHandler, error) {
+func newAgentControlHandler(manager *acp.Manager, broadcast func(string, any), chats *chatControlCoordinator) (*agentControlHandler, error) {
 	if manager == nil {
 		return nil, errors.New("agent control requires an ACP manager")
 	}
-	var chats *chatControlCoordinator
-	if len(coordinators) > 0 {
-		chats = coordinators[0]
+	if chats == nil || chats.providerChats == nil {
+		return nil, errors.New("agent control requires the singleton durable chat actor runtime")
 	}
-	if chats == nil {
-		chats = newChatControlCoordinator(manager, state, broadcast)
-	}
-	handler := &agentControlHandler{manager: manager, chats: chats, state: state}
+	handler := &agentControlHandler{manager: manager, chats: chats}
 	chats.resumeQueues()
 	return handler, nil
 }
@@ -51,7 +48,7 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		}
 		switch request.Method {
 		case "chat.list":
-			return h.chats.list(), nil
+			return h.chats.list()
 		case "chat.read":
 			return h.chats.read(params)
 		case "chat.create":
@@ -76,30 +73,28 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		if !h.manager.ValidateAgentOwner(ownerKey, chatID, tabID) {
 			return nil, errors.New("no running Workass turn owns this subagent request")
 		}
-		rootJobIDHint := ""
-		if h.state != nil {
-			rootJobIDHint = h.state.MostRecentVisibleAssistantJobID(tabID, chatID)
+		if h.chats == nil || h.chats.providerChats == nil {
+			return nil, errors.New("subagent spawn requires the durable chat actor")
 		}
-		return h.manager.SpawnSubagent(r.Context(), acp.SubagentSpawnOptions{
-			OwnerKey:         ownerKey,
-			ParentChatID:     chatID,
-			ParentTabID:      tabID,
-			RootJobIDHint:    rootJobIDHint,
-			Prompt:           fieldString(params, "prompt"),
-			Label:            fieldString(params, "label"),
-			ProviderID:       fieldString(params, "provider_id"),
-			ModelID:          fieldString(params, "model_id"),
-			Effort:           fieldString(params, "effort"),
-			ModeID:           fieldString(params, "mode_id"),
-			CWD:              fieldString(params, "cwd"),
-			Profile:          fieldString(params, "profile"),
-			PermissionIntent: fieldString(params, "permission_intent"),
+		return h.chats.providerChats.RunBackgroundAction(r.Context(), tabID, chatID, chat.BackgroundAction{
+			Kind: chat.BackgroundSpawnAgent, OperationID: providercontract.NormalizeOperationID(fieldString(params, "operation_id")),
+			Spawn: &chat.SpawnAgentAction{
+				Prompt: fieldString(params, "prompt"), Label: fieldString(params, "label"),
+				ProviderID: fieldString(params, "provider_id"), ModelID: fieldString(params, "model_id"),
+				Effort: fieldString(params, "effort"), ModeID: fieldString(params, "mode_id"),
+				CWD: fieldString(params, "cwd"), Profile: fieldString(params, "profile"),
+				PermissionIntent: fieldString(params, "permission_intent"),
+			},
 		})
 	case "agent.list":
-		if !h.manager.ValidateAgentOwner(ownerKey, chatID, tabID) {
-			return nil, errors.New("no running Workass turn owns this subagent request")
+		if h.chats == nil || h.chats.providerChats == nil {
+			return nil, errors.New("agent list requires the durable chat actor")
 		}
-		return map[string]any{"subagents": h.manager.ListSubagents(ownerKey, chatID, tabID)}, nil
+		subagents, err := h.chats.providerChats.ListSubagents(ownerKey, tabID, chatID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"subagents": subagents}, nil
 	case "agent.wait":
 		id := fieldString(params, "id")
 		if id == "" {
@@ -109,11 +104,11 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		if timeoutMS != 0 && (timeoutMS < 1000 || timeoutMS > 3600000) {
 			return nil, errors.New("subagent wait timeout_ms must be between 1000 and 3600000")
 		}
-		if !h.manager.ValidateAgentOwner(ownerKey, chatID, tabID) {
-			return nil, errors.New("no running Workass turn owns this subagent request")
+		if h.chats == nil || h.chats.providerChats == nil {
+			return nil, errors.New("agent wait requires the durable chat actor")
 		}
 		timeout := time.Duration(timeoutMS) * time.Millisecond
-		return h.manager.WaitSubagent(r.Context(), ownerKey, chatID, tabID, id, timeout)
+		return h.chats.providerChats.WaitSubagent(r.Context(), ownerKey, tabID, chatID, id, timeout)
 	case "agent.wait_many":
 		ids := stringSliceField(params["ids"])
 		if len(ids) == 0 {
@@ -123,31 +118,44 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		if timeoutMS != 0 && (timeoutMS < 1000 || timeoutMS > 3600000) {
 			return nil, errors.New("subagent wait timeout_ms must be between 1000 and 3600000")
 		}
-		if !h.manager.ValidateAgentOwner(ownerKey, chatID, tabID) {
-			return nil, errors.New("no running Workass turn owns this subagent request")
+		if h.chats == nil || h.chats.providerChats == nil {
+			return nil, errors.New("agent wait requires the durable chat actor")
 		}
-		return h.manager.WaitSubagents(r.Context(), ownerKey, chatID, tabID, ids, fieldString(params, "return_when"), time.Duration(timeoutMS)*time.Millisecond)
+		return h.chats.providerChats.WaitSubagents(r.Context(), ownerKey, tabID, chatID, ids, fieldString(params, "return_when"), time.Duration(timeoutMS)*time.Millisecond)
 	case "agent.message":
 		if !h.manager.ValidateAgentOwner(ownerKey, chatID, tabID) {
 			return nil, errors.New("no running Workass turn owns this subagent request")
 		}
-		return h.manager.MessageSubagent(ownerKey, chatID, tabID, fieldString(params, "id"), fieldString(params, "message"))
+		return h.runBackgroundAction(r, tabID, chatID, chat.BackgroundAction{
+			Kind: chat.BackgroundMessageAgent, OperationID: providercontract.NormalizeOperationID(fieldString(params, "operation_id")),
+			Message: &chat.MessageAgentAction{WorkID: fieldString(params, "id"), Message: fieldString(params, "message")},
+		})
 	case "agent.retry":
 		if !h.manager.ValidateAgentOwner(ownerKey, chatID, tabID) {
 			return nil, errors.New("no running Workass turn owns this subagent request")
 		}
-		return h.manager.RetrySubagent(r.Context(), ownerKey, chatID, tabID, fieldString(params, "id"), fieldString(params, "message"))
+		return h.runBackgroundAction(r, tabID, chatID, chat.BackgroundAction{
+			Kind: chat.BackgroundRetryAgent, OperationID: providercontract.NormalizeOperationID(fieldString(params, "operation_id")),
+			Retry: &chat.RetryAgentAction{WorkID: fieldString(params, "id"), Message: fieldString(params, "message")},
+		})
 	case "agent.receipts":
-		if !h.manager.ValidateAgentOwner(ownerKey, chatID, tabID) {
-			return nil, errors.New("no running Workass turn owns this subagent request")
+		if h.chats == nil || h.chats.providerChats == nil {
+			return nil, errors.New("agent receipts require the durable chat actor")
 		}
-		return map[string]any{"receipts": h.manager.ListSubagentReceipts(ownerKey, chatID, tabID, intField(params, "limit"))}, nil
+		receipts, err := h.chats.providerChats.ListSubagentReceipts(ownerKey, tabID, chatID, intField(params, "limit"))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"receipts": receipts}, nil
 	case "spawned_work.list":
 		tailChars := intField(params, "tail_chars")
 		if tailChars < 0 || tailChars > 12000 {
 			return nil, errors.New("spawned work tail_chars must be between 0 and 12000")
 		}
-		items, err := h.manager.ListSpawnedWorkForOwner(
+		if h.chats == nil || h.chats.providerChats == nil {
+			return nil, errors.New("spawned work list requires the durable chat actor")
+		}
+		items, err := h.chats.providerChats.ListSpawnedWorkForOwner(
 			ownerKey, chatID, tabID, fieldString(params, "chat_id"), fieldString(params, "tab_id"), tailChars,
 		)
 		if err != nil {
@@ -155,7 +163,10 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		}
 		return map[string]any{"items": items}, nil
 	case "spawned_work.receipts":
-		receipts, err := h.manager.ListSpawnedWorkReceipts(
+		if h.chats == nil || h.chats.providerChats == nil {
+			return nil, errors.New("spawned work receipts require the durable chat actor")
+		}
+		receipts, err := h.chats.providerChats.ListSpawnedWorkReceipts(
 			ownerKey, chatID, tabID, fieldString(params, "chat_id"), fieldString(params, "tab_id"), intField(params, "limit"),
 		)
 		if err != nil {
@@ -170,11 +181,19 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			}
 			pid = &value
 		}
-		return h.manager.RegisterExternalWork(acp.ExternalWorkRegistrationOptions{
-			OwnerKey: ownerKey, ParentChatID: chatID, ParentTabID: tabID,
-			TabID: fieldString(params, "tab_id"), ChatID: fieldString(params, "chat_id"),
-			Label: fieldString(params, "label"), Role: fieldString(params, "role"), PID: pid,
-			OutputFile: fieldString(params, "output_file"), DoneFile: fieldString(params, "done_file"),
+		targetTab, targetChat := firstNonEmptyString(fieldString(params, "tab_id"), tabID), firstNonEmptyString(fieldString(params, "chat_id"), chatID)
+		if targetTab != tabID || targetChat != chatID {
+			return nil, errors.New("external work must remain in the exact owning Workass chat")
+		}
+		if !h.manager.ValidateAgentOwner(ownerKey, targetChat, targetTab) {
+			return nil, errors.New("no running Workass turn owns this external work request")
+		}
+		return h.runBackgroundAction(r, tabID, chatID, chat.BackgroundAction{
+			Kind: chat.BackgroundRegisterExternal, OperationID: providercontract.NormalizeOperationID(fieldString(params, "operation_id")),
+			Register: &chat.RegisterExternalAction{
+				Label: fieldString(params, "label"), Role: fieldString(params, "role"), PID: pid,
+				OutputFile: fieldString(params, "output_file"), DoneFile: fieldString(params, "done_file"),
+			},
 		})
 	case "obligation.get":
 		obligationTab := firstNonEmptyString(fieldString(params, "tab_id"), tabID)
@@ -182,23 +201,41 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		if !h.manager.ValidateAgentOwner(ownerKey, obligationChat, obligationTab) {
 			return nil, errors.New("no running Workass turn owns this obligation request")
 		}
-		return map[string]any{"ok": true, "obligation": h.manager.ObligationFor(obligationTab, obligationChat)}, nil
+		if h.chats == nil || h.chats.providerChats == nil {
+			return nil, errors.New("obligation read requires the durable chat actor")
+		}
+		obligation, err := h.chats.providerChats.Obligation(obligationTab, obligationChat)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true, "obligation": obligation}, nil
 	case "external.settle":
 		var exitCode *int
 		if value, ok := intFieldPresent(params, "exit_code"); ok {
 			exitCode = &value
 		}
-		return h.manager.SettleExternalWork(acp.ExternalWorkSettleOptions{
-			OwnerKey: ownerKey, ParentChatID: chatID, ParentTabID: tabID,
-			TabID: fieldString(params, "tab_id"), ChatID: fieldString(params, "chat_id"),
-			WorkID: fieldString(params, "work_id"), Status: fieldString(params, "status"),
-			ExitCode: exitCode, Summary: fieldString(params, "summary"),
+		targetTab, targetChat := firstNonEmptyString(fieldString(params, "tab_id"), tabID), firstNonEmptyString(fieldString(params, "chat_id"), chatID)
+		if targetTab != tabID || targetChat != chatID {
+			return nil, errors.New("external work must remain in the exact owning Workass chat")
+		}
+		if !h.manager.ValidateAgentOwner(ownerKey, targetChat, targetTab) {
+			return nil, errors.New("no running Workass turn owns this external work request")
+		}
+		return h.runBackgroundAction(r, tabID, chatID, chat.BackgroundAction{
+			Kind: chat.BackgroundSettleExternal, OperationID: providercontract.NormalizeOperationID(fieldString(params, "operation_id")),
+			Settle: &chat.SettleExternalAction{
+				WorkID: fieldString(params, "work_id"), Status: fieldString(params, "status"),
+				ExitCode: exitCode, Summary: fieldString(params, "summary"),
+			},
 		})
 	case "artifact.host", "html.host":
 		if h.artifacts == nil {
 			return nil, errors.New("Workass artifact hosting is unavailable")
 		}
-		cwd, err := h.manager.AgentOwnerCWD(ownerKey, chatID, tabID)
+		if h.chats == nil || h.chats.providerChats == nil {
+			return nil, errors.New("artifact hosting requires the durable chat actor")
+		}
+		cwd, err := h.chats.providerChats.AgentOwnerCWD(ownerKey, tabID, chatID)
 		if err != nil {
 			return nil, err
 		}
@@ -214,22 +251,28 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		if !h.manager.ValidateAgentOwner(ownerKey, chatID, tabID) {
 			return nil, errors.New("no running Workass turn owns this subagent request")
 		}
-		if h.manager.CancelSubagent(ownerKey, chatID, tabID, id) {
-			return map[string]any{"ok": true}, nil
-		}
-		// A bare false reads as "cancellation is broken" when the usual cause is
-		// that the run is gone: the registry is in memory, so a daemon restart
-		// takes every running subagent with it and leaves no receipt either.
-		return map[string]any{"ok": false, "reason": "no addressable running subagent with that id in this chat; it may have already ended, or been lost to a daemon restart"}, nil
+		return h.runBackgroundAction(r, tabID, chatID, chat.BackgroundAction{
+			Kind: chat.BackgroundCancelAgent, OperationID: providercontract.NormalizeOperationID(fieldString(params, "operation_id")),
+			Cancel: &chat.CancelAgentAction{WorkID: id},
+		})
 	case "agent.decide_permission":
 		if !h.manager.ValidateAgentOwner(ownerKey, chatID, tabID) {
 			return nil, errors.New("no running Workass turn owns this subagent request")
 		}
-		return h.manager.DecideSubagentPermission(ownerKey, chatID, tabID,
-			fieldString(params, "subagent_id"), fieldString(params, "decision"))
+		return h.runBackgroundAction(r, tabID, chatID, chat.BackgroundAction{
+			Kind: chat.BackgroundAgentPermission, OperationID: providercontract.NormalizeOperationID(fieldString(params, "operation_id")),
+			Permission: &chat.AgentPermissionAction{WorkID: fieldString(params, "subagent_id"), Decision: fieldString(params, "decision")},
+		})
 	default:
 		return nil, errors.New("unknown agent control method")
 	}
+}
+
+func (h *agentControlHandler) runBackgroundAction(r *http.Request, tabID, chatID string, action chat.BackgroundAction) (any, error) {
+	if h == nil || h.chats == nil || h.chats.providerChats == nil {
+		return nil, errors.New("background mutation requires the durable chat actor")
+	}
+	return h.chats.providerChats.RunBackgroundAction(r.Context(), tabID, chatID, action)
 }
 
 func stringSliceField(raw any) []string {

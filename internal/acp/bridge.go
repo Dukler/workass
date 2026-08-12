@@ -26,6 +26,7 @@ type Bridge struct {
 
 	mu                sync.Mutex
 	child             *exec.Cmd
+	childExited       chan struct{}
 	processTree       processTreeHandle
 	stdin             io.WriteCloser
 	nextID            int64
@@ -66,7 +67,7 @@ type Bridge struct {
 	// Claude's adapter can report currentValue "default" for a synthetic row
 	// that aliases one explicit model. This is populated only from a unique
 	// metadata match in the unfiltered provider catalog and is guarded by mu.
-	claudeDefaultModelAlias string
+	syntheticDefaultModelAlias string
 	// Frontier adapters expose reasoning effort as a SEPARATE config option
 	// (Claude: "effort", Codex: "reasoning_effort") orthogonal to the model.
 	// Workass composes base[effort] only in its persisted/UI selection, then splits
@@ -90,12 +91,11 @@ type Bridge struct {
 	lastWorkassModelWrite map[string]string
 	durableModelSelection map[string]string
 
-	sessions         map[string]struct{}
-	seededSessions   map[string]struct{}
-	restoredSessions map[string]struct{}
-	jobsBySession    map[string]*Job
-	promptMu         sync.Mutex
-	writeMu          sync.Mutex
+	sessions       map[string]struct{}
+	seededSessions map[string]struct{}
+	jobsBySession  map[string]*Job
+	promptMu       sync.Mutex
+	writeMu        sync.Mutex
 }
 
 type pendingRequest struct {
@@ -149,7 +149,7 @@ func newBridge(key string, opts Options, manager *Manager) *Bridge {
 		providerID = normalizeProviderID(opts.DefaultProviderID)
 	}
 	if providerID == "" {
-		providerID = "mock"
+		providerID = defaultFixtureProviderID()
 	}
 	providerName := firstNonEmpty(opts.Provider.Name, opts.Provider.Label, providerID)
 	now := time.Now()
@@ -173,7 +173,6 @@ func newBridge(key string, opts Options, manager *Manager) *Bridge {
 		procID:                "engine-" + safeProcessID(key),
 		sessions:              make(map[string]struct{}),
 		seededSessions:        make(map[string]struct{}),
-		restoredSessions:      make(map[string]struct{}),
 		jobsBySession:         make(map[string]*Job),
 	}
 }
@@ -299,23 +298,11 @@ func (b *Bridge) start() error {
 		b.mu.Unlock()
 		return errors.New("ACP bridge closed")
 	}
-	provider := launchProviderConfig(b.opts.Provider)
+	providerConfig := b.opts.Provider
 	b.mu.Unlock()
-	if b.providerID == "claude" && isOfficialNativeCommand(provider, "claude") {
-		daemonExecutable, _ := os.Executable()
-		nativeProvider, err := claudeNativeHostLaunch(provider, b.opts, daemonExecutable)
-		if err != nil {
-			return err
-		}
-		provider = nativeProvider
-	}
-	if b.providerID == "codex" && isOfficialNativeCommand(provider, "codex") {
-		daemonExecutable, _ := os.Executable()
-		nativeProvider, err := codexNativeHostLaunch(provider, b.opts, daemonExecutable)
-		if err != nil {
-			return err
-		}
-		provider = nativeProvider
+	provider, err := providerAdapterForID(b.providerID).launch.Prepare(providerConfig, b.opts)
+	if err != nil {
+		return err
 	}
 
 	cmd := managedCommand(provider.Command, provider.Args...)
@@ -356,8 +343,10 @@ func (b *Bridge) start() error {
 		return fmt.Errorf("attach ACP process tree: %w", err)
 	}
 
+	childExited := make(chan struct{})
 	b.mu.Lock()
 	b.child = cmd
+	b.childExited = childExited
 	b.processTree = processTree
 	b.stdin = stdin
 	b.startedAt = time.Now()
@@ -371,11 +360,10 @@ func (b *Bridge) start() error {
 	b.recycleAtIdle = false
 	b.recycleReason = ""
 	b.mu.Unlock()
-	b.manager.bridgeChanged(b, "spawn")
-
 	go b.readStdout(stdout)
 	go b.readStderr(stderr)
-	go b.waitChild(cmd)
+	go b.waitChild(cmd, childExited)
+	b.manager.bridgeChanged(b, "spawn")
 	return nil
 }
 
@@ -431,7 +419,7 @@ func (b *Bridge) appendStderrTail(chunk []byte) {
 	}
 }
 
-func (b *Bridge) waitChild(cmd *exec.Cmd) {
+func (b *Bridge) waitChild(cmd *exec.Cmd, childExited chan struct{}) {
 	err := cmd.Wait()
 	code, signal := exitCodeSignal(cmd.ProcessState, err)
 	uptime := time.Duration(0)
@@ -449,6 +437,12 @@ func (b *Bridge) waitChild(cmd *exec.Cmd) {
 	rssKb := b.rssKb
 	b.mu.Unlock()
 	_ = releaseProcessTree(processTree)
+	// Close is the durable teardown receipt. Publish it only after Wait has
+	// reaped the native host and the process-tree handle has been released, so
+	// callers cannot remove StateDir while a provider is still finishing a
+	// checkpoint write. This happens before unexpected-exit handling because
+	// that path calls Bridge.Close and must never wait on its own goroutine.
+	close(childExited)
 
 	fields := map[string]any{
 		"key":      b.key,
@@ -464,6 +458,7 @@ func (b *Bridge) waitChild(cmd *exec.Cmd) {
 	b.opts.Logf("acp engine exited", fields)
 	if !alreadyClosed {
 		cause := fmt.Errorf("ACP server exited (%s%d)", signalPrefix(signal), code)
+		cause = b.withStderrTail(cause)
 		if b.manager != nil {
 			b.manager.handleUnexpectedBridgeExit(b, cause)
 		} else {
@@ -738,7 +733,7 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 		if job != nil {
 			if text := textFromContent(update["content"]); text != "" {
 				b.manager.updateSubagentActivityForJob(job, "working", "Writing response")
-				b.queueStdout(job, text, agentMessagePhase(update))
+				b.queueStdout(job, text, providerAdapterForID(b.providerID).delivery.AssistantPhase(update))
 			}
 			b.publishAssistantImages(job, toolImagesFromContent(update["content"]))
 		}
@@ -757,7 +752,7 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 		// upstream adapter intentionally drops it. Workass's exact-version patch
 		// forwards only the bounded task fields in this additive update. It may
 		// arrive after the user turn ended, so it must not require a live job.
-		if b.manager.acceptsClaudeSpawnedWorkProvider(b.ProviderID()) {
+		if b.manager.acceptsNativeSpawnedWorkProvider(b.ProviderID()) {
 			tabID, chatID := b.chatIdentity()
 			b.manager.observeClaudeSpawnedWork(tabID, chatID, sessionID, mapFromAny(update["event"]))
 		}
@@ -766,7 +761,7 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 		// require a live job — a turn the harness starts on its own is precisely
 		// the case where no job exists yet, and refusing it here is what made
 		// that turn invisible.
-		if b.manager.acceptsClaudeSpawnedWorkProvider(b.ProviderID()) {
+		if b.manager.acceptsNativeSpawnedWorkProvider(b.ProviderID()) {
 			tabID, chatID := b.chatIdentity()
 			b.manager.observeClaudeTurn(b, tabID, chatID, sessionID, update)
 		}
@@ -783,9 +778,29 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 		// the conversation under a new provider id; record it so the next
 		// native restore resumes the transcript that actually has the
 		// post-fork turns (hostile-fixture finding, 2026-07-28).
-		if providerSessionID := strings.TrimSpace(asString(update["providerSessionId"])); providerSessionID != "" && b.manager.nativeSessions != nil {
+		if providerSessionID := strings.TrimSpace(asString(update["providerSessionId"])); providerSessionID != "" {
 			tabID, chatID := b.chatIdentity()
-			b.manager.nativeSessions.adoptProviderSession(tabID, chatID, b.ProviderID(), sessionID, providerSessionID)
+			if lane := b.manager.providerLaneForSessionID(sessionID); lane != nil {
+				if err := lane.advanceLineage(
+					asString(update["previousProviderSessionId"]), providerSessionID,
+					uint64(numberOrZero(update["lineageGeneration"])), asString(update["lineageProof"]),
+				); err != nil {
+					b.opts.Logf("provider lineage rejected", map[string]any{"providerId": b.ProviderID(), "error": err.Error()})
+					go b.Close(false, err)
+				}
+			} else if strings.HasPrefix(chatID, subagentChatIDPrefix) && b.manager.nativeSessions != nil {
+				// Delegated child engines are executor-owned and do not have a
+				// user-chat actor. Keep their exact native binding isolated here.
+				b.manager.nativeSessions.adoptProviderSession(
+					tabID, chatID, b.ProviderID(), sessionID,
+					asString(update["previousProviderSessionId"]), providerSessionID,
+					uint64(numberOrZero(update["lineageGeneration"])), asString(update["lineageProof"]),
+				)
+			} else {
+				err := errors.New("chat-scoped provider lineage has no authoritative actor lane")
+				b.opts.Logf("provider lineage rejected", map[string]any{"providerId": b.ProviderID(), "error": err.Error()})
+				go b.Close(false, err)
+			}
 		}
 	case "_workass_claude_turn_heartbeat":
 		// Turn liveness: a max-effort turn can think silently for minutes and
@@ -851,30 +866,42 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 				},
 			})
 		}
+	case "_workass_input_consumed":
+		clientUserMessageID := strings.TrimSpace(asString(update["clientUserMessageId"]))
+		if job != nil && clientUserMessageID != "" && !job.internal {
+			if b.manager.nativeSessions != nil {
+				b.manager.nativeSessions.markOperationConsumed(
+					job.TabID, job.ChatID, job.ProviderID, sessionID,
+					clientUserMessageID,
+					firstNonEmpty(asString(update["nativeTurnId"]), asString(update["turnId"])),
+				)
+			}
+			b.manager.emit("job:event", map[string]any{
+				"type": "acp", "id": job.ID,
+				"event": map[string]any{
+					"kind": "input-consumed", "clientUserMessageId": clientUserMessageID,
+				},
+			})
+		}
+	case "_workass_compaction":
+		event := map[string]any{
+			"kind": "compaction", "phase": strings.TrimSpace(asString(update["phase"])),
+			"checkpointId": strings.TrimSpace(asString(update["checkpointId"])),
+			"digest":       strings.TrimSpace(asString(update["digest"])),
+		}
+		if coverage := numberOrZero(update["coverage"]); coverage > 0 {
+			event["coverage"] = coverage
+		}
+		if job != nil && !job.internal {
+			b.manager.emit("job:event", map[string]any{"type": "acp", "id": job.ID, "event": event})
+		} else {
+			b.manager.observeProviderLaneCompaction(sessionID, event)
+		}
 	default:
 		if _, ok := update["configOptions"]; ok {
 			b.applyConfigOptionsForSession(sessionID, update["configOptions"], true, false)
 		}
 	}
-}
-
-// A provider may opt into Workass's typed assistant surfaces by supplying
-// _meta.workassAssistantPhase. Codex predates that provider-neutral field, so
-// its native update._meta.codex.phase remains a compatibility source. Only the
-// two documented values cross Workass; provider identity, model names, terminal
-// results, headings, and prose never synthesize a phase.
-func agentMessagePhase(update map[string]any) string {
-	meta := mapFromAny(update["_meta"])
-	codex := mapFromAny(meta["codex"])
-	for _, value := range []any{meta["workassAssistantPhase"], codex["phase"]} {
-		switch strings.TrimSpace(asString(value)) {
-		case "commentary":
-			return "commentary"
-		case "final_answer":
-			return "final_answer"
-		}
-	}
-	return ""
 }
 
 func numberOrZero(v any) int {
@@ -1000,6 +1027,7 @@ func (b *Bridge) emitToolEvent(job *Job, acpKind string, update map[string]any, 
 		ProviderID: b.ProviderID(), ToolCallID: toolCallID, Title: title,
 		Command: execCommandFrom(rawInput), RawInput: rawInput,
 		Meta: mapFromAny(update["_meta"]), Output: outText,
+		JobID: job.ID, OperationID: job.startOpts.OperationID,
 	})
 	b.manager.updateSubagentActivityForJob(job, "tool", title)
 	// Remember this call's title so child subagent events (which carry
@@ -1093,20 +1121,11 @@ func metaParentToolUseID(metas ...map[string]any) string {
 	return ""
 }
 
-// brandForProvider maps a providerID to the model-family brand the renderer uses
-// to pick a subagent's icon (GPT vs Claude). Native Task subagents run on the
-// engine's own model family, so the bridge's provider is the honest source.
+// brandForProvider reads the renderer brand from the provider registration.
+// Branding is presentation metadata, never a provider-family guess or a
+// capability probe.
 func brandForProvider(providerID string) string {
-	s := strings.ToLower(providerID)
-	switch {
-	case strings.Contains(s, "codex"), strings.Contains(s, "gpt"), strings.Contains(s, "openai"):
-		return "gpt"
-	case strings.Contains(s, "claude"), strings.Contains(s, "anthropic"),
-		strings.Contains(s, "opus"), strings.Contains(s, "sonnet"),
-		strings.Contains(s, "haiku"), strings.Contains(s, "fable"):
-		return "claude"
-	}
-	return ""
+	return providerAdapterForID(providerID).model.AssistantBrand
 }
 
 func firstNonEmpty(values ...string) string {
@@ -1418,6 +1437,7 @@ func (b *Bridge) clearJobForSession(sessionID string, job *Job) {
 }
 
 func (b *Bridge) Close(intentional bool, cause error) {
+	safeCause := redactedError(cause)
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -1427,9 +1447,11 @@ func (b *Bridge) Close(intentional bool, cause error) {
 	pending := b.pending
 	b.pending = make(map[string]*pendingRequest)
 	child := b.child
+	childExited := b.childExited
 	processTree := b.processTree
 	stdin := b.stdin
 	b.child = nil
+	b.childExited = nil
 	b.processTree = processTreeHandle{}
 	b.stdin = nil
 	b.finishedAt = time.Now()
@@ -1437,8 +1459,14 @@ func (b *Bridge) Close(intentional bool, cause error) {
 	tabID := b.tabID
 	chatID := b.chatID
 	sessions := make([]string, 0, len(b.sessions))
+	lanes := make(map[*managerLane]struct{})
 	for sessionID := range b.sessions {
 		sessions = append(sessions, sessionID)
+		if b.manager != nil {
+			if lane := b.manager.providerLaneForSessionID(sessionID); lane != nil {
+				lanes[lane] = struct{}{}
+			}
+		}
 	}
 	b.mu.Unlock()
 
@@ -1446,11 +1474,14 @@ func (b *Bridge) Close(intentional bool, cause error) {
 		if p.timer != nil {
 			p.timer.Stop()
 		}
-		p.resolve <- rpcResult{err: firstErr(cause, errors.New("ACP server closed"))}
+		p.resolve <- rpcResult{err: firstErr(safeCause, errors.New("ACP server closed"))}
 	}
 	for _, sessionID := range sessions {
 		b.manager.cancelPermissionsForSession(sessionID)
 		b.manager.forgetSession(sessionID, b)
+	}
+	for lane := range lanes {
+		lane.attachmentClosed()
 	}
 	if stdin != nil {
 		_ = stdin.Close()
@@ -1458,12 +1489,33 @@ func (b *Bridge) Close(intentional bool, cause error) {
 	if child != nil && child.Process != nil {
 		_ = stopProcessTree(child.Process, processTree)
 	}
+	b.waitForChildExit(childExited, "close")
 	if b.manager != nil {
-		b.manager.orphanInProcessSpawnedWorkForChat(tabID, chatID, firstNonEmpty(errString(cause), "bridge-close"))
+		b.manager.orphanInProcessSpawnedWorkForChat(tabID, chatID, firstNonEmpty(errString(safeCause), "bridge-close"))
 	}
-	b.opts.Logf("acp bridge closed", map[string]any{"key": b.key, "intentional": intentional, "error": errString(cause)})
+	b.opts.Logf("acp bridge closed", map[string]any{"key": b.key, "intentional": intentional, "error": errString(safeCause)})
 	if b.manager != nil {
 		b.manager.bridgeChanged(b, "closed")
+	}
+}
+
+const bridgeChildExitWait = 5 * time.Second
+
+func (b *Bridge) waitForChildExit(childExited <-chan struct{}, operation string) {
+	if childExited == nil {
+		return
+	}
+	timer := time.NewTimer(bridgeChildExitWait)
+	defer timer.Stop()
+	select {
+	case <-childExited:
+		return
+	case <-timer.C:
+		b.opts.Logf("ACP child exit receipt timed out", map[string]any{
+			"key":       b.key,
+			"operation": operation,
+			"timeoutMs": bridgeChildExitWait.Milliseconds(),
+		})
 	}
 }
 
@@ -1481,10 +1533,22 @@ func errString(err error) string {
 	return err.Error()
 }
 
+func redactedError(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := redactSensitiveText(err.Error())
+	if message == err.Error() {
+		return err
+	}
+	return errors.New(message)
+}
+
 func (b *Bridge) withStderrTail(err error) error {
 	if err == nil {
 		return nil
 	}
+	err = redactedError(err)
 	b.mu.Lock()
 	tail := redactSensitiveText(string(b.stderrTail))
 	b.mu.Unlock()

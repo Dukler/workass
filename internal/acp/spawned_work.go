@@ -103,6 +103,12 @@ type SpawnedWorkItem struct {
 	// subagents. Both are redacted and bounded before they are stored.
 	ModelLabel    string `json:"modelLabel,omitempty"`
 	ResultExcerpt string `json:"resultExcerpt,omitempty"`
+	// Immutable actor ownership is persisted with the runtime record so later
+	// progress/settlement cannot be rebound to whichever provider turn happens
+	// to be live when the snapshot is emitted.
+	OriginLaneID      string `json:"originLaneId,omitempty"`
+	OriginOperationID string `json:"originOperationId,omitempty"`
+	OriginTurnID      string `json:"originTurnId,omitempty"`
 }
 
 type SpawnedWorkReceipt struct {
@@ -149,16 +155,19 @@ type spawnedWorkSnapshotItem struct {
 }
 
 type ExternalWorkRegistrationOptions struct {
-	OwnerKey     string
-	ParentChatID string
-	ParentTabID  string
-	TabID        string
-	ChatID       string
-	Label        string
-	Role         string
-	PID          *int
-	OutputFile   string
-	DoneFile     string
+	OwnerKey          string
+	ParentChatID      string
+	ParentTabID       string
+	TabID             string
+	ChatID            string
+	Label             string
+	Role              string
+	PID               *int
+	OutputFile        string
+	DoneFile          string
+	OriginLaneID      string
+	OriginOperationID string
+	OriginTurnID      string
 }
 
 type ExternalWorkSettleOptions struct {
@@ -174,28 +183,34 @@ type ExternalWorkSettleOptions struct {
 }
 
 type spawnedWorkCandidate struct {
-	SessionID    string
-	TabID        string
-	ChatID       string
-	ToolCallID   string
-	ProviderID   string
-	ProviderTool string
-	Kind         string
-	Label        string
-	StartedAt    time.Time
+	SessionID         string
+	TabID             string
+	ChatID            string
+	ToolCallID        string
+	ProviderID        string
+	ProviderTool      string
+	Kind              string
+	Label             string
+	StartedAt         time.Time
+	OriginLaneID      string
+	OriginOperationID string
+	OriginTurnID      string
 }
 
 type spawnToolObservation struct {
-	SessionID  string
-	TabID      string
-	ChatID     string
-	ProviderID string
-	ToolCallID string
-	Title      string
-	Command    string
-	RawInput   any
-	Meta       map[string]any
-	Output     string
+	SessionID   string
+	TabID       string
+	ChatID      string
+	ProviderID  string
+	ToolCallID  string
+	Title       string
+	Command     string
+	RawInput    any
+	Meta        map[string]any
+	Output      string
+	JobID       string
+	OperationID string
+	LaneID      string
 }
 
 var claudeBackgroundResultRE = regexp.MustCompile(`(?is)running in background with ID:\s*([A-Za-z0-9._-]+).*?output is being written to:\s*([^\r\n]+?\.output)\b`)
@@ -283,9 +298,9 @@ func boolFromMap(raw any, key string) bool {
 	return v
 }
 
-func (m *Manager) acceptsClaudeSpawnedWorkProvider(providerID string) bool {
+func (m *Manager) acceptsNativeSpawnedWorkProvider(providerID string) bool {
 	providerID = normalizeProviderID(providerID)
-	return providerID == "claude" || (providerID == "mock" && !m.isProductionRuntime())
+	return providerAdapterForID(providerID).features.NativeSpawnedWork || (providerIsFixture(providerID) && !m.isProductionRuntime())
 }
 
 // acceptsExternalWorkProvider is deliberately broader than passive spawned-work
@@ -297,7 +312,7 @@ func (m *Manager) acceptsExternalWorkProvider(providerID string) bool {
 	if providerID == "" {
 		return false
 	}
-	return providerID != "mock" || !m.isProductionRuntime()
+	return !providerIsFixture(providerID) || !m.isProductionRuntime()
 }
 
 func randomExternalWorkID() (string, error) {
@@ -438,6 +453,8 @@ func (m *Manager) RegisterExternalWork(opts ExternalWorkRegistrationOptions) (ma
 		Kind: "external", Label: label, Role: normalizeSpawnedWorkRole(opts.Role), Status: "running",
 		StartedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
 		OutputFile: outputFile, PID: pid,
+		OriginLaneID: strings.TrimSpace(opts.OriginLaneID), OriginOperationID: strings.TrimSpace(opts.OriginOperationID),
+		OriginTurnID: strings.TrimSpace(opts.OriginTurnID),
 	}
 	rec := &spawnedWorkRecord{Item: item, ExternalDoneFile: doneFile, SawPID: opts.PID != nil}
 	m.spawnedWorkMu.Lock()
@@ -485,8 +502,16 @@ func (m *Manager) SettleExternalWork(opts ExternalWorkSettleOptions) (map[string
 }
 
 func (m *Manager) observeSpawnToolEvent(obs spawnToolObservation) {
-	if !m.acceptsClaudeSpawnedWorkProvider(obs.ProviderID) || obs.ToolCallID == "" || obs.TabID == "" || obs.ChatID == "" {
+	if !m.acceptsNativeSpawnedWorkProvider(obs.ProviderID) || obs.ToolCallID == "" || obs.TabID == "" || obs.ChatID == "" {
 		return
+	}
+	if lane := m.providerLaneForJob(obs.JobID); lane != nil {
+		if obs.LaneID == "" {
+			obs.LaneID = string(lane.identity.ID)
+		}
+		if obs.OperationID == "" {
+			obs.OperationID = string(lane.operationForJob(obs.JobID))
+		}
 	}
 	claudeMeta := mapFromAny(obs.Meta["claudeCode"])
 	providerTool := firstNonEmpty(asString(claudeMeta["toolName"]), obs.Title)
@@ -499,6 +524,7 @@ func (m *Manager) observeSpawnToolEvent(obs spawnToolObservation) {
 			ToolCallID: obs.ToolCallID, ProviderID: obs.ProviderID,
 			ProviderTool: providerTool, Kind: spawnedWorkKind(providerTool, "", ""),
 			Label: label, StartedAt: time.Now().UTC(),
+			OriginLaneID: strings.TrimSpace(obs.LaneID), OriginOperationID: strings.TrimSpace(obs.OperationID), OriginTurnID: strings.TrimSpace(obs.JobID),
 		}
 		m.spawnedWorkMu.Unlock()
 	}
@@ -524,6 +550,7 @@ func (m *Manager) observeSpawnToolEvent(obs spawnToolObservation) {
 			ToolCallID: obs.ToolCallID, ProviderID: obs.ProviderID,
 			ProviderTool: providerTool, Kind: spawnedWorkKind(providerTool, "", ""),
 			Label: compactText(firstNonEmpty(obs.Command, obs.Title, providerTool, taskID), 240), StartedAt: time.Now().UTC(),
+			OriginLaneID: strings.TrimSpace(obs.LaneID), OriginOperationID: strings.TrimSpace(obs.OperationID), OriginTurnID: strings.TrimSpace(obs.JobID),
 		}
 	}
 	rec, changed := m.upsertSpawnedWorkLocked(candidate, taskID, "", "", "", outputFile)
@@ -628,7 +655,7 @@ func (m *Manager) candidateForTaskLocked(sessionID, toolCallID, tabID, chatID st
 	}
 	return spawnedWorkCandidate{
 		SessionID: sessionID, TabID: tabID, ChatID: chatID, ToolCallID: toolCallID,
-		ProviderID: "claude", StartedAt: time.Now().UTC(),
+		ProviderID: defaultNativeSpawnedWorkProviderID(), StartedAt: time.Now().UTC(),
 	}
 }
 
@@ -655,10 +682,11 @@ func (m *Manager) upsertSpawnedWorkLocked(candidate spawnedWorkCandidate, taskID
 		item := SpawnedWorkItem{
 			ID: taskID, TaskID: taskID, ToolCallID: candidate.ToolCallID,
 			TabID: candidate.TabID, ChatID: candidate.ChatID,
-			ProviderID: firstNonEmpty(candidate.ProviderID, "claude"),
+			ProviderID: firstNonEmpty(candidate.ProviderID, defaultNativeSpawnedWorkProviderID()),
 			Kind:       spawnedWorkKind(candidate.ProviderTool, firstNonEmpty(taskType, candidate.Kind), subagentType),
 			Label:      label, Status: "running",
 			StartedAt: started.Format(time.RFC3339Nano), UpdatedAt: isoNow(),
+			OriginLaneID: candidate.OriginLaneID, OriginOperationID: candidate.OriginOperationID, OriginTurnID: candidate.OriginTurnID,
 		}
 		rec = &spawnedWorkRecord{Item: item, SessionID: candidate.SessionID}
 		m.spawnedWork[key] = rec
@@ -669,6 +697,12 @@ func (m *Manager) upsertSpawnedWorkLocked(candidate spawnedWorkCandidate, taskID
 	}
 	if rec.Item.ToolCallID == "" && candidate.ToolCallID != "" {
 		rec.Item.ToolCallID = candidate.ToolCallID
+		changed = true
+	}
+	if rec.Item.OriginLaneID == "" && candidate.OriginLaneID != "" {
+		rec.Item.OriginLaneID = candidate.OriginLaneID
+		rec.Item.OriginOperationID = candidate.OriginOperationID
+		rec.Item.OriginTurnID = candidate.OriginTurnID
 		changed = true
 	}
 	if label := compactText(description, 240); label != "" && label != rec.Item.Label {
@@ -738,6 +772,11 @@ func (m *Manager) registerSubagentSpawnedWork(tabID, chatID string, run Subagent
 		StartedAt: startedAt, UpdatedAt: updatedAt,
 		Summary:      compactText(redactSensitiveText(run.LatestActivity), 1000),
 		LastToolName: compactText(redactSensitiveText(run.Phase), 120),
+		OriginTurnID: strings.TrimSpace(run.RootJobID),
+	}
+	if lane := m.providerLaneForJob(run.RootJobID); lane != nil {
+		item.OriginLaneID = string(lane.identity.ID)
+		item.OriginOperationID = string(lane.operationForJob(run.RootJobID))
 	}
 	m.spawnedWorkMu.Lock()
 	m.spawnedWork[spawnedWorkKey(tabID, chatID, run.ID)] = &spawnedWorkRecord{Item: item}
@@ -1033,9 +1072,6 @@ func (m *Manager) reconcileSpawnedWork() {
 		}
 	}
 	m.classifySpawnedWorkServices(now, pidsByPath)
-	// After classification, so a row promoted to "service" on this tick is
-	// already excluded from the evidence a park would otherwise rest on.
-	m.sweepStalledObligations(now)
 }
 
 // classifySpawnedWorkServices decides which running records have stopped being
@@ -1170,19 +1206,124 @@ func (m *Manager) commitSpawnedWorkChange(tabID, chatID string) {
 	if tabID == "" || chatID == "" {
 		return
 	}
+	// Full snapshots are replacement observations. Serialize their persist ->
+	// actor-commit -> publish boundary so two runtime callbacks cannot apply an
+	// older snapshot after a newer one.
+	m.spawnedWorkCommitMu.Lock()
+	defer m.spawnedWorkCommitMu.Unlock()
 	m.persistSpawnedWorkSnapshot(tabID, chatID)
 	m.persistNewSpawnedWorkReceipts(tabID, chatID)
 	m.touchSpawnedWorkBridgeActivity(tabID, chatID, time.Now())
-	payload := map[string]any{
-		"tabId": tabID, "chatId": chatID, "items": m.ListSpawnedWork(tabID, chatID),
+	items := m.ListSpawnedWork(tabID, chatID)
+	m.spawnedWorkObserverMu.RLock()
+	observer := m.spawnedWorkObserver
+	m.spawnedWorkObserverMu.RUnlock()
+	if observer == nil {
+		m.opts.Logf("background executor evidence withheld because actor ingress is unavailable", map[string]any{
+			"tabId": tabID, "chatId": chatID,
+		})
+		return
 	}
-	// Additive, and on this channel deliberately rather than a new one: the
-	// obligation is derived from exactly the background state this event
-	// already reports, and both change on the same reconcile tick.
-	if obligation := m.ObligationFor(tabID, chatID); obligation != nil {
-		payload["obligation"] = obligation
+	var projection SpawnedWorkActorProjection
+	projection, err := observer(tabID, chatID, items)
+	if err != nil {
+		m.opts.Logf("background actor rejected runtime snapshot", map[string]any{
+			"tabId": tabID, "chatId": chatID, "error": redactSensitiveText(err.Error()),
+		})
+		return
 	}
+	payload := map[string]any{"tabId": tabID, "chatId": chatID, "items": items}
+	if projection.Obligation != nil {
+		payload["obligation"] = projection.Obligation
+	}
+	payload["actorRevision"] = projection.ActorRevision
 	m.emit("spawned-work:changed", payload)
+}
+
+type SpawnedWorkActorProjection struct {
+	ActorRevision uint64
+	Obligation    *ChatObligationProjection
+}
+
+type ChatObligationProjection struct {
+	State    string `json:"state"`
+	Source   string `json:"source,omitempty"`
+	Note     string `json:"note,omitempty"`
+	PromptID string `json:"promptId,omitempty"`
+}
+
+// InstallSpawnedWorkObserver installs the authoritative actor ingress once.
+// records remain executor/liveness details; their frozen event is published
+// only after the owning chat actor durably commits the complete snapshot.
+func (m *Manager) InstallSpawnedWorkObserver(observer func(string, string, []SpawnedWorkItem) (SpawnedWorkActorProjection, error)) error {
+	if m == nil || observer == nil {
+		return errors.New("background actor ingress is required")
+	}
+	m.spawnedWorkObserverMu.Lock()
+	defer m.spawnedWorkObserverMu.Unlock()
+	if m.spawnedWorkObserver != nil {
+		return errors.New("background actor ingress is already installed")
+	}
+	m.spawnedWorkObserver = observer
+	return nil
+}
+
+// DropSpawnedWorkForChat removes every executor/liveness record and durable
+// receipt for an actor-tombstoned chat. Runtime records are not semantic
+// authority, but leaving them behind would let startup reconciliation
+// resurrect work belonging to a deleted actor.
+func (m *Manager) DropSpawnedWorkForChat(tabID, chatID string) {
+	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
+	if tabID == "" || chatID == "" {
+		return
+	}
+	m.spawnedWorkCommitMu.Lock()
+	defer m.spawnedWorkCommitMu.Unlock()
+	m.spawnedWorkMu.Lock()
+	for key, rec := range m.spawnedWork {
+		if rec != nil && rec.Item.TabID == tabID && rec.Item.ChatID == chatID {
+			delete(m.spawnedWork, key)
+		}
+	}
+	for key, candidate := range m.spawnedCandidates {
+		if candidate.TabID == tabID && candidate.ChatID == chatID {
+			delete(m.spawnedCandidates, key)
+		}
+	}
+	m.spawnedWorkMu.Unlock()
+	m.persistSpawnedWorkSnapshot(tabID, chatID)
+	m.dropSpawnedWorkReceipts(tabID, chatID)
+}
+
+func (m *Manager) dropSpawnedWorkReceipts(tabID, chatID string) {
+	path := m.spawnedWorkReceiptPath(tabID)
+	if path == "" {
+		return
+	}
+	m.receiptMu.Lock()
+	defer m.receiptMu.Unlock()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	kept := make([][]byte, 0)
+	for _, line := range boundedSpawnedReceiptLines(data) {
+		var receipt SpawnedWorkReceipt
+		if json.Unmarshal(line, &receipt) == nil && receipt.TabID == tabID && receipt.ChatID == chatID {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	payload := []byte{}
+	if len(kept) > 0 {
+		payload = append(bytes.Join(kept, []byte("\n")), '\n')
+	}
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, payload, 0o600) == nil {
+		if os.Rename(tmp, path) != nil {
+			_ = os.Remove(tmp)
+		}
+	}
 }
 
 func (m *Manager) touchSpawnedWorkBridgeActivity(tabID, chatID string, now time.Time) {
@@ -1832,6 +1973,15 @@ func mergeMissingSpawnedWorkFields(dst *SpawnedWorkItem, src SpawnedWorkItem) {
 	}
 	if dst.ResultExcerpt == "" {
 		dst.ResultExcerpt = src.ResultExcerpt
+	}
+	if dst.OriginLaneID == "" {
+		dst.OriginLaneID = src.OriginLaneID
+	}
+	if dst.OriginOperationID == "" {
+		dst.OriginOperationID = src.OriginOperationID
+	}
+	if dst.OriginTurnID == "" {
+		dst.OriginTurnID = src.OriginTurnID
 	}
 	if dst.Status != "running" && dst.FinishedAt == "" {
 		dst.FinishedAt = src.FinishedAt

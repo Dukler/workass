@@ -356,18 +356,6 @@ test('digest divergence schedules only the relevant scoped repair', () => {
   assert.equal(scheduled[0].has('permissions'), false);
 });
 
-test('a stale model echo is ignored when any picker fence field changed', () => {
-  const { subject, owner } = subjectWithChat();
-  owner._controlRevision = 1;
-  const fence = (subject as any).modelWriteFence(owner, 'model-1');
-  owner.currentModelId = 'model-2';
-  owner._controlRevision = 2;
-
-  const accepted = (subject as any).acceptAppliedModel(owner, { currentModelId: 'model-1-echo' }, fence);
-  assert.equal(accepted, false);
-  assert.equal(owner.currentModelId, 'model-2');
-});
-
 test('mirror restore keeps an explicit local pick unless daemon control revision is strictly higher', () => {
   const { subject, owner } = subjectWithChat();
   owner.providerId = 'codex';

@@ -239,16 +239,10 @@ func permissionIntentModes(providerID string, modes []Mode) map[string]string {
 	for _, mode := range modes {
 		available[mode.ID] = true
 	}
-	candidates := map[string][]string{
-		"read": {"read-only", "plan", "default"},
-		"edit": {"agent", "acceptEdits", "auto-edit", "auto", "default"},
-		"full": {"agent-full-access", "bypassPermissions", "bypass", "dontAsk", "yolo", "auto"},
-	}
-	if normalizeProviderID(providerID) == "qwen" {
-		candidates["read"] = []string{"plan", "default"}
-	}
+	policy := providerAdapterForID(providerID).permission
 	out := map[string]string{}
-	for intent, ids := range candidates {
+	for _, intent := range []string{"read", "edit", "full"} {
+		ids := policy.Candidates(intent)
 		for _, id := range ids {
 			if available[id] {
 				out[intent] = id

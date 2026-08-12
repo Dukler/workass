@@ -126,6 +126,61 @@ func TestAgentHandshakePromptStreamsModelListAndStdoutPurity(t *testing.T) {
 	proc.AssertStdoutPurity(t)
 }
 
+func TestAgentDurableSessionResumesExactThreadAfterHostRestart(t *testing.T) {
+	fake := newFakeOpenAI(t)
+	defer fake.Close()
+	storePath := filepath.Join(t.TempDir(), "provider-native", "lmstudio-sessions.json")
+	cwd := t.TempDir()
+
+	first := startAgentWithStore(t, fake.URL()+"/v1", "fake-model", storePath)
+	first.Send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{}})
+	initialized := asMap(first.WaitFor(t, responseID("1"), 2*time.Second)["result"])
+	capabilities := asMap(asMap(initialized["agentCapabilities"])["sessionCapabilities"])
+	if _, ok := capabilities["resume"]; !ok {
+		t.Fatalf("durable workass-agent did not advertise exact resume: %#v", initialized)
+	}
+	first.Send(t, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": map[string]any{"cwd": cwd}})
+	sessionID := stringField(asMap(first.WaitFor(t, responseID("2"), 2*time.Second)["result"])["sessionId"])
+	if sessionID == "" {
+		t.Fatal("durable session/new returned no native thread identity")
+	}
+	first.Send(t, map[string]any{
+		"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+		"params": map[string]any{"sessionId": sessionID, "prompt": []any{map[string]any{"type": "text", "text": "first turn"}}},
+	})
+	_ = first.WaitFor(t, responseID("3"), 2*time.Second)
+	first.Send(t, map[string]any{"jsonrpc": "2.0", "id": 4, "method": "session/close", "params": map[string]any{"sessionId": sessionID}})
+	_ = first.WaitFor(t, responseID("4"), 2*time.Second)
+	first.Close(t)
+
+	second := startAgentWithStore(t, fake.URL()+"/v1", "fake-model", storePath)
+	defer second.Close(t)
+	second.Send(t, map[string]any{"jsonrpc": "2.0", "id": 5, "method": "initialize", "params": map[string]any{}})
+	_ = second.WaitFor(t, responseID("5"), 2*time.Second)
+	second.Send(t, map[string]any{
+		"jsonrpc": "2.0", "id": 6, "method": "session/resume",
+		"params": map[string]any{"sessionId": sessionID, "cwd": cwd},
+	})
+	resumed := asMap(second.WaitFor(t, responseID("6"), 2*time.Second)["result"])
+	if got := stringField(resumed["sessionId"]); got != sessionID {
+		t.Fatalf("session/resume changed native identity: got %q want %q", got, sessionID)
+	}
+	second.Send(t, map[string]any{
+		"jsonrpc": "2.0", "id": 7, "method": "session/prompt",
+		"params": map[string]any{"sessionId": sessionID, "prompt": []any{map[string]any{"type": "text", "text": "second turn"}}},
+	})
+	_ = second.WaitFor(t, responseID("7"), 2*time.Second)
+
+	request := fake.LastChatRequest()
+	if len(request.Messages) != 3 ||
+		request.Messages[0].Role != "user" || request.Messages[0].Content != "first turn" ||
+		request.Messages[1].Role != "assistant" || request.Messages[1].Content != "hello world" ||
+		request.Messages[2].Role != "user" || request.Messages[2].Content != "second turn" {
+		t.Fatalf("exact resume did not preserve native model context: %#v", request.Messages)
+	}
+	second.AssertStdoutPurity(t)
+}
+
 func TestAgentCancelAbortsInFlightHTTP(t *testing.T) {
 	fake := newFakeOpenAI(t)
 	fake.cancelMode = true
@@ -338,6 +393,19 @@ func startAgent(t *testing.T, baseURL, model string) *agentProcess {
 	cmd := exec.Command(os.Args[0], "-test.run=TestWorkassAgentHelper", "--")
 	cmd.Env = append(os.Environ(),
 		"WORKASS_AGENT_TEST_HELPER=1",
+		"OPENAI_BASE_URL="+baseURL,
+		"OPENAI_MODEL="+model,
+		"OPENAI_API_KEY=test-secret",
+	)
+	return startAgentProcess(t, cmd)
+}
+
+func startAgentWithStore(t *testing.T, baseURL, model, storePath string) *agentProcess {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestWorkassAgentHelper", "--")
+	cmd.Env = append(os.Environ(),
+		"WORKASS_AGENT_TEST_HELPER=1",
+		"WORKASS_AGENT_SESSION_STORE="+storePath,
 		"OPENAI_BASE_URL="+baseURL,
 		"OPENAI_MODEL="+model,
 		"OPENAI_API_KEY=test-secret",

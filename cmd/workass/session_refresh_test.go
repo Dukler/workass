@@ -169,10 +169,6 @@ func TestChatControlVisibleMutationRefreshesAreImmediate(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()
 	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
-	parent, err := store.AgentCreateChat("Refresh parent", root, "mock", "mock-deterministic", "ask", true)
-	if err != nil {
-		t.Fatal(err)
-	}
 	emissions := make(chan refreshEmission, 32)
 	manager := acp.NewManager(acp.Options{
 		RootDir: root, StateDir: filepath.Join(stateDir, "acp"), RuntimeProfile: "dev",
@@ -183,9 +179,19 @@ func TestChatControlVisibleMutationRefreshesAreImmediate(t *testing.T) {
 		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
-	coordinator := newChatControlCoordinator(manager, store, func(channel string, payload any) {
+	runtime := newTestProviderChatRuntime(t, manager, store, manager.StateDir())
+	const parentTabID, parentChatID = "refresh-parent-tab", "refresh-parent-chat"
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"operationId": "test:create-refresh-parent",
+		"tabId":       parentTabID, "chatId": parentChatID,
+		"title": "Refresh parent", "cwd": root, "providerId": "mock",
+		"currentModelId": "mock-deterministic", "currentModeId": "ask", "focus": true,
+	}); err != nil {
+		t.Fatalf("create actor-native refresh parent: %v", err)
+	}
+	coordinator := newChatControlCoordinator(manager, func(channel string, payload any) {
 		emissions <- refreshEmission{at: time.Now(), channel: channel, payload: mapFromAnyMain(payload)}
-	})
+	}, runtime)
 	t.Cleanup(coordinator.refreshes.stop)
 	assertImmediate := func(name string, invoke func() error) {
 		t.Helper()
@@ -206,40 +212,148 @@ func TestChatControlVisibleMutationRefreshesAreImmediate(t *testing.T) {
 	assertImmediate("create", func() error {
 		var createErr error
 		created, createErr = coordinator.create(
-			context.Background(), fieldString(parent, "tabId"), fieldString(parent, "chatId"),
-			map[string]any{"title": "Refresh child", "cwd": root, "provider_id": "mock", "model_id": "mock-deterministic"},
+			context.Background(), parentTabID, parentChatID,
+			map[string]any{"operation_id": "test:refresh-create", "title": "Refresh child", "cwd": root, "provider_id": "mock", "model_id": "mock-deterministic"},
 		)
 		return createErr
 	})
 	tabID, chatID := fieldString(created, "tabId"), fieldString(created, "chatId")
 	assertImmediate("rename", func() error {
-		_, err := coordinator.rename(map[string]any{"tab_id": tabID, "chat_id": chatID, "title": "Renamed child"})
+		_, err := coordinator.rename(map[string]any{"operation_id": "test:refresh-rename", "tab_id": tabID, "chat_id": chatID, "title": "Renamed child"})
 		return err
 	})
 	assertImmediate("configure", func() error {
 		_, err := coordinator.configure(context.Background(), map[string]any{
-			"tab_id": tabID, "chat_id": chatID, "cwd": root,
+			"operation_id": "test:refresh-configure",
+			"tab_id":       tabID, "chat_id": chatID, "cwd": root,
 			"provider_id": "mock", "model_id": "mock-deterministic", "mode_id": "ask",
 		})
 		return err
 	})
 	assertImmediate("focus", func() error {
-		_, err := coordinator.focus(map[string]any{"tab_id": tabID, "chat_id": chatID})
+		_, err := coordinator.focus(map[string]any{"operation_id": "test:refresh-focus", "tab_id": tabID, "chat_id": chatID})
 		return err
 	})
-	coordinator.startQueuedTurnOverride = func(context.Context, string, string, map[string]any) error {
-		return acp.ErrChatBusy
-	}
 	assertImmediate("send receipt", func() error {
 		_, err := coordinator.send(map[string]any{
-			"tab_id": tabID, "chat_id": chatID, "message": "queued visibly", "delivery": "queue",
+			"operation_id": "test:refresh-send",
+			"tab_id":       tabID, "chat_id": chatID, "message": "queued visibly", "delivery": "queue",
 		})
 		return err
 	})
 	assertImmediate("delete", func() error {
-		_, err := coordinator.delete(map[string]any{"tab_id": tabID, "chat_id": chatID})
+		_, err := coordinator.delete(map[string]any{"operation_id": "test:refresh-delete", "tab_id": tabID, "chat_id": chatID})
 		return err
 	})
+}
+
+func TestChatControlRefreshUsesExactActorRevisionWithoutSessionMirror(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := t.TempDir()
+	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: filepath.Join(stateDir, "acp"), RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{
+			ID: "mock", Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")},
+			CWD: root, Enabled: true, Label: "Workass Mock ACP",
+		},
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, store, manager.StateDir())
+	const tabID, chatID = "refresh-revision-tab", "refresh-revision-chat"
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"operationId": "test:create-refresh-revision",
+		"tabId":       tabID, "chatId": chatID,
+		"title": "Refresh revision", "cwd": root, "providerId": "mock",
+		"currentModelId": "mock-deterministic", "currentModeId": "ask",
+	}); err != nil {
+		t.Fatalf("create actor-native refresh chat: %v", err)
+	}
+
+	// The chat-control coordinator intentionally receives no sessionStore here.
+	// Refresh generations must come from the exact actor, never from the retired
+	// renderer mirror's global generation.
+	coordinator := newChatControlCoordinator(manager, func(string, any) {}, runtime)
+	t.Cleanup(coordinator.refreshes.stop)
+	batches := make(chan map[sessionRefreshTarget]uint64, 2)
+	coordinator.refreshes.flushObserver = func(batch map[sessionRefreshTarget]uint64) { batches <- batch }
+	expectActorRevision := func(name string) {
+		t.Helper()
+		state, ok := runtime.Snapshot(chatID)
+		if !ok {
+			t.Fatalf("%s actor disappeared", name)
+		}
+		coordinator.refresh(tabID, chatID, false)
+		select {
+		case batch := <-batches:
+			got, exists := batch[sessionRefreshTarget{tabID: tabID, chatID: chatID}]
+			if !exists || got != state.Revision {
+				t.Fatalf("%s refresh generation = %d, want exact actor revision %d; batch=%#v", name, got, state.Revision, batch)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s refresh did not flush", name)
+		}
+	}
+
+	expectActorRevision("create")
+	if err := runtime.RenameChat(tabID, chatID, "Refresh revision renamed", "test:rename-refresh-revision"); err != nil {
+		t.Fatalf("rename actor chat: %v", err)
+	}
+	expectActorRevision("rename")
+}
+
+func TestAdapterSessionRefreshCannotOverwriteActorFromStaleAttachment(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := t.TempDir()
+	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: filepath.Join(stateDir, "acp"), RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{
+			ID: "mock", Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")},
+			CWD: root, Enabled: true, Label: "Workass Mock ACP",
+		},
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, store, manager.StateDir())
+	const tabID, chatID = "refresh-fence-tab", "refresh-fence-chat"
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"operationId": "test:create-refresh-fence", "tabId": tabID, "chatId": chatID,
+		"title": "Refresh fence", "cwd": root, "providerId": "mock",
+		"currentModelId": "mock-deterministic", "currentModeId": "ask",
+	}); err != nil {
+		t.Fatalf("create actor-native refresh chat: %v", err)
+	}
+	info, err := runtime.Select(context.Background(), acp.SessionOptions{
+		TabID: tabID, ChatID: chatID, CWD: root, ProviderID: "mock",
+		ModelID: "mock-deterministic", ModeID: "ask",
+	})
+	if err != nil {
+		t.Fatalf("attach provider lane: %v", err)
+	}
+	stale := map[string]any{
+		"action": "session-refresh", "tabId": tabID, "chatId": chatID,
+		"sessionId": "stale-provider-connection", "providerId": "mock", "modelId": "stale-model",
+	}
+	if err := runtime.ApplySessionRefresh(stale); err == nil {
+		t.Fatal("stale provider attachment refresh unexpectedly mutated the actor")
+	}
+	state, ok := runtime.Snapshot(chatID)
+	if !ok || state.Presentation.CurrentModelID != "mock-deterministic" {
+		t.Fatalf("stale refresh changed actor controls: %#v", state.Presentation)
+	}
+	current := map[string]any{
+		"action": "session-refresh", "tabId": tabID, "chatId": chatID,
+		"sessionId": info.SessionID, "providerId": "mock", "modelId": "adapter-selected-model",
+	}
+	if err := runtime.ApplySessionRefresh(current); err != nil {
+		t.Fatalf("current provider attachment refresh: %v", err)
+	}
+	state, _ = runtime.Snapshot(chatID)
+	if state.Presentation.CurrentModelID != "adapter-selected-model" {
+		t.Fatalf("current refresh model = %q, want adapter-selected-model", state.Presentation.CurrentModelID)
+	}
 }
 
 func waitRefreshEmission(t *testing.T, emissions <-chan refreshEmission, timeout time.Duration) refreshEmission {

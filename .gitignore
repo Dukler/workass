@@ -22,7 +22,6 @@ config/environments/local/*.local.env
 .claude/
 .devin/
 CLAUDE.md
-AGENTS.md
 .agents/
 
 # Compiled daemon binaries (build artifacts; produced by scripts/build-daemon.sh)

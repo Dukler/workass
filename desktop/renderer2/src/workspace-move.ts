@@ -22,14 +22,16 @@ export class WorkspaceMoveGate {
 }
 
 export function workspaceMoveAccepted(result: {
+  operationId?: string;
   sessionId?: string;
   error?: string;
   workspaceCommitted?: boolean;
   workspaceRebound?: boolean;
   workspaceRevision?: number;
-} | null | undefined, expectedRevision = 0): boolean {
+} | null | undefined, expectedRevision = 0, operationId?: string): boolean {
   return !!result
     && !result.error
+    && (!operationId || result.operationId === operationId)
     && result.workspaceCommitted === true
     && result.workspaceRebound === true
     && result.sessionId === ''

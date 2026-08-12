@@ -23,8 +23,10 @@ import (
 	"time"
 
 	"workass/internal/acp"
+	"workass/internal/chat"
 	"workass/internal/httpserve"
 	"workass/internal/lease"
+	providercontract "workass/internal/provider"
 	"workass/internal/wire"
 )
 
@@ -40,36 +42,6 @@ func TestAppMetaDefaultsUnknownRuntimeProfilesToProduction(t *testing.T) {
 	t.Setenv("WORKASS_PROFILE", "unexpected")
 	if profile := appMeta(t.TempDir())["profile"]; profile != "prod" {
 		t.Fatalf("app meta profile = %q, want prod", profile)
-	}
-}
-
-func TestStoredChatRuntimeControlsHydrateSessionAndJobArgs(t *testing.T) {
-	store := newSessionStore(filepath.Join(t.TempDir(), sessionStateFilename))
-	created, err := store.AgentCreateChat("Hydrate controls", "/tmp", "claude", "claude-fable-5[1m][xhigh]", "bypassPermissions", true)
-	if err != nil {
-		t.Fatalf("create chat: %v", err)
-	}
-	tabID, chatID := fieldString(created, "tabId"), fieldString(created, "chatId")
-
-	sessionArg := map[string]any{"tabId": tabID, "chatId": chatID}
-	applyStoredChatRuntimeControls(store, sessionArg)
-	sessionOpts := parseSessionOptions(sessionArg)
-	if sessionOpts.ProviderID != "claude" || sessionOpts.ModelID != "claude-fable-5[1m][xhigh]" || sessionOpts.ModeID != "bypassPermissions" {
-		t.Fatalf("session controls = provider=%q model=%q mode=%q", sessionOpts.ProviderID, sessionOpts.ModelID, sessionOpts.ModeID)
-	}
-
-	jobArg := map[string]any{"tabId": tabID, "chatId": chatID, "prompt": "resume"}
-	applyStoredChatRuntimeControls(store, jobArg)
-	jobOpts := parseJobStartOptions(jobArg)
-	if jobOpts.ProviderID != "claude" || jobOpts.ModelID != "claude-fable-5[1m][xhigh]" || jobOpts.ModeID != "bypassPermissions" {
-		t.Fatalf("job controls = provider=%q model=%q mode=%q", jobOpts.ProviderID, jobOpts.ModelID, jobOpts.ModeID)
-	}
-
-	explicit := map[string]any{"tabId": tabID, "chatId": chatID, "providerId": "codex", "modelId": "gpt-5.6-sol[xhigh]", "modeId": "agent-full-access"}
-	applyStoredChatRuntimeControls(store, explicit)
-	explicitOpts := parseSessionOptions(explicit)
-	if explicitOpts.ProviderID != "codex" || explicitOpts.ModelID != "gpt-5.6-sol[xhigh]" || explicitOpts.ModeID != "agent-full-access" {
-		t.Fatalf("explicit controls overwritten = provider=%q model=%q mode=%q", explicitOpts.ProviderID, explicitOpts.ModelID, explicitOpts.ModeID)
 	}
 }
 
@@ -403,6 +375,7 @@ func TestWireE2EAppChatAssertsJobEventChannel(t *testing.T) {
 	}
 
 	hub := wire.NewHub()
+	sessionState := sharedSessionStore(stateDir)
 	manager := acp.NewManager(acp.Options{
 		RootDir:           root,
 		Provider:          acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{"WORKASS_MOCK_ACP_DELAY_MS": "250"}, Enabled: true, Label: "Workass Mock ACP"},
@@ -410,8 +383,12 @@ func TestWireE2EAppChatAssertsJobEventChannel(t *testing.T) {
 		Broadcast:         hub.Broadcast,
 		StateDir:          stateDir,
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir})
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
@@ -422,24 +399,32 @@ func TestWireE2EAppChatAssertsJobEventChannel(t *testing.T) {
 		t.Fatalf("client-ready refresh = %#v", readyRefresh.Payload)
 	}
 
-	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": "wire-tab"})
+	chatID := "chat-wire-tab"
+	createWireActorChat(t, client, 100, "wire-tab", chatID, "mock")
+	client.invokeRaw(t, 0, "app-chat:new-session", map[string]any{"tabId": "wire-tab", "chatId": chatID})
+	missingOperation := client.waitReply(t, 0, 5*time.Second)
+	missingResult := mapFromAnyMain(missingOperation.Result)
+	if !strings.Contains(fieldString(missingResult, "error"), "stable operationId") {
+		t.Fatalf("new-session without operation id = %#v", missingOperation)
+	}
+	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": "wire-tab", "chatId": chatID})
 	sessionReply := client.waitReply(t, 1, 5*time.Second)
 	if sessionReply.Error != nil {
 		t.Fatalf("new-session error: %s", *sessionReply.Error)
 	}
 	session := sessionReply.Result.(map[string]any)
-	sessionID := session["sessionId"].(string)
+	sessionID := fieldString(session, "sessionId")
 	if sessionID == "" || session["agent"] != "Workass Mock ACP" {
 		t.Fatalf("session reply = %#v", session)
 	}
 
-	chatID := "chat-wire-tab"
 	// Renderer fixture: desktop/renderer/app.js:4901-4918 sends chatId, tabId,
 	// sessionId, prompt, and history to api.startJob; app.js:4932-4941 needs
 	// the start event PublicJob to echo chatId and status=="running".
 	client.invoke(t, 2, "job:start", map[string]any{
 		"kind": "app-chat", "chatId": chatID, "sessionId": sessionID, "tabId": "wire-tab",
 		"prompt":        "[mock:slow] wire cancel token=public-secret",
+		"operationId":   "wire-e2e-turn",
 		"userMessageId": "wire-user", "assistantMessageId": "wire-assistant",
 	})
 	startReply := client.waitReply(t, 2, 5*time.Second)
@@ -503,14 +488,13 @@ func TestWireE2EAppChatAssertsJobEventChannel(t *testing.T) {
 
 func TestStateDigestIsBodyFreeAndUnder64KiBForTwoHundredChats(t *testing.T) {
 	stateDir := t.TempDir()
-	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
 	chats := make([]any, 0, 200)
 	for i := 0; i < 200; i++ {
 		tabID := fmt.Sprintf("t%03d", i)
 		chatID := fmt.Sprintf("c%03d", i)
 		fixture := sessionMirrorFixture(tabID, chatID, "body token=digest-secret")
 		chat := mapFromAnyMain(anySlice(fixture["chats"])[0])
-		chat["queue"] = []any{map[string]any{"id": fmt.Sprintf("q%03d", i), "prompt": "queued body"}}
+		chat["queue"] = []any{map[string]any{"id": fmt.Sprintf("q%03d", i), "text": "queued body"}}
 		chat[agentQueueRevisionField] = i + 1
 		chat[runtimeControlRevisionField] = i + 2
 		chats = append(chats, chat)
@@ -518,13 +502,23 @@ func TestStateDigestIsBodyFreeAndUnder64KiBForTwoHundredChats(t *testing.T) {
 	snapshot := sessionMirrorFixture("unused", "unused-chat", "unused")
 	snapshot["activeId"] = "t000"
 	snapshot["chats"] = chats
-	if !store.Save(snapshot) {
-		t.Fatal("save digest fixture")
-	}
+	writeLegacySessionSnapshot(t, stateDir, snapshot)
+	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
+	root := repoRoot(t)
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{
+			ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
+			CWD: root, Enabled: true,
+		},
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	providerChats := newProviderChatRuntime(manager, store, stateDir)
 
 	hub := wire.NewHub()
 	settings := newAppSettingsStore(filepath.Join(stateDir, "app-settings.json"))
-	registerStateDigestHandler(hub, store, nil, settings)
+	registerStateDigestHandler(hub, providerChats, manager, settings)
 	raw, err := hub.Invoke("state:digest", nil)
 	if err != nil {
 		t.Fatalf("state:digest invoke: %v", err)
@@ -577,28 +571,33 @@ func TestWireSessionRecoversTurnCompletedWithoutRenderer(t *testing.T) {
 		DefaultProviderID: "mock",
 		Broadcast:         daemonEventBroadcaster(sessionState, hub.Broadcast),
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir})
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
 	client := dialTestWS(t, server.URL)
+	createWireActorChat(t, client, 100, "offline-tab", "offline-chat", "mock")
 
 	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": "offline-tab", "chatId": "offline-chat", "providerId": "mock"})
 	sessionReply := client.waitReply(t, 1, 5*time.Second)
 	if sessionReply.Error != nil {
 		t.Fatalf("new-session error: %s", *sessionReply.Error)
 	}
-	sessionID := sessionReply.Result.(map[string]any)["sessionId"].(string)
-	prompt := "[mock:slow] persist after renderer closes"
-	client.invoke(t, 2, "session:save", sessionMirrorFixture("offline-tab", "offline-chat", prompt))
-	if reply := client.waitReply(t, 2, 2*time.Second); reply.Error != nil || reply.Result != true {
-		t.Fatalf("session:save reply = %+v", reply)
+	session := mapFromAnyMain(sessionReply.Result)
+	sessionID := fieldString(session, "sessionId")
+	if sessionID == "" {
+		t.Fatalf("new-session omitted exact native session: %#v", session)
 	}
-
+	prompt := "[mock:slow] persist after renderer closes"
 	client.invoke(t, 3, "job:start", map[string]any{
 		"kind": "app-chat", "title": "Devin · Offline", "chatId": "offline-chat", "tabId": "offline-tab",
 		"sessionId": sessionID, "providerId": "mock", "prompt": prompt,
+		"operationId": "offline-turn", "userMessageId": "offline-user", "assistantMessageId": "offline-assistant",
 	})
 	startReply := client.waitReply(t, 3, 5*time.Second)
 	if startReply.Error != nil {
@@ -611,7 +610,10 @@ func TestWireSessionRecoversTurnCompletedWithoutRenderer(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		snapshot, _ := sessionState.Get().(map[string]any)
+		snapshot, projectionErr := providerChats.ProjectSession()
+		if projectionErr != nil {
+			t.Fatalf("project actor while renderer is closed: %v", projectionErr)
+		}
 		assistant := sessionAssistant(t, snapshot, "offline-tab")
 		if assistant["status"] == "done" {
 			if assistant["jobId"] != jobID || !strings.Contains(stringValue(assistant["content"]), prompt) {
@@ -661,11 +663,7 @@ func TestWireBusyStartQueuesCapabilityAwareFollowUpWithoutFailedTranscript(t *te
 
 	hub := wire.NewHub()
 	store := sharedSessionStore(stateDir)
-	created, err := store.AgentCreateChat("Busy collision", root, "mock", "mock-deterministic", "ask", true)
-	if err != nil {
-		t.Fatalf("create chat: %v", err)
-	}
-	tabID, chatID := fieldString(created, "tabId"), fieldString(created, "chatId")
+	const tabID, chatID = "busy-collision-tab", "busy-collision-chat"
 	manager := acp.NewManager(acp.Options{
 		RootDir: root, StateDir: stateDir,
 		Provider: acp.ProviderConfig{
@@ -674,8 +672,19 @@ func TestWireBusyStartQueuesCapabilityAwareFollowUpWithoutFailedTranscript(t *te
 		},
 		DefaultProviderID: "mock", Broadcast: daemonEventBroadcaster(store, hub.Broadcast),
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir})
+	providerChats := newProviderChatRuntime(manager, store, stateDir)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	if _, err := providerChats.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "create-busy-collision-chat",
+		"focus": true, "title": "Busy collision", "titleLocked": true, "cwd": root,
+		"providerId": "mock", "currentModelId": "mock-deterministic", "currentModeId": "ask",
+	}); err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
@@ -731,7 +740,11 @@ func TestWireBusyStartQueuesCapabilityAwareFollowUpWithoutFailedTranscript(t *te
 		t.Fatalf("busy collision refresh = %#v", collisionRefresh.Payload)
 	}
 
-	queuedChat := chatFromSnapshot(store.Get().(map[string]any), tabID)
+	queuedSnapshot, err := providerChats.ProjectSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	queuedChat := chatFromSnapshot(queuedSnapshot, tabID)
 	queue := anySlice(queuedChat["queue"])
 	if len(queue) != 1 || fieldString(mapFromAnyMain(queue[0]), "source") != "host" || fieldString(mapFromAnyMain(queue[0]), "text") != "follow up exactly once" {
 		t.Fatalf("durable busy queue = %#v", queue)
@@ -747,10 +760,11 @@ func TestWireBusyStartQueuesCapabilityAwareFollowUpWithoutFailedTranscript(t *te
 	client.waitJobEvent(t, firstJobID, "end", 8*time.Second)
 	deadline := time.Now().Add(8 * time.Second)
 	for {
-		read, readErr := store.AgentReadChat(tabID, chatID, 20, false)
+		projected, readErr := providerChats.ProjectSession()
 		if readErr != nil {
-			t.Fatalf("read drained chat: %v", readErr)
+			t.Fatalf("read drained actor chat: %v", readErr)
 		}
+		read := chatFromSnapshot(projected, tabID)
 		messages := anySlice(read["messages"])
 		userCount, doneCount, failedBusyCount := 0, 0, 0
 		for _, raw := range messages {
@@ -788,21 +802,16 @@ func TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCW
 		t.Fatalf("write index: %v", err)
 	}
 
-	sessionState := sharedSessionStore(stateDir)
 	snapshot := sessionMirrorFixture(tabID, chatID, "canonical before move")
 	chat := chatFromSnapshot(snapshot, tabID)
 	chat["cwd"] = oldCWD
-	for _, raw := range messageSlice(chat) {
-		message := mapFromAnyMain(raw)
-		message["status"] = "done"
-		if message["role"] == "assistant" {
-			message["content"] = "canonical answer before move"
-			message["at"] = "2026-07-13T00:00:01Z"
-		}
-	}
-	if !sessionState.Save(snapshot) {
-		t.Fatal("save initial workspace snapshot")
-	}
+	// Workspace lifecycle is tested on an empty migrated chat. A nonempty
+	// history cannot enter a new workspace/provider lane unless that provider
+	// exposes verified non-sampling context import; the mock's history field is
+	// deliberately not a substitute.
+	chat["messages"] = []any{}
+	writeLegacySessionSnapshot(t, stateDir, snapshot)
+	sessionState := sharedSessionStore(stateDir)
 
 	hub := wire.NewHub()
 	manager := acp.NewManager(acp.Options{
@@ -810,11 +819,16 @@ func TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCW
 		Provider: acp.ProviderConfig{
 			ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
 			CWD: root, Enabled: true, Label: "Workass Mock ACP",
+			Env: map[string]string{"WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "mock-provider.json")},
 		},
 		DefaultProviderID: "mock", Broadcast: daemonEventBroadcaster(sessionState, hub.Broadcast),
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir})
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
@@ -831,6 +845,11 @@ func TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCW
 	if oldSessionID == "" || filepath.Clean(fieldString(oldSession, "cwd")) != filepath.Clean(oldCWD) {
 		t.Fatalf("old workspace session = %#v", oldSession)
 	}
+	beforeMove, ok := providerChats.Snapshot(chatID)
+	if !ok || beforeMove.ActiveLaneID == "" {
+		t.Fatalf("old workspace actor lane = %#v ok=%v", beforeMove, ok)
+	}
+	oldLaneID := beforeMove.ActiveLaneID
 
 	first.invoke(t, 2, "app-chat:new-session", map[string]any{
 		"tabId": tabID, "chatId": chatID, "providerId": "mock", "cwd": targetCWD,
@@ -847,7 +866,18 @@ func TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCW
 	if _, ok := manager.LiveSession(oldSessionID); ok {
 		t.Fatal("old live session survived wire workspace move")
 	}
-	if cwd, ok := sessionState.ChatWorkspace(tabID, chatID); !ok || filepath.Clean(cwd) != filepath.Clean(targetCWD) {
+	detachDeadline := time.Now().Add(time.Second)
+	for {
+		actorState, exists := providerChats.Snapshot(chatID)
+		if exists && actorState.Lanes[oldLaneID].Phase == "detached" {
+			break
+		}
+		if time.Now().After(detachDeadline) {
+			t.Fatalf("workspace move left the old actor lane attached: %#v", actorState.Lanes[oldLaneID])
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if cwd, _, ok, err := providerChats.ChatWorkspace(chatID); err != nil || !ok || filepath.Clean(cwd) != filepath.Clean(targetCWD) {
 		t.Fatalf("committed workspace cwd=%q ok=%v, want %q", cwd, ok, targetCWD)
 	}
 	// A second drag is legitimate while the renderer is sessionless, but still
@@ -871,7 +901,7 @@ func TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCW
 	if staleMoveReply.Error != nil || fieldString(staleMove, "error") == "" || staleMove["workspaceCommitted"] != false {
 		t.Fatalf("stale competing move reply = %+v %#v", staleMoveReply, staleMove)
 	}
-	if cwd, ok := sessionState.ChatWorkspace(tabID, chatID); !ok || filepath.Clean(cwd) != filepath.Clean(secondTargetCWD) {
+	if cwd, _, ok, err := providerChats.ChatWorkspace(chatID); err != nil || !ok || filepath.Clean(cwd) != filepath.Clean(secondTargetCWD) {
 		t.Fatalf("stale move changed cwd=%q ok=%v, want %q", cwd, ok, secondTargetCWD)
 	}
 	if err := first.conn.Close(); err != nil {
@@ -897,6 +927,7 @@ func TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCW
 	reconnected.invoke(t, 6, "job:start", map[string]any{
 		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "sessionId": freshSessionID,
 		"providerId": "mock", "cwd": oldCWD, "prompt": "next turn after move",
+		"operationId": "workspace-next-turn", "userMessageId": "workspace-next-user", "assistantMessageId": "workspace-next-assistant",
 		"history": []any{
 			map[string]any{"role": "user", "content": "canonical before move"},
 			map[string]any{"role": "assistant", "content": "canonical answer before move"},
@@ -909,8 +940,8 @@ func TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCW
 	job := mapFromAnyMain(startReply.Result)
 	end := reconnected.waitJobEvent(t, fieldString(job, "id"), "end", 5*time.Second)
 	result := fieldString(mapFromAnyMain(end["job"]), "result")
-	if !strings.Contains(result, "User: canonical before move") || !strings.Contains(result, "User request:\nnext turn after move") {
-		t.Fatalf("next target-cwd turn lost canonical replay: %q", result)
+	if strings.Contains(result, "User: canonical before move") || strings.Contains(result, "Previous conversation") || !strings.Contains(result, "User request:\nnext turn after move") {
+		t.Fatalf("next target-cwd turn replayed Workass history or lost the current request: %q", result)
 	}
 	if live, ok := manager.LiveSession(freshSessionID); !ok || filepath.Clean(live.Info.CWD) != filepath.Clean(secondTargetCWD) {
 		t.Fatalf("next turn live session=%+v ok=%v, want target cwd %q", live, ok, secondTargetCWD)
@@ -933,24 +964,27 @@ func TestWireReconnectRestoresLiveSessionControlsAndPendingPermission(t *testing
 		DefaultProviderID: "mock", PermissionTimeout: 5 * time.Second,
 		Broadcast: daemonEventBroadcaster(sessionState, hub.Broadcast),
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir})
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
 	first := dialTestWS(t, server.URL)
+	createWireActorChat(t, first, 101, "reconnect-tab", "reconnect-chat", "mock")
 	first.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": "reconnect-tab", "chatId": "reconnect-chat", "providerId": "mock"})
 	sessionReply := first.waitReply(t, 1, 5*time.Second)
 	if sessionReply.Error != nil {
 		t.Fatalf("new-session error: %s", *sessionReply.Error)
 	}
 	sessionID := sessionReply.Result.(map[string]any)["sessionId"].(string)
-	if !sessionState.Save(sessionMirrorFixture("reconnect-tab", "reconnect-chat", "[mock:permission] reconnect controls")) {
-		t.Fatal("session save failed")
-	}
 	first.invoke(t, 2, "job:start", map[string]any{
 		"kind": "app-chat", "chatId": "reconnect-chat", "tabId": "reconnect-tab", "sessionId": sessionID,
 		"providerId": "mock", "prompt": "[mock:permission] reconnect controls",
+		"operationId": "reconnect-permission-turn", "userMessageId": "reconnect-permission-user", "assistantMessageId": "reconnect-permission-assistant",
 	})
 	startReply := first.waitReply(t, 2, 5*time.Second)
 	if startReply.Error != nil {
@@ -995,22 +1029,22 @@ func TestWireReconnectRestoresLiveSessionControlsAndPendingPermission(t *testing
 	if job := mapFromAnyMain(end["job"]); job["status"] != "done" || job["stopReason"] != "end_turn" {
 		t.Fatalf("job end after reconnect = %#v", job)
 	}
-	reconnected.invoke(t, 5, "app-chat:set-model", map[string]any{"sessionId": sessionID, "modelId": "mock-deterministic[high]"})
-	if reply := reconnected.waitReply(t, 5, 2*time.Second); reply.Error != nil || mapFromAnyMain(reply.Result)["currentModelId"] != "mock-deterministic[high]" {
-		t.Fatalf("set-model after reconnect = %+v", reply)
+	reconnected.invoke(t, 5, "chat:runtime-controls-save", map[string]any{
+		"tabId": "reconnect-tab", "chatId": "reconnect-chat", "operationId": "reconnect-control-save",
+		"expectedRevision": intValue(chat[runtimeControlRevisionField]), "providerId": "mock",
+		"currentModelId": "mock-deterministic[high]", "currentModeId": "bypass", "modelControls": map[string]any{},
+	})
+	if reply := reconnected.waitReply(t, 5, 2*time.Second); reply.Error != nil || mapFromAnyMain(reply.Result)["currentModelId"] != "mock-deterministic[high]" || mapFromAnyMain(reply.Result)["currentModeId"] != "bypass" {
+		t.Fatalf("actor control save after reconnect = %+v", reply)
 	}
-	reconnected.invoke(t, 6, "app-chat:set-mode", map[string]any{"sessionId": sessionID, "modeId": "bypass"})
-	if reply := reconnected.waitReply(t, 6, 2*time.Second); reply.Error != nil || mapFromAnyMain(reply.Result)["currentModeId"] != "bypass" {
-		t.Fatalf("set-mode after reconnect = %+v", reply)
+	// No renderer session:save follows either control change. Read the actor
+	// projection—the legacy mirror is no longer a chat recovery authority.
+	reconnected.invoke(t, 61, "session:get")
+	controlsReply := reconnected.waitReply(t, 61, 2*time.Second)
+	if controlsReply.Error != nil {
+		t.Fatalf("actor controls readback: %s", *controlsReply.Error)
 	}
-	// No renderer session:save follows either control change. The handlers must
-	// patch the daemon-owned per-chat snapshot synchronously so a tab switch or
-	// renderer loss cannot restore the provider default.
-	reloadedControls := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
-	if err := reloadedControls.LoadError(); err != nil {
-		t.Fatalf("reload controls after wire set: %v", err)
-	}
-	persistedChat := chatFromSnapshot(reloadedControls.Get().(map[string]any), "reconnect-tab")
+	persistedChat := chatFromSnapshot(controlsReply.Result.(map[string]any), "reconnect-tab")
 	if fieldString(persistedChat, "providerId") != "mock" || fieldString(persistedChat, "currentModelId") != "mock-deterministic[high]" || fieldString(persistedChat, "currentModeId") != "bypass" {
 		t.Fatalf("wire controls not durably isolated = provider=%q model=%q mode=%q", fieldString(persistedChat, "providerId"), fieldString(persistedChat, "currentModelId"), fieldString(persistedChat, "currentModeId"))
 	}
@@ -1018,6 +1052,7 @@ func TestWireReconnectRestoresLiveSessionControlsAndPendingPermission(t *testing
 	reconnected.invoke(t, 7, "job:start", map[string]any{
 		"kind": "app-chat", "chatId": "reconnect-chat", "tabId": "reconnect-tab", "sessionId": sessionID,
 		"providerId": "mock", "prompt": "[mock:slow] reconnect cancel",
+		"operationId": "reconnect-cancel-turn", "userMessageId": "reconnect-cancel-user", "assistantMessageId": "reconnect-cancel-assistant",
 	})
 	slowReply := reconnected.waitReply(t, 7, 5*time.Second)
 	if slowReply.Error != nil {
@@ -1058,27 +1093,26 @@ func TestWireDaemonQueueDrainsWithoutControllerAndReplaysPermissionOnAttach(t *t
 		Broadcast: daemonEventBroadcaster(sessionState, hub.Broadcast),
 	})
 	t.Cleanup(func() { manager.Reset() })
-	coordinator := newChatControlCoordinator(manager, sessionState, hub.Broadcast)
-	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ChatControl: coordinator})
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir)
+	coordinator := newChatControlCoordinator(manager, hub.Broadcast, providerChats)
+	registerDaemonHandlers(hub, root, manager, daemonOptions{
+		StateDir: stateDir, ChatControl: coordinator, ProviderChats: providerChats,
+	})
 
-	created, err := sessionState.AgentCreateChat("Disconnected drain", root, "mock", "mock-deterministic", "ask", false)
+	created, err := providerChats.CreateChat("Disconnected drain", root, resolvedChatControls{ProviderID: "mock", ModelID: "mock-deterministic", BaseModel: "mock-deterministic", ModeID: "ask"}, false, "test:create-disconnected-drain")
 	if err != nil {
 		t.Fatal(err)
 	}
 	tabID, chatID := fieldString(created, "tabId"), fieldString(created, "chatId")
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	if _, err := manager.NewSession(ctx, acp.SessionOptions{TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: root}); err != nil {
-		t.Fatalf("new disconnected queue session: %v", err)
-	}
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
-	receipt, err := sessionState.AgentEnqueueChat(tabID, chatID, "[mock:permission] drain before controller attach", "auto")
+	receipt, err := providerChats.QueueAgentMessage(
+		context.Background(), tabID, chatID, "test-disconnected-drain", "[mock:permission] drain before controller attach", "queue",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator.scheduleDrain(tabID, chatID)
 	var permission map[string]any
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -1090,7 +1124,8 @@ func TestWireDaemonQueueDrainsWithoutControllerAndReplaysPermissionOnAttach(t *t
 		time.Sleep(20 * time.Millisecond)
 	}
 	if permission == nil {
-		t.Fatal("daemon-owned queue did not reach a permission wait without a controller")
+		actorState, _ := providerChats.Snapshot(chatID)
+		t.Fatalf("actor-owned queue did not reach a permission wait without a controller: state=%#v processes=%#v", actorState, manager.Processes())
 	}
 
 	client := dialTestWS(t, server.URL)
@@ -1149,27 +1184,37 @@ func TestApplyProductionDefaultsWindowsOnlyAndPreservesOverrides(t *testing.T) {
 
 func TestWireTraceMockPermissionTurn(t *testing.T) {
 	root := repoRoot(t)
+	stateDir := t.TempDir()
 	renderer := t.TempDir()
 	if err := os.WriteFile(filepath.Join(renderer, "index.html"), []byte("<!doctype html><head></head><body></body>"), 0o644); err != nil {
 		t.Fatalf("write index: %v", err)
 	}
 
 	hub := wire.NewHub()
+	sessionState := sharedSessionStore(stateDir)
 	manager := acp.NewManager(acp.Options{
 		RootDir:             root,
-		Provider:            acp.ProviderConfig{Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Label: "Workass Mock ACP"},
+		StateDir:            stateDir,
+		Provider:            acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true, Label: "Workass Mock ACP"},
+		DefaultProviderID:   "mock",
 		Broadcast:           hub.Broadcast,
 		StdoutFlushInterval: 30 * time.Millisecond,
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
 	client := dialTestWS(t, server.URL)
 	defer client.conn.Close()
 
-	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": "wire-perm-tab"})
+	chatID := "chat-wire-permission"
+	createWireActorChat(t, client, 100, "wire-perm-tab", chatID, "mock")
+	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": "wire-perm-tab", "chatId": chatID, "providerId": "mock"})
 	sessionReply := client.waitReply(t, 1, 5*time.Second)
 	if sessionReply.Error != nil {
 		t.Fatalf("new-session error: %s", *sessionReply.Error)
@@ -1177,8 +1222,10 @@ func TestWireTraceMockPermissionTurn(t *testing.T) {
 	session := sessionReply.Result.(map[string]any)
 	sessionID := session["sessionId"].(string)
 
-	chatID := "chat-wire-permission"
-	client.invoke(t, 2, "job:start", map[string]any{"kind": "app-chat", "chatId": chatID, "sessionId": sessionID, "tabId": "wire-perm-tab", "prompt": "[mock:permission] approve this"})
+	client.invoke(t, 2, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": chatID, "sessionId": sessionID, "tabId": "wire-perm-tab", "prompt": "[mock:permission] approve this",
+		"operationId": "wire-permission-turn", "userMessageId": "wire-permission-user", "assistantMessageId": "wire-permission-assistant",
+	})
 	startReply := client.waitReply(t, 2, 5*time.Second)
 	if startReply.Error != nil {
 		t.Fatalf("job:start error: %s", *startReply.Error)
@@ -1267,6 +1314,7 @@ func TestWireTraceMockPermissionTurn(t *testing.T) {
 
 func TestWireLostTerminalReconciliationEmitsRendererEndEvent(t *testing.T) {
 	root := repoRoot(t)
+	stateDir := t.TempDir()
 	renderer := t.TempDir()
 	if err := os.WriteFile(filepath.Join(renderer, "index.html"), []byte("<!doctype html><head></head><body></body>"), 0o644); err != nil {
 		t.Fatalf("write index: %v", err)
@@ -1274,7 +1322,7 @@ func TestWireLostTerminalReconciliationEmitsRendererEndEvent(t *testing.T) {
 
 	hub := wire.NewHub()
 	manager := acp.NewManager(acp.Options{
-		RootDir: root,
+		RootDir: root, StateDir: stateDir,
 		Provider: acp.ProviderConfig{
 			ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
 			CWD: root, Enabled: true, Label: "Workass Mock ACP",
@@ -1287,8 +1335,13 @@ func TestWireLostTerminalReconciliationEmitsRendererEndEvent(t *testing.T) {
 		PromptReconcileTimeout:  100 * time.Millisecond,
 		PromptTerminalGrace:     100 * time.Millisecond,
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager)
+	sessionState := sharedSessionStore(stateDir)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
@@ -1297,6 +1350,7 @@ func TestWireLostTerminalReconciliationEmitsRendererEndEvent(t *testing.T) {
 
 	const tabID = "wire-lost-terminal-tab"
 	const chatID = "wire-lost-terminal-chat"
+	createWireActorChat(t, client, 100, tabID, chatID, "mock")
 	client.invoke(t, 1, "app-chat:new-session", map[string]any{
 		"tabId": tabID, "chatId": chatID, "providerId": "mock",
 	})
@@ -1308,6 +1362,7 @@ func TestWireLostTerminalReconciliationEmitsRendererEndEvent(t *testing.T) {
 	client.invoke(t, 2, "job:start", map[string]any{
 		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "sessionId": sessionID,
 		"providerId": "mock", "prompt": "[mock:lost-terminal] complete visibly over wire",
+		"operationId": "lost-terminal-turn", "userMessageId": "lost-terminal-user", "assistantMessageId": "lost-terminal-assistant",
 	})
 	startReply := client.waitReply(t, 2, 5*time.Second)
 	if startReply.Error != nil {
@@ -1336,34 +1391,42 @@ func TestWireTraceAppChatSteer(t *testing.T) {
 	hub := wire.NewHub()
 	basePrompt := "[mock:slow] [mock:steer] base turn"
 	sessionState := sharedSessionStore(stateDir)
-	if !sessionState.Save(sessionMirrorFixture("wire-steer-tab", "chat-wire-steer", basePrompt)) {
-		t.Fatal("save wire steer session fixture")
-	}
 	manager := acp.NewManager(acp.Options{
 		RootDir:             root,
 		StateDir:            stateDir,
-		Provider:            acp.ProviderConfig{Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Label: "Workass Mock ACP"},
+		Provider:            acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true, Label: "Workass Mock ACP"},
+		DefaultProviderID:   "mock",
 		Broadcast:           daemonEventBroadcaster(sessionState, hub.Broadcast),
 		StdoutFlushInterval: 20 * time.Millisecond,
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir})
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
 	client := dialTestWS(t, server.URL)
 	defer client.conn.Close()
 
-	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": "wire-steer-tab", "chatId": "chat-wire-steer"})
+	createWireActorChat(t, client, 100, "wire-steer-tab", "chat-wire-steer", "mock")
+	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": "wire-steer-tab", "chatId": "chat-wire-steer", "providerId": "mock"})
 	sessionReply := client.waitReply(t, 1, 5*time.Second)
 	if sessionReply.Error != nil {
 		t.Fatalf("new-session error: %s", *sessionReply.Error)
 	}
-	session := sessionReply.Result.(map[string]any)
-	sessionID := session["sessionId"].(string)
+	session := mapFromAnyMain(sessionReply.Result)
+	sessionID := fieldString(session, "sessionId")
+	if sessionID == "" {
+		t.Fatalf("new-session omitted exact actor lane: %#v", session)
+	}
 	t.Logf("trace reply app-chat:new-session sessionId=%s agent=%s", sessionID, session["agent"])
-
-	client.invoke(t, 2, "job:start", map[string]any{"kind": "app-chat", "chatId": "chat-wire-steer", "sessionId": sessionID, "tabId": "wire-steer-tab", "prompt": basePrompt})
+	client.invoke(t, 2, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "chat-wire-steer", "sessionId": sessionID, "tabId": "wire-steer-tab", "prompt": basePrompt,
+		"operationId": "wire-steer-base-turn", "userMessageId": "client-u", "assistantMessageId": "client-a",
+	})
 	startReply := client.waitReply(t, 2, 5*time.Second)
 	if startReply.Error != nil {
 		t.Fatalf("job:start error: %s", *startReply.Error)
@@ -1403,7 +1466,7 @@ func TestWireTraceAppChatSteer(t *testing.T) {
 			break
 		}
 	}
-	if persistedSteer == nil || fieldString(persistedSteer, "status") != "done" || fieldString(persistedSteer, "steerState") != "accepted" || persistedSteer["steerAnchor"] != nil || fieldString(persistedSteer, "steerBoundary") != "" || fieldString(persistedSteer, "turnRootId") != "client-a" {
+	if persistedSteer == nil || fieldString(persistedSteer, "status") != "done" || fieldString(persistedSteer, "steerState") != "applied" || persistedSteer["steerAnchor"] != nil || fieldString(persistedSteer, "steerBoundary") != "" || fieldString(persistedSteer, "turnRootId") != "client-a" {
 		t.Fatalf("daemon-owned steer acknowledgement = %#v", persistedSteer)
 	}
 	if messages := messageSlice(steerChat); fieldString(mapFromAnyMain(messages[len(messages)-1]), "id") != "wire-steer-tail" || fieldString(mapFromAnyMain(messages[len(messages)-1]), "status") != "running" {
@@ -1416,7 +1479,12 @@ func TestWireTraceAppChatSteer(t *testing.T) {
 		t.Fatalf("steered end job = %#v", endJob)
 	}
 	t.Logf("trace event job:event type=end id=%s status=%s result=%q", endJob["id"], endJob["status"], endJob["result"])
-	archive := loadChatArchive(stateDir, "wire-steer-tab")
+	client.invoke(t, 5, "chat:archive-load", "wire-steer-tab")
+	archiveReply := client.waitReply(t, 5, 2*time.Second)
+	if archiveReply.Error != nil {
+		t.Fatalf("actor steer archive load: %s", *archiveReply.Error)
+	}
+	archive := anySlice(archiveReply.Result)
 	steerIndex := -1
 	for index, raw := range archive {
 		if fieldString(mapFromAnyMain(raw), "id") == "wire-steer-user" {
@@ -1429,17 +1497,19 @@ func TestWireTraceAppChatSteer(t *testing.T) {
 	}
 }
 
-func TestWireTraceMockAutoCompaction(t *testing.T) {
+func TestWireTraceMockContextLimitNeverReplacesOrReseedsLane(t *testing.T) {
 	root := repoRoot(t)
+	stateDir := t.TempDir()
 	renderer := t.TempDir()
 	if err := os.WriteFile(filepath.Join(renderer, "index.html"), []byte("<!doctype html><head></head><body></body>"), 0o644); err != nil {
 		t.Fatalf("write index: %v", err)
 	}
-	traceFile := filepath.Join(t.TempDir(), "mock-prompts.jsonl")
+	traceFile := filepath.Join(stateDir, "mock-prompts.jsonl")
 
 	hub := wire.NewHub()
 	manager := acp.NewManager(acp.Options{
 		RootDir:                 root,
+		StateDir:                stateDir,
 		Provider:                acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{"WORKASS_MOCK_ACP_TRACE_FILE": traceFile, "WORKASS_MOCK_ACP_DELAY_MS": "5"}, Enabled: true, Label: "Workass Mock ACP"},
 		DefaultProviderID:       "mock",
 		Broadcast:               hub.Broadcast,
@@ -1450,8 +1520,13 @@ func TestWireTraceMockAutoCompaction(t *testing.T) {
 		CompactionThresholdPct:  80,
 		CompactionKeepLastTurns: 1,
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager)
+	sessionState := sharedSessionStore(stateDir)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
@@ -1459,6 +1534,7 @@ func TestWireTraceMockAutoCompaction(t *testing.T) {
 	defer client.conn.Close()
 
 	tabID := "wire-compact-tab"
+	createWireActorChat(t, client, 100, tabID, "wire-compact-turn", "mock")
 	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": tabID, "chatId": "wire-compact-turn"})
 	sessionReply := client.waitReply(t, 1, 5*time.Second)
 	if sessionReply.Error != nil {
@@ -1472,7 +1548,11 @@ func TestWireTraceMockAutoCompaction(t *testing.T) {
 		map[string]any{"role": "user", "content": "turno anterior usuario", "at": "2026-07-10T00:00:00Z"},
 		map[string]any{"role": "assistant", "content": "turno anterior asistente", "at": "2026-07-10T00:00:01Z"},
 	}
-	client.invoke(t, 2, "job:start", map[string]any{"kind": "app-chat", "chatId": "wire-compact-turn", "sessionId": oldSessionID, "tabId": tabID, "prompt": "[mock:bigusage] compact this", "history": history})
+	client.invoke(t, 2, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "wire-compact-turn", "sessionId": oldSessionID, "tabId": tabID,
+		"operationId": "context-limit-turn-1", "userMessageId": "context-limit-user-1", "assistantMessageId": "context-limit-assistant-1",
+		"prompt": "[mock:bigusage] compact this", "history": history,
+	})
 	startReply := client.waitReply(t, 2, 5*time.Second)
 	if startReply.Error != nil {
 		t.Fatalf("job:start error: %s", *startReply.Error)
@@ -1491,16 +1571,21 @@ func TestWireTraceMockAutoCompaction(t *testing.T) {
 	}
 	t.Logf("trace event job:event type=usage sessionId=%s used=%v size=%v usedPct=%v inputTokens=%v", usage["sessionId"], usage["used"], usage["size"], usage["usedPct"], usage["inputTokens"])
 
-	compacted := client.waitChannelEvent(t, "chat:compacted", 10*time.Second).Payload.(map[string]any)
-	newSessionID := fmt.Sprint(compacted["sessionId"])
-	if newSessionID == "" || newSessionID == oldSessionID || compacted["usedPct"] != json.Number("85") || compacted["summaryChars"] == nil || compacted["keptTurns"] != json.Number("1") {
-		t.Fatalf("chat:compacted payload = %#v oldSession=%s", compacted, oldSessionID)
+	limit := client.waitChannelEvent(t, "chat:context-limit", 10*time.Second).Payload.(map[string]any)
+	if limit["sessionId"] != oldSessionID || limit["usedPct"] != json.Number("85") || limit["providerId"] != "mock" {
+		t.Fatalf("chat:context-limit payload = %#v session=%s", limit, oldSessionID)
 	}
-	t.Logf("trace event chat:compacted old=%s new=%s usedPct=%v summaryChars=%v keptTurns=%v", oldSessionID, newSessionID, compacted["usedPct"], compacted["summaryChars"], compacted["keptTurns"])
+	t.Logf("trace event chat:context-limit session=%s usedPct=%v", oldSessionID, limit["usedPct"])
 	end := client.waitJobEvent(t, jobID, "end", 5*time.Second)
 	assertWireJobStatus(t, end, "done", "end_turn")
+	client.expectNoEventChannel(t, "chat:compacted", 150*time.Millisecond)
+	client.expectNoEventChannel(t, "chat:session-replaced", 150*time.Millisecond)
 
-	client.invoke(t, 3, "job:start", map[string]any{"kind": "app-chat", "chatId": "wire-compact-turn", "sessionId": newSessionID, "tabId": tabID, "prompt": "after compact"})
+	client.invoke(t, 3, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "wire-compact-turn", "sessionId": oldSessionID, "tabId": tabID,
+		"operationId": "context-limit-turn-2", "userMessageId": "context-limit-user-2", "assistantMessageId": "context-limit-assistant-2",
+		"prompt": "after context limit",
+	})
 	nextReply := client.waitReply(t, 3, 5*time.Second)
 	if nextReply.Error != nil {
 		t.Fatalf("next job:start error: %s", *nextReply.Error)
@@ -1508,24 +1593,28 @@ func TestWireTraceMockAutoCompaction(t *testing.T) {
 	nextJob := nextReply.Result.(map[string]any)
 	nextEnd := client.waitJobEvent(t, nextJob["id"].(string), "end", 5*time.Second)
 	assertWireJobStatus(t, nextEnd, "done", "end_turn")
-	t.Logf("trace next turn on compacted session session=%s status=%s", newSessionID, nextEnd["job"].(map[string]any)["status"])
+	if nextEnd["job"].(map[string]any)["sessionId"] != oldSessionID {
+		t.Fatalf("context-limit path replaced the native thread: %#v", nextEnd)
+	}
+	t.Logf("trace next turn kept exact session=%s status=%s", oldSessionID, nextEnd["job"].(map[string]any)["status"])
 
 	prompts := readMockTracePrompts(t, traceFile)
-	seedFound := false
+	if len(prompts) != 2 {
+		t.Fatalf("mock prompts = %#v, want exactly two user turns", prompts)
+	}
 	for _, prompt := range prompts {
-		if prompt["sessionId"] == newSessionID && strings.Contains(prompt["text"], "DETERMINISTIC WORKASS MOCK SUMMARY") && strings.Contains(prompt["text"], "recent_turns_verbatim") {
-			seedFound = true
-			break
+		if prompt["sessionId"] != oldSessionID || strings.Contains(prompt["text"], "WORKASS AUTO-COMPACTION") ||
+			strings.Contains(prompt["text"], "DETERMINISTIC WORKASS MOCK SUMMARY") ||
+			strings.Contains(prompt["text"], "Previous conversation") || strings.Contains(prompt["text"], "turno anterior") {
+			t.Fatalf("context-limit path replayed or reseeded provider text: %#v", prompts)
 		}
 	}
-	if !seedFound {
-		t.Fatalf("mock did not receive compacted seed for %s; prompts=%#v", newSessionID, prompts)
-	}
-	t.Logf("trace mock prompt seed asserted session=%s prompts=%d", newSessionID, len(prompts))
+	t.Logf("trace exact lane received %d direct prompts without transcript replay", len(prompts))
 }
 
-func TestWireTraceMockEngineCrashRecovery(t *testing.T) {
+func TestWireTraceMockEngineCrashReattachesExactThread(t *testing.T) {
 	root := repoRoot(t)
+	stateDir := t.TempDir()
 	renderer := t.TempDir()
 	if err := os.WriteFile(filepath.Join(renderer, "index.html"), []byte("<!doctype html><head></head><body></body>"), 0o644); err != nil {
 		t.Fatalf("write index: %v", err)
@@ -1533,8 +1622,12 @@ func TestWireTraceMockEngineCrashRecovery(t *testing.T) {
 
 	hub := wire.NewHub()
 	manager := acp.NewManager(acp.Options{
-		RootDir:              root,
-		Provider:             acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{"WORKASS_MOCK_ACP_DELAY_MS": "5"}, Enabled: true, Label: "Workass Mock ACP"},
+		RootDir:  root,
+		StateDir: stateDir,
+		Provider: acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{
+			"WORKASS_MOCK_ACP_DELAY_MS": "5", "WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "mock-provider.json"),
+			"WORKASS_MOCK_ACP_OPERATION_READBACK": "1",
+		}, Enabled: true, Label: "Workass Mock ACP"},
 		DefaultProviderID:    "mock",
 		Broadcast:            hub.Broadcast,
 		StdoutFlushInterval:  5 * time.Millisecond,
@@ -1543,8 +1636,13 @@ func TestWireTraceMockEngineCrashRecovery(t *testing.T) {
 		CrashRecoveryBackoff: 20 * time.Millisecond,
 		CompactionEnabled:    false,
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager)
+	sessionState := sharedSessionStore(stateDir)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir, hub.Broadcast)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
@@ -1552,50 +1650,44 @@ func TestWireTraceMockEngineCrashRecovery(t *testing.T) {
 	defer client.conn.Close()
 
 	tabID := "wire-crash-tab"
+	createWireActorChat(t, client, 100, tabID, "wire-crash-turn", "mock")
 	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": tabID, "chatId": "wire-crash-turn"})
 	session := client.waitReply(t, 1, 5*time.Second).Result.(map[string]any)
 	oldSessionID := session["sessionId"].(string)
-	client.invoke(t, 2, "job:start", map[string]any{"kind": "app-chat", "chatId": "wire-crash-turn", "sessionId": oldSessionID, "tabId": tabID, "prompt": "[mock:crash] first crash"})
+	client.invoke(t, 2, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "wire-crash-turn", "sessionId": oldSessionID, "tabId": tabID,
+		"operationId": "engine-crash-turn", "userMessageId": "engine-crash-user", "assistantMessageId": "engine-crash-assistant",
+		"prompt": "[mock:crash] first crash",
+	})
 	startReply := client.waitReply(t, 2, 5*time.Second)
 	if startReply.Error != nil {
 		t.Fatalf("job:start error: %s", *startReply.Error)
 	}
 	job := startReply.Result.(map[string]any)
 	jobID := job["id"].(string)
-	system := client.waitFor(t, 5*time.Second, func(msg wsMessage) bool {
-		if msg.T != "event" || msg.Channel != "job:event" {
-			return false
-		}
-		payload, _ := msg.Payload.(map[string]any)
-		return payload["type"] == "data" && payload["id"] == jobID && payload["stream"] == "system" && strings.Contains(fmt.Sprint(payload["chunk"]), "[engine reiniciado")
-	}).Payload.(map[string]any)
-	t.Logf("trace event job:event type=data stream=system chunk=%q", system["chunk"])
 	recovered := client.waitChannelEvent(t, "chat:engine-recovered", 5*time.Second).Payload.(map[string]any)
-	newSessionID := fmt.Sprint(recovered["sessionId"])
-	if newSessionID == "" || newSessionID == oldSessionID || recovered["oldSessionId"] != oldSessionID {
+	resumedSessionID := fmt.Sprint(recovered["sessionId"])
+	if resumedSessionID != oldSessionID || recovered["oldSessionId"] != oldSessionID {
 		t.Fatalf("chat:engine-recovered payload = %#v old=%s", recovered, oldSessionID)
 	}
-	t.Logf("trace event chat:engine-recovered old=%s new=%s tab=%v", oldSessionID, newSessionID, recovered["tabId"])
+	t.Logf("trace event chat:engine-recovered exactSession=%s tab=%v", oldSessionID, recovered["tabId"])
+	waitProviderChatIdle(t, providerChats, "wire-crash-turn", 5*time.Second)
 	end := client.waitJobEvent(t, jobID, "end", 5*time.Second)
 	endJob := end["job"].(map[string]any)
 	if endJob["status"] != "failed" || endJob["stopReason"] != "engine-crash" || endJob["crashInterrupted"] != true {
 		t.Fatalf("crash end job = %#v", endJob)
 	}
 	t.Logf("trace event job:event type=end id=%s status=%s stopReason=%v crashInterrupted=%v", endJob["id"], endJob["status"], endJob["stopReason"], endJob["crashInterrupted"])
-
-	client.invoke(t, 3, "job:start", map[string]any{"kind": "app-chat", "chatId": "wire-crash-turn", "sessionId": newSessionID, "tabId": tabID, "prompt": "after recovery"})
-	nextReply := client.waitReply(t, 3, 5*time.Second)
-	if nextReply.Error != nil {
-		t.Fatalf("next job:start error: %s", *nextReply.Error)
+	if live, ok := manager.LiveSession(oldSessionID); !ok || live.ChatID != "wire-crash-turn" {
+		t.Fatalf("exact provider thread was not reattached after host crash: %+v ok=%v", live, ok)
 	}
-	nextJob := nextReply.Result.(map[string]any)
-	nextEnd := client.waitJobEvent(t, nextJob["id"].(string), "end", 5*time.Second)
-	assertWireJobStatus(t, nextEnd, "done", "end_turn")
-	t.Logf("trace next turn after recovery session=%s status=%s", newSessionID, nextEnd["job"].(map[string]any)["status"])
+	client.expectNoEventChannel(t, "chat:session-replaced", 150*time.Millisecond)
 }
 
-func TestWireTraceMockDoubleCrashSurfacesError(t *testing.T) {
+func TestWireTraceMockCrashAmbiguityDoesNotResendOrRespawn(t *testing.T) {
 	root := repoRoot(t)
+	stateDir := t.TempDir()
+	traceFile := filepath.Join(stateDir, "crash-prompts.jsonl")
 	renderer := t.TempDir()
 	if err := os.WriteFile(filepath.Join(renderer, "index.html"), []byte("<!doctype html><head></head><body></body>"), 0o644); err != nil {
 		t.Fatalf("write index: %v", err)
@@ -1603,8 +1695,12 @@ func TestWireTraceMockDoubleCrashSurfacesError(t *testing.T) {
 
 	hub := wire.NewHub()
 	manager := acp.NewManager(acp.Options{
-		RootDir:              root,
-		Provider:             acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{"WORKASS_MOCK_ACP_DELAY_MS": "5"}, Enabled: true, Label: "Workass Mock ACP"},
+		RootDir:  root,
+		StateDir: stateDir,
+		Provider: acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{
+			"WORKASS_MOCK_ACP_DELAY_MS": "5", "WORKASS_MOCK_ACP_TRACE_FILE": traceFile,
+			"WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "mock-provider.json"),
+		}, Enabled: true, Label: "Workass Mock ACP"},
 		DefaultProviderID:    "mock",
 		Broadcast:            hub.Broadcast,
 		StdoutFlushInterval:  5 * time.Millisecond,
@@ -1613,8 +1709,13 @@ func TestWireTraceMockDoubleCrashSurfacesError(t *testing.T) {
 		CrashRecoveryBackoff: 20 * time.Millisecond,
 		CompactionEnabled:    false,
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager)
+	sessionState := sharedSessionStore(stateDir)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir, hub.Broadcast)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
@@ -1622,28 +1723,67 @@ func TestWireTraceMockDoubleCrashSurfacesError(t *testing.T) {
 	defer client.conn.Close()
 
 	tabID := "wire-double-crash-tab"
+	createWireActorChat(t, client, 100, tabID, tabID, "mock")
 	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": tabID, "chatId": tabID})
 	session := client.waitReply(t, 1, 5*time.Second).Result.(map[string]any)
 	firstSessionID := session["sessionId"].(string)
-	client.invoke(t, 2, "job:start", map[string]any{"kind": "app-chat", "chatId": tabID, "sessionId": firstSessionID, "tabId": tabID, "prompt": "[mock:crash] first"})
+	client.invoke(t, 2, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": tabID, "sessionId": firstSessionID, "tabId": tabID,
+		"operationId": "ambiguous-crash-turn-1", "userMessageId": "ambiguous-crash-user-1", "assistantMessageId": "ambiguous-crash-assistant-1",
+		"prompt": "[mock:crash] first",
+	})
 	firstJob := client.waitReply(t, 2, 5*time.Second).Result.(map[string]any)
 	firstRecovered := client.waitChannelEvent(t, "chat:engine-recovered", 5*time.Second).Payload.(map[string]any)
-	secondSessionID := fmt.Sprint(firstRecovered["sessionId"])
-	firstEnd := client.waitJobEvent(t, firstJob["id"].(string), "end", 5*time.Second)
-	if firstEnd["job"].(map[string]any)["stopReason"] != "engine-crash" {
-		t.Fatalf("first crash end = %#v", firstEnd)
+	resumedSessionID := fmt.Sprint(firstRecovered["sessionId"])
+	if resumedSessionID != firstSessionID {
+		t.Fatalf("first crash replaced the provider thread: %#v", firstRecovered)
 	}
-	t.Logf("trace first crash recovered old=%s new=%s", firstSessionID, secondSessionID)
+	deadline := time.Now().Add(5 * time.Second)
+	var uncertain chat.State
+	for time.Now().Before(deadline) {
+		uncertain, _ = providerChats.Snapshot(tabID)
+		if uncertain.Foreground != nil && uncertain.Foreground.Status == chat.ForegroundUncertain {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if uncertain.Foreground == nil || uncertain.Foreground.Status != chat.ForegroundUncertain {
+		t.Fatalf("crash without readback did not become actor-owned uncertainty: %#v", uncertain)
+	}
+	if uncertain.Foreground.Turn.NativeID != firstJob["id"].(string) {
+		t.Fatalf("uncertain crash changed turn identity: foreground=%#v job=%#v", uncertain.Foreground, firstJob)
+	}
+	t.Logf("trace first crash resumed exact session=%s and blocked unresolved operation=%s", firstSessionID, uncertain.Foreground.OperationID)
 
-	client.invoke(t, 3, "job:start", map[string]any{"kind": "app-chat", "chatId": tabID, "sessionId": secondSessionID, "tabId": tabID, "prompt": "[mock:crash] second"})
-	secondJob := client.waitReply(t, 3, 5*time.Second).Result.(map[string]any)
-	secondEnd := client.waitJobEvent(t, secondJob["id"].(string), "end", 5*time.Second)
-	secondEndJob := secondEnd["job"].(map[string]any)
-	if secondEndJob["status"] != "failed" || secondEndJob["stopReason"] != "engine-crash" || secondEndJob["crashInterrupted"] != true {
-		t.Fatalf("second crash end job = %#v", secondEndJob)
+	client.invoke(t, 3, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": tabID, "sessionId": firstSessionID, "tabId": tabID,
+		"operationId": "ambiguous-crash-turn-2", "userMessageId": "ambiguous-crash-user-2", "assistantMessageId": "ambiguous-crash-assistant-2",
+		"prompt": "must not be resent after crash ambiguity",
+	})
+	retryReply := client.waitReply(t, 3, 5*time.Second)
+	if retryReply.Error == nil {
+		t.Fatalf("ambiguous crash retry did not fail closed at actor admission: %#v", retryReply)
 	}
 	client.expectNoEventChannel(t, "chat:engine-recovered", 300*time.Millisecond)
-	t.Logf("trace second crash surfaced status=%s stopReason=%v no-auto-recovery=true", secondEndJob["status"], secondEndJob["stopReason"])
+	client.expectNoEventChannel(t, "chat:session-replaced", 150*time.Millisecond)
+	if live, ok := manager.LiveSession(firstSessionID); !ok || live.Info.SessionID != firstSessionID {
+		t.Fatalf("ambiguous operation changed the exact lane: %+v ok=%v", live, ok)
+	}
+	prompts := readMockTracePrompts(t, traceFile)
+	providerInputs := 0
+	for _, prompt := range prompts {
+		if strings.HasPrefix(prompt["text"], "[mock:lifecycle]") {
+			continue
+		}
+		providerInputs++
+		if strings.Contains(prompt["text"], "must not be resent") {
+			t.Fatalf("crash ambiguity resent provider input: %#v", prompts)
+		}
+	}
+	if providerInputs != 1 || !strings.Contains(prompts[0]["text"], "[mock:crash] first") {
+		t.Fatalf("crash ambiguity resent provider input: %#v", prompts)
+	}
+	t.Logf("trace ambiguous crash preserved session=%s and refused input resend", firstSessionID)
 }
 
 func TestConfigAndSettingsPersistInStateDir(t *testing.T) {
@@ -1763,17 +1903,24 @@ func TestWireTraceChatEnvNumstat(t *testing.T) {
 	baseHash := wireFileSHA256(t, filepath.Join(alpha, "work.txt"))
 
 	hub := wire.NewHub()
+	stateDir := filepath.Join(t.TempDir(), "state")
 	manager := acp.NewManager(acp.Options{
 		RootDir:             root,
-		StateDir:            filepath.Join(t.TempDir(), "state"),
-		Provider:            acp.ProviderConfig{Command: os.Args[0], Args: []string{"-test.run=TestWireFakeACPHelper", "--"}, CWD: root, Env: map[string]string{"WORKASS_WIRE_FAKE_ACP": "1"}, Label: "Wire Fake ACP"},
+		StateDir:            stateDir,
+		Provider:            acp.ProviderConfig{ID: "mock", Command: os.Args[0], Args: []string{"-test.run=TestWireFakeACPHelper", "--"}, CWD: root, Env: map[string]string{"WORKASS_WIRE_FAKE_ACP": "1"}, Enabled: true, Label: "Wire Fake ACP"},
+		DefaultProviderID:   "mock",
 		Broadcast:           hub.Broadcast,
 		InitTimeout:         2 * time.Second,
 		StdoutFlushInterval: 10 * time.Millisecond,
 		RSSSampleInterval:   time.Hour,
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager)
+	sessionState := sharedSessionStore(stateDir)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir, hub.Broadcast)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
@@ -1782,6 +1929,7 @@ func TestWireTraceChatEnvNumstat(t *testing.T) {
 
 	chatID := "chat-wire-env"
 	tabID := "wire-env-tab"
+	createWireActorChat(t, client, 100, tabID, chatID, "mock")
 	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": tabID, "chatId": chatID, "cwd": workspace})
 	sessionReply := client.waitReply(t, 1, 5*time.Second)
 	if sessionReply.Error != nil {
@@ -1795,7 +1943,10 @@ func TestWireTraceChatEnvNumstat(t *testing.T) {
 	}
 	t.Logf("trace event chat:env session-create chatId=%s tabId=%s cwd=%s repos=%d unchanged=%s", created["chatId"], created["tabId"], created["cwd"], len(created["repos"].([]any)), strings.Join(stringSliceFromAny(created["unchanged"]), ","))
 
-	client.invoke(t, 2, "job:start", map[string]any{"kind": "app-chat", "chatId": chatID, "sessionId": sessionID, "tabId": tabID, "cwd": workspace, "prompt": "wire env turn"})
+	client.invoke(t, 2, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": chatID, "sessionId": sessionID, "tabId": tabID, "cwd": workspace, "prompt": "wire env turn",
+		"operationId": "wire-env-turn", "userMessageId": "wire-env-user", "assistantMessageId": "wire-env-assistant",
+	})
 	startReply := client.waitReply(t, 2, 5*time.Second)
 	if startReply.Error != nil {
 		t.Fatalf("job:start error: %s", *startReply.Error)
@@ -1831,7 +1982,7 @@ func TestWireTraceChatEnvNumstat(t *testing.T) {
 	}
 	t.Logf("trace event chat:env after-turn chatId=%s repo=%s branch=%s file=%s adds=%v dels=%v unchanged=%s", env["chatId"], repo["name"], repo["branch"], file["path"], file["adds"], file["dels"], strings.Join(stringSliceFromAny(env["unchanged"]), ","))
 
-	client.invoke(t, 3, "chat:env-get", map[string]any{"chatId": chatID})
+	client.invoke(t, 3, "chat:env-get", map[string]any{"chatId": chatID, "tabId": tabID})
 	getReply := client.waitReply(t, 3, 5*time.Second)
 	if getReply.Error != nil {
 		t.Fatalf("chat:env-get error: %s", *getReply.Error)
@@ -1843,7 +1994,7 @@ func TestWireTraceChatEnvNumstat(t *testing.T) {
 	}
 	t.Logf("trace reply chat:env-get chatId=%s repos=%d firstRepo=%s adds=%v", got["chatId"], len(got["repos"].([]any)), gotRepo["name"], gotRepo["adds"])
 
-	client.invoke(t, 4, "chat:checkpoints", map[string]any{"chatId": chatID})
+	client.invoke(t, 4, "chat:checkpoints", map[string]any{"chatId": chatID, "tabId": tabID})
 	cpReply := client.waitReply(t, 4, 5*time.Second)
 	if cpReply.Error != nil {
 		t.Fatalf("chat:checkpoints error: %s", *cpReply.Error)
@@ -1860,7 +2011,7 @@ func TestWireTraceChatEnvNumstat(t *testing.T) {
 	}
 	t.Logf("trace reply chat:checkpoints turnSeq=%v repo=%s ref=%s", cp["turnSeq"], cpRepo["name"], cpRepo["ref"])
 
-	client.invoke(t, 5, "chat:diff", map[string]any{"chatId": chatID, "repo": "alpha", "path": "work.txt"})
+	client.invoke(t, 5, "chat:diff", map[string]any{"chatId": chatID, "tabId": tabID, "repo": "alpha", "path": "work.txt"})
 	diffReply := client.waitReply(t, 5, 5*time.Second)
 	if diffReply.Error != nil {
 		t.Fatalf("chat:diff error: %s", *diffReply.Error)
@@ -1872,7 +2023,9 @@ func TestWireTraceChatEnvNumstat(t *testing.T) {
 	}
 	t.Logf("trace reply chat:diff turnSeq=%v hunk=%t truncated=%v", diff["turnSeq"], strings.Contains(diffText, "@@"), diff["truncated"])
 
-	client.invoke(t, 6, "chat:rewind", map[string]any{"chatId": chatID, "turnSeq": 1})
+	client.invoke(t, 6, "chat:rewind", map[string]any{
+		"tabId": tabID, "chatId": chatID, "turnSeq": 1, "operationId": "wire-env-rewind-1",
+	})
 	rewindReply := client.waitReply(t, 6, 5*time.Second)
 	if rewindReply.Error != nil {
 		t.Fatalf("chat:rewind error: %s", *rewindReply.Error)
@@ -1909,7 +2062,9 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 			Command: "node",
 			Args:    []string{filepath.Join(repo, "desktop", "acp", "mock-server.mjs")},
 			CWD:     repo,
-			Env:     map[string]string{"WORKASS_MOCK_ACP_DELAY_MS": "10"},
+			Env: map[string]string{
+				"WORKASS_MOCK_ACP_DELAY_MS": "10", "WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "mock-provider.json"),
+			},
 			Enabled: true,
 			Label:   "Workass Mock ACP",
 		},
@@ -1922,8 +2077,13 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 		RSSSampleInterval:      time.Hour,
 		CompactionEnabled:      false,
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, repo, manager, daemonOptions{StateDir: stateDir})
+	sessionState := sharedSessionStore(stateDir)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir, hub.Broadcast)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, repo, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
@@ -1932,6 +2092,7 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 
 	chatID := "chat-wire-hibernate-checkpoint"
 	tabID := "wire-hibernate-checkpoint-tab"
+	createWireActorChat(t, client, 100, tabID, chatID, "mock")
 	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": tabID, "chatId": chatID, "cwd": workspace})
 	sessionReply := client.waitReply(t, 1, 5*time.Second)
 	if sessionReply.Error != nil {
@@ -1939,14 +2100,18 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 	}
 	session := sessionReply.Result.(map[string]any)
 	oldSessionID := session["sessionId"].(string)
-	runWireChatTurn(t, client, 2, chatID, tabID, oldSessionID, "before hibernate checkpoint")
+	runWireChatTurn(t, client, 2, chatID, tabID, oldSessionID, "before hibernate checkpoint", workspace)
 	hibernated := waitWireProcStateForChat(t, manager, chatID, acp.StateHibernated, 2*time.Second)
 	t.Logf("trace lifecycle hibernated chat=%s pid=%v", chatID, hibernated["pid"])
 
-	client.invoke(t, 3, "job:start", map[string]any{"kind": "app-chat", "chatId": chatID, "sessionId": oldSessionID, "tabId": tabID, "cwd": workspace, "prompt": "[mock:slow] hibernated checkpoint"})
+	client.invoke(t, 3, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": chatID, "sessionId": oldSessionID, "tabId": tabID, "cwd": workspace, "prompt": "[mock:slow] hibernated checkpoint",
+		"operationId": "hibernate-checkpoint-turn", "userMessageId": "hibernate-checkpoint-user", "assistantMessageId": "hibernate-checkpoint-assistant",
+	})
 	startReply := client.waitReply(t, 3, 5*time.Second)
 	if startReply.Error != nil {
-		t.Fatalf("job:start error: %s", *startReply.Error)
+		state, _ := providerChats.Snapshot(chatID)
+		t.Fatalf("job:start error: %s actor=%#v", *startReply.Error, state)
 	}
 	job := startReply.Result.(map[string]any)
 	jobID := job["id"].(string)
@@ -1955,7 +2120,7 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 	}
 	end := client.waitJobEvent(t, jobID, "end", 5*time.Second)
 	endJob := end["job"].(map[string]any)
-	if endJob["status"] != "done" || endJob["sessionId"] == oldSessionID {
+	if endJob["status"] != "done" || endJob["sessionId"] != oldSessionID {
 		t.Fatalf("hibernated checkpoint end = %#v", endJob)
 	}
 	envMsg := client.waitFor(t, 5*time.Second, func(msg wsMessage) bool {
@@ -1968,7 +2133,7 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 	env := envMsg.Payload.(map[string]any)
 	t.Logf("trace event chat:env hibernated checkpoint chatId=%s repos=%d", env["chatId"], len(env["repos"].([]any)))
 
-	client.invoke(t, 4, "chat:checkpoints", map[string]any{"chatId": chatID})
+	client.invoke(t, 4, "chat:checkpoints", map[string]any{"chatId": chatID, "tabId": tabID})
 	cpReply := client.waitReply(t, 4, 5*time.Second)
 	if cpReply.Error != nil {
 		t.Fatalf("chat:checkpoints error: %s", *cpReply.Error)
@@ -1981,7 +2146,7 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 	if latest["turnSeq"] != json.Number("2") {
 		t.Fatalf("latest checkpoint = %#v", latest)
 	}
-	client.invoke(t, 5, "chat:diff", map[string]any{"chatId": chatID, "repo": "alpha", "path": "work.txt"})
+	client.invoke(t, 5, "chat:diff", map[string]any{"chatId": chatID, "tabId": tabID, "repo": "alpha", "path": "work.txt"})
 	diffReply := client.waitReply(t, 5, 5*time.Second)
 	if diffReply.Error != nil {
 		t.Fatalf("chat:diff error: %s", *diffReply.Error)
@@ -2001,10 +2166,11 @@ func TestWireTraceGroupedCatalogAndInterleavedProviders(t *testing.T) {
 	}
 
 	hub := wire.NewHub()
+	stateDir := t.TempDir()
 	manager := acp.NewManager(acp.Options{
-		RootDir: root,
+		RootDir: root, StateDir: stateDir,
 		Providers: []acp.ProviderConfig{
-			{ID: "mock", Name: "Mock Provider", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true},
+			{ID: "mock", Name: "Mock Provider", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{"WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "mock-provider.json")}, Enabled: true},
 			{ID: "fake-agent", Name: "Fake Provider", Command: os.Args[0], Args: []string{"-test.run=TestWireFakeACPHelper", "--"}, CWD: root, Env: map[string]string{"WORKASS_WIRE_FAKE_ACP": "1"}, Enabled: true},
 		},
 		DefaultProviderID:    "mock",
@@ -2014,8 +2180,13 @@ func TestWireTraceGroupedCatalogAndInterleavedProviders(t *testing.T) {
 		ThoughtFlushInterval: 10 * time.Millisecond,
 		RSSSampleInterval:    time.Hour,
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager)
+	sessionState := sharedSessionStore(stateDir)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir, hub.Broadcast)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 	manager.EmitCatalog(context.Background())
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
@@ -2034,6 +2205,8 @@ func TestWireTraceGroupedCatalogAndInterleavedProviders(t *testing.T) {
 	}
 	t.Logf("trace event chat:catalog groups=%s legacyModels=%d legacyModes=%d", groupSummary(groups), len(catalog["models"].([]any)), len(catalog["modes"].([]any)))
 
+	createWireActorChat(t, client, 100, "wire-mock-tab", "chat-wire-mock", "mock")
+	createWireActorChat(t, client, 101, "wire-fake-tab", "chat-wire-fake", "fake-agent")
 	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": "wire-mock-tab", "chatId": "chat-wire-mock", "providerId": "mock"})
 	client.invoke(t, 2, "app-chat:new-session", map[string]any{"tabId": "wire-fake-tab", "chatId": "chat-wire-fake", "providerId": "fake-agent"})
 	mockSession := client.waitReply(t, 1, 5*time.Second).Result.(map[string]any)
@@ -2044,8 +2217,14 @@ func TestWireTraceGroupedCatalogAndInterleavedProviders(t *testing.T) {
 	t.Logf("trace reply app-chat:new-session chat=chat-wire-mock provider=%s session=%s", mockSession["providerId"], mockSession["sessionId"])
 	t.Logf("trace reply app-chat:new-session chat=chat-wire-fake provider=%s session=%s", fakeSession["providerId"], fakeSession["sessionId"])
 
-	client.invoke(t, 3, "job:start", map[string]any{"kind": "app-chat", "chatId": "chat-wire-mock", "sessionId": mockSession["sessionId"], "tabId": "wire-mock-tab", "prompt": "[mock:slow] interleaved mock"})
-	client.invoke(t, 4, "job:start", map[string]any{"kind": "app-chat", "chatId": "chat-wire-fake", "sessionId": fakeSession["sessionId"], "tabId": "wire-fake-tab", "prompt": "interleaved fake"})
+	client.invoke(t, 3, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "chat-wire-mock", "sessionId": mockSession["sessionId"], "tabId": "wire-mock-tab", "prompt": "[mock:slow] interleaved mock",
+		"operationId": "interleaved-mock-turn", "userMessageId": "interleaved-mock-user", "assistantMessageId": "interleaved-mock-assistant",
+	})
+	client.invoke(t, 4, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "chat-wire-fake", "sessionId": fakeSession["sessionId"], "tabId": "wire-fake-tab", "prompt": "interleaved fake",
+		"operationId": "interleaved-fake-turn", "userMessageId": "interleaved-fake-user", "assistantMessageId": "interleaved-fake-assistant",
+	})
 	mockStartReply := client.waitReply(t, 3, 5*time.Second)
 	fakeStartReply := client.waitReply(t, 4, 5*time.Second)
 	if mockStartReply.Error != nil || fakeStartReply.Error != nil {
@@ -2185,8 +2364,9 @@ func TestWirePlanUsageReplayToLateClient(t *testing.T) {
 	}
 
 	hub := wire.NewHub()
+	stateDir := t.TempDir()
 	manager := acp.NewManager(acp.Options{
-		RootDir: root,
+		RootDir: root, StateDir: stateDir,
 		Providers: []acp.ProviderConfig{
 			{ID: "claude", Name: "Claude Plan Fake", Command: os.Args[0], Args: []string{"-test.run=TestWireFakeACPHelper", "--"}, CWD: root, Env: map[string]string{"WORKASS_WIRE_FAKE_ACP": "1", "WORKASS_WIRE_FAKE_ACP_MODE": "plan-usage"}, Enabled: true},
 		},
@@ -2197,17 +2377,26 @@ func TestWirePlanUsageReplayToLateClient(t *testing.T) {
 		ThoughtFlushInterval: 10 * time.Millisecond,
 		RSSSampleInterval:    time.Hour,
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager)
+	sessionState := sharedSessionStore(stateDir)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir, hub.Broadcast)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
 	first := dialTestWS(t, server.URL)
 	defer first.conn.Close()
 
+	createWireActorChat(t, first, 100, "plan-live-tab", "chat-plan-live", "claude")
 	first.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": "plan-live-tab", "chatId": "chat-plan-live", "providerId": "claude"})
 	session := first.waitReply(t, 1, 5*time.Second).Result.(map[string]any)
-	first.invoke(t, 2, "job:start", map[string]any{"kind": "app-chat", "chatId": "chat-plan-live", "sessionId": session["sessionId"], "tabId": "plan-live-tab", "prompt": "emit plan usage"})
+	first.invoke(t, 2, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "chat-plan-live", "sessionId": session["sessionId"], "tabId": "plan-live-tab", "prompt": "emit plan usage",
+		"operationId": "plan-usage-turn", "userMessageId": "plan-usage-user", "assistantMessageId": "plan-usage-assistant",
+	})
 	startReply := first.waitReply(t, 2, 5*time.Second)
 	if startReply.Error != nil {
 		t.Fatalf("job:start error = %v", *startReply.Error)
@@ -2232,8 +2421,9 @@ func TestWireCodexEarnedRateLimitResetConsume(t *testing.T) {
 		t.Fatalf("write index: %v", err)
 	}
 	hub := wire.NewHub()
+	stateDir := t.TempDir()
 	manager := acp.NewManager(acp.Options{
-		RootDir: root,
+		RootDir: root, StateDir: stateDir,
 		Providers: []acp.ProviderConfig{
 			{ID: "codex", Name: "Codex Reset Fake", Command: os.Args[0], Args: []string{"-test.run=TestWireFakeACPHelper", "--"}, CWD: root, Env: map[string]string{"WORKASS_WIRE_FAKE_ACP": "1", "WORKASS_WIRE_FAKE_ACP_MODE": "codex-reset"}, Enabled: true},
 		},
@@ -2243,13 +2433,19 @@ func TestWireCodexEarnedRateLimitResetConsume(t *testing.T) {
 		RSSSampleInterval:   time.Hour,
 		StdoutFlushInterval: 10 * time.Millisecond,
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager)
+	sessionState := sharedSessionStore(stateDir)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir, hub.Broadcast)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
 	client := dialTestWS(t, server.URL)
 	defer client.conn.Close()
+	createWireActorChat(t, client, 100, "reset-tab", "reset-chat", "codex")
 	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": "reset-tab", "chatId": "reset-chat", "providerId": "codex"})
 	sessionReply := client.waitReply(t, 1, 5*time.Second)
 	if sessionReply.Error != nil {
@@ -2295,7 +2491,6 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 		t.Fatalf("write index: %v", err)
 	}
 	stateDir := filepath.Join(t.TempDir(), "state")
-	sessionState := sharedSessionStore(stateDir)
 	snapshot := map[string]any{
 		"v": json.Number("1"), "activeId": "warm-plan-tab", "seq": json.Number("1"),
 		"theme": "dark", "panes": map[string]any{}, "mode": "chats",
@@ -2305,9 +2500,8 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 			"draft": "", "providerId": "claude", "messages": []any{},
 		}},
 	}
-	if !sessionState.Save(snapshot) {
-		t.Fatal("save active plan-usage session mirror")
-	}
+	writeLegacySessionSnapshot(t, stateDir, snapshot)
+	sessionState := sharedSessionStore(stateDir)
 	tracePath := filepath.Join(t.TempDir(), "wire-fake-methods.log")
 
 	hub := wire.NewHub()
@@ -2326,20 +2520,29 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 		ProviderUpdateInterval:      time.Hour,
 		ProviderUpdateRetryBackoffs: []time.Duration{},
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir})
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
 	client := dialTestWS(t, server.URL)
 	defer client.conn.Close()
+	actorSnapshot, err := providerChats.ProjectSession()
+	if err != nil {
+		t.Fatalf("project migrated plan chat: %v", err)
+	}
 
 	// A renderer reconnect and its initial state save are view lifecycle only.
 	// They replay the latest in-memory snapshot but must never initialize an ACP
 	// process, resume a provider thread, or create a new session just to fetch
 	// plan usage.
-	client.invoke(t, 1, "session:save", snapshot)
-	if reply := client.waitReply(t, 1, 2*time.Second); reply.Error != nil || reply.Result != true {
+	actorSnapshot[globalPresentationOperationField] = "plan-session-save-1"
+	client.invoke(t, 1, "session:save", actorSnapshot)
+	if reply := client.waitReply(t, 1, 2*time.Second); reply.Error != nil || mapFromAnyMain(reply.Result)["ok"] != true {
 		t.Fatalf("initial session save reply = %#v", reply)
 	}
 	time.Sleep(250 * time.Millisecond)
@@ -2350,11 +2553,16 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 	// Exercise the former race boundary: another save and the real attach arrive
 	// back-to-back. Exactly the real app-chat:new-session call owns session
 	// creation; the save cannot launch a competing warm/resume goroutine.
-	client.invoke(t, 2, "session:save", snapshot)
+	actorSnapshot, err = providerChats.ProjectSession()
+	if err != nil {
+		t.Fatalf("project migrated plan chat before race: %v", err)
+	}
+	actorSnapshot[globalPresentationOperationField] = "plan-session-save-2"
+	client.invoke(t, 2, "session:save", actorSnapshot)
 	client.invoke(t, 3, "app-chat:new-session", map[string]any{
 		"tabId": "warm-plan-tab", "chatId": "warm-plan-chat", "providerId": "claude", "cwd": root,
 	})
-	if reply := client.waitReply(t, 2, 2*time.Second); reply.Error != nil || reply.Result != true {
+	if reply := client.waitReply(t, 2, 2*time.Second); reply.Error != nil || mapFromAnyMain(reply.Result)["ok"] != true {
 		t.Fatalf("racing session save reply = %#v", reply)
 	}
 	sessionReply := client.waitReply(t, 3, 5*time.Second)
@@ -2362,6 +2570,9 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 		t.Fatalf("real session attach reply = %#v", sessionReply)
 	}
 	sessionID := fieldString(sessionReply.Result.(map[string]any), "sessionId")
+	if sessionID == "" {
+		t.Fatal("real attach omitted native session identity")
+	}
 
 	plan := client.waitChannelEvent(t, "chat:plan-usage", 5*time.Second).Payload.(map[string]any)
 	if plan["providerId"] != "claude" {
@@ -2382,10 +2593,7 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 	// The renderer's explicit active-chat refresh reuses the exact live session
 	// and performs one metadata read. It must not create another provider session
 	// or send model input.
-	client.invoke(t, 4, "app-chat:new-session", map[string]any{
-		"tabId": "warm-plan-tab", "chatId": "warm-plan-chat", "providerId": "claude",
-		"sessionId": sessionID, "cwd": root, "refreshPlanUsage": true,
-	})
+	client.invoke(t, 4, "app-chat:refresh-plan-usage", map[string]any{"providerId": "claude"})
 	if reply := client.waitReply(t, 4, 5*time.Second); reply.Error != nil {
 		t.Fatalf("explicit plan refresh reply = %#v", reply)
 	}
@@ -2572,17 +2780,24 @@ func TestWireProvidersDetectInvokeEmitsAndEnablesStubs(t *testing.T) {
 	defer models.Close()
 
 	hub := wire.NewHub()
+	stateDir := t.TempDir()
 	manager := acp.NewManager(acp.Options{
 		RootDir:             root,
-		ProviderConfigFile:  filepath.Join(t.TempDir(), "providers.json"),
+		StateDir:            stateDir,
+		ProviderConfigFile:  filepath.Join(stateDir, "providers.json"),
 		Broadcast:           hub.Broadcast,
 		InitTimeout:         800 * time.Millisecond,
 		StdoutFlushInterval: 10 * time.Millisecond,
 		RSSSampleInterval:   time.Hour,
 		LocalModelEndpoints: []string{models.URL + "/v1/models"},
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager)
+	sessionState := sharedSessionStore(stateDir)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir, hub.Broadcast)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
@@ -2621,6 +2836,7 @@ func TestWireProvidersDetectInvokeEmitsAndEnablesStubs(t *testing.T) {
 	catalog := catalogMsg.Payload.(map[string]any)
 	t.Logf("trace event chat:catalog %s", groupSummary(catalogGroups(catalog)))
 
+	createWireActorChat(t, client, 100, "wire-detect-devin-tab", "wire-detect-devin-chat", "devin")
 	client.invoke(t, 2, "app-chat:new-session", map[string]any{"tabId": "wire-detect-devin-tab", "chatId": "wire-detect-devin-chat", "providerId": "devin"})
 	sessionReply := client.waitReply(t, 2, 5*time.Second)
 	if sessionReply.Error != nil {
@@ -2645,20 +2861,26 @@ func TestWireTraceNativeLocalProviderColdStartAndTurn(t *testing.T) {
 	t.Setenv("WORKASS_AGENT_BIN", agentBin)
 
 	hub := wire.NewHub()
+	stateDir := t.TempDir()
 	manager := acp.NewManager(acp.Options{
-		RootDir: root,
+		RootDir: root, StateDir: stateDir,
 		Providers: []acp.ProviderConfig{
 			{ID: "local-lmstudio", Name: "LM Studio (local)", Command: "workass-agent", Args: []string{}, Enabled: false, Badge: "native", CWD: root},
 		},
-		ProviderConfigFile:  filepath.Join(t.TempDir(), "providers.json"),
+		ProviderConfigFile:  filepath.Join(stateDir, "providers.json"),
 		Broadcast:           hub.Broadcast,
 		InitTimeout:         5 * time.Second,
 		StdoutFlushInterval: 5 * time.Millisecond,
 		RSSSampleInterval:   time.Hour,
 		LocalModelEndpoints: []string{fake.URL() + "/v1/models", "http://127.0.0.1:1/v1/models"},
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager)
+	sessionState := sharedSessionStore(stateDir)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir, hub.Broadcast)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 	manager.StartProviderDetection(context.Background())
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
@@ -2681,6 +2903,7 @@ func TestWireTraceNativeLocalProviderColdStartAndTurn(t *testing.T) {
 	catalog := catalogMsg.Payload.(map[string]any)
 	t.Logf("trace event chat:catalog %s", groupSummary(catalogGroups(catalog)))
 
+	createWireActorChat(t, client, 100, "wire-local-tab", "chat-wire-local", "local-lmstudio")
 	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": "wire-local-tab", "chatId": "chat-wire-local", "providerId": "local-lmstudio"})
 	sessionReply := client.waitReply(t, 1, 10*time.Second)
 	if sessionReply.Error != nil {
@@ -2692,7 +2915,10 @@ func TestWireTraceNativeLocalProviderColdStartAndTurn(t *testing.T) {
 	}
 	t.Logf("trace reply app-chat:new-session provider=%s session=%s", session["providerId"], session["sessionId"])
 
-	client.invoke(t, 2, "job:start", map[string]any{"kind": "app-chat", "chatId": "chat-wire-local", "sessionId": session["sessionId"], "tabId": "wire-local-tab", "prompt": "wire native local turn"})
+	client.invoke(t, 2, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "chat-wire-local", "sessionId": session["sessionId"], "tabId": "wire-local-tab", "prompt": "wire native local turn",
+		"operationId": "wire-local-turn", "userMessageId": "wire-local-user", "assistantMessageId": "wire-local-assistant",
+	})
 	startReply := client.waitReply(t, 2, 10*time.Second)
 	if startReply.Error != nil {
 		t.Fatalf("local job:start error: %s", *startReply.Error)
@@ -2940,8 +3166,9 @@ func TestWireTraceForkChatSeedsPrefixAndDiverges(t *testing.T) {
 			Args:    []string{filepath.Join(repo, "desktop", "acp", "mock-server.mjs")},
 			CWD:     repo,
 			Env: map[string]string{
-				"WORKASS_MOCK_ACP_TRACE_FILE": traceFile,
-				"WORKASS_MOCK_ACP_DELAY_MS":   "10",
+				"WORKASS_MOCK_ACP_TRACE_FILE":    traceFile,
+				"WORKASS_MOCK_ACP_DELAY_MS":      "10",
+				"WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "mock-provider.json"),
 			},
 			Enabled: true,
 			Label:   "Workass Mock ACP",
@@ -2957,8 +3184,13 @@ func TestWireTraceForkChatSeedsPrefixAndDiverges(t *testing.T) {
 		CrashRecoveryWindow:    time.Second,
 		LifecycleCheckInterval: time.Hour,
 	})
-	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir})
+	sessionState := sharedSessionStore(stateDir)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir, hub.Broadcast)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
@@ -2968,6 +3200,7 @@ func TestWireTraceForkChatSeedsPrefixAndDiverges(t *testing.T) {
 	sourceTabID := "wire-fork-source"
 	forkTabID := "wire-fork-child"
 	sourceChatID := "chat-wire-fork-source"
+	createWireActorChat(t, client, 100, sourceTabID, sourceChatID, "mock")
 	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": sourceTabID, "chatId": sourceChatID, "providerId": "mock"})
 	sessionReply := client.waitReply(t, 1, 5*time.Second)
 	if sessionReply.Error != nil {
@@ -2982,7 +3215,10 @@ func TestWireTraceForkChatSeedsPrefixAndDiverges(t *testing.T) {
 	secondResult := runWireChatTurn(t, client, 4, sourceChatID, sourceTabID, sourceSessionID, "source second")
 	appendWireArchiveTurn(t, client, 5, sourceTabID, "source second", secondResult, "2026-07-10T00:00:02Z")
 
-	client.invoke(t, 6, "app-chat:fork", map[string]any{"tabId": sourceTabID, "newTabId": forkTabID, "atTurn": 1})
+	client.invoke(t, 6, "app-chat:fork", map[string]any{
+		"tabId": sourceTabID, "chatId": sourceChatID, "newTabId": forkTabID,
+		"newChatId": "chat-wire-fork-child", "cwd": root, "atTurn": 1,
+	})
 	forkReply := client.waitReply(t, 6, 5*time.Second)
 	if forkReply.Error != nil {
 		t.Fatalf("fork reply error: %s", *forkReply.Error)
@@ -2995,22 +3231,37 @@ func TestWireTraceForkChatSeedsPrefixAndDiverges(t *testing.T) {
 	}
 	t.Logf("trace reply app-chat:fork source=%s fork=%s atTurn=%v session=%s", sourceTabID, forkTabID, forkedFrom["atTurn"], forkSessionID)
 
-	sourceArchive := loadChatArchive(stateDir, sourceTabID)
-	forkArchive := loadChatArchive(stateDir, forkTabID)
+	client.invoke(t, 20, "chat:archive-load", sourceTabID)
+	sourceArchiveReply := client.waitReply(t, 20, 2*time.Second)
+	client.invoke(t, 21, "chat:archive-load", forkTabID)
+	forkArchiveReply := client.waitReply(t, 21, 2*time.Second)
+	if sourceArchiveReply.Error != nil || forkArchiveReply.Error != nil {
+		t.Fatalf("actor fork archive replies source=%+v fork=%+v", sourceArchiveReply, forkArchiveReply)
+	}
+	sourceArchive := anySlice(sourceArchiveReply.Result)
+	forkArchive := anySlice(forkArchiveReply.Result)
 	if len(sourceArchive) != 4 || len(forkArchive) != 2 {
 		t.Fatalf("archive lengths source=%d fork=%d source=%#v fork=%#v", len(sourceArchive), len(forkArchive), sourceArchive, forkArchive)
 	}
 	if !archiveContainsText(forkArchive, "source first") || archiveContainsText(forkArchive, "source second") {
 		t.Fatalf("fork archive prefix = %#v", forkArchive)
 	}
-	t.Logf("trace archive copied sourceMessages=%d forkMessages=%d forkFile=%s", len(sourceArchive), len(forkArchive), chatArchivePath(stateDir, forkTabID))
+	t.Logf("trace actor fork prefix sourceMessages=%d forkMessages=%d", len(sourceArchive), len(forkArchive))
 
-	client.invoke(t, 7, "job:start", map[string]any{"kind": "app-chat", "chatId": sourceChatID, "sessionId": sourceSessionID, "tabId": sourceTabID, "prompt": "source third unique"})
-	client.invoke(t, 8, "job:start", map[string]any{"kind": "app-chat", "chatId": "chat-wire-fork-child", "sessionId": forkSessionID, "tabId": forkTabID, "prompt": "fork continuation unique"})
+	client.invoke(t, 7, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": sourceChatID, "sessionId": sourceSessionID, "tabId": sourceTabID,
+		"operationId": "wire-fork-source-turn-3", "userMessageId": "wire-fork-source-user-3", "assistantMessageId": "wire-fork-source-assistant-3",
+		"prompt": "source third unique",
+	})
+	client.invoke(t, 8, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "chat-wire-fork-child", "sessionId": forkSessionID, "tabId": forkTabID,
+		"operationId": "wire-fork-child-turn-2", "userMessageId": "wire-fork-child-user-2", "assistantMessageId": "wire-fork-child-assistant-2",
+		"prompt": "fork continuation unique",
+	})
 	sourceStartReply := client.waitReply(t, 7, 5*time.Second)
 	forkStartReply := client.waitReply(t, 8, 5*time.Second)
 	if sourceStartReply.Error != nil || forkStartReply.Error != nil {
-		t.Fatalf("post-fork job replies source=%+v fork=%+v", sourceStartReply, forkStartReply)
+		t.Fatalf("post-fork job replies source=%s fork=%s", wireReplyError(sourceStartReply), wireReplyError(forkStartReply))
 	}
 	sourceJob := sourceStartReply.Result.(map[string]any)
 	forkJob := forkStartReply.Result.(map[string]any)
@@ -3025,23 +3276,26 @@ func TestWireTraceForkChatSeedsPrefixAndDiverges(t *testing.T) {
 	}
 	if !strings.Contains(sourceResult, "Mock ACP turn 3: Active Workass runtime for this turn:") ||
 		!strings.Contains(sourceResult, "User request:\nsource third unique") ||
-		!strings.Contains(forkResult, "User: source first") || strings.Contains(forkResult, "source second") {
-		t.Fatalf("divergent seeded results source=%q fork=%q", sourceResult, forkResult)
+		!strings.Contains(forkResult, "User request:\nfork continuation unique") ||
+		strings.Contains(forkResult, "source first") || strings.Contains(forkResult, "source second") ||
+		strings.Contains(forkResult, "Previous conversation") {
+		t.Fatalf("divergent contextless fork results source=%q fork=%q", sourceResult, forkResult)
 	}
-	t.Logf("trace fork divergence sourceSession=%s forkSession=%s sourceResult=%q forkSeeded=%v", sourceSessionID, forkSessionID, sourceResult, strings.Contains(forkResult, "User: source first"))
+	t.Logf("trace fork divergence sourceSession=%s forkSession=%s visiblePrefix=true providerReplay=false", sourceSessionID, forkSessionID)
 
 	prompts := readMockTracePrompts(t, traceFile)
 	forkPrompt := promptTraceForSession(t, prompts, forkSessionID, "fork continuation unique")
 	sourceThirdPrompt := promptTraceForSession(t, prompts, sourceSessionID, "source third unique")
-	if !strings.Contains(forkPrompt, "User: source first") || strings.Contains(forkPrompt, "source second") {
-		t.Fatalf("fork seed prompt = %q", forkPrompt)
+	if strings.Contains(forkPrompt, "source first") || strings.Contains(forkPrompt, "source second") ||
+		strings.Contains(forkPrompt, "Previous conversation") || !strings.Contains(forkPrompt, "User request:\nfork continuation unique") {
+		t.Fatalf("fork prompt replayed visible archive text = %q", forkPrompt)
 	}
 	if strings.Contains(sourceThirdPrompt, "Previous conversation") ||
 		!strings.Contains(sourceThirdPrompt, "Active Workass runtime for this turn:") ||
 		!strings.Contains(sourceThirdPrompt, "User request:\nsource third unique") {
 		t.Fatalf("source prompt was touched by fork seed: %q", sourceThirdPrompt)
 	}
-	t.Logf("trace mock prompts sourceThird=%q forkPromptHasPrefix=%v", sourceThirdPrompt, strings.Contains(forkPrompt, "User: source first"))
+	t.Logf("trace mock prompts sourceThird=%q forkProviderReplay=false", sourceThirdPrompt)
 }
 
 func TestWireTraceNotifyControllerOnlyRedactionAndNoTurnEndBacklog(t *testing.T) {
@@ -3179,9 +3433,17 @@ func assertWireJobStatus(t *testing.T, payload map[string]any, status, stopReaso
 	}
 }
 
-func runWireChatTurn(t *testing.T, client *testWS, invokeID int, chatID, tabID, sessionID, prompt string) string {
+func runWireChatTurn(t *testing.T, client *testWS, invokeID int, chatID, tabID, sessionID, prompt string, cwd ...string) string {
 	t.Helper()
-	client.invoke(t, invokeID, "job:start", map[string]any{"kind": "app-chat", "chatId": chatID, "sessionId": sessionID, "tabId": tabID, "prompt": prompt})
+	identity := fmt.Sprintf("wire-turn-%s-%d", chatID, invokeID)
+	arg := map[string]any{
+		"kind": "app-chat", "chatId": chatID, "sessionId": sessionID, "tabId": tabID, "prompt": prompt,
+		"operationId": identity, "userMessageId": identity + "-user", "assistantMessageId": identity + "-assistant",
+	}
+	if len(cwd) != 0 {
+		arg["cwd"] = cwd[0]
+	}
+	client.invoke(t, invokeID, "job:start", arg)
 	reply := client.waitReply(t, invokeID, 5*time.Second)
 	if reply.Error != nil {
 		t.Fatalf("job:start %s error: %s", prompt, *reply.Error)
@@ -3252,6 +3514,13 @@ type wsMessage struct {
 	Payload any
 }
 
+func wireReplyError(message wsMessage) string {
+	if message.Error == nil {
+		return "<nil>"
+	}
+	return *message.Error
+}
+
 type testWS struct {
 	conn   net.Conn
 	reader *bufio.Reader
@@ -3261,6 +3530,19 @@ type testWS struct {
 func dialTestWS(t *testing.T, serverURL string) *testWS {
 	t.Helper()
 	return dialTestWSPath(t, serverURL, "/")
+}
+
+func createWireActorChat(t *testing.T, client *testWS, requestID int, tabID, chatID, providerID string) {
+	t.Helper()
+	client.invoke(t, requestID, "chat:create", map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "wire-create:" + chatID,
+		"focus": true, "title": "Chat", "titleLocked": false, "group": "chats",
+		"providerId": providerID,
+	})
+	reply := client.waitReply(t, requestID, 2*time.Second)
+	if reply.Error != nil || !boolFieldValue(mapFromAnyMain(reply.Result), "ok") {
+		t.Fatalf("create durable actor chat %s/%s: %+v", tabID, chatID, reply)
+	}
 }
 
 func dialTestWSPath(t *testing.T, serverURL, path string) *testWS {
@@ -3358,12 +3640,31 @@ func dialTestWSHandler(t *testing.T, handler http.Handler, path string) *testWS 
 
 func (c *testWS) invoke(t *testing.T, id int, channel string, args ...any) {
 	t.Helper()
+	if channel == "app-chat:new-session" && len(args) > 0 {
+		if arg, ok := args[0].(map[string]any); ok && strings.TrimSpace(fieldString(arg, "operationId")) == "" {
+			// The frozen wire tests model the current renderer, which now supplies
+			// one stable operation for every provider-lane selection. Keep older
+			// fixtures readable without weakening the daemon's missing-id gate.
+			arg["operationId"] = fmt.Sprintf("wire-lane-select:%d:%s:%s", id, fieldString(arg, "chatId"), fieldString(arg, "tabId"))
+		}
+	}
 	payload, err := json.Marshal(map[string]any{"t": "invoke", "id": id, "channel": channel, "args": args})
 	if err != nil {
 		t.Fatalf("marshal invoke: %v", err)
 	}
 	if _, err := c.conn.Write(maskedFrame(payload)); err != nil {
 		t.Fatalf("write invoke: %v", err)
+	}
+}
+
+func (c *testWS) invokeRaw(t *testing.T, id int, channel string, args ...any) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{"t": "invoke", "id": id, "channel": channel, "args": args})
+	if err != nil {
+		t.Fatalf("marshal raw invoke: %v", err)
+	}
+	if _, err := c.conn.Write(maskedFrame(payload)); err != nil {
+		t.Fatalf("write raw invoke: %v", err)
 	}
 }
 
@@ -4025,11 +4326,15 @@ func runWireFakeACP() {
 	fail := func(id any, message string) {
 		write(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32601, "message": message}})
 	}
+	failCode := func(id any, code int, message string) {
+		write(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": message}})
+	}
 	notify := func(sessionID string, update any) {
 		write(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": sessionID, "update": update}})
 	}
 	mode := os.Getenv("WORKASS_WIRE_FAKE_ACP_MODE")
 	sessionSeq := 0
+	sessions := make(map[string]bool)
 	resetCredits := 1
 	redeemedResetKeys := make(map[string]bool)
 	scanner := bufio.NewScanner(os.Stdin)
@@ -4055,7 +4360,8 @@ func runWireFakeACP() {
 		switch msg.Method {
 		case "initialize":
 			capabilities := map[string]any{
-				"promptCapabilities": map[string]any{"image": false},
+				"promptCapabilities":  map[string]any{"image": false},
+				"sessionCapabilities": map[string]any{"resume": map[string]any{}, "close": map[string]any{}},
 			}
 			if mode == "plan-limits" {
 				capabilities["_meta"] = map[string]any{"workassClaudeUsageRequest": true}
@@ -4074,7 +4380,16 @@ func runWireFakeACP() {
 			})
 		case "session/new":
 			sessionSeq++
-			respond(msg.ID, map[string]any{"sessionId": fmt.Sprintf("wire-fake-%d-%d", os.Getpid(), sessionSeq), "configOptions": wireFakeConfigOptions()})
+			sessionID := fmt.Sprintf("wire-fake-%d-%d", os.Getpid(), sessionSeq)
+			sessions[sessionID] = true
+			respond(msg.ID, map[string]any{"sessionId": sessionID, "configOptions": wireFakeConfigOptions()})
+		case "session/resume":
+			sessionID := strings.TrimSpace(fmt.Sprint(params["sessionId"]))
+			if !sessions[sessionID] {
+				failCode(msg.ID, -32000, "wire fake session not found")
+				continue
+			}
+			respond(msg.ID, map[string]any{"sessionId": sessionID, "configOptions": wireFakeConfigOptions()})
 		case "session/set_config_option":
 			respond(msg.ID, map[string]any{"configOptions": wireFakeConfigOptions()})
 		case "session/close":
@@ -4248,39 +4563,53 @@ func wireFakePromptText(raw any) string {
 	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
-// Cross-provider handover (user law 2026-07-11): picking another agent's model
-// mid-chat must switch the chat's engine on the next turn AND hand the chat
-// context to the new agent (history-seeded, replay-once). One engine per chat
-// still holds — the swap is serialized at a turn boundary, never multiplexed.
-func TestWireProviderSwitchMidChatSharesContext(t *testing.T) {
+// A nonempty cross-provider handoff requires a receipt-bearing, non-sampling
+// import. An ordinary ACP prompt/history field is never a substitute. If the
+// target provider lacks that capability, the desired lane blocks while the
+// previous exact native lane remains active and resumable.
+func TestWireProviderSwitchWithoutSafeImportFailsClosed(t *testing.T) {
 	root := repoRoot(t)
+	stateDir := t.TempDir()
 	renderer := t.TempDir()
 	if err := os.WriteFile(filepath.Join(renderer, "index.html"), []byte("<!doctype html><head></head><body></body>"), 0o644); err != nil {
 		t.Fatalf("write index: %v", err)
 	}
 
 	hub := wire.NewHub()
+	store := sharedSessionStore(stateDir)
 	manager := acp.NewManager(acp.Options{
-		RootDir: root,
+		RootDir: root, StateDir: stateDir,
 		Providers: []acp.ProviderConfig{
-			{ID: "mock", Name: "Mock Provider", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{"WORKASS_MOCK_ACP_DELAY_MS": "5"}, Enabled: true},
-			{ID: "fake-agent", Name: "Fake Provider", Command: os.Args[0], Args: []string{"-test.run=TestWireFakeACPHelper", "--"}, CWD: root, Env: map[string]string{"WORKASS_WIRE_FAKE_ACP": "1"}, Enabled: true},
+			{ID: "mock", Name: "Mock Provider", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{
+				"WORKASS_MOCK_ACP_DELAY_MS": "5", "WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "mock-provider.json"),
+			}, Enabled: true},
+			{ID: "fake-agent", Name: "Fake Provider", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{
+				"WORKASS_MOCK_ACP_DELAY_MS": "5", "WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "fake-provider.json"),
+			}, Enabled: true},
 		},
 		DefaultProviderID:    "mock",
-		Broadcast:            hub.Broadcast,
+		Broadcast:            daemonEventBroadcaster(store, hub.Broadcast),
 		InitTimeout:          2 * time.Second,
 		StdoutFlushInterval:  10 * time.Millisecond,
 		ThoughtFlushInterval: 10 * time.Millisecond,
 		RSSSampleInterval:    time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
-	registerDaemonHandlers(hub, root, manager)
+	providerChats := newProviderChatRuntime(manager, store, stateDir)
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
 	defer server.Close()
 	client := dialTestWS(t, server.URL)
 	defer client.conn.Close()
 
+	if _, err := providerChats.CreateRendererChat(map[string]any{
+		"operationId": "test:create-provider-switch-chat",
+		"tabId":       "switch-tab", "chatId": "chat-switch", "title": "Provider switch",
+		"cwd": root, "providerId": "mock", "currentModelId": "mock-deterministic",
+	}); err != nil {
+		t.Fatalf("create actor-native provider switch chat: %v", err)
+	}
 	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": "switch-tab", "chatId": "chat-switch", "providerId": "mock"})
 	mockSession := client.waitReply(t, 1, 5*time.Second).Result.(map[string]any)
 	if mockSession["providerId"] != "mock" || mockSession["sessionId"] == "" {
@@ -4289,7 +4618,11 @@ func TestWireProviderSwitchMidChatSharesContext(t *testing.T) {
 	sessionID := fmt.Sprint(mockSession["sessionId"])
 
 	// Turn 1 on the mock engine.
-	client.invoke(t, 2, "job:start", map[string]any{"kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": sessionID, "prompt": "primer turno con el mock"})
+	client.invoke(t, 2, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": sessionID,
+		"providerId": "mock", "prompt": "primer turno con el mock",
+		"userMessageId": "switch-user-1", "assistantMessageId": "switch-assistant-1",
+	})
 	turn1 := client.waitReply(t, 2, 5*time.Second).Result.(map[string]any)
 	turn1End := client.waitJobEvent(t, fmt.Sprint(turn1["id"]), "end", 10*time.Second)
 	if turn1End["job"].(map[string]any)["status"] != "done" {
@@ -4297,53 +4630,57 @@ func TestWireProviderSwitchMidChatSharesContext(t *testing.T) {
 	}
 	t.Logf("trace switch turn1 provider=%v status=%v", turn1End["job"].(map[string]any)["providerId"], turn1End["job"].(map[string]any)["status"])
 
-	// Turn 2 asks for the OTHER provider on the SAME chat/session, carrying the
-	// visible history exactly like the renderer does on every send.
-	client.invoke(t, 3, "job:start", map[string]any{
-		"kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": sessionID,
-		"providerId": "fake-agent", "prompt": "ahora seguí vos",
-		"history": []any{
-			map[string]any{"role": "user", "content": "primer turno con el mock", "at": "2026-07-11T00:00:00Z"},
-			map[string]any{"role": "assistant", "content": "respuesta del mock al primer turno", "at": "2026-07-11T00:00:01Z"},
-		},
-	})
-	turn2 := client.waitReply(t, 3, 5*time.Second).Result.(map[string]any)
-	if turn2["providerId"] != "fake-agent" {
-		t.Fatalf("turn2 providerId = %#v", turn2)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		state, ok := providerChats.Snapshot("chat-switch")
+		if ok && state.Foreground == nil && state.LedgerHead() >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("provider actor did not commit the first terminal turn")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	replaced := client.waitChannelEvent(t, "chat:session-replaced", 10*time.Second).Payload.(map[string]any)
-	newSession, _ := replaced["session"].(map[string]any)
-	if replaced["oldSessionId"] != sessionID || newSession == nil || newSession["providerId"] != "fake-agent" {
-		t.Fatalf("session-replaced = %#v", replaced)
-	}
-	if fmt.Sprint(newSession["sessionId"]) == sessionID {
-		t.Fatalf("session-replaced kept the old session id")
-	}
-	turn2End := client.waitJobEvent(t, fmt.Sprint(turn2["id"]), "end", 10*time.Second)
-	turn2Job := turn2End["job"].(map[string]any)
-	if turn2Job["status"] != "done" || turn2Job["providerId"] != "fake-agent" {
-		t.Fatalf("turn2 end = %#v", turn2End)
-	}
-	// The fake agent echoes its prompt: the echoed text must carry the seeded
-	// turn-1 context — that IS the cross-provider context handoff.
-	result := fmt.Sprint(turn2Job["result"])
-	if !strings.Contains(result, "primer turno con el mock") || !strings.Contains(result, "ahora seguí vos") {
-		t.Fatalf("turn2 result lacks seeded context: %q", result)
-	}
-	t.Logf("trace switch turn2 provider=%v newSession=%v seeded=%t", turn2Job["providerId"], newSession["sessionId"], strings.Contains(result, "primer turno con el mock"))
 
-	// Guard: switching providers while a turn is running must be rejected.
-	client.invoke(t, 4, "job:start", map[string]any{"kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": fmt.Sprint(newSession["sessionId"]), "prompt": "[mock:slow] turno lento"})
-	slow := client.waitReply(t, 4, 5*time.Second).Result.(map[string]any)
-	client.invoke(t, 5, "job:start", map[string]any{"kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": fmt.Sprint(newSession["sessionId"]), "providerId": "mock", "prompt": "cambiá ya"})
-	rejected := client.waitReply(t, 5, 5*time.Second)
-	rejectedText := ""
-	if rejected.Error != nil {
-		rejectedText = *rejected.Error
+	client.invoke(t, 3, "app-chat:new-session", map[string]any{
+		"tabId": "switch-tab", "chatId": "chat-switch", "providerId": "fake-agent", "cwd": root,
+	})
+	blocked := mapFromAnyMain(client.waitReply(t, 3, 5*time.Second).Result)
+	if !strings.Contains(fieldString(blocked, "error"), "blocked at a safe boundary") {
+		t.Fatalf("unsafe provider switch did not fail closed: %#v", blocked)
 	}
-	if !strings.Contains(rejectedText, "en curso") {
-		t.Fatalf("mid-turn switch not rejected: err=%q %#v", rejectedText, rejected)
+	state, ok := providerChats.Snapshot("chat-switch")
+	if !ok || state.ActiveLaneID == "" || state.DesiredLaneID == state.ActiveLaneID {
+		t.Fatalf("provider switch ownership = %#v", state)
 	}
-	slowEnd := client.waitJobEvent(t, fmt.Sprint(slow["id"]), "end", 15*time.Second)
-	t.Logf("trace switch mid-turn rejected=%q slowEnd=%v", rejectedText, slowEnd["job"].(map[string]any)["status"])
+	active := state.Lanes[state.ActiveLaneID]
+	desired := state.Lanes[state.DesiredLaneID]
+	if active.Identity.Realm.ProviderID != "mock" || active.Thread.HeadID != sessionID || desired.Identity.Realm.ProviderID != "fake-agent" || desired.Phase != chat.LaneBlocked || desired.LastError != providercontract.ErrorUnsupportedCapability {
+		t.Fatalf("fail-closed lane state = active %#v desired %#v", active, desired)
+	}
+
+	// Returning to the original provider selects and uses the exact same native
+	// thread. No replacement session and no transcript replay are involved.
+	client.invoke(t, 4, "app-chat:new-session", map[string]any{
+		"tabId": "switch-tab", "chatId": "chat-switch", "providerId": "mock", "cwd": root,
+	})
+	resumed := mapFromAnyMain(client.waitReply(t, 4, 5*time.Second).Result)
+	if fieldString(resumed, "sessionId") != sessionID || fieldString(resumed, "providerId") != "mock" {
+		t.Fatalf("original lane was not resumed exactly: %#v", resumed)
+	}
+	client.invoke(t, 5, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": sessionID,
+		"providerId": "mock", "prompt": "segundo turno exacto",
+		"userMessageId": "switch-user-2", "assistantMessageId": "switch-assistant-2",
+	})
+	turn2Reply := client.waitReply(t, 5, 5*time.Second)
+	if turn2Reply.Error != nil {
+		t.Fatalf("second exact-lane turn failed: %s", *turn2Reply.Error)
+	}
+	turn2 := mapFromAnyMain(turn2Reply.Result)
+	turn2End := client.waitJobEvent(t, fieldString(turn2, "id"), "end", 10*time.Second)
+	result := fieldString(mapFromAnyMain(turn2End["job"]), "result")
+	if !strings.Contains(result, "Mock ACP turn 2:") || strings.Contains(result, "Previous conversation") {
+		t.Fatalf("exact original lane was replaced or replay-seeded: %q", result)
+	}
 }

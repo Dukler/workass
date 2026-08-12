@@ -14,13 +14,17 @@ import (
 func TestSessionStoreBootSweepsOnlyOldUnclaimedImageFiles(t *testing.T) {
 	stateDir := t.TempDir()
 	statePath := filepath.Join(stateDir, sessionStateFilename)
-	store := newSessionStore(statePath)
 	snapshot := sessionMirrorFixture("gc-live-tab", "gc-live-chat", "live image")
 	user := mapFromAnyMain(messageSlice(chatFromSnapshot(snapshot, "gc-live-tab"))[0])
 	liveData := base64.StdEncoding.EncodeToString([]byte("live screenshot"))
 	user["images"] = []any{refNativeImage(liveData)}
-	if !store.Save(snapshot) {
-		t.Fatal("seed live image")
+	// The snapshot is migration input. Boot import externalizes the referenced
+	// image before the orphan sweep; runtime session Save is retired after the
+	// actor cutover and must not be used to seed this fixture.
+	writeLegacySnapshotForImageTest(t, statePath, snapshot)
+	store := newSessionStore(statePath)
+	if err := store.LoadError(); err != nil {
+		t.Fatalf("import legacy image snapshot: %v", err)
 	}
 	imageDir := filepath.Join(stateDir, sessionImageDirname)
 	liveName := sessionImageName(liveData)

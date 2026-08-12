@@ -49,6 +49,10 @@ test('a live Claude acknowledgement owns the transcript row and never enters FIF
   assert.equal(steeringDestination({ ok: false, strategy: 'interrupt-queue' }), 'queue');
 });
 
+test('the provider-neutral actor receipt is a real consumption boundary', () => {
+  assert.equal(hasSteerConsumptionReceipt({ ok: true, strategy: 'receipt-live', receipt: true }), true);
+});
+
 test('steer acknowledgement selects one visible owner without optimistic bouncing', () => {
   assert.equal(steeringDestination({ ok: true, strategy: 'codex-live' }), 'transcript');
   assert.equal(steeringDestination({ ok: true, strategy: 'capability-live' }), 'transcript');

@@ -62,6 +62,14 @@ func TestAgentMCPToolCallsDirectInProcessControl(t *testing.T) {
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
+	stateDir := manager.StateDir()
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": "parent-tab", "chatId": "parent-chat", "operationId": "agent-mcp-read-create",
+		"title": "MCP owner", "cwd": root, "providerId": "mock",
+	}); err != nil {
+		t.Fatalf("create actor-owned MCP chat: %v", err)
+	}
 	if _, err := manager.NewSession(ctx, acp.SessionOptions{
 		TabID: "parent-tab", ChatID: "parent-chat", ProviderID: "mock", CWD: root, AgentOwnerKey: "owner-1",
 	}); err != nil {
@@ -70,7 +78,7 @@ func TestAgentMCPToolCallsDirectInProcessControl(t *testing.T) {
 	if !manager.ValidateAgentOwner("owner-1", "parent-chat", "parent-tab") {
 		t.Fatal("new session did not retain its MCP owner binding")
 	}
-	control := &agentControlHandler{manager: manager}
+	control := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime)}
 	request := httptest.NewRequest(http.MethodPost, agentMCPPath, nil).WithContext(ctx)
 	result, err := callAgentMCPTool(request, browserMCPCallParams{
 		Name: "workass_list_subagents", Arguments: map[string]any{},

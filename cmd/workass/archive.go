@@ -79,7 +79,11 @@ func archiveFileInfo(path string) (os.FileInfo, bool, error) {
 	return info, true, nil
 }
 
-func registerArchiveHandlers(hub *wire.Hub, state *daemonState) {
+func registerArchiveHandlers(hub *wire.Hub, state *daemonState, runtimes ...*providerChatRuntime) {
+	var providerChats *providerChatRuntime
+	if len(runtimes) > 0 {
+		providerChats = runtimes[0]
+	}
 	hub.Register("chat:archive-append", func(args []any) (any, error) {
 		arg := firstMapArg(args)
 		tabID := fieldString(arg, "tabId")
@@ -87,13 +91,30 @@ func registerArchiveHandlers(hub *wire.Hub, state *daemonState) {
 		if tabID == "" || len(messages) == 0 {
 			return false, nil
 		}
-		if err := appendChatArchive(state.stateDir, tabID, messages); err != nil {
-			return false, nil
+		if providerChats == nil {
+			return false, os.ErrInvalid
 		}
-		return true, nil
+		if _, found, err := providerChats.ProjectArchiveByTab(tabID); err != nil {
+			return false, err
+		} else if found {
+			// The actor already owns these semantic rows. A renderer archive
+			// append is an acknowledgement-only compatibility call, never a
+			// second transcript writer.
+			return true, nil
+		}
+		return false, os.ErrNotExist
 	})
 	hub.Register("chat:archive-load", func(args []any) (any, error) {
-		return loadChatArchive(state.stateDir, stringArg(args, 0)), nil
+		tabID := stringArg(args, 0)
+		if providerChats == nil {
+			return nil, os.ErrInvalid
+		}
+		if messages, found, err := providerChats.ProjectArchiveByTab(tabID); err != nil {
+			return nil, err
+		} else if found {
+			return messages, nil
+		}
+		return []any{}, nil
 	})
 }
 

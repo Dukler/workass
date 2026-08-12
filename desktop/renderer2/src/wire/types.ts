@@ -1,6 +1,8 @@
 // Wire-protocol types — mirror docs/WIRE-CONTRACT.md exactly.
 // The daemon injects /lan-bridge.js which defines window.api before app scripts run.
 
+import type { ModelControlMemory } from '../model-controls';
+
 // `efforts` is an optional, ordered list of reasoning-effort stops the model
 // supports (e.g. ["low","medium","high","xhigh","max","ultra"]). Additive: older
 // daemons and effortless models (Claude/Qwen today) omit it → no effort control.
@@ -477,6 +479,7 @@ export interface DirCreateResult {
 
 export interface StartJobOpts {
   kind: string;
+  operationId: string;
   title?: string;
   chatId?: string;
   tabId?: string;
@@ -490,8 +493,8 @@ export interface StartJobOpts {
   prompt?: string;
   // Renderer-generated stable ids for this optimistic turn. The daemon adopts
   // them so reconnect/archive copies cannot become duplicate message rows.
-  userMessageId?: string;
-  assistantMessageId?: string;
+  userMessageId: string;
+  assistantMessageId: string;
   // Stable originating renderer queue-row id. New daemons use it to fence
   // renderer start vs daemon adoption; old daemons ignore the additive field.
   queueId?: string;
@@ -522,6 +525,7 @@ export interface JobCancelResult {
 export interface StateDigestChat {
   tabId: string;
   chatId: string;
+  actorRevision: number;
   runningJobId: string | null;
   lastMessageId: string | null;
   messageCount: number;
@@ -537,6 +541,7 @@ export interface StateDigestChat {
 
 export interface StateDigest {
   chats: StateDigestChat[];
+  globalRevision: number;
   catalogHash: Record<string, string>;
   settingsRevision: string;
   procHash: string;
@@ -556,7 +561,30 @@ export interface WorkassApi {
   setSettings?: (settings: unknown) => Promise<unknown>;
   getConfig?: () => Promise<DaemonConfig>;
   getSession?: () => Promise<unknown>;
-  saveSession?: (snap: unknown) => Promise<boolean>;
+  saveSession?: (snap: unknown) => Promise<boolean | { ok: boolean; globalRevision: number }>;
+  chatQueueReplace?: (opts: {
+    tabId: string; chatId: string; operationId: string; expectedRevision: number; queue: unknown[];
+  }) => Promise<{ ok: boolean; operationId: string; agentQueueRevision: number; actorRevision: number }>;
+  chatCreate?: (opts: {
+    tabId: string; chatId: string; operationId: string; focus: boolean; title: string; titleLocked: boolean;
+    group: string | null; cwd: string | null; providerId: string | null; currentModelId: string | null;
+    currentModeId: string | null; modelControls?: unknown;
+  }) => Promise<{ ok: boolean; tabId: string; chatId: string; operationId: string; actorRevision: number; presentationRevision: number; globalRevision: number }>;
+  chatPresentationSave?: (opts: {
+    tabId: string; chatId: string; operationId: string; expectedRevision: number;
+    title: string; titleLocked: boolean; group: string | null; draft: string; unread: boolean;
+    settled: 'settled' | 'active' | ''; pane: 'rail' | 'browser' | null;
+  }) => Promise<{ ok: boolean; operationId: string; presentationRevision: number; actorRevision: number }>;
+  chatRuntimeControlsSave?: (opts: {
+    tabId: string; chatId: string; operationId: string; expectedRevision: number;
+    providerId: string; currentModelId: string | null; currentModeId: string | null;
+    modelControls?: ModelControlMemory;
+  }) => Promise<{
+    ok: boolean; operationId: string; runtimeControlRevision: number; actorRevision: number;
+    providerId: string; currentModelId: string | null; currentModeId: string | null;
+    modelControls?: ModelControlMemory;
+  }>;
+  chatDelete?: (opts: { tabId: string; chatId: string; operationId: string; force: boolean }) => Promise<{ ok: boolean; operationId: string }>;
   // Folder browsing is server-owned: `listDir` walks the DAEMON's filesystem, so
   // an Electron, LAN or browser client all pick the same folders. The native
   // directory dialog (`dialog:pick-directory`, still on the bridge) is
@@ -567,14 +595,12 @@ export interface WorkassApi {
   archiveAppend?: (tabId: string, messages: unknown[]) => Promise<boolean>;
   archiveLoad?: (tabId: string) => Promise<unknown[]>;
   visualizeHost?: (options: { tabId: string; chatId: string; path: string; mode?: 'wide'; title?: string }) => Promise<VisualizationRegistration>;
-  appChatNewSession?: (opts: { cwd?: string | null; tabId?: string; chatId?: string; bridgeKey?: string; providerId?: string | null; sessionId?: string; refreshPlanUsage?: boolean; replaceSessionId?: string; workspaceRebind?: boolean; expectedWorkspaceRevision?: number }) => Promise<AcpSessionInfo>;
+  appChatNewSession?: (opts: { cwd?: string | null; tabId?: string; chatId?: string; operationId: string; bridgeKey?: string; providerId?: string | null; sessionId?: string; refreshPlanUsage?: boolean; replaceSessionId?: string; workspaceRebind?: boolean; expectedWorkspaceRevision?: number }) => Promise<AcpSessionInfo>;
   // Account-scoped metadata read. It never binds/replaces a chat session and
   // never sends a provider prompt; the resulting snapshot arrives through the
   // existing chat:plan-usage event.
   appChatRefreshPlanUsage?: (providerId: string) => Promise<{ ok: boolean; providerId: string }>;
   appChatCloseSession?: (sessionId: string) => Promise<boolean>;
-  appChatSetModel?: (sessionId: string, modelId: string) => Promise<{ currentModelId: unknown }>;
-  appChatSetMode?: (sessionId: string, modeId: string) => Promise<{ currentModeId: unknown }>;
   appChatReset?: () => Promise<boolean>;
   // Mid-turn steer (D2). Preload-only in the Electron host; the daemon bridge
   // may not expose it — feature-detected, with a local queue fallback.
@@ -585,7 +611,7 @@ export interface WorkassApi {
     clientUserMessageId?: string,
     continuationAssistantMessageId?: string,
     boundary?: { assistantMessageId: string; contentOffset: number; resultOffset: number; eventCount: number },
-  ) => Promise<{ ok: boolean; live?: boolean; queued?: boolean; interrupted?: boolean; unsupported?: boolean; strategy?: 'codex-live' | 'generic-live' | 'interrupt-queue' | 'queue' | 'uncertain'; turnId?: string; receipt?: boolean; error?: string }>;
+  ) => Promise<{ ok: boolean; live?: boolean; queued?: boolean; daemonQueued?: boolean; interrupted?: boolean; unsupported?: boolean; strategy?: 'codex-live' | 'generic-live' | 'interrupt-queue' | 'queue' | 'uncertain'; turnId?: string; receipt?: boolean; error?: string }>;
   appChatUseRateLimitReset?: (
     providerId: string,
     sessionId: string | undefined,
@@ -620,8 +646,8 @@ export interface WorkassApi {
   providersUpdate?: (providerId: string) => Promise<{ ok: boolean; providerId: string }>;
   // R4/R5 (daemon channels landed; browser bridge does not map them yet — GAP).
   chatCheckpoints?: (opts: { chatId?: string; tabId?: string }) => Promise<ChatCheckpoint[]>;
-  chatRewind?: (opts: { chatId: string; turnSeq: number }) => Promise<ChatRewindResult>;
-  chatDiff?: (opts: { chatId: string; repo: string; path: string }) => Promise<ChatDiffResult>;
+  chatRewind?: (opts: { tabId: string; chatId: string; turnSeq: number; operationId: string }) => Promise<ChatRewindResult>;
+  chatDiff?: (opts: { tabId: string; chatId: string; repo: string; path: string }) => Promise<ChatDiffResult>;
   chatEnvGet?: (opts: { chatId?: string; tabId?: string }) => Promise<ChatEnvPayload>;
   // R7 native bridge notify (Electron host / future daemon); renderer prefers
   // Web Notifications and only calls this when present.

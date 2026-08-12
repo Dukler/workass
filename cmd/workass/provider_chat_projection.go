@@ -1,0 +1,982 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"workass/internal/chat"
+	providercontract "workass/internal/provider"
+)
+
+// StateDigest is the lean actor-derived heartbeat projection. It intentionally
+// does not consult session-state.json chat rows: after cutover that file contains
+// daemon-global UI preferences only, and using it here would manufacture a
+// permanent session:get repair loop for every real actor-owned chat.
+func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, settingsRevision, procHash string) (map[string]any, error) {
+	if r == nil {
+		return nil, errors.New("provider chat digest is unavailable")
+	}
+	ids, err := r.knownChatIDs()
+	if err != nil {
+		return nil, err
+	}
+	chats := make([]any, 0, len(ids))
+	for _, chatID := range ids {
+		actor, err := r.actor(chatID)
+		if err != nil {
+			return nil, err
+		}
+		state := actor.engine.Snapshot()
+		if state.Deleted {
+			continue
+		}
+		projected := map[string]any{}
+		if err := projectActorChat(projected, state); err != nil {
+			return nil, fmt.Errorf("project actor digest %q: %w", chatID, err)
+		}
+		messages := anySlice(projected["messages"])
+		queue := anySlice(projected["queue"])
+		var lastMessageID any
+		if len(messages) > 0 {
+			lastMessageID = nullableDigestString(fieldString(mapFromAnyMain(messages[len(messages)-1]), "id"))
+		}
+		var queueHeadID any
+		if len(queue) > 0 {
+			queueHeadID = nullableDigestString(fieldString(mapFromAnyMain(queue[0]), "id"))
+		}
+		var runningJobID any
+		if state.Foreground != nil {
+			runningJobID = nullableDigestString(strings.TrimSpace(state.Foreground.Turn.NativeID))
+		}
+		permissionIDs := make([]string, 0)
+		for id, permission := range state.Permissions {
+			if !strings.EqualFold(strings.TrimSpace(permission.Event.Status), "resolved") {
+				permissionIDs = append(permissionIDs, id)
+			}
+		}
+		sort.Strings(permissionIDs)
+		chats = append(chats, map[string]any{
+			"tabId": state.Presentation.TabID, "chatId": state.ChatID,
+			"actorRevision": state.Revision,
+			"runningJobId":  runningJobID, "lastMessageId": lastMessageID,
+			"messageCount": len(messages), "queueLen": len(queue), "queueHeadId": queueHeadID,
+			agentQueueRevisionField:     int(state.Presentation.AgentQueueRevision),
+			runtimeControlRevisionField: int(state.Presentation.RuntimeControlRevision),
+			"providerId":                nullableDigestString(string(state.Presentation.ProviderID)),
+			"currentModelId":            nullableDigestString(state.Presentation.CurrentModelID),
+			"currentModeId":             nullableDigestString(state.Presentation.CurrentModeID),
+			"pendingPermissionIds":      permissionIDs,
+		})
+	}
+	if catalogHashes == nil {
+		catalogHashes = map[string]string{}
+	}
+	globalRevision := 0
+	if r.sessions != nil {
+		globalRevision = intValue(r.sessions.GlobalSnapshot()[globalPresentationRevisionField])
+	}
+	return map[string]any{
+		"chats": chats, globalPresentationRevisionField: globalRevision, "catalogHash": catalogHashes,
+		"settingsRevision": settingsRevision, "procHash": procHash,
+	}, nil
+}
+
+// ProjectSession is the pure actor -> frozen Mirror-v1 boundary. The legacy
+// session store contributes daemon-global application preferences and a
+// rebuildable cache only. The eager cutover consumes its one-time migration
+// source before handlers start; projection never lazily falls back to it.
+func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
+	if r == nil || r.sessions == nil {
+		return nil, errors.New("provider chat projection is unavailable")
+	}
+	known, err := r.knownChatIDs()
+	if err != nil {
+		return nil, err
+	}
+	if !r.sessions.actorCutover {
+		return nil, errors.New("provider chat projection requires a verified actor cutover")
+	}
+	root := r.sessions.GlobalSnapshot()
+	projectedChats := make([]any, 0, len(known))
+	for _, chatID := range known {
+		actor, err := r.actor(chatID)
+		if err != nil {
+			return nil, err
+		}
+		state := actor.engine.Snapshot()
+		if state.Deleted {
+			continue
+		}
+		projected := map[string]any{}
+		if err := projectActorChat(projected, state); err != nil {
+			return nil, fmt.Errorf("project actor-native chat %q: %w", chatID, err)
+		}
+		projectedChats = append(projectedChats, projected)
+	}
+	root["chats"] = projectedChats
+	activeID := strings.TrimSpace(fieldString(root, "activeId"))
+	activeExists := false
+	for _, raw := range projectedChats {
+		if fieldString(mapFromAnyMain(raw), "id") == activeID {
+			activeExists = true
+			break
+		}
+	}
+	if !activeExists {
+		root["activeId"] = nil
+		if len(projectedChats) > 0 {
+			root["activeId"] = fieldString(mapFromAnyMain(projectedChats[0]), "id")
+		}
+	}
+	if err := materializeSessionSnapshotForWire(root, filepath.Dir(r.sessions.path)); err != nil {
+		return nil, err
+	}
+	return root, nil
+}
+
+func (r *providerChatRuntime) ProjectSessionRaw() ([]byte, error) {
+	root, err := r.ProjectSession()
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(root)
+}
+
+// ProjectArchiveByTab derives the frozen archive payload from the same actor
+// ledger as session:get. After eager cutover, found=false means the tab is not
+// an actor-owned chat; callers must never fall back to the legacy JSONL.
+func (r *providerChatRuntime) ProjectArchiveByTab(tabID string) ([]any, bool, error) {
+	tabID = strings.TrimSpace(tabID)
+	if r == nil || tabID == "" {
+		return nil, false, nil
+	}
+	ids, err := r.knownChatIDs()
+	if err != nil {
+		return nil, false, err
+	}
+	var matched *providerChatActor
+	for _, chatID := range ids {
+		actor, err := r.actor(chatID)
+		if err != nil {
+			return nil, false, err
+		}
+		if strings.TrimSpace(actor.engine.Snapshot().Presentation.TabID) != tabID {
+			continue
+		}
+		if matched != nil {
+			return nil, false, fmt.Errorf("multiple actor chats claim tab id %q", tabID)
+		}
+		matched = actor
+	}
+	if matched == nil {
+		return nil, false, nil
+	}
+	if matched.engine.Snapshot().Deleted {
+		// A tombstone owns this historical tab. Never fall through to the legacy
+		// JSONL reader and resurrect its transcript.
+		return []any{}, true, nil
+	}
+	projected := map[string]any{}
+	if err := projectActorChat(projected, matched.engine.Snapshot()); err != nil {
+		return nil, false, err
+	}
+	messages := anySlice(projected["messages"])
+	if err := materializeSessionMessagesForArchive(messages, filepath.Dir(r.sessions.path)); err != nil {
+		return nil, false, err
+	}
+	return messages, true, nil
+}
+
+// ApplyRendererSnapshot translates the frozen session:save payload into typed
+// actor commands. Renderer-authored messages, provider runtime fields, lane
+// bindings, permissions, usage and outbox state are ignored; after the actor
+// commit, the legacy store receives only a newly projected cache.
+func (r *providerChatRuntime) ApplyRendererSnapshot(snapshot any) (bool, error) {
+	if r == nil || r.sessions == nil {
+		return false, errors.New("provider chat projection is unavailable")
+	}
+	detached := mapFromAnyMain(cloneJSON(redactSessionValue(snapshot)))
+	if detached == nil {
+		return false, errors.New("renderer session snapshot is not an object")
+	}
+	// Chat rows are deliberately ignored here. Each chat presentation and queue
+	// mutation, including deletion, has its own stable-id actor command;
+	// session:save persists daemon-global UI state only.
+	globalRevision, err := r.sessions.SaveActorGlobalSnapshot(detached)
+	if err != nil {
+		return false, fmt.Errorf("persist daemon-global presentation state: %w", err)
+	}
+	detached[globalPresentationRevisionField] = int(globalRevision)
+	return true, nil
+}
+
+func projectActorChat(out map[string]any, state chat.State) error {
+	if out == nil {
+		return errors.New("chat projection target is nil")
+	}
+	if !state.Initialized {
+		return errors.New("chat actor initialization or migration is incomplete")
+	}
+	if state.Deleted {
+		return errors.New("deleted chat cannot be projected")
+	}
+	p := state.Presentation
+	out["id"] = p.TabID
+	out["chatId"] = state.ChatID
+	out["actorRevision"] = state.Revision
+	out["title"] = p.Title
+	out["titleLocked"] = p.TitleLocked
+	setOptionalProjectionString(out, "group", p.Group)
+	setOptionalProjectionString(out, "cwd", p.CWD)
+	out["draft"] = p.Draft
+	out["unread"] = p.Unread
+	out[presentationRevisionField] = p.PresentationRevision
+	setOptionalProjectionString(out, "pane", p.Pane)
+	setStringOrNil(out, "providerId", string(p.ProviderID))
+	setStringOrNil(out, "currentModelId", p.CurrentModelID)
+	setStringOrNil(out, "currentModeId", p.CurrentModeID)
+	if err := setRawProjection(out, "modelControls", p.ModelControls); err != nil {
+		return err
+	}
+	if err := projectActorUsage(out, state); err != nil {
+		return err
+	}
+	if p.Settled == "" {
+		delete(out, "settled")
+	} else {
+		out["settled"] = p.Settled
+	}
+	if p.WorkspaceRevision == 0 {
+		delete(out, workspaceRevisionField)
+	} else {
+		out[workspaceRevisionField] = p.WorkspaceRevision
+	}
+	if p.AgentQueueRevision == 0 {
+		delete(out, agentQueueRevisionField)
+	} else {
+		out[agentQueueRevisionField] = p.AgentQueueRevision
+	}
+	if p.RuntimeControlRevision == 0 {
+		delete(out, runtimeControlRevisionField)
+	} else {
+		out[runtimeControlRevisionField] = p.RuntimeControlRevision
+	}
+	if len(p.PlanLatest) == 0 {
+		out["planLatest"] = []any{}
+	} else {
+		entries := make([]any, 0, len(p.PlanLatest))
+		for _, entry := range p.PlanLatest {
+			entries = append(entries, map[string]any{"status": entry.Status, "content": entry.Text})
+		}
+		out["planLatest"] = entries
+	}
+	if p.PlanLatestMessageID == "" {
+		delete(out, "planLatestMessageId")
+	} else {
+		out["planLatestMessageId"] = p.PlanLatestMessageID
+	}
+
+	messages := make([]any, 0, len(state.Ledger)+2)
+	seenMessage := make(map[string]struct{}, len(state.Ledger)+2)
+	for _, event := range state.Ledger {
+		message, err := projectLedgerMessage(event)
+		if err != nil {
+			return err
+		}
+		if _, duplicate := seenMessage[event.MessageID]; duplicate {
+			return fmt.Errorf("actor ledger contains duplicate message id %q", event.MessageID)
+		}
+		seenMessage[event.MessageID] = struct{}{}
+		messages = append(messages, message)
+	}
+	if state.Foreground != nil {
+		foreground := state.Foreground
+		if !foreground.UserConsumed {
+			userID := strings.TrimSpace(foreground.Input.Presentation.UserMessageID)
+			if userID == "" {
+				userID = fmt.Sprintf("message:%s:user", foreground.OperationID)
+			}
+			if _, exists := seenMessage[userID]; !exists {
+				userStatus := "pending"
+				if foreground.Status == chat.ForegroundUncertain {
+					userStatus = "done"
+				}
+				user := map[string]any{
+					"id": userID, "role": "user", "content": foreground.Input.Text,
+					"status": userStatus, "at": nilIfEmpty(foreground.StartedAt), "events": []any{},
+				}
+				if queueID := strings.TrimSpace(foreground.Input.Presentation.QueueID); queueID != "" {
+					user[agentQueueMessageField] = queueID
+				}
+				images, err := projectionAttachments(foreground.Input.Attachments)
+				if err != nil {
+					return err
+				}
+				if len(images) > 0 {
+					user["images"] = images
+				}
+				messages = append(messages, user)
+				seenMessage[userID] = struct{}{}
+			}
+		}
+		assistantID := strings.TrimSpace(foreground.CurrentAssistantMessageID)
+		if _, exists := seenMessage[assistantID]; !exists {
+			events, err := projectTimeline(foreground.Timeline)
+			if err != nil {
+				return err
+			}
+			assistantStatus := "running"
+			assistantContent := foreground.AssistantContent
+			if foreground.Status == chat.ForegroundUncertain {
+				assistantStatus = "failed"
+				if strings.TrimSpace(assistantContent) == "" {
+					assistantContent = "Workass could not confirm whether the provider accepted this turn. It will not resend it."
+				}
+			}
+			assistant := map[string]any{
+				"id": assistantID, "role": "assistant", "content": assistantContent,
+				"status": assistantStatus, "at": nil, "events": events,
+			}
+			if foreground.Status == chat.ForegroundUncertain {
+				assistant["interrupted"] = true
+			}
+			if startedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(foreground.StartedAt)); err == nil {
+				assistant["turnStartedAt"] = startedAt.UnixMilli()
+			}
+			if foreground.AssistantResult != "" {
+				assistant["result"] = foreground.AssistantResult
+			}
+			images, err := projectionAttachments(foreground.AssistantAttachments)
+			if err != nil {
+				return err
+			}
+			if len(images) > 0 {
+				assistant["images"] = images
+			}
+			if permission := projectPermission(foreground.Permission); permission != nil {
+				assistant["permission"] = permission
+			}
+			if foreground.Turn.NativeID != "" {
+				assistant["jobId"] = foreground.Turn.NativeID
+			}
+			if assistantID != foreground.RootAssistantMessageID {
+				assistant["turnRootId"] = foreground.RootAssistantMessageID
+				assistant["turnTerminal"] = true
+			}
+			messages = append(messages, assistant)
+			seenMessage[assistantID] = struct{}{}
+		}
+		if state.PendingSteer != nil {
+			steerRows, err := projectPendingSteer(state.PendingSteer, foreground)
+			if err != nil {
+				return err
+			}
+			for _, row := range steerRows {
+				id := fieldString(row, "id")
+				if _, duplicate := seenMessage[id]; duplicate {
+					return fmt.Errorf("pending steer duplicates message id %q", id)
+				}
+				seenMessage[id] = struct{}{}
+				messages = append(messages, row)
+			}
+		}
+	}
+	out["messages"] = messages
+	queue, err := projectActorQueue(state.StagedQueue, state.Queue)
+	if err != nil {
+		return err
+	}
+	out["queue"] = queue
+	out["pending"] = state.Foreground != nil
+	delete(out, "serverAuthored")
+	delete(out, "liveSession")
+	delete(out, "sessionId")
+	delete(out, "sessionProviderId")
+	delete(out, "sessionError")
+	if lane, ok := state.Lanes[state.ActiveLaneID]; ok {
+		out["sessionProviderId"] = string(lane.Identity.Realm.ProviderID)
+		if !lane.Thread.IsZero() {
+			out["sessionId"] = lane.Thread.HeadID
+		}
+		if lane.Attachment != nil {
+			out["liveSession"] = projectLaneAttachment(*lane.Attachment)
+		}
+	}
+	if lane, ok := state.Lanes[state.DesiredLaneID]; ok && (lane.Phase == chat.LaneBlocked || lane.Phase == chat.LaneBroken) {
+		out["sessionError"] = string(lane.LastError)
+	}
+	return nil
+}
+
+// projectReconciledTerminalJob keeps the frozen live job:end contract after a
+// host crash without reviving Manager as chat authority. The terminal ledger
+// row and lane binding have already been committed by the actor; this function
+// is a pure presentation projection of those bytes.
+func projectReconciledTerminalJob(state chat.State, operationID providercontract.OperationID, turn providercontract.TurnRef) (map[string]any, error) {
+	var user *chat.LedgerEvent
+	var assistant *chat.LedgerEvent
+	for index := range state.Ledger {
+		event := &state.Ledger[index]
+		if event.OperationID != operationID {
+			continue
+		}
+		if event.Role == "user" && user == nil {
+			user = event
+		}
+		if event.Role == "assistant" && event.Terminal != nil {
+			assistant = event
+		}
+	}
+	if assistant == nil || assistant.Terminal == nil {
+		return nil, errors.New("reconciled terminal operation is missing its actor ledger receipt")
+	}
+	terminal := assistant.Terminal
+	lane, ok := state.Lanes[assistant.LaneID]
+	if !ok || lane.Thread.IsZero() {
+		return nil, errors.New("reconciled terminal operation lost its exact provider lane")
+	}
+	jobID := firstNonEmptyString(turn.NativeID, assistant.NativeTurnID)
+	if jobID == "" {
+		return nil, errors.New("reconciled terminal operation is missing its native turn id")
+	}
+	status := strings.ToLower(strings.TrimSpace(terminal.Status))
+	jobStatus := "failed"
+	code := any(1)
+	if status == "completed" || status == "done" {
+		jobStatus = "done"
+		code = 0
+	} else if status == "cancelled" || strings.EqualFold(terminal.StopReason, "cancelled") {
+		code = 130
+	}
+	if terminal.Code != nil {
+		code = *terminal.Code
+	}
+	startedAt := ""
+	promptText := ""
+	userMessageID := ""
+	if user != nil {
+		startedAt, promptText, userMessageID = user.At, user.Text, user.MessageID
+	}
+	finishedAt := firstNonEmptyString(terminal.FinishedAt, assistant.At)
+	if finishedAt == "" {
+		finishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	result := firstNonEmptyString(terminal.Result, assistant.Result, assistant.Text)
+	consumedSteers := make([]string, 0, len(terminal.ConsumedSteerIDs))
+	for _, id := range terminal.ConsumedSteerIDs {
+		consumedSteers = append(consumedSteers, string(id))
+	}
+	job := map[string]any{
+		"id": jobID, "kind": "app-chat", "key": nil, "title": state.Presentation.Title,
+		"status": jobStatus, "startedAt": startedAt, "finishedAt": finishedAt, "code": code,
+		"permissionMode": "", "chatId": state.ChatID, "tabId": nullableString(state.Presentation.TabID),
+		"sessionId": lane.Thread.HeadID, "providerId": string(lane.Identity.Realm.ProviderID),
+		"userMessageId": nullableString(userMessageID), "assistantMessageId": nullableString(assistant.MessageID),
+		"promptText": promptText, "result": nullableString(result), "error": nullableString(terminal.Error),
+		"stopReason": nullableString(terminal.StopReason), "crashInterrupted": terminal.CrashInterrupted,
+		"interrupted": terminal.Interrupted, "consumedSteerIds": consumedSteers,
+	}
+	if strings.TrimSpace(terminal.DispositionState) != "" {
+		disposition := map[string]any{"state": terminal.DispositionState}
+		if strings.TrimSpace(terminal.DispositionSource) != "" {
+			disposition["source"] = terminal.DispositionSource
+		}
+		job["disposition"] = disposition
+	}
+	return map[string]any{"type": "end", "job": job}, nil
+}
+
+func projectLaneAttachment(snapshot providercontract.LaneAttachmentSnapshot) map[string]any {
+	models := make([]any, 0, len(snapshot.Models))
+	for _, model := range snapshot.Models {
+		models = append(models, map[string]any{
+			"modelId": model.ID, "name": model.Name, "efforts": append([]string(nil), model.Efforts...),
+		})
+	}
+	modes := make([]any, 0, len(snapshot.Modes))
+	for _, mode := range snapshot.Modes {
+		modes = append(modes, map[string]any{"id": mode.ID, "name": mode.Name})
+	}
+	projected := map[string]any{
+		"sessionId": snapshot.ConnectionID, "cwd": snapshot.CWD, "agent": snapshot.Agent,
+		"providerId": string(snapshot.ProviderID), "providerName": snapshot.ProviderName,
+		"models": models, "currentModelId": nullableDigestString(snapshot.CurrentModelID),
+		"modes": modes, "currentModeId": nullableDigestString(snapshot.CurrentModeID),
+		"imageSupport": snapshot.ImageSupport, "commandCatalogSupported": snapshot.CommandCatalogSupported,
+	}
+	if snapshot.CommandCatalog != nil {
+		projected["commandCatalog"] = projectRuntimeCommandCatalog(snapshot.CommandCatalog)
+	}
+	return projected
+}
+
+func projectRuntimeCommandCatalog(catalog *providercontract.RuntimeCommandCatalog) any {
+	if catalog == nil {
+		return nil
+	}
+	commands := make([]any, 0, len(catalog.Commands))
+	for _, command := range catalog.Commands {
+		commands = append(commands, map[string]any{
+			"name": command.Name, "description": command.Description,
+			"argumentHint": command.ArgumentHint, "aliases": append([]string(nil), command.Aliases...),
+		})
+	}
+	agents := make([]any, 0, len(catalog.Agents))
+	for _, agent := range catalog.Agents {
+		agents = append(agents, map[string]any{"name": agent.Name, "description": agent.Description, "model": agent.Model})
+	}
+	return map[string]any{
+		"commands": commands, "agents": agents, "outputStyle": catalog.OutputStyle,
+		"availableOutputStyles": append([]string(nil), catalog.AvailableOutputStyles...),
+		"commandsTruncated":     catalog.CommandsTruncated, "agentsTruncated": catalog.AgentsTruncated,
+		"stylesTruncated": catalog.StylesTruncated, "asOf": catalog.AsOf,
+	}
+}
+
+func projectLedgerMessage(event chat.LedgerEvent) (map[string]any, error) {
+	message := map[string]any{}
+	message["id"] = event.MessageID
+	message["role"] = event.Role
+	message["content"] = event.Text
+	if event.Result == "" {
+		delete(message, "result")
+	} else {
+		message["result"] = event.Result
+	}
+	status := event.Status
+	if status == "" {
+		status = "done"
+	}
+	message["status"] = status
+	if event.At == "" {
+		message["at"] = nil
+	} else {
+		message["at"] = event.At
+	}
+	if len(event.Timeline) > 0 {
+		events, err := projectTimeline(event.Timeline)
+		if err != nil {
+			return nil, err
+		}
+		message["events"] = events
+	} else if _, exists := message["events"]; !exists {
+		message["events"] = []any{}
+	}
+	images, err := projectionAttachments(event.Attachments)
+	if err != nil {
+		return nil, err
+	}
+	if len(images) > 0 {
+		message["images"] = images
+	}
+	if event.SteerState != "" {
+		message["steerState"] = event.SteerState
+	} else {
+		delete(message, "steerState")
+	}
+	if event.SteerAnchor != nil {
+		message["steerAnchor"] = map[string]any{
+			"assistantMessageId": event.SteerAnchor.AssistantMessageID,
+			"contentOffset":      event.SteerAnchor.ContentOffset,
+			"resultOffset":       event.SteerAnchor.ResultOffset,
+			"eventCount":         event.SteerAnchor.EventCount,
+		}
+	}
+	if event.SteerBoundary != "" {
+		message["steerBoundary"] = event.SteerBoundary
+	}
+	if event.SteerContinuationID != "" {
+		message["steerContinuationId"] = event.SteerContinuationID
+	}
+	if event.SteerContinuationFor != "" {
+		message["steerContinuationFor"] = event.SteerContinuationFor
+	}
+	if event.TurnRootID != "" {
+		message["turnRootId"] = event.TurnRootID
+	} else {
+		delete(message, "turnRootId")
+	}
+	if event.TurnTerminal != nil {
+		message["turnTerminal"] = *event.TurnTerminal
+	} else {
+		delete(message, "turnTerminal")
+	}
+	if permission := projectPermission(event.Permission); permission != nil {
+		message["permission"] = permission
+	} else {
+		delete(message, "permission")
+	}
+	if event.NativeTurnID != "" {
+		message["jobId"] = event.NativeTurnID
+	}
+	if event.TurnStartedAt > 0 {
+		message["turnStartedAt"] = event.TurnStartedAt
+	}
+	if event.QueueID != "" {
+		message[agentQueueMessageField] = event.QueueID
+	} else {
+		delete(message, agentQueueMessageField)
+	}
+	if event.Interrupted {
+		message["interrupted"] = true
+	} else {
+		delete(message, "interrupted")
+	}
+	if event.RetryPrompt != "" {
+		message["retryPrompt"] = event.RetryPrompt
+	} else {
+		delete(message, "retryPrompt")
+	}
+	return message, nil
+}
+
+func projectPendingSteer(pending *chat.PendingSteer, foreground *chat.ForegroundTurn) ([]map[string]any, error) {
+	if pending == nil || foreground == nil {
+		return nil, nil
+	}
+	userID := strings.TrimSpace(pending.Presentation.UserMessageID)
+	if userID == "" {
+		userID = fmt.Sprintf("message:%s:user", pending.OperationID)
+	}
+	continuationID := strings.TrimSpace(pending.Presentation.AssistantMessageID)
+	if continuationID == "" {
+		continuationID = foreground.RootAssistantMessageID + "~after~" + string(pending.OperationID)
+	}
+	steerState := "sending"
+	status := "pending"
+	switch pending.Status {
+	case chat.SteerAccepted:
+		steerState, status = "accepted", "done"
+	case chat.SteerUncertain:
+		steerState, status = "uncertain", "done"
+	}
+	images, err := projectionAttachments(pending.Attachments)
+	if err != nil {
+		return nil, err
+	}
+	user := map[string]any{
+		"id": userID, "role": "user", "content": pending.Text, "status": status,
+		"at": nilIfEmpty(pending.Presentation.StartedAt), "events": []any{},
+		"steerState": steerState, "turnRootId": foreground.RootAssistantMessageID,
+	}
+	if queueID := strings.TrimSpace(pending.Presentation.QueueID); queueID != "" {
+		user[agentQueueMessageField] = queueID
+	}
+	if len(images) > 0 {
+		user["images"] = images
+	}
+	assistant := map[string]any{
+		"id": continuationID, "role": "assistant", "content": "", "status": "pending", "at": nil,
+		"events": []any{}, "jobId": foreground.Turn.NativeID,
+		"turnRootId": foreground.RootAssistantMessageID, "turnTerminal": true,
+	}
+	if pending.AwaitConsumption || pending.Status == chat.SteerDispatching {
+		user["steerBoundary"] = "waiting"
+		user["steerContinuationId"] = continuationID
+		assistant["steerBoundary"] = "waiting"
+		assistant["steerContinuationFor"] = userID
+	}
+	return []map[string]any{user, assistant}, nil
+}
+
+func projectTimeline(entries []chat.TimelineEntry) ([]any, error) {
+	out := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		item := map[string]any{"key": entry.Key, "at": entry.At}
+		switch entry.Kind {
+		case providercontract.EventThinkingUpdate:
+			if entry.Thinking == nil {
+				return nil, errors.New("thinking timeline entry lost its typed payload")
+			}
+			item["kind"], item["text"] = "thinking", entry.Thinking.Text
+		case providercontract.EventPlanUpdate:
+			if entry.Plan == nil {
+				return nil, errors.New("plan timeline entry lost its typed payload")
+			}
+			projected := make([]any, 0, len(entry.Plan.Entries))
+			for _, planEntry := range entry.Plan.Entries {
+				projected = append(projected, map[string]any{"status": planEntry.Status, "content": planEntry.Text})
+			}
+			item["kind"], item["entries"] = "plan", projected
+		case providercontract.EventToolUpdate:
+			if entry.Tool == nil {
+				return nil, errors.New("tool timeline entry lost its typed payload")
+			}
+			tool := entry.Tool
+			item["kind"] = "tool"
+			item["id"] = nullableString(tool.ToolCallID)
+			item["toolKind"] = nullableString(tool.ToolKind)
+			item["title"], item["status"] = tool.Title, tool.Status
+			item["command"] = nullableString(tool.Command)
+			item["terminalId"] = nullableString(tool.TerminalID)
+			item["input"] = nullableString(tool.Input)
+			item["output"] = nullableString(tool.Output)
+			item["location"] = nullableString(tool.Location)
+			images, err := projectionAttachments(tool.Attachments)
+			if err != nil {
+				return nil, err
+			}
+			if len(images) > 0 {
+				item["images"] = images
+			}
+			if tool.StartedAtUnixMS > 0 {
+				item["startedAt"] = tool.StartedAtUnixMS
+			}
+			if tool.EndedAtUnixMS > 0 {
+				item["endedAt"] = tool.EndedAtUnixMS
+			}
+			if tool.SubagentID != "" {
+				item["subagentId"] = tool.SubagentID
+			}
+			if tool.SubagentLabel != "" {
+				item["subagentLabel"] = tool.SubagentLabel
+			}
+			if tool.SubagentProvider != "" {
+				item["subagentProvider"] = tool.SubagentProvider
+			}
+			if tool.SubagentModel != "" {
+				item["subagentModel"] = tool.SubagentModel
+			}
+			if tool.SubagentHeader {
+				item["subagentHeader"] = true
+			}
+		case providercontract.EventCompactionStarted, providercontract.EventCompactionCheckpoint:
+			if entry.Compaction == nil {
+				return nil, errors.New("compaction timeline entry lost its typed payload")
+			}
+			item["kind"] = "compaction"
+		case providercontract.EventCheckpointRestored:
+			if entry.Restored == nil || entry.Restored.TurnSequence <= 0 {
+				return nil, errors.New("checkpoint restore timeline entry lost its typed payload")
+			}
+			item["kind"], item["turnSeq"] = "restored", entry.Restored.TurnSequence
+		default:
+			return nil, fmt.Errorf("unsupported actor timeline event %q", entry.Kind)
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+func projectPermission(permission *providercontract.PermissionEvent) map[string]any {
+	if permission == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(permission.Status)) {
+	case "resolved", "failed":
+		return nil
+	}
+	options := make([]any, 0, max(len(permission.OptionDetails), len(permission.Options)))
+	if len(permission.OptionDetails) > 0 {
+		for _, option := range permission.OptionDetails {
+			options = append(options, map[string]any{"optionId": option.ID, "name": option.Name, "kind": option.Kind})
+		}
+	} else {
+		for _, optionID := range permission.Options {
+			options = append(options, map[string]any{"optionId": optionID, "name": optionID, "kind": ""})
+		}
+	}
+	out := map[string]any{
+		"id": permission.RequestID, "title": permission.Title,
+		"kind": nullableString(permission.Kind), "options": options,
+	}
+	if permission.Question != nil {
+		questionOptions := make([]any, 0, len(permission.Question.Options))
+		for _, option := range permission.Question.Options {
+			questionOptions = append(questionOptions, map[string]any{"label": option.Label, "description": option.Description})
+		}
+		out["question"] = map[string]any{
+			"question": permission.Question.Question, "header": permission.Question.Header,
+			"options": questionOptions, "multiSelect": permission.Question.MultiSelect,
+		}
+	}
+	return out
+}
+
+func projectActorQueue(staged []chat.StagedQueueEntry, queue []chat.QueueEntry) ([]any, error) {
+	out := make([]any, 0, len(staged)+len(queue))
+	for _, entry := range staged {
+		item := map[string]any{"id": entry.ID, "text": entry.Text}
+		if entry.Source != "" {
+			item["source"] = entry.Source
+		}
+		if entry.Delivery != "" {
+			item["delivery"] = entry.Delivery
+		}
+		if entry.QueuedAt != "" {
+			item["queuedAt"] = entry.QueuedAt
+		}
+		images, err := projectionAttachments(entry.Attachments)
+		if err != nil {
+			return nil, err
+		}
+		if len(images) > 0 {
+			item["images"] = images
+		}
+		if len(entry.AttachmentNames) > 0 {
+			item["attachmentNames"] = append([]string(nil), entry.AttachmentNames...)
+		}
+		if entry.AttachmentState != "" {
+			item["attachmentState"] = entry.AttachmentState
+		}
+		if entry.AttachmentError != "" {
+			item["attachmentError"] = entry.AttachmentError
+		}
+		out = append(out, item)
+	}
+	for _, entry := range queue {
+		id := strings.TrimSpace(entry.Presentation.QueueID)
+		if id == "" {
+			id = string(entry.OperationID)
+		}
+		item := map[string]any{
+			"id": id, "text": entry.Text, "delivery": "queue",
+		}
+		if entry.Presentation.Origin != "" {
+			source := entry.Presentation.Origin
+			if source == "human" {
+				source = "host"
+			}
+			item["source"] = source
+		}
+		images, err := projectionAttachments(entry.Attachments)
+		if err != nil {
+			return nil, err
+		}
+		if len(images) > 0 {
+			item["images"] = images
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+func nilIfEmpty(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func projectionAttachments(attachments []providercontract.Attachment) ([]any, error) {
+	out := make([]any, 0, len(attachments))
+	for index, attachment := range attachments {
+		ref := strings.TrimPrefix(strings.TrimSpace(attachment.Ref), providerSessionImageRefPrefix)
+		if ref == "" || ref == strings.TrimSpace(attachment.Ref) {
+			return nil, fmt.Errorf("actor attachment %d is missing a durable session image reference", index)
+		}
+		item := map[string]any{
+			"mimeType": attachment.MIMEType, "name": attachment.Name,
+			sessionImageDataRefField: ref,
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+func setOptionalProjectionString(target map[string]any, key string, value *string) {
+	if value == nil {
+		target[key] = nil
+		return
+	}
+	target[key] = *value
+}
+
+func setStringOrNil(target map[string]any, key, value string) {
+	if strings.TrimSpace(value) == "" {
+		target[key] = nil
+		return
+	}
+	target[key] = value
+}
+
+func setRawProjection(target map[string]any, key string, raw json.RawMessage) error {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		delete(target, key)
+		return nil
+	}
+	var value any
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return fmt.Errorf("actor presentation field %q is invalid: %w", key, err)
+	}
+	target[key] = value
+	return nil
+}
+
+func projectActorUsage(target map[string]any, state chat.State) error {
+	byProvider := make(map[string]any)
+	if raw := state.Presentation.ContextUsageByProvider; len(raw) > 0 && strings.TrimSpace(string(raw)) != "null" {
+		decoder := json.NewDecoder(strings.NewReader(string(raw)))
+		decoder.UseNumber()
+		if err := decoder.Decode(&byProvider); err != nil {
+			return fmt.Errorf("actor presentation field %q is invalid: %w", "contextUsageByProvider", err)
+		}
+		if byProvider == nil {
+			byProvider = make(map[string]any)
+		}
+	}
+	type observedUsage struct {
+		laneID string
+		value  providercontract.UsageEvent
+	}
+	latest := make(map[string]observedUsage)
+	for laneID, usage := range state.Usage {
+		lane, ok := state.Lanes[laneID]
+		if !ok {
+			return fmt.Errorf("actor usage belongs to unknown lane %q", laneID)
+		}
+		providerID := strings.TrimSpace(string(lane.Identity.Realm.ProviderID))
+		used := usage.Used
+		if used <= 0 {
+			used = usage.InputTokens + usage.OutputTokens
+		}
+		if providerID == "" || used < 0 || usage.Size <= 0 {
+			continue
+		}
+		prior, exists := latest[providerID]
+		if exists && (prior.value.ObservedAtUnixMS > usage.ObservedAtUnixMS ||
+			(prior.value.ObservedAtUnixMS == usage.ObservedAtUnixMS && prior.laneID >= string(laneID))) {
+			continue
+		}
+		latest[providerID] = observedUsage{laneID: string(laneID), value: usage}
+	}
+	for providerID, observed := range latest {
+		usage := observed.value
+		used := usage.Used
+		if used <= 0 {
+			used = usage.InputTokens + usage.OutputTokens
+		}
+		projected := map[string]any{"used": used, "size": usage.Size}
+		if usage.ObservedAtUnixMS > 0 {
+			projected["updatedAt"] = time.UnixMilli(usage.ObservedAtUnixMS).UTC().Format(time.RFC3339Nano)
+		}
+		byProvider[providerID] = projected
+	}
+	if len(byProvider) == 0 {
+		delete(target, "contextUsageByProvider")
+	} else {
+		target["contextUsageByProvider"] = byProvider
+	}
+	selected := strings.TrimSpace(string(state.Presentation.ProviderID))
+	if selected != "" {
+		if value, ok := byProvider[selected]; ok {
+			target["usage"] = cloneJSON(value)
+			return nil
+		}
+	}
+	return setRawProjection(target, "usage", state.Presentation.LegacyUsage)
+}

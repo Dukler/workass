@@ -27,24 +27,6 @@ func TestWorkassLanguageRuleIsAdjacentToEveryTurn(t *testing.T) {
 	assertPerTurnLanguageBoundary(t, secondResult, "Keep answering in English.")
 }
 
-func TestWorkassOwnedHistoryScaffoldingIsLanguageNeutral(t *testing.T) {
-	block := buildHistoryBlock([]historyMessage{
-		{Role: "user", Content: "continue in English"},
-		{Role: "assistant", Content: "previous answer"},
-	}, 24000)
-
-	for _, want := range []string{"Previous conversation", "User: continue in English", "Assistant: previous answer"} {
-		if !strings.Contains(block, want) {
-			t.Fatalf("neutral restored-history marker %q missing from %q", want, block)
-		}
-	}
-	for _, forbidden := range []string{"Conversacion previa", "Usuario:", "Devin:", "transcripcion", "historial truncado"} {
-		if strings.Contains(block, forbidden) {
-			t.Fatalf("Workass-owned restored-history scaffolding still contains %q: %q", forbidden, block)
-		}
-	}
-}
-
 func TestLocalizedWorkassToolCardCannotSelectHumanReplyLanguage(t *testing.T) {
 	request := "Usar una herramienta\n" +
 		"mcp.workass-agent.workass_agent_catalog\n" +
@@ -74,26 +56,6 @@ func TestOrdinaryMCPMentionIsNotMisclassifiedAsToolCard(t *testing.T) {
 	prompt := buildUserRequestBlock(request, true)
 	if strings.Contains(prompt, "<workass_tool_card>") || !strings.Contains(prompt, "User request:\n"+request) {
 		t.Fatalf("ordinary request was rewritten as a tool card: %q", prompt)
-	}
-}
-
-func TestWorkassOwnedCompactionScaffoldingCannotSetReplyLanguage(t *testing.T) {
-	seed := buildCompactedSeedBlock(compactedSeed{
-		Summary:  "Internal summary.",
-		Messages: []historyMessage{{Role: "user", Content: "latest request"}},
-	})
-	combined := compactionPrompt() + "\n" + seed
-
-	for _, forbidden := range []string{
-		"Respondé en español", "Resumí la conversación", "Contexto resembrado",
-		"Usuario:", "No respondas", "Instruccion de sistema",
-	} {
-		if strings.Contains(combined, forbidden) {
-			t.Fatalf("Workass-owned compaction scaffolding still contains %q: %q", forbidden, combined)
-		}
-	}
-	if !strings.Contains(combined, "must not determine the language of a later reply") {
-		t.Fatalf("compaction prompt does not neutralize its own language: %q", combined)
 	}
 }
 

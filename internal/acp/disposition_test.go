@@ -94,9 +94,9 @@ func TestDispositionIsOmittedUntilThereIsOne(t *testing.T) {
 	if _, present := job.Public()["disposition"]; present {
 		t.Fatal("a starting turn must not carry a disposition")
 	}
-	job.DispositionState, job.DispositionSource = obligationParked, dispositionSourceInferred
+	job.DispositionState, job.DispositionSource = string(DispositionParked), dispositionSourceInferred
 	got, present := job.Public()["disposition"].(map[string]any)
-	if !present || got["state"] != obligationParked || got["source"] != dispositionSourceInferred {
+	if !present || got["state"] != string(DispositionParked) || got["source"] != dispositionSourceInferred {
 		t.Fatalf("disposition = %#v", job.Public()["disposition"])
 	}
 }

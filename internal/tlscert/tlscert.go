@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,7 +41,9 @@ const (
 	// Ten years. A daemon certificate that quietly expires is worse than one
 	// that never rotates: rotation is visible (the fingerprint changes and every
 	// pinned client says so), expiry is a machine that stops answering at 3am.
-	validity = 10 * 365 * 24 * time.Hour
+	validity               = 10 * 365 * 24 * time.Hour
+	loopbackLeafValidity   = 24 * time.Hour
+	loopbackLeafRenewAhead = time.Hour
 )
 
 // Certificate is the loaded pair plus the name clients know it by.
@@ -50,6 +53,68 @@ type Certificate struct {
 	// the value a client pins and the value the daemon proves under the fleet key.
 	Fingerprint string
 	Minted      bool
+}
+
+// LoopbackServerCertificateRotator keeps the conventional mcp.localhost leaf
+// valid for a long-running daemon without changing the permanent machine root
+// that clients trust. A leaf is replaced before it expires; the root and its
+// fingerprint never move.
+type LoopbackServerCertificateRotator struct {
+	mu      sync.Mutex
+	root    Certificate
+	dnsName string
+	now     func() time.Time
+	current tls.Certificate
+	leaf    *x509.Certificate
+}
+
+// NewLoopbackServerCertificateRotator creates the first loopback leaf and a
+// concurrency-safe source for tls.Config.GetCertificate.
+func NewLoopbackServerCertificateRotator(root Certificate, dnsName string) (*LoopbackServerCertificateRotator, error) {
+	return newLoopbackServerCertificateRotator(root, dnsName, time.Now)
+}
+
+func newLoopbackServerCertificateRotator(root Certificate, dnsName string, now func() time.Time) (*LoopbackServerCertificateRotator, error) {
+	if now == nil {
+		return nil, errors.New("loopback certificate clock is nil")
+	}
+	r := &LoopbackServerCertificateRotator{root: root, dnsName: dnsName, now: now}
+	if err := r.rotateLocked(); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// GetCertificate returns a copy of the current certificate so a concurrent
+// rotation cannot mutate the value while crypto/tls is completing a handshake.
+func (r *LoopbackServerCertificateRotator) GetCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	if r == nil {
+		return nil, errors.New("loopback certificate rotator is nil")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	if r.leaf == nil || !now.Before(r.leaf.NotAfter.Add(-loopbackLeafRenewAhead)) {
+		if err := r.rotateLocked(); err != nil {
+			return nil, err
+		}
+	}
+	current := r.current
+	return &current, nil
+}
+
+func (r *LoopbackServerCertificateRotator) rotateLocked() error {
+	issued, err := issueLoopbackServerCertificateAt(r.root, r.dnsName, r.now())
+	if err != nil {
+		return err
+	}
+	leaf, err := x509.ParseCertificate(issued.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("parse issued loopback certificate: %w", err)
+	}
+	r.current = issued
+	r.leaf = leaf
+	return nil
 }
 
 // Ensure loads this machine's certificate, minting one on first use.
@@ -128,6 +193,10 @@ func FingerprintOf(der []byte) string {
 // The daemon uses it only for loopback-only protocol clients selected by SNI;
 // ordinary LAN clients continue to see and pin the permanent daemon certificate.
 func IssueLoopbackServerCertificate(root Certificate, dnsName string) (tls.Certificate, error) {
+	return issueLoopbackServerCertificateAt(root, dnsName, time.Now())
+}
+
+func issueLoopbackServerCertificateAt(root Certificate, dnsName string, now time.Time) (tls.Certificate, error) {
 	dnsName = strings.TrimSpace(strings.ToLower(dnsName))
 	if dnsName == "" || !strings.HasSuffix(dnsName, ".localhost") {
 		return tls.Certificate{}, errors.New("loopback server certificate requires a .localhost DNS name")
@@ -151,8 +220,7 @@ func IssueLoopbackServerCertificate(root Certificate, dnsName string) (tls.Certi
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	now := time.Now()
-	notAfter := now.Add(24 * time.Hour)
+	notAfter := now.Add(loopbackLeafValidity)
 	if rootCert.NotAfter.Before(notAfter) {
 		notAfter = rootCert.NotAfter
 	}

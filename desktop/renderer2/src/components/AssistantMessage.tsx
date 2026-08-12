@@ -3,7 +3,7 @@ import type { MessageImage, Msg, ThinkingEvent, TimelineEvent } from '../store/t
 import { store, useApp, useMsgVersion, useConnStatus, useClock } from '../store/store';
 import { parseBlocks } from '../markdown/blocks';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
-import { StepRow, StepWords, ToolGroup, PermCard, CompactionRow, RestoredRow, BgProcRow } from './messages';
+import { StepRow, StepWords, ToolGroup, PermCard, CompactionRow, RestoredRow } from './messages';
 import { IcStampCopy, IcWarnTri, IcRetryArc } from '../icons';
 import { whimsyFor } from '../turn-whimsy';
 import { buildTranscriptTimelineSegments, stableMarkdownBlockKeys } from '../timeline-layout';
@@ -52,7 +52,6 @@ function EventView({ ev }: { ev: TimelineEvent }) {
   if (ev.kind === 'plan') return null; // plan lives in the Tareas rail only (no chat dupe)
   if (ev.kind === 'compaction') return <CompactionRow />;
   if (ev.kind === 'restored') return <RestoredRow ev={ev} />;
-  if (ev.kind === 'bgproc') return <BgProcRow ev={ev} />;
   return null; // tool events render as grouped runs (foldToolGroups), never standalone
 }
 

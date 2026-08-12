@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"workass/internal/acp"
+	"workass/internal/chat"
 )
 
 type statelessMCPTestHarness struct {
@@ -34,13 +35,29 @@ func newStatelessMCPTestHarness(t *testing.T) statelessMCPTestHarness {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	t.Cleanup(cancel)
-	if _, err := manager.NewSession(ctx, acp.SessionOptions{
+	store := newSessionStore(filepath.Join(manager.StateDir(), sessionStateFilename))
+	runtime := newTestProviderChatRuntime(t, manager, store, manager.StateDir())
+	if _, err := runtime.actorForNewChatOperation("mcp-chat", chat.PresentationState{
+		TabID: "mcp-tab", Title: "MCP owner", ProviderID: "mock", CWD: stringPointerValueOrNil(root),
+	}, "test:create-mcp-owner"); err != nil {
+		manager.Reset()
+		t.Fatalf("create actor-owned MCP chat: %v", err)
+	}
+	if _, err := runtime.Select(ctx, acp.SessionOptions{
 		TabID: "mcp-tab", ChatID: "mcp-chat", ProviderID: "mock", CWD: root, AgentOwnerKey: "mcp-owner",
 	}); err != nil {
 		manager.Reset()
-		t.Fatalf("new MCP owner session: %v", err)
+		t.Fatalf("create actor-owned MCP session: %v", err)
 	}
-	control, err := newAgentControlHandler(manager, newSessionStore(filepath.Join(t.TempDir(), sessionStateFilename)), nil)
+	if _, err := runtime.Start(ctx, map[string]any{
+		"tabId": "mcp-tab", "chatId": "mcp-chat", "providerId": "mock", "cwd": root,
+		"prompt":        "[mock:permission] hold the actor-owned parent turn",
+		"userMessageId": "mcp-owner-turn", "assistantMessageId": "mcp-owner-assistant",
+	}, "human"); err != nil {
+		manager.Reset()
+		t.Fatalf("start actor-owned MCP parent turn: %v", err)
+	}
+	control, err := newAgentControlHandler(manager, nil, newChatControlCoordinator(manager, nil, runtime))
 	if err != nil {
 		manager.Reset()
 		t.Fatal(err)

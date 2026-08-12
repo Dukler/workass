@@ -291,6 +291,8 @@ func TestSubagentPermissionAttentionStaysUnreadAfterFastResolution(t *testing.T)
 func TestDreamSubagentCatalogProgressMessageWaitManyAndDurableReceipt(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := filepath.Join(t.TempDir(), "state")
+	holdRelease := filepath.Join(t.TempDir(), "release")
+	t.Setenv("WORKASS_MOCK_ACP_HOLD_FILE", holdRelease)
 	events := newEventCollector()
 	manager := NewManager(Options{
 		RootDir: root, StateDir: stateDir,
@@ -341,7 +343,7 @@ func TestDreamSubagentCatalogProgressMessageWaitManyAndDurableReceipt(t *testing
 	}
 
 	run, err := manager.SpawnSubagent(ctx, SubagentSpawnOptions{
-		OwnerKey: ownerKey, Prompt: "[mock:slow] [mock:steer] inspect dream path", Label: "dream-child",
+		OwnerKey: ownerKey, Prompt: "[mock:hold-until-steer] [mock:steer] inspect dream path", Label: "dream-child",
 		PermissionIntent: "inherit", CWD: "inherit",
 	})
 	if err != nil {
@@ -362,6 +364,12 @@ func TestDreamSubagentCatalogProgressMessageWaitManyAndDurableReceipt(t *testing
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	manager.mu.Lock()
+	childBeforeMessage := copySubagentRun(manager.subagents[run.ID])
+	manager.mu.Unlock()
+	if childBeforeMessage.Status != "running" {
+		t.Fatalf("held subagent finished before live message: %#v", childBeforeMessage)
+	}
 
 	delivery, err := manager.MessageSubagent(ownerKey, "", "", run.ID, "focus on the receipt contract")
 	if err != nil {
@@ -369,6 +377,9 @@ func TestDreamSubagentCatalogProgressMessageWaitManyAndDurableReceipt(t *testing
 	}
 	if delivery["delivery"] != "live" {
 		t.Fatalf("generic mock message delivery = %#v", delivery)
+	}
+	if err := os.WriteFile(holdRelease, []byte("release"), 0o600); err != nil {
+		t.Fatalf("release mock hold: %v", err)
 	}
 	waited, err := manager.WaitSubagents(ctx, ownerKey, "", "", []string{run.ID}, "all", 8*time.Second)
 	if err != nil {

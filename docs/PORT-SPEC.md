@@ -438,35 +438,44 @@ shell, NOT the daemon.
       so they survive renderer loss; React only rehydrates the authoritative
       snapshot and may never double-drive them.
 5. **Serialized `session/prompt` per bridge** (prompt queue). (`main.js:2484`)
-6. **Native resume first; canonical-history fallback** (user law 2026-07-12):
-   Workass is the authority for the visible transcript; the provider-native
-   session is the authority for hidden provider context. Persist one native
-   session binding per chat+provider with a monotonic Workass-history cursor.
-   Resurrection order is `session/resume` → delta-seed unseen Workass turns →
-   `session/load` when resume is unavailable but load is supported → fresh
-   `session/new` + archived-transcript replay exactly once. Never feed loaded
-   provider history directly into the renderer and never let a stale session
-   generation overwrite a newer binding. Any restore failure — including a
-   post-resume attach failure — degrades to the next step of this order; it
-   must never surface as a hard error on the user's send. A hibernated or
-   closed engine keeps its session→bridge mapping, and the replacement bridge
-   that resumes the same provider-native session takes over that mapping;
-   "session id collision" is reserved for a session genuinely live on a
-   different chat. Providers without resume/load keep
-   the original replay-once behavior. The daemon-owned archive remains the
-   recovery source of truth across every provider and renderer reload.
-   Replay and delta-seed text is conversation only: adapter-emitted
-   compaction status chatter (the exact progress strings the vendored
-   adapter injects into assistant content, e.g. "Compacting...") MUST be
-   excluded from any seeded history block, and every fall back to full
-   replay MUST log its exact reason (missing binding, resume-unsafe, cwd
-   mismatch, history divergence, or provider miss) so a lost native thread
-   is diagnosable instead of silent. Before
-   dispatching `session/prompt`, atomically mark the native binding resume-unsafe;
-   only the durability-first terminal commit advances its history cursor and
-   clears that bit. Thus a daemon crash can never resume a provider thread that
-   may be ahead of Workass disk. Streaming mirror snapshots remain asynchronous
-   and bounded; native binding writes occur only at session/turn boundaries.
+6. **Exact provider lanes; no replacement-session fallback** (user law
+   2026-08-10, supersedes the 2026-07-12 resurrection order): Workass owns the
+   visible semantic chat ledger; each provider owns the hidden context of one
+   immutable provider-native thread per exact Workass provider lane. A lane is
+   scoped by chat, provider realm, machine, and workspace epoch. Restarting or
+   replacing a host process may only attach to that lane's saved native thread.
+   Exact resume is a mandatory conformance invariant for a durable provider,
+   not an optional user-flow branch; a valid Codex/Claude thread must resume.
+   Any failure is a provider/runtime defect contained by a broken lane, never a
+   reason to change identities.
+   Once a lane has a native binding, Workass MUST NOT call `session/new`, load a
+   different thread, replay archived transcript text, or seed a replacement
+   session as recovery. Attach failures retry only the same native identity and
+   otherwise fail closed as a visible lane error.
+
+   A new native thread may be created only when the target lane is provably
+   absent, or after an explicit user fork/reset/workspace transition creates a
+   new lane epoch. Historical workspace epochs remain stored and resumable;
+   moving the chat detaches them but never deletes them. Changing provider
+   inside one Workass chat selects another
+   lane; returning to a previous provider resumes that lane's exact thread.
+   Cross-provider context enters a lane only through a capability-gated,
+   non-sampling, receipt-bearing context-import operation. Missing or ambiguous
+   import support blocks the switch; ordinary prompts and transcript replay are
+   forbidden substitutes. Import support requires versioned capability
+   negotiation, deterministic operation/range/digest identity, idempotency, and
+   authoritative operation readback. After a crash Workass reads that receipt
+   before deciding whether an absent operation may be sent; unknown acceptance
+   is never resent. Before any delivery, Workass durably records one
+   stable operation id. An ambiguous acknowledgement never causes an automatic
+   resend.
+
+   Provider-native compaction stays inside the same native thread. Workass
+   retains the full visible ledger and records only typed lane-private coverage
+   and checkpoint metadata; it never overwrites visible history with a provider
+   summary or fabricates a context reset. The complete identity, state-machine,
+   migration, and conformance laws are binding in
+   `docs/PROVIDER-LANE-ARCHITECTURE.md`.
 7. **MCP fanout guard**: engines can over-spawn MCP subprocesses; a periodic
    guard watches and reaps. Port the guard, not just the spawn.
    (`main.js:794-836`)
@@ -591,15 +600,14 @@ shell, NOT the daemon.
     and renders only the quiet terminal stamp. Never inject a large synthetic
     `Detenido.` assistant paragraph. Real partial commentary or final output is
     preserved exactly when cancellation happens after visible work.
-19. **Provider-owned context compaction wins** (user correction 2026-07-15):
-    Codex and Claude Code already auto-compact their provider-native sessions.
-    Workass MUST NOT run its summary + fresh-session reseed for provider ids
-    `codex` or `claude`, MUST NOT replace their native session at a Workass
-    threshold, and MUST NOT fabricate a zero-token usage reset. Their native
-    usage/compaction stream remains authoritative; manual `/compact` continues
-    to route to the provider. Workass auto-compaction remains only a turn-boundary
-    fallback for agents without known native context management (including the
-    deterministic mock), until ACP exposes a standard compaction capability.
+19. **Provider-owned context compaction wins** (user corrections 2026-07-15
+    and 2026-08-10): Workass MUST NOT sample a summary, create a fresh session,
+    replay transcript text, or fabricate a zero-token usage reset for any
+    established provider lane. Codex and Claude Code compact their native
+    threads in place; their native usage/compaction stream is authoritative and
+    manual `/compact` continues to route to the provider. A provider without
+    native compaction receives a visible context-limit state until its adapter
+    implements a verified same-lineage checkpoint capability.
 20. **Tool-result images are visible transcript media** (user corrections
     2026-07-15 and 2026-07-22): raster image content returned structurally by
     an MCP/ACP tool MUST survive the bridge, session journal, archive, and
@@ -633,8 +641,8 @@ shell, NOT the daemon.
 
 - **Hibernation**: idle chat (no turn for N min, default 20, config) →
   engine killed, transcript and native session binding stay on disk; next user
-  turn lazily resumes the provider-native session and delta-syncs Workass
-  history, falling back to fresh + replay-once when unsupported or divergent.
+  turn lazily resumes the exact provider-native session. A missing, divergent,
+  or unsupported binding fails closed and never creates or replays a replacement.
   Actively-working chats are PINNED
   (in-flight prompt or live-session background Bash/Agent/Workflow work) and
   never reaped, regardless of output silence or elapsed time. Recent tool
@@ -730,8 +738,10 @@ shell, NOT the daemon.
 - Model quality is NEVER a test oracle.
 
 ## 6. Phase gates
-Copied from the master plan (`desktop/docs/workass-master-plan.html`) — the
-plan is authoritative; this section is a pointer, not a fork.
+
+The provider/chat refactor phases and acceptance gates are maintained in
+`docs/PROVIDER-LANE-ARCHITECTURE.md`. Other work uses the explicit phase gates
+in this specification and its task prompt; no absent external plan is required.
 
 ## 7. ACP event-semantics index (pointers, not new law)
 One map from event family to the binding text above, so nobody re-derives a

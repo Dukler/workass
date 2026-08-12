@@ -13,8 +13,8 @@ const backgroundFDs = new Map();
 const traceFile = process.env.WORKASS_MOCK_ACP_TRACE_FILE || '';
 const persistentSessionFile = process.env.WORKASS_MOCK_ACP_SESSION_STORE || '';
 const sessionCapability = String(process.env.WORKASS_MOCK_ACP_SESSION_CAPABILITY || (persistentSessionFile ? 'both' : 'none')).toLowerCase();
-const compactionPreamble = 'WORKASS AUTO-COMPACTION v2';
-const deterministicSummary = 'DETERMINISTIC WORKASS MOCK SUMMARY: context compacted and ready to reseed.';
+const operationReadback = process.env.WORKASS_MOCK_ACP_OPERATION_READBACK === '1';
+const contextImport = process.env.WORKASS_MOCK_ACP_CONTEXT_IMPORT === '1';
 const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z5m8AAAAASUVORK5CYII=';
 // Test fixture for renderer plan-limit development only. This deliberately
 // uses a mock marker alongside the Claude-shaped key so no paid adapter turn is
@@ -38,11 +38,23 @@ function loadPersistentSessions() {
     const raw = JSON.parse(fs.readFileSync(persistentSessionFile, 'utf8'));
     for (const session of Array.isArray(raw?.sessions) ? raw.sessions : []) {
       if (!session?.id) continue;
+      const operations = session.operations && typeof session.operations === 'object' ? session.operations : {};
+      // A persisted "active" operation belonged to the ACP process that just
+      // disappeared. The replacement process can authoritatively read it back,
+      // but it cannot keep executing that dead process's turn. Model the native
+      // provider receipt as interrupted so Workass can settle the exact input
+      // without replaying it or leaving a permanent spinner.
+      for (const operation of Object.values(operations)) {
+        if (operation && operation.status === 'active') operation.status = 'interrupted';
+      }
       sessions.set(String(session.id), {
         id: String(session.id), cwd: String(session.cwd || process.cwd()),
         model: String(session.model || 'mock-deterministic'), mode: String(session.mode || 'ask'),
         turn: Math.max(0, Number(session.turn || 0)), cancelled: false, steers: [],
         turnStatus: 'idle', pendingPromptId: null, reconcileRelease: true,
+		operations,
+		contextImports: session.contextImports && typeof session.contextImports === 'object' ? session.contextImports : {},
+		activeOperationId: '',
       });
     }
   } catch {
@@ -136,6 +148,51 @@ function drainSteers(session) {
   return steers.map((text) => String(text || '').trim()).filter(Boolean);
 }
 
+// Test-only lifecycle barrier. A prompt containing this marker remains active
+// until the generic ACP steer notification arrives (or the optional one-shot
+// release file exists), giving live-delivery tests an explicit protocol
+// boundary instead of depending on [mock:slow] timing.
+function releaseHeldPrompt(session) {
+  const release = session.releaseHeldPrompt;
+  session.releaseHeldPrompt = null;
+  if (typeof release === 'function') release();
+}
+
+function holdPromptUntilSteer(session) {
+  const releaseFile = String(process.env.WORKASS_MOCK_ACP_HOLD_FILE || '').trim();
+  if (releaseFile && fs.existsSync(releaseFile)) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    let watcher = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (watcher) watcher.close();
+      session.releaseHeldPrompt = null;
+      resolve();
+    };
+    session.releaseHeldPrompt = finish;
+    if (!releaseFile) return;
+    try {
+      watcher = fs.watch(path.dirname(releaseFile), (_eventType, filename) => {
+        if (String(filename || '') === path.basename(releaseFile) && fs.existsSync(releaseFile)) finish();
+      });
+      watcher.on('error', () => {});
+    } catch {
+      // The steer notification remains the primary release path. Tests use an
+      // existing temporary directory, so a watcher failure is not expected.
+    }
+  });
+}
+
+function completeOperation(session, status) {
+  const operationId = String(session.activeOperationId || '').trim();
+  if (!operationId || !session.operations?.[operationId]) return;
+  session.operations[operationId].status = status;
+  session.activeOperationId = '';
+  persistSessions();
+}
+
 function usageMeta(inputTokens, outputTokens) {
   return {
     'workass.mock/inputTokens': inputTokens,
@@ -163,8 +220,18 @@ async function runPrompt(id, params) {
   session.turnStatus = 'active';
   session.pendingPromptId = null;
   session.reconcileRelease = !text.includes('[mock:lost-terminal-unreleased]');
+	const operationId = String(params.clientUserMessageId || '').trim();
+	if (operationReadback && operationId) {
+		const turnId = `mock-native-turn-${session.turn + 1}`;
+		session.operations ||= {};
+		session.operations[operationId] = { turnId, status: 'active', consumed: true };
+		session.activeOperationId = operationId;
+		persistSessions();
+		notify(session.id, { sessionUpdate: '_workass_input_consumed', clientUserMessageId: operationId, turnId });
+	}
   if (text.includes('[mock:error]')) {
     session.turnStatus = 'failed';
+	completeOperation(session, 'failed');
     fail(id, -32001, 'Deterministic mock failure.');
     return;
   }
@@ -183,17 +250,8 @@ async function runPrompt(id, params) {
   session.cancelled = false;
   persistSessions();
 
-  if (text.startsWith(compactionPreamble)) {
-    notify(session.id, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: deterministicSummary } });
-    notify(session.id, {
-      sessionUpdate: 'usage_update',
-      used: 12,
-      size: 100,
-      _meta: usageMeta(4, 8),
-    });
-    session.turnStatus = 'completed';
-    respond(id, { stopReason: 'end_turn' });
-    return;
+  if (text.includes('[mock:hold-until-steer]')) {
+    await holdPromptUntilSteer(session);
   }
 
   if (text.includes('[mock:burst]')) {
@@ -215,6 +273,7 @@ async function runPrompt(id, params) {
       _meta: usageMeta(Math.max(1, Math.ceil(text.length / 4)), burstChunks * burstChunkBytes),
     });
     session.turnStatus = session.cancelled ? 'interrupted' : 'completed';
+	completeOperation(session, session.turnStatus);
     respond(id, { stopReason: session.cancelled ? 'cancelled' : 'end_turn' });
     return;
   }
@@ -367,13 +426,18 @@ async function runPrompt(id, params) {
   // update, while the ACP adapter lost the terminal session/prompt response.
   // Workass must reconcile this state instead of leaving the chat running
   // forever. The recovery extension is intentionally added by the fix, not by
-  // this failing fixture step.
-  session.turnStatus = session.cancelled ? 'interrupted' : 'completed';
-  if (text.includes('[mock:active-without-terminal]')) {
-    session.turnStatus = 'active';
-    session.pendingPromptId = id;
-    return;
-  }
+	// this failing fixture step.
+	session.turnStatus = session.cancelled ? 'interrupted' : 'completed';
+	if (text.includes('[mock:active-without-terminal]')) {
+		session.turnStatus = 'active';
+		if (session.activeOperationId && session.operations?.[session.activeOperationId]) {
+			session.operations[session.activeOperationId].status = 'active';
+			persistSessions();
+		}
+		session.pendingPromptId = id;
+		return;
+	}
+	completeOperation(session, session.turnStatus);
   if (text.includes('[mock:lost-terminal')) {
     session.pendingPromptId = id;
     return;
@@ -389,7 +453,6 @@ async function handleRequest(message) {
       protocolVersion: Number(params.protocolVersion || 1),
       agentInfo: { name: 'Workass Mock ACP', version: '0.1.0' },
       agentCapabilities: {
-        loadSession: sessionCapability === 'both' || sessionCapability === 'load',
         sessionCapabilities: sessionCapability === 'both' || sessionCapability === 'resume' ? { resume: {}, close: {} } : { close: {} },
         sessionSteer: true,
         steerNotification: true,
@@ -402,6 +465,11 @@ async function handleRequest(message) {
         sessionSteer: true,
         steerNotification: true,
         workassTurnReconcileRequest: true,
+		...(operationReadback ? { workassStableTurnInputV1: true, workassOperationReadbackV1: true } : {}),
+		...(contextImport ? { workassContextImportV1: {
+		  mode: 'non_sampling', receipt: 'operation_readback_v1', idempotent: true,
+		  maxEvents: 64, maxBytes: 1048576,
+		} } : {}),
       },
     });
     return;
@@ -418,16 +486,17 @@ async function handleRequest(message) {
       turnStatus: 'idle',
       pendingPromptId: null,
       reconcileRelease: true,
+	  operations: {},
+	  contextImports: {},
+	  activeOperationId: '',
     };
     sessions.set(session.id, session);
     persistSessions();
     respond(id, { sessionId: session.id, configOptions: configOptions(session) });
     return;
   }
-  if (method === 'session/resume' || method === 'session/load') {
-    const allowed = method === 'session/resume'
-      ? sessionCapability === 'both' || sessionCapability === 'resume'
-      : sessionCapability === 'both' || sessionCapability === 'load';
+  if (method === 'session/resume') {
+    const allowed = sessionCapability === 'both' || sessionCapability === 'resume';
     if (!allowed) return fail(id, -32601, `Mock ACP method not enabled: ${method}`);
     const session = sessions.get(params.sessionId);
     if (!session) return fail(id, -32000, 'Unknown persistent mock ACP session.');
@@ -458,6 +527,17 @@ async function handleRequest(message) {
   if (method === '_workass/turn/reconcile') {
     const session = sessions.get(params.sessionId);
     if (!session) return fail(id, -32000, 'Unknown mock ACP session.');
+	if (params.clientUserMessageId) {
+	  if (!operationReadback) return fail(id, -32601, 'Mock operation readback is not enabled.');
+	  const operation = session.operations?.[String(params.clientUserMessageId)] || null;
+	  if (!operation) {
+		respond(id, { found: false, consumed: false, status: 'absent', terminal: false });
+		return;
+	  }
+	  const terminal = ['completed', 'failed', 'interrupted'].includes(operation.status);
+	  respond(id, { found: true, consumed: Boolean(operation.consumed), turnId: operation.turnId, status: operation.status, terminal });
+	  return;
+	}
     const status = String(session.turnStatus || 'unknown');
     const terminal = status === 'completed' || status === 'failed' || status === 'interrupted';
     let reconciled = false;
@@ -469,6 +549,46 @@ async function handleRequest(message) {
     }
     respond(id, { status, terminal, reconciled });
     return;
+  }
+  if (method === '_workass/context/import') {
+	if (!contextImport) return fail(id, -32601, 'Mock context import is not enabled.');
+	const session = sessions.get(params.sessionId);
+	if (!session) return fail(id, -32000, 'Unknown mock ACP session.');
+	const operationId = String(params.operationId || '');
+	const digest = String(params.digest || '');
+	const from = Number(params.from);
+	const to = Number(params.to);
+	if (!operationId || !digest || !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to <= from || !Array.isArray(params.messages)) {
+	  return fail(id, -32602, 'Invalid context import identity.');
+	}
+	const previous = session.contextImports?.[operationId];
+	if (previous && (previous.digest !== digest || previous.from !== from || previous.to !== to)) {
+	  return fail(id, -32000, 'Context import operation identity conflict.');
+	}
+	session.contextImports ??= {};
+	session.contextImports[operationId] = { operationId, digest, from, to, confirmed: true };
+	persistSessions();
+	respond(id, { operationId, digest, from, to, found: true, confirmed: true, ambiguous: false });
+	return;
+  }
+  if (method === '_workass/context/import/readback') {
+	if (!contextImport) return fail(id, -32601, 'Mock context import is not enabled.');
+	const session = sessions.get(params.sessionId);
+	if (!session) return fail(id, -32000, 'Unknown mock ACP session.');
+	const operationId = String(params.operationId || '');
+	const digest = String(params.digest || '');
+	const from = Number(params.from);
+	const to = Number(params.to);
+	const previous = session.contextImports?.[operationId];
+	if (!previous) {
+	  respond(id, { operationId, digest, from, to, found: false, confirmed: false, ambiguous: false });
+	  return;
+	}
+	if (previous.digest !== digest || previous.from !== from || previous.to !== to) {
+	  return fail(id, -32000, 'Context import readback identity conflict.');
+	}
+	respond(id, { operationId, digest, from, to, found: true, confirmed: true, ambiguous: false });
+	return;
   }
   if (method === 'session/close') {
     // session/close releases this adapter's live attachment; it must not delete
@@ -486,6 +606,8 @@ function handleNotification(message) {
     if (session) {
       session.cancelled = true;
       session.turnStatus = 'interrupted';
+	  completeOperation(session, 'interrupted');
+      releaseHeldPrompt(session);
       if (session.pendingPromptId !== null) {
         const promptId = session.pendingPromptId;
         session.pendingPromptId = null;
@@ -495,7 +617,10 @@ function handleNotification(message) {
   }
   if (message.method === '_session/steer') {
     const session = sessions.get(message.params?.sessionId);
-    if (session) session.steers.push(promptText(message.params?.prompt));
+    if (session) {
+      session.steers.push(promptText(message.params?.prompt));
+      releaseHeldPrompt(session);
+    }
   }
 }
 

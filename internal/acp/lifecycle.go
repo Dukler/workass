@@ -170,6 +170,7 @@ func (m *Manager) hibernateBridgeIfEligible(b *Bridge, reason string, ttl time.D
 	}
 
 	child := b.child
+	childExited := b.childExited
 	processTree := b.processTree
 	stdin := b.stdin
 	pending := b.pending
@@ -189,6 +190,7 @@ func (m *Manager) hibernateBridgeIfEligible(b *Bridge, reason string, ttl time.D
 
 	b.pending = make(map[string]*pendingRequest)
 	b.child = nil
+	b.childExited = nil
 	b.processTree = processTreeHandle{}
 	b.stdin = nil
 	b.initialized = false
@@ -207,6 +209,13 @@ func (m *Manager) hibernateBridgeIfEligible(b *Bridge, reason string, ttl time.D
 	}
 	for _, sessionID := range sessions {
 		m.cancelPermissionsForSession(sessionID)
+		// Hibernation destroys the disposable host attachment while retaining
+		// the durable provider-native thread. Notify the chat actor through the
+		// same typed detach boundary used by explicit close so the next command
+		// performs an exact resume instead of treating a dead bridge as ready.
+		if lane := m.providerLaneForSessionID(sessionID); lane != nil {
+			lane.attachmentClosed()
+		}
 		if spare {
 			m.forgetSession(sessionID, b)
 		}
@@ -217,6 +226,7 @@ func (m *Manager) hibernateBridgeIfEligible(b *Bridge, reason string, ttl time.D
 	if child != nil && child.Process != nil {
 		_ = stopProcessTree(child.Process, processTree)
 	}
+	b.waitForChildExit(childExited, "hibernate")
 	m.orphanInProcessSpawnedWorkForChat(tabID, chatID, reason)
 	if spare {
 		m.removeSpareForBridge(b)
@@ -400,6 +410,15 @@ func (m *Manager) warmOneSpare(providerID string, gen, seq int64) {
 	m.mu.Unlock()
 	sessionOpts := SessionOptions{BridgeKey: key, ProviderID: providerID, AgentOwnerKey: ownerKey, Spare: true}
 	bridge := m.getBridge(sessionOpts)
+	if bridge == nil {
+		m.mu.Lock()
+		if m.spareWarming[providerID] > 0 {
+			m.spareWarming[providerID]--
+		}
+		m.spareBlocked[providerID] = true
+		m.mu.Unlock()
+		return
+	}
 	timeout := m.opts.InitTimeout * 2
 	if timeout < time.Second {
 		timeout = time.Second
@@ -407,6 +426,11 @@ func (m *Manager) warmOneSpare(providerID string, gen, seq int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	info, err := bridge.NewSession(ctx, sessionOpts)
+	if err != nil {
+		if _, policyErr := m.markProviderNeedsLogin(context.Background(), providerID, err); policyErr != nil {
+			err = policyErr
+		}
+	}
 
 	m.mu.Lock()
 	if m.spareWarming[providerID] > 0 {

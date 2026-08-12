@@ -13,16 +13,17 @@ test('refreshing spawned work hydrates the obligation, not only the items', () =
   const refresh = source.match(/async refreshSpawnedWork\([\s\S]*?\n  \}\n/)?.[0] ?? '';
 
   assert.match(refresh, /call\('spawnedWorkList'/);
-  assert.match(refresh, /obligation: result\.obligation/);
+  assert.match(refresh, /update\.obligation = result\.obligation/);
 });
 
 // Additive-only: an older daemon answers spawned-work:list with items alone,
 // and the ingest must treat that as "nothing new to say" rather than clearing
-// a state it already holds.
+// a state it already holds. A present empty value remains authoritative so a
+// settled actor obligation can be cleared.
 test('an absent obligation never erases the one already held', () => {
   const source = readFileSync(new URL('../src/store/store.ts', import.meta.url), 'utf8');
   const ingest = source.match(/private onSpawnedWorkChanged\([\s\S]*?\n  \}\n/)?.[0] ?? '';
 
-  assert.match(ingest, /if \(s\.obligation\?\.state\)/);
-  assert.doesNotMatch(ingest, /delete this\.state\.obligationByChat/);
+  assert.match(ingest, /hasOwnProperty\.call\(s, 'obligation'\)/);
+  assert.match(ingest, /delete this\.state\.obligationByChat/);
 });

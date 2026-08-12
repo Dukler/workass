@@ -74,9 +74,37 @@ function isDirty(subject: any, id: string): boolean {
   return subject.dirtyChats?.has(id) === true;
 }
 
+// Actor-backed chats no longer persist semantic mutations by omission from a
+// `saveSession` mirror. These small receipts model the daemon actor commands
+// so the persistence tests exercise the renderer's retry/fence logic without
+// reintroducing the retired legacy authority.
+function actorApi() {
+  return {
+    chatQueueReplace: async (opts: any) => ({
+      ok: true, operationId: opts.operationId,
+      agentQueueRevision: (opts.expectedRevision ?? 0) + 1, actorRevision: 1,
+    }),
+    chatCreate: async (opts: any) => ({
+      ok: true, tabId: opts.tabId, chatId: opts.chatId, operationId: opts.operationId,
+      actorRevision: 1, presentationRevision: 1, globalRevision: 1,
+    }),
+    chatPresentationSave: async (opts: any) => ({
+      ok: true, operationId: opts.operationId,
+      presentationRevision: (opts.expectedRevision ?? 0) + 1, actorRevision: 1,
+    }),
+    chatRuntimeControlsSave: async (opts: any) => ({
+      ok: true, operationId: opts.operationId,
+      runtimeControlRevision: (opts.expectedRevision ?? 0) + 1, actorRevision: 1,
+      providerId: opts.providerId, currentModelId: opts.currentModelId,
+      currentModeId: opts.currentModeId, modelControls: opts.modelControls,
+    }),
+    chatDelete: async (opts: any) => ({ ok: true, operationId: opts.operationId }),
+  };
+}
+
 async function withWindowApi<T>(api: Record<string, unknown>, task: () => Promise<T>): Promise<T> {
   const previousWindow = (globalThis as any).window;
-  (globalThis as any).window = { api };
+  (globalThis as any).window = { api: { ...actorApi(), ...api } };
   try {
     return await task();
   } finally {
@@ -385,7 +413,10 @@ test('delete, structural, first-save, and post-restore boundaries force a comple
     { name: 'folder reorder', run: (subject) => subject.reorderWorkspaces('/tmp/workass-delta-a', null) },
     { name: 'folder collapse', run: (subject) => subject.toggleWorkspaceCollapsed('/tmp/workass-delta-a') },
     { name: 'sidebar settle', run: (subject, owner) => subject.settleChat(owner.id, true) },
-    { name: 'explicit delete', run: (subject, owner) => subject.closeChat(owner.id) },
+    {
+      name: 'explicit delete',
+      run: async (subject, owner) => subject.closeChatDurably(owner.id),
+    },
   ];
 
   for (const family of structuralCases) {
@@ -402,12 +433,15 @@ test('delete, structural, first-save, and post-restore boundaries force a comple
         saves.push({ snapshot, full });
       };
       family.prepare?.(subject, owner);
-      await family.run(subject, owner);
+      await withWindowApi({}, () => Promise.resolve(family.run(subject, owner)));
       const save = saves.at(-1) ?? serverSave(subject, true);
       assert.equal(save.full, true);
       assert.equal(save.snapshot.chats.length, subject.state.chats.length);
       if (family.name === 'explicit delete') {
-        assert.deepEqual(save.snapshot._workassDeletedChatIds, [owner.id]);
+        // Deletion is an actor command now; the session mirror no longer
+        // carries omission-based tombstones.
+        assert.equal(save.snapshot._workassDeletedChatIds, undefined);
+        assert.equal(subject.chat(owner.id), null);
       }
     });
   }
@@ -427,7 +461,7 @@ test('local first-paint mirror and legacy Electron saves remain complete', () =>
   assert.equal(legacy._workassSave, undefined);
 });
 
-test('streaming extends the debounce to 3000ms and a terminal event flushes exactly once', () => {
+test('streaming extends the debounce to 3000ms and a terminal event flushes exactly once', async () => {
   const running: Msg = {
     id: 'assistant-running',
     role: 'assistant',
@@ -448,10 +482,12 @@ test('streaming extends the debounce to 3000ms and a terminal event flushes exac
     return delays.length as unknown as ReturnType<typeof setTimeout>;
   }) as typeof setTimeout;
   try {
-    schedulePersist.call(subject);
-    subject.saveTimer = null;
-    running.status = 'done';
-    schedulePersist.call(subject);
+    await withWindowApi({}, async () => {
+      schedulePersist.call(subject);
+      subject.saveTimer = null;
+      running.status = 'done';
+      schedulePersist.call(subject);
+    });
   } finally {
     globalThis.setTimeout = oldSetTimeout;
   }

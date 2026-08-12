@@ -17,9 +17,12 @@ import (
 
 func TestAgentControlIsInProcessAndCreatesNoLegacyDescriptor(t *testing.T) {
 	descriptorPath := filepath.Join(t.TempDir(), "state", "agent-control.json")
-	manager := acp.NewManager(acp.Options{})
+	stateDir := t.TempDir()
+	manager := acp.NewManager(acp.Options{StateDir: stateDir})
 	t.Cleanup(func() { manager.Reset() })
-	handler, err := newAgentControlHandler(manager, newSessionStore(filepath.Join(t.TempDir(), sessionStateFilename)), nil)
+	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
+	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
+	handler, err := newAgentControlHandler(manager, nil, newChatControlCoordinator(manager, nil, runtime))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,21 +52,26 @@ func TestAgentControlCreatedChatSurvivesStaleSessionSaveBeforeSend(t *testing.T)
 	root := repoRoot(t)
 	path := filepath.Join(t.TempDir(), sessionStateFilename)
 	store := newSessionStore(path)
-	parent := sessionMirrorFixture("control-parent-tab", "control-parent-chat", "parent prompt")
-	parentChat := chatFromSnapshot(parent, "control-parent-tab")
-	parentChat["cwd"] = root
-	parentChat["currentModelId"] = "mock-deterministic"
-	parentChat["currentModeId"] = "ask"
-	stale := cloneJSON(parent).(map[string]any)
-	if !store.Save(parent) {
-		t.Fatal("initial parent session save failed")
-	}
 	manager := acp.NewManager(acp.Options{
 		RootDir: root, StateDir: filepath.Join(t.TempDir(), "state"),
 		Provider:          acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true, Label: "Workass Mock ACP"},
 		RSSSampleInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, store, manager.StateDir())
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"operationId": "test:create-control-parent",
+		"tabId":       "control-parent-tab", "chatId": "control-parent-chat",
+		"title": "Control parent", "cwd": root, "providerId": "mock",
+		"currentModelId": "mock-deterministic", "currentModeId": "ask",
+	}); err != nil {
+		t.Fatalf("create actor-native parent: %v", err)
+	}
+	stale, err := runtime.ProjectSession()
+	if err != nil {
+		t.Fatalf("project stale renderer snapshot: %v", err)
+	}
+	stale[globalPresentationOperationField] = "test:stale-control-renderer-save"
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	if _, err := manager.NewSession(ctx, acp.SessionOptions{
@@ -71,14 +79,15 @@ func TestAgentControlCreatedChatSurvivesStaleSessionSaveBeforeSend(t *testing.T)
 	}); err != nil {
 		t.Fatalf("new owner session: %v", err)
 	}
-	handler := &agentControlHandler{manager: manager, state: store, chats: newChatControlCoordinator(manager, store, nil)}
+	handler := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime)}
 	request := httptest.NewRequest(http.MethodPost, agentMCPPath, nil)
 	ownerParams := map[string]any{"owner_key": "control-owner", "parent_chat_id": "control-parent-chat", "parent_tab_id": "control-parent-tab"}
 	createdRaw, err := handler.call(request, agentControlRequest{
 		Method: "chat.create",
 		Params: map[string]any{
 			"owner_key": "control-owner", "parent_chat_id": "control-parent-chat", "parent_tab_id": "control-parent-tab",
-			"title": "Control durable child", "cwd": "inherit", "provider_id": "mock", "model_id": "mock-deterministic", "mode_id": "ask",
+			"operation_id": "test:create-control-child",
+			"title":        "Control durable child", "cwd": "inherit", "provider_id": "mock", "model_id": "mock-deterministic", "mode_id": "ask",
 		},
 	})
 	if err != nil {
@@ -93,17 +102,15 @@ func TestAgentControlCreatedChatSurvivesStaleSessionSaveBeforeSend(t *testing.T)
 	if !agentControlListHasChat(listedRaw, tabID, chatID) {
 		t.Fatalf("chat.list missing created chat: tab=%s chat=%s list=%#v", tabID, chatID, listedRaw)
 	}
-	if !store.Save(stale) {
-		t.Fatal("stale renderer session save failed")
+	if saved, err := runtime.ApplyRendererSnapshot(stale); err != nil || !saved {
+		t.Fatalf("stale renderer presentation save: saved=%v err=%v", saved, err)
 	}
-	handler.chats.mu.Lock()
-	handler.chats.draining[tabID+"\x00"+chatID] = true
-	handler.chats.mu.Unlock()
 	sentRaw, err := handler.call(request, agentControlRequest{
 		Method: "chat.send",
 		Params: map[string]any{
 			"owner_key": "control-owner", "parent_chat_id": "control-parent-chat", "parent_tab_id": "control-parent-tab",
-			"tab_id": tabID, "chat_id": chatID, "message": "queued after stale save", "delivery": "queue",
+			"operation_id": "test:send-after-stale-save",
+			"tab_id":       tabID, "chat_id": chatID, "message": "queued after stale save", "delivery": "queue",
 		},
 	})
 	if err != nil {
@@ -114,25 +121,24 @@ func TestAgentControlCreatedChatSurvivesStaleSessionSaveBeforeSend(t *testing.T)
 	}
 }
 
-func TestAgentControlTurnlessSpawnUsesSessionMirrorVisibleRootHint(t *testing.T) {
+func TestAgentControlTurnlessSpawnNeverUsesLegacySessionMirrorAsOwner(t *testing.T) {
 	root := repoRoot(t)
 	store := newSessionStore(filepath.Join(t.TempDir(), sessionStateFilename))
-	if !store.Save(sessionMirrorFixture("control-tab", "control-chat", "anchor prompt")) {
-		t.Fatal("initial session mirror save failed")
-	}
-	store.PrepareTurn(map[string]any{"tabId": "control-tab", "chatId": "control-chat", "prompt": "anchor prompt"})
-	store.RecordJobEvent("job:event", map[string]any{"type": "start", "job": map[string]any{
-		"id": "visible-control-job", "tabId": "control-tab", "chatId": "control-chat", "startedAt": "2026-07-16T10:00:00Z",
-	}})
-	store.RecordJobEvent("job:event", map[string]any{"type": "end", "job": map[string]any{
-		"id": "visible-control-job", "tabId": "control-tab", "chatId": "control-chat", "status": "done", "finishedAt": "2026-07-16T10:00:01Z",
-	}})
 	manager := acp.NewManager(acp.Options{
 		RootDir: root, StateDir: filepath.Join(t.TempDir(), "state"),
 		Provider:          acp.ProviderConfig{Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Label: "Workass Mock ACP"},
 		RSSSampleInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, store, manager.StateDir())
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"operationId": "test:create-turnless-control-chat",
+		"tabId":       "control-tab", "chatId": "control-chat",
+		"title": "Turnless control", "cwd": root, "providerId": "mock",
+		"currentModelId": "mock-deterministic", "currentModeId": "ask",
+	}); err != nil {
+		t.Fatalf("create actor-native turnless chat: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	_, err := manager.NewSession(ctx, acp.SessionOptions{
@@ -141,51 +147,69 @@ func TestAgentControlTurnlessSpawnUsesSessionMirrorVisibleRootHint(t *testing.T)
 	if err != nil {
 		t.Fatalf("new owner session: %v", err)
 	}
-	handler := &agentControlHandler{manager: manager, state: store}
+	handler, err := newAgentControlHandler(manager, nil, newChatControlCoordinator(manager, nil, runtime))
+	if err != nil {
+		t.Fatalf("new actor-owned agent control: %v", err)
+	}
 	result, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
 		Method: "agent.spawn",
 		Params: map[string]any{
 			"owner_key": "known-control-owner", "parent_chat_id": "control-chat", "parent_tab_id": "control-tab",
-			"prompt": "turnless control spawn", "label": "control-hinted",
+			"operation_id": "test:turnless-spawn-rejected", "prompt": "turnless control spawn", "label": "control-hinted",
 		},
 	})
-	if err != nil {
-		t.Fatalf("turnless control spawn: %v", err)
-	}
-	run, ok := result.(acp.SubagentRun)
-	if !ok || !run.Adopted || run.ParentJobID != "" || run.RootJobID != "visible-control-job" {
-		t.Fatalf("turnless control result = %#v", result)
-	}
-	finished, err := manager.WaitSubagent(ctx, "known-control-owner", "control-chat", "control-tab", run.ID, 6*time.Second)
-	if err != nil || finished.Status != "done" {
-		t.Fatalf("turnless control child = %#v err=%v", finished, err)
+	if err == nil || !strings.Contains(err.Error(), "actor-owned turn") {
+		t.Fatalf("legacy mirror was accepted as background ownership: result=%#v err=%v", result, err)
 	}
 }
 
 func TestT7AgentControlExternalSettleIsIdempotentAndOwnerValidated(t *testing.T) {
 	root := repoRoot(t)
+	const tabID, chatID, ownerKey = "external-control-tab", "external-control-chat", "external-owner"
+	stateDir := filepath.Join(t.TempDir(), "state")
+	store := sharedSessionStore(stateDir)
 	manager := acp.NewManager(acp.Options{
-		RootDir: root, StateDir: filepath.Join(t.TempDir(), "state"), RuntimeProfile: "dev",
-		Provider:          acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true, Label: "Workass Mock ACP"},
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true, Label: "Workass Mock ACP", Env: map[string]string{
+			"WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "mock-native.json"),
+		}},
 		DefaultProviderID: "mock",
 		RSSSampleInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	if _, err := manager.NewSession(ctx, acp.SessionOptions{
-		TabID: "external-control-tab", ChatID: "external-control-chat", ProviderID: "mock", CWD: root, AgentOwnerKey: "external-owner",
+	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "external-chat-create", "focus": false,
+		"title": "External owner", "titleLocked": true, "cwd": root,
+		"providerId": "mock", "currentModelId": "mock-deterministic", "currentModeId": "ask",
 	}); err != nil {
+		t.Fatalf("create external owner actor: %v", err)
+	}
+	info, err := runtime.Select(ctx, acp.SessionOptions{
+		TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: root, AgentOwnerKey: ownerKey,
+	})
+	if err != nil {
 		t.Fatalf("new owner session: %v", err)
 	}
-	handler := &agentControlHandler{manager: manager}
+	if _, err := runtime.Start(ctx, map[string]any{
+		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "sessionId": info.SessionID, "providerId": "mock", "cwd": root,
+		"operationId": "external-owner-turn", "userMessageId": "external-owner-user", "assistantMessageId": "external-owner-assistant",
+		"prompt": "establish the durable background owner",
+	}, "human"); err != nil {
+		state, _ := runtime.Snapshot(chatID)
+		t.Fatalf("start actor owner turn: %v state=%#v", err, state)
+	}
+	waitProviderChatIdle(t, runtime, chatID, 5*time.Second)
+	handler := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime)}
 	request := httptest.NewRequest(http.MethodPost, agentMCPPath, nil)
 	output := externalControlTestPath(t, "control.output")
-	baseParams := map[string]any{"owner_key": "external-owner", "parent_chat_id": "external-control-chat", "parent_tab_id": "external-control-tab"}
+	baseParams := map[string]any{"owner_key": ownerKey, "parent_chat_id": chatID, "parent_tab_id": tabID}
 	registeredRaw, err := handler.call(request, agentControlRequest{
 		Method: "external.register",
 		Params: map[string]any{
-			"owner_key": "external-owner", "parent_chat_id": "external-control-chat", "parent_tab_id": "external-control-tab",
+			"owner_key": ownerKey, "parent_chat_id": chatID, "parent_tab_id": tabID, "operation_id": "external-register-op",
 			"label": "control external", "output_file": output,
 		},
 	})
@@ -198,6 +222,7 @@ func TestT7AgentControlExternalSettleIsIdempotentAndOwnerValidated(t *testing.T)
 		t.Fatalf("external.register result = %#v", registered)
 	}
 	settleParams := copyAnyMap(baseParams)
+	settleParams["operation_id"] = "external-settle-op"
 	settleParams["work_id"], settleParams["status"], settleParams["exit_code"], settleParams["summary"] = workID, "failed", 7, "failed with token=hidden"
 	settledRaw, err := handler.call(request, agentControlRequest{Method: "external.settle", Params: settleParams})
 	if err != nil {
@@ -211,7 +236,7 @@ func TestT7AgentControlExternalSettleIsIdempotentAndOwnerValidated(t *testing.T)
 	if err != nil {
 		t.Fatalf("external.settle second call: %v", err)
 	}
-	if again := mapFromAnyMain(againRaw); again["ok"] != true || again["already"] != true {
+	if again := mapFromAnyMain(againRaw); again["ok"] != true || again["already"] != false || fieldString(again, "workId") != workID {
 		t.Fatalf("idempotent settle result = %#v", again)
 	}
 	badOwner := copyAnyMap(settleParams)
@@ -220,7 +245,7 @@ func TestT7AgentControlExternalSettleIsIdempotentAndOwnerValidated(t *testing.T)
 		!strings.Contains(err.Error(), "no running Workass turn owns this external work request") {
 		t.Fatalf("non-owning key error = %v", err)
 	}
-	item := manager.ListSpawnedWork("external-control-tab", "external-control-chat")[0]
+	item := manager.ListSpawnedWork(tabID, chatID)[0]
 	if item.Status != "failed" || item.ExitCode == nil || *item.ExitCode != 7 ||
 		strings.Contains(item.Summary, "hidden") || !strings.Contains(item.Summary, "[redacted]") {
 		t.Fatalf("settled external item = %#v", item)
@@ -229,27 +254,49 @@ func TestT7AgentControlExternalSettleIsIdempotentAndOwnerValidated(t *testing.T)
 
 func TestAgentControlCodexOwnerCanRegisterExternalHandoff(t *testing.T) {
 	root := repoRoot(t)
+	const tabID, chatID, ownerKey = "codex-handoff-tab", "codex-handoff-chat", "codex-handoff-owner"
+	stateDir := filepath.Join(t.TempDir(), "state")
+	store := sharedSessionStore(stateDir)
 	manager := acp.NewManager(acp.Options{
-		RootDir: root, StateDir: filepath.Join(t.TempDir(), "state"), RuntimeProfile: "dev",
-		Provider:          acp.ProviderConfig{ID: "codex", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true, Label: "Codex ACP fixture"},
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{ID: "codex", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true, Label: "Codex ACP fixture", Env: map[string]string{
+			"WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "codex-mock-native.json"),
+		}},
 		DefaultProviderID: "codex",
 		RSSSampleInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	if _, err := manager.NewSession(ctx, acp.SessionOptions{
-		TabID: "codex-handoff-tab", ChatID: "codex-handoff-chat", ProviderID: "codex", CWD: root, AgentOwnerKey: "codex-handoff-owner",
+	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "codex-handoff-chat-create", "focus": false,
+		"title": "Codex handoff", "titleLocked": true, "cwd": root,
+		"providerId": "codex", "currentModelId": "mock-deterministic", "currentModeId": "ask",
 	}); err != nil {
+		t.Fatalf("create Codex owner actor: %v", err)
+	}
+	info, err := runtime.Select(ctx, acp.SessionOptions{
+		TabID: tabID, ChatID: chatID, ProviderID: "codex", CWD: root, AgentOwnerKey: ownerKey,
+	})
+	if err != nil {
 		t.Fatalf("new Codex owner session: %v", err)
 	}
-
-	handler := &agentControlHandler{manager: manager}
+	if _, err := runtime.Start(ctx, map[string]any{
+		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "sessionId": info.SessionID, "providerId": "codex", "cwd": root,
+		"operationId": "codex-owner-turn", "userMessageId": "codex-owner-user", "assistantMessageId": "codex-owner-assistant",
+		"prompt": "establish the durable Codex background owner",
+	}, "human"); err != nil {
+		state, _ := runtime.Snapshot(chatID)
+		t.Fatalf("start Codex actor owner turn: %v state=%#v", err, state)
+	}
+	waitProviderChatIdle(t, runtime, chatID, 5*time.Second)
+	handler := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime)}
 	output := externalControlTestPath(t, "codex-handoff.output")
 	registeredRaw, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
 		Method: "external.register",
 		Params: map[string]any{
-			"owner_key": "codex-handoff-owner", "parent_chat_id": "codex-handoff-chat", "parent_tab_id": "codex-handoff-tab",
+			"owner_key": ownerKey, "parent_chat_id": chatID, "parent_tab_id": tabID, "operation_id": "codex-external-register-op",
 			"label": "production handoff receipt", "output_file": output,
 		},
 	})
@@ -260,15 +307,25 @@ func TestAgentControlCodexOwnerCanRegisterExternalHandoff(t *testing.T) {
 	if fieldString(registered, "workId") == "" || fieldString(registered, "doneFile") != output+".done" {
 		t.Fatalf("Codex external.register result = %#v", registered)
 	}
-	items := manager.ListSpawnedWork("codex-handoff-tab", "codex-handoff-chat")
+	items := manager.ListSpawnedWork(tabID, chatID)
 	if len(items) != 1 || items[0].ProviderID != "codex" || items[0].Kind != "external" || items[0].Status != "running" {
 		t.Fatalf("Codex registered handoff = %#v", items)
 	}
 }
 
 func TestAgentControlInvalidOwnerKeepsSubagentOwnershipError(t *testing.T) {
-	handler := &agentControlHandler{manager: acp.NewManager(acp.Options{})}
-	t.Cleanup(func() { handler.manager.Reset() })
+	stateDir := t.TempDir()
+	manager := acp.NewManager(acp.Options{StateDir: stateDir})
+	t.Cleanup(func() { manager.Reset() })
+	store := sharedSessionStore(stateDir)
+	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": "tab", "chatId": "chat", "operationId": "invalid-owner-chat",
+		"title": "Invalid owner", "cwd": t.TempDir(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime)}
 	_, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
 		Method: "agent.list",
 		Params: map[string]any{"owner_key": "missing", "parent_chat_id": "chat", "parent_tab_id": "tab"},
@@ -294,6 +351,15 @@ func TestAgentControlHostsArtifactsOnlyFromTheCallingAgentWorkspace(t *testing.T
 		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
+	stateDir := manager.StateDir()
+	store := sharedSessionStore(stateDir)
+	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": "artifact-tab", "chatId": "artifact-chat", "operationId": "artifact-chat-create",
+		"title": "Artifact workspace", "cwd": workspace, "providerId": "mock",
+	}); err != nil {
+		t.Fatalf("create artifact actor: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	if _, err := manager.NewSession(ctx, acp.SessionOptions{
@@ -305,7 +371,7 @@ func TestAgentControlHostsArtifactsOnlyFromTheCallingAgentWorkspace(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := &agentControlHandler{manager: manager, artifacts: registry}
+	handler := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime), artifacts: registry}
 	result, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
 		Method: "artifact.host",
 		Params: map[string]any{

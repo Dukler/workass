@@ -5,6 +5,7 @@ export interface SteeringReplyLike {
   ok?: boolean;
   strategy?: string;
   receipt?: boolean;
+  daemonQueued?: boolean;
 }
 
 export interface PendingSteerLike {
@@ -579,5 +580,5 @@ export function settlePendingSteer<T extends PendingSteerLike>(
 export function hasSteerConsumptionReceipt(reply: SteeringReplyLike | null | undefined): boolean {
   const strategy = String(reply?.strategy ?? '').trim().toLowerCase();
   return reply?.receipt === true
-    && (strategy === 'codex-live' || strategy === 'claude-live' || strategy === 'uncertain');
+    && (strategy === 'receipt-live' || strategy === 'codex-live' || strategy === 'claude-live' || strategy === 'uncertain');
 }

@@ -353,7 +353,7 @@ event/reply/proc RSS counts are printed.
 - ACP bridges now track lifecycle states `warm`, `active`, `idle`, and `hibernated`.
 - In-flight app-chat prompts mark the bridge `active` and pinned; pinned bridges are never hibernated.
 - When a prompt ends, the bridge becomes `idle` and stamps `lastActivity`.
-- Idle chat bridges past `--hibernate-ttl` are hibernated by killing the ACP child while retaining the session record and disk transcript. The next `job:start` for that chat creates a fresh ACP session, emits `chat:session-replaced`, and uses the replay-once seed path to restore context.
+- Idle chat bridges past `--hibernate-ttl` are hibernated by stopping only the disposable ACP host while retaining the durable provider-lane binding. The next `job:start` must use exact `session/resume` for that same native thread. Missing/unsupported resume fails closed; Workass never creates or transcript-seeds a replacement thread.
 - The hibernation reaper rechecks `lastActivity` and pinned state under the bridge lock immediately before killing the child, so a concurrent prompt wins and aborts the reap.
 - ACP engine RSS is sampled with `ps -o rss= -p <pid>` on macOS/Linux and `tasklist /FI "PID eq N" /FO CSV /NH` on Windows at `--rss-sample-interval`.
 - `proc:changed` and `proc:list` include the existing process fields plus additive `state` and `rssKb` fields for ACP engines.
