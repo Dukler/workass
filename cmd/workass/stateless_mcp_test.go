@@ -75,6 +75,10 @@ func newStatelessMCPTestHarness(t *testing.T) statelessMCPTestHarness {
 	server := httptest.NewTLSServer(handler)
 	t.Cleanup(func() {
 		server.Close()
+		// Close durable actor coordinators while their provider manager is still
+		// alive. Resetting the manager first lets a later lane detach recreate
+		// provider-lanes.json while testing.TempDir is removing the state tree.
+		_ = runtime.Close(context.Background())
 		manager.Reset()
 	})
 	return statelessMCPTestHarness{manager: manager, runtime: runtime, handler: handler, server: server, client: server.Client()}
