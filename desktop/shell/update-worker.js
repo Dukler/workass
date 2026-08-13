@@ -193,16 +193,41 @@ function verifyWindowsIncoming(transaction) {
 }
 
 function validateTransaction(transaction) {
-  if (!transaction || transaction.schemaVersion !== 1) throw new Error('unsupported update transaction');
-  for (const field of ['updateId', 'platform', 'currentVersion', 'targetVersion', 'installTarget', 'incomingTarget', 'backupTarget', 'receiptPath', 'daemonHealthURL', 'shellStatusURL']) {
+  if (!transaction || transaction.schemaVersion !== 2) throw new Error('unsupported update transaction');
+  if (!/^[A-Za-z0-9_-]{8,96}$/.test(String(transaction.updateId || ''))) throw new Error('update transaction has an invalid updateId');
+  for (const field of [
+    'updateId', 'platform', 'currentVersion', 'targetVersion',
+    'transactionRoot', 'installTarget', 'incomingTarget', 'backupTarget',
+    'mutableStateTarget', 'mutableStateBackupTarget', 'failedMutableStateTarget',
+    'receiptPath', 'daemonHealthURL', 'shellStatusURL',
+  ]) {
     if (!String(transaction[field] || '').trim()) throw new Error(`update transaction is missing ${field}`);
   }
-  for (const field of ['installTarget', 'incomingTarget', 'backupTarget', 'receiptPath']) {
+  for (const field of [
+    'transactionRoot', 'installTarget', 'incomingTarget', 'backupTarget',
+    'mutableStateTarget', 'mutableStateBackupTarget', 'failedMutableStateTarget', 'receiptPath',
+  ]) {
     if (!path.isAbsolute(transaction[field])) throw new Error(`${field} must be absolute`);
   }
   const installParent = path.dirname(transaction.installTarget);
   if (path.dirname(transaction.incomingTarget) !== installParent || path.dirname(transaction.backupTarget) !== installParent) {
     throw new Error('update swap paths must share one parent directory');
+  }
+  const updateRoot = path.dirname(path.dirname(transaction.transactionRoot));
+  const dataRoot = path.dirname(updateRoot);
+  if (transaction.transactionRoot !== path.join(updateRoot, 'transactions', transaction.updateId) ||
+      transaction.receiptPath !== path.join(updateRoot, 'receipt.json')) {
+    throw new Error('update transaction paths do not belong to the exact update directory');
+  }
+  if (transaction.mutableStateTarget !== path.join(dataRoot, 'state') || dataRoot === path.parse(dataRoot).root) {
+    throw new Error('mutable state target is not the exact Workass state directory');
+  }
+  if (path.dirname(transaction.mutableStateBackupTarget) !== transaction.transactionRoot ||
+      path.dirname(transaction.failedMutableStateTarget) !== transaction.transactionRoot ||
+      transaction.mutableStateBackupTarget === transaction.failedMutableStateTarget ||
+      transaction.mutableStateBackupTarget === transaction.mutableStateTarget ||
+      transaction.failedMutableStateTarget === transaction.mutableStateTarget) {
+    throw new Error('mutable state rollback paths must be distinct children of the update transaction');
   }
   if (transaction.platform === 'darwin') {
     if (!transaction.installTarget.endsWith('.app') || !transaction.designatedRequirement) throw new Error('invalid macOS update transaction');
@@ -253,6 +278,34 @@ function defaultOperations(transaction) {
     verifyIncoming: async () => {
       if (transaction.platform === 'darwin') verifyMacIncoming(transaction);
       else verifyWindowsIncoming(transaction);
+    },
+    snapshotMutableState: async () => {
+      if (fs.existsSync(transaction.mutableStateBackupTarget) || fs.existsSync(transaction.failedMutableStateTarget)) {
+        throw new Error('mutable state rollback target already exists');
+      }
+      fs.mkdirSync(transaction.mutableStateBackupTarget, { recursive: false, mode: 0o700 });
+      const existed = fs.existsSync(transaction.mutableStateTarget);
+      if (existed) {
+        const stat = fs.statSync(transaction.mutableStateTarget);
+        if (!stat.isDirectory()) throw new Error('Workass mutable state target is not a directory');
+        fs.cpSync(
+          transaction.mutableStateTarget,
+          path.join(transaction.mutableStateBackupTarget, 'state'),
+          {
+            recursive: true,
+            errorOnExist: true,
+            force: false,
+            dereference: false,
+            preserveTimestamps: true,
+            verbatimSymlinks: true,
+            mode: fs.constants.COPYFILE_FICLONE,
+          },
+        );
+      }
+      atomicJSON(path.join(transaction.mutableStateBackupTarget, 'snapshot.json'), {
+        schemaVersion: 1,
+        existed,
+      });
     },
     activate: async () => {
       if (fs.existsSync(transaction.backupTarget)) throw new Error('update rollback target already exists');
@@ -315,11 +368,43 @@ function defaultOperations(transaction) {
       if (fs.existsSync(transaction.installTarget)) fs.renameSync(transaction.installTarget, transaction.incomingTarget);
       fs.renameSync(transaction.backupTarget, transaction.installTarget);
     },
+    restoreMutableState: async () => {
+      const snapshotReceipt = JSON.parse(fs.readFileSync(
+        path.join(transaction.mutableStateBackupTarget, 'snapshot.json'),
+        'utf8',
+      ));
+      if (snapshotReceipt?.schemaVersion !== 1 || typeof snapshotReceipt.existed !== 'boolean') {
+        throw new Error('mutable state rollback snapshot is invalid');
+      }
+      const snapshotState = path.join(transaction.mutableStateBackupTarget, 'state');
+      if (snapshotReceipt.existed && !fs.statSync(snapshotState, { throwIfNoEntry: false })?.isDirectory()) {
+        throw new Error('mutable state rollback snapshot is incomplete');
+      }
+      if (!snapshotReceipt.existed && fs.existsSync(snapshotState)) {
+        throw new Error('mutable state rollback snapshot contradicts its receipt');
+      }
+      if (fs.existsSync(transaction.failedMutableStateTarget)) {
+        throw new Error('failed mutable state holding path already exists');
+      }
+      const failedStateExisted = fs.existsSync(transaction.mutableStateTarget);
+      if (failedStateExisted) fs.renameSync(transaction.mutableStateTarget, transaction.failedMutableStateTarget);
+      try {
+        if (snapshotReceipt.existed) fs.renameSync(snapshotState, transaction.mutableStateTarget);
+      } catch (err) {
+        if (failedStateExisted && !fs.existsSync(transaction.mutableStateTarget)) {
+          fs.renameSync(transaction.failedMutableStateTarget, transaction.mutableStateTarget);
+        }
+        throw err;
+      }
+    },
     cleanup: async () => {
       fs.rmSync(transaction.backupTarget, { recursive: true, force: true });
+      fs.rmSync(transaction.mutableStateBackupTarget, { recursive: true, force: true });
     },
     cleanupFailed: async () => {
       fs.rmSync(transaction.incomingTarget, { recursive: true, force: true });
+      fs.rmSync(transaction.mutableStateBackupTarget, { recursive: true, force: true });
+      fs.rmSync(transaction.failedMutableStateTarget, { recursive: true, force: true });
     },
   };
 }
@@ -353,30 +438,49 @@ async function runTransaction(rawTransaction, operations) {
     }
   }
   let activated = false;
+  let mutableStateSnapshotted = false;
+  let mutableStateRestored = false;
   try {
     await ops.verifyIncoming();
     updateReceipt(transaction, 'activating');
+    await ops.snapshotMutableState();
+    mutableStateSnapshotted = true;
     await ops.activate();
     activated = true;
     await ops.startRuntime?.();
     await ops.launchInstalled();
     if (await wait(() => ops.healthy(transaction.targetVersion), { attempts: 240, delayMs: 250 })) {
-      await ops.cleanup();
-      return updateReceipt(transaction, 'healthy', { activated: true });
+      let cleanupWarning = '';
+      try { await ops.cleanup(); }
+      catch (err) { cleanupWarning = String(err && err.message || err); }
+      return updateReceipt(transaction, 'healthy', {
+        activated: true,
+        ...(cleanupWarning ? { cleanupWarning } : {}),
+      });
     }
     throw new Error('new release did not recover daemon health, controller authority, and provider catalog');
   } catch (activationError) {
     try {
       await ops.stopLaunched();
       if (activated) await ops.rollback();
+      if (activated && mutableStateSnapshotted) {
+        await ops.restoreMutableState();
+        mutableStateRestored = true;
+      }
       await ops.startRuntime?.();
       await ops.launchInstalled();
       const recovered = await wait(() => ops.healthy(transaction.currentVersion), { attempts: 240, delayMs: 250 });
-      if (recovered) await ops.cleanupFailed?.();
+      let cleanupWarning = '';
+      if (recovered) {
+        try { await ops.cleanupFailed?.(); }
+        catch (err) { cleanupWarning = String(err && err.message || err); }
+      }
       return updateReceipt(transaction, recovered ? 'rollback_healthy' : 'failed', {
         activated: false,
         rolledBack: activated,
+        mutableStateRolledBack: mutableStateRestored,
         error: String(activationError && activationError.message || activationError),
+        ...(cleanupWarning ? { cleanupWarning } : {}),
         ...(recovered ? {} : { rollbackError: 'previous release did not recover' }),
       });
     } catch (rollbackError) {

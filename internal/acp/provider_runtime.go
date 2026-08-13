@@ -110,6 +110,7 @@ type ProviderLaneSelection struct {
 	ModeID      string
 	Context     providercontract.ContextCapabilities
 	Delivery    providercontract.DeliveryCapabilities
+	Creation    providercontract.CreationCapabilities
 	Established bool
 }
 
@@ -138,12 +139,14 @@ func (m *Manager) StoredProviderLaneSelections(chatID string) ([]ProviderLaneSel
 		if _, err := m.ProviderDefinition(binding.ProviderID); err != nil {
 			return nil, err
 		}
-		out = append(out, ProviderLaneSelection{
+		selection := ProviderLaneSelection{
 			Identity: identity, Thread: thread,
 			Owner: providercontract.AttachmentOwner{TabID: strings.TrimSpace(binding.TabID)},
 			CWD:   strings.TrimSpace(binding.CWD), ModelID: strings.TrimSpace(binding.ModelID), ModeID: strings.TrimSpace(binding.ModeID),
-			Context: providerAdapterForID(binding.ProviderID).context.Capabilities(), Established: true,
-		})
+			Context:  providerAdapterForID(binding.ProviderID).context.Capabilities(),
+			Creation: providerAdapterForID(binding.ProviderID).creation, Established: binding.ThreadCommitted,
+		}
+		out = append(out, selection)
 	}
 	return out, nil
 }
@@ -177,7 +180,7 @@ func (m *Manager) ResolveProviderLaneSelection(ctx context.Context, opts Session
 	selection := ProviderLaneSelection{
 		Owner: providercontract.AttachmentOwner{TabID: opts.TabID, AgentOwnerKey: strings.TrimSpace(opts.AgentOwnerKey)},
 		CWD:   strings.TrimSpace(opts.CWD), ModelID: strings.TrimSpace(opts.ModelID), ModeID: strings.TrimSpace(opts.ModeID),
-		Context: contextCapabilities,
+		Context: contextCapabilities, Creation: providerAdapterForID(providerID).creation,
 	}
 	if binding, exists := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD); exists {
 		identity, thread := bindingLaneIdentity(binding), bindingThreadRef(binding)
@@ -194,11 +197,13 @@ func (m *Manager) ResolveProviderLaneSelection(ctx context.Context, opts Session
 			}
 		}
 		selection.Identity = identity
-		selection.Thread = thread
+		if binding.ThreadCommitted {
+			selection.Thread = thread
+		}
 		selection.CWD = firstNonEmpty(strings.TrimSpace(binding.CWD), selection.CWD)
 		selection.ModelID = firstNonEmpty(strings.TrimSpace(opts.ModelID), binding.ModelID)
 		selection.ModeID = firstNonEmpty(strings.TrimSpace(opts.ModeID), binding.ModeID)
-		selection.Established = true
+		selection.Established = binding.ThreadCommitted
 		return selection, nil
 	}
 	definition, err := m.ProviderDefinition(providerID)
@@ -429,22 +434,51 @@ func (f managerLaneFactory) Create(ctx context.Context, request providercontract
 			if err := validateCanonicalCreatedLane(identity, canonical); err != nil {
 				return nil, providercontract.ThreadRef{}, err
 			}
-			thread := bindingThreadRef(binding)
-			lane, err := f.Resume(ctx, providercontract.ResumeLaneRequest{
-				Identity: canonical, Thread: thread, Owner: request.Owner, CWD: request.CWD,
-				ModelID: request.ModelID, ModeID: request.ModeID,
+			if binding.ThreadCommitted {
+				thread := bindingThreadRef(binding)
+				lane, resumeErr := f.Resume(ctx, providercontract.ResumeLaneRequest{
+					Identity: canonical, Thread: thread, Owner: request.Owner, CWD: request.CWD,
+					ModelID: request.ModelID, ModeID: request.ModeID,
+				})
+				return lane, thread, resumeErr
+			}
+			previousCandidate := bindingCurrentThreadID(binding)
+			opts.ProviderLaneVerifyCandidate = true
+			opts.ProviderLaneCreateAfterCandidateAbsence = request.CreateAfterCandidateAbsence
+			info, reconcileErr := f.manager.NewSession(ctx, opts)
+			if reconcileErr != nil {
+				return nil, providercontract.ThreadRef{}, classifyLaneRuntimeError("verify provider candidate", reconcileErr)
+			}
+			resolved, ok := f.manager.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, opts.ProviderID, opts.CWD)
+			if !ok {
+				f.manager.CloseSession(context.Background(), info.SessionID)
+				return nil, providercontract.ThreadRef{}, &providercontract.Error{Kind: providercontract.ErrorProtocolViolation, Message: "provider candidate reconciliation lost its durable receipt"}
+			}
+			canonical = bindingLaneIdentity(resolved)
+			if err := validateCanonicalCreatedLane(identity, canonical); err != nil {
+				f.manager.CloseSession(context.Background(), info.SessionID)
+				return nil, providercontract.ThreadRef{}, err
+			}
+			thread := bindingThreadRef(resolved)
+			lane := newManagerLane(f.manager, canonical, request.Owner, info, thread, managerLaneCreationReceipt{
+				committed:               resolved.ThreadCommitted,
+				previousCandidateAbsent: bindingCurrentThreadID(resolved) != previousCandidate,
 			})
-			return lane, thread, err
+			return lane, thread, nil
 		}
 		return nil, providercontract.ThreadRef{}, &providercontract.Error{
 			Kind: providercontract.ErrorNativeIdentityConflict, Message: "an established provider lane cannot enter create",
 		}
 	}
 	if request.Reconcile {
-		return nil, providercontract.ThreadRef{}, &providercontract.Error{
-			Kind:    providercontract.ErrorAcceptanceAmbiguous,
-			Message: "provider create has no durable native binding to reconcile; Workass will not issue another create",
+		if !providerAdapterForID(f.providerID).creation.DeferredUntilInput || !request.CreateAfterCandidateAbsence {
+			return nil, providercontract.ThreadRef{}, &providercontract.Error{
+				Kind:    providercontract.ErrorAcceptanceAmbiguous,
+				Message: "provider create has no durable native binding to reconcile; Workass will not issue another create",
+			}
 		}
+		opts.ProviderLaneVerifyCandidate = true
+		opts.ProviderLaneCreateAfterCandidateAbsence = true
 	}
 	// Exact resume is mandatory for a durable lane. Negotiate it before the one
 	// legal session/new call so an ACP provider that cannot resume never leaves
@@ -490,7 +524,9 @@ func (f managerLaneFactory) Create(ctx context.Context, request providercontract
 		f.manager.CloseSession(context.Background(), info.SessionID)
 		return nil, providercontract.ThreadRef{}, &providercontract.Error{Kind: providercontract.ErrorProtocolViolation, Message: "created provider thread is invalid", Cause: err}
 	}
-	lane := newManagerLane(f.manager, canonical, request.Owner, info, thread)
+	lane := newManagerLane(f.manager, canonical, request.Owner, info, thread, managerLaneCreationReceipt{
+		committed: binding.ThreadCommitted,
+	})
 	return lane, thread, nil
 }
 
@@ -523,6 +559,9 @@ func (f managerLaneFactory) Resume(ctx context.Context, request providercontract
 	}
 	if bindingLaneIdentity(binding) != identity {
 		return nil, &providercontract.Error{Kind: providercontract.ErrorNativeIdentityConflict, Message: "resume request does not match the durable provider lane"}
+	}
+	if !binding.ThreadCommitted {
+		return nil, &providercontract.Error{Kind: providercontract.ErrorNativeThreadMissing, Message: "provider lane has not crossed its durable creation boundary"}
 	}
 	if current := bindingThreadRef(binding); !current.Equal(request.Thread) {
 		// The actor commit is authoritative. A crash can occur after it accepted
@@ -568,6 +607,7 @@ func (f managerLaneFactory) validateCreate(request providercontract.CreateLaneRe
 		TabID: request.Owner.TabID, ChatID: identity.ChatID, CWD: request.CWD,
 		ProviderID: f.providerID, ModelID: request.ModelID, ModeID: request.ModeID,
 		AgentOwnerKey: request.Owner.AgentOwnerKey, ProviderLaneManaged: true, ProviderLaneCreate: true,
+		ProviderLaneCreateAfterCandidateAbsence: request.CreateAfterCandidateAbsence,
 	}
 	return identity, opts, nil
 }
@@ -606,11 +646,14 @@ func classifyLaneRuntimeError(operation string, err error) error {
 }
 
 type managerLane struct {
-	manager  *Manager
-	identity providercontract.LaneIdentity
-	owner    providercontract.AttachmentOwner
-	info     SessionInfo
-	thread   providercontract.ThreadRef
+	manager                  *Manager
+	identity                 providercontract.LaneIdentity
+	owner                    providercontract.AttachmentOwner
+	info                     SessionInfo
+	thread                   providercontract.ThreadRef
+	creationCommitted        bool
+	previousCandidateAbsent  bool
+	creationReceiptOperation providercontract.OperationID
 
 	emitMu     sync.Mutex
 	mu         sync.Mutex
@@ -632,10 +675,20 @@ type managerLane struct {
 	protocolFailed          bool
 }
 
-func newManagerLane(manager *Manager, identity providercontract.LaneIdentity, owner providercontract.AttachmentOwner, info SessionInfo, thread providercontract.ThreadRef) *managerLane {
+type managerLaneCreationReceipt struct {
+	committed               bool
+	previousCandidateAbsent bool
+}
+
+func newManagerLane(manager *Manager, identity providercontract.LaneIdentity, owner providercontract.AttachmentOwner, info SessionInfo, thread providercontract.ThreadRef, receipts ...managerLaneCreationReceipt) *managerLane {
+	receipt := managerLaneCreationReceipt{committed: true}
+	if len(receipts) > 0 {
+		receipt = receipts[0]
+	}
 	lane := &managerLane{
 		manager: manager, identity: identity.Normalize(), owner: owner, info: info,
 		thread: thread.Normalize(), events: make(chan providercontract.Event, 128),
+		creationCommitted: receipt.committed, previousCandidateAbsent: receipt.previousCandidateAbsent,
 		detachDone: make(chan struct{}), jobs: make(map[string]providercontract.OperationID),
 		commitWait: make(map[uint64]chan error), durableCommits: true,
 	}
@@ -652,6 +705,67 @@ func newManagerLane(manager *Manager, identity providercontract.LaneIdentity, ow
 
 func (l *managerLane) Identity() providercontract.LaneIdentity { return l.identity }
 func (l *managerLane) Thread() providercontract.ThreadRef      { return l.thread }
+func (l *managerLane) ThreadCreationCommitted() bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.creationCommitted
+}
+func (l *managerLane) PreviousCandidateAbsent() bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.previousCandidateAbsent
+}
+
+func (l *managerLane) commitThreadCreation(thread providercontract.ThreadRef, operationID providercontract.OperationID) error {
+	if l == nil {
+		return errors.New("provider creation receipt has no lane")
+	}
+	thread = thread.Normalize()
+	operationID = providercontract.NormalizeOperationID(string(operationID))
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if operationID == "" || !l.thread.Equal(thread) {
+		return errors.New("provider creation receipt changed candidate or operation identity")
+	}
+	if l.creationCommitted {
+		return nil
+	}
+	l.creationCommitted = true
+	l.creationReceiptOperation = operationID
+	return nil
+}
+
+func (l *managerLane) threadCreationReceipt(operationID providercontract.OperationID) *providercontract.ThreadRef {
+	if l == nil {
+		return nil
+	}
+	operationID = providercontract.NormalizeOperationID(string(operationID))
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.creationCommitted || l.creationReceiptOperation != operationID {
+		return nil
+	}
+	thread := l.thread.Normalize()
+	return &thread
+}
+
+func (l *managerLane) clearThreadCreationReceipt(operationID providercontract.OperationID) {
+	if l == nil {
+		return
+	}
+	operationID = providercontract.NormalizeOperationID(string(operationID))
+	l.mu.Lock()
+	if l.creationReceiptOperation == operationID {
+		l.creationReceiptOperation = ""
+	}
+	l.mu.Unlock()
+}
 func (l *managerLane) Delivery() providercontract.DeliveryStrategy {
 	return managerLaneDelivery{lane: l}
 }

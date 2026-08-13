@@ -1566,7 +1566,14 @@ async function openSession(params, resume) {
     mcpServers: params?.mcpServers,
     resume,
   });
-  await session.start();
+  try {
+    await session.start();
+  } catch (error) {
+    if (resume && /no conversation found with session id/i.test(String(error?.message || ''))) {
+      throw Object.assign(new Error('Claude provider candidate was never materialized'), { rpcCode: -32044 });
+    }
+    throw error;
+  }
   // The open request's openQuery runs are over: any later reopen is a
   // mid-session restart and must re-announce the command catalog itself.
   session.openReplyPending = false;

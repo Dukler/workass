@@ -878,15 +878,19 @@ class UpdateManager {
     }
 
     const transaction = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       updateId: prepared.updateId,
       platform: this.platform,
       currentVersion: this.currentVersion,
       targetVersion: this.manifest.version,
       shellPID: process.pid,
+      transactionRoot: prepared.transactionRoot,
       installTarget: prepared.installTarget,
       incomingTarget: prepared.incomingTarget,
       backupTarget: prepared.backupTarget,
+      mutableStateTarget: this.runtime.stateDir,
+      mutableStateBackupTarget: path.join(prepared.transactionRoot, 'state-before-activation'),
+      failedMutableStateTarget: path.join(prepared.transactionRoot, 'state-from-failed-activation'),
       receiptPath: this.receiptPath,
       daemonHealthURL: `${this.runtime.daemonURL}/workass/health`,
       shellStatusURL: `http://127.0.0.1:${this.runtime.viewPort}/__workass-shell/status`,

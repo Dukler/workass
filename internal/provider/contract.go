@@ -54,6 +54,11 @@ type CreateLaneRequest struct {
 	// ownership and exact-resume an existing binding; they must never issue a
 	// second provider create call in this mode.
 	Reconcile bool
+	// CreateAfterCandidateAbsence is true only when the chat actor proves this
+	// lane has never acquired provider-native coverage. A deferred provider may
+	// use it after exact resume authoritatively reports that its saved candidate
+	// never materialized. Historical lanes never set it.
+	CreateAfterCandidateAbsence bool
 }
 
 type ResumeLaneRequest struct {
@@ -206,6 +211,23 @@ type ContextCapabilities struct {
 	MaxImportBytes   int
 	NativeCompaction bool
 	VerifiedLineage  bool
+}
+
+// CreationCapabilities describe when a provider-native identity becomes a
+// durable thread. Most ACP servers commit session/new itself. Some native
+// providers return a process-local candidate first and materialize it only
+// after durably consuming the first real user input.
+type CreationCapabilities struct {
+	DeferredUntilInput bool
+}
+
+// ThreadCreationReceipt is implemented by a newly created lane when the
+// ThreadRef returned by LaneFactory is still only a provider candidate. The
+// chat actor keeps that candidate outside its immutable Thread field until an
+// input-consumption event carries the matching durable thread receipt.
+type ThreadCreationReceipt interface {
+	ThreadCreationCommitted() bool
+	PreviousCandidateAbsent() bool
 }
 
 type ContextMessage struct {

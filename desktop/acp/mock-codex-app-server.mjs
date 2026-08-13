@@ -5,6 +5,7 @@ let requestSequence = 0;
 let turnSequence = 0;
 let activeTurn = null;
 const turnRecords = [];
+const fixtureThreadId = String(process.env.WORKASS_CODEX_FIXTURE_THREAD_ID || 'fixture-codex-thread');
 
 function write(message) { process.stdout.write(`${JSON.stringify(message)}\n`); }
 function respond(id, result) { write({ id, result }); }
@@ -34,7 +35,7 @@ function completeTurn(turnId, status = 'completed') {
 	const record = turnRecords.find((turn) => turn.id === turnId);
 	if (record) record.status = status;
   notify('turn/completed', {
-    threadId: 'fixture-codex-thread',
+    threadId: fixtureThreadId,
     turn: { id: turnId, status, items: [] },
   });
 }
@@ -115,7 +116,7 @@ async function handle(message) {
       }
     }
     return respond(id, {
-    thread: { id: 'fixture-codex-thread', preview: '', modelProvider: 'openai', createdAt: 1, updatedAt: 1, status: { type: 'idle' }, path: null, cwd: params.cwd, cliVersion: 'fixture', source: 'appServer', agentNickname: null, agentRole: null, gitInfo: null, name: null, turns: [] },
+    thread: { id: fixtureThreadId, preview: '', modelProvider: 'openai', createdAt: 1, updatedAt: 1, status: { type: 'idle' }, path: null, cwd: params.cwd, cliVersion: 'fixture', source: 'appServer', agentNickname: null, agentRole: null, gitInfo: null, name: null, turns: [] },
     model: model.id, reasoningEffort: 'high', modelProvider: 'openai', cwd: params.cwd,
     approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'workspaceWrite', writableRoots: [], networkAccess: false },
     });
@@ -123,6 +124,9 @@ async function handle(message) {
   if (method === 'thread/resume') {
     if (process.env.WORKASS_CODEX_FIXTURE_AUTH_ERROR === '1') {
       return write({ id, error: { code: -32000, message: 'Authentication required: run codex login' } });
+    }
+    if (process.env.WORKASS_CODEX_FIXTURE_MISSING_RESUME === '1') {
+      return write({ id, error: { code: -32000, message: `no rollout found for thread id ${params.threadId}` } });
     }
     return respond(id, {
     thread: { id: params.threadId, turns: [] }, model: model.id, reasoningEffort: 'high', modelProvider: 'openai', cwd: params.cwd,

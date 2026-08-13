@@ -439,6 +439,9 @@ func (m *Manager) NewSession(ctx context.Context, opts SessionOptions) (SessionI
 	opts.ProviderID = providerID
 	m.mu.Unlock()
 	opts = m.withNativeSessionControls(opts)
+	if opts.ProviderLaneVerifyCandidate && !providerAdapterForID(providerID).creation.DeferredUntilInput {
+		return SessionInfo{}, nativeLaneError(providercontract.ErrorProtocolViolation, "provider does not use deferred thread creation", nil)
+	}
 
 	unlockNative := func() {}
 	if m.nativeSessions != nil && m.nativeSessions.enabledFor(opts) {
@@ -446,7 +449,8 @@ func (m *Manager) NewSession(ctx context.Context, opts SessionOptions) (SessionI
 	}
 	defer unlockNative()
 	if opts.ProviderLaneCreate && m.nativeSessions != nil && m.nativeSessions.enabledFor(opts) {
-		if _, exists := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD); exists {
+		if binding, exists := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD); exists &&
+			(!opts.ProviderLaneVerifyCandidate || binding.ThreadCommitted) {
 			return SessionInfo{}, nativeLaneError(providercontract.ErrorNativeIdentityConflict, "an established provider lane cannot enter session/new", nil)
 		}
 	}
@@ -467,15 +471,39 @@ func (m *Manager) NewSession(ctx context.Context, opts SessionOptions) (SessionI
 		return info, nil
 	}
 	if bindingFound && restoreErr != nil {
-		if stale := m.getBridge(opts); stale != nil {
-			stale.Close(false, restoreErr)
+		if opts.ProviderLaneCreate && opts.ProviderLaneVerifyCandidate &&
+			providercontract.ErrorIs(restoreErr, providercontract.ErrorNativeThreadMissing) {
+			if !opts.ProviderLaneCreateAfterCandidateAbsence {
+				if stale := m.getBridge(opts); stale != nil {
+					stale.Close(false, restoreErr)
+				}
+				return SessionInfo{}, restoreErr
+			}
+			binding, exists := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD)
+			if !exists || binding.ThreadCommitted ||
+				!m.nativeSessions.removeAbsentCandidate(bindingLaneIdentity(binding), bindingCurrentThreadID(binding)) {
+				return SessionInfo{}, nativeLaneError(
+					providercontract.ErrorNativeIdentityConflict,
+					"provider candidate absence did not match the durable creation receipt",
+					restoreErr,
+				)
+			}
+			if stale := m.getBridge(opts); stale != nil {
+				stale.Close(false, restoreErr)
+			}
+			bindingFound = false
+			restoreErr = nil
+		} else {
+			if stale := m.getBridge(opts); stale != nil {
+				stale.Close(false, restoreErr)
+			}
+			if hint, policyErr := m.markProviderNeedsLogin(ctx, providerID, restoreErr); policyErr != nil {
+				return SessionInfo{}, policyErr
+			} else if hint != "" {
+				return SessionInfo{}, providerAuthenticationFailureError(providerID, restoreErr, hint)
+			}
+			return SessionInfo{}, restoreErr
 		}
-		if hint, policyErr := m.markProviderNeedsLogin(ctx, providerID, restoreErr); policyErr != nil {
-			return SessionInfo{}, policyErr
-		} else if hint != "" {
-			return SessionInfo{}, providerAuthenticationFailureError(providerID, restoreErr, hint)
-		}
-		return SessionInfo{}, restoreErr
 	}
 	if !opts.ProviderLaneCreate {
 		if info, ok := m.adoptSpareSession(opts); ok {
@@ -1918,9 +1946,15 @@ func (m *Manager) emit(channel string, payload any) {
 	m.providerPublicationMu.Lock()
 	defer m.providerPublicationMu.Unlock()
 	if err := m.observeProviderLaneEvent(channel, payload); err != nil {
-		m.opts.Logf("provider event rejected before frozen-wire publication", map[string]any{
-			"channel": channel, "error": redactSensitiveText(err.Error()),
-		})
+		fields := map[string]any{"channel": channel, "error": redactSensitiveText(err.Error())}
+		if envelope := mapFromAny(payload); len(envelope) > 0 {
+			fields["wireType"] = strings.TrimSpace(asString(envelope["type"]))
+			fields["jobId"] = firstNonEmpty(asString(envelope["id"]), asString(envelope["jobId"]), asString(mapFromAny(envelope["job"])["id"]))
+			if event := mapFromAny(envelope["event"]); len(event) > 0 {
+				fields["eventKind"] = strings.TrimSpace(asString(event["kind"]))
+			}
+		}
+		m.opts.Logf("provider event rejected before frozen-wire publication", fields)
 		if lane := m.providerLaneForFrozenPayload(mapFromAny(payload)); lane != nil {
 			lane.rejectFrozenProtocol(err)
 		}
@@ -2610,6 +2644,8 @@ func (b *Bridge) SetModel(ctx context.Context, sessionID, modelID string) (map[s
 	b.mu.Unlock()
 	finishWrite := b.beginWorkassModelWrite(sessionID)
 	defer finishWrite()
+	finishConfigWrite := b.beginWorkassConfigWrite(sessionID)
+	defer finishConfigWrite()
 	res, err := b.request(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": "model", "value": resolution.modelValue}, 15*time.Second)
 	if err != nil {
 		return nil, err
@@ -2697,6 +2733,33 @@ func (b *Bridge) beginWorkassModelWrite(sessionID string) func() {
 	}
 }
 
+// beginWorkassConfigWrite marks the complete config-options echo produced by
+// one of our own writes. Frontier hosts return every axis even when Workass
+// changed only the mode; the echoed model must not be mistaken for an
+// adapter-authored model change and synchronously re-enter the chat actor that
+// is still waiting for this control request to finish.
+func (b *Bridge) beginWorkassConfigWrite(sessionID string) func() {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return func() {}
+	}
+	b.mu.Lock()
+	if b.configWriteInFlight == nil {
+		b.configWriteInFlight = make(map[string]int)
+	}
+	b.configWriteInFlight[sessionID]++
+	b.mu.Unlock()
+	return func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.configWriteInFlight[sessionID] <= 1 {
+			delete(b.configWriteInFlight, sessionID)
+		} else {
+			b.configWriteInFlight[sessionID]--
+		}
+	}
+}
+
 func (b *Bridge) rememberWorkassModelWrite(sessionID, appliedModelID string) {
 	sessionID = strings.TrimSpace(sessionID)
 	appliedModelID = strings.TrimSpace(appliedModelID)
@@ -2758,6 +2821,8 @@ func (b *Bridge) SetMode(ctx context.Context, sessionID, modeID string) (map[str
 	b.mu.Lock()
 	modeConfigID := firstNonEmpty(b.modeConfigID, "mode")
 	b.mu.Unlock()
+	finishConfigWrite := b.beginWorkassConfigWrite(sessionID)
+	defer finishConfigWrite()
 	res, err := b.request(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": modeConfigID, "value": modeID}, 15*time.Second)
 	if err != nil {
 		return nil, err
@@ -3393,7 +3458,7 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 	if broadcast && !workassWrite && sessionID != "" && currentModel != nil {
 		if currentSelection := b.currentModelSelectionLocked(); currentSelection != nil {
 			selection := strings.TrimSpace(*currentSelection)
-			inFlight := b.modelWriteInFlight[sessionID] > 0
+			inFlight := b.modelWriteInFlight[sessionID] > 0 || b.configWriteInFlight[sessionID] > 0
 			lastWorkassWrite := strings.TrimSpace(b.lastWorkassModelWrite[sessionID])
 			if selection != "" && !inFlight && selection != lastWorkassWrite {
 				capturedModelID = selection

@@ -164,7 +164,7 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 		}
 		lane, thread, err := definition.Runtime.Create(ctx, provider.CreateLaneRequest{
 			Identity: effect.Identity, Owner: effect.Owner, CWD: effect.CWD, ModelID: effect.ModelID, ModeID: effect.ModeID,
-			Reconcile: effect.Reconcile,
+			Reconcile: effect.Reconcile, CreateAfterCandidateAbsence: effect.CreateAfterCandidateAbsence,
 		})
 		if err != nil {
 			return true, c.applyLaneFailure(effect.Identity.ID, err)
@@ -172,10 +172,21 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 		canonical := lane.Identity().Normalize()
 		c.attachLane(lane, effect.Generation)
 		attachment := laneAttachmentSnapshot(lane)
-		if err := c.engine.Apply(LaneOpened{
-			LaneID: effect.Identity.ID, Identity: canonical, Thread: thread, ConnectionGeneration: effect.Generation,
-			Context: lane.Context().Capabilities(), Delivery: lane.Delivery().Capabilities(), Attachment: attachment, Reconciled: effect.Reconcile,
-		}); err != nil {
+		creationReceipt, deferred := lane.(provider.ThreadCreationReceipt)
+		if deferred && !creationReceipt.ThreadCreationCommitted() {
+			err = c.engine.Apply(LaneProvisioned{
+				LaneID: effect.Identity.ID, Identity: canonical, Candidate: thread, ConnectionGeneration: effect.Generation,
+				Context: lane.Context().Capabilities(), Delivery: lane.Delivery().Capabilities(),
+				Creation: provider.CreationCapabilities{DeferredUntilInput: true}, Attachment: attachment,
+				Reconciled: effect.Reconcile, PreviousCandidateAbsent: creationReceipt.PreviousCandidateAbsent(),
+			})
+		} else {
+			err = c.engine.Apply(LaneOpened{
+				LaneID: effect.Identity.ID, Identity: canonical, Thread: thread, ConnectionGeneration: effect.Generation,
+				Context: lane.Context().Capabilities(), Delivery: lane.Delivery().Capabilities(), Attachment: attachment, Reconciled: effect.Reconcile,
+			})
+		}
+		if err != nil {
 			c.discardLane(lane)
 			return true, err
 		}

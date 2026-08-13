@@ -148,6 +148,21 @@ test('native Codex host opts URL servers into stateless MCP 2026 per session', a
   assert.equal(opened.result.sessionId, 'fixture-codex-thread');
 });
 
+test('native Codex host classifies an absent provisional candidate without parsing in chat state', async (t) => {
+  const peer = startHost({ WORKASS_CODEX_FIXTURE_MISSING_RESUME: '1' });
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: {
+    sessionId: 'fixture-provisional-candidate', cwd: repoRoot, mcpServers: [],
+  } });
+  const resumed = await peer.waitFor((message) => message.id === 2);
+  assert.equal(resumed.error?.code, -32044);
+  assert.match(resumed.error?.message || '', /candidate was never materialized/i);
+  assert.equal(resumed.result, undefined);
+});
+
 test('native Codex compaction is a semantic checkpoint, never synthetic assistant text', async (t) => {
   const peer = startHost();
   t.after(() => peer.child.kill('SIGKILL'));

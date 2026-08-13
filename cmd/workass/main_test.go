@@ -2453,17 +2453,33 @@ func TestWireCodexEarnedRateLimitResetConsume(t *testing.T) {
 	if sessionReply.Error != nil {
 		t.Fatalf("new Codex reset session: %s", *sessionReply.Error)
 	}
-	sessionID := sessionReply.Result.(map[string]any)["sessionId"].(string)
+	if sessionID := fieldString(sessionReply.Result.(map[string]any), "sessionId"); sessionID != "" {
+		t.Fatalf("empty Codex selection materialized a provider thread: %q", sessionID)
+	}
+	client.invoke(t, 2, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "reset-chat", "tabId": "reset-tab", "prompt": "materialize the reset fixture",
+		"operationId": "reset-first-turn", "userMessageId": "reset-first-user", "assistantMessageId": "reset-first-assistant",
+	})
+	startReply := client.waitReply(t, 2, 5*time.Second)
+	if startReply.Error != nil {
+		t.Fatalf("materialize Codex reset session: %s", *startReply.Error)
+	}
+	job := startReply.Result.(map[string]any)
+	sessionID := fieldString(job, "sessionId")
+	if sessionID == "" {
+		t.Fatal("first real Codex input omitted its materialized session identity")
+	}
 	initial := client.waitChannelEvent(t, "chat:plan-usage", 5*time.Second).Payload.(map[string]any)
 	initialReset := initial["rateLimitResetCredits"].(map[string]any)
 	if fmt.Sprint(initialReset["availableCount"]) != "1" {
 		t.Fatalf("initial earned reset = %#v", initialReset)
 	}
 
-	client.invoke(t, 2, "app-chat:use-rate-limit-reset", map[string]any{
+	_ = client.waitJobEvent(t, fieldString(job, "id"), "end", 5*time.Second)
+	client.invoke(t, 3, "app-chat:use-rate-limit-reset", map[string]any{
 		"providerId": "codex", "sessionId": sessionID, "idempotencyKey": "wire-reset-attempt", "creditId": "RateLimitResetCredit_wire",
 	})
-	consume := client.waitReply(t, 2, 5*time.Second)
+	consume := client.waitReply(t, 3, 5*time.Second)
 	if consume.Error != nil {
 		t.Fatalf("consume earned reset: %s", *consume.Error)
 	}
@@ -2477,10 +2493,10 @@ func TestWireCodexEarnedRateLimitResetConsume(t *testing.T) {
 		t.Fatalf("remaining earned resets = %#v", remaining)
 	}
 
-	client.invoke(t, 3, "app-chat:use-rate-limit-reset", map[string]any{
+	client.invoke(t, 4, "app-chat:use-rate-limit-reset", map[string]any{
 		"providerId": "codex", "sessionId": sessionID, "idempotencyKey": "wire-reset-attempt", "creditId": "RateLimitResetCredit_wire",
 	})
-	retry := client.waitReply(t, 3, 5*time.Second)
+	retry := client.waitReply(t, 4, 5*time.Second)
 	if retry.Error != nil || retry.Result.(map[string]any)["outcome"] != "alreadyRedeemed" {
 		t.Fatalf("idempotent earned reset retry = %#v", retry)
 	}
@@ -2551,9 +2567,9 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 		t.Fatalf("client-ready/session-save touched ACP before a real attach: methods=%v", methods)
 	}
 
-	// Exercise the former race boundary: another save and the real attach arrive
-	// back-to-back. Exactly the real app-chat:new-session call owns session
-	// creation; the save cannot launch a competing warm/resume goroutine.
+	// Exercise the former race boundary: another save and provider selection
+	// arrive back-to-back. Both remain ACP-silent; neither may create a native
+	// conversation before the first genuine user input.
 	actorSnapshot, err = providerChats.ProjectSession()
 	if err != nil {
 		t.Fatalf("project migrated plan chat before race: %v", err)
@@ -2571,8 +2587,26 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 		t.Fatalf("real session attach reply = %#v", sessionReply)
 	}
 	sessionID := fieldString(sessionReply.Result.(map[string]any), "sessionId")
+	if sessionID != "" {
+		t.Fatalf("empty selection materialized a provider thread: %q", sessionID)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if methods := readWireFakeMethods(t, tracePath); len(methods) != 0 {
+		t.Fatalf("selection touched ACP before a real input: methods=%v", methods)
+	}
+
+	client.invoke(t, 4, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "warm-plan-chat", "tabId": "warm-plan-tab", "prompt": "materialize the plan fixture",
+		"operationId": "warm-plan-first-turn", "userMessageId": "warm-plan-first-user", "assistantMessageId": "warm-plan-first-assistant",
+	})
+	startReply := client.waitReply(t, 4, 5*time.Second)
+	if startReply.Error != nil {
+		t.Fatalf("first real input attach reply = %#v", startReply)
+	}
+	job := startReply.Result.(map[string]any)
+	sessionID = fieldString(job, "sessionId")
 	if sessionID == "" {
-		t.Fatal("real attach omitted native session identity")
+		t.Fatal("first real input omitted native session identity")
 	}
 
 	plan := client.waitChannelEvent(t, "chat:plan-usage", 5*time.Second).Payload.(map[string]any)
@@ -2582,40 +2616,46 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 	methods := waitWireFakeMethods(t, tracePath, 2*time.Second, func(methods []string) bool {
 		return countWireMethod(methods, "_workass/claude/usage") == 1
 	})
+	_ = client.waitJobEvent(t, fieldString(job, "id"), "end", 5*time.Second)
 	time.Sleep(100 * time.Millisecond)
 	methods = readWireFakeMethods(t, tracePath)
 	if countWireMethod(methods, "session/new") != 1 || countWireMethod(methods, "session/resume") != 0 || countWireMethod(methods, "session/load") != 0 {
 		t.Fatalf("real attach raced a duplicate session: methods=%v", methods)
 	}
-	if countWireMethod(methods, "session/prompt") != 0 {
-		t.Fatalf("plan-usage attach sent a prompt: methods=%v", methods)
+	if countWireMethod(methods, "session/prompt") != 1 {
+		t.Fatalf("first real input did not own exactly one prompt: methods=%v", methods)
+	}
+	usageReads := countWireMethod(methods, "_workass/claude/usage")
+	if usageReads < 1 {
+		t.Fatalf("first real input did not initialize plan usage: methods=%v", methods)
 	}
 
 	// The renderer's explicit active-chat refresh reuses the exact live session
 	// and performs one metadata read. It must not create another provider session
 	// or send model input.
-	client.invoke(t, 4, "app-chat:refresh-plan-usage", map[string]any{"providerId": "claude"})
-	if reply := client.waitReply(t, 4, 5*time.Second); reply.Error != nil {
+	client.invoke(t, 5, "app-chat:refresh-plan-usage", map[string]any{"providerId": "claude"})
+	if reply := client.waitReply(t, 5, 5*time.Second); reply.Error != nil {
 		t.Fatalf("explicit plan refresh reply = %#v", reply)
 	}
 	methods = waitWireFakeMethods(t, tracePath, 2*time.Second, func(methods []string) bool {
-		return countWireMethod(methods, "_workass/claude/usage") == 2
+		return countWireMethod(methods, "_workass/claude/usage") == usageReads+1
 	})
-	if countWireMethod(methods, "session/new") != 1 || countWireMethod(methods, "session/prompt") != 0 {
+	usageReads++
+	if countWireMethod(methods, "session/new") != 1 || countWireMethod(methods, "session/prompt") != 1 {
 		t.Fatalf("explicit plan refresh touched conversation methods: %v", methods)
 	}
 
 	// Provider-scoped refresh is independent of whichever engine currently owns
 	// the visible chat. It reuses the initialized Claude account bridge and never
 	// creates a provider conversation or sends model input.
-	client.invoke(t, 5, "app-chat:refresh-plan-usage", map[string]any{"providerId": "claude"})
-	if reply := client.waitReply(t, 5, 5*time.Second); reply.Error != nil {
+	client.invoke(t, 6, "app-chat:refresh-plan-usage", map[string]any{"providerId": "claude"})
+	if reply := client.waitReply(t, 6, 5*time.Second); reply.Error != nil {
 		t.Fatalf("provider plan refresh reply = %#v", reply)
 	}
 	methods = waitWireFakeMethods(t, tracePath, 2*time.Second, func(methods []string) bool {
-		return countWireMethod(methods, "_workass/claude/usage") == 3
+		return countWireMethod(methods, "_workass/claude/usage") == usageReads+1
 	})
-	if countWireMethod(methods, "session/new") != 1 || countWireMethod(methods, "session/prompt") != 0 {
+	if countWireMethod(methods, "session/new") != 1 || countWireMethod(methods, "session/prompt") != 1 {
 		t.Fatalf("provider plan refresh touched conversation methods: %v", methods)
 	}
 	t.Logf("trace ready/save stayed ACP-silent; real attach methods=%s", strings.Join(methods, ","))
@@ -4390,6 +4430,12 @@ func runWireFakeACP() {
 					"workassCodexRateLimitResetRequest": true,
 				}
 			}
+			if mode == "plan-usage" || mode == "plan-limits" || mode == "codex-reset" {
+				meta := mapFromAnyMain(capabilities["_meta"])
+				meta["workassStableTurnInputV1"] = true
+				meta["workassOperationReadbackV1"] = true
+				capabilities["_meta"] = meta
+			}
 			respond(msg.ID, map[string]any{
 				"protocolVersion":   1,
 				"agentInfo":         map[string]any{"name": "Wire Fake ACP", "version": "0.0.0"},
@@ -4414,6 +4460,13 @@ func runWireFakeACP() {
 			respond(msg.ID, map[string]any{})
 		case "session/prompt":
 			sessionID := fmt.Sprint(params["sessionId"])
+			operationID := strings.TrimSpace(fmt.Sprint(params["clientUserMessageId"]))
+			if operationID != "" && (mode == "plan-usage" || mode == "plan-limits" || mode == "codex-reset") {
+				notify(sessionID, map[string]any{
+					"sessionUpdate": "_workass_input_consumed", "clientUserMessageId": operationID,
+					"turnId": "wire-native-turn-" + operationID,
+				})
+			}
 			if mode == "plan-usage" {
 				notify(sessionID, map[string]any{
 					"sessionUpdate": "usage_update",

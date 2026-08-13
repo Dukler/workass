@@ -104,23 +104,32 @@ type CoverageRecord struct {
 }
 
 type LaneState struct {
-	Identity             provider.LaneIdentity
-	Owner                provider.AttachmentOwner
-	CWD                  string
-	ModelID              string
-	ModeID               string
-	Thread               provider.ThreadRef
-	Phase                LanePhase
-	CoveredThrough       uint64
-	Coverage             map[uint64]CoverageRecord
-	ConnectionGeneration uint64
-	LastEventSequence    uint64
-	CreateGeneration     uint64
-	Context              provider.ContextCapabilities
-	Delivery             provider.DeliveryCapabilities
-	PendingImport        *PendingImport
-	LastError            provider.ErrorKind
-	Attachment           *provider.LaneAttachmentSnapshot
+	Identity provider.LaneIdentity
+	Owner    provider.AttachmentOwner
+	CWD      string
+	ModelID  string
+	ModeID   string
+	Thread   provider.ThreadRef
+	// Provision is a provider-returned candidate that has not crossed the
+	// provider's durable creation boundary. It is never an established ThreadRef
+	// and may only coexist with a zero Thread.
+	Provision *provider.ThreadRef
+	// CreateAfterCandidateAbsence is durable actor proof that this deferred
+	// lane has never acquired provider-native coverage. It is the only state in
+	// which an exact candidate reported missing may be followed by session/new.
+	CreateAfterCandidateAbsence bool
+	Phase                       LanePhase
+	CoveredThrough              uint64
+	Coverage                    map[uint64]CoverageRecord
+	ConnectionGeneration        uint64
+	LastEventSequence           uint64
+	CreateGeneration            uint64
+	Context                     provider.ContextCapabilities
+	Delivery                    provider.DeliveryCapabilities
+	Creation                    provider.CreationCapabilities
+	PendingImport               *PendingImport
+	LastError                   provider.ErrorKind
+	Attachment                  *provider.LaneAttachmentSnapshot
 }
 
 type QueueEntry struct {
@@ -570,38 +579,39 @@ const (
 // executor must claim Pending before making a provider call. On restart,
 // Dispatched delivery/import effects reconcile; they are never blindly resent.
 type OutboxEntry struct {
-	ID               string
-	Kind             EffectKind
-	Status           OutboxStatus
-	LaneID           provider.LaneID
-	OperationID      provider.OperationID
-	Owner            provider.AttachmentOwner
-	ConnectionID     string
-	MutationKind     string
-	MutationMethod   string
-	MutationDigest   string
-	CWD              string
-	ModelID          string
-	ModeID           string
-	Input            *QueueEntry
-	Generation       uint64
-	Reconcile        bool
-	From             uint64
-	To               uint64
-	Thread           provider.ThreadRef
-	Turn             provider.TurnRef
-	RequestID        string
-	OptionID         string
-	ChatID           string
-	TabID            string
-	Background       *BackgroundAction
-	TurnSequence     int
-	ObservedAtUnixMS int64
-	Checkpoint       json.RawMessage
-	CheckpointDigest string
-	Result           json.RawMessage
-	Batch            *ContextBatch
-	LastError        provider.ErrorKind
+	ID                          string
+	Kind                        EffectKind
+	Status                      OutboxStatus
+	LaneID                      provider.LaneID
+	OperationID                 provider.OperationID
+	Owner                       provider.AttachmentOwner
+	ConnectionID                string
+	MutationKind                string
+	MutationMethod              string
+	MutationDigest              string
+	CWD                         string
+	ModelID                     string
+	ModeID                      string
+	Input                       *QueueEntry
+	Generation                  uint64
+	Reconcile                   bool
+	CreateAfterCandidateAbsence bool
+	From                        uint64
+	To                          uint64
+	Thread                      provider.ThreadRef
+	Turn                        provider.TurnRef
+	RequestID                   string
+	OptionID                    string
+	ChatID                      string
+	TabID                       string
+	Background                  *BackgroundAction
+	TurnSequence                int
+	ObservedAtUnixMS            int64
+	Checkpoint                  json.RawMessage
+	CheckpointDigest            string
+	Result                      json.RawMessage
+	Batch                       *ContextBatch
+	LastError                   provider.ErrorKind
 }
 
 type State struct {
@@ -752,6 +762,10 @@ func (s State) Clone() State {
 	}
 	out.Lanes = make(map[provider.LaneID]LaneState, len(s.Lanes))
 	for id, lane := range s.Lanes {
+		if lane.Provision != nil {
+			provision := lane.Provision.Normalize()
+			lane.Provision = &provision
+		}
 		if lane.PendingImport != nil {
 			pending := *lane.PendingImport
 			pending.Batch = cloneContextBatch(lane.PendingImport.Batch)
@@ -1113,6 +1127,33 @@ func (s State) Validate() error {
 				return err
 			}
 		}
+		if lane.Provision != nil {
+			if !lane.Thread.IsZero() {
+				return errors.New("provider lane cannot be provisional and established at once")
+			}
+			if !lane.Creation.DeferredUntilInput {
+				return errors.New("provider lane has a provisional thread without deferred creation capability")
+			}
+			if err := lane.Provision.Validate(lane.Identity.Realm.ProviderID); err != nil {
+				return err
+			}
+			if !lane.Delivery.StableInputIdentity || !lane.Delivery.ConsumptionReceipt {
+				return errors.New("deferred provider lane lacks a stable input consumption receipt")
+			}
+			if lane.Phase != LaneAbsent && lane.Phase != LaneCreating && lane.Phase != LaneBlocked && lane.Phase != LaneBroken {
+				return errors.New("provisional provider lane has an invalid phase")
+			}
+		}
+		if lane.CreateAfterCandidateAbsence {
+			if !lane.Thread.IsZero() || !lane.Creation.DeferredUntilInput {
+				return errors.New("candidate absence may create only on an unestablished deferred lane")
+			}
+			for _, record := range lane.Coverage {
+				if record.Status == CoverageNativeSeen || record.Status == CoverageImported {
+					return errors.New("lane with provider-native coverage may not create after candidate absence")
+				}
+			}
+		}
 		if lane.Phase == LaneCreating && !lane.Thread.IsZero() {
 			return errors.New("established lane cannot re-enter creating phase")
 		}
@@ -1207,6 +1248,8 @@ func (s State) Validate() error {
 			return errors.New("foreground lane does not exist")
 		}
 		validPhase := lane.Phase == LaneRunning && (s.Foreground.Status == ForegroundDispatching || s.Foreground.Status == ForegroundRunning)
+		validPhase = validPhase || lane.Phase == LaneCreating && lane.Provision != nil &&
+			(s.Foreground.Status == ForegroundDispatching || s.Foreground.Status == ForegroundRunning || s.Foreground.Status == ForegroundReconciling)
 		// A persisted-but-not-yet-dispatched input survives a daemon restart. The
 		// exact lane must attach before that Pending outbox entry becomes
 		// executable, so dispatching may temporarily coexist with LaneResuming.

@@ -21,7 +21,7 @@ import (
 
 const (
 	nativeSessionLedgerFilename   = "provider-lanes.json"
-	currentNativeLaneStoreVersion = 7
+	currentNativeLaneStoreVersion = 8
 )
 
 type nativeOperationState string
@@ -60,8 +60,12 @@ type nativeSessionBinding struct {
 	RealmVerified  bool   `json:"realmVerified,omitempty"`
 	WorkspaceEpoch string `json:"workspaceEpoch"`
 	SessionID      string `json:"sessionId"`
-	ThreadLineage  uint64 `json:"threadLineage"`
-	LineageProof   string `json:"lineageProof,omitempty"`
+	// ThreadCommitted is the provider-durability receipt. False means SessionID
+	// is only the exact candidate returned by a deferred-creation provider; it
+	// must never be exposed to the chat actor as an established ThreadRef.
+	ThreadCommitted bool   `json:"threadCommitted"`
+	ThreadLineage   uint64 `json:"threadLineage"`
+	LineageProof    string `json:"lineageProof,omitempty"`
 	// The id the provider currently speaks under when it diverged from
 	// SessionID (Claude's fork family: /clear, forkSession). Alias, never a
 	// mutation of SessionID — live-session guards key on SessionID, and the
@@ -108,7 +112,7 @@ func newNativeSessionLedger(stateDir string, machineIDs ...string) *nativeSessio
 		return ledger
 	}
 	ledger.path = filepath.Join(stateDir, nativeSessionLedgerFilename)
-	if err := upgradeProviderLaneStoreV7(ledger.path, ledger.machineID); err != nil {
+	if err := upgradeProviderLaneStoreV8(ledger.path, ledger.machineID); err != nil {
 		ledger.loadErr = err
 		return ledger
 	}
@@ -209,6 +213,9 @@ func (l *nativeSessionLedger) normalizeBinding(binding nativeSessionBinding) (na
 	}
 	if binding.ThreadLineage == 0 {
 		binding.ThreadLineage = 1
+	}
+	if !binding.ThreadCommitted && (binding.ProviderSessionID != "" || binding.ThreadLineage != 1 || binding.LineageProof != "") {
+		return nativeSessionBinding{}, errors.New("provisional provider candidate cannot carry established lineage")
 	}
 	if binding.WorkspaceEpoch == "" && binding.CWD != "" {
 		binding.WorkspaceEpoch = string(nativeWorkspaceEpoch(binding.CWD))
@@ -682,18 +689,27 @@ func (l *nativeSessionLedger) markInFlight(
 }
 
 func (l *nativeSessionLedger) markOperationConsumed(tabID, chatID, providerID, sessionID, operationID, nativeTurnID string) bool {
+	_, committed := l.markOperationConsumedAndCommit(tabID, chatID, providerID, sessionID, operationID, nativeTurnID)
+	return committed
+}
+
+// markOperationConsumedAndCommit is the one atomic boundary that promotes a
+// deferred provider candidate into a durable native thread. The operation
+// receipt and ThreadCommitted flag reach disk together before the actor can
+// observe either fact.
+func (l *nativeSessionLedger) markOperationConsumedAndCommit(tabID, chatID, providerID, sessionID, operationID, nativeTurnID string) (nativeSessionBinding, bool) {
 	if l == nil {
-		return false
+		return nativeSessionBinding{}, false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
 	if len(matches) != 1 {
-		return false
+		return nativeSessionBinding{}, false
 	}
 	key, binding := matches[0].key, matches[0].binding
 	if binding.PendingOperation == nil || binding.PendingOperation.OperationID != strings.TrimSpace(operationID) {
-		return false
+		return nativeSessionBinding{}, false
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	operation := *binding.PendingOperation
@@ -701,13 +717,14 @@ func (l *nativeSessionLedger) markOperationConsumed(tabID, chatID, providerID, s
 	operation.NativeTurnID = strings.TrimSpace(firstNonEmpty(nativeTurnID, operation.NativeTurnID))
 	operation.UpdatedAt = now
 	binding.PendingOperation = &operation
+	binding.ThreadCommitted = true
 	binding.UpdatedAt = now
 	l.bindings[key] = binding
 	if err := l.writeLocked(); err != nil {
 		l.bindings[key] = matches[0].binding
-		return false
+		return nativeSessionBinding{}, false
 	}
-	return true
+	return binding, true
 }
 
 func (l *nativeSessionLedger) settleOperation(
@@ -818,6 +835,36 @@ func (l *nativeSessionLedger) delete(tabID, chatID, providerID, sessionID string
 	_ = l.writeLocked()
 }
 
+// removeAbsentCandidate removes exactly one deferred-creation receipt
+// after the provider has authoritatively reported that no native thread exists.
+// It cannot remove an established binding or a candidate whose input was
+// consumed, and restores the prior map entry if the disk commit fails.
+func (l *nativeSessionLedger) removeAbsentCandidate(identity providercontract.LaneIdentity, sessionID string) bool {
+	if l == nil {
+		return false
+	}
+	identity = identity.Normalize()
+	sessionID = strings.TrimSpace(sessionID)
+	if identity.ID == "" || sessionID == "" {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := nativeLaneStorageKey(string(identity.ID))
+	binding, ok := l.bindings[key]
+	if !ok || bindingLaneIdentity(binding) != identity || binding.ThreadCommitted ||
+		bindingCurrentThreadID(binding) != sessionID ||
+		(binding.PendingOperation != nil && binding.PendingOperation.State == nativeOperationConsumed) {
+		return false
+	}
+	delete(l.bindings, key)
+	if err := l.writeLocked(); err != nil {
+		l.bindings[key] = binding
+		return false
+	}
+	return true
+}
+
 func (l *nativeSessionLedger) deleteChat(tabID, chatID string) {
 	if l == nil {
 		return
@@ -838,6 +885,10 @@ func (l *nativeSessionLedger) deleteChat(tabID, chatID string) {
 }
 
 func (l *nativeSessionLedger) writeLocked() error {
+	return l.writeVersionLocked(currentNativeLaneStoreVersion)
+}
+
+func (l *nativeSessionLedger) writeVersionLocked(version int) error {
 	if l.path == "" {
 		return nil
 	}
@@ -846,7 +897,7 @@ func (l *nativeSessionLedger) writeLocked() error {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	disk := nativeSessionLedgerFile{Version: currentNativeLaneStoreVersion, Bindings: make([]nativeSessionBinding, 0, len(keys))}
+	disk := nativeSessionLedgerFile{Version: version, Bindings: make([]nativeSessionBinding, 0, len(keys))}
 	for _, key := range keys {
 		disk.Bindings = append(disk.Bindings, l.bindings[key])
 	}
@@ -896,7 +947,7 @@ func nativeLaneError(kind providercontract.ErrorKind, message string, cause erro
 func nativeResumeError(err error) error {
 	kind := providercontract.ErrorTransientTransport
 	var rpcErr *acpError
-	if errors.As(err, &rpcErr) && rpcErr.Code == -32000 {
+	if errors.As(err, &rpcErr) && rpcErr.Code == -32044 {
 		kind = providercontract.ErrorNativeThreadMissing
 	}
 	return nativeLaneError(kind, "could not resume the chat's exact provider-native thread", err)
@@ -1077,6 +1128,7 @@ func (m *Manager) tryRestoreNativeSession(ctx context.Context, opts SessionOptio
 	binding.CWD = info.CWD
 	binding.ModelID = firstNonEmpty(strings.TrimSpace(opts.ModelID), binding.ModelID, stringPointer(info.CurrentModelID))
 	binding.ModeID = firstNonEmpty(strings.TrimSpace(opts.ModeID), binding.ModeID, stringPointer(info.CurrentModeID))
+	binding.ThreadCommitted = true
 	if err := ledger.put(binding); err != nil {
 		bridge.Close(false, err)
 		return SessionInfo{}, true, nativeLaneError(providercontract.ErrorProtocolViolation, "could not persist the exact resumed thread binding", err)
@@ -1112,12 +1164,13 @@ func (m *Manager) rememberNewNativeSession(opts SessionOptions, info SessionInfo
 	binding := nativeSessionBinding{
 		TabID: opts.TabID, ChatID: opts.ChatID, ProviderID: info.ProviderID,
 		SessionID: info.SessionID, CWD: info.CWD,
-		MachineID:     m.nativeSessions.machineID,
-		AccountScope:  firstNonEmpty(strings.TrimSpace(info.ProviderAccountScope), "unverified-account"),
-		InstallScope:  firstNonEmpty(strings.TrimSpace(info.ProviderInstallScope), "registered-"+normalizeProviderID(info.ProviderID)),
-		RealmVerified: info.ProviderRealmVerified,
-		ModelID:       firstNonEmpty(stringPointer(info.CurrentModelID)),
-		ModeID:        firstNonEmpty(stringPointer(info.CurrentModeID)),
+		MachineID:       m.nativeSessions.machineID,
+		AccountScope:    firstNonEmpty(strings.TrimSpace(info.ProviderAccountScope), "unverified-account"),
+		InstallScope:    firstNonEmpty(strings.TrimSpace(info.ProviderInstallScope), "registered-"+normalizeProviderID(info.ProviderID)),
+		RealmVerified:   info.ProviderRealmVerified,
+		ThreadCommitted: !providerAdapterForID(info.ProviderID).creation.DeferredUntilInput,
+		ModelID:         firstNonEmpty(stringPointer(info.CurrentModelID)),
+		ModeID:          firstNonEmpty(stringPointer(info.CurrentModeID)),
 	}
 	return ledger.put(binding)
 }

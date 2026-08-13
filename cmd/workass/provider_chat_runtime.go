@@ -71,7 +71,7 @@ func newProviderChatRuntimeWithStartupMode(manager *acp.Manager, sessions *sessi
 		return runtime
 	}
 	actorDir := filepath.Join(stateDir, "provider-chats")
-	if err := chat.UpgradeActorStoreV20(actorDir, func(chatID string) ([]chat.StoredLane, error) {
+	if err := chat.UpgradeActorStoreV21(actorDir, func(chatID string) ([]chat.StoredLane, error) {
 		selections, err := manager.StoredProviderLaneSelections(chatID)
 		if err != nil {
 			return nil, err
@@ -80,7 +80,8 @@ func newProviderChatRuntimeWithStartupMode(manager *acp.Manager, sessions *sessi
 		for _, selection := range selections {
 			lanes = append(lanes, chat.StoredLane{
 				Identity: selection.Identity, Thread: selection.Thread, Owner: selection.Owner,
-				CWD: selection.CWD, ModelID: selection.ModelID, ModeID: selection.ModeID, Context: selection.Context,
+				CWD: selection.CWD, ModelID: selection.ModelID, ModeID: selection.ModeID,
+				Context: selection.Context, Creation: selection.Creation, Established: selection.Established,
 			})
 		}
 		return lanes, nil
@@ -593,11 +594,38 @@ func (r *providerChatRuntime) Select(ctx context.Context, opts acp.SessionOption
 	}
 	info, ok := r.manager.LiveProviderLaneInfo(selection)
 	if !ok {
+		if selection.Creation.DeferredUntilInput && !selection.Established {
+			return catalogOnlyProviderLaneInfo(r.manager, selection), nil
+		}
 		return acp.SessionInfo{}, &providercontract.Error{
 			Kind: providercontract.ErrorTransientTransport, Message: "the exact provider lane is not attached after selection",
 		}
 	}
 	return info, nil
+}
+
+func catalogOnlyProviderLaneInfo(manager *acp.Manager, selection acp.ProviderLaneSelection) acp.SessionInfo {
+	providerID := string(selection.Identity.Realm.ProviderID)
+	info := acp.SessionInfo{
+		SessionID: "", CWD: selection.CWD, ProviderID: providerID,
+		CurrentModelID: stringPointerValueOrNil(selection.ModelID),
+		CurrentModeID:  stringPointerValueOrNil(selection.ModeID),
+		Models:         []acp.Model{}, Modes: []acp.Mode{},
+	}
+	if manager == nil {
+		return info
+	}
+	for _, group := range manager.CatalogSnapshotGroups() {
+		if group.ProviderID != providerID {
+			continue
+		}
+		info.ProviderName = group.ProviderName
+		info.Agent = group.ProviderName
+		info.Models = append([]acp.Model(nil), group.Models...)
+		info.Modes = append([]acp.Mode(nil), group.Modes...)
+		break
+	}
+	return info
 }
 
 // SelectNewChat attaches a provider lane to an already-created actor. Chat
@@ -1338,7 +1366,7 @@ func providerLaneSelectionFromActorLane(lane chat.LaneState) acp.ProviderLaneSel
 	return acp.ProviderLaneSelection{
 		Identity: lane.Identity, Thread: lane.Thread, Owner: lane.Owner,
 		CWD: lane.CWD, ModelID: lane.ModelID, ModeID: lane.ModeID,
-		Context: lane.Context, Delivery: lane.Delivery, Established: !lane.Thread.IsZero(),
+		Context: lane.Context, Delivery: lane.Delivery, Creation: lane.Creation, Established: !lane.Thread.IsZero(),
 	}
 }
 
@@ -1361,6 +1389,11 @@ func (r *providerChatRuntime) selectLocked(ctx context.Context, actor *providerC
 			return selection, &providercontract.Error{Kind: lane.LastError, Message: "provider lane is blocked at a safe boundary"}
 		case chat.LaneBroken:
 			return selection, &providercontract.Error{Kind: lane.LastError, Message: "provider lane failed closed"}
+		case chat.LaneAbsent:
+			if lane.Creation.DeferredUntilInput {
+				return selection, nil
+			}
+			fallthrough
 		default:
 			return selection, &providercontract.Error{Kind: providercontract.ErrorTransientTransport, Message: "committed provider lane selection is not currently attached"}
 		}
@@ -1394,6 +1427,7 @@ func (r *providerChatRuntime) selectLocked(ctx context.Context, actor *providerC
 	selection.ModeID = lane.ModeID
 	selection.Context = lane.Context
 	selection.Delivery = lane.Delivery
+	selection.Creation = lane.Creation
 	selection.Established = !lane.Thread.IsZero()
 	switch lane.Phase {
 	case chat.LaneReady, chat.LaneRunning, chat.LaneReconciling:
@@ -1410,7 +1444,12 @@ func (r *providerChatRuntime) selectLocked(ctx context.Context, actor *providerC
 		return selection, &providercontract.Error{Kind: lane.LastError, Message: "provider lane is blocked at a safe boundary"}
 	case chat.LaneBroken:
 		return selection, &providercontract.Error{Kind: lane.LastError, Message: "provider lane failed closed"}
-	case chat.LaneAbsent, chat.LaneCreating, chat.LaneDetached, chat.LaneResuming, chat.LaneImporting:
+	case chat.LaneAbsent:
+		if lane.Creation.DeferredUntilInput {
+			return selection, nil
+		}
+		fallthrough
+	case chat.LaneCreating, chat.LaneDetached, chat.LaneResuming, chat.LaneImporting:
 		if state.Foreground != nil && state.Foreground.LaneID != laneID {
 			// A desired provider selected during another lane's running turn is a
 			// valid immutable queue target. Attachment/import waits for the safe
@@ -1450,7 +1489,7 @@ func (r *providerChatRuntime) commitLaneSelectionLocked(actor *providerChatActor
 		OperationID: operationID, Digest: digest,
 		Identity: selection.Identity, Thread: selection.Thread, Owner: selection.Owner,
 		CWD: selection.CWD, ModelID: selection.ModelID, ModeID: selection.ModeID,
-		Context: selection.Context, Established: selection.Established, Update: update,
+		Context: selection.Context, Creation: selection.Creation, Established: selection.Established, Update: update,
 	})
 }
 

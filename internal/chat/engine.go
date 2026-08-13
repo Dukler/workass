@@ -176,7 +176,10 @@ func outboxEntryExecutable(state State, entry OutboxEntry) bool {
 	case EffectImportContext:
 		return lane.Phase == LaneImporting
 	case EffectStartTurn:
-		return lane.Phase == LaneRunning && state.Foreground != nil &&
+		laneCanDispatch := lane.Phase == LaneRunning ||
+			(lane.Phase == LaneCreating && lane.Provision != nil && lane.Creation.DeferredUntilInput)
+		attachedForDispatch := lane.Provision == nil || lane.Attachment != nil
+		return laneCanDispatch && attachedForDispatch && state.Foreground != nil &&
 			state.Foreground.LaneID == entry.LaneID && state.Foreground.OperationID == entry.OperationID &&
 			state.Foreground.Status == ForegroundDispatching
 	case EffectReconcileTurn:
