@@ -82,6 +82,9 @@ type ThinkingEvent struct {
 type InputEvent struct {
 	OperationID  OperationID
 	NativeTurnID string
+	// Thread is present only when consuming this input is also the provider's
+	// durable creation receipt.
+	Thread *ThreadRef
 }
 
 type ToolEvent struct {
@@ -310,6 +313,12 @@ func (e Event) Validate() error {
 	case EventInputConsumed:
 		if e.Input.OperationID == "" {
 			return errors.New("input consumption event is missing operation identity")
+		}
+		if e.Input.Thread != nil {
+			thread := e.Input.Thread.Normalize()
+			if err := thread.Validate(""); err != nil {
+				return errors.New("input consumption event has an invalid durable thread receipt")
+			}
 		}
 	case EventAssistantChunk:
 		if e.Identity.OperationID == "" || e.Assistant.Text == "" {

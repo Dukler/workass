@@ -392,7 +392,8 @@ test('official Claude SDK host fails closed when the exact resumed conversation 
     sessionId: 'fixture-missing-resume', cwd: repoRoot, mcpServers: [],
   } });
   const resumed = await peer.waitFor((message) => message.id === 2);
-  assert.match(resumed.error?.message || '', /no conversation found with session id/i);
+  assert.equal(resumed.error?.code, -32044);
+  assert.match(resumed.error?.message || '', /candidate was never materialized/i);
   assert.equal(resumed.result, undefined);
 });
 

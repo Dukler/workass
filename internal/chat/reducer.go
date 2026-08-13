@@ -24,6 +24,7 @@ type SelectLane struct {
 	CWD      string
 	ModelID  string
 	ModeID   string
+	Creation provider.CreationCapabilities
 }
 
 func (SelectLane) chatCommand() {}
@@ -39,6 +40,7 @@ type BindEstablishedLane struct {
 	ModelID  string
 	ModeID   string
 	Context  provider.ContextCapabilities
+	Creation provider.CreationCapabilities
 }
 
 func (BindEstablishedLane) chatCommand() {}
@@ -59,6 +61,24 @@ type LaneOpened struct {
 }
 
 func (LaneOpened) chatCommand() {}
+
+// LaneProvisioned records a deferred provider's exact creation candidate
+// without establishing it as ThreadRef. Only a matching input-consumption
+// receipt may promote this candidate into the immutable provider lane.
+type LaneProvisioned struct {
+	LaneID                  provider.LaneID
+	Identity                provider.LaneIdentity
+	Candidate               provider.ThreadRef
+	ConnectionGeneration    uint64
+	Context                 provider.ContextCapabilities
+	Delivery                provider.DeliveryCapabilities
+	Creation                provider.CreationCapabilities
+	Attachment              *provider.LaneAttachmentSnapshot
+	Reconciled              bool
+	PreviousCandidateAbsent bool
+}
+
+func (LaneProvisioned) chatCommand() {}
 
 type LaneOpenFailed struct {
 	LaneID    provider.LaneID
@@ -236,6 +256,7 @@ func (TurnReconciled) chatCommand() {}
 
 type InputConsumed struct {
 	OperationID provider.OperationID
+	Thread      *provider.ThreadRef
 }
 
 func (InputConsumed) chatCommand() {}
@@ -365,13 +386,14 @@ type Effect interface {
 }
 
 type CreateLaneEffect struct {
-	Identity   provider.LaneIdentity
-	Owner      provider.AttachmentOwner
-	CWD        string
-	ModelID    string
-	ModeID     string
-	Generation uint64
-	Reconcile  bool
+	Identity                    provider.LaneIdentity
+	Owner                       provider.AttachmentOwner
+	CWD                         string
+	ModelID                     string
+	ModeID                      string
+	Generation                  uint64
+	Reconcile                   bool
+	CreateAfterCandidateAbsence bool
 }
 
 func (CreateLaneEffect) chatEffect() {}
@@ -581,6 +603,8 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 		err = reduceBindEstablishedLane(&next, command)
 	case LaneOpened:
 		effects, err = reduceLaneOpened(&next, command)
+	case LaneProvisioned:
+		effects, err = reduceLaneProvisioned(&next, command)
 	case LaneOpenFailed:
 		err = reduceLaneOpenFailed(&next, command)
 	case LineageAdvanced:
@@ -1174,14 +1198,14 @@ func reduceCommitLaneSelection(state *State, command CommitLaneSelection) ([]Eff
 		}
 		if err := reduceBindEstablishedLane(state, BindEstablishedLane{
 			Identity: identity, Thread: thread, Owner: command.Owner, CWD: command.CWD,
-			ModelID: command.ModelID, ModeID: command.ModeID, Context: command.Context,
+			ModelID: command.ModelID, ModeID: command.ModeID, Context: command.Context, Creation: command.Creation,
 		}); err != nil {
 			return nil, err
 		}
 	}
 	effects, err := reduceSelectLane(state, SelectLane{
 		Identity: identity, Owner: command.Owner, CWD: command.CWD,
-		ModelID: command.ModelID, ModeID: command.ModeID,
+		ModelID: command.ModelID, ModeID: command.ModeID, Creation: command.Creation,
 	})
 	if err != nil {
 		return nil, err
@@ -1385,13 +1409,14 @@ func reduceBindEstablishedLane(state *State, command BindEstablishedLane) error 
 		if existing.Context == (provider.ContextCapabilities{}) {
 			existing.Context = command.Context
 		}
+		existing.Creation = command.Creation
 		lane = existing
 	} else {
 		lane = LaneState{
 			Identity: identity, Owner: command.Owner, CWD: strings.TrimSpace(command.CWD),
 			ModelID: strings.TrimSpace(command.ModelID), ModeID: strings.TrimSpace(command.ModeID),
 			Thread: thread, Phase: LaneDetached, Coverage: make(map[uint64]CoverageRecord),
-			Context: command.Context,
+			Context: command.Context, Creation: command.Creation,
 		}
 	}
 	state.Lanes[identity.ID] = lane
@@ -1439,7 +1464,13 @@ func reduceSelectLane(state *State, command SelectLane) ([]Effect, error) {
 			return nil, errors.New("selected lane workspace changed without a new workspace epoch")
 		}
 		if strings.TrimSpace(command.Owner.TabID) != "" {
-			existing.Owner = command.Owner
+			owner := command.Owner
+			owner.TabID = strings.TrimSpace(owner.TabID)
+			owner.AgentOwnerKey = strings.TrimSpace(owner.AgentOwnerKey)
+			if owner.AgentOwnerKey == "" {
+				owner.AgentOwnerKey = existing.Owner.AgentOwnerKey
+			}
+			existing.Owner = owner
 		}
 		if existing.CWD == "" {
 			existing.CWD = strings.TrimSpace(command.CWD)
@@ -1450,12 +1481,17 @@ func reduceSelectLane(state *State, command SelectLane) ([]Effect, error) {
 		if modeID := strings.TrimSpace(command.ModeID); modeID != "" {
 			existing.ModeID = modeID
 		}
+		if existing.Provision != nil && existing.Creation != command.Creation {
+			return nil, errors.New("selected lane changed deferred creation semantics while provisional")
+		}
+		existing.Creation = command.Creation
 		state.Lanes[identity.ID] = existing
 	} else {
 		lane := LaneState{
 			Identity: identity, Owner: command.Owner, CWD: strings.TrimSpace(command.CWD),
 			ModelID: strings.TrimSpace(command.ModelID), ModeID: strings.TrimSpace(command.ModeID),
-			Phase: LaneAbsent, Coverage: make(map[uint64]CoverageRecord),
+			Phase: LaneAbsent, Coverage: make(map[uint64]CoverageRecord), Creation: command.Creation,
+			CreateAfterCandidateAbsence: command.Creation.DeferredUntilInput,
 		}
 		for sequence := uint64(1); sequence <= state.ContextFloor; sequence++ {
 			lane.Coverage[sequence] = CoverageRecord{
@@ -1501,6 +1537,9 @@ func reduceLaneOpened(state *State, command LaneOpened) ([]Effect, error) {
 	if !lane.Thread.IsZero() && !lane.Thread.Equal(thread) {
 		return nil, errors.New("resume returned a replacement native thread")
 	}
+	if lane.Provision != nil && !lane.Provision.Equal(thread) {
+		return nil, errors.New("provider creation committed a different native candidate")
+	}
 	if !command.Context.ExactResume {
 		lane.Phase = LaneBroken
 		lane.LastError = provider.ErrorUnsupportedCapability
@@ -1508,6 +1547,8 @@ func reduceLaneOpened(state *State, command LaneOpened) ([]Effect, error) {
 		return nil, nil
 	}
 	lane.Thread = thread
+	lane.Provision = nil
+	lane.CreateAfterCandidateAbsence = false
 	if lane.Coverage == nil {
 		lane.Coverage = make(map[uint64]CoverageRecord)
 	}
@@ -1556,6 +1597,90 @@ func reduceLaneOpened(state *State, command LaneOpened) ([]Effect, error) {
 		return nil, nil
 	}
 	return drive(state)
+}
+
+func reduceLaneProvisioned(state *State, command LaneProvisioned) ([]Effect, error) {
+	lane, ok := state.Lanes[command.LaneID]
+	if !ok {
+		return nil, errors.New("provisioned lane is unknown")
+	}
+	if lane.Phase != LaneCreating {
+		return nil, fmt.Errorf("lane provisioned from illegal phase %q", lane.Phase)
+	}
+	if !lane.Thread.IsZero() {
+		return nil, errors.New("established lane cannot accept a creation candidate")
+	}
+	canonical := command.Identity.Normalize()
+	if canonical.ID == "" {
+		canonical = lane.Identity
+	}
+	openedLaneID := command.LaneID
+	if canonical != lane.Identity {
+		var err error
+		openedLaneID, lane, err = canonicalizeCreatingLane(state, command.LaneID, lane, canonical, LaneCreating, false)
+		if err != nil {
+			return nil, err
+		}
+	}
+	candidate := command.Candidate.Normalize()
+	if err := candidate.Validate(canonical.Realm.ProviderID); err != nil {
+		return nil, err
+	}
+	if !command.Creation.DeferredUntilInput {
+		return nil, errors.New("provider returned a provisional candidate without deferred creation semantics")
+	}
+	if !command.Delivery.StableInputIdentity || !command.Delivery.ConsumptionReceipt {
+		return nil, errors.New("deferred provider candidate lacks a stable input consumption receipt")
+	}
+	if !command.Context.ExactResume {
+		return nil, errors.New("provider candidate cannot become a durable lane without exact resume")
+	}
+	if lane.Provision != nil && !lane.Provision.Equal(candidate) && !command.PreviousCandidateAbsent {
+		return nil, errors.New("provider changed an uncommitted candidate without proving native absence")
+	}
+	if command.PreviousCandidateAbsent && (!command.Reconciled || !lane.CreateAfterCandidateAbsence) {
+		return nil, errors.New("provider changed a candidate without actor proof that the lane was empty")
+	}
+	lane.Provision = &candidate
+	lane.Context = command.Context
+	lane.Delivery = command.Delivery
+	lane.Creation = command.Creation
+	lane.ConnectionGeneration = command.ConnectionGeneration
+	if lane.ConnectionGeneration == 0 {
+		lane.ConnectionGeneration = 1
+	}
+	lane.LastEventSequence = 0
+	if command.Attachment != nil {
+		attachment := command.Attachment.Clone()
+		lane.Attachment = &attachment
+	} else {
+		lane.Attachment = nil
+	}
+	lane.Phase = LaneCreating
+	lane.LastError = ""
+	state.Lanes[openedLaneID] = lane
+	if !updateOutbox(state, createEffectID(command.LaneID, lane.CreateGeneration), OutboxCompleted, "") {
+		return nil, errors.New("provider candidate has no durable create operation")
+	}
+
+	if state.Foreground != nil {
+		if state.Foreground.LaneID != openedLaneID {
+			return nil, errors.New("provider candidate conflicts with another foreground owner")
+		}
+		if command.PreviousCandidateAbsent {
+			state.Foreground.Status = ForegroundDispatching
+			state.Foreground.Turn = provider.TurnRef{}
+			state.Foreground.UserConsumed = false
+			if !updateOutbox(state, startTurnEffectID(state.Foreground.OperationID), OutboxPending, "") {
+				return nil, errors.New("new provider candidate lost its durable prompt operation")
+			}
+		}
+		return nil, nil
+	}
+	if len(state.Queue) == 0 || state.Queue[0].LaneID != openedLaneID {
+		return nil, nil
+	}
+	return beginQueuedForeground(state, openedLaneID, lane, true)
 }
 
 // canonicalizeCreatingLane is the sole identity-rekey transition. Realm
@@ -1719,6 +1844,38 @@ func reduceRetryLane(state *State, command RetryLane) ([]Effect, error) {
 		state.Lanes[command.LaneID] = lane
 		return nil, nil
 	}
+	if lane.Provision != nil {
+		if !lane.Thread.IsZero() || !lane.Creation.DeferredUntilInput {
+			return nil, errors.New("provisional lane retry has contradictory thread ownership")
+		}
+		for i := len(state.Outbox) - 1; i >= 0; i-- {
+			entry := &state.Outbox[i]
+			if entry.Kind != EffectCreateLane || entry.LaneID != command.LaneID ||
+				(entry.Status != OutboxAmbiguous && entry.Status != OutboxFailed) {
+				continue
+			}
+			entry.Status = OutboxPending
+			entry.Reconcile = true
+			entry.LastError = ""
+			lane.Phase = LaneCreating
+			lane.LastError = ""
+			state.Lanes[command.LaneID] = lane
+			return nil, nil
+		}
+		lane.CreateGeneration++
+		if lane.CreateGeneration <= lane.ConnectionGeneration {
+			lane.CreateGeneration = lane.ConnectionGeneration + 1
+		}
+		lane.ConnectionGeneration = lane.CreateGeneration
+		lane.Phase = LaneCreating
+		lane.LastError = ""
+		state.Lanes[command.LaneID] = lane
+		return []Effect{CreateLaneEffect{
+			Identity: lane.Identity, Owner: lane.Owner, CWD: lane.CWD, ModelID: lane.ModelID, ModeID: lane.ModeID,
+			Generation: lane.CreateGeneration, Reconcile: true,
+			CreateAfterCandidateAbsence: lane.CreateAfterCandidateAbsence,
+		}}, nil
+	}
 	if lane.Thread.IsZero() {
 		for i := len(state.Outbox) - 1; i >= 0; i-- {
 			entry := &state.Outbox[i]
@@ -1741,7 +1898,7 @@ func reduceRetryLane(state *State, command RetryLane) ([]Effect, error) {
 		state.Lanes[command.LaneID] = lane
 		return []Effect{CreateLaneEffect{
 			Identity: lane.Identity, Owner: lane.Owner, CWD: lane.CWD, ModelID: lane.ModelID, ModeID: lane.ModeID,
-			Generation: lane.CreateGeneration,
+			Generation: lane.CreateGeneration, CreateAfterCandidateAbsence: lane.CreateAfterCandidateAbsence,
 		}}, nil
 	}
 	lane.Phase = LaneResuming
@@ -2191,7 +2348,11 @@ func reduceTurnAdmitted(state *State, command TurnAdmitted) error {
 	}
 	state.Foreground.Turn = command.Turn
 	state.Foreground.Status = ForegroundRunning
-	lane.Phase = LaneRunning
+	if lane.Provision != nil {
+		lane.Phase = LaneCreating
+	} else {
+		lane.Phase = LaneRunning
+	}
 	lane.LastError = ""
 	state.Lanes[state.Foreground.LaneID] = lane
 	updateOutbox(state, startTurnEffectID(command.OperationID), OutboxAccepted, "")
@@ -2285,6 +2446,9 @@ func reduceTurnReconciled(state *State, command TurnReconciled) ([]Effect, error
 
 func reduceInputConsumed(state *State, command InputConsumed) error {
 	if state.PendingSteer != nil && state.PendingSteer.OperationID == command.OperationID {
+		if command.Thread != nil {
+			return errors.New("steer consumption cannot establish a provider thread")
+		}
 		pending := state.PendingSteer
 		if state.Foreground == nil || state.Foreground.LaneID != pending.LaneID || state.Foreground.Turn != pending.Turn {
 			return errors.New("consumed steer lost its foreground turn owner")
@@ -2321,6 +2485,24 @@ func reduceInputConsumed(state *State, command InputConsumed) error {
 	}
 	if state.Foreground == nil || state.Foreground.OperationID != command.OperationID {
 		return errors.New("input consumption does not match foreground operation")
+	}
+	lane := state.Lanes[state.Foreground.LaneID]
+	if command.Thread != nil {
+		thread := command.Thread.Normalize()
+		if err := thread.Validate(lane.Identity.Realm.ProviderID); err != nil {
+			return err
+		}
+		if lane.Provision == nil || !lane.Provision.Equal(thread) || !lane.Creation.DeferredUntilInput || !lane.Thread.IsZero() {
+			return errors.New("input consumption does not match the lane's deferred creation candidate")
+		}
+		lane.Thread = thread
+		lane.Provision = nil
+		lane.CreateAfterCandidateAbsence = false
+		lane.Phase = LaneRunning
+		lane.LastError = ""
+		state.Lanes[state.Foreground.LaneID] = lane
+	} else if lane.Provision != nil {
+		return errors.New("deferred provider input was consumed without a durable thread receipt")
 	}
 	if state.Foreground.UserConsumed {
 		return nil
@@ -2740,7 +2922,11 @@ func reduceProviderEvent(state *State, command ProviderEventReceived) ([]Effect,
 	}
 	switch event.Kind {
 	case provider.EventLaneAttached:
-		if event.Thread == nil || !lane.Thread.Equal(*event.Thread) {
+		expectedThread := lane.Thread
+		if lane.Provision != nil {
+			expectedThread = *lane.Provision
+		}
+		if event.Thread == nil || !expectedThread.Equal(*event.Thread) {
 			return nil, errors.New("attached provider event changed the lane thread")
 		}
 		return nil, nil
@@ -2770,7 +2956,7 @@ func reduceProviderEvent(state *State, command ProviderEventReceived) ([]Effect,
 		if event.Identity.OperationID != "" && operationID != event.Identity.OperationID {
 			return nil, errors.New("input-consumed event changed operation ownership")
 		}
-		return nil, reduceInputConsumed(state, InputConsumed{OperationID: operationID})
+		return nil, reduceInputConsumed(state, InputConsumed{OperationID: operationID, Thread: event.Input.Thread})
 	case provider.EventAssistantChunk:
 		if state.Foreground == nil || state.Foreground.OperationID != event.Identity.OperationID || state.Foreground.LaneID != event.Identity.LaneID {
 			return nil, errors.New("assistant event does not match the foreground owner")
@@ -3152,6 +3338,27 @@ func reduceHostLost(state *State, command HostLost) ([]Effect, error) {
 		}
 	}
 	lane.Attachment = nil
+	if lane.Provision != nil {
+		if !lane.Thread.IsZero() || !lane.Creation.DeferredUntilInput {
+			return nil, errors.New("lost provisional lane has contradictory thread ownership")
+		}
+		if state.Foreground != nil && state.Foreground.LaneID == command.LaneID && state.Foreground.Turn.NativeID != "" {
+			state.Foreground.Status = ForegroundReconciling
+		}
+		lane.CreateGeneration++
+		if lane.CreateGeneration <= lane.ConnectionGeneration {
+			lane.CreateGeneration = lane.ConnectionGeneration + 1
+		}
+		lane.ConnectionGeneration = lane.CreateGeneration
+		lane.Phase = LaneCreating
+		lane.LastError = ""
+		state.Lanes[command.LaneID] = lane
+		return []Effect{CreateLaneEffect{
+			Identity: lane.Identity, Owner: lane.Owner, CWD: lane.CWD,
+			ModelID: lane.ModelID, ModeID: lane.ModeID, Generation: lane.CreateGeneration, Reconcile: true,
+			CreateAfterCandidateAbsence: lane.CreateAfterCandidateAbsence,
+		}}, nil
+	}
 	if lane.Thread.IsZero() {
 		lane.Phase = LaneBroken
 		lane.LastError = provider.ErrorProtocolViolation
@@ -3215,12 +3422,16 @@ func drive(state *State) ([]Effect, error) {
 		if !lane.Thread.IsZero() {
 			return nil, errors.New("established lane attempted create transition")
 		}
+		if lane.Creation.DeferredUntilInput && len(state.Queue) == 0 {
+			return nil, nil
+		}
 		lane.Phase = LaneCreating
 		lane.CreateGeneration++
 		state.Lanes[target] = lane
 		return []Effect{CreateLaneEffect{
 			Identity: lane.Identity, Owner: lane.Owner, CWD: lane.CWD, ModelID: lane.ModelID, ModeID: lane.ModeID,
-			Generation: lane.CreateGeneration,
+			Generation: lane.CreateGeneration, Reconcile: lane.Provision != nil,
+			CreateAfterCandidateAbsence: lane.CreateAfterCandidateAbsence,
 		}}, nil
 	case LaneDetached:
 		if lane.Thread.IsZero() {
@@ -3258,30 +3469,42 @@ func drive(state *State) ([]Effect, error) {
 		if len(state.Queue) == 0 {
 			return nil, nil
 		}
-		input := state.Queue[0]
-		state.Queue = append([]QueueEntry(nil), state.Queue[1:]...)
-		rootAssistantID := strings.TrimSpace(input.Presentation.AssistantMessageID)
-		if rootAssistantID == "" {
-			rootAssistantID = fmt.Sprintf("message:%s:assistant", input.OperationID)
-		}
-		if planEntriesAllCompleted(state.Presentation.PlanLatest) {
-			state.Presentation.PlanLatest = nil
-			state.Presentation.PlanLatestMessageID = rootAssistantID
-		}
-		state.Foreground = &ForegroundTurn{
-			OperationID: input.OperationID, LaneID: target, Input: input, Status: ForegroundDispatching,
-			StartedAt: input.Presentation.StartedAt, RootAssistantMessageID: rootAssistantID,
-			CurrentAssistantMessageID: rootAssistantID,
-		}
-		beginForegroundObligation(state, input)
-		lane.Phase = LaneRunning
-		state.Lanes[target] = lane
-		return []Effect{StartTurnEffect{LaneID: target, Input: input}}, nil
+		return beginQueuedForeground(state, target, lane, false)
 	case LaneCreating, LaneResuming, LaneImporting, LaneRunning, LaneReconciling, LaneBlocked, LaneBroken:
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("unknown lane phase %q", lane.Phase)
 	}
+}
+
+func beginQueuedForeground(state *State, target provider.LaneID, lane LaneState, keepCreating bool) ([]Effect, error) {
+	if state == nil || state.Foreground != nil || len(state.Queue) == 0 || state.Queue[0].LaneID != target {
+		return nil, errors.New("queued foreground start lost its lane or FIFO owner")
+	}
+	input := state.Queue[0]
+	state.Queue = append([]QueueEntry(nil), state.Queue[1:]...)
+	rootAssistantID := strings.TrimSpace(input.Presentation.AssistantMessageID)
+	if rootAssistantID == "" {
+		rootAssistantID = fmt.Sprintf("message:%s:assistant", input.OperationID)
+	}
+	if planEntriesAllCompleted(state.Presentation.PlanLatest) {
+		state.Presentation.PlanLatest = nil
+		state.Presentation.PlanLatestMessageID = rootAssistantID
+	}
+	state.Foreground = &ForegroundTurn{
+		OperationID: input.OperationID, LaneID: target, Input: input, Status: ForegroundDispatching,
+		StartedAt: input.Presentation.StartedAt, RootAssistantMessageID: rootAssistantID,
+		CurrentAssistantMessageID: rootAssistantID,
+	}
+	beginForegroundObligation(state, input)
+	state.ActiveLaneID = target
+	if keepCreating {
+		lane.Phase = LaneCreating
+	} else {
+		lane.Phase = LaneRunning
+	}
+	state.Lanes[target] = lane
+	return []Effect{StartTurnEffect{LaneID: target, Input: input}}, nil
 }
 
 func planEntriesAllCompleted(entries []provider.PlanEntry) bool {
@@ -4006,6 +4229,7 @@ func outboxEntryForEffect(effect Effect) (OutboxEntry, bool, error) {
 			LaneID: effect.Identity.ID, OperationID: provider.OperationID(createEffectID(effect.Identity.ID, effect.Generation)),
 			Owner: effect.Owner, CWD: effect.CWD, ModelID: effect.ModelID, ModeID: effect.ModeID,
 			Generation: effect.Generation, Reconcile: effect.Reconcile,
+			CreateAfterCandidateAbsence: effect.CreateAfterCandidateAbsence,
 		}, true, nil
 	case ResumeLaneEffect:
 		return OutboxEntry{
@@ -4189,9 +4413,13 @@ func effectFromOutbox(state State, entry OutboxEntry) (Effect, error) {
 	}
 	switch entry.Kind {
 	case EffectCreateLane:
+		if entry.CreateAfterCandidateAbsence != lane.CreateAfterCandidateAbsence {
+			return nil, errors.New("create outbox lost its candidate-absence boundary")
+		}
 		return CreateLaneEffect{
 			Identity: lane.Identity, Owner: entry.Owner, CWD: entry.CWD, ModelID: entry.ModelID, ModeID: entry.ModeID,
 			Generation: entry.Generation, Reconcile: entry.Reconcile,
+			CreateAfterCandidateAbsence: entry.CreateAfterCandidateAbsence,
 		}, nil
 	case EffectResumeLane:
 		return ResumeLaneEffect{
@@ -4324,9 +4552,25 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 				lane.LastError = provider.ErrorAcceptanceAmbiguous
 				state.Lanes[entry.LaneID] = lane
 			case EffectStartTurn:
+				lane := state.Lanes[entry.LaneID]
+				if lane.Provision != nil {
+					if state.Foreground != nil && state.Foreground.OperationID == entry.OperationID && state.Foreground.Turn.NativeID == "" {
+						entry.Status = OutboxPending
+						entry.LastError = ""
+						state.Foreground.Status = ForegroundDispatching
+					} else {
+						entry.Status = OutboxAmbiguous
+						entry.LastError = provider.ErrorAcceptanceAmbiguous
+						if state.Foreground != nil && state.Foreground.OperationID == entry.OperationID {
+							state.Foreground.Status = ForegroundReconciling
+						}
+					}
+					state.Lanes[entry.LaneID] = lane
+					continue
+				}
 				entry.Status = OutboxAmbiguous
 				entry.LastError = provider.ErrorAcceptanceAmbiguous
-				lane := state.Lanes[entry.LaneID]
+				lane = state.Lanes[entry.LaneID]
 				lane.Phase = LaneBlocked
 				lane.LastError = provider.ErrorAcceptanceAmbiguous
 				state.Lanes[entry.LaneID] = lane
@@ -4348,6 +4592,12 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 				}
 			}
 		case OutboxAccepted, OutboxConsumed:
+			if entry.Kind == EffectCreateLane {
+				entry.Status = OutboxPending
+				entry.Reconcile = true
+				entry.LastError = ""
+				continue
+			}
 			if entry.Kind == EffectSteerTurn || entry.Kind == EffectPermission {
 				entry.Status = OutboxAmbiguous
 				entry.LastError = provider.ErrorAcceptanceAmbiguous
@@ -4380,6 +4630,44 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 	// lanes become Detached; lanes that own a pending or accepted foreground
 	// operation schedule exact resume before delivery/readback can continue.
 	for laneID, lane := range state.Lanes {
+		if lane.Provision != nil {
+			lane.Attachment = nil
+			if lane.Phase == LaneBlocked || lane.Phase == LaneBroken {
+				state.Lanes[laneID] = lane
+				continue
+			}
+			if pendingOutboxKind(state, laneID, EffectCreateLane) {
+				lane.Phase = LaneCreating
+				state.Lanes[laneID] = lane
+				continue
+			}
+			foreground := state.Foreground != nil && state.Foreground.LaneID == laneID
+			queued := false
+			for _, input := range state.Queue {
+				if input.LaneID == laneID {
+					queued = true
+					break
+				}
+			}
+			if !foreground && !queued {
+				lane.Phase = LaneAbsent
+				state.Lanes[laneID] = lane
+				continue
+			}
+			lane.CreateGeneration++
+			if lane.CreateGeneration <= lane.ConnectionGeneration {
+				lane.CreateGeneration = lane.ConnectionGeneration + 1
+			}
+			lane.ConnectionGeneration = lane.CreateGeneration
+			lane.Phase = LaneCreating
+			state.Lanes[laneID] = lane
+			effects = append(effects, CreateLaneEffect{
+				Identity: lane.Identity, Owner: lane.Owner, CWD: lane.CWD,
+				ModelID: lane.ModelID, ModeID: lane.ModeID, Generation: lane.CreateGeneration, Reconcile: true,
+				CreateAfterCandidateAbsence: lane.CreateAfterCandidateAbsence,
+			})
+			continue
+		}
 		if lane.Thread.IsZero() || lane.Phase == LaneBlocked || lane.Phase == LaneBroken || lane.Phase == LaneCreating {
 			continue
 		}

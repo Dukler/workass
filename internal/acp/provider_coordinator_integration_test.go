@@ -101,7 +101,7 @@ func TestUnifiedCoordinatorRunsExistingACPManagerThroughTypedEvents(t *testing.T
 }
 
 func TestClaudeVerifiedLineageCommitsActorBeforeNativeMaterializationAndExactResume(t *testing.T) {
-	manager, _ := newFakeManager(t, "claude-cold-effort-resume", Options{
+	manager, _ := newFakeManager(t, "claude-cold-effort-stable-resume", Options{
 		RSSSampleInterval: time.Hour, Provider: ProviderConfig{ID: "claude"},
 	})
 	t.Cleanup(func() { manager.Reset() })
@@ -126,21 +126,26 @@ func TestClaudeVerifiedLineageCommitsActorBeforeNativeMaterializationAndExactRes
 	}.Normalize()
 	if err := engine.Apply(chatstate.SelectLane{
 		Identity: identity, Owner: providercontract.AttachmentOwner{TabID: "claude-lineage-tab"}, CWD: manager.opts.RootDir,
+		Creation: providerAdapterForID("claude").creation,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if executed, executeErr := coordinator.ExecuteNext(context.Background()); executeErr != nil || !executed {
-		t.Fatalf("create Claude lane: executed=%v err=%v", executed, executeErr)
-	}
-	createdState := engine.Snapshot()
-	identity = createdState.Lanes[createdState.ActiveLaneID].Identity
-	initial := createdState.Lanes[identity.ID].Thread
-	if initial.Lineage != 1 {
-		t.Fatalf("initial thread = %#v", initial)
+	if executed, executeErr := coordinator.ExecuteNext(context.Background()); executeErr != nil || executed {
+		t.Fatalf("empty Claude selection started a provider: executed=%v err=%v", executed, executeErr)
 	}
 	if err := engine.Apply(chatstate.Submit{OperationID: "claude-lineage-turn", Text: "[fake:claude-updates] go"}); err != nil {
 		t.Fatal(err)
 	}
+	if executed, executeErr := coordinator.ExecuteNext(context.Background()); executeErr != nil || !executed {
+		t.Fatalf("provision Claude candidate: executed=%v err=%v", executed, executeErr)
+	}
+	createdState := engine.Snapshot()
+	identity = createdState.Lanes[createdState.ActiveLaneID].Identity
+	createdLane := createdState.Lanes[identity.ID]
+	if !createdLane.Thread.IsZero() || createdLane.Provision == nil || createdLane.Provision.Lineage != 1 {
+		t.Fatalf("initial candidate was exposed as a durable thread: %#v", createdLane)
+	}
+	initial := *createdLane.Provision
 	if executed, executeErr := coordinator.ExecuteNext(context.Background()); executeErr != nil || !executed {
 		t.Fatalf("start Claude lineage turn: executed=%v err=%v", executed, executeErr)
 	}
@@ -264,7 +269,7 @@ func TestProviderLaneRejectsUnknownFrozenSemanticEvents(t *testing.T) {
 }
 
 func TestProviderLaneCommandCatalogUpdateIsActorDurableBeforePublication(t *testing.T) {
-	manager, events := newFakeManager(t, "claude-commands-resume", Options{
+	manager, events := newFakeManager(t, "claude-commands-stable-resume", Options{
 		RSSSampleInterval: time.Hour, Provider: ProviderConfig{ID: "claude"},
 	})
 	t.Cleanup(func() { manager.Reset() })
@@ -286,18 +291,24 @@ func TestProviderLaneCommandCatalogUpdateIsActorDurableBeforePublication(t *test
 		t.Fatal(err)
 	}
 	identity := providercontract.LaneIdentity{ChatID: "actor-command-catalog-chat", Realm: realm, WorkspaceEpoch: nativeWorkspaceEpoch(manager.opts.RootDir)}.Normalize()
-	if err := engine.Apply(chatstate.SelectLane{Identity: identity, Owner: providercontract.AttachmentOwner{TabID: "actor-command-catalog-tab"}, CWD: manager.opts.RootDir}); err != nil {
+	if err := engine.Apply(chatstate.SelectLane{
+		Identity: identity, Owner: providercontract.AttachmentOwner{TabID: "actor-command-catalog-tab"}, CWD: manager.opts.RootDir,
+		Creation: providerAdapterForID("claude").creation,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if executed, executeErr := coordinator.ExecuteNext(context.Background()); executeErr != nil || executed {
+		t.Fatalf("empty Claude selection started a provider: executed=%v err=%v", executed, executeErr)
+	}
+	if err := engine.Apply(chatstate.Submit{OperationID: "catalog-update-operation", Text: "push commands please"}); err != nil {
 		t.Fatal(err)
 	}
 	if executed, executeErr := coordinator.ExecuteNext(context.Background()); executeErr != nil || !executed {
-		t.Fatalf("create lane: executed=%v err=%v", executed, executeErr)
+		t.Fatalf("provision Claude candidate: executed=%v err=%v", executed, executeErr)
 	}
 	initial := engine.Snapshot().Lanes[engine.Snapshot().ActiveLaneID].Attachment
 	if initial == nil || initial.CommandCatalog == nil || initial.CommandCatalog.AsOf != 1785000000000 {
 		t.Fatalf("initial actor catalog = %#v", initial)
-	}
-	if err := engine.Apply(chatstate.Submit{OperationID: "catalog-update-operation", Text: "push commands please"}); err != nil {
-		t.Fatal(err)
 	}
 	if executed, executeErr := coordinator.ExecuteNext(context.Background()); executeErr != nil || !executed {
 		t.Fatalf("start catalog turn: executed=%v err=%v", executed, executeErr)

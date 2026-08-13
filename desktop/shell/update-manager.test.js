@@ -150,7 +150,8 @@ function managerFixture({
     app: { getVersion: () => '1.1.0' },
     runtime: {
       dataRoot: path.join(root, 'data'), daemonURL: 'https://127.0.0.1:18788',
-      viewPort: 8799, launchdLabel: 'com.workass.daemon.test',
+      stateDir: path.join(root, 'data', 'state'), viewPort: 8799,
+      launchdLabel: 'com.workass.daemon.test',
     },
     resourcesPath,
     executablePath,
@@ -392,6 +393,12 @@ test('committed handoff arms one worker, then quits only after daemon commit', a
   assert.equal(state.phase, 'installing');
   assert.deepEqual(calls, ['prepare', 'spawn:update-worker.js', 'commit']);
   assert.equal(didQuit(), true);
+  const transaction = JSON.parse(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'transaction.json'), 'utf8'));
+  assert.equal(transaction.schemaVersion, 2);
+  assert.equal(transaction.transactionRoot, manager.prepared.transactionRoot);
+  assert.equal(transaction.mutableStateTarget, manager.runtime.stateDir);
+  assert.equal(transaction.mutableStateBackupTarget, path.join(manager.prepared.transactionRoot, 'state-before-activation'));
+  assert.equal(transaction.failedMutableStateTarget, path.join(manager.prepared.transactionRoot, 'state-from-failed-activation'));
 });
 
 test('one apply action stages and commits an available release without a second click', async () => {

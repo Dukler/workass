@@ -330,6 +330,132 @@ func TestResumeCannotReplaceNativeThread(t *testing.T) {
 	}
 }
 
+func TestDeferredProviderThreadExistsOnlyAfterMatchingInputReceipt(t *testing.T) {
+	state, _ := NewState("chat")
+	laneID := testLane("chat", "codex")
+	creation := provider.CreationCapabilities{DeferredUntilInput: true}
+	delivery := provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true}
+	candidate := provider.ThreadRef{ProviderID: "codex", RootID: "candidate", HeadID: "candidate", Lineage: 1}
+
+	state, effects := apply(t, state, SelectLane{Identity: laneID, Creation: creation})
+	if len(effects) != 0 || state.Lanes[laneID.ID].Phase != LaneAbsent {
+		t.Fatalf("empty deferred selection touched the provider: effects=%#v lane=%#v", effects, state.Lanes[laneID.ID])
+	}
+	state, effects = apply(t, state, Submit{OperationID: "first-input", Text: "hello"})
+	if len(effects) != 1 {
+		t.Fatalf("first input did not request exactly one candidate: %#v", effects)
+	}
+	create, ok := effects[0].(CreateLaneEffect)
+	if !ok || create.Reconcile || !create.CreateAfterCandidateAbsence {
+		t.Fatalf("first input create effect = %#v", effects[0])
+	}
+	state, effects = apply(t, state, LaneProvisioned{
+		LaneID: laneID.ID, Identity: laneID, Candidate: candidate, ConnectionGeneration: 1,
+		Context: exactContext(provider.ContextImportUnsupported), Delivery: delivery, Creation: creation,
+	})
+	if len(effects) != 1 {
+		t.Fatalf("candidate did not release the queued input: %#v", effects)
+	}
+	if _, ok := effects[0].(StartTurnEffect); !ok {
+		t.Fatalf("candidate effect = %T, want StartTurnEffect", effects[0])
+	}
+	provisional := state.Lanes[laneID.ID]
+	if !provisional.Thread.IsZero() || provisional.Provision == nil || !provisional.Provision.Equal(candidate) || len(state.Ledger) != 0 {
+		t.Fatalf("candidate escaped the provisional boundary: lane=%#v ledger=%#v", provisional, state.Ledger)
+	}
+	state, _ = apply(t, state, TurnAdmitted{
+		OperationID: "first-input", Accepted: true,
+		Turn: provider.TurnRef{OperationID: "first-input", NativeID: "native-turn"},
+	})
+	if _, _, err := Reduce(state, InputConsumed{OperationID: "first-input"}); err == nil {
+		t.Fatal("deferred input was accepted without its durable thread receipt")
+	}
+	other := provider.ThreadRef{ProviderID: "codex", RootID: "other", HeadID: "other", Lineage: 1}
+	if _, _, err := Reduce(state, InputConsumed{OperationID: "first-input", Thread: &other}); err == nil {
+		t.Fatal("deferred input promoted a different provider candidate")
+	}
+	state, _ = apply(t, state, InputConsumed{OperationID: "first-input", Thread: &candidate})
+	established := state.Lanes[laneID.ID]
+	if !established.Thread.Equal(candidate) || established.Provision != nil || established.Phase != LaneRunning ||
+		established.CreateAfterCandidateAbsence {
+		t.Fatalf("matching receipt did not promote the exact candidate: %#v", established)
+	}
+	if len(state.Ledger) != 1 || state.Ledger[0].OperationID != "first-input" || state.Ledger[0].Role != "user" {
+		t.Fatalf("matching receipt did not admit exactly one user event: %#v", state.Ledger)
+	}
+}
+
+func TestDeferredProviderCrashReconcilesExactCandidateBeforeAnyResend(t *testing.T) {
+	state, _ := NewState("chat")
+	laneID := testLane("chat", "codex")
+	creation := provider.CreationCapabilities{DeferredUntilInput: true}
+	delivery := provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true}
+	first := provider.ThreadRef{ProviderID: "codex", RootID: "candidate-1", HeadID: "candidate-1", Lineage: 1}
+	second := provider.ThreadRef{ProviderID: "codex", RootID: "candidate-2", HeadID: "candidate-2", Lineage: 1}
+
+	state, _ = apply(t, state, SelectLane{Identity: laneID, Creation: creation})
+	state, _ = apply(t, state, Submit{OperationID: "first-input", Text: "hello"})
+	state, _ = apply(t, state, LaneProvisioned{
+		LaneID: laneID.ID, Identity: laneID, Candidate: first, ConnectionGeneration: 1,
+		Context: exactContext(provider.ContextImportUnsupported), Delivery: delivery, Creation: creation,
+	})
+
+	t.Run("authoritative absence permits one fresh candidate", func(t *testing.T) {
+		beforeAdmission := state.Clone()
+		next, effects := apply(t, beforeAdmission, HostLost{LaneID: laneID.ID, ConnectionGeneration: 1})
+		if len(effects) != 1 {
+			t.Fatalf("candidate crash did not request one exact reconciliation: %#v", effects)
+		}
+		reconcile, ok := effects[0].(CreateLaneEffect)
+		if !ok || !reconcile.Reconcile || !reconcile.CreateAfterCandidateAbsence || reconcile.Generation != 2 {
+			t.Fatalf("candidate crash effect = %#v", effects[0])
+		}
+		next, effects = apply(t, next, LaneProvisioned{
+			LaneID: laneID.ID, Identity: laneID, Candidate: second, ConnectionGeneration: 2,
+			Context: exactContext(provider.ContextImportUnsupported), Delivery: delivery, Creation: creation,
+			Reconciled: true, PreviousCandidateAbsent: true,
+		})
+		if len(effects) != 0 || next.Foreground == nil || next.Foreground.OperationID != "first-input" {
+			t.Fatalf("absence reconciliation changed the exact input owner: effects=%#v foreground=%#v", effects, next.Foreground)
+		}
+		lane := next.Lanes[laneID.ID]
+		if !lane.Thread.IsZero() || lane.Provision == nil || !lane.Provision.Equal(second) {
+			t.Fatalf("absence reconciliation exposed or changed the fresh candidate: %#v", lane)
+		}
+		if !outboxHas(&next, startTurnEffectID("first-input"), OutboxPending) {
+			t.Fatalf("absence proof did not release the same input operation: %#v", next.Outbox)
+		}
+	})
+
+	t.Run("successful exact resume proves the original candidate", func(t *testing.T) {
+		admitted, _ := apply(t, state.Clone(), TurnAdmitted{
+			OperationID: "first-input", Accepted: true,
+			Turn: provider.TurnRef{OperationID: "first-input", NativeID: "native-turn"},
+		})
+		lost, effects := apply(t, admitted, HostLost{LaneID: laneID.ID, ConnectionGeneration: 1})
+		if len(effects) != 1 {
+			t.Fatalf("admitted candidate crash did not request exact reconciliation: %#v", effects)
+		}
+		reconcile, ok := effects[0].(CreateLaneEffect)
+		if !ok || !reconcile.Reconcile || !reconcile.CreateAfterCandidateAbsence || reconcile.Generation != 2 {
+			t.Fatalf("admitted candidate crash effect = %#v", effects[0])
+		}
+		resumed, effects := apply(t, lost, LaneOpened{
+			LaneID: laneID.ID, Identity: laneID, Thread: first, ConnectionGeneration: 2,
+			Context: exactContext(provider.ContextImportUnsupported), Delivery: delivery, Reconciled: true,
+		})
+		if !resumed.Lanes[laneID.ID].Thread.Equal(first) || resumed.Lanes[laneID.ID].Provision != nil {
+			t.Fatalf("exact resume did not prove the original candidate: %#v", resumed.Lanes[laneID.ID])
+		}
+		if len(effects) != 1 {
+			t.Fatalf("exact resume did not read back the admitted operation: %#v", effects)
+		}
+		if readback, ok := effects[0].(ReconcileTurnEffect); !ok || readback.OperationID != "first-input" {
+			t.Fatalf("exact resume effect = %#v", effects[0])
+		}
+	})
+}
+
 func TestProviderSwitchImportsOnlyUnseenLedgerAndSwitchesBack(t *testing.T) {
 	state, _ := NewState("chat")
 	codex := testLane("chat", "codex")

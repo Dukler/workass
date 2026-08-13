@@ -14,6 +14,7 @@ import (
 type providerAdapter struct {
 	delivery   providerDeliveryStrategy
 	context    providerContextPolicy
+	creation   providercontract.CreationCapabilities
 	planUsage  providerPlanUsageStrategy
 	commands   providerCommandCatalogStrategy
 	model      providerModelPolicy

@@ -190,6 +190,7 @@ var providerRegistrations = map[string]providerRegistration{
 		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `claude auth login`"},
 		Native:         &frontierNativeSpec{ProviderID: "claude", DefaultCommand: "claude", OverrideEnv: "WORKASS_CLAUDE_CODE", PathNames: []string{"claude", "claude.exe", "claude.cmd"}},
 		Adapter: providerAdapter{
+			creation:  providercontract.CreationCapabilities{DeferredUntilInput: true},
 			delivery:  claudeDeliveryStrategy{},
 			planUsage: claudePlanUsageStrategy{},
 			commands:  capabilityCommandCatalogStrategy{capability: "workassClaudeCommandCatalog"},
@@ -211,6 +212,7 @@ var providerRegistrations = map[string]providerRegistration{
 		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `codex login`"},
 		Native:         &frontierNativeSpec{ProviderID: "codex", DefaultCommand: "codex", OverrideEnv: "WORKASS_CODEX", PathNames: []string{"codex", "codex.exe", "codex.cmd"}},
 		Adapter: providerAdapter{
+			creation:  providercontract.CreationCapabilities{DeferredUntilInput: true},
 			delivery:  codexDeliveryStrategy{},
 			planUsage: codexPlanUsageStrategy{},
 			commands:  unsupportedCommandCatalogStrategy{},

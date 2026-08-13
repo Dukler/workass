@@ -25,7 +25,7 @@ func TestNativeSessionLedgerPersistsAndRejectsStaleGeneration(t *testing.T) {
 	ledger := newNativeSessionLedger(stateDir)
 	binding := nativeSessionBinding{
 		TabID: "tab-ledger", ChatID: "chat-ledger", ProviderID: "codex", SessionID: "native-thread-1",
-		CWD: stateDir,
+		CWD: stateDir, ThreadCommitted: true,
 	}
 	if err := ledger.put(binding); err != nil {
 		t.Fatalf("put binding: %v", err)
@@ -75,7 +75,7 @@ func TestNativeOperationReadbackTransitionsAreDurableAndContradictionsFailClosed
 	ledger := newNativeSessionLedger(stateDir)
 	if err := ledger.put(nativeSessionBinding{
 		TabID: "operation-tab", ChatID: "operation-chat", ProviderID: "codex",
-		SessionID: "operation-thread", CWD: stateDir,
+		SessionID: "operation-thread", CWD: stateDir, ThreadCommitted: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestNativeOperationWriteFailureDoesNotPublishDispatchInMemory(t *testing.T)
 	ledger := newNativeSessionLedger(stateDir)
 	if err := ledger.put(nativeSessionBinding{
 		TabID: "write-failure-tab", ChatID: "write-failure-chat", ProviderID: "codex",
-		SessionID: "write-failure-thread", CWD: stateDir,
+		SessionID: "write-failure-thread", CWD: stateDir, ThreadCommitted: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -152,15 +152,16 @@ func TestNativeOperationWriteFailureDoesNotPublishDispatchInMemory(t *testing.T)
 	}
 }
 
-func TestProviderLaneStoreUpgradesV6ToV7Transactionally(t *testing.T) {
+func TestProviderLaneStoreV7DeferredReferenceNeedsNativeEvidence(t *testing.T) {
 	stateDir := t.TempDir()
 	path := filepath.Join(stateDir, nativeSessionLedgerFilename)
-	source := providerLaneStoreV6{Version: 6, Bindings: []providerLaneBindingV6{{
-		nativeSessionBinding: nativeSessionBinding{
-			TabID: "v6-tab", ChatID: "v6-chat", ProviderID: "codex", SessionID: "v6-thread", CWD: stateDir,
-		},
-		SyncedMessages: 9, HistoryHash: "v6-transcript-digest", HistoryVersion: 2, ResumeSafe: true,
-	}}}
+	source := map[string]any{
+		"v": 7,
+		"bindings": []any{map[string]any{
+			"tabId": "v7-tab", "chatId": "v7-chat", "providerId": "codex",
+			"sessionId": "v7-thread", "cwd": stateDir,
+		}},
+	}
 	raw, err := json.Marshal(source)
 	if err != nil {
 		t.Fatal(err)
@@ -170,20 +171,81 @@ func TestProviderLaneStoreUpgradesV6ToV7Transactionally(t *testing.T) {
 	}
 	ledger := newNativeSessionLedger(stateDir)
 	if ledger.loadErr != nil {
-		t.Fatalf("upgrade v6 lane store: %v", ledger.loadErr)
+		t.Fatalf("upgrade v7 lane store: %v", ledger.loadErr)
 	}
-	migratedRaw, err := os.ReadFile(path)
+	binding, ok := ledger.get("v7-tab", "v7-chat", "codex")
+	if !ok || binding.ThreadCommitted || binding.SessionID != "v7-thread" {
+		t.Fatalf("receiptless v7 Codex reference was not kept provisional: ok=%v binding=%#v", ok, binding)
+	}
+}
+
+func TestProviderLaneStoreV7CommitsOnlyNativeEvidenceOrImmediateCreation(t *testing.T) {
+	stateDir := t.TempDir()
+	path := filepath.Join(stateDir, nativeSessionLedgerFilename)
+	source := nativeSessionLedgerFile{Version: providerLaneStoreV7Version, Bindings: []nativeSessionBinding{
+		{
+			TabID: "consumed-tab", ChatID: "consumed-chat", ProviderID: "codex",
+			SessionID: "consumed-thread", CWD: stateDir,
+			LastOperation: &nativeOperationRecord{
+				OperationID: "consumed-operation", PromptDigest: "digest", State: nativeOperationTerminal,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			},
+		},
+		{TabID: "immediate-tab", ChatID: "immediate-chat", ProviderID: "mock", SessionID: "immediate-thread", CWD: stateDir},
+	}}
+	raw, err := json.Marshal(source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var migrated nativeSessionLedgerFile
-	if err := json.Unmarshal(migratedRaw, &migrated); err != nil || migrated.Version != currentNativeLaneStoreVersion || len(migrated.Bindings) != 1 {
-		t.Fatalf("v7 upgrade receipt = %#v err=%v", migrated, err)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	for _, removed := range []string{"syncedMessages", "historyHash", "historyVersion", "resumeSafe", "quarantined", "quarantineReason"} {
-		if strings.Contains(string(migratedRaw), `"`+removed+`"`) {
-			t.Fatalf("v7 retained removed field %q", removed)
+	ledger := newNativeSessionLedger(stateDir)
+	if ledger.loadErr != nil {
+		t.Fatal(ledger.loadErr)
+	}
+	for _, key := range [][3]string{
+		{"consumed-tab", "consumed-chat", "codex"},
+		{"immediate-tab", "immediate-chat", "mock"},
+	} {
+		binding, ok := ledger.get(key[0], key[1], key[2])
+		if !ok || !binding.ThreadCommitted {
+			t.Fatalf("durable v7 evidence was not committed for %v: ok=%v binding=%#v", key, ok, binding)
 		}
+	}
+}
+
+func TestDeferredCandidateRoundTripAndConsumptionCommitAreAtomic(t *testing.T) {
+	stateDir := t.TempDir()
+	ledger := newNativeSessionLedger(stateDir)
+	if err := ledger.put(nativeSessionBinding{
+		TabID: "candidate-tab", ChatID: "candidate-chat", ProviderID: "codex",
+		SessionID: "candidate-thread", CWD: stateDir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := newNativeSessionLedger(stateDir)
+	candidate, ok := reloaded.get("candidate-tab", "candidate-chat", "codex")
+	if !ok || candidate.ThreadCommitted {
+		t.Fatalf("unconsumed candidate did not round-trip provisionally: ok=%v binding=%#v", ok, candidate)
+	}
+	if !reloaded.markInFlight(
+		candidate.TabID, candidate.ChatID, candidate.ProviderID, candidate.SessionID, candidate.Generation,
+		"gpt", "agent", "candidate-operation", "candidate-prompt-digest",
+	) {
+		t.Fatal("could not persist candidate input dispatch")
+	}
+	committed, ok := reloaded.markOperationConsumedAndCommit(
+		candidate.TabID, candidate.ChatID, candidate.ProviderID, candidate.SessionID,
+		"candidate-operation", "candidate-native-turn",
+	)
+	if !ok || !committed.ThreadCommitted || committed.PendingOperation == nil || committed.PendingOperation.State != nativeOperationConsumed {
+		t.Fatalf("candidate consumption did not atomically commit both receipts: ok=%v binding=%#v", ok, committed)
+	}
+	crashReload := newNativeSessionLedger(stateDir)
+	durable, ok := crashReload.get(candidate.TabID, candidate.ChatID, candidate.ProviderID)
+	if !ok || !durable.ThreadCommitted || durable.PendingOperation == nil || durable.PendingOperation.State != nativeOperationConsumed {
+		t.Fatalf("crash readback split the thread and input receipts: ok=%v binding=%#v", ok, durable)
 	}
 }
 
@@ -193,7 +255,7 @@ func TestProviderHeadAdvanceRequiresAttestedMonotonicLineage(t *testing.T) {
 	binding := nativeSessionBinding{
 		TabID: "tab", ChatID: "chat", ProviderID: "claude", SessionID: "root", CWD: stateDir,
 		MachineID: "machine", AccountScope: "account", InstallScope: "install", RealmVerified: true,
-		ThreadLineage: 1,
+		ThreadLineage: 1, ThreadCommitted: true,
 	}
 	if err := ledger.put(binding); err != nil {
 		t.Fatal(err)
@@ -240,9 +302,9 @@ func TestNativeSessionLedgerDeleteChatRemovesEveryProviderBinding(t *testing.T) 
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir)
 	for _, binding := range []nativeSessionBinding{
-		{TabID: "tab-delete", ChatID: "chat-delete", ProviderID: "codex", SessionID: "codex-thread", CWD: stateDir},
-		{TabID: "tab-delete", ChatID: "chat-delete", ProviderID: "claude", SessionID: "claude-thread", CWD: stateDir},
-		{TabID: "tab-keep", ChatID: "chat-keep", ProviderID: "codex", SessionID: "keep-thread", CWD: stateDir},
+		{TabID: "tab-delete", ChatID: "chat-delete", ProviderID: "codex", SessionID: "codex-thread", CWD: stateDir, ThreadCommitted: true},
+		{TabID: "tab-delete", ChatID: "chat-delete", ProviderID: "claude", SessionID: "claude-thread", CWD: stateDir, ThreadCommitted: true},
+		{TabID: "tab-keep", ChatID: "chat-keep", ProviderID: "codex", SessionID: "keep-thread", CWD: stateDir, ThreadCommitted: true},
 	} {
 		if err := ledger.put(binding); err != nil {
 			t.Fatal(err)
@@ -265,7 +327,7 @@ func TestNativeSessionBindingRequiresExactConversationOwner(t *testing.T) {
 	ledger := newNativeSessionLedger(stateDir)
 	first := nativeSessionBinding{
 		TabID: "tab-a", ChatID: "chat-a", ProviderID: "codex", SessionID: "native-shared",
-		CWD: stateDir,
+		CWD: stateDir, ThreadCommitted: true,
 	}
 	if err := ledger.put(first); err != nil {
 		t.Fatal(err)
@@ -275,7 +337,7 @@ func TestNativeSessionBindingRequiresExactConversationOwner(t *testing.T) {
 	}
 	if err := ledger.put(nativeSessionBinding{
 		TabID: "tab-b", ChatID: "chat-b", ProviderID: "codex", SessionID: "native-shared",
-		CWD: stateDir,
+		CWD: stateDir, ThreadCommitted: true,
 	}); err == nil {
 		t.Fatal("one provider-native session was accepted for two chat owners")
 	}
@@ -285,9 +347,9 @@ func TestNativeSessionLedgerNeverPrunesBindingsFromRendererMirror(t *testing.T) 
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir)
 	for _, binding := range []nativeSessionBinding{
-		{TabID: "real-tab", ChatID: "real-chat", ProviderID: "codex", SessionID: "native-real", CWD: stateDir},
-		{TabID: "test-tab", ChatID: "test-chat", ProviderID: "mock", SessionID: "native-test", CWD: stateDir},
-		{TabID: "changed-tab", ChatID: "old-chat", ProviderID: "claude", SessionID: "native-old", CWD: stateDir},
+		{TabID: "real-tab", ChatID: "real-chat", ProviderID: "codex", SessionID: "native-real", CWD: stateDir, ThreadCommitted: true},
+		{TabID: "test-tab", ChatID: "test-chat", ProviderID: "mock", SessionID: "native-test", CWD: stateDir, ThreadCommitted: true},
+		{TabID: "changed-tab", ChatID: "old-chat", ProviderID: "claude", SessionID: "native-old", CWD: stateDir, ThreadCommitted: true},
 	} {
 		if err := ledger.put(binding); err != nil {
 			t.Fatal(err)
@@ -321,7 +383,7 @@ func TestNativeLaneOwnershipSurvivesDisposableTabChange(t *testing.T) {
 	ledger := newNativeSessionLedger(stateDir, "machine-tab-independent")
 	if err := ledger.put(nativeSessionBinding{
 		TabID: "old-tab", ChatID: "immutable-chat", ProviderID: "codex",
-		SessionID: "native-thread", CWD: stateDir,
+		SessionID: "native-thread", CWD: stateDir, ThreadCommitted: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -345,8 +407,8 @@ func TestMultipleWorkspaceEpochsFailClosedInsteadOfSelectingOrCreating(t *testin
 	ledger := newNativeSessionLedger(stateDir, "machine-lanes")
 	cwdA, cwdB := filepath.Join(stateDir, "a"), filepath.Join(stateDir, "b")
 	for _, binding := range []nativeSessionBinding{
-		{TabID: "tab", ChatID: "chat", ProviderID: "codex", SessionID: "thread-a", CWD: cwdA},
-		{TabID: "tab", ChatID: "chat", ProviderID: "codex", SessionID: "thread-b", CWD: cwdB},
+		{TabID: "tab", ChatID: "chat", ProviderID: "codex", SessionID: "thread-a", CWD: cwdA, ThreadCommitted: true},
+		{TabID: "tab", ChatID: "chat", ProviderID: "codex", SessionID: "thread-b", CWD: cwdB, ThreadCommitted: true},
 	} {
 		if err := ledger.put(binding); err != nil {
 			t.Fatal(err)
@@ -369,7 +431,7 @@ func TestProviderNativeThreadIDsAreScopedByProviderRealm(t *testing.T) {
 	for _, providerID := range []string{"codex", "claude"} {
 		if err := ledger.put(nativeSessionBinding{
 			TabID: "tab-" + providerID, ChatID: "chat-" + providerID, ProviderID: providerID,
-			SessionID: "same-opaque-thread-id", CWD: stateDir,
+			SessionID: "same-opaque-thread-id", CWD: stateDir, ThreadCommitted: true,
 		}); err != nil {
 			t.Fatalf("provider-scoped thread %s: %v", providerID, err)
 		}
@@ -381,7 +443,7 @@ func TestProviderLaneMovedToAnotherMachineIsRejectedAtLoad(t *testing.T) {
 	first := newNativeSessionLedger(stateDir, "machine-a")
 	if err := first.put(nativeSessionBinding{
 		TabID: "tab", ChatID: "chat", ProviderID: "codex", SessionID: "thread",
-		CWD: stateDir,
+		CWD: stateDir, ThreadCommitted: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -695,7 +757,7 @@ func TestMockNativeSessionForeignLiveCollisionFailsClosed(t *testing.T) {
 	manager.nativeSessions.deleteChat("native-tab", "native-chat")
 	if err := manager.nativeSessions.put(nativeSessionBinding{
 		TabID: "other-tab", ChatID: "other-chat", ProviderID: "mock",
-		SessionID: owner.SessionID, CWD: fixture.root,
+		SessionID: owner.SessionID, CWD: fixture.root, ThreadCommitted: true,
 	}); err != nil {
 		t.Fatalf("seed foreign binding: %v", err)
 	}

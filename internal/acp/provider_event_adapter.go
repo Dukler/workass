@@ -579,11 +579,19 @@ func (m *Manager) observeProviderLaneACPEvent(payload map[string]any) error {
 		if consumedID == "" {
 			return errors.New("actor-owned input consumption event is missing operation id")
 		}
-		return lane.emit(providercontract.Event{
+		var thread *providercontract.ThreadRef
+		if strings.TrimSpace(asString(event["kind"])) == "input-consumed" {
+			thread = lane.threadCreationReceipt(consumedID)
+		}
+		err := lane.emit(providercontract.Event{
 			Kind:     providercontract.EventInputConsumed,
 			Identity: providercontract.EventIdentity{OperationID: consumedID, TurnID: jobID},
-			Input:    &providercontract.InputEvent{OperationID: consumedID},
+			Input:    &providercontract.InputEvent{OperationID: consumedID, Thread: thread},
 		})
+		if err == nil && thread != nil {
+			lane.clearThreadCreationReceipt(consumedID)
+		}
+		return err
 	case "tool":
 		attachments, err := m.persistProviderEventAttachments(providerEventSlice(event["images"]))
 		if err != nil {

@@ -1445,7 +1445,7 @@ func TestT6NewSessionConvergesNativeBindingModelWithoutRendererReapply(t *testin
 	requested := "claude-fable-5[1m][xhigh]"
 	if err := manager.nativeSessions.put(nativeSessionBinding{
 		TabID: "native-controls-tab", ChatID: "native-controls-chat", ProviderID: "claude",
-		SessionID: "native-controls-provider-session", ModelID: requested, CWD: stateDir,
+		SessionID: "native-controls-provider-session", ModelID: requested, CWD: stateDir, ThreadCommitted: true,
 	}); err != nil {
 		t.Fatalf("seed native binding: %v", err)
 	}
@@ -1751,7 +1751,7 @@ func TestWorkspaceMoveCreatesFreshEpochWithoutTranscriptReplay(t *testing.T) {
 	// workspace epoch; moving the chat only detaches live transports.
 	other := nativeSessionBinding{
 		TabID: tabID, ChatID: chatID, ProviderID: "other-provider", SessionID: "other-native-session", CWD: oldCWD,
-		Generation: 1,
+		Generation: 1, ThreadCommitted: true,
 	}
 	if err := manager.nativeSessions.put(other); err != nil {
 		t.Fatalf("seed other-provider binding: %v", err)
@@ -2617,6 +2617,12 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 		if strings.HasPrefix(s.mode, "claude-commands") {
 			capabilities["_meta"] = map[string]any{"workassClaudeCommandCatalog": true}
 		}
+		if strings.Contains(s.mode, "-stable-") {
+			meta := mapFromAny(capabilities["_meta"])
+			meta["workassStableTurnInputV1"] = true
+			meta["workassOperationReadbackV1"] = true
+			capabilities["_meta"] = meta
+		}
 		if s.mode == "codex-plan-limits" {
 			capabilities["_meta"] = map[string]any{
 				"workassCodexRateLimitsRequest":     true,
@@ -2675,7 +2681,7 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 			s.mu.Unlock()
 			result["availableModels"] = fakeClaudeAvailableModels()
 		}
-		if s.mode == "codex-controls" {
+		if strings.HasPrefix(s.mode, "codex-controls") {
 			result["configOptions"] = fakeCodexControlsConfigOptions("gpt-5.6-sol", "agent", "xhigh")
 			result["models"] = map[string]any{
 				"availableModels": fakeCodexAvailableModels(),
@@ -2714,7 +2720,7 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 			s.fail(id, -32602, "Invalid params")
 			return
 		}
-		if s.mode == "codex-controls" {
+		if strings.HasPrefix(s.mode, "codex-controls") {
 			model, mode, effort := "gpt-5.6-sol", "agent", "xhigh"
 			switch asString(params["configId"]) {
 			case "model":
@@ -2724,7 +2730,13 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 			case "reasoning_effort":
 				effort = asString(params["value"])
 			}
-			s.respond(id, map[string]any{"configOptions": fakeCodexControlsConfigOptions(model, mode, effort)})
+			options := fakeCodexControlsConfigOptions(model, mode, effort)
+			if s.mode == "codex-controls-notify-first" {
+				s.notify(asString(params["sessionId"]), map[string]any{
+					"sessionUpdate": "config_options_update", "configOptions": options,
+				})
+			}
+			s.respond(id, map[string]any{"configOptions": options})
 			return
 		}
 		if s.mode == "claude-effort" || s.mode == "claude-effort-default" {
@@ -2891,6 +2903,12 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 
 func (s *fakeACP) handlePrompt(id json.RawMessage, params map[string]any) {
 	sessionID := asString(params["sessionId"])
+	if strings.Contains(s.mode, "-stable-") {
+		s.notify(sessionID, map[string]any{
+			"sessionUpdate": "_workass_input_consumed", "clientUserMessageId": asString(params["clientUserMessageId"]),
+			"turnId": "fake-native-turn-" + asString(params["clientUserMessageId"]),
+		})
+	}
 	if strings.HasPrefix(s.mode, "claude-commands") && strings.Contains(fakePromptText(params["prompt"]), "push commands") {
 		// The host's commands_changed forward: a full-catalog replace pushed
 		// between/inside turns as a _workass_claude_commands session update.
@@ -3622,5 +3640,73 @@ func TestNewSessionOpensWhenStoredStartupModelIsUnappliable(t *testing.T) {
 	}
 	if _, ok := manager.LiveSession(info.SessionID); !ok {
 		t.Fatal("session is not live after best-effort startup controls")
+	}
+}
+
+func TestWorkassModeEchoCannotReenterActorRefreshBeforeControlReply(t *testing.T) {
+	manager, _ := newFakeManager(t, "codex-controls-notify-first", Options{
+		Provider: ProviderConfig{ID: "codex"},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	refreshes := make(chan map[string]any, 1)
+	manager.SetSessionRefreshFunc(func(payload map[string]any) {
+		refreshes <- payload
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	session, err := manager.NewSession(ctx, SessionOptions{
+		TabID: "mode-echo-tab", ChatID: "mode-echo-chat", ProviderID: "codex",
+		ModelID: "gpt-5.6-sol[xhigh]", ModeID: "agent-full-access",
+	})
+	if err != nil {
+		t.Fatalf("new Codex session with notify-before-reply mode echo: %v", err)
+	}
+	if session.CurrentModeID == nil || *session.CurrentModeID != "agent-full-access" {
+		t.Fatalf("current mode = %v, want agent-full-access", session.CurrentModeID)
+	}
+	select {
+	case payload := <-refreshes:
+		t.Fatalf("Workass-authored mode echo re-entered actor refresh: %#v", payload)
+	default:
+	}
+}
+
+func TestAdapterAuthoredModelUpdateStillEntersActorRefresh(t *testing.T) {
+	manager, _ := newFakeManager(t, "codex-controls", Options{
+		Provider: ProviderConfig{ID: "codex"},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	session, err := manager.NewSession(ctx, SessionOptions{
+		TabID: "adapter-model-tab", ChatID: "adapter-model-chat", ProviderID: "codex",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := manager.bridgeForSession(session.SessionID, SessionOptions{SessionID: session.SessionID})
+	if bridge == nil {
+		t.Fatal("missing Codex bridge")
+	}
+	refreshes := make(chan map[string]any, 1)
+	manager.SetSessionRefreshFunc(func(payload map[string]any) {
+		refreshes <- payload
+	})
+
+	bridge.handleNotification("session/update", map[string]any{
+		"sessionId": session.SessionID,
+		"update": map[string]any{
+			"sessionUpdate": "config_options_update",
+			"configOptions": fakeCodexControlsConfigOptions("gpt-5.6-terra", "agent", "xhigh"),
+		},
+	})
+	select {
+	case payload := <-refreshes:
+		if got := asString(payload["currentModelId"]); got != "gpt-5.6-terra[xhigh]" {
+			t.Fatalf("captured model = %q, want gpt-5.6-terra[xhigh]", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("adapter-authored model change did not enter actor refresh")
 	}
 }

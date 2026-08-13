@@ -15,6 +15,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	providercontract "workass/internal/provider"
 )
 
 type Bridge struct {
@@ -88,6 +90,7 @@ type Bridge struct {
 	// to be written as a model id while Claude/Codex write model + effort.
 	variantEffortsByModel map[string][]string
 	modelWriteInFlight    map[string]int
+	configWriteInFlight   map[string]int
 	lastWorkassModelWrite map[string]string
 	durableModelSelection map[string]string
 
@@ -166,6 +169,7 @@ func newBridge(key string, opts Options, manager *Manager) *Bridge {
 		axisEffortsByModel:    make(map[string][]string),
 		variantEffortsByModel: make(map[string][]string),
 		modelWriteInFlight:    make(map[string]int),
+		configWriteInFlight:   make(map[string]int),
 		lastWorkassModelWrite: make(map[string]string),
 		durableModelSelection: make(map[string]string),
 		state:                 StateWarm,
@@ -868,7 +872,22 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 	case "_workass_input_consumed":
 		clientUserMessageID := strings.TrimSpace(asString(update["clientUserMessageId"]))
 		if job != nil && clientUserMessageID != "" && !job.internal {
-			if b.manager.nativeSessions != nil {
+			if b.manager.providerLaneManagedJob(job.ID) {
+				binding, committed := b.manager.nativeSessions.markOperationConsumedAndCommit(
+					job.TabID, job.ChatID, job.ProviderID, sessionID,
+					clientUserMessageID,
+					firstNonEmpty(asString(update["nativeTurnId"]), asString(update["turnId"])),
+				)
+				lane := b.manager.providerLaneForJob(job.ID)
+				if !committed || lane == nil || lane.commitThreadCreation(
+					bindingThreadRef(binding), providercontract.OperationID(clientUserMessageID),
+				) != nil {
+					if lane != nil {
+						lane.rejectFrozenProtocol(errors.New("provider input receipt could not commit its durable thread boundary"))
+					}
+					return
+				}
+			} else if b.manager.nativeSessions != nil {
 				b.manager.nativeSessions.markOperationConsumed(
 					job.TabID, job.ChatID, job.ProviderID, sessionID,
 					clientUserMessageID,

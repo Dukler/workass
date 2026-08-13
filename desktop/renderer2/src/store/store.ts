@@ -2444,7 +2444,7 @@ export class Store {
     if (!chat) return false;
     const move = this.workspaceMoves.current(chat.id);
     if (move && !(await move)) return false;
-    await this.ensureSession(chat);
+    if (!(await this.ensureChatCreated(chat))) return false;
     // Unknown is deliberately accepted. The daemon validates the actual target
     // provider at the turn boundary; rejecting here would discard a first image
     // merely because an inherited/previous provider still owns the session.
@@ -2949,9 +2949,9 @@ export class Store {
     this.bumpChat(chat);
 
     await this.ensureSession(chat);
-    if (!chat.sessionId) {
+    if (!chat.sessionId && chat.sessionError) {
       asst.status = 'failed';
-      asst.content = chat.sessionError ? `No hay sesión ACP disponible (${chat.sessionError}).` : 'No hay sesión ACP disponible.';
+      asst.content = `No hay sesión ACP disponible (${chat.sessionError}).`;
       asst.retryPrompt = prompt;
       this.bumpChat(chat);
       return false;
@@ -2964,7 +2964,7 @@ export class Store {
     this.chatJobs.set(chatId, { tabId: chat.id, msgId: asst.id });
     const job = await call('startJob', {
       kind: 'app-chat', operationId: userId, title: `Devin · ${chat.title}`, chatId, tabId: chat.id,
-      sessionId: chat.sessionId, cwd: chat.cwd ?? null,
+      sessionId: chat.sessionId || undefined, cwd: chat.cwd ?? null,
       // providerId rides every turn: when it differs from the session's bound
       // provider, the daemon treats it as a desired-lane selection. It starts
       // only after a verified non-sampling context import; unsupported switches

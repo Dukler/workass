@@ -329,6 +329,14 @@ type SessionOptions struct {
 	// provider-neutral coordinator. It forbids spare adoption, exact-resume of a
 	// concurrently established binding, and any second session/new retry.
 	ProviderLaneCreate bool
+	// ProviderLaneVerifyCandidate is set while executing a persisted create
+	// effect for a deferred-creation provider. It permits only exact resume of
+	// the stored candidate.
+	ProviderLaneVerifyCandidate bool
+	// ProviderLaneCreateAfterCandidateAbsence is actor-owned proof that the lane
+	// has no provider-native coverage. Only this proof plus authoritative
+	// NativeThreadMissing permits removal of the candidate and one session/new.
+	ProviderLaneCreateAfterCandidateAbsence bool
 }
 
 type ForkOptions struct {

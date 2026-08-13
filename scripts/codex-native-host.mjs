@@ -474,9 +474,17 @@ async function openSession(params, resume) {
   if (resume && !requestedThreadId) {
     throw new Error('Codex session/resume requires the exact provider thread id');
   }
-  const response = resume
-    ? await app.request('thread/resume', { ...common, threadId: requestedThreadId })
-    : await app.request('thread/start', common);
+  let response;
+  try {
+    response = resume
+      ? await app.request('thread/resume', { ...common, threadId: requestedThreadId })
+      : await app.request('thread/start', common);
+  } catch (error) {
+    if (resume && /no rollout found for thread id/i.test(String(error?.message || ''))) {
+      throw Object.assign(new Error('Codex provider candidate was never materialized'), { rpcCode: -32044 });
+    }
+    throw error;
+  }
   const threadId = String(response?.thread?.id || requestedThreadId || '');
   if (!threadId) throw new Error('Codex app-server returned no thread id');
   if (resume && threadId !== requestedThreadId) {

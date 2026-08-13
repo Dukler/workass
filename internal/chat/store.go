@@ -20,7 +20,7 @@ type StateStore interface {
 
 type FileStore struct{ Path string }
 
-const currentStateEnvelopeVersion = 20
+const currentStateEnvelopeVersion = 21
 
 type stateEnvelope struct {
 	Version int   `json:"v"`
@@ -168,14 +168,18 @@ func normalizeCancelMutationReceipts(state *State) {
 }
 
 func (s FileStore) Save(state State) error {
+	return saveStateEnvelope(s.Path, state, currentStateEnvelopeVersion)
+}
+
+func saveStateEnvelope(path string, state State, version int) error {
 	if err := state.Validate(); err != nil {
 		return err
 	}
-	path := strings.TrimSpace(s.Path)
+	path = strings.TrimSpace(path)
 	if path == "" {
 		return errors.New("chat state store path is empty")
 	}
-	raw, err := json.Marshal(stateEnvelope{Version: currentStateEnvelopeVersion, State: state})
+	raw, err := json.Marshal(stateEnvelope{Version: version, State: state})
 	if err != nil {
 		return err
 	}
