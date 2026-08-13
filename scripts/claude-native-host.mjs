@@ -262,10 +262,15 @@ function mcpServerMap(rawServers) {
   for (const raw of Array.isArray(rawServers) ? rawServers : []) {
     if (!raw || typeof raw !== 'object' || typeof raw.name !== 'string' || !raw.name.trim()) continue;
     if (typeof raw.url === 'string' && raw.url.trim()) {
+      const headers = Array.isArray(raw.headers)
+        ? Object.fromEntries(raw.headers
+          .filter((entry) => entry && typeof entry.name === 'string')
+          .map((entry) => [entry.name, String(entry.value || '')]))
+        : (raw.headers && typeof raw.headers === 'object' ? raw.headers : undefined);
       result[raw.name] = {
         type: raw.type === 'sse' ? 'sse' : 'http',
         url: raw.url,
-        ...(raw.headers && typeof raw.headers === 'object' ? { headers: raw.headers } : {}),
+        ...(headers && Object.keys(headers).length ? { headers } : {}),
       };
       continue;
     }

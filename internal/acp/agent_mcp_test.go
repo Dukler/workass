@@ -8,20 +8,23 @@ import (
 )
 
 func TestAgentMCPIsInjectedIntoSpareSessionsWithOpaqueOwnerKey(t *testing.T) {
-	servers := agentMCPServers(Options{
+	servers, err := agentMCPServers(Options{
 		WorkassMCPBaseURL: "https://localhost:8788",
-	}, SessionOptions{Spare: true, AgentOwnerKey: "owner-spare-1"})
+	}, SessionOptions{Spare: true, AgentOwnerKey: "owner-spare-1"}, mcpServerHTTP)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(servers) != 1 {
 		t.Fatalf("agent MCP servers = %#v, want one for spare session", servers)
 	}
 	server := mapFromAny(servers[0])
-	headers, _ := server["headers"].(map[string]string)
+	headers := mcpDescriptorValues(server["headers"])
 	if server["name"] != "workass-agent" || server["type"] != "http" ||
 		server["url"] != "https://localhost:8788/workass/mcp/agent" ||
 		headers["Authorization"] != "Bearer owner-spare-1" || server["command"] != nil {
 		t.Fatalf("agent MCP descriptor = %#v", server)
 	}
-	if got := agentMCPServers(Options{WorkassMCPBaseURL: "https://localhost:8788"}, SessionOptions{Ephemeral: true, AgentOwnerKey: "probe"}); len(got) != 0 {
+	if got, err := agentMCPServers(Options{WorkassMCPBaseURL: "https://localhost:8788"}, SessionOptions{Ephemeral: true, AgentOwnerKey: "probe"}, mcpServerHTTP); err != nil || len(got) != 0 {
 		t.Fatalf("catalog probe received agent MCP: %#v", got)
 	}
 }
@@ -30,6 +33,8 @@ func TestSpareAdoptionRebindsInjectedAgentOwnerToRealChat(t *testing.T) {
 	manager, _ := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	manager.opts.WorkassMCPBaseURL = "https://localhost:8788"
+	manager.opts.WorkassMCPCACertFile = "/workass/daemon-cert.pem"
+	manager.opts.WorkassMCPStdioCommand = "/workass/workass-daemon"
 	manager.mu.Lock()
 	providerID := manager.defaultProviderID
 	gen := manager.spareGen

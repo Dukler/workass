@@ -2373,7 +2373,12 @@ func (b *Bridge) NewSession(ctx context.Context, opts SessionOptions) (SessionIn
 	}
 	releaseOwner := b.manager.provisionAgentOwner(opts)
 	cwd := b.sessionCWD(opts.CWD)
-	res, err := b.request(ctx, "session/new", map[string]any{"cwd": cwd, "mcpServers": sessionMCPServers(b.opts, opts)}, b.opts.InitTimeout)
+	mcpServers, err := b.sessionMCPServers(opts)
+	if err != nil {
+		releaseOwner()
+		return SessionInfo{}, err
+	}
+	res, err := b.request(ctx, "session/new", map[string]any{"cwd": cwd, "mcpServers": mcpServers}, b.opts.InitTimeout)
 	if err != nil {
 		releaseOwner()
 		return SessionInfo{}, b.withStderrTail(err)
@@ -2451,59 +2456,6 @@ func (b *Bridge) attachSession(sessionID, cwd string, opts SessionOptions, res m
 		b.manager.schedulePlanUsageRefresh(b, sessionID)
 	}
 	return info, nil
-}
-
-func browserMCPServers(options Options, session SessionOptions) []any {
-	if session.Ephemeral || session.Spare {
-		return []any{}
-	}
-	// A delegated child does not drive the user's browser: it was spawned to do
-	// a job and report back. Attaching the server anyway cost every one of its
-	// requests the whole browser tool list for a child that cannot use it.
-	if strings.HasPrefix(strings.TrimSpace(session.ChatID), subagentChatIDPrefix) {
-		return []any{}
-	}
-	baseURL := strings.TrimRight(strings.TrimSpace(options.WorkassMCPBaseURL), "/")
-	ownerKey := strings.TrimSpace(session.AgentOwnerKey)
-	if !strings.HasPrefix(baseURL, "https://") || ownerKey == "" {
-		return []any{}
-	}
-	return []any{map[string]any{
-		"name": "workass-browser",
-		"type": "http",
-		"url":  baseURL + "/workass/mcp/browser",
-		"headers": map[string]string{
-			"Authorization":     "Bearer " + ownerKey,
-			"X-Workass-Chat-ID": strings.TrimSpace(session.ChatID),
-			"X-Workass-Tab-ID":  strings.TrimSpace(session.TabID),
-		},
-	}}
-}
-
-func agentMCPServers(options Options, session SessionOptions) []any {
-	if session.Ephemeral {
-		return []any{}
-	}
-	baseURL := strings.TrimRight(strings.TrimSpace(options.WorkassMCPBaseURL), "/")
-	ownerKey := strings.TrimSpace(session.AgentOwnerKey)
-	if !strings.HasPrefix(baseURL, "https://") || ownerKey == "" {
-		return []any{}
-	}
-	return []any{map[string]any{
-		"name": "workass-agent",
-		"type": "http",
-		"url":  baseURL + "/workass/mcp/agent",
-		"headers": map[string]string{
-			"Authorization":     "Bearer " + ownerKey,
-			"X-Workass-Chat-ID": strings.TrimSpace(session.ChatID),
-			"X-Workass-Tab-ID":  strings.TrimSpace(session.TabID),
-		},
-	}}
-}
-
-func sessionMCPServers(options Options, session SessionOptions) []any {
-	servers := browserMCPServers(options, session)
-	return append(servers, agentMCPServers(options, session)...)
 }
 
 func (b *Bridge) liveSession(sessionID string) (LiveSession, bool) {

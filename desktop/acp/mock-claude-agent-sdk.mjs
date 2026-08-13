@@ -704,6 +704,12 @@ class FixtureQuery {
 }
 
 export function query(input) {
+	if (process.env.WORKASS_CLAUDE_FIXTURE_REQUIRE_CANONICAL_MCP === '1') {
+		const server = input.options?.mcpServers?.['workass-agent'];
+		if (server?.type !== 'http' || server?.headers?.Authorization !== 'Bearer fixture-owner') {
+			throw new Error('Claude SDK MCP descriptor was not normalized');
+		}
+	}
   if (input.options?.permissionMode === 'bypassPermissions'
       && input.options?.allowDangerouslySkipPermissions !== true) {
     throw new Error('Cannot launch bypassPermissions without allowDangerouslySkipPermissions');
