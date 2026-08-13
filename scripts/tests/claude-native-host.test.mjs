@@ -125,6 +125,27 @@ test('official Claude SDK host provides session, streaming, steering, and permis
   await peer.waitFor((message) => message.id === 4);
 });
 
+test('native Claude host normalizes canonical ACP HTTP header arrays for the SDK', async (t) => {
+  const peer = startHost({ WORKASS_CLAUDE_FIXTURE_REQUIRE_CANONICAL_MCP: '1' });
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: {
+    cwd: repoRoot,
+    mcpServers: [{
+      type: 'http', name: 'workass-agent', url: 'https://mcp.localhost:8788/workass/mcp/agent',
+      headers: [{ name: 'Authorization', value: 'Bearer fixture-owner' }],
+    }],
+  } });
+  const opened = await peer.waitFor((message) => message.id === 2);
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId: opened.result.sessionId, prompt: [{ type: 'text', text: 'verify MCP mapping' }],
+  } });
+  const prompted = await peer.waitFor((message) => message.id === 3);
+  assert.equal(prompted.error, undefined, JSON.stringify(prompted));
+});
+
 test('official Claude SDK host keeps the steered turn open until the direction is answered', async (t) => {
   const peer = startHost();
   t.after(() => peer.child.kill('SIGKILL'));

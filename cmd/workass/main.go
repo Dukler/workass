@@ -34,6 +34,7 @@ import (
 	"workass/internal/httpserve"
 	"workass/internal/lease"
 	"workass/internal/machineid"
+	"workass/internal/mcpstdio"
 	providercontract "workass/internal/provider"
 	"workass/internal/tlscert"
 	"workass/internal/voice"
@@ -47,6 +48,13 @@ var daemonVersion = "0.0.1-dev"
 var secretKeyRE = regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|credential|bearer)`)
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "mcp-stdio" {
+		if err := mcpstdio.ServeEnvironment(context.Background(), os.Stdin, os.Stdout, os.Getenv); err != nil {
+			fmt.Fprintf(os.Stderr, "workass mcp stdio: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "fleet" {
 		if err := runFleetCommand(os.Args[2:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintf(os.Stderr, "workass fleet: %v\n", err)
@@ -215,6 +223,7 @@ func main() {
 		RuntimeProfile:          workassRuntimeProfile(),
 		WorkassMCPBaseURL:       mcpBaseURL,
 		WorkassMCPCACertFile:    filepath.Join(stateDir, tlscert.CertFileName),
+		WorkassMCPStdioCommand:  currentExecutablePath(),
 		Version:                 daemonVersion,
 		Providers:               providers,
 		DefaultProviderID:       defaultProviderID,

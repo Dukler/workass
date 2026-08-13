@@ -99,14 +99,16 @@ type Options struct {
 	// "prod", while isolated development passes "dev" or "test".
 	RuntimeProfile string
 	// WorkassMCPBaseURL is the daemon-owned HTTPS origin that serves the
-	// stateless 2026-07-28 Workass MCP endpoints. The provider harness receives
-	// only per-session bearer headers; there is no MCP helper subprocess or
-	// callback descriptor.
+	// stateless 2026-07-28 Workass MCP endpoints.
 	WorkassMCPBaseURL string
 	// WorkassMCPCACertFile is the public certificate providers add to their TLS
 	// trust store for the daemon's self-signed, pinned Workass identity. It is
 	// never the private key and verification is never disabled.
-	WorkassMCPCACertFile           string
+	WorkassMCPCACertFile string
+	// WorkassMCPStdioCommand is the absolute daemon executable used to expose
+	// those same endpoints to ACP agents that negotiate MCP over stdio. ACP
+	// requires every agent to support stdio; HTTP remains capability-gated.
+	WorkassMCPStdioCommand         string
 	LocalModelEndpoints            []string
 	ProviderDetectionRetryBackoffs []time.Duration
 	Version                        string

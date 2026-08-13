@@ -103,10 +103,14 @@ func (b *Bridge) RestoreSession(ctx context.Context, binding nativeSessionBindin
 	// A verified fork advances ProviderSessionID. That exact head, rather than
 	// the immutable root id, is the session whose provider context is attached.
 	sessionID := firstNonEmpty(binding.ProviderSessionID, binding.SessionID)
+	mcpServers, err := b.sessionMCPServers(opts)
+	if err != nil {
+		return SessionInfo{}, string(attachment.method), err
+	}
 	params := map[string]any{
 		"sessionId":  sessionID,
 		"cwd":        cwd,
-		"mcpServers": sessionMCPServers(b.opts, opts),
+		"mcpServers": mcpServers,
 	}
 	releaseOwner := b.manager.provisionAgentOwner(opts)
 	if attachment.replaysHistory {
