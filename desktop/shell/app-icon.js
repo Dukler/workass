@@ -100,10 +100,50 @@ function atomicJSON(file, value) {
   }
 }
 
+const WINDOWS_SHORTCUT_ICON_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  "if ($args.Length -lt 2) { throw 'shortcut icon arguments are incomplete' }",
+  '$iconPath = $args[0]',
+  '$shell = New-Object -ComObject WScript.Shell',
+  'foreach ($shortcutPath in $args[1..($args.Length - 1)]) {',
+  '  $shortcut = $shell.CreateShortcut($shortcutPath)',
+  "  $shortcut.IconLocation = $iconPath + ',0'",
+  '  $shortcut.Save()',
+  '}',
+].join('; ');
+
+function writeWindowsShortcutIcons({ shortcutPaths, iconPath, env = process.env, run = spawnSync } = {}) {
+  if (!Array.isArray(shortcutPaths) || shortcutPaths.length === 0) return { applied: true, shortcutCount: 0 };
+  try {
+    if (!iconPath || !fs.statSync(iconPath).isFile()) return { applied: false, reason: 'icon-missing' };
+  } catch {
+    return { applied: false, reason: 'icon-missing' };
+  }
+  const systemRoot = String(env.SystemRoot || env.SYSTEMROOT || env.WINDIR || '');
+  const powershell = systemRoot
+    ? path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    : '';
+  if (!powershell || !fs.existsSync(powershell)) return { applied: false, reason: 'shortcut-writer-missing' };
+
+  // Keep every native command line bounded even if a user has copied the
+  // shortcut into many folders. A failed batch leaves no success marker, so
+  // the idempotent rewrite is retried on the next launch.
+  for (let index = 0; index < shortcutPaths.length; index += 64) {
+    const batch = shortcutPaths.slice(index, index + 64);
+    const result = run(powershell, [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_SHORTCUT_ICON_SCRIPT,
+      iconPath, ...batch,
+    ], { windowsHide: true, stdio: 'ignore' });
+    if (result.error || result.status !== 0) return { applied: false, reason: 'shortcut-write-failed' };
+  }
+  return { applied: true, shortcutCount: shortcutPaths.length };
+}
+
 function refreshWindowsShortcutIcons({
   platform = process.platform,
   isPackaged = false,
   executablePath = process.execPath,
+  resourcesPath = '',
   dataRoot = '',
   appVersion = '',
   env = process.env,
@@ -111,6 +151,7 @@ function refreshWindowsShortcutIcons({
   markerFile = '',
   cacheToolPath = '',
   run = spawnSync,
+  writeShortcutIcons = writeWindowsShortcutIcons,
   now = () => new Date(),
 } = {}) {
   if (platform !== 'win32' || !isPackaged) return { applied: false, reason: 'unsupported-runtime' };
@@ -126,10 +167,26 @@ function refreshWindowsShortcutIcons({
     }
   } catch { /* first launch of this executable version */ }
 
+  const iconPath = resolveWindowIconPath({
+    platform,
+    isPackaged,
+    resourcesPath,
+    repoRoot: '',
+  });
+  if (!iconPath) return { applied: false, reason: 'icon-missing', shortcutCount: 0 };
+
   const timestamp = now();
-  let shortcutCount = 0;
+  const shortcuts = [];
   for (const shortcut of shortcutFiles(roots || defaultWindowsShortcutRoots(env))) {
     if (!shortcutTargetsExecutable(shortcut, executablePath)) continue;
+    shortcuts.push(shortcut);
+  }
+  const shortcutWrite = writeShortcutIcons({ shortcutPaths: shortcuts, iconPath, env, run });
+  if (!shortcutWrite?.applied) {
+    return { applied: false, reason: shortcutWrite?.reason || 'shortcut-write-failed', shortcutCount: 0 };
+  }
+  let shortcutCount = 0;
+  for (const shortcut of shortcuts) {
     try {
       const stat = fs.statSync(shortcut);
       fs.utimesSync(shortcut, stat.atime, timestamp);
@@ -148,6 +205,7 @@ function refreshWindowsShortcutIcons({
     schemaVersion: 1,
     appVersion,
     executablePath,
+    iconPath,
     shortcutCount,
     cacheRefresh,
     refreshedAt: timestamp.toISOString(),
@@ -162,4 +220,5 @@ module.exports = {
   resolveWindowFrameOptions,
   resolveWindowIconPath,
   shortcutTargetsExecutable,
+  writeWindowsShortcutIcons,
 };

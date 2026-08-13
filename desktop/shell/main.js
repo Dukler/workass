@@ -463,6 +463,7 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
     platform: process.platform,
     isPackaged: app.isPackaged,
     executablePath: process.execPath,
+    resourcesPath: process.resourcesPath,
     dataRoot: RUNTIME.dataRoot,
     appVersion: APP_VERSION,
   });
