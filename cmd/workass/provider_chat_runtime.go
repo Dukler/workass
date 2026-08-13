@@ -1374,12 +1374,34 @@ func (r *providerChatRuntime) selectLocked(ctx context.Context, actor *providerC
 	before := actor.engine.Snapshot()
 	operationID := providercontract.NormalizeOperationID(string(opts.OperationID))
 	if receipt, replay := before.LaneSelectionMutationReceipts[operationID]; replay {
-		// A committed operation is a readback, not a new selection attempt. In
-		// particular, do not drain another lane's outbox or reattach a hibernated
-		// host when an old wire reply is retried after a newer user selection.
+		// A committed operation normally is a readback, not a new selection
+		// attempt. The one exception is the still-desired lane whose earlier create
+		// acquired neither a ThreadRef nor a provider candidate. Repeating the
+		// explicit selection is then the user intent that starts a fresh generation;
+		// stale receipts for lanes that are no longer desired remain read-only.
 		lane, ok := before.Lanes[receipt.LaneID]
 		if !ok {
 			return selection, errors.New("lane-selection receipt references a missing durable lane")
+		}
+		if before.DesiredLaneID == receipt.LaneID && lane.CreationFailedBeforeEstablishment() {
+			if err := actor.engine.Apply(chat.SelectLane{
+				Identity: lane.Identity, Owner: lane.Owner, CWD: lane.CWD,
+				ModelID: lane.ModelID, ModeID: lane.ModeID, Creation: lane.Creation,
+			}); err != nil {
+				return selection, err
+			}
+			if err := actor.coordinator.Drain(ctx); err != nil {
+				return selection, err
+			}
+			before = actor.engine.Snapshot()
+			receipt, ok = before.LaneSelectionMutationReceipts[operationID]
+			if !ok {
+				return selection, errors.New("retried lane selection lost its durable receipt")
+			}
+			lane, ok = before.Lanes[receipt.LaneID]
+			if !ok {
+				return selection, errors.New("retried lane selection lost its durable lane")
+			}
 		}
 		selection = providerLaneSelectionFromActorLane(lane)
 		switch lane.Phase {
