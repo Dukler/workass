@@ -87,7 +87,12 @@ function httpsRequest(url, {
     if (parsed.protocol !== 'https:') { reject(new Error('updates require HTTPS')); return; }
     const request = https.get(parsed, {
       timeout: timeoutMs,
-      headers: { 'user-agent': 'Workass-Updater/1', accept: 'application/json' },
+      headers: {
+        'user-agent': 'Workass-Updater/1',
+        accept: 'application/json',
+        'cache-control': 'no-cache, no-store',
+        pragma: 'no-cache',
+      },
     }, (response) => {
       const status = response.statusCode || 500;
       if ([301, 302, 303, 307, 308].includes(status)) {
@@ -138,7 +143,17 @@ function networkRequestResponse(url, {
         method: 'GET',
         url: parsed.href,
         redirect: 'manual',
-        headers: { 'user-agent': 'Workass-Updater/1', accept },
+        // GitHub's stable /releases/latest URL intentionally redirects as new
+        // immutable releases are published. Chromium's default HTTP cache can
+        // otherwise preserve an older redirect/manifest while Workass stays
+        // open, so updater traffic must always revalidate at the network edge.
+        cache: 'no-store',
+        headers: {
+          'user-agent': 'Workass-Updater/1',
+          accept,
+          'cache-control': 'no-cache, no-store',
+          pragma: 'no-cache',
+        },
       });
     } catch (err) {
       reject(err);

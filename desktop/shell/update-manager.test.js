@@ -291,6 +291,9 @@ test('system-network updater follows only HTTPS redirects and preserves size and
   for (const options of requests) {
     assert.equal(options.redirect, 'manual');
     assert.equal(options.method, 'GET');
+    assert.equal(options.cache, 'no-store');
+    assert.equal(options.headers['cache-control'], 'no-cache, no-store');
+    assert.equal(options.headers.pragma, 'no-cache');
   }
   await assert.rejects(
     () => fetchReleaseManifest('http://updates.example.test/latest.json', { networkRequest }),
