@@ -379,7 +379,7 @@ type UpdateStrategy interface {
 }
 
 // AuthenticationStrategy classifies provider-owned credential failures and
-// tells Workass how the user can repair them outside Workass. Providers own
+// tells Workass how the user can resolve them outside Workass. Providers own
 // login and credential storage; the host owns only the common needs-login
 // state transition and its retry/spawn circuit breaker.
 type AuthenticationStrategy interface {

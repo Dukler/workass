@@ -19,12 +19,10 @@ import (
 	providercontract "workass/internal/provider"
 )
 
-// TestActorRendererSessionSnapshotParityAcrossRestartAndMirrorForgery is the
-// renderer/session acceptance gate for the actor cutover. It deliberately
-// builds the rich state through the actor reducer, then checks every read path
-// from that state after a durable restart. The legacy mirror is only an input
-// to the final cutover receipt and is forged after that receipt exists.
-func TestActorRendererSessionSnapshotParityAcrossRestartAndMirrorForgery(t *testing.T) {
+// TestActorRendererSessionSnapshotParityAcrossRestart is the renderer/session
+// acceptance gate. It builds rich state through the actor reducer, then checks
+// every read path from that same durable state after a process restart.
+func TestActorRendererSessionSnapshotParityAcrossRestart(t *testing.T) {
 	const (
 		tabID          = "snapshot-parity-tab"
 		chatID         = "snapshot-parity-chat"
@@ -342,59 +340,35 @@ func TestActorRendererSessionSnapshotParityAcrossRestartAndMirrorForgery(t *test
 		t.Fatal("reset first manager")
 	}
 
-	for _, scenario := range []struct {
-		name  string
-		chats []any
-	}{
-		{
-			name: "forged legacy chat rows",
-			chats: []any{
-				map[string]any{
-					"id": tabID, "chatId": chatID, "title": "FORGED TITLE", "messages": []any{
-						map[string]any{"id": "forged-message", "role": "assistant", "content": "forged content"},
-					},
-				},
-				map[string]any{"id": "ghost-tab", "chatId": "ghost-chat", "title": "ghost"},
-			},
-		},
-		{name: "empty legacy chat rows", chats: []any{}},
-	} {
-		t.Run(scenario.name, func(t *testing.T) {
-			legacy := mapFromAnyMain(cloneJSON(firstRoot))
-			legacy["chats"] = scenario.chats
-			writeLegacySessionSnapshot(t, stateDir, legacy)
+	restartedManager := acp.NewManager(acp.Options{
+		RootDir: workspace, StateDir: stateDir, RuntimeProfile: "dev",
+	})
+	restartedStore := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
+	restarted := newProviderChatRuntimeBeforeProviderStartup(restartedManager, restartedStore, stateDir)
+	if err := restarted.StartupError(); err != nil {
+		t.Fatalf("restart actor runtime: %v", err)
+	}
 
-			restartedManager := acp.NewManager(acp.Options{
-				RootDir: workspace, StateDir: stateDir, RuntimeProfile: "dev",
-			})
-			restartedStore := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
-			restarted := newProviderChatRuntimeBeforeProviderStartup(restartedManager, restartedStore, stateDir)
-			if err := restarted.StartupError(); err != nil {
-				t.Fatalf("restart runtime with %s: %v", scenario.name, err)
-			}
+	root, projectedChat, archive := snapshotParityProjection(t, restarted, tabID)
+	if got := len(anySlice(root["chats"])); got != 1 {
+		t.Fatalf("restarted actor chat inventory = %d, want 1", got)
+	}
+	if !reflect.DeepEqual(anySlice(projectedChat["messages"]), archive) {
+		t.Fatal("restarted archive and session message projections diverged")
+	}
+	if !bytes.Equal(snapshotParitySemanticBytes(t, root), firstSemanticBytes) {
+		t.Fatal("restart changed actor-derived session semantic bytes")
+	}
+	if !bytes.Equal(snapshotParityJSONBytes(t, anySlice(projectedChat["messages"])), firstMessageBytes) {
+		t.Fatal("restart changed actor message bytes")
+	}
+	snapshotParityAssertRichRendererContract(t, restarted, root, projectedChat, archive, tabID, chatID, identity, thread, sequence, workspace, baselineCommit, ownerKey)
 
-			root, projectedChat, archive := snapshotParityProjection(t, restarted, tabID)
-			if got := len(anySlice(root["chats"])); got != 1 {
-				t.Fatalf("legacy %s changed actor chat inventory: %d chats", scenario.name, got)
-			}
-			if !reflect.DeepEqual(anySlice(projectedChat["messages"]), archive) {
-				t.Fatalf("legacy %s made archive and session message projections diverge", scenario.name)
-			}
-			if !bytes.Equal(snapshotParitySemanticBytes(t, root), firstSemanticBytes) {
-				t.Fatalf("legacy %s changed the actor-derived session semantic bytes", scenario.name)
-			}
-			if !bytes.Equal(snapshotParityJSONBytes(t, anySlice(projectedChat["messages"])), firstMessageBytes) {
-				t.Fatalf("legacy %s changed actor message bytes", scenario.name)
-			}
-			snapshotParityAssertRichRendererContract(t, restarted, root, projectedChat, archive, tabID, chatID, identity, thread, sequence, workspace, baselineCommit, ownerKey)
-
-			if err := restarted.Close(context.Background()); err != nil {
-				t.Fatalf("close restarted runtime: %v", err)
-			}
-			if !restartedManager.Reset() {
-				t.Fatal("reset restarted manager")
-			}
-		})
+	if err := restarted.Close(context.Background()); err != nil {
+		t.Fatalf("close restarted runtime: %v", err)
+	}
+	if !restartedManager.Reset() {
+		t.Fatal("reset restarted manager")
 	}
 }
 
@@ -405,8 +379,7 @@ func snapshotParityPresentation(workspace string, providerID providercontract.ID
 		Group: &group, CWD: &cwd, Draft: "draft before actor save", Unread: true, Settled: "active", Pane: &pane,
 		ProviderID: providerID, CurrentModelID: modelID, CurrentModeID: modeID, WorkspaceRevision: 4,
 		ModelControls:          json.RawMessage(`{"mock":{"mock-model":{"effort":"high","modeId":"plan"}}}`),
-		ContextUsageByProvider: json.RawMessage(`{"legacy":{"used":99,"size":100}}`),
-		LegacyUsage:            json.RawMessage(`{"used":1,"size":2}`),
+		ContextUsageByProvider: json.RawMessage(`{"historical":{"used":99,"size":100}}`),
 	}
 }
 
@@ -603,7 +576,7 @@ func snapshotParityAssertRichRendererContract(
 		t.Fatalf("pending question projection = %#v", pendingPermission)
 	}
 	var replayed []any
-	if err := runtime.ReplayPendingPermissions(func(channel string, payload any) error {
+	if err := runtime.PublishPendingPermissions(func(channel string, payload any) error {
 		if channel != "chat:permission-request" {
 			return fmt.Errorf("unexpected replay channel %q", channel)
 		}
@@ -672,7 +645,7 @@ func snapshotParityAssertRichRendererContract(
 	if fieldString(projectedChat, "sessionError") != "" {
 		t.Fatalf("healthy actor lane projected an error: %#v", projectedChat)
 	}
-	_ = ownerKey // The lane owner is checked below from actor state, not a mirror.
+	_ = ownerKey // The lane owner is checked below from actor state.
 	if lane.Owner.AgentOwnerKey != ownerKey || lane.Owner.TabID != tabID {
 		t.Fatalf("lane attachment owner = %#v", lane.Owner)
 	}

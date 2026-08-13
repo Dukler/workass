@@ -6,28 +6,28 @@
 // (message list, running state, tabs, catalog) bump `app`.
 
 import { useSyncExternalStore } from 'react';
-import type { AppState, Chat, Msg, TimelineEvent, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
-import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, SessionReplaced, ModelOption, ModeOption, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, EngineRecovered, NotifyEvent, NotifyBacklog, AgentApply, ChatCommandsEvent, ChatStructuredError, StartJobOpts, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
+import type { AppState, Chat, Msg, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
+import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ModelOption, ModeOption, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, EngineRecovered, NotifyEvent, NotifyBacklog, AgentApply, ChatCommandsEvent, ChatStructuredError, StartJobOpts, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
 import { call, callThrow, has, on, bridgeReady } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
-import { DurableImagePayloads, LEAN_SESSION_SAVE_MODE, leanSessionEvents, loadMirror, saveMirror, type Mirror } from './persistence';
+import { LEAN_SESSION_SAVE_MODE, loadMirror, saveMirror, type Mirror, type MirrorMsg } from './persistence';
 import { browserApi } from '../browser';
 import {
   afterQueuedAcceptance, appendDraftImages, attachmentWorkBoundary, draftImagePayloads, mergeMessageImages, messageImages,
   queuedAttachmentsReady, queuedDraftMessage, queuedJob, queuedMessage, releaseDraftImages,
   shouldDrainRecoveredQueue, withoutDraftImages,
 } from '../image-drafts';
-import { acceptPendingSteer, commitChronologicalSteer, hasSteerConsumptionReceipt, insertChronologicalSteer, markPendingSteerUncertain, migrateAnchoredSteers, rejectChronologicalSteer, settlePendingSteer, settleSendingSteersAtTurnEnd, settleStagedSteersAtTurnEnd, stageChronologicalSteer, SteeringDispatchLane, steeringBehavior, steeringDestination, steeringStagesBoundary } from '../steering';
+import { acceptPendingSteer, commitChronologicalSteer, hasSteerConsumptionReceipt, insertChronologicalSteer, markPendingSteerUncertain, rejectChronologicalSteer, settlePendingSteer, settleSendingSteersAtTurnEnd, settleStagedSteersAtTurnEnd, stageChronologicalSteer, SteeringDispatchLane, steeringBehavior, steeringDestination, steeringStagesBoundary } from '../steering';
 import { chooseWorkspacePath, inheritChatControls, normalizeWorkspacePath, normalizeWorkspaces, rememberLastProject, workspaceFromPath } from '../workspaces';
 import { isAutoTurnEndNotice } from '../notifications';
 import { WorkspaceMoveGate, workspaceMoveAccepted, workspaceRebindSupported } from '../workspace-move';
 import { chatPane, nextPane, type RightPane } from './right-pane';
-import { dedupeMessages, mergeArchivedHistory, providerHistoryMessages } from './history-isolation';
+import { actorMessages } from '../chat/history';
+import { preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
 import { redactSensitiveText } from '../redact';
 import { recoverRememberedCatalogModel, resolveModelSelection } from '../model-selection';
-import { adoptsTerminalJobResult, appendAssistantChunk, restoredAssistantContent, restoredAssistantResult } from '../assistant-output.ts';
+import { adoptsTerminalJobResult, appendAssistantChunk } from '../assistant-output.ts';
 import {
-  contextUsageForProvider,
   contextUsageIdentityMatches,
   normalizeContextUsage,
   normalizeContextUsageByProvider,
@@ -77,11 +77,10 @@ const isToolDone = (s: string) => s === 'completed' || s === 'success';
 const isToolFailed = (s: string) => s === 'failed' || s === 'error';
 const HYDRATION_STEP_TIMEOUT = 15000;
 const AGENT_REFRESH_TIMEOUT = 20000;
-const DIGEST_REPAIR_DEBOUNCE = 250;
+const DIGEST_SYNC_DEBOUNCE = 250;
 const UPDATE_TERMINAL_TIMEOUT = 11 * 60 * 1000;
-const CHAT_MESSAGE_TAIL = 60;
 
-type RepairScope = 'session' | 'background' | 'permissions' | 'catalog' | 'settings' | 'processes';
+type SyncScope = 'session' | 'background' | 'permissions' | 'catalog' | 'settings' | 'processes';
 
 type ChatPresentationSnapshot = Pick<Chat, 'title' | 'titleLocked' | 'group' | 'draft' | 'unread' | 'settled' | 'pane'>;
 
@@ -154,11 +153,10 @@ export class Store {
   private machines: MachineRegistry | null = null;
   private selfMachineId = '';
   private machineNameMap: Record<string, string> = {};
-  // Archives load per chat, on demand. `archivesLoaded` is the settled set;
-  // `archiveLoads` dedupes concurrent fetches of the same chat.
-  private archivesLoaded = new Set<string>();
-  private archiveLoads = new Map<string, Promise<void>>();
-  private durableImagePayloads = new DurableImagePayloads();
+  // Full actor history loads per chat, on demand. Session snapshots carry only
+  // a bounded tail; these sets track complete read projections in memory.
+  private fullHistoriesLoaded = new Set<string>();
+  private fullHistoryLoads = new Map<string, Promise<void>>();
   // Chat creation is an immediate actor command. Keep only the optimistic row
   // mounted until the authoritative snapshot echoes its id; the operation id
   // and in-flight promise ensure every later draft/queue/session operation waits
@@ -217,8 +215,8 @@ export class Store {
   private agentRefresh: Promise<void> = Promise.resolve();
   private sessionHydrationPending = false;
   private digestUnsupported = false;
-  private repairScopes = new Set<RepairScope>();
-  private repairTimer: ReturnType<typeof setTimeout> | null = null;
+  private syncScopes = new Set<SyncScope>();
+  private syncTimer: ReturnType<typeof setTimeout> | null = null;
   private localCatalogHashes: Record<string, string> | null = null;
   private localSettingsRevision: string | null = null;
   private localProcHash: string | null = null;
@@ -295,36 +293,17 @@ export class Store {
   private scheduleQueuePersist() {
     // A running turn normally relaxes persistence to 3s to avoid mirroring its
     // streaming transcript. Queue ownership is different: the user just made a
-    // durable FIFO decision, so it must beat the 5s state-digest repair window.
+    // durable FIFO decision, so it must beat the 5s state-digest sync window.
     this.schedulePersist(250);
   }
   private markAllChatsDirty() {
     for (const chat of this.state.chats) this.touchChat(chat.id);
   }
-  private compactInactiveHistories(activeId: string | null) {
-    for (const chat of this.state.chats) {
-      if (chat.id === activeId || chat.messages.length <= CHAT_MESSAGE_TAIL) continue;
-      if (chat.messages.some((message) => message.status === 'running' || message.status === 'pending')) continue;
-      chat._archivedCount = Math.max(chat._archivedCount ?? 0, chat.messages.length);
-      chat.messages = chat.messages.slice(-CHAT_MESSAGE_TAIL);
-      // The complete actor ledger remains durable and is reloaded on the next
-      // visit or send. Keeping this marker would turn the bounded tail into a
-      // false cache hit and make older visible history appear permanently gone.
-      this.archivesLoaded.delete(chat.id);
-    }
+  private releaseInactiveHistories(activeId: string | null) {
+    for (const chatId of releaseInactiveHistories(this.state.chats, activeId)) this.fullHistoriesLoaded.delete(chatId);
   }
-  private preserveResidentHistories(previous: Chat[], restored: Chat[], activeId: string | null) {
-    const previousByID = new Map(previous.map((chat) => [chat.id, chat]));
-    for (const chat of restored) {
-      const prior = previousByID.get(chat.id);
-      if (!prior || (chat.id !== activeId && !this.archivesLoaded.has(chat.id))) continue;
-      if (prior.messages.length <= chat.messages.length) continue;
-      chat.messages = migrateAnchoredSteers(mergeArchivedHistory(
-        chat.messages,
-        prior.messages as unknown as Array<Record<string, unknown>>,
-      ));
-      chat._archivedCount = Math.max(chat._archivedCount ?? 0, prior._archivedCount ?? 0, prior.messages.length);
-    }
+  private preserveUnchangedFullHistories(previous: Chat[], restored: Chat[]) {
+    for (const chatId of preserveUnchangedFullHistories(previous, restored)) this.fullHistoriesLoaded.add(chatId);
   }
   private requireFullSave() {
     this.markAllChatsDirty();
@@ -359,7 +338,7 @@ export class Store {
       if (!selected.model) {
         // This renderer has an explicit picker write that the stale/replayed
         // catalog cannot yet describe. Preserve it until a fresh catalog arrives;
-        // remembered-model recovery is for legacy persisted ids, not live picks.
+        // remembered-model recovery is for stored ids, not live picks.
         if ((chat._controlRevision ?? 0) > 0) continue;
         const providerMemory = chat.modelControls?.[group.providerId] ?? {};
         const recovered = recoverRememberedCatalogModel(
@@ -446,19 +425,19 @@ export class Store {
   }
 
   // ---- persistence -----------------------------------------------------
-  private toMirror(leanMessages = false, localOnly = false, onlyDirty?: ReadonlySet<string>): Mirror {
+  private toMirror(lean = false, onlyDirty?: ReadonlySet<string>): Mirror {
     // A chat that lives on another machine is that machine's to persist. This
     // mirror is written to the LOCAL daemon, so letting a remote chat through
     // would copy it into this machine's session store and it would come back
     // after a restart as a local chat pointing at a repo that is not here
     // (remote-plan E3).
     const owned = this.state.chats.filter((chat) => !chat.machineId);
-    const chats = onlyDirty && leanMessages && !localOnly
+    const chats = onlyDirty && lean
       ? owned.filter((chat) => onlyDirty.has(chat.id))
       : owned;
     const snapshot: Mirror = {
       v: 1,
-      _workassSave: leanMessages && !localOnly ? LEAN_SESSION_SAVE_MODE : undefined,
+      _workassSave: lean ? LEAN_SESSION_SAVE_MODE : undefined,
       activeId: this.state.activeId,
       seq: this.state.seq,
       globalRevision: this.state.globalRevision,
@@ -487,45 +466,14 @@ export class Store {
         queue: c.queue?.length ? c.queue.map(({ draftImages: _draftImages, ...item }) => item) : undefined,
         providerId: c.providerId ?? null,
         contextUsageByProvider: c.contextUsageByProvider,
-        // Rolling compatibility for a renderer/host that understands only the
-        // original single-session field. The provider map remains authoritative.
-        usage: contextUsageForProvider(c.contextUsageByProvider, c.providerId, c.usage) ?? undefined,
-        messages: c.messages.slice(-CHAT_MESSAGE_TAIL).map((m) => ({
-          id: m.id, role: m.role,
-          content: m.content,
-          result: m.result,
-          status: m.status,
-          steerState: m.steerState,
-          steerAnchor: m.steerAnchor,
-          steerBoundary: m.steerBoundary,
-          steerContinuationId: m.steerContinuationId,
-          steerContinuationFor: m.steerContinuationFor,
-          turnRootId: m.turnRootId,
-          turnTerminal: m.turnTerminal,
-          at: m.at,
-          jobId: m.jobId,
-          permission: m.permission,
-          turnStartedAt: m.turnStartedAt,
-          interrupted: m.interrupted,
-          retryPrompt: m.retryPrompt,
-          // The Go daemon already owns sent attachments and timeline events via
-          // PrepareTurn/RecordJobEvent. Renderer session saves only need the
-          // message shell there; resending multi-megabyte image/tool payloads on
-          // an unrelated draft or pane change starves the browser main thread.
-          // The legacy Electron host is not event-sourced, so it still receives
-          // the complete message shape (leanMessages=false).
-          images: localOnly ? undefined : m.images,
-          events: localOnly
-            ? []
-            : leanMessages
-            ? leanSessionEvents(m.events)
-            : m.events.filter((e) => e.kind !== 'thinking'),
-        })),
+        messageCount: c.messageCount ?? c.messages.length,
+        historyComplete: c.historyComplete ?? true,
+        // Actor commands persist every chat mutation. session:save carries only
+        // global presentation state, so transcript rows never cross this path.
+        messages: [],
       })),
     };
-    return leanMessages && !localOnly
-      ? this.durableImagePayloads.omitAcknowledged(snapshot)
-      : snapshot;
+    return snapshot;
   }
 
   private serverSnapshot(lean: boolean): {
@@ -536,7 +484,7 @@ export class Store {
     const full = !lean || this.fullSavePending;
     const onlyDirty = lean && !full ? new Set(this.dirtyChats) : undefined;
     return {
-      snapshot: this.toMirror(lean, false, onlyDirty),
+      snapshot: this.toMirror(lean, onlyDirty),
       full,
       fullRevision: this.fullSaveRevision,
     };
@@ -544,7 +492,6 @@ export class Store {
 
   private async saveServerSnapshot(
     snapshot: Mirror,
-    lean: boolean,
     full: boolean,
     fullRevision: number,
   ): Promise<void> {
@@ -583,7 +530,7 @@ export class Store {
       });
       if (!receipt?.ok || receipt.operationId !== operationId) {
         failedQueueTabs.add(tabId);
-        this.scheduleScopedRepair(['session']);
+        this.scheduleScopedSync(['session']);
         continue;
       }
       const current = this.chat(tabId);
@@ -620,7 +567,7 @@ export class Store {
       });
       if (!receipt?.ok || receipt.operationId !== pending.operationId) {
         failedPresentationTabs.add(tabId);
-        this.scheduleScopedRepair(['session']);
+        this.scheduleScopedSync(['session']);
         continue;
       }
       const current = this.chat(tabId);
@@ -648,7 +595,6 @@ export class Store {
       this.committedGlobalPresentationFingerprint = globalFingerprint;
       this.pendingGlobalPresentationOperation = null;
     }
-    if (lean) this.durableImagePayloads.acknowledge(snapshot, savedOK);
     if (savedOK) {
       for (const [id, version] of sentDirtyVersions) {
         if (failedPresentationTabs.has(id) || failedQueueTabs.has(id)) continue;
@@ -699,8 +645,8 @@ export class Store {
     base.notifEnabled = !!m.notifEnabled;
     // Model scores/favorites are hydrated from the daemon app-settings blob
     // (hydrateSettings), not this session mirror, so defaults stay untouched.
-    // themePref is authoritative; legacy mirrors persisted only the resolved
-    // `theme`, so fall back to that as an explicit preference.
+    // themePref is authoritative; a resolved theme remains a valid explicit
+    // preference when no system-mode choice was stored.
     base.themePref = m.themePref ?? (m.theme ? m.theme : 'system');
     base.theme = resolveTheme(base.themePref);
     if (m.density) base.density = m.density;
@@ -727,11 +673,11 @@ export class Store {
           modeId: controls.modeId ?? undefined,
         });
       }
-      let contextUsageByProvider = normalizeContextUsageByProvider(c.contextUsageByProvider);
-      const legacyUsage = normalizeContextUsage(c.usage);
-      if (providerId && legacyUsage && !contextUsageByProvider[providerId]) {
-        contextUsageByProvider = withContextUsage(contextUsageByProvider, providerId, legacyUsage);
-      }
+      const contextUsageByProvider = normalizeContextUsageByProvider(c.contextUsageByProvider);
+      const messages = actorMessages(Array.isArray(c.messages) ? c.messages : []);
+      const messageCount = Number.isInteger(c.messageCount) && (c.messageCount ?? 0) >= messages.length
+        ? c.messageCount!
+        : messages.length;
       return {
         id: c.id, chatId: c.chatId ?? newChatConvId(), actorRevision: Number.isInteger(c.actorRevision) ? c.actorRevision : 0, sessionId: c.liveSession?.sessionId ?? null,
         sessionProviderId: binding.sessionProviderId,
@@ -742,7 +688,7 @@ export class Store {
         agentQueueRevision: Number.isInteger(c.agentQueueRevision) ? c.agentQueueRevision : 0,
         runtimeControlRevision: Number.isInteger(c.runtimeControlRevision) ? c.runtimeControlRevision : 0,
         // An explicit [] means "no current plan" and must survive as [], not be
-        // collapsed to absent — otherwise a stale scan could resurrect an old plan.
+        // collapsed to absent — otherwise a stale scan could restore an old plan.
         planLatest: Array.isArray(c.planLatest)
           ? c.planLatest.map((entry) => ({
             status: String((entry as PlanEntry)?.status ?? ''), content: String((entry as PlanEntry)?.content ?? ''),
@@ -754,7 +700,6 @@ export class Store {
         modelControls,
         providerId, providerName: binding.useLiveControls ? c.liveSession?.providerName ?? null : null,
         contextUsageByProvider,
-        usage: legacyUsage ?? undefined,
         pane: c.pane,
         imageSupport: c.liveSession?.imageSupport ?? false,
         commands: selectedLiveSession?.commands?.length ? selectedLiveSession.commands : undefined,
@@ -767,53 +712,24 @@ export class Store {
           ?? this.state?.chats?.find((prior) => prior.id === c.id)?.commandCatalog
           ?? undefined,
         pending: !c.liveSession?.sessionId, draft: c.draft ?? '', unread: c.unread, settled: c.settled,
-        // Prefer the new per-item queue; migrate a legacy single-blob `queued`
-        // (split on the old \n\n separator) so nothing in flight is lost on upgrade.
-        queue: (c.queue ?? (c.queued ? c.queued.split('\n\n').map((t): QueuedMsg => ({ id: rid('q'), text: t })) : undefined))
-          ?.map((item: QueuedMsg) => item.attachmentState === 'preparing'
+        queue: c.queue?.map((item: QueuedMsg) => item.attachmentState === 'preparing'
             ? { ...item, attachmentState: 'failed', attachmentError: 'La preparación se interrumpió; volvé a adjuntar las imágenes.' }
             : item),
-        messages: migrateAnchoredSteers(dedupeMessages((c.messages ?? []).map((mm): Msg => {
-          // A persisted "sending" row belonged to a promise in the previous
-          // renderer lifetime. It may still receive a daemon-backed client-id
-          // receipt, but this renderer can no longer truthfully show a spinner.
-          const interruptedSteer = mm.role === 'user' && mm.status === 'pending' && mm.steerState === 'sending';
-          return {
-            id: mm.id, role: mm.role,
-            content: restoredAssistantContent(mm.role, mm.status, mm.content),
-            result: restoredAssistantResult(mm.content, mm.result),
-            status: interruptedSteer ? 'done' : mm.status,
-            steerState: interruptedSteer ? 'uncertain' : mm.steerState,
-            steerAnchor: mm.steerAnchor,
-            steerBoundary: mm.steerBoundary,
-            steerContinuationId: mm.steerContinuationId,
-            steerContinuationFor: mm.steerContinuationFor,
-            turnRootId: mm.turnRootId,
-            turnTerminal: mm.turnTerminal,
-            at: mm.at, jobId: mm.jobId, permission: mm.permission,
-            turnStartedAt: mm.turnStartedAt,
-            interrupted: mm.interrupted,
-            retryPrompt: mm.retryPrompt,
-            images: mm.images, events: (mm.events as TimelineEvent[]) ?? [],
-          };
-        }))),
-        _archivedCount: (c.messages ?? []).length,
+        messages,
+        messageCount,
+        historyComplete: c.historyComplete !== false && messageCount === messages.length,
       };
     });
-    if (!base.chats.find((c) => c.id === base.activeId)) base.activeId = base.chats[0]?.id ?? null;
+    if (base.chats.length && !base.chats.find((c) => c.id === base.activeId)) base.activeId = base.chats[0].id;
     return base;
   }
-  // localStorage.setItem is synchronous, and the mirror it writes carries every
-  // hydrated chat's text. Calling it per keystroke made the composer's latency
-  // scale with conversation length. One coalesced write per burst costs the same
-  // for 1 character as for 40, and the daemon snapshot below is still the
-  // durable copy — a dropped tail here can only cost the last few hundred
-  // milliseconds of a first-paint cache.
+  // localStorage owns only local view preferences; coalescing still avoids a
+  // synchronous browser write per keystroke.
   private scheduleLocalMirror() {
     if (this.mirrorTimer) return;
     this.mirrorTimer = setTimeout(() => {
       this.mirrorTimer = null;
-      saveMirror(this.toMirror(true, true));
+      saveMirror(this.toMirror(true));
     }, 250);
   }
 
@@ -821,57 +737,44 @@ export class Store {
   // through instead of waiting for the coalescing window.
   private writeLocalMirrorNow() {
     if (this.mirrorTimer) { clearTimeout(this.mirrorTimer); this.mirrorTimer = null; }
-    saveMirror(this.toMirror(true, true));
+    saveMirror(this.toMirror(true));
   }
 
-  // A chat's archive is fetched once, on demand, and never twice concurrently.
-  // Callers that must see the full history (a send builds provider history from
-  // it) await this; a chat switch fires it and lets the transcript grow when it
-  // lands, which the scroll anchor already handles for prepended history.
-  private async ensureArchive(chatId: string): Promise<void> {
+  // Session hydration carries a bounded tail. Opening a chat reads one complete
+  // projection from the actor and replaces that tail directly.
+  private async ensureFullHistory(chatId: string): Promise<void> {
     if (!has('archiveLoad') || !chatId) return;
-    if (this.archivesLoaded.has(chatId)) return;
-    const inflight = this.archiveLoads.get(chatId);
+    if (this.fullHistoriesLoaded.has(chatId)) return;
+    const inflight = this.fullHistoryLoads.get(chatId);
     if (inflight) return inflight;
-    // Never reject: `_send` awaits this, and a malformed archive record must
-    // degrade to "this chat shows what the daemon snapshot holds", not to a
-    // failed send.
     const load = (async () => {
-      let older: unknown;
+      let projected: unknown;
       try {
-        const step = await this.guardedStep(`archive (${chatId})`, () => call('archiveLoad', chatId));
-        older = step.ok ? step.value : undefined;
+        const step = await this.guardedStep(`actor history (${chatId})`, () => call('archiveLoad', chatId));
+        projected = step.ok ? step.value : undefined;
         if (!step.ok) return;
       } catch { return; }
       const chat = this.chat(chatId);
-      if (!chat) return;
+      if (!chat || !Array.isArray(projected)) return;
       try {
-        if (Array.isArray(older) && older.length) {
-          chat.messages = migrateAnchoredSteers(mergeArchivedHistory(chat.messages, older as Array<Record<string, unknown>>));
-          this.rebuildJobRefs();
-        }
+        chat.messages = actorMessages(projected as MirrorMsg[]);
       } catch (error) {
-        console.warn(`[store] archive merge failed (${chatId})`, error);
+        console.warn(`[store] actor history rejected (${chatId})`, error);
         return;
       }
-      // Archive hydration establishes the exact finalized prefix. Without this
-      // reset, a short local mirror count could make the next turn end
-      // remap/resend the entire hydrated history on the main thread.
-      chat._archivedCount = chat.messages.filter((message) => message.status !== 'running' && message.status !== 'pending').length;
-      // Only a settled fetch is cached; the early returns above leave a failed
-      // or timed-out load retryable on the next switch or send.
-      this.archivesLoaded.add(chatId);
-      if (Array.isArray(older) && older.length) this.bumpApp(false);
+      chat.messageCount = chat.messages.length;
+      chat.historyComplete = true;
+      this.fullHistoriesLoaded.add(chatId);
+      this.rebuildJobRefs();
+      this.bumpApp(false);
     })();
-    this.archiveLoads.set(chatId, load);
-    try { await load; } finally { this.archiveLoads.delete(chatId); }
+    this.fullHistoryLoads.set(chatId, load);
+    try { await load; } finally { this.fullHistoryLoads.delete(chatId); }
   }
 
   private schedulePersist(delayOverride?: number) {
-    // First-paint storage deliberately excludes event/image payloads. Text,
-    // drafts and UI state remain instant; the authoritative daemon hydrates the
-    // heavy timeline a moment later. This keeps keystrokes off a multi-MiB
-    // JSON.stringify/localStorage path.
+    // First-paint storage contains view preferences only; the actor owns chat
+    // state and the daemon receives explicit chat commands below.
     this.scheduleLocalMirror();
     // Unit/SSR surfaces and a renderer whose preload bridge is absent have no
     // daemon persistence authority. Retrying server writes in that state keeps
@@ -885,7 +788,7 @@ export class Store {
       this.saveTimer = null;
       const lean = this.state.meta?.sessionSaveMode === LEAN_SESSION_SAVE_MODE;
       const save = this.serverSnapshot(lean);
-      void this.saveServerSnapshot(save.snapshot, lean, save.full, save.fullRevision);
+      void this.saveServerSnapshot(save.snapshot, save.full, save.fullRevision);
     }, delay);
   }
 
@@ -927,7 +830,7 @@ export class Store {
           modelControls: current.modelControls,
         });
         if (!receipt?.ok || receipt.operationId !== pending.operationId) {
-          this.scheduleScopedRepair(['session']);
+          this.scheduleScopedSync(['session']);
           return false;
         }
         const latest = this.chat(tabId);
@@ -966,7 +869,7 @@ export class Store {
     this.writeLocalMirrorNow();
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = null;
-    await this.saveServerSnapshot(save.snapshot, lean, save.full, save.fullRevision);
+    await this.saveServerSnapshot(save.snapshot, save.full, save.fullRevision);
   }
 
   private restoreDraftImages(previous: Chat[], restored: Chat[]) {
@@ -1047,7 +950,6 @@ export class Store {
   private restoreSessionSnapshot(server: unknown): boolean {
     if (!server || typeof server !== 'object' || !Array.isArray((server as Mirror).chats)) return false;
     const authoritative = server as Mirror;
-    this.durableImagePayloads.replaceFromServer(authoritative);
     const previousChats = this.state.chats;
     const previousWorkspaces = this.state.workspaces;
     const pendingQueues = new Map(this.pendingQueueSnapshots);
@@ -1061,7 +963,7 @@ export class Store {
       previousChats,
       this.carryPendingCreatedChats(previousChats, restored.chats),
     );
-    this.preserveResidentHistories(previousChats, this.state.chats, this.state.activeId);
+    this.preserveUnchangedFullHistories(previousChats, this.state.chats);
     for (const chat of restored.chats) {
       if (!this.pendingPresentationOperations.has(chat.id)) {
         this.committedPresentationFingerprints.set(chat.id, presentationFingerprint(chat));
@@ -1111,7 +1013,9 @@ export class Store {
     const localSurvives = !!localActive && this.state.chats.some((chat) => chat.id === localActive);
     this.state.activeId = localSurvives ? localActive : restored.activeId;
     this.state.seq = restored.seq;
-    if (this.state.meta?.daemon) this.compactInactiveHistories(this.state.activeId);
+    if (this.state.meta?.daemon) this.releaseInactiveHistories(this.state.activeId);
+    const active = this.active();
+    if (active && !active.historyComplete) void this.ensureFullHistory(active.id);
     this.reconcileWorkspaces();
     this.rebuildJobRefs();
     this.requireFullSave();
@@ -1195,12 +1099,12 @@ export class Store {
   }
 
   private handleStateDigest(digest: StateDigest) {
-    const scopes = this.digestRepairScopes(digest);
-    if (scopes.size) this.scheduleScopedRepair(scopes);
+    const scopes = this.digestSyncScopes(digest);
+    if (scopes.size) this.scheduleScopedSync(scopes);
   }
 
-  private digestRepairScopes(digest: StateDigest): Set<RepairScope> {
-    const scopes = new Set<RepairScope>();
+  private digestSyncScopes(digest: StateDigest): Set<SyncScope> {
+    const scopes = new Set<SyncScope>();
     if (this.sessionHydrationPending) scopes.add('session');
     if (digest.globalRevision !== this.state.globalRevision) scopes.add('session');
     const localByPair = new Map(this.state.chats.map((chat) => [`${chat.id}\u0000${chat.chatId ?? ''}`, chat]));
@@ -1224,18 +1128,18 @@ export class Store {
     return scopes;
   }
 
-  private scheduleScopedRepair(scopes: Iterable<RepairScope>) {
-    for (const scope of scopes) this.repairScopes.add(scope);
-    if (this.repairTimer) return;
-    this.repairTimer = setTimeout(() => {
-      this.repairTimer = null;
-      const batch = new Set(this.repairScopes);
-      this.repairScopes.clear();
-      this.queueAgentRefresh('state digest', () => this.runScopedRepair(batch));
-    }, DIGEST_REPAIR_DEBOUNCE);
+  private scheduleScopedSync(scopes: Iterable<SyncScope>) {
+    for (const scope of scopes) this.syncScopes.add(scope);
+    if (this.syncTimer) return;
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = null;
+      const batch = new Set(this.syncScopes);
+      this.syncScopes.clear();
+      this.queueAgentRefresh('state digest', () => this.runScopedSync(batch));
+    }, DIGEST_SYNC_DEBOUNCE);
   }
 
-  private async runScopedRepair(scopes: ReadonlySet<RepairScope>) {
+  private async runScopedSync(scopes: ReadonlySet<SyncScope>) {
     if (scopes.has('session')) {
       const result = await this.guardedStep('digest session:get', () => callThrow('getSession'));
       if (result.ok && this.restoreSessionSnapshot(result.value)) {
@@ -1354,7 +1258,7 @@ export class Store {
         onOpen: (machineId, info) => {
           // A reconnect reconciles; a daemon that RESTARTED lost every engine and
           // all in-memory session state, so its chats are re-read rather than
-          // repaired.
+          // synchronized.
           void this.hydrateMachine(machineId, info.restarted);
         },
       });
@@ -1572,7 +1476,6 @@ export class Store {
     // Wire events before any network so nothing is missed.
     on('onJobEvent', (e) => this.onJobEvent(e as JobEvent));
     on('onChatCatalog', (c) => this.onCatalog(c as ChatCatalog));
-    on('onChatSessionReplaced', (e) => this.onSessionReplaced(e as SessionReplaced));
     on('onChatPermissionRequest', (r) => this.onPermission(r as PermissionRequest));
     on('onChatPermissionResolved', (r) => this.onPermissionResolved(r as PermissionResolved));
     // Provider plan-usage snapshots — feature-detected; the daemon replays the
@@ -1642,12 +1545,12 @@ export class Store {
       // single fan-out of subagents produced dozens of full hydrations.
       // The tab is not a usable discriminator: the daemon coalesces its own
       // background intents and emits one untargeted event for a merged batch.
-      // Route every refresh through the digest repair machinery instead. It
-      // batches into a single DIGEST_REPAIR_DEBOUNCE window and still funnels
+      // Route every refresh through digest synchronization. It batches into a
+      // single DIGEST_SYNC_DEBOUNCE window and still funnels
       // through queueAgentRefresh, so the ordering guarantee that stops an
       // older session:get from overwriting newer chat state is unchanged.
       // A genuine reconnection is still driven by the socket-open path below.
-      this.scheduleScopedRepair(['session', 'permissions']);
+      this.scheduleScopedSync(['session', 'permissions']);
     });
     if (typeof window !== 'undefined') {
       const bootSocketGen = typeof window.__workassSocketGen === 'number' ? window.__workassSocketGen : 0;
@@ -1693,9 +1596,9 @@ export class Store {
       this.sessionHydrationPending = true;
       this.monitor?.markDisconnected();
     }
-    if (server && typeof server === 'object' && Array.isArray((server as Mirror).chats) && (server as Mirror).chats.length) {
+    const receivedSession = !!server && typeof server === 'object' && Array.isArray((server as Mirror).chats);
+    if (receivedSession) {
       const authoritative = server as Mirror;
-      this.durableImagePayloads.replaceFromServer(authoritative);
       const live = this.state;
       this.state = this.fromMirror(authoritative);
       // Chats from another machine live in another machine's mirror, so a
@@ -1703,6 +1606,9 @@ export class Store {
       // carried across for the same reason groups and models are below: the
       // local session store is not their source of truth.
       this.state.chats = this.carryRemoteChats(live.chats, this.state.chats);
+      if (live.activeId && this.state.chats.some((chat) => chat.id === live.activeId)) {
+        this.state.activeId = live.activeId;
+      }
       this.preserveNewerLocalControls(live.chats, this.state.chats);
       this.restoreDraftImages(live.chats, this.state.chats);
       this.restorePendingDrafts(this.state.chats);
@@ -1741,7 +1647,7 @@ export class Store {
     this.reconcileWorkspaces();
     // Catalog replay can arrive before the authoritative server mirror. The
     // mirror restore above then replaces chats with their persisted model ids,
-    // so reconcile once more at this boundary or a legacy Claude `default`
+    // so reconcile once more at this boundary or a stale Claude `default`
     // selection can survive startup and hide its effort control indefinitely.
     if (this.reconcileCatalogControls()) {
       this.markAllChatsDirty();
@@ -1751,7 +1657,10 @@ export class Store {
     // chat but intentionally does NOT activate; without an activeId the whole
     // surface renders its empty state and the composer targets nothing. Set the
     // active id explicitly (keeping the restored `mode` rather than forcing it).
-    if (this.state.chats.length === 0) { const c = this.newChat(false); this.state.activeId = c.id; }
+    if (sessionStep.ok && receivedSession && this.state.chats.length === 0) {
+      const c = this.newChat(false);
+      this.state.activeId = c.id;
+    }
 
     // Dispositivos (real): device list + pending access requests, feature-detected.
     this.state.hasDeviceChannels = has('lanDevices');
@@ -1779,30 +1688,18 @@ export class Store {
       if (Array.isArray(providers)) this.onProvidersList(providers);
     }
 
-    // Restore per-chat archives (older history than the mirror keeps). Loading
-    // every chat's archive here put every message, tool payload and screenshot
-    // of every conversation in the heap at once — one 412-message chat measures
-    // 119MB of JSON — and made every later mirror serialization walk all of it,
-    // which is what turned typing into a stutter once a chat got long. The
-    // daemon owns the archives, so hydrate the chat being read and fetch the
-    // others when they are opened or sent to.
+    // Session hydration is intentionally bounded. Paint it immediately, then
+    // replace only the selected chat with the complete actor projection.
     if (has('archiveLoad')) {
-      if (this.state.meta?.daemon) {
-        this.compactInactiveHistories(this.state.activeId);
-        if (this.state.activeId) await this.ensureArchive(this.state.activeId);
-      } else {
-        // The legacy Electron host has no event-sourced session store: its
-        // chat:archive-append path needs every chat's archived prefix up front,
-        // or a turn end re-appends history the archive already holds.
-        for (const chat of this.state.chats) await this.ensureArchive(chat.id);
-      }
+      this.releaseInactiveHistories(this.state.activeId);
+      if (this.state.activeId) void this.ensureFullHistory(this.state.activeId);
     }
     await this.guardedStep('boot permissions', () => this.refreshPendingPermissions());
     } catch (error) {
       console.warn('[store] partial boot', error);
     } finally {
       // Partial hydration is still a usable renderer. The monitor and digest
-      // repair path continue pulling any step that failed above.
+      // reconciliation path continues pulling any step that failed above.
       this.state.hydrated = true;
       this.bumpApp(false);
       this.recoverIdleQueues();
@@ -1886,16 +1783,10 @@ export class Store {
         await this.guardedStep('reconnect persist reconciled controls', () => this.persistControlsNow());
       }
     } else if (sessionStep.ok) {
-      // The renderer may still hold prepared image bytes while a replaced
-      // daemon has no session snapshot. Force their next lean save to carry the
-      // full payload again instead of trusting acknowledgements from the old
-      // process.
-      this.durableImagePayloads.clear();
       for (const chat of this.state.chats) {
         chat.sessionId = null;
         chat.pending = true;
         chat._initPromise = undefined;
-        chat.usage = undefined;
       }
       this.requireFullSave();
       this.sessionHydrationPending = false;
@@ -2175,7 +2066,7 @@ export class Store {
       .map((chat) => workspaceFromPath(chat.cwd ?? ''))
       .filter((workspace): workspace is NonNullable<typeof workspace> => workspace !== null);
     const fallback = workspaceFromPath(this.state.meta?.workspaceDir ?? this.state.meta?.rootDir ?? '');
-    // Never resurrect a folder the user removed, even if a chat's bound session
+    // Never recreate a folder the user removed, even if a chat's bound session
     // still runs there — that is the "removed folder came back" bug.
     this.state.workspaces = normalizeWorkspaces([...this.state.workspaces, ...inferred, ...(fallback ? [fallback] : [])])
       .filter((w) => !removed.has(normalizeWorkspacePath(w.path)));
@@ -2251,7 +2142,7 @@ export class Store {
       this.pendingChatCreateOperations.delete(chat.id);
       // Keep pendingChatCreates until session:get echoes the actor id. This is
       // an in-flight display fence only; the actor is already durable here.
-      this.scheduleScopedRepair(['session']);
+      this.scheduleScopedSync(['session']);
       return true;
     })().finally(() => {
       this.pendingChatCreatePromises.delete(chat.id);
@@ -2367,7 +2258,7 @@ export class Store {
     return true;
   }
   // Remove a folder FROM WORKASS only — never touches the folder on disk. Record
-  // it so inference can't resurrect it (a chat's bound session may still run
+  // it so inference can't recreate it (a chat's bound session may still run
   // there); its chats simply fall to the unassigned "Chats" bucket, keeping their
   // real cwd. Re-adding the folder (addWorkspace) restores it with those chats.
   removeWorkspace(path: string) {
@@ -2407,9 +2298,8 @@ export class Store {
   switchChat(id: string) {
     if (this.state.activeId === id) return;
     this.state.activeId = id;
-    if (this.state.meta?.daemon) this.compactInactiveHistories(id);
-    // Boot only hydrates the chat you were reading; the rest arrive here.
-    void this.ensureArchive(id);
+    this.releaseInactiveHistories(id);
+    void this.ensureFullHistory(id);
     const chat = this.chat(id);
     if (chat?.unread) {
       chat.unread = false;
@@ -2505,8 +2395,8 @@ export class Store {
     this.pendingChatCreates.delete(id);
     this.pendingChatCreateOperations.delete(id);
     this.pendingChatCreatePromises.delete(id);
-    this.archivesLoaded.delete(id);
-    this.archiveLoads.delete(id);
+    this.fullHistoriesLoaded.delete(id);
+    this.fullHistoryLoads.delete(id);
     this.committedPresentationFingerprints.delete(id);
     this.pendingPresentationOperations.delete(id);
     this.pendingPresentationSnapshots.delete(id);
@@ -2723,8 +2613,8 @@ export class Store {
   async sendTo(chatId: string, prompt: string, images?: StartJobOpts['images'], submittedDraft = prompt): Promise<boolean> {
     const chat = this.chat(chatId);
     if (!chat) return false;
-    // Claim the exact composer value synchronously, before `_send` can suspend
-    // on archive hydration. This is the ownership boundary: after it, the user
+    // Claim the exact composer value synchronously. This is the ownership
+    // boundary: after it, the user
     // row (or failed-send row) owns the prompt, so a fast tab switch must see an
     // empty draft. Do not erase text typed while attachments were preparing.
     if (chat.draft === submittedDraft) this.setDraft(chat.id, '');
@@ -3007,10 +2897,6 @@ export class Store {
     queueId?: string,
     identity?: { userId: string; assistantId: string },
   ): Promise<boolean> {
-    // providerHistoryMessages below IS the conversation the agent receives, so a
-    // send into a chat whose archive has not landed yet must wait for it rather
-    // than start the turn with a truncated history.
-    await this.ensureArchive(chat.id);
     if (!prompt.trim() || this.isChatRunning(chat.id)) return false;
     const move = this.workspaceMoves.current(chat.id);
     if (move && !(await move)) return false;
@@ -3057,12 +2943,6 @@ export class Store {
       asst.jobId = undefined;
       asst.turnStartedAt = Date.now();
     }
-    // A retry may still have its optimistic pair mounted (the FIFO path keeps
-    // the failed head in place). That pair is the operation being admitted,
-    // not provider context; feeding it back as history would duplicate the
-    // prompt on a definite rejection retry. Ordinary retries remove the pair,
-    // so this exclusion is deliberately a no-op for their existing behavior.
-    const history = providerHistoryMessages(chat.messages.filter((message) => message.id !== userId && message.id !== assistantId));
     if (!priorUser) chat.messages.push(user);
     if (!priorAssistant) chat.messages.push(asst);
     if (!chat.titleLocked) { chat.title = display.trim().slice(0, 34) || chat.title; chat.titleLocked = true; }
@@ -3091,7 +2971,7 @@ export class Store {
       // fail before the active provider lane is detached.
       providerId: chat.providerId ?? undefined,
       modelId: chat.currentModelId, modeId: chat.currentModeId,
-      prompt, history, images: images && images.length ? images : undefined,
+      prompt, images: images && images.length ? images : undefined,
       userMessageId: userId, assistantMessageId: assistantId,
       queueId,
       busyMode: 'queue-v1',
@@ -3154,9 +3034,8 @@ export class Store {
     }
     this.bump('msg:' + running.id);
     this.bumpChat(chat);
-    void this.archive();
     this.recoverIdleQueues();
-    this.scheduleScopedRepair(['session', 'permissions']);
+    this.scheduleScopedSync(['session', 'permissions']);
   }
   async decidePermission(tabId: string, msgId: string, permId: string, optionId: string) {
     const msg = this.chat(tabId)?.messages.find((candidate) => candidate.id === msgId); if (!msg) return;
@@ -3237,7 +3116,7 @@ export class Store {
         }
         if (!msg && chat) {
           msg = this.synthesizeCanonicalJobRows(chat, e.job);
-          if (!msg) this.scheduleScopedRepair(['session', 'permissions']);
+          if (!msg) this.scheduleScopedSync(['session', 'permissions']);
         }
         if (msg && chat) {
           msg.jobId = e.job.id;
@@ -3342,9 +3221,6 @@ export class Store {
             const providerId = e.providerId ?? c.sessionProviderId ?? c.providerId;
             if (!providerId) continue;
             c.contextUsageByProvider = withContextUsage(c.contextUsageByProvider, providerId, usage);
-            // Keep the old field coherent only for the provider currently shown;
-            // a staged provider switch must never display the prior agent's context.
-            if (!c.providerId || c.providerId === providerId) c.usage = usage;
             this.touchChat(c.id);
             touched = true;
           }
@@ -3362,7 +3238,7 @@ export class Store {
         const reattached = jobChat ? this.attachJobSession(jobChat, e.job) : false;
         if (!msg && jobChat) {
           msg = this.synthesizeCanonicalJobRows(jobChat, e.job, true);
-          if (!msg) this.scheduleScopedRepair(['session', 'permissions']);
+          if (!msg) this.scheduleScopedSync(['session', 'permissions']);
         }
         if (jobChat) {
           // The terminal job snapshot is the reconnect-safe source of truth if
@@ -3409,10 +3285,6 @@ export class Store {
           msg.at = e.job.finishedAt ?? new Date().toISOString();
           if (e.job.images?.length) {
             msg.images = mergeMessageImages(msg.images, e.job.images);
-            // job:end is broadcast only after the daemon has durably folded the
-            // terminal snapshot, so the next lean renderer save must not echo
-            // multi-megabyte assistant media back over the socket.
-            this.durableImagePayloads.acknowledgeImages(msg.images);
           }
           if (msg.permission && !msg.permission.resolved) msg.permission = undefined;
           this.jobRef.delete(e.job.id);
@@ -3423,7 +3295,6 @@ export class Store {
         const endedChat = (rec ? this.chat(rec.tabId) : null) ?? jobChat;
         if (endedChat) this.touchChat(endedChat.id);
         this.bumpApp(false);
-        void this.archive();
         // A turn that finished in a chat you were not looking at is the only
         // thing that makes a chat unread. Nothing set the flag before — only
         // switchChat cleared it — so the sidebar's finished cue (v2's "Listo"
@@ -3849,32 +3720,6 @@ export class Store {
     }
     this.bumpApp(false);
   }
-  private onSessionReplaced(e: SessionReplaced) {
-    const rec = e.chatId ? this.chatJobs.get(e.chatId) : undefined;
-    let chat = rec ? this.chat(rec.tabId) : null;
-    if (!chat) chat = this.state.chats.find((c) => c.sessionId === e.oldSessionId) ?? null;
-    if (!chat || !e.session) return;
-    chat.sessionId = e.session.sessionId;
-    chat.cwd = e.session.cwd ?? chat.cwd;
-    chat.sessionError = undefined;
-    // Provider handover confirmation: the daemon names the provider that now
-    // owns this chat (cross-provider switch or crash recovery) — reflect it in
-    // the chip immediately.
-    if (e.session.providerId) {
-      const selectedWasLive = !chat.providerId || !chat.sessionProviderId || chat.providerId === chat.sessionProviderId;
-      chat.sessionProviderId = e.session.providerId;
-      // If the user staged yet another provider while this handover was in
-      // flight, keep that newer pick. Otherwise the replacement confirms it.
-      if (selectedWasLive || chat.providerId === e.session.providerId) chat.providerId = e.session.providerId;
-      chat.providerName = this.providerName(chat.providerId) ?? chat.providerName ?? null;
-    }
-    chat.imageSupport = !!e.session.imageSupport;
-    chat.commands = e.session.commands?.length ? e.session.commands : undefined;
-    if (e.session.commandCatalog !== undefined) chat.commandCatalog = e.session.commandCatalog ?? undefined;
-    if (e.session.models?.length) this.state.models = e.session.models;
-    if (e.session.modes?.length) this.state.modes = e.session.modes;
-    this.bumpApp(false);
-  }
   private onProcChanged(e: ProcChanged) {
     if (Array.isArray(e?.processes)) {
       this.state.processes = e.processes;
@@ -4159,23 +4004,6 @@ export class Store {
     for (const item of items.slice(-5)) this.addToast(item.title || 'workass', item.body || '');
   }
 
-  private async archive() {
-    // The Go daemon appends the completed pair before it emits job:end. Calling
-    // chat:archive-append again from React only remaps the hydrated history and
-    // makes the daemon reread it for dedupe. Keep this compatibility path solely
-    // for the legacy Electron host, which has no event-sourced session store.
-    if (this.state.meta?.daemon) return;
-    if (!has('archiveAppend')) return;
-    for (const chat of this.state.chats) {
-      const finalized = chat.messages.filter((m) => m.status !== 'running' && m.status !== 'pending');
-      const already = chat._archivedCount ?? 0;
-      const fresh = finalized.slice(already);
-      if (fresh.length) {
-        const ok = await call('archiveAppend', chat.id, fresh.map((m) => ({ id: m.id, jobId: m.jobId, role: m.role, content: m.content, result: m.result, status: m.status, at: m.at, steerState: m.steerState, steerAnchor: m.steerAnchor, steerBoundary: m.steerBoundary, steerContinuationId: m.steerContinuationId, steerContinuationFor: m.steerContinuationFor, turnRootId: m.turnRootId, turnTerminal: m.turnTerminal, images: m.images, events: m.events.filter((e) => e.kind !== 'thinking') })));
-        if (ok !== false) chat._archivedCount = finalized.length;
-      }
-    }
-  }
 }
 
 function rid(p: string) { return `${p}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`; }
@@ -4304,10 +4132,8 @@ function localRunningJobID(chat: Chat): string | null {
 }
 function digestChatSessionDiverged(chat: Chat, digest: StateDigestChat): boolean {
   const queue = chat.queue ?? [];
-  const completeMessageCount = Math.max(chat.messages.length, chat._archivedCount ?? 0);
   return (chat.actorRevision ?? 0) !== digest.actorRevision
     || localRunningJobID(chat) !== (digest.runningJobId ?? null)
-    || completeMessageCount !== digest.messageCount
     || (chat.messages.at(-1)?.id ?? null) !== (digest.lastMessageId ?? null)
     || queue.length !== digest.queueLen
     || (queue[0]?.id ?? null) !== (digest.queueHeadId ?? null)

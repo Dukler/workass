@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { adoptsTerminalJobResult, appendAssistantChunk, fullAssistantText, normalizeAssistantMessagePhase, restoredAssistantContent, restoredAssistantResult } from '../src/assistant-output.ts';
+import { adoptsTerminalJobResult, appendAssistantChunk, fullAssistantText, normalizeAssistantMessagePhase } from '../src/assistant-output.ts';
 
 test('provider-typed final answer has one result owner while commentary remains normal prose', () => {
   const msg: { content: string; result?: string } = { content: '' };
@@ -13,21 +13,13 @@ test('provider-typed final answer has one result owner while commentary remains 
   assert.equal(fullAssistantText(msg), 'working notes\n\nfinal report');
 });
 
-test('phase-less and unknown providers retain the legacy transcript path', () => {
+test('phase-less and unknown providers retain ordinary assistant content', () => {
   const msg: { content: string; result?: string } = { content: '' };
   appendAssistantChunk(msg, 'legacy', undefined);
   appendAssistantChunk(msg, ' future', 'future_phase');
   assert.deepEqual(msg, { content: 'legacy future' });
   assert.equal(normalizeAssistantMessagePhase('final_answer'), 'final_answer');
   assert.equal(normalizeAssistantMessagePhase('future_phase'), null);
-});
-
-test('legacy empty cancellation prose migrates to status-only chrome', () => {
-  assert.equal(restoredAssistantContent('assistant', 'cancelled', 'Detenido.'), '');
-  assert.equal(restoredAssistantContent('assistant', 'cancelled', '  Detenido.  '), '');
-  assert.equal(restoredAssistantContent('assistant', 'cancelled', 'partial work'), 'partial work');
-  assert.equal(restoredAssistantContent('assistant', 'done', 'Detenido.'), 'Detenido.');
-  assert.equal(restoredAssistantContent('user', 'cancelled', 'Detenido.'), 'Detenido.');
 });
 
 test('the combined terminal result is adopted only by a turn this renderer never streamed', () => {
@@ -37,14 +29,6 @@ test('the combined terminal result is adopted only by a turn this renderer never
   // A steer split leaves the text on the head segment and an empty continuation.
   assert.equal(adoptsTerminalJobResult([{ content: 'pre-steer', result: undefined }, { content: '', result: undefined }]), false);
   assert.equal(adoptsTerminalJobResult([]), true);
-});
-
-test('an exact content/result twin is healed on restore', () => {
-  assert.equal(restoredAssistantResult('same text', 'same text'), undefined);
-  assert.equal(restoredAssistantResult('commentary', 'final answer'), 'final answer');
-  assert.equal(restoredAssistantResult('', ''), '');   // empty stays empty; only a real twin is dropped
-  assert.equal(restoredAssistantResult('anything', null), undefined);
-  assert.equal(restoredAssistantResult('', 'answer with no commentary'), 'answer with no commentary');
 });
 
 test('typed result renders as ordinary assistant Markdown without dedicated presentation', () => {

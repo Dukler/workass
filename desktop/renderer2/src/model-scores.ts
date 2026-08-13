@@ -81,7 +81,7 @@ export function isEmptyScore(score: ModelScore | undefined | null): boolean {
   return !score.note;
 }
 
-// Coerce arbitrary (possibly persisted/legacy) data into a clean ModelScore, or
+// Coerce arbitrary persisted data into a clean ModelScore, or
 // undefined when nothing valid remains — so callers can drop empty entries.
 export function sanitizeScore(raw: unknown): ModelScore | undefined {
   if (!raw || typeof raw !== 'object') return undefined;

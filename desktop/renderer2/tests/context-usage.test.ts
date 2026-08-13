@@ -25,8 +25,7 @@ test('context usage remains provider-scoped across model handovers', () => {
     updatedAt: '2026-07-22T19:38:00Z',
   });
   assert.equal(contextUsageForProvider(usage, 'mock'), null);
-  assert.equal(contextUsageForProvider(usage, 'mock', { used: 1, size: 2 }), null,
-    'a legacy singleton from the previous provider must not be relabeled after switching');
+  assert.equal(contextUsageForProvider(usage, 'mock'), null);
 });
 
 test('context percentage never turns missing data into zero percent', () => {
@@ -64,5 +63,5 @@ test('composer keeps context passive and exposes exact details only in its popov
   assert.match(composer, /className="pop pop-ctx"/);
   assert.match(composer, /compactContextTokens\(usage\.used\)/);
   assert.match(persistence, /contextUsageByProvider\?:/);
-  assert.match(store, /contextUsageForProvider\(/);
+  assert.doesNotMatch(store, /\busage:\s*legacy|c\.usage/);
 });

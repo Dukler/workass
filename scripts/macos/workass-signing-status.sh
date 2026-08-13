@@ -64,7 +64,7 @@ report() {
           | grep -E '^file (added|modified|missing):' \
           | sed 's|^|                                  |' \
           | head -12
-        printf '%-22s           repair: scripts/package-workass-macos.sh\n' ''
+        printf '%-22s           rebuild: scripts/package-workass-macos.sh\n' ''
         unstable=$((unstable + 1))
       fi
       ;;

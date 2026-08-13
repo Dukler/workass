@@ -99,7 +99,7 @@ func (m *Manager) ValidateAgentOwner(ownerKey, chatID, tabID string) bool {
 // WithActorOwner executes one already-authorized durable chat effect through
 // the existing agent/background runtime without persisting or logging a bearer
 // capability. The actor's immutable chat/lane/operation owner is the authority;
-// this short-lived key is only an adapter for legacy executor internals.
+// this short-lived key exists only for the executor capability boundary.
 func (m *Manager) WithActorOwner(chatID, tabID string, execute func(string) (any, error)) (any, error) {
 	chatID, tabID = strings.TrimSpace(chatID), strings.TrimSpace(tabID)
 	if m == nil || chatID == "" || tabID == "" || execute == nil {

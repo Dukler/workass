@@ -12,8 +12,8 @@ import (
 
 func TestDaemonMetricsUsesAuthoritativeActorInventory(t *testing.T) {
 	stateDir := t.TempDir()
-	// The retired renderer mirror deliberately describes a different chat. It
-	// must not affect the metrics response after actor cutover.
+	// A noncanonical renderer file deliberately describes a different chat. It
+	// must not affect actor-derived metrics.
 	if err := os.WriteFile(filepath.Join(stateDir, sessionStateFilename), []byte(`{"chats":[{"id":"stale","messages":[{"content":"stale"}]}]}`), 0600); err != nil {
 		t.Fatalf("write stale session mirror: %v", err)
 	}
@@ -22,21 +22,27 @@ func TestDaemonMetricsUsesAuthoritativeActorInventory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create actor: %v", err)
 	}
-	if err := engine.Apply(chat.MigrateLegacyChat{
-		Version: 2, Digest: "metrics-digest",
-		Presentation: chat.PresentationState{TabID: "metrics-tab"},
-		Messages: []chat.LegacyMessage{
-			{MessageID: "metrics-user", OperationID: "metrics-turn", Role: "user", Text: "hello", Status: "done"},
-			{MessageID: "metrics-assistant", OperationID: "metrics-turn", Role: "assistant", Text: "world", Status: "done", Timeline: []chat.TimelineEntry{{
-				Key:      "metrics-thinking",
-				At:       0,
-				Kind:     providercontract.EventThinkingUpdate,
-				Thinking: &providercontract.ThinkingEvent{Text: "thinking"},
-			}}},
-		},
-	}); err != nil {
-		t.Fatalf("seed actor: %v", err)
+	apply := func(command chat.Command) {
+		t.Helper()
+		if err := engine.Apply(command); err != nil {
+			t.Fatalf("seed actor with %T: %v", command, err)
+		}
 	}
+	identity := providercontract.LaneIdentity{ChatID: "metrics-chat", WorkspaceEpoch: "workspace", Realm: providercontract.Realm{
+		ProviderID: "codex", MachineID: "machine", AccountScope: "account", InstallScope: "install", Verified: true,
+	}}.Normalize()
+	apply(chat.InitializeChat{Presentation: chat.PresentationState{TabID: "metrics-tab"}, OperationID: "metrics-create", Digest: "metrics-create-digest"})
+	apply(chat.SelectLane{Identity: identity, Owner: providercontract.AttachmentOwner{TabID: "metrics-tab"}})
+	apply(chat.LaneOpened{LaneID: identity.ID, Thread: providercontract.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1}, ConnectionGeneration: 1, Context: providercontract.ContextCapabilities{ExactResume: true}})
+	apply(chat.Submit{OperationID: "metrics-turn", Text: "hello", Presentation: providercontract.TurnPresentation{UserMessageID: "metrics-user", AssistantMessageID: "metrics-assistant"}})
+	apply(chat.TurnAdmitted{OperationID: "metrics-turn", Accepted: true, Turn: providercontract.TurnRef{OperationID: "metrics-turn", NativeID: "native-turn"}})
+	apply(chat.ProviderEventReceived{ConnectionGeneration: 1, Event: providercontract.Event{
+		Kind:     providercontract.EventThinkingUpdate,
+		Identity: providercontract.EventIdentity{ChatID: "metrics-chat", LaneID: identity.ID, OperationID: "metrics-turn", TurnID: "native-turn", Sequence: 1},
+		Thinking: &providercontract.ThinkingEvent{Text: "thinking"},
+	}})
+	apply(chat.InputConsumed{OperationID: "metrics-turn"})
+	apply(chat.TurnCompleted{OperationID: "metrics-turn", Assistant: "world"})
 
 	chatID := "metrics-chat"
 	runtime := &providerChatRuntime{

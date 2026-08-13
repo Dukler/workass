@@ -78,7 +78,7 @@ func TestNormalizeCatalogModelsKeepsSingleEffortFamilyUncollapsed(t *testing.T) 
 	}
 }
 
-func TestCatalogModelSelectionBaseRepairsOnlyCanonicalSuffixesOnExistingModels(t *testing.T) {
+func TestCatalogModelSelectionBaseNormalizesOnlyCanonicalSuffixesOnExistingModels(t *testing.T) {
 	models := []Model{{ModelID: "opus[1m]"}, {ModelID: "haiku"}}
 	cases := []struct {
 		selection string

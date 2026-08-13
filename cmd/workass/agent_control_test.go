@@ -246,10 +246,14 @@ func TestT7AgentControlExternalSettleIsIdempotentAndOwnerValidated(t *testing.T)
 		!strings.Contains(err.Error(), "no running Workass turn owns this external work request") {
 		t.Fatalf("non-owning key error = %v", err)
 	}
-	item := manager.ListSpawnedWork(tabID, chatID)[0]
-	if item.Status != "failed" || item.ExitCode == nil || *item.ExitCode != 7 ||
-		strings.Contains(item.Summary, "hidden") || !strings.Contains(item.Summary, "[redacted]") {
-		t.Fatalf("settled external item = %#v", item)
+	if items := manager.ListSpawnedWork(tabID, chatID); len(items) != 0 {
+		t.Fatalf("settled external delivery cache was not compacted: %#v", items)
+	}
+	state, ok := runtime.Snapshot(chatID)
+	item, exists := state.Background[workID]
+	if !ok || !exists || item.Event.Status != "failed" || item.Event.ExitCode == nil || *item.Event.ExitCode != 7 ||
+		strings.Contains(item.Event.Summary, "hidden") || !strings.Contains(item.Event.Summary, "[redacted]") {
+		t.Fatalf("actor-owned settled external item = %#v", item)
 	}
 }
 

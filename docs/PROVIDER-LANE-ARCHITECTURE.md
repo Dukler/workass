@@ -379,23 +379,29 @@ boundary before exhaustion. Any fork/reset is explicit.
 - Only a provider-authenticated same-lineage event may advance a native alias.
 - Model/catalog changes never replace a thread.
 
-### Migration
+### Storage schema upgrades
 
-- Existing bindings migrate only when chat, provider, realm, workspace, and
-  native owner are unambiguous.
-- Every legacy nonempty visible chat is migrated into the actor's semantic
-  ledger before lane selection, turn admission, or provider switching. Until
-  that transaction commits, the chat is migration-blocked and MUST NOT be
-  interpreted as empty.
-- Multiple historical native ids produced by earlier fallback code are never
-  guessed into one lane. The chat is quarantined for an explicit repair choice.
-- The old ledger remains readable until the new lane store has been written,
-  fsynced, read back, and ownership-checked.
+- Storage upgrades run to completion before chat actors or provider runtimes
+  exist. They perform no provider RPC and never choose, create, resume, replace,
+  or replay a native thread.
+- The supported actor v19 -> v20 upgrade binds every previously unattributed
+  semantic event only when one exact stored lane/thread already proves its
+  owner. The supported provider-lane v6 -> v7 upgrade removes
+  transcript-derived cursor/hash fields and preserves immutable ownership.
+- Duplicate, incomplete, cross-machine, or otherwise ambiguous ownership fails
+  the upgrade without writing the actor. Invalid data never becomes a live
+  recoverable-invalid chat, repair command, compatibility runtime branch, or
+  guessed lane.
+- Each converted file is written atomically, fsynced, read back, and
+  ownership-checked. A mixed directory after a crash is safe because the next
+  startup continues only the files still on the immediately preceding schema.
 - Renderer snapshots cannot erase or overwrite lane bindings/outbox state.
 
-Migration and ordinary commits use one authority order: durable actor commit,
+Upgrades and ordinary commits use one authority order: durable actor commit,
 then rebuildable renderer projection. There is no actor/mirror dual-write
-transaction and no recovery path that chooses the newer-looking copy.
+transaction and no recovery path that chooses the newer-looking copy. Once the
+release floor no longer contains v19/v6 storage, these two upgrade files are
+deleted; their shapes never enter live chat or lane types.
 
 ### Renderer projection and event delivery
 
@@ -480,7 +486,7 @@ are the correctness oracle.
 - provider removal, login recovery, and protocol downgrade;
 - workspace/account transitions;
 - compaction concurrent with queued input;
-- migration collision quarantine.
+- storage-upgrade collision rejection without partial writes.
 
 ### Structural gates
 
@@ -526,8 +532,8 @@ No intermediate phase is production-ready by itself.
       state.
 - [x] Commit provider events durably before publication, with backpressure and
       contiguous sequence enforcement.
-- [x] Migrate every legacy nonempty chat before lane selection; quarantine
-      ambiguous state and never treat it as empty.
+- [x] Upgrade every v19 nonempty chat before lane selection; reject ambiguous
+      ownership without partial writes and never treat it as empty.
 - [x] Derive the frozen renderer snapshot from authoritative state and make
       renderer saves presentation-command-only.
 - [x] Remove legacy runtime dual writes and every direct manager/session-store
@@ -537,8 +543,9 @@ No intermediate phase is production-ready by itself.
 
 - [x] Add durable lane records using all identity dimensions; disposable tab ids
       are attachment metadata only.
-- [x] Migrate unambiguous native bindings transactionally.
-- [x] Quarantine collisions instead of selecting a thread.
+- [x] Upgrade unambiguous native bindings transactionally before runtime.
+- [x] Reject collisions before runtime instead of selecting a thread or
+      persisting a recoverable-invalid chat state.
 - [x] Remove `session/load`, fresh replacement, transcript replay, and automatic
       Workass compaction from established-lane recovery.
 - [x] Enforce established-lane `Create` prohibition at coordinator and runtime.

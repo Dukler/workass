@@ -185,22 +185,22 @@ func (r *providerChatRuntime) RunBackgroundAction(ctx context.Context, tabID, ch
 }
 
 func (r *providerChatRuntime) applySpawnedWorkSnapshot(tabID, chatID string, items []acp.SpawnedWorkItem) (acp.SpawnedWorkActorProjection, error) {
-	actor, state, err := r.exactActor(tabID, chatID)
+	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
+	if tabID == "" || chatID == "" {
+		return acp.SpawnedWorkActorProjection{}, errors.New("background snapshot requires exact tab and chat ids")
+	}
+	actor, err := r.actor(chatID)
 	if err != nil {
 		return acp.SpawnedWorkActorProjection{}, err
 	}
-	background := make([]chat.BackgroundState, 0, len(items))
-	for _, item := range items {
-		workID := firstNonEmptyString(strings.TrimSpace(item.ID), strings.TrimSpace(item.TaskID))
-		if workID == "" {
-			return acp.SpawnedWorkActorProjection{}, errors.New("runtime background snapshot contains an item without identity")
-		}
-		owner, ok := exactBackgroundOwner(state, item)
-		if !ok {
-			return acp.SpawnedWorkActorProjection{}, fmt.Errorf("runtime background work %q has no exact actor owner", workID)
-		}
-		background = append(background, chat.BackgroundState{Owner: owner, Event: backgroundEvent(item, workID)})
+	state := actor.engine.Snapshot()
+	if strings.TrimSpace(state.Presentation.TabID) != tabID {
+		return acp.SpawnedWorkActorProjection{}, errors.New("background snapshot belongs to another tab attachment")
 	}
+	if state.Deleted {
+		return acp.SpawnedWorkActorProjection{ActorRevision: state.Revision, Items: []acp.SpawnedWorkItem{}}, nil
+	}
+	background, accepted := actorOwnedBackgroundSnapshot(state, items)
 	actor.mu.Lock()
 	err = actor.engine.Apply(chat.ReconcileBackgroundSnapshot{
 		Items: background, AuthoritativeAbsence: true, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
@@ -218,8 +218,30 @@ func (r *providerChatRuntime) applySpawnedWorkSnapshot(tabID, chatID string, ite
 		return acp.SpawnedWorkActorProjection{}, err
 	}
 	return acp.SpawnedWorkActorProjection{
-		ActorRevision: state.Revision, Obligation: actorObligationProjection(state.Obligation),
+		ActorRevision: state.Revision, Obligation: actorObligationProjection(state.Obligation), Items: accepted,
 	}, nil
+}
+
+// actorOwnedBackgroundSnapshot is the authority boundary between the durable
+// chat actor and the rebuildable executor cache. Cache rows can describe
+// liveness only after their immutable origin resolves inside this exact actor;
+// every other row is excluded instead of being attached to a convenient turn.
+func actorOwnedBackgroundSnapshot(state chat.State, items []acp.SpawnedWorkItem) ([]chat.BackgroundState, []acp.SpawnedWorkItem) {
+	background := make([]chat.BackgroundState, 0, len(items))
+	accepted := make([]acp.SpawnedWorkItem, 0, len(items))
+	for _, item := range items {
+		workID := firstNonEmptyString(strings.TrimSpace(item.ID), strings.TrimSpace(item.TaskID))
+		if workID == "" {
+			continue
+		}
+		owner, ok := exactBackgroundOwner(state, item)
+		if !ok {
+			continue
+		}
+		background = append(background, chat.BackgroundState{Owner: owner, Event: backgroundEvent(item, workID)})
+		accepted = append(accepted, item)
+	}
+	return background, accepted
 }
 
 func actorObligationProjection(value *chat.ObligationState) *acp.ChatObligationProjection {
@@ -246,10 +268,7 @@ func (r *providerChatRuntime) syncSpawnedWorkSnapshots() error {
 			return err
 		}
 		state := actor.engine.Snapshot()
-		if state.Deleted || state.Migration.BlockedError != "" {
-			// Quarantine is the durable reconciliation result for ambiguous legacy
-			// ownership. Re-reading the same executor cache cannot add evidence and
-			// must not turn one blocked chat back into a daemon-wide startup error.
+		if state.Deleted {
 			continue
 		}
 		tabID := strings.TrimSpace(state.Presentation.TabID)
@@ -257,8 +276,12 @@ func (r *providerChatRuntime) syncSpawnedWorkSnapshots() error {
 			return fmt.Errorf("background reconciliation chat %q has no tab attachment", chatID)
 		}
 		items := r.manager.ListSpawnedWork(tabID, chatID)
-		if _, err := r.applySpawnedWorkSnapshot(tabID, chatID, items); err != nil {
+		projection, err := r.applySpawnedWorkSnapshot(tabID, chatID, items)
+		if err != nil {
 			return fmt.Errorf("reconcile background work for chat %q: %w", chatID, err)
+		}
+		if err := r.manager.CommitActorSpawnedWorkProjection(tabID, chatID, projection.Items); err != nil {
+			return fmt.Errorf("commit actor background projection for chat %q: %w", chatID, err)
 		}
 	}
 	return nil
@@ -267,7 +290,7 @@ func (r *providerChatRuntime) syncSpawnedWorkSnapshots() error {
 func exactBackgroundOwner(state chat.State, item acp.SpawnedWorkItem) (chat.ProviderActivityOwner, bool) {
 	workID := firstNonEmptyString(strings.TrimSpace(item.ID), strings.TrimSpace(item.TaskID))
 	if existing, ok := state.Background[workID]; ok {
-		if backgroundOwnerIsExact(state, existing.Owner) {
+		if backgroundOwnerIsExact(state, existing.Owner) && backgroundOwnerProviderMatches(state, existing.Owner, item.ProviderID) {
 			return existing.Owner, true
 		}
 		return chat.ProviderActivityOwner{}, false

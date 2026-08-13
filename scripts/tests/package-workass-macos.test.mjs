@@ -125,15 +125,13 @@ test('macOS package consumes the exact audited Electron runtime', () => {
 test('production update rejects incompatible identities unless migration is explicit', () => {
   assert.match(script, /--migrate-signing-identity/);
   assert.match(installer, /workass_codesign_mutually_compatible "\$installed" "\$candidate"/);
-  assert.match(installer, /workass_codesign_is_legacy_adhoc "\$installed"/);
+  assert.match(installer, /workass_codesign_is_adhoc_cdhash "\$installed"/);
   assert.match(installer, /refusing an install that would reset macOS privacy grants/);
 });
 
-test('a broken installed seal can only be repaired by an explicit identical-identity replacement', () => {
-  assert.match(installer, /--repair-broken-installed-seal/);
-  assert.match(installer, /"\$installed_requirement" = "\$candidate_requirement"/);
-  assert.match(installer, /codesign --verify --strict -R="\$installed_requirement" "\$candidate"/);
-  assert.match(installer, /refusing repair unless the candidate has the identical signing requirement/);
+test('a broken installed seal hard-stops without a mutation path', () => {
+  assert.doesNotMatch(installer, /repair-broken-installed-seal|broken_seal_repair/);
+  assert.match(installer, /signature seal is broken; refusing to replace it automatically/);
 });
 
 test('production update stops old code before swapping the bundle and can roll back', () => {

@@ -34,7 +34,6 @@ const (
 	qwenModelID           = "workass-dev"
 	qwenPrompt            = "Respondé con una sola palabra: hola"
 	qwenCancelPrompt      = "Escribí los números del 1 al 5000 separados por coma. No resumas."
-	qwenResurrectPrompt   = "Respondé con una frase corta para cerrar la prueba de transporte."
 	mockConcurrentPrompt  = "mock concurrent isolation canary"
 	hibernateTTL          = 1500 * time.Millisecond
 	healthTimeout         = 20 * time.Second
@@ -43,8 +42,6 @@ const (
 	invokeTimeout         = 30 * time.Second
 	realTurnTimeout       = 4 * time.Minute
 	cancelTurnTimeout     = 3 * time.Minute
-	hibernateWaitTimeout  = 20 * time.Second
-	resurrectTurnTimeout  = 4 * time.Minute
 	cancelWarmupMaxWait   = 12 * time.Second
 	lmStudioStartTimeout  = 20 * time.Second
 	lmStudioRequestTimout = 4 * time.Second
@@ -346,9 +343,6 @@ func (c *canary) run(ctx context.Context) error {
 	}
 
 	if err := c.assertCancel(ctx, qwenChat); err != nil {
-		return err
-	}
-	if err := c.assertHibernateAndResurrect(ctx, qwenChat); err != nil {
 		return err
 	}
 	return nil
@@ -734,50 +728,6 @@ func (c *canary) waitForRunningJobBeforeCancel(ctx context.Context, mark int, jo
 	}
 }
 
-func (c *canary) assertHibernateAndResurrect(ctx context.Context, chat *chatRef) error {
-	oldSession := chat.sessionID
-	if err := c.step("hibernate", func() (string, error) {
-		if err := c.waitHibernated(ctx, chat, hibernateWaitTimeout); err != nil {
-			return "", err
-		}
-		return "chatId=" + chat.chatID + " oldSession=" + oldSession + " state=hibernated", nil
-	}); err != nil {
-		return err
-	}
-	return c.step("resurrect", func() (string, error) {
-		mark := c.client.mark()
-		job, err := c.startJob(ctx, chat, qwenResurrectPrompt)
-		if err != nil {
-			return "", err
-		}
-		jobID := stringField(job, "id")
-		rec, err := c.collectJob(ctx, mark, jobID, resurrectTurnTimeout)
-		if err != nil {
-			return "", err
-		}
-		if err := assertDoneEndTurn("qwen resurrect prompt", rec, "qwen"); err != nil {
-			return "", err
-		}
-		if rec.Chunks == 0 {
-			return "", errors.New("qwen resurrect prompt produced no stdout data chunks")
-		}
-		newSession := stringField(rec.Job, "sessionId")
-		if newSession == "" || newSession == oldSession {
-			return "", fmt.Errorf("resurrect did not replace session old=%s new=%s", oldSession, newSession)
-		}
-		replaced, err := c.client.waitEventSince(ctx, mark, "chat:session-replaced", 2*time.Second, func(payload map[string]any) bool {
-			session, _ := payload["session"].(map[string]any)
-			return stringField(payload, "oldSessionId") == oldSession && stringField(session, "sessionId") == newSession
-		})
-		if err != nil {
-			return "", err
-		}
-		chat.sessionID = newSession
-		return fmt.Sprintf("job=%s oldSession=%s newSession=%s replaced=%v chunks=%d bytes=%d stopReason=%s",
-			jobID, oldSession, newSession, replaced != nil, rec.Chunks, rec.Bytes, stringField(rec.Job, "stopReason")), nil
-	})
-}
-
 func (c *canary) startJob(ctx context.Context, chat *chatRef, prompt string) (map[string]any, error) {
 	res, err := c.callOK(ctx, "job:start", map[string]any{
 		"kind":       "app-chat",
@@ -894,39 +844,6 @@ func (c *canary) appendArchive(ctx context.Context, chat *chatRef, userPrompt, a
 		return fmt.Errorf("chat:archive-append returned %#v", res)
 	}
 	return nil
-}
-
-func (c *canary) waitHibernated(ctx context.Context, chat *chatRef, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	lastSeen := "none"
-	for time.Now().Before(deadline) {
-		res, err := c.callOK(ctx, "proc:list")
-		if err == nil {
-			m, _ := asMap(res)
-			var seen []string
-			for _, raw := range anySlice(m["processes"]) {
-				p, _ := raw.(map[string]any)
-				if stringField(p, "chatId") == chat.chatID {
-					seen = append(seen, fmt.Sprintf("%s/%s pid=%s session=%s",
-						stringField(p, "providerId"), stringField(p, "state"), stringField(p, "pid"), chat.sessionID))
-					if stringField(p, "state") == "hibernated" {
-						return nil
-					}
-				}
-			}
-			if len(seen) > 0 {
-				lastSeen = strings.Join(seen, ";")
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(200 * time.Millisecond):
-		case <-c.client.closed:
-			return errors.New("websocket closed")
-		}
-	}
-	return fmt.Errorf("chat %s did not hibernate within %s; lastSeen=%s", chat.chatID, timeout, lastSeen)
 }
 
 func (c *canary) callOK(ctx context.Context, channel string, args ...any) (any, error) {

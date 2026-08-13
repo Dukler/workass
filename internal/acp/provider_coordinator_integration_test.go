@@ -162,7 +162,7 @@ func TestClaudeVerifiedLineageCommitsActorBeforeNativeMaterializationAndExactRes
 		t.Fatalf("native lookup was not derived from actor lineage: ok=%v binding=%#v actor=%#v", ok, binding, advanced)
 	}
 	// Simulate the only torn boundary: actor fsync succeeded, then the daemon
-	// died before the derived native lookup was written. Exact resume may repair
+	// died before the derived native lookup was written. Exact resume may materialize
 	// this one attested edge from actor state; it may not create or replay.
 	manager.nativeSessions.mu.Lock()
 	binding.ProviderSessionID = ""
@@ -196,8 +196,8 @@ func TestClaudeVerifiedLineageCommitsActorBeforeNativeMaterializationAndExactRes
 	if got := state.Lanes[identity.ID].Thread; !got.Equal(advanced) {
 		t.Fatalf("exact resume changed Claude lineage: got=%#v want=%#v", got, advanced)
 	}
-	if repaired, ok := manager.nativeSessions.getForLane(identity); !ok || !bindingThreadRef(repaired).Equal(advanced) {
-		t.Fatalf("exact resume did not repair actor-authoritative lineage: ok=%v binding=%#v", ok, repaired)
+	if materialized, ok := manager.nativeSessions.getForLane(identity); !ok || !bindingThreadRef(materialized).Equal(advanced) {
+		t.Fatalf("exact resume did not materialize actor-authoritative lineage: ok=%v binding=%#v", ok, materialized)
 	}
 }
 

@@ -20,7 +20,7 @@ import (
 // The agent-control read surface is deliberately bounded by the chat actor.
 // ACP's manager remains the executor for a live wait and for optional output
 // tails, but it is never allowed to decide which chat/work item a caller can
-// read. In particular, a manager record must not resurrect a deleted chat or
+// read. In particular, a manager record must not recreate a deleted chat or
 // let a stale tab address a new attachment.
 const (
 	actorAgentReceiptDefaultLimit = 32

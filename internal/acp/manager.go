@@ -75,7 +75,6 @@ type Manager struct {
 	spareBlocked                map[string]bool
 	providerStartupReady        bool
 	usageBySession              map[string]contextUsage
-	crashRecoveries             map[string]time.Time
 	// commandCatalogs is the memory-only Claude command-catalog cache, keyed by
 	// tab/chat (commandCatalogKey). Never persisted; see command_catalog.go.
 	commandCatalogs map[string]*commandCatalogEntry
@@ -87,34 +86,33 @@ type Manager struct {
 	subagentSeq     int64
 	agentOwnerSeq   int64
 
-	jobMu               sync.Mutex
-	jobEndMu            sync.RWMutex
-	jobEndFunc          func(tabID, chatID string)
-	sessionRefreshMu    sync.RWMutex
-	sessionRefreshFunc  func(payload map[string]any)
-	updateMu            sync.Mutex
-	updateCheckMu       sync.Mutex
-	updateCheckRunning  bool
-	updateCheckCancel   context.CancelFunc
-	updateCheckWG       sync.WaitGroup
-	planUsageRefreshMu  sync.Mutex
-	planUsageRefreshes  map[string]*planUsageRefreshRun
-	planUsageRefreshWG  sync.WaitGroup
-	receiptMu           sync.Mutex
-	harnessTurns        *harnessTurnStore
-	spawnedWorkMu       sync.Mutex
-	spawnedWorkCommitMu sync.Mutex
-	spawnedWork         map[string]*spawnedWorkRecord
-	spawnedCandidates   map[string]spawnedWorkCandidate
-	// spawnedWorkPruned fences a legacy/exact chat pair after its executor
-	// evidence has been retired. A late provider callback must not recreate a
-	// cache file after the cutover cleanup receipt has committed.
-	spawnedWorkPruned     map[[2]string]struct{}
+	jobMu                 sync.Mutex
+	jobEndMu              sync.RWMutex
+	jobEndFunc            func(tabID, chatID string)
+	sessionRefreshMu      sync.RWMutex
+	sessionRefreshFunc    func(payload map[string]any)
+	updateMu              sync.Mutex
+	updateCheckMu         sync.Mutex
+	updateCheckRunning    bool
+	updateCheckCancel     context.CancelFunc
+	updateCheckWG         sync.WaitGroup
+	planUsageRefreshMu    sync.Mutex
+	planUsageRefreshes    map[string]*planUsageRefreshRun
+	planUsageRefreshWG    sync.WaitGroup
+	receiptMu             sync.Mutex
+	harnessTurns          *harnessTurnStore
+	spawnedWorkMu         sync.Mutex
+	spawnedWorkCommitMu   sync.Mutex
+	spawnedWork           map[string]*spawnedWorkRecord
+	spawnedCandidates     map[string]spawnedWorkCandidate
 	spawnedWorkObserverMu sync.RWMutex
 	spawnedWorkObserver   func(string, string, []SpawnedWorkItem) (SpawnedWorkActorProjection, error)
 	resetMu               sync.Mutex
 	jobWG                 sync.WaitGroup
 	resetting             bool
+	loopStop              chan struct{}
+	loopStopOnce          sync.Once
+	loopWG                sync.WaitGroup
 	// updateGateMu is the admission barrier for an app-owned release handoff.
 	// A release may begin only after every foreground turn and tracked unit of
 	// work is terminal. Once BeginUpdateDrain succeeds, no new work can enter
@@ -127,9 +125,9 @@ type Manager struct {
 	// job:start holds it until the running job is registered. Different chats do
 	// not block one another.
 	chatLifecycle sync.Map // map[tabID+NUL+chatID]*sync.Mutex
-	// Old ids invalidated by an explicit workspace move must never enter the
-	// normal hibernate/resurrect fallback, which would recreate the chat in the
-	// workspace the provider originally owned.
+	// Old ids invalidated by an explicit workspace move must never be selected
+	// for exact native-thread resume in the workspace the provider originally
+	// owned.
 	workspaceInvalidatedSessions sync.Map // map[sessionID]struct{}
 
 	envMu             sync.Mutex
@@ -167,7 +165,7 @@ type contextUsage struct {
 	UpdatedAt        time.Time
 }
 
-type providerReplayEvent struct {
+type providerSnapshotEvent struct {
 	channel string
 	payload any
 }
@@ -237,9 +235,8 @@ func NewManager(opts Options) *Manager {
 		harnessTurns:            newHarnessTurnStore(),
 		spawnedWork:             make(map[string]*spawnedWorkRecord),
 		spawnedCandidates:       make(map[string]spawnedWorkCandidate),
-		spawnedWorkPruned:       make(map[[2]string]struct{}),
-		crashRecoveries:         make(map[string]time.Time),
 		commandCatalogs:         make(map[string]*commandCatalogEntry),
+		loopStop:                make(chan struct{}),
 		envBySession:            make(map[string]*chatEnvTracker),
 		envByChatID:             make(map[string]*chatEnvTracker),
 		envByTabID:              make(map[string]*chatEnvTracker),
@@ -252,15 +249,15 @@ func NewManager(opts Options) *Manager {
 	m.initializePersistedProviderAuthenticationState()
 	m.emitMockAppUpdateFromEnv()
 	m.loadSpawnedWorkSnapshots()
-	go m.lifecycleLoop()
-	go m.rssLoop()
-	go m.providerUpdateLoop()
-	go m.planUsageLoop()
-	go m.spawnedWorkLoop()
-	go m.mcpFanoutLoop()
+	m.startManagerLoop(m.lifecycleLoop)
+	m.startManagerLoop(m.rssLoop)
+	m.startManagerLoop(m.providerUpdateLoop)
+	m.startManagerLoop(m.planUsageLoop)
+	m.startManagerLoop(m.spawnedWorkLoop)
+	m.startManagerLoop(m.mcpFanoutLoop)
 	if opts.SpareSessions > 0 && m.providerStartupReady {
 		m.WarmSpareSessions()
-		go m.spareLoop()
+		m.startManagerLoop(m.spareLoop)
 	}
 	return m
 }
@@ -282,8 +279,19 @@ func (m *Manager) StartProviderStartup() {
 	m.mu.Unlock()
 	if startSpareLoop {
 		m.WarmSpareSessions()
-		go m.spareLoop()
+		m.startManagerLoop(m.spareLoop)
 	}
+}
+
+func (m *Manager) startManagerLoop(run func()) {
+	if m == nil || run == nil {
+		return
+	}
+	m.loopWG.Add(1)
+	go func() {
+		defer m.loopWG.Done()
+		run()
+	}()
 }
 
 func (m *Manager) SetJobEndFunc(fn func(tabID, chatID string)) {
@@ -309,8 +317,8 @@ func (m *Manager) SetSessionRefreshFunc(fn func(payload map[string]any)) {
 
 // SetChatEnvObserver installs the actor ingress for actor-managed chats. The
 // observer must durably commit the typed Entorno snapshot before returning;
-// Manager then publishes no chat:env event for that snapshot. Unmanaged ACP
-// fixtures retain the historical direct event path when no observer is set.
+// Manager then publishes no chat:env event for that snapshot. Standalone ACP
+// fixtures retain direct publication when no daemon actor runtime is installed.
 func (m *Manager) SetChatEnvObserver(fn func(ChatEnvPayload) error) {
 	if m == nil {
 		return
@@ -438,12 +446,8 @@ func (m *Manager) NewSession(ctx context.Context, opts SessionOptions) (SessionI
 	}
 	defer unlockNative()
 	if opts.ProviderLaneCreate && m.nativeSessions != nil && m.nativeSessions.enabledFor(opts) {
-		if binding, exists := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD); exists {
-			message := "an established provider lane cannot enter session/new"
-			if binding.Quarantined {
-				message = firstNonEmpty(binding.QuarantineReason, message)
-			}
-			return SessionInfo{}, nativeLaneError(providercontract.ErrorNativeIdentityConflict, message, nil)
+		if _, exists := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD); exists {
+			return SessionInfo{}, nativeLaneError(providercontract.ErrorNativeIdentityConflict, "an established provider lane cannot enter session/new", nil)
 		}
 	}
 
@@ -843,6 +847,8 @@ func (m *Manager) ForgetChat(ctx context.Context, tabID, chatID string, operatio
 func (m *Manager) Reset() bool {
 	m.resetMu.Lock()
 	defer m.resetMu.Unlock()
+	m.loopStopOnce.Do(func() { close(m.loopStop) })
+	m.loopWG.Wait()
 	m.mu.Lock()
 	m.resetting = true
 	m.mu.Unlock()
@@ -868,13 +874,11 @@ func (m *Manager) Reset() bool {
 	m.spareWarming = make(map[string]int)
 	m.usageBySession = make(map[string]contextUsage)
 	m.planUsageByProvider = make(map[string]PlanUsageSnapshot)
-	m.crashRecoveries = make(map[string]time.Time)
 	m.commandCatalogs = make(map[string]*commandCatalogEntry)
 	m.mu.Unlock()
 	m.spawnedWorkMu.Lock()
 	m.spawnedWork = make(map[string]*spawnedWorkRecord)
 	m.spawnedCandidates = make(map[string]spawnedWorkCandidate)
-	m.spawnedWorkPruned = make(map[[2]string]struct{})
 	m.spawnedWorkMu.Unlock()
 	m.providerLaneMu.Lock()
 	m.providerLanesBySession = make(map[string]*managerLane)
@@ -889,7 +893,7 @@ func (m *Manager) Reset() bool {
 	// Bridge close unblocks active session/prompt calls. Wait until every app-chat
 	// worker has finished its durability-first native cursor/receipt cleanup before
 	// returning; otherwise a test teardown or daemon handoff can remove StateDir
-	// while a late worker recreates native-sessions.json behind it.
+	// while a late worker recreates provider-lanes.json behind it.
 	m.jobWG.Wait()
 	m.mu.Lock()
 	m.resetting = false
@@ -1024,14 +1028,20 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 	if _, invalidated := m.workspaceInvalidatedSessions.Load(opts.SessionID); invalidated {
 		return nil, errors.New("La sesión ACP fue invalidada al mover el chat; reintentá con el estado actualizado.")
 	}
+	// A connection id is never authority to retarget a turn. Reject a caller
+	// that presents another chat's still-live attachment before bridge-key
+	// resolution can select the requested chat's process instead.
+	if live, ok := m.LiveSession(opts.SessionID); ok && !liveSessionMatchesOptions(live, SessionOptions{TabID: opts.TabID, ChatID: opts.ChatID}) {
+		m.opts.Logf("rejected cross-chat ACP session binding", map[string]any{
+			"requestedTabId": opts.TabID, "requestedChatId": opts.ChatID,
+			"boundTabId": live.TabID, "boundChatId": live.ChatID,
+		})
+		return nil, errors.New("La sesión ACP pertenece a otra conversación; se rechazó para proteger el contexto.")
+	}
 	bridge := m.bridgeForSession(opts.SessionID, SessionOptions{TabID: opts.TabID, ChatID: opts.ChatID, SessionID: opts.SessionID})
 	if bridge == nil {
 		return nil, errors.New("La sesión ACP expiró. Cerrá y reabrí la pestaña del chat.")
 	}
-	// Compatibility for pre-chatId sessions: a legacy live bridge may have an
-	// exact tab owner but no logical conversation id. It may claim that id once;
-	// an existing non-empty owner is immutable and handled by the rejection below.
-	bridge.claimLegacyChatID(opts.SessionID, opts.TabID, opts.ChatID)
 	if live, ok := bridge.liveSession(opts.SessionID); ok && !liveSessionMatchesOptions(live, SessionOptions{TabID: opts.TabID, ChatID: opts.ChatID}) {
 		m.opts.Logf("rejected cross-chat ACP session binding", map[string]any{
 			"requestedTabId": opts.TabID, "requestedChatId": opts.ChatID,
@@ -1057,6 +1067,12 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 		return nil, err
 	}
 	liveSession := bridge.hasLiveSession(opts.SessionID)
+	// The Manager is the provider transport, not a chat recovery coordinator.
+	// Actor-managed admissions remain durable across the narrow race where a
+	// host dies after selection; every other caller must attach/resume first.
+	if !liveSession && !opts.ProviderLaneManaged {
+		return nil, errors.New("La conexión ACP no está activa; el actor durable debe reanudar exactamente el hilo nativo antes de enviar.")
+	}
 	if _, running := m.RunningJobForChat(opts.TabID, opts.ChatID); running {
 		return nil, ErrChatBusy
 	}
@@ -1215,53 +1231,17 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		promptText = strings.TrimSpace(opts.Message)
 	}
 	if !activeBridge.hasLiveSession(job.SessionID) {
+		job.CrashInterrupted = true
+		job.StopReason = "engine-crash"
 		if opts.ProviderLaneManaged {
-			job.CrashInterrupted = true
 			job.actorRecoveryPending.Store(true)
 			if lane := m.providerLaneForSessionID(job.SessionID); lane != nil {
 				lane.attachmentClosed()
 			}
-			job.Status = "failed"
-			job.StopReason = "engine-crash"
-			job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			return
 		}
-		oldSessionID := job.SessionID
-		info, err := m.resurrectSession(ctx, opts)
-		if err != nil {
-			job.Error += "\n[acp error] " + err.Error() + "\n"
-			m.emit("job:event", map[string]any{"type": "data", "id": job.ID, "stream": "system", "chunk": "\n[acp error] " + err.Error() + "\n"})
-			job.Result = cleanDraft(firstNonEmpty(m.outputForJob(job), job.Error))
-			code := 1
-			job.Code = &code
-			job.Status = "failed"
-			job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			return
-		}
-		activeBridge = m.bridgeForSession(info.SessionID, SessionOptions{TabID: opts.TabID, ChatID: opts.ChatID, SessionID: info.SessionID})
-		if activeBridge == nil {
-			job.Error += "\n[acp error] No se pudo reconectar la sesión ACP.\n"
-			code := 1
-			job.Code = &code
-			job.Status = "failed"
-			job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			return
-		}
-		if bridge != activeBridge {
-			bridge.clearJobForSession(oldSessionID, job)
-		}
-		job.SessionID = info.SessionID
-		job.ProviderID = info.ProviderID
-		activeBridge.setJobForSession(job.SessionID, job)
-		if oldSessionID != info.SessionID {
-			// Legacy renderer channel name: this is a provider-proven alias advance
-			// within the same native lineage, never a replacement thread.
-			m.emit("chat:session-replaced", map[string]any{
-				"chatId": nullableString(job.ChatID), "oldSessionId": oldSessionID,
-				"session": info, "sameNativeLineage": true,
-			})
-		}
-		m.emit("job:event", map[string]any{"type": "data", "id": job.ID, "stream": "system", "chunk": "\n[acp] sesión reconectada automáticamente; continuando…\n"})
+		job.Status = "failed"
+		job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return
 	}
 	// The renderer sends the selected controls on every turn. Reconcile them
 	// against THIS chat's bridge immediately before prompting so a reconnect,
@@ -1337,9 +1317,6 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		} else if hint != "" {
 			displayError = providerAuthenticationFailureError(job.ProviderID, err, hint).Error()
 		}
-		if job.CrashInterrupted && job.crashRecoveryDone != nil {
-			<-job.crashRecoveryDone
-		}
 		if job.CrashInterrupted {
 			if job.StopReason == "" {
 				job.StopReason = "engine-crash"
@@ -1372,62 +1349,6 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	}
 	job.Code = &code
 	job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
-}
-
-func (m *Manager) resurrectSession(ctx context.Context, opts JobStartOptions) (SessionInfo, error) {
-	providerID := opts.ProviderID
-	if providerID == "" {
-		m.mu.Lock()
-		providerID = m.sessionProvider[opts.SessionID]
-		m.mu.Unlock()
-	}
-	if _, err := m.providerConfig(providerID); err != nil {
-		return SessionInfo{}, err
-	}
-	if m.nativeSessions == nil {
-		return SessionInfo{}, nativeLaneError(providercontract.ErrorNativeThreadMissing, "the chat has no durable provider lane to resume", nil)
-	}
-	binding, ok := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD)
-	if !ok {
-		return SessionInfo{}, nativeLaneError(providercontract.ErrorNativeThreadMissing, "the chat has no exact provider-native thread binding", nil)
-	}
-	expectedThreadID := firstNonEmpty(binding.ProviderSessionID, binding.SessionID)
-	sessionOpts := SessionOptions{CWD: opts.CWD, TabID: opts.TabID, ChatID: opts.ChatID, ProviderID: providerID}
-	info, err := m.NewSession(ctx, sessionOpts)
-	if err != nil {
-		return SessionInfo{}, err
-	}
-	if info.SessionID != expectedThreadID {
-		return SessionInfo{}, nativeLaneError(
-			providercontract.ErrorNativeIdentityConflict,
-			"provider resume returned a different native thread",
-			fmt.Errorf("expected %q, got %q", expectedThreadID, info.SessionID),
-		)
-	}
-	bridge := m.bridgeForSession(info.SessionID, SessionOptions{TabID: opts.TabID, ChatID: opts.ChatID, SessionID: info.SessionID})
-	if bridge == nil {
-		return SessionInfo{}, errors.New("No se pudo reconectar la sesión ACP.")
-	}
-	if opts.ModelID != "" && stringPointer(info.CurrentModelID) != strings.TrimSpace(opts.ModelID) {
-		if _, valid := catalogModelSelectionBase(opts.ModelID, info.Models); valid {
-			if result, setErr := bridge.SetModel(ctx, info.SessionID, opts.ModelID); setErr == nil {
-				if applied := durableModelIDFromSetResult(result, opts.ModelID); applied != "" {
-					info.CurrentModelID = &applied
-				}
-			}
-		}
-	}
-	if opts.ModeID != "" {
-		for _, mode := range info.Modes {
-			if mode.ID == opts.ModeID {
-				if _, err := bridge.SetMode(ctx, info.SessionID, opts.ModeID); err == nil {
-					info.CurrentModeID = &opts.ModeID
-				}
-				break
-			}
-		}
-	}
-	return info, nil
 }
 
 func cleanDraft(text string) string {
@@ -1661,8 +1582,8 @@ func (m *Manager) CancelJob(id string) bool {
 	return m.CancelJobResult(id).Cancelled
 }
 
-// JobChatID is a read-only compatibility fence. Actor-aware handlers use it to
-// distinguish an addressless legacy/internal job from a logical chat whose
+// JobChatID is a read-only address fence. Actor-aware handlers use it to
+// distinguish an addressless internal job from a logical chat whose
 // mutation must never fall back around the actor.
 func (m *Manager) JobChatID(id string) string {
 	id = strings.TrimSpace(id)
@@ -1769,7 +1690,7 @@ func (m *Manager) PermissionChatID(id string) string {
 }
 
 // PendingPermissions returns reconnect-safe copies of unresolved permission
-// requests. The wire hub replays them only to the current controller.
+// requests for the current controller snapshot.
 func (m *Manager) PendingPermissions() []any {
 	m.mu.Lock()
 	ids := make([]string, 0, len(m.permissions))
@@ -1785,19 +1706,6 @@ func (m *Manager) PendingPermissions() []any {
 	}
 	m.mu.Unlock()
 	return out
-}
-
-// ReplayPendingPermissions restores permission cards after the controller
-// view reconnects while the same daemon/ACP turn remains alive.
-func (m *Manager) ReplayPendingPermissions(send func(channel string, payload any) error) {
-	if send == nil {
-		return
-	}
-	for _, payload := range m.PendingPermissions() {
-		if err := send("chat:permission-request", payload); err != nil {
-			return
-		}
-	}
 }
 
 func (m *Manager) requestPermission(req permissionRequest) string {
@@ -2018,11 +1926,11 @@ func (m *Manager) emit(channel string, payload any) {
 		}
 		return
 	}
-	m.cacheProviderReplayEvent(channel, payload)
+	m.cacheProviderSnapshotEvent(channel, payload)
 	m.opts.Broadcast(channel, payload)
 }
 
-func (m *Manager) clearProviderReplayEvents() {
+func (m *Manager) clearProviderSnapshots() {
 	m.mu.Lock()
 	m.latestProvidersList = nil
 	m.hasLatestProvidersList = false
@@ -2033,7 +1941,7 @@ func (m *Manager) clearProviderReplayEvents() {
 	m.mu.Unlock()
 }
 
-func (m *Manager) cacheProviderReplayEvent(channel string, payload any) {
+func (m *Manager) cacheProviderSnapshotEvent(channel string, payload any) {
 	switch channel {
 	case "providers:list", "chat:catalog", "chat:plan-usage", "providers:updates", "providers:update-progress", "app:update":
 	default:
@@ -2065,23 +1973,23 @@ func (m *Manager) cacheProviderReplayEvent(channel string, payload any) {
 	m.mu.Unlock()
 }
 
-func (m *Manager) providerReplayEvents() []providerReplayEvent {
+func (m *Manager) providerSnapshotEvents() []providerSnapshotEvent {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	events := make([]providerReplayEvent, 0, 4+len(m.planUsageByProvider)+len(m.providerUpdateProgress))
+	events := make([]providerSnapshotEvent, 0, 4+len(m.planUsageByProvider)+len(m.providerUpdateProgress))
 	if m.hasLatestProvidersList {
-		events = append(events, providerReplayEvent{channel: "providers:list", payload: m.latestProvidersList})
+		events = append(events, providerSnapshotEvent{channel: "providers:list", payload: m.latestProvidersList})
 	}
 	if m.hasLatestChatCatalog {
-		events = append(events, providerReplayEvent{channel: "chat:catalog", payload: m.latestChatCatalog})
+		events = append(events, providerSnapshotEvent{channel: "chat:catalog", payload: m.latestChatCatalog})
 	}
 	if m.hasProviderUpdates {
-		events = append(events, providerReplayEvent{channel: "providers:updates", payload: m.latestProviderUpdates})
+		events = append(events, providerSnapshotEvent{channel: "providers:updates", payload: m.latestProviderUpdates})
 	}
 	seenProgress := make(map[string]struct{}, len(m.providerUpdateProgress))
 	for _, id := range m.providerOrder {
 		if progress, ok := m.providerUpdateProgress[id]; ok {
-			events = append(events, providerReplayEvent{channel: "providers:update-progress", payload: progress})
+			events = append(events, providerSnapshotEvent{channel: "providers:update-progress", payload: progress})
 			seenProgress[id] = struct{}{}
 		}
 	}
@@ -2093,15 +2001,15 @@ func (m *Manager) providerReplayEvents() []providerReplayEvent {
 	}
 	sort.Strings(extraProgress)
 	for _, id := range extraProgress {
-		events = append(events, providerReplayEvent{channel: "providers:update-progress", payload: m.providerUpdateProgress[id]})
+		events = append(events, providerSnapshotEvent{channel: "providers:update-progress", payload: m.providerUpdateProgress[id]})
 	}
 	if m.hasAppUpdate {
-		events = append(events, providerReplayEvent{channel: "app:update", payload: m.latestAppUpdate})
+		events = append(events, providerSnapshotEvent{channel: "app:update", payload: m.latestAppUpdate})
 	}
 	seen := make(map[string]struct{}, len(m.planUsageByProvider))
 	for _, id := range m.providerOrder {
 		if snapshot, ok := m.planUsageByProvider[id]; ok {
-			events = append(events, providerReplayEvent{channel: "chat:plan-usage", payload: snapshot})
+			events = append(events, providerSnapshotEvent{channel: "chat:plan-usage", payload: snapshot})
 			seen[id] = struct{}{}
 		}
 	}
@@ -2113,19 +2021,19 @@ func (m *Manager) providerReplayEvents() []providerReplayEvent {
 	}
 	sort.Strings(extra)
 	for _, id := range extra {
-		events = append(events, providerReplayEvent{channel: "chat:plan-usage", payload: m.planUsageByProvider[id]})
+		events = append(events, providerSnapshotEvent{channel: "chat:plan-usage", payload: m.planUsageByProvider[id]})
 	}
 	return events
 }
 
-// ReplayProviderEvents seeds a newly ready wire client with the last provider
-// detection payloads. If detection is in flight, DetectProviders has cleared
+// PublishProviderSnapshots seeds a newly ready wire client with the current
+// provider projections. If detection is in flight, DetectProviders has cleared
 // this cache and the client will receive the eventual broadcast instead.
-func (m *Manager) ReplayProviderEvents(send func(channel string, payload any) error) {
+func (m *Manager) PublishProviderSnapshots(send func(channel string, payload any) error) {
 	if send == nil {
 		return
 	}
-	for _, event := range m.providerReplayEvents() {
+	for _, event := range m.providerSnapshotEvents() {
 		if err := send(event.channel, event.payload); err != nil {
 			return
 		}
@@ -2639,25 +2547,10 @@ func (b *Bridge) liveSession(sessionID string) (LiveSession, bool) {
 	}, true
 }
 
-func (b *Bridge) claimLegacyChatID(sessionID, tabID, chatID string) bool {
-	tabID = strings.TrimSpace(tabID)
-	chatID = strings.TrimSpace(chatID)
-	if b == nil || sessionID == "" || tabID == "" || chatID == "" {
-		return false
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if _, ok := b.sessions[sessionID]; !ok || b.tabID != tabID || b.chatID != "" {
-		return false
-	}
-	b.chatID = chatID
-	return true
-}
-
 // releaseSession removes a session from this bridge's internal ownership maps
 // without touching manager state or the engine process. Used when a
-// replacement bridge takes over a session that this (hibernated or closed)
-// bridge still holds, so a later resurrect cannot double-own it.
+// successor bridge takes over a session that this (hibernated or closed)
+// bridge still holds, so a later attachment cannot double-own it.
 func (b *Bridge) releaseSession(sessionID string) {
 	b.mu.Lock()
 	delete(b.sessions, sessionID)

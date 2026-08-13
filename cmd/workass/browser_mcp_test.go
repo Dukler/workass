@@ -36,50 +36,6 @@ func TestDefaultBrowserControlFileEnvironmentOverrideWins(t *testing.T) {
 	}
 }
 
-func TestInvokeBrowserControlUsesLegacyOnlyWhenPrimaryIsMissing(t *testing.T) {
-	t.Setenv("WORKASS_BROWSER_CONTROL_FILE", "")
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	legacyFile := filepath.Join(home, ".workass", "browser-control.json")
-	if err := os.MkdirAll(filepath.Dir(legacyFile), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(legacyFile, []byte(`{"version":1,"url":"http://legacy.invalid/rpc","token":"legacy-control-value"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	calls := 0
-	client := &http.Client{Transport: browserRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-		calls++
-		if request.URL.Host != "legacy.invalid" {
-			t.Fatalf("control host = %q", request.URL.Host)
-		}
-		body := []byte(`{"result":{"source":"legacy"}}`)
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
-	})}
-	primaryFile := filepath.Join(t.TempDir(), "run", "browser-control.json")
-	result, err := invokeBrowserControl(primaryFile, "browser.list", map[string]any{}, client)
-	if err != nil {
-		t.Fatalf("invoke with missing primary: %v", err)
-	}
-	if source := browserString(mapFromAnyMain(result)["source"]); source != "legacy" || calls != 1 {
-		t.Fatalf("result = %#v calls = %d", result, calls)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(primaryFile), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(primaryFile, []byte(`{"version":0}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err = invokeBrowserControl(primaryFile, "browser.list", map[string]any{}, client)
-	if err == nil || err.Error() != "Workass browser control descriptor is invalid" {
-		t.Fatalf("invalid primary error = %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("legacy control called %d times; invalid primary must not fall back", calls)
-	}
-}
-
 func TestBrowserMCPListsToolsAndRoutesProviderNeutralCalls(t *testing.T) {
 	dir := t.TempDir()
 	controlFile := filepath.Join(dir, "browser-control.json")

@@ -110,45 +110,24 @@ func TestProviderActivityOwnerValidationRequiresExactActorTurn(t *testing.T) {
 	}
 }
 
-func TestProviderActivityOwnerValidationAcceptsMigratedOperationWithoutNativeTurn(t *testing.T) {
-	state, _ := NewState("migrated-owner-chat")
-	state, _ = apply(t, state, MigrateLegacyChat{
-		Version: 1, Digest: "migrated-owner-digest",
-		Presentation: PresentationState{TabID: "migrated-owner-tab"},
-		Messages: []LegacyMessage{{
-			MessageID: "migrated-owner-message", OperationID: "migrated-operation",
-			Role: "assistant", Text: "migrated owner", Status: "done",
-		}},
-	})
-	lane := testLane(state.ChatID, "codex")
-	state, _ = apply(t, state, AdoptLaneBinding{
-		Identity: lane,
-		Thread:   provider.ThreadRef{ProviderID: "codex", RootID: "migrated-owner-thread", HeadID: "migrated-owner-thread", Lineage: 1},
-		Owner:    provider.AttachmentOwner{TabID: state.Presentation.TabID},
-		Context:  exactContext(provider.ContextImportUnsupported), Selected: true,
-		Coverage: []CoverageRecord{{
-			Sequence: 1, EventID: "legacy:migrated-owner-message",
-			Status: CoverageNativeSeen, DeliveryID: "migrated-operation",
-		}},
-	})
-	owner := ProviderActivityOwner{LaneID: lane.ID, OperationID: "migrated-operation", ConnectionGeneration: 1}
-	state, _ = apply(t, state, MigrateLegacyBackground{Items: []BackgroundState{{
-		Owner: owner, Event: provider.BackgroundEvent{WorkID: "migrated-work", Status: "exited"},
-	}}})
-	if got := state.Background["migrated-work"].Owner; got != owner {
-		t.Fatalf("migrated owner changed: got=%#v want=%#v", got, owner)
+func TestProviderActivityOwnerValidationAcceptsHistoricalOperationWithoutNativeTurn(t *testing.T) {
+	state, owner := providerActivityHistoricalState(t, "")
+	state.Background["historical-work"] = BackgroundState{
+		Owner: owner, Event: provider.BackgroundEvent{WorkID: "historical-work", Status: "exited"},
+	}
+	if err := state.Validate(); err != nil {
+		t.Fatalf("historical owner without a native turn was rejected: %v", err)
 	}
 
 	forged := state.Clone()
-	forged.Background["migrated-work"] = BackgroundState{
-		Owner: ProviderActivityOwner{LaneID: lane.ID, OperationID: "unknown-migrated-operation", ConnectionGeneration: 1},
-		Event: provider.BackgroundEvent{WorkID: "migrated-work", Status: "exited"},
+	forged.Background["historical-work"] = BackgroundState{
+		Owner: ProviderActivityOwner{LaneID: owner.LaneID, OperationID: "unknown-operation", ConnectionGeneration: owner.ConnectionGeneration},
+		Event: provider.BackgroundEvent{WorkID: "historical-work", Status: "exited"},
 	}
 	if err := forged.Validate(); err == nil {
-		t.Fatal("migrated background row with unknown operation was accepted")
+		t.Fatal("background row with an unknown operation was accepted")
 	}
 }
-
 func TestBackgroundAdmissionRequiresExactProviderActivityOwner(t *testing.T) {
 	state, exact := providerActivityActiveState(t)
 	newAction := func(owner ProviderActivityOwner) BackgroundAction {

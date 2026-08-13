@@ -237,7 +237,7 @@ func (l *managerLane) currentOperation() (providercontract.OperationID, string) 
 	return "", ""
 }
 
-// observeProviderLaneEvent is the compatibility adapter from the frozen
+// observeProviderLaneEvent is the boundary adapter from the frozen
 // renderer/LAN event payloads to the typed provider event union. Raw maps stop
 // here; the chat reducer never sees them.
 func (m *Manager) observeProviderLaneEvent(channel string, raw any) error {
@@ -260,9 +260,9 @@ func (m *Manager) observeProviderLaneEvent(channel string, raw any) error {
 		// mutate the actor transcript, lane identity, queue, or operation journal.
 		return nil
 	case "chat:checkpoint-restored", "chat:engine-recovered", "chat:session-replaced":
-		// These legacy channels are illegal for an actor-owned lane. Their proper
-		// replacements are typed lane events/effects; unmanaged manager fixtures
-		// retain the frozen channel until those legacy-only tests are removed.
+		// These projection-only channels are illegal as semantic ingress for an
+		// actor-owned lane. Standalone manager fixtures still exercise the frozen
+		// publication surface without constructing the daemon actor runtime.
 		if m.payloadBelongsToProviderLane(payload) {
 			return fmt.Errorf("actor-owned channel %q bypassed typed provider ingress", channel)
 		}

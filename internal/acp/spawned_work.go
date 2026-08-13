@@ -145,7 +145,7 @@ type spawnedWorkRecord struct {
 	ExternalDoneFile string
 	// Service classification evidence, deliberately not persisted: after a
 	// daemon restart the dwell simply restarts, which costs one window of a
-	// wrong pill and can never resurrect a stale verdict.
+	// wrong pill and can never restore a stale verdict.
 	ListeningQuietSince time.Time
 	LastOutputSize      int64
 	SawOutputSize       bool
@@ -226,18 +226,6 @@ func normalizeSpawnedWorkTaskID(raw string) string {
 
 func spawnedWorkKey(tabID, chatID, taskID string) string {
 	return strings.TrimSpace(tabID) + "\x00" + strings.TrimSpace(chatID) + "\x00" + normalizeSpawnedWorkTaskID(taskID)
-}
-
-func spawnedWorkPair(tabID, chatID string) [2]string {
-	return [2]string{strings.TrimSpace(tabID), strings.TrimSpace(chatID)}
-}
-
-func (m *Manager) spawnedWorkPairPrunedLocked(tabID, chatID string) bool {
-	if m == nil {
-		return false
-	}
-	_, pruned := m.spawnedWorkPruned[spawnedWorkPair(tabID, chatID)]
-	return pruned
 }
 
 func spawnedCandidateKey(sessionID, toolCallID string) string {
@@ -393,12 +381,6 @@ func (m *Manager) RegisterExternalWork(opts ExternalWorkRegistrationOptions) (ma
 	if err != nil {
 		return nil, err
 	}
-	m.spawnedWorkMu.Lock()
-	pruned := m.spawnedWorkPairPrunedLocked(tabID, chatID)
-	m.spawnedWorkMu.Unlock()
-	if pruned {
-		return nil, errors.New("external work belongs to a retired chat attachment")
-	}
 	label := compactText(redactSensitiveText(opts.Label), 240)
 	if label == "" {
 		return nil, errors.New("external work label is required")
@@ -415,11 +397,7 @@ func (m *Manager) RegisterExternalWork(opts ExternalWorkRegistrationOptions) (ma
 		}
 		m.spawnedWorkMu.Lock()
 		_, exists := m.spawnedWork[spawnedWorkKey(tabID, chatID, workID)]
-		pruned = m.spawnedWorkPairPrunedLocked(tabID, chatID)
 		m.spawnedWorkMu.Unlock()
-		if pruned {
-			return nil, errors.New("external work belongs to a retired chat attachment")
-		}
 		if !exists {
 			break
 		}
@@ -482,10 +460,6 @@ func (m *Manager) RegisterExternalWork(opts ExternalWorkRegistrationOptions) (ma
 	}
 	rec := &spawnedWorkRecord{Item: item, ExternalDoneFile: doneFile, SawPID: opts.PID != nil}
 	m.spawnedWorkMu.Lock()
-	if m.spawnedWorkPairPrunedLocked(tabID, chatID) {
-		m.spawnedWorkMu.Unlock()
-		return nil, errors.New("external work belongs to a retired chat attachment")
-	}
 	m.spawnedWork[spawnedWorkKey(tabID, chatID, workID)] = rec
 	m.spawnedWorkMu.Unlock()
 	m.commitSpawnedWorkChange(tabID, chatID)
@@ -692,9 +666,6 @@ func (m *Manager) upsertSpawnedWorkLocked(candidate spawnedWorkCandidate, taskID
 	if candidate.TabID == "" || candidate.ChatID == "" || taskID == "" {
 		return nil, false
 	}
-	if m.spawnedWorkPairPrunedLocked(candidate.TabID, candidate.ChatID) {
-		return nil, false
-	}
 	key := spawnedWorkKey(candidate.TabID, candidate.ChatID, taskID)
 	rec := m.spawnedWork[key]
 	changed := false
@@ -810,10 +781,6 @@ func (m *Manager) registerSubagentSpawnedWork(tabID, chatID string, run Subagent
 		item.OriginOperationID = string(lane.operationForJob(run.RootJobID))
 	}
 	m.spawnedWorkMu.Lock()
-	if m.spawnedWorkPairPrunedLocked(tabID, chatID) {
-		m.spawnedWorkMu.Unlock()
-		return
-	}
 	m.spawnedWork[spawnedWorkKey(tabID, chatID, run.ID)] = &spawnedWorkRecord{Item: item}
 	m.spawnedWorkMu.Unlock()
 	m.commitSpawnedWorkChange(tabID, chatID)
@@ -943,8 +910,13 @@ func (m *Manager) orphanInProcessSpawnedWorkForChat(tabID, chatID, reason string
 func (m *Manager) spawnedWorkLoop() {
 	ticker := time.NewTicker(m.opts.SpawnedWorkReconcileInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		m.reconcileSpawnedWork()
+	for {
+		select {
+		case <-m.loopStop:
+			return
+		case <-ticker.C:
+			m.reconcileSpawnedWork()
+		}
 	}
 }
 
@@ -1241,20 +1213,11 @@ func (m *Manager) commitSpawnedWorkChange(tabID, chatID string) {
 	if tabID == "" || chatID == "" {
 		return
 	}
-	// Full snapshots are replacement observations. Serialize their persist ->
-	// actor-commit -> publish boundary so two runtime callbacks cannot apply an
+	// Full snapshots are replacement observations. Serialize their actor-commit
+	// -> derived-cache commit -> publish boundary so two runtime callbacks cannot apply an
 	// older snapshot after a newer one.
 	m.spawnedWorkCommitMu.Lock()
 	defer m.spawnedWorkCommitMu.Unlock()
-	m.spawnedWorkMu.Lock()
-	pruned := m.spawnedWorkPairPrunedLocked(tabID, chatID)
-	m.spawnedWorkMu.Unlock()
-	if pruned {
-		return
-	}
-	m.persistSpawnedWorkSnapshot(tabID, chatID)
-	m.persistNewSpawnedWorkReceipts(tabID, chatID)
-	m.touchSpawnedWorkBridgeActivity(tabID, chatID, time.Now())
 	items := m.ListSpawnedWork(tabID, chatID)
 	m.spawnedWorkObserverMu.RLock()
 	observer := m.spawnedWorkObserver
@@ -1273,7 +1236,20 @@ func (m *Manager) commitSpawnedWorkChange(tabID, chatID string) {
 		})
 		return
 	}
-	payload := map[string]any{"tabId": tabID, "chatId": chatID, "items": items}
+	if err := m.persistNewSpawnedWorkReceipts(tabID, chatID, projection.Items); err != nil {
+		m.opts.Logf("actor-owned background receipt commit failed", map[string]any{
+			"tabId": tabID, "chatId": chatID, "error": redactSensitiveText(err.Error()),
+		})
+		return
+	}
+	if err := m.commitActorSpawnedWorkProjectionLocked(tabID, chatID, projection.Items); err != nil {
+		m.opts.Logf("actor-owned background cache commit failed", map[string]any{
+			"tabId": tabID, "chatId": chatID, "error": redactSensitiveText(err.Error()),
+		})
+		return
+	}
+	m.touchSpawnedWorkBridgeActivity(tabID, chatID, time.Now())
+	payload := map[string]any{"tabId": tabID, "chatId": chatID, "items": projection.Items}
 	if projection.Obligation != nil {
 		payload["obligation"] = projection.Obligation
 	}
@@ -1284,6 +1260,7 @@ func (m *Manager) commitSpawnedWorkChange(tabID, chatID string) {
 type SpawnedWorkActorProjection struct {
 	ActorRevision uint64
 	Obligation    *ChatObligationProjection
+	Items         []SpawnedWorkItem
 }
 
 type ChatObligationProjection struct {
@@ -1291,87 +1268,6 @@ type ChatObligationProjection struct {
 	Source   string `json:"source,omitempty"`
 	Note     string `json:"note,omitempty"`
 	PromptID string `json:"promptId,omitempty"`
-}
-
-// SpawnedWorkPair is an executor-cache identity exposed only so the one-time
-// chat cutover can remove records whose persisted tab attachment no longer
-// matches the verified actor. It is not chat-state authority.
-type SpawnedWorkPair struct {
-	TabID  string
-	ChatID string
-}
-
-// LegacySpawnedWorkPairsForMigration returns the exact identities currently
-// loaded from the executor cache, plus identities still present in its durable
-// snapshot/receipt files. The migration boundary compares these pairs with
-// verified actor attachments; ordinary runtime code must use the actor
-// observer/read surfaces instead.
-func (m *Manager) LegacySpawnedWorkPairsForMigration() []SpawnedWorkPair {
-	if m == nil {
-		return nil
-	}
-	seen := make(map[[2]string]struct{})
-	add := func(tabID, chatID string) {
-		tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
-		if tabID != "" && chatID != "" {
-			seen[spawnedWorkPair(tabID, chatID)] = struct{}{}
-		}
-	}
-	m.spawnedWorkMu.Lock()
-	for _, rec := range m.spawnedWork {
-		if rec == nil {
-			continue
-		}
-		add(rec.Item.TabID, rec.Item.ChatID)
-	}
-	for _, candidate := range m.spawnedCandidates {
-		add(candidate.TabID, candidate.ChatID)
-	}
-	m.spawnedWorkMu.Unlock()
-	if strings.TrimSpace(m.opts.StateDir) != "" {
-		if paths, err := filepath.Glob(filepath.Join(m.opts.StateDir, "spawned-work", "*.json")); err == nil {
-			for _, path := range paths {
-				data, err := os.ReadFile(path)
-				if err != nil || len(data) > maxSpawnedWorkReceiptBytes {
-					continue
-				}
-				var items []spawnedWorkSnapshotItem
-				if json.Unmarshal(data, &items) != nil {
-					continue
-				}
-				for _, item := range items {
-					add(item.TabID, item.ChatID)
-				}
-			}
-		}
-		m.receiptMu.Lock()
-		if paths, err := filepath.Glob(filepath.Join(m.opts.StateDir, "spawned-work-receipts", "*.jsonl")); err == nil {
-			for _, path := range paths {
-				data, err := os.ReadFile(path)
-				if err != nil {
-					continue
-				}
-				for _, line := range boundedSpawnedReceiptLines(data) {
-					var receipt SpawnedWorkReceipt
-					if json.Unmarshal(line, &receipt) == nil {
-						add(receipt.TabID, receipt.ChatID)
-					}
-				}
-			}
-		}
-		m.receiptMu.Unlock()
-	}
-	out := make([]SpawnedWorkPair, 0, len(seen))
-	for pair := range seen {
-		out = append(out, SpawnedWorkPair{TabID: pair[0], ChatID: pair[1]})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].ChatID == out[j].ChatID {
-			return out[i].TabID < out[j].TabID
-		}
-		return out[i].ChatID < out[j].ChatID
-	})
-	return out
 }
 
 // InstallSpawnedWorkObserver installs the authoritative actor ingress once.
@@ -1393,17 +1289,57 @@ func (m *Manager) InstallSpawnedWorkObserver(observer func(string, string, []Spa
 // DropSpawnedWorkForChat removes every executor/liveness record and durable
 // receipt for an actor-tombstoned chat. Runtime records are not semantic
 // authority, but leaving them behind would let startup reconciliation
-// resurrect work belonging to a deleted actor.
+// recreate work belonging to a deleted actor.
 func (m *Manager) DropSpawnedWorkForChat(tabID, chatID string) {
 	_ = m.dropSpawnedWorkPair(tabID, chatID)
 }
 
-// PruneSpawnedWorkForMigration is the one-time migration cleanup entry point.
-// It has an error-returning surface so the cutover receipt cannot claim that
-// disk cleanup completed after a failed rewrite. It is intentionally called
-// only by provider_chat_migration.go; runtime reads use actor projections.
-func (m *Manager) PruneSpawnedWorkForMigration(tabID, chatID string) error {
-	return m.dropSpawnedWorkPair(tabID, chatID)
+// CommitActorSpawnedWorkProjection keeps only running executor rows whose
+// immutable origin the exact chat actor accepted. The actor and receipts retain
+// semantic/terminal history; this rebuildable cache retains liveness details.
+func (m *Manager) CommitActorSpawnedWorkProjection(tabID, chatID string, items []SpawnedWorkItem) error {
+	if m == nil {
+		return errors.New("spawned-work cache manager is unavailable")
+	}
+	m.spawnedWorkCommitMu.Lock()
+	defer m.spawnedWorkCommitMu.Unlock()
+	if err := m.persistNewSpawnedWorkReceipts(tabID, chatID, items); err != nil {
+		return err
+	}
+	return m.commitActorSpawnedWorkProjectionLocked(tabID, chatID, items)
+}
+
+func (m *Manager) commitActorSpawnedWorkProjectionLocked(tabID, chatID string, items []SpawnedWorkItem) error {
+	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
+	if tabID == "" || chatID == "" {
+		return nil
+	}
+	accepted := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if strings.TrimSpace(item.TabID) != tabID || strings.TrimSpace(item.ChatID) != chatID {
+			continue
+		}
+		workID := firstNonEmpty(strings.TrimSpace(item.ID), strings.TrimSpace(item.TaskID))
+		if workID != "" {
+			accepted[workID] = struct{}{}
+		}
+	}
+	m.spawnedWorkMu.Lock()
+	for key, rec := range m.spawnedWork {
+		if rec == nil || rec.Item.TabID != tabID || rec.Item.ChatID != chatID {
+			continue
+		}
+		workID := firstNonEmpty(strings.TrimSpace(rec.Item.ID), strings.TrimSpace(rec.Item.TaskID))
+		_, owned := accepted[workID]
+		if !owned || (!strings.EqualFold(strings.TrimSpace(rec.Item.Status), "running") && rec.ReceiptWritten) {
+			delete(m.spawnedWork, key)
+		}
+	}
+	m.spawnedWorkMu.Unlock()
+	if err := m.persistSpawnedWorkSnapshot(tabID, ""); err != nil {
+		return fmt.Errorf("persist actor-owned background cache for tab %q: %w", tabID, err)
+	}
+	return nil
 }
 
 func (m *Manager) dropSpawnedWorkPair(tabID, chatID string) error {
@@ -1417,10 +1353,6 @@ func (m *Manager) dropSpawnedWorkPair(tabID, chatID string) error {
 	m.spawnedWorkCommitMu.Lock()
 	defer m.spawnedWorkCommitMu.Unlock()
 	m.spawnedWorkMu.Lock()
-	if m.spawnedWorkPruned == nil {
-		m.spawnedWorkPruned = make(map[[2]string]struct{})
-	}
-	m.spawnedWorkPruned[spawnedWorkPair(tabID, chatID)] = struct{}{}
 	for key, rec := range m.spawnedWork {
 		if rec != nil && rec.Item.TabID == tabID && rec.Item.ChatID == chatID {
 			delete(m.spawnedWork, key)
@@ -1586,6 +1518,11 @@ func (m *Manager) StopSpawnedWork(tabID, chatID, id string) map[string]any {
 	}
 	m.spawnedWorkMu.Unlock()
 	if !found {
+		if receipt, ok := m.findSpawnedWorkReceipt(tabID, chatID, id); ok {
+			return map[string]any{
+				"ok": true, "id": receipt.TaskID, "status": receipt.Status, "alreadyFinished": true,
+			}
+		}
 		return map[string]any{"ok": false, "error": "spawned work item not found"}
 	}
 	if item.Status != "running" {
@@ -2016,8 +1953,7 @@ func (m *Manager) loadSpawnedWorkSnapshots() {
 		return
 	}
 	paths, _ := filepath.Glob(filepath.Join(m.opts.StateDir, "spawned-work", "*.json"))
-	healedPairs := map[[2]string]struct{}{}
-	canonicalByKey := map[string]bool{}
+	ambiguous := map[string]struct{}{}
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if err != nil || len(data) > maxSpawnedWorkReceiptBytes {
@@ -2034,15 +1970,9 @@ func (m *Manager) loadSpawnedWorkSnapshots() {
 			}
 			rawTaskID := strings.TrimSpace(item.TaskID)
 			taskID := normalizeSpawnedWorkTaskID(rawTaskID)
-			if taskID == "" {
+			if taskID == "" || rawTaskID != taskID || strings.TrimSpace(item.ID) != taskID {
 				continue
 			}
-			canonical := rawTaskID == taskID
-			if !canonical || item.ID != taskID {
-				healedPairs[[2]string{item.TabID, item.ChatID}] = struct{}{}
-			}
-			item.ID = taskID
-			item.TaskID = taskID
 			if item.OutputFile != "" {
 				if item.Kind == "external" {
 					if safe, ok := validateExternalWorkPath(m.opts.StateDir, item.OutputFile); ok {
@@ -2065,28 +1995,18 @@ func (m *Manager) loadSpawnedWorkSnapshots() {
 					doneFile = safe
 				} else {
 					doneFile = ""
-					healedPairs[[2]string{item.TabID, item.ChatID}] = struct{}{}
 				}
 			}
 			key := spawnedWorkKey(item.TabID, item.ChatID, taskID)
-			incoming := &spawnedWorkRecord{Item: item, SawPID: item.PID != nil, ExternalDoneFile: doneFile}
-			if existing := m.spawnedWork[key]; existing != nil {
-				preferIncoming := canonical && !canonicalByKey[key]
-				if !sameSpawnedWorkToolCall(existing.Item.ToolCallID, incoming.Item.ToolCallID) {
-					if preferIncoming {
-						m.spawnedWork[key] = incoming
-						canonicalByKey[key] = true
-					}
-					healedPairs[[2]string{item.TabID, item.ChatID}] = struct{}{}
-					continue
-				}
-				mergeLoadedSpawnedWorkRecord(existing, incoming, preferIncoming)
-				canonicalByKey[key] = canonicalByKey[key] || canonical
-				healedPairs[[2]string{item.TabID, item.ChatID}] = struct{}{}
+			if _, rejected := ambiguous[key]; rejected {
 				continue
 			}
-			m.spawnedWork[key] = incoming
-			canonicalByKey[key] = canonical
+			if _, duplicate := m.spawnedWork[key]; duplicate {
+				delete(m.spawnedWork, key)
+				ambiguous[key] = struct{}{}
+				continue
+			}
+			m.spawnedWork[key] = &spawnedWorkRecord{Item: item, SawPID: item.PID != nil, ExternalDoneFile: doneFile}
 		}
 	}
 	orphanedPairs := map[[2]string]struct{}{}
@@ -2101,99 +2021,12 @@ func (m *Manager) loadSpawnedWorkSnapshots() {
 			orphanedPairs[[2]string{rec.Item.TabID, rec.Item.ChatID}] = struct{}{}
 		}
 	}
-	for pair := range healedPairs {
-		if _, orphaned := orphanedPairs[pair]; orphaned {
-			continue
-		}
-		m.persistSpawnedWorkSnapshot(pair[0], pair[1])
-	}
 	for pair := range orphanedPairs {
 		// No subagent registry survives daemon replacement, so this is the only
 		// point where silence becomes terminal for tracked subagent work. The
 		// orphan wake is intentional: there is no surviving adoption path that
 		// could double-notify this recovery event.
 		m.commitSpawnedWorkChange(pair[0], pair[1])
-	}
-}
-
-func mergeLoadedSpawnedWorkRecord(dst, src *spawnedWorkRecord, preferSrc bool) {
-	if dst == nil || src == nil {
-		return
-	}
-	if preferSrc {
-		prior := dst.Item
-		dst.Item = src.Item
-		mergeMissingSpawnedWorkFields(&dst.Item, prior)
-	} else {
-		mergeMissingSpawnedWorkFields(&dst.Item, src.Item)
-	}
-	dst.SawPID = dst.SawPID || src.SawPID
-	dst.ReceiptWritten = dst.ReceiptWritten || src.ReceiptWritten
-	if dst.ExternalDoneFile == "" {
-		dst.ExternalDoneFile = src.ExternalDoneFile
-	}
-}
-
-func mergeMissingSpawnedWorkFields(dst *SpawnedWorkItem, src SpawnedWorkItem) {
-	if dst == nil {
-		return
-	}
-	if dst.ToolCallID == "" {
-		dst.ToolCallID = src.ToolCallID
-	}
-	if dst.ProviderID == "" {
-		dst.ProviderID = src.ProviderID
-	}
-	if dst.Kind == "" || (dst.Kind == "background" && src.Kind != "" && src.Kind != "background") {
-		dst.Kind = src.Kind
-	}
-	if dst.Role == "" {
-		dst.Role = src.Role
-	}
-	if dst.Label == "" {
-		dst.Label = src.Label
-	}
-	if dst.Status == "" {
-		dst.Status = src.Status
-	}
-	if dst.StartedAt == "" {
-		dst.StartedAt = src.StartedAt
-	}
-	if dst.UpdatedAt == "" {
-		dst.UpdatedAt = src.UpdatedAt
-	}
-	if dst.OutputFile == "" {
-		dst.OutputFile = src.OutputFile
-	}
-	if dst.PID == nil {
-		dst.PID = src.PID
-	}
-	if dst.ExitCode == nil {
-		dst.ExitCode = src.ExitCode
-	}
-	if dst.Summary == "" {
-		dst.Summary = src.Summary
-	}
-	if dst.LastToolName == "" {
-		dst.LastToolName = src.LastToolName
-	}
-	if dst.ModelLabel == "" {
-		dst.ModelLabel = src.ModelLabel
-	}
-	if dst.ResultExcerpt == "" {
-		dst.ResultExcerpt = src.ResultExcerpt
-	}
-	if dst.OriginLaneID == "" {
-		dst.OriginLaneID = src.OriginLaneID
-	}
-	if dst.OriginOperationID == "" {
-		dst.OriginOperationID = src.OriginOperationID
-	}
-	if dst.OriginTurnID == "" {
-		dst.OriginTurnID = src.OriginTurnID
-	}
-	if dst.Status != "running" && dst.FinishedAt == "" {
-		dst.FinishedAt = src.FinishedAt
 	}
 }
 
@@ -2223,10 +2056,19 @@ func (m *Manager) spawnedWorkReceiptFromItem(item SpawnedWorkItem) SpawnedWorkRe
 	}
 }
 
-func (m *Manager) persistNewSpawnedWorkReceipts(tabID, chatID string) {
+func (m *Manager) persistNewSpawnedWorkReceipts(tabID, chatID string, acceptedItems []SpawnedWorkItem) error {
 	path := m.spawnedWorkReceiptPath(tabID)
 	if path == "" {
-		return
+		return nil
+	}
+	accepted := make(map[string]struct{}, len(acceptedItems))
+	for _, item := range acceptedItems {
+		if strings.TrimSpace(item.TabID) != strings.TrimSpace(tabID) || strings.TrimSpace(item.ChatID) != strings.TrimSpace(chatID) {
+			continue
+		}
+		if workID := firstNonEmpty(strings.TrimSpace(item.ID), strings.TrimSpace(item.TaskID)); workID != "" {
+			accepted[workID] = struct{}{}
+		}
 	}
 	type pendingReceipt struct {
 		key  string
@@ -2235,7 +2077,12 @@ func (m *Manager) persistNewSpawnedWorkReceipts(tabID, chatID string) {
 	m.spawnedWorkMu.Lock()
 	terminal := make([]pendingReceipt, 0)
 	for key, rec := range m.spawnedWork {
-		if rec.Item.TabID == tabID && rec.Item.ChatID == chatID && rec.Item.Status != "running" && !rec.ReceiptWritten {
+		if rec == nil {
+			continue
+		}
+		workID := firstNonEmpty(strings.TrimSpace(rec.Item.ID), strings.TrimSpace(rec.Item.TaskID))
+		_, owned := accepted[workID]
+		if owned && rec.Item.TabID == tabID && rec.Item.ChatID == chatID && rec.Item.Status != "running" && !rec.ReceiptWritten {
 			terminal = append(terminal, pendingReceipt{key: key, item: rec.Item})
 		}
 	}
@@ -2244,7 +2091,7 @@ func (m *Manager) persistNewSpawnedWorkReceipts(tabID, chatID string) {
 		receipt := m.spawnedWorkReceiptFromItem(pending.item)
 		data, err := json.Marshal(receipt)
 		if err != nil {
-			continue
+			return err
 		}
 		m.receiptMu.Lock()
 		_ = os.MkdirAll(filepath.Dir(path), 0o700)
@@ -2269,10 +2116,13 @@ func (m *Manager) persistNewSpawnedWorkReceipts(tabID, chatID string) {
 			lines = lines[1:]
 			payload = append(bytes.Join(lines, []byte("\n")), '\n')
 		}
-		tmp := path + ".tmp"
 		persisted := duplicate
-		if os.WriteFile(tmp, payload, 0o600) == nil {
-			persisted = os.Rename(tmp, path) == nil
+		if !duplicate {
+			if err := writeSpawnedWorkFile(path, payload); err != nil {
+				m.receiptMu.Unlock()
+				return err
+			}
+			persisted = true
 		}
 		m.receiptMu.Unlock()
 		m.spawnedWorkMu.Lock()
@@ -2281,6 +2131,7 @@ func (m *Manager) persistNewSpawnedWorkReceipts(tabID, chatID string) {
 		}
 		m.spawnedWorkMu.Unlock()
 	}
+	return nil
 }
 
 func boundedSpawnedReceiptLines(data []byte) [][]byte {
@@ -2307,15 +2158,34 @@ func (m *Manager) ListSpawnedWorkReceipts(ownerKey, parentChatID, parentTabID, r
 	if !ok || chatID != strings.TrimSpace(requestedChatID) || tabID != strings.TrimSpace(requestedTabID) {
 		return nil, fmt.Errorf("tab_id + chat_id must exactly match the owning Workass chat")
 	}
+	return m.listSpawnedWorkReceipts(tabID, chatID, limit), nil
+}
+
+func (m *Manager) findSpawnedWorkReceipt(tabID, chatID, taskID string) (SpawnedWorkReceipt, bool) {
+	taskID = normalizeSpawnedWorkTaskID(taskID)
+	if taskID == "" {
+		return SpawnedWorkReceipt{}, false
+	}
+	receipts := m.listSpawnedWorkReceipts(tabID, chatID, maxSpawnedWorkPerChat)
+	for i := len(receipts) - 1; i >= 0; i-- {
+		if normalizeSpawnedWorkTaskID(receipts[i].TaskID) == taskID {
+			return receipts[i], true
+		}
+	}
+	return SpawnedWorkReceipt{}, false
+}
+
+func (m *Manager) listSpawnedWorkReceipts(tabID, chatID string, limit int) []SpawnedWorkReceipt {
+	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
 	path := m.spawnedWorkReceiptPath(tabID)
-	if path == "" {
-		return []SpawnedWorkReceipt{}, nil
+	if path == "" || chatID == "" {
+		return []SpawnedWorkReceipt{}
 	}
 	m.receiptMu.Lock()
 	data, err := os.ReadFile(path)
 	m.receiptMu.Unlock()
 	if err != nil {
-		return []SpawnedWorkReceipt{}, nil
+		return []SpawnedWorkReceipt{}
 	}
 	if limit <= 0 || limit > maxSpawnedWorkPerChat {
 		limit = 32
@@ -2335,7 +2205,7 @@ func (m *Manager) ListSpawnedWorkReceipts(ownerKey, parentChatID, parentTabID, r
 	if len(out) > limit {
 		out = out[len(out)-limit:]
 	}
-	return out, nil
+	return out
 }
 
 func (m *Manager) ListSpawnedWorkForOwner(ownerKey, parentChatID, parentTabID, requestedChatID, requestedTabID string, tailBytes int) ([]map[string]any, error) {

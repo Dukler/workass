@@ -113,143 +113,39 @@ type ProviderLaneSelection struct {
 	Established bool
 }
 
-// LegacyCoverageMessage is the exact old cursor input used only by the one-time
-// renderer/session-to-actor migration. It is deliberately smaller than the
-// actor ledger and must be deleted with the cutover reader after rollout.
-type LegacyCoverageMessage struct {
-	ID      string
-	Role    string
-	Content string
-}
-
-type LegacyProviderLaneMigration struct {
-	Selection       ProviderLaneSelection
-	CoveredMessages int
-	BlockedError    providercontract.ErrorKind
-}
-
-// LegacyProviderChatInventoryItem is the minimal, non-secret identity needed
-// to ensure the one-time cutover accounts for native bindings that disappeared
-// from the renderer mirror. Such a chat is quarantined; it is never silently
-// deleted or adopted into another visible chat.
-type LegacyProviderChatInventoryItem struct {
-	ChatID     string
-	TabID      string
-	ProviderID string
-	CWD        string
-}
-
-func (m *Manager) LegacyProviderChatInventory() ([]LegacyProviderChatInventoryItem, error) {
+// StoredProviderLaneSelections returns the exact canonical lane records for one
+// actor-storage schema upgrade. It performs no provider RPC and never proposes,
+// creates, resumes, or replaces a native thread. Ordinary chat execution must
+// continue to address one lane through ResolveProviderLaneSelection.
+func (m *Manager) StoredProviderLaneSelections(chatID string) ([]ProviderLaneSelection, error) {
 	if m == nil || m.nativeSessions == nil {
-		return nil, errors.New("legacy provider lane inventory is unavailable")
-	}
-	bindings := m.nativeSessions.allBindings()
-	byChat := make(map[string]LegacyProviderChatInventoryItem)
-	for _, binding := range bindings {
-		chatID := strings.TrimSpace(binding.ChatID)
-		if chatID == "" {
-			continue
-		}
-		item, exists := byChat[chatID]
-		if !exists {
-			byChat[chatID] = LegacyProviderChatInventoryItem{
-				ChatID: chatID, TabID: strings.TrimSpace(binding.TabID),
-				ProviderID: normalizeProviderID(binding.ProviderID), CWD: strings.TrimSpace(binding.CWD),
-			}
-			continue
-		}
-		// Conflicting attachment metadata is itself ambiguity. Leave the fields
-		// empty so the cutover creates a deterministic quarantine attachment.
-		if item.TabID != strings.TrimSpace(binding.TabID) {
-			item.TabID = ""
-		}
-		if item.ProviderID != normalizeProviderID(binding.ProviderID) {
-			item.ProviderID = ""
-		}
-		if item.CWD != strings.TrimSpace(binding.CWD) {
-			item.CWD = ""
-		}
-		byChat[chatID] = item
-	}
-	out := make([]LegacyProviderChatInventoryItem, 0, len(byChat))
-	for _, item := range byChat {
-		out = append(out, item)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ChatID < out[j].ChatID })
-	return out, nil
-}
-
-// LegacyProviderLaneMigrations enumerates every exact native binding for one
-// pre-actor chat and verifies the old history cursor without starting a
-// provider process. It never creates, resumes, probes, or repairs a thread.
-func (m *Manager) LegacyProviderLaneMigrations(chatID string, messages []LegacyCoverageMessage) ([]LegacyProviderLaneMigration, error) {
-	if m == nil || m.nativeSessions == nil {
-		return nil, errors.New("legacy provider lane migration is unavailable")
+		return nil, errors.New("durable provider lane storage is unavailable")
 	}
 	chatID = strings.TrimSpace(chatID)
 	if chatID == "" {
-		return nil, errors.New("legacy provider lane migration requires chat id")
+		return nil, errors.New("stored provider lane lookup requires chat id")
 	}
 	bindings := m.nativeSessions.bindingsForChat(chatID)
-	out := make([]LegacyProviderLaneMigration, 0, len(bindings))
+	out := make([]ProviderLaneSelection, 0, len(bindings))
 	for _, binding := range bindings {
-		if binding.Quarantined {
-			return nil, &providercontract.Error{
-				Kind:    providercontract.ErrorNativeIdentityConflict,
-				Message: firstNonEmpty(binding.QuarantineReason, "legacy provider binding is quarantined"),
-			}
-		}
 		identity, thread := bindingLaneIdentity(binding), bindingThreadRef(binding)
 		if err := identity.Validate(); err != nil {
-			return nil, &providercontract.Error{Kind: providercontract.ErrorNativeIdentityConflict, Message: "legacy provider lane identity is invalid", Cause: err}
+			return nil, &providercontract.Error{Kind: providercontract.ErrorProtocolViolation, Message: "stored provider lane identity is invalid", Cause: err}
 		}
 		if err := thread.Validate(identity.Realm.ProviderID); err != nil {
-			return nil, &providercontract.Error{Kind: providercontract.ErrorNativeIdentityConflict, Message: "legacy provider thread identity is invalid", Cause: err}
+			return nil, &providercontract.Error{Kind: providercontract.ErrorProtocolViolation, Message: "stored provider thread is invalid", Cause: err}
 		}
 		if _, err := m.ProviderDefinition(binding.ProviderID); err != nil {
-			return nil, &providercontract.Error{Kind: providercontract.ErrorProviderUnavailable, Message: "legacy provider lane is not registered", Cause: err}
+			return nil, err
 		}
-		migration := LegacyProviderLaneMigration{Selection: ProviderLaneSelection{
+		out = append(out, ProviderLaneSelection{
 			Identity: identity, Thread: thread,
-			Owner: providercontract.AttachmentOwner{TabID: binding.TabID},
-			CWD:   binding.CWD, ModelID: binding.ModelID, ModeID: binding.ModeID,
+			Owner: providercontract.AttachmentOwner{TabID: strings.TrimSpace(binding.TabID)},
+			CWD:   strings.TrimSpace(binding.CWD), ModelID: strings.TrimSpace(binding.ModelID), ModeID: strings.TrimSpace(binding.ModeID),
 			Context: providerAdapterForID(binding.ProviderID).context.Capabilities(), Established: true,
-		}}
-		count := binding.SyncedMessages
-		switch {
-		case count < 0 || count > len(messages):
-			migration.BlockedError = providercontract.ErrorNativeIdentityConflict
-		case count == 0 && strings.TrimSpace(binding.HistoryHash) == "":
-			// Old empty bindings may predate cursor hashing. They prove no visible
-			// coverage, which is safe and intentionally does not guess.
-		case binding.HistoryVersion != 1 && binding.HistoryVersion != 2:
-			migration.BlockedError = providercontract.ErrorNativeIdentityConflict
-		case !legacyCoverageDigestMatches(binding, messages[:count]):
-			migration.BlockedError = providercontract.ErrorNativeIdentityConflict
-		default:
-			migration.CoveredMessages = count
-		}
-		if migration.BlockedError == "" && !binding.ResumeSafe {
-			migration.BlockedError = providercontract.ErrorAcceptanceAmbiguous
-		}
-		out = append(out, migration)
+		})
 	}
 	return out, nil
-}
-
-func legacyCoverageDigestMatches(binding nativeSessionBinding, messages []LegacyCoverageMessage) bool {
-	hash := sha256.New()
-	for _, message := range messages {
-		if binding.HistoryVersion > 1 {
-			hash.Write([]byte(strings.TrimSpace(message.ID)))
-			hash.Write([]byte{0xfe})
-		}
-		hash.Write([]byte(strings.TrimSpace(message.Role)))
-		hash.Write([]byte{0})
-		hash.Write([]byte(strings.TrimSpace(message.Content)))
-		hash.Write([]byte{0xff})
-	}
-	return strings.TrimSpace(binding.HistoryHash) == hex.EncodeToString(hash.Sum(nil))
 }
 
 // ResolveProviderLaneSelection performs no provider RPC. It is the single
@@ -284,12 +180,6 @@ func (m *Manager) ResolveProviderLaneSelection(ctx context.Context, opts Session
 		Context: contextCapabilities,
 	}
 	if binding, exists := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD); exists {
-		if binding.Quarantined {
-			return ProviderLaneSelection{}, &providercontract.Error{
-				Kind:    providercontract.ErrorNativeIdentityConflict,
-				Message: firstNonEmpty(binding.QuarantineReason, "provider lane identity is quarantined"),
-			}
-		}
 		identity, thread := bindingLaneIdentity(binding), bindingThreadRef(binding)
 		if err := identity.Validate(); err != nil {
 			return ProviderLaneSelection{}, &providercontract.Error{Kind: providercontract.ErrorProtocolViolation, Message: "stored provider lane identity is invalid", Cause: err}
@@ -471,7 +361,7 @@ func (r managerRealmResolver) ResolveRealm(_ context.Context, request providerco
 	installScope := strings.TrimSpace(request.InstallScope)
 	verified := request.Verified
 	if r.manager.nativeSessions != nil && strings.TrimSpace(request.TabID) != "" && strings.TrimSpace(request.ChatID) != "" {
-		if binding, ok := r.manager.nativeSessions.get(request.TabID, request.ChatID, providerID); ok && !binding.Quarantined {
+		if binding, ok := r.manager.nativeSessions.get(request.TabID, request.ChatID, providerID); ok {
 			machineID = firstNonEmpty(binding.MachineID, machineID)
 			accountScope = firstNonEmpty(binding.AccountScope, accountScope)
 			installScope = firstNonEmpty(binding.InstallScope, installScope)
@@ -534,7 +424,7 @@ func (f managerLaneFactory) Create(ctx context.Context, request providercontract
 		return nil, providercontract.ThreadRef{}, err
 	}
 	if binding, exists := f.manager.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, opts.ProviderID, opts.CWD); exists {
-		if request.Reconcile && !binding.Quarantined {
+		if request.Reconcile {
 			canonical := bindingLaneIdentity(binding)
 			if err := validateCanonicalCreatedLane(identity, canonical); err != nil {
 				return nil, providercontract.ThreadRef{}, err
@@ -546,12 +436,9 @@ func (f managerLaneFactory) Create(ctx context.Context, request providercontract
 			})
 			return lane, thread, err
 		}
-		kind := providercontract.ErrorNativeIdentityConflict
-		message := "an established provider lane cannot enter create"
-		if binding.Quarantined {
-			message = firstNonEmpty(binding.QuarantineReason, message)
+		return nil, providercontract.ThreadRef{}, &providercontract.Error{
+			Kind: providercontract.ErrorNativeIdentityConflict, Message: "an established provider lane cannot enter create",
 		}
-		return nil, providercontract.ThreadRef{}, &providercontract.Error{Kind: kind, Message: message}
 	}
 	if request.Reconcile {
 		return nil, providercontract.ThreadRef{}, &providercontract.Error{
@@ -634,21 +521,18 @@ func (f managerLaneFactory) Resume(ctx context.Context, request providercontract
 	if !ok {
 		return nil, &providercontract.Error{Kind: providercontract.ErrorNativeThreadMissing, Message: "the exact provider lane binding is missing"}
 	}
-	if binding.Quarantined {
-		return nil, &providercontract.Error{Kind: providercontract.ErrorNativeIdentityConflict, Message: firstNonEmpty(binding.QuarantineReason, "provider lane is quarantined")}
-	}
 	if bindingLaneIdentity(binding) != identity {
 		return nil, &providercontract.Error{Kind: providercontract.ErrorNativeIdentityConflict, Message: "resume request does not match the durable provider lane"}
 	}
 	if current := bindingThreadRef(binding); !current.Equal(request.Thread) {
 		// The actor commit is authoritative. A crash can occur after it accepted
 		// one verified lineage edge but before the adapter lookup was materialized;
-		// repair exactly that one edge and no broader mismatch.
+		// commit exactly that one edge and no broader mismatch.
 		if request.Thread.Lineage != current.Lineage+1 || !current.CanAdvanceTo(request.Thread) {
 			return nil, &providercontract.Error{Kind: providercontract.ErrorNativeIdentityConflict, Message: "resume request does not match the durable provider lane"}
 		}
 		if err := f.manager.nativeSessions.materializeActorLineage(identity, current, request.Thread); err != nil {
-			return nil, classifyLaneRuntimeError("repair actor lineage materialization", err)
+			return nil, classifyLaneRuntimeError("commit actor lineage materialization", err)
 		}
 		binding, ok = f.manager.nativeSessions.getForLane(identity)
 		if !ok || !bindingThreadRef(binding).Equal(request.Thread) {
@@ -853,13 +737,28 @@ func (l *managerLane) AcknowledgeDurableEvent(sequence uint64, commitErr error) 
 		return
 	}
 	l.mu.Lock()
-	wait := l.commitWait[sequence]
+	waiters := make([]chan error, 0, 1)
+	if wait := l.commitWait[sequence]; wait != nil {
+		waiters = append(waiters, wait)
+	}
 	if commitErr != nil {
 		l.protocolFailed = true
+		// LaneAttached is queued before its actor consumer exists and therefore has
+		// no waiter. If the actor rejects that first event, a provider callback may
+		// already be waiting on the next sequence. Fail every pending callback so
+		// protocol teardown cannot strand publication or deadlock shutdown.
+		for pendingSequence, pending := range l.commitWait {
+			if pendingSequence != sequence && pending != nil {
+				waiters = append(waiters, pending)
+			}
+		}
 	}
 	l.mu.Unlock()
-	if wait != nil {
-		wait <- commitErr
+	for _, wait := range waiters {
+		select {
+		case wait <- commitErr:
+		default:
+		}
 	}
 }
 
@@ -1018,13 +917,16 @@ func (l *managerLane) emitLocked(event providercontract.Event, waitForCommit boo
 		l.mu.Unlock()
 		return errors.New("provider event lane is closed")
 	}
+	if l.protocolFailed {
+		l.mu.Unlock()
+		if event.Kind == providercontract.EventLaneDetached {
+			return nil
+		}
+		return errors.New("provider event lane failed its durable actor protocol")
+	}
 	if l.detached && event.Kind != providercontract.EventLaneDetached {
 		l.mu.Unlock()
 		return errors.New("provider event lane is detached")
-	}
-	if l.protocolFailed && event.Kind == providercontract.EventLaneDetached {
-		l.mu.Unlock()
-		return nil
 	}
 	if event.Kind != providercontract.EventTurnTerminal && event.Identity.TurnID != "" &&
 		l.manager != nil && l.manager.providerLaneClosedJob(event.Identity.TurnID) {

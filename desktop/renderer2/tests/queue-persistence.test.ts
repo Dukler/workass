@@ -1,21 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { shouldDrainRecoveredQueue } from '../src/image-drafts.ts';
-import { normalizeQueued } from '../src/store/persistence.ts';
 import type { QueuedMsg } from '../src/store/types.ts';
-
-test('queued follow-ups survive JSON mirror serialization and hydration', () => {
-  const queued = 'first queued follow-up\n\nsecond queued follow-up';
-  const saved = { queued: normalizeQueued(queued) };
-  const restored = JSON.parse(JSON.stringify(saved)) as { queued?: unknown };
-  assert.equal(normalizeQueued(restored.queued), queued);
-});
-
-test('empty or invalid queue values hydrate as absent', () => {
-  assert.equal(normalizeQueued(''), undefined);
-  assert.equal(normalizeQueued(null), undefined);
-  assert.equal(normalizeQueued({ text: 'not a string' }), undefined);
-});
 
 test('queued attachments stay bound to their message through daemon mirror JSON', () => {
   const queue: QueuedMsg[] = [{

@@ -42,6 +42,21 @@ func stopTestItem(t *testing.T, manager *Manager) SpawnedWorkItem {
 	return items[0]
 }
 
+func stopTestReceipt(t *testing.T, manager *Manager, taskID string) SpawnedWorkReceipt {
+	t.Helper()
+	receipts, err := manager.ListSpawnedWorkReceipts("owner-stop", "chat-stop", "tab-stop", "chat-stop", "tab-stop", 32)
+	if err != nil {
+		t.Fatalf("list stop receipts: %v", err)
+	}
+	for _, receipt := range receipts {
+		if receipt.TaskID == taskID {
+			return receipt
+		}
+	}
+	t.Fatalf("accepted terminal receipt %q missing from %#v", taskID, receipts)
+	return SpawnedWorkReceipt{}
+}
+
 // The lane's processes are discovered from its output file, not from the one
 // pid the registration carried: `npx expo start` registers a wrapper that binds
 // nothing, and the node child that actually holds the port is only reachable
@@ -90,7 +105,10 @@ func TestStopSpawnedWorkSignalsEveryProcessHoldingTheLaneOpen(t *testing.T) {
 		t.Fatalf("signalled pids = %#v", signals)
 	}
 
-	stopped := stopTestItem(t, manager)
+	if cached := manager.ListSpawnedWork("tab-stop", "chat-stop"); len(cached) != 0 {
+		t.Fatalf("terminal work remained in the liveness cache: %#v", cached)
+	}
+	stopped := stopTestReceipt(t, manager, item.ID)
 	if stopped.Status != "exited" {
 		t.Fatalf("a stop settles the row as exited, not %q (this card carries no failure wording)", stopped.Status)
 	}
@@ -121,7 +139,10 @@ func TestStopSpawnedWorkSettlesALaneWithNoLiveProcess(t *testing.T) {
 	if len(signals) != 0 {
 		t.Fatalf("nothing was alive; nothing may be signalled: %#v", signals)
 	}
-	if got := stopTestItem(t, manager); got.Status != "exited" {
+	if cached := manager.ListSpawnedWork("tab-stop", "chat-stop"); len(cached) != 0 {
+		t.Fatalf("terminal ghost remained in the liveness cache: %#v", cached)
+	}
+	if got := stopTestReceipt(t, manager, item.ID); got.Status != "exited" {
 		t.Fatalf("ghost row status = %q, want exited", got.Status)
 	}
 

@@ -47,8 +47,8 @@ class CertificatePins {
   decision(request) {
     const host = String(request?.hostname || '').replace(/^\[|\]$/g, '');
     const expected = this.byHost.get(host);
-	// Electron exposes both its legacy certificate fingerprint and the SHA-256
-	// fingerprint on some platforms.  The legacy value is truthy but too short,
+	// Electron exposes both its short certificate fingerprint and the SHA-256
+	// fingerprint on some platforms. The short value is truthy but too small,
 	// so selecting it with `||` discarded the valid fingerprint256 and made every
 	// pinned Workass certificate fail with ERR_CERT_AUTHORITY_INVALID.
 	const fingerprint256 = normalizeCertFingerprint(request?.certificate?.fingerprint256);

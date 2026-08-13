@@ -175,7 +175,6 @@ var phaseCAllowedSessionStoreMethods = map[string]struct{}{
 	"enabled":                    {},
 	"Get":                        {},
 	"GlobalSnapshot":             {},
-	"ActivateActorCutover":       {},
 	"SaveActorGlobalSnapshot":    {},
 	"SaveGlobalActiveTab":        {},
 	"PersistProviderAttachments": {},
@@ -232,7 +231,7 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	"ProvidersList":                  {},
 	"ReadProcess":                    {},
 	"RefreshProviderPlanUsage":       {},
-	"ReplayProviderEvents":           {},
+	"PublishProviderSnapshots":       {},
 	"Reset":                          {},
 	"SetModelScores":                 {},
 	"SetProviderAttachmentPersister": {},
@@ -256,55 +255,51 @@ type phaseCManagerRule struct {
 
 func phaseCManagerRules() map[string]phaseCManagerRule {
 	return map[string]phaseCManagerRule{
-		"cmd/workass/agent_control.go:ownerAuthorized:ValidateAgentOwner":                                                 {1, "owner authorization after actor fencing"},
-		"cmd/workass/agent_control.go:call:AgentCatalog":                                                                  {1, "actor-authorized catalog projection"},
-		"cmd/workass/chat_control.go:authorize:ValidateAgentOwner":                                                        {1, "owner authorization after actor fencing"},
-		"cmd/workass/chat_control.go:resolveControls:Catalog":                                                             {1, "provider catalog lookup"},
-		"cmd/workass/main.go:registerAcpHandlers:LiveSession":                                                             {1, "legacy close/steer refresh hint after actor route"},
-		"cmd/workass/metrics.go:metrics:Stats":                                                                            {1, "global metrics projection"},
-		"cmd/workass/provider_chat_agent_read.go:agentOwnerAuthorized:ValidateAgentOwner":                                 {1, "owner authorization after actor fencing"},
-		"cmd/workass/provider_chat_agent_read.go:WaitSubagent:WaitSubagent":                                               {1, "actor-owned wait receipt before transient observation"},
-		"cmd/workass/provider_chat_agent_read.go:WaitSubagents:WaitSubagents":                                             {1, "actor-owned wait receipt before transient observation"},
-		"cmd/workass/provider_chat_agent_read.go:ListSpawnedWorkForOwner:ReadSpawnedWork":                                 {1, "bounded executor-cache enrichment"},
-		"cmd/workass/provider_chat_agent_read.go:ListSpawnedWorkReceipts:ReadSpawnedWork":                                 {1, "bounded executor-cache enrichment"},
-		"cmd/workass/provider_chat_agent_read.go:reconcileAgentBackground:ListSpawnedWork":                                {1, "actor projection reconciliation"},
-		"cmd/workass/provider_chat_background.go:executeBackgroundAction:WithActorOwner":                                  {1, "actor outbox executor bridge"},
-		"cmd/workass/provider_chat_background.go:executeBackgroundAction:SpawnSubagent":                                   {1, "actor outbox executor bridge"},
-		"cmd/workass/provider_chat_background.go:executeBackgroundAction:MessageSubagent":                                 {1, "actor outbox executor bridge"},
-		"cmd/workass/provider_chat_background.go:executeBackgroundAction:RetrySubagent":                                   {1, "actor outbox executor bridge"},
-		"cmd/workass/provider_chat_background.go:executeBackgroundAction:CancelSubagent":                                  {1, "actor outbox executor bridge"},
-		"cmd/workass/provider_chat_background.go:executeBackgroundAction:DecideSubagentPermission":                        {1, "actor outbox executor bridge"},
-		"cmd/workass/provider_chat_background.go:executeBackgroundAction:RegisterExternalWork":                            {1, "actor outbox executor bridge"},
-		"cmd/workass/provider_chat_background.go:executeBackgroundAction:SettleExternalWork":                              {1, "actor outbox executor bridge"},
-		"cmd/workass/provider_chat_background.go:executeBackgroundAction:StopSpawnedWork":                                 {1, "actor outbox executor bridge"},
-		"cmd/workass/provider_chat_background.go:applySpawnedWorkSnapshot:ChatObligationEvidence":                         {1, "actor projection enrichment"},
-		"cmd/workass/provider_chat_background.go:syncSpawnedWorkSnapshots:ListSpawnedWork":                                {1, "actor projection reconciliation"},
-		"cmd/workass/provider_chat_background.go:ReadBackground:ReadSpawnedWork":                                          {1, "bounded executor-cache enrichment"},
-		"cmd/workass/provider_chat_close.go:CloseSession:LiveSessionByID":                                                 {1, "known session-id compatibility lookup before actor proof"},
-		"cmd/workass/provider_chat_migration.go:completeLegacyChatCutover:LegacyProviderChatInventory":                    {1, "one-time migration inventory"},
-		"cmd/workass/provider_chat_migration.go:repairInterruptedCutoverActors:LegacyProviderChatInventory":               {1, "interrupted cutover receipt repair inventory"},
-		"cmd/workass/provider_chat_migration.go:cleanupVerifiedLegacyCutoverArtifacts:LegacySpawnedWorkPairsForMigration": {1, "migration-only stale executor-cache inventory"},
-		"cmd/workass/provider_chat_migration.go:cleanupVerifiedLegacyCutoverArtifacts:PruneSpawnedWorkForMigration":       {1, "migration-only stale executor-cache prune"},
-		"cmd/workass/provider_chat_migration.go:migrateLegacyBackground:ListSpawnedWork":                                  {1, "one-time migration read"},
-		"cmd/workass/provider_chat_migration.go:adoptLegacyProviderBindings:LegacyProviderLaneMigrations":                 {1, "one-time migration inventory"},
-		"cmd/workass/provider_chat_runtime.go:configureCoordinator:ForgetChat":                                            {1, "actor cleanup executor receives the exact operation identity"},
-		"cmd/workass/provider_chat_runtime.go:configureCoordinator:RestoreChatCheckpoint":                                 {1, "checkpoint executor receives the exact operation identity"},
-		"cmd/workass/provider_chat_runtime.go:publishLifecycleReceipt:ChatEnvGet":                                         {1, "lifecycle projection enrichment"},
-		"cmd/workass/provider_chat_runtime.go:restoreActorEnvironment:RestoreChatEnvReference":                            {1, "recovery attachment restore"},
-		"cmd/workass/provider_chat_runtime.go:restoreActorChatEnvReference:RestoreChatEnvReference":                       {1, "recovery attachment restore"},
-		"cmd/workass/provider_chat_runtime.go:Select:LiveProviderLaneInfo":                                                {1, "provider attachment projection"},
-		"cmd/workass/provider_chat_runtime.go:observeChatEnv:ChatCheckpoints":                                             {1, "environment projection enrichment"},
-		"cmd/workass/provider_chat_runtime.go:observeChatEnv:ChatEnvReference":                                            {1, "environment projection enrichment"},
-		"cmd/workass/provider_chat_runtime.go:ChatDiff:ChatDiffFromCheckpoints":                                           {1, "checkpoint projection read"},
-		"cmd/workass/provider_chat_runtime.go:Fork:ResolveProviderLaneSelection":                                          {1, "known child selection before child actor attachment"},
-		"cmd/workass/provider_chat_runtime.go:attachForkChild:LiveProviderLaneInfo":                                       {1, "fork attachment projection"},
-		"cmd/workass/provider_chat_runtime.go:resolveSelectionLocked:ResolveProviderLaneSelection":                        {1, "actor selection command bridge"},
-		"cmd/workass/provider_chat_runtime.go:selectLocked:ReattachProviderLane":                                          {1, "actor selection effect bridge"},
-		"cmd/workass/provider_chat_runtime.go:admissionOutcomeLocked:ProviderLaneAdmission":                               {1, "actor admission receipt bridge"},
-		"cmd/workass/provider_chat_runtime.go:Steer:LiveSessionByID":                                                      {1, "post-commit transient-session recheck"},
-		"cmd/workass/provider_chat_runtime.go:ResolvePermission:PermissionChatID":                                         {1, "permission request projection lookup"},
-		"cmd/workass/provider_chat_runtime.go:reconcileObligations:ChatObligationEvidence":                                {1, "actor obligation projection enrichment"},
-		"cmd/workass/stateless_mcp.go:ownerAuthorized:ValidateAgentOwner":                                                 {1, "owner authorization after actor fencing"},
+		"cmd/workass/agent_control.go:ownerAuthorized:ValidateAgentOwner":                                         {1, "owner authorization after actor fencing"},
+		"cmd/workass/agent_control.go:call:AgentCatalog":                                                          {1, "actor-authorized catalog projection"},
+		"cmd/workass/chat_control.go:authorize:ValidateAgentOwner":                                                {1, "owner authorization after actor fencing"},
+		"cmd/workass/chat_control.go:resolveControls:Catalog":                                                     {1, "provider catalog lookup"},
+		"cmd/workass/main.go:registerAcpHandlers:LiveSession":                                                     {1, "known transient session lookup after actor route"},
+		"cmd/workass/metrics.go:metrics:Stats":                                                                    {1, "global metrics projection"},
+		"cmd/workass/provider_chat_agent_read.go:agentOwnerAuthorized:ValidateAgentOwner":                         {1, "owner authorization after actor fencing"},
+		"cmd/workass/provider_chat_agent_read.go:WaitSubagent:WaitSubagent":                                       {1, "actor-owned wait receipt before transient observation"},
+		"cmd/workass/provider_chat_agent_read.go:WaitSubagents:WaitSubagents":                                     {1, "actor-owned wait receipt before transient observation"},
+		"cmd/workass/provider_chat_agent_read.go:ListSpawnedWorkForOwner:ReadSpawnedWork":                         {1, "bounded executor-cache enrichment"},
+		"cmd/workass/provider_chat_agent_read.go:ListSpawnedWorkReceipts:ReadSpawnedWork":                         {1, "bounded executor-cache enrichment"},
+		"cmd/workass/provider_chat_agent_read.go:reconcileAgentBackground:ListSpawnedWork":                        {1, "actor projection reconciliation"},
+		"cmd/workass/provider_chat_background.go:executeBackgroundAction:WithActorOwner":                          {1, "actor outbox executor bridge"},
+		"cmd/workass/provider_chat_background.go:executeBackgroundAction:SpawnSubagent":                           {1, "actor outbox executor bridge"},
+		"cmd/workass/provider_chat_background.go:executeBackgroundAction:MessageSubagent":                         {1, "actor outbox executor bridge"},
+		"cmd/workass/provider_chat_background.go:executeBackgroundAction:RetrySubagent":                           {1, "actor outbox executor bridge"},
+		"cmd/workass/provider_chat_background.go:executeBackgroundAction:CancelSubagent":                          {1, "actor outbox executor bridge"},
+		"cmd/workass/provider_chat_background.go:executeBackgroundAction:DecideSubagentPermission":                {1, "actor outbox executor bridge"},
+		"cmd/workass/provider_chat_background.go:executeBackgroundAction:RegisterExternalWork":                    {1, "actor outbox executor bridge"},
+		"cmd/workass/provider_chat_background.go:executeBackgroundAction:SettleExternalWork":                      {1, "actor outbox executor bridge"},
+		"cmd/workass/provider_chat_background.go:executeBackgroundAction:StopSpawnedWork":                         {1, "actor outbox executor bridge"},
+		"cmd/workass/provider_chat_background.go:applySpawnedWorkSnapshot:ChatObligationEvidence":                 {1, "actor projection enrichment"},
+		"cmd/workass/provider_chat_background.go:syncSpawnedWorkSnapshots:ListSpawnedWork":                        {1, "actor projection reconciliation"},
+		"cmd/workass/provider_chat_background.go:syncSpawnedWorkSnapshots:CommitActorSpawnedWorkProjection":       {1, "persist the exact actor-owned executor liveness projection"},
+		"cmd/workass/provider_chat_background.go:ReadBackground:ReadSpawnedWork":                                  {1, "bounded executor-cache enrichment"},
+		"cmd/workass/provider_chat_close.go:CloseSession:LiveSessionByID":                                         {1, "known session-id compatibility lookup before actor proof"},
+		"cmd/workass/provider_chat_runtime.go:newProviderChatRuntimeWithStartupMode:StoredProviderLaneSelections": {1, "read exact stored lane identity during actor schema conversion"},
+		"cmd/workass/provider_chat_runtime.go:configureCoordinator:ForgetChat":                                    {1, "actor cleanup executor receives the exact operation identity"},
+		"cmd/workass/provider_chat_runtime.go:configureCoordinator:RestoreChatCheckpoint":                         {1, "checkpoint executor receives the exact operation identity"},
+		"cmd/workass/provider_chat_runtime.go:publishLifecycleReceipt:ChatEnvGet":                                 {1, "lifecycle projection enrichment"},
+		"cmd/workass/provider_chat_runtime.go:restoreActorEnvironment:RestoreChatEnvReference":                    {1, "recovery attachment restore"},
+		"cmd/workass/provider_chat_runtime.go:restoreActorChatEnvReference:RestoreChatEnvReference":               {1, "recovery attachment restore"},
+		"cmd/workass/provider_chat_runtime.go:Select:LiveProviderLaneInfo":                                        {1, "provider attachment projection"},
+		"cmd/workass/provider_chat_runtime.go:observeChatEnv:ChatCheckpoints":                                     {1, "environment projection enrichment"},
+		"cmd/workass/provider_chat_runtime.go:observeChatEnv:ChatEnvReference":                                    {1, "environment projection enrichment"},
+		"cmd/workass/provider_chat_runtime.go:ChatDiff:ChatDiffFromCheckpoints":                                   {1, "checkpoint projection read"},
+		"cmd/workass/provider_chat_runtime.go:Fork:ResolveProviderLaneSelection":                                  {1, "known child selection before child actor attachment"},
+		"cmd/workass/provider_chat_runtime.go:attachForkChild:LiveProviderLaneInfo":                               {1, "fork attachment projection"},
+		"cmd/workass/provider_chat_runtime.go:resolveSelectionLocked:ResolveProviderLaneSelection":                {1, "actor selection command bridge"},
+		"cmd/workass/provider_chat_runtime.go:selectLocked:ReattachProviderLane":                                  {1, "actor selection effect bridge"},
+		"cmd/workass/provider_chat_runtime.go:admissionOutcomeLocked:ProviderLaneAdmission":                       {1, "actor admission receipt bridge"},
+		"cmd/workass/provider_chat_runtime.go:Steer:LiveSessionByID":                                              {1, "post-commit transient-session recheck"},
+		"cmd/workass/provider_chat_runtime.go:ResolvePermission:PermissionChatID":                                 {1, "permission request projection lookup"},
+		"cmd/workass/provider_chat_runtime.go:reconcileObligations:ChatObligationEvidence":                        {1, "actor obligation projection enrichment"},
+		"cmd/workass/stateless_mcp.go:ownerAuthorized:ValidateAgentOwner":                                         {1, "owner authorization after actor fencing"},
 	}
 }
 
@@ -749,88 +744,47 @@ func TestPhaseCChatIDStubIngressIsExplicit(t *testing.T) {
 	}
 }
 
-func TestPhaseCArchiveAuthorityCallSitesAreExplicit(t *testing.T) {
-	repoRoot, cmdFiles, _ := phaseCProductionFiles(t)
-	allowed := map[string]int{
-		"cmd/workass/session_store.go:migratePlanLatest:loadChatArchive":                1,
-		"cmd/workass/archive.go:rebuild:loadChatArchiveRecords":                         1,
-		"cmd/workass/archive.go:loadChatArchive:loadChatArchiveRecords":                 1,
-		"cmd/workass/archive.go:copyChatArchivePrefix:loadChatArchiveRecords":           1,
-		"cmd/workass/provider_chat_migration.go:completeLegacyMessages:loadChatArchive": 1,
+func TestPhaseCObsoleteTranscriptStoreIsAbsent(t *testing.T) {
+	_, _, allFiles := phaseCProductionFiles(t)
+	forbidden := []string{
+		"appendChatArchive", "loadChatArchive", "loadChatArchiveRecords",
+		"copyChatArchivePrefix", "normalizeArchivedSteerChronology",
 	}
-	legacyNames := map[string]struct{}{
-		"appendChatArchive": {}, "loadChatArchive": {}, "loadChatArchiveRecords": {}, "copyChatArchivePrefix": {},
-	}
-	counts := make(map[string]int)
 	var violations []string
-	for _, source := range cmdFiles {
-		ast.Inspect(source.file, func(node ast.Node) bool {
-			call, ok := node.(*ast.CallExpr)
-			if !ok {
-				return true
+	for _, source := range allFiles {
+		raw, err := os.ReadFile(source.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, token := range forbidden {
+			if strings.Contains(string(raw), token) {
+				violations = append(violations, fmt.Sprintf("obsolete transcript-store symbol %s remains in %s", token, source.path))
 			}
-			function, ok := call.Fun.(*ast.Ident)
-			if !ok {
-				return true
-			}
-			if _, legacy := legacyNames[function.Name]; !legacy {
-				return true
-			}
-			key := phaseCRelativePath(repoRoot, source.path) + ":" + phaseCFunctionName(source, call.Pos()) + ":" + function.Name
-			counts[key]++
-			max, expected := allowed[key]
-			if !expected {
-				violations = append(violations, fmt.Sprintf("unreviewed legacy archive authority call %s at %s", key, phaseCPosition(repoRoot, source, call.Pos())))
-			} else if counts[key] > max {
-				violations = append(violations, fmt.Sprintf("legacy archive authority call count exceeded for %s at %s", key, phaseCPosition(repoRoot, source, call.Pos())))
-			}
-			return true
-		})
+		}
 	}
 	if len(violations) > 0 {
 		sort.Strings(violations)
-		t.Fatalf("Phase C archive authority violation(s):\n%s", strings.Join(violations, "\n"))
+		t.Fatalf("obsolete transcript-store violation(s):\n%s", strings.Join(violations, "\n"))
 	}
 }
 
-func TestPhaseCLegacyExecutorCacheAPIIsMigrationOnly(t *testing.T) {
-	repoRoot, _, allFiles := phaseCProductionFiles(t)
-	const method = "LegacySpawnedWorkPairsForMigration"
-	declarations := 0
-	uses := 0
+func TestPhaseCObsoleteExecutorConversionAPIIsAbsent(t *testing.T) {
+	_, _, allFiles := phaseCProductionFiles(t)
 	var violations []string
 	for _, source := range allFiles {
-		for _, declaration := range source.file.Decls {
-			function, ok := declaration.(*ast.FuncDecl)
-			if ok && function.Name.Name == method && function.Recv != nil {
-				declarations++
+		raw, err := os.ReadFile(source.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, token := range []string{"SpawnedWorkPairsForMigration", "PruneSpawnedWorkForMigration"} {
+			if strings.Contains(string(raw), token) {
+				violations = append(violations, fmt.Sprintf("obsolete executor conversion API %s remains in %s", token, source.path))
 			}
 		}
-		ast.Inspect(source.file, func(node ast.Node) bool {
-			call, ok := node.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			selector, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || selector.Sel.Name != method {
-				return true
-			}
-			uses++
-			if phaseCRelativePath(repoRoot, source.path) != "cmd/workass/provider_chat_migration.go" {
-				violations = append(violations, fmt.Sprintf("%s may only be called from cmd/workass/provider_chat_migration.go (found at %s)", method, phaseCPosition(repoRoot, source, call.Pos())))
-			}
-			return true
-		})
-	}
-	if declarations != 1 {
-		violations = append(violations, fmt.Sprintf("expected exactly one %s declaration, found %d", method, declarations))
-	}
-	if uses != 1 {
-		violations = append(violations, fmt.Sprintf("expected exactly one migration use of %s, found %d", method, uses))
 	}
 	if len(violations) > 0 {
 		sort.Strings(violations)
-		t.Fatalf("migration-only executor-cache authority violation(s):\n%s", strings.Join(violations, "\n"))
+		t.Fatalf("obsolete executor conversion API violation(s):\n%s", strings.Join(violations, "\n"))
 	}
 }
 

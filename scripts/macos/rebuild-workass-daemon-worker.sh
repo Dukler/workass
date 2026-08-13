@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-[ "$#" -eq 15 ] || { echo "internal handoff worker: invalid arguments" >&2; exit 2; }
+[ "$#" -eq 14 ] || { echo "internal handoff worker: invalid arguments" >&2; exit 2; }
 repo_root="$1"
 candidate="$2"
 expected_pid="$3"
@@ -16,11 +16,19 @@ runtime_path="${11}"
 runtime_home="${12}"
 target="${13}"
 working_dir="${14}"
-migration_source="${15}"
 backup="$target.previous"
 lock_dir="$repo_root/.dev/rebuild/daemon-$label.lock"
 plist="$HOME/Library/LaunchAgents/$label.plist"
 old_plist_backup="$status_file.previous.plist"
+state_parent=$(dirname -- "$state_dir")
+status_name=$(basename -- "$status_file")
+case "$status_name" in
+  *[!A-Za-z0-9._-]*|'') echo "internal handoff worker: unsafe status filename" >&2; exit 2 ;;
+esac
+state_snapshot="$state_parent/.$status_name.state.previous"
+state_snapshot_staging="$state_snapshot.incomplete"
+state_failed="$state_parent/.$status_name.state.failed"
+state_snapshot_ready=0
 
 mkdir -p "$(dirname -- "$log_file")" "$(dirname -- "$target")"
 exec >>"$log_file" 2>&1
@@ -86,6 +94,41 @@ wait_client_ready() {
   return 1
 }
 
+snapshot_state() {
+  [ -d "$state_dir" ] || return 1
+  [ ! -e "$state_snapshot" ] || return 1
+  [ ! -e "$state_snapshot_staging" ] || return 1
+  [ ! -e "$state_failed" ] || return 1
+  if ! cp -pR "$state_dir" "$state_snapshot_staging"; then
+    rm -rf "$state_snapshot_staging"
+    return 1
+  fi
+  if ! mv "$state_snapshot_staging" "$state_snapshot"; then
+    rm -rf "$state_snapshot_staging"
+    return 1
+  fi
+  state_snapshot_ready=1
+}
+
+restore_state_snapshot() {
+  [ "$state_snapshot_ready" -eq 1 ] || return 0
+  [ -d "$state_snapshot" ] || return 1
+  [ ! -e "$state_failed" ] || return 1
+  state_was_present=0
+  if [ -e "$state_dir" ]; then
+    mv "$state_dir" "$state_failed" || return 1
+    state_was_present=1
+  fi
+  if mv "$state_snapshot" "$state_dir"; then
+    state_snapshot_ready=0
+    return 0
+  fi
+  if [ "$state_was_present" -eq 1 ] && [ ! -e "$state_dir" ]; then
+    mv "$state_failed" "$state_dir" || true
+  fi
+  return 1
+}
+
 install_launchd() {
   "$repo_root/scripts/macos/install-workass-launchd.sh" "$target" "$state_dir" "$port" "$bind" "$label" "$working_dir" "$runtime_path" "$runtime_home"
 }
@@ -100,6 +143,11 @@ rollback() {
     chmod 755 "$target"
   else
     rm -f "$target"
+  fi
+  if ! restore_state_snapshot; then
+    status failed "new daemon failed and state rollback failed: $reason"
+    echo "[handoff] state rollback failed"
+    exit 1
   fi
   rollback_catalog_stamp=''
   if [ "$view_port" -gt 0 ]; then rollback_catalog_stamp=$(catalog_stamp "$(client_status)"); fi
@@ -116,6 +164,7 @@ rollback() {
   fi
   if [ "$restored" -eq 1 ] && wait_health && wait_client_ready "$rollback_catalog_stamp"; then
     restored_pid=$(listener_pid)
+    if [ -e "$state_failed" ]; then rm -rf "$state_failed"; fi
     status rollback_healthy "new daemon failed; previous daemon restored as pid ${restored_pid:-unknown}"
     echo "[handoff] rollback healthy pid=${restored_pid:-unknown}"
     exit 1
@@ -184,7 +233,7 @@ if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
   echo "[handoff] replacing existing launchd daemon"
   launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || rollback "could not stop existing launchd daemon"
 else
-  echo "[handoff] stopping unmanaged daemon pid=$expected_pid"
+  echo "[handoff] stopping directly launched daemon pid=$expected_pid"
   kill -TERM "$expected_pid" 2>/dev/null || true
   attempts=60
   while [ "$attempts" -gt 0 ] && kill -0 "$expected_pid" 2>/dev/null; do
@@ -203,17 +252,10 @@ while [ "$attempts" -gt 0 ] && { [ -n "$(listener_pid)" ] || kill -0 "$expected_
 done
 [ -z "$(listener_pid)" ] || rollback "old daemon listener did not stop"
 
-if [ -n "$migration_source" ]; then
-  destination_root=$(dirname -- "$state_dir")
-  echo "[handoff] migrating canonical chats source=$migration_source destination=$destination_root"
-  migration_args=""
-  if [ -e "$state_dir" ]; then migration_args="--replace"; fi
-  # migration_args is intentionally one optional literal flag.
-  if ! node "$repo_root/scripts/migrate-workass-chats.mjs" \
-      --source-state "$migration_source" --dest-root "$destination_root" $migration_args; then
-    rollback "chat migration failed"
-  fi
-fi
+# A candidate may evolve durable storage before exposing health. The previous
+# binary and the previous state therefore form one rollback unit: restoring
+# only the executable can strand a valid profile on a schema it cannot read.
+snapshot_state || rollback "could not snapshot state before activation"
 
 install_launchd || rollback "launchd install failed"
 wait_health || rollback "health endpoint did not recover"
@@ -221,6 +263,14 @@ new_pid=$(listener_pid)
 [ -n "$new_pid" ] || rollback "health passed without a listener pid"
 [ "$new_pid" != "$expected_pid" ] || rollback "daemon pid did not change"
 wait_client_ready "$baseline_catalog_stamp" || rollback "Electron did not reconnect as controller with a populated provider catalog"
+
+if [ "$state_snapshot_ready" -eq 1 ]; then
+  if rm -rf "$state_snapshot"; then
+    state_snapshot_ready=0
+  else
+    echo "[handoff] warning: could not remove successful state snapshot $state_snapshot"
+  fi
+fi
 
 status healthy "daemon relaunched as pid $new_pid; Electron controller and provider catalog recovered"
 echo "[handoff] healthy new_pid=$new_pid"

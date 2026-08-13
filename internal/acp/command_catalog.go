@@ -40,7 +40,7 @@ func commandCatalogKey(tabID, chatID string) string {
 
 // clipCatalogString redacts first, then clips: redaction can lengthen a value
 // ("x=[redacted]"), so clipping after keeps the §2 limit honest, and a clip of
-// already-redacted text can never resurrect a secret. Clipping counts runes so
+// already-redacted text can never reintroduce a secret. Clipping counts runes so
 // a defensive re-clamp of a host-clipped multibyte string never splits one.
 func clipCatalogString(v any, limit int) string {
 	s := redactSensitiveText(asString(v))
@@ -194,7 +194,7 @@ func (m *Manager) verifyProviderLaneCommandCatalog(payload map[string]any) error
 	sessionID := strings.TrimSpace(asString(payload["sessionId"]))
 	lane := m.providerLaneForSession(sessionID)
 	if lane == nil {
-		return nil // Unmanaged manager fixture/ephemeral provider probe.
+		return nil // Standalone manager fixture or ephemeral provider probe.
 	}
 	if lane.identity.ChatID != strings.TrimSpace(asString(payload["chatId"])) || lane.owner.TabID != strings.TrimSpace(asString(payload["tabId"])) {
 		return errors.New("command catalog event changed its actor lane owner")

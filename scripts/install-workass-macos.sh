@@ -20,10 +20,9 @@ workass_load_profile prod
 candidate=''
 install_root=/Applications
 signing_migration=0
-broken_seal_repair=0
 
 usage() {
-  echo "usage: scripts/install-workass-macos.sh --candidate ABSOLUTE.app [--install-root DIR] [--migrate-signing-identity] [--repair-broken-installed-seal]"
+  echo "usage: scripts/install-workass-macos.sh --candidate ABSOLUTE.app [--install-root DIR] [--migrate-signing-identity]"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -31,7 +30,6 @@ while [ "$#" -gt 0 ]; do
     --candidate) [ "$#" -ge 2 ] || { echo "--candidate needs a value" >&2; exit 2; }; candidate="$2"; shift 2 ;;
     --install-root) [ "$#" -ge 2 ] || { echo "--install-root needs a value" >&2; exit 2; }; install_root="$2"; shift 2 ;;
     --migrate-signing-identity) signing_migration=1; shift ;;
-    --repair-broken-installed-seal) broken_seal_repair=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -70,19 +68,9 @@ workass_codesign_prepare
 workass_codesign_verify_stable "$candidate" true
 if [ -d "$installed" ] && ! workass_codesign_mutually_compatible "$installed" "$candidate"; then
   if ! codesign --verify --strict "$installed" >/dev/null 2>&1; then
-    installed_requirement=$(workass_codesign_requirement "$installed")
-    candidate_requirement=$(workass_codesign_requirement "$candidate")
-    if [ "$broken_seal_repair" -eq 1 ] &&
-      [ -n "$installed_requirement" ] &&
-      [ "$installed_requirement" = "$candidate_requirement" ] &&
-      codesign --verify --strict -R="$installed_requirement" "$candidate" >/dev/null 2>&1; then
-      echo "[install] broken installed seal repair authorized for the identical signing requirement"
-    else
-      echo "the installed Workass signature seal is broken" >&2
-      echo "refusing repair unless the candidate has the identical signing requirement and --repair-broken-installed-seal is explicit" >&2
-      exit 1
-    fi
-  elif [ "$signing_migration" -eq 1 ] && workass_codesign_is_legacy_adhoc "$installed"; then
+    echo "the installed Workass signature seal is broken; refusing to replace it automatically" >&2
+    exit 1
+  elif [ "$signing_migration" -eq 1 ] && workass_codesign_is_adhoc_cdhash "$installed"; then
     echo "[install] one-time signing identity migration authorized"
   else
     echo "installed and candidate Workass identities are incompatible" >&2

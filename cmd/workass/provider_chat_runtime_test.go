@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -547,348 +546,6 @@ func TestProjectActorChatRendersAmbiguousAdmissionAsBlockedInsteadOfRunning(t *t
 	}
 }
 
-func TestProviderChatRuntimeMigratesLegacyTranscriptBeforeOpeningLane(t *testing.T) {
-	root := repoRoot(t)
-	stateDir := t.TempDir()
-	const tabID, chatID = "legacy-migration-tab", "legacy-migration-chat"
-	snapshot := sessionMirrorFixture(tabID, chatID, "old question")
-	chat := chatFromSnapshot(snapshot, tabID)
-	chat["title"] = "Legacy actor migration"
-	chat["cwd"] = root
-	chat["currentModelId"] = "mock-deterministic"
-	chat["currentModeId"] = "ask"
-	chat["draft"] = "unsent legacy draft"
-	chat["messages"] = []any{
-		map[string]any{"id": "legacy-user", "role": "user", "content": "old question", "status": "done", "at": "2026-08-11T00:00:00Z", "events": []any{}},
-		map[string]any{"id": "legacy-assistant", "role": "assistant", "content": "old commentary", "result": "old answer", "status": "done", "at": "2026-08-11T00:00:01Z", "events": []any{
-			map[string]any{"key": "tool-1", "at": 3, "kind": "tool", "id": "tool", "title": "Read", "status": "done", "output": "ok"},
-		}},
-	}
-	writeLegacySessionSnapshot(t, stateDir, snapshot)
-	store := sharedSessionStore(stateDir)
-	manager := acp.NewManager(acp.Options{
-		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
-		Provider: acp.ProviderConfig{
-			ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
-			CWD: root, Enabled: true, Env: map[string]string{"WORKASS_MOCK_ACP_DELAY_MS": "0"},
-		},
-		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
-	})
-	t.Cleanup(func() { manager.Reset() })
-	runtime := newProviderChatRuntime(manager, store, stateDir)
-	actor, err := runtime.actor(chatID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state := actor.engine.Snapshot()
-	if !state.Migration.Complete || state.LedgerHead() != 2 || state.Presentation.Draft != "unsent legacy draft" || len(state.Lanes) != 0 {
-		t.Fatalf("legacy chat did not migrate before provider selection: %#v", state)
-	}
-	if !state.Ledger[0].Legacy || state.Ledger[0].LaneID != "" || state.Ledger[1].ProviderID != "" {
-		t.Fatalf("migration guessed historical provider ownership: %#v", state.Ledger)
-	}
-	if state.Ledger[1].Result != "old answer" || len(state.Ledger[1].Timeline) != 1 || state.Ledger[1].Timeline[0].Tool == nil || state.Ledger[1].Timeline[0].Tool.Output != "ok" {
-		t.Fatalf("rich legacy row was not normalized into actor state: %#v", state.Ledger[1])
-	}
-	rootProjection, err := runtime.ProjectSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var projectedChat map[string]any
-	for _, raw := range anySlice(rootProjection["chats"]) {
-		candidate := mapFromAnyMain(raw)
-		if fieldString(candidate, "chatId") == chatID {
-			projectedChat = candidate
-			break
-		}
-	}
-	projectedMessages := messageSlice(projectedChat)
-	if fieldString(projectedChat, "draft") != "unsent legacy draft" || len(projectedMessages) != 2 {
-		t.Fatalf("actor snapshot parity failed: %#v", projectedChat)
-	}
-	projectedAssistant := mapFromAnyMain(projectedMessages[1])
-	if fieldString(projectedAssistant, "result") != "old answer" || len(anySlice(projectedAssistant["events"])) != 1 {
-		t.Fatalf("actor projector lost rich assistant state: %#v", projectedAssistant)
-	}
-	projectedChat["title"] = "Renamed by renderer"
-	projectedChat["draft"] = "new draft"
-	projectedChat["messages"] = []any{
-		map[string]any{"id": "forged", "role": "user", "content": "overwrite actor history", "status": "done", "events": []any{}},
-	}
-	projectedChat["queue"] = []any{map[string]any{"id": "queued-1", "text": "follow up", "delivery": "queue"}}
-	rootProjection[globalPresentationOperationField] = "global-test-save"
-	if saved, err := runtime.ApplyRendererSnapshot(rootProjection); err != nil || !saved {
-		t.Fatalf("apply renderer global snapshot: saved=%v err=%v", saved, err)
-	}
-	if _, err := runtime.SavePresentation(tabID, chatID, "presentation-test", 0, map[string]any{
-		"tabId": tabID, "chatId": chatID, "operationId": "presentation-test", "expectedRevision": 0,
-		"title": "Renamed by renderer", "titleLocked": true, "group": nil, "draft": "new draft",
-		"unread": false, "settled": "", "pane": nil,
-	}); err != nil {
-		t.Fatalf("apply actor presentation command: %v", err)
-	}
-	afterSave := actor.engine.Snapshot()
-	if afterSave.Presentation.Title != "Renamed by renderer" || afterSave.Presentation.Draft != "new draft" || len(afterSave.StagedQueue) != 0 {
-		t.Fatalf("renderer presentation command was not committed: %#v", afterSave)
-	}
-	if afterSave.LedgerHead() != 2 || afterSave.Ledger[0].MessageID != "legacy-user" || afterSave.Presentation.AgentQueueRevision != 0 {
-		t.Fatalf("renderer save overwrote semantic state or missed queue CAS: %#v", afterSave)
-	}
-	authoritative, err := runtime.ProjectSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, raw := range anySlice(authoritative["chats"]) {
-		candidate := mapFromAnyMain(raw)
-		if fieldString(candidate, "chatId") != chatID {
-			continue
-		}
-		if got := messageSlice(candidate); len(got) != 2 || fieldString(mapFromAnyMain(got[0]), "id") != "legacy-user" {
-			t.Fatalf("forged renderer transcript escaped projection boundary: %#v", candidate)
-		}
-		if queue := anySlice(candidate["queue"]); len(queue) != 0 {
-			t.Fatalf("forged renderer queue escaped the presentation-only save boundary: %#v", candidate)
-		}
-	}
-	if _, err := runtime.Select(context.Background(), acp.SessionOptions{TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: root}); err == nil || !strings.Contains(err.Error(), "blocked") {
-		t.Fatalf("nonempty migrated chat joined provider without verified import: %v", err)
-	}
-}
-
-func TestProviderChatRuntimeMigratesExactLegacyBindingAndContinuesSameThread(t *testing.T) {
-	root := repoRoot(t)
-	stateDir := t.TempDir()
-	const tabID, chatID = "legacy-exact-tab", "legacy-exact-chat"
-	const nativeSessionID = "mock-session-before-actor-cutover"
-	legacyMessages := []map[string]any{
-		{"id": "legacy-exact-user", "role": "user", "content": "question already seen by native thread", "status": "done", "at": "2026-08-11T00:00:00Z", "events": []any{}},
-		{"id": "legacy-exact-assistant", "role": "assistant", "content": "answer already produced by native thread", "result": "answer already produced by native thread", "status": "done", "at": "2026-08-11T00:00:01Z", "events": []any{}},
-	}
-	snapshot := sessionMirrorFixture(tabID, chatID, "question already seen by native thread")
-	legacyChat := chatFromSnapshot(snapshot, tabID)
-	legacyChat["title"] = "Legacy exact lane"
-	legacyChat["messages"] = []any{legacyMessages[0], legacyMessages[1]}
-	legacyChat["sessionId"] = nativeSessionID
-	legacyChat["sessionProviderId"] = "mock"
-	legacyChat["providerId"] = "mock"
-	legacyChat["cwd"] = root
-	legacyChat["currentModelId"] = "mock-deterministic"
-	legacyChat["currentModeId"] = "ask"
-	writeLegacySessionSnapshot(t, stateDir, snapshot)
-	store := sharedSessionStore(stateDir)
-	writeJSONTestFile(t, filepath.Join(stateDir, "native-sessions.json"), map[string]any{
-		"v": 2,
-		"bindings": []any{map[string]any{
-			"tabId": tabID, "chatId": chatID, "providerId": "mock", "sessionId": nativeSessionID,
-			"cwd": root, "modelId": "mock-deterministic", "modeId": "ask",
-			// A selected exact binding from the oldest ledger schema may have no
-			// cursor hash. The cutover must still continue that exact thread; it
-			// must not reinterpret the same-chat history as a cross-provider import.
-			"syncedMessages": 0,
-			"generation":     1, "resumeSafe": true,
-		}},
-	})
-	providerState := filepath.Join(stateDir, "mock-native-sessions.json")
-	writeJSONTestFile(t, providerState, map[string]any{
-		"v": 1,
-		"sessions": []any{map[string]any{
-			"id": nativeSessionID, "cwd": root, "model": "mock-deterministic", "mode": "ask", "turn": 1,
-			"operations": map[string]any{}, "contextImports": map[string]any{},
-		}},
-	})
-	manager := acp.NewManager(acp.Options{
-		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
-		Provider: acp.ProviderConfig{
-			ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
-			CWD: root, Enabled: true, Env: map[string]string{
-				"WORKASS_MOCK_ACP_DELAY_MS": "0", "WORKASS_MOCK_ACP_SESSION_STORE": providerState,
-			},
-		},
-		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
-	})
-	t.Cleanup(func() { manager.Reset() })
-	runtime := newProviderChatRuntime(manager, store, stateDir)
-	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
-	state, ok := runtime.Snapshot(chatID)
-	if !ok || state.LedgerHead() != 2 || len(state.Lanes) != 1 {
-		t.Fatalf("legacy exact lane was not migrated: ok=%v state=%#v", ok, state)
-	}
-	lane := state.Lanes[state.ActiveLaneID]
-	if lane.Thread.RootID != nativeSessionID || lane.CoveredThrough != state.LedgerHead() || lane.Phase != chat.LaneDetached {
-		t.Fatalf("legacy exact lane lost native coverage: %#v", lane)
-	}
-	resumed, err := runtime.Select(context.Background(), acp.SessionOptions{
-		TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: root,
-	})
-	if err != nil {
-		t.Fatalf("resume exact migrated lane: %v", err)
-	}
-	if resumed.SessionID != nativeSessionID {
-		t.Fatalf("migration replaced native thread: got %q want %q", resumed.SessionID, nativeSessionID)
-	}
-	if _, err := runtime.Start(context.Background(), map[string]any{
-		"kind": "app-chat", "title": "Legacy exact lane", "tabId": tabID, "chatId": chatID,
-		"providerId": "mock", "sessionId": nativeSessionID, "cwd": root, "prompt": "continue after actor cutover",
-		"userMessageId": "post-cutover-user", "assistantMessageId": "post-cutover-assistant",
-	}, "human"); err != nil {
-		t.Fatalf("continue exact migrated lane: %v", err)
-	}
-	waitProviderChatLedger(t, runtime, chatID, 4, 5*time.Second)
-	var providerDisk struct {
-		Sessions []struct {
-			ID   string `json:"id"`
-			Turn int    `json:"turn"`
-		} `json:"sessions"`
-	}
-	readJSONTestFile(t, providerState, &providerDisk)
-	if len(providerDisk.Sessions) != 1 || providerDisk.Sessions[0].ID != nativeSessionID || providerDisk.Sessions[0].Turn != 2 {
-		t.Fatalf("cutover created or changed provider thread: %#v", providerDisk.Sessions)
-	}
-}
-
-func TestLegacyPendingPermissionRehydratesAcrossCutoverAndRestart(t *testing.T) {
-	root := repoRoot(t)
-	stateDir := t.TempDir()
-	const tabID, chatID = "legacy-permission-tab", "legacy-permission-chat"
-	const nativeSessionID = "mock-session-with-legacy-permission"
-	const permissionID = "legacy-permission-request"
-	const turnID = "legacy-permission-turn"
-
-	snapshot := sessionMirrorFixture(tabID, chatID, "continue the existing thread")
-	legacyChat := chatFromSnapshot(snapshot, tabID)
-	legacyChat["title"] = "Legacy pending permission"
-	legacyChat["sessionId"] = nativeSessionID
-	legacyChat["sessionProviderId"] = "mock"
-	legacyChat["providerId"] = "mock"
-	legacyChat["cwd"] = root
-	legacyChat["currentModelId"] = "mock-deterministic"
-	legacyChat["currentModeId"] = "ask"
-	legacyChat["queue"] = []any{}
-	legacyChat["messages"] = []any{
-		map[string]any{
-			"id": "legacy-permission-user", "role": "user", "content": "continue the existing thread",
-			"status": "done", "at": "2026-08-11T00:00:00Z", "events": []any{},
-		},
-		map[string]any{
-			"id": "legacy-permission-assistant", "role": "assistant", "content": "waiting for approval",
-			"result": "waiting for approval", "status": "running", "jobId": turnID,
-			"at": "2026-08-11T00:00:01Z", "events": []any{},
-			"permission": map[string]any{
-				"id": permissionID, "title": "Choose an action", "kind": "question",
-				"options": []any{map[string]any{"optionId": "allow", "name": "Allow", "kind": "allow"}},
-				"question": map[string]any{
-					"question": "Continue?", "header": "Approval", "multiSelect": false,
-					"options": []any{map[string]any{"label": "Allow", "description": "Continue the native turn"}},
-				},
-			},
-		},
-	}
-	writeLegacySessionSnapshot(t, stateDir, snapshot)
-	writeJSONTestFile(t, filepath.Join(stateDir, "native-sessions.json"), map[string]any{
-		"v": 2,
-		"bindings": []any{map[string]any{
-			"tabId": tabID, "chatId": chatID, "providerId": "mock", "sessionId": nativeSessionID,
-			"cwd": root, "modelId": "mock-deterministic", "modeId": "ask",
-			"syncedMessages": 0, "generation": 1, "resumeSafe": true,
-		}},
-	})
-	providerState := filepath.Join(stateDir, "mock-native-sessions.json")
-	writeJSONTestFile(t, providerState, map[string]any{
-		"v": 1,
-		"sessions": []any{map[string]any{
-			"id": nativeSessionID, "cwd": root, "model": "mock-deterministic", "mode": "ask", "turn": 1,
-			"operations": map[string]any{}, "contextImports": map[string]any{},
-		}},
-	})
-
-	newManager := func() *acp.Manager {
-		return acp.NewManager(acp.Options{
-			RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
-			Provider: acp.ProviderConfig{
-				ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
-				CWD: root, Enabled: true, Env: map[string]string{
-					"WORKASS_MOCK_ACP_DELAY_MS": "0", "WORKASS_MOCK_ACP_SESSION_STORE": providerState,
-				},
-			},
-			DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
-		})
-	}
-	boot := func() (*providerChatRuntime, *acp.Manager) {
-		manager := newManager()
-		runtime := newProviderChatRuntime(manager, newSessionStore(filepath.Join(stateDir, sessionStateFilename)), stateDir)
-		if err := runtime.StartupError(); err != nil {
-			manager.Reset()
-			t.Fatalf("legacy permission cutover boot: %v", err)
-		}
-		return runtime, manager
-	}
-	assertPending := func(runtime *providerChatRuntime) {
-		t.Helper()
-		pending, err := runtime.PendingPermissions()
-		if err != nil {
-			t.Fatalf("read pending permission: %v", err)
-		}
-		if len(pending) != 1 {
-			t.Fatalf("pending permissions after actor boot = %#v", pending)
-		}
-		projected := mapFromAnyMain(pending[0])
-		if fieldString(projected, "id") != permissionID || fieldString(projected, "jobId") != turnID ||
-			fieldString(projected, "tabId") != tabID || fieldString(projected, "chatId") != chatID ||
-			fieldString(projected, "sessionId") != nativeSessionID || fieldString(projected, "title") != "Choose an action" ||
-			fieldString(projected, "kind") != "question" || len(anySlice(projected["options"])) != 1 {
-			t.Fatalf("rehydrated permission projection = %#v", projected)
-		}
-		question := mapFromAnyMain(projected["question"])
-		if fieldString(question, "question") != "Continue?" || fieldString(question, "header") != "Approval" {
-			t.Fatalf("rehydrated permission question = %#v", question)
-		}
-		state, ok := runtime.Snapshot(chatID)
-		if !ok {
-			t.Fatal("migrated permission actor is missing")
-		}
-		permission, ok := state.Permissions[permissionID]
-		if !ok || permission.Owner.OperationID != "legacy-permission-user" || permission.Owner.TurnID != turnID {
-			t.Fatalf("durable permission owner = %#v state=%#v", permission, state)
-		}
-	}
-
-	first, firstManager := boot()
-	assertPending(first)
-	if err := first.Close(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	firstManager.Reset()
-
-	second, secondManager := boot()
-	t.Cleanup(func() {
-		_ = second.Close(context.Background())
-		secondManager.Reset()
-	})
-	assertPending(second)
-}
-
-func writeJSONTestFile(t *testing.T, path string, value any) {
-	t.Helper()
-	raw, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func readJSONTestFile(t *testing.T, path string, target any) {
-	t.Helper()
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(raw, target); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestProviderChatRuntimeResumesExactLaneAcrossActorAndTabRestart(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()
@@ -1008,7 +665,122 @@ func TestProviderChatRuntimeResumesExactLaneAcrossActorAndTabRestart(t *testing.
 	}
 }
 
-func TestActorNativeChatProjectsAfterRestartWithoutLegacyMirror(t *testing.T) {
+func TestV19ActorAndV6LaneStoreUpgradeResumeTheSameNativeThread(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := t.TempDir()
+	tracePath := filepath.Join(stateDir, "provider-trace.log")
+	providerState := filepath.Join(stateDir, "provider-native.json")
+	const tabID, chatID = "upgrade-tab", "upgrade-chat"
+	newManager := func() *acp.Manager {
+		return acp.NewManager(acp.Options{
+			RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+			Provider: acp.ProviderConfig{
+				ID: "mock", Name: "Mock Provider", Command: "node",
+				Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root,
+				Env: map[string]string{
+					"WORKASS_MOCK_ACP_DELAY_MS": "0", "WORKASS_MOCK_ACP_SESSION_STORE": providerState,
+					"WORKASS_MOCK_ACP_TRACE_FILE": tracePath,
+				},
+				Enabled: true,
+			},
+			DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+		})
+	}
+
+	firstManager := newManager()
+	firstRuntime := newProviderChatRuntime(firstManager, sharedSessionStore(stateDir), stateDir)
+	if _, err := firstRuntime.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "create-upgrade-chat",
+		"title": "Upgrade exact lane", "titleLocked": true, "cwd": root,
+		"providerId": "mock", "currentModelId": "mock-deterministic", "currentModeId": "ask",
+	}); err != nil {
+		firstManager.Reset()
+		t.Fatal(err)
+	}
+	created, err := firstRuntime.Select(context.Background(), acp.SessionOptions{TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: root})
+	if err != nil {
+		firstManager.Reset()
+		t.Fatal(err)
+	}
+	if err := firstRuntime.Close(context.Background()); err != nil && !strings.Contains(err.Error(), "already unavailable") {
+		firstManager.Reset()
+		t.Fatal(err)
+	}
+	firstManager.Reset()
+
+	actorPath := providerChatStatePath(stateDir, chatID)
+	actorRaw, err := os.ReadFile(actorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actorDisk map[string]any
+	if err := json.Unmarshal(actorRaw, &actorDisk); err != nil {
+		t.Fatal(err)
+	}
+	actorDisk["v"] = float64(19)
+	actorState := actorDisk["state"].(map[string]any)
+	actorState["Migration"] = map[string]any{"Version": 2, "Digest": "v19-cutover", "Complete": true}
+	for _, rawRow := range actorState["Ledger"].([]any) {
+		rawRow.(map[string]any)["Legacy"] = true
+	}
+	actorRaw, err = json.Marshal(actorDisk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(actorPath, actorRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	lanePath := filepath.Join(stateDir, "provider-lanes.json")
+	laneRaw, err := os.ReadFile(lanePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var laneDisk map[string]any
+	if err := json.Unmarshal(laneRaw, &laneDisk); err != nil {
+		t.Fatal(err)
+	}
+	laneDisk["v"] = float64(6)
+	for _, rawBinding := range laneDisk["bindings"].([]any) {
+		binding := rawBinding.(map[string]any)
+		binding["syncedMessages"] = float64(2)
+		binding["historyHash"] = "renderer-derived"
+		binding["historyVersion"] = float64(2)
+		binding["resumeSafe"] = true
+	}
+	laneRaw, err = json.Marshal(laneDisk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lanePath, laneRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	secondManager := newManager()
+	t.Cleanup(func() { secondManager.Reset() })
+	secondRuntime := newProviderChatRuntime(secondManager, sharedSessionStore(stateDir), stateDir)
+	t.Cleanup(func() { _ = secondRuntime.Close(context.Background()) })
+	if err := secondRuntime.StartupError(); err != nil {
+		t.Fatalf("upgrade startup: %v", err)
+	}
+	resumed, err := secondRuntime.Select(context.Background(), acp.SessionOptions{TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: root})
+	if err != nil {
+		t.Fatalf("resume upgraded lane: %v", err)
+	}
+	if resumed.SessionID != created.SessionID {
+		t.Fatalf("upgrade changed provider-native thread: created=%q resumed=%q", created.SessionID, resumed.SessionID)
+	}
+	traceRaw, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := string(traceRaw)
+	if strings.Count(trace, "session/resume") != 1 || strings.Contains(trace, "session/load") || strings.Contains(trace, "Previous conversation") {
+		t.Fatalf("upgraded chat did not use exact resume without replay: %s", trace)
+	}
+}
+
+func TestActorNativeChatProjectsAfterRestartFromCanonicalStorage(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()
 	providerState := filepath.Join(stateDir, "provider-native.json")
@@ -1065,7 +837,7 @@ func TestActorNativeChatProjectsAfterRestartWithoutLegacyMirror(t *testing.T) {
 		t.Fatalf("actor-native projection = %#v", chatRow)
 	}
 	if cached := store.GlobalSnapshot(); len(anySlice(cached["chats"])) != 0 {
-		t.Fatalf("read-only actor projection recreated legacy chat rows: %#v", cached)
+		t.Fatalf("actor projection wrote chat rows into the global session store: %#v", cached)
 	}
 }
 
@@ -1102,7 +874,7 @@ func TestActorDeleteCrashRecoveryCompletesNativeCleanupFromTombstone(t *testing.
 		firstManager.Reset()
 		t.Fatalf("create exact lane: info=%#v err=%v", info, err)
 	}
-	if bindings, err := firstManager.LegacyProviderLaneMigrations("delete-chat", nil); err != nil || len(bindings) != 1 {
+	if bindings, err := firstManager.StoredProviderLaneSelections("delete-chat"); err != nil || len(bindings) != 1 {
 		firstManager.Reset()
 		t.Fatalf("native binding before tombstone = %#v err=%v", bindings, err)
 	}
@@ -1130,7 +902,7 @@ func TestActorDeleteCrashRecoveryCompletesNativeCleanupFromTombstone(t *testing.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		state, ok := second.Snapshot("delete-chat")
-		bindings, bindingErr := secondManager.LegacyProviderLaneMigrations("delete-chat", nil)
+		bindings, bindingErr := secondManager.StoredProviderLaneSelections("delete-chat")
 		if bindingErr == nil && len(bindings) == 0 && ok && len(state.Outbox) == 1 && state.Outbox[0].Status == chat.OutboxCompleted {
 			if !state.Deleted {
 				t.Fatal("cleanup receipt cleared the actor tombstone")
@@ -1140,178 +912,8 @@ func TestActorDeleteCrashRecoveryCompletesNativeCleanupFromTombstone(t *testing.
 		time.Sleep(10 * time.Millisecond)
 	}
 	state, _ := second.Snapshot("delete-chat")
-	bindings, bindingErr := secondManager.LegacyProviderLaneMigrations("delete-chat", nil)
+	bindings, bindingErr := secondManager.StoredProviderLaneSelections("delete-chat")
 	t.Fatalf("recovered tombstone did not finish cleanup: state=%#v bindings=%#v err=%v", state, bindings, bindingErr)
-}
-
-func TestActorCutoverRebuildsFromActorsWhenLegacyCacheIsMissingCorruptOrExtra(t *testing.T) {
-	for _, scenario := range []string{"missing", "corrupt", "extra"} {
-		t.Run(scenario, func(t *testing.T) {
-			root := repoRoot(t)
-			stateDir := t.TempDir()
-			newManager := func() *acp.Manager {
-				return acp.NewManager(acp.Options{
-					RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
-					Provider: acp.ProviderConfig{
-						ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
-						CWD: root, Enabled: true,
-					},
-					DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
-				})
-			}
-			firstStore := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
-			firstManager := newManager()
-			first := newProviderChatRuntime(firstManager, firstStore, stateDir)
-			if _, err := first.actorForNewChat("durable-actor-chat", chat.PresentationState{
-				TabID: "durable-actor-tab", Title: "Actor authority", ProviderID: "mock",
-			}); err != nil {
-				t.Fatal(err)
-			}
-			if err := first.Close(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			firstManager.Reset()
-
-			cachePath := filepath.Join(stateDir, sessionStateFilename)
-			switch scenario {
-			case "missing":
-				if err := os.Remove(cachePath); err != nil {
-					t.Fatal(err)
-				}
-			case "corrupt":
-				if err := os.WriteFile(cachePath, []byte("{"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			case "extra":
-				writeJSONTestFile(t, cachePath, map[string]any{
-					"v": 1, "activeId": "stale-tab", "seq": 99,
-					"chats": []any{map[string]any{
-						"id": "stale-tab", "chatId": "stale-chat", "title": "must not resurrect",
-						"messages": []any{map[string]any{"id": "forged", "role": "user", "content": "legacy cache"}},
-					}},
-				})
-			}
-
-			secondStore := newSessionStore(cachePath)
-			secondManager := newManager()
-			t.Cleanup(func() { secondManager.Reset() })
-			second := newProviderChatRuntime(secondManager, secondStore, stateDir)
-			t.Cleanup(func() { _ = second.Close(context.Background()) })
-			projected, err := second.ProjectSession()
-			if err != nil {
-				t.Fatalf("project actor state with %s legacy cache: %v", scenario, err)
-			}
-			rows := anySlice(projected["chats"])
-			if len(rows) != 1 || fieldString(mapFromAnyMain(rows[0]), "chatId") != "durable-actor-chat" {
-				t.Fatalf("%s cache influenced actor projection: %#v", scenario, rows)
-			}
-			if cached := secondStore.GlobalSnapshot(); len(anySlice(cached["chats"])) != 0 {
-				t.Fatalf("%s cache survived actor cutover: %#v", scenario, cached)
-			}
-			if err := secondStore.LoadError(); err != nil {
-				t.Fatalf("%s obsolete cache still blocks actor runtime: %v", scenario, err)
-			}
-		})
-	}
-}
-
-func TestActorCutoverReceiptFailsClosedWhenReferencedActorIsMissing(t *testing.T) {
-	root := repoRoot(t)
-	stateDir := t.TempDir()
-	if err := writeLegacyChatCutoverReceipt(filepath.Join(stateDir, legacyChatCutoverReceiptFilename), legacyChatCutoverReceipt{
-		Version: legacyChatCutoverVersion, Complete: true, CompletedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		ChatIDs: []string{"missing-actor-chat"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
-	manager := acp.NewManager(acp.Options{
-		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
-		Provider:          acp.ProviderConfig{ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true},
-		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
-	})
-	t.Cleanup(func() { manager.Reset() })
-	runtime := newProviderChatRuntime(manager, store, stateDir)
-	if _, err := runtime.ProjectSession(); err == nil || !strings.Contains(err.Error(), "missing actor") {
-		t.Fatalf("missing receipt actor did not fail closed: %v", err)
-	}
-}
-
-func TestInterruptedV2ActorMigrationUpgradesObligationExactlyOnceAcrossBoots(t *testing.T) {
-	stateDir := t.TempDir()
-	legacyChat := map[string]any{
-		"id": "v2-tab", "chatId": "v2-chat", "title": "Interrupted v2",
-		"messages": []any{map[string]any{"id": "v2-user", "role": "user", "content": "keep me", "status": "done"}},
-		"queue":    []any{},
-	}
-	legacyRoot := map[string]any{"activeId": "v2-tab", "chats": []any{legacyChat}}
-	raw, err := json.Marshal(legacyRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stateDir, sessionStateFilename), raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(stateDir, "obligations"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	legacyObligation := `{"open":[{"tabId":"v2-tab","chatId":"v2-chat","state":"needs_input","source":"declared","openedAt":"2026-08-11T10:00:00Z","updatedAt":"2026-08-11T10:00:00Z"}]}`
-	if err := os.WriteFile(filepath.Join(stateDir, "obligations", "v2-tab.json"), []byte(legacyObligation), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	preCutoverStore := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
-	command, _, err := buildLegacyChatMigration(legacyChat, stateDir, preCutoverStore)
-	if err != nil {
-		t.Fatal(err)
-	}
-	engine, err := chat.NewDurableEngine("v2-chat", chat.FileStore{Path: providerChatStatePath(stateDir, "v2-chat")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := engine.Apply(command); err != nil {
-		t.Fatal(err)
-	}
-	if engine.Snapshot().Migration.LegacyObligationMigrated {
-		t.Fatal("fixture did not stop at the intended pre-obligation crash boundary")
-	}
-
-	boot := func() (*providerChatRuntime, *acp.Manager) {
-		manager := acp.NewManager(acp.Options{StateDir: stateDir})
-		store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
-		runtime := newProviderChatRuntime(manager, store, stateDir)
-		if err := runtime.StartupError(); err != nil {
-			manager.Reset()
-			t.Fatalf("actor cutover boot: %v", err)
-		}
-		return runtime, manager
-	}
-	first, firstManager := boot()
-	state, err := first.ReadChat("v2-tab", "v2-chat", 20, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fieldString(mapFromAnyMain(state["obligation"]), "state") != "needs_input" {
-		obligation, obligationErr := first.Obligation("v2-tab", "v2-chat")
-		if obligationErr != nil || obligation == nil || obligation.State != "needs_input" {
-			t.Fatalf("migrated obligation = %#v err=%v", obligation, obligationErr)
-		}
-	}
-	if err := first.Close(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	firstManager.Reset()
-	second, secondManager := boot()
-	t.Cleanup(func() {
-		_ = second.Close(context.Background())
-		secondManager.Reset()
-	})
-	obligation, err := second.Obligation("v2-tab", "v2-chat")
-	if err != nil || obligation == nil || obligation.State != "needs_input" {
-		t.Fatalf("second boot obligation = %#v err=%v", obligation, err)
-	}
-	if _, err := os.Stat(filepath.Join(stateDir, "obligations")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("legacy obligation store survived v5 receipt: %v", err)
-	}
 }
 
 func TestProviderChatRuntimeSwitchesAndReturnsThroughVerifiedContextImport(t *testing.T) {
@@ -1929,6 +1531,18 @@ func countSteerOwners(state chat.State, operationID string) int {
 	}
 	if state.PendingSteer != nil && string(state.PendingSteer.OperationID) == operationID {
 		count++
+	}
+	// Queue promotion moves ownership into the transcript atomically. A fast
+	// provider may finish before this race oracle snapshots the actor, so count
+	// the committed turn as one logical owner only after every transient owner
+	// has disappeared (the user and assistant ledger rows are one turn).
+	if count == 0 {
+		for _, event := range state.Ledger {
+			if string(event.OperationID) == operationID {
+				count = 1
+				break
+			}
+		}
 	}
 	return count
 }

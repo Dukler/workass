@@ -59,24 +59,6 @@ daemon, ACP adapters, and pinned portable Node runtime; on a clean Mac, first
 launch installs the daemon as a user LaunchAgent. See
 `docs/DISTRIBUTION.md`.
 
-## Chat-only migration
-
-`scripts/migrate-workass-chats.mjs` copies only canonical chat data:
-
-- `session-state.json`
-- `native-sessions.json`
-- `chat-archive/*.jsonl`
-- checkpoints whose filenames match authoritative conversation IDs
-
-It excludes control files, browser state, devices, logs, caches, temporary
-snapshots, and test checkpoints. Before committing the destination atomically,
-it rejects duplicate tab/conversation IDs, cross-chat message IDs, mismatched
-native ownership, and multiply-owned provider session IDs. Its manifest hashes
-native session IDs rather than logging them.
-
-For the live production cutover, migration runs only after the old daemon has
-stopped. The repository state remains untouched as the rollback source.
-
 ## Rebuild law
 
 Rebuild commands accept an explicit profile:
@@ -86,7 +68,6 @@ scripts/rebuild-workass-macos.sh electron --profile dev
 scripts/rebuild-workass-macos.sh daemon --profile prod
 ```
 
-A production daemon handoff additionally targets the installed runtime and may
-receive `--migrate-from` for the one-time chat cutover. Daemon replacement is a
-terminal operation because it terminates daemon-owned ACP processes. Dev
-Electron rebuilds never signal the production daemon.
+A production daemon handoff additionally targets the installed runtime. Daemon
+replacement is a terminal operation because it terminates daemon-owned ACP
+processes. Dev Electron rebuilds never signal the production daemon.

@@ -6,31 +6,20 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
-func TestWindowsCutoverReceiptsCommitWithoutDirectorySyncFailure(t *testing.T) {
+func TestWindowsGlobalPresentationCommitWithoutDirectorySyncFailure(t *testing.T) {
 	stateDir := t.TempDir()
-	cutoverPath := filepath.Join(stateDir, legacyChatCutoverReceiptFilename)
-	receipt := legacyChatCutoverReceipt{
-		Version: legacyChatCutoverVersion, Complete: true,
-		CompletedAt: time.Now().UTC().Format(time.RFC3339Nano), ChatIDs: []string{},
+	path := filepath.Join(stateDir, sessionStateFilename)
+	store := newSessionStore(path)
+	if _, err := store.SaveActorGlobalSnapshot(map[string]any{
+		globalPresentationOperationField: "windows-global-save",
+		globalPresentationRevisionField:  0,
+		"theme":                          "dark",
+	}); err != nil {
+		t.Fatalf("write Windows global presentation state: %v", err)
 	}
-	if err := writeLegacyChatCutoverReceipt(cutoverPath, receipt); err != nil {
-		t.Fatalf("write Windows cutover receipt: %v", err)
-	}
-	if _, err := os.Stat(cutoverPath); err != nil {
-		t.Fatalf("Windows cutover receipt is missing: %v", err)
-	}
-	cleanupPath := filepath.Join(stateDir, legacyChatCleanupReceiptFilename)
-	cleanup := legacyChatCleanupReceipt{
-		Version: legacyChatCleanupVersion, Complete: true,
-		CompletedAt: time.Now().UTC().Format(time.RFC3339Nano), CutoverDigest: legacyChatCutoverDigest(receipt),
-	}
-	if err := writeLegacyChatCleanupReceipt(cleanupPath, cleanup); err != nil {
-		t.Fatalf("write Windows cleanup receipt: %v", err)
-	}
-	if _, err := os.Stat(cleanupPath); err != nil {
-		t.Fatalf("Windows cleanup receipt is missing: %v", err)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("Windows global presentation state is missing: %v", err)
 	}
 }

@@ -66,7 +66,6 @@ func main() {
 	stateDirFlag := flag.String("state-dir", "state", "daemon state directory")
 	headless := flag.Bool("headless", false, "run only the daemon; do not expect an Electron shell")
 	installService := flag.Bool("install-service", false, "install and start the headless daemon as the current user's service")
-	repairStartup := flag.Bool("repair-startup", false, "back up malformed startup state so the daemon can start again")
 	trustLocalhost := flag.Bool("trust-localhost", true, "auto-approve localhost WebSocket clients")
 	hibernateTTL := flag.Duration("hibernate-ttl", 20*time.Minute, "idle ACP chat hibernate TTL; accepts Go durations such as 20m or 250ms")
 	rssSampleInterval := flag.Duration("rss-sample-interval", 30*time.Second, "ACP engine RSS sampling interval")
@@ -117,15 +116,6 @@ func main() {
 	stateDir := *stateDirFlag
 	if !filepath.IsAbs(stateDir) {
 		stateDir = filepath.Join(cwd, stateDir)
-	}
-	if *repairStartup {
-		report, repairErr := repairStartupState(stateDir)
-		if repairErr != nil {
-			fmt.Fprintf(os.Stderr, "workass: repair startup state: %v\n", repairErr)
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stdout, "Workass startup recovery complete (%d preserved files)\n", len(report.Moved))
-		return
 	}
 	if *installService {
 		if err := installHeadlessService(headlessServiceOptions{
@@ -216,10 +206,6 @@ func main() {
 	if certErr != nil {
 		logger.Printf("[workass] tls: %v", certErr)
 		os.Exit(1)
-	}
-	legacyAgentControlFile := filepath.Join(stateDir, "agent-control.json")
-	if err := os.Remove(legacyAgentControlFile); err != nil && !errors.Is(err, os.ErrNotExist) {
-		logger.Printf("[workass] remove legacy agent control descriptor: %v", err)
 	}
 	mcpBaseURL := "https://mcp.localhost:" + strconv.Itoa(*port)
 	acpManager := acp.NewManager(acp.Options{
@@ -747,7 +733,7 @@ func resolveMocksDir(flagValue, envValue, cwd, executable string) string {
 // daemonEventBroadcaster preserves manager emission order at the frozen wire
 // boundary. Chat semantics have already crossed the durable actor ingress in
 // Manager.emit; this function must never recover an unowned event by writing it
-// into the retired renderer/session mirror. Non-chat executor events remain
+// into the renderer/session projection. Non-chat executor events remain
 // transient publications and acquire no chat persistence here.
 func daemonEventBroadcaster(_ *sessionStore, broadcast func(string, any)) func(string, any) {
 	var dispatchMu sync.Mutex
@@ -1124,14 +1110,14 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		stateDir = manager.StateDir()
 	}
 	hub.SetOnClientReady(func(send func(channel string, payload any) error) {
-		manager.ReplayProviderEvents(send)
+		manager.PublishProviderSnapshots(send)
 		_ = send("agent:apply", map[string]any{"action": "session-refresh"})
 	})
 	hub.SetOnControllerReady(func(send func(channel string, payload any) error) {
 		if providerChats == nil {
 			return
 		}
-		_ = providerChats.ReplayPendingPermissions(send)
+		_ = providerChats.PublishPendingPermissions(send)
 	})
 	hub.Register("app-chat:new-session", func(args []any) (any, error) {
 		arg := firstMapArg(args)
@@ -1194,10 +1180,10 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		return nil, errors.New("global session reset is unavailable after durable chat cutover")
 	})
 	hub.Register("app-chat:set-model", func(args []any) (any, error) {
-		return nil, errors.New("session-addressed model changes are retired; use chat:runtime-controls-save with exact tabId, chatId, revision, and operationId")
+		return nil, errors.New("model changes require chat:runtime-controls-save with exact tabId, chatId, revision, and operationId")
 	})
 	hub.Register("app-chat:set-mode", func(args []any) (any, error) {
-		return nil, errors.New("session-addressed mode changes are retired; use chat:runtime-controls-save with exact tabId, chatId, revision, and operationId")
+		return nil, errors.New("mode changes require chat:runtime-controls-save with exact tabId, chatId, revision, and operationId")
 	})
 	hub.Register("app-chat:steer", func(args []any) (any, error) {
 		arg := firstMapArg(args)
@@ -1828,7 +1814,7 @@ func workassRuntimeProfile() string {
 	return profile
 }
 
-// workspaceDirectory preserves the path split exposed by the legacy Electron
+// workspaceDirectory preserves the path split exposed by the Electron
 // host: rootDir is the Workass repository/application directory, while
 // workspaceDir is its parent (the directory that contains sibling projects).
 func workspaceDirectory(rootDir string) string {
@@ -1836,7 +1822,7 @@ func workspaceDirectory(rootDir string) string {
 	return filepath.Dir(clean)
 }
 
-// readState is a frozen wire method retained for compatibility. The legacy
+// readState is a frozen wire method retained for compatibility. The removed
 // work-queue integration it once read has been removed, so it reports an empty
 // queue. The method name and reply shape are unchanged.
 func readState(cwd string) map[string]any {

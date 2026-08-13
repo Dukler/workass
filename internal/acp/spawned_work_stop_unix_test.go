@@ -74,7 +74,10 @@ func TestStopSpawnedWorkKillsARealProcessThatIgnoresSIGTERM(t *testing.T) {
 	if externalPIDAlive(cmd.Process.Pid) {
 		t.Fatalf("pid %d survived the stop", cmd.Process.Pid)
 	}
-	if got := manager.ListSpawnedWork("tab-stop", "chat-stop"); len(got) != 1 || got[0].Status != "exited" {
-		t.Fatalf("row after stop = %#v", got)
+	if got := manager.ListSpawnedWork("tab-stop", "chat-stop"); len(got) != 0 {
+		t.Fatalf("terminal work remained in the liveness cache: %#v", got)
+	}
+	if got := stopTestReceipt(t, manager, items[0].ID); got.Status != "exited" {
+		t.Fatalf("accepted stop receipt = %#v", got)
 	}
 }

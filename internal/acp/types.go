@@ -36,8 +36,6 @@ const (
 	defaultProviderUpdateRunTimeout = 10 * time.Minute
 	defaultCompactionThresholdPct   = 80
 	defaultCompactionKeepLastTurns  = 4
-	defaultCrashRecoveryBackoff     = 2 * time.Second
-	defaultCrashRecoveryWindow      = 5 * time.Minute
 )
 
 var (
@@ -146,8 +144,6 @@ type Options struct {
 	CompactionEnabled            bool
 	CompactionThresholdPct       int
 	CompactionKeepLastTurns      int
-	CrashRecoveryBackoff         time.Duration
-	CrashRecoveryWindow          time.Duration
 	Broadcast                    func(channel string, payload any)
 	Logf                         func(message string, fields map[string]any)
 }
@@ -269,12 +265,6 @@ func (o Options) withDefaults() Options {
 	if o.CompactionKeepLastTurns == 0 {
 		o.CompactionKeepLastTurns = defaultCompactionKeepLastTurns
 	}
-	if o.CrashRecoveryBackoff <= 0 {
-		o.CrashRecoveryBackoff = defaultCrashRecoveryBackoff
-	}
-	if o.CrashRecoveryWindow <= 0 {
-		o.CrashRecoveryWindow = defaultCrashRecoveryWindow
-	}
 	if o.SpareSessions < 0 {
 		o.SpareSessions = 0
 	}
@@ -332,12 +322,12 @@ type SessionOptions struct {
 	Spare         bool
 	Ephemeral     bool
 	// ProviderLaneManaged means provider selection is owned by the durable chat
-	// actor. A chat may retain multiple provider lanes, so the legacy one-provider
+	// actor. A chat may retain multiple provider lanes, so a single-provider
 	// chat binding must not reject an explicit lane selection.
 	ProviderLaneManaged bool
 	// ProviderLaneCreate is the fail-closed create path used by the durable
 	// provider-neutral coordinator. It forbids spare adoption, exact-resume of a
-	// concurrently established binding, and the legacy second session/new retry.
+	// concurrently established binding, and any second session/new retry.
 	ProviderLaneCreate bool
 }
 
@@ -461,7 +451,7 @@ type JobStartOptions struct {
 	HumanAuthored bool
 	// ProviderLaneManaged fences crash/session recovery. The durable chat actor
 	// owns exact resume and readback for these jobs; Manager must never launch
-	// its legacy recovery/replacement path for them.
+	// any recovery/replacement path for them.
 	ProviderLaneManaged bool
 	// OperationID is the actor-owned, immutable delivery identity. It is
 	// deliberately distinct from UserMessageID, which identifies the visible
@@ -539,12 +529,10 @@ type Job struct {
 	// reconciliation belongs to the provider bridge/native binding; keeping the
 	// admitted request immutable lets catalog and subagent readers safely inherit
 	// it while the provider turn is running.
-	startOpts         JobStartOptions
-	crashRecoveryDone chan struct{}
+	startOpts JobStartOptions
 	// actorRecoveryPending is set only when an actor-managed provider host dies.
-	// The actor owns exact resume/readback, so the legacy manager worker must
-	// clean up its process-local job without publishing a false terminal failure
-	// or starting its own replacement/recovery session.
+	// The actor owns exact resume/readback; Manager only cleans up its
+	// process-local job and never starts a recovery session.
 	actorRecoveryPending atomic.Bool
 	lastActivityNanos    atomic.Int64
 	waitingPermission    atomic.Bool

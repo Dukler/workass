@@ -87,7 +87,7 @@ func (h *Hub) handleFleetAdmin(c *client, channel string, args []any) (any, erro
 		}
 		// Retiring gates future enrolments only: devices already in keep working,
 		// because their tokens were derived once and are independent of the key.
-		h.logf("[fleet] key %s retired by %s; devices already enrolled keep working", keyID, c.ip)
+		h.logf("[fleet] key %s revoked by %s; devices already enrolled keep working", keyID, c.ip)
 		h.broadcastFleetKeys(store, machineID)
 		return map[string]any{"ok": true, "keyId": keyID, "remaining": len(store.KeyIDs())}, nil
 	}

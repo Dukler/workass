@@ -46,14 +46,6 @@ func defaultBrowserControlFile(stateDirs ...string) string {
 	return ""
 }
 
-func legacyBrowserControlFile() string {
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
-		return filepath.Join(".workass", "browser-control.json")
-	}
-	return filepath.Join(home, ".workass", "browser-control.json")
-}
-
 type browserMCPOptions struct {
 	ControlFile   string
 	ChatID        string
@@ -249,12 +241,6 @@ func invokeBrowserControlReceipt(controlFile, operationID, requestDigest string,
 
 func invokeBrowserControlRequest(controlFile, method string, params map[string]any, operationID, requestDigest string, client *http.Client) (browserControlReply, error) {
 	data, err := os.ReadFile(controlFile)
-	if errors.Is(err, os.ErrNotExist) {
-		legacyFile := legacyBrowserControlFile()
-		if filepath.Clean(controlFile) != filepath.Clean(legacyFile) {
-			data, err = os.ReadFile(legacyFile)
-		}
-	}
 	if err != nil {
 		return browserControlReply{}, errors.New("Workass browser is not running")
 	}

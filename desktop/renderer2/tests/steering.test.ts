@@ -9,7 +9,6 @@ import {
   beginPendingSteer,
   insertChronologicalSteer,
   markPendingSteerUncertain,
-  migrateAnchoredSteers,
   settleStagedSteersAtTurnEnd,
   settlePendingSteer,
   settleSendingSteersAtTurnEnd,
@@ -285,29 +284,6 @@ test('generic capability steering retains immediate chronological insertion', ()
   assert.ok(insertChronologicalSteer(messages, steer, tail));
   assert.deepEqual(messages.map((message) => message.id), ['assistant-root', 'steer', 'tail']);
   assert.equal(steer.steerBoundary, undefined);
-});
-
-test('legacy anchored rows migrate once into real chronological messages, including typed final output', () => {
-  const original = { id: 'original', role: 'user' as const, content: 'start', status: 'done', at: '0', events: [] };
-  const steer = {
-    id: 'legacy-steer', role: 'user' as const, content: 'redirect', status: 'done', at: '1', events: [], steerState: 'applied' as const,
-    steerAnchor: { assistantMessageId: 'legacy-assistant', contentOffset: 6, resultOffset: 0, eventCount: 1 },
-  };
-  const assistant = {
-    id: 'legacy-assistant', role: 'assistant' as const, content: 'beforeafter', result: 'final', status: 'done', at: '2',
-    events: [{ key: 'before', at: 1 }, { key: 'after', at: 7 }], jobId: 'job-1',
-  };
-
-  const migrated = migrateAnchoredSteers([original, steer, assistant]);
-  assert.deepEqual(migrated.map((message) => [message.role, message.content, message.result ?? '']), [
-    ['user', 'start', ''],
-    ['assistant', 'before', ''],
-    ['user', 'redirect', ''],
-    ['assistant', 'after', 'final'],
-  ]);
-  assert.equal(migrated[2].steerAnchor, undefined);
-  assert.equal(migrated[1].turnTerminal, false);
-  assert.equal(migrated[3].turnTerminal, true);
 });
 
 test('acknowledged steering stays pending until Codex consumes it', () => {

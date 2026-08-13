@@ -44,11 +44,13 @@ function chat(id: string, rows: Msg[]): Chat {
     currentModeId: null,
     pending: false,
     messages: rows,
+    messageCount: rows.length,
+    historyComplete: true,
     draft: '',
   } as Chat;
 }
 
-test('switching chats evicts an idle archive tail and reloads the complete ledger on return', async () => {
+test('switching chats releases an idle full history and reloads the actor ledger on return', async () => {
   const complete = messages(85);
   const previousWindow = (globalThis as any).window;
   (globalThis as any).window = {
@@ -63,24 +65,26 @@ test('switching chats evicts an idle archive tail and reloads the complete ledge
     subject.state.chats = [first, second];
     subject.state.activeId = first.id;
     subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
-    subject.archivesLoaded.add(first.id);
+    subject.fullHistoriesLoaded.add(first.id);
 
     subject.switchChat(second.id);
     assert.equal(first.messages.length, 60);
-    assert.equal(first._archivedCount, 85);
-    assert.equal(subject.archivesLoaded.has(first.id), false);
+    assert.equal(first.messageCount, 85);
+    assert.equal(first.historyComplete, false);
+    assert.equal(subject.fullHistoriesLoaded.has(first.id), false);
 
     subject.switchChat(first.id);
-    await subject.archiveLoads.get(first.id);
+    await subject.fullHistoryLoads.get(first.id);
     assert.equal(first.messages.length, 85);
-    assert.equal(subject.archivesLoaded.has(first.id), true);
+    assert.equal(first.historyComplete, true);
+    assert.equal(subject.fullHistoriesLoaded.has(first.id), true);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
   }
 });
 
-test('a daemon refresh compacts every inactive complete history but keeps the active transcript visible', () => {
+test('a daemon refresh releases every inactive complete history but keeps the active transcript visible', () => {
   const subject = new StoreCtor();
   const active = chat('tab-active', messages(80));
   const inactive = chat('tab-inactive', messages(90));
@@ -88,12 +92,17 @@ test('a daemon refresh compacts every inactive complete history but keeps the ac
   subject.state.activeId = active.id;
   subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
 
-  const server = subject.toMirror(false, false);
+  const server = subject.toMirror(false);
   server.chats[0].messages = active.messages;
+  server.chats[0].messageCount = active.messages.length;
+  server.chats[0].historyComplete = true;
   server.chats[1].messages = inactive.messages;
+  server.chats[1].messageCount = inactive.messages.length;
+  server.chats[1].historyComplete = true;
   assert.equal(subject.restoreSessionSnapshot(server), true);
 
   assert.equal(subject.chat(active.id)?.messages.length, 80);
   assert.equal(subject.chat(inactive.id)?.messages.length, 60);
-  assert.equal(subject.chat(inactive.id)?._archivedCount, 90);
+  assert.equal(subject.chat(inactive.id)?.messageCount, 90);
+  assert.equal(subject.chat(inactive.id)?.historyComplete, false);
 });

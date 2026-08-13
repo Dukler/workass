@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"workass/internal/acp"
+	"workass/internal/machineid"
 )
 
 // TestRealCopiedStateStartup is an opt-in migration canary for a disposable
@@ -39,8 +40,12 @@ func TestRealCopiedStateStartup(t *testing.T) {
 		t.Fatalf("copied state directory is unavailable: %v", statErr)
 	}
 
+	identity, err := machineid.Load(stateDir)
+	if err != nil {
+		t.Fatalf("load copied machine identity: %v", err)
+	}
 	manager := acp.NewManager(acp.Options{
-		StateDir: stateDir, RuntimeProfile: "test", RSSSampleInterval: time.Hour,
+		StateDir: stateDir, MachineID: identity.MachineID, RuntimeProfile: "test", RSSSampleInterval: time.Hour,
 		SpawnedWorkReconcileInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })

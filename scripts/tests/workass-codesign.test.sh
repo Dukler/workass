@@ -20,11 +20,11 @@ trap cleanup EXIT HUP INT TERM
 cp /usr/bin/true "$test_root/old"
 cp /usr/bin/false "$test_root/new"
 cp /usr/bin/false "$test_root/other"
-cp /usr/bin/true "$test_root/legacy"
+cp /usr/bin/true "$test_root/adhoc-cdhash"
 codesign --remove-signature "$test_root/old"
 codesign --remove-signature "$test_root/new"
 codesign --remove-signature "$test_root/other"
-codesign --remove-signature "$test_root/legacy"
+codesign --remove-signature "$test_root/adhoc-cdhash"
 codesign --force --sign - --identifier com.workass.test \
   --requirements '=designated => identifier "com.workass.test"' \
   "$test_root/old"
@@ -34,7 +34,7 @@ codesign --force --sign - --identifier com.workass.test \
 codesign --force --sign - --identifier com.workass.other \
   --requirements '=designated => identifier "com.workass.other"' \
   "$test_root/other"
-codesign --force --sign - --identifier com.workass.legacy "$test_root/legacy"
+codesign --force --sign - --identifier com.workass.adhoc "$test_root/adhoc-cdhash"
 
 workass_codesign_mutually_compatible "$test_root/old" "$test_root/new"
 if workass_codesign_mutually_compatible "$test_root/old" "$test_root/other"; then
@@ -58,9 +58,9 @@ if workass_codesign_verify_stable "$test_root/old" false >/dev/null 2>&1; then
   echo "ad-hoc identity was accepted as stable" >&2
   exit 1
 fi
-workass_codesign_is_legacy_adhoc "$test_root/legacy"
-if workass_codesign_is_legacy_adhoc "$test_root/old"; then
-  echo "an arbitrary incompatible identity was accepted as the legacy migration source" >&2
+workass_codesign_is_adhoc_cdhash "$test_root/adhoc-cdhash"
+if workass_codesign_is_adhoc_cdhash "$test_root/old"; then
+  echo "an arbitrary incompatible identity was accepted as the ad-hoc migration source" >&2
   exit 1
 fi
 
@@ -84,4 +84,4 @@ if workass_codesign_prepare distribution >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "WORKASS_CODESIGN_TEST_PASS compatible_updates=true incompatible_rejected=true caller_target_preserved=true adhoc_rejected=true legacy_migration_scoped=true developer_id_required=true"
+echo "WORKASS_CODESIGN_TEST_PASS compatible_updates=true incompatible_rejected=true caller_target_preserved=true adhoc_rejected=true adhoc_migration_scoped=true developer_id_required=true"

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -93,7 +94,21 @@ func TestLegacyPendingWakeSnapshotIsIgnored(t *testing.T) {
 }
 
 func TestTrackedSubagentSettleCarriesModelAndResultOnTheWire(t *testing.T) {
-	manager := NewManager(Options{StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour})
+	var eventMu sync.Mutex
+	var eventItems []SpawnedWorkItem
+	manager := NewManager(Options{
+		StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour,
+		Broadcast: func(channel string, payload any) {
+			if channel != "spawned-work:changed" {
+				return
+			}
+			body, _ := payload.(map[string]any)
+			items, _ := body["items"].([]SpawnedWorkItem)
+			eventMu.Lock()
+			eventItems = append([]SpawnedWorkItem(nil), items...)
+			eventMu.Unlock()
+		},
+	})
 	t.Cleanup(func() { manager.Reset() })
 	const tabID, chatID, id = "tab-sub-wire", "chat-sub-wire", "wa-subagent-wire-1"
 	bindExternalWorkOwnerForTest(manager, "owner-wire", chatID, tabID, "claude")
@@ -101,23 +116,22 @@ func TestTrackedSubagentSettleCarriesModelAndResultOnTheWire(t *testing.T) {
 	startTrackedSubagentForTest(manager, tabID, chatID, id, "wire subagent", time.Now().Add(-time.Minute))
 	finishTrackedSubagentForTest(manager, tabID, chatID, id, "done", "the answer is 42 token=sk-should-not-survive")
 
-	rows, err := manager.ListSpawnedWorkForOwner("owner-wire", chatID, tabID, chatID, tabID, 0)
-	if err != nil {
-		t.Fatalf("owner spawned-work listing: %v", err)
-	}
-	var row map[string]any
-	for _, candidate := range rows {
-		if asString(candidate["taskId"]) == id {
-			row = candidate
+	eventMu.Lock()
+	items := append([]SpawnedWorkItem(nil), eventItems...)
+	eventMu.Unlock()
+	var row *SpawnedWorkItem
+	for i := range items {
+		if items[i].TaskID == id {
+			row = &items[i]
 		}
 	}
 	if row == nil {
-		t.Fatalf("subagent row missing from owner listing: %#v", rows)
+		t.Fatalf("subagent row missing from actor-accepted event: %#v", items)
 	}
-	if asString(row["modelLabel"]) != "Opus4.8-xhigh" {
+	if row.ModelLabel != "Opus4.8-xhigh" {
 		t.Fatalf("subagent row carried no model label: %#v", row)
 	}
-	excerpt := asString(row["resultExcerpt"])
+	excerpt := row.ResultExcerpt
 	if !strings.Contains(excerpt, "the answer is 42") {
 		t.Fatalf("subagent row carried no result excerpt: %#v", row)
 	}

@@ -59,24 +59,12 @@ Defaults:
 
 Daemon logs are written to stderr. Stdout is unused.
 
-## Startup recovery
+## Daemon restart
 
 The Electron command `⌘,` → **Reiniciar daemon y reconectar** is the normal
-recovery path. It performs a graceful local daemon stop, preserves only
-malformed startup records beneath `state/recovery/`, starts the same sibling
-daemon again, and reloads the shell. It never deletes chats, credentials, or a
-valid machine identity.
-
-For a daemon-only diagnosis, run the same narrow repair manually before
-starting the daemon again:
-
-```sh
-workass --repair-startup --state-dir /absolute/path/to/state
-```
-
-If a malformed TLS certificate/key pair is repaired, Workass mints a new
-machine certificate on the next start. Existing remote peers must then pair
-again; the broken pair remains preserved under `state/recovery/`.
+restart path. It performs a graceful local daemon stop, starts the same sibling
+daemon again, and reloads the shell. Durable state is never moved, rewritten,
+or discarded by this command; malformed state remains a startup error.
 
 To run explicitly against the mock:
 

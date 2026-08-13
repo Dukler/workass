@@ -109,8 +109,7 @@ echo "[package] testing shell, installer, signing, and profile isolation" | tee 
   desktop/shell/profile-singleton.test.js \
   desktop/shell/update-manager.test.js \
   desktop/shell/update-worker.test.js \
-  scripts/tests/package-workass-macos.test.mjs \
-  scripts/tests/migrate-workass-chats.test.mjs) >>"$log_file" 2>&1
+  scripts/tests/package-workass-macos.test.mjs) >>"$log_file" 2>&1
 (cd "$repo_root" && scripts/tests/workass-codesign.test.sh) >>"$log_file" 2>&1
 (cd "$repo_root" && scripts/tests/workass-signing-persistence.test.sh) >>"$log_file" 2>&1
 

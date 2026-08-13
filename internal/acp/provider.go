@@ -403,56 +403,16 @@ func mergeProviderConfig(base, raw ProviderConfig, rootDir string) ProviderConfi
 	if label := strings.TrimSpace(raw.Label); label != "" {
 		provider.Label = label
 	}
-	provider = resetDeadFrontierDefaults(provider, base)
 	return normalizeProviderConfig(provider, rootDir, provider.ID)
 }
 
-func resetDeadFrontierDefaults(provider, base ProviderConfig) ProviderConfig {
-	legacyAdapter := legacyFrontierAdapterCommand(provider.ID, provider.Command) ||
-		legacyFrontierAdapterCommand(provider.ID, provider.ResolvedCommand)
-	registration, _ := providerRegistrationForID(provider.ID)
-	if registration.Native != nil && strings.TrimSpace(provider.Command) == registration.DefaultCommand && len(provider.Args) == 1 && provider.Args[0] == "--acp" {
-		legacyAdapter = true
-	}
-	if legacyAdapter {
-		provider.Command = base.Command
-		provider.Args = append([]string(nil), base.Args...)
-		provider.ResolvedCommand = ""
-		provider.Detected = false
-		provider.DetectedAt = ""
-		provider.AutoEnv = nil
-		provider.Badge = base.Badge
-		if strings.HasSuffix(strings.TrimSpace(provider.Name), " ACP") || strings.TrimSpace(provider.Name) == "" {
-			provider.Name = base.Name
-			provider.Label = base.Name
-		}
-	}
-	return provider
-}
-
-func legacyFrontierAdapterCommand(providerID, command string) bool {
-	base := strings.ToLower(filepath.Base(strings.TrimSpace(command)))
-	base = strings.TrimSuffix(base, ".exe")
-	base = strings.TrimSuffix(base, ".cmd")
-	registration, ok := providerRegistrationForID(providerID)
-	if !ok {
-		return false
-	}
-	for _, legacy := range registration.LegacyNames {
-		if base == legacy {
-			return true
-		}
-	}
-	return false
-}
-
 func (o Options) withProviderDefaults() Options {
-	legacy := o.Provider
-	legacySet := providerHasLaunch(legacy)
+	singleProvider := o.Provider
+	singleProviderSet := providerHasLaunch(singleProvider)
 	if len(o.Providers) == 0 {
 		o.Providers = BuiltInProviderConfigs(o.RootDir)
-		if legacySet {
-			custom := normalizeProviderConfig(legacy, o.RootDir, "custom")
+		if singleProviderSet {
+			custom := normalizeProviderConfig(singleProvider, o.RootDir, "custom")
 			custom.Enabled = true
 			o.Providers = upsertProvider(o.Providers, custom)
 			if o.DefaultProviderID == "" {
@@ -975,7 +935,7 @@ func (m *Manager) ToggleProvider(ctx context.Context, id string, enabled bool) (
 	}
 	m.EmitCatalog(ctx)
 	list := m.ProvidersList()
-	m.cacheProviderReplayEvent("providers:list", list)
+	m.cacheProviderSnapshotEvent("providers:list", list)
 	return list, nil
 }
 
@@ -1055,12 +1015,12 @@ type providerDetectionPass struct {
 	providers []map[string]any
 }
 
-func (m *Manager) runProviderDetectionPass(ctx context.Context, providerIDs []string, clearReplay bool, intent providerDetectionIntent) providerDetectionPass {
+func (m *Manager) runProviderDetectionPass(ctx context.Context, providerIDs []string, resetSnapshots bool, intent providerDetectionIntent) providerDetectionPass {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if clearReplay {
-		m.clearProviderReplayEvents()
+	if resetSnapshots {
+		m.clearProviderSnapshots()
 	}
 	candidates := m.providerDetectionCandidates(intent, providerIDs...)
 	results := make([]providerDetectionResult, len(candidates))
@@ -1917,6 +1877,7 @@ func (m *Manager) Catalog(ctx context.Context) map[string]any {
 	}
 	m.mu.Lock()
 	ids := m.enabledProviderIDsLocked()
+	defaultID := m.defaultProviderID
 	m.mu.Unlock()
 
 	groups := make([]CatalogGroup, 0, len(ids))
@@ -1924,7 +1885,26 @@ func (m *Manager) Catalog(ctx context.Context) map[string]any {
 		groups = append(groups, m.catalogGroup(ctx, id))
 	}
 	groups = m.userFacingCatalogGroups(groups)
-	models, modes := m.legacyCatalog(groups)
+	models, modes := []Model{}, []Mode{}
+	var fallback *CatalogGroup
+	for i := range groups {
+		if groups[i].Status != providerStatusReady || len(groups[i].Models) == 0 {
+			continue
+		}
+		if groups[i].ProviderID == defaultID {
+			models = append([]Model(nil), groups[i].Models...)
+			modes = append([]Mode(nil), groups[i].Modes...)
+			fallback = nil
+			break
+		}
+		if fallback == nil {
+			fallback = &groups[i]
+		}
+	}
+	if fallback != nil {
+		models = append([]Model(nil), fallback.Models...)
+		modes = append([]Mode(nil), fallback.Modes...)
+	}
 	return map[string]any{
 		"models": models,
 		"modes":  modes,
@@ -2157,27 +2137,4 @@ func (m *Manager) probeFrontierModelEfforts(ctx context.Context, bridge *Bridge,
 			"error":      redactSensitiveText(err.Error()),
 		})
 	}
-}
-
-func (m *Manager) legacyCatalog(groups []CatalogGroup) ([]Model, []Mode) {
-	m.mu.Lock()
-	defaultID := m.defaultProviderID
-	m.mu.Unlock()
-	var fallback *CatalogGroup
-	for i := range groups {
-		if groups[i].Status == providerStatusReady && len(groups[i].Models) > 0 {
-			if groups[i].ProviderID == defaultID {
-				models := append([]Model(nil), groups[i].Models...)
-				modes := append([]Mode(nil), groups[i].Modes...)
-				return models, modes
-			}
-			if fallback == nil {
-				fallback = &groups[i]
-			}
-		}
-	}
-	if fallback != nil {
-		return append([]Model(nil), fallback.Models...), append([]Mode(nil), fallback.Modes...)
-	}
-	return []Model{}, []Mode{}
 }

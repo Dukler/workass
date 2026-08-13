@@ -78,7 +78,7 @@ export function normalizeCreatedDirectory(raw: unknown, requestedParent: string,
  * Defensive parse of an fs:list-dir reply. `requested` is the path we asked for,
  * so a reply that omits `path` still anchors the dialog where the user is; the
  * default-home request legitimately resolves `null` to the server user's
- * absolute home path. Older daemons may still return their legacy `path: null`
+ * absolute home path. Older daemons may still return their `path: null`
  * shortcut listing.
  */
 export function normalizeListing(raw: unknown, requested: string | null): DirListing {

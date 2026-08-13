@@ -547,7 +547,7 @@ func TestProviderUpdateInvokeProgressNoProcRegistryAndReplay(t *testing.T) {
 		t.Fatalf("post-update cliVersion = %#v", version)
 	}
 	var replayed bool
-	manager.ReplayProviderEvents(func(channel string, payload any) error {
+	manager.PublishProviderSnapshots(func(channel string, payload any) error {
 		if channel == "providers:update-progress" {
 			progress, ok := payload.(ProviderUpdateProgress)
 			if ok && progress.ProviderID == "qwen" && progress.Status == "done" && strings.Contains(progress.Tail, "updater done") {

@@ -176,34 +176,6 @@ func TestBackgroundReconciliationPreservesTerminalRowsAndOrphansMissingLiveWork(
 	}
 }
 
-func TestLegacyObligationAndBackgroundUpgradeRemainSeparateFromV2TranscriptDigest(t *testing.T) {
-	state, _ := NewState("chat")
-	state, _ = apply(t, state, MigrateLegacyChat{
-		Version: 2, Digest: "v2-transcript-digest", Presentation: PresentationState{TabID: "tab"},
-	})
-	if state.Migration.LegacyObligationMigrated || state.Migration.LegacyBackgroundMigrated {
-		t.Fatalf("v2 transcript migration prematurely claimed later stores: %#v", state.Migration)
-	}
-	obligation := &ObligationState{
-		State: "needs_input", Source: "declared", OpenedAt: "2026-08-11T12:00:00Z", UpdatedAt: "2026-08-11T12:00:00Z",
-	}
-	state, _ = apply(t, state, MigrateLegacyObligation{Obligation: obligation})
-	state, _ = apply(t, state, MigrateLegacyBackground{Items: nil})
-	if !state.Migration.LegacyObligationMigrated || !state.Migration.LegacyBackgroundMigrated || state.Obligation == nil {
-		t.Fatalf("post-v2 migration acknowledgements = %#v obligation=%#v", state.Migration, state.Obligation)
-	}
-	// A daemon crash before the global cutover receipt replays each exact actor
-	// migration. The transcript digest and the two later inputs stay idempotent.
-	state, _ = apply(t, state, MigrateLegacyChat{
-		Version: 2, Digest: "v2-transcript-digest", Presentation: PresentationState{TabID: "tab"},
-	})
-	state, _ = apply(t, state, MigrateLegacyObligation{Obligation: obligation})
-	state, _ = apply(t, state, MigrateLegacyBackground{Items: nil})
-	if _, _, err := Reduce(state, MigrateLegacyObligation{Obligation: nil}); err == nil {
-		t.Fatal("changed legacy obligation replay did not fail closed")
-	}
-}
-
 func TestNewLaneCreatesOnceAndEstablishedLaneOnlyResumes(t *testing.T) {
 	state, _ := NewState("chat")
 	lane := testLane("chat", "codex")
@@ -259,77 +231,32 @@ func TestDeleteChatPersistsIdempotentCleanupBeforeNativeDeletion(t *testing.T) {
 	}
 }
 
-func TestAdoptExactLegacyBindingOnlySchedulesResume(t *testing.T) {
+func TestBindEstablishedLaneOnlySchedulesExactResume(t *testing.T) {
 	state, _ := NewState("chat")
+	state, _ = apply(t, state, InitializeChat{Presentation: PresentationState{TabID: "tab"}, OperationID: "create", Digest: "create-digest"})
 	lane := testLane("chat", "codex")
 	thread := provider.ThreadRef{ProviderID: "codex", RootID: "thread-existing", HeadID: "thread-existing", Lineage: 1}
-	state, effects := apply(t, state, AdoptLaneBinding{
+	state, effects := apply(t, state, BindEstablishedLane{
 		Identity: lane, Thread: thread, Owner: provider.AttachmentOwner{TabID: "tab"},
 		CWD: "/workspace", Context: exactContext(provider.ContextImportUnsupported),
 	})
 	if len(effects) != 0 || state.Lanes[lane.ID].Phase != LaneDetached {
-		t.Fatalf("adopted binding created provider work: phase=%q effects=%#v", state.Lanes[lane.ID].Phase, effects)
+		t.Fatalf("binding an established lane created provider work: phase=%q effects=%#v", state.Lanes[lane.ID].Phase, effects)
 	}
 	state, effects = apply(t, state, SelectLane{Identity: lane, Owner: provider.AttachmentOwner{TabID: "tab"}, CWD: "/workspace"})
 	if len(effects) != 1 {
-		t.Fatalf("selected adopted binding effects = %#v", effects)
+		t.Fatalf("selected established binding effects = %#v", effects)
 	}
 	resume, ok := effects[0].(ResumeLaneEffect)
 	if !ok || !resume.Thread.Equal(thread) {
-		t.Fatalf("selected adopted binding effect = %#v, want exact resume", effects[0])
+		t.Fatalf("selected established binding effect = %#v, want exact resume", effects[0])
 	}
 
 	conflict := thread
 	conflict.RootID = "replacement"
 	conflict.HeadID = "replacement"
-	if _, _, err := Reduce(state, AdoptLaneBinding{Identity: lane, Thread: conflict, Context: exactContext(provider.ContextImportUnsupported)}); err == nil {
-		t.Fatal("conflicting migration replaced an existing native thread")
-	}
-}
-
-func TestLegacyNonemptyChatMigratesBeforeProviderSelection(t *testing.T) {
-	state, _ := NewState("legacy-chat")
-	state, _ = apply(t, state, MigrateLegacyChat{
-		Version: 1,
-		Digest:  "legacy-digest",
-		Presentation: PresentationState{
-			TabID: "legacy-tab", Title: "Existing conversation", Draft: "unsent draft",
-		},
-		Messages: []LegacyMessage{
-			{MessageID: "user-1", OperationID: "legacy-user-1", Role: "user", Text: "old question", Status: "done"},
-			{MessageID: "assistant-1", OperationID: "legacy-user-1", Role: "assistant", Text: "old answer", Status: "done"},
-		},
-	})
-	if state.LedgerHead() != 2 || !state.Migration.Complete || state.Presentation.Title != "Existing conversation" {
-		t.Fatalf("legacy migration did not become authoritative: %#v", state)
-	}
-
-	target := testLane("legacy-chat", "codex")
-	state, effects := apply(t, state, SelectLane{Identity: target})
-	if len(effects) != 1 {
-		t.Fatalf("new target create effects = %#v", effects)
-	}
-	state, effects = apply(t, state, LaneOpened{
-		LaneID:               target.ID,
-		Thread:               provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
-		ConnectionGeneration: 1,
-		Context:              exactContext(provider.ContextImportUnsupported),
-	})
-	if len(effects) != 0 || state.ActiveLaneID != "" || state.Lanes[target.ID].Phase != LaneBlocked {
-		t.Fatalf("migrated nonempty chat was treated as empty: lane=%#v effects=%#v", state.Lanes[target.ID], effects)
-	}
-	if state.Ledger[0].Legacy == false || state.Ledger[1].Legacy == false {
-		t.Fatal("legacy-visible events lost their explicit unknown-attribution marker")
-	}
-
-	// Replaying the exact migration is idempotent; a different source digest is
-	// an ownership conflict and cannot replace the already-authoritative ledger.
-	same, _, err := Reduce(state, MigrateLegacyChat{Version: 1, Digest: "legacy-digest"})
-	if err != nil || same.LedgerHead() != state.LedgerHead() {
-		t.Fatalf("idempotent migration replay failed: err=%v state=%#v", err, same)
-	}
-	if _, _, err := Reduce(state, MigrateLegacyChat{Version: 1, Digest: "different"}); err == nil {
-		t.Fatal("conflicting legacy migration replaced authoritative actor state")
+	if _, _, err := Reduce(state, BindEstablishedLane{Identity: lane, Thread: conflict, Context: exactContext(provider.ContextImportUnsupported)}); err == nil {
+		t.Fatal("conflicting binding replaced an existing native thread")
 	}
 }
 
@@ -341,7 +268,6 @@ func TestRendererPresentationCannotOverwriteActorRuntimeState(t *testing.T) {
 		ProviderID: "codex", CurrentModelID: "gpt-authoritative", CurrentModeID: "ask",
 		WorkspaceRevision: 4, AgentQueueRevision: 7, RuntimeControlRevision: 9,
 		ContextUsageByProvider: json.RawMessage(`{"codex":{"used":3}}`),
-		LegacyUsage:            json.RawMessage(`{"used":3}`),
 		PlanLatest:             []provider.PlanEntry{{ID: "p1", Text: "authoritative", Status: "in_progress"}},
 		PlanLatestMessageID:    "assistant-authoritative",
 	}, OperationID: "create:provider-switch", Digest: "create-provider-switch"})
@@ -353,7 +279,6 @@ func TestRendererPresentationCannotOverwriteActorRuntimeState(t *testing.T) {
 		WorkspaceRevision: 4, AgentQueueRevision: 7, RuntimeControlRevision: 9,
 		ModelControls:          json.RawMessage(`{"ui":"allowed"}`),
 		ContextUsageByProvider: json.RawMessage(`{"claude":{"used":999}}`),
-		LegacyUsage:            json.RawMessage(`{"used":999}`),
 		PlanLatest:             []provider.PlanEntry{{ID: "forged", Text: "forged", Status: "done"}},
 		PlanLatestMessageID:    "forged-assistant",
 	}
@@ -363,48 +288,16 @@ func TestRendererPresentationCannotOverwriteActorRuntimeState(t *testing.T) {
 		t.Fatalf("renderer-owned presentation did not update: %#v", got)
 	}
 	if got.CWD == nil || *got.CWD != cwd || got.ProviderID != "codex" || got.CurrentModelID != "gpt-authoritative" || got.CurrentModeID != "ask" ||
-		string(got.ContextUsageByProvider) != `{"codex":{"used":3}}` || string(got.LegacyUsage) != `{"used":3}` ||
+		string(got.ContextUsageByProvider) != `{"codex":{"used":3}}` ||
 		len(got.PlanLatest) != 1 || got.PlanLatest[0].ID != "p1" || got.PlanLatestMessageID != "assistant-authoritative" {
 		t.Fatalf("renderer snapshot overwrote actor runtime state: %#v", got)
 	}
 }
 
-func TestLegacyMigrationReconcilesOnlyExactPreCutoverActorRows(t *testing.T) {
-	state, _ := NewState("chat")
-	lane := testLane("chat", "codex")
-	state.Lanes[lane.ID] = LaneState{
-		Identity: lane, Phase: LaneReady, Coverage: map[uint64]CoverageRecord{
-			1: {Sequence: 1, EventID: "event:op:user", Status: CoverageNativeSeen, DeliveryID: "op"},
-		},
-		CoveredThrough: 1, Context: exactContext(provider.ContextImportUnsupported),
-	}
-	state.Operations["op"] = struct{}{}
-	state.Ledger = []LedgerEvent{{
-		EventID: "event:op:user", MessageID: "user", Sequence: 1, Role: "user", Text: "hello", Status: "done",
-		LaneID: lane.ID, ProviderID: "codex", OperationID: "op",
-	}}
-	next, _, err := Reduce(state, MigrateLegacyChat{
-		Version: 1, Digest: "digest", Presentation: PresentationState{Title: "Existing"},
-		Messages: []LegacyMessage{{MessageID: "user", OperationID: "op", Role: "user", Text: "hello", Status: "done", At: "2026-08-11T00:00:00Z"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !next.Migration.Complete || next.Ledger[0].Legacy || next.Ledger[0].At != "2026-08-11T00:00:00Z" {
-		t.Fatalf("exact actor/mirror reconciliation lost ownership: %#v", next)
-	}
-	if _, _, err := Reduce(state, MigrateLegacyChat{
-		Version: 1, Digest: "different", Presentation: PresentationState{Title: "Existing"},
-		Messages: []LegacyMessage{{MessageID: "other", OperationID: "op", Role: "user", Text: "hello", Status: "done"}},
-	}); err == nil {
-		t.Fatal("identity-conflicting mirror was merged into pre-cutover actor state")
-	}
-}
-
 func TestRendererQueueReplacementUsesActorRevisionAndCannotTouchProviderOutbox(t *testing.T) {
 	state, _ := NewState("chat")
-	state, _ = apply(t, state, MigrateLegacyChat{
-		Version: 1, Digest: "digest", Presentation: PresentationState{AgentQueueRevision: 4},
+	state, _ = apply(t, state, InitializeChat{
+		Presentation: PresentationState{TabID: "tab", AgentQueueRevision: 4}, OperationID: "create", Digest: "create-digest",
 	})
 	state, _ = apply(t, state, ReplaceStagedQueue{OperationID: "queue-op-1", Digest: "queue-digest-1", ExpectedRevision: 4, Entries: []StagedQueueEntry{{
 		ID: "queued", Text: "later", Delivery: "queue", TargetProviderID: "codex",
@@ -486,13 +379,18 @@ func TestProviderSwitchImportsOnlyUnseenLedgerAndSwitchesBack(t *testing.T) {
 
 func TestContextProjectionPreservesAssistantResultBoundary(t *testing.T) {
 	state, _ := NewState("chat")
-	state, _ = apply(t, state, MigrateLegacyChat{
-		Version: 1, Digest: "legacy-digest", Presentation: PresentationState{TabID: "tab"},
-		Messages: []LegacyMessage{
-			{MessageID: "user", OperationID: "operation", Role: "user", Text: "question", Status: "done"},
-			{MessageID: "assistant", OperationID: "operation", Role: "assistant", Text: "commentary", Result: "final answer", Status: "done", TerminalState: "done"},
-		},
+	state, _ = apply(t, state, InitializeChat{Presentation: PresentationState{TabID: "tab"}, OperationID: "create", Digest: "create-digest"})
+	lane := testLane("chat", "codex")
+	state, _ = apply(t, state, BindEstablishedLane{
+		Identity: lane,
+		Thread:   provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
+		Owner:    provider.AttachmentOwner{TabID: "tab"}, Context: exactContext(provider.ContextImportUnsupported),
 	})
+	state.Operations["operation"] = struct{}{}
+	state.Ledger = []LedgerEvent{
+		{EventID: "event-user", MessageID: "user", Sequence: 1, Role: "user", Text: "question", Status: "done", LaneID: lane.ID, ProviderID: "codex", OperationID: "operation"},
+		{EventID: "event-assistant", MessageID: "assistant", Sequence: 2, Role: "assistant", Text: "commentary", Result: "final answer", Status: "done", TerminalState: "done", LaneID: lane.ID, ProviderID: "codex", OperationID: "operation"},
+	}
 	batch, from, to, err := buildContextBatch(state, 0, exactContext(provider.ContextImportNonSampling))
 	if err != nil {
 		t.Fatal(err)

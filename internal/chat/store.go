@@ -20,7 +20,7 @@ type StateStore interface {
 
 type FileStore struct{ Path string }
 
-const currentStateEnvelopeVersion = 19
+const currentStateEnvelopeVersion = 20
 
 type stateEnvelope struct {
 	Version int   `json:"v"`
@@ -29,7 +29,7 @@ type stateEnvelope struct {
 
 // DiscoverFileStates enumerates durable chat actors without consulting the
 // renderer mirror. The directory is actor storage, so any unreadable or
-// duplicate state fails closed instead of silently falling back to legacy UI
+// duplicate state fails closed instead of silently falling back to UI mirror
 // history. Callers may then open exact actors by ChatID through FileStore.
 func DiscoverFileStates(dir string) ([]State, error) {
 	dir = strings.TrimSpace(dir)
@@ -99,143 +99,17 @@ func (s FileStore) Load(chatID string) (State, bool, error) {
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return State{}, false, fmt.Errorf("decode chat state: %w", err)
 	}
-	if envelope.Version < 1 || envelope.Version > currentStateEnvelopeVersion {
+	if envelope.Version != currentStateEnvelopeVersion {
 		return State{}, false, fmt.Errorf("unsupported chat state version %d", envelope.Version)
 	}
 	if strings.TrimSpace(envelope.State.ChatID) != strings.TrimSpace(chatID) {
 		return State{}, false, errors.New("chat state file belongs to another chat")
 	}
-	if envelope.Version <= 16 {
-		// Schema v17 adds the provider-neutral terminal chat.cancel receipt map.
-		// Older actors have no such field; initialize it without inferring any
-		// historical result from transient manager state.
-		normalizeCancelMutationReceipts(&envelope.State)
-	}
 	normalizeStateMaps(&envelope.State)
-	if envelope.Version == 1 {
-		normalizeVersionOneState(&envelope.State)
-	}
-	if envelope.Version <= 2 {
-		normalizeAssistantSegmentIdentity(&envelope.State)
-	}
-	if envelope.Version <= 3 {
-		// Before schema v4 only migrated legacy chats were safe to project. Keep
-		// empty/incomplete sidecars blocked; do not infer new-chat ownership.
-		envelope.State.Initialized = envelope.State.Migration.Complete
-	}
-	if envelope.Version <= 10 {
-		// Background rows before v11 were a passive manager mirror and could lose
-		// their turn operation after the foreground job detached. Canonicalize a
-		// stable migration operation from the immutable work id; all new rows must
-		// arrive with their real actor owner before they are committed.
-		for id, item := range envelope.State.Background {
-			if item.Owner.OperationID == "" {
-				item.Owner.OperationID = provider.OperationID("migrated-background:" + strings.TrimSpace(id))
-				envelope.State.Background[id] = item
-			}
-		}
-	}
-	if envelope.Version <= 11 && envelope.State.QueueMutationReceipts == nil {
-		envelope.State.QueueMutationReceipts = make(map[provider.OperationID]QueueMutationReceipt)
-	}
-	if envelope.Version <= 12 && envelope.State.PresentationMutationReceipts == nil {
-		envelope.State.PresentationMutationReceipts = make(map[provider.OperationID]PresentationMutationReceipt)
-	}
-	if envelope.Version <= 13 && envelope.State.RuntimeControlMutationReceipts == nil {
-		envelope.State.RuntimeControlMutationReceipts = make(map[provider.OperationID]RuntimeControlMutationReceipt)
-	}
-	if envelope.Version <= 14 && envelope.State.LaneSelectionMutationReceipts == nil {
-		envelope.State.LaneSelectionMutationReceipts = make(map[provider.OperationID]LaneSelectionMutationReceipt)
-	}
-	if envelope.Version <= 15 && envelope.State.WorkspaceMutationReceipts == nil {
-		envelope.State.WorkspaceMutationReceipts = make(map[provider.OperationID]WorkspaceMutationReceipt)
-	}
-	if envelope.Version <= 17 && envelope.State.AgentWaitObservationReceipts == nil {
-		envelope.State.AgentWaitObservationReceipts = make(map[provider.OperationID]AgentWaitObservationReceipt)
-	}
 	if err := envelope.State.Validate(); err != nil {
 		return State{}, false, fmt.Errorf("validate chat state: %w", err)
 	}
 	return envelope.State, true, nil
-}
-
-// Version one was the provider-lane sidecar used while the actor did not yet
-// own renderer projection. Its ledger rows did not persist public message ids
-// or statuses, even though the immutable outbox already carried those ids.
-// Recover only identities that are provable from the same operation; the
-// deterministic fallback is an actor identity, not a guess from renderer text.
-//
-// Migration remains incomplete. The daemon must still reconcile the complete
-// legacy mirror before lane selection, and a conflict there fails closed.
-func normalizeVersionOneState(state *State) {
-	presentations := make(map[provider.OperationID]provider.TurnPresentation)
-	for _, entry := range state.Queue {
-		if entry.OperationID != "" {
-			presentations[entry.OperationID] = entry.Presentation
-		}
-	}
-	if state.Foreground != nil && state.Foreground.OperationID != "" {
-		presentations[state.Foreground.OperationID] = state.Foreground.Input.Presentation
-	}
-	for _, effect := range state.Outbox {
-		if effect.Input != nil && effect.OperationID != "" {
-			presentations[effect.OperationID] = effect.Input.Presentation
-		}
-	}
-	for index := range state.Ledger {
-		event := &state.Ledger[index]
-		presentation := presentations[event.OperationID]
-		if strings.TrimSpace(event.MessageID) == "" {
-			switch strings.ToLower(strings.TrimSpace(event.Role)) {
-			case "user":
-				event.MessageID = strings.TrimSpace(presentation.UserMessageID)
-			case "assistant":
-				event.MessageID = strings.TrimSpace(presentation.AssistantMessageID)
-			}
-			if event.MessageID == "" {
-				event.MessageID = fmt.Sprintf("message:%s:%s", event.OperationID, strings.ToLower(strings.TrimSpace(event.Role)))
-			}
-		}
-		if strings.TrimSpace(event.Status) == "" {
-			switch strings.ToLower(strings.TrimSpace(event.TerminalState)) {
-			case "failed":
-				event.Status = "failed"
-			case "cancelled":
-				event.Status = "cancelled"
-			default:
-				event.Status = "done"
-			}
-		}
-	}
-}
-
-// Version three made chronological assistant segments authoritative. Earlier
-// actor sidecars owned only one undifferentiated draft, so their exact public
-// row identity must be derived from the immutable turn presentation before the
-// stricter state validator runs. This does not inspect or match renderer text.
-func normalizeAssistantSegmentIdentity(state *State) {
-	if state == nil || state.Foreground == nil {
-		return
-	}
-	foreground := state.Foreground
-	rootID := strings.TrimSpace(foreground.RootAssistantMessageID)
-	if rootID == "" {
-		rootID = strings.TrimSpace(foreground.Input.Presentation.AssistantMessageID)
-	}
-	if rootID == "" {
-		rootID = fmt.Sprintf("message:%s:assistant", foreground.OperationID)
-	}
-	foreground.RootAssistantMessageID = rootID
-	if strings.TrimSpace(foreground.CurrentAssistantMessageID) == "" {
-		foreground.CurrentAssistantMessageID = rootID
-	}
-	if foreground.StartedAt == "" {
-		foreground.StartedAt = strings.TrimSpace(foreground.Input.Presentation.StartedAt)
-	}
-	if foreground.AssistantContent == "" && foreground.AssistantResult == "" && foreground.AssistantDraft != "" {
-		foreground.AssistantContent = foreground.AssistantDraft
-		foreground.AssistantDraft = ""
-	}
 }
 
 func normalizeStateMaps(state *State) {

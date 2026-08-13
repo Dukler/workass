@@ -52,7 +52,7 @@ func newChatControlCoordinator(manager *acp.Manager, broadcast func(string, any)
 				if coordinator.providerChats != nil {
 					if err := coordinator.providerChats.ApplySessionRefresh(payload); err != nil {
 						// A refresh for a chat that is not actor-owned has no safe
-						// generation to publish. Do not fall back to the retired
+						// generation to publish. Do not fall back to the
 						// session mirror: the actor is the only authority here.
 						return
 					}

@@ -116,11 +116,12 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
      catalog detection MUST NOT assign effort to a model whose official SDK
      control surface omits it, and any synthetic default alias is hidden after
      it is reconciled to its unique explicit model.
-  8. Cached frontier provider records that still name `claude-agent-acp`,
-     `claude-code-acp`, or `codex-acp` are migration input only. On load they
-     are reset to the official native provider commands and all stale resolved
-     paths/detection state are discarded. Compatibility names may remain in
-     parsers solely to read old data; they MUST never become launch candidates.
+  8. Frontier provider records name the official native provider commands.
+     Runtime configuration does not translate retired adapter records or keep
+     adapter-name aliases. A provider record that does not name its configured
+     executable is ordinary explicit user configuration and succeeds or fails
+     under the current provider launch contract; it is never silently rewritten
+     by a compatibility branch.
   9. PLAN LIMITS (user correction 2026-07-13): Workass MUST expose the
      authenticated provider's real five-hour and weekly utilization/reset
      windows without reading vendor OAuth files or calling undocumented HTTP

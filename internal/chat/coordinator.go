@@ -293,7 +293,7 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 		if err != nil {
 			// Readback failure is not permission to leave a permanent spinner or
 			// resend. Mark the exact operation uncertain and the lane blocked; an
-			// explicit later reconciliation may repair it, but ordinary admission
+			// explicit later reconciliation may resolve it, but ordinary admission
 			// cannot pass this boundary.
 			applyErr := c.engine.Apply(TurnReconciled{
 				OperationID: effect.OperationID, Turn: effect.Turn, Found: false,

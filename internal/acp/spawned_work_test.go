@@ -174,8 +174,8 @@ func TestSpawnedWorkPassivelyTracksBackgroundBashAndWritesReceipt(t *testing.T) 
 			}
 		},
 	})
-	if err := manager.InstallSpawnedWorkObserver(func(string, string, []SpawnedWorkItem) (SpawnedWorkActorProjection, error) {
-		return SpawnedWorkActorProjection{ActorRevision: 1}, nil
+	if err := manager.InstallSpawnedWorkObserver(func(_ string, _ string, items []SpawnedWorkItem) (SpawnedWorkActorProjection, error) {
+		return SpawnedWorkActorProjection{ActorRevision: 1, Items: items}, nil
 	}); err != nil {
 		t.Fatalf("install spawned-work actor fixture: %v", err)
 	}
@@ -208,15 +208,15 @@ func TestSpawnedWorkPassivelyTracksBackgroundBashAndWritesReceipt(t *testing.T) 
 	manager.spawnedWorkMu.Unlock()
 	manager.reconcileSpawnedWork()
 	items = manager.ListSpawnedWork("tab-1", "chat-1")
-	if items[0].Status != "exited" || items[0].FinishedAt == "" {
-		t.Fatalf("terminal item = %#v", items[0])
+	if len(items) != 0 {
+		t.Fatalf("settled delivery cache was not compacted after actor acceptance: %#v", items)
 	}
 
 	manager.mu.Lock()
 	manager.bindAgentOwnerLocked("owner-1", "chat-1", "tab-1")
 	manager.mu.Unlock()
 	receipts, err := manager.ListSpawnedWorkReceipts("owner-1", "chat-1", "tab-1", "chat-1", "tab-1", 32)
-	if err != nil || len(receipts) != 1 {
+	if err != nil || len(receipts) != 1 || receipts[0].Status != "exited" || receipts[0].FinishedAt == "" {
 		t.Fatalf("receipts = %#v, err = %v", receipts, err)
 	}
 	if strings.Contains(receipts[0].OutputTail, "do-not-expose") || !strings.Contains(strings.ToLower(receipts[0].OutputTail), "[redacted]") {
@@ -232,9 +232,10 @@ func TestSpawnedWorkPassivelyTracksBackgroundBashAndWritesReceipt(t *testing.T) 
 	}
 
 	restored := NewManager(Options{StateDir: stateDir, SpawnedWorkReconcileInterval: time.Hour})
+	t.Cleanup(func() { restored.Reset() })
 	restoredItems := restored.ListSpawnedWork("tab-1", "chat-1")
-	if len(restoredItems) != 1 || restoredItems[0].Status != "exited" {
-		t.Fatalf("restored items = %#v", restoredItems)
+	if len(restoredItems) != 0 {
+		t.Fatalf("settled delivery cache reappeared after restart: %#v", restoredItems)
 	}
 }
 
@@ -267,7 +268,7 @@ func TestSpawnedWorkFallbackNormalizesSentencePunctuationAndMergesStructuredReco
 	}
 }
 
-func TestSpawnedWorkSnapshotReloadHealsLegacyTrailingPunctuationDuplicate(t *testing.T) {
+func TestSpawnedWorkSnapshotReloadDropsNoncanonicalCacheRow(t *testing.T) {
 	const taskID = "b7hm20ecb"
 	stateDir := t.TempDir()
 	output := spawnedWorkTestOutput(t, taskID)
@@ -298,12 +299,8 @@ func TestSpawnedWorkSnapshotReloadHealsLegacyTrailingPunctuationDuplicate(t *tes
 	manager := NewManager(Options{StateDir: stateDir, SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	restored := manager.ListSpawnedWork("tab-real", "chat-real")
-	if len(restored) != 1 {
-		t.Fatalf("restored rows = %#v, want one healed record", restored)
-	}
-	item := restored[0]
-	if item.ID != taskID || item.TaskID != taskID || item.Label != "Run lab/prove feather_dose ladder third attempt" || item.Status != "running" || item.OutputFile != output {
-		t.Fatalf("healed record = %#v", item)
+	if len(restored) != 1 || restored[0].TaskID != taskID || restored[0].OutputFile != "" {
+		t.Fatalf("noncanonical cache row was merged into actor evidence: %#v", restored)
 	}
 }
 
@@ -496,13 +493,11 @@ func TestTrackedSubagentSnapshotRestartsAsOrphanedInsteadOfPhantomRunning(t *tes
 		!strings.Contains(restored.Summary, "daemon restart") || restored.LastToolName != "orphaned" {
 		t.Fatalf("restored tracked subagent remained a phantom: %#v", restored)
 	}
+	installAcceptingSpawnedWorkActorForTest(manager)
+	manager.commitSpawnedWorkChange(tabID, chatID)
 
-	snapshotData, err := os.ReadFile(manager.spawnedWorkSnapshotPath(tabID))
-	if err != nil {
-		t.Fatalf("read healed snapshot: %v", err)
-	}
-	if strings.Contains(string(snapshotData), `"status":"running"`) {
-		t.Fatalf("healed snapshot retained phantom running status: %s", snapshotData)
+	if _, err := os.Stat(manager.spawnedWorkSnapshotPath(tabID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("terminal executor cache survived actor commit: %v", err)
 	}
 	receiptData, err := os.ReadFile(manager.spawnedWorkReceiptPath(tabID))
 	if err != nil {
@@ -622,6 +617,13 @@ func TestBridgeCloseOrphansInProcessSpawnedWork(t *testing.T) {
 		SpawnedWorkReconcileInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
+	var projected []SpawnedWorkItem
+	if err := manager.InstallSpawnedWorkObserver(func(_ string, _ string, items []SpawnedWorkItem) (SpawnedWorkActorProjection, error) {
+		projected = append([]SpawnedWorkItem(nil), items...)
+		return SpawnedWorkActorProjection{ActorRevision: 1, Items: items}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	const tabID = "spawn-orphan-tab"
 	const chatID = "spawn-orphan-chat"
@@ -638,7 +640,7 @@ func TestBridgeCloseOrphansInProcessSpawnedWork(t *testing.T) {
 
 	bridge.Close(true, errors.New("test forced close"))
 
-	items := spawnedWorkItemsByTaskID(manager.ListSpawnedWork(tabID, chatID))
+	items := spawnedWorkItemsByTaskID(projected)
 	wantSummary := "Orphaned: the ACP engine exited while this ran in-process (reason: test forced close)"
 	for _, taskID := range []string{"wf-orphan", "agent-orphan", "bash-orphan"} {
 		item := items[taskID]
@@ -671,6 +673,7 @@ func TestCommitSpawnedWorkChangeAdvancesBridgeLastActivity(t *testing.T) {
 		SpawnedWorkReconcileInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
+	installAcceptingSpawnedWorkActorForTest(manager)
 
 	const tabID = "spawn-activity-tab"
 	const chatID = "spawn-activity-chat"
@@ -813,9 +816,16 @@ func TestExternalWorkRegistrationIsProviderNeutralAndSettlementSurvivesRestart(t
 	}
 	restored := NewManager(Options{StateDir: stateDir, RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { restored.Reset() })
+	var projected []SpawnedWorkItem
+	if err := restored.InstallSpawnedWorkObserver(func(_ string, _ string, items []SpawnedWorkItem) (SpawnedWorkActorProjection, error) {
+		projected = append([]SpawnedWorkItem(nil), items...)
+		return SpawnedWorkActorProjection{ActorRevision: 1, Items: items}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	restored.reconcileSpawnedWork()
 
-	items = restored.ListSpawnedWork("tab-codex-handoff", "chat-codex-handoff")
+	items = projected
 	if len(items) != 1 || items[0].Status != "exited" || items[0].ProviderID != "codex" {
 		t.Fatalf("Codex handoff after restart items=%#v", items)
 	}
@@ -895,10 +905,6 @@ func TestT3ExternalDoneFileSettlesAndWritesRedactedReceiptTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager.reconcileSpawnedWork()
-	zero := spawnedWorkItemsByTaskID(manager.ListSpawnedWork("tab-done", "chat-done"))[zeroRaw["workId"].(string)]
-	if zero.Status != "exited" || zero.ExitCode == nil || *zero.ExitCode != 0 || zero.Summary != "Done marker written (exit 0)" {
-		t.Fatalf("exit zero item = %#v", zero)
-	}
 
 	outputThree := externalWorkTestPath(t, "done-three.output")
 	threeRaw, err := manager.RegisterExternalWork(ExternalWorkRegistrationOptions{
@@ -914,23 +920,27 @@ func TestT3ExternalDoneFileSettlesAndWritesRedactedReceiptTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager.reconcileSpawnedWork()
-	three := spawnedWorkItemsByTaskID(manager.ListSpawnedWork("tab-done", "chat-done"))[threeRaw["workId"].(string)]
-	if three.Status != "failed" || three.ExitCode == nil || *three.ExitCode != 3 || three.Summary != "Done marker written (exit 3)" {
-		t.Fatalf("exit three item = %#v", three)
-	}
 
 	receipts, err := manager.ListSpawnedWorkReceipts("owner-done", "chat-done", "tab-done", "chat-done", "tab-done", 32)
 	if err != nil || len(receipts) != 2 {
 		t.Fatalf("external receipts = %#v err=%v", receipts, err)
 	}
+	byTaskID := make(map[string]SpawnedWorkReceipt, len(receipts))
+	for _, receipt := range receipts {
+		byTaskID[receipt.TaskID] = receipt
+	}
+	zero := byTaskID[zeroRaw["workId"].(string)]
+	if zero.Status != "exited" || zero.ExitCode == nil || *zero.ExitCode != 0 || zero.Summary != "Done marker written (exit 0)" {
+		t.Fatalf("exit zero receipt = %#v", zero)
+	}
+	three := byTaskID[threeRaw["workId"].(string)]
+	if three.Status != "failed" || three.ExitCode == nil || *three.ExitCode != 3 || three.Summary != "Done marker written (exit 3)" {
+		t.Fatalf("exit three receipt = %#v", three)
+	}
 	joinedTails := receipts[0].OutputTail + "\n" + receipts[1].OutputTail
 	if strings.Contains(joinedTails, "hide-this") || strings.Contains(joinedTails, "abcdef123456") ||
 		!strings.Contains(strings.ToLower(joinedTails), "[redacted]") {
 		t.Fatalf("external receipt tails were not redacted: %q", joinedTails)
-	}
-	read := manager.ReadSpawnedWork("tab-done", "chat-done", zero.TaskID, 12000)
-	if strings.Contains(asString(read["tail"]), "hide-this") || !strings.Contains(strings.ToLower(asString(read["tail"])), "[redacted]") {
-		t.Fatalf("external read tail was not redacted: %#v", read)
 	}
 }
 
@@ -1036,6 +1046,13 @@ func TestT11ExternalWorkPublicPayloadsRedactSecretShapedOutputPath(t *testing.T)
 	t.Cleanup(func() { manager.Reset() })
 	const tabID = "tab-secret-path"
 	const chatID = "chat-secret-path"
+	var projected []SpawnedWorkItem
+	if err := manager.InstallSpawnedWorkObserver(func(_ string, _ string, items []SpawnedWorkItem) (SpawnedWorkActorProjection, error) {
+		projected = append([]SpawnedWorkItem(nil), items...)
+		return SpawnedWorkActorProjection{ActorRevision: 1, Items: items}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	bindExternalWorkOwnerForTest(manager, "owner-secret-path", chatID, tabID, "mock")
 	output := externalWorkTestPath(t, "api_key=lane-secret.output")
 	if err := os.WriteFile(output, []byte("ready\ntoken=tail-secret\n"), 0o600); err != nil {
@@ -1044,25 +1061,19 @@ func TestT11ExternalWorkPublicPayloadsRedactSecretShapedOutputPath(t *testing.T)
 	addExternalRecordForTest(manager, tabID, chatID, "xw-secret-path", "secret path", nil, output, output+".done", "exited", "pending")
 	manager.commitSpawnedWorkChange(tabID, chatID)
 
-	items := manager.ListSpawnedWork(tabID, chatID)
+	items := projected
 	if len(items) != 1 || strings.Contains(items[0].OutputFile, "lane-secret") || !strings.Contains(items[0].OutputFile, "api_key=[redacted]") {
 		t.Fatalf("public list leaked output path: %#v", items)
 	}
-	read := manager.ReadSpawnedWork(tabID, chatID, "xw-secret-path", 12000)
-	readItem, _ := read["item"].(SpawnedWorkItem)
-	if strings.Contains(readItem.OutputFile, "lane-secret") || !strings.Contains(readItem.OutputFile, "api_key=[redacted]") {
-		t.Fatalf("public read leaked output path: %#v", read)
-	}
-	if tail := asString(read["tail"]); strings.Contains(tail, "tail-secret") || !strings.Contains(tail, "token=[redacted]") {
-		t.Fatalf("public read tail was not redacted from raw path: %#v", read)
-	}
-
 	receipts, err := manager.ListSpawnedWorkReceipts("owner-secret-path", chatID, tabID, chatID, tabID, 8)
 	if err != nil || len(receipts) != 1 {
 		t.Fatalf("receipts = %#v err=%v", receipts, err)
 	}
 	if strings.Contains(receipts[0].OutputFile, "lane-secret") || !strings.Contains(receipts[0].OutputFile, "api_key=[redacted]") {
 		t.Fatalf("receipt leaked output path: %#v", receipts[0])
+	}
+	if strings.Contains(receipts[0].OutputTail, "tail-secret") || !strings.Contains(receipts[0].OutputTail, "token=[redacted]") {
+		t.Fatalf("receipt tail leaked raw output: %#v", receipts[0])
 	}
 	receiptBytes, err := os.ReadFile(manager.spawnedWorkReceiptPath(tabID))
 	if err != nil {
@@ -1075,10 +1086,28 @@ func TestT11ExternalWorkPublicPayloadsRedactSecretShapedOutputPath(t *testing.T)
 }
 
 func bindExternalWorkOwnerForTest(manager *Manager, ownerKey, chatID, tabID, providerID string) {
+	installAcceptingSpawnedWorkActorForTest(manager)
 	manager.mu.Lock()
 	manager.bindAgentOwnerLocked(ownerKey, chatID, tabID)
 	manager.bindChatProviderLocked(SessionOptions{TabID: tabID, ChatID: chatID}, providerID)
 	manager.mu.Unlock()
+}
+
+func installAcceptingSpawnedWorkActorForTest(manager *Manager) {
+	if manager == nil {
+		panic("spawned-work actor fixture requires a manager")
+	}
+	manager.spawnedWorkObserverMu.RLock()
+	installed := manager.spawnedWorkObserver != nil
+	manager.spawnedWorkObserverMu.RUnlock()
+	if installed {
+		return
+	}
+	if err := manager.InstallSpawnedWorkObserver(func(_ string, _ string, items []SpawnedWorkItem) (SpawnedWorkActorProjection, error) {
+		return SpawnedWorkActorProjection{ActorRevision: 1, Items: items}, nil
+	}); err != nil {
+		panic(err)
+	}
 }
 
 func externalWorkTestPath(t *testing.T, name string) string {

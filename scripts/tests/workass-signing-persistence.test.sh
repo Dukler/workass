@@ -48,8 +48,11 @@ grep -Fq 'com\.workass\.rebuild\.' "$runner"
 grep -Fq 'incoming="$install_root/.Workass.app.incoming-' "$installer"
 grep -Fq 'backup="$install_root/.Workass.app.previous-' "$installer"
 grep -Fq 'mv "$incoming" "$installed"' "$installer"
-grep -Fq -- '--repair-broken-installed-seal' "$installer"
-grep -Fq '[ "$installed_requirement" = "$candidate_requirement" ]' "$installer"
+if grep -Fq -- '--repair-broken-installed-seal' "$installer"; then
+  echo "installer still exposes broken-seal mutation" >&2
+  exit 1
+fi
+grep -Fq 'workass_codesign_mutually_compatible "$installed" "$candidate"' "$installer"
 if grep -Fq 'cp "$repo_root/dist-bin/workass-darwin-arm64" "$WORKASS_DATA_ROOT/runtime/workass"' "$packager"; then
   echo "packager still copies onto the live daemon binary" >&2
   exit 1
