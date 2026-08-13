@@ -325,7 +325,7 @@ func TestCoordinatorExecutesDurableProviderEffectsAndNormalizesOwnership(t *test
 	}
 }
 
-func TestCoordinatorPersistsAmbiguousCreateWithoutRetry(t *testing.T) {
+func TestCoordinatorRetriesAmbiguousUnestablishedCreateOnlyAfterExplicitSelection(t *testing.T) {
 	engine, err := NewEngine("chat")
 	if err != nil {
 		t.Fatal(err)
@@ -335,6 +335,7 @@ func TestCoordinatorPersistsAmbiguousCreateWithoutRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
 	identity := coordinatorLaneIdentity("chat", "alpha")
 	if err := engine.Apply(SelectLane{Identity: identity, Owner: provider.AttachmentOwner{TabID: "tab"}, CWD: "/workspace"}); err != nil {
 		t.Fatal(err)
@@ -343,11 +344,27 @@ func TestCoordinatorPersistsAmbiguousCreateWithoutRetry(t *testing.T) {
 		t.Fatalf("ambiguous create execution: executed=%v err=%v", executed, err)
 	}
 	state := engine.Snapshot()
-	if state.Lanes[identity.ID].Phase != LaneBlocked || state.Outbox[0].Status != OutboxAmbiguous {
-		t.Fatalf("ambiguous create was made retryable: %#v", state)
+	if state.Lanes[identity.ID].Phase != LaneAbsent || state.Outbox[0].Status != OutboxAmbiguous {
+		t.Fatalf("ambiguous unestablished create did not remain absent: %#v", state)
 	}
 	if _, ok, err := engine.ClaimNext(); err != nil || ok {
-		t.Fatalf("ambiguous create was blindly resent: ok=%v err=%v", ok, err)
+		t.Fatalf("ambiguous create retried without explicit intent: ok=%v err=%v", ok, err)
+	}
+	factory.mu.Lock()
+	factory.fail = nil
+	factory.mu.Unlock()
+	if err := engine.Apply(SelectLane{Identity: identity, Owner: provider.AttachmentOwner{TabID: "tab"}, CWD: "/workspace"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Drain(context.Background()); err != nil {
+		t.Fatalf("explicit unestablished create retry: %v", err)
+	}
+	state = engine.Snapshot()
+	if lane := state.Lanes[identity.ID]; lane.Phase != LaneReady || lane.Thread.IsZero() || lane.CreateGeneration != 2 {
+		t.Fatalf("explicit retry did not establish one fresh lane: %#v", lane)
+	}
+	if len(state.Outbox) != 2 || state.Outbox[0].Status != OutboxAmbiguous || state.Outbox[1].Status != OutboxCompleted || state.Outbox[1].Reconcile {
+		t.Fatalf("explicit retry lost audit evidence or reconciled the failed create: %#v", state.Outbox)
 	}
 }
 

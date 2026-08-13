@@ -1485,6 +1485,12 @@ func reduceSelectLane(state *State, command SelectLane) ([]Effect, error) {
 			return nil, errors.New("selected lane changed deferred creation semantics while provisional")
 		}
 		existing.Creation = command.Creation
+		if existing.CreationFailedBeforeEstablishment() {
+			// Selection is explicit user intent. A lane with no ThreadRef and no
+			// provider candidate is still absent, even when an older build labeled
+			// the failed create blocked or broken.
+			existing.Phase = LaneAbsent
+		}
 		state.Lanes[identity.ID] = existing
 	} else {
 		lane := LaneState{
@@ -1780,7 +1786,13 @@ func reduceLaneOpenFailed(state *State, command LaneOpenFailed) error {
 	if lane.Phase != LaneCreating && lane.Phase != LaneResuming && lane.Phase != LaneReconciling {
 		return fmt.Errorf("lane open failed from illegal phase %q", lane.Phase)
 	}
-	if command.Ambiguous {
+	if lane.Thread.IsZero() && lane.Provision == nil {
+		// session/new must return its native id before any prompt can be sent.
+		// Without a ThreadRef or provisional candidate there is no established
+		// lane to break and no input whose delivery could be duplicated. Preserve
+		// the failed receipt, remain absent, and wait for explicit user intent.
+		lane.Phase = LaneAbsent
+	} else if command.Ambiguous {
 		lane.Phase = LaneBlocked
 	} else {
 		lane.Phase = LaneBroken
@@ -1808,7 +1820,8 @@ func reduceRetryLane(state *State, command RetryLane) ([]Effect, error) {
 	if !ok {
 		return nil, errors.New("retry lane is unknown")
 	}
-	if lane.Phase != LaneBroken && lane.Phase != LaneDetached && lane.Phase != LaneBlocked {
+	retryingUnestablishedCreate := lane.CreationFailedBeforeEstablishment()
+	if lane.Phase != LaneBroken && lane.Phase != LaneDetached && lane.Phase != LaneBlocked && !retryingUnestablishedCreate {
 		return nil, fmt.Errorf("lane cannot retry from phase %q", lane.Phase)
 	}
 	if lane.PendingImport != nil {
@@ -1877,23 +1890,17 @@ func reduceRetryLane(state *State, command RetryLane) ([]Effect, error) {
 		}}, nil
 	}
 	if lane.Thread.IsZero() {
-		for i := len(state.Outbox) - 1; i >= 0; i-- {
-			entry := &state.Outbox[i]
-			if entry.Kind != EffectCreateLane || entry.LaneID != command.LaneID || entry.Status != OutboxAmbiguous {
-				continue
-			}
-			// Retrying an uncertain create means checking the daemon-owned native
-			// binding, never issuing another provider create. Keep the same durable
-			// effect identity and make its reconcile-only constraint explicit.
-			entry.Status = OutboxPending
-			entry.Reconcile = true
-			lane.Phase = LaneCreating
-			lane.LastError = ""
+		if !retryingUnestablishedCreate {
+			lane.Phase = LaneBroken
+			lane.LastError = provider.ErrorProtocolViolation
 			state.Lanes[command.LaneID] = lane
 			return nil, nil
 		}
 		lane.Phase = LaneCreating
 		lane.CreateGeneration++
+		if lane.CreateGeneration <= lane.ConnectionGeneration {
+			lane.CreateGeneration = lane.ConnectionGeneration + 1
+		}
 		lane.LastError = ""
 		state.Lanes[command.LaneID] = lane
 		return []Effect{CreateLaneEffect{
@@ -1929,8 +1936,16 @@ func reduceSubmit(state *State, command Submit) ([]Effect, error) {
 	if target == "" {
 		target = state.ActiveLaneID
 	}
-	if _, ok := state.Lanes[target]; !ok || target == "" {
+	lane, ok := state.Lanes[target]
+	if !ok || target == "" {
 		return nil, errors.New("submit requires a selected target lane")
+	}
+	if lane.CreationFailedBeforeEstablishment() {
+		// Submit is also explicit intent. Reopen only a create that never acquired
+		// native identity; established and provisional lanes retain their exact
+		// resume/reconciliation boundaries.
+		lane.Phase = LaneAbsent
+		state.Lanes[target] = lane
 	}
 	presentation, err := normalizeTurnPresentation(command.Presentation)
 	if err != nil {
@@ -3427,6 +3442,7 @@ func drive(state *State) ([]Effect, error) {
 		}
 		lane.Phase = LaneCreating
 		lane.CreateGeneration++
+		lane.LastError = ""
 		state.Lanes[target] = lane
 		return []Effect{CreateLaneEffect{
 			Identity: lane.Identity, Owner: lane.Owner, CWD: lane.CWD, ModelID: lane.ModelID, ModeID: lane.ModeID,

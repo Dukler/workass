@@ -449,10 +449,22 @@ shell, NOT the daemon.
    not an optional user-flow branch; a valid Codex/Claude thread must resume.
    Any failure is a provider/runtime defect contained by a broken lane, never a
    reason to change identities.
+
    Once a lane has a native binding, Workass MUST NOT call `session/new`, load a
    different thread, replay archived transcript text, or seed a replacement
    session as recovery. Attach failures retry only the same native identity and
    otherwise fail closed as a visible lane error.
+
+   A lane is established only after its actor stores a nonzero `ThreadRef`. If
+   `session/new` fails before either that `ThreadRef` or a provisional provider
+   candidate is recorded, no prompt could have been dispatched: the caller did
+   not yet have a native session id. The lane therefore remains absent. There is
+   no background retry, transcript replay, or provider fanout; the next explicit
+   selection or input for that exact target lane starts one fresh create
+   generation and preserves the earlier failed/ambiguous outbox receipt for
+   audit. This is initial creation, not replacement-session recovery. A saved
+   provisional candidate retains its reconciliation and delivery-ambiguity
+   boundaries because it may already own an input.
 
    A new native thread may be created only when the target lane is provably
    absent, or after an explicit user fork/reset/workspace transition creates a

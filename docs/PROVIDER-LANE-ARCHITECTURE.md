@@ -261,7 +261,9 @@ The authoritative state contains:
 
 Lane phases are explicit: `absent`, `creating`, `detached`, `resuming`, `ready`,
 `importing`, `running`, `reconciling`, `blocked`, and `broken`. An established
-lane cannot transition to `creating`.
+lane cannot transition to `creating`. Establishment means that the actor owns a
+nonzero immutable `ThreadRef`; a failed create with neither a `ThreadRef` nor a
+provisional candidate is still `absent`, never a broken native thread.
 
 ### 5.2 Commands
 
@@ -295,7 +297,9 @@ Switching is one durable transaction:
 
 1. Resolve and persist the target `LaneID` and desired controls.
 2. At a safe foreground boundary, resume the exact target thread when the lane
-   exists, or create it once when the lane is provably absent.
+   exists, or create it when the lane is provably absent. A message targets one
+   immutable lane, so this step never pre-creates or fans out to unselected
+   providers.
 3. Compute visible semantic ledger events beyond the target lane's coverage.
 4. Import those events through `ContextStrategy` using stable operation ids and
    bounded, receipt-bearing chunks.
@@ -339,12 +343,25 @@ boundary before exhaustion. Any fork/reset is explicit.
 
 - Exact resume is a mandatory provider-conformance invariant, not a normal
   optional branch. Codex/Claude provider hosts must always resume a valid saved
-  thread; failure means a provider/runtime defect that requires repair.
+  thread; failure is a provider/runtime defect surfaced on that exact lane.
 - Host crash/restart retries attachment to the same `ThreadRef` only.
 - `NativeThreadMissing` is a broken-lane invariant, never a reason to create.
 - Provider uninstall/auth failure preserves the lane and allows other lanes to
   operate; reinstall/login may resume it.
 - A protocol downgrade that loses a required capability blocks the operation.
+
+### Creation before establishment
+
+- `session/new` must return a native session id before Workass can dispatch a
+  prompt. If creation fails before the actor records either a `ThreadRef` or a
+  provisional provider candidate, no user input reached that attempted session.
+- The lane remains absent and the failed or ambiguous create receipt remains in
+  the outbox. Workass does not retry it in the background.
+- The next explicit selection or submit for that exact lane starts a fresh create
+  generation. It creates only the selected provider lane and never reuses,
+  reconciles, or overwrites the older failed effect.
+- A provisional candidate is different: it may already own an input and must use
+  its negotiated readback/reconciliation contract rather than fresh creation.
 
 ### Delivery ambiguity
 

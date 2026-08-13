@@ -330,6 +330,152 @@ func TestResumeCannotReplaceNativeThread(t *testing.T) {
 	}
 }
 
+func TestCreateFailureRemainsAbsentUntilExplicitIntent(t *testing.T) {
+	tests := []struct {
+		name      string
+		kind      provider.ErrorKind
+		ambiguous bool
+		status    OutboxStatus
+		oldPhase  LanePhase
+		submit    bool
+	}{
+		{name: "ambiguous selection retry", kind: provider.ErrorAcceptanceAmbiguous, ambiguous: true, status: OutboxAmbiguous, oldPhase: LaneBlocked},
+		{name: "deterministic submit retry", kind: provider.ErrorUnsupportedCapability, status: OutboxFailed, oldPhase: LaneBroken, submit: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state, _ := NewState("chat")
+			identity := testLane("chat", "devin")
+			state, effects := apply(t, state, SelectLane{Identity: identity})
+			if len(effects) != 1 {
+				t.Fatalf("initial selection effects = %#v", effects)
+			}
+			firstCreate := createEffectID(identity.ID, 1)
+			state, _ = apply(t, state, ClaimEffect{EffectID: firstCreate})
+			state, effects = apply(t, state, LaneOpenFailed{LaneID: identity.ID, Kind: test.kind, Ambiguous: test.ambiguous})
+			if len(effects) != 0 {
+				t.Fatalf("create failure retried without user intent: %#v", effects)
+			}
+			lane := state.Lanes[identity.ID]
+			if lane.Phase != LaneAbsent || !lane.Thread.IsZero() || lane.Provision != nil || !lane.CreationFailedBeforeEstablishment() {
+				t.Fatalf("pre-establishment create failure = %#v", lane)
+			}
+			if len(state.Outbox) != 1 || state.Outbox[0].ID != firstCreate || state.Outbox[0].Status != test.status {
+				t.Fatalf("failed create receipt = %#v", state.Outbox)
+			}
+			// Actor snapshots written before this invariant used blocked/broken for
+			// the same zero-thread state. Ordinary commands must classify those
+			// records from their identity, without a migration or repair pass.
+			lane.Phase = test.oldPhase
+			state.Lanes[identity.ID] = lane
+			if err := state.Validate(); err != nil {
+				t.Fatalf("persisted pre-invariant state is unreadable: %v", err)
+			}
+
+			if test.submit {
+				state, effects = apply(t, state, Submit{OperationID: "retry-input", Text: "try again"})
+			} else {
+				state, effects = apply(t, state, SelectLane{Identity: identity})
+			}
+			if len(effects) != 1 {
+				t.Fatalf("explicit retry effects = %#v", effects)
+			}
+			create, ok := effects[0].(CreateLaneEffect)
+			if !ok || create.Identity.ID != identity.ID || create.Generation != 2 || create.Reconcile {
+				t.Fatalf("fresh create generation = %#v", effects[0])
+			}
+			lane = state.Lanes[identity.ID]
+			if lane.Phase != LaneCreating || lane.LastError != "" || lane.CreateGeneration != 2 {
+				t.Fatalf("retried unestablished lane = %#v", lane)
+			}
+			if len(state.Outbox) != 2 || state.Outbox[0].Status != test.status || state.Outbox[1].Status != OutboxPending || state.Outbox[1].Reconcile {
+				t.Fatalf("fresh create overwrote prior audit receipt: %#v", state.Outbox)
+			}
+		})
+	}
+}
+
+func TestSubmitCreatesOnlyItsSelectedProviderLane(t *testing.T) {
+	state, _ := NewState("chat")
+	alpha := testLane("chat", "alpha")
+	beta := testLane("chat", "beta")
+	for _, identity := range []provider.LaneIdentity{alpha, beta} {
+		var effects []Effect
+		state, effects = apply(t, state, SelectLane{Identity: identity})
+		if len(effects) != 1 {
+			t.Fatalf("select %s effects = %#v", identity.Realm.ProviderID, effects)
+		}
+		state, _ = apply(t, state, ClaimEffect{EffectID: createEffectID(identity.ID, 1)})
+		state, _ = apply(t, state, LaneOpenFailed{
+			LaneID: identity.ID, Kind: provider.ErrorProviderUnavailable,
+		})
+	}
+
+	state, effects := apply(t, state, Submit{OperationID: "selected-provider-only", Text: "hello beta"})
+	if len(effects) != 1 {
+		t.Fatalf("selected-provider submit effects = %#v", effects)
+	}
+	create, ok := effects[0].(CreateLaneEffect)
+	if !ok || create.Identity.ID != beta.ID || create.Generation != 2 {
+		t.Fatalf("submit created the wrong provider lane: %#v", effects[0])
+	}
+	if state.Lanes[alpha.ID].Phase != LaneAbsent || state.Lanes[alpha.ID].CreateGeneration != 1 {
+		t.Fatalf("submit fanned out into unselected provider: %#v", state.Lanes[alpha.ID])
+	}
+	if state.Lanes[beta.ID].Phase != LaneCreating || state.Lanes[beta.ID].CreateGeneration != 2 {
+		t.Fatalf("selected provider did not start one fresh create: %#v", state.Lanes[beta.ID])
+	}
+}
+
+func TestEstablishedResumeFailureNeverCreatesReplacementThread(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		ambiguous bool
+		phase     LanePhase
+	}{
+		{name: "deterministic", phase: LaneBroken},
+		{name: "ambiguous", ambiguous: true, phase: LaneBlocked},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state, _ := NewState("chat")
+			identity := testLane("chat", "codex")
+			thread := provider.ThreadRef{ProviderID: "codex", RootID: "thread-1", HeadID: "thread-1", Lineage: 1}
+			state, _ = apply(t, state, SelectLane{Identity: identity})
+			state, _ = apply(t, state, LaneOpened{
+				LaneID: identity.ID, Thread: thread, ConnectionGeneration: 1,
+				Context: exactContext(provider.ContextImportUnsupported),
+			})
+			state, _ = apply(t, state, HostLost{LaneID: identity.ID, ConnectionGeneration: 1})
+			state, effects := apply(t, state, SelectLane{Identity: identity})
+			if len(effects) != 1 {
+				t.Fatalf("exact resume effects = %#v", effects)
+			}
+			if _, ok := effects[0].(ResumeLaneEffect); !ok {
+				t.Fatalf("established lane emitted %T, want ResumeLaneEffect", effects[0])
+			}
+			state, _ = apply(t, state, LaneOpenFailed{
+				LaneID: identity.ID, Kind: provider.ErrorNativeThreadMissing, Ambiguous: test.ambiguous,
+			})
+			lane := state.Lanes[identity.ID]
+			if lane.Phase != test.phase || !lane.Thread.Equal(thread) || lane.CreationFailedBeforeEstablishment() {
+				t.Fatalf("established resume failure changed identity: %#v", lane)
+			}
+			state, effects = apply(t, state, SelectLane{Identity: identity})
+			if len(effects) != 0 {
+				t.Fatalf("selection replaced an established failed thread: %#v", effects)
+			}
+			state, effects = apply(t, state, RetryLane{LaneID: identity.ID})
+			if len(effects) != 1 {
+				t.Fatalf("exact retry effects = %#v", effects)
+			}
+			resume, ok := effects[0].(ResumeLaneEffect)
+			if !ok || !resume.Thread.Equal(thread) {
+				t.Fatalf("exact retry changed native thread: %#v", effects[0])
+			}
+		})
+	}
+}
+
 func TestDeferredProviderThreadExistsOnlyAfterMatchingInputReceipt(t *testing.T) {
 	state, _ := NewState("chat")
 	laneID := testLane("chat", "codex")

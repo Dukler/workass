@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -439,6 +441,143 @@ func TestProviderLaneSelectionIsReadOnlyUntilAtomicReceiptCommit(t *testing.T) {
 	if afterConflict.Presentation.RuntimeControlRevision != revision || afterConflict.Presentation.ProviderID != providerID ||
 		afterConflict.Presentation.CurrentModelID != modelID || afterConflict.Presentation.CurrentModeID != modeID {
 		t.Fatalf("conflicting lane selection changed durable controls: before=%#v after=%#v", committed.Presentation, afterConflict.Presentation)
+	}
+}
+
+func TestProviderLaneSelectionRetryCreatesAfterOldZeroThreadFailure(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := t.TempDir()
+	nativeStore := filepath.Join(stateDir, "mock-native.json")
+	store := sharedSessionStore(stateDir)
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{
+			ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
+			CWD: root, Enabled: true, Env: map[string]string{
+				"WORKASS_MOCK_ACP_DELAY_MS":      "0",
+				"WORKASS_MOCK_ACP_SESSION_STORE": nativeStore,
+			},
+		},
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
+	const tabID, chatID = "zero-thread-tab", "zero-thread-chat"
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "create-zero-thread-chat",
+		"title": "Zero thread retry", "cwd": root, "providerId": "mock",
+		"currentModelId": "mock-deterministic", "currentModeId": "ask",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	opts := acp.SessionOptions{
+		TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: root,
+		ModelID: "mock-deterministic", ModeID: "ask", OperationID: "select-zero-thread",
+	}
+	actor, err := runtime.actor(chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = func() error {
+		actor.mu.Lock()
+		defer actor.mu.Unlock()
+		selection, err := runtime.resolveSelectionLocked(context.Background(), actor, opts)
+		if err != nil {
+			return err
+		}
+		if err := runtime.commitLaneSelectionLocked(actor, selection, opts); err != nil {
+			return err
+		}
+		effect, ok, err := actor.engine.ClaimNext()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("initial create effect was not durable")
+		}
+		create, ok := effect.(chat.CreateLaneEffect)
+		if !ok {
+			return fmt.Errorf("initial lane effect is %T, want CreateLaneEffect", effect)
+		}
+		return actor.engine.Apply(chat.LaneOpenFailed{
+			LaneID: create.Identity.ID, Kind: providercontract.ErrorAcceptanceAmbiguous, Ambiguous: true,
+		})
+	}()
+	if err != nil {
+		t.Fatalf("construct old zero-thread failure: %v", err)
+	}
+	failed, _ := runtime.Snapshot(chatID)
+	failedReceipt := failed.LaneSelectionMutationReceipts[opts.OperationID]
+	failedLane := failed.Lanes[failedReceipt.LaneID]
+	if failedLane.Phase != chat.LaneAbsent || !failedLane.Thread.IsZero() || !failedLane.CreationFailedBeforeEstablishment() {
+		t.Fatalf("old zero-thread failure = %#v", failedLane)
+	}
+
+	first, err := runtime.Select(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("retry committed zero-thread selection: %v", err)
+	}
+	if first.SessionID == "" {
+		t.Fatal("zero-thread selection retry did not return a native session")
+	}
+	established, _ := runtime.Snapshot(chatID)
+	receipt := established.LaneSelectionMutationReceipts[opts.OperationID]
+	lane := established.Lanes[receipt.LaneID]
+	if lane.Phase != chat.LaneReady || lane.Thread.IsZero() || lane.CreateGeneration != 2 {
+		t.Fatalf("zero-thread retry did not establish a fresh generation: %#v", lane)
+	}
+	var ambiguousCreates, completedCreates int
+	for _, entry := range established.Outbox {
+		if entry.Kind != chat.EffectCreateLane {
+			continue
+		}
+		switch entry.Status {
+		case chat.OutboxAmbiguous:
+			ambiguousCreates++
+		case chat.OutboxCompleted:
+			completedCreates++
+		}
+	}
+	if ambiguousCreates != 1 || completedCreates != 1 {
+		t.Fatalf("create generations lost their separate receipts: %#v", established.Outbox)
+	}
+	second, err := runtime.Select(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("read back established selection: %v", err)
+	}
+	afterReadback, _ := runtime.Snapshot(chatID)
+	afterReceipt := afterReadback.LaneSelectionMutationReceipts[opts.OperationID]
+	afterLane := afterReadback.Lanes[afterReceipt.LaneID]
+	createEntries := 0
+	for _, entry := range afterReadback.Outbox {
+		if entry.Kind == chat.EffectCreateLane {
+			createEntries++
+		}
+	}
+	if second.SessionID != first.SessionID || afterLane.CreateGeneration != 2 || createEntries != 2 {
+		t.Fatalf("established readback recreated the provider lane: first=%#v second=%#v lane=%#v createEntries=%d", first, second, afterLane, createEntries)
+	}
+
+	if _, err := runtime.Start(context.Background(), map[string]any{
+		"kind": "app-chat", "title": "Zero thread retry", "tabId": tabID, "chatId": chatID,
+		"providerId": "mock", "sessionId": first.SessionID, "cwd": root, "prompt": "talk after retry",
+		"operationId": "zero-thread-turn", "userMessageId": "zero-thread-user", "assistantMessageId": "zero-thread-assistant",
+	}, "human"); err != nil {
+		t.Fatalf("send after zero-thread creation: %v", err)
+	}
+	waitProviderChatLedger(t, runtime, chatID, 2, 5*time.Second)
+	raw, err := os.ReadFile(nativeStore)
+	if err != nil {
+		t.Fatalf("read mock native sessions: %v", err)
+	}
+	var persisted struct {
+		Sessions []json.RawMessage `json:"sessions"`
+	}
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("decode mock native sessions: %v", err)
+	}
+	if len(persisted.Sessions) != 1 {
+		t.Fatalf("zero-thread retry created %d native sessions, want exactly one", len(persisted.Sessions))
 	}
 }
 

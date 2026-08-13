@@ -132,6 +132,23 @@ type LaneState struct {
 	Attachment                  *provider.LaneAttachmentSnapshot
 }
 
+// CreationFailedBeforeEstablishment identifies a lane whose create attempt
+// ended before Workass acquired either an immutable ThreadRef or a provisional
+// provider candidate. No provider input can have been dispatched through such
+// a lane, so a later explicit select or submit may start a fresh create
+// generation. The failed outbox receipt remains immutable audit evidence.
+func (l LaneState) CreationFailedBeforeEstablishment() bool {
+	if !l.Thread.IsZero() || l.Provision != nil || l.LastError == "" {
+		return false
+	}
+	switch l.Phase {
+	case LaneAbsent, LaneBlocked, LaneBroken:
+		return true
+	default:
+		return false
+	}
+}
+
 type QueueEntry struct {
 	OperationID  provider.OperationID
 	LaneID       provider.LaneID
