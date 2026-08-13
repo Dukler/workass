@@ -2577,6 +2577,8 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 		switch s.mode {
 		case "init-hang":
 			select {}
+		case "split-probe-delay":
+			time.Sleep(800 * time.Millisecond)
 		case "crash-stderr":
 			_, _ = fmt.Fprint(os.Stderr, "abcdefghijklmnopqrstuvwxyz0123456789")
 			os.Exit(7)
@@ -2642,6 +2644,9 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 			"authMethods":       []any{},
 		})
 	case "session/new":
+		if s.mode == "split-probe-delay" {
+			time.Sleep(1300 * time.Millisecond)
+		}
 		if s.mode == "auth-on-session" || s.mode == "auth-on-session-secret" {
 			message := "Authentication required"
 			if s.mode == "auth-on-session-secret" {
