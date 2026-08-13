@@ -97,6 +97,7 @@ rm -rf "$stage"
 mkdir -p "$stage" "$stage/resources/app" "$stage/resources/renderer" "$stage/node" "$stage/frontier-hosts"
 ditto "$repo_root/.dev/runtime/electron/win32-x64/." "$stage"
 mv "$stage/electron.exe" "$stage/Workass.exe"
+node "$repo_root/desktop/scripts/make-icon.mjs" --verify
 node "$repo_root/desktop/scripts/stamp-windows-icon.mjs" --exe "$stage/Workass.exe" --icon "$repo_root/desktop/assets/icon.ico"
 rm -f "$stage/resources/default_app.asar"
 cp "$repo_root/dist-bin/workass-windows-amd64.exe" "$stage/workass-daemon.exe"
@@ -155,7 +156,14 @@ const release = {
   // Informational only. Portable Windows updates trust the immutable GitHub
   // release manifest over HTTPS plus the archive's exact SHA-256 and size.
   authenticode: false,
-  artifacts: { update: { name: artifactName, url: artifactName, sha256, size: Number(size) } },
+  artifacts: {
+    update: {
+      name: artifactName,
+      url: `https://github.com/Dukler/workass/releases/download/v${version}/${artifactName}`,
+      sha256,
+      size: Number(size),
+    },
+  },
 };
 fs.writeFileSync(file, `${JSON.stringify(release, null, 2)}\n`);
 NODE

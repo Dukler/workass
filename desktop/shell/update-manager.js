@@ -752,10 +752,11 @@ class UpdateManager {
     this.receiptTimer.unref?.();
   }
 
-  async check() {
+  async check({ background = false } = {}) {
     if (!this.state.supported) return this.snapshot();
     this.beginOperation('check');
-    this.publish({ phase: 'checking', error: null, blockers: null });
+    const previous = this.snapshot();
+    if (!background) this.publish({ phase: 'checking', error: null, blockers: null });
     try {
       const raw = await this.deps.fetchManifest(this.feedURL);
       const manifest = validateReleaseManifest(raw, { platform: this.platform, arch: this.arch });
@@ -775,7 +776,14 @@ class UpdateManager {
       // installed app is broken. Signature, checksum, parse, and network
       // failures remain explicit failures.
       if (err?.statusCode === 404 || err?.code === 'ENOENT') {
+        if (background && previous.phase === 'available') return previous;
         return this.publish({ phase: 'current', targetVersion: null, checkedAt: new Date().toISOString(), error: null });
+      }
+      if (background && previous.phase === 'available') {
+        return this.publish({
+          phase: 'available', targetVersion: previous.targetVersion,
+          checkedAt: new Date().toISOString(), error: String(err && err.message || err),
+        });
       }
       return this.publish({ phase: 'check_failed', checkedAt: new Date().toISOString(), error: String(err && err.message || err) });
     } finally {
@@ -785,10 +793,10 @@ class UpdateManager {
 
   async autoCheck() {
     if (!this.state.supported || this.activeOperation) return this.snapshot();
-    // An offered/staged update and every failure receipt belong to the user.
-    // Background polling must not replace them or race download/install.
-    if (!['idle', 'current', 'healthy', 'check_failed'].includes(this.state.phase)) return this.snapshot();
-    try { return await this.check(); }
+    // A plain offer has no downloaded payload and may advance to a newer
+    // release. Once download/staging begins, that exact transaction is pinned.
+    if (!['idle', 'current', 'available', 'healthy', 'check_failed'].includes(this.state.phase)) return this.snapshot();
+    try { return await this.check({ background: true }); }
     catch { return this.snapshot(); }
   }
 

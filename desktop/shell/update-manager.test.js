@@ -202,9 +202,11 @@ test('platform feed names cannot collide in one GitHub release', () => {
 test('the Windows publisher marks the unsigned portable feed as updater-compatible', () => {
   const publisher = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'stage-windows-portable.sh'), 'utf8');
   assert.match(publisher, /platform:\s*'windows',[\s\S]{0,160}portable:\s*true,[\s\S]{0,240}authenticode:\s*false/);
+  assert.match(publisher, /make-icon\.mjs["']? --verify/);
   assert.match(publisher, /stamp-windows-icon\.mjs["']? --exe ["']?\$stage\/Workass\.exe["']? --icon ["']?\$repo_root\/desktop\/assets\/icon\.ico/);
   assert.match(publisher, /stamp-windows-icon\.mjs["']? --verify --exe ["']?\$stage\/Workass\.exe["']? --icon ["']?\$repo_root\/desktop\/assets\/icon\.ico/);
   assert.match(publisher, /desktop\/assets\/icon\.ico["']? ["']?\$stage\/resources\/Workass\.ico/);
+  assert.match(publisher, /https:\/\/github\.com\/Dukler\/workass\/releases\/download\/v\$\{version\}\/\$\{artifactName\}/);
   const rendererBuild = publisher.indexOf('npm run build --prefix desktop/renderer2');
   const rendererSync = publisher.indexOf('scripts/sync-renderer2.sh');
   const daemonBuild = publisher.indexOf('CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build');
@@ -220,6 +222,35 @@ test('Windows updater uses Electron Chromium networking without weakening HTTPS 
   assert.match(main, /deps:\s*\{\s*networkRequest:\s*\(options\)\s*=>\s*net\.request\(options\)\s*\}/);
   assert.doesNotMatch(source, /getCACertificates|NODE_TLS_REJECT_UNAUTHORIZED/);
   assert.doesNotMatch(source, /networkRequest[\s\S]{0,500}rejectUnauthorized:\s*false/);
+});
+
+test('packaged Windows keeps polling the immutable GitHub latest feed while the app remains open', async () => {
+  const profile = fs.readFileSync(path.join(__dirname, '..', '..', 'config', 'environments', 'windows-prod.env'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.match(profile, /^WORKASS_UPDATE_CHANNEL=github$/m);
+  assert.match(main, /startAutoChecks\(\{[\s\S]{0,240}intervalMs:\s*30_000/);
+  assert.doesNotMatch(main, /60\s*\*\s*60\s*\*\s*1000/);
+
+  const { manager } = managerFixture({ platform: 'win32', arch: 'x64' });
+  const scheduled = [];
+  const repeated = [];
+  const releases = [
+    manifest({ version: '1.1.0', platform: 'windows', arch: 'amd64', portable: true }),
+    manifest({ version: '1.2.0', platform: 'windows', arch: 'amd64', portable: true }),
+  ];
+  manager.deps.fetchManifest = async () => releases.shift();
+  manager.deps.schedule = (fn, delay) => { const handle = { fn, delay, unref() {} }; scheduled.push(handle); return handle; };
+  manager.deps.repeat = (fn, delay) => { const handle = { fn, delay, unref() {} }; repeated.push(handle); return handle; };
+  manager.publish({ phase: 'current', targetVersion: null, error: null });
+
+  manager.startAutoChecks({ initialDelayMs: 15_000, intervalMs: 30_000 });
+  assert.equal(scheduled[0].delay, 15_000);
+  assert.equal(repeated[0].delay, 30_000);
+  assert.equal((await scheduled[0].fn()).phase, 'current');
+  const discovered = await repeated[0].fn();
+  assert.equal(discovered.phase, 'available');
+  assert.equal(discovered.targetVersion, '1.2.0');
+  manager.dispose();
 });
 
 test('system-network updater follows only HTTPS redirects and preserves size and SHA-256 verification', async () => {
@@ -472,7 +503,7 @@ test('automatic checks discover a newly published local release without restarti
   const scheduled = [];
   const repeated = [];
   const cancelled = [];
-  const releases = [manifest({ version: '1.1.0' }), manifest({ version: '1.2.0' })];
+  const releases = [manifest({ version: '1.1.0' }), manifest({ version: '1.2.0' }), manifest({ version: '1.3.0' })];
   let fetches = 0;
   manager.deps.fetchManifest = async () => { fetches += 1; return releases.shift(); };
   manager.deps.schedule = (fn, delay) => { const handle = { fn, delay, unref() {} }; scheduled.push(handle); return handle; };
@@ -487,8 +518,10 @@ test('automatic checks discover a newly published local release without restarti
   assert.equal((await scheduled[0].fn()).phase, 'current');
   assert.equal((await repeated[0].fn()).phase, 'available');
   assert.equal(fetches, 2);
-  await repeated[0].fn();
-  assert.equal(fetches, 2, 'an offered release was replaced by a background poll');
+  const advanced = await repeated[0].fn();
+  assert.equal(advanced.phase, 'available');
+  assert.equal(advanced.targetVersion, '1.3.0');
+  assert.equal(fetches, 3, 'a newer un-downloaded offer must replace the previous offer');
 
   manager.dispose();
   assert.deepEqual(cancelled, [scheduled[0], repeated[0]]);
