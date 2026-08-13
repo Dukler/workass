@@ -8,7 +8,7 @@ const { createViewServer } = require('./view-server');
 const { BrowserManager } = require('./browser-manager');
 const { BrowserControlServer } = require('./browser-control-server');
 const { resolveRuntimeProfile } = require('./runtime-profile');
-const { applyMacDockIcon, resolveWindowFrameOptions, resolveWindowIconPath } = require('./app-icon');
+const { applyMacDockIcon, refreshWindowsShortcutIcons, resolveWindowFrameOptions, resolveWindowIconPath } = require('./app-icon');
 const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
 const { UpdateManager, resolveUpdateFeed } = require('./update-manager');
 const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
@@ -459,6 +459,14 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
     repoRoot: REPO_ROOT,
   });
   console.error(`[shell] dock icon receipt ${JSON.stringify(iconReceipt)}`);
+  const windowsIconReceipt = refreshWindowsShortcutIcons({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    executablePath: process.execPath,
+    dataRoot: RUNTIME.dataRoot,
+    appVersion: APP_VERSION,
+  });
+  console.error(`[shell] Windows icon refresh receipt ${JSON.stringify(windowsIconReceipt)}`);
   let viewURL = DAEMON_URL;
   try {
     viewServer = await createViewServer({
