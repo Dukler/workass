@@ -514,10 +514,10 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
   // release that just failed its health gates and hide the recovery receipt.
   if (updateState.supported && !['rollback_healthy', 'failed'].includes(updateState.phase)) {
     updateManager.startAutoChecks({
-      // The private feed is one bounded local-file read, so dogfood releases
-      // become visible promptly without restarting Electron. Public builds
-      // retain a quiet hourly HTTPS cadence.
-      intervalMs: RUNTIME.updateChannel === 'local' ? 30_000 : 60 * 60 * 1000,
+      // Both release lanes stay discoverable while Workass remains open. Mac
+      // reads its machine-local feed; Windows reads GitHub's fixed latest URL.
+      // Installation remains an explicit click in either case.
+      intervalMs: 30_000,
     });
   }
   app.on('activate', () => {

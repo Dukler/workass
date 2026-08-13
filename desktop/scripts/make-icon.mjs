@@ -1,7 +1,7 @@
-/* Generates the app icon (icon.ico + icon.png) to match the in-app brand mark:
-   a rounded-square tile with a conic gradient teal -> gold -> ember -> teal and
-   a soft teal glow. No dependencies: PNG is encoded via node:zlib, then PNGs are
-   packed into a multi-size .ico (Windows Vista+ supports PNG-in-ICO). */
+/* Generates the Windows app icon from Workass's canonical macOS artwork.
+   No third-party image library is needed: the source RGBA PNG is decoded with
+   node:zlib, area-resampled with premultiplied alpha, then packed into a
+   multi-size ICO. Small entries use BMP DIBs for Windows shell compatibility. */
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,82 +10,116 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const assetsDir = path.resolve(__dirname, '..', 'assets');
-fs.mkdirSync(assetsDir, { recursive: true });
 
-const TEAL = [47, 224, 192];
-const GOLD = [243, 200, 75];
-const EMBER = [255, 107, 61];
-const STOPS = [[0, TEAL], [1 / 3, GOLD], [2 / 3, EMBER], [1, TEAL]];
-
-const lerp = (a, b, t) => a + (b - a) * t;
-const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
-
-function gradientAt(frac) {
-  frac = ((frac % 1) + 1) % 1;
-  for (let i = 0; i < STOPS.length - 1; i++) {
-    const [p0, c0] = STOPS[i];
-    const [p1, c1] = STOPS[i + 1];
-    if (frac >= p0 && frac <= p1) {
-      const t = (frac - p0) / (p1 - p0);
-      return [lerp(c0[0], c1[0], t), lerp(c0[1], c1[1], t), lerp(c0[2], c1[2], t)];
-    }
+function requiredRange(bytes, offset, size, label) {
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(size) || offset < 0 || size < 0 || offset + size > bytes.length) {
+    throw new Error(`${label} is outside the file`);
   }
-  return TEAL;
 }
 
-function renderRGBA(N) {
-  const buf = Buffer.alloc(N * N * 4);
-  const pad = Math.round(N * 0.09);
-  const cx = N / 2;
-  const cy = N / 2;
-  const half = (N - 2 * pad) / 2;
-  const r = 2 * half * 0.28;
-  const glowReach = N * 0.06;
+function paeth(left, above, upperLeft) {
+  const estimate = left + above - upperLeft;
+  const leftDistance = Math.abs(estimate - left);
+  const aboveDistance = Math.abs(estimate - above);
+  const upperLeftDistance = Math.abs(estimate - upperLeft);
+  if (leftDistance <= aboveDistance && leftDistance <= upperLeftDistance) return left;
+  return aboveDistance <= upperLeftDistance ? above : upperLeft;
+}
 
-  for (let y = 0; y < N; y++) {
-    for (let x = 0; x < N; x++) {
-      const px = x + 0.5;
-      const py = y + 0.5;
-      const dx = px - cx;
-      const dy = py - cy;
-
-      // rounded-rect signed distance
-      const qx = Math.abs(dx) - (half - r);
-      const qy = Math.abs(dy) - (half - r);
-      const ox = Math.max(qx, 0);
-      const oy = Math.max(qy, 0);
-      const dist = Math.sqrt(ox * ox + oy * oy) + Math.min(Math.max(qx, qy), 0) - r;
-
-      const tileA = clamp01(0.5 - dist); // ~1px antialias
-
-      // conic gradient (0deg at top, clockwise), rotated -120deg like the CSS mark
-      let deg = (Math.atan2(dx, -dy) * 180) / Math.PI;
-      deg = ((deg - 120) % 360 + 360) % 360;
-      let [cr, cg, cb] = gradientAt(deg / 360);
-
-      // subtle radial sheen for depth
-      const rad = Math.sqrt(dx * dx + dy * dy) / half;
-      const sheen = 1 + (0.12 * (1 - clamp01(rad)));
-      cr = Math.min(255, cr * sheen);
-      cg = Math.min(255, cg * sheen);
-      cb = Math.min(255, cb * sheen);
-
-      // soft teal glow outside the tile
-      let glowA = 0;
-      if (dist > 0) { const g = clamp01(1 - dist / glowReach); glowA = g * g * 0.4; }
-
-      // composite glow under tile
-      const outA = tileA + glowA * (1 - tileA);
-      const i = (y * N + x) * 4;
-      if (outA <= 0) { buf[i] = buf[i + 1] = buf[i + 2] = buf[i + 3] = 0; continue; }
-      const gr = TEAL[0], gg = TEAL[1], gb = TEAL[2];
-      buf[i] = Math.round((cr * tileA + gr * glowA * (1 - tileA)) / outA);
-      buf[i + 1] = Math.round((cg * tileA + gg * glowA * (1 - tileA)) / outA);
-      buf[i + 2] = Math.round((cb * tileA + gb * glowA * (1 - tileA)) / outA);
-      buf[i + 3] = Math.round(outA * 255);
+function decodeRGBA8PNG(bytes) {
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  requiredRange(bytes, 0, signature.length, 'PNG signature');
+  if (!bytes.subarray(0, signature.length).equals(signature)) throw new Error('icon source is not a PNG');
+  let cursor = signature.length;
+  let header = null;
+  const compressed = [];
+  let ended = false;
+  while (cursor < bytes.length) {
+    requiredRange(bytes, cursor, 12, 'PNG chunk');
+    const length = bytes.readUInt32BE(cursor);
+    const type = bytes.toString('ascii', cursor + 4, cursor + 8);
+    requiredRange(bytes, cursor + 8, length + 4, `PNG ${type} chunk`);
+    const data = bytes.subarray(cursor + 8, cursor + 8 + length);
+    const expectedCRC = bytes.readUInt32BE(cursor + 8 + length);
+    const actualCRC = crc32(Buffer.concat([Buffer.from(type, 'ascii'), data]));
+    if (expectedCRC !== actualCRC) throw new Error(`PNG ${type} checksum does not match`);
+    if (type === 'IHDR') {
+      if (header || length !== 13) throw new Error('icon source has an invalid PNG header');
+      header = Buffer.from(data);
+    } else if (type === 'IDAT') compressed.push(Buffer.from(data));
+    else if (type === 'IEND') { ended = true; break; }
+    cursor += length + 12;
+  }
+  if (!header || !compressed.length || !ended) throw new Error('icon source PNG is incomplete');
+  const width = header.readUInt32BE(0);
+  const height = header.readUInt32BE(4);
+  if (!width || !height || width > 4096 || height > 4096 || width !== height) throw new Error('icon source PNG must be a bounded square');
+  if (header[8] !== 8 || header[9] !== 6 || header[10] !== 0 || header[11] !== 0 || header[12] !== 0) {
+    throw new Error('icon source PNG must be non-interlaced 8-bit RGBA');
+  }
+  const stride = width * 4;
+  const filtered = zlib.inflateSync(Buffer.concat(compressed));
+  if (filtered.length !== height * (stride + 1)) throw new Error('icon source PNG scanlines have an invalid size');
+  const rgba = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    const filter = filtered[y * (stride + 1)];
+    if (filter > 4) throw new Error('icon source PNG uses an unsupported row filter');
+    const input = y * (stride + 1) + 1;
+    const output = y * stride;
+    for (let x = 0; x < stride; x += 1) {
+      const encoded = filtered[input + x];
+      const left = x >= 4 ? rgba[output + x - 4] : 0;
+      const above = y > 0 ? rgba[output + x - stride] : 0;
+      const upperLeft = y > 0 && x >= 4 ? rgba[output + x - stride - 4] : 0;
+      let predictor = 0;
+      if (filter === 1) predictor = left;
+      else if (filter === 2) predictor = above;
+      else if (filter === 3) predictor = Math.floor((left + above) / 2);
+      else if (filter === 4) predictor = paeth(left, above, upperLeft);
+      rgba[output + x] = (encoded + predictor) & 0xff;
     }
   }
-  return buf;
+  return { width, height, rgba };
+}
+
+function areaResizeRGBA(source, size) {
+  const { width, height, rgba } = source;
+  if (!Number.isInteger(size) || size < 1 || size > width || size > height) throw new Error('icon output size is invalid');
+  const output = Buffer.alloc(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    const top = y * height / size;
+    const bottom = (y + 1) * height / size;
+    for (let x = 0; x < size; x += 1) {
+      const left = x * width / size;
+      const right = (x + 1) * width / size;
+      let weightedAlpha = 0;
+      let weightedRed = 0;
+      let weightedGreen = 0;
+      let weightedBlue = 0;
+      for (let sourceY = Math.floor(top); sourceY < Math.ceil(bottom); sourceY += 1) {
+        const vertical = Math.min(bottom, sourceY + 1) - Math.max(top, sourceY);
+        for (let sourceX = Math.floor(left); sourceX < Math.ceil(right); sourceX += 1) {
+          const horizontal = Math.min(right, sourceX + 1) - Math.max(left, sourceX);
+          const weight = vertical * horizontal;
+          const sourceOffset = (sourceY * width + sourceX) * 4;
+          const alpha = rgba[sourceOffset + 3] / 255;
+          weightedAlpha += alpha * weight;
+          weightedRed += rgba[sourceOffset] * alpha * weight;
+          weightedGreen += rgba[sourceOffset + 1] * alpha * weight;
+          weightedBlue += rgba[sourceOffset + 2] * alpha * weight;
+        }
+      }
+      const area = (right - left) * (bottom - top);
+      const outputOffset = (y * size + x) * 4;
+      if (weightedAlpha > 0) {
+        output[outputOffset] = Math.round(weightedRed / weightedAlpha);
+        output[outputOffset + 1] = Math.round(weightedGreen / weightedAlpha);
+        output[outputOffset + 2] = Math.round(weightedBlue / weightedAlpha);
+        output[outputOffset + 3] = Math.round(255 * weightedAlpha / area);
+      }
+    }
+  }
+  return output;
 }
 
 /* ---------- PNG encoder ---------- */
@@ -191,13 +225,72 @@ function buildIco(images) {
 
 /* ---------- build ---------- */
 const sizes = [16, 24, 32, 48, 64, 128, 256];
-const images = sizes.map((size) => {
-  const rgba = renderRGBA(size);
-  // BMP DIB for small sizes (taskbar-compatible), PNG for large (size-efficient).
-  const data = size <= 64 ? encodeBmpDib(size, rgba) : encodePNG(size, rgba);
-  return { size, data, png: encodePNG(size, rgba) };
-});
 
-fs.writeFileSync(path.join(assetsDir, 'icon.png'), images[images.length - 1].png);
-fs.writeFileSync(path.join(assetsDir, 'icon.ico'), buildIco(images));
-console.log(`icon.png (256) + icon.ico (${sizes.join(',')}) written to ${assetsDir}`);
+function generatedIcons(sourceFile) {
+  const source = decodeRGBA8PNG(fs.readFileSync(sourceFile));
+  const images = sizes.map((size) => {
+    const rgba = areaResizeRGBA(source, size);
+    // BMP DIB for small sizes (taskbar-compatible), PNG for large (size-efficient).
+    const png = encodePNG(size, rgba);
+    return { size, data: size <= 64 ? encodeBmpDib(size, rgba) : png, png };
+  });
+  return {
+    png: images[images.length - 1].png,
+    ico: buildIco(images),
+  };
+}
+
+function atomicWrite(file, bytes) {
+  const incoming = `${file}.incoming-${process.pid}`;
+  try {
+    fs.writeFileSync(incoming, bytes);
+    fs.renameSync(incoming, file);
+  } finally {
+    try { fs.rmSync(incoming, { force: true }); } catch { /* rename already consumed it */ }
+  }
+}
+
+function parseArgs(argv) {
+  const options = {
+    source: path.join(assetsDir, 'workass-macos.png'),
+    outputDir: assetsDir,
+    verify: false,
+  };
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === '--verify') options.verify = true;
+    else if (argument === '--source' && argv[index + 1]) options.source = path.resolve(argv[++index]);
+    else if (argument === '--output-dir' && argv[index + 1]) options.outputDir = path.resolve(argv[++index]);
+    else throw new Error(`unknown or incomplete argument: ${argument}`);
+  }
+  return options;
+}
+
+function main(argv = process.argv.slice(2)) {
+  const options = parseArgs(argv);
+  const generated = generatedIcons(options.source);
+  const pngFile = path.join(options.outputDir, 'icon.png');
+  const icoFile = path.join(options.outputDir, 'icon.ico');
+  if (options.verify) {
+    if (!fs.readFileSync(pngFile).equals(generated.png) || !fs.readFileSync(icoFile).equals(generated.ico)) {
+      throw new Error('tracked Windows icons do not match canonical Workass artwork');
+    }
+    process.stdout.write(`WORKASS_WINDOWS_ICON_ARTWORK_VERIFIED sizes=${sizes.join(',')}\n`);
+    return;
+  }
+  fs.mkdirSync(options.outputDir, { recursive: true });
+  atomicWrite(pngFile, generated.png);
+  atomicWrite(icoFile, generated.ico);
+  process.stdout.write(`icon.png (256) + icon.ico (${sizes.join(',')}) written to ${options.outputDir}\n`);
+}
+
+const invoked = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invoked) {
+  try { main(); }
+  catch (error) {
+    process.stderr.write(`workass icon generation failed: ${error?.message || error}\n`);
+    process.exitCode = 1;
+  }
+}
+
+export { areaResizeRGBA, buildIco, decodeRGBA8PNG, encodePNG, generatedIcons };
