@@ -15,13 +15,13 @@ import (
 	"sync"
 	"time"
 
+	"workass/internal/durablefs"
 	providercontract "workass/internal/provider"
 )
 
 const (
-	nativeSessionLedgerFilename       = "provider-lanes.json"
-	legacyNativeSessionLedgerFilename = "native-sessions.json"
-	currentNativeLaneStoreVersion     = 6
+	nativeSessionLedgerFilename   = "provider-lanes.json"
+	currentNativeLaneStoreVersion = 7
 )
 
 type nativeOperationState string
@@ -53,7 +53,8 @@ type nativeSessionBinding struct {
 	LaneID     string `json:"laneId"`
 	MachineID  string `json:"machineId"`
 	// AccountScope and InstallScope are opaque, non-secret realm identifiers.
-	// Legacy records are marked unverified rather than guessed across accounts.
+	// Unverified records remain scoped to the provider installation and are never
+	// guessed across accounts.
 	AccountScope   string `json:"accountScope,omitempty"`
 	InstallScope   string `json:"installScope,omitempty"`
 	RealmVerified  bool   `json:"realmVerified,omitempty"`
@@ -71,17 +72,8 @@ type nativeSessionBinding struct {
 	ModeID            string                 `json:"modeId,omitempty"`
 	PendingOperation  *nativeOperationRecord `json:"pendingOperation,omitempty"`
 	LastOperation     *nativeOperationRecord `json:"lastOperation,omitempty"`
-	// Legacy cursor fields are migration evidence only. Admission and recovery
-	// use PendingOperation plus provider-native readback; renderer history never
-	// decides whether an exact native thread may resume.
-	SyncedMessages   int    `json:"syncedMessages,omitempty"`
-	HistoryHash      string `json:"historyHash,omitempty"`
-	HistoryVersion   int    `json:"historyVersion,omitempty"`
-	Generation       uint64 `json:"generation"`
-	ResumeSafe       bool   `json:"resumeSafe,omitempty"`
-	Quarantined      bool   `json:"quarantined,omitempty"`
-	QuarantineReason string `json:"quarantineReason,omitempty"`
-	UpdatedAt        string `json:"updatedAt"`
+	Generation        uint64                 `json:"generation"`
+	UpdatedAt         string                 `json:"updatedAt"`
 }
 
 type nativeSessionLedgerFile struct {
@@ -116,114 +108,55 @@ func newNativeSessionLedger(stateDir string, machineIDs ...string) *nativeSessio
 		return ledger
 	}
 	ledger.path = filepath.Join(stateDir, nativeSessionLedgerFilename)
+	if err := upgradeProviderLaneStoreV7(ledger.path, ledger.machineID); err != nil {
+		ledger.loadErr = err
+		return ledger
+	}
 	raw, err := os.ReadFile(ledger.path)
-	legacySource := false
 	if err != nil {
 		if !os.IsNotExist(err) {
 			ledger.loadErr = err
-			return ledger
 		}
-		raw, err = os.ReadFile(filepath.Join(stateDir, legacyNativeSessionLedgerFilename))
-		if err != nil {
-			if !os.IsNotExist(err) {
-				ledger.loadErr = err
-			}
-			return ledger
-		}
-		legacySource = true
+		return ledger
 	}
 	var disk nativeSessionLedgerFile
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(&disk); err != nil {
 		ledger.loadErr = err
 		return ledger
 	}
+	if disk.Version != currentNativeLaneStoreVersion {
+		ledger.loadErr = fmt.Errorf("provider lane store schema v%d is unsupported", disk.Version)
+		return ledger
+	}
 	ownerBySessionID := make(map[string]string)
 	for index, binding := range disk.Bindings {
-		if binding.HistoryVersion == 0 && disk.Version <= 1 {
-			binding.HistoryVersion = 1
-		}
-		binding = ledger.normalizeBinding(binding)
-		if binding.TabID == "" || binding.ChatID == "" || binding.ProviderID == "" || binding.SessionID == "" {
-			continue
+		binding, err = ledger.normalizeBinding(binding)
+		if err != nil {
+			ledger.loadErr = fmt.Errorf("provider lane store binding %d is invalid: %w", index, err)
+			return ledger
 		}
 		key := nativeLaneStorageKey(binding.LaneID)
-		if prior, exists := ledger.bindings[key]; exists {
-			prior.Quarantined = true
-			prior.ResumeSafe = false
-			prior.QuarantineReason = "multiple native threads claim the same immutable lane"
-			binding.Quarantined = true
-			binding.ResumeSafe = false
-			binding.QuarantineReason = prior.QuarantineReason
-			ledger.bindings[key] = prior
-			ledger.bindings[fmt.Sprintf("%s\x00collision:%d", key, index)] = binding
-			continue
+		if _, exists := ledger.bindings[key]; exists {
+			ledger.loadErr = fmt.Errorf("provider lane store has duplicate immutable lane %q", binding.LaneID)
+			return ledger
 		}
 		for _, providerThreadID := range bindingThreadIDs(binding) {
 			providerSessionKey := binding.ProviderID + "\x00" + providerThreadID
 			if owner, exists := ownerBySessionID[providerSessionKey]; exists && owner != key {
-				binding.Quarantined = true
-				binding.ResumeSafe = false
-				binding.QuarantineReason = "provider-native thread has multiple Workass lane owners"
-				if prior, ok := ledger.bindings[owner]; ok {
-					prior.Quarantined = true
-					prior.ResumeSafe = false
-					prior.QuarantineReason = binding.QuarantineReason
-					ledger.bindings[owner] = prior
-				}
+				ledger.loadErr = fmt.Errorf("provider-native thread %q has multiple immutable lane owners", providerThreadID)
+				return ledger
 			}
 			ownerBySessionID[providerSessionKey] = key
 		}
 		ledger.bindings[key] = binding
 	}
-	if legacySource || disk.Version != currentNativeLaneStoreVersion {
-		// The legacy file remains intact until the complete lane store is written,
-		// fsynced, renamed, decoded, and identity-checked. A failed migration never
-		// leaves recovery dependent on partially converted bytes.
-		if err := ledger.writeLocked(); err != nil {
-			ledger.loadErr = fmt.Errorf("migrate provider lane ledger: %w", err)
-			return ledger
-		}
-		if err := ledger.verifyPersistedLaneStore(); err != nil {
-			ledger.loadErr = fmt.Errorf("verify migrated provider lane store: %w", err)
-			return ledger
-		}
-	}
 	return ledger
 }
 
-func (l *nativeSessionLedger) verifyPersistedLaneStore() error {
-	raw, err := os.ReadFile(l.path)
-	if err != nil {
-		return err
-	}
-	var disk nativeSessionLedgerFile
-	if err := json.Unmarshal(raw, &disk); err != nil {
-		return err
-	}
-	if disk.Version != currentNativeLaneStoreVersion || len(disk.Bindings) != len(l.bindings) {
-		return fmt.Errorf("lane store receipt mismatch: version=%d bindings=%d want=%d", disk.Version, len(disk.Bindings), len(l.bindings))
-	}
-	signature := func(binding nativeSessionBinding) string {
-		return strings.Join([]string{binding.TabID, binding.ChatID, binding.ProviderID, binding.LaneID, binding.SessionID, fmt.Sprint(binding.Quarantined)}, "\x00")
-	}
-	seen := make(map[string]int, len(disk.Bindings))
-	for _, binding := range disk.Bindings {
-		binding = l.normalizeBinding(binding)
-		seen[signature(binding)]++
-	}
-	for _, expected := range l.bindings {
-		key := signature(expected)
-		if seen[key] == 0 {
-			return fmt.Errorf("persisted lane %q failed ownership readback", expected.LaneID)
-		}
-		seen[key]--
-	}
-	return nil
-}
-
-func (l *nativeSessionLedger) normalizeBinding(binding nativeSessionBinding) nativeSessionBinding {
+func (l *nativeSessionLedger) normalizeBinding(binding nativeSessionBinding) (nativeSessionBinding, error) {
 	binding.TabID = strings.TrimSpace(binding.TabID)
 	binding.ChatID = strings.TrimSpace(binding.ChatID)
 	binding.ProviderID = normalizeProviderID(binding.ProviderID)
@@ -237,9 +170,9 @@ func (l *nativeSessionLedger) normalizeBinding(binding nativeSessionBinding) nat
 	binding.CWD = strings.TrimSpace(binding.CWD)
 	binding.ModelID = strings.TrimSpace(binding.ModelID)
 	binding.ModeID = strings.TrimSpace(binding.ModeID)
-	normalizeOperation := func(operation *nativeOperationRecord) *nativeOperationRecord {
+	normalizeOperation := func(operation *nativeOperationRecord) (*nativeOperationRecord, error) {
 		if operation == nil {
-			return nil
+			return nil, nil
 		}
 		copy := *operation
 		copy.OperationID = strings.TrimSpace(copy.OperationID)
@@ -249,30 +182,27 @@ func (l *nativeSessionLedger) normalizeBinding(binding nativeSessionBinding) nat
 		copy.ResultDigest = strings.TrimSpace(copy.ResultDigest)
 		copy.UpdatedAt = strings.TrimSpace(copy.UpdatedAt)
 		if copy.OperationID == "" || copy.PromptDigest == "" {
-			binding.Quarantined = true
-			binding.QuarantineReason = "provider lane contains an incomplete delivery operation"
+			return nil, errors.New("provider lane contains an incomplete delivery operation")
 		}
 		switch copy.State {
 		case nativeOperationDispatched, nativeOperationConsumed, nativeOperationTerminal, nativeOperationAbsent:
 		default:
-			binding.Quarantined = true
-			binding.QuarantineReason = "provider lane contains an unknown delivery state"
+			return nil, errors.New("provider lane contains an unknown delivery state")
 		}
-		return &copy
+		return &copy, nil
 	}
-	binding.PendingOperation = normalizeOperation(binding.PendingOperation)
-	binding.LastOperation = normalizeOperation(binding.LastOperation)
+	var err error
+	if binding.PendingOperation, err = normalizeOperation(binding.PendingOperation); err != nil {
+		return nativeSessionBinding{}, err
+	}
+	if binding.LastOperation, err = normalizeOperation(binding.LastOperation); err != nil {
+		return nativeSessionBinding{}, err
+	}
 	if binding.PendingOperation != nil && binding.PendingOperation.State != nativeOperationDispatched && binding.PendingOperation.State != nativeOperationConsumed {
-		binding.Quarantined = true
-		binding.QuarantineReason = "provider lane pending slot contains a terminal delivery operation"
+		return nativeSessionBinding{}, errors.New("provider lane pending slot contains a terminal delivery operation")
 	}
 	if binding.LastOperation != nil && binding.LastOperation.State != nativeOperationTerminal && binding.LastOperation.State != nativeOperationAbsent {
-		binding.Quarantined = true
-		binding.QuarantineReason = "provider lane settled slot contains an unfinished delivery operation"
-	}
-	if binding.SyncedMessages < 0 {
-		binding.Quarantined = true
-		binding.QuarantineReason = "legacy provider cursor contains an invalid message count"
+		return nativeSessionBinding{}, errors.New("provider lane settled slot contains an unfinished delivery operation")
 	}
 	if binding.Generation == 0 {
 		binding.Generation = 1
@@ -290,23 +220,20 @@ func (l *nativeSessionLedger) normalizeBinding(binding nativeSessionBinding) nat
 		binding.InstallScope = "registered-" + binding.ProviderID
 	}
 	if l.machineID != "" && binding.MachineID != "" && binding.MachineID != l.machineID {
-		binding.Quarantined = true
-		binding.ResumeSafe = false
-		binding.QuarantineReason = "provider-native thread belongs to another machine"
+		return nativeSessionBinding{}, errors.New("provider-native thread belongs to another machine")
 	}
 	identity := bindingLaneIdentity(binding)
 	if err := identity.Validate(); err != nil {
-		binding.Quarantined = true
-		binding.ResumeSafe = false
-		binding.QuarantineReason = "incomplete immutable lane identity: " + err.Error()
+		return nativeSessionBinding{}, fmt.Errorf("incomplete immutable lane identity: %w", err)
 	} else if binding.LaneID == "" {
 		binding.LaneID = string(identity.ID)
 	} else if binding.LaneID != string(identity.ID) {
-		binding.Quarantined = true
-		binding.ResumeSafe = false
-		binding.QuarantineReason = "stored lane id does not match immutable lane identity"
+		return nativeSessionBinding{}, errors.New("stored lane id does not match immutable lane identity")
 	}
-	return binding
+	if binding.TabID == "" || binding.ChatID == "" || binding.ProviderID == "" || binding.SessionID == "" {
+		return nativeSessionBinding{}, errors.New("provider lane requires tab, chat, provider, and native thread ids")
+	}
+	return binding, nil
 }
 
 func fallbackNativeMachineScope(stateDir string) string {
@@ -393,14 +320,6 @@ func (l *nativeSessionLedger) matchingBindingsLocked(tabID, chatID, providerID, 
 	return matches
 }
 
-func ambiguousNativeBinding(tabID, chatID, providerID string) nativeSessionBinding {
-	return nativeSessionBinding{
-		TabID: strings.TrimSpace(tabID), ChatID: strings.TrimSpace(chatID), ProviderID: normalizeProviderID(providerID),
-		Quarantined: true, ResumeSafe: false,
-		QuarantineReason: "multiple provider lanes match this chat selection; explicit repair is required",
-	}
-}
-
 func (l *nativeSessionLedger) enabledFor(opts SessionOptions) bool {
 	return l != nil && l.path != "" && l.loadErr == nil &&
 		strings.TrimSpace(opts.TabID) != "" && strings.TrimSpace(opts.ChatID) != "" &&
@@ -415,7 +334,7 @@ func (l *nativeSessionLedger) ownsSession(tabID, chatID, sessionID string) bool 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, binding := range l.bindings {
-		if binding.ChatID == chatID && (binding.SessionID == sessionID || bindingCurrentThreadID(binding) == sessionID) && !binding.Quarantined {
+		if binding.ChatID == chatID && (binding.SessionID == sessionID || bindingCurrentThreadID(binding) == sessionID) {
 			return true
 		}
 	}
@@ -475,7 +394,7 @@ func (l *nativeSessionLedger) get(tabID, chatID, providerID string) (nativeSessi
 		return nativeSessionBinding{}, false
 	}
 	if len(matches) != 1 {
-		return ambiguousNativeBinding(tabID, chatID, providerID), true
+		return nativeSessionBinding{}, false
 	}
 	return matches[0].binding, true
 }
@@ -506,10 +425,7 @@ func (l *nativeSessionLedger) getForWorkspace(tabID, chatID, providerID, cwd str
 		return nativeSessionBinding{}, false
 	}
 	if len(filtered) != 1 {
-		binding := ambiguousNativeBinding(tabID, chatID, providerID)
-		binding.WorkspaceEpoch = wanted
-		binding.QuarantineReason = "multiple provider lanes match this chat workspace epoch; explicit repair is required"
-		return binding, true
+		return nativeSessionBinding{}, false
 	}
 	return filtered[0].binding, true
 }
@@ -554,41 +470,14 @@ func (l *nativeSessionLedger) bindingsForChat(chatID string) []nativeSessionBind
 	return bindings
 }
 
-// allBindings is exposed only through the one-time actor cutover inventory.
-// Runtime chat resolution must address an exact actor lane and never enumerate
-// this legacy ledger as a fallback authority.
-func (l *nativeSessionLedger) allBindings() []nativeSessionBinding {
-	if l == nil {
-		return nil
-	}
-	l.mu.Lock()
-	bindings := make([]nativeSessionBinding, 0, len(l.bindings))
-	for _, binding := range l.bindings {
-		bindings = append(bindings, binding)
-	}
-	l.mu.Unlock()
-	sort.Slice(bindings, func(i, j int) bool {
-		if bindings[i].ChatID != bindings[j].ChatID {
-			return bindings[i].ChatID < bindings[j].ChatID
-		}
-		return nativeLaneStorageKey(bindings[i].LaneID) < nativeLaneStorageKey(bindings[j].LaneID)
-	})
-	return bindings
-}
-
 func (l *nativeSessionLedger) put(binding nativeSessionBinding) error {
 	if l == nil {
 		return nil
 	}
-	binding = l.normalizeBinding(binding)
-	if binding.TabID == "" || binding.ProviderID == "" || binding.SessionID == "" {
-		return errors.New("native session binding requires tab, provider, and session ids")
-	}
-	if binding.ChatID == "" {
-		return errors.New("native session binding requires a conversation id")
-	}
-	if binding.Quarantined {
-		return nativeLaneError(providercontract.ErrorNativeIdentityConflict, binding.QuarantineReason, nil)
+	var err error
+	binding, err = l.normalizeBinding(binding)
+	if err != nil {
+		return err
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -635,17 +524,12 @@ func (l *nativeSessionLedger) adoptProviderSession(
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
-	if len(matches) != 1 || matches[0].binding.Quarantined {
+	if len(matches) != 1 {
 		return false
 	}
 	key, binding := matches[0].key, matches[0].binding
 	current := firstNonEmpty(binding.ProviderSessionID, binding.SessionID)
 	if previousProviderSessionID != current || lineageGeneration != binding.ThreadLineage+1 || providerSessionID == current {
-		binding.Quarantined = true
-		binding.QuarantineReason = "unverified-provider-lineage-transition"
-		binding.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		l.bindings[key] = binding
-		_ = l.writeLocked()
 		return false
 	}
 	next := providerSessionID
@@ -683,7 +567,7 @@ func (l *nativeSessionLedger) materializeActorLineage(identity providercontract.
 	defer l.mu.Unlock()
 	key := nativeLaneStorageKey(string(identity.ID))
 	binding, ok := l.bindings[key]
-	if !ok || bindingLaneIdentity(binding) != identity || binding.Quarantined {
+	if !ok || bindingLaneIdentity(binding) != identity {
 		return nativeLaneError(providercontract.ErrorNativeIdentityConflict, "actor lineage materialization does not match the native lane", nil)
 	}
 	current := bindingThreadRef(binding)
@@ -714,7 +598,7 @@ func (l *nativeSessionLedger) updateControls(tabID, chatID, providerID, sessionI
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
-	if len(matches) != 1 || matches[0].binding.Quarantined {
+	if len(matches) != 1 {
 		return
 	}
 	key, binding := matches[0].key, matches[0].binding
@@ -740,7 +624,7 @@ func (l *nativeSessionLedger) updateAttachment(tabID, chatID, providerID, sessio
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
-	if len(matches) != 1 || matches[0].binding.Quarantined {
+	if len(matches) != 1 {
 		return false
 	}
 	key, binding := matches[0].key, matches[0].binding
@@ -769,7 +653,7 @@ func (l *nativeSessionLedger) markInFlight(
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
-	if len(matches) != 1 || matches[0].binding.Generation != generation || matches[0].binding.Quarantined {
+	if len(matches) != 1 || matches[0].binding.Generation != generation {
 		return false
 	}
 	key, binding := matches[0].key, matches[0].binding
@@ -804,7 +688,7 @@ func (l *nativeSessionLedger) markOperationConsumed(tabID, chatID, providerID, s
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
-	if len(matches) != 1 || matches[0].binding.Quarantined {
+	if len(matches) != 1 {
 		return false
 	}
 	key, binding := matches[0].key, matches[0].binding
@@ -835,7 +719,7 @@ func (l *nativeSessionLedger) settleOperation(
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
-	if len(matches) != 1 || matches[0].binding.Quarantined {
+	if len(matches) != 1 {
 		return false
 	}
 	key, binding := matches[0].key, matches[0].binding
@@ -875,7 +759,7 @@ func (l *nativeSessionLedger) recordOperationReadback(
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
-	if len(matches) != 1 || matches[0].binding.Quarantined {
+	if len(matches) != 1 {
 		return false
 	}
 	key, binding := matches[0].key, matches[0].binding
@@ -973,7 +857,7 @@ func (l *nativeSessionLedger) writeLocked() error {
 	if err := os.MkdirAll(filepath.Dir(l.path), 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(l.path), ".native-sessions-*.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(l.path), ".provider-lanes-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -994,7 +878,10 @@ func (l *nativeSessionLedger) writeLocked() error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, l.path)
+	if err := os.Rename(tmpName, l.path); err != nil {
+		return err
+	}
+	return durablefs.SyncDirectory(filepath.Dir(l.path))
 }
 
 func nativeLaneError(kind providercontract.ErrorKind, message string, cause error) error {
@@ -1113,13 +1000,6 @@ func (m *Manager) tryRestoreNativeSession(ctx context.Context, opts SessionOptio
 	binding, ok := ledger.getForWorkspace(opts.TabID, opts.ChatID, opts.ProviderID, opts.CWD)
 	if !ok {
 		return SessionInfo{}, false, nil
-	}
-	if binding.Quarantined {
-		return SessionInfo{}, true, nativeLaneError(
-			providercontract.ErrorNativeIdentityConflict,
-			firstNonEmpty(binding.QuarantineReason, "the provider lane identity is ambiguous and requires explicit repair"),
-			nil,
-		)
 	}
 	if binding.SessionID == "" {
 		return SessionInfo{}, true, nativeLaneError(
@@ -1277,9 +1157,6 @@ func (m *Manager) prepareNativeTurn(job *Job, operationID string, prompt []any) 
 	binding, ok := m.nativeSessions.getForWorkspace(job.TabID, job.ChatID, job.ProviderID, job.CWD)
 	if !ok || bindingCurrentThreadID(binding) != job.SessionID {
 		return nil, nil
-	}
-	if binding.Quarantined {
-		return nil, nativeLaneError(providercontract.ErrorNativeIdentityConflict, binding.QuarantineReason, nil)
 	}
 	if binding.PendingOperation != nil {
 		return nil, &providercontract.Error{

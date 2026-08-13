@@ -325,7 +325,14 @@ func cliVersionCommandForProvider(id string) (string, bool) {
 func (m *Manager) providerUpdateLoop() {
 	ticker := time.NewTicker(m.opts.ProviderUpdateInterval)
 	defer ticker.Stop()
-	m.runProviderUpdateTicks(ticker.C)
+	for {
+		select {
+		case <-m.loopStop:
+			return
+		case <-ticker.C:
+			m.scheduleProviderUpdateCheck()
+		}
+	}
 }
 
 func (m *Manager) runProviderUpdateTicks(ticks <-chan time.Time) {

@@ -34,7 +34,6 @@ type PresentationState struct {
 	RuntimeControlRevision uint64
 	ModelControls          json.RawMessage
 	ContextUsageByProvider json.RawMessage
-	LegacyUsage            json.RawMessage
 	PlanLatest             []provider.PlanEntry
 	PlanLatestMessageID    string
 }
@@ -55,7 +54,6 @@ func (p PresentationState) Clone() PresentationState {
 	}
 	out.ModelControls = append(json.RawMessage(nil), p.ModelControls...)
 	out.ContextUsageByProvider = append(json.RawMessage(nil), p.ContextUsageByProvider...)
-	out.LegacyUsage = append(json.RawMessage(nil), p.LegacyUsage...)
 	out.PlanLatest = append([]provider.PlanEntry(nil), p.PlanLatest...)
 	return out
 }
@@ -74,19 +72,8 @@ func (p PresentationState) Validate() error {
 	return nil
 }
 
-type MigrationState struct {
-	Version                  uint32
-	Digest                   string
-	Complete                 bool
-	LegacyObligationMigrated bool
-	LegacyBackgroundMigrated bool
-	BlockedError             provider.ErrorKind
-}
-
 // InitializeChat is the only actor-native creation transition. It is legal
-// only while the actor contains no chat data and deliberately does not mark a
-// legacy migration complete. Existing chats must use MigrateLegacyChat instead
-// so a missing mirror can never be mistaken for a new empty conversation.
+// only while the actor contains no chat data.
 type InitializeChat struct {
 	Presentation PresentationState
 	OperationID  provider.OperationID
@@ -107,68 +94,6 @@ type InitializeFork struct {
 }
 
 func (InitializeFork) chatCommand() {}
-
-// LegacyMessage is the typed migration boundary from the old renderer mirror.
-// Unknown provider attribution is explicit; migration never guesses a lane.
-type LegacyMessage struct {
-	MessageID            string
-	OperationID          provider.OperationID
-	Role                 string
-	Text                 string
-	Result               string
-	Status               string
-	At                   string
-	Attachments          []provider.Attachment
-	TerminalState        string
-	NativeTurnID         string
-	QueueID              string
-	SteerState           string
-	SteerAnchor          *SteerAnchor
-	SteerBoundary        string
-	SteerContinuationID  string
-	SteerContinuationFor string
-	TurnRootID           string
-	TurnTerminal         *bool
-	TurnStartedAt        int64
-	Interrupted          bool
-	RetryPrompt          string
-	Timeline             []TimelineEntry
-	Permission           *provider.PermissionEvent
-}
-
-type MigrateLegacyChat struct {
-	Version      uint32
-	Digest       string
-	Presentation PresentationState
-	Messages     []LegacyMessage
-	StagedQueue  []StagedQueueEntry
-}
-
-func (MigrateLegacyChat) chatCommand() {}
-
-// MigrateLegacyObligation is used only when upgrading a pre-cutover actor
-// receipt that predates actor-owned obligation state. It consumes the old
-// per-tab obligation file once, persists the normalized actor value, and
-// permanently closes that migration ingress for this chat.
-type MigrateLegacyObligation struct{ Obligation *ObligationState }
-
-func (MigrateLegacyObligation) chatCommand() {}
-
-// MigrateLegacyBackground is the one-time ingress for pre-actor spawned-work
-// rows. The daemon builds typed items during versioned startup migration, but
-// every item must still carry exact actor ownership; ordinary runtime snapshots
-// use ReconcileBackgroundSnapshot instead.
-type MigrateLegacyBackground struct{ Items []BackgroundState }
-
-func (MigrateLegacyBackground) chatCommand() {}
-
-// QuarantineLegacyMigration records a per-chat ambiguity discovered while
-// binding pre-actor native threads. It lets the global cutover complete for
-// unrelated chats while this chat remains visible but cannot select, create,
-// resume, or send until an explicit repair protocol is implemented.
-type QuarantineLegacyMigration struct{ Error provider.ErrorKind }
-
-func (QuarantineLegacyMigration) chatCommand() {}
 
 // UpdatePresentation changes only actor-owned chat presentation. Transcript,
 // queue-runtime, lanes and provider activity are intentionally not fields of
@@ -301,7 +226,7 @@ func (PromoteStagedQueue) chatCommand() {}
 
 // DeleteChat writes a durable tombstone before native attachments and cached
 // renderer rows are removed. Force is an explicit user/agent delete intent;
-// it is never inferred from a missing legacy row.
+// it is never inferred from a missing mirror row.
 type DeleteChat struct {
 	OperationID provider.OperationID
 	Force       bool

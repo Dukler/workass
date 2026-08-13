@@ -11,7 +11,7 @@ the local model only proves that the complete external process and inference pat
 
 Mock and fixed smoke-test models are dev/test-only. Production does not
 advertise or accept them through model or tracked-subagent surfaces, and hides
-legacy fixture receipts from the transcript and Turnos rail.
+fixture-only receipts from the transcript and Turnos rail.
 
 ## Architecture
 
@@ -57,7 +57,7 @@ The mock supports:
 - deterministic exact `session/resume` when
   `WORKASS_MOCK_ACP_SESSION_STORE` points to a durable fixture file; select
   `resume` or `none` with `WORKASS_MOCK_ACP_SESSION_CAPABILITY` (`both` remains
-  a legacy alias for `resume` in old fixtures)
+  an old alias for `resume` in existing fixtures)
 - plan updates
 - thought chunks
 - tool-call start and completion updates
@@ -151,7 +151,7 @@ does not block session startup or prompting.
 The native Codex host advertises `_meta.workassTurnReconcileRequest` and
 implements `_workass/turn/reconcile`. After a quiet interval during an
 outstanding `session/prompt`, Workass asks the host to read the authoritative
-Codex thread. A completed/interrupted native turn repairs a lost
+Codex thread. A completed/interrupted native turn reconciles a lost
 `turn/completed` notification and releases the original ACP prompt. Silence by
 itself never completes a turn; an explicitly active native turn keeps running.
 Repeated liveness failures or a terminal turn whose ACP prompt still cannot
@@ -199,7 +199,7 @@ Special prompt markers:
   open and omits the terminal notification so PID/output-file reconciliation
   remains the only running-state authority.
 - `[mock:crash]` exits the mock process mid-turn after a thought update, exercising daemon crash recovery.
-- `[mock:lost-terminal]` streams a complete response, settles its tool/plan, and withholds the original `session/prompt` response until `_workass/turn/reconcile` repairs it.
+- `[mock:lost-terminal]` streams a complete response, settles its tool/plan, and withholds the original `session/prompt` response until `_workass/turn/reconcile` confirms it.
 - `[mock:lost-terminal-unreleased]` reports a terminal provider turn but deliberately refuses to release the ACP prompt, exercising the bounded bridge-recycle fallback.
 - `[mock:active-without-terminal]` goes quiet while still reporting an authoritative active turn, proving that silence is never guessed to mean completion.
 
@@ -352,7 +352,7 @@ health endpoint is unavailable, and connects to an already-running daemon when
 one exists. The package includes the pinned Electron runtime, renderer,
 portable Node, and native provider hosts, so Windows does not run npm.
 
-The legacy scripts remain available only for existing endpoint workflows:
+The endpoint-specific scripts remain available only for existing workflows:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File desktop\scripts\Dev-Launch.ps1

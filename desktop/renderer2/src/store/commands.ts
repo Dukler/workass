@@ -2,7 +2,7 @@
 // promotion (or any relaunch that hands Electron a fresh device identity) can
 // leave this app RUNNING, CONNECTED, and yet not the controller — empty model
 // catalog, every send refused with lan:not-controller — with nothing in the UI
-// able to repair it. That state cost the user a terminal on 2026-07-26.
+// able to recover it. That state cost the user a terminal on 2026-07-26.
 //
 // So "Recargar" is a recovery hatch, and the rule that shapes it is: it must not
 // depend on the machinery that might be the broken thing. No store round-trip,
@@ -11,7 +11,7 @@
 
 /** Marker the shell's controller-migration script writes once it has taken the
  *  lease for a device. Its presence is what stops that device stealing control
- *  back later — and therefore what stops an ordinary reload from repairing a
+ *  back later — and therefore what stops an ordinary reload from recovering a
  *  lease stranded on a dead device identity. Clearing it arms exactly one
  *  re-take on the next load. Mirrors desktop/shell/view-server.js. */
 export const CONTROLLER_MIGRATION_KEY = 'workass.shell.controllerMigration.v1';
@@ -26,7 +26,7 @@ export interface ReconnectDeps {
   /** The LOCAL bridge's lan:take-control. Never the machine router's: control of
    *  a remote daemon is not what a reload on this machine is asking for. */
   takeControl?: () => Promise<unknown>;
-	/** Shell-owned daemon restart + startup repair. It is local-only and may be
+	/** Shell-owned daemon restart. It is local-only and may be
 	 * absent in a plain browser client, where reconnect still degrades safely. */
 	 restartDaemon?: () => Promise<unknown>;
   reload?: () => void;

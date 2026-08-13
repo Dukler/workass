@@ -254,22 +254,6 @@ func TestCodexBridgeLaunchUsesWorkassAppServerHostAndOfficialExecutable(t *testi
 	}
 }
 
-func TestNormalizeProviderCacheMigratesZedFrontierAdaptersToNativeProviders(t *testing.T) {
-	root := repoRoot(t)
-	providers := NormalizeProviderCacheConfigs([]ProviderConfig{
-		{ID: "claude", Name: "Claude Code ACP", Command: "claude-agent-acp", ResolvedCommand: "/old/claude-agent-acp", Args: []string{}, Badge: "agent", Enabled: true},
-		{ID: "codex", Name: "Codex ACP", Command: "codex-acp", ResolvedCommand: "/old/codex-acp", Args: []string{}, Badge: "agent", Enabled: true},
-	}, root)
-	claude, _ := providerFromSlice(providers, "claude")
-	if claude.Command != "claude" || claude.ResolvedCommand != "" || claude.Name != "Claude Code" || claude.Badge != "native" {
-		t.Fatalf("migrated Claude = %#v", claude)
-	}
-	codex, _ := providerFromSlice(providers, "codex")
-	if codex.Command != "codex" || codex.ResolvedCommand != "" || codex.Name != "Codex" || codex.Badge != "native" {
-		t.Fatalf("migrated Codex = %#v", codex)
-	}
-}
-
 func executableName(base string) string {
 	if runtime.GOOS == "windows" {
 		return base + ".cmd"

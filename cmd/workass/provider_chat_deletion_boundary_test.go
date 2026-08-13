@@ -18,16 +18,11 @@ func TestDeletedActorDoesNotBlockStartupReconciliation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create deleted actor: %v", err)
 	}
-	if err := engine.Apply(chat.MigrateLegacyChat{
-		Version: 2, Digest: "deleted-startup-digest",
+	if err := engine.Apply(chat.InitializeChat{
+		OperationID: "deleted-startup-create", Digest: "deleted-startup-digest",
 		Presentation: chat.PresentationState{TabID: "deleted-startup-tab", Title: "Deleted"},
 	}); err != nil {
 		t.Fatalf("initialize deleted actor: %v", err)
-	}
-	if err := engine.Apply(chat.MigrateLegacyObligation{Obligation: &chat.ObligationState{
-		State: "needs_input", Source: "test", OpenedAt: "2026-08-11T12:00:00Z", UpdatedAt: "2026-08-11T12:00:00Z",
-	}}); err != nil {
-		t.Fatalf("add deleted actor obligation: %v", err)
 	}
 	if err := engine.Apply(chat.DeleteChat{OperationID: "delete-startup", Force: true}); err != nil {
 		t.Fatalf("tombstone deleted actor: %v", err)

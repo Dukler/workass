@@ -19,6 +19,8 @@ import (
 	providercontract "workass/internal/provider"
 )
 
+var errActorChatNotFound = errors.New("durable chat actor does not exist")
+
 // providerChatRuntime is the one command boundary shared by renderer, LAN,
 // mobile, and agent-control starts. It owns one durable actor per immutable
 // ChatID; tab ids remain disposable attachment metadata.
@@ -33,7 +35,7 @@ type providerChatRuntime struct {
 	known   map[string]struct{}
 	bootErr error
 	// actorsPaused is used only by the daemon's staged startup path. Durable
-	// actor construction and migration may happen before the network listener,
+	// actor construction may happen before the network listener,
 	// but no coordinator may resume a provider effect until that listener is
 	// accepting MCP connections.
 	actorsPaused bool
@@ -68,18 +70,33 @@ func newProviderChatRuntimeWithStartupMode(manager *acp.Manager, sessions *sessi
 		runtime.bootErr = errors.New("provider chat runtime requires manager, durable state, and state directory")
 		return runtime
 	}
-	states, err := chat.DiscoverFileStates(filepath.Join(stateDir, "provider-chats"))
-	if err != nil {
+	actorDir := filepath.Join(stateDir, "provider-chats")
+	if err := chat.UpgradeActorStoreV20(actorDir, func(chatID string) ([]chat.StoredLane, error) {
+		selections, err := manager.StoredProviderLaneSelections(chatID)
+		if err != nil {
+			return nil, err
+		}
+		lanes := make([]chat.StoredLane, 0, len(selections))
+		for _, selection := range selections {
+			lanes = append(lanes, chat.StoredLane{
+				Identity: selection.Identity, Thread: selection.Thread, Owner: selection.Owner,
+				CWD: selection.CWD, ModelID: selection.ModelID, ModeID: selection.ModeID, Context: selection.Context,
+			})
+		}
+		return lanes, nil
+	}); err != nil {
 		runtime.bootErr = err
 	} else {
+		states, err := chat.DiscoverFileStates(actorDir)
+		if err != nil {
+			runtime.bootErr = err
+		}
 		for _, state := range states {
 			// FileStore may contain a schema-upgraded empty envelope from a
 			// chat:create attempt that never committed InitializeChat. It has no
-			// accepted chat identity and is not part of the immutable cutover
-			// inventory, so discovery must not turn it into a runtime chat. A
-			// referenced interrupted-cutover actor is repaired separately from
-			// the receipt; any nonempty pre-initialization state still fails
-			// closed through actor construction.
+			// accepted chat identity, so discovery must not turn it into a runtime
+			// chat. Any nonempty pre-initialization state still fails closed through
+			// actor construction.
 			if unacceptedEmptyActorState(state) {
 				continue
 			}
@@ -93,9 +110,6 @@ func newProviderChatRuntimeWithStartupMode(manager *acp.Manager, sessions *sessi
 	// any resumed lane can execute a provider effect.
 	manager.SetChatEnvObserver(runtime.observeChatEnv)
 	manager.SetChatEnvRestorer(runtime.restoreActorChatEnvReference)
-	if runtime.bootErr == nil {
-		runtime.bootErr = runtime.completeLegacyChatCutover()
-	}
 	if runtime.bootErr == nil {
 		// Install semantic ingress before any resumed lane or manager recovery can
 		// publish background executor evidence. A nil-observer window would make
@@ -131,17 +145,15 @@ func unacceptedEmptyActorState(state chat.State) bool {
 		len(state.WorkspaceMutationReceipts) != 0 || len(state.LaneSelectionMutationReceipts) != 0 || len(state.CancelMutationReceipts) != 0 ||
 		len(state.AgentWaitObservationReceipts) != 0 || len(state.Operations) != 0 || len(state.Outbox) != 0 || len(state.Tools) != 0 ||
 		len(state.Plans) != 0 || len(state.Permissions) != 0 || len(state.Background) != 0 || len(state.Usage) != 0 ||
-		len(state.Compactions) != 0 || len(state.Transport) != 0 || state.Migration != (chat.MigrationState{}) {
+		len(state.Compactions) != 0 || len(state.Transport) != 0 {
 		return false
 	}
 	presentation := state.Presentation.Clone()
-	if !emptyActorRawJSON(presentation.ModelControls) || !emptyActorRawJSON(presentation.ContextUsageByProvider) ||
-		!emptyActorRawJSON(presentation.LegacyUsage) || len(presentation.PlanLatest) != 0 {
+	if !emptyActorRawJSON(presentation.ModelControls) || !emptyActorRawJSON(presentation.ContextUsageByProvider) || len(presentation.PlanLatest) != 0 {
 		return false
 	}
 	presentation.ModelControls = nil
 	presentation.ContextUsageByProvider = nil
-	presentation.LegacyUsage = nil
 	presentation.PlanLatest = nil
 	environment := state.Environment.Clone()
 	if !emptyActorRawJSON(environment.Payload) || !emptyActorRawJSON(environment.Checkpoints) || !emptyActorRawJSON(environment.Reference) {
@@ -173,11 +185,7 @@ func providerChatStatePath(stateDir, chatID string) string {
 }
 
 func (r *providerChatRuntime) actor(chatID string) (*providerChatActor, error) {
-	return r.actorFromSource(chatID, nil, nil)
-}
-
-func (r *providerChatRuntime) actorFromLegacy(chatID string, legacy map[string]any) (*providerChatActor, error) {
-	return r.actorFromSource(chatID, legacy, nil)
+	return r.openActor(chatID, nil)
 }
 
 func (r *providerChatRuntime) actorForNewChat(chatID string, presentation chat.PresentationState) (*providerChatActor, error) {
@@ -191,7 +199,7 @@ func (r *providerChatRuntime) actorForNewChatOperation(chatID string, presentati
 		return nil, err
 	}
 	command := chat.InitializeChat{Presentation: presentation, OperationID: operationID, Digest: digest}
-	return r.actorFromSource(chatID, nil, &command)
+	return r.openActor(chatID, &command)
 }
 
 func (r *providerChatRuntime) actorForFork(chatID string, command chat.InitializeFork) (*providerChatActor, error) {
@@ -294,7 +302,7 @@ func (r *providerChatRuntime) existingForkActor(chatID string, operationID provi
 	return actor, true, nil
 }
 
-func (r *providerChatRuntime) actorFromSource(chatID string, legacy map[string]any, initialize *chat.InitializeChat) (*providerChatActor, error) {
+func (r *providerChatRuntime) openActor(chatID string, initialize *chat.InitializeChat) (*providerChatActor, error) {
 	if r == nil || r.manager == nil || r.sessions == nil {
 		return nil, errors.New("provider chat runtime is unavailable")
 	}
@@ -309,7 +317,7 @@ func (r *providerChatRuntime) actorFromSource(chatID string, legacy map[string]a
 	}
 	if actor := r.actors[chatID]; actor != nil {
 		state := actor.engine.Snapshot()
-		if state.Deleted && (legacy != nil || initialize != nil) {
+		if state.Deleted && initialize != nil {
 			return nil, errors.New("chat was durably deleted")
 		}
 		if initialize != nil {
@@ -323,21 +331,11 @@ func (r *providerChatRuntime) actorFromSource(chatID string, legacy map[string]a
 	if err != nil {
 		return nil, fmt.Errorf("open provider chat actor: %w", err)
 	}
-	if legacy != nil {
-		engine, err = r.reconcileUncommittedLegacyActor(chatID, engine, legacy)
-		if err != nil {
-			return nil, err
-		}
-	}
 	state := engine.Snapshot()
-	if state.Deleted && (legacy != nil || initialize != nil) {
+	if state.Deleted && initialize != nil {
 		return nil, errors.New("chat was durably deleted")
 	}
 	switch {
-	case legacy != nil:
-		// Before the global cutover receipt, replaying the exact migration source
-		// is an idempotency check. A changed source conflicts and fails closed.
-		err = r.migrateLegacyChatFromSource(chatID, engine, legacy)
 	case !state.Initialized && initialize != nil:
 		command := *initialize
 		command.Presentation = initialize.Presentation.Clone()
@@ -495,11 +493,6 @@ func (r *providerChatRuntime) ResumeActors() error {
 			actor.coordinator.Wake()
 			continue
 		}
-		if state.Migration.BlockedError != "" {
-			// A quarantined chat remains visible and deletable but owns no live
-			// provider/environment effects until an explicit repair exists.
-			continue
-		}
 		if err := r.restoreActorEnvironment(actor); err != nil {
 			return err
 		}
@@ -650,7 +643,7 @@ func (r *providerChatRuntime) ChatWorkspaceForExactPair(tabID, chatID string) (s
 // actorForExactChatPair is the ownership fence for chat-scoped diagnostic
 // surfaces. A ChatID alone is not sufficient: a stale renderer tab must not
 // read or mutate another attachment's Entorno/checkpoint state, and a deleted
-// actor must never be resurrected through the manager cache.
+// actor must never be recreated through the manager cache.
 func (r *providerChatRuntime) actorForExactChatPair(tabID, chatID string) (*providerChatActor, chat.State, error) {
 	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
 	if tabID == "" || chatID == "" {
@@ -718,7 +711,7 @@ func (r *providerChatRuntime) observeChatEnv(payload acp.ChatEnvPayload) error {
 }
 
 // ChatEnvGet returns only the actor's durable Entorno projection. A missing
-// observation is an honest empty state; it is never filled from the retired
+// observation is an honest empty state; it is never filled from the
 // manager cache.
 func (r *providerChatRuntime) ChatEnvGet(tabID, chatID string) (acp.ChatEnvPayload, error) {
 	_, state, err := r.actorForExactChatPair(tabID, chatID)
@@ -953,7 +946,7 @@ func workspaceDetachTargets(state chat.State, tabID, targetCWD, requestedSession
 	if state.Presentation.CWD != nil {
 		currentCWD = strings.TrimSpace(*state.Presentation.CWD)
 	}
-	workspaceChanged := currentCWD == "" || !sameLegacyFilesystemPath(currentCWD, targetCWD)
+	workspaceChanged := currentCWD == "" || !sameFilesystemPath(currentCWD, targetCWD)
 	targets := make([]workspaceDetachTarget, 0)
 	seenConnections := make(map[string]struct{})
 	requestedFound := false
@@ -1114,7 +1107,6 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 	presentation.AgentQueueRevision = 0
 	presentation.RuntimeControlRevision = 0
 	presentation.ContextUsageByProvider = nil
-	presentation.LegacyUsage = nil
 	presentation.PlanLatest = nil
 	presentation.PlanLatestMessageID = ""
 	if cwd := strings.TrimSpace(fieldString(arg, "cwd")); cwd != "" {
@@ -2542,7 +2534,7 @@ func (r *providerChatRuntime) PendingPermissions() ([]any, error) {
 	return out, nil
 }
 
-func (r *providerChatRuntime) ReplayPendingPermissions(send func(string, any) error) error {
+func (r *providerChatRuntime) PublishPendingPermissions(send func(string, any) error) error {
 	if send == nil {
 		return nil
 	}
@@ -2597,7 +2589,7 @@ func (r *providerChatRuntime) reconcileObligations(daemonBoot bool) error {
 			return err
 		}
 		state := actor.engine.Snapshot()
-		if state.Deleted || state.Migration.BlockedError != "" || state.Obligation == nil {
+		if state.Deleted || state.Obligation == nil {
 			continue
 		}
 		evidence := r.manager.ChatObligationEvidence(state.Presentation.TabID, state.ChatID)

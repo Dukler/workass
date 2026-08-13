@@ -42,7 +42,6 @@ type LedgerEvent struct {
 	NativeTurnID         string
 	TerminalState        string
 	SteerState           string
-	SteerAnchor          *SteerAnchor
 	SteerBoundary        string
 	SteerContinuationID  string
 	SteerContinuationFor string
@@ -52,20 +51,12 @@ type LedgerEvent struct {
 	Interrupted          bool
 	RetryPrompt          string
 	Terminal             *provider.TerminalEvent
-	Legacy               bool
 	// ContextExcluded marks a visible row copied by an explicit user fork. It
 	// has no child-lane ownership and is never imported into the fresh provider
-	// thread; unlike Legacy, this exclusion is an intentional product action.
+	// thread.
 	ContextExcluded bool
 	Timeline        []TimelineEntry
 	Permission      *provider.PermissionEvent
-}
-
-type SteerAnchor struct {
-	AssistantMessageID string
-	ContentOffset      int
-	ResultOffset       int
-	EventCount         int
 }
 
 // TimelineEntry is the renderer-visible, provider-neutral event sequence owned
@@ -436,21 +427,7 @@ func providerActivityLedgerOwnsLane(state State, laneID provider.LaneID, event L
 	if event.LaneID == laneID {
 		return true
 	}
-	if event.LaneID != "" || !event.Legacy {
-		return false
-	}
-	// Legacy rows intentionally retain unknown inline lane attribution. A
-	// selected migrated lane may still prove ownership through its immutable
-	// coverage record; excluded coverage is not provider ownership.
-	lane, ok := state.Lanes[laneID]
-	if !ok {
-		return false
-	}
-	record, ok := lane.Coverage[event.Sequence]
-	if !ok || record.EventID != event.EventID {
-		return false
-	}
-	return record.Status == CoverageNativeSeen || record.Status == CoverageImported
+	return false
 }
 
 type ToolState struct {
@@ -630,23 +607,21 @@ type OutboxEntry struct {
 type State struct {
 	ChatID   string
 	Revision uint64
-	// Initialized distinguishes a genuinely new actor-owned chat from an empty
-	// pre-cutover sidecar that still requires legacy reconciliation. Migration
-	// is evidence about the old mirror only; it must not be forged for new chats.
+	// Initialized distinguishes a committed chat from an empty actor file left
+	// by a create attempt that never reached its durable transition.
 	Initialized bool
 	// CreationOperationID and CreationDigest are the immutable receipt for the
 	// one actor-native chat creation. They make a lost create reply replay-safe:
 	// the same request returns the existing ChatID, while the same id with
-	// different content fails closed. Legacy-migrated chats deliberately leave
-	// both fields empty because their authority is the migration receipt.
+	// different content fails closed. Chats created before this receipt existed
+	// deliberately leave both fields empty.
 	CreationOperationID provider.OperationID
 	CreationDigest      string
-	// Deleted is a durable tombstone. A migrated chat can never be resurrected
-	// from a stale renderer mirror or legacy JSONL after this bit commits.
+	// Deleted is a durable tombstone. A deleted chat can never be recreated
+	// from a stale renderer mirror after this bit commits.
 	Deleted             bool
 	DeletionOperationID provider.OperationID
 	Presentation        PresentationState
-	Migration           MigrationState
 	// Environment is the durable actor projection for the Entorno rail. The
 	// manager may observe Git and execute filesystem operations, but it is not
 	// allowed to be the post-cutover authority for this chat-scoped state.
@@ -1035,12 +1010,6 @@ func (s State) Validate() error {
 			return err
 		}
 	}
-	if s.Migration.Complete && (s.Migration.Version == 0 || strings.TrimSpace(s.Migration.Digest) == "") {
-		return errors.New("completed chat migration is missing version or digest")
-	}
-	if s.Migration.BlockedError != "" && !s.Migration.Complete {
-		return errors.New("incomplete chat migration cannot be quarantined")
-	}
 	if s.ContextFloor > s.LedgerHead() {
 		return errors.New("chat context floor is ahead of the semantic ledger")
 	}
@@ -1081,10 +1050,6 @@ func (s State) Validate() error {
 		if event.ContextExcluded {
 			if event.LaneID != "" {
 				return errors.New("context-excluded ledger event claims child lane ownership")
-			}
-		} else if event.Legacy {
-			if event.LaneID != "" || event.ProviderID != "" {
-				return errors.New("legacy ledger event guessed provider attribution")
 			}
 		} else {
 			if event.LaneID == "" || event.ProviderID == "" {

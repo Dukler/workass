@@ -12,8 +12,8 @@ import (
 )
 
 // TestActorFileStoreRetainsContentAddressedProviderAttachmentAcrossRestart
-// covers the post-cutover attachment contract end to end. Legacy image bytes
-// are accepted once by the session boundary, the actor persists only an
+// covers the canonical attachment contract end to end. Image bytes are
+// accepted by the session boundary, the actor persists only an
 // immutable content reference, and a restarted actor resolves that reference
 // through the daemon-owned sidecar without embedding provider payload bytes in
 // chat state.
@@ -37,15 +37,15 @@ func TestActorFileStoreRetainsContentAddressedProviderAttachmentAcrossRestart(t 
 	if err != nil {
 		t.Fatalf("create durable actor: %v", err)
 	}
-	if err := engine.Apply(chat.MigrateLegacyChat{
-		Version: 2, Digest: "legacy-image-digest",
+	if err := engine.Apply(chat.InitializeFork{
 		Presentation: chat.PresentationState{TabID: "actor-image-tab", Title: "Images"},
-		Messages: []chat.LegacyMessage{{
-			MessageID: "image-user", OperationID: "image-op", Role: "user", Text: "inspect this", Status: "done",
-			Attachments: attachments,
+		SourceChatID: "actor-image-source", OperationID: "actor-image-create", Digest: "actor-image-create-digest",
+		Messages: []chat.LedgerEvent{{
+			EventID: "source-image-user", MessageID: "image-user", OperationID: "image-op",
+			Role: "user", Text: "inspect this", Status: "done", Attachments: attachments,
 		}},
 	}); err != nil {
-		t.Fatalf("migrate attachment into actor: %v", err)
+		t.Fatalf("initialize attachment actor: %v", err)
 	}
 
 	actorBytes, err := os.ReadFile(actorPath)

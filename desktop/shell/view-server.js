@@ -49,7 +49,7 @@ function controllerMigration(recoverController = false) {
     }
     // A completed migration belongs to one concrete device. Do not let that
     // device steal control back later, but do recover after Electron's device
-    // identity was replaced (including the legacy literal "done" marker).
+    // identity was replaced (including the old literal "done" marker).
     if (deviceId && migratedFor === deviceId && !recoveryAvailable) { report(false); return; }
     // An explicitly requested shell rebuild may consume one recovery attempt
     // when an older duplicate left the daemon lease on a dead device identity.

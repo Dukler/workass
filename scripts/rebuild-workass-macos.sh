@@ -23,7 +23,6 @@ usage:
                                            [--view-port PORT|0]
                                            [--target ABSOLUTE_PATH]
                                            [--working-dir ABSOLUTE_PATH]
-                                           [--migrate-from ABSOLUTE_STATE_PATH]
                                            [--migrate-signing-identity]
 
 Electron rebuilds and relaunches only the client, then proves the daemon PID
@@ -252,7 +251,6 @@ rebuild_daemon() {
   view_port=''
   target=''
   working_dir=''
-  migrate_from=''
   signing_migration=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -264,7 +262,6 @@ rebuild_daemon() {
       --view-port) [ "$#" -ge 2 ] || die "--view-port needs a value"; view_port="$2"; shift 2 ;;
       --target) [ "$#" -ge 2 ] || die "--target needs a value"; target="$2"; shift 2 ;;
       --working-dir) [ "$#" -ge 2 ] || die "--working-dir needs a value"; working_dir="$2"; shift 2 ;;
-      --migrate-from) [ "$#" -ge 2 ] || die "--migrate-from needs a value"; migrate_from="$2"; shift 2 ;;
       --migrate-signing-identity) signing_migration=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown daemon argument: $1" ;;
@@ -293,7 +290,6 @@ rebuild_daemon() {
     esac
   fi
   case "$working_dir" in /*) ;; *) die "--working-dir must be absolute" ;; esac
-  if [ -n "$migrate_from" ]; then case "$migrate_from" in /*) ;; *) die "--migrate-from must be absolute" ;; esac; fi
   case "$bind" in localhost|lan) ;; *) die "--bind must be localhost or lan" ;; esac
   case "$label" in *[!A-Za-z0-9._-]*|'') die "invalid launchd label" ;; esac
   case "$port" in *[!0-9]*|'') die "invalid port" ;; esac
@@ -377,12 +373,12 @@ rebuild_daemon() {
     echo "[daemon] applying stable $profile signature" | tee -a "$build_log"
     workass_codesign_sign_binary "$candidate" "$WORKASS_BUNDLE_ID.daemon" >>"$build_log" 2>&1
     if [ -f "$target" ] && ! workass_codesign_mutually_compatible "$target" "$candidate"; then
-      if [ "$profile" != prod ] && workass_codesign_is_legacy_adhoc "$target"; then
+      if [ "$profile" != prod ] && workass_codesign_is_adhoc_cdhash "$target"; then
         # A development target that only ever carried the linker's ad-hoc
         # signature already lost its grants on every previous build. Adopting
         # the persistent identity costs one last authorization.
         echo "[daemon] adopting the persistent identity for the $profile daemon" | tee -a "$build_log"
-      elif [ "$signing_migration" -ne 1 ] || ! workass_codesign_is_legacy_adhoc "$target"; then
+      elif [ "$signing_migration" -ne 1 ] || ! workass_codesign_is_adhoc_cdhash "$target"; then
         die "current and candidate daemon identities are incompatible; refusing a rebuild that would reset macOS privacy grants (use --migrate-signing-identity only once)"
       else
         echo "[daemon] one-time signing identity migration authorized" | tee -a "$build_log"
@@ -394,7 +390,7 @@ rebuild_daemon() {
     candidate_cdhash=$(workass_codesign_cdhash "$candidate")
     target_cdhash=''
     if [ -f "$target" ]; then target_cdhash=$(workass_codesign_cdhash "$target"); fi
-    if [ -z "$migrate_from" ] && [ -n "$candidate_cdhash" ] && [ "$candidate_cdhash" = "$target_cdhash" ]; then
+    if [ -n "$candidate_cdhash" ] && [ "$candidate_cdhash" = "$target_cdhash" ]; then
       rm -f "$candidate"
       echo "[daemon] installed daemon already matches this build; no handoff dispatched" | tee -a "$build_log"
       echo "DAEMON_ALREADY_CURRENT target=$target cdhash=$candidate_cdhash"
@@ -459,7 +455,7 @@ rebuild_daemon() {
   argument_index=0
   runtime_path="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
   runtime_home="$HOME"
-  for argument in "$worker" "$repo_root" "$candidate" "$old_pid" "$port" "$bind" "$state_dir" "$label" "$handoff_log" "$status_file" "$view_port" "$runtime_path" "$runtime_home" "$target" "$working_dir" "$migrate_from"; do
+  for argument in "$worker" "$repo_root" "$candidate" "$old_pid" "$port" "$bind" "$state_dir" "$label" "$handoff_log" "$status_file" "$view_port" "$runtime_path" "$runtime_home" "$target" "$working_dir"; do
     plutil -insert "ProgramArguments.$argument_index" -string "$argument" "$handoff_plist"
     argument_index=$((argument_index + 1))
   done

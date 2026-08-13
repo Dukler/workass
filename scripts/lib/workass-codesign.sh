@@ -153,12 +153,12 @@ workass_codesign_verify_stable() {
   esac
 }
 
-workass_codesign_is_legacy_adhoc() {
-  workass_codesign_legacy_target="$1"
-  workass_codesign_legacy_signature_details=$(codesign -d --verbose=4 "$workass_codesign_legacy_target" 2>&1) || return 1
-  workass_codesign_legacy_requirement=$(workass_codesign_requirement "$workass_codesign_legacy_target")
-  printf '%s\n' "$workass_codesign_legacy_signature_details" | grep -Eq 'Signature=adhoc|flags=.*adhoc' || return 1
-  case "$workass_codesign_legacy_requirement" in *cdhash*) return 0 ;; *) return 1 ;; esac
+workass_codesign_is_adhoc_cdhash() {
+  workass_codesign_adhoc_target="$1"
+  workass_codesign_adhoc_signature_details=$(codesign -d --verbose=4 "$workass_codesign_adhoc_target" 2>&1) || return 1
+  workass_codesign_adhoc_requirement=$(workass_codesign_requirement "$workass_codesign_adhoc_target")
+  printf '%s\n' "$workass_codesign_adhoc_signature_details" | grep -Eq 'Signature=adhoc|flags=.*adhoc' || return 1
+  case "$workass_codesign_adhoc_requirement" in *cdhash*) return 0 ;; *) return 1 ;; esac
 }
 
 workass_codesign_sign_app() {

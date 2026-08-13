@@ -1,7 +1,6 @@
 // workass shell — minimal Electron window over the always-on Go daemon.
 // The daemon owns state/agents; the shell-owned loopback view server owns only
 // renderer bytes so Electron can rebuild/restart without touching ACP turns.
-// Legacy desktop/main.js is the old full Electron app and stays untouched.
 const { app, BrowserWindow, WebContentsView, session, net, ipcMain, shell, nativeImage, dialog, Menu } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');

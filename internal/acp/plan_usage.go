@@ -483,7 +483,14 @@ type planUsageRefreshTarget struct {
 func (m *Manager) planUsageLoop() {
 	ticker := time.NewTicker(m.opts.PlanUsageRefreshInterval)
 	defer ticker.Stop()
-	m.runPlanUsageTicks(ticker.C)
+	for {
+		select {
+		case <-m.loopStop:
+			return
+		case <-ticker.C:
+			m.refreshLivePlanUsage()
+		}
+	}
 }
 
 func (m *Manager) runPlanUsageTicks(ticks <-chan time.Time) {

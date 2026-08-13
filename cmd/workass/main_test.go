@@ -488,22 +488,7 @@ func TestWireE2EAppChatAssertsJobEventChannel(t *testing.T) {
 
 func TestStateDigestIsBodyFreeAndUnder64KiBForTwoHundredChats(t *testing.T) {
 	stateDir := t.TempDir()
-	chats := make([]any, 0, 200)
-	for i := 0; i < 200; i++ {
-		tabID := fmt.Sprintf("t%03d", i)
-		chatID := fmt.Sprintf("c%03d", i)
-		fixture := sessionMirrorFixture(tabID, chatID, "body token=digest-secret")
-		chat := mapFromAnyMain(anySlice(fixture["chats"])[0])
-		chat["queue"] = []any{map[string]any{"id": fmt.Sprintf("q%03d", i), "text": "queued body"}}
-		chat[agentQueueRevisionField] = i + 1
-		chat[runtimeControlRevisionField] = i + 2
-		chats = append(chats, chat)
-	}
-	snapshot := sessionMirrorFixture("unused", "unused-chat", "unused")
-	snapshot["activeId"] = "t000"
-	snapshot["chats"] = chats
-	writeLegacySessionSnapshot(t, stateDir, snapshot)
-	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
+	store := sharedSessionStore(stateDir)
 	root := repoRoot(t)
 	manager := acp.NewManager(acp.Options{
 		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
@@ -515,6 +500,25 @@ func TestStateDigestIsBodyFreeAndUnder64KiBForTwoHundredChats(t *testing.T) {
 	})
 	t.Cleanup(func() { manager.Reset() })
 	providerChats := newProviderChatRuntime(manager, store, stateDir)
+	if err := providerChats.StartupError(); err != nil {
+		t.Fatalf("start actor runtime: %v", err)
+	}
+	t.Cleanup(func() { _ = providerChats.Close(context.Background()) })
+	for i := 0; i < 200; i++ {
+		tabID := fmt.Sprintf("t%03d", i)
+		chatID := fmt.Sprintf("c%03d", i)
+		if _, err := providerChats.CreateRendererChat(map[string]any{
+			"tabId": tabID, "chatId": chatID, "operationId": "digest-create-" + chatID,
+			"focus": i == 0, "title": "Digest " + chatID, "providerId": "mock",
+		}); err != nil {
+			t.Fatalf("create actor %s: %v", chatID, err)
+		}
+	}
+	if _, err := providerChats.ReplaceStagedQueue("t000", "c000", "digest-queue", 0, []any{map[string]any{
+		"id": "q000", "text": "queued body token=digest-secret", "source": "host", "delivery": "queue",
+	}}); err != nil {
+		t.Fatalf("seed actor queue: %v", err)
+	}
 
 	hub := wire.NewHub()
 	settings := newAppSettingsStore(filepath.Join(stateDir, "app-settings.json"))
@@ -540,9 +544,9 @@ func TestStateDigestIsBodyFreeAndUnder64KiBForTwoHundredChats(t *testing.T) {
 	}
 	first := mapFromAnyMain(items[0])
 	if first["tabId"] != "t000" || first["chatId"] != "c000" ||
-		first["lastMessageId"] != "client-a" || first["messageCount"] != 2 ||
+		first["lastMessageId"] != nil || first["messageCount"] != 0 ||
 		first["queueLen"] != 1 || first["queueHeadId"] != "q000" ||
-		first["agentQueueRevision"] != 1 || first["runtimeControlRevision"] != 2 {
+		first["agentQueueRevision"] != 1 || first["runtimeControlRevision"] != 0 {
 		t.Fatalf("first chat digest = %#v", first)
 	}
 	if fieldString(digest, "settingsRevision") == "" || fieldString(digest, "procHash") == "" {
@@ -802,15 +806,6 @@ func TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCW
 		t.Fatalf("write index: %v", err)
 	}
 
-	snapshot := sessionMirrorFixture(tabID, chatID, "canonical before move")
-	chat := chatFromSnapshot(snapshot, tabID)
-	chat["cwd"] = oldCWD
-	// Workspace lifecycle is tested on an empty migrated chat. A nonempty
-	// history cannot enter a new workspace/provider lane unless that provider
-	// exposes verified non-sampling context import; the mock's history field is
-	// deliberately not a substitute.
-	chat["messages"] = []any{}
-	writeLegacySessionSnapshot(t, stateDir, snapshot)
 	sessionState := sharedSessionStore(stateDir)
 
 	hub := wire.NewHub()
@@ -828,6 +823,15 @@ func TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCW
 		_ = providerChats.Close(context.Background())
 		manager.Reset()
 	})
+	if err := providerChats.StartupError(); err != nil {
+		t.Fatalf("start actor runtime: %v", err)
+	}
+	if _, err := providerChats.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "wire-workspace-create", "focus": true,
+		"title": "Workspace lifecycle", "cwd": oldCWD, "providerId": "mock",
+	}); err != nil {
+		t.Fatalf("create workspace actor: %v", err)
+	}
 	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
@@ -1633,7 +1637,6 @@ func TestWireTraceMockEngineCrashReattachesExactThread(t *testing.T) {
 		StdoutFlushInterval:  5 * time.Millisecond,
 		ThoughtFlushInterval: 5 * time.Millisecond,
 		RSSSampleInterval:    time.Hour,
-		CrashRecoveryBackoff: 20 * time.Millisecond,
 		CompactionEnabled:    false,
 	})
 	sessionState := sharedSessionStore(stateDir)
@@ -1706,7 +1709,6 @@ func TestWireTraceMockCrashAmbiguityDoesNotResendOrRespawn(t *testing.T) {
 		StdoutFlushInterval:  5 * time.Millisecond,
 		ThoughtFlushInterval: 5 * time.Millisecond,
 		RSSSampleInterval:    time.Hour,
-		CrashRecoveryBackoff: 20 * time.Millisecond,
 		CompactionEnabled:    false,
 	})
 	sessionState := sharedSessionStore(stateDir)
@@ -2203,7 +2205,7 @@ func TestWireTraceGroupedCatalogAndInterleavedProviders(t *testing.T) {
 	if catalogGroup(groups, "mock") == nil || catalogGroup(groups, "fake-agent") == nil {
 		t.Fatalf("catalog groups missing providers: %#v", groups)
 	}
-	t.Logf("trace event chat:catalog groups=%s legacyModels=%d legacyModes=%d", groupSummary(groups), len(catalog["models"].([]any)), len(catalog["modes"].([]any)))
+	t.Logf("trace event chat:catalog groups=%s flatModels=%d flatModes=%d", groupSummary(groups), len(catalog["models"].([]any)), len(catalog["modes"].([]any)))
 
 	createWireActorChat(t, client, 100, "wire-mock-tab", "chat-wire-mock", "mock")
 	createWireActorChat(t, client, 101, "wire-fake-tab", "chat-wire-fake", "fake-agent")
@@ -2491,16 +2493,6 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 		t.Fatalf("write index: %v", err)
 	}
 	stateDir := filepath.Join(t.TempDir(), "state")
-	snapshot := map[string]any{
-		"v": json.Number("1"), "activeId": "warm-plan-tab", "seq": json.Number("1"),
-		"theme": "dark", "panes": map[string]any{}, "mode": "chats",
-		"chats": []any{map[string]any{
-			"id": "warm-plan-tab", "chatId": "warm-plan-chat", "title": "Warm plan", "titleLocked": true,
-			"group": nil, "cwd": nil, "currentModelId": nil, "currentModeId": nil,
-			"draft": "", "providerId": "claude", "messages": []any{},
-		}},
-	}
-	writeLegacySessionSnapshot(t, stateDir, snapshot)
 	sessionState := sharedSessionStore(stateDir)
 	tracePath := filepath.Join(t.TempDir(), "wire-fake-methods.log")
 
@@ -2525,6 +2517,15 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 		_ = providerChats.Close(context.Background())
 		manager.Reset()
 	})
+	if err := providerChats.StartupError(); err != nil {
+		t.Fatalf("start actor runtime: %v", err)
+	}
+	if _, err := providerChats.CreateRendererChat(map[string]any{
+		"tabId": "warm-plan-tab", "chatId": "warm-plan-chat", "operationId": "warm-plan-create", "focus": true,
+		"title": "Warm plan", "titleLocked": true, "cwd": root, "providerId": "claude",
+	}); err != nil {
+		t.Fatalf("create plan actor: %v", err)
+	}
 	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
@@ -3180,8 +3181,6 @@ func TestWireTraceForkChatSeedsPrefixAndDiverges(t *testing.T) {
 		RSSSampleInterval:      time.Hour,
 		SpareSessions:          0,
 		CompactionEnabled:      false,
-		CrashRecoveryBackoff:   10 * time.Millisecond,
-		CrashRecoveryWindow:    time.Second,
 		LifecycleCheckInterval: time.Hour,
 	})
 	sessionState := sharedSessionStore(stateDir)

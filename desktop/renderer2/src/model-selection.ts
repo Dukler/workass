@@ -37,7 +37,7 @@ function findExact(groups: CatalogGroup[], models: ModelOption[], modelId: strin
 // Brackets are ambiguous: Codex uses `${base}[${effort}]`, while Claude uses
 // literal adapter model ids such as `opus[1m]`. An exact catalog id always wins.
 // Prefer an advertised effort; a canonical suffix on an existing base can also
-// be repaired when a persisted capability has disappeared.
+// be normalized when a persisted capability has disappeared.
 export function resolveModelSelection(
   groups: CatalogGroup[],
   models: ModelOption[],
@@ -57,7 +57,7 @@ export function resolveModelSelection(
     }
     // A persisted selection can outlive a provider capability change. Exact
     // catalog ids already won above, so a canonical suffix on an existing base
-    // is safely repairable: retain the user's model and drop only the now-invalid
+    // can be normalized safely: retain the user's model and drop only the now-invalid
     // effort (notably stale haiku[low] from older Claude catalogs).
     if (baseModel && CANONICAL_EFFORTS.has(suffix[2].toLowerCase())) {
       return { base: suffix[1], effort: null, model: baseModel };
@@ -67,7 +67,7 @@ export function resolveModelSelection(
   return { base: selectedId, effort: null, model: null };
 }
 
-// Recover a legacy selection only when the chat's own per-model memory proves
+// Resolve a stale selection only when the chat's own per-model memory proves
 // which literal provider id it used. This is intentionally narrower than name
 // or prefix guessing: exactly one remembered non-effort bracket variant must
 // share the degraded selection's root.
@@ -95,7 +95,7 @@ export function recoverRememberedLiteralVariant(
 
 // Claude's adapter can restore its synthetic `default` alias even after the
 // user explicitly selected a visible model. The daemon now canonicalizes that
-// alias, but older persisted chats still need a deterministic repair. Use only
+// alias, but older persisted chats still need deterministic normalization. Use only
 // this chat's own per-model memory and require exactly one remembered model that
 // still exists in the catalog; catalog order and display-name guesses are never
 // model identity.

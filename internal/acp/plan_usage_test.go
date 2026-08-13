@@ -491,7 +491,7 @@ func TestPlanUsageReplayToLateClient(t *testing.T) {
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "done", 0, "end_turn")
 
 	var replayed []collectedEvent
-	manager.ReplayProviderEvents(func(channel string, payload any) error {
+	manager.PublishProviderSnapshots(func(channel string, payload any) error {
 		replayed = append(replayed, collectedEvent{channel: channel, payload: payload})
 		return nil
 	})

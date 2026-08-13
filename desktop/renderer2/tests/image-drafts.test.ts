@@ -116,7 +116,7 @@ test('queued drafts paint immediately and cannot drain until encoding is ready',
   assert.equal(queuedAttachmentsReady(item), true);
 });
 
-test('local mirror omits heavy sent payloads without mutating the daemon snapshot', () => {
+test('local mirror excludes all actor-owned chat payloads without mutating them', () => {
   const mirror = {
     v: 1, activeId: 'tab', seq: 1, theme: 'dark', density: 'compact', mode: 'chats',
     panes: { side: true, rail: true, railWide: false, sideW: 288, railW: 312, browser: false },
@@ -128,13 +128,7 @@ test('local mirror omits heavy sent payloads without mutating the daemon snapsho
     }],
   } satisfies Mirror;
   const local = localMirror(mirror);
-  assert.equal(local.chats[0].messages[0].images, undefined);
-  // The active-chat tail keeps a first-paint skeleton, but never the payload.
-  const skeleton = local.chats[0].messages[0].events as Array<Record<string, unknown>>;
-  assert.equal(skeleton.length, 1);
-  assert.equal(skeleton[0].output, null, 'heavy tool output must not enter localStorage');
-  assert.equal(local.chats[0].queue?.[0].images, undefined);
-  assert.equal(local.chats[0].queue?.[0].attachmentState, 'preparing', 'the hydration gap cannot dispatch a text-only queued turn');
+  assert.deepEqual(local.chats, []);
   assert.equal(mirror.chats[0].messages[0].images?.[0].data, 'large');
   assert.deepEqual(mirror.chats[0].messages[0].events, [{ kind: 'tool', output: 'large tool output' }]);
   assert.equal(mirror.chats[0].queue?.[0].images?.[0].data, 'queued-large');

@@ -30,7 +30,7 @@ grep -Fq 'node --test desktop/shell/*.test.js' "$runner"
 grep -Fq 'WORKASS_CONTROLLER_RECOVERY=1' "$runner"
 grep -Fq 'installed_app="${WORKASS_INSTALLED_APP:-/Applications/Workass.app}"' "$runner"
 grep -Fq 'workass_codesign_sign_binary "$candidate" "$WORKASS_BUNDLE_ID.daemon"' "$runner"
-grep -Fq 'workass_codesign_is_legacy_adhoc "$target"' "$runner"
+grep -Fq 'workass_codesign_is_adhoc_cdhash "$target"' "$runner"
 grep -Fq 'target="${target:-$WORKASS_DATA_ROOT/runtime/workass}"' "$runner"
 grep -Fq 'production daemon target must not use a temporary candidate path' "$runner"
 grep -Fq 'vendor-frontier-hosts.sh" --target darwin-arm64 --offline' "$runner"
@@ -44,6 +44,9 @@ if grep -Fq 'npm root -g' "$runner"; then
   exit 1
 fi
 grep -Fq 'production candidate has no stable designated requirement' "$worker"
+grep -Fq 'snapshot_state || rollback "could not snapshot state before activation"' "$worker"
+grep -Fq 'if ! restore_state_snapshot; then' "$worker"
+grep -Fq 'new daemon failed and state rollback failed' "$worker"
 
 set +e
 temporary_target_output=$(

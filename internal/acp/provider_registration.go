@@ -33,7 +33,6 @@ type providerRegistration struct {
 	Local          bool
 	Authentication providercontract.AuthenticationStrategy
 	Native         *frontierNativeSpec
-	LegacyNames    []string
 	Update         providerUpdateRegistration
 }
 
@@ -190,7 +189,6 @@ var providerRegistrations = map[string]providerRegistration{
 		Detection: nativeDetectionStrategy{}, ProbeTimeout: frontierProbeTimeout,
 		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `claude auth login`"},
 		Native:         &frontierNativeSpec{ProviderID: "claude", DefaultCommand: "claude", OverrideEnv: "WORKASS_CLAUDE_CODE", PathNames: []string{"claude", "claude.exe", "claude.cmd"}},
-		LegacyNames:    []string{"claude-agent-acp", "claude-code-acp"},
 		Adapter: providerAdapter{
 			delivery:  claudeDeliveryStrategy{},
 			planUsage: claudePlanUsageStrategy{},
@@ -212,7 +210,6 @@ var providerRegistrations = map[string]providerRegistration{
 		Detection: nativeDetectionStrategy{}, ProbeTimeout: frontierProbeTimeout,
 		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `codex login`"},
 		Native:         &frontierNativeSpec{ProviderID: "codex", DefaultCommand: "codex", OverrideEnv: "WORKASS_CODEX", PathNames: []string{"codex", "codex.exe", "codex.cmd"}},
-		LegacyNames:    []string{"codex-acp"},
 		Adapter: providerAdapter{
 			delivery:  codexDeliveryStrategy{},
 			planUsage: codexPlanUsageStrategy{},

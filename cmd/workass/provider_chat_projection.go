@@ -12,10 +12,12 @@ import (
 	providercontract "workass/internal/provider"
 )
 
+const sessionProjectionMessageTail = 60
+
 // StateDigest is the lean actor-derived heartbeat projection. It intentionally
 // does not consult session-state.json chat rows: after cutover that file contains
 // daemon-global UI preferences only, and using it here would manufacture a
-// permanent session:get repair loop for every real actor-owned chat.
+// permanent session:get refresh loop for every real actor-owned chat.
 func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, settingsRevision, procHash string) (map[string]any, error) {
 	if r == nil {
 		return nil, errors.New("provider chat digest is unavailable")
@@ -62,10 +64,10 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 	}, nil
 }
 
-// ProjectSession is the pure actor -> frozen Mirror-v1 boundary. The legacy
-// session store contributes daemon-global application preferences and a
-// rebuildable cache only. The eager cutover consumes its one-time migration
-// source before handlers start; projection never lazily falls back to it.
+// ProjectSession is the pure actor -> frozen Mirror-v1 boundary. The session
+// store contributes daemon-global application preferences only. Chat rows carry
+// a bounded actor tail; opening a chat obtains its full ledger through the
+// frozen chat:archive-load read method.
 func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 	if r == nil || r.sessions == nil {
 		return nil, errors.New("provider chat projection is unavailable")
@@ -73,9 +75,6 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 	known, err := r.knownChatIDs()
 	if err != nil {
 		return nil, err
-	}
-	if !r.sessions.actorCutover {
-		return nil, errors.New("provider chat projection requires a verified actor cutover")
 	}
 	root := r.sessions.GlobalSnapshot()
 	projectedChats := make([]any, 0, len(known))
@@ -89,7 +88,7 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 			continue
 		}
 		projected := map[string]any{}
-		if err := projectActorChat(projected, state); err != nil {
+		if err := projectActorChatWithMessageLimit(projected, state, sessionProjectionMessageTail); err != nil {
 			return nil, fmt.Errorf("project actor-native chat %q: %w", chatID, err)
 		}
 		projectedChats = append(projectedChats, projected)
@@ -109,7 +108,7 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 			root["activeId"] = fieldString(mapFromAnyMain(projectedChats[0]), "id")
 		}
 	}
-	if err := materializeSessionSnapshotForWire(root, filepath.Dir(r.sessions.path)); err != nil {
+	if err := rehydrateExternalSessionImages(root, filepath.Dir(r.sessions.path)); err != nil {
 		return nil, err
 	}
 	return root, nil
@@ -125,8 +124,28 @@ func (r *providerChatRuntime) ProjectSessionRaw() ([]byte, error) {
 
 // ProjectArchiveByTab derives the frozen archive payload from the same actor
 // ledger as session:get. After eager cutover, found=false means the tab is not
-// an actor-owned chat; callers must never fall back to the legacy JSONL.
+// an actor-owned chat; callers must never fall back to deleted JSONL storage.
 func (r *providerChatRuntime) ProjectArchiveByTab(tabID string) ([]any, bool, error) {
+	matched, found, err := r.actorByTab(tabID)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	if matched.engine.Snapshot().Deleted {
+		// A tombstone owns this historical tab. Never recreate its transcript.
+		return []any{}, true, nil
+	}
+	projected := map[string]any{}
+	if err := projectActorChat(projected, matched.engine.Snapshot()); err != nil {
+		return nil, false, err
+	}
+	messages := anySlice(projected["messages"])
+	if err := rehydrateExternalSessionImages(messages, filepath.Dir(r.sessions.path)); err != nil {
+		return nil, false, err
+	}
+	return messages, true, nil
+}
+
+func (r *providerChatRuntime) actorByTab(tabID string) (*providerChatActor, bool, error) {
 	tabID = strings.TrimSpace(tabID)
 	if r == nil || tabID == "" {
 		return nil, false, nil
@@ -152,26 +171,13 @@ func (r *providerChatRuntime) ProjectArchiveByTab(tabID string) ([]any, bool, er
 	if matched == nil {
 		return nil, false, nil
 	}
-	if matched.engine.Snapshot().Deleted {
-		// A tombstone owns this historical tab. Never fall through to the legacy
-		// JSONL reader and resurrect its transcript.
-		return []any{}, true, nil
-	}
-	projected := map[string]any{}
-	if err := projectActorChat(projected, matched.engine.Snapshot()); err != nil {
-		return nil, false, err
-	}
-	messages := anySlice(projected["messages"])
-	if err := materializeSessionMessagesForArchive(messages, filepath.Dir(r.sessions.path)); err != nil {
-		return nil, false, err
-	}
-	return messages, true, nil
+	return matched, true, nil
 }
 
 // ApplyRendererSnapshot translates the frozen session:save payload into typed
 // actor commands. Renderer-authored messages, provider runtime fields, lane
 // bindings, permissions, usage and outbox state are ignored; after the actor
-// commit, the legacy store receives only a newly projected cache.
+// commit, the global presentation store receives only daemon-wide UI fields.
 func (r *providerChatRuntime) ApplyRendererSnapshot(snapshot any) (bool, error) {
 	if r == nil || r.sessions == nil {
 		return false, errors.New("provider chat projection is unavailable")
@@ -192,6 +198,10 @@ func (r *providerChatRuntime) ApplyRendererSnapshot(snapshot any) (bool, error) 
 }
 
 func projectActorChat(out map[string]any, state chat.State) error {
+	return projectActorChatWithMessageLimit(out, state, 0)
+}
+
+func projectActorChatWithMessageLimit(out map[string]any, state chat.State, messageLimit int) error {
 	if out == nil {
 		return errors.New("chat projection target is nil")
 	}
@@ -257,112 +267,15 @@ func projectActorChat(out map[string]any, state chat.State) error {
 		out["planLatestMessageId"] = p.PlanLatestMessageID
 	}
 
-	messages := make([]any, 0, len(state.Ledger)+2)
-	seenMessage := make(map[string]struct{}, len(state.Ledger)+2)
-	for _, event := range state.Ledger {
-		message, err := projectLedgerMessage(event)
-		if err != nil {
-			return err
-		}
-		if _, duplicate := seenMessage[event.MessageID]; duplicate {
-			return fmt.Errorf("actor ledger contains duplicate message id %q", event.MessageID)
-		}
-		seenMessage[event.MessageID] = struct{}{}
-		messages = append(messages, message)
-	}
-	if state.Foreground != nil {
-		foreground := state.Foreground
-		if !foreground.UserConsumed {
-			userID := strings.TrimSpace(foreground.Input.Presentation.UserMessageID)
-			if userID == "" {
-				userID = fmt.Sprintf("message:%s:user", foreground.OperationID)
-			}
-			if _, exists := seenMessage[userID]; !exists {
-				userStatus := "pending"
-				if foreground.Status == chat.ForegroundUncertain {
-					userStatus = "done"
-				}
-				user := map[string]any{
-					"id": userID, "role": "user", "content": foreground.Input.Text,
-					"status": userStatus, "at": nilIfEmpty(foreground.StartedAt), "events": []any{},
-				}
-				if queueID := strings.TrimSpace(foreground.Input.Presentation.QueueID); queueID != "" {
-					user[agentQueueMessageField] = queueID
-				}
-				images, err := projectionAttachments(foreground.Input.Attachments)
-				if err != nil {
-					return err
-				}
-				if len(images) > 0 {
-					user["images"] = images
-				}
-				messages = append(messages, user)
-				seenMessage[userID] = struct{}{}
-			}
-		}
-		assistantID := strings.TrimSpace(foreground.CurrentAssistantMessageID)
-		if _, exists := seenMessage[assistantID]; !exists {
-			events, err := projectTimeline(foreground.Timeline)
-			if err != nil {
-				return err
-			}
-			assistantStatus := "running"
-			assistantContent := foreground.AssistantContent
-			if foreground.Status == chat.ForegroundUncertain {
-				assistantStatus = "failed"
-				if strings.TrimSpace(assistantContent) == "" {
-					assistantContent = "Workass could not confirm whether the provider accepted this turn. It will not resend it."
-				}
-			}
-			assistant := map[string]any{
-				"id": assistantID, "role": "assistant", "content": assistantContent,
-				"status": assistantStatus, "at": nil, "events": events,
-			}
-			if foreground.Status == chat.ForegroundUncertain {
-				assistant["interrupted"] = true
-			}
-			if startedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(foreground.StartedAt)); err == nil {
-				assistant["turnStartedAt"] = startedAt.UnixMilli()
-			}
-			if foreground.AssistantResult != "" {
-				assistant["result"] = foreground.AssistantResult
-			}
-			images, err := projectionAttachments(foreground.AssistantAttachments)
-			if err != nil {
-				return err
-			}
-			if len(images) > 0 {
-				assistant["images"] = images
-			}
-			if permission := projectPermission(foreground.Permission); permission != nil {
-				assistant["permission"] = permission
-			}
-			if foreground.Turn.NativeID != "" {
-				assistant["jobId"] = foreground.Turn.NativeID
-			}
-			if assistantID != foreground.RootAssistantMessageID {
-				assistant["turnRootId"] = foreground.RootAssistantMessageID
-				assistant["turnTerminal"] = true
-			}
-			messages = append(messages, assistant)
-			seenMessage[assistantID] = struct{}{}
-		}
-		if state.PendingSteer != nil {
-			steerRows, err := projectPendingSteer(state.PendingSteer, foreground)
-			if err != nil {
-				return err
-			}
-			for _, row := range steerRows {
-				id := fieldString(row, "id")
-				if _, duplicate := seenMessage[id]; duplicate {
-					return fmt.Errorf("pending steer duplicates message id %q", id)
-				}
-				seenMessage[id] = struct{}{}
-				messages = append(messages, row)
-			}
-		}
+	messages, messageCount, err := projectActorMessages(state, messageLimit)
+	if err != nil {
+		return err
 	}
 	out["messages"] = messages
+	if messageLimit > 0 {
+		out["messageCount"] = messageCount
+		out["historyComplete"] = messageCount <= messageLimit
+	}
 	queue, err := projectActorQueue(state.StagedQueue, state.Queue)
 	if err != nil {
 		return err
@@ -387,6 +300,132 @@ func projectActorChat(out map[string]any, state chat.State) error {
 		out["sessionError"] = string(lane.LastError)
 	}
 	return nil
+}
+
+// projectActorMessages scans stable ids for the full ledger but materializes
+// only the suffix requested by session:get. Full archive reads pass limit=0.
+// This keeps startup payload and allocation cost bounded for very large chats.
+func projectActorMessages(state chat.State, limit int) ([]any, int, error) {
+	seenMessage := make(map[string]struct{}, len(state.Ledger)+4)
+	for _, event := range state.Ledger {
+		if _, duplicate := seenMessage[event.MessageID]; duplicate {
+			return nil, 0, fmt.Errorf("actor ledger contains duplicate message id %q", event.MessageID)
+		}
+		seenMessage[event.MessageID] = struct{}{}
+	}
+
+	extra := make([]map[string]any, 0, 4)
+	if foreground := state.Foreground; foreground != nil {
+		if !foreground.UserConsumed {
+			userID := strings.TrimSpace(foreground.Input.Presentation.UserMessageID)
+			if userID == "" {
+				userID = fmt.Sprintf("message:%s:user", foreground.OperationID)
+			}
+			if _, exists := seenMessage[userID]; !exists {
+				userStatus := "pending"
+				if foreground.Status == chat.ForegroundUncertain {
+					userStatus = "done"
+				}
+				user := map[string]any{
+					"id": userID, "role": "user", "content": foreground.Input.Text,
+					"status": userStatus, "at": nilIfEmpty(foreground.StartedAt), "events": []any{},
+				}
+				if queueID := strings.TrimSpace(foreground.Input.Presentation.QueueID); queueID != "" {
+					user[agentQueueMessageField] = queueID
+				}
+				images, err := projectionAttachments(foreground.Input.Attachments)
+				if err != nil {
+					return nil, 0, err
+				}
+				if len(images) > 0 {
+					user["images"] = images
+				}
+				extra = append(extra, user)
+				seenMessage[userID] = struct{}{}
+			}
+		}
+
+		assistantID := strings.TrimSpace(foreground.CurrentAssistantMessageID)
+		if _, exists := seenMessage[assistantID]; !exists {
+			events, err := projectTimeline(foreground.Timeline)
+			if err != nil {
+				return nil, 0, err
+			}
+			assistantStatus := "running"
+			assistantContent := foreground.AssistantContent
+			if foreground.Status == chat.ForegroundUncertain {
+				assistantStatus = "failed"
+				if strings.TrimSpace(assistantContent) == "" {
+					assistantContent = "Workass could not confirm whether the provider accepted this turn. It will not resend it."
+				}
+			}
+			assistant := map[string]any{
+				"id": assistantID, "role": "assistant", "content": assistantContent,
+				"status": assistantStatus, "at": nil, "events": events,
+			}
+			if foreground.Status == chat.ForegroundUncertain {
+				assistant["interrupted"] = true
+			}
+			if startedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(foreground.StartedAt)); err == nil {
+				assistant["turnStartedAt"] = startedAt.UnixMilli()
+			}
+			if foreground.AssistantResult != "" {
+				assistant["result"] = foreground.AssistantResult
+			}
+			images, err := projectionAttachments(foreground.AssistantAttachments)
+			if err != nil {
+				return nil, 0, err
+			}
+			if len(images) > 0 {
+				assistant["images"] = images
+			}
+			if permission := projectPermission(foreground.Permission); permission != nil {
+				assistant["permission"] = permission
+			}
+			if foreground.Turn.NativeID != "" {
+				assistant["jobId"] = foreground.Turn.NativeID
+			}
+			if assistantID != foreground.RootAssistantMessageID {
+				assistant["turnRootId"] = foreground.RootAssistantMessageID
+				assistant["turnTerminal"] = true
+			}
+			extra = append(extra, assistant)
+			seenMessage[assistantID] = struct{}{}
+		}
+
+		steerRows, err := projectPendingSteer(state.PendingSteer, foreground)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, row := range steerRows {
+			id := fieldString(row, "id")
+			if _, duplicate := seenMessage[id]; duplicate {
+				return nil, 0, fmt.Errorf("pending steer duplicates message id %q", id)
+			}
+			seenMessage[id] = struct{}{}
+			extra = append(extra, row)
+		}
+	}
+
+	total := len(state.Ledger) + len(extra)
+	first := 0
+	if limit > 0 && total > limit {
+		first = total - limit
+	}
+	messages := make([]any, 0, total-first)
+	ledgerStart := min(first, len(state.Ledger))
+	for index := ledgerStart; index < len(state.Ledger); index++ {
+		message, err := projectLedgerMessage(state.Ledger[index])
+		if err != nil {
+			return nil, 0, err
+		}
+		messages = append(messages, message)
+	}
+	extraStart := max(0, first-len(state.Ledger))
+	for index := extraStart; index < len(extra); index++ {
+		messages = append(messages, extra[index])
+	}
+	return messages, total, nil
 }
 
 // projectReconciledTerminalJob keeps the frozen live job:end contract after a
@@ -554,14 +593,6 @@ func projectLedgerMessage(event chat.LedgerEvent) (map[string]any, error) {
 		message["steerState"] = event.SteerState
 	} else {
 		delete(message, "steerState")
-	}
-	if event.SteerAnchor != nil {
-		message["steerAnchor"] = map[string]any{
-			"assistantMessageId": event.SteerAnchor.AssistantMessageID,
-			"contentOffset":      event.SteerAnchor.ContentOffset,
-			"resultOffset":       event.SteerAnchor.ResultOffset,
-			"eventCount":         event.SteerAnchor.EventCount,
-		}
 	}
 	if event.SteerBoundary != "" {
 		message["steerBoundary"] = event.SteerBoundary
@@ -954,5 +985,6 @@ func projectActorUsage(target map[string]any, state chat.State) error {
 			return nil
 		}
 	}
-	return setRawProjection(target, "usage", state.Presentation.LegacyUsage)
+	delete(target, "usage")
+	return nil
 }

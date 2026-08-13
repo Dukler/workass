@@ -1,10 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"workass/internal/acp"
 	"workass/internal/wire"
@@ -16,41 +17,50 @@ import (
 // quiet that event never fires again, so an obligation carried only by the
 // event would be invisible to every client that was not already listening.
 func TestSpawnedWorkListCarriesTheObligation(t *testing.T) {
+	root := repoRoot(t)
 	stateDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(stateDir, "obligations"), 0o755); err != nil {
-		t.Fatalf("mkdir obligations: %v", err)
-	}
-	// needs_input deliberately: boot reconciliation rewrites working and parked
-	// records, so seeding either would test the restart rules instead of the
-	// hydration this file is about.
-	snapshot := `{"open":[{"tabId":"tab-1","chatId":"chat-1","state":"needs_input","source":"declared",` +
-		`"note":"esperando tu respuesta","openedAt":"2026-07-27T06:00:00Z","updatedAt":"2026-07-27T06:10:00Z"}]}`
-	if err := os.WriteFile(filepath.Join(stateDir, "obligations", "tab-1.json"), []byte(snapshot), 0o600); err != nil {
-		t.Fatalf("write snapshot: %v", err)
-	}
-	legacySession := map[string]any{
-		"activeId": "tab-1",
-		"chats": []any{
-			map[string]any{"id": "tab-1", "chatId": "chat-1", "title": "Needs input", "messages": []any{}, "queue": []any{}},
-			map[string]any{"id": "tab-2", "chatId": "chat-2", "title": "Quiet", "messages": []any{}, "queue": []any{}},
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{
+			ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
+			CWD: root, Enabled: true, Label: "Workass Mock ACP",
 		},
-	}
-	rawSession, err := json.Marshal(legacySession)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stateDir, sessionStateFilename), rawSession, 0o600); err != nil {
-		t.Fatalf("write legacy session snapshot: %v", err)
-	}
-
-	manager := acp.NewManager(acp.Options{StateDir: stateDir})
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
 	t.Cleanup(func() { manager.Reset() })
-	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
+	store := sharedSessionStore(stateDir)
 	runtime := newProviderChatRuntime(manager, store, stateDir)
 	if err := runtime.StartupError(); err != nil {
-		t.Fatalf("migrate actor obligation: %v", err)
+		t.Fatalf("start actor runtime: %v", err)
 	}
 	t.Cleanup(func() { _ = runtime.Close(t.Context()) })
+	for _, fixture := range []struct {
+		tabID, chatID, title string
+	}{
+		{tabID: "tab-1", chatID: "chat-1", title: "Needs input"},
+		{tabID: "tab-2", chatID: "chat-2", title: "Quiet"},
+	} {
+		if _, err := runtime.CreateRendererChat(map[string]any{
+			"tabId": fixture.tabID, "chatId": fixture.chatID, "operationId": "obligation-create-" + fixture.chatID,
+			"title": fixture.title, "cwd": root, "providerId": "mock",
+		}); err != nil {
+			t.Fatalf("create obligation actor %s: %v", fixture.chatID, err)
+		}
+	}
+	info, err := runtime.Select(context.Background(), acp.SessionOptions{
+		TabID: "tab-1", ChatID: "chat-1", ProviderID: "mock", CWD: root,
+	})
+	if err != nil {
+		t.Fatalf("attach obligation actor: %v", err)
+	}
+	if _, err := runtime.Start(context.Background(), map[string]any{
+		"kind": "app-chat", "tabId": "tab-1", "chatId": "chat-1", "sessionId": info.SessionID,
+		"providerId": "mock", "cwd": root, "operationId": "obligation-failed-turn",
+		"userMessageId": "obligation-user", "assistantMessageId": "obligation-assistant", "prompt": "[mock:error]",
+	}, "human"); err != nil {
+		t.Fatalf("start obligation turn: %v", err)
+	}
+	waitProviderChatIdle(t, runtime, "chat-1", 5*time.Second)
 	hub := wire.NewHub()
 	registerAcpHandlers(hub, manager, stateDir, store, nil, runtime)
 
@@ -59,8 +69,8 @@ func TestSpawnedWorkListCarriesTheObligation(t *testing.T) {
 	if !ok {
 		t.Fatalf("spawned-work:list reply = %#v, want an obligation", reply)
 	}
-	if obligation["state"] != "needs_input" || obligation["source"] != "declared" {
-		t.Fatalf("obligation = %#v, want needs_input/declared", obligation)
+	if obligation["state"] != "needs_input" || obligation["source"] == "" {
+		t.Fatalf("obligation = %#v, want actor-owned needs_input state", obligation)
 	}
 
 	// A chat that owes nothing must produce exactly the pre-obligation reply

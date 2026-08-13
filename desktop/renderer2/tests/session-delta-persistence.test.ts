@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer, type ViteDevServer } from 'vite';
-import { LEAN_SESSION_SAVE_MODE, type Mirror } from '../src/store/persistence.ts';
+import { LEAN_SESSION_SAVE_MODE, localMirror, type Mirror } from '../src/store/persistence.ts';
 import { stageChronologicalSteer } from '../src/steering.ts';
 import type { Chat, Msg, Workspace } from '../src/store/types.ts';
 import type { PublicJob } from '../src/wire/types.ts';
@@ -77,7 +77,7 @@ function isDirty(subject: any, id: string): boolean {
 // Actor-backed chats no longer persist semantic mutations by omission from a
 // `saveSession` mirror. These small receipts model the daemon actor commands
 // so the persistence tests exercise the renderer's retry/fence logic without
-// reintroducing the retired legacy authority.
+// reintroducing a second chat authority.
 function actorApi() {
   return {
     chatQueueReplace: async (opts: any) => ({
@@ -429,7 +429,7 @@ test('delete, structural, first-save, and post-restore boundaries force a comple
         { id: 'workspace-b', name: 'B', path: '/tmp/workass-delta-b' },
       ] as Workspace[];
       const saves: Array<{ snapshot: Mirror; full: boolean }> = [];
-      subject.saveServerSnapshot = async (snapshot: Mirror, _lean: boolean, full: boolean) => {
+      subject.saveServerSnapshot = async (snapshot: Mirror, full: boolean) => {
         saves.push({ snapshot, full });
       };
       family.prepare?.(subject, owner);
@@ -447,18 +447,18 @@ test('delete, structural, first-save, and post-restore boundaries force a comple
   }
 });
 
-test('local first-paint mirror and legacy Electron saves remain complete', () => {
+test('server deltas carry chat commands while localStorage carries only view preferences', () => {
   const subject = subjectWithChats();
   subject.touchChat('tab-a');
 
-  const local = subject.toMirror(true, true, new Set(['tab-a']));
-  assert.deepEqual(local.chats.map((candidate: Chat) => candidate.id), ['tab-a', 'tab-b']);
-  assert.equal(local._workassSave, undefined);
+  const delta = subject.toMirror(true, new Set(['tab-a']));
+  assert.deepEqual(delta.chats.map((candidate: Chat) => candidate.id), ['tab-a']);
+  assert.equal(delta._workassSave, LEAN_SESSION_SAVE_MODE);
+  assert.deepEqual(delta.chats[0].messages, []);
 
-  subject.state.meta = { daemon: false };
-  const legacy = serverSave(subject, false).snapshot;
-  assert.deepEqual(legacy.chats.map((candidate: Chat) => candidate.id), ['tab-a', 'tab-b']);
-  assert.equal(legacy._workassSave, undefined);
+  const local = localMirror(subject.toMirror(true));
+  assert.deepEqual(local.chats, []);
+  assert.equal(local._workassSave, undefined);
 });
 
 test('streaming extends the debounce to 3000ms and a terminal event flushes exactly once', async () => {
@@ -576,7 +576,7 @@ test('realistic multi-chat session reports full-versus-delta payload distributio
     ...Array.from({ length: 30 }, (_, index) => `tab-${1 + (index % 11)}`),
   ];
   for (const id of sequence) {
-    const delta = subject.toMirror(true, false, new Set([id])) as Mirror;
+    const delta = subject.toMirror(true, new Set([id])) as Mirror;
     samples.push(Buffer.byteLength(JSON.stringify(delta)));
   }
   const sorted = [...samples].sort((left, right) => left - right);

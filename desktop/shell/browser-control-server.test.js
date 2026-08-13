@@ -32,10 +32,10 @@ test('authenticated provider-neutral control file routes RPC without leaking the
   const response = await fetch(descriptor.url, {
     method: 'POST',
     headers: { Authorization: 'Bearer test-only-token', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: 2, method: 'browser.open', params: { url: 'http://localhost:5173' } }),
+	body: JSON.stringify({ id: 2, method: 'browser.list', params: {} }),
   }).then((reply) => reply.json());
-  assert.deepEqual(response, { id: 2, result: { method: 'browser.open', params: { url: 'http://localhost:5173' }, visible: true } });
-  assert.deepEqual(calls, [{ method: 'browser.open', params: { url: 'http://localhost:5173' } }]);
+  assert.deepEqual(response, { id: 2, result: { method: 'browser.list', params: {}, visible: true } });
+  assert.deepEqual(calls, [{ method: 'browser.list', params: {} }]);
   assert.doesNotMatch(JSON.stringify(state), /test-only-token/);
 });
 

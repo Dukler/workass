@@ -152,9 +152,6 @@ func outboxEntryExecutable(state State, entry OutboxEntry) bool {
 	if entry.Kind == EffectDeleteChat {
 		return state.Deleted && strings.TrimSpace(entry.ChatID) == state.ChatID
 	}
-	if state.Migration.BlockedError != "" {
-		return false
-	}
 	if entry.Kind == EffectBackground {
 		return !state.Deleted && entry.Background != nil && entry.Background.OperationID == entry.OperationID
 	}
@@ -206,9 +203,6 @@ func outboxEntryExecutable(state State, entry OutboxEntry) bool {
 }
 
 func outboxEntryDirectClaimable(state State, entry OutboxEntry) bool {
-	if state.Migration.BlockedError != "" && entry.Kind != EffectDeleteChat {
-		return false
-	}
 	if entry.Kind == EffectExternalMutation {
 		return !state.Deleted && state.Initialized &&
 			strings.TrimSpace(entry.ChatID) == state.ChatID &&

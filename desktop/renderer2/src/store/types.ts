@@ -4,20 +4,10 @@ import type { ConnStatus } from '../wire/connection';
 import type { ModelControlMemory } from '../model-controls';
 import type { ModelScores } from '../model-scores';
 import type { WorkassRuntimeProfile } from '../model-catalog';
-import type { ContextUsageByProvider, ContextUsageSnapshot } from '../context-usage';
+import type { ContextUsageByProvider } from '../context-usage';
 
 export type MsgStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
 export type SteerState = 'sending' | 'accepted' | 'applied' | 'uncertain';
-
-// Legacy-only boundary written by the failed offset-based steering build.
-// Hydration migrates it once into real chronological rows and never writes it
-// for new messages.
-export interface SteerAnchor {
-  assistantMessageId: string;
-  contentOffset: number;
-  resultOffset: number;
-  eventCount: number;
-}
 
 export interface ThinkingEvent { key: string; at: number; kind: 'thinking'; text: string; }
 export interface PlanEntry { status: string; content: string; }
@@ -113,7 +103,6 @@ export interface Msg {
   // is the official turn/steer boundary, applied is the canonical client-id
   // receipt, and uncertain is a transport outcome that must not be replayed.
   steerState?: SteerState;
-  steerAnchor?: SteerAnchor;
   // Native Codex stages admitted input until its canonical userMessage receipt
   // arrives between sampling steps. The durable waiting pair is rendered as a
   // composer-adjacent preview, not as transcript history, until that boundary.
@@ -140,7 +129,7 @@ export interface Msg {
 
 // A not-yet-sent image belongs to one chat draft, just like `draft` text. Keep
 // the browser File plus a zero-copy object URL on the interactive path; raw
-// base64 is produced only at send time. `data` remains optional for legacy/test
+// base64 is produced only at send time. `data` remains optional for fixture
 // drafts created before object-URL previews existed.
 //
 // Draft images are deliberately runtime-only: persisting Files, object URLs, or
@@ -245,9 +234,8 @@ export interface Chat {
   settled?: 'settled' | 'active';
   // Last provider-authored context reading per chat+provider. Durable so a
   // renderer/daemon restart never makes the user send a model turn merely to
-  // recover the status indicator. `usage` is the legacy single-session shape.
+  // recover the status indicator.
   contextUsageByProvider?: ContextUsageByProvider;
-  usage?: ContextUsageSnapshot;
   // Locally-queued follow-ups (R2 fallback when appChatSteer is absent). Sent
   // one at a time at each turn's end, in order. Editable/reorderable/removable.
   queue?: QueuedMsg[];
@@ -260,7 +248,8 @@ export interface Chat {
   // so an older inherited-provider response cannot overwrite a newer explicit
   // model/provider/effort/permission selection.
   _controlRevision?: number;
-  _archivedCount?: number;
+  messageCount?: number;
+  historyComplete?: boolean;
 }
 
 // The one right-hand column hosts a single occupant, chosen PER CHAT (never a

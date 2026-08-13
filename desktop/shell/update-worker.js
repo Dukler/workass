@@ -311,7 +311,7 @@ function defaultOperations(transaction) {
       if (!stopped) throw new Error('failed release daemon did not stop before rollback');
     },
     rollback: async () => {
-      if (fs.existsSync(transaction.incomingTarget)) throw new Error('failed release quarantine path already exists');
+      if (fs.existsSync(transaction.incomingTarget)) throw new Error('failed release holding path already exists');
       if (fs.existsSync(transaction.installTarget)) fs.renameSync(transaction.installTarget, transaction.incomingTarget);
       fs.renameSync(transaction.backupTarget, transaction.installTarget);
     },

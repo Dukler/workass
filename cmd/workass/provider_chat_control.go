@@ -281,7 +281,7 @@ func materializeProviderAttachmentPlans(plans []providerAttachmentPlan) error {
 
 // exactActor is the common identity fence for desktop, mobile, LAN, and agent
 // control. Once a ChatID is actor-owned, no caller is allowed to fall back to
-// the legacy mirror merely because its disposable tab attachment is stale.
+// the removed mirror merely because its disposable tab attachment is stale.
 func (r *providerChatRuntime) exactActor(tabID, chatID string) (*providerChatActor, chat.State, error) {
 	if r == nil {
 		return nil, chat.State{}, errors.New("provider chat runtime is unavailable")
@@ -541,7 +541,7 @@ func (r *providerChatRuntime) createChatWithIntentDigest(presentation chat.Prese
 	tabID, chatID := stableAgentChatIdentity("tab", operationID), stableAgentChatIdentity("chat", operationID)
 	presentation = presentation.Clone()
 	presentation.TabID = tabID
-	actor, err := r.actorFromSource(chatID, nil, &chat.InitializeChat{Presentation: presentation, OperationID: operationID, Digest: digest})
+	actor, err := r.openActor(chatID, &chat.InitializeChat{Presentation: presentation, OperationID: operationID, Digest: digest})
 	if err != nil {
 		return nil, err
 	}
@@ -750,7 +750,7 @@ func updateActorModelControls(raw json.RawMessage, controls resolvedChatControls
 		if controls.ModeID != "" {
 			entry["modeId"] = controls.ModeID
 		}
-		providerMemory[modelControlBaseKey(controls.BaseModel)] = entry
+		providerMemory[canonicalModelControlKey(controls.BaseModel)] = entry
 		memory[controls.ProviderID] = providerMemory
 	}
 	return json.Marshal(memory)

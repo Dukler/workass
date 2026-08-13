@@ -138,18 +138,6 @@ function portableReleaseManifest(resourcesPath) {
   }
 }
 
-function legacyPortableDaemonURLs(runtime, platform) {
-  if (platform !== 'win32' || runtime.profile !== 'prod' || runtime.daemonPort === 8788) return [];
-  try {
-    const legacy = new URL(runtime.daemonURL);
-    legacy.hostname = '127.0.0.1';
-    legacy.port = '8788';
-    return [legacy.toString().replace(/\/$/, '')];
-  } catch {
-    return [];
-  }
-}
-
 function spawnPortableDaemon({ runtime, executable, platform = process.platform, childSpawn = spawn } = {}) {
   if (!runtime || !executable) throw new Error('runtime and executable are required');
   fs.mkdirSync(runtime.stateDir, { recursive: true });
@@ -201,10 +189,17 @@ async function ensurePortableDaemon({
 
 	const manifest = portableReleaseManifest(resourcesPath);
 	const expectedVersion = manifest?.version || '';
-	for (const legacyURL of legacyPortableDaemonURLs(runtime, platform)) {
-		if (!await check(legacyURL)) continue;
-		if (!await shutdown(legacyURL)) throw new Error(`legacy Workass daemon refused shutdown: ${legacyURL}`);
-		if (!await waitForDown(legacyURL, { check })) throw new Error(`legacy Workass daemon did not stop: ${legacyURL}`);
+	// The first LAN-default Windows release must stop a still-running 0.1.x
+	// loopback daemon before it starts the bundled daemon on port 80.
+	if (platform === 'win32' && runtime.profile === 'prod' && runtime.daemonPort !== 8788) {
+		const previousURL = new URL(runtime.daemonURL);
+		previousURL.hostname = '127.0.0.1';
+		previousURL.port = '8788';
+		const previousDaemonURL = previousURL.toString().replace(/\/$/, '');
+		if (await check(previousDaemonURL)) {
+			if (!await shutdown(previousDaemonURL)) throw new Error(`previous Workass daemon refused shutdown: ${previousDaemonURL}`);
+			if (!await waitForDown(previousDaemonURL, { check })) throw new Error(`previous Workass daemon did not stop: ${previousDaemonURL}`);
+		}
 	}
 
 	if (await check(runtime.daemonURL, 700, expectedVersion)) return { status: 'already-running', manifest };
@@ -251,23 +246,13 @@ async function waitForUnhealthy(url, { attempts = 40, delayMs = 100, check = hea
   return false;
 }
 
-function repairDaemonStartup({ runtime, executable, platform = process.platform, repairSpawn = spawnSync } = {}) {
-  if (!runtime || !executable) throw new Error('runtime and executable are required');
-  const result = repairSpawn(executable, ['--repair-startup', '--state-dir', runtime.stateDir], {
-    cwd: path.dirname(executable), windowsHide: platform === 'win32', stdio: 'ignore',
-    env: { ...process.env, WORKASS_PROFILE: runtime.profile, WORKASS_DATA_ROOT: runtime.dataRoot },
-  });
-  if (result.error || result.status !== 0) throw new Error('Workass startup repair failed');
-}
-
 // This is the shell-owned recovery transaction behind ⌘, → Enter.  It is
-// intentionally local: it can stop only a daemon on loopback, preserves broken
-// startup files before recreating them, and then uses the exact sibling binary
-// the portable shell would use for a cold launch.
+// intentionally local: it can stop only a daemon on loopback and then uses the
+// exact sibling binary the portable shell would use for a cold launch.
 async function restartDaemonAndRecover({
   runtime, resourcesPath, executablePath = process.execPath, platform = process.platform,
   daemonExecutable = '', check = healthCheck, childSpawn = spawn, wait = waitForHealth,
-  waitForDown = waitForUnhealthy, shutdown = postLocalRecoveryShutdown, repairSpawn = spawnSync,
+  waitForDown = waitForUnhealthy, shutdown = postLocalRecoveryShutdown,
 } = {}) {
   if (!runtime || !resourcesPath) throw new Error('runtime and resourcesPath are required');
   const executable = daemonExecutable && fs.existsSync(daemonExecutable)
@@ -275,10 +260,6 @@ async function restartDaemonAndRecover({
     : bundledPortableDaemon({ resourcesPath, executablePath, platform });
   if (!executable) throw new Error('bundled Workass daemon was not found');
 
-  // Repair before requesting stop: when a file is malformed this is the only
-  // window in which a launchd/service-owned daemon cannot immediately restart
-  // and race the repair. Valid state is never changed.
-  repairDaemonStartup({ runtime, executable, platform, repairSpawn });
   const wasHealthy = await check(runtime.daemonURL);
   const shutdownAccepted = wasHealthy ? await shutdown(runtime.daemonURL) : false;
   if (wasHealthy && !shutdownAccepted) throw new Error('daemon refused the local recovery shutdown');
@@ -290,7 +271,7 @@ async function restartDaemonAndRecover({
   const receipt = await ensurePortableDaemon({
     runtime, resourcesPath, executablePath, platform, daemonExecutable: executable, check, childSpawn, wait,
   });
-  return { ...receipt, repaired: true, shutdownAccepted, stoppedObserved };
+  return { ...receipt, shutdownAccepted, stoppedObserved };
 }
 
 async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process.platform, home = os.homedir(), uid = process.getuid?.(), spawn = spawnSync, check = healthCheck, forceInstall = false } = {}) {
@@ -392,12 +373,11 @@ async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process
 async function restartPackagedDaemonAndRecover({
   runtime, resourcesPath, platform = process.platform, home = os.homedir(), uid = process.getuid?.(),
   check = healthCheck, waitForDown = waitForUnhealthy, shutdown = postLocalRecoveryShutdown,
-  repairSpawn = spawnSync, launchctlSpawn = spawnSync,
+  launchctlSpawn = spawnSync,
 } = {}) {
   if (platform !== 'darwin') throw new Error('packaged daemon recovery is supported on macOS only');
   const executable = path.join(resourcesPath, 'runtime', 'workass');
   if (!fs.existsSync(executable)) throw new Error('bundled Workass daemon was not found');
-  repairDaemonStartup({ runtime, executable, platform, repairSpawn });
   const wasHealthy = await check(runtime.daemonURL);
   const shutdownAccepted = wasHealthy ? await shutdown(runtime.daemonURL) : false;
   if (wasHealthy && !shutdownAccepted) throw new Error('daemon refused the local recovery shutdown');
@@ -405,7 +385,7 @@ async function restartPackagedDaemonAndRecover({
   const receipt = await ensurePackagedDaemon({
     runtime, resourcesPath, platform, home, uid, spawn: launchctlSpawn, check, forceInstall: true,
   });
-  return { ...receipt, repaired: true, shutdownAccepted, stoppedObserved };
+  return { ...receipt, shutdownAccepted, stoppedObserved };
 }
 
 module.exports = {
@@ -417,7 +397,6 @@ module.exports = {
   portableDaemonCandidates,
 	portableReleaseManifest,
   postLocalRecoveryShutdown,
-  repairDaemonStartup,
   restartDaemonAndRecover,
   restartPackagedDaemonAndRecover,
   spawnPortableDaemon,

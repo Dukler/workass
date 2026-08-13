@@ -42,7 +42,7 @@ const PLAN_MARK: Record<string, string> = { completed: '✓', in_progress: '◐'
 
 // The chat's current plan. `chat.planLatest` is authoritative when present —
 // including an explicit [] meaning "no current plan". The reverse message scan is
-// rolling compatibility only, and must never resurrect an already-completed plan
+// rolling compatibility only, and must never recreate an already-completed plan
 // from an older turn.
 function latestChatPlan(chat: Chat | null): PlanEntry[] | null {
   if (!chat) return null;

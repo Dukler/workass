@@ -123,42 +123,43 @@ test('a mounted machine does not make this daemon look permanently diverged', ()
   store.localProcHash = '';
   store.localSettingsRevision = '';
 
-  const scopes = store.digestRepairScopes(digestOf([digestChat(local)]));
+  const scopes = store.digestSyncScopes(digestOf([digestChat(local)]));
 
   assert.equal(scopes.has('session'), false, 'another machine\'s chats count against this daemon\'s digest');
 });
 
-test('a chat this daemon really lost still forces a session repair', () => {
+test('a chat this daemon really lost still forces a session sync', () => {
   const kept = chat('tab-1', [message('m-1', { status: 'done' })]);
   const dropped = chat('tab-2', [message('m-2', { status: 'done' })]);
   const store = subject([kept, dropped]);
   store.localProcHash = '';
   store.localSettingsRevision = '';
 
-  const scopes = store.digestRepairScopes(digestOf([digestChat(kept)]));
+  const scopes = store.digestSyncScopes(digestOf([digestChat(kept)]));
 
-  assert.equal(scopes.has('session'), true, 'a real chat-count divergence no longer repairs');
+  assert.equal(scopes.has('session'), true, 'a real chat-count divergence no longer synchronizes');
 });
 
-test('transcript drift repairs even when queue and controls still match', () => {
+test('bounded history count does not force sync while a changed tail identity does', () => {
   const local = chat('tab-1', [message('m-1', { status: 'done' })]);
   const store = subject([local]);
   store.localProcHash = '';
   store.localSettingsRevision = '';
 
-  assert.equal(store.digestRepairScopes(digestOf([digestChat(local, { messageCount: 2 })])).has('session'), true);
-  assert.equal(store.digestRepairScopes(digestOf([digestChat(local, { lastMessageId: 'different' })])).has('session'), true);
+  assert.equal(store.digestSyncScopes(digestOf([digestChat(local, { messageCount: 2 })])).has('session'), false);
+  assert.equal(store.digestSyncScopes(digestOf([digestChat(local, { lastMessageId: 'different' })])).has('session'), true);
 });
 
-test('an evicted inactive archive reports its complete durable count to the digest', () => {
+test('an inactive bounded history relies on actor revision and tail identity', () => {
   const complete = [message('m-1', { status: 'done' }), message('m-2', { status: 'done' })];
   const local = chat('tab-1', complete.slice(-1));
-  local._archivedCount = complete.length;
+  local.messageCount = complete.length;
+  local.historyComplete = false;
   const store = subject([local]);
   store.localProcHash = '';
   store.localSettingsRevision = '';
 
-  assert.equal(store.digestRepairScopes(digestOf([digestChat(local, {
+  assert.equal(store.digestSyncScopes(digestOf([digestChat(local, {
     messageCount: complete.length,
     lastMessageId: 'm-2',
   })])).has('session'), false);

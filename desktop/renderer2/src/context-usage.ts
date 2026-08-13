@@ -63,18 +63,9 @@ export function withContextUsage(
 export function contextUsageForProvider(
   byProvider: ContextUsageByProvider | undefined,
   rawProviderID: string | null | undefined,
-  legacy?: unknown,
 ): ContextUsageSnapshot | null {
   const providerID = rawProviderID?.trim() ?? '';
-  if (providerID) {
-    const scoped = normalizeContextUsage(byProvider?.[providerID]);
-    if (scoped) return scoped;
-    // Once provider-scoped state exists, the legacy singleton cannot be safely
-    // attributed to a different selected provider. Showing it would recreate
-    // the exact stale-provider context bug this map removes.
-    if (byProvider && Object.keys(byProvider).length > 0) return null;
-  }
-  return normalizeContextUsage(legacy);
+  return providerID ? normalizeContextUsage(byProvider?.[providerID]) : null;
 }
 
 export function contextUsageIdentityMatches(

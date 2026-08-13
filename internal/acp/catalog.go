@@ -470,7 +470,7 @@ func SplitCanonicalEffortSuffix(modelID string) (string, string, bool) {
 // catalogModelSelectionBase validates a persisted/UI model selection against a
 // catalog. Exact ids always win (Claude uses literal ids such as opus[1m]). If
 // an exact id is gone, a canonical effort suffix may still be peeled from a
-// valid base model; this is the repair path for stale selections such as
+// valid base model; this normalizes stale selections such as
 // haiku[low] after the adapter reports that Haiku has no effort axis.
 func catalogModelSelectionBase(modelID string, models []Model) (string, bool) {
 	modelID = strings.TrimSpace(modelID)

@@ -27,26 +27,41 @@ type hibernateCandidate struct {
 func (m *Manager) lifecycleLoop() {
 	ticker := time.NewTicker(m.opts.LifecycleCheckInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		m.SweepLifecycle()
+	for {
+		select {
+		case <-m.loopStop:
+			return
+		case <-ticker.C:
+			m.SweepLifecycle()
+		}
 	}
 }
 
 func (m *Manager) rssLoop() {
 	ticker := time.NewTicker(m.opts.RSSSampleInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		m.SampleRSS(ctx)
-		cancel()
+	for {
+		select {
+		case <-m.loopStop:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			m.SampleRSS(ctx)
+			cancel()
+		}
 	}
 }
 
 func (m *Manager) spareLoop() {
 	ticker := time.NewTicker(m.opts.SpareCheckInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		m.WarmSpareSessions()
+	for {
+		select {
+		case <-m.loopStop:
+			return
+		case <-ticker.C:
+			m.WarmSpareSessions()
+		}
 	}
 }
 

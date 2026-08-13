@@ -23,14 +23,6 @@ export function fullAssistantText(msg: Pick<Msg, 'content' | 'result'>): string 
   return [commentary, result].filter(Boolean).join('\n\n');
 }
 
-// Old builds persisted this synthetic sentence as assistant prose. Status
-// chrome now owns cancellation, so hide only the exact legacy sentinel while
-// retaining every real partial response verbatim.
-export function restoredAssistantContent(role: unknown, status: unknown, content: unknown): string {
-  const text = content == null ? '' : String(content);
-  return role === 'assistant' && status === 'cancelled' && text.trim() === 'Detenido.' ? '' : text;
-}
-
 // Job.Result is the daemon's COMBINED provider-history text for the whole turn:
 // every commentary chunk plus the final answer, accumulated from the turn root
 // (steer splits included). It is a RECOVERY source for a turn this renderer
@@ -41,13 +33,4 @@ export function restoredAssistantContent(role: unknown, status: unknown, content
 // has claimed the structural split).
 export function adoptsTerminalJobResult(streamed: Pick<Msg, 'content' | 'result'>[]): boolean {
   return !streamed.some((msg) => msg.content !== '' || (msg.result ?? '') !== '');
-}
-
-// Heal turns already persisted by the build that adopted the combined result
-// unconditionally: an exact content/result twin is that duplication, never an
-// agent answering itself verbatim.
-export function restoredAssistantResult(content: unknown, result: unknown): string | undefined {
-  if (result == null) return undefined;
-  const text = String(result);
-  return text !== '' && text === (content == null ? '' : String(content)) ? undefined : text;
 }

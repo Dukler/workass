@@ -619,7 +619,7 @@ class ClaudeSession {
   }
 
   async openQuery(resumeExisting) {
-    // Wait for retired queries to release the provider-native session id.
+    // Wait for completed queries to release the provider-native session id.
     // Against SDK 0.3.217 close() returns undefined (the await is free); the
     // moment close() returns its cleanup promise this is what prevents
     // "Session ID ... is already in use" on reopen-after-retire. The flag
@@ -1060,7 +1060,7 @@ class ClaudeSession {
   // produced no content (that is precisely why the ending was invalid) and the
   // original prompt is already in the session transcript, so the reopened query
   // resumes with it and answers the direction. Same shape as the OAuth retry:
-  // Claude Code's query has returned, so it is retired and reopened once.
+  // Claude Code's query has returned, so it is complete and reopened once.
   async redriveSteersAfterEmptyAbort(query, active) {
     const queued = this.pendingSteerMessages();
     if (!queued.length) {

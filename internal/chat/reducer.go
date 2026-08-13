@@ -28,12 +28,10 @@ type SelectLane struct {
 
 func (SelectLane) chatCommand() {}
 
-// AdoptLaneBinding is the only migration ingress for a provider-native thread
-// that predates the durable chat actor. It records the exact daemon-owned
-// identity and thread as detached; it never creates, resumes, replays, or
-// guesses provider state. Selecting the lane afterwards performs the ordinary
-// exact-resume transition through the same outbox as every newer chat.
-type AdoptLaneBinding struct {
+// BindEstablishedLane records an exact daemon-owned native thread as detached.
+// It never creates, resumes, replays, or guesses provider state. Selecting the
+// lane afterwards performs the ordinary exact-resume transition.
+type BindEstablishedLane struct {
 	Identity provider.LaneIdentity
 	Thread   provider.ThreadRef
 	Owner    provider.AttachmentOwner
@@ -41,15 +39,9 @@ type AdoptLaneBinding struct {
 	ModelID  string
 	ModeID   string
 	Context  provider.ContextCapabilities
-	// Coverage is an explicitly verified legacy native-history prefix. The
-	// migration caller must prove it against the old provider cursor before this
-	// command is issued; the reducer rechecks every immutable ledger identity.
-	Coverage     []CoverageRecord
-	Selected     bool
-	BlockedError provider.ErrorKind
 }
 
-func (AdoptLaneBinding) chatCommand() {}
+func (BindEstablishedLane) chatCommand() {}
 
 type LaneOpened struct {
 	// LaneID is the requested (possibly provisional) lane id used by the durable
@@ -268,7 +260,7 @@ func (TurnTerminated) chatCommand() {}
 
 // ReconcileObligation applies current executor evidence to actor-owned request
 // state. It is safe to repeat: evidence can only move a phantom working/parked
-// record to stalled, never resurrect or silently close it.
+// record to stalled, never recreate or silently close it.
 type ReconcileObligation struct {
 	ObservedAt   string
 	LiveEvidence bool
@@ -549,21 +541,6 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 			return current, nil, errors.New("chat was durably deleted")
 		}
 	}
-	if current.Migration.BlockedError != "" {
-		switch command.(type) {
-		case MigrateLegacyChat, MigrateLegacyObligation, MigrateLegacyBackground, QuarantineLegacyMigration, UpdatePresentation, AttachTab, DeleteChat, RecoverOutbox, ClaimEffect:
-			// Quarantined chats remain visible and deletable, and the exact same
-			// migration transaction may be retried. Recovery is required to open
-			// the durable actor, and claiming is required only for its deletion
-			// effect; the engine's executable-effect fence below prevents every
-			// provider/runtime effect while the quarantine remains active.
-		default:
-			return current, nil, &provider.Error{
-				Kind:    current.Migration.BlockedError,
-				Message: "legacy provider ownership is ambiguous; this chat requires explicit repair",
-			}
-		}
-	}
 	next := current.Clone()
 	var (
 		effects []Effect
@@ -574,14 +551,6 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 		err = reduceInitializeChat(&next, command)
 	case InitializeFork:
 		err = reduceInitializeFork(&next, command)
-	case MigrateLegacyChat:
-		err = reduceMigrateLegacyChat(&next, command)
-	case MigrateLegacyObligation:
-		err = reduceMigrateLegacyObligation(&next, command)
-	case MigrateLegacyBackground:
-		err = reduceMigrateLegacyBackground(&next, command)
-	case QuarantineLegacyMigration:
-		err = reduceQuarantineLegacyMigration(&next, command)
 	case UpdatePresentation:
 		err = reduceUpdatePresentation(&next, command)
 	case SavePresentation:
@@ -608,8 +577,8 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 		err = reduceAttachTab(&next, command)
 	case SelectLane:
 		effects, err = reduceSelectLane(&next, command)
-	case AdoptLaneBinding:
-		err = reduceAdoptLaneBinding(&next, command)
+	case BindEstablishedLane:
+		err = reduceBindEstablishedLane(&next, command)
 	case LaneOpened:
 		effects, err = reduceLaneOpened(&next, command)
 	case LaneOpenFailed:
@@ -710,7 +679,7 @@ func reduceInitializeChat(state *State, command InitializeChat) error {
 	if state.Initialized {
 		return errors.New("chat actor is already initialized")
 	}
-	if state.Migration.Complete || len(state.Ledger) != 0 || len(state.Lanes) != 0 ||
+	if len(state.Ledger) != 0 || len(state.Lanes) != 0 ||
 		len(state.Queue) != 0 || len(state.StagedQueue) != 0 || len(state.Outbox) != 0 ||
 		len(state.Operations) != 0 || state.Foreground != nil || state.PendingSteer != nil || state.PendingCancel != nil {
 		return errors.New("new chat initialization conflicts with existing actor state")
@@ -735,7 +704,7 @@ func reduceInitializeChat(state *State, command InitializeChat) error {
 }
 
 func reduceInitializeFork(state *State, command InitializeFork) error {
-	if state.Initialized || state.Migration.Complete || len(state.Ledger) != 0 || len(state.Lanes) != 0 ||
+	if state.Initialized || len(state.Ledger) != 0 || len(state.Lanes) != 0 ||
 		len(state.Queue) != 0 || len(state.StagedQueue) != 0 || len(state.Outbox) != 0 || len(state.Operations) != 0 {
 		return errors.New("fork initialization conflicts with existing actor state")
 	}
@@ -777,7 +746,6 @@ func reduceInitializeFork(state *State, command InitializeFork) error {
 		event.OperationID = operationID
 		event.LaneID = ""
 		event.NativeTurnID = ""
-		event.Legacy = false
 		event.ContextExcluded = true
 		event.Attachments = append([]provider.Attachment(nil), source.Attachments...)
 		event.Timeline = cloneTimeline(source.Timeline)
@@ -794,232 +762,6 @@ func reduceInitializeFork(state *State, command InitializeFork) error {
 	}
 	state.Initialized = true
 	return nil
-}
-
-func reduceMigrateLegacyChat(state *State, command MigrateLegacyChat) error {
-	if command.Version == 0 || strings.TrimSpace(command.Digest) == "" {
-		return errors.New("legacy chat migration requires version and source digest")
-	}
-	if state.Migration.Complete {
-		if state.Migration.Version == command.Version && state.Migration.Digest == strings.TrimSpace(command.Digest) {
-			return nil
-		}
-		return errors.New("legacy chat migration conflicts with authoritative actor state")
-	}
-	if state.Initialized {
-		return errors.New("legacy chat migration cannot replace an actor-native chat")
-	}
-	presentation := command.Presentation.Clone()
-	if err := presentation.Validate(); err != nil {
-		return err
-	}
-	ledger := make([]LedgerEvent, 0, len(command.Messages))
-	operations := make(map[provider.OperationID]struct{}, len(command.Messages))
-	seenMessages := make(map[string]struct{}, len(command.Messages))
-	for index, message := range command.Messages {
-		event, err := legacyLedgerEvent(index, message)
-		if err != nil {
-			return err
-		}
-		if _, duplicate := seenMessages[event.MessageID]; duplicate {
-			return errors.New("legacy migration contains duplicate message identity")
-		}
-		seenMessages[event.MessageID] = struct{}{}
-		ledger = append(ledger, event)
-		operationID := event.OperationID
-		operations[operationID] = struct{}{}
-	}
-	if len(state.Ledger) != 0 || len(state.Operations) != 0 || len(state.Outbox) != 0 || state.Foreground != nil || len(state.Lanes) != 0 {
-		// Schema-v1 actor sidecars can already contain the same completed rows
-		// that the old mirror owns. Reconcile only an exact identity/order match.
-		// Any missing or additional row is ambiguous and quarantines the chat;
-		// text matching is deliberately never used as recovery authority.
-		if len(state.Ledger) != len(ledger) {
-			return errors.New("legacy chat migration conflicts with pre-cutover actor row count")
-		}
-		for index := range ledger {
-			existing, incoming := state.Ledger[index], ledger[index]
-			if existing.MessageID != incoming.MessageID || existing.OperationID != incoming.OperationID || existing.Role != incoming.Role {
-				return errors.New("legacy chat migration conflicts with pre-cutover actor identity")
-			}
-			if existing.Text != incoming.Text || existing.Result != incoming.Result {
-				return errors.New("legacy chat migration conflicts with pre-cutover actor content")
-			}
-			existing.Status = incoming.Status
-			existing.At = incoming.At
-			existing.Attachments = append([]provider.Attachment(nil), incoming.Attachments...)
-			existing.NativeTurnID = incoming.NativeTurnID
-			existing.TerminalState = incoming.TerminalState
-			existing.SteerState = incoming.SteerState
-			existing.SteerAnchor = cloneSteerAnchor(incoming.SteerAnchor)
-			existing.SteerBoundary = incoming.SteerBoundary
-			existing.SteerContinuationID = incoming.SteerContinuationID
-			existing.SteerContinuationFor = incoming.SteerContinuationFor
-			existing.TurnRootID = incoming.TurnRootID
-			existing.TurnTerminal = cloneBool(incoming.TurnTerminal)
-			existing.TurnStartedAt = incoming.TurnStartedAt
-			existing.Interrupted = incoming.Interrupted
-			existing.RetryPrompt = incoming.RetryPrompt
-			existing.Timeline = cloneTimeline(incoming.Timeline)
-			existing.Permission = clonePermission(incoming.Permission)
-			state.Ledger[index] = existing
-		}
-		state.Presentation = presentation
-		if len(state.StagedQueue) != 0 || len(state.Queue) != 0 {
-			return errors.New("legacy chat migration conflicts with pre-cutover queue ownership")
-		}
-		state.StagedQueue = cloneStagedQueue(command.StagedQueue)
-		state.Migration = MigrationState{Version: command.Version, Digest: strings.TrimSpace(command.Digest), Complete: true}
-		state.Initialized = true
-		return nil
-	}
-	state.Presentation = presentation
-	state.Ledger = ledger
-	state.Operations = operations
-	state.StagedQueue = cloneStagedQueue(command.StagedQueue)
-	state.Migration = MigrationState{Version: command.Version, Digest: strings.TrimSpace(command.Digest), Complete: true}
-	state.Initialized = true
-	return nil
-}
-
-func reduceMigrateLegacyObligation(state *State, command MigrateLegacyObligation) error {
-	if !state.Initialized || !state.Migration.Complete {
-		return errors.New("legacy obligation migration requires a migrated chat actor")
-	}
-	if state.Migration.LegacyObligationMigrated {
-		if !sameObligation(state.Obligation, command.Obligation) {
-			return errors.New("legacy obligation migration conflicts with actor state")
-		}
-		return nil
-	}
-	if command.Obligation != nil {
-		if err := command.Obligation.Validate(); err != nil {
-			return err
-		}
-	}
-	state.Obligation = command.Obligation.Clone()
-	state.Migration.LegacyObligationMigrated = true
-	return nil
-}
-
-func sameObligation(left, right *ObligationState) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return *left == *right
-}
-
-func reduceMigrateLegacyBackground(state *State, command MigrateLegacyBackground) error {
-	if !state.Initialized || !state.Migration.Complete {
-		return errors.New("legacy background migration requires a migrated chat actor")
-	}
-	// Pre-actor bindings did not persist an attachment generation. Reserve the
-	// first generation as the historical attachment epoch before validating the
-	// migrated work owner. Ordinary runtime ingress can never perform this
-	// normalization.
-	for _, item := range command.Items {
-		lane, ok := state.Lanes[item.Owner.LaneID]
-		if ok && lane.ConnectionGeneration == 0 && item.Owner.ConnectionGeneration == 1 {
-			lane.ConnectionGeneration = 1
-			state.Lanes[item.Owner.LaneID] = lane
-		}
-	}
-	next, err := canonicalBackgroundSnapshot(*state, command.Items)
-	if err != nil {
-		return err
-	}
-	if state.Migration.LegacyBackgroundMigrated {
-		if !sameBackgroundSnapshot(state.Background, next) {
-			return errors.New("legacy background migration conflicts with actor state")
-		}
-		return nil
-	}
-	state.Background = next
-	state.Migration.LegacyBackgroundMigrated = true
-	return nil
-}
-
-func reduceQuarantineLegacyMigration(state *State, command QuarantineLegacyMigration) error {
-	if !state.Initialized || !state.Migration.Complete {
-		return errors.New("legacy migration quarantine requires a completed transcript migration")
-	}
-	if command.Error == "" {
-		return errors.New("legacy migration quarantine requires an error kind")
-	}
-	if state.Migration.BlockedError != "" && state.Migration.BlockedError != command.Error {
-		return errors.New("legacy migration quarantine conflicts with the durable actor state")
-	}
-	state.Migration.BlockedError = command.Error
-	return nil
-}
-
-func legacyLedgerEvent(index int, message LegacyMessage) (LedgerEvent, error) {
-	messageID := strings.TrimSpace(message.MessageID)
-	operationID := provider.NormalizeOperationID(string(message.OperationID))
-	role := strings.ToLower(strings.TrimSpace(message.Role))
-	if messageID == "" || operationID == "" {
-		return LedgerEvent{}, errors.New("legacy message is missing stable message or operation identity")
-	}
-	if role != "user" && role != "assistant" {
-		return LedgerEvent{}, fmt.Errorf("legacy message has unsupported role %q", role)
-	}
-	status := strings.ToLower(strings.TrimSpace(message.Status))
-	if status == "" {
-		status = "done"
-	}
-	switch status {
-	case "pending", "running", "done", "failed", "cancelled":
-	default:
-		return LedgerEvent{}, fmt.Errorf("legacy message has unsupported status %q", status)
-	}
-	terminal := strings.ToLower(strings.TrimSpace(message.TerminalState))
-	if terminal == "" && role == "assistant" {
-		terminal = status
-	}
-	return LedgerEvent{
-		EventID:              "legacy:" + messageID,
-		MessageID:            messageID,
-		Sequence:             uint64(index + 1),
-		Role:                 role,
-		Text:                 message.Text,
-		Result:               message.Result,
-		Status:               status,
-		At:                   strings.TrimSpace(message.At),
-		Attachments:          append([]provider.Attachment(nil), message.Attachments...),
-		OperationID:          operationID,
-		NativeTurnID:         strings.TrimSpace(message.NativeTurnID),
-		QueueID:              strings.TrimSpace(message.QueueID),
-		TerminalState:        terminal,
-		SteerState:           strings.TrimSpace(message.SteerState),
-		SteerAnchor:          cloneSteerAnchor(message.SteerAnchor),
-		SteerBoundary:        strings.TrimSpace(message.SteerBoundary),
-		SteerContinuationID:  strings.TrimSpace(message.SteerContinuationID),
-		SteerContinuationFor: strings.TrimSpace(message.SteerContinuationFor),
-		TurnRootID:           strings.TrimSpace(message.TurnRootID),
-		TurnTerminal:         cloneBool(message.TurnTerminal),
-		TurnStartedAt:        message.TurnStartedAt,
-		Interrupted:          message.Interrupted,
-		RetryPrompt:          message.RetryPrompt,
-		Timeline:             cloneTimeline(message.Timeline),
-		Permission:           clonePermission(message.Permission),
-		Legacy:               true,
-	}, nil
-}
-
-func cloneSteerAnchor(anchor *SteerAnchor) *SteerAnchor {
-	if anchor == nil {
-		return nil
-	}
-	value := *anchor
-	return &value
-}
-
-func cloneBool(value *bool) *bool {
-	if value == nil {
-		return nil
-	}
-	copy := *value
-	return &copy
 }
 
 func reduceUpdatePresentation(state *State, command UpdatePresentation) error {
@@ -1430,7 +1172,7 @@ func reduceCommitLaneSelection(state *State, command CommitLaneSelection) ([]Eff
 		if err := thread.Validate(identity.Realm.ProviderID); err != nil {
 			return nil, err
 		}
-		if err := reduceAdoptLaneBinding(state, AdoptLaneBinding{
+		if err := reduceBindEstablishedLane(state, BindEstablishedLane{
 			Identity: identity, Thread: thread, Owner: command.Owner, CWD: command.CWD,
 			ModelID: command.ModelID, ModeID: command.ModeID, Context: command.Context,
 		}); err != nil {
@@ -1611,26 +1353,26 @@ func normalizeStagedQueue(entries []StagedQueueEntry) error {
 	return nil
 }
 
-func reduceAdoptLaneBinding(state *State, command AdoptLaneBinding) error {
+func reduceBindEstablishedLane(state *State, command BindEstablishedLane) error {
 	identity := command.Identity.Normalize()
 	if err := identity.Validate(); err != nil {
 		return err
 	}
 	if identity.ChatID != state.ChatID {
-		return errors.New("adopted provider lane belongs to another chat")
+		return errors.New("established provider lane belongs to another chat")
 	}
 	thread := command.Thread.Normalize()
 	if err := thread.Validate(identity.Realm.ProviderID); err != nil {
 		return err
 	}
 	if !command.Context.ExactResume {
-		return errors.New("adopted provider lane does not support exact native-thread resume")
+		return errors.New("established provider lane does not support exact native-thread resume")
 	}
 	lane, exists := state.Lanes[identity.ID]
 	if exists {
 		existing := lane
 		if existing.Identity != identity || !existing.Thread.Equal(thread) {
-			return errors.New("adopted provider lane conflicts with durable chat ownership")
+			return errors.New("established provider lane conflicts with durable chat ownership")
 		}
 		existing.Owner = command.Owner
 		existing.CWD = firstNonEmptyString(existing.CWD, command.CWD)
@@ -1652,83 +1394,7 @@ func reduceAdoptLaneBinding(state *State, command AdoptLaneBinding) error {
 			Context: command.Context,
 		}
 	}
-	for index, record := range command.Coverage {
-		expected := uint64(index + 1)
-		if index >= len(state.Ledger) {
-			return errors.New("adopted provider lane coverage exceeds the immutable ledger")
-		}
-		if record.Sequence != expected || record.EventID != state.Ledger[index].EventID {
-			return errors.New("adopted provider lane coverage does not match the immutable ledger prefix")
-		}
-		if record.Status != CoverageNativeSeen && record.Status != CoverageExcluded {
-			return errors.New("adopted provider lane coverage has an invalid migration status")
-		}
-		if err := setCoverage(&lane, state, record.Sequence, record.Status, record.DeliveryID); err != nil {
-			return err
-		}
-	}
 	state.Lanes[identity.ID] = lane
-	if command.BlockedError != "" {
-		lane.Phase = LaneBlocked
-		lane.LastError = command.BlockedError
-		state.Lanes[identity.ID] = lane
-	}
-	if command.Selected {
-		if state.ActiveLaneID != "" && state.ActiveLaneID != identity.ID ||
-			state.DesiredLaneID != "" && state.DesiredLaneID != identity.ID {
-			return errors.New("legacy chat selects more than one provider lane")
-		}
-		state.ActiveLaneID = identity.ID
-		state.DesiredLaneID = identity.ID
-	}
-	if command.Selected && command.BlockedError == "" {
-		if err := adoptLegacyPendingPermissions(state, &lane); err != nil {
-			return err
-		}
-		state.Lanes[identity.ID] = lane
-	}
-	return nil
-}
-
-// adoptLegacyPendingPermissions restores the actor-owned permission index only
-// after migration has selected an exact native lane. The legacy ledger remains
-// the source of the rich card, while this index is the durable routing record
-// used for replay and decisions after a restart.
-func adoptLegacyPendingPermissions(state *State, lane *LaneState) error {
-	if lane == nil || lane.Identity.ID == "" {
-		return errors.New("legacy permission adoption requires a provider lane")
-	}
-	for _, event := range state.Ledger {
-		permission := event.Permission
-		if permission == nil || strings.ToLower(strings.TrimSpace(permission.Status)) != "pending" {
-			continue
-		}
-		requestID := strings.TrimSpace(permission.RequestID)
-		if requestID == "" {
-			return errors.New("legacy permission is missing its provider identity")
-		}
-		if lane.ConnectionGeneration == 0 {
-			// Pre-actor native bindings did not persist an attachment generation.
-			// Generation one is the same reserved historical epoch used by
-			// legacy background ownership; it makes the owner valid without
-			// claiming a later live connection.
-			lane.ConnectionGeneration = 1
-		}
-		owner := ProviderActivityOwner{
-			LaneID: lane.Identity.ID, OperationID: event.OperationID,
-			TurnID: event.NativeTurnID, ConnectionGeneration: lane.ConnectionGeneration,
-		}
-		if existing, ok := state.Permissions[requestID]; ok {
-			if existing.Owner.LaneID != owner.LaneID || existing.Owner.OperationID != owner.OperationID || existing.Owner.TurnID != owner.TurnID {
-				return errors.New("legacy permission conflicts with durable provider ownership")
-			}
-			if existing.Event.Status == "resolved" || existing.Event.Status == "failed" {
-				return errors.New("legacy pending permission conflicts with a terminal durable decision")
-			}
-			continue
-		}
-		state.Permissions[requestID] = PermissionState{Owner: owner, Event: *clonePermission(permission)}
-	}
 	return nil
 }
 

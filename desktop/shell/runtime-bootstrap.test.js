@@ -161,7 +161,7 @@ test('portable bootstrap starts the sibling Windows daemon when no daemon is hea
 	assert.equal(calls[1].expectedVersion, '1.2.3');
 });
 
-test('portable Windows upgrade stops the legacy loopback daemon before starting LAN port 80', async () => {
+test('portable Windows upgrade stops the pre-LAN loopback daemon before starting port 80', async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-migrate-'));
 	const daemonPath = path.join(root, 'workass-daemon.exe');
 	fs.writeFileSync(daemonPath, 'daemon');
@@ -218,7 +218,7 @@ test('portable Windows bootstrap replaces a stale daemon already on port 80', as
 	]);
 });
 
-test('recovery stops, repairs, and starts the same sibling daemon', async () => {
+test('recovery stops and starts the same sibling daemon without mutating state', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-recovery-'));
   const daemonPath = path.join(root, 'workass-daemon.exe');
   fs.writeFileSync(daemonPath, 'daemon');
@@ -230,13 +230,11 @@ test('recovery stops, repairs, and starts the same sibling daemon', async () => 
     check: async () => { checks += 1; return checks === 1; },
     shutdown: async () => { calls.push('shutdown'); return true; },
     waitForDown: async () => { calls.push('down'); return true; },
-    repairSpawn: (exe, args) => { calls.push({ repair: [exe, ...args] }); return { status: 0 }; },
     wait: async () => true,
     childSpawn: (exe, args) => { calls.push({ start: [exe, ...args] }); return { pid: 7, unref() {} }; },
   });
-  assert.equal(result.repaired, true);
   assert.equal(result.shutdownAccepted, true);
 	assert.equal(result.stoppedObserved, true);
-  assert.deepEqual(calls.slice(0, 3), [{ repair: [daemonPath, '--repair-startup', '--state-dir', runtime.stateDir] }, 'shutdown', 'down']);
-  assert.equal(calls[3].start[0], daemonPath);
+  assert.deepEqual(calls.slice(0, 2), ['shutdown', 'down']);
+  assert.equal(calls[2].start[0], daemonPath);
 });

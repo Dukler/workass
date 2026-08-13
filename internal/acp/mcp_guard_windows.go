@@ -35,10 +35,20 @@ func (m *Manager) mcpFanoutLoop() {
 	}
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
-	<-timer.C
+	select {
+	case <-m.loopStop:
+		return
+	case <-timer.C:
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 	for {
 		m.guardAcpMCPFanout("periodic")
-		time.Sleep(interval)
+		select {
+		case <-m.loopStop:
+			return
+		case <-ticker.C:
+		}
 	}
 }
 

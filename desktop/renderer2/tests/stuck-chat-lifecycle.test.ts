@@ -164,7 +164,7 @@ test('a steer continuation never inherits the pre-steer text as a result', () =>
 test('an unanchored old-daemon job without canonical ids schedules reconciliation', () => {
   const { subject, owner } = subjectWithChat();
   const scheduled: Set<string>[] = [];
-  (subject as any).scheduleScopedRepair = (scopes: Iterable<string>) => scheduled.push(new Set(scopes));
+  (subject as any).scheduleScopedSync = (scopes: Iterable<string>) => scheduled.push(new Set(scopes));
 
   (subject as any).onJobEvent({
     type: 'start',
@@ -215,7 +215,7 @@ test('cancel false finalizes locally, clears anchors, and recovers the FIFO', as
     (subject as any).chatJobs.set(owner.chatId, { tabId: owner.id, msgId: assistant.id });
     let recovered = 0;
     (subject as any).recoverIdleQueues = () => { recovered += 1; };
-    (subject as any).scheduleScopedRepair = () => {};
+    (subject as any).scheduleScopedSync = () => {};
 
     await subject.cancelChatTurn(owner.id);
     assert.equal(assistant.status, 'cancelled');
@@ -257,7 +257,7 @@ test('a digest cannot erase a queue mutation while its save is in flight', () =>
   assert.equal(subject.queueDraftMessage(owner.id, 'must survive refresh', []), true);
   assert.equal(owner.queue?.[0].text, 'must survive refresh');
 
-  // The server still has the pre-queue snapshot when the digest repair lands.
+  // The server still has the pre-queue snapshot when digest sync lands.
   // The pending queue fence must keep the renderer's exact FIFO projection.
   const staleServer = subject.toMirror(false);
   staleServer.chats[0].queue = undefined;
@@ -325,10 +325,10 @@ test('digest heartbeat falls back to app:meta after an old daemon rejects state:
   }
 });
 
-test('digest divergence schedules only the relevant scoped repair', () => {
+test('digest divergence schedules only the relevant scoped sync', () => {
   const { subject, owner } = subjectWithChat();
   const scheduled: Set<string>[] = [];
-  (subject as any).scheduleScopedRepair = (scopes: Set<string>) => scheduled.push(new Set(scopes));
+  (subject as any).scheduleScopedSync = (scopes: Set<string>) => scheduled.push(new Set(scopes));
   const digest: StateDigest = {
     chats: [{
       tabId: owner.id,

@@ -462,7 +462,7 @@ function dictationVocab(chat: Chat | null): string[] {
 
 export function Composer({ chat }: { chat: Chat | null }) {
   const app = useApp();
-  const contextUsage = contextUsageForProvider(chat?.contextUsageByProvider, chat?.providerId, chat?.usage);
+  const contextUsage = contextUsageForProvider(chat?.contextUsageByProvider, chat?.providerId);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [text, setText] = useState(chat?.draft ?? '');
@@ -516,7 +516,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
   const canChooseImage = !!chat && imageCapability !== 'unsupported';
   const atts = chat?.draftImages ?? [];
   const visibleAtts = withoutDraftImages(atts, transferredSteerImageIDs);
-  // Rich per-session catalog when the provider reports one; the legacy
+  // Rich per-session catalog when the provider reports one; the flat
   // session `commands` list stays as the fallback for older daemons.
   const catalog = chat?.commandCatalog;
   const catalogCommands: CatalogCommand[] = catalog?.commands?.length ? catalog.commands : (chat?.commands ?? []);
@@ -584,7 +584,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
     ? (modelEffort && efforts.includes(modelEffort) ? modelEffort : defaultEffort(efforts))
     : null;
   // Permission modes are provider-specific. The old global list represents
-  // only the legacy/default provider and becomes empty or wrong after a
+  // only the default provider and becomes empty or wrong after a
   // reconnect/provider switch, which made this control look dead.
   const providerModes = app.groups.find((g) => g.providerId === chat?.providerId)?.modes;
   const modes = providerModes?.length ? providerModes : app.modes;

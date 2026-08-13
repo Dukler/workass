@@ -72,7 +72,7 @@ func TestMockProviderTypedPhasesAreExplicitAndPhaseLessTurnsStayPlain(t *testing
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	session, err := manager.NewSession(ctx, SessionOptions{TabID: "provider-phase-tab"})
+	session, err := manager.NewSession(ctx, SessionOptions{TabID: "provider-phase-tab", ChatID: "chat-provider-phase-tab"})
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestMockInitializeSessionPromptCancelErrorAndReuse(t *testing.T) {
 		t.Fatalf("init = %+v", init)
 	}
 
-	session, err := manager.NewSession(ctx, SessionOptions{TabID: "mock-tab"})
+	session, err := manager.NewSession(ctx, SessionOptions{TabID: "mock-tab", ChatID: "chat-mock-tab"})
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -218,8 +218,6 @@ func TestMockLostTerminalCannotLeaveJobRunningWhenAdapterDoesNotReleasePrompt(t 
 		PromptReconcileInterval: 25 * time.Millisecond,
 		PromptReconcileTimeout:  100 * time.Millisecond,
 		PromptTerminalGrace:     50 * time.Millisecond,
-		CrashRecoveryBackoff:    time.Millisecond,
-		CrashRecoveryWindow:     time.Second,
 	})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -290,17 +288,16 @@ func TestStartJobStaleSessionIDCannotDriveAnotherChat(t *testing.T) {
 		Kind: "app-chat", SessionID: chatA.SessionID, // deliberately stale/wrong
 		TabID: "owner-tab-b", ChatID: "owner-chat-b", Prompt: "belongs only to chat B",
 	})
-	if err != nil {
-		t.Fatalf("stale id should recover the requested owner, not fail or cross-wire: %v", err)
-	}
-	end := events.waitJobEnd(t, jobID(job), 5*time.Second)
-	ended := jobFromEnd(end)
-	if ended["sessionId"] != chatB.SessionID {
-		t.Fatalf("job used session %v, want chat B session %s (chat A was %s)", ended["sessionId"], chatB.SessionID, chatA.SessionID)
+	if err == nil || job != nil || !strings.Contains(err.Error(), "otra conversación") {
+		t.Fatalf("stale cross-chat id was not rejected before admission: job=%#v err=%v", job, err)
 	}
 	if liveA, ok := manager.LiveSession(chatA.SessionID); !ok || liveA.TabID != "owner-tab-a" || liveA.ChatID != "owner-chat-a" {
 		t.Fatalf("chat A ownership was disturbed: %#v ok=%v", liveA, ok)
 	}
+	if liveB, ok := manager.LiveSession(chatB.SessionID); !ok || liveB.TabID != "owner-tab-b" || liveB.ChatID != "owner-chat-b" {
+		t.Fatalf("chat B ownership was disturbed: %#v ok=%v", liveB, ok)
+	}
+	events.expectNoChannel(t, "job:event", 100*time.Millisecond)
 }
 
 func TestMockPermissionMarkerRoundTrip(t *testing.T) {
@@ -620,8 +617,6 @@ func TestPermissionWaitSuppressesPromptReconciliationKill(t *testing.T) {
 		PromptReconcileTimeout:  15 * time.Millisecond,
 		PromptTerminalGrace:     20 * time.Millisecond,
 		PermissionTimeout:       time.Second,
-		CrashRecoveryBackoff:    time.Millisecond,
-		CrashRecoveryWindow:     time.Second,
 	})
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "permission-reconcile-hang-tab")
@@ -1451,7 +1446,6 @@ func TestT6NewSessionConvergesNativeBindingModelWithoutRendererReapply(t *testin
 	if err := manager.nativeSessions.put(nativeSessionBinding{
 		TabID: "native-controls-tab", ChatID: "native-controls-chat", ProviderID: "claude",
 		SessionID: "native-controls-provider-session", ModelID: requested, CWD: stateDir,
-		HistoryHash: historyDigest(nil), HistoryVersion: nativeHistoryDigestVersion, ResumeSafe: true,
 	}); err != nil {
 		t.Fatalf("seed native binding: %v", err)
 	}
@@ -1731,16 +1725,11 @@ func TestHibernatedControlWriteDoesNotReviveBridgeWithoutSessionRestore(t *testi
 		t.Fatalf("control write revived the hibernated bridge: %#v", manager.Processes())
 	}
 
-	second, err := manager.StartJob(ctx, JobStartOptions{
-		Kind: "app-chat", SessionID: session.SessionID, TabID: tabID, ChatID: chatID,
-		ProviderID: "codex", ModelID: "fake-model[high]", Prompt: "resume through the lifecycle path",
+	_, err = manager.NewSession(ctx, SessionOptions{
+		TabID: tabID, ChatID: chatID, ProviderID: "codex", ModelID: "fake-model[high]",
 	})
-	if err != nil {
-		t.Fatalf("start recovered strict turn: %v", err)
-	}
-	end := events.waitJobEnd(t, jobID(second), 3*time.Second)
-	if job := jobFromEnd(end); asString(job["status"]) != "failed" || !strings.Contains(asString(job["result"]), "exact native-thread resume") || strings.Contains(strings.ToLower(asString(job["result"])), "session not found") {
-		t.Fatalf("hibernated non-resumable lane did not fail closed: %#v", job)
+	if err == nil || !strings.Contains(err.Error(), "exact native-thread resume") || strings.Contains(strings.ToLower(err.Error()), "session not found") {
+		t.Fatalf("hibernated non-resumable lane did not fail closed through exact resume: %v", err)
 	}
 	events.expectNoChannel(t, "chat:session-replaced", 100*time.Millisecond)
 }
@@ -1762,7 +1751,7 @@ func TestWorkspaceMoveCreatesFreshEpochWithoutTranscriptReplay(t *testing.T) {
 	// workspace epoch; moving the chat only detaches live transports.
 	other := nativeSessionBinding{
 		TabID: tabID, ChatID: chatID, ProviderID: "other-provider", SessionID: "other-native-session", CWD: oldCWD,
-		HistoryHash: historyDigest(nil), HistoryVersion: nativeHistoryDigestVersion, Generation: 1, ResumeSafe: true,
+		Generation: 1,
 	}
 	if err := manager.nativeSessions.put(other); err != nil {
 		t.Fatalf("seed other-provider binding: %v", err)
@@ -1799,8 +1788,8 @@ func TestWorkspaceMoveCreatesFreshEpochWithoutTranscriptReplay(t *testing.T) {
 	if binding, ok := manager.nativeSessions.getForWorkspace(tabID, chatID, old.ProviderID, targetCWD); !ok || binding.SessionID != fresh.SessionID {
 		t.Fatalf("target workspace lane = %#v ok=%v, want %q", binding, ok, fresh.SessionID)
 	}
-	if ambiguous, ok := manager.nativeSessions.get(tabID, chatID, old.ProviderID); !ok || !ambiguous.Quarantined {
-		t.Fatalf("workspace-free lookup selected one of multiple epochs: %#v ok=%v", ambiguous, ok)
+	if ambiguous, ok := manager.nativeSessions.get(tabID, chatID, old.ProviderID); ok {
+		t.Fatalf("workspace-free lookup selected one of multiple epochs: %#v", ambiguous)
 	}
 	history := []any{map[string]any{"role": "user", "content": "canonical earlier turn", "at": "2026-07-13T00:00:00Z"}}
 	job, err := manager.StartJob(context.Background(), JobStartOptions{
@@ -1898,10 +1887,11 @@ func TestLifecycleWithoutExactResumeFailsClosedAfterHibernation(t *testing.T) {
 	hibernated := waitProcState(t, manager, StateHibernated, time.Second)
 	t.Logf("trace lifecycle hibernated pid=%v", hibernated["pid"])
 
-	second := startAppChatJobWithHistory(t, manager, session.SessionID, "resurrect-tab", "second live request", history)
-	secondEnd := events.waitJobEnd(t, jobID(second), 2*time.Second)
-	if job := jobFromEnd(secondEnd); asString(job["status"]) != "failed" || !strings.Contains(asString(job["result"]), "exact native-thread resume") {
-		t.Fatalf("non-resumable provider did not fail closed: %#v", job)
+	_, err := manager.NewSession(context.Background(), SessionOptions{
+		TabID: "resurrect-tab", ChatID: "chat-resurrect-tab", ProviderID: session.ProviderID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "exact native-thread resume") {
+		t.Fatalf("non-resumable provider did not fail closed through exact resume: %v", err)
 	}
 	events.expectNoChannel(t, "chat:session-replaced", 100*time.Millisecond)
 }
@@ -1955,41 +1945,6 @@ func TestFailedSpareWarmTripsCircuitBreakerInsteadOfRespawning(t *testing.T) {
 	if !isBlocked || warming != 0 || spares != 0 {
 		t.Fatalf("spare breaker blocked=%v warming=%d spares=%d", isBlocked, warming, spares)
 	}
-}
-
-func TestLifecycleIdleCrashWithoutExactResumeFailsClosed(t *testing.T) {
-	manager, events := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
-	t.Cleanup(func() { manager.Reset() })
-	session := newFakeSession(t, manager, "idle-crash-tab")
-	first := startAppChatJob(t, manager, session.SessionID, "idle-crash-tab", "first idle crash turn")
-	assertJobStatus(t, events.waitJobEnd(t, jobID(first), 2*time.Second), "done", 0, "end_turn")
-	_ = waitProcState(t, manager, StateIdle, 500*time.Millisecond)
-
-	bridge := manager.bridgeForSession(session.SessionID, SessionOptions{SessionID: session.SessionID, TabID: "idle-crash-tab"})
-	if bridge == nil {
-		t.Fatalf("bridge missing before idle crash")
-	}
-	bridge.mu.Lock()
-	child := bridge.child
-	bridge.mu.Unlock()
-	if child == nil || child.Process == nil {
-		t.Fatalf("idle child missing")
-	}
-	if err := child.Process.Kill(); err != nil {
-		t.Fatalf("kill idle child: %v", err)
-	}
-	_ = waitProcStatus(t, manager, "failed", time.Second)
-	t.Log("trace idle crash closed bridge without mid-turn recovery")
-
-	history := []any{map[string]any{"role": "user", "content": "pre-crash history", "at": "2026-07-10T00:00:00Z"}}
-	second := startAppChatJobWithHistory(t, manager, session.SessionID, "idle-crash-tab", "after idle crash", history)
-	secondEnd := events.waitJobEnd(t, jobID(second), 2*time.Second)
-	if job := jobFromEnd(secondEnd); asString(job["status"]) != "failed" || !strings.Contains(asString(job["result"]), "exact native-thread resume") || strings.Contains(asString(job["result"]), "pre-crash history") {
-		t.Fatalf("idle crash did not fail closed: %#v", job)
-	}
-	events.expectNoChannel(t, "chat:session-replaced", 100*time.Millisecond)
-	events.expectNoChannel(t, "chat:engine-recovered", 100*time.Millisecond)
-	t.Logf("trace idle crash preserved lane=%s and refused replacement", session.SessionID)
 }
 
 func TestLifecycleRSSSampledForLiveChild(t *testing.T) {
@@ -2130,12 +2085,6 @@ func newFakeManager(t *testing.T, mode string, overrides Options) (*Manager, *ev
 	}
 	if overrides.CompactionKeepLastTurns != 0 {
 		opts.CompactionKeepLastTurns = overrides.CompactionKeepLastTurns
-	}
-	if overrides.CrashRecoveryBackoff != 0 {
-		opts.CrashRecoveryBackoff = overrides.CrashRecoveryBackoff
-	}
-	if overrides.CrashRecoveryWindow != 0 {
-		opts.CrashRecoveryWindow = overrides.CrashRecoveryWindow
 	}
 	if overrides.ProviderDetectionRetryBackoffs != nil {
 		opts.ProviderDetectionRetryBackoffs = append([]time.Duration(nil), overrides.ProviderDetectionRetryBackoffs...)

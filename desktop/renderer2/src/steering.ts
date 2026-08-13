@@ -14,19 +14,7 @@ export interface PendingSteerLike {
   steerState?: 'sending' | 'accepted' | 'applied' | 'uncertain';
 }
 
-export interface SteerAnchorLike {
-  assistantMessageId: string;
-  contentOffset: number;
-  resultOffset: number;
-  eventCount: number;
-}
-
-export interface AnchoredSteerLike {
-  id: string;
-  steerAnchor?: SteerAnchorLike;
-}
-
-export interface ChronologicalMessageLike extends PendingSteerLike, AnchoredSteerLike {
+export interface ChronologicalMessageLike extends PendingSteerLike {
   role: 'user' | 'assistant';
   id: string;
   content: string;
@@ -46,21 +34,6 @@ export interface ChronologicalMessageLike extends PendingSteerLike, AnchoredStee
   permission?: unknown;
   interrupted?: boolean;
   retryPrompt?: string;
-}
-
-function boundedOffset(value: unknown, limit: number, floor: number): number {
-  const parsed = Number(value);
-  const bounded = Number.isFinite(parsed) ? Math.trunc(parsed) : floor;
-  return Math.max(floor, Math.min(limit, bounded));
-}
-
-function eventSlice(events: readonly unknown[], start: number, end: number, contentStart: number): unknown[] {
-  return events.slice(start, end).map((raw) => {
-    if (!raw || typeof raw !== 'object') return raw;
-    const event = raw as Record<string, unknown>;
-    const at = Number(event.at);
-    return Number.isFinite(at) ? { ...event, at: Math.max(0, at - contentStart) } : { ...event };
-  });
 }
 
 function isEmptyAssistant(message: ChronologicalMessageLike): boolean {
@@ -103,7 +76,6 @@ export function stageChronologicalSteer<T extends ChronologicalMessageLike>(
   steer.turnRootId = rootId;
   steer.steerBoundary = 'waiting';
   steer.steerContinuationId = continuation.id;
-  delete steer.steerAnchor;
 
   continuation.role = 'assistant';
   continuation.status = 'pending';
@@ -113,7 +85,6 @@ export function stageChronologicalSteer<T extends ChronologicalMessageLike>(
   continuation.turnTerminal = true;
   continuation.steerBoundary = 'waiting';
   continuation.steerContinuationFor = steer.id;
-  delete continuation.steerAnchor;
 
   let insertAt = activeIndex + 1;
   while (insertAt < messages.length
@@ -278,7 +249,6 @@ export function insertChronologicalSteer<T extends ChronologicalMessageLike>(
   steer.status = 'pending';
   steer.steerState = 'sending';
   steer.turnRootId = rootId;
-  delete steer.steerAnchor;
 
   continuation.role = 'assistant';
   continuation.status = 'running';
@@ -286,7 +256,6 @@ export function insertChronologicalSteer<T extends ChronologicalMessageLike>(
   continuation.jobId = active?.jobId ?? continuation.jobId;
   continuation.turnRootId = rootId;
   continuation.turnTerminal = true;
-  delete continuation.steerAnchor;
   messages.splice(activeIndex + 1, 0, steer, continuation);
   return { steer, continuation, rootId };
 }
@@ -336,100 +305,6 @@ export function rejectChronologicalSteer<T extends ChronologicalMessageLike>(mes
     messages.splice(index, 1);
   }
   return steer;
-}
-
-function chronologicalSegment<T extends ChronologicalMessageLike>(
-  owner: T,
-  id: string,
-  rootId: string,
-  contentStart: number,
-  contentEnd: number,
-  resultStart: number,
-  resultEnd: number,
-  eventStart: number,
-  eventEnd: number,
-  terminal: boolean,
-): T {
-  const segment = {
-    ...owner,
-    id,
-    content: owner.content.slice(contentStart, contentEnd),
-    result: (owner.result ?? '').slice(resultStart, resultEnd) || undefined,
-    events: eventSlice(owner.events, eventStart, eventEnd, contentStart),
-    turnRootId: rootId,
-    turnTerminal: terminal,
-    status: terminal ? owner.status : 'done',
-    at: terminal ? owner.at : null,
-    permission: terminal ? owner.permission : undefined,
-    interrupted: terminal ? owner.interrupted : false,
-    retryPrompt: terminal ? owner.retryPrompt : undefined,
-  } as T;
-  delete segment.steerAnchor;
-  return segment;
-}
-
-// One-time compatibility migration for mirrors/archives written by the failed
-// offset-based implementation. It materializes those offsets into permanent
-// assistant/user/assistant rows and removes the anchor forever. This also
-// repairs existing chats such as the production screenshot after reload.
-export function migrateAnchoredSteers<T extends ChronologicalMessageLike>(messages: readonly T[]): T[] {
-  const assistantById = new Map(messages.filter((message) => message.role === 'assistant').map((message) => [message.id, message]));
-  const steersByAssistant = new Map<string, T[]>();
-  const legacySteerIds = new Set<string>();
-  for (const message of messages) {
-    const target = message.steerAnchor?.assistantMessageId;
-    if (message.role !== 'user' || !target || !assistantById.has(target)) continue;
-    const steers = steersByAssistant.get(target);
-    if (steers) steers.push(message);
-    else steersByAssistant.set(target, [message]);
-    legacySteerIds.add(message.id);
-  }
-  if (legacySteerIds.size === 0) return [...messages];
-
-  const out: T[] = [];
-  for (const message of messages) {
-    if (legacySteerIds.has(message.id)) continue;
-    const steers = steersByAssistant.get(message.id);
-    if (message.role !== 'assistant' || !steers?.length) {
-      out.push(message);
-      continue;
-    }
-    const rootId = message.turnRootId ?? message.id;
-    const result = message.result ?? '';
-    let contentStart = 0;
-    let resultStart = 0;
-    let eventStart = 0;
-    let priorSteerId = '';
-    for (const steer of steers) {
-      const anchor = steer.steerAnchor!;
-      const contentEnd = boundedOffset(anchor.contentOffset, message.content.length, contentStart);
-      const resultEnd = boundedOffset(anchor.resultOffset, result.length, resultStart);
-      const eventEnd = boundedOffset(anchor.eventCount, message.events.length, eventStart);
-      const id = priorSteerId ? `${rootId}~after~${priorSteerId}` : message.id;
-      const segment = chronologicalSegment(message, id, rootId, contentStart, contentEnd, resultStart, resultEnd, eventStart, eventEnd, false);
-      if (!isEmptyAssistant(segment)) out.push(segment);
-      const migratedSteer = { ...steer, turnRootId: rootId } as T;
-      delete migratedSteer.steerAnchor;
-      out.push(migratedSteer);
-      contentStart = contentEnd;
-      resultStart = resultEnd;
-      eventStart = eventEnd;
-      priorSteerId = steer.id;
-    }
-    out.push(chronologicalSegment(
-      message,
-      `${rootId}~after~${priorSteerId}`,
-      rootId,
-      contentStart,
-      message.content.length,
-      resultStart,
-      result.length,
-      eventStart,
-      message.events.length,
-      message.turnTerminal !== false,
-    ));
-  }
-  return out;
 }
 
 export function steerStatusLabel(

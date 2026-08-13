@@ -6,7 +6,6 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
-const os = require('node:os');
 const path = require('node:path');
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -16,11 +15,6 @@ const MUTATING_METHODS = new Set([
   'browser.reload', 'browser.click', 'browser.type',
   'browser.scroll', 'browser.key', 'browser.batch',
 ]);
-
-function defaultControlFile() {
-  return process.env.WORKASS_BROWSER_CONTROL_FILE
-    || path.join(os.homedir(), '.workass', 'browser-control.json');
-}
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -49,10 +43,11 @@ function writeJSON(res, status, payload) {
 }
 
 class BrowserControlServer {
-  constructor({ manager, controlFile = defaultControlFile(), host = '127.0.0.1', port = 0, token, isController } = {}) {
-    if (!manager || typeof manager.browserControl !== 'function') {
-      throw new Error('browser control manager missing');
-    }
+  constructor({ manager, controlFile, host = '127.0.0.1', port = 0, token, isController } = {}) {
+	if (!manager || typeof manager.browserControl !== 'function') {
+	  throw new Error('browser control manager missing');
+	}
+	if (!controlFile) throw new Error('browser control file missing');
     this.manager = manager;
     this.controlFile = path.resolve(controlFile);
     this.host = host;
@@ -186,16 +181,13 @@ class BrowserControlServer {
             throw new Error('browser receipt requires operationId and requestDigest');
           }
           writeJSON(res, 200, await this.readMutationReceipt(request));
-        } else if (MUTATING_METHODS.has(request.method) &&
-          (String(request.operationId || '').trim() || String(request.requestDigest || '').trim())) {
-          if (!String(request.operationId || '').trim() || !String(request.requestDigest || '').trim()) {
-            throw new Error('browser mutation requires operationId and requestDigest');
-          }
-          writeJSON(res, 200, await this.dispatchMutation(request));
-        } else {
-          // Keep the direct shell surface byte-compatible for older local
-          // callers. The MCP actor path always supplies the journal metadata.
-          const result = await this.manager.browserControl(request.method, request.params || {});
+		} else if (MUTATING_METHODS.has(request.method)) {
+		  if (!String(request.operationId || '').trim() || !String(request.requestDigest || '').trim()) {
+			throw new Error('browser mutation requires operationId and requestDigest');
+		  }
+		  writeJSON(res, 200, await this.dispatchMutation(request));
+		} else {
+		  const result = await this.manager.browserControl(request.method, request.params || {});
           writeJSON(res, 200, { id: request.id ?? null, result });
         }
       } catch (err) {
@@ -235,4 +227,4 @@ class BrowserControlServer {
   }
 }
 
-module.exports = { BrowserControlServer, MAX_MUTATION_RECEIPTS, defaultControlFile };
+module.exports = { BrowserControlServer, MAX_MUTATION_RECEIPTS };

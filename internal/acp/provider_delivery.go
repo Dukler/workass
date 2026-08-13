@@ -90,8 +90,8 @@ func (codexDeliveryStrategy) AssistantPhase(update map[string]any) string {
 		return phase
 	}
 	meta := mapFromAny(update["_meta"])
-	legacy := mapFromAny(meta["codex"])
-	switch strings.TrimSpace(asString(legacy["phase"])) {
+	codexMeta := mapFromAny(meta["codex"])
+	switch strings.TrimSpace(asString(codexMeta["phase"])) {
 	case "commentary":
 		return "commentary"
 	case "final_answer":

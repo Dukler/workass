@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,47 +14,7 @@ import (
 	"workass/internal/chat"
 )
 
-func TestT4ModelControlKeysMigrateToBaseAndCompositeCreateValidation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), sessionStateFilename)
-	snapshot := sessionMirrorFixture("polluted-tab", "polluted-chat", "polluted controls")
-	legacyChat := chatFromSnapshot(snapshot, "polluted-tab")
-	legacyChat["modelControls"] = map[string]any{"mock": map[string]any{
-		"mock-deterministic":       map[string]any{"effort": "low", "modeId": "ask"},
-		"mock-deterministic[high]": map[string]any{"effort": "high", "modeId": "bypass"},
-		"literal[1m]":              map[string]any{"modeId": "literal"},
-	}}
-	raw, err := json.Marshal(snapshot)
-	if err != nil {
-		t.Fatalf("marshal polluted snapshot: %v", err)
-	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatalf("write polluted snapshot: %v", err)
-	}
-	var logLines []string
-	prevLog := sessionStoreLogLine
-	sessionStoreLogLine = func(line string) { logLines = append(logLines, line) }
-	t.Cleanup(func() { sessionStoreLogLine = prevLog })
-
-	reloaded := newSessionStore(path)
-	if err := reloaded.LoadError(); err != nil {
-		t.Fatalf("reload polluted controls: %v", err)
-	}
-	gotChat := chatFromSnapshot(reloaded.Get().(map[string]any), "polluted-tab")
-	memory := mapFromAnyMain(mapFromAnyMain(gotChat["modelControls"])["mock"])
-	if _, exists := memory["mock-deterministic[high]"]; exists {
-		t.Fatalf("composite modelControls key survived migration: %#v", memory)
-	}
-	base := mapFromAnyMain(memory["mock-deterministic"])
-	if fieldString(base, "effort") != "low" || fieldString(base, "modeId") != "ask" {
-		t.Fatalf("base controls did not win conflict: %#v", base)
-	}
-	if _, exists := memory["literal[1m]"]; !exists {
-		t.Fatalf("literal bracketed adapter id was migrated away: %#v", memory)
-	}
-	if len(logLines) != 1 || !strings.Contains(logLines[0], "from=mock-deterministic[high]") || !strings.Contains(logLines[0], "to=mock-deterministic") {
-		t.Fatalf("migration logs = %#v", logLines)
-	}
-
+func TestCompositeModelCreateValidation(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()
 	store := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
