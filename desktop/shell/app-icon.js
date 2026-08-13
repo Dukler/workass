@@ -102,10 +102,11 @@ function atomicJSON(file, value) {
 
 const WINDOWS_SHORTCUT_ICON_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
-  "if ($args.Length -lt 2) { throw 'shortcut icon arguments are incomplete' }",
-  '$iconPath = $args[0]',
+  '$request = ConvertFrom-Json -InputObject $env:WORKASS_SHORTCUT_ICON_REQUEST',
+  "if ($null -eq $request -or [string]::IsNullOrWhiteSpace([string]$request.iconPath)) { throw 'shortcut icon request is incomplete' }",
+  '$iconPath = [string]$request.iconPath',
   '$shell = New-Object -ComObject WScript.Shell',
-  'foreach ($shortcutPath in $args[1..($args.Length - 1)]) {',
+  'foreach ($shortcutPath in @($request.shortcutPaths)) {',
   '  $shortcut = $shell.CreateShortcut($shortcutPath)',
   "  $shortcut.IconLocation = $iconPath + ',0'",
   '  $shortcut.Save()',
@@ -132,8 +133,14 @@ function writeWindowsShortcutIcons({ shortcutPaths, iconPath, env = process.env,
     const batch = shortcutPaths.slice(index, index + 64);
     const result = run(powershell, [
       '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_SHORTCUT_ICON_SCRIPT,
-      iconPath, ...batch,
-    ], { windowsHide: true, stdio: 'ignore' });
+    ], {
+      windowsHide: true,
+      stdio: 'ignore',
+      env: {
+        ...env,
+        WORKASS_SHORTCUT_ICON_REQUEST: JSON.stringify({ iconPath, shortcutPaths: batch }),
+      },
+    });
     if (result.error || result.status !== 0) return { applied: false, reason: 'shortcut-write-failed' };
   }
   return { applied: true, shortcutCount: shortcutPaths.length };

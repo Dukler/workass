@@ -157,8 +157,12 @@ test('Windows binds matching shortcuts to the packaged ICO through the built-in 
   assert.deepEqual(receipt, { applied: true, shortcutCount: 2 });
   assert.equal(calls.length, 1);
   assert.equal(calls[0][0], powershell);
-  assert.deepEqual(calls[0][1].slice(-3), [iconPath, ...shortcutPaths]);
-  assert.deepEqual(calls[0][2], { windowsHide: true, stdio: 'ignore' });
+  assert.deepEqual(JSON.parse(calls[0][2].env.WORKASS_SHORTCUT_ICON_REQUEST), { iconPath, shortcutPaths });
+  assert.deepEqual(calls[0][2], {
+    windowsHide: true,
+    stdio: 'ignore',
+    env: { SystemRoot: systemRoot, WORKASS_SHORTCUT_ICON_REQUEST: JSON.stringify({ iconPath, shortcutPaths }) },
+  });
 });
 
 test('Windows uses native caption buttons while macOS keeps hidden-inset traffic lights', () => {
