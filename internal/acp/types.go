@@ -542,6 +542,8 @@ type Job struct {
 	// The actor owns exact resume/readback; Manager only cleans up its
 	// process-local job and never starts a recovery session.
 	actorRecoveryPending atomic.Bool
+	inputDispatched      atomic.Bool
+	inputConsumed        atomic.Bool
 	lastActivityNanos    atomic.Int64
 	waitingPermission    atomic.Bool
 	consumedSteerIDs     sync.Map // map[string]struct{}
@@ -590,6 +592,20 @@ func (j *Job) markSteerConsumed(clientUserMessageID string) bool {
 	}
 	_, loaded := j.consumedSteerIDs.LoadOrStore(clientUserMessageID, struct{}{})
 	return !loaded
+}
+
+func (j *Job) claimInputConsumption() bool {
+	return j != nil && j.inputConsumed.CompareAndSwap(false, true)
+}
+
+func (j *Job) markInputDispatched() {
+	if j != nil {
+		j.inputDispatched.Store(true)
+	}
+}
+
+func (j *Job) inputWasDispatched() bool {
+	return j != nil && j.inputDispatched.Load()
 }
 
 func (j *Job) consumedSteerIDsSnapshot() []string {

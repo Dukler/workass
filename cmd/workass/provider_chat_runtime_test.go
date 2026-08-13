@@ -665,6 +665,109 @@ func TestProviderChatRuntimeResumesExactLaneAcrossActorAndTabRestart(t *testing.
 	}
 }
 
+func TestProviderChatRuntimeLoadsExactLaneAcrossActorRestart(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := t.TempDir()
+	tracePath := filepath.Join(stateDir, "provider-load-trace.log")
+	providerState := filepath.Join(stateDir, "provider-load-native.json")
+	const tabID, chatID = "load-actor-tab", "load-actor-chat"
+	store := sharedSessionStore(stateDir)
+	newManager := func() *acp.Manager {
+		return acp.NewManager(acp.Options{
+			RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+			Provider: acp.ProviderConfig{
+				ID: "mock", Name: "Load-only ACP", Command: "node",
+				Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root,
+				Env: map[string]string{
+					"WORKASS_MOCK_ACP_DELAY_MS":           "0",
+					"WORKASS_MOCK_ACP_SESSION_STORE":      providerState,
+					"WORKASS_MOCK_ACP_TRACE_FILE":         tracePath,
+					"WORKASS_MOCK_ACP_SESSION_CAPABILITY": "load",
+				},
+				Enabled: true,
+			},
+			DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+		})
+	}
+
+	firstManager := newManager()
+	first := newProviderChatRuntime(firstManager, store, stateDir)
+	if _, err := first.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "create-load-actor-chat",
+		"title": "Load actor lane", "titleLocked": true, "cwd": root,
+		"providerId": "mock", "currentModelId": "mock-deterministic", "currentModeId": "ask",
+	}); err != nil {
+		firstManager.Reset()
+		t.Fatal(err)
+	}
+	initial, err := first.Select(context.Background(), acp.SessionOptions{
+		TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: root,
+	})
+	if err != nil {
+		firstManager.Reset()
+		t.Fatal(err)
+	}
+	if initial.SessionID != "" {
+		firstManager.Reset()
+		t.Fatalf("load-only session/new became durable before first ACP activity: %#v", initial)
+	}
+	if _, err := first.Start(context.Background(), map[string]any{
+		"kind": "app-chat", "title": "Load actor lane", "tabId": tabID, "chatId": chatID,
+		"providerId": "mock", "cwd": root, "prompt": "first load-only turn",
+		"userMessageId": "load-user-1", "assistantMessageId": "load-assistant-1",
+	}, "human"); err != nil {
+		firstManager.Reset()
+		t.Fatal(err)
+	}
+	waitProviderChatIdle(t, first, chatID, 5*time.Second)
+	firstState, ok := first.Snapshot(chatID)
+	if !ok || firstState.ActiveLaneID == "" {
+		firstManager.Reset()
+		t.Fatalf("load-only actor lane did not become active: %#v", firstState)
+	}
+	threadID := firstState.Lanes[firstState.ActiveLaneID].Thread.HeadID
+	if threadID == "" {
+		firstManager.Reset()
+		t.Fatalf("first standard ACP activity did not commit the exact thread: %#v", firstState.Lanes[firstState.ActiveLaneID])
+	}
+	if err := first.Close(context.Background()); err != nil && !strings.Contains(err.Error(), "already unavailable") {
+		firstManager.Reset()
+		t.Fatal(err)
+	}
+	firstManager.Reset()
+
+	secondManager := newManager()
+	t.Cleanup(func() { secondManager.Reset() })
+	second := newProviderChatRuntime(secondManager, store, stateDir)
+	t.Cleanup(func() { _ = second.Close(context.Background()) })
+	loaded, err := second.Select(context.Background(), acp.SessionOptions{
+		TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.SessionID != threadID {
+		t.Fatalf("same-id load changed provider thread: first=%q loaded=%q", threadID, loaded.SessionID)
+	}
+	if _, err := second.Start(context.Background(), map[string]any{
+		"kind": "app-chat", "title": "Load actor lane", "tabId": tabID, "chatId": chatID,
+		"providerId": "mock", "sessionId": loaded.SessionID, "cwd": root, "prompt": "second load-only turn",
+		"userMessageId": "load-user-2", "assistantMessageId": "load-assistant-2",
+	}, "human"); err != nil {
+		t.Fatal(err)
+	}
+	waitProviderChatLedger(t, second, chatID, 4, 5*time.Second)
+	raw, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := string(raw)
+	if strings.Count(trace, "session/load") != 1 || strings.Contains(trace, "session/resume") ||
+		strings.Contains(trace, "[mock:loaded-history]") || strings.Contains(trace, "Previous conversation") {
+		t.Fatalf("actor restart did not use one exact load without replay: %s", trace)
+	}
+}
+
 func TestActorNativeChatProjectsAfterRestartFromCanonicalStorage(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()

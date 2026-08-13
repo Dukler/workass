@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -395,7 +396,10 @@ func TestDescriptorOnlyACPProviderInheritsCompleteGenericLaneContract(t *testing
 		Providers: []ProviderConfig{{
 			ID: providerID, Name: "Descriptor only", Command: "node",
 			Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true,
-			Env: map[string]string{"WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "provider.json")},
+			Env: map[string]string{
+				"WORKASS_MOCK_ACP_SESSION_STORE":      filepath.Join(stateDir, "provider.json"),
+				"WORKASS_MOCK_ACP_SESSION_CAPABILITY": "load",
+			},
 		}},
 		DefaultProviderID: providerID, RSSSampleInterval: time.Hour,
 	})
@@ -424,8 +428,50 @@ func TestDescriptorOnlyACPProviderInheritsCompleteGenericLaneContract(t *testing
 		t.Fatal(err)
 	}
 	identity = lane.Identity()
+	creation, ok := lane.(providercontract.ThreadCreationReceipt)
+	if !ok || creation.ThreadCreationCommitted() {
+		t.Fatalf("descriptor-only ACP create did not preserve its first-input boundary: %#v", creation)
+	}
+	managed, ok := lane.(*managerLane)
+	if !ok {
+		t.Fatalf("descriptor-only ACP lane type = %T", lane)
+	}
+	if attached := <-lane.Events(); attached.Kind != providercontract.EventLaneAttached {
+		t.Fatalf("descriptor-only first event = %q", attached.Kind)
+	}
+	turnDone := make(chan struct{})
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		terminal := false
+		for event := range lane.Events() {
+			managed.AcknowledgeDurableEvent(event.Identity.Sequence, nil)
+			if event.Kind == providercontract.EventTurnTerminal && !terminal {
+				terminal = true
+				close(turnDone)
+			}
+		}
+	}()
+	if _, err := lane.Delivery().StartTurn(context.Background(), providercontract.TurnInput{
+		OperationID: "descriptor-operation", Text: "commit descriptor-only ACP thread",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-turnDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("descriptor-only ACP turn did not reach its terminal receipt")
+	}
+	if !creation.ThreadCreationCommitted() {
+		t.Fatal("standard ACP activity did not commit the descriptor-only thread")
+	}
 	if err := lane.Detach(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case <-drainDone:
+	case <-time.After(time.Second):
+		t.Fatal("descriptor-only ACP lane did not detach")
 	}
 	resumed, err := definition.Runtime.Resume(context.Background(), providercontract.ResumeLaneRequest{
 		Identity: identity, Thread: thread, Owner: owner, CWD: root,
@@ -438,6 +484,47 @@ func TestDescriptorOnlyACPProviderInheritsCompleteGenericLaneContract(t *testing
 	}
 	if err := resumed.Detach(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDescriptorOnlyACPProviderRejectsMissingExactAttachmentBeforeCreate(t *testing.T) {
+	root, stateDir := repoRoot(t), t.TempDir()
+	const providerID = "descriptor-without-attachment"
+	providerStore := filepath.Join(stateDir, "provider.json")
+	manager := NewManager(Options{
+		RootDir: root, StateDir: stateDir, MachineID: "descriptor-machine",
+		Providers: []ProviderConfig{{
+			ID: providerID, Name: "Descriptor without attachment", Command: "node",
+			Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true,
+			Env: map[string]string{
+				"WORKASS_MOCK_ACP_SESSION_STORE":      providerStore,
+				"WORKASS_MOCK_ACP_SESSION_CAPABILITY": "none",
+			},
+		}},
+		DefaultProviderID: providerID, RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	selection, err := manager.ResolveProviderLaneSelection(context.Background(), SessionOptions{
+		TabID: "descriptor-tab", ChatID: "descriptor-chat", ProviderID: providerID, CWD: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := manager.ProviderDefinition(providerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = definition.Runtime.Create(context.Background(), providercontract.CreateLaneRequest{
+		Identity: selection.Identity, Owner: selection.Owner, CWD: root,
+	})
+	if !providercontract.ErrorIs(err, providercontract.ErrorUnsupportedCapability) {
+		t.Fatalf("missing exact attachment error = %v, want unsupported capability", err)
+	}
+	if _, exists := manager.nativeSessions.get("descriptor-tab", "descriptor-chat", providerID); exists {
+		t.Fatal("unsupported ACP provider created a durable Workass binding")
+	}
+	if _, err := os.Stat(providerStore); !os.IsNotExist(err) {
+		t.Fatalf("unsupported ACP provider reached session/new: stat error=%v", err)
 	}
 }
 

@@ -1092,30 +1092,30 @@ func (m *Manager) tryRestoreNativeSession(ctx context.Context, opts SessionOptio
 		}
 	}
 	if _, err := bridge.Initialize(ctx); err != nil {
-		return SessionInfo{}, true, nativeLaneError(providercontract.ErrorTransientTransport, "could not start the provider host for exact resume", err)
+		return SessionInfo{}, true, nativeLaneError(providercontract.ErrorTransientTransport, "could not start the provider host for exact attachment", err)
 	}
-	if !bridge.supportsSessionResume() {
+	if !bridge.supportsExactSessionAttachment() {
 		return SessionInfo{}, true, nativeLaneError(
 			providercontract.ErrorUnsupportedCapability,
-			"the provider does not support exact native-thread resume",
+			"the provider does not support exact native-thread resume or same-id load",
 			nil,
 		)
 	}
 	info, method, err := bridge.RestoreSession(ctx, binding, opts)
 	if err != nil {
-		return SessionInfo{}, true, nativeResumeError(err)
+		return SessionInfo{}, true, exactSessionAttachmentError(err)
 	}
 	if info.SessionID != currentThreadID {
-		bridge.Close(false, errors.New("provider exact resume returned a different native head"))
+		bridge.Close(false, errors.New("provider exact attachment returned a different native head"))
 		return SessionInfo{}, true, nativeLaneError(
 			providercontract.ErrorNativeIdentityConflict,
-			"the provider exact-resume reply changed the lane's native head without an attested lineage event",
+			"the provider exact-attachment reply changed the lane's native head without an attested lineage event",
 			fmt.Errorf("expected %q, got %q", currentThreadID, info.SessionID),
 		)
 	}
 	if binding.RealmVerified && info.ProviderRealmVerified &&
 		(binding.AccountScope != strings.TrimSpace(info.ProviderAccountScope) || binding.InstallScope != strings.TrimSpace(info.ProviderInstallScope)) {
-		bridge.Close(false, errors.New("provider realm changed during exact resume"))
+		bridge.Close(false, errors.New("provider realm changed during exact attachment"))
 		return SessionInfo{}, true, nativeLaneError(
 			providercontract.ErrorNativeIdentityConflict,
 			"the provider account or installation no longer matches this chat lane",
@@ -1131,7 +1131,7 @@ func (m *Manager) tryRestoreNativeSession(ctx context.Context, opts SessionOptio
 	binding.ThreadCommitted = true
 	if err := ledger.put(binding); err != nil {
 		bridge.Close(false, err)
-		return SessionInfo{}, true, nativeLaneError(providercontract.ErrorProtocolViolation, "could not persist the exact resumed thread binding", err)
+		return SessionInfo{}, true, nativeLaneError(providercontract.ErrorProtocolViolation, "could not persist the exact attached thread binding", err)
 	}
 	operationState := "clear"
 	if binding.PendingOperation != nil {
@@ -1161,6 +1161,8 @@ func (m *Manager) rememberNewNativeSession(opts SessionOptions, info SessionInfo
 	if !ledger.enabledFor(opts) {
 		return nil
 	}
+	bridge := m.bridgeForSession(info.SessionID, opts)
+	creation := providerAdapterForID(info.ProviderID).negotiatedCreationCapabilities(bridge)
 	binding := nativeSessionBinding{
 		TabID: opts.TabID, ChatID: opts.ChatID, ProviderID: info.ProviderID,
 		SessionID: info.SessionID, CWD: info.CWD,
@@ -1168,7 +1170,7 @@ func (m *Manager) rememberNewNativeSession(opts SessionOptions, info SessionInfo
 		AccountScope:    firstNonEmpty(strings.TrimSpace(info.ProviderAccountScope), "unverified-account"),
 		InstallScope:    firstNonEmpty(strings.TrimSpace(info.ProviderInstallScope), "registered-"+normalizeProviderID(info.ProviderID)),
 		RealmVerified:   info.ProviderRealmVerified,
-		ThreadCommitted: !providerAdapterForID(info.ProviderID).creation.DeferredUntilInput,
+		ThreadCommitted: !creation.DeferredUntilInput,
 		ModelID:         firstNonEmpty(stringPointer(info.CurrentModelID)),
 		ModeID:          firstNonEmpty(stringPointer(info.CurrentModeID)),
 	}

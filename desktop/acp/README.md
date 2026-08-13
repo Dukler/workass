@@ -54,10 +54,10 @@ The mock supports:
 
 - ACP `initialize`
 - `session/new`, `session/prompt`, `session/set_config_option`, and `session/close`
-- deterministic exact `session/resume` when
+- deterministic exact `session/resume` and same-id `session/load` when
   `WORKASS_MOCK_ACP_SESSION_STORE` points to a durable fixture file; select
-  `resume` or `none` with `WORKASS_MOCK_ACP_SESSION_CAPABILITY` (`both` remains
-  an old alias for `resume` in existing fixtures)
+  `resume`, `load`, `both`, or `none` with
+  `WORKASS_MOCK_ACP_SESSION_CAPABILITY`
 - plan updates
 - thought chunks
 - tool-call start and completion updates

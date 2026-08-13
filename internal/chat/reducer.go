@@ -3470,7 +3470,12 @@ func drive(state *State) ([]Effect, error) {
 			return nil, nil
 		}
 		return beginQueuedForeground(state, target, lane, false)
-	case LaneCreating, LaneResuming, LaneImporting, LaneRunning, LaneReconciling, LaneBlocked, LaneBroken:
+	case LaneCreating:
+		if lane.Provision != nil && lane.Creation.DeferredUntilInput && len(state.Queue) > 0 && state.Queue[0].LaneID == target {
+			return beginQueuedForeground(state, target, lane, true)
+		}
+		return nil, nil
+	case LaneResuming, LaneImporting, LaneRunning, LaneReconciling, LaneBlocked, LaneBroken:
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("unknown lane phase %q", lane.Phase)

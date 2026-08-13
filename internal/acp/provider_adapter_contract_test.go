@@ -21,11 +21,20 @@ func TestProviderAdapterDefaultsAllowSingleFacetOverride(t *testing.T) {
 	if reflect.TypeOf(adapter.delivery) != reflect.TypeOf(fixtureDeliveryOverride{}) {
 		t.Fatalf("delivery override was lost: %T", adapter.delivery)
 	}
-	if adapter.context == nil || adapter.planUsage == nil || adapter.commands == nil || adapter.catalog == nil || adapter.permission == nil || adapter.launch == nil {
+	if adapter.context == nil || adapter.input == nil || adapter.planUsage == nil || adapter.commands == nil || adapter.catalog == nil || adapter.permission == nil || adapter.launch == nil {
 		t.Fatalf("single-facet provider required unrelated implementations: %#v", adapter)
 	}
 	if got := providerAdapterForID("descriptor-only-dummy"); reflect.TypeOf(got.delivery) != reflect.TypeOf(genericACPProviderAdapter.delivery) {
 		t.Fatalf("descriptor-only provider did not inherit generic ACP delivery: %T", got.delivery)
+	}
+	if got := providerAdapterForID("descriptor-only-dummy"); got.creation.DeferredUntilInput || !got.input.StandardACPActivity() {
+		t.Fatalf("descriptor-only provider did not inherit generic ACP creation receipts: %#v", got)
+	}
+	for _, providerID := range []string{"claude", "codex"} {
+		got := providerAdapterForID(providerID)
+		if !got.creation.DeferredUntilInput || got.input.StandardACPActivity() {
+			t.Fatalf("native provider %q lost its explicit input receipt boundary: %#v", providerID, got)
+		}
 	}
 }
 
