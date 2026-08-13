@@ -105,6 +105,32 @@ test('settle and un-settle store opposite overrides, and new work retires the sh
   assert.equal(subject.settled, undefined);
 });
 
+test('a replayed start for an already-terminal job does not resurrect a settled chat', () => {
+  const store = new StoreCtor();
+  const subject = chat({
+    settled: 'settled',
+    messages: [{
+      id: 'assistant-1',
+      role: 'assistant',
+      content: 'already finished',
+      status: 'done',
+      at: '2026-08-12T12:00:00Z',
+      events: [],
+      jobId: 'job-finished',
+    }],
+  });
+  store.state.chats = [subject];
+  store.state.activeId = 'tab-other';
+
+  store.onJobEvent({
+    type: 'start',
+    job: { id: 'job-finished', chatId: 'chat-1', tabId: 'tab-1', status: 'running' } as PublicJob,
+  });
+
+  assert.equal(subject.messages[0].status, 'done');
+  assert.equal(subject.settled, 'settled');
+});
+
 test('a chat with work in flight is not a settle target', () => {
   // T3's canSettle twin: what the partition refuses to classify as settled has
   // to be refused as a target too, or the row offers a click it will swallow.

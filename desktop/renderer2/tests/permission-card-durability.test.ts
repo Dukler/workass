@@ -149,3 +149,17 @@ test('transcript drift repairs even when queue and controls still match', () => 
   assert.equal(store.digestRepairScopes(digestOf([digestChat(local, { messageCount: 2 })])).has('session'), true);
   assert.equal(store.digestRepairScopes(digestOf([digestChat(local, { lastMessageId: 'different' })])).has('session'), true);
 });
+
+test('an evicted inactive archive reports its complete durable count to the digest', () => {
+  const complete = [message('m-1', { status: 'done' }), message('m-2', { status: 'done' })];
+  const local = chat('tab-1', complete.slice(-1));
+  local._archivedCount = complete.length;
+  const store = subject([local]);
+  store.localProcHash = '';
+  store.localSettingsRevision = '';
+
+  assert.equal(store.digestRepairScopes(digestOf([digestChat(local, {
+    messageCount: complete.length,
+    lastMessageId: 'm-2',
+  })])).has('session'), false);
+});

@@ -127,3 +127,49 @@ test('a presentation save retries one stable operation and refuses a mismatched 
     else (globalThis as any).window = previousWindow;
   }
 });
+
+test('a failed settlement save survives a stale digest and retries the same operation', async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  let attempts = 0;
+  const previousWindow = (globalThis as any).window;
+  (globalThis as any).window = {
+    api: {
+      chatPresentationSave: async (opts: Record<string, unknown>) => {
+        calls.push({ ...opts });
+        attempts += 1;
+        if (attempts === 1) {
+          return { ok: true, operationId: 'wrong-operation', presentationRevision: 1, actorRevision: 1 };
+        }
+        return { ok: true, operationId: opts.operationId, presentationRevision: 1, actorRevision: 1 };
+      },
+      saveSession: async () => ({ ok: true, globalRevision: 1 }),
+    },
+  };
+  try {
+    const owner = chat('tab-settlement-fence');
+    owner.unread = true;
+    const subject = setup(owner);
+    const flush = subject.flushSession.bind(subject);
+    subject.flushSession = async () => {};
+
+    subject.settleChat(owner.id, true);
+    await flush(true);
+    assert.equal(subject.dirtyChats.has(owner.id), true);
+
+    const staleServer = subject.toMirror(false, false);
+    staleServer.chats[0].settled = undefined;
+    staleServer.chats[0].unread = true;
+    assert.equal(subject.restoreSessionSnapshot(staleServer), true);
+    assert.equal(subject.chat(owner.id)?.settled, 'settled');
+    assert.equal(subject.chat(owner.id)?.unread, false);
+
+    await flush(true);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].operationId, calls[0].operationId);
+    assert.equal(subject.chat(owner.id)?.settled, 'settled');
+    assert.equal(subject.dirtyChats.has(owner.id), false);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});

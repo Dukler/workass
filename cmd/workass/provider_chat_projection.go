@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -31,46 +30,23 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 		if err != nil {
 			return nil, err
 		}
-		state := actor.engine.Snapshot()
-		if state.Deleted {
+		digest := actor.engine.DigestSnapshot()
+		if digest.Deleted {
 			continue
 		}
-		projected := map[string]any{}
-		if err := projectActorChat(projected, state); err != nil {
-			return nil, fmt.Errorf("project actor digest %q: %w", chatID, err)
-		}
-		messages := anySlice(projected["messages"])
-		queue := anySlice(projected["queue"])
-		var lastMessageID any
-		if len(messages) > 0 {
-			lastMessageID = nullableDigestString(fieldString(mapFromAnyMain(messages[len(messages)-1]), "id"))
-		}
-		var queueHeadID any
-		if len(queue) > 0 {
-			queueHeadID = nullableDigestString(fieldString(mapFromAnyMain(queue[0]), "id"))
-		}
-		var runningJobID any
-		if state.Foreground != nil {
-			runningJobID = nullableDigestString(strings.TrimSpace(state.Foreground.Turn.NativeID))
-		}
-		permissionIDs := make([]string, 0)
-		for id, permission := range state.Permissions {
-			if !strings.EqualFold(strings.TrimSpace(permission.Event.Status), "resolved") {
-				permissionIDs = append(permissionIDs, id)
-			}
-		}
-		sort.Strings(permissionIDs)
 		chats = append(chats, map[string]any{
-			"tabId": state.Presentation.TabID, "chatId": state.ChatID,
-			"actorRevision": state.Revision,
-			"runningJobId":  runningJobID, "lastMessageId": lastMessageID,
-			"messageCount": len(messages), "queueLen": len(queue), "queueHeadId": queueHeadID,
-			agentQueueRevisionField:     int(state.Presentation.AgentQueueRevision),
-			runtimeControlRevisionField: int(state.Presentation.RuntimeControlRevision),
-			"providerId":                nullableDigestString(string(state.Presentation.ProviderID)),
-			"currentModelId":            nullableDigestString(state.Presentation.CurrentModelID),
-			"currentModeId":             nullableDigestString(state.Presentation.CurrentModeID),
-			"pendingPermissionIds":      permissionIDs,
+			"tabId": digest.TabID, "chatId": digest.ChatID,
+			"actorRevision": digest.ActorRevision,
+			"runningJobId":  nullableDigestString(digest.RunningJobID),
+			"lastMessageId": nullableDigestString(digest.LastMessageID),
+			"messageCount":  digest.MessageCount, "queueLen": digest.QueueLen,
+			"queueHeadId":               nullableDigestString(digest.QueueHeadID),
+			agentQueueRevisionField:     int(digest.AgentQueueRevision),
+			runtimeControlRevisionField: int(digest.RuntimeControlRevision),
+			"providerId":                nullableDigestString(digest.ProviderID),
+			"currentModelId":            nullableDigestString(digest.CurrentModelID),
+			"currentModeId":             nullableDigestString(digest.CurrentModeID),
+			"pendingPermissionIds":      digest.PendingPermissionIDs,
 		})
 	}
 	if catalogHashes == nil {

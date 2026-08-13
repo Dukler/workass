@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -676,6 +677,85 @@ func TestFileStoreRoundTripIsPrivateAndValidated(t *testing.T) {
 	}
 	if len(reloaded.Snapshot().Outbox) != 1 {
 		t.Fatalf("file-backed outbox was not restored: %#v", reloaded.Snapshot())
+	}
+}
+
+func TestDigestSnapshotMatchesVisibleMessageAndQueueIdentityWithoutBodies(t *testing.T) {
+	engine, err := NewEngine("chat-digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.state.Initialized = true
+	engine.state.Revision = 42
+	engine.state.Presentation = PresentationState{
+		TabID: "tab-digest", ProviderID: "codex", CurrentModelID: "gpt-test", CurrentModeID: "agent",
+		AgentQueueRevision: 5, RuntimeControlRevision: 7,
+	}
+	engine.state.Ledger = []LedgerEvent{
+		{MessageID: "ledger-user", Text: "body must not enter the digest"},
+		{MessageID: "ledger-assistant", Text: "another private body"},
+	}
+	engine.state.StagedQueue = []StagedQueueEntry{{ID: "staged-head", Text: "queued private body"}}
+	engine.state.Queue = []QueueEntry{{OperationID: "agent-queue", Presentation: provider.TurnPresentation{QueueID: "agent-tail"}}}
+	engine.state.Foreground = &ForegroundTurn{
+		OperationID:               "foreground-op",
+		Input:                     QueueEntry{Presentation: provider.TurnPresentation{UserMessageID: "foreground-user"}},
+		Turn:                      provider.TurnRef{NativeID: "job-live"},
+		RootAssistantMessageID:    "foreground-assistant",
+		CurrentAssistantMessageID: "foreground-assistant",
+	}
+	engine.state.PendingSteer = &PendingSteer{
+		OperationID:  "steer-op",
+		Presentation: provider.TurnPresentation{UserMessageID: "steer-user", AssistantMessageID: "steer-assistant"},
+	}
+	engine.state.Permissions = map[string]PermissionState{
+		"permission-z":        {Event: provider.PermissionEvent{Status: "pending"}},
+		"permission-a":        {Event: provider.PermissionEvent{Status: "pending"}},
+		"permission-resolved": {Event: provider.PermissionEvent{Status: "resolved"}},
+	}
+
+	digest := engine.DigestSnapshot()
+	if digest.ChatID != "chat-digest" || digest.TabID != "tab-digest" || digest.ActorRevision != 42 {
+		t.Fatalf("digest identity = %#v", digest)
+	}
+	if digest.MessageCount != 6 || digest.LastMessageID != "steer-assistant" || digest.RunningJobID != "job-live" {
+		t.Fatalf("digest transcript = %#v", digest)
+	}
+	if digest.QueueLen != 2 || digest.QueueHeadID != "staged-head" {
+		t.Fatalf("digest queue = %#v", digest)
+	}
+	if digest.AgentQueueRevision != 5 || digest.RuntimeControlRevision != 7 ||
+		digest.ProviderID != "codex" || digest.CurrentModelID != "gpt-test" || digest.CurrentModeID != "agent" {
+		t.Fatalf("digest controls = %#v", digest)
+	}
+	if got := strings.Join(digest.PendingPermissionIDs, ","); got != "permission-a,permission-z" {
+		t.Fatalf("digest permissions = %q", got)
+	}
+}
+
+func TestDigestSnapshotAllocationsStayBoundedByIdentityProjection(t *testing.T) {
+	engine, err := NewEngine("chat-large-digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.state.Initialized = true
+	engine.state.Presentation.TabID = "tab-large-digest"
+	const rows = 10_000
+	engine.state.Ledger = make([]LedgerEvent, rows)
+	for index := range engine.state.Ledger {
+		engine.state.Ledger[index] = LedgerEvent{
+			MessageID: fmt.Sprintf("message-%05d", index),
+			Text:      strings.Repeat("private body ", 20),
+			Timeline:  []TimelineEntry{{Key: "tool", Kind: provider.EventToolUpdate, Tool: &provider.ToolEvent{Title: "private tool payload"}}},
+		}
+	}
+	var digest DigestSnapshot
+	allocations := testing.AllocsPerRun(5, func() { digest = engine.DigestSnapshot() })
+	if digest.MessageCount != rows || digest.LastMessageID != "message-09999" {
+		t.Fatalf("large digest identity = %#v", digest)
+	}
+	if allocations > 64 {
+		t.Fatalf("digest allocations = %.1f, want <= 64 independent of ledger payload volume", allocations)
 	}
 }
 
