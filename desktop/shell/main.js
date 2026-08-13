@@ -204,7 +204,7 @@ function createWindow(url, browserReporter, isController) {
 	});
   ipcMain.handle('workass-updater:get-state', (event) => own(event) ? updateManager?.snapshot() || null : null);
   ipcMain.handle('workass-updater:check', async (event) => own(event) ? updateManager?.check() || null : null);
-  ipcMain.handle('workass-updater:apply', async (event) => own(event) ? updateManager?.apply() || null : null);
+  ipcMain.handle('workass-updater:apply', async (event) => own(event) ? updateManager?.startApply() || null : null);
   ipcMain.handle('workass-updater:download', async (event) => own(event) ? updateManager?.download() || null : null);
   ipcMain.handle('workass-updater:install', async (event) => own(event) ? updateManager?.install() || null : null);
   win.on('closed', () => {

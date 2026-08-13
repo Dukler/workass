@@ -1211,7 +1211,10 @@ func (m *Manager) detectProvider(parent context.Context, cfg ProviderConfig) pro
 		return result
 	}
 	timeout := providerProbeTimeout(cfg.ID)
-	probeCtx, cancel := context.WithTimeout(parent, timeout)
+	// initialize and session/new are separate ACP requests, each with the
+	// provider's full per-request timeout. The enclosing detection context must
+	// allow both stages to consume that budget.
+	probeCtx, cancel := context.WithTimeout(parent, timeout*2)
 	defer cancel()
 	probeCfg := cfg
 	probeCfg.Command = resolved

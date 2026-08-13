@@ -684,6 +684,7 @@ class UpdateManager {
     this.initialCheckTimer = null;
     this.periodicCheckTimer = null;
     this.activeOperation = null;
+    this.applyPromise = null;
     this.state = {
       supported: false,
       phase: 'unavailable',
@@ -965,6 +966,22 @@ class UpdateManager {
     if (state.phase === 'available') state = await this.download();
     if (state.phase === 'ready' || state.phase === 'busy') state = await this.install();
     return state;
+  }
+
+  // The renderer observes progress through updater state events. Do not keep
+  // its click IPC pending for the entire download, staging, and handoff: start
+  // the one owned apply operation and immediately return the first running
+  // snapshot (download() publishes it before its first network await).
+  startApply() {
+    if (this.applyPromise) return this.snapshot();
+    const operation = this.apply().catch((err) => this.publish({
+      phase: 'failed', error: String(err && err.message || err),
+    }));
+    this.applyPromise = operation;
+    void operation.then(() => {
+      if (this.applyPromise === operation) this.applyPromise = null;
+    });
+    return this.snapshot();
   }
 
   dispose() {

@@ -40,6 +40,35 @@ func TestProviderDetectionDefaultRetryCadenceMatchesPortContract(t *testing.T) {
 	}
 }
 
+func TestProviderDetectionAllowsFullInitializeAndSessionBudgets(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	installFakeAgentWrapper(t, pathDir, "devin", "split-probe-delay")
+	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ASSISTANT_DEVIN", filepath.Join(pathDir, "devin"))
+
+	original := providerRegistrations["devin"]
+	registration := original
+	registration.ProbeTimeout = 2 * time.Second
+	providerRegistrations["devin"] = registration
+	t.Cleanup(func() { providerRegistrations["devin"] = original })
+
+	manager := NewManager(Options{
+		RootDir:           root,
+		InitTimeout:       2 * time.Second,
+		RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	manager.DetectProviders(ctx, DetectOptions{ProviderID: "devin"})
+	devin := assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusReady, true)
+	if latency, _ := devin["latencyMs"].(int64); latency < 2_000 {
+		t.Fatalf("split ACP probe latency = %dms, want both request stages", latency)
+	}
+}
+
 func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *testing.T) {
 	root := repoRoot(t)
 	pathDir := t.TempDir()

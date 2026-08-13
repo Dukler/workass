@@ -324,7 +324,7 @@ test('the renderer has one owned apply IPC for the complete update intent', () =
   const preload = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
   assert.match(preload, /apply:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('workass-updater:apply'\)/);
-  assert.match(main, /ipcMain\.handle\('workass-updater:apply',[\s\S]{0,160}own\(event\)[\s\S]{0,160}updateManager\?\.apply\(\)/);
+  assert.match(main, /ipcMain\.handle\('workass-updater:apply',[\s\S]{0,160}own\(event\)[\s\S]{0,160}updateManager\?\.startApply\(\)/);
 });
 
 test('macOS dogfood resolves one stable local feed while public builds stay on GitHub', () => {
@@ -450,6 +450,35 @@ test('one apply action stages and commits an available release without a second 
 
   const state = await manager.apply();
   assert.equal(state.phase, 'installing');
+  assert.deepEqual(steps, ['download', 'install']);
+});
+
+test('apply IPC returns a running snapshot immediately while one background intent owns the update', async () => {
+  const { manager } = managerFixture();
+  const steps = [];
+  let finishDownload;
+  manager.publish({ phase: 'available', targetVersion: '1.2.0' });
+  manager.download = async () => {
+    steps.push('download');
+    manager.publish({ phase: 'downloading', progress: 0 });
+    await new Promise((resolve) => { finishDownload = resolve; });
+    return manager.publish({ phase: 'ready', progress: 1 });
+  };
+  manager.install = async () => {
+    steps.push('install');
+    return manager.publish({ phase: 'installing' });
+  };
+
+  const started = manager.startApply();
+  const operation = manager.applyPromise;
+  assert.equal(started.phase, 'downloading');
+  assert.deepEqual(steps, ['download']);
+  assert.equal(manager.startApply().phase, 'downloading');
+  assert.deepEqual(steps, ['download']);
+
+  finishDownload();
+  await operation;
+  assert.equal(manager.snapshot().phase, 'installing');
   assert.deepEqual(steps, ['download', 'install']);
 });
 
