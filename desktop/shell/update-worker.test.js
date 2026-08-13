@@ -7,9 +7,11 @@ const path = require('node:path');
 const test = require('node:test');
 const {
   defaultOperations,
+  renamePathWithRetry,
   runTransaction,
   runtimeIsHealthy,
   startInstalledRuntime,
+  stopLaunchedProcessTree,
   targetRuntimeEnv,
   validateTransaction,
   verifyWindowsIncoming,
@@ -164,6 +166,43 @@ test('the target app profile replaces stale runtime settings inherited from the 
   assert.equal(env.WORKASS_DAEMON_PORT, undefined);
   assert.equal(env.WORKASS_URL, undefined);
   assert.equal(env.WORKASS_BROWSER_CONTROL_FILE, undefined);
+});
+
+test('Windows stops the complete failed Electron process tree before rollback', async () => {
+  let running = true;
+  const calls = [];
+  await stopLaunchedProcessTree(7123, {
+    platform: 'win32',
+    alive: () => running,
+    run: (...args) => {
+      calls.push(args);
+      running = false;
+      return { status: 0 };
+    },
+    wait: async (predicate) => predicate(),
+  });
+  assert.deepEqual(calls, [[
+    'taskkill.exe', ['/PID', '7123', '/T', '/F'], { windowsHide: true, stdio: 'ignore' },
+  ]]);
+});
+
+test('Windows release swaps retry bounded transient file locks', async () => {
+  let attempts = 0;
+  const pauses = [];
+  await renamePathWithRetry('incoming', 'installed', {
+    attempts: 4,
+    delayMs: 7,
+    rename: () => {
+      attempts += 1;
+      if (attempts < 3) throw Object.assign(new Error('locked'), { code: 'EBUSY' });
+    },
+    pause: async (milliseconds) => { pauses.push(milliseconds); },
+  });
+  assert.equal(attempts, 3);
+  assert.deepEqual(pauses, [7, 7]);
+  await assert.rejects(() => renamePathWithRetry('incoming', 'installed', {
+    rename: () => { throw Object.assign(new Error('invalid'), { code: 'EINVAL' }); },
+  }), /invalid/);
 });
 
 test('activation health rejects a daemon that retained the previous bind mode', () => {

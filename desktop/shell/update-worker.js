@@ -64,6 +64,50 @@ function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+async function stopLaunchedProcessTree(pid, {
+  platform = process.platform,
+  alive = pidAlive,
+  kill = process.kill,
+  run = spawnSync,
+  wait = waitUntil,
+} = {}) {
+  if (!Number.isInteger(pid) || pid <= 1 || !alive(pid)) return true;
+  if (platform === 'win32') {
+    const result = run('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    if ((result.error || result.status !== 0) && alive(pid)) {
+      throw new Error('failed release process tree did not stop');
+    }
+  } else {
+    try { kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+  }
+  const stopped = await wait(() => !alive(pid), { attempts: 80, delayMs: 100 });
+  if (!stopped) throw new Error('failed release shell did not stop');
+  return true;
+}
+
+async function renamePathWithRetry(source, destination, {
+  rename = fs.renameSync,
+  pause = delay,
+  attempts = 80,
+  delayMs = 250,
+} = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      rename(source, destination);
+      return;
+    } catch (err) {
+      lastError = err;
+      if (!['EACCES', 'EBUSY', 'EPERM'].includes(err?.code) || attempt + 1 >= attempts) throw err;
+      await pause(delayMs);
+    }
+  }
+  throw lastError || new Error('release path rename failed');
+}
+
 async function waitUntil(predicate, { attempts = 160, delayMs = 250 } = {}) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (await predicate()) return true;
@@ -347,10 +391,7 @@ function defaultOperations(transaction) {
       return runtimeIsHealthy({ daemon, shell, expectedVersion, expectedBind: expectedDaemonBind });
     },
     stopLaunched: async () => {
-      if (launchedPID > 1 && pidAlive(launchedPID)) {
-        try { process.kill(launchedPID, 'SIGTERM'); } catch { /* already gone */ }
-        await waitUntil(() => !pidAlive(launchedPID), { attempts: 40, delayMs: 100 });
-      }
+      await stopLaunchedProcessTree(launchedPID, { platform: transaction.platform });
       if (transaction.platform === 'darwin' && launchAgentPath && launchdDomain) {
         spawnSync('/bin/launchctl', ['bootout', launchdDomain, launchAgentPath], { stdio: 'ignore' });
       }
@@ -365,8 +406,25 @@ function defaultOperations(transaction) {
     },
     rollback: async () => {
       if (fs.existsSync(transaction.incomingTarget)) throw new Error('failed release holding path already exists');
-      if (fs.existsSync(transaction.installTarget)) fs.renameSync(transaction.installTarget, transaction.incomingTarget);
-      fs.renameSync(transaction.backupTarget, transaction.installTarget);
+      if (fs.existsSync(transaction.installTarget)) {
+        if (transaction.platform === 'win32') {
+          await renamePathWithRetry(transaction.installTarget, transaction.incomingTarget);
+        } else {
+          fs.renameSync(transaction.installTarget, transaction.incomingTarget);
+        }
+      }
+      try {
+        if (transaction.platform === 'win32') {
+          await renamePathWithRetry(transaction.backupTarget, transaction.installTarget);
+        } else {
+          fs.renameSync(transaction.backupTarget, transaction.installTarget);
+        }
+      } catch (err) {
+        if (!fs.existsSync(transaction.installTarget) && fs.existsSync(transaction.incomingTarget)) {
+          try { await renamePathWithRetry(transaction.incomingTarget, transaction.installTarget); } catch { /* preserve original rollback error */ }
+        }
+        throw err;
+      }
     },
     restoreMutableState: async () => {
       const snapshotReceipt = JSON.parse(fs.readFileSync(
@@ -516,9 +574,11 @@ module.exports = {
   main,
   requestJSON,
   requestDaemonShutdown,
+  renamePathWithRetry,
   runTransaction,
   runtimeIsHealthy,
   startInstalledRuntime,
+  stopLaunchedProcessTree,
   targetRuntimeEnv,
   updateReceipt,
   validateTransaction,
