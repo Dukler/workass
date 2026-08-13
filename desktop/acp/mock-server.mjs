@@ -13,6 +13,8 @@ const backgroundFDs = new Map();
 const traceFile = process.env.WORKASS_MOCK_ACP_TRACE_FILE || '';
 const persistentSessionFile = process.env.WORKASS_MOCK_ACP_SESSION_STORE || '';
 const sessionCapability = String(process.env.WORKASS_MOCK_ACP_SESSION_CAPABILITY || (persistentSessionFile ? 'both' : 'none')).toLowerCase();
+const failResume = process.env.WORKASS_MOCK_ACP_FAIL_RESUME === '1';
+const mismatchedAttachmentId = String(process.env.WORKASS_MOCK_ACP_MISMATCHED_ATTACHMENT_ID || '').trim();
 const operationReadback = process.env.WORKASS_MOCK_ACP_OPERATION_READBACK === '1';
 const contextImport = process.env.WORKASS_MOCK_ACP_CONTEXT_IMPORT === '1';
 const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z5m8AAAAASUVORK5CYII=';
@@ -454,6 +456,7 @@ async function handleRequest(message) {
       agentInfo: { name: 'Workass Mock ACP', version: '0.1.0' },
       agentCapabilities: {
         sessionCapabilities: sessionCapability === 'both' || sessionCapability === 'resume' ? { resume: {}, close: {} } : { close: {} },
+        loadSession: sessionCapability === 'both' || sessionCapability === 'load',
         sessionSteer: true,
         steerNotification: true,
         promptCapabilities: { image: false, audio: false, embeddedContext: false },
@@ -495,12 +498,15 @@ async function handleRequest(message) {
     respond(id, { sessionId: session.id, configOptions: configOptions(session) });
     return;
   }
-  if (method === 'session/resume') {
-    const allowed = sessionCapability === 'both' || sessionCapability === 'resume';
+  if (method === 'session/resume' || method === 'session/load') {
+    const allowed = method === 'session/resume'
+      ? sessionCapability === 'both' || sessionCapability === 'resume'
+      : sessionCapability === 'both' || sessionCapability === 'load';
     if (!allowed) return fail(id, -32601, `Mock ACP method not enabled: ${method}`);
+    tracePrompt(String(params.sessionId || ''), `[mock:lifecycle] ${method}`);
+    if (method === 'session/resume' && failResume) return fail(id, -32098, 'Mock exact resume failure.');
     const session = sessions.get(params.sessionId);
-    if (!session) return fail(id, -32000, 'Unknown persistent mock ACP session.');
-    tracePrompt(session.id, `[mock:lifecycle] ${method}`);
+    if (!session) return fail(id, -32044, 'Unknown persistent mock ACP session.');
     session.cwd = params.cwd || session.cwd;
     session.cancelled = false;
     session.steers = [];
@@ -508,7 +514,18 @@ async function handleRequest(message) {
     session.pendingPromptId = null;
     session.reconcileRelease = true;
     persistSessions();
-    respond(id, { configOptions: configOptions(session) });
+    if (method === 'session/load') {
+      // Stable ACP v1 load replays history through session/update. Workass must
+      // discard these projection events while attaching the already-owned lane.
+      notify(session.id, {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: `[mock:loaded-history] turn=${session.turn}` },
+      });
+    }
+    respond(id, {
+      configOptions: configOptions(session),
+      ...(mismatchedAttachmentId ? { sessionId: mismatchedAttachmentId } : {}),
+    });
     return;
   }
   if (method === 'session/set_config_option') {
@@ -592,7 +609,7 @@ async function handleRequest(message) {
   }
   if (method === 'session/close') {
     // session/close releases this adapter's live attachment; it must not delete
-    // the durable provider thread that session/resume will reopen later.
+    // the durable provider thread that exact session attachment will reopen.
     if (!persistentSessionFile) sessions.delete(params.sessionId);
     respond(id, {});
     return;

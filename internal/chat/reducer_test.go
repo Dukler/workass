@@ -385,6 +385,36 @@ func TestDeferredProviderThreadExistsOnlyAfterMatchingInputReceipt(t *testing.T)
 	}
 }
 
+func TestNegotiatedDeferredCandidateAcceptsTheLaterFirstInput(t *testing.T) {
+	state, _ := NewState("chat")
+	laneID := testLane("chat", "load-only-acp")
+	state, effects := apply(t, state, SelectLane{Identity: laneID})
+	if len(effects) != 1 {
+		t.Fatalf("eager ACP selection did not request one create: %#v", effects)
+	}
+	creation := provider.CreationCapabilities{DeferredUntilInput: true}
+	delivery := provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true}
+	candidate := provider.ThreadRef{ProviderID: "load-only-acp", RootID: "candidate", HeadID: "candidate", Lineage: 1}
+	state, effects = apply(t, state, LaneProvisioned{
+		LaneID: laneID.ID, Identity: laneID, Candidate: candidate, ConnectionGeneration: 1,
+		Context: exactContext(provider.ContextImportUnsupported), Delivery: delivery, Creation: creation,
+	})
+	if len(effects) != 0 || state.Lanes[laneID.ID].Provision == nil {
+		t.Fatalf("idle negotiated candidate was not retained provisionally: effects=%#v lane=%#v", effects, state.Lanes[laneID.ID])
+	}
+	state, effects = apply(t, state, Submit{OperationID: "later-first-input", Text: "hello after selection"})
+	if len(effects) != 1 {
+		t.Fatalf("later input did not release the existing candidate: %#v", effects)
+	}
+	start, ok := effects[0].(StartTurnEffect)
+	if !ok || start.Input.OperationID != "later-first-input" || start.LaneID != laneID.ID {
+		t.Fatalf("later input effect = %#v", effects[0])
+	}
+	if state.Foreground == nil || state.Foreground.OperationID != "later-first-input" || !state.Lanes[laneID.ID].Thread.IsZero() {
+		t.Fatalf("later input escaped the provisional boundary before receipt: %#v", state)
+	}
+}
+
 func TestDeferredProviderCrashReconcilesExactCandidateBeforeAnyResend(t *testing.T) {
 	state, _ := NewState("chat")
 	laneID := testLane("chat", "codex")

@@ -1449,7 +1449,12 @@ func (r *providerChatRuntime) selectLocked(ctx context.Context, actor *providerC
 			return selection, nil
 		}
 		fallthrough
-	case chat.LaneCreating, chat.LaneDetached, chat.LaneResuming, chat.LaneImporting:
+	case chat.LaneCreating:
+		if lane.Provision != nil && lane.Creation.DeferredUntilInput && lane.Thread.IsZero() {
+			return selection, nil
+		}
+		fallthrough
+	case chat.LaneDetached, chat.LaneResuming, chat.LaneImporting:
 		if state.Foreground != nil && state.Foreground.LaneID != laneID {
 			// A desired provider selected during another lane's running turn is a
 			// valid immutable queue target. Attachment/import waits for the safe

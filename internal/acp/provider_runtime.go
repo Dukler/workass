@@ -146,6 +146,9 @@ func (m *Manager) StoredProviderLaneSelections(chatID string) ([]ProviderLaneSel
 			Context:  providerAdapterForID(binding.ProviderID).context.Capabilities(),
 			Creation: providerAdapterForID(binding.ProviderID).creation, Established: binding.ThreadCommitted,
 		}
+		if !binding.ThreadCommitted {
+			selection.Creation.DeferredUntilInput = true
+		}
 		out = append(out, selection)
 	}
 	return out, nil
@@ -204,6 +207,9 @@ func (m *Manager) ResolveProviderLaneSelection(ctx context.Context, opts Session
 		selection.ModelID = firstNonEmpty(strings.TrimSpace(opts.ModelID), binding.ModelID)
 		selection.ModeID = firstNonEmpty(strings.TrimSpace(opts.ModeID), binding.ModeID)
 		selection.Established = binding.ThreadCommitted
+		if !binding.ThreadCommitted {
+			selection.Creation.DeferredUntilInput = true
+		}
 		return selection, nil
 	}
 	definition, err := m.ProviderDefinition(providerID)
@@ -480,8 +486,8 @@ func (f managerLaneFactory) Create(ctx context.Context, request providercontract
 		opts.ProviderLaneVerifyCandidate = true
 		opts.ProviderLaneCreateAfterCandidateAbsence = true
 	}
-	// Exact resume is mandatory for a durable lane. Negotiate it before the one
-	// legal session/new call so an ACP provider that cannot resume never leaves
+	// Exact attachment is mandatory for a durable lane. Negotiate it before the one
+	// legal session/new call so an ACP provider that cannot reattach never leaves
 	// behind a native thread Workass is structurally unable to own.
 	bridge := f.manager.getBridge(opts)
 	if bridge == nil {
@@ -500,8 +506,8 @@ func (f managerLaneFactory) Create(ctx context.Context, request providercontract
 		}
 		return nil, providercontract.ThreadRef{}, classifyLaneRuntimeError("initialize lane", err)
 	}
-	if !bridge.supportsSessionResume() {
-		return nil, providercontract.ThreadRef{}, providercontract.Unsupported("create-lane", "provider does not expose exact session/resume")
+	if !bridge.supportsExactSessionAttachment() {
+		return nil, providercontract.ThreadRef{}, providercontract.Unsupported("create-lane", "provider does not expose exact session attachment")
 	}
 	info, err := f.manager.NewSession(ctx, opts)
 	if err != nil {
@@ -1100,10 +1106,13 @@ func (d managerLaneDelivery) Capabilities() providercontract.DeliveryCapabilitie
 	if bridge == nil {
 		return providercontract.DeliveryCapabilities{}
 	}
+	adapter := providerAdapterForID(d.lane.info.ProviderID)
+	standardACPReceipt := adapter.input != nil && adapter.input.StandardACPActivity()
+	explicitReceipt := bridge.hasProviderCapability("workassStableTurnInputV1")
 	return providercontract.DeliveryCapabilities{
-		StableInputIdentity: bridge.hasProviderCapability("workassStableTurnInputV1"),
+		StableInputIdentity: standardACPReceipt || explicitReceipt,
 		LiveSteer:           bridge.hasProviderCapability("steerNotification", "sessionSteer", "workassCodexSteerRequest", "workassClaudeSteerRequest"),
-		ConsumptionReceipt:  bridge.hasProviderCapability("workassStableTurnInputV1"),
+		ConsumptionReceipt:  standardACPReceipt || explicitReceipt,
 		TurnReadback:        bridge.hasProviderCapability("workassOperationReadbackV1", "workassTurnReconcileRequest"),
 	}
 }
@@ -1307,7 +1316,7 @@ func (c managerLaneContext) Capabilities() providercontract.ContextCapabilities 
 	bridge := c.lane.manager.bridgeForSession(info.SessionID, SessionOptions{
 		TabID: owner.TabID, ChatID: c.lane.identity.ChatID, SessionID: info.SessionID, ProviderID: info.ProviderID,
 	})
-	capabilities.ExactResume = capabilities.ExactResume && bridge != nil && bridge.supportsSessionResume()
+	capabilities.ExactResume = capabilities.ExactResume && bridge != nil && bridge.supportsExactSessionAttachment()
 	if negotiated, ok := bridge.contextImportCapabilities(); ok {
 		capabilities.ImportMode = providercontract.ContextImportNonSampling
 		capabilities.ImportReadback = true

@@ -214,9 +214,8 @@ type ContextCapabilities struct {
 }
 
 // CreationCapabilities describe when a provider-native identity becomes a
-// durable thread. Most ACP servers commit session/new itself. Some native
-// providers return a process-local candidate first and materialize it only
-// after durably consuming the first real user input.
+// durable thread. Workass keeps a new provider candidate provisional until the
+// transport proves that the first real user input reached that exact thread.
 type CreationCapabilities struct {
 	DeferredUntilInput bool
 }

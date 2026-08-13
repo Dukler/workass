@@ -29,15 +29,20 @@ func TestRealDevinAuthenticationLifecycle(t *testing.T) {
 	}
 
 	t.Run("authenticated-session-and-turn", func(t *testing.T) {
+		root := t.TempDir()
+		stateDir := filepath.Join(root, "state")
 		events := newEventCollector()
-		manager := NewManager(Options{
-			RootDir: t.TempDir(),
-			Providers: []ProviderConfig{{
-				ID: "devin", Name: "Devin ACP", Command: devin, Args: []string{"acp"}, Enabled: true,
-			}},
-			DefaultProviderID: "devin", Broadcast: events.Broadcast,
-			InitTimeout: 120 * time.Second, RSSSampleInterval: time.Hour,
-		})
+		newAuthenticatedManager := func(events *eventCollector) *Manager {
+			return NewManager(Options{
+				RootDir: root, StateDir: stateDir,
+				Providers: []ProviderConfig{{
+					ID: "devin", Name: "Devin ACP", Command: devin, Args: []string{"acp"}, Enabled: true,
+				}},
+				DefaultProviderID: "devin", Broadcast: events.Broadcast,
+				InitTimeout: 120 * time.Second, RSSSampleInterval: time.Hour,
+			})
+		}
+		manager := newAuthenticatedManager(events)
 		t.Cleanup(func() { manager.Reset() })
 
 		manager.DetectProviders(context.Background(), DetectOptions{ProviderID: "devin"})
@@ -61,7 +66,33 @@ func TestRealDevinAuthenticationLifecycle(t *testing.T) {
 			t.Fatalf("real authenticated Devin turn status=%v stopReason=%v code=%v error=%q, want done",
 				got, endJob["stopReason"], endJob["code"], redactSensitiveText(fmt.Sprint(endJob["error"])))
 		}
-		t.Log("canary receipt: authenticated session/new succeeded and terminal prompt status=done")
+		firstSessionID := session.SessionID
+		manager.Reset()
+
+		restartedEvents := newEventCollector()
+		restarted := newAuthenticatedManager(restartedEvents)
+		t.Cleanup(func() { restarted.Reset() })
+		loaded, err := restarted.NewSession(context.Background(), SessionOptions{
+			TabID: "real-devin-tab", ChatID: "real-devin-chat", ProviderID: "devin",
+		})
+		if err != nil {
+			t.Fatalf("real Devin exact session attachment failed")
+		}
+		if loaded.SessionID != firstSessionID {
+			t.Fatalf("real Devin exact attachment changed the saved session identity")
+		}
+		second, err := restarted.StartJob(context.Background(), JobStartOptions{
+			Kind: "app-chat", SessionID: loaded.SessionID, TabID: "real-devin-tab", ChatID: "real-devin-chat",
+			ProviderID: "devin", Prompt: "Reply with another short acknowledgement.",
+		})
+		if err != nil {
+			t.Fatalf("real resumed Devin turn was not admitted")
+		}
+		secondEnd := restartedEvents.waitJobEnd(t, jobID(second), 180*time.Second)
+		if got := jobFromEnd(secondEnd)["status"]; got != "done" {
+			t.Fatalf("real resumed Devin turn status=%v, want done", got)
+		}
+		t.Log("canary receipt: session/new, first prompt, process restart, exact same-id load, and second prompt all completed")
 	})
 
 	t.Run("isolated-logged-out-state-fails-closed", func(t *testing.T) {

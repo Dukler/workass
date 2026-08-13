@@ -439,8 +439,11 @@ func (m *Manager) NewSession(ctx context.Context, opts SessionOptions) (SessionI
 	opts.ProviderID = providerID
 	m.mu.Unlock()
 	opts = m.withNativeSessionControls(opts)
-	if opts.ProviderLaneVerifyCandidate && !providerAdapterForID(providerID).creation.DeferredUntilInput {
-		return SessionInfo{}, nativeLaneError(providercontract.ErrorProtocolViolation, "provider does not use deferred thread creation", nil)
+	if opts.ProviderLaneVerifyCandidate {
+		binding, exists := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD)
+		if (!exists || binding.ThreadCommitted) && !providerAdapterForID(providerID).creation.DeferredUntilInput {
+			return SessionInfo{}, nativeLaneError(providercontract.ErrorProtocolViolation, "provider does not have a provisional thread candidate", nil)
+		}
 	}
 
 	unlockNative := func() {}
@@ -2387,41 +2390,6 @@ func (b *Bridge) NewSession(ctx context.Context, opts SessionOptions) (SessionIn
 	return info, err
 }
 
-// RestoreSession attaches a new adapter host to the exact provider-native
-// thread saved for the lane. Established lanes use session/resume exclusively:
-// session/load may hydrate a transcript, but it is not proof that the same
-// native lineage was resumed and therefore cannot be a recovery fallback.
-func (b *Bridge) RestoreSession(ctx context.Context, binding nativeSessionBinding, opts SessionOptions) (SessionInfo, string, error) {
-	if _, err := b.Initialize(ctx); err != nil {
-		return SessionInfo{}, "", err
-	}
-	cwd := b.sessionCWD(firstNonEmpty(opts.CWD, binding.CWD))
-	// A fork moved the conversation under ProviderSessionID; that is the id
-	// whose transcript carries the post-fork turns.
-	resumeID := firstNonEmpty(binding.ProviderSessionID, binding.SessionID)
-	params := map[string]any{
-		"sessionId":  resumeID,
-		"cwd":        cwd,
-		"mcpServers": sessionMCPServers(b.opts, opts),
-	}
-	if !b.supportsSessionResume() {
-		return SessionInfo{}, "", errors.New("ACP provider does not support exact session/resume")
-	}
-	releaseOwner := b.manager.provisionAgentOwner(opts)
-	const method = "session/resume"
-	res, err := b.request(ctx, method, params, b.opts.InitTimeout)
-	if err != nil {
-		releaseOwner()
-		return SessionInfo{}, method, b.withStderrTail(err)
-	}
-	info, attachErr := b.attachSession(resumeID, cwd, opts, res, method)
-	if attachErr != nil {
-		releaseOwner()
-		return SessionInfo{}, method, attachErr
-	}
-	return info, method, nil
-}
-
 func (b *Bridge) sessionCWD(raw string) string {
 	cwd := strings.TrimSpace(raw)
 	if cwd == "" {
@@ -2431,18 +2399,6 @@ func (b *Bridge) sessionCWD(raw string) string {
 		cwd = filepath.Join(b.opts.RootDir, cwd)
 	}
 	return cwd
-}
-
-func (b *Bridge) supportsSessionResume() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	caps := mapFromAny(b.agentCaps["sessionCapabilities"])
-	raw, ok := caps["resume"]
-	if !ok || raw == nil {
-		return false
-	}
-	_, ok = raw.(map[string]any)
-	return ok
 }
 
 func (b *Bridge) attachSession(sessionID, cwd string, opts SessionOptions, res map[string]any, reason string) (SessionInfo, error) {
@@ -3180,11 +3136,25 @@ func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, o
 	if operationID = strings.TrimSpace(operationID); operationID != "" {
 		params["clientUserMessageId"] = operationID
 	}
+	if job != nil {
+		job.markInputDispatched()
+	}
 	res, err := b.requestPrompt(ctx, sessionID, job, params)
 	if directJob != nil {
 		b.clearJobForSession(sessionID, directJob)
 	}
 	if err != nil {
+		// A JSON-RPC error reply proves the standard ACP server received this
+		// prompt request. Transport closure/timeouts do not, and remain ambiguous.
+		var rpcErr *acpError
+		if errors.As(err, &rpcErr) {
+			if receiptErr := b.acknowledgeStandardACPInput(job, sessionID); receiptErr != nil {
+				return PromptResult{}, receiptErr
+			}
+		}
+		return PromptResult{}, err
+	}
+	if err := b.acknowledgeStandardACPInput(job, sessionID); err != nil {
 		return PromptResult{}, err
 	}
 	if err := b.manager.finishNativeTurn(job, dispatch, res); err != nil {

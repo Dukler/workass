@@ -94,11 +94,12 @@ type Bridge struct {
 	lastWorkassModelWrite map[string]string
 	durableModelSelection map[string]string
 
-	sessions       map[string]struct{}
-	seededSessions map[string]struct{}
-	jobsBySession  map[string]*Job
-	promptMu       sync.Mutex
-	writeMu        sync.Mutex
+	sessions        map[string]struct{}
+	seededSessions  map[string]struct{}
+	jobsBySession   map[string]*Job
+	loadingSessions map[string]uint64
+	promptMu        sync.Mutex
+	writeMu         sync.Mutex
 }
 
 type pendingRequest struct {
@@ -178,6 +179,7 @@ func newBridge(key string, opts Options, manager *Manager) *Bridge {
 		sessions:              make(map[string]struct{}),
 		seededSessions:        make(map[string]struct{}),
 		jobsBySession:         make(map[string]*Job),
+		loadingSessions:       make(map[string]uint64),
 	}
 }
 
@@ -672,6 +674,9 @@ func (b *Bridge) handlePermissionRequest(params map[string]any) (any, error) {
 	if job == nil || job.cancelled {
 		return map[string]any{"outcome": map[string]any{"outcome": "cancelled"}}, nil
 	}
+	if err := b.acknowledgeStandardACPInput(job, sessionID); err != nil {
+		return nil, err
+	}
 	job.waitingPermission.Store(true)
 	defer func() {
 		job.waitingPermission.Store(false)
@@ -720,16 +725,83 @@ func mapFromAny(v any) map[string]any {
 	return m
 }
 
+// acknowledgeStandardACPInput turns ordinary prompt-scoped ACP activity into
+// the same durable receipt consumed by the provider-neutral chat actor. Native
+// hosts opt into their explicit receipt policy and therefore never enter here.
+func (b *Bridge) acknowledgeStandardACPInput(job *Job, sessionID string) error {
+	if b == nil || job == nil || job.internal || !job.inputWasDispatched() {
+		return nil
+	}
+	policy := providerAdapterForID(b.ProviderID()).input
+	if policy == nil || !policy.StandardACPActivity() {
+		return nil
+	}
+	operationID := strings.TrimSpace(firstNonEmpty(job.startOpts.OperationID, job.startOpts.UserMessageID, job.ID))
+	return b.acknowledgeInputConsumption(job, sessionID, operationID, job.ID)
+}
+
+func (b *Bridge) acknowledgeInputConsumption(job *Job, sessionID, operationID, nativeTurnID string) error {
+	if b == nil || b.manager == nil || job == nil || job.internal {
+		return nil
+	}
+	operationID = strings.TrimSpace(operationID)
+	expectedOperationID := strings.TrimSpace(firstNonEmpty(job.startOpts.OperationID, job.startOpts.UserMessageID, job.ID))
+	if operationID == "" || operationID != expectedOperationID {
+		return errors.New("provider input receipt does not match the admitted operation")
+	}
+	if !job.claimInputConsumption() {
+		return nil
+	}
+	if b.manager.providerLaneManagedJob(job.ID) {
+		binding, committed := b.manager.nativeSessions.markOperationConsumedAndCommit(
+			job.TabID, job.ChatID, job.ProviderID, sessionID, operationID, nativeTurnID,
+		)
+		lane := b.manager.providerLaneForJob(job.ID)
+		if !committed || lane == nil || lane.commitThreadCreation(
+			bindingThreadRef(binding), providercontract.OperationID(operationID),
+		) != nil {
+			return errors.New("provider input receipt could not commit its durable thread boundary")
+		}
+	} else if b.manager.nativeSessions != nil {
+		// Non-actor jobs may be intentionally ephemeral. Preserve a receipt when a
+		// ledger binding exists; durable chat lanes enforce the write above.
+		b.manager.nativeSessions.markOperationConsumed(
+			job.TabID, job.ChatID, job.ProviderID, sessionID, operationID, nativeTurnID,
+		)
+	}
+	b.manager.emit("job:event", map[string]any{
+		"type": "acp", "id": job.ID,
+		"event": map[string]any{
+			"kind": "input-consumed", "clientUserMessageId": operationID,
+		},
+	})
+	return nil
+}
+
 func (b *Bridge) handleNotification(method string, params map[string]any) {
 	if method != "session/update" {
 		return
 	}
 	sessionID := asString(params["sessionId"])
+	// session/load replays provider history as ordinary session/update messages.
+	// The actor already owns that history; letting replay notifications enter a
+	// live job stream would duplicate transcript state during exact attachment.
+	if b.sessionLoadInProgress(sessionID) {
+		return
+	}
 	job := b.jobForSession(sessionID)
 	update := mapFromAny(params["update"])
 	kind := asString(update["sessionUpdate"])
 	if job != nil {
 		job.touchActivity()
+		if kind != "_workass_input_consumed" {
+			if err := b.acknowledgeStandardACPInput(job, sessionID); err != nil {
+				if lane := b.manager.providerLaneForJob(job.ID); lane != nil {
+					lane.rejectFrozenProtocol(err)
+				}
+				return
+			}
+		}
 	}
 	switch kind {
 	case "agent_message_chunk":
@@ -872,34 +944,15 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 	case "_workass_input_consumed":
 		clientUserMessageID := strings.TrimSpace(asString(update["clientUserMessageId"]))
 		if job != nil && clientUserMessageID != "" && !job.internal {
-			if b.manager.providerLaneManagedJob(job.ID) {
-				binding, committed := b.manager.nativeSessions.markOperationConsumedAndCommit(
-					job.TabID, job.ChatID, job.ProviderID, sessionID,
-					clientUserMessageID,
-					firstNonEmpty(asString(update["nativeTurnId"]), asString(update["turnId"])),
-				)
-				lane := b.manager.providerLaneForJob(job.ID)
-				if !committed || lane == nil || lane.commitThreadCreation(
-					bindingThreadRef(binding), providercontract.OperationID(clientUserMessageID),
-				) != nil {
-					if lane != nil {
-						lane.rejectFrozenProtocol(errors.New("provider input receipt could not commit its durable thread boundary"))
-					}
-					return
+			if err := b.acknowledgeInputConsumption(
+				job, sessionID, clientUserMessageID,
+				firstNonEmpty(asString(update["nativeTurnId"]), asString(update["turnId"])),
+			); err != nil {
+				if lane := b.manager.providerLaneForJob(job.ID); lane != nil {
+					lane.rejectFrozenProtocol(err)
 				}
-			} else if b.manager.nativeSessions != nil {
-				b.manager.nativeSessions.markOperationConsumed(
-					job.TabID, job.ChatID, job.ProviderID, sessionID,
-					clientUserMessageID,
-					firstNonEmpty(asString(update["nativeTurnId"]), asString(update["turnId"])),
-				)
+				return
 			}
-			b.manager.emit("job:event", map[string]any{
-				"type": "acp", "id": job.ID,
-				"event": map[string]any{
-					"kind": "input-consumed", "clientUserMessageId": clientUserMessageID,
-				},
-			})
 		}
 	case "_workass_compaction":
 		event := map[string]any{

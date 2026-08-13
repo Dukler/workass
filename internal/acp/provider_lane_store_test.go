@@ -505,7 +505,7 @@ func TestMockNativeSessionResumesExactThreadAcrossManagerRestart(t *testing.T) {
 	}
 }
 
-func TestMockNativeSessionLoadCapabilityCannotReplaceExactResume(t *testing.T) {
+func TestMockNativeSessionLoadAttachesTheExactThreadWithoutPublishingReplay(t *testing.T) {
 	fixture := newPersistentMockFixture(t, "load")
 	firstManager, firstEvents := fixture.newManager()
 	first := fixture.newSession(t, firstManager)
@@ -513,21 +513,82 @@ func TestMockNativeSessionLoadCapabilityCannotReplaceExactResume(t *testing.T) {
 	archiveHistoryForEndedJob(t, fixture.stateDir, end, "durable native turn")
 	firstManager.Reset()
 
-	secondManager, _ := fixture.newManager()
+	secondManager, secondEvents := fixture.newManager()
+	t.Cleanup(func() { secondManager.Reset() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	loaded, err := secondManager.NewSession(ctx, SessionOptions{TabID: "native-tab", ChatID: "native-chat", ProviderID: "mock"})
+	if err != nil {
+		t.Fatalf("load exact native thread: %v", err)
+	}
+	if loaded.SessionID != first.SessionID {
+		t.Fatalf("same-id load changed native thread: first=%q loaded=%q", first.SessionID, loaded.SessionID)
+	}
+	binding, ok := secondManager.nativeSessions.get("native-tab", "native-chat", "mock")
+	if !ok || binding.SessionID != first.SessionID {
+		t.Fatalf("same-id load changed the durable binding: %#v ok=%v", binding, ok)
+	}
+	secondEnd := fixture.runTurn(t, secondManager, secondEvents, loaded.SessionID, "after exact load", nil)
+	if result := asString(jobFromEnd(secondEnd)["result"]); !strings.Contains(result, "Mock ACP turn 2:") {
+		t.Fatalf("same-id load did not preserve provider context: %q", result)
+	}
+	for _, event := range secondEvents.snapshot() {
+		raw, _ := json.Marshal(event.payload)
+		if strings.Contains(string(raw), "[mock:loaded-history]") {
+			t.Fatalf("session/load replay entered the Workass event stream: %s", raw)
+		}
+	}
+	trace := readNativeMockTrace(t, fixture.traceFile)
+	if persistentMockSessionCount(t, fixture.sessionFile) != 1 || !traceContains(trace, "[mock:lifecycle] session/load") || traceContains(trace, "[mock:lifecycle] session/resume") {
+		t.Fatalf("load-only attachment did not use exactly one same-id load: %#v", trace)
+	}
+}
+
+func TestExactAttachmentDoesNotTryLoadAfterSelectedResumeFails(t *testing.T) {
+	fixture := newPersistentMockFixture(t, "both")
+	firstManager, firstEvents := fixture.newManager()
+	first := fixture.newSession(t, firstManager)
+	fixture.runTurn(t, firstManager, firstEvents, first.SessionID, "durable native turn", nil)
+	firstManager.Reset()
+
+	secondManager, _ := fixture.newManagerTuned(func(opts *Options) {
+		opts.Provider.Env["WORKASS_MOCK_ACP_FAIL_RESUME"] = "1"
+	})
 	t.Cleanup(func() { secondManager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := secondManager.NewSession(ctx, SessionOptions{TabID: "native-tab", ChatID: "native-chat", ProviderID: "mock"})
-	if !providercontract.ErrorIs(err, providercontract.ErrorUnsupportedCapability) {
-		t.Fatalf("load-only established lane error = %v, want unsupported exact resume", err)
-	}
-	binding, ok := secondManager.nativeSessions.get("native-tab", "native-chat", "mock")
-	if !ok || binding.SessionID != first.SessionID {
-		t.Fatalf("load-only failure replaced the durable binding: %#v ok=%v", binding, ok)
+	if !providercontract.ErrorIs(err, providercontract.ErrorTransientTransport) {
+		t.Fatalf("selected resume failure = %v, want transient transport", err)
 	}
 	trace := readNativeMockTrace(t, fixture.traceFile)
-	if persistentMockSessionCount(t, fixture.sessionFile) != 1 || traceContains(trace, "[mock:lifecycle] session/load") {
-		t.Fatalf("load-only failure created/loaded a replacement thread: %#v", trace)
+	if !traceContains(trace, "[mock:lifecycle] session/resume") || traceContains(trace, "[mock:lifecycle] session/load") {
+		t.Fatalf("exact attachment tried another wire method after resume failed: %#v", trace)
+	}
+	if binding, ok := secondManager.nativeSessions.get("native-tab", "native-chat", "mock"); !ok || binding.SessionID != first.SessionID {
+		t.Fatalf("failed exact attachment changed the durable binding: %#v ok=%v", binding, ok)
+	}
+}
+
+func TestExactLoadRejectsAChangedProviderThreadIdentity(t *testing.T) {
+	fixture := newPersistentMockFixture(t, "load")
+	firstManager, firstEvents := fixture.newManager()
+	first := fixture.newSession(t, firstManager)
+	fixture.runTurn(t, firstManager, firstEvents, first.SessionID, "durable native turn", nil)
+	firstManager.Reset()
+
+	secondManager, _ := fixture.newManagerTuned(func(opts *Options) {
+		opts.Provider.Env["WORKASS_MOCK_ACP_MISMATCHED_ATTACHMENT_ID"] = "different-native-thread"
+	})
+	t.Cleanup(func() { secondManager.Reset() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := secondManager.NewSession(ctx, SessionOptions{TabID: "native-tab", ChatID: "native-chat", ProviderID: "mock"})
+	if !providercontract.ErrorIs(err, providercontract.ErrorNativeIdentityConflict) {
+		t.Fatalf("changed load identity error = %v, want native identity conflict", err)
+	}
+	if binding, ok := secondManager.nativeSessions.get("native-tab", "native-chat", "mock"); !ok || binding.SessionID != first.SessionID {
+		t.Fatalf("identity conflict changed the durable binding: %#v ok=%v", binding, ok)
 	}
 }
 
