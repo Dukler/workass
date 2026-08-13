@@ -79,8 +79,33 @@ const HYDRATION_STEP_TIMEOUT = 15000;
 const AGENT_REFRESH_TIMEOUT = 20000;
 const DIGEST_REPAIR_DEBOUNCE = 250;
 const UPDATE_TERMINAL_TIMEOUT = 11 * 60 * 1000;
+const CHAT_MESSAGE_TAIL = 60;
 
 type RepairScope = 'session' | 'background' | 'permissions' | 'catalog' | 'settings' | 'processes';
+
+type ChatPresentationSnapshot = Pick<Chat, 'title' | 'titleLocked' | 'group' | 'draft' | 'unread' | 'settled' | 'pane'>;
+
+function presentationSnapshot(chat: ChatPresentationSnapshot): ChatPresentationSnapshot {
+  return {
+    title: chat.title,
+    titleLocked: chat.titleLocked,
+    group: chat.group,
+    draft: chat.draft ?? '',
+    unread: !!chat.unread,
+    settled: chat.settled,
+    pane: chat.pane,
+  };
+}
+
+function applyPresentationSnapshot(chat: Chat, snapshot: ChatPresentationSnapshot) {
+  chat.title = snapshot.title;
+  chat.titleLocked = snapshot.titleLocked;
+  chat.group = snapshot.group;
+  chat.draft = snapshot.draft;
+  chat.unread = snapshot.unread;
+  chat.settled = snapshot.settled;
+  chat.pane = snapshot.pane;
+}
 
 function presentationFingerprint(chat: Pick<Chat, 'title' | 'titleLocked' | 'group' | 'draft' | 'unread' | 'settled' | 'pane'>): string {
   return JSON.stringify([
@@ -162,6 +187,11 @@ export class Store {
   private pendingQueueOperationIds = new Map<string, string>();
   private committedPresentationFingerprints = new Map<string, string>();
   private pendingPresentationOperations = new Map<string, { fingerprint: string; operationId: string }>();
+  // A presentation command can overlap the daemon's periodic digest. Keep the
+  // exact renderer-owned projection beside its stable operation id until that
+  // command is acknowledged, or an older actor snapshot can visibly undo a
+  // settle/rename/pane click and leave the retry with nothing left to send.
+  private pendingPresentationSnapshots = new Map<string, ChatPresentationSnapshot>();
   private committedRuntimeControlFingerprints = new Map<string, string>();
   private pendingRuntimeControlOperations = new Map<string, { fingerprint: string; operationId: string }>();
   private pendingRuntimeControlSaves = new Map<string, Promise<boolean>>();
@@ -254,6 +284,14 @@ export class Store {
     this.pendingQueueSnapshots.set(chat.id, chat.queue);
     this.pendingQueueOperationIds.set(chat.id, rid('queue-op'));
   }
+  private markPresentationMutation(chat: Chat) {
+    const fingerprint = presentationFingerprint(chat);
+    const pending = this.pendingPresentationOperations.get(chat.id);
+    if (!pending || pending.fingerprint !== fingerprint) {
+      this.pendingPresentationOperations.set(chat.id, { fingerprint, operationId: rid('presentation-op') });
+    }
+    this.pendingPresentationSnapshots.set(chat.id, presentationSnapshot(chat));
+  }
   private scheduleQueuePersist() {
     // A running turn normally relaxes persistence to 3s to avoid mirroring its
     // streaming transcript. Queue ownership is different: the user just made a
@@ -262,6 +300,31 @@ export class Store {
   }
   private markAllChatsDirty() {
     for (const chat of this.state.chats) this.touchChat(chat.id);
+  }
+  private compactInactiveHistories(activeId: string | null) {
+    for (const chat of this.state.chats) {
+      if (chat.id === activeId || chat.messages.length <= CHAT_MESSAGE_TAIL) continue;
+      if (chat.messages.some((message) => message.status === 'running' || message.status === 'pending')) continue;
+      chat._archivedCount = Math.max(chat._archivedCount ?? 0, chat.messages.length);
+      chat.messages = chat.messages.slice(-CHAT_MESSAGE_TAIL);
+      // The complete actor ledger remains durable and is reloaded on the next
+      // visit or send. Keeping this marker would turn the bounded tail into a
+      // false cache hit and make older visible history appear permanently gone.
+      this.archivesLoaded.delete(chat.id);
+    }
+  }
+  private preserveResidentHistories(previous: Chat[], restored: Chat[], activeId: string | null) {
+    const previousByID = new Map(previous.map((chat) => [chat.id, chat]));
+    for (const chat of restored) {
+      const prior = previousByID.get(chat.id);
+      if (!prior || (chat.id !== activeId && !this.archivesLoaded.has(chat.id))) continue;
+      if (prior.messages.length <= chat.messages.length) continue;
+      chat.messages = migrateAnchoredSteers(mergeArchivedHistory(
+        chat.messages,
+        prior.messages as unknown as Array<Record<string, unknown>>,
+      ));
+      chat._archivedCount = Math.max(chat._archivedCount ?? 0, prior._archivedCount ?? 0, prior.messages.length);
+    }
   }
   private requireFullSave() {
     this.markAllChatsDirty();
@@ -427,7 +490,7 @@ export class Store {
         // Rolling compatibility for a renderer/host that understands only the
         // original single-session field. The provider map remains authoritative.
         usage: contextUsageForProvider(c.contextUsageByProvider, c.providerId, c.usage) ?? undefined,
-        messages: c.messages.slice(-60).map((m) => ({
+        messages: c.messages.slice(-CHAT_MESSAGE_TAIL).map((m) => ({
           id: m.id, role: m.role,
           content: m.content,
           result: m.result,
@@ -548,6 +611,7 @@ export class Store {
         pending = { fingerprint, operationId: rid('presentation-op') };
         this.pendingPresentationOperations.set(tabId, pending);
       }
+      this.pendingPresentationSnapshots.set(tabId, presentationSnapshot(live));
       const receipt = await call('chatPresentationSave', {
         tabId, chatId: projected.chatId, operationId: pending.operationId,
         expectedRevision: live.presentationRevision ?? 0,
@@ -567,6 +631,7 @@ export class Store {
       this.committedPresentationFingerprints.set(tabId, pending.fingerprint);
       if (this.pendingPresentationOperations.get(tabId)?.operationId === pending.operationId) {
         this.pendingPresentationOperations.delete(tabId);
+        this.pendingPresentationSnapshots.delete(tabId);
       }
     }
     const globalFingerprint = globalPresentationFingerprint(this.state);
@@ -996,6 +1061,7 @@ export class Store {
       previousChats,
       this.carryPendingCreatedChats(previousChats, restored.chats),
     );
+    this.preserveResidentHistories(previousChats, this.state.chats, this.state.activeId);
     for (const chat of restored.chats) {
       if (!this.pendingPresentationOperations.has(chat.id)) {
         this.committedPresentationFingerprints.set(chat.id, presentationFingerprint(chat));
@@ -1005,6 +1071,13 @@ export class Store {
       }
     }
     this.restoreDraftImages(previousChats, this.state.chats);
+    // Presentation commands are actor mutations in flight, not speculative
+    // cache. A digest may carry the prior revision while their reply is still
+    // crossing the wire, so retain the exact values until the matching receipt.
+    for (const [chatId, snapshot] of this.pendingPresentationSnapshots) {
+      const chat = this.chat(chatId);
+      if (chat) applyPresentationSnapshot(chat, snapshot);
+    }
     this.restorePendingDrafts(this.state.chats);
     // A digest can legitimately arrive before the renderer's queue save reply.
     // Keep the exact local projection until that reply clears its fence; the
@@ -1038,6 +1111,7 @@ export class Store {
     const localSurvives = !!localActive && this.state.chats.some((chat) => chat.id === localActive);
     this.state.activeId = localSurvives ? localActive : restored.activeId;
     this.state.seq = restored.seq;
+    if (this.state.meta?.daemon) this.compactInactiveHistories(this.state.activeId);
     this.reconcileWorkspaces();
     this.rebuildJobRefs();
     this.requireFullSave();
@@ -1714,6 +1788,7 @@ export class Store {
     // others when they are opened or sent to.
     if (has('archiveLoad')) {
       if (this.state.meta?.daemon) {
+        this.compactInactiveHistories(this.state.activeId);
         if (this.state.activeId) await this.ensureArchive(this.state.activeId);
       } else {
         // The legacy Electron host has no event-sourced session store: its
@@ -2332,6 +2407,7 @@ export class Store {
   switchChat(id: string) {
     if (this.state.activeId === id) return;
     this.state.activeId = id;
+    if (this.state.meta?.daemon) this.compactInactiveHistories(id);
     // Boot only hydrates the chat you were reading; the rest arrive here.
     void this.ensureArchive(id);
     const chat = this.chat(id);
@@ -2386,6 +2462,7 @@ export class Store {
     // unseen-completion guard outranks the shelf, so without this a "Listo" or
     // "Falló" row would absorb the click and stay exactly where it was.
     if (settled) chat.unread = false;
+    this.markPresentationMutation(chat);
     this.bumpChat(chat);
     void this.flushSession(true);   // structural sidebar edit: must survive a fast restart
   }
@@ -2428,8 +2505,11 @@ export class Store {
     this.pendingChatCreates.delete(id);
     this.pendingChatCreateOperations.delete(id);
     this.pendingChatCreatePromises.delete(id);
+    this.archivesLoaded.delete(id);
+    this.archiveLoads.delete(id);
     this.committedPresentationFingerprints.delete(id);
     this.pendingPresentationOperations.delete(id);
+    this.pendingPresentationSnapshots.delete(id);
     this.committedRuntimeControlFingerprints.delete(id);
     this.pendingRuntimeControlOperations.delete(id);
     this.pendingRuntimeControlSaves.delete(id);
@@ -3148,8 +3228,10 @@ export class Store {
         // New work in a shelved chat retires the shelf override: T3's server
         // auto-unsettles on real activity, and a chat you just started a turn
         // in has plainly stopped being history.
-        if (chat?.settled === 'settled') {
+        const startIsLive = !msg || !isTerminalMessage(msg);
+        if (startIsLive && chat?.settled === 'settled') {
           chat.settled = undefined;
+          this.markPresentationMutation(chat);
           this.touchChat(chat.id);
           this.schedulePersist();
         }
@@ -4222,9 +4304,10 @@ function localRunningJobID(chat: Chat): string | null {
 }
 function digestChatSessionDiverged(chat: Chat, digest: StateDigestChat): boolean {
   const queue = chat.queue ?? [];
+  const completeMessageCount = Math.max(chat.messages.length, chat._archivedCount ?? 0);
   return (chat.actorRevision ?? 0) !== digest.actorRevision
     || localRunningJobID(chat) !== (digest.runningJobId ?? null)
-    || chat.messages.length !== digest.messageCount
+    || completeMessageCount !== digest.messageCount
     || (chat.messages.at(-1)?.id ?? null) !== (digest.lastMessageId ?? null)
     || queue.length !== digest.queueLen
     || (queue[0]?.id ?? null) !== (digest.queueHeadId ?? null)

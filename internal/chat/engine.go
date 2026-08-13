@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"sort"
 	"strings"
 	"sync"
 )
@@ -224,4 +225,97 @@ func (e *Engine) Snapshot() State {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.state.Clone()
+}
+
+// DigestSnapshot is the bounded, body-free view used by the five-second health
+// heartbeat. Snapshot intentionally deep-clones the complete semantic ledger;
+// doing that for every idle ping made large histories consume a full CPU core
+// and several transient gigabytes merely to return counts and stable ids.
+type DigestSnapshot struct {
+	Initialized            bool
+	Deleted                bool
+	ChatID                 string
+	TabID                  string
+	ActorRevision          uint64
+	RunningJobID           string
+	LastMessageID          string
+	MessageCount           int
+	QueueLen               int
+	QueueHeadID            string
+	AgentQueueRevision     uint64
+	RuntimeControlRevision uint64
+	ProviderID             string
+	CurrentModelID         string
+	CurrentModeID          string
+	PendingPermissionIDs   []string
+}
+
+func (e *Engine) DigestSnapshot() DigestSnapshot {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	state := &e.state
+	digest := DigestSnapshot{
+		Initialized:            state.Initialized,
+		Deleted:                state.Deleted,
+		ChatID:                 state.ChatID,
+		TabID:                  state.Presentation.TabID,
+		ActorRevision:          state.Revision,
+		AgentQueueRevision:     state.Presentation.AgentQueueRevision,
+		RuntimeControlRevision: state.Presentation.RuntimeControlRevision,
+		ProviderID:             string(state.Presentation.ProviderID),
+		CurrentModelID:         state.Presentation.CurrentModelID,
+		CurrentModeID:          state.Presentation.CurrentModeID,
+		QueueLen:               len(state.StagedQueue) + len(state.Queue),
+	}
+	if len(state.StagedQueue) > 0 {
+		digest.QueueHeadID = state.StagedQueue[0].ID
+	} else if len(state.Queue) > 0 {
+		digest.QueueHeadID = strings.TrimSpace(state.Queue[0].Presentation.QueueID)
+		if digest.QueueHeadID == "" {
+			digest.QueueHeadID = string(state.Queue[0].OperationID)
+		}
+	}
+
+	seen := make(map[string]struct{}, len(state.Ledger)+4)
+	addMessage := func(id string) {
+		if _, exists := seen[id]; exists {
+			return
+		}
+		seen[id] = struct{}{}
+		digest.MessageCount++
+		digest.LastMessageID = id
+	}
+	for _, event := range state.Ledger {
+		addMessage(event.MessageID)
+	}
+	if foreground := state.Foreground; foreground != nil {
+		digest.RunningJobID = foreground.Turn.NativeID
+		if !foreground.UserConsumed {
+			userID := strings.TrimSpace(foreground.Input.Presentation.UserMessageID)
+			if userID == "" {
+				userID = "message:" + string(foreground.OperationID) + ":user"
+			}
+			addMessage(userID)
+		}
+		addMessage(strings.TrimSpace(foreground.CurrentAssistantMessageID))
+		if pending := state.PendingSteer; pending != nil {
+			userID := strings.TrimSpace(pending.Presentation.UserMessageID)
+			if userID == "" {
+				userID = "message:" + string(pending.OperationID) + ":user"
+			}
+			addMessage(userID)
+			continuationID := strings.TrimSpace(pending.Presentation.AssistantMessageID)
+			if continuationID == "" {
+				continuationID = foreground.RootAssistantMessageID + "~after~" + string(pending.OperationID)
+			}
+			addMessage(continuationID)
+		}
+	}
+	for id, permission := range state.Permissions {
+		if !strings.EqualFold(strings.TrimSpace(permission.Event.Status), "resolved") {
+			digest.PendingPermissionIDs = append(digest.PendingPermissionIDs, id)
+		}
+	}
+	sort.Strings(digest.PendingPermissionIDs)
+	return digest
 }
