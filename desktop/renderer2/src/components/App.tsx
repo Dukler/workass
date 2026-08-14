@@ -2,9 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { store, useApp } from '../store/store';
 import { chatPane } from '../store/right-pane';
-// Sidebar v2 (T3 Code port). v1 still lives in ./Sidebar (unmutated, and still
-// the source of ModesSwitch/FooterUpdateCards/AccountMenu) — reverting is
-// importing { Sidebar } from './Sidebar' and swapping the one element below.
 import { SidebarV2 } from './SidebarV2';
 import { Transcript } from './Transcript';
 import { Composer } from './Composer';
@@ -37,6 +34,33 @@ function AssistStub() {
 // chat off-screen). On a wide monitor the full pane width is honoured.
 const MIN_MAIN = 600;
 
+function SidebarToggle({ expanded }: { expanded: boolean }) {
+  return (
+    // This slot is deliberately the final titlebar layer. Electron gives the
+    // topmost drag region ownership of pointer input, so a floating button below
+    // either titlebar row can look clickable while native hit-testing drags the
+    // window instead. The whole slot is a no-drag island, not just its glyph.
+    <div className="side-toggle-slot">
+      <button
+        className="tico side-toggle"
+        title={expanded ? 'Colapsar panel · ⌘B' : 'Mostrar conversaciones · ⌘B'}
+        aria-label={expanded ? 'Colapsar panel' : 'Mostrar conversaciones'}
+        aria-pressed={expanded}
+        onPointerUp={(event) => {
+          if (event.button === 0) store.toggleSide();
+        }}
+        onKeyDown={(event) => {
+          if (event.repeat || (event.key !== 'Enter' && event.key !== ' ')) return;
+          event.preventDefault();
+          store.toggleSide();
+        }}
+      >
+        <IcSidebar />
+      </button>
+    </div>
+  );
+}
+
 export function App() {
   const app = useApp();
   const chat = store.active();
@@ -50,15 +74,6 @@ export function App() {
     const onResize = () => setWinW(window.innerWidth);
     addEventListener('resize', onResize);
     return () => removeEventListener('resize', onResize);
-  }, []);
-
-  // Inside the Electron shell the OS owns the real macOS and Windows caption
-  // controls. Flag the document so CSS can hide the browser-mode stand-ins and
-  // turn the titlebar rows into drag regions where the frame permits it.
-  useEffect(() => {
-    const electron = navigator.userAgent.includes('Electron');
-    document.documentElement.classList.toggle('electron', electron);
-    document.documentElement.classList.toggle('electron-windows', electron && window.workassWindow?.platform === 'win32');
   }, []);
 
   // Reflect pane / settings state onto #root (the grid host lives in index.html).
@@ -138,18 +153,6 @@ export function App() {
 
   return (
     <>
-      {/* One sticky sidebar toggle, pinned to the right of the green traffic
-          light. position:fixed keeps it in the SAME physical spot whether the
-          sidebar is open or closed (user law 2026-07-11); ⌘B (above) mirrors it. */}
-      <button
-        className="tico side-toggle"
-        title={app.panes.side ? 'Colapsar panel · ⌘B' : 'Mostrar conversaciones · ⌘B'}
-        aria-label={app.panes.side ? 'Colapsar panel' : 'Mostrar conversaciones'}
-        aria-pressed={app.panes.side}
-        onClick={() => store.toggleSide()}
-      >
-        <IcSidebar />
-      </button>
       <SidebarV2 />
       {app.panes.side && <ResizeHandle which="side" />}
       <main>
@@ -167,6 +170,7 @@ export function App() {
       <Toasts />
       <ImageLightbox />
       <ImageClipboardController />
+      <SidebarToggle expanded={app.panes.side} />
     </>
   );
 }
