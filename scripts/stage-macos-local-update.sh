@@ -9,9 +9,11 @@ repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 version=''
 build_number=$(date -u +%Y%m%d%H%M%S)
 output_root="$HOME/Library/Application Support/Workass/update-feed"
+candidate_root=''
+release_input=''
 
 usage() {
-  echo "usage: scripts/stage-macos-local-update.sh --version X.Y.Z [--build-number N] [--output DIR]"
+  echo "usage: scripts/stage-macos-local-update.sh --version X.Y.Z [--build-number N] [--output DIR] [--candidate-root DIR] [--release-input DIR]"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -19,6 +21,8 @@ while [ "$#" -gt 0 ]; do
     --version) [ "$#" -ge 2 ] || { echo "--version needs a value" >&2; exit 2; }; version="$2"; shift 2 ;;
     --build-number) [ "$#" -ge 2 ] || { echo "--build-number needs a value" >&2; exit 2; }; build_number="$2"; shift 2 ;;
     --output) [ "$#" -ge 2 ] || { echo "--output needs a value" >&2; exit 2; }; output_root="$2"; shift 2 ;;
+    --candidate-root) [ "$#" -ge 2 ] || { echo "--candidate-root needs a value" >&2; exit 2; }; candidate_root="$2"; shift 2 ;;
+    --release-input) [ "$#" -ge 2 ] || { echo "--release-input needs a value" >&2; exit 2; }; release_input="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -29,8 +33,22 @@ printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "--versio
 printf '%s' "$build_number" | grep -Eq '^[1-9][0-9]*$' || { echo "--build-number must be a positive integer" >&2; exit 2; }
 case "$output_root" in /*) ;; *) echo "--output must be absolute" >&2; exit 2 ;; esac
 case "$output_root" in /|"$repo_root"|"$repo_root"/) echo "refusing unsafe local feed root: $output_root" >&2; exit 2 ;; esac
+case "$candidate_root" in ''|/*) ;; *) echo "--candidate-root must be absolute" >&2; exit 2 ;; esac
+case "$release_input" in ''|/*) ;; *) echo "--release-input must be absolute" >&2; exit 2 ;; esac
 
-candidate_root="$repo_root/.dev/local-updates/$version-$build_number"
+commit=$(git -C "$repo_root" rev-parse HEAD)
+if [ -n "$release_input" ]; then
+  # shellcheck disable=SC1091
+  . "$repo_root/scripts/release/lib/source-state.sh"
+  workass_release_require_source "$repo_root"
+  commit=$WORKASS_RELEASE_COMMIT
+  node "$repo_root/scripts/release/lib/release-input.mjs" verify \
+    --root "$release_input" --version "$version" --commit "$commit"
+fi
+
+if [ -z "$candidate_root" ]; then
+  candidate_root="$repo_root/.dev/local-updates/$version-$build_number"
+fi
 candidate="$candidate_root/Workass.app"
 archive_name="Workass-$version-darwin-arm64.zip"
 archive_incoming="$output_root/.$archive_name.incoming-$$"
@@ -39,12 +57,24 @@ feed_name=workass-darwin-arm64-release.json
 feed_incoming="$output_root/.$feed_name.incoming-$$"
 feed="$output_root/$feed_name"
 
+cleanup_incoming() {
+  rm -f "$archive_incoming" "$feed_incoming"
+}
+trap cleanup_incoming EXIT HUP INT TERM
+
 mkdir -p "$candidate_root" "$output_root"
-"$repo_root/scripts/package-workass-macos.sh" \
+set -- \
   --artifact-only "$candidate" \
   --version "$version" \
   --build-number "$build_number" \
   --portable-runtime
+if [ -n "$release_input" ]; then
+  set -- "$@" \
+    --runtime-root "$release_input/macos/runtime" \
+    --electron-app "$release_input/macos/electron/darwin-arm64/Electron.app" \
+    --renderer-root "$release_input/renderer"
+fi
+"$repo_root/scripts/package-workass-macos.sh" "$@"
 
 ditto -c -k --sequesterRsrc --keepParent "$candidate" "$archive_incoming"
 archive_sha=$(shasum -a 256 "$archive_incoming" | awk '{print $1}')
@@ -80,6 +110,7 @@ NODE
 mv -f "$archive_incoming" "$archive"
 mv -f "$feed_incoming" "$feed"
 (cd "$output_root" && shasum -a 256 "$archive_name" > SHA256SUMS)
+trap - EXIT HUP INT TERM
 
 echo "WORKASS_MACOS_LOCAL_UPDATE_READY"
 echo "version=$version"

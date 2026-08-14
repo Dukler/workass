@@ -29,6 +29,7 @@ portable_runtime=1
 release_arch=arm64
 runtime_input_root="$repo_root/dist-bin"
 electron_app_input=''
+renderer_input_root=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --icon) [ "$#" -ge 2 ] || { echo "--icon needs a value" >&2; exit 2; }; icon_source="$2"; shift 2 ;;
@@ -43,8 +44,9 @@ while [ "$#" -gt 0 ]; do
     --arch) [ "$#" -ge 2 ] || { echo "--arch needs a value" >&2; exit 2; }; release_arch="$2"; shift 2 ;;
     --runtime-root) [ "$#" -ge 2 ] || { echo "--runtime-root needs a value" >&2; exit 2; }; runtime_input_root="$2"; shift 2 ;;
     --electron-app) [ "$#" -ge 2 ] || { echo "--electron-app needs a value" >&2; exit 2; }; electron_app_input="$2"; shift 2 ;;
+    --renderer-root) [ "$#" -ge 2 ] || { echo "--renderer-root needs a value" >&2; exit 2; }; renderer_input_root="$2"; shift 2 ;;
     -h|--help)
-      echo "usage: scripts/package-workass-macos.sh [--icon PNG] [--install-root DIR] [--no-launch] [--migrate-signing-identity] [--artifact-only APP] [--version X.Y.Z] [--build-number N] [--release-signing] [--portable-runtime] [--arch arm64] [--runtime-root DIR] [--electron-app APP]"
+      echo "usage: scripts/package-workass-macos.sh [--icon PNG] [--install-root DIR] [--no-launch] [--migrate-signing-identity] [--artifact-only APP] [--version X.Y.Z] [--build-number N] [--release-signing] [--portable-runtime] [--arch arm64] [--runtime-root DIR] [--electron-app APP] [--renderer-root DIR]"
       exit 0
       ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -56,6 +58,7 @@ case "$install_root" in /*) ;; *) echo "--install-root must be absolute" >&2; ex
 case "$artifact_output" in ''|/*.app) ;; *) echo "--artifact-only must be an absolute .app path" >&2; exit 2 ;; esac
 case "$runtime_input_root" in /*) ;; *) echo "--runtime-root must be absolute" >&2; exit 2 ;; esac
 case "$electron_app_input" in ''|/*.app) ;; *) echo "--electron-app must be an absolute .app path" >&2; exit 2 ;; esac
+case "$renderer_input_root" in ''|/*) ;; *) echo "--renderer-root must be absolute" >&2; exit 2 ;; esac
 printf '%s' "$bundle_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "--version must be X.Y.Z" >&2; exit 2; }
 printf '%s' "$bundle_build" | grep -Eq '^[1-9][0-9]*$' || { echo "--build-number must be a positive integer" >&2; exit 2; }
 [ "$release_arch" = arm64 ] || { echo "this release lane currently supports --arch arm64 only" >&2; exit 2; }
@@ -65,12 +68,23 @@ electron_app=$(workass_electron_resolve "$electron_app_input") || {
   echo "stage the pinned runtime with scripts/vendor-electron-runtime.sh" >&2
   exit 1
 }
-for build_tool in node npm; do
+for build_tool in node; do
   command -v "$build_tool" >/dev/null 2>&1 || {
     echo "missing build tool before package gate: $build_tool" >&2
     exit 1
   }
 done
+if [ -z "$renderer_input_root" ]; then
+  command -v npm >/dev/null 2>&1 || {
+    echo "missing build tool before package gate: npm" >&2
+    exit 1
+  }
+else
+  [ -f "$renderer_input_root/index.html" ] || {
+    echo "prepared renderer is missing: $renderer_input_root/index.html" >&2
+    exit 1
+  }
+fi
 if [ "$runtime_input_root" = "$repo_root/dist-bin" ]; then
   command -v go >/dev/null 2>&1 || {
     echo "missing build tool before package gate: go" >&2
@@ -126,8 +140,14 @@ if [ "$runtime_input_root" = "$repo_root/dist-bin" ]; then
   "$repo_root/scripts/vendor-node-runtime.sh" --target darwin-arm64 --offline >>"$log_file" 2>&1
 fi
 
-echo "[package] building renderer" | tee -a "$log_file"
-(cd "$repo_root" && npm run build --prefix desktop/renderer2) >>"$log_file" 2>&1
+if [ -z "$renderer_input_root" ]; then
+  echo "[package] building renderer" | tee -a "$log_file"
+  (cd "$repo_root" && npm run build --prefix desktop/renderer2) >>"$log_file" 2>&1
+  renderer_source="$repo_root/desktop/renderer2/dist"
+else
+  echo "[package] using verified release renderer" | tee -a "$log_file"
+  renderer_source="$renderer_input_root"
+fi
 
 rm -rf "$stage" "$iconset"
 ditto "$electron_app" "$stage"
@@ -140,7 +160,7 @@ for shell_file in main.js preload.js view-server.js browser-manager.js browser-c
 done
 cp "$repo_root/desktop/shell/package.production.json" "$stage/Contents/Resources/app/package.json"
 plutil -replace version -string "$bundle_version" "$stage/Contents/Resources/app/package.json"
-ditto "$repo_root/desktop/renderer2/dist" "$stage/Contents/Resources/renderer"
+ditto "$renderer_source" "$stage/Contents/Resources/renderer"
 cp "$repo_root/config/environments/prod.env" "$stage/Contents/Resources/workass-profile.env"
 if [ "$release_signing" -eq 1 ]; then
   printf '%s\n' 'WORKASS_UPDATE_CHANNEL=github' >> "$stage/Contents/Resources/workass-profile.env"

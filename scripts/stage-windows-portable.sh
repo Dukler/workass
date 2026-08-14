@@ -10,11 +10,11 @@ repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 version=''
 output_root="$repo_root/dist-release/windows"
 offline=0
-skip_build=0
+release_input=''
 
 usage() {
   cat <<'EOF'
-usage: scripts/stage-windows-portable.sh --version X.Y.Z [--output-root DIR] [--offline] [--skip-build]
+usage: scripts/stage-windows-portable.sh --version X.Y.Z [--output-root DIR] [--offline] [--release-input DIR]
 
 Builds and stages the portable Windows bundle:
   dist-release/windows/X.Y.Z/
@@ -39,7 +39,7 @@ while [ "$#" -gt 0 ]; do
     --version) [ "$#" -ge 2 ] || { echo "--version needs a value" >&2; exit 2; }; version="$2"; shift 2 ;;
     --output-root) [ "$#" -ge 2 ] || { echo "--output-root needs a value" >&2; exit 2; }; output_root="$2"; shift 2 ;;
     --offline) offline=1; shift ;;
-    --skip-build) skip_build=1; shift ;;
+    --release-input) [ "$#" -ge 2 ] || { echo "--release-input needs a value" >&2; exit 2; }; release_input="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -48,46 +48,72 @@ done
 [ -n "$version" ] || { echo "--version is required" >&2; usage >&2; exit 2; }
 printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "invalid version: $version" >&2; exit 2; }
 case "$output_root" in /*) ;; *) echo "--output-root must be absolute" >&2; exit 2 ;; esac
+case "$release_input" in ''|/*) ;; *) echo "--release-input must be absolute" >&2; exit 2 ;; esac
 
 target=windows-amd64
 bundle="Workass-$version-$target"
 release_dir="$output_root/$version"
 stage="$release_dir/$bundle"
 
-for tool in go curl shasum ditto node npm; do
+for tool in shasum ditto node; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 1; }
 done
+if [ -z "$release_input" ]; then
+  for tool in go curl npm; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 1; }
+  done
+fi
 
 offline_flags=''
 [ "$offline" -eq 1 ] && offline_flags='--offline'
 
-# 1. Vendored runtimes, checksum-pinned at build time (never on Windows).
-"$repo_root/scripts/vendor-electron-runtime.sh" --target win32-x64 $offline_flags
-"$repo_root/scripts/vendor-node-runtime.sh" --target "$target" $offline_flags
-"$repo_root/scripts/vendor-frontier-hosts.sh" --target "$target" $offline_flags
+commit=$(git -C "$repo_root" rev-parse HEAD)
+if [ -n "$release_input" ]; then
+  # shellcheck disable=SC1091
+  . "$repo_root/scripts/release/lib/source-state.sh"
+  workass_release_require_source "$repo_root"
+  commit=$WORKASS_RELEASE_COMMIT
+  node "$repo_root/scripts/release/lib/release-input.mjs" verify \
+    --root "$release_input" --version "$version" --commit "$commit"
+  electron_source="$release_input/windows/electron/win32-x64"
+  node_source="$release_input/windows/runtime/node/$target"
+  frontier_hosts_source="$release_input/windows/runtime/frontier-hosts/$target"
+  renderer_source="$release_input/renderer"
+  daemon_source="$release_input/windows/runtime/workass-daemon.exe"
+else
+  # Vendored runtimes are checksum-pinned at build time and never fetched on Windows.
+  "$repo_root/scripts/vendor-electron-runtime.sh" --target win32-x64 $offline_flags
+  "$repo_root/scripts/vendor-node-runtime.sh" --target "$target" $offline_flags
+  "$repo_root/scripts/vendor-frontier-hosts.sh" --target "$target" $offline_flags
+  electron_source="$repo_root/.dev/runtime/electron/win32-x64"
+  node_source="$repo_root/dist-bin/node/$target"
+  frontier_hosts_source="$repo_root/dist-bin/frontier-hosts/$target"
+  renderer_source="$repo_root/desktop/renderer2/dist"
+  daemon_source="$repo_root/dist-bin/workass-windows-amd64.exe"
+fi
 
 # 2. Build the renderer first and sync the exact static bundle into the Go
 #    daemon. Windows never runs npm; both copies are produced on this Mac host.
-if [ "$skip_build" -eq 0 ]; then
+if [ -z "$release_input" ]; then
   echo "building renderer"
   (cd "$repo_root" && npm run build --prefix desktop/renderer2)
   "$repo_root/scripts/sync-renderer2.sh"
 fi
-[ -f "$repo_root/desktop/renderer2/dist/index.html" ] || {
-  echo "renderer build is missing: desktop/renderer2/dist/index.html" >&2
+[ -f "$renderer_source/index.html" ] || {
+  echo "renderer build is missing: $renderer_source/index.html" >&2
   exit 1
 }
 
 # 3. Windows daemon. Cross-compile is CGO-free and stdlib-only per spec; the
 #    existing build-daemon.sh also signs darwin artifacts, which is irrelevant
 #    to the windows-amd64 output, so we build just the windows binary here.
-if [ "$skip_build" -eq 0 ]; then
+if [ -z "$release_input" ]; then
   echo "building dist-bin/workass-windows-amd64.exe"
   CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-X main.daemonVersion=$version" \
     -o "$repo_root/dist-bin/workass-windows-amd64.exe" ./cmd/workass
 fi
-[ -f "$repo_root/dist-bin/workass-windows-amd64.exe" ] || {
-  echo "windows daemon is missing: dist-bin/workass-windows-amd64.exe" >&2
+[ -f "$daemon_source" ] || {
+  echo "windows daemon is missing: $daemon_source" >&2
   exit 1
 }
 
@@ -95,16 +121,16 @@ fi
 #    auto-discovers beside its executable.
 rm -rf "$stage"
 mkdir -p "$stage" "$stage/resources/app" "$stage/resources/renderer" "$stage/node" "$stage/frontier-hosts"
-ditto "$repo_root/.dev/runtime/electron/win32-x64/." "$stage"
+ditto "$electron_source/." "$stage"
 mv "$stage/electron.exe" "$stage/Workass.exe"
 node "$repo_root/desktop/scripts/make-icon.mjs" --verify
 node "$repo_root/desktop/scripts/stamp-windows-icon.mjs" --exe "$stage/Workass.exe" --icon "$repo_root/desktop/assets/icon.ico"
 rm -f "$stage/resources/default_app.asar"
-cp "$repo_root/dist-bin/workass-windows-amd64.exe" "$stage/workass-daemon.exe"
-ditto "$repo_root/dist-bin/node/$target" "$stage/node/$target"
-ditto "$repo_root/dist-bin/frontier-hosts/$target" "$stage/frontier-hosts/$target"
+cp "$daemon_source" "$stage/workass-daemon.exe"
+ditto "$node_source" "$stage/node/$target"
+ditto "$frontier_hosts_source" "$stage/frontier-hosts/$target"
 
-ditto "$repo_root/desktop/renderer2/dist/." "$stage/resources/renderer"
+ditto "$renderer_source/." "$stage/resources/renderer"
 for shell_file in main.js preload.js view-server.js browser-manager.js browser-control-server.js runtime-profile.js runtime-bootstrap.js certificate-pins.js app-icon.js image-copy.js profile-singleton.js update-manager.js update-worker.js; do
   cp "$repo_root/desktop/shell/$shell_file" "$stage/resources/app/$shell_file"
 done
@@ -127,7 +153,7 @@ cp "$repo_root/desktop/assets/icon.ico" "$stage/resources/Workass.ico"
   echo "staged Claude Agent SDK missing" >&2; exit 1;
 }
 
-git_rev=$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo unknown)
+git_rev=$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || echo unknown)
 printf '{"schemaVersion":2,"platform":"windows","arch":"amd64","version":"%s","revision":"%s","portable":true,"electron":true}\n' \
   "$version" "$git_rev" > "$stage/manifest.json"
 node "$repo_root/desktop/scripts/stamp-windows-icon.mjs" --verify --exe "$stage/Workass.exe" --icon "$repo_root/desktop/assets/icon.ico"
