@@ -726,7 +726,6 @@ export interface VisualizationRegistration {
 
 export interface WorkassWindowApi {
   platform: string;
-  control(action: 'minimize' | 'toggle-maximize' | 'close'): Promise<boolean>;
 }
 
 declare global {

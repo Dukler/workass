@@ -184,16 +184,6 @@ function createWindow(url, browserReporter, isController) {
     if (result.opened && result.cleanupPath) externalImageTempDirs.add(result.cleanupPath);
     return result.opened;
   });
-  ipcMain.handle('workass-window:control', (event, action) => {
-    if (!own(event)) return false;
-    if (action === 'minimize') { win.minimize(); return true; }
-    if (action === 'toggle-maximize') {
-      if (win.isMaximized()) win.unmaximize(); else win.maximize();
-      return true;
-    }
-    if (action === 'close') { win.close(); return true; }
-    return false;
-  });
 	ipcMain.on('workass-machines:trust-endpoint', (event, payload) => {
 		event.returnValue = own(event) && certificatePins.trustEndpoint(payload?.address, payload?.certFingerprint);
 	});
@@ -218,7 +208,6 @@ function createWindow(url, browserReporter, isController) {
     }
     try { ipcMain.removeHandler('workass-clipboard:copy-image-at'); } catch { /* ignore */ }
     try { ipcMain.removeHandler('workass-image:open-external'); } catch { /* ignore */ }
-    try { ipcMain.removeHandler('workass-window:control'); } catch { /* ignore */ }
 		try { ipcMain.removeAllListeners('workass-machines:trust-endpoint'); } catch { /* ignore */ }
 		try { ipcMain.removeHandler('workass-recovery:restart-daemon'); } catch { /* ignore */ }
     for (const channel of ['get-state', 'check', 'apply', 'download', 'install']) {

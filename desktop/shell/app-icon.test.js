@@ -177,5 +177,8 @@ test('Windows uses native caption buttons while macOS keeps hidden-inset traffic
   assert.deepEqual(resolveWindowFrameOptions({ platform: 'linux' }), { frame: false });
 
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  const preload = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
   assert.match(main, /\.\.\.resolveWindowFrameOptions\(\{\s*platform:\s*process\.platform\s*}\)/);
+  assert.doesNotMatch(main, /workass-window:control/);
+  assert.doesNotMatch(preload, /workass-window:control/);
 });

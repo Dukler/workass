@@ -29,7 +29,6 @@ contextBridge.exposeInMainWorld('workassClipboard', {
 
 contextBridge.exposeInMainWorld('workassWindow', {
   platform: process.platform,
-  control: (action) => ipcRenderer.invoke('workass-window:control', action),
 });
 
 contextBridge.exposeInMainWorld('workassRecovery', {

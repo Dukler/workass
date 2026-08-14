@@ -30,6 +30,11 @@ body {
      topbar padding DERIVES from this so the two can't silently drift apart. */
   --side-toggle-x: 86px;
 }
+/* Windows already has native caption controls above the web contents, so there
+   are no traffic lights to clear inside this row. Anchor the sidebar control to
+   the same 9px content edge as the rest of the pane instead of leaving a macOS-
+   sized blank strip in front of it. */
+:root.electron-windows #root { --side-toggle-x: 9px; }
 /* A closed side pane leaves NO empty mirror gutter: the transcript centers in the
    content area (1fr `main`) between whatever panes are open, so the scrollbar
    reaches the window edge and the gutters stay balanced instead of piling all the
@@ -89,8 +94,10 @@ aside.side {
    standard native frame. Hide the browser-only stand-ins on both platforms. */
 :root.electron:not(.electron-windows) .tl { visibility: hidden; width: 52px; }
 :root.electron-windows .tl { display: none; }
-:root.electron .titlebar,
-:root.electron .tbar { -webkit-app-region: drag; }
+:root.electron:not(.electron-windows) .tbar { -webkit-app-region: drag; }
+/* The sidebar title row contains the pane control, so it is never a window-drag
+   surface. The much larger main .tbar remains the macOS/Linux drag handle. */
+:root.electron .titlebar { -webkit-app-region: no-drag; }
 :root.electron .titlebar button,
 :root.electron .titlebar input,
 :root.electron .tbar button,
@@ -348,19 +355,17 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
    .side-toggle before the doc icon / chat title begin. Derived from its x +
    its 30px width + an 8px gap, so it tracks --side-toggle-x automatically. */
 #root.no-side .tbar { padding-left: calc(var(--side-toggle-x) + 30px + 8px); }
-/* The ONE sticky sidebar toggle — pinned right of the green traffic light,
-   vertically centered on the lights' y≈20 centerline. position:fixed means its
-   rect is IDENTICAL whether the sidebar is open or closed (no layout shift). */
-/* .tico.side-toggle (not bare .side-toggle): .tico sets position:relative later
-   in source at equal specificity, so it must be out-specified or the toggle
-   stays an in-flow grid item and shoves the panes over. */
-/* left:86 gives comfortable breathing room from the traffic lights (they end
-   ~x66) — ~20px clear to the button, matching the Claude Code / Codex desktop
-   apps — without drifting so far it crowds the doc icon (user law 2026-07-11). */
-.tico.side-toggle {
-  position: fixed; top: 20px; left: var(--side-toggle-x); transform: translateY(-50%);
-  z-index: 25; -webkit-app-region: no-drag;
+/* One stable sidebar control in both pane states. The fixed slot owns the full
+   40px titlebar-height hit region and is painted after both draggable rows, so
+   native Electron hit-testing cannot reinterpret a real click as window drag.
+   macOS keeps x=86 after its traffic lights; Windows overrides x to the pane's
+   9px content edge above. */
+.side-toggle-slot {
+  position: fixed; top: 0; left: var(--side-toggle-x); width: 30px; height: 40px;
+  z-index: 25; display: grid; place-items: center;
+  -webkit-app-region: no-drag;
 }
+.tico.side-toggle { -webkit-app-region: no-drag; }
 /* TRUE alignment law (2026-07-11): every titlebar element shares the same
    centerY (≈20px, the macOS traffic-light line) at every width and in both
    sidebar states. The flex row centers each child's MARGIN box, so raggedness
