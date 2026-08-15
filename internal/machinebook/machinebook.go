@@ -172,8 +172,23 @@ func Open(opts Options) (*Book, error) {
 func (b *Book) List() []Entry {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := make([]Entry, 0, len(b.entries))
+	// Old builds could file the same verified endpoint under several machine
+	// ids. While that endpoint is offline there is no truthful way to decide
+	// which stored id is current, but rendering every stale row as another
+	// physical node is definitely false. Coalesce only identical endpoint sets;
+	// a successful probe below performs the authoritative persisted cleanup.
+	byEndpoints := make(map[string]Entry, len(b.entries))
 	for _, entry := range b.entries {
+		key := endpointSetKey(entry.Endpoints)
+		if key == "" {
+			key = "machine\x00" + entry.MachineID
+		}
+		if current, ok := byEndpoints[key]; !ok || preferEntry(entry, current) {
+			byEndpoints[key] = entry
+		}
+	}
+	out := make([]Entry, 0, len(byEndpoints))
+	for _, entry := range byEndpoints {
 		out = append(out, entry)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -238,10 +253,11 @@ func (b *Book) Discover(ctx context.Context, address string) (Entry, bool, error
 
 	b.mu.Lock()
 	entry, known := b.entries[card.MachineID]
+	endpoint := Endpoint{Kind: KindLAN, Address: normalized}
 	unchanged := known && entry.Status == StatusOK && entry.Name == card.DisplayName() &&
 		entry.Version == card.Version && entry.WireVersion == card.WireVersion &&
 		entry.Secure == card.Secure && entry.CertFingerprint == card.CertFingerprint &&
-		hasEndpoint(entry.Endpoints, Endpoint{Kind: KindLAN, Address: normalized})
+		hasEndpoint(entry.Endpoints, endpoint) && !b.endpointOwnedByAnotherLocked(card.MachineID, endpoint)
 	if unchanged {
 		entry.LastSeenAt = b.now().UTC().Format(time.RFC3339)
 		b.entries[card.MachineID] = entry
@@ -278,8 +294,9 @@ func (b *Book) Sighted(ctx context.Context, machineID, address string) (Entry, b
 
 	b.mu.Lock()
 	entry, known := b.entries[machineID]
+	endpoint := Endpoint{Kind: KindLAN, Address: normalized}
 	unchanged := known && entry.Status == StatusOK &&
-		hasEndpoint(entry.Endpoints, Endpoint{Kind: KindLAN, Address: normalized})
+		hasEndpoint(entry.Endpoints, endpoint) && !b.endpointOwnedByAnotherLocked(machineID, endpoint)
 	if unchanged {
 		// Liveness only. Not persisted: a disk write per announcement per
 		// machine is a lot of writing to record that nothing happened.
@@ -311,6 +328,16 @@ func (b *Book) Sighted(ctx context.Context, machineID, address string) (Entry, b
 func (b *Book) record(card Card, address, source string) (Entry, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	endpoint := Endpoint{Kind: KindLAN, Address: address}
+	b.reconcileEndpointLocked(card.MachineID, endpoint)
+	entry := b.recordLocked(card, endpoint, source)
+	if err := b.save(); err != nil {
+		return Entry{}, err
+	}
+	return entry, nil
+}
+
+func (b *Book) recordLocked(card Card, endpoint Endpoint, source string) Entry {
 	stamp := b.now().UTC().Format(time.RFC3339)
 	entry, existing := b.entries[card.MachineID]
 	if !existing {
@@ -323,13 +350,10 @@ func (b *Book) record(card Card, address, source string) (Entry, error) {
 	entry.CertFingerprint = card.CertFingerprint
 	entry.FleetIDs = card.FleetIDs
 	entry.LastSeenAt = stamp
-	entry.Endpoints = mergeEndpoint(entry.Endpoints, Endpoint{Kind: KindLAN, Address: address})
+	entry.Endpoints = mergeEndpoint(entry.Endpoints, endpoint)
 	entry.Status, entry.Reason = b.assess(card)
 	b.entries[card.MachineID] = entry
-	if err := b.save(); err != nil {
-		return Entry{}, err
-	}
-	return entry, nil
+	return entry
 }
 
 // Forget drops a machine. Reports whether it was there.
@@ -374,7 +398,7 @@ func (b *Book) Refresh(ctx context.Context) ([]Entry, bool) {
 		go func(target Entry) {
 			defer group.Done()
 			slots <- struct{}{}
-			card, err := b.probeAny(ctx, target.Endpoints)
+			card, address, err := b.probeAny(ctx, target.Endpoints)
 			<-slots
 
 			b.mu.Lock()
@@ -387,6 +411,20 @@ func (b *Book) Refresh(ctx context.Context) ([]Entry, bool) {
 			if err != nil {
 				entry.Status = StatusUnreachable
 				entry.Reason = err.Error()
+				b.entries[target.MachineID] = entry
+			} else if card.MachineID != target.MachineID {
+				// The connected health card, not the stale key that selected the
+				// address, owns the endpoint. Rekey it and retain the old entry only
+				// if that machine still has another distinct way to be reached.
+				endpoint := Endpoint{Kind: KindLAN, Address: address}
+				b.reconcileEndpointLocked(card.MachineID, endpoint)
+				source := target.AddedBy
+				if source == "" {
+					source = SourceProbe
+				}
+				b.recordLocked(card, endpoint, source)
+				changed.Store(true)
+				return
 			} else {
 				entry.Name = card.DisplayName()
 				entry.Version = card.Version
@@ -447,27 +485,94 @@ func mergeEndpoint(endpoints []Endpoint, add Endpoint) []Endpoint {
 	return append(endpoints, add)
 }
 
+func removeEndpoint(endpoints []Endpoint, remove Endpoint) []Endpoint {
+	// Allocate instead of reusing the backing array: Refresh snapshots entries
+	// before probing them concurrently, so an in-place filter could rewrite a
+	// goroutine's endpoint list underneath its probe.
+	out := make([]Endpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		if endpoint.Kind == remove.Kind && endpoint.Address == remove.Address {
+			continue
+		}
+		out = append(out, endpoint)
+	}
+	return out
+}
+
+func (b *Book) endpointOwnedByAnotherLocked(machineID string, endpoint Endpoint) bool {
+	for id, entry := range b.entries {
+		if id != machineID && hasEndpoint(entry.Endpoints, endpoint) {
+			return true
+		}
+	}
+	return false
+}
+
+// reconcileEndpointLocked applies the one fact a successful health probe
+// proves: one concrete endpoint belongs to the machine id on that response.
+func (b *Book) reconcileEndpointLocked(machineID string, endpoint Endpoint) bool {
+	changed := false
+	for id, entry := range b.entries {
+		if id == machineID || !hasEndpoint(entry.Endpoints, endpoint) {
+			continue
+		}
+		entry.Endpoints = removeEndpoint(entry.Endpoints, endpoint)
+		if len(entry.Endpoints) == 0 {
+			delete(b.entries, id)
+		} else {
+			b.entries[id] = entry
+		}
+		changed = true
+	}
+	return changed
+}
+
+func endpointSetKey(endpoints []Endpoint) string {
+	if len(endpoints) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		parts = append(parts, endpoint.Kind+"\x00"+endpoint.Address)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "\x01")
+}
+
+func preferEntry(candidate, current Entry) bool {
+	if (candidate.Status == StatusOK) != (current.Status == StatusOK) {
+		return candidate.Status == StatusOK
+	}
+	if candidate.LastSeenAt != current.LastSeenAt {
+		return candidate.LastSeenAt > current.LastSeenAt
+	}
+	if candidate.AddedAt != current.AddedAt {
+		return candidate.AddedAt > current.AddedAt
+	}
+	return candidate.MachineID < current.MachineID
+}
+
 // probeAny tries every known way to reach a machine and gives up only when all
 // of them fail. The failure names how many were tried: with several endpoints,
 // quoting one address makes it look like the others might have worked.
-func (b *Book) probeAny(ctx context.Context, endpoints []Endpoint) (Card, error) {
+func (b *Book) probeAny(ctx context.Context, endpoints []Endpoint) (Card, string, error) {
 	var lastErr error
 	tried := 0
 	for _, endpoint := range endpoints {
 		card, err := b.probe(ctx, endpoint.Address)
 		if err == nil {
-			return card, nil
+			return card, endpoint.Address, nil
 		}
 		tried++
 		lastErr = err
 	}
 	switch {
 	case tried == 0:
-		return Card{}, errors.New("no known address for this machine")
+		return Card{}, "", errors.New("no known address for this machine")
 	case tried == 1:
-		return Card{}, lastErr
+		return Card{}, "", lastErr
 	default:
-		return Card{}, fmt.Errorf("none of its %d addresses answered — last tried %w", tried, lastErr)
+		return Card{}, "", fmt.Errorf("none of its %d addresses answered — last tried %w", tried, lastErr)
 	}
 }
 

@@ -9,8 +9,9 @@
 // The method→channel table is copied from `internal/httpserve/lan_bridge.go`,
 // which PORT-SPEC §2 names as the authoritative client-side enumeration. Only
 // the methods that make sense against ANOTHER machine are here; the rest stay
-// local by omission, which is the safe direction — a missing remote method
-// degrades to the local daemon rather than silently addressing the wrong box.
+// local by omission. Once a tagged id selects another machine, however, that
+// destination is binding: an unavailable remote must fail visibly and must
+// never turn into the same operation against this machine.
 //
 // The table is shorter than the bridge's object on purpose: `WorkassApi` in
 // types.ts declares only what the store actually calls, and a method the store
@@ -133,6 +134,17 @@ export interface MachineRouterOptions {
   subscribeRemote(channel: string, cb: (payload: unknown, machineId: string) => void): void;
 }
 
+export class RemoteMachineUnavailableError extends Error {
+  readonly code = 'workass:remote-machine-unavailable';
+  readonly machineId: string;
+
+  constructor(machineId: string) {
+    super(`remote machine ${machineId} is unavailable`);
+    this.name = 'RemoteMachineUnavailableError';
+    this.machineId = machineId;
+  }
+}
+
 /**
  * Build the `WorkassApi` the store consumes. Every method the local bridge
  * exposes stays exposed — feature detection upstream depends on the SHAPE of
@@ -153,6 +165,7 @@ export function createMachineRouter(options: MachineRouterOptions): WorkassApi {
       const machineId = routeOf(args);
       const link = linkFor(machineId);
       if (!link) {
+        if (machineId) throw new RemoteMachineUnavailableError(machineId);
         const fn = (local() as Record<string, unknown> | undefined)?.[method];
         return typeof fn === 'function' ? (fn as (...a: unknown[]) => unknown)(...args) : undefined;
       }
