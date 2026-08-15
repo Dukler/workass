@@ -1902,6 +1902,11 @@ func TestFailedSpareWarmTripsCircuitBreakerInsteadOfRespawning(t *testing.T) {
 	blocks := 0
 	blocked := make(chan struct{}, 1)
 	manager, _ := newFakeManager(t, "crash-session-new", Options{
+		// Replace the built-in mock fixture instead of adding a second enabled
+		// provider. This assertion is about one provider's circuit breaker; under
+		// full-suite load the unrelated mock could miss this test's deliberately
+		// tiny init deadline and be counted as another failed warm attempt.
+		Provider:           ProviderConfig{ID: "mock"},
 		SpareSessions:      2,
 		SpareCheckInterval: 20 * time.Millisecond,
 		InitTimeout:        150 * time.Millisecond,

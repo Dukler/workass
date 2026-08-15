@@ -39,3 +39,34 @@ test('an unchanged actor revision preserves the already-loaded full history', ()
   assert.equal(restored.messages, previous.messages);
   assert.equal(restored.historyComplete, true);
 });
+
+test('a newer actor revision merges its authoritative tail into the loaded history', () => {
+  const previous = chat('chat', 90, 7);
+  const restored = chat('chat', 60, 8);
+  restored.messages = [
+    ...previous.messages.slice(31).map((row) => ({ ...row })),
+    message(90, 'running'),
+  ];
+  restored.messages.at(-2)!.content = 'updated by the actor';
+  restored.messageCount = 91;
+  restored.historyComplete = false;
+
+  assert.deepEqual(preserveUnchangedFullHistories([previous], [restored]), [restored.id]);
+  assert.equal(restored.messages.length, 91);
+  assert.equal(restored.messages[89].content, 'updated by the actor');
+  assert.equal(restored.messages[90].status, 'running');
+  assert.equal(restored.historyComplete, true);
+});
+
+test('an unrelated partial tail is reloaded instead of being guessed into history', () => {
+  const previous = chat('chat', 90, 7);
+  const restored = chat('chat', 60, 8);
+  restored.messages = Array.from({ length: 60 }, (_, index) => ({
+    ...message(index + 100), id: `replacement-${index}`,
+  }));
+  restored.messageCount = 160;
+  restored.historyComplete = false;
+
+  assert.deepEqual(preserveUnchangedFullHistories([previous], [restored]), []);
+  assert.equal(restored.historyComplete, false);
+});

@@ -38,10 +38,11 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 		}
 		chats = append(chats, map[string]any{
 			"tabId": digest.TabID, "chatId": digest.ChatID,
-			"actorRevision": digest.ActorRevision,
-			"runningJobId":  nullableDigestString(digest.RunningJobID),
-			"lastMessageId": nullableDigestString(digest.LastMessageID),
-			"messageCount":  digest.MessageCount, "queueLen": digest.QueueLen,
+			"actorRevision":           digest.ActorRevision,
+			presentationRevisionField: digest.PresentationRevision,
+			"runningJobId":            nullableDigestString(digest.RunningJobID),
+			"lastMessageId":           nullableDigestString(digest.LastMessageID),
+			"messageCount":            digest.MessageCount, "queueLen": digest.QueueLen,
 			"queueHeadId":               nullableDigestString(digest.QueueHeadID),
 			agentQueueRevisionField:     int(digest.AgentQueueRevision),
 			runtimeControlRevisionField: int(digest.RuntimeControlRevision),

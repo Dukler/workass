@@ -526,6 +526,7 @@ export interface StateDigestChat {
   tabId: string;
   chatId: string;
   actorRevision: number;
+  presentationRevision?: number;
   runningJobId: string | null;
   lastMessageId: string | null;
   messageCount: number;
@@ -551,8 +552,8 @@ export interface StateDigest {
 // we can feature-detect against an older/newer bridge and degrade gracefully.
 export interface WorkassApi {
   appMeta?: () => Promise<{ rootDir: string; workspaceDir: string; version: string; profile?: 'prod' | 'dev' | 'test' } & Record<string, unknown>>;
-  // Additive, body-free heartbeat. Older bridges omit it and the connection
-  // monitor falls back to appMeta.
+  // Additive, body-free reconciliation digest. Liveness uses appMeta so an
+  // actor busy resuming a provider cannot masquerade as a daemon disconnect.
   stateDigest?: () => Promise<StateDigest>;
   getSettings?: () => Promise<unknown>;
   // Controller-gated write of the app-settings blob (settings:set). REPLACES the

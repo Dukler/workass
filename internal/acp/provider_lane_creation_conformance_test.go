@@ -31,13 +31,16 @@ func newCodexCandidateManager(t *testing.T, stateDir, threadID string, missingRe
 			ID: "codex", Command: "node", Args: []string{filepath.Join(root, "scripts", "codex-native-host.mjs")},
 			CWD: root, Enabled: true, Env: env,
 		},
-		DefaultProviderID: "codex", InitTimeout: 3 * time.Second, RSSSampleInterval: time.Hour,
+		// This fixture starts a Node host and a nested mock app-server several
+		// times. Package-parallel repository gates can delay process scheduling;
+		// keep the test deadline about protocol failure, not host startup load.
+		DefaultProviderID: "codex", InitTimeout: 10 * time.Second, RSSSampleInterval: time.Hour,
 	})
 }
 
 func TestDeferredCodexCreatesAgainOnlyForAProvablyEmptyLane(t *testing.T) {
 	stateDir := t.TempDir()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	request := func(manager *Manager, reconcile, createAfterAbsence bool, identity providercontract.LaneIdentity) (providercontract.Lane, providercontract.ThreadRef, providercontract.LaneIdentity, error) {
 		t.Helper()

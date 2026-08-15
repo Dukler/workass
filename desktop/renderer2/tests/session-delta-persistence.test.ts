@@ -198,21 +198,6 @@ test('every persisted chat-mutation family marks its exact chat dirty', async (t
       mutate: (subject, owner) => subject.finalizeCancelledLocally(owner, owner.messages[0], 'job-running'),
     },
     {
-      name: 'disconnect reconciliation',
-      prepare: (_subject, owner) => {
-        owner.messages = [{
-          id: 'assistant-disconnected',
-          role: 'assistant',
-          content: '',
-          status: 'running',
-          at: null,
-          jobId: 'job-disconnected',
-          events: [],
-        } as Msg];
-      },
-      mutate: (subject) => subject.onDisconnected(),
-    },
-    {
       name: 'usage snapshot',
       mutate: (subject, owner) => subject.onJobEvent({
         type: 'usage',
@@ -257,6 +242,24 @@ test('every persisted chat-mutation family marks its exact chat dirty', async (t
       assert.deepEqual(savedChatIDs(subject), [owner.id]);
     });
   }
+});
+
+test('a transport disconnect preserves a daemon-owned running turn for reconnect reconciliation', () => {
+  const owner = chat('tab-owner', {
+    messages: [{
+      id: 'assistant-running', role: 'assistant', content: 'partial', status: 'running',
+      at: null, jobId: 'job-running', events: [],
+    } as Msg],
+  });
+  const subject = subjectWithChats([owner]);
+  subject.rebuildJobRefs();
+  subject.dirtyChats.clear();
+
+  subject.setConnection('disconnected');
+
+  assert.equal(owner.messages[0].status, 'running');
+  assert.deepEqual(subject.jobRef.get('job-running'), { tabId: owner.id, msgId: 'assistant-running' });
+  assert.equal(isDirty(subject, owner.id), false);
 });
 
 test('false and throwing saves keep a chat dirty until a successful retry', async () => {

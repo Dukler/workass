@@ -17,16 +17,32 @@ export function releaseInactiveHistories(chats: Chat[], activeId: string | null)
   return released;
 }
 
-// A heartbeat with the same actor revision may carry only the bounded tail.
-// Preserve an already-loaded full ledger instead of replacing it with that tail.
+// A heartbeat may carry only the bounded actor tail. Preserve an already-loaded
+// full ledger by replacing its overlapping suffix with the authoritative tail.
+// Actor revisions advance while a turn streams, so equality is not a safe
+// prerequisite: requiring it made every five-second digest collapse the active
+// transcript to 60 rows until archive-load put the missing rows back.
 export function preserveUnchangedFullHistories(previous: Chat[], restored: Chat[]): string[] {
   const preserved: string[] = [];
   const previousByID = new Map(previous.map((chat) => [chat.id, chat]));
   for (const chat of restored) {
     const prior = previousByID.get(chat.id);
-    if (!prior?.historyComplete || chat.historyComplete || prior.actorRevision !== chat.actorRevision) continue;
-    chat.messages = prior.messages;
-    chat.messageCount = prior.messageCount ?? prior.messages.length;
+    if (!prior?.historyComplete || chat.historyComplete || prior.chatId !== chat.chatId) continue;
+    if (prior.actorRevision === chat.actorRevision) {
+      chat.messages = prior.messages;
+      chat.messageCount = prior.messageCount ?? prior.messages.length;
+      chat.historyComplete = true;
+      preserved.push(chat.id);
+      continue;
+    }
+    const firstTailID = chat.messages[0]?.id;
+    const overlap = firstTailID ? prior.messages.findIndex((message) => message.id === firstTailID) : -1;
+    if (overlap < 0) continue;
+    const merged = [...prior.messages.slice(0, overlap), ...chat.messages];
+    const authoritativeCount = chat.messageCount ?? merged.length;
+    if (merged.length !== authoritativeCount) continue;
+    chat.messages = merged;
+    chat.messageCount = authoritativeCount;
     chat.historyComplete = true;
     preserved.push(chat.id);
   }
