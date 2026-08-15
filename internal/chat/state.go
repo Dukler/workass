@@ -93,6 +93,7 @@ type CoverageStatus string
 const (
 	CoverageNativeSeen CoverageStatus = "native_seen"
 	CoverageImported   CoverageStatus = "imported"
+	CoverageSeeded     CoverageStatus = "initial_seed"
 	CoverageExcluded   CoverageStatus = "excluded"
 )
 
@@ -118,18 +119,23 @@ type LaneState struct {
 	// lane has never acquired provider-native coverage. It is the only state in
 	// which an exact candidate reported missing may be followed by session/new.
 	CreateAfterCandidateAbsence bool
-	Phase                       LanePhase
-	CoveredThrough              uint64
-	Coverage                    map[uint64]CoverageRecord
-	ConnectionGeneration        uint64
-	LastEventSequence           uint64
-	CreateGeneration            uint64
-	Context                     provider.ContextCapabilities
-	Delivery                    provider.DeliveryCapabilities
-	Creation                    provider.CreationCapabilities
-	PendingImport               *PendingImport
-	LastError                   provider.ErrorKind
-	Attachment                  *provider.LaneAttachmentSnapshot
+	// InitialSeedPending is true only while this lane has never consumed a real
+	// provider input. It allows an absent lane to receive the existing Workass
+	// ledger once as part of its first sampling turn. Once input is consumed it
+	// can never become true again; later coverage gaps require ContextStrategy.
+	InitialSeedPending   bool
+	Phase                LanePhase
+	CoveredThrough       uint64
+	Coverage             map[uint64]CoverageRecord
+	ConnectionGeneration uint64
+	LastEventSequence    uint64
+	CreateGeneration     uint64
+	Context              provider.ContextCapabilities
+	Delivery             provider.DeliveryCapabilities
+	Creation             provider.CreationCapabilities
+	PendingImport        *PendingImport
+	LastError            provider.ErrorKind
+	Attachment           *provider.LaneAttachmentSnapshot
 }
 
 // CreationFailedBeforeEstablishment identifies a lane whose create attempt
@@ -158,7 +164,13 @@ type QueueEntry struct {
 	ModeID       string
 	Permission   string
 	Presentation provider.TurnPresentation
-	Revision     uint64
+	// InitialSeedFrom/Through/Digest freeze the one-time seed range without
+	// duplicating transcript bodies in actor state. The executable effect
+	// deterministically rebuilds the bounded batch from the immutable ledger.
+	InitialSeedFrom    uint64
+	InitialSeedThrough uint64
+	InitialSeedDigest  string
+	Revision           uint64
 }
 
 // StagedQueueEntry is a visible follow-up that has not yet been promoted to a
@@ -1125,7 +1137,7 @@ func (s State) Validate() error {
 				return errors.New("lane coverage record does not match the immutable ledger event")
 			}
 			switch record.Status {
-			case CoverageNativeSeen, CoverageImported, CoverageExcluded:
+			case CoverageNativeSeen, CoverageImported, CoverageSeeded, CoverageExcluded:
 			default:
 				return fmt.Errorf("lane coverage record has unknown status %q", record.Status)
 			}
@@ -1166,8 +1178,15 @@ func (s State) Validate() error {
 				return errors.New("candidate absence may create only on an unestablished deferred lane")
 			}
 			for _, record := range lane.Coverage {
-				if record.Status == CoverageNativeSeen || record.Status == CoverageImported {
+				if record.Status == CoverageNativeSeen || record.Status == CoverageImported || record.Status == CoverageSeeded {
 					return errors.New("lane with provider-native coverage may not create after candidate absence")
+				}
+			}
+		}
+		if lane.InitialSeedPending {
+			for _, record := range lane.Coverage {
+				if record.Status == CoverageNativeSeen || record.Status == CoverageImported || record.Status == CoverageSeeded {
+					return errors.New("lane with consumed provider context still has an initial seed pending")
 				}
 			}
 		}

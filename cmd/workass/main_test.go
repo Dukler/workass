@@ -26,7 +26,6 @@ import (
 	"workass/internal/chat"
 	"workass/internal/httpserve"
 	"workass/internal/lease"
-	providercontract "workass/internal/provider"
 	"workass/internal/wire"
 )
 
@@ -4636,11 +4635,11 @@ func wireFakePromptText(raw any) string {
 	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
-// A nonempty cross-provider handoff requires a receipt-bearing, non-sampling
-// import. An ordinary ACP prompt/history field is never a substitute. If the
-// target provider lacks that capability, the desired lane blocks while the
-// previous exact native lane remains active and resumable.
-func TestWireProviderSwitchWithoutSafeImportFailsClosed(t *testing.T) {
+// A provider lane that has never consumed input may join a nonempty Workass
+// chat by receiving one bounded semantic seed with its first real prompt. Once
+// a lane has consumed input, later cross-provider gaps still require the
+// receipt-bearing non-sampling import contract.
+func TestWireFreshProviderGetsHistorySeedAndEstablishedLaneUsesSafeImport(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()
 	renderer := t.TempDir()
@@ -4655,6 +4654,7 @@ func TestWireProviderSwitchWithoutSafeImportFailsClosed(t *testing.T) {
 		Providers: []acp.ProviderConfig{
 			{ID: "mock", Name: "Mock Provider", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{
 				"WORKASS_MOCK_ACP_DELAY_MS": "5", "WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "mock-provider.json"),
+				"WORKASS_MOCK_ACP_CONTEXT_IMPORT": "1",
 			}, Enabled: true},
 			{ID: "fake-agent", Name: "Fake Provider", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{
 				"WORKASS_MOCK_ACP_DELAY_MS": "5", "WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "fake-provider.json"),
@@ -4718,35 +4718,44 @@ func TestWireProviderSwitchWithoutSafeImportFailsClosed(t *testing.T) {
 	client.invoke(t, 3, "app-chat:new-session", map[string]any{
 		"tabId": "switch-tab", "chatId": "chat-switch", "providerId": "fake-agent", "cwd": root,
 	})
-	blocked := mapFromAnyMain(client.waitReply(t, 3, 5*time.Second).Result)
-	if !strings.Contains(fieldString(blocked, "error"), "blocked at a safe boundary") {
-		t.Fatalf("unsafe provider switch did not fail closed: %#v", blocked)
+	fakeSession := mapFromAnyMain(client.waitReply(t, 3, 5*time.Second).Result)
+	if fieldString(fakeSession, "providerId") != "fake-agent" || fieldString(fakeSession, "sessionId") == "" {
+		t.Fatalf("fresh target provider lane did not attach: %#v", fakeSession)
 	}
-	state, ok := providerChats.Snapshot("chat-switch")
-	if !ok || state.ActiveLaneID == "" || state.DesiredLaneID == state.ActiveLaneID {
-		t.Fatalf("provider switch ownership = %#v", state)
+	client.invoke(t, 4, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": fieldString(fakeSession, "sessionId"),
+		"providerId": "fake-agent", "prompt": "continuar con el agente nuevo",
+		"userMessageId": "switch-user-fresh", "assistantMessageId": "switch-assistant-fresh",
+	})
+	freshTurnReply := client.waitReply(t, 4, 5*time.Second)
+	if freshTurnReply.Error != nil {
+		t.Fatalf("fresh provider seeded turn failed: %s", *freshTurnReply.Error)
 	}
-	active := state.Lanes[state.ActiveLaneID]
-	desired := state.Lanes[state.DesiredLaneID]
-	if active.Identity.Realm.ProviderID != "mock" || active.Thread.HeadID != sessionID || desired.Identity.Realm.ProviderID != "fake-agent" || desired.Phase != chat.LaneBlocked || desired.LastError != providercontract.ErrorUnsupportedCapability {
-		t.Fatalf("fail-closed lane state = active %#v desired %#v", active, desired)
+	freshTurn := mapFromAnyMain(freshTurnReply.Result)
+	freshEnd := client.waitJobEvent(t, fieldString(freshTurn, "id"), "end", 10*time.Second)
+	freshResult := fieldString(mapFromAnyMain(freshEnd["job"]), "result")
+	if !strings.Contains(freshResult, "Previous Workass conversation for this newly created provider thread") ||
+		!strings.Contains(freshResult, "primer turno con el mock") ||
+		!strings.Contains(freshResult, "User request:\ncontinuar con el agente nuevo") {
+		t.Fatalf("fresh provider did not receive the one-time semantic seed: %q", freshResult)
 	}
 
 	// Returning to the original provider selects and uses the exact same native
-	// thread. No replacement session and no transcript replay are involved.
-	client.invoke(t, 4, "app-chat:new-session", map[string]any{
+	// thread. Its later gap is filled through the negotiated non-sampling import,
+	// never by another prompt seed or a replacement thread.
+	client.invoke(t, 5, "app-chat:new-session", map[string]any{
 		"tabId": "switch-tab", "chatId": "chat-switch", "providerId": "mock", "cwd": root,
 	})
-	resumed := mapFromAnyMain(client.waitReply(t, 4, 5*time.Second).Result)
+	resumed := mapFromAnyMain(client.waitReply(t, 5, 5*time.Second).Result)
 	if fieldString(resumed, "sessionId") != sessionID || fieldString(resumed, "providerId") != "mock" {
 		t.Fatalf("original lane was not resumed exactly: %#v", resumed)
 	}
-	client.invoke(t, 5, "job:start", map[string]any{
+	client.invoke(t, 6, "job:start", map[string]any{
 		"kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": sessionID,
 		"providerId": "mock", "prompt": "segundo turno exacto",
 		"userMessageId": "switch-user-2", "assistantMessageId": "switch-assistant-2",
 	})
-	turn2Reply := client.waitReply(t, 5, 5*time.Second)
+	turn2Reply := client.waitReply(t, 6, 5*time.Second)
 	if turn2Reply.Error != nil {
 		t.Fatalf("second exact-lane turn failed: %s", *turn2Reply.Error)
 	}

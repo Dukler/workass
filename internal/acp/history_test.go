@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	providercontract "workass/internal/provider"
 )
 
 func TestEnvironmentBriefIncludesChatArchivePath(t *testing.T) {
@@ -64,6 +66,45 @@ func TestEnvironmentBriefCurrentRequestLanguageOverridesRestoredTranscript(t *te
 		strings.Contains(spanishResult, "Previous conversation") ||
 		!strings.Contains(spanishResult, "User request:\nContinuá este trabajo en español.") {
 		t.Fatalf("current Spanish request replayed history or lost its language boundary:\n%s", spanishResult)
+	}
+}
+
+func TestFirstInputInitialContextSeedIsIncludedOnce(t *testing.T) {
+	manager, events := newFakeManager(t, "echo-prompt", Options{})
+	t.Cleanup(func() { manager.Reset() })
+	session := newFakeSession(t, manager, "initial-seed-tab")
+
+	first, err := manager.StartJob(context.Background(), JobStartOptions{
+		Kind: "app-chat", SessionID: session.SessionID, ChatID: "chat-initial-seed-tab", TabID: "initial-seed-tab",
+		ProviderID: session.ProviderID, Prompt: "current request", HumanAuthored: true,
+		InitialContextSeed: []providercontract.ContextMessage{
+			{LedgerSequence: 1, Role: "user", Text: "earlier question", Inert: true},
+			{LedgerSequence: 2, Role: "assistant", Result: "earlier answer", Inert: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("start seeded first turn: %v", err)
+	}
+	firstEnd := events.waitJobEnd(t, jobID(first), 2*time.Second)
+	firstResult := jobFromEnd(firstEnd)["result"].(string)
+	if !strings.Contains(firstResult, "one-time restored context seed") ||
+		!strings.Contains(firstResult, "User: earlier question") ||
+		!strings.Contains(firstResult, "Assistant: earlier answer") ||
+		!strings.Contains(firstResult, "User request:\ncurrent request") {
+		t.Fatalf("initial context seed was not separated from the current request:\n%s", firstResult)
+	}
+
+	second, err := manager.StartJob(context.Background(), JobStartOptions{
+		Kind: "app-chat", SessionID: session.SessionID, ChatID: "chat-initial-seed-tab", TabID: "initial-seed-tab",
+		ProviderID: session.ProviderID, Prompt: "second request", HumanAuthored: true,
+	})
+	if err != nil {
+		t.Fatalf("start ordinary second turn: %v", err)
+	}
+	secondEnd := events.waitJobEnd(t, jobID(second), 2*time.Second)
+	secondResult := jobFromEnd(secondEnd)["result"].(string)
+	if strings.Contains(secondResult, "earlier question") || strings.Contains(secondResult, "one-time restored context seed") {
+		t.Fatalf("initial context seed replayed on a later turn:\n%s", secondResult)
 	}
 }
 

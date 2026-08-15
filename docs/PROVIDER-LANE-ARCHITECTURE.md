@@ -301,20 +301,25 @@ Switching is one durable transaction:
    immutable lane, so this step never pre-creates or fans out to unselected
    providers.
 3. Compute visible semantic ledger events beyond the target lane's coverage.
-4. Import those events through `ContextStrategy` using stable operation ids and
-   bounded, receipt-bearing chunks.
-5. Reconcile ambiguous import results without resending unknown chunks.
-6. Advance coverage only for confirmed chunks.
-7. Commit the active lane and dispatch that lane's next queued message.
+4. If the target is provably unused, attach one deterministic bounded ledger
+   seed to its first real sampling input, immediately before the current user
+   request. Commit seeded/excluded coverage only when that exact input is
+   consumed. This seed is never available again for that lane.
+5. Otherwise import unseen events through `ContextStrategy` using stable
+   operation ids and bounded, receipt-bearing chunks.
+6. Reconcile ambiguous import results without resending unknown chunks.
+7. Advance coverage only for consumed seed events or confirmed import chunks.
+8. Commit the active lane and dispatch that lane's next queued message.
 
 Until step 7, the previous lane remains the active, usable lane. Failure leaves
 the target lane blocked with a precise reason; it does not half-switch the chat.
 
-A nonempty handoff requires a non-sampling context-import capability. An
-ordinary prompt, synthetic user message, provider sampling turn, `session/load`
-of another thread, or transcript replay is not an import implementation. A
-provider without safe import may serve an empty chat or an explicit fork, but
-cannot silently join an established multi-provider chat.
+An established lane with a later nonempty handoff requires a non-sampling
+context-import capability. An ordinary prompt, synthetic user message,
+provider sampling turn, `session/load` of another thread, or transcript replay
+is not an import implementation for that gap. A provider without safe import
+may still join an established Workass chat only while its own lane has never
+consumed input, through step 4's one-time seed.
 
 ## 7. History and compaction
 
@@ -325,6 +330,8 @@ switching, and deterministic ownership reconciliation.
 Provider-native context remains private to its lane:
 
 - same-provider resume sends no Workass transcript seed;
+- a provider lane that has never consumed input may receive the bounded
+  first-input seed once; this never replaces or recovers an established lane;
 - native compaction stays in the same thread;
 - Workass stores coverage cursor, context usage, optional checkpoint id/hash,
   and verified lineage metadata;
@@ -450,10 +457,11 @@ thread resume plus readback; the payload is resent only after authoritative
 The current Codex native protocol can accept injected input but does not expose
 authoritative readback for that non-sampling import operation. Codex and Claude
 therefore advertise exact resume but not cross-provider context import today.
-That is an explicit capability boundary: switching to one of those lanes after
-another provider added unseen semantic events blocks safely. The deterministic
-mock implements the full V1 protocol and is the conformance oracle. No prompt,
-replay, or replacement session disguises the missing provider capability.
+That is an explicit capability boundary: a never-used Codex or Claude lane may
+receive the one-time first-input seed, but returning after another provider adds
+new unseen events blocks safely. The deterministic mock implements the full V1
+protocol and is the conformance oracle. No later prompt, replay, or replacement
+session disguises the missing provider capability.
 
 ## 9. Anti-slop enforcement
 
@@ -466,7 +474,8 @@ replay, or replacement session disguises the missing provider capability.
 - No god interface forcing every provider to implement unrelated optional
   methods; use the registry plus the two cohesive behavior strategies.
 - No micro-interface per RPC; related behavior stays in delivery or context.
-- No automatic replacement, replay, resend, or context downgrade.
+- No automatic replacement, resend, or context downgrade; no replay outside
+  the provably-unused lane's one-time initial sampling seed.
 - No production release of an intermediate half-refactor.
 
 ## 10. Verification
