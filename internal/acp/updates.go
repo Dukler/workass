@@ -95,6 +95,7 @@ type providerUpdateFailure struct {
 type providerUpdateRun struct {
 	mu         sync.Mutex
 	providerID string
+	target     string
 	status     string
 	startedAt  time.Time
 	exitCode   *int
@@ -451,6 +452,9 @@ func (m *Manager) StartProviderUpdate(parent context.Context, providerID string)
 			return nil, providerUpdateError("providers:update-cli-not-found", err.Error(), map[string]any{"providerId": id})
 		}
 		command.Command = resolved
+		if registration, registered := providerRegistrationForID(id); registered && registration.Update.ResolveCommand != nil {
+			command = registration.Update.ResolveCommand(resolved, command)
+		}
 	}
 	if m.providerUpdateRunning(id) {
 		return nil, providerUpdateError("providers:update-in-progress", "ya hay una actualización en curso", map[string]any{
@@ -471,6 +475,7 @@ func (m *Manager) StartProviderUpdate(parent context.Context, providerID string)
 	now := time.Now().UTC()
 	run := &providerUpdateRun{
 		providerID: id,
+		target:     update.Latest,
 		status:     "running",
 		startedAt:  now,
 		tail:       newOutputTail(providerUpdateTailBytes),
@@ -572,6 +577,21 @@ func (m *Manager) finishProviderUpdateRun(providerID string, run *providerUpdate
 	if status != "done" && lastError == "" {
 		lastError = "actualizacion fallida"
 	}
+	if exitCode == 0 && status == "done" {
+		if version, recheckError := m.detectInstalledCLIVersionAfterProviderUpdate(providerID); version != nil {
+			m.setProviderCLIVersion(providerID, version)
+			if comparison, comparable := compareLenientSemver(version.Version, run.target); comparable && comparison > 0 {
+				status = "failed"
+				exitCode = -1
+				lastError = fmt.Sprintf("la actualización terminó sin instalar %s (sigue en %s; esperada %s)", providerID, version.Version, run.target)
+				run.appendOutput("system", lastError)
+			}
+		} else {
+			m.setProviderUpdateRecheckError(providerID, recheckError)
+		}
+	} else if version := m.detectInstalledCLIVersion(context.Background(), providerID); version != nil {
+		m.setProviderCLIVersion(providerID, version)
+	}
 	run.finish(status, exitCode, lastError)
 	tail := run.tailString()
 
@@ -590,15 +610,6 @@ func (m *Manager) finishProviderUpdateRun(providerID string, run *providerUpdate
 	}
 	m.updateMu.Unlock()
 
-	if exitCode == 0 && status == "done" {
-		if version, recheckError := m.detectInstalledCLIVersionAfterProviderUpdate(providerID); version != nil {
-			m.setProviderCLIVersion(providerID, version)
-		} else {
-			m.setProviderUpdateRecheckError(providerID, recheckError)
-		}
-	} else if version := m.detectInstalledCLIVersion(context.Background(), providerID); version != nil {
-		m.setProviderCLIVersion(providerID, version)
-	}
 	list := m.ProvidersList()
 	m.emit("providers:list", list)
 	// The vendor process and local version verification are the terminal oracle.
