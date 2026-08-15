@@ -368,6 +368,15 @@ test('a stale background refresh cannot remove a newly created active chat befor
   assert.equal(subject.state.activeId, created.id);
 });
 
+test('a new chat owns a closed right pane before its create receipt arrives', () => {
+  const subject = subjectWithChats([chat('tab-existing', { pane: 'rail' })]);
+
+  const created = subject.newChat(true, '/tmp/workass-mobile');
+
+  assert.equal(created.pane, null, 'the first render must not inherit the legacy open-rail fallback');
+  assert.equal(subject.active()?.pane, null);
+});
+
 test('the create fence releases after the daemon echoes the new chat', () => {
   const running = chat('tab-running');
   const subject = subjectWithChats([running]);

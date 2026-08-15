@@ -2074,6 +2074,10 @@ export class Store {
       title: `Chat ${this.state.seq}`, titleLocked: false, group: workspace?.name ?? 'chats', cwd,
       currentModelId: controls.currentModelId, currentModeId: controls.currentModeId,
       providerId: controls.providerId, providerName: controls.providerName,
+      // New chats paint with the right column closed from their first frame.
+      // Leaving this undefined briefly selected the legacy rail fallback until
+      // the daemon's explicit null arrived, producing an open-then-close flash.
+      pane: null,
       pending: true, messages: [], draft: '',
     };
     this.state.chats.unshift(chat);
