@@ -450,11 +450,15 @@ type JobStartOptions struct {
 	Message           string
 	History           []any
 	HistoryCharBudget int
-	ContextSize       int
-	Images            []any
-	ModelID           string
-	ModeID            string
-	ProviderID        string
+	// InitialContextSeed is actor-authored and appears only on the first real
+	// sampling input of a provider lane that has never consumed input. Legacy
+	// renderer History remains non-authoritative and is never replayed.
+	InitialContextSeed []providercontract.ContextMessage
+	ContextSize        int
+	Images             []any
+	ModelID            string
+	ModeID             string
+	ProviderID         string
 	// HumanAuthored separates a request from a resumption. Both can arrive
 	// through the same queue, so only the caller knows which this is; getting it
 	// wrong would either lose the user's request or invent a new one.

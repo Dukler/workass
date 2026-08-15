@@ -35,8 +35,11 @@ The launcher in `desktop/main.js` supports these providers through `app-config.j
 
 Selecting another provider chooses another lane inside the same Workass chat.
 Returning to a provider resumes that lane's exact native thread. Cross-provider
-history moves only through the versioned, non-sampling context-import contract;
-missing import support blocks the switch rather than replaying the transcript.
+history enters a provider lane that has never consumed input once, as a bounded
+semantic seed immediately before its first real user request. After that first
+input, later cross-provider gaps move only through the versioned, non-sampling
+context-import contract; missing import support blocks the switch rather than
+replaying or replacing an established thread.
 
 ## Deterministic Mock
 

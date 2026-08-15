@@ -384,7 +384,14 @@ shell, NOT the daemon.
       chat's provider-native session when possible, then delta-seeds only
       Workass turns it has not seen. A provider with no usable native session
       gets the shared history exactly once — the new agent still inherits the
-      conversation. Mid-turn switch rejected. Regression:
+      conversation. INITIAL-LANE SEED (user correction 2026-08-15): when the
+      target lane is provably absent or owns an exact thread that has never
+      consumed provider input, its first real sampling prompt carries one
+      deterministic, bounded semantic Workass-history seed immediately before
+      the current user request. This is legal only for that unused lane. Once
+      any input is consumed, all later gaps use the receipt-bearing import law
+      in item 6 and can never fall back to another seed. Mid-turn switch
+      rejected. Regression:
       TestWireProviderSwitchMidChatSharesContext.
    c. DELIBERATE multi-agent per chat (subagents) is implemented and is not a
       violation. Each concurrent child gets its own session/engine and one
@@ -472,10 +479,12 @@ shell, NOT the daemon.
    moving the chat detaches them but never deletes them. Changing provider
    inside one Workass chat selects another
    lane; returning to a previous provider resumes that lane's exact thread.
-   Cross-provider context enters a lane only through a capability-gated,
-   non-sampling, receipt-bearing context-import operation. Missing or ambiguous
-   import support blocks the switch; ordinary prompts and transcript replay are
-   forbidden substitutes. Import support requires versioned capability
+   After a lane has consumed provider input, cross-provider context enters it
+   only through a capability-gated, non-sampling, receipt-bearing context-import
+   operation. Missing or ambiguous import support blocks the switch; ordinary
+   prompts and transcript replay are forbidden substitutes for an established
+   lane's later gap. The sole exception is item 4b's first-input seed for a
+   provably unused lane. Import support requires versioned capability
    negotiation, deterministic operation/range/digest identity, idempotency, and
    authoritative operation readback. After a crash Workass reads that receipt
    before deciding whether an absent operation may be sent; unknown acceptance

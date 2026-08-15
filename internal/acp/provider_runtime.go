@@ -1168,6 +1168,7 @@ func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontra
 		ChatID: identity.ChatID, TabID: owner.TabID,
 		SessionID: info.SessionID, CWD: info.CWD, ProviderID: info.ProviderID,
 		Prompt: input.Text, Images: images, ModelID: strings.TrimSpace(input.ModelID), ModeID: strings.TrimSpace(input.ModeID),
+		InitialContextSeed:  append([]providercontract.ContextMessage(nil), input.InitialContext...),
 		HumanAuthored:       humanAuthored,
 		ProviderLaneManaged: true,
 		OperationID:         string(operationID),

@@ -1014,7 +1014,7 @@ func TestTerminalConsumedSteerReceiptCommitsChronologyExactlyOnce(t *testing.T) 
 	}
 }
 
-func TestProviderWithoutContextImportCannotJoinNonemptyChat(t *testing.T) {
+func TestFreshProviderWithoutContextImportSeedsNonemptyChatOnce(t *testing.T) {
 	state, _ := NewState("chat")
 	codex := testLane("chat", "codex")
 	limited := testLane("chat", "limited")
@@ -1030,8 +1030,105 @@ func TestProviderWithoutContextImportCannotJoinNonemptyChat(t *testing.T) {
 		LaneID: limited.ID, Thread: provider.ThreadRef{ProviderID: "limited", RootID: "thread", HeadID: "thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
 	})
-	if len(effects) != 0 || state.Lanes[limited.ID].Phase != LaneBlocked || state.ActiveLaneID != codex.ID {
-		t.Fatalf("unsupported import did not fail closed: lane=%#v active=%q effects=%#v", state.Lanes[limited.ID], state.ActiveLaneID, effects)
+	if len(effects) != 0 || state.Lanes[limited.ID].Phase != LaneReady || state.ActiveLaneID != codex.ID {
+		t.Fatalf("fresh unsupported-import lane was not left ready for its first input: lane=%#v active=%q effects=%#v", state.Lanes[limited.ID], state.ActiveLaneID, effects)
+	}
+	state, effects = apply(t, state, Submit{OperationID: "limited-op", Text: "continue here"})
+	if len(effects) != 1 {
+		t.Fatalf("fresh provider did not start with one seeded turn: %#v", effects)
+	}
+	start, ok := effects[0].(StartTurnEffect)
+	if !ok || start.Input.Text != "continue here" || start.Input.InitialSeedThrough != 2 ||
+		start.Input.InitialSeedDigest == "" || len(start.Seed.Messages) != 2 ||
+		start.Seed.Messages[0].Text != "hello" || start.Seed.Messages[1].Text != "world" {
+		t.Fatalf("initial Workass history seed = %#v", effects[0])
+	}
+	state, _ = apply(t, state, TurnAdmitted{
+		OperationID: "limited-op", Accepted: true,
+		Turn: provider.TurnRef{OperationID: "limited-op", NativeID: "limited-turn"},
+	})
+	state, _ = apply(t, state, InputConsumed{OperationID: "limited-op"})
+	lane := state.Lanes[limited.ID]
+	if lane.InitialSeedPending || lane.CoveredThrough != 3 ||
+		lane.Coverage[1].Status != CoverageSeeded || lane.Coverage[2].Status != CoverageSeeded ||
+		lane.Coverage[3].Status != CoverageNativeSeen {
+		t.Fatalf("consumed initial seed did not advance exact coverage: %#v", lane)
+	}
+}
+
+func TestSelectionRevivesPreUpgradeBlockedLaneThatNeverConsumedInput(t *testing.T) {
+	state, _ := NewState("chat")
+	source := testLane("chat", "source")
+	target := testLane("chat", "qwen")
+	state, _ = apply(t, state, SelectLane{Identity: source})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID: source.ID, Thread: provider.ThreadRef{ProviderID: "source", RootID: "source-thread", HeadID: "source-thread", Lineage: 1},
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
+	})
+	state, _ = apply(t, state, Submit{OperationID: "source-op", Text: "existing history"})
+	state, _ = apply(t, state, TurnCompleted{OperationID: "source-op", Assistant: "existing answer"})
+
+	state, _ = apply(t, state, SelectLane{Identity: target})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID: target.ID, Thread: provider.ThreadRef{ProviderID: "qwen", RootID: "unused-thread", HeadID: "unused-thread", Lineage: 1},
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
+		Attachment: &provider.LaneAttachmentSnapshot{ConnectionID: "unused-thread", ProviderID: "qwen"},
+	})
+	legacy := state.Lanes[target.ID]
+	legacy.InitialSeedPending = false
+	legacy.Phase = LaneBlocked
+	legacy.LastError = provider.ErrorUnsupportedCapability
+	state.Lanes[target.ID] = legacy
+	if err := state.Validate(); err != nil {
+		t.Fatalf("pre-upgrade blocked lane fixture: %v", err)
+	}
+
+	state, effects := apply(t, state, SelectLane{Identity: target})
+	if len(effects) != 0 || state.Lanes[target.ID].Phase != LaneReady || !state.Lanes[target.ID].InitialSeedPending {
+		t.Fatalf("never-used blocked lane was not revived in place: lane=%#v effects=%#v", state.Lanes[target.ID], effects)
+	}
+	state, effects = apply(t, state, Submit{OperationID: "qwen-op", Text: "use the old chat"})
+	if len(effects) != 1 {
+		t.Fatalf("revived lane emitted %d effects, want one seeded turn: %#v", len(effects), effects)
+	}
+	start, ok := effects[0].(StartTurnEffect)
+	if !ok || start.Input.InitialSeedThrough != 2 || len(start.Seed.Messages) != 2 ||
+		state.Lanes[target.ID].Thread.RootID != "unused-thread" {
+		t.Fatalf("revived lane did not keep its exact thread and seed history: lane=%#v effects=%#v", state.Lanes[target.ID], effects)
+	}
+}
+
+func TestDeferredFreshProviderSeedsBeforeItsThreadIsCommitted(t *testing.T) {
+	state, _ := NewState("chat")
+	source := testLane("chat", "source")
+	target := testLane("chat", "codex")
+	state, _ = apply(t, state, SelectLane{Identity: source})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID: source.ID, Thread: provider.ThreadRef{ProviderID: "source", RootID: "source-thread", HeadID: "source-thread", Lineage: 1},
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
+	})
+	state, _ = apply(t, state, Submit{OperationID: "source-op", Text: "history before codex"})
+	state, _ = apply(t, state, TurnCompleted{OperationID: "source-op", Assistant: "source answer"})
+
+	creation := provider.CreationCapabilities{DeferredUntilInput: true}
+	state, _ = apply(t, state, SelectLane{Identity: target, Creation: creation})
+	state, effects := apply(t, state, Submit{OperationID: "codex-op", Text: "continue with codex"})
+	if len(effects) != 1 {
+		t.Fatalf("deferred target did not request creation: %#v", effects)
+	}
+	state, effects = apply(t, state, LaneProvisioned{
+		LaneID: target.ID, Identity: target,
+		Candidate:            provider.ThreadRef{ProviderID: "codex", RootID: "candidate", HeadID: "candidate", Lineage: 1},
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
+		Delivery: provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true},
+		Creation: creation,
+	})
+	if len(effects) != 1 {
+		t.Fatalf("deferred target did not emit its first seeded turn: %#v", effects)
+	}
+	start, ok := effects[0].(StartTurnEffect)
+	if !ok || len(start.Seed.Messages) != 2 || start.Input.InitialSeedThrough != 2 || state.Lanes[target.ID].Provision == nil {
+		t.Fatalf("deferred first turn lost history or candidate ownership: state=%#v effect=%#v", state.Lanes[target.ID], effects[0])
 	}
 }
 

@@ -111,13 +111,19 @@ type TurnPresentation struct {
 }
 
 type TurnInput struct {
-	OperationID  OperationID
-	Text         string
-	Attachments  []Attachment
-	ModelID      string
-	ModeID       string
-	Permission   string
-	Presentation TurnPresentation
+	OperationID OperationID
+	Text        string
+	Attachments []Attachment
+	// InitialContext is the bounded semantic Workass ledger seed attached only
+	// to the first real input of a provider lane that has never consumed input.
+	// It is part of that one sampling turn, not a replacement-session recovery
+	// path and not the receipt-bearing ContextStrategy import operation used by
+	// an already-established lane with later coverage gaps.
+	InitialContext []ContextMessage
+	ModelID        string
+	ModeID         string
+	Permission     string
+	Presentation   TurnPresentation
 	// CommitAdmission is the durable chat-actor boundary. A provider adapter
 	// must call it after fixing the native turn identity and before publishing
 	// any start/output event. Returning an error aborts publication and prompt

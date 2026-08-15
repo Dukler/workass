@@ -424,6 +424,7 @@ func (ImportContextEffect) chatEffect() {}
 type StartTurnEffect struct {
 	LaneID provider.LaneID
 	Input  QueueEntry
+	Seed   ContextBatch
 }
 
 func (StartTurnEffect) chatEffect() {}
@@ -1491,12 +1492,29 @@ func reduceSelectLane(state *State, command SelectLane) ([]Effect, error) {
 			// the failed create blocked or broken.
 			existing.Phase = LaneAbsent
 		}
+		// Releases before the initial-seed law may already have created an exact
+		// target thread and then blocked it solely because context import was
+		// unsupported. If that lane provably never consumed provider input, it is
+		// still safe to use that same untouched thread for the one-time seed.
+		if !existing.InitialSeedPending && laneCanUseInitialSeed(*state, existing) {
+			existing.InitialSeedPending = true
+			existing.LastError = ""
+			switch {
+			case existing.Thread.IsZero():
+				existing.Phase = LaneAbsent
+			case existing.Attachment != nil:
+				existing.Phase = LaneReady
+			default:
+				existing.Phase = LaneDetached
+			}
+		}
 		state.Lanes[identity.ID] = existing
 	} else {
 		lane := LaneState{
 			Identity: identity, Owner: command.Owner, CWD: strings.TrimSpace(command.CWD),
 			ModelID: strings.TrimSpace(command.ModelID), ModeID: strings.TrimSpace(command.ModeID),
 			Phase: LaneAbsent, Coverage: make(map[uint64]CoverageRecord), Creation: command.Creation,
+			InitialSeedPending:          true,
 			CreateAfterCandidateAbsence: command.Creation.DeferredUntilInput,
 		}
 		for sequence := uint64(1); sequence <= state.ContextFloor; sequence++ {
@@ -1512,6 +1530,38 @@ func reduceSelectLane(state *State, command SelectLane) ([]Effect, error) {
 		return nil, nil
 	}
 	return drive(state)
+}
+
+func laneCanUseInitialSeed(state State, lane LaneState) bool {
+	if lane.Phase != LaneBlocked || lane.LastError != provider.ErrorUnsupportedCapability || lane.PendingImport != nil {
+		return false
+	}
+	for _, record := range lane.Coverage {
+		if record.Status == CoverageNativeSeen || record.Status == CoverageImported || record.Status == CoverageSeeded {
+			return false
+		}
+	}
+	for _, event := range state.Ledger {
+		if event.LaneID == lane.Identity.ID {
+			return false
+		}
+	}
+	if state.Foreground != nil && state.Foreground.LaneID == lane.Identity.ID ||
+		state.PendingSteer != nil && state.PendingSteer.LaneID == lane.Identity.ID {
+		return false
+	}
+	for _, entry := range state.Outbox {
+		if entry.LaneID != lane.Identity.ID {
+			continue
+		}
+		switch entry.Kind {
+		case EffectStartTurn, EffectSteerTurn:
+			if entry.Status != OutboxFailed {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func reduceLaneOpened(state *State, command LaneOpened) ([]Effect, error) {
@@ -2334,6 +2384,7 @@ func reduceContextImported(state *State, command ContextImported) ([]Effect, err
 			return nil, err
 		}
 	}
+	lane.InitialSeedPending = false
 	lane.PendingImport = nil
 	lane.Phase = LaneReady
 	lane.LastError = ""
@@ -2471,7 +2522,7 @@ func reduceInputConsumed(state *State, command InputConsumed) error {
 		// A provider cannot consume a later steer before it owns the original
 		// input. Preserve chronology even when the two receipts cross goroutines.
 		if !state.Foreground.UserConsumed {
-			if _, err := appendForegroundUser(state); err != nil {
+			if err := reduceInputConsumed(state, InputConsumed{OperationID: state.Foreground.OperationID}); err != nil {
 				return err
 			}
 		}
@@ -2519,6 +2570,13 @@ func reduceInputConsumed(state *State, command InputConsumed) error {
 	} else if lane.Provision != nil {
 		return errors.New("deferred provider input was consumed without a durable thread receipt")
 	}
+	if lane.InitialSeedPending {
+		if err := commitInitialSeedCoverage(state, &lane, state.Foreground.Input); err != nil {
+			return err
+		}
+		lane.InitialSeedPending = false
+		state.Lanes[state.Foreground.LaneID] = lane
+	}
 	if state.Foreground.UserConsumed {
 		return nil
 	}
@@ -2526,6 +2584,45 @@ func reduceInputConsumed(state *State, command InputConsumed) error {
 		return err
 	}
 	updateOutbox(state, startTurnEffectID(command.OperationID), OutboxConsumed, "")
+	return nil
+}
+
+func commitInitialSeedCoverage(state *State, lane *LaneState, input QueueEntry) error {
+	if state == nil || lane == nil {
+		return errors.New("initial context seed lost its lane state")
+	}
+	if input.InitialSeedDigest == "" {
+		if input.InitialSeedFrom != 0 || input.InitialSeedThrough != 0 {
+			return errors.New("initial context seed lost its immutable digest")
+		}
+		return nil
+	}
+	if input.InitialSeedFrom != lane.CoveredThrough || input.InitialSeedThrough <= input.InitialSeedFrom {
+		return errors.New("initial context seed no longer starts at the lane coverage frontier")
+	}
+	batch, err := buildInitialSeedBatch(*state, input.InitialSeedFrom, input.InitialSeedThrough)
+	if err != nil {
+		return err
+	}
+	if batch.Digest != input.InitialSeedDigest {
+		return errors.New("initial context seed changed identity before consumption")
+	}
+	included := make(map[uint64]struct{}, len(batch.Messages))
+	for _, message := range batch.Messages {
+		included[message.LedgerSequence] = struct{}{}
+	}
+	for sequence := input.InitialSeedFrom + 1; sequence <= input.InitialSeedThrough; sequence++ {
+		if _, exists := lane.Coverage[sequence]; exists {
+			continue
+		}
+		status := CoverageExcluded
+		if _, ok := included[sequence]; ok {
+			status = CoverageSeeded
+		}
+		if err := setCoverage(lane, state, sequence, status, input.OperationID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -2571,7 +2668,12 @@ func reduceTurnTerminated(state *State, command TurnTerminated) ([]Effect, error
 		}
 	}
 	if !state.Foreground.UserConsumed {
-		if _, err := appendForegroundUser(state); err != nil {
+		lane := state.Lanes[state.Foreground.LaneID]
+		if lane.Provision == nil {
+			if err := reduceInputConsumed(state, InputConsumed{OperationID: command.OperationID}); err != nil {
+				return nil, err
+			}
+		} else if _, err := appendForegroundUser(state); err != nil {
 			return nil, err
 		}
 	}
@@ -3462,6 +3564,12 @@ func drive(state *State) ([]Effect, error) {
 		}}, nil
 	case LaneReady:
 		if lane.CoveredThrough < state.LedgerHead() {
+			if lane.InitialSeedPending && lane.Context.ImportMode != provider.ContextImportNonSampling {
+				if len(state.Queue) == 0 || state.Queue[0].LaneID != target {
+					return nil, nil
+				}
+				return beginQueuedForeground(state, target, lane, false)
+			}
 			if lane.Context.ImportMode != provider.ContextImportNonSampling {
 				lane.Phase = LaneBlocked
 				lane.LastError = provider.ErrorUnsupportedCapability
@@ -3503,6 +3611,17 @@ func beginQueuedForeground(state *State, target provider.LaneID, lane LaneState,
 		return nil, errors.New("queued foreground start lost its lane or FIFO owner")
 	}
 	input := state.Queue[0]
+	seed := ContextBatch{}
+	if lane.InitialSeedPending && lane.CoveredThrough < state.LedgerHead() {
+		var err error
+		seed, err = buildInitialSeedBatch(*state, lane.CoveredThrough, state.LedgerHead())
+		if err != nil {
+			return nil, err
+		}
+		input.InitialSeedFrom = lane.CoveredThrough
+		input.InitialSeedThrough = state.LedgerHead()
+		input.InitialSeedDigest = seed.Digest
+	}
 	state.Queue = append([]QueueEntry(nil), state.Queue[1:]...)
 	rootAssistantID := strings.TrimSpace(input.Presentation.AssistantMessageID)
 	if rootAssistantID == "" {
@@ -3525,7 +3644,7 @@ func beginQueuedForeground(state *State, target provider.LaneID, lane LaneState,
 		lane.Phase = LaneRunning
 	}
 	state.Lanes[target] = lane
-	return []Effect{StartTurnEffect{LaneID: target, Input: input}}, nil
+	return []Effect{StartTurnEffect{LaneID: target, Input: input, Seed: seed}}, nil
 }
 
 func planEntriesAllCompleted(entries []provider.PlanEntry) bool {
@@ -4122,6 +4241,77 @@ func reduceCheckpointRestoreFailed(state *State, command CheckpointRestoreFailed
 
 const semanticProjectionVersion uint32 = 1
 
+const (
+	initialSeedMaxEvents = 512
+	initialSeedMaxBytes  = 120000
+)
+
+// buildInitialSeedBatch projects the newest bounded tail of an immutable
+// Workass ledger range for the first real input of a never-used provider lane.
+// The range identity covers every event through `through`; events omitted by
+// the byte/event bound are later recorded as excluded rather than falsely
+// claiming the provider saw them.
+func buildInitialSeedBatch(state State, from, through uint64) (ContextBatch, error) {
+	if from > through || through > state.LedgerHead() {
+		return ContextBatch{}, errors.New("initial context seed range is outside the semantic ledger")
+	}
+	messages := make([]provider.ContextMessage, 0, initialSeedMaxEvents)
+	eventIDs := make([]string, 0, initialSeedMaxEvents)
+	for sequence := through; sequence > from && len(messages) < initialSeedMaxEvents; sequence-- {
+		event := state.Ledger[sequence-1]
+		if event.ContextExcluded {
+			continue
+		}
+		message := contextMessageForLedgerEvent(event)
+		candidateMessages := append([]provider.ContextMessage{message}, messages...)
+		candidateIDs := append([]string{event.EventID}, eventIDs...)
+		payload := struct {
+			Version  uint32
+			From     uint64
+			Through  uint64
+			EventIDs []string
+			Messages []provider.ContextMessage
+		}{semanticProjectionVersion, from, through, candidateIDs, candidateMessages}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return ContextBatch{}, err
+		}
+		if len(raw) > initialSeedMaxBytes {
+			continue
+		}
+		messages = candidateMessages
+		eventIDs = candidateIDs
+	}
+	payload := struct {
+		Version  uint32
+		From     uint64
+		Through  uint64
+		EventIDs []string
+		Messages []provider.ContextMessage
+	}{semanticProjectionVersion, from, through, eventIDs, messages}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return ContextBatch{}, err
+	}
+	digest := sha256.Sum256(raw)
+	return ContextBatch{
+		ProjectionVersion: semanticProjectionVersion,
+		EventIDs:          eventIDs,
+		Digest:            hex.EncodeToString(digest[:]),
+		Messages:          messages,
+	}, nil
+}
+
+func contextMessageForLedgerEvent(event LedgerEvent) provider.ContextMessage {
+	return provider.ContextMessage{
+		EventID: event.EventID, LedgerSequence: event.Sequence, Role: event.Role, Text: event.Text, Result: event.Result,
+		Attachments:  append([]provider.Attachment(nil), event.Attachments...),
+		SourceLaneID: event.LaneID, SourceProvider: event.ProviderID, SourceModelID: event.ModelID,
+		OperationID: event.OperationID, NativeTurnID: event.NativeTurnID, TerminalStatus: event.TerminalState,
+		Inert: true,
+	}
+}
+
 func buildContextBatch(state State, coveredThrough uint64, capabilities provider.ContextCapabilities) (ContextBatch, uint64, uint64, error) {
 	if capabilities.MaxImportEvents <= 0 || capabilities.MaxImportBytes <= 0 {
 		return ContextBatch{}, 0, 0, errors.New("provider did not advertise bounded context-import limits")
@@ -4135,13 +4325,7 @@ func buildContextBatch(state State, coveredThrough uint64, capabilities provider
 	to := from
 	for sequence := from + 1; sequence <= state.LedgerHead() && len(messages) < capabilities.MaxImportEvents; sequence++ {
 		event := state.Ledger[sequence-1]
-		message := provider.ContextMessage{
-			EventID: event.EventID, LedgerSequence: event.Sequence, Role: event.Role, Text: event.Text, Result: event.Result,
-			Attachments:  append([]provider.Attachment(nil), event.Attachments...),
-			SourceLaneID: event.LaneID, SourceProvider: event.ProviderID, SourceModelID: event.ModelID,
-			OperationID: event.OperationID, NativeTurnID: event.NativeTurnID, TerminalStatus: event.TerminalState,
-			Inert: true,
-		}
+		message := contextMessageForLedgerEvent(event)
 		candidate := append(append([]provider.ContextMessage(nil), messages...), message)
 		raw, err := json.Marshal(candidate)
 		if err != nil {
@@ -4269,6 +4453,13 @@ func outboxEntryForEffect(effect Effect) (OutboxEntry, bool, error) {
 	case StartTurnEffect:
 		input := effect.Input
 		input.Attachments = append([]provider.Attachment(nil), effect.Input.Attachments...)
+		if input.InitialSeedDigest != "" {
+			if effect.Seed.Digest != input.InitialSeedDigest || input.InitialSeedThrough <= input.InitialSeedFrom {
+				return OutboxEntry{}, false, errors.New("start-turn effect lost its immutable initial context seed")
+			}
+		} else if effect.Seed.Digest != "" || input.InitialSeedFrom != 0 || input.InitialSeedThrough != 0 {
+			return OutboxEntry{}, false, errors.New("start-turn effect has an incomplete initial context seed")
+		}
 		return OutboxEntry{
 			ID: startTurnEffectID(effect.Input.OperationID), Kind: EffectStartTurn, Status: OutboxPending,
 			LaneID: effect.LaneID, OperationID: effect.Input.OperationID, Input: &input,
@@ -4457,7 +4648,18 @@ func effectFromOutbox(state State, entry OutboxEntry) (Effect, error) {
 		}, nil
 	case EffectStartTurn:
 		if entry.Input != nil && entry.Input.OperationID == entry.OperationID {
-			return StartTurnEffect{LaneID: entry.LaneID, Input: *entry.Input}, nil
+			seed := ContextBatch{}
+			if entry.Input.InitialSeedDigest != "" {
+				var err error
+				seed, err = buildInitialSeedBatch(state, entry.Input.InitialSeedFrom, entry.Input.InitialSeedThrough)
+				if err != nil {
+					return nil, err
+				}
+				if seed.Digest != entry.Input.InitialSeedDigest {
+					return nil, errors.New("start-turn outbox initial context seed changed identity")
+				}
+			}
+			return StartTurnEffect{LaneID: entry.LaneID, Input: *entry.Input, Seed: seed}, nil
 		}
 		return nil, errors.New("start-turn outbox entry lost its immutable input")
 	case EffectReconcileTurn:

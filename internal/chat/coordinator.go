@@ -269,8 +269,9 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 		}
 		admission, err := lane.Delivery().StartTurn(ctx, provider.TurnInput{
 			OperationID: effect.Input.OperationID, Text: effect.Input.Text,
-			Attachments: append([]provider.Attachment(nil), effect.Input.Attachments...),
-			ModelID:     effect.Input.ModelID, ModeID: effect.Input.ModeID, Permission: effect.Input.Permission,
+			Attachments:    append([]provider.Attachment(nil), effect.Input.Attachments...),
+			InitialContext: append([]provider.ContextMessage(nil), effect.Seed.Messages...),
+			ModelID:        effect.Input.ModelID, ModeID: effect.Input.ModeID, Permission: effect.Input.Permission,
 			Presentation: effect.Input.Presentation,
 			CommitAdmission: func(admission provider.TurnAdmission) error {
 				return c.engine.Apply(TurnAdmitted{
