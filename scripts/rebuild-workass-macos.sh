@@ -370,6 +370,10 @@ rebuild_daemon() {
   fi
   chmod 755 "$candidate"
   if [ "$sign_candidate" -eq 1 ]; then
+    # The repository gate can outlive the dedicated signing keychain's unlock
+    # timeout. Re-open it immediately before codesign instead of allowing
+    # SecurityAgent to display a password prompt for the private keychain.
+    workass_codesign_prepare
     echo "[daemon] applying stable $profile signature" | tee -a "$build_log"
     workass_codesign_sign_binary "$candidate" "$WORKASS_BUNDLE_ID.daemon" >>"$build_log" 2>&1
     if [ -f "$target" ] && ! workass_codesign_mutually_compatible "$target" "$candidate"; then

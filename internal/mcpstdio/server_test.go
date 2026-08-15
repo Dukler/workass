@@ -18,7 +18,7 @@ import (
 	"workass/internal/tlscert"
 )
 
-func TestStdio2025RevisionMapsToStatelessWorkassMCP(t *testing.T) {
+func TestStdioLegacyRevisionMapsToStatelessWorkassMCP(t *testing.T) {
 	var mu sync.Mutex
 	var methods []string
 	handler := http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -83,7 +83,7 @@ func TestStdio2025RevisionMapsToStatelessWorkassMCP(t *testing.T) {
 	}}
 
 	input := strings.Join([]string{
-		`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"rmcp","version":"3.0.0"}}}`,
+		`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-10-07","capabilities":{},"clientInfo":{"name":"rmcp","version":"3.0.0"}}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`,
 		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fixture_tool","arguments":{"value":1}}}`,
@@ -103,7 +103,7 @@ func TestStdio2025RevisionMapsToStatelessWorkassMCP(t *testing.T) {
 		}
 	}
 	initialized := responses[0]["result"].(map[string]any)
-	if initialized["protocolVersion"] != protocol2025 || initialized["serverInfo"].(map[string]any)["name"] != "workass-fixture" {
+	if initialized["protocolVersion"] != "2024-10-07" || initialized["serverInfo"].(map[string]any)["name"] != "workass-fixture" {
 		t.Fatalf("initialize result = %#v", initialized)
 	}
 	listed := responses[1]["result"].(map[string]any)
@@ -144,6 +144,27 @@ func TestStdio2026RevisionPassesOneSelfDescribingRequest(t *testing.T) {
 	}
 	if bridge.revision != revision2026 || !json.Valid(bytes.TrimSpace(stdout.Bytes())) {
 		t.Fatalf("modern response = %q revision=%d", stdout.String(), bridge.revision)
+	}
+}
+
+func TestStdioRejectsModernInitializeInsteadOfDowngradingIt(t *testing.T) {
+	bridge := &server{}
+	response, emit := bridge.handle(context.Background(), []byte(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"modern-fixture","version":"1"}}}`,
+	))
+	if !emit {
+		t.Fatal("modern initialize emitted no response")
+	}
+	var message map[string]any
+	if err := json.Unmarshal(response, &message); err != nil {
+		t.Fatalf("modern initialize response is invalid JSON-RPC: %v", err)
+	}
+	rpcErr, _ := message["error"].(map[string]any)
+	if code, _ := rpcErr["code"].(float64); int(code) != -32022 {
+		t.Fatalf("modern initialize response = %#v", message)
+	}
+	if bridge.revision != revisionUnset || bridge.legacyVersion != "" {
+		t.Fatalf("modern initialize changed negotiated state: revision=%d legacy=%q", bridge.revision, bridge.legacyVersion)
 	}
 }
 

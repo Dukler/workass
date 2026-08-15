@@ -3,8 +3,8 @@ import test from 'node:test';
 import type { Chat, Workspace } from '../src/store/types.ts';
 import { buildWorkspaceGroups, chooseWorkspacePath, inheritChatControls, lastProject, newChatTarget, normalizeWorkspacePath, normalizeWorkspaces, rememberLastProject, workspaceName } from '../src/workspaces.ts';
 
-function chat(id: string, cwd: string | null): Chat {
-  return { id, chatId: id, sessionId: null, title: id, titleLocked: false, group: null, cwd, currentModelId: null, currentModeId: null, pending: true, messages: [], draft: '' };
+function chat(id: string, cwd: string | null, machineId?: string): Chat {
+  return { id, chatId: id, machineId, sessionId: null, title: id, titleLocked: false, group: null, cwd, currentModelId: null, currentModeId: null, pending: true, messages: [], draft: '' };
 }
 
 test('normalizes folder aliases without corrupting roots', () => {
@@ -13,6 +13,20 @@ test('normalizes folder aliases without corrupting roots', () => {
   assert.equal(normalizeWorkspacePath('C:\\work\\'), 'C:\\work');
   assert.equal(normalizeWorkspacePath('C:\\'), 'C:\\');
   assert.equal(workspaceName('/Users/me/project'), 'project');
+});
+
+test('a workspace carries a machine only when all of its chats belong to that remote', () => {
+  const remote = buildWorkspaceGroups([], [
+    chat('a', 'C:\\repo\\workass', 'm-lagpc'),
+    chat('b', 'C:\\repo\\workass', 'm-lagpc'),
+  ]);
+  assert.equal(remote[0]?.machineId, 'm-lagpc');
+
+  const mixed = buildWorkspaceGroups([], [
+    chat('remote', 'C:\\repo\\workass', 'm-lagpc'),
+    chat('local', 'C:\\repo\\workass'),
+  ]);
+  assert.equal(mixed[0]?.machineId, undefined);
 });
 
 test('folder groups persist even when empty and collect chats by cwd', () => {

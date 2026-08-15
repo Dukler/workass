@@ -127,7 +127,7 @@ test('provider plan refresh is independent from chat session creation', () => {
   const store = readFileSync(new URL('../src/store/store.ts', import.meta.url), 'utf8');
   const types = readFileSync(new URL('../src/wire/types.ts', import.meta.url), 'utf8');
   const bridge = readFileSync(new URL('../../../internal/httpserve/lan_bridge.go', import.meta.url), 'utf8');
-  assert.match(store, /call\('appChatRefreshPlanUsage',\s*providerId\)/,
+  assert.match(store, /call\('appChatRefreshPlanUsage',\s*providerId,\s*chat\.id\)/,
     'opening the plan popover must query the selected provider, not rebind the chat session');
   assert.match(types, /appChatRefreshPlanUsage\?:/);
   assert.match(bridge, /appChatRefreshPlanUsage:\s*\(providerId\)\s*=>\s*invoke\('app-chat:refresh-plan-usage'/);

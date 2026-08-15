@@ -7,6 +7,7 @@ import { LEAN_SESSION_SAVE_MODE, localMirror, type Mirror } from '../src/store/p
 import { stageChronologicalSteer } from '../src/steering.ts';
 import type { Chat, Msg, Workspace } from '../src/store/types.ts';
 import type { PublicJob } from '../src/wire/types.ts';
+import { splitId, tagId } from '../src/wire/machineIds.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
@@ -375,6 +376,75 @@ test('a new chat owns a closed right pane before its create receipt arrives', ()
 
   assert.equal(created.pane, null, 'the first render must not inherit the legacy open-rail fallback');
   assert.equal(subject.active()?.pane, null);
+});
+
+test('a new chat here preserves the remote machine before its first actor call', () => {
+  const remote = chat(tagId('m-lagpc', 'tab-existing'), {
+    chatId: tagId('m-lagpc', 'chat-existing'),
+    machineId: 'm-lagpc',
+    cwd: 'C:\\Users\\a447079',
+  });
+  const subject = subjectWithChats([remote]);
+
+  const created = subject.newChat(true, remote.cwd);
+
+  assert.equal(created.machineId, 'm-lagpc');
+  assert.ok(splitId(created.id).id.startsWith('tab-'));
+  assert.equal(splitId(created.chatId!).machineId, 'm-lagpc');
+  assert.ok(splitId(created.chatId!).id.startsWith('conv-'));
+  assert.equal(created.cwd, remote.cwd);
+  assert.equal(subject.toMirror(false).chats.some((candidate: Chat) => candidate.id === created.id), false,
+    'the local daemon must never persist a remote chat as its own');
+});
+
+test('Nueva aquí can target an inactive remote row explicitly', () => {
+  const local = chat('tab-local', { cwd: '/tmp/workass-local' });
+  const subject = subjectWithChats([local]);
+
+  const created = subject.newChat(true, 'C:\\Users\\a447079', 'm-lagpc');
+
+  assert.equal(created.machineId, 'm-lagpc');
+  assert.equal(splitId(created.id).machineId, 'm-lagpc');
+  assert.equal(splitId(created.chatId!).machineId, 'm-lagpc');
+});
+
+test('a stale remote hydration cannot erase a chat after its durable create receipt', async () => {
+  const local = chat('tab-local', { cwd: '/tmp/workass-local' });
+  const subject = subjectWithChats([local]);
+  const staleRemote = subject.toMirror(false);
+  staleRemote.chats = [];
+  staleRemote.activeId = null;
+  let createCalls = 0;
+  subject.machines = {
+    linkFor: () => ({ invoke: async (channel: string) => {
+      assert.equal(channel, 'session:get');
+      return staleRemote;
+    } }),
+    setReason: () => {},
+  };
+
+  await withWindowApi({
+    chatCreate: async (opts: any) => {
+      createCalls += 1;
+      return {
+        ok: true, tabId: opts.tabId, chatId: opts.chatId, operationId: opts.operationId,
+        actorRevision: 1, presentationRevision: 1, globalRevision: 1,
+      };
+    },
+  }, async () => {
+    const created = subject.newChat(false, 'C:\\Users\\a447079', 'm-lagpc');
+    await subject.pendingChatCreatePromises.get(created.id);
+
+    assert.equal(subject.pendingChatCreates.has(created.id), false,
+      'the durable receipt must stop duplicate chat:create calls');
+    assert.equal(subject.remoteChatCreateFences.has(created.id), true);
+
+    await subject.hydrateMachine('m-lagpc');
+    assert.strictEqual(subject.chat(created.id), created,
+      'an older session:get must preserve the confirmed optimistic row');
+    assert.equal(await subject.ensureChatCreated(created), true);
+    assert.equal(createCalls, 1);
+  });
 });
 
 test('the create fence releases after the daemon echoes the new chat', () => {

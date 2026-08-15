@@ -30,6 +30,12 @@ grep -Fq 'node --test desktop/shell/*.test.js' "$runner"
 grep -Fq 'WORKASS_CONTROLLER_RECOVERY=1' "$runner"
 grep -Fq 'installed_app="${WORKASS_INSTALLED_APP:-/Applications/Workass.app}"' "$runner"
 grep -Fq 'workass_codesign_sign_binary "$candidate" "$WORKASS_BUNDLE_ID.daemon"' "$runner"
+prepare_line=$(grep -n '^[[:space:]]*workass_codesign_prepare$' "$runner" | tail -n 1 | cut -d: -f1)
+sign_line=$(grep -n 'workass_codesign_sign_binary "$candidate" "$WORKASS_BUNDLE_ID.daemon"' "$runner" | cut -d: -f1)
+[ -n "$prepare_line" ] && [ "$prepare_line" -lt "$sign_line" ] || {
+  echo "daemon rebuild does not refresh the signing keychain immediately before codesign" >&2
+  exit 1
+}
 grep -Fq 'workass_codesign_is_adhoc_cdhash "$target"' "$runner"
 grep -Fq 'target="${target:-$WORKASS_DATA_ROOT/runtime/workass}"' "$runner"
 grep -Fq 'production daemon target must not use a temporary candidate path' "$runner"

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"workass/internal/fleet"
 )
@@ -351,6 +352,29 @@ func TestRetiringAKeyClosesEnrolmentsWithoutStrandingEnrolledDevices(t *testing.
 	sendInvoke(t, kept, 2, "state:get")
 	if reply := readReply(t, kept); reply.Error != nil {
 		t.Fatalf("enrolled device lost access when its key was retired: %+v", reply.Error)
+	}
+
+	// Close and drain the sockets before TempDir cleanup. A disconnect releases
+	// the controller lease synchronously after removing the client from the hub;
+	// returning while that goroutine is still persisting devices.json can race
+	// testing.TempDir's RemoveAll and recreate the directory underneath it.
+	_ = kept.conn.Close()
+	_ = second.conn.Close()
+	_ = first.conn.Close()
+	server.Close()
+	deadline := time.Now().Add(time.Second)
+	for {
+		hub.mu.RLock()
+		connected := len(hub.clients)
+		hub.mu.RUnlock()
+		_, hasController := manager.Controller()
+		if connected == 0 && !hasController {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fleet rotation clients did not drain; connected=%d controller=%t", connected, hasController)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

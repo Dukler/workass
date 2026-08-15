@@ -73,6 +73,50 @@ test('a reply from a machine comes back tagged, so the store can address it agai
   void result;
 });
 
+test('a remotely-tagged chat:create is created by that machine and its receipt stays tagged', async () => {
+  const remote = fakeLink({
+    'chat:create': { ok: true, tabId: 'tab-new', chatId: 'chat-new', operationId: 'create-1' },
+  });
+  const localCalls: unknown[] = [];
+  const router = createMachineRouter({
+    local: () => ({ chatCreate: (opts: unknown) => { localCalls.push(opts); return Promise.resolve({ ok: true }); } }) as never,
+    links: () => new Map([['m-lagpc', remote.link]]),
+    subscribeRemote: () => {},
+  }) as unknown as Record<string, (...a: unknown[]) => Promise<Record<string, unknown>>>;
+
+  const result = await router.chatCreate({
+    tabId: tagId('m-lagpc', 'tab-new'),
+    chatId: tagId('m-lagpc', 'chat-new'),
+    operationId: 'create-1',
+  });
+
+  assert.deepEqual(localCalls, [], 'a remote create must never reach the local daemon');
+  assert.deepEqual(remote.calls, [{
+    channel: 'chat:create',
+    args: [{ tabId: 'tab-new', chatId: 'chat-new', operationId: 'create-1' }],
+  }]);
+  assert.equal(result.tabId, tagId('m-lagpc', 'tab-new'));
+  assert.equal(result.chatId, tagId('m-lagpc', 'chat-new'));
+});
+
+test('plan usage routes by its tagged chat but sends only the provider payload', async () => {
+  const remote = fakeLink({ 'app-chat:refresh-plan-usage': { ok: true, providerId: 'codex' } });
+  const localCalls: unknown[][] = [];
+  const router = createMachineRouter({
+    local: () => ({ appChatRefreshPlanUsage: (...args: unknown[]) => { localCalls.push(args); return Promise.resolve({ ok: true, providerId: 'codex' }); } }) as never,
+    links: () => new Map([['m-lagpc', remote.link]]),
+    subscribeRemote: () => {},
+  }) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+
+  await router.appChatRefreshPlanUsage('codex', tagId('m-lagpc', 'tab-1'));
+
+  assert.deepEqual(localCalls, []);
+  assert.deepEqual(remote.calls, [{
+    channel: 'app-chat:refresh-plan-usage',
+    args: [{ providerId: 'codex' }],
+  }]);
+});
+
 test('a remote event arrives tagged, so a card raised elsewhere finds its chat', () => {
   const seen: unknown[] = [];
   const localSubs: Array<(p: unknown) => void> = [];

@@ -19,11 +19,13 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"workass/internal/mcpprotocol"
 )
 
 const (
-	protocol2025 = "2025-11-25"
-	protocol2026 = "2026-07-28"
+	protocol2025 = mcpprotocol.LatestLegacyVersion
+	protocol2026 = mcpprotocol.ModernVersion
 
 	envEndpoint           = "WORKASS_MCP_ENDPOINT"
 	envCACertFile         = "WORKASS_MCP_CA_FILE"
@@ -53,6 +55,7 @@ type config struct {
 type server struct {
 	config
 	revision           revision
+	legacyVersion      string
 	clientInfo         map[string]any
 	clientCapabilities map[string]any
 }
@@ -229,6 +232,17 @@ func (s *server) initialize2025(ctx context.Context, id json.RawMessage, rawPara
 	if err != nil {
 		return rpcError(id, -32602, "initialize params must be an object")
 	}
+	requestedVersion, ok := params["protocolVersion"].(string)
+	if !ok || strings.TrimSpace(requestedVersion) == "" {
+		return rpcError(id, -32602, "initialize params must include protocolVersion")
+	}
+	requestedVersion = strings.TrimSpace(requestedVersion)
+	// The 2026 direct protocol is self-describing and has no initialize
+	// exchange. Reject a modern initialize instead of silently negotiating it
+	// down to the latest legacy revision.
+	if requestedVersion == protocol2026 {
+		return rpcError(id, -32022, "unsupported MCP protocol version")
+	}
 	if info, ok := params["clientInfo"].(map[string]any); ok {
 		s.clientInfo = info
 	} else {
@@ -240,6 +254,7 @@ func (s *server) initialize2025(ctx context.Context, id json.RawMessage, rawPara
 		s.clientCapabilities = map[string]any{}
 	}
 	s.revision = revision2025
+	s.legacyVersion = mcpprotocol.NegotiateLegacy(requestedVersion)
 	discover := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      json.RawMessage(id),
@@ -272,7 +287,7 @@ func (s *server) initialize2025(ctx context.Context, id json.RawMessage, rawPara
 		return rpcError(id, -32603, "Workass MCP discovery omitted server identity")
 	}
 	translated := map[string]any{
-		"protocolVersion": protocol2025,
+		"protocolVersion": s.legacyVersion,
 		"capabilities":    capabilities,
 		"serverInfo":      serverInfo,
 	}

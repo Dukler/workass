@@ -1,6 +1,6 @@
 import type { Chat, Workspace } from './store/types';
 
-export interface WorkspaceGroup extends Workspace { chats: Chat[]; }
+export interface WorkspaceGroup extends Workspace { chats: Chat[]; machineId?: string; }
 
 export interface InheritedChatControls {
   providerId: string | null;
@@ -58,7 +58,7 @@ export function buildWorkspaceGroups(workspaces: Workspace[], chats: Chat[], rem
     ...workspaces,
     ...chats.map((chat) => workspaceFromPath(chat.cwd ?? '')).filter((item): item is Workspace => item !== null),
   ]).filter((workspace) => !removedKeys.has(pathKey(workspace.path)));
-  const groups = all.map((workspace) => ({ ...workspace, chats: [] as Chat[] }));
+  const groups: WorkspaceGroup[] = all.map((workspace) => ({ ...workspace, chats: [] as Chat[] }));
   const byPath = new Map(groups.map((group) => [pathKey(group.path), group]));
   const unassigned: Chat[] = [];
   for (const chat of chats) {
@@ -67,6 +67,10 @@ export function buildWorkspaceGroups(workspaces: Workspace[], chats: Chat[], rem
     else unassigned.push(chat);
   }
   if (unassigned.length) groups.push({ path: '', name: 'Chats', chats: unassigned });
+  for (const group of groups) {
+    const machineIds = new Set(group.chats.map((chat) => String(chat.machineId ?? '').trim()));
+    if (machineIds.size === 1 && !machineIds.has('')) group.machineId = machineIds.values().next().value;
+  }
   return groups;
 }
 

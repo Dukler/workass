@@ -1,6 +1,10 @@
 package acp
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,8 +61,127 @@ type providerLaunchStrategy interface {
 
 type standardACPLaunchStrategy struct{}
 
-func (standardACPLaunchStrategy) Prepare(config ProviderConfig, _ Options) (ProviderConfig, error) {
-	return launchProviderConfig(config), nil
+func (standardACPLaunchStrategy) Prepare(config ProviderConfig, opts Options) (ProviderConfig, error) {
+	config = launchProviderConfig(config)
+	caFile := strings.TrimSpace(opts.WorkassMCPCACertFile)
+	if caFile == "" {
+		return config, nil
+	}
+	if config.Env == nil {
+		config.Env = make(map[string]string)
+	}
+	existing := strings.TrimSpace(firstNonEmpty(config.Env["NODE_EXTRA_CA_CERTS"], os.Getenv("NODE_EXTRA_CA_CERTS")))
+	trustedCAFile, err := nodeExtraCABundle(opts.StateDir, config.CWD, existing, caFile)
+	if err != nil {
+		return ProviderConfig{}, fmt.Errorf("prepare Workass MCP trust: %w", err)
+	}
+	// Node and Bun add these certificates to their native root store; TLS
+	// verification remains enabled. This is provider-neutral transport setup,
+	// not a provider-name exception.
+	config.Env["NODE_EXTRA_CA_CERTS"] = trustedCAFile
+	return config, nil
+}
+
+const maxNodeExtraCABytes = 4 * 1024 * 1024
+
+func nodeExtraCABundle(stateDir, providerCWD, existingPath, workassPath string) (string, error) {
+	workassPath, err := absoluteProviderCAPath(workassPath, providerCWD)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(existingPath) == "" {
+		return workassPath, nil
+	}
+	existingPath, err = absoluteProviderCAPath(existingPath, providerCWD)
+	if err != nil {
+		return "", err
+	}
+	if existingPath == workassPath {
+		return workassPath, nil
+	}
+	existing, err := boundedPublicCAFile(existingPath)
+	if err != nil {
+		return "", fmt.Errorf("read existing Node CA file: %w", err)
+	}
+	workass, err := boundedPublicCAFile(workassPath)
+	if err != nil {
+		return "", fmt.Errorf("read Workass MCP CA file: %w", err)
+	}
+	if bytes.Equal(existing, workass) {
+		return workassPath, nil
+	}
+	stateDir = strings.TrimSpace(stateDir)
+	if stateDir == "" {
+		return "", errors.New("state directory is required to combine Node CA certificates")
+	}
+	stateDir, err = filepath.Abs(stateDir)
+	if err != nil {
+		return "", err
+	}
+	bundle := append(append(bytes.TrimSpace(existing), '\n'), bytes.TrimSpace(workass)...)
+	bundle = append(bundle, '\n')
+	digest := sha256.Sum256(bundle)
+	dir := filepath.Join(stateDir, "mcp-trust")
+	path := filepath.Join(dir, fmt.Sprintf("node-extra-ca-%x.pem", digest[:12]))
+	if current, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(current, bundle) {
+		return path, nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	temp, err := os.CreateTemp(dir, "node-extra-ca-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	tempPath := temp.Name()
+	committed := false
+	defer func() {
+		_ = temp.Close()
+		if !committed {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if err := temp.Chmod(0o600); err != nil {
+		return "", err
+	}
+	if _, err := temp.Write(bundle); err != nil {
+		return "", err
+	}
+	if err := temp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		if current, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(current, bundle) {
+			committed = true
+			_ = os.Remove(tempPath)
+			return path, nil
+		}
+		return "", err
+	}
+	committed = true
+	return path, nil
+}
+
+func absoluteProviderCAPath(path, providerCWD string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errors.New("CA certificate path is empty")
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(strings.TrimSpace(providerCWD), path)
+	}
+	return filepath.Abs(path)
+}
+
+func boundedPublicCAFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 || len(data) > maxNodeExtraCABytes {
+		return nil, fmt.Errorf("CA certificate file size %d is outside the supported range", len(data))
+	}
+	return data, nil
 }
 
 type mockACPLaunchStrategy struct{}

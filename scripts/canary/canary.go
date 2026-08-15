@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -27,11 +29,13 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"workass/internal/tlscert"
 )
 
 const (
 	lmStudioBaseURL       = "http://127.0.0.1:1234/v1"
-	qwenModelID           = "workass-dev"
+	qwenDefaultModelID    = "workass-dev"
 	qwenPrompt            = "Respondé con una sola palabra: hola"
 	qwenCancelPrompt      = "Escribí los números del 1 al 5000 separados por coma. No resumas."
 	mockConcurrentPrompt  = "mock concurrent isolation canary"
@@ -57,12 +61,13 @@ func runMain() int {
 	stateDirFlag := flag.String("state-dir", "", "scratch state dir; defaults to a new temp dir and must not live inside the repo")
 	keepState := flag.Bool("keep-state", false, "keep the scratch state directory")
 	skipPreflight := flag.Bool("skip-lmstudio-preflight", false, "skip LM Studio /v1/models preflight")
+	qwenModel := flag.String("qwen-model", qwenDefaultModelID, "loaded LM Studio model id used by the real Qwen ACP canary")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	c, err := newCanary(*daemonFlag, *goRunDaemon, *stateDirFlag, *keepState, !*skipPreflight)
+	c, err := newCanary(*daemonFlag, *goRunDaemon, *stateDirFlag, *keepState, !*skipPreflight, *qwenModel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "CANARY FAIL: %v\n", err)
 		return 1
@@ -92,6 +97,7 @@ type canary struct {
 	daemonViaGo  bool
 	keepState    bool
 	doPreflight  bool
+	qwenModelID  string
 	port         int
 	baseURL      string
 	logFile      string
@@ -127,7 +133,7 @@ type jobReceipt struct {
 	FirstChunk *time.Time
 }
 
-func newCanary(daemonFlag string, goRunDaemon bool, stateDirFlag string, keepState, doPreflight bool) (*canary, error) {
+func newCanary(daemonFlag string, goRunDaemon bool, stateDirFlag string, keepState, doPreflight bool, qwenModelID string) (*canary, error) {
 	root, err := os.Getwd()
 	if err != nil {
 		return nil, err
@@ -144,6 +150,10 @@ func newCanary(daemonFlag string, goRunDaemon bool, stateDirFlag string, keepSta
 	}
 	if _, err := exec.LookPath("qwen"); err != nil {
 		return nil, fmt.Errorf("qwen command not on PATH: %w", err)
+	}
+	qwenModelID = strings.TrimSpace(qwenModelID)
+	if qwenModelID == "" {
+		return nil, errors.New("--qwen-model must not be empty")
 	}
 
 	tempRoot := ""
@@ -201,6 +211,7 @@ func newCanary(daemonFlag string, goRunDaemon bool, stateDirFlag string, keepSta
 		daemonViaGo: daemonViaGo,
 		keepState:   keepState,
 		doPreflight: doPreflight,
+		qwenModelID: qwenModelID,
 	}, nil
 }
 
@@ -209,7 +220,7 @@ func (c *canary) run(ctx context.Context) error {
 	fmt.Printf("CANARY start repo=%s state=%s\n", c.repoRoot, c.stateDir)
 	if c.doPreflight {
 		if err := c.step("lmstudio", func() (string, error) {
-			models, err := ensureLMStudio(ctx)
+			models, err := ensureLMStudio(ctx, c.qwenModelID)
 			if err != nil {
 				return "", err
 			}
@@ -235,7 +246,7 @@ func (c *canary) run(ctx context.Context) error {
 		return err
 	}
 	if err := c.step("ws-connect", func() (string, error) {
-		client, err := dialWS(ctx, "canary", c.port, "b2-canary", "")
+		client, err := dialWS(ctx, "canary", c.port, "b2-canary", "", filepath.Join(c.stateDir, tlscert.CertFileName))
 		if err != nil {
 			return "", err
 		}
@@ -361,8 +372,8 @@ func (c *canary) step(name string, fn func() (string, error)) error {
 	return nil
 }
 
-func ensureLMStudio(ctx context.Context) ([]string, error) {
-	models, err := fetchLMStudioModels(ctx)
+func ensureLMStudio(ctx context.Context, qwenModelID string) ([]string, error) {
+	models, err := fetchLMStudioModels(ctx, qwenModelID)
 	if err == nil {
 		return models, nil
 	}
@@ -380,7 +391,7 @@ func ensureLMStudio(ctx context.Context) ([]string, error) {
 	deadline := time.Now().Add(lmStudioStartTimeout)
 	var last error
 	for time.Now().Before(deadline) {
-		models, last = fetchLMStudioModels(ctx)
+		models, last = fetchLMStudioModels(ctx, qwenModelID)
 		if last == nil {
 			return models, nil
 		}
@@ -393,7 +404,7 @@ func ensureLMStudio(ctx context.Context) ([]string, error) {
 	return nil, fmt.Errorf("LM Studio server started but /v1/models did not respond: %v", last)
 }
 
-func fetchLMStudioModels(ctx context.Context) ([]string, error) {
+func fetchLMStudioModels(ctx context.Context, qwenModelID string) ([]string, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, lmStudioRequestTimout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, lmStudioBaseURL+"/models", nil)
@@ -467,7 +478,7 @@ func (c *canary) prepareFilesystem() error {
 			"env": map[string]string{
 				"OPENAI_BASE_URL": lmStudioBaseURL,
 				"OPENAI_API_KEY":  "lm-studio",
-				"OPENAI_MODEL":    qwenModelID,
+				"OPENAI_MODEL":    c.qwenModelID,
 			},
 			"enabled": true,
 			"badge":   "agent",
@@ -507,7 +518,7 @@ func (c *canary) startDaemon(ctx context.Context) error {
 		return err
 	}
 	c.port = port
-	c.baseURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	c.baseURL = fmt.Sprintf("https://127.0.0.1:%d", port)
 	c.logFile = filepath.Join(c.tempRoot, "daemon.log")
 	logf, err := os.Create(c.logFile)
 	if err != nil {
@@ -524,7 +535,7 @@ func (c *canary) startDaemon(ctx context.Context) error {
 	c.daemonCancel = cancel
 	cmd := exec.CommandContext(daemonCtx, command, args...)
 	cmd.Dir = c.repoRoot
-	cmd.Env = withToolPath(os.Environ())
+	cmd.Env = withCanaryRuntimeProfile(withToolPath(os.Environ()))
 	cmd.Stdout = logf
 	cmd.Stderr = logf
 	if runtime.GOOS != "windows" {
@@ -586,8 +597,18 @@ func (c *canary) assertEngineConfig(ctx context.Context) error {
 
 func (c *canary) waitHealth(ctx context.Context, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	client := http.Client{Timeout: 500 * time.Millisecond}
+	caFile := filepath.Join(c.stateDir, tlscert.CertFileName)
+	var client *http.Client
 	for time.Now().Before(deadline) {
+		if client == nil {
+			if tlsConfig, err := canaryTLSConfig(caFile); err == nil {
+				client = &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}, Timeout: 500 * time.Millisecond}
+			}
+		}
+		if client == nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/workass/health", nil)
 		resp, err := client.Do(req)
 		if err == nil {
@@ -627,11 +648,27 @@ func (c *canary) assertCatalog(ctx context.Context) error {
 func (c *canary) newChatSession(ctx context.Context, chatID, tabID, providerID, cwd string) (*chatRef, error) {
 	chat := &chatRef{chatID: chatID, tabID: tabID, cwd: cwd, provider: providerID}
 	err := c.step("new-session-"+providerID, func() (string, error) {
+		created, err := c.callOK(ctx, "chat:create", map[string]any{
+			"chatId": chatID, "tabId": tabID, "operationId": "canary-create:" + chatID,
+			"focus": false, "title": "Canary " + providerID, "titleLocked": true, "group": "chats",
+			"providerId": providerID, "cwd": cwd,
+		})
+		if err != nil {
+			return "", err
+		}
+		createdMap, err := asMap(created)
+		if err != nil {
+			return "", err
+		}
+		if ok, _ := createdMap["ok"].(bool); !ok {
+			return "", fmt.Errorf("chat:create did not commit the durable actor: %#v", created)
+		}
 		res, err := c.callOK(ctx, "app-chat:new-session", map[string]any{
-			"chatId":     chatID,
-			"tabId":      tabID,
-			"cwd":        cwd,
-			"providerId": providerID,
+			"chatId":      chatID,
+			"tabId":       tabID,
+			"cwd":         cwd,
+			"providerId":  providerID,
+			"operationId": "canary-lane-select:" + chatID + ":" + providerID,
 		})
 		if err != nil {
 			return "", err
@@ -675,7 +712,11 @@ func (c *canary) assertCancel(ctx context.Context, chat *chatRef) error {
 		if err != nil {
 			return "", err
 		}
-		if cancelRes != true {
+		cancelled := cancelRes == true
+		if result, ok := cancelRes.(map[string]any); ok {
+			cancelled, _ = result["cancelled"].(bool)
+		}
+		if !cancelled {
 			return "", fmt.Errorf("job:cancel result=%#v", cancelRes)
 		}
 		rec, err := c.collectJob(ctx, mark, jobID, cancelTurnTimeout)
@@ -729,14 +770,18 @@ func (c *canary) waitForRunningJobBeforeCancel(ctx context.Context, mark int, jo
 }
 
 func (c *canary) startJob(ctx context.Context, chat *chatRef, prompt string) (map[string]any, error) {
+	operationID := fmt.Sprintf("canary-job:%s:%d", chat.chatID, time.Now().UnixNano())
 	res, err := c.callOK(ctx, "job:start", map[string]any{
-		"kind":       "app-chat",
-		"chatId":     chat.chatID,
-		"tabId":      chat.tabID,
-		"sessionId":  chat.sessionID,
-		"cwd":        chat.cwd,
-		"providerId": chat.provider,
-		"prompt":     prompt,
+		"kind":               "app-chat",
+		"chatId":             chat.chatID,
+		"tabId":              chat.tabID,
+		"sessionId":          chat.sessionID,
+		"cwd":                chat.cwd,
+		"providerId":         chat.provider,
+		"prompt":             prompt,
+		"operationId":        operationID,
+		"userMessageId":      operationID + ":user",
+		"assistantMessageId": operationID + ":assistant",
 	})
 	if err != nil {
 		return nil, err
@@ -912,9 +957,13 @@ type wsMessage struct {
 	Payload any
 }
 
-func dialWS(ctx context.Context, name string, port int, deviceName, token string) (*wsClient, error) {
+func dialWS(ctx context.Context, name string, port int, deviceName, token, caFile string) (*wsClient, error) {
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	var d net.Dialer
+	tlsConfig, err := canaryTLSConfig(caFile)
+	if err != nil {
+		return nil, err
+	}
+	d := tls.Dialer{NetDialer: &net.Dialer{}, Config: tlsConfig}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
@@ -957,6 +1006,18 @@ func dialWS(ctx context.Context, name string, port int, deviceName, token string
 	c := &wsClient{name: name, conn: conn, reader: reader, pending: map[string]chan wsMessage{}, closed: make(chan struct{})}
 	go c.readLoop()
 	return c, nil
+}
+
+func canaryTLSConfig(caFile string) (*tls.Config, error) {
+	pemBytes, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, err
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pemBytes) {
+		return nil, errors.New("canary daemon certificate contains no certificate")
+	}
+	return &tls.Config{RootCAs: roots, ServerName: "127.0.0.1", MinVersion: tls.VersionTLS13}, nil
 }
 
 func (c *wsClient) readLoop() {
@@ -1315,6 +1376,17 @@ func withToolPath(env []string) []string {
 		out = append(out, "PATH="+path)
 	}
 	return out
+}
+
+func withCanaryRuntimeProfile(env []string) []string {
+	const key = "WORKASS_PROFILE="
+	out := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if !strings.HasPrefix(item, key) {
+			out = append(out, item)
+		}
+	}
+	return append(out, key+"test")
 }
 
 func minDuration(a, b time.Duration) time.Duration {

@@ -130,7 +130,7 @@ security() {
       printf '  1) %s "Workass Local Release"\n     1 valid identities found\n' "$fake_identity"
       return 0
       ;;
-    unlock-keychain) return 0 ;;
+    unlock-keychain|set-key-partition-list) return 0 ;;
     *) return 1 ;;
   esac
 }

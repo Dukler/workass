@@ -38,6 +38,63 @@ func TestProviderAdapterDefaultsAllowSingleFacetOverride(t *testing.T) {
 	}
 }
 
+func TestStandardACPLaunchAddsWorkassMCPTrustWithoutDisablingTLS(t *testing.T) {
+	t.Setenv("NODE_EXTRA_CA_CERTS", "")
+	stateDir := t.TempDir()
+	caFile := filepath.Join(stateDir, "workass-ca.pem")
+	if err := os.WriteFile(caFile, []byte("workass public certificate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launch, err := (standardACPLaunchStrategy{}).Prepare(ProviderConfig{
+		Command: "fixture-acp", CWD: stateDir, Env: map[string]string{"FIXTURE": "yes"},
+	}, Options{StateDir: stateDir, WorkassMCPCACertFile: caFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Env["NODE_EXTRA_CA_CERTS"] != caFile || launch.Env["FIXTURE"] != "yes" {
+		t.Fatalf("standard ACP launch env = %#v", launch.Env)
+	}
+	if _, exists := launch.Env["NODE_TLS_REJECT_UNAUTHORIZED"]; exists {
+		t.Fatalf("standard ACP launch disabled TLS verification: %#v", launch.Env)
+	}
+}
+
+func TestStandardACPLaunchCombinesExistingAndWorkassNodeCAs(t *testing.T) {
+	t.Setenv("NODE_EXTRA_CA_CERTS", "")
+	stateDir := t.TempDir()
+	existing := filepath.Join(stateDir, "existing-ca.pem")
+	workass := filepath.Join(stateDir, "workass-ca.pem")
+	if err := os.WriteFile(existing, []byte("existing public certificate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workass, []byte("workass public certificate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := ProviderConfig{
+		Command: "fixture-acp", CWD: stateDir, Env: map[string]string{"NODE_EXTRA_CA_CERTS": existing},
+	}
+	options := Options{StateDir: stateDir, WorkassMCPCACertFile: workass}
+	first, err := (standardACPLaunchStrategy{}).Prepare(config, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := (standardACPLaunchStrategy{}).Prepare(config, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := first.Env["NODE_EXTRA_CA_CERTS"]
+	if bundlePath == existing || bundlePath == workass || second.Env["NODE_EXTRA_CA_CERTS"] != bundlePath {
+		t.Fatalf("combined CA path first=%q second=%q", bundlePath, second.Env["NODE_EXTRA_CA_CERTS"])
+	}
+	bundle, err := os.ReadFile(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bundle), "existing public certificate") || !strings.Contains(string(bundle), "workass public certificate") {
+		t.Fatalf("combined CA bundle = %q", bundle)
+	}
+}
+
 func TestDaemonSourcesContainNoProviderNameBranchesOutsideRegistrationsAndAdapters(t *testing.T) {
 	root := repoRoot(t)
 	approved := map[string]bool{
