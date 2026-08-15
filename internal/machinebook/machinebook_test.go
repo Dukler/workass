@@ -153,6 +153,80 @@ func TestAddSecondAddressJoinsOneEntry(t *testing.T) {
 	}
 }
 
+func TestVerifiedEndpointMovesToTheMachineIDThatAnswered(t *testing.T) {
+	daemon := newFakeDaemon(t, identityDoc("m-old", "old identity", 1))
+	book := openBook(t, "m-self")
+	if _, err := book.Add(context.Background(), daemon.address()); err != nil {
+		t.Fatalf("add old identity: %v", err)
+	}
+
+	daemon.doc.Store(identityDoc("m-new", "current identity", 1))
+	if _, err := book.Add(context.Background(), daemon.address()); err != nil {
+		t.Fatalf("add current identity: %v", err)
+	}
+
+	list := book.List()
+	if len(list) != 1 || list[0].MachineID != "m-new" {
+		t.Fatalf("verified endpoint remained duplicated: %+v", list)
+	}
+	book.mu.Lock()
+	_, staleExists := book.entries["m-old"]
+	book.mu.Unlock()
+	if staleExists {
+		t.Fatal("stale machine id still owns the verified endpoint")
+	}
+}
+
+func TestVerifiedEndpointTransferRetainsASeparateOldEndpoint(t *testing.T) {
+	daemon := newFakeDaemon(t, identityDoc("m-old", "old identity", 1))
+	book := openBook(t, "m-self")
+	if _, err := book.Add(context.Background(), daemon.address()); err != nil {
+		t.Fatalf("add old identity: %v", err)
+	}
+	host, port, err := net.SplitHostPort(daemon.address())
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+	if host != "127.0.0.1" {
+		t.Skipf("httptest bound %s, not loopback", host)
+	}
+	secondAddress := net.JoinHostPort("localhost", port)
+	if _, err := book.Add(context.Background(), secondAddress); err != nil {
+		t.Fatalf("add second endpoint: %v", err)
+	}
+
+	daemon.doc.Store(identityDoc("m-new", "current identity", 1))
+	if _, err := book.Add(context.Background(), daemon.address()); err != nil {
+		t.Fatalf("transfer first endpoint: %v", err)
+	}
+
+	book.mu.Lock()
+	old := book.entries["m-old"]
+	current := book.entries["m-new"]
+	book.mu.Unlock()
+	if len(old.Endpoints) != 1 || old.Endpoints[0].Address != secondAddress {
+		t.Fatalf("old machine lost its distinct endpoint or kept the transferred one: %+v", old.Endpoints)
+	}
+	if len(current.Endpoints) != 1 || current.Endpoints[0].Address != daemon.address() {
+		t.Fatalf("new machine did not receive the verified endpoint: %+v", current.Endpoints)
+	}
+}
+
+func TestListCoalescesLegacyOfflineCopiesOfOneEndpoint(t *testing.T) {
+	book := openBook(t, "m-self")
+	endpoint := []Endpoint{{Kind: KindLAN, Address: "192.168.0.71:80"}}
+	book.mu.Lock()
+	book.entries["m-stale-a"] = Entry{MachineID: "m-stale-a", Name: "node", Status: StatusUnreachable, LastSeenAt: "2026-07-01T00:00:00Z", Endpoints: endpoint}
+	book.entries["m-stale-b"] = Entry{MachineID: "m-stale-b", Name: "node", Status: StatusUnreachable, LastSeenAt: "2026-07-02T00:00:00Z", Endpoints: endpoint}
+	book.entries["m-current"] = Entry{MachineID: "m-current", Name: "node", Status: StatusOK, LastSeenAt: "2026-07-01T00:00:00Z", Endpoints: endpoint}
+	book.mu.Unlock()
+
+	list := book.List()
+	if len(list) != 1 || list[0].MachineID != "m-current" {
+		t.Fatalf("legacy copies rendered as separate nodes: %+v", list)
+	}
+}
+
 func TestAddRefusesSelf(t *testing.T) {
 	daemon := newFakeDaemon(t, identityDoc("m-self", "this mac", 1))
 	book := openBook(t, "m-self")
@@ -253,6 +327,23 @@ func TestRefreshStaysQuietWhenNothingMoved(t *testing.T) {
 
 	if _, changed := book.Refresh(context.Background()); changed {
 		t.Fatal("a machine that is still exactly where it was is not news")
+	}
+}
+
+func TestRefreshRekeysAnEndpointWhenItsHealthIdentityChanged(t *testing.T) {
+	daemon := newFakeDaemon(t, identityDoc("m-old", "old identity", 1))
+	book := openBook(t, "m-self")
+	if _, err := book.Add(context.Background(), daemon.address()); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	daemon.doc.Store(identityDoc("m-new", "current identity", 1))
+
+	list, changed := book.Refresh(context.Background())
+	if !changed {
+		t.Fatal("identity change was not reported")
+	}
+	if len(list) != 1 || list[0].MachineID != "m-new" || list[0].Name != "current identity" {
+		t.Fatalf("refresh kept the endpoint under its stale id: %+v", list)
 	}
 }
 

@@ -81,6 +81,81 @@ func TestAccessApprovalFlowIssuesTokenAndReconnectWorks(t *testing.T) {
 	}
 }
 
+func TestPendingAccessRequestReplaysWhenControllerReconnects(t *testing.T) {
+	manager, _, _ := testLeaseManager(t)
+	controllerToken := approveTestDevice(t, manager, "controller", "127.0.0.1")
+	hub := NewHub(Options{Lease: manager, TrustLocalhost: false})
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+
+	pending := dialWSPath(t, server.URL, "/?deviceName=phone", "cmVwbGF5LXBlbmRpbmc=")
+	defer pending.conn.Close()
+	waiting := readEvent(t, pending)
+	if waiting.Channel != "lan:access-state" || waiting.Payload["state"] != "waiting" {
+		t.Fatalf("pending access event = %+v", waiting)
+	}
+
+	// There was no controller when the request was first broadcast. Connecting
+	// later must recover the still-pending request rather than leaving the
+	// requester waiting for a notification that disappeared.
+	controller := dialWSPath(t, server.URL, "/?deviceToken="+controllerToken+"&deviceName=controller", "cmVwbGF5LWN0cm9sbGVy")
+	defer controller.conn.Close()
+	approved := readEvent(t, controller)
+	if approved.Channel != "lan:access-state" || approved.Payload["controller"] != true {
+		t.Fatalf("controller access event = %+v", approved)
+	}
+	replayed := readEvent(t, controller)
+	if replayed.Channel != "lan:access-request" || replayed.Payload["requestId"] != waiting.Payload["requestId"] || replayed.Payload["deviceName"] != "phone" {
+		t.Fatalf("replayed access request = %+v waiting=%+v", replayed, waiting)
+	}
+}
+
+func TestAccessRequestReachesLocalHostShellWhenControllerIsRemote(t *testing.T) {
+	manager, _, _ := testLeaseManager(t)
+	remoteDevice, _, err := manager.ApproveDevice("remote controller", "192.168.0.50")
+	if err != nil {
+		t.Fatalf("approve remote controller: %v", err)
+	}
+	localDevice, _, err := manager.ApproveDevice("desktop shell", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve desktop shell: %v", err)
+	}
+	manager.EnsureController(remoteDevice)
+	hub := NewHub(Options{Lease: manager, TrustLocalhost: false})
+
+	remoteServer, remotePeer := net.Pipe()
+	remote := addApprovedDirectClient(hub, remoteServer, remoteDevice)
+	remote.ip = "192.168.0.50"
+	defer hub.drop(remote)
+	defer remotePeer.Close()
+	remoteReader := &testWSClient{conn: remotePeer, reader: bufio.NewReader(remotePeer)}
+
+	localServer, localPeer := net.Pipe()
+	local := addApprovedDirectClient(hub, localServer, localDevice)
+	local.ip = "127.0.0.1"
+	defer hub.drop(local)
+	defer localPeer.Close()
+	localReader := &testWSClient{conn: localPeer, reader: bufio.NewReader(localPeer)}
+
+	payload := accessRequestPayload("lan-test-1", "192.168.0.80", "new laptop", "test", time.Now().UTC().Format(time.RFC3339))
+	done := make(chan struct{})
+	go func() {
+		hub.Broadcast("lan:access-request", payload)
+		close(done)
+	}()
+	for name, reader := range map[string]*testWSClient{"controller": remoteReader, "host shell": localReader} {
+		event := readEvent(t, reader)
+		if event.Channel != "lan:access-request" || event.Payload["requestId"] != "lan-test-1" {
+			t.Fatalf("%s access request = %+v", name, event)
+		}
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("access request broadcast did not finish")
+	}
+}
+
 func TestLanDevicesRefreshesLastSeenAndConnectedIP(t *testing.T) {
 	var mu sync.Mutex
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)

@@ -378,6 +378,14 @@ func (h *Hub) Broadcast(channel string, payload any) {
 	defer h.broadcastMu.Unlock()
 	if _, ok := controllerOnlyEventChannels[channel]; ok && h.lease != nil {
 		delivered, enqueueElapsed := h.broadcastToController(channel, payload)
+		if channel == "lan:access-request" {
+			// Pairing addresses both the controller lease and the daemon's own
+			// desktop shell. A controller on another device must not make the host
+			// screen blind to a request arriving at this machine.
+			delivered += h.broadcastWhere(channel, payload, func(c *client) bool {
+				return isLocalIP(c.ip) && !h.isControllerClient(c)
+			})
+		}
 		h.recordEventEnqueue(enqueueElapsed)
 		if channel == "notify" && delivered == 0 {
 			h.QueueNotify(payload)
@@ -711,6 +719,8 @@ func (h *Hub) announceClientReady(c *client) {
 	h.mu.RUnlock()
 	if h.isControllerClient(c) {
 		h.announceControllerReady(c)
+	} else if isLocalIP(c.ip) {
+		h.replayPendingAccess(c, false)
 	}
 	if fn == nil {
 		return
@@ -723,6 +733,7 @@ func (h *Hub) announceControllerReady(c *client) {
 		return
 	}
 	h.flushNotifyBacklog(c)
+	h.replayPendingAccess(c, true)
 	h.mu.RLock()
 	fn := h.onControllerReady
 	h.mu.RUnlock()
@@ -730,6 +741,34 @@ func (h *Hub) announceControllerReady(c *client) {
 		go fn(func(channel string, payload any) error {
 			return c.sendControllerEvent(channel, payload)
 		})
+	}
+}
+
+func (h *Hub) replayPendingAccess(c *client, controller bool) {
+	if h.lease == nil || c == nil || !c.readySnapshot() {
+		return
+	}
+	if controller {
+		if !h.isControllerClient(c) {
+			return
+		}
+	} else if !isLocalIP(c.ip) || h.isControllerClient(c) {
+		return
+	}
+	payloads := h.pendingAccessPayloads()
+	for _, payload := range payloads {
+		var err error
+		if controller {
+			err = c.sendControllerEventAndWait("lan:access-request", payload)
+		} else {
+			err = c.sendEventAndWait("lan:access-request", payload)
+		}
+		if err != nil {
+			if !errors.Is(err, errControllerChanged) {
+				h.drop(c)
+			}
+			return
+		}
 	}
 }
 
@@ -845,17 +884,40 @@ func (h *Hub) announceClientAccess(c *client) {
 	switch state.State {
 	case "waiting":
 		_ = c.sendEvent("lan:access-state", h.accessStatePayload(state))
-		h.Broadcast("lan:access-request", map[string]any{
-			"requestId":   state.RequestID,
-			"ip":          c.ip,
-			"deviceName":  c.deviceName,
-			"userAgent":   c.userAgent,
-			"requestedAt": state.RequestedAt,
-		})
+		h.Broadcast("lan:access-request", accessRequestPayload(state.RequestID, c.ip, c.deviceName, c.userAgent, state.RequestedAt))
 	case "rejected":
 		_ = c.sendEventAndWait("lan:access-state", h.accessStatePayload(state))
 		h.drop(c)
 	}
+}
+
+func accessRequestPayload(requestID, ip, deviceName, userAgent, requestedAt string) map[string]any {
+	return map[string]any{
+		"requestId":   requestID,
+		"ip":          ip,
+		"deviceName":  deviceName,
+		"userAgent":   userAgent,
+		"requestedAt": requestedAt,
+	}
+}
+
+func (h *Hub) pendingAccessPayloads() []map[string]any {
+	h.mu.RLock()
+	payloads := make([]map[string]any, 0, len(h.pending))
+	for _, rec := range h.pending {
+		payloads = append(payloads, accessRequestPayload(
+			rec.requestID,
+			rec.ip,
+			rec.deviceName,
+			rec.userAgent,
+			rec.requestedAt.Format(time.RFC3339),
+		))
+	}
+	h.mu.RUnlock()
+	sort.Slice(payloads, func(i, j int) bool {
+		return fmt.Sprint(payloads[i]["requestId"]) < fmt.Sprint(payloads[j]["requestId"])
+	})
+	return payloads
 }
 
 func (h *Hub) readLoop(c *client) {

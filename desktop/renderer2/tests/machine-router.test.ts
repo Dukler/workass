@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createMachineRouter, routeOf, ROUTED_EVENTS, ROUTED_METHODS } from '../src/wire/machineRouter.ts';
+import { createMachineRouter, RemoteMachineUnavailableError, routeOf, ROUTED_EVENTS, ROUTED_METHODS } from '../src/wire/machineRouter.ts';
 import { MachineRegistry, type MachineEntry } from '../src/wire/machineRegistry.ts';
 import { tagId } from '../src/wire/machineIds.ts';
 import type { MachineSocket, MachineSocketLike } from '../src/wire/machineSocket.ts';
@@ -97,12 +97,18 @@ test('a remote event arrives tagged, so a card raised elsewhere finds its chat',
   ]);
 });
 
-test('a machine that is not ready degrades to local instead of throwing', async () => {
-  const local = { cancelJob: (id: unknown) => Promise.resolve({ cancelled: id }) };
+test('a tagged call to an unavailable machine fails without touching the local daemon', async () => {
+  const localCalls: unknown[] = [];
+  const local = { cancelJob: (id: unknown) => { localCalls.push(id); return Promise.resolve({ cancelled: id }); } };
   const router = createMachineRouter({ local: () => local as never, links: () => new Map(), subscribeRemote: () => {} }) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
-  // The machine is down, so its link is absent. The call must not reject — the
-  // window keeps working while one machine does not.
-  assert.deepEqual(await router.cancelJob(tagId('m-gone', 'job-1')), { cancelled: 'M~m-gone~job-1' });
+  await assert.rejects(
+    router.cancelJob(tagId('m-gone', 'job-1')),
+    (error: unknown) => error instanceof RemoteMachineUnavailableError && error.machineId === 'm-gone',
+  );
+  assert.deepEqual(localCalls, [], 'a remote operation must never fall through to this machine');
+
+  assert.deepEqual(await router.cancelJob('job-local'), { cancelled: 'job-local' });
+  assert.deepEqual(localCalls, ['job-local'], 'an untagged operation remains local');
 });
 
 test('the router keeps every method the local bridge had', () => {
