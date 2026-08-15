@@ -102,18 +102,20 @@ func (p cliProvider) ResolveExecutable(cfg ProviderConfig) (string, error) {
 	if command != "" && command != p.defaultCommand {
 		return resolveProviderExecutablePath(command, "provider command")
 	}
-	// A successful detection stores the absolute path. Revalidate it on every
-	// operation, but never promote a terminal-injection shim into durable provider
-	// state: those paths live below a temporary directory and can outlive neither
-	// the terminal nor an app update. The official user-owned install is resolved
-	// below and the manager refreshes ResolvedCommand with that stable entrypoint.
-	if cached := strings.TrimSpace(cfg.ResolvedCommand); cached != "" {
-		if resolved, err := resolveProviderExecutablePath(cached, "resolved provider command"); err == nil && !isTransientProviderShim(resolved) {
+	// ResolvedCommand is discovery cache, not an explicit user selection. Prefer
+	// the current stable PATH entry so a newly installed vendor CLI replaces an
+	// older cached executable without requiring a fresh chat or providers.json
+	// edit. Never promote a terminal-injection shim: those paths live below a
+	// temporary directory and can outlive neither the terminal nor an app update.
+	for _, name := range p.pathNames {
+		if resolved, err := resolveProviderExecutableOnPATH(name); err == nil && !isTransientProviderShim(resolved) {
 			return resolved, nil
 		}
 	}
-	for _, name := range p.pathNames {
-		if resolved, err := resolveProviderExecutableOnPATH(name); err == nil {
+	// A valid cached path remains the fallback when the provider is intentionally
+	// installed outside PATH. The manager persists any newer PATH resolution.
+	if cached := strings.TrimSpace(cfg.ResolvedCommand); cached != "" {
+		if resolved, err := resolveProviderExecutablePath(cached, "resolved provider command"); err == nil && !isTransientProviderShim(resolved) {
 			return resolved, nil
 		}
 	}

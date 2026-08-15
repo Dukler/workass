@@ -102,11 +102,53 @@ func TestProviderCLIExecutableUsesExplicitPathVariable(t *testing.T) {
 	}
 }
 
+func TestProviderCLIExecutableRefreshesValidCacheFromPATH(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	cachedDir := t.TempDir()
+	currentPath := filepath.Join(pathDir, "qwen")
+	cachedPath := filepath.Join(cachedDir, "qwen")
+	writeExecutable(t, currentPath, "#!/bin/sh\nprintf '0.21.12\\n'\n")
+	writeExecutable(t, cachedPath, "#!/bin/sh\nprintf '0.19.11\\n'\n")
+	t.Setenv("PATH", pathDir)
+	t.Setenv("WORKASS_QWEN", "")
+	t.Setenv("ASSISTANT_QWEN", "")
+	providerFile := filepath.Join(t.TempDir(), "providers.json")
+
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "qwen", Name: "Qwen Code", Command: "qwen", ResolvedCommand: cachedPath, Enabled: true,
+		}},
+		ProviderConfigFile: providerFile,
+		DefaultProviderID:  "qwen",
+		RSSSampleInterval:  time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	resolved, err := manager.providerCLIExecutable("qwen")
+	if err != nil {
+		t.Fatalf("refresh qwen executable: %v", err)
+	}
+	if resolved != currentPath {
+		t.Fatalf("resolved qwen path = %q, want current PATH entry %q instead of cached %q", resolved, currentPath, cachedPath)
+	}
+	version := manager.detectInstalledCLIVersion(context.Background(), "qwen")
+	if version == nil || version.Version != "0.21.12" {
+		t.Fatalf("refreshed qwen version = %#v", version)
+	}
+	provider, ok := manager.providerSnapshot("qwen")
+	if !ok || provider.ResolvedCommand != currentPath {
+		t.Fatalf("refreshed qwen provider = %#v", provider)
+	}
+}
+
 func TestProviderUpdateRunsResolvedProviderExecutable(t *testing.T) {
 	for _, providerID := range []string{"qwen", "claude"} {
 		t.Run(providerID, func(t *testing.T) {
 			root := repoRoot(t)
 			pathDir := t.TempDir()
+			t.Setenv("PATH", t.TempDir())
 			marker := filepath.Join(t.TempDir(), providerID+"-update-ran")
 			versionFile := filepath.Join(t.TempDir(), providerID+"-version")
 			if err := os.WriteFile(versionFile, []byte("0.19.1\n"), 0o644); err != nil {
@@ -662,6 +704,7 @@ func TestProviderUpdateZeroExitWithoutVersionAdvanceFailsVerification(t *testing
 func TestProviderUpdateTerminalReceiptDoesNotWaitForRegistryRefresh(t *testing.T) {
 	root := repoRoot(t)
 	pathDir := t.TempDir()
+	t.Setenv("PATH", pathDir)
 	versionFile := filepath.Join(t.TempDir(), "claude-version")
 	if err := os.WriteFile(versionFile, []byte("2.1.223\n"), 0o644); err != nil {
 		t.Fatal(err)
