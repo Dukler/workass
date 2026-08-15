@@ -108,10 +108,14 @@ func TestProviderUpdateRunsResolvedProviderExecutable(t *testing.T) {
 			root := repoRoot(t)
 			pathDir := t.TempDir()
 			marker := filepath.Join(t.TempDir(), providerID+"-update-ran")
+			versionFile := filepath.Join(t.TempDir(), providerID+"-version")
+			if err := os.WriteFile(versionFile, []byte("0.19.1\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			// Deliberately give the executable a nonstandard filename. The updater
 			// must use the provider's detected absolute path, not a bare PATH name.
 			providerPath := filepath.Join(pathDir, providerID+"-user-install")
-			writeExecutable(t, providerPath, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '0.19.1\\n'; exit 0; fi\nif [ \"$1\" = \"update\" ]; then printf 'updated\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 1\n")
+			writeExecutable(t, providerPath, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nif [ \"$1\" = \"update\" ]; then printf '0.19.2\\n' > "+shellQuote(versionFile)+"; printf 'updated\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 1\n")
 
 			registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.19.2"})
@@ -560,6 +564,99 @@ func TestProviderUpdateInvokeProgressNoProcRegistryAndReplay(t *testing.T) {
 		t.Fatalf("providers:update-progress was not replayed for qwen")
 	}
 	t.Logf("trace providers:update progress running startedAt=%s done exitCode=%d tail=%q installed=%s latest=%s updateAvailable=%v", running.StartedAt, *done.ExitCode, done.Tail, update.Installed, update.Latest, update.UpdateAvailable)
+}
+
+func TestQwenStandaloneUpdateUsesBundledCLI(t *testing.T) {
+	root := repoRoot(t)
+	prefix := t.TempDir()
+	standaloneRoot := filepath.Join(prefix, "lib", "qwen-code")
+	binDir := filepath.Join(prefix, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(standaloneRoot, "node", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(standaloneRoot, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	versionFile := filepath.Join(t.TempDir(), "qwen-version")
+	marker := filepath.Join(t.TempDir(), "bundled-update-ran")
+	if err := os.WriteFile(versionFile, []byte("0.58.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := []byte(`{"name":"@qwen-code/qwen-code","version":"0.58.1"}`)
+	if err := os.WriteFile(filepath.Join(standaloneRoot, "manifest.json"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cliPath := filepath.Join(standaloneRoot, "lib", "cli.js")
+	if err := os.WriteFile(cliPath, []byte("// qwen standalone cli fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(binDir, "qwen")
+	writeExecutable(t, launcher, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nprintf 'public qwen update must not run\\n' >&2\nexit 91\n")
+	nodePath := filepath.Join(standaloneRoot, "node", "bin", "node")
+	writeExecutable(t, nodePath, "#!/bin/sh\nif [ \"$1\" = "+shellQuote(cliPath)+" ] && [ \"$2\" = \"update\" ]; then printf '0.58.2\\n' > "+shellQuote(versionFile)+"; printf 'bundled standalone updater\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 92\n")
+	t.Setenv("WORKASS_QWEN", launcher)
+
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.58.2"})
+	}))
+	t.Cleanup(registry.Close)
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir:  root,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+		Providers: []ProviderConfig{{
+			ID: "qwen", Name: "Qwen Code ACP", Command: "qwen", Args: []string{"--acp"}, Enabled: true,
+		}},
+		DefaultProviderID:        "qwen",
+		Broadcast:                events.Broadcast,
+		RSSSampleInterval:        time.Hour,
+		ProviderUpdateSources:    map[string]string{"qwen": registry.URL + "/latest"},
+		ProviderUpdateTimeout:    200 * time.Millisecond,
+		ProviderUpdateRunTimeout: 2 * time.Second,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	if _, err := manager.StartProviderUpdate(context.Background(), "qwen"); err != nil {
+		t.Fatalf("start Qwen standalone update: %v", err)
+	}
+	progress := waitProviderUpdateProgress(t, events, "qwen", func(progress ProviderUpdateProgress) bool {
+		return progress.Status == "done" || progress.Status == "failed"
+	}, 3*time.Second)
+	if progress.Status != "done" || progress.ExitCode == nil || *progress.ExitCode != 0 || !fileExists(marker) {
+		t.Fatalf("Qwen standalone progress=%#v marker=%v", progress, fileExists(marker))
+	}
+	update := waitProviderUpdate(t, events, "qwen", func(update ProviderUpdate) bool {
+		return update.Installed == "0.58.2" && update.Latest == "0.58.2" && !update.UpdateAvailable
+	}, 2*time.Second)
+	if update.UpdateAvailable {
+		t.Fatalf("Qwen standalone update remained pending: %#v", update)
+	}
+}
+
+func TestProviderUpdateZeroExitWithoutVersionAdvanceFailsVerification(t *testing.T) {
+	manager, events, _ := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
+	updateScript := filepath.Join(t.TempDir(), "qwen-update-no-change")
+	writeExecutable(t, updateScript, "#!/bin/sh\nprintf 'Run the following to update:\\n  npm install -g @qwen-code/qwen-code@0.58.2\\n'\nexit 0\n")
+	manager.opts.ProviderUpdateCommands = map[string]ProviderUpdateCommand{"qwen": {Command: updateScript}}
+
+	if _, err := manager.StartProviderUpdate(context.Background(), "qwen"); err != nil {
+		t.Fatalf("start no-change update: %v", err)
+	}
+	progress := waitProviderUpdateProgress(t, events, "qwen", func(progress ProviderUpdateProgress) bool {
+		return progress.Status == "failed"
+	}, 2*time.Second)
+	if progress.ExitCode == nil || *progress.ExitCode != -1 || !strings.Contains(progress.Error, "sin instalar qwen") {
+		t.Fatalf("no-change progress = %#v", progress)
+	}
+	update := waitProviderUpdate(t, events, "qwen", func(update ProviderUpdate) bool {
+		return update.UpdateAvailable && update.LastError != ""
+	}, 2*time.Second)
+	if update.Installed != "0.58.1" || update.Latest != "0.58.2" {
+		t.Fatalf("no-change update = %#v", update)
+	}
 }
 
 func TestProviderUpdateTerminalReceiptDoesNotWaitForRegistryRefresh(t *testing.T) {

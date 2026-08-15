@@ -37,9 +37,10 @@ type providerRegistration struct {
 }
 
 type providerUpdateRegistration struct {
-	Source  string
-	Command ProviderUpdateCommand
-	Hint    string
+	Source         string
+	Command        ProviderUpdateCommand
+	Hint           string
+	ResolveCommand func(resolvedCLI string, fallback ProviderUpdateCommand) ProviderUpdateCommand
 }
 
 type vendorCLIAuthenticationStrategy struct {
@@ -181,7 +182,11 @@ var providerRegistrations = map[string]providerRegistration{
 		Discovery: &cliProvider{id: "qwen", defaultCommand: "qwen", pathEnv: []string{"WORKASS_QWEN", "ASSISTANT_QWEN"}, pathNames: []string{"qwen.cmd", "qwen.exe", "qwen"}},
 		Detection: qwenDetectionStrategy{},
 		Adapter:   providerAdapter{permission: qwenProviderPermissionPolicy{}},
-		Update:    providerUpdateRegistration{Source: "https://registry.npmjs.org/@qwen-code/qwen-code/latest", Command: ProviderUpdateCommand{Command: "qwen", Args: []string{"update"}}, Hint: "qwen update"},
+		Update: providerUpdateRegistration{
+			Source:  "https://registry.npmjs.org/@qwen-code/qwen-code/latest",
+			Command: ProviderUpdateCommand{Command: "qwen", Args: []string{"update"}},
+			Hint:    "qwen update", ResolveCommand: resolveQwenUpdateCommand,
+		},
 	},
 	"claude": {
 		ID: "claude", Name: "Claude Code", DefaultCommand: "claude", Badge: "native",
