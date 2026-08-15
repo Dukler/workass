@@ -689,7 +689,7 @@ func TestDigestSnapshotMatchesVisibleMessageAndQueueIdentityWithoutBodies(t *tes
 	engine.state.Revision = 42
 	engine.state.Presentation = PresentationState{
 		TabID: "tab-digest", ProviderID: "codex", CurrentModelID: "gpt-test", CurrentModeID: "agent",
-		AgentQueueRevision: 5, RuntimeControlRevision: 7,
+		PresentationRevision: 3, WorkspaceRevision: 4, AgentQueueRevision: 5, RuntimeControlRevision: 7,
 	}
 	engine.state.Ledger = []LedgerEvent{
 		{MessageID: "ledger-user", Text: "body must not enter the digest"},
@@ -717,6 +717,9 @@ func TestDigestSnapshotMatchesVisibleMessageAndQueueIdentityWithoutBodies(t *tes
 	digest := engine.DigestSnapshot()
 	if digest.ChatID != "chat-digest" || digest.TabID != "tab-digest" || digest.ActorRevision != 42 {
 		t.Fatalf("digest identity = %#v", digest)
+	}
+	if digest.PresentationRevision != 3 {
+		t.Fatalf("digest presentation revisions = %#v", digest)
 	}
 	if digest.MessageCount != 6 || digest.LastMessageID != "steer-assistant" || digest.RunningJobID != "job-live" {
 		t.Fatalf("digest transcript = %#v", digest)

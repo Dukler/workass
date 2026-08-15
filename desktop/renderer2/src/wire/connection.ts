@@ -18,6 +18,7 @@ export type ConnStatus = 'connected' | 'disconnected' | 'reconnecting';
 
 const HEALTH_INTERVAL = 5000; // gap between pings while healthy
 const HEALTH_TIMEOUT = 5000;  // a healthy daemon must answer a ping within this
+const HEALTH_CONFIRM_TIMEOUT = 2000; // one slow actor/render cycle is not a disconnect
 const PROBE_TIMEOUT = 9000;   // during an outage, long enough for the shim's 1.5s reconnect to flush a queued ping
 const BACKOFF_MIN = 1000;     // exponential backoff between failed probes
 const BACKOFF_MAX = 10000;
@@ -99,7 +100,15 @@ export class ConnectionMonitor {
         if (!this.running) break;
         const ok = await this.pingWithTimeout(HEALTH_TIMEOUT);
         if (!this.running) break;
-        if (!ok) { this.backoff = BACKOFF_MIN; this.setStatus('disconnected'); }
+        if (!ok) {
+          // Confirm immediately before changing UI state. A renderer pause or a
+          // chat actor busy resuming its provider can lose one timeout race even
+          // though the daemon socket is healthy; the cheap second probe settles
+          // that case without flashing a reconnect banner.
+          const confirmed = await this.pingWithTimeout(HEALTH_CONFIRM_TIMEOUT);
+          if (!this.running) break;
+          if (!confirmed) { this.backoff = BACKOFF_MIN; this.setStatus('disconnected'); }
+        }
       } else {
         this.setStatus('reconnecting');
         const ok = await this.pingWithTimeout(PROBE_TIMEOUT);

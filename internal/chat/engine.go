@@ -234,6 +234,7 @@ type DigestSnapshot struct {
 	ChatID                 string
 	TabID                  string
 	ActorRevision          uint64
+	PresentationRevision   uint64
 	RunningJobID           string
 	LastMessageID          string
 	MessageCount           int
@@ -257,6 +258,7 @@ func (e *Engine) DigestSnapshot() DigestSnapshot {
 		ChatID:                 state.ChatID,
 		TabID:                  state.Presentation.TabID,
 		ActorRevision:          state.Revision,
+		PresentationRevision:   state.Presentation.PresentationRevision,
 		AgentQueueRevision:     state.Presentation.AgentQueueRevision,
 		RuntimeControlRevision: state.Presentation.RuntimeControlRevision,
 		ProviderID:             string(state.Presentation.ProviderID),

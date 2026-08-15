@@ -215,6 +215,7 @@ export class Store {
   private agentRefresh: Promise<void> = Promise.resolve();
   private sessionHydrationPending = false;
   private digestUnsupported = false;
+  private digestProbe: Promise<void> | null = null;
   private syncScopes = new Set<SyncScope>();
   private syncTimer: ReturnType<typeof setTimeout> | null = null;
   private localCatalogHashes: Record<string, string> | null = null;
@@ -1078,6 +1079,26 @@ export class Store {
   private async pingConnection(): Promise<unknown> {
     const bridge = typeof window !== 'undefined' ? window.api : undefined;
     if (!bridge) throw new Error('no bridge');
+    // Liveness must not wait for actor state. job:start can legitimately hold
+    // the chat actor while an idle provider process resumes; using state:digest
+    // as the heartbeat turned that delay into a false daemon disconnect.
+    if (typeof bridge.appMeta === 'function') {
+      const alive = await bridge.appMeta();
+      this.probeStateDigest(bridge);
+      return alive;
+    }
+    return this.readStateDigest(bridge);
+  }
+
+  private probeStateDigest(bridge: NonNullable<typeof window.api>) {
+    if (this.digestUnsupported || this.digestProbe || typeof bridge.stateDigest !== 'function') return;
+    this.digestProbe = this.readStateDigest(bridge)
+      .then(() => undefined)
+      .catch(() => undefined)
+      .finally(() => { this.digestProbe = null; });
+  }
+
+  private async readStateDigest(bridge: NonNullable<typeof window.api>): Promise<unknown> {
     if (!this.digestUnsupported && typeof bridge.stateDigest === 'function') {
       try {
         const digest = await bridge.stateDigest();
@@ -1094,8 +1115,7 @@ export class Store {
         this.digestUnsupported = true;
       }
     }
-    if (typeof bridge.appMeta !== 'function') throw new Error('no heartbeat channel');
-    return bridge.appMeta();
+    throw new Error('no state digest channel');
   }
 
   private handleStateDigest(digest: StateDigest) {
@@ -1545,12 +1565,13 @@ export class Store {
       // single fan-out of subagents produced dozens of full hydrations.
       // The tab is not a usable discriminator: the daemon coalesces its own
       // background intents and emits one untargeted event for a merged batch.
-      // Route every refresh through digest synchronization. It batches into a
-      // single DIGEST_SYNC_DEBOUNCE window and still funnels
-      // through queueAgentRefresh, so the ordering guarantee that stops an
-      // older session:get from overwriting newer chat state is unchanged.
+      // Route every refresh through the bounded digest. It determines whether
+      // any exact revision actually diverged before session:get is allowed to
+      // replace the mirror. Directly scheduling a session pull here made every
+      // renderer save echo back as a wholesale hydration.
       // A genuine reconnection is still driven by the socket-open path below.
-      this.scheduleScopedSync(['session', 'permissions']);
+      if (this.monitor) this.monitor.probeNow();
+      else this.scheduleScopedSync(['session', 'permissions']);
     });
     if (typeof window !== 'undefined') {
       const bootSocketGen = typeof window.__workassSocketGen === 'number' ? window.__workassSocketGen : 0;
@@ -1715,53 +1736,15 @@ export class Store {
   // ---- connection health ----------------------------------------------
   isConnected(): boolean { return this.state.connection === 'connected'; }
   private setConnection(next: ConnStatus) {
-    const prev = this.state.connection;
-    if (prev === next) return;
+    if (this.state.connection === next) return;
     this.state.connection = next;
-    // First transition away from a healthy socket: stop pretending in-flight and
-    // streaming turns are still alive — the job died with the daemon process.
-    if (prev === 'connected' && next !== 'connected') this.onDisconnected();
     this.bump(CONN);       // banner + per-turn retry affordances
     this.bumpApp(false);   // composer send-gating; connection is never persisted
   }
-  // Flip every spinning turn to an honest failed/interrupted state so nothing is
-  // left showing "Trabajando…" against a dead socket. In-flight sends (no output
-  // yet) read as "no se pudo enviar"; partially-streamed turns read as interrupted.
-  // Both carry the originating prompt so the user can retry once reconnected.
-  private onDisconnected() {
-    let touched = false;
-    for (const chat of this.state.chats) {
-      let chatTouched = false;
-      // Match daemon orphan recovery: a waiting Codex preview cannot remain
-      // hidden forever after its owning transport disappears. Reveal the user
-      // row after the last complete assistant text and drop its inactive tail;
-      // never replay an admission whose outcome is unknown.
-      if (settleStagedSteersAtTurnEnd(chat.messages).length) chatTouched = true;
-      for (let i = 0; i < chat.messages.length; i++) {
-        const msg = chat.messages[i];
-        if (msg.status !== 'running') continue;
-        let prompt = '';
-        for (let j = i - 1; j >= 0; j--) { if (chat.messages[j].role === 'user') { prompt = chat.messages[j].content; break; } }
-        msg.status = 'failed';
-        msg.interrupted = true;
-        if (prompt) msg.retryPrompt = prompt;
-        msg.at = new Date().toISOString();
-        if (msg.permission && !msg.permission.resolved) msg.permission = undefined;
-        if (msg.jobId) this.jobRef.delete(msg.jobId);
-        this.bump('msg:' + msg.id);
-        chatTouched = true;
-      }
-      if (chatTouched) {
-        this.touchChat(chat.id);
-        touched = true;
-      }
-    }
-    // All jobs died with the daemon; drop the anchors so a late-flushed reply
-    // (queued invoke resolving after reconnect) cannot reattach to a dead turn.
-    this.chatJobs.clear();
-    this.jobRef.clear();
-    if (touched) this.schedulePersist();
-  }
+  // A WebSocket loss is not proof that the daemon or provider process died.
+  // Keep optimistic rows and job anchors intact until session:get reconciles
+  // daemon-owned truth after reconnect. Marking them failed here made live
+  // messages disappear and then reappear when the same daemon answered.
   // Reconcile against daemon-owned state after the socket comes back. The
   // daemon may be the SAME process (Electron/view reconnect: live sessions and
   // jobs survive) or a fresh process (no liveSession overlay). session:get is
@@ -4130,13 +4113,14 @@ function localRunningJobID(chat: Chat): string | null {
   }
   return null;
 }
-function digestChatSessionDiverged(chat: Chat, digest: StateDigestChat): boolean {
+export function digestChatSessionDiverged(chat: Chat, digest: StateDigestChat): boolean {
   const queue = chat.queue ?? [];
-  return (chat.actorRevision ?? 0) !== digest.actorRevision
-    || localRunningJobID(chat) !== (digest.runningJobId ?? null)
+  return localRunningJobID(chat) !== (digest.runningJobId ?? null)
     || (chat.messages.at(-1)?.id ?? null) !== (digest.lastMessageId ?? null)
     || queue.length !== digest.queueLen
     || (queue[0]?.id ?? null) !== (digest.queueHeadId ?? null)
+    || (Number.isInteger(digest.presentationRevision)
+      && (chat.presentationRevision ?? 0) !== digest.presentationRevision)
     || (chat.agentQueueRevision ?? 0) !== digest.agentQueueRevision
     || (chat.runtimeControlRevision ?? 0) !== digest.runtimeControlRevision
     || (chat.providerId ?? null) !== (digest.providerId ?? null)
