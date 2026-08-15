@@ -143,7 +143,18 @@ func TestAccessRequestReachesLocalHostShellWhenControllerIsRemote(t *testing.T) 
 		hub.Broadcast("lan:access-request", payload)
 		close(done)
 	}()
-	for name, reader := range map[string]*testWSClient{"controller": remoteReader, "host shell": localReader} {
+	// Controller-only publication waits for the controller socket write before
+	// the host-shell copy is enqueued. Reading a map in random order could wait
+	// on the host shell first and deadlock the test against that intentional wire
+	// ordering; keep the receiver order explicit.
+	for _, target := range []struct {
+		name   string
+		reader *testWSClient
+	}{
+		{name: "controller", reader: remoteReader},
+		{name: "host shell", reader: localReader},
+	} {
+		name, reader := target.name, target.reader
 		event := readEvent(t, reader)
 		if event.Channel != "lan:access-request" || event.Payload["requestId"] != "lan-test-1" {
 			t.Fatalf("%s access request = %+v", name, event)

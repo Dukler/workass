@@ -600,7 +600,7 @@ export interface WorkassApi {
   // Account-scoped metadata read. It never binds/replaces a chat session and
   // never sends a provider prompt; the resulting snapshot arrives through the
   // existing chat:plan-usage event.
-  appChatRefreshPlanUsage?: (providerId: string) => Promise<{ ok: boolean; providerId: string }>;
+  appChatRefreshPlanUsage?: (providerId: string, routingChatId?: string) => Promise<{ ok: boolean; providerId: string }>;
   appChatCloseSession?: (sessionId: string) => Promise<boolean>;
   appChatReset?: () => Promise<boolean>;
   // Mid-turn steer (D2). Preload-only in the Electron host; the daemon bridge

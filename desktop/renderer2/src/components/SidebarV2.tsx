@@ -457,7 +457,7 @@ function ScopeMenu({ groups, scope, onPick, onClose }: {
             <>
               <button
                 className="sv2-mact" title={`Nueva conversación en ${g.name}`}
-                onClick={(e) => { e.stopPropagation(); store.newChat(true, g.path); onClose(); }}
+                onClick={(e) => { e.stopPropagation(); store.newChat(true, g.path, g.machineId ?? ''); onClose(); }}
               ><IcPlus /></button>
               <button
                 className="sv2-mact danger" title="Quitar de Workass (no borra del disco)"
@@ -496,7 +496,7 @@ function RowMenu({ row, x, y, onClose, onRename, onSettle, onUnsettle }: {
       )}
       <button className="sv2-ci" role="menuitem" onClick={() => { onRename(row.chat.id); onClose(); }}>Renombrar</button>
       <button className="sv2-ci" role="menuitem" onClick={() => { store.markUnread(row.chat.id); onClose(); }}>Marcar como no leída</button>
-      <button className="sv2-ci" role="menuitem" onClick={() => { store.newChat(true, row.chat.cwd ?? undefined); onClose(); }}>Nueva aquí</button>
+      <button className="sv2-ci" role="menuitem" onClick={() => { store.newChat(true, row.chat.cwd ?? undefined, row.chat.machineId ?? ''); onClose(); }}>Nueva aquí</button>
       <button
         className="sv2-ci danger" role="menuitem"
         onClick={() => { if (confirming) { store.closeChat(row.chat.id); onClose(); } else setConfirming(true); }}
@@ -598,9 +598,10 @@ export function SidebarV2() {
   // Where + puts the next chat: the project you are scoped to, and in "Todos los
   // proyectos" the last one you started a chat in.
   const newTarget = newChatTarget(scope, groups, lastProject());
-  const newTargetName = newTarget
-    ? groups.find((g) => normalizeWorkspacePath(g.path) === newTarget)?.name ?? null
-    : null;
+  const newTargetGroup = newTarget
+    ? groups.find((g) => normalizeWorkspacePath(g.path) === newTarget)
+    : undefined;
+  const newTargetName = newTargetGroup?.name ?? null;
 
   // T3 settles the thread you are READING and then navigates forward. Ours has
   // to move too: the active guard pins that row to the live list, so filing the
@@ -646,7 +647,7 @@ export function SidebarV2() {
         <button
           className="sv2-sq"
           title={newTargetName ? `Nueva conversación en ${newTargetName}` : 'Nueva conversación'}
-          onClick={() => store.newChat(true, newTarget)}
+          onClick={() => store.newChat(true, newTarget, newTargetGroup?.machineId ?? '')}
         ><IcPlus /></button>
       </div>
 

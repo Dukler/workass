@@ -77,6 +77,18 @@ workass_codesign_prepare() {
         workass_codesign_die "could not unlock the Workass signing keychain"
         return 1
       }
+      # Existing local keychains can lose the non-interactive codesign ACL
+      # (for example after migration or a macOS security update). Refresh it
+      # while the password is available so builds never fall through to a
+      # misleading SecurityAgent password prompt.
+      security set-key-partition-list \
+        -S apple-tool:,apple: \
+        -s \
+        -k "$keychain_password" \
+        "$keychain" >/dev/null || {
+        workass_codesign_die "could not authorize codesign for the Workass signing keychain"
+        return 1
+      }
       keychain_password=''
       unset keychain_password
     fi

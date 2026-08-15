@@ -48,6 +48,7 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?]> = [
   ['cancelJob', 'job:cancel'],
   ['appChatReset', 'app-chat:reset'],
   ['appChatNewSession', 'app-chat:new-session'],
+  ['appChatRefreshPlanUsage', 'app-chat:refresh-plan-usage', (a) => [{ providerId: a[0] }]],
   ['appChatCloseSession', 'app-chat:close-session'],
   ['appChatDetectAcp', 'app-chat:detect-acp', (a) => [a[0] ?? {}]],
   ['appChatSteer', 'app-chat:steer', (a) => [{

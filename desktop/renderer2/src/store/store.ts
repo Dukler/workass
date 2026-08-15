@@ -54,7 +54,7 @@ import { isQueuedJobStart, reconcileQueuedJobStart } from './busy-start';
 import { settleTerminalToolEvents } from '../terminal-tool-reconciliation';
 import { MachineRegistry, type MachineEntry } from '../wire/machineRegistry';
 import { setMachineRouter } from '../wire/api';
-import { tagPayload } from '../wire/machineIds';
+import { tagId, tagPayload } from '../wire/machineIds';
 
 const APP = 'app';
 const PROC = 'proc';
@@ -162,6 +162,10 @@ export class Store {
   // and in-flight promise ensure every later draft/queue/session operation waits
   // for that durable receipt rather than treating React as chat authority.
   private pendingChatCreates = new Set<string>();
+  // A remote chat:create receipt is durable, but an older session:get may
+  // already be in flight. Keep that confirmed optimistic row until a remote
+  // snapshot echoes it, without causing ensureChatCreated to send it twice.
+  private remoteChatCreateFences = new Set<string>();
   private pendingChatCreateOperations = new Map<string, { operationId: string; focus: boolean }>();
   private pendingChatCreatePromises = new Map<string, Promise<boolean>>();
   // A delete is a durable tombstone command, not a UI removal. Keep its one
@@ -1458,8 +1462,22 @@ export class Store {
         ...(tagPayload(machineId, chat) as Chat),
         machineId,
       }));
+      const authoritativeIDs = new Set(normalized.map((chat) => chat.id));
+      for (const id of this.pendingChatCreates) {
+        if (authoritativeIDs.has(id)) this.pendingChatCreates.delete(id);
+      }
+      for (const id of this.remoteChatCreateFences) {
+        if (authoritativeIDs.has(id)) this.remoteChatCreateFences.delete(id);
+      }
+      // A session refresh can race a just-issued remote chat:create. Keep only
+      // the pending rows that the remote mirror has not echoed yet; confirmed
+      // rows are replaced by their daemon-owned projection above.
+      const pending = this.state.chats.filter((chat) =>
+        chat.machineId === machineId
+        && (this.pendingChatCreates.has(chat.id) || this.remoteChatCreateFences.has(chat.id))
+        && !authoritativeIDs.has(chat.id));
       const others = this.state.chats.filter((chat) => chat.machineId !== machineId);
-      this.state.chats = [...others, ...normalized];
+      this.state.chats = [...others, ...normalized, ...pending];
       void replaceAll;
       this.machines?.setReason(machineId, normalized.length
         ? `conectada · ${normalized.length} ${normalized.length === 1 ? 'conversación' : 'conversaciones'}`
@@ -2063,14 +2081,28 @@ export class Store {
       }
     }
   }
-  newChat(activate = true, workspacePath?: string | null): Chat {
+  newChat(activate = true, workspacePath?: string | null, machineId?: string | null): Chat {
     this.state.seq += 1;
     const active = this.active();
     const cwd = chooseWorkspacePath(workspacePath, active, this.state.workspaces, this.state.meta?.workspaceDir ?? this.state.meta?.rootDir);
     const workspace = cwd ? workspaceFromPath(cwd) : null;
     const controls = inheritChatControls(active);
+    // A new conversation created while reading another machine belongs to that
+    // machine when it stays in the same workspace. The row-level "Nueva aquí"
+    // action passes the machine explicitly, including for an inactive row.
+    // Tag both durable ids before the first actor call: the machine router makes
+    // its decision from those tags, so adding machineId only as display metadata
+    // would still create the actor and engine on this Mac.
+    const activeMachine = String(active?.machineId ?? '').trim();
+    const sameAsActive = normalizeWorkspacePath(active?.cwd) === normalizeWorkspacePath(cwd);
+    const targetMachine = String(
+      machineId === undefined ? (sameAsActive ? activeMachine : '') : (machineId ?? ''),
+    ).trim();
+    const localTabId = `tab-${Date.now()}-${this.state.seq}`;
+    const localChatId = newChatConvId();
     const chat: Chat = {
-      id: `tab-${Date.now()}-${this.state.seq}`, chatId: newChatConvId(), sessionId: null,
+      id: tagId(targetMachine, localTabId), chatId: tagId(targetMachine, localChatId),
+      machineId: targetMachine || undefined, sessionId: null,
       title: `Chat ${this.state.seq}`, titleLocked: false, group: workspace?.name ?? 'chats', cwd,
       currentModelId: controls.currentModelId, currentModeId: controls.currentModeId,
       providerId: controls.providerId, providerName: controls.providerName,
@@ -2127,9 +2159,15 @@ export class Store {
       if (creation.focus && receipt.globalRevision > 0) this.state.globalRevision = receipt.globalRevision;
       chat.sessionError = undefined;
       this.pendingChatCreateOperations.delete(chat.id);
-      // Keep pendingChatCreates until session:get echoes the actor id. This is
-      // an in-flight display fence only; the actor is already durable here.
-      this.scheduleScopedSync(['session']);
+      // The remote daemon's reply is ordered after its actor commit, so creation
+      // no longer needs to be retried. A stale session:get can still arrive after
+      // that receipt, however, so a separate fence preserves the row until the
+      // authoritative remote mirror echoes it.
+      if (chat.machineId) {
+        this.pendingChatCreates.delete(chat.id);
+        this.remoteChatCreateFences.add(chat.id);
+      }
+      else this.scheduleScopedSync(['session']);
       return true;
     })().finally(() => {
       this.pendingChatCreatePromises.delete(chat.id);
@@ -2380,6 +2418,7 @@ export class Store {
     releaseDraftImages(live.draftImages ?? []);
     for (const item of live.queue ?? []) releaseDraftImages(item.draftImages ?? []);
     this.pendingChatCreates.delete(id);
+    this.remoteChatCreateFences.delete(id);
     this.pendingChatCreateOperations.delete(id);
     this.pendingChatCreatePromises.delete(id);
     this.fullHistoriesLoaded.delete(id);
@@ -2526,7 +2565,7 @@ export class Store {
           // A provider RPC failure must not fall through into chat session
           // creation: metadata availability can fail independently, while the
           // selected chat/provider binding remains untouched.
-          await call('appChatRefreshPlanUsage', providerId);
+          await call('appChatRefreshPlanUsage', providerId, chat.id);
         } else {
           // Rolling-upgrade fallback: an older bridge lacks the provider metadata
           // channel. Preserve its exact-chat behavior until both halves are new.
