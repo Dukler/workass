@@ -114,10 +114,18 @@ function AssistantSliceBody({
       {segs.map((s, segmentIndex) => {
         if ('tools' in s) return <ToolGroup key={s.key} tools={s.tools} revision={s.revision} />;
         if ('event' in s) return s.event.key === thinkEv?.key ? null : <EventView key={s.event.key} ev={s.event} />;
-        return parsedSegments[segmentIndex]!.map((sb) => <MarkdownBlock key={blockKeys[blockIndex++]} sb={sb} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} />);
+        return (
+          <div className="chatfind-text" data-chat-find-text key={`prose-${segmentIndex}`}>
+            {parsedSegments[segmentIndex]!.map((sb) => <MarkdownBlock key={blockKeys[blockIndex++]} sb={sb} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} />)}
+          </div>
+        );
       })}
 
-      {resultBlocks.map((block, index) => <MarkdownBlock key={`result-${index}-${block.sig}`} sb={block} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} />)}
+      {!!resultBlocks.length && (
+        <div className="chatfind-text" data-chat-find-text>
+          {resultBlocks.map((block, index) => <MarkdownBlock key={`result-${index}-${block.sig}`} sb={block} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} />)}
+        </div>
+      )}
       <StructuredAssistantImages images={msg.images} />
 
       {!running && thinkEv && <StepRow ev={thinkEv} />}

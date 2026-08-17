@@ -36,7 +36,7 @@ export const UserPill = memo(function UserPill({ text, images, steerState }: { t
           })}
         </div>
       )}
-      {!!text.trim() && <div className="userpill-text">{renderInline(text)}</div>}
+      {!!text.trim() && <div className="userpill-text" data-chat-find-text>{renderInline(text)}</div>}
       {steerState && (
         <div className={`steerstate ${steerState}`} role="status" aria-live="polite">
           {(steerState === 'sending' || steerState === 'uncertain') && (
