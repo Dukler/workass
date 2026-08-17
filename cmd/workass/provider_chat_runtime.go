@@ -557,6 +557,7 @@ func newChatPresentation(arg map[string]any, selection acp.ProviderLaneSelection
 		Draft:          stringValue(arg["draft"]),
 		Unread:         boolFieldValue(arg, "unread"),
 		Settled:        fieldString(arg, "settled"),
+		SettledAt:      int64(max(0, intField(arg, "settledAt"))),
 		Pane:           optionalStringPointer(arg, "pane"),
 		ProviderID:     selection.Identity.Realm.ProviderID,
 		CurrentModelID: selection.ModelID,
@@ -1131,6 +1132,7 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 	presentation.Draft = ""
 	presentation.Unread = false
 	presentation.Settled = ""
+	presentation.SettledAt = 0
 	presentation.WorkspaceRevision = 0
 	presentation.AgentQueueRevision = 0
 	presentation.RuntimeControlRevision = 0

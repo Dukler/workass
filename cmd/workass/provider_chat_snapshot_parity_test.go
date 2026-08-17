@@ -526,11 +526,14 @@ func snapshotParityAssertRichRendererContract(
 	if fieldString(projectedChat, "title") != "Actor snapshot parity" || projectedChat["titleLocked"] != true ||
 		fieldString(projectedChat, "group") != "snapshot-group" || fieldString(projectedChat, "cwd") != workspace ||
 		fieldString(projectedChat, "draft") != "draft persisted by actor" || projectedChat["unread"] != true ||
-		fieldString(projectedChat, "settled") != "active" || fieldString(projectedChat, "pane") != "rail" ||
-		intValue(projectedChat[workspaceRevisionField]) != 4 || intValue(projectedChat[presentationRevisionField]) != 1 ||
+		fieldString(projectedChat, "settled") != "" || fieldString(projectedChat, "pane") != "rail" ||
+		intValue(projectedChat[workspaceRevisionField]) != 4 || intValue(projectedChat[presentationRevisionField]) != 2 ||
 		intValue(projectedChat[agentQueueRevisionField]) != 2 {
 		state, _ := runtime.Snapshot(chatID)
 		t.Fatalf("presentation/control projection = %#v actor staged=%#v queue=%#v", projectedChat, state.StagedQueue, state.Queue)
+	}
+	if _, present := projectedChat["settledAt"]; present {
+		t.Fatalf("foreground work should clear the projected archive clock: %#v", projectedChat)
 	}
 	if _, present := projectedChat[runtimeControlRevisionField]; present {
 		t.Fatalf("zero runtime-control revision should be omitted from the canonical projection: %#v", projectedChat)

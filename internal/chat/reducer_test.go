@@ -274,7 +274,7 @@ func TestRendererPresentationCannotOverwriteActorRuntimeState(t *testing.T) {
 	attackerGroup, attackerCWD, attackerPane := "renamed-group", "/forged", "browser"
 	forged := PresentationState{
 		TabID: "tab", Title: "Renamed", TitleLocked: true, Group: &attackerGroup,
-		CWD: &attackerCWD, Draft: "draft", Unread: true, Settled: "settled", Pane: &attackerPane,
+		CWD: &attackerCWD, Draft: "draft", Unread: true, Settled: "settled", SettledAt: 1_787_000_000_000, Pane: &attackerPane,
 		ProviderID: "claude", CurrentModelID: "forged-model", CurrentModeID: "forged-mode",
 		WorkspaceRevision: 4, AgentQueueRevision: 7, RuntimeControlRevision: 9,
 		ModelControls:          json.RawMessage(`{"ui":"allowed"}`),
@@ -284,13 +284,40 @@ func TestRendererPresentationCannotOverwriteActorRuntimeState(t *testing.T) {
 	}
 	state, _ = apply(t, state, UpdatePresentation{Presentation: forged})
 	got := state.Presentation
-	if got.TabID != "tab" || got.Title != "Renamed" || got.Draft != "draft" || got.Group == nil || *got.Group != attackerGroup || got.Pane == nil || *got.Pane != attackerPane {
+	if got.TabID != "tab" || got.Title != "Renamed" || got.Draft != "draft" || got.Settled != "settled" || got.SettledAt != 1_787_000_000_000 || got.Group == nil || *got.Group != attackerGroup || got.Pane == nil || *got.Pane != attackerPane {
 		t.Fatalf("renderer-owned presentation did not update: %#v", got)
 	}
 	if got.CWD == nil || *got.CWD != cwd || got.ProviderID != "codex" || got.CurrentModelID != "gpt-authoritative" || got.CurrentModeID != "ask" ||
 		string(got.ContextUsageByProvider) != `{"codex":{"used":3}}` ||
 		len(got.PlanLatest) != 1 || got.PlanLatest[0].ID != "p1" || got.PlanLatestMessageID != "assistant-authoritative" {
 		t.Fatalf("renderer snapshot overwrote actor runtime state: %#v", got)
+	}
+}
+
+func TestForegroundWorkClearsSettledArchiveClock(t *testing.T) {
+	for _, presentation := range []PresentationState{
+		{TabID: "tab", Settled: "settled", SettledAt: 1_787_000_000_000},
+		{TabID: "tab", Settled: "active"},
+	} {
+		state, _ := NewState("chat")
+		state, _ = apply(t, state, InitializeChat{
+			Presentation: presentation, OperationID: "create:settled", Digest: "create-settled",
+		})
+		lane := testLane("chat", "codex")
+		state, _ = apply(t, state, SelectLane{Identity: lane, Owner: provider.AttachmentOwner{TabID: "tab"}})
+		state, _ = apply(t, state, LaneOpened{
+			LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
+			ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
+		})
+		revision := state.Presentation.PresentationRevision
+		state, _ = apply(t, state, Submit{OperationID: "new-work", Text: "resume"})
+
+		if state.Presentation.Settled != "" || state.Presentation.SettledAt != 0 {
+			t.Fatalf("foreground work retained settled archive state: %#v", state.Presentation)
+		}
+		if state.Presentation.PresentationRevision != revision+1 {
+			t.Fatalf("foreground reset revision = %d, want %d", state.Presentation.PresentationRevision, revision+1)
+		}
 	}
 }
 

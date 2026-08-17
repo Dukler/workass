@@ -24,6 +24,7 @@ type PresentationState struct {
 	Draft                  string
 	Unread                 bool
 	Settled                string
+	SettledAt              int64
 	Pane                   *string
 	PresentationRevision   uint64
 	ProviderID             provider.ID
@@ -61,6 +62,9 @@ func (p PresentationState) Clone() PresentationState {
 func (p PresentationState) Validate() error {
 	if p.Settled != "" && p.Settled != "settled" && p.Settled != "active" {
 		return errors.New("chat presentation has invalid settled state")
+	}
+	if p.SettledAt < 0 || (p.SettledAt != 0 && p.Settled != "settled") {
+		return errors.New("chat presentation has invalid settled timestamp")
 	}
 	if p.Pane != nil {
 		switch strings.TrimSpace(*p.Pane) {

@@ -82,7 +82,7 @@ const UPDATE_TERMINAL_TIMEOUT = 11 * 60 * 1000;
 
 type SyncScope = 'session' | 'background' | 'permissions' | 'catalog' | 'settings' | 'processes';
 
-type ChatPresentationSnapshot = Pick<Chat, 'title' | 'titleLocked' | 'group' | 'draft' | 'unread' | 'settled' | 'pane'>;
+type ChatPresentationSnapshot = Pick<Chat, 'title' | 'titleLocked' | 'group' | 'draft' | 'unread' | 'settled' | 'settledAt' | 'pane'>;
 
 function presentationSnapshot(chat: ChatPresentationSnapshot): ChatPresentationSnapshot {
   return {
@@ -92,6 +92,7 @@ function presentationSnapshot(chat: ChatPresentationSnapshot): ChatPresentationS
     draft: chat.draft ?? '',
     unread: !!chat.unread,
     settled: chat.settled,
+    settledAt: chat.settledAt,
     pane: chat.pane,
   };
 }
@@ -103,13 +104,14 @@ function applyPresentationSnapshot(chat: Chat, snapshot: ChatPresentationSnapsho
   chat.draft = snapshot.draft;
   chat.unread = snapshot.unread;
   chat.settled = snapshot.settled;
+  chat.settledAt = snapshot.settledAt;
   chat.pane = snapshot.pane;
 }
 
-function presentationFingerprint(chat: Pick<Chat, 'title' | 'titleLocked' | 'group' | 'draft' | 'unread' | 'settled' | 'pane'>): string {
+function presentationFingerprint(chat: Pick<Chat, 'title' | 'titleLocked' | 'group' | 'draft' | 'unread' | 'settled' | 'settledAt' | 'pane'>): string {
   return JSON.stringify([
     chat.title, chat.titleLocked, chat.group ?? null, chat.draft ?? '', !!chat.unread,
-    chat.settled ?? '', chat.pane ?? null,
+    chat.settled ?? '', chat.settledAt ?? 0, chat.pane ?? null,
   ]);
 }
 
@@ -467,7 +469,7 @@ export class Store {
         planLatestMessageId: c.planLatestMessageId,
         currentModelId: c.currentModelId, currentModeId: c.currentModeId, modelControls: c.modelControls,
         pane: c.pane,
-        draft: c.draft, unread: c.unread, settled: c.settled,
+        draft: c.draft, unread: c.unread, settled: c.settled, settledAt: c.settledAt,
         queue: c.queue?.length ? c.queue.map(({ draftImages: _draftImages, ...item }) => item) : undefined,
         providerId: c.providerId ?? null,
         contextUsageByProvider: c.contextUsageByProvider,
@@ -568,7 +570,7 @@ export class Store {
         tabId, chatId: projected.chatId, operationId: pending.operationId,
         expectedRevision: live.presentationRevision ?? 0,
         title: live.title, titleLocked: live.titleLocked, group: live.group,
-        draft: live.draft ?? '', unread: !!live.unread, settled: live.settled ?? '', pane: live.pane ?? null,
+        draft: live.draft ?? '', unread: !!live.unread, settled: live.settled ?? '', settledAt: live.settledAt ?? 0, pane: live.pane ?? null,
       });
       if (!receipt?.ok || receipt.operationId !== pending.operationId) {
         failedPresentationTabs.add(tabId);
@@ -717,6 +719,7 @@ export class Store {
           ?? this.state?.chats?.find((prior) => prior.id === c.id)?.commandCatalog
           ?? undefined,
         pending: !c.liveSession?.sessionId, draft: c.draft ?? '', unread: c.unread, settled: c.settled,
+        settledAt: Number.isFinite(c.settledAt) && (c.settledAt ?? 0) > 0 ? c.settledAt : undefined,
         queue: c.queue?.map((item: QueuedMsg) => item.attachmentState === 'preparing'
             ? { ...item, attachmentState: 'failed', attachmentError: 'La preparación se interrumpió; volvé a adjuntar las imágenes.' }
             : item),
@@ -2365,14 +2368,15 @@ export class Store {
       this.commandCatalogAsked.delete(chat.id);
     });
   }
-  // Port of T3's settle/un-settle. Filing a chat away is not deleting it and not
-  // archiving it either: it drops to the shelf and keeps working. Un-settling
-  // stores the opposite override rather than clearing the flag, because the age
-  // rule would otherwise re-file an old chat the instant you pulled it back out.
+  // Port of T3's settle/un-settle. Filing is not deletion: it drops to the shelf
+  // for the retention window, then remains recoverable through archive search.
+  // Un-settling stores the opposite override rather than clearing the flag,
+  // because age would otherwise re-file an old chat the instant it came back.
   settleChat(id: string, settled: boolean) {
     const chat = this.chat(id);
     if (!chat) return;
     chat.settled = settled ? 'settled' : 'active';
+    chat.settledAt = settled ? Date.now() : undefined;
     // Filing a chat away is also an acknowledgement of how it ended: the
     // unseen-completion guard outranks the shelf, so without this a "Listo" or
     // "Falló" row would absorb the click and stay exactly where it was.
@@ -3134,8 +3138,9 @@ export class Store {
         // auto-unsettles on real activity, and a chat you just started a turn
         // in has plainly stopped being history.
         const startIsLive = !msg || !isTerminalMessage(msg);
-        if (startIsLive && chat?.settled === 'settled') {
+        if (startIsLive && chat && (chat.settled || chat.settledAt)) {
           chat.settled = undefined;
+          chat.settledAt = undefined;
           this.markPresentationMutation(chat);
           this.touchChat(chat.id);
           this.schedulePersist();

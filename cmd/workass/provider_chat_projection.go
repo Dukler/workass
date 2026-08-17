@@ -238,6 +238,11 @@ func projectActorChatWithMessageLimit(out map[string]any, state chat.State, mess
 	} else {
 		out["settled"] = p.Settled
 	}
+	if p.SettledAt == 0 {
+		delete(out, "settledAt")
+	} else {
+		out["settledAt"] = p.SettledAt
+	}
 	if p.WorkspaceRevision == 0 {
 		delete(out, workspaceRevisionField)
 	} else {

@@ -17,9 +17,9 @@ import { ModesSwitch, FooterUpdateCards, AccountMenu } from './Sidebar';
 // rows have two densities (78px card / 36px slim) with the quiet ones under a
 // collapsible shelf; one STATUS PILL per row with a fixed hue per state.
 //
-// T3 drives density and lifecycle from stored settle/snooze state. Workass has
-// none and this port invents none — density is derived, and T3's snooze states
-// ("Snoozed" shelf, "Woke" pill) and its PR/branch/diff line are absent.
+// T3 drives density and lifecycle from stored settle/snooze state. Workass
+// keeps a smaller lifecycle: a quiet shelf followed by a hidden, searchable
+// archive. T3's PR/branch/diff line remains absent.
 //
 // Deliberately NOT ported: T3's footer settings button (excluded by the user)
 // and its nightly-stage header backdrop (branding).
@@ -28,6 +28,8 @@ const CARD_WINDOW_MS = 24 * 60 * 60 * 1000;
 // T3's sidebarAutoSettleAfterDays, whose default is 3. Age files a quiet chat
 // away on its own; the row action and the menu do it on demand.
 const AUTO_SETTLE_MS = 3 * 24 * 60 * 60 * 1000;
+export const ARCHIVE_AFTER_SETTLED_MS = 14 * 24 * 60 * 60 * 1000;
+const LIFECYCLE_TICK_MS = 60 * 60 * 1000;
 const TAIL_PAGE = 24;            // T3 pages its settled tail; deep history is rare
 const TOOLTIP_DELAY_MS = 150;    // T3's TooltipProvider delay
 const SCOPE_KEY = 'workass.sv2.scope';
@@ -198,7 +200,7 @@ function WorkingDuration({ since }: { since: number }) {
 }
 
 type Row = {
-  chat: Chat; project: string; card: boolean; settled: boolean; touched: number;
+  chat: Chat; project: string; card: boolean; settled: boolean; archived: boolean; touched: number;
   status: Status; since: number; bg: number; error: string;
 };
 
@@ -215,6 +217,32 @@ export function resolveSettled(chat: Chat, status: Status, active: boolean, now:
   // in 1970" would drop every freshly created chat straight onto the shelf.
   if (!touched) return false;
   return now - touched >= AUTO_SETTLE_MS;
+}
+
+function settledSince(chat: Chat, status: Status, now: number, touched: number): number {
+  if (!resolveSettled(chat, status, false, now, touched)) return 0;
+  if (chat.settled === 'settled') {
+    const explicit = Number(chat.settledAt);
+    if (Number.isFinite(explicit) && explicit > 0) return explicit;
+    // Legacy settled rows predate the timestamp. Their last real activity is
+    // the only honest lower bound. An empty legacy row has no such bound, but
+    // it necessarily predates this migration, so it belongs in the archive too.
+    return touched || 1;
+  }
+  return touched ? touched + AUTO_SETTLE_MS : 0;
+}
+
+export function resolveArchived(chat: Chat, status: Status, now: number, touched: number): boolean {
+  const since = settledSince(chat, status, now, touched);
+  return since > 0 && now - since >= ARCHIVE_AFTER_SETTLED_MS;
+}
+
+export function orderSearchRows(rows: readonly Row[]): Row[] {
+  return [...rows].sort((a, b) =>
+    Number(a.archived) - Number(b.archived)
+    || Number(b.card) - Number(a.card)
+    || STATUS_RANK[a.status] - STATUS_RANK[b.status]
+    || b.touched - a.touched);
 }
 
 // T3's canSettle, the client-side twin of the guards above: "anything the
@@ -247,7 +275,9 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
   const hoverTimer = useRef<number | null>(null);
   const canDrop = !!drag && drag !== chat.id;
   const commit = () => { setEditing(false); store.renameChat(chat.id, value); };
-  const pill = status === 'ready' ? null : STATUS_PILL[status];
+  const pill = row.archived
+    ? { label: 'Archivado', icon: null, tone: 'archived' }
+    : status === 'ready' ? null : STATUS_PILL[status];
 
   useEffect(() => () => { if (hoverTimer.current) window.clearTimeout(hoverTimer.current); }, []);
 
@@ -260,7 +290,7 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
   const surface = [
     'sv2-row', card ? 'card' : 'slim',
     active ? 'on' : '', over && canDrop ? 'dropbefore' : '', drag === chat.id ? 'dragging' : '',
-    chat.unread && !active ? 'unread' : '', recede ? 'recede' : '', inFlight && !active ? 'inflight' : '',
+    chat.unread && !active ? 'unread' : '', row.archived ? 'archived' : '', recede ? 'recede' : '', inFlight && !active ? 'inflight' : '',
   ].filter(Boolean).join(' ');
 
   const openTip = (e: React.MouseEvent) => {
@@ -310,7 +340,7 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
               on a shelved one. Deleting a conversation is irreversible, so it
               lives in the context menu behind a confirmation instead of one
               stray click away from the row you meant to file. */}
-          {row.settled ? (
+          {row.settled || row.archived ? (
             <button
               className="sv2-act" title="Reactivar" aria-label="Reactivar conversación"
               onClick={(e) => { e.stopPropagation(); closeTip(); onUnsettle(row); }}
@@ -456,11 +486,13 @@ function ScopeMenu({ groups, scope, onPick, onClose }: {
           {g.path && (
             <>
               <button
-                className="sv2-mact" title={`Nueva conversación en ${g.name}`}
+                className="sv2-mact create" title={`Nueva conversación en ${g.name}`}
+                aria-label={`Crear conversación en ${g.name}`}
                 onClick={(e) => { e.stopPropagation(); store.newChat(true, g.path, g.machineId ?? ''); onClose(); }}
               ><IcPlus /></button>
               <button
                 className="sv2-mact danger" title="Quitar de Workass (no borra del disco)"
+                aria-label={`Quitar ${g.name} de Workass`}
                 onClick={(e) => { e.stopPropagation(); store.removeWorkspace(g.path); onClose(); }}
               ><IcClose /></button>
             </>
@@ -483,7 +515,7 @@ function RowMenu({ row, x, y, onClose, onRename, onSettle, onUnsettle }: {
   const [confirming, setConfirming] = useState(false);
   return (
     <div className="sv2-ctx" ref={ref} style={{ left: x, top: y }} role="menu">
-      {row.settled ? (
+      {row.settled || row.archived ? (
         <button className="sv2-ci" role="menuitem" onClick={() => { onUnsettle(row); onClose(); }}>Reactivar</button>
       ) : (
         // A menu item that vanishes reads as a missing feature, so a chat that
@@ -519,6 +551,7 @@ export function SidebarV2() {
   const [tailOpen, setTailOpen] = useState(true);
   const [tailShown, setTailShown] = useState(TAIL_PAGE);
   const [query, setQuery] = useState('');
+  const [lifecycleNow, setLifecycleNow] = useState(() => Date.now());
   const [tip, setTip] = useState<Tip>(null);
   const [ctx, setCtx] = useState<{ row: Row; x: number; y: number } | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
@@ -546,6 +579,11 @@ export function SidebarV2() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  useEffect(() => {
+    const id = window.setInterval(() => setLifecycleNow(Date.now()), LIFECYCLE_TICK_MS);
+    return () => window.clearInterval(id);
+  }, []);
+
   const dropChatBefore = (targetChatId: string, targetCwd: string | null) => {
     if (drag) store.moveChat(drag, targetChatId, targetCwd);
     setDrag(null);
@@ -553,7 +591,7 @@ export function SidebarV2() {
 
   const rows = useMemo(() => {
     const out: Row[] = [];
-    const now = Date.now();
+    const now = lifecycleNow;
     const needle = query.trim().toLowerCase();
     for (const g of groups) {
       const key = normalizeWorkspacePath(g.path);
@@ -567,27 +605,32 @@ export function SidebarV2() {
         const status = resolveStatus(chat, live, active, store.obligation(chat));
         const failing = status === 'failed' ? lastOf(chat.messages, (m) => m.role === 'assistant') : undefined;
         const settled = resolveSettled(chat, status, active, now, touched);
+        const archived = resolveArchived(chat, status, now, touched);
         out.push({
-          chat, project: g.name, touched, status, settled,
+          chat, project: g.name, touched, status, settled, archived,
           since: status === 'working' ? (workingSince(chat, work) || touched) : 0,
           bg: work.filter((item) => item.status === 'running').length,
           error: (failing?.content || '').split('\n')[0].slice(0, 140),
           // Density and shelf are separate questions: a chat can be quiet enough
           // for a slim row a day in and still not be shelf material until three.
-          card: !settled && (status !== 'ready' || active || !touched || (now - touched) < CARD_WINDOW_MS),
+          card: !archived && !settled && (status !== 'ready' || active || !touched || (now - touched) < CARD_WINDOW_MS),
         });
       }
     }
     return out;
-  }, [groups, scope, query, app.activeId, app.chats]);
+  }, [groups, scope, query, app.activeId, app.chats, lifecycleNow]);
 
-  // The live list is cards then quiet slim rows; only shelved chats leave it.
+  const searching = query.trim().length > 0;
+  // The live list is cards then quiet slim rows. Archived rows are absent from
+  // normal browsing and are appended after every live/shelved search result.
   const cards = useMemo(
-    () => rows.filter((r) => !r.settled).sort((a, b) =>
+    () => rows.filter((r) => !r.archived && !r.settled).sort((a, b) =>
       Number(b.card) - Number(a.card) || STATUS_RANK[a.status] - STATUS_RANK[b.status] || b.touched - a.touched),
     [rows],
   );
-  const tail = useMemo(() => rows.filter((r) => r.settled).sort((a, b) => b.touched - a.touched), [rows]);
+  const tail = useMemo(() => rows.filter((r) => !r.archived && r.settled).sort((a, b) => b.touched - a.touched), [rows]);
+  const archived = useMemo(() => rows.filter((r) => r.archived).sort((a, b) => b.touched - a.touched), [rows]);
+  const searchRows = useMemo(() => orderSearchRows(rows), [rows]);
   const tailVisible = tailOpen ? tail.slice(0, tailShown) : [];
   const tailHidden = tail.length - tailVisible.length;
 
@@ -662,39 +705,50 @@ export function SidebarV2() {
       </div>
 
       <div className="sv2-list" onScroll={() => setTip(null)}>
-        {rows.length === 0 && (
-          <div className="side-empty">{query ? 'Nada coincide con la búsqueda.' : 'Sin conversaciones todavía.'}</div>
+        {(searching ? searchRows.length === 0 : cards.length + tail.length === 0) && (
+          <div className="side-empty">{searching
+            ? 'Nada coincide con la búsqueda.'
+            : archived.length ? 'Las conversaciones están archivadas. Buscalas arriba.' : 'Sin conversaciones todavía.'}</div>
         )}
         <ul role="list">
-          {cards.map((row) => (
-            // Keyed per density, as T3 is: a row that changes density fades in
-            // place instead of sliding through every row in between.
+          {searching ? searchRows.map((row) => (
             <SidebarV2Row
-              key={`${row.chat.id}:${row.card ? 'card' : 'slim'}`} row={row} active={row.chat.id === app.activeId}
+              key={`${row.chat.id}:search`} row={row} active={row.chat.id === app.activeId}
               {...rowProps}
             />
-          ))}
-          {tail.length > 0 && (
-            <li className="sv2-shelf-li">
-              <button className="sv2-shelf" onClick={() => setTailOpen((v) => !v)} aria-expanded={tailOpen}>
-                <span className="sv2-shelf-label">{tailOpen ? 'En reposo' : `En reposo (${tail.length})`}</span>
-                <span className="sv2-shelf-rule" />
-                <span className={`sv2-shelf-chev ${tailOpen ? 'open' : ''}`}><IcChevron /></span>
-              </button>
-            </li>
-          )}
-          {tailVisible.map((row) => (
-            <SidebarV2Row
-              key={`${row.chat.id}:slim`} row={row} active={row.chat.id === app.activeId}
-              {...rowProps}
-            />
-          ))}
-          {tailOpen && tailHidden > 0 && (
-            <li className="sv2-more-li">
-              <button className="sv2-more" onClick={() => setTailShown((n) => n + TAIL_PAGE)}>
-                Mostrar {Math.min(tailHidden, TAIL_PAGE)} más
-              </button>
-            </li>
+          )) : (
+            <>
+              {cards.map((row) => (
+                // Keyed per density, as T3 is: a row that changes density fades
+                // in place instead of sliding through every row in between.
+                <SidebarV2Row
+                  key={`${row.chat.id}:${row.card ? 'card' : 'slim'}`} row={row} active={row.chat.id === app.activeId}
+                  {...rowProps}
+                />
+              ))}
+              {tail.length > 0 && (
+                <li className="sv2-shelf-li">
+                  <button className="sv2-shelf" onClick={() => setTailOpen((v) => !v)} aria-expanded={tailOpen}>
+                    <span className="sv2-shelf-label">{tailOpen ? 'En reposo' : `En reposo (${tail.length})`}</span>
+                    <span className="sv2-shelf-rule" />
+                    <span className={`sv2-shelf-chev ${tailOpen ? 'open' : ''}`}><IcChevron /></span>
+                  </button>
+                </li>
+              )}
+              {tailVisible.map((row) => (
+                <SidebarV2Row
+                  key={`${row.chat.id}:slim`} row={row} active={row.chat.id === app.activeId}
+                  {...rowProps}
+                />
+              ))}
+              {tailOpen && tailHidden > 0 && (
+                <li className="sv2-more-li">
+                  <button className="sv2-more" onClick={() => setTailShown((n) => n + TAIL_PAGE)}>
+                    Mostrar {Math.min(tailHidden, TAIL_PAGE)} más
+                  </button>
+                </li>
+              )}
+            </>
           )}
         </ul>
       </div>

@@ -29,6 +29,7 @@ export interface MirrorChat {
   id: string; chatId?: string; actorRevision?: number; title: string; titleLocked: boolean; group: string | null; cwd: string | null;
   currentModelId: string | null; currentModeId: string | null; draft: string; unread?: boolean;
   settled?: 'settled' | 'active';
+  settledAt?: number;
   pane?: RightPane | null;      // per-chat right-column occupant (rail/browser/closed)
   modelControls?: ModelControlMemory;
   queue?: QueuedMsg[];

@@ -837,6 +837,7 @@ func applyPresentation(state *State, source PresentationState) error {
 	presentation.Draft = incoming.Draft
 	presentation.Unread = incoming.Unread
 	presentation.Settled = incoming.Settled
+	presentation.SettledAt = incoming.SettledAt
 	presentation.Pane = incoming.Pane
 	if !samePresentationFields(presentation, state.Presentation) {
 		presentation.PresentationRevision++
@@ -848,7 +849,8 @@ func applyPresentation(state *State, source PresentationState) error {
 func samePresentationFields(left, right PresentationState) bool {
 	return left.Title == right.Title && left.TitleLocked == right.TitleLocked &&
 		sameOptionalString(left.Group, right.Group) && left.Draft == right.Draft &&
-		left.Unread == right.Unread && left.Settled == right.Settled && sameOptionalString(left.Pane, right.Pane)
+		left.Unread == right.Unread && left.Settled == right.Settled && left.SettledAt == right.SettledAt &&
+		sameOptionalString(left.Pane, right.Pane)
 }
 
 func sameOptionalString(left, right *string) bool {
@@ -3683,8 +3685,9 @@ func beginForegroundObligation(state *State, input QueueEntry) {
 		state.Obligation.UpdatedAt = startedAt
 		state.Obligation.ParkedSince = ""
 	}
-	if state.Presentation.Settled == "settled" {
-		state.Presentation.Settled = "active"
+	if state.Presentation.Settled != "" || state.Presentation.SettledAt != 0 {
+		state.Presentation.Settled = ""
+		state.Presentation.SettledAt = 0
 		state.Presentation.PresentationRevision++
 	}
 }
