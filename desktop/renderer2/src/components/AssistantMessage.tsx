@@ -6,7 +6,7 @@ import { MarkdownBlock } from '../markdown/MarkdownBlock';
 import { StepRow, StepWords, ToolGroup, PermCard, CompactionRow, RestoredRow } from './messages';
 import { IcStampCopy, IcWarnTri, IcRetryArc } from '../icons';
 import { whimsyFor } from '../turn-whimsy';
-import { buildTranscriptTimelineSegments, stableMarkdownBlockKeys } from '../timeline-layout';
+import { buildTranscriptTimelineSegments, detachTimelineEvent, stableMarkdownBlockKeys } from '../timeline-layout';
 import type { TranscriptTimelineSegment } from '../timeline-layout';
 import { fullAssistantText } from '../assistant-output';
 import { relTime } from '../rel-time';
@@ -82,7 +82,16 @@ function AssistantSliceBody({
   profile: WorkassRuntimeProfile;
   coalescedSegments?: TranscriptTimelineSegment[];
 }) {
-  const segs = coalescedSegments ?? buildTranscriptTimelineSegments(msg, profile);
+  // Thinking is displayed once at the turn tail (or in the live dock), never
+  // inline. Remove its capture marker from the prose layout too; otherwise a
+  // thought arriving mid-token leaves an invisible boundary that renders one
+  // sentence as two spaced Markdown paragraphs.
+  const thinkEv: ThinkingEvent | null =
+    [...msg.events].reverse().find((e): e is ThinkingEvent => e.kind === 'thinking') ?? null;
+  const segs = detachTimelineEvent(
+    coalescedSegments ?? buildTranscriptTimelineSegments(msg, profile),
+    thinkEv?.key,
+  );
   const parsedSegments = segs.map((segment) => 'prose' in segment ? parseBlocks(segment.prose) : null);
   const resultBlocks = msg.result ? parseBlocks(msg.result) : [];
   const media = assistantMediaResolver(msg.images);
@@ -98,8 +107,6 @@ function AssistantSliceBody({
   // single thinking event per message anchored at `at: msg.content.length` from
   // when it first arrived (store.ts), so letting it fall back inline on
   // completion would snap it from the bottom of the turn up above the answer.
-  const thinkEv: ThinkingEvent | null =
-    [...msg.events].reverse().find((e): e is ThinkingEvent => e.kind === 'thinking') ?? null;
   // A turn cut off by a daemon disconnect: shown as a quiet "sin conexión" row
   // with a retry, not the generic model-error stamp.
   const interrupted = terminal && msg.status === 'failed' && !!msg.interrupted;
