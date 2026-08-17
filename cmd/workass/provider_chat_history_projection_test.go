@@ -14,6 +14,8 @@ func TestActorHistoryProjectionMaterializesOnlyRequestedTail(t *testing.T) {
 	}
 	state.Initialized = true
 	state.Presentation.TabID = "bounded-history-tab"
+	state.Presentation.Settled = "settled"
+	state.Presentation.SettledAt = 1_787_000_000_000
 	for index := 0; index < 85; index++ {
 		state.Ledger = append(state.Ledger, chat.LedgerEvent{
 			MessageID: fmt.Sprintf("message-%02d", index), Role: "assistant",
@@ -32,6 +34,9 @@ func TestActorHistoryProjectionMaterializesOnlyRequestedTail(t *testing.T) {
 	if first := fieldString(mapFromAnyMain(rows[0]), "id"); first != "message-25" {
 		t.Fatalf("bounded history began at %q, want message-25", first)
 	}
+	if fieldString(bounded, "settled") != "settled" || intValue(bounded["settledAt"]) != 1_787_000_000_000 {
+		t.Fatalf("bounded presentation archive state = %#v", bounded)
+	}
 
 	full := map[string]any{}
 	if err := projectActorChat(full, state); err != nil {
@@ -39,5 +44,8 @@ func TestActorHistoryProjectionMaterializesOnlyRequestedTail(t *testing.T) {
 	}
 	if rows := anySlice(full["messages"]); len(rows) != 85 || fieldString(mapFromAnyMain(rows[0]), "id") != "message-00" {
 		t.Fatalf("full actor history was not preserved: rows=%d", len(rows))
+	}
+	if fieldString(full, "settled") != "settled" || intValue(full["settledAt"]) != 1_787_000_000_000 {
+		t.Fatalf("full presentation archive state = %#v", full)
 	}
 }

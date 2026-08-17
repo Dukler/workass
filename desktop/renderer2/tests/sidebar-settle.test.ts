@@ -6,14 +6,16 @@ import type { Chat } from '../src/store/types.ts';
 import type { PublicJob } from '../src/wire/types.ts';
 
 // Settling is T3's third sidebar lane: a chat leaves the live list without being
-// deleted or archived. The shelf used to be pure age with no way in or out, so
-// these pin both the age rule and the two explicit overrides.
+// deleted. After two weeks there it moves into the searchable archive, so these
+// pin the age rules, explicit overrides, and archive ordering together.
 
 const DAY = 24 * 60 * 60 * 1000;
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
 let resolveSettled: (chat: unknown, status: string, active: boolean, now: number, touched: number) => boolean;
+let resolveArchived: (chat: unknown, status: string, now: number, touched: number) => boolean;
+let orderSearchRows: (rows: readonly any[]) => any[];
 let canSettle: (status: string) => boolean;
 let resolveStatus: (chat: Chat, live: boolean, active: boolean, obligation?: { state: string }) => string;
 
@@ -27,6 +29,8 @@ before(async () => {
   StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
   const sidebar = await vite.ssrLoadModule('/src/components/SidebarV2.tsx');
   resolveSettled = sidebar.resolveSettled;
+  resolveArchived = sidebar.resolveArchived;
+  orderSearchRows = sidebar.orderSearchRows;
   canSettle = sidebar.canSettle;
   resolveStatus = sidebar.resolveStatus;
 });
@@ -77,6 +81,42 @@ test('the explicit overrides beat the age rule in both directions', () => {
   assert.equal(resolveSettled(chat({ settled: 'active' }), 'ready', false, now, now - 40 * DAY), false);
 });
 
+test('a chat archives after fourteen days on the settled shelf', () => {
+  const now = Date.parse('2026-07-25T12:00:00Z');
+  const explicit = chat({ settled: 'settled', settledAt: now - 13 * DAY });
+
+  assert.equal(resolveArchived(explicit, 'ready', now, now - 40 * DAY), false);
+  explicit.settledAt = now - 14 * DAY;
+  assert.equal(resolveArchived(explicit, 'ready', now, now - 40 * DAY), true);
+
+  // Automatic filing starts at day three, then gets the same fourteen days on
+  // the shelf. The chat therefore archives at day seventeen since activity.
+  assert.equal(resolveArchived(chat(), 'ready', now, now - 16 * DAY), false);
+  assert.equal(resolveArchived(chat(), 'ready', now, now - 17 * DAY), true);
+});
+
+test('legacy settled chats use their last activity as the archive lower bound', () => {
+  const now = Date.parse('2026-07-25T12:00:00Z');
+
+  assert.equal(resolveArchived(chat({ settled: 'settled' }), 'ready', now, now - 13 * DAY), false);
+  assert.equal(resolveArchived(chat({ settled: 'settled' }), 'ready', now, now - 14 * DAY), true);
+  assert.equal(resolveArchived(chat({ settled: 'settled' }), 'ready', now, 0), true);
+});
+
+test('search ordering always appends archived matches after every visible match', () => {
+  const row = (id: string, archived: boolean, touched: number, card = false) => ({
+    chat: { id }, archived, touched, card, status: 'ready', settled: archived,
+  });
+  const ordered = orderSearchRows([
+    row('archived-newest', true, 400),
+    row('shelved', false, 200),
+    row('archived-oldest', true, 100),
+    row('live', false, 300, true),
+  ]);
+
+  assert.deepEqual(ordered.map((item) => item.chat.id), ['live', 'shelved', 'archived-newest', 'archived-oldest']);
+});
+
 test('nothing still alive, awaiting approval, parked, unread, or active can sit on the shelf', () => {
   const now = Date.parse('2026-07-25T12:00:00Z');
   const old = now - 40 * DAY;
@@ -95,14 +135,30 @@ test('settle and un-settle store opposite overrides, and new work retires the sh
   store.state.chats = [subject];
   store.state.activeId = 'tab-other';
 
+  const beforeSettle = Date.now();
   store.settleChat('tab-1', true);
   assert.equal(subject.settled, 'settled');
+  assert.ok(subject.settledAt >= beforeSettle && subject.settledAt <= Date.now());
   store.settleChat('tab-1', false);
   assert.equal(subject.settled, 'active');
+  assert.equal(subject.settledAt, undefined);
 
   store.settleChat('tab-1', true);
   store.onJobEvent({ type: 'start', job: { id: 'job-1', chatId: 'chat-1', tabId: 'tab-1', status: 'running' } as PublicJob });
   assert.equal(subject.settled, undefined);
+  assert.equal(subject.settledAt, undefined);
+});
+
+test('new work resets a manual reactivation so the lifecycle can start fresh', () => {
+  const store = new StoreCtor();
+  const subject = chat({ settled: 'active' });
+  store.state.chats = [subject];
+  store.state.activeId = 'tab-other';
+
+  store.onJobEvent({ type: 'start', job: { id: 'job-reactivated', chatId: 'chat-1', tabId: 'tab-1', status: 'running' } as PublicJob });
+
+  assert.equal(subject.settled, undefined);
+  assert.equal(subject.settledAt, undefined);
 });
 
 test('a replayed start for an already-terminal job does not resurrect a settled chat', () => {

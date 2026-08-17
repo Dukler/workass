@@ -574,7 +574,7 @@ export interface WorkassApi {
   chatPresentationSave?: (opts: {
     tabId: string; chatId: string; operationId: string; expectedRevision: number;
     title: string; titleLocked: boolean; group: string | null; draft: string; unread: boolean;
-    settled: 'settled' | 'active' | ''; pane: 'rail' | 'browser' | null;
+    settled: 'settled' | 'active' | ''; settledAt: number; pane: 'rail' | 'browser' | null;
   }) => Promise<{ ok: boolean; operationId: string; presentationRevision: number; actorRevision: number }>;
   chatRuntimeControlsSave?: (opts: {
     tabId: string; chatId: string; operationId: string; expectedRevision: number;

@@ -232,6 +232,10 @@ export interface Chat {
   // away by hand, 'active' pins one that age would otherwise file for you.
   // Absent = let the age rule decide.
   settled?: 'settled' | 'active';
+  // Millisecond timestamp for an explicit shelf action. It starts the durable
+  // 14-day archive clock; auto-settled legacy chats derive their clock from
+  // last activity instead.
+  settledAt?: number;
   // Last provider-authored context reading per chat+provider. Durable so a
   // renderer/daemon restart never makes the user send a model turn merely to
   // recover the status indicator.

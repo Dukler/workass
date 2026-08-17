@@ -1823,12 +1823,18 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .sv2-mtxt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sv2-mact {
   display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px;
-  flex: none; border: 0; border-radius: 5px; background: transparent; color: var(--faint);
-  opacity: 0; cursor: pointer;
+  flex: none; border: 0; border-radius: 5px; cursor: pointer; opacity: 1;
 }
-.sv2-mi:hover .sv2-mact { opacity: 1; }
-.sv2-mact:hover { background: var(--line2); color: var(--ink); }
-.sv2-mact.danger:hover { color: var(--del); }
+.sv2-mact.create {
+  color: var(--add);
+  background: color-mix(in srgb, var(--add) 12%, transparent);
+}
+.sv2-mact.danger {
+  color: var(--del);
+  background: color-mix(in srgb, var(--del) 12%, transparent);
+}
+.sv2-mact.create:hover { background: color-mix(in srgb, var(--add) 22%, transparent); }
+.sv2-mact.danger:hover { background: color-mix(in srgb, var(--del) 22%, transparent); }
 .sv2-mact svg { width: 12px; height: 12px; }
 .sv2-ci.danger:hover { color: var(--del); }
 .sv2-ci:disabled { color: var(--faint); cursor: default; }
@@ -1917,6 +1923,16 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .sv2-pill.approval { color: var(--sv2-approval); }
 .sv2-pill.failed { color: var(--sv2-failed); }
 .sv2-pill.done { color: var(--sv2-done); }
+.sv2-pill.archived {
+  padding: 1px 5px;
+  border: 1px solid var(--line2);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 14px;
+  letter-spacing: .035em;
+  text-transform: uppercase;
+}
 /* T3's animate-sidebar-working-text, verbatim: a 3.4s breathe STEPPED in ten
    discrete jumps rather than a smooth fade, so a working row ticks like a
    cursor instead of pulsing like a notification. It plays under Reduce Motion

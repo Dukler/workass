@@ -116,7 +116,7 @@ func (r *providerChatRuntime) SavePresentation(tabID, chatID string, operationID
 	}
 	allowed := map[string]struct{}{
 		"tabId": {}, "chatId": {}, "operationId": {}, "expectedRevision": {},
-		"title": {}, "titleLocked": {}, "group": {}, "draft": {}, "unread": {}, "settled": {}, "pane": {},
+		"title": {}, "titleLocked": {}, "group": {}, "draft": {}, "unread": {}, "settled": {}, "settledAt": {}, "pane": {},
 	}
 	if err := requireOnlyKeys(raw, allowed, "renderer presentation save"); err != nil {
 		return nil, err
@@ -132,6 +132,7 @@ func (r *providerChatRuntime) SavePresentation(tabID, chatID string, operationID
 	presentation.Draft = redactedSessionString(stringValue(raw["draft"]))
 	presentation.Unread = boolFieldValue(raw, "unread")
 	presentation.Settled = fieldString(raw, "settled")
+	presentation.SettledAt = int64(max(0, intField(raw, "settledAt")))
 	presentation.Pane = optionalStringPointer(raw, "pane")
 	digestPayload := struct {
 		ExpectedRevision uint64
@@ -141,8 +142,9 @@ func (r *providerChatRuntime) SavePresentation(tabID, chatID string, operationID
 		Draft            string
 		Unread           bool
 		Settled          string
+		SettledAt        int64
 		Pane             *string
-	}{expectedRevision, presentation.Title, presentation.TitleLocked, presentation.Group, presentation.Draft, presentation.Unread, presentation.Settled, presentation.Pane}
+	}{expectedRevision, presentation.Title, presentation.TitleLocked, presentation.Group, presentation.Draft, presentation.Unread, presentation.Settled, presentation.SettledAt, presentation.Pane}
 	digestRaw, err := json.Marshal(digestPayload)
 	if err != nil {
 		return nil, err

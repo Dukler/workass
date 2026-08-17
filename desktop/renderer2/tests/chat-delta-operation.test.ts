@@ -153,19 +153,25 @@ test('a failed settlement save survives a stale digest and retries the same oper
     subject.flushSession = async () => {};
 
     subject.settleChat(owner.id, true);
+    const settledAt = owner.settledAt;
+    assert.equal(typeof settledAt, 'number');
     await flush(true);
     assert.equal(subject.dirtyChats.has(owner.id), true);
 
     const staleServer = subject.toMirror(false, false);
     staleServer.chats[0].settled = undefined;
+    staleServer.chats[0].settledAt = undefined;
     staleServer.chats[0].unread = true;
     assert.equal(subject.restoreSessionSnapshot(staleServer), true);
     assert.equal(subject.chat(owner.id)?.settled, 'settled');
+    assert.equal(subject.chat(owner.id)?.settledAt, settledAt);
     assert.equal(subject.chat(owner.id)?.unread, false);
 
     await flush(true);
     assert.equal(calls.length, 2);
     assert.equal(calls[1].operationId, calls[0].operationId);
+    assert.equal(calls[0].settledAt, settledAt);
+    assert.equal(calls[1].settledAt, settledAt);
     assert.equal(subject.chat(owner.id)?.settled, 'settled');
     assert.equal(subject.dirtyChats.has(owner.id), false);
   } finally {
