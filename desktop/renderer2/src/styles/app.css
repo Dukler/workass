@@ -384,6 +384,23 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
 .tico.hasdot::after { content: ""; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: #6aa2f7; }
 .tico.on { background: var(--field); color: var(--ink); }
 
+/* ⌘F chat-history find. It is transcript-local and deliberately occupies one
+   compact row instead of floating over the first search result. */
+.chatfind { flex: none; display: flex; align-items: center; min-height: 40px; padding: 4px 18px 7px 24px; border-bottom: 1px solid var(--line); }
+.chatfind-box { margin-left: auto; width: min(430px, 100%); height: 30px; display: flex; align-items: center; gap: 5px; padding: 0 5px 0 9px; border: 1px solid var(--line2); border-radius: 9px; background: var(--field); color: var(--muted); }
+.chatfind-box > svg { width: 14px; height: 14px; flex: none; stroke-width: 1.3; }
+.chatfind-box input { flex: 1; min-width: 80px; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; font-size: 12.5px; }
+.chatfind-box input::placeholder { color: var(--faint); }
+.chatfind-count { min-width: 44px; color: var(--faint); font: 10.5px/1 ui-monospace, Menlo, monospace; text-align: right; }
+.chatfind-box button { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font: 18px/1 inherit; cursor: pointer; }
+.chatfind-box button:hover:not(:disabled) { background: var(--line); color: var(--ink); }
+.chatfind-box button:disabled { opacity: .35; cursor: default; }
+.chatfind-box button svg { width: 12px; height: 12px; stroke-width: 1.4; }
+.chatfind-message { display: contents; }
+.chatfind-text { display: contents; }
+::highlight(workass-chat-find) { background-color: color-mix(in srgb, var(--amber) 35%, transparent); color: inherit; }
+::highlight(workass-chat-find-current) { background-color: color-mix(in srgb, var(--amber) 78%, transparent); color: var(--bg); }
+
 /* stable both-edges reserves the 9px classic-scrollbar gutter symmetrically, so
    the centered .doc stays on the same centerline as the (scrollbar-free)
    composer below it — and doesn't shift 4.5px when the scrollbar appears. */
