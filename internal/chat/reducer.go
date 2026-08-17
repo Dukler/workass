@@ -1992,6 +1992,10 @@ func reduceSubmit(state *State, command Submit) ([]Effect, error) {
 	if !ok || target == "" {
 		return nil, errors.New("submit requires a selected target lane")
 	}
+	if err := recoverLegacyUnconsumedSteerCoverage(state, target); err != nil {
+		return nil, err
+	}
+	lane = state.Lanes[target]
 	if lane.CreationFailedBeforeEstablishment() {
 		// Submit is also explicit intent. Reopen only a create that never acquired
 		// native identity; established and provisional lanes retain their exact
@@ -2019,6 +2023,57 @@ func reduceSubmit(state *State, command Submit) ([]Effect, error) {
 		state.Presentation.AgentQueueRevision++
 	}
 	return drive(state)
+}
+
+// Releases before unconsumed steering rows received an explicit excluded
+// coverage record can leave an established lane blocked behind its own
+// ambiguity-fenced input. That input must remain visible and must never be
+// replayed, but it is also not cross-provider context to import. A later
+// explicit submit may therefore advance only a contiguous tail of exact
+// same-lane, terminal-unconsumed steer rows whose durable steer effects remain
+// fenced as acceptance-ambiguous.
+func recoverLegacyUnconsumedSteerCoverage(state *State, laneID provider.LaneID) error {
+	lane, ok := state.Lanes[laneID]
+	if !ok || lane.Phase != LaneBlocked || lane.LastError != provider.ErrorUnsupportedCapability ||
+		lane.Thread.IsZero() || lane.PendingImport != nil || state.Foreground != nil || state.PendingSteer != nil ||
+		lane.CoveredThrough >= state.LedgerHead() {
+		return nil
+	}
+	from := lane.CoveredThrough + 1
+	for sequence := from; sequence <= state.LedgerHead(); sequence++ {
+		event := state.Ledger[sequence-1]
+		if event.Sequence != sequence || event.LaneID != laneID || event.Role != "user" ||
+			event.TerminalState != "unconsumed" ||
+			(event.SteerState != "accepted" && event.SteerState != "uncertain") ||
+			event.OperationID == "" || !ambiguousSteerOutboxHas(state, event.OperationID) {
+			return nil
+		}
+	}
+	for sequence := from; sequence <= state.LedgerHead(); sequence++ {
+		event := state.Ledger[sequence-1]
+		if err := setCoverage(&lane, state, sequence, CoverageExcluded, event.OperationID); err != nil {
+			return err
+		}
+	}
+	lane.LastError = ""
+	if lane.Attachment != nil {
+		lane.Phase = LaneReady
+	} else {
+		lane.Phase = LaneDetached
+	}
+	state.Lanes[laneID] = lane
+	return nil
+}
+
+func ambiguousSteerOutboxHas(state *State, operationID provider.OperationID) bool {
+	for i := range state.Outbox {
+		entry := state.Outbox[i]
+		if entry.ID == steerEffectID(operationID) && entry.Kind == EffectSteerTurn &&
+			entry.Status == OutboxAmbiguous && entry.LastError == provider.ErrorAcceptanceAmbiguous {
+			return true
+		}
+	}
+	return false
 }
 
 func reduceSteer(state *State, command Steer) ([]Effect, error) {
@@ -2944,7 +2999,7 @@ func appendUnconsumedSteerAtTerminal(state *State, pending *PendingSteer) error 
 		steerState = "accepted"
 	}
 	lane := state.Lanes[pending.LaneID]
-	state.Ledger = append(state.Ledger, LedgerEvent{
+	event := LedgerEvent{
 		EventID: fmt.Sprintf("event:%s:user", pending.OperationID), MessageID: messageID,
 		Sequence: state.LedgerHead() + 1, Role: "user", Text: pending.Text, Status: "done",
 		At: pending.Presentation.StartedAt, Attachments: append([]provider.Attachment(nil), pending.Attachments...),
@@ -2952,8 +3007,13 @@ func appendUnconsumedSteerAtTerminal(state *State, pending *PendingSteer) error 
 		OperationID: pending.OperationID, QueueID: strings.TrimSpace(pending.Presentation.QueueID),
 		NativeTurnID: pending.Turn.NativeID, TerminalState: "unconsumed",
 		SteerState: steerState, TurnRootID: state.Foreground.RootAssistantMessageID,
-	})
-	return nil
+	}
+	state.Ledger = append(state.Ledger, event)
+	// No consumption receipt means this exact input remains ambiguity-fenced and
+	// is never replayed. Mark it excluded for its own lane so the next ordinary
+	// turn does not mistake it for a cross-provider import gap and brick a
+	// provider that correctly lacks non-sampling context import.
+	return markLedgerExcluded(state, event, pending.OperationID)
 }
 
 func settleForegroundActivities(state *State, status, finishedAt string, observedAtUnixMS int64) {
