@@ -328,11 +328,14 @@ async function runPrompt(id, params) {
   });
   await pause();
 
-  notify(session.id, {
-    sessionUpdate: 'agent_thought_chunk',
-    content: { type: 'text', text: 'Running the deterministic ACP path.' },
-  });
-  await pause();
+  const thoughtMidToken = text.includes('[mock:thought-mid-token]');
+  if (!thoughtMidToken) {
+    notify(session.id, {
+      sessionUpdate: 'agent_thought_chunk',
+      content: { type: 'text', text: 'Running the deterministic ACP path.' },
+    });
+    await pause();
+  }
 
   notify(session.id, {
     sessionUpdate: 'tool_call',
@@ -398,17 +401,34 @@ async function runPrompt(id, params) {
   if (!session.cancelled) {
     const prefix = `Mock ACP turn ${session.turn}: `;
     const typedPhases = text.includes('[mock:phases]');
-    notify(session.id, {
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text: prefix },
-      ...(typedPhases ? { _meta: { workassAssistantPhase: 'commentary' } } : {}),
-    });
-    await pause();
-    notify(session.id, {
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text: responseText },
-      ...(typedPhases ? { _meta: { workassAssistantPhase: 'final_answer' } } : {}),
-    });
+    if (thoughtMidToken) {
+      notify(session.id, {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: `${prefix}source` },
+      });
+      await pause();
+      notify(session.id, {
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: 'Thinking between adjacent prose chunks.' },
+      });
+      await pause();
+      notify(session.id, {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: ' exclusion remains one paragraph.' },
+      });
+    } else {
+      notify(session.id, {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: prefix },
+        ...(typedPhases ? { _meta: { workassAssistantPhase: 'commentary' } } : {}),
+      });
+      await pause();
+      notify(session.id, {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: responseText },
+        ...(typedPhases ? { _meta: { workassAssistantPhase: 'final_answer' } } : {}),
+      });
+    }
     notify(session.id, {
       sessionUpdate: 'usage_update',
       used: text.includes('[mock:bigusage]') ? 85 : Math.max(8, text.length),

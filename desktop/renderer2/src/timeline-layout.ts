@@ -319,6 +319,35 @@ export function buildTranscriptTimelineSegments(msg: Msg, profile: WorkassRuntim
   return segments;
 }
 
+// Some timeline events are rendered outside the prose flow. The live/settled
+// thinking row is the important case: AssistantMessage moves it to the turn
+// tail, but its capture boundary still splits the surrounding sentence into
+// two Markdown paragraphs unless the adjacent prose is joined here. Preserve
+// every other event/tool boundary and never mutate the cached segment list.
+export function detachTimelineEvent(
+  segments: readonly TranscriptTimelineSegment[],
+  eventKey: string | undefined,
+): TranscriptTimelineSegment[] {
+  if (!eventKey) return segments as TranscriptTimelineSegment[];
+  const eventIndex = segments.findIndex((segment) => 'event' in segment && segment.event.key === eventKey);
+  if (eventIndex < 0) return segments as TranscriptTimelineSegment[];
+
+  const previous = segments[eventIndex - 1];
+  const next = segments[eventIndex + 1];
+  if (previous && next && 'prose' in previous && 'prose' in next) {
+    return [
+      ...segments.slice(0, eventIndex - 1),
+      {
+        prose: previous.prose + next.prose,
+        start: previous.start,
+        end: next.end,
+      },
+      ...segments.slice(eventIndex + 2),
+    ];
+  }
+  return [...segments.slice(0, eventIndex), ...segments.slice(eventIndex + 1)];
+}
+
 type ToolGroupSegment = Extract<TranscriptTimelineSegment, { tools: ToolEvent[] }>;
 
 function isToolGroupSegment(segment: TranscriptTimelineSegment | undefined): segment is ToolGroupSegment {

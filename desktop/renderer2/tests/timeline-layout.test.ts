@@ -7,6 +7,7 @@ import {
   buildCoalescedTurnBlockTimelineSegments,
   buildTimelineSegments,
   buildTranscriptTimelineSegments,
+  detachTimelineEvent,
   stableMarkdownBlockKeys,
 } from '../src/timeline-layout.ts';
 import type { TranscriptTimelineSegment } from '../src/timeline-layout.ts';
@@ -165,6 +166,43 @@ test('filters rail-only subagent children before placement and preserves later v
     segments.map((segment) => 'prose' in segment ? `p:${segment.prose}` : 'tools' in segment ? `t:${segment.key}` : `e:${segment.event.key}`),
     ['p:unfinish', 'e:compact', 'p:ed fragment'],
   );
+});
+
+test('detaching the tail thinking row rejoins prose split at a streaming token boundary', () => {
+  const content = 'I did not add a torrent/source exclusion in this patch.';
+  const splitAt = content.indexOf(' exclusion');
+  const thinking: TimelineEvent = { key: 'thought', at: splitAt, kind: 'thinking', text: 'Checking.' };
+  const msg = assistantRow('assistant-live', 'turn-live', [thinking], content, 'running');
+
+  const split = buildTranscriptTimelineSegments(msg);
+  assert.deepEqual(split.map((segment) => 'prose' in segment ? `p:${segment.prose}` : `e:${segment.event.key}`), [
+    'p:I did not add a torrent/source',
+    'e:thought',
+    'p: exclusion in this patch.',
+  ]);
+
+  const rendered = detachTimelineEvent(split, thinking.key);
+  assert.deepEqual(rendered, [{ prose: content, start: 0, end: content.length }]);
+  assert.equal(parseBlocks(rendered[0].prose).length, 1, 'the sentence must remain one Markdown paragraph');
+});
+
+test('detaching a tail event preserves every surrounding tool and event boundary', () => {
+  const thinking: TimelineEvent = { key: 'thought', at: 3, kind: 'thinking', text: 'Checking.' };
+  const compact: TimelineEvent = { key: 'compact', at: 6, kind: 'compaction' };
+  const segments: TranscriptTimelineSegment[] = [
+    { tools: [tool('before', 0)], key: 'before', revision: [] },
+    { prose: 'one', start: 0, end: 3 },
+    { event: thinking },
+    { prose: ' two', start: 3, end: 7 },
+    { event: compact },
+  ];
+
+  const rendered = detachTimelineEvent(segments, thinking.key);
+  assert.equal(rendered.length, 3);
+  assert.ok('tools' in rendered[0] && rendered[0].key === 'before');
+  assert.deepEqual(rendered[1], { prose: 'one two', start: 0, end: 7 });
+  assert.ok('event' in rendered[2] && rendered[2].event.key === 'compact');
+  assert.equal(segments.length, 5, 'cached segments must remain immutable');
 });
 
 test('keeps a subagent header in its ordered tool group while dropping its children', () => {
