@@ -148,7 +148,7 @@ func TestBackgroundReconciliationPreservesTerminalRowsAndOrphansMissingLiveWork(
 	state, _ = apply(t, state, SelectLane{Identity: lane, Owner: provider.AttachmentOwner{TabID: "tab"}})
 	state, _ = apply(t, state, LaneOpened{
 		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
-		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
 	state, _ = apply(t, state, Submit{OperationID: "turn", LaneID: lane.ID, Text: "background owner"})
 	state, _ = apply(t, state, TurnAdmitted{
@@ -343,7 +343,7 @@ func TestResumeCannotReplaceNativeThread(t *testing.T) {
 	state, _ = apply(t, state, SelectLane{Identity: lane})
 	state, _ = apply(t, state, LaneOpened{
 		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "thread-1", HeadID: "thread-1", Lineage: 1},
-		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
 	})
 	laneState := state.Lanes[lane.ID]
 	laneState.Phase = LaneResuming
@@ -863,7 +863,7 @@ func TestRichProviderTimelineSurvivesActorRestartLosslessly(t *testing.T) {
 	state, _ = apply(t, state, SelectLane{Identity: lane})
 	state, _ = apply(t, state, LaneOpened{
 		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
-		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
 	})
 	state, _ = apply(t, state, Submit{
 		OperationID: "turn", Text: "question", ModelID: "model",
@@ -1006,6 +1006,55 @@ func TestTerminalEventPreservesCompleteSemanticsAndSettlesOpenActivity(t *testin
 	}
 	if !outboxHas(&state, steerEffectID("steer"), OutboxAmbiguous) {
 		t.Fatalf("unconsumed steer outbox is not ambiguity-fenced: %#v", state.Outbox)
+	}
+	settledLane := state.Lanes[lane.ID]
+	if settledLane.CoveredThrough != 3 || settledLane.Coverage[3].Status != CoverageExcluded {
+		t.Fatalf("unconsumed steer created a provider import gap: %#v", settledLane)
+	}
+	state, effects := apply(t, state, Submit{OperationID: "next-turn", Text: "continue safely"})
+	if len(effects) != 1 {
+		t.Fatalf("next turn did not start after ambiguity-fenced steer: %#v", effects)
+	}
+	if start, ok := effects[0].(StartTurnEffect); !ok || start.Input.OperationID != "next-turn" {
+		t.Fatalf("next turn effect = %#v", effects[0])
+	}
+}
+
+func TestSubmitRepairsLegacyUnconsumedSteerCoverageGap(t *testing.T) {
+	state, _ := NewState("chat")
+	lane := testLane("chat", "codex")
+	state, _ = apply(t, state, SelectLane{Identity: lane})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
+		Attachment: &provider.LaneAttachmentSnapshot{ConnectionID: "connection", ProviderID: "codex"},
+	})
+	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "question"})
+	state, _ = apply(t, state, TurnAdmitted{OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"}})
+	state, _ = apply(t, state, Steer{OperationID: "steer", Text: "late direction"})
+	state, _ = apply(t, state, SteerAdmitted{OperationID: "steer", Accepted: true, AwaitConsumption: true})
+	state, _ = apply(t, state, TurnTerminated{OperationID: "turn", Status: "cancelled"})
+
+	legacyLane := state.Lanes[lane.ID]
+	delete(legacyLane.Coverage, 3)
+	legacyLane.CoveredThrough = 2
+	legacyLane.Phase = LaneBlocked
+	legacyLane.LastError = provider.ErrorUnsupportedCapability
+	state.Lanes[lane.ID] = legacyLane
+
+	state, effects := apply(t, state, Submit{OperationID: "recovered-turn", Text: "continue after reload"})
+	recovered := state.Lanes[lane.ID]
+	if recovered.CoveredThrough != 3 || recovered.Coverage[3].Status != CoverageExcluded || recovered.LastError != "" {
+		t.Fatalf("legacy steer gap was not repaired exactly: %#v", recovered)
+	}
+	if len(effects) != 1 {
+		t.Fatalf("recovered submit effects = %#v", effects)
+	}
+	if start, ok := effects[0].(StartTurnEffect); !ok || start.Input.OperationID != "recovered-turn" {
+		t.Fatalf("recovered submit did not start exact next turn: %#v", effects[0])
+	}
+	if !outboxHas(&state, steerEffectID("steer"), OutboxAmbiguous) {
+		t.Fatalf("legacy recovery erased the ambiguity fence: %#v", state.Outbox)
 	}
 }
 
