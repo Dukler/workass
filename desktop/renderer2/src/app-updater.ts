@@ -27,9 +27,6 @@ export interface AppUpdaterReceipt {
   phase?: string;
   updateId?: string;
   previousVersion?: string;
-  // Older shell receipts may have used this name; keep it readable while the
-  // worker's canonical field is previousVersion.
-  currentVersion?: string;
   targetVersion?: string;
   updatedAt?: string;
   error?: string;

@@ -63,7 +63,7 @@ function compareVersions(left, right) {
 
 function receiptAppliesToInstalledVersion(receipt, currentVersion) {
   if (!receipt || receipt.schemaVersion !== 1 || !parseVersion(currentVersion)) return false;
-  const previousVersion = String(receipt.previousVersion || receipt.currentVersion || '');
+  const previousVersion = String(receipt.previousVersion || '');
   const targetVersion = String(receipt.targetVersion || '');
   if (!parseVersion(previousVersion) || !parseVersion(targetVersion)) return false;
 

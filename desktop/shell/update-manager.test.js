@@ -214,6 +214,12 @@ test('an update receipt belongs only to the release version that can honestly re
   assert.equal(receiptAppliesToInstalledVersion({ ...receipt, phase: 'activating' }, '1.1.0'), true);
   assert.equal(receiptAppliesToInstalledVersion({ ...receipt, phase: 'activating' }, '1.2.0'), true);
   assert.equal(receiptAppliesToInstalledVersion({ ...receipt, phase: 'failed' }, '9.9.9'), false);
+  assert.equal(receiptAppliesToInstalledVersion({
+    schemaVersion: 1,
+    phase: 'rollback_healthy',
+    currentVersion: '1.1.0',
+    targetVersion: '1.2.0',
+  }, '1.1.0'), false);
 });
 
 test('a freshly downloaded Windows target ignores the replaced copy rollback receipt', () => {
