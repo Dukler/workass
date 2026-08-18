@@ -108,6 +108,38 @@ async function renamePathWithRetry(source, destination, {
   throw lastError || new Error('release path rename failed');
 }
 
+function mirrorWindowsDirectory(source, destination, { run = spawnSync } = {}) {
+  if (!fs.statSync(source, { throwIfNoEntry: false })?.isDirectory()) {
+    throw new Error('Windows release mirror source is not a directory');
+  }
+  fs.mkdirSync(destination, { recursive: true });
+  const result = run('robocopy.exe', [
+    source,
+    destination,
+    '/MIR',
+    '/COPY:DAT',
+    '/DCOPY:DAT',
+    '/XJ',
+    '/SL',
+    '/R:5',
+    '/W:1',
+    '/NFL',
+    '/NDL',
+    '/NJH',
+    '/NJS',
+    '/NP',
+  ], {
+    windowsHide: true,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  // Robocopy uses 0-7 for successful copies (including differences copied)
+  // and reserves 8+ for failures.
+  if (result.error || !Number.isInteger(result.status) || result.status > 7) {
+    throw new Error(`Windows release mirror failed${Number.isInteger(result.status) ? ` (robocopy exit ${result.status})` : ''}`);
+  }
+}
+
 async function waitUntil(predicate, { attempts = 160, delayMs = 250 } = {}) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (await predicate()) return true;
@@ -253,10 +285,6 @@ function validateTransaction(transaction) {
   ]) {
     if (!path.isAbsolute(transaction[field])) throw new Error(`${field} must be absolute`);
   }
-  const installParent = path.dirname(transaction.installTarget);
-  if (path.dirname(transaction.incomingTarget) !== installParent || path.dirname(transaction.backupTarget) !== installParent) {
-    throw new Error('update swap paths must share one parent directory');
-  }
   const updateRoot = path.dirname(path.dirname(transaction.transactionRoot));
   const dataRoot = path.dirname(updateRoot);
   if (transaction.transactionRoot !== path.join(updateRoot, 'transactions', transaction.updateId) ||
@@ -274,8 +302,23 @@ function validateTransaction(transaction) {
     throw new Error('mutable state rollback paths must be distinct children of the update transaction');
   }
   if (transaction.platform === 'darwin') {
+    const installParent = path.dirname(transaction.installTarget);
+    if (path.dirname(transaction.incomingTarget) !== installParent || path.dirname(transaction.backupTarget) !== installParent) {
+      throw new Error('macOS update swap paths must share one parent directory');
+    }
     if (!transaction.installTarget.endsWith('.app') || !transaction.designatedRequirement) throw new Error('invalid macOS update transaction');
-  } else if (transaction.platform !== 'win32') {
+  } else if (transaction.platform === 'win32') {
+    if (transaction.incomingTarget !== path.join(transaction.transactionRoot, 'incoming-release') ||
+        transaction.backupTarget !== path.join(transaction.transactionRoot, 'installed-before-activation')) {
+      throw new Error('Windows release paths must be exact children of the update transaction');
+    }
+    const transactionFromInstall = path.relative(transaction.installTarget, transaction.transactionRoot);
+    const installFromTransaction = path.relative(transaction.transactionRoot, transaction.installTarget);
+    const nestedUnder = (relative) => relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+    if (nestedUnder(transactionFromInstall) || nestedUnder(installFromTransaction)) {
+      throw new Error('Windows install and update transaction directories must not overlap');
+    }
+  } else {
     throw new Error(`unsupported update platform: ${transaction.platform}`);
   }
   return transaction;
@@ -306,9 +349,10 @@ async function startInstalledRuntime(transaction, dependencies = {}) {
   return { ...receipt, runtime };
 }
 
-function defaultOperations(transaction) {
+function defaultOperations(transaction, dependencies = {}) {
   const launchAgentPath = String(transaction.launchAgentPath || '');
   const launchdDomain = String(transaction.launchdDomain || '');
+  const mirrorWindows = dependencies.mirrorWindowsDirectory || mirrorWindowsDirectory;
   let launchedPID = 0;
   let expectedDaemonBind = '';
   return {
@@ -353,6 +397,19 @@ function defaultOperations(transaction) {
     },
     activate: async () => {
       if (fs.existsSync(transaction.backupTarget)) throw new Error('update rollback target already exists');
+      if (transaction.platform === 'win32') {
+        mirrorWindows(transaction.installTarget, transaction.backupTarget);
+        try {
+          mirrorWindows(transaction.incomingTarget, transaction.installTarget);
+        } catch (err) {
+          // The old install has a complete external snapshot and the in-place
+          // destination may now be partial. Tell the transaction runner that
+          // rollback is mandatory before the previous runtime is relaunched.
+          err.workassRollbackReady = true;
+          throw err;
+        }
+        return;
+      }
       fs.renameSync(transaction.installTarget, transaction.backupTarget);
       try {
         fs.renameSync(transaction.incomingTarget, transaction.installTarget);
@@ -405,20 +462,16 @@ function defaultOperations(transaction) {
       if (!stopped) throw new Error('failed release daemon did not stop before rollback');
     },
     rollback: async () => {
+      if (transaction.platform === 'win32') {
+        mirrorWindows(transaction.backupTarget, transaction.installTarget);
+        return;
+      }
       if (fs.existsSync(transaction.incomingTarget)) throw new Error('failed release holding path already exists');
       if (fs.existsSync(transaction.installTarget)) {
-        if (transaction.platform === 'win32') {
-          await renamePathWithRetry(transaction.installTarget, transaction.incomingTarget);
-        } else {
-          fs.renameSync(transaction.installTarget, transaction.incomingTarget);
-        }
+        fs.renameSync(transaction.installTarget, transaction.incomingTarget);
       }
       try {
-        if (transaction.platform === 'win32') {
-          await renamePathWithRetry(transaction.backupTarget, transaction.installTarget);
-        } else {
-          fs.renameSync(transaction.backupTarget, transaction.installTarget);
-        }
+        fs.renameSync(transaction.backupTarget, transaction.installTarget);
       } catch (err) {
         if (!fs.existsSync(transaction.installTarget) && fs.existsSync(transaction.incomingTarget)) {
           try { await renamePathWithRetry(transaction.incomingTarget, transaction.installTarget); } catch { /* preserve original rollback error */ }
@@ -456,11 +509,13 @@ function defaultOperations(transaction) {
       }
     },
     cleanup: async () => {
+      fs.rmSync(transaction.incomingTarget, { recursive: true, force: true });
       fs.rmSync(transaction.backupTarget, { recursive: true, force: true });
       fs.rmSync(transaction.mutableStateBackupTarget, { recursive: true, force: true });
     },
     cleanupFailed: async () => {
       fs.rmSync(transaction.incomingTarget, { recursive: true, force: true });
+      fs.rmSync(transaction.backupTarget, { recursive: true, force: true });
       fs.rmSync(transaction.mutableStateBackupTarget, { recursive: true, force: true });
       fs.rmSync(transaction.failedMutableStateTarget, { recursive: true, force: true });
     },
@@ -520,7 +575,8 @@ async function runTransaction(rawTransaction, operations) {
   } catch (activationError) {
     try {
       await ops.stopLaunched();
-      if (activated) await ops.rollback();
+      const rollbackReady = activated || activationError?.workassRollbackReady === true;
+      if (rollbackReady) await ops.rollback();
       if (activated && mutableStateSnapshotted) {
         await ops.restoreMutableState();
         mutableStateRestored = true;
@@ -535,7 +591,7 @@ async function runTransaction(rawTransaction, operations) {
       }
       return updateReceipt(transaction, recovered ? 'rollback_healthy' : 'failed', {
         activated: false,
-        rolledBack: activated,
+        rolledBack: rollbackReady,
         mutableStateRolledBack: mutableStateRestored,
         error: String(activationError && activationError.message || activationError),
         ...(cleanupWarning ? { cleanupWarning } : {}),
@@ -572,6 +628,7 @@ module.exports = {
   atomicJSON,
   defaultOperations,
   main,
+  mirrorWindowsDirectory,
   requestJSON,
   requestDaemonShutdown,
   renamePathWithRetry,

@@ -377,6 +377,43 @@ test('the manager checks and stages a local Mac release without any network requ
   assert.deepEqual(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'release.zip')), bytes);
 });
 
+test('the Windows manager stages both release trees inside the external update transaction', async () => {
+  const { manager } = managerFixture({ platform: 'win32' });
+  manager.manifest = manifest({
+    platform: 'windows',
+    arch: 'amd64',
+    portable: true,
+    authenticode: false,
+    designatedRequirement: undefined,
+    artifacts: {
+      update: {
+        name: 'Workass-1.2.0-windows-amd64.zip',
+        url: 'https://releases.example.test/Workass-1.2.0-windows-amd64.zip',
+        sha256: 'b'.repeat(64),
+        size: 1024,
+      },
+    },
+  });
+  manager.publish({ phase: 'available', targetVersion: '1.2.0' });
+  manager.deps.downloadArtifact = async (_source, destination) => {
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, 'archive');
+  };
+  manager.deps.extractArchive = (_archive, destination) => {
+    writeWindowsRelease(path.join(destination, 'Workass'));
+  };
+  manager.deps.stageRelease = (source, destination) => {
+    fs.cpSync(source, destination, { recursive: true, errorOnExist: true });
+  };
+  manager.deps.verifyRelease = () => '';
+
+  const state = await manager.download();
+  assert.equal(state.phase, 'ready');
+  assert.equal(manager.prepared.incomingTarget, path.join(manager.prepared.transactionRoot, 'incoming-release'));
+  assert.equal(manager.prepared.backupTarget, path.join(manager.prepared.transactionRoot, 'installed-before-activation'));
+  assert.notEqual(path.dirname(manager.prepared.incomingTarget), path.dirname(manager.prepared.installTarget));
+});
+
 test('manifest validation requires the exact platform, checksum, size, and platform trust law', () => {
   assert.equal(validateReleaseManifest(manifest(), { platform: 'darwin', arch: 'arm64' }).version, '1.2.0');
   assert.throws(() => validateReleaseManifest(manifest({ arch: 'amd64' }), { platform: 'darwin', arch: 'arm64' }), /another platform/);

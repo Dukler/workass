@@ -859,8 +859,12 @@ class UpdateManager {
       const source = findExtractedRoot(extracted, this.platform);
       const installTarget = installedRoot(this.resourcesPath, this.executablePath, this.platform);
       const parent = path.dirname(installTarget);
-      const incomingTarget = path.join(parent, `${this.platform === 'darwin' ? '.Workass.app' : '.Workass'}.incoming-${updateId}`);
-      const backupTarget = path.join(parent, `${this.platform === 'darwin' ? '.Workass.app' : '.Workass'}.previous-${updateId}`);
+      const incomingTarget = this.platform === 'darwin'
+        ? path.join(parent, `.Workass.app.incoming-${updateId}`)
+        : path.join(transactionRoot, 'incoming-release');
+      const backupTarget = this.platform === 'darwin'
+        ? path.join(parent, `.Workass.app.previous-${updateId}`)
+        : path.join(transactionRoot, 'installed-before-activation');
       if (fs.existsSync(incomingTarget) || fs.existsSync(backupTarget)) throw new Error('update staging target already exists');
       this.deps.stageRelease(source, incomingTarget, this.platform);
       const designatedRequirement = this.deps.verifyRelease(installTarget, incomingTarget, this.manifest.version, this.platform, this.arch);
