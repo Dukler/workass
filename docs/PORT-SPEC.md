@@ -341,8 +341,13 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   update transaction directory, activation mirrors the incoming tree into the
   existing installation directory, and rollback mirrors the snapshot back
   before the previous runtime is relaunched. Release tags and assets are
-  immutable. Builds predating this law require one manual portable replacement
-  before in-app updates can bootstrap themselves.
+  immutable. Update receipts live outside the portable directory for durable
+  handoff diagnostics, but a shell may surface one only when its previous/target
+  version proves that the receipt belongs to the currently running release. A
+  freshly extracted target never inherits another copy's stale failure or
+  rollback UI and continues polling the stable feed. Builds predating this law
+  require one manual portable replacement before in-app updates can bootstrap
+  themselves.
 
 Zero third-party Go dependencies unless this spec grants them. WebSocket is
 hand-rolled RFC 6455 exactly as `desktop/lan-server.js` already proves
