@@ -105,18 +105,18 @@ test('settled chats without settledAt use their last activity as the archive low
   assert.equal(resolveArchived(chat({ settled: 'settled' }), 'ready', now, 0), true);
 });
 
-test('metadata-only settled chats retain their lifecycle clock without resident messages', () => {
+test('metadata-only old chats stay automatically settled without resident messages', () => {
   const now = Date.parse('2026-07-25T12:00:00Z');
   const subject = chat({
-    settled: 'settled',
-    lastActivityAt: now - 13 * DAY,
+    lastActivityAt: now - 4 * DAY,
     messages: [],
     messageCount: 12,
     historyComplete: false,
   });
 
   const touched = lastTouchedAt(subject);
-  assert.equal(touched, now - 13 * DAY);
+  assert.equal(touched, now - 4 * DAY);
+  assert.equal(resolveSettled(subject, 'ready', false, now, touched), true);
   assert.equal(resolveArchived(subject, 'ready', now, touched), false);
 });
 
