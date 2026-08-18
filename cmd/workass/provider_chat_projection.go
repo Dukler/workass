@@ -276,6 +276,11 @@ func projectActorChatWithHistory(out map[string]any, state chat.State, history a
 	} else {
 		out["settledAt"] = p.SettledAt
 	}
+	if lastActivityAt := actorLastActivityAt(state); lastActivityAt > 0 {
+		out["lastActivityAt"] = lastActivityAt
+	} else {
+		delete(out, "lastActivityAt")
+	}
 	if p.WorkspaceRevision == 0 {
 		delete(out, workspaceRevisionField)
 	} else {
@@ -339,6 +344,27 @@ func projectActorChatWithHistory(out map[string]any, state chat.State, history a
 		out["sessionError"] = string(lane.LastError)
 	}
 	return nil
+}
+
+// actorLastActivityAt projects the lifecycle clock independently of transcript
+// residency. Ledger order is canonical, so the newest parseable row is the
+// latest committed activity; a foreground turn may be newer still.
+func actorLastActivityAt(state chat.State) int64 {
+	latest := int64(0)
+	for index := len(state.Ledger) - 1; index >= 0; index-- {
+		at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(state.Ledger[index].At))
+		if err != nil {
+			continue
+		}
+		latest = at.UnixMilli()
+		break
+	}
+	if foreground := state.Foreground; foreground != nil {
+		if at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(foreground.StartedAt)); err == nil && at.UnixMilli() > latest {
+			latest = at.UnixMilli()
+		}
+	}
+	return latest
 }
 
 // projectActorMessages scans stable ids for the full ledger but materializes

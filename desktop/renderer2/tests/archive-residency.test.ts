@@ -99,10 +99,14 @@ test('a daemon refresh releases every inactive complete history but keeps the ac
   server.chats[1].messages = inactive.messages;
   server.chats[1].messageCount = inactive.messages.length;
   server.chats[1].historyComplete = true;
+  const inactiveActivityAt = Date.parse('2026-08-12T12:59:00Z');
+  server.chats[1].lastActivityAt = inactiveActivityAt;
   assert.equal(subject.restoreSessionSnapshot(server), true);
 
   assert.equal(subject.chat(active.id)?.messages.length, 80);
   assert.equal(subject.chat(inactive.id)?.messages.length, 60);
   assert.equal(subject.chat(inactive.id)?.messageCount, 90);
   assert.equal(subject.chat(inactive.id)?.historyComplete, false);
+  assert.equal(subject.chat(inactive.id)?.lastActivityAt, inactiveActivityAt);
+  assert.equal(subject.toMirror(false).chats[1].lastActivityAt, inactiveActivityAt);
 });

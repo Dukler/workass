@@ -15,6 +15,7 @@ let vite: ViteDevServer;
 let StoreCtor: new () => any;
 let resolveSettled: (chat: unknown, status: string, active: boolean, now: number, touched: number) => boolean;
 let resolveArchived: (chat: unknown, status: string, now: number, touched: number) => boolean;
+let lastTouchedAt: (chat: Chat) => number;
 let orderSearchRows: (rows: readonly any[]) => any[];
 let canSettle: (status: string) => boolean;
 let resolveStatus: (chat: Chat, live: boolean, active: boolean, obligation?: { state: string }) => string;
@@ -30,6 +31,7 @@ before(async () => {
   const sidebar = await vite.ssrLoadModule('/src/components/SidebarV2.tsx');
   resolveSettled = sidebar.resolveSettled;
   resolveArchived = sidebar.resolveArchived;
+  lastTouchedAt = sidebar.lastTouchedAt;
   orderSearchRows = sidebar.orderSearchRows;
   canSettle = sidebar.canSettle;
   resolveStatus = sidebar.resolveStatus;
@@ -95,12 +97,27 @@ test('a chat archives after fourteen days on the settled shelf', () => {
   assert.equal(resolveArchived(chat(), 'ready', now, now - 17 * DAY), true);
 });
 
-test('legacy settled chats use their last activity as the archive lower bound', () => {
+test('settled chats without settledAt use their last activity as the archive lower bound', () => {
   const now = Date.parse('2026-07-25T12:00:00Z');
 
   assert.equal(resolveArchived(chat({ settled: 'settled' }), 'ready', now, now - 13 * DAY), false);
   assert.equal(resolveArchived(chat({ settled: 'settled' }), 'ready', now, now - 14 * DAY), true);
   assert.equal(resolveArchived(chat({ settled: 'settled' }), 'ready', now, 0), true);
+});
+
+test('metadata-only settled chats retain their lifecycle clock without resident messages', () => {
+  const now = Date.parse('2026-07-25T12:00:00Z');
+  const subject = chat({
+    settled: 'settled',
+    lastActivityAt: now - 13 * DAY,
+    messages: [],
+    messageCount: 12,
+    historyComplete: false,
+  });
+
+  const touched = lastTouchedAt(subject);
+  assert.equal(touched, now - 13 * DAY);
+  assert.equal(resolveArchived(subject, 'ready', now, touched), false);
 });
 
 test('search ordering always appends archived matches after every visible match', () => {

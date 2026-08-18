@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"workass/internal/chat"
 	providercontract "workass/internal/provider"
@@ -18,11 +19,16 @@ func TestActorHistoryProjectionMaterializesOnlyRequestedTail(t *testing.T) {
 	state.Presentation.Settled = "settled"
 	state.Presentation.SettledAt = 1_787_000_000_000
 	for index := 0; index < 85; index++ {
+		at := ""
+		if index == 84 {
+			at = "2026-08-12T12:59:00Z"
+		}
 		state.Ledger = append(state.Ledger, chat.LedgerEvent{
 			MessageID: fmt.Sprintf("message-%02d", index), Role: "assistant",
-			Text: fmt.Sprintf("row %d", index), Status: "done",
+			Text: fmt.Sprintf("row %d", index), Status: "done", At: at,
 		})
 	}
+	wantLastActivity := time.Date(2026, time.August, 12, 12, 59, 0, 0, time.UTC).UnixMilli()
 
 	bounded := map[string]any{}
 	if err := projectActorChatWithHistory(bounded, state, actorHistoryTail); err != nil {
@@ -45,6 +51,9 @@ func TestActorHistoryProjectionMaterializesOnlyRequestedTail(t *testing.T) {
 	}
 	if rows := anySlice(metadataOnly["messages"]); len(rows) != 0 || intValue(metadataOnly["messageCount"]) != 85 || metadataOnly["historyComplete"] != false {
 		t.Fatalf("metadata-only history = rows:%d count:%v complete:%v", len(rows), metadataOnly["messageCount"], metadataOnly["historyComplete"])
+	}
+	if got := int64(intValue(metadataOnly["lastActivityAt"])); got != wantLastActivity {
+		t.Fatalf("metadata-only last activity = %d, want %d", got, wantLastActivity)
 	}
 
 	full := map[string]any{}
