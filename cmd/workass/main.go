@@ -804,7 +804,7 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 		acpManager.SetModelScores(state.setting.get()["modelScores"])
 	}
 	count := 0
-	hub.Register("app:meta", func(args []any) (any, error) {
+	hub.RegisterOutOfBandRead("app:meta", func(args []any) (any, error) {
 		return appMeta(cwd), nil
 	})
 	count++

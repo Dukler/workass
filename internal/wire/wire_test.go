@@ -110,6 +110,92 @@ func TestInvokeReplyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestOutOfBandLivenessReadBypassesSlowOrderedInvoke(t *testing.T) {
+	hub := NewHub()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	hub.Register("app-chat:new-session", func(args []any) (any, error) {
+		close(started)
+		<-release
+		return map[string]any{"ok": true}, nil
+	})
+	hub.RegisterOutOfBandRead("app:meta", func(args []any) (any, error) {
+		return map[string]any{"name": "workass"}, nil
+	})
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+	client := dialWS(t, server.URL, "bGl2ZW5lc3MtYnlwYXNz")
+	defer client.conn.Close()
+
+	client.sendText(t, `{"t":"invoke","id":1,"channel":"app-chat:new-session","args":[]}`)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("slow ordered invoke never started")
+	}
+	client.sendText(t, `{"t":"invoke","id":2,"channel":"app:meta","args":[]}`)
+	if reply := readReply(t, client); reply.ID != json.Number("2") || reply.Error != nil {
+		t.Fatalf("liveness reply behind slow invoke = %+v", reply)
+	}
+	close(release)
+	if reply := readReply(t, client); reply.ID != json.Number("1") || reply.Error != nil {
+		t.Fatalf("ordered reply after release = %+v", reply)
+	}
+}
+
+func TestMutatingHandlerCannotRunOutOfBand(t *testing.T) {
+	hub := NewHub()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("mutating out-of-band registration did not fail")
+		}
+	}()
+	hub.RegisterOutOfBandRead("job:start", func(args []any) (any, error) {
+		return nil, nil
+	})
+}
+
+func TestOrdinaryInvokesRemainArrivalOrdered(t *testing.T) {
+	hub := NewHub()
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	release := make(chan struct{})
+	hub.Register("ordered", func(args []any) (any, error) {
+		label := fmt.Sprint(args[0])
+		if label == "first" {
+			close(firstStarted)
+			<-release
+		} else {
+			close(secondStarted)
+		}
+		return label, nil
+	})
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+	client := dialWS(t, server.URL, "b3JkZXJlZC1pbnZva2Vz")
+	defer client.conn.Close()
+
+	client.sendText(t, `{"t":"invoke","id":1,"channel":"ordered","args":["first"]}`)
+	client.sendText(t, `{"t":"invoke","id":2,"channel":"ordered","args":["second"]}`)
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first ordered invoke never started")
+	}
+	select {
+	case <-secondStarted:
+		t.Fatal("second ordered invoke overtook the first")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if reply := readReply(t, client); reply.ID != json.Number("1") || reply.Result != "first" {
+		t.Fatalf("first ordered reply = %+v", reply)
+	}
+	if reply := readReply(t, client); reply.ID != json.Number("2") || reply.Result != "second" {
+		t.Fatalf("second ordered reply = %+v", reply)
+	}
+}
+
 func TestRawResultInvokeReplyPreservesFrozenShape(t *testing.T) {
 	hub := NewHub()
 	raw := make(RawResult, len(`{"answer":42,"items":["a","b"]}`), 4096)
@@ -788,10 +874,9 @@ func firstMessage(messages [][]byte) []byte {
 	return messages[0]
 }
 
-// A session:get reply carries the whole canonical snapshot in one frame, and
-// real profiles have exceeded the old 64 MiB ceiling. A dropped hydration
-// reply strands every controller in a hydrate→drop→reconnect loop, so a
-// snapshot-scale reply must be enqueued and delivered end to end.
+// Session/archive reads retain one frozen reply frame. Even though session:get
+// is globally lean, one rich active transcript can cross the regular queue
+// budget, so a snapshot-scale reply must still be delivered end to end.
 func TestSnapshotScaleInvokeReplyIsDelivered(t *testing.T) {
 	payload := strings.Repeat("a", 65<<20)
 	hub := NewHub()

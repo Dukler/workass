@@ -71,7 +71,7 @@ var mutatingChannels = map[string]struct{}{
 	// `chat:permissions-pending` used to sit here, on the reasoning that
 	// permission titles belong to the surface that can answer them. That
 	// conflated seeing with deciding. An approved device already reads every
-	// message of every chat through session:get, so withholding the question an
+	// message through the session and archive reads, so withholding the question an
 	// agent is asking protects nothing — it only blinds a watching phone, whose
 	// whole reason to exist is showing you a card raised at 3am. The lease is
 	// there so two devices cannot answer the same card; `chat:permission-decide`
@@ -106,11 +106,9 @@ const notifyBacklogLimit = 20
 const outboundQueueFrameLimit = 128
 const outboundQueueByteLimit = 16 << 20
 
-// session:get carries the full canonical snapshot in one reply frame, and real
-// profiles have exceeded 64 MiB (69 MiB observed 2026-07-24). A limit below the
-// snapshot size strands every controller in a hydrate→drop→reconnect loop, so
-// the ceiling must stay far above any plausible snapshot until hydration is
-// chunked or leaned.
+// Canonical session and archive reads still use one reply frame. A single rich
+// active chat has exceeded the regular queue budget, so the ceiling remains
+// above a legitimate bounded projection while rejecting runaway allocations.
 const outboundFrameByteLimit = 256 << 20
 
 // A frame larger than the whole regular byte budget (a snapshot reply) is
@@ -136,6 +134,18 @@ var errControllerChanged = errors.New("websocket client is no longer controller"
 
 // Handler is the positional-args form used by the frozen LAN invoke protocol.
 type Handler func(args []any) (any, error)
+
+type invokeScheduling uint8
+
+const (
+	invokeOrdered invokeScheduling = iota
+	invokeOutOfBandRead
+)
+
+type registeredHandler struct {
+	fn         Handler
+	scheduling invokeScheduling
+}
 
 // RawResult is a trusted pre-serialized JSON result. The WebSocket reply path
 // can wrap it in the frozen reply envelope and frame in the same backing
@@ -177,7 +187,7 @@ type Hub struct {
 	// client applies backpressure at this boundary; later semantic frames may
 	// not overtake the frame currently waiting for queue capacity.
 	broadcastMu       sync.Mutex
-	handlers          map[string]Handler
+	handlers          map[string]registeredHandler
 	clients           map[*client]struct{}
 	pending           map[string]*pendingAccess
 	requestSeq        uint64
@@ -266,7 +276,7 @@ func NewHub(options ...Options) *Hub {
 	}
 	hub := &Hub{
 		instanceID:        newInstanceID(),
-		handlers:          make(map[string]Handler),
+		handlers:          make(map[string]registeredHandler),
 		clients:           make(map[*client]struct{}),
 		pending:           make(map[string]*pendingAccess),
 		lease:             opts.Lease,
@@ -318,9 +328,24 @@ func (h *Hub) SetMachineID(machineID string) {
 
 // Register installs or replaces a channel handler.
 func (h *Hub) Register(channel string, fn Handler) {
+	h.register(channel, fn, invokeOrdered)
+}
+
+// RegisterOutOfBandRead installs a read-only handler that may answer while an
+// ordinary invoke is still running. Use it only for transport liveness: normal
+// invokes share one ordered lane so provider and state transitions cannot
+// overtake each other.
+func (h *Hub) RegisterOutOfBandRead(channel string, fn Handler) {
+	if _, mutating := mutatingChannels[channel]; mutating {
+		panic("wire: mutating channel cannot run out of band: " + channel)
+	}
+	h.register(channel, fn, invokeOutOfBandRead)
+}
+
+func (h *Hub) register(channel string, fn Handler, scheduling invokeScheduling) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.handlers[channel] = fn
+	h.handlers[channel] = registeredHandler{fn: fn, scheduling: scheduling}
 }
 
 // SetOnClientReady installs a hook called once a WebSocket client is approved
@@ -350,7 +375,7 @@ func (h *Hub) SetOnControllerReady(fn func(send func(channel string, payload any
 // findable rather than silently swallowed.
 func (h *Hub) Invoke(channel string, args []any) (result any, err error) {
 	h.mu.RLock()
-	fn := h.handlers[channel]
+	fn := h.handlers[channel].fn
 	h.mu.RUnlock()
 	if fn == nil {
 		return nil, fmt.Errorf("unknown channel: %s", channel)
@@ -365,6 +390,13 @@ func (h *Hub) Invoke(channel string, args []any) (result any, err error) {
 	}()
 	result, err = fn(args)
 	return result, err
+}
+
+func (h *Hub) schedulingFor(channel string) invokeScheduling {
+	h.mu.RLock()
+	scheduling := h.handlers[channel].scheduling
+	h.mu.RUnlock()
+	return scheduling
 }
 
 // Broadcast sends an event frame to every approved client. Ordinary delivery
@@ -923,6 +955,39 @@ func (h *Hub) pendingAccessPayloads() []map[string]any {
 func (h *Hub) readLoop(c *client) {
 	defer h.drop(c)
 
+	// Preserve the arrival order of every ordinary invoke without making the
+	// socket reader wait for a slow handler. First provider attachment can spend
+	// tens of seconds inside app-chat:new-session/job:start. Declared out-of-band
+	// reads keep transport liveness observable during that work; reply ids make
+	// out-of-order replies part of the frozen protocol.
+	ordered := make(chan invokeMessage, outboundQueueFrameLimit)
+	readerDone := make(chan struct{})
+	orderedDone := make(chan struct{})
+	go func() {
+		defer close(orderedDone)
+		for {
+			select {
+			case <-readerDone:
+				return
+			case <-c.done:
+				return
+			case msg, ok := <-ordered:
+				if !ok {
+					return
+				}
+				h.handleInvoke(c, msg)
+			}
+		}
+	}()
+	defer func() {
+		close(readerDone)
+		close(ordered)
+		// A handler that already began may have taken the controller lease. Let
+		// it leave the ordered boundary before drop releases that lease; otherwise
+		// it can finish after removal and resurrect a disconnected controller.
+		<-orderedDone
+	}()
+
 	var buf []byte
 	dec := &frameDecoder{}
 	tmp := make([]byte, 32*1024)
@@ -933,7 +998,19 @@ func (h *Hub) readLoop(c *client) {
 			messages, rest, closeFrame := dec.drain(buf)
 			buf = rest
 			for _, raw := range messages {
-				h.handleRaw(c, raw)
+				msg, ok := decodeInvoke(raw)
+				if !ok {
+					continue
+				}
+				if h.schedulingFor(msg.Channel) == invokeOutOfBandRead {
+					h.handleInvoke(c, msg)
+					continue
+				}
+				select {
+				case ordered <- msg:
+				case <-c.done:
+					return
+				}
 			}
 			if closeFrame {
 				return
@@ -945,12 +1022,7 @@ func (h *Hub) readLoop(c *client) {
 	}
 }
 
-func (h *Hub) handleRaw(c *client, raw []byte) {
-	msg, ok := decodeInvoke(raw)
-	if !ok {
-		return
-	}
-
+func (h *Hub) handleInvoke(c *client, msg invokeMessage) {
 	var result any
 	var errText *string
 	result, err := h.invokeForClient(c, msg.Channel, msg.Args)
@@ -986,7 +1058,14 @@ func (h *Hub) handleRaw(c *client, raw []byte) {
 	// An implicit handover announces itself exactly like an explicit one, so the
 	// device that lost the lease learns it from the daemon rather than from its
 	// next action failing.
-	moved := c.tookControl.Swap(false)
+	// Only an action in the ordered mutation lane can have set tookControl. An
+	// out-of-band reply must never consume that receipt before the owning
+	// mutation announces it.
+	_, mutating := mutatingChannels[msg.Channel]
+	moved := false
+	if mutating {
+		moved = c.tookControl.Swap(false)
+	}
 	if h.lease != nil && (moved || (msg.Channel == "lan:take-control" && errText == nil)) {
 		if device, ok := c.deviceSnapshot(); ok {
 			h.Broadcast("lan:controller-changed", controllerPayload(device))

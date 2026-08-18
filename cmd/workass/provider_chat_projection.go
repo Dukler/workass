@@ -14,6 +14,14 @@ import (
 
 const sessionProjectionMessageTail = 60
 
+type actorHistoryProjection uint8
+
+const (
+	actorHistoryFull actorHistoryProjection = iota
+	actorHistoryTail
+	actorHistoryMetadataOnly
+)
+
 // StateDigest is the lean actor-derived heartbeat projection. It intentionally
 // does not consult session-state.json chat rows: after cutover that file contains
 // daemon-global UI preferences only, and using it here would manufacture a
@@ -66,9 +74,12 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 }
 
 // ProjectSession is the pure actor -> frozen Mirror-v1 boundary. The session
-// store contributes daemon-global application preferences only. Chat rows carry
-// a bounded actor tail; opening a chat obtains its full ledger through the
-// frozen chat:archive-load read method.
+// store contributes daemon-global application preferences only. The selected
+// chat and any running chat carry a bounded actor tail; idle, unselected chats
+// carry metadata only. Opening a chat obtains its full ledger through the frozen
+// chat:archive-load read method. Bounding each chat independently was not a
+// bounded session: a machine with many chats still emitted a 90 MiB first
+// hydration and repeatedly lost the receiving WebSocket.
 func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 	if r == nil || r.sessions == nil {
 		return nil, errors.New("provider chat projection is unavailable")
@@ -78,6 +89,34 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 		return nil, err
 	}
 	root := r.sessions.GlobalSnapshot()
+	activeID := strings.TrimSpace(fieldString(root, "activeId"))
+	activeExists := false
+	firstTabID := ""
+	for _, chatID := range known {
+		actor, err := r.actor(chatID)
+		if err != nil {
+			return nil, err
+		}
+		digest := actor.engine.DigestSnapshot()
+		if digest.Deleted {
+			continue
+		}
+		if firstTabID == "" {
+			firstTabID = digest.TabID
+		}
+		if digest.TabID == activeID {
+			activeExists = true
+		}
+	}
+	if !activeExists {
+		activeID = firstTabID
+	}
+	if activeID == "" {
+		root["activeId"] = nil
+	} else {
+		root["activeId"] = activeID
+	}
+
 	projectedChats := make([]any, 0, len(known))
 	for _, chatID := range known {
 		actor, err := r.actor(chatID)
@@ -89,30 +128,24 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 			continue
 		}
 		projected := map[string]any{}
-		if err := projectActorChatWithMessageLimit(projected, state, sessionProjectionMessageTail); err != nil {
+		history := sessionHistoryProjection(state, activeID)
+		if err := projectActorChatWithHistory(projected, state, history); err != nil {
 			return nil, fmt.Errorf("project actor-native chat %q: %w", chatID, err)
 		}
 		projectedChats = append(projectedChats, projected)
 	}
 	root["chats"] = projectedChats
-	activeID := strings.TrimSpace(fieldString(root, "activeId"))
-	activeExists := false
-	for _, raw := range projectedChats {
-		if fieldString(mapFromAnyMain(raw), "id") == activeID {
-			activeExists = true
-			break
-		}
-	}
-	if !activeExists {
-		root["activeId"] = nil
-		if len(projectedChats) > 0 {
-			root["activeId"] = fieldString(mapFromAnyMain(projectedChats[0]), "id")
-		}
-	}
 	if err := rehydrateExternalSessionImages(root, filepath.Dir(r.sessions.path)); err != nil {
 		return nil, err
 	}
 	return root, nil
+}
+
+func sessionHistoryProjection(state chat.State, activeTabID string) actorHistoryProjection {
+	if state.Presentation.TabID == activeTabID || state.Foreground != nil {
+		return actorHistoryTail
+	}
+	return actorHistoryMetadataOnly
 }
 
 func (r *providerChatRuntime) ProjectSessionRaw() ([]byte, error) {
@@ -199,10 +232,10 @@ func (r *providerChatRuntime) ApplyRendererSnapshot(snapshot any) (bool, error) 
 }
 
 func projectActorChat(out map[string]any, state chat.State) error {
-	return projectActorChatWithMessageLimit(out, state, 0)
+	return projectActorChatWithHistory(out, state, actorHistoryFull)
 }
 
-func projectActorChatWithMessageLimit(out map[string]any, state chat.State, messageLimit int) error {
+func projectActorChatWithHistory(out map[string]any, state chat.State, history actorHistoryProjection) error {
 	if out == nil {
 		return errors.New("chat projection target is nil")
 	}
@@ -273,14 +306,14 @@ func projectActorChatWithMessageLimit(out map[string]any, state chat.State, mess
 		out["planLatestMessageId"] = p.PlanLatestMessageID
 	}
 
-	messages, messageCount, err := projectActorMessages(state, messageLimit)
+	messages, messageCount, err := projectActorMessages(state, history)
 	if err != nil {
 		return err
 	}
 	out["messages"] = messages
-	if messageLimit > 0 {
+	if history != actorHistoryFull {
 		out["messageCount"] = messageCount
-		out["historyComplete"] = messageCount <= messageLimit
+		out["historyComplete"] = len(messages) == messageCount
 	}
 	queue, err := projectActorQueue(state.StagedQueue, state.Queue)
 	if err != nil {
@@ -309,9 +342,10 @@ func projectActorChatWithMessageLimit(out map[string]any, state chat.State, mess
 }
 
 // projectActorMessages scans stable ids for the full ledger but materializes
-// only the suffix requested by session:get. Full archive reads pass limit=0.
-// This keeps startup payload and allocation cost bounded for very large chats.
-func projectActorMessages(state chat.State, limit int) ([]any, int, error) {
+// only the history requested by the projection policy. Full archive reads
+// carry every row; metadata-only session rows retain just live foreground rows
+// that have not reached the ledger yet.
+func projectActorMessages(state chat.State, history actorHistoryProjection) ([]any, int, error) {
 	seenMessage := make(map[string]struct{}, len(state.Ledger)+4)
 	for _, event := range state.Ledger {
 		if _, duplicate := seenMessage[event.MessageID]; duplicate {
@@ -415,8 +449,16 @@ func projectActorMessages(state chat.State, limit int) ([]any, int, error) {
 
 	total := len(state.Ledger) + len(extra)
 	first := 0
-	if limit > 0 && total > limit {
-		first = total - limit
+	switch history {
+	case actorHistoryMetadataOnly:
+		first = len(state.Ledger)
+	case actorHistoryTail:
+		if total > sessionProjectionMessageTail {
+			first = total - sessionProjectionMessageTail
+		}
+	case actorHistoryFull:
+	default:
+		return nil, 0, fmt.Errorf("unknown actor history projection %d", history)
 	}
 	messages := make([]any, 0, total-first)
 	ledgerStart := min(first, len(state.Ledger))
