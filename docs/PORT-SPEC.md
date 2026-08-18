@@ -328,10 +328,14 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   verifies the archive's declared size and SHA-256 before extraction, rejects
   unsafe archive paths, revalidates the embedded release/shell versions and
   required PE32+ x86-64 runtime files, then uses the same quiescent daemon
-  handoff, sibling-directory swap, health/controller/catalog gates, and
-  rollback contract. Release tags and assets are immutable. Builds predating
-  this law require one manual portable replacement before in-app updates can
-  bootstrap themselves.
+  handoff and health/controller/catalog gates. Windows must not require the
+  portable installation directory itself to be renameable: the verified
+  incoming release and complete rollback snapshot live under the external
+  update transaction directory, activation mirrors the incoming tree into the
+  existing installation directory, and rollback mirrors the snapshot back
+  before the previous runtime is relaunched. Release tags and assets are
+  immutable. Builds predating this law require one manual portable replacement
+  before in-app updates can bootstrap themselves.
 
 Zero third-party Go dependencies unless this spec grants them. WebSocket is
 hand-rolled RFC 6455 exactly as `desktop/lan-server.js` already proves

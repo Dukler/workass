@@ -7,6 +7,7 @@ const path = require('node:path');
 const test = require('node:test');
 const {
   defaultOperations,
+  mirrorWindowsDirectory,
   renamePathWithRetry,
   runTransaction,
   runtimeIsHealthy,
@@ -77,6 +78,18 @@ function transactionFixture() {
   };
 }
 
+function windowsTransactionFixture() {
+  const tx = transactionFixture();
+  return {
+    ...tx,
+    platform: 'win32',
+    installTarget: path.join(path.dirname(tx.installTarget), 'Workass'),
+    incomingTarget: path.join(tx.transactionRoot, 'incoming-release'),
+    backupTarget: path.join(tx.transactionRoot, 'installed-before-activation'),
+    designatedRequirement: '',
+  };
+}
+
 function operations(overrides = {}) {
   const calls = [];
   return {
@@ -100,23 +113,23 @@ function operations(overrides = {}) {
   };
 }
 
-test('transaction validation requires one same-parent atomic swap', () => {
+test('transaction validation keeps macOS swap paths beside the app and Windows release paths inside its transaction', () => {
   const tx = transactionFixture();
   assert.equal(validateTransaction(tx), tx);
   assert.throws(() => validateTransaction({ ...tx, backupTarget: path.join(path.dirname(path.dirname(tx.backupTarget)), 'elsewhere', 'old') }), /one parent/);
   assert.throws(() => validateTransaction({ ...tx, mutableStateTarget: path.dirname(tx.mutableStateTarget) }), /exact Workass state directory/);
   assert.throws(() => validateTransaction({ ...tx, mutableStateBackupTarget: path.join(path.dirname(tx.transactionRoot), 'state') }), /distinct children/);
   assert.throws(() => validateTransaction({ ...tx, designatedRequirement: '' }), /invalid macOS/);
-  const windowsInstall = path.join(path.dirname(tx.installTarget), 'Workass');
-  const windows = {
-    ...tx,
-    platform: 'win32',
-    installTarget: windowsInstall,
-    incomingTarget: path.join(path.dirname(windowsInstall), '.Workass.incoming-update-fixture-1234'),
-    backupTarget: path.join(path.dirname(windowsInstall), '.Workass.previous-update-fixture-1234'),
-    designatedRequirement: '',
-  };
+  const windows = windowsTransactionFixture();
   assert.equal(validateTransaction(windows), windows);
+  assert.throws(() => validateTransaction({
+    ...windows,
+    backupTarget: path.join(path.dirname(windows.installTarget), '.Workass.previous-update-fixture-1234'),
+  }), /exact children/);
+  assert.throws(() => validateTransaction({
+    ...windows,
+    installTarget: path.dirname(windows.transactionRoot),
+  }), /must not overlap/);
 });
 
 test('the swapped macOS daemon is healthy before the shell is launched', async () => {
@@ -186,7 +199,7 @@ test('Windows stops the complete failed Electron process tree before rollback', 
   ]]);
 });
 
-test('Windows release swaps retry bounded transient file locks', async () => {
+test('rollback path renames retry bounded transient file locks', async () => {
   let attempts = 0;
   const pauses = [];
   await renamePathWithRetry('incoming', 'installed', {
@@ -203,6 +216,79 @@ test('Windows release swaps retry bounded transient file locks', async () => {
   await assert.rejects(() => renamePathWithRetry('incoming', 'installed', {
     rename: () => { throw Object.assign(new Error('invalid'), { code: 'EINVAL' }); },
   }), /invalid/);
+});
+
+test('Windows directory mirrors accept robocopy difference codes and reject failure codes', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-robocopy-'));
+  const source = path.join(root, 'source');
+  const destination = path.join(root, 'destination');
+  fs.mkdirSync(source);
+  const calls = [];
+  mirrorWindowsDirectory(source, destination, {
+    run: (...args) => { calls.push(args); return { status: 7 }; },
+  });
+  assert.equal(calls[0][0], 'robocopy.exe');
+  assert.deepEqual(calls[0][1].slice(0, 3), [source, destination, '/MIR']);
+  assert.ok(calls[0][1].includes('/XJ'));
+  assert.ok(calls[0][1].includes('/SL'));
+  assert.throws(() => mirrorWindowsDirectory(source, destination, {
+    run: () => ({ status: 8 }),
+  }), /robocopy exit 8/);
+});
+
+test('Windows activation preserves the install directory and restores it by mirroring the external backup', async () => {
+  const tx = windowsTransactionFixture();
+  fs.mkdirSync(tx.installTarget, { recursive: true });
+  fs.mkdirSync(tx.incomingTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.installTarget, 'release.txt'), 'old-release');
+  fs.writeFileSync(path.join(tx.installTarget, 'stale.txt'), 'remove-me');
+  fs.writeFileSync(path.join(tx.incomingTarget, 'release.txt'), 'new-release');
+  const calls = [];
+  const mirror = (source, destination) => {
+    calls.push([source, destination]);
+    fs.rmSync(destination, { recursive: true, force: true });
+    fs.cpSync(source, destination, { recursive: true });
+  };
+  const disk = defaultOperations(tx, { mirrorWindowsDirectory: mirror });
+  await disk.activate();
+  assert.equal(fs.readFileSync(path.join(tx.installTarget, 'release.txt'), 'utf8'), 'new-release');
+  assert.equal(fs.existsSync(path.join(tx.installTarget, 'stale.txt')), false);
+  assert.deepEqual(calls, [
+    [tx.installTarget, tx.backupTarget],
+    [tx.incomingTarget, tx.installTarget],
+  ]);
+  await disk.rollback();
+  assert.equal(fs.readFileSync(path.join(tx.installTarget, 'release.txt'), 'utf8'), 'old-release');
+  assert.equal(fs.readFileSync(path.join(tx.installTarget, 'stale.txt'), 'utf8'), 'remove-me');
+  assert.deepEqual(calls[2], [tx.backupTarget, tx.installTarget]);
+});
+
+test('a partial Windows activation is rolled back before the previous runtime relaunches', async () => {
+  const tx = windowsTransactionFixture();
+  fs.mkdirSync(tx.installTarget, { recursive: true });
+  fs.mkdirSync(tx.incomingTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.installTarget, 'release.txt'), 'old-release');
+  fs.writeFileSync(path.join(tx.incomingTarget, 'release.txt'), 'new-release');
+  let mirrors = 0;
+  const mirror = (source, destination) => {
+    mirrors += 1;
+    fs.rmSync(destination, { recursive: true, force: true });
+    fs.cpSync(source, destination, { recursive: true });
+    if (mirrors === 2) throw new Error('activation mirror failed');
+  };
+  const disk = defaultOperations(tx, { mirrorWindowsDirectory: mirror });
+  const ops = operations({
+    activate: disk.activate,
+    rollback: disk.rollback,
+    cleanupFailed: disk.cleanupFailed,
+    healthy: async (version) => version === tx.currentVersion,
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'rollback_healthy');
+  assert.equal(receipt.rolledBack, true);
+  assert.equal(fs.readFileSync(path.join(tx.installTarget, 'release.txt'), 'utf8'), 'old-release');
+  assert.equal(fs.existsSync(tx.backupTarget), false);
+  assert.equal(fs.existsSync(tx.incomingTarget), false);
 });
 
 test('activation health rejects a daemon that retained the previous bind mode', () => {
