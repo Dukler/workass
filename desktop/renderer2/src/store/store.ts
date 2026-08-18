@@ -470,6 +470,7 @@ export class Store {
         currentModelId: c.currentModelId, currentModeId: c.currentModeId, modelControls: c.modelControls,
         pane: c.pane,
         draft: c.draft, unread: c.unread, settled: c.settled, settledAt: c.settledAt,
+        lastActivityAt: c.lastActivityAt,
         queue: c.queue?.length ? c.queue.map(({ draftImages: _draftImages, ...item }) => item) : undefined,
         providerId: c.providerId ?? null,
         contextUsageByProvider: c.contextUsageByProvider,
@@ -720,6 +721,7 @@ export class Store {
           ?? undefined,
         pending: !c.liveSession?.sessionId, draft: c.draft ?? '', unread: c.unread, settled: c.settled,
         settledAt: Number.isFinite(c.settledAt) && (c.settledAt ?? 0) > 0 ? c.settledAt : undefined,
+        lastActivityAt: Number.isFinite(c.lastActivityAt) && (c.lastActivityAt ?? 0) > 0 ? c.lastActivityAt : undefined,
         queue: c.queue?.map((item: QueuedMsg) => item.attachmentState === 'preparing'
             ? { ...item, attachmentState: 'failed', attachmentError: 'La preparación se interrumpió; volvé a adjuntar las imágenes.' }
             : item),

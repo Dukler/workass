@@ -30,6 +30,7 @@ export interface MirrorChat {
   currentModelId: string | null; currentModeId: string | null; draft: string; unread?: boolean;
   settled?: 'settled' | 'active';
   settledAt?: number;
+  lastActivityAt?: number;
   pane?: RightPane | null;      // per-chat right-column occupant (rail/browser/closed)
   modelControls?: ModelControlMemory;
   queue?: QueuedMsg[];

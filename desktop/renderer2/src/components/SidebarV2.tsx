@@ -150,12 +150,14 @@ const STATUS_PILL: Record<Exclude<Status, 'ready'>, { label: string; icon: 'work
 // is pure history, so it sorts by last activity like T3's settled rows.
 const STATUS_RANK: Record<Status, number> = { approval: 0, attention: 1, working: 2, parked: 3, failed: 4, done: 5, ready: 6 };
 
-function lastTouchedAt(chat: Chat): number {
+export function lastTouchedAt(chat: Chat): number {
+  const projected = Number(chat.lastActivityAt);
+  const lifecycleAt = Number.isFinite(projected) && projected > 0 ? projected : 0;
   for (let i = chat.messages.length - 1; i >= 0; i--) {
     const at = chat.messages[i]?.at;
-    if (at) { const t = Date.parse(at); if (!Number.isNaN(t)) return t; }
+    if (at) { const t = Date.parse(at); if (!Number.isNaN(t)) return Math.max(lifecycleAt, t); }
   }
-  return 0;
+  return lifecycleAt;
 }
 
 // A chat can be working because a TURN is running or because background work
@@ -224,9 +226,9 @@ function settledSince(chat: Chat, status: Status, now: number, touched: number):
   if (chat.settled === 'settled') {
     const explicit = Number(chat.settledAt);
     if (Number.isFinite(explicit) && explicit > 0) return explicit;
-    // Legacy settled rows predate the timestamp. Their last real activity is
-    // the only honest lower bound. An empty legacy row has no such bound, but
-    // it necessarily predates this migration, so it belongs in the archive too.
+    // Settled rows without this timestamp use their last real activity as the
+    // honest lower bound. A row with neither timestamp nor activity necessarily
+    // predates the shelf timestamp contract, so it belongs in the archive too.
     return touched || 1;
   }
   return touched ? touched + AUTO_SETTLE_MS : 0;
