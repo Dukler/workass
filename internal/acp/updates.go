@@ -912,9 +912,10 @@ func (m *Manager) CheckProviderUpdates(ctx context.Context) ProviderUpdatesPaylo
 
 func (m *Manager) checkProviderUpdates(ctx context.Context) (ProviderUpdatesPayload, bool, bool) {
 	payload, hasCandidates, hasFailures := m.providerUpdatesPayload(ctx)
-	if hasCandidates {
-		m.emit("providers:updates", payload)
-	}
+	// An empty result is authoritative. Publishing it removes update cards when
+	// a provider CLI was uninstalled or is absent on this machine; suppressing
+	// the event would leave the renderer replaying an obsolete card forever.
+	m.emit("providers:updates", payload)
 	return payload, hasCandidates, hasFailures
 }
 
@@ -961,6 +962,12 @@ func (m *Manager) providerUpdatesPayload(ctx context.Context) (ProviderUpdatesPa
 
 func (m *Manager) providerUpdateCandidate(providerID string) (providerUpdateCandidate, bool) {
 	providerID = normalizeProviderID(providerID)
+	// CLIVersion is an asynchronous discovery cache. It must never be enough by
+	// itself to advertise machine-level maintenance after the actual provider
+	// executable disappears (or on a different machine that never had it).
+	if _, err := m.providerCLIExecutable(providerID); err != nil {
+		return providerUpdateCandidate{}, false
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	runtime := m.providers[providerID]
@@ -979,21 +986,13 @@ func (m *Manager) providerUpdateCandidate(providerID string) (providerUpdateCand
 
 func (m *Manager) providerUpdateCandidates() []providerUpdateCandidate {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]providerUpdateCandidate, 0, len(m.providerOrder))
-	for _, id := range m.providerOrder {
-		runtime := m.providers[id]
-		if runtime == nil || runtime.CLIVersion == nil || runtime.CLIVersion.Version == "" {
-			continue
+	providerIDs := append([]string(nil), m.providerOrder...)
+	m.mu.Unlock()
+	out := make([]providerUpdateCandidate, 0, len(providerIDs))
+	for _, id := range providerIDs {
+		if candidate, ok := m.providerUpdateCandidate(id); ok {
+			out = append(out, candidate)
 		}
-		spec, ok := cliUpdateSpecForProvider(id, m.opts.ProviderUpdateSources)
-		if !ok {
-			continue
-		}
-		if _, ok := parseLenientSemver(runtime.CLIVersion.Version); !ok {
-			continue
-		}
-		out = append(out, providerUpdateCandidate{spec: spec, installed: runtime.CLIVersion.Version})
 	}
 	return out
 }

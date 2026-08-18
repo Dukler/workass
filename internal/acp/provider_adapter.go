@@ -57,9 +57,33 @@ type providerFeaturePolicy struct {
 
 type providerLaunchStrategy interface {
 	Prepare(ProviderConfig, Options) (ProviderConfig, error)
+	EnvironmentPolicy() providerEnvironmentPolicy
 }
 
-type standardACPLaunchStrategy struct{}
+// providerEnvironmentPolicy describes how Workass constructs a provider's
+// subprocess environment. It is owned by the provider launch adapter so the
+// process bridge never branches on provider identity.
+type providerEnvironmentPolicy struct {
+	blockedInheritedKeys []string
+}
+
+func (policy providerEnvironmentPolicy) inherits(key string) bool {
+	key = strings.TrimSpace(key)
+	for _, blocked := range policy.blockedInheritedKeys {
+		if strings.EqualFold(key, strings.TrimSpace(blocked)) {
+			return false
+		}
+	}
+	return true
+}
+
+type standardACPLaunchStrategy struct {
+	environment providerEnvironmentPolicy
+}
+
+func (strategy standardACPLaunchStrategy) EnvironmentPolicy() providerEnvironmentPolicy {
+	return strategy.environment
+}
 
 func (standardACPLaunchStrategy) Prepare(config ProviderConfig, opts Options) (ProviderConfig, error) {
 	config = launchProviderConfig(config)
@@ -186,6 +210,10 @@ func boundedPublicCAFile(path string) ([]byte, error) {
 
 type mockACPLaunchStrategy struct{}
 
+func (mockACPLaunchStrategy) EnvironmentPolicy() providerEnvironmentPolicy {
+	return providerEnvironmentPolicy{}
+}
+
 func (mockACPLaunchStrategy) Prepare(config ProviderConfig, opts Options) (ProviderConfig, error) {
 	config = launchProviderConfig(config)
 	if strings.TrimSpace(config.Env["WORKASS_MOCK_ACP_SESSION_STORE"]) == "" && strings.TrimSpace(opts.StateDir) != "" {
@@ -200,6 +228,10 @@ func (mockACPLaunchStrategy) Prepare(config ProviderConfig, opts Options) (Provi
 type nativeHostLaunchStrategy struct {
 	command string
 	prepare func(ProviderConfig, Options, string) (ProviderConfig, error)
+}
+
+func (nativeHostLaunchStrategy) EnvironmentPolicy() providerEnvironmentPolicy {
+	return providerEnvironmentPolicy{}
 }
 
 func (strategy nativeHostLaunchStrategy) Prepare(config ProviderConfig, opts Options) (ProviderConfig, error) {

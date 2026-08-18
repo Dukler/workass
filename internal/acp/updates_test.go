@@ -300,7 +300,7 @@ func TestProviderUpdateAvailabilityUsesCardWithoutNotify(t *testing.T) {
 	}))
 	t.Cleanup(registry.Close)
 	providerFile := filepath.Join(t.TempDir(), "providers.json")
-	configs := []ProviderConfig{{ID: "codex", Name: "Codex", Command: "codex", ResolvedCommand: providerPath, Enabled: true}}
+	configs := []ProviderConfig{{ID: "codex", Name: "Codex", Command: providerPath, ResolvedCommand: providerPath, Enabled: true}}
 	if err := SaveProviderConfigs(providerFile, configs); err != nil {
 		t.Fatalf("seed provider cache: %v", err)
 	}
@@ -350,6 +350,72 @@ func TestProviderUpdateAvailabilityUsesCardWithoutNotify(t *testing.T) {
 	}
 }
 
+func TestProviderUpdatesRequireInstalledCLIAndPublishCardRemoval(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	claudePath := filepath.Join(pathDir, "claude-user-install")
+	writeExecutable(t, claudePath, "#!/bin/sh\nprintf '2.1.207\\n'\n")
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("WORKASS_CLAUDE_CODE", "")
+
+	var registryMu sync.Mutex
+	registryRequests := 0
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		registryMu.Lock()
+		registryRequests++
+		registryMu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": "2.1.208"})
+	}))
+	t.Cleanup(registry.Close)
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "claude", Name: "Claude Code", Command: claudePath, Enabled: true,
+		}},
+		DefaultProviderID:     "claude",
+		Broadcast:             events.Broadcast,
+		RSSSampleInterval:     time.Hour,
+		ProviderUpdateSources: map[string]string{"claude": registry.URL + "/latest"},
+		ProviderUpdateTimeout: time.Second,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	manager.setProviderCLIVersion("claude", &CLIVersion{Version: "2.1.207", Raw: "2.1.207"})
+
+	available := manager.CheckProviderUpdates(context.Background())
+	if len(available.Updates) != 1 || !available.Updates[0].UpdateAvailable {
+		t.Fatalf("installed Claude update = %#v", available)
+	}
+	first := events.waitChannel(t, "providers:updates", time.Second).payload.(ProviderUpdatesPayload)
+	if len(first.Updates) != 1 {
+		t.Fatalf("installed Claude update event = %#v", first)
+	}
+
+	if err := os.Remove(claudePath); err != nil {
+		t.Fatalf("remove fake Claude install: %v", err)
+	}
+	missing := manager.CheckProviderUpdates(context.Background())
+	if len(missing.Updates) != 0 {
+		t.Fatalf("missing Claude produced update card: %#v", missing)
+	}
+	cleared := events.waitFor(t, time.Second, func(event collectedEvent) bool {
+		if event.channel != "providers:updates" {
+			return false
+		}
+		payload, ok := event.payload.(ProviderUpdatesPayload)
+		return ok && len(payload.Updates) == 0
+	}).payload.(ProviderUpdatesPayload)
+	if len(cleared.Updates) != 0 {
+		t.Fatalf("missing Claude did not publish card removal: %#v", cleared)
+	}
+	registryMu.Lock()
+	requests := registryRequests
+	registryMu.Unlock()
+	if requests != 1 {
+		t.Fatalf("registry requests = %d, want no request after Claude disappeared", requests)
+	}
+}
+
 func TestProviderUpdateSchedulerRepeatsWithoutDaemonRestart(t *testing.T) {
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.58.2"})
@@ -359,7 +425,7 @@ func TestProviderUpdateSchedulerRepeatsWithoutDaemonRestart(t *testing.T) {
 	manager := NewManager(Options{
 		RootDir:                     repoRoot(t),
 		StateDir:                    filepath.Join(t.TempDir(), "state"),
-		Providers:                   []ProviderConfig{{ID: "qwen", Name: "Qwen", Command: "qwen", Enabled: true}},
+		Providers:                   []ProviderConfig{{ID: "qwen", Name: "Qwen", Command: os.Args[0], Enabled: true}},
 		DefaultProviderID:           "qwen",
 		Broadcast:                   events.Broadcast,
 		RSSSampleInterval:           time.Hour,
@@ -417,7 +483,7 @@ func TestProviderUpdateSchedulerRetriesRegistryFailure(t *testing.T) {
 	manager := NewManager(Options{
 		RootDir:                     repoRoot(t),
 		StateDir:                    filepath.Join(t.TempDir(), "state"),
-		Providers:                   []ProviderConfig{{ID: "qwen", Name: "Qwen", Command: "qwen", Enabled: true}},
+		Providers:                   []ProviderConfig{{ID: "qwen", Name: "Qwen", Command: os.Args[0], Enabled: true}},
 		DefaultProviderID:           "qwen",
 		Broadcast:                   events.Broadcast,
 		RSSSampleInterval:           time.Hour,
@@ -463,7 +529,7 @@ func TestProviderUpdateSchedulerRetriesPartialRegistryFailure(t *testing.T) {
 	manager := NewManager(Options{
 		RootDir:                     repoRoot(t),
 		StateDir:                    filepath.Join(t.TempDir(), "state"),
-		Providers:                   []ProviderConfig{{ID: "qwen", Name: "Qwen", Command: "qwen", Enabled: true}, {ID: "claude", Name: "Claude", Command: "claude", Enabled: true}},
+		Providers:                   []ProviderConfig{{ID: "qwen", Name: "Qwen", Command: os.Args[0], Enabled: true}, {ID: "claude", Name: "Claude", Command: os.Args[0], Enabled: true}},
 		DefaultProviderID:           "qwen",
 		Broadcast:                   events.Broadcast,
 		RSSSampleInterval:           time.Hour,
@@ -512,7 +578,7 @@ func TestProviderUpdateScheduledChecksAreSingleFlight(t *testing.T) {
 	manager := NewManager(Options{
 		RootDir:                     repoRoot(t),
 		StateDir:                    filepath.Join(t.TempDir(), "state"),
-		Providers:                   []ProviderConfig{{ID: "qwen", Name: "Qwen", Command: "qwen", Enabled: true}},
+		Providers:                   []ProviderConfig{{ID: "qwen", Name: "Qwen", Command: os.Args[0], Enabled: true}},
 		DefaultProviderID:           "qwen",
 		RSSSampleInterval:           time.Hour,
 		ProviderUpdateInterval:      time.Hour,
