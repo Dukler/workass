@@ -141,6 +141,47 @@ test('a remote event arrives tagged, so a card raised elsewhere finds its chat',
   ]);
 });
 
+test('every machine-wide snapshot stays on its owning Workass window', () => {
+  const seenUpdates: unknown[] = [];
+  const seenProgress: unknown[] = [];
+  const localUpdateSubs: Array<(payload: unknown) => void> = [];
+  const localProgressSubs: Array<(payload: unknown) => void> = [];
+  const remoteChannels: string[] = [];
+  const router = createMachineRouter({
+    local: () => ({
+      onProvidersUpdates: (cb: (payload: unknown) => void) => localUpdateSubs.push(cb),
+      onProvidersUpdateProgress: (cb: (payload: unknown) => void) => localProgressSubs.push(cb),
+    }) as never,
+    links: () => new Map(),
+    subscribeRemote: (channel) => { remoteChannels.push(channel); },
+  }) as unknown as Record<string, (cb: (payload: unknown) => void) => void>;
+
+  router.onProvidersUpdates((payload) => seenUpdates.push(payload));
+  router.onProvidersUpdateProgress((payload) => seenProgress.push(payload));
+  localUpdateSubs[0]({ updates: [{ providerId: 'codex' }] });
+  localProgressSubs[0]({ providerId: 'codex', status: 'running' });
+
+  assert.deepEqual(seenUpdates, [{ updates: [{ providerId: 'codex' }] }]);
+  assert.deepEqual(seenProgress, [{ providerId: 'codex', status: 'running' }]);
+  assert.equal(remoteChannels.includes('providers:updates'), false);
+  assert.equal(remoteChannels.includes('providers:update-progress'), false);
+  assert.equal(ROUTED_EVENTS.includes('onProvidersUpdates'), false);
+  assert.equal(ROUTED_EVENTS.includes('onProvidersUpdateProgress'), false);
+
+  const machineWideSnapshots = [
+    'onChatCatalog',
+    'onChatPlanUsage',
+    'onProvidersList',
+    'onProcChanged',
+    'onProvidersUpdates',
+    'onProvidersUpdateProgress',
+    'onAppUpdate',
+  ] as const;
+  for (const method of machineWideSnapshots) {
+    assert.equal(ROUTED_EVENTS.includes(method), false, `${method} must remain local-only`);
+  }
+});
+
 test('a tagged call to an unavailable machine fails without touching the local daemon', async () => {
   const localCalls: unknown[] = [];
   const local = { cancelJob: (id: unknown) => { localCalls.push(id); return Promise.resolve({ cancelled: id }); } };

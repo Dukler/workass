@@ -84,3 +84,35 @@ test('a failed rewind reply keeps its OperationID until the authoritative receip
     else (globalThis as any).window = previousWindow;
   }
 });
+
+test('a checkpoint receipt cannot close another chat or machine rewind panel', () => {
+  const subject = new StoreCtor();
+  const current = chat();
+  const other = {
+    ...chat(),
+    id: 'M~m-remote~tab-other',
+    chatId: 'M~m-remote~chat-other',
+    sessionId: 'M~m-remote~session-other',
+    machineId: 'm-remote',
+    title: 'Remote rewind',
+  } as Chat;
+  subject.state.chats = [current, other];
+  subject.state.activeId = current.id;
+  subject.state.rewind = {
+    open: true,
+    tabId: current.id,
+    chatId: current.chatId,
+    loading: false,
+    items: [],
+    busyTurn: 4,
+  };
+
+  subject.onCheckpointRestored({ chatId: other.chatId, turnSeq: 2, repos: [] });
+  assert.equal(subject.state.rewind.open, true);
+  assert.equal(subject.state.rewind.busyTurn, 4);
+  assert.equal(subject.state.rewind.tabId, current.id);
+
+  subject.onCheckpointRestored({ chatId: current.chatId, turnSeq: 4, repos: [] });
+  assert.equal(subject.state.rewind.open, false);
+  assert.equal(subject.state.rewind.busyTurn, undefined);
+});

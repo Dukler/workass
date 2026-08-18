@@ -3925,16 +3925,22 @@ export class Store {
     }
   }
   private onCheckpointRestored(e: CheckpointRestored) {
-    const chat = this.chatByConvId(e?.chatId) ?? this.chat(this.state.rewind.tabId ?? '');
-    if (chat) {
-      const last = chat.messages[chat.messages.length - 1];
-      if (last) {
-        last.events.push({ key: rid('rw'), at: last.content.length, kind: 'restored', turnSeq: e.turnSeq });
-        this.bump('msg:' + last.id);
-      }
-      void this.refreshCheckpoints(chat);
+    // The receipt belongs only to the chat named by the daemon. Falling back to
+    // whichever rewind panel happened to be open let another local/remote chat's
+    // receipt close this chat's panel and paint its restored marker here.
+    const chat = this.chatByConvId(e?.chatId);
+    if (!chat) return;
+    const last = chat.messages[chat.messages.length - 1];
+    if (last) {
+      last.events.push({ key: rid('rw'), at: last.content.length, kind: 'restored', turnSeq: e.turnSeq });
+      this.bump('msg:' + last.id);
     }
-    this.state.rewind = { ...this.state.rewind, open: false, busyTurn: undefined, error: undefined };
+    void this.refreshCheckpoints(chat);
+    const ownsOpenRewind = this.state.rewind.tabId === chat.id
+      && this.state.rewind.chatId === chat.chatId;
+    if (ownsOpenRewind) {
+      this.state.rewind = { ...this.state.rewind, open: false, busyTurn: undefined, error: undefined };
+    }
     this.bumpApp(false);
   }
   private onEngineRecovered(e: EngineRecovered) {
