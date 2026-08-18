@@ -61,6 +61,28 @@ function compareVersions(left, right) {
   return 0;
 }
 
+function receiptAppliesToInstalledVersion(receipt, currentVersion) {
+  if (!receipt || receipt.schemaVersion !== 1 || !parseVersion(currentVersion)) return false;
+  const previousVersion = String(receipt.previousVersion || receipt.currentVersion || '');
+  const targetVersion = String(receipt.targetVersion || '');
+  if (!parseVersion(previousVersion) || !parseVersion(targetVersion)) return false;
+
+  switch (receipt.phase) {
+    // The outgoing shell and the newly activated shell may both observe the
+    // worker before it writes its terminal receipt.
+    case 'armed':
+    case 'activating':
+      return currentVersion === previousVersion || currentVersion === targetVersion;
+    case 'healthy':
+      return currentVersion === targetVersion;
+    case 'rollback_healthy':
+    case 'failed':
+      return currentVersion === previousVersion;
+    default:
+      return false;
+  }
+}
+
 function validateReleaseManifest(raw, { platform = process.platform, arch = process.arch } = {}) {
   if (!raw || raw.schemaVersion !== 1 || raw.product !== 'Workass') throw new Error('unsupported Workass release manifest');
   if (!parseVersion(raw.version)) throw new Error('release manifest has an invalid version');
@@ -728,10 +750,11 @@ class UpdateManager {
       supported,
       phase: supported ? 'idle' : 'unavailable',
       error: supported ? null : unsupportedReason,
+      receipt: null,
     });
     try {
       const receipt = JSON.parse(fs.readFileSync(this.receiptPath, 'utf8'));
-      if (receipt?.schemaVersion === 1) {
+      if (receiptAppliesToInstalledVersion(receipt, this.currentVersion)) {
         const active = ['armed', 'activating'].includes(receipt.phase);
         this.publish({ phase: active ? 'installing' : receipt.phase, receipt, error: receipt.error || null });
         if (active) this.watchReceipt();
@@ -1016,6 +1039,7 @@ module.exports = {
   releaseArch,
   releaseFeedName,
   releasePlatform,
+  receiptAppliesToInstalledVersion,
   resolveArtifactSource,
   resolveUpdateFeed,
   stageRelease,

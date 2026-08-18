@@ -16,6 +16,7 @@ const {
   fetchReleaseManifest,
   localFeedPath,
   parseVersion,
+  receiptAppliesToInstalledVersion,
   resolveArtifactSource,
   resolveUpdateFeed,
   validateReleaseManifest,
@@ -126,6 +127,8 @@ function managerFixture({
   replies = [],
   platform = 'darwin',
   networkRequest = () => { throw new Error('fixture network request was not expected'); },
+  currentVersion = '1.1.0',
+  initialReceipt = null,
 } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-manager-'));
   const resourcesPath = platform === 'darwin'
@@ -147,7 +150,7 @@ function managerFixture({
   const calls = [];
   let quit = false;
   const manager = new UpdateManager({
-    app: { getVersion: () => '1.1.0' },
+    app: { getVersion: () => currentVersion },
     runtime: {
       dataRoot: path.join(root, 'data'), daemonURL: 'https://127.0.0.1:18788',
       stateDir: path.join(root, 'data', 'state'), viewPort: 8799,
@@ -169,7 +172,11 @@ function managerFixture({
       schedule: (fn) => { fn(); return { unref() {} }; },
     },
   });
-  manager.init();
+  if (initialReceipt) {
+    fs.mkdirSync(path.dirname(manager.receiptPath), { recursive: true });
+    fs.writeFileSync(manager.receiptPath, `${JSON.stringify(initialReceipt)}\n`);
+  }
+  const initialState = manager.init();
   manager.manifest = manifest();
   const updateId = 'upd-fixture-1234';
   const transactionRoot = path.join(root, 'data', 'updates', 'transactions', updateId);
@@ -183,7 +190,7 @@ function managerFixture({
     designatedRequirement: platform === 'darwin' ? manifest().designatedRequirement : '',
   };
   manager.publish({ phase: 'ready', targetVersion: '1.2.0' });
-  return { manager, calls, didQuit: () => quit };
+  return { manager, calls, didQuit: () => quit, initialState };
 }
 
 test('release versions are strict and monotonic', () => {
@@ -192,6 +199,58 @@ test('release versions are strict and monotonic', () => {
   assert.equal(compareVersions('1.2.3', '1.3.0'), -1);
   assert.equal(compareVersions('2.0.0', '1.9.9'), 1);
   assert.equal(compareVersions('1.2.3', '1.2.3'), 0);
+});
+
+test('an update receipt belongs only to the release version that can honestly report it', () => {
+  const receipt = {
+    schemaVersion: 1,
+    previousVersion: '1.1.0',
+    targetVersion: '1.2.0',
+  };
+  assert.equal(receiptAppliesToInstalledVersion({ ...receipt, phase: 'rollback_healthy' }, '1.1.0'), true);
+  assert.equal(receiptAppliesToInstalledVersion({ ...receipt, phase: 'rollback_healthy' }, '1.2.0'), false);
+  assert.equal(receiptAppliesToInstalledVersion({ ...receipt, phase: 'healthy' }, '1.2.0'), true);
+  assert.equal(receiptAppliesToInstalledVersion({ ...receipt, phase: 'healthy' }, '1.1.0'), false);
+  assert.equal(receiptAppliesToInstalledVersion({ ...receipt, phase: 'activating' }, '1.1.0'), true);
+  assert.equal(receiptAppliesToInstalledVersion({ ...receipt, phase: 'activating' }, '1.2.0'), true);
+  assert.equal(receiptAppliesToInstalledVersion({ ...receipt, phase: 'failed' }, '9.9.9'), false);
+});
+
+test('a freshly downloaded Windows target ignores the replaced copy rollback receipt', () => {
+  const initialReceipt = {
+    schemaVersion: 1,
+    updateId: 'upd-prior-copy-1234',
+    phase: 'rollback_healthy',
+    previousVersion: '1.1.0',
+    targetVersion: '1.2.0',
+    updatedAt: new Date().toISOString(),
+  };
+  const { initialState } = managerFixture({
+    platform: 'win32',
+    currentVersion: '1.2.0',
+    initialReceipt,
+  });
+  assert.equal(initialState.phase, 'idle');
+  assert.equal(initialState.receipt, null);
+  assert.equal(initialState.error, null);
+});
+
+test('the actual rolled-back Windows release retains its own failure receipt', () => {
+  const initialReceipt = {
+    schemaVersion: 1,
+    updateId: 'upd-current-copy-1234',
+    phase: 'rollback_healthy',
+    previousVersion: '1.1.0',
+    targetVersion: '1.2.0',
+    updatedAt: new Date().toISOString(),
+  };
+  const { initialState } = managerFixture({
+    platform: 'win32',
+    currentVersion: '1.1.0',
+    initialReceipt,
+  });
+  assert.equal(initialState.phase, 'rollback_healthy');
+  assert.deepEqual(initialState.receipt, initialReceipt);
 });
 
 test('platform feed names cannot collide in one GitHub release', () => {
