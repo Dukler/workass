@@ -38,6 +38,54 @@ func TestProviderAdapterDefaultsAllowSingleFacetOverride(t *testing.T) {
 	}
 }
 
+func TestDevinLaunchOwnsInheritedACPBackendSanitization(t *testing.T) {
+	devin := providerAdapterForID("devin").launch.EnvironmentPolicy()
+	for _, key := range []string{"ACP_BACKEND", "acp_backend", " Acp_Backend "} {
+		if devin.inherits(key) {
+			t.Fatalf("Devin launch inherited blocked environment key %q", key)
+		}
+	}
+	if !devin.inherits("PATH") {
+		t.Fatal("Devin launch blocked unrelated inherited environment")
+	}
+
+	for _, providerID := range []string{"mock", "qwen", "claude", "codex", "custom"} {
+		if !providerAdapterForID(providerID).launch.EnvironmentPolicy().inherits("ACP_BACKEND") {
+			t.Fatalf("provider %q inherited Devin-only environment policy", providerID)
+		}
+	}
+}
+
+func TestMergedEnvDropsBlockedInheritedKeysButKeepsExplicitLaunchValues(t *testing.T) {
+	policy := providerEnvironmentPolicy{blockedInheritedKeys: []string{"ACP_BACKEND"}}
+	merged := mergedEnv(
+		[]string{"ACP_BACKEND=ambient", "Path=C:\\Windows", "KEEP=ambient"},
+		map[string]string{"ACP_BACKEND": "explicit", "KEEP": "launch"},
+		policy,
+	)
+	got := make(map[string]string, len(merged))
+	for _, item := range merged {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
+			t.Fatalf("invalid merged environment entry %q", item)
+		}
+		got[key] = value
+	}
+	if got["ACP_BACKEND"] != "explicit" {
+		t.Fatalf("explicit launch ACP_BACKEND = %q, want explicit", got["ACP_BACKEND"])
+	}
+	if got["KEEP"] != "launch" || got["Path"] != `C:\Windows` {
+		t.Fatalf("merged environment lost unrelated or explicit values: %#v", got)
+	}
+
+	withoutExplicit := mergedEnv([]string{"acp_backend=ambient", "KEEP=ambient"}, nil, policy)
+	for _, item := range withoutExplicit {
+		if strings.HasPrefix(strings.ToUpper(item), "ACP_BACKEND=") {
+			t.Fatalf("blocked inherited environment survived: %q", item)
+		}
+	}
+}
+
 func TestStandardACPLaunchAddsWorkassMCPTrustWithoutDisablingTLS(t *testing.T) {
 	t.Setenv("NODE_EXTRA_CA_CERTS", "")
 	stateDir := t.TempDir()

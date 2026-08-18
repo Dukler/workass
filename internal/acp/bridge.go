@@ -306,7 +306,8 @@ func (b *Bridge) start() error {
 	}
 	providerConfig := b.opts.Provider
 	b.mu.Unlock()
-	provider, err := providerAdapterForID(b.providerID).launch.Prepare(providerConfig, b.opts)
+	launchStrategy := providerAdapterForID(b.providerID).launch
+	provider, err := launchStrategy.Prepare(providerConfig, b.opts)
 	if err != nil {
 		return err
 	}
@@ -328,7 +329,7 @@ func (b *Bridge) start() error {
 		env["WORKASS_SUBAGENT"] = "1"
 		env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
 	}
-	cmd.Env = mergedEnv(env)
+	cmd.Env = mergedEnv(os.Environ(), env, launchStrategy.EnvironmentPolicy())
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -373,10 +374,10 @@ func (b *Bridge) start() error {
 	return nil
 }
 
-func mergedEnv(extra map[string]string) []string {
+func mergedEnv(inherited []string, extra map[string]string, policy providerEnvironmentPolicy) []string {
 	env := map[string]string{}
-	for _, item := range os.Environ() {
-		if k, v, ok := strings.Cut(item, "="); ok {
+	for _, item := range inherited {
+		if k, v, ok := strings.Cut(item, "="); ok && policy.inherits(k) {
 			env[k] = v
 		}
 	}
