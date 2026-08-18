@@ -64,6 +64,13 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
      If every comparable provider lookup fails, retry after 5, 15, and 30
      minutes. Scheduled checks are single-flight, so detection, retries, and the
      hourly clock cannot stampede the registries or reorder update snapshots.
+     Machine-wide catalog, provider, plan-usage, process, provider-update,
+     provider-update-progress, and application-update snapshots remain owned by
+     the window connected to that daemon. A client with one unpartitioned
+     projection MUST NOT merge those remote events into the current window.
+     Remote delivery is limited to explicitly chat/job/request-addressed events
+     whose identifiers are machine-tagged, plus explicit notification delivery.
+     A receipt for one chat MUST NOT close or mutate another chat's transient UI.
   Acceptance: fresh state dir + no providers.json + cold boot → composer
   offers every installed agent and every running local server with zero
   user action, on Mac (qwen/LM Studio) and Windows (devin) alike.

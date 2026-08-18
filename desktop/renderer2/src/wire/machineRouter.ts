@@ -80,7 +80,6 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?]> = [
 /** [method, channel] for every event a remote machine may raise. */
 const REMOTE_EVENTS: Array<[keyof WorkassApi, string]> = [
   ['onJobEvent', 'job:event'],
-  ['onChatCatalog', 'chat:catalog'],
   ['onChatSessionReplaced', 'chat:session-replaced'],
   ['onChatCompacted', 'chat:compacted'],
   ['onChatCheckpointRestored', 'chat:checkpoint-restored'],
@@ -88,16 +87,26 @@ const REMOTE_EVENTS: Array<[keyof WorkassApi, string]> = [
   ['onChatEnv', 'chat:env'],
   ['onChatPermissionRequest', 'chat:permission-request'],
   ['onChatPermissionResolved', 'chat:permission-resolved'],
-  ['onChatPlanUsage', 'chat:plan-usage'],
   ['onSpawnedWorkChanged', 'spawned-work:changed'],
   ['onChatCommands', 'chat:commands'],
-  ['onProcChanged', 'proc:changed'],
-  ['onProvidersList', 'providers:list'],
-  ['onProvidersUpdates', 'providers:updates'],
-  ['onProvidersUpdateProgress', 'providers:update-progress'],
   ['onNotify', 'notify'],
   ['onNotifyBacklog', 'notify:backlog'],
 ];
+
+// Machine-wide snapshots are deliberately absent from REMOTE_EVENTS:
+//
+//   chat:catalog, chat:plan-usage, providers:list, proc:changed,
+//   providers:updates, providers:update-progress, and app:update.
+//
+// The renderer has one projection for each of those surfaces, not one partition
+// per machine. Forwarding a remote snapshot would therefore replace this
+// window's catalog/provider/process/account/update state. The update variant was
+// especially dangerous: a machine without Claude Code advertised another
+// machine's Claude update, then sent the click to its own daemon. Keep these
+// subscriptions on the owning window until an explicitly machine-scoped
+// projection and matching action target exist. Remote events admitted above are
+// either addressed by tagged chat/job/request ids, or are explicit notification
+// delivery whose purpose is to reach this controller.
 
 /**
  * Which machine a call is for, found by looking for a tagged id anywhere in the
