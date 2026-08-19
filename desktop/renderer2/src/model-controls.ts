@@ -55,6 +55,10 @@ export function imageDraftCapability(
   if (!sessionId || !sessionProviderId || !selectedProviderId || sessionProviderId !== selectedProviderId) {
     return 'unknown';
   }
+  // Capability fields are additive. An older daemon or a metadata-only
+  // projection can attach the exact session/provider without carrying this
+  // field, and absence is not evidence that the provider rejects images.
+  if (imageSupport === undefined) return 'unknown';
   return imageSupport ? 'supported' : 'unsupported';
 }
 
