@@ -12,7 +12,7 @@ const { applyMacDockIcon, refreshWindowsShortcutIcons, resolveWindowFrameOptions
 const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
 const { UpdateManager, resolveUpdateFeed } = require('./update-manager');
 const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
-const { acquireProfileSingleton, focusPrimaryWindow } = require('./profile-singleton');
+const { acquireProfileSingleton, focusPrimaryWindow, shouldShowWindowOnCreate } = require('./profile-singleton');
 const { CertificatePins } = require('./certificate-pins');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -123,6 +123,7 @@ function grantMicrophoneOnly() {
 function createWindow(url, browserReporter, isController) {
   const isUpdateRelaunch = revealUpdateRelaunch;
   revealUpdateRelaunch = false;
+  const showOnCreate = shouldShowWindowOnCreate({ platform: process.platform, updateRelaunch: isUpdateRelaunch });
   const windowIcon = resolveWindowIconPath({
     platform: process.platform,
     isPackaged: app.isPackaged,
@@ -138,7 +139,7 @@ function createWindow(url, browserReporter, isController) {
     backgroundColor: '#151413',
     title: RUNTIME.appName,
     ...(windowIcon ? { icon: windowIcon } : {}),
-    show: !isUpdateRelaunch,
+    show: showOnCreate,
     webPreferences: {
       contextIsolation: true,
       sandbox: true,
@@ -198,6 +199,7 @@ function createWindow(url, browserReporter, isController) {
   ipcMain.handle('workass-updater:download', async (event) => own(event) ? updateManager?.download() || null : null);
   ipcMain.handle('workass-updater:install', async (event) => own(event) ? updateManager?.install() || null : null);
   win.on('closed', () => {
+    viewServer?.reportWindowState?.({ visible: false, minimized: false, focused: false });
     removeImageCopyMenu();
     if (browserControlServer) void browserControlServer.close();
     browserControlServer = null;
@@ -214,7 +216,19 @@ function createWindow(url, browserReporter, isController) {
       try { ipcMain.removeHandler(`workass-updater:${channel}`); } catch { /* ignore */ }
     }
   });
-  if (isUpdateRelaunch) {
+  const reportWindowState = () => {
+    if (win.isDestroyed()) return;
+    viewServer?.reportWindowState?.({
+      visible: win.isVisible(),
+      minimized: win.isMinimized(),
+      focused: win.isFocused(),
+    });
+  };
+  for (const event of ['show', 'hide', 'minimize', 'restore', 'focus', 'blur', 'ready-to-show']) {
+    win.on(event, reportWindowState);
+  }
+  reportWindowState();
+  if (isUpdateRelaunch && !showOnCreate) {
     let revealed = false;
     let fallback = null;
     const reveal = () => {
@@ -222,6 +236,7 @@ function createWindow(url, browserReporter, isController) {
       revealed = true;
       if (fallback) clearTimeout(fallback);
       focusPrimaryWindow(() => [win], process.platform === 'darwin' ? app : null);
+      reportWindowState();
     };
     win.once('ready-to-show', reveal);
     win.webContents.once('did-fail-load', reveal);

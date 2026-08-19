@@ -3,7 +3,13 @@
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
-const { acquireProfileSingleton } = require('./profile-singleton');
+const { acquireProfileSingleton, shouldShowWindowOnCreate } = require('./profile-singleton');
+
+test('Windows update relaunches start visible while macOS keeps hidden-until-ready', () => {
+  assert.equal(shouldShowWindowOnCreate({ platform: 'win32', updateRelaunch: true }), true);
+  assert.equal(shouldShowWindowOnCreate({ platform: 'darwin', updateRelaunch: true }), false);
+  assert.equal(shouldShowWindowOnCreate({ platform: 'darwin', updateRelaunch: false }), true);
+});
 
 class FakeApp extends EventEmitter {
   constructor(acquired) {

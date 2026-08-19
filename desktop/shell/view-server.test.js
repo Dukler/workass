@@ -164,6 +164,8 @@ test('serves local renderer, proxies HTTP, and tunnels WebSocket upgrade', async
   let status = await fetch(view.url + '/__workass-shell/status').then((r) => r.json());
   assert.equal(status.controller, null);
   assert.equal(status.browser, null);
+  assert.equal(status.windowVisible, false);
+  assert.equal(status.window, null);
   assert.equal(status.electronVersion, '43.1.1');
   assert.equal(status.daemonOrigin, `http://127.0.0.1:${daemonPort}`);
   assert.equal((await fetch(view.url + '/__workass-shell/controller', {
@@ -195,6 +197,12 @@ test('serves local renderer, proxies HTTP, and tunnels WebSocket upgrade', async
     hasError: false, reportedAt: status.browser.reportedAt,
   });
   assert.doesNotMatch(JSON.stringify(status.browser), /example|token|must-not-leak/);
+  view.reportWindowState({ visible: true, minimized: false, focused: true });
+  status = await fetch(view.url + '/__workass-shell/status').then((r) => r.json());
+  assert.equal(status.windowVisible, true);
+  assert.deepEqual(status.window, {
+    visible: true, minimized: false, focused: true, reportedAt: status.window.reportedAt,
+  });
 
   const viewPort = Number(new URL(view.url).port);
   const upgraded = await new Promise((resolve, reject) => {
