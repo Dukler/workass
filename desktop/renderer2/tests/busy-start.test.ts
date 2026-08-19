@@ -55,3 +55,20 @@ test('late busy receipt never removes a host turn that has already started', () 
   assert.equal(target.queue, undefined);
   assert.equal(target.agentQueueRevision, 2);
 });
+
+test('a promoted turn rejects its stale queue receipt even before a newer queue revision hydrates', () => {
+  const target = chat([
+    { id: 'follow-user', role: 'user', content: 'follow once', status: 'done', at: '2026-07-21T00:00:00Z', events: [] },
+    { id: 'follow-assistant', role: 'assistant', content: 'working', status: 'running', at: null, events: [], jobId: 'promoted-job' },
+  ]);
+  target.agentQueueRevision = 0;
+
+  assert.deepEqual(reconcileQueuedJobStart(target, {
+    userId: 'follow-user', assistantId: 'follow-assistant',
+  }, 'follow once', undefined, {
+    queued: true, queueId: 'host-q', position: 1, delivery: 'queue', agentQueueRevision: 1,
+  }), { alreadyStarted: true });
+  assert.deepEqual(target.messages.map((message) => message.id), ['follow-user', 'follow-assistant']);
+  assert.equal(target.queue, undefined);
+  assert.equal(target.agentQueueRevision, 0);
+});

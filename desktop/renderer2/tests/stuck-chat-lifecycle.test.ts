@@ -3,7 +3,7 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer, type ViteDevServer } from 'vite';
 import type { Chat, Msg, QueuedMsg } from '../src/store/types.ts';
-import type { PublicJob, StateDigest } from '../src/wire/types.ts';
+import type { PublicJob, StartJobReply, StateDigest } from '../src/wire/types.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
@@ -250,6 +250,186 @@ test('an in-flight cancel receipt never manufactures a local terminal turn', asy
     assert.equal(owner.queuePaused, true);
     assert.equal(owner.queuePauseRevision, 2);
     assert.equal(syncs, 1);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('Stop before job:start dispatch cancels the renderer-owned send without creating provider work', async () => {
+  const previousWindow = (globalThis as any).window;
+  let starts = 0;
+  (globalThis as any).window = {
+    api: {
+      startJob: async () => {
+        starts += 1;
+        return job({ id: 'must-not-start' });
+      },
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    let releaseSession!: () => void;
+    const sessionReady = new Promise<void>((resolve) => { releaseSession = resolve; });
+    (subject as any).ensureSession = async () => { await sessionReady; };
+
+    const sending = subject.sendTo(owner.id, 'cancel before admission');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const assistant = owner.messages.find((message) => message.role === 'assistant')!;
+    assert.equal(assistant.status, 'running');
+
+    await subject.cancelChatTurn(owner.id);
+    releaseSession();
+    assert.equal(await sending, false);
+    assert.equal(starts, 0);
+    assert.equal(assistant.status, 'cancelled');
+    assert.equal(assistant.jobId, undefined);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('Stop during job:start admission cancels the exact accepted job once', async () => {
+  const previousWindow = (globalThis as any).window;
+  let releaseStart!: (value: PublicJob) => void;
+  const cancelIDs: string[] = [];
+  (globalThis as any).window = {
+    api: {
+      startJob: async () => await new Promise<PublicJob>((resolve) => { releaseStart = resolve; }),
+      cancelJob: async (id: string) => {
+        cancelIDs.push(id);
+        return { cancelled: true, reason: 'cancelled', queuePaused: true, queuePauseRevision: 3 };
+      },
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    const sending = subject.sendTo(owner.id, 'cancel across admission');
+    while (!releaseStart) await new Promise((resolve) => setTimeout(resolve, 0));
+    const assistant = owner.messages.find((message) => message.role === 'assistant')!;
+    assert.equal(assistant.jobId, undefined);
+
+    await subject.cancelChatTurn(owner.id);
+    releaseStart(job({ id: 'job-admitted-after-stop' }));
+    assert.equal(await sending, true);
+    assert.deepEqual(cancelIDs, ['job-admitted-after-stop']);
+    assert.equal(assistant.jobId, 'job-admitted-after-stop');
+    assert.equal(assistant.status, 'running', 'the provider terminal event remains authoritative');
+    assert.equal(owner.queuePaused, true);
+    assert.equal(owner.queuePauseRevision, 3);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('an early job:start event and its later reply cannot deliver Stop twice', async () => {
+  const previousWindow = (globalThis as any).window;
+  let releaseStart!: (value: PublicJob) => void;
+  const cancelIDs: string[] = [];
+  (globalThis as any).window = {
+    api: {
+      startJob: async () => await new Promise<PublicJob>((resolve) => { releaseStart = resolve; }),
+      cancelJob: async (id: string) => {
+        cancelIDs.push(id);
+        return { cancelled: true, reason: 'cancelled', queuePaused: true, queuePauseRevision: 5 };
+      },
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    const sending = subject.sendTo(owner.id, 'one physical Stop');
+    while (!releaseStart) await new Promise((resolve) => setTimeout(resolve, 0));
+    const admitted = job({ id: 'job-event-before-reply' });
+    (subject as any).onJobEvent({ type: 'start', job: admitted });
+
+    await subject.cancelChatTurn(owner.id);
+    releaseStart(admitted);
+    assert.equal(await sending, true);
+    assert.deepEqual(cancelIDs, ['job-event-before-reply']);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('a Stop requested before job:start transfers at the event and rejects a stale busy receipt', async () => {
+  const previousWindow = (globalThis as any).window;
+  let releaseStart!: (value: StartJobReply) => void;
+  const cancelIDs: string[] = [];
+  (globalThis as any).window = {
+    api: {
+      startJob: async () => await new Promise<StartJobReply>((resolve) => { releaseStart = resolve; }),
+      cancelJob: async (id: string) => {
+        cancelIDs.push(id);
+        return { cancelled: true, reason: 'cancelled', queuePaused: true, queuePauseRevision: 6 };
+      },
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    const sending = subject.sendTo(owner.id, 'stop before the admission event');
+    while (!releaseStart) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await subject.cancelChatTurn(owner.id);
+    const admitted = job({ id: 'job-admitted-by-event' });
+    (subject as any).onJobEvent({ type: 'start', job: admitted });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(cancelIDs, ['job-admitted-by-event']);
+
+    releaseStart({
+      queued: true, queueId: 'stale-queue-receipt', position: 1, delivery: 'queue',
+      queuedAt: '2026-07-24T12:00:01Z', agentQueueRevision: 1,
+    });
+    assert.equal(await sending, true);
+    assert.deepEqual(cancelIDs, ['job-admitted-by-event']);
+    assert.equal(owner.queue, undefined);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('Stop during durable busy admission removes the exact FIFO owner before send settles', async () => {
+  const previousWindow = (globalThis as any).window;
+  let releaseStart!: (value: StartJobReply) => void;
+  (globalThis as any).window = {
+    api: {
+      startJob: async () => await new Promise<StartJobReply>((resolve) => { releaseStart = resolve; }),
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    let releaseFlush!: () => void;
+    const flushGate = new Promise<void>((resolve) => { releaseFlush = resolve; });
+    let flushes = 0;
+    (subject as any).flushSession = async () => { flushes += 1; await flushGate; };
+
+    const sending = subject.sendTo(owner.id, 'cancel exact busy input');
+    while (!releaseStart) await new Promise((resolve) => setTimeout(resolve, 0));
+    await subject.cancelChatTurn(owner.id);
+    releaseStart({
+      queued: true, queueId: 'busy-owner', position: 1, delivery: 'queue',
+      queuedAt: '2026-07-24T12:00:01Z', agentQueueRevision: 1,
+    });
+
+    let settled = false;
+    void sending.then(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(settled, false, 'the send waits for durable FIFO removal');
+    assert.equal(flushes, 1);
+    assert.equal(owner.queue, undefined);
+    assert.deepEqual(owner.messages, []);
+
+    releaseFlush();
+    assert.equal(await sending, true);
+    assert.equal((subject as any).pendingTurnStarts.size, 0);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;

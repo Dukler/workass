@@ -83,6 +83,12 @@ const UPDATE_TERMINAL_TIMEOUT = 11 * 60 * 1000;
 
 type SyncScope = 'session' | 'background' | 'permissions' | 'catalog' | 'settings' | 'processes';
 
+type PendingTurnStart = {
+  assistantId: string;
+  cancelRequested: boolean;
+  cancelJobId?: string;
+};
+
 type ChatPresentationSnapshot = Pick<Chat, 'title' | 'titleLocked' | 'group' | 'draft' | 'unread' | 'settled' | 'settledAt' | 'pane'>;
 
 function presentationSnapshot(chat: ChatPresentationSnapshot): ChatPresentationSnapshot {
@@ -140,6 +146,11 @@ export class Store {
   // dropped at job end. The transcript tail row reads them for its vitals.
   private turnHeartbeats = new Map<string, { elapsedMs: number; outputTokens: number; phase: string; toolName?: string; retry?: { code?: number; attempt?: number } | null; at: number }>();
   private chatJobs = new Map<string, { tabId: string; msgId: string }>(); // chatId -> {tabId,msgId}
+  // A send is renderer-owned until job:start returns a durable provider job.
+  // Stop closes that ownership gap: it aborts before dispatch, or follows the
+  // exact accepted job across the reply boundary and cancels it once.
+  private pendingTurnStarts = new Map<string, PendingTurnStart>(); // tabId -> exact optimistic assistant
+  private cancelRequests = new Map<string, Promise<void>>(); // provider job id -> one in-flight Stop
   private drainingQueues = new Set<string>();
   // Preserve submission order for rapid explicit steers. Persistence and native
   // acknowledgement are part of the same lane, so a slower first RPC cannot let
@@ -3038,6 +3049,8 @@ export class Store {
     }
   }
   private failPendingSend(chat: Chat, assistant: Msg, prompt: string, chatId: string, detail?: unknown) {
+    const pending = this.pendingTurnStarts.get(chat.id);
+    if (pending?.assistantId === assistant.id) this.pendingTurnStarts.delete(chat.id);
     const chatRef = this.chatJobs.get(chatId);
     if (chatRef?.tabId === chat.id && chatRef.msgId === assistant.id) this.chatJobs.delete(chatId);
     if (assistant.jobId) this.jobRef.delete(assistant.jobId);
@@ -3112,11 +3125,25 @@ export class Store {
     }
     if (!priorUser) chat.messages.push(user);
     if (!priorAssistant) chat.messages.push(asst);
+    const pendingStart: PendingTurnStart = { assistantId: asst.id, cancelRequested: false };
+    this.pendingTurnStarts.set(chat.id, pendingStart);
+    const releasePendingStart = () => {
+      if (this.pendingTurnStarts.get(chat.id) === pendingStart) this.pendingTurnStarts.delete(chat.id);
+    };
     if (!chat.titleLocked) { chat.title = display.trim().slice(0, 34) || chat.title; chat.titleLocked = true; }
     this.bumpChat(chat);
 
     await this.ensureSession(chat);
+    // No provider call escaped yet. A Stop in session initialization therefore
+    // cancels the renderer-owned send instead of creating work merely to cancel
+    // it afterward.
+    if (pendingStart.cancelRequested) {
+      releasePendingStart();
+      this.finalizeCancelledLocally(chat, asst);
+      return false;
+    }
     if (!chat.sessionId && chat.sessionError) {
+      releasePendingStart();
       asst.status = 'failed';
       asst.content = `No hay sesión ACP disponible (${chat.sessionError}).`;
       asst.retryPrompt = prompt;
@@ -3153,14 +3180,40 @@ export class Store {
         job,
       );
       if (!reconciled.alreadyStarted) this.chatJobs.delete(chatId);
+      if (pendingStart.cancelRequested) {
+        const admitted = current.messages.find((message) => message.id === asst.id && message.role === 'assistant');
+        if (reconciled.alreadyStarted && admitted?.jobId) {
+          await this.cancelAdmittedTurn(current, admitted, admitted.jobId, pendingStart);
+        } else if (!reconciled.alreadyStarted) {
+          const cancelled = current.queue?.find((item) => item.id === job.queueId);
+          releaseDraftImages(cancelled?.draftImages ?? []);
+          const remaining = current.queue?.filter((item) => item.id !== job.queueId) ?? [];
+          current.queue = remaining.length ? remaining : undefined;
+          this.markQueueMutation(current);
+          this.scheduleQueuePersist();
+          // The accepted queue receipt is already durable. Stop does not finish
+          // until its exact removal is durable too, otherwise the actor could
+          // promote the supposedly cancelled input in the replacement gap.
+          await this.flushSession();
+        }
+      }
+      releasePendingStart();
       this.bumpChat(current);
       return true;
     }
     if (job?.id) {
       asst.jobId = job.id;
       this.jobRef.set(job.id, { tabId: chat.id, msgId: asst.id });
+      if (pendingStart.cancelRequested) await this.cancelAdmittedTurn(chat, asst, job.id, pendingStart);
+      releasePendingStart();
       return true;
     }
+    if (pendingStart.cancelRequested) {
+      releasePendingStart();
+      this.finalizeCancelledLocally(chat, asst);
+      return false;
+    }
+    releasePendingStart();
     const failure = job && typeof job === 'object' && 'error' in job
       ? String((job as { error?: unknown }).error ?? '')
       : undefined;
@@ -3175,6 +3228,34 @@ export class Store {
     const chat = this.chat(chatId); if (!chat) return;
     const running = [...chat.messages].reverse().find((m) => m.status === 'running');
     if (!running) return;
+    const pendingStart = this.pendingTurnStarts.get(chat.id);
+    if (pendingStart?.assistantId === running.id) pendingStart.cancelRequested = true;
+    if (!running.jobId) {
+      // The optimistic row still belongs to _send. It will either abort before
+      // job:start or cancel the exact job immediately after admission. Marking a
+      // local terminal here created the old ownership hole: live provider work
+      // could appear after the row had already claimed cancellation.
+      this.bumpChat(chat);
+      return;
+    }
+    await this.cancelAdmittedTurn(chat, running, running.jobId, pendingStart);
+  }
+
+  private cancelAdmittedTurn(chat: Chat, running: Msg, jobId: string, pendingStart?: PendingTurnStart): Promise<void> {
+    if (pendingStart?.cancelJobId === jobId) return this.cancelRequests.get(jobId) ?? Promise.resolve();
+    if (pendingStart) pendingStart.cancelJobId = jobId;
+    const existing = this.cancelRequests.get(jobId);
+    if (existing) return existing;
+    const request = this.performAdmittedTurnCancel(chat, running, jobId);
+    this.cancelRequests.set(jobId, request);
+    const releaseRequest = () => {
+      if (this.cancelRequests.get(jobId) === request) this.cancelRequests.delete(jobId);
+    };
+    void request.then(releaseRequest, releaseRequest);
+    return request;
+  }
+
+  private async performAdmittedTurnCancel(chat: Chat, running: Msg, jobId: string): Promise<void> {
     // Stop owns queue dispatch before waiting on the daemon. This prevents the
     // terminal event from promoting a follow-up in the reply gap and keeps the
     // control visually stopped even when another controller hydrates at once.
@@ -3182,15 +3263,17 @@ export class Store {
     chat.queuePauseRevision = (chat.queuePauseRevision ?? 0) + 1;
     chat._queueResumeOperationId = undefined;
     this.bumpChat(chat);
-    if (!running.jobId) {
-      this.finalizeCancelledLocally(chat, running);
+    const result = await call('cancelJob', jobId);
+    const live = this.chat(chat.id);
+    if (!live || live.chatId !== chat.chatId) {
+      this.scheduleScopedSync(['session']);
       return;
     }
-    const result = await call('cancelJob', running.jobId);
+    const liveRunning = live.messages.find((message) => message.id === running.id && message.role === 'assistant') ?? running;
     if (result && typeof result === 'object') {
-      if (typeof result.queuePaused === 'boolean') chat.queuePaused = result.queuePaused;
-      if (Number.isInteger(result.queuePauseRevision)) chat.queuePauseRevision = result.queuePauseRevision;
-      this.bumpChat(chat);
+      if (typeof result.queuePaused === 'boolean') live.queuePaused = result.queuePaused;
+      if (Number.isInteger(result.queuePauseRevision)) live.queuePauseRevision = result.queuePauseRevision;
+      this.bumpChat(live);
     }
     const cancelled = result === true
       || (!!result && typeof result === 'object' && (result as { cancelled?: unknown }).cancelled === true);
@@ -3206,7 +3289,7 @@ export class Store {
       || (!!result && typeof result === 'object'
         && (result as { cancelled?: unknown }).cancelled === false
         && (reason === 'idle' || reason === 'unknown' || reason === 'not-owned'));
-    if (refused) this.finalizeCancelledLocally(chat, running, running.jobId);
+    if (refused) this.finalizeCancelledLocally(live, liveRunning, jobId);
     else this.scheduleScopedSync(['session']);
   }
 
@@ -3310,6 +3393,13 @@ export class Store {
           if (!isTerminalMessage(msg)) msg.status = 'running';
           this.jobRef.set(e.job.id, { tabId: chat.id, msgId: msg.id });
           if (chatId) this.chatJobs.set(chatId, { tabId: chat.id, msgId: msg.id });
+          const pendingStart = this.pendingTurnStarts.get(chat.id);
+          if (pendingStart?.assistantId === msg.id && pendingStart.cancelRequested) {
+            // job:start is the earliest durable admission boundary. Transfer a
+            // pre-admission Stop immediately; the later start reply sees the
+            // same job id and is deduped by cancelAdmittedTurn.
+            void this.cancelAdmittedTurn(chat, msg, e.job.id, pendingStart);
+          }
           this.bumpApp(false);
         }
         break;
