@@ -19,6 +19,8 @@ const {
   receiptAppliesToInstalledVersion,
   resolveArtifactSource,
   resolveUpdateFeed,
+  runUpdateStageWorker,
+  stageAndVerifyRelease,
   validateReleaseManifest,
   verifyWindowsRelease,
 } = require('./update-manager');
@@ -434,9 +436,10 @@ test('the manager checks and stages a local Mac release without any network requ
   fs.writeFileSync(feed, `${JSON.stringify(localManifest)}\n`);
   fs.writeFileSync(path.join(root, artifactName), bytes);
   manager.feedURL = feed;
-  manager.deps.extractArchive = (_archive, destination) => fs.mkdirSync(path.join(destination, 'Workass.app'), { recursive: true });
-  manager.deps.stageRelease = (_source, target) => fs.mkdirSync(target, { recursive: true });
-  manager.deps.verifyRelease = () => localManifest.designatedRequirement;
+  manager.deps.stageAndVerify = async (request) => {
+    fs.mkdirSync(request.incomingTarget, { recursive: true });
+    return { designatedRequirement: localManifest.designatedRequirement };
+  };
   assert.equal((await manager.check()).phase, 'available');
   const state = await manager.download();
   assert.equal(state.phase, 'ready');
@@ -466,19 +469,82 @@ test('the Windows manager stages both release trees inside the external update t
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.writeFileSync(destination, 'archive');
   };
-  manager.deps.extractArchive = (_archive, destination) => {
-    writeWindowsRelease(path.join(destination, 'Workass'));
+  manager.deps.stageAndVerify = async (request) => {
+    writeWindowsRelease(request.incomingTarget);
+    return { designatedRequirement: '' };
   };
-  manager.deps.stageRelease = (source, destination) => {
-    fs.cpSync(source, destination, { recursive: true, errorOnExist: true });
-  };
-  manager.deps.verifyRelease = () => '';
 
   const state = await manager.download();
   assert.equal(state.phase, 'ready');
   assert.equal(manager.prepared.incomingTarget, path.join(manager.prepared.transactionRoot, 'incoming-release'));
   assert.equal(manager.prepared.backupTarget, path.join(manager.prepared.transactionRoot, 'installed-before-activation'));
   assert.notEqual(path.dirname(manager.prepared.incomingTarget), path.dirname(manager.prepared.installTarget));
+});
+
+test('archive extraction, staging, and verification form one bounded worker task', () => {
+  const transactionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-stage-task-'));
+  const request = {
+    schemaVersion: 1,
+    transactionRoot,
+    archive: path.join(transactionRoot, 'release.zip'),
+    extracted: path.join(transactionRoot, 'extracted'),
+    currentRoot: path.join(transactionRoot, 'installed'),
+    incomingTarget: path.join(transactionRoot, 'incoming-release'),
+    targetVersion: '1.2.0',
+    platform: 'win32',
+    arch: 'x64',
+  };
+  const calls = [];
+  const result = stageAndVerifyRelease(request, {
+    extractArchive: (archive, extracted, platform) => { calls.push(['extract', archive, extracted, platform]); },
+    findExtractedRoot: (extracted, platform) => { calls.push(['find', extracted, platform]); return path.join(extracted, 'Workass'); },
+    stageRelease: (source, incoming, platform) => { calls.push(['stage', source, incoming, platform]); },
+    verifyRelease: (current, incoming, version, platform, arch) => {
+      calls.push(['verify', current, incoming, version, platform, arch]);
+      return '';
+    },
+  });
+  assert.deepEqual(result, { designatedRequirement: '' });
+  assert.deepEqual(calls.map((call) => call[0]), ['extract', 'find', 'stage', 'verify']);
+  assert.throws(() => stageAndVerifyRelease({
+    ...request,
+    incomingTarget: path.join(transactionRoot, '..', 'escaped'),
+  }), /escaped the transaction/);
+});
+
+test('heavy update staging runs in a worker thread instead of Electron main', async () => {
+  let invocation = null;
+  class FakeWorker extends EventEmitter {
+    constructor(file, options) {
+      super();
+      invocation = { file, options };
+      setImmediate(() => this.emit('message', { ok: true, result: { designatedRequirement: 'fixture' } }));
+    }
+  }
+  let settled = false;
+  const pending = runUpdateStageWorker({ schemaVersion: 1 }, {
+    WorkerClass: FakeWorker,
+    workerFile: '/app/update-manager.js',
+  }).then((result) => { settled = true; return result; });
+  assert.equal(settled, false);
+  assert.equal(invocation.file, '/app/update-manager.js');
+  assert.equal(invocation.options.workerData.workassTask, 'stage-update');
+  assert.deepEqual(await pending, { designatedRequirement: 'fixture' });
+});
+
+test('the real staging worker reports a bounded extraction failure across the thread boundary', async () => {
+  const transactionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-stage-worker-'));
+  await assert.rejects(() => runUpdateStageWorker({
+    schemaVersion: 1,
+    transactionRoot,
+    archive: path.join(transactionRoot, 'release.zip'),
+    extracted: path.join(transactionRoot, 'extracted'),
+    currentRoot: path.join(transactionRoot, 'Workass.app'),
+    incomingTarget: path.join(transactionRoot, '.Workass.app.incoming-fixture'),
+    targetVersion: '1.2.0',
+    platform: 'darwin',
+    arch: 'arm64',
+  }), /archive could not be inspected/);
 });
 
 test('manifest validation requires the exact platform, checksum, size, and platform trust law', () => {

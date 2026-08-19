@@ -9,6 +9,7 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const { Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
+const { isMainThread, parentPort, workerData, Worker } = require('node:worker_threads');
 
 const DEFAULT_FEED_ROOT = 'https://github.com/Dukler/workass/releases/latest/download/';
 const MAX_MANIFEST_BYTES = 256 * 1024;
@@ -595,6 +596,81 @@ function verifyRelease(currentRoot, incomingRoot, targetVersion, platform = proc
   return '';
 }
 
+function validateStageRequest(request) {
+  if (!request || request.schemaVersion !== 1 || !['darwin', 'win32'].includes(request.platform) ||
+      !parseVersion(request.targetVersion)) {
+    throw new Error('invalid update staging request');
+  }
+  for (const key of ['transactionRoot', 'archive', 'extracted', 'currentRoot', 'incomingTarget']) {
+    if (!path.isAbsolute(String(request[key] || ''))) throw new Error(`update staging ${key} must be absolute`);
+  }
+  if (request.archive !== path.join(request.transactionRoot, 'release.zip') ||
+      request.extracted !== path.join(request.transactionRoot, 'extracted')) {
+    throw new Error('update staging paths escaped the transaction');
+  }
+  if (request.platform === 'win32') {
+    if (request.incomingTarget !== path.join(request.transactionRoot, 'incoming-release')) {
+      throw new Error('Windows update staging target escaped the transaction');
+    }
+  } else if (path.dirname(request.incomingTarget) !== path.dirname(request.currentRoot) ||
+             !path.basename(request.incomingTarget).startsWith('.Workass.app.incoming-')) {
+    throw new Error('macOS update staging target must stay beside the installed app');
+  }
+  return request;
+}
+
+function stageAndVerifyRelease(rawRequest, dependencies = {}) {
+  const request = validateStageRequest(rawRequest);
+  const extract = dependencies.extractArchive || extractArchive;
+  const findRoot = dependencies.findExtractedRoot || findExtractedRoot;
+  const stage = dependencies.stageRelease || stageRelease;
+  const verify = dependencies.verifyRelease || verifyRelease;
+  extract(request.archive, request.extracted, request.platform);
+  const source = findRoot(request.extracted, request.platform);
+  stage(source, request.incomingTarget, request.platform);
+  const designatedRequirement = verify(
+    request.currentRoot,
+    request.incomingTarget,
+    request.targetVersion,
+    request.platform,
+    request.arch,
+  );
+  return { designatedRequirement: String(designatedRequirement || '') };
+}
+
+function runUpdateStageWorker(request, { WorkerClass = Worker, workerFile = __filename } = {}) {
+  return new Promise((resolve, reject) => {
+    let thread;
+    try {
+      thread = new WorkerClass(workerFile, {
+        workerData: { workassTask: 'stage-update', request },
+      });
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    let settled = false;
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err instanceof Error ? err : new Error(String(err || 'update staging worker failed')));
+    };
+    thread.once('message', (message) => {
+      if (settled) return;
+      if (!message || message.ok !== true) {
+        fail(new Error(String(message?.error || 'update staging worker failed')));
+        return;
+      }
+      settled = true;
+      resolve(message.result || { designatedRequirement: '' });
+    });
+    thread.once('error', fail);
+    thread.once('exit', (code) => {
+      if (!settled) fail(new Error(`update staging worker exited before its receipt${code ? ` (${code})` : ''}`));
+    });
+  });
+}
+
 function postLocalUpdate(daemonURL, action, updateId, timeoutMs = 2500) {
   return new Promise((resolve) => {
     const base = new URL(daemonURL);
@@ -687,11 +763,9 @@ class UpdateManager {
       downloadArtifact: (url, destination, artifact, options = {}) => downloadArtifact(
         url, destination, artifact, { ...options, networkRequest },
       ),
-      extractArchive,
       postLocalUpdate,
       spawn,
-      stageRelease,
-      verifyRelease,
+      stageAndVerify: runUpdateStageWorker,
       schedule: setTimeout,
       cancelSchedule: clearTimeout,
       repeat: setInterval,
@@ -879,8 +953,6 @@ class UpdateManager {
         onProgress: (received, total) => this.publish({ progress: total > 0 ? Math.min(1, received / total) : 0 }),
       });
       this.publish({ phase: 'staging', progress: 1 });
-      this.deps.extractArchive(archive, extracted, this.platform);
-      const source = findExtractedRoot(extracted, this.platform);
       const installTarget = installedRoot(this.resourcesPath, this.executablePath, this.platform);
       const parent = path.dirname(installTarget);
       const incomingTarget = this.platform === 'darwin'
@@ -890,8 +962,18 @@ class UpdateManager {
         ? path.join(parent, `.Workass.app.previous-${updateId}`)
         : path.join(transactionRoot, 'installed-before-activation');
       if (fs.existsSync(incomingTarget) || fs.existsSync(backupTarget)) throw new Error('update staging target already exists');
-      this.deps.stageRelease(source, incomingTarget, this.platform);
-      const designatedRequirement = this.deps.verifyRelease(installTarget, incomingTarget, this.manifest.version, this.platform, this.arch);
+      const staged = await this.deps.stageAndVerify({
+        schemaVersion: 1,
+        transactionRoot,
+        archive,
+        extracted,
+        currentRoot: installTarget,
+        incomingTarget,
+        targetVersion: this.manifest.version,
+        platform: this.platform,
+        arch: this.arch,
+      });
+      const designatedRequirement = String(staged?.designatedRequirement || '');
       this.prepared = { updateId, transactionRoot, installTarget, incomingTarget, backupTarget, designatedRequirement };
       return this.publish({ phase: 'ready', progress: 1, error: null });
     } catch (err) {
@@ -1044,6 +1126,8 @@ module.exports = {
   receiptAppliesToInstalledVersion,
   resolveArtifactSource,
   resolveUpdateFeed,
+  runUpdateStageWorker,
+  stageAndVerifyRelease,
   stageRelease,
   validateReleaseManifest,
   verifyRelease,
@@ -1051,3 +1135,11 @@ module.exports = {
   verifyWindowsPE,
   verifyWindowsRelease,
 };
+
+if (!isMainThread && workerData?.workassTask === 'stage-update' && parentPort) {
+  try {
+    parentPort.postMessage({ ok: true, result: stageAndVerifyRelease(workerData.request) });
+  } catch (err) {
+    parentPort.postMessage({ ok: false, error: String(err && err.message || err) });
+  }
+}
