@@ -691,6 +691,11 @@ export function Composer({ chat }: { chat: Chat | null }) {
     // Blocked while offline (mirrors the disabled send button); the banner above
     // the composer explains why. Enter must not silently drop into a dead socket.
     if (app.connection !== 'connected') return;
+    if (!running && chat?.queuePaused) {
+      const resumeOnly = !!chat.queue?.length;
+      const resumed = await store.resumeQueued(chat.id);
+      if (!resumed || resumeOnly) return;
+    }
     const submittedDraft = text;
     const t = text.trim();
     if (running && !t && intent === 'steer') {
@@ -774,13 +779,16 @@ export function Composer({ chat }: { chat: Chat | null }) {
 
   const hasText = text.trim().length > 0;
   const steerMode = running && hasText;      // typing while running → steer/queue
+  const pausedQueue = !running && chat?.queuePaused === true && !!chat.queue?.length;
   // While the daemon socket is down, sending would vanish into a dead queue —
   // block it honestly (the banner above the composer explains why).
   const offline = app.connection !== 'connected';
-  const canSend = (running || hasText) && !offline && !preparingImages;
-  const sendGlyph = steerMode ? '⤴' : running ? '■' : '↑';
+  const canSend = (running || hasText || pausedQueue) && !offline && !preparingImages;
+  const sendGlyph = pausedQueue ? '▶' : steerMode ? '⤴' : running ? '■' : '↑';
   const sendTitle = offline
     ? 'Sin conexión con el daemon'
+    : pausedQueue
+      ? 'Continuar mensajes en cola'
     : steerMode
       ? (steerAvail || steerBehavior !== 'capability'
         ? 'Dirigir el turno en curso · ⌘Enter'

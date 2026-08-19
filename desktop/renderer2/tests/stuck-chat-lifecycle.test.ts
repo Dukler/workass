@@ -195,7 +195,7 @@ test('late data after local cancellation never resurrects the terminal row', () 
   assert.equal(assistant.status, 'cancelled');
 });
 
-test('cancel false finalizes locally, clears anchors, and recovers the FIFO', async () => {
+test('cancel false finalizes locally, clears anchors, and keeps the FIFO paused', async () => {
   const previousWindow = (globalThis as any).window;
   (globalThis as any).window = { api: { cancelJob: async () => ({ cancelled: false, reason: 'idle' }) } };
   try {
@@ -221,7 +221,35 @@ test('cancel false finalizes locally, clears anchors, and recovers the FIFO', as
     assert.equal(assistant.status, 'cancelled');
     assert.equal((subject as any).jobRef.has('job-1'), false);
     assert.equal((subject as any).chatJobs.has(owner.chatId), false);
-    assert.equal(recovered, 1);
+    assert.equal(recovered, 0);
+    assert.equal(owner.queuePaused, true);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('an in-flight cancel receipt never manufactures a local terminal turn', async () => {
+  const previousWindow = (globalThis as any).window;
+  (globalThis as any).window = {
+    api: { cancelJob: async () => ({ cancelled: false, reason: 'pending', queuePaused: true, queuePauseRevision: 2 }) },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    const assistant: Msg = {
+      id: 'assistant-canonical', role: 'assistant', content: 'partial', status: 'running',
+      at: null, jobId: 'job-1', events: [],
+    };
+    owner.messages = [assistant];
+    let syncs = 0;
+    (subject as any).scheduleScopedSync = () => { syncs += 1; };
+
+    await subject.cancelChatTurn(owner.id);
+    assert.equal(assistant.status, 'running');
+    assert.equal(owner.queuePaused, true);
+    assert.equal(owner.queuePauseRevision, 2);
+    assert.equal(syncs, 1);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
@@ -304,6 +332,112 @@ test('an accepted stop reaches a terminal row and does not block the next send',
     const next = owner.messages.at(-1)!;
     assert.equal(next.status, 'running');
     assert.equal(next.jobId, 'job-after-stop');
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('explicit stop leaves queued follow-ups paused after the terminal event', async () => {
+  const previousWindow = (globalThis as any).window;
+  (globalThis as any).window = {
+    api: {
+      cancelJob: async () => ({ cancelled: true, reason: 'cancelled', queuePaused: true, queuePauseRevision: 4 }),
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    owner.queue = [{ id: 'queued-next', text: 'do not auto-start' }];
+    owner.queuePauseRevision = 3;
+    const assistant: Msg = {
+      id: 'assistant-canonical', role: 'assistant', content: 'partial', status: 'running',
+      at: null, jobId: 'job-1', events: [],
+    };
+    owner.messages = [assistant];
+    (subject as any).jobRef.set('job-1', { tabId: owner.id, msgId: assistant.id });
+    (subject as any).chatJobs.set(owner.chatId, { tabId: owner.id, msgId: assistant.id });
+    let drains = 0;
+    (subject as any).flushNextQueued = async () => { drains += 1; };
+
+    await subject.cancelChatTurn(owner.id);
+    assert.equal(owner.queuePaused, true);
+    assert.equal(owner.queuePauseRevision, 4);
+    (subject as any).onJobEvent({
+      type: 'end',
+      job: job({ status: 'failed', code: 130, stopReason: 'cancelled', finishedAt: '2026-07-24T12:00:02Z' }),
+    });
+    assert.equal(subject.isChatRunning(owner.id), false);
+    assert.equal(owner.queue?.[0].id, 'queued-next');
+    assert.equal(drains, 0);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('resuming a paused queue is revision-fenced before it drains', async () => {
+  const previousWindow = (globalThis as any).window;
+  const requests: Record<string, unknown>[] = [];
+  (globalThis as any).window = {
+    api: {
+      chatQueueResume: async (request: Record<string, unknown>) => {
+        requests.push(request);
+        return {
+          ok: true, operationId: request.operationId, queuePaused: false,
+          queuePauseRevision: 7, actorRevision: 12,
+        };
+      },
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    owner.queue = [{ id: 'queued-next', text: 'continue explicitly' }];
+    owner.queuePaused = true;
+    owner.queuePauseRevision = 7;
+    let drains = 0;
+    (subject as any).flushNextQueued = async () => { drains += 1; };
+
+    assert.equal(await subject.resumeQueued(owner.id), true);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].expectedRevision, 7);
+    assert.equal(requests[0].tabId, owner.id);
+    assert.equal(requests[0].chatId, owner.chatId);
+    assert.equal(owner.queuePaused, false);
+    assert.equal(owner.actorRevision, 12);
+    assert.equal(drains, 1);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('resuming after the last queued row is removed persists the empty queue first', async () => {
+  const previousWindow = (globalThis as any).window;
+  const order: string[] = [];
+  (globalThis as any).window = {
+    api: {
+      chatQueueResume: async (request: Record<string, unknown>) => {
+        order.push('resume');
+        return {
+          ok: true, operationId: request.operationId, queuePaused: false,
+          queuePauseRevision: 9, actorRevision: 15,
+        };
+      },
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    owner.queue = [];
+    owner.queuePaused = true;
+    owner.queuePauseRevision = 9;
+    (subject as any).flushSession = async () => { order.push('persist'); };
+
+    assert.equal(await subject.resumeQueued(owner.id), true);
+    assert.deepEqual(order, ['persist', 'resume']);
+    assert.equal(owner.queuePaused, false);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;

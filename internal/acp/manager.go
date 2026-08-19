@@ -1619,8 +1619,10 @@ func clampInt(v, min, max int) int {
 const finishedJobReceiptLimit = 256
 
 type JobCancelResult struct {
-	Cancelled bool   `json:"cancelled"`
-	Reason    string `json:"reason"`
+	Cancelled          bool   `json:"cancelled"`
+	Reason             string `json:"reason"`
+	QueuePaused        bool   `json:"queuePaused,omitempty"`
+	QueuePauseRevision uint64 `json:"queuePauseRevision,omitempty"`
 }
 
 func (m *Manager) rememberFinishedJobLocked(id string) {

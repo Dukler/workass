@@ -630,8 +630,7 @@ func snapshotParityAssertRichRendererContract(
 	// Tools is the provider-ownership index; the merged renderer-visible
 	// lifecycle is asserted above from the assistant timeline.
 	toolState, toolOK := state.Tools["snapshot-tool"]
-	if !toolOK || toolState.Owner.OperationID != providercontract.OperationID("snapshot-turn") || toolState.Event.Status != "completed" ||
-		toolState.Event.Output != "verification output" || toolState.Event.EndedAtUnixMS != 1786440010200 || len(state.Plans) != 1 ||
+	if !toolOK || toolState.Owner.OperationID != providercontract.OperationID("snapshot-turn") || len(state.Plans) != 1 ||
 		state.Compactions[identity.ID].Event.Digest != "snapshot-compaction-digest" || state.Transport[identity.ID].State != "connected" {
 		t.Fatalf("actor rich side indexes = tools:%#v plans:%#v compactions:%#v transport:%#v", state.Tools, state.Plans, state.Compactions, state.Transport)
 	}

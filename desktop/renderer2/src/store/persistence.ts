@@ -44,6 +44,8 @@ export interface MirrorChat {
   // current renderer remove one deliberately while preventing an older save
   // request from recreating a row the daemon already consumed.
   agentQueueRevision?: number;
+  queuePaused?: boolean;
+  queuePauseRevision?: number;
   runtimeControlRevision?: number;
   // The chat's current agent plan (the rail's step-by-step). A plan update only
   // arrives when the agent edits its todo list, so the authoring message ages out

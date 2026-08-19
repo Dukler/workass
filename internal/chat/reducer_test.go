@@ -813,8 +813,66 @@ func TestSteerCancelAndPermissionKeepOriginLaneAcrossProviderSelection(t *testin
 	if state.PendingCancel != nil || !outboxHas(&state, cancelEffectID("cancel"), OutboxCompleted) {
 		t.Fatalf("terminal cancel receipt did not settle idempotently: %#v", state)
 	}
+	if state.Foreground != nil || !state.QueueControl.Paused || len(state.Queue) != 1 || state.Queue[0].OperationID != "steer" || state.Queue[0].LaneID != alpha.ID {
+		t.Fatalf("explicit stop did not retain the queued steer behind the durable pause: foreground=%#v queue=%#v control=%#v", state.Foreground, state.Queue, state.QueueControl)
+	}
+	state, _ = apply(t, state, ResumeQueue{OperationID: "resume", ExpectedRevision: state.QueueControl.Revision})
 	if state.Foreground == nil || state.Foreground.OperationID != "steer" || state.Foreground.LaneID != alpha.ID {
-		t.Fatalf("queued unsupported steer did not retain priority/origin after terminal: %#v", state.Foreground)
+		t.Fatalf("resumed steer did not retain priority/origin: %#v", state.Foreground)
+	}
+}
+
+func TestLateSteerReceiptAfterUrgentCancelNeverReplaysInput(t *testing.T) {
+	state, _ := NewState("chat")
+	lane := testLane("chat", "alpha")
+	state, _ = apply(t, state, SelectLane{Identity: lane})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "alpha", RootID: "thread", HeadID: "thread", Lineage: 1},
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
+	})
+	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "work"})
+	state, _ = apply(t, state, TurnAdmitted{
+		OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"},
+	})
+	state, _ = apply(t, state, Steer{
+		OperationID: "steer", Text: "redirect",
+		Presentation: provider.TurnPresentation{UserMessageID: "steer-user"},
+	})
+	state, _ = apply(t, state, ClaimEffect{EffectID: steerEffectID("steer")})
+	state, _ = apply(t, state, CancelTurn{OperationID: "cancel"})
+	state, _ = apply(t, state, TurnTerminated{OperationID: "turn", Status: "cancelled"})
+	state, _ = apply(t, state, SteerAdmitted{OperationID: "steer", Accepted: true, AwaitConsumption: true})
+
+	if state.Foreground != nil || !state.QueueControl.Paused || len(state.Queue) != 0 {
+		t.Fatalf("urgent stop replayed work: foreground=%#v queue=%#v control=%#v", state.Foreground, state.Queue, state.QueueControl)
+	}
+	var rows int
+	for _, event := range state.Ledger {
+		if event.OperationID == "steer" {
+			rows++
+			if event.SteerState != "uncertain" || event.TerminalState != "unconsumed" {
+				t.Fatalf("late steer changed safe terminal ownership: %#v", event)
+			}
+		}
+	}
+	if rows != 1 || !outboxHas(&state, steerEffectID("steer"), OutboxAmbiguous) {
+		t.Fatalf("late steer ownership rows=%d outbox=%#v", rows, state.Outbox)
+	}
+}
+
+func TestQueueResumeCannotReleaseANewerStopRevision(t *testing.T) {
+	state, _ := NewState("chat")
+	state.QueueControl.Paused = true
+	state.QueueControl.Revision = 2
+	if _, _, err := Reduce(state, ResumeQueue{OperationID: "stale-resume", ExpectedRevision: 1}); err == nil {
+		t.Fatal("stale queue resume released a newer stop boundary")
+	}
+	if !state.QueueControl.Paused || state.QueueControl.Revision != 2 {
+		t.Fatalf("failed stale resume mutated source state: %#v", state.QueueControl)
+	}
+	state, _ = apply(t, state, ResumeQueue{OperationID: "resume", ExpectedRevision: 2})
+	if state.QueueControl.Paused || state.QueueControl.ResumeReceipts["resume"].PauseRevision != 2 {
+		t.Fatalf("exact queue resume was not committed: %#v", state.QueueControl)
 	}
 }
 
@@ -997,7 +1055,7 @@ func TestTerminalEventPreservesCompleteSemanticsAndSettlesOpenActivity(t *testin
 	if assistant.Permission != nil || len(state.Permissions) != 0 {
 		t.Fatalf("unresolved permission survived terminal: message=%#v state=%#v", assistant.Permission, state.Permissions)
 	}
-	if len(assistant.Timeline) != 1 || assistant.Timeline[0].Tool == nil || assistant.Timeline[0].Tool.Status != "failed" || assistant.Timeline[0].Tool.EndedAtUnixMS == 0 || state.Tools["tool"].Event.Status != "failed" {
+	if len(assistant.Timeline) != 1 || assistant.Timeline[0].Tool == nil || assistant.Timeline[0].Tool.Status != "failed" || assistant.Timeline[0].Tool.EndedAtUnixMS == 0 || state.Tools["tool"].Owner.OperationID != provider.OperationID("turn") {
 		t.Fatalf("running tool did not settle at terminal: %#v tools=%#v", assistant.Timeline, state.Tools)
 	}
 	steer := state.Ledger[2]

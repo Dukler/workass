@@ -339,34 +339,9 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 		})
 		return true, nil
 	case SteerTurnEffect:
-		lane, err := c.lane(effect.LaneID)
-		if err != nil {
-			return true, err
-		}
-		receipt, err := lane.Delivery().Steer(ctx, provider.SteerInput{
-			OperationID: effect.OperationID, Turn: effect.Turn, Text: effect.Text,
-			Attachments: append([]provider.Attachment(nil), effect.Attachments...),
-		})
-		if err != nil {
-			return true, c.engine.Apply(SteerFailed{
-				OperationID: effect.OperationID, Kind: providerErrorKind(err),
-				Unsupported: provider.ErrorIs(err, provider.ErrorUnsupportedCapability),
-				Ambiguous:   provider.ErrorIs(err, provider.ErrorAcceptanceAmbiguous) || receipt.Ambiguous,
-			})
-		}
-		return true, c.engine.Apply(SteerAdmitted{
-			OperationID: effect.OperationID, Accepted: receipt.Accepted, Consumed: receipt.Consumed,
-			AwaitConsumption: receipt.AwaitConsumption, Interrupted: receipt.Interrupted,
-		})
+		return true, c.executeSteer(ctx, effect)
 	case CancelTurnEffect:
-		lane, err := c.lane(effect.LaneID)
-		if err != nil {
-			return true, err
-		}
-		if err := lane.Delivery().Cancel(ctx, effect.Turn); err != nil {
-			return true, c.engine.Apply(CancelFailed{OperationID: effect.OperationID, Kind: providerErrorKind(err)})
-		}
-		return true, c.engine.Apply(CancelAcknowledged{OperationID: effect.OperationID})
+		return true, c.executeCancel(ctx, effect)
 	case ResolvePermissionEffect:
 		lane, err := c.lane(effect.LaneID)
 		if err != nil {
@@ -453,6 +428,79 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 	default:
 		return true, fmt.Errorf("chat coordinator cannot execute effect %T", effect)
 	}
+}
+
+// ExecuteSteer claims one exact live direction without waiting behind unrelated
+// actor work in the ordinary outbox drain. The steer remains durable before the
+// provider call, and its acknowledgement still settles the same immutable
+// operation; only dispatch priority changes.
+func (c *Coordinator) ExecuteSteer(ctx context.Context, operationID provider.OperationID) (bool, error) {
+	if c == nil {
+		return false, errors.New("chat coordinator is unavailable")
+	}
+	operationID = provider.NormalizeOperationID(string(operationID))
+	effect, ok, err := c.engine.ClaimEffect(steerEffectID(operationID))
+	if err != nil || !ok {
+		return ok, err
+	}
+	steer, ok := effect.(SteerTurnEffect)
+	if !ok {
+		return true, fmt.Errorf("steer operation claimed non-steer effect %T", effect)
+	}
+	return true, c.executeSteer(ctx, steer)
+}
+
+func (c *Coordinator) executeSteer(ctx context.Context, effect SteerTurnEffect) error {
+	lane, err := c.lane(effect.LaneID)
+	if err != nil {
+		return err
+	}
+	receipt, err := lane.Delivery().Steer(ctx, provider.SteerInput{
+		OperationID: effect.OperationID, Turn: effect.Turn, Text: effect.Text,
+		Attachments: append([]provider.Attachment(nil), effect.Attachments...),
+	})
+	if err != nil {
+		return c.engine.Apply(SteerFailed{
+			OperationID: effect.OperationID, Kind: providerErrorKind(err),
+			Unsupported: provider.ErrorIs(err, provider.ErrorUnsupportedCapability),
+			Ambiguous:   provider.ErrorIs(err, provider.ErrorAcceptanceAmbiguous) || receipt.Ambiguous,
+		})
+	}
+	return c.engine.Apply(SteerAdmitted{
+		OperationID: effect.OperationID, Accepted: receipt.Accepted, Consumed: receipt.Consumed,
+		AwaitConsumption: receipt.AwaitConsumption, Interrupted: receipt.Interrupted,
+	})
+}
+
+// ExecuteCancel claims and executes one exact cancellation without waiting for
+// the ordinary outbox drain. In particular, a provider's slow live-steer
+// acknowledgement must never hold Stop behind drainMu. ClaimEffect preserves
+// the same durable-before-external-call rule while allowing the cancellation
+// notification to preempt that unrelated in-flight effect.
+func (c *Coordinator) ExecuteCancel(ctx context.Context, operationID provider.OperationID) (bool, error) {
+	if c == nil {
+		return false, errors.New("chat coordinator is unavailable")
+	}
+	effect, ok, err := c.engine.ClaimEffect(cancelEffectID(provider.NormalizeOperationID(string(operationID))))
+	if err != nil || !ok {
+		return ok, err
+	}
+	cancel, ok := effect.(CancelTurnEffect)
+	if !ok {
+		return true, fmt.Errorf("cancel operation claimed non-cancel effect %T", effect)
+	}
+	return true, c.executeCancel(ctx, cancel)
+}
+
+func (c *Coordinator) executeCancel(ctx context.Context, effect CancelTurnEffect) error {
+	lane, err := c.lane(effect.LaneID)
+	if err != nil {
+		return err
+	}
+	if err := lane.Delivery().Cancel(ctx, effect.Turn); err != nil {
+		return c.engine.Apply(CancelFailed{OperationID: effect.OperationID, Kind: providerErrorKind(err)})
+	}
+	return c.engine.Apply(CancelAcknowledged{OperationID: effect.OperationID})
 }
 
 // ExecuteDetach claims and executes one exact detach effect without draining

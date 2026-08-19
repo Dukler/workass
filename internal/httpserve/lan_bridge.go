@@ -170,6 +170,7 @@ const LANBridgeJS = `(() => {
     listSkills: () => invoke('skills:list'), appMeta: () => invoke('app:meta'), stateDigest: () => invoke('state:digest'), getSettings: () => invoke('settings:get'), setSettings: (s) => invoke('settings:set', s),
     getConfig: () => invoke('config:get'), setConfig: (p) => invoke('config:set', p), getSession: () => invoke('session:get'), saveSession: (s) => invoke('session:save', s),
     chatQueueReplace: (o) => invoke('chat:queue-replace', o),
+    chatQueueResume: (o) => invoke('chat:queue-resume', o),
     chatCreate: (o) => invoke('chat:create', o),
     chatPresentationSave: (o) => invoke('chat:presentation-save', o),
     chatRuntimeControlsSave: (o) => invoke('chat:runtime-controls-save', o),

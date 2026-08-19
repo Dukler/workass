@@ -187,6 +187,10 @@ export interface Chat {
   // it unchanged; the daemon owns increments on enqueue/consume and accepts a
   // user edit/removal only from the current revision.
   agentQueueRevision?: number;
+  // Explicit Stop pauses FIFO dispatch at the actor boundary. Rows remain
+  // visible/editable and resume only from an explicit user action.
+  queuePaused?: boolean;
+  queuePauseRevision?: number;
   // Daemon-issued fence for exact-chat provider/model/mode commits. Renderer
   // mirrors echo it unchanged so an older save cannot undo agent-side recovery.
   runtimeControlRevision?: number;
@@ -246,6 +250,7 @@ export interface Chat {
   // Locally-queued follow-ups (R2 fallback when appChatSteer is absent). Sent
   // one at a time at each turn's end, in order. Editable/reorderable/removable.
   queue?: QueuedMsg[];
+  _queueResumeOperationId?: string;
   _initPromise?: Promise<void>;
   // Stable until the daemon returns a receipt for this exact provider-lane
   // selection. A lost app-chat:new-session reply must retry the same actor

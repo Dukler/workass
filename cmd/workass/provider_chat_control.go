@@ -105,6 +105,36 @@ func (r *providerChatRuntime) ReplaceStagedQueue(tabID, chatID string, operation
 	}, nil
 }
 
+func (r *providerChatRuntime) ResumeQueue(ctx context.Context, tabID, chatID string, operationID providercontract.OperationID, expectedRevision uint64) (map[string]any, error) {
+	actor, _, err := r.exactActor(tabID, chatID)
+	if err != nil {
+		return nil, err
+	}
+	operationID = providercontract.NormalizeOperationID(string(operationID))
+	if operationID == "" || expectedRevision == 0 {
+		return nil, errors.New("queue resume requires a stable operation id and pause revision")
+	}
+	actor.mu.Lock()
+	err = actor.engine.Apply(chat.ResumeQueue{OperationID: operationID, ExpectedRevision: expectedRevision})
+	actor.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if err := actor.coordinator.Drain(ctx); err != nil {
+		return nil, err
+	}
+	state := actor.engine.Snapshot()
+	receipt, ok := state.QueueControl.ResumeReceipts[operationID]
+	if !ok || receipt.PauseRevision != expectedRevision {
+		return nil, errors.New("queue resume lost its durable actor receipt")
+	}
+	return map[string]any{
+		"ok": true, "tabId": tabID, "chatId": chatID, "operationId": string(operationID),
+		"queuePaused": state.QueueControl.Paused, "queuePauseRevision": state.QueueControl.Revision,
+		"actorRevision": state.Revision,
+	}, nil
+}
+
 func (r *providerChatRuntime) SavePresentation(tabID, chatID string, operationID providercontract.OperationID, expectedRevision uint64, raw map[string]any) (map[string]any, error) {
 	actor, _, err := r.exactActor(tabID, chatID)
 	if err != nil {
@@ -982,11 +1012,12 @@ func (r *providerChatRuntime) QueueAgentMessage(ctx context.Context, tabID, chat
 			return nil, err
 		}
 		if needsDrain {
-			if err := actor.coordinator.Drain(ctx); err != nil {
+			actorOperationID := providercontract.NormalizeOperationID(queueID)
+			if _, err := actor.coordinator.ExecuteSteer(ctx, actorOperationID); err != nil {
 				return nil, err
 			}
 			actor.mu.Lock()
-			result, err = r.agentSteerQueuedResultLocked(actor.engine.Snapshot(), providercontract.NormalizeOperationID(queueID))
+			result, err = r.agentSteerQueuedResultLocked(actor.engine.Snapshot(), actorOperationID)
 			actor.mu.Unlock()
 			if err != nil {
 				return nil, err

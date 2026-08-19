@@ -202,6 +202,21 @@ type QueueMutationReceipt struct {
 	Revision uint64
 }
 
+// QueueControlState is the durable dispatch gate for work that is already in
+// either queue. Explicit cancellation closes the gate before the provider is
+// contacted, so a terminal event cannot make Stop look like it failed by
+// immediately starting the next row. Resuming is revision-fenced: a delayed
+// click from an earlier cancellation can never release a newer paused queue.
+type QueueControlState struct {
+	Paused         bool
+	Revision       uint64
+	ResumeReceipts map[provider.OperationID]QueueResumeReceipt
+}
+
+type QueueResumeReceipt struct {
+	PauseRevision uint64
+}
+
 type PresentationMutationReceipt struct {
 	Digest   string
 	Revision uint64
@@ -470,7 +485,6 @@ func providerActivityLedgerOwnsLane(state State, laneID provider.LaneID, event L
 
 type ToolState struct {
 	Owner ProviderActivityOwner
-	Event provider.ToolEvent
 }
 
 type PlanState struct {
@@ -673,6 +687,7 @@ type State struct {
 	ActiveLaneID                   provider.LaneID
 	DesiredLaneID                  provider.LaneID
 	StagedQueue                    []StagedQueueEntry
+	QueueControl                   QueueControlState
 	QueueMutationReceipts          map[provider.OperationID]QueueMutationReceipt
 	PresentationMutationReceipts   map[provider.OperationID]PresentationMutationReceipt
 	RuntimeControlMutationReceipts map[provider.OperationID]RuntimeControlMutationReceipt
@@ -705,6 +720,7 @@ func NewState(chatID string) (State, error) {
 		ChatID:                         chatID,
 		Lanes:                          make(map[provider.LaneID]LaneState),
 		Operations:                     make(map[provider.OperationID]struct{}),
+		QueueControl:                   QueueControlState{ResumeReceipts: make(map[provider.OperationID]QueueResumeReceipt)},
 		QueueMutationReceipts:          make(map[provider.OperationID]QueueMutationReceipt),
 		PresentationMutationReceipts:   make(map[provider.OperationID]PresentationMutationReceipt),
 		RuntimeControlMutationReceipts: make(map[provider.OperationID]RuntimeControlMutationReceipt),
@@ -741,6 +757,10 @@ func (s State) Clone() State {
 	}
 	out.Queue = cloneQueue(s.Queue)
 	out.StagedQueue = cloneStagedQueue(s.StagedQueue)
+	out.QueueControl.ResumeReceipts = make(map[provider.OperationID]QueueResumeReceipt, len(s.QueueControl.ResumeReceipts))
+	for operationID, receipt := range s.QueueControl.ResumeReceipts {
+		out.QueueControl.ResumeReceipts[operationID] = receipt
+	}
 	out.QueueMutationReceipts = make(map[provider.OperationID]QueueMutationReceipt, len(s.QueueMutationReceipts))
 	for operationID, receipt := range s.QueueMutationReceipts {
 		out.QueueMutationReceipts[operationID] = receipt
@@ -816,7 +836,6 @@ func (s State) Clone() State {
 	}
 	out.Tools = make(map[string]ToolState, len(s.Tools))
 	for id, value := range s.Tools {
-		value.Event.Attachments = append([]provider.Attachment(nil), value.Event.Attachments...)
 		out.Tools[id] = value
 	}
 	out.Plans = make(map[provider.OperationID]PlanState, len(s.Plans))
@@ -970,7 +989,7 @@ func (s State) Validate() error {
 	if strings.TrimSpace(s.ChatID) == "" {
 		return errors.New("chat state requires chat id")
 	}
-	if s.Lanes == nil || s.Operations == nil || s.QueueMutationReceipts == nil || s.PresentationMutationReceipts == nil || s.RuntimeControlMutationReceipts == nil || s.WorkspaceMutationReceipts == nil || s.LaneSelectionMutationReceipts == nil || s.CancelMutationReceipts == nil || s.AgentWaitObservationReceipts == nil || s.Tools == nil || s.Plans == nil || s.Permissions == nil || s.Background == nil || s.Usage == nil || s.Compactions == nil || s.Transport == nil {
+	if s.Lanes == nil || s.Operations == nil || s.QueueControl.ResumeReceipts == nil || s.QueueMutationReceipts == nil || s.PresentationMutationReceipts == nil || s.RuntimeControlMutationReceipts == nil || s.WorkspaceMutationReceipts == nil || s.LaneSelectionMutationReceipts == nil || s.CancelMutationReceipts == nil || s.AgentWaitObservationReceipts == nil || s.Tools == nil || s.Plans == nil || s.Permissions == nil || s.Background == nil || s.Usage == nil || s.Compactions == nil || s.Transport == nil {
 		return errors.New("chat state maps are not initialized")
 	}
 	if s.Deleted {
@@ -988,6 +1007,17 @@ func (s State) Validate() error {
 		if operationID == "" || strings.TrimSpace(receipt.Digest) == "" || receipt.Revision == 0 || receipt.Revision > s.Presentation.AgentQueueRevision {
 			return errors.New("chat queue mutation receipt is invalid")
 		}
+	}
+	for operationID, receipt := range s.QueueControl.ResumeReceipts {
+		if operationID == "" || receipt.PauseRevision == 0 || receipt.PauseRevision > s.QueueControl.Revision {
+			return errors.New("chat queue resume receipt is invalid")
+		}
+		if _, exists := s.Operations[operationID]; !exists {
+			return errors.New("chat queue resume receipt lost its operation")
+		}
+	}
+	if s.QueueControl.Paused && s.QueueControl.Revision == 0 {
+		return errors.New("chat queue pause is missing its revision")
 	}
 	for operationID, receipt := range s.PresentationMutationReceipts {
 		if operationID == "" || strings.TrimSpace(receipt.Digest) == "" || receipt.Revision > s.Presentation.PresentationRevision {

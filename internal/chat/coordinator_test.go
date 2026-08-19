@@ -121,7 +121,12 @@ func (l *coordinatorLane) send(sequence uint64, operation provider.OperationID, 
 	l.events <- event
 }
 
-type coordinatorDelivery struct{ lane *coordinatorLane }
+type coordinatorDelivery struct {
+	lane          *coordinatorLane
+	steerStarted  chan<- struct{}
+	steerRelease  <-chan struct{}
+	cancelStarted chan<- struct{}
+}
 
 func (d coordinatorDelivery) Capabilities() provider.DeliveryCapabilities {
 	return provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true}
@@ -137,9 +142,21 @@ func (d coordinatorDelivery) StartTurn(_ context.Context, input provider.TurnInp
 	return admission, nil
 }
 func (d coordinatorDelivery) Steer(context.Context, provider.SteerInput) (provider.SteerReceipt, error) {
+	if d.steerStarted != nil {
+		d.steerStarted <- struct{}{}
+	}
+	if d.steerRelease != nil {
+		<-d.steerRelease
+		return provider.SteerReceipt{Accepted: true, AwaitConsumption: true}, nil
+	}
 	return provider.SteerReceipt{}, provider.Unsupported("", "not used")
 }
-func (d coordinatorDelivery) Cancel(context.Context, provider.TurnRef) error { return nil }
+func (d coordinatorDelivery) Cancel(context.Context, provider.TurnRef) error {
+	if d.cancelStarted != nil {
+		d.cancelStarted <- struct{}{}
+	}
+	return nil
+}
 func (d coordinatorDelivery) Reconcile(_ context.Context, request provider.ReconcileRequest) (provider.ReconcileResult, error) {
 	return provider.ReconcileResult{Turn: request.Turn, Found: true, Consumed: true}, nil
 }
@@ -322,6 +339,178 @@ func TestCoordinatorExecutesDurableProviderEffectsAndNormalizesOwnership(t *test
 	})
 	if len(state.Permissions) != 0 || state.Background["work"].Owner.LaneID != alpha.ID {
 		t.Fatalf("terminal permission cleanup/background origin = permissions=%#v background=%#v", state.Permissions, state.Background)
+	}
+}
+
+func TestCoordinatorExactCancelPreemptsSlowSteerDrain(t *testing.T) {
+	engine, err := NewEngine("chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := &coordinatorFactory{imports: true}
+	coordinator, err := NewCoordinator(engine, coordinatorRegistry(t, map[provider.ID]*coordinatorFactory{"alpha": factory}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	steerStarted := make(chan struct{}, 1)
+	steerRelease := make(chan struct{})
+	cancelStarted := make(chan struct{}, 1)
+	t.Cleanup(func() {
+		select {
+		case <-steerRelease:
+		default:
+			close(steerRelease)
+		}
+		_ = coordinator.Close(context.Background())
+	})
+
+	identity := coordinatorLaneIdentity("chat", "alpha")
+	if err := engine.Apply(SelectLane{Identity: identity, Owner: provider.AttachmentOwner{TabID: "tab"}, CWD: "/workspace"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Drain(context.Background()); err != nil {
+		t.Fatalf("create lane: %v", err)
+	}
+	if err := engine.Apply(Submit{OperationID: "turn", Text: "question"}); err != nil {
+		t.Fatal(err)
+	}
+	if executed, err := coordinator.ExecuteNext(context.Background()); err != nil || !executed {
+		t.Fatalf("start turn: executed=%v err=%v", executed, err)
+	}
+	factory.mu.Lock()
+	lane := factory.lanes[identity.ID]
+	lane.delivery.steerStarted = steerStarted
+	lane.delivery.steerRelease = steerRelease
+	lane.delivery.cancelStarted = cancelStarted
+	factory.mu.Unlock()
+
+	if err := engine.Apply(Steer{OperationID: "steer", Text: "redirect"}); err != nil {
+		t.Fatal(err)
+	}
+	drainDone := make(chan error, 1)
+	go func() { drainDone <- coordinator.Drain(context.Background()) }()
+	select {
+	case <-steerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("steer did not enter provider acknowledgement")
+	}
+	if err := engine.Apply(CancelTurn{OperationID: "cancel"}); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if executed, err := coordinator.ExecuteCancel(context.Background(), "cancel"); err != nil || !executed {
+		t.Fatalf("execute exact cancel: executed=%v err=%v", executed, err)
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("exact cancel waited behind slow steer for %s", elapsed)
+	}
+	select {
+	case <-cancelStarted:
+	default:
+		t.Fatal("provider cancellation was not invoked")
+	}
+	state := engine.Snapshot()
+	if !state.QueueControl.Paused || !outboxHas(&state, cancelEffectID("cancel"), OutboxAccepted) {
+		t.Fatalf("cancel did not durably pause and acknowledge: control=%#v outbox=%#v", state.QueueControl, state.Outbox)
+	}
+	close(steerRelease)
+	if err := <-drainDone; err != nil {
+		t.Fatalf("steer drain after cancellation: %v", err)
+	}
+}
+
+func TestCoordinatorExactSteerPreemptsUnrelatedActorDrain(t *testing.T) {
+	engine, err := NewEngine("chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := &coordinatorFactory{imports: true}
+	coordinator, err := NewCoordinator(engine, coordinatorRegistry(t, map[provider.ID]*coordinatorFactory{"alpha": factory}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backgroundStarted := make(chan struct{}, 1)
+	backgroundRelease := make(chan struct{})
+	if err := coordinator.SetBackgroundExecutor(func(context.Context, BackgroundAction) (json.RawMessage, error) {
+		backgroundStarted <- struct{}{}
+		<-backgroundRelease
+		return json.RawMessage(`{"ok":true}`), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		select {
+		case <-backgroundRelease:
+		default:
+			close(backgroundRelease)
+		}
+		_ = coordinator.Close(context.Background())
+	})
+
+	identity := coordinatorLaneIdentity("chat", "alpha")
+	if err := engine.Apply(InitializeChat{
+		Presentation: PresentationState{TabID: "tab"}, OperationID: "create", Digest: "create-digest",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Apply(SelectLane{Identity: identity, Owner: provider.AttachmentOwner{TabID: "tab"}, CWD: "/workspace"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Drain(context.Background()); err != nil {
+		t.Fatalf("create lane: %v", err)
+	}
+	if err := engine.Apply(Submit{OperationID: "turn", Text: "question"}); err != nil {
+		t.Fatal(err)
+	}
+	if executed, err := coordinator.ExecuteNext(context.Background()); err != nil || !executed {
+		t.Fatalf("start turn: executed=%v err=%v", executed, err)
+	}
+	state := engine.Snapshot()
+	owner := ProviderActivityOwner{
+		LaneID: identity.ID, OperationID: "turn", TurnID: state.Foreground.Turn.NativeID,
+		ConnectionGeneration: state.Lanes[identity.ID].ConnectionGeneration,
+	}
+	if err := engine.Apply(RequestBackgroundAction{Action: BackgroundAction{
+		Kind: BackgroundSpawnAgent, OperationID: "background", TabID: "tab", ChatID: "chat", Owner: owner,
+		Spawn: &SpawnAgentAction{Prompt: "blocked unrelated work"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	drainDone := make(chan error, 1)
+	go func() { drainDone <- coordinator.Drain(context.Background()) }()
+	select {
+	case <-backgroundStarted:
+	case <-time.After(time.Second):
+		t.Fatal("unrelated actor drain did not block")
+	}
+
+	steerStarted := make(chan struct{}, 1)
+	steerRelease := make(chan struct{})
+	close(steerRelease)
+	factory.mu.Lock()
+	lane := factory.lanes[identity.ID]
+	lane.delivery.steerStarted = steerStarted
+	lane.delivery.steerRelease = steerRelease
+	factory.mu.Unlock()
+	if err := engine.Apply(Steer{OperationID: "steer", Text: "redirect"}); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if executed, err := coordinator.ExecuteSteer(context.Background(), "steer"); err != nil || !executed {
+		t.Fatalf("execute exact steer: executed=%v err=%v", executed, err)
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("exact steer waited behind unrelated actor work for %s", elapsed)
+	}
+	select {
+	case <-steerStarted:
+	default:
+		t.Fatal("provider steer was not invoked")
+	}
+
+	close(backgroundRelease)
+	if err := <-drainDone; err != nil {
+		t.Fatalf("unrelated drain after steer: %v", err)
 	}
 }
 

@@ -543,11 +543,13 @@ func TestStateDigestIsBodyFreeAndUnder64KiBForTwoHundredChats(t *testing.T) {
 	}
 	first := mapFromAnyMain(items[0])
 	_, hasPresentationRevision := first[presentationRevisionField]
+	_, hasIdleQueuePause := first["queuePaused"]
+	_, hasIdleQueuePauseRevision := first["queuePauseRevision"]
 	if first["tabId"] != "t000" || first["chatId"] != "c000" ||
 		first["lastMessageId"] != nil || first["messageCount"] != 0 ||
 		first["queueLen"] != 1 || first["queueHeadId"] != "q000" ||
 		first["agentQueueRevision"] != 1 || first["runtimeControlRevision"] != 0 ||
-		!hasPresentationRevision {
+		!hasPresentationRevision || hasIdleQueuePause || hasIdleQueuePauseRevision {
 		t.Fatalf("first chat digest = %#v", first)
 	}
 	if fieldString(digest, "settingsRevision") == "" || fieldString(digest, "procHash") == "" {

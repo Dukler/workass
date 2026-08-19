@@ -575,7 +575,7 @@ func phaseCChatIDChannel(channel string) bool {
 
 var phaseCExpectedChatHandlers = map[string]struct{}{
 	"session:get": {}, "session:save": {},
-	"chat:queue-replace": {}, "chat:create": {}, "chat:presentation-save": {}, "chat:runtime-controls-save": {}, "chat:delete": {},
+	"chat:queue-replace": {}, "chat:queue-resume": {}, "chat:create": {}, "chat:presentation-save": {}, "chat:runtime-controls-save": {}, "chat:delete": {},
 	"chat:archive-append": {}, "chat:archive-load": {}, "chat:commands-get": {}, "chat:permission-decide": {}, "chat:permissions-pending": {},
 	"chat:env-get": {}, "chat:checkpoints": {}, "chat:rewind": {}, "chat:diff": {},
 	"app-chat:new-session": {}, "app-chat:refresh-plan-usage": {}, "app-chat:fork": {}, "app-chat:close-session": {},

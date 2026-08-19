@@ -229,6 +229,16 @@ type PromoteStagedQueue struct {
 
 func (PromoteStagedQueue) chatCommand() {}
 
+// ResumeQueue reopens the dispatch gate closed by an explicit cancellation.
+// ExpectedRevision binds the request to that exact stop boundary; it may not
+// release a queue paused by a later cancellation.
+type ResumeQueue struct {
+	OperationID      provider.OperationID
+	ExpectedRevision uint64
+}
+
+func (ResumeQueue) chatCommand() {}
+
 // DeleteChat writes a durable tombstone before native attachments and cached
 // renderer rows are removed. Force is an explicit user/agent delete intent;
 // it is never inferred from a missing mirror row.

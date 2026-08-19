@@ -32,6 +32,7 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?]> = [
   ['getSession', 'session:get'],
   ['chatCreate', 'chat:create'],
   ['chatQueueReplace', 'chat:queue-replace'],
+  ['chatQueueResume', 'chat:queue-resume'],
   ['chatPresentationSave', 'chat:presentation-save'],
   ['chatRuntimeControlsSave', 'chat:runtime-controls-save'],
   ['chatDelete', 'chat:delete'],
