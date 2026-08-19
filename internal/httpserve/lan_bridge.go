@@ -159,7 +159,7 @@ const LANBridgeJS = `(() => {
     // renderer simply never calls them, and an older daemon answers "unknown
     // channel", which feature detection upstream reads as absent.
     machinesList: () => invoke('machines:list'), machinesAdd: (address) => invoke('machines:add', { address }),
-    machinesForget: (machineId) => invoke('machines:forget', { machineId }), machinesRefresh: () => invoke('machines:refresh'),
+    machinesForget: (machineId) => invoke('machines:forget', { machineId }), machinesNickname: (machineId, nickname) => invoke('machines:nickname', { machineId, nickname }), machinesRefresh: () => invoke('machines:refresh'),
     // The fleet key, readable without a terminal. Listing is non-secret; the
     // other three answer fleet:not-local unless this client is on the machine
     // that holds the key, so the secret never crosses the network.
@@ -193,7 +193,7 @@ const LANBridgeJS = `(() => {
     chatCheckpoints: (o) => invoke('chat:checkpoints', o), chatRewind: (o) => invoke('chat:rewind', o),
     chatDiff: (o) => invoke('chat:diff', o), chatEnvGet: (o) => invoke('chat:env-get', o),
     providersList: () => invoke('providers:list'), providersDetect: (o) => invoke('providers:detect', o || {}), providersUpdate: (providerId) => invoke('providers:update', { providerId }), providersToggle: (id, enabled) => invoke('providers:toggle', { id, enabled }),
-    pickDirectory: () => invoke('dialog:pick-directory'), listDir: (p) => invoke('fs:list-dir', p), createDir: (parent, name) => invoke('fs:create-dir', { parent, name }), appChatCloseSession: (s) => invoke('app-chat:close-session', s),
+    pickDirectory: () => invoke('dialog:pick-directory'), listDir: (p) => invoke('fs:list-dir', p), createDir: (parent, name) => invoke('fs:create-dir', { parent, name }), projectIcon: (chatId, cwd) => invoke('project:icon', { chatId, cwd }), appChatCloseSession: (s) => invoke('app-chat:close-session', s),
     codeUnlock: (pin) => invoke('code:unlock', pin), codeLock: () => invoke('code:lock'), codeTree: () => invoke('code:tree'), codeRead: (rel) => invoke('code:read', rel),
     chatPermissionDecide: (id, optionId) => invoke('chat:permission-decide', { id, optionId }),
     chatPendingPermissions: () => invoke('chat:permissions-pending'),

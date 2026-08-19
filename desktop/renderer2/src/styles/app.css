@@ -1502,6 +1502,8 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs .lrow .mt { font-size: 11.5px; color: var(--muted); margin-top: 1px; font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stgs .lrow .act { flex: none; display: flex; align-items: center; gap: 10px; }
 .stgs .lrow .empty { color: var(--faint); font-size: 12.5px; }
+.stgs .machine-nickname-input { width: min(280px, 100%); box-sizing: border-box; }
+.stgs .machine-nickname-error { margin-top: 4px; color: var(--del); font-size: 11.5px; }
 /* CLI update rows (Agentes): click-to-update. Primary is an accent-quiet
    "Actualizar" button that runs the daemon updater; live progress + failures
    render inline under the row; the copy-command chip is the manual fallback. */
@@ -1778,6 +1780,23 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 }
 .sv2-wide:hover { background: var(--sv2-hover); color: var(--ink); }
 .sv2-wide > svg { width: 16px; height: 16px; flex: none; opacity: .8; }
+.sv2-picon {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; flex: none; color: var(--muted);
+}
+.sv2-picon > svg, .sv2-picon > img { width: 16px; height: 16px; flex: none; }
+.sv2-picon > svg { opacity: .8; }
+.sv2-picon > img { display: block; border-radius: 3px; object-fit: contain; }
+/* A project action can target another PC. Keep the project artwork/folder as
+   the primary glyph and pin one machine initial to its corner, so duplicate
+   project names remain distinguishable without spending another text column. */
+.sv2-picon > .sv2-remote {
+  position: absolute; right: -4px; bottom: -3px; display: grid; place-items: center;
+  width: 10px; height: 10px; border-radius: 999px;
+  background: var(--acc); color: var(--bg); box-shadow: 0 0 0 1.5px var(--side);
+  font-size: 7px; line-height: 10px; font-weight: 750; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.sv2-menu .sv2-picon > .sv2-remote { box-shadow: 0 0 0 1.5px var(--panel); }
 .sv2-wtxt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sv2-searchbox { cursor: text; }
 .sv2-searchbox:focus-within { background: var(--sv2-hover); }
@@ -1869,7 +1888,6 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .sv2-l2 { display: flex; align-items: center; gap: 6px; min-width: 0; margin-top: 4px; height: 20px; }
 .sv2-l3 { display: flex; align-items: center; gap: 6px; margin-top: 2px; height: 16px; }
 .sv2-fav { display: inline-flex; flex: none; color: var(--muted); }
-.sv2-fav svg { width: 16px; height: 16px; opacity: .8; }
 /* Quiet history recedes at rest and returns on hover, so the tail stays
    scannable while hunting (T3's dimmed-favicon rule). */
 .sv2-row.slim:not(.on) .sv2-fav { opacity: .45; }

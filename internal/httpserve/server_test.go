@@ -243,8 +243,12 @@ func TestLanBridgeServed(t *testing.T) {
 		t.Fatalf("bridge missing app-chat steer/detect-acp methods")
 	}
 	if !strings.Contains(string(body), "listDir: (p) => invoke('fs:list-dir', p)") ||
-		!strings.Contains(string(body), "createDir: (parent, name) => invoke('fs:create-dir', { parent, name })") {
-		t.Fatalf("bridge missing server-owned folder methods")
+		!strings.Contains(string(body), "createDir: (parent, name) => invoke('fs:create-dir', { parent, name })") ||
+		!strings.Contains(string(body), "projectIcon: (chatId, cwd) => invoke('project:icon', { chatId, cwd })") {
+		t.Fatalf("bridge missing server-owned project filesystem methods")
+	}
+	if !strings.Contains(string(body), "machinesNickname: (machineId, nickname) => invoke('machines:nickname', { machineId, nickname })") {
+		t.Fatalf("bridge missing controller-local machine nickname method")
 	}
 }
 

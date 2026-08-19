@@ -477,6 +477,15 @@ export interface DirCreateResult {
   error?: string;
 }
 
+// Small, bounded project artwork read by the daemon that owns the workspace.
+// Paths never cross the wire; missing/invalid artwork is the ordinary folder
+// fallback rather than an error state.
+export interface ProjectIconResult {
+  found: boolean;
+  mimeType?: string;
+  base64?: string;
+}
+
 export interface StartJobOpts {
   kind: string;
   operationId: string;
@@ -593,6 +602,7 @@ export interface WorkassApi {
   // remote client would otherwise pick a path off its own device.
   listDir?: (path: string | null) => Promise<DirListing>;
   createDir?: (parent: string, name: string) => Promise<DirCreateResult>;
+  projectIcon?: (chatId: string, cwd: string) => Promise<ProjectIconResult>;
   archiveAppend?: (tabId: string, messages: unknown[]) => Promise<boolean>;
   archiveLoad?: (tabId: string) => Promise<unknown[]>;
   visualizeHost?: (options: { tabId: string; chatId: string; path: string; mode?: 'wide'; title?: string }) => Promise<VisualizationRegistration>;
@@ -672,6 +682,7 @@ export interface WorkassApi {
   machinesList?: () => Promise<{ machines?: unknown[]; self?: { machineId?: string; name?: string } } | undefined>;
   machinesAdd?: (address: string) => Promise<unknown>;
   machinesForget?: (machineId: string) => Promise<unknown>;
+  machinesNickname?: (machineId: string, nickname: string) => Promise<{ ok?: boolean; error?: string; machines?: unknown[]; self?: { machineId?: string; name?: string } } | undefined>;
   machinesRefresh?: () => Promise<unknown>;
   onMachinesChanged?: (cb: (payload: { machines?: unknown[]; self?: { machineId?: string; name?: string } }) => void) => void;
   // The fleet key, readable from the app instead of a terminal. Listing is

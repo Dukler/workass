@@ -274,6 +274,8 @@ export type Density = 'compact' | 'comfortable';
 export interface MachineView {
   machineId: string;
   name: string;
+  reportedName: string;
+  nickname: string;
   address: string;
   link: 'idle' | 'connecting' | 'open' | 'ready' | 'closed' | 'rejected';
   reason: string;

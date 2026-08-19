@@ -15,6 +15,7 @@ import type { MachineView, SettingsSection } from '../store/types';
 import type { LanDevice, AccessRequest, ProcessSummary, ProviderRecord, ProviderUpdate } from '../wire/types';
 import { store, useApp, useProc } from '../store/store';
 import { call, has } from '../wire/api';
+import { normalizeMachineNickname } from '../machine-nickname';
 import {
   countScoredModels, getModelScore, groupModelsForScoring, isEmptyScore,
   normalizeNote, NOTE_MAX, SCORE_DIMENSIONS, SCORE_MAX, SCORE_MIN,
@@ -663,18 +664,69 @@ function MaquinasPanel() {
 function MachineRow({ m }: { m: MachineView }) {
   const live = m.link === 'ready';
   const dot = live ? 'ok' : (m.paired ? 'warn' : '');
+  const canNickname = m.paired && has('machinesNickname');
+  const [editingNickname, setEditingNickname] = useState(false);
+  const [nickname, setNickname] = useState('');
+  const [savingNickname, setSavingNickname] = useState(false);
+  const [nicknameError, setNicknameError] = useState('');
+  const beginNickname = () => {
+    setNickname(m.nickname);
+    setNicknameError('');
+    setEditingNickname(true);
+  };
+  const cancelNickname = () => {
+    setEditingNickname(false);
+    setNicknameError('');
+  };
+  const saveNickname = async () => {
+    if (savingNickname) return;
+    const normalized = normalizeMachineNickname(nickname);
+    if (normalized.error) { setNicknameError(normalized.error); return; }
+    setSavingNickname(true);
+    setNicknameError('');
+    const result = await store.setMachineNickname(m.machineId, normalized.nickname);
+    setSavingNickname(false);
+    if (!result.ok) { setNicknameError(result.error || 'No se pudo guardar el apodo'); return; }
+    setEditingNickname(false);
+  };
   return (
     <div className="lrow">
       <div className="ic"><Svg><rect x="1.8" y="3" width="12.4" height="8" rx="1.6" /><path d="M5.5 13.5h5M8 11v2.5" /></Svg></div>
       <div className="body">
-        <div className="nm"><span className={`dot ${dot}`} />{m.name}
-          {!m.secure && <span className="badge">insegura</span>}</div>
-        <div className="mt">{m.address || '—'}{m.reason ? ` · ${m.reason}` : (live ? ' · conectada' : m.requested ? ' · esperando aprobación' : ' · disponible en la red')}</div>
+        {canNickname && editingNickname ? (
+          <input
+            className="inp machine-nickname-input"
+            value={nickname}
+            placeholder={m.reportedName}
+            aria-label={`Apodo para ${m.reportedName}`}
+            autoFocus
+            onChange={(event) => { setNickname(event.target.value); setNicknameError(''); }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') { event.preventDefault(); void saveNickname(); }
+              if (event.key === 'Escape') { event.preventDefault(); cancelNickname(); }
+            }}
+          />
+        ) : (
+          <div className="nm"><span className={`dot ${dot}`} />{m.name}
+            {!m.secure && <span className="badge">insegura</span>}</div>
+        )}
+        <div className="mt">{m.nickname ? `${m.reportedName} · ` : ''}{m.address || '—'}{m.reason ? ` · ${m.reason}` : (live ? ' · conectada' : m.requested ? ' · esperando aprobación' : ' · disponible en la red')}</div>
+        {nicknameError && <div className="machine-nickname-error" role="alert">{nicknameError}</div>}
       </div>
       <div className="act">
-		{!m.paired && !m.requested && <button className="btn sm acc" disabled={!m.secure || !m.reachable} onClick={() => void store.requestMachineAccess(m.machineId)}>Solicitar conexión</button>}
+        {!m.paired && !m.requested && <button className="btn sm acc" disabled={!m.secure || !m.reachable} onClick={() => void store.requestMachineAccess(m.machineId)}>Solicitar conexión</button>}
         {!m.paired && m.requested && <span className="badge">solicitud enviada</span>}
-        {m.paired && <button className="btn sm danger" onClick={() => void store.forgetMachine(m.machineId)}>Desconectar</button>}
+        {canNickname && editingNickname ? (
+          <>
+            <button className="btn sm acc" disabled={savingNickname} onClick={() => void saveNickname()}>{savingNickname ? 'Guardando…' : 'Guardar'}</button>
+            <button className="btn sm" disabled={savingNickname} onClick={cancelNickname}>Cancelar</button>
+          </>
+        ) : (
+          <>
+            {canNickname && <button className="btn sm" onClick={beginNickname}>{m.nickname ? 'Editar apodo' : 'Cambiar apodo'}</button>}
+            {m.paired && <button className="btn sm danger" onClick={() => void store.forgetMachine(m.machineId)}>Desconectar</button>}
+          </>
+        )}
       </div>
     </div>
   );

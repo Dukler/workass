@@ -53,6 +53,7 @@ import { clearPermissionById, clearPermissionsOutsideSnapshot } from '../permiss
 import { isQueuedJobStart, reconcileQueuedJobStart } from './busy-start';
 import { settleTerminalToolEvents } from '../terminal-tool-reconciliation';
 import { MachineRegistry, type MachineEntry } from '../wire/machineRegistry';
+import { normalizeMachineNickname } from '../machine-nickname';
 import { setMachineRouter } from '../wire/api';
 import { tagId, tagPayload } from '../wire/machineIds';
 
@@ -1348,6 +1349,24 @@ export class Store {
     this.machines?.forget(machineId);
     if (has('machinesForget')) { try { await call('machinesForget', machineId); } catch { /* it is already gone from here */ } }
     await this.reloadMachines();
+  }
+
+  /** Persist a controller-local label for one remote machine. Empty clears it. */
+  async setMachineNickname(machineId: string, nickname: string): Promise<{ ok: boolean; error?: string }> {
+    const id = String(machineId ?? '').trim();
+    if (!id) return { ok: false, error: 'La máquina ya no está disponible' };
+    const normalized = normalizeMachineNickname(nickname);
+    if (normalized.error) return { ok: false, error: normalized.error };
+    if (!has('machinesNickname')) return { ok: false, error: 'Este daemon todavía no permite cambiar apodos' };
+    try {
+      const reply = await callThrow('machinesNickname', id, normalized.nickname);
+      if (!reply) return { ok: false, error: 'El daemon no respondió al cambio de apodo' };
+      if (reply.ok === false) return { ok: false, error: reply.error || 'No se pudo guardar el apodo' };
+      this.applyMachineBook(reply);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   /**

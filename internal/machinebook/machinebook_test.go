@@ -395,6 +395,65 @@ func TestBookSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestNicknameIsLocalPersistentAndSurvivesPeerRefresh(t *testing.T) {
+	daemon := newFakeDaemon(t, identityDoc("m-remote", "builder-hostname", 1))
+	stateDir := t.TempDir()
+	book, err := Open(Options{StateDir: stateDir, SelfID: "m-self", WireVersion: 1})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := book.Add(context.Background(), daemon.address()); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	renamed, changed, err := book.SetNickname("m-remote", "  Taller  ")
+	if err != nil || !changed || renamed.Nickname != "Taller" || renamed.Name != "builder-hostname" {
+		t.Fatalf("set nickname = %+v, %v, %v", renamed, changed, err)
+	}
+
+	// The peer remains authoritative for its advertised name, but not for the
+	// private label chosen on this controller.
+	daemon.doc.Store(identityDoc("m-remote", "renamed-by-peer", 1))
+	if _, changed := book.Refresh(context.Background()); !changed {
+		t.Fatal("peer name change was not reported")
+	}
+	refreshed := book.List()[0]
+	if refreshed.Name != "renamed-by-peer" || refreshed.Nickname != "Taller" {
+		t.Fatalf("refresh overwrote the local nickname: %+v", refreshed)
+	}
+
+	reopened, err := Open(Options{StateDir: stateDir, SelfID: "m-self", WireVersion: 1})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if got := reopened.List()[0]; got.Nickname != "Taller" || got.Name != "renamed-by-peer" {
+		t.Fatalf("nickname did not persist: %+v", got)
+	}
+	cleared, changed, err := reopened.SetNickname("m-remote", "   ")
+	if err != nil || !changed || cleared.Nickname != "" {
+		t.Fatalf("clear nickname = %+v, %v, %v", cleared, changed, err)
+	}
+}
+
+func TestNicknameValidationDoesNotMutateTheBook(t *testing.T) {
+	book := openBook(t, "m-self")
+	book.mu.Lock()
+	book.entries["m-remote"] = Entry{MachineID: "m-remote", Name: "builder", Nickname: "Build"}
+	book.mu.Unlock()
+
+	tooLong := strings.Repeat("x", MaxNicknameRunes+1)
+	for _, value := range []string{tooLong, "line\nbreak"} {
+		if _, changed, err := book.SetNickname("m-remote", value); err == nil || changed {
+			t.Fatalf("invalid nickname %q = changed %v, err %v", value, changed, err)
+		}
+	}
+	if _, changed, err := book.SetNickname("m-missing", "Desk"); err == nil || changed {
+		t.Fatalf("missing machine = changed %v, err %v", changed, err)
+	}
+	if got := book.List()[0].Nickname; got != "Build" {
+		t.Fatalf("invalid rename changed nickname to %q", got)
+	}
+}
+
 func TestOpenRefusesCorruptBook(t *testing.T) {
 	stateDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(stateDir, FileName), []byte("{not json"), 0o600); err != nil {

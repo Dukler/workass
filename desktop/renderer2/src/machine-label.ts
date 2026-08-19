@@ -19,6 +19,12 @@ export interface MachineWhere {
   full: string;
 }
 
+export interface RemoteMachineBadge {
+  machine: string;
+  initial: string;
+  title: string;
+}
+
 /**
  * Build the two halves of the "where" slot.
  *
@@ -52,6 +58,21 @@ export function shortMachineId(machineId: string): string {
   const body = id.startsWith('m-') ? id.slice(2) : id;
   if (!body) return '?';
   return body.length <= 6 ? body : body.slice(-6);
+}
+
+/** Compact ownership mark for project-picking surfaces where `machine/project`
+ * would consume the whole row. Local projects intentionally return null. */
+export function remoteMachineBadge(
+  machineId?: string | null,
+  names?: Readonly<Record<string, string>>,
+  localMachineId?: string | null,
+): RemoteMachineBadge | null {
+  const id = String(machineId ?? '').trim();
+  const local = String(localMachineId ?? '').trim();
+  if (!id || (local && id === local)) return null;
+  const machine = String(names?.[id] ?? '').trim() || shortMachineId(id);
+  const initial = Array.from(machine).find((character) => /[\p{L}\p{N}]/u.test(character))?.toLocaleUpperCase() ?? '?';
+  return { machine, initial, title: `Proyecto remoto en ${machine}` };
 }
 
 /**

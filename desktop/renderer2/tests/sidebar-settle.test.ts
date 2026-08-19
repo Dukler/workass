@@ -6,7 +6,7 @@ import type { Chat } from '../src/store/types.ts';
 import type { PublicJob } from '../src/wire/types.ts';
 
 // Settling is T3's third sidebar lane: a chat leaves the live list without being
-// deleted. After two weeks there it moves into the searchable archive, so these
+// deleted. After five days there it moves into the searchable archive, so these
 // pin the age rules, explicit overrides, and archive ordering together.
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -19,6 +19,7 @@ let lastTouchedAt: (chat: Chat) => number;
 let orderSearchRows: (rows: readonly any[]) => any[];
 let canSettle: (status: string) => boolean;
 let resolveStatus: (chat: Chat, live: boolean, active: boolean, obligation?: { state: string }) => string;
+let isFullSizeSidebarRow: (settled: boolean, archived: boolean) => boolean;
 
 before(async () => {
   vite = await createServer({
@@ -35,6 +36,7 @@ before(async () => {
   orderSearchRows = sidebar.orderSearchRows;
   canSettle = sidebar.canSettle;
   resolveStatus = sidebar.resolveStatus;
+  isFullSizeSidebarRow = sidebar.isFullSizeSidebarRow;
 });
 
 after(async () => { await vite.close(); });
@@ -83,25 +85,25 @@ test('the explicit overrides beat the age rule in both directions', () => {
   assert.equal(resolveSettled(chat({ settled: 'active' }), 'ready', false, now, now - 40 * DAY), false);
 });
 
-test('a chat archives after fourteen days on the settled shelf', () => {
+test('a chat archives after five days on the settled shelf', () => {
   const now = Date.parse('2026-07-25T12:00:00Z');
-  const explicit = chat({ settled: 'settled', settledAt: now - 13 * DAY });
+  const explicit = chat({ settled: 'settled', settledAt: now - 4 * DAY });
 
   assert.equal(resolveArchived(explicit, 'ready', now, now - 40 * DAY), false);
-  explicit.settledAt = now - 14 * DAY;
+  explicit.settledAt = now - 5 * DAY;
   assert.equal(resolveArchived(explicit, 'ready', now, now - 40 * DAY), true);
 
-  // Automatic filing starts at day three, then gets the same fourteen days on
-  // the shelf. The chat therefore archives at day seventeen since activity.
-  assert.equal(resolveArchived(chat(), 'ready', now, now - 16 * DAY), false);
-  assert.equal(resolveArchived(chat(), 'ready', now, now - 17 * DAY), true);
+  // Automatic filing starts at day three, then gets the same five days on the
+  // shelf. The chat therefore archives at day eight since activity.
+  assert.equal(resolveArchived(chat(), 'ready', now, now - 7 * DAY), false);
+  assert.equal(resolveArchived(chat(), 'ready', now, now - 8 * DAY), true);
 });
 
 test('settled chats without settledAt use their last activity as the archive lower bound', () => {
   const now = Date.parse('2026-07-25T12:00:00Z');
 
-  assert.equal(resolveArchived(chat({ settled: 'settled' }), 'ready', now, now - 13 * DAY), false);
-  assert.equal(resolveArchived(chat({ settled: 'settled' }), 'ready', now, now - 14 * DAY), true);
+  assert.equal(resolveArchived(chat({ settled: 'settled' }), 'ready', now, now - 4 * DAY), false);
+  assert.equal(resolveArchived(chat({ settled: 'settled' }), 'ready', now, now - 5 * DAY), true);
   assert.equal(resolveArchived(chat({ settled: 'settled' }), 'ready', now, 0), true);
 });
 
@@ -134,7 +136,7 @@ test('search ordering always appends archived matches after every visible match'
   assert.deepEqual(ordered.map((item) => item.chat.id), ['live', 'shelved', 'archived-newest', 'archived-oldest']);
 });
 
-test('nothing still alive, awaiting approval, parked, unread, or active can sit on the shelf', () => {
+test('nothing still alive, awaiting approval, parked, or unread can sit on the shelf', () => {
   const now = Date.parse('2026-07-25T12:00:00Z');
   const old = now - 40 * DAY;
   const filed = chat({ settled: 'settled' });
@@ -143,7 +145,26 @@ test('nothing still alive, awaiting approval, parked, unread, or active can sit 
     assert.equal(resolveSettled(filed, status, false, now, old), false, status);
   }
   assert.equal(resolveSettled(chat({ settled: 'settled', unread: true }), 'ready', false, now, old), false);
-  assert.equal(resolveSettled(filed, 'ready', true, now, old), false);   // the chat you are reading
+});
+
+test('selecting a settled thread leaves it compact and in the same shelf', () => {
+  const now = Date.parse('2026-07-25T12:00:00Z');
+  const old = now - 4 * DAY;
+  const automatic = chat();
+  const explicit = chat({ settled: 'settled', settledAt: now - DAY });
+
+  for (const subject of [automatic, explicit]) {
+    assert.equal(resolveSettled(subject, 'ready', false, now, old), true);
+    const afterSelection = resolveSettled(subject, 'ready', true, now, old);
+    assert.equal(afterSelection, true, 'selection alone cannot reactivate or promote the thread');
+    assert.equal(isFullSizeSidebarRow(afterSelection, false), false);
+  }
+});
+
+test('every ordinary thread stays full-size until it is settled', () => {
+  assert.equal(isFullSizeSidebarRow(false, false), true);
+  assert.equal(isFullSizeSidebarRow(true, false), false);
+  assert.equal(isFullSizeSidebarRow(false, true), false);
 });
 
 test('settle and un-settle store opposite overrides, and new work retires the shelf', () => {
