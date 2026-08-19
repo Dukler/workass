@@ -760,7 +760,14 @@ export class Store {
   // projection from the actor and replaces that tail directly.
   private async ensureFullHistory(chatId: string): Promise<void> {
     if (!has('archiveLoad') || !chatId) return;
-    if (this.fullHistoriesLoaded.has(chatId)) return;
+    // The set is only a cache of the chat projection's own completeness bit.
+    // A later session:get may legally replace that projection with metadata
+    // only (for example when another surface updates daemon-global focus). If
+    // suffix preservation cannot reconcile it, historyComplete becomes false;
+    // do not let the stale cache marker suppress the canonical actor read.
+    const resident = this.chat(chatId);
+    if (this.fullHistoriesLoaded.has(chatId) && resident?.historyComplete) return;
+    this.fullHistoriesLoaded.delete(chatId);
     const inflight = this.fullHistoryLoads.get(chatId);
     if (inflight) return inflight;
     const load = (async () => {
