@@ -60,6 +60,9 @@ export interface MirrorChat {
 }
 export interface Mirror {
   v: number; activeId: string | null; seq: number; globalRevision?: number;
+  // Daemon-global sidebar order. Chat rows themselves remain actor-owned; this
+  // list is only presentation metadata and is ignored for unknown/deleted tabs.
+  chatOrder?: string[];
   _workassGlobalOperationId?: string;
   // Capability-gated transient marker. The Go daemon strips this before disk;
   // older hosts never receive a lean snapshot.

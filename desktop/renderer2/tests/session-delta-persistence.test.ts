@@ -485,11 +485,10 @@ test('delete, structural, first-save, and post-restore boundaries force a comple
   }> = [
     { name: 'chat create', run: (subject) => { subject.newChat(); } },
     { name: 'chat rename', run: (subject, owner) => subject.renameChat(owner.id, 'Renamed') },
-    { name: 'chat reorder', run: (subject, owner) => subject.moveChat(owner.id, null) },
     {
       name: 'workspace move',
       prepare: (_subject, owner) => { owner.sessionId = null; },
-      run: (subject, owner) => subject.moveChat(owner.id, null, '/tmp/workass-delta-moved'),
+      run: (subject, owner) => subject.moveChatToWorkspace(owner.id, null, '/tmp/workass-delta-moved'),
     },
     { name: 'folder removal', run: (subject) => subject.removeWorkspace('/tmp/workass-delta-a') },
     { name: 'folder reorder', run: (subject) => subject.reorderWorkspaces('/tmp/workass-delta-a', null) },
@@ -527,6 +526,26 @@ test('delete, structural, first-save, and post-restore boundaries force a comple
       }
     });
   }
+});
+
+test('chat reorder saves only global order and never dirties a chat actor', async () => {
+  const owner = chat('tab-owner');
+  const other = chat('tab-other');
+  const subject = subjectWithChats([owner, other]);
+  const saves: Array<{ snapshot: Mirror; full: boolean }> = [];
+  subject.saveServerSnapshot = async (snapshot: Mirror, full: boolean) => {
+    saves.push({ snapshot, full });
+  };
+
+  subject.reorderChat(owner.id, null);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(subject.state.chats.map((candidate: Chat) => candidate.id), ['tab-other', 'tab-owner']);
+  assert.equal(isDirty(subject, owner.id), false);
+  assert.equal(isDirty(subject, other.id), false);
+  assert.equal(saves.at(-1)?.full, false);
+  assert.deepEqual(saves.at(-1)?.snapshot.chatOrder, ['tab-other', 'tab-owner']);
+  assert.deepEqual(saves.at(-1)?.snapshot.chats, []);
 });
 
 test('server deltas carry chat commands while localStorage carries only view preferences', () => {

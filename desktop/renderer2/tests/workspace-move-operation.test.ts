@@ -19,6 +19,32 @@ before(async () => {
 
 after(async () => { await vite.close(); });
 
+test('row reordering across projects changes only persisted order', async () => {
+  const subject = new StoreCtor();
+  const local = {
+    id: 'tab-local', chatId: 'chat-local', sessionId: 'session-local',
+    title: 'Local target', titleLocked: true, group: 'local', cwd: '/tmp/local',
+    providerId: 'codex', currentModelId: null, currentModeId: null,
+    pending: false, messages: [], draft: '', workspaceRevision: 2,
+  } as Chat;
+  const workass = {
+    id: 'tab-workass', chatId: 'chat-workass', sessionId: 'session-workass',
+    title: 'Workass source', titleLocked: true, group: 'workass', cwd: '/tmp/workass',
+    providerId: 'codex', currentModelId: null, currentModeId: null,
+    pending: false, messages: [], draft: '', workspaceRevision: 4,
+  } as Chat;
+  subject.state.chats = [local, workass];
+  subject.saveServerSnapshot = async () => {};
+
+  assert.equal(subject.reorderChat(workass.id, local.id), true);
+  assert.deepEqual(subject.state.chats.map((chat: Chat) => chat.id), [workass.id, local.id]);
+  assert.equal(workass.cwd, '/tmp/workass');
+  assert.equal(workass.group, 'workass');
+  assert.equal(workass.sessionId, 'session-workass');
+  assert.equal(workass.workspaceRevision, 4);
+  assert.deepEqual((subject as any).toMirror(true).chatOrder, [workass.id, local.id]);
+});
+
 test('a lost workspace-move reply retries one stable operation and clears it only after success', async () => {
   const calls: Array<Record<string, unknown>> = [];
   let attempts = 0;
@@ -52,12 +78,12 @@ test('a lost workspace-move reply retries one stable operation and clears it onl
     subject.state.activeId = owner.id;
     subject.state.meta = { daemon: true, workspaceRebindMode: 'transactional-v1' };
 
-    assert.equal(await subject.moveChat(owner.id, null, '/tmp/workass-move-target'), false);
+    assert.equal(await subject.moveChatToWorkspace(owner.id, null, '/tmp/workass-move-target'), false);
     const firstOperationId = owner._sessionOperationId;
     assert.match(firstOperationId, /^workspace-move-/);
     assert.equal(owner.cwd, '/tmp/workass-move-old');
 
-    assert.equal(await subject.moveChat(owner.id, null, '/tmp/workass-move-target'), true);
+    assert.equal(await subject.moveChatToWorkspace(owner.id, null, '/tmp/workass-move-target'), true);
     assert.equal(owner._sessionOperationId, undefined);
     assert.equal(owner.sessionId, null);
     assert.equal(owner.cwd, '/tmp/workass-move-target');

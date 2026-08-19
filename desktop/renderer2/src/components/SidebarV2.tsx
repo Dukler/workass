@@ -159,12 +159,9 @@ const STATUS_PILL: Record<Exclude<Status, 'ready'>, { label: string; icon: 'work
   done: { label: 'Listo', icon: 'done', tone: 'done' },
 };
 
-// Ordering. T3 keeps its inbox deliberately static (createdAt DESC) because its
-// shelves already separate live work from history. Ours has one list, so it
-// sorts by what the row is DOING — blocked on you, then running, then broken,
-// then finished-unseen, then idle — and by recency within each band. The shelf
-// is pure history, so it sorts by last activity like T3's settled rows.
-const STATUS_RANK: Record<Status, number> = { approval: 0, attention: 1, working: 2, parked: 3, failed: 4, done: 5, ready: 6 };
+// Ordering is the persisted chat-list order. Status and recency are visible
+// metadata, not hidden sort keys: otherwise a successful drag is immediately
+// undone by the next render and rows jump while the user is targeting them.
 
 export function lastTouchedAt(chat: Chat): number {
   const projected = Number(chat.lastActivityAt);
@@ -219,7 +216,7 @@ function WorkingDuration({ since }: { since: number }) {
 
 type Row = {
   chat: Chat; project: string; card: boolean; settled: boolean; archived: boolean; touched: number;
-  status: Status; since: number; bg: number; error: string;
+  status: Status; since: number; bg: number; error: string; order: number;
 };
 
 // Port of T3's effectiveSettled. Live work, pending approval, parked work, and
@@ -261,12 +258,15 @@ export function isFullSizeSidebarRow(settled: boolean, archived: boolean): boole
   return !settled && !archived;
 }
 
+export function orderSidebarRows<T extends { order: number }>(rows: readonly T[]): T[] {
+  return [...rows].sort((a, b) => a.order - b.order);
+}
+
 export function orderSearchRows(rows: readonly Row[]): Row[] {
   return [...rows].sort((a, b) =>
     Number(a.archived) - Number(b.archived)
     || Number(b.card) - Number(a.card)
-    || STATUS_RANK[a.status] - STATUS_RANK[b.status]
-    || b.touched - a.touched);
+    || a.order - b.order);
 }
 
 // T3's canSettle, the client-side twin of the guards above: "anything the
@@ -281,12 +281,18 @@ export function canSettle(status: Status): boolean {
 }
 
 type Tip = { row: Row; top: number } | null;
+type SidebarSection = 'live' | 'settled' | 'archived';
+type DragItem = { id: string; section: SidebarSection };
+
+function rowSection(row: Pick<Row, 'settled' | 'archived'>): SidebarSection {
+  return row.archived ? 'archived' : row.settled ? 'settled' : 'live';
+}
 
 /* ---- row ---------------------------------------------------------------- */
 function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu, onSettle, onUnsettle }: {
   row: Row; active: boolean;
-  drag: string | null; setDrag: (id: string | null) => void;
-  onDropBefore: (targetChatId: string, targetCwd: string | null) => void;
+  drag: DragItem | null; setDrag: (item: DragItem | null) => void;
+  onDropBefore: (targetChatId: string) => void;
   onTip: (tip: Tip) => void;
   onMenu: (row: Row, x: number, y: number) => void;
   onSettle: (row: Row) => void;
@@ -297,7 +303,8 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
   const [value, setValue] = useState(chat.title);
   const [over, setOver] = useState(false);
   const hoverTimer = useRef<number | null>(null);
-  const canDrop = !!drag && drag !== chat.id;
+  const section = rowSection(row);
+  const canDrop = !!drag && drag.id !== chat.id && drag.section === section;
   const commit = () => { setEditing(false); store.renameChat(chat.id, value); };
   const pill = row.archived
     ? { label: 'Archivado', icon: null, tone: 'archived' }
@@ -313,7 +320,7 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
 
   const surface = [
     'sv2-row', card ? 'card' : 'slim',
-    active ? 'on' : '', over && canDrop ? 'dropbefore' : '', drag === chat.id ? 'dragging' : '',
+    active ? 'on' : '', over && canDrop ? 'dropbefore' : '', drag?.id === chat.id ? 'dragging' : '',
     chat.unread && !active ? 'unread' : '', row.archived ? 'archived' : '', recede ? 'recede' : '', inFlight && !active ? 'inflight' : '',
   ].filter(Boolean).join(' ');
 
@@ -391,11 +398,11 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
         onClick={() => { if (!editing) { closeTip(); store.switchChat(chat.id); } }}
         onDoubleClick={() => { closeTip(); setValue(chat.title); setEditing(true); }}
         onContextMenu={(e) => { e.preventDefault(); closeTip(); onMenu(row, e.clientX, e.clientY); }}
-        onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', chat.id); setDrag(chat.id); closeTip(); }}
+        onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', chat.id); setDrag({ id: chat.id, section }); closeTip(); }}
         onDragEnd={() => { setDrag(null); setOver(false); }}
         onDragOver={(e) => { if (canDrop) { e.preventDefault(); setOver(true); } }}
         onDragLeave={() => setOver(false)}
-        onDrop={(e) => { if (canDrop) { e.preventDefault(); onDropBefore(chat.id, chat.cwd ?? null); } setOver(false); }}
+        onDrop={(e) => { if (canDrop) { e.preventDefault(); onDropBefore(chat.id); } setOver(false); }}
       >
         {card ? (
           <>
@@ -587,7 +594,7 @@ export function SidebarV2() {
     try { const v = localStorage.getItem(SCOPE_KEY); return v === null || v === '__all' ? null : v; } catch { return null; }
   });
   const [menu, setMenu] = useState(false);
-  const [drag, setDrag] = useState<string | null>(null);
+  const [drag, setDrag] = useState<DragItem | null>(null);
   const [tailOpen, setTailOpen] = useState(true);
   const [tailShown, setTailShown] = useState(TAIL_PAGE);
   const [query, setQuery] = useState('');
@@ -624,8 +631,8 @@ export function SidebarV2() {
     return () => window.clearInterval(id);
   }, []);
 
-  const dropChatBefore = (targetChatId: string, targetCwd: string | null) => {
-    if (drag) store.moveChat(drag, targetChatId, targetCwd);
+  const dropChatBefore = (targetChatId: string) => {
+    if (drag) store.reorderChat(drag.id, targetChatId);
     setDrag(null);
   };
 
@@ -633,6 +640,7 @@ export function SidebarV2() {
     const out: Row[] = [];
     const now = lifecycleNow;
     const needle = query.trim().toLowerCase();
+    const manualOrder = new Map(app.chats.map((chat, index) => [chat.id, index]));
     for (const g of groups) {
       const key = normalizeWorkspacePath(g.path);
       if (scope !== null && scope !== key) continue;
@@ -651,6 +659,7 @@ export function SidebarV2() {
           since: status === 'working' ? (workingSince(chat, work) || touched) : 0,
           bg: work.filter((item) => item.status === 'running').length,
           error: (failing?.content || '').split('\n')[0].slice(0, 140),
+          order: manualOrder.get(chat.id) ?? Number.MAX_SAFE_INTEGER,
           // Density follows lifecycle, never age or selection. Every ordinary
           // thread stays full-size; only settled/archive rows are compact.
           card: isFullSizeSidebarRow(settled, archived),
@@ -665,12 +674,11 @@ export function SidebarV2() {
   // representation; archived rows are absent from normal browsing and are
   // appended after every live/shelved search result.
   const cards = useMemo(
-    () => rows.filter((r) => !r.archived && !r.settled).sort((a, b) =>
-      STATUS_RANK[a.status] - STATUS_RANK[b.status] || b.touched - a.touched),
+    () => orderSidebarRows(rows.filter((r) => !r.archived && !r.settled)),
     [rows],
   );
-  const tail = useMemo(() => rows.filter((r) => !r.archived && r.settled).sort((a, b) => b.touched - a.touched), [rows]);
-  const archived = useMemo(() => rows.filter((r) => r.archived).sort((a, b) => b.touched - a.touched), [rows]);
+  const tail = useMemo(() => orderSidebarRows(rows.filter((r) => !r.archived && r.settled)), [rows]);
+  const archived = useMemo(() => orderSidebarRows(rows.filter((r) => r.archived)), [rows]);
   const searchRows = useMemo(() => orderSearchRows(rows), [rows]);
   const tailVisible = tailOpen ? tail.slice(0, tailShown) : [];
   const tailHidden = tail.length - tailVisible.length;

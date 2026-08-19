@@ -17,6 +17,7 @@ let resolveSettled: (chat: unknown, status: string, active: boolean, now: number
 let resolveArchived: (chat: unknown, status: string, now: number, touched: number) => boolean;
 let lastTouchedAt: (chat: Chat) => number;
 let orderSearchRows: (rows: readonly any[]) => any[];
+let orderSidebarRows: (rows: readonly any[]) => any[];
 let canSettle: (status: string) => boolean;
 let resolveStatus: (chat: Chat, live: boolean, active: boolean, obligation?: { state: string }) => string;
 let isFullSizeSidebarRow: (settled: boolean, archived: boolean) => boolean;
@@ -34,6 +35,7 @@ before(async () => {
   resolveArchived = sidebar.resolveArchived;
   lastTouchedAt = sidebar.lastTouchedAt;
   orderSearchRows = sidebar.orderSearchRows;
+  orderSidebarRows = sidebar.orderSidebarRows;
   canSettle = sidebar.canSettle;
   resolveStatus = sidebar.resolveStatus;
   isFullSizeSidebarRow = sidebar.isFullSizeSidebarRow;
@@ -122,18 +124,28 @@ test('metadata-only old chats stay automatically settled without resident messag
   assert.equal(resolveArchived(subject, 'ready', now, touched), false);
 });
 
-test('search ordering always appends archived matches after every visible match', () => {
-  const row = (id: string, archived: boolean, touched: number, card = false) => ({
-    chat: { id }, archived, touched, card, status: 'ready', settled: archived,
+test('search ordering appends archived matches while preserving manual order inside each shelf', () => {
+  const row = (id: string, archived: boolean, order: number, card = false) => ({
+    chat: { id }, archived, order, card, status: 'ready', settled: archived, touched: 0,
   });
   const ordered = orderSearchRows([
-    row('archived-newest', true, 400),
-    row('shelved', false, 200),
-    row('archived-oldest', true, 100),
-    row('live', false, 300, true),
+    row('archived-second', true, 3),
+    row('shelved', false, 1),
+    row('archived-first', true, 2),
+    row('live', false, 0, true),
   ]);
 
-  assert.deepEqual(ordered.map((item) => item.chat.id), ['live', 'shelved', 'archived-newest', 'archived-oldest']);
+  assert.deepEqual(ordered.map((item) => item.chat.id), ['live', 'shelved', 'archived-first', 'archived-second']);
+});
+
+test('ordinary sidebar rows follow persisted manual order instead of status or recency', () => {
+  const ordered = orderSidebarRows([
+    { chat: { id: 'done-new' }, order: 2, status: 'done', touched: 900 },
+    { chat: { id: 'working' }, order: 1, status: 'working', touched: 800 },
+    { chat: { id: 'ready-old' }, order: 0, status: 'ready', touched: 100 },
+  ]);
+
+  assert.deepEqual(ordered.map((item) => item.chat.id), ['ready-old', 'working', 'done-new']);
 });
 
 test('nothing still alive, awaiting approval, parked, or unread can sit on the shelf', () => {

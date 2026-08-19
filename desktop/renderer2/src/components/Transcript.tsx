@@ -209,11 +209,11 @@ function EmptyChat({ chat }: { chat: Chat | null }) {
   function pick(path: string) {
     setOpen(false);
     if (!chat) return;
-    // moveChat's beforeId is a DROP target and null means "put it last", so pass
-    // this chat's current successor: switching folders must not also reorder it.
+    // beforeId is a DROP target and null means "put it last", so pass this
+    // chat's current successor: switching folders must not also reorder it.
     const at = app.chats.findIndex((item) => item.id === chat.id);
     const beforeId = app.chats[at + 1]?.id ?? null;
-    void store.moveChat(chat.id, beforeId, path).then((moved) => {
+    void store.moveChatToWorkspace(chat.id, beforeId, path).then((moved) => {
       // Choosing here is the same signal as "Nueva aquí": the next + follows.
       if (moved) rememberLastProject(path);
     });
