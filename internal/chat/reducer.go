@@ -1640,6 +1640,7 @@ func reduceLaneOpened(state *State, command LaneOpened) ([]Effect, error) {
 		return nil, nil
 	}
 	if state.Foreground != nil && state.Foreground.LaneID == openedLaneID && state.Foreground.Status == ForegroundReconciling {
+		rearmTurnReconcileOutbox(state, state.Foreground.OperationID, state.Foreground.Turn)
 		lane.Phase = LaneReconciling
 		state.Lanes[openedLaneID] = lane
 		return []Effect{ReconcileTurnEffect{
@@ -4629,6 +4630,26 @@ func outboxHas(state *State, effectID string, status OutboxStatus) bool {
 		}
 	}
 	return false
+}
+
+// Reconciliation is a pure, non-sampling read of one immutable provider
+// operation. If a host/runtime version could not perform that read, an exact
+// later reattachment may safely try it again. Re-arm the existing receipt
+// instead of appending a duplicate effect or ever replaying the user input.
+func rearmTurnReconcileOutbox(state *State, operationID provider.OperationID, turn provider.TurnRef) {
+	effectID := reconcileTurnEffectID(operationID)
+	for index := range state.Outbox {
+		entry := &state.Outbox[index]
+		if entry.ID != effectID || entry.Kind != EffectReconcileTurn || entry.OperationID != operationID || entry.Turn != turn {
+			continue
+		}
+		switch entry.Status {
+		case OutboxCompleted, OutboxFailed, OutboxAmbiguous:
+			entry.Status = OutboxPending
+			entry.LastError = ""
+		}
+		return
+	}
 }
 
 func effectFromOutbox(state State, entry OutboxEntry) (Effect, error) {

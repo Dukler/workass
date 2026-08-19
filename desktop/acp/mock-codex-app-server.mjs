@@ -154,6 +154,9 @@ async function handle(message) {
   if (method === 'turn/interrupt') { respond(id, {}); completeTurn(params.turnId, 'interrupted'); return; }
 	if (method === 'thread/read') return respond(id, { thread: { id: params.threadId, turns: turnRecords } });
 	if (method === 'thread/items/list') {
+	  if (process.env.WORKASS_CODEX_FIXTURE_ITEMS_LIST_UNSUPPORTED === '1') {
+		return write({ id, error: { code: -32601, message: 'thread/items/list is not supported yet' } });
+	  }
 	  const data = turnRecords.flatMap((turn) => turn.items.map((item) => ({ turnId: turn.id, item }))).reverse();
 	  return respond(id, { data, nextCursor: null, backwardsCursor: null });
 	}

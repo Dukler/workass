@@ -236,6 +236,32 @@ class CodexSession {
 
   modelRow() { return modelCatalog.find((row) => row.id === this.model) || modelCatalog[0]; }
 
+  operationInTurns(turns, clientId) {
+    const rows = Array.isArray(turns) ? turns : [];
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const turn = rows[index];
+      const item = (Array.isArray(turn?.items) ? turn.items : [])
+        .find((candidate) => candidate?.type === 'userMessage' && candidate.clientId === clientId);
+      if (item) return turn;
+    }
+    return null;
+  }
+
+  operationReadback(turn) {
+    if (!turn) return { found: false, consumed: false, status: 'absent', terminal: false };
+    const status = String(turn.status || 'unknown');
+    return {
+      found: true, consumed: true, turnId: String(turn.id || ''), status,
+      terminal: ['completed', 'failed', 'interrupted', 'cancelled', 'canceled'].includes(status),
+    };
+  }
+
+  itemsListUnavailable(error) {
+    const message = String(error?.message || '');
+    return Number(error?.code) === -32601
+      || /thread\/items\/list.*(?:not supported|not found|unknown method)/i.test(message);
+  }
+
   async reconcileOperation(clientUserMessageId) {
     const clientId = String(clientUserMessageId || '').trim();
     if (!clientId) throw new Error('operation reconciliation requires clientUserMessageId');
@@ -245,25 +271,32 @@ class CodexSession {
         terminal: ['completed', 'failed', 'interrupted'].includes(this.turnStatus),
       };
     }
-    let cursor = null;
     let matched = null;
-    for (let page = 0; page < 8 && !matched; page += 1) {
-      const response = await app.request('thread/items/list', {
-        threadId: this.threadId, cursor, limit: 256, sortDirection: 'desc',
-      });
-      matched = (Array.isArray(response?.data) ? response.data : [])
-        .find((entry) => entry?.item?.type === 'userMessage' && entry.item.clientId === clientId) || null;
-      cursor = response?.nextCursor || null;
-      if (!cursor) break;
+    try {
+      let cursor = null;
+      for (let page = 0; page < 8 && !matched; page += 1) {
+        const response = await app.request('thread/items/list', {
+          threadId: this.threadId, cursor, limit: 256, sortDirection: 'desc',
+        });
+        matched = (Array.isArray(response?.data) ? response.data : [])
+          .find((entry) => entry?.item?.type === 'userMessage' && entry.item.clientId === clientId) || null;
+        cursor = response?.nextCursor || null;
+        if (!cursor) break;
+      }
+    } catch (error) {
+      if (!this.itemsListUnavailable(error)) throw error;
+      // Codex 0.148 publishes thread/items/list in its generated schema while
+      // the live app-server still rejects the method as unsupported. The
+      // official thread/read response carries the current turn ledger and the
+      // stable user-message clientId, which is sufficient for this exact
+      // operation readback without sampling or replaying the prompt.
+      const response = await app.request('thread/read', { threadId: this.threadId, includeTurns: true });
+      return this.operationReadback(this.operationInTurns(response?.thread?.turns, clientId));
     }
     if (!matched) return { found: false, consumed: false, status: 'absent', terminal: false };
     const response = await app.request('thread/read', { threadId: this.threadId, includeTurns: true });
     const turn = (response?.thread?.turns || []).find((candidate) => candidate.id === matched.turnId);
-    const status = turn?.status || 'unknown';
-    return {
-      found: true, consumed: true, turnId: matched.turnId, status,
-      terminal: ['completed', 'failed', 'interrupted'].includes(status),
-    };
+    return this.operationReadback(turn || { id: matched.turnId, status: 'unknown' });
   }
 
   startPrompt(blocks, clientUserMessageId = '') {
