@@ -74,6 +74,16 @@ export function buildWorkspaceGroups(workspaces: Workspace[], chats: Chat[], rem
   return groups;
 }
 
+// A removed project is intentionally kept out of the scope menu, but its chats
+// still retain their authoritative cwd. Calling that row "Chats" makes the UI
+// contradict the path shown one line below it (especially for remote Windows
+// chats). Use the real basename for row metadata while reserving "Chats" for a
+// genuinely cwd-less conversation.
+export function workspaceLabelForChat(group: Pick<WorkspaceGroup, 'path' | 'name'>, chat: Pick<Chat, 'cwd'>): string {
+  if (normalizeWorkspacePath(group.path)) return group.name || workspaceName(group.path);
+  return workspaceName(chat.cwd ?? '');
+}
+
 export function chooseWorkspacePath(explicit: string | null | undefined, active: Chat | null, workspaces: Workspace[], fallback: string | null | undefined): string | null {
   return normalizeWorkspacePath(explicit)
     || normalizeWorkspacePath(active?.cwd)

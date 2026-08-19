@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Chat, Workspace } from '../src/store/types.ts';
-import { buildWorkspaceGroups, chooseWorkspacePath, inheritChatControls, lastProject, newChatTarget, normalizeWorkspacePath, normalizeWorkspaces, rememberLastProject, workspaceName } from '../src/workspaces.ts';
+import { buildWorkspaceGroups, chooseWorkspacePath, inheritChatControls, lastProject, newChatTarget, normalizeWorkspacePath, normalizeWorkspaces, rememberLastProject, workspaceLabelForChat, workspaceName } from '../src/workspaces.ts';
 
 function chat(id: string, cwd: string | null, machineId?: string): Chat {
   return { id, chatId: id, machineId, sessionId: null, title: id, titleLocked: false, group: null, cwd, currentModelId: null, currentModeId: null, pending: true, messages: [], draft: '' };
@@ -51,6 +51,16 @@ test('a removed folder is not resurrected by a chat whose cwd still points there
   // Re-adding it (empty removed list) brings the folder back with its chat.
   const back = buildWorkspaceGroups(workspaces, chats, []);
   assert.deepEqual(back.find((g) => g.path === '/repo/network')?.chats.map((c) => c.id), ['b']);
+});
+
+test('a chat in a removed remote project keeps its real Windows folder label', () => {
+  const remote = chat('remote', 'C:\\Users\\a447079\\Workspace', 'san-laptop');
+  const groups = buildWorkspaceGroups([], [remote], ['C:\\Users\\a447079\\Workspace']);
+  const fallback = groups.find((group) => group.path === '');
+  assert.ok(fallback);
+  assert.equal(fallback.name, 'Chats');
+  assert.equal(workspaceLabelForChat(fallback, remote), 'Workspace');
+  assert.equal(workspaceLabelForChat(fallback, chat('unassigned', null)), 'Chats');
 });
 
 test('new chats prefer an explicit folder, then active chat, then saved folders', () => {
