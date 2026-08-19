@@ -8,7 +8,7 @@ const { createViewServer } = require('./view-server');
 const { BrowserManager } = require('./browser-manager');
 const { BrowserControlServer } = require('./browser-control-server');
 const { resolveRuntimeProfile } = require('./runtime-profile');
-const { applyMacDockIcon, refreshWindowsShortcutIcons, resolveWindowFrameOptions, resolveWindowIconPath } = require('./app-icon');
+const { applyMacDockIcon, refreshWindowsShortcutIconsAsync, resolveWindowFrameOptions, resolveWindowIconPath } = require('./app-icon');
 const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
 const { UpdateManager, resolveUpdateFeed } = require('./update-manager');
 const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
@@ -520,20 +520,6 @@ if (runsPrimaryRuntime) app.whenReady().then(async () => {
     repoRoot: REPO_ROOT,
   });
   console.error(`[shell] dock icon receipt ${JSON.stringify(iconReceipt)}`);
-  // Shortcut discovery invokes PowerShell synchronously and can traverse a
-  // redirected/OneDrive desktop. Never put that work in the critical update
-  // relaunch path; its version marker lets a later ordinary launch do it.
-  const windowsIconReceipt = WINDOWS_UPDATE_RECOVERY
-    ? { applied: false, reason: 'deferred-update-relaunch' }
-    : refreshWindowsShortcutIcons({
-        platform: process.platform,
-        isPackaged: app.isPackaged,
-        executablePath: process.execPath,
-        resourcesPath: process.resourcesPath,
-        dataRoot: RUNTIME.dataRoot,
-        appVersion: APP_VERSION,
-      });
-  console.error(`[shell] Windows icon refresh receipt ${JSON.stringify(windowsIconReceipt)}`);
   let viewURL = DAEMON_URL;
   try {
     viewServer = await createViewServer({
@@ -584,6 +570,21 @@ if (runsPrimaryRuntime) app.whenReady().then(async () => {
   });
   const updateState = updateManager.init();
   createWindow(viewURL, browserReporter, isController);
+  if (process.platform === 'win32' && app.isPackaged) {
+    // The window and health surface come first. Shortcut traversal, PowerShell,
+    // and Explorer cache notification then run in a worker so update recovery
+    // refreshes the desktop icon without delaying or freezing the usable app.
+    void refreshWindowsShortcutIconsAsync({
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      executablePath: process.execPath,
+      resourcesPath: process.resourcesPath,
+      dataRoot: RUNTIME.dataRoot,
+      appVersion: APP_VERSION,
+    }).then((receipt) => {
+      console.error(`[shell] Windows icon refresh receipt ${JSON.stringify(receipt)}`);
+    });
+  }
   if (updateBootstrapWindow && !updateBootstrapWindow.isDestroyed()) {
     updateBootstrapWindow.close();
     updateBootstrapWindow = null;
