@@ -8,6 +8,7 @@ const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const {
   defaultOperations,
+  launchUntilHealthy,
   mirrorWindowsDirectory,
   renamePathWithRetry,
   runTransaction,
@@ -42,6 +43,7 @@ function writeWindowsRelease(root, version = '1.1.0') {
   for (const relative of [
     ['resources', 'app', 'update-manager.js'],
     ['resources', 'app', 'update-worker.js'],
+    ['resources', 'app', 'update-lock-recovery.js'],
     ['resources', 'renderer', 'index.html'],
     ['frontier-hosts', 'windows-amd64', 'claude-native-host.mjs'],
     ['frontier-hosts', 'windows-amd64', 'codex-native-host.mjs'],
@@ -101,6 +103,7 @@ function operations(overrides = {}) {
     shellExited: async () => true,
     stopDaemonService: async () => { calls.push('stop-service'); },
     daemonDown: async () => true,
+    stopOldShell: async () => { calls.push('stop-old-shell'); },
     verifyIncoming: async () => { calls.push('verify'); },
     snapshotMutableState: async () => { calls.push('snapshot-state'); },
     activate: async () => { calls.push('activate'); },
@@ -162,6 +165,31 @@ test('the swapped macOS daemon is healthy before the shell is launched', async (
   assert.equal(ensured.forceInstall, true);
 });
 
+test('the swapped Windows daemon is prestarted before Electron relaunches', async () => {
+  const tx = windowsTransactionFixture();
+  const runtime = {
+    daemonURL: 'https://127.0.0.1:8788',
+    viewPort: 8798,
+  };
+  let ensured = null;
+  const receipt = await startInstalledRuntime(tx, {
+    resolveRuntimeProfile: (options) => {
+      assert.equal(options.resourcesPath, path.join(tx.installTarget, 'resources'));
+      assert.equal(options.isPackaged, true);
+      return runtime;
+    },
+    ensurePortableDaemon: async (options) => {
+      ensured = options;
+      return { status: 'started-and-running' };
+    },
+  });
+  assert.equal(receipt.status, 'started-and-running');
+  assert.equal(ensured.runtime, runtime);
+  assert.equal(ensured.resourcesPath, path.join(tx.installTarget, 'resources'));
+  assert.equal(ensured.executablePath, path.join(tx.installTarget, 'Workass.exe'));
+  assert.equal(ensured.platform, 'win32');
+});
+
 test('the target app profile replaces stale runtime settings inherited from the old shell', () => {
   const env = targetRuntimeEnv({
     HOME: '/Users/tester',
@@ -172,6 +200,9 @@ test('the target app profile replaces stale runtime settings inherited from the 
     WORKASS_DAEMON_PORT: '8788',
     WORKASS_URL: 'https://127.0.0.1:8788',
     WORKASS_BROWSER_CONTROL_FILE: '/old/browser-control.json',
+    WORKASS_CONTROLLER_RECOVERY: '1',
+    WORKASS_UPDATE_RELAUNCH: '1',
+    WORKASS_LOCK_RECOVERY_CHILD: '1',
     VENDOR_SETTING: 'preserved',
   });
   assert.equal(env.HOME, '/Users/tester');
@@ -183,6 +214,9 @@ test('the target app profile replaces stale runtime settings inherited from the 
   assert.equal(env.WORKASS_DAEMON_PORT, undefined);
   assert.equal(env.WORKASS_URL, undefined);
   assert.equal(env.WORKASS_BROWSER_CONTROL_FILE, undefined);
+  assert.equal(env.WORKASS_CONTROLLER_RECOVERY, undefined);
+  assert.equal(env.WORKASS_UPDATE_RELAUNCH, undefined);
+  assert.equal(env.WORKASS_LOCK_RECOVERY_CHILD, undefined);
 });
 
 test('Windows stops the complete failed Electron process tree before rollback', async () => {
@@ -296,7 +330,7 @@ test('a partial Windows activation is rolled back before the previous runtime re
 });
 
 test('activation health rejects a daemon that retained the previous bind mode', () => {
-  const shell = { controller: true, catalog: { readyModelCount: 2 }, appVersion: '1.1.0' };
+  const shell = { controller: true, appVersion: '1.1.0' };
   assert.equal(runtimeIsHealthy({
     daemon: { app: 'workass', version: '1.1.0', bind: 'lan' },
     shell,
@@ -315,13 +349,25 @@ test('activation health can require a visible shell window', () => {
   const daemon = { app: 'workass', version: '1.1.0', bind: 'lan' };
   const shell = {
     controller: true,
-    catalog: { readyModelCount: 2 },
     appVersion: '1.1.0',
     windowVisible: false,
   };
   assert.equal(runtimeIsHealthy({ daemon, shell, expectedVersion: '1.1.0' }), true);
   assert.equal(runtimeIsHealthy({ daemon, shell, expectedVersion: '1.1.0', requireVisibleWindow: true }), false);
   assert.equal(runtimeIsHealthy({ daemon, shell: { ...shell, windowVisible: true }, expectedVersion: '1.1.0', requireVisibleWindow: true }), true);
+});
+
+test('activation does not roll back a healthy UI while provider catalogs are still hydrating', () => {
+  const daemon = { app: 'workass', version: '1.1.0' };
+  const shell = {
+    controller: true,
+    appVersion: '1.1.0',
+    windowVisible: true,
+    catalog: { readyModelCount: 0 },
+  };
+  assert.equal(runtimeIsHealthy({
+    daemon, shell, expectedVersion: '1.1.0', requireVisibleWindow: true,
+  }), true);
 });
 
 test('installed process launch waits for Windows spawn acknowledgement and surfaces failure', async () => {
@@ -339,7 +385,32 @@ test('installed process launch waits for Windows spawn acknowledgement and surfa
   await assert.rejects(rejected, /blocked/);
 });
 
-test('Windows activation and rollback launch even an older installed GUI visibly', async () => {
+test('runtime recovery retries launch so a stale Electron singleton cannot strand the app', async () => {
+  const launches = [];
+  let healthChecks = 0;
+  let clock = -5000;
+  const healthy = await launchUntilHealthy({
+    launchInstalled: async (options) => { launches.push(options); },
+    healthy: async () => { healthChecks += 1; return healthChecks >= 3; },
+    waitUntil: async (predicate) => {
+      for (let attempt = 0; attempt < 5; attempt += 1) if (await predicate(attempt)) return true;
+      return false;
+    },
+  }, '1.1.0', {
+    updateRelaunch: true,
+    relaunchIntervalMs: 5000,
+    now: () => { clock += 5000; return clock; },
+  });
+  assert.equal(healthy, true);
+  assert.equal(healthChecks, 3);
+  assert.deepEqual(launches, [
+    { updateRelaunch: true },
+    { updateRelaunch: true },
+    { updateRelaunch: true },
+  ]);
+});
+
+test('Windows target relaunch advertises recovery while rollback keeps older installed GUIs visible', async () => {
   const tx = windowsTransactionFixture();
   let launch = null;
   const disk = defaultOperations(tx, {
@@ -352,12 +423,15 @@ test('Windows activation and rollback launch even an older installed GUI visibly
       return child;
     },
   });
-  await disk.launchInstalled();
+  await disk.launchInstalled({ updateRelaunch: true });
   assert.equal(launch.command, path.join(tx.installTarget, 'Workass.exe'));
   assert.deepEqual(launch.args, []);
   assert.equal(launch.options.cwd, tx.installTarget);
   assert.equal(launch.options.detached, true);
   assert.equal(launch.options.windowsHide, false);
+  assert.equal(launch.options.env.WORKASS_UPDATE_RELAUNCH, '1');
+
+  await disk.launchInstalled({ updateRelaunch: false });
   assert.equal(launch.options.env.WORKASS_UPDATE_RELAUNCH, undefined);
 
   const macTx = transactionFixture();
@@ -399,9 +473,10 @@ test('the update relaunch keeps macOS hidden-until-ready and makes Windows visib
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
   assert.match(worker, /WORKASS_UPDATE_RELAUNCH:\s*'1'/);
   assert.match(main, /show:\s*showOnCreate/);
-  assert.match(main, /isUpdateRelaunch\s*&&\s*!showOnCreate/);
+  assert.match(main, /if \(isUpdateRelaunch\)/);
   assert.match(main, /win\.once\('ready-to-show', reveal\)/);
   assert.match(main, /focusPrimaryWindow\(\(\) => \[win\]/);
+  assert.match(main, /createUpdateBootstrapWindow/);
 });
 
 test('healthy activation deletes the backup only after all runtime gates pass', async () => {
@@ -414,6 +489,23 @@ test('healthy activation deletes the backup only after all runtime gates pass', 
     'stop-service', 'verify', 'snapshot-state', 'activate', 'start-runtime', 'launch', 'healthy:1.1.0', 'cleanup',
   ]);
   assert.equal(JSON.parse(fs.readFileSync(tx.receiptPath, 'utf8')).phase, 'healthy');
+});
+
+test('Windows force-stops the exact old Electron tree after the graceful quit boundary', async () => {
+  const tx = windowsTransactionFixture();
+  let forced = false;
+  const ops = operations({
+    shellExited: async () => forced,
+    stopOldShell: async () => { ops.calls.push('stop-old-shell'); forced = true; },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'healthy');
+  assert.equal(receipt.oldShellForced, true);
+  assert.equal(ops.calls[0], 'stop-old-shell');
+  assert.deepEqual(ops.calls.slice(1), [
+    'stop-service', 'verify', 'snapshot-state', 'activate', 'start-runtime',
+    'launch', 'healthy:1.1.0', 'cleanup',
+  ]);
 });
 
 test('post-health cleanup failure cannot roll a healthy release back', async () => {

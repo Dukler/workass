@@ -50,6 +50,7 @@ function writeWindowsRelease(root, version = '1.2.0') {
   for (const relative of [
     ['resources', 'app', 'update-manager.js'],
     ['resources', 'app', 'update-worker.js'],
+    ['resources', 'app', 'update-lock-recovery.js'],
     ['resources', 'renderer', 'index.html'],
     ['frontier-hosts', 'windows-amd64', 'claude-native-host.mjs'],
     ['frontier-hosts', 'windows-amd64', 'codex-native-host.mjs'],
@@ -271,6 +272,7 @@ test('the Windows publisher marks the unsigned portable feed as updater-compatib
   assert.match(publisher, /stamp-windows-icon\.mjs["']? --exe ["']?\$stage\/Workass\.exe["']? --icon ["']?\$repo_root\/desktop\/assets\/icon\.ico/);
   assert.match(publisher, /stamp-windows-icon\.mjs["']? --verify --exe ["']?\$stage\/Workass\.exe["']? --icon ["']?\$repo_root\/desktop\/assets\/icon\.ico/);
   assert.match(publisher, /desktop\/assets\/icon\.ico["']? ["']?\$stage\/resources\/Workass\.ico/);
+  assert.match(publisher, /for shell_file in[^\n]*update-lock-recovery\.js/);
   assert.match(publisher, /https:\/\/github\.com\/Dukler\/workass\/releases\/download\/v\$\{version\}\/\$\{artifactName\}/);
   const rendererBuild = publisher.indexOf('npm run build --prefix desktop/renderer2');
   const rendererSync = publisher.indexOf('scripts/sync-renderer2.sh');

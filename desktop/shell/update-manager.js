@@ -572,6 +572,7 @@ function verifyWindowsRelease(_currentRoot, incomingRoot, targetVersion, arch = 
   for (const [relative, label] of [
     [['resources', 'app', 'update-manager.js'], 'update manager'],
     [['resources', 'app', 'update-worker.js'], 'update worker'],
+    [['resources', 'app', 'update-lock-recovery.js'], 'update lock recovery'],
     [['resources', 'renderer', 'index.html'], 'renderer'],
     [['frontier-hosts', `windows-${expectedArch}`, 'claude-native-host.mjs'], 'Claude host'],
     [['frontier-hosts', `windows-${expectedArch}`, 'codex-native-host.mjs'], 'Codex host'],

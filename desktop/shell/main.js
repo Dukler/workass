@@ -13,6 +13,12 @@ const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, res
 const { UpdateManager, resolveUpdateFeed } = require('./update-manager');
 const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
 const { acquireProfileSingleton, focusPrimaryWindow, shouldShowWindowOnCreate } = require('./profile-singleton');
+const {
+  createUpdateBootstrapWindow,
+  shouldStartUpdateLockRecovery,
+  startWindowsUpdateLockRecovery,
+  updateLockRecoveryUserData,
+} = require('./update-lock-recovery');
 const { CertificatePins } = require('./certificate-pins');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -26,26 +32,41 @@ fs.mkdirSync(RUNTIME.userDataDir, { recursive: true });
 fs.mkdirSync(RUNTIME.runDir, { recursive: true });
 app.setName(RUNTIME.appName);
 if (process.platform === 'win32') app.setAppUserModelId(RUNTIME.bundleId);
-app.setPath('userData', RUNTIME.userDataDir);
+const RECOVER_CONTROLLER = process.env.WORKASS_CONTROLLER_RECOVERY === '1';
+const UPDATE_RELAUNCH = process.env.WORKASS_UPDATE_RELAUNCH === '1';
+const UPDATE_RETRY_CHILD = process.env.WORKASS_LOCK_RECOVERY_CHILD === '1';
+const WINDOWS_UPDATE_RECOVERY = process.platform === 'win32' && RECOVER_CONTROLLER;
+const WINDOWS_UPDATE_BOOTSTRAP = WINDOWS_UPDATE_RECOVERY && !UPDATE_RETRY_CHILD;
+const APP_VERSION = app.isPackaged ? app.getVersion() : 'development';
+const singletonUserData = WINDOWS_UPDATE_BOOTSTRAP
+  ? updateLockRecoveryUserData(RUNTIME.dataRoot)
+  : RUNTIME.userDataDir;
+fs.mkdirSync(singletonUserData, { recursive: true });
+app.setPath('userData', singletonUserData);
 const ownsProfileInstance = acquireProfileSingleton({
   app,
-  profile: RUNTIME.profile,
-  dataRoot: RUNTIME.dataRoot,
+  profile: WINDOWS_UPDATE_BOOTSTRAP ? `${RUNTIME.profile}-update-recovery` : RUNTIME.profile,
+  dataRoot: WINDOWS_UPDATE_BOOTSTRAP ? singletonUserData : RUNTIME.dataRoot,
   getWindows: () => BrowserWindow.getAllWindows(),
 });
+const recoverStaleUpdateLock = shouldStartUpdateLockRecovery({
+  platform: process.platform,
+  ownsProfileInstance,
+  recoverController: RECOVER_CONTROLLER,
+  retryChild: UPDATE_RETRY_CHILD,
+});
+const runsPrimaryRuntime = ownsProfileInstance && !recoverStaleUpdateLock;
 if (!ownsProfileInstance) {
   console.error(`[shell] profile=${RUNTIME.profile} already has a primary instance; duplicate exiting`);
   app.quit();
 }
 
 const DAEMON_URL = RUNTIME.daemonURL;
-const RECOVER_CONTROLLER = process.env.WORKASS_CONTROLLER_RECOVERY === '1';
-let revealUpdateRelaunch = process.env.WORKASS_UPDATE_RELAUNCH === '1';
+let revealUpdateRelaunch = UPDATE_RELAUNCH || WINDOWS_UPDATE_RECOVERY;
 const RENDERER_DIR = process.env.WORKASS_RENDERER_DIR || (app.isPackaged
   ? path.join(process.resourcesPath, 'renderer')
   : path.join(__dirname, '..', 'renderer2', 'dist'));
 const VIEW_PORT = RUNTIME.viewPort;
-const APP_VERSION = app.isPackaged ? app.getVersion() : 'development';
 let viewServer = null;
 let browserManager = null;
 let browserControlServer = null;
@@ -53,6 +74,28 @@ let updateManager = null;
 const externalImageTempDirs = new Set();
 const certificatePins = new CertificatePins();
 const loggedCertificateDecisions = new Set();
+
+if (recoverStaleUpdateLock) {
+  const windowIcon = resolveWindowIconPath({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    repoRoot: REPO_ROOT,
+  });
+  void startWindowsUpdateLockRecovery({
+    app,
+    BrowserWindow,
+    executablePath: process.execPath,
+    dataRoot: RUNTIME.dataRoot,
+    appVersion: APP_VERSION,
+    windowIcon,
+    statusURL: `http://127.0.0.1:${RUNTIME.viewPort}/__workass-shell/status`,
+    daemonHealthURL: `${RUNTIME.daemonURL}/workass/health`,
+  }).catch((err) => {
+    console.error(`[shell] Windows update lock recovery failed: ${err.message}`);
+    app.quit();
+  });
+}
 
 function sourceDaemonExecutable() {
   if (app.isPackaged) return '';
@@ -228,7 +271,7 @@ function createWindow(url, browserReporter, isController) {
     win.on(event, reportWindowState);
   }
   reportWindowState();
-  if (isUpdateRelaunch && !showOnCreate) {
+  if (isUpdateRelaunch) {
     let revealed = false;
     let fallback = null;
     const reveal = () => {
@@ -240,6 +283,8 @@ function createWindow(url, browserReporter, isController) {
     };
     win.once('ready-to-show', reveal);
     win.webContents.once('did-fail-load', reveal);
+    win.webContents.once('did-finish-load', reveal);
+    if (showOnCreate) setImmediate(reveal);
     fallback = setTimeout(reveal, 5000);
     fallback.unref?.();
   }
@@ -426,7 +471,7 @@ function createWindow(url, browserReporter, isController) {
   return win;
 }
 
-if (ownsProfileInstance) app.on('will-quit', () => {
+if (runsPrimaryRuntime) app.on('will-quit', () => {
   updateManager?.dispose();
   for (const dir of externalImageTempDirs) {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -434,7 +479,19 @@ if (ownsProfileInstance) app.on('will-quit', () => {
   externalImageTempDirs.clear();
 });
 
-if (ownsProfileInstance) app.whenReady().then(async () => {
+if (runsPrimaryRuntime) app.whenReady().then(async () => {
+  let updateBootstrapWindow = null;
+  if (WINDOWS_UPDATE_RECOVERY) {
+    updateBootstrapWindow = createUpdateBootstrapWindow({
+      BrowserWindow,
+      windowIcon: resolveWindowIconPath({
+        platform: process.platform,
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        repoRoot: REPO_ROOT,
+      }),
+    });
+  }
   allowPrivateWorkassCertificates();
   grantMicrophoneOnly();
   if (app.isPackaged) {
@@ -463,14 +520,19 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
     repoRoot: REPO_ROOT,
   });
   console.error(`[shell] dock icon receipt ${JSON.stringify(iconReceipt)}`);
-  const windowsIconReceipt = refreshWindowsShortcutIcons({
-    platform: process.platform,
-    isPackaged: app.isPackaged,
-    executablePath: process.execPath,
-    resourcesPath: process.resourcesPath,
-    dataRoot: RUNTIME.dataRoot,
-    appVersion: APP_VERSION,
-  });
+  // Shortcut discovery invokes PowerShell synchronously and can traverse a
+  // redirected/OneDrive desktop. Never put that work in the critical update
+  // relaunch path; its version marker lets a later ordinary launch do it.
+  const windowsIconReceipt = WINDOWS_UPDATE_RECOVERY
+    ? { applied: false, reason: 'deferred-update-relaunch' }
+    : refreshWindowsShortcutIcons({
+        platform: process.platform,
+        isPackaged: app.isPackaged,
+        executablePath: process.execPath,
+        resourcesPath: process.resourcesPath,
+        dataRoot: RUNTIME.dataRoot,
+        appVersion: APP_VERSION,
+      });
   console.error(`[shell] Windows icon refresh receipt ${JSON.stringify(windowsIconReceipt)}`);
   let viewURL = DAEMON_URL;
   try {
@@ -522,6 +584,10 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
   });
   const updateState = updateManager.init();
   createWindow(viewURL, browserReporter, isController);
+  if (updateBootstrapWindow && !updateBootstrapWindow.isDestroyed()) {
+    updateBootstrapWindow.close();
+    updateBootstrapWindow = null;
+  }
   // A rolled-back/failed transaction stays visible until the user explicitly
   // retries. An automatic check here would immediately re-offer the exact
   // release that just failed its health gates and hide the recovery receipt.
@@ -538,8 +604,8 @@ if (ownsProfileInstance) app.whenReady().then(async () => {
   });
 });
 
-if (ownsProfileInstance) app.on('window-all-closed', () => app.quit());
-if (ownsProfileInstance) app.on('before-quit', () => {
+if (runsPrimaryRuntime) app.on('window-all-closed', () => app.quit());
+if (runsPrimaryRuntime) app.on('before-quit', () => {
   if (browserControlServer) void browserControlServer.close();
   if (browserManager) browserManager.destroy();
   if (viewServer) void viewServer.close();
