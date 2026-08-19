@@ -160,7 +160,10 @@ async function startWindowsUpdateLockRecovery({
       try {
         retry = spawnProcess(executablePath, [], {
           cwd: path.dirname(executablePath),
-          detached: false,
+          // The helper exits as soon as this real-profile child is healthy.
+          // Keep the child in an independent process group so Windows cannot
+          // tear the recovered app down with the temporary helper/job tree.
+          detached: true,
           windowsHide: false,
           stdio: 'ignore',
           env: {

@@ -92,7 +92,7 @@ test('a stale profile lock keeps one bootstrap and retries the real executable u
   const launch = calls.find((entry) => entry[0] === 'spawn');
   assert.equal(launch[1], executablePath);
   assert.equal(launch[3].windowsHide, false);
-  assert.equal(launch[3].detached, false);
+  assert.equal(launch[3].detached, true);
   assert.equal(launch[3].env.WORKASS_UPDATE_RELAUNCH, '1');
   assert.equal(launch[3].env.WORKASS_LOCK_RECOVERY_CHILD, '1');
   assert.equal(retry.unrefCalled, true);
