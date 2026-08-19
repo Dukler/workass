@@ -220,6 +220,11 @@ export class Store {
   private settingsSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private monitor?: ConnectionMonitor;
   private agentRefresh: Promise<void> = Promise.resolve();
+  // A workass_focus_chat call is an explicit, one-shot UI intent. Keep it
+  // separate from the daemon snapshot's activeId: periodic hydration must
+  // preserve the user's local selection, while this exact tab+chat pair must
+  // be adopted once the actor row is present.
+  private pendingAgentFocus: { tabId: string; chatId: string } | null = null;
   private sessionHydrationPending = false;
   private digestUnsupported = false;
   private digestProbe: Promise<void> | null = null;
@@ -1023,6 +1028,7 @@ export class Store {
     const localActive = this.state.activeId;
     const localSurvives = !!localActive && this.state.chats.some((chat) => chat.id === localActive);
     this.state.activeId = localSurvives ? localActive : restored.activeId;
+    this.applyPendingAgentFocus();
     this.state.seq = restored.seq;
     if (this.state.meta?.daemon) this.releaseInactiveHistories(this.state.activeId);
     const active = this.active();
@@ -1516,6 +1522,58 @@ export class Store {
   }
 
   // ---- boot / hydrate --------------------------------------------------
+  private applyPendingAgentFocus(): boolean {
+    const intent = this.pendingAgentFocus;
+    if (!intent) return false;
+    const target = this.state.chats.find((chat) => chat.id === intent.tabId && chat.chatId === intent.chatId);
+    if (!target) return false;
+    this.pendingAgentFocus = null;
+    this.switchChat(target.id);
+    return true;
+  }
+
+  private onAgentApply(event: AgentApply) {
+    if (event.action === 'session-controls-skipped') {
+      // The chat is running on something other than its configured model —
+      // the receipt row makes the silent downgrade visible (2026-07-27).
+      const chat = event.tabId ? this.chat(event.tabId) : null;
+      if (chat && event.requestedModelId) {
+        chat.controlsSkipped = {
+          requestedModelId: event.requestedModelId,
+          requestedModeId: event.requestedModeId,
+          reason: event.reason ?? '',
+          error: event.error,
+          at: Date.now(),
+        };
+        this.bumpApp(false);
+      }
+      return;
+    }
+    if (event.action !== 'session-refresh') return;
+    if (event.focus === true && typeof event.tabId === 'string' && event.tabId
+      && typeof event.chatId === 'string' && event.chatId) {
+      this.pendingAgentFocus = { tabId: event.tabId, chatId: event.chatId };
+      this.applyPendingAgentFocus();
+    }
+    // A session-refresh is a session/permissions delta, not a reconnection.
+    // Running the full cold-reconnect reconciliation per event cost one
+    // session:get plus app:meta, config:get, settings:get, proc:list,
+    // permissions, chat:env-get and a spawned-work call per chat — and the
+    // daemon emits one of these for every agent control operation, so a
+    // single fan-out of subagents produced dozens of full hydrations.
+    // The tab is not a usable discriminator for ordinary refreshes: the daemon
+    // coalesces background intents and emits one untargeted event for a merged
+    // batch. An explicit focus=true payload is handled above as a one-shot UI
+    // intent, then followed on the wire by this same untargeted refresh.
+    // Route every refresh through the bounded digest. It determines whether
+    // any exact revision actually diverged before session:get is allowed to
+    // replace the mirror. Directly scheduling a session pull here made every
+    // renderer save echo back as a wholesale hydration.
+    // A genuine reconnection is still driven by the socket-open path below.
+    if (this.monitor) this.monitor.probeNow();
+    else this.scheduleScopedSync(['session', 'permissions']);
+  }
+
   async init() {
     applyTheme(this.state.theme);
     applyDensity(this.state.density);
@@ -1580,41 +1638,7 @@ export class Store {
       chat.commandCatalog = event.commandCatalog ?? undefined;
       this.bumpApp(false);
     });
-    on('onAgentApply', (e) => {
-      const event = e as AgentApply;
-      if (event.action === 'session-controls-skipped') {
-        // The chat is running on something other than its configured model —
-        // the receipt row makes the silent downgrade visible (2026-07-27).
-        const chat = event.tabId ? this.chat(event.tabId) : null;
-        if (chat && event.requestedModelId) {
-          chat.controlsSkipped = {
-            requestedModelId: event.requestedModelId,
-            requestedModeId: event.requestedModeId,
-            reason: event.reason ?? '',
-            error: event.error,
-            at: Date.now(),
-          };
-          this.bumpApp(false);
-        }
-        return;
-      }
-      if (event.action !== 'session-refresh') return;
-      // A session-refresh is a session/permissions delta, not a reconnection.
-      // Running the full cold-reconnect reconciliation per event cost one
-      // session:get plus app:meta, config:get, settings:get, proc:list,
-      // permissions, chat:env-get and a spawned-work call per chat — and the
-      // daemon emits one of these for every agent control operation, so a
-      // single fan-out of subagents produced dozens of full hydrations.
-      // The tab is not a usable discriminator: the daemon coalesces its own
-      // background intents and emits one untargeted event for a merged batch.
-      // Route every refresh through the bounded digest. It determines whether
-      // any exact revision actually diverged before session:get is allowed to
-      // replace the mirror. Directly scheduling a session pull here made every
-      // renderer save echo back as a wholesale hydration.
-      // A genuine reconnection is still driven by the socket-open path below.
-      if (this.monitor) this.monitor.probeNow();
-      else this.scheduleScopedSync(['session', 'permissions']);
-    });
+    on('onAgentApply', (e) => this.onAgentApply(e as AgentApply));
     if (typeof window !== 'undefined') {
       const bootSocketGen = typeof window.__workassSocketGen === 'number' ? window.__workassSocketGen : 0;
       window.addEventListener('workass:socket-open', (e) => {
@@ -1672,6 +1696,7 @@ export class Store {
       if (live.activeId && this.state.chats.some((chat) => chat.id === live.activeId)) {
         this.state.activeId = live.activeId;
       }
+      this.applyPendingAgentFocus();
       this.preserveNewerLocalControls(live.chats, this.state.chats);
       this.restoreDraftImages(live.chats, this.state.chats);
       this.restorePendingDrafts(this.state.chats);
@@ -2345,7 +2370,16 @@ export class Store {
     void this.flushSession(true);
   }
   switchChat(id: string) {
-    if (this.state.activeId === id) return;
+    // A direct row/keyboard/notification selection is newer local intent than
+    // any agent focus still waiting for its actor row to hydrate.
+    this.pendingAgentFocus = null;
+    if (this.state.activeId === id) {
+      // Re-focusing an already-selected row is still a recovery signal: its
+      // session snapshot may contain only a tail (or a prior archive read may
+      // have failed), so make the canonical actor ledger readable again.
+      void this.ensureFullHistory(id);
+      return;
+    }
     this.state.activeId = id;
     this.releaseInactiveHistories(id);
     void this.ensureFullHistory(id);

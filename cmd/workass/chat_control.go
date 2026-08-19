@@ -529,6 +529,10 @@ func (c *chatControlCoordinator) refresh(tabID, chatID string, focus bool) {
 	if !ok {
 		return
 	}
+	if focus {
+		c.refreshes.RequestFocus(tabID, chatID)
+		return
+	}
 	c.refreshes.Request(tabID, chatID, state.Revision, refreshImmediate)
 }
 

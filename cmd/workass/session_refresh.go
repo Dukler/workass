@@ -73,6 +73,24 @@ func (c *sessionRefreshCoordinator) Request(tabID, chatID string, generation uin
 	c.mu.Unlock()
 }
 
+// RequestFocus publishes one exact, live-only focus intent before the ordinary
+// untargeted refresh. The trailing generic refresh is deliberate: browser
+// bridges cache the last payload per event channel for late subscribers, so it
+// replaces the one-shot focus payload and prevents a reconnect from replaying
+// an old agent selection over the user's current local tab.
+func (c *sessionRefreshCoordinator) RequestFocus(tabID, chatID string) {
+	if c == nil {
+		return
+	}
+	c.broadcast("agent:apply", map[string]any{
+		"action": "session-refresh",
+		"tabId":  tabID,
+		"chatId": chatID,
+		"focus":  true,
+	})
+	c.broadcast("agent:apply", map[string]any{"action": "session-refresh"})
+}
+
 func (c *sessionRefreshCoordinator) ensureTimerLocked() {
 	if c.timer != nil {
 		return
