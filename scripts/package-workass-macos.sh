@@ -121,6 +121,7 @@ echo "[package] testing shell, installer, signing, and profile isolation" | tee 
   desktop/shell/app-icon.test.js \
   desktop/shell/image-copy.test.js \
   desktop/shell/profile-singleton.test.js \
+  desktop/shell/update-lock-recovery.test.js \
   desktop/shell/update-manager.test.js \
   desktop/shell/update-worker.test.js \
   scripts/tests/package-workass-macos.test.mjs) >>"$log_file" 2>&1
@@ -155,7 +156,7 @@ mkdir -p "$stage/Contents/Resources/app" "$stage/Contents/Resources/renderer" "$
 
 mv "$stage/Contents/MacOS/Electron" "$stage/Contents/MacOS/Workass"
 rm -f "$stage/Contents/Resources/default_app.asar"
-for shell_file in main.js preload.js view-server.js browser-manager.js browser-control-server.js runtime-profile.js runtime-bootstrap.js certificate-pins.js app-icon.js image-copy.js profile-singleton.js update-manager.js update-worker.js; do
+for shell_file in main.js preload.js view-server.js browser-manager.js browser-control-server.js runtime-profile.js runtime-bootstrap.js certificate-pins.js app-icon.js image-copy.js profile-singleton.js update-lock-recovery.js update-manager.js update-worker.js; do
   cp "$repo_root/desktop/shell/$shell_file" "$stage/Contents/Resources/app/$shell_file"
 done
 cp "$repo_root/desktop/shell/package.production.json" "$stage/Contents/Resources/app/package.json"

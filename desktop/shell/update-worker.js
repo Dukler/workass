@@ -23,6 +23,8 @@ const STALE_RUNTIME_ENV_KEYS = new Set([
   'WORKASS_LOG_ROOT', 'WORKASS_UPDATE_CHANNEL', 'WORKASS_URL',
   'WORKASS_BROWSER_CONTROL_FILE', 'WORKASS_REPO_ROOT',
   'WORKASS_TEST_ROOT', 'WORKASS_PROD',
+  'WORKASS_CONTROLLER_RECOVERY', 'WORKASS_UPDATE_RELAUNCH',
+  'WORKASS_LOCK_RECOVERY_CHILD',
 ]);
 
 function targetRuntimeEnv(source = process.env) {
@@ -34,7 +36,11 @@ function targetRuntimeEnv(source = process.env) {
 function runtimeIsHealthy({ daemon, shell, expectedVersion, expectedBind = '', requireVisibleWindow = false }) {
   return daemon?.app === 'workass' && daemon?.version === expectedVersion &&
     (!expectedBind || daemon?.bind === expectedBind) &&
-    shell?.controller === true && Number(shell?.catalog?.readyModelCount || 0) > 0 &&
+    // The renderer owning controller authority proves that its bridge loaded
+    // and reached the daemon. Provider catalogs hydrate independently and may
+    // legitimately take longer than an update transaction on a slow network;
+    // treating that as an activation failure killed an otherwise healthy app.
+    shell?.controller === true &&
     shell?.appVersion === expectedVersion &&
     (!requireVisibleWindow || shell?.windowVisible === true);
 }
@@ -167,7 +173,7 @@ function mirrorWindowsDirectory(source, destination, { run = spawnSync } = {}) {
 
 async function waitUntil(predicate, { attempts = 160, delayMs = 250 } = {}) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (await predicate()) return true;
+    if (await predicate(attempt)) return true;
     await delay(delayMs);
   }
   return false;
@@ -286,6 +292,7 @@ function verifyWindowsIncoming(transaction) {
   for (const [relative, label] of [
     [['resources', 'app', 'update-manager.js'], 'update manager'],
     [['resources', 'app', 'update-worker.js'], 'update worker'],
+    [['resources', 'app', 'update-lock-recovery.js'], 'update lock recovery'],
     [['resources', 'renderer', 'index.html'], 'renderer'],
     [['frontier-hosts', 'windows-amd64', 'claude-native-host.mjs'], 'Claude host'],
     [['frontier-hosts', 'windows-amd64', 'codex-native-host.mjs'], 'Codex host'],
@@ -351,13 +358,14 @@ function validateTransaction(transaction) {
 }
 
 async function startInstalledRuntime(transaction, dependencies = {}) {
-  if (transaction.platform !== 'darwin') return { status: 'not-required' };
-  const resourcesPath = path.join(transaction.installTarget, 'Contents', 'Resources');
+  if (!['darwin', 'win32'].includes(transaction.platform)) return { status: 'not-required' };
+  const resourcesPath = transaction.platform === 'darwin'
+    ? path.join(transaction.installTarget, 'Contents', 'Resources')
+    : path.join(transaction.installTarget, 'resources');
   const appCode = path.join(resourcesPath, 'app');
   const resolveRuntimeProfile = dependencies.resolveRuntimeProfile ||
     require(path.join(appCode, 'runtime-profile.js')).resolveRuntimeProfile;
-  const ensurePackagedDaemon = dependencies.ensurePackagedDaemon ||
-    require(path.join(appCode, 'runtime-bootstrap.js')).ensurePackagedDaemon;
+  const bootstrap = dependencies.runtimeBootstrap || {};
   const runtime = resolveRuntimeProfile({
     env: targetRuntimeEnv(process.env),
     isPackaged: true,
@@ -368,11 +376,47 @@ async function startInstalledRuntime(transaction, dependencies = {}) {
       `http://127.0.0.1:${runtime.viewPort}/__workass-shell/status` !== transaction.shellStatusURL) {
     throw new Error('installed runtime profile does not match the prepared update transaction');
   }
-  const receipt = await ensurePackagedDaemon({ runtime, resourcesPath, forceInstall: true });
-  if (!['installed-and-running', 'already-running'].includes(receipt?.status)) {
+  const receipt = transaction.platform === 'darwin'
+    ? await (dependencies.ensurePackagedDaemon || bootstrap.ensurePackagedDaemon ||
+        require(path.join(appCode, 'runtime-bootstrap.js')).ensurePackagedDaemon)({
+        runtime, resourcesPath, forceInstall: true,
+      })
+    : await (dependencies.ensurePortableDaemon || bootstrap.ensurePortableDaemon ||
+        require(path.join(appCode, 'runtime-bootstrap.js')).ensurePortableDaemon)({
+        runtime,
+        resourcesPath,
+        executablePath: path.join(transaction.installTarget, 'Workass.exe'),
+        platform: 'win32',
+      });
+  if (!['installed-and-running', 'started-and-running', 'already-running'].includes(receipt?.status)) {
     throw new Error('installed Workass runtime did not start');
   }
   return { ...receipt, runtime };
+}
+
+async function launchUntilHealthy(ops, expectedVersion, {
+  updateRelaunch = true,
+  attempts = 480,
+  delayMs = 250,
+  relaunchIntervalMs = 5000,
+  now = Date.now,
+} = {}) {
+  await ops.launchInstalled({ updateRelaunch });
+  let nextRelaunchAt = now() + relaunchIntervalMs;
+  const wait = ops.waitUntil || waitUntil;
+  return wait(async () => {
+    if (await ops.healthy(expectedVersion)) return true;
+    const current = now();
+    if (current >= nextRelaunchAt) {
+      // A stale Chromium singleton can outlive the old main PID. Re-launching
+      // is safe: a live primary receives Electron's second-instance event and
+      // shows itself; once the stale lock disappears, one retry becomes the
+      // new primary instead of leaving Workass closed forever.
+      await ops.launchInstalled({ updateRelaunch });
+      nextRelaunchAt = current + relaunchIntervalMs;
+    }
+    return false;
+  }, { attempts, delayMs });
 }
 
 function defaultOperations(transaction, dependencies = {}) {
@@ -380,7 +424,7 @@ function defaultOperations(transaction, dependencies = {}) {
   const launchdDomain = String(transaction.launchdDomain || '');
   const mirrorWindows = dependencies.mirrorWindowsDirectory || mirrorWindowsDirectory;
   const spawnProcess = dependencies.spawnProcess || spawn;
-  let launchedPID = 0;
+  const launchedPIDs = new Set();
   let expectedDaemonBind = '';
   return {
     shellExited: () => !pidAlive(transaction.shellPID),
@@ -390,6 +434,9 @@ function defaultOperations(transaction, dependencies = {}) {
       }
     },
     daemonDown: async () => !(await requestJSON(transaction.daemonHealthURL, 600)),
+    stopOldShell: async () => {
+      await stopLaunchedProcessTree(transaction.shellPID, { platform: transaction.platform });
+    },
     verifyIncoming: async () => {
       if (transaction.platform === 'darwin') verifyMacIncoming(transaction);
       else verifyWindowsIncoming(transaction);
@@ -450,7 +497,7 @@ function defaultOperations(transaction, dependencies = {}) {
       expectedDaemonBind = String(receipt?.runtime?.daemonBind || '');
       return receipt;
     },
-    launchInstalled: async () => {
+    launchInstalled: async ({ updateRelaunch = transaction.platform === 'darwin' } = {}) => {
       const executable = transaction.platform === 'darwin'
         ? path.join(transaction.installTarget, 'Contents', 'MacOS', 'Workass')
         : path.join(transaction.installTarget, 'Workass.exe');
@@ -465,14 +512,13 @@ function defaultOperations(transaction, dependencies = {}) {
         env: {
           ...targetRuntimeEnv(process.env),
           WORKASS_CONTROLLER_RECOVERY: '1',
-          // Older Windows releases interpret this flag by creating their only
-          // BrowserWindow hidden. Omit it on Windows so rollback to one of
-          // those releases is visible too; macOS still uses its bounded
-          // hidden-until-ready path.
-          ...(transaction.platform === 'darwin' ? { WORKASS_UPDATE_RELAUNCH: '1' } : {}),
+          // Target releases use this to surface a responsive recovery window
+          // before daemon/provider hydration. Rollback launches omit it on
+          // Windows because older builds interpreted it as "stay hidden".
+          ...(updateRelaunch ? { WORKASS_UPDATE_RELAUNCH: '1' } : {}),
         },
       }, { spawnProcess });
-      launchedPID = child.pid || 0;
+      if (child.pid) launchedPIDs.add(child.pid);
     },
     healthy: async (expectedVersion = transaction.targetVersion) => {
       const [daemon, shell] = await Promise.all([
@@ -487,7 +533,10 @@ function defaultOperations(transaction, dependencies = {}) {
       });
     },
     stopLaunched: async () => {
-      await stopLaunchedProcessTree(launchedPID, { platform: transaction.platform });
+      for (const pid of Array.from(launchedPIDs).reverse()) {
+        await stopLaunchedProcessTree(pid, { platform: transaction.platform });
+      }
+      launchedPIDs.clear();
       if (transaction.platform === 'darwin' && launchAgentPath && launchdDomain) {
         spawnSync('/bin/launchctl', ['bootout', launchdDomain, launchAgentPath], { stdio: 'ignore' });
       }
@@ -566,17 +615,35 @@ async function runTransaction(rawTransaction, operations) {
   const ops = operations || defaultOperations(transaction);
   const wait = ops.waitUntil || waitUntil;
   updateReceipt(transaction, 'armed');
-  if (!await wait(ops.shellExited, { attempts: 160, delayMs: 250 })) {
-    return updateReceipt(transaction, 'failed', { activated: false, error: 'the old Workass shell did not exit' });
+  let oldShellForced = false;
+  const gracefulShellAttempts = transaction.platform === 'win32' ? 20 : 160;
+  if (!await wait(ops.shellExited, { attempts: gracefulShellAttempts, delayMs: 250 })) {
+    if (transaction.platform !== 'win32') {
+      return updateReceipt(transaction, 'failed', { activated: false, error: 'the old Workass shell did not exit' });
+    }
+    try {
+      await ops.stopOldShell();
+      oldShellForced = true;
+    } catch (err) {
+      return updateReceipt(transaction, 'failed', {
+        activated: false,
+        error: `the old Workass shell process tree did not stop: ${String(err && err.message || err)}`,
+      });
+    }
+    if (!await wait(ops.shellExited, { attempts: 40, delayMs: 250 })) {
+      return updateReceipt(transaction, 'failed', { activated: false, error: 'the old Workass shell did not exit' });
+    }
   }
   await ops.stopDaemonService();
   if (!await wait(ops.daemonDown, { attempts: 80, delayMs: 250 })) {
     try {
-      await ops.launchInstalled();
-      const recovered = await wait(() => ops.healthy(transaction.currentVersion), { attempts: 240, delayMs: 250 });
+      const recovered = await launchUntilHealthy(ops, transaction.currentVersion, {
+        updateRelaunch: transaction.platform === 'darwin',
+      });
       return updateReceipt(transaction, recovered ? 'rollback_healthy' : 'failed', {
         activated: false,
         rolledBack: false,
+        ...(oldShellForced ? { oldShellForced: true } : {}),
         error: 'the old Workass daemon did not stop for the update',
         ...(recovered ? {} : { rollbackError: 'previous release did not recover' }),
       });
@@ -600,17 +667,17 @@ async function runTransaction(rawTransaction, operations) {
     await ops.activate();
     activated = true;
     await ops.startRuntime?.();
-    await ops.launchInstalled();
-    if (await wait(() => ops.healthy(transaction.targetVersion), { attempts: 240, delayMs: 250 })) {
+    if (await launchUntilHealthy(ops, transaction.targetVersion, { updateRelaunch: true })) {
       let cleanupWarning = '';
       try { await ops.cleanup(); }
       catch (err) { cleanupWarning = String(err && err.message || err); }
       return updateReceipt(transaction, 'healthy', {
         activated: true,
+        ...(oldShellForced ? { oldShellForced: true } : {}),
         ...(cleanupWarning ? { cleanupWarning } : {}),
       });
     }
-    throw new Error('new release did not recover daemon health, controller authority, and provider catalog');
+    throw new Error('new release did not recover daemon health, renderer authority, and a visible window');
   } catch (activationError) {
     try {
       await ops.stopLaunched();
@@ -621,8 +688,9 @@ async function runTransaction(rawTransaction, operations) {
         mutableStateRestored = true;
       }
       await ops.startRuntime?.();
-      await ops.launchInstalled();
-      const recovered = await wait(() => ops.healthy(transaction.currentVersion), { attempts: 240, delayMs: 250 });
+      const recovered = await launchUntilHealthy(ops, transaction.currentVersion, {
+        updateRelaunch: transaction.platform === 'darwin',
+      });
       let cleanupWarning = '';
       if (recovered) {
         try { await ops.cleanupFailed?.(); }
@@ -632,6 +700,7 @@ async function runTransaction(rawTransaction, operations) {
         activated: false,
         rolledBack: rollbackReady,
         mutableStateRolledBack: mutableStateRestored,
+        ...(oldShellForced ? { oldShellForced: true } : {}),
         error: String(activationError && activationError.message || activationError),
         ...(cleanupWarning ? { cleanupWarning } : {}),
         ...(recovered ? {} : { rollbackError: 'previous release did not recover' }),
@@ -666,6 +735,7 @@ if (require.main === module) {
 module.exports = {
   atomicJSON,
   defaultOperations,
+  launchUntilHealthy,
   main,
   mirrorWindowsDirectory,
   requestJSON,

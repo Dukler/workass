@@ -19,6 +19,7 @@ test('macOS package keeps both bundle and runtime Dock icon resources', () => {
 test('macOS package includes every standalone shell safety module', () => {
   assert.match(script, /for shell_file in[^\n]*image-copy\.js/);
   assert.match(script, /for shell_file in[^\n]*profile-singleton\.js/);
+  assert.match(script, /for shell_file in[^\n]*update-lock-recovery\.js/);
   assert.match(script, /desktop\/shell\/image-copy\.test\.js/);
   assert.match(script, /desktop\/shell\/profile-singleton\.test\.js/);
   assert.match(script, /for shell_file in[^\n]*update-manager\.js/);
