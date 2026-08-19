@@ -135,6 +135,26 @@ func TestSessionRefreshCoordinatorImmediateAndMergedEventsAreRendererEquivalent(
 	}
 }
 
+func TestSessionRefreshCoordinatorFocusIsOneShotBeforeGenericRefresh(t *testing.T) {
+	emissions := make(chan refreshEmission, 4)
+	coordinator := newSessionRefreshCoordinator(func(channel string, payload any) {
+		emissions <- refreshEmission{at: time.Now(), channel: channel, payload: mapFromAnyMain(payload)}
+	})
+	t.Cleanup(coordinator.stop)
+
+	coordinator.RequestFocus("tab-focused", "chat-focused")
+	focused := waitRefreshEmission(t, emissions, time.Second)
+	if focused.channel != "agent:apply" || fieldString(focused.payload, "action") != "session-refresh" ||
+		fieldString(focused.payload, "tabId") != "tab-focused" || fieldString(focused.payload, "chatId") != "chat-focused" ||
+		focused.payload["focus"] != true || len(focused.payload) != 4 {
+		t.Fatalf("focused wire event = %#v", focused)
+	}
+	generic := waitRefreshEmission(t, emissions, time.Second)
+	if generic.channel != "agent:apply" || fieldString(generic.payload, "action") != "session-refresh" || len(generic.payload) != 1 {
+		t.Fatalf("trailing cache-clearing refresh = %#v", generic)
+	}
+}
+
 func TestSessionRefreshCoordinatorMeasuredBurst(t *testing.T) {
 	emissions := make(chan refreshEmission, 64)
 	coordinator := newSessionRefreshCoordinator(func(channel string, payload any) {
@@ -193,7 +213,7 @@ func TestChatControlVisibleMutationRefreshesAreImmediate(t *testing.T) {
 		emissions <- refreshEmission{at: time.Now(), channel: channel, payload: mapFromAnyMain(payload)}
 	}, runtime)
 	t.Cleanup(coordinator.refreshes.stop)
-	assertImmediate := func(name string, invoke func() error) {
+	assertImmediate := func(name string, invoke func() error) refreshEmission {
 		t.Helper()
 		if err := invoke(); err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -203,8 +223,10 @@ func TestChatControlVisibleMutationRefreshesAreImmediate(t *testing.T) {
 			if emission.channel != "agent:apply" || fieldString(emission.payload, "action") != "session-refresh" {
 				t.Fatalf("%s refresh = %#v", name, emission)
 			}
+			return emission
 		default:
 			t.Fatalf("%s returned before its immediate refresh", name)
+			return refreshEmission{}
 		}
 	}
 
@@ -230,10 +252,17 @@ func TestChatControlVisibleMutationRefreshesAreImmediate(t *testing.T) {
 		})
 		return err
 	})
-	assertImmediate("focus", func() error {
+	focused := assertImmediate("focus", func() error {
 		_, err := coordinator.focus(map[string]any{"operation_id": "test:refresh-focus", "tab_id": tabID, "chat_id": chatID})
 		return err
 	})
+	if focused.payload["focus"] != true || fieldString(focused.payload, "tabId") != tabID || fieldString(focused.payload, "chatId") != chatID {
+		t.Fatalf("focus intent = %#v", focused)
+	}
+	trailing := waitRefreshEmission(t, emissions, time.Second)
+	if len(trailing.payload) != 1 || fieldString(trailing.payload, "action") != "session-refresh" {
+		t.Fatalf("focus trailing refresh = %#v", trailing)
+	}
 	assertImmediate("send receipt", func() error {
 		_, err := coordinator.send(map[string]any{
 			"operation_id": "test:refresh-send",
