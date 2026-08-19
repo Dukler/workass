@@ -58,6 +58,7 @@ test('native Codex host drives app-server directly with turns, steering, permiss
   assert.equal(initialized.result.agentInfo.name, 'Codex');
   assert.equal(initialized.result.agentCapabilities.loadSession, undefined);
   assert.deepEqual(initialized.result.agentCapabilities.sessionCapabilities.resume, {});
+  assert.deepEqual(initialized.result.agentCapabilities.mcpCapabilities, { http: false, sse: false });
   assert.equal(initialized.result._meta.workassCodexSteerRequest, true);
   assert.equal(initialized.result._meta.workassCodexSteerRaceV1, true);
 	assert.equal(initialized.result._meta.workassStableTurnInputV1, true);
@@ -156,8 +157,8 @@ test('native Codex operation readback falls back to thread/read when item listin
   });
 });
 
-test('native Codex host opts URL servers into stateless MCP 2026 per session', async (t) => {
-  const peer = startHost({ WORKASS_CODEX_FIXTURE_REQUIRE_MCP_2026: '1' });
+test('native Codex host maps Workass MCP through the CA-aware stdio bridge', async (t) => {
+  const peer = startHost({ WORKASS_CODEX_FIXTURE_REQUIRE_STDIO_MCP: '1' });
   t.after(() => peer.child.kill('SIGKILL'));
 
   peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
@@ -166,9 +167,11 @@ test('native Codex host opts URL servers into stateless MCP 2026 per session', a
     jsonrpc: '2.0', id: 2, method: 'session/new', params: {
       cwd: repoRoot,
       mcpServers: [{
-        name: 'workass agent',
-        url: 'https://mcp.localhost:18788/workass/mcp/agent',
-        headers: [{ name: 'Authorization', value: 'Bearer fixture-owner' }],
+        name: 'workass-browser', command: '/fixture/workass-daemon', args: ['mcp-stdio'],
+        env: [
+          { name: 'WORKASS_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
+          { name: 'WORKASS_MCP_ENDPOINT', value: 'https://mcp.localhost:8788/workass/mcp/browser' },
+        ],
       }],
     },
   });

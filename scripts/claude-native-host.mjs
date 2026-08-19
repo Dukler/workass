@@ -261,20 +261,9 @@ function mcpServerMap(rawServers) {
   const result = {};
   for (const raw of Array.isArray(rawServers) ? rawServers : []) {
     if (!raw || typeof raw !== 'object' || typeof raw.name !== 'string' || !raw.name.trim()) continue;
-    if (typeof raw.url === 'string' && raw.url.trim()) {
-      const headers = Array.isArray(raw.headers)
-        ? Object.fromEntries(raw.headers
-          .filter((entry) => entry && typeof entry.name === 'string')
-          .map((entry) => [entry.name, String(entry.value || '')]))
-        : (raw.headers && typeof raw.headers === 'object' ? raw.headers : undefined);
-      result[raw.name] = {
-        type: raw.type === 'sse' ? 'sse' : 'http',
-        url: raw.url,
-        ...(headers && Object.keys(headers).length ? { headers } : {}),
-      };
-      continue;
+    if (typeof raw.command !== 'string' || !raw.command.trim()) {
+      throw new Error(`Claude MCP server ${raw.name} requires a stdio command`);
     }
-    if (typeof raw.command !== 'string' || !raw.command.trim()) continue;
     let env;
     if (Array.isArray(raw.env)) {
       env = Object.fromEntries(raw.env
@@ -1597,7 +1586,9 @@ async function handleRequest(message) {
       agentCapabilities: {
         sessionCapabilities: { resume: {}, close: {} },
         promptCapabilities: { image: true, audio: false, embeddedContext: false },
-        mcpCapabilities: { http: true, sse: true },
+        // Workass MCP is served over private-CA HTTPS. The packaged stdio
+        // bridge pins that CA; the SDK's direct URL transport cannot.
+        mcpCapabilities: { http: false, sse: false },
       },
       authMethods: [],
       _meta: {

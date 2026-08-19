@@ -476,24 +476,20 @@ function sessionConfig(cwd, mcpServers) {
   for (const raw of Array.isArray(mcpServers) ? mcpServers : []) {
     if (!raw || typeof raw.name !== 'string') continue;
     const name = raw.name.replace(/\s/gu, '_');
-    if (typeof raw.url === 'string') {
-      const headers = Array.isArray(raw.headers)
-        ? Object.fromEntries(raw.headers.map((header) => [header.name, header.value]))
-        : (raw.headers || {});
-      servers[name] = { url: raw.url, http_headers: headers };
-    } else if (typeof raw.command === 'string') {
-      const env = Array.isArray(raw.env)
-        ? Object.fromEntries(raw.env.map((entry) => [entry.name, entry.value]))
-        : (raw.env || {});
-      servers[name] = { command: raw.command, args: Array.isArray(raw.args) ? raw.args : [], env };
+    if (typeof raw.command !== 'string' || !raw.command.trim()) {
+      throw new Error(`Codex MCP server ${raw.name} requires a stdio command`);
     }
+    const env = Array.isArray(raw.env)
+      ? Object.fromEntries(raw.env.map((entry) => [entry.name, entry.value]))
+      : (raw.env || {});
+    servers[name] = { command: raw.command, args: Array.isArray(raw.args) ? raw.args : [], env };
   }
   return {
     projects: { [cwd]: { trust_level: 'trusted' } },
     // Codex 0.147 ships MCP 2026-07-28 behind an explicit feature while
-    // retaining the stateful lifecycle by default. Workass endpoints
-    // implement only the released stateless lifecycle, so opt this session in
-    // without mutating the user's global Codex configuration.
+    // retaining the stateful lifecycle by default. The Workass stdio bridge
+    // carries that stateless protocol to the daemon without mutating the
+    // user's global Codex configuration.
     features: { mcp_2026_07_28: true },
     ...(Object.keys(servers).length ? { mcp_servers: servers } : {}),
   };
@@ -774,7 +770,10 @@ async function handleWorkassRequest(message) {
       agentCapabilities: {
         sessionCapabilities: { resume: {}, close: {} },
         promptCapabilities: { image: true, audio: false, embeddedContext: false },
-        mcpCapabilities: { http: true, sse: false },
+        // Workass MCP is served over private-CA HTTPS. The packaged stdio
+        // bridge pins that CA; handing the URL directly to app-server makes
+        // registration appear present while startup fails with zero tools.
+        mcpCapabilities: { http: false, sse: false },
       },
       authMethods: [],
       _meta: {

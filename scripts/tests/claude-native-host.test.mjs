@@ -62,6 +62,7 @@ test('official Claude SDK host provides session, streaming, steering, and permis
   assert.equal(initialized.result.agentInfo.name, 'Claude Code');
   assert.equal(initialized.result.agentCapabilities.loadSession, undefined);
   assert.deepEqual(initialized.result.agentCapabilities.sessionCapabilities.resume, {});
+  assert.deepEqual(initialized.result.agentCapabilities.mcpCapabilities, { http: false, sse: false });
   assert.equal(initialized.result._meta.workassClaudeSteerRequest, true);
 	assert.equal(initialized.result._meta.workassStableTurnInputV1, true);
 
@@ -125,8 +126,8 @@ test('official Claude SDK host provides session, streaming, steering, and permis
   await peer.waitFor((message) => message.id === 4);
 });
 
-test('native Claude host normalizes canonical ACP HTTP header arrays for the SDK', async (t) => {
-  const peer = startHost({ WORKASS_CLAUDE_FIXTURE_REQUIRE_CANONICAL_MCP: '1' });
+test('native Claude host maps Workass MCP through the CA-aware stdio bridge', async (t) => {
+  const peer = startHost({ WORKASS_CLAUDE_FIXTURE_REQUIRE_STDIO_MCP: '1' });
   t.after(() => peer.child.kill('SIGKILL'));
 
   peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
@@ -134,8 +135,11 @@ test('native Claude host normalizes canonical ACP HTTP header arrays for the SDK
   peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: {
     cwd: repoRoot,
     mcpServers: [{
-      type: 'http', name: 'workass-agent', url: 'https://mcp.localhost:8788/workass/mcp/agent',
-      headers: [{ name: 'Authorization', value: 'Bearer fixture-owner' }],
+      name: 'workass-browser', command: '/fixture/workass-daemon', args: ['mcp-stdio'],
+      env: [
+        { name: 'WORKASS_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
+        { name: 'WORKASS_MCP_ENDPOINT', value: 'https://mcp.localhost:8788/workass/mcp/browser' },
+      ],
     }],
   } });
   const opened = await peer.waitFor((message) => message.id === 2);
