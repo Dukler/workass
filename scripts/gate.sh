@@ -3,6 +3,27 @@
 set -e -o pipefail
 export PATH="/opt/homebrew/bin:$PATH"
 cd "$(dirname "$0")/.."
+
+# Renderer failures are cheap compared with the full Go matrix. Release input
+# preparation additionally requires the freshly built renderer to match the
+# committed go:embed snapshot, so a stale snapshot fails before any slow test.
+renderer_built=0
+if [ -d desktop/renderer2/node_modules ]; then
+  (cd desktop/renderer2 && npx tsc --noEmit && npm run build --silent >/dev/null)
+  renderer_built=1
+fi
+if [ "${WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER:-0}" = 1 ]; then
+  [ "$renderer_built" -eq 1 ] || {
+    echo "release gate requires desktop/renderer2/node_modules" >&2
+    exit 1
+  }
+  if ! diff -qr desktop/renderer2/dist cmd/workass/embedded/dist >/dev/null; then
+    echo "renderer build differs from committed embedded output; run scripts/sync-renderer2.sh and commit it before release" >&2
+    exit 1
+  fi
+  echo "WORKASS_RENDERER_SNAPSHOT_VERIFIED"
+fi
+
 go build ./... && go vet ./...
 # Brevity is right on the happy path and exactly backwards on the failing one:
 # `| tail -12` shows the alphabetical tail, so a failing package early in the
@@ -28,8 +49,5 @@ else
   echo "--- failing packages ---"
   grep -E '^(FAIL|panic)' "$test_log" | head -20
   exit 1
-fi
-if [ -d desktop/renderer2/node_modules ]; then
-  (cd desktop/renderer2 && npx tsc --noEmit && npm run build --silent >/dev/null)
 fi
 echo "GATE_PASS"

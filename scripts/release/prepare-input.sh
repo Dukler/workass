@@ -1,6 +1,7 @@
 #!/bin/sh
 # Build the immutable, content-addressed input shared by both private update
-# lanes. The repository gate and renderer build happen exactly once here.
+# lanes. A new commit/toolchain runs the repository gate once; an exact local
+# pass receipt makes interrupted retries verify and reuse that result.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -44,6 +45,8 @@ case "$output" in /*) ;; *) echo "--output must be absolute" >&2; exit 2 ;; esac
 case "$output" in /|"$repo_root"|"$repo_root"/) echo "refusing unsafe release input path: $output" >&2; exit 2 ;; esac
 
 input_tool="$script_dir/lib/release-input.mjs"
+gate_tool="$script_dir/lib/repository-gate.mjs"
+gate_receipt="$repo_root/.dev/release-gates/$commit.json"
 if [ -e "$output" ]; then
   node "$input_tool" verify --root "$output" --version "$version" --commit "$commit" || {
     echo "existing release input is immutable and does not verify: $output" >&2
@@ -54,7 +57,7 @@ if [ -e "$output" ]; then
   exit 0
 fi
 
-for tool in go node npm ditto shasum; do
+for tool in go node npm ditto shasum diff; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing release-input tool: $tool" >&2; exit 1; }
 done
 
@@ -66,20 +69,31 @@ cleanup() { rm -rf "$incoming"; }
 trap cleanup EXIT HUP INT TERM
 
 repository_gate() {
-  (cd "$repo_root" && GOCACHE="${GOCACHE:-/private/tmp/workass-gocache}" scripts/gate.sh)
+  (cd "$repo_root" && \
+    GOCACHE="${GOCACHE:-/private/tmp/workass-gocache}" \
+    WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER=1 \
+    scripts/gate.sh)
 }
 
 release_contracts() {
   (cd "$repo_root" && node --test scripts/tests/release-pipeline.test.mjs)
 }
 
-sync_renderer() {
-  (cd "$repo_root" && scripts/sync-renderer2.sh)
-  [ -z "$(git -C "$repo_root" status --porcelain=v1 --untracked-files=all)" ] || {
-    echo "renderer build changed committed embedded output; commit the reconciled source before release" >&2
+verify_gate_receipt() {
+  node "$gate_tool" verify --repo "$repo_root" --receipt "$gate_receipt" --commit "$commit"
+}
+
+record_gate_receipt() {
+  node "$gate_tool" record --repo "$repo_root" --receipt "$gate_receipt" --commit "$commit"
+}
+
+stage_renderer() {
+  workass_release_require_source "$repo_root"
+  [ "$WORKASS_RELEASE_COMMIT" = "$commit" ] || {
+    echo "release source changed after its repository gate" >&2
     return 1
   }
-  ditto "$repo_root/desktop/renderer2/dist/." "$incoming/renderer"
+  ditto "$repo_root/cmd/workass/embedded/dist/." "$incoming/renderer"
 }
 
 build_macos_daemon() {
@@ -110,8 +124,13 @@ write_manifest() {
 }
 
 workass_release_run_phase release_contracts release_contracts
-workass_release_run_phase repository_gate repository_gate
-workass_release_run_phase renderer_snapshot sync_renderer
+if [ -f "$gate_receipt" ] && verify_gate_receipt >/dev/null 2>&1; then
+  workass_release_run_phase repository_gate_cached verify_gate_receipt
+else
+  workass_release_run_phase repository_gate repository_gate
+  workass_release_run_phase repository_gate_receipt record_gate_receipt
+fi
+workass_release_run_phase renderer_snapshot stage_renderer
 workass_release_run_phase macos_daemon build_macos_daemon
 workass_release_run_phase windows_daemon build_windows_daemon
 workass_release_run_phase macos_runtimes vendor_target macos darwin-arm64 darwin-arm64
