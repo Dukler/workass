@@ -529,6 +529,8 @@ export type StartJobReply = PublicJob | QueuedJobStart;
 export interface JobCancelResult {
   cancelled: boolean;
   reason: 'cancelled' | 'idle' | 'unknown' | string;
+  queuePaused?: boolean;
+  queuePauseRevision?: number;
 }
 
 export interface StateDigestChat {
@@ -542,6 +544,8 @@ export interface StateDigestChat {
   queueLen: number;
   queueHeadId: string | null;
   agentQueueRevision: number;
+  queuePaused?: boolean;
+  queuePauseRevision?: number;
   runtimeControlRevision: number;
   providerId: string | null;
   currentModelId: string | null;
@@ -575,6 +579,11 @@ export interface WorkassApi {
   chatQueueReplace?: (opts: {
     tabId: string; chatId: string; operationId: string; expectedRevision: number; queue: unknown[];
   }) => Promise<{ ok: boolean; operationId: string; agentQueueRevision: number; actorRevision: number }>;
+  chatQueueResume?: (opts: {
+    tabId: string; chatId: string; operationId: string; expectedRevision: number;
+  }) => Promise<{
+    ok: boolean; operationId: string; queuePaused: boolean; queuePauseRevision: number; actorRevision: number;
+  }>;
   chatCreate?: (opts: {
     tabId: string; chatId: string; operationId: string; focus: boolean; title: string; titleLocked: boolean;
     group: string | null; cwd: string | null; providerId: string | null; currentModelId: string | null;

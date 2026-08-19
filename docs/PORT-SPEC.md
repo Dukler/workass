@@ -563,7 +563,14 @@ shell, NOT the daemon.
     and never interrupts the active turn; `Cmd+Enter` explicitly invokes the
     provider-aware steering law above. `Shift+Enter` remains newline. The send
     button is the explicit live-steer/stop control and must not erase the normal
-    queue shortcut.
+    queue shortcut. Explicit Stop durably pauses FIFO dispatch before provider
+    cancellation; the cancellation terminal MUST leave every queued row visible
+    and idle until the user explicitly resumes that exact pause revision. A
+    queued follow-up may never auto-start and make a successful Stop look like
+    it failed. Once their commands are durable, live steer and Stop use targeted
+    effect claims: neither may wait behind unrelated actor outbox work, and no
+    actor mutex may be held while awaiting a provider acknowledgement (user
+    correction 2026-08-19).
     A submitted direction has exactly one visible owner. For native Codex, it
     leaves the composer immediately as one durable pending preview while the
     current sampling step finishes; it becomes an ordinary transcript user row

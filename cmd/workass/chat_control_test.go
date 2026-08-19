@@ -344,6 +344,14 @@ func TestChatControlInvalidOperationCannotCancelOrDeleteRunningTurn(t *testing.T
 	if err != nil || fieldString(idleCancel, "reason") != "idle" || fieldString(idleCancel, "operationId") != idleCancelOperationID {
 		t.Fatalf("idle cancel receipt = %#v, err=%v", idleCancel, err)
 	}
+	state, ok = runtime.Snapshot(chatID)
+	if !ok || !state.QueueControl.Paused || state.QueueControl.Revision == 0 {
+		t.Fatalf("explicit stop did not leave its durable queue gate: %#v", state.QueueControl)
+	}
+	if _, err := runtime.ResumeQueue(context.Background(), tabID, chatID,
+		"control-resume-after-stop", state.QueueControl.Revision); err != nil {
+		t.Fatalf("resume exact stop boundary: %v", err)
+	}
 
 	if _, err := runtime.Start(context.Background(), map[string]any{
 		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "sessionId": info.SessionID,

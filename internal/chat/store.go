@@ -119,6 +119,9 @@ func normalizeStateMaps(state *State) {
 	if state.Operations == nil {
 		state.Operations = make(map[provider.OperationID]struct{})
 	}
+	if state.QueueControl.ResumeReceipts == nil {
+		state.QueueControl.ResumeReceipts = make(map[provider.OperationID]QueueResumeReceipt)
+	}
 	if state.QueueMutationReceipts == nil {
 		state.QueueMutationReceipts = make(map[provider.OperationID]QueueMutationReceipt)
 	}

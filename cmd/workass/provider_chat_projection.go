@@ -44,7 +44,7 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 		if digest.Deleted {
 			continue
 		}
-		chats = append(chats, map[string]any{
+		projected := map[string]any{
 			"tabId": digest.TabID, "chatId": digest.ChatID,
 			"actorRevision":           digest.ActorRevision,
 			presentationRevisionField: digest.PresentationRevision,
@@ -58,7 +58,14 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 			"currentModelId":            nullableDigestString(digest.CurrentModelID),
 			"currentModeId":             nullableDigestString(digest.CurrentModeID),
 			"pendingPermissionIds":      digest.PendingPermissionIDs,
-		})
+		}
+		// The heartbeat is size-bounded. An absent gate is the canonical idle
+		// value, so only paused chats pay for these additive fields.
+		if digest.QueuePaused {
+			projected["queuePaused"] = true
+			projected["queuePauseRevision"] = int(digest.QueuePauseRevision)
+		}
+		chats = append(chats, projected)
 	}
 	if catalogHashes == nil {
 		catalogHashes = map[string]string{}
@@ -352,6 +359,8 @@ func projectActorChatWithHistory(out map[string]any, state chat.State, history a
 		return err
 	}
 	out["queue"] = queue
+	out["queuePaused"] = state.QueueControl.Paused
+	out["queuePauseRevision"] = state.QueueControl.Revision
 	out["pending"] = state.Foreground != nil
 	delete(out, "serverAuthored")
 	delete(out, "liveSession")

@@ -592,6 +592,8 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 		effects, err = reduceCommitLaneSelection(&next, command)
 	case PromoteStagedQueue:
 		effects, err = reducePromoteStagedQueue(&next, command)
+	case ResumeQueue:
+		effects, err = reduceResumeQueue(&next, command)
 	case DeleteChat:
 		effects, err = reduceDeleteChat(&next, command)
 	case ChatDeletionCompleted:
@@ -1276,6 +1278,29 @@ func reducePromoteStagedQueue(state *State, command PromoteStagedQueue) ([]Effec
 		Presentation: presentation, Revision: state.Revision + 1,
 	})
 	state.Presentation.AgentQueueRevision++
+	return drive(state)
+}
+
+func reduceResumeQueue(state *State, command ResumeQueue) ([]Effect, error) {
+	operationID := provider.NormalizeOperationID(string(command.OperationID))
+	if operationID == "" || command.ExpectedRevision == 0 {
+		return nil, errors.New("queue resume requires operation identity and pause revision")
+	}
+	if receipt, exists := state.QueueControl.ResumeReceipts[operationID]; exists {
+		if receipt.PauseRevision != command.ExpectedRevision {
+			return nil, errors.New("queue resume operation id was reused for another pause boundary")
+		}
+		return nil, nil
+	}
+	if _, exists := state.Operations[operationID]; exists {
+		return nil, errors.New("queue resume operation id already belongs to another chat action")
+	}
+	if command.ExpectedRevision != state.QueueControl.Revision {
+		return nil, errors.New("queue pause revision changed before resume")
+	}
+	state.Operations[operationID] = struct{}{}
+	state.QueueControl.ResumeReceipts[operationID] = QueueResumeReceipt{PauseRevision: command.ExpectedRevision}
+	state.QueueControl.Paused = false
 	return drive(state)
 }
 
@@ -2113,7 +2138,7 @@ func reduceSteer(state *State, command Steer) ([]Effect, error) {
 func reduceSteerAdmitted(state *State, command SteerAdmitted) error {
 	operationID := provider.NormalizeOperationID(string(command.OperationID))
 	if state.PendingSteer == nil || state.PendingSteer.OperationID != operationID {
-		if outboxHas(state, steerEffectID(operationID), OutboxConsumed) || outboxHas(state, steerEffectID(operationID), OutboxCompleted) {
+		if outboxHas(state, steerEffectID(operationID), OutboxConsumed) || outboxHas(state, steerEffectID(operationID), OutboxCompleted) || outboxHas(state, steerEffectID(operationID), OutboxAmbiguous) {
 			return nil
 		}
 		return errors.New("steer admission does not match pending steer")
@@ -2134,6 +2159,13 @@ func reduceSteerAdmitted(state *State, command SteerAdmitted) error {
 func reduceSteerFailed(state *State, command SteerFailed) ([]Effect, error) {
 	operationID := provider.NormalizeOperationID(string(command.OperationID))
 	if state.PendingSteer == nil || state.PendingSteer.OperationID != operationID {
+		// An urgent explicit cancellation may terminate the foreground while a
+		// provider steer acknowledgement is still in flight. The terminal reducer
+		// has already preserved that input exactly once as unconsumed/uncertain;
+		// a late failure is never permission to replay or move it to FIFO.
+		if outboxHas(state, steerEffectID(operationID), OutboxAmbiguous) || outboxHas(state, steerEffectID(operationID), OutboxCompleted) {
+			return nil, nil
+		}
 		return nil, errors.New("steer failure does not match pending steer")
 	}
 	pending := state.PendingSteer
@@ -2238,6 +2270,8 @@ func reduceCancelTurn(state *State, command CancelTurn) ([]Effect, error) {
 		return nil, errors.New("foreground turn already has a pending cancellation")
 	}
 	state.Operations[operationID] = struct{}{}
+	state.QueueControl.Paused = true
+	state.QueueControl.Revision++
 	state.PendingCancel = &PendingCancel{
 		OperationID: operationID, LaneID: state.Foreground.LaneID, Turn: state.Foreground.Turn,
 	}
@@ -2314,6 +2348,9 @@ func reduceCancelAcknowledged(state *State, command CancelAcknowledged) error {
 func reduceCancelFailed(state *State, command CancelFailed) error {
 	operationID := provider.NormalizeOperationID(string(command.OperationID))
 	if state.PendingCancel == nil || state.PendingCancel.OperationID != operationID {
+		if outboxHas(state, cancelEffectID(operationID), OutboxCompleted) {
+			return nil
+		}
 		return errors.New("cancel failure does not match pending cancellation")
 	}
 	state.PendingCancel = nil
@@ -3048,10 +3085,6 @@ func settleForegroundActivities(state *State, status, finishedAt string, observe
 		if entry.Tool.EndedAtUnixMS <= 0 {
 			entry.Tool.EndedAtUnixMS = endedAt
 		}
-		if tracked, ok := state.Tools[entry.Tool.ToolCallID]; ok {
-			tracked.Event = cloneToolEvent(*entry.Tool)
-			state.Tools[entry.Tool.ToolCallID] = tracked
-		}
 	}
 	for id, permission := range state.Permissions {
 		if permission.Owner.LaneID != state.Foreground.LaneID || permission.Owner.TurnID != state.Foreground.Turn.NativeID {
@@ -3173,7 +3206,12 @@ func reduceProviderEvent(state *State, command ProviderEventReceived) ([]Effect,
 			return nil, err
 		}
 		upsertToolTimeline(state.Foreground, &tool, event.Identity.ObservedAtUnixMS)
-		state.Tools[id] = ToolState{Owner: owner, Event: tool}
+		// The foreground timeline and then the immutable ledger own the complete
+		// tool payload. This side index exists only to correlate later background
+		// work by tool-call id, so storing the payload here duplicated large command
+		// output in every actor write and made streaming/control latency grow with
+		// chat age.
+		state.Tools[id] = ToolState{Owner: owner}
 		return nil, nil
 	case provider.EventPlanUpdate:
 		if owner.OperationID == "" {
@@ -3582,6 +3620,9 @@ func reduceLaneProtocolFailed(state *State, command LaneProtocolFailed) error {
 
 func drive(state *State) ([]Effect, error) {
 	if state.Foreground != nil {
+		return nil, nil
+	}
+	if state.QueueControl.Paused && len(state.Queue) > 0 {
 		return nil, nil
 	}
 	var target provider.LaneID

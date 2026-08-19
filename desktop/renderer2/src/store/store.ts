@@ -472,6 +472,8 @@ export class Store {
         workspaceRevision: c.workspaceRevision,
         presentationRevision: c.presentationRevision,
         agentQueueRevision: c.agentQueueRevision,
+        queuePaused: c.queuePaused,
+        queuePauseRevision: c.queuePauseRevision,
         runtimeControlRevision: c.runtimeControlRevision,
         planLatest: c.planLatest,
         planLatestMessageId: c.planLatestMessageId,
@@ -702,6 +704,8 @@ export class Store {
         workspaceRevision: Number.isInteger(c.workspaceRevision) ? c.workspaceRevision : 0,
         presentationRevision: Number.isInteger(c.presentationRevision) ? c.presentationRevision : 0,
         agentQueueRevision: Number.isInteger(c.agentQueueRevision) ? c.agentQueueRevision : 0,
+        queuePaused: c.queuePaused === true,
+        queuePauseRevision: Number.isInteger(c.queuePauseRevision) ? c.queuePauseRevision : 0,
         runtimeControlRevision: Number.isInteger(c.runtimeControlRevision) ? c.runtimeControlRevision : 0,
         // An explicit [] means "no current plan" and must survive as [], not be
         // collapsed to absent — otherwise a stale scan could restore an old plan.
@@ -1884,7 +1888,7 @@ export class Store {
 
   private recoverIdleQueues() {
     for (const chat of this.state.chats) {
-      if (shouldDrainRecoveredQueue(chat.queue, this.isChatRunning(chat.id))) void this.flushNextQueued(chat);
+      if (!chat.queuePaused && shouldDrainRecoveredQueue(chat.queue, this.isChatRunning(chat.id))) void this.flushNextQueued(chat);
     }
   }
 
@@ -2931,7 +2935,8 @@ export class Store {
     this.markQueueMutation(chat);
     this.bumpChat(chat);
     this.scheduleQueuePersist();
-    if (chat.queue.length && !this.isChatRunning(chat.id)) void this.flushNextQueued(chat);
+    if (chat.queue.length && !chat.queuePaused && !this.isChatRunning(chat.id)) void this.flushNextQueued(chat);
+    else if (!chat.queue.length && chat.queuePaused) void this.resumeQueued(chat.id);
   }
   // Drag-reorder: move `id` to `toIndex` (an index in the CURRENT array, before
   // removal); the splice adjusts for the removed slot.
@@ -2948,7 +2953,7 @@ export class Store {
     this.markQueueMutation(chat);
     this.bumpChat(chat);
     this.scheduleQueuePersist();
-    if (!this.isChatRunning(chat.id)) void this.flushNextQueued(chat);
+    if (!chat.queuePaused && !this.isChatRunning(chat.id)) void this.flushNextQueued(chat);
   }
   cancelQueued(chatId: string) {
     const chat = this.chat(chatId); if (!chat?.queue?.length) return;
@@ -2957,9 +2962,41 @@ export class Store {
     this.markQueueMutation(chat);
     this.bumpChat(chat);
     this.scheduleQueuePersist();
+    if (chat.queuePaused) void this.resumeQueued(chat.id);
+  }
+  async resumeQueued(chatId: string): Promise<boolean> {
+    const chat = this.chat(chatId);
+    if (!chat || !chat.chatId || !chat.queuePaused || !this.isConnected()) return false;
+    const expectedRevision = chat.queuePauseRevision ?? 0;
+    if (expectedRevision <= 0 || !has('chatQueueResume')) {
+      this.scheduleScopedSync(['session']);
+      return false;
+    }
+    // A queued row may have painted only milliseconds before Stop. Commit its
+    // exact actor ownership before reopening dispatch, so resume can never race
+    // a debounced queue save and attempt to promote a row the daemon has not
+    // received yet.
+    await this.flushSession();
+    const operationId = chat._queueResumeOperationId ?? (chat._queueResumeOperationId = rid('queue-resume'));
+    const receipt = await call('chatQueueResume', {
+      tabId: chat.id, chatId: chat.chatId, operationId, expectedRevision,
+    });
+    if (!receipt?.ok || receipt.operationId !== operationId) {
+      this.scheduleScopedSync(['session']);
+      return false;
+    }
+    const live = this.chat(chatId);
+    if (!live || live.chatId !== chat.chatId) return false;
+    live.queuePaused = receipt.queuePaused === true;
+    live.queuePauseRevision = receipt.queuePauseRevision;
+    live.actorRevision = receipt.actorRevision;
+    live._queueResumeOperationId = undefined;
+    this.bumpChat(live);
+    if (!live.queuePaused && live.queue?.length && !this.isChatRunning(live.id)) void this.flushNextQueued(live);
+    return true;
   }
   private async flushNextQueued(chat: Chat): Promise<void> {
-    if (this.drainingQueues.has(chat.id) || this.isChatRunning(chat.id)) return;
+    if (chat.queuePaused || this.drainingQueues.has(chat.id) || this.isChatRunning(chat.id)) return;
     const next = chat.queue?.[0];
     if (!next) return;
     // Agent-authored rows are drained by the daemon so they work headlessly.
@@ -3138,17 +3175,39 @@ export class Store {
     const chat = this.chat(chatId); if (!chat) return;
     const running = [...chat.messages].reverse().find((m) => m.status === 'running');
     if (!running) return;
+    // Stop owns queue dispatch before waiting on the daemon. This prevents the
+    // terminal event from promoting a follow-up in the reply gap and keeps the
+    // control visually stopped even when another controller hydrates at once.
+    chat.queuePaused = true;
+    chat.queuePauseRevision = (chat.queuePauseRevision ?? 0) + 1;
+    chat._queueResumeOperationId = undefined;
+    this.bumpChat(chat);
     if (!running.jobId) {
       this.finalizeCancelledLocally(chat, running);
       return;
     }
     const result = await call('cancelJob', running.jobId);
+    if (result && typeof result === 'object') {
+      if (typeof result.queuePaused === 'boolean') chat.queuePaused = result.queuePaused;
+      if (Number.isInteger(result.queuePauseRevision)) chat.queuePauseRevision = result.queuePauseRevision;
+      this.bumpChat(chat);
+    }
     const cancelled = result === true
       || (!!result && typeof result === 'object' && (result as { cancelled?: unknown }).cancelled === true);
     if (cancelled) return;
+    const reason = result && typeof result === 'object'
+      ? String((result as { reason?: unknown }).reason ?? '')
+      : '';
+    // `pending` means another coordinator execution already owns the exact
+    // durable cancel; `uncertain` also cannot prove refusal. Keep the canonical
+    // turn running until its terminal event or scoped readback instead of
+    // manufacturing a local terminal receipt while provider work may continue.
     const refused = result === false
-      || (!!result && typeof result === 'object' && (result as { cancelled?: unknown }).cancelled === false);
+      || (!!result && typeof result === 'object'
+        && (result as { cancelled?: unknown }).cancelled === false
+        && (reason === 'idle' || reason === 'unknown' || reason === 'not-owned'));
     if (refused) this.finalizeCancelledLocally(chat, running, running.jobId);
+    else this.scheduleScopedSync(['session']);
   }
 
   private finalizeCancelledLocally(chat: Chat, running: Msg, jobId?: string) {
@@ -3162,7 +3221,6 @@ export class Store {
     }
     this.bump('msg:' + running.id);
     this.bumpChat(chat);
-    this.recoverIdleQueues();
     this.scheduleScopedSync(['session', 'permissions']);
   }
   async decidePermission(tabId: string, msgId: string, permId: string, optionId: string) {
@@ -3442,7 +3500,7 @@ export class Store {
         // R4: a turn just finished — refresh this chat's checkpoints so the
         // per-turn Deshacer/Revisar affordances light up (feature-detected).
         if (endedChat) void this.refreshCheckpoints(endedChat);
-        if (endedChat?.queue?.length && !this.isChatRunning(endedChat.id)) {
+        if (endedChat?.queue?.length && !endedChat.queuePaused && !this.isChatRunning(endedChat.id)) {
           // R2: flush one explicitly queued/rejected follow-up at a time. An
           // acknowledged or transport-uncertain native steer never enters FIFO.
           void this.flushNextQueued(endedChat);
@@ -4273,6 +4331,8 @@ function localRunningJobID(chat: Chat): string | null {
 }
 export function digestChatSessionDiverged(chat: Chat, digest: StateDigestChat): boolean {
   const queue = chat.queue ?? [];
+  const queuePaused = chat.queuePaused === true;
+  const digestQueuePaused = digest.queuePaused === true;
   return localRunningJobID(chat) !== (digest.runningJobId ?? null)
     || (chat.messages.at(-1)?.id ?? null) !== (digest.lastMessageId ?? null)
     || queue.length !== digest.queueLen
@@ -4280,6 +4340,11 @@ export function digestChatSessionDiverged(chat: Chat, digest: StateDigestChat): 
     || (Number.isInteger(digest.presentationRevision)
       && (chat.presentationRevision ?? 0) !== digest.presentationRevision)
     || (chat.agentQueueRevision ?? 0) !== digest.agentQueueRevision
+    || queuePaused !== digestQueuePaused
+    // The compact heartbeat omits historical revisions once the gate is open.
+    // Only an active pause needs its revision compared; session:get carries the
+    // full value used by the exact resume command.
+    || (digestQueuePaused && (chat.queuePauseRevision ?? 0) !== (digest.queuePauseRevision ?? 0))
     || (chat.runtimeControlRevision ?? 0) !== digest.runtimeControlRevision
     || (chat.providerId ?? null) !== (digest.providerId ?? null)
     || chat.currentModelId !== (digest.currentModelId ?? null)

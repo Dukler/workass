@@ -189,31 +189,35 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 		return "", acp.JobCancelResult{}, false, err
 	}
 	actor.mu.Lock()
-	defer actor.mu.Unlock()
-
 	state := actor.engine.Snapshot()
 	if receipt, ok := state.CancelMutationReceipts[operationID]; ok {
 		// A terminal actor receipt wins over current foreground state. This is the
 		// idempotency fence for an idle cancel that was acknowledged before a
 		// later foreground turn began.
+		actor.mu.Unlock()
 		return "", cancelResultFromActorReceipt(receipt), true, nil
 	}
 	receipt, hasReceipt := cancelReceiptForOperation(state, operationID)
 	if hasReceipt {
 		jobID := strings.TrimSpace(receipt.Turn.NativeID)
 		if jobID == "" {
+			actor.mu.Unlock()
 			return "", acp.JobCancelResult{}, true, errors.New("chat cancel receipt is missing its native turn id")
 		}
 		if state.Foreground != nil && state.Foreground.Turn != receipt.Turn {
+			actor.mu.Unlock()
 			return "", acp.JobCancelResult{}, true, errors.New("chat cancel operation id was reused for a different foreground turn")
 		}
 		if result, done := cancelResultFromReceipt(receipt); done {
-			return jobID, result, true, nil
+			actor.mu.Unlock()
+			return jobID, cancelResultWithQueueControl(result, state), true, nil
 		}
 		if state.PendingCancel == nil || state.PendingCancel.OperationID != operationID || state.PendingCancel.Turn != receipt.Turn {
-			return jobID, acp.JobCancelResult{Cancelled: false, Reason: "pending"}, true, nil
+			actor.mu.Unlock()
+			return jobID, cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: false, Reason: "pending"}, state), true, nil
 		}
-		if err := actor.coordinator.Drain(ctx); err != nil {
+		actor.mu.Unlock()
+		if _, err := actor.coordinator.ExecuteCancel(ctx, operationID); err != nil {
 			return jobID, acp.JobCancelResult{}, true, err
 		}
 		state = actor.engine.Snapshot()
@@ -222,34 +226,41 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 			return jobID, acp.JobCancelResult{}, true, errors.New("chat cancel receipt disappeared from actor state")
 		}
 		if result, done := cancelResultFromReceipt(receipt); done {
-			return jobID, result, true, nil
+			return jobID, cancelResultWithQueueControl(result, state), true, nil
 		}
-		return jobID, acp.JobCancelResult{Cancelled: false, Reason: "pending"}, true, nil
+		return jobID, cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: false, Reason: "pending"}, state), true, nil
 	}
 	if _, used := state.Operations[operationID]; used {
+		actor.mu.Unlock()
 		return "", acp.JobCancelResult{}, true, errors.New("chat cancel operation id was reused for a different chat action")
 	}
 	if state.Foreground == nil {
 		if err := actor.engine.Apply(chat.RecordCancelReceipt{
 			OperationID: operationID, Cancelled: false, Reason: "idle",
 		}); err != nil {
+			actor.mu.Unlock()
 			return "", acp.JobCancelResult{}, true, err
 		}
 		state = actor.engine.Snapshot()
 		idleReceipt, ok := state.CancelMutationReceipts[operationID]
 		if !ok {
+			actor.mu.Unlock()
 			return "", acp.JobCancelResult{}, true, errors.New("idle cancel did not produce an actor receipt")
 		}
+		actor.mu.Unlock()
 		return "", cancelResultFromActorReceipt(idleReceipt), true, nil
 	}
 	jobID := strings.TrimSpace(state.Foreground.Turn.NativeID)
 	if jobID == "" {
+		actor.mu.Unlock()
 		return "", acp.JobCancelResult{}, true, errors.New("chat foreground turn is not yet cancellable")
 	}
 	if err := actor.engine.Apply(chat.CancelTurn{OperationID: operationID}); err != nil {
+		actor.mu.Unlock()
 		return jobID, acp.JobCancelResult{}, true, err
 	}
-	if err := actor.coordinator.Drain(ctx); err != nil {
+	actor.mu.Unlock()
+	if _, err := actor.coordinator.ExecuteCancel(ctx, operationID); err != nil {
 		return jobID, acp.JobCancelResult{}, true, err
 	}
 	state = actor.engine.Snapshot()
@@ -258,9 +269,9 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 		return jobID, acp.JobCancelResult{}, true, errors.New("chat cancel did not produce an actor receipt")
 	}
 	if result, done := cancelResultFromReceipt(receipt); done {
-		return jobID, result, true, nil
+		return jobID, cancelResultWithQueueControl(result, state), true, nil
 	}
-	return jobID, acp.JobCancelResult{Cancelled: false, Reason: "pending"}, true, nil
+	return jobID, cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: false, Reason: "pending"}, state), true, nil
 }
 
 func (c *chatControlCoordinator) read(params map[string]any) (map[string]any, error) {

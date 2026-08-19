@@ -938,6 +938,17 @@ func registerSessionHandlersWithActor(hub *wire.Hub, store *sessionStore, manage
 			anySlice(arg["queue"]),
 		)
 	})
+	hub.Register("chat:queue-resume", func(args []any) (any, error) {
+		if providerChats == nil {
+			return nil, errors.New("chat queue resume requires the authoritative actor runtime")
+		}
+		arg := firstMapArg(args)
+		return providerChats.ResumeQueue(
+			context.Background(), fieldString(arg, "tabId"), fieldString(arg, "chatId"),
+			providercontract.NormalizeOperationID(fieldString(arg, "operationId")),
+			uint64(max(0, intValue(arg["expectedRevision"]))),
+		)
+	})
 	hub.Register("chat:create", func(args []any) (any, error) {
 		if providerChats == nil {
 			return nil, errors.New("chat creation requires the authoritative actor runtime")

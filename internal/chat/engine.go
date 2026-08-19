@@ -241,6 +241,8 @@ type DigestSnapshot struct {
 	QueueLen               int
 	QueueHeadID            string
 	AgentQueueRevision     uint64
+	QueuePaused            bool
+	QueuePauseRevision     uint64
 	RuntimeControlRevision uint64
 	ProviderID             string
 	CurrentModelID         string
@@ -260,6 +262,8 @@ func (e *Engine) DigestSnapshot() DigestSnapshot {
 		ActorRevision:          state.Revision,
 		PresentationRevision:   state.Presentation.PresentationRevision,
 		AgentQueueRevision:     state.Presentation.AgentQueueRevision,
+		QueuePaused:            state.QueueControl.Paused,
+		QueuePauseRevision:     state.QueueControl.Revision,
 		RuntimeControlRevision: state.Presentation.RuntimeControlRevision,
 		ProviderID:             string(state.Presentation.ProviderID),
 		CurrentModelID:         state.Presentation.CurrentModelID,

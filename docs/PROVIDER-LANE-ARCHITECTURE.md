@@ -285,6 +285,11 @@ state directly.
 - An ordinary send snapshots its target lane at admission and never silently
   moves when the selector changes.
 - Queue promotion and transcript ownership happen in one reducer transition.
+- Explicit cancellation closes a revision-fenced queue dispatch gate before the
+  provider effect; only an explicit resume for that exact revision reopens it.
+- Live steer and cancellation claim their exact durable effects directly; they
+  never wait behind the ordinary outbox drain or hold the actor mutex across a
+  provider acknowledgement.
 - A message has exactly one visible owner: draft, durable queue, pending steer,
   or transcript.
 - Permissions and background work retain their originating lane even after the

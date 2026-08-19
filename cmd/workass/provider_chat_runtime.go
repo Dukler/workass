@@ -2290,7 +2290,12 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 	inputAttachments := attachmentPlan.Attachments
 
 	actor.mu.Lock()
-	defer actor.mu.Unlock()
+	actorLocked := true
+	defer func() {
+		if actorLocked {
+			actor.mu.Unlock()
+		}
+	}()
 	state := actor.engine.Snapshot()
 	if currentLaneID, currentGeneration, targetErr := steerAttachmentTarget(state, sessionID, requestedTabID, requestedChatID); targetErr != nil || currentLaneID != laneID || currentGeneration != generation {
 		if targetErr != nil {
@@ -2364,7 +2369,12 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 		result, readErr := r.durableSteerReply(actor.engine.Snapshot(), operationID)
 		return result, true, readErr
 	}
-	if err := actor.coordinator.Drain(ctx); err != nil {
+	// The durable steer is now fully admitted. Provider acknowledgement can be
+	// slow, so release the actor mailbox before executing it; otherwise an
+	// explicit Stop cannot even persist its cancellation until steering returns.
+	actor.mu.Unlock()
+	actorLocked = false
+	if _, err := actor.coordinator.ExecuteSteer(ctx, operationID); err != nil {
 		return nil, true, err
 	}
 	result, readErr := r.durableSteerReply(actor.engine.Snapshot(), operationID)
@@ -2452,11 +2462,12 @@ func (r *providerChatRuntime) SteerQueued(ctx context.Context, tabID, chatID, qu
 	if err != nil || !needsDrain {
 		return result, true, err
 	}
-	if err := actor.coordinator.Drain(ctx); err != nil {
+	operationID := providercontract.NormalizeOperationID(queueID)
+	if _, err := actor.coordinator.ExecuteSteer(ctx, operationID); err != nil {
 		return nil, true, err
 	}
 	actor.mu.Lock()
-	result, err = r.agentSteerQueuedResultLocked(actor.engine.Snapshot(), providercontract.NormalizeOperationID(queueID))
+	result, err = r.agentSteerQueuedResultLocked(actor.engine.Snapshot(), operationID)
 	actor.mu.Unlock()
 	return result, true, err
 }
@@ -2496,9 +2507,9 @@ func (r *providerChatRuntime) Cancel(ctx context.Context, jobID string) (acp.Job
 				return acp.JobCancelResult{}, true, err
 			}
 		}
-		err := actor.coordinator.Drain(ctx)
-		state = actor.engine.Snapshot()
 		actor.mu.Unlock()
+		_, err := actor.coordinator.ExecuteCancel(ctx, operationID)
+		state = actor.engine.Snapshot()
 		if err != nil {
 			return acp.JobCancelResult{}, true, err
 		}
@@ -2508,14 +2519,14 @@ func (r *providerChatRuntime) Cancel(ctx context.Context, jobID string) (acp.Job
 			}
 			switch entry.Status {
 			case chat.OutboxAccepted, chat.OutboxCompleted:
-				return acp.JobCancelResult{Cancelled: true, Reason: "cancelled"}, true, nil
+				return cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: true, Reason: "cancelled"}, state), true, nil
 			case chat.OutboxAmbiguous:
-				return acp.JobCancelResult{Cancelled: false, Reason: "uncertain"}, true, nil
+				return cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: false, Reason: "uncertain"}, state), true, nil
 			case chat.OutboxFailed:
-				return acp.JobCancelResult{Cancelled: false, Reason: "not-owned"}, true, nil
+				return cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: false, Reason: "not-owned"}, state), true, nil
 			}
 		}
-		return acp.JobCancelResult{Cancelled: false, Reason: "pending"}, true, nil
+		return cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: false, Reason: "pending"}, state), true, nil
 	}
 	for _, actor := range r.actorSnapshot() {
 		state := actor.engine.Snapshot()
@@ -2526,6 +2537,12 @@ func (r *providerChatRuntime) Cancel(ctx context.Context, jobID string) (acp.Job
 		}
 	}
 	return acp.JobCancelResult{Cancelled: false, Reason: "unknown"}, true, nil
+}
+
+func cancelResultWithQueueControl(result acp.JobCancelResult, state chat.State) acp.JobCancelResult {
+	result.QueuePaused = state.QueueControl.Paused
+	result.QueuePauseRevision = state.QueueControl.Revision
+	return result
 }
 
 // ResolvePermission preserves the origin lane recorded by the normalized
