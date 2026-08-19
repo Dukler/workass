@@ -4,10 +4,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const {
   applyMacDockIcon,
   refreshWindowsShortcutIcons,
+  refreshWindowsShortcutIconsAsync,
   resolveAppIconPath,
   resolveWindowFrameOptions,
   resolveWindowIconPath,
@@ -67,7 +69,36 @@ test('Windows resolves the packaged ICO used by the native window and taskbar', 
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
   assert.match(main, /setAppUserModelId\(RUNTIME\.bundleId\)/);
   assert.match(main, /resolveWindowIconPath\(\{[\s\S]{0,500}icon:\s*windowIcon/);
-  assert.match(main, /refreshWindowsShortcutIcons\(\{[\s\S]{0,300}resourcesPath:\s*process\.resourcesPath[\s\S]{0,300}appVersion:\s*APP_VERSION/);
+  assert.match(main, /refreshWindowsShortcutIconsAsync\(\{[\s\S]{0,300}resourcesPath:\s*process\.resourcesPath[\s\S]{0,300}appVersion:\s*APP_VERSION/);
+});
+
+test('Windows update recovery refreshes shortcuts off the Electron main thread', async () => {
+  const calls = [];
+  class FakeWorker extends EventEmitter {
+    constructor(source, options) {
+      super();
+      calls.push({ source, options });
+      queueMicrotask(() => this.emit('message', { ok: true, receipt: { applied: true, shortcutCount: 1, cacheRefresh: true } }));
+    }
+    unref() { this.unrefCalled = true; }
+  }
+  const receipt = await refreshWindowsShortcutIconsAsync({
+    platform: 'win32', isPackaged: true,
+    executablePath: 'C:\\Apps\\Workass\\Workass.exe',
+    resourcesPath: 'C:\\Apps\\Workass\\resources',
+    dataRoot: 'C:\\Users\\test\\AppData\\Local\\Workass',
+    appVersion: '2.0.0',
+  }, { WorkerClass: FakeWorker });
+  assert.deepEqual(receipt, { applied: true, shortcutCount: 1, cacheRefresh: true });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.eval, true);
+  assert.equal(calls[0].options.workerData.options.appVersion, '2.0.0');
+  assert.equal(calls[0].options.workerData.options.executablePath, 'C:\\Apps\\Workass\\Workass.exe');
+  assert.match(calls[0].source, /refreshWindowsShortcutIcons/);
+
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.doesNotMatch(main, /deferred-update-relaunch/);
+  assert.ok(main.indexOf('createWindow(viewURL') < main.indexOf('refreshWindowsShortcutIconsAsync({'));
 });
 
 test('Windows refreshes only shortcuts targeting this exact installed executable once per version', () => {

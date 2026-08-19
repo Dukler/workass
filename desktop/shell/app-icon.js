@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { Worker } = require('node:worker_threads');
 
 function resolveAppIconPath({ isPackaged, resourcesPath, repoRoot }) {
   const candidates = isPackaged
@@ -220,9 +221,69 @@ function refreshWindowsShortcutIcons({
   return { applied: true, shortcutCount, cacheRefresh };
 }
 
+const WINDOWS_SHORTCUT_ICON_WORKER = `
+'use strict';
+const { parentPort, workerData } = require('node:worker_threads');
+try {
+  const { refreshWindowsShortcutIcons } = require(workerData.modulePath);
+  const receipt = refreshWindowsShortcutIcons(workerData.options);
+  parentPort.postMessage({ ok: true, receipt });
+} catch (error) {
+  parentPort.postMessage({ ok: false, error: String(error && error.message || error) });
+}
+`;
+
+// Shortcut discovery may traverse redirected desktops and invoke PowerShell.
+// Keep that entirely off Electron's main thread so the first healthy window —
+// including an update-recovery relaunch — never freezes while Explorer's icon
+// cache is refreshed.
+function refreshWindowsShortcutIconsAsync(options = {}, { WorkerClass = Worker } = {}) {
+  const workerOptions = {
+    platform: options.platform,
+    isPackaged: options.isPackaged,
+    executablePath: options.executablePath,
+    resourcesPath: options.resourcesPath,
+    dataRoot: options.dataRoot,
+    appVersion: options.appVersion,
+    roots: options.roots,
+    markerFile: options.markerFile,
+    cacheToolPath: options.cacheToolPath,
+  };
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (receipt) => {
+      if (settled) return;
+      settled = true;
+      resolve(receipt);
+    };
+    let worker;
+    try {
+      worker = new WorkerClass(WINDOWS_SHORTCUT_ICON_WORKER, {
+        eval: true,
+        workerData: { modulePath: __filename, options: workerOptions },
+      });
+    } catch (error) {
+      finish({ applied: false, reason: 'icon-refresh-worker-failed', error: String(error?.message || error) });
+      return;
+    }
+    worker.once('message', (message) => {
+      if (message?.ok) finish(message.receipt);
+      else finish({ applied: false, reason: 'icon-refresh-worker-failed', error: String(message?.error || 'unknown worker failure') });
+    });
+    worker.once('error', (error) => {
+      finish({ applied: false, reason: 'icon-refresh-worker-failed', error: String(error?.message || error) });
+    });
+    worker.once('exit', (code) => {
+      if (!settled) finish({ applied: false, reason: 'icon-refresh-worker-exited', exitCode: code });
+    });
+    worker.unref?.();
+  });
+}
+
 module.exports = {
   applyMacDockIcon,
   refreshWindowsShortcutIcons,
+  refreshWindowsShortcutIconsAsync,
   resolveAppIconPath,
   resolveWindowFrameOptions,
   resolveWindowIconPath,
