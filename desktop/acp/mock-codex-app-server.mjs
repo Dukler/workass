@@ -107,12 +107,14 @@ async function handle(message) {
     if (process.env.WORKASS_CODEX_FIXTURE_AUTH_ERROR === '1') {
       return write({ id, error: { code: -32000, message: 'Authentication required: run codex login' } });
     }
-    if (process.env.WORKASS_CODEX_FIXTURE_REQUIRE_MCP_2026 === '1') {
-      const server = params.config?.mcp_servers?.workass_agent;
+    if (process.env.WORKASS_CODEX_FIXTURE_REQUIRE_STDIO_MCP === '1') {
+      const server = params.config?.mcp_servers?.['workass-browser'];
       if (params.config?.features?.mcp_2026_07_28 !== true
-          || server?.url !== 'https://mcp.localhost:18788/workass/mcp/agent'
-          || server?.http_headers?.Authorization !== 'Bearer fixture-owner') {
-        return write({ id, error: { code: -32602, message: 'missing stateless MCP session configuration' } });
+          || server?.command !== '/fixture/workass-daemon'
+          || JSON.stringify(server?.args) !== JSON.stringify(['mcp-stdio'])
+          || server?.env?.WORKASS_MCP_CA_FILE !== '/fixture/workass-ca.pem'
+          || server?.env?.WORKASS_MCP_ENDPOINT !== 'https://mcp.localhost:8788/workass/mcp/browser') {
+        return write({ id, error: { code: -32602, message: 'missing CA-aware stdio MCP session configuration' } });
       }
     }
     return respond(id, {

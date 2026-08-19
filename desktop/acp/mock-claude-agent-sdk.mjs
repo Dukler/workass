@@ -704,9 +704,12 @@ class FixtureQuery {
 }
 
 export function query(input) {
-	if (process.env.WORKASS_CLAUDE_FIXTURE_REQUIRE_CANONICAL_MCP === '1') {
-		const server = input.options?.mcpServers?.['workass-agent'];
-		if (server?.type !== 'http' || server?.headers?.Authorization !== 'Bearer fixture-owner') {
+	if (process.env.WORKASS_CLAUDE_FIXTURE_REQUIRE_STDIO_MCP === '1') {
+		const server = input.options?.mcpServers?.['workass-browser'];
+		if (server?.command !== '/fixture/workass-daemon'
+				|| JSON.stringify(server?.args) !== JSON.stringify(['mcp-stdio'])
+				|| server?.env?.WORKASS_MCP_CA_FILE !== '/fixture/workass-ca.pem'
+				|| server?.env?.WORKASS_MCP_ENDPOINT !== 'https://mcp.localhost:8788/workass/mcp/browser') {
 			throw new Error('Claude SDK MCP descriptor was not normalized');
 		}
 	}
