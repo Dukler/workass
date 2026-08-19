@@ -34,9 +34,6 @@ export function reconcileQueuedJobStart(
     chat.messages = chat.messages.filter((message) => message.id !== origin.userId
       && message.id !== origin.assistantId
       && message.turnRootId !== origin.assistantId);
-  }
-
-  if (currentRevision <= receipt.agentQueueRevision) {
     const queue = [...(chat.queue ?? [])];
     if (!queue.some((item) => item.id === receipt.queueId)) {
       const item: QueuedMsg = {
