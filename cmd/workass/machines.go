@@ -15,7 +15,7 @@ import (
 
 // machineChannelCount is how many wire channels the machine book adds. Headless
 // first, per E1: the book is provable from a CLI before a pixel exists.
-const machineChannelCount = 4
+const machineChannelCount = 5
 
 // machineRefreshInterval matches discovery, so a machine that dies is marked
 // unreachable within one interval rather than one of two competing clocks.
@@ -90,6 +90,22 @@ func registerMachineHandlers(hub *wire.Hub, book *machinebook.Book, identity mac
 		result := snapshot()
 		result["ok"] = forgotten
 		if forgotten {
+			hub.Broadcast("machines:changed", snapshot())
+		}
+		return result, nil
+	})
+	hub.Register("machines:nickname", func(args []any) (any, error) {
+		arg := firstMapArg(args)
+		entry, changed, err := book.SetNickname(fieldString(arg, "machineId"), fieldString(arg, "nickname"))
+		result := snapshot()
+		if err != nil {
+			result["ok"] = false
+			result["error"] = err.Error()
+			return result, nil
+		}
+		result["ok"] = true
+		result["machine"] = entry
+		if changed {
 			hub.Broadcast("machines:changed", snapshot())
 		}
 		return result, nil

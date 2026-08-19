@@ -75,6 +75,8 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?]> = [
   // machine where they mean anything.
   ['listDir', 'fs:list-dir'],
   ['createDir', 'fs:create-dir', (a) => [{ parent: a[0], name: a[1] }]],
+  // The tagged chat id selects the owning machine; the daemon uses only cwd.
+  ['projectIcon', 'project:icon', (a) => [{ chatId: a[0], cwd: a[1] }]],
 ];
 
 /** [method, channel] for every event a remote machine may raise. */

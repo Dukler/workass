@@ -28,6 +28,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // FileName is the per-state-dir file holding the book.
@@ -36,6 +38,10 @@ const FileName = "machines.json"
 // LocalOwner is the single-owner placeholder. Every entry is written with it
 // until there is a second person to distinguish.
 const LocalOwner = "local"
+
+// MaxNicknameRunes bounds the controller-local label stored for one remote
+// machine. The peer's advertised Name remains separate and keeps refreshing.
+const MaxNicknameRunes = 64
 
 // Endpoint kinds. Only KindLAN is produced today; the others exist so that
 // adding a transport is a new value here rather than a new field everywhere.
@@ -74,6 +80,7 @@ type Endpoint struct {
 type Entry struct {
 	MachineID   string     `json:"machineId"`
 	Name        string     `json:"name"`
+	Nickname    string     `json:"nickname,omitempty"`
 	Owner       string     `json:"owner"`
 	AddedBy     string     `json:"addedBy,omitempty"`
 	Endpoints   []Endpoint `json:"endpoints"`
@@ -192,8 +199,9 @@ func (b *Book) List() []Entry {
 		out = append(out, entry)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if !strings.EqualFold(out[i].Name, out[j].Name) {
-			return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+		left, right := entryDisplayName(out[i]), entryDisplayName(out[j])
+		if !strings.EqualFold(left, right) {
+			return strings.ToLower(left) < strings.ToLower(right)
 		}
 		return out[i].MachineID < out[j].MachineID
 	})
@@ -369,6 +377,57 @@ func (b *Book) Forget(machineID string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// SetNickname stores a label chosen on this controller. It never changes the
+// remote daemon's advertised name or identity, and refreshes intentionally
+// leave it untouched. An empty nickname clears the override.
+func (b *Book) SetNickname(machineID, nickname string) (Entry, bool, error) {
+	machineID = strings.TrimSpace(machineID)
+	nickname, err := normalizeNickname(nickname)
+	if err != nil {
+		return Entry{}, false, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	entry, ok := b.entries[machineID]
+	if !ok {
+		return Entry{}, false, errors.New("machine is no longer in the book")
+	}
+	if entry.Nickname == nickname {
+		return entry, false, nil
+	}
+	previous := entry
+	entry.Nickname = nickname
+	b.entries[machineID] = entry
+	if err := b.save(); err != nil {
+		b.entries[machineID] = previous
+		return Entry{}, false, err
+	}
+	return entry, true, nil
+}
+
+func normalizeNickname(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if utf8.RuneCountInString(value) > MaxNicknameRunes {
+		return "", fmt.Errorf("nickname is longer than %d characters", MaxNicknameRunes)
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return "", errors.New("nickname contains a control character")
+		}
+	}
+	return value, nil
+}
+
+func entryDisplayName(entry Entry) string {
+	if nickname := strings.TrimSpace(entry.Nickname); nickname != "" {
+		return nickname
+	}
+	if name := strings.TrimSpace(entry.Name); name != "" {
+		return name
+	}
+	return entry.MachineID
 }
 
 // refreshConcurrency bounds simultaneous probes. Machines are refreshed in

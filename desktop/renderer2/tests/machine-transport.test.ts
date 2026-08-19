@@ -7,7 +7,7 @@ import {
 import {
   isTagged, localId, machineOf, splitId, tagId, tagPayload, untagPayload,
 } from '../src/wire/machineIds.ts';
-import { machineWhere, shortMachineId, unifiedOrder } from '../src/machine-label.ts';
+import { machineWhere, remoteMachineBadge, shortMachineId, unifiedOrder } from '../src/machine-label.ts';
 import { fleetDeviceToken, fleetProof } from '../src/wire/fleet.ts';
 
 // ---- a socket the test drives -------------------------------------------
@@ -293,6 +293,17 @@ test('a machine we have not named yet still reads as a machine', () => {
   assert.equal(where.machine, '869022');
   assert.equal(shortMachineId('m-abc'), 'abc');
   assert.equal(shortMachineId(''), '?');
+});
+
+test('project picker badge marks only remote machines with a readable initial', () => {
+  const names = { 'm-remote': 'builder', 'm-here': 'este Mac', 'm-accent': 'Árbol' };
+  assert.equal(remoteMachineBadge('', names, 'm-here'), null);
+  assert.equal(remoteMachineBadge('m-here', names, 'm-here'), null);
+  assert.deepEqual(remoteMachineBadge('m-remote', names, 'm-here'), {
+    machine: 'builder', initial: 'B', title: 'Proyecto remoto en builder',
+  });
+  assert.equal(remoteMachineBadge('m-accent', names, 'm-here')?.initial, 'Á');
+  assert.equal(remoteMachineBadge('m-abcdef', {}, 'm-here')?.initial, 'A');
 });
 
 test('recency stays global across machines', () => {

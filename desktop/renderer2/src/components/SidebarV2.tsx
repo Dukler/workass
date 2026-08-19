@@ -4,8 +4,9 @@ import { store, useApp, useSpawnedWork } from '../store/store';
 import { IcSearch, IcPlus, IcFolder, IcChevron, IcClose, ModelIcon } from '../icons';
 import { buildWorkspaceGroups, lastProject, newChatTarget, normalizeWorkspacePath, type WorkspaceGroup } from '../workspaces';
 import { chatHasLiveActivity, isServiceWork } from '../chat-activity';
-import { machineWhere } from '../machine-label';
+import { machineWhere, remoteMachineBadge } from '../machine-label';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
+import { ProjectIcon } from './ProjectIcon';
 import { ModesSwitch, FooterUpdateCards, AccountMenu } from './Sidebar';
 
 // Sidebar v2 — port of T3 Code's "Sidebar v2" beta (nightly 0.0.29.20260724,
@@ -14,8 +15,10 @@ import { ModesSwitch, FooterUpdateCards, AccountMenu } from './Sidebar';
 // app.css `.sv2-*` for the matching geometry.
 //
 // Structure taken verbatim: the folder TREE becomes a project SCOPE FILTER;
-// rows have two densities (78px card / 36px slim) with the quiet ones under a
-// collapsible shelf; one STATUS PILL per row with a fixed hue per state.
+// rows have two densities (full card / 36px slim), but density follows an
+// explicit lifecycle boundary: ordinary threads stay full-size and only the
+// settled shelf/archive compacts them. One STATUS PILL per row has a fixed hue
+// per state.
 //
 // T3 drives density and lifecycle from stored settle/snooze state. Workass
 // keeps a smaller lifecycle: a quiet shelf followed by a hidden, searchable
@@ -24,11 +27,10 @@ import { ModesSwitch, FooterUpdateCards, AccountMenu } from './Sidebar';
 // Deliberately NOT ported: T3's footer settings button (excluded by the user)
 // and its nightly-stage header backdrop (branding).
 
-const CARD_WINDOW_MS = 24 * 60 * 60 * 1000;
 // T3's sidebarAutoSettleAfterDays, whose default is 3. Age files a quiet chat
 // away on its own; the row action and the menu do it on demand.
 const AUTO_SETTLE_MS = 3 * 24 * 60 * 60 * 1000;
-export const ARCHIVE_AFTER_SETTLED_MS = 14 * 24 * 60 * 60 * 1000;
+export const ARCHIVE_AFTER_SETTLED_MS = 5 * 24 * 60 * 60 * 1000;
 const LIFECYCLE_TICK_MS = 60 * 60 * 1000;
 const TAIL_PAGE = 24;            // T3 pages its settled tail; deep history is rare
 const TOOLTIP_DELAY_MS = 150;    // T3's TooltipProvider delay
@@ -80,6 +82,20 @@ function IcUndo() {
       <path d="M3 7.5h6.6a3 3 0 010 6H6.2" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M5.4 4.6L2.6 7.5l2.8 2.9" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
+  );
+}
+
+function projectRemoteBadge(machineId?: string | null) {
+  return remoteMachineBadge(machineId, store.machineNames(), store.localMachineId());
+}
+
+function WorkspaceProjectIcon({ group, markRemote = false }: { group: WorkspaceGroup; markRemote?: boolean }) {
+  return (
+    <ProjectIcon
+      chatId={group.chats[0]?.id ?? ''}
+      cwd={group.path}
+      remote={markRemote ? projectRemoteBadge(group.machineId) : null}
+    />
   );
 }
 
@@ -206,11 +222,13 @@ type Row = {
   status: Status; since: number; bg: number; error: string;
 };
 
-// Port of T3's effectiveSettled. Live work, pending approval, parked work, the
-// active chat, and unseen news cannot be filed. Terminal attention is different:
-// it is news the user can explicitly acknowledge, but it never auto-files by age.
-export function resolveSettled(chat: Chat, status: Status, active: boolean, now: number, touched: number): boolean {
-  if (active || chat.unread || status === 'approval' || status === 'working' || status === 'parked') return false;
+// Port of T3's effectiveSettled. Live work, pending approval, parked work, and
+// unseen news cannot be filed. Merely selecting a thread is not activity and
+// must not pull it out of the settled shelf; only real new work clears settled
+// state in the store/actor. Terminal attention is different: it is news the
+// user can explicitly acknowledge, but it never auto-files by age.
+export function resolveSettled(chat: Chat, status: Status, _active: boolean, now: number, touched: number): boolean {
+  if (chat.unread || status === 'approval' || status === 'working' || status === 'parked') return false;
   if (chat.settled === 'settled') return true;
   if (chat.settled === 'active') return false;
   if (status !== 'ready') return false;
@@ -237,6 +255,10 @@ function settledSince(chat: Chat, status: Status, now: number, touched: number):
 export function resolveArchived(chat: Chat, status: Status, now: number, touched: number): boolean {
   const since = settledSince(chat, status, now, touched);
   return since > 0 && now - since >= ARCHIVE_AFTER_SETTLED_MS;
+}
+
+export function isFullSizeSidebarRow(settled: boolean, archived: boolean): boolean {
+  return !settled && !archived;
 }
 
 export function orderSearchRows(rows: readonly Row[]): Row[] {
@@ -378,7 +400,7 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
         {card ? (
           <>
             <div className="sv2-l1">
-              <span className="sv2-fav"><IcFolder /></span>
+              <span className="sv2-fav"><ProjectIcon chatId={chat.id} cwd={chat.cwd ?? ''} /></span>
               <Where row={row} />
               {slot}
             </div>
@@ -407,7 +429,7 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
           </>
         ) : (
           <>
-            <span className="sv2-fav"><IcFolder /></span>
+            <span className="sv2-fav"><ProjectIcon chatId={chat.id} cwd={chat.cwd ?? ''} /></span>
             {title}
             {slot}
           </>
@@ -440,7 +462,7 @@ function RowTooltip({ tip }: { tip: NonNullable<Tip> }) {
     <div className="sv2-tip" style={{ top }} role="tooltip">
       <div className="sv2-tip-title">{row.chat.title}</div>
       <div className="sv2-tip-rows">
-        <div className="sv2-tip-row"><IcFolder /><span>{row.project}</span></div>
+        <div className="sv2-tip-row"><ProjectIcon chatId={row.chat.id} cwd={row.chat.cwd ?? ''} /><span>{row.project}</span></div>
         {row.chat.cwd && <div className="sv2-tip-row sv2-tip-path"><span>{row.chat.cwd}</span></div>}
         {row.chat.providerId && (
           <div className="sv2-tip-row">
@@ -467,6 +489,40 @@ function useDismiss(onClose: () => void) {
   return ref;
 }
 
+function ScopeProjectItem({ group, scope, onPick, onClose }: {
+  group: WorkspaceGroup;
+  scope: string | null;
+  onPick: (path: string | null) => void;
+  onClose: () => void;
+}) {
+  const remote = projectRemoteBadge(group.machineId);
+  const target = remote ? `${remote.machine}/${group.name}` : group.name;
+  return (
+    <button
+      className={`sv2-mi ${scope === normalizeWorkspacePath(group.path) ? 'on' : ''}`}
+      role="menuitem"
+      title={remote?.title}
+      onClick={() => { onPick(group.path ? normalizeWorkspacePath(group.path) : ''); onClose(); }}
+    >
+      <WorkspaceProjectIcon group={group} markRemote /><span className="sv2-mtxt">{group.name}</span>
+      {group.path && (
+        <>
+          <button
+            className="sv2-mact create" title={`Nueva conversación en ${target}`}
+            aria-label={`Crear conversación en ${target}`}
+            onClick={(e) => { e.stopPropagation(); store.newChat(true, group.path, group.machineId ?? ''); onClose(); }}
+          ><IcPlus /></button>
+          <button
+            className="sv2-mact danger" title="Quitar de Workass (no borra del disco)"
+            aria-label={`Quitar ${group.name} de Workass`}
+            onClick={(e) => { e.stopPropagation(); store.removeWorkspace(group.path); onClose(); }}
+          ><IcClose /></button>
+        </>
+      )}
+    </button>
+  );
+}
+
 function ScopeMenu({ groups, scope, onPick, onClose }: {
   groups: WorkspaceGroup[]; scope: string | null;
   onPick: (path: string | null) => void; onClose: () => void;
@@ -477,29 +533,11 @@ function ScopeMenu({ groups, scope, onPick, onClose }: {
       <button className={`sv2-mi ${scope === null ? 'on' : ''}`} role="menuitem" onClick={() => { onPick(null); onClose(); }}>
         <IcFolder /><span className="sv2-mtxt">Todos los proyectos</span>
       </button>
-      {groups.map((g) => (
-        <button
-          key={g.path || 'unassigned'}
-          className={`sv2-mi ${scope === normalizeWorkspacePath(g.path) ? 'on' : ''}`}
-          role="menuitem"
-          onClick={() => { onPick(g.path ? normalizeWorkspacePath(g.path) : ''); onClose(); }}
-        >
-          <IcFolder /><span className="sv2-mtxt">{g.name}</span>
-          {g.path && (
-            <>
-              <button
-                className="sv2-mact create" title={`Nueva conversación en ${g.name}`}
-                aria-label={`Crear conversación en ${g.name}`}
-                onClick={(e) => { e.stopPropagation(); store.newChat(true, g.path, g.machineId ?? ''); onClose(); }}
-              ><IcPlus /></button>
-              <button
-                className="sv2-mact danger" title="Quitar de Workass (no borra del disco)"
-                aria-label={`Quitar ${g.name} de Workass`}
-                onClick={(e) => { e.stopPropagation(); store.removeWorkspace(g.path); onClose(); }}
-              ><IcClose /></button>
-            </>
-          )}
-        </button>
+      {groups.map((group) => (
+        <ScopeProjectItem
+          key={`${group.machineId ?? ''}:${group.path || 'unassigned'}`}
+          group={group} scope={scope} onPick={onPick} onClose={onClose}
+        />
       ))}
     </div>
   );
@@ -613,9 +651,9 @@ export function SidebarV2() {
           since: status === 'working' ? (workingSince(chat, work) || touched) : 0,
           bg: work.filter((item) => item.status === 'running').length,
           error: (failing?.content || '').split('\n')[0].slice(0, 140),
-          // Density and shelf are separate questions: a chat can be quiet enough
-          // for a slim row a day in and still not be shelf material until three.
-          card: !archived && !settled && (status !== 'ready' || active || !touched || (now - touched) < CARD_WINDOW_MS),
+          // Density follows lifecycle, never age or selection. Every ordinary
+          // thread stays full-size; only settled/archive rows are compact.
+          card: isFullSizeSidebarRow(settled, archived),
         });
       }
     }
@@ -623,11 +661,12 @@ export function SidebarV2() {
   }, [groups, scope, query, app.activeId, app.chats, lifecycleNow]);
 
   const searching = query.trim().length > 0;
-  // The live list is cards then quiet slim rows. Archived rows are absent from
-  // normal browsing and are appended after every live/shelved search result.
+  // The live list is full-size cards. Settled/archive rows alone use the compact
+  // representation; archived rows are absent from normal browsing and are
+  // appended after every live/shelved search result.
   const cards = useMemo(
     () => rows.filter((r) => !r.archived && !r.settled).sort((a, b) =>
-      Number(b.card) - Number(a.card) || STATUS_RANK[a.status] - STATUS_RANK[b.status] || b.touched - a.touched),
+      STATUS_RANK[a.status] - STATUS_RANK[b.status] || b.touched - a.touched),
     [rows],
   );
   const tail = useMemo(() => rows.filter((r) => !r.archived && r.settled).sort((a, b) => b.touched - a.touched), [rows]);
@@ -639,6 +678,9 @@ export function SidebarV2() {
   const scopeLabel = scope === null
     ? 'Todos los proyectos'
     : (groups.find((g) => normalizeWorkspacePath(g.path) === scope)?.name ?? 'Todos los proyectos');
+  const scopeGroup = scope === null
+    ? undefined
+    : groups.find((g) => normalizeWorkspacePath(g.path) === scope);
 
   // Where + puts the next chat: the project you are scoped to, and in "Todos los
   // proyectos" the last one you started a chat in.
@@ -647,10 +689,14 @@ export function SidebarV2() {
     ? groups.find((g) => normalizeWorkspacePath(g.path) === newTarget)
     : undefined;
   const newTargetName = newTargetGroup?.name ?? null;
+  const newTargetRemote = projectRemoteBadge(newTargetGroup?.machineId);
+  const newTargetLabel = newTargetName
+    ? (newTargetRemote ? `${newTargetRemote.machine}/${newTargetName}` : newTargetName)
+    : null;
 
-  // T3 settles the thread you are READING and then navigates forward. Ours has
-  // to move too: the active guard pins that row to the live list, so filing the
-  // chat in front of you would otherwise look like a click that did nothing.
+  // T3 settles the thread you are READING and then navigates forward. Keep that
+  // explicit filing gesture distinct from merely opening an already-settled
+  // thread, which now stays put until real new activity reactivates it.
   const settleRow = useCallback((row: Row) => {
     store.settleChat(row.chat.id, true);
     if (row.chat.id !== app.activeId) return;
@@ -691,7 +737,7 @@ export function SidebarV2() {
         </div>
         <button
           className="sv2-sq"
-          title={newTargetName ? `Nueva conversación en ${newTargetName}` : 'Nueva conversación'}
+          title={newTargetLabel ? `Nueva conversación en ${newTargetLabel}` : 'Nueva conversación'}
           onClick={() => store.newChat(true, newTarget, newTargetGroup?.machineId ?? '')}
         ><IcPlus /></button>
       </div>
@@ -699,7 +745,8 @@ export function SidebarV2() {
       {/* Project scope + add folder — this row replaces the folder tree. */}
       <div className="sv2-tools sv2-scoperow">
         <button className="sv2-wide" onClick={() => setMenu((v) => !v)} aria-haspopup="menu" aria-expanded={menu}>
-          <IcFolder /><span className="sv2-wtxt">{scopeLabel}</span>
+          {scopeGroup ? <WorkspaceProjectIcon group={scopeGroup} markRemote /> : <IcFolder />}
+          <span className="sv2-wtxt">{scopeLabel}</span>
           <span className={`sv2-chev ${menu ? 'open' : ''}`}><IcChevron /></span>
         </button>
         <button className="sv2-sq" title="Añadir carpeta" onClick={() => setBrowsing(true)}><IcFolderPlus /></button>

@@ -25,6 +25,7 @@ export interface MachineEndpoint {
 export interface MachineEntry {
   machineId: string;
   name: string;
+  nickname?: string;
   owner?: string;
   endpoints?: MachineEndpoint[];
   secure?: boolean;
@@ -38,6 +39,9 @@ export interface MachineEntry {
 export interface MachineView {
   machineId: string;
   name: string;
+  /** Name reported by the peer, before this controller's optional nickname. */
+  reportedName: string;
+  nickname: string;
   /** '' until a socket has been opened. */
   address: string;
   link: MachineLinkState;
@@ -143,9 +147,13 @@ export class MachineRegistry {
   list(): MachineView[] {
     return Array.from(this.entries.values()).map((entry) => {
       const state = this.states.get(entry.machineId);
+      const reportedName = String(entry.name || entry.machineId).trim() || entry.machineId;
+      const nickname = String(entry.nickname ?? '').trim();
       return {
         machineId: entry.machineId,
-        name: entry.name || entry.machineId,
+        name: nickname || reportedName,
+        reportedName,
+        nickname,
         address: firstAddress(entry),
         link: state?.link ?? 'idle',
         reason: state?.reason || entry.reason || '',
@@ -180,7 +188,7 @@ export class MachineRegistry {
 
   names(): Record<string, string> {
     const out: Record<string, string> = {};
-    for (const entry of this.entries.values()) out[entry.machineId] = entry.name || entry.machineId;
+    for (const machine of this.list()) out[machine.machineId] = machine.name;
     return out;
   }
 

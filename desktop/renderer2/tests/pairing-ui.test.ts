@@ -38,6 +38,11 @@ test('an unpaired discovered machine has one action and cannot be deleted accide
   assert.match(row, /Solicitar conexión/);
   assert.match(row, /m\.paired && <button/);
   assert.match(row, />Desconectar<\/button>/);
+  assert.match(row, /has\('machinesNickname'\)/);
+  assert.match(row, /Cambiar apodo/);
+  assert.match(row, /Editar apodo/);
+  assert.match(row, /store\.setMachineNickname/);
+  assert.match(row, /m\.paired && has\('machinesNickname'\)/);
   assert.doesNotMatch(row, />Quitar<\/button>/);
 });
 

@@ -825,6 +825,11 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 		return createServerDirectory(fieldString(arg, "parent"), fieldString(arg, "name")), nil
 	})
 	count++
+	hub.RegisterOutOfBandRead("project:icon", func(args []any) (any, error) {
+		arg := firstMapArg(args)
+		return projectIconForWorkspace(fieldString(arg, "cwd")), nil
+	})
+	count++
 
 	for _, def := range daemonStubs() {
 		registerStub(hub, def.channel, def.result)

@@ -44,6 +44,28 @@ test('server folder creation uses the additive fs:create-dir payload', async () 
   assert.ok(ROUTED_METHODS.includes('createDir'));
 });
 
+test('project artwork is read by the daemon that owns the tagged chat', async () => {
+  const remote = fakeLink({
+    'project:icon': { found: true, mimeType: 'image/png', base64: 'iVBORw==' },
+  });
+  const localCalls: unknown[][] = [];
+  const router = createMachineRouter({
+    local: () => ({ projectIcon: (...args: unknown[]) => { localCalls.push(args); return Promise.resolve({ found: false }); } }) as never,
+    links: () => new Map([['m-builder', remote.link]]),
+    subscribeRemote: () => {},
+  }) as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+
+  const result = await router.projectIcon(tagId('m-builder', 'chat-7'), '/srv/workass');
+
+  assert.deepEqual(localCalls, [], 'a remote path must never be read by the local daemon');
+  assert.deepEqual(remote.calls, [{
+    channel: 'project:icon',
+    args: [{ chatId: 'chat-7', cwd: '/srv/workass' }],
+  }]);
+  assert.deepEqual(result, { found: true, mimeType: 'image/png', base64: 'iVBORw==' });
+  assert.ok(ROUTED_METHODS.includes('projectIcon'));
+});
+
 test('a tagged id is found wherever it sits in the arguments', () => {
   assert.equal(routeOf([]), '');
   assert.equal(routeOf(['chat-1']), '');
@@ -230,13 +252,16 @@ test('the registry keeps nearby machines passive until access is explicitly requ
   });
   registry.sync([
     entry('m-self', 'este Mac', '127.0.0.1:8788'),
-    entry('m-remote', 'builder', '192.168.1.50:18788'),
+    { ...entry('m-remote', 'builder', '192.168.1.50:18788'), nickname: 'Taller' },
   ], 'm-self');
   assert.deepEqual(opened, [], 'a beacon must not open a socket or prompt a nearby machine');
   assert.equal(registry.requestAccess('m-remote'), true);
   assert.deepEqual(opened, ['wss://192.168.1.50:18788/?deviceName=Mac'],
     'only the user request opens an encrypted socket; the local machine is never duplicated');
-  assert.deepEqual(registry.names(), { 'm-remote': 'builder' });
+  assert.deepEqual(registry.names(), { 'm-remote': 'Taller' });
+  assert.deepEqual(registry.list().map(({ name, reportedName, nickname }) => ({ name, reportedName, nickname })), [
+    { name: 'Taller', reportedName: 'builder', nickname: 'Taller' },
+  ]);
 });
 
 test('approval persists the discovered certificate pin before later token reconnects', () => {

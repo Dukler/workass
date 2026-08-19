@@ -112,6 +112,38 @@ func TestMachinesAddAndForget(t *testing.T) {
 	}
 }
 
+func TestMachinesNicknameIsPersistedInTheControllerBook(t *testing.T) {
+	hub := machineTestHub(t, "m-self")
+	address := fakeDaemonServer(t, "m-remote", "builder-hostname")
+	if added := invokeMap(t, hub, "machines:add", []any{map[string]any{"address": address}}); added["ok"] != true {
+		t.Fatalf("add failed: %+v", added)
+	}
+
+	renamed := invokeMap(t, hub, "machines:nickname", []any{map[string]any{
+		"machineId": "m-remote",
+		"nickname":  "  Taller  ",
+	}})
+	if renamed["ok"] != true {
+		t.Fatalf("nickname failed: %+v", renamed)
+	}
+	entry, ok := renamed["machine"].(machinebook.Entry)
+	if !ok || entry.Name != "builder-hostname" || entry.Nickname != "Taller" {
+		t.Fatalf("renamed machine = %+v", renamed["machine"])
+	}
+	machines := renamed["machines"].([]machinebook.Entry)
+	if len(machines) != 1 || machines[0].Nickname != "Taller" {
+		t.Fatalf("nickname missing from snapshot: %+v", machines)
+	}
+
+	missing := invokeMap(t, hub, "machines:nickname", []any{map[string]any{
+		"machineId": "m-gone",
+		"nickname":  "Desk",
+	}})
+	if missing["ok"] != false || !strings.Contains(missing["error"].(string), "no longer") {
+		t.Fatalf("missing machine nickname = %+v", missing)
+	}
+}
+
 // A typed address that does not work is the user's problem to see and fix, so
 // it comes back beside the field as a result — never as a wire error.
 func TestMachinesAddReportsFailuresAsResults(t *testing.T) {
