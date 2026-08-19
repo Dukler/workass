@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Chat, Msg } from '../store/types';
 import { store, useApp, useSpawnedWork } from '../store/store';
 import { IcSearch, IcPlus, IcFolder, IcChevron, IcClose, ModelIcon } from '../icons';
-import { buildWorkspaceGroups, lastProject, newChatTarget, normalizeWorkspacePath, type WorkspaceGroup } from '../workspaces';
+import { buildWorkspaceGroups, lastProject, newChatTarget, normalizeWorkspacePath, workspaceLabelForChat, type WorkspaceGroup } from '../workspaces';
 import { chatHasLiveActivity, isServiceWork } from '../chat-activity';
 import { machineWhere, remoteMachineBadge } from '../machine-label';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
@@ -645,7 +645,8 @@ export function SidebarV2() {
       const key = normalizeWorkspacePath(g.path);
       if (scope !== null && scope !== key) continue;
       for (const chat of g.chats) {
-        if (needle && !`${chat.title} ${g.name}`.toLowerCase().includes(needle)) continue;
+        const project = workspaceLabelForChat(g, chat);
+        if (needle && !`${chat.title} ${project}`.toLowerCase().includes(needle)) continue;
         const work = store.spawnedWork(chat);
         const live = chatHasLiveActivity(chat, work);
         const active = chat.id === app.activeId;
@@ -655,7 +656,7 @@ export function SidebarV2() {
         const settled = resolveSettled(chat, status, active, now, touched);
         const archived = resolveArchived(chat, status, now, touched);
         out.push({
-          chat, project: g.name, touched, status, settled, archived,
+          chat, project, touched, status, settled, archived,
           since: status === 'working' ? (workingSince(chat, work) || touched) : 0,
           bg: work.filter((item) => item.status === 'running').length,
           error: (failing?.content || '').split('\n')[0].slice(0, 140),
