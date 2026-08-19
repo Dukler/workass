@@ -308,11 +308,12 @@ func defaultLifecycleCheckInterval(ttl time.Duration) time.Duration {
 
 // SessionOptions are the app-chat session creation inputs used by the wire handler.
 type SessionOptions struct {
-	CWD       string
-	BridgeKey string
-	TabID     string
-	ChatID    string
-	SessionID string
+	CWD            string
+	WorkspaceEpoch providercontract.WorkspaceEpoch
+	BridgeKey      string
+	TabID          string
+	ChatID         string
+	SessionID      string
 	// OperationID is the stable Workass user-action identity for a provider
 	// lane selection. It is separate from SessionID, which names a disposable
 	// transport attachment.

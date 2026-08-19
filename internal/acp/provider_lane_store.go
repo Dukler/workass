@@ -252,7 +252,7 @@ func fallbackNativeMachineScope(stateDir string) string {
 	return "state-" + hex.EncodeToString(digest[:8])
 }
 
-func nativeWorkspaceEpoch(cwd string) providercontract.WorkspaceEpoch {
+func canonicalNativeWorkspace(cwd string) string {
 	clean := filepath.Clean(strings.TrimSpace(cwd))
 	if abs, err := filepath.Abs(clean); err == nil {
 		clean = abs
@@ -260,8 +260,43 @@ func nativeWorkspaceEpoch(cwd string) providercontract.WorkspaceEpoch {
 	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
 		clean = resolved
 	}
+	return clean
+}
+
+func nativeWorkspaceEpoch(cwd string) providercontract.WorkspaceEpoch {
+	clean := canonicalNativeWorkspace(cwd)
 	digest := sha256.Sum256([]byte(clean))
 	return providercontract.WorkspaceEpoch("ws-" + hex.EncodeToString(digest[:16]))
+}
+
+// WorkspaceEpochForRevision turns the actor's monotonic workspace revision
+// into the immutable provider-neutral epoch required by a lane. Revision zero
+// preserves the original path-derived identity so chats that have never moved
+// continue to address their exact native thread. Every committed move gets a
+// distinct epoch even when the chat later returns to the same directory.
+func WorkspaceEpochForRevision(chatID, cwd string, revision uint64) providercontract.WorkspaceEpoch {
+	if revision == 0 {
+		return nativeWorkspaceEpoch(cwd)
+	}
+	parts := []string{
+		"workass-workspace-epoch-v1",
+		strings.TrimSpace(chatID),
+		fmt.Sprintf("%d", revision),
+		canonicalNativeWorkspace(cwd),
+	}
+	hash := sha256.New()
+	for _, part := range parts {
+		_, _ = fmt.Fprintf(hash, "%d:", len(part))
+		_, _ = hash.Write([]byte(part))
+	}
+	return providercontract.WorkspaceEpoch("ws-" + hex.EncodeToString(hash.Sum(nil)[:16]))
+}
+
+func sessionWorkspaceEpoch(opts SessionOptions) providercontract.WorkspaceEpoch {
+	if epoch := providercontract.WorkspaceEpoch(strings.TrimSpace(string(opts.WorkspaceEpoch))); epoch != "" {
+		return epoch
+	}
+	return nativeWorkspaceEpoch(opts.CWD)
 }
 
 func bindingLaneIdentity(binding nativeSessionBinding) providercontract.LaneIdentity {
@@ -366,17 +401,17 @@ func (l *nativeSessionLedger) hasChat(tabID, chatID string) bool {
 // lock serializes resume/new decisions for one logical chat+provider. Without
 // it, two reconnecting views could both restore/create a native thread and the
 // later disk write would silently orphan the first.
-func (l *nativeSessionLedger) lock(tabID, chatID, providerID, cwd string) func() {
+func (l *nativeSessionLedger) lock(opts SessionOptions) func() {
 	if l == nil {
 		return func() {}
 	}
 	identity := providercontract.LaneIdentity{
-		ChatID: strings.TrimSpace(chatID),
+		ChatID: strings.TrimSpace(opts.ChatID),
 		Realm: providercontract.Realm{
-			ProviderID: providercontract.ID(normalizeProviderID(providerID)), MachineID: l.machineID,
-			AccountScope: "unverified-account", InstallScope: "registered-" + normalizeProviderID(providerID),
+			ProviderID: providercontract.ID(normalizeProviderID(opts.ProviderID)), MachineID: l.machineID,
+			AccountScope: "unverified-account", InstallScope: "registered-" + normalizeProviderID(opts.ProviderID),
 		},
-		WorkspaceEpoch: nativeWorkspaceEpoch(cwd),
+		WorkspaceEpoch: sessionWorkspaceEpoch(opts),
 	}.Normalize()
 	key := nativeLaneStorageKey(string(identity.ID))
 	l.mu.Lock()
@@ -435,6 +470,50 @@ func (l *nativeSessionLedger) getForWorkspace(tabID, chatID, providerID, cwd str
 		return nativeSessionBinding{}, false
 	}
 	return filtered[0].binding, true
+}
+
+func (l *nativeSessionLedger) getForWorkspaceEpoch(tabID, chatID, providerID string, epoch providercontract.WorkspaceEpoch) (nativeSessionBinding, bool) {
+	if l == nil || strings.TrimSpace(string(epoch)) == "" {
+		return nativeSessionBinding{}, false
+	}
+	wanted := strings.TrimSpace(string(epoch))
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	matches := l.matchingBindingsLocked(tabID, chatID, providerID, "")
+	var found nativeSessionBinding
+	count := 0
+	for _, match := range matches {
+		if match.binding.WorkspaceEpoch == wanted {
+			found = match.binding
+			count++
+		}
+	}
+	return found, count == 1
+}
+
+func (l *nativeSessionLedger) getForSession(tabID, chatID, providerID, sessionID string) (nativeSessionBinding, bool) {
+	if l == nil || strings.TrimSpace(sessionID) == "" {
+		return nativeSessionBinding{}, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	if len(matches) != 1 {
+		return nativeSessionBinding{}, false
+	}
+	return matches[0].binding, true
+}
+
+func (l *nativeSessionLedger) getForOptions(opts SessionOptions) (nativeSessionBinding, bool) {
+	if strings.TrimSpace(string(opts.WorkspaceEpoch)) != "" {
+		return l.getForWorkspaceEpoch(opts.TabID, opts.ChatID, opts.ProviderID, opts.WorkspaceEpoch)
+	}
+	if strings.TrimSpace(opts.SessionID) != "" {
+		if binding, ok := l.getForSession(opts.TabID, opts.ChatID, opts.ProviderID, opts.SessionID); ok {
+			return binding, true
+		}
+	}
+	return l.getForWorkspace(opts.TabID, opts.ChatID, opts.ProviderID, opts.CWD)
 }
 
 func (l *nativeSessionLedger) getForLane(identity providercontract.LaneIdentity) (nativeSessionBinding, bool) {
@@ -1048,7 +1127,7 @@ func (m *Manager) tryRestoreNativeSession(ctx context.Context, opts SessionOptio
 	if !ledger.enabledFor(opts) {
 		return SessionInfo{}, false, nil
 	}
-	binding, ok := ledger.getForWorkspace(opts.TabID, opts.ChatID, opts.ProviderID, opts.CWD)
+	binding, ok := ledger.getForOptions(opts)
 	if !ok {
 		return SessionInfo{}, false, nil
 	}
@@ -1165,7 +1244,7 @@ func (m *Manager) rememberNewNativeSession(opts SessionOptions, info SessionInfo
 	creation := providerAdapterForID(info.ProviderID).negotiatedCreationCapabilities(bridge)
 	binding := nativeSessionBinding{
 		TabID: opts.TabID, ChatID: opts.ChatID, ProviderID: info.ProviderID,
-		SessionID: info.SessionID, CWD: info.CWD,
+		SessionID: info.SessionID, CWD: info.CWD, WorkspaceEpoch: string(sessionWorkspaceEpoch(opts)),
 		MachineID:       m.nativeSessions.machineID,
 		AccountScope:    firstNonEmpty(strings.TrimSpace(info.ProviderAccountScope), "unverified-account"),
 		InstallScope:    firstNonEmpty(strings.TrimSpace(info.ProviderInstallScope), "registered-"+normalizeProviderID(info.ProviderID)),
@@ -1209,7 +1288,7 @@ func (m *Manager) prepareNativeTurn(job *Job, operationID string, prompt []any) 
 	if m.nativeSessions == nil || m.nativeSessions.path == "" || job == nil || job.internal || job.TabID == "" || job.ProviderID == "" {
 		return nil, nil
 	}
-	binding, ok := m.nativeSessions.getForWorkspace(job.TabID, job.ChatID, job.ProviderID, job.CWD)
+	binding, ok := m.nativeSessions.getForSession(job.TabID, job.ChatID, job.ProviderID, job.SessionID)
 	if !ok || bindingCurrentThreadID(binding) != job.SessionID {
 		return nil, nil
 	}

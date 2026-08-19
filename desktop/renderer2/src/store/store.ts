@@ -3000,6 +3000,26 @@ export class Store {
       if (accepted && tail.queue?.length && !this.isChatRunning(tail.id)) void this.flushNextQueued(tail);
     }
   }
+  private failPendingSend(chat: Chat, assistant: Msg, prompt: string, chatId: string, detail?: unknown) {
+    const chatRef = this.chatJobs.get(chatId);
+    if (chatRef?.tabId === chat.id && chatRef.msgId === assistant.id) this.chatJobs.delete(chatId);
+    if (assistant.jobId) this.jobRef.delete(assistant.jobId);
+    const reason = typeof detail === 'string' ? redactSensitiveText(detail).trim().slice(0, 240) : '';
+    assistant.status = 'failed';
+    assistant.content = reason ? `No se pudo iniciar el turno (${reason}).` : 'No se pudo iniciar el turno.';
+    assistant.at = new Date().toISOString();
+    assistant.interrupted = true;
+    assistant.retryPrompt = prompt;
+    assistant.turnStartedAt = undefined;
+    assistant.jobId = undefined;
+    // A connection id is disposable. Force the next attempt through exact lane
+    // selection again instead of repeatedly presenting a rejected attachment.
+    chat.sessionId = null;
+    chat.sessionProviderId = null;
+    chat._sessionOperationId = undefined;
+    this.bumpChat(chat);
+    this.scheduleScopedSync(['session', 'permissions']);
+  }
   private async _send(
     chat: Chat,
     prompt: string,
@@ -3104,12 +3124,10 @@ export class Store {
       this.jobRef.set(job.id, { tabId: chat.id, msgId: asst.id });
       return true;
     }
-    if (!job) {
-      asst.status = 'failed';
-      asst.content = 'startJob no disponible.';
-      asst.retryPrompt = prompt;
-      this.bumpChat(chat);
-    }
+    const failure = job && typeof job === 'object' && 'error' in job
+      ? String((job as { error?: unknown }).error ?? '')
+      : undefined;
+    this.failPendingSend(chat, asst, prompt, chatId, failure);
     return false;
   }
   cancelActive() {

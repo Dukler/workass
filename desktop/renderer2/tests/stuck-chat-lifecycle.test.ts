@@ -228,6 +228,88 @@ test('cancel false finalizes locally, clears anchors, and recovers the FIFO', as
   }
 });
 
+test('a rejected job start terminates its optimistic row and the next send can start', async () => {
+  const previousWindow = (globalThis as any).window;
+  let starts = 0;
+  (globalThis as any).window = {
+    api: {
+      appChatNewSession: async () => ({
+        sessionId: 'session-2', providerId: 'codex', cwd: '/tmp/workass-test',
+        currentModelId: 'model-1', currentModeId: 'agent',
+      }),
+      startJob: async () => {
+        starts += 1;
+        if (starts === 1) return { error: 'provider lane rejected the turn' };
+        return job({ id: 'job-2', sessionId: 'session-2' });
+      },
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    (subject as any).scheduleScopedSync = () => {};
+
+    assert.equal(await (subject as any)._send(owner, 'first attempt'), false);
+    const failed = owner.messages.at(-1)!;
+    assert.equal(failed.status, 'failed');
+    assert.match(failed.content, /provider lane rejected the turn/);
+    assert.equal(failed.retryPrompt, 'first attempt');
+    assert.equal(owner.sessionId, null);
+    assert.equal((subject as any).chatJobs.size, 0);
+    assert.equal(subject.isChatRunning(owner.id), false);
+
+    assert.equal(await (subject as any)._send(owner, 'second attempt'), true);
+    const running = owner.messages.at(-1)!;
+    assert.equal(running.status, 'running');
+    assert.equal(running.jobId, 'job-2');
+    assert.equal(owner.sessionId, 'session-2');
+    assert.equal(starts, 2);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('an accepted stop reaches a terminal row and does not block the next send', async () => {
+  const previousWindow = (globalThis as any).window;
+  (globalThis as any).window = {
+    api: {
+      cancelJob: async () => ({ cancelled: true, reason: 'cancelled' }),
+      startJob: async () => job({ id: 'job-after-stop' }),
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    const assistant: Msg = {
+      id: 'assistant-canonical', role: 'assistant', content: 'partial', status: 'running',
+      at: null, jobId: 'job-1', events: [],
+    };
+    owner.messages = [assistant];
+    (subject as any).jobRef.set('job-1', { tabId: owner.id, msgId: assistant.id });
+    (subject as any).chatJobs.set(owner.chatId, { tabId: owner.id, msgId: assistant.id });
+
+    await subject.cancelChatTurn(owner.id);
+    assert.equal(assistant.status, 'running', 'accepted cancellation waits for the durable terminal event');
+    (subject as any).onJobEvent({
+      type: 'end',
+      job: job({ status: 'failed', code: 130, stopReason: 'cancelled', finishedAt: '2026-07-24T12:00:02Z', result: 'partial' }),
+    });
+    assert.equal(assistant.status, 'cancelled');
+    assert.equal(subject.isChatRunning(owner.id), false);
+    assert.equal((subject as any).chatJobs.size, 0);
+    assert.equal((subject as any).jobRef.has('job-1'), false);
+
+    assert.equal(await (subject as any)._send(owner, 'message after stop'), true);
+    const next = owner.messages.at(-1)!;
+    assert.equal(next.status, 'running');
+    assert.equal(next.jobId, 'job-after-stop');
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
 test('a failed queued flush preserves the exact FIFO head object', async () => {
   const { subject, owner } = subjectWithChat();
   owner.sessionId = null;
