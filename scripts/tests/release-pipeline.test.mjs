@@ -11,6 +11,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const releaseRoot = path.join(repoRoot, 'scripts', 'release');
 const inputTool = path.join(releaseRoot, 'lib', 'release-input.mjs');
 const candidateTool = path.join(releaseRoot, 'lib', 'verify-candidate.mjs');
+const gateReceiptTool = path.join(releaseRoot, 'lib', 'repository-gate.mjs');
 const commit = '1'.repeat(40);
 
 function run(command, args, options = {}) {
@@ -79,6 +80,66 @@ test('timing helper reports pass and preserves a failing command status', (t) =>
   const timing = fs.readFileSync(timingFile, 'utf8');
   assert.match(timing, /name=contract_pass status=passed seconds=\d+/);
   assert.match(timing, /name=contract_fail status=failed seconds=\d+/);
+});
+
+test('repository gate receipt binds the exact commit, gate, OS, and toolchain', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-release-gate-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const repo = path.join(root, 'repo');
+  const receipt = path.join(root, 'receipt.json');
+  const gate = path.join(repo, 'scripts', 'gate.sh');
+  write(gate, '#!/bin/sh\necho first\n');
+
+  const record = () => run(process.execPath, [gateReceiptTool, 'record', '--repo', repo,
+    '--receipt', receipt, '--commit', commit]);
+  const verify = (candidateCommit = commit) => run(process.execPath, [gateReceiptTool, 'verify', '--repo', repo,
+    '--receipt', receipt, '--commit', candidateCommit]);
+
+  assert.equal(record().status, 0);
+  assert.equal(verify().status, 0);
+  assert.notEqual(verify('2'.repeat(40)).status, 0);
+
+  write(gate, '#!/bin/sh\necho changed\n');
+  assert.notEqual(verify().status, 0);
+  assert.equal(record().status, 0);
+  assert.equal(verify().status, 0);
+
+  write(receipt, '{broken');
+  assert.notEqual(verify().status, 0);
+  assert.equal(record().status, 0);
+  assert.equal(verify().status, 0);
+});
+
+test('release renderer mismatch fails before the slow Go gate', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-release-renderer-gate-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const gate = path.join(root, 'scripts', 'gate.sh');
+  const bin = path.join(root, 'bin');
+  const goMarker = path.join(root, 'go-was-called');
+  fs.mkdirSync(path.join(root, 'desktop', 'renderer2', 'node_modules'), { recursive: true });
+  write(path.join(root, 'desktop', 'renderer2', 'dist', 'index.html'), 'fresh renderer');
+  write(path.join(root, 'cmd', 'workass', 'embedded', 'dist', 'index.html'), 'stale renderer');
+  fs.mkdirSync(path.dirname(gate), { recursive: true });
+  const gateSource = fs.readFileSync(path.join(repoRoot, 'scripts', 'gate.sh'), 'utf8')
+    .replace('export PATH="/opt/homebrew/bin:$PATH"', 'export PATH="$PATH"');
+  write(gate, gateSource);
+  fs.chmodSync(gate, 0o755);
+  for (const name of ['npx', 'npm']) {
+    const command = path.join(bin, name);
+    write(command, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(command, 0o755);
+  }
+  const go = path.join(bin, 'go');
+  write(go, `#!/bin/sh\ntouch "${goMarker}"\nexit 0\n`);
+  fs.chmodSync(go, 0o755);
+
+  const result = run('sh', [gate], {
+    cwd: root,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER: '1' },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /renderer build differs from committed embedded output/);
+  assert.equal(fs.existsSync(goMarker), false);
 });
 
 test('source-state gate rejects dirty or unpublished main', (t) => {
@@ -189,6 +250,7 @@ test('canonical pipeline stages both platforms from one verified input and publi
   const orchestrator = fs.readFileSync(path.join(releaseRoot, 'stage-updates.sh'), 'utf8');
   const preparer = fs.readFileSync(path.join(releaseRoot, 'prepare-input.sh'), 'utf8');
   const publisher = fs.readFileSync(path.join(releaseRoot, 'publish-windows.sh'), 'utf8');
+  const gate = fs.readFileSync(path.join(repoRoot, 'scripts', 'gate.sh'), 'utf8');
   const macStage = fs.readFileSync(path.join(repoRoot, 'scripts', 'stage-macos-local-update.sh'), 'utf8');
   const windowsStage = fs.readFileSync(path.join(repoRoot, 'scripts', 'stage-windows-portable.sh'), 'utf8');
   const macPackage = fs.readFileSync(path.join(repoRoot, 'scripts', 'package-workass-macos.sh'), 'utf8');
@@ -209,9 +271,20 @@ test('canonical pipeline stages both platforms from one verified input and publi
   assert.ok(orchestrator.indexOf('publish_windows publish_windows') < orchestrator.indexOf('publish_macos publish_macos'));
 
   assert.equal((preparer.match(/scripts\/gate\.sh/g) || []).length, 1);
-  assert.equal((preparer.match(/sync-renderer2\.sh/g) || []).length, 1);
+  assert.doesNotMatch(preparer, /sync-renderer2\.sh/);
+  assert.match(preparer, /repository-gate\.mjs/);
+  assert.match(preparer, /workass_release_run_phase repository_gate_cached verify_gate_receipt/);
+  assert.match(preparer, /workass_release_run_phase repository_gate_receipt record_gate_receipt/);
+  assert.match(preparer, /WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER=1/);
+  assert.match(preparer, /cmd\/workass\/embedded\/dist\/\." "\$incoming\/renderer/);
   assert.match(preparer, /node "\$input_tool" create/);
   assert.match(preparer, /node "\$input_tool" verify/);
+
+  const rendererBuild = gate.indexOf('npm run build --silent');
+  const rendererSnapshot = gate.indexOf('WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER');
+  const goBuild = gate.indexOf('go build ./...');
+  assert.ok(rendererBuild >= 0 && rendererBuild < goBuild);
+  assert.ok(rendererSnapshot >= 0 && rendererSnapshot < goBuild);
 
   assert.match(macStage, /release-input\.mjs" verify/);
   assert.match(macStage, /--renderer-root "\$release_input\/renderer"/);
