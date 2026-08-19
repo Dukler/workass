@@ -16,6 +16,7 @@ const {
   spawnDetached,
   startInstalledRuntime,
   stopLaunchedProcessTree,
+  stopWindowsExecutableProcesses,
   targetRuntimeEnv,
   validateTransaction,
   verifyWindowsIncoming,
@@ -103,7 +104,7 @@ function operations(overrides = {}) {
     shellExited: async () => true,
     stopDaemonService: async () => { calls.push('stop-service'); },
     daemonDown: async () => true,
-    stopOldShell: async () => { calls.push('stop-old-shell'); },
+    stopOldShell: async () => 0,
     verifyIncoming: async () => { calls.push('verify'); },
     snapshotMutableState: async () => { calls.push('snapshot-state'); },
     activate: async () => { calls.push('activate'); },
@@ -235,6 +236,26 @@ test('Windows stops the complete failed Electron process tree before rollback', 
   assert.deepEqual(calls, [[
     'taskkill.exe', ['/PID', '7123', '/T', '/F'], { windowsHide: true, stdio: 'ignore' },
   ]]);
+});
+
+test('Windows shell cleanup targets every process from only the exact portable executable', () => {
+  const executable = path.join(path.sep, 'Apps', 'Workass', 'Workass.exe');
+  let invocation = null;
+  const stopped = stopWindowsExecutableProcesses(executable, {
+    run: (command, args, options) => {
+      invocation = { command, args, options };
+      return { status: 0, stdout: 'WORKASS_STOPPED=4\r\n' };
+    },
+  });
+  assert.equal(stopped, 4);
+  assert.equal(invocation.command, 'powershell.exe');
+  assert.deepEqual(invocation.args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command']);
+  assert.match(invocation.args[3], /Get-Process -Name Workass/);
+  assert.match(invocation.args[3], /OrdinalIgnoreCase/);
+  assert.equal(invocation.options.env.WORKASS_OLD_EXECUTABLE, executable);
+  assert.throws(() => stopWindowsExecutableProcesses(executable, {
+    run: () => ({ status: 0, stdout: '' }),
+  }), /no process receipt/);
 });
 
 test('rollback path renames retry bounded transient file locks', async () => {
@@ -459,13 +480,14 @@ test('runtime prestart rejects a profile outside the prepared update transaction
   }), /does not match/);
 });
 
-test('the independent worker accepts the checksum-staged unsigned Windows portable tree', () => {
+test('the independent worker accepts the checksum-staged unsigned Windows portable tree without Authenticode', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-worker-windows-'));
   const incomingTarget = path.join(root, '.Workass.incoming-fixture');
   writeWindowsRelease(incomingTarget);
   assert.doesNotThrow(() => verifyWindowsIncoming({ incomingTarget, targetVersion: '1.1.0' }));
   const worker = fs.readFileSync(path.join(__dirname, 'update-worker.js'), 'utf8');
-  assert.doesNotMatch(worker, /Get-AuthenticodeSignature|powershell\.exe/);
+  assert.doesNotMatch(worker, /Get-AuthenticodeSignature/);
+  assert.match(worker, /stopWindowsExecutableProcesses/);
 });
 
 test('the update relaunch keeps macOS hidden-until-ready and makes Windows visible immediately', () => {
@@ -496,7 +518,7 @@ test('Windows force-stops the exact old Electron tree after the graceful quit bo
   let forced = false;
   const ops = operations({
     shellExited: async () => forced,
-    stopOldShell: async () => { ops.calls.push('stop-old-shell'); forced = true; },
+    stopOldShell: async () => { ops.calls.push('stop-old-shell'); forced = true; return 4; },
   });
   const receipt = await runTransaction(tx, ops);
   assert.equal(receipt.phase, 'healthy');
@@ -506,6 +528,18 @@ test('Windows force-stops the exact old Electron tree after the graceful quit bo
     'stop-service', 'verify', 'snapshot-state', 'activate', 'start-runtime',
     'launch', 'healthy:1.1.0', 'cleanup',
   ]);
+});
+
+test('Windows sweeps orphaned install processes even after the old main PID already exited', async () => {
+  const tx = windowsTransactionFixture();
+  const ops = operations({
+    shellExited: async () => true,
+    stopOldShell: async () => { ops.calls.push('stop-old-shell'); return 3; },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'healthy');
+  assert.equal(receipt.oldShellForced, true);
+  assert.equal(ops.calls[0], 'stop-old-shell');
 });
 
 test('post-health cleanup failure cannot roll a healthy release back', async () => {
