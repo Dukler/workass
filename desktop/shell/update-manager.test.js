@@ -535,6 +535,7 @@ test('committed handoff arms one worker, then quits only after daemon commit', a
   assert.equal(transaction.mutableStateTarget, manager.runtime.stateDir);
   assert.equal(transaction.mutableStateBackupTarget, path.join(manager.prepared.transactionRoot, 'state-before-activation'));
   assert.equal(transaction.failedMutableStateTarget, path.join(manager.prepared.transactionRoot, 'state-from-failed-activation'));
+  assert.equal(transaction.requireVisibleWindow, true);
 });
 
 test('one apply action stages and commits an available release without a second click', async () => {

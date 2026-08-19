@@ -31,11 +31,36 @@ function targetRuntimeEnv(source = process.env) {
   return clean;
 }
 
-function runtimeIsHealthy({ daemon, shell, expectedVersion, expectedBind = '' }) {
+function runtimeIsHealthy({ daemon, shell, expectedVersion, expectedBind = '', requireVisibleWindow = false }) {
   return daemon?.app === 'workass' && daemon?.version === expectedVersion &&
     (!expectedBind || daemon?.bind === expectedBind) &&
     shell?.controller === true && Number(shell?.catalog?.readyModelCount || 0) > 0 &&
-    shell?.appVersion === expectedVersion;
+    shell?.appVersion === expectedVersion &&
+    (!requireVisibleWindow || shell?.windowVisible === true);
+}
+
+function spawnDetached(command, args, options, { spawnProcess = spawn } = {}) {
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = spawnProcess(command, args, options);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    let settled = false;
+    child.once('error', (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+    child.once('spawn', () => {
+      if (settled) return;
+      settled = true;
+      child.unref?.();
+      resolve(child);
+    });
+  });
 }
 
 function atomicJSON(file, value) {
@@ -271,6 +296,7 @@ function verifyWindowsIncoming(transaction) {
 function validateTransaction(transaction) {
   if (!transaction || transaction.schemaVersion !== 2) throw new Error('unsupported update transaction');
   if (!/^[A-Za-z0-9_-]{8,96}$/.test(String(transaction.updateId || ''))) throw new Error('update transaction has an invalid updateId');
+  if (transaction.requireVisibleWindow !== true) throw new Error('update transaction must require a visible shell window');
   for (const field of [
     'updateId', 'platform', 'currentVersion', 'targetVersion',
     'transactionRoot', 'installTarget', 'incomingTarget', 'backupTarget',
@@ -353,6 +379,7 @@ function defaultOperations(transaction, dependencies = {}) {
   const launchAgentPath = String(transaction.launchAgentPath || '');
   const launchdDomain = String(transaction.launchdDomain || '');
   const mirrorWindows = dependencies.mirrorWindowsDirectory || mirrorWindowsDirectory;
+  const spawnProcess = dependencies.spawnProcess || spawn;
   let launchedPID = 0;
   let expectedDaemonBind = '';
   return {
@@ -427,25 +454,37 @@ function defaultOperations(transaction, dependencies = {}) {
       const executable = transaction.platform === 'darwin'
         ? path.join(transaction.installTarget, 'Contents', 'MacOS', 'Workass')
         : path.join(transaction.installTarget, 'Workass.exe');
-      const child = spawn(executable, [], {
+      const child = await spawnDetached(executable, [], {
         cwd: transaction.installTarget,
         detached: true,
-        windowsHide: true,
+        // Workass.exe is a GUI-subsystem executable and does not create a
+        // console. Do not give Windows a hidden startup state that can outlive
+        // Electron's own BrowserWindow show request.
+        windowsHide: transaction.platform !== 'win32',
         stdio: 'ignore',
         env: {
           ...targetRuntimeEnv(process.env),
           WORKASS_CONTROLLER_RECOVERY: '1',
-          WORKASS_UPDATE_RELAUNCH: '1',
+          // Older Windows releases interpret this flag by creating their only
+          // BrowserWindow hidden. Omit it on Windows so rollback to one of
+          // those releases is visible too; macOS still uses its bounded
+          // hidden-until-ready path.
+          ...(transaction.platform === 'darwin' ? { WORKASS_UPDATE_RELAUNCH: '1' } : {}),
         },
-      });
+      }, { spawnProcess });
       launchedPID = child.pid || 0;
-      child.unref();
     },
     healthy: async (expectedVersion = transaction.targetVersion) => {
       const [daemon, shell] = await Promise.all([
         requestJSON(transaction.daemonHealthURL), requestJSON(transaction.shellStatusURL),
       ]);
-      return runtimeIsHealthy({ daemon, shell, expectedVersion, expectedBind: expectedDaemonBind });
+      return runtimeIsHealthy({
+        daemon,
+        shell,
+        expectedVersion,
+        expectedBind: expectedDaemonBind,
+        requireVisibleWindow: transaction.requireVisibleWindow === true,
+      });
     },
     stopLaunched: async () => {
       await stopLaunchedProcessTree(launchedPID, { platform: transaction.platform });
@@ -632,6 +671,7 @@ module.exports = {
   requestJSON,
   requestDaemonShutdown,
   renamePathWithRetry,
+  spawnDetached,
   runTransaction,
   runtimeIsHealthy,
   startInstalledRuntime,

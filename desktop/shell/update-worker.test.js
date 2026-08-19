@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const {
   defaultOperations,
@@ -11,6 +12,7 @@ const {
   renamePathWithRetry,
   runTransaction,
   runtimeIsHealthy,
+  spawnDetached,
   startInstalledRuntime,
   stopLaunchedProcessTree,
   targetRuntimeEnv,
@@ -74,6 +76,7 @@ function transactionFixture() {
     receiptPath: path.join(dataRoot, 'updates', 'receipt.json'),
     daemonHealthURL: 'https://127.0.0.1:8788/workass/health',
     shellStatusURL: 'http://127.0.0.1:8798/__workass-shell/status',
+    requireVisibleWindow: true,
     designatedRequirement: 'identifier "com.workass.app" and certificate root = H"abc"',
   };
 }
@@ -116,6 +119,7 @@ function operations(overrides = {}) {
 test('transaction validation keeps macOS swap paths beside the app and Windows release paths inside its transaction', () => {
   const tx = transactionFixture();
   assert.equal(validateTransaction(tx), tx);
+  assert.throws(() => validateTransaction({ ...tx, requireVisibleWindow: false }), /visible shell window/);
   assert.throws(() => validateTransaction({ ...tx, backupTarget: path.join(path.dirname(path.dirname(tx.backupTarget)), 'elsewhere', 'old') }), /one parent/);
   assert.throws(() => validateTransaction({ ...tx, mutableStateTarget: path.dirname(tx.mutableStateTarget) }), /exact Workass state directory/);
   assert.throws(() => validateTransaction({ ...tx, mutableStateBackupTarget: path.join(path.dirname(tx.transactionRoot), 'state') }), /distinct children/);
@@ -307,6 +311,72 @@ test('activation health rejects a daemon that retained the previous bind mode', 
   }), false);
 });
 
+test('activation health can require a visible shell window', () => {
+  const daemon = { app: 'workass', version: '1.1.0', bind: 'lan' };
+  const shell = {
+    controller: true,
+    catalog: { readyModelCount: 2 },
+    appVersion: '1.1.0',
+    windowVisible: false,
+  };
+  assert.equal(runtimeIsHealthy({ daemon, shell, expectedVersion: '1.1.0' }), true);
+  assert.equal(runtimeIsHealthy({ daemon, shell, expectedVersion: '1.1.0', requireVisibleWindow: true }), false);
+  assert.equal(runtimeIsHealthy({ daemon, shell: { ...shell, windowVisible: true }, expectedVersion: '1.1.0', requireVisibleWindow: true }), true);
+});
+
+test('installed process launch waits for Windows spawn acknowledgement and surfaces failure', async () => {
+  const successful = new EventEmitter();
+  successful.pid = 8123;
+  successful.unref = () => { successful.unrefCalled = true; };
+  const launched = spawnDetached('Workass.exe', [], {}, { spawnProcess: () => successful });
+  successful.emit('spawn');
+  assert.equal(await launched, successful);
+  assert.equal(successful.unrefCalled, true);
+
+  const failed = new EventEmitter();
+  const rejected = spawnDetached('Workass.exe', [], {}, { spawnProcess: () => failed });
+  failed.emit('error', Object.assign(new Error('blocked'), { code: 'EACCES' }));
+  await assert.rejects(rejected, /blocked/);
+});
+
+test('Windows activation and rollback launch even an older installed GUI visibly', async () => {
+  const tx = windowsTransactionFixture();
+  let launch = null;
+  const disk = defaultOperations(tx, {
+    spawnProcess: (command, args, options) => {
+      launch = { command, args, options };
+      const child = new EventEmitter();
+      child.pid = 9012;
+      child.unref = () => {};
+      queueMicrotask(() => child.emit('spawn'));
+      return child;
+    },
+  });
+  await disk.launchInstalled();
+  assert.equal(launch.command, path.join(tx.installTarget, 'Workass.exe'));
+  assert.deepEqual(launch.args, []);
+  assert.equal(launch.options.cwd, tx.installTarget);
+  assert.equal(launch.options.detached, true);
+  assert.equal(launch.options.windowsHide, false);
+  assert.equal(launch.options.env.WORKASS_UPDATE_RELAUNCH, undefined);
+
+  const macTx = transactionFixture();
+  const macLaunches = [];
+  const macDisk = defaultOperations(macTx, {
+    spawnProcess: (command, args, options) => {
+      macLaunches.push({ command, args, options });
+      const child = new EventEmitter();
+      child.pid = 9013;
+      child.unref = () => {};
+      queueMicrotask(() => child.emit('spawn'));
+      return child;
+    },
+  });
+  await macDisk.launchInstalled();
+  assert.equal(macLaunches[0].options.windowsHide, true);
+  assert.equal(macLaunches[0].options.env.WORKASS_UPDATE_RELAUNCH, '1');
+});
+
 test('runtime prestart rejects a profile outside the prepared update transaction', async () => {
   const tx = transactionFixture();
   await assert.rejects(() => startInstalledRuntime(tx, {
@@ -324,11 +394,12 @@ test('the independent worker accepts the checksum-staged unsigned Windows portab
   assert.doesNotMatch(worker, /Get-AuthenticodeSignature|powershell\.exe/);
 });
 
-test('the update relaunch asks the existing Workass window to reveal itself only when ready', () => {
+test('the update relaunch keeps macOS hidden-until-ready and makes Windows visible immediately', () => {
   const worker = fs.readFileSync(path.join(__dirname, 'update-worker.js'), 'utf8');
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
   assert.match(worker, /WORKASS_UPDATE_RELAUNCH:\s*'1'/);
-  assert.match(main, /show:\s*!isUpdateRelaunch/);
+  assert.match(main, /show:\s*showOnCreate/);
+  assert.match(main, /isUpdateRelaunch\s*&&\s*!showOnCreate/);
   assert.match(main, /win\.once\('ready-to-show', reveal\)/);
   assert.match(main, /focusPrimaryWindow\(\(\) => \[win\]/);
 });

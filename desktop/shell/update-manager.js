@@ -945,6 +945,7 @@ class UpdateManager {
       receiptPath: this.receiptPath,
       daemonHealthURL: `${this.runtime.daemonURL}/workass/health`,
       shellStatusURL: `http://127.0.0.1:${this.runtime.viewPort}/__workass-shell/status`,
+      requireVisibleWindow: true,
       designatedRequirement: prepared.designatedRequirement,
       launchAgentPath: this.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'LaunchAgents', `${this.runtime.launchdLabel}.plist`) : '',
       launchdDomain: this.platform === 'darwin' && typeof process.getuid === 'function' ? `gui/${process.getuid()}` : '',

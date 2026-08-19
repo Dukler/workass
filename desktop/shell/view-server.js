@@ -169,7 +169,7 @@ function createViewServer({ daemonURL, daemonCAPath = '', rendererDir, host = '1
     return Promise.reject(new Error(`renderer build missing: ${indexPath}`));
   }
 
-  const shellStatus = { controller: null, reportedAt: null, catalog: null, claude: null, browser: null };
+  const shellStatus = { controller: null, reportedAt: null, catalog: null, claude: null, browser: null, window: null };
   // Dev screenshot hook (2026-07-12): the shell registers a capture fn (the real
   // main-window webContents.capturePage) so the build workflow / an agent can GET
   // a PNG of exactly what the user sees — no more iterating on the UI blind.
@@ -264,6 +264,8 @@ function createViewServer({ daemonURL, daemonCAPath = '', rendererDir, host = '1
         catalog: shellStatus.catalog,
         claude: shellStatus.claude,
         browser: shellStatus.browser,
+        windowVisible: shellStatus.window?.visible === true,
+        window: shellStatus.window,
         electronVersion: runtimeVersion,
         appVersion,
         rendererDir: root,
@@ -375,6 +377,15 @@ function createViewServer({ daemonURL, daemonCAPath = '', rendererDir, host = '1
             agentControl: raw.agentControl === true,
             loading: raw.loading === true,
             hasError: !!raw.error,
+            reportedAt: new Date().toISOString(),
+          };
+        },
+        reportWindowState: (state) => {
+          const raw = state && typeof state === 'object' ? state : {};
+          shellStatus.window = {
+            visible: raw.visible === true,
+            minimized: raw.minimized === true,
+            focused: raw.focused === true,
             reportedAt: new Date().toISOString(),
           };
         },
