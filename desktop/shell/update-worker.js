@@ -119,6 +119,53 @@ async function stopLaunchedProcessTree(pid, {
   return true;
 }
 
+function stopWindowsExecutableProcesses(executablePath, { run = spawnSync } = {}) {
+  const target = String(executablePath || '').trim();
+  if (!target || path.basename(target).toLowerCase() !== 'workass.exe') {
+    throw new Error('Windows shell cleanup requires the exact Workass executable path');
+  }
+  // Electron's main PID can exit while renderer/GPU children remain orphaned
+  // and keep files in the portable install locked. taskkill /PID can no longer
+  // reach that tree once its root is gone, so select only processes whose
+  // executable path exactly matches this installation. The independent updater
+  // is updater-node.exe outside this directory and cannot select itself.
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+$target = [IO.Path]::GetFullPath($env:WORKASS_OLD_EXECUTABLE)
+function Find-WorkassInstallProcesses {
+  @(
+    Get-Process -Name Workass -ErrorAction SilentlyContinue | Where-Object {
+      try {
+        $_.Path -and [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($_.Path), $target)
+      } catch { $false }
+    }
+  )
+}
+$targets = @(Find-WorkassInstallProcesses)
+$targets | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+$deadline = [DateTime]::UtcNow.AddSeconds(10)
+do {
+  $remaining = @(Find-WorkassInstallProcesses)
+  if ($remaining.Count -eq 0) { break }
+  Start-Sleep -Milliseconds 100
+} while ([DateTime]::UtcNow -lt $deadline)
+if ($remaining.Count -gt 0) { throw 'Workass install processes remained after cleanup' }
+Write-Output "WORKASS_STOPPED=$($targets.Count)"
+`;
+  const result = run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    windowsHide: true,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, WORKASS_OLD_EXECUTABLE: target },
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error('the old Workass install processes did not stop');
+  }
+  const match = String(result.stdout || '').match(/WORKASS_STOPPED=(\d+)/);
+  if (!match) throw new Error('Windows shell cleanup returned no process receipt');
+  return Number(match[1]);
+}
+
 async function renamePathWithRetry(source, destination, {
   rename = fs.renameSync,
   pause = delay,
@@ -423,6 +470,7 @@ function defaultOperations(transaction, dependencies = {}) {
   const launchAgentPath = String(transaction.launchAgentPath || '');
   const launchdDomain = String(transaction.launchdDomain || '');
   const mirrorWindows = dependencies.mirrorWindowsDirectory || mirrorWindowsDirectory;
+  const stopWindowsProcesses = dependencies.stopWindowsExecutableProcesses || stopWindowsExecutableProcesses;
   const spawnProcess = dependencies.spawnProcess || spawn;
   const launchedPIDs = new Set();
   let expectedDaemonBind = '';
@@ -435,7 +483,11 @@ function defaultOperations(transaction, dependencies = {}) {
     },
     daemonDown: async () => !(await requestJSON(transaction.daemonHealthURL, 600)),
     stopOldShell: async () => {
+      if (transaction.platform === 'win32') {
+        return stopWindowsProcesses(path.join(transaction.installTarget, 'Workass.exe'));
+      }
       await stopLaunchedProcessTree(transaction.shellPID, { platform: transaction.platform });
+      return 1;
     },
     verifyIncoming: async () => {
       if (transaction.platform === 'darwin') verifyMacIncoming(transaction);
@@ -617,13 +669,12 @@ async function runTransaction(rawTransaction, operations) {
   updateReceipt(transaction, 'armed');
   let oldShellForced = false;
   const gracefulShellAttempts = transaction.platform === 'win32' ? 20 : 160;
-  if (!await wait(ops.shellExited, { attempts: gracefulShellAttempts, delayMs: 250 })) {
-    if (transaction.platform !== 'win32') {
-      return updateReceipt(transaction, 'failed', { activated: false, error: 'the old Workass shell did not exit' });
-    }
+  const shellExitedGracefully = await wait(ops.shellExited, { attempts: gracefulShellAttempts, delayMs: 250 });
+  if (transaction.platform === 'win32') {
     try {
-      await ops.stopOldShell();
-      oldShellForced = true;
+      // Always perform the exact-path sweep. The main PID may already be gone
+      // while its orphaned renderer/GPU processes still lock the installation.
+      oldShellForced = Number(await ops.stopOldShell()) > 0;
     } catch (err) {
       return updateReceipt(transaction, 'failed', {
         activated: false,
@@ -633,6 +684,8 @@ async function runTransaction(rawTransaction, operations) {
     if (!await wait(ops.shellExited, { attempts: 40, delayMs: 250 })) {
       return updateReceipt(transaction, 'failed', { activated: false, error: 'the old Workass shell did not exit' });
     }
+  } else if (!shellExitedGracefully) {
+    return updateReceipt(transaction, 'failed', { activated: false, error: 'the old Workass shell did not exit' });
   }
   await ops.stopDaemonService();
   if (!await wait(ops.daemonDown, { attempts: 80, delayMs: 250 })) {
@@ -746,6 +799,7 @@ module.exports = {
   runtimeIsHealthy,
   startInstalledRuntime,
   stopLaunchedProcessTree,
+  stopWindowsExecutableProcesses,
   targetRuntimeEnv,
   updateReceipt,
   validateTransaction,
