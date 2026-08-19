@@ -22,3 +22,7 @@ test('composer remeasures a wrapped draft when a chat switch changes its rendere
   assert.match(composer, /observeComposerTextareaWidth/);
   assert.match(composer, /return observeComposerTextareaWidth\(el, autosize\)/);
 });
+
+test('the queue shares the composer reading column', () => {
+  assert.match(styles, /\.qlist\s*\{[^}]*width:\s*100%;[^}]*max-width:\s*var\(--read\);[^}]*margin:\s*0 auto 9px;/s);
+});

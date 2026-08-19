@@ -110,3 +110,50 @@ test('a daemon refresh releases every inactive complete history but keeps the ac
   assert.equal(subject.chat(inactive.id)?.lastActivityAt, inactiveActivityAt);
   assert.equal(subject.toMirror(false).chats[1].lastActivityAt, inactiveActivityAt);
 });
+
+test('a metadata-only refresh invalidates a stale loaded marker and reloads the visible chat', async () => {
+  const complete = messages(14);
+  const previousWindow = (globalThis as any).window;
+  let archiveReads = 0;
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async (tabId: string) => {
+        archiveReads += 1;
+        return tabId === 'tab-active' ? complete : [];
+      },
+    },
+  };
+  try {
+    const subject = new StoreCtor();
+    const active = chat('tab-active', [...complete]);
+    active.actorRevision = 7;
+    subject.state.chats = [active];
+    subject.state.activeId = active.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+    subject.fullHistoriesLoaded.add(active.id);
+
+    // Another surface may be the daemon-global active tab, so session:get can
+    // legally return only metadata for the chat this renderer is still reading.
+    // A newer actor revision prevents suffix preservation when that projection
+    // has no rows; the renderer must clear its old residency marker and pull
+    // the canonical actor ledger instead of painting an empty new chat.
+    const server = subject.toMirror(false);
+    server.chats[0].actorRevision = 8;
+    server.chats[0].messages = [];
+    server.chats[0].messageCount = complete.length;
+    server.chats[0].historyComplete = false;
+
+    assert.equal(subject.restoreSessionSnapshot(server), true);
+    const load = subject.fullHistoryLoads.get(active.id);
+    assert.ok(load, 'visible incomplete history must start an actor archive read');
+    await load;
+
+    assert.equal(archiveReads, 1);
+    assert.equal(subject.chat(active.id)?.messages.length, complete.length);
+    assert.equal(subject.chat(active.id)?.historyComplete, true);
+    assert.equal(subject.fullHistoriesLoaded.has(active.id), true);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
