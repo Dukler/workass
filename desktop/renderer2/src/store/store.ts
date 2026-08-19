@@ -717,7 +717,12 @@ export class Store {
         providerId, providerName: binding.useLiveControls ? c.liveSession?.providerName ?? null : null,
         contextUsageByProvider,
         pane: c.pane,
-        imageSupport: c.liveSession?.imageSupport ?? false,
+        // Additive capability: a mirror without the field means UNKNOWN. Do
+        // not collapse it to false or a later job attachment will make the
+        // composer reject images before the live provider is queried.
+        imageSupport: typeof c.liveSession?.imageSupport === 'boolean'
+          ? c.liveSession.imageSupport
+          : undefined,
         commands: selectedLiveSession?.commands?.length ? selectedLiveSession.commands : undefined,
         // Absent = UNKNOWN, never a wipe: the snapshot cannot carry the
         // daemon-memory-only catalog, so a rebuild keeps what this client
@@ -2335,7 +2340,7 @@ export class Store {
       chat._sessionOperationId = undefined;
       chat.workspaceRevision = result!.workspaceRevision;
       chat.sessionError = undefined;
-      chat.imageSupport = false;
+      chat.imageSupport = undefined;
       chat.commands = undefined;
       chat.commandCatalog = undefined;
     }
@@ -2593,9 +2598,10 @@ export class Store {
       // an older daemon → fall back to the picked id + catalog name).
       if (info.providerId) chat.providerId = info.providerId;
       chat.providerName = info.providerName ?? this.providerName(chat.providerId) ?? chat.providerName ?? null;
-      // R6 caps: image attach + agent-advertised slash commands (feature-detected;
-      // the mock reports neither → both stay off).
-      chat.imageSupport = !!info.imageSupport;
+      // R6 caps: image attach + agent-advertised slash commands. Only an
+      // explicit image false disables drafts; an absent additive field stays
+      // unknown and is validated by the daemon at the turn boundary.
+      chat.imageSupport = typeof info.imageSupport === 'boolean' ? info.imageSupport : undefined;
       chat.commands = Array.isArray(info.commands) && info.commands.length ? info.commands : undefined;
       if (info.commandCatalog !== undefined) chat.commandCatalog = info.commandCatalog ?? undefined;
       if (info.models?.length) this.state.models = info.models;
@@ -3439,7 +3445,13 @@ export class Store {
       chat.pending = false;
       chat.sessionError = undefined;
     }
-    if (sessionChanged && job.providerId) chat.sessionProviderId = job.providerId;
+    if (sessionChanged) {
+      if (job.providerId) chat.sessionProviderId = job.providerId;
+      // A job event identifies the attached session but carries no capability
+      // snapshot. Any value from the previous session is stale until the live
+      // session reports it, so preserve the honest unknown state.
+      chat.imageSupport = undefined;
+    }
     // A model/provider selected while the turn was running is staged for the
     // next turn. Do not overwrite that pick with the provider that just ended.
     if (!chat.providerId || !job.providerId || chat.providerId === job.providerId) {

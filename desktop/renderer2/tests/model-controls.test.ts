@@ -96,6 +96,8 @@ test('a stale provider session never turns unresolved image support into a rejec
     'a brand-new chat may accept the image while its selected provider initializes');
   assert.equal(imageDraftCapability('codex-session', 'codex', 'claude', false), 'unknown',
     'the previous provider capability says nothing about the newly selected provider');
+  assert.equal(imageDraftCapability('codex-session', 'codex', 'codex', undefined), 'unknown',
+    'a matching session without an additive capability field is still unresolved');
   assert.equal(imageDraftCapability('claude-session', 'claude', 'claude', true), 'supported');
   assert.equal(imageDraftCapability('claude-session', 'claude', 'claude', false), 'unsupported');
 });

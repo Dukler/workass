@@ -83,3 +83,75 @@ test('a lost lane-selection reply retries the exact OperationID and clears it on
     else (globalThis as any).window = previousWindow;
   }
 });
+
+test('missing additive image capability stays unknown through hydration and late job attachment', () => {
+  const subject = new StoreCtor();
+  const restored = subject.fromMirror({
+    v: 1,
+    activeId: 'tab-image-unknown',
+    seq: 1,
+    theme: 'dark',
+    panes: { side: true, railWide: false, sideW: 288, railW: 312 },
+    mode: 'chats',
+    chats: [{
+      id: 'tab-image-unknown',
+      chatId: 'chat-image-unknown',
+      title: 'Image capability',
+      titleLocked: true,
+      group: 'workass',
+      cwd: '/tmp/workass',
+      currentModelId: null,
+      currentModeId: null,
+      providerId: 'codex',
+      draft: '',
+      messages: [],
+    }],
+  });
+  const owner = restored.chats[0] as Chat;
+  assert.equal(owner.imageSupport, undefined);
+
+  owner.imageSupport = false;
+  subject.attachJobSession(owner, {
+    sessionId: 'session-image-late',
+    providerId: 'codex',
+  });
+  assert.equal(owner.sessionProviderId, 'codex');
+  assert.equal(owner.imageSupport, undefined,
+    'a new session attachment must not inherit a stale negative capability');
+});
+
+test('explicit image rejection from a live matching session remains authoritative', () => {
+  const subject = new StoreCtor();
+  const restored = subject.fromMirror({
+    v: 1,
+    activeId: 'tab-image-false',
+    seq: 1,
+    theme: 'dark',
+    panes: { side: true, railWide: false, sideW: 288, railW: 312 },
+    mode: 'chats',
+    chats: [{
+      id: 'tab-image-false',
+      chatId: 'chat-image-false',
+      title: 'Unsupported images',
+      titleLocked: true,
+      group: 'workass',
+      cwd: '/tmp/workass',
+      currentModelId: null,
+      currentModeId: null,
+      providerId: 'mock',
+      draft: '',
+      messages: [],
+      liveSession: {
+        sessionId: 'session-image-false',
+        cwd: '/tmp/workass',
+        providerId: 'mock',
+        models: [],
+        currentModelId: null,
+        modes: [],
+        currentModeId: null,
+        imageSupport: false,
+      },
+    }],
+  });
+  assert.equal((restored.chats[0] as Chat).imageSupport, false);
+});
