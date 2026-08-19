@@ -208,6 +208,96 @@ func TestRunningTurnHostLossResumesExactThreadThenReadsBackWithoutResend(t *test
 	}
 }
 
+func TestFailedTurnReadbackCanRetryAfterExactHostReattach(t *testing.T) {
+	store := &memoryStateStore{}
+	engine, err := NewDurableEngine("failed-readback-recovery-chat", store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	laneIdentity := testLane("failed-readback-recovery-chat", "codex")
+	openReadyDurableLane(t, engine, laneIdentity)
+	if err := engine.Apply(Submit{OperationID: "failed-readback-turn", Text: "send once"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := engine.ClaimNext(); err != nil || !ok {
+		t.Fatalf("claim running turn: ok=%v err=%v", ok, err)
+	}
+	turn := provider.TurnRef{OperationID: "failed-readback-turn", NativeID: "native-failed-readback-turn"}
+	if err := engine.Apply(TurnAdmitted{OperationID: "failed-readback-turn", Accepted: true, Turn: turn}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := engine.Apply(HostLost{LaneID: laneIdentity.ID, ConnectionGeneration: 1}); err != nil {
+		t.Fatalf("first host loss: %v", err)
+	}
+	effect, ok, err := engine.ClaimNext()
+	if err != nil || !ok {
+		t.Fatalf("claim first exact resume: ok=%v err=%v", ok, err)
+	}
+	resume, ok := effect.(ResumeLaneEffect)
+	if !ok {
+		t.Fatalf("first recovery claimed %T, want ResumeLaneEffect", effect)
+	}
+	if err := engine.Apply(LaneOpened{
+		LaneID: laneIdentity.ID, Identity: laneIdentity, Thread: resume.Thread,
+		ConnectionGeneration: resume.Generation, Context: exactContext(provider.ContextImportUnsupported),
+	}); err != nil {
+		t.Fatalf("open first exact resume: %v", err)
+	}
+	if effect, ok, err = engine.ClaimNext(); err != nil || !ok {
+		t.Fatalf("claim first readback: ok=%v err=%v", ok, err)
+	} else if _, ok := effect.(ReconcileTurnEffect); !ok {
+		t.Fatalf("first post-resume effect = %T, want ReconcileTurnEffect", effect)
+	}
+	if err := engine.Apply(TurnReconciled{OperationID: "failed-readback-turn", Turn: turn, Found: false}); err != nil {
+		t.Fatalf("record failed readback: %v", err)
+	}
+	state := engine.Snapshot()
+	if state.Foreground == nil || state.Foreground.Status != ForegroundUncertain || !outboxHas(&state, reconcileTurnEffectID("failed-readback-turn"), OutboxFailed) {
+		t.Fatalf("failed readback did not remain uncertain and non-replayable: %#v", state)
+	}
+	if _, claimed, err := engine.ClaimNext(); err != nil || claimed {
+		t.Fatalf("failed readback retried without a new attachment: claimed=%v err=%v", claimed, err)
+	}
+
+	generation := state.Lanes[laneIdentity.ID].ConnectionGeneration
+	if err := engine.Apply(HostLost{LaneID: laneIdentity.ID, ConnectionGeneration: generation}); err != nil {
+		t.Fatalf("second host loss: %v", err)
+	}
+	effect, ok, err = engine.ClaimNext()
+	if err != nil || !ok {
+		t.Fatalf("claim second exact resume: ok=%v err=%v", ok, err)
+	}
+	resume, ok = effect.(ResumeLaneEffect)
+	if !ok {
+		t.Fatalf("second recovery claimed %T, want ResumeLaneEffect", effect)
+	}
+	if err := engine.Apply(LaneOpened{
+		LaneID: laneIdentity.ID, Identity: laneIdentity, Thread: resume.Thread,
+		ConnectionGeneration: resume.Generation, Context: exactContext(provider.ContextImportUnsupported),
+	}); err != nil {
+		t.Fatalf("open second exact resume: %v", err)
+	}
+	if effect, ok, err = engine.ClaimNext(); err != nil || !ok {
+		t.Fatalf("claim retried readback: ok=%v err=%v", ok, err)
+	} else if retry, ok := effect.(ReconcileTurnEffect); !ok || retry.OperationID != "failed-readback-turn" || retry.Turn != turn {
+		t.Fatalf("retried effect = %#v, want same immutable readback", effect)
+	}
+	state = engine.Snapshot()
+	count := 0
+	for _, entry := range state.Outbox {
+		if entry.Kind == EffectReconcileTurn && entry.OperationID == "failed-readback-turn" {
+			count++
+		}
+		if entry.Kind == EffectStartTurn && entry.OperationID == "failed-readback-turn" && entry.Status == OutboxPending {
+			t.Fatal("retry made the original user input replayable")
+		}
+	}
+	if count != 1 {
+		t.Fatalf("reconciliation retry appended duplicate receipts: count=%d", count)
+	}
+}
+
 func TestStartupDoesNotReplayDispatchedExternalMutation(t *testing.T) {
 	store := &memoryStateStore{}
 	engine, err := NewDurableEngine("external-recovery-chat", store)

@@ -127,6 +127,35 @@ test('native Codex host drives app-server directly with turns, steering, permiss
   assert.equal(limits.result.rateLimits.primary.usedPercent, 17);
 });
 
+test('native Codex operation readback falls back to thread/read when item listing is unavailable', async (t) => {
+  const peer = startHost({ WORKASS_CODEX_FIXTURE_ITEMS_LIST_UNSUPPORTED: '1' });
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const opened = await peer.waitFor((message) => message.id === 2);
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId: opened.result.sessionId,
+    prompt: [{ type: 'text', text: 'readback fallback fixture' }],
+    clientUserMessageId: 'fallback-operation-1',
+  } });
+  assert.equal((await peer.waitFor((message) => message.id === 3)).result.stopReason, 'end_turn');
+
+  peer.send({ jsonrpc: '2.0', id: 4, method: 'session/close', params: { sessionId: opened.result.sessionId } });
+  await peer.waitFor((message) => message.id === 4);
+  peer.send({ jsonrpc: '2.0', id: 5, method: 'session/resume', params: {
+    sessionId: opened.result.sessionId, cwd: repoRoot, mcpServers: [],
+  } });
+  await peer.waitFor((message) => message.id === 5);
+  peer.send({ jsonrpc: '2.0', id: 6, method: '_workass/turn/reconcile', params: {
+    sessionId: opened.result.sessionId, clientUserMessageId: 'fallback-operation-1',
+  } });
+  assert.deepEqual((await peer.waitFor((message) => message.id === 6)).result, {
+    found: true, consumed: true, turnId: 'fixture-turn-1', status: 'completed', terminal: true,
+  });
+});
+
 test('native Codex host opts URL servers into stateless MCP 2026 per session', async (t) => {
   const peer = startHost({ WORKASS_CODEX_FIXTURE_REQUIRE_MCP_2026: '1' });
   t.after(() => peer.child.kill('SIGKILL'));
