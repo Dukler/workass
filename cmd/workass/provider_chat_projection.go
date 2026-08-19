@@ -89,22 +89,27 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 		return nil, err
 	}
 	root := r.sessions.GlobalSnapshot()
-	activeID := strings.TrimSpace(fieldString(root, "activeId"))
-	activeExists := false
-	firstTabID := ""
+	states := make([]chat.State, 0, len(known))
 	for _, chatID := range known {
 		actor, err := r.actor(chatID)
 		if err != nil {
 			return nil, err
 		}
-		digest := actor.engine.DigestSnapshot()
-		if digest.Deleted {
-			continue
+		state := actor.engine.Snapshot()
+		if !state.Deleted {
+			states = append(states, state)
 		}
+	}
+	states = orderActorChatStates(states, root["chatOrder"])
+	activeID := strings.TrimSpace(fieldString(root, "activeId"))
+	activeExists := false
+	firstTabID := ""
+	for _, state := range states {
+		tabID := state.Presentation.TabID
 		if firstTabID == "" {
-			firstTabID = digest.TabID
+			firstTabID = tabID
 		}
-		if digest.TabID == activeID {
+		if tabID == activeID {
 			activeExists = true
 		}
 	}
@@ -117,20 +122,12 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 		root["activeId"] = activeID
 	}
 
-	projectedChats := make([]any, 0, len(known))
-	for _, chatID := range known {
-		actor, err := r.actor(chatID)
-		if err != nil {
-			return nil, err
-		}
-		state := actor.engine.Snapshot()
-		if state.Deleted {
-			continue
-		}
+	projectedChats := make([]any, 0, len(states))
+	for _, state := range states {
 		projected := map[string]any{}
 		history := sessionHistoryProjection(state, activeID)
 		if err := projectActorChatWithHistory(projected, state, history); err != nil {
-			return nil, fmt.Errorf("project actor-native chat %q: %w", chatID, err)
+			return nil, fmt.Errorf("project actor-native chat %q: %w", state.ChatID, err)
 		}
 		projectedChats = append(projectedChats, projected)
 	}
@@ -139,6 +136,36 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 		return nil, err
 	}
 	return root, nil
+}
+
+func orderActorChatStates(states []chat.State, rawOrder any) []chat.State {
+	if len(states) < 2 {
+		return states
+	}
+	byTab := make(map[string]chat.State, len(states))
+	for _, state := range states {
+		byTab[state.Presentation.TabID] = state
+	}
+	ordered := make([]chat.State, 0, len(states))
+	seen := make(map[string]struct{}, len(states))
+	for _, rawTabID := range normalizedActorChatOrder(rawOrder) {
+		tabID, _ := rawTabID.(string)
+		state, exists := byTab[tabID]
+		if !exists {
+			continue
+		}
+		ordered = append(ordered, state)
+		seen[tabID] = struct{}{}
+	}
+	// Actors unknown to the saved order are appended in knownChatIDs order,
+	// which is deterministic. A later renderer save folds them into chatOrder.
+	for _, state := range states {
+		if _, exists := seen[state.Presentation.TabID]; exists {
+			continue
+		}
+		ordered = append(ordered, state)
+	}
+	return ordered
 }
 
 func sessionHistoryProjection(state chat.State, activeTabID string) actorHistoryProjection {

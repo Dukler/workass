@@ -164,9 +164,14 @@ func (s *sessionStore) Get() any {
 }
 
 var actorGlobalSessionFields = []string{
-	"v", "activeId", "seq", "workspaces", "collapsedWorkspaces", "removedWorkspaces",
+	"v", "activeId", "seq", "chatOrder", "workspaces", "collapsedWorkspaces", "removedWorkspaces",
 	"theme", "themePref", "density", "panes", "mode", "notifEnabled", globalPresentationRevisionField,
 }
+
+const (
+	actorGlobalChatOrderLimit = 4096
+	actorGlobalTabIDLimit     = 256
+)
 
 func actorGlobalSessionSnapshot(source map[string]any) map[string]any {
 	out := map[string]any{
@@ -177,10 +182,50 @@ func actorGlobalSessionSnapshot(source map[string]any) map[string]any {
 	}
 	for _, key := range actorGlobalSessionFields {
 		if value, exists := source[key]; exists {
+			if key == "chatOrder" {
+				out[key] = normalizedActorChatOrder(value)
+				continue
+			}
 			out[key] = cloneJSON(value)
 		}
 	}
 	return mapFromAnyMain(redactSessionValue(out))
+}
+
+func normalizedActorChatOrder(raw any) []any {
+	var values []any
+	switch typed := raw.(type) {
+	case []any:
+		values = typed
+	case []string:
+		values = make([]any, len(typed))
+		for index, value := range typed {
+			values[index] = value
+		}
+	default:
+		return []any{}
+	}
+	out := make([]any, 0, min(len(values), actorGlobalChatOrderLimit))
+	seen := make(map[string]struct{}, min(len(values), actorGlobalChatOrderLimit))
+	for _, rawValue := range values {
+		value, ok := rawValue.(string)
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > actorGlobalTabIDLimit {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+		if len(out) == actorGlobalChatOrderLimit {
+			break
+		}
+	}
+	return out
 }
 
 // GlobalSnapshot exposes only daemon-wide presentation preferences. It cannot

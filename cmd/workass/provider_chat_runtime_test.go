@@ -83,6 +83,66 @@ func TestRendererChatCreationIsDurableIdempotentAndIndependentFromProviderAttach
 	}
 }
 
+func TestProjectSessionPreservesManualChatOrder(t *testing.T) {
+	stateDir := t.TempDir()
+	store := sharedSessionStore(stateDir)
+	manager := acp.NewManager(acp.Options{StateDir: stateDir, RuntimeProfile: "dev"})
+	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
+	for _, item := range []struct {
+		tabID  string
+		chatID string
+	}{
+		{tabID: "manual-tab-a", chatID: "manual-chat-a"},
+		{tabID: "manual-tab-b", chatID: "manual-chat-b"},
+		{tabID: "manual-tab-c", chatID: "manual-chat-c"},
+	} {
+		if _, err := runtime.CreateRendererChat(map[string]any{
+			"tabId": item.tabID, "chatId": item.chatID, "operationId": "create-" + item.chatID,
+			"title": item.tabID, "cwd": stateDir, "providerId": "codex",
+		}); err != nil {
+			t.Fatalf("create %s: %v", item.chatID, err)
+		}
+	}
+
+	global := store.GlobalSnapshot()
+	global["chatOrder"] = []any{"manual-tab-c", "unknown-tab", "manual-tab-a", "manual-tab-c"}
+	global[globalPresentationOperationField] = "save-manual-chat-order"
+	if _, err := store.SaveActorGlobalSnapshot(global); err != nil {
+		t.Fatalf("save manual chat order: %v", err)
+	}
+	projection, err := runtime.ProjectSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := anySlice(projection["chats"])
+	got := make([]string, 0, len(rows))
+	for _, raw := range rows {
+		got = append(got, fieldString(mapFromAnyMain(raw), "id"))
+	}
+	want := []string{"manual-tab-c", "manual-tab-a", "manual-tab-b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("projected chat order = %v, want %v", got, want)
+	}
+	if gotOrder := stringSliceField(store.GlobalSnapshot()["chatOrder"]); !reflect.DeepEqual(gotOrder, []string{"manual-tab-c", "unknown-tab", "manual-tab-a"}) {
+		t.Fatalf("persisted normalized chat order = %v", gotOrder)
+	}
+}
+
+func TestActorGlobalChatOrderIsBoundedAndSanitized(t *testing.T) {
+	values := []any{" first ", "", "first", 42, strings.Repeat("x", actorGlobalTabIDLimit+1)}
+	for index := 0; index < actorGlobalChatOrderLimit+20; index++ {
+		values = append(values, fmt.Sprintf("tab-%04d", index))
+	}
+	root := actorGlobalSessionSnapshot(map[string]any{"chatOrder": values})
+	order := stringSliceField(root["chatOrder"])
+	if len(order) != actorGlobalChatOrderLimit {
+		t.Fatalf("normalized chat order length = %d, want %d", len(order), actorGlobalChatOrderLimit)
+	}
+	if order[0] != "first" || order[1] != "tab-0000" {
+		t.Fatalf("normalized chat order prefix = %v", order[:2])
+	}
+}
+
 func TestForkRetryAfterChildActorCommitAttachesExactlyOnce(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()

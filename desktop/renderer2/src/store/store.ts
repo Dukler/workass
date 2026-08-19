@@ -123,9 +123,10 @@ function runtimeControlsFingerprint(chat: Pick<Chat, 'providerId' | 'currentMode
   ]);
 }
 
-function globalPresentationFingerprint(value: Pick<AppState, 'activeId' | 'seq' | 'workspaces' | 'collapsedWorkspaces' | 'removedWorkspaces' | 'theme' | 'themePref' | 'density' | 'panes' | 'mode' | 'notifEnabled'>): string {
+function globalPresentationFingerprint(value: Pick<AppState, 'chats' | 'activeId' | 'seq' | 'workspaces' | 'collapsedWorkspaces' | 'removedWorkspaces' | 'theme' | 'themePref' | 'density' | 'panes' | 'mode' | 'notifEnabled'>): string {
   return JSON.stringify([
-    value.activeId, value.seq, value.workspaces, value.collapsedWorkspaces, value.removedWorkspaces,
+    value.activeId, value.seq, value.chats.filter((chat) => !chat.machineId).map((chat) => chat.id),
+    value.workspaces, value.collapsedWorkspaces, value.removedWorkspaces,
     value.theme, value.themePref, value.density, value.panes, value.mode, value.notifEnabled,
   ]);
 }
@@ -454,6 +455,7 @@ export class Store {
       activeId: this.state.activeId,
       seq: this.state.seq,
       globalRevision: this.state.globalRevision,
+      chatOrder: owned.map((chat) => chat.id),
       workspaces: this.state.workspaces,
       collapsedWorkspaces: this.state.collapsedWorkspaces,
       removedWorkspaces: this.state.removedWorkspaces,
@@ -2251,20 +2253,30 @@ export class Store {
     this.bumpChat(chat);
     void this.flushSession(true);
   }
-  // Drag-reorder a chat. A cross-folder drop is also a cwd change, so an
-  // initialized chat crosses a daemon-owned turn boundary before the renderer
-  // changes folders. The move promise gates send/attachment initialization.
-  moveChat(chatId: string, beforeId: string | null, folderPath?: string | null): Promise<boolean> {
+  // Reordering is presentation-only. It must never inherit a neighbouring
+  // row's cwd: Sidebar V2 is a flat cross-project list, so overloading this
+  // gesture as a workspace move silently rebound chats to the project they
+  // happened to be dropped beside.
+  reorderChat(chatId: string, beforeId: string | null): boolean {
+    const chat = this.chat(chatId);
+    if (!chat) return false;
+    this.placeChat(chat, beforeId);
+    this.bumpApp(false);
+    // chatOrder is daemon-global presentation state. Flush it immediately, but
+    // do not force a full actor save or mark any chat presentation dirty.
+    void this.flushSession();
+    return true;
+  }
+
+  // Changing project is an explicit operation with an explicit target cwd.
+  // Initialized chats cross the daemon-owned workspace boundary before the
+  // renderer changes folders. The promise gates send/attachment initialization.
+  moveChatToWorkspace(chatId: string, beforeId: string | null, folderPath: string | null): Promise<boolean> {
     const chat = this.chat(chatId);
     if (!chat) return Promise.resolve(false);
-    const targetCwd = folderPath === undefined ? chat.cwd : normalizeWorkspacePath(folderPath ?? '') || null;
-    const workspaceChanged = folderPath !== undefined && normalizeWorkspacePath(chat.cwd ?? '') !== normalizeWorkspacePath(targetCwd ?? '');
-    if (!workspaceChanged) {
-      this.placeChat(chat, beforeId);
-      this.bumpChat(chat);
-      void this.flushSession(true);
-      return Promise.resolve(true);
-    }
+    const targetCwd = normalizeWorkspacePath(folderPath ?? '') || null;
+    const workspaceChanged = normalizeWorkspacePath(chat.cwd ?? '') !== normalizeWorkspacePath(targetCwd ?? '');
+    if (!workspaceChanged) return Promise.resolve(this.reorderChat(chatId, beforeId));
     if (this.isChatRunning(chat.id)) {
       this.addToast('No se movió la conversación', 'Esperá a que termine la respuesta en curso.');
       return Promise.resolve(false);

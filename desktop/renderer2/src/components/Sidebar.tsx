@@ -20,7 +20,7 @@ type DragItem = { kind: 'chat' | 'folder'; id: string };
 function ChatRow({ chat, active, drag, setDrag, onDropBefore }: {
   chat: Chat; active: boolean;
   drag: DragItem | null; setDrag: (d: DragItem | null) => void;
-  onDropBefore: (targetChatId: string, targetCwd: string | null) => void;
+  onDropBefore: (targetChatId: string) => void;
 }) {
   const running = chatHasLiveActivity(chat, store.spawnedWork(chat));
   const [editing, setEditing] = useState(false);
@@ -41,7 +41,7 @@ function ChatRow({ chat, active, drag, setDrag, onDropBefore }: {
       onDragEnd={() => { setDrag(null); setOver(false); }}
       onDragOver={(e) => { if (canDrop) { e.preventDefault(); setOver(true); } }}
       onDragLeave={() => setOver(false)}
-      onDrop={(e) => { if (canDrop) { e.preventDefault(); onDropBefore(chat.id, chat.cwd ?? null); } setOver(false); }}
+      onDrop={(e) => { if (canDrop) { e.preventDefault(); onDropBefore(chat.id); } setOver(false); }}
     >
       <span className={`dot ${running ? 'run' : ''}`} />
       {editing ? (
@@ -280,9 +280,10 @@ export function Sidebar() {
 
   const collapsed = new Set(app.collapsedWorkspaces.map((p) => normalizeWorkspacePath(p)));
   const [drag, setDrag] = useState<DragItem | null>(null);
-  // Drop a thread just before another → reorder + adopt that thread's folder.
-  const dropChatBefore = (targetChatId: string, targetCwd: string | null) => {
-    if (drag?.kind === 'chat') store.moveChat(drag.id, targetChatId, targetCwd);
+  // A row-to-row drop only reorders. Moving to another project is the distinct
+  // folder-head target below, so a slightly diagonal drag cannot change cwd.
+  const dropChatBefore = (targetChatId: string) => {
+    if (drag?.kind === 'chat') store.reorderChat(drag.id, targetChatId);
     setDrag(null);
   };
   // Drop a thread on a folder head → move it into that folder, at the top.
@@ -290,7 +291,7 @@ export function Sidebar() {
     if (drag?.kind !== 'chat') return;
     const key = normalizeWorkspacePath(path);
     const firstInFolder = app.chats.find((c) => normalizeWorkspacePath(c.cwd ?? '') === key && c.id !== drag.id);
-    store.moveChat(drag.id, firstInFolder?.id ?? null, path);
+    store.moveChatToWorkspace(drag.id, firstInFolder?.id ?? null, path);
     setDrag(null);
   };
   // Drop a folder on another folder head → reorder before it.
