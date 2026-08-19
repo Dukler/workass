@@ -242,6 +242,88 @@ func TestMoveWorkspaceReceiptRetryDoesNotCloseProviderHostAgain(t *testing.T) {
 	}
 }
 
+func TestWorkspaceReturnCreatesCurrentRevisionLaneAndAcceptsNextTurn(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := t.TempDir()
+	workspaceA, workspaceB := t.TempDir(), t.TempDir()
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{
+			ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")},
+			CWD: root, Enabled: true,
+		},
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	const tabID, chatID = "workspace-return-tab", "workspace-return-chat"
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "workspace-return-create",
+		"title": "Workspace return", "cwd": workspaceA, "providerId": "mock",
+	}); err != nil {
+		t.Fatalf("create actor chat: %v", err)
+	}
+
+	selectLane := func(operationID, cwd string) acp.SessionInfo {
+		t.Helper()
+		info, err := runtime.Select(context.Background(), acp.SessionOptions{
+			TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: cwd,
+			OperationID: providercontract.OperationID(operationID),
+		})
+		if err != nil {
+			t.Fatalf("select %s: %v", operationID, err)
+		}
+		return info
+	}
+	startTurn := func(info acp.SessionInfo, operationID, prompt string, wantLedger uint64) {
+		t.Helper()
+		if _, err := runtime.Start(context.Background(), map[string]any{
+			"kind": "app-chat", "title": "Workspace return", "tabId": tabID, "chatId": chatID,
+			"providerId": "mock", "sessionId": info.SessionID, "cwd": info.CWD, "prompt": prompt,
+			"operationId": operationID, "userMessageId": operationID, "assistantMessageId": operationID + "-assistant",
+		}, "human"); err != nil {
+			t.Fatalf("start %s: %v", operationID, err)
+		}
+		waitProviderChatLedger(t, runtime, chatID, wantLedger, 5*time.Second)
+	}
+	move := func(operationID, cwd, replaceSessionID string, revision uint64) {
+		t.Helper()
+		result, err := runtime.MoveWorkspace(context.Background(), map[string]any{
+			"tabId": tabID, "chatId": chatID, "cwd": cwd, "providerId": "mock",
+			"operationId": operationID, "workspaceRebind": true,
+			"replaceSessionId": replaceSessionID, "expectedWorkspaceRevision": revision,
+		})
+		if err != nil || result["workspaceCommitted"] != true {
+			t.Fatalf("move %s: result=%#v err=%v", operationID, result, err)
+		}
+	}
+
+	first := selectLane("workspace-return-select-a1", workspaceA)
+	startTurn(first, "workspace-return-turn-a1", "first workspace turn", 2)
+	move("workspace-return-move-b", workspaceB, first.SessionID, 0)
+
+	second := selectLane("workspace-return-select-b", workspaceB)
+	startTurn(second, "workspace-return-turn-b", "second workspace turn", 4)
+	move("workspace-return-move-a2", workspaceA, second.SessionID, 1)
+
+	returned := selectLane("workspace-return-select-a2", workspaceA)
+	if returned.SessionID == first.SessionID || returned.SessionID == second.SessionID {
+		t.Fatalf("workspace return reused a historical native thread: first=%q second=%q returned=%q", first.SessionID, second.SessionID, returned.SessionID)
+	}
+	state, ok := runtime.Snapshot(chatID)
+	if !ok || state.Presentation.WorkspaceRevision != 2 || len(state.Lanes) != 3 {
+		t.Fatalf("workspace return state = %#v", state)
+	}
+	seenEpochs := make(map[providercontract.WorkspaceEpoch]struct{}, len(state.Lanes))
+	for _, lane := range state.Lanes {
+		seenEpochs[lane.Identity.WorkspaceEpoch] = struct{}{}
+	}
+	if len(seenEpochs) != 3 {
+		t.Fatalf("workspace moves did not create three immutable epochs: %#v", state.Lanes)
+	}
+	startTurn(returned, "workspace-return-turn-a2", "turn after returning", 6)
+}
+
 func TestMoveWorkspaceReceiptReplayFinishesCrashWindowWithoutNewEpoch(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()

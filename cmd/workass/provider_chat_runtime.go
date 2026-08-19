@@ -1335,6 +1335,23 @@ func effectiveSelectionOptions(state chat.State, opts acp.SessionOptions) acp.Se
 	if state.Presentation.CWD != nil {
 		opts.CWD = strings.TrimSpace(*state.Presentation.CWD)
 	}
+	derivedWorkspaceEpoch := acp.WorkspaceEpochForRevision(state.ChatID, opts.CWD, state.Presentation.WorkspaceRevision)
+	opts.WorkspaceEpoch = derivedWorkspaceEpoch
+	for _, laneID := range []providercontract.LaneID{state.ActiveLaneID, state.DesiredLaneID} {
+		lane, exists := state.Lanes[laneID]
+		if !exists || strings.TrimSpace(lane.CWD) == "" || !sameFilesystemPath(lane.CWD, opts.CWD) {
+			continue
+		}
+		// An active lane is durable proof of the current epoch. A desired-only
+		// lane is reusable only when it already has the epoch derived from the
+		// actor's current workspace revision; ChangeWorkspace intentionally clears
+		// both ids before the next revision is selected.
+		if laneID == state.DesiredLaneID && lane.Identity.WorkspaceEpoch != derivedWorkspaceEpoch {
+			continue
+		}
+		opts.WorkspaceEpoch = lane.Identity.WorkspaceEpoch
+		break
+	}
 	opts.ProviderID = string(providercontract.NormalizeID(opts.ProviderID))
 	opts.ModelID = hydratableStoredModelID(opts.ModelID)
 	opts.ModeID = strings.TrimSpace(opts.ModeID)
@@ -1344,17 +1361,18 @@ func effectiveSelectionOptions(state chat.State, opts acp.SessionOptions) acp.Se
 
 func selectionRequestDigest(opts acp.SessionOptions) (string, error) {
 	payload := struct {
-		TabID      string
-		ChatID     string
-		ProviderID string
-		ModelID    string
-		ModeID     string
-		CWD        string
-		OwnerKey   string
+		TabID          string
+		ChatID         string
+		ProviderID     string
+		ModelID        string
+		ModeID         string
+		CWD            string
+		WorkspaceEpoch providercontract.WorkspaceEpoch
+		OwnerKey       string
 	}{
 		TabID: strings.TrimSpace(opts.TabID), ChatID: strings.TrimSpace(opts.ChatID),
 		ProviderID: strings.TrimSpace(opts.ProviderID), ModelID: strings.TrimSpace(opts.ModelID),
-		ModeID: strings.TrimSpace(opts.ModeID), CWD: strings.TrimSpace(opts.CWD),
+		ModeID: strings.TrimSpace(opts.ModeID), CWD: strings.TrimSpace(opts.CWD), WorkspaceEpoch: opts.WorkspaceEpoch,
 		OwnerKey: strings.TrimSpace(opts.AgentOwnerKey),
 	}
 	raw, err := json.Marshal(payload)

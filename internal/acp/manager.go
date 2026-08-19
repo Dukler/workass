@@ -440,7 +440,7 @@ func (m *Manager) NewSession(ctx context.Context, opts SessionOptions) (SessionI
 	m.mu.Unlock()
 	opts = m.withNativeSessionControls(opts)
 	if opts.ProviderLaneVerifyCandidate {
-		binding, exists := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD)
+		binding, exists := m.nativeSessions.getForOptions(opts)
 		if (!exists || binding.ThreadCommitted) && !providerAdapterForID(providerID).creation.DeferredUntilInput {
 			return SessionInfo{}, nativeLaneError(providercontract.ErrorProtocolViolation, "provider does not have a provisional thread candidate", nil)
 		}
@@ -448,11 +448,11 @@ func (m *Manager) NewSession(ctx context.Context, opts SessionOptions) (SessionI
 
 	unlockNative := func() {}
 	if m.nativeSessions != nil && m.nativeSessions.enabledFor(opts) {
-		unlockNative = m.nativeSessions.lock(opts.TabID, opts.ChatID, providerID, opts.CWD)
+		unlockNative = m.nativeSessions.lock(opts)
 	}
 	defer unlockNative()
 	if opts.ProviderLaneCreate && m.nativeSessions != nil && m.nativeSessions.enabledFor(opts) {
-		if binding, exists := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD); exists &&
+		if binding, exists := m.nativeSessions.getForOptions(opts); exists &&
 			(!opts.ProviderLaneVerifyCandidate || binding.ThreadCommitted) {
 			return SessionInfo{}, nativeLaneError(providercontract.ErrorNativeIdentityConflict, "an established provider lane cannot enter session/new", nil)
 		}
@@ -482,7 +482,7 @@ func (m *Manager) NewSession(ctx context.Context, opts SessionOptions) (SessionI
 				}
 				return SessionInfo{}, restoreErr
 			}
-			binding, exists := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD)
+			binding, exists := m.nativeSessions.getForOptions(opts)
 			if !exists || binding.ThreadCommitted ||
 				!m.nativeSessions.removeAbsentCandidate(bindingLaneIdentity(binding), bindingCurrentThreadID(binding)) {
 				return SessionInfo{}, nativeLaneError(
@@ -606,7 +606,7 @@ func (m *Manager) withNativeSessionControls(opts SessionOptions) SessionOptions 
 	if m == nil || m.nativeSessions == nil || !m.nativeSessions.enabledFor(opts) {
 		return opts
 	}
-	binding, ok := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, opts.ProviderID, opts.CWD)
+	binding, ok := m.nativeSessions.getForOptions(opts)
 	if !ok {
 		return opts
 	}

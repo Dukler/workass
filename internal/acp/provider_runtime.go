@@ -185,7 +185,7 @@ func (m *Manager) ResolveProviderLaneSelection(ctx context.Context, opts Session
 		CWD:   strings.TrimSpace(opts.CWD), ModelID: strings.TrimSpace(opts.ModelID), ModeID: strings.TrimSpace(opts.ModeID),
 		Context: contextCapabilities, Creation: providerAdapterForID(providerID).creation,
 	}
-	if binding, exists := m.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, providerID, opts.CWD); exists {
+	if binding, exists := m.nativeSessions.getForOptions(opts); exists {
 		identity, thread := bindingLaneIdentity(binding), bindingThreadRef(binding)
 		if err := identity.Validate(); err != nil {
 			return ProviderLaneSelection{}, &providercontract.Error{Kind: providercontract.ErrorProtocolViolation, Message: "stored provider lane identity is invalid", Cause: err}
@@ -224,7 +224,7 @@ func (m *Manager) ResolveProviderLaneSelection(ctx context.Context, opts Session
 		return ProviderLaneSelection{}, err
 	}
 	selection.Identity = providercontract.LaneIdentity{
-		ChatID: opts.ChatID, Realm: realm, WorkspaceEpoch: nativeWorkspaceEpoch(opts.CWD),
+		ChatID: opts.ChatID, Realm: realm, WorkspaceEpoch: sessionWorkspaceEpoch(opts),
 	}.Normalize()
 	if err := selection.Identity.Validate(); err != nil {
 		return ProviderLaneSelection{}, err
@@ -434,7 +434,7 @@ func (f managerLaneFactory) Create(ctx context.Context, request providercontract
 	if err != nil {
 		return nil, providercontract.ThreadRef{}, err
 	}
-	if binding, exists := f.manager.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, opts.ProviderID, opts.CWD); exists {
+	if binding, exists := f.manager.nativeSessions.getForOptions(opts); exists {
 		if request.Reconcile {
 			canonical := bindingLaneIdentity(binding)
 			if err := validateCanonicalCreatedLane(identity, canonical); err != nil {
@@ -455,7 +455,7 @@ func (f managerLaneFactory) Create(ctx context.Context, request providercontract
 			if reconcileErr != nil {
 				return nil, providercontract.ThreadRef{}, classifyLaneRuntimeError("verify provider candidate", reconcileErr)
 			}
-			resolved, ok := f.manager.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, opts.ProviderID, opts.CWD)
+			resolved, ok := f.manager.nativeSessions.getForOptions(opts)
 			if !ok {
 				f.manager.CloseSession(context.Background(), info.SessionID)
 				return nil, providercontract.ThreadRef{}, &providercontract.Error{Kind: providercontract.ErrorProtocolViolation, Message: "provider candidate reconciliation lost its durable receipt"}
@@ -513,7 +513,7 @@ func (f managerLaneFactory) Create(ctx context.Context, request providercontract
 	if err != nil {
 		return nil, providercontract.ThreadRef{}, classifyLaneRuntimeError("create lane", err)
 	}
-	binding, ok := f.manager.nativeSessions.getForWorkspace(opts.TabID, opts.ChatID, opts.ProviderID, opts.CWD)
+	binding, ok := f.manager.nativeSessions.getForOptions(opts)
 	if !ok {
 		f.manager.CloseSession(context.Background(), info.SessionID)
 		return nil, providercontract.ThreadRef{}, &providercontract.Error{
@@ -610,7 +610,7 @@ func (f managerLaneFactory) validateCreate(request providercontract.CreateLaneRe
 		return providercontract.LaneIdentity{}, SessionOptions{}, errors.New("durable provider lane storage is unavailable")
 	}
 	opts := SessionOptions{
-		TabID: request.Owner.TabID, ChatID: identity.ChatID, CWD: request.CWD,
+		TabID: request.Owner.TabID, ChatID: identity.ChatID, CWD: request.CWD, WorkspaceEpoch: identity.WorkspaceEpoch,
 		ProviderID: f.providerID, ModelID: request.ModelID, ModeID: request.ModeID,
 		AgentOwnerKey: request.Owner.AgentOwnerKey, ProviderLaneManaged: true, ProviderLaneCreate: true,
 		ProviderLaneCreateAfterCandidateAbsence: request.CreateAfterCandidateAbsence,
