@@ -7,7 +7,7 @@
 
 import { useSyncExternalStore } from 'react';
 import type { AppState, Chat, Msg, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
-import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, EngineRecovered, NotifyEvent, NotifyBacklog, AgentApply, ChatCommandsEvent, ChatStructuredError, StartJobOpts, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
+import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, EngineRecovered, NotifyEvent, NotifyBacklog, AgentApply, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
 import { call, callThrow, has, on, bridgeReady } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
 import { LEAN_SESSION_SAVE_MODE, loadMirror, saveMirror, type Mirror, type MirrorMsg } from './persistence';
@@ -35,7 +35,7 @@ import {
 import {
   compatibleEffortId, compatibleModeId, composeModelSelection,
   imageDraftCapability,
-  modelControlsChangedDuringInit, nextModelControlRevision,
+  nextModelControlRevision,
   normalizeModelControlMemory, permissionIntentForMode, rememberModelControls, rememberedModelControls,
   restoredControlSelection, restoredProviderBinding,
 } from '../model-controls';
@@ -1008,7 +1008,6 @@ export class Store {
   }
 
   private preserveHydratedRuntime(previous: Chat, restored: Chat) {
-    restored._initPromise = previous._initPromise;
     restored._sessionOperationId = previous._sessionOperationId;
     restored._controlRevision = previous._controlRevision;
     restored._queueResumeOperationId = previous._queueResumeOperationId;
@@ -1209,7 +1208,11 @@ export class Store {
         && message.role === 'assistant' && message.status === 'running');
       if (!assistant) continue;
       this.chatJobs.set(pending.chatId, { tabId: chat.id, msgId: assistant.id });
-      if (assistant.jobId) this.jobRef.set(assistant.jobId, { tabId: chat.id, msgId: assistant.id });
+      if (assistant.jobId) {
+        this.jobRef.set(assistant.jobId, { tabId: chat.id, msgId: assistant.id });
+        if (pending.cancelRequested) void this.cancelAdmittedTurn(chat, assistant, assistant.jobId, pending);
+        this.pendingTurnStarts.delete(chat.id);
+      }
     }
   }
 
@@ -2093,7 +2096,6 @@ export class Store {
         chat.planUsageSupported = undefined;
         chat.planUsageResetSupported = undefined;
         chat.pending = true;
-        chat._initPromise = undefined;
       }
       this.requireFullSave();
       this.sessionHydrationPending = false;
@@ -2560,9 +2562,6 @@ export class Store {
     const tabId = chat.id;
     const chatId = chat.chatId;
     if (!chatId) return false;
-    // A session creation already in flight owns the same lifecycle boundary.
-    // Let it settle, then invalidate that exact initialized session below.
-    if (chat._initPromise) await chat._initPromise;
     let owner = this.chat(tabId);
     if (!sameChatPair(owner, tabId, chatId) || this.isChatRunning(tabId)) return false;
     if (!(await this.ensureChatCreated(owner))) return false;
@@ -2596,8 +2595,8 @@ export class Store {
       return false;
     }
     // The daemon has durably committed a new workspace epoch and invalidated
-    // the previous attachment. Keep it sessionless until the next real need;
-    // ensureSession creates the explicit new lane without transcript replay.
+    // the previous attachment. Keep it sessionless until the next actor-owned
+    // send creates or resumes the selected lane without transcript replay.
     live.sessionId = null;
     live.pending = true;
     live._sessionOperationId = undefined;
@@ -2817,97 +2816,6 @@ export class Store {
     return imageDraftCapability(chat.sessionId, chat.sessionProviderId, chat.providerId, chat.imageSupport) !== 'unsupported';
   }
 
-  // ---- session ---------------------------------------------------------
-  private async ensureSession(chat: Chat): Promise<void> {
-    if (chat.sessionId) return;
-    if (chat._initPromise) return chat._initPromise;
-    if (!(await this.ensureChatCreated(chat))) return;
-    const tabId = chat.id;
-    const chatId = chat.chatId;
-    let owner = this.chat(tabId);
-    if (!chatId || !sameChatPair(owner, tabId, chatId)) return;
-    if (owner._initPromise) return owner._initPromise;
-    const controlRevision = owner._controlRevision ?? 0;
-    const operationId = owner._sessionOperationId ?? (owner._sessionOperationId = rid('lane-select'));
-    const requested = {
-      cwd: owner.cwd ?? null,
-      tabId,
-      chatId,
-      operationId,
-      providerId: owner.providerId ?? null,
-    };
-    const initPromise = (async () => {
-      const info = await call('appChatNewSession', {
-        ...requested,
-      });
-      const live = this.chat(tabId);
-      if (!sameChatPair(live, tabId, chatId)) return;
-      if (!info || info.error) { live.sessionError = info?.error ?? 'no bridge'; this.bumpApp(false); return; }
-      if (!info.providerId) {
-        live.sessionError = 'the provider attachment omitted its provider identity';
-        this.bumpApp(false);
-        return;
-      }
-      live._sessionOperationId = undefined;
-      live.sessionId = info.sessionId;
-      live.sessionProviderId = info.providerId;
-      live.cwd = info.cwd ?? live.cwd;
-      live.pending = false;
-      live.sessionError = undefined;
-      // Session initialization can race an explicit provider pick. Keep the returned session id as
-      // the daemon handover source, but never adopt its stale provider,
-      // controls, capabilities, or model list over the explicit picker state.
-      // startJob carries the newer provider/model/mode and performs the safe
-      // engine handover at the turn boundary.
-      if (modelControlsChangedDuringInit(controlRevision, live._controlRevision)) {
-        this.bumpApp(false);
-        return;
-      }
-      // Record the provider the daemon actually bound.
-      live.providerId = info.providerId;
-      live.providerName = info.providerName ?? this.providerName(live.providerId, live) ?? live.providerName ?? null;
-      // R6 caps: image attach + agent-advertised slash commands. Only an
-      // explicit image false disables drafts; an absent additive field stays
-      // unknown and is validated by the daemon at the turn boundary.
-      live.imageSupport = typeof info.imageSupport === 'boolean' ? info.imageSupport : undefined;
-      live.deliveryCapabilities = normalizeDeliveryCapabilities(info.deliveryCapabilities);
-      live.planUsageSupported = info.planUsageSupported === true;
-      live.planUsageResetSupported = info.planUsageResetSupported === true;
-      if (info.commandCatalog !== undefined) live.commandCatalog = info.commandCatalog ?? undefined;
-      const sessionModels = info.models ?? [];
-      const sessionModes = info.modes ?? [];
-      const requestedSelection = resolveModelSelection([], sessionModels, live.currentModelId ?? info.currentModelId);
-      const defaultSelection = resolveModelSelection([], sessionModels, info.currentModelId);
-      const target = requestedSelection.model ? requestedSelection : defaultSelection;
-      let controlsChanged = false;
-      if (live.providerId && target.base) {
-        controlsChanged = this.applyControlsForModel(live, live.providerId, target.base, sessionModels, sessionModes, {
-          fallbackEffort: requestedSelection.effort ?? defaultSelection.effort,
-          fallbackMode: live.currentModeId,
-          providerDefaultMode: info.currentModeId,
-        });
-      } else {
-        if (!live.currentModelId) live.currentModelId = info.currentModelId;
-        if (!live.currentModeId) live.currentModeId = info.currentModeId;
-      }
-      // Desired controls are actor-owned. The provider lane applies them inside
-      // the next actor-owned turn effect; initializing a disposable session is
-      // never permission to mutate native controls outside that journal.
-      if (controlsChanged) {
-        this.touchChat(live.id);
-        await this.persistRuntimeControls(live);
-      }
-      this.bumpApp(false);
-    })();
-    owner._initPromise = initPromise;
-    try {
-      await initPromise;
-    } finally {
-      if (owner._initPromise === initPromise) owner._initPromise = undefined;
-      owner = this.chat(tabId);
-      if (sameChatPair(owner, tabId, chatId) && owner._initPromise === initPromise) owner._initPromise = undefined;
-    }
-  }
   // Account-plan refresh is a provider metadata RPC. It never creates or
   // resumes a visible chat session and never sends a model prompt.
   refreshPlanUsage(chatId: string): void {
@@ -3427,7 +3335,23 @@ export class Store {
     if (!chat.titleLocked) { chat.title = display.trim().slice(0, 34) || chat.title; chat.titleLocked = true; }
     this.bumpChat(chat);
 
-    await this.ensureSession(chat);
+    if (!(await this.ensureChatCreated(chat))) {
+      const current = this.chat(tabId);
+      const failedAssistant = sameChatPair(current, tabId, durableChatId)
+        ? current.messages.find((message) => message.id === pendingStart.assistantId && message.role === 'assistant')
+        : undefined;
+      if (current && failedAssistant) {
+        this.failPendingSend(current, failedAssistant, prompt, durableChatId, current.sessionError);
+      } else {
+        releasePendingStart();
+      }
+      return false;
+    }
+
+    // One actor-owned operation performs selection, exact resume/creation, and
+    // prompt admission. A separate app-chat:new-session preflight doubled the
+    // remote round trips and could time out while the later job:start still ran.
+    // The selected provider rides this command; no other provider is touched.
     const initialized = this.chat(tabId);
     if (!sameChatPair(initialized, tabId, durableChatId)) {
       releasePendingStart();
@@ -3450,34 +3374,48 @@ export class Store {
       this.finalizeCancelledLocally(chat, asst);
       return false;
     }
-    if (!chat.sessionId && chat.sessionError) {
-      releasePendingStart();
-      asst.status = 'failed';
-      asst.content = `No hay sesión ACP disponible (${chat.sessionError}).`;
-      asst.retryPrompt = prompt;
-      this.bumpChat(chat);
-      return false;
-    }
     // Stable conversation id (R4): every turn in this chat rides the SAME chatId
     // so the daemon accumulates checkpoints and increments turnSeq under it. A
     // fresh id per turn (the old behaviour) scattered checkpoints and reset the
     // sequence, making rewind/diff unusable.
     const chatId = durableChatId;
     this.chatJobs.set(chatId, { tabId: chat.id, msgId: asst.id });
-    const job = await call('startJob', {
-      kind: 'app-chat', operationId: userId, title: `${chat.providerName ?? 'Agente'} · ${chat.title}`, chatId, tabId: chat.id,
-      sessionId: chat.sessionId || undefined, cwd: chat.cwd ?? null,
-      // providerId rides every turn: when it differs from the session's bound
-      // provider, the daemon treats it as a desired-lane selection. It starts
-      // only after a verified non-sampling context import; unsupported switches
-      // fail before the active provider lane is detached.
-      providerId: chat.providerId ?? undefined,
-      modelId: chat.currentModelId, modeId: chat.currentModeId,
-      prompt, images: images && images.length ? images : undefined,
-      userMessageId: userId, assistantMessageId: assistantId,
-      queueId,
-      busyMode: 'queue-v1',
-    });
+    let job: StartJobReply | undefined;
+    let startFailure: unknown;
+    try {
+      job = await callThrow('startJob', {
+        kind: 'app-chat', operationId: userId, title: `${chat.providerName ?? 'Agente'} · ${chat.title}`, chatId, tabId: chat.id,
+        sessionId: chat.sessionId || undefined, cwd: chat.cwd ?? null,
+        // providerId rides every turn: when it differs from the session's bound
+        // provider, the daemon treats it as a desired-lane selection. It starts
+        // only after a verified non-sampling context import; unsupported switches
+        // fail before the active provider lane is detached.
+        providerId: chat.providerId ?? undefined,
+        modelId: chat.currentModelId, modeId: chat.currentModeId,
+        prompt, images: images && images.length ? images : undefined,
+        userMessageId: userId, assistantMessageId: assistantId,
+        queueId,
+        busyMode: 'queue-v1',
+      });
+    } catch (error) {
+      startFailure = error;
+      if (possiblyAcceptedInvoke(error)) {
+        const uncertain = this.chat(tabId);
+        const uncertainAssistant = sameChatPair(uncertain, tabId, chatId)
+          ? uncertain.messages.find((message) => message.id === pendingStart.assistantId && message.role === 'assistant')
+          : undefined;
+        if (!uncertain || !uncertainAssistant) {
+          releasePendingStart();
+          return false;
+        }
+        // The actor may already own this exact OperationID. Keep one transcript
+        // owner and its Stop intent; reconnect hydration or the start/end event
+        // will bind the durable job. Returning true transfers a FIFO row into
+        // this owner and prevents an automatic resend of uncertain input.
+        this.bumpChat(uncertain);
+        return true;
+      }
+    }
     if (isQueuedJobStart(job)) {
       const current = this.chat(tabId);
       if (!sameChatPair(current, tabId, chatId)) {
@@ -3522,6 +3460,7 @@ export class Store {
         releasePendingStart();
         return false;
       }
+      this.attachJobSession(current, job);
       admitted.jobId = job.id;
       this.jobRef.set(job.id, { tabId: current.id, msgId: admitted.id });
       if (pendingStart.cancelRequested) await this.cancelAdmittedTurn(current, admitted, job.id, pendingStart);
@@ -3542,9 +3481,11 @@ export class Store {
       return false;
     }
     releasePendingStart();
-    const failure = job && typeof job === 'object' && 'error' in job
-      ? String((job as { error?: unknown }).error ?? '')
-      : undefined;
+    const failure = startFailure instanceof Error
+      ? startFailure.message
+      : job && typeof job === 'object' && 'error' in job
+        ? String((job as { error?: unknown }).error ?? '')
+        : undefined;
     this.failPendingSend(current, failedAssistant, prompt, chatId, failure);
     return false;
   }
@@ -3725,11 +3666,13 @@ export class Store {
           this.jobRef.set(e.job.id, { tabId: chat.id, msgId: msg.id });
           if (chatId) this.chatJobs.set(chatId, { tabId: chat.id, msgId: msg.id });
           const pendingStart = this.pendingTurnStarts.get(chat.id);
-          if (pendingStart && pendingStart.chatId === chat.chatId && pendingStart.assistantId === msg.id && pendingStart.cancelRequested) {
+          if (pendingStart && pendingStart.chatId === chat.chatId && pendingStart.assistantId === msg.id) {
             // job:start is the earliest durable admission boundary. Transfer a
             // pre-admission Stop immediately; the later start reply sees the
-            // same job id and is deduped by cancelAdmittedTurn.
-            void this.cancelAdmittedTurn(chat, msg, e.job.id, pendingStart);
+            // same job id and is deduped by cancelAdmittedTurn. Either way the
+            // transport waiter no longer owns this operation.
+            if (pendingStart.cancelRequested) void this.cancelAdmittedTurn(chat, msg, e.job.id, pendingStart);
+            this.pendingTurnStarts.delete(chat.id);
           }
           this.bumpApp(false);
         }
@@ -3901,6 +3844,13 @@ export class Store {
           this.jobRef.delete(e.job.id);
           this.bump('msg:' + msg.id);
         }
+        if (jobChat) {
+          const pendingStart = this.pendingTurnStarts.get(jobChat.id);
+          if (pendingStart && pendingStart.chatId === jobChat.chatId
+            && (pendingStart.assistantId === msg?.id || pendingStart.assistantId === e.job.assistantMessageId)) {
+            this.pendingTurnStarts.delete(jobChat.id);
+          }
+        }
         this.chatJobs.delete(e.job.chatId ?? '');
         void reattached;
         const endedChat = (rec ? this.chat(rec.tabId) : null) ?? jobChat;
@@ -3938,12 +3888,13 @@ export class Store {
     }
   }
   private attachJobSession(chat: Chat, job: PublicJob): boolean {
-    const attached = !chat.sessionId && !!job.sessionId;
-    const sessionChanged = !!job.sessionId && (
+    const exactSessionIdentity = !!job.sessionId && typeof job.providerId === 'string' && !!job.providerId.trim();
+    const attached = !chat.sessionId && exactSessionIdentity;
+    const sessionChanged = exactSessionIdentity && (
       chat.sessionId !== job.sessionId
-      || (!!job.providerId && chat.sessionProviderId !== job.providerId)
+      || chat.sessionProviderId !== job.providerId
     );
-    if (job.sessionId) {
+    if (exactSessionIdentity) {
       chat.sessionId = job.sessionId;
       chat.pending = false;
       chat.sessionError = undefined;
@@ -4813,6 +4764,10 @@ function isStateDigest(value: unknown): value is StateDigest {
 }
 function isTransportInvokeError(error: unknown): boolean {
   return error instanceof Error && error.name === 'WorkassInvokeError';
+}
+function possiblyAcceptedInvoke(error: unknown): boolean {
+  return isTransportInvokeError(error)
+    && (error as Error & { mayHaveBeenAccepted?: unknown }).mayHaveBeenAccepted === true;
 }
 
 export const store = new Store();

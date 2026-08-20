@@ -33,6 +33,13 @@ design, never "improve" scope. Log suggestions separately; do not act on them.
   is redacted before it reaches logs, UI payloads, or documents.
 - Tests run against `desktop/acp/mock-server.mjs` fixtures — model quality is
   NEVER a test oracle.
+- Never recursively content-scan a Workass profile or data root (including
+  `~/Library/Application Support/Workass`) with `rg`, `grep`, `strings`,
+  `find ... | xargs`, or equivalent. Before any profile-file content read, run
+  `scripts/safe-profile-file.sh check EXACT_FILE`; use its `search-count` mode
+  for bounded searches. The executable guard rejects directories, symlinks,
+  sparse/oversized/binary files, container images, caches, update artifacts,
+  and attachment/blob stores.
 - Do not modify files outside your lane's declared manifest.
 
 ## Internal evidence and final handoff
