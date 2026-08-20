@@ -3,6 +3,7 @@ import type { Chat } from '../store/types';
 import { store } from '../store/store';
 import { messageImageSrc } from '../image-drafts';
 import { steerStatusLabel } from '../steering';
+import { projectSteeringPresentation } from '../chat/steering-presentation';
 
 // Minimalist message queue (redesign 2026-07-12): each queued follow-up is its
 // own box sized to its text. Double-click to edit in place (saves as you type,
@@ -11,7 +12,7 @@ import { steerStatusLabel } from '../steering';
 // unless an explicit Stop has durably paused dispatch until Continuar.
 export function QueueList({ chat }: { chat: Chat }) {
   const queue = chat.queue ?? [];
-  const waitingSteers = chat.messages.filter((message) => message.role === 'user' && message.steerBoundary === 'waiting');
+  const waitingSteers = projectSteeringPresentation(chat.messages).steeringTrayMessages;
   const [editing, setEditing] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
   const dragId = useRef<string | null>(null);
