@@ -20,6 +20,7 @@ const {
   resolveArtifactSource,
   resolveUpdateFeed,
   runUpdateStageWorker,
+  spawnArmedUpdateWorker,
   stageAndVerifyRelease,
   validateReleaseManifest,
   verifyWindowsRelease,
@@ -171,7 +172,28 @@ function managerFixture({
         calls.push(action);
         return replies.shift() || { status: 500, body: {} };
       },
-      spawn: (_exe, args) => { calls.push(`spawn:${path.basename(args[0])}`); return { unref() {}, kill() {} }; },
+      spawn: (_exe, args) => {
+        calls.push(`spawn:${path.basename(args[0])}`);
+        const child = new EventEmitter();
+        child.unref = () => {};
+        child.kill = () => {};
+        queueMicrotask(() => {
+          const transactionIndex = args.indexOf('--transaction');
+          if (transactionIndex !== -1) {
+            const transaction = JSON.parse(fs.readFileSync(args[transactionIndex + 1], 'utf8'));
+            fs.mkdirSync(path.dirname(transaction.receiptPath), { recursive: true });
+            fs.writeFileSync(transaction.receiptPath, `${JSON.stringify({
+              schemaVersion: 1,
+              updateId: transaction.updateId,
+              phase: 'armed',
+              previousVersion: transaction.currentVersion,
+              targetVersion: transaction.targetVersion,
+            })}\n`);
+          }
+          child.emit('spawn');
+        });
+        return child;
+      },
       schedule: (fn) => { fn(); return { unref() {} }; },
     },
   });
@@ -588,7 +610,7 @@ test('busy daemon leaves the verified release staged and never starts the worker
   assert.equal(didQuit(), false);
 });
 
-test('committed handoff arms one worker, then quits only after daemon commit', async () => {
+test('committed handoff requires one durable worker arm before daemon commit and quit', async () => {
   const { manager, calls, didQuit } = managerFixture({ replies: [
     { status: 200, body: { ready: true } },
     { status: 202, body: { stopping: true } },
@@ -604,6 +626,60 @@ test('committed handoff arms one worker, then quits only after daemon commit', a
   assert.equal(transaction.mutableStateBackupTarget, path.join(manager.prepared.transactionRoot, 'state-before-activation'));
   assert.equal(transaction.failedMutableStateTarget, path.join(manager.prepared.transactionRoot, 'state-from-failed-activation'));
   assert.equal(transaction.requireVisibleWindow, true);
+  const receipt = JSON.parse(fs.readFileSync(manager.receiptPath, 'utf8'));
+  assert.equal(receipt.phase, 'armed');
+  assert.equal(receipt.updateId, manager.prepared.updateId);
+});
+
+test('a worker that cannot durably arm cancels the prepared handoff and keeps Workass open', async () => {
+  const { manager, calls, didQuit } = managerFixture({ replies: [
+    { status: 200, body: { ready: true } },
+    { status: 200, body: { cancelled: true } },
+  ] });
+  manager.deps.spawnArmedWorker = async () => { throw new Error('fixture worker did not arm'); };
+  await assert.rejects(() => manager.install(), /did not arm/);
+  assert.deepEqual(calls, ['prepare', 'cancel']);
+  assert.equal(didQuit(), false);
+});
+
+test('worker ownership transfers only after the exact durable arm receipt', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-arm-'));
+  const receiptPath = path.join(root, 'receipt.json');
+  const child = new EventEmitter();
+  let unrefs = 0;
+  child.unref = () => { unrefs += 1; };
+  child.kill = () => {};
+  const pending = spawnArmedUpdateWorker({
+    command: process.execPath,
+    args: [],
+    receiptPath,
+    updateId: 'upd-exact-arm-1234',
+    currentVersion: '1.1.0',
+    targetVersion: '1.2.0',
+    timeoutMs: 500,
+    pollIntervalMs: 5,
+  }, { spawnProcess: () => child });
+  let settled = false;
+  void pending.then(() => { settled = true; });
+  child.emit('spawn');
+  fs.writeFileSync(receiptPath, `${JSON.stringify({
+    schemaVersion: 1,
+    updateId: 'upd-another-worker',
+    phase: 'armed',
+    previousVersion: '1.1.0',
+    targetVersion: '1.2.0',
+  })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(settled, false);
+  fs.writeFileSync(receiptPath, `${JSON.stringify({
+    schemaVersion: 1,
+    updateId: 'upd-exact-arm-1234',
+    phase: 'armed',
+    previousVersion: '1.1.0',
+    targetVersion: '1.2.0',
+  })}\n`);
+  assert.equal(await pending, child);
+  assert.equal(unrefs, 1);
 });
 
 test('one apply action stages and commits an available release without a second click', async () => {

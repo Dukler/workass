@@ -17,6 +17,8 @@ const MAX_UPDATE_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 120000;
 const DEFAULT_INITIAL_CHECK_DELAY_MS = 15_000;
 const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+const DEFAULT_WORKER_ARM_TIMEOUT_MS = 15_000;
+const DEFAULT_WORKER_ARM_POLL_MS = 25;
 
 function releaseArch(platform = process.platform, arch = process.arch) {
   if (arch === 'x64') return 'amd64';
@@ -709,6 +711,88 @@ function atomicJSON(file, value) {
   fs.renameSync(incoming, file);
 }
 
+function isExactArmedReceipt(receipt, { updateId, currentVersion, targetVersion }) {
+  return receipt?.schemaVersion === 1 && receipt.phase === 'armed' &&
+    receipt.updateId === updateId && receipt.previousVersion === currentVersion &&
+    receipt.targetVersion === targetVersion;
+}
+
+function spawnArmedUpdateWorker({
+  command,
+  args = [],
+  options = {},
+  receiptPath,
+  updateId,
+  currentVersion,
+  targetVersion,
+  timeoutMs = DEFAULT_WORKER_ARM_TIMEOUT_MS,
+  pollIntervalMs = DEFAULT_WORKER_ARM_POLL_MS,
+}, {
+  spawnProcess = spawn,
+  readReceipt = (file) => JSON.parse(fs.readFileSync(file, 'utf8')),
+  schedule = setTimeout,
+  cancelSchedule = clearTimeout,
+  repeat = setInterval,
+  cancelRepeat = clearInterval,
+} = {}) {
+  if (!path.isAbsolute(String(command || '')) || !path.isAbsolute(String(receiptPath || '')) ||
+      !/^[A-Za-z0-9_-]{8,96}$/.test(String(updateId || '')) ||
+      !parseVersion(currentVersion) || !parseVersion(targetVersion) ||
+      !Number.isFinite(timeoutMs) || timeoutMs <= 0 ||
+      !Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+    return Promise.reject(new Error('invalid independent update worker handoff'));
+  }
+  return new Promise((resolve, reject) => {
+    let child;
+    let timeout = null;
+    let poller = null;
+    let settled = false;
+    const clear = () => {
+      if (timeout) cancelSchedule(timeout);
+      if (poller) cancelRepeat(poller);
+      timeout = null;
+      poller = null;
+    };
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      clear();
+      try { child?.kill?.(); } catch { /* best effort before daemon commit */ }
+      reject(err instanceof Error ? err : new Error(String(err || 'independent update worker failed to arm')));
+    };
+    const inspect = () => {
+      if (settled) return;
+      let receipt;
+      try { receipt = readReceipt(receiptPath); } catch { return; }
+      if (!isExactArmedReceipt(receipt, { updateId, currentVersion, targetVersion })) return;
+      settled = true;
+      clear();
+      child.unref?.();
+      resolve(child);
+    };
+    try {
+      child = spawnProcess(command, args, options);
+    } catch (err) {
+      fail(err);
+      return;
+    }
+    if (!child || typeof child.once !== 'function') {
+      fail(new Error('independent update worker returned no process handle'));
+      return;
+    }
+    child.once('error', fail);
+    child.once('exit', (code, signal) => {
+      fail(new Error(`independent update worker exited before arming (${signal || code || 0})`));
+    });
+    child.once('spawn', () => {
+      inspect();
+      if (settled) return;
+      poller = repeat(inspect, pollIntervalMs);
+      timeout = schedule(() => fail(new Error('independent update worker did not durably arm')), timeoutMs);
+    });
+  });
+}
+
 function installedRoot(resourcesPath, executablePath, platform = process.platform) {
   return platform === 'darwin' ? path.resolve(resourcesPath, '..', '..') : path.dirname(executablePath);
 }
@@ -1038,13 +1122,23 @@ class UpdateManager {
     const logFD = fs.openSync(path.join(prepared.transactionRoot, 'worker.log'), 'a', 0o600);
     let worker;
     try {
-      worker = this.deps.spawn(nodePath, [workerPath, '--transaction', transactionPath], {
-        cwd: prepared.transactionRoot,
-        detached: true,
-        windowsHide: true,
-        stdio: ['ignore', logFD, logFD],
+      const armWorker = this.deps.spawnArmedWorker || ((request) => spawnArmedUpdateWorker(request, {
+        spawnProcess: this.deps.spawn,
+      }));
+      worker = await armWorker({
+        command: nodePath,
+        args: [workerPath, '--transaction', transactionPath],
+        options: {
+          cwd: prepared.transactionRoot,
+          detached: true,
+          windowsHide: true,
+          stdio: ['ignore', logFD, logFD],
+        },
+        receiptPath: this.receiptPath,
+        updateId: prepared.updateId,
+        currentVersion: this.currentVersion,
+        targetVersion: this.manifest.version,
       });
-      worker.unref();
     } catch (err) {
       await this.deps.postLocalUpdate(this.runtime.daemonURL, 'cancel', prepared.updateId);
       throw err;
@@ -1127,6 +1221,7 @@ module.exports = {
   resolveArtifactSource,
   resolveUpdateFeed,
   runUpdateStageWorker,
+  spawnArmedUpdateWorker,
   stageAndVerifyRelease,
   stageRelease,
   validateReleaseManifest,
