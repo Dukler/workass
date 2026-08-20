@@ -14,6 +14,7 @@ const CHAT = tagId(MACHINE, 'chat-remote');
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+let resolveSettled: (chat: unknown, status: string, active: boolean, now: number, touched: number) => boolean;
 
 before(async () => {
   vite = await createServer({
@@ -23,6 +24,7 @@ before(async () => {
     appType: 'custom',
   });
   StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
+  resolveSettled = (await vite.ssrLoadModule('/src/components/SidebarV2.tsx')).resolveSettled;
 });
 
 after(async () => { await vite.close(); });
@@ -75,22 +77,147 @@ function mirror(messages: MirrorMsg[] = [], overrides: Record<string, unknown> =
   } as Mirror;
 }
 
-function remoteSubject(nextMirror: () => Mirror): any {
+function remoteSubject(nextMirror: () => Mirror | Promise<Mirror>, ownsLink: () => boolean = () => true): any {
   const subject = new StoreCtor();
   subject.schedulePersist = () => {};
   subject.state.meta = { daemon: true, sessionSaveMode: LEAN_SESSION_SAVE_MODE, workspaceRebindMode: 'transactional-v1' };
   subject.state.connection = 'connected';
+  const link = {
+    invoke: async (channel: string) => {
+      assert.equal(channel, 'session:get');
+      return nextMirror();
+    },
+  };
   subject.machines = {
-    linkFor: (machineId: string) => machineId === MACHINE ? {
-      invoke: async (channel: string) => {
-        assert.equal(channel, 'session:get');
-        return nextMirror();
-      },
-    } : null,
+    linkFor: (machineId: string) => machineId === MACHINE ? link : null,
+    ownsLink: (machineId: string, candidate: unknown) => machineId === MACHINE && candidate === link && ownsLink(),
     setReason: () => {},
   };
   return subject;
 }
+
+test('remote settlement survives a session snapshot read before its actor receipt', async () => {
+  let currentMirror = mirror([], { presentationRevision: 1 });
+  let releaseStaleHydration!: (value: Mirror) => void;
+  let staleHydration: Promise<Mirror> | null = null;
+  const subject = remoteSubject(() => staleHydration ?? currentMirror);
+  await subject.hydrateMachine(MACHINE);
+  subject.dirtyChats.clear();
+  subject.dirtyChatVersions.clear();
+  subject.fullSavePending = false;
+
+  const staleRead = structuredClone(currentMirror);
+  staleHydration = new Promise((resolve) => { releaseStaleHydration = resolve; });
+  const hydration = subject.hydrateMachine(MACHINE);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const flush = subject.flushSession.bind(subject);
+  subject.flushSession = async () => {};
+  await withWindowApi({
+    chatPresentationSave: async (opts: Record<string, unknown>) => ({
+      ok: true,
+      operationId: opts.operationId,
+      presentationRevision: 2,
+      actorRevision: 2,
+    }),
+    saveSession: async () => ({ ok: true, globalRevision: 1 }),
+  }, async () => {
+    subject.settleChat(TAB, true);
+    const settledAt = subject.chat(TAB).settledAt;
+    await flush(true);
+    assert.equal(subject.chat(TAB).settled, 'settled');
+    assert.equal(subject.chat(TAB).presentationRevision, 2);
+
+    releaseStaleHydration(staleRead);
+    await hydration;
+    assert.equal(subject.chat(TAB).settled, 'settled');
+    assert.equal(subject.chat(TAB).settledAt, settledAt);
+    assert.equal(subject.chat(TAB).presentationRevision, 2);
+
+    staleHydration = null;
+    currentMirror = mirror([], {
+      actorRevision: 3,
+      presentationRevision: 3,
+      settled: 'active',
+    });
+    await subject.hydrateMachine(MACHINE);
+    assert.equal(subject.chat(TAB).settled, 'active', 'a genuinely newer actor projection remains authoritative');
+    assert.equal(subject.chat(TAB).presentationRevision, 3);
+  });
+});
+
+test('replayed remote terminal events do not revive an acknowledged settled chat', async () => {
+  const userID = 'user-terminal';
+  const assistantID = 'assistant-terminal';
+  const jobID = 'job-terminal';
+  const subject = remoteSubject(() => mirror([
+    { id: userID, role: 'user', content: 'hello remote', status: 'done', at: '2026-08-19T12:00:00Z', events: [] },
+    {
+      id: assistantID,
+      role: 'assistant',
+      content: 'done',
+      status: 'done',
+      at: '2026-08-19T12:00:01Z',
+      jobId: jobID,
+      events: [],
+    },
+  ], {
+    settled: 'settled',
+    settledAt: Date.parse('2026-08-19T12:00:02Z'),
+    unread: false,
+  }));
+  await subject.hydrateMachine(MACHINE);
+  subject.state.activeId = null;
+
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'end',
+    job: terminalJob({ id: jobID, userMessageId: userID, assistantMessageId: assistantID }),
+  }));
+
+  const settled = subject.chat(TAB) as Chat;
+  assert.equal(settled.unread, false);
+  assert.equal(settled.settled, 'settled');
+  assert.equal(resolveSettled(settled, 'ready', false, Date.now(), Date.now()), true);
+});
+
+test('machine rejection evicts its chats and a late snapshot cannot mount them again', async () => {
+  let authorized = true;
+  let delayedMirror: Promise<Mirror> | null = null;
+  let resolveDelayed!: (value: Mirror) => void;
+  const subject = remoteSubject(() => delayedMirror ?? mirror(), () => authorized);
+  await subject.hydrateMachine(MACHINE);
+
+  const local = {
+    id: 'tab-local-survivor',
+    chatId: 'chat-local-survivor',
+    sessionId: null,
+    title: 'Local survivor',
+    titleLocked: true,
+    group: null,
+    cwd: '/tmp/workass',
+    currentModelId: null,
+    currentModeId: null,
+    providerId: 'codex',
+    pending: true,
+    messages: [],
+    draft: '',
+  } as Chat;
+  subject.state.chats.unshift(local);
+  subject.state.activeId = local.id;
+
+  delayedMirror = new Promise((resolve) => { resolveDelayed = resolve; });
+  const lateHydration = subject.hydrateMachine(MACHINE);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  authorized = false;
+  subject.evictMachineChats(MACHINE);
+  assert.deepEqual(subject.state.chats.map((chat: Chat) => chat.id), [local.id]);
+
+  resolveDelayed(mirror([], { title: 'Must stay evicted' }));
+  await lateHydration;
+  assert.deepEqual(subject.state.chats.map((chat: Chat) => chat.id), [local.id]);
+  assert.equal(subject.state.activeId, local.id);
+});
 
 async function withWindowApi<T>(api: Record<string, unknown>, task: () => Promise<T>): Promise<T> {
   const previousWindow = (globalThis as any).window;

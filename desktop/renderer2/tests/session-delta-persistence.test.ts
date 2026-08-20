@@ -415,11 +415,15 @@ test('a stale remote hydration cannot erase a chat after its durable create rece
   staleRemote.chats = [];
   staleRemote.activeId = null;
   let createCalls = 0;
-  subject.machines = {
-    linkFor: () => ({ invoke: async (channel: string) => {
+  const machineLink = {
+    invoke: async (channel: string) => {
       assert.equal(channel, 'session:get');
       return staleRemote;
-    } }),
+    },
+  };
+  subject.machines = {
+    linkFor: () => machineLink,
+    ownsLink: (_machineId: string, link: unknown) => link === machineLink,
     setReason: () => {},
   };
 

@@ -15,6 +15,7 @@ import { createMachineRouter, REMOTE_EVENT_CHANNELS } from './machineRouter.ts';
 import { tagPayload } from './machineIds.ts';
 
 const CREDENTIAL_PREFIX = 'workass.machine.';
+const AUTO_CONNECT_DISABLED_SUFFIX = '.auto-connect-disabled';
 
 export interface MachineEndpoint {
   kind?: string;
@@ -88,6 +89,12 @@ export interface MachineRegistryOptions {
   onChange?(machines: MachineView[]): void;
   /** A machine reconnected. `restarted` means it lost everything it was holding. */
   onOpen?(machineId: string, info: { generation: number; restarted: boolean }): void;
+  /**
+   * The user's authority to read this machine ended. The store must evict every
+   * projection owned by this machine synchronously; an ordinary network close
+   * deliberately does not fire this because offline chats remain visible.
+   */
+  onUnmount?(machineId: string): void;
 	/** Deterministic scheduler seam used by transport lifecycle tests. */
 	setTimer?(fn: () => void, ms: number): unknown;
 	clearTimer?(handle: unknown): void;
@@ -106,6 +113,10 @@ export class MachineRegistry {
   private readonly remoteSubs = new Map<string, Set<RemoteEventListener>>();
   private readonly replayed = new Map<string, Set<unknown>>();
   private readonly requested = new Set<string>();
+  /** Machines whose chats have been admitted into the mounted projection. */
+  private readonly mounted = new Set<string>();
+  /** Current-runtime authority even when browser storage is unavailable. */
+  private readonly autoConnectDisabledMachines = new Set<string>();
   private fleetKey = '';
 
   constructor(opts: MachineRegistryOptions) {
@@ -172,6 +183,15 @@ export class MachineRegistry {
   }
 
   /**
+   * Proves that an async read still belongs to the currently-authorized link.
+   * Socket generation alone is insufficient because forget/reject may replace
+   * the whole MachineSocket while an already-resolved promise is queued.
+   */
+  ownsLink(machineId: string, link: MachineSocket): boolean {
+    return this.ready.get(machineId) === link && this.sockets.get(machineId) === link;
+  }
+
+  /**
    * What the machine is doing in words, past the socket being open.
    *
    * A connected machine whose chats never arrive is the worst failure this
@@ -213,10 +233,10 @@ export class MachineRegistry {
 			// under TOFU after an upgrade, and never follow a changed certificate.
 			// Keep the discovered machine row so one explicit approval can pair it
 			// again under the fingerprint it currently proves.
-			this.sockets.get(id)?.close();
-			this.sockets.delete(id);
-			this.ready.delete(id);
+			this.detachSocket(id);
 			this.clearCredentials(id);
+			this.disableAutoConnect(id);
+			this.unmount(id);
 			this.states.set(id, { link: 'idle', reason: credentials.certFingerprint ? 'la identidad TLS cambió; volvé a aprobarla' : 'volvé a aprobarla para fijar su identidad TLS' });
 			continue;
 		}
@@ -226,36 +246,35 @@ export class MachineRegistry {
       // doomed wss:// socket every 1.5s forever. Keep its book entry and
       // credential so a later secure refresh reconnects without re-pairing.
 		if (!entry.secure || (entry.status && entry.status !== 'ok')) {
-        this.sockets.get(id)?.close();
-        this.sockets.delete(id);
-        this.ready.delete(id);
-        continue;
-      }
+			this.detachSocket(id);
+			continue;
+		}
       // Seeing a beacon never opens a socket or prompts the other machine.
       // A past approval reconnects automatically; a new request is always an
       // explicit local action, except the separately opted-in fleet mechanism.
-      if (!this.sockets.has(id) && (this.credentials(id).deviceToken || this.requested.has(id) || this.fleetKey)) this.connect(entry);
+      const automatic = !this.autoConnectDisabled(id) && (this.credentials(id).deviceToken || this.fleetKey);
+      if (!this.sockets.has(id) && (this.requested.has(id) || automatic)) this.connect(entry);
     }
-    for (const id of Array.from(this.sockets.keys())) {
+    for (const id of Array.from(this.entries.keys())) {
       if (seen.has(id)) continue;
-      this.sockets.get(id)?.close();
-      this.sockets.delete(id);
-      this.ready.delete(id);
+		this.detachSocket(id);
       this.entries.delete(id);
       this.states.delete(id);
+		this.requested.delete(id);
+		this.unmount(id);
     }
     this.opts.onChange?.(this.list());
   }
 
   /** Drop a machine and forget what it gave us. Its chats leave the list. */
   forget(machineId: string): void {
-    this.sockets.get(machineId)?.close();
-    this.sockets.delete(machineId);
-    this.ready.delete(machineId);
+		this.disableAutoConnect(machineId);
+		this.detachSocket(machineId);
     this.entries.delete(machineId);
     this.states.delete(machineId);
     this.requested.delete(machineId);
     this.clearCredentials(machineId);
+		this.unmount(machineId);
     this.opts.onChange?.(this.list());
   }
 
@@ -269,6 +288,7 @@ export class MachineRegistry {
   requestAccess(machineId: string): boolean {
     const entry = this.entries.get(machineId);
 	if (!entry || !entry.secure || (entry.status && entry.status !== 'ok')) return false;
+	this.enableAutoConnect(machineId);
     this.requested.add(machineId);
     if (!this.sockets.has(machineId)) this.connect(entry);
     this.opts.onChange?.(this.list());
@@ -299,20 +319,37 @@ export class MachineRegistry {
       saveCredentials: (id, next) => this.saveCredentials(id, next),
       clearCredentials: (id) => this.clearCredentials(id),
       onState: (state, detail) => {
+		if (this.sockets.get(entry.machineId) !== socket) return;
         if (state === 'ready' || state === 'rejected') this.requested.delete(entry.machineId);
         this.states.set(entry.machineId, { link: state, reason: detail?.reason ?? '' });
-        if (state === 'ready') this.ready.set(entry.machineId, socket);
-        else this.ready.delete(entry.machineId);
+		if (state === 'ready') {
+			this.ready.set(entry.machineId, socket);
+			this.mounted.add(entry.machineId);
+		} else {
+			this.ready.delete(entry.machineId);
+		}
+		if (state === 'rejected') {
+			// A human denial is terminal for automatic reconnect, including after
+			// reload with a fleet key. Only a later explicit Request access clears it.
+			this.disableAutoConnect(entry.machineId);
+			this.sockets.delete(entry.machineId);
+			socket.close();
+			this.unmount(entry.machineId);
+		}
         this.opts.onChange?.(this.list());
       },
-      onOpen: (info) => this.opts.onOpen?.(entry.machineId, info),
+		onOpen: (info) => {
+			if (this.ownsLink(entry.machineId, socket)) this.opts.onOpen?.(entry.machineId, info);
+		},
 		setTimer: this.opts.setTimer,
 		clearTimer: this.opts.clearTimer,
       // Every event from every machine funnels here, so a subscription outlives
       // the socket that happened to exist when it was made. Subscribing to the
       // link directly is what broke: the store subscribes at boot, no machine is
       // connected yet, and the remote's events were delivered to nobody.
-      onEvent: (channel, payload) => this.dispatchRemoteEvent(entry.machineId, channel, payload),
+		onEvent: (channel, payload) => {
+			if (this.sockets.get(entry.machineId) === socket) this.dispatchRemoteEvent(entry.machineId, channel, payload);
+		},
     });
     this.sockets.set(entry.machineId, socket);
     socket.connect();
@@ -357,6 +394,41 @@ export class MachineRegistry {
   private clearCredentials(machineId: string): void {
     try { this.storage()?.removeItem(CREDENTIAL_PREFIX + machineId); } catch { /* private mode */ }
   }
+
+	private autoConnectDisabled(machineId: string): boolean {
+		if (this.autoConnectDisabledMachines.has(machineId)) return true;
+		try {
+			const disabled = this.storage()?.getItem(CREDENTIAL_PREFIX + machineId + AUTO_CONNECT_DISABLED_SUFFIX) === '1';
+			if (disabled) this.autoConnectDisabledMachines.add(machineId);
+			return disabled;
+		}
+		catch { return false; }
+	}
+
+	private disableAutoConnect(machineId: string): void {
+		this.autoConnectDisabledMachines.add(machineId);
+		try { this.storage()?.setItem(CREDENTIAL_PREFIX + machineId + AUTO_CONNECT_DISABLED_SUFFIX, '1'); }
+		catch { /* private mode: the in-memory authority still remains fenced */ }
+	}
+
+	private enableAutoConnect(machineId: string): void {
+		this.autoConnectDisabledMachines.delete(machineId);
+		try { this.storage()?.removeItem(CREDENTIAL_PREFIX + machineId + AUTO_CONNECT_DISABLED_SUFFIX); }
+		catch { /* private mode: the explicit request still opens now */ }
+	}
+
+	/** Remove one transport before closing it so every synchronous late callback is stale. */
+	private detachSocket(machineId: string): void {
+		const socket = this.sockets.get(machineId);
+		this.sockets.delete(machineId);
+		this.ready.delete(machineId);
+		if (socket) socket.close();
+	}
+
+	private unmount(machineId: string): void {
+		if (!this.mounted.delete(machineId)) return;
+		this.opts.onUnmount?.(machineId);
+	}
 }
 
 function normalizeFingerprint(value: unknown): string {
