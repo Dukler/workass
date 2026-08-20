@@ -9,6 +9,7 @@ const { Readable } = require('node:stream');
 const test = require('node:test');
 const {
   UpdateManager,
+  atomicJSON,
   cheapWorkerLeaseOwnership,
   compareVersions,
   copyLocalArtifact,
@@ -34,6 +35,31 @@ const {
   verifyWindowsRelease,
   workerProcessOwnership,
 } = require('./update-manager');
+
+function rejectReadOnlyFileFlushes(run) {
+  const originalOpenSync = fs.openSync;
+  const originalFsyncSync = fs.fsyncSync;
+  const accessByDescriptor = new Map();
+  fs.openSync = (...args) => {
+    const descriptor = originalOpenSync(...args);
+    accessByDescriptor.set(descriptor, args[1]);
+    return descriptor;
+  };
+  fs.fsyncSync = (descriptor) => {
+    if (accessByDescriptor.get(descriptor) === 'r') {
+      const error = new Error('operation not permitted, fsync');
+      error.code = 'EPERM';
+      throw error;
+    }
+    return originalFsyncSync(descriptor);
+  };
+  try {
+    return run();
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.fsyncSync = originalFsyncSync;
+  }
+}
 
 function writeFakeWindowsPE(file) {
   const bytes = Buffer.alloc(256);
@@ -462,6 +488,17 @@ test('fresh Windows portable extractions receive distinct persistent installatio
     installationId: second.installationId,
     installTarget: secondRoot,
   }), false);
+});
+
+test('Windows installation identity is flushed through its writable atomic file handle', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-windows-identity-flush-'));
+  const file = path.join(root, '.workass-installation.json');
+  rejectReadOnlyFileFlushes(() => atomicJSON(file, {
+    schemaVersion: 1,
+    product: 'Workass',
+    installationId: `install-${'7'.repeat(32)}`,
+  }));
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).installationId, `install-${'7'.repeat(32)}`);
 });
 
 test('the actual rolled-back Windows release retains its own failure receipt', () => {

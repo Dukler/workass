@@ -7,6 +7,7 @@ const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const {
+  atomicJSON,
   daemonServiceIsDown,
   defaultOperations,
   launchUntilHealthy,
@@ -24,6 +25,38 @@ const {
   verifyWindowsIncoming,
   waitUntilDeadline,
 } = require('./update-worker');
+
+function rejectReadOnlyFileFlushes(run) {
+  const originalOpenSync = fs.openSync;
+  const originalFsyncSync = fs.fsyncSync;
+  const accessByDescriptor = new Map();
+  fs.openSync = (...args) => {
+    const descriptor = originalOpenSync(...args);
+    accessByDescriptor.set(descriptor, args[1]);
+    return descriptor;
+  };
+  fs.fsyncSync = (descriptor) => {
+    if (accessByDescriptor.get(descriptor) === 'r') {
+      const error = new Error('operation not permitted, fsync');
+      error.code = 'EPERM';
+      throw error;
+    }
+    return originalFsyncSync(descriptor);
+  };
+  try {
+    return run();
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.fsyncSync = originalFsyncSync;
+  }
+}
+
+test('worker journal writes flush through the writable atomic file handle used on Windows', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-windows-worker-flush-'));
+  const file = path.join(root, 'journal.json');
+  rejectReadOnlyFileFlushes(() => atomicJSON(file, { schemaVersion: 3, phase: 'armed' }));
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { schemaVersion: 3, phase: 'armed' });
+});
 
 function writeFakeWindowsPE(file) {
   const bytes = Buffer.alloc(256);

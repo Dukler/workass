@@ -863,9 +863,13 @@ function postLocalUpdate(daemonURL, action, updateId, timeoutMs = 2500) {
 function atomicJSON(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const incoming = `${file}.incoming-${process.pid}`;
-  fs.writeFileSync(incoming, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  const descriptor = fs.openSync(incoming, 'r');
-  try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+  const descriptor = fs.openSync(incoming, 'w', 0o600);
+  try {
+    fs.writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
   fs.renameSync(incoming, file);
 }
 
