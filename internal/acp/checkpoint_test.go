@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	providercontract "workass/internal/provider"
 )
 
 func TestChatCheckpointsDiffRewindAndOutsideGuard(t *testing.T) {
@@ -87,14 +89,25 @@ func TestChatCheckpointsDiffRewindAndOutsideGuard(t *testing.T) {
 	}
 	t.Logf("trace diff chat=chat-cp repo=alpha path=work.txt turnSeq=%v contains=%q", diff["turnSeq"], "+four")
 
-	if _, err := manager.ChatRewind(context.Background(), "chat-cp", 1); err != nil {
+	restore := func(turnSeq int, operationID providercontract.OperationID) (map[string]any, error) {
+		checkpoint, ok := checkpointByTurn(checkpoints, turnSeq)
+		if !ok {
+			t.Fatalf("checkpoint %d disappeared", turnSeq)
+		}
+		payload, err := json.Marshal(checkpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(payload)
+		return manager.RestoreChatCheckpoint(context.Background(), "chat-cp", turnSeq, payload, fmt.Sprintf("%x", digest), operationID)
+	}
+	if _, err := restore(1, "rewind-turn-1"); err != nil {
 		t.Fatalf("rewind turn 1: %v", err)
 	}
-	_ = events.waitChannel(t, "chat:checkpoint-restored", 2*time.Second)
 	if got := fileSHA256(t, workPath); got != hashA {
 		t.Fatalf("rewind turn1 hash=%s want=%s", got, hashA)
 	}
-	if _, err := manager.ChatRewind(context.Background(), "chat-cp", 2); err != nil {
+	if _, err := restore(2, "rewind-turn-2"); err != nil {
 		t.Fatalf("rewind turn 2: %v", err)
 	}
 	if got := fileSHA256(t, workPath); got != hashB {
@@ -103,7 +116,7 @@ func TestChatCheckpointsDiffRewindAndOutsideGuard(t *testing.T) {
 	t.Logf("trace rewind hashes turn1=%s turn2=%s", hashA, hashB)
 
 	writeFile(t, workPath, "outside\n")
-	_, err = manager.ChatRewind(context.Background(), "chat-cp", 1)
+	_, err = restore(1, "rewind-outside-modification")
 	if err == nil || structuredErrorCode(err) != "chat:rewind-outside-modification" {
 		t.Fatalf("outside modification error = %v code=%s", err, structuredErrorCode(err))
 	}

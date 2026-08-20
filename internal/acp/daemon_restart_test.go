@@ -3,14 +3,13 @@ package acp
 import (
 	"context"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 )
 
 type restartCollector struct {
-	mu     sync.Mutex
-	events []map[string]any
+	data  chan string
+	ended chan map[string]any
 }
 
 func (c *restartCollector) Broadcast(channel string, raw any) {
@@ -18,35 +17,55 @@ func (c *restartCollector) Broadcast(channel string, raw any) {
 		return
 	}
 	payload, _ := raw.(map[string]any)
-	c.mu.Lock()
-	c.events = append(c.events, payload)
-	c.mu.Unlock()
-}
-
-func (c *restartCollector) endedJob(id string) map[string]any {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, event := range c.events {
-		if event["type"] != "end" {
-			continue
+	switch payload["type"] {
+	case "data":
+		if id, _ := payload["id"].(string); id != "" {
+			select {
+			case c.data <- id:
+			default:
+			}
 		}
-		job, _ := event["job"].(map[string]any)
-		if job != nil && job["id"] == id {
-			return job
+	case "end":
+		if job, _ := payload["job"].(map[string]any); job != nil {
+			c.ended <- job
 		}
 	}
-	return nil
 }
 
-func (c *restartCollector) sawData(id string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, event := range c.events {
-		if event["type"] == "data" && event["id"] == id {
-			return true
+func newRestartCollector() *restartCollector {
+	return &restartCollector{data: make(chan string, 1), ended: make(chan map[string]any, 1)}
+}
+
+func waitForRestartData(t *testing.T, collector *restartCollector, id string) {
+	t.Helper()
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case got := <-collector.data:
+			if got == id {
+				return
+			}
+		case <-timer.C:
+			t.Fatal("timed out waiting for the turn to start streaming")
 		}
 	}
-	return false
+}
+
+func waitForRestartEnd(t *testing.T, collector *restartCollector, id string) map[string]any {
+	t.Helper()
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case job := <-collector.ended:
+			if job["id"] == id {
+				return job
+			}
+		case <-timer.C:
+			t.Fatal("timed out waiting for the turn to finish")
+		}
+	}
 }
 
 // A daemon restart runs Reset(), which closes every bridge and so fails the
@@ -56,7 +75,7 @@ func (c *restartCollector) sawData(id string) bool {
 // and the sidebar repaints the chat as "Falló" on every restart.
 func TestResetMarksInFlightTurnInterrupted(t *testing.T) {
 	root := repoRoot(t)
-	collector := &restartCollector{}
+	collector := newRestartCollector()
 	manager := NewManager(Options{
 		RootDir: root,
 		Provider: ProviderConfig{
@@ -64,7 +83,7 @@ func TestResetMarksInFlightTurnInterrupted(t *testing.T) {
 			Command: "node",
 			Args:    []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
 			CWD:     root,
-			Env:     map[string]string{"WORKASS_MOCK_ACP_DELAY_MS": "4000"},
+			Env:     map[string]string{"WORKASS_MOCK_ACP_DELAY_MS": "0"},
 			Enabled: true,
 			Label:   "Workass Mock ACP",
 		},
@@ -79,22 +98,12 @@ func TestResetMarksInFlightTurnInterrupted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new mock session: %v", err)
 	}
-	id := jobID(startAppChatJob(t, manager, session.SessionID, "restart-tab", "[mock:slow] hold the line"))
-
-	deadline := time.Now().Add(20 * time.Second)
-	for !collector.sawData(id) {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for the turn to start streaming")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	id := jobID(startAppChatJob(t, manager, session.SessionID, "restart-tab", "[mock:active-without-terminal] hold the line"))
+	waitForRestartData(t, collector, id)
 
 	manager.Reset()
 
-	ended := collector.endedJob(id)
-	if ended == nil {
-		t.Fatal("reset did not finalize the in-flight turn")
-	}
+	ended := waitForRestartEnd(t, collector, id)
 	if ended["status"] != "failed" {
 		t.Fatalf("reset turn status = %v, want failed", ended["status"])
 	}
@@ -110,7 +119,7 @@ func TestResetMarksInFlightTurnInterrupted(t *testing.T) {
 // and an agent error still has to reach the sidebar as a failure.
 func TestCompletedTurnIsNotMarkedInterrupted(t *testing.T) {
 	root := repoRoot(t)
-	collector := &restartCollector{}
+	collector := newRestartCollector()
 	manager := NewManager(Options{
 		RootDir: root,
 		Provider: ProviderConfig{
@@ -135,17 +144,7 @@ func TestCompletedTurnIsNotMarkedInterrupted(t *testing.T) {
 	}
 	id := jobID(startAppChatJob(t, manager, session.SessionID, "clean-tab", "finish normally"))
 
-	deadline := time.Now().Add(20 * time.Second)
-	var ended map[string]any
-	for {
-		if ended = collector.endedJob(id); ended != nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for the turn to finish")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	ended := waitForRestartEnd(t, collector, id)
 	if ended["interrupted"] != false {
 		t.Fatalf("completed turn interrupted = %v, want false", ended["interrupted"])
 	}

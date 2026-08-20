@@ -274,7 +274,7 @@ func projectActorChatWithHistory(out map[string]any, state chat.State, history a
 		return errors.New("chat projection target is nil")
 	}
 	if !state.Initialized {
-		return errors.New("chat actor initialization or migration is incomplete")
+		return errors.New("chat actor initialization is incomplete")
 	}
 	if state.Deleted {
 		return errors.New("deleted chat cannot be projected")
@@ -373,7 +373,7 @@ func projectActorChatWithHistory(out map[string]any, state chat.State, history a
 			out["sessionId"] = lane.Thread.HeadID
 		}
 		if lane.Attachment != nil {
-			out["liveSession"] = projectLaneAttachment(*lane.Attachment)
+			out["liveSession"] = projectLaneAttachment(*lane.Attachment, lane.Delivery)
 		}
 	}
 	if lane, ok := state.Lanes[state.DesiredLaneID]; ok && (lane.Phase == chat.LaneBlocked || lane.Phase == chat.LaneBroken) {
@@ -616,7 +616,7 @@ func projectReconciledTerminalJob(state chat.State, operationID providercontract
 	return map[string]any{"type": "end", "job": job}, nil
 }
 
-func projectLaneAttachment(snapshot providercontract.LaneAttachmentSnapshot) map[string]any {
+func projectLaneAttachment(snapshot providercontract.LaneAttachmentSnapshot, delivery providercontract.DeliveryCapabilities) map[string]any {
 	models := make([]any, 0, len(snapshot.Models))
 	for _, model := range snapshot.Models {
 		models = append(models, map[string]any{
@@ -632,12 +632,25 @@ func projectLaneAttachment(snapshot providercontract.LaneAttachmentSnapshot) map
 		"providerId": string(snapshot.ProviderID), "providerName": snapshot.ProviderName,
 		"models": models, "currentModelId": nullableDigestString(snapshot.CurrentModelID),
 		"modes": modes, "currentModeId": nullableDigestString(snapshot.CurrentModeID),
-		"imageSupport": snapshot.ImageSupport, "commandCatalogSupported": snapshot.CommandCatalogSupported,
+		"imageSupport":       snapshot.ImageSupport,
+		"planUsageSupported": snapshot.PlanUsageSupported, "planUsageResetSupported": snapshot.PlanUsageResetSupported,
+		"commandCatalogSupported": snapshot.CommandCatalogSupported,
+		"deliveryCapabilities":    projectDeliveryCapabilities(delivery),
 	}
 	if snapshot.CommandCatalog != nil {
 		projected["commandCatalog"] = projectRuntimeCommandCatalog(snapshot.CommandCatalog)
 	}
 	return projected
+}
+
+func projectDeliveryCapabilities(capabilities providercontract.DeliveryCapabilities) map[string]any {
+	return map[string]any{
+		"stableInputIdentity":     capabilities.StableInputIdentity,
+		"liveSteer":               capabilities.LiveSteer,
+		"steerConsumptionReceipt": capabilities.SteerConsumptionReceipt,
+		"consumptionReceipt":      capabilities.ConsumptionReceipt,
+		"turnReadback":            capabilities.TurnReadback,
+	}
 }
 
 func projectRuntimeCommandCatalog(catalog *providercontract.RuntimeCommandCatalog) any {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Chat, ToolEvent, PlanEvent, PlanEntry } from '../store/types';
+import type { ToolEvent, PlanEntry } from '../store/types';
 import { store, useApp, useActivity, useSpawnedWork } from '../store/store';
 import { toolState, fmtDur, extractSubagents, nodeState, nodeDuration, ToolDetail } from './messages';
 import { subagentActivity, type SubagentNode } from '../subagent-layout';
@@ -39,24 +39,6 @@ function railAction(t: ToolEvent) {
 // shows no dots — it never invents a step and never infers a current one.
 
 const PLAN_MARK: Record<string, string> = { completed: '✓', in_progress: '◐', pending: '○' };
-
-// The chat's current plan. `chat.planLatest` is authoritative when present —
-// including an explicit [] meaning "no current plan". The reverse message scan is
-// rolling compatibility only, and must never recreate an already-completed plan
-// from an older turn.
-function latestChatPlan(chat: Chat | null): PlanEntry[] | null {
-  if (!chat) return null;
-  if (chat.planLatest) return chat.planLatest;
-  for (let i = chat.messages.length - 1; i >= 0; i--) {
-    const message = chat.messages[i];
-    if (message.role !== 'assistant') continue;
-    const found = (message.events ?? []).find((e): e is PlanEvent => e.kind === 'plan');
-    if (found) {
-      return found.entries.some((entry) => entry.status !== 'completed') ? found.entries : null;
-    }
-  }
-  return null;
-}
 
 // Progress as dots only: done = filled, in_progress = ring, pending = hollow.
 function PlanDots({ entries }: { entries: readonly PlanEntry[] }) {
@@ -187,7 +169,7 @@ export function TareasCard() {
   const running = msg?.status === 'running';
   const events = msg?.events ?? [];
   const tools = events.filter((e): e is ToolEvent => e.kind === 'tool');
-  const { nodes, mainTools } = extractSubagents(tools, app.meta?.profile ?? 'prod');
+  const { nodes, mainTools } = extractSubagents(tools);
   // ONE row per subagent. A tracked subagent is registered as spawned work under
   // the same id the header event carries (daemon: registerSubagentSpawnedWork
   // uses run.ID, emitSubagentHeader emits subagentId=run.ID), so while it is
@@ -208,9 +190,8 @@ export function TareasCard() {
   // finished one — held so the action slot never empties between calls.
   const currentTool = running ? (runningTools[runningTools.length - 1] ?? doneTools[doneTools.length - 1]) : undefined;
 
-  // The plan the provider actually sent — this turn's, else the chat's current one.
-  const turnPlan = events.find((e): e is PlanEvent => e.kind === 'plan');
-  const planEntries: readonly PlanEntry[] = turnPlan?.entries ?? latestChatPlan(chat) ?? [];
+  // Actor projection owns the current plan, including an explicit empty plan.
+  const planEntries: readonly PlanEntry[] = chat?.planLatest ?? [];
   const hasPlan = planEntries.length > 0;
   const doneCount = planEntries.filter((e) => e.status === 'completed').length;
 

@@ -24,6 +24,7 @@ const plan = (entries: Array<{ status: string; content: string }>, key = 'plan-1
 async function renderRail(
   t: { after: (fn: () => Promise<void>) => void },
   messages: unknown[],
+  planLatest: Array<{ status: string; content: string }> = [],
 ) {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
@@ -32,7 +33,7 @@ async function renderRail(
   const storeModule = await server.ssrLoadModule('/src/store/store.ts') as { store: { state: Record<string, unknown> } };
   storeModule.store.state.meta = { profile: 'dev' };
   storeModule.store.state.activeId = 'tab-1';
-  storeModule.store.state.chats = [{ id: 'tab-1', cwd: null, messages }];
+  storeModule.store.state.chats = [{ id: 'tab-1', cwd: null, messages, planLatest }];
   return renderToStaticMarkup(React.createElement(loaded.TareasCard));
 }
 
@@ -47,7 +48,7 @@ test('the hero is the provider in_progress entry verbatim, and the dots match th
     { status: 'in_progress', content: 'Rediseñar la densidad del panel' },
     { status: 'pending', content: 'Verificar en dev' },
   ];
-  const html = await renderRail(t, [running([doneTool, plan(entries)])]);
+  const html = await renderRail(t, [running([doneTool])], entries);
   assert.match(html, /class="r-say">Rediseñar la densidad del panel</);
   // one dot per provider entry, in provider order and status
   assert.match(html, /class="r-pdots"[^>]*>(<i class="done"><\/i>|<i class="done">)/);
@@ -73,7 +74,7 @@ test('a plan with no in_progress entry shows the dots but never infers a current
     { status: 'completed', content: 'Paso uno' },
     { status: 'pending', content: 'Paso dos' },
   ];
-  const html = await renderRail(t, [running([plan(entries)])]);
+  const html = await renderRail(t, [running([])], entries);
   assert.match(html, /class="r-pdots"/);
   assert.doesNotMatch(html, /class="r-say">/, 'no hero is inferred from pending/completed entries');
 });
@@ -83,7 +84,7 @@ test('an incomplete plan from an earlier turn carries forward', async (t) => {
     { status: 'completed', content: 'Paso hecho' },
     { status: 'in_progress', content: 'Paso en curso' },
   ];
-  const html = await renderRail(t, [settled([plan(entries)]), running([doneTool], 'a-2')]);
+  const html = await renderRail(t, [settled([]), running([doneTool], 'a-2')], entries);
   assert.match(html, /class="r-say">Paso en curso</);
   assert.match(html, /class="r-pdots"/);
 });
@@ -93,7 +94,7 @@ test('a completed plan from an earlier turn does not linger', async (t) => {
     { status: 'completed', content: 'Todo listo uno' },
     { status: 'completed', content: 'Todo listo dos' },
   ];
-  const html = await renderRail(t, [settled([plan(entries)]), running([doneTool], 'a-2')]);
+  const html = await renderRail(t, [settled([plan(entries)]), running([doneTool], 'a-2')], []);
   assert.doesNotMatch(html, /Todo listo uno/, 'a finished plan must not resurface on a later turn');
   assert.doesNotMatch(html, /class="r-pdots"/);
   assert.match(html, /Sin plan del agente\./);

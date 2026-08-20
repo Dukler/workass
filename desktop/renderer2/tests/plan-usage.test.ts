@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 
 import {
   availableRateLimitReset,
@@ -13,7 +12,6 @@ import {
   prepareRateLimitResetAttempt,
   rateLimitLabel,
   rateLimitResetExpiry,
-  rateLimitValue,
   relativePlanReset,
 } from '../src/plan-usage.ts';
 
@@ -46,27 +44,6 @@ test('retrying one earned reset reuses its idempotency key while another credit 
   assert.equal(next.idempotencyKey, 'attempt-2');
 });
 
-test('earned reset UI belongs to the account menu, not the composer context controls', () => {
-  const sidebar = readFileSync(new URL('../src/components/Sidebar.tsx', import.meta.url), 'utf8');
-  const composer = readFileSync(new URL('../src/components/Composer.tsx', import.meta.url), 'utf8');
-  const styles = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
-  assert.match(sidebar, /className="acctcredit"/);
-  assert.match(sidebar, /store\.useRateLimitReset\('codex'/);
-  assert.match(sidebar, /className="acctcredit-mark"[^>]*><ModelIcon provider="gpt" \/>/);
-  assert.match(sidebar, /className="acctcredit-title">Codex reset<\/span>/);
-  assert.doesNotMatch(sidebar, /className="acctcredit-title">\{reset\.credit\?\.title/);
-  assert.match(sidebar, /const label = 'workass';/);
-  assert.match(sidebar, /<span className="ava" aria-hidden="true" \/>/);
-  assert.doesNotMatch(sidebar, /<span className="ava">W<\/span>/);
-  assert.doesNotMatch(composer, /plancredit|availableRateLimitReset|useRateLimitReset|inlinePlanResets|planreset-inline/);
-  assert.doesNotMatch(styles, /planreset-inline|planreset-item|planreset-name|planreset-time/);
-  assert.match(styles, /\.acct \.ava\s*\{[^}]*workass-macos\.png[^}]*cover no-repeat/);
-  assert.match(styles, /\.acctcredit-use\s*\{[^}]*border:\s*1px solid var\(--acc\)[^}]*background:\s*var\(--acc\)[^}]*cursor:\s*pointer/);
-  assert.match(styles, /\.acctcredit-use:disabled\s*\{[^}]*background:\s*transparent[^}]*color:\s*var\(--muted\)[^}]*cursor:\s*default/);
-  assert.match(composer, /<ContextRing usage=/);
-  assert.match(composer, /<PlanSection providerLabel=/);
-});
-
 test('a reset is live only when it lands within the next 24 hours', () => {
   const now = Date.parse('2026-07-13T16:20:00Z');
   assert.equal(isLiveReset('2026-07-13T19:20:00Z', now), true);   // 3h
@@ -82,7 +59,6 @@ test('an expired provider window is stale account data, not another reset label'
   assert.equal(isExpiredPlanReset('2026-07-15T18:00:00Z', now), true);
   assert.equal(isExpiredPlanReset('2026-07-15T20:00:00Z', now), false);
   assert.equal(isExpiredPlanReset(undefined, now), false);
-  assert.equal(rateLimitValue({ kind: 'rate-limit', usedPercent: 100, resetsAt: '2026-07-15T18:00:00Z' }, now), 'Actualizando límites…');
 });
 
 test('the live countdown clock drops the hour segment under an hour', () => {
@@ -113,22 +89,10 @@ test('plan usage clamps malformed provider percentages without inventing data', 
 test('plan usage formats percentage and exact reset relative to a fixed clock', () => {
   const now = Date.parse('2026-07-13T16:20:00Z');
   assert.equal(relativePlanReset('2026-07-13T20:00:00Z', now), 'en 3 h 40 min');
-  assert.equal(rateLimitValue({ kind: 'rate-limit', usedPercent: 37.5, resetsAt: '2026-07-13T20:00:00Z' }, now), '37.5% usado · reinicia en 3 h 40 min');
-  assert.equal(rateLimitValue({ kind: 'rate-limit', resetsAt: '2026-07-13T20:00:00Z' }, now), 'Se reinicia en 3 h 40 min');
 });
 
 test('plan usage highlights provider rejection and utilization at eighty percent', () => {
   assert.equal(isHotRateLimit({ kind: 'rate-limit', usedPercent: 79.9 }), false);
   assert.equal(isHotRateLimit({ kind: 'rate-limit', usedPercent: 80 }), true);
   assert.equal(isHotRateLimit({ kind: 'rate-limit', status: 'rejected', usedPercent: 1 }), true);
-});
-
-test('provider plan refresh is independent from chat session creation', () => {
-  const store = readFileSync(new URL('../src/store/store.ts', import.meta.url), 'utf8');
-  const types = readFileSync(new URL('../src/wire/types.ts', import.meta.url), 'utf8');
-  const bridge = readFileSync(new URL('../../../internal/httpserve/lan_bridge.go', import.meta.url), 'utf8');
-  assert.match(store, /call\('appChatRefreshPlanUsage',\s*providerId,\s*chat\.id\)/,
-    'opening the plan popover must query the selected provider, not rebind the chat session');
-  assert.match(types, /appChatRefreshPlanUsage\?:/);
-  assert.match(bridge, /appChatRefreshPlanUsage:\s*\(providerId\)\s*=>\s*invoke\('app-chat:refresh-plan-usage'/);
 });

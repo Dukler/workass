@@ -128,12 +128,3 @@ export function envView(payload: ChatEnvPayload | null | undefined): EnvView {
     unchanged: Array.isArray(payload?.unchanged) ? payload!.unchanged : [],
   };
 }
-
-// A quiet one-liner for the empty state — names the watched repo(s) when known
-// rather than sitting as a dead box.
-export function emptyEnvSummary(view: EnvView): string {
-  const count = view.unchanged.length;
-  if (count === 0) return 'Sin cambios todavía.';
-  if (count === 1) return `Sin cambios · ${view.unchanged[0]}`;
-  return `Sin cambios · ${count} repos`;
-}

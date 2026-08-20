@@ -10,7 +10,7 @@ const { BrowserControlServer } = require('./browser-control-server');
 const { resolveRuntimeProfile } = require('./runtime-profile');
 const { applyMacDockIcon, refreshWindowsShortcutIconsAsync, resolveWindowFrameOptions, resolveWindowIconPath } = require('./app-icon');
 const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
-const { UpdateManager, resolveUpdateFeed } = require('./update-manager');
+const { UpdateManager, ensureInstallationIdentity, installedRoot, resolveUpdateFeed } = require('./update-manager');
 const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
 const { acquireProfileSingleton, focusPrimaryWindow, shouldShowWindowOnCreate } = require('./profile-singleton');
 const {
@@ -38,6 +38,15 @@ const UPDATE_RETRY_CHILD = process.env.WORKASS_LOCK_RECOVERY_CHILD === '1';
 const WINDOWS_UPDATE_RECOVERY = process.platform === 'win32' && RECOVER_CONTROLLER;
 const WINDOWS_UPDATE_BOOTSTRAP = WINDOWS_UPDATE_RECOVERY && !UPDATE_RETRY_CHILD;
 const APP_VERSION = app.isPackaged ? app.getVersion() : 'development';
+const updaterInstallTarget = installedRoot(process.resourcesPath, process.execPath, process.platform);
+let updaterInstallationId = '';
+if (app.isPackaged && ['darwin', 'win32'].includes(process.platform)) {
+  try {
+    updaterInstallationId = ensureInstallationIdentity(updaterInstallTarget, { platform: process.platform }).installationId;
+  } catch (err) {
+    console.error(`[shell] updater installation identity unavailable: ${err.message}`);
+  }
+}
 const singletonUserData = WINDOWS_UPDATE_BOOTSTRAP
   ? updateLockRecoveryUserData(RUNTIME.dataRoot)
   : RUNTIME.userDataDir;
@@ -88,6 +97,8 @@ if (recoverStaleUpdateLock) {
     executablePath: process.execPath,
     dataRoot: RUNTIME.dataRoot,
     appVersion: APP_VERSION,
+    installationId: updaterInstallationId,
+    installTarget: updaterInstallTarget,
     windowIcon,
     statusURL: `http://127.0.0.1:${RUNTIME.viewPort}/__workass-shell/status`,
     daemonHealthURL: `${RUNTIME.daemonURL}/workass/health`,
@@ -239,8 +250,6 @@ function createWindow(url, browserReporter, isController) {
   ipcMain.handle('workass-updater:get-state', (event) => own(event) ? updateManager?.snapshot() || null : null);
   ipcMain.handle('workass-updater:check', async (event) => own(event) ? updateManager?.check() || null : null);
   ipcMain.handle('workass-updater:apply', async (event) => own(event) ? updateManager?.startApply() || null : null);
-  ipcMain.handle('workass-updater:download', async (event) => own(event) ? updateManager?.download() || null : null);
-  ipcMain.handle('workass-updater:install', async (event) => own(event) ? updateManager?.install() || null : null);
   win.on('closed', () => {
     viewServer?.reportWindowState?.({ visible: false, minimized: false, focused: false });
     removeImageCopyMenu();
@@ -255,7 +264,7 @@ function createWindow(url, browserReporter, isController) {
     try { ipcMain.removeHandler('workass-image:open-external'); } catch { /* ignore */ }
 		try { ipcMain.removeAllListeners('workass-machines:trust-endpoint'); } catch { /* ignore */ }
 		try { ipcMain.removeHandler('workass-recovery:restart-daemon'); } catch { /* ignore */ }
-    for (const channel of ['get-state', 'check', 'apply', 'download', 'install']) {
+    for (const channel of ['get-state', 'check', 'apply']) {
       try { ipcMain.removeHandler(`workass-updater:${channel}`); } catch { /* ignore */ }
     }
   });
@@ -529,6 +538,8 @@ if (runsPrimaryRuntime) app.whenReady().then(async () => {
       port: VIEW_PORT,
       runtimeVersion: process.versions.electron,
       appVersion: APP_VERSION,
+      installationId: updaterInstallationId,
+      installTarget: updaterInstallTarget,
       recoverController: RECOVER_CONTROLLER,
     });
     viewURL = viewServer.url;
@@ -589,10 +600,10 @@ if (runsPrimaryRuntime) app.whenReady().then(async () => {
     updateBootstrapWindow.close();
     updateBootstrapWindow = null;
   }
-  // A rolled-back/failed transaction stays visible until the user explicitly
-  // retries. An automatic check here would immediately re-offer the exact
-  // release that just failed its health gates and hide the recovery receipt.
-  if (updateState.supported && !['rollback_healthy', 'failed'].includes(updateState.phase)) {
+  // Availability and the durable transaction receipt are independent. A
+  // rollback remains visible, while polling can still discover a corrected
+  // later release without requiring another app launch.
+  if (updateState.supported) {
     updateManager.startAutoChecks({
       // Both release lanes stay discoverable while Workass remains open. Mac
       // reads its machine-local feed; Windows reads GitHub's fixed latest URL.

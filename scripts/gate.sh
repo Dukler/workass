@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 # committed go:embed snapshot, so a stale snapshot fails before any slow test.
 renderer_built=0
 if [ -d desktop/renderer2/node_modules ]; then
-  (cd desktop/renderer2 && npx tsc --noEmit && npm run build --silent >/dev/null)
+  (cd desktop/renderer2 && npm test --silent && npx tsc --noEmit && npm run build --silent >/dev/null)
   renderer_built=1
 fi
 if [ "${WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER:-0}" = 1 ]; then
@@ -24,6 +24,7 @@ if [ "${WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER:-0}" = 1 ]; then
   echo "WORKASS_RENDERER_SNAPSHOT_VERIFIED"
 fi
 
+node --test desktop/shell/*.test.js
 go build ./... && go vet ./...
 # Brevity is right on the happy path and exactly backwards on the failing one:
 # `| tail -12` shows the alphabetical tail, so a failing package early in the

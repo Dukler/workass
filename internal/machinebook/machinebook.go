@@ -179,23 +179,12 @@ func Open(opts Options) (*Book, error) {
 func (b *Book) List() []Entry {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	// Old builds could file the same verified endpoint under several machine
-	// ids. While that endpoint is offline there is no truthful way to decide
-	// which stored id is current, but rendering every stale row as another
-	// physical node is definitely false. Coalesce only identical endpoint sets;
-	// a successful probe below performs the authoritative persisted cleanup.
-	byEndpoints := make(map[string]Entry, len(b.entries))
+	// MachineID is the durable identity. A shared or reused endpoint is not proof
+	// that two offline identities are the same machine, so List must expose every
+	// stored entry until a successful probe authoritatively transfers that exact
+	// endpoint in reconcileEndpointLocked.
+	out := make([]Entry, 0, len(b.entries))
 	for _, entry := range b.entries {
-		key := endpointSetKey(entry.Endpoints)
-		if key == "" {
-			key = "machine\x00" + entry.MachineID
-		}
-		if current, ok := byEndpoints[key]; !ok || preferEntry(entry, current) {
-			byEndpoints[key] = entry
-		}
-	}
-	out := make([]Entry, 0, len(byEndpoints))
-	for _, entry := range byEndpoints {
 		out = append(out, entry)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -584,31 +573,6 @@ func (b *Book) reconcileEndpointLocked(machineID string, endpoint Endpoint) bool
 		changed = true
 	}
 	return changed
-}
-
-func endpointSetKey(endpoints []Endpoint) string {
-	if len(endpoints) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(endpoints))
-	for _, endpoint := range endpoints {
-		parts = append(parts, endpoint.Kind+"\x00"+endpoint.Address)
-	}
-	sort.Strings(parts)
-	return strings.Join(parts, "\x01")
-}
-
-func preferEntry(candidate, current Entry) bool {
-	if (candidate.Status == StatusOK) != (current.Status == StatusOK) {
-		return candidate.Status == StatusOK
-	}
-	if candidate.LastSeenAt != current.LastSeenAt {
-		return candidate.LastSeenAt > current.LastSeenAt
-	}
-	if candidate.AddedAt != current.AddedAt {
-		return candidate.AddedAt > current.AddedAt
-	}
-	return candidate.MachineID < current.MachineID
 }
 
 // probeAny tries every known way to reach a machine and gives up only when all

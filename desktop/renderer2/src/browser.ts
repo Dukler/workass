@@ -1,7 +1,17 @@
+import { machineOf } from './wire/machineIds.ts';
+
 export interface WorkassBrowserBounds { x: number; y: number; width: number; height: number; }
 
 export function sameBrowserBounds(a: WorkassBrowserBounds | null, b: WorkassBrowserBounds): boolean {
   return !!a && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+}
+
+// The Electron browser belongs to this shell process. A remote chat's ids are
+// routed to its owning daemon, so mounting the local native view there would
+// display and control an unrelated page. Check both ownership fields and the
+// boundary tag so incomplete remote hydration also fails closed.
+export function localBrowserOwnsChat(chatId: string, machineId?: string): boolean {
+  return String(machineId ?? '').trim() === '' && machineOf(chatId) === '';
 }
 
 export interface WorkassBrowserState {

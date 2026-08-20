@@ -27,7 +27,7 @@ func providerActivityOwnerBase(t *testing.T) (State, provider.LaneIdentity) {
 func providerActivityActiveState(t *testing.T) (State, ProviderActivityOwner) {
 	t.Helper()
 	state, lane := providerActivityOwnerBase(t)
-	state, _ = apply(t, state, Submit{OperationID: "active-operation", LaneID: lane.ID, Text: "active owner"})
+	state, _ = apply(t, state, Submit{OperationID: "active-operation", LaneID: lane.ID, Text: "active owner", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, TurnAdmitted{
 		OperationID: "active-operation", Accepted: true,
 		Turn: provider.TurnRef{OperationID: "active-operation", NativeID: "active-native-turn"},

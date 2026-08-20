@@ -24,7 +24,7 @@ func TestDispatchedDetachWithoutDurableReceiptIsAmbiguousWithAttachmentUnchanged
 	operationID := DetachOperationID(state.ChatID, identity.ID, connectionID, 7)
 
 	var err error
-	state, _, err = Reduce(state, DetachLane{
+	state, _, err = Reduce(state, DetachTarget{
 		OperationID: operationID, LaneID: identity.ID, Owner: owner,
 		ConnectionID: connectionID, ConnectionGeneration: 7,
 	})
@@ -82,7 +82,7 @@ func TestLaneDetachedReceiptCompletesDetachAndExactResumeKeepsThread(t *testing.
 	operationID := DetachOperationID(state.ChatID, identity.ID, connectionID, 7)
 
 	var err error
-	state, _, err = Reduce(state, DetachLane{
+	state, _, err = Reduce(state, DetachTarget{
 		OperationID: operationID, LaneID: identity.ID, Owner: owner,
 		ConnectionID: connectionID, ConnectionGeneration: 7,
 	})
@@ -146,7 +146,7 @@ func TestRunningTurnHostLossResumesExactThreadThenReadsBackWithoutResend(t *test
 	}
 	laneIdentity := testLane("host-loss-recovery-chat", "codex")
 	openReadyDurableLane(t, engine, laneIdentity)
-	if err := engine.Apply(Submit{OperationID: "host-loss-turn", Text: "send once"}); err != nil {
+	if err := engine.Apply(Submit{OperationID: "host-loss-turn", Text: "send once", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := engine.ClaimNext(); err != nil || !ok {
@@ -216,7 +216,7 @@ func TestFailedTurnReadbackCanRetryAfterExactHostReattach(t *testing.T) {
 	}
 	laneIdentity := testLane("failed-readback-recovery-chat", "codex")
 	openReadyDurableLane(t, engine, laneIdentity)
-	if err := engine.Apply(Submit{OperationID: "failed-readback-turn", Text: "send once"}); err != nil {
+	if err := engine.Apply(Submit{OperationID: "failed-readback-turn", Text: "send once", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := engine.ClaimNext(); err != nil || !ok {
@@ -418,7 +418,7 @@ func TestDispatchedDetachErrorWithoutReceiptIsAcceptanceAmbiguous(t *testing.T) 
 		t.Fatal("test lane did not expose an exact attachment")
 	}
 	operationID := DetachOperationID(state.ChatID, identity.ID, lane.Attachment.ConnectionID, lane.ConnectionGeneration)
-	if err := engine.Apply(DetachLane{
+	if err := engine.Apply(DetachTarget{
 		OperationID: operationID, LaneID: identity.ID, Owner: lane.Owner,
 		ConnectionID: lane.Attachment.ConnectionID, ConnectionGeneration: lane.ConnectionGeneration,
 	}); err != nil {

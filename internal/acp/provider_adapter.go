@@ -16,17 +16,21 @@ import (
 // semantic differences. Chat, lifecycle, persistence, and renderer code consume
 // these strategies and never branch on provider branding.
 type providerAdapter struct {
-	delivery   providerDeliveryStrategy
-	context    providerContextPolicy
-	creation   providercontract.CreationCapabilities
-	input      providerInputReceiptPolicy
-	planUsage  providerPlanUsageStrategy
-	commands   providerCommandCatalogStrategy
-	model      providerModelPolicy
-	catalog    providerCatalogStrategy
-	permission providerPermissionPolicy
-	launch     providerLaunchStrategy
-	features   providerFeaturePolicy
+	delivery      providerDeliveryStrategy
+	context       providerContextPolicy
+	creation      providercontract.CreationCapabilities
+	input         providerInputReceiptPolicy
+	planUsage     providerPlanUsageStrategy
+	commands      providerCommandCatalogStrategy
+	notifications providerNotificationStrategy
+	spawnedWork   providerSpawnedWorkStrategy
+	model         providerModelPolicy
+	catalog       providerCatalogStrategy
+	permission    providerPermissionPolicy
+	launch        providerLaunchStrategy
+	// subagentEnvironment contains only provider-owned launch settings. The
+	// generic bridge adds its provider-neutral owner marker separately.
+	subagentEnvironment map[string]string
 }
 
 // providerInputReceiptPolicy identifies the transport boundary that proves a
@@ -49,10 +53,6 @@ type providerModelPolicy struct {
 	SyntheticDefaultAlias bool
 	AssistantBrand        string
 	InspectAllEfforts     func(ProviderConfig) bool
-}
-
-type providerFeaturePolicy struct {
-	NativeSpawnedWork bool
 }
 
 type providerLaunchStrategy interface {
@@ -256,13 +256,15 @@ func (p staticProviderContextPolicy) Capabilities() providercontract.ContextCapa
 }
 
 var genericACPProviderAdapter = providerAdapter{
-	delivery:   genericACPDeliveryStrategy{},
-	input:      standardACPInputReceiptPolicy{},
-	planUsage:  unsupportedPlanUsageStrategy{},
-	commands:   unsupportedCommandCatalogStrategy{},
-	catalog:    genericProviderCatalogStrategy{},
-	permission: genericProviderPermissionPolicy{},
-	launch:     standardACPLaunchStrategy{},
+	delivery:      genericACPDeliveryStrategy{},
+	input:         standardACPInputReceiptPolicy{},
+	planUsage:     unsupportedPlanUsageStrategy{},
+	commands:      unsupportedCommandCatalogStrategy{},
+	notifications: unsupportedProviderNotificationStrategy{},
+	spawnedWork:   unsupportedProviderSpawnedWorkStrategy{},
+	catalog:       genericProviderCatalogStrategy{},
+	permission:    genericProviderPermissionPolicy{},
+	launch:        standardACPLaunchStrategy{},
 	context: staticProviderContextPolicy{capabilities: providercontract.ContextCapabilities{
 		ExactResume: true,
 		ImportMode:  providercontract.ContextImportUnsupported,
@@ -299,6 +301,12 @@ func providerAdapterWithDefaults(adapter providerAdapter) providerAdapter {
 	}
 	if adapter.commands == nil {
 		adapter.commands = genericACPProviderAdapter.commands
+	}
+	if adapter.notifications == nil {
+		adapter.notifications = genericACPProviderAdapter.notifications
+	}
+	if adapter.spawnedWork == nil {
+		adapter.spawnedWork = genericACPProviderAdapter.spawnedWork
 	}
 	if adapter.catalog == nil {
 		adapter.catalog = genericACPProviderAdapter.catalog

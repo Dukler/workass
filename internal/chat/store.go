@@ -20,7 +20,7 @@ type StateStore interface {
 
 type FileStore struct{ Path string }
 
-const currentStateEnvelopeVersion = 21
+const currentStateEnvelopeVersion = 22
 
 type stateEnvelope struct {
 	Version int   `json:"v"`

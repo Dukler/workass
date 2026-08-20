@@ -103,7 +103,7 @@ type TurnPresentation struct {
 	QueueID            string
 	PromptText         string
 	Title              string
-	Origin             string // human | agent | internal; empty retains human compatibility.
+	Origin             string // human | agent | internal; required.
 	// StartedAt is the daemon-observed RFC3339Nano admission timestamp. It is
 	// presentation metadata, not provider input, and survives restart so the
 	// actor can rebuild the frozen transcript without inventing a new time.
@@ -188,8 +188,14 @@ type PermissionReceipt struct {
 type DeliveryCapabilities struct {
 	StableInputIdentity bool
 	LiveSteer           bool
-	ConsumptionReceipt  bool
-	TurnReadback        bool
+	// SteerConsumptionReceipt is narrower than ConsumptionReceipt. It proves
+	// that an admitted live steer has a later, stable input-consumption receipt
+	// which defines its semantic boundary inside the running turn. Generic ACP
+	// prompt activity may prove ordinary turn consumption without providing this
+	// steer-specific receipt.
+	SteerConsumptionReceipt bool
+	ConsumptionReceipt      bool
+	TurnReadback            bool
 }
 
 type DeliveryStrategy interface {
@@ -307,6 +313,8 @@ type LaneAttachmentSnapshot struct {
 	Modes                   []RuntimeMode
 	CurrentModeID           string
 	ImageSupport            bool
+	PlanUsageSupported      bool
+	PlanUsageResetSupported bool
 	CommandCatalogSupported bool
 	CommandCatalog          *RuntimeCommandCatalog
 }

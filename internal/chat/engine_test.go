@@ -226,7 +226,7 @@ func TestCrashAfterTurnDispatchBlocksWithoutResend(t *testing.T) {
 	}
 	lane := testLane("chat", "codex")
 	openReadyDurableLane(t, engine, lane)
-	if err := engine.Apply(Submit{OperationID: "op", Text: "send exactly once"}); err != nil {
+	if err := engine.Apply(Submit{OperationID: "op", Text: "send exactly once", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	effect, ok, err := engine.ClaimNext()
@@ -382,7 +382,7 @@ func TestRestartAttachesExactLaneBeforePendingTurn(t *testing.T) {
 	}
 	lane := testLane("chat", "codex")
 	openReadyDurableLane(t, engine, lane)
-	if err := engine.Apply(Submit{OperationID: "op-pending", Text: "not dispatched yet"}); err != nil {
+	if err := engine.Apply(Submit{OperationID: "op-pending", Text: "not dispatched yet", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := store.state.Outbox[len(store.state.Outbox)-1].Status; got != OutboxPending {
@@ -425,7 +425,7 @@ func TestCrashAfterAdmissionQueuesReadbackNotResend(t *testing.T) {
 	}
 	lane := testLane("chat", "codex")
 	openReadyDurableLane(t, engine, lane)
-	if err := engine.Apply(Submit{OperationID: "op", Text: "work"}); err != nil {
+	if err := engine.Apply(Submit{OperationID: "op", Text: "work", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := engine.ClaimNext(); err != nil || !ok {
@@ -524,7 +524,7 @@ func TestCrashRecoveryNeverBlindlyResendsSteerButMayRepeatCancel(t *testing.T) {
 	}
 	lane := testLane("chat", "alpha")
 	openReadyDurableLane(t, engine, lane)
-	if err := engine.Apply(Submit{OperationID: "turn", Text: "work"}); err != nil {
+	if err := engine.Apply(Submit{OperationID: "turn", Text: "work", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := engine.ClaimNext(); err != nil || !ok {
@@ -535,7 +535,7 @@ func TestCrashRecoveryNeverBlindlyResendsSteerButMayRepeatCancel(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := engine.Apply(Steer{OperationID: "steer", Text: "redirect"}); err != nil {
+	if err := engine.Apply(Steer{OperationID: "steer", Text: "redirect", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if effect, ok, err := engine.ClaimNext(); err != nil || !ok {
@@ -610,7 +610,7 @@ func TestCrashAfterPermissionDecisionFailsClosedWithoutResend(t *testing.T) {
 	}
 	lane := testLane("chat", "alpha")
 	openReadyDurableLane(t, engine, lane)
-	if err := engine.Apply(Submit{OperationID: "turn", Text: "work"}); err != nil {
+	if err := engine.Apply(Submit{OperationID: "turn", Text: "work", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := engine.ClaimNext(); err != nil || !ok {
@@ -696,17 +696,17 @@ func TestDigestSnapshotMatchesVisibleMessageAndQueueIdentityWithoutBodies(t *tes
 		{MessageID: "ledger-assistant", Text: "another private body"},
 	}
 	engine.state.StagedQueue = []StagedQueueEntry{{ID: "staged-head", Text: "queued private body"}}
-	engine.state.Queue = []QueueEntry{{OperationID: "agent-queue", Presentation: provider.TurnPresentation{QueueID: "agent-tail"}}}
+	engine.state.Queue = []QueueEntry{{OperationID: "agent-queue", Presentation: provider.TurnPresentation{QueueID: "agent-tail", Origin: "agent"}}}
 	engine.state.Foreground = &ForegroundTurn{
 		OperationID:               "foreground-op",
-		Input:                     QueueEntry{Presentation: provider.TurnPresentation{UserMessageID: "foreground-user"}},
+		Input:                     QueueEntry{Presentation: provider.TurnPresentation{UserMessageID: "foreground-user", Origin: "human"}},
 		Turn:                      provider.TurnRef{NativeID: "job-live"},
 		RootAssistantMessageID:    "foreground-assistant",
 		CurrentAssistantMessageID: "foreground-assistant",
 	}
 	engine.state.PendingSteer = &PendingSteer{
 		OperationID:  "steer-op",
-		Presentation: provider.TurnPresentation{UserMessageID: "steer-user", AssistantMessageID: "steer-assistant"},
+		Presentation: provider.TurnPresentation{UserMessageID: "steer-user", AssistantMessageID: "steer-assistant", Origin: "human"},
 	}
 	engine.state.Permissions = map[string]PermissionState{
 		"permission-z":        {Event: provider.PermissionEvent{Status: "pending"}},

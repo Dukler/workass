@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { splitPath, basename, labelChangedFiles, envView, emptyEnvSummary } from '../src/env-files.ts';
+import { splitPath, basename, labelChangedFiles, envView } from '../src/env-files.ts';
 import type { ChatEnvPayload, ChatEnvRepo } from '../src/wire/types.ts';
 
 const f = (path: string, adds = 1, dels = 0) => ({ path, adds, dels });
@@ -90,10 +90,4 @@ test('envView surfaces truncation and treats a missing payload as no changes', (
   assert.equal(truncated.reposTruncated, true);
   assert.equal(truncated.filesTruncated, true);
   assert.equal(truncated.groups[0].filesTruncated, true);
-});
-
-test('emptyEnvSummary names the watched repos instead of a dead box', () => {
-  assert.equal(emptyEnvSummary(envView(undefined)), 'Sin cambios todavía.');
-  assert.equal(emptyEnvSummary(envView(payload([], { unchanged: ['workass'] }))), 'Sin cambios · workass');
-  assert.equal(emptyEnvSummary(envView(payload([], { unchanged: ['a', 'b', 'c'] }))), 'Sin cambios · 3 repos');
 });

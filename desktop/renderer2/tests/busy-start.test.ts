@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { reconcileQueuedJobStart } from '../src/store/busy-start.ts';
 import type { Chat, Msg } from '../src/store/types.ts';
+import { tagId } from '../src/wire/machineIds.ts';
 
 function chat(messages: Msg[]): Chat {
   return {
@@ -71,4 +72,25 @@ test('a promoted turn rejects its stale queue receipt even before a newer queue 
   assert.deepEqual(target.messages.map((message) => message.id), ['follow-user', 'follow-assistant']);
   assert.equal(target.queue, undefined);
   assert.equal(target.agentQueueRevision, 0);
+});
+
+test('a tagged remote busy receipt matches its hydrated queue row instead of duplicating it', () => {
+  const machineId = 'm-lagpc';
+  const userId = tagId(machineId, 'follow-user');
+  const assistantId = tagId(machineId, 'follow-assistant');
+  const queueId = tagId(machineId, 'host-q');
+  const target = chat([
+    { id: userId, role: 'user', content: 'follow once', status: 'done', at: '2026-07-21T00:00:00Z', events: [] },
+    { id: assistantId, role: 'assistant', content: '', status: 'running', at: null, events: [] },
+  ]);
+  target.id = tagId(machineId, target.id);
+  target.chatId = tagId(machineId, target.chatId!);
+  target.queue = [{ id: queueId, text: 'follow once', source: 'host', delivery: 'queue' }];
+
+  reconcileQueuedJobStart(target, { userId, assistantId }, 'follow once', undefined, {
+    queued: true, queueId, position: 1, delivery: 'queue', agentQueueRevision: 1,
+  });
+
+  assert.deepEqual(target.queue?.map((item) => item.id), [queueId]);
+  assert.deepEqual(target.messages, []);
 });

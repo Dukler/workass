@@ -419,7 +419,7 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
             <div className="sv2-l2">
               {title}
               <span className="sv2-prov" aria-hidden="true">
-                <ModelIcon provider={chat.providerId === 'codex' ? 'gpt' : chat.providerId} />
+                <ModelIcon provider={store.providerBrand(chat.providerId)} />
               </span>
             </div>
             {/* T3's third line is branch / PR / diff, which it almost always
@@ -473,8 +473,8 @@ function RowTooltip({ tip }: { tip: NonNullable<Tip> }) {
         {row.chat.cwd && <div className="sv2-tip-row sv2-tip-path"><span>{row.chat.cwd}</span></div>}
         {row.chat.providerId && (
           <div className="sv2-tip-row">
-            <ModelIcon provider={row.chat.providerId === 'codex' ? 'gpt' : row.chat.providerId} />
-            <span>{row.chat.providerId === 'codex' ? 'Codex' : 'Claude Code'}</span>
+            <ModelIcon provider={store.providerBrand(row.chat.providerId)} />
+            <span>{store.providerName(row.chat.providerId) ?? row.chat.providerName ?? row.chat.providerId}</span>
           </div>
         )}
         {row.error && <div className="sv2-tip-row err"><IcAlert /><span>{row.error}</span></div>}

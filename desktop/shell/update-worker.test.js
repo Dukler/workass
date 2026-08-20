@@ -7,6 +7,7 @@ const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const {
+  daemonServiceIsDown,
   defaultOperations,
   launchUntilHealthy,
   mirrorWindowsDirectory,
@@ -19,7 +20,9 @@ const {
   stopWindowsExecutableProcesses,
   targetRuntimeEnv,
   validateTransaction,
+  validateWorkerEntrypoint,
   verifyWindowsIncoming,
+  waitUntilDeadline,
 } = require('./update-worker');
 
 function writeFakeWindowsPE(file) {
@@ -33,7 +36,7 @@ function writeFakeWindowsPE(file) {
   fs.writeFileSync(file, bytes);
 }
 
-function writeWindowsRelease(root, version = '1.1.0') {
+function writeWindowsRelease(root, version = '1.1.0', installationId = `install-${'1'.repeat(32)}`) {
   const write = (relative, value) => {
     const file = path.join(root, ...relative);
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -41,6 +44,11 @@ function writeWindowsRelease(root, version = '1.1.0') {
   };
   write(['manifest.json'], `${JSON.stringify({ schemaVersion: 2, platform: 'windows', arch: 'amd64', version, portable: true, electron: true })}\n`);
   write(['resources', 'app', 'package.json'], `${JSON.stringify({ version })}\n`);
+  write(['.workass-installation.json'], `${JSON.stringify({
+    schemaVersion: 1,
+    product: 'Workass',
+    installationId,
+  })}\n`);
   for (const relative of [
     ['resources', 'app', 'update-manager.js'],
     ['resources', 'app', 'update-worker.js'],
@@ -63,12 +71,14 @@ function transactionFixture() {
   fs.mkdirSync(parent, { recursive: true });
   fs.mkdirSync(transactionRoot, { recursive: true });
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     updateId: 'update-fixture-1234',
     platform: 'darwin',
     currentVersion: '1.0.0',
     targetVersion: '1.1.0',
     shellPID: 44,
+    workerId: `worker-${'2'.repeat(32)}`,
+    installationId: `install-${'1'.repeat(32)}`,
     transactionRoot,
     installTarget: path.join(parent, 'Workass.app'),
     incomingTarget: path.join(parent, '.Workass.app.incoming-update-fixture-1234'),
@@ -77,6 +87,8 @@ function transactionFixture() {
     mutableStateBackupTarget: path.join(transactionRoot, 'state-before-activation'),
     failedMutableStateTarget: path.join(transactionRoot, 'state-from-failed-activation'),
     receiptPath: path.join(dataRoot, 'updates', 'receipt.json'),
+    journalPath: path.join(transactionRoot, 'journal.json'),
+    leasePath: path.join(transactionRoot, 'worker-lease.json'),
     daemonHealthURL: 'https://127.0.0.1:8788/workass/health',
     shellStatusURL: 'http://127.0.0.1:8798/__workass-shell/status',
     requireVisibleWindow: true,
@@ -101,8 +113,10 @@ function operations(overrides = {}) {
   return {
     calls,
     waitUntil: async (predicate) => predicate(),
+    pause: async () => {},
     shellExited: async () => true,
     stopDaemonService: async () => { calls.push('stop-service'); },
+    clearUpdateFence: async () => { calls.push('clear-fence'); return true; },
     daemonDown: async () => true,
     stopOldShell: async () => 0,
     verifyIncoming: async () => { calls.push('verify'); },
@@ -120,10 +134,61 @@ function operations(overrides = {}) {
   };
 }
 
+function verifyReleaseMarker(transaction, root, version) {
+  const expected = version === transaction.currentVersion ? 'old-release' : 'new-release';
+  assert.equal(fs.readFileSync(path.join(root, 'release.txt'), 'utf8'), expected);
+}
+
+function writeRecoveryJournal(transaction, overrides = {}) {
+  const journal = {
+    schemaVersion: 1,
+    updateId: transaction.updateId,
+    installationId: transaction.installationId,
+    installTarget: transaction.installTarget,
+    previousVersion: transaction.currentVersion,
+    targetVersion: transaction.targetVersion,
+    phase: 'armed',
+    shellStopped: true,
+    daemonStopped: true,
+    incomingVerified: true,
+    mutableStateSnapshotted: false,
+    activated: false,
+    healthVerified: false,
+    rollbackStarted: false,
+    rolledBack: false,
+    mutableStateRestored: false,
+    terminal: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+  fs.writeFileSync(transaction.journalPath, `${JSON.stringify(journal)}\n`);
+  return journal;
+}
+
+function writeWindowsBackupReceipt(transaction) {
+  fs.writeFileSync(path.join(transaction.transactionRoot, 'installed-before-activation.complete.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    updateId: transaction.updateId,
+    installationId: transaction.installationId,
+    version: transaction.currentVersion,
+    source: transaction.installTarget,
+    backup: transaction.backupTarget,
+    mirrorCompleted: true,
+    completedAt: new Date().toISOString(),
+  })}\n`);
+}
+
 test('transaction validation keeps macOS swap paths beside the app and Windows release paths inside its transaction', () => {
   const tx = transactionFixture();
   assert.equal(validateTransaction(tx), tx);
   assert.throws(() => validateTransaction({ ...tx, requireVisibleWindow: false }), /visible shell window/);
+  assert.throws(() => validateTransaction({
+    ...tx, incomingTarget: tx.installTarget, backupTarget: tx.installTarget,
+  }), /must be distinct/);
+  assert.throws(() => validateTransaction({
+    ...tx, incomingTarget: path.join(path.dirname(tx.installTarget), `.Workass.app.incoming-wrong-${tx.updateId}`),
+  }), /share one parent/);
   assert.throws(() => validateTransaction({ ...tx, backupTarget: path.join(path.dirname(path.dirname(tx.backupTarget)), 'elsewhere', 'old') }), /one parent/);
   assert.throws(() => validateTransaction({ ...tx, mutableStateTarget: path.dirname(tx.mutableStateTarget) }), /exact Workass state directory/);
   assert.throws(() => validateTransaction({ ...tx, mutableStateBackupTarget: path.join(path.dirname(tx.transactionRoot), 'state') }), /distinct children/);
@@ -138,6 +203,15 @@ test('transaction validation keeps macOS swap paths beside the app and Windows r
     ...windows,
     installTarget: path.dirname(windows.transactionRoot),
   }), /must not overlap/);
+});
+
+test('worker entrypoint is bound to the exact copied worker and transaction paths', () => {
+  const tx = transactionFixture();
+  const transactionPath = path.join(tx.transactionRoot, 'transaction.json');
+  const workerPath = path.join(tx.transactionRoot, 'update-worker.js');
+  assert.doesNotThrow(() => validateWorkerEntrypoint(transactionPath, tx, workerPath));
+  assert.throws(() => validateWorkerEntrypoint(path.join(path.dirname(tx.transactionRoot), 'transaction.json'), tx, workerPath), /transaction path/);
+  assert.throws(() => validateWorkerEntrypoint(transactionPath, tx, __filename), /does not belong/);
 });
 
 test('the swapped macOS daemon is healthy before the shell is launched', async () => {
@@ -258,6 +332,31 @@ test('Windows shell cleanup targets every process from only the exact portable e
   }), /no process receipt/);
 });
 
+test('daemon exit requires exact OS process or service evidence, never a silent health probe', () => {
+  const windows = windowsTransactionFixture();
+  let invocation = null;
+  assert.equal(daemonServiceIsDown(windows, {
+    run: (...args) => { invocation = args; return { status: 0, stdout: 'WORKASS_DAEMON_DOWN\r\n' }; },
+  }), true);
+  assert.equal(invocation[2].env.WORKASS_DAEMON_EXECUTABLE, path.join(windows.installTarget, 'workass-daemon.exe'));
+  assert.equal(daemonServiceIsDown(windows, {
+    run: () => ({ status: 3, stdout: 'WORKASS_DAEMON_RUNNING\r\n' }),
+  }), false);
+  assert.equal(daemonServiceIsDown(windows, {
+    run: () => ({ status: 0, stdout: '', error: new Error('WMI unavailable') }),
+  }), false);
+
+  const mac = transactionFixture();
+  mac.launchAgentPath = '/Users/test/Library/LaunchAgents/com.workass.daemon.plist';
+  mac.launchdDomain = 'gui/501';
+  assert.equal(daemonServiceIsDown(mac, {
+    run: () => ({ status: 113, stderr: 'Could not find service' }),
+  }), true);
+  assert.equal(daemonServiceIsDown(mac, {
+    run: () => ({ status: 0, stdout: 'pid = 9123' }),
+  }), false);
+});
+
 test('rollback path renames retry bounded transient file locks', async () => {
   let attempts = 0;
   const pauses = [];
@@ -308,7 +407,10 @@ test('Windows activation preserves the install directory and restores it by mirr
     fs.rmSync(destination, { recursive: true, force: true });
     fs.cpSync(source, destination, { recursive: true });
   };
-  const disk = defaultOperations(tx, { mirrorWindowsDirectory: mirror });
+  const disk = defaultOperations(tx, {
+    mirrorWindowsDirectory: mirror,
+    verifyWindowsTree: verifyReleaseMarker,
+  });
   await disk.activate();
   assert.equal(fs.readFileSync(path.join(tx.installTarget, 'release.txt'), 'utf8'), 'new-release');
   assert.equal(fs.existsSync(path.join(tx.installTarget, 'stale.txt')), false);
@@ -335,7 +437,10 @@ test('a partial Windows activation is rolled back before the previous runtime re
     fs.cpSync(source, destination, { recursive: true });
     if (mirrors === 2) throw new Error('activation mirror failed');
   };
-  const disk = defaultOperations(tx, { mirrorWindowsDirectory: mirror });
+  const disk = defaultOperations(tx, {
+    mirrorWindowsDirectory: mirror,
+    verifyWindowsTree: verifyReleaseMarker,
+  });
   const ops = operations({
     activate: disk.activate,
     rollback: disk.rollback,
@@ -350,8 +455,293 @@ test('a partial Windows activation is rolled back before the previous runtime re
   assert.equal(fs.existsSync(tx.incomingTarget), false);
 });
 
+test('Windows rebuilds an interrupted backup mirror only while the exact old install is intact', async () => {
+  const tx = windowsTransactionFixture();
+  fs.mkdirSync(tx.installTarget, { recursive: true });
+  fs.mkdirSync(tx.incomingTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.installTarget, 'release.txt'), 'old-release');
+  fs.writeFileSync(path.join(tx.installTarget, 'only-in-old.txt'), 'must-survive');
+  fs.writeFileSync(path.join(tx.incomingTarget, 'release.txt'), 'new-release');
+  let backupAttempts = 0;
+  const interrupted = defaultOperations(tx, {
+    verifyWindowsTree: verifyReleaseMarker,
+    mirrorWindowsDirectory: (source, destination) => {
+      if (source === tx.installTarget && destination === tx.backupTarget) {
+        backupAttempts += 1;
+        fs.mkdirSync(destination, { recursive: true });
+        fs.writeFileSync(path.join(destination, 'release.txt'), 'old-release');
+        throw new Error('simulated crash during backup mirror');
+      }
+      throw new Error('target mutation must not start without a committed backup');
+    },
+  });
+  await assert.rejects(() => interrupted.activate(), /simulated crash/);
+  assert.equal(fs.existsSync(path.join(tx.transactionRoot, 'installed-before-activation.complete.json')), false);
+  assert.equal(fs.existsSync(path.join(tx.backupTarget, 'only-in-old.txt')), false);
+
+  const mirrors = [];
+  const resumed = defaultOperations(tx, {
+    verifyWindowsTree: verifyReleaseMarker,
+    mirrorWindowsDirectory: (source, destination) => {
+      mirrors.push([source, destination]);
+      fs.rmSync(destination, { recursive: true, force: true });
+      fs.cpSync(source, destination, { recursive: true });
+    },
+  });
+  await resumed.activate();
+  assert.equal(backupAttempts, 1);
+  assert.deepEqual(mirrors, [
+    [tx.installTarget, tx.backupTarget],
+    [tx.incomingTarget, tx.installTarget],
+  ]);
+  assert.equal(fs.readFileSync(path.join(tx.backupTarget, 'only-in-old.txt'), 'utf8'), 'must-survive');
+  assert.equal(JSON.parse(fs.readFileSync(
+    path.join(tx.transactionRoot, 'installed-before-activation.complete.json'), 'utf8',
+  )).mirrorCompleted, true);
+});
+
+test('macOS resumes after activation completed before its checkpoint without replacing the verified backup', async () => {
+  const tx = transactionFixture();
+  fs.mkdirSync(tx.installTarget, { recursive: true });
+  fs.mkdirSync(tx.backupTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.installTarget, 'release.txt'), 'new-release');
+  fs.writeFileSync(path.join(tx.backupTarget, 'release.txt'), 'old-release');
+  writeRecoveryJournal(tx, {
+    phase: 'activating',
+    mutableStateSnapshotted: true,
+    activationStarted: true,
+  });
+  const disk = defaultOperations(tx, { verifyMacTree: verifyReleaseMarker });
+  let activationReconciliations = 0;
+  const ops = operations({
+    activate: async () => { activationReconciliations += 1; await disk.activate(); },
+    cleanup: disk.cleanup,
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'healthy');
+  assert.equal(activationReconciliations, 1);
+  assert.equal(fs.readFileSync(path.join(tx.installTarget, 'release.txt'), 'utf8'), 'new-release');
+  assert.equal(fs.existsSync(tx.backupTarget), false);
+  assert.doesNotMatch(ops.calls.join(','), /rollback|restore-state/);
+});
+
+test('Windows resumes after activation mirror completed before its checkpoint without overwriting the old backup', async () => {
+  const tx = windowsTransactionFixture();
+  fs.mkdirSync(tx.installTarget, { recursive: true });
+  fs.mkdirSync(tx.incomingTarget, { recursive: true });
+  fs.mkdirSync(tx.backupTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.installTarget, 'release.txt'), 'new-release');
+  fs.writeFileSync(path.join(tx.incomingTarget, 'release.txt'), 'new-release');
+  fs.writeFileSync(path.join(tx.backupTarget, 'release.txt'), 'old-release');
+  writeWindowsBackupReceipt(tx);
+  writeRecoveryJournal(tx, {
+    phase: 'activating',
+    mutableStateSnapshotted: true,
+    activationStarted: true,
+  });
+  const mirrors = [];
+  const mirror = (source, destination) => {
+    mirrors.push([source, destination]);
+    fs.rmSync(destination, { recursive: true, force: true });
+    fs.cpSync(source, destination, { recursive: true });
+  };
+  const disk = defaultOperations(tx, {
+    mirrorWindowsDirectory: mirror,
+    verifyWindowsTree: verifyReleaseMarker,
+  });
+  const ops = operations({ activate: disk.activate, cleanup: disk.cleanup });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'healthy');
+  assert.deepEqual(mirrors, [[tx.incomingTarget, tx.installTarget]]);
+  assert.equal(fs.readFileSync(path.join(tx.installTarget, 'release.txt'), 'utf8'), 'new-release');
+  assert.equal(fs.existsSync(tx.backupTarget), false);
+});
+
+test('macOS marks a verified backup rollback-ready when a post-rename target is corrupt', async () => {
+  const tx = transactionFixture();
+  fs.mkdirSync(tx.installTarget, { recursive: true });
+  fs.mkdirSync(tx.backupTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.installTarget, 'release.txt'), 'partial-release');
+  fs.writeFileSync(path.join(tx.backupTarget, 'release.txt'), 'old-release');
+  writeRecoveryJournal(tx, {
+    phase: 'activating',
+    mutableStateSnapshotted: true,
+    activationStarted: true,
+  });
+  const disk = defaultOperations(tx, { verifyMacTree: verifyReleaseMarker });
+  const ops = operations({
+    activate: disk.activate,
+    rollback: disk.rollback,
+    restoreMutableState: async () => {},
+    cleanupFailed: disk.cleanupFailed,
+    healthy: async (version) => version === tx.currentVersion,
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'rollback_healthy');
+  assert.equal(receipt.rolledBack, true);
+  assert.equal(fs.readFileSync(path.join(tx.installTarget, 'release.txt'), 'utf8'), 'old-release');
+});
+
+test('a completed mutable-state snapshot is reconciled when its checkpoint was lost', async () => {
+  const tx = transactionFixture();
+  fs.mkdirSync(tx.mutableStateTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.mutableStateTarget, 'provider-lanes.json'), '{"v":1}\n');
+  const disk = defaultOperations(tx, { verifyMacTree: verifyReleaseMarker });
+  await disk.snapshotMutableState();
+  writeRecoveryJournal(tx, { phase: 'snapshotting_state', snapshotStarted: true });
+  let snapshotReconciliations = 0;
+  const ops = operations({
+    snapshotMutableState: async () => { snapshotReconciliations += 1; await disk.snapshotMutableState(); },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'healthy');
+  assert.equal(snapshotReconciliations, 1);
+  assert.equal(fs.readFileSync(path.join(tx.mutableStateBackupTarget, 'state', 'provider-lanes.json'), 'utf8'), '{"v":1}\n');
+});
+
+test('a completed macOS rollback is reconciled when its checkpoint was lost', async () => {
+  const tx = transactionFixture();
+  fs.mkdirSync(tx.installTarget, { recursive: true });
+  fs.mkdirSync(tx.incomingTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.installTarget, 'release.txt'), 'old-release');
+  fs.writeFileSync(path.join(tx.incomingTarget, 'release.txt'), 'new-release');
+  writeRecoveryJournal(tx, {
+    phase: 'rollback_started',
+    mutableStateSnapshotted: false,
+    activated: true,
+    rollbackStarted: true,
+    rollbackReady: true,
+    rolledBack: false,
+    error: 'target health failed before worker exit',
+  });
+  const disk = defaultOperations(tx, { verifyMacTree: verifyReleaseMarker });
+  const ops = operations({
+    rollback: disk.rollback,
+    cleanupFailed: disk.cleanupFailed,
+    healthy: async (version) => version === tx.currentVersion,
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'rollback_healthy');
+  assert.equal(receipt.rolledBack, true);
+  assert.equal(fs.readFileSync(path.join(tx.installTarget, 'release.txt'), 'utf8'), 'old-release');
+});
+
+test('a completed Windows rollback mirror is reconciled when its checkpoint was lost', async () => {
+  const tx = windowsTransactionFixture();
+  fs.mkdirSync(tx.installTarget, { recursive: true });
+  fs.mkdirSync(tx.incomingTarget, { recursive: true });
+  fs.mkdirSync(tx.backupTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.installTarget, 'release.txt'), 'old-release');
+  fs.writeFileSync(path.join(tx.incomingTarget, 'release.txt'), 'new-release');
+  fs.writeFileSync(path.join(tx.backupTarget, 'release.txt'), 'old-release');
+  writeWindowsBackupReceipt(tx);
+  writeRecoveryJournal(tx, {
+    phase: 'rollback_started',
+    activated: true,
+    rollbackStarted: true,
+    rollbackReady: true,
+    rolledBack: false,
+    error: 'target health failed before worker exit',
+  });
+  const mirrors = [];
+  const mirror = (source, destination) => {
+    mirrors.push([source, destination]);
+    fs.rmSync(destination, { recursive: true, force: true });
+    fs.cpSync(source, destination, { recursive: true });
+  };
+  const disk = defaultOperations(tx, {
+    mirrorWindowsDirectory: mirror,
+    verifyWindowsTree: verifyReleaseMarker,
+  });
+  const ops = operations({
+    rollback: disk.rollback,
+    cleanupFailed: disk.cleanupFailed,
+    healthy: async (version) => version === tx.currentVersion,
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'rollback_healthy');
+  assert.equal(receipt.rolledBack, true);
+  assert.deepEqual(mirrors, [[tx.backupTarget, tx.installTarget]]);
+  assert.equal(fs.readFileSync(path.join(tx.installTarget, 'release.txt'), 'utf8'), 'old-release');
+});
+
+test('a completed mutable-state restore is reconciled when its checkpoint was lost', async () => {
+  const tx = transactionFixture();
+  fs.mkdirSync(tx.installTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.installTarget, 'release.txt'), 'old-release');
+  fs.mkdirSync(tx.mutableStateBackupTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.mutableStateBackupTarget, 'snapshot.json'), '{"schemaVersion":1,"existed":true}\n');
+  fs.mkdirSync(tx.mutableStateTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.mutableStateTarget, 'provider-lanes.json'), '{"v":1}\n');
+  fs.mkdirSync(tx.failedMutableStateTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.failedMutableStateTarget, 'provider-lanes.json'), '{"v":2}\n');
+  writeRecoveryJournal(tx, {
+    phase: 'restoring_state',
+    mutableStateSnapshotted: true,
+    activated: true,
+    rollbackStarted: true,
+    rollbackReady: true,
+    rolledBack: true,
+    stateRestoreStarted: true,
+    mutableStateRestored: false,
+    error: 'target health failed before worker exit',
+  });
+  const disk = defaultOperations(tx, { verifyMacTree: verifyReleaseMarker });
+  let restorations = 0;
+  const ops = operations({
+    restoreMutableState: async () => { restorations += 1; await disk.restoreMutableState(); },
+    cleanupFailed: disk.cleanupFailed,
+    healthy: async (version) => version === tx.currentVersion,
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'rollback_healthy');
+  assert.equal(receipt.mutableStateRolledBack, true);
+  assert.equal(restorations, 1);
+  assert.equal(fs.readFileSync(path.join(tx.mutableStateTarget, 'provider-lanes.json'), 'utf8'), '{"v":1}\n');
+});
+
+test('a health-verified target finishes after cleanup/checkpoint loss without a second rollback decision', async () => {
+  const tx = transactionFixture();
+  fs.mkdirSync(tx.installTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.installTarget, 'release.txt'), 'new-release');
+  writeRecoveryJournal(tx, {
+    phase: 'health_verified',
+    mutableStateSnapshotted: true,
+    activated: true,
+    healthVerified: true,
+  });
+  const ops = operations({
+    healthy: async () => { ops.calls.push('unexpected-health'); return false; },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'healthy');
+  assert.deepEqual(ops.calls, ['cleanup']);
+});
+
+test('a terminal journal reconstructs a missing receipt without repeating any update effect', async () => {
+  const tx = transactionFixture();
+  writeRecoveryJournal(tx, {
+    phase: 'healthy',
+    mutableStateSnapshotted: true,
+    activated: true,
+    healthVerified: true,
+    installedVersion: tx.targetVersion,
+    terminal: true,
+  });
+  const ops = operations({
+    verifyIncoming: async () => { throw new Error('verification repeated after terminal checkpoint'); },
+    activate: async () => { throw new Error('activation repeated after terminal checkpoint'); },
+    rollback: async () => { throw new Error('rollback repeated after terminal checkpoint'); },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'healthy');
+  assert.equal(receipt.installedVersion, tx.targetVersion);
+  assert.equal(receipt.installationId, tx.installationId);
+  assert.deepEqual(ops.calls, []);
+});
+
 test('activation health rejects a daemon that retained the previous bind mode', () => {
-  const shell = { controller: true, appVersion: '1.1.0' };
+  const shell = { controller: true, appVersion: '1.1.0', catalog: { readyModelCount: 1 } };
   assert.equal(runtimeIsHealthy({
     daemon: { app: 'workass', version: '1.1.0', bind: 'lan' },
     shell,
@@ -372,23 +762,118 @@ test('activation health can require a visible shell window', () => {
     controller: true,
     appVersion: '1.1.0',
     windowVisible: false,
+    catalog: { readyModelCount: 1 },
   };
   assert.equal(runtimeIsHealthy({ daemon, shell, expectedVersion: '1.1.0' }), true);
   assert.equal(runtimeIsHealthy({ daemon, shell, expectedVersion: '1.1.0', requireVisibleWindow: true }), false);
   assert.equal(runtimeIsHealthy({ daemon, shell: { ...shell, windowVisible: true }, expectedVersion: '1.1.0', requireVisibleWindow: true }), true);
 });
 
-test('activation does not roll back a healthy UI while provider catalogs are still hydrating', () => {
+test('activation requires controller authority and at least one ready catalog model', () => {
   const daemon = { app: 'workass', version: '1.1.0' };
-  const shell = {
+  const healthyShell = {
     controller: true,
     appVersion: '1.1.0',
     windowVisible: true,
-    catalog: { readyModelCount: 0 },
+    catalog: { readyModelCount: 1 },
   };
   assert.equal(runtimeIsHealthy({
-    daemon, shell, expectedVersion: '1.1.0', requireVisibleWindow: true,
+    daemon, shell: healthyShell, expectedVersion: '1.1.0', requireVisibleWindow: true,
   }), true);
+  assert.equal(runtimeIsHealthy({
+    daemon, shell: { ...healthyShell, controller: false }, expectedVersion: '1.1.0', requireVisibleWindow: true,
+  }), false);
+  assert.equal(runtimeIsHealthy({
+    daemon, shell: { ...healthyShell, catalog: { readyModelCount: 0 } }, expectedVersion: '1.1.0', requireVisibleWindow: true,
+  }), false);
+});
+
+test('activation health rejects a same-version shell owned by another portable installation', () => {
+  const tx = windowsTransactionFixture();
+  const daemon = { app: 'workass', version: tx.targetVersion };
+  const shell = {
+    controller: true,
+    appVersion: tx.targetVersion,
+    windowVisible: true,
+    catalog: { readyModelCount: 1 },
+    installationId: tx.installationId,
+    installTarget: tx.installTarget,
+  };
+  assert.equal(runtimeIsHealthy({
+    daemon,
+    shell,
+    expectedVersion: tx.targetVersion,
+    expectedInstallationId: tx.installationId,
+    expectedInstallTarget: tx.installTarget,
+    requireVisibleWindow: true,
+  }), true);
+  assert.equal(runtimeIsHealthy({
+    daemon,
+    shell: { ...shell, installationId: `install-${'f'.repeat(32)}` },
+    expectedVersion: tx.targetVersion,
+    expectedInstallationId: tx.installationId,
+    expectedInstallTarget: tx.installTarget,
+    requireVisibleWindow: true,
+  }), false);
+  assert.equal(runtimeIsHealthy({
+    daemon,
+    shell: { ...shell, installTarget: path.join(path.dirname(tx.installTarget), 'ForeignWorkass') },
+    expectedVersion: tx.targetVersion,
+    expectedInstallationId: tx.installationId,
+    expectedInstallTarget: tx.installTarget,
+    requireVisibleWindow: true,
+  }), false);
+});
+
+test('Windows worker requests idempotent loopback daemon shutdown before waiting for daemon exit', async () => {
+  const tx = windowsTransactionFixture();
+  const calls = [];
+  const disk = defaultOperations(tx, {
+    requestDaemonShutdown: async (url) => { calls.push(url); return true; },
+  });
+  await disk.stopDaemonService();
+  assert.deepEqual(calls, [tx.daemonHealthURL]);
+});
+
+test('worker retries the exact update cancel when the first success response is lost', async () => {
+  const tx = windowsTransactionFixture();
+  const calls = [];
+  const statuses = [0, 200];
+  const disk = defaultOperations(tx, {
+    requestUpdateCancel: async (url, updateId) => {
+      calls.push({ url, updateId });
+      return statuses.shift();
+    },
+  });
+  assert.equal(await disk.clearUpdateFence(), true);
+  assert.deepEqual(calls, [
+    { url: tx.daemonHealthURL, updateId: tx.updateId },
+    { url: tx.daemonHealthURL, updateId: tx.updateId },
+  ]);
+});
+
+test('an exited relaunch child can never make rollback kill a reused PID', async () => {
+  const tx = transactionFixture();
+  const child = new EventEmitter();
+  child.pid = 7331;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.unref = () => {};
+  const killed = [];
+  const disk = defaultOperations(tx, {
+    spawnProcess: () => child,
+    stopLaunchedProcessTree: async (pid) => { killed.push(pid); },
+    processOwnsExecutable: () => true,
+    requestDaemonShutdown: async () => true,
+    daemonServiceIsDown: () => true,
+  });
+  const launched = disk.launchInstalled({ updateRelaunch: true });
+  child.emit('spawn');
+  await launched;
+  child.exitCode = 0;
+  child.emit('exit', 0, null);
+  await disk.stopLaunched();
+  assert.deepEqual(killed, []);
 });
 
 test('installed process launch waits for Windows spawn acknowledgement and surfaces failure', async () => {
@@ -417,6 +902,7 @@ test('runtime recovery retries launch so a stale Electron singleton cannot stran
       for (let attempt = 0; attempt < 5; attempt += 1) if (await predicate(attempt)) return true;
       return false;
     },
+    pause: async () => {},
   }, '1.1.0', {
     updateRelaunch: true,
     relaunchIntervalMs: 5000,
@@ -429,6 +915,41 @@ test('runtime recovery retries launch so a stale Electron singleton cannot stran
     { updateRelaunch: true },
     { updateRelaunch: true },
   ]);
+});
+
+test('health and daemon polling honor one wall-clock deadline even when every probe consumes its timeout', async () => {
+  let clock = 0;
+  const probeTimeouts = [];
+  const healthy = await launchUntilHealthy({
+    launchInstalled: async () => {},
+    healthy: async (_version, timeoutMs) => { probeTimeouts.push(timeoutMs); clock += timeoutMs; return false; },
+    pause: async (ms) => { clock += ms; },
+  }, '1.1.0', {
+    attempts: 1000,
+    timeoutMs: 120000,
+    delayMs: 250,
+    now: () => clock,
+  });
+  assert.equal(healthy, false);
+  assert.ok(clock <= 120000);
+  assert.ok(probeTimeouts.every((timeout) => timeout > 0 && timeout <= 1500));
+
+  clock = 0;
+  const daemonTimeouts = [];
+  const down = await waitUntilDeadline(async (timeoutMs) => {
+    daemonTimeouts.push(timeoutMs);
+    clock += timeoutMs;
+    return false;
+  }, {
+    timeoutMs: 30000,
+    maxProbeMs: 600,
+    delayMs: 250,
+    now: () => clock,
+    pause: async (ms) => { clock += ms; },
+  });
+  assert.equal(down, false);
+  assert.ok(clock <= 30000);
+  assert.ok(daemonTimeouts.every((timeout) => timeout > 0 && timeout <= 600));
 });
 
 test('Windows target relaunch advertises recovery while rollback keeps older installed GUIs visible', async () => {
@@ -484,7 +1005,11 @@ test('the independent worker accepts the checksum-staged unsigned Windows portab
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-worker-windows-'));
   const incomingTarget = path.join(root, '.Workass.incoming-fixture');
   writeWindowsRelease(incomingTarget);
-  assert.doesNotThrow(() => verifyWindowsIncoming({ incomingTarget, targetVersion: '1.1.0' }));
+  assert.doesNotThrow(() => verifyWindowsIncoming({
+    incomingTarget,
+    targetVersion: '1.1.0',
+    installationId: `install-${'1'.repeat(32)}`,
+  }));
   const worker = fs.readFileSync(path.join(__dirname, 'update-worker.js'), 'utf8');
   assert.doesNotMatch(worker, /Get-AuthenticodeSignature/);
   assert.match(worker, /stopWindowsExecutableProcesses/);
@@ -530,6 +1055,22 @@ test('Windows force-stops the exact old Electron tree after the graceful quit bo
   ]);
 });
 
+test('commit-never-arrived shell-stop failure stays nonterminal until exact daemon admission is cleared', async () => {
+  const tx = windowsTransactionFixture();
+  const ops = operations({
+    shellExited: async () => false,
+    stopOldShell: async () => { throw new Error('profile process is locked'); },
+    daemonDown: async () => false,
+    clearUpdateFence: async () => false,
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'activating');
+  assert.match(receipt.error, /profile process is locked/);
+  const journal = JSON.parse(fs.readFileSync(tx.journalPath, 'utf8'));
+  assert.equal(journal.phase, 'admission_fence_pending');
+  assert.equal(journal.terminal, false);
+});
+
 test('Windows sweeps orphaned install processes even after the old main PID already exited', async () => {
   const tx = windowsTransactionFixture();
   const ops = operations({
@@ -565,8 +1106,12 @@ test('failed new runtime is rolled back and the old version must pass the same g
   assert.equal(receipt.phase, 'rollback_healthy');
   assert.equal(receipt.rolledBack, true);
   assert.equal(receipt.mutableStateRolledBack, true);
-  assert.deepEqual(ops.calls, [
-    'stop-service', 'verify', 'snapshot-state', 'activate', 'start-runtime', 'launch', 'healthy:1.1.0',
+  assert.deepEqual(ops.calls.slice(0, 6), [
+    'stop-service', 'verify', 'snapshot-state', 'activate', 'start-runtime', 'launch',
+  ]);
+  assert.ok(ops.calls.filter((call) => call === 'healthy:1.1.0').length > 0);
+  const rollbackStart = ops.calls.indexOf('stop-launched');
+  assert.deepEqual(ops.calls.slice(rollbackStart), [
     'stop-launched', 'rollback', 'restore-state', 'start-runtime', 'launch', 'healthy:1.0.0', 'cleanup-failed',
   ]);
 });
@@ -595,7 +1140,23 @@ test('daemon stop failure relaunches the untouched app instead of leaving Workas
   assert.equal(receipt.phase, 'rollback_healthy');
   assert.equal(receipt.activated, false);
   assert.equal(receipt.rolledBack, false);
-  assert.deepEqual(ops.calls, ['stop-service', 'launch', 'healthy:1.0.0']);
+  assert.deepEqual(ops.calls, ['stop-service', 'clear-fence', 'launch', 'healthy:1.0.0']);
+});
+
+test('daemon stop failure remains nonterminal while its exact update admission fence remains', async () => {
+  const tx = transactionFixture();
+  const ops = operations({
+    daemonDown: async () => false,
+    clearUpdateFence: async () => { ops.calls.push('clear-fence'); return false; },
+    healthy: async () => { throw new Error('health must not run behind a prepared update drain'); },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'activating');
+  assert.match(receipt.error, /admission fence did not clear/);
+  const journal = JSON.parse(fs.readFileSync(tx.journalPath, 'utf8'));
+  assert.equal(journal.phase, 'admission_fence_pending');
+  assert.equal(journal.terminal, false);
+  assert.deepEqual(ops.calls, ['stop-service', 'clear-fence']);
 });
 
 test('incoming verification failure relaunches the untouched previous release without a bogus rollback swap', async () => {
@@ -651,7 +1212,7 @@ test('failed activation restores the exact pre-upgrade mutable state before star
   fs.writeFileSync(path.join(tx.mutableStateTarget, 'chat-actors', 'chat.json'), '{"v":20}\n');
   const beforeProvider = fs.readFileSync(path.join(tx.mutableStateTarget, 'provider-lanes.json'));
   const beforeActor = fs.readFileSync(path.join(tx.mutableStateTarget, 'chat-actors', 'chat.json'));
-  const disk = defaultOperations(tx);
+  const disk = defaultOperations(tx, { verifyMacTree: verifyReleaseMarker });
   let starts = 0;
   const ops = operations({
     snapshotMutableState: disk.snapshotMutableState,

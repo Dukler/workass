@@ -303,7 +303,7 @@ func TestCoordinatorExecutesDurableProviderEffectsAndNormalizesOwnership(t *test
 	if executed, err := coordinator.ExecuteNext(context.Background()); err != nil || !executed {
 		t.Fatalf("execute create: executed=%v err=%v", executed, err)
 	}
-	if err := engine.Apply(Submit{OperationID: "op", Text: "question"}); err != nil {
+	if err := engine.Apply(Submit{OperationID: "op", Text: "question", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if executed, err := coordinator.ExecuteNext(context.Background()); err != nil || !executed {
@@ -371,7 +371,7 @@ func TestCoordinatorExactCancelPreemptsSlowSteerDrain(t *testing.T) {
 	if err := coordinator.Drain(context.Background()); err != nil {
 		t.Fatalf("create lane: %v", err)
 	}
-	if err := engine.Apply(Submit{OperationID: "turn", Text: "question"}); err != nil {
+	if err := engine.Apply(Submit{OperationID: "turn", Text: "question", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if executed, err := coordinator.ExecuteNext(context.Background()); err != nil || !executed {
@@ -384,7 +384,7 @@ func TestCoordinatorExactCancelPreemptsSlowSteerDrain(t *testing.T) {
 	lane.delivery.cancelStarted = cancelStarted
 	factory.mu.Unlock()
 
-	if err := engine.Apply(Steer{OperationID: "steer", Text: "redirect"}); err != nil {
+	if err := engine.Apply(Steer{OperationID: "steer", Text: "redirect", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	drainDone := make(chan error, 1)
@@ -459,7 +459,7 @@ func TestCoordinatorExactSteerPreemptsUnrelatedActorDrain(t *testing.T) {
 	if err := coordinator.Drain(context.Background()); err != nil {
 		t.Fatalf("create lane: %v", err)
 	}
-	if err := engine.Apply(Submit{OperationID: "turn", Text: "question"}); err != nil {
+	if err := engine.Apply(Submit{OperationID: "turn", Text: "question", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if executed, err := coordinator.ExecuteNext(context.Background()); err != nil || !executed {
@@ -492,7 +492,7 @@ func TestCoordinatorExactSteerPreemptsUnrelatedActorDrain(t *testing.T) {
 	lane.delivery.steerStarted = steerStarted
 	lane.delivery.steerRelease = steerRelease
 	factory.mu.Unlock()
-	if err := engine.Apply(Steer{OperationID: "steer", Text: "redirect"}); err != nil {
+	if err := engine.Apply(Steer{OperationID: "steer", Text: "redirect", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	started := time.Now()
@@ -577,7 +577,7 @@ func TestCoordinatorCanonicalizesProviderRealmOnlyBeforeFirstThread(t *testing.T
 	if err := engine.Apply(SelectLane{Identity: proposal, Owner: provider.AttachmentOwner{TabID: "tab"}, CWD: "/workspace"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := engine.Apply(Submit{OperationID: "queued-before-create", Text: "keep my target"}); err != nil {
+	if err := engine.Apply(Submit{OperationID: "queued-before-create", Text: "keep my target", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if executed, err := coordinator.ExecuteNext(context.Background()); err != nil || !executed {
@@ -672,7 +672,7 @@ func TestCrashAfterProviderContextImportReconcilesWithoutSecondImport(t *testing
 	if err := coordinator.Drain(context.Background()); err != nil {
 		t.Fatalf("create alpha: %v", err)
 	}
-	if err := engine.Apply(Submit{OperationID: "alpha-turn", Text: "question"}); err != nil {
+	if err := engine.Apply(Submit{OperationID: "alpha-turn", Text: "question", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if executed, err := coordinator.ExecuteNext(context.Background()); err != nil || !executed {

@@ -1,24 +1,31 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import test from 'node:test';
+import { after, before, test } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { createServer } from 'vite';
+import { createServer, type ViteDevServer } from 'vite';
 import type { ToolEvent } from '../src/store/types.ts';
 
-test('a collapsed multi-call tool group does not mount tool details or their heavy payloads', async (t) => {
+let server: ViteDevServer;
+let ToolGroup: React.ComponentType<{ tools: ToolEvent[] }>;
+
+before(async () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  const server = await createServer({
+  server = await createServer({
     root,
     server: { middlewareMode: true },
     appType: 'custom',
     logLevel: 'silent',
   });
-  t.after(async () => { await server.close(); });
-  const loaded = await server.ssrLoadModule('/src/components/messages.tsx') as {
+  ({ ToolGroup } = await server.ssrLoadModule('/src/components/messages.tsx') as {
     ToolGroup: React.ComponentType<{ tools: ToolEvent[] }>;
-  };
+  });
+});
+
+after(async () => { await server.close(); });
+
+test('a collapsed multi-call tool group does not mount tool details or their heavy payloads', () => {
   const tools: ToolEvent[] = [
     {
       key: 'heavy-1', at: 0, kind: 'tool', id: 'heavy-1', toolKind: 'execute',
@@ -34,7 +41,7 @@ test('a collapsed multi-call tool group does not mount tool details or their hea
 
   // A run of 2+ calls collapses to one summary line; the per-call details (and
   // their heavy payloads) stay unmounted until it is expanded.
-  const html = renderToStaticMarkup(React.createElement(loaded.ToolGroup, { tools }));
+  const html = renderToStaticMarkup(React.createElement(ToolGroup, { tools }));
   assert.match(html, /2 comandos/);
   assert.match(html, /2 llamadas/);
   assert.doesNotMatch(html, /class="tg-body"/);
@@ -47,25 +54,14 @@ test('a collapsed multi-call tool group does not mount tool details or their hea
 // call in a summary line AND a detail row, so the title showed twice and the
 // output took two opens. A single call now renders inline as its own line: one
 // title, no group wrapper, output still lazy behind the row's own toggle.
-test('a single tool call renders inline — title once, no group wrapper, output lazy', async (t) => {
-  const root = fileURLToPath(new URL('..', import.meta.url));
-  const server = await createServer({
-    root,
-    server: { middlewareMode: true },
-    appType: 'custom',
-    logLevel: 'silent',
-  });
-  t.after(async () => { await server.close(); });
-  const loaded = await server.ssrLoadModule('/src/components/messages.tsx') as {
-    ToolGroup: React.ComponentType<{ tools: ToolEvent[] }>;
-  };
+test('a single tool call renders inline — title once, no group wrapper, output lazy', () => {
   const tool: ToolEvent = {
     key: 'solo', at: 0, kind: 'tool', id: 'solo', toolKind: 'execute',
     title: 'mcp__workass-agent__workass_read_chat', status: 'completed', command: null,
     terminalId: null, input: null, output: 'verbose-read-chat-output', location: null,
   };
 
-  const html = renderToStaticMarkup(React.createElement(loaded.ToolGroup, { tools: [tool] }));
+  const html = renderToStaticMarkup(React.createElement(ToolGroup, { tools: [tool] }));
   // The row itself IS the collapsed line now — one evt, no summary/body wrapper.
   assert.match(html, /class="toolsolo"/);
   assert.match(html, /class="evt/);
@@ -77,18 +73,7 @@ test('a single tool call renders inline — title once, no group wrapper, output
   assert.doesNotMatch(html, /verbose-read-chat-output/);
 });
 
-test('a single-call image result renders as assistant media before its tool row', async (t) => {
-  const root = fileURLToPath(new URL('..', import.meta.url));
-  const server = await createServer({
-    root,
-    server: { middlewareMode: true },
-    appType: 'custom',
-    logLevel: 'silent',
-  });
-  t.after(async () => { await server.close(); });
-  const loaded = await server.ssrLoadModule('/src/components/messages.tsx') as {
-    ToolGroup: React.ComponentType<{ tools: ToolEvent[] }>;
-  };
+test('a single-call image result renders as assistant media before its tool row', () => {
   const tool: ToolEvent = {
     key: 'image-tool', at: 0, kind: 'tool', id: 'image-tool', toolKind: 'read',
     title: 'Render comparison', status: 'completed', command: null,
@@ -96,7 +81,7 @@ test('a single-call image result renders as assistant media before its tool row'
     images: [{ mimeType: 'image/png', data: 'cG5n', name: 'Option A' }],
   };
 
-  const html = renderToStaticMarkup(React.createElement(loaded.ToolGroup, { tools: [tool] }));
+  const html = renderToStaticMarkup(React.createElement(ToolGroup, { tools: [tool] }));
   const gallery = html.indexOf('class="tool-images"');
   const toolRow = html.indexOf('class="toolsolo"');
   assert.ok(gallery >= 0 && toolRow > gallery, 'image media must be a sibling before the tool row');
@@ -106,18 +91,7 @@ test('a single-call image result renders as assistant media before its tool row'
   assert.doesNotMatch(html, /hidden verbose output/);
 });
 
-test('a multi-call image result renders as assistant media before its grouped tool row', async (t) => {
-  const root = fileURLToPath(new URL('..', import.meta.url));
-  const server = await createServer({
-    root,
-    server: { middlewareMode: true },
-    appType: 'custom',
-    logLevel: 'silent',
-  });
-  t.after(async () => { await server.close(); });
-  const loaded = await server.ssrLoadModule('/src/components/messages.tsx') as {
-    ToolGroup: React.ComponentType<{ tools: ToolEvent[] }>;
-  };
+test('a multi-call image result renders as assistant media before its grouped tool row', () => {
   const tools: ToolEvent[] = [
     {
       key: 'image-tool', at: 0, kind: 'tool', id: 'image-tool', toolKind: 'read',
@@ -132,7 +106,7 @@ test('a multi-call image result renders as assistant media before its grouped to
     },
   ];
 
-  const html = renderToStaticMarkup(React.createElement(loaded.ToolGroup, { tools }));
+  const html = renderToStaticMarkup(React.createElement(ToolGroup, { tools }));
   const group = html.indexOf('class="toolgroup"');
   const summary = html.indexOf('class="tg-summary"');
   const gallery = html.indexOf('class="tool-images"');

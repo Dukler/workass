@@ -31,7 +31,7 @@ func TestRuntimeBackgroundOwnerRequiresExactOrigin(t *testing.T) {
 		LaneID: identity.ID, Thread: providercontract.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: providercontract.ContextCapabilities{ExactResume: true},
 	})
-	apply(chat.Submit{OperationID: "turn-op", Text: "run it"})
+	apply(chat.Submit{OperationID: "turn-op", Text: "run it", Presentation: providercontract.TurnPresentation{Origin: "human"}})
 	apply(chat.TurnAdmitted{OperationID: "turn-op", Accepted: true, Turn: providercontract.TurnRef{OperationID: "turn-op", NativeID: "native-turn"}})
 
 	if owner, ok := exactBackgroundOwner(state, acp.SpawnedWorkItem{ID: "work", ProviderID: "codex"}); ok {

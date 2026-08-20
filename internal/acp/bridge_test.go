@@ -127,9 +127,8 @@ func TestMockInitializeSessionPromptCancelErrorAndReuse(t *testing.T) {
 	job := startAppChatJob(t, manager, session.SessionID, "mock-tab", "hello from mock")
 	start := events.waitJobType(t, jobID(job), "start", 2*time.Second)
 	startJob := start["job"].(map[string]any)
-	// Renderer fixture: desktop/renderer/app.js:4901-4903 stores chatJobs by chatId,
-	// app.js:4932-4941 consumes job.chatId and sets the assistant status to "running",
-	// and app.js:4577-4578 is the tabRunning() predicate that drives the composer.
+	// The frozen renderer contract routes this start by chat identity and keeps
+	// the assistant turn running until its terminal event.
 	if startJob["chatId"] != "chat-mock-tab" || startJob["tabId"] != "mock-tab" || startJob["sessionId"] != session.SessionID || startJob["status"] != "running" {
 		t.Fatalf("start running-state job shape = %#v", startJob)
 	}
@@ -1628,33 +1627,6 @@ func TestFakePromptSerializationQueuesPerBridge(t *testing.T) {
 	}
 }
 
-func TestFakeHistoryIsNeverReplayedIntoProviderPrompt(t *testing.T) {
-	manager, events := newFakeManager(t, "echo-prompt", Options{})
-	t.Cleanup(func() { manager.Reset() })
-	session := newFakeSession(t, manager, "history-tab")
-	history := []any{map[string]any{"role": "user", "content": "earlier request", "at": "2026-07-10T00:00:00Z"}}
-
-	first, err := manager.StartJob(context.Background(), JobStartOptions{Kind: "app-chat", SessionID: session.SessionID, TabID: "history-tab", Prompt: "first live request", History: history})
-	if err != nil {
-		t.Fatalf("first job: %v", err)
-	}
-	firstEnd := events.waitJobEnd(t, jobID(first), 2*time.Second)
-	if result := jobFromEnd(firstEnd)["result"].(string); strings.Contains(result, "User: earlier request") || !strings.Contains(result, "User request:\nfirst live request") {
-		t.Fatalf("first provider prompt replayed Workass history: %q", result)
-	}
-
-	second, err := manager.StartJob(context.Background(), JobStartOptions{Kind: "app-chat", SessionID: session.SessionID, TabID: "history-tab", Prompt: "second live request", History: history})
-	if err != nil {
-		t.Fatalf("second job: %v", err)
-	}
-	secondEnd := events.waitJobEnd(t, jobID(second), 2*time.Second)
-	if result := jobFromEnd(secondEnd)["result"].(string); strings.Contains(result, "User: earlier request") ||
-		!strings.Contains(result, `Active Workass runtime for this turn: provider "custom"`) ||
-		!strings.Contains(result, "User request:\nsecond live request") {
-		t.Fatalf("second result should not replay history: %q", result)
-	}
-}
-
 func TestLifecyclePinnedNeverReapedTinyTTL(t *testing.T) {
 	manager, events := newFakeManager(t, "slow-prompt", Options{
 		HibernateTTL:           20 * time.Millisecond,
@@ -1791,10 +1763,9 @@ func TestWorkspaceMoveCreatesFreshEpochWithoutTranscriptReplay(t *testing.T) {
 	if ambiguous, ok := manager.nativeSessions.get(tabID, chatID, old.ProviderID); ok {
 		t.Fatalf("workspace-free lookup selected one of multiple epochs: %#v", ambiguous)
 	}
-	history := []any{map[string]any{"role": "user", "content": "canonical earlier turn", "at": "2026-07-13T00:00:00Z"}}
 	job, err := manager.StartJob(context.Background(), JobStartOptions{
 		Kind: "app-chat", SessionID: fresh.SessionID, TabID: tabID, ChatID: chatID, CWD: targetCWD,
-		Prompt: "run after move", History: history,
+		Prompt: "run after move",
 	})
 	if err != nil {
 		t.Fatalf("start after move: %v", err)
@@ -1802,8 +1773,8 @@ func TestWorkspaceMoveCreatesFreshEpochWithoutTranscriptReplay(t *testing.T) {
 	end := events.waitJobEnd(t, jobID(job), 2*time.Second)
 	assertJobStatus(t, end, "done", 0, "end_turn")
 	result := jobFromEnd(end)["result"].(string)
-	if strings.Contains(result, "User: canonical earlier turn") || strings.Contains(result, "Previous conversation") || !strings.Contains(result, "User request:\nrun after move") {
-		t.Fatalf("new workspace epoch replayed history or lost the current request: %q", result)
+	if !strings.Contains(result, "User request:\nrun after move") {
+		t.Fatalf("new workspace epoch lost the current request: %q", result)
 	}
 }
 
@@ -1872,15 +1843,13 @@ func TestLifecycleWithoutExactResumeFailsClosedAfterHibernation(t *testing.T) {
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "resurrect-tab")
 	t.Log("trace lifecycle spawn -> warm")
-	history := []any{map[string]any{"role": "user", "content": "earlier request", "at": "2026-07-10T00:00:00Z"}}
-
-	first := startAppChatJobWithHistory(t, manager, session.SessionID, "resurrect-tab", "first live request", history)
+	first := startAppChatJob(t, manager, session.SessionID, "resurrect-tab", "first live request")
 	active := waitProcState(t, manager, StateActive, 500*time.Millisecond)
 	t.Logf("trace lifecycle active(pinned) pid=%v rssKb=%v", active["pid"], active["rssKb"])
 	firstEnd := events.waitJobEnd(t, jobID(first), 2*time.Second)
 	assertJobStatus(t, firstEnd, "done", 0, "end_turn")
-	if result := jobFromEnd(firstEnd)["result"].(string); strings.Contains(result, "User: earlier request") || strings.Contains(result, "Previous conversation") || !strings.Contains(result, "User request:\nfirst live request") {
-		t.Fatalf("first turn replayed Workass history or lost the request: %q", result)
+	if result := jobFromEnd(firstEnd)["result"].(string); !strings.Contains(result, "User request:\nfirst live request") {
+		t.Fatalf("first turn lost the request: %q", result)
 	}
 	idle := waitProcState(t, manager, StateIdle, 500*time.Millisecond)
 	t.Logf("trace lifecycle idle lastLine=%q", idle["lastLine"])
@@ -2143,17 +2112,12 @@ func newMockSession(t *testing.T, manager *Manager, tabID string) SessionInfo {
 
 func startAppChatJob(t *testing.T, manager *Manager, sessionID, tabID, prompt string) map[string]any {
 	t.Helper()
-	return startAppChatJobWithHistory(t, manager, sessionID, tabID, prompt, nil)
-}
-
-func startAppChatJobWithHistory(t *testing.T, manager *Manager, sessionID, tabID, prompt string, history []any) map[string]any {
-	t.Helper()
-	job, err := manager.StartJob(context.Background(), JobStartOptions{Kind: "app-chat", SessionID: sessionID, ChatID: "chat-" + tabID, TabID: tabID, Prompt: prompt, History: history})
+	job, err := manager.StartJob(context.Background(), JobStartOptions{Kind: "app-chat", SessionID: sessionID, ChatID: "chat-" + tabID, TabID: tabID, Prompt: prompt})
 	if err != nil {
 		t.Fatalf("start job: %v", err)
 	}
-	// Renderer fixture: desktop/renderer/app.js:4921-4923 reads the job:start reply id
-	// and binds it to the assistant message created by app.js:4901-4903's chatId.
+	// The frozen renderer contract binds this reply id to the optimistic message
+	// pair addressed by the chat identity.
 	if job["id"] == "" || job["kind"] != "app-chat" || job["status"] != "running" {
 		t.Fatalf("job = %#v", job)
 	}
@@ -2324,9 +2288,8 @@ func assertJobStatus(t *testing.T, endPayload map[string]any, status string, cod
 
 func assertDataChunkShape(t *testing.T, payload map[string]any, id string) {
 	t.Helper()
-	// Renderer fixture: desktop/renderer/app.js:5206-5209 dispatches top-level
-	// {type:"data", id, chunk, stream}; app.js:5538-5539 requires stream=="stdout";
-	// app.js:4948-4953 appends chunk to the assistant message.
+	// The frozen renderer contract consumes top-level
+	// {type:"data", id, chunk, stream:"stdout"} events.
 	if payload["type"] != "data" || payload["id"] != id || payload["stream"] != "stdout" {
 		t.Fatalf("data chunk routing shape = %#v", payload)
 	}
@@ -3595,23 +3558,29 @@ func TestToolResultImagesAreBounded(t *testing.T) {
 	}
 }
 
-func TestMetaParentToolUseID(t *testing.T) {
-	onUpdate := metaParentToolUseID(
+func TestRegisteredNotificationAdapterDecodesToolParentID(t *testing.T) {
+	strategy := providerAdapterForID("claude").notifications
+	onUpdate := strategy.ToolParentID(
 		mapFromAny(map[string]any{"claudeCode": map[string]any{"parentToolUseId": "T9"}}),
 		map[string]any{},
 	)
 	if onUpdate != "T9" {
 		t.Fatalf("_meta on update: got %q, want T9", onUpdate)
 	}
-	onParams := metaParentToolUseID(
+	onParams := strategy.ToolParentID(
 		map[string]any{},
 		mapFromAny(map[string]any{"claudeCode": map[string]any{"parentToolUseId": "P5"}}),
 	)
 	if onParams != "P5" {
 		t.Fatalf("_meta on params: got %q, want P5", onParams)
 	}
-	if none := metaParentToolUseID(map[string]any{}, map[string]any{}); none != "" {
+	if none := strategy.ToolParentID(map[string]any{}, map[string]any{}); none != "" {
 		t.Fatalf("no _meta (main thread): got %q, want empty", none)
+	}
+	if leaked := providerAdapterForID("devin").notifications.ToolParentID(
+		map[string]any{"claudeCode": map[string]any{"parentToolUseId": "wrong-provider"}}, nil,
+	); leaked != "" {
+		t.Fatalf("generic ACP adapter consumed vendor metadata: %q", leaked)
 	}
 }
 

@@ -43,7 +43,18 @@ function setup(owner: Chat, startJob: (...args: any[]) => Promise<unknown>): any
   subject.state.activeId = owner.id;
   subject.state.connection = 'connected';
   subject.schedulePersist = () => {};
-  (globalThis as any).window = { api: { startJob } };
+  (globalThis as any).window = {
+    api: {
+      // A failed start invalidates the old provider attachment. Retrying the
+      // same turn must first bind a fresh lane, then reuse the turn identity.
+      appChatNewSession: async () => ({
+        sessionId: `session-${owner.id}-reattached`,
+        providerId: owner.providerId,
+        cwd: owner.cwd,
+      }),
+      startJob,
+    },
+  };
   return subject;
 }
 
@@ -79,7 +90,8 @@ test('retryTurn reuses the original job:start OperationID and exact message pair
     assert.equal(calls[1].operationId, userID);
     assert.equal(calls[1].userMessageId, userID);
     assert.equal(calls[1].assistantMessageId, assistantID);
-    assert.deepEqual(calls[1].history, calls[0].history);
+    assert.equal(Object.hasOwn(calls[0], 'history'), false, 'the actor owns provider history');
+    assert.equal(Object.hasOwn(calls[1], 'history'), false, 'a retry must not replay renderer transcript state');
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
@@ -113,36 +125,6 @@ test('a queued head reuses its operation and assistant identities after a lost j
     assert.equal(calls[1].assistantMessageId, calls[0].assistantMessageId);
     assert.equal(owner.queue, undefined);
     assert.equal(new Set(owner.messages.map((message: any) => message.id)).size, owner.messages.length);
-  } finally {
-    if (previousWindow === undefined) delete (globalThis as any).window;
-    else (globalThis as any).window = previousWindow;
-  }
-});
-
-test('a definite queued rejection does not feed the current operation back as provider history', async () => {
-  const calls: Array<Record<string, any>> = [];
-  let attempts = 0;
-  const previousWindow = (globalThis as any).window;
-  try {
-    const owner = chat('tab-queued-history-retry');
-    owner.queue = [{ id: 'queue-history-retry', text: 'do not duplicate this' }];
-    const subject = setup(owner, async (opts: Record<string, unknown>) => {
-      calls.push({ ...opts });
-      attempts += 1;
-      // null models a definite start rejection after the renderer has created
-      // its optimistic pair; the next FIFO attempt is the same operation.
-      return attempts === 1 ? null : { id: 'job-history-retried' };
-    });
-
-    await subject.flushNextQueued(owner);
-    await subject.flushNextQueued(owner);
-
-    assert.equal(calls.length, 2);
-    const history = Array.isArray(calls[1].history) ? calls[1].history : [];
-    assert.equal(history.some((row: any) => row.id === 'queue-history-retry'), false);
-    assert.equal(history.some((row: any) => row.id === 'queue-assistant-queue-history-retry'), false);
-    assert.equal(calls[1].operationId, 'queue-history-retry');
-    assert.equal(owner.queue, undefined);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;

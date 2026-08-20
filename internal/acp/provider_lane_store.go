@@ -112,10 +112,6 @@ func newNativeSessionLedger(stateDir string, machineIDs ...string) *nativeSessio
 		return ledger
 	}
 	ledger.path = filepath.Join(stateDir, nativeSessionLedgerFilename)
-	if err := upgradeProviderLaneStoreV8(ledger.path, ledger.machineID); err != nil {
-		ledger.loadErr = err
-		return ledger
-	}
 	raw, err := os.ReadFile(ledger.path)
 	if err != nil {
 		if !os.IsNotExist(err) {

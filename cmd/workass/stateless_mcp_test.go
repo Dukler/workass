@@ -575,17 +575,32 @@ func TestBrowserStatelessMCPRejectsLiveManagerOwnerAfterActorDeletion(t *testing
 func TestBrowserStatelessMCPMutationJournalReadbackConflictAndActorFence(t *testing.T) {
 	harness := newStatelessMCPTestHarness(t)
 	controlFile := filepath.Join(t.TempDir(), "browser-control.json")
-	if err := os.WriteFile(controlFile, []byte(`{"version":1,"url":"http://browser-control.invalid/rpc","token":"browser-control-token"}`), 0o600); err != nil {
+	if err := os.WriteFile(controlFile, []byte(`{"version":2,"url":"http://127.0.0.1:43123/rpc","token":"browser-control-token","pid":123,"instanceId":"`+browserTestInstanceID+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var externalCalls int
 	var receiptCalls int
 	receiptAvailable := true
+	controlAvailable := true
 	var lastOperationID, lastDigest string
 	client := &http.Client{Transport: browserRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if !controlAvailable {
+			return nil, errors.New("simulated absent browser shell")
+		}
 		var payload map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
+		}
+		if payload["instanceId"] != browserTestInstanceID {
+			t.Fatalf("browser control instance = %#v", payload["instanceId"])
+		}
+		if payload["method"] == "browser.controlStatus" {
+			body, _ := json.Marshal(map[string]any{
+				"id": payload["id"], "result": map[string]any{
+					"ready": true, "controller": true, "instanceId": browserTestInstanceID,
+				},
+			})
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
 		}
 		operationID := toString(payload["operationId"])
 		digest := toString(payload["requestDigest"])
@@ -689,10 +704,12 @@ func TestBrowserStatelessMCPMutationJournalReadbackConflictAndActorFence(t *test
 	}
 	receiptAvailable = false
 	receiptCalls = 0
+	controlAvailable = false
 	status, response = request(6, "browser-completed-once", "#completed")
 	if status != http.StatusOK || mapFromAnyMain(response["result"])["isError"] == true || externalCalls != 3 || receiptCalls != 0 {
 		t.Fatalf("completed actor receipt status=%d calls=%d receiptCalls=%d response=%#v", status, externalCalls, receiptCalls, response)
 	}
+	controlAvailable = true
 
 	status, response = request(7, "browser-reject-once", "#reject")
 	if status != http.StatusOK || mapFromAnyMain(response["result"])["isError"] != true || externalCalls != 4 {
@@ -714,5 +731,129 @@ func TestBrowserStatelessMCPMutationJournalReadbackConflictAndActorFence(t *test
 	status, _ = request(9, "browser-deleted", "#deleted")
 	if status != http.StatusUnauthorized || externalCalls != 4 {
 		t.Fatalf("deleted actor browser mutation status=%d calls=%d", status, externalCalls)
+	}
+}
+
+func TestBrowserStatelessMCPUnreadyControlDoesNotClaimActorMutation(t *testing.T) {
+	harness := newStatelessMCPTestHarness(t)
+	controlFile := filepath.Join(t.TempDir(), "browser-control.json")
+	if err := os.WriteFile(controlFile, []byte(`{"version":2,"url":"http://127.0.0.1:43123/rpc","token":"browser-control-token","pid":123,"instanceId":"`+browserTestInstanceID+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reachable := false
+	controller := false
+	probeCalls := 0
+	mutationCalls := 0
+	handler, ok := newBrowserStatelessMCPHandler(harness.manager, controlFile, harness.runtime).(*statelessMCPHandler)
+	if !ok {
+		t.Fatal("browser stateless MCP handler has unexpected concrete type")
+	}
+	handler.browserClient = &http.Client{Transport: browserRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if !reachable {
+			probeCalls++
+			return nil, errors.New("fixture shell is unavailable")
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["method"] == "browser.controlStatus" {
+			probeCalls++
+			body, _ := json.Marshal(map[string]any{
+				"id": payload["id"], "result": map[string]any{
+					"ready": true, "controller": controller, "instanceId": browserTestInstanceID,
+				},
+			})
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
+		}
+		mutationCalls++
+		body, _ := json.Marshal(map[string]any{
+			"id": payload["id"], "operationId": payload["operationId"], "requestDigest": payload["requestDigest"],
+			"receipt": true, "result": map[string]any{"clicked": true},
+		})
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+	server := httptest.NewTLSServer(handler)
+	defer server.Close()
+
+	requestMutation := func(id int, operationID string) (int, map[string]any) {
+		t.Helper()
+		params := map[string]any{
+			"name": "workass_browser_click",
+			"arguments": map[string]any{
+				"operation_id": operationID, "tab_id": 7, "selector": "#save",
+			},
+			"_meta": map[string]any{
+				"io.modelcontextprotocol/protocolVersion":    statelessMCPProtocolVersion,
+				"io.modelcontextprotocol/clientCapabilities": map[string]any{},
+			},
+		}
+		body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params})
+		req, err := http.NewRequest(http.MethodPost, server.URL+browserMCPPath, bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer mcp-owner")
+		req.Header.Set("X-Workass-Chat-ID", "mcp-chat")
+		req.Header.Set("X-Workass-Tab-ID", "mcp-tab")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("MCP-Protocol-Version", statelessMCPProtocolVersion)
+		req.Header.Set("Mcp-Method", "tools/call")
+		req.Header.Set("Mcp-Name", "workass_browser_click")
+		reply, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reply.Body.Close()
+		var response map[string]any
+		if err := json.NewDecoder(reply.Body).Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+		return reply.StatusCode, response
+	}
+	assertNoMutation := func(operationID string) {
+		t.Helper()
+		state, exists := harness.runtime.Snapshot("mcp-chat")
+		if !exists {
+			t.Fatal("actor snapshot disappeared")
+		}
+		for _, entry := range state.Outbox {
+			if entry.Kind == chat.EffectExternalMutation && entry.OperationID == providercontract.OperationID(operationID) {
+				t.Fatalf("unready browser control was durably claimed: %#v", entry)
+			}
+		}
+	}
+
+	status, response := requestMutation(1, "browser-stale-no-claim")
+	if status != http.StatusOK || mapFromAnyMain(response["result"])["isError"] != true || probeCalls != 1 {
+		t.Fatalf("stale mutation status=%d probeCalls=%d response=%#v", status, probeCalls, response)
+	}
+	assertNoMutation("browser-stale-no-claim")
+
+	reachable = true
+	status, response = requestMutation(2, "browser-controller-no-claim")
+	if status != http.StatusOK || mapFromAnyMain(response["result"])["isError"] != true || mutationCalls != 0 {
+		t.Fatalf("non-controller mutation status=%d mutationCalls=%d response=%#v", status, mutationCalls, response)
+	}
+	assertNoMutation("browser-controller-no-claim")
+
+	controller = true
+	status, response = requestMutation(3, "browser-controller-no-claim")
+	if status != http.StatusOK || mapFromAnyMain(response["result"])["isError"] == true || mutationCalls != 1 {
+		t.Fatalf("controller retry status=%d mutationCalls=%d response=%#v", status, mutationCalls, response)
+	}
+	state, exists := harness.runtime.Snapshot("mcp-chat")
+	if !exists {
+		t.Fatal("actor snapshot disappeared after controller retry")
+	}
+	foundCompleted := false
+	for _, entry := range state.Outbox {
+		if entry.Kind == chat.EffectExternalMutation && entry.OperationID == "browser-controller-no-claim" {
+			foundCompleted = entry.Status == chat.OutboxCompleted
+		}
+	}
+	if !foundCompleted {
+		t.Fatal("same stable operation did not complete after controller acquisition")
 	}
 }

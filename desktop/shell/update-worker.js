@@ -12,6 +12,34 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const INSTALLATION_IDENTITY_FILE = '.workass-installation.json';
+const RECEIPT_SCHEMA_VERSION = 2;
+const TRANSACTION_SCHEMA_VERSION = 3;
+const JOURNAL_SCHEMA_VERSION = 1;
+const LEASE_SCHEMA_VERSION = 1;
+const WINDOWS_BACKUP_RECEIPT = 'installed-before-activation.complete.json';
+
+function validInstallationId(value) {
+  return /^install-[a-f0-9]{32}$/.test(String(value || ''));
+}
+
+function validWorkerId(value) {
+  return /^worker-[a-f0-9]{32}$/.test(String(value || ''));
+}
+
+function installationIdentityPath(installTarget) {
+  return path.join(installTarget, INSTALLATION_IDENTITY_FILE);
+}
+
+function readInstallationIdentity(installTarget) {
+  try {
+    const identity = JSON.parse(fs.readFileSync(installationIdentityPath(installTarget), 'utf8'));
+    if (identity?.schemaVersion !== 1 || identity.product !== 'Workass' || !validInstallationId(identity.installationId)) return null;
+    return identity;
+  } catch {
+    return null;
+  }
+}
 
 // The worker is forked by the release being replaced. Runtime values inherited
 // from that old shell must not override the profile inside the newly installed
@@ -33,15 +61,25 @@ function targetRuntimeEnv(source = process.env) {
   return clean;
 }
 
-function runtimeIsHealthy({ daemon, shell, expectedVersion, expectedBind = '', requireVisibleWindow = false }) {
+function runtimeIsHealthy({
+  daemon,
+  shell,
+  expectedVersion,
+  expectedBind = '',
+  expectedInstallationId = '',
+  expectedInstallTarget = '',
+  requireVisibleWindow = false,
+}) {
+  const sameInstallTarget = !expectedInstallTarget || (process.platform === 'win32'
+    ? path.win32.normalize(String(shell?.installTarget || '')).toLowerCase() === path.win32.normalize(expectedInstallTarget).toLowerCase()
+    : path.resolve(String(shell?.installTarget || '')) === path.resolve(expectedInstallTarget));
   return daemon?.app === 'workass' && daemon?.version === expectedVersion &&
     (!expectedBind || daemon?.bind === expectedBind) &&
-    // The renderer owning controller authority proves that its bridge loaded
-    // and reached the daemon. Provider catalogs hydrate independently and may
-    // legitimately take longer than an update transaction on a slow network;
-    // treating that as an activation failure killed an otherwise healthy app.
+    (!expectedInstallationId || shell?.installationId === expectedInstallationId) &&
+    sameInstallTarget &&
     shell?.controller === true &&
     shell?.appVersion === expectedVersion &&
+    Number.isSafeInteger(shell?.catalog?.readyModelCount) && shell.catalog.readyModelCount > 0 &&
     (!requireVisibleWindow || shell?.windowVisible === true);
 }
 
@@ -73,16 +111,22 @@ function atomicJSON(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const incoming = `${file}.incoming-${process.pid}`;
   fs.writeFileSync(incoming, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  const descriptor = fs.openSync(incoming, 'r');
+  try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
   fs.renameSync(incoming, file);
 }
 
 function updateReceipt(transaction, phase, extra = {}) {
   const receipt = {
-    schemaVersion: 1,
+    schemaVersion: RECEIPT_SCHEMA_VERSION,
     updateId: transaction.updateId,
     phase,
     previousVersion: transaction.currentVersion,
     targetVersion: transaction.targetVersion,
+    installationId: transaction.installationId,
+    installTarget: transaction.installTarget,
+    workerId: transaction.workerId,
+    workerPID: process.pid,
     updatedAt: new Date().toISOString(),
     ...extra,
   };
@@ -90,9 +134,87 @@ function updateReceipt(transaction, phase, extra = {}) {
   return receipt;
 }
 
+function readJournal(transaction) {
+  try {
+    const journal = JSON.parse(fs.readFileSync(transaction.journalPath, 'utf8'));
+    if (journal?.schemaVersion !== JOURNAL_SCHEMA_VERSION || journal.updateId !== transaction.updateId ||
+        journal.installationId !== transaction.installationId ||
+        path.resolve(String(journal.installTarget || '')) !== path.resolve(transaction.installTarget) ||
+        journal.previousVersion !== transaction.currentVersion || journal.targetVersion !== transaction.targetVersion) {
+      throw new Error('update recovery journal identity does not match');
+    }
+    return journal;
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+function checkpoint(transaction, previous, phase, patch = {}) {
+  const journal = {
+    ...previous,
+    ...patch,
+    schemaVersion: JOURNAL_SCHEMA_VERSION,
+    updateId: transaction.updateId,
+    installationId: transaction.installationId,
+    installTarget: transaction.installTarget,
+    previousVersion: transaction.currentVersion,
+    targetVersion: transaction.targetVersion,
+    createdAt: previous?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    phase,
+  };
+  atomicJSON(transaction.journalPath, journal);
+  return journal;
+}
+
+function startWorkerLease(transaction, {
+  repeat = setInterval,
+  cancelRepeat = clearInterval,
+} = {}) {
+  if (process.env.WORKASS_UPDATE_WORKER_ID !== transaction.workerId) {
+    throw new Error('independent update worker identity does not match the transaction');
+  }
+  const base = {
+    schemaVersion: LEASE_SCHEMA_VERSION,
+    updateId: transaction.updateId,
+    installationId: transaction.installationId,
+    workerId: transaction.workerId,
+    pid: process.pid,
+    workerPath: path.resolve(__filename),
+    transactionPath: path.join(transaction.transactionRoot, 'transaction.json'),
+    startedAt: new Date().toISOString(),
+  };
+  const write = (state) => atomicJSON(transaction.leasePath, {
+    ...base,
+    state,
+    updatedAt: new Date().toISOString(),
+  });
+  write('running');
+  const timer = repeat(() => write('running'), 1000);
+  timer.unref?.();
+  return {
+    stop(state = 'terminal') {
+      cancelRepeat(timer);
+      write(state);
+    },
+  };
+}
+
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 1) return false;
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function processOwnsExecutable(pid, executable, {
+  platform = process.platform,
+  run = spawnSync,
+} = {}) {
+  if (!Number.isInteger(pid) || pid <= 1 || platform === 'win32') return false;
+  const result = run('/bin/ps', ['-p', String(pid), '-o', 'command='], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  return !result.error && result.status === 0 && String(result.stdout || '').includes(path.resolve(executable));
 }
 
 async function stopLaunchedProcessTree(pid, {
@@ -166,6 +288,45 @@ Write-Output "WORKASS_STOPPED=$($targets.Count)"
   return Number(match[1]);
 }
 
+function daemonServiceIsDown(transaction, { run = spawnSync } = {}) {
+  if (transaction.platform === 'win32') {
+    const executable = path.join(transaction.installTarget, 'workass-daemon.exe');
+    const script = String.raw`
+$ErrorActionPreference = 'Stop'
+$target = [IO.Path]::GetFullPath($env:WORKASS_DAEMON_EXECUTABLE)
+$running = @(
+  Get-Process -Name workass-daemon -ErrorAction SilentlyContinue | Where-Object {
+    try {
+      $_.Path -and [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($_.Path), $target)
+    } catch { $false }
+  }
+)
+if ($running.Count -eq 0) { Write-Output 'WORKASS_DAEMON_DOWN'; exit 0 }
+Write-Output 'WORKASS_DAEMON_RUNNING'
+exit 3
+`;
+    const result = run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, WORKASS_DAEMON_EXECUTABLE: executable },
+    });
+    return !result.error && result.status === 0 && /\bWORKASS_DAEMON_DOWN\b/.test(String(result.stdout || ''));
+  }
+  if (transaction.platform === 'darwin') {
+    const launchAgentPath = String(transaction.launchAgentPath || '');
+    const launchdDomain = String(transaction.launchdDomain || '');
+    const label = path.basename(launchAgentPath, '.plist');
+    if (!launchAgentPath || !launchdDomain || !label) return false;
+    const result = run('/bin/launchctl', ['print', `${launchdDomain}/${label}`], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (result.error || result.status === 0) return false;
+    return result.status === 113 || /could not find service/i.test(String(result.stderr || ''));
+  }
+  return false;
+}
+
 async function renamePathWithRetry(source, destination, {
   rename = fs.renameSync,
   pause = delay,
@@ -226,6 +387,27 @@ async function waitUntil(predicate, { attempts = 160, delayMs = 250 } = {}) {
   return false;
 }
 
+async function waitUntilDeadline(predicate, {
+  timeoutMs,
+  delayMs = 250,
+  maxProbeMs = 1500,
+  now = Date.now,
+  pause = delay,
+  maxAttempts = Math.ceil(timeoutMs / Math.max(1, delayMs)) + 2,
+} = {}) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('bounded wait requires a positive timeout');
+  const deadline = now() + timeoutMs;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const remaining = deadline - now();
+    if (remaining <= 0) return false;
+    if (await predicate(Math.max(1, Math.min(maxProbeMs, remaining)), attempt)) return true;
+    const afterProbe = deadline - now();
+    if (afterProbe <= 0) return false;
+    await pause(Math.min(delayMs, afterProbe));
+  }
+  return false;
+}
+
 function requestJSON(url, timeoutMs = 1500) {
   return new Promise((resolve) => {
     let parsed;
@@ -266,6 +448,35 @@ function requestDaemonShutdown(healthURL, timeoutMs = 1500) {
     request.on('timeout', () => { request.destroy(); resolve(false); });
     request.on('error', () => resolve(false));
     request.end();
+  });
+}
+
+function requestUpdateCancel(healthURL, updateId, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    let parsed;
+    try { parsed = new URL('/workass/update/cancel', healthURL); } catch { resolve(0); return; }
+    if (!['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname) ||
+        !/^[A-Za-z0-9_-]{8,96}$/.test(String(updateId || ''))) {
+      resolve(0);
+      return;
+    }
+    const transport = parsed.protocol === 'https:' ? https : http;
+    const body = Buffer.from(JSON.stringify({ updateId }));
+    const request = transport.request(parsed, {
+      method: 'POST',
+      timeout: timeoutMs,
+      rejectUnauthorized: false,
+      headers: {
+        'content-type': 'application/json',
+        'content-length': body.length,
+      },
+    }, (response) => {
+      response.resume();
+      response.on('end', () => resolve(response.statusCode || 0));
+    });
+    request.on('timeout', () => { request.destroy(); resolve(0); });
+    request.on('error', () => resolve(0));
+    request.end(body);
   });
 }
 
@@ -345,30 +556,77 @@ function verifyWindowsIncoming(transaction) {
     [['frontier-hosts', 'windows-amd64', 'codex-native-host.mjs'], 'Codex host'],
     [['frontier-hosts', 'windows-amd64', 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'sdk.mjs'], 'Claude Agent SDK'],
   ]) requiredRegularFile(path.join(root, ...relative), label);
+  const identity = readInstallationIdentity(root);
+  if (!identity || identity.installationId !== transaction.installationId) {
+    throw new Error('incoming Windows release does not belong to this portable installation');
+  }
+}
+
+function verifyMacTree(transaction, root, version) {
+  verifyMacIncoming({ ...transaction, incomingTarget: root, targetVersion: version });
+}
+
+function verifyWindowsTree(transaction, root, version) {
+  verifyWindowsIncoming({ ...transaction, incomingTarget: root, targetVersion: version });
+}
+
+function windowsBackupReceiptPath(transaction) {
+  return path.join(transaction.transactionRoot, WINDOWS_BACKUP_RECEIPT);
+}
+
+function validWindowsBackupReceipt(transaction) {
+  try {
+    const receipt = JSON.parse(fs.readFileSync(windowsBackupReceiptPath(transaction), 'utf8'));
+    return receipt?.schemaVersion === 1 && receipt.updateId === transaction.updateId &&
+      receipt.installationId === transaction.installationId &&
+      receipt.version === transaction.currentVersion &&
+      path.resolve(String(receipt.source || '')) === path.resolve(transaction.installTarget) &&
+      path.resolve(String(receipt.backup || '')) === path.resolve(transaction.backupTarget) &&
+      receipt.mirrorCompleted === true;
+  } catch {
+    return false;
+  }
+}
+
+function commitWindowsBackupReceipt(transaction) {
+  atomicJSON(windowsBackupReceiptPath(transaction), {
+    schemaVersion: 1,
+    updateId: transaction.updateId,
+    installationId: transaction.installationId,
+    version: transaction.currentVersion,
+    source: transaction.installTarget,
+    backup: transaction.backupTarget,
+    mirrorCompleted: true,
+    completedAt: new Date().toISOString(),
+  });
 }
 
 function validateTransaction(transaction) {
-  if (!transaction || transaction.schemaVersion !== 2) throw new Error('unsupported update transaction');
+  if (!transaction || transaction.schemaVersion !== TRANSACTION_SCHEMA_VERSION) throw new Error('unsupported update transaction');
   if (!/^[A-Za-z0-9_-]{8,96}$/.test(String(transaction.updateId || ''))) throw new Error('update transaction has an invalid updateId');
+  if (!validInstallationId(transaction.installationId)) throw new Error('update transaction has an invalid installation identity');
+  if (!validWorkerId(transaction.workerId)) throw new Error('update transaction has an invalid worker identity');
   if (transaction.requireVisibleWindow !== true) throw new Error('update transaction must require a visible shell window');
   for (const field of [
     'updateId', 'platform', 'currentVersion', 'targetVersion',
     'transactionRoot', 'installTarget', 'incomingTarget', 'backupTarget',
     'mutableStateTarget', 'mutableStateBackupTarget', 'failedMutableStateTarget',
-    'receiptPath', 'daemonHealthURL', 'shellStatusURL',
+    'receiptPath', 'journalPath', 'leasePath', 'daemonHealthURL', 'shellStatusURL',
   ]) {
     if (!String(transaction[field] || '').trim()) throw new Error(`update transaction is missing ${field}`);
   }
   for (const field of [
     'transactionRoot', 'installTarget', 'incomingTarget', 'backupTarget',
-    'mutableStateTarget', 'mutableStateBackupTarget', 'failedMutableStateTarget', 'receiptPath',
+    'mutableStateTarget', 'mutableStateBackupTarget', 'failedMutableStateTarget', 'receiptPath', 'journalPath', 'leasePath',
   ]) {
     if (!path.isAbsolute(transaction[field])) throw new Error(`${field} must be absolute`);
   }
   const updateRoot = path.dirname(path.dirname(transaction.transactionRoot));
   const dataRoot = path.dirname(updateRoot);
   if (transaction.transactionRoot !== path.join(updateRoot, 'transactions', transaction.updateId) ||
-      transaction.receiptPath !== path.join(updateRoot, 'receipt.json')) {
+      transaction.receiptPath !== path.join(updateRoot, 'receipt.json') ||
+      transaction.journalPath !== path.join(transaction.transactionRoot, 'journal.json') ||
+      transaction.leasePath !== path.join(transaction.transactionRoot, 'worker-lease.json')) {
     throw new Error('update transaction paths do not belong to the exact update directory');
   }
   if (transaction.mutableStateTarget !== path.join(dataRoot, 'state') || dataRoot === path.parse(dataRoot).root) {
@@ -381,9 +639,16 @@ function validateTransaction(transaction) {
       transaction.failedMutableStateTarget === transaction.mutableStateTarget) {
     throw new Error('mutable state rollback paths must be distinct children of the update transaction');
   }
+  const releaseTargets = [transaction.installTarget, transaction.incomingTarget, transaction.backupTarget]
+    .map((target) => path.resolve(target));
+  if (new Set(releaseTargets).size !== releaseTargets.length) {
+    throw new Error('installed, incoming, and rollback release paths must be distinct');
+  }
   if (transaction.platform === 'darwin') {
     const installParent = path.dirname(transaction.installTarget);
-    if (path.dirname(transaction.incomingTarget) !== installParent || path.dirname(transaction.backupTarget) !== installParent) {
+    if (path.dirname(transaction.incomingTarget) !== installParent || path.dirname(transaction.backupTarget) !== installParent ||
+        transaction.incomingTarget !== path.join(installParent, `.Workass.app.incoming-${transaction.updateId}`) ||
+        transaction.backupTarget !== path.join(installParent, `.Workass.app.previous-${transaction.updateId}`)) {
       throw new Error('macOS update swap paths must share one parent directory');
     }
     if (!transaction.installTarget.endsWith('.app') || !transaction.designatedRequirement) throw new Error('invalid macOS update transaction');
@@ -446,14 +711,19 @@ async function launchUntilHealthy(ops, expectedVersion, {
   attempts = 480,
   delayMs = 250,
   relaunchIntervalMs = 5000,
+  timeoutMs = 120000,
   now = Date.now,
 } = {}) {
   await ops.launchInstalled({ updateRelaunch });
   let nextRelaunchAt = now() + relaunchIntervalMs;
-  const wait = ops.waitUntil || waitUntil;
-  return wait(async () => {
-    if (await ops.healthy(expectedVersion)) return true;
+  const pause = ops.pause || delay;
+  const deadline = now() + timeoutMs;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const remaining = deadline - now();
+    if (remaining <= 0) return false;
+    if (await ops.healthy(expectedVersion, Math.max(1, Math.min(1500, remaining)))) return true;
     const current = now();
+    if (current >= deadline) return false;
     if (current >= nextRelaunchAt) {
       // A stale Chromium singleton can outlive the old main PID. Re-launching
       // is safe: a live primary receives Electron's second-instance event and
@@ -462,8 +732,9 @@ async function launchUntilHealthy(ops, expectedVersion, {
       await ops.launchInstalled({ updateRelaunch });
       nextRelaunchAt = current + relaunchIntervalMs;
     }
-    return false;
-  }, { attempts, delayMs });
+    await pause(Math.min(delayMs, Math.max(0, deadline - now())));
+  }
+  return false;
 }
 
 function defaultOperations(transaction, dependencies = {}) {
@@ -471,8 +742,15 @@ function defaultOperations(transaction, dependencies = {}) {
   const launchdDomain = String(transaction.launchdDomain || '');
   const mirrorWindows = dependencies.mirrorWindowsDirectory || mirrorWindowsDirectory;
   const stopWindowsProcesses = dependencies.stopWindowsExecutableProcesses || stopWindowsExecutableProcesses;
+  const verifyMac = dependencies.verifyMacTree || verifyMacTree;
+  const verifyWindows = dependencies.verifyWindowsTree || verifyWindowsTree;
   const spawnProcess = dependencies.spawnProcess || spawn;
-  const launchedPIDs = new Set();
+  const shutdownDaemon = dependencies.requestDaemonShutdown || requestDaemonShutdown;
+  const cancelUpdate = dependencies.requestUpdateCancel || requestUpdateCancel;
+  const stopProcessTree = dependencies.stopLaunchedProcessTree || stopLaunchedProcessTree;
+  const ownsExecutable = dependencies.processOwnsExecutable || processOwnsExecutable;
+  const exactDaemonDown = dependencies.daemonServiceIsDown || daemonServiceIsDown;
+  const launchedProcesses = new Map();
   let expectedDaemonBind = '';
   return {
     shellExited: () => !pidAlive(transaction.shellPID),
@@ -480,8 +758,21 @@ function defaultOperations(transaction, dependencies = {}) {
       if (transaction.platform === 'darwin' && launchAgentPath && launchdDomain) {
         spawnSync('/bin/launchctl', ['bootout', launchdDomain, launchAgentPath], { stdio: 'ignore' });
       }
+      // Commit normally asks the daemon to exit first. This exact loopback
+      // shutdown is also the idempotent recovery path when the commit request
+      // itself never reached the Windows daemon: the worker owns the already
+      // quiescent transaction and must not wait forever on a no-op service stop.
+      await shutdownDaemon(transaction.daemonHealthURL);
     },
-    daemonDown: async () => !(await requestJSON(transaction.daemonHealthURL, 600)),
+    clearUpdateFence: async () => {
+      let status = await cancelUpdate(transaction.daemonHealthURL, transaction.updateId);
+      if (status === 0) status = await cancelUpdate(transaction.daemonHealthURL, transaction.updateId);
+      return status === 200;
+    },
+    // Health silence is not process death: a hung live daemon can still hold
+    // Windows files and retain update admission. Only the exact executable or
+    // launchd service disappearing permits activation.
+    daemonDown: async () => exactDaemonDown(transaction),
     stopOldShell: async () => {
       if (transaction.platform === 'win32') {
         return stopWindowsProcesses(path.join(transaction.installTarget, 'Workass.exe'));
@@ -494,8 +785,19 @@ function defaultOperations(transaction, dependencies = {}) {
       else verifyWindowsIncoming(transaction);
     },
     snapshotMutableState: async () => {
-      if (fs.existsSync(transaction.mutableStateBackupTarget) || fs.existsSync(transaction.failedMutableStateTarget)) {
-        throw new Error('mutable state rollback target already exists');
+      const snapshotFile = path.join(transaction.mutableStateBackupTarget, 'snapshot.json');
+      if (fs.existsSync(transaction.mutableStateBackupTarget)) {
+        try {
+          const prior = JSON.parse(fs.readFileSync(snapshotFile, 'utf8'));
+          const priorState = path.join(transaction.mutableStateBackupTarget, 'state');
+          if (prior?.schemaVersion === 1 && typeof prior.existed === 'boolean' &&
+              ((prior.existed && fs.statSync(priorState, { throwIfNoEntry: false })?.isDirectory()) ||
+               (!prior.existed && !fs.existsSync(priorState)))) return;
+        } catch { /* an incomplete pre-activation snapshot is safe to rebuild */ }
+        fs.rmSync(transaction.mutableStateBackupTarget, { recursive: true, force: true });
+      }
+      if (fs.existsSync(transaction.failedMutableStateTarget)) {
+        throw new Error('mutable state failure holding path exists before activation');
       }
       fs.mkdirSync(transaction.mutableStateBackupTarget, { recursive: false, mode: 0o700 });
       const existed = fs.existsSync(transaction.mutableStateTarget);
@@ -516,17 +818,30 @@ function defaultOperations(transaction, dependencies = {}) {
           },
         );
       }
-      atomicJSON(path.join(transaction.mutableStateBackupTarget, 'snapshot.json'), {
+      atomicJSON(snapshotFile, {
         schemaVersion: 1,
         existed,
       });
     },
     activate: async () => {
-      if (fs.existsSync(transaction.backupTarget)) throw new Error('update rollback target already exists');
       if (transaction.platform === 'win32') {
-        mirrorWindows(transaction.installTarget, transaction.backupTarget);
+        if (!validWindowsBackupReceipt(transaction)) {
+          // A backup directory without this atomic receipt can only be an
+          // interrupted mirror. It is safe to rebuild while the exact old
+          // install still verifies; once target mutation starts the receipt
+          // has already been committed and must never be synthesized.
+          verifyWindows(transaction, transaction.installTarget, transaction.currentVersion);
+          fs.rmSync(transaction.backupTarget, { recursive: true, force: true });
+          fs.rmSync(windowsBackupReceiptPath(transaction), { force: true });
+          mirrorWindows(transaction.installTarget, transaction.backupTarget);
+          verifyWindows(transaction, transaction.backupTarget, transaction.currentVersion);
+          commitWindowsBackupReceipt(transaction);
+        }
+        if (!validWindowsBackupReceipt(transaction)) throw new Error('Windows rollback snapshot has no durable completion receipt');
+        verifyWindows(transaction, transaction.backupTarget, transaction.currentVersion);
         try {
           mirrorWindows(transaction.incomingTarget, transaction.installTarget);
+          verifyWindows(transaction, transaction.installTarget, transaction.targetVersion);
         } catch (err) {
           // The old install has a complete external snapshot and the in-place
           // destination may now be partial. Tell the transaction runner that
@@ -536,11 +851,36 @@ function defaultOperations(transaction, dependencies = {}) {
         }
         return;
       }
+      if (fs.existsSync(transaction.backupTarget)) {
+        verifyMac(transaction, transaction.backupTarget, transaction.currentVersion);
+        try {
+          if (fs.existsSync(transaction.installTarget)) {
+            verifyMac(transaction, transaction.installTarget, transaction.targetVersion);
+            return;
+          }
+          if (!fs.existsSync(transaction.incomingTarget)) throw new Error('incoming app disappeared during activation recovery');
+          fs.renameSync(transaction.incomingTarget, transaction.installTarget);
+          verifyMac(transaction, transaction.installTarget, transaction.targetVersion);
+          return;
+        } catch (err) {
+          // The previous app was verified before entering this block. From
+          // here onward the active path may be absent or partial, so recovery
+          // must restore that exact backup before relaunching.
+          err.workassRollbackReady = true;
+          throw err;
+        }
+      }
+      verifyMac(transaction, transaction.installTarget, transaction.currentVersion);
       fs.renameSync(transaction.installTarget, transaction.backupTarget);
       try {
         fs.renameSync(transaction.incomingTarget, transaction.installTarget);
+        verifyMac(transaction, transaction.installTarget, transaction.targetVersion);
       } catch (err) {
-        fs.renameSync(transaction.backupTarget, transaction.installTarget);
+        if (!fs.existsSync(transaction.installTarget) && fs.existsSync(transaction.backupTarget)) {
+          try { fs.renameSync(transaction.backupTarget, transaction.installTarget); }
+          catch { err.workassRollbackReady = true; }
+        }
+        if (fs.existsSync(transaction.backupTarget)) err.workassRollbackReady = true;
         throw err;
       }
     },
@@ -570,25 +910,40 @@ function defaultOperations(transaction, dependencies = {}) {
           ...(updateRelaunch ? { WORKASS_UPDATE_RELAUNCH: '1' } : {}),
         },
       }, { spawnProcess });
-      if (child.pid) launchedPIDs.add(child.pid);
+      if (child.pid) {
+        launchedProcesses.set(child.pid, { child, executable });
+        child.once?.('exit', () => { launchedProcesses.delete(child.pid); });
+      }
     },
-    healthy: async (expectedVersion = transaction.targetVersion) => {
+    healthy: async (expectedVersion = transaction.targetVersion, timeoutMs = 1500) => {
       const [daemon, shell] = await Promise.all([
-        requestJSON(transaction.daemonHealthURL), requestJSON(transaction.shellStatusURL),
+        requestJSON(transaction.daemonHealthURL, timeoutMs), requestJSON(transaction.shellStatusURL, timeoutMs),
       ]);
       return runtimeIsHealthy({
         daemon,
         shell,
         expectedVersion,
         expectedBind: expectedDaemonBind,
+        expectedInstallationId: transaction.installationId,
+        expectedInstallTarget: transaction.installTarget,
         requireVisibleWindow: transaction.requireVisibleWindow === true,
       });
     },
     stopLaunched: async () => {
-      for (const pid of Array.from(launchedPIDs).reverse()) {
-        await stopLaunchedProcessTree(pid, { platform: transaction.platform });
+      if (transaction.platform === 'win32') {
+        launchedProcesses.clear();
+        stopWindowsProcesses(path.join(transaction.installTarget, 'Workass.exe'));
+      } else {
+        for (const [pid, launched] of Array.from(launchedProcesses.entries()).reverse()) {
+          if (launched.child.exitCode !== null || launched.child.signalCode !== null ||
+              !ownsExecutable(pid, launched.executable, { platform: transaction.platform })) {
+            launchedProcesses.delete(pid);
+            continue;
+          }
+          await stopProcessTree(pid, { platform: transaction.platform });
+          launchedProcesses.delete(pid);
+        }
       }
-      launchedPIDs.clear();
       if (transaction.platform === 'darwin' && launchAgentPath && launchdDomain) {
         spawnSync('/bin/launchctl', ['bootout', launchdDomain, launchAgentPath], { stdio: 'ignore' });
       }
@@ -598,20 +953,31 @@ function defaultOperations(transaction, dependencies = {}) {
       // files remain locked while the daemon is alive, and prevents an old app
       // from accidentally reconnecting to the failed new daemon on either OS.
       await requestDaemonShutdown(transaction.daemonHealthURL);
-      const stopped = await waitUntil(async () => !(await requestJSON(transaction.daemonHealthURL, 600)), { attempts: 80, delayMs: 250 });
+      const stopped = await waitUntil(() => exactDaemonDown(transaction), { attempts: 80, delayMs: 250 });
       if (!stopped) throw new Error('failed release daemon did not stop before rollback');
     },
     rollback: async () => {
       if (transaction.platform === 'win32') {
+        if (!validWindowsBackupReceipt(transaction)) throw new Error('Windows rollback snapshot is incomplete');
+        verifyWindows(transaction, transaction.backupTarget, transaction.currentVersion);
         mirrorWindows(transaction.backupTarget, transaction.installTarget);
+        verifyWindows(transaction, transaction.installTarget, transaction.currentVersion);
         return;
       }
-      if (fs.existsSync(transaction.incomingTarget)) throw new Error('failed release holding path already exists');
-      if (fs.existsSync(transaction.installTarget)) {
+      if (!fs.existsSync(transaction.backupTarget)) {
+        verifyMac(transaction, transaction.installTarget, transaction.currentVersion);
+        return;
+      }
+      verifyMac(transaction, transaction.backupTarget, transaction.currentVersion);
+      if (fs.existsSync(transaction.installTarget) && !fs.existsSync(transaction.incomingTarget)) {
         fs.renameSync(transaction.installTarget, transaction.incomingTarget);
+      }
+      if (fs.existsSync(transaction.installTarget)) {
+        throw new Error('failed release holding path and installed app conflict during rollback');
       }
       try {
         fs.renameSync(transaction.backupTarget, transaction.installTarget);
+        verifyMac(transaction, transaction.installTarget, transaction.currentVersion);
       } catch (err) {
         if (!fs.existsSync(transaction.installTarget) && fs.existsSync(transaction.incomingTarget)) {
           try { await renamePathWithRetry(transaction.incomingTarget, transaction.installTarget); } catch { /* preserve original rollback error */ }
@@ -628,21 +994,27 @@ function defaultOperations(transaction, dependencies = {}) {
         throw new Error('mutable state rollback snapshot is invalid');
       }
       const snapshotState = path.join(transaction.mutableStateBackupTarget, 'state');
-      if (snapshotReceipt.existed && !fs.statSync(snapshotState, { throwIfNoEntry: false })?.isDirectory()) {
+      const snapshotStateExists = fs.statSync(snapshotState, { throwIfNoEntry: false })?.isDirectory() === true;
+      if (snapshotReceipt.existed && !snapshotStateExists &&
+          !(fs.existsSync(transaction.failedMutableStateTarget) && fs.existsSync(transaction.mutableStateTarget))) {
         throw new Error('mutable state rollback snapshot is incomplete');
       }
-      if (!snapshotReceipt.existed && fs.existsSync(snapshotState)) {
+      if (!snapshotReceipt.existed && snapshotStateExists) {
         throw new Error('mutable state rollback snapshot contradicts its receipt');
       }
-      if (fs.existsSync(transaction.failedMutableStateTarget)) {
-        throw new Error('failed mutable state holding path already exists');
+      if (snapshotReceipt.existed && !snapshotStateExists &&
+          fs.existsSync(transaction.failedMutableStateTarget) && fs.existsSync(transaction.mutableStateTarget)) {
+        return;
       }
-      const failedStateExisted = fs.existsSync(transaction.mutableStateTarget);
-      if (failedStateExisted) fs.renameSync(transaction.mutableStateTarget, transaction.failedMutableStateTarget);
+      if (!snapshotReceipt.existed && fs.existsSync(transaction.failedMutableStateTarget) &&
+          !fs.existsSync(transaction.mutableStateTarget)) return;
+      if (!fs.existsSync(transaction.failedMutableStateTarget) && fs.existsSync(transaction.mutableStateTarget)) {
+        fs.renameSync(transaction.mutableStateTarget, transaction.failedMutableStateTarget);
+      }
       try {
-        if (snapshotReceipt.existed) fs.renameSync(snapshotState, transaction.mutableStateTarget);
+        if (snapshotReceipt.existed && fs.existsSync(snapshotState)) fs.renameSync(snapshotState, transaction.mutableStateTarget);
       } catch (err) {
-        if (failedStateExisted && !fs.existsSync(transaction.mutableStateTarget)) {
+        if (fs.existsSync(transaction.failedMutableStateTarget) && !fs.existsSync(transaction.mutableStateTarget)) {
           fs.renameSync(transaction.failedMutableStateTarget, transaction.mutableStateTarget);
         }
         throw err;
@@ -651,11 +1023,13 @@ function defaultOperations(transaction, dependencies = {}) {
     cleanup: async () => {
       fs.rmSync(transaction.incomingTarget, { recursive: true, force: true });
       fs.rmSync(transaction.backupTarget, { recursive: true, force: true });
+      fs.rmSync(windowsBackupReceiptPath(transaction), { force: true });
       fs.rmSync(transaction.mutableStateBackupTarget, { recursive: true, force: true });
     },
     cleanupFailed: async () => {
       fs.rmSync(transaction.incomingTarget, { recursive: true, force: true });
       fs.rmSync(transaction.backupTarget, { recursive: true, force: true });
+      fs.rmSync(windowsBackupReceiptPath(transaction), { force: true });
       fs.rmSync(transaction.mutableStateBackupTarget, { recursive: true, force: true });
       fs.rmSync(transaction.failedMutableStateTarget, { recursive: true, force: true });
     },
@@ -666,106 +1040,248 @@ async function runTransaction(rawTransaction, operations) {
   const transaction = validateTransaction(rawTransaction);
   const ops = operations || defaultOperations(transaction);
   const wait = ops.waitUntil || waitUntil;
-  updateReceipt(transaction, 'armed');
-  let oldShellForced = false;
-  const gracefulShellAttempts = transaction.platform === 'win32' ? 20 : 160;
-  const shellExitedGracefully = await wait(ops.shellExited, { attempts: gracefulShellAttempts, delayMs: 250 });
-  if (transaction.platform === 'win32') {
+  const waitForDeadline = ops.waitUntilDeadline || waitUntilDeadline;
+  const lease = operations ? null : startWorkerLease(transaction);
+  let terminal = false;
+  let journal = readJournal(transaction);
+
+  const save = (phase, patch = {}) => {
+    journal = checkpoint(transaction, journal, phase, patch);
+    return journal;
+  };
+  const finish = (phase, extra = {}) => {
+    const installedVersion = phase === 'healthy' ? transaction.targetVersion : transaction.currentVersion;
+    save(phase, { terminal: true, installedVersion, ...extra });
+    terminal = true;
+    return updateReceipt(transaction, phase, { installedVersion, ...extra });
+  };
+  const settleBeforeDaemonStop = async (error, extra = {}) => {
+    let fenceCleared = false;
     try {
-      // Always perform the exact-path sweep. The main PID may already be gone
-      // while its orphaned renderer/GPU processes still lock the installation.
-      oldShellForced = Number(await ops.stopOldShell()) > 0;
-    } catch (err) {
-      return updateReceipt(transaction, 'failed', {
+      fenceCleared = await ops.daemonDown(600) ||
+        (typeof ops.clearUpdateFence === 'function' && await ops.clearUpdateFence());
+    } catch { fenceCleared = false; }
+    if (!fenceCleared) {
+      save('admission_fence_pending', { terminal: false, daemonStopped: false, error, ...extra });
+      return updateReceipt(transaction, 'activating', {
+        installedVersion: transaction.currentVersion,
         activated: false,
-        error: `the old Workass shell process tree did not stop: ${String(err && err.message || err)}`,
+        error,
+        ...extra,
       });
     }
-    if (!await wait(ops.shellExited, { attempts: 40, delayMs: 250 })) {
-      return updateReceipt(transaction, 'failed', { activated: false, error: 'the old Workass shell did not exit' });
-    }
-  } else if (!shellExitedGracefully) {
-    return updateReceipt(transaction, 'failed', { activated: false, error: 'the old Workass shell did not exit' });
-  }
-  await ops.stopDaemonService();
-  if (!await wait(ops.daemonDown, { attempts: 80, delayMs: 250 })) {
-    try {
-      const recovered = await launchUntilHealthy(ops, transaction.currentVersion, {
-        updateRelaunch: transaction.platform === 'darwin',
-      });
-      return updateReceipt(transaction, recovered ? 'rollback_healthy' : 'failed', {
-        activated: false,
-        rolledBack: false,
-        ...(oldShellForced ? { oldShellForced: true } : {}),
-        error: 'the old Workass daemon did not stop for the update',
-        ...(recovered ? {} : { rollbackError: 'previous release did not recover' }),
-      });
-    } catch (recoveryError) {
-      return updateReceipt(transaction, 'failed', {
-        activated: false,
-        rolledBack: false,
-        error: 'the old Workass daemon did not stop for the update',
-        rollbackError: String(recoveryError && recoveryError.message || recoveryError),
-      });
-    }
-  }
-  let activated = false;
-  let mutableStateSnapshotted = false;
-  let mutableStateRestored = false;
+    save('daemon_fence_cleared', { daemonFenceCleared: true });
+    return finish('failed', { activated: false, error, ...extra });
+  };
+
   try {
-    await ops.verifyIncoming();
-    updateReceipt(transaction, 'activating');
-    await ops.snapshotMutableState();
-    mutableStateSnapshotted = true;
-    await ops.activate();
-    activated = true;
-    await ops.startRuntime?.();
-    if (await launchUntilHealthy(ops, transaction.targetVersion, { updateRelaunch: true })) {
-      let cleanupWarning = '';
-      try { await ops.cleanup(); }
-      catch (err) { cleanupWarning = String(err && err.message || err); }
-      return updateReceipt(transaction, 'healthy', {
-        activated: true,
-        ...(oldShellForced ? { oldShellForced: true } : {}),
-        ...(cleanupWarning ? { cleanupWarning } : {}),
+    if (!journal) journal = save('armed', {
+      shellStopped: false,
+      daemonStopped: false,
+      incomingVerified: false,
+      mutableStateSnapshotted: false,
+      activated: false,
+      healthVerified: false,
+      rollbackStarted: false,
+      rolledBack: false,
+      mutableStateRestored: false,
+      terminal: false,
+    });
+    if (journal.terminal) {
+      terminal = true;
+      const receipt = (() => {
+        try { return JSON.parse(fs.readFileSync(transaction.receiptPath, 'utf8')); } catch { return null; }
+      })();
+      if (receipt?.schemaVersion === RECEIPT_SCHEMA_VERSION && receipt.updateId === transaction.updateId &&
+          receipt.phase === journal.phase && receipt.installationId === transaction.installationId &&
+          path.resolve(String(receipt.installTarget || '')) === path.resolve(transaction.installTarget) &&
+          receipt.previousVersion === transaction.currentVersion && receipt.targetVersion === transaction.targetVersion) return receipt;
+      return updateReceipt(transaction, journal.phase, {
+        installedVersion: journal.installedVersion,
+        activated: journal.phase === 'healthy',
+        ...(journal.error ? { error: journal.error } : {}),
+        ...(journal.rollbackError ? { rollbackError: journal.rollbackError } : {}),
       });
     }
-    throw new Error('new release did not recover daemon health, renderer authority, and a visible window');
-  } catch (activationError) {
-    try {
-      await ops.stopLaunched();
-      const rollbackReady = activated || activationError?.workassRollbackReady === true;
-      if (rollbackReady) await ops.rollback();
-      if (activated && mutableStateSnapshotted) {
-        await ops.restoreMutableState();
-        mutableStateRestored = true;
+    updateReceipt(transaction, journal.activated || journal.rollbackStarted ? 'activating' : 'armed');
+
+    if (!journal.shellStopped) {
+      const gracefulShellAttempts = transaction.platform === 'win32' ? 20 : 160;
+      const shellExitedGracefully = await wait(ops.shellExited, { attempts: gracefulShellAttempts, delayMs: 250 });
+      let oldShellForced = Boolean(journal.oldShellForced);
+      if (transaction.platform === 'win32') {
+        try {
+          oldShellForced = Number(await ops.stopOldShell()) > 0 || oldShellForced;
+        } catch (err) {
+          return await settleBeforeDaemonStop(
+            `the old Workass shell process tree did not stop: ${String(err && err.message || err)}`,
+          );
+        }
+        if (!await wait(ops.shellExited, { attempts: 40, delayMs: 250 })) {
+          return await settleBeforeDaemonStop('the old Workass shell did not exit');
+        }
+      } else if (!shellExitedGracefully) {
+        return await settleBeforeDaemonStop('the old Workass shell did not exit');
       }
-      await ops.startRuntime?.();
-      const recovered = await launchUntilHealthy(ops, transaction.currentVersion, {
-        updateRelaunch: transaction.platform === 'darwin',
-      });
-      let cleanupWarning = '';
-      if (recovered) {
-        try { await ops.cleanupFailed?.(); }
-        catch (err) { cleanupWarning = String(err && err.message || err); }
-      }
-      return updateReceipt(transaction, recovered ? 'rollback_healthy' : 'failed', {
-        activated: false,
-        rolledBack: rollbackReady,
-        mutableStateRolledBack: mutableStateRestored,
-        ...(oldShellForced ? { oldShellForced: true } : {}),
-        error: String(activationError && activationError.message || activationError),
-        ...(cleanupWarning ? { cleanupWarning } : {}),
-        ...(recovered ? {} : { rollbackError: 'previous release did not recover' }),
-      });
-    } catch (rollbackError) {
-      return updateReceipt(transaction, 'failed', {
-        activated: false,
-        rolledBack: false,
-        error: String(activationError && activationError.message || activationError),
-        rollbackError: String(rollbackError && rollbackError.message || rollbackError),
-      });
+      save('shell_stopped', { shellStopped: true, oldShellForced });
     }
+
+    if (!journal.daemonStopped) {
+      await ops.stopDaemonService();
+      if (!await waitForDeadline((probeTimeoutMs) => ops.daemonDown(probeTimeoutMs), {
+        timeoutMs: 30000,
+        delayMs: 250,
+        maxProbeMs: 600,
+        ...(ops.pause ? { pause: ops.pause } : {}),
+      })) {
+        let recoveryPhase;
+        let recoveryExtra;
+        try {
+          // If the commit request never reached the daemon, recovery shutdown
+          // may also fail while the exact prepare drain remains active. A
+          // healthy-looking old shell is not usable in that state: prove that
+          // this transaction's admission fence was cancelled before recovery
+          // can be classified as healthy.
+          if (typeof ops.clearUpdateFence !== 'function' || !await ops.clearUpdateFence()) {
+            const error = 'the daemon update admission fence did not clear';
+            save('admission_fence_pending', { error, daemonStopped: false, terminal: false });
+            return updateReceipt(transaction, 'activating', {
+              installedVersion: transaction.currentVersion,
+              activated: false,
+              error,
+            });
+          }
+          save('daemon_fence_cleared', { daemonFenceCleared: true });
+          const recovered = await launchUntilHealthy(ops, transaction.currentVersion, {
+            updateRelaunch: transaction.platform === 'darwin',
+          });
+          recoveryPhase = recovered ? 'rollback_healthy' : 'failed';
+          recoveryExtra = {
+            activated: false,
+            rolledBack: false,
+            ...(journal.oldShellForced ? { oldShellForced: true } : {}),
+            error: 'the old Workass daemon did not stop for the update',
+            ...(recovered ? {} : { rollbackError: 'previous release did not recover' }),
+          };
+        } catch (recoveryError) {
+          recoveryPhase = 'failed';
+          recoveryExtra = {
+            activated: false,
+            rolledBack: false,
+            error: 'the old Workass daemon did not stop for the update',
+            rollbackError: String(recoveryError && recoveryError.message || recoveryError),
+          };
+        }
+        return finish(recoveryPhase, recoveryExtra);
+      }
+      save('daemon_stopped', { daemonStopped: true });
+    }
+
+    const recoverActivation = async (activationError) => {
+      const error = String(activationError && activationError.message || activationError || journal.error || 'update activation failed');
+      let recoveryPhase;
+      let recoveryExtra;
+      try {
+        if (!journal.rollbackStarted) {
+          save('rollback_started', {
+            rollbackStarted: true,
+            rollbackReady: journal.activated || activationError?.workassRollbackReady === true,
+            error,
+          });
+        }
+        await ops.stopLaunched();
+        if (journal.rollbackReady && !journal.rolledBack) {
+          await ops.rollback();
+          save('rolled_back', { rolledBack: true });
+        }
+        if (journal.mutableStateSnapshotted && !journal.mutableStateRestored) {
+          if (!journal.stateRestoreStarted) save('restoring_state', { stateRestoreStarted: true });
+          await ops.restoreMutableState();
+          save('state_restored', { mutableStateRestored: true });
+        }
+        await ops.startRuntime?.();
+        const recovered = await launchUntilHealthy(ops, transaction.currentVersion, {
+          updateRelaunch: transaction.platform === 'darwin',
+        });
+        let cleanupWarning = '';
+        if (recovered) {
+          try { await ops.cleanupFailed?.(); }
+          catch (err) { cleanupWarning = String(err && err.message || err); }
+        }
+        recoveryPhase = recovered ? 'rollback_healthy' : 'failed';
+        recoveryExtra = {
+          activated: false,
+          rolledBack: Boolean(journal.rolledBack),
+          mutableStateRolledBack: Boolean(journal.mutableStateRestored),
+          ...(journal.oldShellForced ? { oldShellForced: true } : {}),
+          error,
+          ...(cleanupWarning ? { cleanupWarning } : {}),
+          ...(recovered ? {} : { rollbackError: 'previous release did not recover' }),
+        };
+      } catch (rollbackError) {
+        recoveryPhase = 'failed';
+        recoveryExtra = {
+          activated: false,
+          rolledBack: Boolean(journal.rolledBack),
+          error,
+          rollbackError: String(rollbackError && rollbackError.message || rollbackError),
+        };
+      }
+      return finish(recoveryPhase, recoveryExtra);
+    };
+
+    if (journal.rollbackStarted) return await recoverActivation(new Error(journal.error || 'update activation was interrupted'));
+
+    if (!journal.healthVerified) {
+      try {
+        if (!journal.incomingVerified) {
+          await ops.verifyIncoming();
+          save('incoming_verified', { incomingVerified: true });
+        }
+        updateReceipt(transaction, 'activating');
+        if (!journal.mutableStateSnapshotted) {
+          if (!journal.snapshotStarted) save('snapshotting_state', { snapshotStarted: true });
+          await ops.snapshotMutableState();
+          save('state_snapshotted', { mutableStateSnapshotted: true });
+        }
+        if (!journal.activated) {
+          if (!journal.activationStarted) save('activating', { activationStarted: true });
+          await ops.activate();
+          save('activated', { activated: true });
+        }
+        await ops.startRuntime?.();
+        if (!await launchUntilHealthy(ops, transaction.targetVersion, { updateRelaunch: true })) {
+          throw new Error('new release did not recover daemon health, renderer authority, a visible window, and a populated model catalog');
+        }
+        // This is the commit point. Once all runtime gates have passed, persist
+        // that fact before deleting the rollback tree. A worker crash after
+        // cleanup must finish the proven target, never reinterpret a transient
+        // later health miss as a reason to roll back without a backup.
+        save('health_verified', { healthVerified: true });
+      } catch (activationError) {
+        return await recoverActivation(activationError);
+      }
+    }
+    let cleanupWarning = '';
+    try { await ops.cleanup(); }
+    catch (err) { cleanupWarning = String(err && err.message || err); }
+    return finish('healthy', {
+      activated: true,
+      ...(journal.oldShellForced ? { oldShellForced: true } : {}),
+      ...(cleanupWarning ? { cleanupWarning } : {}),
+    });
+  } finally {
+    lease?.stop(terminal ? 'terminal' : 'interrupted');
+  }
+}
+
+function validateWorkerEntrypoint(transactionPath, transaction, workerFile = __filename) {
+  const root = path.resolve(String(transaction?.transactionRoot || ''));
+  if (path.resolve(transactionPath) !== path.join(root, 'transaction.json')) {
+    throw new Error('update worker transaction path is not the exact transaction journal');
+  }
+  if (path.resolve(workerFile) !== path.join(root, 'update-worker.js')) {
+    throw new Error('update worker executable does not belong to the transaction');
   }
 }
 
@@ -774,6 +1290,7 @@ async function main(argv = process.argv.slice(2)) {
   if (argv[0] !== '--transaction' || !argv[1]) throw new Error('usage: update-worker.js --transaction ABSOLUTE_PATH');
   const transactionPath = path.resolve(argv[1]);
   const transaction = JSON.parse(fs.readFileSync(transactionPath, 'utf8'));
+  validateWorkerEntrypoint(transactionPath, transaction);
   await runTransaction(transaction);
   return 0;
 }
@@ -787,24 +1304,32 @@ if (require.main === module) {
 
 module.exports = {
   atomicJSON,
+  checkpoint,
+  daemonServiceIsDown,
   defaultOperations,
   launchUntilHealthy,
   main,
   mirrorWindowsDirectory,
+  processOwnsExecutable,
   requestJSON,
   requestDaemonShutdown,
+  requestUpdateCancel,
+  readJournal,
   renamePathWithRetry,
   spawnDetached,
   runTransaction,
   runtimeIsHealthy,
+  startWorkerLease,
   startInstalledRuntime,
   stopLaunchedProcessTree,
   stopWindowsExecutableProcesses,
   targetRuntimeEnv,
   updateReceipt,
+  validateWorkerEntrypoint,
   validateTransaction,
   verifyMacIncoming,
   verifyWindowsPE,
   verifyWindowsIncoming,
   waitUntil,
+  waitUntilDeadline,
 };

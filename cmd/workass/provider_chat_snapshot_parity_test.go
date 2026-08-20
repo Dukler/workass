@@ -101,7 +101,8 @@ func TestActorRendererSessionSnapshotParityAcrossRestart(t *testing.T) {
 			NativeCompaction: true, VerifiedLineage: true,
 		},
 		Delivery: providercontract.DeliveryCapabilities{
-			StableInputIdentity: true, LiveSteer: true, ConsumptionReceipt: true, TurnReadback: true,
+			StableInputIdentity: true, LiveSteer: true, SteerConsumptionReceipt: true,
+			ConsumptionReceipt: true, TurnReadback: true,
 		},
 		Attachment: &providercontract.LaneAttachmentSnapshot{
 			ConnectionID: "snapshot-connection", CWD: workspace, Agent: "Mock ACP",
@@ -109,7 +110,8 @@ func TestActorRendererSessionSnapshotParityAcrossRestart(t *testing.T) {
 				ID: modelID, Name: "Mock deterministic", Efforts: []string{"low", "high"},
 			}}, CurrentModelID: modelID,
 			Modes: []providercontract.RuntimeMode{{ID: modeID, Name: "Plan"}}, CurrentModeID: modeID,
-			ImageSupport: true, CommandCatalogSupported: true, CommandCatalog: commandCatalog,
+			ImageSupport: true, PlanUsageSupported: true, PlanUsageResetSupported: true,
+			CommandCatalogSupported: true, CommandCatalog: commandCatalog,
 		},
 	})
 
@@ -558,8 +560,15 @@ func snapshotParityAssertRichRendererContract(
 	liveSession := mapFromAnyMain(projectedChat["liveSession"])
 	if fieldString(projectedChat, "sessionId") != thread.HeadID || fieldString(projectedChat, "sessionProviderId") != string(identity.Realm.ProviderID) ||
 		fieldString(liveSession, "sessionId") != "snapshot-connection" || fieldString(liveSession, "providerName") != "Mock ACP" ||
-		liveSession["imageSupport"] != true || liveSession["commandCatalogSupported"] != true {
+		liveSession["imageSupport"] != true || liveSession["planUsageSupported"] != true ||
+		liveSession["planUsageResetSupported"] != true || liveSession["commandCatalogSupported"] != true {
 		t.Fatalf("lane attachment projection = %#v", projectedChat)
+	}
+	delivery := mapFromAnyMain(liveSession["deliveryCapabilities"])
+	if delivery["stableInputIdentity"] != true || delivery["liveSteer"] != true ||
+		delivery["steerConsumptionReceipt"] != true || delivery["consumptionReceipt"] != true ||
+		delivery["turnReadback"] != true {
+		t.Fatalf("delivery capability projection = %#v", delivery)
 	}
 	catalog := mapFromAnyMain(liveSession["commandCatalog"])
 	commands := anySlice(catalog["commands"])

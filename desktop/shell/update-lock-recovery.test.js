@@ -48,6 +48,7 @@ test('the Windows update bootstrap is a visible responsive native window', () =>
 test('a stale profile lock keeps one bootstrap and retries the real executable until the target window is healthy', async () => {
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-lock-recovery-'));
   const executablePath = path.join(dataRoot, 'Workass.exe');
+  const installationId = `install-${'1'.repeat(32)}`;
   fs.writeFileSync(executablePath, 'fixture');
   const calls = [];
   const app = {
@@ -65,7 +66,7 @@ test('a stale profile lock keeps one bootstrap and retries the real executable u
   }
   const retry = new EventEmitter();
   retry.unref = () => { retry.unrefCalled = true; };
-  let healthy = false;
+  let healthCase = 'down';
   const scheduled = [];
   const recovery = await startWindowsUpdateLockRecovery({
     app,
@@ -73,11 +74,18 @@ test('a stale profile lock keeps one bootstrap and retries the real executable u
     executablePath,
     dataRoot,
     appVersion: '1.2.3',
+    installationId,
+    installTarget: dataRoot,
     daemonHealthURL: 'https://127.0.0.1:80/workass/health',
-    readStatus: async () => healthy
-      ? { appVersion: '1.2.3', controller: true, windowVisible: true }
+    readStatus: async () => healthCase !== 'down'
+      ? {
+        appVersion: '1.2.3', controller: true, windowVisible: true,
+        installationId: healthCase === 'foreign' ? `install-${'2'.repeat(32)}` : installationId,
+        installTarget: healthCase === 'wrong-target' ? path.join(dataRoot, 'OtherWorkass') : dataRoot,
+        catalog: { readyModelCount: healthCase === 'empty-catalog' ? 0 : 2 },
+      }
       : null,
-    readDaemon: async () => healthy
+    readDaemon: async () => healthCase !== 'down'
       ? { app: 'workass', version: '1.2.3' }
       : null,
     spawnProcess(command, args, options) {
@@ -98,7 +106,14 @@ test('a stale profile lock keeps one bootstrap and retries the real executable u
   assert.equal(retry.unrefCalled, true);
   assert.equal(scheduled.length, 1);
 
-  healthy = true;
+  healthCase = 'foreign';
+  assert.equal(await recovery.poll(), false);
+  healthCase = 'wrong-target';
+  assert.equal(await recovery.poll(), false);
+  healthCase = 'empty-catalog';
+  assert.equal(await recovery.poll(), false);
+  assert.equal(calls.filter((entry) => entry[0] === 'quit').length, 0);
+  healthCase = 'healthy';
   assert.equal(await recovery.poll(), true);
   assert.equal(calls.filter((entry) => entry[0] === 'spawn').length, 1);
   assert.equal(calls.filter((entry) => entry[0] === 'quit').length, 1);

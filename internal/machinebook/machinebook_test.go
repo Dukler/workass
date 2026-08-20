@@ -212,7 +212,7 @@ func TestVerifiedEndpointTransferRetainsASeparateOldEndpoint(t *testing.T) {
 	}
 }
 
-func TestListCoalescesLegacyOfflineCopiesOfOneEndpoint(t *testing.T) {
+func TestListNeverGuessesThatDistinctMachineIDsAreOneMachine(t *testing.T) {
 	book := openBook(t, "m-self")
 	endpoint := []Endpoint{{Kind: KindLAN, Address: "192.168.0.71:80"}}
 	book.mu.Lock()
@@ -222,8 +222,17 @@ func TestListCoalescesLegacyOfflineCopiesOfOneEndpoint(t *testing.T) {
 	book.mu.Unlock()
 
 	list := book.List()
-	if len(list) != 1 || list[0].MachineID != "m-current" {
-		t.Fatalf("legacy copies rendered as separate nodes: %+v", list)
+	if len(list) != 3 {
+		t.Fatalf("distinct immutable machine ids were collapsed: %+v", list)
+	}
+	got := map[string]bool{}
+	for _, entry := range list {
+		got[entry.MachineID] = true
+	}
+	for _, machineID := range []string{"m-stale-a", "m-stale-b", "m-current"} {
+		if !got[machineID] {
+			t.Fatalf("machine %q disappeared from endpoint conflict: %+v", machineID, list)
+		}
 	}
 }
 

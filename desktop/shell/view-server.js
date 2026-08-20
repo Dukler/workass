@@ -153,7 +153,18 @@ function proxyUpgrade(req, socket, head, daemon) {
   });
 }
 
-function createViewServer({ daemonURL, daemonCAPath = '', rendererDir, host = '127.0.0.1', port = 8799, runtimeVersion = null, appVersion = null, recoverController = false }) {
+function createViewServer({
+  daemonURL,
+  daemonCAPath = '',
+  rendererDir,
+  host = '127.0.0.1',
+  port = 8799,
+  runtimeVersion = null,
+  appVersion = null,
+  installationId = '',
+  installTarget = '',
+  recoverController = false,
+}) {
   const daemon = new URL(daemonURL);
   if (daemon.protocol !== 'http:' && daemon.protocol !== 'https:') {
     return Promise.reject(new Error(`unsupported daemon protocol: ${daemon.protocol}`));
@@ -169,7 +180,7 @@ function createViewServer({ daemonURL, daemonCAPath = '', rendererDir, host = '1
     return Promise.reject(new Error(`renderer build missing: ${indexPath}`));
   }
 
-  const shellStatus = { controller: null, reportedAt: null, catalog: null, claude: null, browser: null, window: null };
+  const shellStatus = { controller: null, reportedAt: null, catalog: null, browser: null, window: null };
   // Dev screenshot hook (2026-07-12): the shell registers a capture fn (the real
   // main-window webContents.capturePage) so the build workflow / an agent can GET
   // a PNG of exactly what the user sees — no more iterating on the UI blind.
@@ -262,12 +273,13 @@ function createViewServer({ daemonURL, daemonCAPath = '', rendererDir, host = '1
         controller: shellStatus.controller,
         reportedAt: shellStatus.reportedAt,
         catalog: shellStatus.catalog,
-        claude: shellStatus.claude,
         browser: shellStatus.browser,
         windowVisible: shellStatus.window?.visible === true,
         window: shellStatus.window,
         electronVersion: runtimeVersion,
         appVersion,
+        installationId,
+        installTarget,
         rendererDir: root,
         daemonOrigin: daemon.origin,
       });
@@ -297,8 +309,6 @@ function createViewServer({ daemonURL, daemonCAPath = '', rendererDir, host = '1
               .reduce((total, group) => total + group.models.length, 0),
             groups,
           };
-          const claude = groups.find((group) => group.providerId === 'claude');
-          shellStatus.claude = claude ? { status: claude.status, models: claude.models } : null;
           res.writeHead(204); res.end();
         } catch {
           res.writeHead(400); res.end();

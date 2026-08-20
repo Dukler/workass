@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DraftImage } from '../src/store/types.ts';
-import { afterQueuedAcceptance, appendDraftImages, clipboardImageFiles, createDraftImages, draftImagePayloads, imageBase64, mergeMessageImages, messageImages, messageImageSrc, promoteQueuedMessage, queuedAttachmentsReady, queuedDraftMessage, queuedJob, queuedMessage, releaseDraftImages, withoutDraftImages } from '../src/image-drafts.ts';
+import { afterQueuedAcceptance, appendDraftImages, clipboardImageFiles, createDraftImages, draftImagePayloads, imageBase64, mergeMessageImages, messageImages, messageImageSrc, queuedAttachmentsReady, queuedDraftMessage, queuedJob, queuedMessage, releaseDraftImages, withoutDraftImages } from '../src/image-drafts.ts';
 import { localMirror, type Mirror } from '../src/store/persistence.ts';
 
 function image(id: string): DraftImage {
@@ -91,18 +91,6 @@ test('queued attachment payload stays bound until the popped job is accepted', (
   const queue = [item, queuedMessage('q2', 'after it')];
   assert.equal(afterQueuedAcceptance(queue, 'q1', false), queue);
   assert.deepEqual(afterQueuedAcceptance(queue, 'q1', true).map((queued) => queued.id), ['q2']);
-});
-
-test('FIFO promotion transfers one message out of the queue without duplicate ownership', () => {
-  const first = queuedMessage('q1', 'promote me');
-  const second = queuedMessage('q2', 'wait here');
-  const promoted = promoteQueuedMessage([first, second], 'q1');
-  assert.equal(promoted.item, first);
-  assert.deepEqual(promoted.queue, [second]);
-  assert.equal(promoted.queue.some((item) => item.id === promoted.item?.id), false);
-  const missing = promoteQueuedMessage(promoted.queue, 'missing');
-  assert.equal(missing.item, undefined);
-  assert.equal(missing.queue, promoted.queue);
 });
 
 test('queued drafts paint immediately and cannot drain until encoding is ready', () => {

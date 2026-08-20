@@ -56,24 +56,28 @@ type PlanUsageEntry struct {
 	PerModel       []map[string]any `json:"perModel,omitempty"`
 }
 
+// recordPlanUsageCapture is the raw provider-carrier entrypoint used by the
+// transport boundary. It resolves the registered provider adapter first; only
+// the adapter may inspect protocol metadata. The generic snapshot store below
+// receives the resulting typed capture.
 func (m *Manager) recordPlanUsageCapture(sessionID, providerID string, carrier map[string]any) (PlanUsageSnapshot, bool) {
-	capture := extractPlanUsageCapture(carrier)
+	providerID = m.resolvePlanUsageProviderID(sessionID, providerID)
+	capture := providerAdapterForID(providerID).planUsage.Normalize(carrier)
+	return m.recordNormalizedPlanUsageCapture(sessionID, providerID, capture)
+}
+
+func (m *Manager) recordNormalizedPlanUsageCapture(sessionID, providerID string, capture planUsageCapture) (PlanUsageSnapshot, bool) {
+	// Redaction and the raw-byte ceiling are enforced again at the generic
+	// storage boundary so an adapter cannot accidentally expose unbounded or
+	// secret-shaped diagnostic metadata.
+	capture.raw = boundedPlanUsageRaw(redactPlanUsageValue(capture.raw))
 	if len(capture.entries) == 0 && len(capture.raw) == 0 && !capture.resetCreditsSet {
 		return PlanUsageSnapshot{}, false
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	providerID = normalizeProviderID(providerID)
+	providerID = m.resolvePlanUsageProviderID(sessionID, providerID)
 	m.mu.Lock()
-	if providerID == "" && sessionID != "" {
-		providerID = normalizeProviderID(m.sessionProvider[sessionID])
-	}
-	if providerID == "" {
-		providerID = m.defaultProviderID
-	}
-	if providerID == "" {
-		providerID = "unknown"
-	}
 	prev := m.planUsageByProvider[providerID]
 	next := PlanUsageSnapshot{
 		ProviderID:            providerID,
@@ -92,6 +96,24 @@ func (m *Manager) recordPlanUsageCapture(sessionID, providerID string, carrier m
 	return next, true
 }
 
+func (m *Manager) resolvePlanUsageProviderID(sessionID, providerID string) string {
+	if providerID = normalizeProviderID(providerID); providerID != "" {
+		return providerID
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sessionID != "" {
+		providerID = normalizeProviderID(m.sessionProvider[sessionID])
+	}
+	if providerID == "" {
+		providerID = normalizeProviderID(m.defaultProviderID)
+	}
+	if providerID == "" {
+		providerID = "unknown"
+	}
+	return providerID
+}
+
 type planUsageCapture struct {
 	entries         []PlanUsageEntry
 	raw             map[string]any
@@ -99,323 +121,9 @@ type planUsageCapture struct {
 	resetCreditsSet bool
 }
 
-func extractPlanUsageCapture(carrier map[string]any) planUsageCapture {
-	if carrier == nil {
-		return planUsageCapture{}
-	}
-	meta := mapFromAny(carrier["_meta"])
-	out := planUsageCapture{}
-	if len(meta) > 0 {
-		out.raw = boundedPlanUsageRaw(redactPlanUsageValue(meta))
-		out.entries = append(out.entries, claudeRateLimitPlanUsage(meta)...)
-		out.entries = append(out.entries, claudeStructuredPlanUsage(meta)...)
-		out.entries = append(out.entries, codexRateLimitPlanUsage(meta)...)
-		out.resetCredits, out.resetCreditsSet = codexRateLimitResetCredits(meta)
-		if entry, ok := codexQuotaPlanUsage(meta); ok {
-			out.entries = append(out.entries, entry)
-		}
-	}
-	if entry, ok := costPlanUsage(carrier); ok {
-		out.entries = append(out.entries, entry)
-	}
-	return out
-}
-
-func codexRateLimitResetCredits(meta map[string]any) (*RateLimitResetCreditsSummary, bool) {
-	response := mapFromAny(meta["workass.codex/rateLimits"])
-	if len(response) == 0 {
-		return nil, false
-	}
-	raw, present := response["rateLimitResetCredits"]
-	if !present || raw == nil {
-		return nil, present
-	}
-	value := mapFromAny(raw)
-	if len(value) == 0 {
-		return nil, true
-	}
-	count, _ := int64FromAny(value["availableCount"])
-	if count < 0 {
-		count = 0
-	}
-	summary := &RateLimitResetCreditsSummary{AvailableCount: count}
-	if rawCredits, detailsPresent := value["credits"]; detailsPresent && rawCredits != nil {
-		summary.Credits = make([]RateLimitResetCredit, 0)
-		for _, rawCredit := range anySlice(rawCredits) {
-			credit := mapFromAny(rawCredit)
-			if len(credit) == 0 {
-				continue
-			}
-			summary.Credits = append(summary.Credits, RateLimitResetCredit{
-				ID:          boundedPlanUsageText(credit["id"], 500),
-				ResetType:   boundedPlanUsageText(credit["resetType"], 80),
-				Status:      boundedPlanUsageText(credit["status"], 80),
-				GrantedAt:   epochRFC3339(credit["grantedAt"]),
-				ExpiresAt:   epochRFC3339(credit["expiresAt"]),
-				Title:       boundedPlanUsageText(credit["title"], 200),
-				Description: boundedPlanUsageText(credit["description"], 1000),
-			})
-		}
-	}
-	return summary, true
-}
-
-func boundedPlanUsageText(value any, maxRunes int) string {
-	text := strings.TrimSpace(asString(value))
-	if maxRunes <= 0 {
-		return ""
-	}
-	runes := []rune(text)
-	if len(runes) > maxRunes {
-		return string(runes[:maxRunes])
-	}
-	return text
-}
-
-func claudeRateLimitPlanUsage(meta map[string]any) []PlanUsageEntry {
-	rateLimit := mapFromAny(meta["_claude/rateLimit"])
-	if len(rateLimit) == 0 {
-		return nil
-	}
-	entry := PlanUsageEntry{
-		Kind:          "rate-limit",
-		ID:            asString(rateLimit["rateLimitType"]),
-		Status:        asString(rateLimit["status"]),
-		ResetsAt:      epochRFC3339(rateLimit["resetsAt"]),
-		OverageStatus: asString(rateLimit["overageStatus"]),
-	}
-	if utilization, ok := floatFromAny(rateLimit["utilization"]); ok {
-		// SDKRateLimitInfo reports a 0..1 fraction; the structured /usage control
-		// response below reports a 0..100 percentage.
-		utilization *= 100
-		entry.UsedPercent = &utilization
-	}
-	if v, ok := rateLimit["isUsingOverage"].(bool); ok {
-		entry.IsUsingOverage = &v
-	}
-	return []PlanUsageEntry{entry}
-}
-
-func claudeStructuredPlanUsage(meta map[string]any) []PlanUsageEntry {
-	usage := mapFromAny(meta["workass.claude/usage"])
-	rateLimits := mapFromAny(usage["rate_limits"])
-	if len(rateLimits) == 0 {
-		return nil
-	}
-	keys := []string{"five_hour", "seven_day", "seven_day_oauth_apps", "seven_day_opus", "seven_day_sonnet"}
-	out := make([]PlanUsageEntry, 0, len(keys))
-	for _, key := range keys {
-		window := mapFromAny(rateLimits[key])
-		if len(window) == 0 {
-			continue
-		}
-		entry := PlanUsageEntry{Kind: "rate-limit", ID: key, ResetsAt: rfc3339Timestamp(window["resets_at"])}
-		if pct, ok := floatFromAny(window["utilization"]); ok {
-			entry.UsedPercent = &pct
-		}
-		out = append(out, entry)
-	}
-	for _, raw := range anySlice(rateLimits["model_scoped"]) {
-		window := mapFromAny(raw)
-		name := strings.TrimSpace(asString(window["display_name"]))
-		if len(window) == 0 || name == "" {
-			continue
-		}
-		entry := PlanUsageEntry{
-			Kind:      "rate-limit",
-			ID:        "seven_day_model:" + strings.ToLower(name),
-			LimitName: name,
-			ResetsAt:  rfc3339Timestamp(window["resets_at"]),
-		}
-		if pct, ok := floatFromAny(window["utilization"]); ok {
-			entry.UsedPercent = &pct
-		}
-		out = append(out, entry)
-	}
-	return out
-}
-
-func codexRateLimitPlanUsage(meta map[string]any) []PlanUsageEntry {
-	response := mapFromAny(meta["workass.codex/rateLimits"])
-	if len(response) == 0 {
-		return nil
-	}
-	buckets := mapFromAny(response["rateLimitsByLimitId"])
-	if len(buckets) == 0 {
-		if snapshot := mapFromAny(response["rateLimits"]); len(snapshot) > 0 {
-			buckets = map[string]any{"": snapshot}
-		}
-	}
-	keys := make([]string, 0, len(buckets))
-	for key := range buckets {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	multiple := len(keys) > 1
-	var out []PlanUsageEntry
-	for _, key := range keys {
-		snapshot := mapFromAny(buckets[key])
-		if len(snapshot) == 0 {
-			continue
-		}
-		limitID := firstNonEmpty(asString(snapshot["limitId"]), key)
-		limitName := firstNonEmpty(asString(snapshot["limitName"]), limitID)
-		for _, windowName := range []string{"primary", "secondary"} {
-			window := mapFromAny(snapshot[windowName])
-			if len(window) == 0 {
-				continue
-			}
-			entry := PlanUsageEntry{
-				Kind:      "rate-limit",
-				ID:        codexWindowID(limitID, windowName, window["windowDurationMins"], multiple),
-				LimitName: limitName,
-				ResetsAt:  epochRFC3339(window["resetsAt"]),
-			}
-			if pct, ok := floatFromAny(window["usedPercent"]); ok {
-				entry.UsedPercent = &pct
-			}
-			if minutes, ok := int64FromAny(window["windowDurationMins"]); ok {
-				entry.WindowMinutes = &minutes
-			}
-			if asString(snapshot["rateLimitReachedType"]) != "" {
-				entry.Status = "rejected"
-			}
-			out = append(out, entry)
-		}
-	}
-	return out
-}
-
-func codexWindowID(limitID, windowName string, duration any, multiple bool) string {
-	base := ""
-	if minutes, ok := int64FromAny(duration); ok {
-		switch {
-		case minutes == 300:
-			base = "five_hour"
-		case minutes >= 7*24*60:
-			base = "seven_day"
-		}
-	}
-	if base == "" {
-		base = windowName
-	}
-	if multiple && limitID != "" {
-		return limitID + ":" + base
-	}
-	return base
-}
-
-func costPlanUsage(carrier map[string]any) (PlanUsageEntry, bool) {
-	cost := mapFromAny(carrier["cost"])
-	if len(cost) == 0 {
-		return PlanUsageEntry{}, false
-	}
-	entry := PlanUsageEntry{Kind: "cost"}
-	if amount, ok := cost["amount"]; ok && amount != nil {
-		entry.Amount = amount
-	}
-	if currency, ok := cost["currency"]; ok {
-		entry.Currency = asString(currency)
-	}
-	return entry, true
-}
-
-func codexQuotaPlanUsage(meta map[string]any) (PlanUsageEntry, bool) {
-	quota := mapFromAny(meta["quota"])
-	if len(quota) == 0 {
-		return PlanUsageEntry{}, false
-	}
-	entry := PlanUsageEntry{Kind: "quota"}
-	for _, raw := range anySlice(quota["model_usage"]) {
-		modelUsage := mapFromAny(raw)
-		if len(modelUsage) == 0 {
-			continue
-		}
-		row := map[string]any{}
-		if model, ok := modelUsage["model"]; ok {
-			row["model"] = asString(model)
-		}
-		copyTokenCountFields(row, mapFromAny(modelUsage["token_count"]))
-		if len(row) > 0 {
-			entry.PerModel = append(entry.PerModel, row)
-		}
-	}
-	if len(entry.PerModel) == 0 {
-		row := map[string]any{}
-		copyTokenCountFields(row, mapFromAny(quota["token_count"]))
-		if len(row) > 0 {
-			entry.PerModel = append(entry.PerModel, row)
-		}
-	}
-	return entry, true
-}
-
-func copyTokenCountFields(dst map[string]any, tokenCount map[string]any) {
-	if len(tokenCount) == 0 {
-		return
-	}
-	known := map[string]struct{}{}
-	for _, key := range []string{
-		"totalTokens",
-		"inputTokens",
-		"cachedInputTokens",
-		"cachedReadTokens",
-		"outputTokens",
-		"reasoningOutputTokens",
-		"thoughtTokens",
-	} {
-		known[key] = struct{}{}
-		if value, ok := tokenCount[key]; ok {
-			dst[key] = value
-		}
-	}
-	var extra []string
-	for key := range tokenCount {
-		if _, ok := known[key]; !ok {
-			extra = append(extra, key)
-		}
-	}
-	sort.Strings(extra)
-	for _, key := range extra {
-		dst[key] = tokenCount[key]
-	}
-}
-
 func anySlice(v any) []any {
 	items, _ := v.([]any)
 	return items
-}
-
-func epochRFC3339(v any) string {
-	var sec int64
-	switch x := v.(type) {
-	case json.Number:
-		if n, err := x.Int64(); err == nil {
-			sec = n
-		} else if f, err := strconv.ParseFloat(x.String(), 64); err == nil {
-			sec = int64(f)
-		}
-	case float64:
-		sec = int64(x)
-	case float32:
-		sec = int64(x)
-	case int:
-		sec = int64(x)
-	case int64:
-		sec = x
-	case int32:
-		sec = int64(x)
-	case string:
-		if n, err := strconv.ParseInt(x, 10, 64); err == nil {
-			sec = n
-		} else if f, err := strconv.ParseFloat(x, 64); err == nil {
-			sec = int64(f)
-		}
-	}
-	if sec <= 0 {
-		return ""
-	}
-	return time.Unix(sec, 0).UTC().Format(time.RFC3339)
 }
 
 func floatFromAny(v any) (float64, bool) {
@@ -458,16 +166,6 @@ func int64FromAny(v any) (int64, bool) {
 		return 0, false
 	}
 	return int64(value), true
-}
-
-func rfc3339Timestamp(v any) string {
-	if raw, ok := v.(string); ok {
-		raw = strings.TrimSpace(raw)
-		if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
-			return parsed.UTC().Format(time.RFC3339)
-		}
-	}
-	return epochRFC3339(v)
 }
 
 type planUsageRefreshRun struct {
@@ -770,9 +468,7 @@ func (m *Manager) ConsumeRateLimitResetCredit(ctx context.Context, providerID, s
 	if err != nil {
 		return nil, err
 	}
-	snapshot, ok := m.recordPlanUsageCapture(sessionID, providerID, map[string]any{
-		"_meta": map[string]any{capture.metaKey: capture.result},
-	})
+	snapshot, ok := m.recordNormalizedPlanUsageCapture(sessionID, providerID, capture)
 	if !ok {
 		return nil, errors.New("Codex reset response contained no usable rate-limit snapshot")
 	}
@@ -790,9 +486,7 @@ func (b *Bridge) refreshNativePlanUsage(ctx context.Context, sessionID string) e
 	if err != nil {
 		return err
 	}
-	b.manager.recordPlanUsageCapture(sessionID, providerID, map[string]any{
-		"_meta": map[string]any{capture.metaKey: capture.result},
-	})
+	b.manager.recordNormalizedPlanUsageCapture(sessionID, providerID, capture)
 	return nil
 }
 

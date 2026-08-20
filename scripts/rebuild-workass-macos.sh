@@ -102,7 +102,7 @@ rebuild_electron() {
   echo "[electron] testing shell view server" | tee -a "$log_file"
   step_output="$log_root/electron-test-$stamp.step"
   if (cd "$repo_root" && node --test desktop/shell/*.test.js && \
-      node --experimental-strip-types --test desktop/renderer2/tests/model-selection.test.ts desktop/renderer2/tests/timeline-layout.test.ts desktop/renderer2/tests/queue-persistence.test.ts desktop/renderer2/tests/image-drafts.test.ts desktop/renderer2/tests/workspaces.test.ts desktop/renderer2/tests/workspace-picker.test.ts desktop/renderer2/tests/notifications.test.ts desktop/renderer2/tests/subagent-layout.test.ts) >"$step_output" 2>&1; then
+      npm test --prefix desktop/renderer2 --silent) >"$step_output" 2>&1; then
     tee -a "$log_file" < "$step_output"
     rm -f "$step_output"
   else

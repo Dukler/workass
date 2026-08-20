@@ -1,10 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  compactModelProviderLabel,
   modelContextQualifier,
-  recoverRememberedCatalogModel,
-  recoverRememberedLiteralVariant,
   resolveModelSelection,
 } from '../src/model-selection.ts';
 import type { CatalogGroup, ModelOption } from '../src/wire/types.ts';
@@ -37,9 +34,9 @@ test('parses a suffix only when the base model advertises that effort', () => {
   assert.deepEqual(selected, { base: 'gpt-5.6-sol', effort: 'xhigh', model: codex });
 });
 
-test('repairs a stale canonical effort without changing the selected base model', () => {
+test('an unadvertised effort is not guessed into a provider model', () => {
   const selected = resolveModelSelection(groups, [], 'haiku[low]');
-  assert.deepEqual(selected, { base: 'haiku', effort: null, model: claudeModels[3] });
+  assert.deepEqual(selected, { base: 'haiku[low]', effort: null, model: null });
 });
 
 test('does not corrupt an unknown bracketed provider model id', () => {
@@ -47,64 +44,9 @@ test('does not corrupt an unknown bracketed provider model id', () => {
   assert.deepEqual(selected, { base: 'vendor-model[long-context]', effort: null, model: null });
 });
 
-test('repairs a degraded selection only from one exact remembered literal variant', () => {
-  const repaired = recoverRememberedLiteralVariant(
-    claudeModels,
-    'claude-fable-5[high]',
-    ['claude-fable-5', 'claude-fable-5[1m]', 'sonnet'],
-  );
-  assert.equal(repaired?.modelId, 'claude-fable-5[1m]');
-
-  assert.equal(recoverRememberedLiteralVariant(
-    claudeModels,
-    'claude-fable-5[high]',
-    ['claude-fable-5', 'sonnet'],
-  ), null);
-
-  assert.equal(recoverRememberedLiteralVariant(
-    [...claudeModels, { modelId: 'claude-fable-5[long]', name: 'Fable 5 long' }],
-    'claude-fable-5[high]',
-    ['claude-fable-5[1m]', 'claude-fable-5[long]'],
-  ), null);
-});
-
-test('repairs a legacy Claude default alias only from one remembered visible model', () => {
-  const repaired = recoverRememberedCatalogModel(
-    claudeModels,
-    'default',
-    ['default', 'claude-fable-5[1m]'],
-    'claude',
-  );
-  assert.equal(repaired?.modelId, 'claude-fable-5[1m]');
-
-  assert.equal(recoverRememberedCatalogModel(
-    claudeModels,
-    'default',
-    ['default'],
-    'claude',
-  ), null);
-
-  assert.equal(recoverRememberedCatalogModel(
-    claudeModels,
-    'default',
-    ['claude-fable-5[1m]', 'opus[1m]'],
-    'claude',
-  ), null);
-
-  assert.equal(recoverRememberedCatalogModel(
-    claudeModels,
-    'default',
-    ['claude-fable-5[1m]'],
-    'custom',
-  ), null);
-});
-
 test('exposes literal context qualifiers without mistaking effort for context', () => {
   assert.equal(modelContextQualifier('claude-fable-5[1m]'), '1M');
   assert.equal(modelContextQualifier('vendor-model[long-context]'), 'LONG-CONTEXT');
   assert.equal(modelContextQualifier('gpt-5.6-sol[xhigh]'), null);
   assert.equal(modelContextQualifier('sonnet'), null);
-  assert.equal(compactModelProviderLabel('claude', 'Claude Code ACP'), 'Claude');
-  assert.equal(compactModelProviderLabel('codex', 'Codex ACP'), 'Codex');
-  assert.equal(compactModelProviderLabel('custom', 'My Agent ACP'), 'My Agent');
 });

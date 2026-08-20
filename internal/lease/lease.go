@@ -112,11 +112,6 @@ func (m *Manager) ApproveDevice(name, ip string) (Device, string, error) {
 	return device, token, nil
 }
 
-// PairDevice is a compatibility alias for older callers; it now records an approved device.
-func (m *Manager) PairDevice(name string) (Device, string, error) {
-	return m.ApproveDevice(name, "")
-}
-
 // EnrollDevice records a device whose token was *derived* rather than minted
 // here, which is what a fleet enrolment produces.
 //

@@ -3,6 +3,7 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer, type ViteDevServer } from 'vite';
 import type { Chat, Msg } from '../src/store/types.ts';
+import type { DeliveryCapabilities } from '../src/wire/types.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
@@ -22,7 +23,25 @@ after(async () => {
   delete (globalThis as any).window;
 });
 
-function chat(providerId = 'claude'): Chat {
+const receiptDelivery: DeliveryCapabilities = {
+  stableInputIdentity: true,
+  liveSteer: true,
+  steerConsumptionReceipt: true,
+  consumptionReceipt: true,
+  turnReadback: true,
+};
+
+const genericLiveDelivery: DeliveryCapabilities = {
+  ...receiptDelivery,
+  steerConsumptionReceipt: false,
+};
+
+const queuedDelivery: DeliveryCapabilities = {
+  ...genericLiveDelivery,
+  liveSteer: false,
+};
+
+function chat(providerId = 'provider-receipt-fixture', deliveryCapabilities: DeliveryCapabilities | undefined = receiptDelivery): Chat {
   return {
     id: 'tab-1',
     chatId: 'chat-1',
@@ -35,6 +54,7 @@ function chat(providerId = 'claude'): Chat {
     currentModelId: 'model-1',
     currentModeId: 'agent',
     providerId,
+    deliveryCapabilities,
     pending: false,
     messages: [],
     draft: '',
@@ -49,10 +69,14 @@ function running(owner: Chat, jobId = 'job-1') {
 }
 
 // window.api is the only bridge the store talks to; `has()` feature-detects on it.
-function subject(api: Record<string, unknown> = {}, providerId = 'claude'): { store: any; owner: Chat } {
+function subject(
+  api: Record<string, unknown> = {},
+  providerId = 'provider-receipt-fixture',
+  deliveryCapabilities: DeliveryCapabilities | undefined = receiptDelivery,
+): { store: any; owner: Chat } {
   (globalThis as any).window = { api: { appChatSteer: async () => ({ ok: true }), ...api } };
   const store = new StoreCtor();
-  const owner = chat(providerId);
+  const owner = chat(providerId, deliveryCapabilities);
   store.state.chats = [owner];
   store.state.activeId = owner.id;
   store.state.connection = 'connected';
@@ -64,12 +88,12 @@ function subject(api: Record<string, unknown> = {}, providerId = 'claude'): { st
   return { store, owner };
 }
 
-test('a live Claude steer lands in the transcript and never bounces through the queue', async () => {
+test('a receipt-capable live steer stays staged and never bounces through the queue', async () => {
   const steerCalls: unknown[][] = [];
   const { store, owner } = subject({
     appChatSteer: async (...args: unknown[]) => {
       steerCalls.push(args);
-      return { ok: true, live: true, strategy: 'claude-live', turnId: 'sdk-uuid-1', receipt: true };
+      return { ok: true, live: true, strategy: 'receipt-live', turnId: 'provider-turn-1', receipt: true };
     },
   });
   running(owner);
@@ -92,11 +116,11 @@ test('a live Claude steer lands in the transcript and never bounces through the 
   assert.equal((steerCalls[0][5] as { deferUntilConsumed?: boolean }).deferUntilConsumed, true);
 });
 
-test('only an adapter rejection moves a Claude steer into the FIFO, exactly once', async () => {
+test('only a typed delivery rejection moves a live steer into the FIFO, exactly once', async () => {
   const { store, owner } = subject({
     appChatSteer: async () => ({
       ok: false, live: false, interrupted: true, strategy: 'interrupt-queue',
-      error: 'adapter viejo sin steering nativo',
+      error: 'the delivery strategy rejected live steering',
     }),
   });
   running(owner);
@@ -109,6 +133,56 @@ test('only an adapter rejection moves a Claude steer into the FIFO, exactly once
     0,
     'the rejected transcript row is removed so the queue row is the only owner',
   );
+});
+
+test('provider identity cannot change receipt-boundary placement', async () => {
+  for (const providerId of ['fixture-a', 'fixture-b']) {
+    const calls: unknown[][] = [];
+    const { store, owner } = subject({
+      appChatSteer: async (...args: unknown[]) => {
+        calls.push(args);
+        return { ok: true, live: true, strategy: 'receipt-live', turnId: `${providerId}-turn`, receipt: true };
+      },
+    }, providerId, receiptDelivery);
+    running(owner, `${providerId}-job`);
+
+    assert.equal(await store.steerOrQueue(owner.id, `steer ${providerId}`), true);
+    const steer = owner.messages.find((message) => message.role === 'user' && message.content === `steer ${providerId}`);
+    assert.ok(steer);
+    assert.equal(steer!.steerBoundary, 'waiting');
+    assert.equal((calls[0][5] as { deferUntilConsumed?: boolean }).deferUntilConsumed, true);
+  }
+});
+
+test('generic live steering uses its pending transcript row without a receipt boundary', async () => {
+  let boundary: { deferUntilConsumed?: boolean } | undefined;
+  const { store, owner } = subject({
+    appChatSteer: async (...args: unknown[]) => {
+      boundary = args[5] as { deferUntilConsumed?: boolean };
+      return { ok: true, live: true, strategy: 'generic-live', turnId: 'generic-turn' };
+    },
+  }, 'arbitrary-generic-provider', genericLiveDelivery);
+  running(owner);
+
+  assert.equal(await store.steerOrQueue(owner.id, 'generic steer'), true);
+  const steer = owner.messages.find((message) => message.role === 'user' && message.content === 'generic steer');
+  assert.ok(steer);
+  assert.equal(steer!.steerBoundary, undefined);
+  assert.equal(boundary?.deferUntilConsumed, undefined);
+  assert.equal(owner.queue, undefined);
+});
+
+test('a lane without live-steer capability queues without invoking the steer channel', async () => {
+  let steerCalls = 0;
+  const { store, owner } = subject({
+    appChatSteer: async () => { steerCalls += 1; return { ok: true }; },
+  }, 'arbitrary-queued-provider', queuedDelivery);
+  running(owner);
+
+  assert.equal(await store.steerOrQueue(owner.id, 'queue by capability'), true);
+  assert.equal(steerCalls, 0);
+  assert.deepEqual(owner.queue?.map((item) => item.text), ['queue by capability']);
+  assert.equal(owner.messages.some((message) => message.content === 'queue by capability'), false);
 });
 
 test('an actor-owned rejected steer does not create a second renderer FIFO row', async () => {
@@ -150,23 +224,29 @@ test('a follow-up queued as the turn ends still drains instead of parking', asyn
 });
 
 test('a hydration during the drain cannot strand the accepted row in the live queue', async () => {
-  let replaceOnSend: (() => void) | null = null;
+  let hydrateOnSend: (() => void) | null = null;
   const { store, owner } = subject({
-    startJob: async () => { replaceOnSend?.(); return { id: 'job-3' }; },
+    startJob: async () => { hydrateOnSend?.(); return { id: 'job-3' }; },
   });
   owner.queue = [{ id: 'q-1', text: 'mandá esto' }];
 
-  // restoreSessionSnapshot replaces every chat object wholesale. The drain used
-  // to remove the accepted row from its captured object, leaving the live chat
-  // with a row nothing would ever drain again.
-  const replacement = chat();
-  replacement.queue = [{ id: 'q-1', text: 'mandá esto' }];
-  replaceOnSend = () => { store.state.chats = [replacement]; };
+  // The daemon snapshot predates the optimistic turn pair but still owns the
+  // queued row. Exercise the real hydration boundary: it replaces the Chat
+  // object and must carry the exact in-flight pair before job:start can accept.
+  const staleMirror = store.toMirror(false);
+  let replacement: Chat | null = null;
+  hydrateOnSend = () => {
+    assert.equal(store.restoreSessionSnapshot(staleMirror), true);
+    replacement = store.chat(owner.id);
+  };
 
   await store.flushNextQueued(owner);
 
+  assert.ok(replacement, 'the stale daemon snapshot hydrated a replacement chat');
+  assert.notStrictEqual(replacement, owner);
   assert.equal(store.chat('tab-1'), replacement);
-  assert.equal(replacement.queue, undefined, 'the accepted row leaves the live chat, not the orphan');
+  assert.deepEqual(replacement!.messages.map((message) => message.id), ['q-1', 'queue-assistant-q-1']);
+  assert.equal(replacement!.queue, undefined, 'the accepted row leaves the live chat, not the orphan');
 });
 
 test('a delayed queue save cannot strand a later accepted steer beside the composer', async () => {
@@ -184,9 +264,9 @@ test('a delayed queue save cannot strand a later accepted steer beside the compo
       };
       store.state.chats = [replacement];
       await Promise.resolve();
-      return { ok: true, live: true, strategy: 'codex-live', turnId: 'turn-1', receipt: true };
+      return { ok: true, live: true, strategy: 'receipt-live', turnId: 'turn-1', receipt: true };
     },
-  }, 'codex');
+  }, 'another-receipt-provider', receiptDelivery);
   running(owner);
 
   assert.equal(store.queueDraftMessage(owner.id, 'first, keep this queued', []), true);

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,9 +19,11 @@ import (
 )
 
 type browserControlDescriptor struct {
-	Version int    `json:"version"`
-	URL     string `json:"url"`
-	Token   string `json:"token"`
+	Version    int    `json:"version"`
+	URL        string `json:"url"`
+	Token      string `json:"token"`
+	PID        int    `json:"pid"`
+	InstanceID string `json:"instanceId"`
 }
 
 type browserMCPCallParams struct {
@@ -239,16 +242,55 @@ func invokeBrowserControlReceipt(controlFile, operationID, requestDigest string,
 	return invokeBrowserControlRequest(controlFile, "browser.receipt", map[string]any{}, operationID, requestDigest, client)
 }
 
+func probeBrowserControl(controlFile string, client *http.Client) error {
+	result, err := invokeBrowserControl(controlFile, "browser.controlStatus", map[string]any{}, client)
+	if err != nil {
+		return err
+	}
+	status := mapFromAnyMain(result)
+	if status["ready"] != true || status["controller"] != true || strings.TrimSpace(browserString(status["instanceId"])) == "" {
+		return errors.New("Workass browser control is not ready")
+	}
+	return nil
+}
+
+func validBrowserControlDescriptor(descriptor browserControlDescriptor) bool {
+	if descriptor.Version != 2 || strings.TrimSpace(descriptor.Token) == "" || descriptor.PID <= 0 ||
+		!validHex32(strings.TrimSpace(descriptor.InstanceID)) {
+		return false
+	}
+	parsed, err := url.Parse(strings.TrimSpace(descriptor.URL))
+	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.Port() == "" ||
+		parsed.Path != "/rpc" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	return true
+}
+
+func validHex32(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func invokeBrowserControlRequest(controlFile, method string, params map[string]any, operationID, requestDigest string, client *http.Client) (browserControlReply, error) {
 	data, err := os.ReadFile(controlFile)
 	if err != nil {
 		return browserControlReply{}, errors.New("Workass browser is not running")
 	}
 	var descriptor browserControlDescriptor
-	if err := json.Unmarshal(data, &descriptor); err != nil || descriptor.Version != 1 || descriptor.URL == "" || descriptor.Token == "" {
+	if err := json.Unmarshal(data, &descriptor); err != nil || !validBrowserControlDescriptor(descriptor) {
 		return browserControlReply{}, errors.New("Workass browser control descriptor is invalid")
 	}
-	payload := map[string]any{"id": time.Now().UnixNano(), "method": method, "params": params}
+	payload := map[string]any{
+		"id": time.Now().UnixNano(), "method": method, "params": params, "instanceId": descriptor.InstanceID,
+	}
 	if strings.TrimSpace(operationID) != "" {
 		payload["operationId"] = strings.TrimSpace(operationID)
 	}

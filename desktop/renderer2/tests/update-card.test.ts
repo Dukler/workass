@@ -3,11 +3,17 @@ import assert from 'node:assert/strict';
 import { nextUpdatePhase, brandForProvider, DONE_HOLD_MS, EXIT_MS } from '../src/update-card.ts';
 
 test('provider ids resolve to the same brand marks the daemon uses', () => {
-  assert.equal(brandForProvider('codex'), 'gpt');
-  assert.equal(brandForProvider('gpt-5.6-sol'), 'gpt');
-  assert.equal(brandForProvider('claude'), 'claude');
-  assert.equal(brandForProvider('opus'), 'claude');
-  assert.equal(brandForProvider('qwen'), '');
+  const providers = [
+    { id: 'alpha', name: 'Alpha', assistantBrand: 'gpt', enabled: true, status: 'ready' },
+    { id: 'beta', name: 'Beta', assistantBrand: 'claude', enabled: true, status: 'ready' },
+  ];
+  const groups = [
+    { providerId: 'gamma', providerName: 'Gamma', assistantBrand: 'qwen', models: [], modes: [] },
+  ];
+  assert.equal(brandForProvider('alpha', providers, groups), 'gpt');
+  assert.equal(brandForProvider('beta', providers, groups), 'claude');
+  assert.equal(brandForProvider('gamma', providers, groups), 'qwen');
+  assert.equal(brandForProvider('missing', providers, groups), '');
   assert.equal(brandForProvider(null), '');
 });
 

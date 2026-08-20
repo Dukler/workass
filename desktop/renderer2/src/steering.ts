@@ -1,4 +1,5 @@
-export type SteeringBehavior = 'codex-live' | 'claude-live' | 'capability';
+import type { DeliveryCapabilities } from './wire/types';
+
 export type SteeringDestination = 'transcript' | 'queue';
 
 export interface SteeringReplyLike {
@@ -24,8 +25,8 @@ export interface ChronologicalMessageLike extends PendingSteerLike {
   jobId?: string;
   turnRootId?: string;
   turnTerminal?: boolean;
-  // Native Codex keeps an admitted steer out of transcript history until the
-  // core commits its userMessage item between sampling steps. Workass persists
+  // A receipt-bearing lane keeps an admitted steer out of transcript history
+  // until the core commits its user-input item at the negotiated boundary. Workass persists
   // this waiting pair immediately, but hides it from transcript rendering and
   // leaves the current assistant segment live until that receipt arrives.
   steerBoundary?: 'waiting';
@@ -48,8 +49,8 @@ export function isWaitingSteerBoundary(message: ChronologicalMessageLike): boole
   return message.steerBoundary === 'waiting';
 }
 
-// Match Codex TUI: submission is durable and visible in the pending-input
-// preview immediately, but it does not split a streaming assistant message.
+// Submission is durable and visible in the pending-input preview immediately,
+// but it does not split a streaming assistant message.
 // The pre-created continuation is also durable so a receipt can atomically
 // reveal user+continuation without manufacturing identity after provider I/O.
 export function stageChronologicalSteer<T extends ChronologicalMessageLike>(
@@ -337,28 +338,28 @@ export class SteeringDispatchLane {
   }
 }
 
-// Codex app-server accepts same-turn input through turn/steer; the packaged
-// Claude host accepts it through the Agent SDK's live streaming input. Both
-// acknowledge on admission and confirm consumption later, so both are live.
-// Every other ACP agent keeps capability-driven behavior (`_session/steer` when
-// advertised, local queue otherwise). An adapter too old for the native request
-// still reports its own `interrupt-queue` disposition, which is the ONLY thing
-// that may move a submitted steer into the FIFO.
-export function steeringBehavior(providerId: string | null | undefined): SteeringBehavior {
-  const id = String(providerId ?? '').trim().toLowerCase();
-  if (id === 'codex' || id === 'codex-acp' || id.includes('codex')) return 'codex-live';
-  if (id === 'claude' || id === 'claude-agent-acp' || id === 'claude-code-acp' || id.includes('claude')) return 'claude-live';
-  return 'capability';
+export function normalizeDeliveryCapabilities(value: unknown): DeliveryCapabilities | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const capabilities = value as Partial<DeliveryCapabilities>;
+  return {
+    stableInputIdentity: capabilities.stableInputIdentity === true,
+    liveSteer: capabilities.liveSteer === true,
+    steerConsumptionReceipt: capabilities.steerConsumptionReceipt === true,
+    consumptionReceipt: capabilities.consumptionReceipt === true,
+    turnReadback: capabilities.turnReadback === true,
+  };
 }
 
-// Native frontier hosts commit the user row at their own canonical boundary
-// (Codex between sampling steps; Claude at the terminal result that closes the
-// pre-steer segment, since the SDK answers the direction in the next turn of
-// the same query), so the pair is persisted immediately but stays hidden until
-// the receipt arrives. Generic capability steering has no such receipt and
-// keeps the immediate-split contract.
-export function steeringStagesBoundary(behavior: SteeringBehavior): boolean {
-  return behavior === 'codex-live' || behavior === 'claude-live';
+export function liveSteeringSupported(capabilities: DeliveryCapabilities | null | undefined): boolean {
+  return capabilities?.liveSteer === true;
+}
+
+// A later, stable steer-consumption receipt is the only reason to stage the
+// pending row outside transcript chronology. Generic live steering has an
+// admission acknowledgement but no later semantic receipt, so it keeps the
+// pending transcript row. Provider branding never enters this decision.
+export function steeringStagesBoundary(capabilities: DeliveryCapabilities | null | undefined): boolean {
+  return liveSteeringSupported(capabilities) && capabilities?.steerConsumptionReceipt === true;
 }
 
 // A steering message must have exactly one visible owner. Workass creates that
@@ -372,19 +373,9 @@ export function steeringDestination(reply: SteeringReplyLike | null | undefined)
   return 'transcript';
 }
 
-// Initialize one stable pending owner. Provider-specific placement is handled
-// separately: Codex stages it in the pending preview, while generic live ACP
-// steering may place it directly in transcript history.
-export function beginPendingSteer<T extends PendingSteerLike>(messages: T[], message: T): T {
-  message.status = 'pending';
-  message.steerState = 'sending';
-  messages.push(message);
-  return message;
-}
-
 // A successful turn/steer response proves admission to the active regular turn.
 // It settles delivery feedback but does not choose the transcript boundary;
-// userMessage.clientId does that for receipt-capable Codex adapters.
+// the typed steer-consumption receipt does that for receipt-capable lanes.
 export function acceptPendingSteer<T extends PendingSteerLike>(messages: T[], pendingId: string): T | undefined {
   const message = messages.find((candidate) => candidate.id === pendingId);
   if (!message || message.steerState === 'applied') return undefined;
@@ -448,12 +439,9 @@ export function settlePendingSteer<T extends PendingSteerLike>(
   return message;
 }
 
-// Receipt capability controls whether Workass waits for the host's canonical
-// transcript boundary (Codex's between-sampling-step userMessage, Claude's
-// pre-steer terminal result). Older adapters commit at their successful
-// acknowledgement instead.
+// The attached lane capability has already selected the staged path. The
+// operation reply now needs only its typed receipt fact; provider-branded
+// strategy labels are transport diagnostics and never semantic switches.
 export function hasSteerConsumptionReceipt(reply: SteeringReplyLike | null | undefined): boolean {
-  const strategy = String(reply?.strategy ?? '').trim().toLowerCase();
-  return reply?.receipt === true
-    && (strategy === 'receipt-live' || strategy === 'codex-live' || strategy === 'claude-live' || strategy === 'uncertain');
+  return reply?.receipt === true;
 }

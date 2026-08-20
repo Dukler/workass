@@ -2,10 +2,35 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   createTranscriptPinScheduler,
+  latestOrdinaryUserMessageId,
   TRANSCRIPT_BACKGROUND_PIN_DELAY_MS,
   transcriptIsAtBottom,
   transcriptPinnedAfterScroll,
 } from '../src/transcript-scroll.ts';
+
+test('only a new ordinary user row changes the transcript follow identity', () => {
+  const messages = [
+    { id: 'user-1', role: 'user' },
+    { id: 'assistant-1', role: 'assistant' },
+  ];
+  assert.equal(latestOrdinaryUserMessageId(messages), 'user-1');
+
+  messages.push({ id: 'user-2', role: 'user' });
+  assert.equal(latestOrdinaryUserMessageId(messages), 'user-2');
+});
+
+test('steer submission and terminal presentation do not change the follow identity', () => {
+  const active = [
+    { id: 'user-1', role: 'user' },
+    { id: 'assistant-1', role: 'assistant' },
+    { id: 'steer-1', role: 'user', steerState: 'applied' },
+    { id: 'assistant-2', role: 'assistant' },
+  ];
+  const terminal = [active[0], active[1], active[3], active[2]];
+
+  assert.equal(latestOrdinaryUserMessageId(active), 'user-1');
+  assert.equal(latestOrdinaryUserMessageId(terminal), 'user-1');
+});
 
 const farFromBottom = { scrollHeight: 2_400, scrollTop: 900, clientHeight: 700 };
 const nearBottom = { scrollHeight: 2_400, scrollTop: 1_630, clientHeight: 700 };

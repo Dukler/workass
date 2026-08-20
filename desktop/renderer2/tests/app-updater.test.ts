@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { appUpdaterBlockerText, appUpdaterPhaseText, appUpdaterReceiptIsRecent, type AppUpdaterState } from '../src/app-updater.ts';
+import { appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, appUpdaterReceiptIsRecent, type AppUpdaterState } from '../src/app-updater.ts';
 
 const sidebar = readFileSync(new URL('../src/components/Sidebar.tsx', import.meta.url), 'utf8');
+const updaterSource = readFileSync(new URL('../src/app-updater.ts', import.meta.url), 'utf8');
 const settings = readFileSync(new URL('../src/components/Settings.tsx', import.meta.url), 'utf8');
 const settingsTypes = readFileSync(new URL('../src/store/types.ts', import.meta.url), 'utf8');
 
@@ -39,10 +40,28 @@ test('failed state surfaces the bounded updater error', () => {
   assert.equal(appUpdaterPhaseText(state('failed', { error: 'checksum inválido' })), 'checksum inválido');
 });
 
+test('a retained failure receipt visibly offers the newer release found by background polling', () => {
+  const failedWithNewOffer = state('failed', {
+    targetVersion: '1.2.0',
+    availableVersion: '1.2.0',
+    error: 'falló 1.1.0',
+  });
+  assert.equal(appUpdaterCardTitle(failedWithNewOffer), 'Workass 1.2.0');
+  assert.match(appUpdaterPhaseText(failedWithNewOffer), /Workass 1\.2\.0 está disponible/);
+  assert.match(appUpdaterPhaseText(failedWithNewOffer), /falló 1\.1\.0/);
+
+  const rollbackWithNewOffer = state('rollback_healthy', {
+    targetVersion: '1.2.0',
+    availableVersion: '1.2.0',
+  });
+  assert.equal(appUpdaterCardTitle(rollbackWithNewOffer), 'Workass 1.2.0');
+  assert.match(appUpdaterPhaseText(rollbackWithNewOffer), /restauró la versión saludable/);
+});
+
 test('availability-check failure is distinct from an attempted update failure', () => {
-  assert.equal(appUpdaterPhaseText(state('check_failed', { error: 'GitHub no disponible' })), 'GitHub no disponible');
-  assert.match(sidebar, /No se pudo buscar actualizaciones/);
-  assert.match(sidebar, /selfUpdate\.phase === 'check_failed'/);
+  const unavailable = state('check_failed', { error: 'GitHub no disponible' });
+  assert.equal(appUpdaterPhaseText(unavailable), 'GitHub no disponible');
+  assert.equal(appUpdaterCardTitle(unavailable), 'No se pudo buscar actualizaciones');
 });
 
 test('only a fresh terminal receipt can replay the success seal after an app restart', () => {
@@ -61,6 +80,7 @@ test('Workass updater uses the existing footer update-card lifecycle and never a
   assert.match(selfCard, /className="uretry"/);
   assert.match(sidebar, /const selfAction = selfPending \|\| selfCheckFailed \|\| selfFailed \? selfUpdater\.apply : null/);
   assert.doesNotMatch(sidebar, /selfUpdater\.(download|install)/);
+  assert.doesNotMatch(updaterSource, /\b(?:download|install)\(\):\s*Promise<AppUpdaterState>/);
   assert.doesNotMatch(sidebar, /const selfActionLabel[\s\S]{0,180}'Reiniciar'/);
   assert.doesNotMatch(settings, /WorkassPanel|useAppUpdater|appUpdaterPhaseText/);
   assert.doesNotMatch(settingsTypes, /SettingsSection\s*=\s*[^;]*'workass'/);

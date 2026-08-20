@@ -1,6 +1,5 @@
 import type { Msg, TimelineEvent, ToolEvent } from './store/types';
-import { isSubagentChild, isUserFacingSubagentTool } from './subagent-layout.ts';
-import type { WorkassRuntimeProfile } from './model-catalog.ts';
+import { isSubagentChild } from './subagent-layout.ts';
 
 export type TimelineSegment =
   | { prose: string; start: number; end: number }
@@ -28,12 +27,10 @@ interface BoundaryIndex {
 const boundaryCache = new WeakMap<Msg, { content: string; index: BoundaryIndex }>();
 const markdownKeyCache = new WeakMap<Msg, { next: number; entries: Array<{ signature: string; key: string }> }>();
 const transcriptTimelineCache = new WeakMap<Msg, {
-  profile: WorkassRuntimeProfile;
   snapshot: readonly unknown[];
   segments: TranscriptTimelineSegment[];
 }>();
 const turnBlockTimelineCache = new WeakMap<Msg, {
-  profile: WorkassRuntimeProfile;
   messages: readonly Msg[];
   segments: TranscriptTimelineSegment[][];
 }>();
@@ -291,10 +288,9 @@ function sameSnapshot(previous: readonly unknown[], next: readonly unknown[]): b
 
 function transcriptTimelineSnapshot(
   msg: Msg,
-  profile: WorkassRuntimeProfile,
   visibleEvents: readonly TimelineEvent[],
 ): unknown[] {
-  const snapshot: unknown[] = [profile, msg.content, msg.status, visibleEvents.length];
+  const snapshot: unknown[] = [msg.content, msg.status, visibleEvents.length];
   for (const event of visibleEvents) {
     snapshot.push(event, event.key, event.at, event.kind);
     if (event.kind === 'tool') {
@@ -308,14 +304,14 @@ function transcriptTimelineSnapshot(
 // Transcript law: subagent child calls are rail-only. Filter them BEFORE
 // sorting/boundary placement so hundreds of hidden calls never scan prose or
 // block later visible events; subagent headers remain normal grouped tool rows.
-export function buildTranscriptTimelineSegments(msg: Msg, profile: WorkassRuntimeProfile = 'dev'): TranscriptTimelineSegment[] {
+export function buildTranscriptTimelineSegments(msg: Msg): TranscriptTimelineSegment[] {
   const visibleEvents = msg.events.filter((event) => event.kind !== 'tool'
-    || (!isSubagentChild(event) && isUserFacingSubagentTool(event, profile)));
-  const snapshot = transcriptTimelineSnapshot(msg, profile, visibleEvents);
+    || !isSubagentChild(event));
+  const snapshot = transcriptTimelineSnapshot(msg, visibleEvents);
   const cached = transcriptTimelineCache.get(msg);
-  if (cached?.profile === profile && sameSnapshot(cached.snapshot, snapshot)) return cached.segments;
+  if (cached && sameSnapshot(cached.snapshot, snapshot)) return cached.segments;
   const segments = foldToolGroups(buildTimelineSegments(msg, visibleEvents));
-  transcriptTimelineCache.set(msg, { profile, snapshot, segments });
+  transcriptTimelineCache.set(msg, { snapshot, segments });
   return segments;
 }
 
@@ -448,22 +444,20 @@ function sameTimelineSegmentList(
 // in the same continuation block updates.
 export function buildCoalescedTurnBlockTimelineSegments(
   messages: readonly Msg[],
-  profile: WorkassRuntimeProfile = 'dev',
 ): TranscriptTimelineSegment[][] {
   if (messages.length === 0) return [];
-  const perMsgSegments = messages.map((message) => buildTranscriptTimelineSegments(message, profile));
+  const perMsgSegments = messages.map((message) => buildTranscriptTimelineSegments(message));
   const candidate = coalesceTurnBlockToolFolds(perMsgSegments);
   const first = messages[0];
   const cached = turnBlockTimelineCache.get(first);
   const segments = candidate.map((row, index) => (
-    cached?.profile === profile
-      && cached.messages[index] === messages[index]
+    cached?.messages[index] === messages[index]
       && cached.segments[index]
       && sameTimelineSegmentList(cached.segments[index], row)
       ? cached.segments[index]
       : row
   ));
-  turnBlockTimelineCache.set(first, { profile, messages: [...messages], segments });
+  turnBlockTimelineCache.set(first, { messages: [...messages], segments });
   return segments;
 }
 
@@ -500,18 +494,18 @@ export function stableMarkdownBlockKeys(msg: Msg, signatures: readonly string[])
 
   const keys = new Array<string | undefined>(signatures.length);
   const previousTail = state.entries[state.entries.length - 1];
-  const available = new Map<string, string[]>();
+  const available = new Map<string, { keys: string[]; cursor: number }>();
   for (const entry of state.entries) {
     const queue = available.get(entry.signature);
-    if (queue) queue.push(entry.key);
-    else available.set(entry.signature, [entry.key]);
+    if (queue) queue.keys.push(entry.key);
+    else available.set(entry.signature, { keys: [entry.key], cursor: 0 });
   }
 
   const used = new Set<string>();
   for (let index = 0; index < signatures.length; index++) {
     const queue = available.get(signatures[index]);
-    if (queue?.length) {
-      const key = queue.shift()!;
+    if (queue && queue.cursor < queue.keys.length) {
+      const key = queue.keys[queue.cursor++];
       keys[index] = key;
       used.add(key);
     }

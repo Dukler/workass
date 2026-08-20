@@ -117,21 +117,43 @@ func TestClaudeSteerCancelLeavesSpawnedWorkRunning(t *testing.T) {
 func TestProductionMockProviderCannotInjectSpawnedWork(t *testing.T) {
 	manager := NewManager(Options{StateDir: t.TempDir(), RuntimeProfile: "prod", SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
-	if manager.acceptsNativeSpawnedWorkProvider("mock") {
+	if manager.acceptsProviderSpawnedWork("mock") {
 		t.Fatal("production accepted mock spawned-work provider")
 	}
-	manager.observeSpawnToolEvent(spawnToolObservation{
+	observeRawSpawnToolFixture(t, manager, spawnToolObservation{
 		SessionID: "session-prod", TabID: "tab-prod", ChatID: "chat-prod", ProviderID: "mock", ToolCallID: "tool-prod",
-		Title: "Bash", RawInput: map[string]any{"run_in_background": true},
-	})
+		Title: "Bash",
+	}, providerRawToolObservation{Title: "Bash", RawInput: map[string]any{"run_in_background": true}})
 	if got := manager.ListSpawnedWork("tab-prod", "chat-prod"); len(got) != 0 {
 		t.Fatalf("production accepted mock spawned-work fixture: %#v", got)
 	}
 }
 
+func observeRawSpawnToolFixture(t *testing.T, manager *Manager, observation spawnToolObservation, raw providerRawToolObservation) {
+	t.Helper()
+	signal, ok := providerAdapterForID(observation.ProviderID).spawnedWork.DecodeTool(raw)
+	if !ok {
+		return
+	}
+	observation.ProviderTool = signal.ProviderTool
+	observation.RunsInBackground = signal.RunsInBackground
+	observation.FallbackTaskID = signal.FallbackTaskID
+	observation.FallbackOutputFile = signal.FallbackOutputFile
+	manager.observeSpawnToolEvent(observation)
+}
+
+func observeRawSpawnLifecycleFixture(t *testing.T, manager *Manager, tabID, chatID, sessionID, providerID string, raw map[string]any) {
+	t.Helper()
+	update, ok := providerAdapterForID(providerID).spawnedWork.DecodeLifecycle(raw)
+	if !ok {
+		t.Fatalf("registered provider did not decode spawned-work fixture: %#v", raw)
+	}
+	manager.observeProviderSpawnedWork(tabID, chatID, sessionID, providerID, update)
+}
+
 func spawnedWorkTestOutput(t *testing.T, taskID string) string {
 	t.Helper()
-	// validateClaudeTaskOutputPath only trusts os.TempDir()/tmp roots. Under
+	// The registered provider path policy trusts only os.TempDir()/tmp roots. Under
 	// GOTMPDIR (sandboxed gates) t.TempDir() moves elsewhere, so anchor the
 	// fixture explicitly inside the allowed root.
 	root, err := os.MkdirTemp(os.TempDir(), "spawned-work-test-")
@@ -180,13 +202,17 @@ func TestSpawnedWorkPassivelyTracksBackgroundBashAndWritesReceipt(t *testing.T) 
 		t.Fatalf("install spawned-work actor fixture: %v", err)
 	}
 
-	manager.observeSpawnToolEvent(spawnToolObservation{
+	observeRawSpawnToolFixture(t, manager, spawnToolObservation{
 		SessionID: "session-1", TabID: "tab-1", ChatID: "chat-1", ProviderID: "claude", ToolCallID: "tool-1",
+		Title: "Bash", Command: "python3 -m http.server 8737",
+	}, providerRawToolObservation{
 		Title: "Bash", Command: "python3 -m http.server 8737", RawInput: map[string]any{"run_in_background": true},
 		Meta: map[string]any{"claudeCode": map[string]any{"toolName": "Bash"}},
 	})
-	manager.observeSpawnToolEvent(spawnToolObservation{
+	observeRawSpawnToolFixture(t, manager, spawnToolObservation{
 		SessionID: "session-1", TabID: "tab-1", ChatID: "chat-1", ProviderID: "claude", ToolCallID: "tool-1",
+		Title: "Bash",
+	}, providerRawToolObservation{
 		Title: "Bash", Meta: map[string]any{"claudeCode": map[string]any{"toolName": "Bash"}},
 		Output: "Command running in background with ID: bash-1\nOutput is being written to: " + output,
 	})
@@ -245,12 +271,14 @@ func TestSpawnedWorkFallbackNormalizesSentencePunctuationAndMergesStructuredReco
 	manager := NewManager(Options{StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 
-	manager.observeClaudeSpawnedWork("tab-real", "chat-real", "session-real", map[string]any{
+	observeRawSpawnLifecycleFixture(t, manager, "tab-real", "chat-real", "session-real", "claude", map[string]any{
 		"type": "started", "taskId": taskID, "toolCallId": "tool-real",
 		"description": "Run lab/prove feather_dose ladder third attempt", "taskType": "bash",
 	})
-	manager.observeSpawnToolEvent(spawnToolObservation{
+	observeRawSpawnToolFixture(t, manager, spawnToolObservation{
 		SessionID: "session-real", TabID: "tab-real", ChatID: "chat-real", ProviderID: "claude", ToolCallID: "tool-real",
+		Title: "tool",
+	}, providerRawToolObservation{
 		Title: "tool", Meta: map[string]any{"claudeCode": map[string]any{"toolName": "Bash"}},
 		Output: "Command running in background with ID: " + taskID + ". Output is being written to: " + output,
 	})
@@ -309,10 +337,10 @@ func TestSpawnedWorkStructuredAgentWorkflowAndSnapshotLifecycle(t *testing.T) {
 		StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour,
 		SpawnedWorkPIDProbe: func([]string) (map[string][]int, bool) { return nil, false },
 	})
-	manager.observeClaudeSpawnedWork("tab-2", "chat-2", "session-2", map[string]any{
+	observeRawSpawnLifecycleFixture(t, manager, "tab-2", "chat-2", "session-2", "claude", map[string]any{
 		"type": "started", "taskId": "agent-1", "toolCallId": "tool-agent", "description": "Review UI", "taskType": "agent", "subagentType": "Explore",
 	})
-	manager.observeClaudeSpawnedWork("tab-2", "chat-2", "session-2", map[string]any{
+	observeRawSpawnLifecycleFixture(t, manager, "tab-2", "chat-2", "session-2", "claude", map[string]any{
 		"type": "started", "taskId": "flow-1", "description": "Run validation workflow", "taskType": "local_workflow",
 	})
 	items := manager.ListSpawnedWork("tab-2", "chat-2")
@@ -324,10 +352,10 @@ func TestSpawnedWorkStructuredAgentWorkflowAndSnapshotLifecycle(t *testing.T) {
 		t.Fatalf("structured items = %#v", items)
 	}
 
-	manager.observeClaudeSpawnedWork("tab-2", "chat-2", "session-2", map[string]any{
+	observeRawSpawnLifecycleFixture(t, manager, "tab-2", "chat-2", "session-2", "claude", map[string]any{
 		"type": "notification", "taskId": "agent-1", "status": "failed", "summary": "review failed",
 	})
-	manager.observeClaudeSpawnedWork("tab-2", "chat-2", "session-2", map[string]any{
+	observeRawSpawnLifecycleFixture(t, manager, "tab-2", "chat-2", "session-2", "claude", map[string]any{
 		"type": "snapshot", "tasks": []any{},
 	})
 	manager.spawnedWorkMu.Lock()
@@ -347,10 +375,11 @@ func TestSpawnedWorkStructuredAgentWorkflowAndSnapshotLifecycle(t *testing.T) {
 }
 
 func TestSpawnedWorkRejectsUntrustedOutputPaths(t *testing.T) {
-	if _, ok := validateClaudeTaskOutputPath("task-1", "/etc/task-1.output"); ok {
+	strategy := providerAdapterForID("claude").spawnedWork
+	if _, ok := strategy.ValidateOutputPath("task-1", "/etc/task-1.output"); ok {
 		t.Fatal("accepted output outside Claude temp task directory")
 	}
-	if _, ok := validateClaudeTaskOutputPath("../task-1", filepath.Join(os.TempDir(), "claude-501", "tasks", "task-1.output")); ok {
+	if _, ok := strategy.ValidateOutputPath("../task-1", filepath.Join(os.TempDir(), "claude-501", "tasks", "task-1.output")); ok {
 		t.Fatal("accepted path traversal task id")
 	}
 }

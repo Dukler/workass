@@ -19,7 +19,10 @@ func seedAgentProviderTurn(t *testing.T, engine *chat.Engine, operationID provid
 	if state.ActiveLaneID == "" {
 		t.Fatal("agent turn fixture has no active lane")
 	}
-	if err := engine.Apply(chat.Submit{OperationID: operationID, LaneID: state.ActiveLaneID, Text: "legitimate provider turn"}); err != nil {
+	if err := engine.Apply(chat.Submit{
+		OperationID: operationID, LaneID: state.ActiveLaneID, Text: "legitimate provider turn",
+		Presentation: providercontract.TurnPresentation{Origin: "human"},
+	}); err != nil {
 		t.Fatalf("seed provider turn: submit: %v", err)
 	}
 	if err := engine.Apply(chat.TurnAdmitted{

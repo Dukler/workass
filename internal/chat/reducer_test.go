@@ -3,6 +3,7 @@ package chat
 import (
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -39,6 +40,24 @@ func apply(t *testing.T, state State, command Command) (State, []Effect) {
 	return next, effects
 }
 
+func TestSubmitRejectsMissingPresentationOriginWithoutMutation(t *testing.T) {
+	state, _ := NewState("chat")
+	laneID := testLane("chat", "provider")
+	state, _ = apply(t, state, SelectLane{Identity: laneID})
+	revision := state.Revision
+
+	next, effects, err := Reduce(state, Submit{
+		OperationID: "missing-origin", Text: "do not infer who sent this",
+		Presentation: provider.TurnPresentation{UserMessageID: "user", AssistantMessageID: "assistant"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "turn presentation origin is required") {
+		t.Fatalf("missing origin was not rejected explicitly: %v", err)
+	}
+	if len(effects) != 0 || next.Revision != revision || !reflect.DeepEqual(next, state) {
+		t.Fatalf("rejected submit mutated actor state: next=%#v effects=%#v", next, effects)
+	}
+}
+
 func TestAdmissionRejectionPersistsVisibleFailedTurnWithoutClaimingNativeConsumption(t *testing.T) {
 	state, _ := NewState("chat")
 	laneID := testLane("chat", "codex")
@@ -52,7 +71,7 @@ func TestAdmissionRejectionPersistsVisibleFailedTurnWithoutClaimingNativeConsump
 	state, _ = apply(t, state, Submit{
 		OperationID: "rejected", Text: "keep this prompt",
 		Presentation: provider.TurnPresentation{
-			UserMessageID: "public-user", AssistantMessageID: "public-assistant", StartedAt: "2026-08-11T12:00:00Z",
+			UserMessageID: "public-user", AssistantMessageID: "public-assistant", Origin: "human", StartedAt: "2026-08-11T12:00:00Z",
 		},
 	})
 	state, _ = apply(t, state, TurnAdmissionFailed{OperationID: "rejected", Kind: provider.ErrorProviderUnavailable})
@@ -90,7 +109,7 @@ func TestBackgroundActionJournalPreservesPendingAndNeverReplaysDispatched(t *tes
 		ConnectionGeneration: 1,
 		Context:              exactContext(provider.ContextImportUnsupported),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "coordinate"})
+	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "coordinate", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, TurnAdmitted{
 		OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"},
 	})
@@ -150,7 +169,7 @@ func TestBackgroundReconciliationPreservesTerminalRowsAndOrphansMissingLiveWork(
 		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "turn", LaneID: lane.ID, Text: "background owner"})
+	state, _ = apply(t, state, Submit{OperationID: "turn", LaneID: lane.ID, Text: "background owner", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, TurnAdmitted{
 		OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"},
 	})
@@ -226,7 +245,7 @@ func TestDeleteChatPersistsIdempotentCleanupBeforeNativeDeletion(t *testing.T) {
 	if state.Outbox[0].Status != OutboxCompleted {
 		t.Fatalf("delete cleanup receipt = %#v", state.Outbox[0])
 	}
-	if _, _, err := Reduce(state, Submit{OperationID: "resurrect", Text: "no"}); err == nil {
+	if _, _, err := Reduce(state, Submit{OperationID: "resurrect", Text: "no", Presentation: provider.TurnPresentation{Origin: "human"}}); err == nil {
 		t.Fatal("tombstoned chat accepted semantic work")
 	}
 }
@@ -310,7 +329,7 @@ func TestForegroundWorkClearsSettledArchiveClock(t *testing.T) {
 			ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
 		})
 		revision := state.Presentation.PresentationRevision
-		state, _ = apply(t, state, Submit{OperationID: "new-work", Text: "resume"})
+		state, _ = apply(t, state, Submit{OperationID: "new-work", Text: "resume", Presentation: provider.TurnPresentation{Origin: "human"}})
 
 		if state.Presentation.Settled != "" || state.Presentation.SettledAt != 0 {
 			t.Fatalf("foreground work retained settled archive state: %#v", state.Presentation)
@@ -400,7 +419,7 @@ func TestCreateFailureRemainsAbsentUntilExplicitIntent(t *testing.T) {
 			}
 
 			if test.submit {
-				state, effects = apply(t, state, Submit{OperationID: "retry-input", Text: "try again"})
+				state, effects = apply(t, state, Submit{OperationID: "retry-input", Text: "try again", Presentation: provider.TurnPresentation{Origin: "human"}})
 			} else {
 				state, effects = apply(t, state, SelectLane{Identity: identity})
 			}
@@ -438,7 +457,7 @@ func TestSubmitCreatesOnlyItsSelectedProviderLane(t *testing.T) {
 		})
 	}
 
-	state, effects := apply(t, state, Submit{OperationID: "selected-provider-only", Text: "hello beta"})
+	state, effects := apply(t, state, Submit{OperationID: "selected-provider-only", Text: "hello beta", Presentation: provider.TurnPresentation{Origin: "human"}})
 	if len(effects) != 1 {
 		t.Fatalf("selected-provider submit effects = %#v", effects)
 	}
@@ -514,7 +533,7 @@ func TestDeferredProviderThreadExistsOnlyAfterMatchingInputReceipt(t *testing.T)
 	if len(effects) != 0 || state.Lanes[laneID.ID].Phase != LaneAbsent {
 		t.Fatalf("empty deferred selection touched the provider: effects=%#v lane=%#v", effects, state.Lanes[laneID.ID])
 	}
-	state, effects = apply(t, state, Submit{OperationID: "first-input", Text: "hello"})
+	state, effects = apply(t, state, Submit{OperationID: "first-input", Text: "hello", Presentation: provider.TurnPresentation{Origin: "human"}})
 	if len(effects) != 1 {
 		t.Fatalf("first input did not request exactly one candidate: %#v", effects)
 	}
@@ -575,7 +594,7 @@ func TestNegotiatedDeferredCandidateAcceptsTheLaterFirstInput(t *testing.T) {
 	if len(effects) != 0 || state.Lanes[laneID.ID].Provision == nil {
 		t.Fatalf("idle negotiated candidate was not retained provisionally: effects=%#v lane=%#v", effects, state.Lanes[laneID.ID])
 	}
-	state, effects = apply(t, state, Submit{OperationID: "later-first-input", Text: "hello after selection"})
+	state, effects = apply(t, state, Submit{OperationID: "later-first-input", Text: "hello after selection", Presentation: provider.TurnPresentation{Origin: "human"}})
 	if len(effects) != 1 {
 		t.Fatalf("later input did not release the existing candidate: %#v", effects)
 	}
@@ -597,7 +616,7 @@ func TestDeferredProviderCrashReconcilesExactCandidateBeforeAnyResend(t *testing
 	second := provider.ThreadRef{ProviderID: "codex", RootID: "candidate-2", HeadID: "candidate-2", Lineage: 1}
 
 	state, _ = apply(t, state, SelectLane{Identity: laneID, Creation: creation})
-	state, _ = apply(t, state, Submit{OperationID: "first-input", Text: "hello"})
+	state, _ = apply(t, state, Submit{OperationID: "first-input", Text: "hello", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, LaneProvisioned{
 		LaneID: laneID.ID, Identity: laneID, Candidate: first, ConnectionGeneration: 1,
 		Context: exactContext(provider.ContextImportUnsupported), Delivery: delivery, Creation: creation,
@@ -668,7 +687,7 @@ func TestProviderSwitchImportsOnlyUnseenLedgerAndSwitchesBack(t *testing.T) {
 		LaneID: codex.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "codex-thread", HeadID: "codex-thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, effects := apply(t, state, Submit{OperationID: "op-codex", Text: "first"})
+	state, effects := apply(t, state, Submit{OperationID: "op-codex", Text: "first", Presentation: provider.TurnPresentation{Origin: "human"}})
 	if _, ok := effects[0].(StartTurnEffect); !ok {
 		t.Fatalf("submit effect = %T", effects[0])
 	}
@@ -742,7 +761,7 @@ func TestSwitchDuringTurnDoesNotRetargetForegroundOrSteerOwner(t *testing.T) {
 		LaneID: codex.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "codex-thread", HeadID: "codex-thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "running", Text: "work"})
+	state, _ = apply(t, state, Submit{OperationID: "running", Text: "work", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, effects := apply(t, state, SelectLane{Identity: claude})
 	if len(effects) != 0 {
 		t.Fatalf("switch during turn emitted effects: %#v", effects)
@@ -750,7 +769,7 @@ func TestSwitchDuringTurnDoesNotRetargetForegroundOrSteerOwner(t *testing.T) {
 	if state.Foreground == nil || state.Foreground.LaneID != codex.ID || state.DesiredLaneID != claude.ID {
 		t.Fatalf("foreground/desired ownership changed incorrectly: %#v", state)
 	}
-	state, _ = apply(t, state, Submit{OperationID: "queued-for-claude", Text: "next"})
+	state, _ = apply(t, state, Submit{OperationID: "queued-for-claude", Text: "next", Presentation: provider.TurnPresentation{Origin: "human"}})
 	if len(state.Queue) != 1 || state.Queue[0].LaneID != claude.ID {
 		t.Fatalf("queued target was not snapshotted: %#v", state.Queue)
 	}
@@ -765,13 +784,13 @@ func TestSteerCancelAndPermissionKeepOriginLaneAcrossProviderSelection(t *testin
 		LaneID: alpha.ID, Thread: provider.ThreadRef{ProviderID: "alpha", RootID: "thread-a", HeadID: "thread-a", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "work"})
+	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "work", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, TurnAdmitted{
 		OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"},
 	})
 	state, _ = apply(t, state, SelectLane{Identity: beta})
 
-	state, effects := apply(t, state, Steer{OperationID: "steer", Text: "redirect"})
+	state, effects := apply(t, state, Steer{OperationID: "steer", Text: "redirect", Presentation: provider.TurnPresentation{Origin: "human"}})
 	steer, ok := effects[0].(SteerTurnEffect)
 	if !ok || steer.LaneID != alpha.ID || steer.Turn.NativeID != "native-turn" {
 		t.Fatalf("steer was retargeted by provider selection: %#v", effects)
@@ -830,13 +849,13 @@ func TestLateSteerReceiptAfterUrgentCancelNeverReplaysInput(t *testing.T) {
 		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "alpha", RootID: "thread", HeadID: "thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "work"})
+	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "work", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, TurnAdmitted{
 		OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"},
 	})
 	state, _ = apply(t, state, Steer{
 		OperationID: "steer", Text: "redirect",
-		Presentation: provider.TurnPresentation{UserMessageID: "steer-user"},
+		Presentation: provider.TurnPresentation{UserMessageID: "steer-user", Origin: "human"},
 	})
 	state, _ = apply(t, state, ClaimEffect{EffectID: steerEffectID("steer")})
 	state, _ = apply(t, state, CancelTurn{OperationID: "cancel"})
@@ -884,11 +903,11 @@ func TestConsumedSteerGetsOneSemanticOwner(t *testing.T) {
 		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "alpha", RootID: "thread", HeadID: "thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "work"})
+	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "work", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, TurnAdmitted{
 		OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"},
 	})
-	state, _ = apply(t, state, Steer{OperationID: "steer", Text: "one direction"})
+	state, _ = apply(t, state, Steer{OperationID: "steer", Text: "one direction", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, SteerAdmitted{OperationID: "steer", Accepted: true})
 	state, _ = apply(t, state, InputConsumed{OperationID: "steer"})
 	if state.PendingSteer != nil || len(state.Ledger) != 3 {
@@ -926,7 +945,7 @@ func TestRichProviderTimelineSurvivesActorRestartLosslessly(t *testing.T) {
 	state, _ = apply(t, state, Submit{
 		OperationID: "turn", Text: "question", ModelID: "model",
 		Presentation: provider.TurnPresentation{
-			UserMessageID: "user", AssistantMessageID: "assistant", StartedAt: "2026-08-11T12:00:00Z",
+			UserMessageID: "user", AssistantMessageID: "assistant", Origin: "human", StartedAt: "2026-08-11T12:00:00Z",
 		},
 	})
 	state, _ = apply(t, state, TurnAdmitted{
@@ -1010,7 +1029,7 @@ func TestTerminalEventPreservesCompleteSemanticsAndSettlesOpenActivity(t *testin
 	})
 	state, _ = apply(t, state, Submit{
 		OperationID: "turn", Text: "question", ModelID: "model",
-		Presentation: provider.TurnPresentation{UserMessageID: "user", AssistantMessageID: "assistant", StartedAt: "2026-08-11T12:00:00Z"},
+		Presentation: provider.TurnPresentation{UserMessageID: "user", AssistantMessageID: "assistant", Origin: "human", StartedAt: "2026-08-11T12:00:00Z"},
 	})
 	state, _ = apply(t, state, TurnAdmitted{OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"}})
 	sequence := uint64(0)
@@ -1029,7 +1048,7 @@ func TestTerminalEventPreservesCompleteSemanticsAndSettlesOpenActivity(t *testin
 	emit(provider.Event{Kind: provider.EventPermissionRequested, Permission: &provider.PermissionEvent{RequestID: "permission", Status: "pending"}})
 	state, _ = apply(t, state, Steer{
 		OperationID: "steer", Text: "late direction",
-		Presentation: provider.TurnPresentation{UserMessageID: "steer-user", StartedAt: "2026-08-11T12:00:05Z"},
+		Presentation: provider.TurnPresentation{UserMessageID: "steer-user", Origin: "human", StartedAt: "2026-08-11T12:00:05Z"},
 	})
 	state, _ = apply(t, state, SteerAdmitted{OperationID: "steer", Accepted: true, AwaitConsumption: true})
 	code := 1
@@ -1069,50 +1088,12 @@ func TestTerminalEventPreservesCompleteSemanticsAndSettlesOpenActivity(t *testin
 	if settledLane.CoveredThrough != 3 || settledLane.Coverage[3].Status != CoverageExcluded {
 		t.Fatalf("unconsumed steer created a provider import gap: %#v", settledLane)
 	}
-	state, effects := apply(t, state, Submit{OperationID: "next-turn", Text: "continue safely"})
+	state, effects := apply(t, state, Submit{OperationID: "next-turn", Text: "continue safely", Presentation: provider.TurnPresentation{Origin: "human"}})
 	if len(effects) != 1 {
 		t.Fatalf("next turn did not start after ambiguity-fenced steer: %#v", effects)
 	}
 	if start, ok := effects[0].(StartTurnEffect); !ok || start.Input.OperationID != "next-turn" {
 		t.Fatalf("next turn effect = %#v", effects[0])
-	}
-}
-
-func TestSubmitRepairsLegacyUnconsumedSteerCoverageGap(t *testing.T) {
-	state, _ := NewState("chat")
-	lane := testLane("chat", "codex")
-	state, _ = apply(t, state, SelectLane{Identity: lane})
-	state, _ = apply(t, state, LaneOpened{
-		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
-		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
-		Attachment: &provider.LaneAttachmentSnapshot{ConnectionID: "connection", ProviderID: "codex"},
-	})
-	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "question"})
-	state, _ = apply(t, state, TurnAdmitted{OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"}})
-	state, _ = apply(t, state, Steer{OperationID: "steer", Text: "late direction"})
-	state, _ = apply(t, state, SteerAdmitted{OperationID: "steer", Accepted: true, AwaitConsumption: true})
-	state, _ = apply(t, state, TurnTerminated{OperationID: "turn", Status: "cancelled"})
-
-	legacyLane := state.Lanes[lane.ID]
-	delete(legacyLane.Coverage, 3)
-	legacyLane.CoveredThrough = 2
-	legacyLane.Phase = LaneBlocked
-	legacyLane.LastError = provider.ErrorUnsupportedCapability
-	state.Lanes[lane.ID] = legacyLane
-
-	state, effects := apply(t, state, Submit{OperationID: "recovered-turn", Text: "continue after reload"})
-	recovered := state.Lanes[lane.ID]
-	if recovered.CoveredThrough != 3 || recovered.Coverage[3].Status != CoverageExcluded || recovered.LastError != "" {
-		t.Fatalf("legacy steer gap was not repaired exactly: %#v", recovered)
-	}
-	if len(effects) != 1 {
-		t.Fatalf("recovered submit effects = %#v", effects)
-	}
-	if start, ok := effects[0].(StartTurnEffect); !ok || start.Input.OperationID != "recovered-turn" {
-		t.Fatalf("recovered submit did not start exact next turn: %#v", effects[0])
-	}
-	if !outboxHas(&state, steerEffectID("steer"), OutboxAmbiguous) {
-		t.Fatalf("legacy recovery erased the ambiguity fence: %#v", state.Outbox)
 	}
 }
 
@@ -1124,9 +1105,9 @@ func TestTerminalConsumedSteerReceiptCommitsChronologyExactlyOnce(t *testing.T) 
 		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "question", Presentation: provider.TurnPresentation{UserMessageID: "user", AssistantMessageID: "assistant"}})
+	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "question", Presentation: provider.TurnPresentation{UserMessageID: "user", AssistantMessageID: "assistant", Origin: "human"}})
 	state, _ = apply(t, state, TurnAdmitted{OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"}})
-	state, _ = apply(t, state, Steer{OperationID: "steer", Text: "direction", Presentation: provider.TurnPresentation{UserMessageID: "steer-user", AssistantMessageID: "continuation"}})
+	state, _ = apply(t, state, Steer{OperationID: "steer", Text: "direction", Presentation: provider.TurnPresentation{UserMessageID: "steer-user", AssistantMessageID: "continuation", Origin: "human"}})
 	state, _ = apply(t, state, SteerAdmitted{OperationID: "steer", Accepted: true, AwaitConsumption: true})
 	event := provider.Event{
 		Kind:     provider.EventTurnTerminal,
@@ -1157,7 +1138,7 @@ func TestFreshProviderWithoutContextImportSeedsNonemptyChatOnce(t *testing.T) {
 		LaneID: codex.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "op", Text: "hello"})
+	state, _ = apply(t, state, Submit{OperationID: "op", Text: "hello", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, TurnCompleted{OperationID: "op", Assistant: "world"})
 	state, _ = apply(t, state, SelectLane{Identity: limited})
 	state, effects := apply(t, state, LaneOpened{
@@ -1167,7 +1148,7 @@ func TestFreshProviderWithoutContextImportSeedsNonemptyChatOnce(t *testing.T) {
 	if len(effects) != 0 || state.Lanes[limited.ID].Phase != LaneReady || state.ActiveLaneID != codex.ID {
 		t.Fatalf("fresh unsupported-import lane was not left ready for its first input: lane=%#v active=%q effects=%#v", state.Lanes[limited.ID], state.ActiveLaneID, effects)
 	}
-	state, effects = apply(t, state, Submit{OperationID: "limited-op", Text: "continue here"})
+	state, effects = apply(t, state, Submit{OperationID: "limited-op", Text: "continue here", Presentation: provider.TurnPresentation{Origin: "human"}})
 	if len(effects) != 1 {
 		t.Fatalf("fresh provider did not start with one seeded turn: %#v", effects)
 	}
@@ -1190,7 +1171,7 @@ func TestFreshProviderWithoutContextImportSeedsNonemptyChatOnce(t *testing.T) {
 	}
 }
 
-func TestSelectionRevivesPreUpgradeBlockedLaneThatNeverConsumedInput(t *testing.T) {
+func TestSelectionRevivesBlockedLaneThatNeverConsumedInput(t *testing.T) {
 	state, _ := NewState("chat")
 	source := testLane("chat", "source")
 	target := testLane("chat", "qwen")
@@ -1199,7 +1180,7 @@ func TestSelectionRevivesPreUpgradeBlockedLaneThatNeverConsumedInput(t *testing.
 		LaneID: source.ID, Thread: provider.ThreadRef{ProviderID: "source", RootID: "source-thread", HeadID: "source-thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "source-op", Text: "existing history"})
+	state, _ = apply(t, state, Submit{OperationID: "source-op", Text: "existing history", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, TurnCompleted{OperationID: "source-op", Assistant: "existing answer"})
 
 	state, _ = apply(t, state, SelectLane{Identity: target})
@@ -1208,20 +1189,20 @@ func TestSelectionRevivesPreUpgradeBlockedLaneThatNeverConsumedInput(t *testing.
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
 		Attachment: &provider.LaneAttachmentSnapshot{ConnectionID: "unused-thread", ProviderID: "qwen"},
 	})
-	legacy := state.Lanes[target.ID]
-	legacy.InitialSeedPending = false
-	legacy.Phase = LaneBlocked
-	legacy.LastError = provider.ErrorUnsupportedCapability
-	state.Lanes[target.ID] = legacy
+	blocked := state.Lanes[target.ID]
+	blocked.InitialSeedPending = false
+	blocked.Phase = LaneBlocked
+	blocked.LastError = provider.ErrorUnsupportedCapability
+	state.Lanes[target.ID] = blocked
 	if err := state.Validate(); err != nil {
-		t.Fatalf("pre-upgrade blocked lane fixture: %v", err)
+		t.Fatalf("blocked unconsumed lane fixture: %v", err)
 	}
 
 	state, effects := apply(t, state, SelectLane{Identity: target})
 	if len(effects) != 0 || state.Lanes[target.ID].Phase != LaneReady || !state.Lanes[target.ID].InitialSeedPending {
 		t.Fatalf("never-used blocked lane was not revived in place: lane=%#v effects=%#v", state.Lanes[target.ID], effects)
 	}
-	state, effects = apply(t, state, Submit{OperationID: "qwen-op", Text: "use the old chat"})
+	state, effects = apply(t, state, Submit{OperationID: "qwen-op", Text: "use the old chat", Presentation: provider.TurnPresentation{Origin: "human"}})
 	if len(effects) != 1 {
 		t.Fatalf("revived lane emitted %d effects, want one seeded turn: %#v", len(effects), effects)
 	}
@@ -1241,12 +1222,12 @@ func TestDeferredFreshProviderSeedsBeforeItsThreadIsCommitted(t *testing.T) {
 		LaneID: source.ID, Thread: provider.ThreadRef{ProviderID: "source", RootID: "source-thread", HeadID: "source-thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "source-op", Text: "history before codex"})
+	state, _ = apply(t, state, Submit{OperationID: "source-op", Text: "history before codex", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, TurnCompleted{OperationID: "source-op", Assistant: "source answer"})
 
 	creation := provider.CreationCapabilities{DeferredUntilInput: true}
 	state, _ = apply(t, state, SelectLane{Identity: target, Creation: creation})
-	state, effects := apply(t, state, Submit{OperationID: "codex-op", Text: "continue with codex"})
+	state, effects := apply(t, state, Submit{OperationID: "codex-op", Text: "continue with codex", Presentation: provider.TurnPresentation{Origin: "human"}})
 	if len(effects) != 1 {
 		t.Fatalf("deferred target did not request creation: %#v", effects)
 	}
@@ -1274,8 +1255,8 @@ func TestDuplicateOperationCannotCreateTwoVisibleOwners(t *testing.T) {
 		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "same", Text: "once"})
-	if _, _, err := Reduce(state, Submit{OperationID: "same", Text: "twice"}); err == nil {
+	state, _ = apply(t, state, Submit{OperationID: "same", Text: "once", Presentation: provider.TurnPresentation{Origin: "human"}})
+	if _, _, err := Reduce(state, Submit{OperationID: "same", Text: "twice", Presentation: provider.TurnPresentation{Origin: "human"}}); err == nil {
 		t.Fatal("duplicate operation id was accepted")
 	}
 }
@@ -1355,7 +1336,7 @@ func TestContextImportIsBoundedAndCoverageCannotSkipAGap(t *testing.T) {
 		Thread:               provider.ThreadRef{ProviderID: "first", RootID: "first-thread", HeadID: "first-thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "source", Text: "question"})
+	state, _ = apply(t, state, Submit{OperationID: "source", Text: "question", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, TurnCompleted{OperationID: "source", Assistant: "answer"})
 
 	state, _ = apply(t, state, SelectLane{Identity: second})
@@ -1406,7 +1387,7 @@ func TestRecoveredContextImportResendsOnlyAfterAuthoritativeNotFound(t *testing.
 		LaneID: source.ID, Thread: provider.ThreadRef{ProviderID: "source", RootID: "source-thread", HeadID: "source-thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "source-turn", Text: "question"})
+	state, _ = apply(t, state, Submit{OperationID: "source-turn", Text: "question", Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, TurnCompleted{OperationID: "source-turn", Assistant: "answer"})
 	state, _ = apply(t, state, SelectLane{Identity: target})
 	state, effects := apply(t, state, LaneOpened{
@@ -1468,7 +1449,7 @@ func TestOneOversizedContextEventFailsClosed(t *testing.T) {
 		Thread:               provider.ThreadRef{ProviderID: "first", RootID: "first-thread", HeadID: "first-thread", Lineage: 1},
 		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
 	})
-	state, _ = apply(t, state, Submit{OperationID: "large", Text: strings.Repeat("x", 2048)})
+	state, _ = apply(t, state, Submit{OperationID: "large", Text: strings.Repeat("x", 2048), Presentation: provider.TurnPresentation{Origin: "human"}})
 	state, _ = apply(t, state, TurnCompleted{OperationID: "large", Assistant: "answer"})
 	state, _ = apply(t, state, SelectLane{Identity: second})
 	limited := exactContext(provider.ContextImportNonSampling)

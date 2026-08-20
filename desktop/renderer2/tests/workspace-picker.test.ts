@@ -22,7 +22,7 @@ test('the default request resolves to the server user home and is selectable', (
   assert.equal(folderCountLabel(home), '2 carpetas');
 });
 
-test('a legacy roots reply keeps its null path and is never selectable', () => {
+test('the explicit roots reply keeps its null path and is never selectable', () => {
   const roots = normalizeListing(
     { path: null, parent: null, entries: [{ name: 'Inicio', path: '/Users/me' }] },
     null,
@@ -80,8 +80,11 @@ test('an unreadable reply degrades to an honest error anchored at the requested 
   }
 });
 
-test('a reply that omits its path is anchored at the path we asked for', () => {
-  assert.equal(normalizeListing({ entries: [] }, '/srv/repo').path, '/srv/repo');
+test('a reply that omits its exact path fails closed', () => {
+  const missing = normalizeListing({ entries: [] }, '/srv/repo');
+  assert.equal(missing.path, '/srv/repo');
+  assert.match(String(missing.error), /diferente/i);
+  assert.equal(canSelectFolder(missing), false);
   assert.equal(normalizeListing({ path: '   ' }, null).path, null, 'a blank path is the roots, not a folder named ""');
 });
 

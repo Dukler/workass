@@ -50,7 +50,7 @@ func TestReceiptReviewDetachFailureRequiresDispatch(t *testing.T) {
 	state, identity, owner, _, connectionID := newDetachTestState(t)
 	operationID := DetachOperationID(state.ChatID, identity.ID, connectionID, 7)
 	var err error
-	state, _, err = Reduce(state, DetachLane{
+	state, _, err = Reduce(state, DetachTarget{
 		OperationID: operationID, LaneID: identity.ID, Owner: owner,
 		ConnectionID: connectionID, ConnectionGeneration: 7,
 	})
@@ -173,7 +173,9 @@ func TestReceiptReviewDeleteTombstonePersistsAndRejectsTampering(t *testing.T) {
 		mutate func(*State)
 	}{
 		{name: "empty tombstone operation", mutate: func(state *State) { state.DeletionOperationID = "" }},
-		{name: "unnormalized tombstone operation", mutate: func(state *State) { state.DeletionOperationID = provider.OperationID(" " + string(deletionOperationID)) }},
+		{name: "unnormalized tombstone operation", mutate: func(state *State) {
+			state.DeletionOperationID = provider.OperationID(" " + string(deletionOperationID))
+		}},
 		{name: "missing delete effect", mutate: func(state *State) { state.Outbox = nil }},
 		{name: "wrong effect id", mutate: func(state *State) { state.Outbox[0].ID = "chat-delete:forged" }},
 		{name: "wrong operation id", mutate: func(state *State) { state.Outbox[0].OperationID = "forged-delete-operation" }},

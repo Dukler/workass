@@ -159,8 +159,9 @@ func outboxEntryExecutable(state State, entry OutboxEntry) bool {
 		return !state.Deleted && entry.OperationID != "" && entry.TurnSequence > 0
 	}
 	// External browser mutations are claimed by their exact MCP actor boundary,
-	// never by the provider coordinator's generic drain. The caller must retain
-	// the actor lock across the claim and the transient browser dispatch.
+	// never by the provider coordinator's generic drain. Their dedicated executor
+	// lock serializes claim/dispatch/readback while the actor state lock is held
+	// only for the durable reducer transitions.
 	if entry.Kind == EffectExternalMutation {
 		return false
 	}

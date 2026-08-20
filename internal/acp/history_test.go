@@ -31,41 +31,31 @@ func TestEnvironmentBriefIncludesChatArchivePath(t *testing.T) {
 	t.Logf("trace env brief archive path=%s", archivePath)
 }
 
-func TestEnvironmentBriefCurrentRequestLanguageOverridesRestoredTranscript(t *testing.T) {
+func TestEnvironmentBriefCurrentRequestLanguageUsesHumanRequest(t *testing.T) {
 	manager, events := newFakeManager(t, "echo-prompt", Options{})
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "language-tab")
-	history := []any{
-		map[string]any{"role": "assistant", "content": "Respuesta anterior en español.", "at": "2026-07-10T00:00:00Z"},
-	}
 
-	job := startAppChatJobWithHistory(t, manager, session.SessionID, "language-tab", "Continue this work in English.", history)
+	job := startAppChatJob(t, manager, session.SessionID, "language-tab", "Continue this work in English.")
 	end := events.waitJobEnd(t, jobID(job), 2*time.Second)
 	result := jobFromEnd(end)["result"].(string)
 	rule := expectedPerTurnLanguageRule
 	if !strings.Contains(result, rule) ||
 		!strings.Contains(result, "restored transcripts") ||
-		strings.Contains(result, "Respuesta anterior en español.") ||
-		strings.Contains(result, "Previous conversation") ||
 		!strings.Contains(result, "User request:\nContinue this work in English.") {
-		t.Fatalf("Workass history was replayed or the current-request boundary is missing:\n%s", result)
+		t.Fatalf("current-request language boundary is missing:\n%s", result)
 	}
 	if strings.Index(result, rule) > strings.Index(result, "User request:\nContinue this work in English.") {
 		t.Fatalf("per-turn language rule must govern the current request:\n%s", result)
 	}
 
 	spanishSession := newFakeSession(t, manager, "language-tab-spanish")
-	spanishHistory := []any{
-		map[string]any{"role": "assistant", "content": "Previous assistant response in English.", "at": "2026-07-10T00:00:00Z"},
-	}
-	spanishJob := startAppChatJobWithHistory(t, manager, spanishSession.SessionID, "language-tab-spanish", "Continuá este trabajo en español.", spanishHistory)
+	spanishJob := startAppChatJob(t, manager, spanishSession.SessionID, "language-tab-spanish", "Continuá este trabajo en español.")
 	spanishEnd := events.waitJobEnd(t, jobID(spanishJob), 2*time.Second)
 	spanishResult := jobFromEnd(spanishEnd)["result"].(string)
 	if !strings.Contains(spanishResult, rule) ||
-		strings.Contains(spanishResult, "Previous assistant response in English.") ||
-		strings.Contains(spanishResult, "Previous conversation") ||
 		!strings.Contains(spanishResult, "User request:\nContinuá este trabajo en español.") {
-		t.Fatalf("current Spanish request replayed history or lost its language boundary:\n%s", spanishResult)
+		t.Fatalf("current Spanish request lost its language boundary:\n%s", spanishResult)
 	}
 }
 

@@ -180,6 +180,98 @@ test('native Codex host maps Workass MCP through the CA-aware stdio bridge', asy
   assert.equal(opened.result.sessionId, 'fixture-codex-thread');
 });
 
+test('native Codex host waits for delayed official MCP readiness and proves every configured catalog', async (t) => {
+  const peer = startHost({
+    WORKASS_CODEX_FIXTURE_REQUIRE_STDIO_MCP: '1',
+    WORKASS_CODEX_FIXTURE_MCP_DELAY_MS: '75',
+  });
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  const mcpServers = [
+    {
+      name: 'workass-browser', command: '/fixture/workass-daemon', args: ['mcp-stdio'],
+      env: [
+        { name: 'WORKASS_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
+        { name: 'WORKASS_MCP_ENDPOINT', value: 'https://mcp.localhost:8788/workass/mcp/browser' },
+      ],
+    },
+    { name: 'workass-agent', command: '/fixture/workass-daemon', args: ['mcp-stdio'], env: [] },
+  ];
+
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({
+    jsonrpc: '2.0', id: 2, method: 'session/new', params: {
+      cwd: repoRoot,
+      mcpServers,
+    },
+  });
+  const opened = await peer.waitFor((message) => message.id === 2);
+  assert.equal(opened.error, undefined, JSON.stringify(opened));
+  assert.equal(opened.result.sessionId, 'fixture-codex-thread');
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/close', params: { sessionId: opened.result.sessionId } });
+  await peer.waitFor((message) => message.id === 3);
+  peer.send({
+    jsonrpc: '2.0', id: 4, method: 'session/resume', params: {
+      sessionId: opened.result.sessionId, cwd: repoRoot, mcpServers,
+    },
+  });
+  const resumed = await peer.waitFor((message) => message.id === 4);
+  assert.equal(resumed.error, undefined, JSON.stringify(resumed));
+});
+
+test('native Codex host refuses a session whose configured MCP has no discovered tools', async (t) => {
+  const peer = startHost({
+    WORKASS_CODEX_FIXTURE_REQUIRE_STDIO_MCP: '1',
+    WORKASS_CODEX_FIXTURE_MCP_EMPTY_CATALOG: '1',
+  });
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({
+    jsonrpc: '2.0', id: 2, method: 'session/new', params: {
+      cwd: repoRoot,
+      mcpServers: [{
+        name: 'workass-browser', command: '/fixture/workass-daemon', args: ['mcp-stdio'],
+        env: [
+          { name: 'WORKASS_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
+          { name: 'WORKASS_MCP_ENDPOINT', value: 'https://mcp.localhost:8788/workass/mcp/browser' },
+        ],
+      }],
+    },
+  });
+  const opened = await peer.waitFor((message) => message.id === 2);
+  assert.equal(opened.result, undefined);
+  assert.match(opened.error?.message || '', /MCP tool catalog is unavailable for: workass-browser/);
+});
+
+test('native Codex host reports terminal MCP startup failure instead of publishing the session', async (t) => {
+  const peer = startHost({
+    WORKASS_CODEX_FIXTURE_REQUIRE_STDIO_MCP: '1',
+    WORKASS_CODEX_FIXTURE_MCP_FAILED: '1',
+  });
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({
+    jsonrpc: '2.0', id: 2, method: 'session/new', params: {
+      cwd: repoRoot,
+      mcpServers: [{
+        name: 'workass-browser', command: '/fixture/workass-daemon', args: ['mcp-stdio'],
+        env: [
+          { name: 'WORKASS_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
+          { name: 'WORKASS_MCP_ENDPOINT', value: 'https://mcp.localhost:8788/workass/mcp/browser' },
+        ],
+      }],
+    },
+  });
+  const opened = await peer.waitFor((message) => message.id === 2);
+  assert.equal(opened.result, undefined);
+  assert.match(opened.error?.message || '', /workass-browser startup failed: fixture MCP startup failed/);
+});
+
 test('native Codex host classifies an absent provisional candidate without parsing in chat state', async (t) => {
   const peer = startHost({ WORKASS_CODEX_FIXTURE_MISSING_RESUME: '1' });
   t.after(() => peer.child.kill('SIGKILL'));

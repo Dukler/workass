@@ -1,4 +1,4 @@
-import type { ModeOption, ModelOption } from './wire/types.ts';
+import type { ModeOption, ModelOption, PermissionIntent } from './wire/types.ts';
 import { canonicalModelControlKey } from './model-selection.ts';
 
 export interface RememberedModelControls {
@@ -32,13 +32,6 @@ export function nextModelControlRevision(current: number | undefined): number {
 
 export function modelControlsChangedDuringInit(startedRevision: number, currentRevision: number | undefined): boolean {
   return (currentRevision ?? 0) !== startedRevision;
-}
-
-export function providerSwitchRequiresHandover(
-  previousProviderId: string | null | undefined,
-  nextProviderId: string | null | undefined,
-): boolean {
-  return !!nextProviderId && nextProviderId !== previousProviderId;
 }
 
 // Provider selection and live-session ownership intentionally diverge while a
@@ -95,27 +88,22 @@ export function restoredControlSelection(
   };
 }
 
-const MODE_FAMILIES = {
-  unrestricted: ['agent-full-access', 'bypassPermissions', 'bypass', 'dontAsk'],
-  readonly: ['read-only', 'plan'],
-  agent: ['agent', 'default', 'ask', 'auto', 'acceptEdits', 'guardian'],
-} as const;
-
-type ModeFamily = keyof typeof MODE_FAMILIES;
-
-function modeFamily(modeId: string | null | undefined): ModeFamily | null {
-  const id = (modeId ?? '').trim().toLowerCase();
-  if (!id) return null;
-  for (const [family, aliases] of Object.entries(MODE_FAMILIES) as Array<[ModeFamily, readonly string[]]>) {
-    if (aliases.some((alias) => alias.toLowerCase() === id)) return family;
-  }
-  return null;
-}
-
 function availableMode(modes: ModeOption[], id: string | null | undefined): string | null {
   const wanted = (id ?? '').trim();
   if (!wanted) return null;
   return modes.find((mode) => mode.id === wanted)?.id ?? null;
+}
+
+export function permissionIntentForMode(
+  intents: Partial<Record<PermissionIntent, string>> | null | undefined,
+  modeId: string | null | undefined,
+): PermissionIntent | null {
+  const wanted = (modeId ?? '').trim();
+  if (!wanted) return null;
+  for (const intent of ['read', 'edit', 'full'] as const) {
+    if (intents?.[intent] === wanted) return intent;
+  }
+  return null;
 }
 
 // Preserve an exact provider-native id whenever possible. Across providers,
@@ -126,15 +114,14 @@ export function compatibleModeId(
   requested: string | null | undefined,
   modes: ModeOption[],
   providerDefault?: string | null,
+  requestedIntent?: PermissionIntent | null,
+  targetIntents?: Partial<Record<PermissionIntent, string>> | null,
 ): string | null {
   const exact = availableMode(modes, requested);
   if (exact) return exact;
-  const family = modeFamily(requested);
-  if (family) {
-    for (const alias of MODE_FAMILIES[family]) {
-      const match = modes.find((mode) => mode.id.toLowerCase() === alias.toLowerCase());
-      if (match) return match.id;
-    }
+  if (requestedIntent) {
+    const translated = availableMode(modes, targetIntents?.[requestedIntent]);
+    if (translated) return translated;
   }
   return availableMode(modes, providerDefault);
 }

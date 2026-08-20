@@ -12,60 +12,30 @@ import (
 	"time"
 )
 
-func TestPlanUsageClaudeUsageUpdatesNormalizeAndMerge(t *testing.T) {
-	manager, events := newPlanUsageFakeManager(t, "claude", "claude-plan-usage")
+func TestNormalizedPlanUsageCaptureMergesTypedSnapshots(t *testing.T) {
+	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
-	session := newFakeSession(t, manager, "claude-plan-tab")
-	if session.ProviderID != "claude" {
-		t.Fatalf("session provider = %q, want claude", session.ProviderID)
-	}
-
-	job := startAppChatJob(t, manager, session.SessionID, "claude-plan-tab", "capture claude plan usage")
-	rateUsage := events.waitFor(t, 2*time.Second, func(ev collectedEvent) bool {
-		payload, _ := ev.payload.(map[string]any)
-		return ev.channel == "job:event" && payload["type"] == "usage" && payload["sessionId"] == session.SessionID && fmt.Sprint(payload["size"]) == "200000"
-	}).payload.(map[string]any)
-	if rateUsage["tabId"] != "claude-plan-tab" || rateUsage["chatId"] != "chat-claude-plan-tab" || rateUsage["providerId"] != "claude" {
-		t.Fatalf("usage identity = tab=%#v chat=%#v provider=%#v", rateUsage["tabId"], rateUsage["chatId"], rateUsage["providerId"])
-	}
-	if strings.TrimSpace(fmt.Sprint(rateUsage["updatedAt"])) == "" {
-		t.Fatalf("usage update omitted durable timestamp: %#v", rateUsage)
-	}
-	rateSnapshot := jsonMap(t, rateUsage["planUsage"])
-	assertPlanUsageBase(t, rateSnapshot, "claude")
-	rateEntry := onlyPlanEntry(t, rateSnapshot, "rate-limit")
-	wantRate := map[string]any{
-		"kind":           "rate-limit",
-		"id":             "five_hour",
-		"status":         "allowed",
-		"resetsAt":       "2026-07-10T20:00:00Z",
-		"usedPercent":    json.Number("78"),
-		"overageStatus":  "allowed",
-		"isUsingOverage": false,
-	}
-	assertJSONMapEqual(t, rateEntry, wantRate)
-
-	finalEvent := events.waitFor(t, 2*time.Second, func(ev collectedEvent) bool {
-		if ev.channel != "chat:plan-usage" {
-			return false
-		}
-		snapshot := jsonMap(t, ev.payload)
-		return snapshot["providerId"] == "claude" && len(planEntries(snapshot)) == 2
+	used := 78.0
+	first, ok := manager.recordNormalizedPlanUsageCapture("", "fixture", planUsageCapture{
+		entries: []PlanUsageEntry{{Kind: "rate-limit", ID: "five_hour", UsedPercent: &used}},
+		raw:     map[string]any{"window": map[string]any{"source": "typed"}},
 	})
-	finalSnapshot := jsonMap(t, finalEvent.payload)
-	costEntry := onlyPlanEntry(t, finalSnapshot, "cost")
-	if got := numberString(costEntry["amount"]); got != "0.0581616" {
-		t.Fatalf("cost amount = %s, want 0.0581616; entry=%#v", got, costEntry)
+	if !ok || len(first.Entries) != 1 {
+		t.Fatalf("first normalized snapshot = %#v, ok=%v", first, ok)
 	}
-	if costEntry["currency"] != "USD" {
-		t.Fatalf("cost currency = %#v, want USD", costEntry["currency"])
+	second, ok := manager.recordNormalizedPlanUsageCapture("", "fixture", planUsageCapture{
+		entries: []PlanUsageEntry{{Kind: "cost", Amount: 0.25, Currency: "USD"}},
+		raw:     map[string]any{"billing": map[string]any{"source": "typed"}},
+	})
+	if !ok || second.ProviderID != "fixture" || strings.TrimSpace(second.CapturedAt) == "" {
+		t.Fatalf("merged normalized snapshot = %#v, ok=%v", second, ok)
 	}
-	raw := rawPlanUsage(t, finalSnapshot)
-	if _, ok := raw["_claude/rateLimit"].(map[string]any); !ok {
-		t.Fatalf("raw metadata did not retain captured rate limit: %#v", raw)
+	if len(second.Entries) != 2 || second.Entries[0].Kind != "rate-limit" || second.Entries[1].Kind != "cost" {
+		t.Fatalf("merged normalized entries = %#v", second.Entries)
 	}
-
-	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "done", 0, "end_turn")
+	if len(second.Raw) != 2 {
+		t.Fatalf("merged normalized raw metadata = %#v", second.Raw)
+	}
 }
 
 func TestPlanUsageClaudeStructuredRefreshCapturesFiveHourAndWeeklyWindows(t *testing.T) {
@@ -172,19 +142,18 @@ func TestCodexEarnedRateLimitResetIsIdempotentAndRefreshesPlanUsage(t *testing.T
 	}
 }
 
-func TestCodexEarnedRateLimitResetNullSnapshotClearsPreviousCredit(t *testing.T) {
+func TestNormalizedPlanUsageCaptureClearsExplicitResetSnapshot(t *testing.T) {
 	manager := NewManager(Options{})
-	first, ok := manager.recordPlanUsageCapture("", "codex", map[string]any{
-		"_meta": map[string]any{"workass.codex/rateLimits": fakeCodexRateLimitsWithCredits(1)},
+	t.Cleanup(func() { manager.Reset() })
+	first, ok := manager.recordNormalizedPlanUsageCapture("", "fixture", planUsageCapture{
+		resetCredits:    &RateLimitResetCreditsSummary{AvailableCount: 1},
+		resetCreditsSet: true,
 	})
 	if !ok || first.RateLimitResetCredits == nil || first.RateLimitResetCredits.AvailableCount != 1 {
 		t.Fatalf("initial earned reset snapshot = %#v, ok=%v", first.RateLimitResetCredits, ok)
 	}
-	second, ok := manager.recordPlanUsageCapture("", "codex", map[string]any{
-		"_meta": map[string]any{"workass.codex/rateLimits": map[string]any{
-			"rateLimits":            fakeCodexRateLimitsWithCredits(0)["rateLimits"],
-			"rateLimitResetCredits": nil,
-		}},
+	second, ok := manager.recordNormalizedPlanUsageCapture("", "fixture", planUsageCapture{
+		resetCreditsSet: true,
 	})
 	if !ok || second.RateLimitResetCredits != nil {
 		t.Fatalf("null earned reset snapshot = %#v, ok=%v; want cleared", second.RateLimitResetCredits, ok)
@@ -398,78 +367,51 @@ func TestRefreshProviderPlanUsageColdStartIsEphemeralAndPromptFree(t *testing.T)
 	}
 }
 
-func TestPlanUsageCodexPromptResultNormalizesQuota(t *testing.T) {
-	manager, events := newPlanUsageFakeManager(t, "codex", "codex-plan-usage")
+func TestNormalizedPlanUsageCaptureStoresRawWithoutFabricatingEntries(t *testing.T) {
+	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
-	session := newFakeSession(t, manager, "codex-plan-tab")
-
-	job := startAppChatJob(t, manager, session.SessionID, "codex-plan-tab", "capture codex quota")
-	ev := events.waitChannel(t, "chat:plan-usage", 2*time.Second)
-	snapshot := jsonMap(t, ev.payload)
-	assertPlanUsageBase(t, snapshot, "codex")
-	quota := onlyPlanEntry(t, snapshot, "quota")
-	perModel, _ := quota["perModel"].([]any)
-	if len(perModel) != 1 {
-		t.Fatalf("quota perModel = %#v, want one model", quota["perModel"])
+	snapshot, ok := manager.recordNormalizedPlanUsageCapture("", "custom", planUsageCapture{
+		raw: map[string]any{
+			"weekly":  map[string]any{"remaining": 42},
+			"credits": map[string]any{"used": 7, "size": 100},
+		},
+	})
+	if !ok || len(snapshot.Entries) != 0 {
+		t.Fatalf("raw-only normalized capture = %#v, ok=%v", snapshot, ok)
 	}
-	got := perModel[0].(map[string]any)
-	want := map[string]any{
-		"model":                 "gpt-5.6-sol",
-		"totalTokens":           json.Number("14609"),
-		"inputTokens":           json.Number("4616"),
-		"cachedInputTokens":     json.Number("9984"),
-		"outputTokens":          json.Number("9"),
-		"reasoningOutputTokens": json.Number("0"),
+	weekly := mapFromAny(snapshot.Raw["weekly"])
+	credits := mapFromAny(snapshot.Raw["credits"])
+	if weekly["remaining"] != 42 || credits["used"] != 7 || credits["size"] != 100 {
+		t.Fatalf("raw normalized metadata = %#v", snapshot.Raw)
 	}
-	assertJSONMapEqual(t, got, want)
-	raw := rawPlanUsage(t, snapshot)
-	if _, ok := raw["quota"].(map[string]any); !ok {
-		t.Fatalf("raw quota missing: %#v", raw)
-	}
-	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "done", 0, "end_turn")
-}
-
-func TestPlanUsageUnknownMetaLandsInRaw(t *testing.T) {
-	manager, events := newPlanUsageFakeManager(t, "custom", "unknown-plan-usage")
-	t.Cleanup(func() { manager.Reset() })
-	session := newFakeSession(t, manager, "unknown-plan-tab")
-
-	job := startAppChatJob(t, manager, session.SessionID, "unknown-plan-tab", "capture unknown metadata")
-	ev := events.waitChannel(t, "chat:plan-usage", 2*time.Second)
-	snapshot := jsonMap(t, ev.payload)
-	if entries := planEntries(snapshot); len(entries) != 0 {
-		t.Fatalf("unknown metadata produced typed entries: %#v", entries)
-	}
-	raw := rawPlanUsage(t, snapshot)
-	weekly := raw["weekly"].(map[string]any)
-	credits := raw["credits"].(map[string]any)
-	if weekly["remaining"] != json.Number("42") || credits["used"] != json.Number("7") || credits["size"] != json.Number("100") {
-		t.Fatalf("raw unknown metadata = %#v", raw)
-	}
-	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "done", 0, "end_turn")
 }
 
 func TestPlanUsageRawIsBoundedAndRedacted(t *testing.T) {
-	hugeManager, hugeEvents := newPlanUsageFakeManager(t, "custom", "huge-plan-usage")
+	hugeManager := NewManager(Options{})
 	t.Cleanup(func() { hugeManager.Reset() })
-	hugeSession := newFakeSession(t, hugeManager, "huge-plan-tab")
-	hugeJob := startAppChatJob(t, hugeManager, hugeSession.SessionID, "huge-plan-tab", "capture huge metadata")
-	hugeSnapshot := jsonMap(t, hugeEvents.waitChannel(t, "chat:plan-usage", 2*time.Second).payload)
-	hugeRaw := rawPlanUsage(t, hugeSnapshot)
-	if hugeRaw["_truncated"] != true || hugeRaw["_limitBytes"] != json.Number("8192") {
+	hugeSnapshot, ok := hugeManager.recordNormalizedPlanUsageCapture("", "custom", planUsageCapture{
+		raw: map[string]any{"blob": strings.Repeat("x", 9000)},
+	})
+	if !ok {
+		t.Fatal("bounded normalized capture was dropped")
+	}
+	hugeRaw := hugeSnapshot.Raw
+	if hugeRaw["_truncated"] != true || hugeRaw["_limitBytes"] != planUsageRawLimitBytes {
 		t.Fatalf("huge raw metadata was not capped with note: %#v", hugeRaw)
 	}
 	if data, err := json.Marshal(hugeRaw); err != nil || len(data) > planUsageRawLimitBytes {
 		t.Fatalf("huge raw JSON len=%d err=%v raw=%#v", len(data), err, hugeRaw)
 	}
-	assertJobStatus(t, hugeEvents.waitJobEnd(t, jobID(hugeJob), 2*time.Second), "done", 0, "end_turn")
 
-	secretManager, secretEvents := newPlanUsageFakeManager(t, "custom", "secret-plan-usage")
+	secretManager := NewManager(Options{})
 	t.Cleanup(func() { secretManager.Reset() })
-	secretSession := newFakeSession(t, secretManager, "secret-plan-tab")
-	secretJob := startAppChatJob(t, secretManager, secretSession.SessionID, "secret-plan-tab", "capture secret metadata")
-	secretSnapshot := jsonMap(t, secretEvents.waitChannel(t, "chat:plan-usage", 2*time.Second).payload)
-	secretRaw := rawPlanUsage(t, secretSnapshot)
+	secretSnapshot, ok := secretManager.recordNormalizedPlanUsageCapture("", "custom", planUsageCapture{
+		raw: map[string]any{"api_key": "sk-live-secret", "nested": map[string]any{"safe": "api_key=sk-nested"}},
+	})
+	if !ok {
+		t.Fatal("redacted normalized capture was dropped")
+	}
+	secretRaw := secretSnapshot.Raw
 	if secretRaw["api_key"] != "[redacted]" {
 		t.Fatalf("api_key was not redacted: %#v", secretRaw)
 	}
@@ -477,18 +419,17 @@ func TestPlanUsageRawIsBoundedAndRedacted(t *testing.T) {
 	if nested["safe"] != "api_key=[redacted]" {
 		t.Fatalf("nested secret-looking value was not redacted: %#v", nested)
 	}
-	assertJobStatus(t, secretEvents.waitJobEnd(t, jobID(secretJob), 2*time.Second), "done", 0, "end_turn")
 }
 
 func TestPlanUsageReplayToLateClient(t *testing.T) {
-	manager, events := newPlanUsageFakeManager(t, "claude", "claude-plan-usage")
+	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
-	session := newFakeSession(t, manager, "replay-plan-tab")
-	job := startAppChatJob(t, manager, session.SessionID, "replay-plan-tab", "capture replay metadata")
-	_ = events.waitFor(t, 2*time.Second, func(ev collectedEvent) bool {
-		return ev.channel == "chat:plan-usage" && len(planEntries(jsonMap(t, ev.payload))) == 2
-	})
-	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "done", 0, "end_turn")
+	used := 42.0
+	if _, ok := manager.recordNormalizedPlanUsageCapture("", "fixture", planUsageCapture{
+		entries: []PlanUsageEntry{{Kind: "rate-limit", ID: "five_hour", UsedPercent: &used}},
+	}); !ok {
+		t.Fatal("normalized replay fixture was not recorded")
+	}
 
 	var replayed []collectedEvent
 	manager.PublishProviderSnapshots(func(channel string, payload any) error {
@@ -500,7 +441,7 @@ func TestPlanUsageReplayToLateClient(t *testing.T) {
 			continue
 		}
 		snapshot := jsonMap(t, ev.payload)
-		if snapshot["providerId"] == "claude" && len(planEntries(snapshot)) == 2 {
+		if snapshot["providerId"] == "fixture" && len(planEntries(snapshot)) == 1 {
 			return
 		}
 	}

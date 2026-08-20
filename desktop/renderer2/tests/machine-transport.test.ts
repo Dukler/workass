@@ -7,7 +7,7 @@ import {
 import {
   isTagged, localId, machineOf, splitId, tagId, tagPayload, untagPayload,
 } from '../src/wire/machineIds.ts';
-import { machineWhere, remoteMachineBadge, shortMachineId, unifiedOrder } from '../src/machine-label.ts';
+import { machineWhere, remoteMachineBadge, shortMachineId } from '../src/machine-label.ts';
 import { fleetDeviceToken, fleetProof } from '../src/wire/fleet.ts';
 
 // ---- a socket the test drives -------------------------------------------
@@ -266,15 +266,35 @@ test('a local id is left byte-identical, so nothing persisted stops matching', (
 test('only id-shaped keys are rewritten, and a round trip is lossless', () => {
   const payload = {
     chatId: 'chat-1', title: 'chat-1', modelId: 'opus[1m]', cwd: '/Users/dev/x',
-    nested: { jobId: 'job-2', items: [{ id: 'a' }, { id: 'b' }] },
+    operationId: 'operation-local',
+    nested: {
+      jobId: 'job-2', userMessageId: 'user-1', assistantMessageId: 'assistant-1',
+      clientUserMessageId: 'steer-1', continuationAssistantMessageId: 'assistant-2',
+      queueId: 'queue-1', steerContinuationId: 'assistant-3', steerContinuationFor: 'steer-2',
+      turnRootId: 'assistant-root', planLatestMessageId: 'assistant-plan',
+      consumedSteerIds: ['steer-1', 'steer-2'], pendingPermissionIds: ['permission-1'],
+      items: [{ id: 'a' }, { id: 'b' }],
+    },
   };
   const tagged = tagPayload('m-remote', payload) as typeof payload;
   assert.equal(tagged.chatId, 'M~m-remote~chat-1');
   assert.equal(tagged.nested.jobId, 'M~m-remote~job-2');
+  assert.equal(tagged.nested.userMessageId, 'M~m-remote~user-1');
+  assert.equal(tagged.nested.assistantMessageId, 'M~m-remote~assistant-1');
+  assert.equal(tagged.nested.clientUserMessageId, 'M~m-remote~steer-1');
+  assert.equal(tagged.nested.continuationAssistantMessageId, 'M~m-remote~assistant-2');
+  assert.equal(tagged.nested.queueId, 'M~m-remote~queue-1');
+  assert.equal(tagged.nested.steerContinuationId, 'M~m-remote~assistant-3');
+  assert.equal(tagged.nested.steerContinuationFor, 'M~m-remote~steer-2');
+  assert.equal(tagged.nested.turnRootId, 'M~m-remote~assistant-root');
+  assert.equal(tagged.nested.planLatestMessageId, 'M~m-remote~assistant-plan');
+  assert.deepEqual(tagged.nested.consumedSteerIds, ['M~m-remote~steer-1', 'M~m-remote~steer-2']);
+  assert.deepEqual(tagged.nested.pendingPermissionIds, ['M~m-remote~permission-1']);
   assert.equal(tagged.nested.items[0].id, 'M~m-remote~a');
   assert.equal(tagged.title, 'chat-1', 'a title that looks like an id is not one');
   assert.equal(tagged.modelId, 'opus[1m]');
   assert.equal(tagged.cwd, '/Users/dev/x');
+  assert.equal(tagged.operationId, 'operation-local', 'correlation ids remain opaque');
   assert.deepEqual(untagPayload(tagged), payload);
 });
 
@@ -304,16 +324,4 @@ test('project picker badge marks only remote machines with a readable initial', 
   });
   assert.equal(remoteMachineBadge('m-accent', names, 'm-here')?.initial, 'Á');
   assert.equal(remoteMachineBadge('m-abcdef', {}, 'm-here')?.initial, 'A');
-});
-
-test('recency stays global across machines', () => {
-  const rows = [
-    { id: 'a', touched: 10, machineId: '' },
-    { id: 'b', touched: 99, machineId: 'm-remote' },
-    { id: 'c', touched: 50, machineId: '' },
-  ];
-  assert.deepEqual(unifiedOrder(rows).map((r) => r.id), ['b', 'c', 'a'],
-    'a running turn elsewhere outranks a sleeping one here');
-  const tie = [{ id: 'z', touched: 5, machineId: 'm-b' }, { id: 'y', touched: 5, machineId: 'm-a' }];
-  assert.deepEqual(unifiedOrder(tie).map((r) => r.id), ['y', 'z'], 'ties are stable, not render-order');
 });

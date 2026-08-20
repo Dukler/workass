@@ -780,16 +780,23 @@ test('mirror restore keeps an explicit local pick unless daemon control revision
 
 test('plan-usage failure always releases the provider loading latch', async () => {
   const previousWindow = (globalThis as any).window;
+  let metadataCalls = 0;
+  let sessionCalls = 0;
   (globalThis as any).window = {
     api: {
-      appChatRefreshPlanUsage: async () => { throw new Error('fixture usage failure'); },
+      appChatRefreshPlanUsage: async () => { metadataCalls += 1; throw new Error('fixture usage failure'); },
+      appChatNewSession: async () => { sessionCalls += 1; throw new Error('visible session must not be acquired'); },
     },
   };
   try {
     const { subject, owner } = subjectWithChat();
     subject.state.connection = 'connected';
+    owner.sessionProviderId = owner.providerId;
+    owner.planUsageSupported = true;
     subject.refreshPlanUsage(owner.id);
     await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(metadataCalls, 1);
+    assert.equal(sessionCalls, 0);
     assert.equal(subject.state.planUsageLoadingByProvider.codex, false);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;

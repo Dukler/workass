@@ -284,15 +284,12 @@ type ForegroundTurn struct {
 	StartedAt                 string
 	RootAssistantMessageID    string
 	CurrentAssistantMessageID string
-	// AssistantDraft is read-only schema-v1 compatibility. New events are split
-	// by provider phase into Content and Result so final answers render once.
-	AssistantDraft       string
-	AssistantContent     string
-	AssistantResult      string
-	TypedAssistantPhases bool
-	AssistantAttachments []provider.Attachment
-	Timeline             []TimelineEntry
-	Permission           *provider.PermissionEvent
+	AssistantContent          string
+	AssistantResult           string
+	TypedAssistantPhases      bool
+	AssistantAttachments      []provider.Attachment
+	Timeline                  []TimelineEntry
+	Permission                *provider.PermissionEvent
 }
 
 type SteerStatus string
@@ -985,6 +982,22 @@ func (s State) LedgerHead() uint64 {
 	return s.Ledger[len(s.Ledger)-1].Sequence
 }
 
+func validateTurnPresentation(presentation provider.TurnPresentation) error {
+	origin := strings.TrimSpace(presentation.Origin)
+	if origin == "" {
+		return errors.New("turn presentation origin is required")
+	}
+	if origin != strings.ToLower(origin) {
+		return errors.New("turn presentation origin is not normalized")
+	}
+	switch origin {
+	case "human", "agent", "internal":
+		return nil
+	default:
+		return errors.New("turn presentation origin is invalid")
+	}
+}
+
 func (s State) Validate() error {
 	if strings.TrimSpace(s.ChatID) == "" {
 		return errors.New("chat state requires chat id")
@@ -1283,6 +1296,11 @@ func (s State) Validate() error {
 			return errors.New("active lane does not exist")
 		}
 	}
+	for index, entry := range s.Queue {
+		if err := validateTurnPresentation(entry.Presentation); err != nil {
+			return fmt.Errorf("queue entry %d: %w", index, err)
+		}
+	}
 	seenStagedQueue := make(map[string]struct{}, len(s.StagedQueue))
 	for _, entry := range s.StagedQueue {
 		if strings.TrimSpace(entry.ID) == "" || strings.TrimSpace(entry.Text) == "" && len(entry.Attachments) == 0 {
@@ -1309,6 +1327,9 @@ func (s State) Validate() error {
 		}
 	}
 	if s.Foreground != nil {
+		if err := validateTurnPresentation(s.Foreground.Input.Presentation); err != nil {
+			return fmt.Errorf("foreground input: %w", err)
+		}
 		lane, ok := s.Lanes[s.Foreground.LaneID]
 		if !ok {
 			return errors.New("foreground lane does not exist")
@@ -1334,6 +1355,9 @@ func (s State) Validate() error {
 		}
 	}
 	if s.PendingSteer != nil {
+		if err := validateTurnPresentation(s.PendingSteer.Presentation); err != nil {
+			return fmt.Errorf("pending steer: %w", err)
+		}
 		if s.Foreground == nil || s.PendingSteer.LaneID != s.Foreground.LaneID || s.PendingSteer.Turn != s.Foreground.Turn {
 			return errors.New("pending steer lost its foreground turn owner")
 		}
@@ -1427,6 +1451,11 @@ func (s State) Validate() error {
 		}
 		if effect.Kind == EffectStartTurn && effect.Input == nil {
 			return errors.New("start-turn outbox effect is missing its immutable input")
+		}
+		if effect.Input != nil {
+			if err := validateTurnPresentation(effect.Input.Presentation); err != nil {
+				return fmt.Errorf("%s outbox input: %w", effect.Kind, err)
+			}
 		}
 		if effect.Kind == EffectImportContext && effect.Batch == nil {
 			return errors.New("context-import outbox effect is missing its immutable projection")

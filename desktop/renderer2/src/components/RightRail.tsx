@@ -4,6 +4,7 @@ import { chatPane } from '../store/right-pane';
 import { IcExpand, IcClose } from '../icons';
 import { TareasCard } from './TareasCard';
 import { BrowserPanel } from './BrowserPanel';
+import { localBrowserOwnsChat } from '../browser';
 import { SpawnedWorkCard } from './SpawnedWorkCard';
 import { EnvCard } from './EnvCard';
 
@@ -20,10 +21,16 @@ export function RightRail({ chat }: { chat: Chat | null }) {
   // live browser — its own frame, no rail chrome. Electron-only; a client without
   // the browser bridge can't turn this on (the toggle is hidden there). Per-chat,
   // so it only shows for the chat that actually opened a browser.
-  if (pane === 'browser' && app.hasBrowserChannels && chat) {
+  if (pane === 'browser') {
+    if (!app.hasBrowserChannels || !chat || !localBrowserOwnsChat(chat.id, chat.machineId)) return null;
     return (
       <aside className="rail browser-col">
-        <BrowserPanel chatId={chat.id} conversationId={chat.chatId} onClose={() => store.toggleBrowser()} />
+        <BrowserPanel
+          chatId={chat.id}
+          conversationId={chat.chatId}
+          machineId={chat.machineId}
+          onClose={() => store.toggleBrowser()}
+        />
       </aside>
     );
   }

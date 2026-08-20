@@ -77,14 +77,6 @@ export function formatCountdown(ms: number): string {
   return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
 }
 
-export function rateLimitValue(entry: PlanUsageEntry, now: number = Date.now()): string {
-  if (isExpiredPlanReset(entry.resetsAt, now)) return 'Actualizando límites…';
-  const percent = formatPlanUsagePercent(entry.usedPercent);
-  const reset = relativePlanReset(entry.resetsAt, now);
-  if (percent != null) return `${percent}% usado${reset ? ` · reinicia ${reset}` : ''}`;
-  return reset ? `Se reinicia ${reset}` : '';
-}
-
 export function isHotRateLimit(entry: PlanUsageEntry): boolean {
   const percent = clampPlanUsagePercent(entry.usedPercent);
   return (!!entry.status && entry.status !== 'allowed') || (percent != null && percent >= 80);

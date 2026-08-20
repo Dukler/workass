@@ -324,11 +324,6 @@ type DetachTarget struct {
 
 func (DetachTarget) chatCommand() {}
 
-// DetachLane is the compatibility name for the standalone actor command. A
-// target is deliberately the same immutable typed value whether it is
-// journaled by close-session or by ChangeWorkspace.
-type DetachLane = DetachTarget
-
 // DetachLaneFailed is the provider-side failure receipt for a durable detach
 // effect. Ambiguous delivery never becomes an automatic retry: the exact
 // attachment remains fenced by its generation and the operation is surfaced
@@ -438,11 +433,12 @@ type ReconcileTurnEffect struct {
 func (ReconcileTurnEffect) chatEffect() {}
 
 type SteerTurnEffect struct {
-	LaneID      provider.LaneID
-	OperationID provider.OperationID
-	Turn        provider.TurnRef
-	Text        string
-	Attachments []provider.Attachment
+	LaneID       provider.LaneID
+	OperationID  provider.OperationID
+	Turn         provider.TurnRef
+	Text         string
+	Attachments  []provider.Attachment
+	Presentation provider.TurnPresentation
 }
 
 func (SteerTurnEffect) chatEffect() {}
@@ -672,7 +668,7 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 		effects, err = reduceProviderEvent(&next, command)
 	case HostLost:
 		effects, err = reduceHostLost(&next, command)
-	case DetachLane:
+	case DetachTarget:
 		effects, err = reduceDetachLane(&next, command)
 	case DetachLaneFailed:
 		err = reduceDetachLaneFailed(&next, command)
@@ -1316,7 +1312,7 @@ func reduceDeleteChat(state *State, command DeleteChat) ([]Effect, error) {
 		return nil, nil
 	}
 	if !state.Initialized {
-		return nil, errors.New("chat deletion requires a completed initialization or migration")
+		return nil, errors.New("chat deletion requires completed initialization")
 	}
 	if !command.Force && (state.Foreground != nil || state.PendingSteer != nil || state.PendingCancel != nil) {
 		return nil, errors.New("chat has active provider work")
@@ -2018,10 +2014,6 @@ func reduceSubmit(state *State, command Submit) ([]Effect, error) {
 	if !ok || target == "" {
 		return nil, errors.New("submit requires a selected target lane")
 	}
-	if err := recoverLegacyUnconsumedSteerCoverage(state, target); err != nil {
-		return nil, err
-	}
-	lane = state.Lanes[target]
 	if lane.CreationFailedBeforeEstablishment() {
 		// Submit is also explicit intent. Reopen only a create that never acquired
 		// native identity; established and provisional lanes retain their exact
@@ -2049,57 +2041,6 @@ func reduceSubmit(state *State, command Submit) ([]Effect, error) {
 		state.Presentation.AgentQueueRevision++
 	}
 	return drive(state)
-}
-
-// Releases before unconsumed steering rows received an explicit excluded
-// coverage record can leave an established lane blocked behind its own
-// ambiguity-fenced input. That input must remain visible and must never be
-// replayed, but it is also not cross-provider context to import. A later
-// explicit submit may therefore advance only a contiguous tail of exact
-// same-lane, terminal-unconsumed steer rows whose durable steer effects remain
-// fenced as acceptance-ambiguous.
-func recoverLegacyUnconsumedSteerCoverage(state *State, laneID provider.LaneID) error {
-	lane, ok := state.Lanes[laneID]
-	if !ok || lane.Phase != LaneBlocked || lane.LastError != provider.ErrorUnsupportedCapability ||
-		lane.Thread.IsZero() || lane.PendingImport != nil || state.Foreground != nil || state.PendingSteer != nil ||
-		lane.CoveredThrough >= state.LedgerHead() {
-		return nil
-	}
-	from := lane.CoveredThrough + 1
-	for sequence := from; sequence <= state.LedgerHead(); sequence++ {
-		event := state.Ledger[sequence-1]
-		if event.Sequence != sequence || event.LaneID != laneID || event.Role != "user" ||
-			event.TerminalState != "unconsumed" ||
-			(event.SteerState != "accepted" && event.SteerState != "uncertain") ||
-			event.OperationID == "" || !ambiguousSteerOutboxHas(state, event.OperationID) {
-			return nil
-		}
-	}
-	for sequence := from; sequence <= state.LedgerHead(); sequence++ {
-		event := state.Ledger[sequence-1]
-		if err := setCoverage(&lane, state, sequence, CoverageExcluded, event.OperationID); err != nil {
-			return err
-		}
-	}
-	lane.LastError = ""
-	if lane.Attachment != nil {
-		lane.Phase = LaneReady
-	} else {
-		lane.Phase = LaneDetached
-	}
-	state.Lanes[laneID] = lane
-	return nil
-}
-
-func ambiguousSteerOutboxHas(state *State, operationID provider.OperationID) bool {
-	for i := range state.Outbox {
-		entry := state.Outbox[i]
-		if entry.ID == steerEffectID(operationID) && entry.Kind == EffectSteerTurn &&
-			entry.Status == OutboxAmbiguous && entry.LastError == provider.ErrorAcceptanceAmbiguous {
-			return true
-		}
-	}
-	return false
 }
 
 func reduceSteer(state *State, command Steer) ([]Effect, error) {
@@ -2132,6 +2073,7 @@ func reduceSteer(state *State, command Steer) ([]Effect, error) {
 	return []Effect{SteerTurnEffect{
 		LaneID: state.Foreground.LaneID, OperationID: operationID, Turn: state.Foreground.Turn,
 		Text: strings.TrimSpace(command.Text), Attachments: append([]provider.Attachment(nil), command.Attachments...),
+		Presentation: presentation,
 	}}, nil
 }
 
@@ -2203,12 +2145,10 @@ func normalizeTurnPresentation(presentation provider.TurnPresentation) (provider
 	presentation.Title = strings.TrimSpace(presentation.Title)
 	presentation.Origin = strings.ToLower(strings.TrimSpace(presentation.Origin))
 	presentation.StartedAt = strings.TrimSpace(presentation.StartedAt)
-	switch presentation.Origin {
-	case "", "human", "agent", "internal":
-		return presentation, nil
-	default:
-		return provider.TurnPresentation{}, errors.New("turn presentation origin is invalid")
+	if err := validateTurnPresentation(presentation); err != nil {
+		return provider.TurnPresentation{}, err
 	}
+	return presentation, nil
 }
 
 func reducePrepareQueuedTurn(state *State, command PrepareQueuedTurn) error {
@@ -2634,7 +2574,6 @@ func reduceInputConsumed(state *State, command InputConsumed) error {
 			continuationID = state.Foreground.RootAssistantMessageID + "~after~" + string(pending.OperationID)
 		}
 		state.Foreground.CurrentAssistantMessageID = continuationID
-		state.Foreground.AssistantDraft = ""
 		state.Foreground.AssistantContent = ""
 		state.Foreground.AssistantResult = ""
 		state.Foreground.AssistantAttachments = nil
@@ -2781,7 +2720,7 @@ func reduceTurnTerminated(state *State, command TurnTerminated) ([]Effect, error
 		state.Foreground.AssistantResult = terminal.Result
 	}
 	if state.Foreground.AssistantContent == "" && state.Foreground.AssistantResult == "" {
-		state.Foreground.AssistantContent = firstNonEmptyString(command.Assistant, state.Foreground.AssistantDraft)
+		state.Foreground.AssistantContent = strings.TrimSpace(command.Assistant)
 	}
 	if status == "failed" && state.Foreground.AssistantContent == "" && state.Foreground.AssistantResult == "" {
 		if strings.TrimSpace(terminal.Error) != "" {
@@ -2841,7 +2780,7 @@ func shouldPersistForegroundSegment(foreground *ForegroundTurn) bool {
 	if foreground.CurrentAssistantMessageID == foreground.RootAssistantMessageID {
 		return true
 	}
-	return foreground.AssistantDraft != "" || foreground.AssistantContent != "" || foreground.AssistantResult != "" ||
+	return foreground.AssistantContent != "" || foreground.AssistantResult != "" ||
 		len(foreground.AssistantAttachments) != 0 || len(foreground.Timeline) != 0 || foreground.Permission != nil
 }
 
@@ -3348,7 +3287,7 @@ func detachEntryForOperation(state State, operationID provider.OperationID) (*Ou
 	return nil, false
 }
 
-func reduceDetachLane(state *State, command DetachLane) ([]Effect, error) {
+func reduceDetachLane(state *State, command DetachTarget) ([]Effect, error) {
 	operationID := provider.NormalizeOperationID(string(command.OperationID))
 	laneID := provider.LaneID(strings.TrimSpace(string(command.LaneID)))
 	connectionID := strings.TrimSpace(command.ConnectionID)
@@ -3772,7 +3711,7 @@ func beginForegroundObligation(state *State, input QueueEntry) {
 		startedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	origin := strings.ToLower(strings.TrimSpace(input.Presentation.Origin))
-	if origin == "" || origin == "human" || state.Obligation == nil {
+	if origin == "human" || state.Obligation == nil {
 		promptID := strings.TrimSpace(input.Presentation.UserMessageID)
 		if promptID == "" {
 			promptID = string(input.OperationID)
@@ -4577,7 +4516,8 @@ func outboxEntryForEffect(effect Effect) (OutboxEntry, bool, error) {
 	case SteerTurnEffect:
 		input := QueueEntry{
 			OperationID: effect.OperationID, LaneID: effect.LaneID, Text: effect.Text,
-			Attachments: append([]provider.Attachment(nil), effect.Attachments...),
+			Attachments:  append([]provider.Attachment(nil), effect.Attachments...),
+			Presentation: effect.Presentation,
 		}
 		return OutboxEntry{
 			ID: steerEffectID(effect.OperationID), Kind: EffectSteerTurn, Status: OutboxPending,
@@ -4799,6 +4739,7 @@ func effectFromOutbox(state State, entry OutboxEntry) (Effect, error) {
 		return SteerTurnEffect{
 			LaneID: entry.LaneID, OperationID: entry.OperationID, Turn: entry.Turn,
 			Text: entry.Input.Text, Attachments: append([]provider.Attachment(nil), entry.Input.Attachments...),
+			Presentation: entry.Input.Presentation,
 		}, nil
 	case EffectCancelTurn:
 		if entry.Turn.NativeID == "" {

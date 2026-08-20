@@ -251,6 +251,7 @@ test('canonical pipeline stages both platforms from one verified input and publi
   const preparer = fs.readFileSync(path.join(releaseRoot, 'prepare-input.sh'), 'utf8');
   const publisher = fs.readFileSync(path.join(releaseRoot, 'publish-windows.sh'), 'utf8');
   const gate = fs.readFileSync(path.join(repoRoot, 'scripts', 'gate.sh'), 'utf8');
+  const rendererPackage = JSON.parse(fs.readFileSync(path.join(repoRoot, 'desktop', 'renderer2', 'package.json'), 'utf8'));
   const macStage = fs.readFileSync(path.join(repoRoot, 'scripts', 'stage-macos-local-update.sh'), 'utf8');
   const windowsStage = fs.readFileSync(path.join(repoRoot, 'scripts', 'stage-windows-portable.sh'), 'utf8');
   const macPackage = fs.readFileSync(path.join(repoRoot, 'scripts', 'package-workass-macos.sh'), 'utf8');
@@ -281,8 +282,13 @@ test('canonical pipeline stages both platforms from one verified input and publi
   assert.match(preparer, /node "\$input_tool" verify/);
 
   const rendererBuild = gate.indexOf('npm run build --silent');
+  const rendererTests = gate.indexOf('npm test --silent');
+  const shellTests = gate.indexOf('node --test desktop/shell/*.test.js');
   const rendererSnapshot = gate.indexOf('WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER');
   const goBuild = gate.indexOf('go build ./...');
+  assert.equal(rendererPackage.scripts.test, 'node --experimental-strip-types --test tests/*.test.ts');
+  assert.ok(rendererTests >= 0 && rendererTests < goBuild);
+  assert.ok(shellTests >= 0 && shellTests < goBuild);
   assert.ok(rendererBuild >= 0 && rendererBuild < goBuild);
   assert.ok(rendererSnapshot >= 0 && rendererSnapshot < goBuild);
 

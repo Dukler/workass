@@ -79,25 +79,6 @@ func (m *Manager) ChatCheckpoints(chatID, tabID string) []ChatCheckpoint {
 	return cloneChatCheckpoints(state.Checkpoints)
 }
 
-func (m *Manager) restoreChatCheckpoint(ctx context.Context, chatID string, turnSeq int) (map[string]any, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	chatID = strings.TrimSpace(chatID)
-	if chatID == "" || turnSeq <= 0 {
-		return nil, structuredChatError("chat:rewind-invalid", "chatId and turnSeq are required", nil)
-	}
-	state, err := m.loadCheckpointState(chatID)
-	if err != nil {
-		return nil, err
-	}
-	checkpoint, ok := checkpointByTurn(state.Checkpoints, turnSeq)
-	if !ok {
-		return nil, structuredChatError("chat:rewind-not-found", "checkpoint not found", map[string]any{"chatId": chatID, "turnSeq": turnSeq})
-	}
-	return m.restoreChatCheckpointTarget(ctx, chatID, turnSeq, checkpoint)
-}
-
 func (m *Manager) restoreChatCheckpointTarget(ctx context.Context, chatID string, turnSeq int, checkpoint ChatCheckpoint) (map[string]any, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -181,22 +162,6 @@ func (m *Manager) RestoreChatCheckpoint(ctx context.Context, chatID string, turn
 		return nil, err
 	}
 	result["operationId"] = string(operationID)
-	return result, nil
-}
-
-// ChatRewind remains only for package-level compatibility tests while the old
-// direct manager surface is removed. Production handlers use the actor effect.
-func (m *Manager) ChatRewind(ctx context.Context, chatID string, turnSeq int) (map[string]any, error) {
-	result, err := m.restoreChatCheckpoint(ctx, chatID, turnSeq)
-	if err != nil {
-		return nil, err
-	}
-	m.emit("chat:checkpoint-restored", map[string]any{
-		"chatId": result["chatId"], "turnSeq": result["turnSeq"], "repos": result["repos"],
-	})
-	if env := m.ChatEnvGet(chatID, ""); env.ChatID != "" {
-		m.emit("chat:env", env)
-	}
 	return result, nil
 }
 

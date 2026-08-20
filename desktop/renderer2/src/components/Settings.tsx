@@ -190,7 +190,7 @@ function AgentesPanel() {
     .filter(Boolean).join(' ');
   const name = provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : 'Agente ACP';
   const connected = app.chats.some((c) => c.sessionId);
-  const models = app.models.length;
+  const models = app.groups.reduce((count, group) => count + group.models.length, 0);
   const canProbe = has('appChatDetectAcp');
 
   return (
@@ -216,7 +216,7 @@ function AgentesPanel() {
             <div className="lrow">
               <div className="ic mono">{name.charAt(0)}</div>
               <div className="body">
-                <div className="nm">{name}{provider === 'mock' && <span className="badge acc">Oráculo de pruebas</span>}</div>
+                <div className="nm">{name}</div>
                 <div className="mt">{command || '—'}</div>
               </div>
               <div className="act">
@@ -297,7 +297,7 @@ function ModelScoreCard({ providerId, model, score }: { providerId: string; mode
 }
 function ModelosPanel() {
   const app = useApp();
-  const groups = groupModelsForScoring(app.groups, app.models, app.providers, app.meta?.profile ?? 'prod');
+  const groups = groupModelsForScoring(app.groups, app.providers);
   const scored = countScoredModels(app.modelScores);
   return (
     <section className="stgs-panel">
