@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createMachineRouter, RemoteMachineUnavailableError, routeOf } from '../src/wire/machineRouter.ts';
+import { createMachineRouter, machineScopeOf, RemoteMachineUnavailableError, routeOf } from '../src/wire/machineRouter.ts';
 import { MachineRegistry, type MachineEntry } from '../src/wire/machineRegistry.ts';
 import { tagId } from '../src/wire/machineIds.ts';
 import type { MachineSocket, MachineSocketLike } from '../src/wire/machineSocket.ts';
@@ -173,9 +173,29 @@ test('a remote event arrives tagged, so a card raised elsewhere finds its chat',
   ]);
 });
 
-test('every machine-wide snapshot stays on its owning Workass window', () => {
+test('remote catalog keeps exact model and mode ids while carrying its machine owner', () => {
+  const seen: unknown[] = [];
+  const localSubs = new Map<string, (payload: unknown) => void>();
+  const remoteSubs = new Map<string, (payload: unknown, machineId: string) => void>();
+  const router = createMachineRouter({
+    local: () => ({ onChatCatalog: (cb: (payload: unknown) => void) => { localSubs.set('chat:catalog', cb); } }) as never,
+    links: () => new Map(),
+    subscribeRemote: (channel, cb) => { remoteSubs.set(channel, cb); },
+  }) as unknown as { onChatCatalog(cb: (payload: unknown) => void): void };
+
+  router.onChatCatalog((payload) => seen.push(payload));
+  const local = { groups: [{ providerId: 'same', models: [{ modelId: 'local-model' }], modes: [{ id: 'local-mode' }] }] };
+  const remote = { groups: [{ providerId: 'same', models: [{ modelId: 'remote-model' }], modes: [{ id: 'remote-mode' }] }] };
+  localSubs.get('chat:catalog')?.(local);
+  remoteSubs.get('chat:catalog')?.(remote, 'm-lagpc');
+
+  assert.equal(machineScopeOf(seen[0]), '');
+  assert.equal(machineScopeOf(seen[1]), 'm-lagpc');
+  assert.deepEqual(seen, [local, remote], 'catalog identifiers stay byte-identical to their owning daemon');
+});
+
+test('unpartitioned machine-wide snapshots stay on their owning Workass window', () => {
   const machineWideSnapshots = [
-    'onChatCatalog',
     'onChatPlanUsage',
     'onProvidersList',
     'onProcChanged',
@@ -209,7 +229,7 @@ test('every machine-wide snapshot stays on its owning Workass window', () => {
 
   assert.deepEqual(seenUpdates, [{ updates: [{ providerId: 'codex' }] }]);
   assert.deepEqual(seenProgress, [{ providerId: 'codex', status: 'running' }]);
-  assert.deepEqual(remoteChannels, [], 'machine-wide subscriptions must never attach to a remote sink');
+  assert.deepEqual(remoteChannels, [], 'unpartitioned machine-wide subscriptions must never attach to a remote sink');
 });
 
 test('a tagged call to an unavailable machine fails without touching the local daemon', async () => {
@@ -290,6 +310,32 @@ test('approval persists the discovered certificate pin before later token reconn
 	const saved = JSON.parse(storage.getItem('workass.machine.m-remote') || '{}');
 	assert.equal(saved.deviceToken, 'paired-token');
 	assert.equal(saved.certFingerprint, CERT_FINGERPRINT);
+});
+
+test('boot-time event replay delivers a machine-scoped remote catalog', () => {
+  const storage = memoryStorage();
+  let socket: MachineSocketLike | undefined;
+  const seen: unknown[] = [];
+  const registry = new MachineRegistry({
+    local: () => ({}) as never, deviceName: 'Mac', storage,
+    open: (() => (socket = { send() {}, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null })) as never,
+  });
+  registry.subscribeRemoteMethod('onChatCatalog', (payload) => { seen.push(payload); });
+  registry.sync([entry('m-remote', 'builder', '192.168.1.71:80')], 'm-self');
+  assert.equal(registry.requestAccess('m-remote'), true);
+  socket?.onopen?.();
+  socket?.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+    state: 'approved', deviceToken: 'paired-token', deviceId: 'device-1', instanceId: 'instance-1',
+  } }));
+  socket?.onmessage?.(JSON.stringify({ t: 'event', channel: 'chat:catalog', payload: {
+    groups: [{ providerId: 'shared', models: [{ modelId: 'remote-only' }], modes: [{ id: 'remote-mode' }] }],
+  } }));
+
+  assert.equal(seen.length, 1);
+  assert.equal(machineScopeOf(seen[0]), 'm-remote');
+  assert.deepEqual(seen[0], {
+    groups: [{ providerId: 'shared', models: [{ modelId: 'remote-only' }], modes: [{ id: 'remote-mode' }] }],
+  });
 });
 
 test('a changed certificate never receives a stored device token', () => {

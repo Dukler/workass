@@ -52,6 +52,7 @@ import { clearPermissionById, clearPermissionsOutsideSnapshot } from '../permiss
 import { isQueuedJobStart, reconcileQueuedJobStart } from './busy-start';
 import { settleTerminalToolEvents } from '../terminal-tool-reconciliation';
 import { MachineRegistry, type MachineEntry } from '../wire/machineRegistry';
+import { machineScopeOf } from '../wire/machineRouter';
 import { normalizeMachineNickname } from '../machine-nickname';
 import { setMachineRouter } from '../wire/api';
 import { localId, machineOf, tagId, tagPayload } from '../wire/machineIds';
@@ -201,6 +202,10 @@ export class Store {
   private machines: MachineRegistry | null = null;
   private selfMachineId = '';
   private machineNameMap: Record<string, string> = {};
+  // Catalog snapshots are daemon-memory-only and machine-wide. Local remains
+  // in AppState because Settings owns this daemon; remotes are partitioned by
+  // immutable machine id so a chat never sees models installed somewhere else.
+  private remoteCatalogGroups = new Map<string, CatalogGroup[]>();
   // Full actor history loads per chat, on demand. Session snapshots carry only
   // a bounded tail; these sets track complete read projections in memory.
   private fullHistoriesLoaded = new Set<string>();
@@ -382,12 +387,25 @@ export class Store {
     return !!chat && chat.messages.some((m) => m.status === 'running');
   }
 
-  private providerGroup(providerId: string | null | undefined): CatalogGroup | undefined {
-    return providerId ? this.state.groups.find((group) => group.providerId === providerId) : undefined;
+  private machineForChatRef(chatRef?: Pick<Chat, 'id' | 'machineId'> | string | null): string {
+    if (typeof chatRef === 'string') return ownerMachineId(this.chat(chatRef) ?? { id: chatRef });
+    return chatRef ? ownerMachineId(chatRef) : '';
+  }
+
+  catalogGroupsForChat(chatRef?: Pick<Chat, 'id' | 'machineId'> | string | null): CatalogGroup[] {
+    const machineId = this.machineForChatRef(chatRef);
+    return machineId ? this.remoteCatalogGroups.get(machineId) ?? [] : this.state.groups;
+  }
+
+  private providerGroup(
+    providerId: string | null | undefined,
+    chat?: Pick<Chat, 'id' | 'machineId'> | string | null,
+  ): CatalogGroup | undefined {
+    return providerId ? this.catalogGroupsForChat(chat).find((group) => group.providerId === providerId) : undefined;
   }
 
   private rememberCurrentControls(chat: Chat): { effort: string | null; modeId: string | null; modeIntent: PermissionIntent | null } {
-    const group = this.providerGroup(chat.providerId);
+    const group = this.providerGroup(chat.providerId, chat);
     const selected = resolveModelSelection(group ? [group] : [], [], chat.currentModelId);
     if (chat.providerId && selected.base) {
       chat.modelControls = rememberModelControls(chat.modelControls, chat.providerId, selected.base, {
@@ -424,7 +442,7 @@ export class Store {
       ? compatibleEffortId(options.explicitEffort, model)
       : compatibleEffortId(remembered?.effort, model, options.fallbackEffort);
     const requestedMode = remembered?.modeId ?? options.fallbackMode;
-    const group = this.providerGroup(providerId);
+    const group = this.providerGroup(providerId, chat);
     const modeId = modes.length
       ? compatibleModeId(requestedMode, modes, options.providerDefaultMode, options.fallbackModeIntent, group?.permissionIntents)
       : (requestedMode ?? options.providerDefaultMode ?? null);
@@ -909,7 +927,7 @@ export class Store {
         this.committedRuntimeControlFingerprints.set(tabId, pending.fingerprint);
         if (runtimeControlsFingerprint(latest) === pending.fingerprint) {
           latest.providerId = receipt.providerId;
-          latest.providerName = this.providerName(receipt.providerId) ?? latest.providerName ?? null;
+          latest.providerName = this.providerName(receipt.providerId, latest) ?? latest.providerName ?? null;
           latest.currentModelId = receipt.currentModelId;
           latest.currentModeId = receipt.currentModeId;
           latest.modelControls = normalizeModelControlMemory(receipt.modelControls);
@@ -1426,6 +1444,7 @@ export class Store {
           // A reconnect reconciles; a daemon that RESTARTED lost every engine and
           // all in-memory session state, so its chats are re-read rather than
           // synchronized.
+          if (info.restarted) this.remoteCatalogGroups.delete(machineId);
           void this.hydrateMachine(machineId, info.restarted);
         },
         onUnmount: (machineId) => this.evictMachineChats(machineId),
@@ -1680,8 +1699,12 @@ export class Store {
    * or revive one of its chats.
    */
   private evictMachineChats(machineId: string): void {
+    const removedCatalog = this.remoteCatalogGroups.delete(machineId);
     const removed = this.state.chats.filter((chat) => ownerMachineId(chat) === machineId);
-    if (!removed.length) return;
+    if (!removed.length) {
+      if (removedCatalog) this.bumpApp(false);
+      return;
+    }
     const removedTabs = new Set(removed.map((chat) => chat.id));
     for (const chat of removed) this.discardChatProjection(chat);
     this.state.chats = this.state.chats.filter((chat) => !removedTabs.has(chat.id));
@@ -2842,7 +2865,7 @@ export class Store {
       }
       // Record the provider the daemon actually bound.
       live.providerId = info.providerId;
-      live.providerName = info.providerName ?? this.providerName(live.providerId) ?? live.providerName ?? null;
+      live.providerName = info.providerName ?? this.providerName(live.providerId, live) ?? live.providerName ?? null;
       // R6 caps: image attach + agent-advertised slash commands. Only an
       // explicit image false disables drafts; an absent additive field stays
       // unknown and is validated by the daemon at the turn boundary.
@@ -2914,7 +2937,7 @@ export class Store {
   async setModel(chatId: string, modelId: string) {
     const chat = this.chat(chatId); if (!chat) return;
     const previous = this.rememberCurrentControls(chat);
-    const group = this.providerGroup(chat.providerId);
+    const group = this.providerGroup(chat.providerId, chat);
     if (!chat.providerId || !group) return;
     const selected = resolveModelSelection([group], [], modelId);
     if (!selected.model || !selected.base) return;
@@ -2935,7 +2958,7 @@ export class Store {
   async pickModel(chatId: string, providerId: string, modelId: string) {
     const chat = this.chat(chatId); if (!chat) return;
     const previous = this.rememberCurrentControls(chat);
-    const group = this.providerGroup(providerId);
+    const group = this.providerGroup(providerId, chat);
     const selected = group ? resolveModelSelection([group], [], modelId) : null;
     if (!providerId || !group || !selected?.model || !selected.base) return;
     // Chats are NOT bound to one agent for life (user law 2026-07-11): picking
@@ -2945,7 +2968,7 @@ export class Store {
     // capability. The native control is applied only inside that actor-owned
     // turn effect, never as an unjournaled session-id side write.
     chat.providerId = providerId;
-    chat.providerName = this.providerName(chat.providerId) ?? chat.providerName ?? null;
+    chat.providerName = this.providerName(chat.providerId, chat) ?? chat.providerName ?? null;
     this.applyControlsForModel(chat, chat.providerId, selected.base, group.models, group.modes, {
       fallbackEffort: previous.effort,
       fallbackMode: previous.modeId,
@@ -3939,7 +3962,7 @@ export class Store {
     // next turn. Do not overwrite that pick with the provider that just ended.
     if (!chat.providerId || !job.providerId || chat.providerId === job.providerId) {
       if (job.providerId) chat.providerId = job.providerId;
-      chat.providerName = this.providerName(chat.providerId) ?? chat.providerName ?? null;
+      chat.providerName = this.providerName(chat.providerId, chat) ?? chat.providerName ?? null;
     }
     return attached;
   }
@@ -4010,28 +4033,46 @@ export class Store {
     // Additive provider groups (P4). Accept an explicit array even when empty so
     // a daemon that reports "no enabled providers" clears a stale grouping.
     if (Array.isArray(c.groups)) {
-      this.captureCatalogHashes(c.groups as CatalogGroup[]);
-      this.state.groups = c.groups as CatalogGroup[];
-      reportShellCatalog(this.state.groups);
+      const machineId = machineScopeOf(c);
+      const groups = c.groups as CatalogGroup[];
+      if (machineId) {
+        this.remoteCatalogGroups.set(machineId, groups);
+      } else {
+        this.captureCatalogHashes(groups);
+        this.state.groups = groups;
+        reportShellCatalog(groups);
+      }
       // Provider names are presentation metadata only. A catalog replay does
-      // not rewrite actor-owned controls.
+      // not rewrite actor-owned controls. Update only chats owned by the daemon
+      // that emitted this snapshot; equal provider ids across machines are not
+      // evidence of equal installations or catalogs.
       for (const chat of this.state.chats) {
-        if (chat.providerId) chat.providerName = this.providerName(chat.providerId) ?? chat.providerName ?? null;
+        if (ownerMachineId(chat) === machineId && chat.providerId) {
+          chat.providerName = this.providerName(chat.providerId, chat) ?? chat.providerName ?? null;
+        }
       }
     }
     this.bumpApp(false);
   }
-  // Resolve a provider's display name from the catalog groups.
-  providerName(providerId: string | null | undefined): string | null {
+  // Resolve provider presentation from the catalog owned by this exact chat.
+  providerName(
+    providerId: string | null | undefined,
+    chat?: Pick<Chat, 'id' | 'machineId'> | string | null,
+  ): string | null {
     if (!providerId) return null;
-    return this.state.groups.find((g) => g.providerId === providerId)?.providerName
-      ?? this.state.providers.find((provider) => provider.id === providerId)?.name
+    const machineId = this.machineForChatRef(chat);
+    return this.catalogGroupsForChat(chat).find((group) => group.providerId === providerId)?.providerName
+      ?? (!machineId ? this.state.providers.find((provider) => provider.id === providerId)?.name : null)
       ?? null;
   }
-  providerBrand(providerId: string | null | undefined): string {
+  providerBrand(
+    providerId: string | null | undefined,
+    chat?: Pick<Chat, 'id' | 'machineId'> | string | null,
+  ): string {
     if (!providerId) return '';
-    return this.state.groups.find((group) => group.providerId === providerId)?.assistantBrand
-      ?? this.state.providers.find((provider) => provider.id === providerId)?.assistantBrand
+    const machineId = this.machineForChatRef(chat);
+    return this.catalogGroupsForChat(chat).find((group) => group.providerId === providerId)?.assistantBrand
+      ?? (!machineId ? this.state.providers.find((provider) => provider.id === providerId)?.assistantBrand : null)
       ?? '';
   }
   private onProvidersList(providers: ProviderRecord[]) {
