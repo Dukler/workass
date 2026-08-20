@@ -403,8 +403,8 @@ func (h *statelessMCPHandler) callTool(r *http.Request, call browserMCPCallParam
 				return browserMCPErrorResult("browser chat attachment is stale"), nil
 			}
 			actor.mu.Lock()
-			defer actor.mu.Unlock()
 			state := actor.engine.Snapshot()
+			actor.mu.Unlock()
 			if state.Deleted || !state.Initialized || strings.TrimSpace(state.Presentation.TabID) != strings.TrimSpace(tabID) {
 				return browserMCPErrorResult("browser chat attachment is stale"), nil
 			}
@@ -415,8 +415,16 @@ func (h *statelessMCPHandler) callTool(r *http.Request, call browserMCPCallParam
 			return formatBrowserMCPResult(call, prepared, result)
 		}
 		digest := browserMCPRequestDigest(prepared.Method, params)
-		reply, err := h.providerChats.executeBrowserMutation(
+		reply, err := h.providerChats.executeBrowserMutationWithAdmission(
 			r.Context(), tabID, chatID, providercontract.OperationID(operationID), call.Name, prepared.Method, digest,
+			// Prove a live, controller-owning shell before the first durable
+			// Record+Claim. The executor runs this inside the per-actor external
+			// mutation lock, but never while holding the actor state lock. Existing
+			// terminal operations skip admission; dispatched/ambiguous operations
+			// remain pure receipt readbacks.
+			func() error {
+				return probeBrowserControl(h.browserControlFile, h.browserClient)
+			},
 			func() (browserControlReply, error) {
 				return invokeBrowserControlMutation(h.browserControlFile, prepared.Method, params, string(operationID), digest, h.browserClient)
 			},

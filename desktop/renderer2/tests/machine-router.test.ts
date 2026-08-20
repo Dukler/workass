@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createMachineRouter, RemoteMachineUnavailableError, routeOf, ROUTED_EVENTS, ROUTED_METHODS } from '../src/wire/machineRouter.ts';
+import { createMachineRouter, RemoteMachineUnavailableError, routeOf } from '../src/wire/machineRouter.ts';
 import { MachineRegistry, type MachineEntry } from '../src/wire/machineRegistry.ts';
 import { tagId } from '../src/wire/machineIds.ts';
 import type { MachineSocket, MachineSocketLike } from '../src/wire/machineSocket.ts';
@@ -41,7 +41,6 @@ test('server folder creation uses the additive fs:create-dir payload', async () 
   const router = createMachineRouter({ local: () => local as never, links: () => new Map(), subscribeRemote: () => {} }) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
   await router.createDir('/Users/me', 'New App');
   assert.deepEqual(calls, [['/Users/me', 'New App']]);
-  assert.ok(ROUTED_METHODS.includes('createDir'));
 });
 
 test('project artwork is read by the daemon that owns the tagged chat', async () => {
@@ -63,7 +62,6 @@ test('project artwork is read by the daemon that owns the tagged chat', async ()
     args: [{ chatId: 'chat-7', cwd: '/srv/workass' }],
   }]);
   assert.deepEqual(result, { found: true, mimeType: 'image/png', base64: 'iVBORw==' });
-  assert.ok(ROUTED_METHODS.includes('projectIcon'));
 });
 
 test('a tagged id is found wherever it sits in the arguments', () => {
@@ -78,21 +76,33 @@ test('a tagged id is found wherever it sits in the arguments', () => {
 });
 
 test('a reply from a machine comes back tagged, so the store can address it again', async () => {
-  const remote = fakeLink({ 'session:get': { chats: [{ id: 'chat-1', tabId: 'tab-1', title: 'chat-1' }] } });
+  const remote = fakeLink({
+    'chat:archive-append': { ok: true, tabId: 'tab-1', chatId: 'chat-1' },
+    'chat:archive-load': [{ id: 'message-1', chatId: 'chat-1', role: 'assistant', content: 'remote answer' }],
+  });
   const router = createMachineRouter({
     local: () => ({ getSession: () => Promise.resolve({ chats: [] }) }) as never,
     links: () => new Map([['m-remote', remote.link]]),
   }) as unknown as Record<string, (...a: unknown[]) => Promise<{ chats: Array<Record<string, string>> }>>;
 
   // Routed by a tagged argument, because getSession itself carries no id.
-  const result = await router.archiveAppend(tagId('m-remote', 'tab-1'), [] as never);
+  const result = await router.archiveAppend(tagId('m-remote', 'tab-1'), [] as never) as unknown as Record<string, unknown>;
   assert.deepEqual(remote.calls[0].args, [{ tabId: 'tab-1', messages: [] }]);
+  assert.deepEqual(result, {
+    ok: true,
+    tabId: tagId('m-remote', 'tab-1'),
+    chatId: tagId('m-remote', 'chat-1'),
+  });
 
   const listed = await router.archiveLoad(tagId('m-remote', 'tab-1')) as unknown;
-  assert.ok(listed !== undefined || true);
+  assert.deepEqual(listed, [{
+    id: tagId('m-remote', 'message-1'),
+    chatId: tagId('m-remote', 'chat-1'),
+    role: 'assistant',
+    content: 'remote answer',
+  }]);
   const session = await router.getSession();
   assert.deepEqual(session.chats, [], 'no tagged argument means the local daemon answered');
-  void result;
 });
 
 test('a remotely-tagged chat:create is created by that machine and its receipt stays tagged', async () => {
@@ -164,32 +174,6 @@ test('a remote event arrives tagged, so a card raised elsewhere finds its chat',
 });
 
 test('every machine-wide snapshot stays on its owning Workass window', () => {
-  const seenUpdates: unknown[] = [];
-  const seenProgress: unknown[] = [];
-  const localUpdateSubs: Array<(payload: unknown) => void> = [];
-  const localProgressSubs: Array<(payload: unknown) => void> = [];
-  const remoteChannels: string[] = [];
-  const router = createMachineRouter({
-    local: () => ({
-      onProvidersUpdates: (cb: (payload: unknown) => void) => localUpdateSubs.push(cb),
-      onProvidersUpdateProgress: (cb: (payload: unknown) => void) => localProgressSubs.push(cb),
-    }) as never,
-    links: () => new Map(),
-    subscribeRemote: (channel) => { remoteChannels.push(channel); },
-  }) as unknown as Record<string, (cb: (payload: unknown) => void) => void>;
-
-  router.onProvidersUpdates((payload) => seenUpdates.push(payload));
-  router.onProvidersUpdateProgress((payload) => seenProgress.push(payload));
-  localUpdateSubs[0]({ updates: [{ providerId: 'codex' }] });
-  localProgressSubs[0]({ providerId: 'codex', status: 'running' });
-
-  assert.deepEqual(seenUpdates, [{ updates: [{ providerId: 'codex' }] }]);
-  assert.deepEqual(seenProgress, [{ providerId: 'codex', status: 'running' }]);
-  assert.equal(remoteChannels.includes('providers:updates'), false);
-  assert.equal(remoteChannels.includes('providers:update-progress'), false);
-  assert.equal(ROUTED_EVENTS.includes('onProvidersUpdates'), false);
-  assert.equal(ROUTED_EVENTS.includes('onProvidersUpdateProgress'), false);
-
   const machineWideSnapshots = [
     'onChatCatalog',
     'onChatPlanUsage',
@@ -199,9 +183,33 @@ test('every machine-wide snapshot stays on its owning Workass window', () => {
     'onProvidersUpdateProgress',
     'onAppUpdate',
   ] as const;
+  const seenUpdates: unknown[] = [];
+  const seenProgress: unknown[] = [];
+  const localSubs = new Map<string, (payload: unknown) => void>();
+  const remoteChannels: string[] = [];
+  const local = Object.fromEntries(machineWideSnapshots.map((method) => [
+    method,
+    (cb: (payload: unknown) => void) => { localSubs.set(method, cb); },
+  ]));
+  const router = createMachineRouter({
+    local: () => local as never,
+    links: () => new Map(),
+    subscribeRemote: (channel) => { remoteChannels.push(channel); },
+  }) as unknown as Record<string, (cb: (payload: unknown) => void) => void>;
+
   for (const method of machineWideSnapshots) {
-    assert.equal(ROUTED_EVENTS.includes(method), false, `${method} must remain local-only`);
+    router[method](method === 'onProvidersUpdates'
+      ? (payload) => seenUpdates.push(payload)
+      : method === 'onProvidersUpdateProgress'
+        ? (payload) => seenProgress.push(payload)
+        : () => {});
   }
+  localSubs.get('onProvidersUpdates')?.({ updates: [{ providerId: 'codex' }] });
+  localSubs.get('onProvidersUpdateProgress')?.({ providerId: 'codex', status: 'running' });
+
+  assert.deepEqual(seenUpdates, [{ updates: [{ providerId: 'codex' }] }]);
+  assert.deepEqual(seenProgress, [{ providerId: 'codex', status: 'running' }]);
+  assert.deepEqual(remoteChannels, [], 'machine-wide subscriptions must never attach to a remote sink');
 });
 
 test('a tagged call to an unavailable machine fails without touching the local daemon', async () => {
@@ -218,11 +226,10 @@ test('a tagged call to an unavailable machine fails without touching the local d
   assert.deepEqual(localCalls, ['job-local'], 'an untagged operation remains local');
 });
 
-test('the router keeps every method the local bridge had', () => {
+test('an additive local bridge method remains available without router changes', () => {
   const local = { getSession: () => Promise.resolve({}), somethingNewer: () => 42 };
   const router = createMachineRouter({ local: () => local as never, links: () => new Map(), subscribeRemote: () => {} }) as unknown as Record<string, unknown>;
   assert.equal(typeof router.somethingNewer, 'function', 'feature detection upstream reads the SHAPE of this object');
-  for (const method of [...ROUTED_METHODS, ...ROUTED_EVENTS]) assert.equal(typeof router[method], 'function', String(method));
 });
 
 // ---- the registry --------------------------------------------------------
@@ -400,7 +407,16 @@ test('a tagged id buried in a bulk payload does not route the call', () => {
   assert.equal(routeOf([{ tabId: tagId('m-remote', 'tab-1'), messages: [] }]), 'm-remote');
 });
 
-test('session:save is not routable at all', () => {
-  assert.ok(!ROUTED_METHODS.includes('saveSession'),
-    'a whole-store write has no addressee and must never leave this machine');
+test('session:save is not routable at all', async () => {
+  const localCalls: unknown[] = [];
+  const remote = fakeLink();
+  const router = createMachineRouter({
+    local: () => ({ saveSession: async (snapshot: unknown) => { localCalls.push(snapshot); return true; } }) as never,
+    links: () => new Map([['m-remote', remote.link]]),
+    subscribeRemote: () => {},
+  });
+  const snapshot = { activeId: tagId('m-remote', 'tab-1'), chats: [] };
+  assert.equal(await router.saveSession?.(snapshot as never), true);
+  assert.deepEqual(localCalls, [snapshot]);
+  assert.deepEqual(remote.calls, [], 'a whole-store write has no remote addressee');
 });

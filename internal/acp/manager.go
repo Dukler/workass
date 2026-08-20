@@ -1137,7 +1137,7 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 	}
 	title := strings.TrimSpace(opts.Title)
 	if title == "" {
-		title = "Chat Devin · ACP"
+		title = "Chat · ACP"
 	}
 	cwd := strings.TrimSpace(opts.CWD)
 	if cwd == "" {
@@ -1401,9 +1401,9 @@ func (m *Manager) buildAppChatPrompt(opts JobStartOptions, userText string) stri
 		return brief + buildUserRequestBlock(userText, opts.HumanAuthored)
 	}
 	// The seed is allowed only on the first real sampling input of a lane that
-	// has never consumed provider input. The actor supplies it; renderer History
-	// is deliberately ignored. Existing lanes still resume their native thread
-	// and use receipt-bearing ContextStrategy import for later coverage gaps.
+	// has never consumed provider input. The actor supplies it. Existing lanes
+	// still resume their native thread and use receipt-bearing ContextStrategy
+	// import for later coverage gaps.
 	return brief + seed + buildUserRequestBlock(userText, false)
 }
 
@@ -2490,6 +2490,8 @@ func (b *Bridge) attachSession(sessionID, cwd string, opts SessionOptions, res m
 	b.applySessionModels(res["models"])
 	commandCatalog := b.applyCommandCatalog(sessionID, res["commandCatalog"])
 	commandCatalogSupported := b.supportsProviderCommandCatalog()
+	planUsageSupported := b.supportsNativePlanUsage()
+	planUsageResetSupported := b.supportsPlanUsageReset()
 	b.manager.bridgeChanged(b, reason)
 
 	b.mu.Lock()
@@ -2509,6 +2511,8 @@ func (b *Bridge) attachSession(sessionID, cwd string, opts SessionOptions, res m
 		Modes:                   append([]Mode(nil), b.modes...),
 		CurrentModeID:           copyStringPtr(b.currentMode),
 		ImageSupport:            b.imageSupport,
+		PlanUsageSupported:      planUsageSupported,
+		PlanUsageResetSupported: planUsageResetSupported,
 		CommandCatalogSupported: commandCatalogSupported,
 		CommandCatalog:          commandCatalog,
 	}
@@ -2523,6 +2527,8 @@ func (b *Bridge) liveSession(sessionID string) (LiveSession, bool) {
 	if b == nil || sessionID == "" || b.Closed() || b.Hibernated() {
 		return LiveSession{}, false
 	}
+	planUsageSupported := b.supportsNativePlanUsage()
+	planUsageResetSupported := b.supportsPlanUsageReset()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if _, ok := b.sessions[sessionID]; !ok {
@@ -2536,16 +2542,18 @@ func (b *Bridge) liveSession(sessionID string) (LiveSession, bool) {
 		TabID:  b.tabID,
 		ChatID: b.chatID,
 		Info: SessionInfo{
-			SessionID:      sessionID,
-			CWD:            b.cwd,
-			Agent:          b.agentName,
-			ProviderID:     b.providerID,
-			ProviderName:   b.providerName,
-			Models:         append([]Model(nil), b.models...),
-			CurrentModelID: currentModelID,
-			Modes:          append([]Mode(nil), b.modes...),
-			CurrentModeID:  copyStringPtr(b.currentMode),
-			ImageSupport:   b.imageSupport,
+			SessionID:               sessionID,
+			CWD:                     b.cwd,
+			Agent:                   b.agentName,
+			ProviderID:              b.providerID,
+			ProviderName:            b.providerName,
+			Models:                  append([]Model(nil), b.models...),
+			CurrentModelID:          currentModelID,
+			Modes:                   append([]Mode(nil), b.modes...),
+			CurrentModeID:           copyStringPtr(b.currentMode),
+			ImageSupport:            b.imageSupport,
+			PlanUsageSupported:      planUsageSupported,
+			PlanUsageResetSupported: planUsageResetSupported,
 		},
 	}, true
 }

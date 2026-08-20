@@ -6,7 +6,6 @@ import {
   acceptPendingSteer,
   commitChronologicalSteer,
   hasSteerConsumptionReceipt,
-  beginPendingSteer,
   insertChronologicalSteer,
   markPendingSteerUncertain,
   settleStagedSteersAtTurnEnd,
@@ -14,37 +13,52 @@ import {
   settleSendingSteersAtTurnEnd,
   stageChronologicalSteer,
   SteeringDispatchLane,
-  steeringBehavior,
+  liveSteeringSupported,
+  normalizeDeliveryCapabilities,
   steeringDestination,
   steeringStagesBoundary,
   steerStatusLabel,
 } from '../src/steering.ts';
 
-test('both frontier providers steer the live turn and stage their own boundary', () => {
-  assert.equal(steeringBehavior('codex'), 'codex-live');
-  assert.equal(steeringBehavior('codex-acp'), 'codex-live');
-  // The packaged Claude host answers _workass/claude/steer from the Agent SDK's
-  // live streaming input and echoes a consumption receipt, so a Claude steer
-  // belongs in the transcript exactly like Codex — never bounced through FIFO.
-  assert.equal(steeringBehavior('claude'), 'claude-live');
-  assert.equal(steeringBehavior('claude-agent-acp'), 'claude-live');
-  assert.equal(steeringStagesBoundary(steeringBehavior('codex')), true);
-  assert.equal(steeringStagesBoundary(steeringBehavior('claude')), true);
+const receiptLive = {
+  stableInputIdentity: true,
+  liveSteer: true,
+  steerConsumptionReceipt: true,
+  consumptionReceipt: true,
+  turnReadback: false,
+};
+
+const genericLive = { ...receiptLive, steerConsumptionReceipt: false };
+
+test('a typed steer-consumption receipt selects the staged boundary without provider identity', () => {
+  assert.equal(liveSteeringSupported(receiptLive), true);
+  assert.equal(steeringStagesBoundary(receiptLive), true);
 });
 
-test('generic ACP providers remain capability driven and split immediately', () => {
-  assert.equal(steeringBehavior('mock'), 'capability');
-  assert.equal(steeringBehavior('qwen'), 'capability');
-  assert.equal(steeringBehavior('custom'), 'capability');
-  assert.equal(steeringBehavior(null), 'capability');
-  assert.equal(steeringStagesBoundary('capability'), false);
+test('generic live steering stays in the pending transcript without a steer receipt', () => {
+  assert.equal(liveSteeringSupported(genericLive), true);
+  assert.equal(steeringStagesBoundary(genericLive), false);
+  assert.equal(liveSteeringSupported(undefined), false);
+  assert.equal(steeringStagesBoundary(undefined), false);
 });
 
-test('a live Claude acknowledgement owns the transcript row and never enters FIFO', () => {
-  assert.equal(steeringDestination({ ok: true, strategy: 'claude-live' }), 'transcript');
-  assert.equal(hasSteerConsumptionReceipt({ ok: true, strategy: 'claude-live', receipt: true }), true);
+test('wire capability normalization is additive and fail-closed', () => {
+  assert.deepEqual(normalizeDeliveryCapabilities({ liveSteer: true, steerConsumptionReceipt: true }), {
+    stableInputIdentity: false,
+    liveSteer: true,
+    steerConsumptionReceipt: true,
+    consumptionReceipt: false,
+    turnReadback: false,
+  });
+  assert.equal(normalizeDeliveryCapabilities(null), undefined);
+  assert.equal(normalizeDeliveryCapabilities('receipt-provider'), undefined);
+});
+
+test('a live acknowledgement owns the transcript row and never enters FIFO', () => {
+  assert.equal(steeringDestination({ ok: true, strategy: 'receipt-live' }), 'transcript');
+  assert.equal(hasSteerConsumptionReceipt({ ok: true, strategy: 'receipt-live', receipt: true }), true);
   // Only the adapter's own rejection may move a submitted steer into the queue.
-  assert.equal(steeringDestination({ ok: false, strategy: 'claude-live' }), 'queue');
+  assert.equal(steeringDestination({ ok: false, strategy: 'receipt-live' }), 'queue');
   assert.equal(steeringDestination({ ok: false, strategy: 'interrupt-queue' }), 'queue');
 });
 
@@ -53,7 +67,7 @@ test('the provider-neutral actor receipt is a real consumption boundary', () => 
 });
 
 test('steer acknowledgement selects one visible owner without optimistic bouncing', () => {
-  assert.equal(steeringDestination({ ok: true, strategy: 'codex-live' }), 'transcript');
+  assert.equal(steeringDestination({ ok: true, strategy: 'receipt-live' }), 'transcript');
   assert.equal(steeringDestination({ ok: true, strategy: 'capability-live' }), 'transcript');
   assert.equal(steeringDestination({ ok: false, strategy: 'queue' }), 'queue');
   assert.equal(steeringDestination({ ok: false, strategy: 'interrupt-queue' }), 'queue');
@@ -62,15 +76,10 @@ test('steer acknowledgement selects one visible owner without optimistic bouncin
 });
 
 test('steer delivery feedback keeps one stable owner through acknowledgement and receipt', () => {
-  const messages = [{ id: 'assistant-running', status: 'running' }];
-  const pending = { id: 'steer-user', status: 'done' };
-  const started = beginPendingSteer(messages, pending);
-  assert.equal(started, pending);
-  assert.equal(messages.at(-1), pending);
-  assert.equal(pending.status, 'pending');
-  assert.equal(pending.steerState, 'sending');
+  const pending = { id: 'steer-user', status: 'pending', steerState: 'sending' as const };
+  const messages = [{ id: 'assistant-running', status: 'running' }, pending];
 
-  assert.equal(hasSteerConsumptionReceipt({ ok: true, strategy: 'codex-live', receipt: true }), true);
+  assert.equal(hasSteerConsumptionReceipt({ ok: true, strategy: 'receipt-live', receipt: true }), true);
   assert.equal(acceptPendingSteer(messages, pending.id), pending);
   assert.equal(pending.status, 'done', 'official turn-id acknowledgement is the delivery boundary');
   assert.equal(pending.steerState, 'accepted');
@@ -83,19 +92,17 @@ test('steer delivery feedback keeps one stable owner through acknowledgement and
 });
 
 test('receipt can beat acknowledgement without regressing applied feedback', () => {
-  const pending = { id: 'steer-user', status: 'done' };
+  const pending = { id: 'steer-user', status: 'pending', steerState: 'sending' as const };
   const messages = [pending];
-  beginPendingSteer(messages.slice(0, 0), pending);
-  const owned = [pending];
-  assert.equal(settlePendingSteer(owned, pending.id, 'transcript'), pending);
+  assert.equal(settlePendingSteer(messages, pending.id, 'transcript'), pending);
   assert.equal(pending.steerState, 'applied');
-  assert.equal(acceptPendingSteer(owned, pending.id), undefined);
+  assert.equal(acceptPendingSteer(messages, pending.id), undefined);
   assert.equal(pending.steerState, 'applied');
 });
 
 test('transport-uncertain delivery settles in place and can be upgraded by a late receipt', () => {
   assert.equal(hasSteerConsumptionReceipt({ ok: false, strategy: 'uncertain', receipt: true }), true);
-  assert.equal(hasSteerConsumptionReceipt({ ok: true, strategy: 'codex-live' }), false, 'older adapters retain acknowledgement behavior');
+  assert.equal(hasSteerConsumptionReceipt({ ok: true, strategy: 'receipt-live' }), false);
   const pending = { id: 'steer-user', status: 'pending', steerState: 'sending' as const };
   const messages = [pending];
   assert.equal(markPendingSteerUncertain(messages, pending.id), pending);
@@ -143,9 +150,9 @@ test('turn end resolves only unacknowledged spinners and never replays accepted 
 });
 
 test('multiple rapid steers settle independently in submission order', () => {
-  const messages: Array<{ id: string; status: string; steerState?: 'sending' | 'accepted' | 'applied' | 'uncertain' }> = [];
-  const first = beginPendingSteer(messages, { id: 'first', status: 'done' });
-  const second = beginPendingSteer(messages, { id: 'second', status: 'done' });
+  const first = { id: 'first', status: 'pending', steerState: 'sending' as const };
+  const second = { id: 'second', status: 'pending', steerState: 'sending' as const };
+  const messages: Array<{ id: string; status: string; steerState?: 'sending' | 'accepted' | 'applied' | 'uncertain' }> = [first, second];
   assert.deepEqual(messages.map((message) => message.id), ['first', 'second']);
   assert.equal(acceptPendingSteer(messages, second.id), second);
   assert.equal(settlePendingSteer(messages, first.id, 'transcript'), first);

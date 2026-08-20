@@ -27,6 +27,92 @@ func newTestProviderChatRuntime(t *testing.T, manager *acp.Manager, store *sessi
 	return runtime
 }
 
+func TestProviderChatRuntimeUpgradesV21OriginsBeforeActorDiscovery(t *testing.T) {
+	stateDir := t.TempDir()
+	path := providerChatStatePath(stateDir, "origin-upgrade-chat")
+	state, err := chat.NewState("origin-upgrade-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _, err = chat.Reduce(state, chat.InitializeChat{
+		Presentation: chat.PresentationState{TabID: "origin-upgrade-tab", ProviderID: "mock"},
+		OperationID:  "create-origin-upgrade", Digest: "create-origin-upgrade-digest",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := providercontract.LaneIdentity{
+		ChatID: state.ChatID,
+		Realm: providercontract.Realm{
+			ProviderID: "mock", MachineID: "machine", AccountScope: "default", InstallScope: "official",
+		},
+		WorkspaceEpoch: "workspace",
+	}.Normalize()
+	state, _, err = chat.Reduce(state, chat.SelectLane{
+		Identity: identity, Owner: providercontract.AttachmentOwner{TabID: "origin-upgrade-tab"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Outbox = append(state.Outbox, chat.OutboxEntry{
+		ID: "turn-steer:old-steer", Kind: chat.EffectSteerTurn, Status: chat.OutboxCompleted,
+		LaneID: identity.ID, OperationID: "old-steer",
+		Input: &chat.QueueEntry{
+			OperationID: "old-steer", LaneID: identity.ID, Text: "old steer",
+			Presentation: providercontract.TurnPresentation{Origin: "human"},
+		},
+		Turn: providercontract.TurnRef{OperationID: "turn", NativeID: "native-turn"},
+	})
+	if err := (chat.FileStore{Path: path}).Save(state); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	envelope["v"] = 21
+	actorState := mapFromAnyMain(envelope["state"])
+	outbox := anySlice(actorState["Outbox"])
+	input := mapFromAnyMain(mapFromAnyMain(outbox[len(outbox)-1])["Input"])
+	presentation := mapFromAnyMain(input["Presentation"])
+	presentation["Origin"] = ""
+	raw, err = json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := sharedSessionStore(stateDir)
+	manager := acp.NewManager(acp.Options{StateDir: stateDir, RuntimeProfile: "dev"})
+	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
+	if _, known := runtime.known[state.ChatID]; !known {
+		t.Fatal("upgraded actor was not discovered")
+	}
+	committed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(committed, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if intValue(envelope["v"]) != 22 {
+		t.Fatalf("actor schema = %v, want 22", envelope["v"])
+	}
+	actorState = mapFromAnyMain(envelope["state"])
+	outbox = anySlice(actorState["Outbox"])
+	input = mapFromAnyMain(mapFromAnyMain(outbox[len(outbox)-1])["Input"])
+	presentation = mapFromAnyMain(input["Presentation"])
+	if fieldString(presentation, "Origin") != "human" {
+		t.Fatalf("upgraded origin = %#v", presentation["Origin"])
+	}
+}
+
 func TestRendererChatCreationIsDurableIdempotentAndIndependentFromProviderAttachment(t *testing.T) {
 	stateDir := t.TempDir()
 	store := sharedSessionStore(stateDir)
@@ -720,7 +806,7 @@ func TestProjectActorChatRendersAmbiguousAdmissionAsBlockedInsteadOfRunning(t *t
 	})
 	apply(chat.Submit{
 		OperationID: "ambiguous", Text: "send once",
-		Presentation: providercontract.TurnPresentation{UserMessageID: "user", AssistantMessageID: "assistant", StartedAt: "2026-08-11T12:00:00Z"},
+		Presentation: providercontract.TurnPresentation{UserMessageID: "user", AssistantMessageID: "assistant", Origin: "human", StartedAt: "2026-08-11T12:00:00Z"},
 	})
 	apply(chat.TurnAdmitted{OperationID: "ambiguous", Ambiguous: true})
 
@@ -1045,6 +1131,15 @@ func TestActorDeleteCrashRecoveryCompletesNativeCleanupFromTombstone(t *testing.
 		})
 	}
 	store := sharedSessionStore(stateDir)
+	laneEstablished := func(manager *acp.Manager) (bool, error) {
+		selection, err := manager.ResolveProviderLaneSelection(context.Background(), acp.SessionOptions{
+			TabID: "delete-tab", ChatID: "delete-chat", ProviderID: "mock", CWD: root,
+		})
+		if err != nil {
+			return false, err
+		}
+		return selection.Established, nil
+	}
 	firstManager := newManager()
 	first := newProviderChatRuntime(firstManager, store, stateDir)
 	if _, err := first.CreateRendererChat(map[string]any{
@@ -1061,9 +1156,9 @@ func TestActorDeleteCrashRecoveryCompletesNativeCleanupFromTombstone(t *testing.
 		firstManager.Reset()
 		t.Fatalf("create exact lane: info=%#v err=%v", info, err)
 	}
-	if bindings, err := firstManager.StoredProviderLaneSelections("delete-chat"); err != nil || len(bindings) != 1 {
+	if established, err := laneEstablished(firstManager); err != nil || !established {
 		firstManager.Reset()
-		t.Fatalf("native binding before tombstone = %#v err=%v", bindings, err)
+		t.Fatalf("native binding before tombstone established=%v err=%v", established, err)
 	}
 	actor, err := first.actor("delete-chat")
 	if err != nil {
@@ -1089,8 +1184,8 @@ func TestActorDeleteCrashRecoveryCompletesNativeCleanupFromTombstone(t *testing.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		state, ok := second.Snapshot("delete-chat")
-		bindings, bindingErr := secondManager.StoredProviderLaneSelections("delete-chat")
-		if bindingErr == nil && len(bindings) == 0 && ok && len(state.Outbox) == 1 && state.Outbox[0].Status == chat.OutboxCompleted {
+		established, bindingErr := laneEstablished(secondManager)
+		if bindingErr == nil && !established && ok && len(state.Outbox) == 1 && state.Outbox[0].Status == chat.OutboxCompleted {
 			if !state.Deleted {
 				t.Fatal("cleanup receipt cleared the actor tombstone")
 			}
@@ -1099,8 +1194,8 @@ func TestActorDeleteCrashRecoveryCompletesNativeCleanupFromTombstone(t *testing.
 		time.Sleep(10 * time.Millisecond)
 	}
 	state, _ := second.Snapshot("delete-chat")
-	bindings, bindingErr := secondManager.StoredProviderLaneSelections("delete-chat")
-	t.Fatalf("recovered tombstone did not finish cleanup: state=%#v bindings=%#v err=%v", state, bindings, bindingErr)
+	established, bindingErr := laneEstablished(secondManager)
+	t.Fatalf("recovered tombstone did not finish cleanup: state=%#v established=%v err=%v", state, established, bindingErr)
 }
 
 func TestProviderChatRuntimeSwitchesAndReturnsThroughVerifiedContextImport(t *testing.T) {

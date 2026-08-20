@@ -10,6 +10,7 @@ export interface ContextUsageEventIdentity {
   tabId?: string | null;
   chatId?: string | null;
   sessionId?: string | null;
+  providerId?: string | null;
 }
 
 export interface ContextUsageChatIdentity {
@@ -72,15 +73,14 @@ export function contextUsageIdentityMatches(
   event: ContextUsageEventIdentity,
   chat: ContextUsageChatIdentity,
 ): boolean {
-  // New daemons provide stable tab+chat identity. If either is present, every
-  // provided stable field must match; an OR here can leak a late usage update
-  // into a replacement conversation that reused only one identifier.
-  if (event.tabId || event.chatId) {
-    return (!event.tabId || event.tabId === chat.id)
-      && (!event.chatId || event.chatId === chat.chatId);
-  }
-  // Rolling compatibility for old daemons that only emitted the ACP session.
-  return !!event.sessionId && event.sessionId === chat.sessionId;
+  // Usage is accepted only with the complete actor address and its provider.
+  // Session-only or partial identities can collide after a provider handover,
+  // remote hydration, or a replacement conversation reuses one raw id.
+  return !!event.tabId
+    && !!event.chatId
+    && !!event.providerId
+    && event.tabId === chat.id
+    && event.chatId === chat.chatId;
 }
 
 export function contextUsagePercent(usage?: ContextUsageSnapshot | null): number | null {

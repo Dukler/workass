@@ -4,27 +4,39 @@
 import type { ModelControlMemory } from '../model-controls';
 
 // `efforts` is an optional, ordered list of reasoning-effort stops the model
-// supports (e.g. ["low","medium","high","xhigh","max","ultra"]). Additive: older
-// daemons and effortless models (Claude/Qwen today) omit it → no effort control.
+// supports (e.g. ["low","medium","high","xhigh","max","ultra"]). Providers
+// without a separate effort axis omit it.
 // Selecting effort E binds the chat to the model id `${modelId}[${E}]` through the
 // existing set-model path; a bare `modelId` means no explicit effort.
 export interface ModelOption { modelId: string; name: string; efforts?: string[]; }
+export type PermissionIntent = 'read' | 'edit' | 'full';
 export interface ModeOption { id: string; name: string; }
 
-// Additive provider registry group carried on chat:catalog (P4 provider
-// registry). Older daemons omit `groups`; the renderer feature-detects.
+// Authoritative provider registry group carried on chat:catalog.
 export interface CatalogGroup {
   providerId: string;
   providerName: string;
   models: ModelOption[];
   modes: ModeOption[];
+  permissionIntents?: Partial<Record<PermissionIntent, string>>;
+  assistantBrand?: string;
   status?: string;
   latencyMs?: number;
   error?: string;
   badge?: string;
 }
 
-export interface SlashCommand { name: string; description?: string; }
+// Typed delivery semantics negotiated by the exact attached provider lane.
+// `consumptionReceipt` covers ordinary turn input; the narrower
+// `steerConsumptionReceipt` is what defines a later semantic boundary for an
+// admitted live steer.
+export interface DeliveryCapabilities {
+  stableInputIdentity: boolean;
+  liveSteer: boolean;
+  steerConsumptionReceipt: boolean;
+  consumptionReceipt: boolean;
+  turnReadback: boolean;
+}
 
 // Rich per-session catalog reported by the provider (Claude Agent SDK):
 // slash commands with hints/aliases, subagent types, and output styles.
@@ -53,15 +65,16 @@ export interface AcpSessionInfo {
   currentModelId: string | null;
   modes: ModeOption[];
   currentModeId: string | null;
-  // R6: image paste/attach is gated on this cap; agent-advertised slash commands
-  // drive the composer autocomplete when present (feature-detected; both absent
-  // on the mock/older sessions → no attach, no overlay).
+  // Image paste/attach is gated on the exact attached-lane capability.
   imageSupport?: boolean;
-  commands?: SlashCommand[];
-  // Additive rich catalog (commands + agents + output styles). When present it
-  // supersedes `commands` for the composer popup; `commands` stays for older
-  // daemons/providers.
+  deliveryCapabilities?: DeliveryCapabilities;
+  // Typed command/agent/style catalog for the attached lane.
   commandCatalog?: CommandCatalog;
+  // Typed metadata facets for the exact attached provider lane. The renderer
+  // never guesses these from a provider id or starts a visible chat session to
+  // discover account metadata.
+  planUsageSupported?: boolean;
+  planUsageResetSupported?: boolean;
   error?: string;
   // Existing app-chat:new-session also carries the transactional workspace
   // invalidation result when replaceSessionId is supplied. No live session is
@@ -231,6 +244,7 @@ export interface ProviderRecord {
   // Absolute executable path selected from the provider override or daemon PATH.
   resolvedCommand?: string;
   cliVersion?: CliVersion;
+  assistantBrand?: string;
 }
 
 export type AcpEvent =
@@ -261,14 +275,14 @@ export type AcpEvent =
       location?: string | null;
       images?: Array<{ mimeType: string; data: string; name?: string }>;
       // Subagent linkage (additive; absent on the main thread / older daemons).
-      // subagentId = the spawning tool call's id (parentToolUseId); subagentLabel
+      // subagentId = the provider-reported parent tool call; subagentLabel
       // = that call's title; subagentProvider = model-family brand for the icon.
       subagentId?: string | null;
       subagentLabel?: string | null;
       subagentProvider?: string | null;
-	  subagentHeader?: boolean;
-	  // Friendly model+effort combo ("Opus4.8-xhigh") for the Turnos chip.
-	  subagentModel?: string | null;
+      subagentHeader?: boolean;
+      // Friendly model+effort combo for the Turnos chip.
+      subagentModel?: string | null;
     };
 
 export interface PermissionRequest {
@@ -344,6 +358,7 @@ export interface SpawnedWorkItem {
   tabId: string;
   chatId: string;
   providerId: string;
+  assistantBrand?: string;
   kind: 'bash' | 'agent' | 'workflow' | 'background' | string;
   label: string;
   // Lifecycle, not shape: 'service' is a process expected never to finish (a
@@ -615,7 +630,7 @@ export interface WorkassApi {
   archiveAppend?: (tabId: string, messages: unknown[]) => Promise<boolean>;
   archiveLoad?: (tabId: string) => Promise<unknown[]>;
   visualizeHost?: (options: { tabId: string; chatId: string; path: string; mode?: 'wide'; title?: string }) => Promise<VisualizationRegistration>;
-  appChatNewSession?: (opts: { cwd?: string | null; tabId?: string; chatId?: string; operationId: string; bridgeKey?: string; providerId?: string | null; sessionId?: string; refreshPlanUsage?: boolean; replaceSessionId?: string; workspaceRebind?: boolean; expectedWorkspaceRevision?: number }) => Promise<AcpSessionInfo>;
+  appChatNewSession?: (opts: { cwd?: string | null; tabId?: string; chatId?: string; operationId: string; bridgeKey?: string; providerId?: string | null; sessionId?: string; replaceSessionId?: string; workspaceRebind?: boolean; expectedWorkspaceRevision?: number }) => Promise<AcpSessionInfo>;
   // Account-scoped metadata read. It never binds/replaces a chat session and
   // never sends a provider prompt; the resulting snapshot arrives through the
   // existing chat:plan-usage event.
@@ -631,7 +646,7 @@ export interface WorkassApi {
     clientUserMessageId?: string,
     continuationAssistantMessageId?: string,
     boundary?: { assistantMessageId: string; contentOffset: number; resultOffset: number; eventCount: number },
-  ) => Promise<{ ok: boolean; live?: boolean; queued?: boolean; daemonQueued?: boolean; interrupted?: boolean; unsupported?: boolean; strategy?: 'codex-live' | 'generic-live' | 'interrupt-queue' | 'queue' | 'uncertain'; turnId?: string; receipt?: boolean; error?: string }>;
+  ) => Promise<{ ok: boolean; live?: boolean; queued?: boolean; daemonQueued?: boolean; interrupted?: boolean; unsupported?: boolean; strategy?: 'receipt-live' | 'generic-live' | 'interrupt-queue' | 'queue' | 'uncertain'; turnId?: string; receipt?: boolean; error?: string }>;
   appChatUseRateLimitReset?: (
     providerId: string,
     sessionId: string | undefined,

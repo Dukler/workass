@@ -153,7 +153,14 @@ test('serves local renderer, proxies HTTP, and tunnels WebSocket upgrade', async
   t.after(() => daemon.close());
   const daemonPort = daemon.address().port;
 
-  const view = await createViewServer({ daemonURL: `http://127.0.0.1:${daemonPort}`, rendererDir: renderer, port: 0, runtimeVersion: '43.1.1' });
+  const view = await createViewServer({
+    daemonURL: `http://127.0.0.1:${daemonPort}`,
+    rendererDir: renderer,
+    port: 0,
+    runtimeVersion: '43.1.1',
+    installationId: `install-${'a'.repeat(32)}`,
+    installTarget: '/Applications/Workass.app',
+  });
   t.after(() => view.close());
   const index = await fetch(view.url + '/').then((r) => r.text());
   assert.match(index, /local-index/);
@@ -167,6 +174,8 @@ test('serves local renderer, proxies HTTP, and tunnels WebSocket upgrade', async
   assert.equal(status.windowVisible, false);
   assert.equal(status.window, null);
   assert.equal(status.electronVersion, '43.1.1');
+  assert.equal(status.installationId, `install-${'a'.repeat(32)}`);
+  assert.equal(status.installTarget, '/Applications/Workass.app');
   assert.equal(status.daemonOrigin, `http://127.0.0.1:${daemonPort}`);
   assert.equal((await fetch(view.url + '/__workass-shell/controller', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ controller: true }),
@@ -183,7 +192,7 @@ test('serves local renderer, proxies HTTP, and tunnels WebSocket upgrade', async
     ] }),
   })).status, 204);
   status = await fetch(view.url + '/__workass-shell/status').then((r) => r.json());
-  assert.deepEqual(status.claude, { status: 'ready', models: [{ modelId: 'haiku', name: 'Haiku 4.5' }] });
+  assert.equal(Object.hasOwn(status, 'claude'), false);
   assert.equal(status.catalog.readyModelCount, 2);
   assert.ok(status.catalog.reportedAt);
   assert.deepEqual(status.catalog.groups.map((group) => group.providerId), ['claude', 'codex', 'missing']);

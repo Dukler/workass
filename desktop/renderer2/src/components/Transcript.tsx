@@ -1,32 +1,18 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type RefObject, type WheelEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent, type RefObject, type WheelEvent } from 'react';
 import type { Chat } from '../store/types';
 import { store, useApp, useProc } from '../store/store';
 import { chatPane } from '../store/right-pane';
-import { AssistantMessage, LiveTurnPulse } from './AssistantMessage';
+import { AssistantMessage, AssistantTurnBlock, LiveTurnPulse } from './AssistantMessage';
 import { UserPill } from './messages';
 import { IcDoc, IcTerminal, IcChanges, IcPreview, IcRail, IcBrowser, IcChevron, IcClose, IcSearch } from '../icons';
 import { normalizeWorkspacePath, rememberLastProject, workspaceName } from '../workspaces';
-import { createTranscriptPinScheduler, transcriptPinnedAfterScroll } from '../transcript-scroll';
+import { createTranscriptPinScheduler, latestOrdinaryUserMessageId, transcriptPinnedAfterScroll } from '../transcript-scroll';
 import { projectSteeringPresentation } from '../chat/steering-presentation';
-import { assistantTurnBlockRanges, buildCoalescedTurnBlockTimelineSegments } from '../timeline-layout';
-import type { TranscriptTimelineSegment } from '../timeline-layout';
+import { assistantTurnBlockRanges } from '../timeline-layout';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
+import { localBrowserOwnsChat } from '../browser';
 
 const WINDOW = 40; // hand-rolled windowing: render the last N, reveal older on demand
-
-function useTurnBlockMessageVersions(messageIdsKey: string): void {
-  const messageIds = useMemo(() => messageIdsKey ? messageIdsKey.split('\0') : [], [messageIdsKey]);
-  const subscribe = useCallback((callback: () => void) => {
-    const unsubscribers = messageIds.map((messageId) => store.subscribe(`msg:${messageId}`, callback));
-    return () => { for (const unsubscribe of unsubscribers) unsubscribe(); };
-  }, [messageIds]);
-  const snapshot = useCallback(() => {
-    let version = 0;
-    for (const messageId of messageIds) version += store.version(`msg:${messageId}`);
-    return version;
-  }, [messageIds]);
-  useSyncExternalStore(subscribe, snapshot, snapshot);
-}
 
 // Transcript copy/export menu removed by user request (2026-07-11): agents
 // read chats through the daemon (archives + Agent API), humans don't paste
@@ -59,7 +45,7 @@ function Topbar({ chat, onFind }: { chat: Chat | null; onFind: () => void }) {
         <button className="tico" title="Terminal (próximamente)"><IcTerminal /></button>
         <button className="tico" title="Cambios (próximamente)"><IcChanges /></button>
         <button className="tico" title="Vista previa (próximamente)"><IcPreview /></button>
-        {app.hasBrowserChannels && (
+        {app.hasBrowserChannels && chat && localBrowserOwnsChat(chat.id, chat.machineId) && (
           <button className={`tico ${pane === 'browser' ? 'on' : ''}`} title="Navegador" aria-pressed={pane === 'browser'} onClick={() => store.toggleBrowser()}><IcBrowser /></button>
         )}
         <button className={`tico ${pane === 'rail' ? 'on' : ''}`} title="Mostrar/ocultar panel" onClick={() => store.toggleRail()}><IcRail /></button>
@@ -244,7 +230,7 @@ function EmptyChat({ chat }: { chat: Chat | null }) {
 export function Transcript({ chat }: { chat: Chat | null }) {
   // Subscribe to app so the per-turn Deshacer/Revisar affordances appear once
   // this chat's checkpoints load (they bump `app`).
-  const app = useApp();
+  useApp();
   const scrollRef = useRef<HTMLDivElement>(null);
   const docRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -277,29 +263,17 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     && message.status === 'running'
     && message.turnTerminal !== false
   ));
-  const profile = app.meta?.profile ?? 'prod';
   const turnBlocks = assistantTurnBlockRanges(shown);
-  const turnBlockMessageIds = turnBlocks.flatMap(({ start, end }) => shown.slice(start, end).map((message) => message.id));
-  useTurnBlockMessageVersions(turnBlockMessageIds.join('\0'));
-  const coalescedSegments = new Map<string, TranscriptTimelineSegment[]>();
+  const turnBlockStarts = new Map<number, number>();
+  const turnBlockMembers = new Set<number>();
   for (const { start, end } of turnBlocks) {
-    const blockMessages = shown.slice(start, end);
-    const blockSegments = buildCoalescedTurnBlockTimelineSegments(blockMessages, profile);
-    for (let index = 0; index < blockMessages.length; index++) {
-      coalescedSegments.set(blockMessages[index].id, blockSegments[index]);
-    }
+    turnBlockStarts.set(start, end);
+    for (let index = start + 1; index < end; index++) turnBlockMembers.add(index);
   }
   // Provider receipts remain canonical in state. The presentation projection
   // keeps live directions in the composer tray and settles them after their
   // assistant turn, so a receipt never inserts a bubble into rendered prose.
-  let latestUserMessageId: string | null = null;
-  if (chat) {
-    for (let i = visibleMessages.length - 1; i >= 0; i--) {
-      if (visibleMessages[i].role !== 'user') continue;
-      latestUserMessageId = visibleMessages[i].id;
-      break;
-    }
-  }
+  const latestUserMessageId = latestOrdinaryUserMessageId(chat?.messages ?? []);
 
   // SCROLL CONTRACT — "↓ N mensajes nuevos" pill state. `seen` is the message
   // count last observed while pinned to bottom; when the user scrolls up, new
@@ -582,7 +556,20 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                     Ver {Math.min(WINDOW, hidden)} mensajes anteriores
                   </button>
                 )}
-                {shown.map((m) => {
+                {shown.map((m, index) => {
+                  const blockEnd = turnBlockStarts.get(index);
+                  if (blockEnd != null) {
+                    const messages = shown.slice(index, blockEnd);
+                    return (
+                      <AssistantTurnBlock
+                        key={`turn-block:${messages[0].id}`}
+                        tabId={chat.id}
+                        messages={messages}
+                        turnSeqs={messages.map((message) => store.checkpointForJob(chat, message.jobId)?.turnSeq)}
+                      />
+                    );
+                  }
+                  if (turnBlockMembers.has(index)) return null;
                   return (
                     <div className="chatfind-message" data-chat-find-message={m.id} key={m.id}>
                       {m.role === 'user' ? (
@@ -592,8 +579,6 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                           tabId={chat.id}
                           msg={m}
                           turnSeq={store.checkpointForJob(chat, m.jobId)?.turnSeq}
-                          profile={profile}
-                          coalescedSegments={coalescedSegments.get(m.id)}
                         />
                       )}
                     </div>

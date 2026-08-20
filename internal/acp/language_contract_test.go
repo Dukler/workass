@@ -12,17 +12,13 @@ func TestWorkassLanguageRuleIsAdjacentToEveryTurn(t *testing.T) {
 	manager, events := newFakeManager(t, "echo-prompt", Options{})
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "language-every-turn")
-	history := []any{
-		map[string]any{"role": "assistant", "content": "Respuesta anterior en español.", "at": "2026-07-10T00:00:00Z"},
-	}
 
-	first := startAppChatJobWithHistory(t, manager, session.SessionID, "language-every-turn", "Continue this work in English.", history)
+	first := startAppChatJob(t, manager, session.SessionID, "language-every-turn", "Continue this work in English.")
 	firstResult := jobFromEnd(events.waitJobEnd(t, jobID(first), 2*time.Second))["result"].(string)
 	assertPerTurnLanguageBoundary(t, firstResult, "Continue this work in English.")
 
-	// The environment/history brief is seeded only once. The language boundary
-	// must still be repeated on an already-seeded or provider-resumed session.
-	second := startAppChatJobWithHistory(t, manager, session.SessionID, "language-every-turn", "Keep answering in English.", nil)
+	// The language boundary must repeat on an already-used provider session.
+	second := startAppChatJob(t, manager, session.SessionID, "language-every-turn", "Keep answering in English.")
 	secondResult := jobFromEnd(events.waitJobEnd(t, jobID(second), 2*time.Second))["result"].(string)
 	assertPerTurnLanguageBoundary(t, secondResult, "Keep answering in English.")
 }

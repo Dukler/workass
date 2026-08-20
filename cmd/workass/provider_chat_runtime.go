@@ -44,9 +44,10 @@ type providerChatRuntime struct {
 }
 
 type providerChatActor struct {
-	mu          sync.Mutex
-	engine      *chat.Engine
-	coordinator *chat.Coordinator
+	mu                 sync.Mutex
+	externalMutationMu sync.Mutex
+	engine             *chat.Engine
+	coordinator        *chat.Coordinator
 }
 
 func newProviderChatRuntime(manager *acp.Manager, sessions *sessionStore, stateDir string, publishers ...func(string, any)) *providerChatRuntime {
@@ -71,30 +72,16 @@ func newProviderChatRuntimeWithStartupMode(manager *acp.Manager, sessions *sessi
 		return runtime
 	}
 	actorDir := filepath.Join(stateDir, "provider-chats")
-	if err := chat.UpgradeActorStoreV21(actorDir, func(chatID string) ([]chat.StoredLane, error) {
-		selections, err := manager.StoredProviderLaneSelections(chatID)
-		if err != nil {
-			return nil, err
-		}
-		lanes := make([]chat.StoredLane, 0, len(selections))
-		for _, selection := range selections {
-			lanes = append(lanes, chat.StoredLane{
-				Identity: selection.Identity, Thread: selection.Thread, Owner: selection.Owner,
-				CWD: selection.CWD, ModelID: selection.ModelID, ModeID: selection.ModeID,
-				Context: selection.Context, Creation: selection.Creation, Established: selection.Established,
-			})
-		}
-		return lanes, nil
-	}); err != nil {
+	var states []chat.State
+	if err := chat.UpgradeActorStoreV22(actorDir); err != nil {
 		runtime.bootErr = err
 	} else {
-		states, err := chat.DiscoverFileStates(actorDir)
-		if err != nil {
-			runtime.bootErr = err
-		}
+		states, runtime.bootErr = chat.DiscoverFileStates(actorDir)
+	}
+	if runtime.bootErr == nil {
 		for _, state := range states {
-			// FileStore may contain a schema-upgraded empty envelope from a
-			// chat:create attempt that never committed InitializeChat. It has no
+			// FileStore may contain an empty envelope from a chat:create attempt
+			// that never committed InitializeChat. It has no
 			// accepted chat identity, so discovery must not turn it into a runtime
 			// chat. Any nonempty pre-initialization state still fails closed through
 			// actor construction.
@@ -609,9 +596,10 @@ func catalogOnlyProviderLaneInfo(manager *acp.Manager, selection acp.ProviderLan
 	providerID := string(selection.Identity.Realm.ProviderID)
 	info := acp.SessionInfo{
 		SessionID: "", CWD: selection.CWD, ProviderID: providerID,
-		CurrentModelID: stringPointerValueOrNil(selection.ModelID),
-		CurrentModeID:  stringPointerValueOrNil(selection.ModeID),
-		Models:         []acp.Model{}, Modes: []acp.Mode{},
+		CurrentModelID:       stringPointerValueOrNil(selection.ModelID),
+		CurrentModeID:        stringPointerValueOrNil(selection.ModeID),
+		DeliveryCapabilities: acp.DeliveryCapabilitiesForWire(selection.Delivery),
+		Models:               []acp.Model{}, Modes: []acp.Mode{},
 	}
 	if manager == nil {
 		return info
@@ -1642,9 +1630,6 @@ func (r *providerChatRuntime) existingTurnReceiptLocked(
 	}
 	incomingText := strings.TrimSpace(firstNonEmptyString(fieldString(arg, "prompt"), fieldString(arg, "message")))
 	incomingOrigin := strings.ToLower(strings.TrimSpace(origin))
-	if incomingOrigin == "" {
-		incomingOrigin = "human"
-	}
 	if durable.Text != incomingText || !sameSteerAttachments(durable.Attachments, attachments) ||
 		durable.Presentation.UserMessageID != fields["userMessageId"] ||
 		durable.Presentation.AssistantMessageID != fields["assistantMessageId"] ||
@@ -1834,9 +1819,6 @@ func turnPresentation(arg map[string]any, fields map[string]string, origin strin
 	}
 	if presentation.StartedAt == "" {
 		presentation.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	}
-	if presentation.Origin == "" {
-		presentation.Origin = "human"
 	}
 	return presentation
 }

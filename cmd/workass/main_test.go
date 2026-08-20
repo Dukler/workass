@@ -167,6 +167,30 @@ func TestLocalUpdateControlRequiresQuiescenceAndExactCommit(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("committed update did not request daemon shutdown")
 	}
+	retried := updateControlRequest(t, control.commit, "127.0.0.1:41000", "update-ready-1234")
+	if retried.Code != http.StatusAccepted {
+		t.Fatalf("idempotent commit retry = %d %s", retried.Code, retried.Body.String())
+	}
+	samePrepare := updateControlRequest(t, control.prepare, "127.0.0.1:41000", "update-ready-1234")
+	if samePrepare.Code != http.StatusOK || !strings.Contains(samePrepare.Body.String(), `"committed":true`) {
+		t.Fatalf("committed prepare retry = %d %s", samePrepare.Code, samePrepare.Body.String())
+	}
+	otherPrepare := updateControlRequest(t, control.prepare, "127.0.0.1:41000", "update-other-1234")
+	if otherPrepare.Code != http.StatusConflict {
+		t.Fatalf("other prepare while committed = %d", otherPrepare.Code)
+	}
+	wrongCancel := updateControlRequest(t, control.cancel, "127.0.0.1:41000", "update-wrong-1234")
+	if wrongCancel.Code != http.StatusConflict || gate.cancelled {
+		t.Fatalf("wrong committed cancel = %d gate=%v", wrongCancel.Code, gate.cancelled)
+	}
+	recovered := updateControlRequest(t, control.cancel, "127.0.0.1:41000", "update-ready-1234")
+	if recovered.Code != http.StatusOK || !gate.cancelled {
+		t.Fatalf("exact committed cancel = %d gate=%v", recovered.Code, gate.cancelled)
+	}
+	recoveredAgain := updateControlRequest(t, control.cancel, "127.0.0.1:41000", "update-ready-1234")
+	if recoveredAgain.Code != http.StatusOK || !strings.Contains(recoveredAgain.Body.String(), `"alreadyCancelled":true`) {
+		t.Fatalf("idempotent committed cancel = %d %s", recoveredAgain.Code, recoveredAgain.Body.String())
+	}
 }
 
 func TestLocalUpdateControlIsLoopbackOnlyAndCanCancel(t *testing.T) {
@@ -417,9 +441,8 @@ func TestWireE2EAppChatAssertsJobEventChannel(t *testing.T) {
 		t.Fatalf("session reply = %#v", session)
 	}
 
-	// Renderer fixture: desktop/renderer/app.js:4901-4918 sends chatId, tabId,
-	// sessionId, prompt, and history to api.startJob; app.js:4932-4941 needs
-	// the start event PublicJob to echo chatId and status=="running".
+	// The frozen renderer contract sends the exact chat/session/message identity
+	// and needs the start event PublicJob to echo chatId and status=="running".
 	client.invoke(t, 2, "job:start", map[string]any{
 		"kind": "app-chat", "chatId": chatID, "sessionId": sessionID, "tabId": "wire-tab",
 		"prompt":        "[mock:slow] wire cancel token=public-secret",
@@ -1254,9 +1277,8 @@ func TestWireTraceMockPermissionTurn(t *testing.T) {
 				t.Fatalf("permission arrived before renderer-consumable start event")
 			}
 			req := msg.Payload.(map[string]any)
-			// Renderer fixture: desktop/renderer/app.js:6048-6056 requires id,
-			// jobId, options[], title, and kind; app.js:6065-6069 renders each
-			// optionId into button data-opt, which app.js:6084-6087 sends back.
+			// The frozen renderer permission card requires id, jobId, options[],
+			// title, and kind, and returns the selected optionId.
 			options, _ := req["options"].([]any)
 			if req["id"] == "" || req["jobId"] != jobID || req["sessionId"] != sessionID || req["title"] != "Mock permission gate" || req["kind"] != "execute" || len(options) != 2 {
 				t.Fatalf("permission request payload = %#v", req)
@@ -1267,10 +1289,8 @@ func TestWireTraceMockPermissionTurn(t *testing.T) {
 				t.Fatalf("permission options = %#v", options)
 			}
 			t.Logf("trace event chat:permission-request id=%s jobId=%s sessionId=%s title=%s options=%d", req["id"], req["jobId"], req["sessionId"], req["title"], len(req["options"].([]any)))
-			// Renderer fixture: desktop/renderer/app.js:6084-6087 calls
-			// api.chatPermissionDecide(permId, b.dataset.opt); the LAN bridge
-			// at internal/httpserve/lan_bridge.go:38 turns that into exactly
-			// invoke('chat:permission-decide', { id, optionId }).
+			// The frozen LAN bridge turns the selected permission option into
+			// exactly invoke('chat:permission-decide', { id, optionId }).
 			client.invoke(t, 3, "chat:permission-decide", map[string]any{"id": req["id"], "optionId": "allow-once"})
 			decideReply := client.waitReply(t, 3, 5*time.Second)
 			t.Logf("trace reply chat:permission-decide result=%v error=%v", decideReply.Result, decideReply.Error)
@@ -3461,13 +3481,8 @@ func TestWireTraceNotifyControllerOnlyRedactionAndNoTurnEndBacklog(t *testing.T)
 
 func assertRendererRunningFixture(t *testing.T, replyJob, startPayload map[string]any, chatID string) {
 	t.Helper()
-	// Renderer fixture:
-	// - desktop/renderer/app.js:4899-4903 marks the assistant message running and
-	//   stores chatJobs by the generated chatId before invoking job:start.
-	// - app.js:4921-4923 consumes the job:start reply id and binds jobRef.
-	// - app.js:5206-5207 routes {type:"start", job} to onJobStart; app.js:5484-5490
-	//   calls onAppChatStart for kind=="app-chat"; app.js:4932-4941 uses job.chatId
-	//   to find chatJobs and keep the assistant status at "running".
+	// The frozen renderer contract creates a running optimistic message before
+	// job:start, binds the reply id, then routes the start event by job.chatId.
 	assistantMessage := map[string]string{"status": "running"}
 	chatJobs := map[string]map[string]string{chatID: assistantMessage}
 	if replyJob["id"] == "" || replyJob["status"] != "running" {

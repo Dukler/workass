@@ -84,7 +84,7 @@ func TestMetadataOnlyProjectionRetainsUncommittedForegroundRows(t *testing.T) {
 		Input: chat.QueueEntry{
 			Text: "current input",
 			Presentation: providercontract.TurnPresentation{
-				UserMessageID: "running-user", AssistantMessageID: "running-assistant",
+				UserMessageID: "running-user", AssistantMessageID: "running-assistant", Origin: "human",
 			},
 		},
 		CurrentAssistantMessageID: "running-assistant",

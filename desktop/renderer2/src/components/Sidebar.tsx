@@ -8,7 +8,7 @@ import { buildWorkspaceGroups, normalizeWorkspacePath, type WorkspaceGroup } fro
 import { nextUpdatePhase, brandForProvider, DONE_HOLD_MS, EXIT_MS, type UpdatePhase } from '../update-card';
 import { availableRateLimitReset, prepareRateLimitResetAttempt, rateLimitResetExpiry, type RateLimitResetAttempt } from '../plan-usage';
 import { chatHasLiveActivity } from '../chat-activity';
-import { appUpdaterPhaseText, appUpdaterReceiptIsRecent, useAppUpdater } from '../app-updater';
+import { appUpdaterCardTitle, appUpdaterPhaseText, appUpdaterReceiptIsRecent, useAppUpdater } from '../app-updater';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
 
 // What is currently being dragged in the sidebar. `id` is the chat.id for a
@@ -489,7 +489,7 @@ export function FooterUpdateCards() {
   // the one that just sealed, or the single pending update. Empty when several
   // agents are pending at once (no single brand to show).
   const iconProviderId = running ? running.providerId : sealing ? lastProviderId.current : one ? one.providerId : '';
-  const iconBrand = brandForProvider(iconProviderId);
+  const iconBrand = brandForProvider(iconProviderId, app.providers, app.groups);
 
   // Resting card is the update button (or opens Ajustes on an older bridge). It
   // shares the .updcard box as a role=button div so it lives inside the same
@@ -500,21 +500,7 @@ export function FooterUpdateCards() {
 
   const selfRunning = selfPhase === 'running';
   const selfAction = selfPending || selfCheckFailed || selfFailed ? selfUpdater.apply : null;
-  const selfTitle = selfUpdate.phase === 'available'
-    ? `Workass ${selfUpdate.targetVersion}`
-    : selfUpdate.phase === 'ready'
-      ? `Workass ${selfUpdate.targetVersion || selfUpdate.currentVersion}`
-      : selfUpdate.phase === 'busy'
-        ? 'La actualización está esperando'
-        : selfUpdate.phase === 'check_failed'
-          ? 'No se pudo buscar actualizaciones'
-          : selfUpdate.phase === 'rollback_healthy'
-            ? 'Workass volvió a la versión anterior'
-            : selfUpdate.phase === 'failed'
-              ? 'No se pudo actualizar Workass'
-              : selfUpdate.phase === 'healthy'
-                ? 'Listo'
-                : 'Actualizando Workass';
+  const selfTitle = appUpdaterCardTitle(selfUpdate);
   const selfActionLabel = selfUpdate.phase === 'busy'
     ? 'Reintentar'
     : 'Actualizar';
@@ -541,7 +527,9 @@ export function FooterUpdateCards() {
                 <span className="ut">{selfTitle}</span>
                 <span className="us">{appUpdaterPhaseText(selfUpdate)}</span>
                 <span className="ufail-act">
-                  <button className="uretry" disabled={selfActionBusy} onClick={() => void runSelfAction()}>{selfActionBusy ? 'Reintentando…' : 'Reintentar'}</button>
+                  <button className="uretry" disabled={selfActionBusy} onClick={() => void runSelfAction()}>
+                    {selfActionBusy ? 'Reintentando…' : selfUpdate.availableVersion ? 'Actualizar' : 'Reintentar'}
+                  </button>
                 </span>
               </span>
             </div>
@@ -690,9 +678,15 @@ export function AccountMenu() {
   }, [open]);
 
   const label = 'workass';
-  const reset = availableRateLimitReset(app.planUsageByProvider.codex?.rateLimitResetCredits);
+  const resetEntry = Object.values(app.planUsageByProvider)
+    .map((snapshot) => ({ snapshot, reset: availableRateLimitReset(snapshot.rateLimitResetCredits) }))
+    .find((entry) => entry.reset != null);
+  const reset = resetEntry?.reset ?? null;
+  const resetProviderId = resetEntry?.snapshot.providerId ?? '';
+  const resetProviderName = store.providerName(resetProviderId) ?? resetProviderId;
+  const resetProviderBrand = store.providerBrand(resetProviderId);
   const active = app.chats.find((chat) => chat.id === app.activeId);
-  const codexSessionId = active?.providerId === 'codex' ? active.sessionId : undefined;
+  const resetSessionId = active?.providerId === resetProviderId ? active.sessionId : undefined;
   const canUseReset = has('appChatUseRateLimitReset');
   const useEarnedReset = async () => {
     if (!reset || resetBusy || !canUseReset) return;
@@ -704,12 +698,12 @@ export function AccountMenu() {
     ));
     setResetBusy(true);
     try {
-      const result = await store.useRateLimitReset('codex', codexSessionId || undefined, resetAttempt.current.idempotencyKey, creditId);
+      const result = await store.useRateLimitReset(resetProviderId, resetSessionId || undefined, resetAttempt.current.idempotencyKey, creditId);
       switch (result?.outcome) {
         case 'reset':
         case 'alreadyRedeemed':
           resetAttempt.current = null;
-          store.addToast('Reset aplicado', 'Codex actualizó tus límites con el reset gratis.');
+          store.addToast('Reset aplicado', `${resetProviderName || 'El proveedor'} actualizó tus límites.`);
           break;
         case 'nothingToReset':
           resetAttempt.current = null;
@@ -717,10 +711,10 @@ export function AccountMenu() {
           break;
         case 'noCredit':
           resetAttempt.current = null;
-          store.addToast('Reset no disponible', 'Codex ya no encuentra ese reset gratis.');
+          store.addToast('Reset no disponible', 'El proveedor ya no encuentra ese reset gratis.');
           break;
         default:
-          throw new Error('Codex no devolvió un resultado de reset reconocido.');
+          throw new Error('El proveedor no devolvió un resultado de reset reconocido.');
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error || 'Error desconocido');
@@ -741,12 +735,12 @@ export function AccountMenu() {
           {reset && (
             <div className="acctcredit" role="group" aria-label={`${reset.count} reset gratis disponible`}>
               <div className="acctcredit-top">
-                <span className="acctcredit-mark" aria-hidden><ModelIcon provider="gpt" /></span>
-                <span className="acctcredit-title">Codex reset</span>
+                <span className="acctcredit-mark" aria-hidden>{resetProviderBrand && <ModelIcon provider={resetProviderBrand} />}</span>
+                <span className="acctcredit-title">{resetProviderName || 'Proveedor'} reset</span>
                 <span className="acctcredit-count">×{reset.count}</span>
               </div>
               <div className="acctcredit-copy">
-                {reset.credit?.description || 'Crédito de Codex disponible para reiniciar tus límites.'}
+                {reset.credit?.description || 'Crédito disponible para reiniciar tus límites.'}
               </div>
               <div className="acctcredit-foot">
                 <span className="acctcredit-expiry">{rateLimitResetExpiry(reset.credit?.expiresAt)}</span>

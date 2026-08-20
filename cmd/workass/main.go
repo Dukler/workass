@@ -455,6 +455,8 @@ type localUpdateControl struct {
 	gate            appUpdateDrainGate
 	requestShutdown context.CancelFunc
 	preparedID      string
+	committedID     string
+	cancelledID     string
 }
 
 func newLocalUpdateControl(gate appUpdateDrainGate, requestShutdown context.CancelFunc) *localUpdateControl {
@@ -513,6 +515,15 @@ func (control *localUpdateControl) prepare(w http.ResponseWriter, r *http.Reques
 	}
 	control.mu.Lock()
 	defer control.mu.Unlock()
+	if control.committedID != "" {
+		if control.committedID == id {
+			_, _ = w.Write([]byte(`{"ready":true,"committed":true}`))
+			return
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"ready":false,"reason":"another update is committed"}`))
+		return
+	}
 	if control.preparedID != "" && control.preparedID != id {
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`{"ready":false,"reason":"another update is prepared"}`))
@@ -529,6 +540,7 @@ func (control *localUpdateControl) prepare(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	control.preparedID = id
+	control.cancelledID = ""
 	_ = json.NewEncoder(w).Encode(readiness)
 }
 
@@ -539,12 +551,23 @@ func (control *localUpdateControl) cancel(w http.ResponseWriter, r *http.Request
 	}
 	control.mu.Lock()
 	defer control.mu.Unlock()
-	if control.preparedID != id {
+	if control.cancelledID == id {
+		_, _ = w.Write([]byte(`{"cancelled":true,"alreadyCancelled":true}`))
+		return
+	}
+	if control.preparedID == "" && control.committedID == "" {
+		control.cancelledID = id
+		_, _ = w.Write([]byte(`{"cancelled":false,"notPrepared":true}`))
+		return
+	}
+	if control.preparedID != id && control.committedID != id {
 		http.Error(w, "update is not prepared", http.StatusConflict)
 		return
 	}
 	control.gate.CancelUpdateDrain()
 	control.preparedID = ""
+	control.committedID = ""
+	control.cancelledID = id
 	_, _ = w.Write([]byte(`{"cancelled":true}`))
 }
 
@@ -554,12 +577,23 @@ func (control *localUpdateControl) commit(w http.ResponseWriter, r *http.Request
 		return
 	}
 	control.mu.Lock()
+	if control.committedID == id {
+		control.mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"stopping":true}`))
+		go func() {
+			time.Sleep(25 * time.Millisecond)
+			control.requestShutdown()
+		}()
+		return
+	}
 	if control.preparedID != id {
 		control.mu.Unlock()
 		http.Error(w, "update is not prepared", http.StatusConflict)
 		return
 	}
 	control.preparedID = ""
+	control.committedID = id
 	control.mu.Unlock()
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte(`{"stopping":true}`))
@@ -1549,8 +1583,6 @@ func parseJobStartOptions(m map[string]any) acp.JobStartOptions {
 		CWD:                fieldString(m, "cwd"),
 		Prompt:             fieldString(m, "prompt"),
 		Message:            fieldString(m, "message"),
-		History:            sliceArg(m["history"]),
-		HistoryCharBudget:  firstNonZeroInt(intField(m, "historyCharBudget"), intField(m, "historyBudgetChars")),
 		ContextSize:        firstNonZeroInt(intField(m, "contextSize"), intField(m, "contextWindow")),
 		Images:             sliceArg(m["images"]),
 		ModelID:            firstNonEmptyString(fieldString(m, "modelId"), fieldString(m, "model")),

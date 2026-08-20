@@ -56,7 +56,15 @@ export function localId(id: string): string {
  */
 const ID_KEYS = new Set([
   'id', 'chatId', 'tabId', 'conversationId', 'parentChatId', 'parentTabId',
-  'jobId', 'workId', 'subagentId', 'parentToolUseId', 'sessionId', 'requestId',
+  'jobId', 'workId', 'subagentId', 'sessionId', 'requestId',
+  'userMessageId', 'assistantMessageId', 'messageId', 'clientUserMessageId',
+  'continuationAssistantMessageId', 'queueId', 'planLatestMessageId',
+  'steerContinuationId', 'steerContinuationFor', 'turnRootId', 'runningJobId',
+  'lastMessageId', 'queueHeadId',
+]);
+
+const ID_ARRAY_KEYS = new Set([
+  'consumedSteerIds', 'pendingPermissionIds',
 ]);
 
 export function tagPayload<T>(machineId: string, value: T): T {
@@ -97,15 +105,21 @@ function deepMap(value: unknown, map: (text: string) => string): unknown {
   return out;
 }
 
-function walk(value: unknown, map: (id: string) => string): unknown {
-  if (Array.isArray(value)) return value.map((item) => walk(item, map));
+function walk(value: unknown, map: (id: string) => string, ownerKey = ''): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => (
+      typeof item === 'string' && ID_ARRAY_KEYS.has(ownerKey)
+        ? map(item)
+        : walk(item, map)
+    ));
+  }
   if (!value || typeof value !== 'object') return value;
   const source = value as Record<string, unknown>;
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(source)) {
     const item = source[key];
     if (typeof item === 'string' && ID_KEYS.has(key)) out[key] = map(item);
-    else out[key] = walk(item, map);
+    else out[key] = walk(item, map, key);
   }
   return out;
 }

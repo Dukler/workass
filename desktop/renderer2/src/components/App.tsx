@@ -15,6 +15,7 @@ import { CommandBar } from './CommandBar';
 import { ImageLightbox } from './ImageLightbox';
 import { ImageClipboardController } from './ImageClipboardController';
 import { IcSidebar } from '../icons';
+import { localBrowserOwnsChat } from '../browser';
 
 function AssistStub() {
   return (
@@ -65,7 +66,10 @@ export function App() {
   const app = useApp();
   const chat = store.active();
   // The right column's occupant is per-chat: read the ACTIVE chat's choice.
-  const activePane = chatPane(chat);
+  const requestedPane = chatPane(chat);
+  const activePane = requestedPane === 'browser' && (!chat || !localBrowserOwnsChat(chat.id, chat.machineId))
+    ? null
+    : requestedPane;
 
   // Recompute the pane-width clamp when the window resizes (the grid CSS already
   // drops the rail entirely below 1180px; this handles the range above it).

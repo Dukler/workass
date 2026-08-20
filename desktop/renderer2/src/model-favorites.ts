@@ -1,5 +1,4 @@
 import type { CatalogGroup, ModelOption } from './wire/types.ts';
-import { userFacingCatalogGroups, type WorkassRuntimeProfile } from './model-catalog.ts';
 
 export const MODEL_FAVORITES_SETTINGS_KEY = 'modelFavorites';
 export const MAX_MODEL_FAVORITES = 100;
@@ -77,10 +76,10 @@ export function toggleModelFavorite(
 // temporarily missing provider can recover later, but only live, user-facing
 // catalog entries are rendered.
 export function favoriteCatalogModels(
-  groups: readonly CatalogGroup[], favorites: readonly ModelFavorite[], profile: WorkassRuntimeProfile = 'prod',
+  groups: readonly CatalogGroup[], favorites: readonly ModelFavorite[],
 ): FavoriteCatalogModel[] {
   const byKey = new Map<string, FavoriteCatalogModel>();
-  for (const group of userFacingCatalogGroups(groups, profile)) {
+  for (const group of groups) {
     for (const model of group.models) {
       byKey.set(favoriteKey(group.providerId, model.modelId), {
         providerId: group.providerId,

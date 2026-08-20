@@ -6,6 +6,26 @@ export type TranscriptScrollMetrics = {
 
 export const TRANSCRIPT_BOTTOM_THRESHOLD = 80;
 
+type TranscriptMessageIdentity = {
+  id: string;
+  role: string;
+  steerState?: unknown;
+};
+
+// A steer is rendered in the composer tray while its turn is active and moves
+// into the transcript only when that turn settles. That presentation-only move
+// is not a new send and must never re-pin a reader who scrolled away. Ordinary
+// user rows remain the explicit "follow this turn" signal.
+export function latestOrdinaryUserMessageId(
+  messages: readonly TranscriptMessageIdentity[],
+): string | null {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role === 'user' && message.steerState === undefined) return message.id;
+  }
+  return null;
+}
+
 export function transcriptIsAtBottom(
   metrics: TranscriptScrollMetrics,
   threshold = TRANSCRIPT_BOTTOM_THRESHOLD,

@@ -66,7 +66,7 @@ func (r *providerChatRuntime) closeExactAttachment(ctx context.Context, actor *p
 	}
 	lane := state.Lanes[laneID]
 	operationID := chat.DetachOperationID(state.ChatID, laneID, sessionID, generation)
-	err := actor.engine.Apply(chat.DetachLane{
+	err := actor.engine.Apply(chat.DetachTarget{
 		OperationID:          operationID,
 		LaneID:               laneID,
 		Owner:                lane.Owner,

@@ -53,9 +53,8 @@ type Bridge struct {
 	cwd               string
 	agentOwnerKey     string
 
-	// Subagent labeling: toolCallId → title, remembered so any child tool events
-	// (subagent calls that carry _meta.claudeCode.parentToolUseId == this id) can
-	// be labeled with the spawning call's title (e.g. a Task's description).
+	// Subagent labeling: toolCallId → title, remembered so any typed child-tool
+	// lineage event can be labeled with the spawning call's title.
 	// Guarded by mu because request and notification handling can overlap.
 	subagentTitles map[string]string
 
@@ -319,15 +318,17 @@ func (b *Bridge) start() error {
 		// A delegated child is not the user. It must not inherit the user's
 		// personal instruction file or their auto-memory: the memory index is
 		// theirs, one entry of it is explicitly marked "private — never put it
-		// in a subagent brief", and the brief honoured that while the harness
-		// delivered it anyway. The repo's own CLAUDE.md still loads, because
-		// the binding laws a child works under are a property of the repo.
+		// in a subagent brief", and the brief honoured that while the provider
+		// delivered it anyway. Repository instructions still load because they
+		// are a property of the working tree.
 		env = copyStringMap(env)
 		if env == nil {
 			env = map[string]string{}
 		}
 		env["WORKASS_SUBAGENT"] = "1"
-		env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+		for key, value := range providerAdapterForID(b.providerID).subagentEnvironment {
+			env[key] = value
+		}
 	}
 	cmd.Env = mergedEnv(os.Environ(), env, launchStrategy.EnvironmentPolicy())
 	stdin, err := cmd.StdinPipe()
@@ -793,6 +794,7 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 	job := b.jobForSession(sessionID)
 	update := mapFromAny(params["update"])
 	kind := asString(update["sessionUpdate"])
+	adapter := providerAdapterForID(b.providerID)
 	if job != nil {
 		job.touchActivity()
 		if kind != "_workass_input_consumed" {
@@ -803,6 +805,10 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 				return
 			}
 		}
+	}
+	if notification, ok := adapter.notifications.Decode(update, params); ok {
+		b.handleProviderNotification(sessionID, job, notification)
+		return
 	}
 	switch kind {
 	case "agent_message_chunk":
@@ -820,80 +826,8 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 		}
 	case "tool_call", "tool_call_update":
 		if job != nil && !job.internal {
-			parent := metaParentToolUseID(mapFromAny(update["_meta"]), mapFromAny(params["_meta"]))
+			parent := adapter.notifications.ToolParentID(mapFromAny(update["_meta"]), mapFromAny(params["_meta"]))
 			b.emitToolEvent(job, kind, update, parent)
-		}
-	case "_workass_claude_spawned_work":
-		// The Claude native host sees the official SDK's structured task lifecycle but the
-		// upstream adapter intentionally drops it. Workass's exact-version patch
-		// forwards only the bounded task fields in this additive update. It may
-		// arrive after the user turn ended, so it must not require a live job.
-		if b.manager.acceptsNativeSpawnedWorkProvider(b.ProviderID()) {
-			tabID, chatID := b.chatIdentity()
-			b.manager.observeClaudeSpawnedWork(tabID, chatID, sessionID, mapFromAny(update["event"]))
-		}
-	case "_workass_claude_turn":
-		// The harness's own turn lifecycle. Like spawned work above it must not
-		// require a live job — a turn the harness starts on its own is precisely
-		// the case where no job exists yet, and refusing it here is what made
-		// that turn invisible.
-		if b.manager.acceptsNativeSpawnedWorkProvider(b.ProviderID()) {
-			tabID, chatID := b.chatIdentity()
-			b.manager.observeClaudeTurn(b, tabID, chatID, sessionID, update)
-		}
-	case "_workass_claude_commands":
-		// Claude's slash-command catalog changed mid-session (commands_changed
-		// push or an engine restart re-announcing its truth). Chat-level data:
-		// like _workass_claude_turn above it must never require a live job — it
-		// arrives between turns. applyCommandCatalog gates on the claude
-		// provider and keys by chat identity; old daemons fall into default:
-		// and ignore the kind, which is what keeps this additive-safe.
-		b.applyCommandCatalog(sessionID, update["commandCatalog"])
-	case "_workass_claude_provider_session":
-		// Claude's fork family (/clear, forkSession, conversation_reset) moved
-		// the conversation under a new provider id; record it so the next
-		// native restore resumes the transcript that actually has the
-		// post-fork turns (hostile-fixture finding, 2026-07-28).
-		if providerSessionID := strings.TrimSpace(asString(update["providerSessionId"])); providerSessionID != "" {
-			tabID, chatID := b.chatIdentity()
-			if lane := b.manager.providerLaneForSessionID(sessionID); lane != nil {
-				if err := lane.advanceLineage(
-					asString(update["previousProviderSessionId"]), providerSessionID,
-					uint64(numberOrZero(update["lineageGeneration"])), asString(update["lineageProof"]),
-				); err != nil {
-					b.opts.Logf("provider lineage rejected", map[string]any{"providerId": b.ProviderID(), "error": err.Error()})
-					go b.Close(false, err)
-				}
-			} else if strings.HasPrefix(chatID, subagentChatIDPrefix) && b.manager.nativeSessions != nil {
-				// Delegated child engines are executor-owned and do not have a
-				// user-chat actor. Keep their exact native binding isolated here.
-				b.manager.nativeSessions.adoptProviderSession(
-					tabID, chatID, b.ProviderID(), sessionID,
-					asString(update["previousProviderSessionId"]), providerSessionID,
-					uint64(numberOrZero(update["lineageGeneration"])), asString(update["lineageProof"]),
-				)
-			} else {
-				err := errors.New("chat-scoped provider lineage has no authoritative actor lane")
-				b.opts.Logf("provider lineage rejected", map[string]any{"providerId": b.ProviderID(), "error": err.Error()})
-				go b.Close(false, err)
-			}
-		}
-	case "_workass_claude_turn_heartbeat":
-		// Turn liveness: a max-effort turn can think silently for minutes and
-		// was indistinguishable from a dead chat (2026-07-27). Additive job
-		// event; a renderer that does not know the kind ignores it.
-		if job != nil && !job.internal {
-			b.manager.emit("job:event", map[string]any{
-				"type": "acp", "id": job.ID,
-				"event": map[string]any{
-					"kind":         "turn-heartbeat",
-					"elapsedMs":    update["elapsedMs"],
-					"outputTokens": update["outputTokens"],
-					"phase":        update["phase"],
-					"toolName":     update["toolName"],
-					"retry":        update["retry"],
-				},
-			})
 		}
 	case "plan":
 		if entries, ok := update["entries"].([]any); ok && job != nil && !job.internal {
@@ -915,33 +849,6 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 		}
 	case "config_options_update":
 		b.applyConfigOptionsForSession(sessionID, update["configOptions"], true, false)
-	case "_workass_codex_steer_consumed":
-		// Codex's turn/steer response acknowledges admission. The canonical
-		// userMessage item is the later proof that the active turn actually
-		// consumed that input. Persist the receipt on the job as well as emitting
-		// it so reconnecting controllers cannot strand an acknowledged bubble.
-		clientUserMessageID := strings.TrimSpace(asString(update["clientUserMessageId"]))
-		if job != nil && job.markSteerConsumed(clientUserMessageID) && !job.internal {
-			b.manager.emit("job:event", map[string]any{
-				"type": "acp", "id": job.ID,
-				"event": map[string]any{
-					"kind": "steer-consumed", "clientUserMessageId": clientUserMessageID,
-				},
-			})
-		}
-	case "_workass_claude_steer_consumed":
-		// Claude live steering is accepted when the adapter pushes the direction
-		// into the SDK streaming input. The later echoed user message proves the
-		// live query actually consumed it.
-		clientUserMessageID := strings.TrimSpace(asString(update["clientUserMessageId"]))
-		if job != nil && job.markSteerConsumed(clientUserMessageID) && !job.internal {
-			b.manager.emit("job:event", map[string]any{
-				"type": "acp", "id": job.ID,
-				"event": map[string]any{
-					"kind": "steer-consumed", "clientUserMessageId": clientUserMessageID,
-				},
-			})
-		}
 	case "_workass_input_consumed":
 		clientUserMessageID := strings.TrimSpace(asString(update["clientUserMessageId"]))
 		if job != nil && clientUserMessageID != "" && !job.internal {
@@ -1087,24 +994,31 @@ func safeToolImageMIME(mimeType string) bool {
 	}
 }
 
-func (b *Bridge) emitToolEvent(job *Job, acpKind string, update map[string]any, parentToolUseID string) {
+func (b *Bridge) emitToolEvent(job *Job, acpKind string, update map[string]any, parentToolCallID string) {
 	rawInput := update["rawInput"]
 	outText := textFromContent(update["content"])
 	images := toolImagesFromContent(update["content"])
 	toolCall := mapFromAny(update["toolCall"])
 	toolCallID := firstNonEmpty(asString(update["toolCallId"]), asString(toolCall["toolCallId"]))
 	title := firstNonEmpty(asString(update["title"]), asString(toolCall["title"]), asString(update["kind"]), "tool")
-	b.manager.observeSpawnToolEvent(spawnToolObservation{
-		SessionID: job.SessionID, TabID: job.TabID, ChatID: job.ChatID,
-		ProviderID: b.ProviderID(), ToolCallID: toolCallID, Title: title,
-		Command: execCommandFrom(rawInput), RawInput: rawInput,
+	spawnedWork := providerAdapterForID(b.ProviderID()).spawnedWork
+	if signal, ok := spawnedWork.DecodeTool(providerRawToolObservation{
+		Title: title, Command: execCommandFrom(rawInput), RawInput: rawInput,
 		Meta: mapFromAny(update["_meta"]), Output: outText,
-		JobID: job.ID, OperationID: job.startOpts.OperationID,
-	})
+	}); ok {
+		b.manager.observeSpawnToolEvent(spawnToolObservation{
+			SessionID: job.SessionID, TabID: job.TabID, ChatID: job.ChatID,
+			ProviderID: b.ProviderID(), ToolCallID: toolCallID, Title: title,
+			Command: execCommandFrom(rawInput), ProviderTool: signal.ProviderTool,
+			RunsInBackground: signal.RunsInBackground, FallbackTaskID: signal.FallbackTaskID,
+			FallbackOutputFile: signal.FallbackOutputFile,
+			JobID:              job.ID, OperationID: job.startOpts.OperationID,
+		})
+	}
 	b.manager.updateSubagentActivityForJob(job, "tool", title)
-	// Remember this call's title so child subagent events (which carry
-	// parentToolUseId == this toolCallId) can be labeled with it. Bounded reset
-	// guards against unbounded growth over a long-lived engine.
+	// Remember this call's title so child subagent events linked to this tool call
+	// can be labeled with it. Bounded reset guards against unbounded growth over
+	// a long-lived engine.
 	if toolCallID != "" && !strings.EqualFold(title, "tool") {
 		b.mu.Lock()
 		if b.subagentTitles == nil {
@@ -1124,7 +1038,7 @@ func (b *Bridge) emitToolEvent(job *Job, acpKind string, update map[string]any, 
 			return
 		}
 		visibleJobID = firstNonEmpty(job.VisibleJobID, job.ID)
-		parentToolUseID = job.SubagentID
+		parentToolCallID = job.SubagentID
 		if eventToolCallID != "" {
 			eventToolCallID = job.SubagentID + ":" + eventToolCallID
 		}
@@ -1147,18 +1061,16 @@ func (b *Bridge) emitToolEvent(job *Job, acpKind string, update map[string]any, 
 	if len(images) > 0 {
 		event["images"] = images
 	}
-	// Subagent linkage (additive — the renderer nests tool calls by these fields
-	// and ignores them when absent, so the frozen wire contract holds). The Claude
-	// adapter stamps _meta.claudeCode.parentToolUseId on every tool event emitted
-	// inside a Task subagent; it is empty on the main thread.
-	if parentToolUseID != "" {
-		event["subagentId"] = parentToolUseID
+	// Subagent linkage is additive; the renderer ignores these fields when the
+	// registered adapter did not report a parent.
+	if parentToolCallID != "" {
+		event["subagentId"] = parentToolCallID
 		label := ""
 		if job.SubagentID != "" {
 			label = job.SubagentLabel
 		} else {
 			b.mu.Lock()
-			label = b.subagentTitles[parentToolUseID]
+			label = b.subagentTitles[parentToolCallID]
 			b.mu.Unlock()
 		}
 		if label != "" {
@@ -1179,18 +1091,6 @@ func (b *Bridge) chatIdentity() (string, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.tabID, b.chatID
-}
-
-// metaParentToolUseID pulls the subagent→parent linkage the Claude adapter
-// stamps on tool events. It lives at _meta.claudeCode.parentToolUseId, which may
-// ride on the update object or on the notification params; check both.
-func metaParentToolUseID(metas ...map[string]any) string {
-	for _, meta := range metas {
-		if id := asString(mapFromAny(meta["claudeCode"])["parentToolUseId"]); id != "" {
-			return id
-		}
-	}
-	return ""
 }
 
 // brandForProvider reads the renderer brand from the provider registration.

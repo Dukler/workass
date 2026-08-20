@@ -56,6 +56,15 @@ test('a lost lane-selection reply retries the exact OperationID and clears it on
           currentModelId: null,
           modes: [],
           currentModeId: null,
+          planUsageSupported: true,
+          planUsageResetSupported: true,
+          deliveryCapabilities: {
+            stableInputIdentity: true,
+            liveSteer: true,
+            steerConsumptionReceipt: true,
+            consumptionReceipt: true,
+            turnReadback: true,
+          },
         };
       },
     },
@@ -74,6 +83,10 @@ test('a lost lane-selection reply retries the exact OperationID and clears it on
 
     await subject.ensureSession(owner);
     assert.equal(owner.sessionId, 'session-lane-retry');
+    assert.equal(owner.deliveryCapabilities?.liveSteer, true);
+    assert.equal(owner.deliveryCapabilities?.steerConsumptionReceipt, true);
+    assert.equal(owner.planUsageSupported, true);
+    assert.equal(owner.planUsageResetSupported, true);
     assert.equal(owner._sessionOperationId, undefined);
     assert.equal(calls.length, 2);
     assert.equal(calls[0].operationId, firstOperationId);
@@ -111,6 +124,15 @@ test('missing additive image capability stays unknown through hydration and late
   assert.equal(owner.imageSupport, undefined);
 
   owner.imageSupport = false;
+  owner.deliveryCapabilities = {
+    stableInputIdentity: true,
+    liveSteer: true,
+    steerConsumptionReceipt: true,
+    consumptionReceipt: true,
+    turnReadback: true,
+  };
+  owner.planUsageSupported = true;
+  owner.planUsageResetSupported = true;
   subject.attachJobSession(owner, {
     sessionId: 'session-image-late',
     providerId: 'codex',
@@ -118,6 +140,10 @@ test('missing additive image capability stays unknown through hydration and late
   assert.equal(owner.sessionProviderId, 'codex');
   assert.equal(owner.imageSupport, undefined,
     'a new session attachment must not inherit a stale negative capability');
+  assert.equal(owner.deliveryCapabilities, undefined,
+    'a new session attachment must not inherit stale delivery semantics');
+  assert.equal(owner.planUsageSupported, undefined);
+  assert.equal(owner.planUsageResetSupported, undefined);
 });
 
 test('explicit image rejection from a live matching session remains authoritative', () => {
@@ -150,8 +176,52 @@ test('explicit image rejection from a live matching session remains authoritativ
         modes: [],
         currentModeId: null,
         imageSupport: false,
+        planUsageSupported: true,
+        planUsageResetSupported: false,
+        deliveryCapabilities: {
+          stableInputIdentity: true,
+          liveSteer: false,
+          steerConsumptionReceipt: false,
+          consumptionReceipt: true,
+          turnReadback: false,
+        },
       },
     }],
   });
   assert.equal((restored.chats[0] as Chat).imageSupport, false);
+  assert.deepEqual((restored.chats[0] as Chat).deliveryCapabilities, {
+    stableInputIdentity: true,
+    liveSteer: false,
+    steerConsumptionReceipt: false,
+    consumptionReceipt: true,
+    turnReadback: false,
+  });
+  assert.equal((restored.chats[0] as Chat).planUsageSupported, true);
+  assert.equal((restored.chats[0] as Chat).planUsageResetSupported, false);
+});
+
+test('a session reply without provider identity cannot become a chat attachment', async () => {
+  const previousWindow = (globalThis as any).window;
+  (globalThis as any).window = {
+    api: {
+      appChatNewSession: async () => ({
+        sessionId: 'identity-missing-session', cwd: '/tmp/workass-lane-retry',
+        models: [], currentModelId: null, modes: [], currentModeId: null,
+      }),
+    },
+  };
+  try {
+    const subject = new StoreCtor();
+    const owner = chat();
+    subject.state.chats = [owner];
+    subject.state.activeId = owner.id;
+    subject.state.meta = { daemon: true };
+    await subject.ensureSession(owner);
+    assert.equal(owner.sessionId, null);
+    assert.equal(owner.sessionProviderId, undefined);
+    assert.match(String(owner.sessionError), /provider identity/);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
 });

@@ -34,7 +34,7 @@ func TestDaemonMetricsUsesAuthoritativeActorInventory(t *testing.T) {
 	apply(chat.InitializeChat{Presentation: chat.PresentationState{TabID: "metrics-tab"}, OperationID: "metrics-create", Digest: "metrics-create-digest"})
 	apply(chat.SelectLane{Identity: identity, Owner: providercontract.AttachmentOwner{TabID: "metrics-tab"}})
 	apply(chat.LaneOpened{LaneID: identity.ID, Thread: providercontract.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1}, ConnectionGeneration: 1, Context: providercontract.ContextCapabilities{ExactResume: true}})
-	apply(chat.Submit{OperationID: "metrics-turn", Text: "hello", Presentation: providercontract.TurnPresentation{UserMessageID: "metrics-user", AssistantMessageID: "metrics-assistant"}})
+	apply(chat.Submit{OperationID: "metrics-turn", Text: "hello", Presentation: providercontract.TurnPresentation{UserMessageID: "metrics-user", AssistantMessageID: "metrics-assistant", Origin: "human"}})
 	apply(chat.TurnAdmitted{OperationID: "metrics-turn", Accepted: true, Turn: providercontract.TurnRef{OperationID: "metrics-turn", NativeID: "native-turn"}})
 	apply(chat.ProviderEventReceived{ConnectionGeneration: 1, Event: providercontract.Event{
 		Kind:     providercontract.EventThinkingUpdate,

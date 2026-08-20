@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -47,47 +48,65 @@ function applyMacDockIcon({ app, nativeImage, isPackaged, resourcesPath, repoRoo
   return { applied: true, iconPath };
 }
 
-function defaultWindowsShortcutRoots(env) {
-  const roots = [
-    env.USERPROFILE && path.join(env.USERPROFILE, 'Desktop'),
-    env.USERPROFILE && path.join(env.USERPROFILE, 'OneDrive', 'Desktop'),
-    env.PUBLIC && path.join(env.PUBLIC, 'Desktop'),
-    env.APPDATA && path.join(env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
-    (env.ProgramData || env.PROGRAMDATA) && path.join(env.ProgramData || env.PROGRAMDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
-  ].filter(Boolean);
-  return [...new Set(roots.map((root) => path.resolve(root)))];
+const WINDOWS_SHORTCUT_DISCOVERY_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$requestedRoots = @()
+if (-not [string]::IsNullOrWhiteSpace($env:WORKASS_SHORTCUT_ROOTS)) {
+  $requestedRoots = @(ConvertFrom-Json -InputObject $env:WORKASS_SHORTCUT_ROOTS)
 }
-
-function shortcutFiles(roots, maximum = 4096) {
-  const output = [];
-  const pending = roots.map((root) => ({ root, depth: 0 }));
-  let inspected = 0;
-  while (pending.length > 0 && inspected < maximum) {
-    const current = pending.shift();
-    let entries;
-    try { entries = fs.readdirSync(current.root, { withFileTypes: true }); }
-    catch { continue; }
-    for (const entry of entries) {
-      if (inspected >= maximum) break;
-      inspected += 1;
-      const candidate = path.join(current.root, entry.name);
-      if (entry.isDirectory() && current.depth < 8) pending.push({ root: candidate, depth: current.depth + 1 });
-      else if (entry.isFile() && path.extname(entry.name).toLowerCase() === '.lnk') output.push(candidate);
-    }
+$roots = if ($requestedRoots.Count -gt 0) { $requestedRoots } else {
+  @(
+    [Environment]::GetFolderPath('Desktop'),
+    [Environment]::GetFolderPath('CommonDesktopDirectory'),
+    [Environment]::GetFolderPath('Programs'),
+    [Environment]::GetFolderPath('CommonPrograms')
+  )
+}
+$shell = New-Object -ComObject WScript.Shell
+$items = [System.Collections.Generic.List[object]]::new()
+foreach ($root in @($roots | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)) {
+  if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+  foreach ($file in @(Get-ChildItem -LiteralPath $root -Filter '*.lnk' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 4096)) {
+    try {
+      $shortcut = $shell.CreateShortcut($file.FullName)
+      $items.Add([pscustomobject]@{
+        path = $file.FullName
+        targetPath = [string]$shortcut.TargetPath
+        iconLocation = [string]$shortcut.IconLocation
+      })
+    } catch {}
+    if ($items.Count -ge 4096) { break }
   }
-  return output;
+  if ($items.Count -ge 4096) { break }
 }
+ConvertTo-Json -InputObject @($items) -Compress
+`;
 
-function shortcutTargetsExecutable(file, executablePath) {
-  let bytes;
-  try {
-    const stat = fs.statSync(file);
-    if (!stat.isFile() || stat.size < 1 || stat.size > 1024 * 1024) return false;
-    bytes = fs.readFileSync(file);
-  } catch { return false; }
-  const wanted = path.win32.normalize(executablePath).toLowerCase();
-  return [bytes, bytes.subarray(1)].some((candidate) => candidate.toString('utf16le').toLowerCase().includes(wanted)) ||
-    bytes.toString('latin1').replaceAll('/', '\\').toLowerCase().includes(wanted);
+function resolveWindowsShortcutTargets({ roots = null, env = process.env, run = spawnSync } = {}) {
+  const systemRoot = String(env.SystemRoot || env.SYSTEMROOT || env.WINDIR || '');
+  const powershell = systemRoot
+    ? path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    : 'powershell.exe';
+  const result = run(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_SHORTCUT_DISCOVERY_SCRIPT], {
+    windowsHide: true,
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: {
+      ...env,
+      ...(Array.isArray(roots) ? { WORKASS_SHORTCUT_ROOTS: JSON.stringify(roots) } : {}),
+    },
+  });
+  if (result.error || result.status !== 0) return { applied: false, reason: 'shortcut-discovery-failed', shortcuts: [] };
+  let parsed;
+  try { parsed = JSON.parse(String(result.stdout || '[]')); }
+  catch { return { applied: false, reason: 'shortcut-discovery-invalid', shortcuts: [] }; }
+  const items = (Array.isArray(parsed) ? parsed : parsed ? [parsed] : []).slice(0, 4096).map((item) => ({
+    path: String(item?.path || ''),
+    targetPath: String(item?.targetPath || ''),
+    iconLocation: String(item?.iconLocation || ''),
+  })).filter((item) => path.win32.isAbsolute(item.path) && path.win32.isAbsolute(item.targetPath));
+  return { applied: true, shortcuts: items };
 }
 
 function atomicJSON(file, value) {
@@ -107,11 +126,18 @@ const WINDOWS_SHORTCUT_ICON_SCRIPT = [
   "if ($null -eq $request -or [string]::IsNullOrWhiteSpace([string]$request.iconPath)) { throw 'shortcut icon request is incomplete' }",
   '$iconPath = [string]$request.iconPath',
   '$shell = New-Object -ComObject WScript.Shell',
+  '$results = [System.Collections.Generic.List[object]]::new()',
   'foreach ($shortcutPath in @($request.shortcutPaths)) {',
-  '  $shortcut = $shell.CreateShortcut($shortcutPath)',
-  "  $shortcut.IconLocation = $iconPath + ',0'",
-  '  $shortcut.Save()',
+  '  try {',
+  '    $shortcut = $shell.CreateShortcut($shortcutPath)',
+  "    $shortcut.IconLocation = $iconPath + ',0'",
+  '    $shortcut.Save()',
+  '    $results.Add([pscustomobject]@{ path = [string]$shortcutPath; applied = $true })',
+  '  } catch {',
+  '    $results.Add([pscustomobject]@{ path = [string]$shortcutPath; applied = $false })',
+  '  }',
   '}',
+  'ConvertTo-Json -InputObject @($results) -Compress',
 ].join('; ');
 
 function writeWindowsShortcutIcons({ shortcutPaths, iconPath, env = process.env, run = spawnSync } = {}) {
@@ -127,24 +153,91 @@ function writeWindowsShortcutIcons({ shortcutPaths, iconPath, env = process.env,
     : '';
   if (!powershell || !fs.existsSync(powershell)) return { applied: false, reason: 'shortcut-writer-missing' };
 
+  const succeeded = [];
+  const failed = [];
   // Keep every native command line bounded even if a user has copied the
-  // shortcut into many folders. A failed batch leaves no success marker, so
-  // the idempotent rewrite is retried on the next launch.
+  // shortcut into many folders. Per-link receipts let a protected shared
+  // shortcut fail without blocking a writable desktop shortcut.
   for (let index = 0; index < shortcutPaths.length; index += 64) {
     const batch = shortcutPaths.slice(index, index + 64);
     const result = run(powershell, [
       '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_SHORTCUT_ICON_SCRIPT,
     ], {
       windowsHide: true,
-      stdio: 'ignore',
+      encoding: 'utf8',
+      maxBuffer: 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
       env: {
         ...env,
         WORKASS_SHORTCUT_ICON_REQUEST: JSON.stringify({ iconPath, shortcutPaths: batch }),
       },
     });
-    if (result.error || result.status !== 0) return { applied: false, reason: 'shortcut-write-failed' };
+    if (result.error || result.status !== 0) {
+      failed.push(...batch);
+      continue;
+    }
+    let receipts;
+    try {
+      const parsed = JSON.parse(String(result.stdout || '[]'));
+      receipts = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+    } catch {
+      failed.push(...batch);
+      continue;
+    }
+    const byPath = new Map(receipts.map((receipt) => [path.win32.normalize(String(receipt?.path || '')).toLowerCase(), receipt?.applied === true]));
+    for (const shortcut of batch) {
+      if (byPath.get(path.win32.normalize(shortcut).toLowerCase()) === true) succeeded.push(shortcut);
+      else failed.push(shortcut);
+    }
   }
-  return { applied: true, shortcutCount: shortcutPaths.length };
+  return {
+    applied: succeeded.length > 0,
+    shortcutCount: succeeded.length,
+    shortcutPaths: succeeded,
+    failedShortcutPaths: failed,
+    ...(failed.length > 0 ? { reason: 'shortcut-write-partial' } : {}),
+  };
+}
+
+function shortcutUsesIcon(shortcut, iconPath) {
+  const match = String(shortcut?.iconLocation || '').trim().match(/^(.*),\s*(-?\d+)$/);
+  return Boolean(match) && match[2] === '0' &&
+    path.win32.normalize(match[1].trim()).toLowerCase() === path.win32.normalize(iconPath).toLowerCase();
+}
+
+function materializeWindowsShortcutIcon(sourceIcon, iconDigest, iconCacheDir) {
+  const iconPath = path.join(iconCacheDir, `Workass-${iconDigest.slice(0, 24)}.ico`);
+  fs.mkdirSync(iconCacheDir, { recursive: true, mode: 0o700 });
+  let current = '';
+  try { current = crypto.createHash('sha256').update(fs.readFileSync(iconPath)).digest('hex'); } catch { /* copy below */ }
+  if (current !== iconDigest) {
+    const incoming = `${iconPath}.incoming-${process.pid}`;
+    try {
+      fs.copyFileSync(sourceIcon, incoming);
+      const copied = crypto.createHash('sha256').update(fs.readFileSync(incoming)).digest('hex');
+      if (copied !== iconDigest) throw new Error('shortcut icon copy checksum mismatch');
+      fs.renameSync(incoming, iconPath);
+    } finally {
+      try { fs.rmSync(incoming, { force: true }); } catch { /* rename consumed it */ }
+    }
+  }
+  return iconPath;
+}
+
+function pruneWindowsShortcutIcons(iconCacheDir, currentIcon, shortcuts) {
+  let entries = [];
+  try { entries = fs.readdirSync(iconCacheDir, { withFileTypes: true }); } catch { return; }
+  const referenced = new Set();
+  for (const shortcut of shortcuts || []) {
+    const match = String(shortcut?.iconLocation || '').trim().match(/^(.*),\s*(-?\d+)$/);
+    if (match) referenced.add(path.win32.normalize(match[1].trim()).toLowerCase());
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^Workass-[a-f0-9]{24}\.ico$/i.test(entry.name)) continue;
+    const candidate = path.join(iconCacheDir, entry.name);
+    if (candidate === currentIcon || referenced.has(path.win32.normalize(candidate).toLowerCase())) continue;
+    try { fs.rmSync(candidate, { force: true }); } catch { /* retry next launch */ }
+  }
 }
 
 function refreshWindowsShortcutIcons({
@@ -157,8 +250,11 @@ function refreshWindowsShortcutIcons({
   env = process.env,
   roots = null,
   markerFile = '',
+  iconCacheDir = '',
   cacheToolPath = '',
   run = spawnSync,
+  resolveShortcutTargets = resolveWindowsShortcutTargets,
+  readShortcutTargets = resolveShortcutTargets,
   writeShortcutIcons = writeWindowsShortcutIcons,
   now = () => new Date(),
 } = {}) {
@@ -167,53 +263,109 @@ function refreshWindowsShortcutIcons({
     return { applied: false, reason: 'invalid-runtime' };
   }
   const marker = markerFile || path.join(dataRoot, 'run', 'windows-icon-refresh.json');
-  try {
-    const previous = JSON.parse(fs.readFileSync(marker, 'utf8'));
-    if (previous?.schemaVersion === 1 && previous.appVersion === appVersion &&
-        String(previous.executablePath || '').toLowerCase() === executablePath.toLowerCase()) {
-      return { applied: false, reason: 'current', shortcutCount: Number(previous.shortcutCount || 0) };
-    }
-  } catch { /* first launch of this executable version */ }
-
-  const iconPath = resolveWindowIconPath({
+  const cacheDirectory = iconCacheDir || path.join(path.dirname(marker), 'shortcut-icons');
+  const sourceIconPath = resolveWindowIconPath({
     platform,
     isPackaged,
     resourcesPath,
     repoRoot: '',
   });
-  if (!iconPath) return { applied: false, reason: 'icon-missing', shortcutCount: 0 };
+  if (!sourceIconPath) return { applied: false, reason: 'icon-missing', shortcutCount: 0 };
+
+  let iconDigest;
+  try { iconDigest = crypto.createHash('sha256').update(fs.readFileSync(sourceIconPath)).digest('hex'); }
+  catch { return { applied: false, reason: 'icon-missing', shortcutCount: 0 }; }
+  let iconPath;
+  try {
+    iconPath = materializeWindowsShortcutIcon(
+      sourceIconPath,
+      iconDigest,
+      cacheDirectory,
+    );
+  } catch {
+    return { applied: false, reason: 'icon-cache-copy-failed', shortcutCount: 0 };
+  }
 
   const timestamp = now();
-  const shortcuts = [];
-  for (const shortcut of shortcutFiles(roots || defaultWindowsShortcutRoots(env))) {
-    if (!shortcutTargetsExecutable(shortcut, executablePath)) continue;
-    shortcuts.push(shortcut);
+  const discovery = resolveShortcutTargets({ roots, env, run });
+  if (!discovery?.applied) return { applied: false, reason: discovery?.reason || 'shortcut-discovery-failed', shortcutCount: 0 };
+  const wanted = path.win32.normalize(executablePath).toLowerCase();
+  const matched = new Map();
+  for (const shortcut of discovery.shortcuts) {
+    if (path.win32.normalize(shortcut.targetPath).toLowerCase() !== wanted) continue;
+    const key = path.win32.normalize(shortcut.path).toLowerCase();
+    if (!matched.has(key)) matched.set(key, shortcut);
   }
-  const shortcutWrite = writeShortcutIcons({ shortcutPaths: shortcuts, iconPath, env, run });
-  if (!shortcutWrite?.applied) {
-    return { applied: false, reason: shortcutWrite?.reason || 'shortcut-write-failed', shortcutCount: 0 };
+  const shortcutSet = [...matched.keys()].sort((left, right) => left.localeCompare(right));
+  const shortcuts = shortcutSet.map((key) => matched.get(key).path);
+  if (shortcuts.length === 0) return { applied: false, reason: 'no-shortcuts', shortcutCount: 0 };
+  try {
+    const previous = JSON.parse(fs.readFileSync(marker, 'utf8'));
+    if (previous?.schemaVersion === 2 && previous.appVersion === appVersion &&
+        String(previous.executablePath || '').toLowerCase() === executablePath.toLowerCase() &&
+        previous.iconDigest === iconDigest && JSON.stringify(previous.shortcutSet) === JSON.stringify(shortcutSet) &&
+        shortcutSet.every((key) => shortcutUsesIcon(matched.get(key), iconPath))) {
+      return { applied: false, reason: 'current', shortcutCount: shortcuts.length };
+    }
+  } catch { /* no successful refresh for this exact icon and shortcut set */ }
+  const pendingKeys = shortcutSet.filter((key) => !shortcutUsesIcon(matched.get(key), iconPath));
+  const pendingShortcuts = pendingKeys.map((key) => matched.get(key).path);
+  const shortcutWrite = pendingShortcuts.length > 0
+    ? writeShortcutIcons({ shortcutPaths: pendingShortcuts, iconPath, env, run })
+    : { applied: true, shortcutCount: 0, shortcutPaths: [] };
+  const readback = readShortcutTargets({ roots, env, run });
+  if (!readback?.applied) {
+    return { applied: false, reason: readback?.reason || 'shortcut-readback-failed', shortcutCount: 0 };
   }
-  let shortcutCount = 0;
-  for (const shortcut of shortcuts) {
+  const verified = new Set();
+  for (const shortcut of readback.shortcuts) {
+    const key = path.win32.normalize(shortcut.path).toLowerCase();
+    if (!matched.has(key) || path.win32.normalize(shortcut.targetPath).toLowerCase() !== wanted) continue;
+    if (!shortcutUsesIcon(shortcut, iconPath)) continue;
+    verified.add(key);
+  }
+  const changedKeys = pendingKeys.filter((key) => verified.has(key));
+  if (pendingKeys.length > 0 && changedKeys.length === 0) {
+    return { applied: false, reason: shortcutWrite?.reason || 'shortcut-readback-mismatch', shortcutCount: 0 };
+  }
+  for (const key of changedKeys) {
+    const shortcut = matched.get(key).path;
     try {
       const stat = fs.statSync(shortcut);
       fs.utimesSync(shortcut, stat.atime, timestamp);
-      shortcutCount += 1;
     } catch { /* one inaccessible shared shortcut cannot block app startup */ }
   }
+  const complete = verified.size === shortcutSet.length && shortcutSet.every((shortcut) => verified.has(shortcut));
+  const shortcutCount = complete ? shortcuts.length : changedKeys.length;
 
   const systemRoot = String(env.SystemRoot || env.SYSTEMROOT || env.WINDIR || '');
   const cacheTool = cacheToolPath || (systemRoot ? path.win32.join(systemRoot, 'System32', 'ie4uinit.exe') : '');
-  let cacheRefresh = false;
-  if (cacheTool && fs.existsSync(cacheTool)) {
-    const result = run(cacheTool, ['-show'], { windowsHide: true, stdio: 'ignore' });
-    cacheRefresh = !result.error && result.status === 0;
+  if (!cacheTool || !fs.existsSync(cacheTool)) {
+    return { applied: false, reason: 'icon-cache-notifier-missing', shortcutCount: 0 };
+  }
+  const cacheResult = run(cacheTool, ['-show'], { windowsHide: true, stdio: 'ignore' });
+  if (cacheResult.error || cacheResult.status !== 0) {
+    return { applied: false, reason: 'icon-cache-refresh-failed', shortcutCount: 0 };
+  }
+  const cacheRefresh = true;
+  pruneWindowsShortcutIcons(cacheDirectory, iconPath, readback.shortcuts);
+  if (!complete) {
+    return {
+      applied: false,
+      reason: 'shortcut-write-partial',
+      shortcutCount,
+      failedShortcutCount: shortcutSet.length - verified.size,
+      cacheRefresh,
+    };
   }
   atomicJSON(marker, {
-    schemaVersion: 1,
+    schemaVersion: 2,
     appVersion,
     executablePath,
     iconPath,
+    sourceIconPath,
+    iconDigest,
+    shortcutSet,
     shortcutCount,
     cacheRefresh,
     refreshedAt: timestamp.toISOString(),
@@ -247,6 +399,7 @@ function refreshWindowsShortcutIconsAsync(options = {}, { WorkerClass = Worker }
     appVersion: options.appVersion,
     roots: options.roots,
     markerFile: options.markerFile,
+    iconCacheDir: options.iconCacheDir,
     cacheToolPath: options.cacheToolPath,
   };
   return new Promise((resolve) => {
@@ -284,9 +437,9 @@ module.exports = {
   applyMacDockIcon,
   refreshWindowsShortcutIcons,
   refreshWindowsShortcutIconsAsync,
+  resolveWindowsShortcutTargets,
   resolveAppIconPath,
   resolveWindowFrameOptions,
   resolveWindowIconPath,
-  shortcutTargetsExecutable,
   writeWindowsShortcutIcons,
 };

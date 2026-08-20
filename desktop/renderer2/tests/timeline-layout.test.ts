@@ -223,23 +223,6 @@ test('keeps a subagent header in its ordered tool group while dropping its child
   assert.deepEqual(group.tools.map((event) => event.key), ['header', 'main']);
 });
 
-test('production removes legacy fixture subagent rows while development retains them', () => {
-  const header: ToolEvent = {
-    ...tool('fixture-header', 6), id: 'fixture-parent', toolKind: 'agent',
-    subagentId: 'fixture-parent', subagentHeader: true, subagentModel: 'Mockdeterministic-low',
-  };
-  const main = tool('main', 6);
-  const msg = message('Ready:', 0);
-  msg.events = [header, main];
-
-  const prod = buildTranscriptTimelineSegments(msg, 'prod').find((segment) => 'tools' in segment);
-  const dev = buildTranscriptTimelineSegments(msg, 'dev').find((segment) => 'tools' in segment);
-  assert.ok(prod && 'tools' in prod);
-  assert.ok(dev && 'tools' in dev);
-  assert.deepEqual(prod.tools.map((event) => event.key), ['main']);
-  assert.deepEqual(dev.tools.map((event) => event.key), ['fixture-header', 'main']);
-});
-
 test('tool groups keep a stable key and expose an immutable paint revision across in-place ACP updates', () => {
   const event = tool('stable-tool', 6);
   const msg = message('Ready:', 0);

@@ -67,11 +67,7 @@ type ProviderConfig struct {
 	Detected        bool              `json:"detected,omitempty"`
 	DetectedAt      string            `json:"detectedAt,omitempty"`
 	ResolvedCommand string            `json:"resolvedCommand,omitempty"`
-	// LastUpdateNotice is retained only to read and preserve provider caches
-	// written by older Workass releases. Update availability now has one UI owner:
-	// the replayable sidebar card, never a generic notification/toast.
-	LastUpdateNotice string `json:"lastUpdateNotice,omitempty"`
-	DisabledByUser   bool   `json:"disabledByUser,omitempty"`
+	DisabledByUser  bool              `json:"disabledByUser,omitempty"`
 	// NeedsLogin is durable provider readiness, not Workass-owned credentials.
 	// It suppresses automatic probing/spawning until an explicit re-enable or a
 	// successful explicit provider probe proves the vendor CLI is authenticated.
@@ -352,24 +348,48 @@ type ForkOptions struct {
 
 // SessionInfo mirrors the AcpSessionInfo wire contract.
 type SessionInfo struct {
-	SessionID               string  `json:"sessionId"`
-	CWD                     string  `json:"cwd"`
-	Agent                   string  `json:"agent"`
-	ProviderID              string  `json:"providerId,omitempty"`
-	ProviderName            string  `json:"providerName,omitempty"`
-	ProviderAccountScope    string  `json:"-"`
-	ProviderInstallScope    string  `json:"-"`
-	ProviderRealmVerified   bool    `json:"-"`
-	Models                  []Model `json:"models"`
-	CurrentModelID          *string `json:"currentModelId"`
-	Modes                   []Mode  `json:"modes"`
-	CurrentModeID           *string `json:"currentModeId"`
-	ImageSupport            bool    `json:"imageSupport"`
-	CommandCatalogSupported bool    `json:"-"`
+	SessionID               string               `json:"sessionId"`
+	CWD                     string               `json:"cwd"`
+	Agent                   string               `json:"agent"`
+	ProviderID              string               `json:"providerId,omitempty"`
+	ProviderName            string               `json:"providerName,omitempty"`
+	ProviderAccountScope    string               `json:"-"`
+	ProviderInstallScope    string               `json:"-"`
+	ProviderRealmVerified   bool                 `json:"-"`
+	Models                  []Model              `json:"models"`
+	CurrentModelID          *string              `json:"currentModelId"`
+	Modes                   []Mode               `json:"modes"`
+	CurrentModeID           *string              `json:"currentModeId"`
+	ImageSupport            bool                 `json:"imageSupport"`
+	PlanUsageSupported      bool                 `json:"planUsageSupported"`
+	PlanUsageResetSupported bool                 `json:"planUsageResetSupported"`
+	DeliveryCapabilities    DeliveryCapabilities `json:"deliveryCapabilities"`
+	CommandCatalogSupported bool                 `json:"-"`
 	// CommandCatalog is the additive Claude commands surface
 	// (docs/specs/claude-commands-surface.md). Absent = UNKNOWN (old host or
 	// non-claude provider). The actor persists the normalized snapshot.
 	CommandCatalog *CommandCatalog `json:"commandCatalog,omitempty"`
+}
+
+// DeliveryCapabilities is the additive frozen-wire projection of the provider
+// contract's typed capability snapshot. It stays separate from the durable Go
+// actor shape so renderer JSON naming cannot silently change actor storage.
+type DeliveryCapabilities struct {
+	StableInputIdentity     bool `json:"stableInputIdentity"`
+	LiveSteer               bool `json:"liveSteer"`
+	SteerConsumptionReceipt bool `json:"steerConsumptionReceipt"`
+	ConsumptionReceipt      bool `json:"consumptionReceipt"`
+	TurnReadback            bool `json:"turnReadback"`
+}
+
+func DeliveryCapabilitiesForWire(capabilities providercontract.DeliveryCapabilities) DeliveryCapabilities {
+	return DeliveryCapabilities{
+		StableInputIdentity:     capabilities.StableInputIdentity,
+		LiveSteer:               capabilities.LiveSteer,
+		SteerConsumptionReceipt: capabilities.SteerConsumptionReceipt,
+		ConsumptionReceipt:      capabilities.ConsumptionReceipt,
+		TurnReadback:            capabilities.TurnReadback,
+	}
 }
 
 // CommandCatalog mirrors the commandCatalog wire object of
@@ -439,21 +459,18 @@ type PromptResult struct {
 }
 
 type JobStartOptions struct {
-	Kind              string
-	Key               any
-	Title             string
-	PermissionMode    string
-	ChatID            string
-	TabID             string
-	SessionID         string
-	CWD               string
-	Prompt            string
-	Message           string
-	History           []any
-	HistoryCharBudget int
+	Kind           string
+	Key            any
+	Title          string
+	PermissionMode string
+	ChatID         string
+	TabID          string
+	SessionID      string
+	CWD            string
+	Prompt         string
+	Message        string
 	// InitialContextSeed is actor-authored and appears only on the first real
-	// sampling input of a provider lane that has never consumed input. Legacy
-	// renderer History remains non-authoritative and is never replayed.
+	// sampling input of a provider lane that has never consumed input.
 	InitialContextSeed []providercontract.ContextMessage
 	ContextSize        int
 	Images             []any

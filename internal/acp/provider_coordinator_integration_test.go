@@ -63,7 +63,7 @@ func TestUnifiedCoordinatorRunsExistingACPManagerThroughTypedEvents(t *testing.T
 	if executed, err := coordinator.ExecuteNext(context.Background()); err != nil || !executed {
 		t.Fatalf("execute create: executed=%v err=%v", executed, err)
 	}
-	if err := engine.Apply(chatstate.Submit{OperationID: "stable-operation", Text: "typed event turn"}); err != nil {
+	if err := engine.Apply(chatstate.Submit{OperationID: "stable-operation", Text: "typed event turn", Presentation: providercontract.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if executed, err := coordinator.ExecuteNext(context.Background()); err != nil || !executed {
@@ -133,7 +133,7 @@ func TestClaudeVerifiedLineageCommitsActorBeforeNativeMaterializationAndExactRes
 	if executed, executeErr := coordinator.ExecuteNext(context.Background()); executeErr != nil || executed {
 		t.Fatalf("empty Claude selection started a provider: executed=%v err=%v", executed, executeErr)
 	}
-	if err := engine.Apply(chatstate.Submit{OperationID: "claude-lineage-turn", Text: "[fake:claude-updates] go"}); err != nil {
+	if err := engine.Apply(chatstate.Submit{OperationID: "claude-lineage-turn", Text: "[fake:claude-updates] go", Presentation: providercontract.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if executed, executeErr := coordinator.ExecuteNext(context.Background()); executeErr != nil || !executed {
@@ -191,7 +191,7 @@ func TestClaudeVerifiedLineageCommitsActorBeforeNativeMaterializationAndExactRes
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
-	if err := engine.Apply(chatstate.Submit{OperationID: "after-lineage-resume", Text: "resume exact fork head"}); err != nil {
+	if err := engine.Apply(chatstate.Submit{OperationID: "after-lineage-resume", Text: "resume exact fork head", Presentation: providercontract.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := coordinator.Drain(context.Background()); err != nil {
@@ -300,7 +300,7 @@ func TestProviderLaneCommandCatalogUpdateIsActorDurableBeforePublication(t *test
 	if executed, executeErr := coordinator.ExecuteNext(context.Background()); executeErr != nil || executed {
 		t.Fatalf("empty Claude selection started a provider: executed=%v err=%v", executed, executeErr)
 	}
-	if err := engine.Apply(chatstate.Submit{OperationID: "catalog-update-operation", Text: "push commands please"}); err != nil {
+	if err := engine.Apply(chatstate.Submit{OperationID: "catalog-update-operation", Text: "push commands please", Presentation: providercontract.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
 	if executed, executeErr := coordinator.ExecuteNext(context.Background()); executeErr != nil || !executed {

@@ -3,13 +3,14 @@ import test from 'node:test';
 import {
   compatibleEffortId, compatibleModeId, composeModelSelection,
   imageDraftCapability,
-  modelControlsChangedDuringInit, nextModelControlRevision, providerSwitchRequiresHandover,
+  modelControlsChangedDuringInit, nextModelControlRevision,
   normalizeModelControlMemory, rememberModelControls, rememberedModelControls,
+  permissionIntentForMode,
   restoredProviderBinding,
   restoredControlSelection,
   type ModelControlMemory,
 } from '../src/model-controls.ts';
-import type { ModeOption, ModelOption } from '../src/wire/types.ts';
+import type { ModeOption, ModelOption, PermissionIntent } from '../src/wire/types.ts';
 
 const codexModel: ModelOption = { modelId: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', efforts: ['low', 'high', 'xhigh', 'max'] };
 const claudeModel: ModelOption = { modelId: 'opus[1m]', name: 'Opus 4.8', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] };
@@ -19,14 +20,22 @@ const codexModes: ModeOption[] = [
 const claudeModes: ModeOption[] = [
   { id: 'default', name: 'Default' }, { id: 'plan', name: 'Plan' }, { id: 'bypassPermissions', name: 'Bypass' },
 ];
+const codexIntents = {
+  read: 'read-only', edit: 'agent', full: 'agent-full-access',
+} satisfies Partial<Record<PermissionIntent, string>>;
+const claudeIntents = {
+  read: 'plan', edit: 'default', full: 'bypassPermissions',
+} satisfies Partial<Record<PermissionIntent, string>>;
 
 test('one chat restores the last permission and effort for each provider/model', () => {
   let memory: ModelControlMemory | undefined;
   memory = rememberModelControls(memory, 'codex', codexModel.modelId, { effort: 'xhigh', modeId: 'agent-full-access' });
 
-  // First use of another provider carries the same intent through that
-  // provider's native ids, then the user's later choices are remembered there.
-  assert.equal(compatibleModeId('agent-full-access', claudeModes, 'default'), 'bypassPermissions');
+  // Provider-native ids translate only through typed adapter intent metadata.
+  assert.equal(compatibleModeId(
+    'agent-full-access', claudeModes, 'default',
+    permissionIntentForMode(codexIntents, 'agent-full-access'), claudeIntents,
+  ), 'bypassPermissions');
   assert.equal(compatibleEffortId(undefined, claudeModel, 'xhigh'), 'xhigh');
   memory = rememberModelControls(memory, 'claude', claudeModel.modelId, { effort: 'high', modeId: 'bypassPermissions' });
 
@@ -70,9 +79,16 @@ test('reload uses live ACP controls instead of stale persisted provider controls
   );
 });
 
-test('legacy cross-provider permission ids translate instead of aborting initialization', () => {
-  assert.equal(compatibleModeId('bypassPermissions', codexModes, 'agent'), 'agent-full-access');
-  assert.equal(compatibleModeId('plan', codexModes, 'agent'), 'read-only');
+test('permission translation is driven by typed adapter intent metadata', () => {
+  assert.equal(compatibleModeId(
+    'bypassPermissions', codexModes, 'agent',
+    permissionIntentForMode(claudeIntents, 'bypassPermissions'), codexIntents,
+  ), 'agent-full-access');
+  assert.equal(compatibleModeId(
+    'plan', codexModes, 'agent',
+    permissionIntentForMode(claudeIntents, 'plan'), codexIntents,
+  ), 'read-only');
+  assert.equal(compatibleModeId('agent-full-access', codexModes, 'agent'), 'agent-full-access');
   assert.equal(compatibleModeId('unknown-old-mode', codexModes, 'agent'), 'agent');
 });
 
@@ -86,9 +102,6 @@ test('an explicit picker change wins over an in-flight inherited-provider initia
   const pickedRevision = nextModelControlRevision(initRevision);
   assert.equal(modelControlsChangedDuringInit(initRevision, pickedRevision), true);
   assert.equal(modelControlsChangedDuringInit(pickedRevision, pickedRevision), false);
-  assert.equal(providerSwitchRequiresHandover('claude', 'mock'), true,
-    'provider handover is required even when the inherited session had not returned yet');
-  assert.equal(providerSwitchRequiresHandover('mock', 'mock'), false);
 });
 
 test('a stale provider session never turns unresolved image support into a rejection', () => {

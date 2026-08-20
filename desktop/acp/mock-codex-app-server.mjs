@@ -5,6 +5,8 @@ let requestSequence = 0;
 let turnSequence = 0;
 let activeTurn = null;
 const turnRecords = [];
+const threadMCPConfigs = new Map();
+const threadMCPStartup = new Map();
 const fixtureThreadId = String(process.env.WORKASS_CODEX_FIXTURE_THREAD_ID || 'fixture-codex-thread');
 
 function write(message) { process.stdout.write(`${JSON.stringify(message)}\n`); }
@@ -38,6 +40,32 @@ function completeTurn(turnId, status = 'completed') {
     threadId: fixtureThreadId,
     turn: { id: turnId, status, items: [] },
   });
+}
+
+function startMCPFixtures(threadId, configured) {
+  const startup = new Map();
+  threadMCPStartup.set(threadId, startup);
+  const delayed = Number.parseInt(String(process.env.WORKASS_CODEX_FIXTURE_MCP_DELAY_MS || ''), 10);
+  for (const name of Object.keys(configured || {})) {
+    if (process.env.WORKASS_CODEX_FIXTURE_MCP_FAILED === '1') {
+      startup.set(name, 'failed');
+      notify('mcpServer/startupStatus/updated', {
+        threadId, name, status: 'failed', error: 'fixture MCP startup failed',
+      });
+      continue;
+    }
+    if (Number.isFinite(delayed) && delayed > 0) {
+      startup.set(name, 'starting');
+      notify('mcpServer/startupStatus/updated', { threadId, name, status: 'starting' });
+      setTimeout(() => {
+        startup.set(name, 'ready');
+        notify('mcpServer/startupStatus/updated', { threadId, name, status: 'ready' });
+      }, delayed);
+      continue;
+    }
+    startup.set(name, 'ready');
+    notify('mcpServer/startupStatus/updated', { threadId, name, status: 'ready' });
+  }
 }
 
 async function runTurn(id, params) {
@@ -117,6 +145,8 @@ async function handle(message) {
         return write({ id, error: { code: -32602, message: 'missing CA-aware stdio MCP session configuration' } });
       }
     }
+    threadMCPConfigs.set(fixtureThreadId, params.config?.mcp_servers || {});
+    startMCPFixtures(fixtureThreadId, params.config?.mcp_servers || {});
     return respond(id, {
     thread: { id: fixtureThreadId, preview: '', modelProvider: 'openai', createdAt: 1, updatedAt: 1, status: { type: 'idle' }, path: null, cwd: params.cwd, cliVersion: 'fixture', source: 'appServer', agentNickname: null, agentRole: null, gitInfo: null, name: null, turns: [] },
     model: model.id, reasoningEffort: 'high', modelProvider: 'openai', cwd: params.cwd,
@@ -130,9 +160,28 @@ async function handle(message) {
     if (process.env.WORKASS_CODEX_FIXTURE_MISSING_RESUME === '1') {
       return write({ id, error: { code: -32000, message: `no rollout found for thread id ${params.threadId}` } });
     }
+    threadMCPConfigs.set(params.threadId, params.config?.mcp_servers || {});
+    startMCPFixtures(params.threadId, params.config?.mcp_servers || {});
     return respond(id, {
     thread: { id: params.threadId, turns: [] }, model: model.id, reasoningEffort: 'high', modelProvider: 'openai', cwd: params.cwd,
     approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'workspaceWrite', writableRoots: [], networkAccess: false },
+    });
+  }
+  if (method === 'mcpServerStatus/list') {
+    const configured = threadMCPConfigs.get(params.threadId) || {};
+    const startup = threadMCPStartup.get(params.threadId) || new Map();
+    const empty = process.env.WORKASS_CODEX_FIXTURE_MCP_EMPTY_CATALOG === '1';
+    return respond(id, {
+      data: Object.keys(configured).map((name) => ({
+        name,
+        authStatus: 'unsupported',
+        resources: [],
+        resourceTemplates: [],
+        tools: empty || startup.get(name) !== 'ready' ? {} : {
+          fixture_tool: { name: 'fixture_tool', description: 'Fixture tool', inputSchema: { type: 'object' } },
+        },
+      })),
+      nextCursor: null,
     });
   }
   if (method === 'turn/start') return void runTurn(id, params).catch((error) => write({ id, error: { code: -32603, message: error.message } }));

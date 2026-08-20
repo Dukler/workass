@@ -14,6 +14,10 @@ import (
 
 type browserRoundTripFunc func(*http.Request) (*http.Response, error)
 
+const browserTestInstanceID = "0123456789abcdef0123456789abcdef"
+
+const browserTestDescriptor = `{"version":2,"url":"http://127.0.0.1:43123/rpc","token":"test-control-value","pid":123,"instanceId":"` + browserTestInstanceID + `"}`
+
 func (fn browserRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
 }
@@ -39,7 +43,7 @@ func TestDefaultBrowserControlFileEnvironmentOverrideWins(t *testing.T) {
 func TestBrowserMCPListsToolsAndRoutesProviderNeutralCalls(t *testing.T) {
 	dir := t.TempDir()
 	controlFile := filepath.Join(dir, "browser-control.json")
-	if err := os.WriteFile(controlFile, []byte(`{"version":1,"url":"http://workass-browser.invalid/rpc","token":"test-control-value"}`), 0o600); err != nil {
+	if err := os.WriteFile(controlFile, []byte(browserTestDescriptor), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	requests := []map[string]any{}
@@ -50,6 +54,9 @@ func TestBrowserMCPListsToolsAndRoutesProviderNeutralCalls(t *testing.T) {
 		var payload map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
+		}
+		if payload["instanceId"] != browserTestInstanceID {
+			t.Fatalf("browser control instance = %#v", payload["instanceId"])
 		}
 		requests = append(requests, payload)
 		result := map[string]any{"ok": true, "method": payload["method"]}
@@ -97,13 +104,16 @@ func TestBrowserMCPListsToolsAndRoutesProviderNeutralCalls(t *testing.T) {
 func TestBrowserMCPMutationCarriesOperationIdentityAndDigest(t *testing.T) {
 	dir := t.TempDir()
 	controlFile := filepath.Join(dir, "browser-control.json")
-	if err := os.WriteFile(controlFile, []byte(`{"version":1,"url":"http://workass-browser.invalid/rpc","token":"test-control-value"}`), 0o600); err != nil {
+	if err := os.WriteFile(controlFile, []byte(browserTestDescriptor), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var payload map[string]any
 	client := &http.Client{Transport: browserRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
+		}
+		if payload["instanceId"] != browserTestInstanceID {
+			t.Fatalf("browser control instance = %#v", payload["instanceId"])
 		}
 		body, _ := json.Marshal(map[string]any{
 			"id": payload["id"], "operationId": payload["operationId"], "requestDigest": payload["requestDigest"],

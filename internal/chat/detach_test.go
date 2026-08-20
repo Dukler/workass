@@ -36,7 +36,7 @@ func TestDetachLaneJournalsExactTargetAndSettlesReceiptOnce(t *testing.T) {
 	state, identity, owner, thread, connectionID := newDetachTestState(t)
 	operationID := DetachOperationID(state.ChatID, identity.ID, connectionID, 7)
 
-	state, effects, err := Reduce(state, DetachLane{
+	state, effects, err := Reduce(state, DetachTarget{
 		OperationID: operationID, LaneID: identity.ID, Owner: owner,
 		ConnectionID: connectionID, ConnectionGeneration: 7,
 	})
@@ -91,7 +91,7 @@ func TestDetachLaneRecoveryNeverRetriesChangedAttachment(t *testing.T) {
 	state, identity, owner, _, connectionID := newDetachTestState(t)
 	operationID := DetachOperationID(state.ChatID, identity.ID, connectionID, 7)
 	var err error
-	state, _, err = Reduce(state, DetachLane{
+	state, _, err = Reduce(state, DetachTarget{
 		OperationID: operationID, LaneID: identity.ID, Owner: owner,
 		ConnectionID: connectionID, ConnectionGeneration: 7,
 	})

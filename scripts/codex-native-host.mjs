@@ -18,6 +18,7 @@ let app;
 let initializePromise;
 let providerRealm;
 let modelCatalog = [];
+const MAX_MCP_STARTUP_STATES = 512;
 
 function safeErrorText(value) {
   return String(value?.message || value || 'Codex request failed')
@@ -69,6 +70,9 @@ class AppServerPeer {
   constructor(executable, args) {
     this.sequence = 0;
     this.pending = new Map();
+    this.mcpStartup = new Map();
+    this.mcpStartupWaiters = new Set();
+    this.mcpStartupRevision = 0;
     this.closing = false;
     this.child = spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
     readline.createInterface({ input: this.child.stdout }).on('line', (line) => this.accept(line));
@@ -104,7 +108,12 @@ class AppServerPeer {
       );
       return;
     }
-    if (message.method) void handleAppNotification(message.method, message.params || {});
+    if (message.method) {
+      if (message.method === 'mcpServer/startupStatus/updated') {
+        this.recordMCPStartupStatus(message.params || {});
+      }
+      void handleAppNotification(message.method, message.params || {});
+    }
   }
 
   request(method, params = {}) {
@@ -117,6 +126,49 @@ class AppServerPeer {
   }
 
   notify(method, params) { this.write({ method, ...(params === undefined ? {} : { params }) }); }
+  recordMCPStartupStatus(params) {
+    const name = String(params?.name || '').trim();
+    if (!name) return;
+    const threadId = String(params?.threadId || '').trim();
+    const key = `${threadId}\0${name}`;
+    this.mcpStartup.delete(key);
+    this.mcpStartup.set(key, {
+      revision: ++this.mcpStartupRevision,
+      status: String(params?.status || '').trim(),
+      error: params?.error ? safeErrorText(params.error) : '',
+    });
+    while (this.mcpStartup.size > MAX_MCP_STARTUP_STATES) {
+      this.mcpStartup.delete(this.mcpStartup.keys().next().value);
+    }
+    for (const waiter of [...this.mcpStartupWaiters]) {
+      if (!waiter.names.has(name) || (threadId && threadId !== waiter.threadId)) continue;
+      this.mcpStartupWaiters.delete(waiter);
+      clearTimeout(waiter.timer);
+      waiter.resolve();
+    }
+  }
+  mcpStartupStatus(threadId, name, afterRevision) {
+    const normalizedName = String(name || '').trim();
+    const candidates = [
+      this.mcpStartup.get(`${String(threadId || '').trim()}\0${normalizedName}`),
+      this.mcpStartup.get(`\0${normalizedName}`),
+    ].filter((status) => status && status.revision > afterRevision);
+    return candidates.reduce((latest, status) => (
+      !latest || status.revision > latest.revision ? status : latest
+    ), null);
+  }
+  waitForMCPStartupChange(threadId, names, waitMs) {
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        threadId: String(threadId || '').trim(), names: new Set(names), resolve, reject, timer: null,
+      };
+      waiter.timer = setTimeout(() => {
+        this.mcpStartupWaiters.delete(waiter);
+        resolve();
+      }, waitMs);
+      this.mcpStartupWaiters.add(waiter);
+    });
+  }
   write(message) {
     if (!this.child.stdin.writable) throw new Error('codex app-server stdin is closed');
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
@@ -124,6 +176,11 @@ class AppServerPeer {
   terminate(error) {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    for (const waiter of this.mcpStartupWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    this.mcpStartupWaiters.clear();
   }
   close() {
     this.closing = true;
@@ -495,10 +552,64 @@ function sessionConfig(cwd, mcpServers) {
   };
 }
 
+async function requireMCPToolCatalogs(threadId, config, afterStartupRevision) {
+  const required = new Set(Object.keys(config?.mcp_servers || {}));
+  if (!required.size) return;
+  const configuredTimeout = Number.parseInt(String(process.env.WORKASS_CODEX_MCP_STARTUP_TIMEOUT_MS || ''), 10);
+  const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 15_000;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const found = new Set();
+    const cursors = new Set();
+    let cursor = null;
+    do {
+      const response = await app.request('mcpServerStatus/list', {
+        threadId,
+        detail: 'toolsAndAuthOnly',
+        cursor,
+        limit: null,
+      });
+      for (const row of Array.isArray(response?.data) ? response.data : []) {
+        const name = String(row?.name || '');
+        if (!required.has(name)) continue;
+        const tools = row?.tools && typeof row.tools === 'object' && !Array.isArray(row.tools)
+          ? Object.keys(row.tools)
+          : [];
+        if (tools.length) found.add(name);
+      }
+      cursor = response?.nextCursor == null ? null : String(response.nextCursor);
+      if (cursor) {
+        if (cursors.has(cursor)) throw new Error('Codex MCP server status pagination repeated a cursor');
+        cursors.add(cursor);
+      }
+    } while (cursor && found.size < required.size);
+
+    const missing = [...required].filter((name) => !found.has(name));
+    if (!missing.length) return;
+    for (const name of missing) {
+      const startup = app.mcpStartupStatus(threadId, name, afterStartupRevision);
+      if (startup?.status === 'failed' || startup?.status === 'cancelled') {
+        const reason = startup.error ? `: ${startup.error}` : '';
+        throw new Error(`Codex MCP server ${name} startup ${startup.status}${reason}`);
+      }
+      if (startup?.status === 'ready') {
+        throw new Error(`Codex MCP tool catalog is unavailable for: ${name}`);
+      }
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error(`Codex MCP tool catalog is unavailable for: ${missing.join(', ')}`);
+    }
+    await app.waitForMCPStartupChange(threadId, missing, Math.min(100, remaining));
+  }
+}
+
 async function openSession(params, resume) {
   await ensureInitialized();
   const cwd = String(params.cwd || process.cwd());
-  const common = { cwd, config: sessionConfig(cwd, params.mcpServers) };
+  const config = sessionConfig(cwd, params.mcpServers);
+  const common = { cwd, config };
+  const mcpStartupRevision = app.mcpStartupRevision;
   const requestedThreadId = String(params.sessionId || '').trim();
   if (resume && !requestedThreadId) {
     throw new Error('Codex session/resume requires the exact provider thread id');
@@ -519,6 +630,10 @@ async function openSession(params, resume) {
   if (resume && threadId !== requestedThreadId) {
     throw new Error('Codex session/resume returned a different provider thread id');
   }
+  // A spawned stdio child is not proof that Codex discovered any tools from it.
+  // Refuse to publish the provider session until the official app-server status
+  // surface proves every configured MCP server has a nonempty tool catalog.
+  await requireMCPToolCatalogs(threadId, config, mcpStartupRevision);
   let session = sessions.get(threadId);
   if (!session) {
     const defaultModel = modelCatalog.find((model) => model.isDefault) || modelCatalog[0];

@@ -14,7 +14,7 @@ import (
 	"workass/internal/machineid"
 )
 
-// TestRealCopiedStateStartup is an opt-in migration canary for a disposable
+// TestRealCopiedStateStartup is an opt-in current-schema startup canary for a disposable
 // copy of a real profile. It refuses known live profile roots and never starts
 // providers; success means actor cutover and full projection completed from
 // the copied bytes.

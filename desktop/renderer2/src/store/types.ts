@@ -1,4 +1,4 @@
-import type { ModelOption, ModeOption, ProcessSummary, LanDevice, AccessRequest, DaemonConfig, CatalogGroup, ChatCheckpoint, ChatEnvRepo, ChatEnvPayload, ChatDiffResult, SlashCommand, CommandCatalog, PlanUsageSnapshot, PermissionQuestion, ProviderRecord, ProviderUpdate, ProviderUpdateProgress, AppUpdate, SpawnedWorkItem } from '../wire/types';
+import type { ProcessSummary, LanDevice, AccessRequest, DaemonConfig, CatalogGroup, ChatCheckpoint, ChatEnvRepo, ChatEnvPayload, ChatDiffResult, CommandCatalog, PlanUsageSnapshot, PermissionQuestion, ProviderRecord, ProviderUpdate, ProviderUpdateProgress, AppUpdate, SpawnedWorkItem, DeliveryCapabilities } from '../wire/types';
 import type { ModelFavorite } from '../model-favorites';
 import type { ConnStatus } from '../wire/connection';
 import type { ModelControlMemory } from '../model-controls';
@@ -201,13 +201,16 @@ export interface Chat {
   // THIS chat. Switching away and back restores the same setup without leaking
   // another tab's controls or sending an id from the previous provider.
   modelControls?: ModelControlMemory;
-  // R6: image attach cap + agent-advertised slash commands, learned from the
-  // session info (both absent on the mock → feature-detected off).
+  // Image attach capability learned from the exact attached lane.
   imageSupport?: boolean;
-  commands?: SlashCommand[];
-  // Rich provider catalog (commands + agents + styles). Mirrors `commands`'
-  // lifecycle exactly: learned from session info, cleared with the session,
-  // never persisted beyond it.
+  // Delivery semantics belong to the exact attached/running lane, not to the
+  // staged provider picker. They are transient and replaced or cleared with
+  // that attachment so steering can never inherit behavior from another lane.
+  deliveryCapabilities?: DeliveryCapabilities;
+  planUsageSupported?: boolean;
+  planUsageResetSupported?: boolean;
+  // Provider catalog (commands + agents + styles), learned from the exact
+  // attachment and never persisted beyond it.
   commandCatalog?: CommandCatalog;
   // The daemon could not apply this chat's configured model/mode at session
   // startup (agent:apply action session-controls-skipped). The receipt row
@@ -316,10 +319,7 @@ export interface AppState {
   activeId: string | null;
   seq: number;
   globalRevision: number;
-  models: ModelOption[];
-  modes: ModeOption[];
-  // Provider-grouped catalog (P4). Empty against an older daemon → the composer
-  // falls back to the flat model list.
+  // Authoritative provider-grouped catalog.
   groups: CatalogGroup[];
   providers: ProviderRecord[];
   // User-authored per-model scores (Settings · Modelos). A durable PREFERENCE —

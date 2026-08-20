@@ -7,16 +7,13 @@ import (
 	"time"
 )
 
-// Harness-native turn evidence.
+// Provider harness turn evidence.
 //
 // Until v3 the daemon answered "is this request finished or merely paused?"
 // from its own registry, and could not see a turn the harness started on its
-// own at all — the model's prose for such a turn was discarded at
-// bridge.go:700-717 because no job owned the session. The Claude Agent SDK
-// already publishes both facts. Its Stop hook carries the background work still
-// in flight and the wakes scheduled to re-invoke the session, documented in the
-// vendored typings as: "Lets hooks distinguish 'session is done' from 'session
-// is paused waiting for background work to wake it'."
+// own at all because no job owned the session. A registered native harness may
+// publish both facts: its stop hook carries background work still in flight and
+// wakes scheduled to re-invoke the session.
 //
 // This file holds what the host reports, keyed by session, and answers the two
 // questions the clamp asks of it. It stores facts, never verdicts.
@@ -179,39 +176,6 @@ func (s *harnessTurnStore) clearStarted(sessionID string) {
 	delete(s.started, sessionID)
 }
 
-func harnessEvidenceFromUpdate(update map[string]any) *harnessTurnEvidence {
-	evidence := &harnessTurnEvidence{
-		PromptID:       asString(update["promptId"]),
-		TerminalReason: asString(update["terminalReason"]),
-		StopReason:     asString(update["stopReason"]),
-		OriginKind:     asString(update["originKind"]),
-		HookEvidence:   asBool(update["harnessEvidence"]),
-		At:             time.Now(),
-	}
-	if raw, ok := update["backgroundTasks"].([]any); ok {
-		evidence.TasksKnown = true
-		for _, item := range raw {
-			task := mapFromAny(item)
-			evidence.Tasks = append(evidence.Tasks, harnessBackgroundTask{
-				ID:     asString(task["id"]),
-				Type:   asString(task["type"]),
-				Status: asString(task["status"]),
-			})
-		}
-	}
-	if raw, ok := update["sessionCrons"].([]any); ok {
-		evidence.CronsKnown = true
-		for _, item := range raw {
-			cron := mapFromAny(item)
-			evidence.Crons = append(evidence.Crons, harnessSessionCron{
-				Schedule:  asString(cron["schedule"]),
-				Recurring: asBool(cron["recurring"]),
-			})
-		}
-	}
-	return evidence
-}
-
 // parkEvidence answers whether the harness says something will wake this chat.
 //
 // Two filters apply before a task counts (gate amendment D9). A task whose
@@ -278,9 +242,8 @@ func (m *Manager) harnessParkEvidence(tabID, chatID string, evidence, prior *har
 	return true, "waiting on " + strings.Join(parts, " and ")
 }
 
-// harnessTaskIsService consults the registry the SDK's own task lifecycle
-// already mirrors into (observeClaudeSpawnedWork, spawned_work.go:532), where
-// the service classifier lives.
+// harnessTaskIsService consults the registry the provider's typed task
+// lifecycle already mirrors into, where the service classifier lives.
 func (m *Manager) harnessTaskIsService(tabID, chatID string, task harnessBackgroundTask) bool {
 	if strings.TrimSpace(task.ID) == "" {
 		return false
@@ -291,11 +254,6 @@ func (m *Manager) harnessTaskIsService(tabID, chatID string, task harnessBackgro
 	return rec != nil && isServiceSpawnedWork(rec.Item)
 }
 
-func asBool(v any) bool {
-	b, ok := v.(bool)
-	return ok && b
-}
-
 func sortStrings(values []string) {
 	for i := 1; i < len(values); i++ {
 		for j := i; j > 0 && values[j] < values[j-1]; j-- {
@@ -304,14 +262,13 @@ func sortStrings(values []string) {
 	}
 }
 
-// observeClaudeTurn is the daemon's entry point for the host's turn-lifecycle
-// updates. It never blocks the bridge reader: everything it does is bounded and
-// synchronous, and the adopted turn is ended by a later update, not by waiting.
-func (m *Manager) observeClaudeTurn(bridge *Bridge, tabID, chatID, sessionID string, update map[string]any) {
-	switch asString(update["phase"]) {
+// observeHarnessTurn is the daemon's provider-neutral entry point for a
+// registered harness lifecycle update. It never blocks the bridge reader.
+func (m *Manager) observeHarnessTurn(bridge *Bridge, tabID, chatID, sessionID string, update providerHarnessTurnUpdate) {
+	switch update.Phase {
 	case harnessTurnPhaseStarted:
-		promptID := asString(update["promptId"])
-		if asBool(update["humanAuthored"]) {
+		promptID := update.PromptID
+		if update.HumanAuthored {
 			// The user's own turn already has a job; nothing to adopt.
 			m.harnessTurns.clearStarted(sessionID)
 			return
@@ -322,7 +279,10 @@ func (m *Manager) observeClaudeTurn(bridge *Bridge, tabID, chatID, sessionID str
 		m.adoptHarnessTurn(bridge, tabID, chatID, sessionID, promptID)
 	case harnessTurnPhaseEnded:
 		prior := m.harnessTurns.get(sessionID)
-		evidence := harnessEvidenceFromUpdate(update)
+		evidence := update.Evidence
+		if evidence == nil {
+			evidence = &harnessTurnEvidence{PromptID: update.PromptID, At: time.Now()}
+		}
 		evidence.TabID, evidence.ChatID = tabID, chatID
 		evidence.Parked, evidence.ParkNote = m.harnessParkEvidence(tabID, chatID, evidence, prior)
 		m.harnessTurns.record(sessionID, evidence)

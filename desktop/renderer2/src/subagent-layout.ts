@@ -1,6 +1,5 @@
 import type { ToolEvent } from './store/types';
 import { toolPresentation, type ToolPresentation } from './tool-names.ts';
-import { isUserFacingSubagentIdentity, type WorkassRuntimeProfile } from './model-catalog.ts';
 
 // The spawning header of a subagent (rendered inline as one "Subagente · …" task
 // row, folded into the normal tool group). Workass stamps subagentHeader/toolKind
@@ -12,11 +11,6 @@ export function isSubagentHeader(t: ToolEvent): boolean {
 // These are dropped from the transcript and shown only in the Turnos rail.
 export function isSubagentChild(t: ToolEvent): boolean {
   return !!t.subagentId && t.subagentHeader !== true && t.subagentId !== t.id;
-}
-
-export function isUserFacingSubagentTool(t: ToolEvent, profile: WorkassRuntimeProfile): boolean {
-  if (!isSubagentHeader(t) && !isSubagentChild(t)) return true;
-  return isUserFacingSubagentIdentity(t.subagentProvider, t.subagentModel, profile);
 }
 
 export interface SubagentNode {
@@ -59,8 +53,7 @@ export function subagentActivity(node: SubagentNode): ToolPresentation {
 // Reconstruct one node per explicitly-attributed child. Synthetic Workass
 // headers use id===subagentId; native Claude Task headers are discovered when
 // leaf calls reference their tool-call id. Main-thread tools stay separate.
-export function extractSubagents(tools: ToolEvent[], profile: WorkassRuntimeProfile = 'dev'): { nodes: SubagentNode[]; mainTools: ToolEvent[]; hasSubagents: boolean } {
-  tools = tools.filter((tool) => isUserFacingSubagentTool(tool, profile));
+export function extractSubagents(tools: ToolEvent[]): { nodes: SubagentNode[]; mainTools: ToolEvent[]; hasSubagents: boolean } {
   const parentIds = new Set<string>();
   for (const tool of tools) if (tool.subagentId) parentIds.add(tool.subagentId);
   const order: string[] = [];
@@ -99,16 +92,4 @@ export function extractSubagents(tools: ToolEvent[], profile: WorkassRuntimeProf
     }
   }
   return { nodes: order.map((id) => byId.get(id)!), mainTools, hasSubagents: order.length > 0 };
-}
-
-export type SettledSubagentState = 'done' | 'failed' | 'cancelled';
-
-export function summarizeSettledSubagents(states: SettledSubagentState[]) {
-  const failedCount = states.filter((state) => state === 'failed').length;
-  const cancelledCount = states.filter((state) => state === 'cancelled').length;
-  return {
-    failedCount,
-    cancelledCount,
-    status: failedCount > 0 ? 'failed' as const : cancelledCount > 0 ? 'cancelled' as const : 'done' as const,
-  };
 }

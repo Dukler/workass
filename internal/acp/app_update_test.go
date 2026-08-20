@@ -1,23 +1,18 @@
 package acp
 
-import (
-	"testing"
-	"time"
-)
+import "testing"
 
-func updateTestManager(t *testing.T) *Manager {
-	t.Helper()
-	m := NewManager(Options{
-		StateDir:               t.TempDir(),
-		RSSSampleInterval:      time.Hour,
-		ProviderUpdateInterval: time.Hour,
-	})
-	t.Cleanup(func() { m.Reset() })
-	return m
+func updateTestManager() *Manager {
+	return &Manager{
+		jobs:               make(map[string]*Job),
+		subagents:          make(map[string]*SubagentRun),
+		spawnedWork:        make(map[string]*spawnedWorkRecord),
+		providerUpdateRuns: make(map[string]*providerUpdateRun),
+	}
 }
 
 func TestBeginUpdateDrainLatchesOnlyWhenQuiescent(t *testing.T) {
-	m := updateTestManager(t)
+	m := updateTestManager()
 	result := m.BeginUpdateDrain()
 	if !result.Ready {
 		t.Fatalf("quiescent readiness = %#v", result)
@@ -28,7 +23,7 @@ func TestBeginUpdateDrainLatchesOnlyWhenQuiescent(t *testing.T) {
 }
 
 func TestBusyUpdateCheckReopensWorkAdmission(t *testing.T) {
-	m := updateTestManager(t)
+	m := updateTestManager()
 	m.updateGateMu.Lock()
 	m.updateAdmissions = 1
 	m.updateGateMu.Unlock()

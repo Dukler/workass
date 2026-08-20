@@ -7,10 +7,9 @@ import { has } from '../wire/api';
 import { IcPlus, IcMic, IcGauge, IcStar } from '../icons';
 import { modelContextQualifier, resolveModelSelection } from '../model-selection';
 import { favoriteCatalogModels, isModelFavorite } from '../model-favorites';
-import { userFacingCatalogGroups, userFacingFlatModels, type WorkassRuntimeProfile } from '../model-catalog';
 import { attachmentWorkBoundary, clipboardImageFiles, createDraftImages, draftImagePayloads, withoutDraftImages } from '../image-drafts';
 import { QueueList } from './QueueList';
-import { steeringBehavior } from '../steering';
+import { liveSteeringSupported } from '../steering';
 import { composerSubmitIntent, type ComposerSubmitIntent } from '../composer-submit';
 import { insertAtCaret, startRecording, transcribe, voiceStatus, type Recorder, type VoiceState } from '../voice';
 import { clampPlanUsagePercent, formatCountdown, formatPlanUsagePercent, isExpiredPlanReset, isHotRateLimit, isLiveReset, rateLimitLabel, relativePlanReset } from '../plan-usage';
@@ -209,9 +208,8 @@ function Popover({ items, current, onPick, onClose, cap }: {
 // Grouped model picker (R1): one scrollable list, a small provider-section
 // divider per group, pick anything. Selecting binds the chat to the group's
 // provider (at creation) and sets the model.
-function GroupedModelPopover({ groups, profile, currentProvider, current, favorites, onPick, onToggleFavorite, onClose }: {
+function GroupedModelPopover({ groups, currentProvider, current, favorites, onPick, onToggleFavorite, onClose }: {
   groups: CatalogGroup[]; currentProvider: string | null; current: string | null; favorites: readonly ModelFavorite[];
-  profile: WorkassRuntimeProfile;
   onPick: (providerId: string, modelId: string) => void;
   onToggleFavorite: (providerId: string, modelId: string) => void;
   onClose: () => void;
@@ -222,8 +220,8 @@ function GroupedModelPopover({ groups, profile, currentProvider, current, favori
     document.addEventListener('mousedown', h);
     return () => document.removeEventListener('mousedown', h);
   }, [onClose]);
-  const usable = userFacingCatalogGroups(groups, profile);
-  const favoriteModels = favoriteCatalogModels(usable, favorites, profile);
+  const usable = groups;
+  const favoriteModels = favoriteCatalogModels(usable, favorites);
   const modelRow = (providerId: string, providerName: string, model: { modelId: string; name: string }, showProvider = false) => {
     const active = providerId === currentProvider && model.modelId === current;
     const favorite = isModelFavorite(favorites, providerId, model.modelId);
@@ -271,7 +269,7 @@ function GroupedModelPopover({ groups, profile, currentProvider, current, favori
 function resolveModelName(app: AppState, modelId: string | null | undefined): string | null {
   if (!modelId) return null;
   for (const g of app.groups) { const m = g.models.find((x) => x.modelId === modelId); if (m) return m.name; }
-  return app.models.find((m) => m.modelId === modelId)?.name ?? null;
+  return null;
 }
 // ---- plan-usage rendering (provider-aware; WIRE-CONTRACT chat:plan-usage) ----
 // Billed cost: "$0.06 USD" style — 2–4 decimals, trailing zeros beyond 2 trimmed.
@@ -516,10 +514,9 @@ export function Composer({ chat }: { chat: Chat | null }) {
   const canChooseImage = !!chat && imageCapability !== 'unsupported';
   const atts = chat?.draftImages ?? [];
   const visibleAtts = withoutDraftImages(atts, transferredSteerImageIDs);
-  // Rich per-session catalog when the provider reports one; the flat
-  // session `commands` list stays as the fallback for older daemons.
+  // Commands and agents come only from the typed attached-lane catalog.
   const catalog = chat?.commandCatalog;
-  const catalogCommands: CatalogCommand[] = catalog?.commands?.length ? catalog.commands : (chat?.commands ?? []);
+  const catalogCommands: CatalogCommand[] = catalog?.commands ?? [];
   const catalogAgents = catalog?.agents ?? [];
   // Triggers (approved composer-skills mock): "/" at draft start opens
   // Comandos; "@" at a word boundary opens Agentes. Esc latches per token —
@@ -573,26 +570,21 @@ export function Composer({ chat }: { chat: Chat | null }) {
   }
 
   const running = store.isChatRunning(chat?.id ?? null);
-  const grouped = app.groups.length > 0;
   // The persisted id may be suffixed (`base[effort]`). Split it so the picker shows
   // the base name/selection and the effort control reflects the chosen stop.
-  const modelSelection = resolveModelSelection(app.groups, app.models, chat?.currentModelId);
+  const providerGroup = app.groups.find((group) => group.providerId === chat?.providerId);
+  const modelSelection = resolveModelSelection(providerGroup ? [providerGroup] : [], [], chat?.currentModelId);
   const { base: modelBase, effort: modelEffort } = modelSelection;
-  const modelName = modelSelection.model?.name ?? resolveModelName(app, modelBase) ?? app.models[0]?.name ?? 'Modelo';
+  const modelName = modelSelection.model?.name ?? resolveModelName(app, modelBase) ?? providerGroup?.models[0]?.name ?? 'Modelo';
   const efforts = modelSelection.model?.efforts ?? [];
   const curEffort = efforts.length
     ? (modelEffort && efforts.includes(modelEffort) ? modelEffort : defaultEffort(efforts))
     : null;
-  // Permission modes are provider-specific. The old global list represents
-  // only the default provider and becomes empty or wrong after a
-  // reconnect/provider switch, which made this control look dead.
-  const providerModes = app.groups.find((g) => g.providerId === chat?.providerId)?.modes;
-  const modes = providerModes?.length ? providerModes : app.modes;
+  const modes = providerGroup?.modes ?? [];
   const modeId = chat?.currentModeId ?? modes[0]?.id ?? null;
   const modeName = modes.find((m) => m.id === modeId)?.name ?? '';
   const permLabel = (modeId && MODE_LABEL[modeId]) || (modeName ? modeName : 'Preguntar permisos');
-  const steerAvail = has('appChatSteer');
-  const steerBehavior = steeringBehavior(chat?.providerId);
+  const steerAvail = has('appChatSteer') && liveSteeringSupported(chat?.deliveryCapabilities);
 
   function autosize() {
     const el = taRef.current; if (!el) return;
@@ -790,7 +782,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
     : pausedQueue
       ? 'Continuar mensajes en cola'
     : steerMode
-      ? (steerAvail || steerBehavior !== 'capability'
+      ? (steerAvail
         ? 'Dirigir el turno en curso · ⌘Enter'
         : 'Encolar · se envía al terminar el turno')
       : running ? 'Detener' : 'Enviar';
@@ -897,15 +889,11 @@ export function Composer({ chat }: { chat: Chat | null }) {
         <div className="selectorcluster">
           <div className="selectoranchor">
             <button className="modelsel" onClick={() => setModelOpen((v) => !v)}>{modelName}</button>
-            {modelOpen && (grouped
-              ? <GroupedModelPopover groups={app.groups} profile={app.meta?.profile ?? 'prod'} currentProvider={chat?.providerId ?? null} current={modelBase || null}
-                  favorites={app.modelFavorites}
-                  onPick={(providerId, modelId) => chat && void store.pickModel(chat.id, providerId, modelId)}
-                  onToggleFavorite={(providerId, modelId) => store.toggleModelFavorite(providerId, modelId)}
-                  onClose={() => setModelOpen(false)} />
-              : <Popover cap="Modelo" items={userFacingFlatModels(app.models, app.meta?.profile ?? 'prod').map((m) => ({ id: m.modelId, name: m.name }))}
-                  current={modelBase || null} onPick={(id) => chat && void store.setModel(chat.id, id)} onClose={() => setModelOpen(false)} />
-            )}
+            {modelOpen && <GroupedModelPopover groups={app.groups} currentProvider={chat?.providerId ?? null} current={modelBase || null}
+                favorites={app.modelFavorites}
+                onPick={(providerId, modelId) => chat && void store.pickModel(chat.id, providerId, modelId)}
+                onToggleFavorite={(providerId, modelId) => store.toggleModelFavorite(providerId, modelId)}
+                onClose={() => setModelOpen(false)} />}
           </div>
           {curEffort && (
             <div className="selectoranchor">

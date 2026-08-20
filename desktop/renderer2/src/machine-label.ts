@@ -74,18 +74,3 @@ export function remoteMachineBadge(
   const initial = Array.from(machine).find((character) => /[\p{L}\p{N}]/u.test(character))?.toLocaleUpperCase() ?? '?';
   return { machine, initial, title: `Proyecto remoto en ${machine}` };
 }
-
-/**
- * Sort key for one unified list. Recency stays GLOBAL — a turn running on
- * another machine belongs above one sleeping here, and that is the whole point
- * of merging the lists rather than stacking them.
- *
- * Ties break on machine then id so a re-render cannot reorder equal rows.
- */
-export function unifiedOrder<T extends { touched: number; machineId?: string; id: string }>(rows: T[]): T[] {
-  return [...rows].sort((a, b) => {
-    if (b.touched !== a.touched) return b.touched - a.touched;
-    const machine = String(a.machineId ?? '').localeCompare(String(b.machineId ?? ''));
-    return machine !== 0 ? machine : a.id.localeCompare(b.id);
-  });
-}

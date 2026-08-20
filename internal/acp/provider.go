@@ -59,15 +59,17 @@ type providerRuntime struct {
 }
 
 type CatalogGroup struct {
-	ProviderID   string  `json:"providerId"`
-	ProviderName string  `json:"providerName"`
-	Models       []Model `json:"models"`
-	Modes        []Mode  `json:"modes"`
-	Status       string  `json:"status,omitempty"`
-	LatencyMs    *int64  `json:"latencyMs,omitempty"`
-	Error        string  `json:"error,omitempty"`
-	FixHint      string  `json:"fixHint,omitempty"`
-	Badge        string  `json:"badge,omitempty"`
+	ProviderID        string            `json:"providerId"`
+	ProviderName      string            `json:"providerName"`
+	Models            []Model           `json:"models"`
+	Modes             []Mode            `json:"modes"`
+	PermissionIntents map[string]string `json:"permissionIntents"`
+	AssistantBrand    string            `json:"assistantBrand,omitempty"`
+	Status            string            `json:"status,omitempty"`
+	LatencyMs         *int64            `json:"latencyMs,omitempty"`
+	Error             string            `json:"error,omitempty"`
+	FixHint           string            `json:"fixHint,omitempty"`
+	Badge             string            `json:"badge,omitempty"`
 }
 
 // Provider is the small provider-specific seam used before any ACP/native
@@ -395,7 +397,6 @@ func mergeProviderConfig(base, raw ProviderConfig, rootDir string) ProviderConfi
 	provider.Detected = raw.Detected
 	provider.DetectedAt = strings.TrimSpace(raw.DetectedAt)
 	provider.ResolvedCommand = strings.TrimSpace(raw.ResolvedCommand)
-	provider.LastUpdateNotice = strings.TrimSpace(raw.LastUpdateNotice)
 	provider.DisabledByUser = raw.DisabledByUser
 	provider.NeedsLogin = raw.NeedsLogin
 	provider.enabledSet = raw.enabledSet
@@ -468,7 +469,6 @@ func normalizeProviderConfig(provider ProviderConfig, rootDir, fallbackID string
 		provider.AutoEnv = copyStringMap(provider.AutoEnv)
 	}
 	provider.ResolvedCommand = strings.TrimSpace(provider.ResolvedCommand)
-	provider.LastUpdateNotice = strings.TrimSpace(provider.LastUpdateNotice)
 	provider.DetectedAt = strings.TrimSpace(provider.DetectedAt)
 	if strings.TrimSpace(provider.CWD) == "" {
 		provider.CWD = rootDir
@@ -789,6 +789,9 @@ func (m *Manager) ProvidersList() []map[string]any {
 		}
 		if runtime.Config.Badge != "" {
 			item["badge"] = runtime.Config.Badge
+		}
+		if brand := providerAdapterForID(id).model.AssistantBrand; brand != "" {
+			item["assistantBrand"] = brand
 		}
 		if hint := firstNonEmpty(runtime.FixHint, runtime.Config.FixHint); hint != "" {
 			item["fixHint"] = hint
@@ -2031,15 +2034,17 @@ func (r *providerRuntime) catalogGroupLocked() CatalogGroup {
 		status = providerStatusInactive
 	}
 	group := CatalogGroup{
-		ProviderID:   r.Config.ID,
-		ProviderName: firstNonEmpty(r.Config.Name, r.AgentName, r.Config.Label, r.Config.ID),
-		Models:       normalizeProviderCatalogModels(r.Config.ID, append([]Model(nil), r.Models...)),
-		Modes:        append([]Mode(nil), r.Modes...),
-		Status:       status,
-		LatencyMs:    r.LatencyMs,
-		Error:        r.Error,
-		FixHint:      firstNonEmpty(r.FixHint, r.Config.FixHint),
-		Badge:        r.Config.Badge,
+		ProviderID:        r.Config.ID,
+		ProviderName:      firstNonEmpty(r.Config.Name, r.AgentName, r.Config.Label, r.Config.ID),
+		Models:            normalizeProviderCatalogModels(r.Config.ID, append([]Model(nil), r.Models...)),
+		Modes:             append([]Mode(nil), r.Modes...),
+		PermissionIntents: permissionIntentModes(r.Config.ID, r.Modes),
+		AssistantBrand:    providerAdapterForID(r.Config.ID).model.AssistantBrand,
+		Status:            status,
+		LatencyMs:         r.LatencyMs,
+		Error:             r.Error,
+		FixHint:           firstNonEmpty(r.FixHint, r.Config.FixHint),
+		Badge:             r.Config.Badge,
 	}
 	if group.Models == nil {
 		group.Models = []Model{}

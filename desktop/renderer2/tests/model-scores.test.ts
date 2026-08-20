@@ -3,7 +3,7 @@ import test from 'node:test';
 import type { CatalogGroup, ModelOption, ProviderRecord } from '../src/wire/types.ts';
 import {
   clampScore, clearAllModelScores, clearModelScore, countScoredModels,
-  FLAT_PROVIDER_ID, getModelScore, groupModelsForScoring, isEmptyScore,
+  getModelScore, groupModelsForScoring, isEmptyScore,
   MODEL_SCORES_SETTINGS_KEY, modelScoresFromSettings,
   NOTE_MAX, normalizeNote, parseModelScores, sanitizeScore, SCORE_DIMENSIONS, SCORE_MAX, SCORE_MIN,
   serializeModelScores, settingsFromReply, withModelScoresInSettings, withNoteValue, withScoreValue,
@@ -25,7 +25,7 @@ test('grouping prefers provider groups, dedups models, and resolves provider nam
     { providerId: 'codex', providerName: '', models: codexModels, modes: [] },
   ];
   const providers: ProviderRecord[] = [{ id: 'codex', name: 'Codex ACP', enabled: true, status: 'ready' }];
-  const out = groupModelsForScoring(groups, [], providers);
+  const out = groupModelsForScoring(groups, providers);
   assert.equal(out.length, 2);
   assert.deepEqual(out[0], {
     providerId: 'claude', providerName: 'Claude',
@@ -40,43 +40,26 @@ test('grouping drops empty groups and models missing an id', () => {
     { providerId: 'empty', providerName: 'Empty', models: [], modes: [] },
     { providerId: 'x', providerName: 'X', models: [{ modelId: '', name: 'nameless' } as ModelOption, { modelId: 'ok', name: 'Ok' }], modes: [] },
   ];
-  const out = groupModelsForScoring(groups, []);
+  const out = groupModelsForScoring(groups);
   assert.equal(out.length, 1);
   assert.deepEqual(out[0].models, [{ modelId: 'ok', name: 'Ok' }]);
 });
 
-test('production model preference surfaces omit deterministic and local smoke-test fixtures', () => {
+test('model preference surfaces trust the authoritative grouped catalog', () => {
   const out = groupModelsForScoring([
     { providerId: 'mock', providerName: 'Mock', models: [{ modelId: 'mock-deterministic', name: 'Mock deterministic' }], modes: [] },
     { providerId: 'qwen', providerName: 'Qwen', models: [
       { modelId: '$runtime|openai|workass-dev(openai)', name: 'workass-dev' },
       { modelId: 'qwen3-coder', name: 'Qwen3 Coder' },
     ], modes: [] },
-  ], [], [], 'prod');
-  assert.deepEqual(out, [{ providerId: 'qwen', providerName: 'Qwen', models: [{ modelId: 'qwen3-coder', name: 'Qwen3 Coder' }] }]);
-});
-
-test('development model preference surfaces retain deterministic and local smoke-test fixtures', () => {
-  const out = groupModelsForScoring([
-    { providerId: 'mock', providerName: 'Mock', models: [{ modelId: 'mock-deterministic', name: 'Mock deterministic' }], modes: [] },
-    { providerId: 'qwen', providerName: 'Qwen', models: [{ modelId: 'workass-dev', name: 'workass-dev' }], modes: [] },
-  ], [], [], 'dev');
+  ]);
   assert.deepEqual(out.map((group) => [group.providerId, group.models.map((model) => model.modelId)]), [
-    ['mock', ['mock-deterministic']], ['qwen', ['workass-dev']],
+    ['mock', ['mock-deterministic']], ['qwen', ['$runtime|openai|workass-dev(openai)', 'qwen3-coder']],
   ]);
 });
 
-test('grouping falls back to the flat model list under FLAT_PROVIDER_ID', () => {
-  const flat: ModelOption[] = [{ modelId: 'm1', name: '' }, { modelId: 'm1', name: 'dup' }, { modelId: 'm2', name: 'Two' }];
-  const out = groupModelsForScoring([], flat);
-  assert.equal(out.length, 1);
-  assert.equal(out[0].providerId, FLAT_PROVIDER_ID);
-  // Missing display name falls back to the model id; duplicates removed.
-  assert.deepEqual(out[0].models, [{ modelId: 'm1', name: 'm1' }, { modelId: 'm2', name: 'Two' }]);
-});
-
 test('grouping returns nothing when there is no catalog', () => {
-  assert.deepEqual(groupModelsForScoring([], []), []);
+  assert.deepEqual(groupModelsForScoring([]), []);
 });
 
 // ---- validation / clamping ------------------------------------------------

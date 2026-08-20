@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ToolEvent } from '../src/store/types.ts';
-import { extractSubagents, summarizeSettledSubagents, isSubagentHeader, isSubagentChild, subagentActivity } from '../src/subagent-layout.ts';
+import { extractSubagents, isSubagentHeader, isSubagentChild, subagentActivity } from '../src/subagent-layout.ts';
 
 function tool(partial: Partial<ToolEvent> & Pick<ToolEvent, 'key' | 'title'>): ToolEvent {
   return {
@@ -60,15 +60,6 @@ test('header renders inline as a task; children are dropped from the transcript'
   assert.equal(isSubagentChild(main), false);
   // A native-style header discovered via toolKind 'agent' also renders inline.
   assert.equal(isSubagentHeader(tool({ key: 'a', id: 'x', title: 'T', toolKind: 'agent' })), true);
-});
-
-test('failed and cancelled children never produce a success summary', () => {
-  assert.deepEqual(summarizeSettledSubagents(['done', 'failed', 'cancelled']), {
-    failedCount: 1, cancelledCount: 1, status: 'failed',
-  });
-  assert.deepEqual(summarizeSettledSubagents(['done', 'cancelled']), {
-    failedCount: 0, cancelledCount: 1, status: 'cancelled',
-  });
 });
 
 // The rail names a subagent's live call with the SAME vocabulary the transcript

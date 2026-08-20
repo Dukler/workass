@@ -266,19 +266,7 @@ func PermissionIntentModes(providerID string, modes []Mode) map[string]string {
 // through to Claude's restrictive default and deadlock on an unattended
 // permission request.
 func permissionIntentForMode(providerID, modeID string) string {
-	modeID = strings.TrimSpace(modeID)
-	switch modeID {
-	case "agent-full-access", "bypassPermissions", "bypass", "dontAsk", "yolo":
-		return "full"
-	case "agent", "acceptEdits", "auto-edit", "auto":
-		return "edit"
-	case "read-only", "plan", "default", "ask":
-		return "read"
-	}
-	// Keep the provider argument in the contract: adapters can add an
-	// unambiguous native alias here without changing spawn callers.
-	_ = providerID
-	return ""
+	return providerAdapterForID(providerID).permission.Intent(modeID)
 }
 
 func PermissionIntentForMode(providerID, modeID string) string {

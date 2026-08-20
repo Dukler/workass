@@ -1,6 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { browserApi, sameBrowserBounds, type WorkassBrowserBounds, type WorkassBrowserState } from '../browser';
+import {
+  browserApi, localBrowserOwnsChat, sameBrowserBounds,
+  type WorkassBrowserApi, type WorkassBrowserBounds, type WorkassBrowserState,
+} from '../browser';
 import { useApp } from '../store/store';
 import { IcBrowser } from '../icons';
 
@@ -26,8 +29,25 @@ function initialState(chatId: string): WorkassBrowserState {
 // no SSO / CDP / "Sesión persistente" labels — the persistent session and CDP
 // control still work underneath; they just stop shouting. The persistent-session
 // profile and CDP are daemon/shell concerns, not UI chrome.
-export function BrowserPanel({ chatId, conversationId, onClose }: { chatId: string; conversationId?: string; onClose: () => void }) {
+export function BrowserPanel(props: {
+  chatId: string;
+  conversationId?: string;
+  machineId?: string;
+  onClose: () => void;
+}) {
   const api = browserApi();
+  if (!api?.supported || !localBrowserOwnsChat(props.chatId, props.machineId)) return null;
+  return <LocalBrowserPanel {...props} api={api} />;
+}
+
+function LocalBrowserPanel({
+  api, chatId, conversationId, onClose,
+}: {
+  api: WorkassBrowserApi;
+  chatId: string;
+  conversationId?: string;
+  onClose: () => void;
+}) {
   const app = useApp();
   const viewport = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<WorkassBrowserState>(() => initialState(chatId));

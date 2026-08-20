@@ -482,12 +482,25 @@ test('delete, structural, first-save, and post-restore boundaries force a comple
     name: string;
     run: (subject: any, owner: Chat) => void | Promise<unknown>;
     prepare?: (subject: any, owner: Chat) => void;
+    api?: Record<string, unknown>;
   }> = [
     { name: 'chat create', run: (subject) => { subject.newChat(); } },
     { name: 'chat rename', run: (subject, owner) => subject.renameChat(owner.id, 'Renamed') },
     {
       name: 'workspace move',
-      prepare: (_subject, owner) => { owner.sessionId = null; },
+      prepare: (subject, owner) => {
+        owner.sessionId = null;
+        subject.state.meta = { daemon: true, workspaceRebindMode: 'transactional-v1' };
+      },
+      api: {
+        appChatNewSession: async (opts: any) => ({
+          operationId: opts.operationId,
+          sessionId: '',
+          workspaceCommitted: true,
+          workspaceRebound: true,
+          workspaceRevision: (opts.expectedWorkspaceRevision ?? 0) + 1,
+        }),
+      },
       run: (subject, owner) => subject.moveChatToWorkspace(owner.id, null, '/tmp/workass-delta-moved'),
     },
     { name: 'folder removal', run: (subject) => subject.removeWorkspace('/tmp/workass-delta-a') },
@@ -514,7 +527,7 @@ test('delete, structural, first-save, and post-restore boundaries force a comple
         saves.push({ snapshot, full });
       };
       family.prepare?.(subject, owner);
-      await withWindowApi({}, () => Promise.resolve(family.run(subject, owner)));
+      await withWindowApi(family.api ?? {}, () => Promise.resolve(family.run(subject, owner)));
       const save = saves.at(-1) ?? serverSave(subject, true);
       assert.equal(save.full, true);
       assert.equal(save.snapshot.chats.length, subject.state.chats.length);

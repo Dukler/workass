@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,8 +84,11 @@ type SpawnedWorkItem struct {
 	TabID      string `json:"tabId"`
 	ChatID     string `json:"chatId"`
 	ProviderID string `json:"providerId"`
-	Kind       string `json:"kind"`
-	Label      string `json:"label"`
+	// AssistantBrand is presentation metadata supplied by the provider
+	// registration. Renderers never infer it from ProviderID.
+	AssistantBrand string `json:"assistantBrand,omitempty"`
+	Kind           string `json:"kind"`
+	Label          string `json:"label"`
 	// Role is the lifecycle, not the shape: "" is work whose completion is news,
 	// spawnedWorkRoleService is a process that is expected never to finish. It is
 	// declared at registration or inferred by classifySpawnedWorkServices, and is
@@ -200,27 +202,26 @@ type spawnedWorkCandidate struct {
 }
 
 type spawnToolObservation struct {
-	SessionID   string
-	TabID       string
-	ChatID      string
-	ProviderID  string
-	ToolCallID  string
-	Title       string
-	Command     string
-	RawInput    any
-	Meta        map[string]any
-	Output      string
-	JobID       string
-	OperationID string
-	LaneID      string
+	SessionID          string
+	TabID              string
+	ChatID             string
+	ProviderID         string
+	ToolCallID         string
+	Title              string
+	Command            string
+	ProviderTool       string
+	RunsInBackground   bool
+	FallbackTaskID     string
+	FallbackOutputFile string
+	JobID              string
+	OperationID        string
+	LaneID             string
 }
 
-var claudeBackgroundResultRE = regexp.MustCompile(`(?is)running in background with ID:\s*([A-Za-z0-9._-]+).*?output is being written to:\s*([^\r\n]+?\.output)\b`)
-
 func normalizeSpawnedWorkTaskID(raw string) string {
-	// Claude's Bash result is prose, and currently terminates the task id with
-	// sentence punctuation ("ID: abc123. Output ..."). Keep punctuation that is
-	// valid inside an id, but never let the prose terminator become identity.
+	// Provider prose may terminate an otherwise valid task id with sentence
+	// punctuation. Keep punctuation valid inside an id, but never let the prose
+	// terminator become identity.
 	return strings.TrimRight(strings.TrimSpace(raw), ".,;:!?")
 }
 
@@ -300,9 +301,12 @@ func boolFromMap(raw any, key string) bool {
 	return v
 }
 
-func (m *Manager) acceptsNativeSpawnedWorkProvider(providerID string) bool {
+func (m *Manager) acceptsProviderSpawnedWork(providerID string) bool {
 	providerID = normalizeProviderID(providerID)
-	return providerAdapterForID(providerID).features.NativeSpawnedWork || (providerIsFixture(providerID) && !m.isProductionRuntime())
+	if !providerAdapterForID(providerID).spawnedWork.Supported() {
+		return false
+	}
+	return !providerIsFixture(providerID) || !m.isProductionRuntime()
 }
 
 // acceptsExternalWorkProvider is deliberately broader than passive spawned-work
@@ -504,7 +508,7 @@ func (m *Manager) SettleExternalWork(opts ExternalWorkSettleOptions) (map[string
 }
 
 func (m *Manager) observeSpawnToolEvent(obs spawnToolObservation) {
-	if !m.acceptsNativeSpawnedWorkProvider(obs.ProviderID) || obs.ToolCallID == "" || obs.TabID == "" || obs.ChatID == "" {
+	if !m.acceptsProviderSpawnedWork(obs.ProviderID) || obs.ToolCallID == "" || obs.TabID == "" || obs.ChatID == "" {
 		return
 	}
 	if lane := m.providerLaneForJob(obs.JobID); lane != nil {
@@ -515,10 +519,9 @@ func (m *Manager) observeSpawnToolEvent(obs spawnToolObservation) {
 			obs.OperationID = string(lane.operationForJob(obs.JobID))
 		}
 	}
-	claudeMeta := mapFromAny(obs.Meta["claudeCode"])
-	providerTool := firstNonEmpty(asString(claudeMeta["toolName"]), obs.Title)
+	providerTool := firstNonEmpty(obs.ProviderTool, obs.Title)
 	candidateKey := spawnedCandidateKey(obs.SessionID, obs.ToolCallID)
-	if boolFromMap(obs.RawInput, "run_in_background") {
+	if obs.RunsInBackground {
 		label := compactText(firstNonEmpty(obs.Command, obs.Title, providerTool, "Background work"), 240)
 		m.spawnedWorkMu.Lock()
 		m.spawnedCandidates[candidateKey] = spawnedWorkCandidate{
@@ -530,20 +533,11 @@ func (m *Manager) observeSpawnToolEvent(obs spawnToolObservation) {
 		}
 		m.spawnedWorkMu.Unlock()
 	}
-	match := claudeBackgroundResultRE.FindStringSubmatch(obs.Output)
-	if len(match) != 3 {
-		return
-	}
-	taskID := normalizeSpawnedWorkTaskID(match[1])
+	taskID := normalizeSpawnedWorkTaskID(obs.FallbackTaskID)
 	if taskID == "" {
 		return
 	}
-	outputFile := strings.TrimSpace(match[2])
-	if safe, ok := validateClaudeTaskOutputPath(taskID, outputFile); ok {
-		outputFile = safe
-	} else {
-		outputFile = ""
-	}
+	outputFile := strings.TrimSpace(obs.FallbackOutputFile)
 	m.spawnedWorkMu.Lock()
 	candidate := m.spawnedCandidates[candidateKey]
 	if candidate.TabID == "" {
@@ -563,25 +557,26 @@ func (m *Manager) observeSpawnToolEvent(obs spawnToolObservation) {
 	}
 }
 
-func (m *Manager) observeClaudeSpawnedWork(tabID, chatID, sessionID string, event map[string]any) {
-	if tabID == "" || chatID == "" || event == nil {
+func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerID string, event providerSpawnedWorkUpdate) {
+	if tabID == "" || chatID == "" || !m.acceptsProviderSpawnedWork(providerID) {
 		return
 	}
 	now := time.Now().UTC()
-	typeName := strings.TrimSpace(asString(event["type"]))
-	if typeName == "snapshot" {
-		live := map[string]map[string]any{}
-		for _, raw := range anySliceValue(event["tasks"]) {
-			task := mapFromAny(raw)
-			if id := normalizeSpawnedWorkTaskID(asString(task["taskId"])); id != "" {
+	if event.Kind == "snapshot" {
+		if !event.TasksKnown {
+			return
+		}
+		live := map[string]providerSpawnedWorkTask{}
+		for _, task := range event.Tasks {
+			if id := normalizeSpawnedWorkTaskID(task.TaskID); id != "" {
 				live[id] = task
 			}
 		}
 		changed := false
 		m.spawnedWorkMu.Lock()
 		for taskID, task := range live {
-			candidate := m.candidateForTaskLocked(sessionID, asString(task["toolCallId"]), tabID, chatID)
-			rec, itemChanged := m.upsertSpawnedWorkLocked(candidate, taskID, asString(task["description"]), asString(task["taskType"]), "", "")
+			candidate := m.candidateForTaskLocked(sessionID, task.ToolCallID, tabID, chatID, providerID)
+			rec, itemChanged := m.upsertSpawnedWorkLocked(candidate, taskID, task.Description, task.TaskType, task.SubagentType, task.OutputFile)
 			if rec != nil {
 				rec.LastLevelSeen = now
 				rec.MissingSince = time.Time{}
@@ -603,39 +598,39 @@ func (m *Manager) observeClaudeSpawnedWork(tabID, chatID, sessionID string, even
 		return
 	}
 
-	taskID := normalizeSpawnedWorkTaskID(asString(event["taskId"]))
+	task := event.Task
+	taskID := normalizeSpawnedWorkTaskID(task.TaskID)
 	if taskID == "" {
 		return
 	}
-	toolCallID := strings.TrimSpace(asString(event["toolCallId"]))
-	patch := mapFromAny(event["patch"])
+	toolCallID := strings.TrimSpace(task.ToolCallID)
 	m.spawnedWorkMu.Lock()
-	candidate := m.candidateForTaskLocked(sessionID, toolCallID, tabID, chatID)
-	rec, changed := m.upsertSpawnedWorkLocked(candidate, taskID, firstNonEmpty(asString(event["description"]), asString(patch["description"])), asString(event["taskType"]), asString(event["subagentType"]), asString(event["outputFile"]))
+	candidate := m.candidateForTaskLocked(sessionID, toolCallID, tabID, chatID, providerID)
+	rec, changed := m.upsertSpawnedWorkLocked(candidate, taskID, task.Description, task.TaskType, task.SubagentType, task.OutputFile)
 	if rec != nil {
 		rec.LastLevelSeen = now
-		if typeName == "started" || typeName == "progress" || spawnedWorkStatus(firstNonEmpty(asString(event["status"]), asString(patch["status"]))) == "running" {
+		if event.Kind == "started" || event.Kind == "progress" || spawnedWorkStatus(task.Status) == "running" {
 			rec.MissingSince = time.Time{}
 		}
-		if summary := compactText(firstNonEmpty(asString(event["summary"]), asString(patch["error"])), 1000); summary != "" && rec.Item.Summary != summary {
+		if summary := compactText(task.Summary, 1000); summary != "" && rec.Item.Summary != summary {
 			rec.Item.Summary = summary
 			rec.Item.UpdatedAt = isoNow()
 			changed = true
 		}
-		if tool := compactText(asString(event["lastToolName"]), 120); tool != "" && rec.Item.LastToolName != tool {
+		if tool := compactText(task.LastToolName, 120); tool != "" && rec.Item.LastToolName != tool {
 			rec.Item.LastToolName = tool
 			rec.Item.UpdatedAt = isoNow()
 			changed = true
 		}
-		status := firstNonEmpty(asString(event["status"]), asString(patch["status"]))
-		if typeName == "notification" || status != "" {
+		status := task.Status
+		if event.Kind == "notification" || status != "" {
 			mapped := spawnedWorkStatus(status)
 			if mapped != "running" && rec.Item.Status == "running" {
 				changed = m.settleSpawnedWorkLocked(rec, mapped, nil) || changed
 			}
 		}
 	}
-	if toolCallID != "" && typeName == "started" {
+	if toolCallID != "" && event.Kind == "started" {
 		delete(m.spawnedCandidates, spawnedCandidateKey(sessionID, toolCallID))
 	}
 	m.spawnedWorkMu.Unlock()
@@ -644,12 +639,7 @@ func (m *Manager) observeClaudeSpawnedWork(tabID, chatID, sessionID string, even
 	}
 }
 
-func anySliceValue(v any) []any {
-	items, _ := v.([]any)
-	return items
-}
-
-func (m *Manager) candidateForTaskLocked(sessionID, toolCallID, tabID, chatID string) spawnedWorkCandidate {
+func (m *Manager) candidateForTaskLocked(sessionID, toolCallID, tabID, chatID, providerID string) spawnedWorkCandidate {
 	if toolCallID != "" {
 		if candidate, ok := m.spawnedCandidates[spawnedCandidateKey(sessionID, toolCallID)]; ok {
 			return candidate
@@ -657,7 +647,7 @@ func (m *Manager) candidateForTaskLocked(sessionID, toolCallID, tabID, chatID st
 	}
 	return spawnedWorkCandidate{
 		SessionID: sessionID, TabID: tabID, ChatID: chatID, ToolCallID: toolCallID,
-		ProviderID: defaultNativeSpawnedWorkProviderID(), StartedAt: time.Now().UTC(),
+		ProviderID: normalizeProviderID(providerID), StartedAt: time.Now().UTC(),
 	}
 }
 
@@ -684,7 +674,7 @@ func (m *Manager) upsertSpawnedWorkLocked(candidate spawnedWorkCandidate, taskID
 		item := SpawnedWorkItem{
 			ID: taskID, TaskID: taskID, ToolCallID: candidate.ToolCallID,
 			TabID: candidate.TabID, ChatID: candidate.ChatID,
-			ProviderID: firstNonEmpty(candidate.ProviderID, defaultNativeSpawnedWorkProviderID()),
+			ProviderID: candidate.ProviderID,
 			Kind:       spawnedWorkKind(candidate.ProviderTool, firstNonEmpty(taskType, candidate.Kind), subagentType),
 			Label:      label, Status: "running",
 			StartedAt: started.Format(time.RFC3339Nano), UpdatedAt: isoNow(),
@@ -717,7 +707,7 @@ func (m *Manager) upsertSpawnedWorkLocked(candidate spawnedWorkCandidate, taskID
 		changed = true
 	}
 	if outputFile != "" {
-		if safe, ok := validateClaudeTaskOutputPath(taskID, outputFile); ok && safe != rec.Item.OutputFile {
+		if safe, ok := providerAdapterForID(candidate.ProviderID).spawnedWork.ValidateOutputPath(taskID, outputFile); ok && safe != rec.Item.OutputFile {
 			rec.Item.OutputFile = safe
 			changed = true
 		}
@@ -1422,7 +1412,11 @@ func (m *Manager) touchSpawnedWorkBridgeActivity(tabID, chatID string, now time.
 }
 
 func (m *Manager) ListSpawnedWork(tabID, chatID string) []SpawnedWorkItem {
-	return publicSpawnedWorkItems(m.listSpawnedWorkRaw(tabID, chatID))
+	items := m.listSpawnedWorkRaw(tabID, chatID)
+	for index := range items {
+		items[index].AssistantBrand = providerAdapterForID(items[index].ProviderID).model.AssistantBrand
+	}
+	return publicSpawnedWorkItems(items)
 }
 
 func (m *Manager) listSpawnedWorkRaw(tabID, chatID string) []SpawnedWorkItem {
@@ -1637,43 +1631,6 @@ func (m *Manager) terminateSpawnedWorkPIDs(pids []int) (signalled []int, forced 
 	return signalled, forced
 }
 
-func validateClaudeTaskOutputPath(taskID, raw string) (string, bool) {
-	taskID = normalizeSpawnedWorkTaskID(taskID)
-	if taskID == "" || strings.ContainsAny(taskID, `/\\`) {
-		return "", false
-	}
-	path := filepath.Clean(strings.TrimSpace(raw))
-	if !filepath.IsAbs(path) || filepath.Base(path) != taskID+".output" || filepath.Base(filepath.Dir(path)) != "tasks" {
-		return "", false
-	}
-	allowedRoots := []string{os.TempDir()}
-	if filepath.Separator == '/' {
-		allowedRoots = append(allowedRoots, "/private/tmp", "/tmp")
-	}
-	allowed := false
-	for _, root := range allowedRoots {
-		rel, err := filepath.Rel(filepath.Clean(root), path)
-		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			allowed = true
-			break
-		}
-	}
-	if !allowed {
-		return "", false
-	}
-	hasClaudeDir := false
-	for dir := filepath.Dir(path); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if strings.HasPrefix(strings.ToLower(filepath.Base(dir)), "claude-") {
-			hasClaudeDir = true
-			break
-		}
-	}
-	if !hasClaudeDir {
-		return "", false
-	}
-	return path, true
-}
-
 func validateExternalWorkPath(stateDir, raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -1719,8 +1676,8 @@ func validateExternalWorkPath(stateDir, raw string) (string, bool) {
 	return path, true
 }
 
-func readSpawnedWorkTail(taskID, path string, limit int) (string, bool) {
-	path, ok := validateClaudeTaskOutputPath(taskID, path)
+func readProviderSpawnedWorkTail(providerID, taskID, path string, limit int) (string, bool) {
+	path, ok := providerAdapterForID(providerID).spawnedWork.ValidateOutputPath(taskID, path)
 	if !ok || limit <= 0 {
 		return "", false
 	}
@@ -1777,7 +1734,7 @@ func readSpawnedWorkTailForItem(stateDir string, item SpawnedWorkItem, limit int
 	if item.Kind == "external" {
 		return readExternalWorkTail(stateDir, item.OutputFile, limit)
 	}
-	return readSpawnedWorkTail(item.TaskID, item.OutputFile, limit)
+	return readProviderSpawnedWorkTail(item.ProviderID, item.TaskID, item.OutputFile, limit)
 }
 
 func readExternalDoneFile(stateDir, path string) (bool, *int) {
@@ -1980,7 +1937,7 @@ func (m *Manager) loadSpawnedWorkSnapshots() {
 					} else {
 						item.OutputFile = ""
 					}
-				} else if safe, ok := validateClaudeTaskOutputPath(taskID, item.OutputFile); ok {
+				} else if safe, ok := providerAdapterForID(item.ProviderID).spawnedWork.ValidateOutputPath(taskID, item.OutputFile); ok {
 					item.OutputFile = safe
 				} else {
 					item.OutputFile = ""

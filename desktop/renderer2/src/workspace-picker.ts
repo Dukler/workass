@@ -76,22 +76,17 @@ export function normalizeCreatedDirectory(raw: unknown, requestedParent: string,
 
 /**
  * Defensive parse of an fs:list-dir reply. `requested` is the path we asked for,
- * so a reply that omits `path` still anchors the dialog where the user is; the
- * default-home request legitimately resolves `null` to the server user's
- * absolute home path. Older daemons may still return their `path: null`
- * shortcut listing.
+ * The default-home request legitimately resolves `null` to the server user's
+ * absolute home path. Every reply still carries its resolved path explicitly.
  */
 export function normalizeListing(raw: unknown, requested: string | null): DirListing {
   if (!raw || typeof raw !== 'object') return errorListing(requested, INVALID_REPLY);
   const reply = raw as { path?: unknown; parent?: unknown; entries?: unknown; error?: unknown };
   const repliedPath = optionalPath(reply.path);
-  // fs:list-dir is an exact-address operation, not a redirect. Accept an
-  // omitted path for compatibility with older daemons, but never let a reply
-  // paint a different folder than the row the user selected. Without this
-  // check a malformed/stale bridge reply makes the picker appear to jump at
-  // random even though the click target itself was correct.
+  // fs:list-dir is an exact-address operation, not a redirect. A missing path
+  // is not evidence about what was listed and must fail closed.
   const resolvedDefaultHome = requested === null && repliedPath !== null;
-  if (reply.path !== undefined && repliedPath !== requested && !resolvedDefaultHome) {
+  if (reply.path === undefined || (repliedPath !== requested && !resolvedDefaultHome)) {
     return errorListing(requested, WRONG_FOLDER);
   }
   const listing: DirListing = {

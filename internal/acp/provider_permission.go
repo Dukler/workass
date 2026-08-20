@@ -1,7 +1,10 @@
 package acp
 
+import "strings"
+
 type providerPermissionPolicy interface {
 	Candidates(intent string) []string
+	Intent(modeID string) string
 }
 
 type genericProviderPermissionPolicy struct{}
@@ -19,6 +22,21 @@ func (genericProviderPermissionPolicy) Candidates(intent string) []string {
 	}
 }
 
+func (policy genericProviderPermissionPolicy) Intent(modeID string) string {
+	modeID = strings.TrimSpace(modeID)
+	if modeID == "" {
+		return ""
+	}
+	for _, intent := range []string{"read", "edit", "full"} {
+		for _, candidate := range policy.Candidates(intent) {
+			if strings.EqualFold(candidate, modeID) {
+				return intent
+			}
+		}
+	}
+	return ""
+}
+
 type qwenProviderPermissionPolicy struct {
 	genericProviderPermissionPolicy
 }
@@ -28,4 +46,8 @@ func (qwenProviderPermissionPolicy) Candidates(intent string) []string {
 		return []string{"plan", "default"}
 	}
 	return genericProviderPermissionPolicy{}.Candidates(intent)
+}
+
+func (qwenProviderPermissionPolicy) Intent(modeID string) string {
+	return genericProviderPermissionPolicy{}.Intent(modeID)
 }

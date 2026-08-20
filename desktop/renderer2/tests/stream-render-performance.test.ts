@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
-import { performance } from 'node:perf_hooks';
 import test from 'node:test';
-import { parseBlocks, type SignedBlock } from '../src/markdown/blocks.ts';
+import { parseBlocks } from '../src/markdown/blocks.ts';
 import type { Msg, ToolEvent } from '../src/store/types.ts';
 import { buildTranscriptTimelineSegments, stableMarkdownBlockKeys } from '../src/timeline-layout.ts';
 
@@ -19,39 +18,47 @@ function percentile(sorted: number[], ratio: number): number {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))];
 }
 
+function measuredCPUms(run: () => void): number {
+  // This gate owns synchronous renderer preparation, not the host scheduler.
+  // CPU usage still includes parsing, allocation, GC, and system work in this
+  // process while excluding time stolen by unrelated parallel test workers.
+  const started = process.cpuUsage();
+  run();
+  const elapsed = process.cpuUsage(started);
+  return (elapsed.user + elapsed.system) / 1_000;
+}
+
 test('512 KiB burst stays inside the renderer preparation budget at display cadence', () => {
-  let content = '';
-  let previous: SignedBlock[] = [];
-  let signatureComparisons = 0;
+  const msg: Msg = {
+    id: 'burst-message', role: 'assistant', content: '', status: 'running', at: null, events: [],
+  };
   const samples: number[] = [];
+  let renderedBlocks = 0;
 
   for (let offset = 0; offset < CHUNK_COUNT; offset += CHUNKS_PER_FRAME) {
     for (let index = offset; index < Math.min(CHUNK_COUNT, offset + CHUNKS_PER_FRAME); index++) {
-      content += burstChunk(index);
+      msg.content += burstChunk(index);
     }
-    const started = performance.now();
-    const next = parseBlocks(content);
-    // React.memo compares each stable block signature during reconciliation;
-    // include that linear work in the preparation measurement.
-    const shared = Math.min(previous.length, next.length);
-    for (let index = 0; index < shared; index++) {
-      void (previous[index].sig === next[index].sig);
-      signatureComparisons++;
-    }
-    samples.push(performance.now() - started);
-    previous = next;
+    const signatures: string[] = [];
+    samples.push(measuredCPUms(() => {
+      for (const segment of buildTranscriptTimelineSegments(msg)) {
+        if (!('prose' in segment)) continue;
+        for (const block of parseBlocks(segment.prose)) signatures.push(block.sig);
+      }
+      void stableMarkdownBlockKeys(msg, signatures);
+    }));
+    renderedBlocks = signatures.length;
   }
 
-  assert.equal(content.length, CHUNK_COUNT * CHUNK_BYTES);
-  assert.equal(previous.length, CHUNK_COUNT / 16);
-  assert.ok(signatureComparisons > 30_000);
+  assert.equal(msg.content.length, CHUNK_COUNT * CHUNK_BYTES);
+  assert.equal(renderedBlocks, CHUNK_COUNT / 16);
 
   samples.sort((a, b) => a - b);
   const total = samples.reduce((sum, value) => sum + value, 0);
   const mean = total / samples.length;
   const p95 = percentile(samples, 0.95);
   const max = samples[samples.length - 1];
-  console.log(`renderer preparation bytes=${content.length} frames=${samples.length} blocks=${previous.length} comparisons=${signatureComparisons} total=${total.toFixed(3)}ms mean=${mean.toFixed(3)}ms p95=${p95.toFixed(3)}ms max=${max.toFixed(3)}ms`);
+  console.log(`renderer preparation bytes=${msg.content.length} frames=${samples.length} blocks=${renderedBlocks} total=${total.toFixed(3)}ms mean=${mean.toFixed(3)}ms p95=${p95.toFixed(3)}ms max=${max.toFixed(3)}ms`);
 
   // This is deliberately much looser than the expected sub-millisecond result:
   // preparation must leave most of a 16.7 ms frame available for React commit,
@@ -90,23 +97,23 @@ test('384 KiB event-rich stream with 200 tools prepares inside one display frame
   for (let frame = 0; frame < frameCount; frame++) {
     const bytes = initialBytes + Math.floor(((frame + 1) * (totalBytes - initialBytes)) / frameCount);
     msg.content = full.slice(0, bytes);
-    const started = performance.now();
     const signatures: string[] = [];
     let blocks = 0;
     let tools = 0;
-    for (const segment of buildTranscriptTimelineSegments(msg)) {
-      if ('tools' in segment) {
-        tools += segment.tools.length;
-        continue;
+    samples.push(measuredCPUms(() => {
+      for (const segment of buildTranscriptTimelineSegments(msg)) {
+        if ('tools' in segment) {
+          tools += segment.tools.length;
+          continue;
+        }
+        if (!('prose' in segment)) continue;
+        for (const block of parseBlocks(segment.prose)) {
+          signatures.push(block.sig);
+          blocks++;
+        }
       }
-      if (!('prose' in segment)) continue;
-      for (const block of parseBlocks(segment.prose)) {
-        signatures.push(block.sig);
-        blocks++;
-      }
-    }
-    void stableMarkdownBlockKeys(msg, signatures);
-    samples.push(performance.now() - started);
+      void stableMarkdownBlockKeys(msg, signatures);
+    }));
     renderedBlocks = blocks;
     renderedTools = tools;
   }

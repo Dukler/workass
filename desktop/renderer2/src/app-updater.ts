@@ -37,6 +37,9 @@ export interface AppUpdaterState {
   phase: AppUpdaterPhase;
   currentVersion: string;
   targetVersion: string | null;
+  // Background discovery keeps a failed/rollback receipt visible while still
+  // advertising a later, independently verified release through this field.
+  availableVersion?: string | null;
   checkedAt: string | null;
   progress: number;
   error: string | null;
@@ -50,8 +53,6 @@ interface WorkassUpdaterApi {
   getState(): Promise<AppUpdaterState>;
   check(): Promise<AppUpdaterState>;
   apply(): Promise<AppUpdaterState>;
-  download(): Promise<AppUpdaterState>;
-  install(): Promise<AppUpdaterState>;
   onState(callback: (state: AppUpdaterState) => void): () => void;
 }
 
@@ -82,6 +83,7 @@ export function appUpdaterBlockerText(blockers: AppUpdaterBlockers | null): stri
 }
 
 export function appUpdaterPhaseText(state: AppUpdaterState): string {
+  const newerOffer = state.availableVersion?.trim();
   switch (state.phase) {
     case 'unavailable': return 'Esta compilación no admite actualizaciones automáticas.';
     case 'idle': return 'Listo para buscar una versión verificada de Workass.';
@@ -95,9 +97,27 @@ export function appUpdaterPhaseText(state: AppUpdaterState): string {
     case 'busy': return appUpdaterBlockerText(state.blockers);
     case 'installing': return `Instalando Workass ${state.targetVersion || ''} de forma segura…`.trim();
     case 'healthy': return `Workass ${state.targetVersion || state.receipt?.targetVersion || state.currentVersion} quedó actualizado.`;
-    case 'rollback_healthy': return 'La actualización falló; Workass restauró la versión anterior saludable.';
-    case 'failed': return state.error || 'No se pudo completar la actualización.';
+    case 'rollback_healthy': return newerOffer
+      ? `Workass ${newerOffer} está disponible; la actualización anterior falló y se restauró la versión saludable.`
+      : 'La actualización falló; Workass restauró la versión anterior saludable.';
+    case 'failed': return newerOffer
+      ? `Workass ${newerOffer} está disponible; el intento anterior falló${state.error ? `: ${state.error}` : '.'}`
+      : state.error || 'No se pudo completar la actualización.';
     default: return state.phase;
+  }
+}
+
+export function appUpdaterCardTitle(state: AppUpdaterState): string {
+  const offeredVersion = state.availableVersion?.trim()
+    || (state.phase === 'available' || state.phase === 'ready' ? state.targetVersion?.trim() : '');
+  if (offeredVersion) return `Workass ${offeredVersion}`;
+  switch (state.phase) {
+    case 'busy': return 'La actualización está esperando';
+    case 'check_failed': return 'No se pudo buscar actualizaciones';
+    case 'rollback_healthy': return 'Workass volvió a la versión anterior';
+    case 'failed': return 'No se pudo actualizar Workass';
+    case 'healthy': return 'Listo';
+    default: return 'Actualizando Workass';
   }
 }
 
@@ -121,7 +141,7 @@ export function useAppUpdater() {
     return () => { mounted = false; unsubscribe?.(); };
   }, [bridge]);
 
-  const run = useCallback(async (action: 'check' | 'apply' | 'download' | 'install') => {
+  const run = useCallback(async (action: 'check' | 'apply') => {
     if (!bridge) return state;
     const next = await bridge[action]();
     setState(next);
@@ -132,7 +152,5 @@ export function useAppUpdater() {
     state,
     check: useCallback(() => run('check'), [run]),
     apply: useCallback(() => run('apply'), [run]),
-    download: useCallback(() => run('download'), [run]),
-    install: useCallback(() => run('install'), [run]),
   };
 }

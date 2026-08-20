@@ -169,7 +169,13 @@ var providerRegistrations = map[string]providerRegistration{
 			return fileExists(filepath.Join(rootDir, "desktop", "acp", "mock-server.mjs"))
 		},
 		Detection: mockDetectionStrategy{}, FixtureOnly: true,
-		Adapter: providerAdapter{launch: mockACPLaunchStrategy{}},
+		Adapter: providerAdapter{
+			launch: mockACPLaunchStrategy{},
+			// The deterministic fixture emits the same bounded task frames as the
+			// native fixture host so development can exercise background lifecycle.
+			notifications: claudeProviderNotificationStrategy{},
+			spawnedWork:   claudeProviderSpawnedWorkStrategy{},
+		},
 	},
 	"devin": {
 		ID: "devin", Name: "Devin ACP", DefaultCommand: "devin", DefaultArgs: []string{"acp"}, Badge: "agent",
@@ -201,19 +207,21 @@ var providerRegistrations = map[string]providerRegistration{
 		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `claude auth login`"},
 		Native:         &frontierNativeSpec{ProviderID: "claude", DefaultCommand: "claude", OverrideEnv: "WORKASS_CLAUDE_CODE", PathNames: []string{"claude", "claude.exe", "claude.cmd"}},
 		Adapter: providerAdapter{
-			creation:  providercontract.CreationCapabilities{DeferredUntilInput: true},
-			input:     explicitHostInputReceiptPolicy{},
-			delivery:  claudeDeliveryStrategy{},
-			planUsage: claudePlanUsageStrategy{},
-			commands:  capabilityCommandCatalogStrategy{capability: "workassClaudeCommandCatalog"},
+			creation:      providercontract.CreationCapabilities{DeferredUntilInput: true},
+			input:         explicitHostInputReceiptPolicy{},
+			delivery:      claudeDeliveryStrategy{},
+			planUsage:     claudePlanUsageStrategy{},
+			commands:      capabilityCommandCatalogStrategy{capability: "workassClaudeCommandCatalog"},
+			notifications: claudeProviderNotificationStrategy{},
+			spawnedWork:   claudeProviderSpawnedWorkStrategy{},
 			model: providerModelPolicy{
 				SeparateEffortAxis: true, SyntheticDefaultAlias: true, AssistantBrand: "claude",
 				InspectAllEfforts: func(ProviderConfig) bool { return true },
 			},
-			catalog:  claudeProviderCatalogStrategy{},
-			launch:   nativeHostLaunchStrategy{command: "claude", prepare: claudeNativeHostLaunch},
-			features: providerFeaturePolicy{NativeSpawnedWork: true},
-			context:  staticProviderContextPolicy{capabilities: exactNativeContextCapabilities()},
+			catalog:             claudeProviderCatalogStrategy{},
+			launch:              nativeHostLaunchStrategy{command: "claude", prepare: claudeNativeHostLaunch},
+			subagentEnvironment: map[string]string{"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
+			context:             staticProviderContextPolicy{capabilities: exactNativeContextCapabilities()},
 		},
 		Update: providerUpdateRegistration{Source: "https://registry.npmjs.org/@anthropic-ai/claude-code/latest", Command: ProviderUpdateCommand{Command: "claude", Args: []string{"update"}}, Hint: "claude update"},
 	},
@@ -224,11 +232,12 @@ var providerRegistrations = map[string]providerRegistration{
 		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `codex login`"},
 		Native:         &frontierNativeSpec{ProviderID: "codex", DefaultCommand: "codex", OverrideEnv: "WORKASS_CODEX", PathNames: []string{"codex", "codex.exe", "codex.cmd"}},
 		Adapter: providerAdapter{
-			creation:  providercontract.CreationCapabilities{DeferredUntilInput: true},
-			input:     explicitHostInputReceiptPolicy{},
-			delivery:  codexDeliveryStrategy{},
-			planUsage: codexPlanUsageStrategy{},
-			commands:  unsupportedCommandCatalogStrategy{},
+			creation:      providercontract.CreationCapabilities{DeferredUntilInput: true},
+			input:         explicitHostInputReceiptPolicy{},
+			delivery:      codexDeliveryStrategy{},
+			planUsage:     codexPlanUsageStrategy{},
+			commands:      unsupportedCommandCatalogStrategy{},
+			notifications: codexProviderNotificationStrategy{},
 			model: providerModelPolicy{
 				SeparateEffortAxis: true, AssistantBrand: "gpt",
 				InspectAllEfforts: func(config ProviderConfig) bool { return isOfficialNativeCommand(config, "codex") },
@@ -295,15 +304,6 @@ func providerIsFixture(id string) bool {
 func defaultFixtureProviderID() string {
 	for _, id := range providerRegistrationOrder {
 		if providerIsFixture(id) {
-			return id
-		}
-	}
-	return ""
-}
-
-func defaultNativeSpawnedWorkProviderID() string {
-	for _, id := range providerRegistrationOrder {
-		if providerAdapterForID(id).features.NativeSpawnedWork && !providerIsFixture(id) {
 			return id
 		}
 	}

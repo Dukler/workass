@@ -34,11 +34,15 @@ func harnessTask(id, kind, status string) any {
 
 func recordHarnessEnd(m *Manager, tabID, chatID, sessionID string, update map[string]any) *harnessTurnEvidence {
 	prior := m.harnessTurns.get(sessionID)
-	evidence := harnessEvidenceFromUpdate(update)
+	evidence := decodeClaudeHarnessTurn(update).Evidence
 	evidence.TabID, evidence.ChatID = tabID, chatID
 	evidence.Parked, evidence.ParkNote = m.harnessParkEvidence(tabID, chatID, evidence, prior)
 	m.harnessTurns.record(sessionID, evidence)
 	return evidence
+}
+
+func observeHarnessFixture(m *Manager, bridge *Bridge, tabID, chatID, sessionID string, update map[string]any) {
+	m.observeHarnessTurn(bridge, tabID, chatID, sessionID, decodeClaudeHarnessTurn(update))
 }
 
 // A background task still running IS the park the user waited 76 minutes on. It
@@ -254,7 +258,7 @@ func TestAdoptedHarnessTurnStartsAndEnds(t *testing.T) {
 		jobsBySession: map[string]*Job{},
 	}
 
-	manager.observeClaudeTurn(bridge, "tab-1", "chat-1", "sess-1", map[string]any{
+	observeHarnessFixture(manager, bridge, "tab-1", "chat-1", "sess-1", map[string]any{
 		"phase": harnessTurnPhaseStarted, "promptId": "p-2", "humanAuthored": false,
 	})
 
@@ -265,7 +269,7 @@ func TestAdoptedHarnessTurnStartsAndEnds(t *testing.T) {
 	if !job.harnessTurn || job.Status != "running" {
 		t.Fatalf("adopted job = %+v, want a running harness turn", job)
 	}
-	manager.observeClaudeTurn(bridge, "tab-1", "chat-1", "sess-1",
+	observeHarnessFixture(manager, bridge, "tab-1", "chat-1", "sess-1",
 		harnessEndedUpdate("p-2", []any{}, []any{}, "completed"))
 
 	if remaining := bridge.jobForSession("sess-1"); remaining != nil {
@@ -286,7 +290,7 @@ func TestHumanAuthoredTurnIsNotAdopted(t *testing.T) {
 		opts: Options{StdoutFlushInterval: time.Hour}, jobsBySession: map[string]*Job{},
 	}
 
-	manager.observeClaudeTurn(bridge, "tab-1", "chat-1", "sess-1", map[string]any{
+	observeHarnessFixture(manager, bridge, "tab-1", "chat-1", "sess-1", map[string]any{
 		"phase": harnessTurnPhaseStarted, "promptId": "p-1", "humanAuthored": true,
 	})
 
@@ -305,7 +309,7 @@ func TestAdoptedHarnessTurnEndsWhenEngineDies(t *testing.T) {
 		opts: Options{StdoutFlushInterval: time.Hour}, jobsBySession: map[string]*Job{},
 	}
 
-	manager.observeClaudeTurn(bridge, "tab-1", "chat-1", "sess-1", map[string]any{
+	observeHarnessFixture(manager, bridge, "tab-1", "chat-1", "sess-1", map[string]any{
 		"phase": harnessTurnPhaseStarted, "promptId": "p-2", "humanAuthored": false,
 	})
 	if bridge.jobForSession("sess-1") == nil {
@@ -333,11 +337,11 @@ func TestSubagentHookIsNotASessionTurn(t *testing.T) {
 	// The host never emits this — a payload carrying a subagent's evidence is
 	// already dropped there. If one ever arrives, adoption must still be keyed
 	// on humanAuthored alone and a second identical start must not re-adopt.
-	manager.observeClaudeTurn(bridge, "tab-1", "chat-1", "sess-1", map[string]any{
+	observeHarnessFixture(manager, bridge, "tab-1", "chat-1", "sess-1", map[string]any{
 		"phase": harnessTurnPhaseStarted, "promptId": "p-2", "humanAuthored": false,
 	})
 	first := bridge.jobForSession("sess-1")
-	manager.observeClaudeTurn(bridge, "tab-1", "chat-1", "sess-1", map[string]any{
+	observeHarnessFixture(manager, bridge, "tab-1", "chat-1", "sess-1", map[string]any{
 		"phase": harnessTurnPhaseStarted, "promptId": "p-2", "humanAuthored": false,
 	})
 	if bridge.jobForSession("sess-1") != first {

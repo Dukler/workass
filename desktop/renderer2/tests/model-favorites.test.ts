@@ -36,25 +36,15 @@ test('toggle adds at the end and removes the exact provider plus model pair', ()
   assert.deepEqual(toggleModelFavorite(second, 'codex', 'gpt-5.6-sol'), [{ providerId: 'claude', modelId: 'opus[1m]' }]);
 });
 
-test('production favorites resolve in saved order and never surface hidden or stale fixtures', () => {
+test('favorites resolve only against the authoritative grouped catalog', () => {
   const resolved = favoriteCatalogModels(groups, [
     { providerId: 'codex', modelId: 'gpt-5.6-sol' },
     { providerId: 'missing', modelId: 'gone' },
     { providerId: 'mock', modelId: 'mock-deterministic' },
     { providerId: 'claude', modelId: 'opus[1m]' },
-  ], 'prod');
-  assert.deepEqual(resolved.map(({ providerId, modelId }) => [providerId, modelId]), [
-    ['codex', 'gpt-5.6-sol'], ['claude', 'opus[1m]'],
   ]);
-});
-
-test('development favorites may resolve fixture models', () => {
-  const resolved = favoriteCatalogModels(groups, [
-    { providerId: 'mock', modelId: 'mock-deterministic' },
-    { providerId: 'codex', modelId: 'gpt-5.6-sol' },
-  ], 'dev');
   assert.deepEqual(resolved.map(({ providerId, modelId }) => [providerId, modelId]), [
-    ['mock', 'mock-deterministic'], ['codex', 'gpt-5.6-sol'],
+    ['codex', 'gpt-5.6-sol'], ['mock', 'mock-deterministic'], ['claude', 'opus[1m]'],
   ]);
 });
 

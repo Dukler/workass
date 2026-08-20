@@ -1,3 +1,5 @@
+import type { CatalogGroup, ProviderRecord } from './wire/types.ts';
+
 // Footer update-card lifecycle. The card used to vanish the instant the daemon
 // re-emitted `providers:updates` with nothing left to update, so a successful
 // update had no visible resolution — it just blinked out mid-spin. This models
@@ -21,16 +23,17 @@ export interface UpdateSignals {
 export const DONE_HOLD_MS = 500;
 export const EXIT_MS = 340;
 
-// Model-family brand ('gpt' | 'claude' | '') for a provider id, so the footer
-// card can show the same brand mark the subagent rows use. Mirrors the daemon's
-// brandForProvider (internal/acp/bridge.go) so the two never drift; '' means no
-// brand mark (e.g. qwen), and ModelIcon renders nothing.
-export function brandForProvider(providerId: string | null | undefined): 'gpt' | 'claude' | '' {
-  const s = String(providerId ?? '').toLowerCase();
-  if (s.includes('codex') || s.includes('gpt') || s.includes('openai')) return 'gpt';
-  if (s.includes('claude') || s.includes('anthropic') || s.includes('opus') ||
-      s.includes('sonnet') || s.includes('haiku') || s.includes('fable')) return 'claude';
-  return '';
+// Provider branding is registration metadata. Identity selects the matching
+// row; it never implies a capability or a model family by itself.
+export function brandForProvider(
+  providerId: string | null | undefined,
+  providers: readonly ProviderRecord[] = [],
+  groups: readonly CatalogGroup[] = [],
+): string {
+  if (!providerId) return '';
+  return groups.find((group) => group.providerId === providerId)?.assistantBrand
+    ?? providers.find((provider) => provider.id === providerId)?.assistantBrand
+    ?? '';
 }
 
 // Next data-driven phase given the previous phase and the current signals. This

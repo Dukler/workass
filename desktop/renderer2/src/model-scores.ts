@@ -11,7 +11,6 @@
 // catalog reads back.
 
 import type { CatalogGroup, ModelOption, ProviderRecord } from './wire/types.ts';
-import { userFacingCatalogGroups, userFacingFlatModels, type WorkassRuntimeProfile } from './model-catalog.ts';
 
 // The rated numeric dimensions, in display order, keyed to the daemon's wire
 // contract: `intelligence`, `taste`, `cost` (higher cost = MORE expensive).
@@ -47,11 +46,6 @@ export type ModelScore = Partial<Record<ScoreDimension, number>> & { note?: stri
 // model id that contains separators can never collide across providers, and the
 // structure round-trips through JSON 1:1.
 export type ModelScores = Record<string, Record<string, ModelScore>>;
-
-// Synthetic provider id for the flat-catalog fallback (an older daemon that
-// exposes no provider groups, only a flat model list). Non-empty and clearly not
-// a real provider slug so guards stay meaningful and it cannot shadow a provider.
-export const FLAT_PROVIDER_ID = '__flat__';
 
 // ---- validation / clamping ------------------------------------------------
 
@@ -269,32 +263,22 @@ function dedupeModels(models: readonly ModelOption[] | undefined): ScoreableMode
   return out;
 }
 
-// Build the ordered provider→models list the scoring panel renders, from the live
-// catalog/state. Prefers the P4 provider-grouped catalog; falls back to the flat
-// model list under a single synthetic group when an older daemon exposes no
-// groups. Models are deduplicated by id within a group and empty groups dropped.
+// Build the ordered provider→models list from the authoritative grouped catalog.
+// A missing group is missing authority; the renderer never invents a provider.
 export function groupModelsForScoring(
   groups: readonly CatalogGroup[],
-  models: readonly ModelOption[],
   providers: readonly ProviderRecord[] = [],
-  profile: WorkassRuntimeProfile = 'prod',
 ): ScoreableGroup[] {
   const nameById = new Map(providers.map((p) => [p.id, p.name] as const));
   const out: ScoreableGroup[] = [];
-  if (groups.length) {
-    for (const group of userFacingCatalogGroups(groups, profile)) {
-      const groupModels = dedupeModels(group.models);
-      if (groupModels.length === 0) continue;
-      out.push({
-        providerId: group.providerId,
-        providerName: group.providerName || nameById.get(group.providerId) || group.providerId,
-        models: groupModels,
-      });
-    }
-    return out;
+  for (const group of groups) {
+    const groupModels = dedupeModels(group.models);
+    if (groupModels.length === 0) continue;
+    out.push({
+      providerId: group.providerId,
+      providerName: group.providerName || nameById.get(group.providerId) || group.providerId,
+      models: groupModels,
+    });
   }
-  const flat = dedupeModels(userFacingFlatModels(models, profile));
-  if (flat.length === 0) return out;
-  out.push({ providerId: FLAT_PROVIDER_ID, providerName: 'Modelos', models: flat });
   return out;
 }

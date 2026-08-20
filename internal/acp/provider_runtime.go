@@ -114,46 +114,6 @@ type ProviderLaneSelection struct {
 	Established bool
 }
 
-// StoredProviderLaneSelections returns the exact canonical lane records for one
-// actor-storage schema upgrade. It performs no provider RPC and never proposes,
-// creates, resumes, or replaces a native thread. Ordinary chat execution must
-// continue to address one lane through ResolveProviderLaneSelection.
-func (m *Manager) StoredProviderLaneSelections(chatID string) ([]ProviderLaneSelection, error) {
-	if m == nil || m.nativeSessions == nil {
-		return nil, errors.New("durable provider lane storage is unavailable")
-	}
-	chatID = strings.TrimSpace(chatID)
-	if chatID == "" {
-		return nil, errors.New("stored provider lane lookup requires chat id")
-	}
-	bindings := m.nativeSessions.bindingsForChat(chatID)
-	out := make([]ProviderLaneSelection, 0, len(bindings))
-	for _, binding := range bindings {
-		identity, thread := bindingLaneIdentity(binding), bindingThreadRef(binding)
-		if err := identity.Validate(); err != nil {
-			return nil, &providercontract.Error{Kind: providercontract.ErrorProtocolViolation, Message: "stored provider lane identity is invalid", Cause: err}
-		}
-		if err := thread.Validate(identity.Realm.ProviderID); err != nil {
-			return nil, &providercontract.Error{Kind: providercontract.ErrorProtocolViolation, Message: "stored provider thread is invalid", Cause: err}
-		}
-		if _, err := m.ProviderDefinition(binding.ProviderID); err != nil {
-			return nil, err
-		}
-		selection := ProviderLaneSelection{
-			Identity: identity, Thread: thread,
-			Owner: providercontract.AttachmentOwner{TabID: strings.TrimSpace(binding.TabID)},
-			CWD:   strings.TrimSpace(binding.CWD), ModelID: strings.TrimSpace(binding.ModelID), ModeID: strings.TrimSpace(binding.ModeID),
-			Context:  providerAdapterForID(binding.ProviderID).context.Capabilities(),
-			Creation: providerAdapterForID(binding.ProviderID).creation, Established: binding.ThreadCommitted,
-		}
-		if !binding.ThreadCommitted {
-			selection.Creation.DeferredUntilInput = true
-		}
-		out = append(out, selection)
-	}
-	return out, nil
-}
-
 // ResolveProviderLaneSelection performs no provider RPC. It is the single
 // identity resolver used by the durable chat actor before SelectLane. Existing
 // bindings are returned exactly; new selections receive a conservative realm
@@ -243,7 +203,9 @@ func (m *Manager) LiveProviderLaneInfo(selection ProviderLaneSelection) (Session
 	if !ok || live.ChatID != selection.Identity.ChatID || live.Info.ProviderID != string(selection.Identity.Realm.ProviderID) {
 		return SessionInfo{}, false
 	}
-	return live.Info, true
+	info := live.Info
+	info.DeliveryCapabilities = DeliveryCapabilitiesForWire(selection.Delivery)
+	return info, true
 }
 
 // SetProviderAttachmentResolver installs the daemon's one content-addressed
@@ -796,6 +758,8 @@ func (l *managerLane) AttachmentSnapshot() providercontract.LaneAttachmentSnapsh
 		CurrentModelID:          stringValue(info.CurrentModelID),
 		CurrentModeID:           stringValue(info.CurrentModeID),
 		ImageSupport:            info.ImageSupport,
+		PlanUsageSupported:      info.PlanUsageSupported,
+		PlanUsageResetSupported: info.PlanUsageResetSupported,
 		CommandCatalogSupported: info.CommandCatalogSupported,
 		Models:                  make([]providercontract.RuntimeModel, len(info.Models)),
 		Modes:                   make([]providercontract.RuntimeMode, len(info.Modes)),
@@ -1109,12 +1073,11 @@ func (d managerLaneDelivery) Capabilities() providercontract.DeliveryCapabilitie
 	adapter := providerAdapterForID(d.lane.info.ProviderID)
 	standardACPReceipt := adapter.input != nil && adapter.input.StandardACPActivity()
 	explicitReceipt := bridge.hasProviderCapability("workassStableTurnInputV1")
-	return providercontract.DeliveryCapabilities{
-		StableInputIdentity: standardACPReceipt || explicitReceipt,
-		LiveSteer:           bridge.hasProviderCapability("steerNotification", "sessionSteer", "workassCodexSteerRequest", "workassClaudeSteerRequest"),
-		ConsumptionReceipt:  standardACPReceipt || explicitReceipt,
-		TurnReadback:        bridge.hasProviderCapability("workassOperationReadbackV1", "workassTurnReconcileRequest"),
-	}
+	capabilities := adapter.delivery.Capabilities(bridge)
+	capabilities.StableInputIdentity = standardACPReceipt || explicitReceipt
+	capabilities.ConsumptionReceipt = standardACPReceipt || explicitReceipt
+	capabilities.TurnReadback = bridge.hasProviderCapability("workassOperationReadbackV1", "workassTurnReconcileRequest")
+	return capabilities
 }
 
 func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontract.TurnInput) (providercontract.TurnAdmission, error) {

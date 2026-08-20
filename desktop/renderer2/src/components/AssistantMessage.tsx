@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useCallback, useMemo, useSyncExternalStore } from 'react';
 import type { MessageImage, Msg, ThinkingEvent, TimelineEvent } from '../store/types';
 import { store, useApp, useMsgVersion, useConnStatus, useClock } from '../store/store';
 import { parseBlocks } from '../markdown/blocks';
@@ -6,11 +6,10 @@ import { MarkdownBlock } from '../markdown/MarkdownBlock';
 import { StepRow, StepWords, ToolGroup, PermCard, CompactionRow, RestoredRow } from './messages';
 import { IcStampCopy, IcWarnTri, IcRetryArc } from '../icons';
 import { whimsyFor } from '../turn-whimsy';
-import { buildTranscriptTimelineSegments, detachTimelineEvent, stableMarkdownBlockKeys } from '../timeline-layout';
+import { buildCoalescedTurnBlockTimelineSegments, buildTranscriptTimelineSegments, detachTimelineEvent, stableMarkdownBlockKeys } from '../timeline-layout';
 import type { TranscriptTimelineSegment } from '../timeline-layout';
 import { fullAssistantText } from '../assistant-output';
 import { relTime } from '../rel-time';
-import type { WorkassRuntimeProfile } from '../model-catalog';
 import { messageImageSrc } from '../image-drafts';
 import { normalizeMarkdownTarget, type InlineMediaResolver } from '../markdown/inline';
 
@@ -70,7 +69,6 @@ function AssistantSliceBody({
   terminal,
   turnSeq,
   connection,
-  profile,
   coalescedSegments,
 }: {
   tabId: string;
@@ -79,7 +77,6 @@ function AssistantSliceBody({
   terminal: boolean;
   turnSeq?: number;
   connection: ReturnType<typeof useConnStatus>;
-  profile: WorkassRuntimeProfile;
   coalescedSegments?: TranscriptTimelineSegment[];
 }) {
   // Thinking is displayed once at the turn tail (or in the live dock), never
@@ -89,7 +86,7 @@ function AssistantSliceBody({
   const thinkEv: ThinkingEvent | null =
     [...msg.events].reverse().find((e): e is ThinkingEvent => e.kind === 'thinking') ?? null;
   const segs = detachTimelineEvent(
-    coalescedSegments ?? buildTranscriptTimelineSegments(msg, profile),
+    coalescedSegments ?? buildTranscriptTimelineSegments(msg),
     thinkEv?.key,
   );
   const parsedSegments = segs.map((segment) => 'prose' in segment ? parseBlocks(segment.prose) : null);
@@ -178,16 +175,26 @@ interface AssistantBodyProps {
   tabId: string;
   msg: Msg;
   turnSeq?: number;
-  profile: WorkassRuntimeProfile;
   coalescedSegments?: TranscriptTimelineSegment[];
 }
 
-function AssistantBody({ tabId, msg, turnSeq, profile, coalescedSegments }: AssistantBodyProps) {
-  // Subscribe to this canonical message's topic; token streams bump only this.
-  useMsgVersion(msg.id);
-  // Only re-renders on the rare connection transition (dedicated topic), so the
-  // Reintentar affordance can enable/disable live without APP-bump coupling.
-  const connection = useConnStatus();
+interface AssistantRowViewProps extends AssistantBodyProps {
+  version: number;
+  connection: ReturnType<typeof useConnStatus>;
+}
+
+// Pure versioned view shared by singleton messages and multi-slice turn blocks.
+// `Msg` objects are intentionally updated in place, so their topic version is
+// the immutable React prop that makes a changed slice cross memoization. The
+// cross-slice timeline cache keeps every unaffected slice's segment reference
+// stable and lets this comparator skip it completely.
+const AssistantRowView = memo(function AssistantRowView({
+  tabId,
+  msg,
+  turnSeq,
+  coalescedSegments,
+  connection,
+}: AssistantRowViewProps) {
   return (
     <AssistantSliceBody
       tabId={tabId}
@@ -196,9 +203,82 @@ function AssistantBody({ tabId, msg, turnSeq, profile, coalescedSegments }: Assi
       terminal={msg.turnTerminal !== false}
       turnSeq={msg.turnTerminal === false ? undefined : turnSeq}
       connection={connection}
-      profile={profile}
       coalescedSegments={coalescedSegments}
     />
+  );
+}, (a, b) => (
+  a.tabId === b.tabId
+  && a.msg === b.msg
+  && a.version === b.version
+  && a.turnSeq === b.turnSeq
+  && a.connection === b.connection
+  && a.coalescedSegments === b.coalescedSegments
+));
+
+function AssistantBody({ tabId, msg, turnSeq, coalescedSegments }: AssistantBodyProps) {
+  // Subscribe to this canonical message's topic; token streams bump only this.
+  const version = useMsgVersion(msg.id);
+  // Only re-renders on the rare connection transition (dedicated topic), so the
+  // Reintentar affordance can enable/disable live without APP-bump coupling.
+  const connection = useConnStatus();
+  return (
+    <AssistantRowView
+      tabId={tabId}
+      msg={msg}
+      version={version}
+      turnSeq={turnSeq}
+      connection={connection}
+      coalescedSegments={coalescedSegments}
+    />
+  );
+}
+
+function useTurnBlockMessageVersions(messageIdsKey: string): void {
+  const messageIds = useMemo(() => messageIdsKey ? messageIdsKey.split('\0') : [], [messageIdsKey]);
+  const subscribe = useCallback((callback: () => void) => {
+    const unsubscribers = messageIds.map((messageId) => store.subscribe(`msg:${messageId}`, callback));
+    return () => { for (const unsubscribe of unsubscribers) unsubscribe(); };
+  }, [messageIds]);
+  const snapshot = useCallback(() => {
+    let version = 0;
+    for (const messageId of messageIds) version += store.version(`msg:${messageId}`);
+    return version;
+  }, [messageIds]);
+  useSyncExternalStore(subscribe, snapshot, snapshot);
+}
+
+interface AssistantTurnBlockProps {
+  tabId: string;
+  messages: Msg[];
+  turnSeqs: Array<number | undefined>;
+}
+
+// A steered turn can span several canonical assistant rows. Cross-row tool
+// folds require those rows to share one layout calculation, but streaming must
+// never subscribe the whole Transcript to their token topics. This leaf is the
+// sole multi-row subscription owner; its pure row views receive primitive topic
+// versions, so only the changed slice reconciles. Fragments preserve the exact
+// per-message DOM shape used by ordinary singleton rows.
+export function AssistantTurnBlock({ tabId, messages, turnSeqs }: AssistantTurnBlockProps) {
+  const messageIdsKey = messages.map((message) => message.id).join('\0');
+  useTurnBlockMessageVersions(messageIdsKey);
+  const connection = useConnStatus();
+  const coalesced = buildCoalescedTurnBlockTimelineSegments(messages);
+  return (
+    <>
+      {messages.map((msg, index) => (
+        <div className="chatfind-message" data-chat-find-message={msg.id} key={msg.id}>
+          <AssistantRowView
+            tabId={tabId}
+            msg={msg}
+            version={store.version(`msg:${msg.id}`)}
+            turnSeq={turnSeqs[index]}
+            connection={connection}
+            coalescedSegments={coalesced[index]}
+          />
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -304,6 +384,5 @@ export const AssistantMessage = memo(AssistantBody, (a, b) => (
   a.tabId === b.tabId
   && a.msg === b.msg
   && a.turnSeq === b.turnSeq
-  && a.profile === b.profile
   && a.coalescedSegments === b.coalescedSegments
 ));

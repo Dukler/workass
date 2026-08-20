@@ -93,6 +93,8 @@ async function startWindowsUpdateLockRecovery({
   executablePath = process.execPath,
   dataRoot,
   appVersion,
+  installationId,
+  installTarget,
   env = process.env,
   windowIcon = '',
   statusURL = DEFAULT_STATUS_URL,
@@ -107,8 +109,10 @@ async function startWindowsUpdateLockRecovery({
   timeoutMs = 110000,
 } = {}) {
   if (!app || !path.isAbsolute(String(dataRoot || '')) || !String(appVersion || '').trim() ||
+      !/^install-[a-f0-9]{32}$/.test(String(installationId || '')) ||
+      !path.isAbsolute(String(installTarget || '')) ||
       !String(daemonHealthURL || '').trim()) {
-    throw new Error('Windows update lock recovery requires an app, data root, version, and daemon health URL');
+    throw new Error('Windows update lock recovery requires an app, data root, version, installation identity, install target, and daemon health URL');
   }
   const recoveryRoot = updateLockRecoveryUserData(dataRoot);
   fs.mkdirSync(recoveryRoot, { recursive: true, mode: 0o700 });
@@ -142,7 +146,11 @@ async function startWindowsUpdateLockRecovery({
       readDaemon(daemonHealthURL),
     ]);
     if (daemon?.app === 'workass' && daemon?.version === appVersion &&
-        status?.appVersion === appVersion && status?.controller === true && status?.windowVisible === true) {
+        status?.appVersion === appVersion && status?.installationId === installationId &&
+        path.win32.normalize(String(status?.installTarget || '')).toLowerCase() ===
+          path.win32.normalize(installTarget).toLowerCase() &&
+        status?.controller === true && status?.windowVisible === true &&
+        Number.isSafeInteger(status?.catalog?.readyModelCount) && status.catalog.readyModelCount > 0) {
       stop();
       try { win.close?.(); } catch { /* updater may already be stopping us */ }
       quit();

@@ -2,6 +2,7 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -152,66 +153,23 @@ func TestNativeOperationWriteFailureDoesNotPublishDispatchInMemory(t *testing.T)
 	}
 }
 
-func TestProviderLaneStoreV7DeferredReferenceNeedsNativeEvidence(t *testing.T) {
+func TestProviderLaneStoreRejectsUnsupportedVersionWithoutWriting(t *testing.T) {
 	stateDir := t.TempDir()
 	path := filepath.Join(stateDir, nativeSessionLedgerFilename)
-	source := map[string]any{
-		"v": 7,
-		"bindings": []any{map[string]any{
-			"tabId": "v7-tab", "chatId": "v7-chat", "providerId": "codex",
-			"sessionId": "v7-thread", "cwd": stateDir,
-		}},
-	}
-	raw, err := json.Marshal(source)
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw := []byte(`{"v":7,"bindings":[]}`)
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ledger := newNativeSessionLedger(stateDir)
-	if ledger.loadErr != nil {
-		t.Fatalf("upgrade v7 lane store: %v", ledger.loadErr)
+	if ledger.loadErr == nil || !strings.Contains(ledger.loadErr.Error(), "schema v7 is unsupported") {
+		t.Fatalf("unsupported provider lane schema was accepted: %v", ledger.loadErr)
 	}
-	binding, ok := ledger.get("v7-tab", "v7-chat", "codex")
-	if !ok || binding.ThreadCommitted || binding.SessionID != "v7-thread" {
-		t.Fatalf("receiptless v7 Codex reference was not kept provisional: ok=%v binding=%#v", ok, binding)
-	}
-}
-
-func TestProviderLaneStoreV7CommitsOnlyNativeEvidenceOrImmediateCreation(t *testing.T) {
-	stateDir := t.TempDir()
-	path := filepath.Join(stateDir, nativeSessionLedgerFilename)
-	source := nativeSessionLedgerFile{Version: providerLaneStoreV7Version, Bindings: []nativeSessionBinding{
-		{
-			TabID: "consumed-tab", ChatID: "consumed-chat", ProviderID: "codex",
-			SessionID: "consumed-thread", CWD: stateDir,
-			LastOperation: &nativeOperationRecord{
-				OperationID: "consumed-operation", PromptDigest: "digest", State: nativeOperationTerminal,
-				UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
-			},
-		},
-		{TabID: "immediate-tab", ChatID: "immediate-chat", ProviderID: "mock", SessionID: "immediate-thread", CWD: stateDir},
-	}}
-	raw, err := json.Marshal(source)
+	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ledger := newNativeSessionLedger(stateDir)
-	if ledger.loadErr != nil {
-		t.Fatal(ledger.loadErr)
-	}
-	for _, key := range [][3]string{
-		{"consumed-tab", "consumed-chat", "codex"},
-		{"immediate-tab", "immediate-chat", "mock"},
-	} {
-		binding, ok := ledger.get(key[0], key[1], key[2])
-		if !ok || !binding.ThreadCommitted {
-			t.Fatalf("durable v7 evidence was not committed for %v: ok=%v binding=%#v", key, ok, binding)
-		}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("unsupported provider lane store was rewritten: got=%q want=%q", got, raw)
 	}
 }
 
@@ -478,8 +436,8 @@ func TestMockNativeSessionResumesExactThreadAcrossManagerRestart(t *testing.T) {
 	if _, err := firstManager.SetMode(context.Background(), firstSession.SessionID, "bypass"); err != nil {
 		t.Fatalf("set native mode: %v", err)
 	}
-	firstEnd := fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "first native turn", nil)
-	firstHistory := archiveHistoryForEndedJob(t, fixture.stateDir, firstEnd, "first native turn")
+	firstEnd := fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "first native turn")
+	archiveHistoryForEndedJob(t, fixture.stateDir, firstEnd, "first native turn")
 	firstManager.Reset()
 
 	secondManager, secondEvents := fixture.newManager()
@@ -491,7 +449,7 @@ func TestMockNativeSessionResumesExactThreadAcrossManagerRestart(t *testing.T) {
 	if stringPointer(resumed.CurrentModelID) != "mock-deterministic[high]" || stringPointer(resumed.CurrentModeID) != "bypass" {
 		t.Fatalf("resumed controls = model %q mode %q", stringPointer(resumed.CurrentModelID), stringPointer(resumed.CurrentModeID))
 	}
-	secondEnd := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "second native turn", firstHistory)
+	secondEnd := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "second native turn")
 	result := asString(jobFromEnd(secondEnd)["result"])
 	if !strings.Contains(result, "Mock ACP turn 2:") {
 		t.Fatalf("provider turn counter did not resume: %q", result)
@@ -509,7 +467,7 @@ func TestMockNativeSessionLoadAttachesTheExactThreadWithoutPublishingReplay(t *t
 	fixture := newPersistentMockFixture(t, "load")
 	firstManager, firstEvents := fixture.newManager()
 	first := fixture.newSession(t, firstManager)
-	end := fixture.runTurn(t, firstManager, firstEvents, first.SessionID, "durable native turn", nil)
+	end := fixture.runTurn(t, firstManager, firstEvents, first.SessionID, "durable native turn")
 	archiveHistoryForEndedJob(t, fixture.stateDir, end, "durable native turn")
 	firstManager.Reset()
 
@@ -528,7 +486,7 @@ func TestMockNativeSessionLoadAttachesTheExactThreadWithoutPublishingReplay(t *t
 	if !ok || binding.SessionID != first.SessionID {
 		t.Fatalf("same-id load changed the durable binding: %#v ok=%v", binding, ok)
 	}
-	secondEnd := fixture.runTurn(t, secondManager, secondEvents, loaded.SessionID, "after exact load", nil)
+	secondEnd := fixture.runTurn(t, secondManager, secondEvents, loaded.SessionID, "after exact load")
 	if result := asString(jobFromEnd(secondEnd)["result"]); !strings.Contains(result, "Mock ACP turn 2:") {
 		t.Fatalf("same-id load did not preserve provider context: %q", result)
 	}
@@ -548,7 +506,7 @@ func TestExactAttachmentDoesNotTryLoadAfterSelectedResumeFails(t *testing.T) {
 	fixture := newPersistentMockFixture(t, "both")
 	firstManager, firstEvents := fixture.newManager()
 	first := fixture.newSession(t, firstManager)
-	fixture.runTurn(t, firstManager, firstEvents, first.SessionID, "durable native turn", nil)
+	fixture.runTurn(t, firstManager, firstEvents, first.SessionID, "durable native turn")
 	firstManager.Reset()
 
 	secondManager, _ := fixture.newManagerTuned(func(opts *Options) {
@@ -574,7 +532,7 @@ func TestExactLoadRejectsAChangedProviderThreadIdentity(t *testing.T) {
 	fixture := newPersistentMockFixture(t, "load")
 	firstManager, firstEvents := fixture.newManager()
 	first := fixture.newSession(t, firstManager)
-	fixture.runTurn(t, firstManager, firstEvents, first.SessionID, "durable native turn", nil)
+	fixture.runTurn(t, firstManager, firstEvents, first.SessionID, "durable native turn")
 	firstManager.Reset()
 
 	secondManager, _ := fixture.newManagerTuned(func(opts *Options) {
@@ -596,7 +554,7 @@ func TestMockNativeSessionNeverResumesAfterConversationIdentityChanges(t *testin
 	fixture := newPersistentMockFixture(t, "resume")
 	firstManager, firstEvents := fixture.newManager()
 	firstSession := fixture.newSession(t, firstManager)
-	fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "original owner turn", nil)
+	fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "original owner turn")
 	firstManager.Reset()
 
 	secondManager, _ := fixture.newManager()
@@ -622,14 +580,13 @@ func TestMockNativeSessionUnseenWorkassHistoryDoesNotGovernExactResume(t *testin
 	fixture := newPersistentMockFixture(t, "resume")
 	firstManager, firstEvents := fixture.newManager()
 	firstSession := fixture.newSession(t, firstManager)
-	firstEnd := fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "first native turn", nil)
-	history := archiveHistoryForEndedJob(t, fixture.stateDir, firstEnd, "first native turn")
+	firstEnd := fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "first native turn")
+	archiveHistoryForEndedJob(t, fixture.stateDir, firstEnd, "first native turn")
 	extra := []historyMessage{
 		{Role: "user", Content: "turn handled by another provider", At: "2026-07-12T01:00:00Z"},
 		{Role: "assistant", Content: "other provider answer", At: "2026-07-12T01:00:01Z"},
 	}
 	appendNativeTestArchive(t, fixture.stateDir, extra)
-	history = append(history, extra...)
 	firstManager.Reset()
 
 	secondManager, secondEvents := fixture.newManager()
@@ -638,9 +595,9 @@ func TestMockNativeSessionUnseenWorkassHistoryDoesNotGovernExactResume(t *testin
 	if resumed.SessionID != firstSession.SessionID {
 		t.Fatalf("history mismatch replaced the native session: first=%s resumed=%s", firstSession.SessionID, resumed.SessionID)
 	}
-	secondEnd := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "after provider switch", history)
+	secondEnd := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "after provider switch")
 	if job := jobFromEnd(secondEnd); asString(job["status"]) != "done" {
-		t.Fatalf("renderer history incorrectly governed exact native resume: %#v", job)
+		t.Fatalf("Workass archive incorrectly governed exact native resume: %#v", job)
 	}
 	trace := readNativeMockTrace(t, fixture.traceFile)
 	if traceContains(trace, "WORKASS HISTORY DELTA SYNC") || traceContains(trace, "turn handled by another provider") || traceContains(trace, "other provider answer") || !traceContains(trace, "after provider switch") {
@@ -657,7 +614,7 @@ func TestMockNativeSessionDivergenceDoesNotGovernExactResume(t *testing.T) {
 	fixture := newPersistentMockFixture(t, "resume")
 	firstManager, firstEvents := fixture.newManager()
 	firstSession := fixture.newSession(t, firstManager)
-	firstEnd := fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "original turn", nil)
+	firstEnd := fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "original turn")
 	history := archiveHistoryForEndedJob(t, fixture.stateDir, firstEnd, "original turn")
 	firstManager.Reset()
 
@@ -671,7 +628,7 @@ func TestMockNativeSessionDivergenceDoesNotGovernExactResume(t *testing.T) {
 	if resumed.SessionID != firstSession.SessionID {
 		t.Fatalf("divergence replaced the exact provider session: first=%s resumed=%s", firstSession.SessionID, resumed.SessionID)
 	}
-	end := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "continue after rewrite", history)
+	end := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "continue after rewrite")
 	job := jobFromEnd(end)
 	if asString(job["status"]) != "done" {
 		t.Fatalf("renderer archive divergence incorrectly blocked native resume: %#v", job)
@@ -686,8 +643,8 @@ func TestMockNativeSessionInFlightGuardResumesExactThreadAndBlocksAdmission(t *t
 	fixture := newPersistentMockFixture(t, "resume")
 	firstManager, firstEvents := fixture.newManager()
 	firstSession := fixture.newSession(t, firstManager)
-	firstEnd := fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "durable turn", nil)
-	history := archiveHistoryForEndedJob(t, fixture.stateDir, firstEnd, "durable turn")
+	firstEnd := fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "durable turn")
+	archiveHistoryForEndedJob(t, fixture.stateDir, firstEnd, "durable turn")
 	binding, ok := firstManager.nativeSessions.get("native-tab", "native-chat", "mock")
 	if !ok || !firstManager.nativeSessions.markInFlight("native-tab", "native-chat", "mock", firstSession.SessionID, binding.Generation, "", "", "operation-crash", "prompt-digest-crash") {
 		t.Fatal("could not simulate daemon death after provider prompt dispatch")
@@ -700,7 +657,7 @@ func TestMockNativeSessionInFlightGuardResumesExactThreadAndBlocksAdmission(t *t
 	if resumed.SessionID != firstSession.SessionID {
 		t.Fatalf("in-flight ambiguity replaced the native thread: first=%s resumed=%s", firstSession.SessionID, resumed.SessionID)
 	}
-	end := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "recover after daemon crash", history)
+	end := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "recover after daemon crash")
 	job := jobFromEnd(end)
 	if asString(job["status"]) != "failed" || !strings.Contains(asString(job["result"]), "unresolved delivery operation") {
 		t.Fatalf("ambiguous in-flight lane did not block admission: %#v", job)
@@ -716,7 +673,7 @@ func TestMockNativeSessionTerminalOperationReadbackClearsOnlyExactPendingID(t *t
 	fixture.operationReadback = true
 	firstManager, firstEvents := fixture.newManager()
 	firstSession := fixture.newSession(t, firstManager)
-	fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "provider completed this operation", nil)
+	fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "provider completed this operation")
 	binding, ok := firstManager.nativeSessions.get("native-tab", "native-chat", "mock")
 	if !ok || binding.LastOperation == nil || binding.LastOperation.OperationID == "" {
 		t.Fatalf("completed operation receipt missing: %#v", binding)
@@ -740,7 +697,7 @@ func TestMockNativeSessionTerminalOperationReadbackClearsOnlyExactPendingID(t *t
 	if !ok || reconciled.PendingOperation != nil || reconciled.LastOperation == nil || reconciled.LastOperation.State != nativeOperationTerminal || reconciled.LastOperation.OperationID != completedOperationID {
 		t.Fatalf("terminal provider readback did not settle exact operation: %#v", reconciled)
 	}
-	end := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "turn after terminal reconciliation", nil)
+	end := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "turn after terminal reconciliation")
 	if job := jobFromEnd(end); asString(job["status"]) != "done" {
 		t.Fatalf("reconciled lane did not admit the next turn: %#v", job)
 	}
@@ -770,7 +727,7 @@ func TestMockNativeSessionAuthoritativeAbsentReadbackClearsUnsentOperation(t *te
 	if !ok || reconciled.PendingOperation != nil || reconciled.LastOperation == nil || reconciled.LastOperation.State != nativeOperationAbsent || reconciled.LastOperation.OperationID != "operation-never-sent" {
 		t.Fatalf("authoritative absence did not clear the unsent operation: %#v", reconciled)
 	}
-	end := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "turn after absent reconciliation", nil)
+	end := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "turn after absent reconciliation")
 	if job := jobFromEnd(end); asString(job["status"]) != "done" {
 		t.Fatalf("absent-reconciled lane did not admit the next turn: %#v", job)
 	}
@@ -789,7 +746,7 @@ func TestMockNativeSessionResumeAfterHibernationDoesNotCollide(t *testing.T) {
 	t.Cleanup(func() { manager.Reset() })
 
 	first := fixture.newSession(t, manager)
-	end := fixture.runTurn(t, manager, events, first.SessionID, "turn before hibernation", nil)
+	end := fixture.runTurn(t, manager, events, first.SessionID, "turn before hibernation")
 	archiveHistoryForEndedJob(t, fixture.stateDir, end, "turn before hibernation")
 	_ = waitProcState(t, manager, StateHibernated, 2*time.Second)
 
@@ -893,14 +850,10 @@ func (f *persistentMockFixture) newSession(t *testing.T, manager *Manager) Sessi
 	return session
 }
 
-func (f *persistentMockFixture) runTurn(t *testing.T, manager *Manager, events *eventCollector, sessionID, prompt string, history []historyMessage) map[string]any {
-	rawHistory := make([]any, 0, len(history))
-	for _, message := range history {
-		rawHistory = append(rawHistory, map[string]any{"role": message.Role, "content": message.Content, "at": message.At})
-	}
+func (f *persistentMockFixture) runTurn(t *testing.T, manager *Manager, events *eventCollector, sessionID, prompt string) map[string]any {
 	job, err := manager.StartJob(context.Background(), JobStartOptions{
 		Kind: "app-chat", SessionID: sessionID, TabID: "native-tab", ChatID: "native-chat",
-		ProviderID: "mock", Prompt: prompt, History: rawHistory,
+		ProviderID: "mock", Prompt: prompt,
 	})
 	if err != nil {
 		t.Fatalf("start native mock turn: %v", err)

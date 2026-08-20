@@ -9,14 +9,19 @@ import (
 // seedBackgroundServiceBash reproduces the exact path a dev server takes into
 // the registry today: Claude runs it with run_in_background, so it arrives as
 // passively observed background Bash with an output file and no declaration.
-func seedBackgroundServiceBash(manager *Manager, taskID, output, command string) {
-	manager.observeSpawnToolEvent(spawnToolObservation{
+func seedBackgroundServiceBash(t *testing.T, manager *Manager, taskID, output, command string) {
+	t.Helper()
+	observeRawSpawnToolFixture(t, manager, spawnToolObservation{
 		SessionID: "session-1", TabID: "tab-1", ChatID: "chat-1", ProviderID: "claude", ToolCallID: "tool-" + taskID,
+		Title: "Bash", Command: command,
+	}, providerRawToolObservation{
 		Title: "Bash", Command: command, RawInput: map[string]any{"run_in_background": true},
 		Meta: map[string]any{"claudeCode": map[string]any{"toolName": "Bash"}},
 	})
-	manager.observeSpawnToolEvent(spawnToolObservation{
+	observeRawSpawnToolFixture(t, manager, spawnToolObservation{
 		SessionID: "session-1", TabID: "tab-1", ChatID: "chat-1", ProviderID: "claude", ToolCallID: "tool-" + taskID,
+		Title: "Bash",
+	}, providerRawToolObservation{
 		Title: "Bash", Meta: map[string]any{"claudeCode": map[string]any{"toolName": "Bash"}},
 		Output: "Command running in background with ID: " + taskID + "\nOutput is being written to: " + output,
 	})
@@ -87,7 +92,7 @@ func TestQuietListenerBecomesAServiceAndStopsReportingTheChatBusy(t *testing.T) 
 	listening := true
 	output := spawnedWorkTestOutput(t, "bash-expo")
 	manager := serviceProbeManager(t, output, &listening)
-	seedBackgroundServiceBash(manager, "bash-expo", output, "npx expo start")
+	seedBackgroundServiceBash(t, manager, "bash-expo", output, "npx expo start")
 
 	if !manager.hasRunningSpawnedWorkForChat("tab-1", "chat-1") {
 		t.Fatal("a freshly spawned background process must count as work until it is classified")
@@ -138,7 +143,7 @@ func TestListenerInAChildProcessStillClassifiesTheLane(t *testing.T) {
 		},
 	})
 	t.Cleanup(func() { manager.Reset() })
-	seedBackgroundServiceBash(manager, "bash-npx", output, "npx expo start")
+	seedBackgroundServiceBash(t, manager, "bash-npx", output, "npx expo start")
 
 	manager.reconcileSpawnedWork()
 	manager.reconcileSpawnedWork()
@@ -160,7 +165,7 @@ func TestListenerThatKeepsWritingStaysWork(t *testing.T) {
 	manager := serviceProbeManager(t, output, &listening)
 	// `go test ./internal/httpserve` binds a listener for its whole run. Only the
 	// output it keeps writing separates it from a booted server.
-	seedBackgroundServiceBash(manager, "bash-tests", output, "go test ./internal/httpserve")
+	seedBackgroundServiceBash(t, manager, "bash-tests", output, "go test ./internal/httpserve")
 
 	for i := 0; i < 4; i++ {
 		manager.reconcileSpawnedWork()
@@ -179,7 +184,7 @@ func TestQuietProcessWithoutAListenerStaysWork(t *testing.T) {
 	output := spawnedWorkTestOutput(t, "bash-link")
 	manager := serviceProbeManager(t, output, &listening)
 	// A long link step is silent for minutes without being a server.
-	seedBackgroundServiceBash(manager, "bash-link", output, "cargo build --release")
+	seedBackgroundServiceBash(t, manager, "bash-link", output, "cargo build --release")
 
 	manager.reconcileSpawnedWork()
 	manager.reconcileSpawnedWork()
@@ -205,7 +210,7 @@ func TestFailedListenProbeNeverClassifies(t *testing.T) {
 		SpawnedWorkListenProbe: func([]int) (map[int]bool, bool) { return nil, false },
 	})
 	t.Cleanup(func() { manager.Reset() })
-	seedBackgroundServiceBash(manager, "bash-unprobed", output, "npx expo start")
+	seedBackgroundServiceBash(t, manager, "bash-unprobed", output, "npx expo start")
 
 	for i := 0; i < 4; i++ {
 		manager.reconcileSpawnedWork()

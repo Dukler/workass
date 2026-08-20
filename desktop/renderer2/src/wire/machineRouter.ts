@@ -203,9 +203,6 @@ export function createMachineRouter(options: MachineRouterOptions): WorkassApi {
   return out as WorkassApi;
 }
 
-export const ROUTED_METHODS: ReadonlyArray<keyof WorkassApi> = REMOTE_METHODS.map(([method]) => method);
-export const ROUTED_EVENTS: ReadonlyArray<keyof WorkassApi> = REMOTE_EVENTS.map(([method]) => method);
-
 /** method → channel, so a replayed subscription can reach the remote sink
  *  without going through the router method (which would also re-subscribe the
  *  local bridge and duplicate every delivery). */

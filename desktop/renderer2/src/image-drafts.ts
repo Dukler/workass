@@ -175,9 +175,3 @@ export function queuedJob(item: QueuedMsg): { prompt: string; images?: MessageIm
 export function afterQueuedAcceptance(queue: QueuedMsg[], id: string, accepted: boolean): QueuedMsg[] {
   return accepted ? queue.filter((item) => item.id !== id) : queue;
 }
-
-export function promoteQueuedMessage(queue: QueuedMsg[], id: string): { item?: QueuedMsg; queue: QueuedMsg[] } {
-  const item = queue.find((candidate) => candidate.id === id);
-  if (!item) return { queue };
-  return { item, queue: queue.filter((candidate) => candidate.id !== id) };
-}

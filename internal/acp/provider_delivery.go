@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	providercontract "workass/internal/provider"
 )
 
 type providerSteerRequest struct {
@@ -57,6 +59,7 @@ func (o providerSteerOutcome) payload() map[string]any {
 }
 
 type providerDeliveryStrategy interface {
+	Capabilities(*Bridge) providercontract.DeliveryCapabilities
 	Steer(*Bridge, providerSteerRequest) providerSteerOutcome
 	AssistantPhase(map[string]any) string
 }
@@ -64,6 +67,38 @@ type providerDeliveryStrategy interface {
 type genericACPDeliveryStrategy struct{}
 type codexDeliveryStrategy struct{}
 type claudeDeliveryStrategy struct{}
+
+func standardACPSteerCapabilities(b *Bridge) (providercontract.DeliveryCapabilities, bool) {
+	if b == nil || !b.hasProviderCapability("steerNotification", "sessionSteer") {
+		return providercontract.DeliveryCapabilities{}, false
+	}
+	return providercontract.DeliveryCapabilities{LiveSteer: true}, true
+}
+
+func (genericACPDeliveryStrategy) Capabilities(b *Bridge) providercontract.DeliveryCapabilities {
+	capabilities, _ := standardACPSteerCapabilities(b)
+	return capabilities
+}
+
+func (codexDeliveryStrategy) Capabilities(b *Bridge) providercontract.DeliveryCapabilities {
+	if b == nil || !b.hasProviderCapability("workassCodexSteerRequest") {
+		return providercontract.DeliveryCapabilities{}
+	}
+	return providercontract.DeliveryCapabilities{
+		LiveSteer:               true,
+		SteerConsumptionReceipt: b.hasProviderCapability("workassCodexSteerReceipt"),
+	}
+}
+
+func (claudeDeliveryStrategy) Capabilities(b *Bridge) providercontract.DeliveryCapabilities {
+	if b == nil || !b.hasProviderCapability("workassClaudeSteerRequest") {
+		return providercontract.DeliveryCapabilities{}
+	}
+	return providercontract.DeliveryCapabilities{
+		LiveSteer:               true,
+		SteerConsumptionReceipt: b.hasProviderCapability("workassClaudeSteerReceipt"),
+	}
+}
 
 func standardAssistantPhase(update map[string]any) string {
 	meta := mapFromAny(update["_meta"])
@@ -102,7 +137,7 @@ func (codexDeliveryStrategy) AssistantPhase(update map[string]any) string {
 }
 
 func tryStandardACPSteer(b *Bridge, request providerSteerRequest) (providerSteerOutcome, bool) {
-	if !b.hasProviderCapability("steerNotification", "sessionSteer") {
+	if capabilities, supported := standardACPSteerCapabilities(b); !supported || !capabilities.LiveSteer {
 		return providerSteerOutcome{}, false
 	}
 	if !b.notify("_session/steer", map[string]any{"sessionId": request.sessionID, "prompt": request.prompt}) {
@@ -124,9 +159,6 @@ func (genericACPDeliveryStrategy) Steer(b *Bridge, request providerSteerRequest)
 }
 
 func (codexDeliveryStrategy) Steer(b *Bridge, request providerSteerRequest) providerSteerOutcome {
-	if outcome, handled := tryStandardACPSteer(b, request); handled {
-		return outcome
-	}
 	if b.hasProviderCapability("workassCodexSteerRequest") {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -184,9 +216,6 @@ func (codexDeliveryStrategy) Steer(b *Bridge, request providerSteerRequest) prov
 }
 
 func (claudeDeliveryStrategy) Steer(b *Bridge, request providerSteerRequest) providerSteerOutcome {
-	if outcome, handled := tryStandardACPSteer(b, request); handled {
-		return outcome
-	}
 	if b.hasProviderCapability("workassClaudeSteerRequest") {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()

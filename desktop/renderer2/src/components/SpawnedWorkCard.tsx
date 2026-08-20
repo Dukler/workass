@@ -19,11 +19,9 @@ function itemDuration(item: SpawnedWorkItem, nowMs: number): string {
 function KindIcon({ item }: { item: SpawnedWorkItem }) {
   if (item.kind === 'bash') return <IcTerminal />;
   // A tracked subagent's live row is now the ONLY row it gets (TareasCard drops
-  // the duplicate node), so it carries the brand mark the subagent row would
-  // have. providerId is the raw engine id here, not the brand the icons use.
+  // the duplicate node), so it carries the registration-projected brand mark.
   if (item.kind === 'agent' || item.kind === 'subagent') {
-    const brand = item.providerId === 'codex' ? 'gpt' : item.providerId || 'claude';
-    return <ModelIcon provider={brand} />;
+    return item.assistantBrand ? <ModelIcon provider={item.assistantBrand} /> : null;
   }
   return null;
 }

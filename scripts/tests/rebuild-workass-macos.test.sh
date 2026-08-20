@@ -27,6 +27,11 @@ grep -Fq 'old_pids=$(listener_pid "$view_port" || true)' "$runner"
 grep -Fq 'old Electron shell pid $pid did not exit' "$runner"
 grep -Fq 'kill -0 "$pid"' "$runner"
 grep -Fq 'node --test desktop/shell/*.test.js' "$runner"
+grep -Fq 'npm test --prefix desktop/renderer2 --silent' "$runner"
+if grep -Fq 'desktop/renderer2/tests/model-selection.test.ts' "$runner"; then
+  echo "Electron rebuild still carries a hand-picked renderer test list" >&2
+  exit 1
+fi
 grep -Fq 'WORKASS_CONTROLLER_RECOVERY=1' "$runner"
 grep -Fq 'installed_app="${WORKASS_INSTALLED_APP:-/Applications/Workass.app}"' "$runner"
 grep -Fq 'workass_codesign_sign_binary "$candidate" "$WORKASS_BUNDLE_ID.daemon"' "$runner"
