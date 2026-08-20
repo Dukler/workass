@@ -104,8 +104,9 @@ export interface Msg {
   // receipt, and uncertain is a transport outcome that must not be replayed.
   steerState?: SteerState;
   // Native Codex stages admitted input until its canonical userMessage receipt
-  // arrives between sampling steps. The durable waiting pair is rendered as a
-  // composer-adjacent preview, not as transcript history, until that boundary.
+  // arrives between sampling steps. Presentation keeps the durable steer in the
+  // composer-adjacent tray for the whole active turn, then places that same row
+  // after the terminal assistant slices instead of interrupting rendered prose.
   steerBoundary?: 'waiting';
   steerContinuationId?: string;
   steerContinuationFor?: string;

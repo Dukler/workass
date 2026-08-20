@@ -76,10 +76,12 @@ Workass deliberately does not model steering as one universal cancel action:
   `_workass/codex/steer` request. The host calls the
   official app-server `turn/steer` RPC; Workass only reports success after the
   app-server returns the active `turnId`, and correlates the later canonical
-  `userMessage.clientId` as both stronger "applied" feedback and the transcript
-  boundary: the pending preview is committed after the current sampling step,
-  immediately before the next model/tool step, so click time never cuts a
-  streaming sentence in half. A cached turn-id
+  `userMessage.clientId` as both stronger "applied" feedback and the semantic
+  transcript boundary. The renderer keeps that same durable row in its
+  composer-adjacent steering tray until the active turn is terminal, then
+  projects it after the assistant turn; a receipt never inserts a bubble into
+  already-rendered prose. The provider boundary still commits after the current
+  sampling step, immediately before the next model/tool step. A cached turn-id
   mismatch is resynchronized and retried once, matching the official Codex TUI;
   an already-finished turn becomes the immediate persisted follow-up, while
   review/manual-compaction rejection waits in FIFO without cancelling that

@@ -573,13 +573,18 @@ shell, NOT the daemon.
     correction 2026-08-19).
     A submitted direction has exactly one visible owner. For native Codex, it
     leaves the composer immediately as one durable pending preview while the
-    current sampling step finishes; it becomes an ordinary transcript user row
-    only when the matching `userMessage.clientId` receipt commits it between
-    sampling steps, immediately before the next model/tool step. It MUST NOT
-    split a streaming sentence at click time. Adapters without that receipt use
-    their successful acknowledgement as the commit boundary; turn end reveals
-    an admitted but unconsumed row after the completed assistant and never
-    replays it. Generic live steering retains one stable pending transcript row.
+    current sampling step finishes; the matching `userMessage.clientId` receipt
+    commits its canonical semantic position between sampling steps, immediately
+    before the next model/tool step. That semantic boundary MUST NOT be painted
+    as a user bubble between assistant slices (user correction 2026-08-20): the
+    same row stays in the composer-adjacent steering tray for the whole active
+    turn, then the pure presentation projection places it after the terminal
+    assistant slice. Provider chronology, stable ids, persistence, and resume
+    retain the canonical receipt order; no row is copied or mutated for display.
+    Adapters without that receipt use their successful acknowledgement as the
+    semantic commit boundary and the same presentation law. Turn end reveals an
+    admitted but unconsumed row after the completed assistant and never replays
+    it. Generic live steering retains one stable pending transcript row.
     An acknowledged native steer remains visibly "Steering…" while its semantic
     receipt boundary is still pending; only a committed/applied row may say
     "Steered". Attachments transfer into that pending owner in the same renderer

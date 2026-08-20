@@ -7,7 +7,7 @@ import { UserPill } from './messages';
 import { IcDoc, IcTerminal, IcChanges, IcPreview, IcRail, IcBrowser, IcChevron, IcClose, IcSearch } from '../icons';
 import { normalizeWorkspacePath, rememberLastProject, workspaceName } from '../workspaces';
 import { createTranscriptPinScheduler, transcriptPinnedAfterScroll } from '../transcript-scroll';
-import { isWaitingSteerBoundary } from '../steering';
+import { projectSteeringPresentation } from '../chat/steering-presentation';
 import { assistantTurnBlockRanges, buildCoalescedTurnBlockTimelineSegments } from '../timeline-layout';
 import type { TranscriptTimelineSegment } from '../timeline-layout';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
@@ -262,7 +262,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const findInputRef = useRef<HTMLInputElement>(null);
   const findReturnFocusRef = useRef<HTMLElement | null>(null);
 
-  const visibleMessages = chat?.messages.filter((message) => !isWaitingSteerBoundary(message)) ?? [];
+  const visibleMessages = projectSteeringPresentation(chat?.messages ?? []).transcriptMessages;
   const total = visibleMessages.length;
   const findMatches = findOpen ? findChatMessageMatches(visibleMessages, findQuery) : [];
   const selectedFindMatch = findMatches.length ? findMatches[Math.min(findIndex, findMatches.length - 1)] : undefined;
@@ -289,9 +289,9 @@ export function Transcript({ chat }: { chat: Chat | null }) {
       coalescedSegments.set(blockMessages[index].id, blockSegments[index]);
     }
   }
-  // The canonical array is already the permanent transcript chronology. Native
-  // steering physically inserts user rows between assistant segments; rendering
-  // must never regroup or anchor them at paint time.
+  // Provider receipts remain canonical in state. The presentation projection
+  // keeps live directions in the composer tray and settles them after their
+  // assistant turn, so a receipt never inserts a bubble into rendered prose.
   let latestUserMessageId: string | null = null;
   if (chat) {
     for (let i = visibleMessages.length - 1; i >= 0; i--) {
