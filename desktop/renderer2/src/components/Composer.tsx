@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { Chat, AppState } from '../store/types';
+import type { Chat } from '../store/types';
 import type { CatalogGroup, CatalogCommand, PlanUsageSnapshot, PlanUsageEntry } from '../wire/types';
 import type { ModelFavorite } from '../model-favorites';
 import { store, useApp } from '../store/store';
@@ -266,9 +266,12 @@ function GroupedModelPopover({ groups, currentProvider, current, favorites, onPi
   );
 }
 
-function resolveModelName(app: AppState, modelId: string | null | undefined): string | null {
+function resolveModelName(groups: readonly CatalogGroup[], modelId: string | null | undefined): string | null {
   if (!modelId) return null;
-  for (const g of app.groups) { const m = g.models.find((x) => x.modelId === modelId); if (m) return m.name; }
+  for (const group of groups) {
+    const model = group.models.find((candidate) => candidate.modelId === modelId);
+    if (model) return model.name;
+  }
   return null;
 }
 // ---- plan-usage rendering (provider-aware; WIRE-CONTRACT chat:plan-usage) ----
@@ -570,12 +573,13 @@ export function Composer({ chat }: { chat: Chat | null }) {
   }
 
   const running = store.isChatRunning(chat?.id ?? null);
+  const modelGroups = store.catalogGroupsForChat(chat);
   // The persisted id may be suffixed (`base[effort]`). Split it so the picker shows
   // the base name/selection and the effort control reflects the chosen stop.
-  const providerGroup = app.groups.find((group) => group.providerId === chat?.providerId);
+  const providerGroup = modelGroups.find((group) => group.providerId === chat?.providerId);
   const modelSelection = resolveModelSelection(providerGroup ? [providerGroup] : [], [], chat?.currentModelId);
   const { base: modelBase, effort: modelEffort } = modelSelection;
-  const modelName = modelSelection.model?.name ?? resolveModelName(app, modelBase) ?? providerGroup?.models[0]?.name ?? 'Modelo';
+  const modelName = modelSelection.model?.name ?? resolveModelName(modelGroups, modelBase) ?? providerGroup?.models[0]?.name ?? 'Modelo';
   const efforts = modelSelection.model?.efforts ?? [];
   const curEffort = efforts.length
     ? (modelEffort && efforts.includes(modelEffort) ? modelEffort : defaultEffort(efforts))
@@ -889,7 +893,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
         <div className="selectorcluster">
           <div className="selectoranchor">
             <button className="modelsel" onClick={() => setModelOpen((v) => !v)}>{modelName}</button>
-            {modelOpen && <GroupedModelPopover groups={app.groups} currentProvider={chat?.providerId ?? null} current={modelBase || null}
+            {modelOpen && <GroupedModelPopover groups={modelGroups} currentProvider={chat?.providerId ?? null} current={modelBase || null}
                 favorites={app.modelFavorites}
                 onPick={(providerId, modelId) => chat && void store.pickModel(chat.id, providerId, modelId)}
                 onToggleFavorite={(providerId, modelId) => store.toggleModelFavorite(providerId, modelId)}

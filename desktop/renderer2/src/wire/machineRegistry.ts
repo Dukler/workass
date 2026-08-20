@@ -11,8 +11,7 @@
 
 import type { WorkassApi } from './types';
 import { MachineSocket, type MachineCredentials, type MachineLinkState, type MachineSocketLike } from './machineSocket.ts';
-import { createMachineRouter, REMOTE_EVENT_CHANNELS } from './machineRouter.ts';
-import { tagPayload } from './machineIds.ts';
+import { createMachineRouter, projectRemoteEvent, REMOTE_EVENT_CHANNELS } from './machineRouter.ts';
 
 const CREDENTIAL_PREFIX = 'workass.machine.';
 const AUTO_CONNECT_DISABLED_SUFFIX = '.auto-connect-disabled';
@@ -147,7 +146,7 @@ export class MachineRegistry {
     if (!seen) this.replayed.set(channel, (seen = new Set()));
     if (seen.has(cb)) return;
     seen.add(cb);
-    this.subscribeRemote(channel, (payload, machineId) => cb(tagPayload(machineId, payload)));
+    this.subscribeRemote(channel, (payload, machineId) => cb(projectRemoteEvent(method, machineId, payload)));
   }
 
   /** Held in memory only. It is used to enrol and never written to storage. */
