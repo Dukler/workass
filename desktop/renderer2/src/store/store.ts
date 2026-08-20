@@ -996,6 +996,20 @@ export class Store {
     restored._queueResumeOperationId = previous._queueResumeOperationId;
     restored.commandCatalog ??= previous.commandCatalog;
 
+    // session:get is a point-in-time actor projection and may have started
+    // before a presentation command whose durable receipt has already reached
+    // this renderer. The exact chat pair plus its monotonic presentation
+    // revision decide that race: hydration may replace the object, but it must
+    // never downgrade an actor-acknowledged settle, rename, draft, unread, or
+    // pane mutation to an older projection.
+    const previousPresentationRevision = previous.presentationRevision ?? 0;
+    const restoredPresentationRevision = restored.presentationRevision ?? 0;
+    if (previousPresentationRevision > restoredPresentationRevision) {
+      applyPresentationSnapshot(restored, presentationSnapshot(previous));
+      restored.presentationRevision = previousPresentationRevision;
+      restored.actorRevision = Math.max(previous.actorRevision ?? 0, restored.actorRevision ?? 0);
+    }
+
     const pendingIDs = new Set<string>();
     const pendingTurn = this.pendingTurnStarts.get(restored.id);
     if (pendingTurn && pendingTurn.chatId === restored.chatId) {
@@ -1414,6 +1428,7 @@ export class Store {
           // synchronized.
           void this.hydrateMachine(machineId, info.restarted);
         },
+        onUnmount: (machineId) => this.evictMachineChats(machineId),
       });
     }
     // The key a client holds so it can enrol with a newly-found machine without
@@ -1601,6 +1616,7 @@ export class Store {
     // whole feature is invisible when that happens.
     try {
       const mirror = (await link.invoke('session:get')) as Mirror | null;
+      if (!this.machines?.ownsLink(machineId, link)) return;
       if (!mirror || !Array.isArray(mirror.chats)) {
         this.machines?.setReason(machineId, 'conectada, pero no devolvió sesión');
         return;
@@ -1649,10 +1665,102 @@ export class Store {
         : 'conectada, sin conversaciones');
       this.bumpApp(true);
     } catch (err) {
+      if (!this.machines?.ownsLink(machineId, link)) return;
       // Called as `void hydrateMachine(...)` from a socket callback, so without
       // this the rejection vanishes into an unhandled promise and the machine
       // looks healthy forever.
       this.machines?.setReason(machineId, `no pude leer sus chats: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * A rejected/forgotten machine no longer authorizes any of its projections.
+   * Remove that ownership as one boundary, including transient renderer state,
+   * so neither a late async receipt nor the local first-paint cache can retain
+   * or revive one of its chats.
+   */
+  private evictMachineChats(machineId: string): void {
+    const removed = this.state.chats.filter((chat) => ownerMachineId(chat) === machineId);
+    if (!removed.length) return;
+    const removedTabs = new Set(removed.map((chat) => chat.id));
+    for (const chat of removed) this.discardChatProjection(chat);
+    this.state.chats = this.state.chats.filter((chat) => !removedTabs.has(chat.id));
+    if (!this.state.activeId || removedTabs.has(this.state.activeId)) {
+      this.state.activeId = this.state.chats.find((chat) => !ownerMachineId(chat))?.id
+        ?? this.state.chats[0]?.id
+        ?? null;
+    }
+    this.rebuildJobRefs(removedTabs);
+    if (!this.state.chats.length) {
+      this.newChat();
+      return;
+    }
+    this.requireFullSave();
+    this.bumpApp();
+  }
+
+  /** Release every renderer-owned resource and in-flight index for one row. */
+  private discardChatProjection(chat: Chat): void {
+    const tabId = chat.id;
+    void browserApi()?.close(tabId);
+    releaseDraftImages(chat.draftImages ?? []);
+    for (const item of chat.queue ?? []) releaseDraftImages(item.draftImages ?? []);
+
+    const jobIDs = new Set(chat.messages.map((message) => message.jobId).filter((id): id is string => !!id));
+    for (const message of chat.messages) {
+      if (message.permission?.id) this.resolvedPermissionIds.delete(message.permission.id);
+    }
+    for (const [jobId, ref] of this.jobRef) {
+      if (ref.tabId === tabId) jobIDs.add(jobId);
+    }
+    for (const jobId of jobIDs) {
+      this.jobRef.delete(jobId);
+      this.turnHeartbeats.delete(jobId);
+      this.cancelRequests.delete(jobId);
+    }
+    for (const [chatId, ref] of this.chatJobs) {
+      if (ref.tabId === tabId) this.chatJobs.delete(chatId);
+    }
+    for (const [key, pending] of this.pendingSteers) {
+      if (pending.tabId === tabId) this.pendingSteers.delete(key);
+    }
+
+    this.pendingTurnStarts.delete(tabId);
+    this.drainingQueues.delete(tabId);
+    this.pendingChatCreates.delete(tabId);
+    this.remoteChatCreateFences.delete(tabId);
+    this.pendingChatCreateOperations.delete(tabId);
+    this.pendingChatCreatePromises.delete(tabId);
+    this.pendingChatDeleteOperations.delete(tabId);
+    this.fullHistoriesLoaded.delete(tabId);
+    this.fullHistoryLoads.delete(tabId);
+    this.dirtyChats.delete(tabId);
+    this.dirtyChatVersions.delete(tabId);
+    this.pendingQueueMutationVersions.delete(tabId);
+    this.pendingQueueSnapshots.delete(tabId);
+    this.pendingQueueOperationIds.delete(tabId);
+    this.committedPresentationFingerprints.delete(tabId);
+    this.pendingPresentationOperations.delete(tabId);
+    this.pendingPresentationSnapshots.delete(tabId);
+    this.committedRuntimeControlFingerprints.delete(tabId);
+    this.pendingRuntimeControlOperations.delete(tabId);
+    this.pendingRuntimeControlSaves.delete(tabId);
+    this.pendingDraftMutationVersions.delete(tabId);
+    this.pendingDraftSnapshots.delete(tabId);
+    this.commandCatalogAsked.delete(tabId);
+
+    if (this.pendingAgentFocus?.tabId === tabId) this.pendingAgentFocus = null;
+    if (chat.chatId) {
+      const key = spawnedWorkChatKey(tabId, chat.chatId);
+      delete this.state.spawnedWorkByChat[key];
+      delete this.state.obligationByChat[key];
+      delete this.state.chatEnvByChat[chatEnvKey(tabId, chat.chatId)];
+    }
+    if (this.state.rewind.tabId === tabId) {
+      this.state.rewind = { open: false, tabId: null, chatId: null, loading: false, items: [] };
+    }
+    if (this.state.review.tabId === tabId) {
+      this.state.review = { open: false, tabId: null, chatId: null, loading: false, repos: [], diffLoading: false };
     }
   }
 
@@ -2633,24 +2741,7 @@ export class Store {
       return;
     }
     if (this.pendingChatDeleteOperations.get(id)?.operationId === operationId) this.pendingChatDeleteOperations.delete(id);
-    void browserApi()?.close(live.id);
-    releaseDraftImages(live.draftImages ?? []);
-    for (const item of live.queue ?? []) releaseDraftImages(item.draftImages ?? []);
-    this.pendingChatCreates.delete(id);
-    this.remoteChatCreateFences.delete(id);
-    this.pendingChatCreateOperations.delete(id);
-    this.pendingChatCreatePromises.delete(id);
-    this.fullHistoriesLoaded.delete(id);
-    this.fullHistoryLoads.delete(id);
-    this.committedPresentationFingerprints.delete(id);
-    this.pendingPresentationOperations.delete(id);
-    this.pendingPresentationSnapshots.delete(id);
-    this.committedRuntimeControlFingerprints.delete(id);
-    this.pendingRuntimeControlOperations.delete(id);
-    this.pendingRuntimeControlSaves.delete(id);
-    this.pendingQueueMutationVersions.delete(id);
-    this.pendingQueueSnapshots.delete(id);
-    this.pendingQueueOperationIds.delete(id);
+    this.discardChatProjection(live);
     this.state.chats = this.state.chats.filter((c) => c.id !== live.id);
     if (this.state.activeId === live.id) this.state.activeId = this.state.chats[0]?.id ?? null;
     if (this.state.chats.length === 0) this.newChat();
@@ -3729,6 +3820,9 @@ export class Store {
         const rec = this.chatJobs.get(e.job.chatId ?? '');
         let msg = this.msgForRef(rec) ?? this.resolveMsg(e.job.id);
         const jobChat = (e.job.tabId ? this.chat(e.job.tabId) : null) ?? (e.job.chatId ? this.chatByConvId(e.job.chatId) : null);
+        const terminalOwnerBeforeEnd = msg ?? jobChat?.messages.find((candidate) => candidate.role === 'assistant'
+          && (candidate.id === e.job.assistantMessageId || candidate.jobId === e.job.id));
+        const terminalWasAlreadyApplied = !!terminalOwnerBeforeEnd && isTerminalMessage(terminalOwnerBeforeEnd);
         const reattached = jobChat ? this.attachJobSession(jobChat, e.job) : false;
         if (!msg && jobChat) {
           msg = this.synthesizeCanonicalJobRows(jobChat, e.job, true);
@@ -3798,7 +3892,7 @@ export class Store {
         // A turn the daemon itself ended is not news either: every chat would
         // come back from a restart wearing an unseen-result cue for something
         // that never finished.
-        if (endedChat && endedChat.id !== this.state.activeId && !e.job.interrupted
+        if (!terminalWasAlreadyApplied && endedChat && endedChat.id !== this.state.activeId && !e.job.interrupted
           && e.job.code !== 130 && e.job.stopReason !== 'cancelled' && !endedChat.unread) {
           endedChat.unread = true;
           this.touchChat(endedChat.id);

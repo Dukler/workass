@@ -322,6 +322,125 @@ test('a machine leaving the book is disconnected, and forgetting it drops its to
   assert.ok(closed.length >= 1);
 });
 
+test('forget unmounts an admitted machine and persists the explicit reconnect fence', () => {
+  const storage = memoryStorage();
+  const unmounted: string[] = [];
+  let socket: MachineSocketLike | undefined;
+  const registry = new MachineRegistry({
+    local: () => ({}) as never, deviceName: 'Mac', storage,
+    onUnmount: (machineId) => { unmounted.push(machineId); },
+    open: (() => (socket = { send() {}, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null })) as never,
+    setTimer: () => 1,
+    clearTimer: () => {},
+  });
+  registry.sync([entry('m-remote', 'builder', '192.168.1.71:80')], 'm-self');
+  assert.equal(registry.requestAccess('m-remote'), true);
+  socket?.onopen?.();
+  socket?.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+    state: 'approved', deviceToken: 'paired-token', deviceId: 'device-1', instanceId: 'instance-1',
+  } }));
+  socket?.onclose?.();
+  assert.deepEqual(unmounted, [], 'an ordinary offline transition keeps the mounted chat projection');
+
+  registry.forget('m-remote');
+  assert.deepEqual(unmounted, ['m-remote']);
+  assert.equal(storage.getItem('workass.machine.m-remote'), null);
+  assert.equal(storage.getItem('workass.machine.m-remote.auto-connect-disabled'), '1');
+});
+
+test('rejection unmounts exactly once, fences stale sockets, and requires an explicit reconnect', () => {
+  const storage = memoryStorage();
+  const opened: MachineSocketLike[] = [];
+  const unmounted: string[] = [];
+  const openedGenerations: number[] = [];
+  const remoteEvents: unknown[] = [];
+  const registry = new MachineRegistry({
+    local: () => ({}) as never, deviceName: 'Mac', storage,
+    onUnmount: (machineId) => { unmounted.push(machineId); },
+    onOpen: (_machineId, info) => { openedGenerations.push(info.generation); },
+    open: (() => {
+      const socket: MachineSocketLike = { send() {}, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null };
+      opened.push(socket);
+      return socket;
+    }) as never,
+  });
+  registry.subscribeRemote('job:event', (payload) => { remoteEvents.push(payload); });
+  registry.sync([entry('m-remote', 'builder', '192.168.1.71:80')], 'm-self');
+  assert.equal(registry.requestAccess('m-remote'), true);
+  const first = opened[0];
+  first.onopen?.();
+  first.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+    state: 'approved', deviceToken: 'paired-token', deviceId: 'device-1', instanceId: 'instance-1',
+  } }));
+  const admitted = registry.linkFor('m-remote');
+  assert.ok(admitted);
+  assert.equal(registry.ownsLink('m-remote', admitted), true);
+  assert.deepEqual(openedGenerations, [1]);
+
+  first.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+    state: 'rejected', reason: 'denied', instanceId: 'instance-1',
+  } }));
+  assert.deepEqual(unmounted, ['m-remote']);
+  assert.equal(registry.linkFor('m-remote'), undefined);
+  assert.equal(registry.ownsLink('m-remote', admitted), false);
+  assert.equal(storage.getItem('workass.machine.m-remote'), null);
+  assert.equal(storage.getItem('workass.machine.m-remote.auto-connect-disabled'), '1');
+
+  // A callback already queued by the rejected socket has no authority now.
+  first.onmessage?.(JSON.stringify({ t: 'event', channel: 'job:event', payload: { id: 'late-job' } }));
+  assert.deepEqual(remoteEvents, []);
+  registry.forget('m-remote');
+  assert.deepEqual(unmounted, ['m-remote'], 'forget after rejection is idempotent');
+
+  // Discovery and a fleet key may repaint a nearby row, but cannot silently
+  // remount it after a human rejection — even in a fresh renderer registry.
+  const afterReload: MachineSocketLike[] = [];
+  const reloaded = new MachineRegistry({
+    local: () => ({}) as never, deviceName: 'Mac', storage,
+    open: (() => {
+      const socket: MachineSocketLike = { send() {}, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null };
+      afterReload.push(socket);
+      return socket;
+    }) as never,
+  });
+  reloaded.useFleetKey('fleet-key-held-in-memory');
+  reloaded.sync([entry('m-remote', 'builder', '192.168.1.71:80')], 'm-self');
+  assert.deepEqual(afterReload, [], 'fleet discovery cannot undo an explicit rejection');
+  assert.equal(reloaded.requestAccess('m-remote'), true);
+  assert.equal(afterReload.length, 1, 'only an explicit request clears the reconnect fence');
+  assert.equal(storage.getItem('workass.machine.m-remote.auto-connect-disabled'), null);
+});
+
+test('rejection remains fenced for the current runtime when browser storage is unavailable', () => {
+  const opened: MachineSocketLike[] = [];
+  const unavailableStorage = {
+    getItem: () => { throw new Error('storage unavailable'); },
+    setItem: () => { throw new Error('storage unavailable'); },
+    removeItem: () => { throw new Error('storage unavailable'); },
+  };
+  const registry = new MachineRegistry({
+    local: () => ({}) as never, deviceName: 'Mac', storage: unavailableStorage,
+    open: (() => {
+      const socket: MachineSocketLike = { send() {}, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null };
+      opened.push(socket);
+      return socket;
+    }) as never,
+  });
+  registry.useFleetKey('fleet-key-held-in-memory');
+  const remote = entry('m-remote', 'builder', '192.168.1.71:80');
+  registry.sync([remote], 'm-self');
+  opened[0].onopen?.();
+  opened[0].onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+    state: 'approved', instanceId: 'instance-1',
+  } }));
+  opened[0].onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+    state: 'denied', reason: 'denied', instanceId: 'instance-1',
+  } }));
+
+  registry.sync([remote], 'm-self');
+  assert.equal(opened.length, 1, 'a later book refresh cannot undo the in-memory rejection');
+});
+
 test('an insecure paired endpoint stays parked without losing its credential', () => {
   const opened: string[] = [];
   const closed: number[] = [];

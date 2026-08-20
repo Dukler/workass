@@ -164,22 +164,36 @@ func (r *providerChatRuntime) SavePresentation(tabID, chatID string, operationID
 	presentation.Settled = fieldString(raw, "settled")
 	presentation.SettledAt = int64(max(0, intField(raw, "settledAt")))
 	presentation.Pane = optionalStringPointer(raw, "pane")
+	// ExpectedRevision is a compare-and-swap precondition, not part of the
+	// immutable user intent. If the actor commits this operation and its reply is
+	// lost, session:get advances the renderer to the committed revision before it
+	// retries the same operation. Keeping the precondition out of the digest lets
+	// that retry recover the existing receipt while a changed presentation still
+	// fails closed as operation-id reuse.
 	digestPayload := struct {
-		ExpectedRevision uint64
-		Title            string
-		TitleLocked      bool
-		Group            *string
-		Draft            string
-		Unread           bool
-		Settled          string
-		SettledAt        int64
-		Pane             *string
-	}{expectedRevision, presentation.Title, presentation.TitleLocked, presentation.Group, presentation.Draft, presentation.Unread, presentation.Settled, presentation.SettledAt, presentation.Pane}
+		Title       string
+		TitleLocked bool
+		Group       *string
+		Draft       string
+		Unread      bool
+		Settled     string
+		SettledAt   int64
+		Pane        *string
+	}{presentation.Title, presentation.TitleLocked, presentation.Group, presentation.Draft, presentation.Unread, presentation.Settled, presentation.SettledAt, presentation.Pane}
 	digestRaw, err := json.Marshal(digestPayload)
 	if err != nil {
 		return nil, err
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(digestRaw))
+	if receipt, exists := state.PresentationMutationReceipts[operationID]; exists {
+		if receipt.Digest != digest {
+			return nil, errors.New("presentation operation id was reused for different content")
+		}
+		return map[string]any{
+			"ok": true, "tabId": tabID, "chatId": chatID, "operationId": string(operationID),
+			"presentationRevision": receipt.Revision, "actorRevision": state.Revision,
+		}, nil
+	}
 	if err := actor.engine.Apply(chat.SavePresentation{OperationID: operationID, Digest: digest, Presentation: presentation}); err != nil {
 		return nil, err
 	}

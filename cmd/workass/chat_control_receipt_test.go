@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"strings"
 	"testing"
 
@@ -77,5 +78,67 @@ func TestChatControlRenameReceiptIsStableAcrossLostReply(t *testing.T) {
 	unchanged, _ := runtime.Snapshot(chatID)
 	if unchanged.Presentation.Title != "After rename" || unchanged.Revision != first.Revision {
 		t.Fatalf("changed rename mutated actor: %#v", unchanged)
+	}
+}
+
+func TestRendererPresentationReceiptSurvivesLostReplyAndRevisionHydration(t *testing.T) {
+	stateDir := t.TempDir()
+	manager := acp.NewManager(acp.Options{StateDir: stateDir, RuntimeProfile: "dev"})
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	const tabID, chatID = "presentation-receipt-tab", "presentation-receipt-chat"
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "presentation-receipt-create",
+		"title": "Before presentation mutation", "providerId": "mock", "currentModelId": "mock-deterministic",
+	}); err != nil {
+		t.Fatalf("create actor chat: %v", err)
+	}
+	if err := runtime.RenameChat(tabID, chatID, "Prepared presentation", "presentation-receipt-prepare"); err != nil {
+		t.Fatalf("prepare presentation revision: %v", err)
+	}
+	prepared, ok := runtime.Snapshot(chatID)
+	if !ok || prepared.Presentation.PresentationRevision != 1 {
+		t.Fatalf("prepared presentation revision = %#v", prepared)
+	}
+
+	const operationID = "presentation-receipt-once"
+	request := map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": operationID, "expectedRevision": 1,
+		"title": "Prepared presentation", "titleLocked": true, "group": nil, "draft": "",
+		"unread": false, "settled": "settled", "settledAt": 1_787_000_000_000, "pane": nil,
+	}
+	first, err := runtime.SavePresentation(tabID, chatID, operationID, 1, request)
+	if err != nil {
+		t.Fatalf("first presentation save: %v", err)
+	}
+	committed, ok := runtime.Snapshot(chatID)
+	if !ok || committed.Presentation.PresentationRevision != 2 || committed.Presentation.Settled != "settled" {
+		t.Fatalf("committed presentation = %#v", committed)
+	}
+	committedActorRevision := committed.Revision
+
+	// Model a lost reply followed by session:get: the renderer has learned the
+	// committed revision, but retries the same immutable operation and fields.
+	retryRequest := maps.Clone(request)
+	retryRequest["expectedRevision"] = 2
+	retried, err := runtime.SavePresentation(tabID, chatID, operationID, 2, retryRequest)
+	if err != nil {
+		t.Fatalf("lost-reply presentation retry: %v", err)
+	}
+	afterRetry, ok := runtime.Snapshot(chatID)
+	if !ok || afterRetry.Revision != committedActorRevision || afterRetry.Presentation.PresentationRevision != 2 {
+		t.Fatalf("lost-reply retry changed actor state: committed=%#v retry=%#v", committed, afterRetry)
+	}
+	if first["presentationRevision"] != retried["presentationRevision"] || first["actorRevision"] != retried["actorRevision"] {
+		t.Fatalf("lost-reply retry changed receipt: first=%#v retry=%#v", first, retried)
+	}
+
+	changed := maps.Clone(retryRequest)
+	changed["title"] = "Changed presentation intent"
+	if _, err := runtime.SavePresentation(tabID, chatID, operationID, 2, changed); err == nil || !strings.Contains(err.Error(), "different content") {
+		t.Fatalf("changed presentation reused operation id: %v", err)
+	}
+	unchanged, _ := runtime.Snapshot(chatID)
+	if unchanged.Revision != committedActorRevision || unchanged.Presentation.Title != "Prepared presentation" || unchanged.Presentation.Settled != "settled" {
+		t.Fatalf("changed presentation mutated actor: %#v", unchanged)
 	}
 }
