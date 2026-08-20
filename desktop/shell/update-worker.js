@@ -956,7 +956,7 @@ function defaultOperations(transaction, dependencies = {}) {
       // the rollback release. This is required on Windows, where executable
       // files remain locked while the daemon is alive, and prevents an old app
       // from accidentally reconnecting to the failed new daemon on either OS.
-      await requestDaemonShutdown(transaction.daemonHealthURL);
+      await shutdownDaemon(transaction.daemonHealthURL);
       const stopped = await waitUntil(() => exactDaemonDown(transaction), { attempts: 80, delayMs: 250 });
       if (!stopped) throw new Error('failed release daemon did not stop before rollback');
     },

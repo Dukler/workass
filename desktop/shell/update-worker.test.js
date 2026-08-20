@@ -909,6 +909,17 @@ test('an exited relaunch child can never make rollback kill a reused PID', async
   assert.deepEqual(killed, []);
 });
 
+test('rollback cleanup uses the injected daemon shutdown boundary', async () => {
+  const tx = transactionFixture();
+  const calls = [];
+  const disk = defaultOperations(tx, {
+    requestDaemonShutdown: async (url) => { calls.push(url); return true; },
+    daemonServiceIsDown: () => true,
+  });
+  await disk.stopLaunched();
+  assert.deepEqual(calls, [tx.daemonHealthURL]);
+});
+
 test('installed process launch waits for Windows spawn acknowledgement and surfaces failure', async () => {
   const successful = new EventEmitter();
   successful.pid = 8123;
