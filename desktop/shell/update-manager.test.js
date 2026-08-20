@@ -11,6 +11,7 @@ const {
   UpdateManager,
   atomicJSON,
   cheapWorkerLeaseOwnership,
+  cleanupUpdateTransactions,
   compareVersions,
   copyLocalArtifact,
   createProgressPublisher,
@@ -26,6 +27,7 @@ const {
   resolveArtifactSource,
   resolveUpdateFeed,
   runUpdateStageWorker,
+  runUpdateTransactionCleanupWorker,
   snapshotReleaseManifest,
   spawnArmedUpdateWorker,
   stageAndVerifyRelease,
@@ -288,6 +290,7 @@ function managerFixture({
         return child;
       },
       schedule: (fn) => { fn(); return { unref() {} }; },
+      cleanupUpdateTransactions: async () => ({ removed: 0, pruned: 0, retained: 0 }),
       prepareWorkerRuntime: async ({ transactionRoot, workerSource, nodeSource, platform: targetPlatform }) => {
         const workerPath = path.join(transactionRoot, 'update-worker.js');
         const preparedNodePath = targetPlatform === 'win32' ? path.join(transactionRoot, 'updater-node.exe') : nodeSource;
@@ -521,8 +524,12 @@ test('the actual rolled-back Windows release retains its own failure receipt', (
   assert.equal(path.isAbsolute(initialState.receipt.installTarget), true);
 });
 
-test('terminal pruning removes updater payloads, retries state cleanup, bounds logs, and retains only eight journals', () => {
+test('terminal pruning removes updater payloads off-main, retries state cleanup, bounds logs, and retains only eight journals', async () => {
   const { manager } = managerFixture({ platform: 'win32', primeReady: false });
+  await manager.transactionCleanupPromise;
+  manager.deps.cleanupUpdateTransactions = async (request) => cleanupUpdateTransactions(request, {
+    run: () => ({ status: 0, stdout: '[]' }),
+  });
   const transaction = seedRecoveryTransaction({
     manager,
     installTarget: manager.installTarget,
@@ -588,6 +595,7 @@ test('terminal pruning removes updater payloads, retries state cleanup, bounds l
   }
 
   manager.pruneTerminalPayload(receipt);
+  await manager.transactionCleanupPromise;
   for (const target of [
     transaction.incomingTarget, transaction.backupTarget,
     transaction.mutableStateBackupTarget, transaction.failedMutableStateTarget,
@@ -601,6 +609,89 @@ test('terminal pruning removes updater payloads, retries state cleanup, bounds l
     .filter((entry) => entry.isDirectory());
   assert.equal(retained.length, 8);
   assert.equal(fs.existsSync(transaction.transactionRoot), true);
+});
+
+test('transaction cleanup reclaims inactive updater cache without touching live or recoverable work', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-cleanup-'));
+  const transactionsRoot = path.join(root, 'updates', 'transactions');
+  const seed = (updateId, schemaVersion = 2) => {
+    const transactionRoot = path.join(transactionsRoot, updateId);
+    fs.mkdirSync(path.join(transactionRoot, 'incoming-release'), { recursive: true });
+    fs.writeFileSync(path.join(transactionRoot, 'incoming-release', 'payload.bin'), 'payload');
+    fs.writeFileSync(path.join(transactionRoot, 'release.zip'), 'archive');
+    fs.writeFileSync(path.join(transactionRoot, 'updater-node.exe'), 'node');
+    fs.writeFileSync(path.join(transactionRoot, 'transaction.json'), `${JSON.stringify({
+      schemaVersion, updateId, transactionRoot,
+    })}\n`);
+    fs.writeFileSync(path.join(transactionRoot, 'update-worker.js'), 'worker');
+    return transactionRoot;
+  };
+  const obsoleteRoot = seed('upd-obsolete-cache-1234');
+  const receiptRoot = seed('upd-current-receipt-1234');
+  const activeRoot = seed('upd-active-worker-1234');
+  const recoverableRoot = seed('upd-current-schema-1234', 3);
+  const activeCommand = `${process.execPath} ${path.join(activeRoot, 'update-worker.js')} --transaction ${path.join(activeRoot, 'transaction.json')}`;
+
+  const result = cleanupUpdateTransactions({
+    transactionsRoot,
+    platform: 'darwin',
+    receipt: { updateId: 'upd-current-receipt-1234', phase: 'healthy' },
+  }, {
+    run: () => ({ status: 0, stdout: `${activeCommand}\n` }),
+  });
+
+  assert.deepEqual(result, { removed: 1, pruned: 1, retained: 3 });
+  assert.equal(fs.existsSync(obsoleteRoot), false);
+  assert.equal(fs.existsSync(receiptRoot), true);
+  assert.equal(fs.existsSync(path.join(receiptRoot, 'release.zip')), false);
+  assert.equal(fs.existsSync(path.join(receiptRoot, 'incoming-release')), false);
+  assert.equal(fs.existsSync(path.join(activeRoot, 'release.zip')), true);
+  assert.equal(fs.existsSync(path.join(recoverableRoot, 'release.zip')), true);
+});
+
+test('transaction cleanup fails closed when worker process ownership cannot be inspected', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-cleanup-fail-'));
+  const transactionsRoot = path.join(root, 'updates', 'transactions');
+  const transactionRoot = path.join(transactionsRoot, 'upd-uninspected-cache-1234');
+  fs.mkdirSync(transactionRoot, { recursive: true });
+  fs.writeFileSync(path.join(transactionRoot, 'transaction.json'), '{"schemaVersion":2}\n');
+
+  const result = cleanupUpdateTransactions({ transactionsRoot, platform: 'win32' }, {
+    run: () => ({ status: 1, stdout: '' }),
+  });
+
+  assert.deepEqual(result, { removed: 0, pruned: 0, retained: 1, inspectionFailed: true });
+  assert.equal(fs.existsSync(transactionRoot), true);
+});
+
+test('packaged startup schedules transaction cleanup outside the shell thread', async () => {
+  let cleanupRequest = null;
+  const { manager } = managerFixture({
+    primeReady: false,
+    dependencyOverrides: {
+      cleanupUpdateTransactions: async (request) => {
+        cleanupRequest = request;
+        return { removed: 0, pruned: 0, retained: 0 };
+      },
+    },
+  });
+
+  await manager.transactionCleanupPromise;
+  assert.equal(cleanupRequest.transactionsRoot, path.join(manager.updateRoot, 'transactions'));
+  assert.equal(cleanupRequest.platform, 'darwin');
+});
+
+test('the transaction cleanup worker reclaims cache without running deletion on Electron main', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-cleanup-thread-'));
+  const transactionsRoot = path.join(root, 'updates', 'transactions');
+  const transactionRoot = path.join(transactionsRoot, 'upd-thread-cache-1234');
+  fs.mkdirSync(transactionRoot, { recursive: true });
+  fs.writeFileSync(path.join(transactionRoot, 'transaction.json'), '{"schemaVersion":2}\n');
+
+  const result = await runUpdateTransactionCleanupWorker({ transactionsRoot, platform: 'darwin' });
+
+  assert.deepEqual(result, { removed: 1, pruned: 0, retained: 0 });
+  assert.equal(fs.existsSync(transactionRoot), false);
 });
 
 test('platform feed names cannot collide in one GitHub release', () => {

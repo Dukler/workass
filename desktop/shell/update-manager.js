@@ -1280,6 +1280,225 @@ function inspectWorkerOwnershipAsync(lease, transaction, {
   });
 }
 
+function runningUpdateWorkerCommands({
+  platform = process.platform,
+  run = spawnSync,
+} = {}) {
+  let result;
+  if (platform === 'win32') {
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      "$commands = @(Get-CimInstance Win32_Process -Filter \"Name = 'updater-node.exe'\" | ForEach-Object { [string]$_.CommandLine })",
+      'ConvertTo-Json -Compress -InputObject $commands',
+    ].join('; ');
+    result = run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    if (result.error || result.status !== 0) return null;
+    try {
+      const parsed = JSON.parse(String(result.stdout || '[]'));
+      return (Array.isArray(parsed) ? parsed : [parsed]).map(String).filter(Boolean);
+    } catch {
+      return null;
+    }
+  }
+  result = run('/bin/ps', ['-axww', '-o', 'command='], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  if (result.error || result.status !== 0) return null;
+  return String(result.stdout || '').split(/\r?\n/).filter(Boolean);
+}
+
+function boundUpdateWorkerLog(transactionRoot) {
+  const logFile = path.join(transactionRoot, 'worker.log');
+  try {
+    const stat = fs.statSync(logFile);
+    const maximum = 1024 * 1024;
+    if (!stat.isFile() || stat.size <= maximum) return;
+    const descriptor = fs.openSync(logFile, 'r');
+    const tail = Buffer.alloc(maximum);
+    try { fs.readSync(descriptor, tail, 0, maximum, stat.size - maximum); }
+    finally { fs.closeSync(descriptor); }
+    const incoming = `${logFile}.bounded-${process.pid}`;
+    fs.writeFileSync(incoming, tail, { mode: 0o600 });
+    fs.renameSync(incoming, logFile);
+  } catch { /* cleanup retries on a later launch */ }
+}
+
+function removeUpdatePayload(transactionRoot, phase, transaction = null) {
+  const children = ['release.zip', 'release.zip.partial', 'extracted', 'updater-node.exe'];
+  for (const child of children) {
+    try { fs.rmSync(path.join(transactionRoot, child), { recursive: true, force: true }); }
+    catch { /* locked Windows payload retries on a later launch */ }
+  }
+  if (['healthy', 'rollback_healthy'].includes(phase)) {
+    const installParent = path.dirname(String(transaction?.installTarget || ''));
+    const safeTargets = transaction ? [
+      [transaction.incomingTarget, transaction.platform === 'darwin'
+        ? path.join(installParent, `.Workass.app.incoming-${transaction.updateId}`)
+        : path.join(transactionRoot, 'incoming-release')],
+      [transaction.backupTarget, transaction.platform === 'darwin'
+        ? path.join(installParent, `.Workass.app.previous-${transaction.updateId}`)
+        : path.join(transactionRoot, 'installed-before-activation')],
+      [transaction.mutableStateBackupTarget, path.join(transactionRoot, 'state-before-activation')],
+      [transaction.failedMutableStateTarget, path.join(transactionRoot, 'state-from-failed-activation')],
+    ] : [
+      [path.join(transactionRoot, 'incoming-release'), path.join(transactionRoot, 'incoming-release')],
+      [path.join(transactionRoot, 'installed-before-activation'), path.join(transactionRoot, 'installed-before-activation')],
+      [path.join(transactionRoot, 'state-before-activation'), path.join(transactionRoot, 'state-before-activation')],
+      [path.join(transactionRoot, 'state-from-failed-activation'), path.join(transactionRoot, 'state-from-failed-activation')],
+    ];
+    for (const [target, expected] of safeTargets) {
+      if (path.resolve(String(target || '')) !== path.resolve(expected)) continue;
+      try { fs.rmSync(target, { recursive: true, force: true }); }
+      catch { /* cleanup retries on a later launch */ }
+    }
+  }
+  boundUpdateWorkerLog(transactionRoot);
+}
+
+function cleanupUpdateTransactions(request, {
+  run = spawnSync,
+} = {}) {
+  const transactionsRoot = String(request?.transactionsRoot || '');
+  if (!path.isAbsolute(transactionsRoot) || path.basename(transactionsRoot) !== 'transactions' ||
+      path.basename(path.dirname(transactionsRoot)) !== 'updates') {
+    throw new Error('update transaction cleanup root is invalid');
+  }
+  let entries;
+  try {
+    entries = fs.readdirSync(transactionsRoot, { withFileTypes: true }).filter((entry) => (
+      entry.isDirectory() && /^[A-Za-z0-9_-]{8,96}$/.test(entry.name)
+    ));
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { removed: 0, pruned: 0, retained: 0 };
+    throw err;
+  }
+  if (entries.length === 0) return { removed: 0, pruned: 0, retained: 0 };
+
+  const commands = runningUpdateWorkerCommands({ platform: request.platform, run });
+  if (!commands) return { removed: 0, pruned: 0, retained: entries.length, inspectionFailed: true };
+  const normalize = request.platform === 'win32'
+    ? (value) => String(value || '').toLocaleLowerCase('en-US')
+    : (value) => String(value || '');
+  const active = new Set();
+  const rootToken = normalize(`${transactionsRoot}${path.sep}`);
+  for (const command of commands) {
+    const normalized = normalize(command);
+    if (!normalized.includes(rootToken) || !normalized.includes('update-worker.js')) continue;
+    let matched = false;
+    for (const entry of entries) {
+      const root = path.join(transactionsRoot, entry.name);
+      if (normalized.includes(normalize(path.join(root, 'update-worker.js'))) &&
+          normalized.includes(normalize(path.join(root, 'transaction.json')))) {
+        active.add(entry.name);
+        matched = true;
+        break;
+      }
+    }
+    // A Workass updater process that cannot be mapped exactly makes ownership
+    // ambiguous. Cleanup must fail closed rather than infer that it is stale.
+    if (!matched) return { removed: 0, pruned: 0, retained: entries.length, inspectionFailed: true };
+  }
+
+  const receipt = request.receipt && typeof request.receipt === 'object' ? request.receipt : null;
+  const receiptUpdateId = /^[A-Za-z0-9_-]{8,96}$/.test(String(receipt?.updateId || ''))
+    ? String(receipt.updateId)
+    : '';
+  const terminalReceipt = ['healthy', 'rollback_healthy', 'failed'].includes(String(receipt?.phase || ''));
+  const protectedUpdateIds = new Set((Array.isArray(request.protectedUpdateIds) ? request.protectedUpdateIds : [])
+    .map(String).filter((value) => /^[A-Za-z0-9_-]{8,96}$/.test(value)));
+  if (receiptUpdateId && !terminalReceipt) protectedUpdateIds.add(receiptUpdateId);
+
+  let removed = 0;
+  let pruned = 0;
+  let retained = 0;
+  const terminal = [];
+  for (const entry of entries) {
+    const transactionRoot = path.join(transactionsRoot, entry.name);
+    if (active.has(entry.name) || protectedUpdateIds.has(entry.name)) {
+      retained += 1;
+      continue;
+    }
+    const transaction = readJSONFile(path.join(transactionRoot, 'transaction.json'));
+    if (transaction?.schemaVersion === TRANSACTION_SCHEMA_VERSION) {
+      const journal = journalForTransaction(transaction);
+      const exactCurrentOwner = transaction.updateId === entry.name && transaction.transactionRoot === transactionRoot &&
+        transaction.receiptPath === request.receiptPath && transaction.installationId === request.installationId &&
+        path.resolve(String(transaction.installTarget || '')) === path.resolve(String(request.installTarget || ''));
+      if (exactCurrentOwner && journal?.terminal && ['healthy', 'rollback_healthy', 'failed'].includes(journal.phase)) {
+        removeUpdatePayload(transactionRoot, journal.phase, transaction);
+        terminal.push({
+          updateId: entry.name,
+          transactionRoot,
+          updatedAt: Date.parse(String(journal.updatedAt || '')) || 0,
+        });
+        pruned += 1;
+      }
+      retained += 1;
+      continue;
+    }
+    if (entry.name === receiptUpdateId) {
+      removeUpdatePayload(transactionRoot, String(receipt.phase || ''));
+      pruned += 1;
+      retained += 1;
+      continue;
+    }
+    try {
+      fs.rmSync(transactionRoot, { recursive: true, force: true });
+      removed += 1;
+    } catch {
+      retained += 1;
+    }
+  }
+  terminal.sort((left, right) => right.updatedAt - left.updatedAt);
+  for (const old of terminal.slice(8)) {
+    if (old.updateId === receiptUpdateId || active.has(old.updateId)) continue;
+    try {
+      fs.rmSync(old.transactionRoot, { recursive: true, force: true });
+      removed += 1;
+      retained -= 1;
+    } catch { /* cleanup retries on a later launch */ }
+  }
+  return { removed, pruned, retained };
+}
+
+function runUpdateTransactionCleanupWorker(request, {
+  WorkerClass = Worker,
+  workerFile = __filename,
+} = {}) {
+  return new Promise((resolve, reject) => {
+    let thread;
+    try {
+      thread = new WorkerClass(workerFile, {
+        workerData: { workassTask: 'cleanup-update-transactions', request },
+      });
+      thread.unref?.();
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    let settled = false;
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err instanceof Error ? err : new Error(String(err || 'update transaction cleanup failed')));
+    };
+    thread.once('message', (message) => {
+      if (settled) return;
+      if (!message?.ok) { fail(new Error(String(message?.error || 'update transaction cleanup failed'))); return; }
+      settled = true;
+      resolve(message.result || { removed: 0, pruned: 0, retained: 0 });
+    });
+    thread.once('error', fail);
+    thread.once('exit', (code) => {
+      if (!settled) fail(new Error(`update transaction cleanup exited early (${code || 0})`));
+    });
+  });
+}
+
 async function terminateExactWorker(ownership, {
   platform = process.platform,
   run = spawnSync,
@@ -1353,6 +1572,7 @@ class UpdateManager {
       inspectWorkerOwnership: asyncOwnershipOverride || (ownershipOverride
         ? async (lease, transaction, options) => ownershipOverride(lease, transaction, options)
         : inspectWorkerOwnershipAsync),
+      cleanupUpdateTransactions: runUpdateTransactionCleanupWorker,
       terminateExactWorker,
       prepareWorkerRuntime: (request) => prepareUpdateWorkerRuntime(request, { spawnProcess: spawn }),
       ...dependencyOverrides,
@@ -1372,6 +1592,8 @@ class UpdateManager {
     this.discoveryPromise = null;
     this.applyPromise = null;
     this.recoveryPromise = null;
+    this.transactionCleanupPromise = null;
+    this.transactionCleanupQueued = false;
     this.watchedUpdateId = '';
     this.verifiedWorkerLeases = new Map();
     this.state = {
@@ -1540,6 +1762,34 @@ class UpdateManager {
     return this.snapshot();
   }
 
+  requestTransactionCleanup(receipt = this.state.receipt) {
+    if (!this.isPackaged || !['darwin', 'win32'].includes(this.platform) || !this.installationIdentity) return null;
+    if (this.transactionCleanupPromise) {
+      this.transactionCleanupQueued = true;
+      return this.transactionCleanupPromise;
+    }
+    const protectedUpdateIds = [this.prepared?.updateId, this.watchedUpdateId].filter(Boolean);
+    const operation = Promise.resolve().then(() => this.deps.cleanupUpdateTransactions({
+      transactionsRoot: path.join(this.updateRoot, 'transactions'),
+      platform: this.platform,
+      installationId: this.installationIdentity.installationId,
+      installTarget: this.installTarget,
+      receiptPath: this.receiptPath,
+      receipt: receipt ? { updateId: receipt.updateId, phase: receipt.phase } : null,
+      protectedUpdateIds,
+    }));
+    this.transactionCleanupPromise = operation;
+    const finish = () => {
+      if (this.transactionCleanupPromise !== operation) return;
+      this.transactionCleanupPromise = null;
+      if (!this.transactionCleanupQueued) return;
+      this.transactionCleanupQueued = false;
+      this.requestTransactionCleanup(this.state.receipt);
+    };
+    void operation.then(finish, finish);
+    return operation;
+  }
+
   init() {
     const node = bundledNode(this.resourcesPath, this.executablePath, this.platform, this.arch);
     const platformSupported = this.platform === 'darwin' || this.platform === 'win32';
@@ -1563,8 +1813,11 @@ class UpdateManager {
       error: supported ? null : unsupportedReason,
       receipt: null,
     });
+    let storedReceipt = null;
+    let cleanupRequested = false;
     try {
       const receipt = JSON.parse(fs.readFileSync(this.receiptPath, 'utf8'));
+      storedReceipt = receipt;
       if (receiptAppliesToInstalledVersion(receipt, this.currentVersion, {
         installationId: this.installationIdentity?.installationId,
         installTarget: this.installTarget,
@@ -1574,79 +1827,23 @@ class UpdateManager {
         const unresolvedFence = !active && transaction && handoffNeedsCancel(transaction);
         this.publish({ phase: active || unresolvedFence ? 'installing' : receipt.phase, receipt, error: receipt.error || null });
         if (active || unresolvedFence) this.reconcileActiveReceipt(receipt);
-        else this.pruneTerminalPayload(receipt);
+        else {
+          this.pruneTerminalPayload(receipt);
+          cleanupRequested = true;
+        }
       }
     } catch { /* no prior transaction */ }
+    if (!cleanupRequested) this.requestTransactionCleanup(storedReceipt);
     return this.snapshot();
   }
 
   pruneTerminalPayload(receipt) {
     const updateId = String(receipt?.updateId || '');
-    if (!/^[A-Za-z0-9_-]{8,96}$/.test(updateId)) return;
-    const transactionRoot = path.join(this.updateRoot, 'transactions', updateId);
-    const transaction = this.transactionForReceipt(receipt);
-    const journal = transaction && journalForTransaction(transaction);
-    if (!journal?.terminal || !['healthy', 'rollback_healthy', 'failed'].includes(journal.phase)) return;
-
-    // Keep bounded JSON evidence and the worker source, but discard large
-    // staging/runtime payloads. updater-node.exe is intentionally outside the
-    // install so it can replace Workass; once exact worker ownership is gone it
-    // must not accumulate once per release forever.
-    for (const child of ['release.zip', 'release.zip.partial', 'extracted', 'updater-node.exe']) {
-      try { fs.rmSync(path.join(transactionRoot, child), { recursive: true, force: true }); } catch { /* best effort */ }
-    }
-    if (['healthy', 'rollback_healthy'].includes(journal.phase)) {
-      const installParent = path.dirname(transaction.installTarget);
-      const exactIncoming = this.platform === 'darwin'
-        ? path.join(installParent, `.Workass.app.incoming-${updateId}`)
-        : path.join(transactionRoot, 'incoming-release');
-      const exactBackup = this.platform === 'darwin'
-        ? path.join(installParent, `.Workass.app.previous-${updateId}`)
-        : path.join(transactionRoot, 'installed-before-activation');
-      const safeTargets = [
-        [transaction.incomingTarget, exactIncoming],
-        [transaction.backupTarget, exactBackup],
-        [transaction.mutableStateBackupTarget, path.join(transactionRoot, 'state-before-activation')],
-        [transaction.failedMutableStateTarget, path.join(transactionRoot, 'state-from-failed-activation')],
-      ];
-      for (const [target, expected] of safeTargets) {
-        if (path.resolve(String(target || '')) !== path.resolve(expected)) continue;
-        try { fs.rmSync(target, { recursive: true, force: true }); } catch { /* retry on a later launch */ }
-      }
-    }
-    const logFile = path.join(transactionRoot, 'worker.log');
-    try {
-      const stat = fs.statSync(logFile);
-      const maximum = 1024 * 1024;
-      if (stat.isFile() && stat.size > maximum) {
-        const descriptor = fs.openSync(logFile, 'r');
-        const tail = Buffer.alloc(maximum);
-        try { fs.readSync(descriptor, tail, 0, maximum, stat.size - maximum); }
-        finally { fs.closeSync(descriptor); }
-        const incoming = `${logFile}.bounded-${process.pid}`;
-        fs.writeFileSync(incoming, tail, { mode: 0o600 });
-        fs.renameSync(incoming, logFile);
-      }
-    } catch { /* diagnostic truncation retries on a later terminal prune */ }
-
-    const transactionsRoot = path.join(this.updateRoot, 'transactions');
-    let terminal = [];
-    try {
-      terminal = fs.readdirSync(transactionsRoot, { withFileTypes: true }).flatMap((entry) => {
-        if (!entry.isDirectory() || !/^[A-Za-z0-9_-]{8,96}$/.test(entry.name)) return [];
-        const root = path.join(transactionsRoot, entry.name);
-        const candidate = readJSONFile(path.join(root, 'transaction.json'));
-        if (!candidate || candidate.schemaVersion !== TRANSACTION_SCHEMA_VERSION || candidate.updateId !== entry.name ||
-            candidate.transactionRoot !== root || candidate.installationId !== this.installationIdentity?.installationId ||
-            path.resolve(String(candidate.installTarget || '')) !== path.resolve(this.installTarget)) return [];
-        const candidateJournal = journalForTransaction(candidate);
-        if (!candidateJournal?.terminal || !['healthy', 'rollback_healthy', 'failed'].includes(candidateJournal.phase)) return [];
-        return [{ root, updatedAt: Date.parse(String(candidateJournal.updatedAt || '')) || 0 }];
-      }).sort((left, right) => right.updatedAt - left.updatedAt);
-    } catch { terminal = []; }
-    for (const old of terminal.slice(8)) {
-      try { fs.rmSync(old.root, { recursive: true, force: true }); } catch { /* locked Windows payload retries later */ }
-    }
+    if (!/^[A-Za-z0-9_-]{8,96}$/.test(updateId) ||
+        !['healthy', 'rollback_healthy', 'failed'].includes(String(receipt?.phase || ''))) return;
+    // All filesystem reclamation runs in a worker thread. Large Windows trees
+    // and process inspection must never block Electron's event loop.
+    this.requestTransactionCleanup(receipt);
   }
 
   transactionForUpdateId(value) {
@@ -2361,6 +2558,7 @@ module.exports = {
   atomicJSON,
   bundledNode,
   cheapWorkerLeaseOwnership,
+  cleanupUpdateTransactions,
   compareVersions,
   copyLocalArtifact,
   createProgressPublisher,
@@ -2387,6 +2585,7 @@ module.exports = {
   resolveArtifactSource,
   resolveUpdateFeed,
   runUpdateStageWorker,
+  runUpdateTransactionCleanupWorker,
   snapshotReleaseManifest,
   spawnArmedUpdateWorker,
   stageAndVerifyRelease,
@@ -2417,6 +2616,13 @@ if (!isMainThread && workerData?.workassTask === 'inspect-update-worker' && pare
         platform: workerData.transaction?.platform,
       }),
     });
+  } catch (err) {
+    parentPort.postMessage({ ok: false, error: String(err && err.message || err) });
+  }
+}
+if (!isMainThread && workerData?.workassTask === 'cleanup-update-transactions' && parentPort) {
+  try {
+    parentPort.postMessage({ ok: true, result: cleanupUpdateTransactions(workerData.request) });
   } catch (err) {
     parentPort.postMessage({ ok: false, error: String(err && err.message || err) });
   }
