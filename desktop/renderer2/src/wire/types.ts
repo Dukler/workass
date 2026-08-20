@@ -78,7 +78,7 @@ export interface AcpSessionInfo {
   error?: string;
   // Existing app-chat:new-session also carries the transactional workspace
   // invalidation result when replaceSessionId is supplied. No live session is
-  // returned on that branch; ensureSession creates the fresh target-cwd one.
+  // returned on that branch; the next actor-owned send creates the fresh one.
   workspaceCommitted?: boolean;
   workspaceRebound?: boolean;
   workspaceRevision?: number;

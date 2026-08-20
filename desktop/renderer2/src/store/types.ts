@@ -255,7 +255,6 @@ export interface Chat {
   // one at a time at each turn's end, in order. Editable/reorderable/removable.
   queue?: QueuedMsg[];
   _queueResumeOperationId?: string;
-  _initPromise?: Promise<void>;
   // Stable until the daemon returns a receipt for this exact provider-lane
   // selection. A lost app-chat:new-session reply must retry the same actor
   // operation instead of committing a second control mutation.

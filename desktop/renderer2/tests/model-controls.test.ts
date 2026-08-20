@@ -3,7 +3,7 @@ import test from 'node:test';
 import {
   compatibleEffortId, compatibleModeId, composeModelSelection,
   imageDraftCapability,
-  modelControlsChangedDuringInit, nextModelControlRevision,
+  nextModelControlRevision,
   normalizeModelControlMemory, rememberModelControls, rememberedModelControls,
   permissionIntentForMode,
   restoredProviderBinding,
@@ -95,13 +95,6 @@ test('permission translation is driven by typed adapter intent metadata', () => 
 test('invalid remembered effort falls back inside the selected model vocabulary', () => {
   assert.equal(compatibleEffortId('ultra', codexModel, 'xhigh'), 'xhigh');
   assert.equal(compatibleEffortId('ultra', codexModel), 'high');
-});
-
-test('an explicit picker change wins over an in-flight inherited-provider initialization', () => {
-  const initRevision = 0;
-  const pickedRevision = nextModelControlRevision(initRevision);
-  assert.equal(modelControlsChangedDuringInit(initRevision, pickedRevision), true);
-  assert.equal(modelControlsChangedDuringInit(pickedRevision, pickedRevision), false);
 });
 
 test('a stale provider session never turns unresolved image support into a rejection', () => {

@@ -37,34 +37,20 @@ function chat(): Chat {
   } as Chat;
 }
 
-test('a lost lane-selection reply retries the exact OperationID and clears it only after success', async () => {
+test('a lost selected-lane start retries the exact OperationID and attaches only that provider', async () => {
   const calls: Array<Record<string, unknown>> = [];
   let attempts = 0;
   const previousWindow = (globalThis as any).window;
   (globalThis as any).window = {
     api: {
-      appChatNewSession: async (opts: Record<string, unknown>) => {
+      startJob: async (opts: Record<string, unknown>) => {
         calls.push({ ...opts });
         attempts += 1;
         if (attempts === 1) return undefined;
         return {
+          id: 'job-lane-retry',
           sessionId: 'session-lane-retry',
-          cwd: '/tmp/workass-lane-retry',
           providerId: 'codex',
-          providerName: 'Codex',
-          models: [],
-          currentModelId: null,
-          modes: [],
-          currentModeId: null,
-          planUsageSupported: true,
-          planUsageResetSupported: true,
-          deliveryCapabilities: {
-            stableInputIdentity: true,
-            liveSteer: true,
-            steerConsumptionReceipt: true,
-            consumptionReceipt: true,
-            turnReadback: true,
-          },
         };
       },
     },
@@ -75,22 +61,26 @@ test('a lost lane-selection reply retries the exact OperationID and clears it on
     subject.state.chats = [owner];
     subject.state.activeId = owner.id;
     subject.state.meta = { daemon: true };
+    subject.state.connection = 'connected';
+    subject.schedulePersist = () => {};
 
-    await subject.ensureSession(owner);
+    assert.equal(await subject._send(owner, 'retry selected lane'), false);
     assert.equal(owner.sessionId, null);
-    const firstOperationId = owner._sessionOperationId;
-    assert.match(firstOperationId, /^lane-select-/);
+    const failed = owner.messages.find((message) => message.role === 'assistant');
+    const submitted = owner.messages.find((message) => message.role === 'user');
+    assert.ok(failed?.retryPrompt);
+    assert.ok(submitted);
 
-    await subject.ensureSession(owner);
+    await subject.retryTurn(owner.id, failed.id);
     assert.equal(owner.sessionId, 'session-lane-retry');
-    assert.equal(owner.deliveryCapabilities?.liveSteer, true);
-    assert.equal(owner.deliveryCapabilities?.steerConsumptionReceipt, true);
-    assert.equal(owner.planUsageSupported, true);
-    assert.equal(owner.planUsageResetSupported, true);
-    assert.equal(owner._sessionOperationId, undefined);
+    assert.equal(owner.sessionProviderId, 'codex');
     assert.equal(calls.length, 2);
-    assert.equal(calls[0].operationId, firstOperationId);
-    assert.equal(calls[1].operationId, firstOperationId);
+    assert.equal(calls[0].operationId, submitted.id);
+    assert.equal(calls[1].operationId, submitted.id);
+    assert.equal(calls[0].providerId, 'codex');
+    assert.equal(calls[1].providerId, 'codex');
+    assert.equal(calls[0].sessionId, undefined);
+    assert.equal(calls[1].sessionId, undefined);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
@@ -200,28 +190,15 @@ test('explicit image rejection from a live matching session remains authoritativ
   assert.equal((restored.chats[0] as Chat).planUsageResetSupported, false);
 });
 
-test('a session reply without provider identity cannot become a chat attachment', async () => {
-  const previousWindow = (globalThis as any).window;
-  (globalThis as any).window = {
-    api: {
-      appChatNewSession: async () => ({
-        sessionId: 'identity-missing-session', cwd: '/tmp/workass-lane-retry',
-        models: [], currentModelId: null, modes: [], currentModeId: null,
-      }),
-    },
-  };
-  try {
-    const subject = new StoreCtor();
-    const owner = chat();
-    subject.state.chats = [owner];
-    subject.state.activeId = owner.id;
-    subject.state.meta = { daemon: true };
-    await subject.ensureSession(owner);
-    assert.equal(owner.sessionId, null);
-    assert.equal(owner.sessionProviderId, undefined);
-    assert.match(String(owner.sessionError), /provider identity/);
-  } finally {
-    if (previousWindow === undefined) delete (globalThis as any).window;
-    else (globalThis as any).window = previousWindow;
-  }
+test('a job session without provider identity cannot become a chat attachment', () => {
+  const subject = new StoreCtor();
+  const owner = chat();
+  subject.state.chats = [owner];
+
+  assert.equal(subject.attachJobSession(owner, {
+    id: 'job-identity-missing',
+    sessionId: 'identity-missing-session',
+  }), false);
+  assert.equal(owner.sessionId, null);
+  assert.equal(owner.sessionProviderId, undefined);
 });

@@ -39,11 +39,13 @@ export class WorkassInvokeError extends Error {
   readonly code: InvokeErrorCode;
   readonly channel: string;
   readonly generation: number;
-  constructor(code: InvokeErrorCode, channel: string, generation: number) {
+  readonly mayHaveBeenAccepted: boolean;
+  constructor(code: InvokeErrorCode, channel: string, generation: number, mayHaveBeenAccepted = false) {
     super(`Workass invoke ${channel} failed: ${code}`);
     this.code = code;
     this.channel = channel;
     this.generation = generation;
+    this.mayHaveBeenAccepted = mayHaveBeenAccepted;
   }
 }
 
@@ -100,6 +102,7 @@ interface Pending {
   timer: unknown;
   channel: string;
   generation: number;
+  dispatched: boolean;
 }
 
 interface Queued {
@@ -199,9 +202,16 @@ export class MachineSocket {
       const generation = this.gen;
       const budget = SESSION_CHANNELS.has(channel) ? SESSION_INVOKE_TIMEOUT_MS : INVOKE_TIMEOUT_MS;
       const timer = this.later(() => {
-        this.failInvoke(id, new WorkassInvokeError('invoke-timeout', channel, generation));
+        this.failInvoke(id, 'invoke-timeout');
       }, budget);
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer, channel, generation });
+      this.pending.set(id, {
+        resolve: resolve as (v: unknown) => void,
+        reject,
+        timer,
+        channel,
+        generation,
+        dispatched: false,
+      });
       const entry: Queued = { id, data: JSON.stringify({ t: 'invoke', id, channel, args }), generation };
       if (this.ready || PRE_READY_CHANNELS.has(channel)) this.send(entry);
       else this.queue.push(entry);
@@ -247,7 +257,7 @@ export class MachineSocket {
       // A reply from a superseded generation is dropped, never resolved.
       if (!entry || entry.generation !== gen) return;
       this.pending.delete(message.id as number);
-      this.opts.clearTimer?.(entry.timer);
+      this.cancelTimer(entry.timer);
       if (message.error) entry.reject(new Error(message.error));
       else entry.resolve(message.result);
       return;
@@ -350,33 +360,44 @@ export class MachineSocket {
   }
 
   private send(entry: Queued): void {
-    if (this.opened && this.socket) this.socket.send(entry.data);
-    else this.queue.push(entry);
+    if (!this.opened || !this.socket) {
+      this.queue.push(entry);
+      return;
+    }
+    try {
+      this.socket.send(entry.data);
+    } catch {
+      this.failInvoke(entry.id, 'socket-closed');
+      return;
+    }
+    const pending = this.pending.get(entry.id);
+    if (!pending) return;
+    pending.dispatched = true;
   }
 
   private flush(): void {
     while (this.ready && this.queue.length) {
       const entry = this.queue.shift() as Queued;
       // Only still-pending invokes go out: a timed-out one must not be sent late.
-      if (this.pending.has(entry.id) && this.socket) this.socket.send(entry.data);
+      if (this.pending.has(entry.id) && this.socket) this.send(entry);
     }
   }
 
-  private failInvoke(id: number, error: WorkassInvokeError): void {
+  private failInvoke(id: number, code: InvokeErrorCode): void {
     const entry = this.pending.get(id);
     if (!entry) return;
     this.pending.delete(id);
-    this.opts.clearTimer?.(entry.timer);
+    this.cancelTimer(entry.timer);
     const queued = this.queue.findIndex((q) => q.id === id);
     if (queued >= 0) this.queue.splice(queued, 1);
-    entry.reject(error);
+    entry.reject(new WorkassInvokeError(code, entry.channel, entry.generation, entry.dispatched));
   }
 
   private rejectPending(code: InvokeErrorCode): void {
     for (const [id, entry] of Array.from(this.pending)) {
       this.pending.delete(id);
-      this.opts.clearTimer?.(entry.timer);
-      entry.reject(new WorkassInvokeError(code, entry.channel, entry.generation));
+      this.cancelTimer(entry.timer);
+      entry.reject(new WorkassInvokeError(code, entry.channel, entry.generation, entry.dispatched));
     }
     this.queue = [];
   }
@@ -390,6 +411,11 @@ export class MachineSocket {
   private later(fn: () => void, ms: number): unknown {
     if (this.opts.setTimer) return this.opts.setTimer(fn, ms);
     return setTimeout(fn, ms);
+  }
+
+  private cancelTimer(handle: unknown): void {
+    if (this.opts.clearTimer) this.opts.clearTimer(handle);
+    else clearTimeout(handle as ReturnType<typeof setTimeout>);
   }
 
 	private cancelReconnect(): void {

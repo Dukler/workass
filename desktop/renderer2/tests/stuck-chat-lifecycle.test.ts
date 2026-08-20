@@ -256,7 +256,7 @@ test('an in-flight cancel receipt never manufactures a local terminal turn', asy
   }
 });
 
-test('Stop before job:start dispatch cancels the renderer-owned send without creating provider work', async () => {
+test('Stop before durable chat creation completes cancels the renderer-owned send without creating provider work', async () => {
   const previousWindow = (globalThis as any).window;
   let starts = 0;
   (globalThis as any).window = {
@@ -270,9 +270,9 @@ test('Stop before job:start dispatch cancels the renderer-owned send without cre
   try {
     const { subject, owner } = subjectWithChat();
     subject.state.connection = 'connected';
-    let releaseSession!: () => void;
-    const sessionReady = new Promise<void>((resolve) => { releaseSession = resolve; });
-    (subject as any).ensureSession = async () => { await sessionReady; };
+    let releaseCreation!: () => void;
+    const creationReady = new Promise<void>((resolve) => { releaseCreation = resolve; });
+    (subject as any).ensureChatCreated = async () => { await creationReady; return true; };
 
     const sending = subject.sendTo(owner.id, 'cancel before admission');
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -280,7 +280,7 @@ test('Stop before job:start dispatch cancels the renderer-owned send without cre
     assert.equal(assistant.status, 'running');
 
     await subject.cancelChatTurn(owner.id);
-    releaseSession();
+    releaseCreation();
     assert.equal(await sending, false);
     assert.equal(starts, 0);
     assert.equal(assistant.status, 'cancelled');

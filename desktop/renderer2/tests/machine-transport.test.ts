@@ -92,6 +92,67 @@ test('the pre-ready set is exactly the three channels the daemon allows', () => 
   assert.deepEqual([...PRE_READY_CHANNELS].sort(), ['fleet:challenge', 'fleet:enroll', 'lan:pairing-info']);
 });
 
+test('a dispatched job:start timeout is acceptance-ambiguous and releases its waiter', async () => {
+  const h = harness();
+  h.link.connect();
+  h.last().onopen?.();
+  h.last().access({ state: 'approved', deviceId: 'd1', name: 'iPhone', instanceId: 'i-1' });
+
+  const start = h.link.invoke('job:start', { operationId: 'stable-turn' });
+  const frame = h.last().frames().find((candidate) => candidate.channel === 'job:start');
+  assert.ok(frame);
+
+  // The promise is bounded, but bytes that left the renderer may already be
+  // actor-owned. The caller must preserve the exact operation for event or
+  // hydration reconciliation and must never auto-resend it.
+  h.runTimers();
+  await assert.rejects(start, (error: unknown) => {
+    assert.ok(error instanceof WorkassInvokeError);
+    assert.equal((error as WorkassInvokeError).code, 'invoke-timeout');
+    assert.equal((error as WorkassInvokeError).mayHaveBeenAccepted, true);
+    return true;
+  });
+
+  // A reply after the bounded waiter was released cannot resurrect or mutate
+  // the invoke. The authoritative job event/session snapshot owns recovery.
+  h.last().reply(frame.id, { id: 'job-late-but-owned' });
+});
+
+test('a job:start that never left the approval queue times out as not delivered', async () => {
+  const h = harness();
+  h.link.connect();
+  h.last().onopen?.();
+  const start = h.link.invoke('job:start', { operationId: 'never-sent' });
+
+  h.runTimers();
+  await assert.rejects(start, (error: unknown) => {
+    assert.ok(error instanceof WorkassInvokeError);
+    assert.equal((error as WorkassInvokeError).code, 'invoke-timeout');
+    assert.equal((error as WorkassInvokeError).mayHaveBeenAccepted, false);
+    return true;
+  });
+
+  h.last().access({ state: 'approved', deviceId: 'd1', name: 'iPhone', instanceId: 'i-1' });
+  assert.equal(h.last().frames().some((frame) => frame.channel === 'job:start'), false,
+    'a proven-unsent timed-out command must not leave the queue later');
+});
+
+test('socket loss after job:start dispatch reports possible actor acceptance', async () => {
+  const h = harness();
+  h.link.connect();
+  h.last().onopen?.();
+  h.last().access({ state: 'approved', deviceId: 'd1', name: 'iPhone', instanceId: 'i-1' });
+  const start = h.link.invoke('job:start', { operationId: 'possibly-owned' });
+  h.last().close();
+
+  await assert.rejects(start, (error: unknown) => {
+    assert.ok(error instanceof WorkassInvokeError);
+    assert.equal((error as WorkassInvokeError).code, 'socket-closed');
+    assert.equal((error as WorkassInvokeError).mayHaveBeenAccepted, true);
+    return true;
+  });
+});
+
 // ---- generation and restart ---------------------------------------------
 
 test('a reply from a superseded socket is dropped, and its invoke is rejected', async () => {

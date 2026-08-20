@@ -45,17 +45,17 @@ function setup(owner: Chat, startJob: (...args: any[]) => Promise<unknown>): any
   subject.schedulePersist = () => {};
   (globalThis as any).window = {
     api: {
-      // A failed start invalidates the old provider attachment. Retrying the
-      // same turn must first bind a fresh lane, then reuse the turn identity.
-      appChatNewSession: async () => ({
-        sessionId: `session-${owner.id}-reattached`,
-        providerId: owner.providerId,
-        cwd: owner.cwd,
-      }),
       startJob,
     },
   };
   return subject;
+}
+
+function possibleDeliveryError(): Error & { mayHaveBeenAccepted: true } {
+  const error = new Error('socket closed after dispatch') as Error & { mayHaveBeenAccepted: true };
+  error.name = 'WorkassInvokeError';
+  error.mayHaveBeenAccepted = true;
+  return error;
 }
 
 test('retryTurn reuses the original job:start OperationID and exact message pair', async () => {
@@ -125,6 +125,73 @@ test('a queued head reuses its operation and assistant identities after a lost j
     assert.equal(calls[1].assistantMessageId, calls[0].assistantMessageId);
     assert.equal(owner.queue, undefined);
     assert.equal(new Set(owner.messages.map((message: any) => message.id)).size, owner.messages.length);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('a sessionless first send creates and admits only through the selected job:start operation', async () => {
+  const previousWindow = (globalThis as any).window;
+  try {
+    const owner = chat('tab-sessionless-send');
+    owner.sessionId = null;
+    let sessionCreates = 0;
+    const calls: Array<Record<string, unknown>> = [];
+    const subject = setup(owner, async (opts: Record<string, unknown>) => {
+      calls.push({ ...opts });
+      return { id: 'job-sessionless' };
+    });
+    (globalThis as any).window.api.appChatNewSession = async () => {
+      sessionCreates += 1;
+      return { sessionId: 'unwanted-preflight', providerId: owner.providerId };
+    };
+
+    assert.equal(await subject._send(owner, 'one atomic send'), true);
+    assert.equal(sessionCreates, 0, 'send must not create a separate provider session before actor admission');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].providerId, owner.providerId);
+    assert.equal(calls[0].operationId, calls[0].userMessageId);
+    assert.equal(calls[0].sessionId, undefined);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('possible remote acceptance keeps one running owner until the late actor event binds it', async () => {
+  const previousWindow = (globalThis as any).window;
+  try {
+    let submitted!: Record<string, unknown>;
+    const owner = chat('tab-possibly-accepted');
+    const subject = setup(owner, async (opts: Record<string, unknown>) => {
+      submitted = { ...opts };
+      throw possibleDeliveryError();
+    });
+
+    assert.equal(await subject._send(owner, 'keep exact ownership'), true);
+    assert.deepEqual(owner.messages.map((message) => message.id), [submitted.userMessageId, submitted.assistantMessageId]);
+    const assistant = owner.messages[1];
+    assert.equal(assistant.status, 'running');
+    assert.equal(assistant.retryPrompt, undefined);
+    assert.ok(subject.pendingTurnStarts.has(owner.id));
+
+    subject.onJobEvent({
+      type: 'start',
+      job: {
+        id: 'job-late-admission', kind: 'app-chat', key: null, title: owner.title, status: 'running',
+        startedAt: '2026-08-20T12:00:00Z', finishedAt: null, code: null, permissionMode: 'agent',
+        chatId: owner.chatId, tabId: owner.id, sessionId: 'session-late', providerId: owner.providerId,
+        userMessageId: submitted.userMessageId, assistantMessageId: submitted.assistantMessageId,
+        promptText: 'keep exact ownership', result: null, error: null, stopReason: null, crashInterrupted: false,
+      },
+    });
+    assert.equal(subject.pendingTurnStarts.has(owner.id), false);
+    assert.equal(assistant.jobId, 'job-late-admission');
+
+    subject.onJobEvent({ type: 'data', id: 'job-late-admission', stream: 'stdout', chunk: 'arrived once' });
+    assert.equal(assistant.content, 'arrived once');
+    assert.equal(new Set(owner.messages.map((message) => message.id)).size, 2);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;

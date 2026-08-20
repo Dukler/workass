@@ -23,15 +23,8 @@ export interface RestoredProviderBinding {
 // because two agents may advertise the same model id with different controls.
 export type ModelControlMemory = Record<string, Record<string, RememberedModelControls>>;
 
-// A new chat may already be initializing its inherited provider to refresh plan
-// usage when the user picks another provider. The explicit picker change must
-// win over that older async response, even before a session id exists.
 export function nextModelControlRevision(current: number | undefined): number {
   return (current ?? 0) + 1;
-}
-
-export function modelControlsChangedDuringInit(startedRevision: number, currentRevision: number | undefined): boolean {
-  return (currentRevision ?? 0) !== startedRevision;
 }
 
 // Provider selection and live-session ownership intentionally diverge while a
