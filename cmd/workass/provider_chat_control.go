@@ -105,36 +105,6 @@ func (r *providerChatRuntime) ReplaceStagedQueue(tabID, chatID string, operation
 	}, nil
 }
 
-func (r *providerChatRuntime) ResumeQueue(ctx context.Context, tabID, chatID string, operationID providercontract.OperationID, expectedRevision uint64) (map[string]any, error) {
-	actor, _, err := r.exactActor(tabID, chatID)
-	if err != nil {
-		return nil, err
-	}
-	operationID = providercontract.NormalizeOperationID(string(operationID))
-	if operationID == "" || expectedRevision == 0 {
-		return nil, errors.New("queue resume requires a stable operation id and pause revision")
-	}
-	actor.mu.Lock()
-	err = actor.engine.Apply(chat.ResumeQueue{OperationID: operationID, ExpectedRevision: expectedRevision})
-	actor.mu.Unlock()
-	if err != nil {
-		return nil, err
-	}
-	if err := actor.coordinator.Drain(ctx); err != nil {
-		return nil, err
-	}
-	state := actor.engine.Snapshot()
-	receipt, ok := state.QueueControl.ResumeReceipts[operationID]
-	if !ok || receipt.PauseRevision != expectedRevision {
-		return nil, errors.New("queue resume lost its durable actor receipt")
-	}
-	return map[string]any{
-		"ok": true, "tabId": tabID, "chatId": chatID, "operationId": string(operationID),
-		"queuePaused": state.QueueControl.Paused, "queuePauseRevision": state.QueueControl.Revision,
-		"actorRevision": state.Revision,
-	}, nil
-}
-
 func (r *providerChatRuntime) SavePresentation(tabID, chatID string, operationID providercontract.OperationID, expectedRevision uint64, raw map[string]any) (map[string]any, error) {
 	actor, _, err := r.exactActor(tabID, chatID)
 	if err != nil {
@@ -1020,12 +990,15 @@ func (r *providerChatRuntime) QueueAgentMessage(ctx context.Context, tabID, chat
 		return receipt, nil
 	}
 	if delivery == "steer" {
-		needsDrain, result, err := r.steerQueuedLocked(actor, tabID, chatID, queueID, message)
+		action, result, err := r.steerQueuedLocked(actor, tabID, chatID, queueID, message)
 		actor.mu.Unlock()
 		if err != nil {
 			return nil, err
 		}
-		if needsDrain {
+		if action == agentSteerWakeQueue {
+			actor.coordinator.Wake()
+		}
+		if action == agentSteerExecuteLive {
 			actorOperationID := providercontract.NormalizeOperationID(queueID)
 			if _, err := actor.coordinator.ExecuteSteer(ctx, actorOperationID); err != nil {
 				return nil, err
@@ -1087,39 +1060,77 @@ func (r *providerChatRuntime) QueueAgentMessage(ctx context.Context, tabID, chat
 // steerQueuedLocked records a steer operation while the exact actor mutex is
 // held. It deliberately does not call the coordinator: a provider effect may
 // run concurrently and must never execute while the reducer lock is held.
-// The bool reports whether the caller should drain after unlocking.
-func (r *providerChatRuntime) steerQueuedLocked(actor *providerChatActor, tabID, chatID, queueID, message string) (bool, map[string]any, error) {
+// The action reports whether the caller should execute the provider steer or
+// wake an ordinary FIFO turn after unlocking.
+type agentSteerAction uint8
+
+const (
+	agentSteerNoAction agentSteerAction = iota
+	agentSteerExecuteLive
+	agentSteerWakeQueue
+)
+
+func (r *providerChatRuntime) steerQueuedLocked(actor *providerChatActor, tabID, chatID, queueID, message string) (agentSteerAction, map[string]any, error) {
 	if actor == nil || actor.engine == nil {
-		return false, nil, errors.New("chat actor is unavailable")
+		return agentSteerNoAction, nil, errors.New("chat actor is unavailable")
 	}
 	state := actor.engine.Snapshot()
 	if strings.TrimSpace(state.ChatID) != strings.TrimSpace(chatID) || strings.TrimSpace(state.Presentation.TabID) != strings.TrimSpace(tabID) {
-		return false, nil, errors.New("steer tab attachment is stale")
+		return agentSteerNoAction, nil, errors.New("steer tab attachment is stale")
 	}
 	operationID := providercontract.NormalizeOperationID(queueID)
 	if operationID == "" {
-		return false, nil, errors.New("steer requires a stable operation id")
-	}
-	if state.Foreground == nil || state.Foreground.Status != chat.ForegroundRunning {
-		return false, map[string]any{"ok": false, "queued": true, "strategy": "queue"}, nil
+		return agentSteerNoAction, nil, errors.New("steer requires a stable operation id")
 	}
 	if _, exists := state.Operations[operationID]; exists {
 		result, err := r.agentSteerQueuedResultLocked(state, operationID)
-		return false, result, err
+		return agentSteerNoAction, result, err
+	}
+	if state.Foreground == nil || state.Foreground.Status != chat.ForegroundRunning {
+		laneID := state.DesiredLaneID
+		if laneID == "" {
+			return agentSteerNoAction, nil, errors.New("agent queue requires a selected provider lane")
+		}
+		presentation := providercontract.TurnPresentation{
+			UserMessageID:      stableAgentMessageIdentity("u", operationID),
+			AssistantMessageID: stableAgentMessageIdentity("a", operationID),
+			QueueID:            queueID, PromptText: message, Title: state.Presentation.Title,
+			Origin: "agent", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		if err := actor.engine.Apply(chat.Submit{
+			OperationID: operationID, LaneID: laneID, Text: message,
+			ModelID: state.Presentation.CurrentModelID, ModeID: state.Presentation.CurrentModeID,
+			Presentation: presentation,
+		}); err != nil {
+			return agentSteerNoAction, nil, err
+		}
+		result := queuedActorReceipt(actor.engine.Snapshot(), operationID, queueID)
+		result["ok"] = false
+		result["queued"] = true
+		result["strategy"] = "queue"
+		result["daemonQueued"] = true
+		return agentSteerWakeQueue, result, nil
 	}
 	if err := actor.engine.Apply(chat.Steer{
 		OperationID: operationID, Text: message,
 		Presentation: providercontract.TurnPresentation{
-			QueueID: queueID, PromptText: message, Origin: "agent", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			UserMessageID:      stableAgentMessageIdentity("u", operationID),
+			AssistantMessageID: stableAgentMessageIdentity("a", operationID),
+			QueueID:            queueID, PromptText: message, Origin: "agent", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		},
 	}); err != nil {
-		return false, nil, err
+		return agentSteerNoAction, nil, err
 	}
-	return true, nil, nil
+	return agentSteerExecuteLive, nil, nil
 }
 
 func (r *providerChatRuntime) agentSteerQueuedResultLocked(state chat.State, operationID providercontract.OperationID) (map[string]any, error) {
 	operationID = providercontract.NormalizeOperationID(string(operationID))
+	for _, entry := range state.Queue {
+		if entry.OperationID == operationID {
+			return map[string]any{"ok": false, "queued": true, "strategy": "queue", "daemonQueued": true}, nil
+		}
+	}
 	for _, entry := range state.Outbox {
 		if entry.Kind != chat.EffectSteerTurn || entry.OperationID != operationID {
 			continue

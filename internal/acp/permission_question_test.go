@@ -11,6 +11,7 @@ import (
 // what is being ASKED — dropping it is what rendered a permission card with no
 // question in it.
 func TestPermissionRequestForwardsTheAgentsQuestion(t *testing.T) {
+	t.Parallel()
 	events := newEventCollector()
 	manager := NewManager(Options{Broadcast: events.Broadcast, PermissionTimeout: time.Second})
 	t.Cleanup(func() { manager.Reset() })
@@ -69,6 +70,7 @@ func TestPermissionRequestForwardsTheAgentsQuestion(t *testing.T) {
 
 // An ordinary tool permission has no question, and must not grow one.
 func TestPermissionRequestWithoutQuestionStaysAPlainPermission(t *testing.T) {
+	t.Parallel()
 	events := newEventCollector()
 	manager := NewManager(Options{Broadcast: events.Broadcast, PermissionTimeout: time.Second})
 	t.Cleanup(func() { manager.Reset() })
@@ -92,6 +94,7 @@ func TestPermissionRequestWithoutQuestionStaysAPlainPermission(t *testing.T) {
 // and it finished the whole job anyway. A tool permission fails closed on a
 // deadline; a question addressed to a human must not answer itself.
 func TestQuestionWaitsForTheUserWhileAPermissionStillExpires(t *testing.T) {
+	t.Parallel()
 	events := newEventCollector()
 	manager := NewManager(Options{Broadcast: events.Broadcast, PermissionTimeout: 120 * time.Millisecond})
 	t.Cleanup(func() { manager.Reset() })
@@ -155,6 +158,7 @@ func TestQuestionWaitsForTheUserWhileAPermissionStillExpires(t *testing.T) {
 
 // A parked question must not survive its turn: cancelling settles it.
 func TestCancellingASessionSettlesAParkedQuestion(t *testing.T) {
+	t.Parallel()
 	events := newEventCollector()
 	manager := NewManager(Options{Broadcast: events.Broadcast, PermissionTimeout: 120 * time.Millisecond})
 	t.Cleanup(func() { manager.Reset() })
@@ -188,6 +192,7 @@ func TestCancellingASessionSettlesAParkedQuestion(t *testing.T) {
 // agent owns it. Answer the subagent immediately so no background lane parks on
 // a human, and put no card on anyone's screen.
 func TestSpawnedSubagentQuestionIsHandedBackWhileItsPermissionsStillAsk(t *testing.T) {
+	t.Parallel()
 	events := newEventCollector()
 	manager := NewManager(Options{Broadcast: events.Broadcast, PermissionTimeout: 120 * time.Millisecond})
 	t.Cleanup(func() { manager.Reset() })
@@ -224,6 +229,7 @@ func TestSpawnedSubagentQuestionIsHandedBackWhileItsPermissionsStillAsk(t *testi
 }
 
 func TestPermissionQuestionIsBoundedAndRedacted(t *testing.T) {
+	t.Parallel()
 	long := strings.Repeat("x", 900)
 	question := permissionQuestion(map[string]any{
 		"question": long,
@@ -257,6 +263,7 @@ func TestPermissionQuestionIsBoundedAndRedacted(t *testing.T) {
 // resolver rather than by waiting, since the bug it guards against is a deadline
 // measured in minutes.
 func TestPermissionWithoutAConfiguredDeadlineArmsNoTimer(t *testing.T) {
+	t.Parallel()
 	events := newEventCollector()
 	manager := NewManager(Options{Broadcast: events.Broadcast})
 	t.Cleanup(func() { manager.Reset() })
@@ -305,6 +312,7 @@ func TestPermissionWithoutAConfiguredDeadlineArmsNoTimer(t *testing.T) {
 
 // A malformed or empty payload must not produce a question card with no answers.
 func TestPermissionQuestionRejectsUnanswerableInput(t *testing.T) {
+	t.Parallel()
 	for name, raw := range map[string]any{
 		"nil":            nil,
 		"not a map":      "question?",

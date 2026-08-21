@@ -50,6 +50,23 @@ type providerChatActor struct {
 	coordinator        *chat.Coordinator
 }
 
+// providerChatStartAdmission is the durable boundary between a frozen
+// job:start receipt and provider execution. Receipt is safe to return before
+// any provider attachment or prompt work. Dispatch is idempotent and only
+// wakes the coordinator after the caller has crossed its reply boundary.
+type providerChatStartAdmission struct {
+	Receipt  map[string]any
+	dispatch func()
+	once     sync.Once
+}
+
+func (a *providerChatStartAdmission) Dispatch() {
+	if a == nil || a.dispatch == nil {
+		return
+	}
+	a.once.Do(a.dispatch)
+}
+
 func newProviderChatRuntime(manager *acp.Manager, sessions *sessionStore, stateDir string, publishers ...func(string, any)) *providerChatRuntime {
 	return newProviderChatRuntimeWithStartupMode(manager, sessions, stateDir, false, publishers...)
 }
@@ -434,6 +451,11 @@ func (r *providerChatRuntime) publishLifecycleReceipt(receipt chat.LifecycleRece
 		// The actor snapshot carries the complete authoritative result, including
 		// rich timeline/media that an operation readback cannot reproduce in one
 		// terminal receipt. Ask connected renderers to reconcile from that state.
+		r.publish("agent:apply", map[string]any{"action": "session-refresh"})
+	case chat.LifecycleTurnAdmissionFailed:
+		if event, err := projectActorTerminalJob(state, receipt.OperationID, receipt.Turn); err == nil {
+			r.publish("job:event", event)
+		}
 		r.publish("agent:apply", map[string]any{"action": "session-refresh"})
 	case chat.LifecycleCheckpointRestored:
 		var payload map[string]any
@@ -1497,6 +1519,26 @@ func (r *providerChatRuntime) selectLocked(ctx context.Context, actor *providerC
 	}
 }
 
+// selectTurnLocked commits only actor-owned lane intent. Provider attachment,
+// resume, import, model/mode application, and admission are all coordinator
+// effects and must never extend the frozen job:start round trip.
+func (r *providerChatRuntime) selectTurnLocked(actor *providerChatActor, selection acp.ProviderLaneSelection, opts acp.SessionOptions) (acp.ProviderLaneSelection, error) {
+	if err := r.commitLaneSelectionLocked(actor, selection, opts); err != nil {
+		return selection, err
+	}
+	state := actor.engine.Snapshot()
+	operationID := providercontract.NormalizeOperationID(string(opts.OperationID))
+	laneID := state.DesiredLaneID
+	if receipt, exists := state.LaneSelectionMutationReceipts[operationID]; exists {
+		laneID = receipt.LaneID
+	}
+	lane, exists := state.Lanes[laneID]
+	if !exists {
+		return selection, errors.New("provider lane selection did not persist a desired lane")
+	}
+	return providerLaneSelectionFromActorLane(lane), nil
+}
+
 func (r *providerChatRuntime) commitLaneSelectionLocked(actor *providerChatActor, selection acp.ProviderLaneSelection, opts acp.SessionOptions) error {
 	if actor == nil {
 		return errors.New("provider chat actor is unavailable")
@@ -1529,6 +1571,18 @@ func (r *providerChatRuntime) commitLaneSelectionLocked(actor *providerChatActor
 }
 
 func (r *providerChatRuntime) Start(ctx context.Context, arg map[string]any, origin string) (map[string]any, error) {
+	admission, err := r.AdmitStart(ctx, arg, origin)
+	if err != nil {
+		return nil, err
+	}
+	admission.Dispatch()
+	return admission.Receipt, nil
+}
+
+// AdmitStart persists the exact actor-owned input and returns its deterministic
+// public receipt without starting provider work. Callers must invoke Dispatch
+// after their reply boundary; direct in-process callers use Start above.
+func (r *providerChatRuntime) AdmitStart(ctx context.Context, arg map[string]any, origin string) (*providerChatStartAdmission, error) {
 	if r == nil {
 		return nil, errors.New("provider chat runtime is unavailable")
 	}
@@ -1544,6 +1598,16 @@ func (r *providerChatRuntime) Start(ctx context.Context, arg map[string]any, ori
 	if err != nil {
 		return nil, err
 	}
+	release := actor.coordinator.BeginReplyAdmission()
+	receipt, err := r.admitStartReceipt(ctx, arg, fields, origin, actor)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	return &providerChatStartAdmission{Receipt: receipt, dispatch: release}, nil
+}
+
+func (r *providerChatRuntime) admitStartReceipt(ctx context.Context, arg map[string]any, fields map[string]string, origin string, actor *providerChatActor) (map[string]any, error) {
 	actor.mu.Lock()
 	defer actor.mu.Unlock()
 	if result, handled, err := r.existingTurnReceiptLocked(actor, arg, fields, origin); handled {
@@ -1557,7 +1621,7 @@ func (r *providerChatRuntime) Start(ctx context.Context, arg map[string]any, ori
 			if err != nil {
 				return nil, err
 			}
-			selection, err = r.selectLocked(ctx, actor, selection, opts)
+			selection, err = r.selectTurnLocked(actor, selection, opts)
 			if err != nil {
 				return nil, err
 			}
@@ -1571,7 +1635,7 @@ func (r *providerChatRuntime) Start(ctx context.Context, arg map[string]any, ori
 	if err != nil {
 		return nil, err
 	}
-	selection, err = r.selectLocked(ctx, actor, selection, opts)
+	selection, err = r.selectTurnLocked(actor, selection, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -1637,13 +1701,30 @@ func (r *providerChatRuntime) existingTurnReceiptLocked(
 		(strings.TrimSpace(fieldString(arg, "queueId")) != "" && durable.Presentation.QueueID != strings.TrimSpace(fieldString(arg, "queueId"))) {
 		return nil, true, errors.New("turn operation id was reused for different content")
 	}
+	if terminal, ok := actorTerminalJobReceipt(state, operationID); ok {
+		return terminal, true, nil
+	}
 	for _, entry := range state.Queue {
 		if entry.OperationID == operationID {
-			return queuedActorReceipt(state, operationID, entry.Presentation.QueueID), true, nil
+			if strings.TrimSpace(entry.Presentation.QueueID) != "" {
+				return queuedActorReceipt(state, operationID, entry.Presentation.QueueID), true, nil
+			}
+			return actorJobReceipt(state, entry, fieldString(arg, "tabId"), fieldString(arg, "chatId")), true, nil
 		}
 	}
-	result, err := r.admissionOutcomeLocked(actor, fieldString(arg, "tabId"), fieldString(arg, "chatId"), operationID)
-	return result, true, err
+	return actorJobReceipt(state, *durable, fieldString(arg, "tabId"), fieldString(arg, "chatId")), true, nil
+}
+
+func actorTerminalJobReceipt(state chat.State, operationID providercontract.OperationID) (map[string]any, bool) {
+	event, err := projectActorTerminalJob(state, operationID, providercontract.TurnRef{OperationID: operationID})
+	if err != nil {
+		return nil, false
+	}
+	job, ok := event["job"].(map[string]any)
+	if !ok || strings.TrimSpace(fieldString(job, "id")) == "" {
+		return nil, false
+	}
+	return job, true
 }
 
 func (r *providerChatRuntime) queueBusyTurnLocked(
@@ -1684,10 +1765,11 @@ func (r *providerChatRuntime) queueBusyTurnLocked(
 	// The foreground may have crossed its terminal boundary between the busy
 	// check and this commit. Drain executes only if the queued operation became
 	// immediately eligible; otherwise the coordinator's event wake owns it.
-	if err := actor.coordinator.Drain(ctx); err != nil {
-		return nil, err
+	state = actor.engine.Snapshot()
+	if state.Foreground != nil && state.Foreground.OperationID == operationID {
+		return actorJobReceipt(state, state.Foreground.Input, fieldString(arg, "tabId"), fieldString(arg, "chatId")), nil
 	}
-	return queuedActorReceipt(actor.engine.Snapshot(), operationID, queueID), nil
+	return queuedActorReceipt(state, operationID, queueID), nil
 }
 
 func actorHasStagedQueue(state chat.State, queueID string) bool {
@@ -1734,7 +1816,7 @@ func (r *providerChatRuntime) admitStagedLocked(
 }
 
 func (r *providerChatRuntime) promoteStagedLocked(
-	ctx context.Context,
+	_ context.Context,
 	actor *providerChatActor,
 	selection acp.ProviderLaneSelection,
 	arg map[string]any,
@@ -1760,11 +1842,19 @@ func (r *providerChatRuntime) promoteStagedLocked(
 	}); err != nil {
 		return nil, err
 	}
-	if err := actor.coordinator.Drain(ctx); err != nil {
-		return nil, err
-	}
+	state = actor.engine.Snapshot()
 	if wantAdmission {
-		return r.admissionOutcomeLocked(actor, fieldString(arg, "tabId"), fieldString(arg, "chatId"), operationID)
+		if state.Foreground != nil && state.Foreground.OperationID == operationID {
+			receipt := actorJobReceipt(state, state.Foreground.Input, fieldString(arg, "tabId"), fieldString(arg, "chatId"))
+			return receipt, nil
+		}
+		for _, queued := range state.Queue {
+			if queued.OperationID == operationID {
+				receipt := actorJobReceipt(state, queued, fieldString(arg, "tabId"), fieldString(arg, "chatId"))
+				return receipt, nil
+			}
+		}
+		return nil, errors.New("promoted turn lost its durable actor input")
 	}
 	return queuedActorReceipt(actor.engine.Snapshot(), operationID, queueID), nil
 }
@@ -1788,22 +1878,60 @@ func queuedActorReceipt(state chat.State, operationID providercontract.Operation
 	}
 }
 
+func actorJobReceipt(state chat.State, input chat.QueueEntry, tabID, chatID string) map[string]any {
+	startedAt := strings.TrimSpace(input.Presentation.StartedAt)
+	if startedAt == "" {
+		startedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	providerID := ""
+	delivery := providercontract.DeliveryCapabilities{}
+	if lane, exists := state.Lanes[input.LaneID]; exists {
+		providerID = string(lane.Identity.Realm.ProviderID)
+		delivery = lane.Delivery
+	}
+	return map[string]any{
+		"id": providercontract.DeriveJobID(chatID, input.OperationID), "kind": "app-chat", "key": nil,
+		"title":  firstNonEmptyString(strings.TrimSpace(input.Presentation.Title), "Chat · ACP"),
+		"status": "running", "startedAt": startedAt, "finishedAt": nil, "code": nil,
+		"permissionMode": firstNonEmptyString(strings.TrimSpace(input.Permission), "ask"),
+		"chatId":         chatID, "tabId": tabID, "sessionId": nil, "providerId": nullableActorString(providerID),
+		"deliveryCapabilities": projectDeliveryCapabilities(delivery),
+		"result":               nil, "error": nil, "stopReason": nil, "crashInterrupted": false, "interrupted": false,
+		"consumedSteerIds": []string{}, "userMessageId": input.Presentation.UserMessageID,
+		"assistantMessageId": input.Presentation.AssistantMessageID, "promptText": input.Presentation.PromptText,
+	}
+}
+
+func nullableActorString(value string) any {
+	if value = strings.TrimSpace(value); value != "" {
+		return value
+	}
+	return nil
+}
+
 func actorTurnPublicFields(arg map[string]any) (map[string]string, error) {
+	chatID, err := providercontract.ValidateOperationID(fieldString(arg, "chatId"))
+	if err != nil {
+		return nil, fmt.Errorf("job:start invalid chatId: %w", err)
+	}
 	userID := firstNonEmptyString(fieldString(arg, "userMessageId"), fieldString(arg, "clientUserMessageId"))
 	assistantID := firstNonEmptyString(fieldString(arg, "assistantMessageId"), fieldString(arg, "continuationAssistantMessageId"))
 	// userMessageId was the frozen wire's original idempotency key. Modern
 	// clients send the explicit alias; old exact clients remain safe because the
 	// stable public user id is itself the immutable operation identity.
-	operationID := providercontract.NormalizeOperationID(firstNonEmptyString(fieldString(arg, "operationId"), userID))
-	if operationID == "" || userID == "" || assistantID == "" {
+	if userID == "" || assistantID == "" {
 		return nil, errors.New("job:start requires stable operationId, userMessageId, and assistantMessageId")
+	}
+	operationID, err := providercontract.ValidateOperationID(firstNonEmptyString(fieldString(arg, "operationId"), userID))
+	if err != nil {
+		return nil, fmt.Errorf("job:start invalid operationId: %w", err)
 	}
 	startedAt := fieldString(arg, "startedAt")
 	if startedAt == "" {
 		startedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	return map[string]string{
-		"operationId":   string(operationID),
+		"chatId": string(chatID), "operationId": string(operationID),
 		"userMessageId": userID, "assistantMessageId": assistantID,
 		"promptText": redactedSessionString(firstNonEmptyString(fieldString(arg, "prompt"), fieldString(arg, "message"))),
 		"startedAt":  startedAt,
@@ -1824,7 +1952,7 @@ func turnPresentation(arg map[string]any, fields map[string]string, origin strin
 }
 
 func (r *providerChatRuntime) admitPreparedLocked(
-	ctx context.Context,
+	_ context.Context,
 	actor *providerChatActor,
 	selection acp.ProviderLaneSelection,
 	arg map[string]any,
@@ -1849,10 +1977,16 @@ func (r *providerChatRuntime) admitPreparedLocked(
 	}, attachmentPlan.Materialize); err != nil {
 		return nil, err
 	}
-	if err := actor.coordinator.Drain(ctx); err != nil {
-		return nil, err
+	state := actor.engine.Snapshot()
+	if state.Foreground != nil && state.Foreground.OperationID == operationID {
+		return actorJobReceipt(state, state.Foreground.Input, tabID, chatID), nil
 	}
-	return r.admissionOutcomeLocked(actor, tabID, chatID, operationID)
+	for _, queued := range state.Queue {
+		if queued.OperationID == operationID {
+			return actorJobReceipt(state, queued, tabID, chatID), nil
+		}
+	}
+	return nil, errors.New("submitted turn lost its durable actor input")
 }
 
 func (r *providerChatRuntime) admissionOutcomeLocked(actor *providerChatActor, tabID, chatID string, operationID providercontract.OperationID) (map[string]any, error) {
@@ -2232,9 +2366,6 @@ func (r *providerChatRuntime) durableSteerReply(state chat.State, operationID pr
 					result["strategy"] = "receipt-live"
 					result["receipt"] = true
 				}
-				if state.PendingSteer.Interrupted {
-					result["interrupted"] = true
-				}
 			}
 			return result, nil
 		}
@@ -2296,16 +2427,8 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 		return nil, true, errors.New("steer operation id already belongs to a different actor command")
 	}
 	if err := steerForegroundTarget(state, laneID, generation, sessionID); err != nil {
-		// A steer arriving after the foreground has already ended is the
-		// provider-neutral FIFO fallback, not a rejected operation. Materialize
-		// its attachments only inside the accepted actor command, then let the
-		// existing queue reducer own the one immutable operation.
 		if steerForegroundEnded(state) {
-			presentation := providercontract.TurnPresentation{
-				UserMessageID: string(operationID), AssistantMessageID: continuationID,
-				PromptText: prompt, Origin: "human", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
-			}
-			return r.queueActorFallbackLocked(ctx, actor, operationID, prompt, attachmentPlan, presentation, "the foreground turn ended before steering admission")
+			return nil, true, &providercontract.Error{Kind: providercontract.ErrorAdmissionRejected, Operation: operationID, Message: "the foreground turn ended before live steering admission"}
 		}
 		return nil, true, err
 	}
@@ -2316,12 +2439,12 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 		UserMessageID: string(operationID), AssistantMessageID: continuationID,
 		PromptText: prompt, Origin: "human", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	// Revalidate immediately before the actor command so a terminal event that
-	// won the race transfers the same immutable operation into FIFO exactly once.
+	// Revalidate immediately before the actor command. A terminal winner rejects
+	// live-steer intent before ownership; it is never converted into FIFO.
 	state = actor.engine.Snapshot()
 	if err := steerForegroundTarget(state, laneID, generation, sessionID); err != nil {
 		if steerForegroundEnded(state) {
-			return r.queueActorFallbackLocked(ctx, actor, operationID, prompt, attachmentPlan, presentation, "the foreground turn ended before steering admission")
+			return nil, true, &providercontract.Error{Kind: providercontract.ErrorAdmissionRejected, Operation: operationID, Message: "the foreground turn ended before live steering admission"}
 		}
 		return nil, true, err
 	}
@@ -2334,14 +2457,14 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 			return result, true, readErr
 		}
 		if steerForegroundEnded(state) {
-			return r.queueActorFallbackLocked(ctx, actor, operationID, prompt, attachmentPlan, presentation, "the foreground turn ended before steering admission")
+			return nil, true, &providercontract.Error{Kind: providercontract.ErrorAdmissionRejected, Operation: operationID, Message: "the foreground turn ended before live steering admission"}
 		}
 		return nil, true, err
 	}
 
 	// The manager is now only an executor authority. A stale/mismatched
-	// transient session cannot receive the durable steer; turn it into the
-	// provider-neutral FIFO disposition through the actor instead.
+	// transient session cannot receive the durable steer; settle the exact steer
+	// as rejected and let the renderer restore its composer owner.
 	state = actor.engine.Snapshot()
 	live, liveOK := r.manager.LiveSessionByID(sessionID)
 	if !liveOK || strings.TrimSpace(live.ChatID) != strings.TrimSpace(state.ChatID) || strings.TrimSpace(live.TabID) != strings.TrimSpace(state.Presentation.TabID) || strings.TrimSpace(live.Info.SessionID) != sessionID {
@@ -2356,46 +2479,15 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 	// explicit Stop cannot even persist its cancellation until steering returns.
 	actor.mu.Unlock()
 	actorLocked = false
-	if _, err := actor.coordinator.ExecuteSteer(ctx, operationID); err != nil {
-		return nil, true, err
-	}
+	_, executeErr := actor.coordinator.ExecuteSteer(ctx, operationID)
 	result, readErr := r.durableSteerReply(actor.engine.Snapshot(), operationID)
-	return result, true, readErr
-}
-
-func (r *providerChatRuntime) queueActorFallbackLocked(
-	ctx context.Context,
-	actor *providerChatActor,
-	operationID providercontract.OperationID,
-	prompt string,
-	attachmentPlan providerAttachmentPlan,
-	presentation providercontract.TurnPresentation,
-	reason string,
-) (map[string]any, bool, error) {
-	state := actor.engine.Snapshot()
-	target := state.DesiredLaneID
-	if target == "" {
-		target = state.ActiveLaneID
+	if readErr != nil {
+		return nil, true, readErr
 	}
-	if target == "" {
-		return nil, true, errors.New("steer fallback has no selected provider lane")
+	if executeErr != nil {
+		return nil, true, executeErr
 	}
-	presentation.QueueID = firstNonEmptyString(presentation.QueueID, nextSessionID("q"))
-	if err := actor.engine.ApplyPrepared(chat.Submit{
-		OperationID: operationID, LaneID: target, Text: prompt, Attachments: attachmentPlan.Attachments,
-		Presentation: presentation,
-	}, attachmentPlan.Materialize); err != nil {
-		return nil, true, err
-	}
-	if err := actor.coordinator.Drain(ctx); err != nil {
-		return nil, true, err
-	}
-	receipt := queuedActorReceipt(actor.engine.Snapshot(), operationID, presentation.QueueID)
-	receipt["ok"] = false
-	receipt["strategy"] = "queue"
-	receipt["daemonQueued"] = true
-	receipt["error"] = strings.TrimSpace(reason)
-	return receipt, true, nil
+	return result, true, nil
 }
 
 func queuedSteerReceipt(state chat.State, operationID providercontract.OperationID, kind providercontract.ErrorKind) map[string]any {
@@ -2439,10 +2531,17 @@ func (r *providerChatRuntime) SteerQueued(ctx context.Context, tabID, chatID, qu
 		return nil, true, err
 	}
 	actor.mu.Lock()
-	needsDrain, result, err := r.steerQueuedLocked(actor, tabID, chatID, queueID, message)
+	action, result, err := r.steerQueuedLocked(actor, tabID, chatID, queueID, message)
 	actor.mu.Unlock()
-	if err != nil || !needsDrain {
+	if err != nil {
 		return result, true, err
+	}
+	if action == agentSteerWakeQueue {
+		actor.coordinator.Wake()
+		return result, true, nil
+	}
+	if action != agentSteerExecuteLive {
+		return result, true, nil
 	}
 	operationID := providercontract.NormalizeOperationID(queueID)
 	if _, err := actor.coordinator.ExecuteSteer(ctx, operationID); err != nil {
@@ -2479,6 +2578,36 @@ func (r *providerChatRuntime) Cancel(ctx context.Context, jobID string) (acp.Job
 	for _, actor := range r.actorSnapshot() {
 		actor.mu.Lock()
 		state := actor.engine.Snapshot()
+		pendingOperationID := providercontract.OperationID("")
+		if state.Foreground != nil && state.Foreground.Turn.NativeID == "" && providercontract.DeriveJobID(state.ChatID, state.Foreground.OperationID) == jobID {
+			pendingOperationID = state.Foreground.OperationID
+		} else {
+			for _, queued := range state.Queue {
+				if providercontract.DeriveJobID(state.ChatID, queued.OperationID) == jobID {
+					pendingOperationID = queued.OperationID
+					break
+				}
+			}
+		}
+		if pendingOperationID != "" {
+			applyErr := actor.engine.Apply(chat.CancelPendingTurn{OperationID: pendingOperationID})
+			if applyErr == nil {
+				state = actor.engine.Snapshot()
+				actor.mu.Unlock()
+				r.wakeCoordinatorIfStarted(actor.coordinator)
+				return acp.JobCancelResult{Cancelled: true, Reason: "cancelled", PreAdmission: true}, true, nil
+			}
+			// Admission may have won immediately after the read. Only that exact
+			// transition is allowed to supersede the persistence error: re-read the
+			// same foreground operation and require its deterministic native id.
+			// Every other Apply failure is a real storage/invariant failure and must
+			// be surfaced instead of being misreported as an admission race.
+			state = actor.engine.Snapshot()
+			if state.Foreground == nil || state.Foreground.OperationID != pendingOperationID || state.Foreground.Turn.NativeID != jobID {
+				actor.mu.Unlock()
+				return acp.JobCancelResult{}, true, applyErr
+			}
+		}
 		if state.Foreground == nil || state.Foreground.Turn.NativeID != jobID {
 			actor.mu.Unlock()
 			continue
@@ -2501,30 +2630,24 @@ func (r *providerChatRuntime) Cancel(ctx context.Context, jobID string) (acp.Job
 			}
 			switch entry.Status {
 			case chat.OutboxAccepted, chat.OutboxCompleted:
-				return cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: true, Reason: "cancelled"}, state), true, nil
+				return acp.JobCancelResult{Cancelled: true, Reason: "cancelled"}, true, nil
 			case chat.OutboxAmbiguous:
-				return cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: false, Reason: "uncertain"}, state), true, nil
+				return acp.JobCancelResult{Cancelled: false, Reason: "uncertain"}, true, nil
 			case chat.OutboxFailed:
-				return cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: false, Reason: "not-owned"}, state), true, nil
+				return acp.JobCancelResult{Cancelled: false, Reason: "not-owned"}, true, nil
 			}
 		}
-		return cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: false, Reason: "pending"}, state), true, nil
+		return acp.JobCancelResult{Cancelled: false, Reason: "pending"}, true, nil
 	}
 	for _, actor := range r.actorSnapshot() {
 		state := actor.engine.Snapshot()
 		for _, event := range state.Ledger {
-			if strings.TrimSpace(event.NativeTurnID) == jobID {
+			if strings.TrimSpace(event.NativeTurnID) == jobID || providercontract.DeriveJobID(state.ChatID, event.OperationID) == jobID {
 				return acp.JobCancelResult{Cancelled: false, Reason: "idle"}, true, nil
 			}
 		}
 	}
 	return acp.JobCancelResult{Cancelled: false, Reason: "unknown"}, true, nil
-}
-
-func cancelResultWithQueueControl(result acp.JobCancelResult, state chat.State) acp.JobCancelResult {
-	result.QueuePaused = state.QueueControl.Paused
-	result.QueuePauseRevision = state.QueueControl.Revision
-	return result
 }
 
 // ResolvePermission preserves the origin lane recorded by the normalized

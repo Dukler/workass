@@ -15,6 +15,7 @@ import (
 )
 
 func TestProviderUpdateCheckFakeRegistry(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		installed string
@@ -27,35 +28,37 @@ func TestProviderUpdateCheckFakeRegistry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := repoRoot(t)
 			pathDir := t.TempDir()
-			installFakeAgentWrapperWithEnv(t, pathDir, "qwen", "echo-prompt", map[string]string{"WORKASS_FAKE_CLI_VERSION": tc.installed})
-			t.Setenv("PATH", pathDir)
-			models := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write([]byte(`{"data":[{"id":"qwen-test-model"}]}`))
-			}))
-			defer models.Close()
+			qwenPath := filepath.Join(pathDir, "qwen")
+			writeExecutable(t, qwenPath, "#!/bin/sh\nprintf '%s\\n' "+shellQuote(tc.installed)+"\n")
 			registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]string{"version": tc.latest})
 			}))
 			defer registry.Close()
 
 			manager := NewManager(Options{
-				RootDir:               root,
-				InitTimeout:           800 * time.Millisecond,
+				RootDir: root,
+				Providers: []ProviderConfig{{
+					ID: "qwen", Name: "Qwen Code", Command: qwenPath, ResolvedCommand: qwenPath, Enabled: true,
+				}},
+				DefaultProviderID:     "qwen",
 				RSSSampleInterval:     time.Hour,
-				LocalModelEndpoints:   []string{models.URL + "/v1/models"},
 				ProviderUpdateSources: map[string]string{"qwen": registry.URL + "/@qwen-code/qwen-code/latest"},
 				ProviderUpdateTimeout: 200 * time.Millisecond,
 			})
 			t.Cleanup(func() { manager.Reset() })
 
-			result := manager.DetectProviders(context.Background(), DetectOptions{ProviderID: "qwen"})
-			if result["ok"] != true {
-				t.Fatalf("detect qwen = %#v", result)
+			cliVersion := manager.detectInstalledCLIVersion(context.Background(), "qwen")
+			if cliVersion == nil {
+				t.Fatal("fake qwen version process returned no version")
 			}
+			manager.setProviderCLIVersion("qwen", cliVersion)
+			manager.mu.Lock()
+			manager.providers["qwen"].Status = providerStatusReady
+			manager.mu.Unlock()
 			qwen := assertProviderListItem(t, manager.ProvidersList(), "qwen", providerStatusReady, true)
-			cliVersion, _ := qwen["cliVersion"].(*CLIVersion)
-			if cliVersion == nil || cliVersion.Version != parseSemverToken(tc.installed) || cliVersion.Raw != tc.installed {
-				t.Fatalf("qwen cliVersion = %#v in %#v", cliVersion, qwen)
+			publishedVersion, _ := qwen["cliVersion"].(*CLIVersion)
+			if publishedVersion == nil || publishedVersion.Version != parseSemverToken(tc.installed) || publishedVersion.Raw != tc.installed {
+				t.Fatalf("qwen cliVersion = %#v in %#v", publishedVersion, qwen)
 			}
 
 			payload := manager.CheckProviderUpdates(context.Background())
@@ -275,6 +278,7 @@ func TestClaudeUpdateReresolvesTransientShimAndAtomicInstallSwap(t *testing.T) {
 }
 
 func TestProviderUpdateSchedulerDefaultCadence(t *testing.T) {
+	t.Parallel()
 	opts := (Options{}).withDefaults()
 	if opts.ProviderUpdateInterval != time.Hour {
 		t.Fatalf("provider update interval = %s, want 1h", opts.ProviderUpdateInterval)
@@ -291,6 +295,7 @@ func TestProviderUpdateSchedulerDefaultCadence(t *testing.T) {
 }
 
 func TestProviderUpdateAvailabilityUsesCardWithoutNotify(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	pathDir := t.TempDir()
 	providerPath := filepath.Join(pathDir, "codex")
@@ -417,6 +422,7 @@ func TestProviderUpdatesRequireInstalledCLIAndPublishCardRemoval(t *testing.T) {
 }
 
 func TestProviderUpdateSchedulerRepeatsWithoutDaemonRestart(t *testing.T) {
+	t.Parallel()
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.58.2"})
 	}))
@@ -465,6 +471,7 @@ func TestProviderUpdateSchedulerRepeatsWithoutDaemonRestart(t *testing.T) {
 }
 
 func TestProviderUpdateSchedulerRetriesRegistryFailure(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	requests := 0
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -509,6 +516,7 @@ func TestProviderUpdateSchedulerRetriesRegistryFailure(t *testing.T) {
 }
 
 func TestProviderUpdateSchedulerRetriesPartialRegistryFailure(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	requests := map[string]int{}
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -557,6 +565,7 @@ func TestProviderUpdateSchedulerRetriesPartialRegistryFailure(t *testing.T) {
 }
 
 func TestProviderUpdateScheduledChecksAreSingleFlight(t *testing.T) {
+	t.Parallel()
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -623,9 +632,10 @@ func waitProviderUpdateSchedulerIdle(t *testing.T, manager *Manager) {
 }
 
 func TestProviderUpdateInvokeProgressNoProcRegistryAndReplay(t *testing.T) {
+	t.Parallel()
 	manager, events, versionFile := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
 	updateScript := filepath.Join(t.TempDir(), "qwen-update")
-	writeExecutable(t, updateScript, "#!/bin/sh\nprintf 'updater start\\n'\n/bin/sleep 0.1\nprintf '0.58.2\\n' > "+shellQuote(versionFile)+"\nprintf 'updater done\\n'\n")
+	writeExecutable(t, updateScript, "#!/bin/sh\nprintf 'updater start\\n'\nprintf '0.58.2\\n' > "+shellQuote(versionFile)+"\nprintf 'updater done\\n'\n")
 	manager.opts.ProviderUpdateCommands = map[string]ProviderUpdateCommand{"qwen": {Command: updateScript}}
 
 	result, err := manager.StartProviderUpdate(context.Background(), "qwen")
@@ -675,6 +685,7 @@ func TestProviderUpdateInvokeProgressNoProcRegistryAndReplay(t *testing.T) {
 }
 
 func TestQwenStandaloneUpdateUsesBundledCLI(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	prefix := t.TempDir()
 	standaloneRoot := filepath.Join(prefix, "lib", "qwen-code")
@@ -705,8 +716,6 @@ func TestQwenStandaloneUpdateUsesBundledCLI(t *testing.T) {
 	writeExecutable(t, launcher, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nprintf 'public qwen update must not run\\n' >&2\nexit 91\n")
 	nodePath := filepath.Join(standaloneRoot, "node", "bin", "node")
 	writeExecutable(t, nodePath, "#!/bin/sh\nif [ \"$1\" = "+shellQuote(cliPath)+" ] && [ \"$2\" = \"update\" ]; then printf '0.58.2\\n' > "+shellQuote(versionFile)+"; printf 'bundled standalone updater\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 92\n")
-	t.Setenv("WORKASS_QWEN", launcher)
-
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.58.2"})
 	}))
@@ -716,7 +725,7 @@ func TestQwenStandaloneUpdateUsesBundledCLI(t *testing.T) {
 		RootDir:  root,
 		StateDir: filepath.Join(t.TempDir(), "state"),
 		Providers: []ProviderConfig{{
-			ID: "qwen", Name: "Qwen Code ACP", Command: "qwen", Args: []string{"--acp"}, Enabled: true,
+			ID: "qwen", Name: "Qwen Code ACP", Command: launcher, ResolvedCommand: launcher, Args: []string{"--acp"}, Enabled: true,
 		}},
 		DefaultProviderID:        "qwen",
 		Broadcast:                events.Broadcast,
@@ -745,6 +754,7 @@ func TestQwenStandaloneUpdateUsesBundledCLI(t *testing.T) {
 }
 
 func TestProviderUpdateZeroExitWithoutVersionAdvanceFailsVerification(t *testing.T) {
+	t.Parallel()
 	manager, events, _ := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
 	updateScript := filepath.Join(t.TempDir(), "qwen-update-no-change")
 	writeExecutable(t, updateScript, "#!/bin/sh\nprintf 'Run the following to update:\\n  npm install -g @qwen-code/qwen-code@0.58.2\\n'\nexit 0\n")
@@ -768,9 +778,9 @@ func TestProviderUpdateZeroExitWithoutVersionAdvanceFailsVerification(t *testing
 }
 
 func TestProviderUpdateTerminalReceiptDoesNotWaitForRegistryRefresh(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	pathDir := t.TempDir()
-	t.Setenv("PATH", pathDir)
 	versionFile := filepath.Join(t.TempDir(), "claude-version")
 	if err := os.WriteFile(versionFile, []byte("2.1.223\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -802,7 +812,7 @@ func TestProviderUpdateTerminalReceiptDoesNotWaitForRegistryRefresh(t *testing.T
 	manager := NewManager(Options{
 		RootDir: root,
 		Providers: []ProviderConfig{{
-			ID: "claude", Name: "Claude Code", Command: "claude", ResolvedCommand: claudePath, Enabled: true,
+			ID: "claude", Name: "Claude Code", Command: claudePath, ResolvedCommand: claudePath, Enabled: true,
 		}},
 		DefaultProviderID:        "claude",
 		Broadcast:                events.Broadcast,
@@ -831,6 +841,7 @@ func TestProviderUpdateTerminalReceiptDoesNotWaitForRegistryRefresh(t *testing.T
 }
 
 func TestProviderUpdateInvokeFailureKeepsCardWithRedactedTail(t *testing.T) {
+	t.Parallel()
 	manager, events, _ := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
 	updateScript := filepath.Join(t.TempDir(), "qwen-update-fail")
 	writeExecutable(t, updateScript, "#!/bin/sh\ni=0\nwhile [ $i -lt 260 ]; do printf 'line %s api_key=supersecret\\n' \"$i\"; i=$((i+1)); done\nexit 42\n")
@@ -927,22 +938,41 @@ func TestProviderUpdatePostRecheckAllFailKeepsEntryWithRecheckError(t *testing.T
 }
 
 func TestProviderUpdateInvokeRejectsDoubleUnknownAndNoPending(t *testing.T) {
+	t.Parallel()
 	t.Run("double invoke", func(t *testing.T) {
-		manager, events, _ := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
+		manager, events, versionFile := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
 		updateScript := filepath.Join(t.TempDir(), "qwen-update-slow")
-		writeExecutable(t, updateScript, "#!/bin/sh\nprintf 'slow update\\n'\n/bin/sleep 0.4\n")
+		startedFile := filepath.Join(t.TempDir(), "started-update")
+		releaseFile := filepath.Join(t.TempDir(), "release-update")
+		t.Cleanup(func() { _ = os.WriteFile(releaseFile, []byte("release\n"), 0o600) })
+		writeExecutable(t, updateScript, "#!/bin/sh\nprintf 'started\\n' > "+shellQuote(startedFile)+"\nwhile [ ! -f "+shellQuote(releaseFile)+" ]; do /bin/sleep 0.01; done\nprintf '0.58.2\\n' > "+shellQuote(versionFile)+"\nprintf 'slow update\\n'\n")
 		manager.opts.ProviderUpdateCommands = map[string]ProviderUpdateCommand{"qwen": {Command: updateScript}}
 		first, err := manager.StartProviderUpdate(context.Background(), "qwen")
 		if err != nil {
 			t.Fatalf("first update: %v", err)
 		}
+		deadline := time.Now().Add(time.Second)
+		for !fileExists(startedFile) {
+			if time.Now().After(deadline) {
+				t.Fatal("first update process never reached its start boundary")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
 		_, err = manager.StartProviderUpdate(context.Background(), "qwen")
 		if structuredErrorCode(err) != "providers:update-in-progress" || !strings.Contains(err.Error(), "ya hay una actualización en curso") {
 			t.Fatalf("second update error = %v", err)
 		}
-		_ = events.waitChannel(t, "providers:updates", 2*time.Second)
 		if first["processId"] != nil || first["process"] != nil {
 			t.Fatalf("first update leaked process fields: %#v", first)
+		}
+		if err := os.WriteFile(releaseFile, []byte("release\n"), 0o600); err != nil {
+			t.Fatalf("release first update: %v", err)
+		}
+		done := waitProviderUpdateProgress(t, events, "qwen", func(progress ProviderUpdateProgress) bool {
+			return progress.Status == "done" || progress.Status == "failed"
+		}, 2*time.Second)
+		if done.Status != "done" {
+			t.Fatalf("first update after release = %#v, want done", done)
 		}
 		t.Logf("trace providers:update double rejected provider=%s code=%s", first["providerId"], structuredErrorCode(err))
 	})
@@ -968,6 +998,7 @@ func TestProviderUpdateInvokeRejectsDoubleUnknownAndNoPending(t *testing.T) {
 }
 
 func TestProviderUpdateCheckRegistryFailuresOmitEntries(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		source func(t *testing.T) string
@@ -986,8 +1017,7 @@ func TestProviderUpdateCheckRegistryFailuresOmitEntries(t *testing.T) {
 			source: func(t *testing.T) string {
 				t.Helper()
 				registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					time.Sleep(200 * time.Millisecond)
-					_, _ = w.Write([]byte(`{"version":"0.58.10"}`))
+					<-r.Context().Done()
 				}))
 				t.Cleanup(registry.Close)
 				return registry.URL + "/latest"
@@ -1007,28 +1037,24 @@ func TestProviderUpdateCheckRegistryFailuresOmitEntries(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := repoRoot(t)
-			pathDir := t.TempDir()
-			installFakeAgentWrapperWithEnv(t, pathDir, "qwen", "echo-prompt", map[string]string{"WORKASS_FAKE_CLI_VERSION": "0.58.1"})
-			t.Setenv("PATH", pathDir)
-			models := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write([]byte(`{"data":[{"id":"qwen-test-model"}]}`))
-			}))
-			defer models.Close()
+			qwenPath := filepath.Join(t.TempDir(), "qwen")
+			writeExecutable(t, qwenPath, "#!/bin/sh\nprintf '0.58.1\\n'\n")
 
 			manager := NewManager(Options{
-				RootDir:               root,
-				InitTimeout:           800 * time.Millisecond,
+				RootDir: root,
+				Providers: []ProviderConfig{{
+					ID: "qwen", Name: "Qwen Code", Command: qwenPath, ResolvedCommand: qwenPath, Enabled: true,
+				}},
+				DefaultProviderID:     "qwen",
 				RSSSampleInterval:     time.Hour,
-				LocalModelEndpoints:   []string{models.URL + "/v1/models"},
 				ProviderUpdateSources: map[string]string{"qwen": tc.source(t)},
 				ProviderUpdateTimeout: 25 * time.Millisecond,
 			})
 			t.Cleanup(func() { manager.Reset() })
-
-			result := manager.DetectProviders(context.Background(), DetectOptions{ProviderID: "qwen"})
-			if result["ok"] != true {
-				t.Fatalf("detection should complete despite registry %s: %#v", tc.name, result)
-			}
+			manager.setProviderCLIVersion("qwen", &CLIVersion{Version: "0.58.1", Raw: "0.58.1"})
+			manager.mu.Lock()
+			manager.providers["qwen"].Status = providerStatusReady
+			manager.mu.Unlock()
 			assertProviderListItem(t, manager.ProvidersList(), "qwen", providerStatusReady, true)
 			payload := manager.CheckProviderUpdates(context.Background())
 			if len(payload.Updates) != 0 {
@@ -1040,6 +1066,7 @@ func TestProviderUpdateCheckRegistryFailuresOmitEntries(t *testing.T) {
 }
 
 func TestVersionParsingRealOutputFixtures(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		raw  string
 		want string
@@ -1055,6 +1082,7 @@ func TestVersionParsingRealOutputFixtures(t *testing.T) {
 }
 
 func TestLenientSemverCompareEdges(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		installed string
 		latest    string
@@ -1155,6 +1183,7 @@ func TestRealProviderUpdateInvokeQwen(t *testing.T) {
 }
 
 func TestProviderUpdatesPayloadSkipsIncomparableInstalledVersion(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{
 		RootDir:           repoRoot(t),
 		RSSSampleInterval: time.Hour,
@@ -1186,6 +1215,7 @@ func TestMockAppUpdatePayloadFromEnv(t *testing.T) {
 }
 
 func TestLatestCLIVersionRequiresComparableRegistryVersion(t *testing.T) {
+	t.Parallel()
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprint(w, `{"version":"not-a-version"}`)
 	}))
@@ -1210,8 +1240,8 @@ func newProviderUpdateTestManager(t *testing.T, installed, latest, updateCommand
 	if err := os.WriteFile(versionFile, []byte(installed+"\n"), 0o644); err != nil {
 		t.Fatalf("write version file: %v", err)
 	}
-	writeExecutable(t, filepath.Join(pathDir, "qwen"), "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nexit 1\n")
-	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	qwenPath := filepath.Join(pathDir, "qwen")
+	writeExecutable(t, qwenPath, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nexit 1\n")
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": latest})
 	}))
@@ -1225,7 +1255,7 @@ func newProviderUpdateTestManager(t *testing.T, installed, latest, updateCommand
 		RootDir:  root,
 		StateDir: filepath.Join(t.TempDir(), "state"),
 		Providers: []ProviderConfig{
-			{ID: "qwen", Name: "Qwen Code ACP", Command: "qwen", Args: []string{"--acp"}, Enabled: true, Badge: "agent", CWD: root},
+			{ID: "qwen", Name: "Qwen Code ACP", Command: qwenPath, ResolvedCommand: qwenPath, Args: []string{"--acp"}, Enabled: true, Badge: "agent", CWD: root},
 		},
 		DefaultProviderID:        "qwen",
 		Broadcast:                events.Broadcast,
@@ -1276,8 +1306,8 @@ if [ "$1" = "--version" ]; then
 fi
 exit 1
 `, shellQuote(countFile), script.Installed, script.PostUpdateFailures+1, shellQuote(versionFile))
-	writeExecutable(t, filepath.Join(pathDir, "qwen"), qwenScript)
-	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	qwenPath := filepath.Join(pathDir, "qwen")
+	writeExecutable(t, qwenPath, qwenScript)
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": script.Latest})
 	}))
@@ -1289,7 +1319,7 @@ exit 1
 		RootDir:  root,
 		StateDir: stateDir,
 		Providers: []ProviderConfig{
-			{ID: "qwen", Name: "Qwen Code ACP", Command: "qwen", Args: []string{"--acp"}, Enabled: true, Badge: "agent", CWD: root},
+			{ID: "qwen", Name: "Qwen Code ACP", Command: qwenPath, ResolvedCommand: qwenPath, Args: []string{"--acp"}, Enabled: true, Badge: "agent", CWD: root},
 		},
 		DefaultProviderID:        "qwen",
 		Broadcast:                events.Broadcast,

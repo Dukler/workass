@@ -8,13 +8,11 @@ import { projectSteeringPresentation } from '../chat/steering-presentation';
 // Minimalist message queue (redesign 2026-07-12): each queued follow-up is its
 // own box sized to its text. Double-click to edit in place (saves as you type,
 // no button), drag a box to reorder (no handle — the box itself is the grip),
-// and the ✕ (hover-only) removes it. They send one per turn end in this order,
-// unless an explicit Stop has durably paused dispatch until Continuar.
+// and the ✕ (hover-only) removes it. They send one per turn end in this order.
 export function QueueList({ chat }: { chat: Chat }) {
   const queue = chat.queue ?? [];
   const waitingSteers = projectSteeringPresentation(chat.messages).steeringTrayMessages;
   const [editing, setEditing] = useState<string | null>(null);
-  const [resuming, setResuming] = useState(false);
   const dragId = useRef<string | null>(null);
   const [over, setOver] = useState<{ id: string; after: boolean } | null>(null);
   if (!queue.length && !waitingSteers.length) return null;
@@ -48,22 +46,7 @@ export function QueueList({ chat }: { chat: Chat }) {
         </div>
       ))}
       {!!queue.length && (
-        <div className="qlabel">
-          <span>En cola · {queue.length}{chat.queuePaused ? ' · pausada' : ''}</span>
-          {chat.queuePaused && (
-            <button
-              type="button"
-              className="qresume"
-              disabled={resuming}
-              onClick={() => {
-                setResuming(true);
-                void store.resumeQueued(chat.id).finally(() => setResuming(false));
-              }}
-            >
-              {resuming ? 'Continuando…' : 'Continuar'}
-            </button>
-          )}
-        </div>
+		<div className="qlabel">En cola · {queue.length}</div>
       )}
       {queue.map((q) => {
         const isEditing = editing === q.id;

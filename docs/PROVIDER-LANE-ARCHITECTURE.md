@@ -285,8 +285,9 @@ state directly.
 - An ordinary send snapshots its target lane at admission and never silently
   moves when the selector changes.
 - Queue promotion and transcript ownership happen in one reducer transition.
-- Explicit cancellation closes a revision-fenced queue dispatch gate before the
-  provider effect; only an explicit resume for that exact revision reopens it.
+- Explicit cancellation targets only the foreground turn. It never pauses,
+  resumes, clears, or otherwise mutates FIFO work; after the exact terminal
+  boundary, ordinary queue promotion continues automatically.
 - Live steer and cancellation claim their exact durable effects directly; they
   never wait behind the ordinary outbox drain or hold the actor mutex across a
   provider acknowledgement.

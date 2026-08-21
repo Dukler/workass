@@ -3,27 +3,25 @@ package acp
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 const expectedPerTurnLanguageRule = "Response language for this turn: use the language of the current human-authored user request below."
 
 func TestWorkassLanguageRuleIsAdjacentToEveryTurn(t *testing.T) {
-	manager, events := newFakeManager(t, "echo-prompt", Options{})
+	t.Parallel()
+	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
-	session := newFakeSession(t, manager, "language-every-turn")
 
-	first := startAppChatJob(t, manager, session.SessionID, "language-every-turn", "Continue this work in English.")
-	firstResult := jobFromEnd(events.waitJobEnd(t, jobID(first), 2*time.Second))["result"].(string)
+	firstResult := manager.buildAppChatPrompt(JobStartOptions{HumanAuthored: true}, "Continue this work in English.")
 	assertPerTurnLanguageBoundary(t, firstResult, "Continue this work in English.")
 
 	// The language boundary must repeat on an already-used provider session.
-	second := startAppChatJob(t, manager, session.SessionID, "language-every-turn", "Keep answering in English.")
-	secondResult := jobFromEnd(events.waitJobEnd(t, jobID(second), 2*time.Second))["result"].(string)
+	secondResult := buildUserRequestBlock("Keep answering in English.", true)
 	assertPerTurnLanguageBoundary(t, secondResult, "Keep answering in English.")
 }
 
 func TestLocalizedWorkassToolCardCannotSelectHumanReplyLanguage(t *testing.T) {
+	t.Parallel()
 	request := "Usar una herramienta\n" +
 		"mcp.workass-agent.workass_agent_catalog\n" +
 		"0.0s\n" +
@@ -48,6 +46,7 @@ func TestLocalizedWorkassToolCardCannotSelectHumanReplyLanguage(t *testing.T) {
 }
 
 func TestOrdinaryMCPMentionIsNotMisclassifiedAsToolCard(t *testing.T) {
+	t.Parallel()
 	request := "Please inspect mcp.workass-agent.workass_agent_catalog and answer in English."
 	prompt := buildUserRequestBlock(request, true)
 	if strings.Contains(prompt, "<workass_tool_card>") || !strings.Contains(prompt, "User request:\n"+request) {

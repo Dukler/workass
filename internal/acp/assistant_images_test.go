@@ -28,6 +28,7 @@ func writeAssistantImageFixture(t *testing.T, filename string) string {
 }
 
 func TestResolveAssistantMarkdownImagesImportsNaturalWorkspaceLinks(t *testing.T) {
+	t.Parallel()
 	workspace := t.TempDir()
 	imagePath := writeAssistantImageFixture(t, filepath.Join(workspace, "calibration ready.png"))
 	markdown := "[Open calibration](<" + imagePath + ">)\n![Calibration ready](<" + imagePath + ">)"
@@ -46,6 +47,7 @@ func TestResolveAssistantMarkdownImagesImportsNaturalWorkspaceLinks(t *testing.T
 }
 
 func TestResolveAssistantMarkdownImagesRejectsNonWorkspaceAndUnsafeMedia(t *testing.T) {
+	t.Parallel()
 	workspace := t.TempDir()
 	outside := writeAssistantImageFixture(t, filepath.Join(t.TempDir(), "outside.png"))
 	insideSVG := filepath.Join(workspace, "active.svg")
@@ -63,6 +65,7 @@ func TestResolveAssistantMarkdownImagesRejectsNonWorkspaceAndUnsafeMedia(t *test
 }
 
 func TestJobPublicCarriesBoundedAssistantImages(t *testing.T) {
+	t.Parallel()
 	job := &Job{ID: "assistant-media-job"}
 	job.addAssistantImages([]any{
 		map[string]any{"mimeType": "image/png", "data": assistantImageFixture, "name": "Preview", "source": "preview.png"},
@@ -75,6 +78,7 @@ func TestJobPublicCarriesBoundedAssistantImages(t *testing.T) {
 }
 
 func TestAgentMessageChunkPreservesStructuredACPImages(t *testing.T) {
+	t.Parallel()
 	events := newEventCollector()
 	mgr := NewManager(Options{Broadcast: events.Broadcast})
 	t.Cleanup(func() { mgr.Reset() })
@@ -108,6 +112,7 @@ func TestAgentMessageChunkPreservesStructuredACPImages(t *testing.T) {
 }
 
 func TestAgentMessageMarkdownImageStreamsBeforeTurnEndAcrossSplitChunks(t *testing.T) {
+	t.Parallel()
 	workspace := t.TempDir()
 	imagePath := writeAssistantImageFixture(t, filepath.Join(workspace, "recording started.png"))
 	events := newEventCollector()
@@ -171,6 +176,7 @@ func TestAgentMessageMarkdownImageStreamsBeforeTurnEndAcrossSplitChunks(t *testi
 }
 
 func TestMockNaturalAssistantImageCompletesAsDurableJobMedia(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	workspace := t.TempDir()
 	events := newEventCollector()

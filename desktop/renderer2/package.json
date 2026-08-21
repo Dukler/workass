@@ -7,6 +7,7 @@
     "dev": "vite build --watch",
     "build": "vite build",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "benchmark": "node --experimental-strip-types --test tests/*.bench.ts",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview"
   },

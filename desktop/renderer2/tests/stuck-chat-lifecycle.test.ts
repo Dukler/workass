@@ -195,7 +195,7 @@ test('late data after local cancellation never resurrects the terminal row', () 
   assert.equal(assistant.status, 'cancelled');
 });
 
-test('cancel false finalizes locally, clears anchors, and keeps the FIFO paused', async () => {
+test('a refused cancel keeps the live owner and FIFO anchored until authoritative readback', async () => {
   const previousWindow = (globalThis as any).window;
   (globalThis as any).window = { api: { cancelJob: async () => ({ cancelled: false, reason: 'idle' }) } };
   try {
@@ -213,16 +213,18 @@ test('cancel false finalizes locally, clears anchors, and keeps the FIFO paused'
     owner.queue = [{ id: 'queued-next', text: 'continue' }];
     (subject as any).jobRef.set('job-1', { tabId: owner.id, msgId: assistant.id });
     (subject as any).chatJobs.set(owner.chatId, { tabId: owner.id, msgId: assistant.id });
-    let recovered = 0;
-    (subject as any).recoverIdleQueues = () => { recovered += 1; };
-    (subject as any).scheduleScopedSync = () => {};
+	let drains = 0;
+	let syncs = 0;
+	(subject as any).flushNextQueued = async () => { drains += 1; };
+    (subject as any).scheduleScopedSync = () => { syncs += 1; };
 
     await subject.cancelChatTurn(owner.id);
-    assert.equal(assistant.status, 'cancelled');
-    assert.equal((subject as any).jobRef.has('job-1'), false);
-    assert.equal((subject as any).chatJobs.has(owner.chatId), false);
-    assert.equal(recovered, 0);
-    assert.equal(owner.queuePaused, true);
+	assert.equal(assistant.status, 'running');
+	assert.equal((subject as any).jobRef.has('job-1'), true);
+	assert.equal((subject as any).chatJobs.has(owner.chatId), true);
+	assert.equal(drains, 0);
+	assert.equal(syncs, 1);
+	assert.equal(owner.queue?.[0].id, 'queued-next');
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
@@ -232,7 +234,7 @@ test('cancel false finalizes locally, clears anchors, and keeps the FIFO paused'
 test('an in-flight cancel receipt never manufactures a local terminal turn', async () => {
   const previousWindow = (globalThis as any).window;
   (globalThis as any).window = {
-    api: { cancelJob: async () => ({ cancelled: false, reason: 'pending', queuePaused: true, queuePauseRevision: 2 }) },
+	api: { cancelJob: async () => ({ cancelled: false, reason: 'pending' }) },
   };
   try {
     const { subject, owner } = subjectWithChat();
@@ -247,8 +249,6 @@ test('an in-flight cancel receipt never manufactures a local terminal turn', asy
 
     await subject.cancelChatTurn(owner.id);
     assert.equal(assistant.status, 'running');
-    assert.equal(owner.queuePaused, true);
-    assert.equal(owner.queuePauseRevision, 2);
     assert.equal(syncs, 1);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
@@ -300,7 +300,7 @@ test('Stop during job:start admission cancels the exact accepted job once', asyn
       startJob: async () => await new Promise<PublicJob>((resolve) => { releaseStart = resolve; }),
       cancelJob: async (id: string) => {
         cancelIDs.push(id);
-        return { cancelled: true, reason: 'cancelled', queuePaused: true, queuePauseRevision: 3 };
+		return { cancelled: true, reason: 'cancelled' };
       },
     },
   };
@@ -318,8 +318,70 @@ test('Stop during job:start admission cancels the exact accepted job once', asyn
     assert.deepEqual(cancelIDs, ['job-admitted-after-stop']);
     assert.equal(assistant.jobId, 'job-admitted-after-stop');
     assert.equal(assistant.status, 'running', 'the provider terminal event remains authoritative');
-    assert.equal(owner.queuePaused, true);
-    assert.equal(owner.queuePauseRevision, 3);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('a durable pre-admission Stop settles locally because no provider end event exists', async () => {
+  const previousWindow = (globalThis as any).window;
+  (globalThis as any).window = {
+    api: {
+      startJob: async () => job({ id: 'job-pre-admission' }),
+      cancelJob: async () => ({
+        cancelled: true, reason: 'cancelled', preAdmission: true,
+      }),
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    (subject as any).scheduleScopedSync = () => {};
+    assert.equal(await subject.sendTo(owner.id, 'cancel before provider attach'), true);
+
+    const assistant = owner.messages.find((message) => message.role === 'assistant')!;
+    assert.equal(assistant.status, 'running');
+    await subject.cancelChatTurn(owner.id);
+
+    assert.equal(assistant.status, 'cancelled');
+    assert.equal((subject as any).jobRef.has('job-pre-admission'), false);
+    assert.equal((subject as any).chatJobs.has(owner.chatId), false);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('a fast terminal event before the start reply cannot recreate a job anchor', async () => {
+  const previousWindow = (globalThis as any).window;
+  let releaseStart!: (value: PublicJob) => void;
+  let cancelCalls = 0;
+  (globalThis as any).window = {
+    api: {
+      startJob: async () => await new Promise<PublicJob>((resolve) => { releaseStart = resolve; }),
+      cancelJob: async () => { cancelCalls += 1; return { cancelled: false, reason: 'idle' }; },
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    const sending = subject.sendTo(owner.id, 'fast provider');
+    while (!releaseStart) await new Promise((resolve) => setTimeout(resolve, 0));
+    const admitted = job({ id: 'job-fast-terminal' });
+    (subject as any).onJobEvent({ type: 'start', job: admitted });
+    (subject as any).onJobEvent({
+      type: 'end',
+      job: job({ id: 'job-fast-terminal', status: 'done', code: 0, finishedAt: '2026-07-24T12:00:01Z', result: 'done' }),
+    });
+    releaseStart(admitted);
+
+    assert.equal(await sending, true);
+    const assistant = owner.messages.find((message) => message.role === 'assistant')!;
+    assert.equal(assistant.status, 'done');
+    assert.equal((subject as any).jobRef.has('job-fast-terminal'), false);
+    assert.equal((subject as any).chatJobs.has(owner.chatId), false);
+    assert.equal(cancelCalls, 0);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
@@ -335,7 +397,7 @@ test('an early job:start event and its later reply cannot deliver Stop twice', a
       startJob: async () => await new Promise<PublicJob>((resolve) => { releaseStart = resolve; }),
       cancelJob: async (id: string) => {
         cancelIDs.push(id);
-        return { cancelled: true, reason: 'cancelled', queuePaused: true, queuePauseRevision: 5 };
+		return { cancelled: true, reason: 'cancelled' };
       },
     },
   };
@@ -366,7 +428,7 @@ test('a Stop requested before job:start transfers at the event and rejects a sta
       startJob: async () => await new Promise<StartJobReply>((resolve) => { releaseStart = resolve; }),
       cancelJob: async (id: string) => {
         cancelIDs.push(id);
-        return { cancelled: true, reason: 'cancelled', queuePaused: true, queuePauseRevision: 6 };
+		return { cancelled: true, reason: 'cancelled' };
       },
     },
   };
@@ -518,18 +580,17 @@ test('an accepted stop reaches a terminal row and does not block the next send',
   }
 });
 
-test('explicit stop leaves queued follow-ups paused after the terminal event', async () => {
+test('explicit stop preserves queued follow-ups and auto-drains the head after terminal', async () => {
   const previousWindow = (globalThis as any).window;
   (globalThis as any).window = {
     api: {
-      cancelJob: async () => ({ cancelled: true, reason: 'cancelled', queuePaused: true, queuePauseRevision: 4 }),
+	  cancelJob: async () => ({ cancelled: true, reason: 'cancelled' }),
     },
   };
   try {
     const { subject, owner } = subjectWithChat();
     subject.state.connection = 'connected';
-    owner.queue = [{ id: 'queued-next', text: 'do not auto-start' }];
-    owner.queuePauseRevision = 3;
+	owner.queue = [{ id: 'queued-next', text: 'start next' }, { id: 'queued-after', text: 'preserve after' }];
     const assistant: Msg = {
       id: 'assistant-canonical', role: 'assistant', content: 'partial', status: 'running',
       at: null, jobId: 'job-1', events: [],
@@ -541,83 +602,14 @@ test('explicit stop leaves queued follow-ups paused after the terminal event', a
     (subject as any).flushNextQueued = async () => { drains += 1; };
 
     await subject.cancelChatTurn(owner.id);
-    assert.equal(owner.queuePaused, true);
-    assert.equal(owner.queuePauseRevision, 4);
     (subject as any).onJobEvent({
       type: 'end',
       job: job({ status: 'failed', code: 130, stopReason: 'cancelled', finishedAt: '2026-07-24T12:00:02Z' }),
     });
     assert.equal(subject.isChatRunning(owner.id), false);
     assert.equal(owner.queue?.[0].id, 'queued-next');
-    assert.equal(drains, 0);
-  } finally {
-    if (previousWindow === undefined) delete (globalThis as any).window;
-    else (globalThis as any).window = previousWindow;
-  }
-});
-
-test('resuming a paused queue is revision-fenced before it drains', async () => {
-  const previousWindow = (globalThis as any).window;
-  const requests: Record<string, unknown>[] = [];
-  (globalThis as any).window = {
-    api: {
-      chatQueueResume: async (request: Record<string, unknown>) => {
-        requests.push(request);
-        return {
-          ok: true, operationId: request.operationId, queuePaused: false,
-          queuePauseRevision: 7, actorRevision: 12,
-        };
-      },
-    },
-  };
-  try {
-    const { subject, owner } = subjectWithChat();
-    subject.state.connection = 'connected';
-    owner.queue = [{ id: 'queued-next', text: 'continue explicitly' }];
-    owner.queuePaused = true;
-    owner.queuePauseRevision = 7;
-    let drains = 0;
-    (subject as any).flushNextQueued = async () => { drains += 1; };
-
-    assert.equal(await subject.resumeQueued(owner.id), true);
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].expectedRevision, 7);
-    assert.equal(requests[0].tabId, owner.id);
-    assert.equal(requests[0].chatId, owner.chatId);
-    assert.equal(owner.queuePaused, false);
-    assert.equal(owner.actorRevision, 12);
-    assert.equal(drains, 1);
-  } finally {
-    if (previousWindow === undefined) delete (globalThis as any).window;
-    else (globalThis as any).window = previousWindow;
-  }
-});
-
-test('resuming after the last queued row is removed persists the empty queue first', async () => {
-  const previousWindow = (globalThis as any).window;
-  const order: string[] = [];
-  (globalThis as any).window = {
-    api: {
-      chatQueueResume: async (request: Record<string, unknown>) => {
-        order.push('resume');
-        return {
-          ok: true, operationId: request.operationId, queuePaused: false,
-          queuePauseRevision: 9, actorRevision: 15,
-        };
-      },
-    },
-  };
-  try {
-    const { subject, owner } = subjectWithChat();
-    subject.state.connection = 'connected';
-    owner.queue = [];
-    owner.queuePaused = true;
-    owner.queuePauseRevision = 9;
-    (subject as any).flushSession = async () => { order.push('persist'); };
-
-    assert.equal(await subject.resumeQueued(owner.id), true);
-    assert.deepEqual(order, ['persist', 'resume']);
-    assert.equal(owner.queuePaused, false);
+	assert.deepEqual(owner.queue?.map((item) => item.id), ['queued-next', 'queued-after']);
+	assert.equal(drains, 1);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;

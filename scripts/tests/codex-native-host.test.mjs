@@ -128,6 +128,45 @@ test('native Codex host drives app-server directly with turns, steering, permiss
   assert.equal(limits.result.rateLimits.primary.usedPercent, 17);
 });
 
+test('native Codex host rejects non-live steering without interrupting or queueing the active turn', async (t) => {
+  for (const [fixtureRejection, reason] of [
+    ['active-turn-not-steerable', 'active-turn-not-steerable'],
+    ['no-active-turn', 'no-active-turn'],
+  ]) {
+    const peer = startHost({ WORKASS_CODEX_FIXTURE_STEER_REJECTION: fixtureRejection });
+    t.after(() => peer.child.kill('SIGKILL'));
+
+    peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await peer.waitFor((message) => message.id === 1);
+    peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+    const opened = await peer.waitFor((message) => message.id === 2);
+    peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+      sessionId: opened.result.sessionId,
+      prompt: [{ type: 'text', text: 'keep running' }],
+    } });
+    await peer.waitFor((message) => message.method === 'session/update'
+      && message.params?.update?.sessionUpdate === 'agent_thought_chunk');
+
+    peer.send({ jsonrpc: '2.0', id: 4, method: '_workass/codex/steer', params: {
+      sessionId: opened.result.sessionId,
+      prompt: [{ type: 'text', text: 'do not queue or interrupt this' }],
+      clientUserMessageId: `rejected-${fixtureRejection}`,
+    } });
+    const rejected = await peer.waitFor((message) => message.id === 4);
+    assert.equal(rejected.error, undefined);
+    assert.equal(rejected.result.disposition, 'rejected');
+    assert.equal(rejected.result.reason, reason);
+    await assert.rejects(
+      peer.waitFor((message) => message.id === 3, 150),
+      /timed out waiting for Codex host message/,
+      'a rejected steer must leave the original turn running',
+    );
+
+    peer.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: opened.result.sessionId } });
+    assert.equal((await peer.waitFor((message) => message.id === 3)).result.stopReason, 'cancelled');
+  }
+});
+
 test('native Codex operation readback falls back to thread/read when item listing is unavailable', async (t) => {
   const peer = startHost({ WORKASS_CODEX_FIXTURE_ITEMS_LIST_UNSUPPORTED: '1' });
   t.after(() => peer.child.kill('SIGKILL'));

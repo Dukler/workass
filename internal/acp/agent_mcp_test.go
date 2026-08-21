@@ -8,6 +8,7 @@ import (
 )
 
 func TestAgentMCPIsInjectedIntoSpareSessionsWithOpaqueOwnerKey(t *testing.T) {
+	t.Parallel()
 	servers, err := agentMCPServers(Options{
 		WorkassMCPBaseURL: "https://localhost:8788",
 	}, SessionOptions{Spare: true, AgentOwnerKey: "owner-spare-1"}, mcpServerHTTP)
@@ -30,6 +31,7 @@ func TestAgentMCPIsInjectedIntoSpareSessionsWithOpaqueOwnerKey(t *testing.T) {
 }
 
 func TestSpareAdoptionRebindsInjectedAgentOwnerToRealChat(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	manager.opts.WorkassMCPBaseURL = "https://localhost:8788"
@@ -66,6 +68,7 @@ func TestSpareAdoptionRebindsInjectedAgentOwnerToRealChat(t *testing.T) {
 }
 
 func TestEnvironmentBriefAdvertisesAgentCatalogAndSpawnTools(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{WorkassMCPBaseURL: "https://localhost:8788"})
 	t.Cleanup(func() { manager.Reset() })
 	brief := manager.buildEnvironmentBrief(false)
@@ -96,6 +99,7 @@ func TestEnvironmentBriefAdvertisesAgentCatalogAndSpawnTools(t *testing.T) {
 }
 
 func TestEnvironmentBriefKeepsVerificationReceiptsInternal(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 	brief := manager.buildEnvironmentBrief(false)
@@ -107,6 +111,7 @@ func TestEnvironmentBriefKeepsVerificationReceiptsInternal(t *testing.T) {
 }
 
 func TestAgentOwnerCapabilityCannotBeRetargetedToAnotherChat(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 	manager.mu.Lock()

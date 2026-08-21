@@ -56,7 +56,7 @@ function chatWithLiveSteer(): Chat {
     messages: [
       user('prompt', 'INITIAL-PROMPT'),
       assistant('head', 'ASSISTANT-BEFORE-DIRECTION', { turnRootId: 'head', turnTerminal: false }),
-      user('steer', 'STEER-DIRECTION-TEXT', { turnRootId: 'head', steerState: 'applied' }),
+      user('steer', 'STEER-DIRECTION-TEXT', { turnRootId: 'head', steerState: 'sending' }),
       assistant('tail', 'ASSISTANT-AFTER-DIRECTION', {
         turnRootId: 'head', turnTerminal: true, status: 'running', jobId: 'job-steering-render',
       }),
@@ -79,18 +79,26 @@ function occurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
 }
 
-test('actual transcript and composer tray transfer one steer owner at the terminal boundary', () => {
+test('actual transcript and composer tray transfer one steer owner at acknowledgement, then retain it through terminal', () => {
   const chat = chatWithLiveSteer();
   const canonicalOrder = chat.messages.map((message) => message.id);
 
+  const unresolvedTranscript = renderTranscript(chat);
+  const unresolvedTray = renderQueue(chat);
+  assert.doesNotMatch(unresolvedTranscript, /STEER-DIRECTION-TEXT/);
+  assert.equal(occurrences(unresolvedTray, 'STEER-DIRECTION-TEXT'), 1);
+  assert.match(unresolvedTray, /Steering · 1/);
+
+  chat.messages[2].status = 'done';
+  chat.messages[2].steerState = 'applied';
   const liveTranscript = renderTranscript(chat);
   const liveTray = renderQueue(chat);
-  assert.doesNotMatch(liveTranscript, /STEER-DIRECTION-TEXT/);
-  assert.equal(occurrences(liveTray, 'STEER-DIRECTION-TEXT'), 1);
-  assert.match(liveTray, /Steering · 1/);
+  assert.equal(occurrences(liveTranscript, 'STEER-DIRECTION-TEXT'), 1);
+  assert.doesNotMatch(liveTray, /STEER-DIRECTION-TEXT|Steering · 1/);
   assert.ok(
-    liveTranscript.indexOf('ASSISTANT-BEFORE-DIRECTION') < liveTranscript.indexOf('ASSISTANT-AFTER-DIRECTION'),
-    'live assistant slices retain their canonical order',
+    liveTranscript.indexOf('ASSISTANT-BEFORE-DIRECTION') < liveTranscript.indexOf('STEER-DIRECTION-TEXT')
+      && liveTranscript.indexOf('STEER-DIRECTION-TEXT') < liveTranscript.indexOf('ASSISTANT-AFTER-DIRECTION'),
+    'acknowledged steering renders once at canonical chronology while the turn remains live',
   );
 
   chat.messages.at(-1)!.status = 'done';
@@ -99,14 +107,14 @@ test('actual transcript and composer tray transfer one steer owner at the termin
   const before = settledTranscript.indexOf('ASSISTANT-BEFORE-DIRECTION');
   const after = settledTranscript.indexOf('ASSISTANT-AFTER-DIRECTION');
   const steer = settledTranscript.indexOf('STEER-DIRECTION-TEXT');
-  assert.ok(before >= 0 && before < after && after < steer, 'settled steer renders after every assistant slice');
+  assert.ok(before >= 0 && before < steer && steer < after, 'terminal keeps the same canonical steer position');
   assert.doesNotMatch(settledTray, /STEER-DIRECTION-TEXT|Steering · 1/);
   assert.deepEqual(chat.messages.map((message) => message.id), canonicalOrder, 'rendering never rewrites actor chronology');
 
   const reloaded = JSON.parse(JSON.stringify(chat)) as Chat;
   const reloadedTranscript = renderTranscript(reloaded);
   assert.ok(
-    reloadedTranscript.indexOf('ASSISTANT-AFTER-DIRECTION') < reloadedTranscript.indexOf('STEER-DIRECTION-TEXT'),
+    reloadedTranscript.indexOf('STEER-DIRECTION-TEXT') < reloadedTranscript.indexOf('ASSISTANT-AFTER-DIRECTION'),
     'the same terminal presentation survives a JSON hydration boundary',
   );
   assert.deepEqual(reloaded.messages.map((message) => message.id), canonicalOrder);

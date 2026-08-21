@@ -38,8 +38,9 @@ agent can explain its choice.
 
 Coordinator messages are appended to the child's durable FIFO before any
 adapter operation. Confirmed live steer removes the queued copy. Unsupported
-or interrupt-based adapters consume it as the immediate next prompt. An
-uncertain acknowledgement is surfaced and never blindly duplicated.
+or definitely rejected steering leaves that same copy as the immediate next
+prompt without interrupting the child. An uncertain acknowledgement is
+surfaced and never blindly duplicated.
 
 Settled receipt records contain identity, parent/root lineage, resolved
 selection, start/finish times, stop reason, retry linkage, and bounded result

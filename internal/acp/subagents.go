@@ -1173,8 +1173,8 @@ func subagentRunSettled(run *SubagentRun) bool {
 
 // MessageSubagent queues the coordinator's direction before attempting live
 // delivery. Native/live steering removes it from the FIFO only after an
-// acknowledgement; Claude and unsupported agents consume it as the immediate
-// next prompt after cancellation or natural completion.
+// acknowledgement; unsupported or rejected steering leaves that same owner as
+// the immediate next prompt after natural completion.
 func (m *Manager) MessageSubagent(ownerKey, parentChatID, parentTabID, id, message string) (map[string]any, error) {
 	message = strings.TrimSpace(message)
 	if message == "" {
@@ -1218,11 +1218,7 @@ func (m *Manager) MessageSubagent(ownerKey, parentChatID, parentTabID, id, messa
 		m.removeQueuedSubagentFollowup(id, followup.ID)
 		return map[string]any{"ok": false, "delivery": "uncertain", "strategy": strategy, "subagentId": id, "error": steer["error"]}, nil
 	}
-	delivery := "followup"
-	if steer["interrupted"] == true {
-		delivery = "interrupt-followup"
-	}
-	return map[string]any{"ok": true, "delivery": delivery, "strategy": strategy, "subagentId": id}, nil
+	return map[string]any{"ok": true, "delivery": "followup", "strategy": strategy, "subagentId": id}, nil
 }
 
 func (m *Manager) RetrySubagent(ctx context.Context, ownerKey, parentChatID, parentTabID, id, message string) (SubagentRun, error) {

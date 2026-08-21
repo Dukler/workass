@@ -34,6 +34,11 @@ var mutatingChannels = map[string]struct{}{
 	"config:set":                    {},
 	"session:save":                  {},
 	"fs:create-dir":                 {},
+	"chat:create":                   {},
+	"chat:queue-replace":            {},
+	"chat:presentation-save":        {},
+	"chat:runtime-controls-save":    {},
+	"chat:delete":                   {},
 	"chat:archive-append":           {},
 	"visualize:host":                {},
 	"chat:rewind":                   {},
@@ -86,6 +91,14 @@ var mutatingChannels = map[string]struct{}{
 	"browser:set-active": {},
 }
 
+var auxiliaryControlChannels = map[string]struct{}{
+	"chat:create":            {},
+	"chat:queue-replace":     {},
+	"job:start":              {},
+	"app-chat:steer":         {},
+	"chat:permission-decide": {},
+}
+
 // Events only the controller may see. The test is not "is this sensitive" —
 // an approved device reads the whole session anyway — but "does this address
 // the screen a human is sitting at". `notify` and `show` put something on that
@@ -102,6 +115,7 @@ var controllerOnlyEventChannels = map[string]struct{}{
 
 const defaultAccessRequestTimeout = 120 * time.Second
 const defaultDeviceRefreshInterval = 30 * time.Second
+const revocationNoticeTimeout = 250 * time.Millisecond
 const notifyBacklogLimit = 20
 const outboundQueueFrameLimit = 128
 const outboundQueueByteLimit = 16 << 20
@@ -134,6 +148,21 @@ var errControllerChanged = errors.New("websocket client is no longer controller"
 
 // Handler is the positional-args form used by the frozen LAN invoke protocol.
 type Handler func(args []any) (any, error)
+
+// ReplyAction keeps a durable admission's side effect behind its frozen wire
+// receipt. The envelope is unchanged: only Result is encoded. Network callers
+// run After after the reply write attempt completes; direct Invoke callers run
+// it after the handler returns.
+type ReplyAction struct {
+	Result any
+	After  func()
+}
+
+// ReplyThen returns result through the existing reply envelope and defers
+// after until that reply has crossed the caller's delivery boundary.
+func ReplyThen(result any, after func()) ReplyAction {
+	return ReplyAction{Result: result, After: after}
+}
 
 type invokeScheduling uint8
 
@@ -183,6 +212,14 @@ const (
 // Hub owns the invoke handler registry and connected WebSocket clients.
 type Hub struct {
 	mu sync.RWMutex
+	// Auxiliary mutation authority exists only while a same-device projection
+	// client is live. This lock makes primary removal and aux invoke admission one
+	// atomic boundary without serializing ordinary sockets or event writes.
+	projectionMu sync.RWMutex
+	// Controller announcements are post-reply on auxiliary lanes. Serialize
+	// them before reading the current lease so delayed goroutines cannot publish
+	// an older captured controller after a newer takeover.
+	controllerAnnounceMu sync.Mutex
 	// broadcastMu preserves one global event admission order. A saturated
 	// client applies backpressure at this boundary; later semantic frames may
 	// not overtake the frame currently waiting for queue capacity.
@@ -224,13 +261,18 @@ type client struct {
 	ip                string
 	deviceName        string
 	userAgent         string
-	device            *lease.Device
-	issuedToken       string
-	pendingRequestID  string
-	access            accessState
-	fleetNonce        string
-	fleetNonceAt      time.Time
-	fleetFailures     int
+	// Auxiliary authenticated sockets preserve the frozen invoke/reply bytes but
+	// never receive projection events. `control` carries send-critical ordered
+	// mutations; `urgent` isolates Stop from a blocked steer handler.
+	purpose          string
+	connectionGroup  string
+	device           *lease.Device
+	issuedToken      string
+	pendingRequestID string
+	access           accessState
+	fleetNonce       string
+	fleetNonceAt     time.Time
+	fleetFailures    int
 	// Set when acting on this socket moved the controller lease, so the reply
 	// path announces the handover the same way an explicit lan:take-control does.
 	tookControl atomic.Bool
@@ -374,6 +416,15 @@ func (h *Hub) SetOnControllerReady(fn func(send func(channel string, payload any
 // strictly cheaper, and the stack still reaches the log so the bug stays
 // findable rather than silently swallowed.
 func (h *Hub) Invoke(channel string, args []any) (result any, err error) {
+	result, err = h.invokeRegistered(channel, args)
+	if action, ok := result.(ReplyAction); ok && err == nil {
+		result = action.Result
+		h.runReplyAction(channel, action.After)
+	}
+	return result, err
+}
+
+func (h *Hub) invokeRegistered(channel string, args []any) (result any, err error) {
 	h.mu.RLock()
 	fn := h.handlers[channel].fn
 	h.mu.RUnlock()
@@ -390,6 +441,18 @@ func (h *Hub) Invoke(channel string, args []any) (result any, err error) {
 	}()
 	result, err = fn(args)
 	return result, err
+}
+
+func (h *Hub) runReplyAction(channel string, action func()) {
+	if action == nil {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.logf("[wire] reply action panic channel=%s err=%v\n%s", channel, recovered, debug.Stack())
+		}
+	}()
+	action()
 }
 
 func (h *Hub) schedulingFor(channel string) invokeScheduling {
@@ -589,7 +652,7 @@ func (h *Hub) controllerConnectionCount() int {
 	h.mu.RUnlock()
 	count := 0
 	for _, c := range clients {
-		if h.isControllerClient(c) {
+		if c.receivesProjectionEvents() && h.isControllerClient(c) {
 			count++
 		}
 	}
@@ -611,7 +674,7 @@ func (h *Hub) broadcastToController(channel string, payload any) (int, time.Dura
 		h.mu.RLock()
 		clients := make([]*client, 0, len(h.clients))
 		for c := range h.clients {
-			if h.isControllerClient(c) {
+			if c.receivesProjectionEvents() && h.isControllerClient(c) {
 				clients = append(clients, c)
 			}
 		}
@@ -674,7 +737,7 @@ func (h *Hub) broadcastWhere(channel string, payload any, include func(*client) 
 	}
 	selected := make([]*client, 0, len(clients))
 	for _, c := range clients {
-		if !c.readySnapshot() {
+		if !c.readySnapshot() || !c.receivesProjectionEvents() {
 			continue
 		}
 		if include != nil && !include(c) {
@@ -734,9 +797,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c := h.newClient(conn, r)
-	h.mu.Lock()
-	h.clients[c] = struct{}{}
-	h.mu.Unlock()
+	h.registerClient(c)
 	go h.writeLoop(c)
 	h.announceClientAccess(c)
 	if c.readySnapshot() {
@@ -746,6 +807,9 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) announceClientReady(c *client) {
+	if c == nil || !c.receivesProjectionEvents() {
+		return
+	}
 	h.mu.RLock()
 	fn := h.onClientReady
 	h.mu.RUnlock()
@@ -761,6 +825,11 @@ func (h *Hub) announceClientReady(c *client) {
 }
 
 func (h *Hub) announceControllerReady(c *client) {
+	if c != nil && !c.receivesProjectionEvents() {
+		if device, ok := c.deviceSnapshot(); ok {
+			c = h.projectionClientForGroup(device.ID, c.connectionGroup)
+		}
+	}
 	if !h.isControllerClient(c) {
 		return
 	}
@@ -832,6 +901,21 @@ func (h *Hub) isControllerClient(c *client) bool {
 	return ok && h.lease.IsController(device.ID)
 }
 
+func (h *Hub) projectionClientForDevice(deviceID string) *client {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return nil
+	}
+	h.mu.RLock()
+	client := h.projectionClientForDeviceLocked(deviceID)
+	h.mu.RUnlock()
+	return client
+}
+
+func (c *client) receivesProjectionEvents() bool {
+	return c != nil && c.purpose != "control" && c.purpose != "urgent"
+}
+
 // AcceptKey computes the Sec-WebSocket-Accept response header.
 func AcceptKey(key string) string {
 	sum := sha1.Sum([]byte(key + wsGUID))
@@ -840,13 +924,15 @@ func AcceptKey(key string) string {
 
 func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 	c := &client{
-		conn:          conn,
-		outbound:      make(chan outboundFrame, outboundQueueFrameLimit),
-		outboundSpace: make(chan struct{}, 1),
-		done:          make(chan struct{}),
-		ip:            clientIP(r.RemoteAddr),
-		deviceName:    deviceNameFromRequest(r),
-		userAgent:     strings.TrimSpace(r.UserAgent()),
+		conn:            conn,
+		outbound:        make(chan outboundFrame, outboundQueueFrameLimit),
+		outboundSpace:   make(chan struct{}, 1),
+		done:            make(chan struct{}),
+		ip:              clientIP(r.RemoteAddr),
+		deviceName:      deviceNameFromRequest(r),
+		userAgent:       strings.TrimSpace(r.UserAgent()),
+		purpose:         connectionPurpose(r),
+		connectionGroup: connectionGroup(r),
 	}
 	if h.lease == nil {
 		c.setAccessState(accessState{State: "approved"})
@@ -865,6 +951,13 @@ func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 		c.setAccessState(accessState{State: "rejected", Reason: "invalid-token"})
 		return c
 	}
+	if !c.receivesProjectionEvents() {
+		// Auxiliary roles are never pairing surfaces. They must reuse a token
+		// already proved by the live primary, otherwise they could become distinct
+		// devices and defeat the same-device controller boundary.
+		c.setAccessState(accessState{State: "rejected", Reason: "auxiliary-auth-required"})
+		return c
+	}
 
 	if h.trustLocalhost && isLocalIP(c.ip) {
 		device, issuedToken, err := h.lease.ApproveDevice(c.deviceName, c.ip)
@@ -880,6 +973,77 @@ func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 	requestID, requestedAt := h.addPendingAccess(c)
 	c.setPendingAccess(requestID, requestedAt)
 	return c
+}
+
+// registerClient binds an auxiliary to one exact live same-device primary
+// connection group in the same critical section that makes it visible. The
+// opaque group is transport correlation only; device-token authentication is
+// still the authority proof.
+func (h *Hub) registerClient(c *client) {
+	if c == nil {
+		return
+	}
+	h.projectionMu.Lock()
+	h.mu.Lock()
+	if !c.receivesProjectionEvents() {
+		device, paired := c.deviceSnapshot()
+		if !paired || c.connectionGroup == "" || h.projectionClientForGroupLocked(device.ID, c.connectionGroup) == nil {
+			c.rejectAccess("auxiliary-primary-required")
+		}
+	}
+	h.clients[c] = struct{}{}
+	h.mu.Unlock()
+	h.projectionMu.Unlock()
+}
+
+// Caller holds h.mu (and, for authority decisions, projectionMu).
+func (h *Hub) projectionClientForDeviceLocked(deviceID string) *client {
+	for c := range h.clients {
+		if !c.receivesProjectionEvents() || !c.readySnapshot() {
+			continue
+		}
+		device, ok := c.deviceSnapshot()
+		if ok && device.ID == deviceID {
+			return c
+		}
+	}
+	return nil
+}
+
+func (h *Hub) projectionClientForGroup(deviceID, group string) *client {
+	deviceID, group = strings.TrimSpace(deviceID), strings.TrimSpace(group)
+	if deviceID == "" || group == "" {
+		return nil
+	}
+	h.mu.RLock()
+	c := h.projectionClientForGroupLocked(deviceID, group)
+	h.mu.RUnlock()
+	return c
+}
+
+// Caller holds h.mu (and, for authority decisions, projectionMu).
+func (h *Hub) projectionClientForGroupLocked(deviceID, group string) *client {
+	for c := range h.clients {
+		if !c.receivesProjectionEvents() || !c.readySnapshot() || c.connectionGroup != group {
+			continue
+		}
+		device, ok := c.deviceSnapshot()
+		if ok && device.ID == deviceID {
+			return c
+		}
+	}
+	return nil
+}
+
+func (h *Hub) auxiliaryAuthorized(c *client, deviceID string) bool {
+	if c == nil || c.receivesProjectionEvents() || c.connectionGroup == "" {
+		return false
+	}
+	h.mu.RLock()
+	_, connected := h.clients[c]
+	primary := h.projectionClientForGroupLocked(deviceID, c.connectionGroup)
+	h.mu.RUnlock()
+	return connected && primary != nil
 }
 
 func (h *Hub) addPendingAccess(c *client) (string, time.Time) {
@@ -908,7 +1072,9 @@ func (h *Hub) announceClientAccess(c *client) {
 		return
 	}
 	if device, ok := c.deviceSnapshot(); ok {
-		h.ensureController(device)
+		if c.receivesProjectionEvents() {
+			h.ensureController(device)
+		}
 		_ = c.sendEvent("lan:access-state", h.accessApprovedPayload(c, device))
 		return
 	}
@@ -1024,12 +1190,17 @@ func (h *Hub) readLoop(c *client) {
 
 func (h *Hub) handleInvoke(c *client, msg invokeMessage) {
 	var result any
+	var afterReply func()
 	var errText *string
 	result, err := h.invokeForClient(c, msg.Channel, msg.Args)
 	if err != nil {
 		s := err.Error()
 		errText = &s
 		result = nil
+	}
+	if action, ok := result.(ReplyAction); ok && errText == nil {
+		result = action.Result
+		afterReply = action.After
 	}
 	var frame []byte
 	replyBytes := 0
@@ -1051,8 +1222,15 @@ func (h *Hub) handleInvoke(c *client, msg invokeMessage) {
 		replyBytes = len(reply)
 		frame = encodeTextFrame(reply)
 	}
-	if err := c.enqueueAndWait(frame); err != nil {
-		h.logf("[wire] invoke reply could not be written channel=%s replyBytes=%d err=%v", msg.Channel, replyBytes, err)
+	writeErr := c.enqueueAndWait(frame)
+	if afterReply != nil {
+		// The actor input is already durable. Dispatch therefore follows the
+		// completed write attempt even when the peer disappeared before receipt;
+		// a reconnect reads the same operation instead of replaying its prompt.
+		go h.runReplyAction(msg.Channel, afterReply)
+	}
+	if writeErr != nil {
+		h.logf("[wire] invoke reply could not be written channel=%s replyBytes=%d err=%v", msg.Channel, replyBytes, writeErr)
 		h.drop(c)
 	}
 	// An implicit handover announces itself exactly like an explicit one, so the
@@ -1068,10 +1246,46 @@ func (h *Hub) handleInvoke(c *client, msg invokeMessage) {
 	}
 	if h.lease != nil && (moved || (msg.Channel == "lan:take-control" && errText == nil)) {
 		if device, ok := c.deviceSnapshot(); ok {
-			h.Broadcast("lan:controller-changed", controllerPayload(device))
-			h.announceControllerReady(c)
+			announce := func() {
+				h.announceCurrentController(c, device)
+			}
+			if c.receivesProjectionEvents() {
+				announce()
+			} else {
+				// Controller replay targets the primary and may wait behind its bulk
+				// writer. The auxiliary ordered invoke lane owns only replies; it must
+				// be free for the next interactive mutation immediately.
+				go announce()
+			}
 		}
 	}
+}
+
+// announceCurrentController resolves authority at publication time. In the
+// auxiliary path the reply deliberately precedes replay; another device may
+// take the lease in that gap, and broadcasting the captured actor would
+// announce a controller that no longer exists.
+func (h *Hub) announceCurrentController(source *client, acted lease.Device) {
+	if h == nil || h.lease == nil {
+		return
+	}
+	h.controllerAnnounceMu.Lock()
+	defer h.controllerAnnounceMu.Unlock()
+	current, ok := h.lease.Controller()
+	if !ok {
+		return
+	}
+	var target *client
+	if source != nil && !source.receivesProjectionEvents() && current.ID == acted.ID {
+		target = h.projectionClientForGroup(current.ID, source.connectionGroup)
+	} else {
+		target = h.projectionClientForDevice(current.ID)
+	}
+	if target == nil {
+		return
+	}
+	h.Broadcast("lan:controller-changed", controllerPayload(current))
+	h.announceControllerReady(target)
 }
 
 func encodeRawResultReplyFrame(id any, raw RawResult) ([]byte, int, error) {
@@ -1107,7 +1321,7 @@ func encodeRawResultReplyFrame(id any, raw RawResult) ([]byte, int, error) {
 
 func (h *Hub) invokeForClient(c *client, channel string, args []any) (any, error) {
 	if h.lease == nil {
-		return h.Invoke(channel, args)
+		return h.invokeRegistered(channel, args)
 	}
 	if channel == "lan:pairing-info" {
 		return h.handlePairingInfo(c, args)
@@ -1136,8 +1350,44 @@ func (h *Hub) invokeForClient(c *client, channel string, args []any) (any, error
 			"reason": state.Reason,
 		})
 	}
+	auxiliary := !c.receivesProjectionEvents()
+	if auxiliary {
+		h.projectionMu.RLock()
+		authorized := h.auxiliaryAuthorized(c, device.ID)
+		if !authorized {
+			h.projectionMu.RUnlock()
+			return nil, structuredError("lan:projection-required", "live projection connection required", map[string]any{
+				"deviceId": device.ID,
+			})
+		}
+		switch c.purpose {
+		case "urgent":
+			if channel != "job:cancel" {
+				h.projectionMu.RUnlock()
+				return nil, structuredError("lan:auxiliary-channel", "channel is not allowed on urgent connection", nil)
+			}
+		case "control":
+			if _, ok := auxiliaryControlChannels[channel]; !ok {
+				h.projectionMu.RUnlock()
+				return nil, structuredError("lan:auxiliary-channel", "channel is not allowed on control connection", nil)
+			}
+		}
+		// Authority acquisition is part of the same short admission fence as the
+		// live-primary proof. A primary drop that wins next can release the lease
+		// and close this socket; the already-admitted handler may finish, but it can
+		// never reacquire controller authority after the projection vanished.
+		h.ensureController(device)
+		if _, mutating := mutatingChannels[channel]; mutating && !h.lease.IsController(device.ID) {
+			if h.lease.TakeControl(device) {
+				c.tookControl.Store(true)
+			}
+		}
+		h.projectionMu.RUnlock()
+	}
 	h.touchClientDevice(c)
-	h.ensureController(device)
+	if !auxiliary {
+		h.ensureController(device)
+	}
 	if channel == "lan:take-control" {
 		return h.handleTakeControl(c)
 	}
@@ -1162,7 +1412,7 @@ func (h *Hub) invokeForClient(c *client, channel string, args []any) (any, error
 		}
 		return h.handleFleetAdmin(c, channel, args)
 	}
-	if _, mutating := mutatingChannels[channel]; mutating && !h.lease.IsController(device.ID) {
+	if _, mutating := mutatingChannels[channel]; !auxiliary && mutating && !h.lease.IsController(device.ID) {
 		// One human, several devices (no accounts by design). An explicit "take
 		// control" ceremony buys no safety here, because you cannot type on two
 		// devices at once — it only makes the phone in your hand refuse to send
@@ -1178,7 +1428,7 @@ func (h *Hub) invokeForClient(c *client, channel string, args []any) (any, error
 			c.tookControl.Store(true)
 		}
 	}
-	return h.Invoke(channel, args)
+	return h.invokeRegistered(channel, args)
 }
 
 func (h *Hub) handlePairingInfo(c *client, args []any) (any, error) {
@@ -1417,7 +1667,63 @@ func (h *Hub) handleRevoke(args []any) (any, error) {
 	if deviceID == "" {
 		return map[string]any{"ok": false, "error": "missing deviceId"}, nil
 	}
-	return map[string]any{"ok": h.lease.RevokeDevice(deviceID)}, nil
+	ok := h.lease.RevokeDevice(deviceID)
+	if ok {
+		h.fenceRevokedDevice(deviceID)
+	}
+	return map[string]any{"ok": ok}, nil
+}
+
+// fenceRevokedDevice removes every authenticated transport for one identity in
+// the same lifecycle boundary used by projection/auxiliary admission. A token
+// revocation must invalidate already-open sockets too: retaining c.device after
+// the lease record is gone would otherwise let that socket take the lease again
+// on its next mutation.
+func (h *Hub) fenceRevokedDevice(deviceID string) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return
+	}
+	var revoked []*client
+	h.projectionMu.Lock()
+	h.mu.Lock()
+	for c := range h.clients {
+		device, ok := c.deviceSnapshot()
+		if !ok || device.ID != deviceID {
+			continue
+		}
+		delete(h.clients, c)
+		revoked = append(revoked, c)
+	}
+	h.mu.Unlock()
+	h.projectionMu.Unlock()
+	for _, c := range revoked {
+		c.rejectAccess("revoked")
+		// A normal renderer close deliberately preserves offline chats. Give the
+		// three sockets a bounded rejected handshake first so either free
+		// auxiliary writer clears credentials and unmounts immediately even when
+		// the projection writer is blocked behind a bulk snapshot.
+		frame, err := json.Marshal(eventFrame{T: "event", Channel: "lan:access-state", Payload: h.accessStatePayload(c.accessSnapshot())})
+		if err != nil {
+			c.close()
+			continue
+		}
+		written := make(chan error, 1)
+		if err := c.enqueueFrame(outboundFrame{payload: encodeTextFrame(frame), written: written}); err != nil {
+			c.close()
+			continue
+		}
+		go func(revokedClient *client, writeDone <-chan error) {
+			timer := time.NewTimer(revocationNoticeTimeout)
+			defer timer.Stop()
+			select {
+			case <-writeDone:
+			case <-timer.C:
+			case <-revokedClient.done:
+			}
+			revokedClient.close()
+		}(c, written)
+	}
 }
 
 // accessStatePayload is the hub's stamped form: the same document plus who is
@@ -1538,20 +1844,44 @@ func (h *Hub) drop(c *client) {
 	// rehydrate. Counting drops makes the hydrate→drop→reconnect loop visible
 	// without reading logs.
 	atomic.AddUint64(&h.stats.drops, 1)
+	h.projectionMu.Lock()
+	defer h.projectionMu.Unlock()
 	h.removePendingForClient(c)
 	device, paired := c.deviceSnapshot()
+	projection := c.receivesProjectionEvents()
 	h.mu.Lock()
 	_, connected := h.clients[c]
 	if connected {
 		delete(h.clients, c)
 	}
 	deviceStillConnected := false
+	groupStillConnected := false
+	var auxiliary []*client
 	if connected && paired && h.lease != nil {
 		for other := range h.clients {
 			otherDevice, ok := other.deviceSnapshot()
-			if ok && otherDevice.ID == device.ID {
+			if !ok || otherDevice.ID != device.ID {
+				continue
+			}
+			if other.receivesProjectionEvents() {
 				deviceStillConnected = true
-				break
+				if projection && c.connectionGroup != "" && other.connectionGroup == c.connectionGroup {
+					groupStillConnected = true
+				}
+			}
+		}
+		if projection && !groupStillConnected {
+			// Fence exactly the siblings of the primary group that disappeared.
+			// A delayed old-primary drop cannot close its replacement's lanes, and
+			// a current-primary loss still fences its lanes even if an older
+			// same-device projection is finishing in parallel.
+			for other := range h.clients {
+				otherDevice, ok := other.deviceSnapshot()
+				if !ok || otherDevice.ID != device.ID || other.receivesProjectionEvents() || other.connectionGroup != c.connectionGroup {
+					continue
+				}
+				delete(h.clients, other)
+				auxiliary = append(auxiliary, other)
 			}
 		}
 		if !deviceStillConnected {
@@ -1561,6 +1891,9 @@ func (h *Hub) drop(c *client) {
 	h.mu.Unlock()
 	if connected {
 		c.close()
+	}
+	for _, sibling := range auxiliary {
+		sibling.close()
 	}
 }
 
@@ -1703,6 +2036,15 @@ func (c *client) setDevice(device lease.Device, issuedToken string) {
 	c.issuedToken = issuedToken
 	c.pendingRequestID = ""
 	c.access = accessState{State: "approved"}
+}
+
+func (c *client) rejectAccess(reason string) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	c.device = nil
+	c.issuedToken = ""
+	c.pendingRequestID = ""
+	c.access = accessState{State: "rejected", Reason: strings.TrimSpace(reason)}
 }
 
 func (c *client) setFleetNonce(nonce string) {
@@ -2019,6 +2361,37 @@ func deviceNameFromRequest(r *http.Request) string {
 		name = name[:80]
 	}
 	return name
+}
+
+func connectionPurpose(r *http.Request) string {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("purpose"))) {
+	case "control":
+		return "control"
+	case "urgent":
+		return "urgent"
+	default:
+		return ""
+	}
+}
+
+func connectionGroup(r *http.Request) string {
+	group := strings.TrimSpace(r.URL.Query().Get("connectionGroup"))
+	if group == "" || len(group) > 128 {
+		return ""
+	}
+	for index := 0; index < len(group); index++ {
+		char := group[index]
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
+			continue
+		}
+		switch char {
+		case '-', '_', '.', ':':
+			continue
+		default:
+			return ""
+		}
+	}
+	return group
 }
 
 func firstNonEmpty(values ...string) string {

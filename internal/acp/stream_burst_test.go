@@ -38,6 +38,7 @@ func (c *timedBurstCollector) snapshot() []timedBurstEvent {
 }
 
 func TestMockBurstStreamsAtDisplayCadenceWithoutDroppingText(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	collector := &timedBurstCollector{}
 	const (

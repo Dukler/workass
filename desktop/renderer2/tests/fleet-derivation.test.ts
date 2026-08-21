@@ -19,7 +19,7 @@ test('SHA-256 matches FIPS 180-4', () => {
   assert.equal(toHex(sha256(utf8('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq'))),
     '248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1');
   // Crosses the 55-byte padding boundary, where a block gets appended.
-  assert.equal(toHex(sha256(utf8('a'.repeat(1000000).slice(0, 1000)))),
+  assert.equal(toHex(sha256(utf8('a'.repeat(1000)))),
     toHex(sha256(utf8('a'.repeat(1000)))));
 });
 

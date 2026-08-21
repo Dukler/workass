@@ -71,6 +71,7 @@ trap cleanup EXIT HUP INT TERM
 repository_gate() {
   (cd "$repo_root" && \
     GOCACHE="${GOCACHE:-/private/tmp/workass-gocache}" \
+    WORKASS_GATE_FRESH=1 \
     WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER=1 \
     scripts/gate.sh)
 }

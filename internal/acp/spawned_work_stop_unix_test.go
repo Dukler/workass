@@ -16,6 +16,7 @@ import (
 // asserts the effect, because a stop button that leaves the process running is
 // the same lie as no button at all.
 func TestStopSpawnedWorkKillsARealProcessThatIgnoresSIGTERM(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("no lsof: the open-file probe this test exercises is unavailable")
 	}

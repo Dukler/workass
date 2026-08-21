@@ -5,16 +5,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
 func TestProviderTypedMessagePhaseBoundarySurvivesStdoutCoalescing(t *testing.T) {
+	t.Parallel()
 	events := newEventCollector()
 	manager := NewManager(Options{Broadcast: events.Broadcast, StdoutFlushInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
@@ -60,6 +63,7 @@ func TestProviderTypedMessagePhaseBoundarySurvivesStdoutCoalescing(t *testing.T)
 }
 
 func TestMockProviderTypedPhasesAreExplicitAndPhaseLessTurnsStayPlain(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	events := newEventCollector()
 	manager := NewManager(Options{
@@ -95,6 +99,7 @@ func TestMockProviderTypedPhasesAreExplicitAndPhaseLessTurnsStayPlain(t *testing
 }
 
 func TestMockInitializeSessionPromptCancelErrorAndReuse(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	events := newEventCollector()
 	manager := NewManager(Options{
@@ -171,6 +176,7 @@ func TestMockInitializeSessionPromptCancelErrorAndReuse(t *testing.T) {
 }
 
 func TestMockLostTerminalEventuallyEnds(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	events := newEventCollector()
 	manager := NewManager(Options{
@@ -202,6 +208,7 @@ func TestMockLostTerminalEventuallyEnds(t *testing.T) {
 }
 
 func TestMockLostTerminalCannotLeaveJobRunningWhenAdapterDoesNotReleasePrompt(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	events := newEventCollector()
 	manager := NewManager(Options{
@@ -233,6 +240,7 @@ func TestMockLostTerminalCannotLeaveJobRunningWhenAdapterDoesNotReleasePrompt(t 
 }
 
 func TestMockPromptSilenceDoesNotCompleteAnAuthoritativelyActiveTurn(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	events := newEventCollector()
 	manager := NewManager(Options{
@@ -271,6 +279,7 @@ func TestMockPromptSilenceDoesNotCompleteAnAuthoritativelyActiveTurn(t *testing.
 }
 
 func TestStartJobStaleSessionIDCannotDriveAnotherChat(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -300,6 +309,7 @@ func TestStartJobStaleSessionIDCannotDriveAnotherChat(t *testing.T) {
 }
 
 func TestMockPermissionMarkerRoundTrip(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	events := newEventCollector()
 	manager := NewManager(Options{
@@ -326,6 +336,7 @@ func TestMockPermissionMarkerRoundTrip(t *testing.T) {
 }
 
 func TestMockSteerMidSlowTurnReflectedInOutput(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	events := newEventCollector()
 	manager := NewManager(Options{
@@ -350,20 +361,250 @@ func TestMockSteerMidSlowTurnReflectedInOutput(t *testing.T) {
 	}
 }
 
-func TestSteerUnsupportedKeepsClientQueue(t *testing.T) {
+func TestSteerWaitsForCommittedBasePromptDispatchBoundary(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	traceFile := filepath.Join(t.TempDir(), "prompt-trace.jsonl")
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root,
+		Provider: ProviderConfig{
+			Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root,
+			Env: map[string]string{"WORKASS_MOCK_ACP_TRACE_FILE": traceFile},
+		},
+		Broadcast: events.Broadcast,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	session := newMockSession(t, manager, "commit-steer-tab")
+	jobIDAtCommit := make(chan string, 1)
+	releaseCommit := make(chan struct{})
+	startResult := make(chan struct {
+		job map[string]any
+		err error
+	}, 1)
+	go func() {
+		job, err := manager.StartJob(context.Background(), JobStartOptions{
+			Kind: "app-chat", SessionID: session.SessionID, TabID: "commit-steer-tab", ChatID: "chat-commit-steer-tab",
+			Prompt: "provider prompt must stay behind the dispatch boundary",
+			CommitAdmission: func(job map[string]any) error {
+				jobIDAtCommit <- jobID(job)
+				<-releaseCommit
+				return nil
+			},
+		})
+		startResult <- struct {
+			job map[string]any
+			err error
+		}{job: job, err: err}
+	}()
+	reservedID := <-jobIDAtCommit
+	manager.mu.Lock()
+	reserved := manager.jobs[reservedID]
+	manager.mu.Unlock()
+	if reserved == nil {
+		t.Fatal("durable admission did not reserve the exact manager job")
+	}
+
+	// Keep the provider process outside the deterministic bubble. Only the
+	// pre-dispatch wait uses a bubble-owned channel, so Wait proves the steering
+	// goroutine reached that receive instead of relying on a scheduler timeout.
+	synctest.Test(t, func(t *testing.T) {
+		reserved.inputDispatchBoundary = make(chan struct{})
+		steerResult := make(chan map[string]any, 1)
+		go func() {
+			steerResult <- manager.Steer(session.SessionID, "must not overtake", nil, "commit-steer-operation")
+		}()
+		synctest.Wait()
+		select {
+		case result := <-steerResult:
+			t.Fatalf("steer crossed the blocked base-prompt dispatch boundary: %#v", result)
+		default:
+		}
+		cancel := manager.CancelJobResult(reservedID)
+		if !cancel.Cancelled || !cancel.PreAdmission {
+			t.Fatalf("cancel reserved admission = %#v", cancel)
+		}
+		reserved.settleInputDispatch()
+		synctest.Wait()
+		result := <-steerResult
+		if result["ok"] != false || result["queued"] != false {
+			t.Fatalf("cancelled pre-dispatch steer = %#v", result)
+		}
+	})
+
+	close(releaseCommit)
+	started := <-startResult
+	if started.err != nil {
+		t.Fatalf("finish cancelled admission: %v", started.err)
+	}
+	_ = events.waitJobEnd(t, reservedID, 3*time.Second)
+	trace, err := os.ReadFile(traceFile)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read prompt trace: %v", err)
+	}
+	if bytes.Contains(trace, []byte("provider prompt must stay behind")) {
+		t.Fatalf("cancelled pre-dispatch prompt reached the provider: %s", trace)
+	}
+}
+
+func TestSteerSucceedsOnlyAfterBasePromptPhysicalWrite(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	traceFile := filepath.Join(t.TempDir(), "prompt-trace.jsonl")
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root,
+		Provider: ProviderConfig{
+			Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root,
+			Env: map[string]string{"WORKASS_MOCK_ACP_TRACE_FILE": traceFile},
+		},
+		Broadcast: events.Broadcast,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	session := newMockSession(t, manager, "written-steer-tab")
+	started, err := manager.StartJob(context.Background(), JobStartOptions{
+		Kind: "app-chat", SessionID: session.SessionID, TabID: "written-steer-tab", ChatID: "chat-written-steer-tab",
+		Prompt: "[mock:hold-until-steer] [mock:steer] physically written base prompt",
+	})
+	if err != nil {
+		t.Fatalf("start base turn: %v", err)
+	}
+	var trace []byte
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		trace, err = os.ReadFile(traceFile)
+		if err == nil && bytes.Contains(trace, []byte("physically written base prompt")) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("read prompt trace: %v", err)
+	}
+	if !bytes.Contains(trace, []byte("physically written base prompt")) {
+		t.Fatalf("base prompt was not physically observed: %s", trace)
+	}
+	result := manager.Steer(session.SessionID, "committed steer", nil, "written-steer-operation")
+	if result["ok"] != true || result["live"] != true || result["queued"] != false {
+		t.Fatalf("steer after base prompt write = %#v", result)
+	}
+	_ = events.waitJobEnd(t, jobID(started), 3*time.Second)
+}
+
+func TestCancelDuringCommitAdmissionStartsNoProviderPrompt(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	traceFile := filepath.Join(t.TempDir(), "prompt-trace.jsonl")
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root,
+		Provider: ProviderConfig{
+			Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root,
+			Env: map[string]string{"WORKASS_MOCK_ACP_TRACE_FILE": traceFile},
+		},
+		Broadcast: events.Broadcast,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	session := newMockSession(t, manager, "commit-cancel-tab")
+	jobIDAtCommit := make(chan string, 1)
+	releaseCommit := make(chan struct{})
+	startResult := make(chan struct {
+		job map[string]any
+		err error
+	}, 1)
+	go func() {
+		job, err := manager.StartJob(context.Background(), JobStartOptions{
+			Kind: "app-chat", SessionID: session.SessionID, TabID: "commit-cancel-tab", ChatID: "chat-commit-cancel-tab",
+			Prompt: "provider prompt must never start",
+			CommitAdmission: func(job map[string]any) error {
+				jobIDAtCommit <- jobID(job)
+				<-releaseCommit
+				return nil
+			},
+		})
+		startResult <- struct {
+			job map[string]any
+			err error
+		}{job: job, err: err}
+	}()
+	reservedID := <-jobIDAtCommit
+	result := manager.CancelJobResult(reservedID)
+	if !result.Cancelled || !result.PreAdmission || result.Reason != "cancelled" {
+		t.Fatalf("cancel reserved admission = %#v", result)
+	}
+	close(releaseCommit)
+	started := <-startResult
+	if started.err != nil {
+		t.Fatalf("finish cancelled admission: %v", started.err)
+	}
+	end := events.waitJobEnd(t, reservedID, 3*time.Second)
+	assertJobStatus(t, end, "failed", 130, "cancelled")
+	trace, err := os.ReadFile(traceFile)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read prompt trace: %v", err)
+	}
+	if bytes.Contains(trace, []byte("provider prompt must never start")) {
+		t.Fatalf("cancelled pre-admission input reached the provider: %s", trace)
+	}
+}
+
+func TestCommitAdmissionFailureDropsReservationBeforeProviderPrompt(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	traceFile := filepath.Join(t.TempDir(), "prompt-trace.jsonl")
+	manager := NewManager(Options{
+		RootDir: root,
+		Provider: ProviderConfig{
+			Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root,
+			Env: map[string]string{"WORKASS_MOCK_ACP_TRACE_FILE": traceFile},
+		},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	session := newMockSession(t, manager, "commit-failure-tab")
+	commitErr := errors.New("durable actor admission failed")
+	reservedID := ""
+	_, err := manager.StartJob(context.Background(), JobStartOptions{
+		Kind: "app-chat", SessionID: session.SessionID, TabID: "commit-failure-tab", ChatID: "chat-commit-failure-tab",
+		Prompt: "failed admission must never start",
+		CommitAdmission: func(job map[string]any) error {
+			reservedID = jobID(job)
+			return commitErr
+		},
+	})
+	if !errors.Is(err, commitErr) {
+		t.Fatalf("commit failure = %v, want %v", err, commitErr)
+	}
+	if result := manager.CancelJobResult(reservedID); result.Cancelled || result.Reason != "unknown" {
+		t.Fatalf("failed reservation remained manager-owned: %#v", result)
+	}
+	trace, readErr := os.ReadFile(traceFile)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatalf("read prompt trace: %v", readErr)
+	}
+	if bytes.Contains(trace, []byte("failed admission must never start")) {
+		t.Fatalf("failed durable admission reached the provider: %s", trace)
+	}
+}
+
+func TestSteerUnsupportedRejectsWithoutQueueingOrInterrupting(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "slow-prompt", Options{})
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "steer-unsupported-tab")
 	job := startAppChatJob(t, manager, session.SessionID, "steer-unsupported-tab", "unsupported steer")
 
 	res := manager.Steer(session.SessionID, "local queue should stay", nil, "")
-	if res["ok"] != false || res["unsupported"] != true || res["queued"] != false {
+	if res["ok"] != false || res["unsupported"] != true || res["queued"] != false || res["strategy"] != "unsupported" || res["interrupted"] == true {
 		t.Fatalf("unsupported steer result = %#v", res)
+	}
+	if _, running := manager.RunningJobForChat("steer-unsupported-tab", "chat-steer-unsupported-tab"); !running {
+		t.Fatal("unsupported steer interrupted the active turn")
 	}
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "done", 0, "end_turn")
 }
 
 func TestSteerRejectsInternalMaintenancePrompt(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "echo-prompt", Options{Provider: ProviderConfig{ID: "codex"}})
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "internal-steer-tab")
@@ -382,6 +623,7 @@ func TestSteerRejectsInternalMaintenancePrompt(t *testing.T) {
 }
 
 func TestCodexSteerUsesAcknowledgedNativeRequestWithoutCancellingRunningTurn(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "codex-steer", Options{
 		Provider: ProviderConfig{ID: "codex"},
 	})
@@ -412,7 +654,8 @@ func TestCodexSteerUsesAcknowledgedNativeRequestWithoutCancellingRunningTurn(t *
 	}
 }
 
-func TestCodexSteerAlreadyFinishedNativeTurnInterruptsOnlyStaleWrapperForNextTurn(t *testing.T) {
+func TestCodexSteerAlreadyFinishedNativeTurnRejectsWithoutInterruptingWrapper(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "codex-steer-next-turn", Options{
 		Provider: ProviderConfig{ID: "codex"},
 	})
@@ -422,13 +665,20 @@ func TestCodexSteerAlreadyFinishedNativeTurnInterruptsOnlyStaleWrapperForNextTur
 	_ = events.waitJobType(t, jobID(job), "acp", 2*time.Second)
 
 	res := manager.Steer(session.SessionID, "start this next", nil, "u-next-turn")
-	if res["ok"] != false || res["strategy"] != "interrupt-queue" || res["interrupted"] != true || res["reason"] != "no-active-turn" {
+	if res["ok"] != false || res["strategy"] != "rejected" || res["interrupted"] == true || res["reason"] != "no-active-turn" {
 		t.Fatalf("finished-turn steer disposition = %#v", res)
+	}
+	if _, running := manager.RunningJobForChat("codex-steer-next-turn-tab", "chat-codex-steer-next-turn-tab"); !running {
+		t.Fatal("finished-native-turn rejection interrupted the active Workass wrapper")
+	}
+	if cancelled := manager.CancelJobResult(jobID(job)); !cancelled.Cancelled {
+		t.Fatalf("explicit cleanup Stop did not cancel the active wrapper: %#v", cancelled)
 	}
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "failed", 130, "cancelled")
 }
 
-func TestCodexSteerNonSteerableReviewQueuesWithoutCancellingReview(t *testing.T) {
+func TestCodexSteerNonSteerableReviewRejectsWithoutQueueingOrCancellingReview(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "codex-steer-nonsteerable", Options{
 		Provider: ProviderConfig{ID: "codex"},
 	})
@@ -438,13 +688,38 @@ func TestCodexSteerNonSteerableReviewQueuesWithoutCancellingReview(t *testing.T)
 	_ = events.waitJobType(t, jobID(job), "acp", 2*time.Second)
 
 	res := manager.Steer(session.SessionID, "after review", nil, "u-after-review")
-	if res["ok"] != false || res["strategy"] != "queue" || res["interrupted"] == true || res["reason"] != "active-turn-not-steerable" {
+	if res["ok"] != false || res["queued"] != false || res["strategy"] != "rejected" || res["interrupted"] == true || res["reason"] != "active-turn-not-steerable" {
 		t.Fatalf("non-steerable review disposition = %#v", res)
 	}
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "done", 0, "end_turn")
 }
 
+func TestCodexNativeSteerRejectionDoesNotQueueOrInterrupt(t *testing.T) {
+	t.Parallel()
+	manager, events := newFakeManager(t, "codex-steer-rejected", Options{
+		Provider: ProviderConfig{ID: "codex"},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	const tabID = "codex-steer-rejected-tab"
+	session := newFakeSession(t, manager, tabID)
+	job := startAppChatJob(t, manager, session.SessionID, tabID, "base turn")
+	_ = events.waitJobType(t, jobID(job), "acp", 2*time.Second)
+
+	res := manager.Steer(session.SessionID, "do not interrupt this turn", nil, "u-rejected")
+	if res["ok"] != false || res["queued"] != false || res["interrupted"] == true || res["strategy"] != "rejected" {
+		t.Fatalf("native Codex rejection = %#v", res)
+	}
+	if _, running := manager.RunningJobForChat(tabID, "chat-"+tabID); !running {
+		t.Fatal("native Codex rejection interrupted the active turn")
+	}
+	if cancelled := manager.CancelJobResult(jobID(job)); !cancelled.Cancelled {
+		t.Fatalf("explicit cleanup Stop did not cancel the active turn: %#v", cancelled)
+	}
+	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "failed", 130, "cancelled")
+}
+
 func TestCodexSteerDuplicateConsumptionReceiptIsIdempotent(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "codex-steer-duplicate-receipt", Options{
 		Provider: ProviderConfig{ID: "codex"},
 	})
@@ -466,7 +741,8 @@ func TestCodexSteerDuplicateConsumptionReceiptIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestClaudeSteerInterruptsCurrentTurnForImmediateFIFOFollowup(t *testing.T) {
+func TestClaudeWithoutLiveSteerRejectsWithoutQueueingOrInterrupting(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "interruptible-prompt", Options{
 		Provider: ProviderConfig{ID: "claude"},
 	})
@@ -475,13 +751,20 @@ func TestClaudeSteerInterruptsCurrentTurnForImmediateFIFOFollowup(t *testing.T) 
 	job := startAppChatJob(t, manager, session.SessionID, "claude-queue-tab", "finish current turn")
 
 	res := manager.Steer(session.SessionID, "next Claude turn", nil, "")
-	if res["ok"] != false || res["unsupported"] != true || res["interrupted"] != true || res["queued"] != false || res["strategy"] != "interrupt-queue" {
-		t.Fatalf("claude interrupt+queue result = %#v", res)
+	if res["ok"] != false || res["unsupported"] != true || res["interrupted"] == true || res["queued"] != false || res["strategy"] != "unsupported" {
+		t.Fatalf("unsupported Claude steer result = %#v", res)
+	}
+	if _, running := manager.RunningJobForChat("claude-queue-tab", "chat-claude-queue-tab"); !running {
+		t.Fatal("unsupported Claude steer interrupted the active turn")
+	}
+	if cancelled := manager.CancelJobResult(jobID(job)); !cancelled.Cancelled {
+		t.Fatalf("explicit cleanup Stop did not cancel the active turn: %#v", cancelled)
 	}
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "failed", 130, "cancelled")
 }
 
 func TestClaudeNativeSteerUsesAcknowledgedLiveRequestWithoutCancellingRunningTurn(t *testing.T) {
+	t.Parallel()
 	methodLog := filepath.Join(t.TempDir(), "methods.log")
 	manager, events := newFakeManager(t, "claude-steer", Options{
 		Provider: ProviderConfig{
@@ -523,7 +806,8 @@ func TestClaudeNativeSteerUsesAcknowledgedLiveRequestWithoutCancellingRunningTur
 	}
 }
 
-func TestUnpatchedCodexAdapterFallsBackToInterruptQueueWithoutHanging(t *testing.T) {
+func TestUnpatchedCodexAdapterRejectsWithoutQueueingOrInterrupting(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "interruptible-prompt", Options{
 		Provider: ProviderConfig{ID: "codex"},
 	})
@@ -533,13 +817,20 @@ func TestUnpatchedCodexAdapterFallsBackToInterruptQueueWithoutHanging(t *testing
 	_ = events.waitJobType(t, jobID(job), "acp", 2*time.Second)
 
 	res := manager.Steer(session.SessionID, "redirect without native extension", nil, "")
-	if res["ok"] != false || res["interrupted"] != true || res["strategy"] != "interrupt-queue" {
-		t.Fatalf("unpatched codex fallback = %#v", res)
+	if res["ok"] != false || res["unsupported"] != true || res["interrupted"] == true || res["queued"] != false || res["strategy"] != "unsupported" {
+		t.Fatalf("unpatched Codex rejection = %#v", res)
+	}
+	if _, running := manager.RunningJobForChat("codex-unpatched-steer-tab", "chat-codex-unpatched-steer-tab"); !running {
+		t.Fatal("unpatched Codex steer interrupted the active turn")
+	}
+	if cancelled := manager.CancelJobResult(jobID(job)); !cancelled.Cancelled {
+		t.Fatalf("explicit cleanup Stop did not cancel the active turn: %#v", cancelled)
 	}
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "failed", 130, "cancelled")
 }
 
 func TestCloseSessionEmitsProcChanged(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	events := newEventCollector()
 	manager := NewManager(Options{
@@ -581,6 +872,7 @@ func TestCloseSessionEmitsProcChanged(t *testing.T) {
 }
 
 func TestFakePermissionDecideRoundTrip(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "permission", Options{PermissionTimeout: 2 * time.Second})
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "perm-tab")
@@ -611,6 +903,7 @@ func TestFakePermissionDecideRoundTrip(t *testing.T) {
 }
 
 func TestPermissionWaitSuppressesPromptReconciliationKill(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "permission-reconcile-hang", Options{
 		PromptReconcileInterval: 15 * time.Millisecond,
 		PromptReconcileTimeout:  15 * time.Millisecond,
@@ -636,6 +929,7 @@ func TestPermissionWaitSuppressesPromptReconciliationKill(t *testing.T) {
 }
 
 func TestFakePermissionTimeoutUsesFallbackDeny(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "permission", Options{PermissionTimeout: 60 * time.Millisecond})
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "timeout-tab")
@@ -650,6 +944,7 @@ func TestFakePermissionTimeoutUsesFallbackDeny(t *testing.T) {
 }
 
 func TestProviderConfigFileDefaultsAndConfiguredRegistry(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	file := filepath.Join(t.TempDir(), "providers.json")
 	defaults, err := LoadProviderConfigs(file, root)
@@ -682,6 +977,7 @@ func TestProviderConfigFileDefaultsAndConfiguredRegistry(t *testing.T) {
 }
 
 func TestProviderRegistryCatalogToggleFailureAndConcurrentIsolation(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	events := newEventCollector()
 	manager := NewManager(Options{
@@ -766,6 +1062,7 @@ func TestProviderRegistryCatalogToggleFailureAndConcurrentIsolation(t *testing.T
 }
 
 func TestSetModelPassesEffortSuffixedIDUnchanged(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -796,9 +1093,14 @@ func TestSetModelPassesEffortSuffixedIDUnchanged(t *testing.T) {
 }
 
 func TestTurnReappliesPersistedModelAndPermissionMode(t *testing.T) {
+	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "turn-controls.log")
-	t.Setenv("WORKASS_FAKE_ACP_CONFIG_LOG", logPath)
-	manager, events := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
+	manager, events := newFakeManager(t, "echo-prompt", Options{
+		RSSSampleInterval: time.Hour,
+		Provider: ProviderConfig{Env: map[string]string{
+			"WORKASS_FAKE_ACP_CONFIG_LOG": logPath,
+		}},
+	})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -824,9 +1126,14 @@ func TestTurnReappliesPersistedModelAndPermissionMode(t *testing.T) {
 }
 
 func TestTurnTranslatesLegacyPermissionAndRoutesCodexEffortAxis(t *testing.T) {
+	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "codex-controls.log")
-	t.Setenv("WORKASS_FAKE_ACP_CONFIG_LOG", logPath)
-	manager, events := newFakeManager(t, "codex-controls", Options{RSSSampleInterval: time.Hour})
+	manager, events := newFakeManager(t, "codex-controls", Options{
+		RSSSampleInterval: time.Hour,
+		Provider: ProviderConfig{Env: map[string]string{
+			"WORKASS_FAKE_ACP_CONFIG_LOG": logPath,
+		}},
+	})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -859,9 +1166,14 @@ func TestTurnTranslatesLegacyPermissionAndRoutesCodexEffortAxis(t *testing.T) {
 }
 
 func TestTurnRoutesCodexCrossModelRestoreThroughSeparateEffortAxis(t *testing.T) {
+	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "codex-cross-model-controls.log")
-	t.Setenv("WORKASS_FAKE_ACP_CONFIG_LOG", logPath)
-	manager, events := newFakeManager(t, "codex-controls", Options{RSSSampleInterval: time.Hour})
+	manager, events := newFakeManager(t, "codex-controls", Options{
+		RSSSampleInterval: time.Hour,
+		Provider: ProviderConfig{Env: map[string]string{
+			"WORKASS_FAKE_ACP_CONFIG_LOG": logPath,
+		}},
+	})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -894,6 +1206,7 @@ func TestTurnRoutesCodexCrossModelRestoreThroughSeparateEffortAxis(t *testing.T)
 }
 
 func TestTurnControlRestoreRejectionFallsBackToPrompt(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "control-reject", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -919,9 +1232,14 @@ func TestTurnControlRestoreRejectionFallsBackToPrompt(t *testing.T) {
 }
 
 func TestClaudeEffortAxisSurfacesAndRoutesSeparately(t *testing.T) {
+	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "config-calls.log")
-	t.Setenv("WORKASS_FAKE_ACP_CONFIG_LOG", logPath)
-	manager, events := newFakeManager(t, "claude-effort", Options{RSSSampleInterval: time.Hour})
+	manager, events := newFakeManager(t, "claude-effort", Options{
+		RSSSampleInterval: time.Hour,
+		Provider: ProviderConfig{Env: map[string]string{
+			"WORKASS_FAKE_ACP_CONFIG_LOG": logPath,
+		}},
+	})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -979,6 +1297,7 @@ func TestClaudeEffortAxisSurfacesAndRoutesSeparately(t *testing.T) {
 }
 
 func TestClaudeSyntheticDefaultInitialSessionUsesExplicitModel(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "claude-effort-default", Options{
 		RSSSampleInterval: time.Hour,
 		Provider:          ProviderConfig{ID: "claude"},
@@ -1026,6 +1345,7 @@ func TestClaudeSyntheticDefaultInitialSessionUsesExplicitModel(t *testing.T) {
 }
 
 func TestClaudePassiveSyntheticDefaultWinsAsExplicitAlias(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "claude-effort-default", Options{
 		RSSSampleInterval: time.Hour,
 		Provider:          ProviderConfig{ID: "claude"},
@@ -1074,9 +1394,14 @@ func TestClaudePassiveSyntheticDefaultWinsAsExplicitAlias(t *testing.T) {
 }
 
 func TestClaudeEffortCapabilityStaysModelSpecificWhenSwitchingToHaiku(t *testing.T) {
+	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "config-calls.log")
-	t.Setenv("WORKASS_FAKE_ACP_CONFIG_LOG", logPath)
-	manager, _ := newFakeManager(t, "claude-effort", Options{RSSSampleInterval: time.Hour})
+	manager, _ := newFakeManager(t, "claude-effort", Options{
+		RSSSampleInterval: time.Hour,
+		Provider: ProviderConfig{Env: map[string]string{
+			"WORKASS_FAKE_ACP_CONFIG_LOG": logPath,
+		}},
+	})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1141,11 +1466,13 @@ func TestClaudeEffortCapabilityStaysModelSpecificWhenSwitchingToHaiku(t *testing
 }
 
 func TestT1cUndiscoveredBaseRowStillRoutesEffortComposite(t *testing.T) {
+	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "cold-row-controls.log")
-	t.Setenv("WORKASS_FAKE_ACP_CONFIG_LOG", logPath)
 	manager, _ := newFakeManager(t, "claude-cold-effort", Options{
 		RSSSampleInterval: time.Hour,
-		Provider:          ProviderConfig{ID: "claude"},
+		Provider: ProviderConfig{ID: "claude", Env: map[string]string{
+			"WORKASS_FAKE_ACP_CONFIG_LOG": logPath,
+		}},
 	})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1184,6 +1511,7 @@ func TestT1cUndiscoveredBaseRowStillRoutesEffortComposite(t *testing.T) {
 }
 
 func TestUnownedClaudeProviderSessionCannotMutateNativeLineage(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "claude-effort", Options{
 		RSSSampleInterval: time.Hour,
 		Provider:          ProviderConfig{ID: "claude"},
@@ -1231,6 +1559,7 @@ func TestUnownedClaudeProviderSessionCannotMutateNativeLineage(t *testing.T) {
 }
 
 func TestOrdinaryPromptCarriesStableWorkassOperationID(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "input-receipt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1265,6 +1594,7 @@ func TestOrdinaryPromptCarriesStableWorkassOperationID(t *testing.T) {
 }
 
 func TestT1ColdBridgePreservesUndiscoveredEffortSelection(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "claude-cold-effort", Options{
 		RSSSampleInterval: time.Hour,
 		Provider:          ProviderConfig{ID: "claude"},
@@ -1304,6 +1634,7 @@ func TestT1ColdBridgePreservesUndiscoveredEffortSelection(t *testing.T) {
 }
 
 func TestT2AuthoritativeEffortDowngradePersistsAndLogs(t *testing.T) {
+	t.Parallel()
 	var logs []string
 	manager, _ := newFakeManager(t, "claude-effort", Options{
 		RSSSampleInterval: time.Hour,
@@ -1346,6 +1677,7 @@ func TestT2AuthoritativeEffortDowngradePersistsAndLogs(t *testing.T) {
 }
 
 func TestT3AdapterSideModelChangeCapturesStoredControls(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "claude-effort", Options{
 		RSSSampleInterval: time.Hour,
 		Provider:          ProviderConfig{ID: "claude"},
@@ -1388,11 +1720,13 @@ func TestT3AdapterSideModelChangeCapturesStoredControls(t *testing.T) {
 }
 
 func TestT5LiteralBracketedModelRoundTripsAfterResumeDiscovery(t *testing.T) {
+	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "cold-roundtrip-calls.log")
-	t.Setenv("WORKASS_FAKE_ACP_CONFIG_LOG", logPath)
 	manager, events := newFakeManager(t, "claude-cold-effort", Options{
 		RSSSampleInterval: time.Hour,
-		Provider:          ProviderConfig{ID: "claude"},
+		Provider: ProviderConfig{ID: "claude", Env: map[string]string{
+			"WORKASS_FAKE_ACP_CONFIG_LOG": logPath,
+		}},
 	})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1432,13 +1766,15 @@ func TestT5LiteralBracketedModelRoundTripsAfterResumeDiscovery(t *testing.T) {
 }
 
 func TestT6NewSessionConvergesNativeBindingModelWithoutRendererReapply(t *testing.T) {
+	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "native-startup-controls.log")
-	t.Setenv("WORKASS_FAKE_ACP_CONFIG_LOG", logPath)
 	stateDir := t.TempDir()
 	manager, _ := newFakeManager(t, "claude-cold-effort-resume", Options{
 		StateDir:          stateDir,
 		RSSSampleInterval: time.Hour,
-		Provider:          ProviderConfig{ID: "claude"},
+		Provider: ProviderConfig{ID: "claude", Env: map[string]string{
+			"WORKASS_FAKE_ACP_CONFIG_LOG": logPath,
+		}},
 	})
 	t.Cleanup(func() { manager.Reset() })
 	requested := "claude-fable-5[1m][xhigh]"
@@ -1492,6 +1828,7 @@ func nativeBindingModel(t *testing.T, manager *Manager, tabID, chatID, providerI
 }
 
 func TestSplitEffortSuffix(t *testing.T) {
+	t.Parallel()
 	efforts := []string{"low", "medium", "high", "xhigh", "max"}
 	cases := []struct {
 		id         string
@@ -1542,6 +1879,7 @@ func containsString(values []string, want string) bool {
 }
 
 func TestFakeInitTimeout(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "init-hang", Options{InitTimeout: 40 * time.Millisecond})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -1553,6 +1891,7 @@ func TestFakeInitTimeout(t *testing.T) {
 }
 
 func TestFakeStderrTailCapturedOnCrash(t *testing.T) {
+	t.Parallel()
 	var logsMu sync.Mutex
 	var logs []map[string]any
 	manager, _ := newFakeManager(t, "crash-stderr", Options{
@@ -1597,6 +1936,7 @@ func TestFakeStderrTailCapturedOnCrash(t *testing.T) {
 }
 
 func TestFakePromptSerializationQueuesPerBridge(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "serialize", Options{})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1628,6 +1968,7 @@ func TestFakePromptSerializationQueuesPerBridge(t *testing.T) {
 }
 
 func TestLifecyclePinnedNeverReapedTinyTTL(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "slow-prompt", Options{
 		HibernateTTL:           20 * time.Millisecond,
 		LifecycleCheckInterval: 10 * time.Millisecond,
@@ -1646,6 +1987,7 @@ func TestLifecyclePinnedNeverReapedTinyTTL(t *testing.T) {
 }
 
 func TestLifecycleIdleReapFires(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "echo-prompt", Options{
 		HibernateTTL:           25 * time.Millisecond,
 		LifecycleCheckInterval: 10 * time.Millisecond,
@@ -1664,6 +2006,7 @@ func TestLifecycleIdleReapFires(t *testing.T) {
 // place leaves Workass's retained session id pointing at nothing and bricks
 // every later prompt with "session not found".
 func TestHibernatedControlWriteDoesNotReviveBridgeWithoutSessionRestore(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "strict-sessions", Options{
 		Provider:               ProviderConfig{ID: "codex"},
 		HibernateTTL:           25 * time.Millisecond,
@@ -1707,6 +2050,7 @@ func TestHibernatedControlWriteDoesNotReviveBridgeWithoutSessionRestore(t *testi
 }
 
 func TestWorkspaceMoveCreatesFreshEpochWithoutTranscriptReplay(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	oldCWD := t.TempDir()
@@ -1779,6 +2123,7 @@ func TestWorkspaceMoveCreatesFreshEpochWithoutTranscriptReplay(t *testing.T) {
 }
 
 func TestWorkspaceMoveRejectsActiveTurnBeforeCommit(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "slow-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	tabID, chatID := "workspace-active-tab", "workspace-active-chat"
@@ -1809,6 +2154,7 @@ func TestWorkspaceMoveRejectsActiveTurnBeforeCommit(t *testing.T) {
 }
 
 func TestWorkspaceMoveWriteFailureKeepsLiveAndNativeBinding(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	tabID, chatID := "workspace-write-fail-tab", "workspace-write-fail-chat"
@@ -1835,6 +2181,7 @@ func TestWorkspaceMoveWriteFailureKeepsLiveAndNativeBinding(t *testing.T) {
 }
 
 func TestLifecycleWithoutExactResumeFailsClosedAfterHibernation(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "slow-prompt", Options{
 		HibernateTTL:           80 * time.Millisecond,
 		LifecycleCheckInterval: 10 * time.Millisecond,
@@ -1866,6 +2213,7 @@ func TestLifecycleWithoutExactResumeFailsClosedAfterHibernation(t *testing.T) {
 }
 
 func TestFailedSpareWarmTripsCircuitBreakerInsteadOfRespawning(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	exits := 0
 	blocks := 0
@@ -1922,6 +2270,7 @@ func TestFailedSpareWarmTripsCircuitBreakerInsteadOfRespawning(t *testing.T) {
 }
 
 func TestLifecycleRSSSampledForLiveChild(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if _, err := sampleProcessRSS(ctx, os.Getpid()); err != nil {
@@ -1940,6 +2289,7 @@ func TestLifecycleRSSSampledForLiveChild(t *testing.T) {
 }
 
 func TestLifecycleRecycleAtNextIdle(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "slow-prompt", Options{
 		HibernateTTL:           time.Hour,
 		LifecycleCheckInterval: time.Hour,
@@ -1961,6 +2311,7 @@ func TestLifecycleRecycleAtNextIdle(t *testing.T) {
 }
 
 func TestLifecycleRaceReapAbortedByArrivingPrompt(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "slow-prompt", Options{
 		HibernateTTL:           20 * time.Millisecond,
 		LifecycleCheckInterval: time.Hour,
@@ -2546,7 +2897,7 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 		case "init-hang":
 			select {}
 		case "split-probe-delay":
-			time.Sleep(800 * time.Millisecond)
+			time.Sleep(fakeACPDelay("WORKASS_FAKE_ACP_INIT_DELAY", 800*time.Millisecond))
 		case "crash-stderr":
 			_, _ = fmt.Fprint(os.Stderr, "abcdefghijklmnopqrstuvwxyz0123456789")
 			os.Exit(7)
@@ -2613,7 +2964,7 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 		})
 	case "session/new":
 		if s.mode == "split-probe-delay" {
-			time.Sleep(1300 * time.Millisecond)
+			time.Sleep(fakeACPDelay("WORKASS_FAKE_ACP_SESSION_DELAY", 1300*time.Millisecond))
 		}
 		if s.mode == "auth-on-session" || s.mode == "auth-on-session-secret" {
 			message := "Authentication required"
@@ -2872,6 +3223,18 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 	default:
 		s.fail(id, -32601, "fake method not found: "+method)
 	}
+}
+
+func fakeACPDelay(name string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	delay, err := time.ParseDuration(raw)
+	if err != nil || delay < 0 {
+		return fallback
+	}
+	return delay
 }
 
 func (s *fakeACP) handlePrompt(id json.RawMessage, params map[string]any) {
@@ -3459,6 +3822,7 @@ func (s *fakeACP) write(v any) {
 // label each child with the spawning call's title. Drives emitToolEvent directly
 // so the mapping is asserted deterministically without a live adapter.
 func TestEmitToolEventForwardsSubagentLinkage(t *testing.T) {
+	t.Parallel()
 	var events []map[string]any
 	mgr := NewManager(Options{Broadcast: func(channel string, payload any) {
 		if channel != "job:event" {
@@ -3502,6 +3866,7 @@ func TestEmitToolEventForwardsSubagentLinkage(t *testing.T) {
 }
 
 func TestEmitToolEventPreservesVisibleRasterResults(t *testing.T) {
+	t.Parallel()
 	var events []map[string]any
 	mgr := NewManager(Options{Broadcast: func(channel string, payload any) {
 		if channel == "job:event" {
@@ -3544,6 +3909,7 @@ func TestEmitToolEventPreservesVisibleRasterResults(t *testing.T) {
 }
 
 func TestToolResultImagesAreBounded(t *testing.T) {
+	t.Parallel()
 	content := make([]any, 0, maxToolResultImages+2)
 	for index := 0; index < maxToolResultImages+2; index++ {
 		content = append(content, map[string]any{"type": "image", "mimeType": "image/png", "data": fmt.Sprintf("aW1hZ2Ut%d", index)})
@@ -3559,6 +3925,7 @@ func TestToolResultImagesAreBounded(t *testing.T) {
 }
 
 func TestRegisteredNotificationAdapterDecodesToolParentID(t *testing.T) {
+	t.Parallel()
 	strategy := providerAdapterForID("claude").notifications
 	onUpdate := strategy.ToolParentID(
 		mapFromAny(map[string]any{"claudeCode": map[string]any{"parentToolUseId": "T9"}}),
@@ -3585,6 +3952,7 @@ func TestRegisteredNotificationAdapterDecodesToolParentID(t *testing.T) {
 }
 
 func TestBrandForProvider(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"claude": "claude", "codex": "gpt",
 		"claude-agent-acp": "", "gpt-5": "", "workass.mock": "", "cognition.devin": "",
@@ -3600,6 +3968,7 @@ func TestBrandForProvider(t *testing.T) {
 // must never prevent the session from opening: startup control application is
 // best-effort and degrades to the adapter default with the store untouched.
 func TestNewSessionOpensWhenStoredStartupModelIsUnappliable(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	manager, _ := newFakeManager(t, "claude-cold-effort", Options{
 		StateDir:          stateDir,
@@ -3623,6 +3992,7 @@ func TestNewSessionOpensWhenStoredStartupModelIsUnappliable(t *testing.T) {
 }
 
 func TestWorkassModeEchoCannotReenterActorRefreshBeforeControlReply(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "codex-controls-notify-first", Options{
 		Provider: ProviderConfig{ID: "codex"},
 	})
@@ -3652,6 +4022,7 @@ func TestWorkassModeEchoCannotReenterActorRefreshBeforeControlReply(t *testing.T
 }
 
 func TestAdapterAuthoredModelUpdateStillEntersActorRefresh(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "codex-controls", Options{
 		Provider: ProviderConfig{ID: "codex"},
 	})

@@ -27,6 +27,7 @@ func waitChatCommands(t *testing.T, events *eventCollector, pred func(payload ma
 }
 
 func TestClaudeCommandCatalogRidesOpenReplyEmitsEventAndAnswersCommandsGet(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "claude-commands", Options{
 		RSSSampleInterval: time.Hour,
 		Provider:          ProviderConfig{ID: "claude"},
@@ -105,6 +106,7 @@ func TestClaudeCommandCatalogRidesOpenReplyEmitsEventAndAnswersCommandsGet(t *te
 }
 
 func TestClaudeCommandCatalogSurvivesHibernationAsCachedSnapshot(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "claude-commands", Options{
 		HibernateTTL:      20 * time.Millisecond,
 		RSSSampleInterval: time.Hour,
@@ -144,6 +146,7 @@ func TestClaudeCommandCatalogSurvivesHibernationAsCachedSnapshot(t *testing.T) {
 }
 
 func TestChatCommandsGetIsUnsupportedForUnknownChatsAndUnadvertisedHosts(t *testing.T) {
+	t.Parallel()
 	// The fake in echo-prompt mode is a claude-id provider whose host never
 	// advertises workassClaudeCommandCatalog — the "old host" skew: everything
 	// stays UNKNOWN, nothing crashes.
@@ -174,6 +177,7 @@ func TestChatCommandsGetIsUnsupportedForUnknownChatsAndUnadvertisedHosts(t *test
 }
 
 func TestClaudeCommandCatalogIsGatedToTheClaudeProvider(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "claude-commands", Options{
 		RSSSampleInterval: time.Hour,
 		Provider:          ProviderConfig{ID: "codex"},
@@ -206,6 +210,7 @@ func TestClaudeCommandCatalogIsGatedToTheClaudeProvider(t *testing.T) {
 }
 
 func TestClaudeCommandCatalogReclampsASkewedHostPayload(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "claude-commands-overflow", Options{
 		RSSSampleInterval: time.Hour,
 		Provider:          ProviderConfig{ID: "claude"},
@@ -243,6 +248,7 @@ func TestClaudeCommandCatalogReclampsASkewedHostPayload(t *testing.T) {
 // TRAIL a /command prompt as its own block — a prefix would stop the CLI from
 // seeing the command. Plain prompts keep the notice as a prefix.
 func TestPromptBlocksKeepsTheLeadingSlashAheadOfTheImageNotice(t *testing.T) {
+	t.Parallel()
 	b := &Bridge{imageSupport: true}
 	image := []any{map[string]any{"mimeType": "image/png", "data": "iVBORw0KGgo="}}
 

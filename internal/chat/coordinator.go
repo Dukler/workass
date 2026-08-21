@@ -38,6 +38,7 @@ type LifecycleReceipt struct {
 const (
 	LifecycleHostRecoveryResumed = "host_recovery_resumed"
 	LifecycleTurnReconciled      = "turn_reconciled"
+	LifecycleTurnAdmissionFailed = "turn_admission_failed"
 	LifecycleCheckpointRestored  = "checkpoint_restored"
 )
 
@@ -55,12 +56,41 @@ type Coordinator struct {
 	cancel                    context.CancelFunc
 	eventsWG                  sync.WaitGroup
 	drainMu                   sync.Mutex
+	claimMu                   sync.Mutex
+	replyAdmissionHolds       int
 	effectWake                chan struct{}
 	effectWG                  sync.WaitGroup
 	chatCleanup               func(context.Context, string, string, provider.OperationID) error
 	backgroundExecutor        func(context.Context, BackgroundAction) (json.RawMessage, error)
 	checkpointRestoreExecutor func(context.Context, string, int, json.RawMessage, string, provider.OperationID) (json.RawMessage, error)
 	lifecycleObserver         func(LifecycleReceipt)
+}
+
+// BeginReplyAdmission fences the generic durable-effect claim boundary while
+// a caller commits input whose receipt has not crossed its reply boundary yet.
+// It is transient by design: a process restart drops the fence and recovery
+// drains the already-durable input. The returned release is idempotent.
+func (c *Coordinator) BeginReplyAdmission() func() {
+	if c == nil {
+		return func() {}
+	}
+	c.claimMu.Lock()
+	c.replyAdmissionHolds++
+	c.claimMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.claimMu.Lock()
+			if c.replyAdmissionHolds > 0 {
+				c.replyAdmissionHolds--
+			}
+			ready := c.replyAdmissionHolds == 0
+			c.claimMu.Unlock()
+			if ready {
+				c.Wake()
+			}
+		})
+	}
 }
 
 func NewCoordinator(engine *Engine, registry DefinitionResolver) (*Coordinator, error) {
@@ -152,7 +182,13 @@ func (c *Coordinator) publishLifecycle(receipt LifecycleReceipt) {
 // ExecuteNext claims and executes at most one durable effect. true means an
 // effect was claimed, even if its provider receipt failed closed.
 func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
+	c.claimMu.Lock()
+	if c.replyAdmissionHolds > 0 {
+		c.claimMu.Unlock()
+		return false, nil
+	}
 	effect, ok, err := c.engine.ClaimNext()
+	c.claimMu.Unlock()
 	if err != nil || !ok {
 		return ok, err
 	}
@@ -281,15 +317,28 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 			},
 		})
 		if err != nil {
+			if turnCancelledBeforeAdmission(c.engine.Snapshot(), effect.Input.OperationID) {
+				return true, nil
+			}
 			if provider.ErrorIs(err, provider.ErrorAcceptanceAmbiguous) {
 				return true, c.engine.Apply(TurnAdmitted{OperationID: effect.Input.OperationID, Ambiguous: true})
 			}
-			return true, c.engine.Apply(TurnAdmissionFailed{OperationID: effect.Input.OperationID, Kind: providerErrorKind(err)})
+			applyErr := c.engine.Apply(TurnAdmissionFailed{OperationID: effect.Input.OperationID, Kind: providerErrorKind(err)})
+			if applyErr == nil {
+				c.publishLifecycle(LifecycleReceipt{
+					Kind: LifecycleTurnAdmissionFailed, ChatID: c.engine.Snapshot().ChatID,
+					LaneID: effect.LaneID, OperationID: effect.Input.OperationID, Terminal: true, Status: "failed",
+				})
+			}
+			return true, applyErr
 		}
 		if err := c.engine.Apply(TurnAdmitted{
 			OperationID: effect.Input.OperationID, Turn: admission.Turn, Accepted: admission.Accepted,
 			Ambiguous: !admission.Accepted,
 		}); err != nil {
+			if turnCancelledBeforeAdmission(c.engine.Snapshot(), effect.Input.OperationID) {
+				return true, nil
+			}
 			return true, err
 		}
 		if admission.Consumed {
@@ -430,6 +479,16 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 	}
 }
 
+func turnCancelledBeforeAdmission(state State, operationID provider.OperationID) bool {
+	operationID = provider.NormalizeOperationID(string(operationID))
+	for _, event := range state.Ledger {
+		if event.OperationID == operationID && event.TerminalState == "cancelled_before_admission" {
+			return true
+		}
+	}
+	return false
+}
+
 // ExecuteSteer claims one exact live direction without waiting behind unrelated
 // actor work in the ordinary outbox drain. The steer remains durable before the
 // provider call, and its acknowledgement still settles the same immutable
@@ -453,7 +512,7 @@ func (c *Coordinator) ExecuteSteer(ctx context.Context, operationID provider.Ope
 func (c *Coordinator) executeSteer(ctx context.Context, effect SteerTurnEffect) error {
 	lane, err := c.lane(effect.LaneID)
 	if err != nil {
-		return err
+		return c.engine.Apply(SteerFailed{OperationID: effect.OperationID, Kind: providerErrorKind(err)})
 	}
 	receipt, err := lane.Delivery().Steer(ctx, provider.SteerInput{
 		OperationID: effect.OperationID, Turn: effect.Turn, Text: effect.Text,
@@ -466,9 +525,12 @@ func (c *Coordinator) executeSteer(ctx context.Context, effect SteerTurnEffect) 
 			Ambiguous:   provider.ErrorIs(err, provider.ErrorAcceptanceAmbiguous) || receipt.Ambiguous,
 		})
 	}
+	if !receipt.Accepted {
+		return c.engine.Apply(SteerFailed{OperationID: effect.OperationID, Kind: provider.ErrorAdmissionRejected})
+	}
 	return c.engine.Apply(SteerAdmitted{
 		OperationID: effect.OperationID, Accepted: receipt.Accepted, Consumed: receipt.Consumed,
-		AwaitConsumption: receipt.AwaitConsumption, Interrupted: receipt.Interrupted,
+		AwaitConsumption: receipt.AwaitConsumption,
 	})
 }
 
@@ -783,12 +845,30 @@ func acknowledgeProviderEvent(lane provider.Lane, sequence uint64, err error) {
 }
 
 func (c *Coordinator) applyLaneFailure(laneID provider.LaneID, err error) error {
+	before := c.engine.Snapshot()
+	operationID := provider.OperationID("")
+	if before.Foreground != nil && before.Foreground.LaneID == laneID && before.Foreground.Status == ForegroundDispatching {
+		operationID = before.Foreground.OperationID
+	} else {
+		for _, queued := range before.Queue {
+			if queued.LaneID == laneID && strings.TrimSpace(queued.Presentation.QueueID) == "" {
+				operationID = queued.OperationID
+				break
+			}
+		}
+	}
 	kind := providerErrorKind(err)
 	applyErr := c.engine.Apply(LaneOpenFailed{
 		LaneID: laneID, Kind: kind, Ambiguous: provider.ErrorIs(err, provider.ErrorAcceptanceAmbiguous),
 	})
 	if applyErr != nil {
 		return errors.Join(err, applyErr)
+	}
+	if operationID != "" && !provider.ErrorIs(err, provider.ErrorAcceptanceAmbiguous) {
+		c.publishLifecycle(LifecycleReceipt{
+			Kind: LifecycleTurnAdmissionFailed, ChatID: before.ChatID,
+			LaneID: laneID, OperationID: operationID, Terminal: true, Status: "failed",
+		})
 	}
 	return err
 }

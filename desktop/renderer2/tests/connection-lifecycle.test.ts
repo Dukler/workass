@@ -54,16 +54,6 @@ test('stream-only actor revisions do not request a full session hydration', () =
   assert.equal(digestChatSessionDiverged(chat, digest({ runningJobId: null })), true);
 });
 
-test('the compact digest compares queue revisions only while dispatch is paused', () => {
-  const chat = runningChat();
-  chat.queuePaused = false;
-  chat.queuePauseRevision = 7;
-  assert.equal(digestChatSessionDiverged(chat, digest()), false);
-  chat.queuePaused = true;
-  assert.equal(digestChatSessionDiverged(chat, digest({ queuePaused: true, queuePauseRevision: 6 })), true);
-  assert.equal(digestChatSessionDiverged(chat, digest({ queuePaused: true, queuePauseRevision: 7 })), false);
-});
-
 test('daemon liveness answers without waiting for a busy chat-state digest', async () => {
   const previousWindow = (globalThis as any).window;
   let releaseDigest: ((value: unknown) => void) | undefined;

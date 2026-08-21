@@ -798,8 +798,8 @@ func TestSteerCancelAndPermissionKeepOriginLaneAcrossProviderSelection(t *testin
 	state, _ = apply(t, state, SteerFailed{
 		OperationID: "steer", Kind: provider.ErrorUnsupportedCapability, Unsupported: true,
 	})
-	if len(state.Queue) != 1 || state.Queue[0].LaneID != alpha.ID || state.Queue[0].OperationID != "steer" {
-		t.Fatalf("unsupported steer fallback lost origin lane: %#v", state.Queue)
+	if len(state.Queue) != 0 || state.PendingSteer != nil || !outboxHas(&state, steerEffectID("steer"), OutboxFailed) {
+		t.Fatalf("rejected explicit steer entered FIFO or lost its typed receipt: queue=%#v outbox=%#v", state.Queue, state.Outbox)
 	}
 
 	permission := provider.Event{
@@ -832,13 +832,89 @@ func TestSteerCancelAndPermissionKeepOriginLaneAcrossProviderSelection(t *testin
 	if state.PendingCancel != nil || !outboxHas(&state, cancelEffectID("cancel"), OutboxCompleted) {
 		t.Fatalf("terminal cancel receipt did not settle idempotently: %#v", state)
 	}
-	if state.Foreground != nil || !state.QueueControl.Paused || len(state.Queue) != 1 || state.Queue[0].OperationID != "steer" || state.Queue[0].LaneID != alpha.ID {
-		t.Fatalf("explicit stop did not retain the queued steer behind the durable pause: foreground=%#v queue=%#v control=%#v", state.Foreground, state.Queue, state.QueueControl)
+	if state.Foreground != nil || len(state.Queue) != 0 {
+		t.Fatalf("stop resurrected a rejected steer: foreground=%#v queue=%#v", state.Foreground, state.Queue)
 	}
-	state, _ = apply(t, state, ResumeQueue{OperationID: "resume", ExpectedRevision: state.QueueControl.Revision})
-	if state.Foreground == nil || state.Foreground.OperationID != "steer" || state.Foreground.LaneID != alpha.ID {
-		t.Fatalf("resumed steer did not retain priority/origin: %#v", state.Foreground)
+}
+
+func TestSteerFailureTransfersOnlyHeadlessQueueOwner(t *testing.T) {
+	newRunning := func(t *testing.T) State {
+		t.Helper()
+		state, _ := NewState("chat")
+		lane := testLane("chat", "codex")
+		state, _ = apply(t, state, SelectLane{Identity: lane})
+		state, _ = apply(t, state, LaneOpened{
+			LaneID:               lane.ID,
+			Thread:               provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
+			ConnectionGeneration: 1,
+			Context:              exactContext(provider.ContextImportNonSampling),
+		})
+		state, _ = apply(t, state, Submit{OperationID: "turn", Text: "work", Presentation: provider.TurnPresentation{Origin: "human"}})
+		state, _ = apply(t, state, TurnAdmitted{
+			OperationID: "turn", Accepted: true,
+			Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"},
+		})
+		return state
 	}
+
+	t.Run("human rejection never enters FIFO", func(t *testing.T) {
+		state := newRunning(t)
+		state, _ = apply(t, state, Steer{
+			OperationID: "human-steer", Text: "redirect",
+			Presentation: provider.TurnPresentation{Origin: "human", UserMessageID: "human-user"},
+		})
+		state, _ = apply(t, state, SteerFailed{OperationID: "human-steer", Kind: provider.ErrorUnsupportedCapability})
+		if state.PendingSteer != nil || len(state.Queue) != 0 || !outboxHas(&state, steerEffectID("human-steer"), OutboxFailed) {
+			t.Fatalf("human rejection gained a FIFO owner: pending=%#v queue=%#v outbox=%#v", state.PendingSteer, state.Queue, state.Outbox)
+		}
+	})
+
+	t.Run("agent rejection transfers the exact immutable owner once", func(t *testing.T) {
+		state := newRunning(t)
+		operationID := provider.OperationID("q:agent-send:fixture")
+		presentation := provider.TurnPresentation{
+			Origin: "agent", QueueID: string(operationID), PromptText: "redirect",
+			UserMessageID: "agent-user", AssistantMessageID: "agent-assistant", StartedAt: "2026-08-20T12:00:00Z",
+		}
+		state, _ = apply(t, state, Steer{OperationID: operationID, Text: "redirect", Presentation: presentation})
+		state, _ = apply(t, state, SteerFailed{OperationID: operationID, Kind: provider.ErrorUnsupportedCapability})
+		if state.PendingSteer != nil || len(state.Queue) != 1 {
+			t.Fatalf("agent rejection lost its FIFO owner: pending=%#v queue=%#v", state.PendingSteer, state.Queue)
+		}
+		queued := state.Queue[0]
+		if queued.OperationID != operationID || queued.Text != "redirect" || queued.Presentation != presentation {
+			t.Fatalf("agent steer owner changed during transfer: %#v", queued)
+		}
+		if state.Presentation.AgentQueueRevision != 1 || !outboxHas(&state, steerEffectID(operationID), OutboxCompleted) {
+			t.Fatalf("agent transfer has no terminal steer receipt: revision=%d outbox=%#v", state.Presentation.AgentQueueRevision, state.Outbox)
+		}
+		state, _ = apply(t, state, SteerFailed{OperationID: operationID, Kind: provider.ErrorUnsupportedCapability})
+		if len(state.Queue) != 1 || state.Presentation.AgentQueueRevision != 1 {
+			t.Fatalf("lost-reply retry duplicated the agent owner: revision=%d queue=%#v", state.Presentation.AgentQueueRevision, state.Queue)
+		}
+	})
+
+	t.Run("success and ambiguity never transfer", func(t *testing.T) {
+		accepted := newRunning(t)
+		accepted, _ = apply(t, accepted, Steer{
+			OperationID: "agent-accepted", Text: "redirect",
+			Presentation: provider.TurnPresentation{Origin: "agent", QueueID: "agent-accepted"},
+		})
+		accepted, _ = apply(t, accepted, SteerAdmitted{OperationID: "agent-accepted", Accepted: true, Consumed: true})
+		if len(accepted.Queue) != 0 {
+			t.Fatalf("accepted steer entered FIFO: %#v", accepted.Queue)
+		}
+
+		uncertain := newRunning(t)
+		uncertain, _ = apply(t, uncertain, Steer{
+			OperationID: "agent-uncertain", Text: "redirect",
+			Presentation: provider.TurnPresentation{Origin: "agent", QueueID: "agent-uncertain"},
+		})
+		uncertain, _ = apply(t, uncertain, SteerFailed{OperationID: "agent-uncertain", Ambiguous: true})
+		if uncertain.PendingSteer == nil || uncertain.PendingSteer.Status != SteerUncertain || len(uncertain.Queue) != 0 {
+			t.Fatalf("ambiguous steer was replayed: pending=%#v queue=%#v", uncertain.PendingSteer, uncertain.Queue)
+		}
+	})
 }
 
 func TestLateSteerReceiptAfterUrgentCancelNeverReplaysInput(t *testing.T) {
@@ -862,8 +938,8 @@ func TestLateSteerReceiptAfterUrgentCancelNeverReplaysInput(t *testing.T) {
 	state, _ = apply(t, state, TurnTerminated{OperationID: "turn", Status: "cancelled"})
 	state, _ = apply(t, state, SteerAdmitted{OperationID: "steer", Accepted: true, AwaitConsumption: true})
 
-	if state.Foreground != nil || !state.QueueControl.Paused || len(state.Queue) != 0 {
-		t.Fatalf("urgent stop replayed work: foreground=%#v queue=%#v control=%#v", state.Foreground, state.Queue, state.QueueControl)
+	if state.Foreground != nil || len(state.Queue) != 0 {
+		t.Fatalf("urgent stop replayed work: foreground=%#v queue=%#v", state.Foreground, state.Queue)
 	}
 	var rows int
 	for _, event := range state.Ledger {
@@ -879,19 +955,109 @@ func TestLateSteerReceiptAfterUrgentCancelNeverReplaysInput(t *testing.T) {
 	}
 }
 
-func TestQueueResumeCannotReleaseANewerStopRevision(t *testing.T) {
+func TestCancelAutomaticallyDrivesNextExplicitQueuedTurnExactlyOnce(t *testing.T) {
 	state, _ := NewState("chat")
-	state.QueueControl.Paused = true
-	state.QueueControl.Revision = 2
-	if _, _, err := Reduce(state, ResumeQueue{OperationID: "stale-resume", ExpectedRevision: 1}); err == nil {
-		t.Fatal("stale queue resume released a newer stop boundary")
+	lane := testLane("chat", "alpha")
+	state, _ = apply(t, state, SelectLane{Identity: lane})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "alpha", RootID: "thread", HeadID: "thread", Lineage: 1},
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
+	})
+	state, _ = apply(t, state, Submit{OperationID: "active", Text: "active", Presentation: provider.TurnPresentation{Origin: "human"}})
+	state, _ = apply(t, state, TurnAdmitted{
+		OperationID: "active", Accepted: true, Turn: provider.TurnRef{OperationID: "active", NativeID: "native-active"},
+	})
+	state, _ = apply(t, state, Submit{OperationID: "next-one", Text: "one", Presentation: provider.TurnPresentation{Origin: "human"}})
+	state, _ = apply(t, state, Submit{OperationID: "next-two", Text: "two", Presentation: provider.TurnPresentation{Origin: "human"}})
+	state, _ = apply(t, state, CancelTurn{OperationID: "cancel-active"})
+	state, effects := apply(t, state, TurnTerminated{OperationID: "active", Status: "cancelled"})
+	if state.Foreground == nil || state.Foreground.OperationID != "next-one" || len(state.Queue) != 1 || state.Queue[0].OperationID != "next-two" {
+		t.Fatalf("terminal cancel did not preserve and advance FIFO once: foreground=%#v queue=%#v", state.Foreground, state.Queue)
 	}
-	if !state.QueueControl.Paused || state.QueueControl.Revision != 2 {
-		t.Fatalf("failed stale resume mutated source state: %#v", state.QueueControl)
+	if len(effects) != 1 {
+		t.Fatalf("terminal cancel emitted %d effects, want exactly one next start: %#v", len(effects), effects)
 	}
-	state, _ = apply(t, state, ResumeQueue{OperationID: "resume", ExpectedRevision: 2})
-	if state.QueueControl.Paused || state.QueueControl.ResumeReceipts["resume"].PauseRevision != 2 {
-		t.Fatalf("exact queue resume was not committed: %#v", state.QueueControl)
+	state, effects = apply(t, state, CancelAcknowledged{OperationID: "cancel-active"})
+	if len(effects) != 0 || state.Foreground == nil || state.Foreground.OperationID != "next-one" || len(state.Queue) != 1 {
+		t.Fatalf("late cancel acknowledgement duplicated FIFO advance: foreground=%#v queue=%#v effects=%#v", state.Foreground, state.Queue, effects)
+	}
+}
+
+func TestCancelPendingTurnPreservesFIFOAndAdvancesOnlyAtItsExactBoundary(t *testing.T) {
+	newReady := func(t *testing.T) State {
+		t.Helper()
+		state, _ := NewState("chat")
+		lane := testLane("chat", "alpha")
+		state, _ = apply(t, state, SelectLane{Identity: lane})
+		state, _ = apply(t, state, LaneOpened{
+			LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "alpha", RootID: "thread", HeadID: "thread", Lineage: 1},
+			ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
+		})
+		return state
+	}
+	presentation := func(id string) provider.TurnPresentation {
+		return provider.TurnPresentation{
+			Origin: "human", UserMessageID: "user-" + id, AssistantMessageID: "assistant-" + id,
+			PromptText: id, StartedAt: "2026-08-20T12:00:00Z",
+		}
+	}
+
+	t.Run("queued row is removed without disturbing the dispatching head", func(t *testing.T) {
+		state := newReady(t)
+		state, _ = apply(t, state, Submit{OperationID: "head", Text: "head", Presentation: presentation("head")})
+		state, _ = apply(t, state, Submit{OperationID: "cancel-me", Text: "cancel-me", Presentation: presentation("cancel-me")})
+		state, _ = apply(t, state, Submit{OperationID: "survivor", Text: "survivor", Presentation: presentation("survivor")})
+		state, effects := apply(t, state, CancelPendingTurn{OperationID: "cancel-me"})
+		if len(effects) != 0 || state.Foreground == nil || state.Foreground.OperationID != "head" ||
+			len(state.Queue) != 1 || state.Queue[0].OperationID != "survivor" {
+			t.Fatalf("queued pre-admission cancel disturbed FIFO: foreground=%#v queue=%#v effects=%#v", state.Foreground, state.Queue, effects)
+		}
+		assertPreAdmissionCancellationRows(t, state, "cancel-me")
+		retry, effects := apply(t, state, CancelPendingTurn{OperationID: "cancel-me"})
+		if len(effects) != 0 || retry.Foreground == nil || retry.Foreground.OperationID != "head" || len(retry.Queue) != 1 {
+			t.Fatalf("queued cancel retry mutated its terminal receipt: foreground=%#v queue=%#v effects=%#v", retry.Foreground, retry.Queue, effects)
+		}
+		assertPreAdmissionCancellationRows(t, retry, "cancel-me")
+	})
+
+	t.Run("dispatched head settles once and starts exactly one survivor", func(t *testing.T) {
+		state := newReady(t)
+		state, _ = apply(t, state, Submit{OperationID: "cancel-head", Text: "cancel-head", Presentation: presentation("cancel-head")})
+		state, _ = apply(t, state, ClaimEffect{EffectID: startTurnEffectID("cancel-head")})
+		state, _ = apply(t, state, Submit{OperationID: "next-one", Text: "next-one", Presentation: presentation("next-one")})
+		state, _ = apply(t, state, Submit{OperationID: "next-two", Text: "next-two", Presentation: presentation("next-two")})
+		state, effects := apply(t, state, CancelPendingTurn{OperationID: "cancel-head"})
+		if state.Foreground == nil || state.Foreground.OperationID != "next-one" || len(state.Queue) != 1 || state.Queue[0].OperationID != "next-two" {
+			t.Fatalf("dispatched pre-admission cancel did not preserve FIFO: foreground=%#v queue=%#v", state.Foreground, state.Queue)
+		}
+		if len(effects) != 1 {
+			t.Fatalf("dispatched pre-admission cancel started %d survivors, want one: %#v", len(effects), effects)
+		}
+		start, ok := effects[0].(StartTurnEffect)
+		if !ok || start.Input.OperationID != "next-one" {
+			t.Fatalf("wrong survivor start after pre-admission cancel: %#v", effects)
+		}
+		assertPreAdmissionCancellationRows(t, state, "cancel-head")
+		retry, effects := apply(t, state, CancelPendingTurn{OperationID: "cancel-head"})
+		if len(effects) != 0 || retry.Foreground == nil || retry.Foreground.OperationID != "next-one" || len(retry.Queue) != 1 {
+			t.Fatalf("dispatched cancel retry duplicated FIFO advancement: foreground=%#v effects=%#v", retry.Foreground, effects)
+		}
+		assertPreAdmissionCancellationRows(t, retry, "cancel-head")
+	})
+}
+
+func assertPreAdmissionCancellationRows(t *testing.T, state State, operationID provider.OperationID) {
+	t.Helper()
+	rows := make([]LedgerEvent, 0, 2)
+	for _, event := range state.Ledger {
+		if event.OperationID == operationID {
+			rows = append(rows, event)
+		}
+	}
+	if len(rows) != 2 || rows[0].Role != "user" || rows[1].Role != "assistant" ||
+		rows[0].TerminalState != "cancelled_before_admission" || rows[1].TerminalState != "cancelled_before_admission" ||
+		rows[1].Status != "cancelled" || !rows[1].Interrupted || rows[1].Terminal == nil || rows[1].Terminal.StopReason != "cancelled" {
+		t.Fatalf("pre-admission cancellation rows = %#v", rows)
 	}
 }
 

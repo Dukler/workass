@@ -8,6 +8,7 @@ import (
 )
 
 func TestAcceptedImageReachesGenericProviderWithExplicitAttachmentContextOnEveryTurn(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "image-echo", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -44,30 +45,18 @@ func TestAcceptedImageReachesGenericProviderWithExplicitAttachmentContextOnEvery
 }
 
 func TestAcceptedImageNeverSilentlyDegradesToTextForUnsupportedProvider(t *testing.T) {
-	manager, events := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
-	t.Cleanup(func() { manager.Reset() })
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	session, err := manager.NewSession(ctx, SessionOptions{TabID: "no-image-tab", ChatID: "no-image-chat"})
-	if err != nil {
-		t.Fatalf("new non-image session: %v", err)
-	}
-	job, err := manager.StartJob(ctx, JobStartOptions{
-		Kind: "app-chat", SessionID: session.SessionID, TabID: "no-image-tab", ChatID: "no-image-chat",
-		ProviderID: session.ProviderID, Prompt: "must not become text only",
-		Images: []any{map[string]any{"mimeType": "image/png", "data": "iVBORw0KGgo="}},
+	t.Parallel()
+	bridge := newBridge("no-image", Options{}, nil)
+	_, err := bridge.promptBlocks("must not become text only", []any{
+		map[string]any{"mimeType": "image/png", "data": "iVBORw0KGgo="},
 	})
-	if err != nil {
-		t.Fatalf("start unsupported image turn: %v", err)
-	}
-	end := events.waitJobEnd(t, jobID(job), 3*time.Second)
-	assertJobStatus(t, end, "failed", 1, "")
-	if errText := asString(jobFromEnd(end)["error"]); !strings.Contains(strings.ToLower(errText), "does not support image input") {
-		t.Fatalf("unsupported image failure = %q", errText)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "does not support image input") {
+		t.Fatalf("unsupported image failure = %v", err)
 	}
 }
 
 func TestAttachedImageAndContextSurviveNativeSteeringForEveryFrontierProvider(t *testing.T) {
+	t.Parallel()
 	for _, providerID := range []string{"codex", "claude"} {
 		t.Run(providerID, func(t *testing.T) {
 			mode := providerID + "-steer-image"

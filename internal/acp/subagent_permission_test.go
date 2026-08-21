@@ -10,6 +10,7 @@ import (
 // user's machine, so it is pinned separately from the authority rule. A bare
 // "no" inside an allow label must never read as a rejection.
 func TestPermissionOptionForDecisionReadsAllowAndReject(t *testing.T) {
+	t.Parallel()
 	options := []any{
 		map[string]any{"optionId": "allow-1", "name": "Allow, no confirmation", "kind": "allow_once"},
 		map[string]any{"optionId": "reject-1", "name": "Reject", "kind": "reject_once"},
@@ -29,6 +30,7 @@ func TestPermissionOptionForDecisionReadsAllowAndReject(t *testing.T) {
 // may not grant one on a child's behalf. This is the boundary the whole feature
 // rests on: without it, a chat could widen its own reach by spawning.
 func TestParentMayGrantOnlyFromItsOwnFullAccessMode(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -44,6 +46,7 @@ func TestParentMayGrantOnlyFromItsOwnFullAccessMode(t *testing.T) {
 // The deadlock this exists to end: a child parks on a card, and the parent
 // answers it without a human. Deny is the half every parent may always use.
 func TestParentDenyReleasesAParkedSubagentPermission(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -88,6 +91,7 @@ func TestParentDenyReleasesAParkedSubagentPermission(t *testing.T) {
 // else's card: the lookup is keyed by the child's session precisely so one
 // subagent cannot answer another's request.
 func TestPendingSubagentPermissionIgnoresOtherSessions(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -110,6 +114,7 @@ func TestPendingSubagentPermissionIgnoresOtherSessions(t *testing.T) {
 // since the subagent registry is in memory only — must fail with a reason the
 // parent can act on instead of a bare false.
 func TestDecideSubagentPermissionRejectsUnknownRunWithAReason(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -127,6 +132,7 @@ func TestDecideSubagentPermissionRejectsUnknownRunWithAReason(t *testing.T) {
 // A subagent's plan handshake now answers itself with "keep planning": it grants
 // nothing, and analysis in prose is what the narrowing was chosen for.
 func TestSubagentExitPlanModeAnswersItselfWithoutGranting(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -146,6 +152,7 @@ func TestSubagentExitPlanModeAnswersItselfWithoutGranting(t *testing.T) {
 // The same handshake raised by the USER's own chat still belongs to the user:
 // only a subagent's is answered for it.
 func TestUserExitPlanModeIsStillTheUsersToAnswer(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{PermissionTimeout: 80 * time.Millisecond})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -164,6 +171,7 @@ func TestUserExitPlanModeIsStillTheUsersToAnswer(t *testing.T) {
 }
 
 func TestExitPlanModeRecognitionSurvivesNamingShapes(t *testing.T) {
+	t.Parallel()
 	for _, shape := range []map[string]any{
 		{"title": "ExitPlanMode"},
 		{"kind": "exit_plan_mode"},
@@ -188,6 +196,7 @@ func TestExitPlanModeRecognitionSurvivesNamingShapes(t *testing.T) {
 // An attention the parent cannot grant must say so, or the parent's only
 // rational move is to keep waiting on someone who is not at the machine.
 func TestPermissionAttentionNamesWhoCanGrantIt(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -215,6 +224,7 @@ func TestPermissionAttentionNamesWhoCanGrantIt(t *testing.T) {
 // and every earlier test missed it by leaving m.jobs empty, so the parent
 // resolved to nil and never reached the lookup. This one keeps a real parent.
 func TestPermissionAttentionDoesNotDeadlockWithALiveParentJob(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 

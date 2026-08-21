@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"workass/internal/chat"
 	"workass/internal/httpserve"
 	"workass/internal/lease"
+	providercontract "workass/internal/provider"
 	"workass/internal/wire"
 )
 
@@ -41,6 +43,27 @@ func TestAppMetaDefaultsUnknownRuntimeProfilesToProduction(t *testing.T) {
 	t.Setenv("WORKASS_PROFILE", "unexpected")
 	if profile := appMeta(t.TempDir())["profile"]; profile != "prod" {
 		t.Fatalf("app meta profile = %q, want prod", profile)
+	}
+}
+
+func TestFrozenQueueResumeBoundaryIsInertAndActorIndependent(t *testing.T) {
+	hub := wire.NewHub()
+	registerSessionHandlersWithActor(hub, nil, nil, nil)
+	result, err := hub.Invoke("chat:queue-resume", []any{map[string]any{
+		"tabId": "old-tab", "chatId": "old-chat", "operationId": "old-resume-operation", "expectedRevision": 91,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"ok": true, "tabId": "old-tab", "chatId": "old-chat", "operationId": "old-resume-operation",
+		"queuePaused": false, "queuePauseRevision": 0, "actorRevision": 0,
+	}
+	if !reflect.DeepEqual(result, want) {
+		t.Fatalf("frozen queue-resume receipt = %#v, want %#v", result, want)
+	}
+	if _, err := hub.Invoke("chat:queue-resume", []any{map[string]any{"chatId": "old-chat"}}); err == nil {
+		t.Fatal("frozen queue-resume boundary accepted a missing operation identity")
 	}
 }
 
@@ -441,6 +464,25 @@ func TestWireE2EAppChatAssertsJobEventChannel(t *testing.T) {
 		t.Fatalf("session reply = %#v", session)
 	}
 
+	client.invoke(t, 101, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": chatID, "sessionId": sessionID, "tabId": "wire-tab",
+		"prompt": "must not persist", "operationId": "bearer:credential",
+		"userMessageId": "invalid-op-user", "assistantMessageId": "invalid-op-assistant",
+	})
+	invalidOperation := client.waitReply(t, 101, 5*time.Second)
+	if invalidOperation.Error == nil || !strings.Contains(*invalidOperation.Error, "forbidden secret-shaped") {
+		t.Fatalf("secret-shaped job:start operation was not rejected at handler boundary: %+v", invalidOperation)
+	}
+	client.invoke(t, 102, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": strings.Repeat("c", 257), "sessionId": sessionID, "tabId": "wire-tab",
+		"prompt": "must not resolve actor", "operationId": "bounded-operation",
+		"userMessageId": "invalid-chat-user", "assistantMessageId": "invalid-chat-assistant",
+	})
+	invalidChat := client.waitReply(t, 102, 5*time.Second)
+	if invalidChat.Error == nil || !strings.Contains(*invalidChat.Error, "invalid chatId") || !strings.Contains(*invalidChat.Error, "too long") {
+		t.Fatalf("unbounded job:start chat identity was not rejected at handler boundary: %+v", invalidChat)
+	}
+
 	// The frozen renderer contract sends the exact chat/session/message identity
 	// and needs the start event PublicJob to echo chatId and status=="running".
 	client.invoke(t, 2, "job:start", map[string]any{
@@ -455,7 +497,7 @@ func TestWireE2EAppChatAssertsJobEventChannel(t *testing.T) {
 	}
 	job := startReply.Result.(map[string]any)
 	jobID := job["id"].(string)
-	if job["kind"] != "app-chat" || job["status"] != "running" || job["chatId"] != chatID || job["sessionId"] != sessionID {
+	if job["kind"] != "app-chat" || job["status"] != "running" || job["chatId"] != chatID || job["sessionId"] != nil {
 		t.Fatalf("job reply = %#v", job)
 	}
 	if job["userMessageId"] != "wire-user" || job["assistantMessageId"] != "wire-assistant" ||
@@ -466,7 +508,7 @@ func TestWireE2EAppChatAssertsJobEventChannel(t *testing.T) {
 
 	startEvent := client.waitJobEvent(t, jobID, "start", 5*time.Second)
 	startEventJob, ok := startEvent["job"].(map[string]any)
-	if !ok || startEvent["type"] != "start" || startEventJob["chatId"] != chatID || startEventJob["status"] != "running" {
+	if !ok || startEvent["type"] != "start" || startEventJob["chatId"] != chatID || startEventJob["status"] != "running" || startEventJob["sessionId"] != sessionID {
 		t.Fatalf("start event shape = %#v", startEvent)
 	}
 	if startEventJob["userMessageId"] != job["userMessageId"] ||
@@ -510,41 +552,42 @@ func TestWireE2EAppChatAssertsJobEventChannel(t *testing.T) {
 
 func TestStateDigestIsBodyFreeAndUnder64KiBForTwoHundredChats(t *testing.T) {
 	stateDir := t.TempDir()
-	store := sharedSessionStore(stateDir)
-	root := repoRoot(t)
-	manager := acp.NewManager(acp.Options{
-		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
-		Provider: acp.ProviderConfig{
-			ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
-			CWD: root, Enabled: true,
-		},
-		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
-	})
-	t.Cleanup(func() { manager.Reset() })
-	providerChats := newProviderChatRuntime(manager, store, stateDir)
-	if err := providerChats.StartupError(); err != nil {
-		t.Fatalf("start actor runtime: %v", err)
+	providerChats := &providerChatRuntime{
+		manager: &acp.Manager{}, sessions: sharedSessionStore(stateDir), stateDir: stateDir,
+		actors: make(map[string]*providerChatActor, 200), known: make(map[string]struct{}, 200),
 	}
-	t.Cleanup(func() { _ = providerChats.Close(context.Background()) })
 	for i := 0; i < 200; i++ {
 		tabID := fmt.Sprintf("t%03d", i)
 		chatID := fmt.Sprintf("c%03d", i)
-		if _, err := providerChats.CreateRendererChat(map[string]any{
-			"tabId": tabID, "chatId": chatID, "operationId": "digest-create-" + chatID,
-			"focus": i == 0, "title": "Digest " + chatID, "providerId": "mock",
-		}); err != nil {
-			t.Fatalf("create actor %s: %v", chatID, err)
+		engine, err := chat.NewEngine(chatID)
+		if err != nil {
+			t.Fatalf("create digest actor %s: %v", chatID, err)
 		}
-	}
-	if _, err := providerChats.ReplaceStagedQueue("t000", "c000", "digest-queue", 0, []any{map[string]any{
-		"id": "q000", "text": "queued body token=digest-secret", "source": "host", "delivery": "queue",
-	}}); err != nil {
-		t.Fatalf("seed actor queue: %v", err)
+		if err := engine.Apply(chat.InitializeChat{
+			Presentation: chat.PresentationState{
+				TabID: tabID, Title: "Digest " + chatID, ProviderID: "mock",
+			},
+			OperationID: providercontract.OperationID("digest-create-" + chatID), Digest: "digest-create-" + chatID,
+		}); err != nil {
+			t.Fatalf("initialize digest actor %s: %v", chatID, err)
+		}
+		if i == 0 {
+			if err := engine.Apply(chat.ReplaceStagedQueue{
+				OperationID: "digest-queue", Digest: "digest-queue", ExpectedRevision: 0,
+				Entries: []chat.StagedQueueEntry{{
+					ID: "q000", Text: "queued body token=digest-secret", Source: "host", Delivery: "queue",
+				}},
+			}); err != nil {
+				t.Fatalf("seed actor queue: %v", err)
+			}
+		}
+		providerChats.actors[chatID] = &providerChatActor{engine: engine}
+		providerChats.known[chatID] = struct{}{}
 	}
 
 	hub := wire.NewHub()
 	settings := newAppSettingsStore(filepath.Join(stateDir, "app-settings.json"))
-	registerStateDigestHandler(hub, providerChats, manager, settings)
+	registerStateDigestHandler(hub, providerChats, nil, settings)
 	raw, err := hub.Invoke("state:digest", nil)
 	if err != nil {
 		t.Fatalf("state:digest invoke: %v", err)
@@ -683,9 +726,9 @@ func TestWireSessionRecoversTurnCompletedWithoutRenderer(t *testing.T) {
 }
 
 func TestWireBusyStartQueuesCapabilityAwareFollowUpWithoutFailedTranscript(t *testing.T) {
-	t.Setenv("WORKASS_MOCK_ACP_DELAY_MS", "750")
 	root := repoRoot(t)
 	stateDir := t.TempDir()
+	releaseFile := filepath.Join(t.TempDir(), "release-first-turn")
 	renderer := t.TempDir()
 	if err := os.WriteFile(filepath.Join(renderer, "index.html"), []byte("<!doctype html><head></head><body></body>"), 0o644); err != nil {
 		t.Fatalf("write index: %v", err)
@@ -698,7 +741,9 @@ func TestWireBusyStartQueuesCapabilityAwareFollowUpWithoutFailedTranscript(t *te
 		RootDir: root, StateDir: stateDir,
 		Provider: acp.ProviderConfig{
 			ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
-			CWD: root, Env: map[string]string{"WORKASS_MOCK_ACP_DELAY_MS": "750"}, Enabled: true, Label: "Workass Mock ACP",
+			CWD: root, Env: map[string]string{
+				"WORKASS_MOCK_ACP_DELAY_MS": "0", "WORKASS_MOCK_ACP_HOLD_FILE": releaseFile,
+			}, Enabled: true, Label: "Workass Mock ACP",
 		},
 		DefaultProviderID: "mock", Broadcast: daemonEventBroadcaster(store, hub.Broadcast),
 	})
@@ -739,7 +784,7 @@ func TestWireBusyStartQueuesCapabilityAwareFollowUpWithoutFailedTranscript(t *te
 
 	client.invoke(t, 2, "job:start", map[string]any{
 		"kind": "app-chat", "title": "Busy collision", "tabId": tabID, "chatId": chatID,
-		"sessionId": sessionID, "providerId": "mock", "prompt": "[mock:slow] first turn",
+		"sessionId": sessionID, "providerId": "mock", "prompt": "[mock:hold-until-steer] first turn",
 		"userMessageId": "busy-first-user", "assistantMessageId": "busy-first-assistant",
 	})
 	firstReply := client.waitReply(t, 2, 5*time.Second)
@@ -787,6 +832,9 @@ func TestWireBusyStartQueuesCapabilityAwareFollowUpWithoutFailedTranscript(t *te
 		}
 	}
 
+	if err := os.WriteFile(releaseFile, []byte("release"), 0o600); err != nil {
+		t.Fatalf("release first held turn: %v", err)
+	}
 	client.waitJobEvent(t, firstJobID, "end", 8*time.Second)
 	deadline := time.Now().Add(8 * time.Second)
 	for {
@@ -1262,7 +1310,7 @@ func TestWireTraceMockPermissionTurn(t *testing.T) {
 	}
 	job := startReply.Result.(map[string]any)
 	jobID := job["id"].(string)
-	if job["kind"] != "app-chat" || job["status"] != "running" || job["chatId"] != chatID || job["sessionId"] != sessionID {
+	if job["kind"] != "app-chat" || job["status"] != "running" || job["chatId"] != chatID || job["sessionId"] != nil {
 		t.Fatalf("job:start reply = %#v", job)
 	}
 
@@ -1336,6 +1384,88 @@ func TestWireTraceMockPermissionTurn(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+func TestWireJobStartReplyGateBlocksProviderAndProjectsFailureAfterReceipt(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := t.TempDir()
+	renderer := t.TempDir()
+	if err := os.WriteFile(filepath.Join(renderer, "index.html"), []byte("<!doctype html><body></body>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hub := wire.NewHub()
+	sessions := sharedSessionStore(stateDir)
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir,
+		Provider: acp.ProviderConfig{
+			ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
+			CWD: root, Enabled: true, Label: "Workass Mock ACP",
+		},
+		DefaultProviderID: "mock", Broadcast: hub.Broadcast,
+		StdoutFlushInterval: 5 * time.Millisecond, ThoughtFlushInterval: 5 * time.Millisecond,
+		RSSSampleInterval: time.Hour,
+	})
+	providerChats := newProviderChatRuntime(manager, sessions, stateDir, hub.Broadcast)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
+
+	client := dialTestWSHandler(t, httpserve.New(renderer, hub, nil), "/")
+	defer client.conn.Close()
+	const tabID, chatID = "reply-gate-tab", "reply-gate-chat"
+	createWireActorChat(t, client, 100, tabID, chatID, "mock")
+	client.invoke(t, 1, "job:start", map[string]any{
+		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "providerId": "mock",
+		"prompt": "[mock:error] fail after the durable reply", "operationId": "reply-gate-turn",
+		"userMessageId": "reply-gate-user", "assistantMessageId": "reply-gate-assistant",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		state, ok := providerChats.Snapshot(chatID)
+		if ok {
+			if _, durable := state.Operations["reply-gate-turn"]; durable {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job:start input did not become durable before reply: state=%#v", state)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	actor, err := providerChats.actor(chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor.coordinator.Wake()
+	if executed, err := actor.coordinator.ExecuteNext(context.Background()); err != nil || executed {
+		t.Fatalf("provider effect crossed blocked reply: executed=%v err=%v", executed, err)
+	}
+	if processes := manager.Processes(); len(processes) != 0 {
+		t.Fatalf("provider process started before job:start reply: %#v", processes)
+	}
+
+	first := client.readMessage(t, 5*time.Second)
+	if first.T != "reply" || first.ID.String() != "1" || first.Error != nil {
+		t.Fatalf("first frame after releasing blocked writer = %#v", first)
+	}
+	job := mapFromAnyMain(first.Result)
+	jobID := fieldString(job, "id")
+	if jobID == "" || fieldString(job, "status") != "running" || job["sessionId"] != nil {
+		t.Fatalf("durable job receipt = %#v", job)
+	}
+	start := client.waitJobEvent(t, jobID, "start", 5*time.Second)
+	if fieldString(mapFromAnyMain(start["job"]), "sessionId") == "" {
+		t.Fatalf("provider start omitted native attachment: %#v", start)
+	}
+	end := client.waitJobEvent(t, jobID, "end", 5*time.Second)
+	ended := mapFromAnyMain(end["job"])
+	if fieldString(ended, "status") != "failed" || strings.TrimSpace(fieldString(ended, "error")) == "" {
+		t.Fatalf("provider failure was not projected canonically: %#v", ended)
 	}
 }
 
@@ -1522,121 +1652,6 @@ func TestWireTraceAppChatSteer(t *testing.T) {
 	if steerIndex <= 0 || steerIndex >= len(archive)-1 || fieldString(mapFromAnyMain(archive[steerIndex+1]), "role") != "assistant" {
 		t.Fatalf("wire steer archive order = %#v", archive)
 	}
-}
-
-func TestWireTraceMockContextLimitNeverReplacesOrReseedsLane(t *testing.T) {
-	root := repoRoot(t)
-	stateDir := t.TempDir()
-	renderer := t.TempDir()
-	if err := os.WriteFile(filepath.Join(renderer, "index.html"), []byte("<!doctype html><head></head><body></body>"), 0o644); err != nil {
-		t.Fatalf("write index: %v", err)
-	}
-	traceFile := filepath.Join(stateDir, "mock-prompts.jsonl")
-
-	hub := wire.NewHub()
-	manager := acp.NewManager(acp.Options{
-		RootDir:                 root,
-		StateDir:                stateDir,
-		Provider:                acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{"WORKASS_MOCK_ACP_TRACE_FILE": traceFile, "WORKASS_MOCK_ACP_DELAY_MS": "5"}, Enabled: true, Label: "Workass Mock ACP"},
-		DefaultProviderID:       "mock",
-		Broadcast:               hub.Broadcast,
-		StdoutFlushInterval:     5 * time.Millisecond,
-		ThoughtFlushInterval:    5 * time.Millisecond,
-		RSSSampleInterval:       time.Hour,
-		CompactionEnabled:       true,
-		CompactionThresholdPct:  80,
-		CompactionKeepLastTurns: 1,
-	})
-	sessionState := sharedSessionStore(stateDir)
-	providerChats := newProviderChatRuntime(manager, sessionState, stateDir)
-	t.Cleanup(func() {
-		_ = providerChats.Close(context.Background())
-		manager.Reset()
-	})
-	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
-
-	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
-	defer server.Close()
-	client := dialTestWS(t, server.URL)
-	defer client.conn.Close()
-
-	tabID := "wire-compact-tab"
-	createWireActorChat(t, client, 100, tabID, "wire-compact-turn", "mock")
-	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": tabID, "chatId": "wire-compact-turn"})
-	sessionReply := client.waitReply(t, 1, 5*time.Second)
-	if sessionReply.Error != nil {
-		t.Fatalf("new-session error: %s", *sessionReply.Error)
-	}
-	session := sessionReply.Result.(map[string]any)
-	oldSessionID := session["sessionId"].(string)
-	t.Logf("trace reply app-chat:new-session tab=%s session=%s", tabID, oldSessionID)
-
-	history := []any{
-		map[string]any{"role": "user", "content": "turno anterior usuario", "at": "2026-07-10T00:00:00Z"},
-		map[string]any{"role": "assistant", "content": "turno anterior asistente", "at": "2026-07-10T00:00:01Z"},
-	}
-	client.invoke(t, 2, "job:start", map[string]any{
-		"kind": "app-chat", "chatId": "wire-compact-turn", "sessionId": oldSessionID, "tabId": tabID,
-		"operationId": "context-limit-turn-1", "userMessageId": "context-limit-user-1", "assistantMessageId": "context-limit-assistant-1",
-		"prompt": "[mock:bigusage] compact this", "history": history,
-	})
-	startReply := client.waitReply(t, 2, 5*time.Second)
-	if startReply.Error != nil {
-		t.Fatalf("job:start error: %s", *startReply.Error)
-	}
-	job := startReply.Result.(map[string]any)
-	jobID := job["id"].(string)
-	usage := client.waitFor(t, 5*time.Second, func(msg wsMessage) bool {
-		if msg.T != "event" || msg.Channel != "job:event" {
-			return false
-		}
-		payload, _ := msg.Payload.(map[string]any)
-		return payload["type"] == "usage" && payload["sessionId"] == oldSessionID
-	}).Payload.(map[string]any)
-	if usage["used"] != json.Number("85") || usage["size"] != json.Number("100") || usage["inputTokens"] == nil {
-		t.Fatalf("normalized usage payload = %#v", usage)
-	}
-	t.Logf("trace event job:event type=usage sessionId=%s used=%v size=%v usedPct=%v inputTokens=%v", usage["sessionId"], usage["used"], usage["size"], usage["usedPct"], usage["inputTokens"])
-
-	limit := client.waitChannelEvent(t, "chat:context-limit", 10*time.Second).Payload.(map[string]any)
-	if limit["sessionId"] != oldSessionID || limit["usedPct"] != json.Number("85") || limit["providerId"] != "mock" {
-		t.Fatalf("chat:context-limit payload = %#v session=%s", limit, oldSessionID)
-	}
-	t.Logf("trace event chat:context-limit session=%s usedPct=%v", oldSessionID, limit["usedPct"])
-	end := client.waitJobEvent(t, jobID, "end", 5*time.Second)
-	assertWireJobStatus(t, end, "done", "end_turn")
-	client.expectNoEventChannel(t, "chat:compacted", 150*time.Millisecond)
-	client.expectNoEventChannel(t, "chat:session-replaced", 150*time.Millisecond)
-
-	client.invoke(t, 3, "job:start", map[string]any{
-		"kind": "app-chat", "chatId": "wire-compact-turn", "sessionId": oldSessionID, "tabId": tabID,
-		"operationId": "context-limit-turn-2", "userMessageId": "context-limit-user-2", "assistantMessageId": "context-limit-assistant-2",
-		"prompt": "after context limit",
-	})
-	nextReply := client.waitReply(t, 3, 5*time.Second)
-	if nextReply.Error != nil {
-		t.Fatalf("next job:start error: %s", *nextReply.Error)
-	}
-	nextJob := nextReply.Result.(map[string]any)
-	nextEnd := client.waitJobEvent(t, nextJob["id"].(string), "end", 5*time.Second)
-	assertWireJobStatus(t, nextEnd, "done", "end_turn")
-	if nextEnd["job"].(map[string]any)["sessionId"] != oldSessionID {
-		t.Fatalf("context-limit path replaced the native thread: %#v", nextEnd)
-	}
-	t.Logf("trace next turn kept exact session=%s status=%s", oldSessionID, nextEnd["job"].(map[string]any)["status"])
-
-	prompts := readMockTracePrompts(t, traceFile)
-	if len(prompts) != 2 {
-		t.Fatalf("mock prompts = %#v, want exactly two user turns", prompts)
-	}
-	for _, prompt := range prompts {
-		if prompt["sessionId"] != oldSessionID || strings.Contains(prompt["text"], "WORKASS AUTO-COMPACTION") ||
-			strings.Contains(prompt["text"], "DETERMINISTIC WORKASS MOCK SUMMARY") ||
-			strings.Contains(prompt["text"], "Previous conversation") || strings.Contains(prompt["text"], "turno anterior") {
-			t.Fatalf("context-limit path replayed or reseeded provider text: %#v", prompts)
-		}
-	}
-	t.Logf("trace exact lane received %d direct prompts without transcript replay", len(prompts))
 }
 
 func TestWireTraceMockEngineCrashReattachesExactThread(t *testing.T) {
@@ -1978,6 +1993,10 @@ func TestWireTraceChatEnvNumstat(t *testing.T) {
 	}
 	job := startReply.Result.(map[string]any)
 	jobID := job["id"].(string)
+	startEvent := client.waitJobEvent(t, jobID, "start", 5*time.Second)
+	if startJob := mapFromAnyMain(startEvent["job"]); fieldString(startJob, "sessionId") != sessionID {
+		t.Fatalf("job:start event session = %#v, want %s", startJob, sessionID)
+	}
 	if err := os.WriteFile(filepath.Join(alpha, "work.txt"), []byte("one\ntwo\nthree\n"), 0o644); err != nil {
 		t.Fatalf("edit alpha: %v", err)
 	}
@@ -2140,6 +2159,10 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 	}
 	job := startReply.Result.(map[string]any)
 	jobID := job["id"].(string)
+	startEvent := client.waitJobEvent(t, jobID, "start", 5*time.Second)
+	if startJob := mapFromAnyMain(startEvent["job"]); fieldString(startJob, "sessionId") != oldSessionID {
+		t.Fatalf("hibernated checkpoint start = %#v, want session %s", startJob, oldSessionID)
+	}
 	if err := os.WriteFile(filepath.Join(alpha, "work.txt"), []byte("one\ntwo\n"), 0o644); err != nil {
 		t.Fatalf("edit alpha: %v", err)
 	}
@@ -2488,9 +2511,13 @@ func TestWireCodexEarnedRateLimitResetConsume(t *testing.T) {
 		t.Fatalf("materialize Codex reset session: %s", *startReply.Error)
 	}
 	job := startReply.Result.(map[string]any)
-	sessionID := fieldString(job, "sessionId")
+	if sessionID := fieldString(job, "sessionId"); sessionID != "" {
+		t.Fatalf("durable Codex admission prematurely exposed native session identity: %q", sessionID)
+	}
+	startEvent := client.waitJobEvent(t, fieldString(job, "id"), "start", 5*time.Second)
+	sessionID := fieldString(mapFromAnyMain(startEvent["job"]), "sessionId")
 	if sessionID == "" {
-		t.Fatal("first real Codex input omitted its materialized session identity")
+		t.Fatal("Codex start event omitted its materialized session identity")
 	}
 	initial := client.waitChannelEvent(t, "chat:plan-usage", 5*time.Second).Payload.(map[string]any)
 	initialReset := initial["rateLimitResetCredits"].(map[string]any)
@@ -2585,7 +2612,13 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 	if reply := client.waitReply(t, 1, 2*time.Second); reply.Error != nil || mapFromAnyMain(reply.Result)["ok"] != true {
 		t.Fatalf("initial session save reply = %#v", reply)
 	}
-	time.Sleep(250 * time.Millisecond)
+	preAttach, ok := providerChats.Snapshot("warm-plan-chat")
+	if !ok || preAttach.Foreground != nil || len(preAttach.Lanes) != 0 || len(preAttach.Outbox) != 0 {
+		t.Fatalf("client-ready/session-save scheduled provider work: %#v", preAttach)
+	}
+	if processes := manager.Processes(); len(processes) != 0 {
+		t.Fatalf("client-ready/session-save started ACP before a real attach: %#v", processes)
+	}
 	if methods := readWireFakeMethods(t, tracePath); len(methods) != 0 {
 		t.Fatalf("client-ready/session-save touched ACP before a real attach: methods=%v", methods)
 	}
@@ -2613,7 +2646,18 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 	if sessionID != "" {
 		t.Fatalf("empty selection materialized a provider thread: %q", sessionID)
 	}
-	time.Sleep(100 * time.Millisecond)
+	selected, ok := providerChats.Snapshot("warm-plan-chat")
+	if !ok || selected.Foreground != nil || len(selected.Outbox) != 0 || selected.DesiredLaneID == "" {
+		t.Fatalf("empty selection scheduled provider work: %#v", selected)
+	}
+	for _, lane := range selected.Lanes {
+		if !lane.Thread.IsZero() || lane.Attachment != nil {
+			t.Fatalf("empty selection attached a native provider lane: %#v", lane)
+		}
+	}
+	if processes := manager.Processes(); len(processes) != 0 {
+		t.Fatalf("empty selection started ACP before real input: %#v", processes)
+	}
 	if methods := readWireFakeMethods(t, tracePath); len(methods) != 0 {
 		t.Fatalf("selection touched ACP before a real input: methods=%v", methods)
 	}
@@ -2627,9 +2671,13 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 		t.Fatalf("first real input attach reply = %#v", startReply)
 	}
 	job := startReply.Result.(map[string]any)
-	sessionID = fieldString(job, "sessionId")
+	if sessionID = fieldString(job, "sessionId"); sessionID != "" {
+		t.Fatalf("durable Claude admission prematurely exposed native session identity: %q", sessionID)
+	}
+	startEvent := client.waitJobEvent(t, fieldString(job, "id"), "start", 5*time.Second)
+	sessionID = fieldString(mapFromAnyMain(startEvent["job"]), "sessionId")
 	if sessionID == "" {
-		t.Fatal("first real input omitted native session identity")
+		t.Fatal("Claude start event omitted native session identity")
 	}
 
 	plan := client.waitChannelEvent(t, "chat:plan-usage", 5*time.Second).Payload.(map[string]any)
@@ -2640,7 +2688,6 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 		return countWireMethod(methods, "_workass/claude/usage") == 1
 	})
 	_ = client.waitJobEvent(t, fieldString(job, "id"), "end", 5*time.Second)
-	time.Sleep(100 * time.Millisecond)
 	methods = readWireFakeMethods(t, tracePath)
 	if countWireMethod(methods, "session/new") != 1 || countWireMethod(methods, "session/resume") != 0 || countWireMethod(methods, "session/load") != 0 {
 		t.Fatalf("real attach raced a duplicate session: methods=%v", methods)

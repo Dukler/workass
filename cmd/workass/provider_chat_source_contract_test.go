@@ -584,6 +584,9 @@ var phaseCExpectedChatHandlers = map[string]struct{}{
 }
 
 var phaseCActorHandlerExceptions = map[string]struct{}{
+	// Frozen compatibility boundary only: queue pausing no longer exists and
+	// this handler returns an inert already-unpaused receipt without actor work.
+	"chat:queue-resume":             {},
 	"app-chat:refresh-plan-usage":   {},
 	"app-chat:reset":                {},
 	"app-chat:set-model":            {},

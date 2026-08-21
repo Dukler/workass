@@ -36,6 +36,7 @@ func TestProviderOwnsContextCompaction(t *testing.T) {
 }
 
 func TestProviderNativeCompactionBypassesWorkassFallback(t *testing.T) {
+	t.Parallel()
 	for _, providerID := range []string{"codex", "claude"} {
 		providerID := providerID
 		t.Run(providerID, func(t *testing.T) {
@@ -88,6 +89,7 @@ func TestProviderNativeCompactionBypassesWorkassFallback(t *testing.T) {
 }
 
 func TestProviderWithoutNativeCompactionNeverReplacesOrReseedsLane(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	traceFile := filepath.Join(t.TempDir(), "mock-prompts.jsonl")
 	events := newEventCollector()

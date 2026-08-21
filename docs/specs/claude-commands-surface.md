@@ -56,7 +56,9 @@ Verified against the SDK types: there is NO dedicated command field on user mess
 - Picking command `foo` with argument string `A` sends prompt text `"/foo A"` (`"/" + name + (args ? " " + args : "")`) through the EXISTING turn-start path (`job:start` → `session/prompt`). No new wire field, no new host method. Aliases: send the canonical `name`, never the alias.
 - The slash must begin the message text (D7 protects this when images are attached).
 - Unknown/stale names are SAFE: the CLI passes an unrecognized `/name` to the model as plain text. The renderer must never hard-block a send on catalog membership.
-- Commands are turn-starting prompts. Sending one through the steer path is out of contract (harmless — treated as text/queued input — but unspecified).
+- Commands are turn-starting prompts. Sending one through the steer path follows
+  the ordinary live-steer contract: it is accepted live or returned to the
+  composer, never converted into FIFO work.
 - Subagent types and output styles are display data only in this spec: `agents` inform the renderer (e.g. rail/subagent affordances); output style is read-only state (no setter in this SDK build — a future style switch would be a new `session/set_config_option` axis + query restart, explicitly out of scope).
 
 ## 6. Renderer contract (data only — mock lane owns visuals)

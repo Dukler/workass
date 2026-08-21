@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer, type ViteDevServer } from 'vite';
-import { stageChronologicalSteer } from '../src/steering.ts';
+import { projectSteeringPresentation } from '../src/chat/steering-presentation.ts';
+import { commitChronologicalSteer, stageChronologicalSteer } from '../src/steering.ts';
 import { LEAN_SESSION_SAVE_MODE, type Mirror, type MirrorMsg } from '../src/store/persistence.ts';
 import type { Chat, Msg } from '../src/store/types.ts';
 import type { PublicJob } from '../src/wire/types.ts';
@@ -146,6 +147,660 @@ test('remote settlement survives a session snapshot read before its actor receip
   });
 });
 
+test('a delayed remote hydration cannot erase newer streamed bytes, tools, or terminal state', async () => {
+  const jobID = 'job-hydration-race';
+  const userID = 'user-hydration-race';
+  const assistantID = 'assistant-hydration-race';
+  const stale = mirror([
+    { id: userID, role: 'user', content: 'race', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: assistantID, role: 'assistant', content: '', status: 'running', at: null, jobId: jobID, events: [] },
+  ]);
+  let releaseHydration!: (value: Mirror) => void;
+  let delayed: Promise<Mirror> | null = null;
+  const subject = remoteSubject(() => delayed ?? stale);
+  await subject.hydrateMachine(MACHINE);
+
+  delayed = new Promise((resolve) => { releaseHydration = resolve; });
+  const hydration = subject.hydrateMachine(MACHINE);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'data', id: jobID, stream: 'stdout', chunk: 'NEW', phase: 'commentary',
+  }));
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'acp', id: jobID,
+    event: { kind: 'tool', toolKind: 'execute', id: 'tool-race', title: 'Probe', status: 'completed', output: 'ok' },
+  }));
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'end',
+    job: terminalJob({ id: jobID, userMessageId: userID, assistantMessageId: assistantID }),
+  }));
+  releaseHydration(stale);
+  await hydration;
+
+  const restored = subject.chat(TAB) as Chat;
+  const assistant = restored.messages.find((message) => message.id === tagId(MACHINE, assistantID));
+  assert.equal(assistant?.content, 'NEW');
+  assert.equal(assistant?.status, 'done');
+  assert.equal(assistant?.events.some((event) => event.kind === 'tool' && event.id === tagId(MACHINE, 'tool-race')), true);
+  assert.equal(subject.jobRef.has(tagId(MACHINE, jobID)), false, 'terminal hydration must not recreate a running anchor');
+});
+
+test('a delayed remote hydration cannot restore a consumed steer boundary after terminal', async () => {
+  const jobID = 'job-steer-consumed-terminal';
+  const rootID = 'assistant-steer-consumed-terminal';
+  const steerID = 'steer-consumed-terminal';
+  const continuationID = 'continuation-steer-consumed-terminal';
+  const stale = mirror([
+    { id: 'user-steer-consumed-terminal', role: 'user', content: 'start', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: rootID, role: 'assistant', content: 'before', status: 'running', at: null, jobId: jobID, events: [] },
+    {
+      id: steerID, role: 'user', content: 'redirect', status: 'done', at: '2026-08-20T12:00:01Z', events: [],
+      steerState: 'accepted', steerBoundary: 'waiting', steerContinuationId: continuationID, turnRootId: rootID,
+    },
+    {
+      id: continuationID, role: 'assistant', content: '', status: 'pending', at: null, jobId: jobID, events: [],
+      steerBoundary: 'waiting', steerContinuationFor: steerID, turnRootId: rootID, turnTerminal: true,
+    },
+  ]);
+  let releaseHydration!: (value: Mirror) => void;
+  let delayed: Promise<Mirror> | null = null;
+  const subject = remoteSubject(() => delayed ?? stale);
+  subject.flushSession = async () => {};
+  await subject.hydrateMachine(MACHINE);
+
+  delayed = new Promise((resolve) => { releaseHydration = resolve; });
+  const hydration = subject.hydrateMachine(MACHINE);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'acp', id: jobID,
+    event: { kind: 'steer-consumed', clientUserMessageId: steerID },
+  }));
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'end',
+    job: { ...terminalJob({ id: jobID, userMessageId: 'user-steer-consumed-terminal', assistantMessageId: rootID }), consumedSteerIds: [steerID] },
+  }));
+  releaseHydration(stale);
+  await hydration;
+
+  const restored = subject.chat(TAB) as Chat;
+  const steer = restored.messages.find((message) => message.id === tagId(MACHINE, steerID));
+  assert.equal(steer?.steerState, 'applied');
+  assert.equal(steer?.steerBoundary, undefined);
+  assert.equal(restored.messages.some((message) => message.status === 'running' || message.status === 'pending'), false);
+  assert.deepEqual(projectSteeringPresentation(restored.messages).steeringTrayMessages, []);
+  assert.equal(subject.jobRef.has(tagId(MACHINE, jobID)), false);
+});
+
+test('a delayed remote hydration cannot resurrect an unconsumed steer continuation removed at terminal', async () => {
+  const jobID = 'job-steer-unconsumed-terminal';
+  const rootID = 'assistant-steer-unconsumed-terminal';
+  const steerID = 'steer-unconsumed-terminal';
+  const continuationID = 'continuation-steer-unconsumed-terminal';
+  const stale = mirror([
+    { id: 'user-steer-unconsumed-terminal', role: 'user', content: 'start', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: rootID, role: 'assistant', content: 'finished', status: 'running', at: null, jobId: jobID, events: [] },
+    {
+      id: steerID, role: 'user', content: 'late redirect', status: 'done', at: '2026-08-20T12:00:01Z', events: [],
+      steerState: 'accepted', steerBoundary: 'waiting', steerContinuationId: continuationID, turnRootId: rootID,
+    },
+    {
+      id: continuationID, role: 'assistant', content: '', status: 'pending', at: null, jobId: jobID, events: [],
+      steerBoundary: 'waiting', steerContinuationFor: steerID, turnRootId: rootID, turnTerminal: true,
+    },
+  ]);
+  let releaseHydration!: (value: Mirror) => void;
+  let delayed: Promise<Mirror> | null = null;
+  const subject = remoteSubject(() => delayed ?? stale);
+  subject.flushSession = async () => {};
+  await subject.hydrateMachine(MACHINE);
+
+  delayed = new Promise((resolve) => { releaseHydration = resolve; });
+  const hydration = subject.hydrateMachine(MACHINE);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'end',
+    job: terminalJob({ id: jobID, userMessageId: 'user-steer-unconsumed-terminal', assistantMessageId: rootID }),
+  }));
+  releaseHydration(stale);
+  await hydration;
+
+  const restored = subject.chat(TAB) as Chat;
+  const steer = restored.messages.find((message) => message.id === tagId(MACHINE, steerID));
+  assert.equal(steer?.steerState, 'accepted');
+  assert.equal(steer?.steerBoundary, undefined);
+  assert.equal(restored.messages.some((message) => message.id === tagId(MACHINE, continuationID)), false);
+  assert.equal(restored.messages.some((message) => message.status === 'running' || message.status === 'pending'), false);
+  assert.deepEqual(projectSteeringPresentation(restored.messages).steeringTrayMessages, []);
+  assert.equal(subject.jobRef.has(tagId(MACHINE, jobID)), false);
+});
+
+test('a steer acknowledgement survives an older hydration that omitted its now-transcript owner', async () => {
+  const jobID = 'job-steer-ack-hydration';
+  const stale = mirror([
+    { id: 'user-steer-ack-hydration', role: 'user', content: 'start', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: 'assistant-steer-ack-hydration', role: 'assistant', content: 'working', status: 'running', at: null, jobId: jobID, events: [] },
+  ]);
+  let releaseHydration!: (value: Mirror) => void;
+  let delayed: Promise<Mirror> | null = null;
+  const subject = remoteSubject(() => delayed ?? stale);
+  subject.flushSession = async () => {};
+  await subject.hydrateMachine(MACHINE);
+  const owner = subject.chat(TAB) as Chat;
+  owner.deliveryCapabilities = {
+    stableInputIdentity: true, liveSteer: true, steerConsumptionReceipt: true,
+    consumptionReceipt: true, turnReadback: true,
+  };
+
+  delayed = new Promise((resolve) => { releaseHydration = resolve; });
+  const hydration = subject.hydrateMachine(MACHINE);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await withWindowApi({
+    appChatSteer: async () => ({ ok: true, live: true, strategy: 'receipt-live', receipt: true, turnId: 'native-turn' }),
+  }, async () => {
+    assert.equal(await subject.steerRunning(TAB, 'accepted direction'), true);
+  });
+  assert.equal(subject.pendingSteers.size, 0, 'the control waiter released before the stale read returned');
+
+  releaseHydration(stale);
+  await hydration;
+  const restored = subject.chat(TAB) as Chat;
+  const accepted = restored.messages.find((message) => message.content === 'accepted direction');
+  assert.equal(accepted?.steerState, 'accepted');
+  assert.equal(projectSteeringPresentation(restored.messages).steeringTrayMessages.length, 0);
+  assert.equal(projectSteeringPresentation(restored.messages).transcriptMessages.filter((message) => message.id === accepted?.id).length, 1);
+});
+
+test('a pre-job-id steer acknowledgement survives an older hydration that omitted its transcript owner', async () => {
+  const stale = mirror([
+    { id: 'user-steer-pre-job-hydration', role: 'user', content: 'start', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: 'assistant-steer-pre-job-hydration', role: 'assistant', content: 'admitting', status: 'running', at: null, events: [] },
+  ]);
+  let releaseHydration!: (value: Mirror) => void;
+  let delayed: Promise<Mirror> | null = null;
+  const subject = remoteSubject(() => delayed ?? stale);
+  subject.flushSession = async () => {};
+  await subject.hydrateMachine(MACHINE);
+  const owner = subject.chat(TAB) as Chat;
+  owner.deliveryCapabilities = {
+    stableInputIdentity: true, liveSteer: true, steerConsumptionReceipt: true,
+    consumptionReceipt: true, turnReadback: true,
+  };
+
+  delayed = new Promise((resolve) => { releaseHydration = resolve; });
+  const hydration = subject.hydrateMachine(MACHINE);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await withWindowApi({
+    appChatSteer: async () => ({ ok: true, live: true, strategy: 'receipt-live', receipt: true, turnId: 'native-turn' }),
+  }, async () => {
+    assert.equal(await subject.steerRunning(TAB, 'accepted before job id'), true);
+  });
+  assert.equal(subject.pendingSteers.size, 0, 'the control waiter released before the stale read returned');
+
+  releaseHydration(stale);
+  await hydration;
+  const restored = subject.chat(TAB) as Chat;
+  const accepted = restored.messages.filter((message) => message.content === 'accepted before job id');
+  assert.equal(accepted.length, 1);
+  assert.equal(accepted[0].steerState, 'accepted');
+  assert.deepEqual(projectSteeringPresentation(restored.messages).steeringTrayMessages, []);
+  assert.equal(projectSteeringPresentation(restored.messages).transcriptMessages.filter((message) => message.id === accepted[0].id).length, 1);
+});
+
+test('a newer terminal actor snapshot beats an equal accepted local boundary without a live end event', async () => {
+  const jobID = 'job-terminal-actor-steer';
+  const rootID = 'assistant-terminal-actor-steer';
+  const initial = mirror([
+    { id: 'user-terminal-actor-steer', role: 'user', content: 'start', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: rootID, role: 'assistant', content: 'working', status: 'running', at: null, jobId: jobID, events: [] },
+  ]);
+  let releaseHydration!: (value: Mirror) => void;
+  let delayed: Promise<Mirror> | null = null;
+  const subject = remoteSubject(() => delayed ?? initial);
+  subject.flushSession = async () => {};
+  await subject.hydrateMachine(MACHINE);
+  const owner = subject.chat(TAB) as Chat;
+  owner.deliveryCapabilities = {
+    stableInputIdentity: true, liveSteer: true, steerConsumptionReceipt: true,
+    consumptionReceipt: true, turnReadback: true,
+  };
+
+  delayed = new Promise((resolve) => { releaseHydration = resolve; });
+  const hydration = subject.hydrateMachine(MACHINE);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await withWindowApi({
+    appChatSteer: async () => ({ ok: true, live: true, strategy: 'receipt-live', receipt: true, turnId: 'native-turn' }),
+  }, async () => {
+    assert.equal(await subject.steerRunning(TAB, 'accepted at terminal edge'), true);
+  });
+  assert.equal(subject.pendingSteers.size, 0);
+
+  const live = subject.chat(TAB) as Chat;
+  const accepted = live.messages.find((message) => message.content === 'accepted at terminal edge');
+  assert.ok(accepted);
+  const terminalMessages = structuredClone(live.messages);
+  const terminalSteer = terminalMessages.find((message) => message.id === accepted.id);
+  assert.ok(terminalSteer);
+  delete terminalSteer.steerBoundary;
+  delete terminalSteer.steerContinuationId;
+  terminalSteer.status = 'done';
+  const waitingIndex = terminalMessages.findIndex((message) => message.steerContinuationFor === accepted.id);
+  assert.ok(waitingIndex >= 0);
+  const [waiting] = terminalMessages.splice(waitingIndex, 1);
+  const terminalRoot = terminalMessages.find((message) => message.id === tagId(MACHINE, rootID));
+  assert.ok(terminalRoot);
+  terminalRoot.status = 'done';
+  terminalRoot.at = '2026-08-20T12:00:02Z';
+  terminalRoot.jobId = undefined;
+
+  releaseHydration(mirror(rawRemoteMessages(terminalMessages), { actorRevision: 2 }));
+  await hydration;
+
+  const restored = subject.chat(TAB) as Chat;
+  const rows = restored.messages.filter((message) => message.id === accepted.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].steerState, 'accepted');
+  assert.equal(rows[0].steerBoundary, undefined);
+  assert.equal(restored.messages.some((message) => message.id === waiting.id), false);
+  assert.equal(restored.messages.some((message) => message.status === 'running' || message.status === 'pending'), false);
+  assert.deepEqual(projectSteeringPresentation(restored.messages).steeringTrayMessages, []);
+  assert.equal(subject.jobRef.has(tagId(MACHINE, jobID)), false);
+});
+
+test('a stale full-history reply cannot erase a steer that is still awaiting acknowledgement', async () => {
+  const jobID = 'job-history-pending-steer';
+  const initial = mirror([
+    { id: 'user-history-pending-steer', role: 'user', content: 'start', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: 'assistant-history-pending-steer', role: 'assistant', content: 'working', status: 'running', at: null, jobId: jobID, events: [] },
+  ], { historyComplete: false, messageCount: 20 });
+  const subject = remoteSubject(() => initial);
+  subject.flushSession = async () => {};
+  await subject.hydrateMachine(MACHINE);
+  const owner = subject.chat(TAB) as Chat;
+  owner.deliveryCapabilities = {
+    stableInputIdentity: true, liveSteer: true, steerConsumptionReceipt: true,
+    consumptionReceipt: true, turnReadback: true,
+  };
+  let releaseHistory!: (value: unknown) => void;
+  let releaseSteer!: (value: unknown) => void;
+  const historyReply = new Promise((resolve) => { releaseHistory = resolve; });
+  const steerReply = new Promise((resolve) => { releaseSteer = resolve; });
+
+  await withWindowApi({
+    archiveLoad: async () => historyReply,
+    appChatSteer: async () => steerReply,
+  }, async () => {
+    const history = subject.ensureFullHistory(TAB);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const steering = subject.steerRunning(TAB, 'pending during history');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    releaseHistory(tagPayload(MACHINE, initial.chats[0].messages));
+    await history;
+    const pending = (subject.chat(TAB) as Chat).messages.filter((message) => message.content === 'pending during history');
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].steerState, 'sending');
+
+    releaseSteer({ ok: true, live: true, strategy: 'receipt-live', receipt: true, turnId: 'native-turn' });
+    assert.equal(await steering, true);
+  });
+
+  const restored = subject.chat(TAB) as Chat;
+  const accepted = restored.messages.filter((message) => message.content === 'pending during history');
+  assert.equal(accepted.length, 1);
+  assert.equal(accepted[0].steerState, 'accepted');
+  assert.deepEqual(projectSteeringPresentation(restored.messages).steeringTrayMessages, []);
+});
+
+test('a stale full-history reply cannot erase an acknowledged steer after its waiter releases', async () => {
+  const jobID = 'job-history-accepted-steer';
+  const initial = mirror([
+    { id: 'user-history-accepted-steer', role: 'user', content: 'start', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: 'assistant-history-accepted-steer', role: 'assistant', content: 'working', status: 'running', at: null, jobId: jobID, events: [] },
+  ], { historyComplete: false, messageCount: 20 });
+  const subject = remoteSubject(() => initial);
+  subject.flushSession = async () => {};
+  await subject.hydrateMachine(MACHINE);
+  const owner = subject.chat(TAB) as Chat;
+  owner.deliveryCapabilities = {
+    stableInputIdentity: true, liveSteer: true, steerConsumptionReceipt: true,
+    consumptionReceipt: true, turnReadback: true,
+  };
+  let releaseHistory!: (value: unknown) => void;
+  const historyReply = new Promise((resolve) => { releaseHistory = resolve; });
+
+  await withWindowApi({
+    archiveLoad: async () => historyReply,
+    appChatSteer: async () => ({ ok: true, live: true, strategy: 'receipt-live', receipt: true, turnId: 'native-turn' }),
+  }, async () => {
+    const history = subject.ensureFullHistory(TAB);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(await subject.steerRunning(TAB, 'accepted during history'), true);
+    assert.equal(subject.pendingSteers.size, 0);
+    releaseHistory(tagPayload(MACHINE, initial.chats[0].messages));
+    await history;
+  });
+
+  const restored = subject.chat(TAB) as Chat;
+  const accepted = restored.messages.filter((message) => message.content === 'accepted during history');
+  assert.equal(accepted.length, 1);
+  assert.equal(accepted[0].steerState, 'accepted');
+  assert.deepEqual(projectSteeringPresentation(restored.messages).steeringTrayMessages, []);
+  assert.equal(projectSteeringPresentation(restored.messages).transcriptMessages.filter((message) => message.id === accepted[0].id).length, 1);
+});
+
+test('a complete terminal history clears an equal accepted boundary without resurrecting its placeholder', async () => {
+  const jobID = 'job-history-terminal-steer';
+  const rootID = 'assistant-history-terminal-steer';
+  const initial = mirror([
+    { id: 'user-history-terminal-steer', role: 'user', content: 'start', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: rootID, role: 'assistant', content: 'working', status: 'running', at: null, jobId: jobID, events: [] },
+  ], { historyComplete: false, messageCount: 20 });
+  const subject = remoteSubject(() => initial);
+  subject.flushSession = async () => {};
+  await subject.hydrateMachine(MACHINE);
+  const owner = subject.chat(TAB) as Chat;
+  owner.deliveryCapabilities = {
+    stableInputIdentity: true, liveSteer: true, steerConsumptionReceipt: true,
+    consumptionReceipt: true, turnReadback: true,
+  };
+  let releaseHistory!: (value: unknown) => void;
+  const historyReply = new Promise((resolve) => { releaseHistory = resolve; });
+
+  await withWindowApi({
+    archiveLoad: async () => historyReply,
+    appChatSteer: async () => ({ ok: true, live: true, strategy: 'receipt-live', receipt: true, turnId: 'native-turn' }),
+  }, async () => {
+    const history = subject.ensureFullHistory(TAB);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(await subject.steerRunning(TAB, 'accepted before history terminal'), true);
+    const live = subject.chat(TAB) as Chat;
+    const accepted = live.messages.find((message) => message.content === 'accepted before history terminal');
+    assert.ok(accepted);
+    const terminalMessages = structuredClone(live.messages);
+    const terminalSteer = terminalMessages.find((message) => message.id === accepted.id);
+    assert.ok(terminalSteer);
+    delete terminalSteer.steerBoundary;
+    delete terminalSteer.steerContinuationId;
+    terminalSteer.status = 'done';
+    const continuationIndex = terminalMessages.findIndex((message) => message.steerContinuationFor === accepted.id);
+    assert.ok(continuationIndex >= 0);
+    terminalMessages.splice(continuationIndex, 1);
+    const terminalRoot = terminalMessages.find((message) => message.id === tagId(MACHINE, rootID));
+    assert.ok(terminalRoot);
+    terminalRoot.status = 'done';
+    terminalRoot.at = '2026-08-20T12:00:02Z';
+    terminalRoot.jobId = undefined;
+
+    releaseHistory(tagPayload(MACHINE, rawRemoteMessages(terminalMessages)));
+    await history;
+  });
+
+  const restored = subject.chat(TAB) as Chat;
+  const accepted = restored.messages.filter((message) => message.content === 'accepted before history terminal');
+  assert.equal(accepted.length, 1);
+  assert.equal(accepted[0].steerState, 'accepted');
+  assert.equal(accepted[0].steerBoundary, undefined);
+  assert.equal(restored.messages.some((message) => message.steerBoundary === 'waiting'), false);
+  assert.equal(restored.messages.some((message) => message.status === 'running' || message.status === 'pending'), false);
+  assert.deepEqual(projectSteeringPresentation(restored.messages).steeringTrayMessages, []);
+  assert.equal(subject.jobRef.has(tagId(MACHINE, jobID)), false);
+});
+
+test('an older stronger receipt for steer one cannot erase a newer acknowledged steer two omitted by hydration', async () => {
+  const jobID = 'job-rapid-steer-hydration';
+  const initial = mirror([
+    { id: 'user-rapid-steer-hydration', role: 'user', content: 'start', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: 'assistant-rapid-steer-hydration', role: 'assistant', content: 'working', status: 'running', at: null, jobId: jobID, events: [] },
+  ]);
+  let releaseHydration!: (value: Mirror) => void;
+  let delayed: Promise<Mirror> | null = null;
+  const subject = remoteSubject(() => delayed ?? initial);
+  subject.flushSession = async () => {};
+  await subject.hydrateMachine(MACHINE);
+  const owner = subject.chat(TAB) as Chat;
+  owner.deliveryCapabilities = {
+    stableInputIdentity: true, liveSteer: true, steerConsumptionReceipt: true,
+    consumptionReceipt: true, turnReadback: true,
+  };
+
+  await withWindowApi({
+    appChatSteer: async () => ({ ok: true, live: true, strategy: 'receipt-live', receipt: true, turnId: 'native-turn' }),
+  }, async () => {
+    assert.equal(await subject.steerRunning(TAB, 'first accepted direction'), true);
+    const liveAfterFirst = subject.chat(TAB) as Chat;
+    const first = liveAfterFirst.messages.find((message) => message.content === 'first accepted direction');
+    assert.ok(first);
+
+    const actorAfterFirstReceipt = structuredClone(liveAfterFirst.messages);
+    assert.ok(commitChronologicalSteer(actorAfterFirstReceipt, first.id));
+    const snapshotAfterFirstReceipt = mirror(rawRemoteMessages(actorAfterFirstReceipt), { actorRevision: 2 });
+
+    delayed = new Promise((resolve) => { releaseHydration = resolve; });
+    const hydration = subject.hydrateMachine(MACHINE);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(await subject.steerRunning(TAB, 'second accepted direction'), true);
+    assert.equal(subject.pendingSteers.size, 0);
+
+    releaseHydration(snapshotAfterFirstReceipt);
+    await hydration;
+  });
+
+  const restored = subject.chat(TAB) as Chat;
+  const first = restored.messages.filter((message) => message.content === 'first accepted direction');
+  const second = restored.messages.filter((message) => message.content === 'second accepted direction');
+  assert.equal(first.length, 1);
+  assert.equal(first[0].steerState, 'applied');
+  assert.equal(second.length, 1);
+  assert.equal(second[0].steerState, 'accepted');
+  assert.deepEqual(projectSteeringPresentation(restored.messages).steeringTrayMessages, []);
+  assert.ok(restored.messages.indexOf(first[0]) < restored.messages.indexOf(second[0]));
+});
+
+test('a definite steer rejection tombstones an older hydration pair and restores one composer owner', async () => {
+  const initial = mirror([
+    { id: 'user-steer-reject-hydration', role: 'user', content: 'start', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: 'assistant-steer-reject-hydration', role: 'assistant', content: 'working', status: 'running', at: null, events: [] },
+  ]);
+  let releaseHydration!: (value: Mirror) => void;
+  let delayed: Promise<Mirror> | null = null;
+  let releaseSteer!: (value: unknown) => void;
+  const steerReply = new Promise((resolve) => { releaseSteer = resolve; });
+  const subject = remoteSubject(() => delayed ?? initial);
+  subject.flushSession = async () => {};
+  await subject.hydrateMachine(MACHINE);
+  const owner = subject.chat(TAB) as Chat;
+  owner.deliveryCapabilities = {
+    stableInputIdentity: true, liveSteer: true, steerConsumptionReceipt: true,
+    consumptionReceipt: true, turnReadback: true,
+  };
+  owner.draft = 'rejected direction';
+
+  await withWindowApi({ appChatSteer: async () => steerReply }, async () => {
+    const steering = subject.steerRunning(TAB, 'rejected direction');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const staged = subject.chat(TAB) as Chat;
+    const stalePending = mirror(rawRemoteMessages(staged.messages));
+    delayed = new Promise((resolve) => { releaseHydration = resolve; });
+    const hydration = subject.hydrateMachine(MACHINE);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    releaseSteer({ ok: false, live: false, strategy: 'rejected', error: 'not steerable' });
+    assert.equal(await steering, false);
+    subject.setDraft(TAB, 'rejected direction');
+    releaseHydration(stalePending);
+    await hydration;
+  });
+
+  const restored = subject.chat(TAB) as Chat;
+  assert.equal(restored.messages.some((message) => message.content === 'rejected direction'), false);
+  assert.deepEqual(projectSteeringPresentation(restored.messages).steeringTrayMessages, []);
+  assert.equal(restored.draft, 'rejected direction');
+});
+
+test('a delayed remote hydration preserves the exact attached lane and its live steering capabilities', async () => {
+  const jobID = 'job-capability-race';
+  const userID = 'user-capability-race';
+  const assistantID = 'assistant-capability-race';
+  const stale = mirror();
+  let releaseHydration!: (value: Mirror) => void;
+  let delayed: Promise<Mirror> | null = null;
+  const subject = remoteSubject(() => delayed ?? stale);
+  await subject.hydrateMachine(MACHINE);
+
+  delayed = new Promise((resolve) => { releaseHydration = resolve; });
+  const hydration = subject.hydrateMachine(MACHINE);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'start',
+    job: {
+      ...terminalJob({ id: jobID, userMessageId: userID, assistantMessageId: assistantID }),
+      status: 'running',
+      finishedAt: null,
+      code: null,
+      sessionId: 'session-new',
+      deliveryCapabilities: {
+        stableInputIdentity: true,
+        liveSteer: true,
+        steerConsumptionReceipt: true,
+        consumptionReceipt: true,
+        turnReadback: true,
+      },
+    },
+  }));
+  releaseHydration(stale);
+  await hydration;
+
+  const restored = subject.chat(TAB) as Chat;
+  assert.equal(restored.sessionId, tagId(MACHINE, 'session-new'));
+  assert.equal(restored.sessionProviderId, 'codex');
+  assert.deepEqual(restored.deliveryCapabilities, {
+    stableInputIdentity: true,
+    liveSteer: true,
+    steerConsumptionReceipt: true,
+    consumptionReceipt: true,
+    turnReadback: true,
+  });
+  assert.equal(restored.messages.find((message) => message.id === tagId(MACHINE, assistantID))?.status, 'running');
+});
+
+test('events crossing first remote mount converge through bounded actor catch-up reads without replaying chunks', async () => {
+  const jobID = 'job-first-hydrate';
+  const userID = 'user-first-hydrate';
+  const assistantID = 'assistant-first-hydrate';
+  const first = mirror();
+  const second = mirror([
+    { id: userID, role: 'user', content: 'first', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: assistantID, role: 'assistant', content: 'A', status: 'running', at: null, jobId: jobID, events: [] },
+  ]);
+  const caughtUp = mirror([
+    { id: userID, role: 'user', content: 'first', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: assistantID, role: 'assistant', content: 'AE', status: 'running', at: null, jobId: jobID, events: [] },
+  ]);
+  let releaseFirst!: (value: Mirror) => void;
+  let releaseSecond!: (value: Mirror) => void;
+  const firstRead = new Promise<Mirror>((resolve) => { releaseFirst = resolve; });
+  const secondRead = new Promise<Mirror>((resolve) => { releaseSecond = resolve; });
+  let reads = 0;
+  const subject = remoteSubject(() => {
+    reads += 1;
+    if (reads === 1) return firstRead;
+    if (reads === 2) return secondRead;
+    return caughtUp;
+  });
+
+  const hydration = subject.hydrateMachine(MACHINE);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'start',
+    job: {
+      ...terminalJob({ id: jobID, userMessageId: userID, assistantMessageId: assistantID }),
+      status: 'running', finishedAt: null, code: null, result: null,
+    },
+  }));
+  releaseFirst(first);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(reads, 2, 'the missed start opens one coalesced catch-up read');
+
+  // S2 already captured A, but its reply is still in flight when E arrives.
+  // No job owner is mounted yet, so E raises one more marker instead of being
+  // replayed blindly onto a snapshot whose prefix is unknown.
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'data', id: jobID, stream: 'stdout', chunk: 'E', phase: 'commentary',
+  }));
+  releaseSecond(second);
+  await hydration;
+
+  assert.equal(reads, 3, 'one marker raised during S2 owns exactly one converging S3 read');
+  const assistant = (subject.chat(TAB) as Chat).messages.find((message) => message.id === tagId(MACHINE, assistantID));
+  assert.equal(assistant?.content, 'AE', 'the actor snapshot recovers each byte once; raw chunks are never replayed');
+  assert.equal(subject.remoteMachinesNeedingCatchup.size, 0);
+});
+
+test('an unknown remote-host chat event after initial mount triggers an immediate coalesced actor read', async () => {
+  let current = mirror();
+  let reads = 0;
+  const subject = remoteSubject(() => { reads += 1; return current; });
+  await subject.hydrateMachine(MACHINE);
+
+  const remoteCreated = structuredClone(mirror()).chats[0];
+  remoteCreated.id = 'tab-host-created';
+  remoteCreated.chatId = 'chat-host-created';
+  remoteCreated.title = 'Host created';
+  remoteCreated.messages = [
+    { id: 'user-host-created', role: 'user', content: 'host work', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: 'assistant-host-created', role: 'assistant', content: 'mounted once', status: 'running', at: null, jobId: 'job-host-created', events: [] },
+  ];
+  remoteCreated.messageCount = remoteCreated.messages.length;
+  current = { ...mirror(), chats: [mirror().chats[0], remoteCreated] };
+
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'start',
+    job: {
+      ...terminalJob({ id: 'job-host-created', userMessageId: 'user-host-created', assistantMessageId: 'assistant-host-created' }),
+      tabId: 'tab-host-created', chatId: 'chat-host-created', sessionId: 'session-host-created',
+      status: 'running', finishedAt: null, code: null, result: null,
+    },
+  }));
+  for (let attempt = 0; attempt < 10 && subject.remoteMachineCatchups.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  assert.equal(reads, 2, 'the unmatched event starts one catch-up without a socket reopen');
+  const mounted = subject.chat(tagId(MACHINE, 'tab-host-created')) as Chat;
+  assert.equal(mounted.messages.find((message) => message.id === tagId(MACHINE, 'assistant-host-created'))?.content, 'mounted once');
+  assert.equal(subject.remoteMachinesNeedingCatchup.size, 0);
+});
+
+test('a refused remote Stop keeps the active owner nonterminal and never drains FIFO', async () => {
+  const jobID = 'job-stop-refused';
+  const assistantID = 'assistant-stop-refused';
+  let delayedRead: Promise<Mirror> | null = null;
+  const current = mirror([
+    { id: 'user-stop-refused', role: 'user', content: 'work', status: 'done', at: '2026-08-20T12:00:00Z', events: [] },
+    { id: assistantID, role: 'assistant', content: 'still working', status: 'running', at: null, jobId: jobID, events: [] },
+  ], { queue: [{ id: 'queue-next', text: 'next' }] });
+  const subject = remoteSubject(() => delayedRead ?? current);
+  await subject.hydrateMachine(MACHINE);
+  delayedRead = new Promise(() => {});
+  let drains = 0;
+  subject.flushNextQueued = () => { drains += 1; };
+
+  await withWindowApi({
+    cancelJob: async () => ({ cancelled: false, reason: 'not-owned' }),
+  }, async () => {
+    await subject.cancelChatTurn(TAB);
+  });
+
+  const live = subject.chat(TAB) as Chat;
+  assert.equal(live.messages.find((message) => message.id === tagId(MACHINE, assistantID))?.status, 'running');
+  assert.deepEqual(live.queue?.map((item) => item.id), [tagId(MACHINE, 'queue-next')]);
+  assert.equal(drains, 0);
+  assert.equal(subject.state.toasts.at(-1)?.title, 'No se pudo detener');
+});
+
 test('replayed remote terminal events do not revive an acknowledged settled chat', async () => {
   const userID = 'user-terminal';
   const assistantID = 'assistant-terminal';
@@ -219,6 +874,60 @@ test('machine rejection evicts its chats and a late snapshot cannot mount them a
   assert.equal(subject.state.activeId, local.id);
 });
 
+test('rejection invalidates an old catch-up owner without erasing an immediate re-request', async () => {
+  let reads = 0;
+  let rejectOld!: (reason: Error) => void;
+  let resolveNew!: (value: Mirror) => void;
+  const oldCatchup = new Promise<Mirror>((_resolve, reject) => { rejectOld = reject; });
+  const newCatchup = new Promise<Mirror>((resolve) => { resolveNew = resolve; });
+  const replacement = mirror([], { title: 'Authorized again' });
+  const subject = remoteSubject(() => {
+    reads += 1;
+    if (reads === 1) return mirror();
+    if (reads === 2) return oldCatchup;
+    if (reads === 3) return newCatchup;
+    return replacement;
+  });
+  await subject.hydrateMachine(MACHINE);
+
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'start',
+    job: {
+      ...terminalJob({ id: 'job-old-owner', userMessageId: 'user-old-owner', assistantMessageId: 'assistant-old-owner' }),
+      tabId: 'unknown-old-tab', chatId: 'unknown-old-chat', status: 'running', finishedAt: null,
+    },
+  }));
+  for (let attempt = 0; reads < 2 && attempt < 10; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(reads, 2);
+
+  subject.evictMachineChats(MACHINE);
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'start',
+    job: {
+      ...terminalJob({ id: 'job-new-owner', userMessageId: 'user-new-owner', assistantMessageId: 'assistant-new-owner' }),
+      tabId: 'unknown-new-tab', chatId: 'unknown-new-chat', status: 'running', finishedAt: null,
+    },
+  }));
+  for (let attempt = 0; reads < 3 && attempt < 10; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(reads, 3, 'the re-request owns a new catch-up read immediately');
+
+  rejectOld(new Error('the rejected owner completed late'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(subject.remoteMachineCatchups.size, 1, 'the stale owner cannot clear the replacement owner');
+
+  resolveNew(replacement);
+  for (let attempt = 0; subject.remoteMachineCatchups.size && attempt < 10; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(subject.chat(TAB)?.title, 'Authorized again');
+  assert.equal(subject.remoteMachineCatchups.size, 0);
+  assert.equal(subject.remoteMachinesNeedingCatchup.size, 0);
+});
+
 async function withWindowApi<T>(api: Record<string, unknown>, task: () => Promise<T>): Promise<T> {
   const previousWindow = (globalThis as any).window;
   (globalThis as any).window = { api };
@@ -253,6 +962,17 @@ function terminalJob(opts: Record<string, unknown>): PublicJob {
     stopReason: 'end_turn',
     crashInterrupted: false,
   } as PublicJob;
+}
+
+function rawRemoteMessages(messages: Msg[]): MirrorMsg[] {
+  return structuredClone(messages).map((message) => ({
+    ...message,
+    id: localId(message.id),
+    jobId: message.jobId ? localId(message.jobId) : undefined,
+    turnRootId: message.turnRootId ? localId(message.turnRootId) : undefined,
+    steerContinuationId: message.steerContinuationId ? localId(message.steerContinuationId) : undefined,
+    steerContinuationFor: message.steerContinuationFor ? localId(message.steerContinuationFor) : undefined,
+  })) as MirrorMsg[];
 }
 
 test('local session hydration preserves the exact pre-admission owner and Stop intent', () => {
@@ -617,7 +1337,9 @@ test('remote presentation, queue, controls, workspace, history, create, and dele
 
     subject.setDraft(TAB, 'remote draft');
     await subject.flushSession();
-    subject.enqueue(subject.chat(TAB), 'remote queue');
+	const remoteQueueOwner = subject.chat(TAB) as Chat;
+	remoteQueueOwner.queue = [{ id: tagId(MACHINE, 'remote-queue'), text: 'remote queue' }];
+	subject.markQueueMutation(remoteQueueOwner);
     await subject.flushSession();
 
     const remote = subject.chat(TAB) as Chat;

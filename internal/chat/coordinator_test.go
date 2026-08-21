@@ -123,6 +123,7 @@ func (l *coordinatorLane) send(sequence uint64, operation provider.OperationID, 
 
 type coordinatorDelivery struct {
 	lane          *coordinatorLane
+	startStarted  chan<- struct{}
 	steerStarted  chan<- struct{}
 	steerRelease  <-chan struct{}
 	cancelStarted chan<- struct{}
@@ -132,6 +133,9 @@ func (d coordinatorDelivery) Capabilities() provider.DeliveryCapabilities {
 	return provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true}
 }
 func (d coordinatorDelivery) StartTurn(_ context.Context, input provider.TurnInput) (provider.TurnAdmission, error) {
+	if d.startStarted != nil {
+		d.startStarted <- struct{}{}
+	}
 	turn := provider.TurnRef{OperationID: input.OperationID, NativeID: "turn-" + string(input.OperationID)}
 	admission := provider.TurnAdmission{Turn: turn, Accepted: true}
 	if input.CommitAdmission != nil {
@@ -140,6 +144,59 @@ func (d coordinatorDelivery) StartTurn(_ context.Context, input provider.TurnInp
 		}
 	}
 	return admission, nil
+}
+
+func TestCoordinatorReplyAdmissionFencesGenericProviderClaim(t *testing.T) {
+	engine, err := NewEngine("reply-admission-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := &coordinatorFactory{}
+	coordinator, err := NewCoordinator(engine, coordinatorRegistry(t, map[provider.ID]*coordinatorFactory{"alpha": factory}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+
+	identity := coordinatorLaneIdentity("reply-admission-chat", "alpha")
+	if err := engine.Apply(SelectLane{Identity: identity, Owner: provider.AttachmentOwner{TabID: "tab"}, CWD: "/workspace"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Drain(context.Background()); err != nil {
+		t.Fatalf("create lane: %v", err)
+	}
+	factory.mu.Lock()
+	started := make(chan struct{}, 1)
+	lane := factory.lanes[identity.ID]
+	lane.delivery.startStarted = started
+	factory.mu.Unlock()
+
+	release := coordinator.BeginReplyAdmission()
+	if err := engine.Apply(Submit{
+		OperationID: "reply-admission-turn", Text: "question",
+		Presentation: provider.TurnPresentation{Origin: "human"},
+	}); err != nil {
+		release()
+		t.Fatal(err)
+	}
+	coordinator.Wake()
+	if executed, err := coordinator.ExecuteNext(context.Background()); err != nil || executed {
+		release()
+		t.Fatalf("provider effect crossed pending reply: executed=%v err=%v", executed, err)
+	}
+	select {
+	case <-started:
+		release()
+		t.Fatal("provider start crossed pending reply")
+	default:
+	}
+
+	release()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("provider start did not resume after reply release")
+	}
 }
 func (d coordinatorDelivery) Steer(context.Context, provider.SteerInput) (provider.SteerReceipt, error) {
 	if d.steerStarted != nil {
@@ -410,8 +467,8 @@ func TestCoordinatorExactCancelPreemptsSlowSteerDrain(t *testing.T) {
 		t.Fatal("provider cancellation was not invoked")
 	}
 	state := engine.Snapshot()
-	if !state.QueueControl.Paused || !outboxHas(&state, cancelEffectID("cancel"), OutboxAccepted) {
-		t.Fatalf("cancel did not durably pause and acknowledge: control=%#v outbox=%#v", state.QueueControl, state.Outbox)
+	if !outboxHas(&state, cancelEffectID("cancel"), OutboxAccepted) {
+		t.Fatalf("cancel did not durably acknowledge: outbox=%#v", state.Outbox)
 	}
 	close(steerRelease)
 	if err := <-drainDone; err != nil {

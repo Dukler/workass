@@ -459,6 +459,10 @@ type PromptResult struct {
 }
 
 type JobStartOptions struct {
+	// JobID is supplied only by the durable provider-lane actor. It projects the
+	// immutable ChatID+OperationID pair onto the frozen public job namespace so
+	// admission can be acknowledged before any provider work begins.
+	JobID          string
 	Kind           string
 	Key            any
 	Title          string
@@ -477,6 +481,11 @@ type JobStartOptions struct {
 	ModelID            string
 	ModeID             string
 	ProviderID         string
+	// DeliveryCapabilities is the exact typed snapshot of the lane that owns
+	// this turn. It is projected additively on the existing job payload so a
+	// session attachment cannot lose live-steer authority between admission and
+	// the later provider start event.
+	DeliveryCapabilities *providercontract.DeliveryCapabilities
 	// HumanAuthored separates a request from a resumption. Both can arrive
 	// through the same queue, so only the caller knows which this is; getting it
 	// wrong would either lose the user's request or invent a new one.
@@ -555,6 +564,11 @@ type Job struct {
 	harnessTurn bool
 
 	cancelled bool
+	// admitting reserves the deterministic public id before the actor admission
+	// callback commits. It is manager-private: cancellation may claim the exact
+	// reservation, but read projections must not expose it as running until the
+	// actor owns the native turn.
+	admitting bool
 	output    strings.Builder
 	internal  bool
 	// startOpts is the immutable admission snapshot. Runtime control
@@ -565,12 +579,14 @@ type Job struct {
 	// actorRecoveryPending is set only when an actor-managed provider host dies.
 	// The actor owns exact resume/readback; Manager only cleans up its
 	// process-local job and never starts a recovery session.
-	actorRecoveryPending atomic.Bool
-	inputDispatched      atomic.Bool
-	inputConsumed        atomic.Bool
-	lastActivityNanos    atomic.Int64
-	waitingPermission    atomic.Bool
-	consumedSteerIDs     sync.Map // map[string]struct{}
+	actorRecoveryPending  atomic.Bool
+	inputDispatched       atomic.Bool
+	inputDispatchBoundary chan struct{}
+	inputDispatchOnce     sync.Once
+	inputConsumed         atomic.Bool
+	lastActivityNanos     atomic.Int64
+	waitingPermission     atomic.Bool
+	consumedSteerIDs      sync.Map // map[string]struct{}
 
 	stdoutBuf   strings.Builder
 	stdoutPhase string
@@ -625,7 +641,25 @@ func (j *Job) claimInputConsumption() bool {
 func (j *Job) markInputDispatched() {
 	if j != nil {
 		j.inputDispatched.Store(true)
+		j.settleInputDispatch()
 	}
+}
+
+func (j *Job) settleInputDispatch() {
+	if j == nil || j.inputDispatchBoundary == nil {
+		return
+	}
+	j.inputDispatchOnce.Do(func() { close(j.inputDispatchBoundary) })
+}
+
+func (j *Job) waitForInputDispatch() bool {
+	if j == nil {
+		return false
+	}
+	if j.inputDispatchBoundary != nil {
+		<-j.inputDispatchBoundary
+	}
+	return j.inputWasDispatched()
 }
 
 func (j *Job) inputWasDispatched() bool {
@@ -675,6 +709,9 @@ func (j *Job) Public() map[string]any {
 		"userMessageId":      nullableString(j.startOpts.UserMessageID),
 		"assistantMessageId": nullableString(j.startOpts.AssistantMessageID),
 		"promptText":         j.startOpts.PromptText,
+	}
+	if j.startOpts.DeliveryCapabilities != nil {
+		out["deliveryCapabilities"] = DeliveryCapabilitiesForWire(*j.startOpts.DeliveryCapabilities)
 	}
 	if images := j.assistantImagesSnapshot(); len(images) > 0 {
 		out["images"] = images

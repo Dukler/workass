@@ -895,9 +895,6 @@ table.mdtable th { background: var(--field); font-weight: 600; }
    ✕ appears only on hover and is the only button. */
 .qlist { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; width: 100%; max-width: var(--read); margin: 0 auto 9px; }
 .qlabel { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--faint); margin: 0 2px 1px; letter-spacing: .02em; }
-.qresume { border: 0; background: transparent; color: var(--acc); padding: 0; font: inherit; cursor: pointer; }
-.qresume:hover { text-decoration: underline; }
-.qresume:disabled { cursor: default; opacity: .55; text-decoration: none; }
 .qrow { display: inline-flex; align-items: flex-start; gap: 8px; width: fit-content; max-width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 6px 8px 6px 11px; cursor: grab; }
 .qrow:hover { border-color: var(--line2); }
 .qrow:active { cursor: grabbing; }

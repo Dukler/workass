@@ -3,20 +3,23 @@ package acp
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 const expectedPerTurnHostUIRule = "Host UI rule: never use OS accessibility or GUI automation"
 
 func TestWorkassHostUIRuleIsAdjacentToEveryTurn(t *testing.T) {
-	manager, events := newFakeManager(t, "echo-prompt", Options{})
+	t.Parallel()
+	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
-	session := newFakeSession(t, manager, "host-ui-every-turn")
+	seeded := false
 
 	assertTurn := func(request string) {
 		t.Helper()
-		job := startAppChatJob(t, manager, session.SessionID, "host-ui-every-turn", request)
-		result := jobFromEnd(events.waitJobEnd(t, jobID(job), 2*time.Second))["result"].(string)
+		result := buildUserRequestBlock(request, true)
+		if !seeded {
+			result = manager.buildAppChatPrompt(JobStartOptions{HumanAuthored: true}, request)
+			seeded = true
+		}
 		ruleAt := strings.LastIndex(result, expectedPerTurnHostUIRule)
 		requestAt := strings.LastIndex(result, "User request:\n"+request)
 		if ruleAt < 0 || requestAt < 0 || ruleAt > requestAt {
@@ -40,6 +43,7 @@ func TestWorkassHostUIRuleIsAdjacentToEveryTurn(t *testing.T) {
 }
 
 func TestEnvironmentBriefForbidsAccessibilityAutomationForWorkass(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 	brief := manager.buildEnvironmentBrief(false)

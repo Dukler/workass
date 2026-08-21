@@ -128,6 +128,27 @@ func DeriveLaneID(chatID string, realm Realm, epoch WorkspaceEpoch) LaneID {
 	return LaneID("lane-" + hex.EncodeToString(hash.Sum(nil)[:16]))
 }
 
+// DeriveJobID projects one immutable actor operation onto the frozen public
+// job namespace. The value is deterministic so a lost job:start reply can be
+// reconstructed before, during, or after provider admission without creating
+// a second provider input.
+func DeriveJobID(chatID string, operationID OperationID) string {
+	chatIdentity, err := ValidateOperationID(chatID)
+	if err != nil {
+		return ""
+	}
+	operationID, err = ValidateOperationID(string(operationID))
+	if err != nil {
+		return ""
+	}
+	hash := sha256.New()
+	for _, part := range []string{"workass-job-v1", string(chatIdentity), string(operationID)} {
+		_, _ = hash.Write([]byte(fmt.Sprintf("%d:", len(part))))
+		_, _ = hash.Write([]byte(part))
+	}
+	return "app-chat-" + hex.EncodeToString(hash.Sum(nil)[:16])
+}
+
 // ThreadRef names one provider-native lineage. RootID never changes. HeadID may
 // advance only through an adapter-attested lineage event; a host restart is not
 // such an event and must resume the exact current head.

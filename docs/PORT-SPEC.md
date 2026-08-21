@@ -348,6 +348,19 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   rollback UI and continues polling the stable feed. Builds predating this law
   require one manual portable replacement before in-app updates can bootstrap
   themselves.
+- **Visible independent update ownership** (user law 2026-08-20): activation
+  and rollback filesystem effects belong to a verified updater worker outside
+  the mutable installation tree, never Electron's primary shell process. A
+  separate progress process must prove its exact transaction identity and a
+  successfully rendered visible window before the old shell commits or quits.
+  It remains the visible owner through shell/daemon shutdown, snapshot,
+  activation, health verification, and any rollback until the replacement or
+  restored shell is visibly healthy. Losing that owner fences or re-establishes
+  it before another destructive effect. Progress rendering and receipt
+  heartbeats are single-flight, acknowledgement-backed, bounded, and leave no
+  repeating cleanup/render process after terminal ownership ends. Future
+  releases stage and verify their updater runtime from the incoming artifact so
+  an outgoing release cannot permanently pin updater behavior.
 
 Zero third-party Go dependencies unless this spec grants them. WebSocket is
 hand-rolled RFC 6455 exactly as `desktop/lan-server.js` already proves
@@ -356,6 +369,15 @@ hand-rolled RFC 6455 exactly as `desktop/lan-server.js` already proves
 ## 2. Wire protocol (FROZEN)
 
 Transport: WebSocket, text frames, one JSON object per frame.
+
+Remote machine mounts use one authenticated projection/data connection plus
+same-device control connections for user admission and urgent cancellation.
+All connections speak the identical frozen frames below. Auxiliary control
+connections receive no projection replay or event broadcast, never substitute
+for a missing primary connection, and never fall back to the bulk data socket;
+this keeps a large `session:get` frame from head-of-line blocking interactive
+admission, while the urgent connection keeps a provider acknowledgement from
+blocking Stop.
 
 - Client → server: `{ "t": "invoke", "id": <seq>, "channel": "<name>", "args": [...] }`
 - Server → client: `{ "t": "reply", "id": <seq>, "result": <any>, "error": <string|null> }`
@@ -540,22 +562,22 @@ shell, NOT the daemon.
     steering from a concurrent ACP `session/prompt`. Preserve three distinct
     paths: (a) packaged Codex exposes app-server's real `turn/steer` through the
     version-gated `_workass/codex/steer` adapter request; Workass MUST wait for
-    its `{turnId}` acknowledgement, and an absent/rejected extension interrupts
-    the active turn and immediately runs the persisted follow-up instead of
-    hanging; (b) Claude steers LIVE when the packaged adapter advertises the
-    version-gated `_workass/claude/steer` extension (user correction
-    2026-07-16, supersedes the cancel-first rule): the direction is injected
-    into the running SDK query's streaming input and Workass MUST wait for the
+    its `{turnId}` acknowledgement. An absent or explicitly rejected extension
+    returns the same input to the composer without interrupting, replaying, or
+    converting it into FIFO work; (b) Claude steers LIVE when the packaged
+    adapter advertises the version-gated `_workass/claude/steer` extension
+    (user correction 2026-07-16, supersedes the cancel-first rule): the
+    direction is injected into the running SDK query's streaming input and
+    Workass MUST wait for the
     adapter's accepted prompt UUID (`{turnId}`) — a frame written to stdin is
     not acknowledgement. Timeout → uncertain: never re-send, never interrupt.
     Explicit rejection only occurs when no live turn exists, so it never
     interrupts either. The `_workass_claude_steer_consumed` session update is
-    the semantic "applied" receipt. Older Claude adapters keep the legacy
-    fallback: persist a separate FIFO follow-up FIRST, then send
-    `session/cancel` so the queued direction starts at the cancellation
-    terminal — never wait for natural completion;
+    the semantic "applied" receipt. An adapter without that live capability does
+    not receive an explicit steer and cannot convert it into another intent;
     (c) every other agent keeps the capability-gated `_session/steer`
-    notification, falling back to the client queue when unsupported. The
+    notification. Unsupported or explicitly rejected steering returns ownership
+    to the composer; only ordinary `Enter` creates client FIFO work. The
     deterministic mock remains the oracle for path (c); real-adapter canaries
     verify protocol acknowledgement/cancellation, never model quality.
 14. **Queue and steer are separate user intents** (user correction 2026-07-13):
@@ -563,37 +585,43 @@ shell, NOT the daemon.
     and never interrupts the active turn; `Cmd+Enter` explicitly invokes the
     provider-aware steering law above. `Shift+Enter` remains newline. The send
     button is the explicit live-steer/stop control and must not erase the normal
-    queue shortcut. Explicit Stop durably pauses FIFO dispatch before provider
-    cancellation; the cancellation terminal MUST leave every queued row visible
-    and idle until the user explicitly resumes that exact pause revision. A
-    queued follow-up may never auto-start and make a successful Stop look like
-    it failed. Once their commands are durable, live steer and Stop use targeted
+    queue shortcut. Explicit Stop cancels only the exact active turn. It never
+    pauses, resumes, clears, or otherwise mutates durable FIFO rows, and there is
+    no separate pause/continue state or control. Once the cancelled turn reaches
+    its exact terminal boundary, ordinary FIFO dispatch promotes the next queued
+    row; a pre-admission cancellation supplies that same terminal boundary
+    directly. Once their commands are durable, live steer and Stop use targeted
     effect claims: neither may wait behind unrelated actor outbox work, and no
     actor mutex may be held while awaiting a provider acknowledgement (user
-    correction 2026-08-19).
+    correction 2026-08-20).
     A submitted direction has exactly one visible owner. For native Codex, it
     leaves the composer immediately as one durable pending preview while the
     current sampling step finishes; the matching `userMessage.clientId` receipt
     commits its canonical semantic position between sampling steps, immediately
-    before the next model/tool step. That semantic boundary MUST NOT be painted
-    as a user bubble between assistant slices (user correction 2026-08-20): the
-    same row stays in the composer-adjacent steering tray for the whole active
-    turn, then the pure presentation projection places it after the terminal
-    assistant slice. Provider chronology, stable ids, persistence, and resume
-    retain the canonical receipt order; no row is copied or mutated for display.
-    Adapters without that receipt use their successful acknowledgement as the
-    semantic commit boundary and the same presentation law. Turn end reveals an
-    admitted but unconsumed row after the completed assistant and never replays
-    it. Generic live steering retains one stable pending transcript row.
-    An acknowledged native steer remains visibly "Steering…" while its semantic
-    receipt boundary is still pending; only a committed/applied row may say
-    "Steered". Attachments transfer into that pending owner in the same renderer
-    commit and remain continuously visible through acknowledgement, receipt,
-    transcript commit, or an explicit one-time transfer to FIFO.
-    Only an explicit live-steer rejection may transfer its owner to one FIFO
-    row. FIFO promotion removes the queue row and creates the transcript turn in one
-    renderer commit; transcript → queue → transcript rubber-banding is
-    forbidden.
+    before the next model/tool step. PRESENTATION CLARIFICATION (user correction
+    2026-08-20, superseding the whole-turn tray rule): only a genuinely
+    unresolved live steer (`sending` or transport-`uncertain`) may count or
+    render in the composer-adjacent Steering tray. A definite provider
+    acknowledgement transfers that same stable user row to the transcript
+    immediately and exactly once, after the assistant content already visible
+    at that moment; it must leave the Steering count even while the turn keeps
+    running. For receipt-bearing lanes, only the reserved assistant
+    continuation remains hidden until the canonical `userMessage.clientId`
+    receipt commits the semantic boundary. That receipt reveals the same
+    continuation after the already-visible user row without moving, copying, or
+    repainting the row elsewhere. Applied rows remain in canonical receipt
+    order. Adapters without the later receipt use their successful
+    acknowledgement as the semantic commit boundary. Turn end moves any still
+    unresolved owner out of the live tray after the completed assistant and
+    never replays it. Generic live steering retains one stable transcript row.
+    Attachments transfer with that one owner in the same renderer commit and
+    remain continuously visible through acknowledgement, receipt, transcript
+    commit, terminal settlement, or an explicit rejection back to the composer.
+    An explicit live-steer rejection removes its temporary owner and returns the
+    same text to the composer; it never creates a FIFO row. FIFO promotion
+    belongs only to an ordinary queue intent and removes that queue row while
+    creating the transcript turn in one renderer commit. Transcript → queue →
+    transcript rubber-banding is forbidden.
     A daemon-owned resume may become active while a renderer is still awaiting
     cold session initialization. If an ordinary capability-aware `job:start`
     then loses the exact chat's atomic start race, Workass MUST return one
@@ -799,11 +827,12 @@ contract from code. Each entry is where that semantics is normatively pinned.
 
 - **Steering** — §3 landmines 13 (provider-aware dispatch: Codex `{turnId}`
   admission wait, Claude native live steer via `_workass/claude/steer` with
-  durable-FIFO-then-interrupt as the legacy fallback, generic `_session/steer`)
-  and 14 (queue vs steer intents; admission ≠ consumption: an acknowledged
-  steer stays "Steering…" until the canonical `userMessage` receipt; only a
-  consumed/committed row may read "Steered"; timeout → uncertain, never
-  replayed). Durable-before-delivery: §3.4e.
+  no interrupt/FIFO fallback, generic `_session/steer`)
+  and 14 (queue vs steer intents; admission ≠ consumption: only unresolved
+  live ownership stays in Steering; acknowledgement moves the same row to the
+  transcript immediately, while a receipt-bearing continuation stays hidden
+  until canonical consumption; timeout → uncertain, never replayed; terminal
+  always clears the live tray). Durable-before-delivery: §3.4e.
 - **Typed assistant phases (results)** — §3 landmine 17. Provider-neutral
   `_meta.workassAssistantPhase`; `_meta.codex.phase` is the compatibility
   source; only `commentary`/`final_answer` cross the boundary; phase

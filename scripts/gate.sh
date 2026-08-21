@@ -33,7 +33,14 @@ go build ./... && go vet ./...
 # Capture, then keep the tail when it passes and the failures when it does not.
 test_log="$(mktemp)"
 trap 'rm -f "$test_log"' EXIT INT TERM
-if go test ./... -count=1 >"$test_log" 2>&1; then
+run_go_tests() {
+  if [ "${WORKASS_GATE_FRESH:-0}" = 1 ]; then
+    go test ./... -count=1 -p=2 -parallel=2
+  else
+    go test ./... -p=2 -parallel=2
+  fi
+}
+if run_go_tests >"$test_log" 2>&1; then
   tail -12 "$test_log"
 else
   # Dropping the packages that passed is what leaves room for the ones that did

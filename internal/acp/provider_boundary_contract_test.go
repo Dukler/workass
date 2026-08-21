@@ -20,6 +20,7 @@ import (
 // sources use a small comment-aware lexer because the repository deliberately
 // ships no JavaScript parser dependency.
 func TestProviderPrivateTokensStayAtRegisteredBoundaries(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	violations := append(
 		scanGoProviderBoundaries(t, root),

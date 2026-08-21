@@ -345,12 +345,8 @@ func TestChatControlInvalidOperationCannotCancelOrDeleteRunningTurn(t *testing.T
 		t.Fatalf("idle cancel receipt = %#v, err=%v", idleCancel, err)
 	}
 	state, ok = runtime.Snapshot(chatID)
-	if !ok || !state.QueueControl.Paused || state.QueueControl.Revision == 0 {
-		t.Fatalf("explicit stop did not leave its durable queue gate: %#v", state.QueueControl)
-	}
-	if _, err := runtime.ResumeQueue(context.Background(), tabID, chatID,
-		"control-resume-after-stop", state.QueueControl.Revision); err != nil {
-		t.Fatalf("resume exact stop boundary: %v", err)
+	if !ok || state.Foreground != nil {
+		t.Fatalf("explicit stop did not settle the exact active turn: %#v", state.Foreground)
 	}
 
 	if _, err := runtime.Start(context.Background(), map[string]any{

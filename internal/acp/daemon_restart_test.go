@@ -74,6 +74,7 @@ func waitForRestartEnd(t *testing.T, collector *restartCollector, id string) map
 // has to be recorded here or the turn is indistinguishable from an agent error
 // and the sidebar repaints the chat as "Falló" on every restart.
 func TestResetMarksInFlightTurnInterrupted(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	collector := newRestartCollector()
 	manager := NewManager(Options{
@@ -118,6 +119,7 @@ func TestResetMarksInFlightTurnInterrupted(t *testing.T) {
 // A turn that ends on its own must stay clean: the flag means "we stopped it",
 // and an agent error still has to reach the sidebar as a failure.
 func TestCompletedTurnIsNotMarkedInterrupted(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	collector := newRestartCollector()
 	manager := NewManager(Options{

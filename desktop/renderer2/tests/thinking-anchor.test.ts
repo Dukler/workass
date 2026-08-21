@@ -57,7 +57,7 @@ test('the running pulse is one scrollport-chrome row after the projected transcr
       assistant('assistant-head', 'ASSISTANT-HEAD-ROW', {
         turnRootId: 'assistant-head', turnTerminal: false,
       }),
-      user('steer-receipt', 'LIVE-STEER-TRAY-ONLY', {
+      user('steer-receipt', 'LIVE-STEER-TRANSCRIPT', {
         turnRootId: 'assistant-head', steerState: 'applied',
       }),
       assistant('assistant-tail', 'ASSISTANT-TAIL-ROW', {
@@ -76,7 +76,7 @@ test('the running pulse is one scrollport-chrome row after the projected transcr
   assert.match(html, /class="transcriptviewport has-live"/);
   assert.equal(html.split('class="thinklive"').length - 1, 1);
   assert.ok(lastMessage >= 0 && pulse > lastMessage, 'the pulse follows every projected transcript row');
-  assert.doesNotMatch(html, /LIVE-STEER-TRAY-ONLY/);
+  assert.equal(html.split('LIVE-STEER-TRANSCRIPT').length - 1, 1);
 });
 
 test('the live pulse has a physical bottom anchor independent of document height', () => {

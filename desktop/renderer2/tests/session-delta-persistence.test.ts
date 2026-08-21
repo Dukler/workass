@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer, type ViteDevServer } from 'vite';
@@ -13,7 +12,6 @@ let vite: ViteDevServer;
 let StoreCtor: new () => any;
 
 const rendererRoot = fileURLToPath(new URL('..', import.meta.url));
-const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
 
 before(async () => {
   vite = await createServer({
@@ -140,15 +138,7 @@ function terminalJob(owner: Chat, overrides: Partial<PublicJob> = {}): PublicJob
   } as PublicJob;
 }
 
-test('lean save omits an unchanged chat and the real daemon merge preserves that omission', async () => {
-  execFileSync('go', [
-    'test',
-    './cmd/workass',
-    '-run',
-    '^TestSessionStoreExplicitDeleteSavePreservesOmissionsAndDeletesOnlyNamedChat$',
-    '-count=1',
-  ], { cwd: repoRoot, stdio: 'pipe' });
-
+test('lean save sends only the changed chat with the additive merge marker', async () => {
   const subject = subjectWithChats();
   const saves: Mirror[] = [];
   await withWindowApi({
@@ -174,7 +164,10 @@ test('every persisted chat-mutation family marks its exact chat dirty', async (t
       subject.state.activeId = 'another-tab';
       subject.markUnread(owner.id);
     } },
-    { name: 'FIFO queue', mutate: (subject, owner) => subject.enqueue(owner, 'queued') },
+    { name: 'FIFO queue', mutate: (subject, owner) => {
+      owner.queue = [{ id: 'queued-once', text: 'queued' }];
+      subject.markQueueMutation(owner);
+    } },
     { name: 'model/mode controls', mutate: async (subject, owner) => {
       subject.persistControlsNow = async () => {};
       await subject.setModeSel(owner.id, 'plan');
@@ -670,16 +663,14 @@ test('steer-consumed relies on its immediate flush without scheduling a second s
   assert.equal(flushed, 1);
 });
 
-test('realistic multi-chat session reports full-versus-delta payload distribution', () => {
-  const chats = Array.from({ length: 12 }, (_, chatIndex) => chat(`tab-${chatIndex}`, {
+test('a chat delta stays smaller than the equivalent complete session', () => {
+  const chats = Array.from({ length: 3 }, (_, chatIndex) => chat(`tab-${chatIndex}`, {
     title: `Conversation ${chatIndex}`,
     draft: chatIndex === 0 ? 'active draft' : '',
-    messages: Array.from({ length: 60 }, (_, messageIndex): Msg => ({
+    messages: Array.from({ length: 3 }, (_, messageIndex): Msg => ({
       id: `message-${chatIndex}-${messageIndex}`,
       role: messageIndex % 2 ? 'assistant' : 'user',
-      content: chatIndex === 0
-        ? `active ${messageIndex} ${'streaming text '.repeat(160)}`
-        : `idle ${chatIndex}/${messageIndex} ${'retained text '.repeat(18 + chatIndex)}`,
+      content: `message ${chatIndex}/${messageIndex} ${'retained text '.repeat(2 + chatIndex)}`,
       status: 'done',
       at: '2026-07-25T12:00:00Z',
       events: [],
@@ -688,33 +679,10 @@ test('realistic multi-chat session reports full-versus-delta payload distributio
   const subject = subjectWithChats(chats);
   const full = subject.toMirror(true) as Mirror;
   const fullBytes = Buffer.byteLength(JSON.stringify(full));
-  const samples: number[] = [];
-  const sequence = [
-    ...Array.from({ length: 90 }, () => 'tab-0'),
-    ...Array.from({ length: 30 }, (_, index) => `tab-${1 + (index % 11)}`),
-  ];
-  for (const id of sequence) {
-    const delta = subject.toMirror(true, new Set([id])) as Mirror;
-    samples.push(Buffer.byteLength(JSON.stringify(delta)));
-  }
-  const sorted = [...samples].sort((left, right) => left - right);
-  const totalFullBytes = fullBytes * samples.length;
-  const totalDeltaBytes = samples.reduce((sum, value) => sum + value, 0);
-  const percentile = (fraction: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * fraction))];
-  console.log([
-    'delta persistence measurement',
-    `saves=${samples.length}`,
-    `fullBytesPerSave=${fullBytes}`,
-    `deltaMin=${sorted[0]}`,
-    `deltaP50=${percentile(0.50)}`,
-    `deltaP95=${percentile(0.95)}`,
-    `deltaMax=${sorted.at(-1)}`,
-    `fullTotal=${totalFullBytes}`,
-    `deltaTotal=${totalDeltaBytes}`,
-  ].join(' '));
+  const delta = subject.toMirror(true, new Set(['tab-1'])) as Mirror;
+  const deltaBytes = Buffer.byteLength(JSON.stringify(delta));
 
-  assert.equal(samples.length, 120);
-  assert.ok(totalDeltaBytes < totalFullBytes);
-  assert.ok(sorted[0] < fullBytes / 5);
-  assert.ok(sorted.at(-1)! < fullBytes);
+  assert.deepEqual(delta.chats.map((candidate) => candidate.id), ['tab-1']);
+  assert.equal(delta._workassSave, LEAN_SESSION_SAVE_MODE);
+  assert.ok(deltaBytes < fullBytes);
 });

@@ -5,7 +5,7 @@ const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { Readable } = require('node:stream');
+const { PassThrough, Readable } = require('node:stream');
 const test = require('node:test');
 const {
   UpdateManager,
@@ -30,6 +30,7 @@ const {
   runUpdateTransactionCleanupWorker,
   snapshotReleaseManifest,
   spawnArmedUpdateWorker,
+  spawnVisibleUpdateProgress,
   stageAndVerifyRelease,
   validateArchiveLinksBeforeExtraction,
   validateExtractedTree,
@@ -90,6 +91,7 @@ function writeWindowsRelease(root, version = '1.2.0') {
   for (const relative of [
     ['resources', 'app', 'update-manager.js'],
     ['resources', 'app', 'update-worker.js'],
+    ['resources', 'app', 'update-progress.js'],
     ['resources', 'app', 'update-lock-recovery.js'],
     ['resources', 'renderer', 'index.html'],
     ['frontier-hosts', 'windows-amd64', 'claude-native-host.mjs'],
@@ -99,6 +101,19 @@ function writeWindowsRelease(root, version = '1.2.0') {
   writeFakeWindowsPE(path.join(root, 'Workass.exe'));
   writeFakeWindowsPE(path.join(root, 'workass-daemon.exe'));
   writeFakeWindowsPE(path.join(root, 'node', 'windows-amd64', 'node.exe'));
+}
+
+function writeMacUpdaterRuntime(root) {
+  const resources = path.join(root, 'Contents', 'Resources');
+  const executable = path.join(root, 'Contents', 'MacOS', 'Workass');
+  fs.mkdirSync(path.join(resources, 'app'), { recursive: true });
+  fs.mkdirSync(path.dirname(executable), { recursive: true });
+  fs.writeFileSync(executable, 'app');
+  fs.writeFileSync(path.join(resources, 'app', 'update-worker.js'), 'worker');
+  fs.writeFileSync(path.join(resources, 'app', 'update-progress.js'), 'progress');
+  const incomingNode = path.join(resources, 'runtime', 'node', 'darwin-arm64', 'bin', 'node');
+  fs.mkdirSync(path.dirname(incomingNode), { recursive: true });
+  fs.copyFileSync(process.execPath, incomingNode);
 }
 
 function writeStoredZip(file, entries) {
@@ -289,15 +304,45 @@ function managerFixture({
         });
         return child;
       },
+      spawnVisibleProgress: async ({ transaction }) => {
+        calls.push('spawn:update-progress');
+        const child = new EventEmitter();
+        child.pid = 4343;
+        child.exitCode = null;
+        child.signalCode = null;
+        child.unref = () => {};
+        child.kill = () => { child.exitCode = 0; child.emit('exit', 0, null); };
+        fs.writeFileSync(transaction.progressReceiptPath, `${JSON.stringify({
+          schemaVersion: 1,
+          updateId: transaction.updateId,
+          installationId: transaction.installationId,
+          workerId: transaction.workerId,
+          progressId: transaction.progressId,
+          pid: child.pid,
+          executablePath: transaction.progressExecutable,
+          transactionPath: path.join(transaction.transactionRoot, 'transaction.json'),
+          phase: 'visible',
+          displayedPhase: 'preparing',
+          windowVisible: true,
+          updatedAt: new Date().toISOString(),
+        })}\n`);
+        return child;
+      },
+      terminateProgress: async (child) => {
+        if (child?.exitCode == null) child?.kill?.();
+        return true;
+      },
       schedule: (fn) => { fn(); return { unref() {} }; },
       cleanupUpdateTransactions: async () => ({ removed: 0, pruned: 0, retained: 0 }),
-      prepareWorkerRuntime: async ({ transactionRoot, workerSource, nodeSource, platform: targetPlatform }) => {
+      prepareWorkerRuntime: async ({ transactionRoot, workerSource, progressSource, nodeSource, platform: targetPlatform }) => {
         const workerPath = path.join(transactionRoot, 'update-worker.js');
-        const preparedNodePath = targetPlatform === 'win32' ? path.join(transactionRoot, 'updater-node.exe') : nodeSource;
+        const progressModulePath = path.join(transactionRoot, 'update-progress.js');
+        const preparedNodePath = path.join(transactionRoot, targetPlatform === 'win32' ? 'updater-node.exe' : 'updater-node');
         await fs.promises.mkdir(transactionRoot, { recursive: true });
         await fs.promises.copyFile(workerSource, workerPath);
-        if (targetPlatform === 'win32') await fs.promises.copyFile(nodeSource, preparedNodePath);
-        return { workerPath, nodePath: preparedNodePath };
+        await fs.promises.copyFile(progressSource, progressModulePath);
+        await fs.promises.copyFile(nodeSource, preparedNodePath);
+        return { workerPath, progressModulePath, nodePath: preparedNodePath };
       },
       ...dependencyOverrides,
     },
@@ -330,15 +375,23 @@ function managerFixture({
     fs.mkdirSync(transactionRoot, { recursive: true });
     const workerPath = path.join(transactionRoot, 'update-worker.js');
     fs.writeFileSync(workerPath, 'worker');
-    const preparedNodePath = platform === 'win32' ? path.join(transactionRoot, 'updater-node.exe') : nodePath;
-    if (platform === 'win32') fs.copyFileSync(nodePath, preparedNodePath);
+    const progressModulePath = path.join(transactionRoot, 'update-progress.js');
+    fs.writeFileSync(progressModulePath, 'progress');
+    const preparedNodePath = path.join(transactionRoot, platform === 'win32' ? 'updater-node.exe' : 'updater-node');
+    fs.copyFileSync(nodePath, preparedNodePath);
+    const incomingTarget = platform === 'darwin'
+      ? path.join(path.dirname(installTarget), `.Workass.app.incoming-${updateId}`)
+      : path.join(transactionRoot, 'incoming-release');
+    const progressExecutable = platform === 'darwin'
+      ? path.join(incomingTarget, 'Contents', 'MacOS', 'Workass')
+      : path.join(incomingTarget, 'Workass.exe');
+    fs.mkdirSync(path.dirname(progressExecutable), { recursive: true });
+    fs.writeFileSync(progressExecutable, 'app');
     manager.prepared = {
       updateId,
       transactionRoot,
       installTarget,
-      incomingTarget: platform === 'darwin'
-        ? path.join(path.dirname(installTarget), `.Workass.app.incoming-${updateId}`)
-        : path.join(transactionRoot, 'incoming-release'),
+      incomingTarget,
       backupTarget: platform === 'darwin'
         ? path.join(path.dirname(installTarget), `.Workass.app.previous-${updateId}`)
         : path.join(transactionRoot, 'installed-before-activation'),
@@ -348,7 +401,9 @@ function managerFixture({
       artifact: release.artifacts.update,
       release,
       workerPath,
+      progressModulePath,
       nodePath: preparedNodePath,
+      progressExecutable,
     };
     manager.publish({ phase: 'ready', targetVersion: '1.2.0' });
   }
@@ -368,13 +423,14 @@ function seedRecoveryTransaction({ manager, installTarget, installationIdentity 
     ? path.join(path.dirname(installTarget), `.Workass.app.previous-${updateId}`)
     : path.join(transactionRoot, 'installed-before-activation');
   const transaction = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     updateId,
     platform: manager.platform,
     currentVersion: '1.1.0',
     targetVersion: '1.2.0',
     shellPID: 4000,
     workerId,
+    progressId: `progress-${'8'.repeat(32)}`,
     installationId: installationIdentity.installationId,
     transactionRoot,
     installTarget,
@@ -386,6 +442,13 @@ function seedRecoveryTransaction({ manager, installTarget, installationIdentity 
     receiptPath: manager.receiptPath,
     journalPath: path.join(transactionRoot, 'journal.json'),
     leasePath: path.join(transactionRoot, 'worker-lease.json'),
+    workerPath: path.join(transactionRoot, 'update-worker.js'),
+    workerRuntimePath: path.join(transactionRoot, manager.platform === 'win32' ? 'updater-node.exe' : 'updater-node'),
+    progressModulePath: path.join(transactionRoot, 'update-progress.js'),
+    progressReceiptPath: path.join(transactionRoot, 'progress-receipt.json'),
+    progressExecutable: manager.platform === 'darwin'
+      ? path.join(incomingTarget, 'Contents', 'MacOS', 'Workass')
+      : path.join(incomingTarget, 'Workass.exe'),
     daemonHealthURL: `${manager.runtime.daemonURL}/workass/health`,
     shellStatusURL: `http://127.0.0.1:${manager.runtime.viewPort}/__workass-shell/status`,
     requireVisibleWindow: true,
@@ -393,7 +456,10 @@ function seedRecoveryTransaction({ manager, installTarget, installationIdentity 
   };
   fs.mkdirSync(transactionRoot, { recursive: true });
   fs.writeFileSync(path.join(transactionRoot, 'update-worker.js'), 'worker');
-  if (manager.platform === 'win32') fs.copyFileSync(process.execPath, path.join(transactionRoot, 'updater-node.exe'));
+  fs.writeFileSync(path.join(transactionRoot, 'update-progress.js'), 'progress');
+  fs.copyFileSync(process.execPath, transaction.workerRuntimePath);
+  fs.mkdirSync(path.dirname(transaction.progressExecutable), { recursive: true });
+  fs.writeFileSync(transaction.progressExecutable, 'app');
   fs.writeFileSync(transaction.journalPath, `${JSON.stringify({
     schemaVersion: 1,
     updateId,
@@ -611,6 +677,63 @@ test('terminal pruning removes updater payloads off-main, retries state cleanup,
   assert.equal(fs.existsSync(transaction.transactionRoot), true);
 });
 
+test('terminal cleanup preserves the executable tree until the visible progress owner exits', () => {
+  const { manager } = managerFixture({ platform: 'win32', primeReady: false });
+  const transaction = seedRecoveryTransaction({
+    manager,
+    installTarget: manager.installTarget,
+    installationIdentity: manager.installationIdentity,
+  }, {
+    updateId: 'upd-live-progress-1234',
+    journal: {
+      phase: 'healthy', terminal: true, installedVersion: '1.2.0',
+      activated: true, healthVerified: true,
+    },
+  });
+  fs.writeFileSync(transaction.progressReceiptPath, `${JSON.stringify({
+    schemaVersion: 1,
+    updateId: transaction.updateId,
+    installationId: transaction.installationId,
+    workerId: transaction.workerId,
+    progressId: transaction.progressId,
+    pid: process.pid,
+    executablePath: transaction.progressExecutable,
+    transactionPath: path.join(transaction.transactionRoot, 'transaction.json'),
+    phase: 'terminal',
+    displayedPhase: 'healthy',
+    windowVisible: true,
+    updatedAt: new Date().toISOString(),
+  })}\n`);
+  const request = {
+    transactionsRoot: path.join(manager.updateRoot, 'transactions'),
+    platform: 'win32',
+    receiptPath: manager.receiptPath,
+    installationId: manager.installationIdentity.installationId,
+    installTarget: manager.installTarget,
+    receipt: {
+      updateId: transaction.updateId,
+      phase: 'healthy',
+    },
+  };
+  const first = cleanupUpdateTransactions(request, {
+    run: () => ({ status: 0, stdout: '[]' }),
+  });
+  assert.equal(first.progressActive, 1);
+  assert.deepEqual(first.progressUpdateIds, [transaction.updateId]);
+  assert.equal(fs.existsSync(transaction.incomingTarget), true);
+  assert.equal(fs.existsSync(transaction.workerRuntimePath), false);
+
+  const closed = JSON.parse(fs.readFileSync(transaction.progressReceiptPath, 'utf8'));
+  fs.writeFileSync(transaction.progressReceiptPath, `${JSON.stringify({
+    ...closed, phase: 'closed', windowVisible: false, updatedAt: new Date().toISOString(),
+  })}\n`);
+  const second = cleanupUpdateTransactions(request, {
+    run: () => ({ status: 0, stdout: '[]' }),
+  });
+  assert.equal(second.progressActive, undefined);
+  assert.equal(fs.existsSync(transaction.incomingTarget), false);
+});
+
 test('transaction cleanup reclaims inactive updater cache without touching live or recoverable work', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-cleanup-'));
   const transactionsRoot = path.join(root, 'updates', 'transactions');
@@ -629,7 +752,7 @@ test('transaction cleanup reclaims inactive updater cache without touching live 
   const obsoleteRoot = seed('upd-obsolete-cache-1234');
   const receiptRoot = seed('upd-current-receipt-1234');
   const activeRoot = seed('upd-active-worker-1234');
-  const recoverableRoot = seed('upd-current-schema-1234', 3);
+  const recoverableRoot = seed('upd-current-schema-1234', 4);
   const activeCommand = `${process.execPath} ${path.join(activeRoot, 'update-worker.js')} --transaction ${path.join(activeRoot, 'transaction.json')}`;
 
   const result = cleanupUpdateTransactions({
@@ -679,6 +802,63 @@ test('packaged startup schedules transaction cleanup outside the shell thread', 
   await manager.transactionCleanupPromise;
   assert.equal(cleanupRequest.transactionsRoot, path.join(manager.updateRoot, 'transactions'));
   assert.equal(cleanupRequest.platform, 'darwin');
+});
+
+test('live progress cleanup retries stop after a bounded series and reset only after ownership changes', async () => {
+  const scheduled = [];
+  const cancelled = [];
+  let cleanupCalls = 0;
+  let progressUpdateIds = ['upd-live-progress-retry-1234'];
+  const { manager } = managerFixture({
+    primeReady: false,
+    dependencyOverrides: {
+      cleanupUpdateTransactions: async () => {
+        cleanupCalls += 1;
+        return progressUpdateIds.length > 0
+          ? {
+              removed: 0,
+              pruned: 1,
+              retained: 1,
+              progressActive: progressUpdateIds.length,
+              progressUpdateIds,
+            }
+          : { removed: 0, pruned: 1, retained: 1 };
+      },
+      schedule: (fn, delay) => {
+        const handle = { fn, delay, unref() {} };
+        scheduled.push(handle);
+        return handle;
+      },
+      cancelSchedule: (handle) => { cancelled.push(handle); },
+    },
+  });
+  const pending = manager.transactionCleanupPromise;
+  await pending;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].delay, 3000);
+
+  for (let index = 0; index < 4; index += 1) {
+    scheduled[index].fn();
+    await manager.transactionCleanupPromise;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(cleanupCalls, 5);
+  assert.equal(scheduled.length, 4);
+  assert.equal(manager.transactionCleanupRetryTimer, null);
+
+  progressUpdateIds = [];
+  await manager.requestTransactionCleanup();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scheduled.length, 4);
+
+  progressUpdateIds = ['upd-new-progress-owner-1234'];
+  await manager.requestTransactionCleanup();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scheduled.length, 5);
+  assert.equal(scheduled[4].delay, 3000);
+  manager.dispose();
+  assert.deepEqual(cancelled, [scheduled[4]]);
 });
 
 test('the transaction cleanup worker reclaims cache without running deletion on Electron main', async () => {
@@ -880,27 +1060,75 @@ test('artifact progress is coalesced to bounded meaningful updates and always pu
 test('update worker runtime copy and self-test finish asynchronously before a release becomes ready', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-worker-prep-'));
   const workerSource = path.join(root, 'source-worker.js');
+  const progressSource = path.join(root, 'source-progress.js');
   const nodeSource = path.join(root, 'source-node.exe');
   const transactionRoot = path.join(root, 'transaction');
   fs.writeFileSync(workerSource, 'worker');
+  fs.writeFileSync(progressSource, 'progress');
   fs.writeFileSync(nodeSource, 'node');
   const child = new EventEmitter();
+  child.stdout = new PassThrough();
   let invocation = null;
   let settled = false;
   const preparing = prepareUpdateWorkerRuntime({
-    transactionRoot, workerSource, nodeSource, platform: 'win32',
+    transactionRoot, workerSource, progressSource, nodeSource, platform: 'win32',
   }, {
     spawnProcess: (command, args, options) => { invocation = { command, args, options }; return child; },
   });
   void preparing.then(() => { settled = true; });
   while (!invocation) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(settled, false);
+  child.stdout.write(`${JSON.stringify({
+    schemaVersion: 1,
+    product: 'Workass',
+    component: 'update-worker',
+    supportedTransactionSchemas: [4],
+    progressReceiptSchemaVersion: 1,
+  })}\n`);
   child.emit('exit', 0, null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  child.stdout.end();
   const runtime = await preparing;
   assert.equal(invocation.command, path.join(transactionRoot, 'updater-node.exe'));
-  assert.deepEqual(invocation.args, [path.join(transactionRoot, 'update-worker.js'), '--self-test']);
+  assert.deepEqual(invocation.args, [
+    path.join(transactionRoot, 'update-worker.js'), '--self-test', '--transaction-schema', '4',
+  ]);
+  assert.deepEqual(invocation.options.stdio, ['ignore', 'pipe', 'ignore']);
   assert.deepEqual(fs.readFileSync(runtime.workerPath, 'utf8'), 'worker');
+  assert.deepEqual(fs.readFileSync(runtime.progressModulePath, 'utf8'), 'progress');
   assert.deepEqual(fs.readFileSync(runtime.nodePath, 'utf8'), 'node');
+});
+
+test('a hung incoming worker self-test is bounded and its process is terminated', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-worker-self-test-timeout-'));
+  const workerSource = path.join(root, 'source-worker.js');
+  const progressSource = path.join(root, 'source-progress.js');
+  const nodeSource = path.join(root, 'source-node');
+  const transactionRoot = path.join(root, 'transaction');
+  fs.writeFileSync(workerSource, 'worker');
+  fs.writeFileSync(progressSource, 'progress');
+  fs.writeFileSync(nodeSource, 'node');
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  let killed = 0;
+  child.kill = () => { killed += 1; };
+  let timeout = null;
+  const cancelled = [];
+  const preparing = prepareUpdateWorkerRuntime({
+    transactionRoot, workerSource, progressSource, nodeSource, platform: 'darwin',
+  }, {
+    spawnProcess: () => child,
+    schedule: (fn, delay) => { timeout = { fn, delay, unref() {} }; return timeout; },
+    cancelSchedule: (handle) => { cancelled.push(handle); },
+    selfTestTimeoutMs: 2000,
+  });
+  while (!timeout) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(timeout.delay, 2000);
+  timeout.fn();
+  await assert.rejects(preparing, /self-test timed out/);
+  assert.equal(killed, 1);
+  assert.deepEqual(cancelled, [timeout]);
 });
 
 test('the manager checks and stages a local Mac release without any network request', async () => {
@@ -915,14 +1143,29 @@ test('the manager checks and stages a local Mac release without any network requ
   fs.writeFileSync(path.join(root, artifactName), bytes);
   manager.feedURL = feed;
   manager.deps.stageAndVerify = async (request) => {
-    fs.mkdirSync(request.incomingTarget, { recursive: true });
+    writeMacUpdaterRuntime(request.incomingTarget);
     return { designatedRequirement: localManifest.designatedRequirement };
+  };
+  const prepareWorkerRuntime = manager.deps.prepareWorkerRuntime;
+  let runtimeRequest = null;
+  manager.deps.prepareWorkerRuntime = async (request) => {
+    runtimeRequest = request;
+    return prepareWorkerRuntime(request);
   };
   assert.equal((await manager.check()).phase, 'available');
   const state = await manager.download();
   assert.equal(state.phase, 'ready');
   assert.equal(manager.prepared.designatedRequirement, localManifest.designatedRequirement);
   assert.deepEqual(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'release.zip')), bytes);
+  assert.equal(runtimeRequest.workerSource, path.join(
+    manager.prepared.incomingTarget, 'Contents', 'Resources', 'app', 'update-worker.js',
+  ));
+  assert.equal(runtimeRequest.progressSource, path.join(
+    manager.prepared.incomingTarget, 'Contents', 'Resources', 'app', 'update-progress.js',
+  ));
+  assert.equal(runtimeRequest.nodeSource, path.join(
+    manager.prepared.incomingTarget, 'Contents', 'Resources', 'runtime', 'node', 'darwin-arm64', 'bin', 'node',
+  ));
 });
 
 test('the Windows manager stages both release trees inside the external update transaction', async () => {
@@ -1163,6 +1406,158 @@ test('busy daemon leaves the verified release staged and never starts the worker
   assert.equal(didQuit(), false);
 });
 
+test('slow machines can become visibly ready within the bounded progress handoff', async () => {
+  const { manager } = managerFixture({ primeReady: false });
+  const transaction = seedRecoveryTransaction({
+    manager,
+    installTarget: manager.installTarget,
+    installationIdentity: manager.installationIdentity,
+  }, { updateId: 'upd-slow-progress-1234' });
+  const child = new EventEmitter();
+  child.pid = 7337;
+  child.exitCode = null;
+  child.signalCode = null;
+  let unrefs = 0;
+  child.unref = () => { unrefs += 1; };
+  const intervals = [];
+  const timeouts = [];
+  const cancelled = [];
+  let receipt = null;
+  const pending = spawnVisibleUpdateProgress({
+    command: transaction.progressExecutable,
+    args: ['--workass-update-progress', path.join(transaction.transactionRoot, 'transaction.json')],
+    transaction,
+    timeoutMs: 45_000,
+    pollIntervalMs: 100,
+  }, {
+    spawnProcess: () => child,
+    readReceipt: () => receipt,
+    repeat: (fn, delay) => { const handle = { fn, delay }; intervals.push(handle); return handle; },
+    cancelRepeat: (handle) => { cancelled.push(handle); },
+    schedule: (fn, delay) => { const handle = { fn, delay }; timeouts.push(handle); return handle; },
+    cancelSchedule: (handle) => { cancelled.push(handle); },
+    now: () => 10_000,
+  });
+  let resolved = false;
+  void pending.then(() => { resolved = true; });
+  child.emit('spawn');
+  assert.equal(resolved, false);
+  assert.equal(intervals[0].delay, 100);
+  assert.equal(timeouts[0].delay, 45_000);
+  receipt = {
+    schemaVersion: 1,
+    updateId: transaction.updateId,
+    installationId: transaction.installationId,
+    workerId: transaction.workerId,
+    progressId: transaction.progressId,
+    pid: child.pid,
+    executablePath: transaction.progressExecutable,
+    transactionPath: path.join(transaction.transactionRoot, 'transaction.json'),
+    phase: 'visible',
+    displayedPhase: 'preparing',
+    windowVisible: true,
+    updatedAt: new Date(10_000).toISOString(),
+  };
+  intervals[0].fn();
+  assert.equal(await pending, child);
+  assert.equal(unrefs, 1);
+  assert.deepEqual(new Set(cancelled), new Set([intervals[0], timeouts[0]]));
+});
+
+test('a progress launch timeout fences its child before rejecting the handoff', async () => {
+  const { manager } = managerFixture({ primeReady: false });
+  const transaction = seedRecoveryTransaction({
+    manager,
+    installTarget: manager.installTarget,
+    installationIdentity: manager.installationIdentity,
+  }, { updateId: 'upd-progress-timeout-1234' });
+  const child = new EventEmitter();
+  child.pid = 7447;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.unref = () => {};
+  let timeout = null;
+  let poller = null;
+  const cancelled = [];
+  const fenced = [];
+  const pending = spawnVisibleUpdateProgress({
+    command: transaction.progressExecutable,
+    transaction,
+    timeoutMs: 10,
+    pollIntervalMs: 5,
+  }, {
+    spawnProcess: () => child,
+    readReceipt: () => null,
+    repeat: (fn) => { poller = { fn }; return poller; },
+    cancelRepeat: (handle) => { cancelled.push(handle); },
+    schedule: (fn) => { timeout = { fn }; return timeout; },
+    cancelSchedule: (handle) => { cancelled.push(handle); },
+    terminateChild: async (target) => { fenced.push(target.pid); target.exitCode = 1; return true; },
+  });
+  child.emit('spawn');
+  timeout.fn();
+  await assert.rejects(pending, /did not become visibly ready/);
+  assert.deepEqual(fenced, [child.pid]);
+  assert.deepEqual(new Set(cancelled), new Set([poller, timeout]));
+});
+
+test('failure before visible readiness keeps the old Workass shell usable', async () => {
+  const { manager, calls, didQuit } = managerFixture({ replies: [
+    { status: 200, body: { ready: true } },
+    { status: 200, body: { cancelled: true } },
+  ] });
+  manager.deps.spawnVisibleProgress = async () => {
+    throw new Error('fixture window never became visible');
+  };
+  const state = await manager.install();
+  assert.equal(state.phase, 'failed');
+  assert.match(state.error, /window never became visible/);
+  assert.deepEqual(calls, ['prepare', 'cancel']);
+  assert.equal(didQuit(), false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'journal.json'), 'utf8')).terminal, true);
+});
+
+test('progress loss after worker arm fences both owners and prevents commit or quit', async () => {
+  const fencedWorkers = [];
+  const { manager, calls, didQuit } = managerFixture({
+    replies: [
+      { status: 200, body: { ready: true } },
+      { status: 200, body: { cancelled: true } },
+    ],
+    dependencyOverrides: {
+      inspectWorkerOwnership: async () => ({ owned: true, exact: true, stale: false, pid: 8558 }),
+      terminateExactWorker: async (ownership) => { fencedWorkers.push(ownership.pid); return true; },
+    },
+  });
+  manager.deps.spawnArmedWorker = async (request) => {
+    fs.writeFileSync(request.receiptPath, `${JSON.stringify({
+      schemaVersion: 2,
+      updateId: request.updateId,
+      phase: 'armed',
+      previousVersion: request.currentVersion,
+      targetVersion: request.targetVersion,
+      installationId: request.installationId,
+      installTarget: request.installTarget,
+      workerId: request.workerId,
+      workerPID: 8558,
+    })}\n`);
+    const transaction = JSON.parse(fs.readFileSync(
+      path.join(manager.prepared.transactionRoot, 'transaction.json'), 'utf8',
+    ));
+    const progress = JSON.parse(fs.readFileSync(transaction.progressReceiptPath, 'utf8'));
+    fs.writeFileSync(transaction.progressReceiptPath, `${JSON.stringify({
+      ...progress, phase: 'closed', windowVisible: false,
+    })}\n`);
+    return { pid: 8558 };
+  };
+  const state = await manager.install();
+  assert.equal(state.phase, 'failed');
+  assert.match(state.error, /progress window closed before handoff commit/);
+  assert.deepEqual(fencedWorkers, [8558]);
+  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'cancel']);
+  assert.equal(didQuit(), false);
+});
+
 test('committed handoff requires one durable worker arm before daemon commit and quit', async () => {
   const { manager, calls, didQuit } = managerFixture({ replies: [
     { status: 200, body: { ready: true } },
@@ -1170,10 +1565,10 @@ test('committed handoff requires one durable worker arm before daemon commit and
   ] });
   const state = await manager.install();
   assert.equal(state.phase, 'installing');
-  assert.deepEqual(calls, ['prepare', 'spawn:update-worker.js', 'commit']);
+  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
   assert.equal(didQuit(), true);
   const transaction = JSON.parse(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'transaction.json'), 'utf8'));
-  assert.equal(transaction.schemaVersion, 3);
+  assert.equal(transaction.schemaVersion, 4);
   assert.equal(transaction.transactionRoot, manager.prepared.transactionRoot);
   assert.equal(transaction.mutableStateTarget, manager.runtime.stateDir);
   assert.equal(transaction.mutableStateBackupTarget, path.join(manager.prepared.transactionRoot, 'state-before-activation'));
@@ -1193,7 +1588,7 @@ test('a lost prepare response retries the same durable transaction identity', as
   const updateId = manager.prepared.updateId;
   const state = await manager.install();
   assert.equal(state.phase, 'installing');
-  assert.deepEqual(calls, ['prepare', 'prepare', 'spawn:update-worker.js', 'commit']);
+  assert.deepEqual(calls, ['prepare', 'prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
   assert.equal(didQuit(), true);
   assert.equal(JSON.parse(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'transaction.json'), 'utf8')).updateId, updateId);
 });
@@ -1205,7 +1600,7 @@ test('a lost commit response transfers ownership to the exact armed worker witho
   ] });
   const state = await manager.install();
   assert.equal(state.phase, 'installing');
-  assert.deepEqual(calls, ['prepare', 'spawn:update-worker.js', 'commit']);
+  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
   assert.equal(didQuit(), true);
   assert.equal(JSON.parse(fs.readFileSync(manager.receiptPath, 'utf8')).phase, 'armed');
 });
@@ -1226,7 +1621,7 @@ test('an authoritative commit rejection fences the exact worker and remains term
   const state = await manager.install();
   assert.equal(state.phase, 'failed');
   assert.deepEqual(fenced, [4242]);
-  assert.deepEqual(calls, ['prepare', 'spawn:update-worker.js', 'commit', 'cancel']);
+  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit', 'cancel']);
   assert.equal(didQuit(), false);
   assert.equal(JSON.parse(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'journal.json'), 'utf8')).terminal, true);
   assert.equal(JSON.parse(fs.readFileSync(manager.receiptPath, 'utf8')).phase, 'failed');
@@ -1246,8 +1641,10 @@ test('a worker that cannot durably arm cancels the prepared handoff and keeps Wo
     error.workassWorkerFenced = true;
     throw error;
   };
-  await assert.rejects(() => manager.install(), /did not arm/);
-  assert.deepEqual(calls, ['prepare', 'cancel']);
+  const state = await manager.install();
+  assert.equal(state.phase, 'failed');
+  assert.match(state.error, /did not arm/);
+  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'cancel']);
   assert.equal(didQuit(), false);
 });
 
@@ -1262,8 +1659,10 @@ test('a lost cancel response is reconciled with the same ID only after the arm-f
     error.workassWorkerFenced = true;
     throw error;
   };
-  await assert.rejects(() => manager.install(), /arm failed/);
-  assert.deepEqual(calls, ['prepare', 'cancel', 'cancel']);
+  const state = await manager.install();
+  assert.equal(state.phase, 'failed');
+  assert.match(state.error, /arm failed/);
+  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'cancel', 'cancel']);
 });
 
 test('unconfirmed arm-failure cancel stays nonterminal and retries the exact prepared ID', async () => {
@@ -1529,10 +1928,29 @@ test('a stale but exact live worker is fenced before its journal is resumed', as
         transactionPath: path.join(seededTransaction.transactionRoot, 'transaction.json'),
         updatedAt: '2026-08-19T00:00:00.000Z',
       })}\n`);
+      fs.writeFileSync(path.join(seededTransaction.transactionRoot, 'progress-owner.json'), `${JSON.stringify({
+        schemaVersion: 1,
+        updateId: seededTransaction.updateId,
+        installationId: seededTransaction.installationId,
+        workerId: seededTransaction.workerId,
+        progressId: seededTransaction.progressId,
+        pid: 7441,
+        executablePath: seededTransaction.progressExecutable,
+        transactionPath: path.join(seededTransaction.transactionRoot, 'transaction.json'),
+        phase: 'starting',
+        displayedPhase: '',
+        windowVisible: false,
+        updatedAt: new Date().toISOString(),
+      })}\n`);
     },
     dependencyOverrides: {
       workerProcessOwnership: () => ({ owned: false, exact: true, stale: true, pid: 7331 }),
       terminateExactWorker: async (ownership) => { order.push(`fence:${ownership.pid}`); return true; },
+      inspectProgressOwnership: (receipt) => {
+        order.push(`inspect-progress:${receipt.pid}`);
+        return { running: true, exact: true, ambiguous: false, pid: receipt.pid };
+      },
+      terminateProgress: async (ownership) => { order.push(`fence-progress:${ownership.pid}`); return true; },
       postLocalUpdate: async (_url, action) => {
         order.push(action);
         return action === 'prepare' ? { status: 200, body: { ready: true } } : { status: 202, body: { stopping: true } };
@@ -1550,7 +1968,10 @@ test('a stale but exact live worker is fenced before its journal is resumed', as
     },
   });
   await manager.recoveryPromise;
-  assert.deepEqual(order, ['fence:7331', 'prepare', 'spawn', 'commit']);
+  assert.deepEqual(order, [
+    'fence:7331', 'inspect-progress:7441', 'fence-progress:7441',
+    'prepare', 'spawn', 'commit',
+  ]);
   assert.equal(manager.snapshot().phase, 'installing');
 });
 
@@ -1714,6 +2135,8 @@ test('fresh worker heartbeats require one off-main identity proof and keep later
   const workerId = `worker-${'c'.repeat(32)}`;
   let inspections = 0;
   let transaction;
+  let now = Date.now();
+  let receiptPoll = null;
   const { manager } = managerFixture({
     primeReady: false,
     initialReceipt: {
@@ -1733,11 +2156,21 @@ test('fresh worker heartbeats require one off-main identity proof and keep later
       })}\n`);
     },
     dependencyOverrides: {
+      now: () => now,
+      repeat: (fn, delay) => {
+        receiptPoll = { fn, delay, unref() {} };
+        return receiptPoll;
+      },
+      cancelRepeat: (handle) => { handle.cancelled = true; },
       inspectWorkerOwnership: async () => { inspections += 1; return { owned: true, exact: true, pid: process.pid }; },
     },
   });
   assert.equal(cheapWorkerLeaseOwnership(JSON.parse(fs.readFileSync(transaction.leasePath, 'utf8')), transaction).owned, true);
-  await new Promise((resolve) => setTimeout(resolve, 1100));
+  await manager.recoveryPromise;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(receiptPoll.delay, 1000);
+  now += 1000;
+  receiptPoll.fn();
   manager.dispose();
   assert.equal(inspections, 1);
 });
@@ -1928,7 +2361,7 @@ test('N+2 discovery stays visible without mutating the immutable N+1 staged tran
   };
   manager.deps.stageAndVerify = async (request) => {
     stagedRequest = request;
-    fs.mkdirSync(request.incomingTarget, { recursive: true });
+    writeMacUpdaterRuntime(request.incomingTarget);
     return { designatedRequirement: n1.designatedRequirement };
   };
   const downloading = manager.download();

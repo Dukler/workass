@@ -1125,12 +1125,15 @@ func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontra
 	}
 	presentation := input.Presentation
 	humanAuthored := strings.TrimSpace(presentation.Origin) == "" || strings.EqualFold(strings.TrimSpace(presentation.Origin), "human")
+	deliveryCapabilities := d.Capabilities()
 	var admitted providercontract.TurnAdmission
 	job, err := d.lane.manager.StartJob(ctx, JobStartOptions{
-		Kind: "app-chat", Title: strings.TrimSpace(presentation.Title), PermissionMode: strings.TrimSpace(input.Permission),
+		JobID: providercontract.DeriveJobID(identity.ChatID, operationID),
+		Kind:  "app-chat", Title: strings.TrimSpace(presentation.Title), PermissionMode: strings.TrimSpace(input.Permission),
 		ChatID: identity.ChatID, TabID: owner.TabID,
 		SessionID: info.SessionID, CWD: info.CWD, ProviderID: info.ProviderID,
-		Prompt: input.Text, Images: images, ModelID: strings.TrimSpace(input.ModelID), ModeID: strings.TrimSpace(input.ModeID),
+		DeliveryCapabilities: &deliveryCapabilities,
+		Prompt:               input.Text, Images: images, ModelID: strings.TrimSpace(input.ModelID), ModeID: strings.TrimSpace(input.ModeID),
 		InitialContextSeed:  append([]providercontract.ContextMessage(nil), input.InitialContext...),
 		HumanAuthored:       humanAuthored,
 		ProviderLaneManaged: true,
@@ -1201,7 +1204,7 @@ func (d managerLaneDelivery) Steer(ctx context.Context, input providercontract.S
 	awaitConsumption := boolValue(outcome["receipt"])
 	return providercontract.SteerReceipt{
 		Turn: input.Turn, Accepted: true, Consumed: !awaitConsumption,
-		AwaitConsumption: awaitConsumption, Interrupted: boolValue(outcome["interrupted"]),
+		AwaitConsumption: awaitConsumption,
 	}, nil
 }
 

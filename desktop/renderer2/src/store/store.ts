@@ -98,6 +98,35 @@ type PendingSteerDispatch = {
   continuationId: string;
 };
 
+type LiveTurnEventKind = 'start' | 'data' | 'media' | 'acp' | 'plan' | 'steer' | 'end';
+
+type LiveTurnEventFence = {
+  version: number;
+  machineId: string;
+  tabId: string;
+  chatId: string;
+  jobId: string;
+  userMessageId?: string;
+  assistantMessageId?: string;
+  relatedMessageIds?: string[];
+  // A terminal steer transition can remove a never-activated continuation
+  // placeholder. A session:get that began before that transition must not
+  // resurrect the deleted runtime owner when its older snapshot arrives.
+  removedMessageIds?: string[];
+  startVersion?: number;
+  dataVersion?: number;
+  mediaVersion?: number;
+  acpVersion?: number;
+  planVersion?: number;
+  steerVersion?: number;
+  endVersion?: number;
+  sessionVersion?: number;
+  sessionId?: string;
+  sessionProviderId?: string;
+  deliveryCapabilities?: ReturnType<typeof normalizeDeliveryCapabilities>;
+  actorRevision?: number;
+};
+
 type OwnedChatSnapshot<T> = {
   chatId: string;
   value: T;
@@ -159,6 +188,132 @@ function steerDispatchKey(tabId: string, chatId: string, userId: string): string
   return JSON.stringify([tabId, chatId, userId]);
 }
 
+function monotonicTurnText(authoritative: string | undefined, live: string | undefined): string | undefined {
+  if (live == null) return authoritative;
+  if (authoritative == null || live.startsWith(authoritative)) return live;
+  return authoritative;
+}
+
+function steerStateRank(state: Msg['steerState']): number {
+  if (!state) return 0;
+  const rank: Record<NonNullable<Msg['steerState']>, number> = { sending: 1, uncertain: 2, accepted: 3, applied: 4 };
+  return rank[state];
+}
+
+function monotonicSteerState(authoritative: Msg['steerState'], live: Msg['steerState']): Msg['steerState'] {
+  if (!authoritative) return live;
+  if (!live) return authoritative;
+  return steerStateRank(live) >= steerStateRank(authoritative) ? live : authoritative;
+}
+
+function mergeThinkingText(authoritative: string, live: string): string {
+  if (!authoritative) return live;
+  if (!live || authoritative === live || authoritative.includes(live)) return authoritative;
+  if (live.includes(authoritative)) return live;
+  const lines = authoritative.split('\n');
+  const seen = new Set(lines);
+  for (const line of live.split('\n')) {
+    if (!seen.has(line)) {
+      seen.add(line);
+      lines.push(line);
+    }
+  }
+  return lines.join('\n');
+}
+
+function mergeLiveTimelineEvents(authoritative: Msg['events'], live: Msg['events'], includePlan: boolean): Msg['events'] {
+  const merged = authoritative.slice();
+  for (const event of live) {
+    if (event.kind === 'plan' && !includePlan) continue;
+    if (event.kind === 'thinking') {
+      const current = merged.find((candidate) => candidate.kind === 'thinking');
+      if (current?.kind === 'thinking') current.text = mergeThinkingText(current.text, event.text);
+      else merged.push(event);
+      continue;
+    }
+    if (event.kind === 'plan') {
+      const current = merged.findIndex((candidate) => candidate.kind === 'plan');
+      if (current >= 0) merged[current] = event;
+      else merged.push(event);
+      continue;
+    }
+    if (event.kind === 'tool') {
+      const current = merged.findIndex((candidate) => candidate.kind === 'tool'
+        && ((!!event.id && candidate.id === event.id)
+          || (!!event.terminalId && candidate.terminalId === event.terminalId)));
+      if (current >= 0) merged[current] = { ...merged[current], ...event } as ToolEvent;
+      else merged.push(event);
+    }
+  }
+  return merged;
+}
+
+function mergeLiveTurnMessage(
+  authoritative: Msg,
+  live: Msg,
+  fence: LiveTurnEventFence,
+  afterVersion: number,
+  preserveAuthoritativeSteerFields = false,
+): Msg {
+  // A terminal actor snapshot is the final authority. A live event fence may
+  // fill an older running snapshot, but it can never revive or rewrite a
+  // terminal row that the actor already returned.
+  if (authoritative.role === 'assistant' && isTerminalMessage(authoritative)) return authoritative;
+
+  const startAfter = (fence.startVersion ?? 0) > afterVersion;
+  const dataAfter = (fence.dataVersion ?? 0) > afterVersion;
+  const mediaAfter = (fence.mediaVersion ?? 0) > afterVersion;
+  const acpAfter = (fence.acpVersion ?? 0) > afterVersion;
+  const planAfter = (fence.planVersion ?? 0) > afterVersion;
+  const steerAfter = (fence.steerVersion ?? 0) > afterVersion;
+  const endAfter = (fence.endVersion ?? 0) > afterVersion;
+  const next = { ...authoritative };
+
+  if (startAfter || endAfter) {
+    if (live.jobId) next.jobId = live.jobId;
+    next.turnStartedAt = live.turnStartedAt ?? next.turnStartedAt;
+  }
+  if (dataAfter || endAfter) {
+    next.content = monotonicTurnText(next.content, live.content) ?? '';
+    next.result = monotonicTurnText(next.result, live.result);
+  }
+  if (mediaAfter || endAfter) next.images = mergeMessageImages(next.images, live.images);
+  if (acpAfter || planAfter || endAfter) {
+    next.events = mergeLiveTimelineEvents(next.events, live.events, planAfter || endAfter);
+  }
+  if (steerAfter || endAfter) {
+    // `undefined` is meaningful here: consumption/terminal settlement removes
+    // the staged boundary fields. Nullish fallback revived those stale fields
+    // from an older actor snapshot and left an already-applied row in the
+    // steering tray forever.
+    // A point-in-time actor projection may already carry a stronger receipt
+    // than the renderer-local transport outcome (for example accepted versus
+    // uncertain after a lost reply). Receipt state is monotonic even though the
+    // boundary/continuation fields below use exact deletion semantics.
+    next.steerState = monotonicSteerState(next.steerState, live.steerState);
+    if (!preserveAuthoritativeSteerFields) {
+      next.steerBoundary = live.steerBoundary;
+      next.steerContinuationId = live.steerContinuationId;
+      next.steerContinuationFor = live.steerContinuationFor;
+      next.turnRootId = live.turnRootId;
+      next.turnTerminal = live.turnTerminal;
+    }
+  }
+  if (endAfter && isTerminalMessage(live)) {
+    next.status = live.status;
+    next.at = live.at;
+    next.interrupted = live.interrupted;
+    next.permission = live.permission;
+    next.retryPrompt = live.retryPrompt;
+  } else if ((startAfter || dataAfter || mediaAfter) && live.status === 'running') {
+    next.status = 'running';
+  } else if (steerAfter && live.status !== 'pending') {
+    next.status = live.status;
+    next.at = live.at;
+  }
+  return next;
+}
+
 function globalPresentationFingerprint(value: Pick<AppState, 'chats' | 'activeId' | 'seq' | 'workspaces' | 'collapsedWorkspaces' | 'removedWorkspaces' | 'theme' | 'themePref' | 'density' | 'panes' | 'mode' | 'notifEnabled'>): string {
   return JSON.stringify([
     value.activeId, value.seq, value.chats.filter((chat) => !ownerMachineId(chat)).map((chat) => chat.id),
@@ -176,6 +331,19 @@ export class Store {
   // dropped at job end. The transcript tail row reads them for its vitals.
   private turnHeartbeats = new Map<string, { elapsedMs: number; outputTokens: number; phase: string; toolName?: string; retry?: { code?: number; attempt?: number } | null; at: number }>();
   private chatJobs = new Map<string, { tabId: string; msgId: string }>(); // chatId -> {tabId,msgId}
+  // session:get is a point-in-time read whose reply may cross newer live job
+  // events. Keep a bounded renderer-local fence per exact machine/job so an
+  // older hydration cannot erase start/data/tool/end state already displayed.
+  private liveTurnEventVersion = 0;
+  private liveTurnEvents = new Map<string, LiveTurnEventFence>();
+  // A remote event may beat that machine's very first session:get, when no
+  // tagged chat exists yet to own it. Never replay an unsequenced chunk; mark
+  // the machine and take one authoritative catch-up snapshot immediately after
+  // the first snapshot mounts its actor rows.
+  private remoteMachineCatchupEpochs = new Map<string, number>();
+  private remoteMachinesNeedingCatchup = new Map<string, number>();
+  private remoteMachineCatchups = new Map<string, number>();
+  private remoteMachineHydrationCounts = new Map<string, { epoch: number; count: number }>();
   // A send is renderer-owned until job:start returns a durable provider job.
   // Stop closes that ownership gap: it aborts before dispatch, or follows the
   // exact accepted job across the reply boundary and cancels it once.
@@ -337,6 +505,7 @@ export class Store {
     this.dirtyChatVersions.set(tabId, ++this.dirtyChatRevision);
   }
   private markQueueMutation(chat: Pick<Chat, 'id' | 'chatId' | 'queue'>) {
+    this.touchChat(chat.id);
     const version = ++this.queueMutationRevision;
     this.pendingQueueMutationVersions.set(chat.id, version);
     // Queue rows are already renderer-owned objects. Keep the array projection
@@ -490,8 +659,6 @@ export class Store {
         workspaceRevision: c.workspaceRevision,
         presentationRevision: c.presentationRevision,
         agentQueueRevision: c.agentQueueRevision,
-        queuePaused: c.queuePaused,
-        queuePauseRevision: c.queuePauseRevision,
         runtimeControlRevision: c.runtimeControlRevision,
         planLatest: c.planLatest,
         planLatestMessageId: c.planLatestMessageId,
@@ -762,8 +929,6 @@ export class Store {
         workspaceRevision: Number.isInteger(c.workspaceRevision) ? c.workspaceRevision : 0,
         presentationRevision: Number.isInteger(c.presentationRevision) ? c.presentationRevision : 0,
         agentQueueRevision: Number.isInteger(c.agentQueueRevision) ? c.agentQueueRevision : 0,
-        queuePaused: c.queuePaused === true,
-        queuePauseRevision: Number.isInteger(c.queuePauseRevision) ? c.queuePauseRevision : 0,
         runtimeControlRevision: Number.isInteger(c.runtimeControlRevision) ? c.runtimeControlRevision : 0,
         // An explicit [] means "no current plan" and must survive as [], not be
         // collapsed to absent — otherwise a stale scan could restore an old plan.
@@ -831,7 +996,8 @@ export class Store {
   }
 
   // Session hydration carries a bounded tail. Opening a chat reads one complete
-  // projection from the actor and replaces that tail directly.
+  // projection from the actor, then overlays only ownership/events that became
+  // newer while that point-in-time read was in flight.
   private async ensureFullHistory(chatId: string): Promise<void> {
     if (!has('archiveLoad') || !chatId) return;
     // The set is only a cache of the chat projection's own completeness bit.
@@ -842,6 +1008,7 @@ export class Store {
     const resident = this.chat(chatId);
     if (this.fullHistoriesLoaded.has(chatId) && resident?.historyComplete) return;
     const durableChatId = resident?.chatId;
+    const liveEventFence = this.liveTurnEventVersion;
     this.fullHistoriesLoaded.delete(chatId);
     const inflight = this.fullHistoryLoads.get(chatId);
     if (inflight) return inflight;
@@ -854,13 +1021,34 @@ export class Store {
       } catch { return; }
       const chat = this.chat(chatId);
       if (!chat || chat.chatId !== durableChatId || !Array.isArray(projected)) return;
+      let messages: Msg[];
       try {
-        chat.messages = actorMessages(projected as MirrorMsg[]);
+        messages = actorMessages(projected as MirrorMsg[]);
       } catch (error) {
         console.warn(`[store] actor history rejected (${chatId})`, error);
         return;
       }
-      chat.messageCount = chat.messages.length;
+      const restored = {
+        ...chat,
+        messages,
+        messageCount: messages.length,
+        historyComplete: true,
+      };
+      // The archive read has the same race shape as session:get. A steer still
+      // awaiting its control reply owns its staged ids via pendingSteers; once
+      // acknowledged/rejected, the post-read live fence owns the receipt or
+      // tombstone. A complete terminal actor projection is authoritative for
+      // cleared boundaries even though archiveLoad has no revision envelope.
+      this.preserveHydratedRuntime(chat, restored);
+      this.preserveLiveTurnEvents(
+        [chat],
+        [restored],
+        liveEventFence,
+        ownerMachineId(chat),
+        true,
+      );
+      chat.messages = restored.messages;
+      chat.messageCount = restored.messages.length;
       chat.historyComplete = true;
       this.fullHistoriesLoaded.add(chatId);
       this.rebuildJobRefs(new Set([chat.id]));
@@ -1010,8 +1198,21 @@ export class Store {
   private preserveHydratedRuntime(previous: Chat, restored: Chat) {
     restored._sessionOperationId = previous._sessionOperationId;
     restored._controlRevision = previous._controlRevision;
-    restored._queueResumeOperationId = previous._queueResumeOperationId;
     restored.commandCatalog ??= previous.commandCatalog;
+
+    // Capabilities are transient but authoritative for one exact attached
+    // lane. A same-session hydration that omits the additive snapshot must not
+    // turn a proven live-steer lane back into unknown while that turn is live.
+    // A different session/provider is a different lane and receives nothing.
+    const sameAttachedLane = !!previous.sessionId
+      && previous.sessionId === restored.sessionId
+      && previous.sessionProviderId === restored.sessionProviderId;
+    const previousLaneIsLive = previous.messages.some((message) => message.role === 'assistant'
+      && message.status === 'running' && !!message.jobId);
+    if (sameAttachedLane && previousLaneIsLive
+      && previous.deliveryCapabilities && !restored.deliveryCapabilities) {
+      restored.deliveryCapabilities = normalizeDeliveryCapabilities(previous.deliveryCapabilities);
+    }
 
     // session:get is a point-in-time actor projection and may have started
     // before a presentation command whose durable receipt has already reached
@@ -1053,6 +1254,213 @@ export class Store {
     for (const chat of restored) {
       const prior = previousByPair.get(JSON.stringify([chat.id, chat.chatId ?? '']));
       if (prior) this.preserveHydratedRuntime(prior, chat);
+    }
+  }
+
+  private markLiveTurnEvent(
+    chat: Chat,
+    jobId: string,
+    kind: LiveTurnEventKind,
+    job?: PublicJob,
+    relatedMessageIds: string[] = [],
+    removedMessageIds: string[] = [],
+  ) {
+    jobId = jobId.trim();
+    if (!jobId) return;
+    const machineId = ownerMachineId(chat);
+    const key = JSON.stringify([machineId, jobId]);
+    const prior = this.liveTurnEvents.get(key);
+    this.liveTurnEventVersion += 1;
+    const version = this.liveTurnEventVersion;
+    const sessionId = typeof job?.sessionId === 'string' && job.sessionId.trim()
+      ? job.sessionId.trim()
+      : undefined;
+    const sessionProviderId = typeof job?.providerId === 'string' && job.providerId.trim()
+      ? job.providerId.trim()
+      : undefined;
+    const exactAttachedLane = !!sessionId && !!sessionProviderId
+      && chat.sessionId === sessionId && chat.sessionProviderId === sessionProviderId;
+    const mergedRelatedIds = Array.from(new Set([
+      ...(prior?.relatedMessageIds ?? []),
+      ...relatedMessageIds.map((id) => id.trim()).filter(Boolean),
+    ]));
+    const mergedRemovedIds = Array.from(new Set([
+      ...(prior?.removedMessageIds ?? []),
+      ...removedMessageIds.map((id) => id.trim()).filter(Boolean),
+    ]));
+    const next: LiveTurnEventFence = {
+      ...prior,
+      version,
+      machineId,
+      tabId: chat.id,
+      chatId: chat.chatId ?? '',
+      jobId,
+      userMessageId: typeof job?.userMessageId === 'string' && job.userMessageId.trim()
+        ? job.userMessageId.trim()
+        : prior?.userMessageId,
+      assistantMessageId: typeof job?.assistantMessageId === 'string' && job.assistantMessageId.trim()
+        ? job.assistantMessageId.trim()
+        : prior?.assistantMessageId,
+      relatedMessageIds: mergedRelatedIds.length ? mergedRelatedIds : prior?.relatedMessageIds,
+      removedMessageIds: mergedRemovedIds.length ? mergedRemovedIds : prior?.removedMessageIds,
+      actorRevision: Math.max(prior?.actorRevision ?? 0, chat.actorRevision ?? 0),
+    };
+    if (kind === 'start') next.startVersion = version;
+    if (kind === 'data') next.dataVersion = version;
+    if (kind === 'media') next.mediaVersion = version;
+    if (kind === 'acp') next.acpVersion = version;
+    if (kind === 'plan') {
+      next.acpVersion = version;
+      next.planVersion = version;
+    }
+    if (kind === 'steer') next.steerVersion = version;
+    if (kind === 'end') next.endVersion = version;
+    if (exactAttachedLane) {
+      next.sessionVersion = version;
+      next.sessionId = sessionId;
+      next.sessionProviderId = sessionProviderId;
+      next.deliveryCapabilities = normalizeDeliveryCapabilities(chat.deliveryCapabilities);
+    }
+    this.liveTurnEvents.delete(key);
+    this.liveTurnEvents.set(key, next);
+    while (this.liveTurnEvents.size > 2048) {
+      const oldest = this.liveTurnEvents.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.liveTurnEvents.delete(oldest);
+    }
+  }
+
+  private preserveLiveTurnEvents(
+    previous: Chat[],
+    restored: Chat[],
+    afterVersion: number,
+    machineId?: string,
+    completeActorProjection = false,
+  ) {
+    const previousByPair = new Map(previous.map((chat) => [JSON.stringify([chat.id, chat.chatId ?? '']), chat]));
+    const restoredByPair = new Map(restored.map((chat) => [JSON.stringify([chat.id, chat.chatId ?? '']), chat]));
+    for (const fence of this.liveTurnEvents.values()) {
+      if (fence.version <= afterVersion || (machineId !== undefined && fence.machineId !== machineId)) continue;
+      const pair = JSON.stringify([fence.tabId, fence.chatId]);
+      const prior = previousByPair.get(pair);
+      const next = restoredByPair.get(pair);
+      if (!prior || !next) continue;
+      const affected = new Set([
+        fence.userMessageId,
+        fence.assistantMessageId,
+        ...(fence.relatedMessageIds ?? []),
+        ...(fence.removedMessageIds ?? []),
+      ].filter((id): id is string => !!id));
+      for (const message of prior.messages) {
+        if (message.jobId === fence.jobId) affected.add(message.id);
+      }
+      const steerOwners = (messages: Msg[]) => {
+        const ownerByMessage = new Map<string, string>();
+        const rankByOwner = new Map<string, number>();
+        for (const message of messages) {
+          if (message.role === 'user' && message.steerState) {
+            ownerByMessage.set(message.id, message.id);
+            rankByOwner.set(message.id, steerStateRank(message.steerState));
+            if (message.steerContinuationId) ownerByMessage.set(message.steerContinuationId, message.id);
+          } else if (message.role === 'assistant' && message.steerContinuationFor) {
+            ownerByMessage.set(message.id, message.steerContinuationFor);
+          }
+        }
+        return { ownerByMessage, rankByOwner };
+      };
+      const authoritativeSteers = steerOwners(next.messages);
+      const liveSteers = steerOwners(prior.messages);
+      const snapshotHasNewerActorRevision = (next.actorRevision ?? 0) > (fence.actorRevision ?? 0);
+      const snapshotTurnWasTerminal = next.messages.some((message) => {
+        if (!affected.has(message.id)
+            || message.role !== 'assistant'
+            || message.turnTerminal === false
+            || !isTerminalMessage(message)) return false;
+        const rootId = message.turnRootId?.trim() || message.id;
+        return !next.messages.some((candidate) => candidate.role === 'assistant'
+          && (candidate.turnRootId?.trim() || candidate.id) === rootId
+          && candidate.turnTerminal !== false
+          && (candidate.status === 'running' || candidate.status === 'pending'));
+      });
+      const preserveAuthoritativeSteerFields = (messageId: string): boolean => {
+        const owner = authoritativeSteers.ownerByMessage.get(messageId)
+          ?? liveSteers.ownerByMessage.get(messageId);
+        if (!owner) return false;
+        const authoritativeRank = authoritativeSteers.rankByOwner.get(owner) ?? 0;
+        const liveRank = liveSteers.rankByOwner.get(owner) ?? 0;
+        return authoritativeRank > liveRank
+          || ((snapshotHasNewerActorRevision || completeActorProjection) && snapshotTurnWasTerminal
+            && authoritativeRank > 0 && authoritativeRank >= liveRank);
+      };
+      const messageVersion = Math.max(
+        fence.startVersion ?? 0,
+        fence.dataVersion ?? 0,
+        fence.mediaVersion ?? 0,
+        fence.acpVersion ?? 0,
+        fence.planVersion ?? 0,
+        fence.steerVersion ?? 0,
+        fence.endVersion ?? 0,
+      );
+      if (affected.size && messageVersion > afterVersion) {
+        const removed = new Set(fence.removedMessageIds ?? []);
+        if (removed.size) {
+          next.messages = next.messages.filter((message) => !removed.has(message.id));
+        }
+        const nextByID = new Map(next.messages.map((message, index) => [message.id, index]));
+        for (let priorIndex = 0; priorIndex < prior.messages.length; priorIndex += 1) {
+          const message = prior.messages[priorIndex];
+          if (!affected.has(message.id)) continue;
+          const existing = nextByID.get(message.id);
+          if (existing !== undefined) {
+            next.messages[existing] = mergeLiveTurnMessage(
+              next.messages[existing],
+              message,
+              fence,
+              afterVersion,
+              preserveAuthoritativeSteerFields(message.id),
+            );
+            continue;
+          }
+          if (preserveAuthoritativeSteerFields(message.id) && (message.steerState || message.steerBoundary === 'waiting')) {
+            continue;
+          }
+          let insertAt = next.messages.length;
+          for (let before = priorIndex - 1; before >= 0; before -= 1) {
+            const preceding = next.messages.findIndex((candidate) => candidate.id === prior.messages[before].id);
+            if (preceding >= 0) { insertAt = preceding + 1; break; }
+          }
+          if (insertAt === next.messages.length) {
+            for (let after = priorIndex + 1; after < prior.messages.length; after += 1) {
+              const following = next.messages.findIndex((candidate) => candidate.id === prior.messages[after].id);
+              if (following >= 0) { insertAt = following; break; }
+            }
+          }
+          next.messages.splice(insertAt, 0, message);
+          nextByID.clear();
+          next.messages.forEach((candidate, index) => nextByID.set(candidate.id, index));
+        }
+        next.messageCount = Math.max(next.messageCount ?? 0, next.messages.length);
+      }
+
+      if ((fence.planVersion ?? 0) > afterVersion && !snapshotTurnWasTerminal && !snapshotHasNewerActorRevision) {
+        next.planLatest = prior.planLatest;
+        next.planLatestMessageId = prior.planLatestMessageId;
+      }
+
+      if ((fence.sessionVersion ?? 0) > afterVersion
+        && fence.sessionId && fence.sessionProviderId
+        && prior.sessionId === fence.sessionId
+        && prior.sessionProviderId === fence.sessionProviderId) {
+        const snapshotHasNewerDifferentLane = !!next.sessionId
+          && (next.sessionId !== fence.sessionId || next.sessionProviderId !== fence.sessionProviderId)
+          && (next.actorRevision ?? 0) > (fence.actorRevision ?? 0);
+        if (snapshotHasNewerDifferentLane) continue;
+        next.sessionId = fence.sessionId;
+        next.sessionProviderId = fence.sessionProviderId;
+        next.deliveryCapabilities = normalizeDeliveryCapabilities(fence.deliveryCapabilities);
+        next.pending = prior.pending;
+        next.sessionError = prior.sessionError;
+      }
     }
   }
 
@@ -1106,7 +1514,7 @@ export class Store {
     return merged;
   }
 
-  private restoreSessionSnapshot(server: unknown): boolean {
+  private restoreSessionSnapshot(server: unknown, liveEventFence = this.liveTurnEventVersion): boolean {
     if (!server || typeof server !== 'object' || !Array.isArray((server as Mirror).chats)) return false;
     const authoritative = server as Mirror;
     const previousChats = this.state.chats;
@@ -1119,6 +1527,7 @@ export class Store {
     const restored = this.fromMirror(authoritative);
     this.preserveNewerLocalControls(previousChats, restored.chats);
     this.preserveMatchingHydratedRuntime(previousChats, restored.chats);
+    this.preserveLiveTurnEvents(previousChats, restored.chats, liveEventFence, '');
     this.state.chats = this.carryRemoteChats(
       previousChats,
       this.carryPendingCreatedChats(previousChats, restored.chats),
@@ -1342,8 +1751,9 @@ export class Store {
 
   private async runScopedSync(scopes: ReadonlySet<SyncScope>) {
     if (scopes.has('session')) {
+      const liveEventFence = this.liveTurnEventVersion;
       const result = await this.guardedStep('digest session:get', () => callThrow('getSession'));
-      if (result.ok && this.restoreSessionSnapshot(result.value)) {
+      if (result.ok && this.restoreSessionSnapshot(result.value, liveEventFence)) {
         this.recoverIdleQueues();
         this.bumpApp(false);
       }
@@ -1630,18 +2040,25 @@ export class Store {
    * renderer expecting a field. Then its ids are tagged and its machine is
    * stamped, which is everything the rest of the app needs to address it.
    */
-  private async hydrateMachine(machineId: string, replaceAll = false): Promise<void> {
+  private async hydrateMachine(machineId: string, replaceAll = false, allowCatchup = true): Promise<boolean> {
     const link = this.machines?.linkFor(machineId);
-    if (!link) { this.machines?.setReason(machineId, 'conectada, sin enlace para leer sus chats'); return; }
+    if (!link) { this.machines?.setReason(machineId, 'conectada, sin enlace para leer sus chats'); return false; }
+    const catchupEpoch = this.remoteMachineCatchupEpoch(machineId);
+    const hydration = this.remoteMachineHydrationCounts.get(machineId);
+    this.remoteMachineHydrationCounts.set(machineId, {
+      epoch: catchupEpoch,
+      count: hydration?.epoch === catchupEpoch ? hydration.count + 1 : 1,
+    });
     // Every exit says why. A machine that connects and then contributes nothing
     // to the list is indistinguishable from one that is simply idle, and the
     // whole feature is invisible when that happens.
+    const liveEventFence = this.liveTurnEventVersion;
     try {
       const mirror = (await link.invoke('session:get')) as Mirror | null;
-      if (!this.machines?.ownsLink(machineId, link)) return;
+      if (!this.machines?.ownsLink(machineId, link)) return false;
       if (!mirror || !Array.isArray(mirror.chats)) {
         this.machines?.setReason(machineId, 'conectada, pero no devolvió sesión');
-        return;
+        return false;
       }
       const normalized = this.fromMirror(mirror).chats.map((chat) => ({
         ...(tagPayload(machineId, chat) as Chat),
@@ -1651,6 +2068,7 @@ export class Store {
       this.preserveNewerLocalControls(previousMachineChats, normalized);
       this.restoreDraftImages(previousMachineChats, normalized);
       this.preserveMatchingHydratedRuntime(previousMachineChats, normalized);
+      this.preserveLiveTurnEvents(previousMachineChats, normalized, liveEventFence, machineId);
       for (const chat of normalized) {
         if (!this.pendingPresentationOperations.has(chat.id)) {
           this.committedPresentationFingerprints.set(chat.id, presentationFingerprint(chat));
@@ -1686,12 +2104,71 @@ export class Store {
         ? `conectada · ${normalized.length} ${normalized.length === 1 ? 'conversación' : 'conversaciones'}`
         : 'conectada, sin conversaciones');
       this.bumpApp(true);
+      // An event that arrived before this machine had any mounted actor row
+      // could not be applied safely (job chunks have no replay sequence). One
+      // second authoritative read recovers it exactly once from actor state.
+      if (allowCatchup) await this.runRemoteMachineCatchup(machineId, catchupEpoch);
+      return true;
     } catch (err) {
-      if (!this.machines?.ownsLink(machineId, link)) return;
+      if (!this.machines?.ownsLink(machineId, link)) return false;
       // Called as `void hydrateMachine(...)` from a socket callback, so without
       // this the rejection vanishes into an unhandled promise and the machine
       // looks healthy forever.
       this.machines?.setReason(machineId, `no pude leer sus chats: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    } finally {
+      const current = this.remoteMachineHydrationCounts.get(machineId);
+      if (current?.epoch === catchupEpoch) {
+        if (current.count > 1) this.remoteMachineHydrationCounts.set(machineId, { ...current, count: current.count - 1 });
+        else this.remoteMachineHydrationCounts.delete(machineId);
+      }
+    }
+  }
+
+  private remoteMachineCatchupEpoch(machineId: string): number {
+    return this.remoteMachineCatchupEpochs.get(machineId) ?? 0;
+  }
+
+  private noteUnmatchedRemoteTurnEvent(machineId: string) {
+    machineId = machineId.trim();
+    if (!machineId) return;
+    const epoch = this.remoteMachineCatchupEpoch(machineId);
+    this.remoteMachinesNeedingCatchup.set(machineId, epoch);
+    const hydration = this.remoteMachineHydrationCounts.get(machineId);
+    if ((hydration?.epoch !== epoch || hydration.count === 0)
+      && this.remoteMachineCatchups.get(machineId) !== epoch) {
+      void this.runRemoteMachineCatchup(machineId, epoch);
+    }
+  }
+
+  private async runRemoteMachineCatchup(
+    machineId: string,
+    epoch = this.remoteMachineCatchupEpoch(machineId),
+  ): Promise<void> {
+    if (this.remoteMachineCatchupEpoch(machineId) !== epoch) return;
+    if (this.remoteMachineCatchups.get(machineId) === epoch) return;
+    this.remoteMachineCatchups.set(machineId, epoch);
+    try {
+      // One epoch-bound marker coalesces every dropped event in a read window. If another
+      // event arrives after that read's actor snapshot but before its reply,
+      // it raises the marker again and the loop takes one more snapshot. Once
+      // the job owner is mounted, later events apply live and the loop ends.
+      // Rejection advances the epoch, so an old read can neither revive its
+      // marker nor clear a newly-authorized machine's catch-up owner.
+      while (this.remoteMachineCatchupEpoch(machineId) === epoch
+        && this.remoteMachinesNeedingCatchup.get(machineId) === epoch) {
+        this.remoteMachinesNeedingCatchup.delete(machineId);
+        const recovered = await this.hydrateMachine(machineId, false, false);
+        if (this.remoteMachineCatchupEpoch(machineId) !== epoch) return;
+        if (!recovered) {
+          this.remoteMachinesNeedingCatchup.set(machineId, epoch);
+          break;
+        }
+      }
+    } finally {
+      if (this.remoteMachineCatchups.get(machineId) === epoch) {
+        this.remoteMachineCatchups.delete(machineId);
+      }
     }
   }
 
@@ -1702,6 +2179,10 @@ export class Store {
    * or revive one of its chats.
    */
   private evictMachineChats(machineId: string): void {
+    this.remoteMachineCatchupEpochs.set(machineId, this.remoteMachineCatchupEpoch(machineId) + 1);
+    this.remoteMachinesNeedingCatchup.delete(machineId);
+    this.remoteMachineCatchups.delete(machineId);
+    this.remoteMachineHydrationCounts.delete(machineId);
     const removedCatalog = this.remoteCatalogGroups.delete(machineId);
     const removed = this.state.chats.filter((chat) => ownerMachineId(chat) === machineId);
     if (!removed.length) {
@@ -1944,6 +2425,7 @@ export class Store {
     // the awaits above, and a wholesale `this.state = fromMirror(...)` would wipe
     // an already-received catalog, leaving the model picker empty (regression
     // from the server-side session store).
+    const liveEventFence = this.liveTurnEventVersion;
     const sessionStep = has('getSession')
       ? await this.guardedStep('boot session:get', () => callThrow('getSession'))
       : { ok: true as const, value: undefined };
@@ -1968,6 +2450,7 @@ export class Store {
       this.applyPendingAgentFocus();
       this.preserveNewerLocalControls(live.chats, this.state.chats);
       this.preserveMatchingHydratedRuntime(live.chats, this.state.chats);
+      this.preserveLiveTurnEvents(live.chats, this.state.chats, liveEventFence, '');
       this.restoreDraftImages(live.chats, this.state.chats);
       this.restorePendingDrafts(this.state.chats);
       this.state.meta = live.meta;
@@ -2082,11 +2565,12 @@ export class Store {
     // introduced. Re-read it before restoring catalog-dependent UI so dev never
     // remains stuck on the conservative production filter until Electron reloads.
     await this.guardedStep('reconnect app metadata', () => this.refreshAppMeta());
+    const liveEventFence = this.liveTurnEventVersion;
     const sessionStep = has('getSession')
       ? await this.guardedStep('reconnect session:get', () => callThrow('getSession'))
       : { ok: true as const, value: undefined };
     const server = sessionStep.ok ? sessionStep.value : undefined;
-    if (sessionStep.ok && this.restoreSessionSnapshot(server)) {
+    if (sessionStep.ok && this.restoreSessionSnapshot(server, liveEventFence)) {
       this.sessionHydrationPending = false;
     } else if (sessionStep.ok) {
       for (const chat of this.state.chats) {
@@ -2129,7 +2613,7 @@ export class Store {
 
   private recoverIdleQueues() {
     for (const chat of this.state.chats) {
-      if (!chat.queuePaused && shouldDrainRecoveredQueue(chat.queue, this.isChatRunning(chat.id))) void this.flushNextQueued(chat);
+	  if (shouldDrainRecoveredQueue(chat.queue, this.isChatRunning(chat.id))) void this.flushNextQueued(chat);
     }
   }
 
@@ -2908,15 +3392,22 @@ export class Store {
     if (chat.draft === submittedDraft) this.setDraft(chat.id, '');
     return this._send(chat, prompt, images);
   }
-  // Steer the running turn if the bridge supports it, else queue locally and
-  // auto-send at turn end (R2). No-op when the chat is idle → normal send.
-  async steerOrQueue(chatId: string, prompt: string, images?: StartJobOpts['images']): Promise<boolean> {
+  // Submit explicit live-steer intent to the exact running lane. Unsupported or
+  // definitively rejected steering returns ownership to the composer; FIFO is
+  // available only through the separate explicit queue action.
+  async steerRunning(chatId: string, prompt: string, images?: StartJobOpts['images']): Promise<boolean> {
     const chat = this.chat(chatId);
     if (!chat || !prompt.trim()) return false;
     // Offline: steering/queuing into a dead socket would silently vanish. Keep
     // the draft intact; the banner already explains why sending is blocked.
     if (!this.isConnected()) return false;
-    if (!this.isChatRunning(chat.id)) return this._send(chat, prompt, images);
+    if (!this.isChatRunning(chat.id)) {
+      // Explicit steer intent is never permission to create a fresh turn. The
+      // active turn may have ended between the composer's render and this
+      // click; leave the draft untouched so ordinary Enter can own that send.
+      this.addToast('No se pudo dirigir', 'El turno activo ya terminó; el mensaje quedó en el editor.');
+      return false;
+    }
     if (has('appChatSteer') && chat.sessionId && chat.chatId && liveSteeringSupported(chat.deliveryCapabilities)) {
       const steerSessionId = chat.sessionId;
       const deliveryCapabilities = chat.deliveryCapabilities;
@@ -2964,6 +3455,21 @@ export class Store {
       };
       const pendingSteerID = steerDispatchKey(chat.id, chat.chatId, pendingUser.id);
       this.pendingSteers.set(pendingSteerID, pendingSteer);
+      const markSteerOwnership = (owner: Chat, removed = false) => {
+        // A native turn can accept steering before its start receipt attaches a
+        // daemon job id. The stable assistant id still gives this hydration
+        // fence an exact key; related ids, rather than the job scan, own the
+        // accepted pair (or its rejection tombstone) in that brief window.
+        const fenceId = activeAssistant.jobId ?? continuation.jobId ?? activeAssistant.id;
+        this.markLiveTurnEvent(
+          owner,
+          fenceId,
+          'steer',
+          undefined,
+          [activeAssistant.id, pendingUser.id, continuation.id],
+          removed ? [pendingUser.id, continuation.id] : [],
+        );
+      };
       this.setDraft(chat.id, '');
       this.bumpChat(chat);
       return this.steerDispatches.run(chat.id, async () => {
@@ -2971,7 +3477,7 @@ export class Store {
           // The daemon persists the same staged ownership before turn/steer. For
           // native hosts it advances that boundary on the canonical consumption
           // receipt; older/generic adapters retain acknowledgement-time behavior.
-          const r = await call('appChatSteer', steerSessionId, prompt, images ?? [], pendingUser.id, continuation.id, boundary);
+          const r = await callThrow('appChatSteer', steerSessionId, prompt, images ?? [], pendingUser.id, continuation.id, boundary);
           // Queue persistence and the actor digest may replace the renderer Chat
           // object while this native acknowledgement is in flight. Identity is
           // the immutable tab+chat pair, not the JavaScript object reference: the
@@ -2985,12 +3491,13 @@ export class Store {
             // A timeout is explicitly not a rejection. Keep the same visible owner,
             // settle its spinner, and let a late client-id receipt upgrade it.
             markPendingSteerUncertain(live.messages, pendingUser.id);
+            markSteerOwnership(live);
             this.bumpChat(live);
             await this.flushSession();
             return true;
           }
           const destination = steeringDestination(r);
-          if (stagedReceiptBoundary && destination !== 'queue' && !hasSteerConsumptionReceipt(r)) {
+          if (stagedReceiptBoundary && destination !== 'rejected' && !hasSteerConsumptionReceipt(r)) {
             // The attachment promised a steer-consumption receipt. A reply that
             // drops that guarantee is a protocol mismatch, never permission to
             // invent an acknowledgement-time boundary or resend the input. A
@@ -2998,49 +3505,63 @@ export class Store {
             // waiting owner uncertain.
             if (markPendingSteerUncertain(live.messages, pendingUser.id)) {
               this.addToast('Steering no confirmado', 'El agente no conservó el recibo de steering negociado; no se reenvió para evitar duplicarlo.');
+              markSteerOwnership(live);
               this.bumpChat(live);
               await this.flushSession();
               return true;
             }
           }
-          if (destination === 'queue') {
-            // An explicit rejection transfers ownership in one structural commit:
-            // remove the pending chronological row, rejoin adjacent assistant
-            // segments, then create exactly one FIFO row.
+          if (destination === 'rejected') {
+            // A definite rejection releases the temporary transcript owner and
+            // returns the text to the composer. It never changes user intent by
+            // manufacturing an ordinary FIFO row.
             const removed = rejectChronologicalSteer(live.messages, pendingUser.id);
             // A receipt/acknowledgement may have beaten a late response. Once that
             // happens the transcript row owns delivery and cannot be duplicated.
             if (!removed) return true;
+            markSteerOwnership(live, true);
             this.rebuildJobRefs(new Set([live.id]));
-            if (r?.daemonQueued !== true) this.enqueue(live, prompt, images);
+			this.addToast('No se pudo dirigir', r?.error ?? 'El turno activo rechazó el steering; el mensaje quedó en el editor.');
+			this.bumpChat(live);
             await this.flushSession();
-            if (!this.isChatRunning(live.id)) void this.flushNextQueued(live);
-            return true;
+			return false;
           }
           // {turnId} proves admission and permanently owns delivery. The later
           // userMessage.clientId receipt chooses the transcript boundary and
           // upgrades feedback; neither outcome is ever replayed through FIFO.
-          acceptPendingSteer(live.messages, pendingUser.id);
+          if (acceptPendingSteer(live.messages, pendingUser.id)) markSteerOwnership(live);
           this.bumpChat(live);
           await this.flushSession();
           return true;
-        } finally {
+		} catch (error) {
+		  const live = this.chat(chatId);
+		  if (!sameChatPair(live, pendingSteer.tabId, pendingSteer.chatId)) return false;
+		  if (possiblyAcceptedInvoke(error)) {
+			if (markPendingSteerUncertain(live.messages, pendingUser.id)) markSteerOwnership(live);
+			this.addToast('Steering no confirmado', 'La conexión se cortó después de enviar el steering; no se reenvió para evitar duplicarlo.');
+			this.bumpChat(live);
+			await this.flushSession();
+			return true;
+		  }
+		  const removed = rejectChronologicalSteer(live.messages, pendingUser.id);
+		  // A receipt may have committed this steer before a late transport error.
+		  // Once committed, the transcript still owns it and the composer must not
+		  // receive a duplicate. A definite rejection dirties the chat explicitly;
+		  // addToast performs the single renderer bump for both changes.
+		  if (!removed) return true;
+		  markSteerOwnership(live, true);
+		  this.rebuildJobRefs(new Set([live.id]));
+		  this.touchChat(live.id);
+		  this.addToast('No se pudo dirigir', error instanceof Error ? error.message : 'El turno activo rechazó el steering; el mensaje quedó en el editor.');
+		  await this.flushSession();
+		  return false;
+		} finally {
           if (this.pendingSteers.get(pendingSteerID) === pendingSteer) this.pendingSteers.delete(pendingSteerID);
         }
       });
     }
-    this.enqueue(chat, prompt, images);
-    if (!this.isChatRunning(chat.id)) void this.flushNextQueued(chat);
-    return true;
-  }
-  private enqueue(chat: Chat, prompt: string, images?: StartJobOpts['images']) {
-    // Queue text is persisted through the daemon (which redacts at ingestion)
-    // and is what the dispatch eventually sends; store the same redacted bytes
-    // locally so neither hydration nor dispatch changes the visible row.
-    (chat.queue ??= []).push(queuedMessage(ownedEntityId(chat, rid('q')), redactSensitiveText(prompt), messageImages(images)));
-    this.markQueueMutation(chat);
-    this.bumpChat(chat);
-    this.scheduleQueuePersist();
+	this.addToast('No se pudo dirigir', 'El proveedor activo no admite steering en vivo; el mensaje quedó en el editor.');
+	return false;
   }
   queueDraftMessage(chatId: string, prompt: string, drafts: DraftImage[]): boolean {
     const chat = this.chat(chatId);
@@ -3131,8 +3652,7 @@ export class Store {
     this.markQueueMutation(chat);
     this.bumpChat(chat);
     this.scheduleQueuePersist();
-    if (chat.queue.length && !chat.queuePaused && !this.isChatRunning(chat.id)) void this.flushNextQueued(chat);
-    else if (!chat.queue.length && chat.queuePaused) void this.resumeQueued(chat.id);
+	if (chat.queue.length && !this.isChatRunning(chat.id)) void this.flushNextQueued(chat);
   }
   // Drag-reorder: move `id` to `toIndex` (an index in the CURRENT array, before
   // removal); the splice adjusts for the removed slot.
@@ -3149,7 +3669,7 @@ export class Store {
     this.markQueueMutation(chat);
     this.bumpChat(chat);
     this.scheduleQueuePersist();
-    if (!chat.queuePaused && !this.isChatRunning(chat.id)) void this.flushNextQueued(chat);
+	if (!this.isChatRunning(chat.id)) void this.flushNextQueued(chat);
   }
   cancelQueued(chatId: string) {
     const chat = this.chat(chatId); if (!chat?.queue?.length) return;
@@ -3158,46 +3678,9 @@ export class Store {
     this.markQueueMutation(chat);
     this.bumpChat(chat);
     this.scheduleQueuePersist();
-    if (chat.queuePaused) void this.resumeQueued(chat.id);
-  }
-  async resumeQueued(chatId: string): Promise<boolean> {
-    let chat = this.chat(chatId);
-    if (!chat || !chat.chatId || !chat.queuePaused || !this.isConnected()) return false;
-    const tabId = chat.id;
-    const durableChatId = chat.chatId;
-    const expectedRevision = chat.queuePauseRevision ?? 0;
-    if (expectedRevision <= 0 || !has('chatQueueResume')) {
-      this.scheduleScopedSync(['session']);
-      return false;
-    }
-    // A queued row may have painted only milliseconds before Stop. Commit its
-    // exact actor ownership before reopening dispatch, so resume can never race
-    // a debounced queue save and attempt to promote a row the daemon has not
-    // received yet.
-    await this.flushSession();
-    chat = this.chat(tabId);
-    if (!sameChatPair(chat, tabId, durableChatId) || !chat.queuePaused
-      || (chat.queuePauseRevision ?? 0) !== expectedRevision) return false;
-    const operationId = chat._queueResumeOperationId ?? (chat._queueResumeOperationId = rid('queue-resume'));
-    const receipt = await call('chatQueueResume', {
-      tabId, chatId: durableChatId, operationId, expectedRevision,
-    });
-    if (!receipt?.ok || receipt.operationId !== operationId) {
-      this.scheduleScopedSync(['session']);
-      return false;
-    }
-    const live = this.chat(tabId);
-    if (!sameChatPair(live, tabId, durableChatId)) return false;
-    live.queuePaused = receipt.queuePaused === true;
-    live.queuePauseRevision = receipt.queuePauseRevision;
-    live.actorRevision = receipt.actorRevision;
-    live._queueResumeOperationId = undefined;
-    this.bumpChat(live);
-    if (!live.queuePaused && live.queue?.length && !this.isChatRunning(live.id)) void this.flushNextQueued(live);
-    return true;
   }
   private async flushNextQueued(chat: Chat): Promise<void> {
-    if (chat.queuePaused || this.drainingQueues.has(chat.id) || this.isChatRunning(chat.id)) return;
+	if (this.drainingQueues.has(chat.id) || this.isChatRunning(chat.id)) return;
     const next = chat.queue?.[0];
     if (!next) return;
     // Agent-authored rows are drained by the daemon so they work headlessly.
@@ -3461,6 +3944,23 @@ export class Store {
         return false;
       }
       this.attachJobSession(current, job);
+      if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled' || !!job.finishedAt) {
+        admitted.jobId = job.id;
+        this.jobRef.set(job.id, { tabId: current.id, msgId: admitted.id });
+        this.onJobEvent({ type: 'end', job });
+        releasePendingStart();
+        return true;
+      }
+      // A fast provider can emit start+end while the frozen invoke reply is
+      // still crossing the socket. The terminal event already owns this row;
+      // the older start receipt must not recreate a live job anchor or send a
+      // queued Stop to work that is provably finished.
+      if (isTerminalMessage(admitted)) {
+        this.jobRef.delete(job.id);
+        if (this.chatJobs.get(chatId)?.msgId === admitted.id) this.chatJobs.delete(chatId);
+        releasePendingStart();
+        return true;
+      }
       admitted.jobId = job.id;
       this.jobRef.set(job.id, { tabId: current.id, msgId: admitted.id });
       if (pendingStart.cancelRequested) await this.cancelAdmittedTurn(current, admitted, job.id, pendingStart);
@@ -3527,29 +4027,38 @@ export class Store {
     return request;
   }
 
+  private requestChatReadback(chat: Chat, includePermissions = false) {
+    const machineId = ownerMachineId(chat);
+    if (machineId) {
+      void this.hydrateMachine(machineId);
+      return;
+    }
+    this.scheduleScopedSync(includePermissions ? ['session', 'permissions'] : ['session']);
+  }
+
   private async performAdmittedTurnCancel(chat: Chat, running: Msg, jobId: string): Promise<void> {
-    // Stop owns queue dispatch before waiting on the daemon. This prevents the
-    // terminal event from promoting a follow-up in the reply gap and keeps the
-    // control visually stopped even when another controller hydrates at once.
-    chat.queuePaused = true;
-    chat.queuePauseRevision = (chat.queuePauseRevision ?? 0) + 1;
-    chat._queueResumeOperationId = undefined;
-    this.bumpChat(chat);
     const result = await call('cancelJob', jobId);
     const live = this.chat(chat.id);
     if (!live || live.chatId !== chat.chatId) {
-      this.scheduleScopedSync(['session']);
+      this.requestChatReadback(chat);
       return;
     }
     const liveRunning = live.messages.find((message) => message.id === running.id && message.role === 'assistant') ?? running;
-    if (result && typeof result === 'object') {
-      if (typeof result.queuePaused === 'boolean') live.queuePaused = result.queuePaused;
-      if (Number.isInteger(result.queuePauseRevision)) live.queuePauseRevision = result.queuePauseRevision;
-      this.bumpChat(live);
-    }
     const cancelled = result === true
       || (!!result && typeof result === 'object' && (result as { cancelled?: unknown }).cancelled === true);
-    if (cancelled) return;
+    const preAdmission = !!result && typeof result === 'object'
+      && (result as { preAdmission?: unknown }).preAdmission === true;
+    if (cancelled) {
+      // A pre-admission Stop has no provider job and therefore no job:end.
+      // The actor already settled the exact canonical rows; finish the matching
+      // optimistic owner now and let scoped hydration confirm that same state.
+      if (preAdmission) {
+        this.finalizeCancelledLocally(live, liveRunning, jobId);
+        this.requestChatReadback(live, true);
+        void this.flushNextQueued(live);
+      }
+      return;
+    }
     const reason = result && typeof result === 'object'
       ? String((result as { reason?: unknown }).reason ?? '')
       : '';
@@ -3561,8 +4070,12 @@ export class Store {
       || (!!result && typeof result === 'object'
         && (result as { cancelled?: unknown }).cancelled === false
         && (reason === 'idle' || reason === 'unknown' || reason === 'not-owned'));
-    if (refused) this.finalizeCancelledLocally(live, liveRunning, jobId);
-    else this.scheduleScopedSync(['session']);
+    if (refused) {
+      this.addToast('No se pudo detener', 'El daemon no confirmó la cancelación; el turno sigue activo hasta que su estado se reconcilie.');
+      this.requestChatReadback(live, true);
+      return;
+    }
+    this.requestChatReadback(live);
   }
 
   private finalizeCancelledLocally(chat: Chat, running: Msg, jobId?: string) {
@@ -3633,6 +4146,22 @@ export class Store {
   }
 
   private onJobEvent(e: JobEvent) {
+    const remoteJobId = e.type === 'start' || e.type === 'end'
+      ? e.job.id
+      : e.type === 'data' || e.type === 'assistant-media' || e.type === 'acp'
+        ? e.id
+        : '';
+    const remoteMachineId = machineOf(remoteJobId);
+    if (remoteMachineId) {
+      const ownerKnown = e.type === 'start' || e.type === 'end'
+        ? !!((e.job.tabId ? this.chat(e.job.tabId) : null)
+          ?? (e.job.chatId ? this.chatByConvId(e.job.chatId) : null)
+          ?? this.resolveMsg(e.job.id))
+        : e.type === 'data' || e.type === 'assistant-media' || e.type === 'acp'
+          ? this.jobRef.has(e.id)
+          : true;
+      if (!ownerKnown) this.noteUnmatchedRemoteTurnEvent(remoteMachineId);
+    }
     switch (e.type) {
       case 'start': {
         const chatId = e.job.chatId ?? '';
@@ -3676,26 +4205,35 @@ export class Store {
           }
           this.bumpApp(false);
         }
+        if (chat) this.markLiveTurnEvent(chat, e.job.id, 'start', e.job);
         break;
       }
       case 'data': {
         if (e.stream !== 'stdout') return;      // stderr/system stay off the transcript
+        const ref = this.jobRef.get(e.id);
         const msg = this.resolveMsg(e.id);
         if (!msg) return;
         appendAssistantChunk(msg, e.chunk, e.phase);
         if (!isTerminalMessage(msg)) msg.status = 'running';
+        const chat = ref ? this.chat(ref.tabId) : null;
+        if (chat) this.markLiveTurnEvent(chat, e.id, 'data');
         this.bump('msg:' + msg.id);             // <-- isolated streaming re-render
         break;
       }
       case 'assistant-media': {
+        const ref = this.jobRef.get(e.id);
         const msg = this.resolveMsg(e.id);
         if (!msg) return;
         msg.images = mergeMessageImages(msg.images, e.images);
         if (!isTerminalMessage(msg)) msg.status = 'running';
+        const chat = ref ? this.chat(ref.tabId) : null;
+        if (chat) this.markLiveTurnEvent(chat, e.id, 'media');
         this.bump('msg:' + msg.id);
         break;
       }
       case 'acp': {
+        const liveRef = this.jobRef.get(e.id);
+        const liveChat = liveRef ? this.chat(liveRef.tabId) : null;
         if (e.event.kind === 'steer-consumed') {
           const ref = this.jobRef.get(e.id);
           const chat = ref ? this.chat(ref.tabId) : null;
@@ -3707,6 +4245,7 @@ export class Store {
             ? settlePendingSteer(chat.messages, e.event.clientUserMessageId, 'transcript')
             : undefined;
           if (chat && (committed || settled)) {
+            this.markLiveTurnEvent(chat, e.id, 'steer', undefined, [e.event.clientUserMessageId]);
             this.touchChat(chat.id);
             this.bumpApp(false);
             void this.flushSession();
@@ -3753,6 +4292,7 @@ export class Store {
           }
         }
         this.applyAcp(msg, e.event);
+        if (liveChat) this.markLiveTurnEvent(liveChat, e.id, e.event.kind === 'plan' ? 'plan' : 'acp');
         this.bump('msg:' + msg.id);
         this.bump(ACT);   // Tareas rail: live plan/tool activity
         break;
@@ -3790,11 +4330,24 @@ export class Store {
           && (candidate.id === e.job.assistantMessageId || candidate.jobId === e.job.id));
         const terminalWasAlreadyApplied = !!terminalOwnerBeforeEnd && isTerminalMessage(terminalOwnerBeforeEnd);
         const reattached = jobChat ? this.attachJobSession(jobChat, e.job) : false;
+        const terminalSteerRelatedMessageIds = new Set<string>(e.job.consumedSteerIds ?? []);
+        const terminalSteerRemovedMessageIds = new Set<string>();
         if (!msg && jobChat) {
           msg = this.synthesizeCanonicalJobRows(jobChat, e.job, true);
           if (!msg) this.scheduleScopedSync(['session', 'permissions']);
         }
         if (jobChat) {
+          const beforeSettlement = new Set(jobChat.messages.map((message) => message.id));
+          const terminalRoots = new Set(jobChat.messages
+            .filter((message) => message.role === 'assistant'
+              && (message.jobId === e.job.id || message.id === e.job.assistantMessageId))
+            .map((message) => message.turnRootId ?? message.id));
+          for (const message of jobChat.messages) {
+            if (message.role !== 'user' || !message.steerState || !message.turnRootId
+              || !terminalRoots.has(message.turnRootId)) continue;
+            terminalSteerRelatedMessageIds.add(message.id);
+            if (message.steerContinuationId) terminalSteerRelatedMessageIds.add(message.steerContinuationId);
+          }
           // The terminal job snapshot is the reconnect-safe source of truth if
           // the live receipt event raced a controller disconnect.
           for (const clientUserMessageId of e.job.consumedSteerIds ?? []) {
@@ -3806,6 +4359,10 @@ export class Store {
           // stable transcript owner. End its spinner honestly at the native
           // boundary; do not replay an outcome whose transport is unknown.
           settleSendingSteersAtTurnEnd(jobChat.messages);
+          const afterSettlement = new Set(jobChat.messages.map((message) => message.id));
+          for (const messageId of beforeSettlement) {
+            if (!afterSettlement.has(messageId)) terminalSteerRemovedMessageIds.add(messageId);
+          }
           this.rebuildJobRefs(new Set([jobChat.id]));
           msg = this.resolveMsg(e.job.id) ?? msg;
         }
@@ -3844,6 +4401,14 @@ export class Store {
           this.jobRef.delete(e.job.id);
           this.bump('msg:' + msg.id);
         }
+        if (jobChat) this.markLiveTurnEvent(
+          jobChat,
+          e.job.id,
+          'end',
+          e.job,
+          [...terminalSteerRelatedMessageIds],
+          [...terminalSteerRemovedMessageIds],
+        );
         if (jobChat) {
           const pendingStart = this.pendingTurnStarts.get(jobChat.id);
           if (pendingStart && pendingStart.chatId === jobChat.chatId
@@ -3874,7 +4439,7 @@ export class Store {
         // R4: a turn just finished — refresh this chat's checkpoints so the
         // per-turn Deshacer/Revisar affordances light up (feature-detected).
         if (endedChat) void this.refreshCheckpoints(endedChat);
-        if (endedChat?.queue?.length && !endedChat.queuePaused && !this.isChatRunning(endedChat.id)) {
+		if (endedChat?.queue?.length && !this.isChatRunning(endedChat.id)) {
           // R2: flush one explicitly queued/rejected follow-up at a time. An
           // acknowledged or transport-uncertain native steer never enters FIFO.
           void this.flushNextQueued(endedChat);
@@ -3899,13 +4464,15 @@ export class Store {
       chat.pending = false;
       chat.sessionError = undefined;
     }
+	const jobDeliveryCapabilities = normalizeDeliveryCapabilities(job.deliveryCapabilities);
+	if (jobDeliveryCapabilities) chat.deliveryCapabilities = jobDeliveryCapabilities;
     if (sessionChanged) {
       if (job.providerId) chat.sessionProviderId = job.providerId;
-      // A job event identifies the attached session but carries no capability
-      // snapshot. Any value from the previous session is stale until the live
-      // session reports it, so preserve the honest unknown state.
       chat.imageSupport = undefined;
-      chat.deliveryCapabilities = undefined;
+	  // The additive job field is an exact snapshot from the newly attached
+	  // lane. Older daemons omit it, which remains honest unknown rather than
+	  // retaining capabilities from the previous session.
+	  chat.deliveryCapabilities = jobDeliveryCapabilities;
       chat.planUsageSupported = undefined;
       chat.planUsageResetSupported = undefined;
     }
@@ -4711,20 +5278,13 @@ function localRunningJobID(chat: Chat): string | null {
 }
 export function digestChatSessionDiverged(chat: Chat, digest: StateDigestChat): boolean {
   const queue = chat.queue ?? [];
-  const queuePaused = chat.queuePaused === true;
-  const digestQueuePaused = digest.queuePaused === true;
   return localRunningJobID(chat) !== (digest.runningJobId ?? null)
     || (chat.messages.at(-1)?.id ?? null) !== (digest.lastMessageId ?? null)
     || queue.length !== digest.queueLen
     || (queue[0]?.id ?? null) !== (digest.queueHeadId ?? null)
     || (Number.isInteger(digest.presentationRevision)
       && (chat.presentationRevision ?? 0) !== digest.presentationRevision)
-    || (chat.agentQueueRevision ?? 0) !== digest.agentQueueRevision
-    || queuePaused !== digestQueuePaused
-    // The compact heartbeat omits historical revisions once the gate is open.
-    // Only an active pause needs its revision compared; session:get carries the
-    // full value used by the exact resume command.
-    || (digestQueuePaused && (chat.queuePauseRevision ?? 0) !== (digest.queuePauseRevision ?? 0))
+	|| (chat.agentQueueRevision ?? 0) !== digest.agentQueueRevision
     || (chat.runtimeControlRevision ?? 0) !== digest.runtimeControlRevision
     || (chat.providerId ?? null) !== (digest.providerId ?? null)
     || chat.currentModelId !== (digest.currentModelId ?? null)

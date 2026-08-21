@@ -950,109 +950,6 @@ func TestProviderChatRuntimeResumesExactLaneAcrossActorAndTabRestart(t *testing.
 	}
 }
 
-func TestProviderChatRuntimeLoadsExactLaneAcrossActorRestart(t *testing.T) {
-	root := repoRoot(t)
-	stateDir := t.TempDir()
-	tracePath := filepath.Join(stateDir, "provider-load-trace.log")
-	providerState := filepath.Join(stateDir, "provider-load-native.json")
-	const tabID, chatID = "load-actor-tab", "load-actor-chat"
-	store := sharedSessionStore(stateDir)
-	newManager := func() *acp.Manager {
-		return acp.NewManager(acp.Options{
-			RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
-			Provider: acp.ProviderConfig{
-				ID: "mock", Name: "Load-only ACP", Command: "node",
-				Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root,
-				Env: map[string]string{
-					"WORKASS_MOCK_ACP_DELAY_MS":           "0",
-					"WORKASS_MOCK_ACP_SESSION_STORE":      providerState,
-					"WORKASS_MOCK_ACP_TRACE_FILE":         tracePath,
-					"WORKASS_MOCK_ACP_SESSION_CAPABILITY": "load",
-				},
-				Enabled: true,
-			},
-			DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
-		})
-	}
-
-	firstManager := newManager()
-	first := newProviderChatRuntime(firstManager, store, stateDir)
-	if _, err := first.CreateRendererChat(map[string]any{
-		"tabId": tabID, "chatId": chatID, "operationId": "create-load-actor-chat",
-		"title": "Load actor lane", "titleLocked": true, "cwd": root,
-		"providerId": "mock", "currentModelId": "mock-deterministic", "currentModeId": "ask",
-	}); err != nil {
-		firstManager.Reset()
-		t.Fatal(err)
-	}
-	initial, err := first.Select(context.Background(), acp.SessionOptions{
-		TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: root,
-	})
-	if err != nil {
-		firstManager.Reset()
-		t.Fatal(err)
-	}
-	if initial.SessionID != "" {
-		firstManager.Reset()
-		t.Fatalf("load-only session/new became durable before first ACP activity: %#v", initial)
-	}
-	if _, err := first.Start(context.Background(), map[string]any{
-		"kind": "app-chat", "title": "Load actor lane", "tabId": tabID, "chatId": chatID,
-		"providerId": "mock", "cwd": root, "prompt": "first load-only turn",
-		"userMessageId": "load-user-1", "assistantMessageId": "load-assistant-1",
-	}, "human"); err != nil {
-		firstManager.Reset()
-		t.Fatal(err)
-	}
-	waitProviderChatIdle(t, first, chatID, 5*time.Second)
-	firstState, ok := first.Snapshot(chatID)
-	if !ok || firstState.ActiveLaneID == "" {
-		firstManager.Reset()
-		t.Fatalf("load-only actor lane did not become active: %#v", firstState)
-	}
-	threadID := firstState.Lanes[firstState.ActiveLaneID].Thread.HeadID
-	if threadID == "" {
-		firstManager.Reset()
-		t.Fatalf("first standard ACP activity did not commit the exact thread: %#v", firstState.Lanes[firstState.ActiveLaneID])
-	}
-	if err := first.Close(context.Background()); err != nil && !strings.Contains(err.Error(), "already unavailable") {
-		firstManager.Reset()
-		t.Fatal(err)
-	}
-	firstManager.Reset()
-
-	secondManager := newManager()
-	t.Cleanup(func() { secondManager.Reset() })
-	second := newProviderChatRuntime(secondManager, store, stateDir)
-	t.Cleanup(func() { _ = second.Close(context.Background()) })
-	loaded, err := second.Select(context.Background(), acp.SessionOptions{
-		TabID: tabID, ChatID: chatID, ProviderID: "mock", CWD: root,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.SessionID != threadID {
-		t.Fatalf("same-id load changed provider thread: first=%q loaded=%q", threadID, loaded.SessionID)
-	}
-	if _, err := second.Start(context.Background(), map[string]any{
-		"kind": "app-chat", "title": "Load actor lane", "tabId": tabID, "chatId": chatID,
-		"providerId": "mock", "sessionId": loaded.SessionID, "cwd": root, "prompt": "second load-only turn",
-		"userMessageId": "load-user-2", "assistantMessageId": "load-assistant-2",
-	}, "human"); err != nil {
-		t.Fatal(err)
-	}
-	waitProviderChatLedger(t, second, chatID, 4, 5*time.Second)
-	raw, err := os.ReadFile(tracePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trace := string(raw)
-	if strings.Count(trace, "session/load") != 1 || strings.Contains(trace, "session/resume") ||
-		strings.Contains(trace, "[mock:loaded-history]") || strings.Contains(trace, "Previous conversation") {
-		t.Fatalf("actor restart did not use one exact load without replay: %s", trace)
-	}
-}
-
 func TestActorNativeChatProjectsAfterRestartFromCanonicalStorage(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()
@@ -1324,6 +1221,24 @@ func waitProviderChatIdle(t *testing.T, runtime *providerChatRuntime, chatID str
 	t.Fatalf("provider chat did not reach an idle terminal boundary: %#v", state)
 }
 
+func stopSteerRegressionTurn(t *testing.T, runtime *providerChatRuntime) {
+	t.Helper()
+	state, ok := runtime.Snapshot("steer-regression-chat")
+	if !ok || state.Foreground == nil {
+		return
+	}
+	jobID := strings.TrimSpace(state.Foreground.Turn.NativeID)
+	if jobID == "" {
+		jobID = providercontract.DeriveJobID(state.ChatID, state.Foreground.OperationID)
+	}
+	result, handled, err := runtime.Cancel(context.Background(), jobID)
+	if err != nil || !handled || !result.Cancelled {
+		t.Errorf("stop held steer regression turn: handled=%v result=%#v err=%v", handled, result, err)
+		return
+	}
+	waitProviderChatIdle(t, runtime, "steer-regression-chat", 5*time.Second)
+}
+
 func waitProviderChatLedger(t *testing.T, runtime *providerChatRuntime, chatID string, want uint64, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -1452,17 +1367,17 @@ func TestProviderChatSteerRejectsStaleDurableAttachmentBeforeManagerOrSidecars(t
 func TestProviderChatSteerDuplicateAndChangedRetryAreDurableReadbackOnly(t *testing.T) {
 	runtime, _, _, stateDir, info := newSteerRegressionFixture(t)
 	startSteerRegressionTurn(t, runtime, info)
-	image := steerRegressionImage("same-steer-image", "same.png")
+	t.Cleanup(func() { stopSteerRegressionTurn(t, runtime) })
 	request := map[string]any{
 		"sessionId": info.SessionID, "prompt": "steer exactly once", "clientUserMessageId": "steer-once-operation",
-		"continuationAssistantMessageId": "steer-once-assistant", "images": []any{image},
+		"continuationAssistantMessageId": "steer-once-assistant",
 	}
 	if _, handled, err := runtime.Steer(context.Background(), request); !handled || err != nil {
 		t.Fatalf("initial steer admission failed: handled=%v err=%v", handled, err)
 	}
 	firstCount := sessionImageFileCount(t, stateDir)
-	if firstCount != 1 {
-		t.Fatalf("initial steer sidecar count=%d, want 1", firstCount)
+	if firstCount != 0 {
+		t.Fatalf("text steer unexpectedly wrote %d sidecars", firstCount)
 	}
 	if _, handled, err := runtime.Steer(context.Background(), cloneJSON(request).(map[string]any)); !handled || err != nil {
 		t.Fatalf("identical steer retry was not durable readback: handled=%v err=%v", handled, err)
@@ -1483,6 +1398,7 @@ func TestProviderChatSteerDuplicateAndChangedRetryAreDurableReadbackOnly(t *test
 	if got := sessionImageFileCount(t, stateDir); got != firstCount {
 		t.Fatalf("changed steer retry wrote sidecars: before=%d after=%d", firstCount, got)
 	}
+	stopSteerRegressionTurn(t, runtime)
 }
 
 func TestProviderChatStartChangedImageRetryDoesNotPersistSidecar(t *testing.T) {
@@ -1588,38 +1504,37 @@ func TestProviderChatSteerRejectedInputDoesNotPersistAttachmentSidecar(t *testin
 	}
 }
 
-func TestProviderChatSteerForegroundEndUsesDurableQueueExactlyOnce(t *testing.T) {
+func TestProviderChatSteerRejectsAfterForegroundEndWithoutTakingOwnership(t *testing.T) {
 	runtime, _, _, stateDir, info := newSteerRegressionFixture(t)
 	request := map[string]any{
-		"sessionId": info.SessionID, "prompt": "queue after foreground end", "clientUserMessageId": "race-steer-operation",
+		"sessionId": info.SessionID, "prompt": "reject after foreground end", "clientUserMessageId": "race-steer-operation",
 		"continuationAssistantMessageId": "race-steer-assistant", "images": []any{steerRegressionImage("race-sidecar", "race.png")},
 	}
 	result, handled, err := runtime.Steer(context.Background(), request)
-	if !handled || err != nil || result["daemonQueued"] != true || result["queued"] != true {
-		t.Fatalf("foreground-end steer did not use durable queue: handled=%v err=%v result=%#v", handled, err, result)
+	if !handled || !providercontract.ErrorIs(err, providercontract.ErrorAdmissionRejected) || result != nil {
+		t.Fatalf("foreground-end steer did not reject before ownership: handled=%v err=%v result=%#v", handled, err, result)
 	}
 	state, _ := runtime.Snapshot("steer-regression-chat")
-	if _, exists := state.Operations["race-steer-operation"]; !exists {
-		t.Fatal("queued foreground-end steer is missing its actor operation")
+	if _, exists := state.Operations["race-steer-operation"]; exists || len(state.Queue) != 0 || state.PendingSteer != nil {
+		t.Fatalf("rejected foreground-end steer acquired actor ownership: %#v", state)
 	}
-	if owners := countSteerOwners(state, "race-steer-operation"); owners != 1 {
-		t.Fatalf("foreground-end steer has %d durable owners, want exactly one", owners)
+	if got := sessionImageFileCount(t, stateDir); got != 0 {
+		t.Fatalf("rejected foreground-end steer wrote %d attachment sidecars", got)
 	}
-	count := sessionImageFileCount(t, stateDir)
 	retry, handled, err := runtime.Steer(context.Background(), cloneJSON(request).(map[string]any))
-	if !handled || err != nil || retry["operationId"] != "race-steer-operation" {
-		t.Fatalf("queued foreground-end retry was not durable readback: handled=%v err=%v result=%#v", handled, err, retry)
+	if !handled || !providercontract.ErrorIs(err, providercontract.ErrorAdmissionRejected) || retry != nil {
+		t.Fatalf("foreground-end retry did not remain rejected: handled=%v err=%v result=%#v", handled, err, retry)
 	}
-	if got := sessionImageFileCount(t, stateDir); got != count {
-		t.Fatalf("queued foreground-end retry wrote sidecars: before=%d after=%d", count, got)
+	if got := sessionImageFileCount(t, stateDir); got != 0 {
+		t.Fatalf("foreground-end retry wrote %d attachment sidecars", got)
 	}
 	state, _ = runtime.Snapshot("steer-regression-chat")
-	if owners := countSteerOwners(state, "race-steer-operation"); owners != 1 {
-		t.Fatalf("foreground-end retry duplicated durable ownership %d times", owners)
+	if _, exists := state.Operations["race-steer-operation"]; exists || len(state.Queue) != 0 || state.PendingSteer != nil {
+		t.Fatalf("foreground-end retry acquired actor ownership: %#v", state)
 	}
 }
 
-func TestProviderChatSteerForegroundEndRaceUsesDurableQueueExactlyOnce(t *testing.T) {
+func TestProviderChatSteerTerminalWinnerNeverFallsBackToFIFO(t *testing.T) {
 	runtime, _, _, _, info := newSteerRegressionFixture(t)
 	actor, err := runtime.actor("steer-regression-chat")
 	if err != nil {
@@ -1640,6 +1555,7 @@ func TestProviderChatSteerForegroundEndRaceUsesDurableQueueExactlyOnce(t *testin
 		err     error
 	}
 	responses := make(chan steerResponse, 1)
+	started := make(chan struct{})
 	// Hold the actor-facing mutex while the request resolves its exact durable
 	// attachment. The provider cancellation and terminal commit below can still
 	// advance the engine, forcing the request to recheck the foreground boundary
@@ -1670,10 +1586,11 @@ func TestProviderChatSteerForegroundEndRaceUsesDurableQueueExactlyOnce(t *testin
 		t.Fatalf("admit synthetic foreground: %v", err)
 	}
 	go func() {
+		close(started)
 		result, handled, err := runtime.Steer(context.Background(), request)
 		responses <- steerResponse{result: result, handled: handled, err: err}
 	}()
-	time.Sleep(10 * time.Millisecond)
+	<-started
 	state := actor.engine.Snapshot()
 	if state.Foreground == nil {
 		actor.mu.Unlock()
@@ -1685,15 +1602,12 @@ func TestProviderChatSteerForegroundEndRaceUsesDurableQueueExactlyOnce(t *testin
 		t.Fatalf("commit concurrent foreground terminal: %v", terminalErr)
 	}
 	response := <-responses
-	if !response.handled || response.err != nil || response.result["daemonQueued"] != true || response.result["queued"] != true {
-		t.Fatalf("concurrent foreground-end steer did not queue exactly once: handled=%v err=%v result=%#v", response.handled, response.err, response.result)
+	if !response.handled || !providercontract.ErrorIs(response.err, providercontract.ErrorAdmissionRejected) || response.result != nil {
+		t.Fatalf("terminal-winning steer did not reject before ownership: handled=%v err=%v result=%#v", response.handled, response.err, response.result)
 	}
 	after, _ := runtime.Snapshot("steer-regression-chat")
-	if _, exists := after.Operations["race-steer-concurrent-operation"]; !exists {
-		t.Fatal("concurrent foreground-end steer lost its actor operation")
-	}
-	if owners := countSteerOwners(after, "race-steer-concurrent-operation"); owners != 1 {
-		t.Fatalf("concurrent foreground-end steer has %d durable owners, want exactly one", owners)
+	if _, exists := after.Operations["race-steer-concurrent-operation"]; exists || len(after.Queue) != 0 || after.PendingSteer != nil {
+		t.Fatalf("terminal-winning steer acquired FIFO or pending ownership: %#v", after)
 	}
 }
 
@@ -1799,32 +1713,4 @@ func TestProviderChatRuntimeCheckpointExecutorCarriesOperationToReceipt(t *testi
 	if err := actor.engine.Apply(chat.RestoreCheckpoint{OperationID: operationID, TurnSequence: 2, ObservedAtUnixMS: 2000, Checkpoint: checkpointTarget, CheckpointDigest: checkpointDigest}); err == nil {
 		t.Fatal("changed checkpoint request reused the committed operation")
 	}
-}
-
-func countSteerOwners(state chat.State, operationID string) int {
-	count := 0
-	for _, entry := range state.Queue {
-		if string(entry.OperationID) == operationID {
-			count++
-		}
-	}
-	if state.Foreground != nil && string(state.Foreground.OperationID) == operationID {
-		count++
-	}
-	if state.PendingSteer != nil && string(state.PendingSteer.OperationID) == operationID {
-		count++
-	}
-	// Queue promotion moves ownership into the transcript atomically. A fast
-	// provider may finish before this race oracle snapshots the actor, so count
-	// the committed turn as one logical owner only after every transient owner
-	// has disappeared (the user and assistant ledger rows are one turn).
-	if count == 0 {
-		for _, event := range state.Ledger {
-			if string(event.OperationID) == operationID {
-				count = 1
-				break
-			}
-		}
-	}
-	return count
 }

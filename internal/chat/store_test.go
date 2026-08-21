@@ -40,6 +40,78 @@ func TestFileStoreRejectsUnsupportedVersionWithoutWriting(t *testing.T) {
 	}
 }
 
+func TestFileStoreIgnoresRemovedQueuePauseBytesWithoutRewritingOrLosingFIFO(t *testing.T) {
+	state, err := NewState("removed-queue-pause-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane := testLane(state.ChatID, "provider")
+	state, _ = apply(t, state, SelectLane{Identity: lane})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID:               lane.ID,
+		Thread:               provider.ThreadRef{ProviderID: lane.Realm.ProviderID, RootID: "thread", HeadID: "thread", Lineage: 1},
+		ConnectionGeneration: 1,
+		Context:              exactContext(provider.ContextImportUnsupported),
+	})
+	state, _ = apply(t, state, Submit{
+		OperationID: "active", Text: "active turn",
+		Presentation: provider.TurnPresentation{UserMessageID: "active-user", AssistantMessageID: "active-assistant", Origin: "human"},
+	})
+	state, _ = apply(t, state, Submit{
+		OperationID: "queued", Text: "preserve this queued turn",
+		Presentation: provider.TurnPresentation{UserMessageID: "queued-user", AssistantMessageID: "queued-assistant", Origin: "human"},
+	})
+
+	rawState, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stateObject map[string]any
+	if err := json.Unmarshal(rawState, &stateObject); err != nil {
+		t.Fatal(err)
+	}
+	stateObject["QueueControl"] = map[string]any{
+		"Paused": true, "Revision": 7,
+		"ResumeReceipts": map[string]any{"old-resume": map[string]any{"PauseRevision": 7}},
+	}
+	raw, err := json.Marshal(map[string]any{"v": currentStateEnvelopeVersion, "state": stateObject})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "provider-chats", state.ChatID+".json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, found, err := (FileStore{Path: path}).Load(state.ChatID)
+	if err != nil || !found {
+		t.Fatalf("load actor with removed field: found=%v err=%v", found, err)
+	}
+	if len(loaded.Queue) != 1 || loaded.Queue[0].OperationID != "queued" || loaded.Queue[0].Text != "preserve this queued turn" {
+		t.Fatalf("removed pause bytes changed FIFO content: %#v", loaded.Queue)
+	}
+	afterLoad, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterLoad, raw) {
+		t.Fatal("loading removed pause bytes rewrote current actor state")
+	}
+	if err := (FileStore{Path: path}).Save(loaded); err != nil {
+		t.Fatal(err)
+	}
+	afterSave, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(afterSave, []byte(`"QueueControl"`)) {
+		t.Fatalf("ordinary save retained removed pause subsystem: %s", afterSave)
+	}
+}
+
 func TestFileStoreRejectsCurrentStateWithMissingOutboxPresentationOriginWithoutWriting(t *testing.T) {
 	state, err := NewState("missing-origin-chat")
 	if err != nil {
