@@ -98,6 +98,49 @@ func TestMockProviderTypedPhasesAreExplicitAndPhaseLessTurnsStayPlain(t *testing
 	}
 }
 
+func TestSilentAgentTurnSurfacesEmptyCompletionNotice(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir:             root,
+		Provider:            ProviderConfig{Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Label: "Workass Mock ACP"},
+		Broadcast:           events.Broadcast,
+		StdoutFlushInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	session, err := manager.NewSession(ctx, SessionOptions{TabID: "silent-turn-tab", ChatID: "chat-silent-turn-tab"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+
+	job := startAppChatJob(t, manager, session.SessionID, "silent-turn-tab", "[mock:silent] end with nothing")
+	end := events.waitJobEnd(t, jobID(job), 5*time.Second)
+	assertJobStatus(t, end, "done", 0, "end_turn")
+	dataEvents := events.jobEvents(jobID(job), "data")
+	if len(dataEvents) != 1 {
+		t.Fatalf("silent turn data events = %#v, want exactly the empty-completion notice", dataEvents)
+	}
+	if dataEvents[0]["stream"] != "system" {
+		t.Fatalf("notice stream = %#v, want system", dataEvents[0])
+	}
+	chunk, _ := dataEvents[0]["chunk"].(string)
+	if !strings.Contains(chunk, "[acp]") || !strings.Contains(chunk, "without any visible response") {
+		t.Fatalf("empty-completion notice = %q", chunk)
+	}
+
+	healthy := startAppChatJob(t, manager, session.SessionID, "silent-turn-tab", "ordinary provider response")
+	assertJobStatus(t, events.waitJobEnd(t, jobID(healthy), 5*time.Second), "done", 0, "end_turn")
+	for _, ev := range events.jobEvents(jobID(healthy), "data") {
+		if text, _ := ev["chunk"].(string); strings.Contains(text, "[acp] The agent ended") {
+			t.Fatalf("healthy turn was flagged empty: %#v", ev)
+		}
+	}
+}
+
 func TestMockInitializeSessionPromptCancelErrorAndReuse(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)

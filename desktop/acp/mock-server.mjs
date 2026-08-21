@@ -398,7 +398,7 @@ async function runPrompt(id, params) {
     responseText = `[Open deterministic preview](<${imagePath}>)\n![Deterministic preview](<${imagePath}>)`;
   }
 
-  if (!session.cancelled) {
+  if (!session.cancelled && !text.includes('[mock:silent]')) {
     const prefix = `Mock ACP turn ${session.turn}: `;
     const typedPhases = text.includes('[mock:phases]');
     if (thoughtMidToken) {

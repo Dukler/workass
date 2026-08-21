@@ -1439,6 +1439,14 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	}
 	job.Code = &code
 	job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	if job.Status == "done" && !job.internal && strings.TrimSpace(job.Result) == "" && len(job.assistantImagesSnapshot()) == 0 {
+		m.opts.Logf("acp turn completed without content", map[string]any{
+			"tabID":      job.TabID,
+			"providerID": job.ProviderID,
+			"stopReason": job.StopReason,
+		})
+		m.emit("job:event", map[string]any{"type": "data", "id": job.ID, "stream": "system", "chunk": "\n[acp] The agent ended this turn without any visible response. Its model backend most likely failed or returned an empty completion (for example an upstream \"Service Unavailable\"). Retry the message or switch model.\n"})
+	}
 }
 
 func cleanDraft(text string) string {
