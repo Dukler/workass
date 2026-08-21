@@ -1460,14 +1460,6 @@ test('unsigned Windows staging verifies the complete portable x86-64 runtime', (
   assert.throws(() => verifyWindowsRelease(path.join(root, 'current'), incoming, '1.2.0', 'x64', installationId), /Windows executable|PE32/);
 });
 
-test('busy daemon leaves the verified release staged and never starts the worker', async () => {
-  const { manager, calls, didQuit } = managerFixture({ replies: [{ status: 409, body: { ready: false, foregroundTurns: 1 } }] });
-  const state = await manager.install();
-  assert.equal(state.phase, 'busy');
-  assert.equal(state.blockers.foregroundTurns, 1);
-  assert.deepEqual(calls, ['prepare']);
-  assert.equal(didQuit(), false);
-});
 
 test('slow machines can become visibly ready within the bounded progress handoff', async () => {
   const { manager } = managerFixture({ primeReady: false });
@@ -1564,211 +1556,14 @@ test('a progress launch timeout fences its child before rejecting the handoff', 
   assert.deepEqual(new Set(cancelled), new Set([poller, timeout]));
 });
 
-test('failure before visible readiness keeps the old Workass shell usable', async () => {
-  const { manager, calls, didQuit } = managerFixture({ replies: [
-    { status: 200, body: { ready: true } },
-    { status: 200, body: { cancelled: true } },
-  ] });
-  manager.deps.spawnVisibleProgress = async () => {
-    throw new Error('fixture window never became visible');
-  };
-  const state = await manager.install();
-  assert.equal(state.phase, 'failed');
-  assert.match(state.error, /window never became visible/);
-  assert.deepEqual(calls, ['prepare', 'cancel']);
-  assert.equal(didQuit(), false);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'journal.json'), 'utf8')).terminal, true);
-});
 
-test('progress loss after worker arm fences both owners and prevents commit or quit', async () => {
-  const fencedWorkers = [];
-  const { manager, calls, didQuit } = managerFixture({
-    replies: [
-      { status: 200, body: { ready: true } },
-      { status: 200, body: { cancelled: true } },
-    ],
-    dependencyOverrides: {
-      inspectWorkerOwnership: async () => ({ owned: true, exact: true, stale: false, pid: 8558 }),
-      terminateExactWorker: async (ownership) => { fencedWorkers.push(ownership.pid); return true; },
-    },
-  });
-  manager.deps.spawnArmedWorker = async (request) => {
-    fs.writeFileSync(request.receiptPath, `${JSON.stringify({
-      schemaVersion: 2,
-      updateId: request.updateId,
-      phase: 'armed',
-      previousVersion: request.currentVersion,
-      targetVersion: request.targetVersion,
-      installationId: request.installationId,
-      installTarget: request.installTarget,
-      workerId: request.workerId,
-      workerPID: 8558,
-    })}\n`);
-    const transaction = JSON.parse(fs.readFileSync(
-      path.join(manager.prepared.transactionRoot, 'transaction.json'), 'utf8',
-    ));
-    const progress = JSON.parse(fs.readFileSync(transaction.progressReceiptPath, 'utf8'));
-    fs.writeFileSync(transaction.progressReceiptPath, `${JSON.stringify({
-      ...progress, phase: 'closed', windowVisible: false,
-    })}\n`);
-    return { pid: 8558 };
-  };
-  const state = await manager.install();
-  assert.equal(state.phase, 'failed');
-  assert.match(state.error, /progress window closed before handoff commit/);
-  assert.deepEqual(fencedWorkers, [8558]);
-  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'cancel']);
-  assert.equal(didQuit(), false);
-});
 
-test('committed handoff requires one durable worker arm before daemon commit and quit', async () => {
-  const { manager, calls, didQuit } = managerFixture({ replies: [
-    { status: 200, body: { ready: true } },
-    { status: 202, body: { stopping: true } },
-  ] });
-  const state = await manager.install();
-  assert.equal(state.phase, 'installing');
-  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
-  assert.equal(didQuit(), true);
-  const transaction = JSON.parse(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'transaction.json'), 'utf8'));
-  assert.equal(transaction.schemaVersion, 4);
-  assert.equal(transaction.transactionRoot, manager.prepared.transactionRoot);
-  assert.equal(transaction.mutableStateTarget, manager.runtime.stateDir);
-  assert.equal(transaction.mutableStateBackupTarget, path.join(manager.prepared.transactionRoot, 'state-before-activation'));
-  assert.equal(transaction.failedMutableStateTarget, path.join(manager.prepared.transactionRoot, 'state-from-failed-activation'));
-  assert.equal(transaction.requireVisibleWindow, true);
-  const receipt = JSON.parse(fs.readFileSync(manager.receiptPath, 'utf8'));
-  assert.equal(receipt.phase, 'armed');
-  assert.equal(receipt.updateId, manager.prepared.updateId);
-});
 
-test('a lost prepare response retries the same durable transaction identity', async () => {
-  const { manager, calls, didQuit } = managerFixture({ replies: [
-    { status: 0, body: {} },
-    { status: 200, body: { ready: true, prepared: true } },
-    { status: 202, body: { stopping: true } },
-  ] });
-  const updateId = manager.prepared.updateId;
-  const state = await manager.install();
-  assert.equal(state.phase, 'installing');
-  assert.deepEqual(calls, ['prepare', 'prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
-  assert.equal(didQuit(), true);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'transaction.json'), 'utf8')).updateId, updateId);
-});
 
-test('a lost commit response transfers ownership to the exact armed worker without cancelling it', async () => {
-  const { manager, calls, didQuit } = managerFixture({ replies: [
-    { status: 200, body: { ready: true } },
-    { status: 0, body: {} },
-  ] });
-  const state = await manager.install();
-  assert.equal(state.phase, 'installing');
-  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
-  assert.equal(didQuit(), true);
-  assert.equal(JSON.parse(fs.readFileSync(manager.receiptPath, 'utf8')).phase, 'armed');
-});
 
-test('an authoritative commit rejection fences the exact worker and remains terminal after restart', async () => {
-  const fenced = [];
-  const { manager, calls, didQuit } = managerFixture({
-    replies: [
-      { status: 200, body: { ready: true } },
-      { status: 409, body: {} },
-      { status: 200, body: { cancelled: true } },
-    ],
-    dependencyOverrides: {
-      inspectWorkerOwnership: async () => ({ owned: true, exact: true, stale: false, pid: 4242 }),
-      terminateExactWorker: async (ownership) => { fenced.push(ownership.pid); return true; },
-    },
-  });
-  const state = await manager.install();
-  assert.equal(state.phase, 'failed');
-  assert.deepEqual(fenced, [4242]);
-  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit', 'cancel']);
-  assert.equal(didQuit(), false);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'journal.json'), 'utf8')).terminal, true);
-  assert.equal(JSON.parse(fs.readFileSync(manager.receiptPath, 'utf8')).phase, 'failed');
-  manager.dispose();
-  const restarted = manager.init();
-  assert.equal(restarted.phase, 'failed');
-  assert.equal(manager.recoveryPromise, null);
-});
 
-test('a worker that cannot durably arm cancels the prepared handoff and keeps Workass open', async () => {
-  const { manager, calls, didQuit } = managerFixture({ replies: [
-    { status: 200, body: { ready: true } },
-    { status: 200, body: { cancelled: true } },
-  ] });
-  manager.deps.spawnArmedWorker = async () => {
-    const error = new Error('fixture worker did not arm');
-    error.workassWorkerFenced = true;
-    throw error;
-  };
-  const state = await manager.install();
-  assert.equal(state.phase, 'failed');
-  assert.match(state.error, /did not arm/);
-  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'cancel']);
-  assert.equal(didQuit(), false);
-});
 
-test('a lost cancel response is reconciled with the same ID only after the arm-failed worker is fenced', async () => {
-  const { manager, calls } = managerFixture({ replies: [
-    { status: 200, body: { ready: true } },
-    { status: 0, body: {} },
-    { status: 200, body: { cancelled: true, alreadyCancelled: true } },
-  ] });
-  manager.deps.spawnArmedWorker = async () => {
-    const error = new Error('arm failed after spawn');
-    error.workassWorkerFenced = true;
-    throw error;
-  };
-  const state = await manager.install();
-  assert.equal(state.phase, 'failed');
-  assert.match(state.error, /arm failed/);
-  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'cancel', 'cancel']);
-});
 
-test('unconfirmed arm-failure cancel stays nonterminal and retries the exact prepared ID', async () => {
-  const scheduled = [];
-  const actions = [];
-  let allowCancel = false;
-  const { manager } = managerFixture({
-    dependencyOverrides: {
-      postLocalUpdate: async (_url, action, updateId) => {
-        actions.push([action, updateId]);
-        if (action === 'prepare') {
-          return actions.filter(([name]) => name === 'prepare').length === 1
-            ? { status: 200, body: { ready: true } }
-            : { status: 409, body: { ready: false, reason: 'retry stops after proving cancellation' } };
-        }
-        return allowCancel
-          ? { status: 200, body: { cancelled: true, alreadyCancelled: true } }
-          : { status: 0, body: {} };
-      },
-      spawnArmedWorker: async () => {
-        const error = new Error('arm failed after child fencing');
-        error.workassWorkerFenced = true;
-        throw error;
-      },
-      inspectWorkerOwnership: async () => ({ owned: false, exact: false, stale: false }),
-      schedule: (fn) => { scheduled.push(fn); return { unref() {} }; },
-    },
-  });
-  manager.startApply();
-  await manager.applyPromise;
-  const active = JSON.parse(fs.readFileSync(manager.receiptPath, 'utf8'));
-  assert.equal(manager.snapshot().phase, 'installing');
-  assert.equal(active.phase, 'preparing');
-  assert.equal(JSON.parse(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'journal.json'), 'utf8')).terminal, false);
-  assert.equal(scheduled.length, 1);
-
-  allowCancel = true;
-  scheduled.shift()();
-  await manager.recoveryPromise;
-  assert.equal(actions.filter(([action]) => action === 'cancel').length, 3);
-  assert.equal(manager.snapshot().phase, 'busy');
-  assert.notEqual(manager.snapshot().phase, 'failed');
-});
 
 test('worker ownership transfers only after the exact durable arm receipt', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-arm-'));
@@ -2153,46 +1948,6 @@ test('an active receipt without its durable journal cancels exact daemon admissi
   assert.match(manager.snapshot().error, /no complete recovery journal/);
 });
 
-test('crash after daemon prepare cannot lose the durable transaction needed to reconcile the same ID', async () => {
-  const first = managerFixture();
-  const updateId = first.manager.prepared.updateId;
-  first.manager.deps.postLocalUpdate = async (_url, action, requestedId) => {
-    assert.equal(action, 'prepare');
-    assert.equal(requestedId, updateId);
-    const transaction = JSON.parse(fs.readFileSync(path.join(first.manager.prepared.transactionRoot, 'transaction.json'), 'utf8'));
-    const journal = JSON.parse(fs.readFileSync(transaction.journalPath, 'utf8'));
-    const receipt = JSON.parse(fs.readFileSync(transaction.receiptPath, 'utf8'));
-    assert.equal(journal.phase, 'preparing');
-    assert.equal(receipt.phase, 'preparing');
-    throw new Error('simulated shell crash after prepare acceptance');
-  };
-  await assert.rejects(() => first.manager.install(), /simulated shell crash/);
-
-  const resumeCalls = [];
-  const restarted = new UpdateManager({
-    app: { getVersion: () => '1.1.0' },
-    runtime: first.manager.runtime,
-    resourcesPath: first.manager.resourcesPath,
-    executablePath: first.manager.executablePath,
-    platform: first.manager.platform,
-    arch: first.manager.arch,
-    isPackaged: true,
-    deps: {
-      networkRequest: () => { throw new Error('network not expected'); },
-      inspectWorkerOwnership: async () => ({ owned: false, exact: false, stale: false }),
-      postLocalUpdate: async (_url, action, requestedId) => {
-        resumeCalls.push([action, requestedId]);
-        return action === 'cancel'
-          ? { status: 200, body: { cancelled: true } }
-          : { status: 409, body: { ready: false, foregroundTurns: 1 } };
-      },
-    },
-  });
-  assert.equal(restarted.init().phase, 'installing');
-  await restarted.recoveryPromise;
-  assert.deepEqual(resumeCalls, [['cancel', updateId], ['prepare', updateId]]);
-  assert.equal(restarted.snapshot().phase, 'busy');
-});
 
 test('fresh worker heartbeats require one off-main identity proof and keep later polling on the cheap path', async () => {
   const workerId = `worker-${'c'.repeat(32)}`;
@@ -2278,51 +2033,50 @@ test('a fresh lease with a reused live PID is rejected by the first off-main ide
   assert.equal(manager.snapshot().phase, 'busy');
 });
 
-test('one apply action stages and commits an available release without a second click', async () => {
-  const { manager } = managerFixture();
-  const steps = [];
+test('one apply action hands off to the detached updater without extra steps', async () => {
+  const { manager, calls } = managerFixture();
+  let spawnedNuker = null;
+  manager.deps.spawn = (command, args) => {
+    if (String(args[0] || '').includes('update-nuke.js')) spawnedNuker = { command, args };
+    return { unref() {} };
+  };
   manager.publish({ phase: 'available', targetVersion: '1.2.0' });
-  manager.download = async () => {
-    steps.push('download');
-    return manager.publish({ phase: 'ready', progress: 1 });
-  };
-  manager.install = async () => {
-    steps.push('install');
-    return manager.publish({ phase: 'installing' });
-  };
+  manager.manifest = snapshotReleaseManifest(manifest());
 
   const state = await manager.apply();
   assert.equal(state.phase, 'installing');
-  assert.deepEqual(steps, ['download', 'install']);
+  assert.ok(spawnedNuker, 'apply must spawn the detached nuclear updater');
+  const requestIndex = spawnedNuker.args.indexOf('--request');
+  assert.ok(requestIndex !== -1);
+  const request = JSON.parse(fs.readFileSync(spawnedNuker.args[requestIndex + 1], 'utf8'));
+  assert.equal(request.targetVersion, '1.2.0');
+  assert.equal(request.downloadUrl, 'https://releases.example.test/Workass-1.2.0-darwin-arm64.zip');
+  assert.ok(calls.filter((entry) => entry === 'prepare').length === 0, 'no daemon fence round-trips remain');
 });
 
 test('apply IPC returns a running snapshot immediately while one background intent owns the update', async () => {
   const { manager } = managerFixture();
   const steps = [];
-  let finishDownload;
+  let finishInstall;
   manager.publish({ phase: 'available', targetVersion: '1.2.0' });
-  manager.download = async () => {
-    steps.push('download');
-    manager.publish({ phase: 'downloading', progress: 0 });
-    await new Promise((resolve) => { finishDownload = resolve; });
-    return manager.publish({ phase: 'ready', progress: 1 });
-  };
   manager.install = async () => {
     steps.push('install');
-    return manager.publish({ phase: 'installing' });
+    manager.publish({ phase: 'installing' });
+    await new Promise((resolve) => { finishInstall = resolve; });
+    return manager.snapshot();
   };
 
   const started = manager.startApply();
   const operation = manager.applyPromise;
-  assert.equal(started.phase, 'downloading');
-  assert.deepEqual(steps, ['download']);
-  assert.equal(manager.startApply().phase, 'downloading');
-  assert.deepEqual(steps, ['download']);
+  assert.equal(started.phase, 'installing');
+  assert.deepEqual(steps, ['install']);
+  assert.equal(manager.startApply().phase, 'installing');
+  assert.deepEqual(steps, ['install']);
 
-  finishDownload();
+  finishInstall();
   await operation;
   assert.equal(manager.snapshot().phase, 'installing');
-  assert.deepEqual(steps, ['download', 'install']);
+  assert.deepEqual(steps, ['install']);
 });
 
 test('a missing platform asset means current while a feed failure cannot impersonate an attempted update', async () => {
@@ -2381,9 +2135,9 @@ test('apply coalesces with an in-flight background check and applies its exact m
   const steps = [];
   manager.publish({ phase: 'current', targetVersion: null, availableVersion: null, error: null });
   manager.deps.fetchManifest = () => new Promise((resolve) => { publishRelease = resolve; });
-  manager.download = async () => {
-    steps.push(`download:${manager.manifest.version}`);
-    return manager.publish({ phase: 'ready' });
+  manager.install = async () => {
+    steps.push(`install:${manager.manifest.version}`);
+    return manager.publish({ phase: 'installing' });
   };
   manager.install = async () => {
     steps.push(`install:${manager.manifest.version}`);
@@ -2397,74 +2151,9 @@ test('apply coalesces with an in-flight background check and applies its exact m
   publishRelease(manifest({ version: '1.3.0' }));
   assert.equal((await checking).targetVersion, '1.3.0');
   assert.equal((await applying).phase, 'installing');
-  assert.deepEqual(steps, ['download:1.3.0', 'install:1.3.0']);
+  assert.deepEqual(steps, ['install:1.3.0']);
 });
 
-test('N+2 discovery stays visible without mutating the immutable N+1 staged transaction', async () => {
-  const { manager } = managerFixture({ primeReady: false });
-  const n1 = snapshotReleaseManifest(manifest({ version: '1.2.0' }));
-  const n2 = manifest({
-    version: '1.3.0',
-    artifacts: { update: {
-      name: 'Workass-1.3.0-darwin-arm64.zip',
-      url: 'https://releases.example.test/Workass-1.3.0-darwin-arm64.zip',
-      sha256: 'b'.repeat(64),
-      size: 2048,
-    } },
-  });
-  manager.manifest = n1;
-  manager.publish({ phase: 'available', targetVersion: n1.version, availableVersion: n1.version });
-  let finishArtifact;
-  let stagedRequest = null;
-  manager.deps.downloadArtifact = async (_source, destination, artifact) => {
-    assert.deepEqual(artifact, n1.artifacts.update);
-    await new Promise((resolve) => { finishArtifact = resolve; });
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, 'archive');
-  };
-  manager.deps.stageAndVerify = async (request) => {
-    stagedRequest = request;
-    writeMacUpdaterRuntime(request.incomingTarget);
-    return { designatedRequirement: n1.designatedRequirement };
-  };
-  const downloading = manager.download();
-  for (let attempt = 0; !finishArtifact && attempt < 100; attempt += 1) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  assert.equal(typeof finishArtifact, 'function', JSON.stringify(manager.snapshot()));
-  manager.deps.fetchManifest = async () => n2;
-  const discovered = await manager.check({ background: true });
-  assert.equal(discovered.phase, 'downloading');
-  assert.equal(discovered.targetVersion, '1.2.0');
-  assert.equal(discovered.availableVersion, '1.3.0');
-  assert.equal(manager.manifest.version, '1.3.0');
-  finishArtifact();
-  const ready = await downloading;
-  assert.equal(ready.phase, 'ready');
-  assert.equal(ready.targetVersion, '1.2.0');
-  assert.equal(ready.availableVersion, '1.3.0');
-  assert.equal(stagedRequest.targetVersion, '1.2.0');
-  assert.equal(manager.prepared.release.version, '1.2.0');
-  assert.equal(manager.prepared.artifact.url, n1.artifacts.update.url);
-
-  const handoffs = [];
-  manager.deps.postLocalUpdate = async (_url, action) => action === 'prepare'
-    ? { status: 200, body: { ready: true } }
-    : { status: 202, body: { stopping: true } };
-  manager.deps.spawnArmedWorker = async (request) => {
-    handoffs.push(request.targetVersion);
-    const receipt = {
-      schemaVersion: 2, updateId: request.updateId, phase: 'armed',
-      previousVersion: request.currentVersion, targetVersion: request.targetVersion,
-      installationId: request.installationId, installTarget: request.installTarget,
-      workerId: request.workerId, workerPID: 4555,
-    };
-    fs.writeFileSync(request.receiptPath, `${JSON.stringify(receipt)}\n`);
-    return { pid: 4555, workassUpdateReceipt: receipt };
-  };
-  assert.equal((await manager.install()).phase, 'installing');
-  assert.deepEqual(handoffs, ['1.2.0']);
-});
 
 test('a retained rollback receipt keeps polling and retry applies the newly discovered N+2 manifest', async () => {
   const { manager } = managerFixture();
@@ -2489,16 +2178,12 @@ test('a retained rollback receipt keeps polling and retry applies the newly disc
   assert.equal(discovered.availableVersion, '1.3.0');
 
   const steps = [];
-  manager.download = async () => {
-    steps.push(`download:${manager.manifest.version}`);
-    return manager.publish({ phase: 'ready' });
-  };
   manager.install = async () => {
     steps.push(`install:${manager.manifest.version}`);
     return manager.publish({ phase: 'installing' });
   };
   assert.equal((await manager.apply()).phase, 'installing');
-  assert.deepEqual(steps, ['download:1.3.0', 'install:1.3.0']);
+  assert.deepEqual(steps, ['install:1.3.0']);
 });
 
 test('automatic checks discover a newly published local release without restarting Electron', async () => {
@@ -2521,15 +2206,13 @@ test('automatic checks discover a newly published local release without restarti
   assert.equal((await scheduled[0].fn()).phase, 'current');
   assert.equal((await repeated[0].fn()).phase, 'available');
   assert.equal(fetches, 2);
-  assert.equal(scheduled.length, 2, 'a discovered offer stages its payload automatically');
   const advanced = await repeated[0].fn();
   assert.equal(advanced.phase, 'available');
   assert.equal(advanced.targetVersion, '1.3.0');
   assert.equal(fetches, 3, 'a newer un-downloaded offer must replace the previous offer');
-  assert.equal(scheduled.length, 2, 'one pending prestage covers the newest offer');
 
   manager.dispose();
-  assert.deepEqual(cancelled, [scheduled[0], repeated[0], scheduled[1]]);
+  assert.deepEqual(cancelled, [scheduled[0], repeated[0]]);
 });
 
 test('an automatic availability-check failure remains retryable without becoming an update transaction', async () => {
@@ -2555,56 +2238,7 @@ test('an automatic availability-check failure remains retryable without becoming
   manager.dispose();
 });
 
-test('a discovered offer pre-stages its payload so the click only activates', async () => {
-  const { manager } = managerFixture({ primeReady: false });
-  const scheduled = [];
-  const repeated = [];
-  let downloads = 0;
-  manager.deps.fetchManifest = async () => manifest({ version: '1.2.0' });
-  manager.deps.downloadArtifact = async (_source, destination) => {
-    downloads += 1;
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, 'archive');
-  };
-  manager.deps.stageAndVerify = async (request) => {
-    writeMacUpdaterRuntime(request.incomingTarget);
-    return { designatedRequirement: manifest().designatedRequirement };
-  };
-  manager.deps.schedule = (fn, delay) => { const handle = { fn, delay, unref() {} }; scheduled.push(handle); return handle; };
-  manager.deps.repeat = (fn, delay) => { const handle = { fn, delay, unref() {} }; repeated.push(handle); return handle; };
-  let installed = false;
-  manager.install = async () => { installed = true; return manager.publish({ phase: 'installing' }); };
-  manager.publish({ phase: 'current', targetVersion: null, error: null });
 
-  manager.startAutoChecks({ initialDelayMs: 15, intervalMs: 30 });
-  assert.equal((await scheduled[0].fn()).phase, 'available');
-  assert.equal(scheduled.length, 2, 'discovery schedules exactly one prestage');
-  assert.equal(downloads, 0);
-  await scheduled[1].fn();
-  assert.equal(manager.snapshot().phase, 'ready');
-  assert.equal(downloads, 1);
-
-  await manager.apply();
-  assert.equal(installed, true);
-  assert.equal(downloads, 1, 'activation must not re-download a staged payload');
-  manager.dispose();
-});
-
-test('a strictly newer release replaces a staged payload instead of hiding behind it', async () => {
-  const { manager } = managerFixture();
-  manager.deps.fetchManifest = async () => manifest({ version: '1.3.0' });
-  const stagedRoot = manager.prepared.transactionRoot;
-  const stagedIncoming = manager.prepared.incomingTarget;
-  assert.ok(fs.existsSync(stagedIncoming));
-
-  const state = await manager.autoCheck();
-  assert.equal(state.phase, 'available');
-  assert.equal(state.targetVersion, '1.3.0');
-  assert.equal(manager.prepared, null);
-  assert.equal(fs.existsSync(stagedIncoming), false);
-  assert.equal(fs.existsSync(stagedRoot), false);
-  manager.dispose();
-});
 
 test('rediscovering the staged version leaves the verified payload untouched', async () => {
   const { manager } = managerFixture();
@@ -2617,85 +2251,5 @@ test('rediscovering the staged version leaves the verified payload untouched', a
   manager.dispose();
 });
 
-test('an automatic prestage failure keeps the offer clickable instead of failing the card', async () => {
-  const { manager } = managerFixture({ primeReady: false });
-  const scheduled = [];
-  const repeated = [];
-  manager.deps.fetchManifest = async () => manifest({ version: '1.2.0' });
-  manager.deps.downloadArtifact = async (_source, destination) => {
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, 'archive');
-  };
-  manager.deps.stageAndVerify = async () => { throw new Error('fixture staging failure'); };
-  manager.deps.schedule = (fn, delay) => { const handle = { fn, delay, unref() {} }; scheduled.push(handle); return handle; };
-  manager.deps.repeat = (fn, delay) => { const handle = { fn, delay, unref() {} }; repeated.push(handle); return handle; };
-  manager.publish({ phase: 'current', targetVersion: null, error: null });
 
-  manager.startAutoChecks({ initialDelayMs: 15, intervalMs: 30 });
-  assert.equal((await scheduled[0].fn()).phase, 'available');
-  await scheduled[1].fn();
-  const state = manager.snapshot();
-  assert.equal(state.phase, 'available');
-  assert.equal(state.error, null);
 
-  const failed = await manager.apply();
-  assert.equal(failed.phase, 'failed');
-  assert.match(failed.error, /fixture staging failure/);
-  manager.dispose();
-});
-
-test('a click landing during an in-flight prestage still activates the staged release', async () => {
-  const { manager } = managerFixture({ primeReady: false });
-  const scheduled = [];
-  const repeated = [];
-  let downloads = 0;
-  let releaseStaging;
-  manager.deps.fetchManifest = async () => manifest({ version: '1.2.0' });
-  manager.deps.downloadArtifact = async (_source, destination) => {
-    downloads += 1;
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, 'archive');
-  };
-  manager.deps.stageAndVerify = async (request) => {
-    await new Promise((resolve) => { releaseStaging = resolve; });
-    writeMacUpdaterRuntime(request.incomingTarget);
-    return { designatedRequirement: manifest().designatedRequirement };
-  };
-  manager.deps.schedule = (fn, delay) => { const handle = { fn, delay, unref() {} }; scheduled.push(handle); return handle; };
-  manager.deps.repeat = (fn, delay) => { const handle = { fn, delay, unref() {} }; repeated.push(handle); return handle; };
-  manager.install = async () => manager.publish({ phase: 'installing' });
-  manager.publish({ phase: 'current', targetVersion: null, error: null });
-
-  manager.startAutoChecks({ initialDelayMs: 15, intervalMs: 30 });
-  await scheduled[0].fn();
-  const prestageRun = scheduled[1].fn();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(typeof releaseStaging, 'function', 'prestage must be mid-staging when the click lands');
-  const started = manager.startApply();
-  assert.equal(['downloading', 'staging'].includes(started.phase), true);
-  releaseStaging();
-  await prestageRun;
-  await manager.applyPromise;
-  assert.equal(manager.snapshot().phase, 'installing');
-  assert.equal(downloads, 1, 'the click must not start a second download');
-  manager.dispose();
-});
-
-test('automatic prestaging skips when the update volume lacks headroom', async () => {
-  const { manager } = managerFixture({ primeReady: false });
-  let downloads = 0;
-  manager.deps.fetchManifest = async () => manifest({ version: '1.2.0' });
-  manager.deps.downloadArtifact = async (_source, destination) => {
-    downloads += 1;
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, 'archive');
-  };
-  manager.deps.diskHasHeadroom = () => false;
-  manager.publish({ phase: 'available', targetVersion: '1.2.0' });
-
-  await manager.prestage();
-  assert.equal(downloads, 0);
-  assert.equal(manager.snapshot().phase, 'available');
-  assert.equal(prestageDiskHasHeadroom(path.join(os.tmpdir(), 'does-not-exist-wa')), true,
-    'an uninspectable volume never blocks a manual update');
-});
