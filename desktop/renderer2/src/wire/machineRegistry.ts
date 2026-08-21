@@ -107,7 +107,16 @@ export class MachineRegistry {
   private readonly opts: MachineRegistryOptions;
   private readonly entries = new Map<string, MachineEntry>();
   private readonly sockets = new Map<string, MachineSocket>();
+  private readonly socketAddresses = new Map<string, string>();
+  private readonly socketGroups = new Map<string, string>();
   private readonly ready = new Map<string, MachineSocket>();
+  // Bulk reads and event projection stay on `sockets`. Send-critical mutations
+  // use an event-free ordered sibling, while Stop has its own sibling so a
+  // provider-blocked steer handler can never sit in front of cancellation.
+  private readonly controlSockets = new Map<string, MachineSocket>();
+  private readonly controlReady = new Map<string, MachineSocket>();
+  private readonly urgentSockets = new Map<string, MachineSocket>();
+  private readonly urgentReady = new Map<string, MachineSocket>();
   private readonly states = new Map<string, { link: MachineLinkState; reason: string }>();
   private readonly remoteSubs = new Map<string, Set<RemoteEventListener>>();
   private readonly replayed = new Map<string, Set<unknown>>();
@@ -128,6 +137,11 @@ export class MachineRegistry {
     return createMachineRouter({
       local: () => this.opts.local(),
       links: () => this.ready,
+      // Owned auxiliary placeholders queue the first mutation until their
+      // authenticated handshake completes. Absence still fails closed; there
+      // is never a fallback onto the bulk projection socket.
+      controlLinks: () => this.controlSockets,
+      urgentLinks: () => this.urgentSockets,
       subscribeRemote: (channel, cb) => this.subscribeRemote(channel, cb),
     });
   }
@@ -244,14 +258,18 @@ export class MachineRegistry {
       // previously paired machine that later becomes stale/insecure opens a
       // doomed wss:// socket every 1.5s forever. Keep its book entry and
       // credential so a later secure refresh reconnects without re-pairing.
-		if (!entry.secure || (entry.status && entry.status !== 'ok')) {
-			this.detachSocket(id);
+      if (!entry.secure || (entry.status && entry.status !== 'ok')) {
+			this.detachSocket(id, entry.reason || 'el endpoint no está disponible');
 			continue;
 		}
       // Seeing a beacon never opens a socket or prompts the other machine.
       // A past approval reconnects automatically; a new request is always an
       // explicit local action, except the separately opted-in fleet mechanism.
       const automatic = !this.autoConnectDisabled(id) && (this.credentials(id).deviceToken || this.fleetKey);
+      const address = firstAddress(entry);
+      if (this.sockets.has(id) && this.socketAddresses.get(id) !== address) {
+        this.detachSocket(id, 'la dirección del endpoint cambió; reconectando');
+      }
       if (!this.sockets.has(id) && (this.requested.has(id) || automatic)) this.connect(entry);
     }
     for (const id of Array.from(this.entries.keys())) {
@@ -278,9 +296,12 @@ export class MachineRegistry {
   }
 
   closeAll(): void {
-    for (const socket of this.sockets.values()) socket.close();
-    this.sockets.clear();
-    this.ready.clear();
+    for (const machineId of Array.from(this.sockets.keys())) this.detachSocket(machineId);
+    // Defensive: a stale auxiliary can never survive a partially constructed
+    // primary entry, even if closeAll runs during its approval callback.
+    for (const machineId of new Set([...this.controlSockets.keys(), ...this.urgentSockets.keys()])) {
+      this.detachAuxiliarySockets(machineId);
+    }
   }
 
   /** Open one TLS socket to a discovered candidate after the user clicks Request access. */
@@ -311,29 +332,42 @@ export class MachineRegistry {
       // an unencrypted socket.
       url: 'wss://' + address,
       deviceName: this.opts.deviceName,
+      connectionGroup: newConnectionGroup,
       credentials: this.credentials(entry.machineId),
 		certFingerprint: fingerprint,
       fleetKey: this.fleetKey || undefined,
       open: this.opts.open ?? browserSocket,
-      saveCredentials: (id, next) => this.saveCredentials(id, next),
+      saveCredentials: (id, next) => {
+        this.saveCredentials(id, next);
+        // Fleet approval may announce `ready` before the enrol reply persists
+        // its derived token. The credential callback closes that one ordering
+        // gap without opening a second access request.
+        if (this.ready.get(id) === socket) this.ensureAuxiliarySockets(entry, socket);
+      },
       clearCredentials: (id) => this.clearCredentials(id),
       onState: (state, detail) => {
 		if (this.sockets.get(entry.machineId) !== socket) return;
+        // Fence both mutation siblings before publishing any primary state
+        // transition. An auxiliary is never usable without the projection
+        // socket whose events and hydration establish renderer authority.
+        if (state !== 'ready') {
+			this.detachAuxiliarySockets(entry.machineId);
+			this.socketGroups.delete(entry.machineId);
+		}
         if (state === 'ready' || state === 'rejected') this.requested.delete(entry.machineId);
         this.states.set(entry.machineId, { link: state, reason: detail?.reason ?? '' });
 		if (state === 'ready') {
 			this.ready.set(entry.machineId, socket);
+			this.socketGroups.set(entry.machineId, socket.connectionGroup);
 			this.mounted.add(entry.machineId);
+			this.ensureAuxiliarySockets(entry, socket);
 		} else {
 			this.ready.delete(entry.machineId);
 		}
 		if (state === 'rejected') {
 			// A human denial is terminal for automatic reconnect, including after
 			// reload with a fleet key. Only a later explicit Request access clears it.
-			this.disableAutoConnect(entry.machineId);
-			this.sockets.delete(entry.machineId);
-			socket.close();
-			this.unmount(entry.machineId);
+			this.rejectMachine(entry.machineId, detail?.reason ?? 'rejected');
 		}
         this.opts.onChange?.(this.list());
       },
@@ -351,7 +385,67 @@ export class MachineRegistry {
 		},
     });
     this.sockets.set(entry.machineId, socket);
+    this.socketAddresses.set(entry.machineId, address);
     socket.connect();
+  }
+
+  private ensureAuxiliarySockets(entry: MachineEntry, primary: MachineSocket): void {
+    const machineId = entry.machineId;
+    if (this.sockets.get(machineId) !== primary || this.ready.get(machineId) !== primary) return;
+    const address = firstAddress(entry);
+    const fingerprint = normalizeFingerprint(entry.certFingerprint);
+    if (!address || !fingerprint || !this.socketGroups.get(machineId) || this.socketAddresses.get(machineId) !== address) return;
+    this.ensureAuxiliarySocket(entry, primary, 'control', this.controlSockets, this.controlReady);
+    this.ensureAuxiliarySocket(entry, primary, 'urgent', this.urgentSockets, this.urgentReady);
+  }
+
+  private ensureAuxiliarySocket(
+    entry: MachineEntry,
+    primary: MachineSocket,
+    purpose: 'control' | 'urgent',
+    sockets: Map<string, MachineSocket>,
+    ready: Map<string, MachineSocket>,
+  ): void {
+    const machineId = entry.machineId;
+    const address = firstAddress(entry);
+    const fingerprint = normalizeFingerprint(entry.certFingerprint);
+    const credentials = this.credentials(machineId);
+    const connectionGroup = this.socketGroups.get(machineId);
+    if (!address || !fingerprint || !connectionGroup) return;
+	const existing = sockets.get(machineId);
+	if (existing) {
+		if (credentials.deviceToken && existing.generation === 0) existing.connect(credentials);
+		return;
+	}
+    const socket = new MachineSocket({
+      machineId,
+      url: 'wss://' + address,
+      purpose,
+      connectionGroup,
+      deviceName: this.opts.deviceName,
+      credentials,
+      certFingerprint: fingerprint,
+      open: this.opts.open ?? browserSocket,
+      // Auxiliary sockets authenticate with the already persisted identity.
+      // They never enrol, persist a second credential, or dispatch events.
+      clearCredentials: (id) => this.clearCredentials(id),
+      onState: (state, detail) => {
+        if (sockets.get(machineId) !== socket) return;
+        if (this.sockets.get(machineId) !== primary || this.ready.get(machineId) !== primary) {
+          sockets.delete(machineId);
+          ready.delete(machineId);
+          socket.close();
+          return;
+        }
+        if (state === 'ready') ready.set(machineId, socket);
+        else ready.delete(machineId);
+        if (state === 'rejected') this.rejectMachine(machineId, detail?.reason ?? 'rejected');
+      },
+      setTimer: this.opts.setTimer,
+      clearTimer: this.opts.clearTimer,
+    });
+    sockets.set(machineId, socket);
+	if (credentials.deviceToken) socket.connect(credentials);
   }
 
   /**
@@ -417,11 +511,35 @@ export class MachineRegistry {
 	}
 
 	/** Remove one transport before closing it so every synchronous late callback is stale. */
-	private detachSocket(machineId: string): void {
+	private detachSocket(machineId: string, reason = ''): void {
 		const socket = this.sockets.get(machineId);
 		this.sockets.delete(machineId);
+		this.socketAddresses.delete(machineId);
+		this.socketGroups.delete(machineId);
 		this.ready.delete(machineId);
+		this.detachAuxiliarySockets(machineId);
+		if (this.entries.has(machineId)) this.states.set(machineId, { link: 'idle', reason });
 		if (socket) socket.close();
+	}
+
+	private detachAuxiliarySockets(machineId: string): void {
+		const control = this.controlSockets.get(machineId);
+		const urgent = this.urgentSockets.get(machineId);
+		this.controlSockets.delete(machineId);
+		this.controlReady.delete(machineId);
+		this.urgentSockets.delete(machineId);
+		this.urgentReady.delete(machineId);
+		if (control) control.close();
+		if (urgent) urgent.close();
+	}
+
+	private rejectMachine(machineId: string, reason: string): void {
+		this.disableAutoConnect(machineId);
+		this.detachSocket(machineId, reason);
+		this.clearCredentials(machineId);
+		this.states.set(machineId, { link: 'rejected', reason });
+		this.requested.delete(machineId);
+		this.unmount(machineId);
 	}
 
 	private unmount(machineId: string): void {
@@ -433,6 +551,15 @@ export class MachineRegistry {
 function normalizeFingerprint(value: unknown): string {
 	const fingerprint = String(value ?? '').replaceAll(':', '').trim().toLowerCase();
 	return /^[a-f0-9]{64}$/.test(fingerprint) ? fingerprint : '';
+}
+
+let connectionGroupSequence = 0;
+
+function newConnectionGroup(): string {
+	connectionGroupSequence++;
+	const random = globalThis.crypto?.randomUUID?.().replaceAll('-', '')
+		?? Math.random().toString(36).slice(2);
+	return `cg-${connectionGroupSequence.toString(36)}-${random}`.slice(0, 128);
 }
 
 function trustMachineEndpoint(address: string, certFingerprint: string): boolean {

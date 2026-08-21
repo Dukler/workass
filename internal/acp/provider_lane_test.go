@@ -13,6 +13,7 @@ import (
 )
 
 func TestManagerLaneBackpressuresInsteadOfDroppingNormalizedEvents(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	identity := providercontract.LaneIdentity{
@@ -78,6 +79,7 @@ func TestManagerLaneBackpressuresInsteadOfDroppingNormalizedEvents(t *testing.T)
 }
 
 func TestFrozenWirePublicationWaitsForDurableActorCommit(t *testing.T) {
+	t.Parallel()
 	published := make(chan struct{}, 1)
 	manager := NewManager(Options{
 		RSSSampleInterval: time.Hour,
@@ -134,6 +136,7 @@ func TestFrozenWirePublicationWaitsForDurableActorCommit(t *testing.T) {
 }
 
 func TestProviderLaneArmsDurableCommitsBeforeLaneOpened(t *testing.T) {
+	t.Parallel()
 	published := make(chan struct{}, 1)
 	manager := NewManager(Options{
 		RSSSampleInterval: time.Hour,
@@ -203,6 +206,7 @@ func TestProviderLaneArmsDurableCommitsBeforeLaneOpened(t *testing.T) {
 }
 
 func TestManagedProviderJobRejectsLateEventsAfterTerminalCleanup(t *testing.T) {
+	t.Parallel()
 	var (
 		mu        sync.Mutex
 		published []string
@@ -274,6 +278,7 @@ func TestManagedProviderJobRejectsLateEventsAfterTerminalCleanup(t *testing.T) {
 }
 
 func TestManagerEmitSerializesDurableObserveAckAndPublication(t *testing.T) {
+	t.Parallel()
 	firstBroadcastEntered := make(chan struct{})
 	secondBroadcastEntered := make(chan struct{}, 1)
 	releaseFirst := make(chan struct{})
@@ -376,6 +381,7 @@ func newUnopenedManagerLaneForTest(t *testing.T, manager *Manager, chatID, sessi
 }
 
 func TestProviderAdmissionReceiptIsOwnedByChatNotDisposableTab(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	manager.recordProviderLaneAdmission("old-tab", "immutable-chat", "operation-1", map[string]any{"id": "job-1"})
@@ -386,6 +392,7 @@ func TestProviderAdmissionReceiptIsOwnedByChatNotDisposableTab(t *testing.T) {
 }
 
 func TestDescriptorOnlyACPProviderInheritsCompleteGenericLaneContract(t *testing.T) {
+	t.Parallel()
 	root, stateDir := repoRoot(t), t.TempDir()
 	const providerID = "descriptor-only-dummy"
 	if _, registered := providerRegistrationForID(providerID); registered {
@@ -488,6 +495,7 @@ func TestDescriptorOnlyACPProviderInheritsCompleteGenericLaneContract(t *testing
 }
 
 func TestDescriptorOnlyACPProviderRejectsMissingExactAttachmentBeforeCreate(t *testing.T) {
+	t.Parallel()
 	root, stateDir := repoRoot(t), t.TempDir()
 	const providerID = "descriptor-without-attachment"
 	providerStore := filepath.Join(stateDir, "provider.json")
@@ -529,6 +537,7 @@ func TestDescriptorOnlyACPProviderRejectsMissingExactAttachmentBeforeCreate(t *t
 }
 
 func TestConfiguredProviderUsesUnifiedRegistryAndExactLaneFactory(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "claude-cold-effort-resume", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -596,6 +605,7 @@ func TestConfiguredProviderUsesUnifiedRegistryAndExactLaneFactory(t *testing.T) 
 }
 
 func TestProviderLaneSelectionIsReadOnlyAndReturnsExactStoredBinding(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "claude-cold-effort-resume", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	opts := SessionOptions{TabID: "selection-tab", ChatID: "selection-chat", ProviderID: "custom", CWD: manager.opts.RootDir}
@@ -632,6 +642,7 @@ func TestProviderLaneSelectionIsReadOnlyAndReturnsExactStoredBinding(t *testing.
 }
 
 func TestUnifiedLaneCreateNeverRetriesAnAmbiguousProviderCreate(t *testing.T) {
+	t.Parallel()
 	methodLog := filepath.Join(t.TempDir(), "methods.log")
 	manager, _ := newFakeManager(t, "crash-session-new-resume", Options{
 		RSSSampleInterval: time.Hour,
@@ -666,6 +677,7 @@ func TestUnifiedLaneCreateNeverRetriesAnAmbiguousProviderCreate(t *testing.T) {
 }
 
 func TestUnifiedLaneFactoryRejectsReplacementThreadBeforeProviderCall(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "claude-cold-effort-resume", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	definition, err := manager.ProviderDefinition("custom")
@@ -693,6 +705,7 @@ func TestUnifiedLaneFactoryRejectsReplacementThreadBeforeProviderCall(t *testing
 }
 
 func TestCrossProviderSelectionFailsBeforeDetachingActiveLane(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	const tabID = "lane-switch-tab"

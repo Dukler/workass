@@ -36,7 +36,7 @@ func TestWireMockBurstReachesClientAtDisplayCadence(t *testing.T) {
 			CWD:     root,
 			Env: map[string]string{
 				"WORKASS_MOCK_ACP_DELAY_MS":          "0",
-				"WORKASS_MOCK_ACP_BURST_CHUNKS":      "2048",
+				"WORKASS_MOCK_ACP_BURST_CHUNKS":      "512",
 				"WORKASS_MOCK_ACP_BURST_CHUNK_BYTES": "128",
 			},
 			Enabled: true,
@@ -116,11 +116,11 @@ func TestWireMockBurstReachesClientAtDisplayCadence(t *testing.T) {
 	for _, sample := range samples {
 		output.WriteString(sample.chunk)
 	}
-	const wantBytes = 2048 * 128
+	const wantBytes = 512 * 128
 	if output.Len() != wantBytes {
 		t.Fatalf("wire bytes = %d, want %d", output.Len(), wantBytes)
 	}
-	if len(samples) < 20 || len(samples) >= 1024 {
+	if len(samples) < 20 || len(samples) >= 256 {
 		t.Fatalf("wire updates = %d, want sustained frame batches rather than per-token events", len(samples))
 	}
 

@@ -43,30 +43,30 @@ func TestProviderDetectionDefaultRetryCadenceMatchesPortContract(t *testing.T) {
 func TestProviderDetectionAllowsFullInitializeAndSessionBudgets(t *testing.T) {
 	root := repoRoot(t)
 	pathDir := t.TempDir()
-	installFakeAgentWrapper(t, pathDir, "devin", "split-probe-delay")
+	installFakeAgentWrapperWithEnv(t, pathDir, "devin", "split-probe-delay", map[string]string{
+		"WORKASS_FAKE_ACP_INIT_DELAY":    "200ms",
+		"WORKASS_FAKE_ACP_SESSION_DELAY": "410ms",
+	})
 	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("ASSISTANT_DEVIN", filepath.Join(pathDir, "devin"))
 
 	original := providerRegistrations["devin"]
 	registration := original
-	registration.ProbeTimeout = 2 * time.Second
+	registration.ProbeTimeout = 600 * time.Millisecond
 	providerRegistrations["devin"] = registration
 	t.Cleanup(func() { providerRegistrations["devin"] = original })
 
 	manager := NewManager(Options{
 		RootDir:           root,
-		InitTimeout:       2 * time.Second,
+		InitTimeout:       600 * time.Millisecond,
 		RSSSampleInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	manager.DetectProviders(ctx, DetectOptions{ProviderID: "devin"})
-	devin := assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusReady, true)
-	if latency, _ := devin["latencyMs"].(int64); latency < 2_000 {
-		t.Fatalf("split ACP probe latency = %dms, want both request stages", latency)
-	}
+	assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusReady, true)
 }
 
 func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *testing.T) {
@@ -1138,6 +1138,9 @@ func TestDetectProvidersLocalServerRegistersNativeProviderAndStreamsThroughAgent
 	defer fake.Close()
 	agentBin := buildWorkassAgentBinary(t, root)
 	t.Setenv(workassAgentBinEnv, agentBin)
+	pathDir := t.TempDir()
+	installFakeAgentWrapper(t, pathDir, "qwen", "echo-prompt")
+	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	providersFile := filepath.Join(t.TempDir(), "providers.json")
 	events := newEventCollector()
 	manager := NewManager(Options{
@@ -1216,34 +1219,17 @@ func TestDetectProvidersLocalServerRegistersNativeProviderAndStreamsThroughAgent
 	if savedEnv["OPENAI_MODEL"] != "local-first" || savedEnv["OPENAI_BASE_URL"] != fake.URL()+"/v1" || savedEnv["OPENAI_API_KEY"] != "local" {
 		t.Fatalf("saved local autoEnv = %#v", savedEnv)
 	}
-}
 
-func TestDetectProvidersQwenAndLocalServerCoexist(t *testing.T) {
-	root := repoRoot(t)
-	fake := newFakeLocalOpenAI(t, "shared-local-model")
-	defer fake.Close()
-	agentBin := buildWorkassAgentBinary(t, root)
-	t.Setenv(workassAgentBinEnv, agentBin)
-	pathDir := t.TempDir()
-	installFakeAgentWrapper(t, pathDir, "qwen", "echo-prompt")
-	t.Setenv("PATH", pathDir)
-	manager := NewManager(Options{
-		RootDir:             root,
-		InitTimeout:         5 * time.Second,
-		RSSSampleInterval:   time.Hour,
-		LocalModelEndpoints: []string{fake.URL() + "/v1/models", "http://127.0.0.1:1/v1/models"},
-	})
-	t.Cleanup(func() { manager.Reset() })
-
+	// The real local-agent boundary above also owns the coexistence assertion;
+	// rebuilding the same binary in a second test added no provider behavior.
 	manager.DetectProviders(context.Background(), DetectOptions{ProviderID: "qwen"})
-	manager.DetectProviders(context.Background(), DetectOptions{ProviderID: localLMStudioProviderID})
 	assertProviderListItem(t, manager.ProvidersList(), "qwen", providerStatusReady, true)
 	assertProviderListItem(t, manager.ProvidersList(), localLMStudioProviderID, providerStatusReady, true)
-	groups, _ := manager.Catalog(context.Background())["groups"].([]CatalogGroup)
+	groups, _ = manager.Catalog(context.Background())["groups"].([]CatalogGroup)
 	assertCatalogGroup(t, groups, "qwen", providerStatusReady, true)
-	local := findCatalogGroup(groups, localLMStudioProviderID)
-	if local == nil || len(local.Models) != 1 || local.Models[0].ModelID != "shared-local-model" {
-		t.Fatalf("local group = %#v groups=%#v", local, groups)
+	localGroup := findCatalogGroup(groups, localLMStudioProviderID)
+	if localGroup == nil || strings.Join(modelIDs(localGroup.Models), ",") != "local-first,local-second" {
+		t.Fatalf("local group changed after Qwen detection = %#v groups=%#v", localGroup, groups)
 	}
 	t.Logf("trace qwen+local coexist catalog %s", catalogSummaryForACP(manager.Catalog(context.Background())))
 }

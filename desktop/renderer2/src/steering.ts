@@ -1,6 +1,6 @@
 import type { DeliveryCapabilities } from './wire/types';
 
-export type SteeringDestination = 'transcript' | 'queue';
+export type SteeringDestination = 'transcript' | 'rejected';
 
 export interface SteeringReplyLike {
   ok?: boolean;
@@ -25,10 +25,10 @@ export interface ChronologicalMessageLike extends PendingSteerLike {
   jobId?: string;
   turnRootId?: string;
   turnTerminal?: boolean;
-  // A receipt-bearing lane keeps an admitted steer out of transcript history
-  // until the core commits its user-input item at the negotiated boundary. Workass persists
-  // this waiting pair immediately, but hides it from transcript rendering and
-  // leaves the current assistant segment live until that receipt arrives.
+  // A receipt-bearing lane persists both identities immediately. Once accepted,
+  // the user steer is transcript-visible at its canonical position; only the
+  // reserved continuation stays hidden until the core commits the negotiated
+  // consumption boundary.
   steerBoundary?: 'waiting';
   steerContinuationId?: string;
   steerContinuationFor?: string;
@@ -175,6 +175,13 @@ export function commitChronologicalSteer<T extends ChronologicalMessageLike>(
   for (const id of waitingIds) {
     const result = commitOneStagedSteer(messages, id);
     if (!result) return undefined;
+    // A provider cannot consume a later FIFO steer before every earlier staged
+    // direction. A receipt for the later client id therefore applies each row
+    // this loop commits, not only the requested target; leaving an earlier row
+    // sending/uncertain would strand it in the Steering tray after its semantic
+    // boundary had already been committed.
+    result.steer.status = 'done';
+    result.steer.steerState = 'applied';
     if (id === steerId) committed = result;
   }
   return committed;
@@ -310,11 +317,11 @@ export function rejectChronologicalSteer<T extends ChronologicalMessageLike>(mes
 
 export function steerStatusLabel(
   state: 'sending' | 'accepted' | 'applied' | 'uncertain',
-  waitingForConsumption = false,
+  _waitingForConsumption = false,
 ): string {
   switch (state) {
     case 'sending': return 'Steering…';
-    case 'accepted': return waitingForConsumption ? 'Steering…' : 'Steered';
+    case 'accepted': return 'Steered';
     case 'applied': return 'Steered';
     case 'uncertain': return 'Steer unconfirmed';
   }
@@ -363,13 +370,14 @@ export function steeringStagesBoundary(capabilities: DeliveryCapabilities | null
 }
 
 // A steering message must have exactly one visible owner. Workass creates that
-// owner synchronously, then either settles the SAME transcript row or transfers
-// it once to the FIFO after an explicit rejection. It never paints a second
-// optimistic row or bounces an acknowledged steer through the queue.
+// owner synchronously, then either settles that same transcript row or rejects
+// it back to the untouched composer. FIFO ownership exists only for a separate,
+// explicit queue intent.
 export function steeringDestination(reply: SteeringReplyLike | null | undefined): SteeringDestination {
   const strategy = String(reply?.strategy ?? '').trim().toLowerCase();
   if (strategy === 'uncertain') return 'transcript';
-  if (!reply || reply.ok === false || strategy === 'queue' || strategy === 'interrupt-queue') return 'queue';
+  if (!reply || reply.ok === false || strategy === 'rejected' || strategy === 'unsupported'
+      || strategy === 'queue' || strategy === 'interrupt-queue') return 'rejected';
   return 'transcript';
 }
 
@@ -412,8 +420,8 @@ export function settleSendingSteersAtTurnEnd<T extends PendingSteerLike>(message
   return settled;
 }
 
-// A consumed live steer stays in the transcript. Only an explicit queue
-// disposition removes a still-pending bubble before its FIFO row is created.
+// A consumed live steer stays in the transcript. A definite rejection removes
+// only the temporary row so the composer can reclaim the untouched input.
 export function settlePendingSteer<T extends PendingSteerLike>(
   messages: T[],
   pendingId: string,
@@ -422,7 +430,7 @@ export function settlePendingSteer<T extends PendingSteerLike>(
   const index = messages.findIndex((message) => message.id === pendingId);
   if (index < 0) return undefined;
   const message = messages[index];
-  if (destination === 'queue') {
+  if (destination === 'rejected') {
     // Only an unresolved/transport-uncertain steer can be explicitly rejected.
     // A receipt or acknowledgement owns the transcript row permanently; a late
     // response cannot steal it after it became a normal/accepted message.

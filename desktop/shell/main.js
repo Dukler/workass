@@ -19,8 +19,41 @@ const {
   startWindowsUpdateLockRecovery,
   updateLockRecoveryUserData,
 } = require('./update-lock-recovery');
+const {
+  PROGRESS_ARGUMENT,
+  progressTransactionArgument,
+  runUpdateProgressProcess,
+} = require('./update-progress');
 const { CertificatePins } = require('./certificate-pins');
 
+const updateProgressRequested = process.argv.includes(PROGRESS_ARGUMENT);
+let updateProgressTransaction = '';
+try { updateProgressTransaction = progressTransactionArgument(process.argv); }
+catch (err) {
+  console.error(`[updater] progress launch rejected: ${err.message}`);
+  app.quit();
+}
+
+if (updateProgressTransaction) {
+  const windowIcon = process.platform === 'win32'
+    ? path.join(process.resourcesPath, 'Workass.ico')
+    : path.join(process.resourcesPath, 'Workass.icns');
+  void runUpdateProgressProcess({
+    app,
+    BrowserWindow,
+    transactionPath: updateProgressTransaction,
+    platform: process.platform,
+    executablePath: process.execPath,
+    windowIcon: fs.existsSync(windowIcon) ? windowIcon : '',
+  }).catch((err) => {
+    console.error(`[updater] progress process failed: ${err.message}`);
+    app.quit();
+  });
+} else if (!updateProgressRequested) {
+  startPrimaryShell();
+}
+
+function startPrimaryShell() {
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const RUNTIME = resolveRuntimeProfile({
   env: process.env,
@@ -622,3 +655,4 @@ if (runsPrimaryRuntime) app.on('before-quit', () => {
   if (browserManager) browserManager.destroy();
   if (viewServer) void viewServer.close();
 });
+}

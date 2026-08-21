@@ -72,6 +72,14 @@ export interface MachineSocketOptions {
   machineId: string;
   /** `ws://host:port` — no trailing slash needed. */
   url: string;
+  /**
+   * Auxiliary authenticated sockets use the frozen envelope but receive no
+   * daemon event projection. Closed to the two server-declared roles so an
+   * arbitrary query value can never silently change transport semantics.
+   */
+  purpose?: 'control' | 'urgent';
+  /** Opaque correlation shared only by one primary and its two auxiliaries. */
+  connectionGroup?: string | (() => string);
   deviceName: string;
   credentials?: MachineCredentials;
 	/** Certificate identity proven by discovery before this socket is opened. */
@@ -127,6 +135,7 @@ export class MachineSocket {
   private enrolling = false;
   private state: MachineLinkState = 'idle';
 	private reconnectTimer: unknown = null;
+  private activeConnectionGroup = '';
 
   private readonly opts: MachineSocketOptions;
 
@@ -139,13 +148,16 @@ export class MachineSocket {
   get generation(): number { return this.gen; }
   get linkState(): MachineLinkState { return this.state; }
   get instanceId(): string { return this.lastInstanceId; }
+  get connectionGroup(): string { return this.activeConnectionGroup; }
 
-  connect(): void {
+  connect(credentials?: MachineCredentials): void {
+	if (credentials) this.credentials = { ...credentials };
 	this.cancelReconnect();
     this.closedByCaller = false;
     // A superseded socket's in-flight invokes are rejected, never resolved by
     // whatever the new socket happens to answer (lan_bridge.go:64).
-    if (this.pending.size) this.rejectPending('socket-replaced');
+    const firstConnect = this.gen === 0 && this.socket === null;
+    if (this.pending.size && !firstConnect) this.rejectPending('socket-replaced');
     if (this.socket) {
       const prior = this.socket;
       this.socket = null;
@@ -154,6 +166,17 @@ export class MachineSocket {
     this.opened = false;
     this.ready = false;
     const gen = ++this.gen;
+	const configuredGroup = typeof this.opts.connectionGroup === 'function'
+		? this.opts.connectionGroup()
+		: this.opts.connectionGroup;
+	this.activeConnectionGroup = String(configuredGroup ?? '').trim();
+	if (firstConnect) {
+		// Registry-owned auxiliary placeholders accept the user's first click while
+		// fleet enrolment persists the derived token. Rebind those undispatched
+		// invokes to the first real socket generation instead of rejecting them.
+		for (const pending of this.pending.values()) pending.generation = gen;
+		for (const queued of this.queue) queued.generation = gen;
+	}
     this.setState('connecting');
     const socket = this.opts.open(this.socketURL());
     this.socket = socket;
@@ -243,6 +266,10 @@ export class MachineSocket {
     const base = this.opts.url.replace(/\/+$/, '');
     const params: string[] = [];
     if (this.credentials.deviceToken) params.push('deviceToken=' + encodeURIComponent(this.credentials.deviceToken));
+    if (this.opts.purpose === 'control' || this.opts.purpose === 'urgent') {
+      params.push('purpose=' + this.opts.purpose);
+    }
+    if (this.activeConnectionGroup) params.push('connectionGroup=' + encodeURIComponent(this.activeConnectionGroup));
     const name = this.credentials.deviceName || this.opts.deviceName;
     if (name) params.push('deviceName=' + encodeURIComponent(name));
     return base + '/' + (params.length ? '?' + params.join('&') : '');

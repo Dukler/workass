@@ -15,11 +15,13 @@ D1. **Provider-owned compaction** — usage% is tracked per lane (normalize usag
     Providers without native compaction receive a visible context-limit event;
     Workass never asks a model to summarize itself, replaces the thread, resets
     usage, or replays transcript text.
-D2. **Steer / queue** — port app-chat:steer (legacy channel) with provider
-    semantics: Codex routes concurrent input into the active app-server turn;
-    Claude persists it as a distinct FIFO follow-up without cancelling the
-    active response; generic ACP agents use `_session/steer` only when their
-    capabilities advertise it, otherwise queue for turn end.
+D2. **Steer / queue** — `app-chat:steer` has provider-aware live semantics:
+    Codex routes acknowledged input into the active app-server turn; Claude
+    injects acknowledged input into the running SDK query; generic ACP agents
+    use `_session/steer` only when their capabilities advertise it. Unsupported
+    or definitely rejected steering returns the same input to the composer and
+    never interrupts or creates FIFO work. Ordinary queue submission is a
+    separate durable intent.
 D3. **Turn checkpoints + rewind (git-based)** — at each turn end with
     changes (Entorno tracking knows), record `git stash create`-style
     snapshot refs per touched repo; invokes chat:checkpoints (list per chat)
@@ -43,9 +45,10 @@ D8. **Diff read channel** — chat:diff {repo, path} → unified diff text of
 ## Renderer2 features (Opus lanes, serialized)
 R1. **Composer agent/model picker** — grouped by provider from catalog
     groups (daemon ready); per-chat binding at creation; effort selector.
-R2. **Steer/queue UX** — typing while running flips send to "Steer/encolar"
-    (legacy behavior), wired to D2 with feature-detect fallback (local
-    queue, send at turn end).
+R2. **Steer/queue UX** — while a turn runs, ordinary Enter creates one durable
+    FIFO row and Command+Enter or the text-bearing send button invokes live
+    steer. Unsupported/rejected steering restores the untouched composer input;
+    it never silently changes intent into queue work.
 R3. **Context meter + compaction indicator** — compact context ring near the
     composer, with exact values in its click-open popover; compaction announced
     in-transcript as a quiet step row.

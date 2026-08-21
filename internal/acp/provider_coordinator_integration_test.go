@@ -11,6 +11,7 @@ import (
 )
 
 func TestUnifiedCoordinatorRunsExistingACPManagerThroughTypedEvents(t *testing.T) {
+	t.Parallel()
 	// A durable provider lane is not legal unless the provider proves exact
 	// resume before its one session/new call. Use the resumable fixture so this
 	// integration test exercises the same conformance boundary as production.
@@ -101,6 +102,7 @@ func TestUnifiedCoordinatorRunsExistingACPManagerThroughTypedEvents(t *testing.T
 }
 
 func TestClaudeVerifiedLineageCommitsActorBeforeNativeMaterializationAndExactResume(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "claude-cold-effort-stable-resume", Options{
 		RSSSampleInterval: time.Hour, Provider: ProviderConfig{ID: "claude"},
 	})
@@ -207,6 +209,7 @@ func TestClaudeVerifiedLineageCommitsActorBeforeNativeMaterializationAndExactRes
 }
 
 func TestProviderLaneRejectsUnknownFrozenSemanticEvents(t *testing.T) {
+	t.Parallel()
 	events := &eventCollector{ch: make(chan collectedEvent, 64)}
 	manager, _ := newFakeManager(t, "echo-prompt-resume", Options{
 		RSSSampleInterval: time.Hour,
@@ -269,6 +272,7 @@ func TestProviderLaneRejectsUnknownFrozenSemanticEvents(t *testing.T) {
 }
 
 func TestProviderLaneCommandCatalogUpdateIsActorDurableBeforePublication(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "claude-commands-stable-resume", Options{
 		RSSSampleInterval: time.Hour, Provider: ProviderConfig{ID: "claude"},
 	})

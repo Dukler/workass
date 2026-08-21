@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -12,6 +13,7 @@ const {
   defaultOperations,
   launchUntilHealthy,
   mirrorWindowsDirectory,
+  replaceVisibleProgress,
   renamePathWithRetry,
   runTransaction,
   runtimeIsHealthy,
@@ -24,7 +26,10 @@ const {
   validateWorkerEntrypoint,
   verifyWindowsIncoming,
   waitUntilDeadline,
+  workerSelfTestReport,
 } = require('./update-worker');
+
+const RELEASED_UPDATER_COMMIT = '4b3c961841eb9ab59a7430d65bf80f9ac2b87910';
 
 function rejectReadOnlyFileFlushes(run) {
   const originalOpenSync = fs.openSync;
@@ -58,6 +63,18 @@ test('worker journal writes flush through the writable atomic file handle used o
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { schemaVersion: 3, phase: 'armed' });
 });
 
+test('the worker self-test reports the one exact transaction schema supported by this release', () => {
+  assert.deepEqual(workerSelfTestReport(['--self-test', '--transaction-schema', '4']), {
+    schemaVersion: 1,
+    product: 'Workass',
+    component: 'update-worker',
+    supportedTransactionSchemas: [4],
+    progressReceiptSchemaVersion: 1,
+  });
+  assert.throws(() => workerSelfTestReport(['--self-test', '--transaction-schema', '3']), /schema is unsupported/);
+  assert.throws(() => workerSelfTestReport(['--self-test']), /schema is unsupported/);
+});
+
 function writeFakeWindowsPE(file) {
   const bytes = Buffer.alloc(256);
   bytes.write('MZ', 0, 'ascii');
@@ -85,6 +102,7 @@ function writeWindowsRelease(root, version = '1.1.0', installationId = `install-
   for (const relative of [
     ['resources', 'app', 'update-manager.js'],
     ['resources', 'app', 'update-worker.js'],
+    ['resources', 'app', 'update-progress.js'],
     ['resources', 'app', 'update-lock-recovery.js'],
     ['resources', 'renderer', 'index.html'],
     ['frontier-hosts', 'windows-amd64', 'claude-native-host.mjs'],
@@ -104,13 +122,14 @@ function transactionFixture() {
   fs.mkdirSync(parent, { recursive: true });
   fs.mkdirSync(transactionRoot, { recursive: true });
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     updateId: 'update-fixture-1234',
     platform: 'darwin',
     currentVersion: '1.0.0',
     targetVersion: '1.1.0',
     shellPID: 44,
     workerId: `worker-${'2'.repeat(32)}`,
+    progressId: `progress-${'3'.repeat(32)}`,
     installationId: `install-${'1'.repeat(32)}`,
     transactionRoot,
     installTarget: path.join(parent, 'Workass.app'),
@@ -122,6 +141,11 @@ function transactionFixture() {
     receiptPath: path.join(dataRoot, 'updates', 'receipt.json'),
     journalPath: path.join(transactionRoot, 'journal.json'),
     leasePath: path.join(transactionRoot, 'worker-lease.json'),
+    workerPath: path.join(transactionRoot, 'update-worker.js'),
+    workerRuntimePath: path.join(transactionRoot, 'updater-node'),
+    progressModulePath: path.join(transactionRoot, 'update-progress.js'),
+    progressReceiptPath: path.join(transactionRoot, 'progress-receipt.json'),
+    progressExecutable: path.join(parent, '.Workass.app.incoming-update-fixture-1234', 'Contents', 'MacOS', 'Workass'),
     daemonHealthURL: 'https://127.0.0.1:8788/workass/health',
     shellStatusURL: 'http://127.0.0.1:8798/__workass-shell/status',
     requireVisibleWindow: true,
@@ -137,6 +161,8 @@ function windowsTransactionFixture() {
     installTarget: path.join(path.dirname(tx.installTarget), 'Workass'),
     incomingTarget: path.join(tx.transactionRoot, 'incoming-release'),
     backupTarget: path.join(tx.transactionRoot, 'installed-before-activation'),
+    workerRuntimePath: path.join(tx.transactionRoot, 'updater-node.exe'),
+    progressExecutable: path.join(tx.transactionRoot, 'incoming-release', 'Workass.exe'),
     designatedRequirement: '',
   };
 }
@@ -212,15 +238,50 @@ function writeWindowsBackupReceipt(transaction) {
   })}\n`);
 }
 
+test('the released schema-3 updater accepts the current portable artifact shape for the bootstrap transition', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-released-updater-'));
+  const releasedWorker = path.join(root, 'released-update-worker.js');
+  const source = execFileSync('git', [
+    'show', `${RELEASED_UPDATER_COMMIT}:desktop/shell/update-worker.js`,
+  ], { cwd: path.resolve(__dirname, '..', '..'), encoding: 'utf8' });
+  fs.writeFileSync(releasedWorker, source);
+  const released = require(releasedWorker);
+  const modern = windowsTransactionFixture();
+  const transaction = { ...modern, schemaVersion: 3 };
+  for (const field of [
+    'progressId', 'workerPath', 'workerRuntimePath', 'progressModulePath',
+    'progressReceiptPath', 'progressExecutable',
+  ]) delete transaction[field];
+  writeWindowsRelease(transaction.incomingTarget, transaction.targetVersion, transaction.installationId);
+  assert.equal(fs.statSync(path.join(transaction.incomingTarget, 'resources', 'app', 'update-progress.js')).isFile(), true);
+  assert.equal(released.validateTransaction(transaction), transaction);
+  const ops = operations({
+    verifyIncoming: async () => {
+      released.verifyWindowsIncoming(transaction);
+      ops.calls.push('verify');
+    },
+  });
+  const receipt = await released.runTransaction(transaction, ops);
+  assert.equal(receipt.phase, 'healthy');
+  assert.equal(receipt.installedVersion, transaction.targetVersion);
+  assert.ok(ops.calls.indexOf('verify') < ops.calls.indexOf('activate'));
+});
+
 test('transaction validation keeps macOS swap paths beside the app and Windows release paths inside its transaction', () => {
   const tx = transactionFixture();
   assert.equal(validateTransaction(tx), tx);
   assert.throws(() => validateTransaction({ ...tx, requireVisibleWindow: false }), /visible shell window/);
   assert.throws(() => validateTransaction({
-    ...tx, incomingTarget: tx.installTarget, backupTarget: tx.installTarget,
+    ...tx,
+    incomingTarget: tx.installTarget,
+    backupTarget: tx.installTarget,
+    progressExecutable: path.join(tx.installTarget, 'Contents', 'MacOS', 'Workass'),
+    recoveryAttempt: 1,
   }), /must be distinct/);
   assert.throws(() => validateTransaction({
-    ...tx, incomingTarget: path.join(path.dirname(tx.installTarget), `.Workass.app.incoming-wrong-${tx.updateId}`),
+    ...tx,
+    incomingTarget: path.join(path.dirname(tx.installTarget), `.Workass.app.incoming-wrong-${tx.updateId}`),
+    progressExecutable: path.join(path.dirname(tx.installTarget), `.Workass.app.incoming-wrong-${tx.updateId}`, 'Contents', 'MacOS', 'Workass'),
   }), /share one parent/);
   assert.throws(() => validateTransaction({ ...tx, backupTarget: path.join(path.dirname(path.dirname(tx.backupTarget)), 'elsewhere', 'old') }), /one parent/);
   assert.throws(() => validateTransaction({ ...tx, mutableStateTarget: path.dirname(tx.mutableStateTarget) }), /exact Workass state directory/);
@@ -1068,6 +1129,130 @@ test('the update relaunch keeps macOS hidden-until-ready and makes Windows visib
   assert.match(main, /win\.once\('ready-to-show', reveal\)/);
   assert.match(main, /focusPrimaryWindow\(\(\) => \[win\]/);
   assert.match(main, /createUpdateBootstrapWindow/);
+});
+
+test('progress loss before destructive work relaunches once and fails without an ownerless health wait', async () => {
+  const tx = transactionFixture();
+  const ops = operations({
+    progressVisible: async () => false,
+    healthy: async (version) => { ops.calls.push(`healthy:${version}`); return version === tx.currentVersion; },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'failed');
+  assert.equal(receipt.activated, false);
+  assert.equal(receipt.recoveryRelaunched, true);
+  assert.match(receipt.error, /progress window stopped/);
+  assert.deepEqual(ops.calls, ['start-runtime', 'launch']);
+});
+
+test('a crashed progress owner is replaced visibly before the update continues', async () => {
+  const tx = transactionFixture();
+  let visible = false;
+  const ops = operations({
+    progressVisible: async () => visible,
+    replaceProgress: async () => {
+      ops.calls.push('replace-progress');
+      visible = true;
+      return true;
+    },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'healthy');
+  assert.deepEqual(ops.calls, [
+    'replace-progress', 'stop-service', 'verify', 'snapshot-state', 'activate',
+    'start-runtime', 'launch', 'healthy:1.1.0', 'cleanup',
+  ]);
+});
+
+test('progress replacement fences its exact old tree and durably rotates ownership before spawn', async () => {
+  const tx = transactionFixture();
+  fs.mkdirSync(path.dirname(tx.progressExecutable), { recursive: true });
+  fs.writeFileSync(tx.progressExecutable, 'app');
+  fs.writeFileSync(path.join(tx.transactionRoot, 'transaction.json'), `${JSON.stringify(tx)}\n`);
+  const prior = {
+    schemaVersion: 1,
+    updateId: tx.updateId,
+    installationId: tx.installationId,
+    workerId: tx.workerId,
+    progressId: tx.progressId,
+    pid: 9559,
+    executablePath: tx.progressExecutable,
+    transactionPath: path.join(tx.transactionRoot, 'transaction.json'),
+    phase: 'watching',
+    windowVisible: true,
+    updatedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(tx.progressReceiptPath, `${JSON.stringify(prior)}\n`);
+  const steps = [];
+  const replaced = await replaceVisibleProgress(tx, {
+    inspectOwnership: () => ({ running: true, exact: true, pid: prior.pid }),
+    terminateProgress: async (ownership) => { steps.push(`fence:${ownership.pid}`); return true; },
+    createProgressId: () => `progress-${'9'.repeat(32)}`,
+    spawnProgress: async (request) => {
+      steps.push('spawn');
+      assert.equal(request.command, tx.progressExecutable);
+      assert.equal(request.transaction.progressId, `progress-${'9'.repeat(32)}`);
+      assert.equal(request.options.detached, true);
+      assert.equal(request.options.windowsHide, false);
+      return { pid: 9669 };
+    },
+  });
+  assert.equal(replaced, true);
+  assert.deepEqual(steps, [`fence:${prior.pid}`, 'spawn']);
+  const durable = JSON.parse(fs.readFileSync(path.join(tx.transactionRoot, 'transaction.json'), 'utf8'));
+  assert.equal(durable.schemaVersion, 4);
+  assert.equal(durable.progressId, `progress-${'9'.repeat(32)}`);
+  assert.equal(durable.recoveryAttempt, 1);
+  assert.equal(fs.existsSync(tx.progressReceiptPath), false);
+});
+
+test('progress replacement fails closed when a live receipt process is not the exact owner', async () => {
+  const tx = transactionFixture();
+  let spawned = false;
+  const replaced = await replaceVisibleProgress(tx, {
+    readReceipt: () => ({ pid: 9779 }),
+    inspectOwnership: () => ({ running: true, exact: false, ambiguous: true, pid: 9779 }),
+    spawnProgress: async () => { spawned = true; },
+  });
+  assert.equal(replaced, false);
+  assert.equal(spawned, false);
+});
+
+test('progress loss after activation defers rollback until a visible recovery owner exists', async () => {
+  const tx = transactionFixture();
+  let progressChecks = 0;
+  const ops = operations({
+    progressVisible: async () => {
+      progressChecks += 1;
+      return progressChecks < 5;
+    },
+    healthy: async (version) => { ops.calls.push(`healthy:${version}`); return version === tx.currentVersion; },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'activating');
+  assert.equal(receipt.activated, true);
+  assert.equal(receipt.recoveryOwnerUnavailable, true);
+  assert.ok(progressChecks >= 5);
+  assert.deepEqual(ops.calls, [
+    'stop-service', 'verify', 'snapshot-state', 'activate',
+  ]);
+  const journal = JSON.parse(fs.readFileSync(tx.journalPath, 'utf8'));
+  assert.equal(journal.phase, 'recovery_owner_unavailable');
+  assert.equal(journal.terminal, false);
+});
+
+test('a proven healthy target wins the same probe in which progress closes', async () => {
+  const ops = operations({
+    healthy: async () => true,
+  });
+  let progressChecks = 0;
+  const healthy = await launchUntilHealthy(ops, '1.2.0', {
+    attempts: 1,
+    timeoutMs: 1000,
+    progressVisible: async () => { progressChecks += 1; return false; },
+  });
+  assert.equal(healthy, true);
+  assert.equal(progressChecks, 0);
 });
 
 test('healthy activation deletes the backup only after all runtime gates pass', async () => {

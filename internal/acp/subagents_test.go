@@ -11,6 +11,7 @@ import (
 )
 
 func TestSubagentModelLabelBuildsTurnosChip(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name, model, effort, want string
 	}{
@@ -28,6 +29,7 @@ func TestSubagentModelLabelBuildsTurnosChip(t *testing.T) {
 }
 
 func TestTrackedSubagentAppearsAndUpdatesInOwningSpawnedWorkFeed(t *testing.T) {
+	t.Parallel()
 	manager, _, session, ownerKey, root, _ := newSubagentLifecycleFixture(t, "spawned-work-feed")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -62,6 +64,7 @@ func TestTrackedSubagentAppearsAndUpdatesInOwningSpawnedWorkFeed(t *testing.T) {
 }
 
 func TestTrackedSubagentTerminalStatusesSettleWithoutSyntheticWake(t *testing.T) {
+	t.Parallel()
 	manager, _, session, ownerKey, root, _ := newSubagentLifecycleFixture(t, "spawned-work-terminal")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -139,6 +142,7 @@ func assertTerminalSubagentSpawnedWorkItem(t *testing.T, manager *Manager, sessi
 }
 
 func TestCoordinatedSubagentUsesExplicitSelectionRoutesPermissionAndNamespacesTools(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	events := newEventCollector()
 	manager := NewManager(Options{
@@ -262,6 +266,7 @@ func TestCoordinatedSubagentUsesExplicitSelectionRoutesPermissionAndNamespacesTo
 }
 
 func TestSubagentPermissionAttentionStaysUnreadAfterFastResolution(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	run := &SubagentRun{ID: "child", Status: "running", Phase: "working"}
 	manager.mu.Lock()
@@ -289,14 +294,17 @@ func TestSubagentPermissionAttentionStaysUnreadAfterFastResolution(t *testing.T)
 }
 
 func TestDreamSubagentCatalogProgressMessageWaitManyAndDurableReceipt(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	stateDir := filepath.Join(t.TempDir(), "state")
 	holdRelease := filepath.Join(t.TempDir(), "release")
-	t.Setenv("WORKASS_MOCK_ACP_HOLD_FILE", holdRelease)
 	events := newEventCollector()
 	manager := NewManager(Options{
 		RootDir: root, StateDir: stateDir,
-		Provider:  ProviderConfig{Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Label: "Workass Mock ACP"},
+		Provider: ProviderConfig{
+			Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Label: "Workass Mock ACP",
+			Env: map[string]string{"WORKASS_MOCK_ACP_HOLD_FILE": holdRelease},
+		},
 		Broadcast: events.Broadcast, PermissionTimeout: 2 * time.Second,
 		StdoutFlushInterval: 10 * time.Millisecond, ThoughtFlushInterval: 10 * time.Millisecond,
 		RSSSampleInterval: time.Hour,
@@ -418,6 +426,7 @@ func TestDreamSubagentCatalogProgressMessageWaitManyAndDurableReceipt(t *testing
 }
 
 func TestSubagentPermissionInheritanceUsesEffectiveLiveModeAndNeverDowngrades(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "codex-controls", Options{Provider: ProviderConfig{ID: "codex"}})
 	t.Cleanup(func() { manager.Reset() })
 	root := repoRoot(t)
@@ -473,6 +482,7 @@ func TestSubagentPermissionInheritanceUsesEffectiveLiveModeAndNeverDowngrades(t 
 }
 
 func TestSubagentWaitDoesNotReportTerminalBeforeReceiptCommit(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 	run := &SubagentRun{
@@ -498,6 +508,7 @@ func TestSubagentWaitDoesNotReportTerminalBeforeReceiptCommit(t *testing.T) {
 }
 
 func TestSubagentAPIDeniesMissingOrStaleOwner(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 	if _, err := manager.AgentCatalog(context.Background(), "missing-owner", "chat", "tab"); err == nil {
@@ -512,6 +523,7 @@ func TestSubagentAPIDeniesMissingOrStaleOwner(t *testing.T) {
 }
 
 func TestSubagentCancelClearsPermissionAndValidOwnerIsolation(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	events := newEventCollector()
 	manager := NewManager(Options{
@@ -618,6 +630,7 @@ func TestSubagentCancelClearsPermissionAndValidOwnerIsolation(t *testing.T) {
 }
 
 func TestNestedSubagentOwnershipIsImmediateAndCascadeIsScoped(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	rootJob := &Job{ID: "root-job", Status: "running", ChatID: "root-chat", TabID: "root-tab"}
 	childJob := &Job{
@@ -691,6 +704,7 @@ func TestNestedSubagentOwnershipIsImmediateAndCascadeIsScoped(t *testing.T) {
 }
 
 func TestSubagentSurvivesCancelledParentSettlesAndWritesReceipt(t *testing.T) {
+	t.Parallel()
 	manager, events, session, ownerKey, root, stateDir := newSubagentLifecycleFixture(t, "cancel-survival")
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
@@ -756,16 +770,42 @@ func TestSubagentSurvivesCancelledParentSettlesAndWritesReceipt(t *testing.T) {
 	if len(events.jobEvents(asString(parent["id"]), "acp")) == 0 {
 		t.Fatal("surviving child lost its existing visible parent route")
 	}
+
+	// Normal completion is the same adoption boundary with a different parent
+	// terminal reason. Reuse the established provider/session instead of paying
+	// for another parent engine and catalog handshake.
+	startSubagentParent(t, manager, session, root, "[mock:slow] parent completes normally")
+	normalRun, err := manager.SpawnSubagent(ctx, SubagentSpawnOptions{
+		OwnerKey: ownerKey, ParentChatID: session.ChatID, ParentTabID: session.TabID,
+		Prompt: "[mock:slow] [mock:active-without-terminal] child remains active", Label: "normal-survivor",
+		ProviderID: session.Info.ProviderID, ModelID: "mock-deterministic", Effort: "high", ModeID: "ask", CWD: root,
+	})
+	if err != nil {
+		t.Fatalf("spawn normal-completion survivor: %v", err)
+	}
+	waitForSubagentAdoption(t, manager, normalRun.ID, 6*time.Second)
+	manager.mu.Lock()
+	normalSnapshot := copySubagentRun(manager.subagents[normalRun.ID])
+	manager.mu.Unlock()
+	if normalSnapshot.Status != "running" || !normalSnapshot.Adopted || normalSnapshot.AdoptedAt == "" {
+		t.Fatalf("normally completed parent did not leave child running: %#v", normalSnapshot)
+	}
+	if !manager.CancelSubagent(ownerKey, session.ChatID, session.TabID, normalRun.ID) {
+		t.Fatal("normal-completion survivor cleanup failed")
+	}
+	waitForSubagentTerminal(t, manager, ownerKey, session, normalRun.ID, 5*time.Second)
 }
 
-func TestSteerInterruptedParentAdoptsRunningSubagents(t *testing.T) {
+func TestRejectedSteerDoesNotEndParentOrPrematurelyAdoptRunningSubagents(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		mode       string
 		providerID string
+		strategy   string
 	}{
-		{name: "claude-fallback", mode: "interruptible-prompt", providerID: "claude"},
-		{name: "codex-rejected-native", mode: "codex-steer-rejected", providerID: "codex"},
+		{name: "claude-unsupported", mode: "interruptible-prompt", providerID: "claude", strategy: "unsupported"},
+		{name: "codex-rejected-native", mode: "codex-steer-rejected", providerID: "codex", strategy: "rejected"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -806,8 +846,20 @@ func TestSteerInterruptedParentAdoptsRunningSubagents(t *testing.T) {
 			}
 
 			res := manager.Steer(session.SessionID, "redirect parent", nil, "")
-			if res["interrupted"] != true || res["strategy"] != "interrupt-queue" {
-				t.Fatalf("steer fallback result = %#v", res)
+			if res["ok"] != false || res["queued"] != false || res["interrupted"] == true || res["strategy"] != tc.strategy {
+				t.Fatalf("steer rejection result = %#v", res)
+			}
+			if _, running := manager.RunningJobForChat(tabID, chatID); !running {
+				t.Fatal("rejected steer ended the parent turn")
+			}
+			manager.mu.Lock()
+			beforeCancel := copySubagentRun(manager.subagents[run.ID])
+			manager.mu.Unlock()
+			if beforeCancel.Status != "running" || beforeCancel.Adopted {
+				t.Fatalf("rejected steer prematurely adopted child: %#v", beforeCancel)
+			}
+			if cancelled := manager.CancelJobResult(jobID(parent)); !cancelled.Cancelled {
+				t.Fatalf("explicit cleanup Stop did not cancel parent: %#v", cancelled)
 			}
 			assertJobStatus(t, events.waitJobEnd(t, jobID(parent), 2*time.Second), "failed", 130, "cancelled")
 			waitForSubagentAdoption(t, manager, run.ID, 4*time.Second)
@@ -816,40 +868,75 @@ func TestSteerInterruptedParentAdoptsRunningSubagents(t *testing.T) {
 			snapshot := copySubagentRun(manager.subagents[run.ID])
 			manager.mu.Unlock()
 			if snapshot.Status != "running" || !snapshot.Adopted || snapshot.ParentJobID != jobID(parent) {
-				t.Fatalf("steer-interrupted parent did not adopt child: %#v", snapshot)
+				t.Fatalf("explicitly cancelled parent did not adopt child: %#v", snapshot)
 			}
 		})
 	}
 }
 
-func TestSubagentSurvivesNormallyCompletedParent(t *testing.T) {
-	manager, _, session, ownerKey, root, _ := newSubagentLifecycleFixture(t, "normal-survival")
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+func TestUnsupportedSubagentSteerKeepsOneDurableFollowupWithoutInterrupting(t *testing.T) {
+	t.Parallel()
+	manager, events := newFakeManager(t, "interruptible-prompt", Options{
+		Provider: ProviderConfig{ID: "claude"},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	const tabID = "subagent-unsupported-steer-tab"
+	const chatID = "chat-subagent-unsupported-steer-tab"
+	session := newFakeSession(t, manager, tabID)
+	manager.mu.Lock()
+	ownerKey := manager.agentOwnerBySession[session.SessionID]
+	manager.mu.Unlock()
+	if ownerKey == "" {
+		t.Fatal("parent session has no owner key")
+	}
+	parent := startAppChatJob(t, manager, session.SessionID, tabID, "parent keeps running")
+	_ = events.waitJobType(t, jobID(parent), "acp", 2*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	startSubagentParent(t, manager, session, root, "[mock:slow] parent completes normally")
 	run, err := manager.SpawnSubagent(ctx, SubagentSpawnOptions{
-		OwnerKey: ownerKey, ParentChatID: session.ChatID, ParentTabID: session.TabID,
-		Prompt: "[mock:slow] [mock:active-without-terminal] child remains active", Label: "normal-survivor",
-		ProviderID: session.Info.ProviderID, ModelID: "mock-deterministic", Effort: "high", ModeID: "ask", CWD: root,
+		OwnerKey: ownerKey, ParentChatID: chatID, ParentTabID: tabID,
+		Prompt: "child keeps running for a durable follow-up", Label: "unsupported-steer-child",
+		ProviderID: session.ProviderID, ModelID: "fake-model", ModeID: "ask", CWD: repoRoot(t),
 	})
 	if err != nil {
 		t.Fatalf("spawn child: %v", err)
 	}
-	waitForSubagentAdoption(t, manager, run.ID, 6*time.Second)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		manager.mu.Lock()
+		child := manager.subagents[run.ID]
+		ready := child != nil && child.Status == "running" && child.acceptingMessages && child.SessionID != "" && child.JobID != ""
+		manager.mu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child never became ready for coordinator feedback")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	delivery, err := manager.MessageSubagent(ownerKey, chatID, tabID, run.ID, "persist this exact follow-up")
+	if err != nil || delivery["ok"] != true || delivery["delivery"] != "followup" || delivery["strategy"] != "unsupported" {
+		t.Fatalf("unsupported subagent delivery = %#v err=%v", delivery, err)
+	}
 	manager.mu.Lock()
-	snapshot := copySubagentRun(manager.subagents[run.ID])
+	child := copySubagentRun(manager.subagents[run.ID])
+	followupCount := len(manager.subagents[run.ID].followups)
 	manager.mu.Unlock()
-	if snapshot.Status != "running" || !snapshot.Adopted || snapshot.AdoptedAt == "" {
-		t.Fatalf("normally completed parent did not leave child running: %#v", snapshot)
+	if child.Status != "running" || followupCount != 1 {
+		t.Fatalf("unsupported steer interrupted child or lost its owner: child=%#v followups=%d", child, followupCount)
 	}
-	if !manager.CancelSubagent(ownerKey, session.ChatID, session.TabID, run.ID) {
-		t.Fatal("turnless cleanup cancel failed")
+	if !manager.CancelSubagent(ownerKey, chatID, tabID, run.ID) {
+		t.Fatal("cleanup child cancellation failed")
 	}
-	waitForSubagentTerminal(t, manager, ownerKey, session, run.ID, 5*time.Second)
+	manager.CancelJob(jobID(parent))
 }
 
 func TestNextTurnListsAndWaitsOnAdoptedSubagent(t *testing.T) {
-	manager, _, session, ownerKey, root, _ := newSubagentLifecycleFixture(t, "next-turn")
+	t.Parallel()
+	manager, events, session, ownerKey, root, _ := newSubagentLifecycleFixture(t, "next-turn")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	startSubagentParent(t, manager, session, root, "[mock:slow] first parent completes")
@@ -871,39 +958,41 @@ func TestNextTurnListsAndWaitsOnAdoptedSubagent(t *testing.T) {
 	if err != nil || finished.Status != "done" || len(finished.Result) == 0 || len(finished.Result) > 12000 {
 		t.Fatalf("next-turn adopted wait = %#v err=%v", finished, err)
 	}
-	manager.CancelJob(asString(next["id"]))
-}
+	nextID := asString(next["id"])
+	if !manager.CancelJob(nextID) {
+		t.Fatal("cancel adopting parent failed")
+	}
+	assertJobStatus(t, events.waitJobEnd(t, nextID, 2*time.Second), "failed", 130, "cancelled")
 
-func TestMessageAndCancelAddressAdoptedSubagent(t *testing.T) {
-	manager, _, session, ownerKey, root, _ := newSubagentLifecycleFixture(t, "message-cancel")
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-	defer cancel()
+	// Addressability after adoption uses the same owner/session boundary. Run it
+	// after the completed wait instead of creating another provider fixture.
 	startSubagentParent(t, manager, session, root, "[mock:slow] parent completes before message")
-	run, err := manager.SpawnSubagent(ctx, SubagentSpawnOptions{
+	messageRun, err := manager.SpawnSubagent(ctx, SubagentSpawnOptions{
 		OwnerKey: ownerKey, ParentChatID: session.ChatID, ParentTabID: session.TabID,
 		Prompt: "[mock:slow] [mock:steer] [mock:active-without-terminal] adopted message target", Label: "adopted-message",
 		ProviderID: session.Info.ProviderID, ModelID: "mock-deterministic", Effort: "high", ModeID: "ask", CWD: root,
 	})
 	if err != nil {
-		t.Fatalf("spawn child: %v", err)
+		t.Fatalf("spawn adopted message target: %v", err)
 	}
-	waitForSubagentAdoption(t, manager, run.ID, 6*time.Second)
-	delivery, err := manager.MessageSubagent(ownerKey, session.ChatID, session.TabID, run.ID, "continue with the adopted correction")
+	waitForSubagentAdoption(t, manager, messageRun.ID, 6*time.Second)
+	delivery, err := manager.MessageSubagent(ownerKey, session.ChatID, session.TabID, messageRun.ID, "continue with the adopted correction")
 	if err != nil || delivery["ok"] != true {
 		t.Fatalf("turnless message adopted child = %#v err=%v", delivery, err)
 	}
-	next := startSubagentParent(t, manager, session, root, "[mock:active-without-terminal] adopting controller")
-	if !manager.CancelSubagent(ownerKey, session.ChatID, session.TabID, run.ID) {
+	controller := startSubagentParent(t, manager, session, root, "[mock:active-without-terminal] adopting controller")
+	if !manager.CancelSubagent(ownerKey, session.ChatID, session.TabID, messageRun.ID) {
 		t.Fatal("cancel adopted child failed")
 	}
-	finished := waitForSubagentTerminal(t, manager, ownerKey, session, run.ID, 5*time.Second)
-	if finished.Status != "cancelled" || finished.ParentJobID != asString(next["id"]) {
-		t.Fatalf("cancelled adopted child = %#v", finished)
+	cancelledRun := waitForSubagentTerminal(t, manager, ownerKey, session, messageRun.ID, 5*time.Second)
+	if cancelledRun.Status != "cancelled" || cancelledRun.ParentJobID != asString(controller["id"]) {
+		t.Fatalf("cancelled adopted child = %#v", cancelledRun)
 	}
-	manager.CancelJob(asString(next["id"]))
+	manager.CancelJob(asString(controller["id"]))
 }
 
 func TestSubagentLatchedPermissionAttentionSurfacesToAdoptingTurn(t *testing.T) {
+	t.Parallel()
 	manager, events, session, ownerKey, root, _ := newSubagentLifecycleFixture(t, "permission-adoption")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -944,6 +1033,7 @@ func TestSubagentLatchedPermissionAttentionSurfacesToAdoptingTurn(t *testing.T) 
 }
 
 func TestPruneSubagentsNeverEvictsRunningAdoptedRun(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 	manager.mu.Lock()
@@ -961,12 +1051,13 @@ func TestPruneSubagentsNeverEvictsRunningAdoptedRun(t *testing.T) {
 }
 
 func TestSubagentTurnlessOwnerListsWaitsAndSpawnsBornAdoptedWithOptionalVisibleHint(t *testing.T) {
+	t.Parallel()
 	manager, events, session, ownerKey, root, _ := newSubagentLifecycleFixture(t, "turnless")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	withHint, err := manager.SpawnSubagent(ctx, SubagentSpawnOptions{
 		OwnerKey: ownerKey, ParentChatID: session.ChatID, ParentTabID: session.TabID, RootJobIDHint: "visible-assistant-job",
-		Prompt: "[mock:slow] born adopted with anchor", Label: "turnless-hinted",
+		Prompt: "born adopted with anchor", Label: "turnless-hinted",
 		ProviderID: session.Info.ProviderID, ModelID: "mock-deterministic", Effort: "high", ModeID: "ask", CWD: root,
 	})
 	if err != nil || !withHint.Adopted || withHint.ParentJobID != "" || withHint.RootJobID != "visible-assistant-job" || withHint.AdoptedAt == "" {
@@ -998,7 +1089,7 @@ func TestSubagentTurnlessOwnerListsWaitsAndSpawnsBornAdoptedWithOptionalVisibleH
 
 	withoutHint, err := manager.SpawnSubagent(ctx, SubagentSpawnOptions{
 		OwnerKey: ownerKey, ParentChatID: session.ChatID, ParentTabID: session.TabID,
-		Prompt: "[mock:slow] born adopted without anchor", Label: "turnless-unanchored",
+		Prompt: "born adopted without anchor", Label: "turnless-unanchored",
 		ProviderID: session.Info.ProviderID, ModelID: "mock-deterministic", Effort: "high", ModeID: "ask", CWD: root,
 	})
 	if err != nil || !withoutHint.Adopted || withoutHint.ParentJobID != "" || withoutHint.RootJobID != "" {
@@ -1025,6 +1116,7 @@ func TestSubagentTurnlessOwnerListsWaitsAndSpawnsBornAdoptedWithOptionalVisibleH
 }
 
 func TestExplicitChatDeletionStillCancelsAdoptedSubagents(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithCancel(context.Background())

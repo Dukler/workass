@@ -185,8 +185,26 @@ func legacyStatelessMCPRequest(
 	return reply.StatusCode, response
 }
 
-func TestStatelessMCPModernAndQwenLegacyLifecycles(t *testing.T) {
+func TestStatelessMCPProtocolBoundaries(t *testing.T) {
 	harness := newStatelessMCPTestHarness(t)
+	t.Run("modern and Qwen lifecycles", func(t *testing.T) {
+		assertStatelessMCPModernAndQwenLifecycles(t, harness)
+	})
+	t.Run("every supported legacy revision", func(t *testing.T) {
+		assertStatelessMCPLegacyNegotiatesEverySupportedRevision(t, harness)
+	})
+	t.Run("browser legacy HTTP", func(t *testing.T) {
+		assertBrowserStatelessMCPSupportsLegacyHTTP(t, harness)
+	})
+	t.Run("protocol and authentication rejection", func(t *testing.T) {
+		assertStatelessMCPRejectsHeaderMismatchUnsupportedVersionAndBadAuth(t, harness)
+	})
+	t.Run("plaintext and browser origin rejection", func(t *testing.T) {
+		assertStatelessMCPRefusesPlaintextAndBrowserOrigin(t, harness)
+	})
+}
+
+func assertStatelessMCPModernAndQwenLifecycles(t *testing.T, harness statelessMCPTestHarness) {
 	status, response := harness.request(t, 1, "server/discover", "", statelessMCPProtocolVersion, map[string]any{})
 	result := mapFromAnyMain(response["result"])
 	meta := mapFromAnyMain(result["_meta"])
@@ -246,8 +264,7 @@ func TestStatelessMCPModernAndQwenLegacyLifecycles(t *testing.T) {
 	}
 }
 
-func TestStatelessMCPLegacyNegotiatesEverySupportedRevision(t *testing.T) {
-	harness := newStatelessMCPTestHarness(t)
+func assertStatelessMCPLegacyNegotiatesEverySupportedRevision(t *testing.T, harness statelessMCPTestHarness) {
 	versions := []string{"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07"}
 	for index, version := range versions {
 		status, response := harness.legacyRequest(t, agentMCPPath, index+1, "initialize", "", map[string]any{
@@ -261,8 +278,7 @@ func TestStatelessMCPLegacyNegotiatesEverySupportedRevision(t *testing.T) {
 	}
 }
 
-func TestBrowserStatelessMCPSupportsLegacyHTTP(t *testing.T) {
-	harness := newStatelessMCPTestHarness(t)
+func assertBrowserStatelessMCPSupportsLegacyHTTP(t *testing.T, harness statelessMCPTestHarness) {
 	handler := newBrowserStatelessMCPHandler(
 		harness.manager, filepath.Join(t.TempDir(), "browser-control.json"), harness.runtime,
 	)
@@ -291,8 +307,7 @@ func TestBrowserStatelessMCPSupportsLegacyHTTP(t *testing.T) {
 	}
 }
 
-func TestStatelessMCPRejectsHeaderMismatchUnsupportedVersionAndBadAuth(t *testing.T) {
-	harness := newStatelessMCPTestHarness(t)
+func assertStatelessMCPRejectsHeaderMismatchUnsupportedVersionAndBadAuth(t *testing.T, harness statelessMCPTestHarness) {
 	status, response := harness.request(t, 1, "tools/list", "", "2099-01-01", map[string]any{})
 	protocolError := mapFromAnyMain(response["error"])
 	if status != http.StatusBadRequest || int(protocolError["code"].(float64)) != -32022 ||
@@ -454,8 +469,7 @@ func TestStatelessMCPMutationsRequireCallerStableOperationID(t *testing.T) {
 	}
 }
 
-func TestStatelessMCPRefusesPlaintextAndBrowserOrigin(t *testing.T) {
-	harness := newStatelessMCPTestHarness(t)
+func assertStatelessMCPRefusesPlaintextAndBrowserOrigin(t *testing.T, harness statelessMCPTestHarness) {
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`
 	plain := httptest.NewRequest(http.MethodPost, agentMCPPath, strings.NewReader(body))
 	plain.RemoteAddr = "127.0.0.1:1234"

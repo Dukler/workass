@@ -57,9 +57,8 @@ test('wire capability normalization is additive and fail-closed', () => {
 test('a live acknowledgement owns the transcript row and never enters FIFO', () => {
   assert.equal(steeringDestination({ ok: true, strategy: 'receipt-live' }), 'transcript');
   assert.equal(hasSteerConsumptionReceipt({ ok: true, strategy: 'receipt-live', receipt: true }), true);
-  // Only the adapter's own rejection may move a submitted steer into the queue.
-  assert.equal(steeringDestination({ ok: false, strategy: 'receipt-live' }), 'queue');
-  assert.equal(steeringDestination({ ok: false, strategy: 'interrupt-queue' }), 'queue');
+  assert.equal(steeringDestination({ ok: false, strategy: 'receipt-live' }), 'rejected');
+  assert.equal(steeringDestination({ ok: false, strategy: 'interrupt-queue' }), 'rejected');
 });
 
 test('the provider-neutral actor receipt is a real consumption boundary', () => {
@@ -69,10 +68,12 @@ test('the provider-neutral actor receipt is a real consumption boundary', () => 
 test('steer acknowledgement selects one visible owner without optimistic bouncing', () => {
   assert.equal(steeringDestination({ ok: true, strategy: 'receipt-live' }), 'transcript');
   assert.equal(steeringDestination({ ok: true, strategy: 'capability-live' }), 'transcript');
-  assert.equal(steeringDestination({ ok: false, strategy: 'queue' }), 'queue');
-  assert.equal(steeringDestination({ ok: false, strategy: 'interrupt-queue' }), 'queue');
+  assert.equal(steeringDestination({ ok: false, strategy: 'queue' }), 'rejected');
+  assert.equal(steeringDestination({ ok: false, strategy: 'interrupt-queue' }), 'rejected');
+	assert.equal(steeringDestination({ ok: true, strategy: 'rejected' }), 'rejected');
+	assert.equal(steeringDestination({ ok: true, strategy: 'unsupported' }), 'rejected');
   assert.equal(steeringDestination({ ok: false, strategy: 'uncertain' }), 'transcript');
-  assert.equal(steeringDestination(undefined), 'queue');
+  assert.equal(steeringDestination(undefined), 'rejected');
 });
 
 test('steer delivery feedback keeps one stable owner through acknowledgement and receipt', () => {
@@ -115,23 +116,23 @@ test('transport-uncertain delivery settles in place and can be upgraded by a lat
 test('a rejected live steer transfers its pending owner out before FIFO creation', () => {
   const pending = { id: 'steer-user', status: 'pending' };
   const messages = [{ id: 'assistant-running', status: 'running' }, pending];
-  assert.equal(settlePendingSteer(messages, pending.id, 'queue'), pending);
+  assert.equal(settlePendingSteer(messages, pending.id, 'rejected'), pending);
   assert.deepEqual(messages, [{ id: 'assistant-running', status: 'running' }]);
 });
 
 test('a late steer rejection cannot steal a bubble already promoted to a normal turn', () => {
   const promoted = { id: 'steer-user', status: 'done' };
   const messages = [{ id: 'assistant-finished', status: 'done' }, promoted, { id: 'assistant-next', status: 'running' }];
-  assert.equal(settlePendingSteer(messages, promoted.id, 'queue'), undefined);
+  assert.equal(settlePendingSteer(messages, promoted.id, 'rejected'), undefined);
   assert.equal(messages[1], promoted);
 });
 
 test('a late rejection can transfer a transport-uncertain owner exactly once', () => {
   const uncertain = { id: 'steer-user', status: 'done', steerState: 'uncertain' as const };
   const messages = [{ id: 'assistant-finished', status: 'done' }, uncertain];
-  assert.equal(settlePendingSteer(messages, uncertain.id, 'queue'), uncertain);
+  assert.equal(settlePendingSteer(messages, uncertain.id, 'rejected'), uncertain);
   assert.deepEqual(messages, [{ id: 'assistant-finished', status: 'done' }]);
-  assert.equal(settlePendingSteer(messages, uncertain.id, 'queue'), undefined);
+  assert.equal(settlePendingSteer(messages, uncertain.id, 'rejected'), undefined);
 });
 
 test('turn end resolves only unacknowledged spinners and never replays accepted input', () => {
@@ -249,11 +250,11 @@ test('Codex waits for the semantic receipt boundary instead of splitting streame
   ], 'all output after the semantic receipt boundary belongs below the committed user row');
 });
 
-test('rapid Codex receipts commit staged steers in FIFO order without empty assistant rows', () => {
+test('a later rapid Codex receipt applies every earlier staged steer in FIFO order without empty assistant rows', () => {
   const root = { id: 'assistant-root', role: 'assistant' as const, content: 'before', status: 'running', at: null, events: [], jobId: 'job-1' };
-  const first = { id: 'first', role: 'user' as const, content: 'first', status: 'done', at: '1', events: [] };
+  const first = { id: 'first', role: 'user' as const, content: 'first', status: 'done', at: '1', events: [], steerState: 'sending' as 'sending' | 'accepted' | 'applied' | 'uncertain' };
   const tail1 = { id: 'tail-1', role: 'assistant' as const, content: '', status: 'running', at: null, events: [], jobId: 'job-1' };
-  const second = { id: 'second', role: 'user' as const, content: 'second', status: 'done', at: '2', events: [] };
+  const second = { id: 'second', role: 'user' as const, content: 'second', status: 'done', at: '2', events: [], steerState: 'sending' as 'sending' | 'accepted' | 'applied' | 'uncertain' };
   const tail2 = { id: 'tail-2', role: 'assistant' as const, content: '', status: 'running', at: null, events: [], jobId: 'job-1' };
   const messages = [root];
 
@@ -261,9 +262,12 @@ test('rapid Codex receipts commit staged steers in FIFO order without empty assi
   stageChronologicalSteer(messages, second, tail2);
   assert.deepEqual(messages.filter((message) => message.steerBoundary !== 'waiting').map((message) => message.id), ['assistant-root']);
 
-  commitChronologicalSteer(messages, first.id);
+  first.steerState = 'uncertain';
+  second.steerState = 'accepted';
   commitChronologicalSteer(messages, second.id);
   assert.deepEqual(messages.map((message) => message.id), ['assistant-root', 'first', 'second', 'tail-2']);
+  assert.equal(first.steerState, 'applied');
+  assert.equal(second.steerState, 'applied');
   tail2.result = 'answer after both';
   assert.equal(messages.at(-1)?.result, 'answer after both');
 });
@@ -293,10 +297,10 @@ test('generic capability steering retains immediate chronological insertion', ()
   assert.equal(steer.steerBoundary, undefined);
 });
 
-test('acknowledged steering stays pending until Codex consumes it', () => {
+test('steering status labels move acknowledged ownership out of the unresolved state', () => {
   assert.equal(steerStatusLabel('sending'), 'Steering…');
   assert.equal(steerStatusLabel('accepted'), 'Steered');
-  assert.equal(steerStatusLabel('accepted', true), 'Steering…');
+  assert.equal(steerStatusLabel('accepted', true), 'Steered');
   assert.equal(steerStatusLabel('applied'), 'Steered');
   assert.equal(steerStatusLabel('uncertain'), 'Steer unconfirmed');
 

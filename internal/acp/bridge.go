@@ -565,6 +565,16 @@ func decodeObject(raw json.RawMessage) map[string]any {
 }
 
 func (b *Bridge) request(ctx context.Context, method string, params any, timeout time.Duration) (map[string]any, error) {
+	return b.requestWithDispatch(ctx, method, params, timeout, nil)
+}
+
+func (b *Bridge) requestWithDispatch(
+	ctx context.Context,
+	method string,
+	params any,
+	timeout time.Duration,
+	afterWrite func(),
+) (map[string]any, error) {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -600,6 +610,9 @@ func (b *Bridge) request(ctx context.Context, method string, params any, timeout
 			pending.timer.Stop()
 		}
 		return nil, err
+	}
+	if afterWrite != nil {
+		afterWrite()
 	}
 	select {
 	case <-ctx.Done():

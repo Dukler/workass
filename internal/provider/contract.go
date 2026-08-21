@@ -154,7 +154,6 @@ type SteerReceipt struct {
 	Accepted         bool
 	Consumed         bool
 	AwaitConsumption bool
-	Interrupted      bool
 	Ambiguous        bool
 }
 

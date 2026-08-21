@@ -50,7 +50,7 @@ function renderTranscript(chat: Chat): string {
   return renderToStaticMarkup(React.createElement(Transcript, { chat }));
 }
 
-test('a live steered block renders each row once, updates only its mutable tail, then relocates its steer', () => {
+test('a live steered block renders accepted direction once in canonical order while only its tail mutates', () => {
   const head = assistant('assistant-head', 'SEALED-HEAD-CONTENT', {
     turnRootId: 'assistant-head', turnTerminal: false,
   });
@@ -87,7 +87,7 @@ test('a live steered block renders each row once, updates only its mutable tail,
   assert.equal(occurrences(initial, 'data-chat-find-message="assistant-tail"'), 1);
   assert.equal(occurrences(initial, 'SEALED-HEAD-CONTENT'), 1);
   assert.equal(occurrences(initial, 'MUTABLE-TAIL-V1'), 1);
-  assert.doesNotMatch(initial, /STEER-RECEIPT-CONTENT/);
+  assert.equal(occurrences(initial, 'STEER-RECEIPT-CONTENT'), 1);
 
   const beforeSegments = buildCoalescedTurnBlockTimelineSegments([head, tail]);
   tail.content = 'MUTABLE-TAIL-V2-LATEST';
@@ -101,7 +101,8 @@ test('a live steered block renders each row once, updates only its mutable tail,
   assert.equal(occurrences(streamed, 'data-chat-find-message="assistant-tail"'), 1);
   assert.equal(occurrences(streamed, 'SEALED-HEAD-CONTENT'), 1);
   assert.equal(occurrences(streamed, 'MUTABLE-TAIL-V2-LATEST'), 1);
-  assert.doesNotMatch(streamed, /MUTABLE-TAIL-V1|STEER-RECEIPT-CONTENT/);
+  assert.doesNotMatch(streamed, /MUTABLE-TAIL-V1/);
+  assert.equal(occurrences(streamed, 'STEER-RECEIPT-CONTENT'), 1);
 
   tail.status = 'done';
   appStore.bump(`msg:${tail.id}`);
@@ -109,7 +110,7 @@ test('a live steered block renders each row once, updates only its mutable tail,
   const headOffset = settled.indexOf('SEALED-HEAD-CONTENT');
   const tailOffset = settled.indexOf('MUTABLE-TAIL-V2-LATEST');
   const steerOffset = settled.indexOf('STEER-RECEIPT-CONTENT');
-  assert.ok(headOffset >= 0 && headOffset < tailOffset && tailOffset < steerOffset);
+  assert.ok(headOffset >= 0 && headOffset < steerOffset && steerOffset < tailOffset);
   assert.equal(occurrences(settled, 'SEALED-HEAD-CONTENT'), 1);
   assert.equal(occurrences(settled, 'MUTABLE-TAIL-V2-LATEST'), 1);
   assert.equal(occurrences(settled, 'STEER-RECEIPT-CONTENT'), 1);

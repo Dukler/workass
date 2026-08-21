@@ -15,6 +15,7 @@ import (
 )
 
 func TestChatCheckpointsDiffRewindAndOutsideGuard(t *testing.T) {
+	t.Parallel()
 	requireGit(t)
 	workspace := t.TempDir()
 	repoDir := filepath.Join(workspace, "alpha")
@@ -124,34 +125,72 @@ func TestChatCheckpointsDiffRewindAndOutsideGuard(t *testing.T) {
 }
 
 func TestChatCheckpointRotationAndLargeRepoSkip(t *testing.T) {
+	t.Parallel()
 	requireGit(t)
 	t.Run("rotation", func(t *testing.T) {
+		for _, existing := range []int{checkpointLimit - 1, checkpointLimit} {
+			t.Run(fmt.Sprintf("cap-from-%d", existing), func(t *testing.T) {
+				manager := NewManager(Options{StateDir: filepath.Join(t.TempDir(), "state")})
+				t.Cleanup(func() { manager.Reset() })
+				seed := chatCheckpointFile{Version: checkpointStateVersion, ChatID: "chat-cap"}
+				for turnSeq := 1; turnSeq <= existing; turnSeq++ {
+					seed.Checkpoints = append(seed.Checkpoints, ChatCheckpoint{TurnSeq: turnSeq, JobID: fmt.Sprintf("job-%d", turnSeq)})
+				}
+				if err := manager.saveCheckpointStateUnlocked(seed); err != nil {
+					t.Fatalf("seed %d checkpoints: %v", existing, err)
+				}
+				if err := manager.appendCheckpoint("chat-cap", ChatCheckpoint{TurnSeq: existing + 1, JobID: "job-boundary"}); err != nil {
+					t.Fatalf("append checkpoint at cap boundary: %v", err)
+				}
+				got := manager.ChatCheckpoints("chat-cap", "")
+				wantLen := existing + 1
+				wantFirst := 1
+				if wantLen > checkpointLimit {
+					wantLen = checkpointLimit
+					wantFirst = 2
+				}
+				if len(got) != wantLen || got[0].TurnSeq != wantFirst || got[len(got)-1].TurnSeq != existing+1 {
+					t.Fatalf("cap from %d checkpoints = %#v", existing, got)
+				}
+			})
+		}
+
 		workspace := t.TempDir()
 		repoDir := filepath.Join(workspace, "alpha")
 		initTinyGitRepo(t, repoDir, map[string]string{"work.txt": "base\n"})
-		manager, events := newFakeManager(t, "slow-prompt", Options{StateDir: filepath.Join(t.TempDir(), "state"), RSSSampleInterval: time.Hour})
+		manager := NewManager(Options{StateDir: filepath.Join(t.TempDir(), "state")})
 		t.Cleanup(func() { manager.Reset() })
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		session, err := manager.NewSession(ctx, SessionOptions{CWD: workspace, TabID: "rotate-tab", ChatID: "chat-rotate"})
+		commitBytes, err := gitOutput(context.Background(), repoDir, "rev-parse", "HEAD")
 		if err != nil {
-			t.Fatalf("new session: %v", err)
+			t.Fatalf("resolve rotation commit: %v", err)
 		}
-		_ = waitChatEnv(t, events, func(env ChatEnvPayload) bool { return env.ChatID == "chat-rotate" }, 2*time.Second)
-		for i := 1; i <= checkpointLimit+1; i++ {
-			job, err := manager.StartJob(context.Background(), JobStartOptions{
-				Kind:      "app-chat",
-				SessionID: session.SessionID,
-				ChatID:    "chat-rotate",
-				TabID:     "rotate-tab",
-				CWD:       workspace,
-				Prompt:    fmt.Sprintf("turn %d", i),
-			})
-			if err != nil {
-				t.Fatalf("start rotation job %d: %v", i, err)
+		commit := strings.TrimSpace(string(commitBytes))
+		oldRef := checkpointRef("chat-rotate", 1)
+		newRef := checkpointRef("chat-rotate", checkpointLimit+1)
+		for _, ref := range []string{oldRef, newRef} {
+			if _, err := gitOutput(context.Background(), repoDir, "update-ref", ref, commit); err != nil {
+				t.Fatalf("seed rotation ref %s: %v", ref, err)
 			}
-			writeFile(t, filepath.Join(repoDir, "work.txt"), "base\n"+strings.Repeat("turn\n", i))
-			assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "done", 0, "end_turn")
+		}
+		seed := chatCheckpointFile{Version: checkpointStateVersion, ChatID: "chat-rotate"}
+		for turnSeq := 1; turnSeq <= checkpointLimit; turnSeq++ {
+			repo := ChatCheckpointRepo{Name: "alpha", Path: repoDir}
+			if turnSeq == 1 {
+				repo.Ref = oldRef
+				repo.Commit = commit
+			}
+			seed.Checkpoints = append(seed.Checkpoints, ChatCheckpoint{
+				TurnSeq: turnSeq, JobID: fmt.Sprintf("job-%d", turnSeq), Repos: []ChatCheckpointRepo{repo},
+			})
+		}
+		if err := manager.saveCheckpointStateUnlocked(seed); err != nil {
+			t.Fatalf("seed rotation ledger: %v", err)
+		}
+		if err := manager.appendCheckpoint("chat-rotate", ChatCheckpoint{
+			TurnSeq: checkpointLimit + 1, JobID: "job-latest",
+			Repos: []ChatCheckpointRepo{{Name: "alpha", Path: repoDir, Ref: newRef, Commit: commit}},
+		}); err != nil {
+			t.Fatalf("append rotating checkpoint: %v", err)
 		}
 		checkpoints := manager.ChatCheckpoints("chat-rotate", "")
 		if len(checkpoints) != checkpointLimit || checkpoints[0].TurnSeq != 2 || checkpoints[len(checkpoints)-1].TurnSeq != checkpointLimit+1 {

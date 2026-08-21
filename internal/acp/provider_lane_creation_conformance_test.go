@@ -39,6 +39,7 @@ func newCodexCandidateManager(t *testing.T, stateDir, threadID string, missingRe
 }
 
 func TestDeferredCodexCreatesAgainOnlyForAProvablyEmptyLane(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -14,24 +14,24 @@ import (
 // screen: it must be handed back with its choices intact so the parent can answer
 // it or ask the user itself, and it must never park a background lane on a human.
 func TestSubagentQuestionGoesBackToTheParentInsteadOfTheUser(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
-	node, err := exec.LookPath("node")
+	_, err := exec.LookPath("node")
 	if err != nil {
 		t.Skipf("node not available for Claude native-host test: %v", err)
 	}
 	cliDir := t.TempDir()
 	claude := filepath.Join(cliDir, executableName("claude"))
 	writeExecutable(t, claude, nativeNoopScript())
-	t.Setenv("WORKASS_NODE", node)
-	t.Setenv("WORKASS_CLAUDE_HOST", filepath.Join(root, "scripts", "claude-native-host.mjs"))
-	t.Setenv("WORKASS_CLAUDE_SDK_MODULE", filepath.Join(root, "desktop", "acp", "mock-claude-agent-sdk.mjs"))
-	t.Setenv("WORKASS_CLAUDE_SESSION_ID", "fixture-subagent-question-session")
-
 	events := newEventCollector()
 	manager := NewManager(Options{
 		RootDir: root,
 		Providers: []ProviderConfig{{
 			ID: "claude", Name: "Claude Code", Command: claude, Enabled: true, Badge: "native", CWD: root,
+			Env: map[string]string{
+				"WORKASS_CLAUDE_SDK_MODULE": filepath.Join(root, "desktop", "acp", "mock-claude-agent-sdk.mjs"),
+				"WORKASS_CLAUDE_SESSION_ID": "fixture-subagent-question-session",
+			},
 		}},
 		DefaultProviderID:  "claude",
 		ProviderConfigFile: filepath.Join(t.TempDir(), "providers.json"),
@@ -82,24 +82,24 @@ func TestSubagentQuestionGoesBackToTheParentInsteadOfTheUser(t *testing.T) {
 // client got "run AskUserQuestion?" with allow/reject and no answer could ever
 // be given (user report 2026-07-25, chat deploy-fix).
 func TestClaudeNativeQuestionReachesTheClientAndItsAnswerReachesTheModel(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
-	node, err := exec.LookPath("node")
+	_, err := exec.LookPath("node")
 	if err != nil {
 		t.Skipf("node not available for Claude native-host test: %v", err)
 	}
 	cliDir := t.TempDir()
 	claude := filepath.Join(cliDir, executableName("claude"))
 	writeExecutable(t, claude, nativeNoopScript())
-	t.Setenv("WORKASS_NODE", node)
-	t.Setenv("WORKASS_CLAUDE_HOST", filepath.Join(root, "scripts", "claude-native-host.mjs"))
-	t.Setenv("WORKASS_CLAUDE_SDK_MODULE", filepath.Join(root, "desktop", "acp", "mock-claude-agent-sdk.mjs"))
-	t.Setenv("WORKASS_CLAUDE_SESSION_ID", "fixture-question-session")
-
 	events := newEventCollector()
 	manager := NewManager(Options{
 		RootDir: root,
 		Providers: []ProviderConfig{{
 			ID: "claude", Name: "Claude Code", Command: claude, Enabled: true, Badge: "native", CWD: root,
+			Env: map[string]string{
+				"WORKASS_CLAUDE_SDK_MODULE": filepath.Join(root, "desktop", "acp", "mock-claude-agent-sdk.mjs"),
+				"WORKASS_CLAUDE_SESSION_ID": "fixture-question-session",
+			},
 		}},
 		DefaultProviderID:  "claude",
 		ProviderConfigFile: filepath.Join(t.TempDir(), "providers.json"),
@@ -182,6 +182,7 @@ func TestClaudeNativeQuestionReachesTheClientAndItsAnswerReachesTheModel(t *test
 // A question the user answered is a completed tool call; one nobody answered is
 // not, and that half must keep failing or the fix is just whitewash.
 func TestClaudeAnsweredQuestionRowCompletesAndAnUnansweredOneStillFails(t *testing.T) {
+	t.Parallel()
 	if got := questionRowStatus(t, "answered", 0); got != "completed" {
 		t.Fatalf("row status after the user answered = %q, want completed", got)
 	}
@@ -196,23 +197,22 @@ func TestClaudeAnsweredQuestionRowCompletesAndAnUnansweredOneStillFails(t *testi
 func questionRowStatus(t *testing.T, name string, choice int) string {
 	t.Helper()
 	root := repoRoot(t)
-	node, err := exec.LookPath("node")
+	_, err := exec.LookPath("node")
 	if err != nil {
 		t.Skipf("node not available for Claude native-host test: %v", err)
 	}
 	cliDir := t.TempDir()
 	claude := filepath.Join(cliDir, executableName("claude"))
 	writeExecutable(t, claude, nativeNoopScript())
-	t.Setenv("WORKASS_NODE", node)
-	t.Setenv("WORKASS_CLAUDE_HOST", filepath.Join(root, "scripts", "claude-native-host.mjs"))
-	t.Setenv("WORKASS_CLAUDE_SDK_MODULE", filepath.Join(root, "desktop", "acp", "mock-claude-agent-sdk.mjs"))
-	t.Setenv("WORKASS_CLAUDE_SESSION_ID", "fixture-question-row-"+name)
-
 	events := newEventCollector()
 	manager := NewManager(Options{
 		RootDir: root,
 		Providers: []ProviderConfig{{
 			ID: "claude", Name: "Claude Code", Command: claude, Enabled: true, Badge: "native", CWD: root,
+			Env: map[string]string{
+				"WORKASS_CLAUDE_SDK_MODULE": filepath.Join(root, "desktop", "acp", "mock-claude-agent-sdk.mjs"),
+				"WORKASS_CLAUDE_SESSION_ID": "fixture-question-row-" + name,
+			},
 		}},
 		DefaultProviderID:  "claude",
 		ProviderConfigFile: filepath.Join(t.TempDir(), "providers.json"),

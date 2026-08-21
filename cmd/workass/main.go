@@ -973,15 +973,19 @@ func registerSessionHandlersWithActor(hub *wire.Hub, store *sessionStore, manage
 		)
 	})
 	hub.Register("chat:queue-resume", func(args []any) (any, error) {
-		if providerChats == nil {
-			return nil, errors.New("chat queue resume requires the authoritative actor runtime")
-		}
 		arg := firstMapArg(args)
-		return providerChats.ResumeQueue(
-			context.Background(), fieldString(arg, "tabId"), fieldString(arg, "chatId"),
-			providercontract.NormalizeOperationID(fieldString(arg, "operationId")),
-			uint64(max(0, intValue(arg["expectedRevision"]))),
-		)
+		operationID := providercontract.NormalizeOperationID(fieldString(arg, "operationId"))
+		if operationID == "" {
+			return nil, errors.New("chat queue resume requires a stable operation id")
+		}
+		// Frozen boundary compatibility only. Queue pausing no longer exists, so
+		// older renderers receive an idempotent already-unpaused receipt without
+		// mutating an actor or changing FIFO dispatch.
+		return map[string]any{
+			"ok": true, "tabId": fieldString(arg, "tabId"), "chatId": fieldString(arg, "chatId"),
+			"operationId": string(operationID), "queuePaused": false,
+			"queuePauseRevision": 0, "actorRevision": 0,
+		}, nil
 	})
 	hub.Register("chat:create", func(args []any) (any, error) {
 		if providerChats == nil {
@@ -1330,6 +1334,12 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		if providerChats == nil || fieldString(arg, "tabId") == "" || fieldString(arg, "chatId") == "" {
 			return nil, errors.New("job:start requires an exact durable chat actor")
 		}
+		// Validate the immutable public operation/chat identity before any actor
+		// lookup or workspace read. An unbounded or secret-shaped frozen-wire id
+		// must never reach durable state or the deterministic job hash.
+		if _, err := actorTurnPublicFields(arg); err != nil {
+			return nil, err
+		}
 		// Workspace cwd is daemon-authoritative after a transactional sidebar
 		// move. A stale controller may still submit the previous value, but it
 		// can never make the next job execute there.
@@ -1338,12 +1348,16 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		} else if ok {
 			arg["cwd"] = cwd
 		}
-		job, err := providerChats.Start(context.Background(), arg, "human")
-		if err == nil && boolFieldValue(job, "queued") && chatControl != nil {
-			tabID, chatID := fieldString(arg, "tabId"), fieldString(arg, "chatId")
-			chatControl.refresh(tabID, chatID, false)
+		admission, err := providerChats.AdmitStart(context.Background(), arg, "human")
+		if err != nil {
+			return nil, err
 		}
-		return job, err
+		return wire.ReplyThen(admission.Receipt, func() {
+			admission.Dispatch()
+			if boolFieldValue(admission.Receipt, "queued") && chatControl != nil {
+				chatControl.refresh(fieldString(arg, "tabId"), fieldString(arg, "chatId"), false)
+			}
+		}), nil
 	})
 	hub.Register("job:cancel", func(args []any) (any, error) {
 		jobID := stringArg(args, 0)

@@ -22,6 +22,7 @@ type historyMessage struct {
 }
 
 func TestNativeSessionLedgerPersistsAndRejectsStaleGeneration(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir)
 	binding := nativeSessionBinding{
@@ -72,6 +73,7 @@ func TestNativeSessionLedgerPersistsAndRejectsStaleGeneration(t *testing.T) {
 }
 
 func TestNativeOperationReadbackTransitionsAreDurableAndContradictionsFailClosed(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir)
 	if err := ledger.put(nativeSessionBinding{
@@ -131,6 +133,7 @@ func TestNativeOperationReadbackTransitionsAreDurableAndContradictionsFailClosed
 }
 
 func TestNativeOperationWriteFailureDoesNotPublishDispatchInMemory(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir)
 	if err := ledger.put(nativeSessionBinding{
@@ -154,6 +157,7 @@ func TestNativeOperationWriteFailureDoesNotPublishDispatchInMemory(t *testing.T)
 }
 
 func TestProviderLaneStoreRejectsUnsupportedVersionWithoutWriting(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	path := filepath.Join(stateDir, nativeSessionLedgerFilename)
 	raw := []byte(`{"v":7,"bindings":[]}`)
@@ -174,6 +178,7 @@ func TestProviderLaneStoreRejectsUnsupportedVersionWithoutWriting(t *testing.T) 
 }
 
 func TestDeferredCandidateRoundTripAndConsumptionCommitAreAtomic(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir)
 	if err := ledger.put(nativeSessionBinding{
@@ -208,6 +213,7 @@ func TestDeferredCandidateRoundTripAndConsumptionCommitAreAtomic(t *testing.T) {
 }
 
 func TestProviderHeadAdvanceRequiresAttestedMonotonicLineage(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir, "machine")
 	binding := nativeSessionBinding{
@@ -240,6 +246,7 @@ func TestProviderHeadAdvanceRequiresAttestedMonotonicLineage(t *testing.T) {
 }
 
 func TestCorruptNativeSessionLedgerDisablesResumeWithoutOverwriting(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	path := filepath.Join(stateDir, nativeSessionLedgerFilename)
 	const corrupt = "{not-json"
@@ -257,6 +264,7 @@ func TestCorruptNativeSessionLedgerDisablesResumeWithoutOverwriting(t *testing.T
 }
 
 func TestNativeSessionLedgerDeleteChatRemovesEveryProviderBinding(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir)
 	for _, binding := range []nativeSessionBinding{
@@ -281,6 +289,7 @@ func TestNativeSessionLedgerDeleteChatRemovesEveryProviderBinding(t *testing.T) 
 }
 
 func TestNativeSessionBindingRequiresExactConversationOwner(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir)
 	first := nativeSessionBinding{
@@ -302,6 +311,7 @@ func TestNativeSessionBindingRequiresExactConversationOwner(t *testing.T) {
 }
 
 func TestNativeSessionLedgerNeverPrunesBindingsFromRendererMirror(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir)
 	for _, binding := range []nativeSessionBinding{
@@ -337,6 +347,7 @@ func TestNativeSessionLedgerNeverPrunesBindingsFromRendererMirror(t *testing.T) 
 }
 
 func TestNativeLaneOwnershipSurvivesDisposableTabChange(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir, "machine-tab-independent")
 	if err := ledger.put(nativeSessionBinding{
@@ -361,6 +372,7 @@ func TestNativeLaneOwnershipSurvivesDisposableTabChange(t *testing.T) {
 }
 
 func TestMultipleWorkspaceEpochsFailClosedInsteadOfSelectingOrCreating(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir, "machine-lanes")
 	cwdA, cwdB := filepath.Join(stateDir, "a"), filepath.Join(stateDir, "b")
@@ -384,6 +396,7 @@ func TestMultipleWorkspaceEpochsFailClosedInsteadOfSelectingOrCreating(t *testin
 }
 
 func TestProviderNativeThreadIDsAreScopedByProviderRealm(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir, "machine-provider-scope")
 	for _, providerID := range []string{"codex", "claude"} {
@@ -397,6 +410,7 @@ func TestProviderNativeThreadIDsAreScopedByProviderRealm(t *testing.T) {
 }
 
 func TestProviderLaneMovedToAnotherMachineIsRejectedAtLoad(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	first := newNativeSessionLedger(stateDir, "machine-a")
 	if err := first.put(nativeSessionBinding{
@@ -415,6 +429,7 @@ func TestProviderLaneMovedToAnotherMachineIsRejectedAtLoad(t *testing.T) {
 }
 
 func TestManagerWithoutExplicitStateDirCannotWriteRepositoryLedger(t *testing.T) {
+	t.Parallel()
 	opts := (Options{RootDir: t.TempDir()}).withDefaults()
 	if opts.StateDir != "" {
 		t.Fatalf("implicit state dir = %q, want ephemeral empty state", opts.StateDir)
@@ -427,6 +442,7 @@ func TestManagerWithoutExplicitStateDirCannotWriteRepositoryLedger(t *testing.T)
 }
 
 func TestMockNativeSessionResumesExactThreadAcrossManagerRestart(t *testing.T) {
+	t.Parallel()
 	fixture := newPersistentMockFixture(t, "resume")
 	firstManager, firstEvents := fixture.newManager()
 	firstSession := fixture.newSession(t, firstManager)
@@ -464,6 +480,7 @@ func TestMockNativeSessionResumesExactThreadAcrossManagerRestart(t *testing.T) {
 }
 
 func TestMockNativeSessionLoadAttachesTheExactThreadWithoutPublishingReplay(t *testing.T) {
+	t.Parallel()
 	fixture := newPersistentMockFixture(t, "load")
 	firstManager, firstEvents := fixture.newManager()
 	first := fixture.newSession(t, firstManager)
@@ -500,9 +517,26 @@ func TestMockNativeSessionLoadAttachesTheExactThreadWithoutPublishingReplay(t *t
 	if persistentMockSessionCount(t, fixture.sessionFile) != 1 || !traceContains(trace, "[mock:lifecycle] session/load") || traceContains(trace, "[mock:lifecycle] session/resume") {
 		t.Fatalf("load-only attachment did not use exactly one same-id load: %#v", trace)
 	}
+
+	// The same durable binding must also fail closed if a later load reports a
+	// different native identity. Reuse the established provider thread instead
+	// of paying for a second create/turn/restart scenario.
+	secondManager.Reset()
+	conflictManager, _ := fixture.newManagerTuned(func(opts *Options) {
+		opts.Provider.Env["WORKASS_MOCK_ACP_MISMATCHED_ATTACHMENT_ID"] = "different-native-thread"
+	})
+	t.Cleanup(func() { conflictManager.Reset() })
+	_, err = conflictManager.NewSession(context.Background(), SessionOptions{TabID: "native-tab", ChatID: "native-chat", ProviderID: "mock"})
+	if !providercontract.ErrorIs(err, providercontract.ErrorNativeIdentityConflict) {
+		t.Fatalf("changed load identity error = %v, want native identity conflict", err)
+	}
+	if binding, ok := conflictManager.nativeSessions.get("native-tab", "native-chat", "mock"); !ok || binding.SessionID != first.SessionID {
+		t.Fatalf("identity conflict changed the durable binding: %#v ok=%v", binding, ok)
+	}
 }
 
 func TestExactAttachmentDoesNotTryLoadAfterSelectedResumeFails(t *testing.T) {
+	t.Parallel()
 	fixture := newPersistentMockFixture(t, "both")
 	firstManager, firstEvents := fixture.newManager()
 	first := fixture.newSession(t, firstManager)
@@ -528,29 +562,8 @@ func TestExactAttachmentDoesNotTryLoadAfterSelectedResumeFails(t *testing.T) {
 	}
 }
 
-func TestExactLoadRejectsAChangedProviderThreadIdentity(t *testing.T) {
-	fixture := newPersistentMockFixture(t, "load")
-	firstManager, firstEvents := fixture.newManager()
-	first := fixture.newSession(t, firstManager)
-	fixture.runTurn(t, firstManager, firstEvents, first.SessionID, "durable native turn")
-	firstManager.Reset()
-
-	secondManager, _ := fixture.newManagerTuned(func(opts *Options) {
-		opts.Provider.Env["WORKASS_MOCK_ACP_MISMATCHED_ATTACHMENT_ID"] = "different-native-thread"
-	})
-	t.Cleanup(func() { secondManager.Reset() })
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := secondManager.NewSession(ctx, SessionOptions{TabID: "native-tab", ChatID: "native-chat", ProviderID: "mock"})
-	if !providercontract.ErrorIs(err, providercontract.ErrorNativeIdentityConflict) {
-		t.Fatalf("changed load identity error = %v, want native identity conflict", err)
-	}
-	if binding, ok := secondManager.nativeSessions.get("native-tab", "native-chat", "mock"); !ok || binding.SessionID != first.SessionID {
-		t.Fatalf("identity conflict changed the durable binding: %#v ok=%v", binding, ok)
-	}
-}
-
 func TestMockNativeSessionNeverResumesAfterConversationIdentityChanges(t *testing.T) {
+	t.Parallel()
 	fixture := newPersistentMockFixture(t, "resume")
 	firstManager, firstEvents := fixture.newManager()
 	firstSession := fixture.newSession(t, firstManager)
@@ -577,11 +590,12 @@ func TestMockNativeSessionNeverResumesAfterConversationIdentityChanges(t *testin
 }
 
 func TestMockNativeSessionUnseenWorkassHistoryDoesNotGovernExactResume(t *testing.T) {
+	t.Parallel()
 	fixture := newPersistentMockFixture(t, "resume")
 	firstManager, firstEvents := fixture.newManager()
 	firstSession := fixture.newSession(t, firstManager)
 	firstEnd := fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "first native turn")
-	archiveHistoryForEndedJob(t, fixture.stateDir, firstEnd, "first native turn")
+	history := archiveHistoryForEndedJob(t, fixture.stateDir, firstEnd, "first native turn")
 	extra := []historyMessage{
 		{Role: "user", Content: "turn handled by another provider", At: "2026-07-12T01:00:00Z"},
 		{Role: "assistant", Content: "other provider answer", At: "2026-07-12T01:00:01Z"},
@@ -608,38 +622,33 @@ func TestMockNativeSessionUnseenWorkassHistoryDoesNotGovernExactResume(t *testin
 			t.Fatalf("delta seed resent history already seen by the native session: %q", line)
 		}
 	}
-}
-
-func TestMockNativeSessionDivergenceDoesNotGovernExactResume(t *testing.T) {
-	fixture := newPersistentMockFixture(t, "resume")
-	firstManager, firstEvents := fixture.newManager()
-	firstSession := fixture.newSession(t, firstManager)
-	firstEnd := fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "original turn")
-	history := archiveHistoryForEndedJob(t, fixture.stateDir, firstEnd, "original turn")
-	firstManager.Reset()
 
 	// Simulate rewind/edit of canonical Workass history. The saved provider cursor
-	// no longer names a prefix and must never be guessed-merged.
+	// no longer names a prefix and must never be guessed-merged. This is the same
+	// exact-resume invariant as the unseen-history case above, so exercise it on
+	// the already-established native thread instead of creating another one.
+	secondManager.Reset()
 	history[0].Content = "rewritten canonical turn"
 	writeNativeTestArchive(t, fixture.stateDir, history)
-	secondManager, secondEvents := fixture.newManager()
-	t.Cleanup(func() { secondManager.Reset() })
-	resumed := fixture.newSession(t, secondManager)
-	if resumed.SessionID != firstSession.SessionID {
-		t.Fatalf("divergence replaced the exact provider session: first=%s resumed=%s", firstSession.SessionID, resumed.SessionID)
+	thirdManager, thirdEvents := fixture.newManager()
+	t.Cleanup(func() { thirdManager.Reset() })
+	resumedAfterRewrite := fixture.newSession(t, thirdManager)
+	if resumedAfterRewrite.SessionID != firstSession.SessionID {
+		t.Fatalf("divergence replaced the exact provider session: first=%s resumed=%s", firstSession.SessionID, resumedAfterRewrite.SessionID)
 	}
-	end := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "continue after rewrite")
+	end := fixture.runTurn(t, thirdManager, thirdEvents, resumedAfterRewrite.SessionID, "continue after rewrite")
 	job := jobFromEnd(end)
 	if asString(job["status"]) != "done" {
 		t.Fatalf("renderer archive divergence incorrectly blocked native resume: %#v", job)
 	}
-	trace := readNativeMockTrace(t, fixture.traceFile)
+	trace = readNativeMockTrace(t, fixture.traceFile)
 	if traceContains(trace, "rewritten canonical turn") || !traceContains(trace, "continue after rewrite") || persistentMockSessionCount(t, fixture.sessionFile) != 1 {
 		t.Fatalf("divergence replayed history or created a replacement: %#v", trace)
 	}
 }
 
 func TestMockNativeSessionInFlightGuardResumesExactThreadAndBlocksAdmission(t *testing.T) {
+	t.Parallel()
 	fixture := newPersistentMockFixture(t, "resume")
 	firstManager, firstEvents := fixture.newManager()
 	firstSession := fixture.newSession(t, firstManager)
@@ -669,6 +678,7 @@ func TestMockNativeSessionInFlightGuardResumesExactThreadAndBlocksAdmission(t *t
 }
 
 func TestMockNativeSessionTerminalOperationReadbackClearsOnlyExactPendingID(t *testing.T) {
+	t.Parallel()
 	fixture := newPersistentMockFixture(t, "resume")
 	fixture.operationReadback = true
 	firstManager, firstEvents := fixture.newManager()
@@ -701,34 +711,30 @@ func TestMockNativeSessionTerminalOperationReadbackClearsOnlyExactPendingID(t *t
 	if job := jobFromEnd(end); asString(job["status"]) != "done" {
 		t.Fatalf("reconciled lane did not admit the next turn: %#v", job)
 	}
-}
 
-func TestMockNativeSessionAuthoritativeAbsentReadbackClearsUnsentOperation(t *testing.T) {
-	fixture := newPersistentMockFixture(t, "resume")
-	fixture.operationReadback = true
-	firstManager, _ := fixture.newManager()
-	firstSession := fixture.newSession(t, firstManager)
-	binding, ok := firstManager.nativeSessions.get("native-tab", "native-chat", "mock")
-	if !ok || !firstManager.nativeSessions.markInFlight(
+	// Reuse the reconciled lane to prove the other authoritative readback state:
+	// an operation absent from the provider is unsent and may be cleared.
+	binding, ok = secondManager.nativeSessions.get("native-tab", "native-chat", "mock")
+	if !ok || !secondManager.nativeSessions.markInFlight(
 		binding.TabID, binding.ChatID, binding.ProviderID, binding.SessionID,
 		binding.Generation, "", "", "operation-never-sent", "unsent-prompt-digest",
 	) {
 		t.Fatal("could not persist unsent operation fixture")
 	}
-	firstManager.Reset()
+	secondManager.Reset()
 
-	secondManager, secondEvents := fixture.newManager()
-	t.Cleanup(func() { secondManager.Reset() })
-	resumed := fixture.newSession(t, secondManager)
-	if resumed.SessionID != firstSession.SessionID {
-		t.Fatalf("absent readback replaced native thread: first=%s resumed=%s", firstSession.SessionID, resumed.SessionID)
+	thirdManager, thirdEvents := fixture.newManager()
+	t.Cleanup(func() { thirdManager.Reset() })
+	resumedAbsent := fixture.newSession(t, thirdManager)
+	if resumedAbsent.SessionID != firstSession.SessionID {
+		t.Fatalf("absent readback replaced native thread: first=%s resumed=%s", firstSession.SessionID, resumedAbsent.SessionID)
 	}
-	reconciled, ok := secondManager.nativeSessions.get("native-tab", "native-chat", "mock")
-	if !ok || reconciled.PendingOperation != nil || reconciled.LastOperation == nil || reconciled.LastOperation.State != nativeOperationAbsent || reconciled.LastOperation.OperationID != "operation-never-sent" {
-		t.Fatalf("authoritative absence did not clear the unsent operation: %#v", reconciled)
+	absent, ok := thirdManager.nativeSessions.get("native-tab", "native-chat", "mock")
+	if !ok || absent.PendingOperation != nil || absent.LastOperation == nil || absent.LastOperation.State != nativeOperationAbsent || absent.LastOperation.OperationID != "operation-never-sent" {
+		t.Fatalf("authoritative absence did not clear the unsent operation: %#v", absent)
 	}
-	end := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "turn after absent reconciliation")
-	if job := jobFromEnd(end); asString(job["status"]) != "done" {
+	absentEnd := fixture.runTurn(t, thirdManager, thirdEvents, resumedAbsent.SessionID, "turn after absent reconciliation")
+	if job := jobFromEnd(absentEnd); asString(job["status"]) != "done" {
 		t.Fatalf("absent-reconciled lane did not admit the next turn: %#v", job)
 	}
 }
@@ -738,6 +744,7 @@ func TestMockNativeSessionAuthoritativeAbsentReadbackClearsUnsentOperation(t *te
 // same provider-native session must take ownership instead of failing with
 // "ACP session id collision" (which bricked the chat until a daemon restart).
 func TestMockNativeSessionResumeAfterHibernationDoesNotCollide(t *testing.T) {
+	t.Parallel()
 	fixture := newPersistentMockFixture(t, "resume")
 	manager, events := fixture.newManagerTuned(func(opts *Options) {
 		opts.HibernateTTL = 80 * time.Millisecond
@@ -764,6 +771,7 @@ func TestMockNativeSessionResumeAfterHibernationDoesNotCollide(t *testing.T) {
 // must fail closed without disturbing the real owner or rewriting the corrupt
 // binding to a newly created thread.
 func TestMockNativeSessionForeignLiveCollisionFailsClosed(t *testing.T) {
+	t.Parallel()
 	fixture := newPersistentMockFixture(t, "resume")
 	manager, _ := fixture.newManager()
 	t.Cleanup(func() { manager.Reset() })

@@ -429,7 +429,7 @@ class CodexSession {
     if (!this.activeTurnId && this.activePrompt && this.turnStartedPromise) {
       await this.turnStartedPromise;
     }
-    if (!this.activeTurnId) return { disposition: 'next-turn', reason: 'no-active-turn' };
+    if (!this.activeTurnId) return { disposition: 'rejected', reason: 'no-active-turn' };
     let expectedTurnId = this.activeTurnId;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
@@ -443,7 +443,7 @@ class CodexSession {
         return { turnId: result.turnId, receipt: Boolean(clientUserMessageId) };
       } catch (error) {
         const nonSteerable = error.data?.codexErrorInfo?.activeTurnNotSteerable;
-        if (nonSteerable) return { disposition: 'queue', reason: 'active-turn-not-steerable', turnKind: nonSteerable.turnKind };
+        if (nonSteerable) return { disposition: 'rejected', reason: 'active-turn-not-steerable', turnKind: nonSteerable.turnKind };
         const actual = actualTurnFromMismatch(error.message);
         if (attempt === 0 && actual && actual !== expectedTurnId) {
           expectedTurnId = actual;
@@ -452,17 +452,24 @@ class CodexSession {
         }
         if (/no active turn/i.test(error.message)) {
           this.activeTurnId = '';
-          return { disposition: 'next-turn', reason: 'no-active-turn' };
+          return { disposition: 'rejected', reason: 'no-active-turn' };
         }
         throw error;
       }
     }
-    return { disposition: 'next-turn', reason: 'no-active-turn' };
+    return { disposition: 'rejected', reason: 'no-active-turn' };
   }
 
   async interrupt() {
     const turnId = this.activeTurnId;
-    if (!turnId) return;
+    if (!turnId) {
+      // The app-server can reject a steer with "no active turn" while the ACP
+      // prompt wrapper is still waiting for a terminal notification. A later
+      // explicit Stop still owns that exact wrapper and must release it; this
+      // is cancellation handling, never a steer-triggered fallback.
+      if (this.activePrompt) this.complete({ id: '', status: 'interrupted' });
+      return;
+    }
     await app.request('turn/interrupt', { threadId: this.threadId, turnId });
   }
 

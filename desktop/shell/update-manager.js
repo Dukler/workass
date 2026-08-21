@@ -10,6 +10,18 @@ const { spawn, spawnSync } = require('node:child_process');
 const { Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const { isMainThread, parentPort, workerData, Worker } = require('node:worker_threads');
+const {
+  TRANSACTION_SCHEMA_VERSION,
+  expectedProgressExecutable,
+  installedProgressExecutable,
+  progressExecutableIsAllowed,
+  progressOwnerReceiptPath,
+  progressProcessOwnership,
+  progressReceiptIsLive,
+  progressReceiptProcessIsRunning,
+  spawnVisibleUpdateProgress,
+  terminateUpdateProgress,
+} = require('./update-progress');
 
 const DEFAULT_FEED_ROOT = 'https://github.com/Dukler/workass/releases/latest/download/';
 const MAX_MANIFEST_BYTES = 256 * 1024;
@@ -19,9 +31,9 @@ const DEFAULT_INITIAL_CHECK_DELAY_MS = 15_000;
 const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_WORKER_ARM_TIMEOUT_MS = 15_000;
 const DEFAULT_WORKER_ARM_POLL_MS = 25;
+const MAX_PROGRESS_CLEANUP_RETRIES = 4;
 const INSTALLATION_IDENTITY_FILE = '.workass-installation.json';
 const RECEIPT_SCHEMA_VERSION = 2;
-const TRANSACTION_SCHEMA_VERSION = 3;
 // The worker writes once per second. Five seconds is only the cheap polling
 // window; crossing it triggers an off-main exact process inspection. The
 // longer takeover bound remains inside workerProcessOwnership so a legitimate
@@ -665,12 +677,13 @@ function verifyMacRelease(currentApp, incomingApp, targetVersion) {
   if (runtimeManifest.version !== targetVersion || runtimeManifest.platform !== 'darwin' || !fs.existsSync(path.join(runtimeRoot, 'workass'))) {
     throw new Error('incoming app and bundled daemon are not one release');
   }
+  requiredRegularFile(path.join(incomingApp, 'Contents', 'Resources', 'app', 'update-progress.js'), 'update progress process');
   return currentRequirement;
 }
 
 function requiredRegularFile(file, label) {
   const stat = fs.statSync(file, { throwIfNoEntry: false });
-  if (!stat?.isFile() || stat.size <= 0) throw new Error(`incoming Windows release has no ${label}`);
+  if (!stat?.isFile() || stat.size <= 0) throw new Error(`incoming release has no ${label}`);
   return stat;
 }
 
@@ -716,6 +729,7 @@ function verifyWindowsRelease(_currentRoot, incomingRoot, targetVersion, arch = 
   for (const [relative, label] of [
     [['resources', 'app', 'update-manager.js'], 'update manager'],
     [['resources', 'app', 'update-worker.js'], 'update worker'],
+    [['resources', 'app', 'update-progress.js'], 'update progress process'],
     [['resources', 'app', 'update-lock-recovery.js'], 'update lock recovery'],
     [['resources', 'renderer', 'index.html'], 'renderer'],
     [['frontier-hosts', `windows-${expectedArch}`, 'claude-native-host.mjs'], 'Claude host'],
@@ -1035,41 +1049,85 @@ function createProgressPublisher(publish, {
 function prepareUpdateWorkerRuntime({
   transactionRoot,
   workerSource,
+  progressSource,
   nodeSource,
   platform = process.platform,
-}, { spawnProcess = spawn } = {}) {
+}, {
+  spawnProcess = spawn,
+  schedule = setTimeout,
+  cancelSchedule = clearTimeout,
+  selfTestTimeoutMs = 15_000,
+} = {}) {
   return (async () => {
     const workerPath = path.join(transactionRoot, 'update-worker.js');
-    const nodePath = platform === 'win32' ? path.join(transactionRoot, 'updater-node.exe') : nodeSource;
+    const progressModulePath = path.join(transactionRoot, 'update-progress.js');
+    const nodePath = path.join(transactionRoot, platform === 'win32' ? 'updater-node.exe' : 'updater-node');
     await fs.promises.mkdir(transactionRoot, { recursive: true, mode: 0o700 });
     await fs.promises.copyFile(workerSource, workerPath);
-    if (platform === 'win32') await fs.promises.copyFile(nodeSource, nodePath);
+    await fs.promises.copyFile(progressSource, progressModulePath);
+    await fs.promises.copyFile(nodeSource, nodePath);
+    if (platform !== 'win32') await fs.promises.chmod(nodePath, 0o700);
     await new Promise((resolve, reject) => {
       let child;
       try {
-        child = spawnProcess(nodePath, [workerPath, '--self-test'], {
+        child = spawnProcess(nodePath, [workerPath, '--self-test', '--transaction-schema', String(TRANSACTION_SCHEMA_VERSION)], {
           windowsHide: true,
-          stdio: 'ignore',
+          stdio: ['ignore', 'pipe', 'ignore'],
         });
       } catch (err) {
         reject(err);
         return;
       }
       let settled = false;
+      let stdout = '';
+      let stdoutEnded = !child.stdout;
+      let exitResult = null;
+      let timeout = null;
+      const append = (target, value) => `${target}${String(value || '')}`.slice(-4096);
+      child.stdout?.setEncoding?.('utf8');
+      child.stdout?.on?.('data', (chunk) => { stdout = append(stdout, chunk); });
       const fail = (err) => {
         if (settled) return;
         settled = true;
+        if (timeout) cancelSchedule(timeout);
+        timeout = null;
         reject(err instanceof Error ? err : new Error(String(err || 'update worker self-test failed')));
       };
-      child.once('error', fail);
-      child.once('exit', (code, signal) => {
-        if (settled) return;
+      const inspect = () => {
+        if (settled || !exitResult || !stdoutEnded) return;
         settled = true;
-        if (code === 0) resolve();
-        else reject(new Error(`the independent update worker did not pass its self-test (${signal || code || 0})`));
+        if (timeout) cancelSchedule(timeout);
+        timeout = null;
+        const { code, signal } = exitResult;
+        if (code !== 0) {
+          reject(new Error(`the independent update worker did not pass its self-test (${signal || code || 0})`));
+          return;
+        }
+        let report;
+        try { report = JSON.parse(stdout); } catch { report = null; }
+        if (report?.schemaVersion !== 1 || report.product !== 'Workass' || report.component !== 'update-worker' ||
+            !Array.isArray(report.supportedTransactionSchemas) || report.supportedTransactionSchemas.length !== 1 ||
+            report.supportedTransactionSchemas[0] !== TRANSACTION_SCHEMA_VERSION ||
+            report.progressReceiptSchemaVersion !== 1) {
+          reject(new Error('the independent update worker returned an incompatible self-test receipt'));
+          return;
+        }
+        resolve();
+      };
+      child.once('error', fail);
+      child.stdout?.once?.('error', fail);
+      child.stdout?.once?.('end', () => { stdoutEnded = true; inspect(); });
+      child.once('exit', (code, signal) => {
+        exitResult = { code, signal };
+        inspect();
       });
+      timeout = schedule(() => {
+        try { child.kill?.(); } catch {}
+        fail(new Error('the independent update worker self-test timed out'));
+      }, selfTestTimeoutMs);
+      timeout?.unref?.();
     });
-    return { workerPath, nodePath };
+    return { workerPath, progressModulePath, nodePath };
   })();
 }
 
@@ -1080,6 +1138,20 @@ function installedRoot(resourcesPath, executablePath, platform = process.platfor
 function bundledNode(resourcesPath, executablePath, platform = process.platform, arch = process.arch) {
   if (platform === 'darwin') return path.join(resourcesPath, 'runtime', 'node', `darwin-${releaseArch(platform, arch)}`, 'bin', 'node');
   return path.join(path.dirname(executablePath), 'node', `windows-${releaseArch(platform, arch)}`, 'node.exe');
+}
+
+function incomingAppCode(incomingTarget, platform = process.platform) {
+  if (platform === 'darwin') return path.join(incomingTarget, 'Contents', 'Resources', 'app');
+  if (platform === 'win32') return path.join(incomingTarget, 'resources', 'app');
+  throw new Error('unsupported Workass update platform');
+}
+
+function incomingNode(incomingTarget, platform = process.platform, arch = process.arch) {
+  if (platform === 'darwin') {
+    return path.join(incomingTarget, 'Contents', 'Resources', 'runtime', 'node', `darwin-${releaseArch(platform, arch)}`, 'bin', 'node');
+  }
+  if (platform === 'win32') return path.join(incomingTarget, 'node', `windows-${releaseArch(platform, arch)}`, 'node.exe');
+  throw new Error('unsupported Workass update platform');
 }
 
 function findExtractedRoot(stageRoot, platform = process.platform) {
@@ -1327,8 +1399,8 @@ function boundUpdateWorkerLog(transactionRoot) {
   } catch { /* cleanup retries on a later launch */ }
 }
 
-function removeUpdatePayload(transactionRoot, phase, transaction = null) {
-  const children = ['release.zip', 'release.zip.partial', 'extracted', 'updater-node.exe'];
+function removeUpdatePayload(transactionRoot, phase, transaction = null, { preserveProgressTree = false } = {}) {
+  const children = ['release.zip', 'release.zip.partial', 'extracted', 'updater-node.exe', 'updater-node'];
   for (const child of children) {
     try { fs.rmSync(path.join(transactionRoot, child), { recursive: true, force: true }); }
     catch { /* locked Windows payload retries on a later launch */ }
@@ -1352,6 +1424,7 @@ function removeUpdatePayload(transactionRoot, phase, transaction = null) {
     ];
     for (const [target, expected] of safeTargets) {
       if (path.resolve(String(target || '')) !== path.resolve(expected)) continue;
+      if (preserveProgressTree && transaction && path.resolve(target) === path.resolve(transaction.incomingTarget)) continue;
       try { fs.rmSync(target, { recursive: true, force: true }); }
       catch { /* cleanup retries on a later launch */ }
     }
@@ -1416,6 +1489,7 @@ function cleanupUpdateTransactions(request, {
   let pruned = 0;
   let retained = 0;
   const terminal = [];
+  const liveProgress = new Set();
   for (const entry of entries) {
     const transactionRoot = path.join(transactionsRoot, entry.name);
     if (active.has(entry.name) || protectedUpdateIds.has(entry.name)) {
@@ -1429,7 +1503,10 @@ function cleanupUpdateTransactions(request, {
         transaction.receiptPath === request.receiptPath && transaction.installationId === request.installationId &&
         path.resolve(String(transaction.installTarget || '')) === path.resolve(String(request.installTarget || ''));
       if (exactCurrentOwner && journal?.terminal && ['healthy', 'rollback_healthy', 'failed'].includes(journal.phase)) {
-        removeUpdatePayload(transactionRoot, journal.phase, transaction);
+        const progressRunning = [transaction.progressReceiptPath, progressOwnerReceiptPath(transaction)]
+          .some((receiptPath) => progressReceiptProcessIsRunning(readJSONFile(receiptPath), transaction));
+        if (progressRunning) liveProgress.add(entry.name);
+        removeUpdatePayload(transactionRoot, journal.phase, transaction, { preserveProgressTree: progressRunning });
         terminal.push({
           updateId: entry.name,
           transactionRoot,
@@ -1455,14 +1532,22 @@ function cleanupUpdateTransactions(request, {
   }
   terminal.sort((left, right) => right.updatedAt - left.updatedAt);
   for (const old of terminal.slice(8)) {
-    if (old.updateId === receiptUpdateId || active.has(old.updateId)) continue;
+    if (old.updateId === receiptUpdateId || active.has(old.updateId) || liveProgress.has(old.updateId)) continue;
     try {
       fs.rmSync(old.transactionRoot, { recursive: true, force: true });
       removed += 1;
       retained -= 1;
     } catch { /* cleanup retries on a later launch */ }
   }
-  return { removed, pruned, retained };
+  return liveProgress.size > 0
+    ? {
+        removed,
+        pruned,
+        retained,
+        progressActive: liveProgress.size,
+        progressUpdateIds: [...liveProgress].sort(),
+      }
+    : { removed, pruned, retained };
 }
 
 function runUpdateTransactionCleanupWorker(request, {
@@ -1569,12 +1654,18 @@ class UpdateManager {
       cancelSchedule: clearTimeout,
       repeat: setInterval,
       cancelRepeat: clearInterval,
+      now: Date.now,
       inspectWorkerOwnership: asyncOwnershipOverride || (ownershipOverride
         ? async (lease, transaction, options) => ownershipOverride(lease, transaction, options)
         : inspectWorkerOwnershipAsync),
+      inspectProgressOwnership: progressProcessOwnership,
       cleanupUpdateTransactions: runUpdateTransactionCleanupWorker,
       terminateExactWorker,
       prepareWorkerRuntime: (request) => prepareUpdateWorkerRuntime(request, { spawnProcess: spawn }),
+      spawnVisibleProgress: (request) => spawnVisibleUpdateProgress(request, { spawnProcess: spawn }),
+      terminateProgress: (owner) => terminateUpdateProgress(
+        owner?.exact === true ? owner : { exact: true, pid: owner?.pid }, { platform },
+      ),
       ...dependencyOverrides,
     };
     this.updateRoot = path.join(runtime.dataRoot, 'updates');
@@ -1594,6 +1685,9 @@ class UpdateManager {
     this.recoveryPromise = null;
     this.transactionCleanupPromise = null;
     this.transactionCleanupQueued = false;
+    this.transactionCleanupRetryTimer = null;
+    this.transactionCleanupRetryOwnerKey = '';
+    this.transactionCleanupRetryCount = 0;
     this.watchedUpdateId = '';
     this.verifiedWorkerLeases = new Map();
     this.state = {
@@ -1619,14 +1713,14 @@ class UpdateManager {
 
   rememberVerifiedWorker(lease, transaction, milliseconds = 30000) {
     const key = this.workerLeaseKey(lease, transaction);
-    if (key) this.verifiedWorkerLeases.set(key, Date.now() + milliseconds);
+    if (key) this.verifiedWorkerLeases.set(key, this.deps.now() + milliseconds);
   }
 
   workerWasVerifiedRecently(lease, transaction) {
     const key = this.workerLeaseKey(lease, transaction);
     if (!key) return false;
     const until = this.verifiedWorkerLeases.get(key) || 0;
-    if (until <= Date.now()) {
+    if (until <= this.deps.now()) {
       this.verifiedWorkerLeases.delete(key);
       return false;
     }
@@ -1744,6 +1838,43 @@ class UpdateManager {
     return receipt;
   }
 
+  async failBeforeActivation(transaction, progressProcess, message) {
+    if (progressProcess && !await this.deps.terminateProgress(progressProcess)) {
+      const error = new Error('the rejected update progress process could not be fenced');
+      error.code = 'WORKASS_UPDATE_PROGRESS_FENCE_FAILED';
+      throw error;
+    }
+    await this.releasePreparedHandoff(transaction);
+    writeHandoffState(transaction, 'cancelled');
+    const journal = journalForTransaction(transaction) || {};
+    atomicJSON(transaction.journalPath, {
+      ...journal,
+      schemaVersion: 1,
+      updateId: transaction.updateId,
+      installationId: transaction.installationId,
+      installTarget: transaction.installTarget,
+      previousVersion: transaction.currentVersion,
+      targetVersion: transaction.targetVersion,
+      createdAt: journal.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      phase: 'failed',
+      terminal: true,
+      installedVersion: transaction.currentVersion,
+      activated: false,
+      error: message,
+    });
+    const receipt = terminalReceiptForTransaction(transaction);
+    this.pruneTerminalPayload(receipt);
+    return receipt;
+  }
+
+  async stopProgressOrThrow(progressProcess) {
+    if (!progressProcess || await this.deps.terminateProgress(progressProcess)) return;
+    const error = new Error('the rejected update progress process could not be fenced');
+    error.code = 'WORKASS_UPDATE_PROGRESS_FENCE_FAILED';
+    throw error;
+  }
+
   async releasePreparedHandoff(transaction) {
     if (!handoffNeedsCancel(transaction)) return true;
     const cancelled = await this.cancelHandoff(transaction.updateId);
@@ -1779,14 +1910,37 @@ class UpdateManager {
       protectedUpdateIds,
     }));
     this.transactionCleanupPromise = operation;
-    const finish = () => {
+    const finish = (result = null) => {
       if (this.transactionCleanupPromise !== operation) return;
       this.transactionCleanupPromise = null;
-      if (!this.transactionCleanupQueued) return;
-      this.transactionCleanupQueued = false;
-      this.requestTransactionCleanup(this.state.receipt);
+      if (this.transactionCleanupQueued) {
+        this.transactionCleanupQueued = false;
+        this.requestTransactionCleanup(this.state.receipt);
+        return;
+      }
+      const progressUpdateIds = Array.isArray(result?.progressUpdateIds)
+        ? result.progressUpdateIds.map(String).filter((value) => /^[A-Za-z0-9_-]{8,96}$/.test(value)).sort()
+        : [];
+      const progressOwnerKey = progressUpdateIds.join('\n');
+      if (Number(result?.progressActive || 0) <= 0 || progressUpdateIds.length === 0) {
+        this.transactionCleanupRetryOwnerKey = '';
+        this.transactionCleanupRetryCount = 0;
+        return;
+      }
+      if (this.transactionCleanupRetryOwnerKey !== progressOwnerKey) {
+        this.transactionCleanupRetryOwnerKey = progressOwnerKey;
+        this.transactionCleanupRetryCount = 0;
+      }
+      if (this.transactionCleanupRetryCount < MAX_PROGRESS_CLEANUP_RETRIES && !this.transactionCleanupRetryTimer) {
+        this.transactionCleanupRetryCount += 1;
+        this.transactionCleanupRetryTimer = this.deps.schedule(() => {
+          this.transactionCleanupRetryTimer = null;
+          this.requestTransactionCleanup(this.state.receipt);
+        }, 3000);
+        this.transactionCleanupRetryTimer?.unref?.();
+      }
     };
-    void operation.then(finish, finish);
+    void operation.then(finish, () => finish(null));
     return operation;
   }
 
@@ -1854,10 +2008,17 @@ class UpdateManager {
     const transaction = readJSONFile(transactionPath);
     if (!transaction || transaction.schemaVersion !== TRANSACTION_SCHEMA_VERSION ||
         transaction.updateId !== updateId || transaction.transactionRoot !== transactionRoot ||
+        transaction.platform !== this.platform ||
         transaction.installationId !== this.installationIdentity?.installationId ||
         path.resolve(transaction.installTarget || '') !== path.resolve(this.installTarget) ||
         transaction.receiptPath !== this.receiptPath ||
-        !/^worker-[a-f0-9]{32}$/.test(String(transaction.workerId || ''))) return null;
+        transaction.workerPath !== path.join(transactionRoot, 'update-worker.js') ||
+        transaction.progressModulePath !== path.join(transactionRoot, 'update-progress.js') ||
+        transaction.workerRuntimePath !== path.join(transactionRoot, this.platform === 'win32' ? 'updater-node.exe' : 'updater-node') ||
+        transaction.progressReceiptPath !== path.join(transactionRoot, 'progress-receipt.json') ||
+        !progressExecutableIsAllowed(transaction, transaction.progressExecutable) ||
+        !/^worker-[a-f0-9]{32}$/.test(String(transaction.workerId || '')) ||
+        !/^progress-[a-f0-9]{32}$/.test(String(transaction.progressId || ''))) return null;
     const journal = readJSONFile(transaction.journalPath);
     if (!journal || journal.schemaVersion !== 1 || journal.updateId !== updateId ||
         journal.installationId !== transaction.installationId ||
@@ -1979,6 +2140,22 @@ class UpdateManager {
       });
     }
 
+    const inspectedProgressPids = new Set();
+    for (const receiptPath of [transaction.progressReceiptPath, progressOwnerReceiptPath(transaction)]) {
+      const priorProgressReceipt = readJSONFile(receiptPath);
+      if (!Number.isInteger(priorProgressReceipt?.pid) || inspectedProgressPids.has(priorProgressReceipt.pid)) continue;
+      inspectedProgressPids.add(priorProgressReceipt.pid);
+      const priorProgressOwnership = this.deps.inspectProgressOwnership(priorProgressReceipt, transaction, {
+        platform: this.platform,
+      });
+      if (priorProgressOwnership.running &&
+          (!priorProgressOwnership.exact || !await this.deps.terminateProgress(priorProgressOwnership))) {
+        const error = new Error('the interrupted update progress process tree could not be fenced for recovery');
+        error.code = 'WORKASS_UPDATE_PROGRESS_FENCE_FAILED';
+        throw error;
+      }
+    }
+
     await this.releasePreparedHandoff(transaction);
     writeHandoffState(transaction, 'intent');
     const prepared = await this.prepareHandoff(transaction.updateId);
@@ -1997,10 +2174,24 @@ class UpdateManager {
     }
     writeHandoffState(transaction, 'prepared');
     const workerId = `worker-${crypto.randomBytes(16).toString('hex')}`;
+    const progressId = `progress-${crypto.randomBytes(16).toString('hex')}`;
+    const stagedProgressExecutable = expectedProgressExecutable(transaction);
+    const installedExecutable = installedProgressExecutable(transaction);
+    const progressExecutable = fs.statSync(stagedProgressExecutable, { throwIfNoEntry: false })?.isFile()
+      ? stagedProgressExecutable
+      : this.platform === 'darwin' && fs.statSync(installedExecutable, { throwIfNoEntry: false })?.isFile()
+        ? installedExecutable
+        : '';
+    if (!progressExecutable) {
+      await this.releasePreparedHandoff(transaction);
+      throw new Error('the interrupted update has no verified progress executable');
+    }
     const resumed = {
       ...transaction,
       shellPID: process.pid,
       workerId,
+      progressId,
+      progressExecutable,
       recoveryAttempt: Number(transaction.recoveryAttempt || 0) + 1,
     };
     const transactionPath = path.join(transaction.transactionRoot, 'transaction.json');
@@ -2016,14 +2207,34 @@ class UpdateManager {
       workerId: resumed.workerId,
       updatedAt: new Date().toISOString(),
     });
-    const workerPath = path.join(transaction.transactionRoot, 'update-worker.js');
-    const nodePath = this.platform === 'win32'
-      ? path.join(transaction.transactionRoot, 'updater-node.exe')
-      : bundledNode(this.resourcesPath, this.executablePath, this.platform, this.arch);
+    const workerPath = resumed.workerPath;
+    const nodePath = resumed.workerRuntimePath;
     if (!fs.statSync(workerPath, { throwIfNoEntry: false })?.isFile() ||
         !fs.statSync(nodePath, { throwIfNoEntry: false })?.isFile()) {
-      await this.releasePreparedHandoff(transaction);
+      await this.releasePreparedHandoff(resumed);
       throw new Error('the interrupted update worker runtime is incomplete');
+    }
+
+    try { fs.rmSync(resumed.progressReceiptPath, { force: true }); } catch { /* exact replacement process owns the next receipt */ }
+    try { fs.rmSync(progressOwnerReceiptPath(resumed), { force: true }); } catch { /* exact replacement process owns the next receipt */ }
+    let progressProcess = null;
+    try {
+      progressProcess = await this.deps.spawnVisibleProgress({
+        command: resumed.progressExecutable,
+        args: ['--workass-update-progress', transactionPath],
+        options: {
+          cwd: path.dirname(resumed.progressExecutable),
+          detached: true,
+          windowsHide: false,
+          stdio: 'ignore',
+          env: { ...process.env, WORKASS_UPDATE_PROGRESS_ID: resumed.progressId },
+        },
+        transaction: resumed,
+      });
+    } catch (err) {
+      const message = `the interrupted update progress window could not open: ${String(err && err.message || err)}`;
+      const receipt = await this.failBeforeActivation(resumed, progressProcess, message);
+      return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
     }
     const logFD = fs.openSync(path.join(transaction.transactionRoot, 'worker.log'), 'a', 0o600);
     let worker;
@@ -2051,14 +2262,16 @@ class UpdateManager {
       });
     } catch (err) {
       if (err?.workassWorkerFenced !== true) throw err;
-      await this.releasePreparedHandoff(transaction);
-      throw err;
+      const message = String(err && err.message || err);
+      const receipt = await this.failBeforeActivation(resumed, progressProcess, message);
+      return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
     } finally {
       fs.closeSync(logFD);
     }
     const handoffReceipt = this.exactHandoffReceipt(resumed, worker);
     if (!handoffReceipt) {
       const message = 'the independent update worker handoff receipt changed after arming';
+      await this.stopProgressOrThrow(progressProcess);
       const receipt = await this.abortRejectedHandoff(resumed, worker, message);
       return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
     }
@@ -2073,9 +2286,19 @@ class UpdateManager {
         blockers: null,
       });
     }
+    const progressReceipt = readJSONFile(resumed.progressReceiptPath);
+    if (!progressReceiptIsLive(progressReceipt, resumed, {
+      alive: (pid) => pid === progressProcess?.pid && progressProcess.exitCode == null && progressProcess.signalCode == null,
+    })) {
+      const message = 'the recovered update progress window closed before handoff commit';
+      await this.stopProgressOrThrow(progressProcess);
+      const receipt = await this.abortRejectedHandoff(resumed, worker, message);
+      return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
+    }
     const committed = await this.commitHandoff(transaction.updateId);
     if (!committed.accepted) {
       const message = 'the daemon did not commit the interrupted update handoff';
+      await this.stopProgressOrThrow(progressProcess);
       const receipt = await this.abortRejectedHandoff(resumed, worker, message);
       return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
     }
@@ -2089,7 +2312,7 @@ class UpdateManager {
   watchReceipt(updateId = this.watchedUpdateId) {
     if (this.receiptTimer) return;
     this.watchedUpdateId = String(updateId || '');
-    this.receiptTimer = setInterval(() => {
+    this.receiptTimer = this.deps.repeat(() => {
       try {
         const receipt = JSON.parse(fs.readFileSync(this.receiptPath, 'utf8'));
         if (!receipt || receipt.schemaVersion !== RECEIPT_SCHEMA_VERSION || receipt.updateId !== this.watchedUpdateId ||
@@ -2100,7 +2323,7 @@ class UpdateManager {
         const terminal = ['healthy', 'rollback_healthy', 'failed'].includes(receipt.phase);
         this.publish({ phase: terminal ? receipt.phase : 'installing', receipt, error: receipt.error || null });
         if (terminal) {
-          clearInterval(this.receiptTimer);
+          this.deps.cancelRepeat(this.receiptTimer);
           this.receiptTimer = null;
           this.watchedUpdateId = '';
           this.pruneTerminalPayload(receipt);
@@ -2108,11 +2331,13 @@ class UpdateManager {
         }
         const transaction = this.transactionForReceipt(receipt);
         const lease = transaction && readJSONFile(path.join(transaction.transactionRoot, 'worker-lease.json'));
-        const ownership = transaction ? cheapWorkerLeaseOwnership(lease, transaction) : { owned: false };
+        const ownership = transaction
+          ? cheapWorkerLeaseOwnership(lease, transaction, { now: this.deps.now })
+          : { owned: false };
         const verified = transaction && this.workerWasVerifiedRecently(lease, transaction);
         if (verified && ownership.owned) this.rememberVerifiedWorker(lease, transaction);
         if (!transaction || !verified) {
-          clearInterval(this.receiptTimer);
+          this.deps.cancelRepeat(this.receiptTimer);
           this.receiptTimer = null;
           this.watchedUpdateId = '';
           this.reconcileActiveReceipt(receipt);
@@ -2290,10 +2515,12 @@ class UpdateManager {
         installationId: this.installationIdentity.installationId,
       });
       const designatedRequirement = String(staged?.designatedRequirement || '');
+      const targetAppCode = incomingAppCode(incomingTarget, this.platform);
       const runtime = await this.deps.prepareWorkerRuntime({
         transactionRoot,
-        workerSource: path.join(__dirname, 'update-worker.js'),
-        nodeSource: bundledNode(this.resourcesPath, this.executablePath, this.platform, this.arch),
+        workerSource: path.join(targetAppCode, 'update-worker.js'),
+        progressSource: path.join(targetAppCode, 'update-progress.js'),
+        nodeSource: incomingNode(incomingTarget, this.platform, this.arch),
         platform: this.platform,
       });
       this.prepared = {
@@ -2303,7 +2530,11 @@ class UpdateManager {
         artifact,
         release,
         workerPath: runtime.workerPath,
+        progressModulePath: runtime.progressModulePath,
         nodePath: runtime.nodePath,
+        progressExecutable: this.platform === 'darwin'
+          ? path.join(incomingTarget, 'Contents', 'MacOS', 'Workass')
+          : path.join(incomingTarget, 'Workass.exe'),
       };
       return this.publish({ phase: 'ready', targetVersion: release.version, progress: 1, error: null });
     } catch (err) {
@@ -2338,18 +2569,23 @@ class UpdateManager {
       throw new Error('the verified Workass transaction lost its exact release metadata');
     }
     const expectedWorkerPath = path.join(prepared.transactionRoot, 'update-worker.js');
-    const expectedNodePath = this.platform === 'win32'
-      ? path.join(prepared.transactionRoot, 'updater-node.exe')
-      : bundledNode(this.resourcesPath, this.executablePath, this.platform, this.arch);
+    const expectedNodePath = path.join(prepared.transactionRoot, this.platform === 'win32' ? 'updater-node.exe' : 'updater-node');
     if (prepared.workerPath !== expectedWorkerPath || prepared.nodePath !== expectedNodePath ||
+        prepared.progressModulePath !== path.join(prepared.transactionRoot, 'update-progress.js') ||
+        prepared.progressExecutable !== (this.platform === 'darwin'
+          ? path.join(prepared.incomingTarget, 'Contents', 'MacOS', 'Workass')
+          : path.join(prepared.incomingTarget, 'Workass.exe')) ||
         !fs.statSync(prepared.workerPath, { throwIfNoEntry: false })?.isFile() ||
-        !fs.statSync(prepared.nodePath, { throwIfNoEntry: false })?.isFile()) {
+        !fs.statSync(prepared.progressModulePath, { throwIfNoEntry: false })?.isFile() ||
+        !fs.statSync(prepared.nodePath, { throwIfNoEntry: false })?.isFile() ||
+        !fs.statSync(prepared.progressExecutable, { throwIfNoEntry: false })?.isFile()) {
       throw new Error('the independently verified update worker runtime is incomplete');
     }
     const workerPath = prepared.workerPath;
     const nodePath = prepared.nodePath;
 
     const workerId = `worker-${crypto.randomBytes(16).toString('hex')}`;
+    const progressId = `progress-${crypto.randomBytes(16).toString('hex')}`;
     const transaction = {
       schemaVersion: TRANSACTION_SCHEMA_VERSION,
       updateId: prepared.updateId,
@@ -2358,6 +2594,7 @@ class UpdateManager {
       targetVersion: prepared.targetVersion,
       shellPID: process.pid,
       workerId,
+      progressId,
       installationId: prepared.installationId || this.installationIdentity.installationId,
       transactionRoot: prepared.transactionRoot,
       installTarget: prepared.installTarget,
@@ -2369,6 +2606,11 @@ class UpdateManager {
       receiptPath: this.receiptPath,
       journalPath: path.join(prepared.transactionRoot, 'journal.json'),
       leasePath: path.join(prepared.transactionRoot, 'worker-lease.json'),
+      workerPath,
+      progressModulePath: prepared.progressModulePath,
+      workerRuntimePath: nodePath,
+      progressReceiptPath: path.join(prepared.transactionRoot, 'progress-receipt.json'),
+      progressExecutable: prepared.progressExecutable,
       daemonHealthURL: `${this.runtime.daemonURL}/workass/health`,
       shellStatusURL: `http://127.0.0.1:${this.runtime.viewPort}/__workass-shell/status`,
       requireVisibleWindow: true,
@@ -2432,6 +2674,26 @@ class UpdateManager {
     }
     writeHandoffState(transaction, 'prepared');
 
+    let progressProcess = null;
+    try {
+      progressProcess = await this.deps.spawnVisibleProgress({
+        command: transaction.progressExecutable,
+        args: ['--workass-update-progress', transactionPath],
+        options: {
+          cwd: transaction.incomingTarget,
+          detached: true,
+          windowsHide: false,
+          stdio: 'ignore',
+          env: { ...process.env, WORKASS_UPDATE_PROGRESS_ID: transaction.progressId },
+        },
+        transaction,
+      });
+    } catch (err) {
+      const message = `the verified update progress window could not open: ${String(err && err.message || err)}`;
+      const receipt = await this.failBeforeActivation(transaction, progressProcess, message);
+      return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
+    }
+
     const logFD = fs.openSync(path.join(prepared.transactionRoot, 'worker.log'), 'a', 0o600);
     let worker;
     try {
@@ -2457,9 +2719,10 @@ class UpdateManager {
         workerId,
       });
     } catch (err) {
+      const message = String(err && err.message || err);
       if (err?.workassWorkerFenced !== true) throw err;
-      await this.releasePreparedHandoff(transaction);
-      throw err;
+      const receipt = await this.failBeforeActivation(transaction, progressProcess, message);
+      return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
     } finally {
       fs.closeSync(logFD);
     }
@@ -2467,6 +2730,7 @@ class UpdateManager {
     const handoffReceipt = this.exactHandoffReceipt(transaction, worker);
     if (!handoffReceipt) {
       const message = 'the independent update worker handoff receipt changed after arming';
+      await this.stopProgressOrThrow(progressProcess);
       const receipt = await this.abortRejectedHandoff(transaction, worker, message);
       return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
     }
@@ -2482,9 +2746,20 @@ class UpdateManager {
       });
     }
 
+    const progressReceipt = readJSONFile(transaction.progressReceiptPath);
+    if (!progressReceiptIsLive(progressReceipt, transaction, {
+      alive: (pid) => pid === progressProcess?.pid && progressProcess.exitCode == null && progressProcess.signalCode == null,
+    })) {
+      const message = 'the verified update progress window closed before handoff commit';
+      await this.stopProgressOrThrow(progressProcess);
+      const receipt = await this.abortRejectedHandoff(transaction, worker, message);
+      return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
+    }
+
     const committed = await this.commitHandoff(prepared.updateId);
     if (!committed.accepted) {
       const message = 'the daemon did not commit the prepared update handoff';
+      await this.stopProgressOrThrow(progressProcess);
       const receipt = await this.abortRejectedHandoff(transaction, worker, message);
       return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
     }
@@ -2547,8 +2822,12 @@ class UpdateManager {
 
   dispose() {
     this.stopAutoChecks();
-    if (this.receiptTimer) clearInterval(this.receiptTimer);
+    if (this.receiptTimer) this.deps.cancelRepeat(this.receiptTimer);
     this.receiptTimer = null;
+    if (this.transactionCleanupRetryTimer) this.deps.cancelSchedule(this.transactionCleanupRetryTimer);
+    this.transactionCleanupRetryTimer = null;
+    this.transactionCleanupRetryOwnerKey = '';
+    this.transactionCleanupRetryCount = 0;
   }
 }
 
@@ -2570,6 +2849,8 @@ module.exports = {
   findExtractedRoot,
   httpsRequest,
   installedRoot,
+  incomingAppCode,
+  incomingNode,
   inspectWorkerOwnershipAsync,
   installationIdentityPath,
   localFeedPath,
@@ -2588,6 +2869,7 @@ module.exports = {
   runUpdateTransactionCleanupWorker,
   snapshotReleaseManifest,
   spawnArmedUpdateWorker,
+  spawnVisibleUpdateProgress,
   stageAndVerifyRelease,
   stageRelease,
   validateArchiveLinksBeforeExtraction,
@@ -2599,6 +2881,7 @@ module.exports = {
   verifyWindowsRelease,
   workerProcessOwnership,
   terminateExactWorker,
+  terminateUpdateProgress,
 };
 
 if (!isMainThread && workerData?.workassTask === 'stage-update' && parentPort) {

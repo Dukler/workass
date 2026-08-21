@@ -77,22 +77,26 @@ Workass deliberately does not model steering as one universal cancel action:
   official app-server `turn/steer` RPC; Workass only reports success after the
   app-server returns the active `turnId`, and correlates the later canonical
   `userMessage.clientId` as both stronger "applied" feedback and the semantic
-  transcript boundary. The renderer keeps that same durable row in its
-  composer-adjacent steering tray until the active turn is terminal, then
-  projects it after the assistant turn; a receipt never inserts a bubble into
-  already-rendered prose. The provider boundary still commits after the current
-  sampling step, immediately before the next model/tool step. A cached turn-id
-  mismatch is resynchronized and retried once, matching the official Codex TUI;
-  an already-finished turn becomes the immediate persisted follow-up, while
-  review/manual-compaction rejection waits in FIFO without cancelling that
-  operation. Transport-uncertain input keeps its single durable owner and is
-  never replayed automatically. A rejecting native host falls back to
-  interrupt + immediate persisted follow-up, never a detached prompt.
-- The native Claude host advertises its steering receipt extension. Workass
-  persists the follow-up first, interrupts the active turn, and drains that FIFO
-  as soon as cancellation completes; it does not wait for natural completion.
+  transcript boundary. Only a genuinely unresolved live row remains in the
+  composer-adjacent Steering tray. The provider acknowledgement moves that same
+  row into the transcript immediately and exactly once; while consumption is
+  pending, only its reserved assistant continuation stays hidden. The receipt
+  reveals that continuation after the already-visible row without moving or
+  copying it. A terminal turn settles any still-unresolved owner out of the live
+  tray and never replays it. The provider boundary still commits after the
+  current sampling step, immediately before the next model/tool step. A cached turn-id
+  mismatch is resynchronized and retried once, matching the official Codex TUI.
+  An already-finished or non-steerable turn rejects the explicit direction back
+  to the composer without interrupting the active Workass turn or creating FIFO
+  work. Transport-uncertain input keeps its single durable owner and is never
+  replayed automatically.
+- The native Claude host advertises its live steering receipt extension and
+  injects the direction into the running SDK query. Workass waits for the
+  accepted prompt UUID; a definite rejection returns the direction to the
+  composer, while a timeout remains uncertain and is never resent.
 - Mock/custom ACP agents retain the `_session/steer` extension when advertised;
-  agents without any steering capability use the same durable FIFO fallback.
+  agents without that capability reject explicit steering back to the composer.
+  Only a separate ordinary queue intent creates durable FIFO work.
 
 Real native-provider sessions are canaries for these protocol shapes only. The
 deterministic mock and direct-host fixtures remain the correctness oracle.

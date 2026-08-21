@@ -7,35 +7,40 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"workass/internal/acp"
+	"workass/internal/chat"
 	providercontract "workass/internal/provider"
 )
 
 func TestBrowserMutationReleasesActorLockAndSerializesConcurrentRetry(t *testing.T) {
-	harness := newStatelessMCPTestHarness(t)
-	actor, err := harness.runtime.actor("mcp-chat")
+	engine, err := chat.NewEngine("browser-mutation-chat")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := engine.Apply(chat.InitializeChat{
+		Presentation: chat.PresentationState{TabID: "browser-mutation-tab"},
+		OperationID:  "browser-mutation-create", Digest: "browser-mutation-create",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	actor := &providerChatActor{engine: engine}
+	runtime := &providerChatRuntime{
+		manager: &acp.Manager{}, sessions: &sessionStore{},
+		actors: map[string]*providerChatActor{"browser-mutation-chat": actor},
+		known:  map[string]struct{}{"browser-mutation-chat": {}},
 	}
 
 	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	operationID := providercontract.OperationID("browser-concurrent-retry")
 	started := make(chan struct{})
 	release := make(chan struct{})
-	defer func() {
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-	}()
 	firstDone := make(chan error, 1)
 	go func() {
-		_, callErr := harness.runtime.executeBrowserMutation(
-			context.Background(), "mcp-tab", "mcp-chat", operationID,
+		_, callErr := runtime.executeBrowserMutation(
+			context.Background(), "browser-mutation-tab", "browser-mutation-chat", operationID,
 			"workass_browser_click", "browser.click", digest,
 			func() (browserControlReply, error) {
 				close(started)
@@ -51,55 +56,36 @@ func TestBrowserMutationReleasesActorLockAndSerializesConcurrentRetry(t *testing
 	}()
 	<-started
 
-	actorLockAvailable := make(chan struct{})
-	go func() {
-		actor.mu.Lock()
-		actor.mu.Unlock()
-		close(actorLockAvailable)
-	}()
-	select {
-	case <-actorLockAvailable:
-	case <-time.After(time.Second):
+	if !actor.mu.TryLock() {
 		t.Fatal("actor state lock remained held during external browser dispatch")
 	}
-
-	var duplicateDispatches atomic.Int32
-	var prematureReadbacks atomic.Int32
-	retryDone := make(chan error, 1)
-	go func() {
-		_, callErr := harness.runtime.executeBrowserMutation(
-			context.Background(), "mcp-tab", "mcp-chat", operationID,
-			"workass_browser_click", "browser.click", digest,
-			func() (browserControlReply, error) {
-				duplicateDispatches.Add(1)
-				return browserControlReply{}, nil
-			},
-			func() (browserControlReply, error) {
-				prematureReadbacks.Add(1)
-				return browserControlReply{}, nil
-			},
-		)
-		retryDone <- callErr
-	}()
-
-	select {
-	case err := <-retryDone:
-		t.Fatalf("concurrent retry escaped serialization before dispatch receipt: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-	if duplicateDispatches.Load() != 0 || prematureReadbacks.Load() != 0 {
-		t.Fatalf("retry raced browser dispatch: dispatches=%d readbacks=%d", duplicateDispatches.Load(), prematureReadbacks.Load())
+	actor.mu.Unlock()
+	if actor.externalMutationMu.TryLock() {
+		actor.externalMutationMu.Unlock()
+		t.Fatal("external browser dispatch did not hold the exact retry serialization boundary")
 	}
 
 	close(release)
-	if err := <-firstDone; err != nil {
-		t.Fatalf("first mutation: %v", err)
+	if firstErr := <-firstDone; firstErr != nil {
+		t.Fatalf("first mutation: %v", firstErr)
 	}
-	if err := <-retryDone; err != nil {
-		t.Fatalf("serialized retry: %v", err)
+	duplicateDispatches, prematureReadbacks := 0, 0
+	if _, retryErr := runtime.executeBrowserMutation(
+		context.Background(), "browser-mutation-tab", "browser-mutation-chat", operationID,
+		"workass_browser_click", "browser.click", digest,
+		func() (browserControlReply, error) {
+			duplicateDispatches++
+			return browserControlReply{}, nil
+		},
+		func() (browserControlReply, error) {
+			prematureReadbacks++
+			return browserControlReply{}, nil
+		},
+	); retryErr != nil {
+		t.Fatalf("serialized retry: %v", retryErr)
 	}
-	if duplicateDispatches.Load() != 0 || prematureReadbacks.Load() != 0 {
-		t.Fatalf("terminal retry performed external work: dispatches=%d readbacks=%d", duplicateDispatches.Load(), prematureReadbacks.Load())
+	if duplicateDispatches != 0 || prematureReadbacks != 0 {
+		t.Fatalf("terminal retry performed external work: dispatches=%d readbacks=%d", duplicateDispatches, prematureReadbacks)
 	}
 }
 

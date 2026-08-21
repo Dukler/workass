@@ -12,6 +12,7 @@ import (
 )
 
 func TestChatEnvTracksRepoChangesAfterTurn(t *testing.T) {
+	t.Parallel()
 	requireGit(t)
 	workspace := t.TempDir()
 	alpha := filepath.Join(workspace, "alpha")
@@ -69,6 +70,7 @@ func TestChatEnvTracksRepoChangesAfterTurn(t *testing.T) {
 }
 
 func TestChatEnvNonGitCwdIsEmpty(t *testing.T) {
+	t.Parallel()
 	requireGit(t)
 	workspace := t.TempDir()
 	manager, events := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
@@ -91,6 +93,7 @@ func TestChatEnvNonGitCwdIsEmpty(t *testing.T) {
 }
 
 func TestChatEnvTruncationFlags(t *testing.T) {
+	t.Parallel()
 	requireGit(t)
 	t.Run("repo discovery", func(t *testing.T) {
 		workspace := t.TempDir()

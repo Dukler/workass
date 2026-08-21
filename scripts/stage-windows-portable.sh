@@ -131,7 +131,7 @@ ditto "$node_source" "$stage/node/$target"
 ditto "$frontier_hosts_source" "$stage/frontier-hosts/$target"
 
 ditto "$renderer_source/." "$stage/resources/renderer"
-for shell_file in main.js preload.js view-server.js browser-manager.js browser-control-server.js runtime-profile.js runtime-bootstrap.js certificate-pins.js app-icon.js image-copy.js profile-singleton.js update-lock-recovery.js update-manager.js update-worker.js; do
+for shell_file in main.js preload.js view-server.js browser-manager.js browser-control-server.js runtime-profile.js runtime-bootstrap.js certificate-pins.js app-icon.js image-copy.js profile-singleton.js update-lock-recovery.js update-progress.js update-manager.js update-worker.js; do
   cp "$repo_root/desktop/shell/$shell_file" "$stage/resources/app/$shell_file"
 done
 cp "$repo_root/desktop/shell/package.production.json" "$stage/resources/app/package.json"

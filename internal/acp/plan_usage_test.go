@@ -13,6 +13,7 @@ import (
 )
 
 func TestNormalizedPlanUsageCaptureMergesTypedSnapshots(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 	used := 78.0
@@ -39,6 +40,7 @@ func TestNormalizedPlanUsageCaptureMergesTypedSnapshots(t *testing.T) {
 }
 
 func TestPlanUsageClaudeStructuredRefreshCapturesFiveHourAndWeeklyWindows(t *testing.T) {
+	t.Parallel()
 	manager, events := newPlanUsageFakeManager(t, "claude", "claude-plan-limits")
 	t.Cleanup(func() { manager.Reset() })
 	_ = newFakeSession(t, manager, "claude-limits-tab")
@@ -57,6 +59,7 @@ func TestPlanUsageClaudeStructuredRefreshCapturesFiveHourAndWeeklyWindows(t *tes
 }
 
 func TestPlanUsageCodexStructuredRefreshCapturesFiveHourAndWeeklyWindows(t *testing.T) {
+	t.Parallel()
 	manager, events := newPlanUsageFakeManager(t, "codex", "codex-plan-limits")
 	t.Cleanup(func() { manager.Reset() })
 	_ = newFakeSession(t, manager, "codex-limits-tab")
@@ -91,6 +94,7 @@ func TestPlanUsageCodexStructuredRefreshCapturesFiveHourAndWeeklyWindows(t *test
 }
 
 func TestCodexEarnedRateLimitResetIsIdempotentAndRefreshesPlanUsage(t *testing.T) {
+	t.Parallel()
 	manager, events := newPlanUsageFakeManager(t, "codex", "codex-plan-limits")
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "codex-earned-reset-tab")
@@ -143,6 +147,7 @@ func TestCodexEarnedRateLimitResetIsIdempotentAndRefreshesPlanUsage(t *testing.T
 }
 
 func TestNormalizedPlanUsageCaptureClearsExplicitResetSnapshot(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 	first, ok := manager.recordNormalizedPlanUsageCapture("", "fixture", planUsageCapture{
@@ -161,6 +166,7 @@ func TestNormalizedPlanUsageCaptureClearsExplicitResetSnapshot(t *testing.T) {
 }
 
 func TestEarnedRateLimitResetRejectsProvidersWithoutNativeCapability(t *testing.T) {
+	t.Parallel()
 	manager, _ := newPlanUsageFakeManager(t, "claude", "claude-plan-limits")
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "claude-no-earned-reset-tab")
@@ -170,6 +176,7 @@ func TestEarnedRateLimitResetRejectsProvidersWithoutNativeCapability(t *testing.
 }
 
 func TestPlanUsageRefreshIsCancelledByReset(t *testing.T) {
+	t.Parallel()
 	manager, _ := newPlanUsageFakeManager(t, "claude", "claude-plan-limits-hang")
 	_ = newFakeSession(t, manager, "claude-limits-hang-tab")
 	started := time.Now()
@@ -236,6 +243,7 @@ func TestPlanUsageTerminalRefreshQueuesBehindSlowAttachRefresh(t *testing.T) {
 }
 
 func TestPlanUsageRefreshDefaultsToFiveMinutes(t *testing.T) {
+	t.Parallel()
 	opts := (Options{}).withDefaults()
 	if opts.PlanUsageRefreshInterval != 5*time.Minute {
 		t.Fatalf("plan usage refresh interval = %s, want 5m", opts.PlanUsageRefreshInterval)
@@ -243,6 +251,7 @@ func TestPlanUsageRefreshDefaultsToFiveMinutes(t *testing.T) {
 }
 
 func TestPlanUsagePeriodicTickRefreshesOneLiveSessionPerProviderWithoutPrompt(t *testing.T) {
+	t.Parallel()
 	tracePath := filepath.Join(t.TempDir(), "periodic-plan-usage.log")
 	manager, _ := newPlanUsageFakeManagerWithProviders(t, tracePath,
 		planUsageFakeProvider{id: "claude", mode: "claude-plan-limits"},
@@ -276,6 +285,7 @@ func TestPlanUsagePeriodicTickRefreshesOneLiveSessionPerProviderWithoutPrompt(t 
 }
 
 func TestRefreshPlanUsageSessionReusesLiveChatWithoutPrompt(t *testing.T) {
+	t.Parallel()
 	tracePath := filepath.Join(t.TempDir(), "active-plan-usage.log")
 	manager, _ := newPlanUsageFakeManagerWithProviders(t, tracePath,
 		planUsageFakeProvider{id: "claude", mode: "claude-plan-limits"},
@@ -305,6 +315,7 @@ func TestRefreshPlanUsageSessionReusesLiveChatWithoutPrompt(t *testing.T) {
 }
 
 func TestRefreshProviderPlanUsageReusesAnyLiveProviderSessionWithoutPrompt(t *testing.T) {
+	t.Parallel()
 	tracePath := filepath.Join(t.TempDir(), "provider-plan-usage.log")
 	manager, events := newPlanUsageFakeManagerWithProviders(t, tracePath,
 		planUsageFakeProvider{id: "claude", mode: "claude-plan-limits"},
@@ -337,6 +348,7 @@ func TestRefreshProviderPlanUsageReusesAnyLiveProviderSessionWithoutPrompt(t *te
 }
 
 func TestRefreshProviderPlanUsageColdStartIsEphemeralAndPromptFree(t *testing.T) {
+	t.Parallel()
 	tracePath := filepath.Join(t.TempDir(), "cold-provider-plan-usage.log")
 	manager, events := newPlanUsageFakeManagerWithProviders(t, tracePath,
 		planUsageFakeProvider{id: "claude", mode: "claude-plan-limits"},
@@ -368,6 +380,7 @@ func TestRefreshProviderPlanUsageColdStartIsEphemeralAndPromptFree(t *testing.T)
 }
 
 func TestNormalizedPlanUsageCaptureStoresRawWithoutFabricatingEntries(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 	snapshot, ok := manager.recordNormalizedPlanUsageCapture("", "custom", planUsageCapture{
@@ -387,6 +400,7 @@ func TestNormalizedPlanUsageCaptureStoresRawWithoutFabricatingEntries(t *testing
 }
 
 func TestPlanUsageRawIsBoundedAndRedacted(t *testing.T) {
+	t.Parallel()
 	hugeManager := NewManager(Options{})
 	t.Cleanup(func() { hugeManager.Reset() })
 	hugeSnapshot, ok := hugeManager.recordNormalizedPlanUsageCapture("", "custom", planUsageCapture{
@@ -422,6 +436,7 @@ func TestPlanUsageRawIsBoundedAndRedacted(t *testing.T) {
 }
 
 func TestPlanUsageReplayToLateClient(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 	used := 42.0

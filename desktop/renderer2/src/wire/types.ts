@@ -98,6 +98,9 @@ export interface PublicJob {
   tabId: string | null;
   sessionId: string | null;
   providerId?: string | null;
+  // Exact typed capabilities of the lane that owns this job. Additive on the
+  // frozen job payload; absent means unknown, never unsupported by inference.
+  deliveryCapabilities?: DeliveryCapabilities;
   // Additive canonical turn identity (stuck-chat WP-B). Older daemons omit all
   // three fields, in which case the renderer pulls session:get instead of
   // guessing rows from an unanchored event.
@@ -544,8 +547,7 @@ export type StartJobReply = PublicJob | QueuedJobStart;
 export interface JobCancelResult {
   cancelled: boolean;
   reason: 'cancelled' | 'idle' | 'unknown' | string;
-  queuePaused?: boolean;
-  queuePauseRevision?: number;
+	preAdmission?: boolean;
 }
 
 export interface StateDigestChat {
@@ -559,8 +561,6 @@ export interface StateDigestChat {
   queueLen: number;
   queueHeadId: string | null;
   agentQueueRevision: number;
-  queuePaused?: boolean;
-  queuePauseRevision?: number;
   runtimeControlRevision: number;
   providerId: string | null;
   currentModelId: string | null;
@@ -594,11 +594,6 @@ export interface WorkassApi {
   chatQueueReplace?: (opts: {
     tabId: string; chatId: string; operationId: string; expectedRevision: number; queue: unknown[];
   }) => Promise<{ ok: boolean; operationId: string; agentQueueRevision: number; actorRevision: number }>;
-  chatQueueResume?: (opts: {
-    tabId: string; chatId: string; operationId: string; expectedRevision: number;
-  }) => Promise<{
-    ok: boolean; operationId: string; queuePaused: boolean; queuePauseRevision: number; actorRevision: number;
-  }>;
   chatCreate?: (opts: {
     tabId: string; chatId: string; operationId: string; focus: boolean; title: string; titleLocked: boolean;
     group: string | null; cwd: string | null; providerId: string | null; currentModelId: string | null;
@@ -638,7 +633,8 @@ export interface WorkassApi {
   appChatCloseSession?: (sessionId: string) => Promise<boolean>;
   appChatReset?: () => Promise<boolean>;
   // Mid-turn steer (D2). Preload-only in the Electron host; the daemon bridge
-  // may not expose it — feature-detected, with a local queue fallback.
+  // may not expose it. Unsupported or rejected steering retains composer
+  // ownership; FIFO is a separate explicit intent.
   appChatSteer?: (
     sessionId: string,
     prompt: string,
@@ -646,7 +642,7 @@ export interface WorkassApi {
     clientUserMessageId?: string,
     continuationAssistantMessageId?: string,
     boundary?: { assistantMessageId: string; contentOffset: number; resultOffset: number; eventCount: number },
-  ) => Promise<{ ok: boolean; live?: boolean; queued?: boolean; daemonQueued?: boolean; interrupted?: boolean; unsupported?: boolean; strategy?: 'receipt-live' | 'generic-live' | 'interrupt-queue' | 'queue' | 'uncertain'; turnId?: string; receipt?: boolean; error?: string }>;
+  ) => Promise<{ ok: boolean; live?: boolean; queued?: boolean; daemonQueued?: boolean; interrupted?: boolean; unsupported?: boolean; strategy?: 'receipt-live' | 'generic-live' | 'rejected' | 'unsupported' | 'uncertain' | 'interrupt-queue' | 'queue'; turnId?: string; receipt?: boolean; error?: string }>;
   appChatUseRateLimitReset?: (
     providerId: string,
     sessionId: string | undefined,

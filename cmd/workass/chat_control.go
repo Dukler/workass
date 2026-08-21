@@ -210,11 +210,11 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 		}
 		if result, done := cancelResultFromReceipt(receipt); done {
 			actor.mu.Unlock()
-			return jobID, cancelResultWithQueueControl(result, state), true, nil
+			return jobID, result, true, nil
 		}
 		if state.PendingCancel == nil || state.PendingCancel.OperationID != operationID || state.PendingCancel.Turn != receipt.Turn {
 			actor.mu.Unlock()
-			return jobID, cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: false, Reason: "pending"}, state), true, nil
+			return jobID, acp.JobCancelResult{Cancelled: false, Reason: "pending"}, true, nil
 		}
 		actor.mu.Unlock()
 		if _, err := actor.coordinator.ExecuteCancel(ctx, operationID); err != nil {
@@ -226,9 +226,9 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 			return jobID, acp.JobCancelResult{}, true, errors.New("chat cancel receipt disappeared from actor state")
 		}
 		if result, done := cancelResultFromReceipt(receipt); done {
-			return jobID, cancelResultWithQueueControl(result, state), true, nil
+			return jobID, result, true, nil
 		}
-		return jobID, cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: false, Reason: "pending"}, state), true, nil
+		return jobID, acp.JobCancelResult{Cancelled: false, Reason: "pending"}, true, nil
 	}
 	if _, used := state.Operations[operationID]; used {
 		actor.mu.Unlock()
@@ -269,9 +269,9 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 		return jobID, acp.JobCancelResult{}, true, errors.New("chat cancel did not produce an actor receipt")
 	}
 	if result, done := cancelResultFromReceipt(receipt); done {
-		return jobID, cancelResultWithQueueControl(result, state), true, nil
+		return jobID, result, true, nil
 	}
-	return jobID, cancelResultWithQueueControl(acp.JobCancelResult{Cancelled: false, Reason: "pending"}, state), true, nil
+	return jobID, acp.JobCancelResult{Cancelled: false, Reason: "pending"}, true, nil
 }
 
 func (c *chatControlCoordinator) read(params map[string]any) (map[string]any, error) {

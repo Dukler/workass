@@ -93,7 +93,7 @@ func agentMCPTools() []map[string]any {
 			"tab_id": str("Tab id from workass_list_chats."), "chat_id": str("Paired conversation id."),
 			"force": boolean("Cancel a running turn before deleting."),
 		}, "tab_id", "chat_id"), false, true, false, false),
-		tool("workass_send_chat_message", "Send text to one exact chat without focusing it. auto sends at the next idle boundary, queue always preserves FIFO order, and steer explicitly targets the active turn with provider-native semantics plus durable fallback.", mutationObject(map[string]any{
+		tool("workass_send_chat_message", "Send text to one exact chat without focusing it. auto sends at the next idle boundary, queue preserves FIFO order, and headless steer first records one durable FIFO owner, then removes that same owner only after acknowledged live delivery.", mutationObject(map[string]any{
 			"tab_id":   str("Tab id from workass_list_chats."),
 			"chat_id":  str("Paired conversation id."),
 			"message":  str("Message to send."),
@@ -135,7 +135,7 @@ func agentMCPTools() []map[string]any {
 			"return_when":  enum("Return after the first completion or after all complete.", "first", "all"),
 			"timeout_ms":   map[string]any{"type": "integer", "minimum": 1000, "maximum": 3600000, "description": "Wait timeout in milliseconds; defaults to 10 minutes."},
 		}, "subagent_ids"), false, false, false, false),
-		tool("workass_message_subagent", "Send coordinator feedback to a running subagent. Uses acknowledged live steering when supported; otherwise persists an immediate follow-up before interrupting/queuing.", mutationObject(map[string]any{
+		tool("workass_message_subagent", "Send coordinator feedback to a running subagent. It persists one immediate follow-up before attempting acknowledged live steering; unsupported or rejected steering leaves that same follow-up queued without interrupting the child.", mutationObject(map[string]any{
 			"subagent_id": str("Running subagent id."),
 			"message":     str("Correction, clarification, or additional direction."),
 		}, "subagent_id", "message"), false, false, false, true),

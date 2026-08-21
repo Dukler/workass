@@ -22,17 +22,17 @@ import type { MachineSocket } from './machineSocket.ts';
 import { isTagged, machineOf, tagPayload, untagFor } from './machineIds.ts';
 
 type Mapper = (args: unknown[]) => unknown[];
+type RemoteLane = 'data' | 'control' | 'urgent';
 
-/** [method, channel, argument shape]. Absent mapper means pass the args through. */
-const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?]> = [
+/** [method, channel, argument shape, transport lane]. */
+const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?, RemoteLane?]> = [
   ['appMeta', 'app:meta'],
   ['stateDigest', 'state:digest'],
   ['getSettings', 'settings:get'],
   ['getConfig', 'config:get'],
   ['getSession', 'session:get'],
-  ['chatCreate', 'chat:create'],
-  ['chatQueueReplace', 'chat:queue-replace'],
-  ['chatQueueResume', 'chat:queue-resume'],
+  ['chatCreate', 'chat:create', undefined, 'control'],
+  ['chatQueueReplace', 'chat:queue-replace', undefined, 'control'],
   ['chatPresentationSave', 'chat:presentation-save'],
   ['chatRuntimeControlsSave', 'chat:runtime-controls-save'],
   ['chatDelete', 'chat:delete'],
@@ -45,8 +45,8 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?]> = [
   ['archiveAppend', 'chat:archive-append', (a) => [{ tabId: a[0], messages: a[1] }]],
   ['archiveLoad', 'chat:archive-load'],
   ['visualizeHost', 'visualize:host'],
-  ['startJob', 'job:start'],
-  ['cancelJob', 'job:cancel'],
+  ['startJob', 'job:start', undefined, 'control'],
+  ['cancelJob', 'job:cancel', undefined, 'urgent'],
   ['appChatReset', 'app-chat:reset'],
   ['appChatNewSession', 'app-chat:new-session'],
   ['appChatRefreshPlanUsage', 'app-chat:refresh-plan-usage', (a) => [{ providerId: a[0] }]],
@@ -55,12 +55,12 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?]> = [
   ['appChatSteer', 'app-chat:steer', (a) => [{
     sessionId: a[0], prompt: a[1], images: a[2], clientUserMessageId: a[3],
     continuationAssistantMessageId: a[4], boundary: a[5],
-  }]],
+  }], 'control'],
   ['chatCheckpoints', 'chat:checkpoints'],
   ['chatRewind', 'chat:rewind'],
   ['chatDiff', 'chat:diff'],
   ['chatEnvGet', 'chat:env-get'],
-  ['chatPermissionDecide', 'chat:permission-decide', (a) => [{ id: a[0], optionId: a[1] }]],
+  ['chatPermissionDecide', 'chat:permission-decide', (a) => [{ id: a[0], optionId: a[1] }], 'control'],
   ['chatPendingPermissions', 'chat:permissions-pending'],
   ['spawnedWorkList', 'spawned-work:list', (a) => [{ tabId: a[0], chatId: a[1] }]],
   ['chatCommandsGet', 'chat:commands-get', (a) => [{ tabId: a[0], chatId: a[1] }]],
@@ -157,6 +157,10 @@ export interface MachineRouterOptions {
   local(): WorkassApi | undefined;
   /** Ready links, by machine id. A machine that is down is simply absent. */
   links(): ReadonlyMap<string, MachineSocket>;
+  /** Event-free ordered mutation links. There is deliberately no data fallback. */
+  controlLinks?(): ReadonlyMap<string, MachineSocket>;
+  /** Event-free Stop links, isolated from a provider-blocked steer handler. */
+  urgentLinks?(): ReadonlyMap<string, MachineSocket>;
   /**
    * Durable subscription to one channel across every machine, present and
    * future. Binding to `links()` here would capture whatever happened to be
@@ -184,7 +188,12 @@ export class RemoteMachineUnavailableError extends Error {
  */
 export function createMachineRouter(options: MachineRouterOptions): WorkassApi {
   const local = () => options.local();
-  const linkFor = (machineId: string) => (machineId ? options.links().get(machineId) : undefined);
+  const linkFor = (machineId: string, lane: RemoteLane) => {
+    if (!machineId) return undefined;
+    if (lane === 'control') return options.controlLinks?.().get(machineId);
+    if (lane === 'urgent') return options.urgentLinks?.().get(machineId);
+    return options.links().get(machineId);
+  };
   const out: Record<string, unknown> = {};
 
   // Start from the local bridge so anything not routed keeps working exactly as
@@ -192,10 +201,10 @@ export function createMachineRouter(options: MachineRouterOptions): WorkassApi {
   const base = local();
   if (base) for (const key of Object.keys(base) as Array<keyof WorkassApi>) out[key] = (base as Record<string, unknown>)[key];
 
-  for (const [method, channel, mapper] of REMOTE_METHODS) {
+  for (const [method, channel, mapper, declaredLane] of REMOTE_METHODS) {
     out[method] = async (...args: unknown[]) => {
       const machineId = routeOf(args);
-      const link = linkFor(machineId);
+      const link = linkFor(machineId, declaredLane ?? 'data');
       if (!link) {
         if (machineId) throw new RemoteMachineUnavailableError(machineId);
         const fn = (local() as Record<string, unknown> | undefined)?.[method];

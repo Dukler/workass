@@ -4,6 +4,7 @@ import { createMachineRouter, machineScopeOf, RemoteMachineUnavailableError, rou
 import { MachineRegistry, type MachineEntry } from '../src/wire/machineRegistry.ts';
 import { tagId } from '../src/wire/machineIds.ts';
 import type { MachineSocket, MachineSocketLike } from '../src/wire/machineSocket.ts';
+import { fleetDeviceToken, fleetProof } from '../src/wire/fleet.ts';
 
 // A stand-in for a ready link: it records what it was asked and answers with
 // whatever the test queued.
@@ -113,6 +114,7 @@ test('a remotely-tagged chat:create is created by that machine and its receipt s
   const router = createMachineRouter({
     local: () => ({ chatCreate: (opts: unknown) => { localCalls.push(opts); return Promise.resolve({ ok: true }); } }) as never,
     links: () => new Map([['m-lagpc', remote.link]]),
+    controlLinks: () => new Map([['m-lagpc', remote.link]]),
     subscribeRemote: () => {},
   }) as unknown as Record<string, (...a: unknown[]) => Promise<Record<string, unknown>>>;
 
@@ -252,6 +254,71 @@ test('an additive local bridge method remains available without router changes',
   assert.equal(typeof router.somethingNewer, 'function', 'feature detection upstream reads the SHAPE of this object');
 });
 
+test('a pending data read uses a different link from one control admission receipt', async () => {
+  let releaseBulk!: (value: unknown) => void;
+  const blockedBulk = new Promise((resolve) => { releaseBulk = resolve; });
+  const data = fakeLink({ 'session:get': blockedBulk });
+  const control = fakeLink({ 'job:start': { id: 'job-control' } });
+  const urgent = fakeLink();
+  const bulkRead = data.link.invoke('session:get');
+  const router = createMachineRouter({
+    local: () => ({}) as never,
+    links: () => new Map([['m-lagpc', data.link]]),
+    controlLinks: () => new Map([['m-lagpc', control.link]]),
+    urgentLinks: () => new Map([['m-lagpc', urgent.link]]),
+    subscribeRemote: () => {},
+  }) as unknown as Record<string, (...args: unknown[]) => Promise<Record<string, unknown>>>;
+
+  const receipt = await router.startJob({
+    tabId: tagId('m-lagpc', 'tab-1'), chatId: tagId('m-lagpc', 'chat-1'),
+    operationId: 'transport-one', userMessageId: 'user-one', assistantMessageId: 'assistant-one',
+  });
+  assert.equal(receipt.id, tagId('m-lagpc', 'job-control'));
+  assert.deepEqual(control.calls.map((call) => call.channel), ['job:start']);
+  assert.deepEqual(data.calls.map((call) => call.channel), ['session:get']);
+
+  releaseBulk({ hydrated: true });
+  assert.deepEqual(await bulkRead, { hydrated: true });
+});
+
+test('urgent Stop is admitted while the ordered control steer handler is still blocked', async () => {
+  let releaseSteer!: (value: unknown) => void;
+  const blockedSteer = new Promise((resolve) => { releaseSteer = resolve; });
+  const data = fakeLink();
+  const control = fakeLink({ 'app-chat:steer': blockedSteer });
+  const urgent = fakeLink({ 'job:cancel': { cancelled: true } });
+  const router = createMachineRouter({
+    local: () => ({}) as never,
+    links: () => new Map([['m-lagpc', data.link]]),
+    controlLinks: () => new Map([['m-lagpc', control.link]]),
+    urgentLinks: () => new Map([['m-lagpc', urgent.link]]),
+    subscribeRemote: () => {},
+  }) as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+
+  const steer = router.appChatSteer(tagId('m-lagpc', 'session-1'), 'redirect', [], 'user-1', 'assistant-1', {});
+  await Promise.resolve();
+  assert.deepEqual(await router.cancelJob(tagId('m-lagpc', 'job-1')), { cancelled: true });
+  assert.deepEqual(control.calls.map((call) => call.channel), ['app-chat:steer']);
+  assert.deepEqual(urgent.calls.map((call) => call.channel), ['job:cancel']);
+  releaseSteer({ ok: true, strategy: 'receipt-live' });
+  await steer;
+});
+
+test('send-critical remote methods never fall back to the bulk data socket', async () => {
+  const data = fakeLink();
+  const router = createMachineRouter({
+    local: () => ({}) as never,
+    links: () => new Map([['m-lagpc', data.link]]),
+    controlLinks: () => new Map(),
+    urgentLinks: () => new Map(),
+    subscribeRemote: () => {},
+  }) as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+
+  await assert.rejects(router.startJob({ tabId: tagId('m-lagpc', 'tab-1'), chatId: tagId('m-lagpc', 'chat-1') }), RemoteMachineUnavailableError);
+  await assert.rejects(router.cancelJob(tagId('m-lagpc', 'job-1')), RemoteMachineUnavailableError);
+  assert.deepEqual(data.calls, []);
+});
+
 // ---- the registry --------------------------------------------------------
 
 function memoryStorage() {
@@ -283,8 +350,8 @@ test('the registry keeps nearby machines passive until access is explicitly requ
   ], 'm-self');
   assert.deepEqual(opened, [], 'a beacon must not open a socket or prompt a nearby machine');
   assert.equal(registry.requestAccess('m-remote'), true);
-  assert.deepEqual(opened, ['wss://192.168.1.50:18788/?deviceName=Mac'],
-    'only the user request opens an encrypted socket; the local machine is never duplicated');
+  assert.equal(opened.length, 1, 'only the user request opens an encrypted socket; the local machine is never duplicated');
+  assert.match(opened[0], /^wss:\/\/192\.168\.1\.50:18788\/\?connectionGroup=cg-[^&]+&deviceName=Mac$/);
   assert.deepEqual(registry.names(), { 'm-remote': 'Taller' });
   assert.deepEqual(registry.list().map(({ name, reportedName, nickname }) => ({ name, reportedName, nickname })), [
     { name: 'Taller', reportedName: 'builder', nickname: 'Taller' },
@@ -312,22 +379,201 @@ test('approval persists the discovered certificate pin before later token reconn
 	assert.equal(saved.certFingerprint, CERT_FINGERPRINT);
 });
 
+test('fleet approval queues the first Start and Stop until exact-group auxiliary handshakes', async () => {
+	const fleetKey = 'wf-byntydr27z7j3zsdpih3uulqhi';
+	const storage = memoryStorage();
+	const opened: Array<{ url: string; socket: MachineSocketLike; sent: string[] }> = [];
+	const remoteEvents: unknown[] = [];
+	const registry = new MachineRegistry({
+		local: () => ({}) as never, deviceName: 'Mac', storage,
+		open: ((url: string) => {
+			const sent: string[] = [];
+			const socket: MachineSocketLike = {
+				send(data) { sent.push(data); }, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null,
+			};
+			opened.push({ url, socket, sent });
+			return socket;
+		}) as never,
+	});
+	registry.useFleetKey(fleetKey);
+	registry.subscribeRemote('job:event', (payload) => { remoteEvents.push(payload); });
+	registry.sync([entry('m-remote', 'builder', '192.168.1.71:80')], 'm-self');
+	assert.equal(registry.requestAccess('m-remote'), true);
+	const primary = opened[0];
+	primary.socket.onopen?.();
+	primary.socket.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+		state: 'waiting', requestId: 'fleet-waiting', instanceId: 'instance-1',
+	} }));
+	await Promise.resolve();
+	const challenge = primary.sent.map((raw) => JSON.parse(raw)).find((frame) => frame.channel === 'fleet:challenge');
+	assert.ok(challenge);
+	primary.socket.onmessage?.(JSON.stringify({ t: 'reply', id: challenge.id, result: {
+		enabled: true, machineId: 'm-remote', serverNonce: 'server-nonce', keyIds: ['key-1'],
+	}, error: null }));
+	await Promise.resolve(); await Promise.resolve();
+	const enrol = primary.sent.map((raw) => JSON.parse(raw)).find((frame) => frame.channel === 'fleet:enroll');
+	assert.ok(enrol);
+	const enrolment = enrol.args[0] as { clientNonce: string; proof: string };
+	assert.equal(enrolment.proof, fleetProof(fleetKey, 'server-nonce', enrolment.clientNonce, 'm-remote'));
+	const derivedToken = fleetDeviceToken(fleetKey, 'server-nonce', enrolment.clientNonce, 'm-remote');
+
+	// The server's approved event is intentionally delivered before the enrol
+	// reply. At this point the primary may hydrate, but no reusable token has
+	// been persisted and no auxiliary network connection can exist yet.
+	primary.socket.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+		state: 'approved', deviceId: 'device-fleet', name: 'Mac', instanceId: 'instance-1',
+	} }));
+	assert.equal(opened.length, 1);
+	const router = registry.router() as unknown as {
+		startJob(arg: Record<string, unknown>): Promise<Record<string, unknown>>;
+		cancelJob(id: string): Promise<Record<string, unknown>>;
+	};
+	const start = router.startJob({
+		tabId: tagId('m-remote', 'tab-first'), chatId: tagId('m-remote', 'chat-first'),
+		operationId: 'first-start', userMessageId: 'first-user', assistantMessageId: 'first-assistant',
+	});
+	const stop = router.cancelJob(tagId('m-remote', 'job-first'));
+	await Promise.resolve();
+	assert.deepEqual(primary.sent.map((raw) => JSON.parse(raw).channel), ['fleet:challenge', 'fleet:enroll'],
+		'first Start/Stop wait on owned auxiliary placeholders and never fall back to primary');
+
+	primary.socket.onmessage?.(JSON.stringify({ t: 'reply', id: enrol.id, result: { ok: true, deviceId: 'device-fleet' }, error: null }));
+	await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+	assert.equal(opened.length, 3, 'persisting the proven token opens exactly control and urgent siblings');
+	const parsedURLs = opened.map(({ url }) => new URL(url));
+	const groups = parsedURLs.map((url) => url.searchParams.get('connectionGroup'));
+	assert.ok(groups[0]);
+	assert.deepEqual(groups, [groups[0], groups[0], groups[0]], 'one primary mount owns one exact connection group');
+	const control = opened.find(({ url }) => new URL(url).searchParams.get('purpose') === 'control');
+	const urgent = opened.find(({ url }) => new URL(url).searchParams.get('purpose') === 'urgent');
+	assert.ok(control && urgent);
+	assert.equal(new URL(control.url).searchParams.get('deviceToken'), derivedToken);
+	assert.equal(new URL(urgent.url).searchParams.get('deviceToken'), derivedToken);
+
+	for (const sibling of [control, urgent]) {
+		sibling.socket.onopen?.();
+		sibling.socket.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+			state: 'approved', deviceId: 'device-fleet', instanceId: 'instance-1',
+		} }));
+	}
+	const startFrame = control.sent.map((raw) => JSON.parse(raw)).find((frame) => frame.channel === 'job:start');
+	const stopFrame = urgent.sent.map((raw) => JSON.parse(raw)).find((frame) => frame.channel === 'job:cancel');
+	assert.ok(startFrame && stopFrame, 'pre-ready invokes flush on their exact lanes after authentication');
+	control.socket.onmessage?.(JSON.stringify({ t: 'reply', id: startFrame.id, result: {
+		id: 'job-first', kind: 'app-chat', status: 'running', tabId: 'tab-first', chatId: 'chat-first',
+	}, error: null }));
+	urgent.socket.onmessage?.(JSON.stringify({ t: 'reply', id: stopFrame.id, result: { cancelled: true }, error: null }));
+	assert.equal((await start).id, tagId('m-remote', 'job-first'));
+	assert.deepEqual(await stop, { cancelled: true });
+
+	control.socket.onmessage?.(JSON.stringify({ t: 'event', channel: 'job:event', payload: { id: 'must-be-ignored' } }));
+	assert.deepEqual(remoteEvents, [], 'auxiliary sockets cannot dispatch projection events');
+});
+
+test('a rejected auxiliary clears credentials and unmounts the machine immediately', () => {
+	const storage = memoryStorage();
+	storage.setItem('workass.machine.m-remote', JSON.stringify({ deviceToken: 'paired-token', certFingerprint: CERT_FINGERPRINT }));
+	const opened: Array<{ url: string; socket: MachineSocketLike }> = [];
+	const unmounted: string[] = [];
+	const registry = new MachineRegistry({
+		local: () => ({}) as never, deviceName: 'Mac', storage,
+		onUnmount: (machineId) => { unmounted.push(machineId); },
+		open: ((url: string) => {
+			const socket: MachineSocketLike = { send() {}, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null };
+			opened.push({ url, socket });
+			return socket;
+		}) as never,
+	});
+	registry.sync([entry('m-remote', 'builder', '192.168.1.71:80')], 'm-self');
+	const primary = opened[0];
+	primary.socket.onopen?.();
+	primary.socket.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+		state: 'approved', deviceId: 'device-1', instanceId: 'instance-1',
+	} }));
+	const control = opened.find(({ url }) => new URL(url).searchParams.get('purpose') === 'control');
+	assert.ok(control);
+	control.socket.onopen?.();
+	control.socket.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+		state: 'approved', deviceId: 'device-1', instanceId: 'instance-1',
+	} }));
+	control.socket.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+		state: 'rejected', reason: 'revoked', instanceId: 'instance-1',
+	} }));
+	assert.deepEqual(unmounted, ['m-remote']);
+	assert.equal(storage.getItem('workass.machine.m-remote'), null);
+	assert.equal(registry.linkFor('m-remote'), undefined);
+	assert.equal(registry.list()[0].link, 'rejected');
+});
+
+test('every primary reconnect rotates its group and replaces exactly one auxiliary pair', () => {
+	const storage = memoryStorage();
+	storage.setItem('workass.machine.m-remote', JSON.stringify({ deviceToken: 'paired-token', certFingerprint: CERT_FINGERPRINT }));
+	const opened: Array<{ url: string; socket: MachineSocketLike; sent: string[]; closed: boolean }> = [];
+	const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+	const registry = new MachineRegistry({
+		local: () => ({}) as never, deviceName: 'Mac', storage,
+		open: ((url: string) => {
+			const record = { url, sent: [] as string[], closed: false, socket: undefined as unknown as MachineSocketLike };
+			record.socket = {
+				send(data) { record.sent.push(data); }, close() { record.closed = true; },
+				onopen: null, onclose: null, onmessage: null, onerror: null,
+			};
+			opened.push(record);
+			return record.socket;
+		}) as never,
+		setTimer: (fn, ms) => { timers.push({ fn, ms, cleared: false }); return timers.length - 1; },
+		clearTimer: (handle) => { if (timers[handle as number]) timers[handle as number].cleared = true; },
+	});
+	registry.sync([entry('m-remote', 'builder', '192.168.1.71:80')], 'm-self');
+	const primary1 = opened[0];
+	primary1.socket.onopen?.();
+	primary1.socket.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+		state: 'approved', deviceId: 'device-1', instanceId: 'instance-1',
+	} }));
+	assert.equal(opened.length, 3);
+	const group1 = new URL(primary1.url).searchParams.get('connectionGroup');
+	assert.ok(group1);
+	assert.deepEqual(opened.slice(0, 3).map(({ url }) => new URL(url).searchParams.get('connectionGroup')), [group1, group1, group1]);
+
+	primary1.socket.onclose?.();
+	assert.equal(opened.slice(1, 3).every((record) => record.closed), true, 'primary loss fences its exact auxiliary pair before reconnect');
+	const reconnect = timers.find((timer) => timer.ms === 1_500 && !timer.cleared);
+	assert.ok(reconnect);
+	reconnect.fn();
+	const primary2 = opened[3];
+	assert.ok(primary2);
+	const group2 = new URL(primary2.url).searchParams.get('connectionGroup');
+	assert.ok(group2 && group2 !== group1, 'a new physical primary gets a new opaque group');
+	primary2.socket.onopen?.();
+	primary2.socket.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+		state: 'approved', deviceId: 'device-1', instanceId: 'instance-1',
+	} }));
+	assert.equal(opened.length, 6, 'reconnect creates one replacement control and one replacement urgent socket');
+	assert.deepEqual(opened.slice(3, 6).map(({ url }) => new URL(url).searchParams.get('connectionGroup')), [group2, group2, group2]);
+	assert.deepEqual(opened.slice(3, 6).map(({ url }) => new URL(url).searchParams.get('purpose')), [null, 'control', 'urgent']);
+});
+
 test('boot-time event replay delivers a machine-scoped remote catalog', () => {
   const storage = memoryStorage();
-  let socket: MachineSocketLike | undefined;
+  const sockets: MachineSocketLike[] = [];
   const seen: unknown[] = [];
   const registry = new MachineRegistry({
     local: () => ({}) as never, deviceName: 'Mac', storage,
-    open: (() => (socket = { send() {}, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null })) as never,
+    open: (() => {
+      const socket = { send() {}, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null } as MachineSocketLike;
+      sockets.push(socket);
+      return socket;
+    }) as never,
   });
   registry.subscribeRemoteMethod('onChatCatalog', (payload) => { seen.push(payload); });
   registry.sync([entry('m-remote', 'builder', '192.168.1.71:80')], 'm-self');
   assert.equal(registry.requestAccess('m-remote'), true);
-  socket?.onopen?.();
-  socket?.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
+  const primary = sockets[0];
+  primary.onopen?.();
+  primary.onmessage?.(JSON.stringify({ t: 'event', channel: 'lan:access-state', payload: {
     state: 'approved', deviceToken: 'paired-token', deviceId: 'device-1', instanceId: 'instance-1',
   } }));
-  socket?.onmessage?.(JSON.stringify({ t: 'event', channel: 'chat:catalog', payload: {
+  primary.onmessage?.(JSON.stringify({ t: 'event', channel: 'chat:catalog', payload: {
     groups: [{ providerId: 'shared', models: [{ modelId: 'remote-only' }], modes: [{ id: 'remote-mode' }] }],
   } }));
 
@@ -511,10 +757,36 @@ test('an insecure paired endpoint stays parked without losing its credential', (
 
   registry.sync([insecure], 'm-self');
   assert.equal(closed.length, 1, 'a live reconnect is closed when a refresh marks the endpoint insecure');
+  assert.equal(registry.list()[0].link, 'idle', 'detaching must not leave a stale ready/connecting transport state');
+  assert.equal(registry.linkFor('m-remote'), undefined);
   assert.equal(storage.getItem('workass.machine.m-remote') !== null, true, 'the credential survives a security downgrade');
 
   registry.sync([secure], 'm-self');
   assert.equal(opened.length, 2, 'a later secure refresh reconnects without re-pairing');
+});
+
+test('an endpoint address change replaces the immutable socket exactly once', () => {
+  const opened: Array<{ url: string; socket: MachineSocketLike }> = [];
+  const storage = memoryStorage();
+  storage.setItem('workass.machine.m-remote', JSON.stringify({ deviceToken: 'paired-token', certFingerprint: CERT_FINGERPRINT }));
+  const registry = new MachineRegistry({
+    local: () => ({}) as never, deviceName: 'Mac', storage,
+    open: ((url: string) => {
+      const socket: MachineSocketLike = { send() {}, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null };
+      opened.push({ url, socket });
+      return socket;
+    }) as never,
+  });
+  registry.sync([entry('m-remote', 'builder', '192.168.1.71:80')], 'm-self');
+  assert.equal(opened.length, 1);
+
+  registry.sync([entry('m-remote', 'builder', '10.0.0.71:443')], 'm-self');
+  assert.equal(opened.length, 2);
+  assert.match(opened[1].url, /^wss:\/\/10\.0\.0\.71:443\//);
+  assert.equal(registry.list()[0].paired, true, 'address rotation retains the machine credential');
+
+  registry.sync([entry('m-remote', 'builder', '10.0.0.71:443')], 'm-self');
+  assert.equal(opened.length, 2, 'an unchanged endpoint does not churn its socket');
 });
 
 test('an unreachable paired endpoint cancels retries and reconnects only after a reachable refresh', () => {

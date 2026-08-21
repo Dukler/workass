@@ -19,7 +19,6 @@ type providerSteerOutcome struct {
 	ok          bool
 	live        bool
 	queued      bool
-	interrupted bool
 	unsupported bool
 	receipt     bool
 	strategy    string
@@ -33,9 +32,6 @@ func (o providerSteerOutcome) payload() map[string]any {
 		"ok":     o.ok,
 		"live":   o.live,
 		"queued": o.queued,
-	}
-	if o.interrupted {
-		payload["interrupted"] = true
 	}
 	if o.unsupported {
 		payload["unsupported"] = true
@@ -153,7 +149,7 @@ func (genericACPDeliveryStrategy) Steer(b *Bridge, request providerSteerRequest)
 		return outcome
 	}
 	return providerSteerOutcome{
-		queued: false, unsupported: true, strategy: "queue",
+		queued: false, unsupported: true, strategy: "unsupported",
 		errorText: "El agente ACP no anuncio steering mid-turn estandar.",
 	}
 }
@@ -169,20 +165,13 @@ func (codexDeliveryStrategy) Steer(b *Bridge, request providerSteerRequest) prov
 		result, err := b.request(ctx, "_workass/codex/steer", params, 15*time.Second)
 		if err == nil {
 			switch strings.TrimSpace(asString(result["disposition"])) {
-			case "queue":
+			case "rejected", "queue", "next-turn":
+				// queue/next-turn are accepted only as old-host rejection shapes.
+				// They never authorize Workass to interrupt the active turn or
+				// convert an explicit live-steer intent into FIFO work.
 				return providerSteerOutcome{
-					queued: false, strategy: "queue", reason: asString(result["reason"]),
-					errorText: "El turno activo de Codex no acepta steering; la indicacion se conservara para el siguiente turno.",
-				}
-			case "next-turn":
-				interrupted := b.interruptForQueuedSteer(request.sessionID)
-				strategy := "queue"
-				if interrupted {
-					strategy = "interrupt-queue"
-				}
-				return providerSteerOutcome{
-					queued: false, interrupted: interrupted, strategy: strategy, reason: asString(result["reason"]),
-					errorText: "El turno nativo ya termino; la indicacion se enviara como el siguiente turno.",
+					queued: false, strategy: "rejected", reason: asString(result["reason"]),
+					errorText: "Codex no acepto el steer; la indicacion sigue en el composer.",
 				}
 			}
 		}
@@ -194,7 +183,12 @@ func (codexDeliveryStrategy) Steer(b *Bridge, request providerSteerRequest) prov
 			}
 		}
 		if err == nil {
-			err = errors.New("el adapter no devolvio el turnId que acepto el steer")
+			b.opts.Logf("native Codex steer acknowledgement omitted turn identity", map[string]any{"key": b.key})
+			return providerSteerOutcome{
+				queued: false, strategy: "uncertain",
+				receipt:   request.clientUserMessageID != "" && b.hasProviderCapability("workassCodexSteerReceipt"),
+				errorText: "Codex no devolvio la identidad del turno que acepto el steer; no lo reenvie para evitar duplicarlo.",
+			}
 		}
 		if providerRequestTimedOut(err) {
 			b.opts.Logf("native Codex steer acknowledgement timed out", map[string]any{"key": b.key, "error": err.Error()})
@@ -204,14 +198,15 @@ func (codexDeliveryStrategy) Steer(b *Bridge, request providerSteerRequest) prov
 				errorText: "Codex no confirmo el steer a tiempo; no lo reenvie para evitar duplicarlo.",
 			}
 		}
-		b.opts.Logf("native Codex steer rejected; interrupting for queued follow-up", map[string]any{"key": b.key, "error": err.Error()})
-	}
-	if !b.interruptForQueuedSteer(request.sessionID) {
-		return providerSteerOutcome{queued: false, errorText: "Codex no acepto steering nativo y tampoco pude interrumpir el turno."}
+		b.opts.Logf("native Codex steer rejected", map[string]any{"key": b.key, "error": err.Error()})
+		return providerSteerOutcome{
+			queued: false, strategy: "rejected",
+			errorText: "Codex rechazo el steer; la indicacion sigue en el composer.",
+		}
 	}
 	return providerSteerOutcome{
-		queued: false, interrupted: true, unsupported: true, strategy: "interrupt-queue",
-		errorText: "El adapter Codex activo no expone turn/steer; interrumpi el turno para enviar la indicacion inmediatamente despues.",
+		queued: false, unsupported: true, strategy: "unsupported",
+		errorText: "El adapter Codex activo no expone turn/steer; la indicacion sigue en el composer.",
 	}
 }
 
@@ -232,7 +227,12 @@ func (claudeDeliveryStrategy) Steer(b *Bridge, request providerSteerRequest) pro
 			}
 		}
 		if err == nil {
-			err = errors.New("el adapter no devolvio el turnId que acepto el steer")
+			b.opts.Logf("native Claude steer acknowledgement omitted turn identity", map[string]any{"key": b.key})
+			return providerSteerOutcome{
+				queued: false, strategy: "uncertain",
+				receipt:   request.clientUserMessageID != "" && b.hasProviderCapability("workassClaudeSteerReceipt"),
+				errorText: "Claude no devolvio la identidad del turno que acepto el steer; no lo reenvie para evitar duplicarlo.",
+			}
 		}
 		if providerRequestTimedOut(err) {
 			b.opts.Logf("native Claude steer acknowledgement timed out", map[string]any{"key": b.key, "error": err.Error()})
@@ -244,16 +244,13 @@ func (claudeDeliveryStrategy) Steer(b *Bridge, request providerSteerRequest) pro
 		}
 		b.opts.Logf("native Claude steer rejected", map[string]any{"key": b.key, "error": err.Error()})
 		return providerSteerOutcome{
-			queued: false, strategy: "claude-live",
-			errorText: "Claude no confirmo el steer nativo; no interrumpi el turno porque la entrega es incierta.",
+			queued: false, strategy: "rejected",
+			errorText: "Claude rechazo el steer; la indicacion sigue en el composer.",
 		}
 	}
-	if !b.interruptForQueuedSteer(request.sessionID) {
-		return providerSteerOutcome{queued: false, errorText: "No pude interrumpir el turno de Claude para redirigirlo."}
-	}
 	return providerSteerOutcome{
-		queued: false, interrupted: true, unsupported: true, strategy: "interrupt-queue",
-		errorText: "Claude fue interrumpido; la indicacion persistida se enviara como el siguiente turno.",
+		queued: false, unsupported: true, strategy: "unsupported",
+		errorText: "El adapter Claude activo no expone live steering; la indicacion sigue en el composer.",
 	}
 }
 

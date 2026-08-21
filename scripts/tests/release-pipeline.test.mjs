@@ -277,6 +277,7 @@ test('canonical pipeline stages both platforms from one verified input and publi
   assert.match(preparer, /workass_release_run_phase repository_gate_cached verify_gate_receipt/);
   assert.match(preparer, /workass_release_run_phase repository_gate_receipt record_gate_receipt/);
   assert.match(preparer, /WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER=1/);
+  assert.match(preparer, /WORKASS_GATE_FRESH=1/);
   assert.match(preparer, /cmd\/workass\/embedded\/dist\/\." "\$incoming\/renderer/);
   assert.match(preparer, /node "\$input_tool" create/);
   assert.match(preparer, /node "\$input_tool" verify/);
@@ -287,10 +288,12 @@ test('canonical pipeline stages both platforms from one verified input and publi
   const rendererSnapshot = gate.indexOf('WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER');
   const goBuild = gate.indexOf('go build ./...');
   assert.equal(rendererPackage.scripts.test, 'node --experimental-strip-types --test tests/*.test.ts');
+  assert.equal(rendererPackage.scripts.benchmark, 'node --experimental-strip-types --test tests/*.bench.ts');
   assert.ok(rendererTests >= 0 && rendererTests < goBuild);
   assert.ok(shellTests >= 0 && shellTests < goBuild);
   assert.ok(rendererBuild >= 0 && rendererBuild < goBuild);
   assert.ok(rendererSnapshot >= 0 && rendererSnapshot < goBuild);
+  assert.match(gate, /if \[ "\$\{WORKASS_GATE_FRESH:-0\}" = 1 \]; then[\s\S]*go test \.\/\.\.\. -count=1 -p=2 -parallel=2[\s\S]*else[\s\S]*go test \.\/\.\.\. -p=2 -parallel=2/);
 
   assert.match(macStage, /release-input\.mjs" verify/);
   assert.match(macStage, /--renderer-root "\$release_input\/renderer"/);

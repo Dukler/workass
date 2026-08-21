@@ -98,7 +98,7 @@ test('a receipt-capable live steer stays staged and never bounces through the qu
   });
   running(owner);
 
-  assert.equal(await store.steerOrQueue(owner.id, 'pará, hacé lo otro'), true);
+  assert.equal(await store.steerRunning(owner.id, 'pará, hacé lo otro'), true);
 
   // The bug: Claude used to enqueue a FIFO copy before asking the daemon to
   // interrupt, so every steer visibly bounced into the queue list and the copy
@@ -116,7 +116,7 @@ test('a receipt-capable live steer stays staged and never bounces through the qu
   assert.equal((steerCalls[0][5] as { deferUntilConsumed?: boolean }).deferUntilConsumed, true);
 });
 
-test('only a typed delivery rejection moves a live steer into the FIFO, exactly once', async () => {
+test('a typed live-steer rejection restores composer ownership without creating FIFO work', async () => {
   const { store, owner } = subject({
     appChatSteer: async () => ({
       ok: false, live: false, interrupted: true, strategy: 'interrupt-queue',
@@ -125,13 +125,12 @@ test('only a typed delivery rejection moves a live steer into the FIFO, exactly 
   });
   running(owner);
 
-  assert.equal(await store.steerOrQueue(owner.id, 'redirigí esto'), true);
-  assert.equal(owner.queue?.length, 1, 'an interrupted steer becomes one queued follow-up');
-  assert.equal(owner.queue?.[0].text, 'redirigí esto');
+  assert.equal(await store.steerRunning(owner.id, 'redirigí esto'), false);
+  assert.equal(owner.queue, undefined, 'explicit steering must never create a queued follow-up');
   assert.equal(
     owner.messages.filter((message) => message.role === 'user' && message.content === 'redirigí esto').length,
     0,
-    'the rejected transcript row is removed so the queue row is the only owner',
+    'the rejected temporary row is removed so the composer can reclaim ownership',
   );
 });
 
@@ -146,7 +145,7 @@ test('provider identity cannot change receipt-boundary placement', async () => {
     }, providerId, receiptDelivery);
     running(owner, `${providerId}-job`);
 
-    assert.equal(await store.steerOrQueue(owner.id, `steer ${providerId}`), true);
+    assert.equal(await store.steerRunning(owner.id, `steer ${providerId}`), true);
     const steer = owner.messages.find((message) => message.role === 'user' && message.content === `steer ${providerId}`);
     assert.ok(steer);
     assert.equal(steer!.steerBoundary, 'waiting');
@@ -164,7 +163,7 @@ test('generic live steering uses its pending transcript row without a receipt bo
   }, 'arbitrary-generic-provider', genericLiveDelivery);
   running(owner);
 
-  assert.equal(await store.steerOrQueue(owner.id, 'generic steer'), true);
+  assert.equal(await store.steerRunning(owner.id, 'generic steer'), true);
   const steer = owner.messages.find((message) => message.role === 'user' && message.content === 'generic steer');
   assert.ok(steer);
   assert.equal(steer!.steerBoundary, undefined);
@@ -172,20 +171,39 @@ test('generic live steering uses its pending transcript row without a receipt bo
   assert.equal(owner.queue, undefined);
 });
 
-test('a lane without live-steer capability queues without invoking the steer channel', async () => {
+test('a lane without live-steer capability rejects visibly without invoking steer or FIFO', async () => {
   let steerCalls = 0;
   const { store, owner } = subject({
     appChatSteer: async () => { steerCalls += 1; return { ok: true }; },
   }, 'arbitrary-queued-provider', queuedDelivery);
   running(owner);
 
-  assert.equal(await store.steerOrQueue(owner.id, 'queue by capability'), true);
+  assert.equal(await store.steerRunning(owner.id, 'queue by capability'), false);
   assert.equal(steerCalls, 0);
-  assert.deepEqual(owner.queue?.map((item) => item.text), ['queue by capability']);
+  assert.equal(owner.queue, undefined);
   assert.equal(owner.messages.some((message) => message.content === 'queue by capability'), false);
+	assert.equal(store.state.toasts.at(-1)?.title, 'No se pudo dirigir');
 });
 
-test('an actor-owned rejected steer does not create a second renderer FIFO row', async () => {
+test('an explicit steer whose active turn just ended restores the composer without starting a new turn', async () => {
+  let steerCalls = 0;
+  let startCalls = 0;
+  const { store, owner } = subject({
+    appChatSteer: async () => { steerCalls += 1; return { ok: true }; },
+    startJob: async () => { startCalls += 1; return { id: 'unexpected-job' }; },
+  });
+  running(owner);
+  owner.messages[1].status = 'done';
+
+  assert.equal(await store.steerRunning(owner.id, 'do not turn this into a new turn'), false);
+  assert.equal(steerCalls, 0);
+  assert.equal(startCalls, 0);
+  assert.equal(owner.queue, undefined);
+  assert.equal(owner.messages.some((message) => message.content === 'do not turn this into a new turn'), false);
+  assert.equal(store.state.toasts.at(-1)?.title, 'No se pudo dirigir');
+});
+
+test('an old queue-shaped rejection cannot transfer explicit steer intent into renderer FIFO', async () => {
   const { store, owner } = subject({
     appChatSteer: async () => ({
       ok: false, live: false, interrupted: true, strategy: 'interrupt-queue',
@@ -194,12 +212,12 @@ test('an actor-owned rejected steer does not create a second renderer FIFO row',
   });
   running(owner);
 
-  assert.equal(await store.steerOrQueue(owner.id, 'queue this once'), true);
-  assert.equal(owner.queue, undefined, 'the daemon-owned FIFO must not be mirrored a second time in renderer state');
+  assert.equal(await store.steerRunning(owner.id, 'queue this once'), false);
+  assert.equal(owner.queue, undefined, 'a queue-shaped rejection must not create renderer FIFO state');
   assert.equal(
     owner.messages.filter((message) => message.role === 'user' && message.content === 'queue this once').length,
     0,
-    'ownership transferred out of the transcript exactly once',
+    'the rejected temporary transcript owner was released',
   );
 });
 
@@ -272,7 +290,7 @@ test('a delayed queue save cannot strand a later accepted steer beside the compo
   assert.equal(store.queueDraftMessage(owner.id, 'first, keep this queued', []), true);
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(await store.steerOrQueue(owner.id, 'now steer the running turn'), true);
+  assert.equal(await store.steerRunning(owner.id, 'now steer the running turn'), true);
   assert.ok(replacement, 'the queue digest replaced the renderer chat');
   assert.equal(store.chat(owner.id), replacement);
   assert.deepEqual(replacement!.queue?.map((item) => item.text), ['first, keep this queued']);

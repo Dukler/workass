@@ -11,6 +11,7 @@ import (
 )
 
 func TestPhaseCManagerLanePreservesBurstAndTerminalUnderBoundedBackpressure(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	lane := newUnopenedManagerLaneForTest(t, manager, "phase-c-burst-chat", "phase-c-burst-session")
@@ -97,6 +98,7 @@ func TestPhaseCManagerLanePreservesBurstAndTerminalUnderBoundedBackpressure(t *t
 }
 
 func TestPhaseCManagerPublicationWaitsForDurableActorState(t *testing.T) {
+	t.Parallel()
 	const (
 		chatID    = "phase-c-publication-chat"
 		sessionID = "phase-c-publication-session"

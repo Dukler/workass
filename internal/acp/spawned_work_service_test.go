@@ -89,6 +89,7 @@ func roleOf(t *testing.T, manager *Manager, taskID string) string {
 }
 
 func TestQuietListenerBecomesAServiceAndStopsReportingTheChatBusy(t *testing.T) {
+	t.Parallel()
 	listening := true
 	output := spawnedWorkTestOutput(t, "bash-expo")
 	manager := serviceProbeManager(t, output, &listening)
@@ -124,6 +125,7 @@ func TestQuietListenerBecomesAServiceAndStopsReportingTheChatBusy(t *testing.T) 
 }
 
 func TestListenerInAChildProcessStillClassifiesTheLane(t *testing.T) {
+	t.Parallel()
 	output := spawnedWorkTestOutput(t, "bash-npx")
 	// `npx expo start`: the wrapper that owns the record binds nothing, and the
 	// node child that inherited its stdout is the one holding the port. Only the
@@ -160,6 +162,7 @@ func TestListenerInAChildProcessStillClassifiesTheLane(t *testing.T) {
 }
 
 func TestListenerThatKeepsWritingStaysWork(t *testing.T) {
+	t.Parallel()
 	listening := true
 	output := spawnedWorkTestOutput(t, "bash-tests")
 	manager := serviceProbeManager(t, output, &listening)
@@ -180,6 +183,7 @@ func TestListenerThatKeepsWritingStaysWork(t *testing.T) {
 }
 
 func TestQuietProcessWithoutAListenerStaysWork(t *testing.T) {
+	t.Parallel()
 	listening := false
 	output := spawnedWorkTestOutput(t, "bash-link")
 	manager := serviceProbeManager(t, output, &listening)
@@ -201,6 +205,7 @@ func TestQuietProcessWithoutAListenerStaysWork(t *testing.T) {
 }
 
 func TestFailedListenProbeNeverClassifies(t *testing.T) {
+	t.Parallel()
 	output := spawnedWorkTestOutput(t, "bash-unprobed")
 	manager := NewManager(Options{
 		StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour,
@@ -221,6 +226,7 @@ func TestFailedListenProbeNeverClassifies(t *testing.T) {
 }
 
 func TestDeclaredWorkIsNeverReclassifiedByInference(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	pid := 5150
 	manager := NewManager(Options{
@@ -262,6 +268,7 @@ func TestDeclaredWorkIsNeverReclassifiedByInference(t *testing.T) {
 }
 
 func TestDeclaredServiceIsCarriedFromRegistrationAndSurvivesRestart(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	manager := NewManager(Options{StateDir: stateDir, RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
@@ -311,6 +318,7 @@ func TestDeclaredServiceIsCarriedFromRegistrationAndSurvivesRestart(t *testing.T
 // earlier stubs returned their map unconditionally, which answered for a path
 // production never requested and hid the gap.
 func TestRegisteredExternalServiceLaneIsClassifiedFromItsListeningChild(t *testing.T) {
+	t.Parallel()
 	const child = 7100
 	asked := [][]string{}
 	manager := NewManager(Options{

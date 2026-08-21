@@ -71,7 +71,8 @@ test('a queue save retries one stable operation after an undefined reply and pre
   try {
     const owner = chat('tab-queue-operation');
     const subject = setup(owner);
-    subject.enqueue(owner, 'queued once');
+	owner.queue = [{ id: 'queued-once', text: 'queued once' }];
+	subject.markQueueMutation(owner);
 
     await subject.flushSession();
     assert.equal(subject.dirtyChats.has(owner.id), true);

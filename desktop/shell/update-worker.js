@@ -9,12 +9,25 @@ const fs = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
+const {
+  PROGRESS_RECEIPT_SCHEMA_VERSION,
+  TRANSACTION_SCHEMA_VERSION,
+  expectedProgressExecutable,
+  installedProgressExecutable,
+  progressProcessOwnership,
+  progressExecutableIsAllowed,
+  progressOwnerReceiptPath,
+  progressReceiptIsLive,
+  progressReceiptProcessIsRunning,
+  spawnVisibleUpdateProgress,
+  terminateUpdateProgress,
+} = require('./update-progress');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const INSTALLATION_IDENTITY_FILE = '.workass-installation.json';
 const RECEIPT_SCHEMA_VERSION = 2;
-const TRANSACTION_SCHEMA_VERSION = 3;
 const JOURNAL_SCHEMA_VERSION = 1;
 const LEASE_SCHEMA_VERSION = 1;
 const WINDOWS_BACKUP_RECEIPT = 'installed-before-activation.complete.json';
@@ -52,7 +65,7 @@ const STALE_RUNTIME_ENV_KEYS = new Set([
   'WORKASS_BROWSER_CONTROL_FILE', 'WORKASS_REPO_ROOT',
   'WORKASS_TEST_ROOT', 'WORKASS_PROD',
   'WORKASS_CONTROLLER_RECOVERY', 'WORKASS_UPDATE_RELAUNCH',
-  'WORKASS_LOCK_RECOVERY_CHILD',
+  'WORKASS_LOCK_RECOVERY_CHILD', 'WORKASS_UPDATE_PROGRESS_ID',
 ]);
 
 function targetRuntimeEnv(source = process.env) {
@@ -504,11 +517,12 @@ function verifyMacIncoming(transaction) {
     throw new Error('incoming daemon runtime does not match the app release');
   }
   if (!fs.existsSync(path.join(runtimeRoot, 'workass'))) throw new Error('incoming release has no bundled daemon');
+  requiredRegularFile(path.join(transaction.incomingTarget, 'Contents', 'Resources', 'app', 'update-progress.js'), 'update progress process');
 }
 
 function requiredRegularFile(file, label) {
   const stat = fs.statSync(file, { throwIfNoEntry: false });
-  if (!stat?.isFile() || stat.size <= 0) throw new Error(`incoming Windows release has no ${label}`);
+  if (!stat?.isFile() || stat.size <= 0) throw new Error(`incoming release has no ${label}`);
   return stat;
 }
 
@@ -554,6 +568,7 @@ function verifyWindowsIncoming(transaction) {
   for (const [relative, label] of [
     [['resources', 'app', 'update-manager.js'], 'update manager'],
     [['resources', 'app', 'update-worker.js'], 'update worker'],
+    [['resources', 'app', 'update-progress.js'], 'update progress process'],
     [['resources', 'app', 'update-lock-recovery.js'], 'update lock recovery'],
     [['resources', 'renderer', 'index.html'], 'renderer'],
     [['frontier-hosts', 'windows-amd64', 'claude-native-host.mjs'], 'Claude host'],
@@ -610,18 +625,23 @@ function validateTransaction(transaction) {
   if (!/^[A-Za-z0-9_-]{8,96}$/.test(String(transaction.updateId || ''))) throw new Error('update transaction has an invalid updateId');
   if (!validInstallationId(transaction.installationId)) throw new Error('update transaction has an invalid installation identity');
   if (!validWorkerId(transaction.workerId)) throw new Error('update transaction has an invalid worker identity');
+  if (!/^progress-[a-f0-9]{32}$/.test(String(transaction.progressId || ''))) throw new Error('update transaction has an invalid progress identity');
   if (transaction.requireVisibleWindow !== true) throw new Error('update transaction must require a visible shell window');
   for (const field of [
     'updateId', 'platform', 'currentVersion', 'targetVersion',
     'transactionRoot', 'installTarget', 'incomingTarget', 'backupTarget',
     'mutableStateTarget', 'mutableStateBackupTarget', 'failedMutableStateTarget',
-    'receiptPath', 'journalPath', 'leasePath', 'daemonHealthURL', 'shellStatusURL',
+    'receiptPath', 'journalPath', 'leasePath', 'workerPath', 'workerRuntimePath',
+    'progressModulePath', 'progressReceiptPath', 'progressExecutable',
+    'daemonHealthURL', 'shellStatusURL',
   ]) {
     if (!String(transaction[field] || '').trim()) throw new Error(`update transaction is missing ${field}`);
   }
   for (const field of [
     'transactionRoot', 'installTarget', 'incomingTarget', 'backupTarget',
-    'mutableStateTarget', 'mutableStateBackupTarget', 'failedMutableStateTarget', 'receiptPath', 'journalPath', 'leasePath',
+    'mutableStateTarget', 'mutableStateBackupTarget', 'failedMutableStateTarget',
+    'receiptPath', 'journalPath', 'leasePath', 'workerPath', 'workerRuntimePath',
+    'progressModulePath', 'progressReceiptPath', 'progressExecutable',
   ]) {
     if (!path.isAbsolute(transaction[field])) throw new Error(`${field} must be absolute`);
   }
@@ -630,7 +650,12 @@ function validateTransaction(transaction) {
   if (transaction.transactionRoot !== path.join(updateRoot, 'transactions', transaction.updateId) ||
       transaction.receiptPath !== path.join(updateRoot, 'receipt.json') ||
       transaction.journalPath !== path.join(transaction.transactionRoot, 'journal.json') ||
-      transaction.leasePath !== path.join(transaction.transactionRoot, 'worker-lease.json')) {
+      transaction.leasePath !== path.join(transaction.transactionRoot, 'worker-lease.json') ||
+      transaction.workerPath !== path.join(transaction.transactionRoot, 'update-worker.js') ||
+      transaction.progressModulePath !== path.join(transaction.transactionRoot, 'update-progress.js') ||
+      transaction.workerRuntimePath !== path.join(transaction.transactionRoot, transaction.platform === 'win32' ? 'updater-node.exe' : 'updater-node') ||
+      transaction.progressReceiptPath !== path.join(transaction.transactionRoot, 'progress-receipt.json') ||
+      !progressExecutableIsAllowed(transaction, transaction.progressExecutable)) {
     throw new Error('update transaction paths do not belong to the exact update directory');
   }
   if (transaction.mutableStateTarget !== path.join(dataRoot, 'state') || dataRoot === path.parse(dataRoot).root) {
@@ -717,6 +742,7 @@ async function launchUntilHealthy(ops, expectedVersion, {
   relaunchIntervalMs = 5000,
   timeoutMs = 120000,
   now = Date.now,
+  progressVisible = null,
 } = {}) {
   await ops.launchInstalled({ updateRelaunch });
   let nextRelaunchAt = now() + relaunchIntervalMs;
@@ -726,6 +752,11 @@ async function launchUntilHealthy(ops, expectedVersion, {
     const remaining = deadline - now();
     if (remaining <= 0) return false;
     if (await ops.healthy(expectedVersion, Math.max(1, Math.min(1500, remaining)))) return true;
+    if (progressVisible && !await progressVisible()) {
+      const error = new Error('the verified update progress window stopped before Workass recovered');
+      error.code = 'WORKASS_UPDATE_PROGRESS_LOST';
+      throw error;
+    }
     const current = now();
     if (current >= deadline) return false;
     if (current >= nextRelaunchAt) {
@@ -739,6 +770,58 @@ async function launchUntilHealthy(ops, expectedVersion, {
     await pause(Math.min(delayMs, Math.max(0, deadline - now())));
   }
   return false;
+}
+
+async function replaceVisibleProgress(transaction, {
+  readReceipt = (file) => {
+    try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+  },
+  inspectOwnership = progressProcessOwnership,
+  terminateProgress = terminateUpdateProgress,
+  spawnProgress = spawnVisibleUpdateProgress,
+  createProgressId = () => `progress-${crypto.randomBytes(16).toString('hex')}`,
+} = {}) {
+  const inspectedPids = new Set();
+  for (const receiptPath of [transaction.progressReceiptPath, progressOwnerReceiptPath(transaction)]) {
+    const priorReceipt = readReceipt(receiptPath);
+    if (!Number.isInteger(priorReceipt?.pid) || inspectedPids.has(priorReceipt.pid)) continue;
+    inspectedPids.add(priorReceipt.pid);
+    const ownership = inspectOwnership(priorReceipt, transaction, { platform: transaction.platform });
+    if (ownership.running && (!ownership.exact || !await terminateProgress(ownership, { platform: transaction.platform }))) {
+      return false;
+    }
+  }
+  const stagedExecutable = expectedProgressExecutable(transaction);
+  const installedExecutable = installedProgressExecutable(transaction);
+  const executable = fs.statSync(stagedExecutable, { throwIfNoEntry: false })?.isFile()
+    ? stagedExecutable
+    : transaction.platform === 'darwin' && fs.statSync(installedExecutable, { throwIfNoEntry: false })?.isFile()
+      ? installedExecutable
+      : '';
+  if (!executable) return false;
+  transaction.progressId = createProgressId();
+  transaction.progressExecutable = executable;
+  transaction.recoveryAttempt = Number(transaction.recoveryAttempt || 0) + 1;
+  atomicJSON(path.join(transaction.transactionRoot, 'transaction.json'), transaction);
+  try { fs.rmSync(transaction.progressReceiptPath, { force: true }); } catch {}
+  try { fs.rmSync(progressOwnerReceiptPath(transaction), { force: true }); } catch {}
+  try {
+    await spawnProgress({
+      command: executable,
+      args: ['--workass-update-progress', path.join(transaction.transactionRoot, 'transaction.json')],
+      options: {
+        cwd: path.dirname(executable),
+        detached: true,
+        windowsHide: false,
+        stdio: 'ignore',
+        env: { ...process.env, WORKASS_UPDATE_PROGRESS_ID: transaction.progressId },
+      },
+      transaction,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function defaultOperations(transaction, dependencies = {}) {
@@ -757,6 +840,12 @@ function defaultOperations(transaction, dependencies = {}) {
   const launchedProcesses = new Map();
   let expectedDaemonBind = '';
   return {
+    progressVisible: async () => {
+      let receipt = null;
+      try { receipt = JSON.parse(fs.readFileSync(transaction.progressReceiptPath, 'utf8')); } catch { return false; }
+      return progressReceiptIsLive(receipt, transaction);
+    },
+    replaceProgress: () => replaceVisibleProgress(transaction),
     shellExited: () => !pidAlive(transaction.shellPID),
     stopDaemonService: async () => {
       if (transaction.platform === 'darwin' && launchAgentPath && launchdDomain) {
@@ -1025,13 +1114,27 @@ function defaultOperations(transaction, dependencies = {}) {
       }
     },
     cleanup: async () => {
-      fs.rmSync(transaction.incomingTarget, { recursive: true, force: true });
+      const progressRunning = [transaction.progressReceiptPath, progressOwnerReceiptPath(transaction)]
+        .some((receiptPath) => {
+          try { return progressReceiptProcessIsRunning(JSON.parse(fs.readFileSync(receiptPath, 'utf8')), transaction); }
+          catch { return false; }
+        });
+      if (!progressRunning) {
+        fs.rmSync(transaction.incomingTarget, { recursive: true, force: true });
+      }
       fs.rmSync(transaction.backupTarget, { recursive: true, force: true });
       fs.rmSync(windowsBackupReceiptPath(transaction), { force: true });
       fs.rmSync(transaction.mutableStateBackupTarget, { recursive: true, force: true });
     },
     cleanupFailed: async () => {
-      fs.rmSync(transaction.incomingTarget, { recursive: true, force: true });
+      const progressRunning = [transaction.progressReceiptPath, progressOwnerReceiptPath(transaction)]
+        .some((receiptPath) => {
+          try { return progressReceiptProcessIsRunning(JSON.parse(fs.readFileSync(receiptPath, 'utf8')), transaction); }
+          catch { return false; }
+        });
+      if (!progressRunning) {
+        fs.rmSync(transaction.incomingTarget, { recursive: true, force: true });
+      }
       fs.rmSync(transaction.backupTarget, { recursive: true, force: true });
       fs.rmSync(windowsBackupReceiptPath(transaction), { force: true });
       fs.rmSync(transaction.mutableStateBackupTarget, { recursive: true, force: true });
@@ -1048,6 +1151,12 @@ async function runTransaction(rawTransaction, operations) {
   const lease = operations ? null : startWorkerLease(transaction);
   let terminal = false;
   let journal = readJournal(transaction);
+  const progressVisible = typeof ops.progressVisible === 'function' ? ops.progressVisible : async () => true;
+  const progressReady = async () => {
+    if (await progressVisible()) return true;
+    if (typeof ops.replaceProgress !== 'function' || !await ops.replaceProgress()) return false;
+    return progressVisible();
+  };
 
   const save = (phase, patch = {}) => {
     journal = checkpoint(transaction, journal, phase, patch);
@@ -1076,6 +1185,63 @@ async function runTransaction(rawTransaction, operations) {
     }
     save('daemon_fence_cleared', { daemonFenceCleared: true });
     return finish('failed', { activated: false, error, ...extra });
+  };
+  const requireProgress = async () => {
+    if (await progressReady()) return;
+    const error = new Error('the verified update progress window stopped before Workass recovered');
+    error.code = 'WORKASS_UPDATE_PROGRESS_LOST';
+    throw error;
+  };
+  const failBeforeDestructiveWork = async (cause) => {
+    const error = String(cause && cause.message || cause || 'the update progress window stopped');
+    try {
+      const daemonAlreadyDown = await ops.daemonDown(600);
+      if (!daemonAlreadyDown) {
+        if (typeof ops.clearUpdateFence !== 'function' || !await ops.clearUpdateFence()) {
+          save('admission_fence_pending', {
+            terminal: false,
+            daemonStopped: false,
+            error: 'the daemon update admission fence did not clear after the progress owner was lost',
+          });
+          return updateReceipt(transaction, 'activating', {
+            installedVersion: transaction.currentVersion,
+            activated: false,
+            error: 'the daemon update admission fence did not clear after the progress owner was lost',
+          });
+        }
+        save('daemon_fence_cleared', { daemonFenceCleared: true, error });
+      }
+      if (daemonAlreadyDown) await ops.startRuntime?.();
+      await ops.launchInstalled({ updateRelaunch: transaction.platform === 'darwin' });
+      return finish('failed', {
+        activated: false,
+        rolledBack: false,
+        error,
+        recoveryRelaunched: true,
+      });
+    } catch (launchError) {
+      return finish('failed', {
+        activated: false,
+        rolledBack: false,
+        error,
+        rollbackError: String(launchError && launchError.message || launchError),
+      });
+    }
+  };
+  const deferRecoveryUntilVisible = (cause) => {
+    const error = String(cause && cause.message || cause || 'the update progress window stopped');
+    save('recovery_owner_unavailable', {
+      terminal: false,
+      error,
+      recoveryOwnerUnavailable: true,
+    });
+    return updateReceipt(transaction, 'activating', {
+      installedVersion: journal.rolledBack ? transaction.currentVersion
+        : journal.activated ? transaction.targetVersion : transaction.currentVersion,
+      activated: Boolean(journal.activated && !journal.rolledBack),
+      error,
+      recoveryOwnerUnavailable: true,
+    });
   };
 
   try {
@@ -1129,6 +1295,9 @@ async function runTransaction(rawTransaction, operations) {
       }
       save('shell_stopped', { shellStopped: true, oldShellForced });
     }
+
+    try { await requireProgress(); }
+    catch (progressError) { return await failBeforeDestructiveWork(progressError); }
 
     if (!journal.daemonStopped) {
       await ops.stopDaemonService();
@@ -1186,6 +1355,7 @@ async function runTransaction(rawTransaction, operations) {
       let recoveryPhase;
       let recoveryExtra;
       try {
+        await requireProgress();
         if (!journal.rollbackStarted) {
           save('rollback_started', {
             rollbackStarted: true,
@@ -1193,19 +1363,24 @@ async function runTransaction(rawTransaction, operations) {
             error,
           });
         }
+        await requireProgress();
         await ops.stopLaunched();
         if (journal.rollbackReady && !journal.rolledBack) {
+          await requireProgress();
           await ops.rollback();
           save('rolled_back', { rolledBack: true });
         }
         if (journal.mutableStateSnapshotted && !journal.mutableStateRestored) {
+          await requireProgress();
           if (!journal.stateRestoreStarted) save('restoring_state', { stateRestoreStarted: true });
           await ops.restoreMutableState();
           save('state_restored', { mutableStateRestored: true });
         }
+        await requireProgress();
         await ops.startRuntime?.();
         const recovered = await launchUntilHealthy(ops, transaction.currentVersion, {
           updateRelaunch: transaction.platform === 'darwin',
+          progressVisible: progressReady,
         });
         let cleanupWarning = '';
         if (recovered) {
@@ -1223,6 +1398,9 @@ async function runTransaction(rawTransaction, operations) {
           ...(recovered ? {} : { rollbackError: 'previous release did not recover' }),
         };
       } catch (rollbackError) {
+        if (rollbackError?.code === 'WORKASS_UPDATE_PROGRESS_LOST') {
+          return deferRecoveryUntilVisible(rollbackError);
+        }
         recoveryPhase = 'failed';
         recoveryExtra = {
           activated: false,
@@ -1238,23 +1416,30 @@ async function runTransaction(rawTransaction, operations) {
 
     if (!journal.healthVerified) {
       try {
+        await requireProgress();
         if (!journal.incomingVerified) {
           await ops.verifyIncoming();
           save('incoming_verified', { incomingVerified: true });
         }
+        await requireProgress();
         updateReceipt(transaction, 'activating');
         if (!journal.mutableStateSnapshotted) {
           if (!journal.snapshotStarted) save('snapshotting_state', { snapshotStarted: true });
           await ops.snapshotMutableState();
           save('state_snapshotted', { mutableStateSnapshotted: true });
         }
+        await requireProgress();
         if (!journal.activated) {
           if (!journal.activationStarted) save('activating', { activationStarted: true });
           await ops.activate();
           save('activated', { activated: true });
         }
+        await requireProgress();
         await ops.startRuntime?.();
-        if (!await launchUntilHealthy(ops, transaction.targetVersion, { updateRelaunch: true })) {
+        if (!await launchUntilHealthy(ops, transaction.targetVersion, {
+          updateRelaunch: true,
+          progressVisible: progressReady,
+        })) {
           throw new Error('new release did not recover daemon health, renderer authority, a visible window, and a populated model catalog');
         }
         // This is the commit point. Once all runtime gates have passed, persist
@@ -1287,10 +1472,32 @@ function validateWorkerEntrypoint(transactionPath, transaction, workerFile = __f
   if (path.resolve(workerFile) !== path.join(root, 'update-worker.js')) {
     throw new Error('update worker executable does not belong to the transaction');
   }
+  if (path.resolve(String(transaction.progressModulePath || '')) !== path.join(root, 'update-progress.js')) {
+    throw new Error('update progress module does not belong to the transaction');
+  }
 }
 
-async function main(argv = process.argv.slice(2)) {
-  if (argv[0] === '--self-test') return 0;
+function workerSelfTestReport(argv) {
+  if (argv.length !== 3 || argv[0] !== '--self-test' || argv[1] !== '--transaction-schema' ||
+      Number(argv[2]) !== TRANSACTION_SCHEMA_VERSION) {
+    throw new Error('update worker self-test transaction schema is unsupported');
+  }
+  return {
+    schemaVersion: 1,
+    product: 'Workass',
+    component: 'update-worker',
+    supportedTransactionSchemas: [TRANSACTION_SCHEMA_VERSION],
+    progressReceiptSchemaVersion: PROGRESS_RECEIPT_SCHEMA_VERSION,
+  };
+}
+
+async function main(argv = process.argv.slice(2), {
+  writeOutput = (value) => process.stdout.write(value),
+} = {}) {
+  if (argv[0] === '--self-test') {
+    writeOutput(`${JSON.stringify(workerSelfTestReport(argv))}\n`);
+    return 0;
+  }
   if (argv[0] !== '--transaction' || !argv[1]) throw new Error('usage: update-worker.js --transaction ABSOLUTE_PATH');
   const transactionPath = path.resolve(argv[1]);
   const transaction = JSON.parse(fs.readFileSync(transactionPath, 'utf8'));
@@ -1319,6 +1526,7 @@ module.exports = {
   requestDaemonShutdown,
   requestUpdateCancel,
   readJournal,
+  replaceVisibleProgress,
   renamePathWithRetry,
   spawnDetached,
   runTransaction,
@@ -1336,4 +1544,5 @@ module.exports = {
   verifyWindowsIncoming,
   waitUntil,
   waitUntilDeadline,
+  workerSelfTestReport,
 };

@@ -11,14 +11,11 @@ import (
 )
 
 func TestEnvironmentBriefIncludesChatArchivePath(t *testing.T) {
+	t.Parallel()
 	stateDir := filepath.Join(t.TempDir(), "state")
-	manager, events := newFakeManager(t, "echo-prompt", Options{StateDir: stateDir, RSSSampleInterval: time.Hour})
+	manager := NewManager(Options{StateDir: stateDir})
 	t.Cleanup(func() { manager.Reset() })
-	session := newFakeSession(t, manager, "brief-tab")
-
-	job := startAppChatJob(t, manager, session.SessionID, "brief-tab", "read referenced chat")
-	end := events.waitJobEnd(t, jobID(job), 2*time.Second)
-	result := jobFromEnd(end)["result"].(string)
+	result := manager.buildAppChatPrompt(JobStartOptions{HumanAuthored: true}, "read referenced chat")
 	archivePath := filepath.Join(stateDir, "chat-archive", "<chatId>.jsonl")
 	if !strings.Contains(result, archivePath) ||
 		!strings.Contains(result, "{role, content, status, at}") ||
@@ -32,13 +29,8 @@ func TestEnvironmentBriefIncludesChatArchivePath(t *testing.T) {
 }
 
 func TestEnvironmentBriefCurrentRequestLanguageUsesHumanRequest(t *testing.T) {
-	manager, events := newFakeManager(t, "echo-prompt", Options{})
-	t.Cleanup(func() { manager.Reset() })
-	session := newFakeSession(t, manager, "language-tab")
-
-	job := startAppChatJob(t, manager, session.SessionID, "language-tab", "Continue this work in English.")
-	end := events.waitJobEnd(t, jobID(job), 2*time.Second)
-	result := jobFromEnd(end)["result"].(string)
+	t.Parallel()
+	result := buildUserRequestBlock("Continue this work in English.", true)
 	rule := expectedPerTurnLanguageRule
 	if !strings.Contains(result, rule) ||
 		!strings.Contains(result, "restored transcripts") ||
@@ -49,10 +41,7 @@ func TestEnvironmentBriefCurrentRequestLanguageUsesHumanRequest(t *testing.T) {
 		t.Fatalf("per-turn language rule must govern the current request:\n%s", result)
 	}
 
-	spanishSession := newFakeSession(t, manager, "language-tab-spanish")
-	spanishJob := startAppChatJob(t, manager, spanishSession.SessionID, "language-tab-spanish", "Continuá este trabajo en español.")
-	spanishEnd := events.waitJobEnd(t, jobID(spanishJob), 2*time.Second)
-	spanishResult := jobFromEnd(spanishEnd)["result"].(string)
+	spanishResult := buildUserRequestBlock("Continuá este trabajo en español.", true)
 	if !strings.Contains(spanishResult, rule) ||
 		!strings.Contains(spanishResult, "User request:\nContinuá este trabajo en español.") {
 		t.Fatalf("current Spanish request lost its language boundary:\n%s", spanishResult)
@@ -60,23 +49,16 @@ func TestEnvironmentBriefCurrentRequestLanguageUsesHumanRequest(t *testing.T) {
 }
 
 func TestFirstInputInitialContextSeedIsIncludedOnce(t *testing.T) {
-	manager, events := newFakeManager(t, "echo-prompt", Options{})
+	t.Parallel()
+	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
-	session := newFakeSession(t, manager, "initial-seed-tab")
-
-	first, err := manager.StartJob(context.Background(), JobStartOptions{
-		Kind: "app-chat", SessionID: session.SessionID, ChatID: "chat-initial-seed-tab", TabID: "initial-seed-tab",
-		ProviderID: session.ProviderID, Prompt: "current request", HumanAuthored: true,
+	firstResult := manager.buildAppChatPrompt(JobStartOptions{
+		HumanAuthored: true,
 		InitialContextSeed: []providercontract.ContextMessage{
 			{LedgerSequence: 1, Role: "user", Text: "earlier question", Inert: true},
 			{LedgerSequence: 2, Role: "assistant", Result: "earlier answer", Inert: true},
 		},
-	})
-	if err != nil {
-		t.Fatalf("start seeded first turn: %v", err)
-	}
-	firstEnd := events.waitJobEnd(t, jobID(first), 2*time.Second)
-	firstResult := jobFromEnd(firstEnd)["result"].(string)
+	}, "current request")
 	if !strings.Contains(firstResult, "one-time restored context seed") ||
 		!strings.Contains(firstResult, "User: earlier question") ||
 		!strings.Contains(firstResult, "Assistant: earlier answer") ||
@@ -84,44 +66,24 @@ func TestFirstInputInitialContextSeedIsIncludedOnce(t *testing.T) {
 		t.Fatalf("initial context seed was not separated from the current request:\n%s", firstResult)
 	}
 
-	second, err := manager.StartJob(context.Background(), JobStartOptions{
-		Kind: "app-chat", SessionID: session.SessionID, ChatID: "chat-initial-seed-tab", TabID: "initial-seed-tab",
-		ProviderID: session.ProviderID, Prompt: "second request", HumanAuthored: true,
-	})
-	if err != nil {
-		t.Fatalf("start ordinary second turn: %v", err)
-	}
-	secondEnd := events.waitJobEnd(t, jobID(second), 2*time.Second)
-	secondResult := jobFromEnd(secondEnd)["result"].(string)
+	secondResult := buildUserRequestBlock("second request", true)
 	if strings.Contains(secondResult, "earlier question") || strings.Contains(secondResult, "one-time restored context seed") {
 		t.Fatalf("initial context seed replayed on a later turn:\n%s", secondResult)
 	}
 }
 
 func TestEnvironmentBriefIncludesActiveModelOnEveryTurn(t *testing.T) {
-	manager, events := newFakeManager(t, "echo-prompt", Options{})
+	t.Parallel()
+	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
-	session := newFakeSession(t, manager, "model-identity-tab")
+	bridge := newBridge("model-identity", Options{Provider: ProviderConfig{ID: "mock", Name: "Mock Provider"}}, manager)
 
 	start := func(modelID, prompt string) string {
-		job, err := manager.StartJob(context.Background(), JobStartOptions{
-			Kind:       "app-chat",
-			SessionID:  session.SessionID,
-			ChatID:     "chat-model-identity-tab",
-			TabID:      "model-identity-tab",
-			ProviderID: session.ProviderID,
-			ModelID:    modelID,
-			Prompt:     prompt,
-		})
-		if err != nil {
-			t.Fatalf("start %s turn: %v", modelID, err)
-		}
-		end := events.waitJobEnd(t, jobID(job), 2*time.Second)
-		return jobFromEnd(end)["result"].(string)
+		return buildTurnRuntimeIdentity(bridge, "mock", modelID) + buildUserRequestBlock(prompt, true)
 	}
 
 	first := start("model-alpha", "what model are you?")
-	if !strings.Contains(first, `provider "`+session.ProviderID+`"`) ||
+	if !strings.Contains(first, `provider "mock"`) ||
 		!strings.Contains(first, `model "model-alpha"`) ||
 		!strings.Contains(first, "answer with this exact Workass runtime identity") ||
 		!strings.Contains(first, "User request:\nwhat model are you?") {
@@ -137,6 +99,7 @@ func TestEnvironmentBriefIncludesActiveModelOnEveryTurn(t *testing.T) {
 }
 
 func TestCompletedAppChatJobsArePruned(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "echo-prompt", Options{})
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "prune-tab")

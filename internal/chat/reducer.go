@@ -143,7 +143,6 @@ type SteerAdmitted struct {
 	Accepted         bool
 	Consumed         bool
 	AwaitConsumption bool
-	Interrupted      bool
 }
 
 func (SteerAdmitted) chatCommand() {}
@@ -187,6 +186,13 @@ func (RecordAgentWaitObservation) chatCommand() {}
 type CancelAcknowledged struct{ OperationID provider.OperationID }
 
 func (CancelAcknowledged) chatCommand() {}
+
+// CancelPendingTurn settles an exact Workass operation before a provider owns
+// it. It is keyed by the submit OperationID itself: no native turn or transient
+// manager job is required to stop work that is still queued/dispatching.
+type CancelPendingTurn struct{ OperationID provider.OperationID }
+
+func (CancelPendingTurn) chatCommand() {}
 
 type CancelFailed struct {
 	OperationID provider.OperationID
@@ -588,8 +594,6 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 		effects, err = reduceCommitLaneSelection(&next, command)
 	case PromoteStagedQueue:
 		effects, err = reducePromoteStagedQueue(&next, command)
-	case ResumeQueue:
-		effects, err = reduceResumeQueue(&next, command)
 	case DeleteChat:
 		effects, err = reduceDeleteChat(&next, command)
 	case ChatDeletionCompleted:
@@ -605,7 +609,7 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 	case LaneProvisioned:
 		effects, err = reduceLaneProvisioned(&next, command)
 	case LaneOpenFailed:
-		err = reduceLaneOpenFailed(&next, command)
+		effects, err = reduceLaneOpenFailed(&next, command)
 	case LineageAdvanced:
 		err = reduceLineageAdvanced(&next, command)
 	case RetryLane:
@@ -622,6 +626,8 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 		effects, err = reduceSteerFailed(&next, command)
 	case CancelTurn:
 		effects, err = reduceCancelTurn(&next, command)
+	case CancelPendingTurn:
+		effects, err = reduceCancelPendingTurn(&next, command)
 	case RecordCancelReceipt:
 		err = reduceRecordCancelReceipt(&next, command)
 	case RecordAgentWaitObservation:
@@ -1277,29 +1283,6 @@ func reducePromoteStagedQueue(state *State, command PromoteStagedQueue) ([]Effec
 	return drive(state)
 }
 
-func reduceResumeQueue(state *State, command ResumeQueue) ([]Effect, error) {
-	operationID := provider.NormalizeOperationID(string(command.OperationID))
-	if operationID == "" || command.ExpectedRevision == 0 {
-		return nil, errors.New("queue resume requires operation identity and pause revision")
-	}
-	if receipt, exists := state.QueueControl.ResumeReceipts[operationID]; exists {
-		if receipt.PauseRevision != command.ExpectedRevision {
-			return nil, errors.New("queue resume operation id was reused for another pause boundary")
-		}
-		return nil, nil
-	}
-	if _, exists := state.Operations[operationID]; exists {
-		return nil, errors.New("queue resume operation id already belongs to another chat action")
-	}
-	if command.ExpectedRevision != state.QueueControl.Revision {
-		return nil, errors.New("queue pause revision changed before resume")
-	}
-	state.Operations[operationID] = struct{}{}
-	state.QueueControl.ResumeReceipts[operationID] = QueueResumeReceipt{PauseRevision: command.ExpectedRevision}
-	state.QueueControl.Paused = false
-	return drive(state)
-}
-
 func reduceDeleteChat(state *State, command DeleteChat) ([]Effect, error) {
 	operationID := provider.NormalizeOperationID(string(command.OperationID))
 	if operationID == "" {
@@ -1852,13 +1835,13 @@ func canonicalizeCreatingLane(
 	return canonical.ID, lane, nil
 }
 
-func reduceLaneOpenFailed(state *State, command LaneOpenFailed) error {
+func reduceLaneOpenFailed(state *State, command LaneOpenFailed) ([]Effect, error) {
 	lane, ok := state.Lanes[command.LaneID]
 	if !ok {
-		return errors.New("failed lane is unknown")
+		return nil, errors.New("failed lane is unknown")
 	}
 	if lane.Phase != LaneCreating && lane.Phase != LaneResuming && lane.Phase != LaneReconciling {
-		return fmt.Errorf("lane open failed from illegal phase %q", lane.Phase)
+		return nil, fmt.Errorf("lane open failed from illegal phase %q", lane.Phase)
 	}
 	if lane.Thread.IsZero() && lane.Provision == nil {
 		// session/new must return its native id before any prompt can be sent.
@@ -1886,6 +1869,50 @@ func reduceLaneOpenFailed(state *State, command LaneOpenFailed) error {
 		}
 		updateOutbox(state, resumeEffectID(command.LaneID, lane.ConnectionGeneration), status, command.Kind)
 	}
+	if !command.Ambiguous {
+		if err := settleWaitingTurnAfterLaneFailure(state, command.LaneID, command.Kind); err != nil {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
+
+func settleWaitingTurnAfterLaneFailure(state *State, laneID provider.LaneID, kind provider.ErrorKind) error {
+	if state.Foreground != nil {
+		if state.Foreground.LaneID != laneID || state.Foreground.Status != ForegroundDispatching || state.Foreground.Turn.NativeID != "" {
+			return nil
+		}
+		updateOutbox(state, startTurnEffectID(state.Foreground.OperationID), OutboxFailed, kind)
+	} else {
+		index := -1
+		for candidate := range state.Queue {
+			if state.Queue[candidate].LaneID == laneID && strings.TrimSpace(state.Queue[candidate].Presentation.QueueID) == "" {
+				index = candidate
+				break
+			}
+		}
+		if index < 0 {
+			return nil
+		}
+		input := state.Queue[index]
+		state.Queue = append(state.Queue[:index:index], state.Queue[index+1:]...)
+		assistantID := strings.TrimSpace(input.Presentation.AssistantMessageID)
+		if assistantID == "" {
+			assistantID = fmt.Sprintf("message:%s:assistant", input.OperationID)
+		}
+		state.Foreground = &ForegroundTurn{
+			OperationID: input.OperationID, LaneID: input.LaneID, Input: input,
+			Status: ForegroundDispatching, StartedAt: input.Presentation.StartedAt,
+			RootAssistantMessageID: assistantID, CurrentAssistantMessageID: assistantID,
+		}
+	}
+	if err := appendForegroundAdmissionFailure(state, kind); err != nil {
+		return err
+	}
+	settleForegroundObligation(state, "failed", &provider.TerminalEvent{
+		Status: "failed", Error: string(kind), DispositionState: "needs_input", DispositionSource: "inferred",
+	}, 0)
+	state.Foreground = nil
 	return nil
 }
 
@@ -2090,7 +2117,6 @@ func reduceSteerAdmitted(state *State, command SteerAdmitted) error {
 	}
 	state.PendingSteer.Status = SteerAccepted
 	state.PendingSteer.AwaitConsumption = command.AwaitConsumption
-	state.PendingSteer.Interrupted = command.Interrupted
 	updateOutbox(state, steerEffectID(operationID), OutboxAccepted, "")
 	if command.Consumed {
 		return reduceInputConsumed(state, InputConsumed{OperationID: operationID})
@@ -2122,18 +2148,38 @@ func reduceSteerFailed(state *State, command SteerFailed) ([]Effect, error) {
 		return nil, nil
 	}
 	state.PendingSteer = nil
-	// Any definite non-consumption transfers the same immutable operation into
-	// the FIFO. Acceptance ambiguity is handled above and never resends. The
-	// provider adapter owns that classification; chat logic never parses text.
-	foregroundInput := state.Foreground.Input
-	state.Queue = append([]QueueEntry{{
-		OperationID: operationID, LaneID: pending.LaneID, Text: pending.Text,
-		Attachments: append([]provider.Attachment(nil), pending.Attachments...),
-		ModelID:     foregroundInput.ModelID, ModeID: foregroundInput.ModeID, Permission: foregroundInput.Permission,
-		Presentation: pending.Presentation, Revision: state.Revision + 1,
-	}}, state.Queue...)
-	state.Presentation.AgentQueueRevision++
-	updateOutbox(state, steerEffectID(operationID), OutboxCompleted, kind)
+	if pending.Presentation.Origin == "agent" && strings.TrimSpace(pending.Presentation.QueueID) != "" {
+		// Headless chat.send(delivery=steer) already gave this exact input a
+		// durable FIFO identity. A definite native rejection transfers that same
+		// immutable owner into Queue once; it does not manufacture a second row or
+		// alter the active foreground. Human UI steering has no QueueID and takes
+		// the typed rejection path below instead.
+		modelID, modeID, permission := "", "", ""
+		if state.Foreground != nil && state.Foreground.LaneID == pending.LaneID && state.Foreground.Turn == pending.Turn {
+			modelID = state.Foreground.Input.ModelID
+			modeID = state.Foreground.Input.ModeID
+			permission = state.Foreground.Input.Permission
+		}
+		state.Queue = append(state.Queue, QueueEntry{
+			OperationID:  pending.OperationID,
+			LaneID:       pending.LaneID,
+			Text:         pending.Text,
+			Attachments:  append([]provider.Attachment(nil), pending.Attachments...),
+			ModelID:      modelID,
+			ModeID:       modeID,
+			Permission:   permission,
+			Presentation: pending.Presentation,
+			Revision:     state.Revision + 1,
+		})
+		state.Presentation.AgentQueueRevision++
+		updateOutbox(state, steerEffectID(operationID), OutboxCompleted, kind)
+		return drive(state)
+	}
+	// Explicit live-steer intent has no FIFO fallback. A definite rejection
+	// releases the renderer-owned composer input through the typed failed receipt;
+	// only an explicit Submit/queue command may create a queue row. Ambiguity is
+	// handled above and keeps its single durable owner without replay.
+	updateOutbox(state, steerEffectID(operationID), OutboxFailed, kind)
 	return nil, nil
 }
 
@@ -2210,14 +2256,95 @@ func reduceCancelTurn(state *State, command CancelTurn) ([]Effect, error) {
 		return nil, errors.New("foreground turn already has a pending cancellation")
 	}
 	state.Operations[operationID] = struct{}{}
-	state.QueueControl.Paused = true
-	state.QueueControl.Revision++
 	state.PendingCancel = &PendingCancel{
 		OperationID: operationID, LaneID: state.Foreground.LaneID, Turn: state.Foreground.Turn,
 	}
 	return []Effect{CancelTurnEffect{
 		LaneID: state.Foreground.LaneID, OperationID: operationID, Turn: state.Foreground.Turn,
 	}}, nil
+}
+
+func reduceCancelPendingTurn(state *State, command CancelPendingTurn) ([]Effect, error) {
+	operationID := provider.NormalizeOperationID(string(command.OperationID))
+	if operationID == "" {
+		return nil, errors.New("pending cancel requires operation id")
+	}
+	for _, event := range state.Ledger {
+		if event.OperationID == operationID && event.TerminalState == "cancelled_before_admission" {
+			return nil, nil
+		}
+	}
+	var input QueueEntry
+	found := false
+	if state.Foreground != nil && state.Foreground.OperationID == operationID {
+		if state.Foreground.Status != ForegroundDispatching || state.Foreground.Turn.NativeID != "" {
+			return nil, errors.New("pending cancel lost the pre-admission boundary")
+		}
+		input = state.Foreground.Input
+		found = true
+		updateOutbox(state, startTurnEffectID(operationID), OutboxFailed, provider.ErrorAdmissionRejected)
+		lane := state.Lanes[state.Foreground.LaneID]
+		if lane.Phase == LaneRunning {
+			lane.Phase = LaneReady
+			lane.LastError = ""
+			state.Lanes[state.Foreground.LaneID] = lane
+		}
+		settleForegroundObligation(state, "cancelled", &provider.TerminalEvent{Status: "cancelled", StopReason: "cancelled", Interrupted: true}, 0)
+		state.Foreground = nil
+	} else {
+		for index := range state.Queue {
+			if state.Queue[index].OperationID != operationID {
+				continue
+			}
+			input = state.Queue[index]
+			state.Queue = append(state.Queue[:index:index], state.Queue[index+1:]...)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, errors.New("pending cancel does not own a queued or dispatching turn")
+	}
+	if err := appendPreAdmissionCancellation(state, input); err != nil {
+		return nil, err
+	}
+	return drive(state)
+}
+
+func appendPreAdmissionCancellation(state *State, input QueueEntry) error {
+	lane, ok := state.Lanes[input.LaneID]
+	if !ok {
+		return errors.New("pending cancellation belongs to an unknown lane")
+	}
+	userID := strings.TrimSpace(input.Presentation.UserMessageID)
+	if userID == "" {
+		userID = fmt.Sprintf("message:%s:user", input.OperationID)
+	}
+	user := LedgerEvent{
+		EventID: fmt.Sprintf("event:%s:user", input.OperationID), MessageID: userID,
+		Sequence: state.LedgerHead() + 1, Role: "user", Text: input.Text, Status: "done",
+		At: input.Presentation.StartedAt, Attachments: append([]provider.Attachment(nil), input.Attachments...),
+		LaneID: input.LaneID, ProviderID: lane.Identity.Realm.ProviderID, ModelID: input.ModelID,
+		OperationID: input.OperationID, QueueID: strings.TrimSpace(input.Presentation.QueueID),
+		TerminalState: "cancelled_before_admission",
+	}
+	state.Ledger = append(state.Ledger, user)
+	if err := markLedgerExcluded(state, user, input.OperationID); err != nil {
+		return err
+	}
+	assistantID := strings.TrimSpace(input.Presentation.AssistantMessageID)
+	if assistantID == "" {
+		assistantID = fmt.Sprintf("message:%s:assistant", input.OperationID)
+	}
+	terminal := &provider.TerminalEvent{Status: "cancelled", StopReason: "cancelled", Interrupted: true}
+	assistant := LedgerEvent{
+		EventID: fmt.Sprintf("event:%s:assistant:%s", input.OperationID, assistantID), MessageID: assistantID,
+		Sequence: state.LedgerHead() + 1, Role: "assistant", Status: "cancelled", At: input.Presentation.StartedAt,
+		LaneID: input.LaneID, ProviderID: lane.Identity.Realm.ProviderID, ModelID: input.ModelID,
+		OperationID: input.OperationID, TerminalState: "cancelled_before_admission", Interrupted: true, Terminal: terminal,
+	}
+	state.Ledger = append(state.Ledger, assistant)
+	return markLedgerExcluded(state, assistant, input.OperationID)
 }
 
 func reduceRecordCancelReceipt(state *State, command RecordCancelReceipt) error {
@@ -3559,9 +3686,6 @@ func reduceLaneProtocolFailed(state *State, command LaneProtocolFailed) error {
 
 func drive(state *State) ([]Effect, error) {
 	if state.Foreground != nil {
-		return nil, nil
-	}
-	if state.QueueControl.Paused && len(state.Queue) > 0 {
 		return nil, nil
 	}
 	var target provider.LaneID

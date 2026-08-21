@@ -59,12 +59,6 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 			"currentModeId":             nullableDigestString(digest.CurrentModeID),
 			"pendingPermissionIds":      digest.PendingPermissionIDs,
 		}
-		// The heartbeat is size-bounded. An absent gate is the canonical idle
-		// value, so only paused chats pay for these additive fields.
-		if digest.QueuePaused {
-			projected["queuePaused"] = true
-			projected["queuePauseRevision"] = int(digest.QueuePauseRevision)
-		}
 		chats = append(chats, projected)
 	}
 	if catalogHashes == nil {
@@ -359,8 +353,6 @@ func projectActorChatWithHistory(out map[string]any, state chat.State, history a
 		return err
 	}
 	out["queue"] = queue
-	out["queuePaused"] = state.QueueControl.Paused
-	out["queuePauseRevision"] = state.QueueControl.Revision
 	out["pending"] = state.Foreground != nil
 	delete(out, "serverAuthored")
 	delete(out, "liveSession")
@@ -543,6 +535,10 @@ func projectActorMessages(state chat.State, history actorHistoryProjection) ([]a
 // row and lane binding have already been committed by the actor; this function
 // is a pure presentation projection of those bytes.
 func projectReconciledTerminalJob(state chat.State, operationID providercontract.OperationID, turn providercontract.TurnRef) (map[string]any, error) {
+	return projectActorTerminalJob(state, operationID, turn)
+}
+
+func projectActorTerminalJob(state chat.State, operationID providercontract.OperationID, turn providercontract.TurnRef) (map[string]any, error) {
 	var user *chat.LedgerEvent
 	var assistant *chat.LedgerEvent
 	for index := range state.Ledger {
@@ -562,10 +558,10 @@ func projectReconciledTerminalJob(state chat.State, operationID providercontract
 	}
 	terminal := assistant.Terminal
 	lane, ok := state.Lanes[assistant.LaneID]
-	if !ok || lane.Thread.IsZero() {
-		return nil, errors.New("reconciled terminal operation lost its exact provider lane")
+	if !ok {
+		return nil, errors.New("terminal operation lost its exact provider lane")
 	}
-	jobID := firstNonEmptyString(turn.NativeID, assistant.NativeTurnID)
+	jobID := firstNonEmptyString(turn.NativeID, assistant.NativeTurnID, providercontract.DeriveJobID(state.ChatID, operationID))
 	if jobID == "" {
 		return nil, errors.New("reconciled terminal operation is missing its native turn id")
 	}
@@ -600,7 +596,7 @@ func projectReconciledTerminalJob(state chat.State, operationID providercontract
 		"id": jobID, "kind": "app-chat", "key": nil, "title": state.Presentation.Title,
 		"status": jobStatus, "startedAt": startedAt, "finishedAt": finishedAt, "code": code,
 		"permissionMode": "", "chatId": state.ChatID, "tabId": nullableString(state.Presentation.TabID),
-		"sessionId": lane.Thread.HeadID, "providerId": string(lane.Identity.Realm.ProviderID),
+		"sessionId": nullableString(lane.Thread.HeadID), "providerId": string(lane.Identity.Realm.ProviderID),
 		"userMessageId": nullableString(userMessageID), "assistantMessageId": nullableString(assistant.MessageID),
 		"promptText": promptText, "result": nullableString(result), "error": nullableString(terminal.Error),
 		"stopReason": nullableString(terminal.StopReason), "crashInterrupted": terminal.CrashInterrupted,

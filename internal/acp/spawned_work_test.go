@@ -14,6 +14,7 @@ import (
 )
 
 func TestMockClaudeProviderForwardsSpawnedWorkWithoutAgentCooperation(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	manager := NewManager(Options{
 		RootDir: root, StateDir: t.TempDir(), RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour,
@@ -45,6 +46,7 @@ func TestMockClaudeProviderForwardsSpawnedWorkWithoutAgentCooperation(t *testing
 }
 
 func TestMockClaudeProviderKeepsUnnotifiedBackgroundWorkRunningViaOutputOwner(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	manager := NewManager(Options{
 		RootDir: root, StateDir: t.TempDir(), RuntimeProfile: "dev", SpawnedWorkReconcileInterval: 25 * time.Millisecond,
@@ -72,7 +74,8 @@ func TestMockClaudeProviderKeepsUnnotifiedBackgroundWorkRunningViaOutputOwner(t 
 	t.Fatalf("unnotified background work did not reconcile: %#v", manager.ListSpawnedWork("spawn-running-fixture", "chat-spawn-running-fixture"))
 }
 
-func TestClaudeSteerCancelLeavesSpawnedWorkRunning(t *testing.T) {
+func TestRejectedClaudeSteerLeavesForegroundAndSpawnedWorkRunning(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "claude-spawned-work-interrupt", Options{
 		Provider: ProviderConfig{ID: "claude"},
 	})
@@ -99,8 +102,18 @@ func TestClaudeSteerCancelLeavesSpawnedWorkRunning(t *testing.T) {
 		t.Fatalf("background work was not running before steer; job=%#v items=%#v", job, items)
 	}
 	res := manager.Steer(session.SessionID, "redirect parent while background continues", nil, "")
-	if res["interrupted"] != true || res["strategy"] != "interrupt-queue" {
-		t.Fatalf("claude steer fallback = %#v", res)
+	if res["ok"] != false || res["unsupported"] != true || res["queued"] != false || res["interrupted"] == true || res["strategy"] != "unsupported" {
+		t.Fatalf("Claude steer rejection = %#v", res)
+	}
+	if _, running := manager.RunningJobForChat(tabID, chatID); !running {
+		t.Fatal("rejected steer ended the foreground turn")
+	}
+	items = manager.ListSpawnedWork(tabID, chatID)
+	if len(items) != 1 || items[0].Status != "running" {
+		t.Fatalf("rejected steer changed spawned work: %#v", items)
+	}
+	if cancelled := manager.CancelJobResult(jobID(job)); !cancelled.Cancelled {
+		t.Fatalf("explicit cleanup Stop did not cancel foreground turn: %#v", cancelled)
 	}
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 5*time.Second), "failed", 130, "cancelled")
 	deadline = time.Now().Add(4 * time.Second)
@@ -111,10 +124,11 @@ func TestClaudeSteerCancelLeavesSpawnedWorkRunning(t *testing.T) {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("spawned work did not survive steer cancel: %#v", manager.ListSpawnedWork(tabID, chatID))
+	t.Fatalf("spawned work did not survive explicit foreground Stop: %#v", manager.ListSpawnedWork(tabID, chatID))
 }
 
 func TestProductionMockProviderCannotInjectSpawnedWork(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{StateDir: t.TempDir(), RuntimeProfile: "prod", SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	if manager.acceptsProviderSpawnedWork("mock") {
@@ -172,6 +186,7 @@ func spawnedWorkTestOutput(t *testing.T, taskID string) string {
 }
 
 func TestSpawnedWorkPassivelyTracksBackgroundBashAndWritesReceipt(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	output := spawnedWorkTestOutput(t, "bash-1")
 	active := true
@@ -266,6 +281,7 @@ func TestSpawnedWorkPassivelyTracksBackgroundBashAndWritesReceipt(t *testing.T) 
 }
 
 func TestSpawnedWorkFallbackNormalizesSentencePunctuationAndMergesStructuredRecord(t *testing.T) {
+	t.Parallel()
 	const taskID = "b7hm20ecb"
 	output := spawnedWorkTestOutput(t, taskID)
 	manager := NewManager(Options{StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour})
@@ -297,6 +313,7 @@ func TestSpawnedWorkFallbackNormalizesSentencePunctuationAndMergesStructuredReco
 }
 
 func TestSpawnedWorkSnapshotReloadDropsNoncanonicalCacheRow(t *testing.T) {
+	t.Parallel()
 	const taskID = "b7hm20ecb"
 	stateDir := t.TempDir()
 	output := spawnedWorkTestOutput(t, taskID)
@@ -333,6 +350,7 @@ func TestSpawnedWorkSnapshotReloadDropsNoncanonicalCacheRow(t *testing.T) {
 }
 
 func TestSpawnedWorkStructuredAgentWorkflowAndSnapshotLifecycle(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{
 		StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour,
 		SpawnedWorkPIDProbe: func([]string) (map[string][]int, bool) { return nil, false },
@@ -375,6 +393,7 @@ func TestSpawnedWorkStructuredAgentWorkflowAndSnapshotLifecycle(t *testing.T) {
 }
 
 func TestSpawnedWorkRejectsUntrustedOutputPaths(t *testing.T) {
+	t.Parallel()
 	strategy := providerAdapterForID("claude").spawnedWork
 	if _, ok := strategy.ValidateOutputPath("task-1", "/etc/task-1.output"); ok {
 		t.Fatal("accepted output outside Claude temp task directory")
@@ -385,6 +404,7 @@ func TestSpawnedWorkRejectsUntrustedOutputPaths(t *testing.T) {
 }
 
 func TestSpawnedWorkBatchProbeFindsOpenOutputOwner(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "open.output")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -405,6 +425,7 @@ func TestSpawnedWorkBatchProbeFindsOpenOutputOwner(t *testing.T) {
 }
 
 func TestSpawnedWorkRestoredPathlessRecordBecomesOrphanedButLiveSilentRecordStaysRunning(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{
 		RootDir: repoRoot(t), StateDir: t.TempDir(), RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour,
 		Provider: ProviderConfig{ID: "claude"},
@@ -460,6 +481,7 @@ func TestSpawnedWorkRestoredPathlessRecordBecomesOrphanedButLiveSilentRecordStay
 }
 
 func TestTrackedSubagentParentEngineExitDoesNotOrphan(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -474,6 +496,7 @@ func TestTrackedSubagentParentEngineExitDoesNotOrphan(t *testing.T) {
 }
 
 func TestTrackedSubagentReconcileSilenceDoesNotOrphan(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -491,6 +514,7 @@ func TestTrackedSubagentReconcileSilenceDoesNotOrphan(t *testing.T) {
 }
 
 func TestTrackedSubagentSnapshotRestartsAsOrphanedInsteadOfPhantomRunning(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	const tabID = "tab-subagent-restart"
 	const chatID = "chat-subagent-restart"
@@ -538,6 +562,7 @@ func TestTrackedSubagentSnapshotRestartsAsOrphanedInsteadOfPhantomRunning(t *tes
 }
 
 func TestLifecycleSilentPathlessSpawnedWorkRemainsPinnedBeyondTTL(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "echo-prompt", Options{
 		HibernateTTL:                 time.Millisecond,
 		LifecycleCheckInterval:       time.Hour,
@@ -575,6 +600,7 @@ func TestLifecycleSilentPathlessSpawnedWorkRemainsPinnedBeyondTTL(t *testing.T) 
 }
 
 func TestLifecycleRunningSpawnedWorkBlocksIdleTTLHibernation(t *testing.T) {
+	t.Parallel()
 	logs := &spawnedWorkLifecycleLog{}
 	manager, events := newFakeManager(t, "echo-prompt", Options{
 		HibernateTTL:                 time.Millisecond,
@@ -606,6 +632,7 @@ func TestLifecycleRunningSpawnedWorkBlocksIdleTTLHibernation(t *testing.T) {
 }
 
 func TestLifecycleSettledSpawnedWorkAllowsIdleTTLHibernation(t *testing.T) {
+	t.Parallel()
 	manager, events := newFakeManager(t, "echo-prompt", Options{
 		HibernateTTL:                 time.Millisecond,
 		LifecycleCheckInterval:       time.Hour,
@@ -638,6 +665,7 @@ func TestLifecycleSettledSpawnedWorkAllowsIdleTTLHibernation(t *testing.T) {
 }
 
 func TestBridgeCloseOrphansInProcessSpawnedWork(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	manager, _ := newFakeManager(t, "echo-prompt", Options{
 		StateDir:                     stateDir,
@@ -696,6 +724,7 @@ func TestBridgeCloseOrphansInProcessSpawnedWork(t *testing.T) {
 }
 
 func TestCommitSpawnedWorkChangeAdvancesBridgeLastActivity(t *testing.T) {
+	t.Parallel()
 	manager, _ := newFakeManager(t, "echo-prompt", Options{
 		LifecycleCheckInterval:       time.Hour,
 		RSSSampleInterval:            time.Hour,
@@ -724,6 +753,7 @@ func TestCommitSpawnedWorkChangeAdvancesBridgeLastActivity(t *testing.T) {
 }
 
 func TestLifecycleRecycleAtIdleBlockedBySpawnedWork(t *testing.T) {
+	t.Parallel()
 	logs := &spawnedWorkLifecycleLog{}
 	manager, events := newFakeManager(t, "echo-prompt", Options{
 		HibernateTTL:                 time.Hour,
@@ -760,6 +790,7 @@ func TestLifecycleRecycleAtIdleBlockedBySpawnedWork(t *testing.T) {
 }
 
 func TestT1ExternalWorkRegisterDesignatesOutputAndPersistsSnapshot(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	manager := NewManager(Options{StateDir: stateDir, RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
@@ -814,6 +845,7 @@ func TestT1ExternalWorkRegisterDesignatesOutputAndPersistsSnapshot(t *testing.T)
 }
 
 func TestExternalWorkRegistrationIsProviderNeutralAndSettlementSurvivesRestart(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	outputFile := externalWorkTestPath(t, "codex-handoff.output")
 	manager := NewManager(Options{StateDir: stateDir, RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour})
@@ -861,6 +893,7 @@ func TestExternalWorkRegistrationIsProviderNeutralAndSettlementSurvivesRestart(t
 }
 
 func TestProductionMockProviderCannotRegisterExternalWork(t *testing.T) {
+	t.Parallel()
 	manager := NewManager(Options{StateDir: t.TempDir(), RuntimeProfile: "prod", SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	bindExternalWorkOwnerForTest(manager, "owner-prod-mock", "chat-prod-mock", "tab-prod-mock", "mock")
@@ -872,6 +905,7 @@ func TestProductionMockProviderCannotRegisterExternalWork(t *testing.T) {
 }
 
 func TestT2RunningExternalWorkDoesNotPinIdleTTLHibernationButBashStillDoes(t *testing.T) {
+	t.Parallel()
 	logs := &spawnedWorkLifecycleLog{}
 	manager, events := newFakeManager(t, "echo-prompt", Options{
 		HibernateTTL:                 time.Millisecond,
@@ -915,6 +949,7 @@ func TestT2RunningExternalWorkDoesNotPinIdleTTLHibernationButBashStillDoes(t *te
 }
 
 func TestT3ExternalDoneFileSettlesAndWritesRedactedReceiptTail(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	manager := NewManager(Options{StateDir: stateDir, RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
@@ -974,6 +1009,7 @@ func TestT3ExternalDoneFileSettlesAndWritesRedactedReceiptTail(t *testing.T) {
 }
 
 func TestT4ExternalDeadPIDSettlesAfterMissingGrace(t *testing.T) {
+	t.Parallel()
 	deadPID := 99999999
 	if externalPIDAlive(deadPID) {
 		t.Skip("platform reports the test pid alive or unknown")
@@ -1001,6 +1037,7 @@ func TestT4ExternalDeadPIDSettlesAfterMissingGrace(t *testing.T) {
 }
 
 func TestT9ExternalWorkPathValidation(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	if _, ok := validateExternalWorkPath(stateDir, "relative.output"); ok {
 		t.Fatal("accepted relative external path")
@@ -1033,6 +1070,7 @@ func TestT9ExternalWorkPathValidation(t *testing.T) {
 }
 
 func TestT10ExternalSnapshotCapPreservesAllRunningRecords(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	manager := NewManager(Options{StateDir: stateDir, RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
@@ -1070,6 +1108,7 @@ func TestT10ExternalSnapshotCapPreservesAllRunningRecords(t *testing.T) {
 }
 
 func TestT11ExternalWorkPublicPayloadsRedactSecretShapedOutputPath(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	manager := NewManager(Options{StateDir: stateDir, RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })

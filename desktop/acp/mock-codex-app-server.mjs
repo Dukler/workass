@@ -186,6 +186,19 @@ async function handle(message) {
   }
   if (method === 'turn/start') return void runTurn(id, params).catch((error) => write({ id, error: { code: -32603, message: error.message } }));
   if (method === 'turn/steer') {
+    if (process.env.WORKASS_CODEX_FIXTURE_STEER_REJECTION === 'active-turn-not-steerable') {
+      return write({
+        id,
+        error: {
+          code: -32000,
+          message: 'active turn does not accept steering',
+          data: { codexErrorInfo: { activeTurnNotSteerable: { turnKind: 'review' } } },
+        },
+      });
+    }
+    if (process.env.WORKASS_CODEX_FIXTURE_STEER_REJECTION === 'no-active-turn') {
+      return write({ id, error: { code: -32000, message: 'no active turn' } });
+    }
     respond(id, { turnId: activeTurn });
     notify('item/started', {
       threadId: params.threadId, turnId: activeTurn, startedAtMs: Date.now(),

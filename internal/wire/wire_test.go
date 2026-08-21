@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -107,6 +108,75 @@ func TestInvokeReplyRoundTrip(t *testing.T) {
 	result, ok := reply.Result.(map[string]any)
 	if !ok || result["name"] != "workass" || result["daemon"] != true {
 		t.Fatalf("result = %#v", reply.Result)
+	}
+}
+
+func TestReplyActionWritesFrozenReplyBeforePublishingProviderEvents(t *testing.T) {
+	hub := NewHub()
+	hub.Register("job:start", func([]any) (any, error) {
+		return ReplyThen(map[string]any{"id": "job-1", "status": "running"}, func() {
+			hub.Broadcast("job:event", map[string]any{"type": "start", "id": "job-1"})
+		}), nil
+	})
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+	client := dialWS(t, server.URL, "cmVwbHktYWN0aW9uLW9yZGVy")
+	defer client.conn.Close()
+
+	client.sendText(t, `{"t":"invoke","id":41,"channel":"job:start","args":[]}`)
+	if got, want := string(client.readText(t)), `{"t":"reply","id":41,"result":{"id":"job-1","status":"running"},"error":null}`; got != want {
+		t.Fatalf("reply bytes = %s, want %s", got, want)
+	}
+	event := readEvent(t, client)
+	if event.Channel != "job:event" || event.Payload["type"] != "start" || event.Payload["id"] != "job-1" {
+		t.Fatalf("post-reply provider event = %+v", event)
+	}
+}
+
+func TestReplyActionRunsOnceAfterFailedReplyAttempt(t *testing.T) {
+	hub := NewHub()
+	var calls atomic.Int32
+	called := make(chan struct{})
+	hub.Register("job:start", func([]any) (any, error) {
+		return ReplyThen(map[string]any{"id": "lost-reply-job"}, func() {
+			if calls.Add(1) == 1 {
+				close(called)
+			}
+		}), nil
+	})
+	serverConn, peerConn := net.Pipe()
+	defer peerConn.Close()
+	client := addDirectClientWithoutWriter(t, hub, serverConn)
+	for i := 0; i < outboundQueueFrameLimit; i++ {
+		if err := client.enqueue([]byte("blocked")); err != nil {
+			t.Fatalf("fill reply queue %d: %v", i, err)
+		}
+	}
+
+	hub.handleInvoke(client, invokeMessage{ID: json.Number("42"), Channel: "job:start"})
+	waitForClosed(t, called, "lost-reply durable dispatch")
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("lost-reply dispatch calls = %d, want 1", got)
+	}
+}
+
+func TestDirectInvokeUnwrapsReplyActionAndDispatchesOnce(t *testing.T) {
+	hub := NewHub()
+	var calls atomic.Int32
+	hub.Register("job:start", func([]any) (any, error) {
+		return ReplyThen(map[string]any{"id": "direct-job"}, func() { calls.Add(1) }), nil
+	})
+
+	result, err := hub.Invoke("job:start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, ok := result.(map[string]any)
+	if !ok || job["id"] != "direct-job" {
+		t.Fatalf("direct result = %#v", result)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("direct dispatch calls = %d, want 1", got)
 	}
 }
 
@@ -834,6 +904,83 @@ func readReply(t *testing.T, client *testWSClient) decodedReply {
 	return reply
 }
 
+func waitForHubClient(t *testing.T, hub *Hub, deviceID, purpose string) *client {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		hub.mu.RLock()
+		var found *client
+		for candidate := range hub.clients {
+			device, ok := candidate.deviceSnapshot()
+			if ok && device.ID == deviceID && candidate.purpose == purpose {
+				found = candidate
+				break
+			}
+		}
+		hub.mu.RUnlock()
+		if found != nil {
+			return found
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("hub client device=%q purpose=%q did not connect", deviceID, purpose)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitForHubClientCount(t *testing.T, hub *Hub, deviceID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		got := 0
+		hub.mu.RLock()
+		for candidate := range hub.clients {
+			device, ok := candidate.deviceSnapshot()
+			if ok && device.ID == deviceID {
+				got++
+			}
+		}
+		hub.mu.RUnlock()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("hub clients for device %q = %d, want %d", deviceID, got, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func assertNoSocketData(t *testing.T, client *testWSClient, wait time.Duration, message string) {
+	t.Helper()
+	if err := client.conn.SetReadDeadline(time.Now().Add(wait)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	_, err := client.reader.Peek(1)
+	_ = client.conn.SetReadDeadline(time.Time{})
+	if err == nil {
+		t.Fatal(message)
+	}
+	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("%s: unexpected read error: %v", message, err)
+	}
+}
+
+func assertSocketClosed(t *testing.T, client *testWSClient, message string) {
+	t.Helper()
+	if err := client.conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set close read deadline: %v", err)
+	}
+	_, err := client.reader.Peek(1)
+	_ = client.conn.SetReadDeadline(time.Time{})
+	if err == nil {
+		t.Fatal(message)
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatal(message)
+	}
+}
+
 func maskedFrame(opcode byte, fin bool, payload []byte) []byte {
 	b0 := opcode
 	if fin {
@@ -900,6 +1047,501 @@ func TestSnapshotScaleInvokeReplyIsDelivered(t *testing.T) {
 	blob, _ := result["blob"].(string)
 	if len(blob) != len(payload) {
 		t.Fatalf("blob len = %d, want %d", len(blob), len(payload))
+	}
+}
+
+func TestAuxiliarySocketsIsolateBulkReplayAndUrgentCancel(t *testing.T) {
+	manager, _, _ := testLeaseManager(t)
+	deviceA, tokenA, err := manager.ApproveDevice("controller-a", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve controller A: %v", err)
+	}
+	deviceB, tokenB, err := manager.ApproveDevice("controller-b", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve controller B: %v", err)
+	}
+	manager.EnsureController(deviceA)
+
+	const blobBytes = 20 << 20
+	bulk := make(RawResult, len(`{"blob":""}`)+blobBytes)
+	n := copy(bulk, `{"blob":"`)
+	for i := 0; i < blobBytes; i++ {
+		bulk[n+i] = 'x'
+	}
+	copy(bulk[n+blobBytes:], `"}`)
+
+	steerEntered := make(chan struct{})
+	steerRelease := make(chan struct{})
+	hub := NewHub(Options{Lease: manager, TrustLocalhost: false})
+	hub.Register("session:get", func([]any) (any, error) { return bulk, nil })
+	hub.Register("chat:create", func([]any) (any, error) { return map[string]any{"ok": true}, nil })
+	hub.Register("chat:queue-replace", func([]any) (any, error) { return map[string]any{"ok": true}, nil })
+	hub.Register("app-chat:steer", func([]any) (any, error) {
+		close(steerEntered)
+		<-steerRelease
+		return map[string]any{"accepted": true, "turnId": "turn-steer"}, nil
+	})
+	hub.Register("job:cancel", func([]any) (any, error) { return map[string]any{"ok": true}, nil })
+	var replayEnabled atomic.Bool
+	hub.SetOnControllerReady(func(send func(channel string, payload any) error) {
+		if replayEnabled.Load() {
+			_ = send("chat:permission-request", map[string]any{"id": "pending-after-takeover"})
+		}
+	})
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+
+	primaryA := dialWSPath(t, server.URL, "/?deviceToken="+tokenA+"&connectionGroup=bulk-a", "YXV4LWJ1bGstcHJpbWFyeS1h")
+	defer primaryA.conn.Close()
+	if approved := readEvent(t, primaryA); approved.Channel != "lan:access-state" || approved.Payload["controller"] != true {
+		t.Fatalf("primary A access = %+v", approved)
+	}
+	primaryB := dialWSPath(t, server.URL, "/?deviceToken="+tokenB+"&connectionGroup=bulk-b", "YXV4LWJ1bGstcHJpbWFyeS1i")
+	defer primaryB.conn.Close()
+	if approved := readEvent(t, primaryB); approved.Channel != "lan:access-state" || approved.Payload["controller"] != false {
+		t.Fatalf("primary B access = %+v", approved)
+	}
+	controlB := dialWSPath(t, server.URL, "/?deviceToken="+tokenB+"&purpose=control&connectionGroup=bulk-b", "YXV4LWJ1bGstY29udHJvbC1i")
+	defer controlB.conn.Close()
+	if approved := readEvent(t, controlB); approved.Channel != "lan:access-state" || approved.Payload["state"] != "approved" {
+		t.Fatalf("control B access = %+v", approved)
+	}
+	urgentB := dialWSPath(t, server.URL, "/?deviceToken="+tokenB+"&purpose=urgent&connectionGroup=bulk-b", "YXV4LWJ1bGstdXJnZW50LWI=")
+	defer urgentB.conn.Close()
+	if approved := readEvent(t, urgentB); approved.Channel != "lan:access-state" || approved.Payload["state"] != "approved" {
+		t.Fatalf("urgent B access = %+v", approved)
+	}
+
+	serverPrimary := waitForHubClient(t, hub, deviceB.ID, "")
+	serverControl := waitForHubClient(t, hub, deviceB.ID, "control")
+	serverUrgent := waitForHubClient(t, hub, deviceB.ID, "urgent")
+	if serverPrimary.conn == serverControl.conn || serverPrimary.conn == serverUrgent.conn || serverControl.conn == serverUrgent.conn {
+		t.Fatal("primary, control, and urgent lanes must use distinct physical connections")
+	}
+	if tcp, ok := primaryB.conn.(*net.TCPConn); ok {
+		if err := tcp.SetReadBuffer(1024); err != nil {
+			t.Fatalf("shrink primary receive buffer: %v", err)
+		}
+	}
+
+	// Stop reading the primary after dispatch. The server writer must become
+	// physically blocked in the 20 MiB reply while both auxiliary lanes remain
+	// independently writable.
+	sendInvoke(t, primaryB, 1, "session:get")
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		frames, queuedBytes := serverPrimary.outboundSnapshot()
+		if frames == 0 && queuedBytes > blobBytes {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("primary writer did not block in bulk reply; frames=%d bytes=%d", frames, queuedBytes)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	replayEnabled.Store(true)
+	sendInvoke(t, controlB, 2, "chat:create", map[string]any{"chatId": "bulk-isolation"})
+	if reply := readReply(t, controlB); reply.Error != nil {
+		t.Fatalf("control create behind bulk = %+v", reply)
+	}
+	if controller, ok := manager.Controller(); !ok || controller.ID != deviceB.ID {
+		t.Fatalf("control mutation did not move lease to B: controller=%+v ok=%v", controller, ok)
+	}
+	// Controller-change replay targets B's blocked primary. It must not occupy
+	// the control handler, so a second ordered control mutation still replies.
+	sendInvoke(t, controlB, 3, "chat:queue-replace", map[string]any{"chatId": "bulk-isolation", "queue": []any{}})
+	if reply := readReply(t, controlB); reply.Error != nil {
+		t.Fatalf("second control reply while primary replay blocked = %+v", reply)
+	}
+
+	if reply := readReply(t, primaryB); reply.Error != nil || reply.ID.String() != "1" {
+		t.Fatalf("bulk reply after release = %+v", reply)
+	}
+	changed := readEvent(t, primaryB)
+	if changed.Channel != "lan:controller-changed" || changed.Payload["deviceId"] != deviceB.ID {
+		t.Fatalf("controller change after bulk = %+v", changed)
+	}
+	replay := readEvent(t, primaryB)
+	if replay.Channel != "chat:permission-request" || replay.Payload["id"] != "pending-after-takeover" {
+		t.Fatalf("controller replay after bulk = %+v", replay)
+	}
+
+	hub.Broadcast("job:event", map[string]any{"jobId": "projection-only", "type": "data"})
+	if event := readEvent(t, primaryB); event.Channel != "job:event" || event.Payload["jobId"] != "projection-only" {
+		t.Fatalf("primary projection event = %+v", event)
+	}
+	assertNoSocketData(t, controlB, 100*time.Millisecond, "control received projection event")
+	assertNoSocketData(t, urgentB, 100*time.Millisecond, "urgent received projection event")
+
+	sendInvoke(t, controlB, 4, "app-chat:steer", map[string]any{"sessionId": "session-b", "prompt": "probe"})
+	select {
+	case <-steerEntered:
+	case <-time.After(time.Second):
+		t.Fatal("control steer handler did not start")
+	}
+	sendInvoke(t, urgentB, 5, "job:cancel", map[string]any{"id": "turn-steer"})
+	if reply := readReply(t, urgentB); reply.Error != nil || reply.ID.String() != "5" {
+		t.Fatalf("urgent cancel behind blocked steer = %+v", reply)
+	}
+	close(steerRelease)
+	if reply := readReply(t, controlB); reply.Error != nil || reply.ID.String() != "4" {
+		t.Fatalf("steer reply after release = %+v", reply)
+	}
+}
+
+func TestAuxiliaryRequiresPrimaryAndUsesClosedRoleAllowlists(t *testing.T) {
+	manager, _, _ := testLeaseManager(t)
+	device, token, err := manager.ApproveDevice("role-device", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve role device: %v", err)
+	}
+	hub := NewHub(Options{Lease: manager, TrustLocalhost: false})
+	hub.Register("job:start", func([]any) (any, error) { return map[string]any{"id": "job"}, nil })
+	hub.Register("job:cancel", func([]any) (any, error) { return map[string]any{"ok": true}, nil })
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+
+	orphan := dialWSPath(t, server.URL, "/?deviceToken="+token+"&purpose=control&connectionGroup=orphan", "b3JwaGFuLWF1eA==")
+	defer orphan.conn.Close()
+	if event := readEvent(t, orphan); event.Channel != "lan:access-state" || event.Payload["state"] != "rejected" || event.Payload["reason"] != "auxiliary-primary-required" {
+		t.Fatalf("orphan auxiliary access = %+v", event)
+	}
+
+	primary := dialWSPath(t, server.URL, "/?deviceToken="+token+"&connectionGroup=role", "cm9sZS1wcmltYXJ5")
+	defer primary.conn.Close()
+	_ = readEvent(t, primary)
+	mismatched := dialWSPath(t, server.URL, "/?deviceToken="+token+"&purpose=control&connectionGroup=other-role", "cm9sZS1taXNtYXRjaA==")
+	defer mismatched.conn.Close()
+	if event := readEvent(t, mismatched); event.Channel != "lan:access-state" || event.Payload["state"] != "rejected" || event.Payload["reason"] != "auxiliary-primary-required" {
+		t.Fatalf("mismatched group access = %+v", event)
+	}
+	control := dialWSPath(t, server.URL, "/?deviceToken="+token+"&purpose=control&connectionGroup=role", "cm9sZS1jb250cm9s")
+	defer control.conn.Close()
+	_ = readEvent(t, control)
+	urgent := dialWSPath(t, server.URL, "/?deviceToken="+token+"&purpose=urgent&connectionGroup=role", "cm9sZS11cmdlbnQ=")
+	defer urgent.conn.Close()
+	_ = readEvent(t, urgent)
+
+	sendInvoke(t, control, 1, "job:cancel", map[string]any{"id": "x"})
+	if reply := readReply(t, control); reply.Error == nil || !strings.Contains(*reply.Error, `"code":"lan:auxiliary-channel"`) {
+		t.Fatalf("job:cancel on control = %+v", reply)
+	}
+	sendInvoke(t, urgent, 2, "job:start", map[string]any{"id": "x"})
+	if reply := readReply(t, urgent); reply.Error == nil || !strings.Contains(*reply.Error, `"code":"lan:auxiliary-channel"`) {
+		t.Fatalf("job:start on urgent = %+v", reply)
+	}
+	if got := waitForHubClient(t, hub, device.ID, "control"); got == nil {
+		t.Fatal("control lane disappeared after rejected channel")
+	}
+}
+
+func TestReplacementPrimaryPreservesCurrentAuxiliaryUntilLastPrimaryDrops(t *testing.T) {
+	manager, _, _ := testLeaseManager(t)
+	device, token, err := manager.ApproveDevice("replacement-device", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve device: %v", err)
+	}
+	hub := NewHub(Options{Lease: manager, TrustLocalhost: false})
+	hub.Register("chat:create", func([]any) (any, error) { return map[string]any{"ok": true}, nil })
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+
+	primary1 := dialWSPath(t, server.URL, "/?deviceToken="+token+"&connectionGroup=replace-one", "cmVwbGFjZS1wcmltYXJ5LTE=")
+	_ = readEvent(t, primary1)
+	aux1 := dialWSPath(t, server.URL, "/?deviceToken="+token+"&purpose=control&connectionGroup=replace-one", "cmVwbGFjZS1hdXgtMQ==")
+	_ = readEvent(t, aux1)
+	primary2 := dialWSPath(t, server.URL, "/?deviceToken="+token+"&connectionGroup=replace-two", "cmVwbGFjZS1wcmltYXJ5LTI=")
+	defer primary2.conn.Close()
+	_ = readEvent(t, primary2)
+	aux2 := dialWSPath(t, server.URL, "/?deviceToken="+token+"&purpose=control&connectionGroup=replace-two", "cmVwbGFjZS1hdXgtMg==")
+	defer aux2.conn.Close()
+	_ = readEvent(t, aux2)
+
+	_ = primary1.conn.Close()
+	waitForHubClientCount(t, hub, device.ID, 2) // replacement primary + current control
+	sendInvoke(t, aux2, 1, "chat:create", map[string]any{"chatId": "after-overlap"})
+	if reply := readReply(t, aux2); reply.Error != nil {
+		t.Fatalf("current auxiliary after old-primary drop = %+v", reply)
+	}
+
+	_ = primary2.conn.Close()
+	waitForHubClientCount(t, hub, device.ID, 0)
+	assertSocketClosed(t, aux2, "current auxiliary survived last-primary drop")
+	_ = aux1.conn.Close()
+}
+
+func TestCurrentPrimaryDropFencesItsGroupWhileOlderPrimaryLingers(t *testing.T) {
+	manager, _, _ := testLeaseManager(t)
+	device, token, err := manager.ApproveDevice("group-device", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve device: %v", err)
+	}
+	hub := NewHub(Options{Lease: manager, TrustLocalhost: false})
+	hub.Register("chat:create", func([]any) (any, error) { return map[string]any{"ok": true}, nil })
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+
+	primary1 := dialWSPath(t, server.URL, "/?deviceToken="+token+"&connectionGroup=older", "Z3JvdXAtcHJpbWFyeS0x")
+	defer primary1.conn.Close()
+	_ = readEvent(t, primary1)
+	aux1 := dialWSPath(t, server.URL, "/?deviceToken="+token+"&purpose=control&connectionGroup=older", "Z3JvdXAtYXV4LTE=")
+	defer aux1.conn.Close()
+	_ = readEvent(t, aux1)
+	primary2 := dialWSPath(t, server.URL, "/?deviceToken="+token+"&connectionGroup=current", "Z3JvdXAtcHJpbWFyeS0y")
+	_ = readEvent(t, primary2)
+	aux2 := dialWSPath(t, server.URL, "/?deviceToken="+token+"&purpose=control&connectionGroup=current", "Z3JvdXAtYXV4LTI=")
+	defer aux2.conn.Close()
+	_ = readEvent(t, aux2)
+
+	_ = primary2.conn.Close()
+	waitForHubClientCount(t, hub, device.ID, 2) // older primary + its exact auxiliary
+	assertSocketClosed(t, aux2, "current-group auxiliary survived its primary")
+	sendInvoke(t, aux1, 1, "chat:create", map[string]any{"chatId": "older-still-live"})
+	if reply := readReply(t, aux1); reply.Error != nil {
+		t.Fatalf("older exact-group auxiliary after current drop = %+v", reply)
+	}
+}
+
+func TestPrimaryDropAfterAuxAdmissionDoesNotReacquireController(t *testing.T) {
+	manager, _, _ := testLeaseManager(t)
+	deviceA, tokenA, err := manager.ApproveDevice("fence-a", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve A: %v", err)
+	}
+	deviceB, tokenB, err := manager.ApproveDevice("fence-b", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve B: %v", err)
+	}
+	manager.EnsureController(deviceA)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	hub := NewHub(Options{Lease: manager, TrustLocalhost: false})
+	hub.Register("app-chat:steer", func([]any) (any, error) {
+		close(entered)
+		<-release
+		return map[string]any{"accepted": true, "turnId": "admitted-before-drop"}, nil
+	})
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+	primaryA := dialWSPath(t, server.URL, "/?deviceToken="+tokenA+"&connectionGroup=fence-a", "ZmVuY2UtcHJpbWFyeS1h")
+	defer primaryA.conn.Close()
+	_ = readEvent(t, primaryA)
+	primaryB := dialWSPath(t, server.URL, "/?deviceToken="+tokenB+"&connectionGroup=fence-b", "ZmVuY2UtcHJpbWFyeS1i")
+	_ = readEvent(t, primaryB)
+	controlB := dialWSPath(t, server.URL, "/?deviceToken="+tokenB+"&purpose=control&connectionGroup=fence-b", "ZmVuY2UtY29udHJvbC1i")
+	defer controlB.conn.Close()
+	_ = readEvent(t, controlB)
+	serverControl := waitForHubClient(t, hub, deviceB.ID, "control")
+
+	invokeDone := make(chan error, 1)
+	go func() {
+		_, invokeErr := hub.invokeForClient(serverControl, "app-chat:steer", []any{map[string]any{"sessionId": "session-b", "prompt": "admit"}})
+		invokeDone <- invokeErr
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("auxiliary mutation did not reach admitted handler")
+	}
+	if controller, ok := manager.Controller(); !ok || controller.ID != deviceB.ID {
+		t.Fatalf("auxiliary admission did not take lease: controller=%+v ok=%v", controller, ok)
+	}
+	_ = primaryB.conn.Close()
+	waitForHubClientCount(t, hub, deviceB.ID, 0)
+	if controller, ok := manager.Controller(); ok && controller.ID == deviceB.ID {
+		t.Fatalf("last-primary drop retained B controller: %+v", controller)
+	}
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case invokeErr := <-invokeDone:
+		if invokeErr != nil {
+			t.Fatalf("admitted auxiliary invoke returned an error: %v", invokeErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("admitted auxiliary invoke did not return after release")
+	}
+	if controller, ok := manager.Controller(); ok && controller.ID == deviceB.ID {
+		t.Fatalf("admitted handler reacquired B controller after projection drop: %+v", controller)
+	}
+	if serverControl.tookControl.Swap(false) {
+		hub.announceCurrentController(serverControl, deviceB)
+	}
+	assertNoSocketData(t, primaryA, 100*time.Millisecond, "stale auxiliary announced controller after primary drop")
+}
+
+func TestRevokeFencesEveryOpenSocketForDevice(t *testing.T) {
+	manager, _, _ := testLeaseManager(t)
+	_, controllerToken, err := manager.ApproveDevice("revoking-controller", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve controller: %v", err)
+	}
+	revoked, revokedToken, err := manager.ApproveDevice("revoked-device", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve revoked device: %v", err)
+	}
+	const blobBytes = 20 << 20
+	bulk := make(RawResult, len(`{"blob":""}`)+blobBytes)
+	n := copy(bulk, `{"blob":"`)
+	for i := 0; i < blobBytes; i++ {
+		bulk[n+i] = 'r'
+	}
+	copy(bulk[n+blobBytes:], `"}`)
+	hub := NewHub(Options{Lease: manager, TrustLocalhost: false})
+	hub.Register("session:get", func([]any) (any, error) { return bulk, nil })
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+
+	controller := dialWSPath(t, server.URL, "/?deviceToken="+controllerToken, "cmV2b2tlLWNvbnRyb2xsZXI=")
+	defer controller.conn.Close()
+	_ = readEvent(t, controller)
+	primary := dialWSPath(t, server.URL, "/?deviceToken="+revokedToken+"&connectionGroup=revoke", "cmV2b2tlLXByaW1hcnk=")
+	_ = readEvent(t, primary)
+	control := dialWSPath(t, server.URL, "/?deviceToken="+revokedToken+"&purpose=control&connectionGroup=revoke", "cmV2b2tlLWNvbnRyb2w=")
+	_ = readEvent(t, control)
+	urgent := dialWSPath(t, server.URL, "/?deviceToken="+revokedToken+"&purpose=urgent&connectionGroup=revoke", "cmV2b2tlLXVyZ2VudA==")
+	_ = readEvent(t, urgent)
+	serverPrimary := waitForHubClient(t, hub, revoked.ID, "")
+	if tcp, ok := primary.conn.(*net.TCPConn); ok {
+		if err := tcp.SetReadBuffer(1024); err != nil {
+			t.Fatalf("shrink revoked primary receive buffer: %v", err)
+		}
+	}
+	sendInvoke(t, primary, 99, "session:get")
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		frames, queuedBytes := serverPrimary.outboundSnapshot()
+		if frames == 0 && queuedBytes > blobBytes {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("revoked primary writer did not block in bulk reply; frames=%d bytes=%d", frames, queuedBytes)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	sendInvoke(t, controller, 1, "lan:revoke", map[string]any{"deviceId": revoked.ID})
+	if reply := readReply(t, controller); reply.Error != nil || reply.Result.(map[string]any)["ok"] != true {
+		t.Fatalf("revoke reply = %+v", reply)
+	}
+	waitForHubClientCount(t, hub, revoked.ID, 0)
+	if event := readEvent(t, control); event.Channel != "lan:access-state" || event.Payload["state"] != "rejected" || event.Payload["reason"] != "revoked" {
+		t.Fatalf("revoked control notice = %+v", event)
+	}
+	if event := readEvent(t, urgent); event.Channel != "lan:access-state" || event.Payload["state"] != "rejected" || event.Payload["reason"] != "revoked" {
+		t.Fatalf("revoked urgent notice = %+v", event)
+	}
+	select {
+	case <-serverPrimary.done:
+	case <-time.After(time.Second):
+		t.Fatal("revoked bulk-blocked primary was not boundedly closed")
+	}
+	_ = primary.conn.Close()
+	assertSocketClosed(t, control, "revoked control remained open")
+	assertSocketClosed(t, urgent, "revoked urgent remained open")
+}
+
+func TestActorMutationsMoveControllerLeaseBehaviorally(t *testing.T) {
+	manager, _, _ := testLeaseManager(t)
+	deviceA, tokenA, err := manager.ApproveDevice("mutation-a", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve A: %v", err)
+	}
+	deviceB, tokenB, err := manager.ApproveDevice("mutation-b", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve B: %v", err)
+	}
+	manager.EnsureController(deviceA)
+	hub := NewHub(Options{Lease: manager, TrustLocalhost: false})
+	channels := []string{"chat:create", "chat:queue-replace", "chat:presentation-save", "chat:runtime-controls-save", "chat:delete"}
+	var calls atomic.Int32
+	for _, channel := range channels {
+		hub.Register(channel, func([]any) (any, error) {
+			calls.Add(1)
+			return map[string]any{"ok": true}, nil
+		})
+	}
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+	primaryA := dialWSPath(t, server.URL, "/?deviceToken="+tokenA, "bXV0YXRpb24tYQ==")
+	defer primaryA.conn.Close()
+	_ = readEvent(t, primaryA)
+	primaryB := dialWSPath(t, server.URL, "/?deviceToken="+tokenB, "bXV0YXRpb24tYg==")
+	defer primaryB.conn.Close()
+	_ = readEvent(t, primaryB)
+
+	for i, channel := range channels {
+		manager.TakeControl(deviceA)
+		sendInvoke(t, primaryB, i+1, channel, map[string]any{"chatId": "lease-test"})
+		reply, _ := readReplyFor(t, primaryB, i+1)
+		if reply.Error != nil {
+			t.Fatalf("%s reply = %+v", channel, reply)
+		}
+		if controller, ok := manager.Controller(); !ok || controller.ID != deviceB.ID {
+			t.Fatalf("%s did not move lease to B: controller=%+v ok=%v", channel, controller, ok)
+		}
+	}
+	if got := calls.Load(); got != int32(len(channels)) {
+		t.Fatalf("mutation handler calls = %d, want %d", got, len(channels))
+	}
+}
+
+func TestAuxiliaryControllerReplayTargetsExactGroupAndRereadsLease(t *testing.T) {
+	manager, _, _ := testLeaseManager(t)
+	device, _, err := manager.ApproveDevice("same-device", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve same device: %v", err)
+	}
+	manager.EnsureController(device)
+	hub := NewHub(Options{Lease: manager, TrustLocalhost: false})
+	hub.SetOnControllerReady(func(send func(channel string, payload any) error) {
+		_ = send("chat:permission-request", map[string]any{"id": "exact-group-replay"})
+	})
+	serverOne, peerOne := net.Pipe()
+	primaryOne := addApprovedDirectClient(hub, serverOne, device)
+	primaryOne.connectionGroup = "group-one"
+	defer hub.drop(primaryOne)
+	defer peerOne.Close()
+	serverTwo, peerTwo := net.Pipe()
+	primaryTwo := addApprovedDirectClient(hub, serverTwo, device)
+	primaryTwo.connectionGroup = "group-two"
+	defer hub.drop(primaryTwo)
+	defer peerTwo.Close()
+	readerOne := &testWSClient{conn: peerOne, reader: bufio.NewReader(peerOne)}
+	readerTwo := &testWSClient{conn: peerTwo, reader: bufio.NewReader(peerTwo)}
+	source := &client{purpose: "control", connectionGroup: "group-two"}
+	source.setDevice(device, "")
+
+	hub.announceCurrentController(source, device)
+	if event := readEvent(t, readerOne); event.Channel != "lan:controller-changed" || event.Payload["deviceId"] != device.ID {
+		t.Fatalf("group one controller event = %+v", event)
+	}
+	if event := readEvent(t, readerTwo); event.Channel != "lan:controller-changed" || event.Payload["deviceId"] != device.ID {
+		t.Fatalf("group two controller event = %+v", event)
+	}
+	if replay := readEvent(t, readerTwo); replay.Channel != "chat:permission-request" || replay.Payload["id"] != "exact-group-replay" {
+		t.Fatalf("exact-group replay = %+v", replay)
+	}
+	assertNoSocketData(t, readerOne, 100*time.Millisecond, "controller replay leaked to another same-device group")
+
+	other, _, err := manager.ApproveDevice("newer-controller", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("approve newer controller: %v", err)
+	}
+	serverOther, peerOther := net.Pipe()
+	primaryOther := addApprovedDirectClient(hub, serverOther, other)
+	primaryOther.connectionGroup = "group-other"
+	defer hub.drop(primaryOther)
+	defer peerOther.Close()
+	readerOther := &testWSClient{conn: peerOther, reader: bufio.NewReader(peerOther)}
+	manager.TakeControl(other)
+	// This is the delayed old-device goroutine shape: its captured acted device
+	// is stale, so publication must resolve and announce the actual newer lease.
+	hub.announceCurrentController(source, device)
+	if event := readEvent(t, readerOther); event.Channel != "lan:controller-changed" || event.Payload["deviceId"] != other.ID {
+		t.Fatalf("delayed announcement did not reread newer lease = %+v", event)
 	}
 }
 

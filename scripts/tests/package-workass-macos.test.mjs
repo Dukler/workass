@@ -16,14 +16,15 @@ test('macOS package keeps both bundle and runtime Dock icon resources', () => {
   assert.match(script, /app-icon\.js/);
 });
 
-test('macOS package includes every standalone shell safety module', () => {
+test('macOS package includes every standalone shell safety module without rerunning their gate', () => {
   assert.match(script, /for shell_file in[^\n]*image-copy\.js/);
   assert.match(script, /for shell_file in[^\n]*profile-singleton\.js/);
   assert.match(script, /for shell_file in[^\n]*update-lock-recovery\.js/);
-  assert.match(script, /desktop\/shell\/image-copy\.test\.js/);
-  assert.match(script, /desktop\/shell\/profile-singleton\.test\.js/);
+  assert.match(script, /for shell_file in[^\n]*update-progress\.js/);
   assert.match(script, /for shell_file in[^\n]*update-manager\.js/);
   assert.match(script, /for shell_file in[^\n]*update-worker\.js/);
+  assert.doesNotMatch(script, /desktop\/shell\/[^\s]+\.test\.js/);
+  assert.match(script, /node --test scripts\/tests\/package-workass-macos\.test\.mjs/);
 });
 
 test('an explicit package activation carries one controller recovery attempt', () => {
@@ -159,9 +160,10 @@ test('candidate building fails fast on missing tools and produces a complete sou
   const toolCheck = script.indexOf('missing build tool before package gate');
   const gate = script.indexOf('[package] repository gate');
   assert.ok(toolCheck >= 0 && toolCheck < gate, 'toolchain check must happen before the slow gate');
-  const packageContracts = script.indexOf('[package] testing shell, installer, signing, and profile isolation');
+  const packageContracts = script.indexOf('[package] testing installer, signing, and package contracts');
   assert.ok(packageContracts >= 0 && packageContracts < gate, 'fast package contracts must happen before the slow gate');
   assert.match(script, /if \[ "\$runtime_input_root" = "\$repo_root\/dist-bin" \]; then/);
+  assert.match(script, /WORKASS_GATE_FRESH=1[\s\S]{0,80}scripts\/gate\.sh/);
   assert.doesNotMatch(script, /if \[ -z "\$artifact_output" \] && \[ "\$runtime_input_root" = "\$repo_root\/dist-bin" \]/);
   assert.match(script, /"\$repo_root\/scripts\/install-workass-macos\.sh" "\$@"/);
 });

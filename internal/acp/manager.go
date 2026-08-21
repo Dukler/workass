@@ -1126,10 +1126,15 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 	opts.ProviderID = providerID
 
 	now := time.Now().UTC()
-	m.mu.Lock()
-	m.jobSeq++
-	id := fmt.Sprintf("app-chat-%d-%d", now.UnixMilli(), m.jobSeq)
-	m.mu.Unlock()
+	id := strings.TrimSpace(opts.JobID)
+	if id == "" {
+		m.mu.Lock()
+		m.jobSeq++
+		id = fmt.Sprintf("app-chat-%d-%d", now.UnixMilli(), m.jobSeq)
+		m.mu.Unlock()
+	} else if !opts.ProviderLaneManaged || providercontract.NormalizeOperationID(opts.OperationID) == "" {
+		return nil, errors.New("stable job identity requires a durable provider-lane operation")
+	}
 
 	mode := strings.TrimSpace(opts.PermissionMode)
 	if mode == "" {
@@ -1155,45 +1160,85 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 	}
 	opts.PromptText = strings.TrimSpace(RedactSensitiveText(opts.PromptText))
 	job := &Job{
-		ID:             id,
-		Kind:           "app-chat",
-		Key:            nil,
-		Title:          title,
-		Status:         "running",
-		StartedAt:      now.Format(time.RFC3339Nano),
-		PermissionMode: mode,
-		ChatID:         opts.ChatID,
-		TabID:          opts.TabID,
-		SessionID:      opts.SessionID,
-		ProviderID:     providerID,
-		CWD:            cwd,
-		startOpts:      opts,
+		ID:                    id,
+		Kind:                  "app-chat",
+		Key:                   nil,
+		Title:                 title,
+		Status:                "running",
+		StartedAt:             now.Format(time.RFC3339Nano),
+		PermissionMode:        mode,
+		ChatID:                opts.ChatID,
+		TabID:                 opts.TabID,
+		SessionID:             opts.SessionID,
+		ProviderID:            providerID,
+		CWD:                   cwd,
+		startOpts:             opts,
+		inputDispatchBoundary: make(chan struct{}),
 	}
 	job.touchActivity()
-	// The actor must own the immutable provider turn before any manager state or
-	// frozen event can expose it. This callback persists the admission receipt;
-	// if it fails, no job is registered and no provider prompt is started.
-	public := job.Public()
-	if commitAdmission := opts.CommitAdmission; commitAdmission != nil {
-		opts.CommitAdmission = nil
-		job.startOpts.CommitAdmission = nil
-		if err := commitAdmission(public); err != nil {
-			return nil, err
-		}
-	}
-
+	// Reserve the deterministic id before actor admission. Stop can now claim the
+	// exact operation in the CommitAdmission -> worker-registration gap, while
+	// public manager projections continue to ignore this private reservation.
+	// The worker count is reserved at the same boundary so Reset cannot return
+	// while a successful actor commit is still being handed to its owner.
 	m.mu.Lock()
 	if m.resetting {
 		m.mu.Unlock()
 		return nil, errors.New("ACP manager is resetting")
 	}
+	if _, exists := m.jobs[id]; exists {
+		m.mu.Unlock()
+		return nil, errors.New("stable job identity is already registered")
+	}
+	job.admitting = true
 	m.jobs[id] = job
 	m.jobWG.Add(1)
 	m.mu.Unlock()
-	m.bindChatEnvToJob(opts.SessionID, opts.ChatID, opts.TabID, cwd)
 	if liveSession {
+		// Make the exact reserved owner discoverable before the actor commit can
+		// become visible to another control request. Bridge.Steer waits for the
+		// prompt-write boundary, so this cannot overtake the base turn.
 		bridge.setJobForSession(opts.SessionID, job)
 	}
+
+	// The actor must own the immutable provider turn before a frozen event or
+	// read projection can expose it. This callback persists the admission
+	// receipt; failure drops the unexposed reservation and starts no provider.
+	public := job.Public()
+	if commitAdmission := opts.CommitAdmission; commitAdmission != nil {
+		opts.CommitAdmission = nil
+		job.startOpts.CommitAdmission = nil
+		if err := commitAdmission(public); err != nil {
+			job.settleInputDispatch()
+			if liveSession {
+				bridge.clearJobForSession(opts.SessionID, job)
+			}
+			m.mu.Lock()
+			if m.jobs[id] == job {
+				delete(m.jobs, id)
+				if job.cancelled {
+					m.rememberFinishedJobLocked(id)
+				}
+			}
+			m.mu.Unlock()
+			m.jobWG.Done()
+			return nil, err
+		}
+	}
+
+	m.mu.Lock()
+	if m.jobs[id] != job {
+		m.mu.Unlock()
+		job.settleInputDispatch()
+		if liveSession {
+			bridge.clearJobForSession(opts.SessionID, job)
+		}
+		m.jobWG.Done()
+		return nil, errors.New("stable job admission reservation was lost")
+	}
+	job.admitting = false
+	m.mu.Unlock()
+	m.bindChatEnvToJob(opts.SessionID, opts.ChatID, opts.TabID, cwd)
 	// Actor operation identity must own the provider lane before the frozen
 	// start event is published. Fast providers can request permission or emit
 	// output immediately; binding after publication would leave those events
@@ -1215,6 +1260,7 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 
 func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, opts JobStartOptions) {
 	defer m.jobWG.Done()
+	defer job.settleInputDispatch()
 	activeBridge := bridge
 	defer func() {
 		m.adoptSubagentsForParent(firstNonEmpty(job.VisibleJobID, job.ID))
@@ -1256,6 +1302,19 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 			m.notifyJobEnd(job.TabID, job.ChatID)
 		}
 	}()
+	// Stop may win after the actor committed the deterministic native id but
+	// before this worker was launched. The reservation makes that cancellation
+	// durable here; terminate through the normal provider-lane event path without
+	// applying controls or sending even one provider prompt.
+	if m.jobCancelled(job) {
+		code := 130
+		job.Code = &code
+		job.Status = "failed"
+		job.StopReason = "cancelled"
+		job.Interrupted = true
+		job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return
+	}
 
 	promptText := strings.TrimSpace(opts.Prompt)
 	if promptText == "" {
@@ -1619,10 +1678,9 @@ func clampInt(v, min, max int) int {
 const finishedJobReceiptLimit = 256
 
 type JobCancelResult struct {
-	Cancelled          bool   `json:"cancelled"`
-	Reason             string `json:"reason"`
-	QueuePaused        bool   `json:"queuePaused,omitempty"`
-	QueuePauseRevision uint64 `json:"queuePauseRevision,omitempty"`
+	Cancelled    bool   `json:"cancelled"`
+	Reason       string `json:"reason"`
+	PreAdmission bool   `json:"preAdmission,omitempty"`
 }
 
 func (m *Manager) rememberFinishedJobLocked(id string) {
@@ -1660,7 +1718,11 @@ func (m *Manager) CancelJobResult(id string) JobCancelResult {
 		return JobCancelResult{Reason: "idle"}
 	}
 	job.cancelled = true
+	admitting := job.admitting
 	m.mu.Unlock()
+	if admitting {
+		return JobCancelResult{Cancelled: true, Reason: "cancelled", PreAdmission: true}
+	}
 	m.cancelPermissionsForSession(job.SessionID)
 	bridge := m.bridgeForJob(job)
 	if bridge == nil {
@@ -1698,7 +1760,7 @@ func (m *Manager) RunningJobForChat(tabID, chatID string) (map[string]any, bool)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, job := range m.jobs {
-		if job == nil || job.Status != "running" || job.TabID != tabID || job.ChatID != chatID {
+		if job == nil || job.admitting || job.Status != "running" || job.TabID != tabID || job.ChatID != chatID {
 			continue
 		}
 		return job.Public(), true
@@ -1719,7 +1781,7 @@ func (m *Manager) ChatRuntimeDigests() map[string]ChatRuntimeDigest {
 	jobKeys := make(map[string]string)
 	m.mu.Lock()
 	for id, job := range m.jobs {
-		if job == nil || job.Status != "running" || job.TabID == "" || job.ChatID == "" {
+		if job == nil || job.admitting || job.Status != "running" || job.TabID == "" || job.ChatID == "" {
 			continue
 		}
 		key := job.TabID + "\x00" + job.ChatID
@@ -3009,10 +3071,6 @@ func (b *Bridge) supportsPromptReconciliation() bool {
 	return b.hasProviderCapability("workassTurnReconcileRequest")
 }
 
-func (b *Bridge) interruptForQueuedSteer(sessionID string) bool {
-	return b.notify("session/cancel", map[string]any{"sessionId": sessionID})
-}
-
 func boolMapField(m map[string]any, key string) bool {
 	if m == nil {
 		return false
@@ -3031,15 +3089,20 @@ const promptReconcileFailureLimit = 3
 // if it does not, or the advertised liveness request repeatedly fails, the
 // wedged bridge is recycled so the visible job cannot remain running forever.
 func (b *Bridge) requestPrompt(ctx context.Context, sessionID string, job *Job, params map[string]any) (map[string]any, error) {
+	afterWrite := func() {
+		if job != nil {
+			job.markInputDispatched()
+		}
+	}
 	if !b.supportsPromptReconciliation() {
-		return b.request(ctx, "session/prompt", params, 0)
+		return b.requestWithDispatch(ctx, "session/prompt", params, 0, afterWrite)
 	}
 
 	promptCtx, cancelPrompt := context.WithCancel(ctx)
 	defer cancelPrompt()
 	promptResult := make(chan rpcResult, 1)
 	go func() {
-		value, err := b.request(promptCtx, "session/prompt", params, 0)
+		value, err := b.requestWithDispatch(promptCtx, "session/prompt", params, 0, afterWrite)
 		promptResult <- rpcResult{value: value, err: err}
 	}()
 
@@ -3110,7 +3173,8 @@ func (b *Bridge) requestPrompt(ctx context.Context, sessionID string, job *Job, 
 
 func (b *Bridge) Steer(sessionID, promptText string, images []any, clientUserMessageID string) map[string]any {
 	job := b.jobForSession(sessionID)
-	if job == nil || job.Status != "running" || job.internal {
+	if job == nil || job.internal || !job.waitForInputDispatch() ||
+		b.manager.jobCancelled(job) || b.jobForSession(sessionID) != job || job.Status != "running" {
 		return map[string]any{"ok": false, "queued": false, "error": "No hay una respuesta en curso para steerear."}
 	}
 	prompt, promptErr := b.promptBlocks(promptText, images)
@@ -3156,9 +3220,6 @@ func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, o
 	}
 	if operationID = strings.TrimSpace(operationID); operationID != "" {
 		params["clientUserMessageId"] = operationID
-	}
-	if job != nil {
-		job.markInputDispatched()
 	}
 	res, err := b.requestPrompt(ctx, sessionID, job, params)
 	if directJob != nil {

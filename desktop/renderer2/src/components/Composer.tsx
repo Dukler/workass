@@ -10,7 +10,7 @@ import { favoriteCatalogModels, isModelFavorite } from '../model-favorites';
 import { attachmentWorkBoundary, clipboardImageFiles, createDraftImages, draftImagePayloads, withoutDraftImages } from '../image-drafts';
 import { QueueList } from './QueueList';
 import { liveSteeringSupported } from '../steering';
-import { composerSubmitIntent, type ComposerSubmitIntent } from '../composer-submit';
+import { composerSubmitIntent, restoreRejectedSteerDraft, type ComposerSubmitIntent } from '../composer-submit';
 import { insertAtCaret, startRecording, transcribe, voiceStatus, type Recorder, type VoiceState } from '../voice';
 import { clampPlanUsagePercent, formatCountdown, formatPlanUsagePercent, isExpiredPlanReset, isHotRateLimit, isLiveReset, rateLimitLabel, relativePlanReset } from '../plan-usage';
 import { imageDraftCapability } from '../model-controls';
@@ -687,11 +687,6 @@ export function Composer({ chat }: { chat: Chat | null }) {
     // Blocked while offline (mirrors the disabled send button); the banner above
     // the composer explains why. Enter must not silently drop into a dead socket.
     if (app.connection !== 'connected') return;
-    if (!running && chat?.queuePaused) {
-      const resumeOnly = !!chat.queue?.length;
-      const resumed = await store.resumeQueued(chat.id);
-      if (!resumed || resumeOnly) return;
-    }
     const submittedDraft = text;
     const t = text.trim();
     if (running && !t && intent === 'steer') {
@@ -719,7 +714,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
     const sentImageIDs = atts.map((image) => image.id);
     if (running && intent === 'steer') {
       if (t && chat) {
-        const delivery = store.steerOrQueue(chat.id, t, images);
+        const delivery = store.steerRunning(chat.id, t, images);
         setTransferredSteerImageIDs(sentImageIDs);
         // A native acknowledgement can arrive seconds after Codex has already
         // received the direction. Release the composer as soon as the store has
@@ -737,12 +732,12 @@ export function Composer({ chat }: { chat: Chat | null }) {
             return;
           }
           // The dispatch boundary rejected the direction before it acquired a
-          // visible owner. Restore only into an untouched empty composer; never
-          // overwrite text the user typed while the receipt was in flight.
+          // visible owner. Return that exact input without overwriting anything
+          // the user typed while the receipt was in flight.
           if (sentChatID) setText((current) => {
-            if (current) return current;
-            store.setDraft(sentChatID, submittedDraft);
-            return submittedDraft;
+            const restored = restoreRejectedSteerDraft(submittedDraft, current);
+            store.setDraft(sentChatID, restored);
+            return restored;
           });
         }).finally(() => {
           setTransferredSteerImageIDs([]);
@@ -774,21 +769,18 @@ export function Composer({ chat }: { chat: Chat | null }) {
   }
 
   const hasText = text.trim().length > 0;
-  const steerMode = running && hasText;      // typing while running → steer/queue
-  const pausedQueue = !running && chat?.queuePaused === true && !!chat.queue?.length;
+  const steerMode = running && hasText;      // send button explicitly steers the active turn
   // While the daemon socket is down, sending would vanish into a dead queue —
   // block it honestly (the banner above the composer explains why).
   const offline = app.connection !== 'connected';
-  const canSend = (running || hasText || pausedQueue) && !offline && !preparingImages;
-  const sendGlyph = pausedQueue ? '▶' : steerMode ? '⤴' : running ? '■' : '↑';
+	const canSend = (running || hasText) && !offline && !preparingImages;
+	const sendGlyph = steerMode ? '⤴' : running ? '■' : '↑';
   const sendTitle = offline
     ? 'Sin conexión con el daemon'
-    : pausedQueue
-      ? 'Continuar mensajes en cola'
-    : steerMode
+	: steerMode
       ? (steerAvail
         ? 'Dirigir el turno en curso · ⌘Enter'
-        : 'Encolar · se envía al terminar el turno')
+		: 'Steering no disponible')
       : running ? 'Detener' : 'Enviar';
 
   return (
