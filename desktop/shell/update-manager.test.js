@@ -2520,13 +2520,15 @@ test('automatic checks discover a newly published local release without restarti
   assert.equal((await scheduled[0].fn()).phase, 'current');
   assert.equal((await repeated[0].fn()).phase, 'available');
   assert.equal(fetches, 2);
+  assert.equal(scheduled.length, 2, 'a discovered offer stages its payload automatically');
   const advanced = await repeated[0].fn();
   assert.equal(advanced.phase, 'available');
   assert.equal(advanced.targetVersion, '1.3.0');
   assert.equal(fetches, 3, 'a newer un-downloaded offer must replace the previous offer');
+  assert.equal(scheduled.length, 2, 'one pending prestage covers the newest offer');
 
   manager.dispose();
-  assert.deepEqual(cancelled, [scheduled[0], repeated[0]]);
+  assert.deepEqual(cancelled, [scheduled[0], repeated[0], scheduled[1]]);
 });
 
 test('an automatic availability-check failure remains retryable without becoming an update transaction', async () => {
@@ -2549,5 +2551,131 @@ test('an automatic availability-check failure remains retryable without becoming
   assert.equal(failedCheck.receipt, null);
   assert.equal((await repeated[0].fn()).phase, 'current');
   assert.equal(fetches, 2);
+  manager.dispose();
+});
+
+test('a discovered offer pre-stages its payload so the click only activates', async () => {
+  const { manager } = managerFixture({ primeReady: false });
+  const scheduled = [];
+  const repeated = [];
+  let downloads = 0;
+  manager.deps.fetchManifest = async () => manifest({ version: '1.2.0' });
+  manager.deps.downloadArtifact = async (_source, destination) => {
+    downloads += 1;
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, 'archive');
+  };
+  manager.deps.stageAndVerify = async (request) => {
+    writeMacUpdaterRuntime(request.incomingTarget);
+    return { designatedRequirement: manifest().designatedRequirement };
+  };
+  manager.deps.schedule = (fn, delay) => { const handle = { fn, delay, unref() {} }; scheduled.push(handle); return handle; };
+  manager.deps.repeat = (fn, delay) => { const handle = { fn, delay, unref() {} }; repeated.push(handle); return handle; };
+  let installed = false;
+  manager.install = async () => { installed = true; return manager.publish({ phase: 'installing' }); };
+  manager.publish({ phase: 'current', targetVersion: null, error: null });
+
+  manager.startAutoChecks({ initialDelayMs: 15, intervalMs: 30 });
+  assert.equal((await scheduled[0].fn()).phase, 'available');
+  assert.equal(scheduled.length, 2, 'discovery schedules exactly one prestage');
+  assert.equal(downloads, 0);
+  await scheduled[1].fn();
+  assert.equal(manager.snapshot().phase, 'ready');
+  assert.equal(downloads, 1);
+
+  await manager.apply();
+  assert.equal(installed, true);
+  assert.equal(downloads, 1, 'activation must not re-download a staged payload');
+  manager.dispose();
+});
+
+test('a strictly newer release replaces a staged payload instead of hiding behind it', async () => {
+  const { manager } = managerFixture();
+  manager.deps.fetchManifest = async () => manifest({ version: '1.3.0' });
+  const stagedRoot = manager.prepared.transactionRoot;
+  const stagedIncoming = manager.prepared.incomingTarget;
+  assert.ok(fs.existsSync(stagedIncoming));
+
+  const state = await manager.autoCheck();
+  assert.equal(state.phase, 'available');
+  assert.equal(state.targetVersion, '1.3.0');
+  assert.equal(manager.prepared, null);
+  assert.equal(fs.existsSync(stagedIncoming), false);
+  assert.equal(fs.existsSync(stagedRoot), false);
+  manager.dispose();
+});
+
+test('rediscovering the staged version leaves the verified payload untouched', async () => {
+  const { manager } = managerFixture();
+  manager.deps.fetchManifest = async () => manifest({ version: '1.2.0' });
+  const state = await manager.autoCheck();
+  assert.equal(state.phase, 'ready');
+  assert.equal(state.targetVersion, '1.2.0');
+  assert.ok(manager.prepared);
+  assert.ok(fs.existsSync(manager.prepared.incomingTarget));
+  manager.dispose();
+});
+
+test('an automatic prestage failure keeps the offer clickable instead of failing the card', async () => {
+  const { manager } = managerFixture({ primeReady: false });
+  const scheduled = [];
+  const repeated = [];
+  manager.deps.fetchManifest = async () => manifest({ version: '1.2.0' });
+  manager.deps.downloadArtifact = async (_source, destination) => {
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, 'archive');
+  };
+  manager.deps.stageAndVerify = async () => { throw new Error('fixture staging failure'); };
+  manager.deps.schedule = (fn, delay) => { const handle = { fn, delay, unref() {} }; scheduled.push(handle); return handle; };
+  manager.deps.repeat = (fn, delay) => { const handle = { fn, delay, unref() {} }; repeated.push(handle); return handle; };
+  manager.publish({ phase: 'current', targetVersion: null, error: null });
+
+  manager.startAutoChecks({ initialDelayMs: 15, intervalMs: 30 });
+  assert.equal((await scheduled[0].fn()).phase, 'available');
+  await scheduled[1].fn();
+  const state = manager.snapshot();
+  assert.equal(state.phase, 'available');
+  assert.equal(state.error, null);
+
+  const failed = await manager.apply();
+  assert.equal(failed.phase, 'failed');
+  assert.match(failed.error, /fixture staging failure/);
+  manager.dispose();
+});
+
+test('a click landing during an in-flight prestage still activates the staged release', async () => {
+  const { manager } = managerFixture({ primeReady: false });
+  const scheduled = [];
+  const repeated = [];
+  let downloads = 0;
+  let releaseStaging;
+  manager.deps.fetchManifest = async () => manifest({ version: '1.2.0' });
+  manager.deps.downloadArtifact = async (_source, destination) => {
+    downloads += 1;
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, 'archive');
+  };
+  manager.deps.stageAndVerify = async (request) => {
+    await new Promise((resolve) => { releaseStaging = resolve; });
+    writeMacUpdaterRuntime(request.incomingTarget);
+    return { designatedRequirement: manifest().designatedRequirement };
+  };
+  manager.deps.schedule = (fn, delay) => { const handle = { fn, delay, unref() {} }; scheduled.push(handle); return handle; };
+  manager.deps.repeat = (fn, delay) => { const handle = { fn, delay, unref() {} }; repeated.push(handle); return handle; };
+  manager.install = async () => manager.publish({ phase: 'installing' });
+  manager.publish({ phase: 'current', targetVersion: null, error: null });
+
+  manager.startAutoChecks({ initialDelayMs: 15, intervalMs: 30 });
+  await scheduled[0].fn();
+  const prestageRun = scheduled[1].fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof releaseStaging, 'function', 'prestage must be mid-staging when the click lands');
+  const started = manager.startApply();
+  assert.equal(['downloading', 'staging'].includes(started.phase), true);
+  releaseStaging();
+  await prestageRun;
+  await manager.applyPromise;
+  assert.equal(manager.snapshot().phase, 'installing');
+  assert.equal(downloads, 1, 'the click must not start a second download');
   manager.dispose();
 });
