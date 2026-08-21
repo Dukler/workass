@@ -117,12 +117,13 @@ type Options struct {
 
 // Book is a daemon's machine list, persisted to its state dir.
 type Book struct {
-	path        string
-	selfID      string
-	wireVersion int
-	owner       string
-	client      *http.Client
-	now         func() time.Time
+	path           string
+	selfID         string
+	wireVersion    int
+	owner          string
+	client         *http.Client
+	probeTransport *http.Transport
+	now            func() time.Time
 
 	mu      sync.Mutex
 	entries map[string]Entry
@@ -143,13 +144,14 @@ func Open(opts Options) (*Book, error) {
 		now = time.Now
 	}
 	book := &Book{
-		path:        filepath.Join(opts.StateDir, FileName),
-		selfID:      strings.TrimSpace(opts.SelfID),
-		wireVersion: opts.WireVersion,
-		owner:       owner,
-		client:      client,
-		now:         now,
-		entries:     map[string]Entry{},
+		path:           filepath.Join(opts.StateDir, FileName),
+		selfID:         strings.TrimSpace(opts.SelfID),
+		wireVersion:    opts.WireVersion,
+		owner:          owner,
+		client:         client,
+		probeTransport: newProbeTransport(client),
+		now:            now,
+		entries:        map[string]Entry{},
 	}
 	data, err := os.ReadFile(book.path)
 	switch {
