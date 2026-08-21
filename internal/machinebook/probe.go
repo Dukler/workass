@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // HealthPath is the identity document every daemon serves.
@@ -20,6 +21,33 @@ const HealthPath = "/workass/health"
 // whatever a human typed or whatever announced itself on the network, so it may
 // be any HTTP server at all — including one happy to stream forever.
 const maxCardBytes = 64 << 10
+
+// probeIdleConnTimeout bounds how long a probed machine's idle TLS connection
+// may sit between probes. It must stay below DefaultInterval so liveness
+// refreshes reuse the warm connection instead of accumulating abandoned ones.
+const probeIdleConnTimeout = 5 * time.Second
+
+// newProbeTransport builds the one long-lived transport every identity probe
+// on this book shares. A per-probe transport leaks: each successful probe
+// parks its TLS connection in an abandoned clone's idle pool, where Go holds
+// the socket open until IdleConnTimeout, so a daemon probing every few seconds
+// accumulated dozens of ESTABLISHED connections per remote machine.
+func newProbeTransport(base *http.Client) *http.Transport {
+	var transport *http.Transport
+	if base != nil {
+		transport, _ = base.Transport.(*http.Transport)
+	}
+	if transport != nil {
+		transport = transport.Clone()
+	} else {
+		transport = http.DefaultTransport.(*http.Transport).Clone()
+	}
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true} // #nosec G402 -- pairing pins after explicit user approval; no plaintext is permitted.
+	transport.MaxIdleConns = 2
+	transport.MaxIdleConnsPerHost = 1
+	transport.IdleConnTimeout = probeIdleConnTimeout
+	return transport
+}
 
 // Card is a daemon's answer to "who are you?", parsed.
 //
@@ -71,14 +99,7 @@ func (b *Book) probe(ctx context.Context, address string) (Card, error) {
 		return Card{}, err
 	}
 	client := *b.client
-	transport, ok := client.Transport.(*http.Transport)
-	if !ok || transport == nil {
-		transport = http.DefaultTransport.(*http.Transport).Clone()
-	} else {
-		transport = transport.Clone()
-	}
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true} // #nosec G402 -- pairing pins after explicit user approval; no plaintext is permitted.
-	client.Transport = transport
+	client.Transport = b.probeTransport
 	response, err := client.Do(request)
 	if err != nil {
 		return Card{}, fmt.Errorf("%s %s", address, whyItFailed(err))

@@ -67,6 +67,54 @@ func openBook(t *testing.T, selfID string) *Book {
 	return book
 }
 
+func TestProbeReusesOneConnectionAcrossCalls(t *testing.T) {
+	var accepts atomic.Int64
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != HealthPath {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(identityDoc("m-reuse", "reuse probe", 1))
+	}))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server.Listener = &countingListener{Listener: listener, accepts: &accepts}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	address := strings.TrimPrefix(server.URL, "https://")
+
+	book := openBook(t, "self-book")
+	for attempt := 1; attempt <= 3; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		card, probeErr := book.probe(ctx, address)
+		cancel()
+		if probeErr != nil {
+			t.Fatalf("probe %d: %v", attempt, probeErr)
+		}
+		if card.MachineID != "m-reuse" {
+			t.Fatalf("probe %d card = %+v", attempt, card)
+		}
+	}
+	if got := accepts.Load(); got != 1 {
+		t.Fatalf("three probes opened %d TCP connections, want exactly one reused connection", got)
+	}
+}
+
+type countingListener struct {
+	net.Listener
+	accepts *atomic.Int64
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err == nil {
+		l.accepts.Add(1)
+	}
+	return conn, err
+}
+
 func TestNormalizeAddress(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"192.168.1.50", "192.168.1.50:8788"},
