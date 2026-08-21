@@ -29,23 +29,6 @@ const MAX_UPDATE_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 120000;
 const DEFAULT_INITIAL_CHECK_DELAY_MS = 15_000;
 const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
-const DEFAULT_PRESTAGE_DELAY_MS = 2_000;
-// Automatic prestaging must never be the straw that fills a small disk: the
-// staged payload coexists with the extracted tree and, on Windows, with a full
-// backup mirror during activation.
-const MIN_PRESTAGE_FREE_BYTES = 3 * 1024 * 1024 * 1024;
-
-// prestageDiskHasHeadroom reports whether the volume holding the update root
-// has room for an automatic staging run. A volume that cannot be inspected is
-// treated as having headroom so a manual update is never blocked by this guard.
-function prestageDiskHasHeadroom(root) {
-  try {
-    const stats = fs.statfsSync(root);
-    return Number(stats.bavail) * Number(stats.bsize) >= MIN_PRESTAGE_FREE_BYTES;
-  } catch {
-    return true;
-  }
-}
 const DEFAULT_WORKER_ARM_TIMEOUT_MS = 15_000;
 const DEFAULT_WORKER_ARM_POLL_MS = 25;
 const MAX_PROGRESS_CLEANUP_RETRIES = 4;
@@ -1700,9 +1683,6 @@ class UpdateManager {
     this.discoveryPromise = null;
     this.applyPromise = null;
     this.recoveryPromise = null;
-    this.prestageTimer = null;
-    this.prestagedVersion = '';
-    this.prestagePromise = null;
     this.transactionCleanupPromise = null;
     this.transactionCleanupQueued = false;
     this.transactionCleanupRetryTimer = null;
@@ -2390,15 +2370,7 @@ class UpdateManager {
       this.manifest = manifest;
       const available = compareVersions(this.currentVersion, manifest.version) < 0;
       const pinned = this.pinnedRelease();
-      let supersededStalePayload = false;
-      if (pinned && available && this.state.phase === 'ready' && this.prepared &&
-          compareVersions(manifest.version, pinned.version) > 0) {
-        // A strictly newer release exists while a verified payload waits
-        // uninstalled. The stale payload must not hide the newer offer.
-        this.discardStagedPreparation();
-        supersededStalePayload = true;
-      }
-      if (pinned && !supersededStalePayload) {
+      if (pinned) {
         const current = this.snapshot();
         const previouslyDiscovered = parseVersion(current.availableVersion) &&
           compareVersions(current.availableVersion, pinned.version) > 0 ? current.availableVersion : null;
@@ -2472,14 +2444,8 @@ class UpdateManager {
     if (!this.state.supported || this.activeOperation) return this.snapshot();
     // A plain offer has no downloaded payload and may advance to a newer
     // release. Once download/staging begins, that exact transaction is pinned.
-    // A staged-but-uninstalled payload also keeps watching: a strictly newer
-    // release must replace it instead of hiding behind it.
-    if (!['idle', 'current', 'available', 'ready', 'healthy', 'check_failed', 'failed', 'rollback_healthy'].includes(this.state.phase)) return this.snapshot();
-    try {
-      const state = await this.check({ background: true });
-      if (state.phase === 'available') this.schedulePrestage();
-      return state;
-    }
+    if (!['idle', 'current', 'available', 'healthy', 'check_failed', 'failed', 'rollback_healthy'].includes(this.state.phase)) return this.snapshot();
+    try { return await this.check({ background: true }); }
     catch { return this.snapshot(); }
   }
 
@@ -2606,273 +2572,49 @@ class UpdateManager {
   async install() {
     this.beginOperation('install');
     try {
-    if (!this.prepared || !['ready', 'busy'].includes(this.state.phase)) throw new Error('the verified Workass update is not ready');
-    const prepared = this.prepared;
-    const release = prepared.release;
-    if (!release || !Object.isFrozen(release) || release.version !== prepared.targetVersion ||
-        release.artifacts?.update !== prepared.artifact || this.state.targetVersion !== prepared.targetVersion) {
-      throw new Error('the verified Workass transaction lost its exact release metadata');
-    }
-    const expectedWorkerPath = path.join(prepared.transactionRoot, 'update-worker.js');
-    const expectedNodePath = path.join(prepared.transactionRoot, this.platform === 'win32' ? 'updater-node.exe' : 'updater-node');
-    if (prepared.workerPath !== expectedWorkerPath || prepared.nodePath !== expectedNodePath ||
-        prepared.progressModulePath !== path.join(prepared.transactionRoot, 'update-progress.js') ||
-        prepared.progressExecutable !== (this.platform === 'darwin'
-          ? path.join(prepared.incomingTarget, 'Contents', 'MacOS', 'Workass')
-          : path.join(prepared.incomingTarget, 'Workass.exe')) ||
-        !fs.statSync(prepared.workerPath, { throwIfNoEntry: false })?.isFile() ||
-        !fs.statSync(prepared.progressModulePath, { throwIfNoEntry: false })?.isFile() ||
-        !fs.statSync(prepared.nodePath, { throwIfNoEntry: false })?.isFile() ||
-        !fs.statSync(prepared.progressExecutable, { throwIfNoEntry: false })?.isFile()) {
-      throw new Error('the independently verified update worker runtime is incomplete');
-    }
-    const workerPath = prepared.workerPath;
-    const nodePath = prepared.nodePath;
-
-    const workerId = `worker-${crypto.randomBytes(16).toString('hex')}`;
-    const progressId = `progress-${crypto.randomBytes(16).toString('hex')}`;
-    const transaction = {
-      schemaVersion: TRANSACTION_SCHEMA_VERSION,
-      updateId: prepared.updateId,
-      platform: this.platform,
-      currentVersion: this.currentVersion,
-      targetVersion: prepared.targetVersion,
-      shellPID: process.pid,
-      workerId,
-      progressId,
-      installationId: prepared.installationId || this.installationIdentity.installationId,
-      transactionRoot: prepared.transactionRoot,
-      installTarget: prepared.installTarget,
-      incomingTarget: prepared.incomingTarget,
-      backupTarget: prepared.backupTarget,
-      mutableStateTarget: this.runtime.stateDir,
-      mutableStateBackupTarget: path.join(prepared.transactionRoot, 'state-before-activation'),
-      failedMutableStateTarget: path.join(prepared.transactionRoot, 'state-from-failed-activation'),
-      receiptPath: this.receiptPath,
-      journalPath: path.join(prepared.transactionRoot, 'journal.json'),
-      leasePath: path.join(prepared.transactionRoot, 'worker-lease.json'),
-      workerPath,
-      progressModulePath: prepared.progressModulePath,
-      workerRuntimePath: nodePath,
-      progressReceiptPath: path.join(prepared.transactionRoot, 'progress-receipt.json'),
-      progressExecutable: prepared.progressExecutable,
-      daemonHealthURL: `${this.runtime.daemonURL}/workass/health`,
-      shellStatusURL: `http://127.0.0.1:${this.runtime.viewPort}/__workass-shell/status`,
-      requireVisibleWindow: true,
-      designatedRequirement: prepared.designatedRequirement,
-      launchAgentPath: this.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'LaunchAgents', `${this.runtime.launchdLabel}.plist`) : '',
-      launchdDomain: this.platform === 'darwin' && typeof process.getuid === 'function' ? `gui/${process.getuid()}` : '',
-    };
-    const transactionPath = path.join(prepared.transactionRoot, 'transaction.json');
-    atomicJSON(transactionPath, transaction);
-    atomicJSON(transaction.journalPath, {
-      schemaVersion: 1,
-      updateId: transaction.updateId,
-      installationId: transaction.installationId,
-      installTarget: transaction.installTarget,
-      previousVersion: transaction.currentVersion,
-      targetVersion: transaction.targetVersion,
-      phase: 'preparing',
-      shellStopped: false,
-      daemonStopped: false,
-      incomingVerified: false,
-      mutableStateSnapshotted: false,
-      activated: false,
-      healthVerified: false,
-      rollbackStarted: false,
-      rolledBack: false,
-      mutableStateRestored: false,
-      terminal: false,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
-    atomicJSON(transaction.receiptPath, {
-      schemaVersion: RECEIPT_SCHEMA_VERSION,
-      updateId: transaction.updateId,
-      phase: 'preparing',
-      previousVersion: transaction.currentVersion,
-      targetVersion: transaction.targetVersion,
-      installationId: transaction.installationId,
-      installTarget: transaction.installTarget,
-      workerId: transaction.workerId,
-      updatedAt: new Date().toISOString(),
-    });
-
-    writeHandoffState(transaction, 'intent');
-    const preparedReply = await this.prepareHandoff(prepared.updateId);
-    if (preparedReply.status === 409) {
-      return this.publish({ phase: 'busy', blockers: preparedReply.body, error: null });
-    }
-    if (preparedReply.status === 0) {
-      return this.publish({
-        phase: 'busy',
-        blockers: { reason: 'the daemon prepare receipt is temporarily unavailable' },
-        error: null,
+      if (this.state.phase !== 'available') throw new Error('the Workass update is not ready to install');
+      if (!this.manifest || compareVersions(this.currentVersion, this.manifest.version) >= 0) throw new Error('no Workass update is available');
+      if (this.state.targetVersion !== this.manifest.version) throw new Error('the offered Workass release changed before install');
+      const release = snapshotReleaseManifest(this.manifest);
+      const artifact = release.artifacts.update;
+      const artifactSource = resolveArtifactSource(artifact.url, this.feedURL);
+      const updateId = `upd-${Date.now().toString(36)}-${crypto.randomBytes(8).toString('hex')}`;
+      const workRoot = path.join(this.updateRoot, 'nuke', updateId);
+      fs.mkdirSync(workRoot, { recursive: true });
+      const nodePath = bundledNode(this.resourcesPath, this.executablePath, this.platform, this.arch);
+      // The detached script runs after this process dies; ship it and the
+      // module it requires into the work root so nothing depends on files
+      // inside the folder about to be replaced.
+      for (const file of ['update-nuke.js', 'update-manager.js']) {
+        fs.copyFileSync(path.join(__dirname, file), path.join(workRoot, file));
+      }
+      const request = {
+        platform: this.platform,
+        arch: this.arch,
+        downloadUrl: artifactSource,
+        sha256: String(artifact.sha256 || ''),
+        size: Number(artifact.size || 0),
+        targetVersion: release.version,
+        installDir: installedRoot(this.resourcesPath, this.executablePath, this.platform),
+        trashDir: path.join(workRoot, 'previous'),
+        workRoot,
+        healthURL: `${this.runtime.daemonURL}/workass/health`,
+        logPath: path.join(workRoot, 'nuke.log'),
+        env: { ...process.env },
+        launchAgentPath: this.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'LaunchAgents', `${this.runtime.launchdLabel}.plist`) : '',
+        launchdDomain: this.platform === 'darwin' && typeof process.getuid === 'function' ? `gui/${process.getuid()}` : '',
+      };
+      atomicJSON(path.join(workRoot, 'request.json'), request);
+      const child = this.deps.spawn(nodePath, [path.join(workRoot, 'update-nuke.js'), '--request', path.join(workRoot, 'request.json')], {
+        cwd: workRoot, detached: true, windowsHide: true, stdio: 'ignore', env: { ...process.env },
       });
-    }
-    if (preparedReply.status !== 200 || preparedReply.body?.ready !== true) {
-      return this.publish({
-        phase: 'busy',
-        blockers: { reason: 'the daemon could not confirm a safe update handoff' },
-        error: null,
-      });
-    }
-    writeHandoffState(transaction, 'prepared');
-
-    let progressProcess = null;
-    try {
-      progressProcess = await this.deps.spawnVisibleProgress({
-        command: transaction.progressExecutable,
-        args: ['--workass-update-progress', transactionPath],
-        options: {
-          cwd: transaction.incomingTarget,
-          detached: true,
-          windowsHide: false,
-          stdio: 'ignore',
-          env: { ...process.env, WORKASS_UPDATE_PROGRESS_ID: transaction.progressId },
-        },
-        transaction,
-      });
-    } catch (err) {
-      const message = `the verified update progress window could not open: ${String(err && err.message || err)}`;
-      const receipt = await this.failBeforeActivation(transaction, progressProcess, message);
-      return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
-    }
-
-    const logFD = fs.openSync(path.join(prepared.transactionRoot, 'worker.log'), 'a', 0o600);
-    let worker;
-    try {
-      const armWorker = this.deps.spawnArmedWorker || ((request) => spawnArmedUpdateWorker(request, {
-        spawnProcess: this.deps.spawn,
-      }));
-      worker = await armWorker({
-        command: nodePath,
-        args: [workerPath, '--transaction', transactionPath],
-        options: {
-          cwd: prepared.transactionRoot,
-          detached: true,
-          windowsHide: true,
-          stdio: ['ignore', logFD, logFD],
-          env: { ...process.env, WORKASS_UPDATE_WORKER_ID: workerId },
-        },
-        receiptPath: this.receiptPath,
-        updateId: prepared.updateId,
-        currentVersion: this.currentVersion,
-        targetVersion: prepared.targetVersion,
-        installationId: transaction.installationId,
-        installTarget: transaction.installTarget,
-        workerId,
-      });
-    } catch (err) {
-      const message = String(err && err.message || err);
-      if (err?.workassWorkerFenced !== true) throw err;
-      const receipt = await this.failBeforeActivation(transaction, progressProcess, message);
-      return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
-    } finally {
-      fs.closeSync(logFD);
-    }
-
-    const handoffReceipt = this.exactHandoffReceipt(transaction, worker);
-    if (!handoffReceipt) {
-      const message = 'the independent update worker handoff receipt changed after arming';
-      await this.stopProgressOrThrow(progressProcess);
-      const receipt = await this.abortRejectedHandoff(transaction, worker, message);
-      return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
-    }
-    this.rememberSpawnedWorker(transaction, worker);
-    if (handoffReceipt && ['healthy', 'rollback_healthy', 'failed'].includes(handoffReceipt.phase)) {
-      await this.releasePreparedHandoff(transaction);
-      this.pruneTerminalPayload(handoffReceipt);
-      return this.publish({
-        phase: handoffReceipt.phase,
-        receipt: handoffReceipt,
-        error: handoffReceipt.error || null,
-        blockers: null,
-      });
-    }
-
-    const progressReceipt = readJSONFile(transaction.progressReceiptPath);
-    if (!progressReceiptIsLive(progressReceipt, transaction, {
-      alive: (pid) => pid === progressProcess?.pid && progressProcess.exitCode == null && progressProcess.signalCode == null,
-    })) {
-      const message = 'the verified update progress window closed before handoff commit';
-      await this.stopProgressOrThrow(progressProcess);
-      const receipt = await this.abortRejectedHandoff(transaction, worker, message);
-      return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
-    }
-
-    const committed = await this.commitHandoff(prepared.updateId);
-    if (!committed.accepted) {
-      const message = 'the daemon did not commit the prepared update handoff';
-      await this.stopProgressOrThrow(progressProcess);
-      const receipt = await this.abortRejectedHandoff(transaction, worker, message);
-      return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
-    }
-    writeHandoffState(transaction, 'committed');
-    this.publish({ phase: 'installing', targetVersion: prepared.targetVersion, receipt: {
-      phase: 'armed', targetVersion: prepared.targetVersion,
-    }, error: null });
-    this.watchReceipt(prepared.updateId);
-    this.deps.schedule(() => this.quit(), 100)?.unref?.();
-    return this.snapshot();
+      child.unref?.();
+      this.publish({ phase: 'installing', targetVersion: release.version, progress: null, error: null, blockers: null });
+      this.deps.schedule(() => this.quit(), 400)?.unref?.();
+      return this.snapshot();
     } finally {
       this.endOperation('install');
     }
-  }
-
-  // A discovered offer stages its payload without waiting for the click, so
-  // activation is the only work left behind the button. An automatic prestage
-  // never surfaces as a user-facing failure: the card stays an ordinary offer
-  // and clicking retries the full chain loudly.
-  async prestage() {
-    if (!this.state.supported || this.activeOperation) return this.snapshot();
-    if (this.state.phase !== 'available' || !this.state.targetVersion) return this.snapshot();
-    if (this.prepared || this.activeRelease) return this.snapshot();
-    const headroom = this.deps.diskHasHeadroom || prestageDiskHasHeadroom;
-    if (!headroom(this.updateRoot)) return this.snapshot();
-    const target = this.state.targetVersion;
-    if (this.prestagedVersion === target) return this.snapshot();
-    this.prestagedVersion = target;
-    const run = this.download();
-    this.prestagePromise = run.finally(() => {
-      if (this.prestagePromise === run) this.prestagePromise = null;
-    });
-    await run;
-    const state = this.snapshot();
-    if (state.phase === 'failed' && !state.receipt) {
-      this.publish({ phase: 'available', targetVersion: target, error: null, progress: null });
-    }
-    return this.snapshot();
-  }
-
-  schedulePrestage() {
-    if (this.prestageTimer) return this.snapshot();
-    this.prestageTimer = this.deps.schedule(() => {
-      this.prestageTimer = null;
-      return this.prestage().catch(() => {});
-    }, DEFAULT_PRESTAGE_DELAY_MS);
-    this.prestageTimer?.unref?.();
-    return this.snapshot();
-  }
-
-  // Discard a verified-but-uninstalled payload so discovery can offer a
-  // strictly newer release. Only ever called while nothing is running.
-  discardStagedPreparation() {
-    const prepared = this.prepared;
-    if (!prepared) return false;
-    this.prepared = null;
-    this.prestagedVersion = '';
-    const cleanupErrors = [];
-    if (prepared.incomingTarget && this.platform === 'darwin') {
-      try { fs.rmSync(prepared.incomingTarget, { recursive: true, force: true }); }
-      catch (cleanupError) { cleanupErrors.push(String(cleanupError && cleanupError.message || cleanupError)); }
-    }
-    try { fs.rmSync(prepared.transactionRoot, { recursive: true, force: true }); }
-    catch (cleanupError) { cleanupErrors.push(String(cleanupError && cleanupError.message || cleanupError)); }
-    if (this.state.phase === 'ready') {
-      this.publish({ phase: 'available', targetVersion: null, availableVersion: null, progress: null, error: null });
-    }
-    return cleanupErrors.length === 0;
   }
 
   // One user intent owns the complete ordinary update path. The lower-level
@@ -2880,10 +2622,6 @@ class UpdateManager {
   // user to click once to stage and again to activate the same verified release.
   async apply() {
     if (this.discoveryPromise) await this.discoveryPromise;
-    // A click landing while an automatic prestage is still running must wait
-    // for it and then activate, never fall through the phase checks and lose
-    // the intent.
-    if (this.prestagePromise) await this.prestagePromise;
     let state = this.snapshot();
     if (state.phase === 'check_failed' || state.phase === 'failed' || state.phase === 'rollback_healthy') {
       if (state.phase !== 'check_failed' && this.manifest && state.targetVersion === this.manifest.version &&
@@ -2897,8 +2635,7 @@ class UpdateManager {
       this.reconcileActiveReceipt(state.receipt);
       return this.snapshot();
     }
-    if (state.phase === 'available') state = await this.download();
-    if (state.phase === 'ready' || state.phase === 'busy') state = await this.install();
+    if (state.phase === 'available' || state.phase === 'ready') state = await this.install();
     return state;
   }
 
@@ -2928,8 +2665,6 @@ class UpdateManager {
     this.stopAutoChecks();
     if (this.receiptTimer) this.deps.cancelRepeat(this.receiptTimer);
     this.receiptTimer = null;
-    if (this.prestageTimer) this.deps.cancelSchedule(this.prestageTimer);
-    this.prestageTimer = null;
     this.watchedUpdateId = '';
     this.watchedTargetHandoff = false;
     if (this.transactionCleanupRetryTimer) this.deps.cancelSchedule(this.transactionCleanupRetryTimer);
@@ -2941,7 +2676,6 @@ class UpdateManager {
 
 module.exports = {
   UpdateManager,
-  prestageDiskHasHeadroom,
   archiveEntries,
   atomicJSON,
   bundledNode,
