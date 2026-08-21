@@ -190,13 +190,11 @@ export function normalizeModelControlMemory(raw: unknown): ModelControlMemory | 
       const effort = typeof controls.effort === 'string' && controls.effort ? controls.effort : undefined;
       const modeId = typeof controls.modeId === 'string' && controls.modeId ? controls.modeId : undefined;
       if (!effort && !modeId) continue;
-      // Keyed the way the daemon keys it. A suffixed key read back unchanged is
-      // written back unchanged, and the daemon strips it again on every save.
-      // An entry already stored under the base wins, matching the daemon's own
-      // migration, so collapsing never overwrites the newer shape.
-      const key = canonicalModelControlKey(modelId);
-      if (key !== modelId && provider[key]) continue;
-      provider[key] = { ...(effort ? { effort } : {}), ...(modeId ? { modeId } : {}) };
+      // Persisted memory is already canonical: composite effort ids are not
+      // model keys. Ignore an obsolete suffixed key instead of migrating it
+      // back into the current shape during hydration.
+      if (canonicalModelControlKey(modelId) !== modelId) continue;
+      provider[modelId] = { ...(effort ? { effort } : {}), ...(modeId ? { modeId } : {}) };
     }
     if (Object.keys(provider).length) out[providerId] = provider;
   }

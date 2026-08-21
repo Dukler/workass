@@ -82,7 +82,7 @@ func agentMCPTools() []map[string]any {
 			"cwd":               str("Absolute server directory; omit to preserve."),
 			"provider_id":       str("Provider id from workass_agent_catalog; omit to preserve."),
 			"model_id":          str("Base model id from workass_agent_catalog; omit to preserve."),
-			"effort":            str("Exact effort exposed by the selected model; omit to preserve/default compatibly."),
+			"effort":            str("Exact effort exposed by the selected model; omit to use the provider default."),
 			"mode_id":           str("Exact provider-native permission mode; mutually exclusive with permission_intent."),
 			"permission_intent": enum("Provider-neutral permission intent.", "read", "edit", "full"),
 		}, "tab_id", "chat_id"), false, false, false, false),
@@ -193,7 +193,9 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 	if operationID != "" {
 		params["operation_id"] = string(operationID)
 	}
-	delete(params, "operationId")
+	if _, exists := params["operationId"]; exists {
+		return agentMCPErrorResult("MCP uses operation_id; operationId is not accepted"), nil
+	}
 	switch call.Name {
 	case "workass_list_chats":
 		method = "chat.list"
@@ -217,18 +219,13 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		method = "agent.catalog"
 	case "workass_host_artifact":
 		method = "artifact.host"
-	case "workass_host_html":
-		// Compatibility for ACP sessions that cached the pre-rename tool list.
-		// The alias is accepted but intentionally no longer advertised.
-		method = "artifact.host"
 	case "workass_spawn_subagent":
 		method = "agent.spawn"
 		params["prompt"] = params["task"]
 		delete(params, "task")
-		if params["mode_id"] == nil && params["permission_mode"] != nil {
-			params["mode_id"] = params["permission_mode"]
+		if _, exists := params["permission_mode"]; exists {
+			return agentMCPErrorResult("MCP uses mode_id; permission_mode is not accepted"), nil
 		}
-		delete(params, "permission_mode")
 	case "workass_wait_subagents":
 		method = "agent.wait_many"
 		params["ids"] = params["subagent_ids"]

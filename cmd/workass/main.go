@@ -1568,13 +1568,13 @@ func parseSessionOptions(m map[string]any) acp.SessionOptions {
 	return acp.SessionOptions{
 		CWD:         fieldString(m, "cwd"),
 		BridgeKey:   fieldString(m, "bridgeKey"),
-		TabID:       firstNonEmptyString(fieldString(m, "tabId"), fieldString(m, "chatTabId")),
+		TabID:       fieldString(m, "tabId"),
 		ChatID:      fieldString(m, "chatId"),
 		SessionID:   fieldString(m, "sessionId"),
 		OperationID: providercontract.NormalizeOperationID(fieldString(m, "operationId")),
 		ProviderID:  fieldString(m, "providerId"),
-		ModelID:     firstNonEmptyString(fieldString(m, "modelId"), fieldString(m, "currentModelId"), fieldString(m, "model")),
-		ModeID:      firstNonEmptyString(fieldString(m, "modeId"), fieldString(m, "currentModeId"), fieldString(m, "mode")),
+		ModelID:     fieldString(m, "modelId"),
+		ModeID:      fieldString(m, "modeId"),
 	}
 }
 
@@ -1583,31 +1583,6 @@ func stringPointerValue(value *string) string {
 		return ""
 	}
 	return strings.TrimSpace(*value)
-}
-
-func parseJobStartOptions(m map[string]any) acp.JobStartOptions {
-	return acp.JobStartOptions{
-		Kind:               fieldString(m, "kind"),
-		Key:                m["key"],
-		Title:              fieldString(m, "title"),
-		PermissionMode:     fieldString(m, "permissionMode"),
-		ChatID:             fieldString(m, "chatId"),
-		TabID:              fieldString(m, "tabId"),
-		SessionID:          fieldString(m, "sessionId"),
-		CWD:                fieldString(m, "cwd"),
-		Prompt:             fieldString(m, "prompt"),
-		Message:            fieldString(m, "message"),
-		ContextSize:        firstNonZeroInt(intField(m, "contextSize"), intField(m, "contextWindow")),
-		Images:             sliceArg(m["images"]),
-		ModelID:            firstNonEmptyString(fieldString(m, "modelId"), fieldString(m, "model")),
-		ModeID:             firstNonEmptyString(fieldString(m, "modeId"), fieldString(m, "mode")),
-		ProviderID:         fieldString(m, "providerId"),
-		HumanAuthored:      boolFieldValue(m, "humanAuthored"),
-		UserMessageID:      fieldString(m, "userMessageId"),
-		AssistantMessageID: fieldString(m, "assistantMessageId"),
-		QueueID:            firstNonEmptyString(fieldString(m, "queueId"), fieldString(m, agentQueueMessageField)),
-		PromptText:         fieldString(m, "promptText"),
-	}
 }
 
 func intField(m map[string]any, key string) int {

@@ -289,7 +289,7 @@ func TestProbeWritesSelfTestToStderrOnly(t *testing.T) {
 	defer fake.Close()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	err := run([]string{"--probe", "--openai-base-url", fake.URL() + "/v1", "--model", "fake-model", "--api-key", "test-secret"}, strings.NewReader(""), &stdout, &stderr)
+	err := run([]string{"--probe", "--openai-base-url", fake.URL() + "/v1", "--openai-model", "fake-model", "--openai-api-key", "test-secret"}, strings.NewReader(""), &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("probe run: %v stderr=%s", err, stderr.String())
 	}

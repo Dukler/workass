@@ -22,17 +22,15 @@ import (
 )
 
 const (
-	PathPrefix             = "/workass/artifacts"
-	LegacyPathPrefix       = "/workass/html"
-	registryVersion        = 1
-	registryFilename       = "artifact-hosts.json"
-	legacyRegistryFilename = "html-hosts.json"
-	maxRegistryBytes       = 4 * 1024 * 1024
-	maxCapturedHTMLBytes   = 1 * 1024 * 1024
-	maxInspectedEntries    = 4000
-	maxWithheldReported    = 20
-	maxLoggedWithholds     = 512
-	maxReceiptFieldBytes   = 4096
+	PathPrefix           = "/workass/artifacts"
+	registryVersion      = 1
+	registryFilename     = "artifact-hosts.json"
+	maxRegistryBytes     = 4 * 1024 * 1024
+	maxCapturedHTMLBytes = 1 * 1024 * 1024
+	maxInspectedEntries  = 4000
+	maxWithheldReported  = 20
+	maxLoggedWithholds   = 512
+	maxReceiptFieldBytes = 4096
 )
 
 // A hosted name is filtered by the SHAPE of a credential file, never by
@@ -170,7 +168,6 @@ type artifactReceipt struct {
 type registryFile struct {
 	Version   int              `json:"version"`
 	Artifacts []artifactRecord `json:"artifacts,omitempty"`
-	Hosts     []artifactRecord `json:"hosts,omitempty"`
 }
 
 // RegisterOptions describes one source exposed by the daemon. SourcePath may
@@ -212,15 +209,14 @@ type Registration struct {
 // Registry persists stable source registrations and serves their current
 // bytes read-only. It never copies or rewrites an agent-authored artifact.
 type Registry struct {
-	mu         sync.RWMutex
-	receiptMu  sync.Mutex
-	path       string
-	legacyPath string
-	origin     string
-	artifacts  map[string]artifactRecord
-	now        func() time.Time
-	logf       func(string, ...any)
-	logged     map[string]bool
+	mu        sync.RWMutex
+	receiptMu sync.Mutex
+	path      string
+	origin    string
+	artifacts map[string]artifactRecord
+	now       func() time.Time
+	logf      func(string, ...any)
+	logged    map[string]bool
 }
 
 // SetLogger routes withheld-asset notices to the daemon log. Silence was the
@@ -262,31 +258,14 @@ func New(stateDir, origin string) (*Registry, error) {
 		return nil, fmt.Errorf("initialize artifact hosting state: %w", err)
 	}
 	registry := &Registry{
-		path:       filepath.Join(stateDir, registryFilename),
-		legacyPath: filepath.Join(stateDir, legacyRegistryFilename),
-		origin:     strings.TrimRight(strings.TrimSpace(origin), "/"),
-		artifacts:  make(map[string]artifactRecord),
-		now:        time.Now,
+		path:      filepath.Join(stateDir, registryFilename),
+		origin:    strings.TrimRight(strings.TrimSpace(origin), "/"),
+		artifacts: make(map[string]artifactRecord),
+		now:       time.Now,
 	}
-	loaded, _, err := registry.loadPath(registry.path, false)
+	_, err := registry.loadPath(registry.path)
 	if err != nil {
 		return nil, err
-	}
-	// Always inspect the legacy file, even after migration. This keeps a
-	// rollback-safe mixed-version window: if an older daemon registered another
-	// HTML host, the next artifact-aware daemon folds in that missing id instead
-	// of silently losing it. Current artifact records win on duplicate ids.
-	legacyLoaded, legacyAdded, legacyErr := registry.loadPath(registry.legacyPath, true)
-	if legacyErr != nil {
-		return nil, legacyErr
-	}
-	if legacyLoaded && (!loaded || legacyAdded) {
-		registry.mu.Lock()
-		err = registry.persistLocked()
-		registry.mu.Unlock()
-		if err != nil {
-			return nil, fmt.Errorf("migrate legacy HTML hosting registry: %w", err)
-		}
 	}
 	return registry, nil
 }
@@ -706,10 +685,8 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 }
 
 func artifactPathPrefix(path string) string {
-	for _, prefix := range []string{PathPrefix, LegacyPathPrefix} {
-		if path == prefix || strings.HasPrefix(path, prefix+"/") {
-			return prefix
-		}
+	if path == PathPrefix || strings.HasPrefix(path, PathPrefix+"/") {
+		return PathPrefix
 	}
 	return ""
 }
@@ -805,39 +782,31 @@ func (r *Registry) availableIDLocked(label, seed string) string {
 	}
 }
 
-func (r *Registry) loadPath(path string, keepExisting bool) (bool, bool, error) {
+func (r *Registry) loadPath(path string) (bool, error) {
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, false, nil
+		return false, nil
 	}
 	if err != nil {
-		return false, false, fmt.Errorf("open artifact hosting registry: %w", err)
+		return false, fmt.Errorf("open artifact hosting registry: %w", err)
 	}
 	defer file.Close()
 	var stored registryFile
 	decoder := json.NewDecoder(io.LimitReader(file, maxRegistryBytes))
 	if err := decoder.Decode(&stored); err != nil {
-		return false, false, fmt.Errorf("read artifact hosting registry: %w", err)
+		return false, fmt.Errorf("read artifact hosting registry: %w", err)
 	}
 	if stored.Version != registryVersion {
-		return false, false, fmt.Errorf("unsupported artifact hosting registry version %d", stored.Version)
+		return false, fmt.Errorf("unsupported artifact hosting registry version %d", stored.Version)
 	}
 	records := stored.Artifacts
-	if len(records) == 0 {
-		records = stored.Hosts
-	}
-	added := false
 	for _, record := range records {
 		if !validStoredRecord(record) {
-			return false, false, fmt.Errorf("invalid artifact hosting registry record %q", record.ID)
-		}
-		if _, exists := r.artifacts[record.ID]; exists && keepExisting {
-			continue
+			return false, fmt.Errorf("invalid artifact hosting registry record %q", record.ID)
 		}
 		r.artifacts[record.ID] = record
-		added = true
 	}
-	return true, added, nil
+	return true, nil
 }
 
 func (r *Registry) persistLocked() error {

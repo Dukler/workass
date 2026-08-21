@@ -161,34 +161,6 @@ test('portable bootstrap starts the sibling Windows daemon when no daemon is hea
 	assert.equal(calls[1].expectedVersion, '1.2.3');
 });
 
-test('portable Windows upgrade stops the pre-LAN loopback daemon before starting port 80', async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-migrate-'));
-	const daemonPath = path.join(root, 'workass-daemon.exe');
-	fs.writeFileSync(daemonPath, 'daemon');
-	fs.writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({ schemaVersion: 2, platform: 'windows', version: '1.2.4' }));
-	const runtime = {
-		profile: 'prod', daemonURL: 'https://127.0.0.1:80', daemonPort: 80, daemonBind: 'lan',
-		dataRoot: path.join(root, 'data'), stateDir: path.join(root, 'data', 'state'),
-		logRoot: path.join(root, 'data', 'logs'), browserControlFile: path.join(root, 'data', 'run', 'browser.json'),
-	};
-	const calls = [];
-	const result = await ensurePortableDaemon({
-		runtime, resourcesPath: path.join(root, 'resources'), executablePath: path.join(root, 'Workass.exe'), platform: 'win32',
-		check: async (url) => url === 'https://127.0.0.1:8788',
-		shutdown: async (url) => { calls.push(['shutdown', url]); return true; },
-		waitForDown: async (url) => { calls.push(['down', url]); return true; },
-		wait: async (_url, options) => { calls.push(['wait', options.expectedVersion]); return true; },
-		childSpawn: () => { calls.push(['start']); return { pid: 80, unref() {} }; },
-	});
-	assert.equal(result.status, 'started-and-running');
-	assert.deepEqual(calls, [
-		['shutdown', 'https://127.0.0.1:8788'],
-		['down', 'https://127.0.0.1:8788'],
-		['start'],
-		['wait', '1.2.4'],
-	]);
-});
-
 test('portable Windows bootstrap replaces a stale daemon already on port 80', async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-stale-'));
 	const daemonPath = path.join(root, 'workass-daemon.exe');

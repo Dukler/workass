@@ -189,18 +189,6 @@ async function ensurePortableDaemon({
 
 	const manifest = portableReleaseManifest(resourcesPath);
 	const expectedVersion = manifest?.version || '';
-	// The first LAN-default Windows release must stop a still-running 0.1.x
-	// loopback daemon before it starts the bundled daemon on port 80.
-	if (platform === 'win32' && runtime.profile === 'prod' && runtime.daemonPort !== 8788) {
-		const previousURL = new URL(runtime.daemonURL);
-		previousURL.hostname = '127.0.0.1';
-		previousURL.port = '8788';
-		const previousDaemonURL = previousURL.toString().replace(/\/$/, '');
-		if (await check(previousDaemonURL)) {
-			if (!await shutdown(previousDaemonURL)) throw new Error(`previous Workass daemon refused shutdown: ${previousDaemonURL}`);
-			if (!await waitForDown(previousDaemonURL, { check })) throw new Error(`previous Workass daemon did not stop: ${previousDaemonURL}`);
-		}
-	}
 
 	if (await check(runtime.daemonURL, 700, expectedVersion)) return { status: 'already-running', manifest };
 	if (expectedVersion && await check(runtime.daemonURL)) {

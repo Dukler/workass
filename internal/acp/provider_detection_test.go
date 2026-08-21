@@ -43,30 +43,69 @@ func TestProviderDetectionDefaultRetryCadenceMatchesPortContract(t *testing.T) {
 func TestProviderDetectionAllowsFullInitializeAndSessionBudgets(t *testing.T) {
 	root := repoRoot(t)
 	pathDir := t.TempDir()
+	initGate := filepath.Join(pathDir, "initialize-gate")
+	sessionGate := filepath.Join(pathDir, "session-gate")
 	installFakeAgentWrapperWithEnv(t, pathDir, "devin", "split-probe-delay", map[string]string{
-		"WORKASS_FAKE_ACP_INIT_DELAY":    "200ms",
-		"WORKASS_FAKE_ACP_SESSION_DELAY": "410ms",
+		"WORKASS_FAKE_ACP_INIT_GATE":    initGate,
+		"WORKASS_FAKE_ACP_SESSION_GATE": sessionGate,
 	})
 	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("ASSISTANT_DEVIN", filepath.Join(pathDir, "devin"))
 
 	original := providerRegistrations["devin"]
 	registration := original
-	registration.ProbeTimeout = 600 * time.Millisecond
+	registration.ProbeTimeout = 1500 * time.Millisecond
 	providerRegistrations["devin"] = registration
 	t.Cleanup(func() { providerRegistrations["devin"] = original })
 
 	manager := NewManager(Options{
 		RootDir:           root,
-		InitTimeout:       600 * time.Millisecond,
+		InitTimeout:       1500 * time.Millisecond,
 		RSSSampleInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	manager.DetectProviders(ctx, DetectOptions{ProviderID: "devin"})
+	detected := make(chan struct{})
+	go func() {
+		manager.DetectProviders(ctx, DetectOptions{ProviderID: "devin"})
+		close(detected)
+	}()
+	waitForFakeACPProbeGate(t, initGate)
+	// Each stage is held for less than its 1500 ms request budget, while the
+	// pair is longer than one budget. A single outer timeout would therefore
+	// fail; the enclosing detection context must allow both requests.
+	time.Sleep(800 * time.Millisecond)
+	if err := os.WriteFile(initGate+".release", []byte("release\n"), 0o600); err != nil {
+		t.Fatalf("release initialize probe gate: %v", err)
+	}
+	waitForFakeACPProbeGate(t, sessionGate)
+	time.Sleep(800 * time.Millisecond)
+	if err := os.WriteFile(sessionGate+".release", []byte("release\n"), 0o600); err != nil {
+		t.Fatalf("release session probe gate: %v", err)
+	}
+	select {
+	case <-detected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider detection did not finish after releasing both probe stages")
+	}
 	assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusReady, true)
+}
+
+func waitForFakeACPProbeGate(t *testing.T, gate string) {
+	t.Helper()
+	entered := gate + ".entered"
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(entered); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for fake ACP probe gate %s", entered)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *testing.T) {

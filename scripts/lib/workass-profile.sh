@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Canonical profile loader shared by macOS launch, package, migration, and
+# Canonical profile loader shared by macOS launch, package, and
 # rebuild scripts. Call workass_load_profile <prod|dev|test> after defining
 # WORKASS_REPO_ROOT. Profile files are trusted repository inputs, but still use
 # a strict assignment-only grammar so a local override cannot execute commands.

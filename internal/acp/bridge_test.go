@@ -2824,6 +2824,16 @@ func TestFakeACPHelper(t *testing.T) {
 	os.Exit(0)
 }
 
+func waitFakeACPProbeGate(gate string) {
+	_ = os.WriteFile(gate+".entered", []byte("entered\n"), 0o600)
+	for {
+		if _, err := os.Stat(gate + ".release"); err == nil {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 type fakeACP struct {
 	mode       string
 	mu         sync.Mutex
@@ -2897,7 +2907,11 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 		case "init-hang":
 			select {}
 		case "split-probe-delay":
-			time.Sleep(fakeACPDelay("WORKASS_FAKE_ACP_INIT_DELAY", 800*time.Millisecond))
+			if gate := os.Getenv("WORKASS_FAKE_ACP_INIT_GATE"); gate != "" {
+				waitFakeACPProbeGate(gate)
+			} else {
+				time.Sleep(fakeACPDelay("WORKASS_FAKE_ACP_INIT_DELAY", 800*time.Millisecond))
+			}
 		case "crash-stderr":
 			_, _ = fmt.Fprint(os.Stderr, "abcdefghijklmnopqrstuvwxyz0123456789")
 			os.Exit(7)
@@ -2964,7 +2978,11 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 		})
 	case "session/new":
 		if s.mode == "split-probe-delay" {
-			time.Sleep(fakeACPDelay("WORKASS_FAKE_ACP_SESSION_DELAY", 1300*time.Millisecond))
+			if gate := os.Getenv("WORKASS_FAKE_ACP_SESSION_GATE"); gate != "" {
+				waitFakeACPProbeGate(gate)
+			} else {
+				time.Sleep(fakeACPDelay("WORKASS_FAKE_ACP_SESSION_DELAY", 1300*time.Millisecond))
+			}
 		}
 		if s.mode == "auth-on-session" || s.mode == "auth-on-session-secret" {
 			message := "Authentication required"

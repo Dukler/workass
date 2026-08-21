@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"os"
 	"strings"
 	"time"
 
@@ -138,16 +137,9 @@ func machineAddError(err error) string {
 	}
 }
 
-// beaconDefault reads the compatibility profile switch for automatic machine
-// discovery. The historical flag name remains stable, but discovery itself is
-// now the PORT-SPEC-required private-LAN TCP port-80 probe, not a UDP beacon.
+// beaconDefault enables the current private-LAN discovery probe by default.
 func beaconDefault() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("WORKASS_DAEMON_BEACON"))) {
-	case "0", "false", "off", "no":
-		return false
-	default:
-		return true
-	}
+	return true
 }
 
 // machinePresenceOptions is how the daemon is exposed to other machines.

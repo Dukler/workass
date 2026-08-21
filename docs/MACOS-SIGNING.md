@@ -2,8 +2,8 @@
 
 macOS privacy grants belong to a code-signing designated requirement, not to an
 app name or filesystem path. A release whose identity is only its CDHash is a
-different app after every rebuild. That was Workass's legacy state for both
-`/Applications/Workass.app` and the separately launched Go daemon.
+different app after every rebuild. Workass therefore requires one persistent
+identity for `/Applications/Workass.app` and the separately launched Go daemon.
 
 The build and release scripts now enforce five invariants:
 
@@ -85,23 +85,6 @@ once. Rebuilds after that are silent.
 
 A build without an identity is not blocked, only reported:
 `warning: macOS will ask for permissions again after every rebuild`.
-
-## One-time migration from the legacy ad-hoc build
-
-The existing installed app and daemon cannot be mutually compatible with a
-stable signer because their old designated requirements contain only specific
-CDHashes. One final privacy reauthorization is therefore unavoidable during
-the migration:
-
-```sh
-scripts/package-workass-macos.sh --migrate-signing-identity
-scripts/rebuild-workass-macos.sh daemon --profile prod --migrate-signing-identity
-```
-
-The daemon command remains a terminal production handoff and follows the
-ordinary Workass release safety workflow. After this one migration, omit both
-flags. Any later identity mismatch is an error rather than a silent permission
-reset.
 
 ## Verification
 

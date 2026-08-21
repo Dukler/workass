@@ -330,11 +330,10 @@ func bindingThreadIDs(binding nativeSessionBinding) []string {
 	return []string{root, head}
 }
 
-func (l *nativeSessionLedger) matchingBindingsLocked(tabID, chatID, providerID, sessionID string) []struct {
+func (l *nativeSessionLedger) matchingBindingsLocked(chatID, providerID, sessionID string) []struct {
 	key     string
 	binding nativeSessionBinding
 } {
-	_ = strings.TrimSpace(tabID) // compatibility parameter; never lane identity.
 	chatID = strings.TrimSpace(chatID)
 	providerID = normalizeProviderID(providerID)
 	sessionID = strings.TrimSpace(sessionID)
@@ -427,7 +426,7 @@ func (l *nativeSessionLedger) get(tabID, chatID, providerID string) (nativeSessi
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(tabID, chatID, providerID, "")
+	matches := l.matchingBindingsLocked(chatID, providerID, "")
 	if len(matches) == 0 {
 		return nativeSessionBinding{}, false
 	}
@@ -452,7 +451,7 @@ func (l *nativeSessionLedger) getForWorkspace(tabID, chatID, providerID, cwd str
 	wanted := string(nativeWorkspaceEpoch(cwd))
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(tabID, chatID, providerID, "")
+	matches := l.matchingBindingsLocked(chatID, providerID, "")
 	filtered := matches[:0]
 	for _, match := range matches {
 		if match.binding.WorkspaceEpoch == wanted {
@@ -475,7 +474,7 @@ func (l *nativeSessionLedger) getForWorkspaceEpoch(tabID, chatID, providerID str
 	wanted := strings.TrimSpace(string(epoch))
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(tabID, chatID, providerID, "")
+	matches := l.matchingBindingsLocked(chatID, providerID, "")
 	var found nativeSessionBinding
 	count := 0
 	for _, match := range matches {
@@ -493,7 +492,7 @@ func (l *nativeSessionLedger) getForSession(tabID, chatID, providerID, sessionID
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	matches := l.matchingBindingsLocked(chatID, providerID, sessionID)
 	if len(matches) != 1 {
 		return nativeSessionBinding{}, false
 	}
@@ -605,7 +604,7 @@ func (l *nativeSessionLedger) adoptProviderSession(
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	matches := l.matchingBindingsLocked(chatID, providerID, sessionID)
 	if len(matches) != 1 {
 		return false
 	}
@@ -679,7 +678,7 @@ func (l *nativeSessionLedger) updateControls(tabID, chatID, providerID, sessionI
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	matches := l.matchingBindingsLocked(chatID, providerID, sessionID)
 	if len(matches) != 1 {
 		return
 	}
@@ -705,7 +704,7 @@ func (l *nativeSessionLedger) updateAttachment(tabID, chatID, providerID, sessio
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	matches := l.matchingBindingsLocked(chatID, providerID, sessionID)
 	if len(matches) != 1 {
 		return false
 	}
@@ -734,7 +733,7 @@ func (l *nativeSessionLedger) markInFlight(
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	matches := l.matchingBindingsLocked(chatID, providerID, sessionID)
 	if len(matches) != 1 || matches[0].binding.Generation != generation {
 		return false
 	}
@@ -778,7 +777,7 @@ func (l *nativeSessionLedger) markOperationConsumedAndCommit(tabID, chatID, prov
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	matches := l.matchingBindingsLocked(chatID, providerID, sessionID)
 	if len(matches) != 1 {
 		return nativeSessionBinding{}, false
 	}
@@ -810,7 +809,7 @@ func (l *nativeSessionLedger) settleOperation(
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	matches := l.matchingBindingsLocked(chatID, providerID, sessionID)
 	if len(matches) != 1 {
 		return false
 	}
@@ -850,7 +849,7 @@ func (l *nativeSessionLedger) recordOperationReadback(
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	matches := l.matchingBindingsLocked(chatID, providerID, sessionID)
 	if len(matches) != 1 {
 		return false
 	}
@@ -902,7 +901,7 @@ func (l *nativeSessionLedger) delete(tabID, chatID, providerID, sessionID string
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(tabID, chatID, providerID, sessionID)
+	matches := l.matchingBindingsLocked(chatID, providerID, sessionID)
 	if len(matches) != 1 {
 		return
 	}

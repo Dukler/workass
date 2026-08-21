@@ -128,8 +128,8 @@ Approval flow:
    client only. Deny or 120-second timeout sends `lan:access-state` with `state:"denied"` or
    `state:"timeout"` and closes the pending socket.
 
-`lan:pairing-info` remains registered for identifier compatibility but is deprecated and returns
-`{ deprecated:true }` plus any current access status. It no longer accepts or validates PINs.
+`lan:pairing-info` is a reserved frozen channel. It returns `{ deprecated:true }` plus
+any current access status and never accepts or validates PINs.
 
 Localhost dev ergonomics: when `--trust-localhost=true`, localhost WebSocket clients without a
 valid token are auto-approved and receive a token without host approval. Tests can force the real
@@ -237,7 +237,8 @@ workass-daemon.exe --prod --headless --install-service
 
 Windows uses a least-privilege Scheduled Task and macOS uses a user LaunchAgent;
 both launch the same daemon with an explicit state directory, port, and bind.
-The legacy Windows service wrapper remains for existing endpoint workflows.
+The separate Windows scheduled-task wrapper remains available for endpoint
+workflows.
 
 macOS user launchd install:
 
@@ -327,7 +328,7 @@ event/reply/proc RSS counts are printed.
 - The invoke/reply/event JSON protocol is active.
 - Broadcast events fan out to connected clients.
 - `app:meta` returns daemon metadata.
-- `state:get` is a frozen compatibility method that returns an empty work queue: `{ "runAt": null, "items": [] }`.
+- `state:get` is a reserved frozen method that returns an empty work queue: `{ "runAt": null, "items": [] }`.
 - `app-chat:new-session` launches one mock ACP subprocess per chat key and returns ACP session info.
 - `job:start` supports `kind: "app-chat"` only. Other job kinds return `not implemented until P2`.
 - ACP `session/update` notifications emit `job:event` payloads for start/data/end, tools, thinking, plan, and usage.

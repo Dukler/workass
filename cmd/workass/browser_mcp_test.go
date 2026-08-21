@@ -150,3 +150,16 @@ func TestBrowserMCPReturnsToolErrorWhenBrowserIsUnavailable(t *testing.T) {
 		t.Fatalf("result = %#v", result)
 	}
 }
+
+func TestBrowserMCPRejectsLegacyCamelOperationID(t *testing.T) {
+	result, err := callBrowserMCPTool(browserMCPCallParams{
+		Name: "workass_browser_click", Arguments: map[string]any{"operationId": "old", "selector": "#save"},
+	}, browserMCPOptions{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(result)
+	if !strings.Contains(string(encoded), `"isError":true`) || !strings.Contains(string(encoded), "operation_id") {
+		t.Fatalf("legacy operation id result = %s", encoded)
+	}
+}

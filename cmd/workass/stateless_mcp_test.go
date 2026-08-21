@@ -16,6 +16,7 @@ import (
 
 	"workass/internal/acp"
 	"workass/internal/chat"
+	"workass/internal/mcpprotocol"
 	providercontract "workass/internal/provider"
 )
 
@@ -129,32 +130,15 @@ func (h statelessMCPTestHarness) request(t *testing.T, id int, method, name, ver
 	return reply.StatusCode, response
 }
 
-func (h statelessMCPTestHarness) legacyRequest(
-	t *testing.T,
-	path string,
-	id any,
-	method, version string,
-	params map[string]any,
-) (int, map[string]any) {
+func (h statelessMCPTestHarness) requestInitialized(t *testing.T, id int, method, version string, params map[string]any) (int, map[string]any) {
 	t.Helper()
-	return legacyStatelessMCPRequest(t, h.client, h.server.URL, path, id, method, version, params)
-}
-
-func legacyStatelessMCPRequest(
-	t *testing.T,
-	client *http.Client,
-	baseURL, path string,
-	id any,
-	method, version string,
-	params map[string]any,
-) (int, map[string]any) {
-	t.Helper()
-	message := map[string]any{"jsonrpc": "2.0", "method": method, "params": params}
-	if id != nil {
-		message["id"] = id
+	if params == nil {
+		params = map[string]any{}
 	}
-	body, _ := json.Marshal(message)
-	request, err := http.NewRequest(http.MethodPost, baseURL+path, bytes.NewReader(body))
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": id, "method": method, "params": params,
+	})
+	request, err := http.NewRequest(http.MethodPost, h.server.URL+agentMCPPath, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,38 +147,23 @@ func legacyStatelessMCPRequest(
 	request.Header.Set("X-Workass-Tab-ID", "mcp-tab")
 	request.Header.Set("Accept", "application/json, text/event-stream")
 	request.Header.Set("Content-Type", "application/json")
-	if version != "" {
-		request.Header.Set("MCP-Protocol-Version", version)
-	}
-	reply, err := client.Do(request)
+	request.Header.Set("MCP-Protocol-Version", version)
+	reply, err := h.client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reply.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(reply.Body, 8*1024*1024))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(bytes.TrimSpace(data)) == 0 {
-		return reply.StatusCode, nil
-	}
 	var response map[string]any
-	if err := json.Unmarshal(data, &response); err != nil {
-		t.Fatalf("invalid JSON-RPC response (%d): %v: %s", reply.StatusCode, err, data)
+	if err := json.NewDecoder(io.LimitReader(reply.Body, 8*1024*1024)).Decode(&response); err != nil {
+		t.Fatalf("invalid initialized JSON-RPC response (%d): %v", reply.StatusCode, err)
 	}
 	return reply.StatusCode, response
 }
 
 func TestStatelessMCPProtocolBoundaries(t *testing.T) {
 	harness := newStatelessMCPTestHarness(t)
-	t.Run("modern and Qwen lifecycles", func(t *testing.T) {
-		assertStatelessMCPModernAndQwenLifecycles(t, harness)
-	})
-	t.Run("every supported legacy revision", func(t *testing.T) {
-		assertStatelessMCPLegacyNegotiatesEverySupportedRevision(t, harness)
-	})
-	t.Run("browser legacy HTTP", func(t *testing.T) {
-		assertBrowserStatelessMCPSupportsLegacyHTTP(t, harness)
+	t.Run("modern lifecycle", func(t *testing.T) {
+		assertStatelessMCPModernLifecycle(t, harness)
 	})
 	t.Run("protocol and authentication rejection", func(t *testing.T) {
 		assertStatelessMCPRejectsHeaderMismatchUnsupportedVersionAndBadAuth(t, harness)
@@ -204,7 +173,7 @@ func TestStatelessMCPProtocolBoundaries(t *testing.T) {
 	})
 }
 
-func assertStatelessMCPModernAndQwenLifecycles(t *testing.T, harness statelessMCPTestHarness) {
+func assertStatelessMCPModernLifecycle(t *testing.T, harness statelessMCPTestHarness) {
 	status, response := harness.request(t, 1, "server/discover", "", statelessMCPProtocolVersion, map[string]any{})
 	result := mapFromAnyMain(response["result"])
 	meta := mapFromAnyMain(result["_meta"])
@@ -220,36 +189,6 @@ func assertStatelessMCPModernAndQwenLifecycles(t *testing.T, harness statelessMC
 		t.Fatalf("tools/list status=%d response=%#v", status, response)
 	}
 
-	status, response = harness.legacyRequest(t, agentMCPPath, 3, "initialize", "", map[string]any{
-		"protocolVersion": "2025-11-25",
-		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "qwen-code", "version": "0.21.12"},
-	})
-	legacy := mapFromAnyMain(response["result"])
-	if status != http.StatusOK || legacy["protocolVersion"] != "2025-11-25" ||
-		mapFromAnyMain(legacy["serverInfo"])["name"] != "workass-agent" || legacy["resultType"] != nil || legacy["_meta"] != nil {
-		t.Fatalf("Qwen initialize status=%d response=%#v", status, response)
-	}
-
-	status, response = harness.legacyRequest(t, agentMCPPath, nil, "notifications/initialized", "2025-11-25", map[string]any{})
-	if status != http.StatusAccepted || response != nil {
-		t.Fatalf("Qwen initialized notification status=%d response=%#v", status, response)
-	}
-
-	status, response = harness.legacyRequest(t, agentMCPPath, 4, "tools/list", "2025-11-25", map[string]any{})
-	legacy = mapFromAnyMain(response["result"])
-	if status != http.StatusOK || len(legacy["tools"].([]any)) != 24 || legacy["resultType"] != nil || legacy["_meta"] != nil {
-		t.Fatalf("Qwen tools/list status=%d response=%#v", status, response)
-	}
-
-	status, response = harness.legacyRequest(t, agentMCPPath, 5, "tools/call", "2025-11-25", map[string]any{
-		"name": "workass_list_chats", "arguments": map[string]any{},
-	})
-	legacy = mapFromAnyMain(response["result"])
-	if status != http.StatusOK || legacy["resultType"] != nil || legacy["_meta"] != nil || len(legacy["content"].([]any)) == 0 {
-		t.Fatalf("Qwen tools/call status=%d response=%#v", status, response)
-	}
-
 	get, err := http.NewRequest(http.MethodGet, harness.server.URL+agentMCPPath, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -260,50 +199,7 @@ func assertStatelessMCPModernAndQwenLifecycles(t *testing.T, harness statelessMC
 	}
 	defer getReply.Body.Close()
 	if getReply.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("legacy GET status = %d", getReply.StatusCode)
-	}
-}
-
-func assertStatelessMCPLegacyNegotiatesEverySupportedRevision(t *testing.T, harness statelessMCPTestHarness) {
-	versions := []string{"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07"}
-	for index, version := range versions {
-		status, response := harness.legacyRequest(t, agentMCPPath, index+1, "initialize", "", map[string]any{
-			"protocolVersion": version,
-			"capabilities":    map[string]any{},
-			"clientInfo":      map[string]any{"name": "legacy-fixture", "version": "1"},
-		})
-		if status != http.StatusOK || mapFromAnyMain(response["result"])["protocolVersion"] != version {
-			t.Fatalf("legacy %s status=%d response=%#v", version, status, response)
-		}
-	}
-}
-
-func assertBrowserStatelessMCPSupportsLegacyHTTP(t *testing.T, harness statelessMCPTestHarness) {
-	handler := newBrowserStatelessMCPHandler(
-		harness.manager, filepath.Join(t.TempDir(), "browser-control.json"), harness.runtime,
-	)
-	server := httptest.NewTLSServer(handler)
-	defer server.Close()
-
-	status, response := legacyStatelessMCPRequest(
-		t, server.Client(), server.URL, browserMCPPath, 1, "initialize", "", map[string]any{
-			"protocolVersion": "2025-11-25",
-			"capabilities":    map[string]any{},
-			"clientInfo":      map[string]any{"name": "legacy-browser-client", "version": "1"},
-		},
-	)
-	result := mapFromAnyMain(response["result"])
-	if status != http.StatusOK || result["protocolVersion"] != "2025-11-25" ||
-		mapFromAnyMain(result["serverInfo"])["name"] != "workass-browser" {
-		t.Fatalf("browser initialize status=%d response=%#v", status, response)
-	}
-
-	status, response = legacyStatelessMCPRequest(
-		t, server.Client(), server.URL, browserMCPPath, 2, "tools/list", "2025-11-25", map[string]any{},
-	)
-	result = mapFromAnyMain(response["result"])
-	if status != http.StatusOK || len(result["tools"].([]any)) == 0 || result["resultType"] != nil {
-		t.Fatalf("browser tools/list status=%d response=%#v", status, response)
+		t.Fatalf("modern GET status = %d", getReply.StatusCode)
 	}
 }
 
@@ -315,36 +211,37 @@ func assertStatelessMCPRejectsHeaderMismatchUnsupportedVersionAndBadAuth(t *test
 		t.Fatalf("unsupported version status=%d response=%#v", status, response)
 	}
 
-	status, response = harness.legacyRequest(t, agentMCPPath, 10, "initialize", statelessMCPProtocolVersion, map[string]any{
+	status, response = harness.requestInitialized(t, 10, "initialize", mcpprotocol.InitializedVersion, map[string]any{
+		"protocolVersion": mcpprotocol.InitializedVersion,
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "workass-test", "version": "1"},
+	})
+	result := mapFromAnyMain(response["result"])
+	if status != http.StatusOK || toString(result["protocolVersion"]) != mcpprotocol.InitializedVersion {
+		t.Fatalf("initialized handshake status=%d response=%#v", status, response)
+	}
+	status, response = harness.requestInitialized(t, 101, "initialize", mcpprotocol.CurrentInitializedVersion, map[string]any{
+		"protocolVersion": mcpprotocol.CurrentInitializedVersion,
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "codex-mcp-client", "version": "0.149.0"},
+	})
+	result = mapFromAnyMain(response["result"])
+	if status != http.StatusOK || toString(result["protocolVersion"]) != mcpprotocol.CurrentInitializedVersion {
+		t.Fatalf("Codex initialized handshake status=%d response=%#v", status, response)
+	}
+	status, response = harness.requestInitialized(t, 11, "tools/list", mcpprotocol.InitializedVersion, nil)
+	result = mapFromAnyMain(response["result"])
+	if status != http.StatusOK || len(result["tools"].([]any)) != 24 {
+		t.Fatalf("initialized tools/list status=%d response=%#v", status, response)
+	}
+	status, response = harness.requestInitialized(t, 12, "initialize", statelessMCPProtocolVersion, map[string]any{
 		"protocolVersion": statelessMCPProtocolVersion,
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "workass-test", "version": "1"},
 	})
-	protocolError = mapFromAnyMain(response["error"])
-	if status != http.StatusBadRequest || int(protocolError["code"].(float64)) != -32022 {
-		t.Fatalf("modern initialize downgrade status=%d response=%#v", status, response)
-	}
-
-	status, response = harness.legacyRequest(t, agentMCPPath, 10.5, "initialize", "", map[string]any{
-		"protocolVersion": statelessMCPProtocolVersion,
-	})
-	protocolError = mapFromAnyMain(response["error"])
-	if status != http.StatusBadRequest || int(protocolError["code"].(float64)) != -32022 {
-		t.Fatalf("headerless modern initialize downgrade status=%d response=%#v", status, response)
-	}
-
-	status, response = harness.legacyRequest(t, agentMCPPath, 11, "tools/list", "2025-11-25", map[string]any{
-		"_meta": map[string]any{"io.modelcontextprotocol/protocolVersion": "2024-10-07"},
-	})
-	protocolError = mapFromAnyMain(response["error"])
-	if status != http.StatusBadRequest || int(protocolError["code"].(float64)) != -32020 {
-		t.Fatalf("legacy version mismatch status=%d response=%#v", status, response)
-	}
-
-	status, response = harness.legacyRequest(t, agentMCPPath, 11.5, "initialize", "2025-11-25", map[string]any{
-		"protocolVersion": "2024-10-07",
-	})
-	protocolError = mapFromAnyMain(response["error"])
-	if status != http.StatusBadRequest || int(protocolError["code"].(float64)) != -32020 {
-		t.Fatalf("legacy initialize header/body mismatch status=%d response=%#v", status, response)
+	result = mapFromAnyMain(response["result"])
+	if status != http.StatusOK || toString(result["protocolVersion"]) != statelessMCPProtocolVersion {
+		t.Fatalf("modern initialized handshake status=%d response=%#v", status, response)
 	}
 
 	params := map[string]any{

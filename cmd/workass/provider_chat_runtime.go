@@ -89,12 +89,8 @@ func newProviderChatRuntimeWithStartupMode(manager *acp.Manager, sessions *sessi
 		return runtime
 	}
 	actorDir := filepath.Join(stateDir, "provider-chats")
-	var states []chat.State
-	if err := chat.UpgradeActorStoreV22(actorDir); err != nil {
-		runtime.bootErr = err
-	} else {
-		states, runtime.bootErr = chat.DiscoverFileStates(actorDir)
-	}
+	states, bootErr := chat.DiscoverFileStates(actorDir)
+	runtime.bootErr = bootErr
 	if runtime.bootErr == nil {
 		for _, state := range states {
 			// FileStore may contain an empty envelope from a chat:create attempt
@@ -1101,7 +1097,7 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 	sourceTabID := fieldString(arg, "tabId")
 	sourceChatID := fieldString(arg, "chatId")
 	newTabID := fieldString(arg, "newTabId")
-	newChatID := firstNonEmptyString(fieldString(arg, "newChatId"), fieldString(arg, "chatIdNew"))
+	newChatID := fieldString(arg, "newChatId")
 	if sourceTabID == "" || sourceChatID == "" || newTabID == "" || newChatID == "" {
 		return nil, errors.New("app-chat:fork requires exact source and child tab/chat ids")
 	}
@@ -1590,7 +1586,7 @@ func (r *providerChatRuntime) AdmitStart(ctx context.Context, arg map[string]any
 	if tabID == "" || chatID == "" {
 		return nil, errors.New("job:start requires exact tabId and chatId")
 	}
-	fields, err := actorTurnPublicFields(arg)
+	fields, err := actorTurnPublicFieldsInternal(arg)
 	if err != nil {
 		return nil, err
 	}
@@ -1692,7 +1688,7 @@ func (r *providerChatRuntime) existingTurnReceiptLocked(
 	if err != nil {
 		return nil, true, err
 	}
-	incomingText := strings.TrimSpace(firstNonEmptyString(fieldString(arg, "prompt"), fieldString(arg, "message")))
+	incomingText := strings.TrimSpace(fieldString(arg, "prompt"))
 	incomingOrigin := strings.ToLower(strings.TrimSpace(origin))
 	if durable.Text != incomingText || !sameSteerAttachments(durable.Attachments, attachments) ||
 		durable.Presentation.UserMessageID != fields["userMessageId"] ||
@@ -1736,7 +1732,7 @@ func (r *providerChatRuntime) queueBusyTurnLocked(
 	origin string,
 ) (map[string]any, error) {
 	operationID := providercontract.NormalizeOperationID(fields["operationId"])
-	queueID := firstNonEmptyString(fieldString(arg, "queueId"), fieldString(arg, agentQueueMessageField))
+	queueID := fieldString(arg, "queueId")
 	if queueID == "" {
 		queueID = nextSessionID("q")
 	}
@@ -1756,7 +1752,7 @@ func (r *providerChatRuntime) queueBusyTurnLocked(
 	presentation.QueueID = queueID
 	if err := actor.engine.ApplyPrepared(chat.Submit{
 		OperationID: operationID, LaneID: selection.Identity.ID,
-		Text:        firstNonEmptyString(fieldString(arg, "prompt"), fieldString(arg, "message")),
+		Text:        fieldString(arg, "prompt"),
 		Attachments: attachments, ModelID: selection.ModelID, ModeID: selection.ModeID,
 		Permission: fieldString(arg, "permissionMode"), Presentation: presentation,
 	}, attachmentPlan.Materialize); err != nil {
@@ -1910,19 +1906,32 @@ func nullableActorString(value string) any {
 }
 
 func actorTurnPublicFields(arg map[string]any) (map[string]string, error) {
+	return actorTurnPublicFieldsWithOperationPolicy(arg, true)
+}
+
+// Direct in-process actor callers are not frozen-wire clients and may omit an
+// operation id; derive one from the canonical user message identity. The wire
+// handler always uses actorTurnPublicFields above, which requires the explicit
+// modern operationId field.
+func actorTurnPublicFieldsInternal(arg map[string]any) (map[string]string, error) {
+	return actorTurnPublicFieldsWithOperationPolicy(arg, false)
+}
+
+func actorTurnPublicFieldsWithOperationPolicy(arg map[string]any, requireOperationID bool) (map[string]string, error) {
 	chatID, err := providercontract.ValidateOperationID(fieldString(arg, "chatId"))
 	if err != nil {
 		return nil, fmt.Errorf("job:start invalid chatId: %w", err)
 	}
-	userID := firstNonEmptyString(fieldString(arg, "userMessageId"), fieldString(arg, "clientUserMessageId"))
-	assistantID := firstNonEmptyString(fieldString(arg, "assistantMessageId"), fieldString(arg, "continuationAssistantMessageId"))
-	// userMessageId was the frozen wire's original idempotency key. Modern
-	// clients send the explicit alias; old exact clients remain safe because the
-	// stable public user id is itself the immutable operation identity.
+	userID := fieldString(arg, "userMessageId")
+	assistantID := fieldString(arg, "assistantMessageId")
 	if userID == "" || assistantID == "" {
 		return nil, errors.New("job:start requires stable operationId, userMessageId, and assistantMessageId")
 	}
-	operationID, err := providercontract.ValidateOperationID(firstNonEmptyString(fieldString(arg, "operationId"), userID))
+	rawOperationID := fieldString(arg, "operationId")
+	if !requireOperationID && rawOperationID == "" {
+		rawOperationID = userID
+	}
+	operationID, err := providercontract.ValidateOperationID(rawOperationID)
 	if err != nil {
 		return nil, fmt.Errorf("job:start invalid operationId: %w", err)
 	}
@@ -1933,7 +1942,7 @@ func actorTurnPublicFields(arg map[string]any) (map[string]string, error) {
 	return map[string]string{
 		"chatId": string(chatID), "operationId": string(operationID),
 		"userMessageId": userID, "assistantMessageId": assistantID,
-		"promptText": redactedSessionString(firstNonEmptyString(fieldString(arg, "prompt"), fieldString(arg, "message"))),
+		"promptText": redactedSessionString(fieldString(arg, "prompt")),
 		"startedAt":  startedAt,
 	}, nil
 }
@@ -1968,7 +1977,7 @@ func (r *providerChatRuntime) admitPreparedLocked(
 	if _, exists := actor.engine.Snapshot().Operations[operationID]; exists {
 		return r.admissionOutcomeLocked(actor, tabID, chatID, operationID)
 	}
-	prompt := firstNonEmptyString(fieldString(arg, "prompt"), fieldString(arg, "message"))
+	prompt := fieldString(arg, "prompt")
 	presentation := turnPresentation(arg, fields, origin)
 	if err := actor.engine.ApplyPrepared(chat.Submit{
 		OperationID: operationID, LaneID: selection.Identity.ID, Text: prompt, Attachments: attachmentPlan.Attachments,

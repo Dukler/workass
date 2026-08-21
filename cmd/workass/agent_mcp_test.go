@@ -110,3 +110,28 @@ func TestAgentMCPRedactsReflectedToolErrors(t *testing.T) {
 		t.Fatalf("reflected error was not redacted: %s", encoded)
 	}
 }
+
+func TestAgentMCPRejectsLegacyArgumentAliases(t *testing.T) {
+	tests := []struct {
+		name string
+		call browserMCPCallParams
+		want string
+	}{
+		{name: "camel operation id", call: browserMCPCallParams{Name: "workass_list_chats", Arguments: map[string]any{"operationId": "old"}}, want: "operation_id"},
+		{name: "permission mode", call: browserMCPCallParams{Name: "workass_spawn_subagent", Arguments: map[string]any{
+			"operation_id": "modern", "task": "task", "permission_mode": "old",
+		}}, want: "mode_id"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := callAgentMCPTool(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), test.call, agentMCPOptions{}, &agentControlHandler{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, _ := json.Marshal(result)
+			if !strings.Contains(string(encoded), test.want) || !strings.Contains(string(encoded), `"isError":true`) {
+				t.Fatalf("legacy alias result = %s", encoded)
+			}
+		})
+	}
+}

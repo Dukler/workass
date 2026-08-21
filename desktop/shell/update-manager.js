@@ -1689,6 +1689,7 @@ class UpdateManager {
     this.transactionCleanupRetryOwnerKey = '';
     this.transactionCleanupRetryCount = 0;
     this.watchedUpdateId = '';
+    this.watchedTargetHandoff = false;
     this.verifiedWorkerLeases = new Map();
     this.state = {
       supported: false,
@@ -1978,9 +1979,15 @@ class UpdateManager {
       })) {
         const active = ['preparing', 'armed', 'activating'].includes(receipt.phase);
         const transaction = this.transactionForReceipt(receipt);
+        // The target shell can become visible before the outgoing worker seals
+        // its terminal receipt. A target never interprets or takes over a
+        // transaction format created by another release; the exact durable
+        // receipt is the cross-version handoff boundary.
+        const targetHandoff = active && !transaction && this.currentVersion === receipt.targetVersion;
         const unresolvedFence = !active && transaction && handoffNeedsCancel(transaction);
         this.publish({ phase: active || unresolvedFence ? 'installing' : receipt.phase, receipt, error: receipt.error || null });
-        if (active || unresolvedFence) this.reconcileActiveReceipt(receipt);
+        if (targetHandoff) this.watchReceipt(receipt.updateId, { targetHandoff: true });
+        else if (active || unresolvedFence) this.reconcileActiveReceipt(receipt);
         else {
           this.pruneTerminalPayload(receipt);
           cleanupRequested = true;
@@ -2309,9 +2316,10 @@ class UpdateManager {
     return this.snapshot();
   }
 
-  watchReceipt(updateId = this.watchedUpdateId) {
+  watchReceipt(updateId = this.watchedUpdateId, { targetHandoff = false } = {}) {
     if (this.receiptTimer) return;
     this.watchedUpdateId = String(updateId || '');
+    this.watchedTargetHandoff = targetHandoff;
     this.receiptTimer = this.deps.repeat(() => {
       try {
         const receipt = JSON.parse(fs.readFileSync(this.receiptPath, 'utf8'));
@@ -2326,10 +2334,12 @@ class UpdateManager {
           this.deps.cancelRepeat(this.receiptTimer);
           this.receiptTimer = null;
           this.watchedUpdateId = '';
+          this.watchedTargetHandoff = false;
           this.pruneTerminalPayload(receipt);
           return;
         }
         const transaction = this.transactionForReceipt(receipt);
+        if (!transaction && this.watchedTargetHandoff && this.currentVersion === receipt.targetVersion) return;
         const lease = transaction && readJSONFile(path.join(transaction.transactionRoot, 'worker-lease.json'));
         const ownership = transaction
           ? cheapWorkerLeaseOwnership(lease, transaction, { now: this.deps.now })
@@ -2340,6 +2350,7 @@ class UpdateManager {
           this.deps.cancelRepeat(this.receiptTimer);
           this.receiptTimer = null;
           this.watchedUpdateId = '';
+          this.watchedTargetHandoff = false;
           this.reconcileActiveReceipt(receipt);
         }
       } catch { /* worker may be between atomic receipt writes */ }
@@ -2824,6 +2835,8 @@ class UpdateManager {
     this.stopAutoChecks();
     if (this.receiptTimer) this.deps.cancelRepeat(this.receiptTimer);
     this.receiptTimer = null;
+    this.watchedUpdateId = '';
+    this.watchedTargetHandoff = false;
     if (this.transactionCleanupRetryTimer) this.deps.cancelSchedule(this.transactionCleanupRetryTimer);
     this.transactionCleanupRetryTimer = null;
     this.transactionCleanupRetryOwnerKey = '';

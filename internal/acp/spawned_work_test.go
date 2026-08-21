@@ -1091,7 +1091,7 @@ func TestT10ExternalSnapshotCapPreservesAllRunningRecords(t *testing.T) {
 			t.Fatalf("terminal row displaced a running row in list: %#v", item)
 		}
 	}
-	manager.persistSpawnedWorkSnapshot(tabID, chatID)
+	manager.persistSpawnedWorkSnapshot(tabID)
 	manager.Reset()
 
 	restored := NewManager(Options{StateDir: stateDir, RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour})
@@ -1316,4 +1316,15 @@ func bridgeStateForTest(bridge *Bridge) EngineState {
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
 	return bridge.state
+}
+
+func TestNormalizeSpawnedWorkRoleAcceptsOnlyCanonicalRoles(t *testing.T) {
+	for _, role := range []string{"server", "daemon", "task", "job"} {
+		if got := normalizeSpawnedWorkRole(role); got != "" {
+			t.Fatalf("legacy role %q normalized to %q", role, got)
+		}
+	}
+	if normalizeSpawnedWorkRole("service") != spawnedWorkRoleService || normalizeSpawnedWorkRole("work") != spawnedWorkRoleWork {
+		t.Fatal("canonical spawned-work roles were not preserved")
+	}
 }

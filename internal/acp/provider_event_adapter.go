@@ -353,32 +353,6 @@ func (m *Manager) providerLaneForFrozenPayload(payload map[string]any) *managerL
 	return nil
 }
 
-// ProviderLaneOwnsFrozenEvent reports whether a frozen wire event has already
-// crossed the durable actor ingress. It is used only to suppress the obsolete
-// renderer-mirror semantic writer; publication still happens unchanged.
-func (m *Manager) ProviderLaneOwnsFrozenEvent(channel string, raw any) bool {
-	if m == nil || strings.TrimSpace(channel) != "job:event" {
-		return false
-	}
-	payload := mapFromAny(raw)
-	typeName := strings.TrimSpace(asString(payload["type"]))
-	if typeName == "usage" {
-		return m.providerLaneForSession(asString(payload["sessionId"])) != nil
-	}
-	if typeName == "start" || typeName == "end" {
-		job := mapFromAny(payload["job"])
-		if m.providerLaneForJob(asString(job["id"])) != nil {
-			return true
-		}
-		if m.providerLaneClosedJob(asString(job["id"])) {
-			return true
-		}
-		return m.providerLaneForSession(asString(job["sessionId"])) != nil
-	}
-	jobID := asString(payload["id"])
-	return m.providerLaneForJob(jobID) != nil || m.providerLaneClosedJob(jobID)
-}
-
 func (m *Manager) observeProviderLaneJobEvent(payload map[string]any) error {
 	switch strings.TrimSpace(asString(payload["type"])) {
 	case "start":

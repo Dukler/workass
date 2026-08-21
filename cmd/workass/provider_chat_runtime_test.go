@@ -27,92 +27,6 @@ func newTestProviderChatRuntime(t *testing.T, manager *acp.Manager, store *sessi
 	return runtime
 }
 
-func TestProviderChatRuntimeUpgradesV21OriginsBeforeActorDiscovery(t *testing.T) {
-	stateDir := t.TempDir()
-	path := providerChatStatePath(stateDir, "origin-upgrade-chat")
-	state, err := chat.NewState("origin-upgrade-chat")
-	if err != nil {
-		t.Fatal(err)
-	}
-	state, _, err = chat.Reduce(state, chat.InitializeChat{
-		Presentation: chat.PresentationState{TabID: "origin-upgrade-tab", ProviderID: "mock"},
-		OperationID:  "create-origin-upgrade", Digest: "create-origin-upgrade-digest",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	identity := providercontract.LaneIdentity{
-		ChatID: state.ChatID,
-		Realm: providercontract.Realm{
-			ProviderID: "mock", MachineID: "machine", AccountScope: "default", InstallScope: "official",
-		},
-		WorkspaceEpoch: "workspace",
-	}.Normalize()
-	state, _, err = chat.Reduce(state, chat.SelectLane{
-		Identity: identity, Owner: providercontract.AttachmentOwner{TabID: "origin-upgrade-tab"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	state.Outbox = append(state.Outbox, chat.OutboxEntry{
-		ID: "turn-steer:old-steer", Kind: chat.EffectSteerTurn, Status: chat.OutboxCompleted,
-		LaneID: identity.ID, OperationID: "old-steer",
-		Input: &chat.QueueEntry{
-			OperationID: "old-steer", LaneID: identity.ID, Text: "old steer",
-			Presentation: providercontract.TurnPresentation{Origin: "human"},
-		},
-		Turn: providercontract.TurnRef{OperationID: "turn", NativeID: "native-turn"},
-	})
-	if err := (chat.FileStore{Path: path}).Save(state); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var envelope map[string]any
-	if err := json.Unmarshal(raw, &envelope); err != nil {
-		t.Fatal(err)
-	}
-	envelope["v"] = 21
-	actorState := mapFromAnyMain(envelope["state"])
-	outbox := anySlice(actorState["Outbox"])
-	input := mapFromAnyMain(mapFromAnyMain(outbox[len(outbox)-1])["Input"])
-	presentation := mapFromAnyMain(input["Presentation"])
-	presentation["Origin"] = ""
-	raw, err = json.Marshal(envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	store := sharedSessionStore(stateDir)
-	manager := acp.NewManager(acp.Options{StateDir: stateDir, RuntimeProfile: "dev"})
-	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
-	if _, known := runtime.known[state.ChatID]; !known {
-		t.Fatal("upgraded actor was not discovered")
-	}
-	committed, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(committed, &envelope); err != nil {
-		t.Fatal(err)
-	}
-	if intValue(envelope["v"]) != 22 {
-		t.Fatalf("actor schema = %v, want 22", envelope["v"])
-	}
-	actorState = mapFromAnyMain(envelope["state"])
-	outbox = anySlice(actorState["Outbox"])
-	input = mapFromAnyMain(mapFromAnyMain(outbox[len(outbox)-1])["Input"])
-	presentation = mapFromAnyMain(input["Presentation"])
-	if fieldString(presentation, "Origin") != "human" {
-		t.Fatalf("upgraded origin = %#v", presentation["Origin"])
-	}
-}
-
 func TestRendererChatCreationIsDurableIdempotentAndIndependentFromProviderAttachment(t *testing.T) {
 	stateDir := t.TempDir()
 	store := sharedSessionStore(stateDir)
@@ -559,7 +473,7 @@ func TestProviderLaneSelectionIsReadOnlyUntilAtomicReceiptCommit(t *testing.T) {
 
 	selection := map[string]any{
 		"tabId": "selection-tab", "chatId": "selection-chat", "operationId": "selection-commit",
-		"providerId": "mock", "currentModelId": "mock-deterministic", "currentModeId": "ask",
+		"providerId": "mock", "modelId": "mock-deterministic", "modeId": "ask",
 	}
 	first, err := runtime.SelectNewChat(context.Background(), selection)
 	if err != nil {
@@ -579,7 +493,7 @@ func TestProviderLaneSelectionIsReadOnlyUntilAtomicReceiptCommit(t *testing.T) {
 	}
 	revision, providerID, modelID, modeID := committed.Presentation.RuntimeControlRevision, committed.Presentation.ProviderID, committed.Presentation.CurrentModelID, committed.Presentation.CurrentModeID
 	conflict := cloneJSON(selection).(map[string]any)
-	conflict["currentModelId"] = "different-model"
+	conflict["modelId"] = "different-model"
 	if _, err := runtime.SelectNewChat(context.Background(), conflict); err == nil {
 		t.Fatal("conflicting lane-selection operation id was accepted")
 	}

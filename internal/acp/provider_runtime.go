@@ -257,8 +257,7 @@ func (m *Manager) resolveProviderAttachment(ctx context.Context, attachment prov
 
 const providerAdmissionReceiptLimit = 2048
 
-func providerAdmissionKey(tabID, chatID string, operationID providercontract.OperationID) string {
-	_ = strings.TrimSpace(tabID) // compatibility parameter; tab is not ownership.
+func providerAdmissionKey(chatID string, operationID providercontract.OperationID) string {
 	return strings.TrimSpace(chatID) + "\x00" + string(providercontract.NormalizeOperationID(string(operationID)))
 }
 
@@ -270,7 +269,7 @@ func (m *Manager) recordProviderLaneAdmission(tabID, chatID string, operationID 
 	if m == nil || operationID == "" || strings.TrimSpace(asString(job["id"])) == "" {
 		return
 	}
-	key := providerAdmissionKey(tabID, chatID, operationID)
+	key := providerAdmissionKey(chatID, operationID)
 	copyJob := cloneMap(job)
 	m.providerAdmissionMu.Lock()
 	if _, exists := m.providerAdmissions[key]; !exists {
@@ -292,7 +291,7 @@ func (m *Manager) ProviderLaneAdmission(tabID, chatID string, operationID provid
 	if m == nil || operationID == "" {
 		return nil, false
 	}
-	key := providerAdmissionKey(tabID, chatID, operationID)
+	key := providerAdmissionKey(chatID, operationID)
 	m.providerAdmissionMu.Lock()
 	job, ok := m.providerAdmissions[key]
 	m.providerAdmissionMu.Unlock()

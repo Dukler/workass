@@ -110,8 +110,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveMocks(w, r, rel)
 		return
 	}
-	if rel == artifacthost.PathPrefix || strings.HasPrefix(rel, artifacthost.PathPrefix+"/") ||
-		rel == artifacthost.LegacyPathPrefix || strings.HasPrefix(rel, artifacthost.LegacyPathPrefix+"/") {
+	if rel == artifacthost.PathPrefix || strings.HasPrefix(rel, artifacthost.PathPrefix+"/") {
 		if s.ArtifactHosts == nil {
 			http.NotFound(w, r)
 			return

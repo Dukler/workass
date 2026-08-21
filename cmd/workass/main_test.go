@@ -783,7 +783,7 @@ func TestWireBusyStartQueuesCapabilityAwareFollowUpWithoutFailedTranscript(t *te
 	}
 
 	client.invoke(t, 2, "job:start", map[string]any{
-		"kind": "app-chat", "title": "Busy collision", "tabId": tabID, "chatId": chatID,
+		"operationId": "wire-busy-first", "kind": "app-chat", "title": "Busy collision", "tabId": tabID, "chatId": chatID,
 		"sessionId": sessionID, "providerId": "mock", "prompt": "[mock:hold-until-steer] first turn",
 		"userMessageId": "busy-first-user", "assistantMessageId": "busy-first-assistant",
 	})
@@ -797,7 +797,7 @@ func TestWireBusyStartQueuesCapabilityAwareFollowUpWithoutFailedTranscript(t *te
 	}
 
 	client.invoke(t, 3, "job:start", map[string]any{
-		"kind": "app-chat", "title": "Busy collision", "tabId": tabID, "chatId": chatID,
+		"operationId": "wire-busy-follow", "kind": "app-chat", "title": "Busy collision", "tabId": tabID, "chatId": chatID,
 		"sessionId": sessionID, "providerId": "mock", "prompt": "follow up exactly once",
 		"userMessageId": "busy-follow-user", "assistantMessageId": "busy-follow-assistant",
 		"busyMode": "queue-v1",
@@ -4756,7 +4756,7 @@ func TestWireFreshProviderGetsHistorySeedAndEstablishedLaneUsesSafeImport(t *tes
 
 	// Turn 1 on the mock engine.
 	client.invoke(t, 2, "job:start", map[string]any{
-		"kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": sessionID,
+		"operationId": "wire-provider-switch-mock", "kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": sessionID,
 		"providerId": "mock", "prompt": "primer turno con el mock",
 		"userMessageId": "switch-user-1", "assistantMessageId": "switch-assistant-1",
 	})
@@ -4787,7 +4787,7 @@ func TestWireFreshProviderGetsHistorySeedAndEstablishedLaneUsesSafeImport(t *tes
 		t.Fatalf("fresh target provider lane did not attach: %#v", fakeSession)
 	}
 	client.invoke(t, 4, "job:start", map[string]any{
-		"kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": fieldString(fakeSession, "sessionId"),
+		"operationId": "wire-provider-switch-fake", "kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": fieldString(fakeSession, "sessionId"),
 		"providerId": "fake-agent", "prompt": "continuar con el agente nuevo",
 		"userMessageId": "switch-user-fresh", "assistantMessageId": "switch-assistant-fresh",
 	})
@@ -4815,7 +4815,7 @@ func TestWireFreshProviderGetsHistorySeedAndEstablishedLaneUsesSafeImport(t *tes
 		t.Fatalf("original lane was not resumed exactly: %#v", resumed)
 	}
 	client.invoke(t, 6, "job:start", map[string]any{
-		"kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": sessionID,
+		"operationId": "wire-provider-switch-mock-second", "kind": "app-chat", "chatId": "chat-switch", "tabId": "switch-tab", "sessionId": sessionID,
 		"providerId": "mock", "prompt": "segundo turno exacto",
 		"userMessageId": "switch-user-2", "assistantMessageId": "switch-assistant-2",
 	})

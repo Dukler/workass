@@ -47,13 +47,14 @@ func TestStatsCountEventBytesPerChannel(t *testing.T) {
 	if broadcasts, _ := stats["broadcasts"].(uint64); broadcasts != 1 {
 		t.Fatalf("broadcasts = %v, want 1", stats["broadcasts"])
 	}
-	enqueueAvg, avgOK := stats["enqueueAvgMs"].(float64)
-	enqueueMax, maxOK := stats["enqueueMaxMs"].(float64)
-	if !avgOK || !maxOK {
-		t.Fatalf("canonical enqueue timing metrics missing: %v", stats)
+	if _, ok := stats["enqueueAvgMs"].(float64); !ok {
+		t.Fatalf("canonical enqueue average timing metric missing: %v", stats)
 	}
-	if stats["broadcastAvgMs"] != enqueueAvg || stats["broadcastMaxMs"] != enqueueMax {
-		t.Fatalf("legacy broadcast timing aliases diverged from enqueue timings: %v", stats)
+	if _, ok := stats["enqueueMaxMs"].(float64); !ok {
+		t.Fatalf("canonical enqueue maximum timing metric missing: %v", stats)
+	}
+	if _, ok := stats["enqueuesOver50ms"].(uint64); !ok {
+		t.Fatalf("canonical enqueue timing metrics missing: %v", stats)
 	}
 	if scope := stats["eventTimingScope"]; scope != "enqueue" {
 		t.Fatalf("event timing scope = %v, want enqueue", scope)

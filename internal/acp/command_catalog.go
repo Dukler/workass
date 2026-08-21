@@ -269,9 +269,7 @@ func (b *Bridge) supportsProviderCommandCatalog() bool {
 // supported:false for providers without the registered facet, for chats this daemon has never
 // attached, or when the host never advertised workassClaudeCommandCatalog;
 // live:false when the chat's engine is hibernated or gone (the catalog, if
-// any, is a cached snapshot); commandCatalog null = UNKNOWN. An old daemon
-// answers "unknown channel" instead and the renderer treats that as
-// unsupported.
+// any, is a cached snapshot); commandCatalog null = UNKNOWN.
 func (m *Manager) ChatCommands(tabID, chatID string) map[string]any {
 	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
 	m.mu.Lock()
