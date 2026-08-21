@@ -27,6 +27,7 @@ const {
   resolveArtifactSource,
   resolveUpdateFeed,
   runUpdateStageWorker,
+  prestageDiskHasHeadroom,
   runUpdateTransactionCleanupWorker,
   snapshotReleaseManifest,
   spawnArmedUpdateWorker,
@@ -2678,4 +2679,23 @@ test('a click landing during an in-flight prestage still activates the staged re
   assert.equal(manager.snapshot().phase, 'installing');
   assert.equal(downloads, 1, 'the click must not start a second download');
   manager.dispose();
+});
+
+test('automatic prestaging skips when the update volume lacks headroom', async () => {
+  const { manager } = managerFixture({ primeReady: false });
+  let downloads = 0;
+  manager.deps.fetchManifest = async () => manifest({ version: '1.2.0' });
+  manager.deps.downloadArtifact = async (_source, destination) => {
+    downloads += 1;
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, 'archive');
+  };
+  manager.deps.diskHasHeadroom = () => false;
+  manager.publish({ phase: 'available', targetVersion: '1.2.0' });
+
+  await manager.prestage();
+  assert.equal(downloads, 0);
+  assert.equal(manager.snapshot().phase, 'available');
+  assert.equal(prestageDiskHasHeadroom(path.join(os.tmpdir(), 'does-not-exist-wa')), true,
+    'an uninspectable volume never blocks a manual update');
 });

@@ -30,6 +30,22 @@ const MAX_ARCHIVE_ENTRIES = 120000;
 const DEFAULT_INITIAL_CHECK_DELAY_MS = 15_000;
 const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_PRESTAGE_DELAY_MS = 2_000;
+// Automatic prestaging must never be the straw that fills a small disk: the
+// staged payload coexists with the extracted tree and, on Windows, with a full
+// backup mirror during activation.
+const MIN_PRESTAGE_FREE_BYTES = 3 * 1024 * 1024 * 1024;
+
+// prestageDiskHasHeadroom reports whether the volume holding the update root
+// has room for an automatic staging run. A volume that cannot be inspected is
+// treated as having headroom so a manual update is never blocked by this guard.
+function prestageDiskHasHeadroom(root) {
+  try {
+    const stats = fs.statfsSync(root);
+    return Number(stats.bavail) * Number(stats.bsize) >= MIN_PRESTAGE_FREE_BYTES;
+  } catch {
+    return true;
+  }
+}
 const DEFAULT_WORKER_ARM_TIMEOUT_MS = 15_000;
 const DEFAULT_WORKER_ARM_POLL_MS = 25;
 const MAX_PROGRESS_CLEANUP_RETRIES = 4;
@@ -2812,6 +2828,8 @@ class UpdateManager {
     if (!this.state.supported || this.activeOperation) return this.snapshot();
     if (this.state.phase !== 'available' || !this.state.targetVersion) return this.snapshot();
     if (this.prepared || this.activeRelease) return this.snapshot();
+    const headroom = this.deps.diskHasHeadroom || prestageDiskHasHeadroom;
+    if (!headroom(this.updateRoot)) return this.snapshot();
     const target = this.state.targetVersion;
     if (this.prestagedVersion === target) return this.snapshot();
     this.prestagedVersion = target;
@@ -2923,6 +2941,7 @@ class UpdateManager {
 
 module.exports = {
   UpdateManager,
+  prestageDiskHasHeadroom,
   archiveEntries,
   atomicJSON,
   bundledNode,

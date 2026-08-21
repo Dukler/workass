@@ -1401,11 +1401,13 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	res, err := activeBridge.promptForJob(ctx, job.SessionID, job, operationID, promptText, opts.Images)
 	if err != nil {
 		displayError := redactSensitiveText(err.Error())
-		hint, policyErr := m.markProviderNeedsLogin(ctx, job.ProviderID, err)
-		if policyErr != nil {
-			displayError = redactSensitiveText(policyErr.Error())
-		} else if hint != "" {
-			displayError = providerAuthenticationFailureError(job.ProviderID, err, hint).Error()
+		if !job.CrashInterrupted {
+			hint, policyErr := m.markProviderNeedsLogin(ctx, job.ProviderID, err)
+			if policyErr != nil {
+				displayError = redactSensitiveText(policyErr.Error())
+			} else if hint != "" {
+				displayError = providerAuthenticationFailureError(job.ProviderID, err, hint).Error()
+			}
 		}
 		if job.CrashInterrupted {
 			if job.StopReason == "" {

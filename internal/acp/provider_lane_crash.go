@@ -1,30 +1,17 @@
 package acp
 
-import "context"
-
 // handleUnexpectedBridgeExit terminates process-local work and lets the chat
 // actor own the only durable recovery decision. The manager never creates,
 // resumes, aliases, or replays a chat in response to a host crash.
+//
+// An engine that was running and then died is a crash, never a login verdict:
+// its stderr routinely contains credential-flavored words from ordinary CLI
+// startup and shutdown logs, so classifying exits here used to permanently
+// disable providers across whole fleets after every update wave.
 func (m *Manager) handleUnexpectedBridgeExit(bridge *Bridge, cause error) {
 	if bridge == nil {
 		return
 	}
-	hint, policyErr := m.markProviderNeedsLogin(context.Background(), bridge.ProviderID(), cause)
-	if hint != "" || policyErr != nil {
-		m.abandonAdoptedHarnessTurns(bridge)
-		closeCause := cause
-		reason := providerStatusNeedsLogin
-		if policyErr != nil {
-			closeCause = policyErr
-			reason = "authentication-policy-invalid"
-		}
-		bridge.Close(false, closeCause)
-		m.opts.Logf("acp host closed", map[string]any{
-			"provider": bridge.ProviderID(), "reason": reason,
-		})
-		return
-	}
-
 	m.abandonAdoptedHarnessTurns(bridge)
 	bridge.mu.Lock()
 	for _, job := range bridge.jobsBySession {

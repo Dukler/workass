@@ -3300,6 +3300,12 @@ func fakeACPDelay(name string, fallback time.Duration) time.Duration {
 
 func (s *fakeACP) handlePrompt(id json.RawMessage, params map[string]any) {
 	sessionID := asString(params["sessionId"])
+	if s.mode == "prompt-auth-stderr" {
+		// An engine that initialized fine and then died mid-turn with ordinary
+		// credential-flavored log words: a crash, never a login verdict.
+		_, _ = fmt.Fprint(os.Stderr, "Unauthorized: session token rejected; please login again")
+		os.Exit(1)
+	}
 	if strings.Contains(s.mode, "-stable-") {
 		s.notify(sessionID, map[string]any{
 			"sessionUpdate": "_workass_input_consumed", "clientUserMessageId": asString(params["clientUserMessageId"]),
@@ -4119,5 +4125,42 @@ func TestAdapterAuthoredModelUpdateStillEntersActorRefresh(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("adapter-authored model change did not enter actor refresh")
+	}
+}
+
+func TestEngineCrashMidTurnDoesNotDisableProviderAsNeedsLogin(t *testing.T) {
+	providersFile := filepath.Join(t.TempDir(), "providers.json")
+	manager, events := newFakeManager(t, "prompt-auth-stderr", Options{
+		InitTimeout:        2 * time.Second,
+		ProviderConfigFile: providersFile,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	session, err := manager.NewSession(context.Background(), SessionOptions{TabID: "crash-auth-tab", ChatID: "chat-crash-auth"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	job, err := manager.StartJob(context.Background(), JobStartOptions{
+		Kind: "app-chat", SessionID: session.SessionID, TabID: "crash-auth-tab", ChatID: "chat-crash-auth",
+		Prompt: "die with auth-flavored stderr",
+	})
+	if err != nil {
+		t.Fatalf("start job: %v", err)
+	}
+	end := events.waitJobEnd(t, jobID(job), 5*time.Second)
+	assertJobStatus(t, end, "failed", 1, "engine-crash")
+
+	item := assertProviderListItem(t, manager.ProvidersList(), manager.opts.Provider.ID, providerStatusReady, true)
+	if item["needsLogin"] == true {
+		t.Fatalf("engine crash latched needs-login: %#v", item)
+	}
+	reloaded, err := LoadProviderConfigs(providersFile, repoRoot(t))
+	if err != nil {
+		t.Fatalf("reload providers: %v", err)
+	}
+	for _, cfg := range reloaded {
+		if cfg.NeedsLogin {
+			t.Fatalf("persisted needs-login after engine crash: %#v", cfg)
+		}
 	}
 }
