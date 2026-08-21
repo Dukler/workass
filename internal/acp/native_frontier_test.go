@@ -30,6 +30,33 @@ func TestBuiltInFrontierProvidersUseOfficialNativeCommands(t *testing.T) {
 	}
 }
 
+func TestBuiltInOpenCodeProviderDefaultsToOxAlphaFree(t *testing.T) {
+	providers := BuiltInProviderConfigs(repoRoot(t))
+	opencode, ok := providerFromSlice(providers, "opencode")
+	if !ok {
+		t.Fatal("OpenCode provider missing")
+	}
+	if opencode.Command != "opencode" || opencode.Name != "OpenCode" || opencode.Badge != "agent" || strings.Join(opencode.Args, " ") != "acp" {
+		t.Fatalf("OpenCode provider = %#v", opencode)
+	}
+
+	executable := filepath.Join(t.TempDir(), executableName("opencode"))
+	writeExecutable(t, executable, nativeNoopScript())
+	t.Setenv("WORKASS_OPENCODE", "")
+	resolved, args, env, inactive, err := (opencodeDetectionStrategy{}).Prepare(context.Background(), nil, ProviderConfig{
+		ID: "opencode", Command: executable, Args: []string{"acp"}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("prepare OpenCode: %v", err)
+	}
+	if resolved != executable || strings.Join(args, " ") != "acp" || inactive != "" {
+		t.Fatalf("OpenCode launch = command %q args %#v inactive %q", resolved, args, inactive)
+	}
+	if env["OPENCODE_CONFIG_CONTENT"] != opencodeOxAlphaConfigContent || !strings.Contains(env["OPENCODE_CONFIG_CONTENT"], "opencode/x-preview-f-free") {
+		t.Fatalf("OpenCode default config = %#v", env)
+	}
+}
+
 func TestResolveFrontierNativeLaunchUsesOfficialCLIsAndIgnoresZedAdapters(t *testing.T) {
 	pathDir := t.TempDir()
 	claude := filepath.Join(pathDir, executableName("claude"))

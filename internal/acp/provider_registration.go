@@ -109,6 +109,25 @@ func (qwenDetectionStrategy) Prepare(ctx context.Context, manager *Manager, cfg 
 	}, "", nil
 }
 
+// OpenCode owns the provider catalog and authentication surface, while the
+// Workass launch only supplies a scoped default model. OPENCODE_CONFIG_CONTENT
+// is merged by OpenCode with its global and project configuration, so the
+// user's existing instructions, permissions, MCP servers, and login remain in
+// force without Workass writing those files.
+type opencodeDetectionStrategy struct{}
+
+const opencodeOxAlphaConfigContent = `{"$schema":"https://opencode.ai/config.json","model":"opencode/x-preview-f-free","small_model":"opencode/x-preview-f-free"}`
+
+func (opencodeDetectionStrategy) Prepare(_ context.Context, _ *Manager, cfg ProviderConfig) (string, []string, map[string]string, string, error) {
+	resolved, err := resolveProviderExecutable(cfg)
+	if err != nil {
+		return "", nil, nil, "", err
+	}
+	return resolved, append([]string(nil), cfg.Args...), map[string]string{
+		"OPENCODE_CONFIG_CONTENT": opencodeOxAlphaConfigContent,
+	}, "", nil
+}
+
 type nativeDetectionStrategy struct{}
 
 func (nativeDetectionStrategy) Prepare(_ context.Context, _ *Manager, cfg ProviderConfig) (string, []string, map[string]string, string, error) {
@@ -157,8 +176,19 @@ func devinKnownPaths() []string {
 	return known
 }
 
+func opencodeKnownPaths() []string {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return nil
+	}
+	return []string{
+		filepath.Join(home, ".opencode", "bin", "opencode"),
+		filepath.Join(home, ".opencode", "bin", "opencode.exe"),
+	}
+}
+
 var providerRegistrationOrder = []string{
-	"mock", "devin", "qwen", "claude", "codex",
+	"mock", "devin", "qwen", "claude", "codex", "opencode",
 	localLMStudioProviderID, localOllamaProviderID, "custom",
 }
 
@@ -246,6 +276,16 @@ var providerRegistrations = map[string]providerRegistration{
 			context: staticProviderContextPolicy{capabilities: exactNativeContextCapabilities()},
 		},
 		Update: providerUpdateRegistration{Source: "https://registry.npmjs.org/@openai/codex/latest", Command: ProviderUpdateCommand{Command: "codex", Args: []string{"update"}}, Hint: "codex update"},
+	},
+	"opencode": {
+		ID: "opencode", Name: "OpenCode", DefaultCommand: "opencode", DefaultArgs: []string{"acp"}, Badge: "agent",
+		Discovery: &cliProvider{id: "opencode", defaultCommand: "opencode", pathEnv: []string{"WORKASS_OPENCODE"}, pathNames: []string{"opencode", "opencode.exe", "opencode.cmd"}, knownPaths: opencodeKnownPaths},
+		Detection: opencodeDetectionStrategy{}, ProbeTimeout: frontierProbeTimeout,
+		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `opencode auth login`"},
+		// OpenCode is an ordinary ACP provider. Its model/session semantics stay
+		// behind the generic ACP adapter; only executable discovery and the
+		// scoped, free Ox Alpha default belong to this registration.
+		Adapter: providerAdapter{},
 	},
 	localLMStudioProviderID: {
 		ID: localLMStudioProviderID, Name: "LM Studio (local)", DefaultCommand: "workass-agent", Badge: "native",
