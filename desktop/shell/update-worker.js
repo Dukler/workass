@@ -379,6 +379,7 @@ function mirrorWindowsDirectory(source, destination, { run = spawnSync } = {}) {
     '/SL',
     '/R:5',
     '/W:1',
+    '/MT:8',
     '/NFL',
     '/NDL',
     '/NJH',

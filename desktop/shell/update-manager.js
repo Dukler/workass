@@ -29,6 +29,7 @@ const MAX_UPDATE_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 120000;
 const DEFAULT_INITIAL_CHECK_DELAY_MS = 15_000;
 const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+const DEFAULT_PRESTAGE_DELAY_MS = 2_000;
 const DEFAULT_WORKER_ARM_TIMEOUT_MS = 15_000;
 const DEFAULT_WORKER_ARM_POLL_MS = 25;
 const MAX_PROGRESS_CLEANUP_RETRIES = 4;
@@ -1683,6 +1684,9 @@ class UpdateManager {
     this.discoveryPromise = null;
     this.applyPromise = null;
     this.recoveryPromise = null;
+    this.prestageTimer = null;
+    this.prestagedVersion = '';
+    this.prestagePromise = null;
     this.transactionCleanupPromise = null;
     this.transactionCleanupQueued = false;
     this.transactionCleanupRetryTimer = null;
@@ -2370,7 +2374,15 @@ class UpdateManager {
       this.manifest = manifest;
       const available = compareVersions(this.currentVersion, manifest.version) < 0;
       const pinned = this.pinnedRelease();
-      if (pinned) {
+      let supersededStalePayload = false;
+      if (pinned && available && this.state.phase === 'ready' && this.prepared &&
+          compareVersions(manifest.version, pinned.version) > 0) {
+        // A strictly newer release exists while a verified payload waits
+        // uninstalled. The stale payload must not hide the newer offer.
+        this.discardStagedPreparation();
+        supersededStalePayload = true;
+      }
+      if (pinned && !supersededStalePayload) {
         const current = this.snapshot();
         const previouslyDiscovered = parseVersion(current.availableVersion) &&
           compareVersions(current.availableVersion, pinned.version) > 0 ? current.availableVersion : null;
@@ -2444,8 +2456,14 @@ class UpdateManager {
     if (!this.state.supported || this.activeOperation) return this.snapshot();
     // A plain offer has no downloaded payload and may advance to a newer
     // release. Once download/staging begins, that exact transaction is pinned.
-    if (!['idle', 'current', 'available', 'healthy', 'check_failed', 'failed', 'rollback_healthy'].includes(this.state.phase)) return this.snapshot();
-    try { return await this.check({ background: true }); }
+    // A staged-but-uninstalled payload also keeps watching: a strictly newer
+    // release must replace it instead of hiding behind it.
+    if (!['idle', 'current', 'available', 'ready', 'healthy', 'check_failed', 'failed', 'rollback_healthy'].includes(this.state.phase)) return this.snapshot();
+    try {
+      const state = await this.check({ background: true });
+      if (state.phase === 'available') this.schedulePrestage();
+      return state;
+    }
     catch { return this.snapshot(); }
   }
 
@@ -2786,11 +2804,68 @@ class UpdateManager {
     }
   }
 
+  // A discovered offer stages its payload without waiting for the click, so
+  // activation is the only work left behind the button. An automatic prestage
+  // never surfaces as a user-facing failure: the card stays an ordinary offer
+  // and clicking retries the full chain loudly.
+  async prestage() {
+    if (!this.state.supported || this.activeOperation) return this.snapshot();
+    if (this.state.phase !== 'available' || !this.state.targetVersion) return this.snapshot();
+    if (this.prepared || this.activeRelease) return this.snapshot();
+    const target = this.state.targetVersion;
+    if (this.prestagedVersion === target) return this.snapshot();
+    this.prestagedVersion = target;
+    const run = this.download();
+    this.prestagePromise = run.finally(() => {
+      if (this.prestagePromise === run) this.prestagePromise = null;
+    });
+    await run;
+    const state = this.snapshot();
+    if (state.phase === 'failed' && !state.receipt) {
+      this.publish({ phase: 'available', targetVersion: target, error: null, progress: null });
+    }
+    return this.snapshot();
+  }
+
+  schedulePrestage() {
+    if (this.prestageTimer) return this.snapshot();
+    this.prestageTimer = this.deps.schedule(() => {
+      this.prestageTimer = null;
+      return this.prestage().catch(() => {});
+    }, DEFAULT_PRESTAGE_DELAY_MS);
+    this.prestageTimer?.unref?.();
+    return this.snapshot();
+  }
+
+  // Discard a verified-but-uninstalled payload so discovery can offer a
+  // strictly newer release. Only ever called while nothing is running.
+  discardStagedPreparation() {
+    const prepared = this.prepared;
+    if (!prepared) return false;
+    this.prepared = null;
+    this.prestagedVersion = '';
+    const cleanupErrors = [];
+    if (prepared.incomingTarget && this.platform === 'darwin') {
+      try { fs.rmSync(prepared.incomingTarget, { recursive: true, force: true }); }
+      catch (cleanupError) { cleanupErrors.push(String(cleanupError && cleanupError.message || cleanupError)); }
+    }
+    try { fs.rmSync(prepared.transactionRoot, { recursive: true, force: true }); }
+    catch (cleanupError) { cleanupErrors.push(String(cleanupError && cleanupError.message || cleanupError)); }
+    if (this.state.phase === 'ready') {
+      this.publish({ phase: 'available', targetVersion: null, availableVersion: null, progress: null, error: null });
+    }
+    return cleanupErrors.length === 0;
+  }
+
   // One user intent owns the complete ordinary update path. The lower-level
   // methods remain separate for recovery/tests, but the renderer never asks the
   // user to click once to stage and again to activate the same verified release.
   async apply() {
     if (this.discoveryPromise) await this.discoveryPromise;
+    // A click landing while an automatic prestage is still running must wait
+    // for it and then activate, never fall through the phase checks and lose
+    // the intent.
+    if (this.prestagePromise) await this.prestagePromise;
     let state = this.snapshot();
     if (state.phase === 'check_failed' || state.phase === 'failed' || state.phase === 'rollback_healthy') {
       if (state.phase !== 'check_failed' && this.manifest && state.targetVersion === this.manifest.version &&
@@ -2835,6 +2910,8 @@ class UpdateManager {
     this.stopAutoChecks();
     if (this.receiptTimer) this.deps.cancelRepeat(this.receiptTimer);
     this.receiptTimer = null;
+    if (this.prestageTimer) this.deps.cancelSchedule(this.prestageTimer);
+    this.prestageTimer = null;
     this.watchedUpdateId = '';
     this.watchedTargetHandoff = false;
     if (this.transactionCleanupRetryTimer) this.deps.cancelSchedule(this.transactionCleanupRetryTimer);

@@ -483,6 +483,7 @@ test('Windows directory mirrors accept robocopy difference codes and reject fail
   assert.deepEqual(calls[0][1].slice(0, 3), [source, destination, '/MIR']);
   assert.ok(calls[0][1].includes('/XJ'));
   assert.ok(calls[0][1].includes('/SL'));
+  assert.ok(calls[0][1].includes('/MT:8'), 'mirrors copy multithreaded so activation stays fast');
   assert.throws(() => mirrorWindowsDirectory(source, destination, {
     run: () => ({ status: 8 }),
   }), /robocopy exit 8/);
