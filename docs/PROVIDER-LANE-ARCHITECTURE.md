@@ -93,8 +93,8 @@ parallel chat store is permitted.
 
 Physical files may be split for durability or bounded writes, but that never
 creates a second logical owner. A persisted renderer mirror may exist only as a
-versioned, rebuildable materialized view. It is never recovery authority once a
-chat actor has been migrated.
+versioned, rebuildable materialized view. It is never recovery authority for a
+chat actor.
 
 ### 3.1 Provider registry
 
@@ -409,29 +409,17 @@ boundary before exhaustion. Any fork/reset is explicit.
 - Only a provider-authenticated same-lineage event may advance a native alias.
 - Model/catalog changes never replace a thread.
 
-### Storage schema upgrades
+### Storage schema
 
-- Storage upgrades run to completion before chat actors or provider runtimes
-  exist. They perform no provider RPC and never choose, create, resume, replace,
-  or replay a native thread.
-- The supported actor v19 -> v20 upgrade binds every previously unattributed
-  semantic event only when one exact stored lane/thread already proves its
-  owner. The supported provider-lane v6 -> v7 upgrade removes
-  transcript-derived cursor/hash fields and preserves immutable ownership.
+- The actor store and provider-lane store accept only their current schemas.
+  Obsolete envelopes are rejected before any actor or provider runtime exists;
+  there is no runtime migration path, compatibility branch, or guessed repair.
 - Duplicate, incomplete, cross-machine, or otherwise ambiguous ownership fails
-  the upgrade without writing the actor. Invalid data never becomes a live
-  recoverable-invalid chat, repair command, compatibility runtime branch, or
-  guessed lane.
-- Each converted file is written atomically, fsynced, read back, and
-  ownership-checked. A mixed directory after a crash is safe because the next
-  startup continues only the files still on the immediately preceding schema.
-- Renderer snapshots cannot erase or overwrite lane bindings/outbox state.
-
-Upgrades and ordinary commits use one authority order: durable actor commit,
-then rebuildable renderer projection. There is no actor/mirror dual-write
-transaction and no recovery path that chooses the newer-looking copy. Once the
-release floor no longer contains v19/v6 storage, these two upgrade files are
-deleted; their shapes never enter live chat or lane types.
+  without writing the actor. Renderer snapshots cannot erase or overwrite lane
+  bindings/outbox state.
+- Ordinary commits use one authority order: durable actor commit, then
+  rebuildable renderer projection. There is no actor/mirror dual-write
+  transaction and no recovery path that chooses the newer-looking copy.
 
 ### Renderer projection and event delivery
 
@@ -564,8 +552,8 @@ No intermediate phase is production-ready by itself.
       state.
 - [x] Commit provider events durably before publication, with backpressure and
       contiguous sequence enforcement.
-- [x] Upgrade every v19 nonempty chat before lane selection; reject ambiguous
-      ownership without partial writes and never treat it as empty.
+- [x] Reject obsolete or ambiguous chat envelopes before lane selection without
+      partial writes and never treat them as empty.
 - [x] Derive the frozen renderer snapshot from authoritative state and make
       renderer saves presentation-command-only.
 - [x] Remove legacy runtime dual writes and every direct manager/session-store
@@ -575,7 +563,7 @@ No intermediate phase is production-ready by itself.
 
 - [x] Add durable lane records using all identity dimensions; disposable tab ids
       are attachment metadata only.
-- [x] Upgrade unambiguous native bindings transactionally before runtime.
+- [x] Validate current native bindings transactionally before runtime.
 - [x] Reject collisions before runtime instead of selecting a thread or
       persisting a recoverable-invalid chat state.
 - [x] Remove `session/load`, fresh replacement, transcript replay, and automatic
@@ -609,9 +597,9 @@ No intermediate phase is production-ready by itself.
 -->
 - [x] Prove source-contract ownership: no ChatID-bearing mutation bypasses the
       actor and no renderer save can mutate semantic/runtime state.
-- [x] Prove crash consistency, migration idempotency, rich snapshot parity,
+- [x] Prove crash consistency, command idempotency, rich snapshot parity,
       contiguous event delivery, and zero-loss saturation.
-- [ ] Audit existing production bindings read-only and produce a migration
-      report before requesting any production activation.
+- [ ] Audit existing production bindings read-only before requesting any
+      production activation.
 - [ ] Publish only from a clean commit containing the complete reconciled
       product after explicit production authority.

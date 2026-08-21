@@ -357,17 +357,19 @@ func (m *Manager) loadCheckpointStateUnlocked(chatID string) (chatCheckpointFile
 	if err != nil {
 		return state, err
 	}
-	if err := json.Unmarshal(data, &state); err != nil {
+	var stored chatCheckpointFile
+	if err := json.Unmarshal(data, &stored); err != nil {
 		return chatCheckpointFile{}, err
 	}
-	if state.Version == 0 {
-		state.Version = checkpointStateVersion
-	}
-	if state.ChatID == "" {
-		state.ChatID = chatID
+	state = stored
+	if state.Version != checkpointStateVersion {
+		return chatCheckpointFile{}, fmt.Errorf("unsupported checkpoint state version %d", state.Version)
 	}
 	if state.Checkpoints == nil {
-		state.Checkpoints = []ChatCheckpoint{}
+		return chatCheckpointFile{}, errors.New("checkpoint state is missing checkpoints")
+	}
+	if strings.TrimSpace(state.ChatID) == "" || state.ChatID != chatID {
+		return chatCheckpointFile{}, errors.New("checkpoint state has invalid chat ownership")
 	}
 	sort.SliceStable(state.Checkpoints, func(i, j int) bool { return state.Checkpoints[i].TurnSeq < state.Checkpoints[j].TurnSeq })
 	return state, nil

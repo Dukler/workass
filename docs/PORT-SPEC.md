@@ -10,8 +10,8 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
 (Electron shell, any browser, phone) are views over WebSocket. Modules:
 
 - **state store** — chats, transcripts, activity, config; hot in RAM, spilled
-  to disk in the SAME file formats the Node app uses today (`state/`,
-  transcripts, `app-config.json`) so existing tools interop during migration.
+  to disk in the current canonical formats (`state/`, transcripts,
+  `app-config.json`) so current tools interoperate.
 - **ACP bridge manager** — one engine subprocess per chat; lifecycle states
   `warm | active | idle | hibernated`; spare-session pre-warm pool.
   MULTI-PROVIDER MODEL (user law 2026-07-10): there is NO global provider.
@@ -759,12 +759,10 @@ shell, NOT the daemon.
   served live, read-only, no-cache, byte-range capable, traversal/symlink
   guarded, credential-shape filtered, and sandboxed; registration survives daemon
   restart. A directory defaults to `index.html` when present and otherwise
-  requires an explicit supported entry. The hidden legacy MCP/control aliases
-  `workass_host_html` / `html.host`, existing `/workass/html/…` URLs, and
-  `html-hosts.json` records remain readable and migrate without link loss, but
-  new catalogs, receipts, state, and Go server code use artifact terminology.
-  The tool MUST NOT open or focus UI by itself, and the frozen renderer wire
-  protocol is unchanged.
+  requires an explicit supported entry. Artifact hosting has one canonical
+  tool name, URL prefix, and registry file; removed names and paths are
+  rejected rather than translated or migrated. The tool MUST NOT open or focus
+  UI by itself, and the frozen renderer wire protocol is unchanged.
 - **Credential-shape filter, and no silent withholding** (bug report
   2026-07-26): artifact names are filtered by the SHAPE of a credential file —
   key/keystore extensions, and names whose words OPEN with a credential phrase

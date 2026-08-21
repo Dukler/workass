@@ -18,7 +18,7 @@ import (
 	"workass/internal/tlscert"
 )
 
-func TestStdioLegacyRevisionMapsToStatelessWorkassMCP(t *testing.T) {
+func TestStdioModernRevisionPassesThroughToStatelessWorkassMCP(t *testing.T) {
 	var mu sync.Mutex
 	var methods []string
 	handler := http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -83,10 +83,10 @@ func TestStdioLegacyRevisionMapsToStatelessWorkassMCP(t *testing.T) {
 	}}
 
 	input := strings.Join([]string{
-		`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-10-07","capabilities":{},"clientInfo":{"name":"rmcp","version":"3.0.0"}}}`,
+		`{"jsonrpc":"2.0","id":0,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`,
-		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
-		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fixture_tool","arguments":{"value":1}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fixture_tool","arguments":{"value":1},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`,
 	}, "\n") + "\n"
 	var stdout bytes.Buffer
 	if err := bridge.serve(context.Background(), strings.NewReader(input), &stdout); err != nil {
@@ -102,17 +102,17 @@ func TestStdioLegacyRevisionMapsToStatelessWorkassMCP(t *testing.T) {
 			t.Fatalf("stdout line %d is not JSON-RPC: %v", i, err)
 		}
 	}
-	initialized := responses[0]["result"].(map[string]any)
-	if initialized["protocolVersion"] != "2024-10-07" || initialized["serverInfo"].(map[string]any)["name"] != "workass-fixture" {
-		t.Fatalf("initialize result = %#v", initialized)
+	discovered := responses[0]["result"].(map[string]any)
+	if discovered["resultType"] != "complete" || discovered["supportedVersions"].([]any)[0] != protocol2026 {
+		t.Fatalf("discover result = %#v", discovered)
 	}
 	listed := responses[1]["result"].(map[string]any)
-	if listed["resultType"] != nil || len(listed["tools"].([]any)) != 1 {
-		t.Fatalf("2025 tools/list result = %#v", listed)
+	if listed["resultType"] != "complete" || len(listed["tools"].([]any)) != 1 {
+		t.Fatalf("modern tools/list result = %#v", listed)
 	}
 	called := responses[2]["result"].(map[string]any)
-	if called["resultType"] != nil || called["content"].([]any)[0].(map[string]any)["text"] != "done" {
-		t.Fatalf("2025 tools/call result = %#v", called)
+	if called["resultType"] != "complete" || called["content"].([]any)[0].(map[string]any)["text"] != "done" {
+		t.Fatalf("modern tools/call result = %#v", called)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -142,15 +142,15 @@ func TestStdio2026RevisionPassesOneSelfDescribingRequest(t *testing.T) {
 	if err := bridge.serve(context.Background(), strings.NewReader(input), &stdout); err != nil {
 		t.Fatal(err)
 	}
-	if bridge.revision != revision2026 || !json.Valid(bytes.TrimSpace(stdout.Bytes())) {
-		t.Fatalf("modern response = %q revision=%d", stdout.String(), bridge.revision)
+	if !json.Valid(bytes.TrimSpace(stdout.Bytes())) {
+		t.Fatalf("modern response = %q", stdout.String())
 	}
 }
 
-func TestStdioRejectsModernInitializeInsteadOfDowngradingIt(t *testing.T) {
+func TestStdioRejectsUnsupportedInitializeRevision(t *testing.T) {
 	bridge := &server{}
 	response, emit := bridge.handle(context.Background(), []byte(
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"modern-fixture","version":"1"}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"old-fixture","version":"1"}}}`,
 	))
 	if !emit {
 		t.Fatal("modern initialize emitted no response")
@@ -162,9 +162,6 @@ func TestStdioRejectsModernInitializeInsteadOfDowngradingIt(t *testing.T) {
 	rpcErr, _ := message["error"].(map[string]any)
 	if code, _ := rpcErr["code"].(float64); int(code) != -32022 {
 		t.Fatalf("modern initialize response = %#v", message)
-	}
-	if bridge.revision != revisionUnset || bridge.legacyVersion != "" {
-		t.Fatalf("modern initialize changed negotiated state: revision=%d legacy=%q", bridge.revision, bridge.legacyVersion)
 	}
 }
 

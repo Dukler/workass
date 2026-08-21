@@ -483,19 +483,14 @@ func TestAgentControlHostsArtifactsOnlyFromTheCallingAgentWorkspace(t *testing.T
 		hosted.ContentType != "application/pdf" || !strings.Contains(hosted.Markdown, hosted.URLPath) {
 		t.Fatalf("artifact.host result = %#v", result)
 	}
-	legacyResult, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
+	if _, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
 		Method: "html.host",
 		Params: map[string]any{
 			"owner_key": "artifact-owner", "parent_chat_id": "artifact-chat", "parent_tab_id": "artifact-tab",
 			"operation_id": "artifact-host-once", "source_path": "review.pdf", "name": "Review",
 		},
-	})
-	if err != nil {
-		t.Fatalf("legacy html.host alias: %v", err)
-	}
-	legacyHosted, ok := legacyResult.(artifacthost.Registration)
-	if !ok || legacyHosted.ID != hosted.ID || !strings.HasPrefix(legacyHosted.URLPath, artifacthost.PathPrefix+"/") {
-		t.Fatalf("legacy html.host result = %#v", legacyResult)
+	}); err == nil || !strings.Contains(err.Error(), "unknown agent control method") {
+		t.Fatalf("removed html.host alias error = %v", err)
 	}
 	changedSource := filepath.Join(workspace, "changed.pdf")
 	if err := os.WriteFile(changedSource, []byte("changed"), 0o600); err != nil {

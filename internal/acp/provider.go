@@ -1534,12 +1534,10 @@ func frontierNativeSpecForProvider(id string) (frontierNativeSpec, bool) {
 }
 
 func resolveFrontierNativeLaunch(cfg ProviderConfig) (agentLaunch, error) {
-	executable, _ := os.Executable()
-	return resolveFrontierNativeLaunchWithExecutable(cfg, executable)
+	return resolveFrontierNativeLaunchWithExecutable(cfg)
 }
 
-func resolveFrontierNativeLaunchWithExecutable(cfg ProviderConfig, daemonExecutable string) (agentLaunch, error) {
-	_ = daemonExecutable // retained for a stable resolver seam and platform tests
+func resolveFrontierNativeLaunchWithExecutable(cfg ProviderConfig) (agentLaunch, error) {
 	spec, ok := frontierNativeSpecForProvider(cfg.ID)
 	if !ok {
 		return agentLaunch{}, fmt.Errorf("provider %q is not a native frontier provider", cfg.ID)

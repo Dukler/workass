@@ -111,11 +111,6 @@ test('manual seed install restores the prior launch agent when app health gates 
   assert.match(installer, /launchctl bootstrap "\$launchd_domain" "\$launch_agent_path"/);
 });
 
-test('one seed install can migrate the legacy local HTTP daemon without making it an update fallback', () => {
-  assert.match(script, /curl -kfsS --max-time 2 "\$WORKASS_DAEMON_URL\/workass\/health"/);
-  assert.match(script, /http:\/\/127\.0\.0\.1:\$WORKASS_DAEMON_PORT\/workass\/health/);
-});
-
 test('macOS package consumes the exact audited Electron runtime', () => {
   assert.equal(electronPin, '43.1.1');
   assert.match(script, /workass-electron\.sh/);
@@ -124,10 +119,10 @@ test('macOS package consumes the exact audited Electron runtime', () => {
   assert.doesNotMatch(script, /npm root -g/);
 });
 
-test('production update rejects incompatible identities unless migration is explicit', () => {
-  assert.match(script, /--migrate-signing-identity/);
+test('production update rejects incompatible signing identities', () => {
+  assert.doesNotMatch(script, /--migrate-signing-identity/);
+  assert.doesNotMatch(installer, /--migrate-signing-identity/);
   assert.match(installer, /workass_codesign_mutually_compatible "\$installed" "\$candidate"/);
-  assert.match(installer, /workass_codesign_is_adhoc_cdhash "\$installed"/);
   assert.match(installer, /refusing an install that would reset macOS privacy grants/);
 });
 

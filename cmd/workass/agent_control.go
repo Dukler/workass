@@ -282,7 +282,7 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 				ExitCode: exitCode, Summary: fieldString(params, "summary"),
 			},
 		})
-	case "artifact.host", "html.host":
+	case "artifact.host":
 		return h.hostArtifact(r, ownerKey, tabID, chatID, params)
 	case "agent.cancel":
 		id := fieldString(params, "id")

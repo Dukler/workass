@@ -619,14 +619,9 @@ func (h *Hub) Stats() map[string]any {
 		"enqueueAvgMs":     averageMs,
 		"enqueueMaxMs":     maxMs,
 		"enqueuesOver50ms": over50,
-		// Compatibility aliases: these old identifiers also mean enqueue cost;
-		// they do not claim controller-socket delivery.
-		"broadcastAvgMs":     averageMs,
-		"broadcastMaxMs":     maxMs,
-		"broadcastsOver50ms": over50,
-		"clientDrops":        atomic.LoadUint64(&h.stats.drops),
-		"slowestInvokes":     invokes,
-		"eventChannels":      events,
+		"clientDrops":      atomic.LoadUint64(&h.stats.drops),
+		"slowestInvokes":   invokes,
+		"eventChannels":    events,
 	}
 }
 

@@ -204,7 +204,7 @@ func TestArtifactHostingRoutesThroughTheAllowedDaemonHTTPServer(t *testing.T) {
 		w.Header().Set("X-Workass-Artifact-Host", "yes")
 		_, _ = w.Write([]byte(r.URL.Path))
 	})
-	for _, requestPath := range []string{"/workass/artifacts/report-id/", "/workass/html/site-id/"} {
+	for _, requestPath := range []string{"/workass/artifacts/report-id/"} {
 		request := httptest.NewRequest(http.MethodGet, "http://example.test"+requestPath, nil)
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, request)

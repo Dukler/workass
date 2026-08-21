@@ -143,7 +143,9 @@ func prepareBrowserMCPCall(call browserMCPCallParams) (preparedBrowserMCPCall, e
 		delete(prepared.Params, "tab_id")
 	}
 	delete(prepared.Params, "operation_id")
-	delete(prepared.Params, "operationId")
+	if _, exists := prepared.Params["operationId"]; exists {
+		return preparedBrowserMCPCall{}, errors.New("MCP uses operation_id; operationId is not accepted")
+	}
 	switch call.Name {
 	case "workass_browser_list":
 		prepared.Method = "browser.list"

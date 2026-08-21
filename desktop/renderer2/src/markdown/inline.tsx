@@ -35,7 +35,7 @@ function looksLikeLocalRaster(target: string): boolean {
 
 function looksLikeHostedArtifact(target: string): boolean {
   const normalized = normalizeMarkdownTarget(target);
-  return normalized.startsWith('/workass/artifacts/') || normalized.startsWith('/workass/html/');
+  return normalized.startsWith('/workass/artifacts/');
 }
 
 export function renderInline(text: string, keyBase = 'i', allowLinks = true, media?: InlineMediaResolver): ReactNode[] {

@@ -129,11 +129,11 @@ fi
 old_pid=$!
 attempts=80
 while [ "$attempts" -gt 0 ]; do
-  curl -fsS --max-time 2 "http://127.0.0.1:$port/workass/health" >/dev/null 2>&1 && break
+  curl -kfsS --max-time 2 "https://127.0.0.1:$port/workass/health" >/dev/null 2>&1 && break
   attempts=$((attempts - 1))
   sleep 0.25
 done
-curl -fsS --max-time 2 "http://127.0.0.1:$port/workass/health" >/dev/null
+curl -kfsS --max-time 2 "https://127.0.0.1:$port/workass/health" >/dev/null
 old_listener_pid=$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -n 1)
 [ -n "$old_listener_pid" ]
 
@@ -170,7 +170,7 @@ grep -q '^phase=healthy$' "$status_file"
 [ "$(grep -c '^\[handoff\] start ' "${status_file%.status}.log")" -eq 1 ]
 new_pid=$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -n 1)
 [ -n "$new_pid" ] && [ "$new_pid" != "$old_listener_pid" ]
-curl -fsS --max-time 2 "http://127.0.0.1:$port/workass/health" >/dev/null
+curl -kfsS --max-time 2 "https://127.0.0.1:$port/workass/health" >/dev/null
 installed_path=$(plutil -extract EnvironmentVariables.PATH raw -o - "$plist")
 case "$installed_path" in "$path_marker":*) ;; *) echo "launchd PATH marker missing: $installed_path" >&2; exit 1 ;; esac
 installed_home=$(plutil -extract EnvironmentVariables.HOME raw -o - "$plist")

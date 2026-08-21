@@ -19,7 +19,7 @@ func TestActorSpawnedWorkProjectionPreservesAcceptedRunningAndSharedTabRows(t *t
 	addExternalRecordForTest(manager, tabID, chatID, "orphan-work", "orphan", nil, "", "", "running", "")
 	addExternalRecordForTest(manager, tabID, chatID, "settled-work", "settled", nil, "", "", "exited", "")
 	addExternalRecordForTest(manager, tabID, otherChatID, "other-work", "other", nil, "", "", "running", "")
-	if err := manager.persistSpawnedWorkSnapshot(tabID, chatID); err != nil {
+	if err := manager.persistSpawnedWorkSnapshot(tabID); err != nil {
 		t.Fatal(err)
 	}
 	accepted := []SpawnedWorkItem{{ID: "running-work", TaskID: "running-work", TabID: tabID, ChatID: chatID, Status: "running"}}

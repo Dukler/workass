@@ -1,29 +1,18 @@
-// The daemon and the renderer must key per-model memory identically.
-//
-// They did not. `cmd/workass/session_store.go` rewrites `gpt-5.6-sol[xhigh]` to
-// `gpt-5.6-sol` on every save and marks the session changed; the renderer read
-// the key back unchanged, kept it through `preserveNewerLocalControls`, and
-// wrote it out again. Measured on the running daemon 2026-07-26: one session
-// rewrite every 1.25s, indefinitely — and each one restores the server's
-// `activeId`, so the chat the user had selected kept getting yanked away.
+// Persisted per-model memory uses base model ids as keys. Composite effort ids
+// are selections, not keys, and are not accepted from the persisted shape.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizeModelControlMemory } from '../src/model-controls.ts';
 import { canonicalModelControlKey } from '../src/model-selection.ts';
 
-test('a canonical effort suffix is peeled from a memory key, as the daemon peels it', () => {
+test('a noncanonical effort-suffixed key is ignored', () => {
   const memory = normalizeModelControlMemory({ codex: { 'gpt-5.6-sol[xhigh]': { effort: 'xhigh' } } });
-  assert.deepEqual(memory, { codex: { 'gpt-5.6-sol': { effort: 'xhigh' } } });
+  assert.equal(memory, undefined);
 });
 
-test('normalizing is idempotent, which is what ends the loop', () => {
-  const once = normalizeModelControlMemory({ codex: { 'gpt-5.6-sol[xhigh]': { effort: 'xhigh' } } });
-  assert.deepEqual(normalizeModelControlMemory(once), once);
-});
-
-test('an entry already stored under the base wins, matching the daemon migration', () => {
+test('canonical entries survive normalization unchanged', () => {
   const memory = normalizeModelControlMemory({
-    codex: { 'gpt-5.6-sol': { effort: 'high' }, 'gpt-5.6-sol[xhigh]': { effort: 'xhigh' } },
+    codex: { 'gpt-5.6-sol': { effort: 'high' } },
   });
   assert.deepEqual(memory, { codex: { 'gpt-5.6-sol': { effort: 'high' } } });
 });
@@ -44,10 +33,9 @@ test('the renderer effort set matches the daemon canonicalEffortOrder', () => {
   assert.equal(canonicalModelControlKey('m[thinking]'), 'm[thinking]');
 });
 
-// The actual loop, reproduced: a model that has LEFT the catalog cannot be split
-// by resolveModelSelection, which returns the whole suffixed id as the base. The
-// reconcile pass then wrote that back as a memory key on every pass, the daemon
-// stripped it on every save, and neither side ever converged.
+// A model that has LEFT the catalog cannot be split by resolveModelSelection,
+// which returns the whole suffixed id as the base. The write path still
+// canonicalizes that selected base before storing controls.
 test('a model missing from the catalog still writes a canonical memory key', async () => {
   const { rememberModelControls, rememberedModelControls } = await import('../src/model-controls.ts');
   const { resolveModelSelection } = await import('../src/model-selection.ts');

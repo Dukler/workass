@@ -80,8 +80,9 @@ becomes "last writer wins, both writers observed".
 
 I4 — Composite ids never become model-map keys. Whatever per-model keyed
 maps exist in chat controls persistence use BASE model ids as keys.
-On load, migrate polluted stores: a composite key merges into its base key
-(base wins on conflict) and is removed; log each migration once.
+The current renderer accepts only canonical persisted keys; obsolete composite
+keys are ignored rather than migrated during hydration. New writes continue to
+canonicalize the selected base before storing controls.
 `workass_create_chat` (and any model validation) must accept a composite id
 by resolving base+effort against the catalog exactly like a turn does —
 inheriting `claude-fable-5[1m][high]` or `claude-fable-5[high]` must work.

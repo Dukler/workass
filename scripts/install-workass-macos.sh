@@ -19,17 +19,15 @@ workass_load_profile prod
 
 candidate=''
 install_root=/Applications
-signing_migration=0
 
 usage() {
-  echo "usage: scripts/install-workass-macos.sh --candidate ABSOLUTE.app [--install-root DIR] [--migrate-signing-identity]"
+  echo "usage: scripts/install-workass-macos.sh --candidate ABSOLUTE.app [--install-root DIR]"
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --candidate) [ "$#" -ge 2 ] || { echo "--candidate needs a value" >&2; exit 2; }; candidate="$2"; shift 2 ;;
     --install-root) [ "$#" -ge 2 ] || { echo "--install-root needs a value" >&2; exit 2; }; install_root="$2"; shift 2 ;;
-    --migrate-signing-identity) signing_migration=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -70,8 +68,6 @@ if [ -d "$installed" ] && ! workass_codesign_mutually_compatible "$installed" "$
   if ! codesign --verify --strict "$installed" >/dev/null 2>&1; then
     echo "the installed Workass signature seal is broken; refusing to replace it automatically" >&2
     exit 1
-  elif [ "$signing_migration" -eq 1 ] && workass_codesign_is_adhoc_cdhash "$installed"; then
-    echo "[install] one-time signing identity migration authorized"
   else
     echo "installed and candidate Workass identities are incompatible" >&2
     echo "refusing an install that would reset macOS privacy grants" >&2

@@ -46,7 +46,6 @@ requirement is incompatible with the installed release. The downloaded Workass
 artwork is stored at `desktop/assets/workass-macos.png` and converted into the
 macOS `.icns` during packaging.
 
-The legacy ad-hoc build requires one explicit signing-identity migration.
 Private builds on one Mac can use the opt-in local identity bootstrap; public
 distribution requires Developer ID signing and notarization. See
 `docs/MACOS-SIGNING.md`.

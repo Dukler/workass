@@ -42,7 +42,7 @@ func TestResolveFrontierNativeLaunchUsesOfficialCLIsAndIgnoresZedAdapters(t *tes
 	t.Setenv("WORKASS_CLAUDE_CODE", "")
 	t.Setenv("WORKASS_CODEX", "")
 
-	claudeLaunch, err := resolveFrontierNativeLaunchWithExecutable(ProviderConfig{ID: "claude", Command: "claude"}, filepath.Join(t.TempDir(), "workass"))
+	claudeLaunch, err := resolveFrontierNativeLaunchWithExecutable(ProviderConfig{ID: "claude", Command: "claude"})
 	if err != nil {
 		t.Fatalf("resolve Claude: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestResolveFrontierNativeLaunchUsesOfficialCLIsAndIgnoresZedAdapters(t *tes
 		t.Fatalf("Claude launch = %#v", claudeLaunch)
 	}
 
-	codexLaunch, err := resolveFrontierNativeLaunchWithExecutable(ProviderConfig{ID: "codex", Command: "codex"}, filepath.Join(t.TempDir(), "workass"))
+	codexLaunch, err := resolveFrontierNativeLaunchWithExecutable(ProviderConfig{ID: "codex", Command: "codex"})
 	if err != nil {
 		t.Fatalf("resolve Codex: %v", err)
 	}
@@ -70,11 +70,11 @@ func TestResolveFrontierNativeLaunchHonorsExplicitOfficialCLIOverrides(t *testin
 	t.Setenv("WORKASS_CLAUDE_CODE", claude)
 	t.Setenv("WORKASS_CODEX", codex)
 
-	gotClaude, err := resolveFrontierNativeLaunchWithExecutable(ProviderConfig{ID: "claude", Command: "claude"}, os.Args[0])
+	gotClaude, err := resolveFrontierNativeLaunchWithExecutable(ProviderConfig{ID: "claude", Command: "claude"})
 	if err != nil || gotClaude.Command != claude {
 		t.Fatalf("Claude override = %#v err=%v", gotClaude, err)
 	}
-	gotCodex, err := resolveFrontierNativeLaunchWithExecutable(ProviderConfig{ID: "codex", Command: "codex"}, os.Args[0])
+	gotCodex, err := resolveFrontierNativeLaunchWithExecutable(ProviderConfig{ID: "codex", Command: "codex"})
 	if err != nil || gotCodex.Command != codex {
 		t.Fatalf("Codex override = %#v err=%v", gotCodex, err)
 	}

@@ -522,8 +522,8 @@ export interface StartJobOpts {
   // them so reconnect/archive copies cannot become duplicate message rows.
   userMessageId: string;
   assistantMessageId: string;
-  // Stable originating renderer queue-row id. New daemons use it to fence
-  // renderer start vs daemon adoption; old daemons ignore the additive field.
+  // Stable originating renderer queue-row id. The daemon uses it to fence
+  // renderer start vs daemon adoption.
   queueId?: string;
   // Capability marker: a daemon that atomically finds this ordinary send busy
   // returns a durable FIFO receipt instead of a failed transcript turn.

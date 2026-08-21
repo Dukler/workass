@@ -2,31 +2,22 @@ package mcpprotocol
 
 import "testing"
 
-func TestLegacyNegotiationPreservesEverySupportedRevision(t *testing.T) {
-	for _, version := range LegacyVersions() {
-		if !IsLegacy(version) {
-			t.Fatalf("legacy version %q is not recognized", version)
+func TestModernVersionIsStable(t *testing.T) {
+	if CurrentInitializedVersion != "2025-06-18" {
+		t.Fatalf("CurrentInitializedVersion = %q", CurrentInitializedVersion)
+	}
+	if ModernVersion != "2026-07-28" {
+		t.Fatalf("ModernVersion = %q", ModernVersion)
+	}
+	if InitializedVersion != "2025-11-25" {
+		t.Fatalf("InitializedVersion = %q", InitializedVersion)
+	}
+	for _, version := range []string{CurrentInitializedVersion, InitializedVersion} {
+		if !IsInitializedVersion(version) {
+			t.Fatalf("IsInitializedVersion(%q) = false", version)
 		}
-		if negotiated := NegotiateLegacy(version); negotiated != version {
-			t.Fatalf("negotiate %q = %q", version, negotiated)
-		}
 	}
-	if IsLegacy(ModernVersion) {
-		t.Fatalf("modern version %q was classified as legacy", ModernVersion)
-	}
-	if negotiated := NegotiateLegacy("2099-01-01"); negotiated != LatestLegacyVersion {
-		t.Fatalf("unknown legacy negotiation = %q", negotiated)
-	}
-}
-
-func TestVersionListsAreDefensiveCopies(t *testing.T) {
-	versions := LegacyVersions()
-	versions[0] = "changed"
-	if LegacyVersions()[0] != LatestLegacyVersion {
-		t.Fatal("LegacyVersions exposed mutable package state")
-	}
-	all := AllVersions()
-	if all[0] != ModernVersion || len(all) != len(LegacyVersions())+1 {
-		t.Fatalf("all versions = %#v", all)
+	if IsInitializedVersion("2024-11-05") {
+		t.Fatal("old MCP revision was accepted")
 	}
 }

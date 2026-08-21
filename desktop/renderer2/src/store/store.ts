@@ -444,7 +444,6 @@ export class Store {
   // be adopted once the actor row is present.
   private pendingAgentFocus: { tabId: string; chatId: string } | null = null;
   private sessionHydrationPending = false;
-  private digestUnsupported = false;
   private digestProbe: Promise<void> | null = null;
   private syncScopes = new Set<SyncScope>();
   private syncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1681,7 +1680,7 @@ export class Store {
   }
 
   private probeStateDigest(bridge: NonNullable<typeof window.api>) {
-    if (this.digestUnsupported || this.digestProbe || typeof bridge.stateDigest !== 'function') return;
+    if (this.digestProbe || typeof bridge.stateDigest !== 'function') return;
     this.digestProbe = this.readStateDigest(bridge)
       .then(() => undefined)
       .catch(() => undefined)
@@ -1689,23 +1688,11 @@ export class Store {
   }
 
   private async readStateDigest(bridge: NonNullable<typeof window.api>): Promise<unknown> {
-    if (!this.digestUnsupported && typeof bridge.stateDigest === 'function') {
-      try {
-        const digest = await bridge.stateDigest();
-        if (isStateDigest(digest)) {
-          this.handleStateDigest(digest);
-          return digest;
-        }
-        this.digestUnsupported = true;
-      } catch (error) {
-        // A rolling old daemon answers the additive invoke with an ordinary
-        // channel error. Transport lifecycle failures from the LAN shim are
-        // typed and must still drive the monitor offline.
-        if (isTransportInvokeError(error)) throw error;
-        this.digestUnsupported = true;
-      }
-    }
-    throw new Error('no state digest channel');
+    if (typeof bridge.stateDigest !== 'function') throw new Error('no state digest channel');
+    const digest = await bridge.stateDigest();
+    if (!isStateDigest(digest)) throw new Error('invalid state digest response');
+    this.handleStateDigest(digest);
+    return digest;
   }
 
   private handleStateDigest(digest: StateDigest) {

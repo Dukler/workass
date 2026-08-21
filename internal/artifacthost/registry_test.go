@@ -2,7 +2,6 @@ package artifacthost
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -134,27 +133,6 @@ func TestRegisterArtifactDirectoryAcceptsNonHTMLEntryAndServesAssets(t *testing.
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("artifact suffix %q status=%d", suffix, response.StatusCode)
 		}
-	}
-}
-
-func TestLegacyHTMLRouteStillResolvesAnArtifactRegistration(t *testing.T) {
-	workspace := t.TempDir()
-	if err := os.WriteFile(filepath.Join(workspace, "plan.html"), []byte("<h1>legacy link</h1>"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	registry, err := New(t.TempDir(), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	hosted, err := registry.Register(RegisterOptions{BaseDir: workspace, SourcePath: "plan.html"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := httptest.NewRequest(http.MethodGet, "http://workass.test"+strings.Replace(hosted.URLPath, PathPrefix, LegacyPathPrefix, 1), nil)
-	recorder := httptest.NewRecorder()
-	registry.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "legacy link") {
-		t.Fatalf("legacy route: status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -471,90 +449,5 @@ func TestArtifactHostRejectsSymlinkEscapesHiddenFilesAndMutatingMethods(t *testi
 	}
 	if got := recorder.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") {
 		t.Fatalf("content-security-policy = %q", got)
-	}
-}
-
-func TestLegacyHTMLRegistryMigratesWithoutBreakingSavedURLs(t *testing.T) {
-	stateDir := t.TempDir()
-	workspace := t.TempDir()
-	source := filepath.Join(workspace, "legacy.html")
-	if err := os.WriteFile(source, []byte("<h1>saved legacy URL</h1>"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	stored := registryFile{Version: registryVersion, Hosts: []artifactRecord{{
-		ID: "legacy-plan-1234", Label: "legacy-plan", SourcePath: source,
-		RootPath: workspace, Entry: "legacy.html", Kind: "file",
-		CreatedAt: "2026-07-18T00:00:00Z", UpdatedAt: "2026-07-18T00:00:00Z",
-	}}}
-	data, err := json.Marshal(stored)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stateDir, legacyRegistryFilename), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	registry, err := New(stateDir, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, prefix := range []string{LegacyPathPrefix, PathPrefix} {
-		request := httptest.NewRequest(http.MethodGet, "http://workass.test"+prefix+"/legacy-plan-1234/", nil)
-		recorder := httptest.NewRecorder()
-		registry.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "saved legacy URL") {
-			t.Fatalf("migrated route %s = status %d body=%q", prefix, recorder.Code, recorder.Body.String())
-		}
-	}
-	newRegistry, err := os.ReadFile(filepath.Join(stateDir, registryFilename))
-	if err != nil || !strings.Contains(string(newRegistry), `"artifacts"`) || strings.Contains(string(newRegistry), `"hosts"`) {
-		t.Fatalf("migrated registry = %q err=%v", newRegistry, err)
-	}
-}
-
-func TestLegacyRegistryAddsMissingRollbackRecordsAfterMigration(t *testing.T) {
-	stateDir := t.TempDir()
-	workspace := t.TempDir()
-	currentSource := filepath.Join(workspace, "current.pdf")
-	legacySource := filepath.Join(workspace, "rollback.html")
-	if err := os.WriteFile(currentSource, []byte("%PDF-current"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(legacySource, []byte("<h1>rollback registration</h1>"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	current := registryFile{Version: registryVersion, Artifacts: []artifactRecord{{
-		ID: "current-report-1234", Label: "current-report", SourcePath: currentSource,
-		RootPath: workspace, Entry: "current.pdf", Kind: "file",
-		CreatedAt: "2026-07-20T00:00:00Z", UpdatedAt: "2026-07-20T00:00:00Z",
-	}}}
-	legacy := registryFile{Version: registryVersion, Hosts: []artifactRecord{{
-		ID: "rollback-plan-1234", Label: "rollback-plan", SourcePath: legacySource,
-		RootPath: workspace, Entry: "rollback.html", Kind: "file",
-		CreatedAt: "2026-07-20T01:00:00Z", UpdatedAt: "2026-07-20T01:00:00Z",
-	}}}
-	for filename, stored := range map[string]registryFile{registryFilename: current, legacyRegistryFilename: legacy} {
-		data, err := json.Marshal(stored)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(stateDir, filename), data, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	registry, err := New(stateDir, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{"current-report-1234", "rollback-plan-1234"} {
-		request := httptest.NewRequest(http.MethodGet, "http://workass.test"+PathPrefix+"/"+id+"/", nil)
-		recorder := httptest.NewRecorder()
-		registry.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("merged registration %s status=%d", id, recorder.Code)
-		}
-	}
-	persisted, err := os.ReadFile(filepath.Join(stateDir, registryFilename))
-	if err != nil || !strings.Contains(string(persisted), "current-report-1234") || !strings.Contains(string(persisted), "rollback-plan-1234") {
-		t.Fatalf("merged artifact registry = %q err=%v", persisted, err)
 	}
 }

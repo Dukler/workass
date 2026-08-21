@@ -23,7 +23,6 @@ usage:
                                            [--view-port PORT|0]
                                            [--target ABSOLUTE_PATH]
                                            [--working-dir ABSOLUTE_PATH]
-                                           [--migrate-signing-identity]
 
 Electron rebuilds and relaunches only the client, then proves the daemon PID
 did not change. Daemon builds and preflights a candidate, then dispatches a
@@ -251,7 +250,6 @@ rebuild_daemon() {
   view_port=''
   target=''
   working_dir=''
-  signing_migration=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --profile) [ "$#" -ge 2 ] || die "--profile needs a value"; profile="$2"; shift 2 ;;
@@ -262,7 +260,6 @@ rebuild_daemon() {
       --view-port) [ "$#" -ge 2 ] || die "--view-port needs a value"; view_port="$2"; shift 2 ;;
       --target) [ "$#" -ge 2 ] || die "--target needs a value"; target="$2"; shift 2 ;;
       --working-dir) [ "$#" -ge 2 ] || die "--working-dir needs a value"; working_dir="$2"; shift 2 ;;
-      --migrate-signing-identity) signing_migration=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown daemon argument: $1" ;;
     esac
@@ -310,11 +307,7 @@ rebuild_daemon() {
   [ -n "$old_pid" ] || die "no daemon listener found on port $port"
   old_command=$(ps -p "$old_pid" -o command= 2>/dev/null || true)
   printf '%s' "$old_command" | grep -q 'workass' || die "port $port belongs to a non-Workass process: $old_command"
-  # One release transition may begin against the old loopback HTTP daemon. It
-  # is accepted only as a pre-handoff liveness check; the candidate preflight,
-  # handoff, and every daemon built from this source require HTTPS.
-  if ! curl -kfsS --max-time 2 "https://127.0.0.1:$port/workass/health" >/dev/null 2>&1 && \
-     ! curl -fsS --max-time 2 "http://127.0.0.1:$port/workass/health" >/dev/null 2>&1; then
+  if ! curl -kfsS --max-time 2 "https://127.0.0.1:$port/workass/health" >/dev/null 2>&1; then
     die "current daemon health check failed"
   fi
   if [ "$view_port" -gt 0 ]; then
@@ -382,10 +375,8 @@ rebuild_daemon() {
         # signature already lost its grants on every previous build. Adopting
         # the persistent identity costs one last authorization.
         echo "[daemon] adopting the persistent identity for the $profile daemon" | tee -a "$build_log"
-      elif [ "$signing_migration" -ne 1 ] || ! workass_codesign_is_adhoc_cdhash "$target"; then
-        die "current and candidate daemon identities are incompatible; refusing a rebuild that would reset macOS privacy grants (use --migrate-signing-identity only once)"
       else
-        echo "[daemon] one-time signing identity migration authorized" | tee -a "$build_log"
+        die "current and candidate daemon identities are incompatible; refusing a rebuild that would reset macOS privacy grants"
       fi
     fi
 

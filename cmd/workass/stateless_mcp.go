@@ -48,14 +48,6 @@ type statelessMCPRequest struct {
 	Params  json.RawMessage `json:"params"`
 }
 
-type statelessMCPRevision uint8
-
-const (
-	statelessMCPRevisionUnsupported statelessMCPRevision = iota
-	statelessMCPRevisionLegacy
-	statelessMCPRevisionModern
-)
-
 // statelessMCPToolMutates is the ingress manifest for the logical-operation
 // boundary. It is intentionally separate from the JSON-RPC transport id: a
 // caller may retry one logical mutation with any number of transport ids.
@@ -73,7 +65,7 @@ func statelessMCPToolMutates(kind statelessMCPKind, name string) bool {
 	switch name {
 	case "workass_create_chat", "workass_rename_chat", "workass_configure_chat", "workass_focus_chat",
 		"workass_delete_chat", "workass_send_chat_message", "workass_cancel_chat_turn", "workass_host_artifact",
-		"workass_host_html", "workass_spawn_subagent", "workass_wait_subagent", "workass_wait_subagents",
+		"workass_spawn_subagent", "workass_wait_subagent", "workass_wait_subagents",
 		"workass_message_subagent", "workass_retry_subagent", "workass_register_external_work",
 		"workass_settle_external_work", "workass_cancel_subagent", "workass_decide_subagent_permission":
 		return true
@@ -89,30 +81,15 @@ func requiredStatelessMCPOperationID(kind statelessMCPKind, call browserMCPCallP
 	if call.Arguments == nil {
 		return "", errors.New("mutating MCP tool requires a caller-stable operation_id")
 	}
-	var operationID providercontract.OperationID
-	seen := false
-	for _, key := range []string{"operation_id", "operationId"} {
-		raw, present := call.Arguments[key]
-		if !present {
-			continue
-		}
-		value, ok := raw.(string)
-		if !ok {
-			return "", errors.New("MCP operation_id must be a string")
-		}
-		validated, err := providercontract.ValidateOperationID(value)
-		if err != nil {
-			return "", err
-		}
-		if seen && operationID != validated {
-			return "", errors.New("operation_id and operationId must identify the same operation")
-		}
-		operationID, seen = validated, true
-	}
-	if !seen {
+	raw, present := call.Arguments["operation_id"]
+	if !present {
 		return "", errors.New("mutating MCP tool requires a caller-stable operation_id")
 	}
-	return operationID, nil
+	value, ok := raw.(string)
+	if !ok {
+		return "", errors.New("MCP operation_id must be a string")
+	}
+	return providercontract.ValidateOperationID(value)
 }
 
 func newAgentStatelessMCPHandler(manager *acp.Manager, control *agentControlHandler) http.Handler {
@@ -208,30 +185,108 @@ func (h *statelessMCPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		h.writeError(w, http.StatusBadRequest, request.ID, -32600, "invalid JSON-RPC request", nil)
 		return
 	}
-	revision, version := classifyStatelessMCPRequest(r, request)
-	if revision == statelessMCPRevisionUnsupported {
-		h.writeError(w, http.StatusBadRequest, request.ID, -32022, "unsupported MCP protocol version", map[string]any{
-			"requested": version, "supported": mcpprotocol.AllVersions(),
-		})
-		return
-	}
 	if request.ID == nil {
-		if revision == statelessMCPRevisionLegacy && request.Method == "notifications/initialized" {
-			if err := validateLegacyStatelessMCPHeaders(r, request, version, nil); err != nil {
-				h.writeError(w, http.StatusBadRequest, nil, -32020, err.Error(), nil)
+		if request.Method == "notifications/initialized" {
+			version := strings.TrimSpace(r.Header.Get("MCP-Protocol-Version"))
+			if version != "" && version != statelessMCPProtocolVersion && !mcpprotocol.IsInitializedVersion(version) {
+				h.writeError(w, http.StatusBadRequest, nil, -32022, "unsupported MCP protocol version", map[string]any{
+					"supported": append(mcpprotocol.InitializedVersions(), statelessMCPProtocolVersion),
+				})
 				return
 			}
-			h.writeAccepted(w)
+			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 		h.writeError(w, http.StatusBadRequest, nil, -32600, "invalid JSON-RPC request", nil)
 		return
 	}
-	if revision == statelessMCPRevisionLegacy {
-		h.serveLegacyMCP(w, r, request, version, ownerKey, chatID, tabID)
+	if request.Method == "initialize" {
+		h.serveInitializedMCP(w, r, request)
+		return
+	}
+	headerVersion := strings.TrimSpace(r.Header.Get("MCP-Protocol-Version"))
+	// The current MCP HTTP transport uses the same JSON-RPC methods after its
+	// initialize exchange.  A standard client has no Workass _meta envelope;
+	// keep the direct Workass 2026 dialect on its existing, explicitly marked
+	// path and translate only the current initialized form here.
+	if mcpprotocol.IsInitializedVersion(headerVersion) ||
+		(headerVersion == statelessMCPProtocolVersion && !statelessMCPHasModernMeta(request.Params)) {
+		h.serveInitializedMCP(w, r, request)
 		return
 	}
 	h.serveModernMCP(w, r, request, ownerKey, chatID, tabID)
+}
+
+func statelessMCPHasModernMeta(raw json.RawMessage) bool {
+	var params map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &params) != nil || params == nil {
+		return false
+	}
+	meta, ok := params["_meta"].(map[string]any)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(mcpString(meta["io.modelcontextprotocol/protocolVersion"])) != ""
+}
+
+func (h *statelessMCPHandler) serveInitializedMCP(w http.ResponseWriter, r *http.Request, request statelessMCPRequest) {
+	params := map[string]any{}
+	if len(request.Params) > 0 && string(request.Params) != "null" {
+		decoder := json.NewDecoder(strings.NewReader(string(request.Params)))
+		decoder.UseNumber()
+		if err := decoder.Decode(&params); err != nil || params == nil {
+			h.writeError(w, http.StatusBadRequest, request.ID, -32602, "request params must be an object", nil)
+			return
+		}
+	}
+	requested := strings.TrimSpace(mcpString(params["protocolVersion"]))
+	if request.Method == "initialize" {
+		if requested == "" {
+			h.writeError(w, http.StatusBadRequest, request.ID, -32602, "initialize params must include protocolVersion", nil)
+			return
+		}
+		if !mcpprotocol.IsInitializedVersion(requested) && requested != statelessMCPProtocolVersion {
+			h.writeError(w, http.StatusBadRequest, request.ID, -32022, "unsupported MCP protocol version", map[string]any{
+				"supported": append(mcpprotocol.InitializedVersions(), statelessMCPProtocolVersion),
+			})
+			return
+		}
+		h.writeResult(w, request.ID, map[string]any{
+			"protocolVersion": requested,
+			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
+			"serverInfo":      map[string]any{"name": h.name, "version": daemonVersion},
+			"instructions":    h.instructions(),
+		})
+		return
+	}
+	switch request.Method {
+	case "ping":
+		h.writeResult(w, request.ID, map[string]any{})
+	case "tools/list":
+		h.writeResult(w, request.ID, map[string]any{"tools": h.tools()})
+	case "tools/call":
+		var call browserMCPCallParams
+		if err := json.Unmarshal(request.Params, &call); err != nil || strings.TrimSpace(call.Name) == "" {
+			h.writeError(w, http.StatusBadRequest, request.ID, -32602, "invalid tools/call parameters", nil)
+			return
+		}
+		ownerKey := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		chatID := strings.TrimSpace(r.Header.Get("X-Workass-Chat-ID"))
+		tabID := strings.TrimSpace(r.Header.Get("X-Workass-Tab-ID"))
+		result, err := h.callTool(r, call, ownerKey, chatID, tabID)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, request.ID, -32603, acp.RedactSensitiveText(err.Error()), nil)
+			return
+		}
+		resultMap := mapFromAnyMain(result)
+		delete(resultMap, "resultType")
+		delete(resultMap, "ttlMs")
+		delete(resultMap, "cacheScope")
+		delete(resultMap, "_meta")
+		h.writeResult(w, request.ID, resultMap)
+	default:
+		h.writeError(w, http.StatusNotFound, request.ID, -32601, "method not found", nil)
+	}
 }
 
 func (h *statelessMCPHandler) serveModernMCP(
@@ -295,56 +350,6 @@ func (h *statelessMCPHandler) serveModernMCP(
 		resultMap["resultType"] = "complete"
 		resultMap["_meta"] = h.resultMeta()
 		h.writeResult(w, request.ID, resultMap)
-	default:
-		h.writeError(w, http.StatusNotFound, request.ID, -32601, "method not found", nil)
-	}
-}
-
-func (h *statelessMCPHandler) serveLegacyMCP(
-	w http.ResponseWriter,
-	r *http.Request,
-	request statelessMCPRequest,
-	version, ownerKey, chatID, tabID string,
-) {
-	params, err := decodeLegacyStatelessMCPParams(request.Params)
-	if err != nil {
-		h.writeError(w, http.StatusBadRequest, request.ID, -32602, err.Error(), nil)
-		return
-	}
-	if err := validateLegacyStatelessMCPHeaders(r, request, version, params); err != nil {
-		h.writeError(w, http.StatusBadRequest, request.ID, -32020, err.Error(), nil)
-		return
-	}
-
-	switch request.Method {
-	case "initialize":
-		requested := strings.TrimSpace(mcpString(params["protocolVersion"]))
-		if requested == "" {
-			h.writeError(w, http.StatusBadRequest, request.ID, -32602, "initialize params must include protocolVersion", nil)
-			return
-		}
-		h.writeResult(w, request.ID, map[string]any{
-			"protocolVersion": mcpprotocol.NegotiateLegacy(requested),
-			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-			"serverInfo":      map[string]any{"name": h.name, "version": daemonVersion},
-			"instructions":    h.instructions(),
-		})
-	case "ping":
-		h.writeResult(w, request.ID, map[string]any{})
-	case "tools/list":
-		h.writeResult(w, request.ID, map[string]any{"tools": h.tools()})
-	case "tools/call":
-		var call browserMCPCallParams
-		if err := json.Unmarshal(request.Params, &call); err != nil || strings.TrimSpace(call.Name) == "" {
-			h.writeError(w, http.StatusBadRequest, request.ID, -32602, "invalid tools/call parameters", nil)
-			return
-		}
-		result, err := h.callTool(r, call, ownerKey, chatID, tabID)
-		if err != nil {
-			h.writeError(w, http.StatusInternalServerError, request.ID, -32603, acp.RedactSensitiveText(err.Error()), nil)
-			return
-		}
-		h.writeResult(w, request.ID, result)
 	default:
 		h.writeError(w, http.StatusNotFound, request.ID, -32601, "method not found", nil)
 	}
@@ -466,124 +471,6 @@ func (h *statelessMCPHandler) writeJSON(w http.ResponseWriter, status int, value
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
-}
-
-func (h *statelessMCPHandler) writeAccepted(w http.ResponseWriter) {
-	w.Header().Set("Cache-Control", "private, no-store")
-	w.WriteHeader(http.StatusAccepted)
-}
-
-func classifyStatelessMCPRequest(r *http.Request, request statelessMCPRequest) (statelessMCPRevision, string) {
-	headerVersion := strings.TrimSpace(r.Header.Get("MCP-Protocol-Version"))
-	if request.Method == "initialize" {
-		if headerVersion == "" {
-			// The 2026 direct protocol does not have an initialize exchange. Do
-			// not silently reinterpret a known-modern body as a legacy client
-			// merely because its HTTP version header is absent.
-			var params map[string]any
-			if decoded, err := decodeLegacyStatelessMCPParams(request.Params); err == nil {
-				params = decoded
-			}
-			bodyVersion := strings.TrimSpace(mcpString(params["protocolVersion"]))
-			if bodyVersion == statelessMCPProtocolVersion {
-				return statelessMCPRevisionUnsupported, bodyVersion
-			}
-			return statelessMCPRevisionLegacy, mcpprotocol.LatestLegacyVersion
-		}
-		if mcpprotocol.IsLegacy(headerVersion) {
-			return statelessMCPRevisionLegacy, headerVersion
-		}
-		return statelessMCPRevisionUnsupported, headerVersion
-	}
-	if headerVersion == statelessMCPProtocolVersion {
-		return statelessMCPRevisionModern, headerVersion
-	}
-	if mcpprotocol.IsLegacy(headerVersion) {
-		return statelessMCPRevisionLegacy, headerVersion
-	}
-	if headerVersion != "" {
-		return statelessMCPRevisionUnsupported, headerVersion
-	}
-
-	bodyVersion := statelessMCPBodyVersion(request.Params)
-	if bodyVersion == statelessMCPProtocolVersion {
-		return statelessMCPRevisionModern, bodyVersion
-	}
-	if mcpprotocol.IsLegacy(bodyVersion) {
-		return statelessMCPRevisionLegacy, bodyVersion
-	}
-	if bodyVersion != "" {
-		return statelessMCPRevisionUnsupported, bodyVersion
-	}
-	// The modern revision requires its routing headers. Treat an incomplete
-	// modern-shaped request as modern so header validation rejects it instead
-	// of silently downgrading it to the initialize-based protocol.
-	if r.Header.Get("Mcp-Method") != "" || r.Header.Get("Mcp-Name") != "" || request.Method == "server/discover" {
-		return statelessMCPRevisionModern, statelessMCPProtocolVersion
-	}
-	return statelessMCPRevisionLegacy, mcpprotocol.LatestLegacyVersion
-}
-
-func statelessMCPBodyVersion(raw json.RawMessage) string {
-	params, err := decodeLegacyStatelessMCPParams(raw)
-	if err != nil {
-		return ""
-	}
-	meta, _ := params["_meta"].(map[string]any)
-	return strings.TrimSpace(mcpString(meta["io.modelcontextprotocol/protocolVersion"]))
-}
-
-func decodeLegacyStatelessMCPParams(raw json.RawMessage) (map[string]any, error) {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" {
-		return map[string]any{}, nil
-	}
-	var params map[string]any
-	decoder := json.NewDecoder(strings.NewReader(string(raw)))
-	decoder.UseNumber()
-	if err := decoder.Decode(&params); err != nil || params == nil {
-		return nil, errors.New("request params must be an object")
-	}
-	return params, nil
-}
-
-func validateLegacyStatelessMCPHeaders(
-	r *http.Request,
-	request statelessMCPRequest,
-	version string,
-	params map[string]any,
-) error {
-	headerVersion := strings.TrimSpace(r.Header.Get("MCP-Protocol-Version"))
-	if headerVersion != "" && !mcpprotocol.IsLegacy(headerVersion) {
-		return errors.New("MCP-Protocol-Version header is not a supported legacy revision")
-	}
-	if params != nil {
-		if request.Method == "initialize" {
-			requestedVersion := strings.TrimSpace(mcpString(params["protocolVersion"]))
-			if headerVersion != "" && requestedVersion != "" && headerVersion != requestedVersion {
-				return errors.New("MCP-Protocol-Version header does not match initialize params")
-			}
-		}
-		meta, _ := params["_meta"].(map[string]any)
-		bodyVersion := strings.TrimSpace(mcpString(meta["io.modelcontextprotocol/protocolVersion"]))
-		if bodyVersion != "" && (!mcpprotocol.IsLegacy(bodyVersion) || (headerVersion != "" && headerVersion != bodyVersion)) {
-			return errors.New("MCP-Protocol-Version header does not match request _meta")
-		}
-	}
-	if headerVersion != "" && version != "" && headerVersion != version {
-		return errors.New("MCP-Protocol-Version header does not match negotiated revision")
-	}
-	if method := r.Header.Get("Mcp-Method"); method != "" && method != request.Method {
-		return errors.New("Mcp-Method header does not match request method")
-	}
-	if request.Method == "tools/call" && r.Header.Get("Mcp-Name") != "" {
-		bodyName := mcpString(params["name"])
-		headerName, err := decodeMCPHeaderValue(r.Header.Get("Mcp-Name"))
-		if err != nil || bodyName == "" || headerName != bodyName {
-			return errors.New("Mcp-Name header does not match request tool name")
-		}
-	}
-	return nil
 }
 
 func decodeStatelessMCPParams(raw json.RawMessage) (map[string]any, map[string]any, error) {

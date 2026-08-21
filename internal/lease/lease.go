@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -339,6 +340,9 @@ func (m *Manager) load() error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if err := dec.Decode(&root); err != nil {
 		return err
+	}
+	if root.Version != stateVersion {
+		return fmt.Errorf("unsupported device state version %d", root.Version)
 	}
 	m.devices = append([]Device(nil), root.Devices...)
 	return nil

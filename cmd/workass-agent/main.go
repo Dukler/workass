@@ -31,11 +31,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("workass-agent", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.StringVar(&cfg.BaseURL, "openai-base-url", env.BaseURL, "OpenAI-compatible API base URL, for example http://127.0.0.1:1234/v1")
-	fs.StringVar(&cfg.BaseURL, "base-url", env.BaseURL, "alias for --openai-base-url")
 	fs.StringVar(&cfg.Model, "openai-model", env.Model, "OpenAI-compatible model id")
-	fs.StringVar(&cfg.Model, "model", env.Model, "alias for --openai-model")
 	fs.StringVar(&cfg.APIKey, "openai-api-key", env.APIKey, "OpenAI-compatible API key")
-	fs.StringVar(&cfg.APIKey, "api-key", env.APIKey, "alias for --openai-api-key")
 	fs.BoolVar(&probe, "probe", false, "print a self-test JSON object to stderr and exit")
 	if err := fs.Parse(args); err != nil {
 		return err

@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	protocol2025 = mcpprotocol.LatestLegacyVersion
+	protocol2025 = mcpprotocol.InitializedVersion
 	protocol2026 = mcpprotocol.ModernVersion
 
 	envEndpoint           = "WORKASS_MCP_ENDPOINT"
@@ -34,14 +34,6 @@ const (
 	envTabID              = "WORKASS_MCP_TAB_ID"
 	maxMessageBytes       = 4 * 1024 * 1024
 	defaultRequestTimeout = 30 * time.Second
-)
-
-type revision uint8
-
-const (
-	revisionUnset revision = iota
-	revision2025
-	revision2026
 )
 
 type config struct {
@@ -54,8 +46,8 @@ type config struct {
 
 type server struct {
 	config
-	revision           revision
-	legacyVersion      string
+	initialized        bool
+	initializedVersion string
 	clientInfo         map[string]any
 	clientCapabilities map[string]any
 }
@@ -179,68 +171,58 @@ func (s *server) handle(ctx context.Context, line []byte) ([]byte, bool) {
 		return rpcError(id, -32600, "invalid JSON-RPC message"), hasID
 	}
 	if !hasID || bytes.Equal(bytes.TrimSpace(id), []byte("null")) {
-		// Neither supported Workass MCP revision needs client notifications. The
-		// 2025 initialized notification is acknowledged by silence, as required.
+		// MCP notifications do not produce JSON-RPC responses.
 		return nil, false
 	}
-
 	if method == "initialize" {
-		if s.revision != revisionUnset {
+		if s.initialized {
 			return rpcError(id, -32600, "MCP connection is already initialized"), true
 		}
-		return s.initialize2025(ctx, id, message["params"]), true
+		return s.initialize(ctx, id, message["params"]), true
 	}
-	if s.revision == revisionUnset {
-		if requestProtocol(message["params"]) == protocol2026 {
-			s.revision = revision2026
-		} else {
-			return rpcError(id, -32002, "MCP connection is not initialized"), true
+	if s.initialized {
+		switch method {
+		case "ping":
+			return rpcResult(id, map[string]any{}), true
+		case "tools/list", "tools/call":
+			modern, err := s.modernRequest(message, method)
+			if err != nil {
+				return rpcError(id, -32602, err.Error()), true
+			}
+			response, err := s.forward(ctx, modern, method, json.RawMessage(messageParams(modern)))
+			if err != nil {
+				return rpcError(id, -32000, "Workass MCP endpoint request failed"), true
+			}
+			translated, err := responseForInitialized(response, method)
+			if err != nil {
+				return rpcError(id, -32603, "Workass MCP endpoint returned an invalid response"), true
+			}
+			return translated, true
+		default:
+			return rpcError(id, -32601, "method not found"), true
 		}
 	}
-	if s.revision == revision2026 {
-		response, err := s.forward(ctx, line, method, message["params"])
-		if err != nil {
-			return rpcError(id, -32000, "Workass MCP endpoint request failed"), true
-		}
-		return response, true
+	if requestProtocol(message["params"]) != protocol2026 {
+		return rpcError(id, -32002, "MCP connection is not initialized"), true
 	}
-
-	switch method {
-	case "ping":
-		return rpcResult(id, map[string]any{}), true
-	case "tools/list", "tools/call":
-		modern, err := s.modernRequest(message, method)
-		if err != nil {
-			return rpcError(id, -32602, err.Error()), true
-		}
-		response, err := s.forward(ctx, modern, method, json.RawMessage(messageParams(modern)))
-		if err != nil {
-			return rpcError(id, -32000, "Workass MCP endpoint request failed"), true
-		}
-		translated, err := responseFor2025(response, method)
-		if err != nil {
-			return rpcError(id, -32603, "Workass MCP endpoint returned an invalid response"), true
-		}
-		return translated, true
-	default:
-		return rpcError(id, -32601, "method not found"), true
+	response, err := s.forward(ctx, line, method, message["params"])
+	if err != nil {
+		return rpcError(id, -32000, "Workass MCP endpoint request failed"), true
 	}
+	return response, true
 }
 
-func (s *server) initialize2025(ctx context.Context, id json.RawMessage, rawParams json.RawMessage) []byte {
+func (s *server) initialize(ctx context.Context, id, rawParams json.RawMessage) []byte {
 	params, err := objectFromRaw(rawParams)
 	if err != nil {
 		return rpcError(id, -32602, "initialize params must be an object")
 	}
-	requestedVersion, ok := params["protocolVersion"].(string)
-	if !ok || strings.TrimSpace(requestedVersion) == "" {
+	requested, ok := params["protocolVersion"].(string)
+	if !ok || strings.TrimSpace(requested) == "" {
 		return rpcError(id, -32602, "initialize params must include protocolVersion")
 	}
-	requestedVersion = strings.TrimSpace(requestedVersion)
-	// The 2026 direct protocol is self-describing and has no initialize
-	// exchange. Reject a modern initialize instead of silently negotiating it
-	// down to the latest legacy revision.
-	if requestedVersion == protocol2026 {
+	requested = strings.TrimSpace(requested)
+	if !mcpprotocol.IsInitializedVersion(requested) && requested != protocol2026 {
 		return rpcError(id, -32022, "unsupported MCP protocol version")
 	}
 	if info, ok := params["clientInfo"].(map[string]any); ok {
@@ -253,8 +235,6 @@ func (s *server) initialize2025(ctx context.Context, id json.RawMessage, rawPara
 	} else {
 		s.clientCapabilities = map[string]any{}
 	}
-	s.revision = revision2025
-	s.legacyVersion = mcpprotocol.NegotiateLegacy(requestedVersion)
 	discover := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      json.RawMessage(id),
@@ -286,15 +266,17 @@ func (s *server) initialize2025(ctx context.Context, id json.RawMessage, rawPara
 	if !ok {
 		return rpcError(id, -32603, "Workass MCP discovery omitted server identity")
 	}
-	translated := map[string]any{
-		"protocolVersion": s.legacyVersion,
+	s.initialized = true
+	s.initializedVersion = requested
+	initialized := map[string]any{
+		"protocolVersion": requested,
 		"capabilities":    capabilities,
 		"serverInfo":      serverInfo,
 	}
 	if instructions, ok := result["instructions"]; ok {
-		translated["instructions"] = instructions
+		initialized["instructions"] = instructions
 	}
-	return rpcResult(id, translated)
+	return rpcResult(id, initialized)
 }
 
 func (s *server) modernRequest(message map[string]json.RawMessage, method string) ([]byte, error) {
@@ -361,7 +343,7 @@ func (s *server) forward(ctx context.Context, body []byte, method string, rawPar
 	return compact.Bytes(), nil
 }
 
-func responseFor2025(response []byte, method string) ([]byte, error) {
+func responseForInitialized(response []byte, method string) ([]byte, error) {
 	result, rpcErr, err := decodedResponse(response)
 	if err != nil || rpcErr != nil {
 		return response, err
@@ -438,6 +420,14 @@ func objectFromBytes(raw []byte) (map[string]any, error) {
 	return value, nil
 }
 
+func messageParams(message []byte) []byte {
+	decoded, err := decodeMessage(message)
+	if err != nil {
+		return nil
+	}
+	return decoded["params"]
+}
+
 func requestProtocol(rawParams json.RawMessage) string {
 	params, err := objectFromRaw(rawParams)
 	if err != nil {
@@ -446,14 +436,6 @@ func requestProtocol(rawParams json.RawMessage) string {
 	meta, _ := params["_meta"].(map[string]any)
 	version, _ := meta["io.modelcontextprotocol/protocolVersion"].(string)
 	return strings.TrimSpace(version)
-}
-
-func messageParams(message []byte) []byte {
-	decoded, err := decodeMessage(message)
-	if err != nil {
-		return nil
-	}
-	return decoded["params"]
 }
 
 func rawString(raw json.RawMessage) string {

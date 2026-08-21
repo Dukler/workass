@@ -513,6 +513,68 @@ test('an update receipt belongs only to the release version that can honestly re
   }, '1.1.0', ownership), false);
 });
 
+test('a newly activated target observes the outgoing receipt without parsing its transaction format', () => {
+  for (const platform of ['darwin', 'win32']) {
+    const updateId = `upd-outgoing-${platform}-1234`;
+    const workerId = `worker-${(platform === 'darwin' ? '4' : '5').repeat(32)}`;
+    let receiptPoll = null;
+    let cancelledPolls = 0;
+    let daemonCalls = 0;
+    const { manager, initialState } = managerFixture({
+      platform,
+      currentVersion: '1.2.0',
+      primeReady: false,
+      initialReceipt: {
+        updateId, phase: 'activating', previousVersion: '1.1.0', targetVersion: '1.2.0',
+        workerId, workerPID: 999990,
+      },
+      dependencyOverrides: {
+        repeat: (fn) => {
+          assert.equal(receiptPoll, null);
+          receiptPoll = fn;
+          return { unref() {} };
+        },
+        cancelRepeat: () => { cancelledPolls += 1; },
+        postLocalUpdate: async () => {
+          daemonCalls += 1;
+          return { status: 200, body: { cancelled: false, notPrepared: true } };
+        },
+      },
+    });
+
+    assert.equal(initialState.phase, 'installing');
+    assert.equal(initialState.error, null);
+    assert.equal(manager.recoveryPromise, null);
+    assert.equal(typeof receiptPoll, 'function');
+    const foreignTransactionPath = path.join(manager.updateRoot, 'transactions', updateId, 'transaction.json');
+    fs.mkdirSync(path.dirname(foreignTransactionPath), { recursive: true });
+    fs.writeFileSync(foreignTransactionPath, JSON.stringify({ format: 'external-updater', updateId, targetVersion: '1.2.0' }));
+    assert.equal(fs.existsSync(foreignTransactionPath), true);
+    receiptPoll();
+    assert.equal(manager.snapshot().phase, 'installing');
+    assert.equal(daemonCalls, 0);
+
+    fs.writeFileSync(manager.receiptPath, `${JSON.stringify({
+      schemaVersion: 2,
+      updateId,
+      phase: 'healthy',
+      previousVersion: '1.1.0',
+      targetVersion: '1.2.0',
+      installedVersion: '1.2.0',
+      installationId: manager.installationIdentity.installationId,
+      installTarget: manager.installTarget,
+      workerId,
+      workerPID: 999990,
+      activated: true,
+    })}\n`);
+    receiptPoll();
+    assert.equal(manager.snapshot().phase, 'healthy');
+    assert.equal(manager.snapshot().error, null);
+    assert.equal(cancelledPolls, 1);
+    assert.equal(daemonCalls, 0);
+  }
+});
+
 test('a freshly downloaded Windows target ignores the replaced copy rollback receipt', () => {
   const initialReceipt = {
     schemaVersion: 2,

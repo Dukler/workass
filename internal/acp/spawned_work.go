@@ -247,9 +247,9 @@ func isoNow() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 // the only outcome here that loses information.
 func normalizeSpawnedWorkRole(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "service", "server", "daemon":
+	case "service":
 		return spawnedWorkRoleService
-	case "work", "task", "job":
+	case "work":
 		return spawnedWorkRoleWork
 	default:
 		return ""
@@ -1326,7 +1326,7 @@ func (m *Manager) commitActorSpawnedWorkProjectionLocked(tabID, chatID string, i
 		}
 	}
 	m.spawnedWorkMu.Unlock()
-	if err := m.persistSpawnedWorkSnapshot(tabID, ""); err != nil {
+	if err := m.persistSpawnedWorkSnapshot(tabID); err != nil {
 		return fmt.Errorf("persist actor-owned background cache for tab %q: %w", tabID, err)
 	}
 	return nil
@@ -1354,7 +1354,7 @@ func (m *Manager) dropSpawnedWorkPair(tabID, chatID string) error {
 		}
 	}
 	m.spawnedWorkMu.Unlock()
-	if err := m.persistSpawnedWorkSnapshot(tabID, ""); err != nil {
+	if err := m.persistSpawnedWorkSnapshot(tabID); err != nil {
 		return fmt.Errorf("persist surviving spawned-work cache for tab %q: %w", tabID, err)
 	}
 	if err := m.dropSpawnedWorkReceipts(tabID, chatID); err != nil {
@@ -1770,12 +1770,12 @@ func (m *Manager) spawnedWorkSnapshotPath(tabID string) string {
 	return filepath.Join(m.opts.StateDir, "spawned-work", safeArchiveName(tabID)+".json")
 }
 
-func (m *Manager) persistSpawnedWorkSnapshot(tabID, chatID string) error {
+func (m *Manager) persistSpawnedWorkSnapshot(tabID string) error {
 	path := m.spawnedWorkSnapshotPath(tabID)
 	if path == "" {
 		return nil
 	}
-	items := m.listSpawnedWorkSnapshotItems(tabID, chatID)
+	items := m.listSpawnedWorkSnapshotItems(tabID)
 	data, err := json.Marshal(items)
 	if err != nil {
 		return err
@@ -1789,15 +1789,14 @@ func (m *Manager) persistSpawnedWorkSnapshot(tabID, chatID string) error {
 	return writeSpawnedWorkFile(path, data)
 }
 
-func (m *Manager) listSpawnedWorkSnapshotItems(tabID, chatID string) []spawnedWorkSnapshotItem {
-	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
+func (m *Manager) listSpawnedWorkSnapshotItems(tabID string) []spawnedWorkSnapshotItem {
+	tabID = strings.TrimSpace(tabID)
 	if tabID == "" {
 		return []spawnedWorkSnapshotItem{}
 	}
 	// The file is tab-scoped, not chat-scoped. Keep every surviving chat pair
 	// when one pair changes; filtering by chat here would silently delete a
 	// current cache that shares a reused renderer tab.
-	_ = chatID
 	m.spawnedWorkMu.Lock()
 	out := make([]spawnedWorkSnapshotItem, 0)
 	for _, rec := range m.spawnedWork {

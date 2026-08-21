@@ -18,7 +18,6 @@ bundle_build=$(date -u +%Y%m%d%H%M%S)
 bundle_version=0.1.0
 install_root=/Applications
 launch=1
-signing_migration=0
 artifact_output=''
 release_signing=0
 # Every installed Workass is one self-contained release. The old shell-only
@@ -35,7 +34,6 @@ while [ "$#" -gt 0 ]; do
     --icon) [ "$#" -ge 2 ] || { echo "--icon needs a value" >&2; exit 2; }; icon_source="$2"; shift 2 ;;
     --install-root) [ "$#" -ge 2 ] || { echo "--install-root needs a value" >&2; exit 2; }; install_root="$2"; shift 2 ;;
     --no-launch) launch=0; shift ;;
-    --migrate-signing-identity) signing_migration=1; shift ;;
     --artifact-only) [ "$#" -ge 2 ] || { echo "--artifact-only needs a value" >&2; exit 2; }; artifact_output="$2"; shift 2 ;;
     --version) [ "$#" -ge 2 ] || { echo "--version needs a value" >&2; exit 2; }; bundle_version="$2"; shift 2 ;;
     --build-number) [ "$#" -ge 2 ] || { echo "--build-number needs a value" >&2; exit 2; }; bundle_build="$2"; shift 2 ;;
@@ -46,7 +44,7 @@ while [ "$#" -gt 0 ]; do
     --electron-app) [ "$#" -ge 2 ] || { echo "--electron-app needs a value" >&2; exit 2; }; electron_app_input="$2"; shift 2 ;;
     --renderer-root) [ "$#" -ge 2 ] || { echo "--renderer-root needs a value" >&2; exit 2; }; renderer_input_root="$2"; shift 2 ;;
     -h|--help)
-      echo "usage: scripts/package-workass-macos.sh [--icon PNG] [--install-root DIR] [--no-launch] [--migrate-signing-identity] [--artifact-only APP] [--version X.Y.Z] [--build-number N] [--release-signing] [--portable-runtime] [--arch arm64] [--runtime-root DIR] [--electron-app APP] [--renderer-root DIR]"
+      echo "usage: scripts/package-workass-macos.sh [--icon PNG] [--install-root DIR] [--no-launch] [--artifact-only APP] [--version X.Y.Z] [--build-number N] [--release-signing] [--portable-runtime] [--arch arm64] [--runtime-root DIR] [--electron-app APP] [--renderer-root DIR]"
       exit 0
       ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -239,7 +237,6 @@ fi
   exit 2
 }
 set -- --candidate "$stage" --install-root "$install_root"
-if [ "$signing_migration" -eq 1 ]; then set -- "$@" --migrate-signing-identity; fi
 "$repo_root/scripts/install-workass-macos.sh" "$@"
 echo "WORKASS_MACOS_PACKAGE_HEALTHY"
 echo "profile=$WORKASS_PROFILE"

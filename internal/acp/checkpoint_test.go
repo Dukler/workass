@@ -132,7 +132,7 @@ func TestChatCheckpointRotationAndLargeRepoSkip(t *testing.T) {
 			t.Run(fmt.Sprintf("cap-from-%d", existing), func(t *testing.T) {
 				manager := NewManager(Options{StateDir: filepath.Join(t.TempDir(), "state")})
 				t.Cleanup(func() { manager.Reset() })
-				seed := chatCheckpointFile{Version: checkpointStateVersion, ChatID: "chat-cap"}
+				seed := chatCheckpointFile{Version: checkpointStateVersion, ChatID: "chat-cap", Checkpoints: []ChatCheckpoint{}}
 				for turnSeq := 1; turnSeq <= existing; turnSeq++ {
 					seed.Checkpoints = append(seed.Checkpoints, ChatCheckpoint{TurnSeq: turnSeq, JobID: fmt.Sprintf("job-%d", turnSeq)})
 				}
@@ -172,7 +172,7 @@ func TestChatCheckpointRotationAndLargeRepoSkip(t *testing.T) {
 				t.Fatalf("seed rotation ref %s: %v", ref, err)
 			}
 		}
-		seed := chatCheckpointFile{Version: checkpointStateVersion, ChatID: "chat-rotate"}
+		seed := chatCheckpointFile{Version: checkpointStateVersion, ChatID: "chat-rotate", Checkpoints: []ChatCheckpoint{}}
 		for turnSeq := 1; turnSeq <= checkpointLimit; turnSeq++ {
 			repo := ChatCheckpointRepo{Name: "alpha", Path: repoDir}
 			if turnSeq == 1 {
@@ -297,4 +297,27 @@ func structuredErrorCode(err error) string {
 	}
 	code, _ := payload["code"].(string)
 	return code
+}
+
+func TestCheckpointLoaderRejectsUnversionedAndUnownedState(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(Options{StateDir: filepath.Join(t.TempDir(), "state")})
+	t.Cleanup(func() { manager.Reset() })
+	path := manager.checkpointStatePath("chat-checkpoint-strict")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string]string{
+		"unversioned":   `{"chatId":"chat-checkpoint-strict","checkpoints":[]}`,
+		"missing-owner": `{"version":1,"checkpoints":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.loadCheckpointState("chat-checkpoint-strict"); err == nil {
+				t.Fatal("accepted invalid checkpoint state")
+			}
+		})
+	}
 }
