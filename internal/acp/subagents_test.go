@@ -931,6 +931,17 @@ func TestUnsupportedSubagentSteerKeepsOneDurableFollowupWithoutInterrupting(t *t
 	if !manager.CancelSubagent(ownerKey, chatID, tabID, run.ID) {
 		t.Fatal("cleanup child cancellation failed")
 	}
+	waitForSubagentTerminal(t, manager, ownerKey, subagentParentSession{Info: session, ChatID: chatID, TabID: tabID}, run.ID, 5*time.Second)
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if receipts := manager.ListSubagentReceipts(ownerKey, chatID, tabID, 10); len(receipts) == 1 && receipts[0].SubagentID == run.ID {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cleanup child receipt was not durably committed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	manager.CancelJob(jobID(parent))
 }
 
