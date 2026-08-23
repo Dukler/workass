@@ -914,7 +914,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
             planProvider={chat?.providerName ?? chat?.providerId ?? null}
             planUsage={chat?.providerId ? app.planUsageByProvider[chat.providerId] : undefined}
             planUsageLoading={chat?.providerId ? app.planUsageLoadingByProvider[chat.providerId] : false}
-            onOpen={() => { if (chat) store.refreshPlanUsage(chat.id); }} />
+            onOpen={() => { if (chat) store.requestPlanUsage(chat.id); }} />
         </div>
       </div>
     </div>
