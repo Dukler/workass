@@ -795,3 +795,34 @@ test('plan-usage failure always releases the provider loading latch', async () =
     else (globalThis as any).window = previousWindow;
   }
 });
+
+test('opening plan usage on a fresh chat fetches account metadata before the first turn', async () => {
+  const previousWindow = (globalThis as any).window;
+  const metadataCalls: Array<{ providerId: string; routingChatId?: string }> = [];
+  (globalThis as any).window = {
+    api: {
+      appChatRefreshPlanUsage: async (providerId: string, routingChatId?: string) => {
+        metadataCalls.push({ providerId, routingChatId });
+        return { ok: true, providerId };
+      },
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    owner.sessionId = null;
+    owner.sessionProviderId = null;
+    owner.planUsageSupported = undefined;
+
+    subject.requestPlanUsage(owner.id);
+    assert.equal(subject.state.planUsageLoadingByProvider.codex, true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(metadataCalls, [{ providerId: 'codex', routingChatId: owner.id }]);
+    assert.equal(subject.state.planUsageLoadingByProvider.codex, false);
+    assert.equal(owner.sessionId, null, 'account metadata must not bind a visible chat session');
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});

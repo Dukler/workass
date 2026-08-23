@@ -1503,9 +1503,13 @@ export class Store {
     const pending = previous.filter((chat) => !ownerMachineId(chat) && this.pendingChatCreates.has(chat.id));
     if (!pending.length) return next;
     const merged = [...next];
-    for (const chat of pending) {
-      if (merged.some((candidate) => candidate.id === chat.id)) continue;
-      const at = previousIndex.get(chat.id) ?? previous.length;
+    // Walk backwards so several rapid creates retain their exact optimistic
+    // order when an authoritative projection first echoes them at the tail.
+    for (let index = pending.length - 1; index >= 0; index -= 1) {
+      const optimistic = pending[index];
+      const echoedAt = merged.findIndex((candidate) => candidate.id === optimistic.id);
+      const chat = echoedAt >= 0 ? merged.splice(echoedAt, 1)[0] : optimistic;
+      const at = previousIndex.get(optimistic.id) ?? previous.length;
       const following = previous.slice(at + 1).find((candidate) => merged.some((item) => item.id === candidate.id));
       if (following) merged.splice(merged.findIndex((candidate) => candidate.id === following.id), 0, chat);
       else merged.push(chat);
@@ -1520,9 +1524,6 @@ export class Store {
     const previousWorkspaces = this.state.workspaces;
     const pendingQueues = new Map(this.pendingQueueSnapshots);
     const authoritativeChatIDs = new Set(authoritative.chats.map((chat) => chat.id));
-    for (const id of this.pendingChatCreates) {
-      if (authoritativeChatIDs.has(id)) this.pendingChatCreates.delete(id);
-    }
     const restored = this.fromMirror(authoritative);
     this.preserveNewerLocalControls(previousChats, restored.chats);
     this.preserveMatchingHydratedRuntime(previousChats, restored.chats);
@@ -1531,6 +1532,12 @@ export class Store {
       previousChats,
       this.carryPendingCreatedChats(previousChats, restored.chats),
     );
+    // Keep the create fence alive through the merge above. The actor row can
+    // become visible before daemon-global chatOrder catches up; clearing first
+    // allowed that early echo to move a freshly created thread to the bottom.
+    for (const id of this.pendingChatCreates) {
+      if (authoritativeChatIDs.has(id)) this.pendingChatCreates.delete(id);
+    }
     this.preserveUnchangedFullHistories(previousChats, this.state.chats);
     for (const chat of restored.chats) {
       if (!this.pendingPresentationOperations.has(chat.id)) {
@@ -3290,9 +3297,18 @@ export class Store {
   // Account-plan refresh is a provider metadata RPC. It never creates or
   // resumes a visible chat session and never sends a model prompt.
   refreshPlanUsage(chatId: string): void {
+    this.refreshPlanUsageForChat(chatId, false);
+  }
+  // Opening the context popover is the explicit account-metadata request from
+  // PORT-SPEC. A fresh chat has no negotiated session flags yet, so this path
+  // must allow the daemon's disposable provider-scoped metadata session.
+  requestPlanUsage(chatId: string): void {
+    this.refreshPlanUsageForChat(chatId, true);
+  }
+  private refreshPlanUsageForChat(chatId: string, allowColdProvider: boolean): void {
     const chat = this.chat(chatId);
-    if (!chat || !this.isConnected() || !chat.planUsageSupported || !chat.providerId
-      || chat.sessionProviderId !== chat.providerId) return;
+    if (!chat || !this.isConnected() || !chat.providerId) return;
+    if (!allowColdProvider && (!chat.planUsageSupported || chat.sessionProviderId !== chat.providerId)) return;
     const providerId = chat.providerId;
     if (this.state.planUsageLoadingByProvider[providerId]) return;
     this.state.planUsageLoadingByProvider[providerId] = true;

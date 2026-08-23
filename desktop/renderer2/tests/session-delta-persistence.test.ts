@@ -459,6 +459,34 @@ test('the create fence releases after the daemon echoes the new chat', () => {
   assert.equal(subject.state.activeId, running.id);
 });
 
+test('the authoritative create echo keeps a newly created thread at the top', async () => {
+  const first = chat('tab-first');
+  const second = chat('tab-second');
+  const subject = subjectWithChats([first, second]);
+
+  await withWindowApi({}, async () => {
+    const created = subject.newChat(true, '/tmp/workass-delta-test');
+    await subject.pendingChatCreatePromises.get(created.id);
+
+    // An actor may become visible to session:get before its tab id has reached
+    // the daemon-global chatOrder projection. That authoritative echo appends
+    // the otherwise-correct row; hydration must retain the user's creation
+    // position until the create fence settles.
+    const echoed = subject.toMirror(false) as Mirror;
+    const createdRow = echoed.chats.find((candidate) => candidate.id === created.id)!;
+    echoed.chats = [
+      echoed.chats.find((candidate) => candidate.id === first.id)!,
+      echoed.chats.find((candidate) => candidate.id === second.id)!,
+      createdRow,
+    ];
+    echoed.chatOrder = [first.id, second.id, created.id];
+
+    assert.equal(subject.restoreSessionSnapshot(echoed), true);
+    assert.deepEqual(subject.state.chats.map((candidate: Chat) => candidate.id), [created.id, first.id, second.id]);
+    assert.deepEqual(serverSave(subject, false).snapshot.chatOrder, [created.id, first.id, second.id]);
+  });
+});
+
 test('delete, structural, first-save, and post-restore boundaries force a complete save', async (t) => {
   await t.test('first save after boot', () => {
     const subject = new StoreCtor();
