@@ -378,12 +378,14 @@ func (b *Bridge) start() error {
 func mergedEnv(inherited []string, extra map[string]string, policy providerEnvironmentPolicy) []string {
 	env := map[string]string{}
 	for _, item := range inherited {
-		if k, v, ok := strings.Cut(item, "="); ok && policy.inherits(k) {
+		if k, v, ok := strings.Cut(item, "="); ok && policy.allows(k) {
 			env[k] = v
 		}
 	}
 	for k, v := range extra {
-		env[k] = v
+		if policy.allows(k) {
+			env[k] = v
+		}
 	}
 	out := make([]string, 0, len(env))
 	for k, v := range env {

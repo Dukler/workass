@@ -214,9 +214,9 @@ var providerRegistrations = map[string]providerRegistration{
 		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `devin auth login`"},
 		Adapter: providerAdapter{launch: standardACPLaunchStrategy{environment: providerEnvironmentPolicy{
 			// ACP_BACKEND is a Workass/test harness selector, not Devin auth
-			// configuration. Inheriting it makes the installed Windows Devin CLI
-			// enter the wrong backend and reject its already-valid vendor login.
-			blockedInheritedKeys: []string{"ACP_BACKEND"},
+			// configuration. Inheriting or persisting it makes the installed Windows
+			// Devin CLI enter the wrong backend and reject its valid vendor login.
+			blockedKeys: []string{"ACP_BACKEND"},
 		}}},
 	},
 	"qwen": {

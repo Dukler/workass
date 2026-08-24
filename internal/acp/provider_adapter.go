@@ -64,12 +64,12 @@ type providerLaunchStrategy interface {
 // subprocess environment. It is owned by the provider launch adapter so the
 // process bridge never branches on provider identity.
 type providerEnvironmentPolicy struct {
-	blockedInheritedKeys []string
+	blockedKeys []string
 }
 
-func (policy providerEnvironmentPolicy) inherits(key string) bool {
+func (policy providerEnvironmentPolicy) allows(key string) bool {
 	key = strings.TrimSpace(key)
-	for _, blocked := range policy.blockedInheritedKeys {
+	for _, blocked := range policy.blockedKeys {
 		if strings.EqualFold(key, strings.TrimSpace(blocked)) {
 			return false
 		}

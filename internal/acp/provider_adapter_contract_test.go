@@ -44,29 +44,29 @@ func TestProviderAdapterDefaultsAllowSingleFacetOverride(t *testing.T) {
 	}
 }
 
-func TestDevinLaunchOwnsInheritedACPBackendSanitization(t *testing.T) {
+func TestDevinLaunchOwnsACPBackendSanitization(t *testing.T) {
 	devin := providerAdapterForID("devin").launch.EnvironmentPolicy()
 	for _, key := range []string{"ACP_BACKEND", "acp_backend", " Acp_Backend "} {
-		if devin.inherits(key) {
-			t.Fatalf("Devin launch inherited blocked environment key %q", key)
+		if devin.allows(key) {
+			t.Fatalf("Devin launch allowed blocked environment key %q", key)
 		}
 	}
-	if !devin.inherits("PATH") {
-		t.Fatal("Devin launch blocked unrelated inherited environment")
+	if !devin.allows("PATH") {
+		t.Fatal("Devin launch blocked unrelated environment")
 	}
 
 	for _, providerID := range []string{"mock", "qwen", "claude", "codex", "custom"} {
-		if !providerAdapterForID(providerID).launch.EnvironmentPolicy().inherits("ACP_BACKEND") {
+		if !providerAdapterForID(providerID).launch.EnvironmentPolicy().allows("ACP_BACKEND") {
 			t.Fatalf("provider %q inherited Devin-only environment policy", providerID)
 		}
 	}
 }
 
-func TestMergedEnvDropsBlockedInheritedKeysButKeepsExplicitLaunchValues(t *testing.T) {
-	policy := providerEnvironmentPolicy{blockedInheritedKeys: []string{"ACP_BACKEND"}}
+func TestMergedEnvDropsBlockedKeysFromInheritedAndExplicitValues(t *testing.T) {
+	policy := providerAdapterForID("devin").launch.EnvironmentPolicy()
 	merged := mergedEnv(
 		[]string{"ACP_BACKEND=ambient", "Path=C:\\Windows", "KEEP=ambient"},
-		map[string]string{"ACP_BACKEND": "explicit", "KEEP": "launch"},
+		map[string]string{"Acp_Backend": "persisted", "KEEP": "launch"},
 		policy,
 	)
 	got := make(map[string]string, len(merged))
@@ -77,18 +77,13 @@ func TestMergedEnvDropsBlockedInheritedKeysButKeepsExplicitLaunchValues(t *testi
 		}
 		got[key] = value
 	}
-	if got["ACP_BACKEND"] != "explicit" {
-		t.Fatalf("explicit launch ACP_BACKEND = %q, want explicit", got["ACP_BACKEND"])
+	for key := range got {
+		if strings.EqualFold(strings.TrimSpace(key), "ACP_BACKEND") {
+			t.Fatalf("blocked ACP_BACKEND survived merged launch environment as %q", key)
+		}
 	}
 	if got["KEEP"] != "launch" || got["Path"] != `C:\Windows` {
 		t.Fatalf("merged environment lost unrelated or explicit values: %#v", got)
-	}
-
-	withoutExplicit := mergedEnv([]string{"acp_backend=ambient", "KEEP=ambient"}, nil, policy)
-	for _, item := range withoutExplicit {
-		if strings.HasPrefix(strings.ToUpper(item), "ACP_BACKEND=") {
-			t.Fatalf("blocked inherited environment survived: %q", item)
-		}
 	}
 }
 
