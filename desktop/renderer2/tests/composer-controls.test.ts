@@ -26,3 +26,7 @@ test('composer remeasures a wrapped draft when a chat switch changes its rendere
 test('the queue shares the composer reading column', () => {
   assert.match(styles, /\.qlist\s*\{[^}]*width:\s*100%;[^}]*max-width:\s*var\(--read\);[^}]*margin:\s*0 auto 9px;/s);
 });
+
+test('draft attachments share the queue and composer reading column', () => {
+  assert.match(styles, /\.attrow\s*\{[^}]*width:\s*100%;[^}]*max-width:\s*var\(--read\);[^}]*margin:\s*0 auto 9px;/s);
+});

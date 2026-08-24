@@ -128,6 +128,42 @@ test('native Codex host drives app-server directly with turns, steering, permiss
   assert.equal(limits.result.rateLimits.primary.usedPercent, 17);
 });
 
+test('native Codex host preserves commentary item boundaries across two rapid steers', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const opened = await peer.waitFor((message) => message.id === 2);
+
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId: opened.result.sessionId,
+    prompt: [{ type: 'text', text: '[fixture:rapid-steer-commentary] keep the turn open' }],
+  } });
+  await peer.waitFor((message) => message.method === 'session/update'
+    && message.params?.update?.sessionUpdate === 'agent_thought_chunk');
+
+  for (const [id, clientUserMessageId] of [[4, 'rapid-steer-1'], [5, 'rapid-steer-2']]) {
+    peer.send({ jsonrpc: '2.0', id, method: '_workass/codex/steer', params: {
+      sessionId: opened.result.sessionId,
+      prompt: [{ type: 'text', text: clientUserMessageId }],
+      clientUserMessageId,
+    } });
+    assert.equal((await peer.waitFor((message) => message.id === id)).error, undefined);
+    await peer.waitFor((message) => message.method === 'session/update'
+      && message.params?.update?.sessionUpdate === '_workass_codex_steer_consumed'
+      && message.params.update.clientUserMessageId === clientUserMessageId);
+  }
+  assert.equal((await peer.waitFor((message) => message.id === 3)).result.stopReason, 'end_turn');
+
+  const commentary = peer.messages.filter((message) => message.method === 'session/update'
+    && message.params?.update?.sessionUpdate === 'agent_message_chunk');
+  assert.equal(commentary.map((message) => message.params.update.content.text).join(''),
+    'Steer 1 commentary A. continuation.\n\nSteer 2 commentary A. continuation.');
+  assert.ok(commentary.every((message) => message.params.update._meta?.codex?.phase === 'commentary'));
+});
+
 test('native Codex host rejects non-live steering without interrupting or queueing the active turn', async (t) => {
   for (const [fixtureRejection, reason] of [
     ['active-turn-not-steerable', 'active-turn-not-steerable'],

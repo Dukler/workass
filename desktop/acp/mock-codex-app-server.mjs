@@ -4,6 +4,8 @@ const pending = new Map();
 let requestSequence = 0;
 let turnSequence = 0;
 let activeTurn = null;
+let activeTurnScenario = '';
+let rapidSteerSequence = 0;
 const turnRecords = [];
 const threadMCPConfigs = new Map();
 const threadMCPStartup = new Map();
@@ -34,6 +36,8 @@ const secondaryModel = {
 
 function completeTurn(turnId, status = 'completed') {
   activeTurn = null;
+	activeTurnScenario = '';
+	rapidSteerSequence = 0;
 	const record = turnRecords.find((turn) => turn.id === turnId);
 	if (record) record.status = status;
   notify('turn/completed', {
@@ -86,6 +90,11 @@ async function runTurn(id, params) {
   const text = (params.input || []).filter((item) => item.type === 'text').map((item) => item.text).join('\n');
   const images = (params.input || []).filter((item) => item.type === 'image');
   notify('item/reasoning/summaryTextDelta', { threadId: params.threadId, turnId, itemId: 'reasoning-fixture', summaryIndex: 0, delta: 'Fixture reasoning' });
+  if (text.includes('[fixture:rapid-steer-commentary]')) {
+    activeTurnScenario = 'rapid-steer-commentary';
+    rapidSteerSequence = 0;
+    return;
+  }
   if (text.includes('keep running')) return;
   if (text.includes('[fixture:compact]')) {
     notify('thread/compacted', {
@@ -202,8 +211,35 @@ async function handle(message) {
     respond(id, { turnId: activeTurn });
     notify('item/started', {
       threadId: params.threadId, turnId: activeTurn, startedAtMs: Date.now(),
-      item: { type: 'userMessage', id: 'steer-user-fixture', clientId: params.clientUserMessageId, content: params.input },
+      item: {
+        type: 'userMessage',
+        id: activeTurnScenario === 'rapid-steer-commentary' ? `steer-user-fixture-${rapidSteerSequence + 1}` : 'steer-user-fixture',
+        clientId: params.clientUserMessageId,
+        content: params.input,
+      },
     });
+    if (activeTurnScenario === 'rapid-steer-commentary') {
+      const sequence = ++rapidSteerSequence;
+      const messageId = `rapid-commentary-${sequence}`;
+      const item = { type: 'agentMessage', id: messageId, phase: 'commentary', text: '' };
+      notify('item/started', {
+        threadId: params.threadId, turnId: activeTurn, startedAtMs: Date.now(), item,
+      });
+      notify('item/agentMessage/delta', {
+        threadId: params.threadId, turnId: activeTurn, itemId: messageId,
+        delta: `Steer ${sequence} commentary A.`,
+      });
+      notify('item/agentMessage/delta', {
+        threadId: params.threadId, turnId: activeTurn, itemId: messageId,
+        delta: ' continuation.',
+      });
+      notify('item/completed', {
+        threadId: params.threadId, turnId: activeTurn, completedAtMs: Date.now(),
+        item: { ...item, status: 'completed' },
+      });
+      if (sequence >= 2) completeTurn(activeTurn);
+      return;
+    }
     const images = (params.input || []).filter((item) => item.type === 'image');
     const text = (params.input || []).filter((item) => item.type === 'text').map((item) => item.text).join('\n');
     notify('item/agentMessage/delta', {

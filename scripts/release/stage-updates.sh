@@ -12,7 +12,7 @@ repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 . "$script_dir/lib/source-state.sh"
 
 version=''
-build_number=$(date -u +%Y%m%d%H%M%S)
+build_number=''
 input=''
 candidate=''
 macos_output="$HOME/Library/Application Support/Workass/update-feed"
@@ -24,7 +24,7 @@ usage() {
 usage: scripts/release/stage-updates.sh --version X.Y.Z [options]
 
 Options:
-  --build-number N       macOS bundle build (default: UTC timestamp)
+  --build-number N       macOS bundle build (default: exact commit UTC timestamp)
   --input DIR            reuse an exact verified release input
   --candidate DIR        isolated candidate output
   --macos-output DIR     local Mac update feed used only with --publish
@@ -51,7 +51,6 @@ done
 
 [ "$(uname -s)" = Darwin ] || { echo "private releases must be staged on the Mac build host" >&2; exit 1; }
 printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || { echo "invalid version" >&2; exit 2; }
-printf '%s' "$build_number" | grep -Eq '^[1-9][0-9]*$' || { echo "invalid build number" >&2; exit 2; }
 case "$input" in ''|/*) ;; *) echo "--input must be absolute" >&2; exit 2 ;; esac
 case "$candidate" in ''|/*) ;; *) echo "--candidate must be absolute" >&2; exit 2 ;; esac
 case "$macos_output" in /*) ;; *) echo "--macos-output must be absolute" >&2; exit 2 ;; esac
@@ -59,6 +58,8 @@ case "$candidate" in /|"$repo_root"|"$repo_root"/) echo "refusing unsafe candida
 
 workass_release_require_source "$repo_root"
 commit=$WORKASS_RELEASE_COMMIT
+if [ -z "$build_number" ]; then build_number=$(workass_release_build_number "$repo_root" "$commit"); fi
+printf '%s' "$build_number" | grep -Eq '^[1-9][0-9]*$' || { echo "invalid build number" >&2; exit 2; }
 
 if [ -z "$input" ]; then input="$repo_root/.dev/release-inputs/$version-$commit"; fi
 if [ -z "$candidate" ]; then candidate="$repo_root/.dev/release-candidates/$version-$commit"; fi
@@ -66,8 +67,10 @@ case "$input" in /|"$repo_root"|"$repo_root"/) echo "refusing unsafe release inp
 
 mkdir -p "$candidate"
 WORKASS_RELEASE_TIMING_FILE="$candidate/timings.log"
-export WORKASS_RELEASE_TIMING_FILE
+WORKASS_RELEASE_PHASE_LOG_DIR="$candidate/phase-logs/$build_number-$$"
+export WORKASS_RELEASE_TIMING_FILE WORKASS_RELEASE_PHASE_LOG_DIR
 : > "$WORKASS_RELEASE_TIMING_FILE"
+mkdir -p "$WORKASS_RELEASE_PHASE_LOG_DIR"
 release_started=$(workass_release_now)
 
 for tool in node ditto unzip codesign plutil file shasum cmp awk diff; do
@@ -231,7 +234,23 @@ publish_windows() {
   "$script_dir/publish-windows.sh" \
     --version "$version" \
     --commit "$commit" \
-    --release-dir "$candidate/windows/$version"
+    --release-dir "$candidate/windows/$version" \
+    --receipt "$candidate/windows-publication.json"
+}
+
+verify_published_release() {
+  "$script_dir/publish-windows.sh" \
+    --version "$version" \
+    --commit "$commit" \
+    --release-dir "$candidate/windows/$version" \
+    --verify-only \
+    --receipt "$candidate/windows-publication.json"
+  node "$script_dir/lib/verify-publication.mjs" record \
+    --root "$candidate" \
+    --macos-output "$macos_output" \
+    --version "$version" \
+    --build "$build_number" \
+    --commit "$commit"
 }
 
 workass_release_run_phase prepare_release_input prepare_input
@@ -239,8 +258,7 @@ if [ -f "$candidate/receipt.json" ]; then
   workass_release_run_phase verify_cached_candidate verify_candidate
   echo "WORKASS_RELEASE_CANDIDATE_REUSED"
 else
-  workass_release_run_phase stage_macos stage_macos
-  workass_release_run_phase stage_windows stage_windows
+  workass_release_run_parallel_pair stage_macos stage_macos stage_windows stage_windows
   workass_release_run_phase verify_candidates verify_candidate
 fi
 
@@ -248,6 +266,7 @@ if [ "$publish" -eq 1 ]; then
   workass_release_run_phase preflight_macos_publish preflight_macos_publish
   workass_release_run_phase publish_windows publish_windows
   workass_release_run_phase publish_macos publish_macos
+  workass_release_run_phase verify_published_release verify_published_release
 fi
 
 release_finished=$(workass_release_now)
@@ -259,3 +278,8 @@ echo "commit=$commit"
 echo "candidate=$candidate"
 echo "published=$publish"
 echo "timings=$WORKASS_RELEASE_TIMING_FILE"
+echo "phase_logs=$WORKASS_RELEASE_PHASE_LOG_DIR"
+if [ "$publish" -eq 1 ]; then
+  echo "publication=$candidate/publication.json"
+  echo "release=https://github.com/Dukler/workass/releases/tag/v$version"
+fi

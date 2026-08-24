@@ -1565,6 +1565,35 @@ test('a progress launch timeout fences its child before rejecting the handoff', 
 
 
 
+test('a busy daemon keeps the verified release staged and leaves Workass open', async () => {
+  const { manager, calls, didQuit } = managerFixture({
+    replies: [{ status: 409, body: { ready: false, foregroundTurns: 1 } }],
+  });
+  const state = await manager.install();
+  assert.equal(state.phase, 'busy');
+  assert.equal(state.blockers.foregroundTurns, 1);
+  assert.deepEqual(calls, ['prepare']);
+  assert.equal(didQuit(), false);
+  assert.ok(manager.prepared, 'the verified payload remains ready for the next click');
+});
+
+test('a committed transaction has one progress owner and quits the old shell immediately after handoff', async () => {
+  const { manager, calls, didQuit } = managerFixture({ replies: [
+    { status: 200, body: { ready: true } },
+    { status: 202, body: { stopping: true } },
+  ] });
+  const state = await manager.install();
+  assert.equal(state.phase, 'installing');
+  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
+  assert.equal(didQuit(), true);
+  const transaction = JSON.parse(fs.readFileSync(
+    path.join(manager.prepared.transactionRoot, 'transaction.json'), 'utf8',
+  ));
+  assert.equal(transaction.schemaVersion, 4);
+  assert.equal(transaction.requireVisibleWindow, true);
+  assert.equal(JSON.parse(fs.readFileSync(manager.receiptPath, 'utf8')).phase, 'armed');
+});
+
 test('worker ownership transfers only after the exact durable arm receipt', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-arm-'));
   const receiptPath = path.join(root, 'receipt.json');
@@ -2033,50 +2062,51 @@ test('a fresh lease with a reused live PID is rejected by the first off-main ide
   assert.equal(manager.snapshot().phase, 'busy');
 });
 
-test('one apply action hands off to the detached updater without extra steps', async () => {
-  const { manager, calls } = managerFixture();
-  let spawnedNuker = null;
-  manager.deps.spawn = (command, args) => {
-    if (String(args[0] || '').includes('update-nuke.js')) spawnedNuker = { command, args };
-    return { unref() {} };
-  };
+test('one apply action stages and commits the verified transaction without extra clicks', async () => {
+  const { manager } = managerFixture();
+  const steps = [];
   manager.publish({ phase: 'available', targetVersion: '1.2.0' });
-  manager.manifest = snapshotReleaseManifest(manifest());
+  manager.download = async () => {
+    steps.push('download');
+    return manager.publish({ phase: 'ready', progress: 1 });
+  };
+  manager.install = async () => {
+    steps.push('install');
+    return manager.publish({ phase: 'installing' });
+  };
 
   const state = await manager.apply();
   assert.equal(state.phase, 'installing');
-  assert.ok(spawnedNuker, 'apply must spawn the detached nuclear updater');
-  const requestIndex = spawnedNuker.args.indexOf('--request');
-  assert.ok(requestIndex !== -1);
-  const request = JSON.parse(fs.readFileSync(spawnedNuker.args[requestIndex + 1], 'utf8'));
-  assert.equal(request.targetVersion, '1.2.0');
-  assert.equal(request.downloadUrl, 'https://releases.example.test/Workass-1.2.0-darwin-arm64.zip');
-  assert.ok(calls.filter((entry) => entry === 'prepare').length === 0, 'no daemon fence round-trips remain');
+  assert.deepEqual(steps, ['download', 'install']);
 });
 
 test('apply IPC returns a running snapshot immediately while one background intent owns the update', async () => {
   const { manager } = managerFixture();
   const steps = [];
-  let finishInstall;
+  let finishDownload;
   manager.publish({ phase: 'available', targetVersion: '1.2.0' });
+  manager.download = async () => {
+    steps.push('download');
+    manager.publish({ phase: 'downloading', progress: 0 });
+    await new Promise((resolve) => { finishDownload = resolve; });
+    return manager.publish({ phase: 'ready', progress: 1 });
+  };
   manager.install = async () => {
     steps.push('install');
-    manager.publish({ phase: 'installing' });
-    await new Promise((resolve) => { finishInstall = resolve; });
-    return manager.snapshot();
+    return manager.publish({ phase: 'installing' });
   };
 
   const started = manager.startApply();
   const operation = manager.applyPromise;
-  assert.equal(started.phase, 'installing');
-  assert.deepEqual(steps, ['install']);
-  assert.equal(manager.startApply().phase, 'installing');
-  assert.deepEqual(steps, ['install']);
+  assert.equal(started.phase, 'downloading');
+  assert.deepEqual(steps, ['download']);
+  assert.equal(manager.startApply().phase, 'downloading');
+  assert.deepEqual(steps, ['download']);
 
-  finishInstall();
+  finishDownload();
   await operation;
   assert.equal(manager.snapshot().phase, 'installing');
-  assert.deepEqual(steps, ['install']);
+  assert.deepEqual(steps, ['download', 'install']);
 });
 
 test('a missing platform asset means current while a feed failure cannot impersonate an attempted update', async () => {
@@ -2135,9 +2165,9 @@ test('apply coalesces with an in-flight background check and applies its exact m
   const steps = [];
   manager.publish({ phase: 'current', targetVersion: null, availableVersion: null, error: null });
   manager.deps.fetchManifest = () => new Promise((resolve) => { publishRelease = resolve; });
-  manager.install = async () => {
-    steps.push(`install:${manager.manifest.version}`);
-    return manager.publish({ phase: 'installing' });
+  manager.download = async () => {
+    steps.push(`download:${manager.manifest.version}`);
+    return manager.publish({ phase: 'ready' });
   };
   manager.install = async () => {
     steps.push(`install:${manager.manifest.version}`);
@@ -2151,7 +2181,7 @@ test('apply coalesces with an in-flight background check and applies its exact m
   publishRelease(manifest({ version: '1.3.0' }));
   assert.equal((await checking).targetVersion, '1.3.0');
   assert.equal((await applying).phase, 'installing');
-  assert.deepEqual(steps, ['install:1.3.0']);
+  assert.deepEqual(steps, ['download:1.3.0', 'install:1.3.0']);
 });
 
 
@@ -2178,12 +2208,16 @@ test('a retained rollback receipt keeps polling and retry applies the newly disc
   assert.equal(discovered.availableVersion, '1.3.0');
 
   const steps = [];
+  manager.download = async () => {
+    steps.push(`download:${manager.manifest.version}`);
+    return manager.publish({ phase: 'ready' });
+  };
   manager.install = async () => {
     steps.push(`install:${manager.manifest.version}`);
     return manager.publish({ phase: 'installing' });
   };
   assert.equal((await manager.apply()).phase, 'installing');
-  assert.deepEqual(steps, ['install:1.3.0']);
+  assert.deepEqual(steps, ['download:1.3.0', 'install:1.3.0']);
 });
 
 test('automatic checks discover a newly published local release without restarting Electron', async () => {
@@ -2250,6 +2284,3 @@ test('rediscovering the staged version leaves the verified payload untouched', a
   assert.ok(fs.existsSync(manager.prepared.incomingTarget));
   manager.dispose();
 });
-
-
-
