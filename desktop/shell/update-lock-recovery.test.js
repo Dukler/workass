@@ -23,6 +23,9 @@ test('only the first Windows update process that lost the profile lock becomes a
     platform: 'win32', ownsProfileInstance: false, recoverController: true, retryChild: true,
   }), false);
   assert.equal(shouldStartUpdateLockRecovery({
+    platform: 'win32', ownsProfileInstance: true, recoverController: true, retryChild: true,
+  }), false, 'the transaction progress window stays the only updater UI');
+  assert.equal(shouldStartUpdateLockRecovery({
     platform: 'darwin', ownsProfileInstance: false, recoverController: true, retryChild: false,
   }), false);
 });

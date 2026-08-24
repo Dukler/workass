@@ -10,9 +10,11 @@ version=''
 commit=''
 release_dir=''
 repository=Dukler/workass
+verify_only=0
+receipt=''
 
 usage() {
-  echo "usage: scripts/release/publish-windows.sh --version X.Y.Z --commit FULL_SHA --release-dir DIR"
+  echo "usage: scripts/release/publish-windows.sh --version X.Y.Z --commit FULL_SHA --release-dir DIR [--verify-only] [--receipt FILE]"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -20,6 +22,8 @@ while [ "$#" -gt 0 ]; do
     --version) [ "$#" -ge 2 ] || { echo "--version needs a value" >&2; exit 2; }; version=$2; shift 2 ;;
     --commit) [ "$#" -ge 2 ] || { echo "--commit needs a value" >&2; exit 2; }; commit=$2; shift 2 ;;
     --release-dir) [ "$#" -ge 2 ] || { echo "--release-dir needs a value" >&2; exit 2; }; release_dir=$2; shift 2 ;;
+    --verify-only) verify_only=1; shift ;;
+    --receipt) [ "$#" -ge 2 ] || { echo "--receipt needs a value" >&2; exit 2; }; receipt=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -28,6 +32,7 @@ done
 printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || { echo "invalid version" >&2; exit 2; }
 printf '%s' "$commit" | grep -Eq '^[0-9a-f]{40}$' || { echo "invalid commit" >&2; exit 2; }
 case "$release_dir" in /*) ;; *) echo "--release-dir must be absolute" >&2; exit 2 ;; esac
+case "$receipt" in ''|/*) ;; *) echo "--receipt must be absolute" >&2; exit 2 ;; esac
 for tool in gh curl node shasum cmp; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing Windows publisher tool: $tool" >&2; exit 1; }
 done
@@ -103,7 +108,14 @@ process.stdout.write(missing.join('\n'));
 NODE
 }
 
-if gh release view "$tag" --repo "$repository" \
+if [ "$verify_only" -eq 1 ]; then
+  gh release view "$tag" --repo "$repository" \
+    --json tagName,targetCommitish,name,isDraft,isPrerelease,assets,url > "$view" || {
+      echo "GitHub release does not exist for verification: $tag" >&2
+      exit 1
+    }
+  validate_release complete >/dev/null
+elif gh release view "$tag" --repo "$repository" \
     --json tagName,targetCommitish,name,isDraft,isPrerelease,assets,url > "$view" 2>/dev/null; then
   missing_assets=$(validate_release allow-missing)
   if [ -n "$missing_assets" ]; then
@@ -156,7 +168,55 @@ done
 [ "$latest_verified" -eq 1 ] || { echo "GitHub latest manifest does not resolve to the published immutable bytes" >&2; exit 1; }
 
 release_url=$(node -e 'const fs=require("node:fs"); process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).url)' "$view")
+if [ -n "$receipt" ]; then
+  node - "$receipt" "$view" "$release_dir" "$version" "$commit" "$repository" "$latest_url" <<'NODE'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const [receiptFile, viewFile, root, version, commit, repository, latestManifestUrl] = process.argv.slice(2);
+const release = JSON.parse(fs.readFileSync(viewFile, 'utf8'));
+const names = {
+  archive: `Workass-${version}-windows-amd64.zip`,
+  manifest: 'workass-windows-amd64-release.json',
+  checksums: 'SHA256SUMS',
+};
+const artifact = (name) => {
+  const file = path.join(root, name);
+  const bytes = fs.readFileSync(file);
+  return { name, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+};
+const expected = {
+  schemaVersion: 1,
+  product: 'Workass',
+  kind: 'windows-publication',
+  status: 'verified',
+  repository,
+  version,
+  commit,
+  tag: `v${version}`,
+  releaseUrl: release.url,
+  latestManifestUrl,
+  assets: Object.fromEntries(Object.entries(names).map(([key, name]) => [key, artifact(name)])),
+};
+let recorded = null;
+try { recorded = JSON.parse(fs.readFileSync(receiptFile, 'utf8')); } catch {}
+if (recorded && JSON.stringify(recorded) !== JSON.stringify(expected)) {
+  throw new Error('Windows publication differs from its immutable receipt');
+}
+if (!recorded) {
+  fs.mkdirSync(path.dirname(receiptFile), { recursive: true });
+  const incoming = `${receiptFile}.incoming.${process.pid}`;
+  try {
+    fs.writeFileSync(incoming, `${JSON.stringify(expected, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+    fs.renameSync(incoming, receiptFile);
+  } finally {
+    fs.rmSync(incoming, { force: true });
+  }
+}
+NODE
+fi
 echo "WORKASS_WINDOWS_GITHUB_RELEASE_VERIFIED"
 echo "version=$version"
 echo "commit=$commit"
 echo "release=$release_url"
+[ -z "$receipt" ] || echo "windows_publication=$receipt"

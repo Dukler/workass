@@ -1077,9 +1077,11 @@ test('Windows target relaunch advertises recovery while rollback keeps older ins
   assert.equal(launch.options.cwd, tx.installTarget);
   assert.equal(launch.options.detached, true);
   assert.equal(launch.options.windowsHide, false);
+  assert.equal(launch.options.env.WORKASS_LOCK_RECOVERY_CHILD, '1');
   assert.equal(launch.options.env.WORKASS_UPDATE_RELAUNCH, '1');
 
   await disk.launchInstalled({ updateRelaunch: false });
+  assert.equal(launch.options.env.WORKASS_LOCK_RECOVERY_CHILD, '1');
   assert.equal(launch.options.env.WORKASS_UPDATE_RELAUNCH, undefined);
 
   const macTx = transactionFixture();

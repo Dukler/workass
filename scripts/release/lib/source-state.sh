@@ -26,3 +26,18 @@ workass_release_require_source() {
   }
   export WORKASS_RELEASE_COMMIT
 }
+
+# CFBundleVersion must be numeric, while interrupted release retries must use
+# the exact same build identity without another manually copied argument. The
+# UTC commit time is stable for the immutable release commit and retains the
+# established sortable YYYYMMDDhhmmss shape.
+workass_release_build_number() {
+  build_repo_root=$1
+  build_commit=$2
+  build_number=$(TZ=UTC git -C "$build_repo_root" show -s \
+    --format=%cd --date=format-local:%Y%m%d%H%M%S "$build_commit") || return 1
+  case "$build_number" in
+    ''|*[!0-9]*|0) echo "cannot derive release build number from $build_commit" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$build_number"
+}

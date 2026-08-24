@@ -107,7 +107,7 @@ build_windows_daemon() {
     -ldflags "-X main.daemonVersion=$version" -o "$incoming/windows/runtime/workass-daemon.exe" ./cmd/workass)
 }
 
-vendor_target() {
+vendor_runtime_core() {
   platform=$1
   electron_target=$2
   node_target=$3
@@ -116,8 +116,21 @@ vendor_target() {
   [ "$offline" -eq 0 ] || offline_arg=--offline
   "$repo_root/scripts/vendor-electron-runtime.sh" --target "$electron_target" --output-root "$platform_root/electron" $offline_arg
   "$repo_root/scripts/vendor-node-runtime.sh" --target "$node_target" --output-root "$platform_root/runtime/node" $offline_arg
+}
+
+vendor_frontier_target() {
+  platform=$1
+  node_target=$2
+  platform_root="$incoming/$platform"
+  offline_arg=''
+  [ "$offline" -eq 0 ] || offline_arg=--offline
   "$repo_root/scripts/vendor-frontier-hosts.sh" --target "$node_target" --output-root "$platform_root/runtime/frontier-hosts" $offline_arg
 }
+
+vendor_macos_runtime() { vendor_runtime_core macos darwin-arm64 darwin-arm64; }
+vendor_windows_runtime() { vendor_runtime_core windows win32-x64 windows-amd64; }
+vendor_macos_frontier() { vendor_frontier_target macos darwin-arm64; }
+vendor_windows_frontier() { vendor_frontier_target windows windows-amd64; }
 
 write_manifest() {
   node "$input_tool" create --root "$incoming" --version "$version" --commit "$commit"
@@ -132,10 +145,12 @@ else
   workass_release_run_phase repository_gate_receipt record_gate_receipt
 fi
 workass_release_run_phase renderer_snapshot stage_renderer
-workass_release_run_phase macos_daemon build_macos_daemon
-workass_release_run_phase windows_daemon build_windows_daemon
-workass_release_run_phase macos_runtimes vendor_target macos darwin-arm64 darwin-arm64
-workass_release_run_phase windows_runtimes vendor_target windows win32-x64 windows-amd64
+workass_release_run_parallel_pair macos_daemon build_macos_daemon windows_daemon build_windows_daemon
+workass_release_run_parallel_pair macos_runtimes vendor_macos_runtime windows_runtimes vendor_windows_runtime
+# Both frontier targets read one shared pinned SDK cache. Stage one first so a
+# cold cache cannot race two downloads; the copies themselves are tiny.
+workass_release_run_phase macos_frontier vendor_macos_frontier
+workass_release_run_phase windows_frontier vendor_windows_frontier
 workass_release_run_phase input_manifest write_manifest
 
 mv "$incoming" "$output"

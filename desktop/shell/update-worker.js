@@ -998,6 +998,10 @@ function defaultOperations(transaction, dependencies = {}) {
         env: {
           ...targetRuntimeEnv(process.env),
           WORKASS_CONTROLLER_RECOVERY: '1',
+          // The verified progress process already owns the only updater UI.
+          // Every Windows relaunch tries the real profile directly; retries
+          // exit quietly while Chromium releases a stale singleton lock.
+          ...(transaction.platform === 'win32' ? { WORKASS_LOCK_RECOVERY_CHILD: '1' } : {}),
           // Target releases use this to surface a responsive recovery window
           // before daemon/provider hydration. Rollback launches omit it on
           // Windows because older builds interpreted it as "stay hidden".

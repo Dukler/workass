@@ -140,19 +140,31 @@ ID, or notarization. A locally packaged app carries
   SHA256SUMS
 ```
 
-Publish one complete update to that folder with:
+The normal private lane prepares both platform updates from one immutable
+commit. After dev acceptance, materialize the generated renderer before the
+single reviewed commit:
 
 ```sh
-scripts/stage-macos-local-update.sh --version X.Y.Z
+scripts/release/prepare-source.sh
 ```
 
-The command runs the normal candidate gate, creates one self-contained app,
-signs it with Workass's persistent machine-local certificate, checksums the
-archive, and publishes the manifest last. The installed app reads and copies
-those local bytes directly; it never starts an HTTP server and never weakens
-the transactional daemon/controller/catalog/browser health gates. This local
-signature preserves the bundle identity and macOS privacy grants without an
-Apple account.
+After that exact commit is clean and pushed, publication is one command:
+
+```sh
+scripts/release/ship.sh
+```
+
+`ship.sh` discovers the next version from the installed app, local feed, and
+stable GitHub release, derives one retry-stable build number from the exact
+commit, and owns the gate, parallel Mac/Windows staging, publication, and
+readback. It emits one final `publication=` receipt and keeps complete output
+in its `log=` artifact; callers do not repeat its internal checks. The
+installed Mac app reads and copies those local bytes directly; it never starts
+an HTTP server and never weakens the transactional
+daemon/controller/catalog/browser health gates. Its local signature preserves
+bundle identity and macOS privacy grants without an Apple account.
+`scripts/stage-updates.sh` and the platform packagers remain internal lanes,
+not normal publication entrypoints.
 
 The packaged shell checks once shortly after launch and then polls this local
 manifest every 30 seconds. Publishing a dogfood build therefore makes the

@@ -284,6 +284,8 @@ class CodexSession {
     this.turnStatus = 'idle';
     this.lastUsage = null;
     this.agentPhases = new Map();
+    this.agentMessageItemsWithText = new Set();
+    this.lastAgentMessageItem = null;
     this.turnError = null;
     this.completedTurns = new Map();
     this.turnStartedPromise = null;
@@ -359,6 +361,9 @@ class CodexSession {
   startPrompt(blocks, clientUserMessageId = '') {
     if (this.activePrompt) throw new Error('A Codex turn is already running');
     this.turnStatus = 'starting';
+	this.agentPhases.clear();
+	this.agentMessageItemsWithText.clear();
+	this.lastAgentMessageItem = null;
 	this.activePromptClientId = String(clientUserMessageId || '').trim();
     this.turnError = null;
     this.turnStartedPromise = new Promise((resolve, reject) => {
@@ -388,6 +393,26 @@ class CodexSession {
       if (early) { this.completedTurns.delete(turnId); this.complete(early); }
     }).catch((error) => this.failPrompt(error));
     return promise;
+  }
+
+  agentMessageDelta(itemId, delta) {
+    const id = String(itemId || '');
+    const text = String(delta || '');
+    const phase = this.agentPhases.get(id);
+    if (!id || !text || this.agentMessageItemsWithText.has(id)) return { text, phase };
+
+    // Codex emits every commentary/final response as its own agentMessage item,
+    // but ACP's frozen text stream has no item-boundary field. Preserve that
+    // semantic boundary in-band only when two distinct items paint onto the
+    // same renderer surface. Deltas within one item remain byte-contiguous.
+    const surface = phase === 'final_answer' ? 'result' : 'content';
+    const previous = this.lastAgentMessageItem;
+    this.agentMessageItemsWithText.add(id);
+    this.lastAgentMessageItem = { id, surface };
+    return {
+      text: previous && previous.id !== id && previous.surface === surface ? `\n\n${text}` : text,
+      phase,
+    };
   }
 
   complete(turn) {
@@ -720,9 +745,10 @@ async function handleAppNotification(method, params) {
   }
   if (method === 'turn/completed') { session.complete(params.turn || {}); return; }
   if (method === 'item/agentMessage/delta') {
+    const item = session.agentMessageDelta(params.itemId, params.delta);
     notify(session.threadId, {
-      sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: params.delta || '' },
-      _meta: { codex: { phase: session.agentPhases.get(params.itemId) || undefined } },
+      sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: item.text },
+      _meta: { codex: { phase: item.phase || undefined } },
     });
     return;
   }
