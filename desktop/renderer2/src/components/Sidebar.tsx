@@ -8,7 +8,7 @@ import { buildWorkspaceGroups, normalizeWorkspacePath, type WorkspaceGroup } fro
 import { nextUpdatePhase, brandForProvider, DONE_HOLD_MS, EXIT_MS, type UpdatePhase } from '../update-card';
 import { availableRateLimitReset, prepareRateLimitResetAttempt, rateLimitResetExpiry, type RateLimitResetAttempt } from '../plan-usage';
 import { chatHasLiveActivity } from '../chat-activity';
-import { appUpdaterCardTitle, appUpdaterPhaseText, appUpdaterReceiptIsRecent, useAppUpdater } from '../app-updater';
+import { appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, appUpdaterReceiptIsRecent, useAppUpdater } from '../app-updater';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
 
 // What is currently being dragged in the sidebar. `id` is the chat.id for a
@@ -501,14 +501,19 @@ export function FooterUpdateCards() {
   const selfRunning = selfPhase === 'running';
   const selfAction = selfPending || selfCheckFailed || selfFailed ? selfUpdater.apply : null;
   const selfTitle = appUpdaterCardTitle(selfUpdate);
-  const selfActionLabel = selfUpdate.phase === 'busy'
+  const selfActionLabel = selfActionBusy
+    ? 'Comprobando…'
+    : selfUpdate.phase === 'busy'
     ? 'Reintentar'
     : 'Actualizar';
   const runSelfAction = async () => {
     if (!selfAction || selfActionBusy) return;
     setSelfActionBusy(true);
     try {
-      await selfAction();
+      const next = await selfAction();
+      if (next.phase === 'busy') {
+        store.addToast('La actualización sigue esperando', appUpdaterBlockerText(next.blockers));
+      }
     } catch (error) {
       store.addToast('No se pudo actualizar', String((error as Error)?.message || error));
     } finally {
@@ -534,14 +539,11 @@ export function FooterUpdateCards() {
               </span>
             </div>
           ) : (
-            <div
+            <button
+              type="button"
               className={`updcard${selfRunning ? ' upd-run' : ''}${selfSealing ? ' upd-run upd-done' : ''}${selfActionBusy ? ' upd-off' : ''}`}
-              {...(selfRunning || selfSealing || !selfAction || selfActionBusy ? {} : {
-                role: 'button',
-                tabIndex: 0,
-                onClick: () => void runSelfAction(),
-                onKeyDown: (e: ReactKeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void runSelfAction(); } },
-              })}
+              disabled={selfRunning || selfSealing || !selfAction || selfActionBusy}
+              onClick={() => void runSelfAction()}
               title={appUpdaterPhaseText(selfUpdate)}
             >
               <span className="updring" aria-hidden="true" />
@@ -555,7 +557,7 @@ export function FooterUpdateCards() {
                 <span className="us">{appUpdaterPhaseText(selfUpdate)}</span>
               </span>
               {selfAction && !selfRunning && !selfSealing && <span className="uarrow updo" aria-hidden="true">{selfActionLabel}</span>}
-            </div>
+            </button>
           )}
         </div>
       )}
