@@ -116,7 +116,11 @@ func (qwenDetectionStrategy) Prepare(ctx context.Context, manager *Manager, cfg 
 // force without Workass writing those files.
 type opencodeDetectionStrategy struct{}
 
-const opencodeOxAlphaConfigContent = `{"$schema":"https://opencode.ai/config.json","model":"opencode/x-preview-f-free","small_model":"opencode/x-preview-f-free"}`
+// Route Ox Alpha through OpenRouter rather than OpenCode Zen. The Zen route's
+// tool-bearing requests currently fail upstream, while OpenRouter exposes the
+// same model under its canonical stealth/ox-alpha identifier. OpenCode still
+// owns authentication and merges this scoped default with the user's config.
+const opencodeOxAlphaConfigContent = `{"$schema":"https://opencode.ai/config.json","model":"openrouter/stealth/ox-alpha","small_model":"openrouter/stealth/ox-alpha","provider":{"openrouter":{"whitelist":["stealth/ox-alpha"]}}}`
 
 func (opencodeDetectionStrategy) Prepare(_ context.Context, _ *Manager, cfg ProviderConfig) (string, []string, map[string]string, string, error) {
 	resolved, err := resolveProviderExecutable(cfg)
