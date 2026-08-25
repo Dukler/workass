@@ -104,8 +104,13 @@ type Options struct {
 	// WorkassMCPStdioCommand is the absolute daemon executable used to expose
 	// those same endpoints to ACP agents that negotiate MCP over stdio. ACP
 	// requires every agent to support stdio; HTTP remains capability-gated.
-	WorkassMCPStdioCommand         string
-	LocalModelEndpoints            []string
+	WorkassMCPStdioCommand string
+	LocalModelEndpoints    []string
+	// OMLXSettingsFile overrides the provider-owned oMLX settings location.
+	// Production leaves it empty and follows oMLX's own base-path resolution;
+	// tests use an isolated file. Workass reads the API key only at probe/launch
+	// time and never copies it into ProviderConfig or providers.json.
+	OMLXSettingsFile               string
 	ProviderDetectionRetryBackoffs []time.Duration
 	Version                        string
 	InitTimeout                    time.Duration

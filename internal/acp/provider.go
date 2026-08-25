@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -30,19 +31,25 @@ const (
 
 	localLMStudioProviderID = "local-lmstudio"
 	localOllamaProviderID   = "local-ollama"
+	localOMLXProviderID     = "local-omlx"
 	workassAgentBinEnv      = "WORKASS_AGENT_BIN"
 	workassAgentDevGoRunEnv = "WORKASS_AGENT_DEV_GO_RUN"
+	defaultOMLXModelsURL    = "http://127.0.0.1:8000/v1/models"
+	maxOMLXSettingsBytes    = 1024 * 1024
+	maxOMLXBootstrapBytes   = 16 * 1024
 )
 
 var defaultQwenModelEndpoints = []string{
 	"http://127.0.0.1:1234/v1/models",
 	"http://127.0.0.1:11434/v1/models",
+	defaultOMLXModelsURL,
 }
 
 type localModelServer struct {
 	ProviderID string
 	Name       string
 	Endpoint   string
+	OMLX       bool
 }
 
 type providerRuntime struct {
@@ -1421,13 +1428,24 @@ func isLocalProviderID(id string) bool {
 }
 
 func (m *Manager) localModelServersLocked() []localModelServer {
-	endpoints := append([]string(nil), m.opts.LocalModelEndpoints...)
-	if len(endpoints) == 0 {
-		endpoints = append([]string(nil), defaultQwenModelEndpoints...)
-	}
+	return localModelServers(m.opts.LocalModelEndpoints)
+}
+
+func localModelServers(configuredEndpoints []string) []localModelServer {
+	endpoints := append([]string(nil), configuredEndpoints...)
 	servers := []localModelServer{
 		{ProviderID: localLMStudioProviderID, Name: "LM Studio (local)", Endpoint: defaultQwenModelEndpoints[0]},
 		{ProviderID: localOllamaProviderID, Name: "Ollama (local)", Endpoint: defaultQwenModelEndpoints[1]},
+		{ProviderID: localOMLXProviderID, Name: "oMLX (local)", Endpoint: defaultQwenModelEndpoints[2], OMLX: true},
+	}
+	if len(endpoints) == 0 {
+		return servers
+	}
+	// An explicit endpoint list is a complete test/embedder override. Keeping
+	// only its registered positions prevents a developer's real local servers
+	// from leaking into an isolated detection run.
+	if len(endpoints) < len(servers) {
+		servers = servers[:len(endpoints)]
 	}
 	for i := range servers {
 		if i < len(endpoints) && strings.TrimSpace(endpoints[i]) != "" {
@@ -1765,10 +1783,7 @@ func dedupeStrings(in []string) []string {
 }
 
 func (m *Manager) detectQwenLocalModel(ctx context.Context) (string, string, error) {
-	endpoints := append([]string(nil), m.opts.LocalModelEndpoints...)
-	if len(endpoints) == 0 {
-		endpoints = append([]string(nil), defaultQwenModelEndpoints...)
-	}
+	servers := m.localModelServersLocked()
 	type modelResult struct {
 		modelID  string
 		baseURL  string
@@ -1777,20 +1792,20 @@ func (m *Manager) detectQwenLocalModel(ctx context.Context) (string, string, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	ch := make(chan modelResult, len(endpoints))
-	for _, endpoint := range endpoints {
-		endpoint := endpoint
+	ch := make(chan modelResult, len(servers))
+	for _, server := range servers {
+		server := server
 		go func() {
-			models, baseURL, err := queryOpenAIModelCatalog(ctx, endpoint)
+			models, baseURL, err := m.queryOpenAIModelCatalog(ctx, server)
 			modelID := ""
 			if len(models) > 0 {
 				modelID = models[0].ModelID
 			}
-			ch <- modelResult{modelID: modelID, baseURL: baseURL, endpoint: endpoint, err: err}
+			ch <- modelResult{modelID: modelID, baseURL: baseURL, endpoint: server.Endpoint, err: err}
 		}()
 	}
 	var errs []string
-	for range endpoints {
+	for range servers {
 		select {
 		case <-ctx.Done():
 			if len(errs) == 0 {
@@ -1819,7 +1834,7 @@ func (m *Manager) detectLocalModelServer(ctx context.Context, providerID string)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	models, baseURL, err := queryOpenAIModelCatalog(ctx, server.Endpoint)
+	models, baseURL, err := m.queryOpenAIModelCatalog(ctx, server)
 	if err != nil {
 		return nil, "", fmt.Errorf("%s did not respond at %s (%s)", server.Name, server.Endpoint, err.Error())
 	}
@@ -1830,9 +1845,16 @@ func (m *Manager) detectLocalModelServer(ctx context.Context, providerID string)
 }
 
 func queryOpenAIModelCatalog(ctx context.Context, endpoint string) ([]Model, string, error) {
+	return queryOpenAIModelCatalogWithAPIKey(ctx, endpoint, "")
+}
+
+func queryOpenAIModelCatalogWithAPIKey(ctx context.Context, endpoint, apiKey string) ([]Model, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, "", err
+	}
+	if apiKey = strings.TrimSpace(apiKey); apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -1867,6 +1889,116 @@ func queryOpenAIModelCatalog(ctx context.Context, endpoint string) ([]Model, str
 		return nil, "", errors.New("no model id in /v1/models")
 	}
 	return normalizeCatalogModels(models), openAIBaseURLFromModelsEndpoint(endpoint), nil
+}
+
+func (m *Manager) queryOpenAIModelCatalog(ctx context.Context, server localModelServer) ([]Model, string, error) {
+	apiKey := ""
+	if server.OMLX {
+		var err error
+		apiKey, err = omlxAPIKey(m.opts)
+		if err != nil {
+			return nil, "", fmt.Errorf("read oMLX authentication settings: %w", err)
+		}
+	}
+	return queryOpenAIModelCatalogWithAPIKey(ctx, server.Endpoint, apiKey)
+}
+
+func omlxAPIKey(opts Options) (string, error) {
+	if apiKey := strings.TrimSpace(os.Getenv("OMLX_API_KEY")); apiKey != "" {
+		return apiKey, nil
+	}
+	settingsFile, err := omlxSettingsFile(opts)
+	if err != nil {
+		return "", err
+	}
+	data, err := readBoundedProviderFile(settingsFile, maxOMLXSettingsBytes)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	var settings struct {
+		Auth struct {
+			APIKey string `json:"api_key"`
+		} `json:"auth"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return "", fmt.Errorf("decode %s: %w", settingsFile, err)
+	}
+	return strings.TrimSpace(settings.Auth.APIKey), nil
+}
+
+func omlxSettingsFile(opts Options) (string, error) {
+	if explicit := strings.TrimSpace(opts.OMLXSettingsFile); explicit != "" {
+		return filepath.Abs(expandHomePath(explicit))
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	basePath := strings.TrimSpace(os.Getenv("OMLX_BASE_PATH"))
+	if basePath == "" && runtime.GOOS == "darwin" {
+		bootstrap := filepath.Join(home, "Library", "Application Support", "oMLX", "base-path")
+		if data, readErr := readBoundedProviderFile(bootstrap, maxOMLXBootstrapBytes); readErr == nil {
+			basePath = strings.TrimSpace(string(data))
+		}
+	}
+	if basePath == "" {
+		basePath = filepath.Join(home, ".omlx")
+	} else {
+		basePath = expandHomePathWithHome(basePath, home)
+	}
+	basePath, err = filepath.Abs(basePath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(basePath, "settings.json"), nil
+}
+
+func expandHomePath(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return expandHomePathWithHome(path, home)
+}
+
+func expandHomePathWithHome(path, home string) string {
+	path = strings.TrimSpace(path)
+	if path == "~" {
+		return home
+	}
+	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
+		return filepath.Join(home, path[2:])
+	}
+	return path
+}
+
+func readBoundedProviderFile(path string, maxBytes int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	if info.Size() > maxBytes {
+		return nil, fmt.Errorf("%s exceeds the %d-byte limit", path, maxBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%s exceeds the %d-byte limit", path, maxBytes)
+	}
+	return data, nil
 }
 
 func openAIBaseURLFromModelsEndpoint(endpoint string) string {

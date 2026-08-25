@@ -106,6 +106,56 @@ func (standardACPLaunchStrategy) Prepare(config ProviderConfig, opts Options) (P
 	return config, nil
 }
 
+// omlxAwareACPLaunchStrategy keeps oMLX's provider-owned API key ephemeral.
+// Detection persists only the harmless "local" placeholder; immediately before
+// an oMLX-backed Qwen or workass-agent child starts, this adapter replaces the
+// placeholder in the child-only environment.
+type omlxAwareACPLaunchStrategy struct {
+	environment providerEnvironmentPolicy
+}
+
+func (strategy omlxAwareACPLaunchStrategy) EnvironmentPolicy() providerEnvironmentPolicy {
+	return strategy.environment
+}
+
+func (strategy omlxAwareACPLaunchStrategy) Prepare(config ProviderConfig, opts Options) (ProviderConfig, error) {
+	config = launchProviderConfig(config)
+	if providerLaunchUsesOMLX(config, opts) {
+		apiKey, err := omlxAPIKey(opts)
+		if err != nil {
+			return ProviderConfig{}, fmt.Errorf("prepare oMLX authentication: %w", err)
+		}
+		currentKey := strings.TrimSpace(config.Env["OPENAI_API_KEY"])
+		if apiKey != "" && (currentKey == "" || currentKey == "local") {
+			if config.Env == nil {
+				config.Env = make(map[string]string)
+			}
+			config.Env["OPENAI_API_KEY"] = apiKey
+		}
+	}
+	return (standardACPLaunchStrategy{environment: strategy.environment}).Prepare(config, opts)
+}
+
+func providerLaunchUsesOMLX(config ProviderConfig, opts Options) bool {
+	if normalizeProviderID(config.ID) == localOMLXProviderID {
+		return true
+	}
+	return openAIBaseURLUsesOMLX(config.Env["OPENAI_BASE_URL"], opts)
+}
+
+func openAIBaseURLUsesOMLX(rawBaseURL string, opts Options) bool {
+	baseURL := strings.TrimRight(strings.TrimSpace(rawBaseURL), "/")
+	if baseURL == "" {
+		return false
+	}
+	for _, server := range localModelServers(opts.LocalModelEndpoints) {
+		if server.OMLX && baseURL == strings.TrimRight(openAIBaseURLFromModelsEndpoint(server.Endpoint), "/") {
+			return true
+		}
+	}
+	return false
+}
+
 const maxNodeExtraCABytes = 4 * 1024 * 1024
 
 func nodeExtraCABundle(stateDir, providerCWD, existingPath, workassPath string) (string, error) {

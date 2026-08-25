@@ -102,11 +102,19 @@ func (qwenDetectionStrategy) Prepare(ctx context.Context, manager *Manager, cfg 
 	if err != nil {
 		return resolved, append([]string(nil), cfg.Args...), nil, err.Error(), nil
 	}
-	return resolved, append([]string(nil), cfg.Args...), map[string]string{
+	env := map[string]string{
 		"OPENAI_BASE_URL": baseURL,
 		"OPENAI_API_KEY":  "local",
 		"OPENAI_MODEL":    model,
-	}, "", nil
+	}
+	if openAIBaseURLUsesOMLX(baseURL, manager.opts) {
+		// Qwen's normal bootstrap plus Workass's ACP-supplied tools can exceed
+		// oMLX's default 32k context before the first user token. Safe mode strips
+		// ambient extensions, skills, memory, and context while Qwen 0.21.13 keeps
+		// the explicit session/new MCP servers supplied by Workass.
+		env["QWEN_CODE_SAFE_MODE"] = "true"
+	}
+	return resolved, append([]string(nil), cfg.Args...), env, "", nil
 }
 
 // OpenCode owns the provider catalog and authentication surface, while the
@@ -193,7 +201,7 @@ func opencodeKnownPaths() []string {
 
 var providerRegistrationOrder = []string{
 	"mock", "devin", "qwen", "claude", "codex", "opencode",
-	localLMStudioProviderID, localOllamaProviderID, "custom",
+	localLMStudioProviderID, localOllamaProviderID, localOMLXProviderID, "custom",
 }
 
 var providerRegistrations = map[string]providerRegistration{
@@ -227,7 +235,10 @@ var providerRegistrations = map[string]providerRegistration{
 		ID: "qwen", Name: "Qwen Code ACP", DefaultCommand: "qwen", DefaultArgs: []string{"--acp"}, Badge: "agent",
 		Discovery: &cliProvider{id: "qwen", defaultCommand: "qwen", pathEnv: []string{"WORKASS_QWEN", "ASSISTANT_QWEN"}, pathNames: []string{"qwen.cmd", "qwen.exe", "qwen"}},
 		Detection: qwenDetectionStrategy{},
-		Adapter:   providerAdapter{permission: qwenProviderPermissionPolicy{}},
+		Adapter: providerAdapter{
+			permission: qwenProviderPermissionPolicy{},
+			launch:     omlxAwareACPLaunchStrategy{},
+		},
 		Update: providerUpdateRegistration{
 			Source:  "https://registry.npmjs.org/@qwen-code/qwen-code/latest",
 			Command: ProviderUpdateCommand{Command: "qwen", Args: []string{"update"}},
@@ -298,6 +309,11 @@ var providerRegistrations = map[string]providerRegistration{
 	localOllamaProviderID: {
 		ID: localOllamaProviderID, Name: "Ollama (local)", DefaultCommand: "workass-agent", Badge: "native",
 		Detection: localModelDetectionStrategy{}, Local: true,
+	},
+	localOMLXProviderID: {
+		ID: localOMLXProviderID, Name: "oMLX (local)", DefaultCommand: "workass-agent", Badge: "native",
+		Detection: localModelDetectionStrategy{}, Local: true,
+		Adapter: providerAdapter{launch: omlxAwareACPLaunchStrategy{}},
 	},
 	"custom": {ID: "custom", Name: "Custom ACP", Badge: "custom"},
 }
