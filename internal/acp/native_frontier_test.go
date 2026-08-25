@@ -52,8 +52,14 @@ func TestBuiltInOpenCodeProviderDefaultsToOxAlphaFree(t *testing.T) {
 	if resolved != executable || strings.Join(args, " ") != "acp" || inactive != "" {
 		t.Fatalf("OpenCode launch = command %q args %#v inactive %q", resolved, args, inactive)
 	}
-	if env["OPENCODE_CONFIG_CONTENT"] != opencodeOxAlphaConfigContent || !strings.Contains(env["OPENCODE_CONFIG_CONTENT"], "opencode/x-preview-f-free") {
+	if env["OPENCODE_CONFIG_CONTENT"] != opencodeOxAlphaConfigContent || !strings.Contains(env["OPENCODE_CONFIG_CONTENT"], "openrouter/stealth/ox-alpha") {
 		t.Fatalf("OpenCode default config = %#v", env)
+	}
+	if strings.Contains(env["OPENCODE_CONFIG_CONTENT"], "opencode/x-preview-f-free") {
+		t.Fatalf("OpenCode default still uses the failing Zen route: %#v", env)
+	}
+	if !strings.Contains(env["OPENCODE_CONFIG_CONTENT"], `"whitelist":["stealth/ox-alpha"]`) {
+		t.Fatalf("OpenCode default does not isolate the free OpenRouter route: %#v", env)
 	}
 }
 
