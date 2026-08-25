@@ -111,9 +111,10 @@ The updater:
 2. inspects archive paths before extraction and stages beside the installed app;
 3. verifies the incoming app's platform signature, version, bundled daemon,
    runtime manifest, and mutual designated requirement with the installed app;
-4. asks the daemon for a quiescent handoff. The daemon atomically blocks new
-   turns, subagents, tracked external work, and provider updates while it checks
-   that all existing work has finished;
+4. asks the daemon for a user-clicked handoff (user law 2026-08-25). The
+   daemon atomically blocks new turns, subagents, tracked external work, and
+   provider updates for the handoff window; active work never blocks the
+   click and is recorded in the durable receipt instead;
 5. starts an updater worker outside the code being replaced, stops the daemon,
    atomically swaps the complete release, and launches the new Workass;
 6. keeps the previous release until daemon health, controller authority,
@@ -123,9 +124,9 @@ The updater:
    records `healthy`, `rollback_healthy`, or `failed`.
 
 The UI exposes this through the same compact sidebar update card used for
-provider updates; it does not add a separate Settings section. Workass never
-kills active work to update: it shows the blockers and lets the user retry after
-they finish.
+provider updates; it does not add a separate Settings section. Updates are
+user-clicked only: Workass never enters or schedules an update on its own,
+and a user click updates immediately regardless of running work.
 
 ### macOS local update channel
 
@@ -187,7 +188,7 @@ The corresponding normal Windows artifact requires:
 3. Authenticode signing for every executable and the installer, preferably
    through Microsoft Azure Artifact Signing or an EV signing provider.
 4. A signed Squirrel/MSIX/MSI installer and update feed, with the same
-   quiescent daemon handoff contract.
+   user-clicked daemon handoff contract.
 5. A clean Windows VM acceptance test with no Node, npm, source checkout, or
    developer credentials installed.
 

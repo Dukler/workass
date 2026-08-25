@@ -2,8 +2,8 @@
 
 You are building part of the workass campaign from a closed spec. You have NO
 design authority: build exactly what the spec says; if the spec seems wrong or
-impossible, STOP and report — never loosen a gate, never substitute your own
-design, never "improve" scope. Log suggestions separately; do not act on them.
+impossible, report it — never substitute your own design, never "improve"
+scope. Log suggestions separately; do not act on them.
 
 ## Read first (in order)
 1. `docs/PORT-SPEC.md` — binding laws for everything you build here.
@@ -13,6 +13,11 @@ design, never "improve" scope. Log suggestions separately; do not act on them.
 3. `desktop/acp/README.md` — mock ACP server + probe usage (your test oracle).
 
 ## Hard rules
+- Updates are user-clicked only (user law 2026-08-25): never download, stage,
+  install, activate, or relaunch any Workass release on your own initiative.
+  When the user requests installation, perform exactly the requested step
+  through the supported update surface — never blocked by running work, never
+  extended to machines or profiles the user did not name.
 - The `invoke/reply/event` wire protocol in `desktop/lan-server.js` is FROZEN.
   New server code speaks it byte-compatibly; the renderer is not modified to
   accommodate the server.

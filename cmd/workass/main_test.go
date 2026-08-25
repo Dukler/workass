@@ -162,17 +162,22 @@ func updateControlRequest(t *testing.T, handler http.HandlerFunc, remoteAddr, up
 	return recorder
 }
 
-func TestLocalUpdateControlRequiresQuiescenceAndExactCommit(t *testing.T) {
-	gate := &fakeAppUpdateGate{readiness: acp.AppUpdateReadiness{ForegroundTurns: 1}}
+func TestLocalUpdateControlRecordsActiveWorkAndExactCommit(t *testing.T) {
+	gate := &fakeAppUpdateGate{readiness: acp.AppUpdateReadiness{Ready: true, ForegroundTurns: 1, BackgroundWork: 2}}
 	stopped := make(chan struct{}, 1)
 	control := newLocalUpdateControl(gate, func() { stopped <- struct{}{} })
 
 	busy := updateControlRequest(t, control.prepare, "127.0.0.1:41000", "update-busy-1234")
-	if busy.Code != http.StatusConflict || !strings.Contains(busy.Body.String(), `"foregroundTurns":1`) {
-		t.Fatalf("busy prepare = %d %s", busy.Code, busy.Body.String())
+	if busy.Code != http.StatusOK || !strings.Contains(busy.Body.String(), `"ready":true`) ||
+		!strings.Contains(busy.Body.String(), `"foregroundTurns":1`) {
+		t.Fatalf("active-work prepare must not be blocked = %d %s", busy.Code, busy.Body.String())
 	}
+	reset := updateControlRequest(t, control.cancel, "127.0.0.1:41000", "update-busy-1234")
+	if reset.Code != http.StatusOK || !strings.Contains(reset.Body.String(), `"cancelled":true`) {
+		t.Fatalf("reset after active-work prepare = %d %s", reset.Code, reset.Body.String())
+	}
+	gate.cancelled = false
 
-	gate.readiness = acp.AppUpdateReadiness{Ready: true}
 	prepared := updateControlRequest(t, control.prepare, "127.0.0.1:41000", "update-ready-1234")
 	if prepared.Code != http.StatusOK || !strings.Contains(prepared.Body.String(), `"ready":true`) {
 		t.Fatalf("ready prepare = %d %s", prepared.Code, prepared.Body.String())

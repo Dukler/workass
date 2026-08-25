@@ -2,6 +2,8 @@ package acp
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -35,7 +37,13 @@ func TestSpareAdoptionRebindsInjectedAgentOwnerToRealChat(t *testing.T) {
 	manager, _ := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
 	manager.opts.WorkassMCPBaseURL = "https://localhost:8788"
-	manager.opts.WorkassMCPCACertFile = "/workass/daemon-cert.pem"
+	// MCP trust is prepared at provider launch (provider_adapter.go), so the
+	// fixture CA must exist on disk like the daemon's real certificate does.
+	caFile := filepath.Join(t.TempDir(), "daemon-cert.pem")
+	if err := os.WriteFile(caFile, []byte("-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager.opts.WorkassMCPCACertFile = caFile
 	manager.opts.WorkassMCPStdioCommand = "/workass/workass-daemon"
 	manager.mu.Lock()
 	providerID := manager.defaultProviderID
