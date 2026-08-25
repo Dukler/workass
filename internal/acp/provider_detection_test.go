@@ -157,6 +157,9 @@ func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *test
 	if autoEnv["OPENAI_BASE_URL"] != models.URL+"/v1" || autoEnv["OPENAI_MODEL"] != "qwen-test-model" || autoEnv["OPENAI_API_KEY"] != "[redacted]" {
 		t.Fatalf("qwen autoEnv = %#v", autoEnv)
 	}
+	if _, exists := autoEnv["QWEN_CODE_SAFE_MODE"]; exists {
+		t.Fatalf("non-oMLX Qwen unexpectedly entered safe mode: %#v", autoEnv)
+	}
 
 	groups, _ := manager.Catalog(context.Background())["groups"].([]CatalogGroup)
 	assertCatalogGroup(t, groups, "mock", providerStatusReady, true)
@@ -1273,6 +1276,106 @@ func TestDetectProvidersLocalServerRegistersNativeProviderAndStreamsThroughAgent
 	t.Logf("trace qwen+local coexist catalog %s", catalogSummaryForACP(manager.Catalog(context.Background())))
 }
 
+func TestDetectProvidersOMLXAuthenticatesQwenAndNativeProviderWithoutPersistingKey(t *testing.T) {
+	root := repoRoot(t)
+	const apiKey = "omlx-test-secret-value"
+	t.Setenv("OMLX_API_KEY", "")
+	settingsFile := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(settingsFile, []byte(`{"auth":{"api_key":"`+apiKey+`"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeLocalOpenAIWithAPIKey(t, apiKey, "omlx-qwen-new", "omlx-qwen-second")
+	defer fake.Close()
+	agentBin := buildWorkassAgentBinary(t, root)
+	t.Setenv(workassAgentBinEnv, agentBin)
+	pathDir := t.TempDir()
+	installFakeAgentWrapper(t, pathDir, "qwen", "echo-prompt")
+	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	providersFile := filepath.Join(t.TempDir(), "providers.json")
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir:             root,
+		StateDir:            filepath.Join(t.TempDir(), "state"),
+		ProviderConfigFile:  providersFile,
+		Broadcast:           events.Broadcast,
+		InitTimeout:         5 * time.Second,
+		StdoutFlushInterval: 5 * time.Millisecond,
+		RSSSampleInterval:   time.Hour,
+		LocalModelEndpoints: []string{
+			"http://127.0.0.1:1/v1/models",
+			"http://127.0.0.1:1/v1/models",
+			fake.URL() + "/v1/models",
+		},
+		OMLXSettingsFile: settingsFile,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	manager.DetectProviders(context.Background(), DetectOptions{ProviderID: "qwen"})
+	qwen := assertProviderListItem(t, manager.ProvidersList(), "qwen", providerStatusReady, true)
+	qwenEnv, _ := qwen["autoEnv"].(map[string]string)
+	if qwenEnv["OPENAI_BASE_URL"] != fake.URL()+"/v1" || qwenEnv["OPENAI_MODEL"] != "omlx-qwen-new" || qwenEnv["OPENAI_API_KEY"] != "[redacted]" || qwenEnv["QWEN_CODE_SAFE_MODE"] != "true" {
+		t.Fatalf("oMLX-backed Qwen autoEnv = %#v", qwenEnv)
+	}
+
+	manager.DetectProviders(context.Background(), DetectOptions{ProviderID: localOMLXProviderID})
+	omlx := assertProviderListItem(t, manager.ProvidersList(), localOMLXProviderID, providerStatusReady, true)
+	if omlx["name"] != "oMLX (local)" || omlx["resolvedCommand"] != agentBin {
+		t.Fatalf("oMLX provider metadata = %#v", omlx)
+	}
+	groups, _ := manager.Catalog(context.Background())["groups"].([]CatalogGroup)
+	group := findCatalogGroup(groups, localOMLXProviderID)
+	if group == nil || strings.Join(modelIDs(group.Models), ",") != "omlx-qwen-new,omlx-qwen-second" {
+		t.Fatalf("oMLX catalog group = %#v", group)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := manager.NewSession(ctx, SessionOptions{
+		TabID: "omlx-native-tab", ChatID: "chat-omlx-native", ProviderID: localOMLXProviderID,
+	})
+	if err != nil {
+		t.Fatalf("new oMLX session: %v", err)
+	}
+	job, err := manager.StartJob(context.Background(), JobStartOptions{
+		Kind: "app-chat", ChatID: "chat-omlx-native", TabID: "omlx-native-tab",
+		SessionID: session.SessionID, Prompt: "authenticated oMLX turn",
+	})
+	if err != nil {
+		t.Fatalf("start oMLX job: %v", err)
+	}
+	end := events.waitJobEnd(t, jobID(job), 10*time.Second)
+	assertJobStatus(t, end, "done", 0, "end_turn")
+	if result := jobFromEnd(end)["result"]; result != "native local ok" {
+		t.Fatalf("oMLX job result = %q", result)
+	}
+
+	authorizationHeaders := fake.AuthorizationHeaders()
+	if len(authorizationHeaders) == 0 {
+		t.Fatal("oMLX test server received no authenticated requests")
+	}
+	for i, authorization := range authorizationHeaders {
+		if authorization != "Bearer "+apiKey {
+			t.Fatalf("oMLX request %d did not carry the provider-owned credential", i)
+		}
+	}
+	persisted, err := os.ReadFile(providersFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(persisted, []byte(apiKey)) {
+		t.Fatal("oMLX API key was persisted in providers.json")
+	}
+	saved := readProviderFile(t, providersFile)
+	for _, providerID := range []string{"qwen", localOMLXProviderID} {
+		autoEnv, _ := saved[providerID]["autoEnv"].(map[string]any)
+		if autoEnv["OPENAI_API_KEY"] != "local" {
+			t.Fatalf("persisted %s credential placeholder = %#v", providerID, autoEnv["OPENAI_API_KEY"])
+		}
+	}
+	t.Logf("trace oMLX auth qwen=%s native=%s models=%d", qwen["status"], omlx["status"], len(group.Models))
+}
+
 func TestDetectProvidersLocalServerInactiveWhenDown(t *testing.T) {
 	root := repoRoot(t)
 	models := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1533,10 +1636,12 @@ func modelIDs(models []Model) []string {
 }
 
 type fakeLocalOpenAI struct {
-	server *httptest.Server
-	mu     sync.Mutex
-	models []string
-	reqs   []fakeLocalChatRequest
+	server                *httptest.Server
+	mu                    sync.Mutex
+	models                []string
+	reqs                  []fakeLocalChatRequest
+	requiredAuthorization string
+	authorizationHeaders  []string
 }
 
 type fakeLocalChatRequest struct {
@@ -1549,11 +1654,21 @@ type fakeLocalChatRequest struct {
 }
 
 func newFakeLocalOpenAI(t *testing.T, models ...string) *fakeLocalOpenAI {
+	return newFakeLocalOpenAIWithAPIKey(t, "", models...)
+}
+
+func newFakeLocalOpenAIWithAPIKey(t *testing.T, apiKey string, models ...string) *fakeLocalOpenAI {
 	t.Helper()
 	if len(models) == 0 {
 		models = []string{"local-first"}
 	}
-	fake := &fakeLocalOpenAI{models: append([]string(nil), models...)}
+	requiredAuthorization := ""
+	if strings.TrimSpace(apiKey) != "" {
+		requiredAuthorization = "Bearer " + strings.TrimSpace(apiKey)
+	}
+	fake := &fakeLocalOpenAI{
+		models: append([]string(nil), models...), requiredAuthorization: requiredAuthorization,
+	}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
 	return fake
 }
@@ -1575,7 +1690,23 @@ func (f *fakeLocalOpenAI) LastChatRequest() fakeLocalChatRequest {
 	return f.reqs[len(f.reqs)-1]
 }
 
+func (f *fakeLocalOpenAI) AuthorizationHeaders() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.authorizationHeaders...)
+}
+
 func (f *fakeLocalOpenAI) handle(w http.ResponseWriter, r *http.Request) {
+	if f.requiredAuthorization != "" {
+		authorization := r.Header.Get("Authorization")
+		f.mu.Lock()
+		f.authorizationHeaders = append(f.authorizationHeaders, authorization)
+		f.mu.Unlock()
+		if authorization != f.requiredAuthorization {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
 	switch r.URL.Path {
 	case "/v1/models":
 		w.Header().Set("Content-Type", "application/json")

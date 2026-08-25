@@ -108,6 +108,62 @@ func TestStandardACPLaunchAddsWorkassMCPTrustWithoutDisablingTLS(t *testing.T) {
 	}
 }
 
+func TestOMLXAwareLaunchInjectsProviderOwnedKeyEphemerally(t *testing.T) {
+	t.Setenv("OMLX_API_KEY", "")
+	stateDir := t.TempDir()
+	settingsFile := filepath.Join(stateDir, "settings.json")
+	const apiKey = "omlx-test-secret-value"
+	if err := os.WriteFile(settingsFile, []byte(`{"auth":{"api_key":"`+apiKey+`"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	endpoints := []string{
+		"http://127.0.0.1:1234/v1/models",
+		"http://127.0.0.1:11434/v1/models",
+		"http://127.0.0.1:18000/v1/models",
+	}
+	config := ProviderConfig{
+		ID: "qwen", Command: "qwen", Args: []string{"--acp"}, CWD: stateDir,
+		AutoEnv: map[string]string{
+			"OPENAI_BASE_URL": "http://127.0.0.1:18000/v1",
+			"OPENAI_API_KEY":  "local",
+			"OPENAI_MODEL":    "qwen-local",
+		},
+	}
+	options := Options{OMLXSettingsFile: settingsFile, LocalModelEndpoints: endpoints}
+	launch, err := (omlxAwareACPLaunchStrategy{}).Prepare(config, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Env["OPENAI_API_KEY"] != apiKey {
+		t.Fatalf("oMLX child key was not injected: %#v", redactedStringMap(launch.Env))
+	}
+	if config.AutoEnv["OPENAI_API_KEY"] != "local" || config.Env != nil {
+		t.Fatalf("oMLX launch mutated persisted config: %#v", config)
+	}
+
+	explicit := config
+	explicit.Env = map[string]string{"OPENAI_API_KEY": "user-owned-subkey"}
+	launch, err = (omlxAwareACPLaunchStrategy{}).Prepare(explicit, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Env["OPENAI_API_KEY"] != "user-owned-subkey" {
+		t.Fatalf("oMLX launch replaced an explicit user key: %#v", redactedStringMap(launch.Env))
+	}
+
+	providersFile := filepath.Join(stateDir, "providers.json")
+	if err := SaveProviderConfigs(providersFile, []ProviderConfig{config}); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(providersFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(persisted), apiKey) || !strings.Contains(string(persisted), `"OPENAI_API_KEY": "local"`) {
+		t.Fatalf("persisted oMLX config crossed the credential boundary: %s", redactSensitiveText(string(persisted)))
+	}
+}
+
 func TestStandardACPLaunchCombinesExistingAndWorkassNodeCAs(t *testing.T) {
 	t.Setenv("NODE_EXTRA_CA_CERTS", "")
 	stateDir := t.TempDir()
