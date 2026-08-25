@@ -323,19 +323,22 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   and notary receipts. The Electron shell itself is exact-version pinned and
   fetched only at Mac build time from its official release; its published
   checksum is verified before development activation or release packaging, and
-  an arbitrary global Electron install is never a release input. Automatic
-  update activation stays disabled until it can
-  prove foreground turns and tracked asynchronous work are quiescent, stop the
-  shell and daemon before replacement, and roll back after failed health,
-  controller, or catalog recovery.
+   an arbitrary global Electron install is never a release input. Update
+   activation is user-clicked only (user law 2026-08-25): the updater is never
+   entered agentically, and a user-initiated activation is never blocked by
+   active foreground turns or tracked asynchronous work. The drain records any
+   interrupted work in the durable receipt, stops the shell and daemon before
+   replacement, and rolls back after failed health, controller, or catalog
+   recovery.
 - **Windows portable updates** (user law 2026-08-10): extracted Windows builds
   update from the platform-specific manifest on the latest stable GitHub
   Release. Authenticode is not required for this private portable lane. The
   shell accepts only an HTTPS feed for the exact Windows/amd64 portable target,
   verifies the archive's declared size and SHA-256 before extraction, rejects
   unsafe archive paths, revalidates the embedded release/shell versions and
-  required PE32+ x86-64 runtime files, then uses the same quiescent daemon
-  handoff and health/controller/catalog gates. Windows must not require the
+   required PE32+ x86-64 runtime files, then uses the same user-clicked daemon
+   handoff (never blocked by active work, per user law 2026-08-25) and
+   health/controller/catalog gates. Windows must not require the
   portable installation directory itself to be renameable: the verified
   incoming release and complete rollback snapshot live under the external
   update transaction directory, activation mirrors the incoming tree into the

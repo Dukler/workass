@@ -533,12 +533,11 @@ func (control *localUpdateControl) prepare(w http.ResponseWriter, r *http.Reques
 		_, _ = w.Write([]byte(`{"ready":true,"prepared":true}`))
 		return
 	}
+	// User law 2026-08-25: a user-clicked update is never blocked by active
+	// work. The drain closes admission for the handoff window; any interrupted
+	// foreground/background/provider work is recorded in the readiness payload
+	// and the durable updater receipt instead of refusing the click.
 	readiness := control.gate.BeginUpdateDrain()
-	if !readiness.Ready {
-		w.WriteHeader(http.StatusConflict)
-		_ = json.NewEncoder(w).Encode(readiness)
-		return
-	}
 	control.preparedID = id
 	control.cancelledID = ""
 	_ = json.NewEncoder(w).Encode(readiness)
