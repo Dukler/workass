@@ -166,8 +166,22 @@ export function TareasCard() {
 
   const chat = store.active();
   const msg = chat ? [...chat.messages].reverse().find((m) => m.role === 'assistant') ?? null : null;
-  const running = msg?.status === 'running';
-  const events = msg?.events ?? [];
+  // Steering splits one provider turn into assistant continuations separated by
+  // canonical user rows. The newest continuation may still be empty (or only a
+  // staged placeholder), while every subagent/tool event seen so far remains on
+  // an earlier segment. Turnos projects the whole logical turn, not whichever
+  // transcript segment happens to be last, so steering cannot make live child
+  // work disappear or make the still-running turn look settled.
+  const turnRootId = msg?.turnRootId?.trim();
+  const turnMessages = !msg
+    ? []
+    : !turnRootId
+      ? [msg]
+      : (chat?.messages.filter((message) => message.role === 'assistant' && (
+          message.id === turnRootId || message.turnRootId?.trim() === turnRootId
+        )) ?? [msg]);
+  const running = turnMessages.some((message) => message.status === 'running');
+  const events = turnMessages.flatMap((message) => message.events);
   const tools = events.filter((e): e is ToolEvent => e.kind === 'tool');
   const { nodes, mainTools } = extractSubagents(tools);
   // ONE row per subagent. A tracked subagent is registered as spawned work under
