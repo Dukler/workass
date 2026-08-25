@@ -2109,6 +2109,20 @@ test('apply IPC returns a running snapshot immediately while one background inte
   assert.deepEqual(steps, ['download', 'install']);
 });
 
+test('busy apply IPC waits for the refreshed daemon blockers instead of returning the stale snapshot', async () => {
+  const { manager } = managerFixture({
+    replies: [{ status: 409, body: { ready: false, foregroundTurns: 1, backgroundWork: 2 } }],
+  });
+  manager.publish({ phase: 'busy', blockers: { foregroundTurns: 9 } });
+
+  const refreshed = manager.startApply();
+  assert.equal(typeof refreshed?.then, 'function');
+  const state = await refreshed;
+
+  assert.equal(state.phase, 'busy');
+  assert.deepEqual(state.blockers, { ready: false, foregroundTurns: 1, backgroundWork: 2 });
+});
+
 test('a missing platform asset means current while a feed failure cannot impersonate an attempted update', async () => {
   const missing = managerFixture({ primeReady: false });
   missing.manager.deps.fetchManifest = async () => { throw Object.assign(new Error('HTTP 404'), { statusCode: 404 }); };

@@ -39,3 +39,15 @@ func TestBusyUpdateCheckReopensWorkAdmission(t *testing.T) {
 	}
 	m.endWorkAdmission()
 }
+
+func TestBeginUpdateDrainCountsTrackedSubagentOnlyAsBackgroundWork(t *testing.T) {
+	m := updateTestManager()
+	m.jobs["foreground"] = &Job{ID: "foreground", Kind: "app-chat", Status: "running"}
+	m.jobs["subagent-job"] = &Job{ID: "subagent-job", Kind: "subagent", Status: "running"}
+	m.subagents["subagent"] = &SubagentRun{ID: "subagent", JobID: "subagent-job", Status: "running"}
+
+	result := m.BeginUpdateDrain()
+	if result.Ready || result.ForegroundTurns != 1 || result.BackgroundWork != 1 {
+		t.Fatalf("readiness double-counted tracked subagent = %#v", result)
+	}
+}

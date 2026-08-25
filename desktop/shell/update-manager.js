@@ -2815,6 +2815,10 @@ class UpdateManager {
   // snapshot (download() publishes it before its first network await).
   startApply() {
     if (this.applyPromise) return this.snapshot();
+    // A busy retry is a short readiness refresh, not a download. Let its IPC
+    // resolve with the newly measured blockers; returning the old snapshot can
+    // race the state event and overwrite the fresh result in the renderer.
+    const waitForBusyRefresh = this.state.phase === 'busy';
     const operation = this.apply().catch((err) => {
       if (err?.code === 'WORKASS_UPDATE_CANCEL_UNCONFIRMED') {
         const receipt = readJSONFile(this.receiptPath) || this.state.receipt;
@@ -2828,7 +2832,7 @@ class UpdateManager {
     void operation.then(() => {
       if (this.applyPromise === operation) this.applyPromise = null;
     });
-    return this.snapshot();
+    return waitForBusyRefresh ? operation : this.snapshot();
   }
 
   dispose() {

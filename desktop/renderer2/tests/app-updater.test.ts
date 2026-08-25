@@ -78,6 +78,9 @@ test('Workass updater uses the existing footer update-card lifecycle and never a
   assert.match(selfCard, /upd-run upd-done/);
   assert.match(selfCard, /updcard upd-fail/);
   assert.match(selfCard, /className="uretry"/);
+  assert.match(selfCard, /<button[\s\S]*type="button"[\s\S]*className=\{`updcard/);
+  assert.doesNotMatch(selfCard, /role:\s*'button'/);
+  assert.match(sidebar, /La actualización sigue esperando/);
   assert.match(sidebar, /const selfAction = selfPending \|\| selfCheckFailed \|\| selfFailed \? selfUpdater\.apply : null/);
   assert.doesNotMatch(sidebar, /selfUpdater\.(download|install)/);
   assert.doesNotMatch(updaterSource, /\b(?:download|install)\(\):\s*Promise<AppUpdaterState>/);

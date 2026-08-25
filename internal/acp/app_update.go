@@ -27,7 +27,11 @@ func (m *Manager) BeginUpdateDrain() AppUpdateReadiness {
 
 	m.mu.Lock()
 	for _, job := range m.jobs {
-		if job != nil && job.Status == "running" {
+		// A tracked subagent owns an internal Job for its provider session, but
+		// that same unit of work is reported by the subagent registry below.
+		// Counting it here labels background work as a foreground chat turn and
+		// then counts it a second time as background work.
+		if job != nil && job.Status == "running" && job.Kind != "subagent" {
 			result.ForegroundTurns++
 		}
 	}
