@@ -17,6 +17,7 @@ export type AppUpdaterPhase =
   | 'failed';
 
 export interface AppUpdaterBlockers {
+  reason?: string;
   foregroundTurns?: number;
   backgroundWork?: number;
   providerUpdates?: number;
@@ -73,13 +74,18 @@ const INITIAL: AppUpdaterState = {
 };
 
 export function appUpdaterBlockerText(blockers: AppUpdaterBlockers | null): string {
-  if (!blockers) return 'Workass espera a que termine el trabajo actual.';
+  if (blockers?.reason === 'another update is committed') return 'Otra actualización ya está activándose.';
+  if (blockers?.reason === 'another update is prepared') return 'Otra actualización ya está preparada para activarse.';
+  if (blockers?.reason) return 'El updater no pudo obtener el control exclusivo. Reintentá en un momento.';
+  if (!blockers) return 'Otra actualización ya controla la activación. Reintentá en un momento.';
   const parts: string[] = [];
   if (blockers.foregroundTurns) parts.push(`${blockers.foregroundTurns} ${blockers.foregroundTurns === 1 ? 'turno activo' : 'turnos activos'}`);
   if (blockers.backgroundWork) parts.push(`${blockers.backgroundWork} ${blockers.backgroundWork === 1 ? 'tarea en segundo plano' : 'tareas en segundo plano'}`);
   if (blockers.providerUpdates) parts.push(`${blockers.providerUpdates} ${blockers.providerUpdates === 1 ? 'agente actualizándose' : 'agentes actualizándose'}`);
   if (blockers.admissions) parts.push(`${blockers.admissions} ${blockers.admissions === 1 ? 'operación iniciándose' : 'operaciones iniciándose'}`);
-  return parts.length ? parts.join(' · ') : 'Workass espera a que termine el trabajo actual.';
+  return parts.length
+    ? `El trabajo activo no bloquea la actualización (${parts.join(' · ')}). Reintentá porque otra actualización controla la activación.`
+    : 'Otra actualización ya controla la activación. Reintentá en un momento.';
 }
 
 export function appUpdaterPhaseText(state: AppUpdaterState): string {
@@ -112,7 +118,7 @@ export function appUpdaterCardTitle(state: AppUpdaterState): string {
     || (state.phase === 'available' || state.phase === 'ready' ? state.targetVersion?.trim() : '');
   if (offeredVersion) return `Workass ${offeredVersion}`;
   switch (state.phase) {
-    case 'busy': return 'La actualización está esperando';
+    case 'busy': return 'La actualización necesita reintento';
     case 'check_failed': return 'No se pudo buscar actualizaciones';
     case 'rollback_healthy': return 'Workass volvió a la versión anterior';
     case 'failed': return 'No se pudo actualizar Workass';

@@ -512,7 +512,9 @@ export function FooterUpdateCards() {
     try {
       const next = await selfAction();
       if (next.phase === 'busy') {
-        store.addToast('La actualización sigue esperando', appUpdaterBlockerText(next.blockers));
+        // Never restore the legacy "La actualización sigue esperando" copy:
+        // active chat work is not an updater gate.
+        store.addToast('La actualización necesita reintento', appUpdaterBlockerText(next.blockers));
       }
     } catch (error) {
       store.addToast('No se pudo actualizar', String((error as Error)?.message || error));

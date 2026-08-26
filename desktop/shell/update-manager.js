@@ -1190,7 +1190,7 @@ function readHandoffState(transaction) {
       handoff.installationId !== transaction.installationId ||
       handoff.previousVersion !== transaction.currentVersion || handoff.targetVersion !== transaction.targetVersion ||
       path.resolve(String(handoff.installTarget || '')) !== path.resolve(transaction.installTarget) ||
-      !['intent', 'prepared', 'committed', 'cancelled'].includes(handoff.state)) return null;
+      !['intent', 'prepared', 'daemon_unavailable', 'committed', 'cancelled'].includes(handoff.state)) return null;
   return handoff;
 }
 
@@ -1210,7 +1210,26 @@ function writeHandoffState(transaction, state) {
 }
 
 function handoffNeedsCancel(transaction) {
-  return ['intent', 'prepared'].includes(readHandoffState(transaction)?.state);
+  return ['intent', 'prepared', 'daemon_unavailable'].includes(readHandoffState(transaction)?.state);
+}
+
+function interruptedWorkFromReadiness(readiness, { daemonUnavailable = false } = {}) {
+  const boundedCount = (field) => {
+    const value = Number(readiness?.[field]);
+    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  };
+  return {
+    foregroundTurns: Math.min(boundedCount('foregroundTurns'), 1_000_000),
+    backgroundWork: Math.min(boundedCount('backgroundWork'), 1_000_000),
+    providerUpdates: Math.min(boundedCount('providerUpdates'), 1_000_000),
+    admissions: Math.min(boundedCount('admissions'), 1_000_000),
+    ...(daemonUnavailable ? { daemonUnavailable: true } : {}),
+  };
+}
+
+function interruptedWorkForReceipt(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return interruptedWorkFromReadiness(value, { daemonUnavailable: value.daemonUnavailable === true });
 }
 
 function terminalReceiptForTransaction(transaction) {
@@ -1225,6 +1244,7 @@ function terminalReceiptForTransaction(transaction) {
       existing.installationId === transaction.installationId &&
       existing.workerId === transaction.workerId &&
       path.resolve(String(existing.installTarget || '')) === path.resolve(transaction.installTarget)) return existing;
+  const interruptedWork = interruptedWorkForReceipt(transaction.interruptedWork);
   const receipt = {
     schemaVersion: RECEIPT_SCHEMA_VERSION,
     updateId: transaction.updateId,
@@ -1235,6 +1255,7 @@ function terminalReceiptForTransaction(transaction) {
     installationId: transaction.installationId,
     installTarget: transaction.installTarget,
     workerId: transaction.workerId,
+    ...(interruptedWork ? { interruptedWork } : {}),
     updatedAt: new Date().toISOString(),
     activated: journal.phase === 'healthy',
     ...(journal.error ? { error: journal.error } : {}),
@@ -1885,9 +1906,18 @@ class UpdateManager {
   }
 
   async releasePreparedHandoff(transaction) {
-    if (!handoffNeedsCancel(transaction)) return true;
+    const handoff = readHandoffState(transaction);
+    if (!['intent', 'prepared', 'daemon_unavailable'].includes(handoff?.state)) return true;
     const cancelled = await this.cancelHandoff(transaction.updateId);
     if (!cancelled.confirmed) {
+      // When prepare was never acknowledged, daemon availability cannot become
+      // an update gate. Persist the uncertainty and let the independently
+      // verified worker stop the exact daemon before replacement. A confirmed
+      // prepared fence still requires a confirmed cancel on pre-arm failure.
+      if (cancelled.reply.status === 0 && handoff.state !== 'prepared') {
+        writeHandoffState(transaction, 'daemon_unavailable');
+        return true;
+      }
       const error = new Error('the daemon update fence could not be reconciled');
       error.code = 'WORKASS_UPDATE_CANCEL_UNCONFIRMED';
       throw error;
@@ -2050,6 +2080,7 @@ class UpdateManager {
   }
 
   terminalizeInterruptedReceipt(receipt, message) {
+    const interruptedWork = interruptedWorkForReceipt(receipt.interruptedWork);
     const terminal = {
       schemaVersion: RECEIPT_SCHEMA_VERSION,
       updateId: receipt.updateId,
@@ -2061,6 +2092,7 @@ class UpdateManager {
       installTarget: this.installTarget,
       updatedAt: new Date().toISOString(),
       activated: this.currentVersion === receipt.targetVersion,
+      ...(interruptedWork ? { interruptedWork } : {}),
       error: message,
     };
     atomicJSON(this.receiptPath, terminal);
@@ -2177,17 +2209,11 @@ class UpdateManager {
     if (prepared.status === 409) {
       return this.publish({ phase: 'busy', blockers: prepared.body, error: null });
     }
-    if (prepared.status === 0) {
-      return this.publish({
-        phase: 'busy',
-        blockers: { reason: 'the daemon prepare receipt is temporarily unavailable' },
-        error: null,
-      });
-    }
-    if (prepared.status !== 200 || prepared.body?.ready !== true) {
+    const daemonUnavailable = prepared.status === 0;
+    if (!daemonUnavailable && (prepared.status !== 200 || prepared.body?.ready !== true)) {
       throw new Error('the daemon could not prepare the interrupted update handoff');
     }
-    writeHandoffState(transaction, 'prepared');
+    writeHandoffState(transaction, daemonUnavailable ? 'daemon_unavailable' : 'prepared');
     const workerId = `worker-${crypto.randomBytes(16).toString('hex')}`;
     const progressId = `progress-${crypto.randomBytes(16).toString('hex')}`;
     const stagedProgressExecutable = expectedProgressExecutable(transaction);
@@ -2207,6 +2233,7 @@ class UpdateManager {
       workerId,
       progressId,
       progressExecutable,
+      interruptedWork: interruptedWorkFromReadiness(prepared.body, { daemonUnavailable }),
       recoveryAttempt: Number(transaction.recoveryAttempt || 0) + 1,
     };
     const transactionPath = path.join(transaction.transactionRoot, 'transaction.json');
@@ -2220,6 +2247,7 @@ class UpdateManager {
       installationId: resumed.installationId,
       installTarget: resumed.installTarget,
       workerId: resumed.workerId,
+      interruptedWork: resumed.interruptedWork,
       updatedAt: new Date().toISOString(),
     });
     const workerPath = resumed.workerPath;
@@ -2310,7 +2338,9 @@ class UpdateManager {
       const receipt = await this.abortRejectedHandoff(resumed, worker, message);
       return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
     }
-    const committed = await this.commitHandoff(transaction.updateId);
+    const committed = daemonUnavailable
+      ? { accepted: true, daemonUnavailable: true }
+      : await this.commitHandoff(transaction.updateId);
     if (!committed.accepted) {
       const message = 'the daemon did not commit the interrupted update handoff';
       await this.stopProgressOrThrow(progressProcess);
@@ -2677,21 +2707,22 @@ class UpdateManager {
     if (preparedReply.status === 409) {
       return this.publish({ phase: 'busy', blockers: preparedReply.body, error: null });
     }
-    if (preparedReply.status === 0) {
-      return this.publish({
-        phase: 'busy',
-        blockers: { reason: 'the daemon prepare receipt is temporarily unavailable' },
-        error: null,
-      });
-    }
-    if (preparedReply.status !== 200 || preparedReply.body?.ready !== true) {
+    const daemonUnavailable = preparedReply.status === 0;
+    if (!daemonUnavailable && (preparedReply.status !== 200 || preparedReply.body?.ready !== true)) {
       return this.publish({
         phase: 'busy',
         blockers: { reason: 'the daemon could not confirm a safe update handoff' },
         error: null,
       });
     }
-    writeHandoffState(transaction, 'prepared');
+    writeHandoffState(transaction, daemonUnavailable ? 'daemon_unavailable' : 'prepared');
+    transaction.interruptedWork = interruptedWorkFromReadiness(preparedReply.body, { daemonUnavailable });
+    atomicJSON(transactionPath, transaction);
+    atomicJSON(transaction.receiptPath, {
+      ...readJSONFile(transaction.receiptPath),
+      interruptedWork: transaction.interruptedWork,
+      updatedAt: new Date().toISOString(),
+    });
 
     let progressProcess = null;
     try {
@@ -2775,7 +2806,9 @@ class UpdateManager {
       return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
     }
 
-    const committed = await this.commitHandoff(prepared.updateId);
+    const committed = daemonUnavailable
+      ? { accepted: true, daemonUnavailable: true }
+      : await this.commitHandoff(prepared.updateId);
     if (!committed.accepted) {
       const message = 'the daemon did not commit the prepared update handoff';
       await this.stopProgressOrThrow(progressProcess);

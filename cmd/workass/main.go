@@ -504,10 +504,11 @@ func localUpdateRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return id, true
 }
 
-// prepare proves quiescence and fences all new work, but deliberately keeps
-// the daemon alive. The shell first arms an independent worker; only then does
-// commit stop the process. A worker launch failure can therefore cancel the
-// fence without interrupting the running app.
+// prepare snapshots work that the user-clicked update may interrupt and fences
+// all new admission, but deliberately keeps the daemon alive. It never waits
+// for active work to become terminal. The shell first arms an independent
+// worker; only then does commit stop the process. A worker launch failure can
+// therefore cancel the fence without interrupting the running app.
 func (control *localUpdateControl) prepare(w http.ResponseWriter, r *http.Request) {
 	id, ok := localUpdateRequest(w, r)
 	if !ok {

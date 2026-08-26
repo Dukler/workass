@@ -40,6 +40,17 @@ function validWorkerId(value) {
   return /^worker-[a-f0-9]{32}$/.test(String(value || ''));
 }
 
+function validInterruptedWork(value) {
+  if (value == null) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const allowed = new Set(['foregroundTurns', 'backgroundWork', 'providerUpdates', 'admissions', 'daemonUnavailable']);
+  if (Object.keys(value).some((key) => !allowed.has(key))) return false;
+  for (const field of ['foregroundTurns', 'backgroundWork', 'providerUpdates', 'admissions']) {
+    if (!Number.isSafeInteger(value[field]) || value[field] < 0 || value[field] > 1_000_000) return false;
+  }
+  return value.daemonUnavailable == null || typeof value.daemonUnavailable === 'boolean';
+}
+
 function installationIdentityPath(installTarget) {
   return path.join(installTarget, INSTALLATION_IDENTITY_FILE);
 }
@@ -144,6 +155,7 @@ function updateReceipt(transaction, phase, extra = {}) {
     installTarget: transaction.installTarget,
     workerId: transaction.workerId,
     workerPID: process.pid,
+    ...(transaction.interruptedWork ? { interruptedWork: transaction.interruptedWork } : {}),
     updatedAt: new Date().toISOString(),
     ...extra,
   };
@@ -696,6 +708,7 @@ function validateTransaction(transaction) {
   if (!/^[A-Za-z0-9_-]{8,96}$/.test(String(transaction.updateId || ''))) throw new Error('update transaction has an invalid updateId');
   if (!validInstallationId(transaction.installationId)) throw new Error('update transaction has an invalid installation identity');
   if (!validWorkerId(transaction.workerId)) throw new Error('update transaction has an invalid worker identity');
+  if (!validInterruptedWork(transaction.interruptedWork)) throw new Error('update transaction has invalid interrupted-work counts');
   if (!/^progress-[a-f0-9]{32}$/.test(String(transaction.progressId || ''))) throw new Error('update transaction has an invalid progress identity');
   if (transaction.requireVisibleWindow !== true) throw new Error('update transaction must require a visible shell window');
   for (const field of [
