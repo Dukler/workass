@@ -5028,6 +5028,15 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 				entry.LastError = provider.ErrorAcceptanceAmbiguous
 				continue
 			}
+			lane := state.Lanes[entry.LaneID]
+			if lane.Phase == LaneBlocked || lane.Phase == LaneBroken {
+				// The accepted native turn is still owned by this exact lane, but a
+				// prior provider failure already made automatic attachment unsafe.
+				// Preserve the valid blocked/uncertain boundary until explicit
+				// reconciliation instead of manufacturing an impossible
+				// blocked/reconciling state during every daemon startup.
+				continue
+			}
 			// Native acceptance is known, but every provider attachment died with
 			// the daemon. Exact-resume the same lane first; LaneOpened will then
 			// enqueue readback. Reconciliation can never run against a missing
