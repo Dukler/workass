@@ -2067,6 +2067,14 @@ func reduceSubmit(state *State, command Submit) ([]Effect, error) {
 	if presentation.QueueID != "" {
 		state.Presentation.AgentQueueRevision++
 	}
+	// A definite transport failure did not admit the previous operation. A new
+	// Submit is fresh explicit user/agent intent, so it may exact-resume the same
+	// established native thread and deliver only this newly journaled input. The
+	// failed operation remains terminal and is never replayed. Ambiguous,
+	// protocol, context-limit, and identity failures stay blocked.
+	if lane.Phase == LaneBlocked && lane.LastError == provider.ErrorTransientTransport && !lane.Thread.IsZero() {
+		return reduceRetryLane(state, RetryLane{LaneID: target})
+	}
 	return drive(state)
 }
 

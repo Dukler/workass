@@ -2944,7 +2944,20 @@ func (b *Bridge) currentSessionControlResult() sessionControlResult {
 // adapter's model axis. Caller must hold b.mu.
 func (b *Bridge) resolveModelWriteLocked(modelID string) modelWriteResolution {
 	modelID = strings.TrimSpace(modelID)
-	out := modelWriteResolution{requested: modelID, modelValue: modelID, baseModelID: modelID}
+	requested := modelID
+	// Qwen Code releases before 0.21 exposed local OpenAI-compatible models as
+	// $runtime|<provider>|<model>. Current releases expose the provider-native
+	// model id directly and reject the old wrapper on session/set_config_option.
+	// Treat the wrapper as a compatibility alias only when it is absent from the
+	// live catalog and its unwrapped value resolves to a current catalog row. A
+	// provider that still advertises a literal $runtime id therefore keeps exact
+	// byte-for-byte ownership of that id.
+	if _, current := catalogModelSelectionBase(modelID, b.models); !current {
+		if candidate, ok := catalogBackedRuntimeModelAlias(modelID, b.models); ok {
+			modelID = candidate
+		}
+	}
+	out := modelWriteResolution{requested: requested, modelValue: modelID, baseModelID: modelID}
 	for _, model := range b.models {
 		if strings.TrimSpace(model.ModelID) == modelID {
 			return out
@@ -3019,6 +3032,26 @@ func (b *Bridge) resolveModelWriteLocked(modelID string) modelWriteResolution {
 	out.modelValue = base
 	out.separateAxis = true
 	return out
+}
+
+func catalogBackedRuntimeModelAlias(modelID string, models []Model) (string, bool) {
+	const prefix = "$runtime|"
+	modelID = strings.TrimSpace(modelID)
+	if !strings.HasPrefix(modelID, prefix) {
+		return "", false
+	}
+	parts := strings.SplitN(modelID, "|", 3)
+	if len(parts) != 3 || strings.TrimSpace(parts[1]) == "" {
+		return "", false
+	}
+	candidate := strings.TrimSpace(parts[2])
+	if candidate == "" {
+		return "", false
+	}
+	if _, ok := catalogModelSelectionBase(candidate, models); !ok {
+		return "", false
+	}
+	return candidate, true
 }
 
 func matchingStringFold(values []string, requested string) string {
