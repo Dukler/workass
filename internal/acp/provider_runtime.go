@@ -1433,7 +1433,7 @@ func (s managerUpdateStrategy) CheckUpdate(ctx context.Context) (providercontrac
 	if !ok {
 		return providercontract.UpdateInfo{}, nil
 	}
-	latest, err := s.manager.latestCLIVersion(ctx, candidate.spec)
+	latest, err := s.manager.latestCLIVersion(ctx, candidate)
 	if err != nil {
 		return providercontract.UpdateInfo{}, err
 	}

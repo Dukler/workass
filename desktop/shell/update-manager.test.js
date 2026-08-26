@@ -411,6 +411,28 @@ function managerFixture({
   return { manager, calls, didQuit: () => quit, initialState };
 }
 
+test('the default committed handoff exits Electron without a cancellable window close', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-exit-'));
+  const calls = [];
+  const manager = new UpdateManager({
+    app: {
+      exit: (code) => { calls.push(['exit', code]); },
+      quit: () => { calls.push(['quit']); },
+    },
+    runtime: {
+      dataRoot: path.join(root, 'data'),
+      stateDir: path.join(root, 'data', 'state'),
+      daemonURL: 'https://127.0.0.1:8788',
+      viewPort: 8798,
+    },
+    resourcesPath: path.join(root, 'Workass', 'resources'),
+    executablePath: path.join(root, 'Workass', 'Workass.exe'),
+    platform: 'win32',
+  });
+  manager.exitCommittedHandoff();
+  assert.deepEqual(calls, [['exit', 0]]);
+});
+
 function seedRecoveryTransaction({ manager, installTarget, installationIdentity }, {
   updateId = 'upd-recovery-1234',
   workerId = `worker-${'7'.repeat(32)}`,

@@ -684,9 +684,13 @@ func TestProviderUpdateInvokeProgressNoProcRegistryAndReplay(t *testing.T) {
 	t.Logf("trace providers:update progress running startedAt=%s done exitCode=%d tail=%q installed=%s latest=%s updateAvailable=%v", running.StartedAt, *done.ExitCode, done.Tail, update.Installed, update.Latest, update.UpdateAvailable)
 }
 
-func TestQwenStandaloneUpdateUsesBundledCLI(t *testing.T) {
+func TestQwenStandaloneUpdateUsesBundledUpdaterAtCompatibleRelease(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
+	target, supported := qwenStandaloneTargetForRuntime()
+	if !supported {
+		t.Skip("Qwen has no standalone build for this test platform")
+	}
 	prefix := t.TempDir()
 	standaloneRoot := filepath.Join(prefix, "lib", "qwen-code")
 	binDir := filepath.Join(prefix, "bin")
@@ -696,7 +700,8 @@ func TestQwenStandaloneUpdateUsesBundledCLI(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(standaloneRoot, "node", "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(standaloneRoot, "lib"), 0o755); err != nil {
+	chunksDir := filepath.Join(standaloneRoot, "lib", "chunks")
+	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	versionFile := filepath.Join(t.TempDir(), "qwen-version")
@@ -704,22 +709,49 @@ func TestQwenStandaloneUpdateUsesBundledCLI(t *testing.T) {
 	if err := os.WriteFile(versionFile, []byte("0.58.1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	manifest := []byte(`{"name":"@qwen-code/qwen-code","version":"0.58.1"}`)
+	manifest := []byte(fmt.Sprintf(`{"name":"@qwen-code/qwen-code","version":"0.58.1","target":%q}`, target))
 	if err := os.WriteFile(filepath.Join(standaloneRoot, "manifest.json"), manifest, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cliPath := filepath.Join(standaloneRoot, "lib", "cli.js")
-	if err := os.WriteFile(cliPath, []byte("// qwen standalone cli fixture\n"), 0o644); err != nil {
+	updateModule := filepath.Join(chunksDir, "standalone-update-FIXTURE.js")
+	if err := os.WriteFile(updateModule, []byte("export async function performStandaloneUpdate() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	launcher := filepath.Join(binDir, "qwen")
 	writeExecutable(t, launcher, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nprintf 'public qwen update must not run\\n' >&2\nexit 91\n")
 	nodePath := filepath.Join(standaloneRoot, "node", "bin", "node")
-	writeExecutable(t, nodePath, "#!/bin/sh\nif [ \"$1\" = "+shellQuote(cliPath)+" ] && [ \"$2\" = \"update\" ]; then printf '0.58.2\\n' > "+shellQuote(versionFile)+"; printf 'bundled standalone updater\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 92\n")
+	if target == "win-x64" {
+		nodePath += ".exe"
+	}
+	writeExecutable(t, nodePath, "#!/bin/sh\nif [ \"$1\" = \"--input-type=module\" ] && [ \"$2\" = \"--eval\" ] && [ \"$4\" = "+shellQuote(updateModule)+" ] && [ \"$5\" = "+shellQuote(standaloneRoot)+" ] && [ \"$6\" = \"0.58.2\" ]; then printf '0.58.2\\n' > "+shellQuote(versionFile)+"; printf 'bundled standalone updater\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 92\n")
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.58.2"})
+		if r.URL.Path == "/latest" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.58.3"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"versions": map[string]any{
+			"0.58.1": map[string]any{},
+			"0.58.2": map[string]any{},
+			"0.58.3": map[string]any{},
+		}})
 	}))
 	t.Cleanup(registry.Close)
+	assetExtension := ".tar.gz"
+	if strings.HasPrefix(target, "win-") {
+		assetExtension = ".zip"
+	}
+	assets := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if r.URL.Path == "/v0.58.2/qwen-code-"+target+assetExtension {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(assets.Close)
 	events := newEventCollector()
 	manager := NewManager(Options{
 		RootDir:  root,
@@ -727,29 +759,50 @@ func TestQwenStandaloneUpdateUsesBundledCLI(t *testing.T) {
 		Providers: []ProviderConfig{{
 			ID: "qwen", Name: "Qwen Code ACP", Command: launcher, ResolvedCommand: launcher, Args: []string{"--acp"}, Enabled: true,
 		}},
-		DefaultProviderID:        "qwen",
-		Broadcast:                events.Broadcast,
-		RSSSampleInterval:        time.Hour,
-		ProviderUpdateSources:    map[string]string{"qwen": registry.URL + "/latest"},
-		ProviderUpdateTimeout:    200 * time.Millisecond,
-		ProviderUpdateRunTimeout: 2 * time.Second,
+		DefaultProviderID:          "qwen",
+		Broadcast:                  events.Broadcast,
+		RSSSampleInterval:          time.Hour,
+		ProviderUpdateSources:      map[string]string{"qwen": registry.URL + "/latest"},
+		ProviderUpdateAssetSources: map[string]string{"qwen": assets.URL},
+		ProviderUpdateTimeout:      3 * time.Second,
+		ProviderUpdateRunTimeout:   10 * time.Second,
 	})
 	t.Cleanup(func() { manager.Reset() })
 
+	manager.setProviderCLIVersion("qwen", manager.detectInstalledCLIVersion(context.Background(), "qwen"))
+	pending := manager.CheckProviderUpdates(context.Background())
+	if len(pending.Updates) != 1 || pending.Updates[0].Latest != "0.58.2" || !pending.Updates[0].UpdateAvailable {
+		t.Fatalf("Qwen advertised unpublished standalone release: %#v", pending)
+	}
 	if _, err := manager.StartProviderUpdate(context.Background(), "qwen"); err != nil {
 		t.Fatalf("start Qwen standalone update: %v", err)
 	}
 	progress := waitProviderUpdateProgress(t, events, "qwen", func(progress ProviderUpdateProgress) bool {
 		return progress.Status == "done" || progress.Status == "failed"
-	}, 3*time.Second)
+	}, 12*time.Second)
 	if progress.Status != "done" || progress.ExitCode == nil || *progress.ExitCode != 0 || !fileExists(marker) {
 		t.Fatalf("Qwen standalone progress=%#v marker=%v", progress, fileExists(marker))
 	}
 	update := waitProviderUpdate(t, events, "qwen", func(update ProviderUpdate) bool {
 		return update.Installed == "0.58.2" && update.Latest == "0.58.2" && !update.UpdateAvailable
-	}, 2*time.Second)
+	}, 5*time.Second)
 	if update.UpdateAvailable {
 		t.Fatalf("Qwen standalone update remained pending: %#v", update)
+	}
+}
+
+func TestProviderUpdateFailureDoesNotLeakToDifferentTarget(t *testing.T) {
+	t.Parallel()
+	manager := &Manager{
+		providerUpdateFailures: map[string]providerUpdateFailure{
+			"qwen": {LastError: "missing standalone asset", ExitCode: 1, Tail: "HTTP 404", Target: "0.58.3"},
+		},
+		providerUpdateRechecks: map[string]string{},
+	}
+	update := ProviderUpdate{ProviderID: "qwen", Latest: "0.58.2", UpdateAvailable: true}
+	manager.decorateProviderUpdateFailure(&update)
+	if update.LastError != "" || update.ExitCode != nil || update.Tail != "" {
+		t.Fatalf("failure for a different Qwen target leaked into compatible update: %#v", update)
 	}
 }
 
@@ -1226,7 +1279,7 @@ func TestLatestCLIVersionRequiresComparableRegistryVersion(t *testing.T) {
 		ProviderUpdateTimeout: 100 * time.Millisecond,
 	})
 	t.Cleanup(func() { manager.Reset() })
-	_, err := manager.latestCLIVersion(context.Background(), providerUpdateSpec{ProviderID: "qwen", Source: registry.URL})
+	_, err := manager.latestCLIVersion(context.Background(), providerUpdateCandidate{spec: providerUpdateSpec{ProviderID: "qwen", Source: registry.URL}})
 	if err == nil {
 		t.Fatalf("latestCLIVersion accepted garbage registry version")
 	}
