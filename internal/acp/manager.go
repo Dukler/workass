@@ -114,9 +114,10 @@ type Manager struct {
 	loopStopOnce          sync.Once
 	loopWG                sync.WaitGroup
 	// updateGateMu is the admission barrier for an app-owned release handoff.
-	// A release may begin only after every foreground turn and tracked unit of
-	// work is terminal. Once BeginUpdateDrain succeeds, no new work can enter
-	// while the shell shuts this daemon down and swaps the complete release.
+	// A user-clicked release snapshots active work and closes new admission; it
+	// never waits for foreground or asynchronous work to become terminal. Once
+	// BeginUpdateDrain succeeds, no new work can enter while the shell shuts this
+	// daemon down and swaps the complete release.
 	updateGateMu     sync.Mutex
 	updateDraining   bool
 	updateAdmissions int
