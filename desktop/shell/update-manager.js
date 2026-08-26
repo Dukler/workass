@@ -1621,7 +1621,12 @@ class UpdateManager {
     isPackaged = false,
     feedURL = defaultFeedURL(platform, arch),
     onState = () => {},
-    quit = () => app?.quit?.(),
+    // A committed updater handoff is not an ordinary window close. Electron's
+    // app.quit() may be cancelled by a renderer beforeunload handler, leaving
+    // the outgoing executable mapped while the independent worker starts the
+    // filesystem transaction. app.exit() is the exact non-cancellable process
+    // boundary required after the visible progress owner and worker are armed.
+    quit = () => typeof app?.exit === 'function' ? app.exit(0) : app?.quit?.(),
     deps = {},
   } = {}) {
     this.app = app;
@@ -1633,7 +1638,10 @@ class UpdateManager {
     this.isPackaged = isPackaged;
     this.feedURL = feedURL;
     this.onState = onState;
-    this.quit = quit;
+    // Keep the non-cancellable exit capability named for the only boundary at
+    // which it is legal. Both call sites are after the daemon accepted the
+    // handoff and the independent visible owner was revalidated.
+    this.exitCommittedHandoff = quit;
     const networkRequest = typeof deps.networkRequest === 'function' ? deps.networkRequest : null;
     const ownershipOverride = typeof deps.workerProcessOwnership === 'function' ? deps.workerProcessOwnership : null;
     const asyncOwnershipOverride = typeof deps.inspectWorkerOwnership === 'function' ? deps.inspectWorkerOwnership : null;
@@ -2312,7 +2320,7 @@ class UpdateManager {
     writeHandoffState(resumed, 'committed');
     this.publish({ phase: 'installing', receipt: readJSONFile(this.receiptPath), error: null, blockers: null });
     this.watchReceipt(transaction.updateId);
-    this.deps.schedule(() => this.quit(), 100)?.unref?.();
+    this.deps.schedule(() => this.exitCommittedHandoff(), 100)?.unref?.();
     return this.snapshot();
   }
 
@@ -2779,7 +2787,7 @@ class UpdateManager {
       phase: 'armed', targetVersion: prepared.targetVersion,
     }, error: null });
     this.watchReceipt(prepared.updateId);
-    this.deps.schedule(() => this.quit(), 100)?.unref?.();
+    this.deps.schedule(() => this.exitCommittedHandoff(), 100)?.unref?.();
     return this.snapshot();
     } finally {
       this.endOperation('install');

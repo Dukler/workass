@@ -38,9 +38,11 @@ type providerRegistration struct {
 
 type providerUpdateRegistration struct {
 	Source         string
+	AssetSource    string
 	Command        ProviderUpdateCommand
 	Hint           string
-	ResolveCommand func(resolvedCLI string, fallback ProviderUpdateCommand) ProviderUpdateCommand
+	ResolveLatest  func(context.Context, providerUpdateCandidate, string) (string, error)
+	ResolveCommand func(resolvedCLI, target string, fallback ProviderUpdateCommand) ProviderUpdateCommand
 }
 
 type vendorCLIAuthenticationStrategy struct {
@@ -240,9 +242,10 @@ var providerRegistrations = map[string]providerRegistration{
 			launch:     omlxAwareACPLaunchStrategy{},
 		},
 		Update: providerUpdateRegistration{
-			Source:  "https://registry.npmjs.org/@qwen-code/qwen-code/latest",
-			Command: ProviderUpdateCommand{Command: "qwen", Args: []string{"update"}},
-			Hint:    "qwen update", ResolveCommand: resolveQwenUpdateCommand,
+			Source:      "https://registry.npmjs.org/@qwen-code/qwen-code/latest",
+			AssetSource: "https://github.com/QwenLM/qwen-code/releases/download",
+			Command:     ProviderUpdateCommand{Command: "qwen", Args: []string{"update"}},
+			Hint:        "qwen update", ResolveLatest: resolveQwenLatestVersion, ResolveCommand: resolveQwenUpdateCommand,
 		},
 	},
 	"claude": {

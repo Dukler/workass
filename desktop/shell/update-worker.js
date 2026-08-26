@@ -218,9 +218,18 @@ function startWorkerLease(transaction, {
   };
 }
 
-function pidAlive(pid) {
+function pidAlive(pid, { kill = process.kill } = {}) {
   if (!Number.isInteger(pid) || pid <= 1) return false;
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  try {
+    kill(pid, 0);
+    return true;
+  } catch (err) {
+    // On Windows an existing process outside the worker's access token can
+    // raise EPERM. Only ESRCH proves that the PID has stopped; every other
+    // probe failure must keep the updater on the conservative, non-destructive
+    // side of the handoff boundary.
+    return err?.code !== 'ESRCH';
+  }
 }
 
 function processOwnsExecutable(pid, executable, {
@@ -260,48 +269,87 @@ async function stopLaunchedProcessTree(pid, {
 
 function stopWindowsExecutableProcesses(executablePath, { run = spawnSync } = {}) {
   const target = String(executablePath || '').trim();
-  if (!target || path.basename(target).toLowerCase() !== 'workass.exe') {
-    throw new Error('Windows shell cleanup requires the exact Workass executable path');
+  const image = path.basename(target).toLowerCase();
+  if (!target || !['workass.exe', 'workass-daemon.exe'].includes(image)) {
+    throw new Error('Windows process cleanup requires an exact Workass executable path');
   }
+  const label = image === 'workass.exe' ? 'shell' : 'daemon';
   // Electron's main PID can exit while renderer/GPU children remain orphaned
   // and keep files in the portable install locked. taskkill /PID can no longer
-  // reach that tree once its root is gone, so select only processes whose
-  // executable path exactly matches this installation. The independent updater
-  // is updater-node.exe outside this directory and cannot select itself.
+  // reach that tree once its root is gone, so select only processes whose CIM
+  // executable path exactly matches this installation. Get-Process.Path can be
+  // null (notably across PowerShell/process bitness) and Stop-Process failures
+  // are non-terminating by default; neither condition is absence proof. The
+  // incoming progress owner has another absolute path and is preserved.
   const script = String.raw`
 $ErrorActionPreference = 'Stop'
-$target = [IO.Path]::GetFullPath($env:WORKASS_OLD_EXECUTABLE)
-function Find-WorkassInstallProcesses {
+$target = [IO.Path]::GetFullPath($env:WORKASS_TARGET_EXECUTABLE)
+$image = $env:WORKASS_TARGET_IMAGE
+$query = "Name = '" + $image.Replace("'", "''") + "'"
+function Find-TargetProcesses {
   @(
-    Get-Process -Name Workass -ErrorAction SilentlyContinue | Where-Object {
+    Get-CimInstance -ClassName Win32_Process -Filter $query -ErrorAction Stop | Where-Object {
+      if ([String]::IsNullOrWhiteSpace([string]$_.ExecutablePath)) {
+        throw "could not resolve executable path for pid $($_.ProcessId)"
+      }
       try {
-        $_.Path -and [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($_.Path), $target)
-      } catch { $false }
+        [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath([string]$_.ExecutablePath), $target)
+      } catch { throw }
     }
   )
 }
-$targets = @(Find-WorkassInstallProcesses)
-$targets | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+function Test-TargetQuiescent {
+  if (-not [IO.File]::Exists($target)) { return $true }
+  $handle = $null
+  try {
+    $handle = [IO.File]::Open($target, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    return $true
+  } catch {
+    return $false
+  } finally {
+    if ($null -ne $handle) { $handle.Dispose() }
+  }
+}
+$targets = @(Find-TargetProcesses)
+$targets | ForEach-Object {
+  $candidate = $_
+  try {
+    Stop-Process -Id ([int]$candidate.ProcessId) -Force -ErrorAction Stop
+  } catch {
+    $current = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $([int]$candidate.ProcessId)" -ErrorAction Stop
+    if ($null -ne $current -and $current.CreationDate -eq $candidate.CreationDate) { throw }
+  }
+}
 $deadline = [DateTime]::UtcNow.AddSeconds(10)
 do {
-  $remaining = @(Find-WorkassInstallProcesses)
-  if ($remaining.Count -eq 0) { break }
+  $remaining = @(Find-TargetProcesses)
+  $quiescent = Test-TargetQuiescent
+  if ($remaining.Count -eq 0 -and $quiescent) { break }
   Start-Sleep -Milliseconds 100
 } while ([DateTime]::UtcNow -lt $deadline)
-if ($remaining.Count -gt 0) { throw 'Workass install processes remained after cleanup' }
+if ($remaining.Count -gt 0) { throw 'Workass processes remained after cleanup' }
+if (-not $quiescent) { throw 'Workass executable remained locked after cleanup' }
 Write-Output "WORKASS_STOPPED=$($targets.Count)"
+Write-Output 'WORKASS_QUIESCENT=1'
 `;
   const result = run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
     windowsHide: true,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, WORKASS_OLD_EXECUTABLE: target },
+    env: {
+      ...process.env,
+      WORKASS_TARGET_EXECUTABLE: target,
+      WORKASS_TARGET_IMAGE: path.basename(target),
+    },
   });
   if (result.error || result.status !== 0) {
-    throw new Error('the old Workass install processes did not stop');
+    throw new Error(`the old Workass ${label} processes did not stop`);
   }
   const match = String(result.stdout || '').match(/WORKASS_STOPPED=(\d+)/);
   if (!match) throw new Error('Windows shell cleanup returned no process receipt');
+  if (!/\bWORKASS_QUIESCENT=1\b/.test(String(result.stdout || ''))) {
+    throw new Error(`Windows ${label} cleanup returned no quiescence receipt`);
+  }
   return Number(match[1]);
 }
 
@@ -311,14 +359,34 @@ function daemonServiceIsDown(transaction, { run = spawnSync } = {}) {
     const script = String.raw`
 $ErrorActionPreference = 'Stop'
 $target = [IO.Path]::GetFullPath($env:WORKASS_DAEMON_EXECUTABLE)
+$query = "Name = 'workass-daemon.exe'"
 $running = @(
-  Get-Process -Name workass-daemon -ErrorAction SilentlyContinue | Where-Object {
+  Get-CimInstance -ClassName Win32_Process -Filter $query -ErrorAction Stop | Where-Object {
+    if ([String]::IsNullOrWhiteSpace([string]$_.ExecutablePath)) {
+      throw "could not resolve executable path for pid $($_.ProcessId)"
+    }
     try {
-      $_.Path -and [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($_.Path), $target)
-    } catch { $false }
+      [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath([string]$_.ExecutablePath), $target)
+    } catch { throw }
   }
 )
-if ($running.Count -eq 0) { Write-Output 'WORKASS_DAEMON_DOWN'; exit 0 }
+function Test-DaemonQuiescent {
+  if (-not [IO.File]::Exists($target)) { return $true }
+  $handle = $null
+  try {
+    $handle = [IO.File]::Open($target, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    return $true
+  } catch {
+    return $false
+  } finally {
+    if ($null -ne $handle) { $handle.Dispose() }
+  }
+}
+if ($running.Count -eq 0 -and (Test-DaemonQuiescent)) {
+  Write-Output 'WORKASS_DAEMON_DOWN'
+  Write-Output 'WORKASS_QUIESCENT=1'
+  exit 0
+}
 Write-Output 'WORKASS_DAEMON_RUNNING'
 exit 3
 `;
@@ -328,7 +396,9 @@ exit 3
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, WORKASS_DAEMON_EXECUTABLE: executable },
     });
-    return !result.error && result.status === 0 && /\bWORKASS_DAEMON_DOWN\b/.test(String(result.stdout || ''));
+    return !result.error && result.status === 0 &&
+      /\bWORKASS_DAEMON_DOWN\b/.test(String(result.stdout || '')) &&
+      /\bWORKASS_QUIESCENT=1\b/.test(String(result.stdout || ''));
   }
   if (transaction.platform === 'darwin') {
     const launchAgentPath = String(transaction.launchAgentPath || '');
@@ -838,8 +908,18 @@ function defaultOperations(transaction, dependencies = {}) {
   const stopProcessTree = dependencies.stopLaunchedProcessTree || stopLaunchedProcessTree;
   const ownsExecutable = dependencies.processOwnsExecutable || processOwnsExecutable;
   const exactDaemonDown = dependencies.daemonServiceIsDown || daemonServiceIsDown;
+  const waitForCondition = dependencies.waitUntil || waitUntil;
   const launchedProcesses = new Map();
   let expectedDaemonBind = '';
+  const stopWindowsDaemonAfterGrace = async () => {
+    const stoppedGracefully = await waitForCondition(
+      () => exactDaemonDown(transaction),
+      { attempts: 24, delayMs: 250 },
+    );
+    if (!stoppedGracefully) {
+      stopWindowsProcesses(path.join(transaction.installTarget, 'workass-daemon.exe'));
+    }
+  };
   return {
     progressVisible: async () => {
       let receipt = null;
@@ -857,6 +937,13 @@ function defaultOperations(transaction, dependencies = {}) {
       // itself never reached the Windows daemon: the worker owns the already
       // quiescent transaction and must not wait forever on a no-op service stop.
       await shutdownDaemon(transaction.daemonHealthURL);
+      if (transaction.platform === 'win32') {
+        // The 202 response schedules ordinary daemon cleanup, which can spend
+        // several seconds detaching providers. Give that path a bounded grace
+        // window, then terminate only the daemon image from this exact portable
+        // install and require the same exclusive-file proof used for Electron.
+        await stopWindowsDaemonAfterGrace();
+      }
     },
     clearUpdateFence: async () => {
       let status = await cancelUpdate(transaction.daemonHealthURL, transaction.updateId);
@@ -1051,6 +1138,9 @@ function defaultOperations(transaction, dependencies = {}) {
       // files remain locked while the daemon is alive, and prevents an old app
       // from accidentally reconnecting to the failed new daemon on either OS.
       await shutdownDaemon(transaction.daemonHealthURL);
+      if (transaction.platform === 'win32') {
+        await stopWindowsDaemonAfterGrace();
+      }
       const stopped = await waitUntil(() => exactDaemonDown(transaction), { attempts: 80, delayMs: 250 });
       if (!stopped) throw new Error('failed release daemon did not stop before rollback');
     },
@@ -1526,6 +1616,7 @@ module.exports = {
   launchUntilHealthy,
   main,
   mirrorWindowsDirectory,
+  pidAlive,
   processOwnsExecutable,
   requestJSON,
   requestDaemonShutdown,

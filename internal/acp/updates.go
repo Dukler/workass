@@ -75,21 +75,24 @@ type ProviderUpdateCommand struct {
 }
 
 type providerUpdateSpec struct {
-	ProviderID string
-	CLI        string
-	Source     string
-	Hint       string
+	ProviderID  string
+	CLI         string
+	Source      string
+	AssetSource string
+	Hint        string
 }
 
 type providerUpdateCandidate struct {
-	spec      providerUpdateSpec
-	installed string
+	spec        providerUpdateSpec
+	installed   string
+	resolvedCLI string
 }
 
 type providerUpdateFailure struct {
 	LastError string
 	ExitCode  int
 	Tail      string
+	Target    string
 }
 
 type providerUpdateRun struct {
@@ -124,6 +127,17 @@ func defaultProviderUpdateSources() map[string]string {
 		registration, ok := providerRegistrationForID(id)
 		if ok && strings.TrimSpace(registration.Update.Source) != "" {
 			out[id] = strings.TrimSpace(registration.Update.Source)
+		}
+	}
+	return out
+}
+
+func defaultProviderUpdateAssetSources() map[string]string {
+	out := make(map[string]string)
+	for _, id := range registeredProviderIDs() {
+		registration, ok := providerRegistrationForID(id)
+		if ok && strings.TrimSpace(registration.Update.AssetSource) != "" {
+			out[id] = strings.TrimSpace(registration.Update.AssetSource)
 		}
 	}
 	return out
@@ -297,7 +311,7 @@ func providerUpdateCommandForProvider(id string, commands map[string]ProviderUpd
 	return cmd, true
 }
 
-func cliUpdateSpecForProvider(id string, sources map[string]string) (providerUpdateSpec, bool) {
+func cliUpdateSpecForProvider(id string, sources, assetSources map[string]string) (providerUpdateSpec, bool) {
 	id = normalizeProviderID(id)
 	source := strings.TrimSpace(sources[id])
 	if source == "" {
@@ -308,10 +322,11 @@ func cliUpdateSpecForProvider(id string, sources map[string]string) (providerUpd
 		return providerUpdateSpec{}, false
 	}
 	return providerUpdateSpec{
-		ProviderID: id,
-		CLI:        strings.TrimSpace(registration.Update.Command.Command),
-		Source:     source,
-		Hint:       strings.TrimSpace(registration.Update.Hint),
+		ProviderID:  id,
+		CLI:         strings.TrimSpace(registration.Update.Command.Command),
+		Source:      source,
+		AssetSource: strings.TrimSpace(assetSources[id]),
+		Hint:        strings.TrimSpace(registration.Update.Hint),
 	}, true
 }
 
@@ -446,15 +461,14 @@ func (m *Manager) StartProviderUpdate(parent context.Context, providerID string)
 	if !m.providerExists(id) {
 		return nil, providerUpdateError("providers:update-unknown-provider", "unknown providerId", map[string]any{"providerId": id})
 	}
+	resolvedCLI := ""
 	if cli, supported := cliVersionCommandForProvider(id); supported && sameExecutableName(command.Command, cli) {
 		resolved, err := m.providerCLIExecutable(id)
 		if err != nil {
 			return nil, providerUpdateError("providers:update-cli-not-found", err.Error(), map[string]any{"providerId": id})
 		}
+		resolvedCLI = resolved
 		command.Command = resolved
-		if registration, registered := providerRegistrationForID(id); registered && registration.Update.ResolveCommand != nil {
-			command = registration.Update.ResolveCommand(resolved, command)
-		}
 	}
 	if m.providerUpdateRunning(id) {
 		return nil, providerUpdateError("providers:update-in-progress", "ya hay una actualización en curso", map[string]any{
@@ -470,6 +484,11 @@ func (m *Manager) StartProviderUpdate(parent context.Context, providerID string)
 			fields["latest"] = update.Latest
 		}
 		return nil, providerUpdateError("providers:update-no-pending", "no pending update", fields)
+	}
+	if resolvedCLI != "" {
+		if registration, registered := providerRegistrationForID(id); registered && registration.Update.ResolveCommand != nil {
+			command = registration.Update.ResolveCommand(resolvedCLI, update.Latest, command)
+		}
 	}
 
 	now := time.Now().UTC()
@@ -606,6 +625,7 @@ func (m *Manager) finishProviderUpdateRun(providerID string, run *providerUpdate
 			LastError: redactSensitiveText(firstNonEmpty(lastError, "actualizacion fallida")),
 			ExitCode:  exitCode,
 			Tail:      redactSensitiveText(tail),
+			Target:    run.target,
 		}
 	}
 	m.updateMu.Unlock()
@@ -698,7 +718,7 @@ func (m *Manager) currentProviderUpdate(ctx context.Context, providerID string) 
 	if !ok {
 		return ProviderUpdate{}, false
 	}
-	latest, err := m.latestCLIVersion(ctx, candidate.spec)
+	latest, err := m.latestCLIVersion(ctx, candidate)
 	if err != nil {
 		m.logProviderUpdateSkip(candidate.spec.ProviderID, err)
 		return ProviderUpdate{}, false
@@ -930,7 +950,7 @@ func (m *Manager) providerUpdatesPayload(ctx context.Context) (ProviderUpdatesPa
 	}
 	hasFailures := false
 	for _, candidate := range candidates {
-		latest, err := m.latestCLIVersion(ctx, candidate.spec)
+		latest, err := m.latestCLIVersion(ctx, candidate)
 		if err != nil {
 			hasFailures = true
 			if fallback, ok := m.failedProviderUpdateFallback(candidate.spec.ProviderID); ok {
@@ -965,7 +985,8 @@ func (m *Manager) providerUpdateCandidate(providerID string) (providerUpdateCand
 	// CLIVersion is an asynchronous discovery cache. It must never be enough by
 	// itself to advertise machine-level maintenance after the actual provider
 	// executable disappears (or on a different machine that never had it).
-	if _, err := m.providerCLIExecutable(providerID); err != nil {
+	resolvedCLI, err := m.providerCLIExecutable(providerID)
+	if err != nil {
 		return providerUpdateCandidate{}, false
 	}
 	m.mu.Lock()
@@ -974,14 +995,14 @@ func (m *Manager) providerUpdateCandidate(providerID string) (providerUpdateCand
 	if runtime == nil || runtime.CLIVersion == nil || runtime.CLIVersion.Version == "" {
 		return providerUpdateCandidate{}, false
 	}
-	spec, ok := cliUpdateSpecForProvider(providerID, m.opts.ProviderUpdateSources)
+	spec, ok := cliUpdateSpecForProvider(providerID, m.opts.ProviderUpdateSources, m.opts.ProviderUpdateAssetSources)
 	if !ok {
 		return providerUpdateCandidate{}, false
 	}
 	if _, ok := parseLenientSemver(runtime.CLIVersion.Version); !ok {
 		return providerUpdateCandidate{}, false
 	}
-	return providerUpdateCandidate{spec: spec, installed: runtime.CLIVersion.Version}, true
+	return providerUpdateCandidate{spec: spec, installed: runtime.CLIVersion.Version, resolvedCLI: resolvedCLI}, true
 }
 
 func (m *Manager) providerUpdateCandidates() []providerUpdateCandidate {
@@ -1005,7 +1026,7 @@ func (m *Manager) decorateProviderUpdateFailure(update *ProviderUpdate) {
 	failure, ok := m.providerUpdateFailures[update.ProviderID]
 	recheckError := m.providerUpdateRechecks[update.ProviderID]
 	m.updateMu.Unlock()
-	if ok {
+	if ok && (failure.Target == "" || failure.Target == update.Latest) {
 		update.UpdateAvailable = true
 		update.LastError = failure.LastError
 		update.ExitCode = intPtr(failure.ExitCode)
@@ -1060,7 +1081,11 @@ func providerUpdateError(code, message string, fields map[string]any) error {
 	return chatStructuredError{Code: code, Message: message, Fields: fields}
 }
 
-func (m *Manager) latestCLIVersion(ctx context.Context, spec providerUpdateSpec) (string, error) {
+func (m *Manager) latestCLIVersion(ctx context.Context, candidate providerUpdateCandidate) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	spec := candidate.spec
 	reqCtx, cancel := context.WithTimeout(ctx, m.opts.ProviderUpdateTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, spec.Source, nil)
@@ -1085,6 +1110,9 @@ func (m *Manager) latestCLIVersion(ctx context.Context, spec providerUpdateSpec)
 	latest := parseSemverToken(body.Version)
 	if latest == "" {
 		return "", fmt.Errorf("registry version not comparable: %q", body.Version)
+	}
+	if registration, ok := providerRegistrationForID(spec.ProviderID); ok && registration.Update.ResolveLatest != nil {
+		return registration.Update.ResolveLatest(reqCtx, candidate, latest)
 	}
 	return latest, nil
 }

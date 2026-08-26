@@ -142,6 +142,7 @@ type Options struct {
 	ProviderUpdateRetryBackoffs  []time.Duration
 	ProviderUpdateTimeout        time.Duration
 	ProviderUpdateSources        map[string]string
+	ProviderUpdateAssetSources   map[string]string
 	ProviderUpdateRunTimeout     time.Duration
 	ProviderUpdateCommands       map[string]ProviderUpdateCommand
 	CompactionEnabled            bool
@@ -247,6 +248,11 @@ func (o Options) withDefaults() Options {
 		o.ProviderUpdateSources = defaultProviderUpdateSources()
 	} else {
 		o.ProviderUpdateSources = copyStringMap(o.ProviderUpdateSources)
+	}
+	if o.ProviderUpdateAssetSources == nil {
+		o.ProviderUpdateAssetSources = defaultProviderUpdateAssetSources()
+	} else {
+		o.ProviderUpdateAssetSources = copyStringMap(o.ProviderUpdateAssetSources)
 	}
 	if o.ProviderUpdateRunTimeout <= 0 {
 		o.ProviderUpdateRunTimeout = defaultProviderUpdateRunTimeout

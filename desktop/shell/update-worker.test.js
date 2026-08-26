@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -13,6 +13,7 @@ const {
   defaultOperations,
   launchUntilHealthy,
   mirrorWindowsDirectory,
+  pidAlive,
   replaceVisibleProgress,
   renamePathWithRetry,
   runTransaction,
@@ -406,33 +407,170 @@ test('Windows stops the complete failed Electron process tree before rollback', 
   ]]);
 });
 
+test('PID liveness treats access denial as alive and only ESRCH as stopped', () => {
+  assert.equal(pidAlive(7123, {
+    kill: () => { throw Object.assign(new Error('access denied'), { code: 'EPERM' }); },
+  }), true);
+  assert.equal(pidAlive(7123, {
+    kill: () => { throw Object.assign(new Error('no such process'), { code: 'ESRCH' }); },
+  }), false);
+});
+
 test('Windows shell cleanup targets every process from only the exact portable executable', () => {
   const executable = path.join(path.sep, 'Apps', 'Workass', 'Workass.exe');
   let invocation = null;
   const stopped = stopWindowsExecutableProcesses(executable, {
     run: (command, args, options) => {
       invocation = { command, args, options };
-      return { status: 0, stdout: 'WORKASS_STOPPED=4\r\n' };
+      return { status: 0, stdout: 'WORKASS_STOPPED=4\r\nWORKASS_QUIESCENT=1\r\n' };
     },
   });
   assert.equal(stopped, 4);
   assert.equal(invocation.command, 'powershell.exe');
   assert.deepEqual(invocation.args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command']);
-  assert.match(invocation.args[3], /Get-Process -Name Workass/);
+  assert.match(invocation.args[3], /Get-CimInstance -ClassName Win32_Process/);
+  assert.match(invocation.args[3], /ExecutablePath/);
+  assert.match(invocation.args[3], /IsNullOrWhiteSpace[\s\S]+could not resolve executable path/);
   assert.match(invocation.args[3], /OrdinalIgnoreCase/);
-  assert.equal(invocation.options.env.WORKASS_OLD_EXECUTABLE, executable);
+  assert.doesNotMatch(invocation.args[3], /catch\s*{\s*\$false\s*}/);
+  assert.match(invocation.args[3], /Stop-Process[^\n]+-ErrorAction Stop/);
+  assert.doesNotMatch(invocation.args[3], /Stop-Process[^\n]+SilentlyContinue/);
+  assert.match(invocation.args[3], /FileAccess\]::ReadWrite/);
+  assert.match(invocation.args[3], /FileShare\]::None/);
+  assert.equal(invocation.options.env.WORKASS_TARGET_EXECUTABLE, executable);
+  assert.equal(invocation.options.env.WORKASS_TARGET_IMAGE, 'Workass.exe');
   assert.throws(() => stopWindowsExecutableProcesses(executable, {
     run: () => ({ status: 0, stdout: '' }),
   }), /no process receipt/);
+  assert.throws(() => stopWindowsExecutableProcesses(executable, {
+    run: () => ({ status: 0, stdout: 'WORKASS_STOPPED=0\r\n' }),
+  }), /no quiescence receipt/);
+});
+
+test('Windows process cleanup scopes the daemon separately and requires positive quiescence', () => {
+  const executable = path.join(path.sep, 'Apps', 'Workass', 'workass-daemon.exe');
+  let invocation = null;
+  assert.equal(stopWindowsExecutableProcesses(executable, {
+    run: (command, args, options) => {
+      invocation = { command, args, options };
+      return { status: 0, stdout: 'WORKASS_STOPPED=1\r\nWORKASS_QUIESCENT=1\r\n' };
+    },
+  }), 1);
+  assert.equal(invocation.options.env.WORKASS_TARGET_EXECUTABLE, executable);
+  assert.equal(invocation.options.env.WORKASS_TARGET_IMAGE, 'workass-daemon.exe');
+  assert.throws(() => stopWindowsExecutableProcesses(executable, {
+    run: () => ({ status: 1, stdout: '', stderr: 'access denied' }),
+  }), /daemon processes did not stop/);
+});
+
+test('Windows executable cleanup kills every outgoing image and preserves same-name incoming progress', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-process-cleanup-'));
+  const outgoingDir = path.join(root, 'outgoing');
+  const incomingDir = path.join(root, 'incoming');
+  fs.mkdirSync(outgoingDir, { recursive: true });
+  fs.mkdirSync(incomingDir, { recursive: true });
+  const outgoingExecutable = path.join(outgoingDir, 'Workass.exe');
+  const incomingExecutable = path.join(incomingDir, 'Workass.exe');
+  fs.copyFileSync(process.execPath, outgoingExecutable);
+  fs.copyFileSync(process.execPath, incomingExecutable);
+  const children = [];
+  const launch = (executable) => new Promise((resolve, reject) => {
+    const child = spawn(executable, ['-e', 'setInterval(() => {}, 1000)'], {
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    children.push(child);
+    child.once('spawn', () => resolve(child));
+    child.once('error', reject);
+  });
+  const waitForExit = (child, timeoutMs = 5000) => {
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`process ${child.pid} did not exit`)), timeoutMs);
+      child.once('exit', () => { clearTimeout(timer); resolve(); });
+    });
+  };
+  try {
+    const [main, orphan, progress] = await Promise.all([
+      launch(outgoingExecutable),
+      launch(outgoingExecutable),
+      launch(incomingExecutable),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(stopWindowsExecutableProcesses(outgoingExecutable), 2);
+    await Promise.all([waitForExit(main), waitForExit(orphan)]);
+    assert.equal(pidAlive(progress.pid), true);
+  } finally {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) {
+        try { child.kill('SIGKILL'); } catch { /* already stopped */ }
+      }
+    }
+    await Promise.all(children.map((child) => waitForExit(child).catch(() => {})));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Windows executable cleanup still sweeps an orphan after the recorded main PID exits', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-orphan-cleanup-'));
+  const outgoingDir = path.join(root, 'outgoing');
+  fs.mkdirSync(outgoingDir, { recursive: true });
+  const outgoingExecutable = path.join(outgoingDir, 'Workass.exe');
+  fs.copyFileSync(process.execPath, outgoingExecutable);
+  const launch = () => new Promise((resolve, reject) => {
+    const child = spawn(outgoingExecutable, ['-e', 'setInterval(() => {}, 1000)'], {
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    child.once('spawn', () => resolve(child));
+    child.once('error', reject);
+  });
+  const waitForExit = (child, timeoutMs = 5000) => {
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`process ${child.pid} did not exit`)), timeoutMs);
+      child.once('exit', () => { clearTimeout(timer); resolve(); });
+    });
+  };
+  let main = null;
+  let orphan = null;
+  try {
+    [main, orphan] = await Promise.all([launch(), launch()]);
+    main.kill('SIGKILL');
+    await waitForExit(main);
+    assert.equal(stopWindowsExecutableProcesses(outgoingExecutable), 1);
+    await waitForExit(orphan);
+  } finally {
+    for (const child of [main, orphan]) {
+      if (child && child.exitCode === null && child.signalCode === null) {
+        try { child.kill('SIGKILL'); } catch { /* already stopped */ }
+        await waitForExit(child).catch(() => {});
+      }
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('daemon exit requires exact OS process or service evidence, never a silent health probe', () => {
   const windows = windowsTransactionFixture();
   let invocation = null;
   assert.equal(daemonServiceIsDown(windows, {
-    run: (...args) => { invocation = args; return { status: 0, stdout: 'WORKASS_DAEMON_DOWN\r\n' }; },
+    run: (...args) => {
+      invocation = args;
+      return { status: 0, stdout: 'WORKASS_DAEMON_DOWN\r\nWORKASS_QUIESCENT=1\r\n' };
+    },
   }), true);
   assert.equal(invocation[2].env.WORKASS_DAEMON_EXECUTABLE, path.join(windows.installTarget, 'workass-daemon.exe'));
+  assert.match(invocation[1].at(-1), /Get-CimInstance -ClassName Win32_Process/);
+  assert.match(invocation[1].at(-1), /IsNullOrWhiteSpace[\s\S]+could not resolve executable path/);
+  assert.match(invocation[1].at(-1), /FileShare\]::None/);
+  assert.equal(daemonServiceIsDown(windows, {
+    run: () => ({ status: 0, stdout: 'WORKASS_DAEMON_DOWN\r\n' }),
+  }), false);
   assert.equal(daemonServiceIsDown(windows, {
     run: () => ({ status: 3, stdout: 'WORKASS_DAEMON_RUNNING\r\n' }),
   }), false);
@@ -920,14 +1058,44 @@ test('activation health rejects a same-version shell owned by another portable i
   }), false);
 });
 
-test('Windows worker requests idempotent loopback daemon shutdown before waiting for daemon exit', async () => {
+test('Windows worker gives the daemon a bounded graceful shutdown window', async () => {
   const tx = windowsTransactionFixture();
   const calls = [];
   const disk = defaultOperations(tx, {
     requestDaemonShutdown: async (url) => { calls.push(url); return true; },
+    daemonServiceIsDown: () => { calls.push('down'); return true; },
+    stopWindowsExecutableProcesses: (executable) => {
+      calls.push(executable);
+      return 1;
+    },
   });
   await disk.stopDaemonService();
-  assert.deepEqual(calls, [tx.daemonHealthURL]);
+  assert.deepEqual(calls, [tx.daemonHealthURL, 'down']);
+});
+
+test('Windows worker force-stops only its exact daemon image after graceful shutdown stalls', async () => {
+  const tx = windowsTransactionFixture();
+  const calls = [];
+  const disk = defaultOperations(tx, {
+    requestDaemonShutdown: async (url) => { calls.push(url); return true; },
+    daemonServiceIsDown: () => { calls.push('still-running'); return false; },
+    waitUntil: async (predicate, options) => {
+      calls.push(options);
+      await predicate();
+      return false;
+    },
+    stopWindowsExecutableProcesses: (executable) => {
+      calls.push(executable);
+      return 1;
+    },
+  });
+  await disk.stopDaemonService();
+  assert.deepEqual(calls, [
+    tx.daemonHealthURL,
+    { attempts: 24, delayMs: 250 },
+    'still-running',
+    path.join(tx.installTarget, 'workass-daemon.exe'),
+  ]);
 });
 
 test('worker retries the exact update cancel when the first success response is lost', async () => {
@@ -980,6 +1148,38 @@ test('rollback cleanup uses the injected daemon shutdown boundary', async () => 
   });
   await disk.stopLaunched();
   assert.deepEqual(calls, [tx.daemonHealthURL]);
+});
+
+test('Windows rollback gives the new daemon grace, then fences the exact install before mirroring', async () => {
+  const tx = windowsTransactionFixture();
+  const calls = [];
+  let daemonForced = false;
+  const disk = defaultOperations(tx, {
+    requestDaemonShutdown: async (url) => { calls.push(url); return true; },
+    daemonServiceIsDown: () => {
+      calls.push(daemonForced ? 'down' : 'still-running');
+      return daemonForced;
+    },
+    waitUntil: async (predicate, options) => {
+      calls.push(options);
+      await predicate();
+      return false;
+    },
+    stopWindowsExecutableProcesses: (executable) => {
+      calls.push(executable);
+      if (path.basename(executable).toLowerCase() === 'workass-daemon.exe') daemonForced = true;
+      return 1;
+    },
+  });
+  await disk.stopLaunched();
+  assert.deepEqual(calls, [
+    path.join(tx.installTarget, 'Workass.exe'),
+    tx.daemonHealthURL,
+    { attempts: 24, delayMs: 250 },
+    'still-running',
+    path.join(tx.installTarget, 'workass-daemon.exe'),
+    'down',
+  ]);
 });
 
 test('installed process launch waits for Windows spawn acknowledgement and surfaces failure', async () => {
