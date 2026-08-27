@@ -557,7 +557,12 @@ func (c *Coordinator) ExecuteCancel(ctx context.Context, operationID provider.Op
 func (c *Coordinator) executeCancel(ctx context.Context, effect CancelTurnEffect) error {
 	lane, err := c.lane(effect.LaneID)
 	if err != nil {
-		return err
+		// ClaimEffect already made this cancellation durable and dispatched. A
+		// detached/resuming lane is a definite local rejection, not permission to
+		// leave the exact Stop operation permanently pending. Settle the claimed
+		// effect just like every provider-side cancellation failure; later exact
+		// resume/readback remains responsible for the foreground turn itself.
+		return c.engine.Apply(CancelFailed{OperationID: effect.OperationID, Kind: providerErrorKind(err)})
 	}
 	if err := lane.Delivery().Cancel(ctx, effect.Turn); err != nil {
 		return c.engine.Apply(CancelFailed{OperationID: effect.OperationID, Kind: providerErrorKind(err)})
@@ -800,6 +805,20 @@ func (c *Coordinator) forwardEvents(lane provider.Lane, generation uint64) {
 			return
 		case event, ok = <-lane.Events():
 			if !ok {
+				// A normal detach is durably observed above before the adapter closes
+				// this stream. A close while the same generation is still registered
+				// is therefore host loss, not a successful quiet shutdown.
+				c.mu.Lock()
+				current := c.lanes[lane.Identity().ID] == lane && c.generations[lane.Identity().ID] == generation
+				if current {
+					delete(c.lanes, lane.Identity().ID)
+					delete(c.generations, lane.Identity().ID)
+				}
+				c.mu.Unlock()
+				if current {
+					_ = c.engine.Apply(LaneProtocolFailed{LaneID: lane.Identity().ID, ConnectionGeneration: generation})
+					c.wakeEffects()
+				}
 				return
 			}
 		}

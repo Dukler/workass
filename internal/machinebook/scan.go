@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,6 +78,11 @@ func (s *Scanner) scan(ctx context.Context) {
 	if timeout <= 0 {
 		timeout = defaultProbeTimeout
 	}
+	probeClient, probeTransport := scanProbeClient(s.Book, timeout)
+	defer probeTransport.CloseIdleConnections()
+	probe := func(probeCtx context.Context, address string) (Card, error) {
+		return probeWithClient(probeCtx, address, probeClient)
+	}
 
 	jobs := make(chan string)
 	var workers sync.WaitGroup
@@ -86,7 +92,7 @@ func (s *Scanner) scan(ctx context.Context) {
 			defer workers.Done()
 			for address := range jobs {
 				probeCtx, cancel := context.WithTimeout(ctx, timeout)
-				entry, changed, err := s.Book.Discover(probeCtx, address)
+				entry, changed, err := s.Book.discover(probeCtx, address, probe)
 				cancel()
 				if err != nil {
 					continue
@@ -111,6 +117,39 @@ func (s *Scanner) scan(ctx context.Context) {
 	}
 	close(jobs)
 	workers.Wait()
+}
+
+// scanProbeClient gives one LAN sweep its own transport. A request context is
+// not enough to bound a Transport dial: after a request is cancelled, Go may
+// keep that dial alive for connection reuse. On a /24 sweep that left hundreds
+// of TCP-80 SYNs in flight until the default dialer's much longer timeout.
+// Bound the dial itself and disable pooling because each candidate is normally
+// contacted only once per scan.
+func scanProbeClient(book *Book, timeout time.Duration) (*http.Client, *http.Transport) {
+	transport := book.probeTransport.Clone()
+	transport.DialContext = boundedDialContext(transport.DialContext, timeout)
+	if transport.DialTLSContext != nil {
+		transport.DialTLSContext = boundedDialContext(transport.DialTLSContext, timeout)
+	}
+	transport.DisableKeepAlives = true
+
+	client := *book.client
+	client.Transport = transport
+	if client.Timeout <= 0 || client.Timeout > timeout {
+		client.Timeout = timeout
+	}
+	return &client, transport
+}
+
+func boundedDialContext(dial func(context.Context, string, string) (net.Conn, error), timeout time.Duration) func(context.Context, string, string) (net.Conn, error) {
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		dialCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return dial(dialCtx, network, address)
+	}
 }
 
 func (s *Scanner) logf(format string, args ...any) {

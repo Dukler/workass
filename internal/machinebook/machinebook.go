@@ -235,6 +235,10 @@ func (b *Book) Add(ctx context.Context, address string) (Entry, error) {
 // Discover records a daemon found by automatic TCP port-80 probing. It avoids
 // a disk write and UI broadcast when the same healthy endpoint answers again.
 func (b *Book) Discover(ctx context.Context, address string) (Entry, bool, error) {
+	return b.discover(ctx, address, b.probe)
+}
+
+func (b *Book) discover(ctx context.Context, address string, probe func(context.Context, string) (Card, error)) (Entry, bool, error) {
 	normalized, err := NormalizeAddress(address)
 	if err != nil {
 		return Entry{}, false, err
@@ -242,7 +246,7 @@ func (b *Book) Discover(ctx context.Context, address string) (Entry, bool, error
 	if !isPort80Address(normalized) {
 		return Entry{}, false, errors.New("automatic discovery probes only TCP port 80")
 	}
-	card, probeErr := b.probe(ctx, normalized)
+	card, probeErr := probe(ctx, normalized)
 	if probeErr != nil {
 		return Entry{}, false, probeErr
 	}

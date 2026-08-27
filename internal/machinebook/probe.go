@@ -94,12 +94,16 @@ var ErrNoIdentity = errors.New("daemon has no machine id")
 // initial probe accepts that private PKI boundary so an approved user can pin
 // the machine; every payload beyond the multicast presence packet is encrypted.
 func (b *Book) probe(ctx context.Context, address string) (Card, error) {
+	client := *b.client
+	client.Transport = b.probeTransport
+	return probeWithClient(ctx, address, &client)
+}
+
+func probeWithClient(ctx context.Context, address string, client *http.Client) (Card, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+address+HealthPath, nil)
 	if err != nil {
 		return Card{}, err
 	}
-	client := *b.client
-	client.Transport = b.probeTransport
 	response, err := client.Do(request)
 	if err != nil {
 		return Card{}, fmt.Errorf("%s %s", address, whyItFailed(err))
