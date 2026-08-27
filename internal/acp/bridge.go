@@ -133,6 +133,12 @@ type acpError struct {
 	Msg  string
 }
 
+// workassMCPStartupRPCCode identifies a failure in Workass's injected MCP
+// attachment, not in the vendor account. Native hosts use the same private
+// code so authentication policy cannot turn an internal tool failure into a
+// durable vendor needs-login latch.
+const workassMCPStartupRPCCode = -32045
+
 var errBridgeHibernated = errors.New("ACP bridge hibernated; session restore required")
 
 func (e *acpError) Error() string {

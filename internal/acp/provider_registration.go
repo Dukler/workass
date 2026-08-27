@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,6 +56,10 @@ func (strategy vendorCLIAuthenticationStrategy) IsAuthenticationFailure(err erro
 	}
 	if providercontract.ErrorIs(err, providercontract.ErrorAuthenticationRequired) {
 		return true
+	}
+	var rpcErr *acpError
+	if errors.As(err, &rpcErr) && rpcErr.Code == workassMCPStartupRPCCode {
+		return false
 	}
 	return isAuthShapedError(redactSensitiveText(err.Error()))
 }

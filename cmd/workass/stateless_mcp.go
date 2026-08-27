@@ -146,13 +146,18 @@ func (h *statelessMCPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		h.writeError(w, http.StatusServiceUnavailable, nil, -32001, "authoritative chat state is unavailable", nil)
 		return
 	}
-	// The durable actor is the authority for whether this exact attachment is
-	// still alive. Only after it fences the pair may the short-lived Manager
-	// owner capability participate in authorization; a deleted chat must not
-	// remain usable merely because its provider session is still live.
-	if _, _, err := h.providerChats.exactActor(tabID, chatID); err != nil {
-		h.writeError(w, http.StatusUnauthorized, nil, -32000, "unauthorized", nil)
-		return
+	// A top-level chat's durable actor is the authority for whether this exact
+	// attachment is still alive. Delegated children deliberately have no
+	// top-level actor; their live Manager-owned SubagentRun is the corresponding
+	// authority. In both cases the short-lived exact owner capability is checked
+	// below, so neither authority can be retargeted to another attachment.
+	delegatedChild := chatID == tabID && strings.HasPrefix(chatID, subagentTabPrefix) &&
+		strings.TrimPrefix(chatID, subagentTabPrefix) != ""
+	if !delegatedChild {
+		if _, _, err := h.providerChats.exactActor(tabID, chatID); err != nil {
+			h.writeError(w, http.StatusUnauthorized, nil, -32000, "unauthorized", nil)
+			return
+		}
 	}
 	if !h.ownerAuthorized(ownerKey, chatID, tabID) {
 		h.writeError(w, http.StatusUnauthorized, nil, -32000, "unauthorized", nil)
