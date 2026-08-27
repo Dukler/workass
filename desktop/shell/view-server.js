@@ -28,6 +28,7 @@ function controllerMigration(recoverController = false) {
   return `<script>(()=>{
   const key = 'workass.shell.controllerMigration.v1';
   let recoveryAvailable = ${recoverController === true ? 'true' : 'false'};
+  let localDeviceId = '';
   const post = (path, body) => fetch(path, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
   }).catch(() => {});
@@ -39,6 +40,7 @@ function controllerMigration(recoverController = false) {
   window.api.onLanAccessState(async (state) => {
     if (!state || state.state !== 'approved') return;
     const deviceId = String(state.deviceId || '');
+    localDeviceId = deviceId;
     let migratedFor = '';
     try { migratedFor = localStorage.getItem(key) || ''; } catch (_) {}
     if (state.controller) {
@@ -65,6 +67,12 @@ function controllerMigration(recoverController = false) {
       } else report(false);
     } catch (_) {}
   });
+  if (typeof window.api.onLanControllerChanged === 'function') {
+    window.api.onLanControllerChanged((state) => {
+      const controllerDeviceId = String(state && state.deviceId || '');
+      if (localDeviceId && controllerDeviceId) report(controllerDeviceId === localDeviceId);
+    });
+  }
   if (typeof window.api.onChatCatalog === 'function') {
     window.api.onChatCatalog((catalog) => {
       post('/__workass-shell/catalog', {
@@ -188,7 +196,8 @@ function createViewServer({
   let probeFn = null;
   let perfFn = null;
   let reloadFn = null;
-	let recoveryFn = null;
+  let recoveryFn = null;
+  let takeControlFn = null;
   const server = http.createServer((req, res) => {
     const parsedUrl = new URL(req.url || '/', 'http://shell.local');
     const pathname = parsedUrl.pathname;
@@ -266,6 +275,19 @@ function createViewServer({
         res.writeHead(200, { 'Cache-Control': 'no-store', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
         res.end(body);
       }).catch((err) => { if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' }); res.end(`recovery failed: ${err && err.message || err}`); });
+      return;
+    }
+    if (pathname === '/__workass-shell/take-control') {
+      if (req.method !== 'POST') { res.writeHead(405, { 'Allow': 'POST', 'Content-Type': 'text/plain' }); res.end('take-control requires POST'); return; }
+      if (typeof takeControlFn !== 'function') { res.writeHead(503, { 'Content-Type': 'text/plain' }); res.end('renderer controller recovery is not ready'); return; }
+      Promise.resolve().then(() => takeControlFn()).then((data) => {
+        const result = data || { controller: false };
+        shellStatus.controller = result.controller === true;
+        shellStatus.reportedAt = new Date().toISOString();
+        const body = JSON.stringify(result);
+        res.writeHead(200, { 'Cache-Control': 'no-store', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+        res.end(body);
+      }).catch((err) => { if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' }); res.end(`take-control failed: ${err && err.message || err}`); });
       return;
     }
     if (pathname === '/__workass-shell/status' && req.method === 'GET') {
@@ -411,7 +433,8 @@ function createViewServer({
         // a renderer promotion never needs the shell relaunch that can strand the
         // controller lease.
         setReload: (fn) => { reloadFn = typeof fn === 'function' ? fn : null; },
-		setRecovery: (fn) => { recoveryFn = typeof fn === 'function' ? fn : null; },
+        setRecovery: (fn) => { recoveryFn = typeof fn === 'function' ? fn : null; },
+        setTakeControl: (fn) => { takeControlFn = typeof fn === 'function' ? fn : null; },
         close: () => new Promise((done) => {
           for (const socket of sockets) socket.destroy();
           server.close(() => done());

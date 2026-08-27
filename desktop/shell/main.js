@@ -449,9 +449,20 @@ function createWindow(url, browserReporter, isController) {
       return { reloaded: true, url, recoverController: recoverController === true };
     });
   }
-	if (viewServer && typeof viewServer.setRecovery === 'function') {
-		viewServer.setRecovery(recoverLocalDaemon);
-	}
+  if (viewServer && typeof viewServer.setRecovery === 'function') {
+    viewServer.setRecovery(recoverLocalDaemon);
+  }
+  if (viewServer && typeof viewServer.setTakeControl === 'function') {
+    viewServer.setTakeControl(async () => {
+      if (win.isDestroyed()) throw new Error('window destroyed');
+      return win.webContents.executeJavaScript(`(() => {
+        if (!window.api || typeof window.api.lanTakeControl !== 'function') {
+          return Promise.resolve({ controller: false, error: 'lan bridge unavailable' });
+        }
+        return window.api.lanTakeControl();
+      })()`);
+    });
+  }
   if (viewServer && typeof viewServer.setPerf === 'function') {
     viewServer.setPerf(async (requestedAction) => {
       if (win.isDestroyed()) throw new Error('window destroyed');
