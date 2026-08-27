@@ -640,6 +640,7 @@ type managerLane struct {
 	durableLifecycleCommits bool
 	commitWait              map[uint64]chan error
 	protocolFailed          bool
+	protocolClosing         bool
 }
 
 type managerLaneCreationReceipt struct {
@@ -916,26 +917,32 @@ func (l *managerLane) rejectFrozenProtocol(_ error) {
 		return
 	}
 	l.mu.Lock()
-	if l.closed || l.detached || l.protocolFailed {
+	if l.closed || l.detached || l.protocolClosing {
 		l.mu.Unlock()
 		return
 	}
-	l.mu.Unlock()
-	if err := l.emit(providercontract.Event{
-		Kind: providercontract.EventTransportHealth,
-		Health: &providercontract.TransportHealthEvent{
-			State: "protocol_failed", Error: providercontract.ErrorProtocolViolation,
-		},
-	}); err != nil {
-		l.manager.opts.Logf("provider protocol failure could not reach chat actor", map[string]any{
-			"chatId": l.identity.ChatID, "error": redactSensitiveText(err.Error()),
-		})
-	}
-	l.mu.Lock()
-	l.protocolFailed = true
+	alreadyFailed := l.protocolFailed
+	l.protocolClosing = true
 	l.mu.Unlock()
 	go func() {
-		_ = l.manager.CloseSession(context.Background(), l.info.SessionID)
+		if !alreadyFailed {
+			if err := l.emit(providercontract.Event{
+				Kind: providercontract.EventTransportHealth,
+				Health: &providercontract.TransportHealthEvent{
+					State: "protocol_failed", Error: providercontract.ErrorProtocolViolation,
+				},
+			}); err != nil {
+				l.manager.opts.Logf("provider protocol failure could not reach chat actor", map[string]any{
+					"chatId": l.identity.ChatID, "error": redactSensitiveText(err.Error()),
+				})
+			}
+		}
+		l.mu.Lock()
+		l.protocolFailed = true
+		l.mu.Unlock()
+		closeCtx, cancel := context.WithTimeout(context.Background(), l.durableCommitTimeout())
+		defer cancel()
+		_ = l.manager.CloseSession(closeCtx, l.info.SessionID)
 		l.attachmentClosed()
 	}()
 }
@@ -1007,6 +1014,10 @@ func (l *managerLane) emitLocked(event providercontract.Event, waitForCommit boo
 		}
 		return errors.New("provider event lane failed its durable actor protocol")
 	}
+	if l.protocolClosing && event.Kind != providercontract.EventTransportHealth && event.Kind != providercontract.EventLaneDetached {
+		l.mu.Unlock()
+		return errors.New("provider event lane is closing after a durable actor protocol failure")
+	}
 	if l.detached && event.Kind != providercontract.EventLaneDetached {
 		l.mu.Unlock()
 		return errors.New("provider event lane is detached")
@@ -1048,15 +1059,43 @@ func (l *managerLane) emitLocked(event providercontract.Event, waitForCommit boo
 	// the adapter when its bounded handoff is full; dropping here would let the
 	// frozen renderer observe output that the authoritative actor can never
 	// reconstruct after a restart.
-	l.events <- event
+	timer := time.NewTimer(l.durableCommitTimeout())
+	defer timer.Stop()
+	select {
+	case l.events <- event:
+	case <-timer.C:
+		l.removeCommitWait(event.Identity.Sequence, wait)
+		return &providercontract.Error{Kind: providercontract.ErrorTransientTransport, Message: "provider event handoff to the durable chat actor timed out"}
+	}
 	if wait == nil {
 		return nil
 	}
-	err := <-wait
+	select {
+	case err := <-wait:
+		l.removeCommitWait(event.Identity.Sequence, wait)
+		return err
+	case <-timer.C:
+		l.removeCommitWait(event.Identity.Sequence, wait)
+		return &providercontract.Error{Kind: providercontract.ErrorTransientTransport, Message: "durable chat actor acknowledgement timed out"}
+	}
+}
+
+func (l *managerLane) durableCommitTimeout() time.Duration {
+	if l != nil && l.manager != nil && l.manager.opts.InitTimeout > 0 {
+		return l.manager.opts.InitTimeout
+	}
+	return defaultInitTimeout
+}
+
+func (l *managerLane) removeCommitWait(sequence uint64, wait chan error) {
+	if l == nil || wait == nil {
+		return
+	}
 	l.mu.Lock()
-	delete(l.commitWait, event.Identity.Sequence)
+	if l.commitWait[sequence] == wait {
+		delete(l.commitWait, sequence)
+	}
 	l.mu.Unlock()
-	return err
 }
 
 type managerLaneDelivery struct{ lane *managerLane }
