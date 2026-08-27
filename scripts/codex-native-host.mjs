@@ -19,6 +19,13 @@ let initializePromise;
 let providerRealm;
 let modelCatalog = [];
 const MAX_MCP_STARTUP_STATES = 512;
+const WORKASS_MCP_STARTUP_RPC_CODE = -32045;
+
+function workassMCPStartupError(value) {
+  const error = value instanceof Error ? value : new Error(String(value || 'Codex Workass MCP startup failed'));
+  error.rpcCode = WORKASS_MCP_STARTUP_RPC_CODE;
+  return error;
+}
 
 function safeErrorText(value) {
   return String(value?.message || value || 'Codex request failed')
@@ -566,7 +573,7 @@ function sessionConfig(cwd, mcpServers) {
     if (!raw || typeof raw.name !== 'string') continue;
     const name = raw.name.replace(/\s/gu, '_');
     if (typeof raw.command !== 'string' || !raw.command.trim()) {
-      throw new Error(`Codex MCP server ${raw.name} requires a stdio command`);
+      throw workassMCPStartupError(`Codex MCP server ${raw.name} requires a stdio command`);
     }
     const env = Array.isArray(raw.env)
       ? Object.fromEntries(raw.env.map((entry) => [entry.name, entry.value]))
@@ -611,7 +618,7 @@ async function requireMCPToolCatalogs(threadId, config, afterStartupRevision) {
       }
       cursor = response?.nextCursor == null ? null : String(response.nextCursor);
       if (cursor) {
-        if (cursors.has(cursor)) throw new Error('Codex MCP server status pagination repeated a cursor');
+        if (cursors.has(cursor)) throw workassMCPStartupError('Codex MCP server status pagination repeated a cursor');
         cursors.add(cursor);
       }
     } while (cursor && found.size < required.size);
@@ -622,15 +629,15 @@ async function requireMCPToolCatalogs(threadId, config, afterStartupRevision) {
       const startup = app.mcpStartupStatus(threadId, name, afterStartupRevision);
       if (startup?.status === 'failed' || startup?.status === 'cancelled') {
         const reason = startup.error ? `: ${startup.error}` : '';
-        throw new Error(`Codex MCP server ${name} startup ${startup.status}${reason}`);
+        throw workassMCPStartupError(`Codex MCP server ${name} startup ${startup.status}${reason}`);
       }
       if (startup?.status === 'ready') {
-        throw new Error(`Codex MCP tool catalog is unavailable for: ${name}`);
+        throw workassMCPStartupError(`Codex MCP tool catalog is unavailable for: ${name}`);
       }
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
-      throw new Error(`Codex MCP tool catalog is unavailable for: ${missing.join(', ')}`);
+      throw workassMCPStartupError(`Codex MCP tool catalog is unavailable for: ${missing.join(', ')}`);
     }
     await app.waitForMCPStartupChange(threadId, missing, Math.min(100, remaining));
   }
