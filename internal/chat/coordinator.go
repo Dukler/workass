@@ -805,6 +805,12 @@ func (c *Coordinator) forwardEvents(lane provider.Lane, generation uint64) {
 			return
 		case event, ok = <-lane.Events():
 			if !ok {
+				if _, durable := lane.(provider.DurableEventDelivery); !durable {
+					// Compatibility lanes have no durable event-commit fence, so a
+					// closed optional event stream is not authoritative host-loss
+					// evidence. Their provider operation surfaces may remain usable.
+					return
+				}
 				// A normal detach is durably observed above before the adapter closes
 				// this stream. A close while the same generation is still registered
 				// is therefore host loss, not a successful quiet shutdown.
@@ -816,7 +822,10 @@ func (c *Coordinator) forwardEvents(lane provider.Lane, generation uint64) {
 				}
 				c.mu.Unlock()
 				if current {
-					_ = c.engine.Apply(LaneProtocolFailed{LaneID: lane.Identity().ID, ConnectionGeneration: generation})
+					if durableLane, exists := c.engine.Snapshot().Lanes[lane.Identity().ID]; exists && durableLane.Phase == LaneBroken {
+						return
+					}
+					_ = c.engine.Apply(HostLost{LaneID: lane.Identity().ID, ConnectionGeneration: generation})
 					c.wakeEffects()
 				}
 				return
