@@ -441,6 +441,59 @@ func TestCreateFailureRemainsAbsentUntilExplicitIntent(t *testing.T) {
 	}
 }
 
+func TestAmbiguousAdmissionUsesReadbackOrTerminalNoResendBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		readback bool
+	}{
+		{name: "readback available", readback: true},
+		{name: "readback unavailable", readback: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state, _ := NewState("ambiguous-admission-" + strings.ReplaceAll(test.name, " ", "-"))
+			laneID := testLane(state.ChatID, "provider")
+			state, _ = apply(t, state, SelectLane{Identity: laneID})
+			state, _ = apply(t, state, LaneOpened{
+				LaneID:               laneID.ID,
+				Thread:               provider.ThreadRef{ProviderID: "provider", RootID: "thread", HeadID: "thread", Lineage: 1},
+				ConnectionGeneration: 1,
+				Context:              exactContext(provider.ContextImportUnsupported),
+				Delivery:             provider.DeliveryCapabilities{StableInputIdentity: true, TurnReadback: test.readback},
+			})
+			state, _ = apply(t, state, Submit{
+				OperationID: "ambiguous", Text: "send once",
+				Presentation: provider.TurnPresentation{Origin: "human"},
+			})
+			state, effects := apply(t, state, TurnAdmitted{OperationID: "ambiguous", Ambiguous: true})
+			if test.readback {
+				if state.Foreground == nil || state.Foreground.Status != ForegroundReconciling || state.Lanes[laneID.ID].Phase != LaneReconciling {
+					t.Fatalf("safe ambiguous admission did not enter readback: %#v", state)
+				}
+				if len(effects) != 1 {
+					t.Fatalf("safe ambiguous admission effects = %#v", effects)
+				}
+				readback, ok := effects[0].(ReconcileTurnEffect)
+				if !ok || readback.OperationID != "ambiguous" || strings.TrimSpace(readback.Turn.NativeID) == "" {
+					t.Fatalf("safe ambiguous admission readback = %#v", effects[0])
+				}
+				return
+			}
+			if len(effects) != 0 {
+				t.Fatalf("unreadable ambiguous admission emitted provider effects: %#v", effects)
+			}
+			assertUnrecoverableTurnTerminalized(t, state, laneID.ID, "ambiguous", provider.ErrorAcceptanceAmbiguous)
+			revision := state.Revision
+			next, retryEffects, err := Reduce(state, Submit{
+				OperationID: "unsafe-retry", Text: "do not queue behind a broken lane",
+				Presentation: provider.TurnPresentation{Origin: "human"},
+			})
+			if err == nil || len(retryEffects) != 0 || next.Revision != revision || !reflect.DeepEqual(next, state) {
+				t.Fatalf("blocked lane accepted an undispatchable retry: err=%v effects=%#v", err, retryEffects)
+			}
+		})
+	}
+}
+
 func TestSubmitCreatesOnlyItsSelectedProviderLane(t *testing.T) {
 	state, _ := NewState("chat")
 	alpha := testLane("chat", "alpha")
