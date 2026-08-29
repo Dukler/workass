@@ -1784,21 +1784,46 @@ func TestWireTraceMockCrashAmbiguityDoesNotResendOrRespawn(t *testing.T) {
 		t.Fatalf("first crash replaced the provider thread: %#v", firstRecovered)
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	var uncertain chat.State
+	var terminalized chat.State
 	for time.Now().Before(deadline) {
-		uncertain, _ = providerChats.Snapshot(tabID)
-		if uncertain.Foreground != nil && uncertain.Foreground.Status == chat.ForegroundUncertain {
-			break
+		terminalized, _ = providerChats.Snapshot(tabID)
+		if terminalized.Foreground == nil && len(terminalized.Ledger) >= 2 {
+			assistant := terminalized.Ledger[len(terminalized.Ledger)-1]
+			if assistant.OperationID == "ambiguous-crash-turn-1" && assistant.Terminal != nil {
+				break
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if uncertain.Foreground == nil || uncertain.Foreground.Status != chat.ForegroundUncertain {
-		t.Fatalf("crash without readback did not become actor-owned uncertainty: %#v", uncertain)
+	if terminalized.Foreground != nil || len(terminalized.Ledger) < 2 {
+		t.Fatalf("crash without readback did not seal a terminal no-resend receipt: %#v", terminalized)
 	}
-	if uncertain.Foreground.Turn.NativeID != firstJob["id"].(string) {
-		t.Fatalf("uncertain crash changed turn identity: foreground=%#v job=%#v", uncertain.Foreground, firstJob)
+	assistant := terminalized.Ledger[len(terminalized.Ledger)-1]
+	if assistant.OperationID != "ambiguous-crash-turn-1" || assistant.Status != "failed" || !assistant.Interrupted || assistant.RetryPrompt != "" || assistant.Terminal == nil {
+		t.Fatalf("crash without readback terminal receipt = %#v", assistant)
 	}
-	t.Logf("trace first crash resumed exact session=%s and blocked unresolved operation=%s", firstSessionID, uncertain.Foreground.OperationID)
+	if assistant.NativeTurnID != firstJob["id"].(string) {
+		t.Fatalf("terminal crash changed turn identity: assistant=%#v job=%#v", assistant, firstJob)
+	}
+	if !strings.Contains(strings.ToLower(assistant.Text), "will not resend") {
+		t.Fatalf("terminal crash omitted no-resend explanation: %#v", assistant)
+	}
+	end := client.waitJobEvent(t, firstJob["id"].(string), "end", 5*time.Second)
+	endJob := mapFromAnyMain(end["job"])
+	if fieldString(endJob, "status") != "failed" || endJob["interrupted"] != true {
+		t.Fatalf("unrecoverable crash did not publish terminal job:end: %#v", endJob)
+	}
+	blockedLane := false
+	for _, lane := range terminalized.Lanes {
+		if lane.Phase == chat.LaneBlocked && lane.LastError != "" {
+			blockedLane = true
+			break
+		}
+	}
+	if !blockedLane {
+		t.Fatalf("unrecoverable crash did not block its exact lane: %#v", terminalized.Lanes)
+	}
+	t.Logf("trace first crash resumed exact session=%s and terminalized unresolved operation without resend", firstSessionID)
 
 	client.invoke(t, 3, "job:start", map[string]any{
 		"kind": "app-chat", "chatId": tabID, "sessionId": firstSessionID, "tabId": tabID,

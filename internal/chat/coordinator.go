@@ -265,10 +265,17 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 		}
 		c.startLaneEvents(lane, effect.Generation)
 		if recoveringForeground {
-			c.publishLifecycle(LifecycleReceipt{
-				Kind: LifecycleHostRecoveryResumed, ChatID: effect.Identity.ChatID, LaneID: effect.Identity.ID,
-				OperationID: recoveryOperationID, Thread: effect.Thread, Turn: recoveryTurn,
-			})
+			if recovered := c.engine.Snapshot(); recovered.Foreground == nil {
+				c.publishLifecycle(LifecycleReceipt{
+					Kind: LifecycleTurnReconciled, ChatID: effect.Identity.ChatID, LaneID: effect.Identity.ID,
+					OperationID: recoveryOperationID, Thread: effect.Thread, Turn: recoveryTurn, Terminal: true, Status: "failed",
+				})
+			} else {
+				c.publishLifecycle(LifecycleReceipt{
+					Kind: LifecycleHostRecoveryResumed, ChatID: effect.Identity.ChatID, LaneID: effect.Identity.ID,
+					OperationID: recoveryOperationID, Thread: effect.Thread, Turn: recoveryTurn,
+				})
+			}
 		}
 		return true, nil
 	case ImportContextEffect:
@@ -321,7 +328,18 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 				return true, nil
 			}
 			if provider.ErrorIs(err, provider.ErrorAcceptanceAmbiguous) {
-				return true, c.engine.Apply(TurnAdmitted{OperationID: effect.Input.OperationID, Ambiguous: true})
+				turn := provider.TurnRef{
+					OperationID: effect.Input.OperationID,
+					NativeID:    provider.DeriveJobID(lane.Identity().ChatID, effect.Input.OperationID),
+				}
+				applyErr := c.engine.Apply(TurnAdmitted{OperationID: effect.Input.OperationID, Turn: turn, Ambiguous: true})
+				if applyErr == nil && c.engine.Snapshot().Foreground == nil {
+					c.publishLifecycle(LifecycleReceipt{
+						Kind: LifecycleTurnReconciled, ChatID: lane.Identity().ChatID, LaneID: effect.LaneID,
+						OperationID: effect.Input.OperationID, Turn: turn, Terminal: true, Status: "failed",
+					})
+				}
+				return true, applyErr
 			}
 			applyErr := c.engine.Apply(TurnAdmissionFailed{OperationID: effect.Input.OperationID, Kind: providerErrorKind(err)})
 			if applyErr == nil {
@@ -341,6 +359,12 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 			}
 			return true, err
 		}
+		if !admission.Accepted && c.engine.Snapshot().Foreground == nil {
+			c.publishLifecycle(LifecycleReceipt{
+				Kind: LifecycleTurnReconciled, ChatID: lane.Identity().ChatID, LaneID: effect.LaneID,
+				OperationID: effect.Input.OperationID, Turn: admission.Turn, Terminal: true, Status: "failed",
+			})
+		}
 		if admission.Consumed {
 			return true, c.engine.Apply(InputConsumed{OperationID: effect.Input.OperationID})
 		}
@@ -353,15 +377,14 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 		result, err := lane.Delivery().Reconcile(ctx, provider.ReconcileRequest{OperationID: effect.OperationID, Turn: effect.Turn})
 		if err != nil {
 			// Readback failure is not permission to leave a permanent spinner or
-			// resend. Mark the exact operation uncertain and the lane blocked; an
-			// explicit later reconciliation may resolve it, but ordinary admission
-			// cannot pass this boundary.
+			// resend. The actor seals a failed/interrupted no-resend receipt and
+			// blocks the exact lane.
 			applyErr := c.engine.Apply(TurnReconciled{
-				OperationID: effect.OperationID, Turn: effect.Turn, Found: false,
+				OperationID: effect.OperationID, Turn: effect.Turn, Kind: providerErrorKind(err), Found: false,
 			})
 			c.publishLifecycle(LifecycleReceipt{
 				Kind: LifecycleTurnReconciled, ChatID: lane.Identity().ChatID, LaneID: effect.LaneID,
-				OperationID: effect.OperationID, Turn: effect.Turn, Status: "uncertain",
+				OperationID: effect.OperationID, Turn: effect.Turn, Terminal: true, Status: "failed",
 			})
 			if applyErr != nil {
 				return true, errors.Join(err, applyErr)
@@ -382,9 +405,13 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 		if err := c.engine.Apply(command); err != nil {
 			return true, err
 		}
+		receiptStatus := result.State
+		if !result.Found {
+			receiptStatus = "failed"
+		}
 		c.publishLifecycle(LifecycleReceipt{
 			Kind: LifecycleTurnReconciled, ChatID: lane.Identity().ChatID, LaneID: effect.LaneID,
-			OperationID: effect.OperationID, Turn: turn, Terminal: result.Terminal, Status: result.State,
+			OperationID: effect.OperationID, Turn: turn, Terminal: result.Terminal || !result.Found, Status: receiptStatus,
 		})
 		return true, nil
 	case SteerTurnEffect:
@@ -875,8 +902,14 @@ func acknowledgeProviderEvent(lane provider.Lane, sequence uint64, err error) {
 func (c *Coordinator) applyLaneFailure(laneID provider.LaneID, err error) error {
 	before := c.engine.Snapshot()
 	operationID := provider.OperationID("")
+	recoveryTurn := provider.TurnRef{}
+	recoveringForeground := false
 	if before.Foreground != nil && before.Foreground.LaneID == laneID && before.Foreground.Status == ForegroundDispatching {
 		operationID = before.Foreground.OperationID
+	} else if before.Foreground != nil && before.Foreground.LaneID == laneID && before.Foreground.Status == ForegroundReconciling {
+		operationID = before.Foreground.OperationID
+		recoveryTurn = before.Foreground.Turn
+		recoveringForeground = true
 	} else {
 		for _, queued := range before.Queue {
 			if queued.LaneID == laneID && strings.TrimSpace(queued.Presentation.QueueID) == "" {
@@ -892,7 +925,12 @@ func (c *Coordinator) applyLaneFailure(laneID provider.LaneID, err error) error 
 	if applyErr != nil {
 		return errors.Join(err, applyErr)
 	}
-	if operationID != "" && !provider.ErrorIs(err, provider.ErrorAcceptanceAmbiguous) {
+	if recoveringForeground {
+		c.publishLifecycle(LifecycleReceipt{
+			Kind: LifecycleTurnReconciled, ChatID: before.ChatID,
+			LaneID: laneID, OperationID: operationID, Turn: recoveryTurn, Terminal: true, Status: "failed",
+		})
+	} else if operationID != "" && !provider.ErrorIs(err, provider.ErrorAcceptanceAmbiguous) {
 		c.publishLifecycle(LifecycleReceipt{
 			Kind: LifecycleTurnAdmissionFailed, ChatID: before.ChatID,
 			LaneID: laneID, OperationID: operationID, Terminal: true, Status: "failed",

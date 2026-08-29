@@ -180,6 +180,7 @@ func TestRunningTurnHostLossResumesExactThreadThenReadsBackWithoutResend(t *test
 	if err := engine.Apply(LaneOpened{
 		LaneID: laneIdentity.ID, Identity: laneIdentity, Thread: resume.Thread,
 		ConnectionGeneration: resume.Generation, Context: exactContext(provider.ContextImportUnsupported),
+		Delivery: provider.DeliveryCapabilities{TurnReadback: true},
 	}); err != nil {
 		t.Fatalf("open exact resumed lane: %v", err)
 	}
@@ -198,9 +199,7 @@ func TestRunningTurnHostLossResumesExactThreadThenReadsBackWithoutResend(t *test
 		t.Fatalf("apply authoritative not-found readback: %v", err)
 	}
 	state = engine.Snapshot()
-	if state.Foreground == nil || state.Foreground.Status != ForegroundUncertain || state.Lanes[laneIdentity.ID].Phase != LaneBlocked {
-		t.Fatalf("missing native turn did not block uncertain recovery: %#v", state)
-	}
+	assertUnrecoverableTurnTerminalized(t, state, laneIdentity.ID, "host-loss-turn", provider.ErrorProtocolViolation)
 	for _, entry := range state.Outbox {
 		if entry.Kind == EffectStartTurn && entry.OperationID == "host-loss-turn" && entry.Status == OutboxPending {
 			t.Fatal("host-loss readback made the original turn replayable")
@@ -208,7 +207,7 @@ func TestRunningTurnHostLossResumesExactThreadThenReadsBackWithoutResend(t *test
 	}
 }
 
-func TestFailedTurnReadbackCanRetryAfterExactHostReattach(t *testing.T) {
+func TestFailedTurnReadbackTerminalizesWithoutRetryOrResend(t *testing.T) {
 	store := &memoryStateStore{}
 	engine, err := NewDurableEngine("failed-readback-recovery-chat", store)
 	if err != nil {
@@ -241,6 +240,7 @@ func TestFailedTurnReadbackCanRetryAfterExactHostReattach(t *testing.T) {
 	if err := engine.Apply(LaneOpened{
 		LaneID: laneIdentity.ID, Identity: laneIdentity, Thread: resume.Thread,
 		ConnectionGeneration: resume.Generation, Context: exactContext(provider.ContextImportUnsupported),
+		Delivery: provider.DeliveryCapabilities{TurnReadback: true},
 	}); err != nil {
 		t.Fatalf("open first exact resume: %v", err)
 	}
@@ -253,48 +253,198 @@ func TestFailedTurnReadbackCanRetryAfterExactHostReattach(t *testing.T) {
 		t.Fatalf("record failed readback: %v", err)
 	}
 	state := engine.Snapshot()
-	if state.Foreground == nil || state.Foreground.Status != ForegroundUncertain || !outboxHas(&state, reconcileTurnEffectID("failed-readback-turn"), OutboxFailed) {
-		t.Fatalf("failed readback did not remain uncertain and non-replayable: %#v", state)
+	assertUnrecoverableTurnTerminalized(t, state, laneIdentity.ID, "failed-readback-turn", provider.ErrorProtocolViolation)
+	if !outboxHas(&state, reconcileTurnEffectID("failed-readback-turn"), OutboxFailed) {
+		t.Fatalf("failed readback lost its terminal reconciliation receipt: %#v", state.Outbox)
 	}
 	if _, claimed, err := engine.ClaimNext(); err != nil || claimed {
 		t.Fatalf("failed readback retried without a new attachment: claimed=%v err=%v", claimed, err)
 	}
+	for _, entry := range state.Outbox {
+		if entry.Kind == EffectStartTurn && entry.OperationID == "failed-readback-turn" && entry.Status == OutboxPending {
+			t.Fatal("terminal readback failure made the original user input replayable")
+		}
+	}
+}
 
-	generation := state.Lanes[laneIdentity.ID].ConnectionGeneration
-	if err := engine.Apply(HostLost{LaneID: laneIdentity.ID, ConnectionGeneration: generation}); err != nil {
-		t.Fatalf("second host loss: %v", err)
+func TestExactResumeWithoutTurnReadbackTerminalizesAcceptedTurn(t *testing.T) {
+	store := &memoryStateStore{}
+	engine, err := NewDurableEngine("no-readback-recovery-chat", store)
+	if err != nil {
+		t.Fatal(err)
 	}
-	effect, ok, err = engine.ClaimNext()
+	laneIdentity := testLane("no-readback-recovery-chat", "qwen")
+	openReadyDurableLane(t, engine, laneIdentity)
+	if err := engine.Apply(Submit{OperationID: "no-readback-turn", Text: "send once", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := engine.ClaimNext(); err != nil || !ok {
+		t.Fatalf("claim running turn: ok=%v err=%v", ok, err)
+	}
+	turn := provider.TurnRef{OperationID: "no-readback-turn", NativeID: "native-no-readback-turn"}
+	if err := engine.Apply(TurnAdmitted{OperationID: "no-readback-turn", Accepted: true, Turn: turn}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Apply(HostLost{LaneID: laneIdentity.ID, ConnectionGeneration: 1}); err != nil {
+		t.Fatalf("host loss: %v", err)
+	}
+	effect, ok, err := engine.ClaimNext()
 	if err != nil || !ok {
-		t.Fatalf("claim second exact resume: ok=%v err=%v", ok, err)
+		t.Fatalf("claim exact resume: ok=%v err=%v", ok, err)
 	}
-	resume, ok = effect.(ResumeLaneEffect)
+	resume, ok := effect.(ResumeLaneEffect)
 	if !ok {
-		t.Fatalf("second recovery claimed %T, want ResumeLaneEffect", effect)
+		t.Fatalf("recovery claimed %T, want ResumeLaneEffect", effect)
 	}
 	if err := engine.Apply(LaneOpened{
 		LaneID: laneIdentity.ID, Identity: laneIdentity, Thread: resume.Thread,
 		ConnectionGeneration: resume.Generation, Context: exactContext(provider.ContextImportUnsupported),
+		Delivery: provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: false},
 	}); err != nil {
-		t.Fatalf("open second exact resume: %v", err)
+		t.Fatalf("open exact resumed lane without readback: %v", err)
 	}
-	if effect, ok, err = engine.ClaimNext(); err != nil || !ok {
-		t.Fatalf("claim retried readback: ok=%v err=%v", ok, err)
-	} else if retry, ok := effect.(ReconcileTurnEffect); !ok || retry.OperationID != "failed-readback-turn" || retry.Turn != turn {
-		t.Fatalf("retried effect = %#v, want same immutable readback", effect)
-	}
-	state = engine.Snapshot()
-	count := 0
+	state := engine.Snapshot()
+	assertUnrecoverableTurnTerminalized(t, state, laneIdentity.ID, "no-readback-turn", provider.ErrorUnsupportedCapability)
 	for _, entry := range state.Outbox {
-		if entry.Kind == EffectReconcileTurn && entry.OperationID == "failed-readback-turn" {
-			count++
+		if entry.Kind == EffectReconcileTurn && entry.OperationID == "no-readback-turn" {
+			t.Fatalf("provider without turn readback received a reconcile effect: %#v", entry)
 		}
-		if entry.Kind == EffectStartTurn && entry.OperationID == "failed-readback-turn" && entry.Status == OutboxPending {
-			t.Fatal("retry made the original user input replayable")
+		if entry.Kind == EffectStartTurn && entry.OperationID == "no-readback-turn" && entry.Status == OutboxPending {
+			t.Fatalf("provider without turn readback made accepted input replayable: %#v", entry)
 		}
 	}
-	if count != 1 {
-		t.Fatalf("reconciliation retry appended duplicate receipts: count=%d", count)
+}
+
+func TestAcceptedTurnResumeFailureTerminalizesForBothFailureClasses(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		ambiguous bool
+		phase     LanePhase
+	}{
+		{name: "definitive", phase: LaneBroken},
+		{name: "ambiguous attachment", ambiguous: true, phase: LaneBlocked},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &memoryStateStore{}
+			engine, err := NewDurableEngine("resume-failure-"+test.name, store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			laneIdentity := testLane("resume-failure-"+test.name, "qwen")
+			openReadyDurableLane(t, engine, laneIdentity)
+			if err := engine.Apply(Submit{OperationID: "resume-failure-turn", Text: "send once", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, err := engine.ClaimNext(); err != nil || !ok {
+				t.Fatalf("claim running turn: ok=%v err=%v", ok, err)
+			}
+			turn := provider.TurnRef{OperationID: "resume-failure-turn", NativeID: "native-resume-failure-turn"}
+			if err := engine.Apply(TurnAdmitted{OperationID: "resume-failure-turn", Accepted: true, Turn: turn}); err != nil {
+				t.Fatal(err)
+			}
+			if err := engine.Apply(HostLost{LaneID: laneIdentity.ID, ConnectionGeneration: 1}); err != nil {
+				t.Fatalf("host loss: %v", err)
+			}
+			if _, ok, err := engine.ClaimNext(); err != nil || !ok {
+				t.Fatalf("claim exact resume: ok=%v err=%v", ok, err)
+			}
+			if err := engine.Apply(LaneOpenFailed{
+				LaneID: laneIdentity.ID, Kind: provider.ErrorTransientTransport, Ambiguous: test.ambiguous,
+			}); err != nil {
+				t.Fatalf("record resume failure: %v", err)
+			}
+			state := engine.Snapshot()
+			assertUnrecoverableTurnTerminalized(t, state, laneIdentity.ID, "resume-failure-turn", provider.ErrorTransientTransport)
+			if state.Lanes[laneIdentity.ID].Phase != test.phase {
+				t.Fatalf("resume failure phase = %q, want %q", state.Lanes[laneIdentity.ID].Phase, test.phase)
+			}
+			for _, entry := range state.Outbox {
+				if entry.Kind == EffectStartTurn && entry.OperationID == "resume-failure-turn" && entry.Status == OutboxPending {
+					t.Fatalf("resume failure made accepted input replayable: %#v", entry)
+				}
+			}
+		})
+	}
+}
+
+func TestStartupTerminalizesLegacyFailedReadbackState(t *testing.T) {
+	store := &memoryStateStore{}
+	engine, err := NewDurableEngine("legacy-readback-chat", store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	laneIdentity := testLane("legacy-readback-chat", "qwen")
+	openReadyDurableLane(t, engine, laneIdentity)
+	if err := engine.Apply(Submit{OperationID: "legacy-readback-turn", Text: "send once", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := engine.ClaimNext(); err != nil || !ok {
+		t.Fatalf("claim running turn: ok=%v err=%v", ok, err)
+	}
+	turn := provider.TurnRef{OperationID: "legacy-readback-turn", NativeID: "native-legacy-readback-turn"}
+	if err := engine.Apply(TurnAdmitted{OperationID: "legacy-readback-turn", Accepted: true, Turn: turn}); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy := engine.Snapshot()
+	legacy.Foreground.Status = ForegroundUncertain
+	lane := legacy.Lanes[laneIdentity.ID]
+	lane.Phase = LaneBlocked
+	lane.LastError = provider.ErrorProtocolViolation
+	lane.Delivery = provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: false}
+	legacy.Lanes[laneIdentity.ID] = lane
+	legacy.Outbox = append(legacy.Outbox, OutboxEntry{
+		ID: reconcileTurnEffectID("legacy-readback-turn"), Kind: EffectReconcileTurn, Status: OutboxFailed,
+		LaneID: laneIdentity.ID, OperationID: "legacy-readback-turn", Turn: turn, LastError: provider.ErrorProtocolViolation,
+	})
+	if err := store.Save(legacy); err != nil {
+		t.Fatalf("save legacy actor fixture: %v", err)
+	}
+
+	restarted, err := NewDurableEngine("legacy-readback-chat", store)
+	if err != nil {
+		t.Fatalf("restart legacy actor: %v", err)
+	}
+	state := restarted.Snapshot()
+	assertUnrecoverableTurnTerminalized(t, state, laneIdentity.ID, "legacy-readback-turn", provider.ErrorProtocolViolation)
+	if _, claimed, err := restarted.ClaimNext(); err != nil || claimed {
+		t.Fatalf("legacy repair replayed provider input or reconciliation: claimed=%v err=%v", claimed, err)
+	}
+}
+
+func assertUnrecoverableTurnTerminalized(t *testing.T, state State, laneID provider.LaneID, operationID provider.OperationID, kind provider.ErrorKind) {
+	t.Helper()
+	if state.Foreground != nil {
+		t.Fatalf("unrecoverable turn retained live foreground ownership: %#v", state.Foreground)
+	}
+	lane := state.Lanes[laneID]
+	if lane.Phase != LaneBlocked && lane.Phase != LaneBroken {
+		t.Fatalf("unrecoverable turn left lane phase %q", lane.Phase)
+	}
+	if lane.LastError != kind {
+		t.Fatalf("unrecoverable turn lane error = %q, want %q", lane.LastError, kind)
+	}
+	if len(state.Ledger) < 2 {
+		t.Fatalf("unrecoverable turn did not persist both visible owners: %#v", state.Ledger)
+	}
+	user, assistant := state.Ledger[len(state.Ledger)-2], state.Ledger[len(state.Ledger)-1]
+	if user.OperationID != operationID || user.Role != "user" || user.Status != "done" {
+		t.Fatalf("unrecoverable user row = %#v", user)
+	}
+	if assistant.OperationID != operationID || assistant.Role != "assistant" || assistant.Status != "failed" || !assistant.Interrupted {
+		t.Fatalf("unrecoverable assistant row = %#v", assistant)
+	}
+	if assistant.RetryPrompt != "" {
+		t.Fatalf("unrecoverable accepted turn exposed unsafe retry input: %#v", assistant)
+	}
+	if assistant.Terminal == nil || assistant.Terminal.Status != "failed" || !assistant.Terminal.Interrupted || assistant.Terminal.Error != string(kind) {
+		t.Fatalf("unrecoverable terminal receipt = %#v", assistant.Terminal)
+	}
+	if !strings.Contains(strings.ToLower(assistant.Text), "will not resend") {
+		t.Fatalf("unrecoverable terminal explanation omitted no-resend boundary: %q", assistant.Text)
+	}
+	if state.Obligation != nil && state.Obligation.State == "working" {
+		t.Fatalf("unrecoverable turn left its obligation working: %#v", state.Obligation)
 	}
 }
 

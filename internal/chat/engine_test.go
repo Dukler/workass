@@ -40,6 +40,12 @@ func (s *memoryStateStore) Save(state State) error {
 }
 
 func openReadyDurableLane(t *testing.T, engine *Engine, lane provider.LaneIdentity) {
+	openReadyDurableLaneWithDelivery(t, engine, lane, provider.DeliveryCapabilities{
+		StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true,
+	})
+}
+
+func openReadyDurableLaneWithDelivery(t *testing.T, engine *Engine, lane provider.LaneIdentity, delivery provider.DeliveryCapabilities) {
 	t.Helper()
 	if err := engine.Apply(SelectLane{Identity: lane}); err != nil {
 		t.Fatal(err)
@@ -57,6 +63,7 @@ func openReadyDurableLane(t *testing.T, engine *Engine, lane provider.LaneIdenti
 		Thread:               provider.ThreadRef{ProviderID: lane.Realm.ProviderID, RootID: "native-thread", HeadID: "native-thread", Lineage: 1},
 		ConnectionGeneration: 1,
 		Context:              exactContext(provider.ContextImportNonSampling),
+		Delivery:             delivery,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -218,14 +225,14 @@ func TestExternalMutationJournalClaimsBeforeEffectAndFailsClosedOnRecovery(t *te
 	}
 }
 
-func TestCrashAfterTurnDispatchBlocksWithoutResend(t *testing.T) {
+func TestCrashAfterTurnDispatchTerminalizesWithoutResend(t *testing.T) {
 	store := &memoryStateStore{}
 	engine, err := NewDurableEngine("chat", store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lane := testLane("chat", "codex")
-	openReadyDurableLane(t, engine, lane)
+	openReadyDurableLaneWithDelivery(t, engine, lane, provider.DeliveryCapabilities{})
 	if err := engine.Apply(Submit{OperationID: "op", Text: "send exactly once", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -243,9 +250,7 @@ func TestCrashAfterTurnDispatchBlocksWithoutResend(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := restarted.Snapshot()
-	if snapshot.Lanes[lane.ID].Phase != LaneBlocked || snapshot.Foreground == nil || snapshot.Foreground.Status != ForegroundUncertain {
-		t.Fatalf("ambiguous dispatch did not fail closed: %#v", snapshot)
-	}
+	assertUnrecoverableTurnTerminalized(t, snapshot, lane.ID, "op", provider.ErrorAcceptanceAmbiguous)
 	if got := snapshot.Outbox[len(snapshot.Outbox)-1].Status; got != OutboxAmbiguous {
 		t.Fatalf("turn outbox status = %q", got)
 	}
@@ -404,6 +409,7 @@ func TestRestartAttachesExactLaneBeforePendingTurn(t *testing.T) {
 	if err := restarted.Apply(LaneOpened{
 		LaneID: lane.ID, Identity: lane, Thread: resume.Thread,
 		ConnectionGeneration: resume.Generation, Context: exactContext(provider.ContextImportNonSampling),
+		Delivery: provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -453,6 +459,7 @@ func TestCrashAfterAdmissionQueuesReadbackNotResend(t *testing.T) {
 	if err := restarted.Apply(LaneOpened{
 		LaneID: lane.ID, Identity: lane, Thread: resume.Thread,
 		ConnectionGeneration: resume.Generation, Context: exactContext(provider.ContextImportNonSampling),
+		Delivery: provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -583,6 +590,7 @@ func TestCrashRecoveryNeverBlindlyResendsSteerButMayRepeatCancel(t *testing.T) {
 	if err := recoveredForCancel.Apply(LaneOpened{
 		LaneID: lane.ID, Identity: lane, Thread: resume.Thread,
 		ConnectionGeneration: resume.Generation, Context: exactContext(provider.ContextImportNonSampling),
+		Delivery: provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true},
 	}); err != nil {
 		t.Fatal(err)
 	}

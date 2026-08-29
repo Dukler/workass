@@ -728,6 +728,9 @@ func TestProjectActorChatRendersAmbiguousAdmissionAsBlockedInsteadOfRunning(t *t
 	if err := projectActorChat(projection, state); err != nil {
 		t.Fatal(err)
 	}
+	if projection["pending"] != false {
+		t.Fatalf("ambiguous terminal projection still owns pending/running chrome: %#v", projection["pending"])
+	}
 	messages := anySlice(projection["messages"])
 	if len(messages) != 2 {
 		t.Fatalf("ambiguous projection messages = %#v", messages)
@@ -742,6 +745,28 @@ func TestProjectActorChatRendersAmbiguousAdmissionAsBlockedInsteadOfRunning(t *t
 	}
 	if strings.TrimSpace(fieldString(assistant, "content")) == "" {
 		t.Fatalf("ambiguous delivery has no visible blocked explanation: %#v", assistant)
+	}
+}
+
+func TestActorForegroundRunningExcludesLegacyUncertainState(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status chat.ForegroundStatus
+		want   bool
+	}{
+		{name: "dispatching", status: chat.ForegroundDispatching, want: true},
+		{name: "running", status: chat.ForegroundRunning, want: true},
+		{name: "reconciling", status: chat.ForegroundReconciling, want: true},
+		{name: "legacy uncertain", status: chat.ForegroundUncertain, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := actorForegroundRunning(&chat.ForegroundTurn{Status: test.status}); got != test.want {
+				t.Fatalf("actor foreground %q running = %v, want %v", test.status, got, test.want)
+			}
+		})
+	}
+	if actorForegroundRunning(nil) {
+		t.Fatal("nil foreground reported running")
 	}
 }
 

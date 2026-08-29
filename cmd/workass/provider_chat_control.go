@@ -441,7 +441,7 @@ func (r *providerChatRuntime) ReadChat(tabID, chatID string, limit int, includeE
 		"modelId": fieldString(projected, "currentModelId"), "modeId": fieldString(projected, "currentModeId"),
 		"messages": copyMessages, "truncated": truncated,
 	}
-	if state.Foreground != nil {
+	if actorForegroundRunning(state.Foreground) {
 		result["running"] = true
 		result["jobId"] = state.Foreground.Turn.NativeID
 	} else {
@@ -466,7 +466,7 @@ func (r *providerChatRuntime) ListChats() ([]map[string]any, error) {
 			"active": fieldString(root, "activeId") == tabID,
 		}
 		state, ok := r.Snapshot(chatID)
-		if ok && state.Foreground != nil {
+		if ok && actorForegroundRunning(state.Foreground) {
 			listed["running"] = true
 			listed["jobId"] = state.Foreground.Turn.NativeID
 		} else {
@@ -485,7 +485,7 @@ func (r *providerChatRuntime) Foreground(tabID, chatID string) (string, bool, er
 	actor.mu.Lock()
 	state = actor.engine.Snapshot()
 	actor.mu.Unlock()
-	if state.Foreground == nil {
+	if !actorForegroundRunning(state.Foreground) {
 		return "", false, nil
 	}
 	return strings.TrimSpace(state.Foreground.Turn.NativeID), true, nil

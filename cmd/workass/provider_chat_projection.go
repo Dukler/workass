@@ -353,7 +353,7 @@ func projectActorChatWithHistory(out map[string]any, state chat.State, history a
 		return err
 	}
 	out["queue"] = queue
-	out["pending"] = state.Foreground != nil
+	out["pending"] = actorForegroundRunning(state.Foreground)
 	delete(out, "serverAuthored")
 	delete(out, "liveSession")
 	delete(out, "sessionId")
@@ -372,6 +372,18 @@ func projectActorChatWithHistory(out map[string]any, state chat.State, history a
 		out["sessionError"] = string(lane.LastError)
 	}
 	return nil
+}
+
+func actorForegroundRunning(foreground *chat.ForegroundTurn) bool {
+	if foreground == nil {
+		return false
+	}
+	switch foreground.Status {
+	case chat.ForegroundDispatching, chat.ForegroundRunning, chat.ForegroundReconciling:
+		return true
+	default:
+		return false
+	}
 }
 
 // actorLastActivityAt projects the lifecycle clock independently of transcript
