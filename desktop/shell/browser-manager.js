@@ -69,12 +69,146 @@ function cleanUserAgent(chromeVersion, platform = process.platform) {
   return `Mozilla/5.0 (${os}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`;
 }
 
+const BROWSER_MODIFIER_ALIASES = new Map([
+  ['alt', 'alt'], ['option', 'alt'],
+  ['control', 'control'], ['ctrl', 'control'],
+  ['meta', 'meta'], ['command', 'meta'], ['cmd', 'meta'], ['super', 'meta'],
+  ['shift', 'shift'],
+]);
+
+const BROWSER_KEY_ALIASES = new Map([
+  ['esc', 'Escape'], ['escape', 'Escape'],
+  ['return', 'Enter'], ['enter', 'Enter'],
+  ['spacebar', 'Space'], ['space', 'Space'],
+  ['backspace', 'Backspace'], ['delete', 'Delete'], ['del', 'Delete'],
+  ['tab', 'Tab'], ['home', 'Home'], ['end', 'End'],
+  ['pageup', 'PageUp'], ['pagedown', 'PageDown'],
+  ['arrowup', 'ArrowUp'], ['up', 'ArrowUp'],
+  ['arrowdown', 'ArrowDown'], ['down', 'ArrowDown'],
+  ['arrowleft', 'ArrowLeft'], ['left', 'ArrowLeft'],
+  ['arrowright', 'ArrowRight'], ['right', 'ArrowRight'],
+]);
+
+// Workass accepts the familiar compact shortcut spelling used by agents
+// (`Meta+A`, `Control+Shift+P`). Electron wants the key and modifiers in
+// separate fields; passing the whole string as keyCode silently emits no real
+// shortcut while still looking like a successful send.
+function parseBrowserKey(value, platform = process.platform) {
+  const raw = String(value || '').trim();
+  if (!raw) throw new Error('browser key is required');
+  if (raw.length > 128 || /[\r\n\0]/u.test(raw)) throw new Error('browser key is invalid');
+
+  const parts = raw.split('+').map((part) => part.trim());
+  if (parts.some((part) => !part)) throw new Error(`invalid browser shortcut: ${raw}`);
+  const keyRaw = parts.pop();
+  const modifiers = [];
+  for (const part of parts) {
+    const normalized = part.toLowerCase().replace(/[\s_-]+/gu, '');
+    const modifier = normalized === 'commandorcontrol' || normalized === 'cmdorctrl' || normalized === 'mod'
+      ? (platform === 'darwin' ? 'meta' : 'control')
+      : BROWSER_MODIFIER_ALIASES.get(normalized);
+    if (!modifier) throw new Error(`unsupported browser modifier: ${part}`);
+    if (!modifiers.includes(modifier)) modifiers.push(modifier);
+  }
+
+  const loweredKey = keyRaw.toLowerCase().replace(/[\s_-]+/gu, '');
+  const keyCode = BROWSER_KEY_ALIASES.get(loweredKey)
+    || (/^[a-z]$/iu.test(keyRaw) ? keyRaw.toUpperCase() : keyRaw);
+  if (!keyCode || keyCode.length > 64) throw new Error('browser key is invalid');
+  return { keyCode, modifiers };
+}
+
+const CDP_MODIFIER_BITS = Object.freeze({ alt: 1, control: 2, meta: 4, shift: 8 });
+const CDP_NAMED_KEYS = new Map([
+  ['Backspace', { key: 'Backspace', code: 'Backspace', virtualKeyCode: 8 }],
+  ['Tab', { key: 'Tab', code: 'Tab', virtualKeyCode: 9 }],
+  ['Enter', { key: 'Enter', code: 'Enter', virtualKeyCode: 13, text: '\r' }],
+  ['Shift', { key: 'Shift', code: 'ShiftLeft', virtualKeyCode: 16 }],
+  ['Control', { key: 'Control', code: 'ControlLeft', virtualKeyCode: 17 }],
+  ['Alt', { key: 'Alt', code: 'AltLeft', virtualKeyCode: 18 }],
+  ['Escape', { key: 'Escape', code: 'Escape', virtualKeyCode: 27 }],
+  ['Space', { key: ' ', code: 'Space', virtualKeyCode: 32, text: ' ' }],
+  ['PageUp', { key: 'PageUp', code: 'PageUp', virtualKeyCode: 33 }],
+  ['PageDown', { key: 'PageDown', code: 'PageDown', virtualKeyCode: 34 }],
+  ['End', { key: 'End', code: 'End', virtualKeyCode: 35 }],
+  ['Home', { key: 'Home', code: 'Home', virtualKeyCode: 36 }],
+  ['ArrowLeft', { key: 'ArrowLeft', code: 'ArrowLeft', virtualKeyCode: 37 }],
+  ['ArrowUp', { key: 'ArrowUp', code: 'ArrowUp', virtualKeyCode: 38 }],
+  ['ArrowRight', { key: 'ArrowRight', code: 'ArrowRight', virtualKeyCode: 39 }],
+  ['ArrowDown', { key: 'ArrowDown', code: 'ArrowDown', virtualKeyCode: 40 }],
+  ['Delete', { key: 'Delete', code: 'Delete', virtualKeyCode: 46 }],
+  ['Meta', { key: 'Meta', code: 'MetaLeft', virtualKeyCode: 91 }],
+]);
+const CDP_PUNCTUATION_KEYS = new Map([
+  [';', { code: 'Semicolon', virtualKeyCode: 186, shifted: ':' }],
+  ['=', { code: 'Equal', virtualKeyCode: 187, shifted: '+' }],
+  [',', { code: 'Comma', virtualKeyCode: 188, shifted: '<' }],
+  ['-', { code: 'Minus', virtualKeyCode: 189, shifted: '_' }],
+  ['.', { code: 'Period', virtualKeyCode: 190, shifted: '>' }],
+  ['/', { code: 'Slash', virtualKeyCode: 191, shifted: '?' }],
+  ['`', { code: 'Backquote', virtualKeyCode: 192, shifted: '~' }],
+  ['[', { code: 'BracketLeft', virtualKeyCode: 219, shifted: '{' }],
+  ['\\', { code: 'Backslash', virtualKeyCode: 220, shifted: '|' }],
+  [']', { code: 'BracketRight', virtualKeyCode: 221, shifted: '}' }],
+  ["'", { code: 'Quote', virtualKeyCode: 222, shifted: '"' }],
+]);
+
+// CDP targets the owned page without requiring a focused BrowserWindow.
+// Electron's webContents.sendInputEvent only works while the containing window
+// is focused, which made its success-looking return value especially dangerous
+// for agent-driven shortcuts. Editing commands add page-side verification where
+// a detached Chromium target cannot perform the default selection/deletion.
+function cdpBrowserKey(parsed) {
+  const modifiers = parsed.modifiers.reduce((bits, modifier) => bits | (CDP_MODIFIER_BITS[modifier] || 0), 0);
+  const shift = parsed.modifiers.includes('shift');
+  const nonShiftModifier = parsed.modifiers.some((modifier) => modifier !== 'shift');
+  let definition = CDP_NAMED_KEYS.get(parsed.keyCode);
+
+  if (!definition && /^[A-Z]$/u.test(parsed.keyCode)) {
+    const lower = parsed.keyCode.toLowerCase();
+    definition = {
+      key: shift ? parsed.keyCode : lower,
+      code: `Key${parsed.keyCode}`,
+      virtualKeyCode: parsed.keyCode.charCodeAt(0),
+      text: shift ? parsed.keyCode : lower,
+      unmodifiedText: lower,
+    };
+  } else if (!definition && /^[0-9]$/u.test(parsed.keyCode)) {
+    definition = {
+      key: parsed.keyCode,
+      code: `Digit${parsed.keyCode}`,
+      virtualKeyCode: parsed.keyCode.charCodeAt(0),
+      text: parsed.keyCode,
+    };
+  } else if (!definition && CDP_PUNCTUATION_KEYS.has(parsed.keyCode)) {
+    const punctuation = CDP_PUNCTUATION_KEYS.get(parsed.keyCode);
+    const key = shift ? punctuation.shifted : parsed.keyCode;
+    definition = { key, code: punctuation.code, virtualKeyCode: punctuation.virtualKeyCode, text: key, unmodifiedText: parsed.keyCode };
+  } else if (!definition && /^F(?:[1-9]|1[0-9]|2[0-4])$/u.test(parsed.keyCode)) {
+    const number = Number(parsed.keyCode.slice(1));
+    definition = { key: parsed.keyCode, code: parsed.keyCode, virtualKeyCode: 111 + number };
+  }
+
+  definition ||= { key: parsed.keyCode, code: parsed.keyCode, virtualKeyCode: 0 };
+  const unmodifiedText = definition.unmodifiedText ?? definition.text;
+  const text = nonShiftModifier ? undefined : definition.text;
+  return {
+    modifiers,
+    key: definition.key,
+    code: definition.code,
+    windowsVirtualKeyCode: definition.virtualKeyCode,
+    ...(unmodifiedText ? { unmodifiedText } : {}),
+    ...(text ? { text } : {}),
+  };
+}
+
 class BrowserManager {
   constructor({ win, WebContentsView, session, partition = DEFAULT_PARTITION, chromeVersion, platform, onState, requestOpen }) {
     if (!win || !WebContentsView || !session) throw new Error('browser manager dependencies missing');
     this.win = win;
     this.WebContentsView = WebContentsView;
     this.partition = partition;
+    this.platform = platform || process.platform;
     this.profile = session.fromPartition(partition, { cache: true });
     this.userAgent = cleanUserAgent(chromeVersion, platform);
     this.onState = typeof onState === 'function' ? onState : () => {};
@@ -85,6 +219,7 @@ class BrowserManager {
     this.agentControl = false;
     this.cdpListeners = new Set();
     this.childSessions = new Map();
+    this.typeProbeSeq = 0;
 
     try { this.profile.setUserAgent(this.userAgent); } catch { /* best effort */ }
     // Remote pages never receive ambient device capabilities. Login itself does
@@ -428,6 +563,128 @@ class BrowserManager {
     return debug.sendCommand(String(method || ''), commandParams || {}, sessionId || undefined);
   }
 
+  async dispatchBrowserKey(entry, parsed, { commands } = {}) {
+    const tabId = this.tabInfo(entry).id;
+    const key = cdpBrowserKey(parsed);
+    const down = { type: key.text ? 'keyDown' : 'rawKeyDown', ...key };
+    if (Array.isArray(commands) && commands.length) down.commands = commands;
+    await this.executeCDP({ tabId }, 'Input.dispatchKeyEvent', down);
+    const { text: _text, ...keyUp } = key;
+    await this.executeCDP({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyUp', ...keyUp });
+  }
+
+  async selectAllBrowserTarget(webContents) {
+    return webContents.executeJavaScript(`(/* workass-browser-select-all */ () => {
+      const el = document.activeElement;
+      if (!el || el === document.body || el === document.documentElement) {
+        return { found: false, selectionVerified: false, strategy: 'none' };
+      }
+      const editorRoot = el.closest?.('.monaco-editor,.CodeMirror,.cm-editor') || null;
+      try {
+        if (editorRoot?.classList.contains('monaco-editor')) {
+          const api = globalThis.monaco?.editor;
+          const editors = typeof api?.getEditors === 'function' ? api.getEditors() : [];
+          const editor = editors.find((candidate) => candidate?.getDomNode?.() === editorRoot);
+          const model = editor?.getModel?.();
+          const range = model?.getFullModelRange?.();
+          if (editor && range) {
+            editor.focus();
+            editor.setSelection(range);
+            return { found: true, selectionVerified: true, strategy: 'monaco-model' };
+          }
+        }
+        if (editorRoot?.classList.contains('CodeMirror') && editorRoot.CodeMirror) {
+          editorRoot.CodeMirror.execCommand('selectAll');
+          return { found: true, selectionVerified: true, strategy: 'codemirror-command' };
+        }
+        if (el.isContentEditable) {
+          const selection = globalThis.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          const empty = !String(el.innerText || el.textContent || '');
+          return {
+            found: true,
+            selectionVerified: empty || (selection.rangeCount === 1 && !selection.getRangeAt(0).collapsed),
+            strategy: 'contenteditable-range',
+          };
+        }
+        if (!editorRoot && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) {
+          el.setSelectionRange(0, String(el.value || '').length);
+          return {
+            found: true,
+            selectionVerified: el.selectionStart === 0 && el.selectionEnd === String(el.value || '').length,
+            strategy: 'form-control-range',
+          };
+        }
+      } catch { /* keyboard dispatch remains the fallback */ }
+      return { found: true, selectionVerified: false, strategy: 'keyboard-fallback' };
+    })()`);
+  }
+
+  async deleteSelectedBrowserText(webContents, keyCode) {
+    const command = JSON.stringify(keyCode === 'Delete' ? 'forwardDelete' : 'delete');
+    return webContents.executeJavaScript(`(/* workass-browser-delete-selection */ () => {
+      const el = document.activeElement;
+      if (!el || el === document.body || el === document.documentElement) {
+        return { found: false, deletionVerified: false, strategy: 'none' };
+      }
+      const editorRoot = el.closest?.('.monaco-editor,.CodeMirror,.cm-editor') || null;
+      try {
+        if (editorRoot?.classList.contains('monaco-editor')) {
+          const api = globalThis.monaco?.editor;
+          const editors = typeof api?.getEditors === 'function' ? api.getEditors() : [];
+          const editor = editors.find((candidate) => candidate?.getDomNode?.() === editorRoot);
+          const model = editor?.getModel?.();
+          const selection = editor?.getSelection?.();
+          if (editor && model && selection && !selection.isEmpty()) {
+            const before = model.getValueLength();
+            editor.executeEdits('workass-browser-key', [{ range: selection, text: '', forceMoveMarkers: true }]);
+            return { found: true, deletionVerified: model.getValueLength() < before, strategy: 'monaco-model' };
+          }
+        }
+        if (editorRoot?.classList.contains('CodeMirror') && editorRoot.CodeMirror?.somethingSelected?.()) {
+          const before = String(editorRoot.CodeMirror.getValue()).length;
+          editorRoot.CodeMirror.replaceSelection('');
+          return {
+            found: true,
+            deletionVerified: String(editorRoot.CodeMirror.getValue()).length < before,
+            strategy: 'codemirror-selection',
+          };
+        }
+        if (el.isContentEditable) {
+          const selection = globalThis.getSelection();
+          if (selection?.rangeCount && !selection.getRangeAt(0).collapsed) {
+            const before = String(el.innerText || el.textContent || '').length;
+            document.execCommand(${command}, false, null);
+            const after = String(el.innerText || el.textContent || '').length;
+            return { found: true, deletionVerified: after < before, strategy: 'contenteditable-command' };
+          }
+        }
+        if (!editorRoot && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) {
+          const start = Number(el.selectionStart);
+          const end = Number(el.selectionEnd);
+          if (Number.isInteger(start) && Number.isInteger(end) && end > start) {
+            const before = String(el.value || '');
+            const next = before.slice(0, start) + before.slice(end);
+            const prototype = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+            if (typeof setter === 'function') setter.call(el, next);
+            else el.value = next;
+            el.setSelectionRange(start, start);
+            let event;
+            try { event = new InputEvent('input', { bubbles: true, inputType: ${command} === 'forwardDelete' ? 'deleteContentForward' : 'deleteContentBackward' }); }
+            catch { event = new Event('input', { bubbles: true }); }
+            el.dispatchEvent(event);
+            return { found: true, deletionVerified: String(el.value || '') === next, strategy: 'form-control-selection' };
+          }
+        }
+      } catch { /* the CDP key event remains the primary attempt */ }
+      return { found: false, deletionVerified: false, strategy: 'keyboard-only' };
+    })()`);
+  }
+
   async attachTarget(tabId, targetId) {
     const result = await this.executeCDP({ tabId }, 'Target.attachToTarget', { targetId: String(targetId), flatten: true });
     if (!result || !result.sessionId) throw new Error('browser child target attach returned no session id');
@@ -458,6 +715,324 @@ class BrowserManager {
       + `${visible} Only the visible tab can be screenshotted — open the browser on chat ${info.chatId} and retry.`;
   }
 
+  async submitBrowserType(entry, selector) {
+    const webContents = entry.view.webContents;
+    const target = JSON.stringify(String(selector || ''));
+    const submit = await webContents.executeJavaScript(`(() => {
+      const el = document.querySelector(${target});
+      if (!el) return { found: false };
+      el.focus();
+      if (el.form && typeof el.form.requestSubmit === 'function') {
+        el.form.requestSubmit();
+        return { found: true, submitted: true, strategy: 'form' };
+      }
+      return { found: true, submitted: false, strategy: 'enter-key' };
+    })()`);
+    if (!submit || submit.found !== true) throw new Error('browser type target disappeared before submit');
+    if (!submit.submitted) {
+      await this.dispatchBrowserKey(entry, parseBrowserKey('Enter', this.platform));
+      submit.submitted = true;
+    }
+    return submit;
+  }
+
+  async browserType(entry, params = {}) {
+    const wc = entry.view.webContents;
+    const selectorText = String(params.selector || '');
+    const text = String(params.text ?? '');
+    const selector = JSON.stringify(selectorText);
+    const value = JSON.stringify(text);
+    const probeKey = `__workassBrowserTypeProbe${++this.typeProbeSeq}`;
+    const encodedProbeKey = JSON.stringify(probeKey);
+
+    // Ordinary form controls keep the deterministic value-set path, but use
+    // the native prototype setter so React/Vue value trackers observe the
+    // input event. Hidden editor textareas and contenteditable surfaces must be
+    // driven like a user: focus, select all, then insert native text.
+    const prepared = await wc.executeJavaScript(`(/* workass-browser-type-prepare */ () => {
+      const el = document.querySelector(${selector});
+      if (!el) return { found: false };
+      const input = el instanceof HTMLInputElement;
+      const textarea = el instanceof HTMLTextAreaElement;
+      const blockedInputTypes = new Set(['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit']);
+      const formControl = textarea || (input && !blockedInputTypes.has(String(el.type || '').toLowerCase()));
+      const editorRoot = el.matches?.('.monaco-editor,.CodeMirror,.cm-editor')
+        ? el
+        : el.closest('.monaco-editor,.CodeMirror,.cm-editor');
+      const monacoEditor = (() => {
+        if (!editorRoot?.classList.contains('monaco-editor')) return null;
+        try {
+          const api = globalThis.monaco?.editor;
+          const editors = typeof api?.getEditors === 'function' ? api.getEditors() : [];
+          return editors.find((candidate) => candidate?.getDomNode?.() === editorRoot) || null;
+        } catch { return null; }
+      })();
+      const nativeEditor = !!editorRoot || el.isContentEditable || (!formControl && el.getAttribute('role') === 'textbox');
+      el.scrollIntoView({ block: 'center', inline: 'center' });
+      if (monacoEditor) monacoEditor.focus();
+      else if (editorRoot && el === editorRoot) {
+        const editorInput = editorRoot.querySelector('textarea:not([readonly]),[contenteditable]:not([contenteditable="false"])');
+        if (editorInput) editorInput.focus();
+        else el.focus();
+      } else el.focus();
+      const focused = () => document.activeElement === el || (!!editorRoot && editorRoot.contains(document.activeElement));
+      const editorReadOnly = monacoEditor?.getRawOptions?.()?.readOnly === true;
+      if (editorReadOnly || (!editorRoot && (el.disabled || el.readOnly))) {
+        return { found: true, editable: false, focused: focused(), reason: 'disabled or read-only' };
+      }
+      if (!formControl && !nativeEditor) {
+        return { found: true, editable: false, focused: focused(), reason: 'target is not editable' };
+      }
+      if (!nativeEditor) {
+        const before = String(el.value ?? '');
+        const prototype = textarea ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+        if (typeof setter !== 'function') {
+          return { found: true, editable: false, focused: focused(), reason: 'value setter is unavailable' };
+        }
+        setter.call(el, ${value});
+        let inputEvent;
+        try {
+          inputEvent = new InputEvent('input', { bubbles: true, inputType: 'insertReplacementText', data: ${value} });
+        } catch {
+          inputEvent = new Event('input', { bubbles: true });
+        }
+        el.dispatchEvent(inputEvent);
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return new Promise((resolve) => setTimeout(() => {
+          const retained = String(el.value ?? '') === ${value};
+          resolve({
+            found: true, editable: true, strategy: 'value', focused: focused(),
+            changed: before !== String(el.value ?? ''), replacementVerified: retained,
+            valueLength: String(el.value ?? '').length,
+          });
+        }, 0));
+      }
+
+      const readModel = () => {
+        try {
+          const api = globalThis.monaco?.editor;
+          if (!api) return null;
+          if (typeof api.getEditors === 'function' && editorRoot) {
+            const matches = api.getEditors().filter((editor) => editor?.getDomNode?.() === editorRoot);
+            if (matches.length === 1) return String(matches[0].getModel()?.getValue?.() ?? '');
+          }
+          if (typeof api.getModels === 'function') {
+            const models = api.getModels().filter((model) => !model?.isDisposed?.());
+            if (models.length === 1) return String(models[0].getValue());
+          }
+        } catch { /* optional Monaco readback */ }
+        return null;
+      };
+      const readVisible = () => {
+        const root = editorRoot || el;
+        const lines = root.querySelectorAll('.view-lines .view-line,.CodeMirror-code pre,.cm-content .cm-line');
+        if (lines.length) return Array.from(lines).map((line) => String(line.textContent || '')).join('\\n');
+        if (el.isContentEditable) return String(el.innerText || el.textContent || '');
+        return '';
+      };
+      const probe = {
+        el,
+        beforeModel: readModel(),
+        beforeVisible: readVisible(),
+        beforeInputEvents: 0,
+        inputEvents: 0,
+        dataLengths: [],
+        inputTypes: [],
+      };
+      probe.onBeforeInput = (event) => {
+        probe.beforeInputEvents += 1;
+        probe.dataLengths.push(typeof event.data === 'string' ? event.data.length : null);
+        probe.inputTypes.push(String(event.inputType || ''));
+      };
+      probe.onInput = (event) => {
+        probe.inputEvents += 1;
+        probe.dataLengths.push(typeof event.data === 'string' ? event.data.length : null);
+        probe.inputTypes.push(String(event.inputType || ''));
+      };
+      el.addEventListener('beforeinput', probe.onBeforeInput, true);
+      el.addEventListener('input', probe.onInput, true);
+      globalThis[${encodedProbeKey}] = probe;
+      let selectionVerified = false;
+      let selectionStrategy = 'keyboard-fallback';
+      try {
+        if (editorRoot?.classList.contains('monaco-editor')) {
+          const api = globalThis.monaco?.editor;
+          const editors = typeof api?.getEditors === 'function' ? api.getEditors() : [];
+          const editor = editors.find((candidate) => candidate?.getDomNode?.() === editorRoot);
+          const model = editor?.getModel?.();
+          const range = model?.getFullModelRange?.();
+          if (editor && range) {
+            editor.focus();
+            editor.setSelection(range);
+            selectionVerified = true;
+            selectionStrategy = 'monaco-model';
+          }
+        }
+        if (!selectionVerified && editorRoot?.classList.contains('CodeMirror') && editorRoot.CodeMirror) {
+          editorRoot.CodeMirror.execCommand('selectAll');
+          selectionVerified = true;
+          selectionStrategy = 'codemirror-command';
+        }
+        if (!selectionVerified && el.isContentEditable) {
+          const selection = globalThis.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          const empty = !String(el.innerText || el.textContent || '');
+          selectionVerified = empty || (selection.rangeCount === 1 && !selection.getRangeAt(0).collapsed);
+          selectionStrategy = 'contenteditable-range';
+        }
+      } catch { /* CDP keyboard selection remains the fallback */ }
+      return {
+        found: true, editable: true, strategy: 'native', focused: focused(),
+        editor: editorRoot ? (editorRoot.classList.contains('monaco-editor') ? 'monaco' : 'code-editor') : 'contenteditable',
+        selectionVerified, selectionStrategy,
+      };
+    })()`);
+
+    if (!prepared || prepared.found !== true) return { found: false };
+    if (prepared.editable !== true) {
+      throw new Error(`browser type target is not editable${prepared.reason ? `: ${prepared.reason}` : ''}`);
+    }
+    if (prepared.focused !== true) throw new Error('browser type target could not be focused');
+
+    if (prepared.strategy === 'value') {
+      if (prepared.replacementVerified !== true) throw new Error('browser type target did not retain the replacement text');
+      let submitted = false;
+      if (params.submit === true) submitted = (await this.submitBrowserType(entry, selectorText)).submitted === true;
+      return { ...prepared, submitted };
+    }
+    if (prepared.strategy !== 'native') throw new Error('browser type selected an unknown edit strategy');
+
+    const cleanupProbe = async () => {
+      try {
+        await wc.executeJavaScript(`(() => {
+          const probe = globalThis[${encodedProbeKey}];
+          if (probe?.el) {
+            probe.el.removeEventListener('beforeinput', probe.onBeforeInput, true);
+            probe.el.removeEventListener('input', probe.onInput, true);
+          }
+          delete globalThis[${encodedProbeKey}];
+        })()`);
+      } catch { /* navigation or renderer teardown owns the cleanup */ }
+    };
+
+    let verification;
+    try {
+      if (prepared.selectionVerified !== true) {
+        await this.dispatchBrowserKey(entry, parseBrowserKey('CommandOrControl+A', this.platform), { commands: ['selectAll'] });
+      }
+      // Cross the renderer event loop once so the editor consumes Select All
+      // before the replacement text reaches its hidden input surface.
+      await wc.executeJavaScript('(/* workass-browser-input-barrier */ () => new Promise((resolve) => setTimeout(resolve, 0)))()');
+      if (text) {
+        await this.executeCDP({ tabId: this.tabInfo(entry).id }, 'Input.insertText', { text });
+      } else {
+        await this.dispatchBrowserKey(entry, parseBrowserKey('Backspace', this.platform));
+        await wc.executeJavaScript('(/* workass-browser-delete-barrier */ () => new Promise((resolve) => setTimeout(resolve, 0)))()');
+        await this.deleteSelectedBrowserText(wc, 'Backspace');
+      }
+
+      verification = await wc.executeJavaScript(`(/* workass-browser-type-verify */ async () => {
+        const expected = ${value};
+        const normalize = (raw) => String(raw ?? '').replace(/\\r\\n?/gu, '\\n').replace(/\\u00a0/gu, ' ');
+        const compact = (raw) => normalize(raw).replace(/\\s+/gu, ' ').trim();
+        const visibleMatches = (visible) => {
+          const observed = compact(visible);
+          const wanted = compact(expected);
+          if (!wanted) return !observed;
+          return !!observed && wanted.includes(observed);
+        };
+        const readState = () => {
+          const probe = globalThis[${encodedProbeKey}];
+          const el = document.querySelector(${selector});
+          if (!probe || !el) return { found: false };
+          const editorRoot = el.closest('.monaco-editor,.CodeMirror,.cm-editor');
+          let model = null;
+          try {
+            const api = globalThis.monaco?.editor;
+            if (api && typeof api.getEditors === 'function' && editorRoot) {
+              const matches = api.getEditors().filter((editor) => editor?.getDomNode?.() === editorRoot);
+              if (matches.length === 1) model = String(matches[0].getModel()?.getValue?.() ?? '');
+            }
+            if (model === null && api && typeof api.getModels === 'function') {
+              const models = api.getModels().filter((candidate) => !candidate?.isDisposed?.());
+              if (models.length === 1) model = String(models[0].getValue());
+            }
+          } catch { /* optional Monaco readback */ }
+          const root = editorRoot || el;
+          const lines = root.querySelectorAll('.view-lines .view-line,.CodeMirror-code pre,.cm-content .cm-line');
+          const visible = lines.length
+            ? Array.from(lines).map((line) => String(line.textContent || '')).join('\\n')
+            : (el.isContentEditable ? String(el.innerText || el.textContent || '') : '');
+          const exact = model !== null
+            ? normalize(model) === normalize(expected)
+            : (el.isContentEditable ? normalize(visible) === normalize(expected) : false);
+          const changed = model !== null
+            ? normalize(model) !== normalize(probe.beforeModel)
+            : normalize(visible) !== normalize(probe.beforeVisible);
+          const inputAccepted = probe.beforeInputEvents > 0 || probe.inputEvents > 0;
+          return {
+            found: true,
+            focused: document.activeElement === el || (!!editorRoot && editorRoot.contains(document.activeElement)),
+            changed,
+            inputAccepted,
+            exact,
+            visibleMatch: visibleMatches(visible),
+            beforeInputEvents: probe.beforeInputEvents,
+            inputEvents: probe.inputEvents,
+            valueLength: model !== null ? model.length : null,
+            verification: exact ? (model !== null ? 'model' : 'contenteditable') : (visibleMatches(visible) ? 'visible-fragment' : 'none'),
+          };
+        };
+        let state = readState();
+        for (let attempt = 0; attempt < 20 && state.found && !state.exact && !state.visibleMatch; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          state = readState();
+        }
+        const probe = globalThis[${encodedProbeKey}];
+        if (probe?.el) {
+          probe.el.removeEventListener('beforeinput', probe.onBeforeInput, true);
+          probe.el.removeEventListener('input', probe.onInput, true);
+        }
+        delete globalThis[${encodedProbeKey}];
+        return state;
+      })()`);
+    } catch (error) {
+      await cleanupProbe();
+      throw error;
+    }
+
+    if (!verification || verification.found !== true) throw new Error('browser type target disappeared during replacement');
+    if (verification.focused !== true) throw new Error('browser type target lost focus during replacement');
+    if (verification.inputAccepted !== true && verification.exact !== true) {
+      throw new Error('browser type replacement did not reach the editor input');
+    }
+    if (verification.exact !== true && verification.visibleMatch !== true) {
+      throw new Error('browser type could not observe the replacement in the editor');
+    }
+    if (verification.changed !== true && verification.exact !== true) {
+      throw new Error('browser type did not change the editor');
+    }
+
+    let submitted = false;
+    if (params.submit === true) submitted = (await this.submitBrowserType(entry, selectorText)).submitted === true;
+    return {
+      found: true,
+      editable: true,
+      focused: true,
+      strategy: 'native',
+      changed: verification.changed === true,
+      replacementVerified: verification.exact === true,
+      observed: verification.visibleMatch === true,
+      verification: verification.verification,
+      valueLength: verification.valueLength,
+      submitted,
+    };
+  }
+
   async browserControl(method, params = {}) {
     if (method === 'browser.list') return { tabs: this.browserTabs(params.chatId) };
     if (method === 'browser.open') {
@@ -482,6 +1057,10 @@ class BrowserManager {
           if (el.id) return '#' + esc(el.id);
           const parts = [];
           for (let n = el; n && n.nodeType === 1 && n !== document.documentElement; n = n.parentElement) {
+            if (n.id) {
+              parts.unshift('#' + esc(n.id));
+              break;
+            }
             let p = n.tagName.toLowerCase();
             const same = n.parentElement ? Array.from(n.parentElement.children).filter((x) => x.tagName === n.tagName) : [];
             if (same.length > 1) p += ':nth-of-type(' + (same.indexOf(n) + 1) + ')';
@@ -489,16 +1068,66 @@ class BrowserManager {
           }
           return parts.join(' > ');
         };
-        const nodes = Array.from(document.querySelectorAll('a,button,input,textarea,select,[role="button"],[tabindex]')).filter(visible).slice(0, 200);
+        const readEditor = (root) => {
+          let value = '';
+          let valueRead = false;
+          let readOnly = root.getAttribute('aria-readonly') === 'true';
+          let kind = root.matches('.monaco-editor') ? 'monaco' : 'code-editor';
+          try {
+            if (kind === 'monaco') {
+              const api = globalThis.monaco?.editor;
+              const candidates = typeof api?.getEditors === 'function' ? api.getEditors() : [];
+              const editor = candidates.find((candidate) => candidate?.getDomNode?.() === root);
+              const model = editor?.getModel?.();
+              if (model) {
+                value = String(model.getValue());
+                valueRead = true;
+              }
+              readOnly = readOnly || editor?.getRawOptions?.()?.readOnly === true;
+            } else if (root.CodeMirror?.getValue) {
+              value = String(root.CodeMirror.getValue());
+              valueRead = true;
+              readOnly = readOnly || root.CodeMirror.getOption?.('readOnly') === true;
+            }
+          } catch { /* visible lines remain available below */ }
+          if (!valueRead) {
+            const lines = root.querySelectorAll('.view-lines .view-line,.CodeMirror-code pre,.cm-content .cm-line');
+            if (lines.length) value = Array.from(lines).map((line) => String(line.textContent || '')).join('\\n');
+          }
+          return {
+            selector: selector(root), kind,
+            text: value.slice(0, 12000), valueLength: value.length, truncated: value.length > 12000,
+            focused: root.contains(document.activeElement), readOnly,
+          };
+        };
+        const editorRoots = Array.from(document.querySelectorAll('.monaco-editor,.CodeMirror,.cm-editor')).filter(visible);
+        const editorStates = new Map(editorRoots.map((root) => [root, readEditor(root)]));
+        const nodes = Array.from(document.querySelectorAll('a,button,input,textarea,select,[role="button"],[role="textbox"],[contenteditable]:not([contenteditable="false"]),[tabindex],.monaco-editor,.CodeMirror,.cm-editor')).filter(visible).slice(0, 200);
         return {
           url: location.href,
           title: document.title,
           text: String(document.body?.innerText || '').slice(0, 12000),
-          interactive: nodes.map((el) => ({
-            selector: selector(el), tag: el.tagName.toLowerCase(),
-            text: String(el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim().slice(0, 240),
-            type: el.getAttribute('type') || null,
-          })),
+          editors: editorRoots.map((root) => editorStates.get(root)),
+          interactive: nodes.map((el) => {
+            const bounds = el.getBoundingClientRect();
+            const editorState = editorStates.get(el);
+            return {
+              selector: selector(el), tag: el.tagName.toLowerCase(),
+              text: String(editorState?.text || el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim().slice(0, 240),
+              type: el.getAttribute('type') || null,
+              role: el.getAttribute('role') || null,
+              ariaLabel: el.getAttribute('aria-label') || null,
+              focused: document.activeElement === el || el.contains(document.activeElement),
+              disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
+              readOnly: !!el.readOnly || el.getAttribute('aria-readonly') === 'true' || editorState?.readOnly === true,
+              editable: !!el.isContentEditable || el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.matches('.monaco-editor,.CodeMirror,.cm-editor'),
+              editor: el.matches('.monaco-editor') ? 'monaco' : (el.matches('.CodeMirror,.cm-editor') ? 'code-editor' : null),
+              valueLength: el instanceof HTMLInputElement && el.type === 'password'
+                ? null
+                : (typeof el.value === 'string' ? el.value.length : null),
+              bounds: { x: Math.round(bounds.x), y: Math.round(bounds.y), width: Math.round(bounds.width), height: Math.round(bounds.height) },
+            };
+          }),
         };
       })()`);
     }
@@ -507,10 +1136,7 @@ class BrowserManager {
       return wc.executeJavaScript(`(() => { const el = document.querySelector(${selector}); if (!el) return { found:false }; el.scrollIntoView({block:'center',inline:'center'}); el.click(); return { found:true }; })()`);
     }
     if (method === 'browser.type') {
-      const selector = JSON.stringify(String(params.selector || ''));
-      const value = JSON.stringify(String(params.text || ''));
-      const submit = params.submit === true ? 'true' : 'false';
-      return wc.executeJavaScript(`(() => { const el = document.querySelector(${selector}); if (!el) return { found:false }; el.focus(); el.value = ${value}; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); if (${submit}) { const form = el.form; if (form?.requestSubmit) form.requestSubmit(); else el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',bubbles:true})); } return { found:true }; })()`);
+      return this.browserType(entry, params);
     }
     if (method === 'browser.scroll') {
       const x = Number.isFinite(Number(params.x)) ? Number(params.x) : 0;
@@ -518,11 +1144,22 @@ class BrowserManager {
       return wc.executeJavaScript(`(() => { window.scrollBy(${JSON.stringify(x)}, ${JSON.stringify(y)}); return { x: window.scrollX, y: window.scrollY }; })()`);
     }
     if (method === 'browser.key') {
-      const key = String(params.key || '').trim();
-      if (!key) throw new Error('browser key is required');
-      wc.sendInputEvent({ type: 'keyDown', keyCode: key });
-      wc.sendInputEvent({ type: 'keyUp', keyCode: key });
-      return { sent: true };
+      const parsed = parseBrowserKey(params.key, this.platform);
+      await this.dispatchBrowserKey(entry, parsed);
+      const selectAll = parsed.keyCode === 'A'
+        && (parsed.modifiers.includes('meta') || parsed.modifiers.includes('control'))
+        && !parsed.modifiers.includes('alt');
+      const selection = selectAll ? await this.selectAllBrowserTarget(wc) : null;
+      let deletion = null;
+      if (parsed.keyCode === 'Backspace' || parsed.keyCode === 'Delete') {
+        await wc.executeJavaScript('(/* workass-browser-key-barrier */ () => new Promise((resolve) => setTimeout(resolve, 0)))()');
+        deletion = await this.deleteSelectedBrowserText(wc, parsed.keyCode);
+      }
+      return {
+        sent: true, key: parsed.keyCode, modifiers: parsed.modifiers,
+        ...(selection ? { selectionVerified: selection.selectionVerified === true, selectionStrategy: selection.strategy } : {}),
+        ...(deletion?.found ? { deletionVerified: deletion.deletionVerified === true, deletionStrategy: deletion.strategy } : {}),
+      };
     }
     if (method === 'browser.batch') {
       const actions = Array.isArray(params.actions) ? params.actions : [];
@@ -565,4 +1202,4 @@ class BrowserManager {
   }
 }
 
-module.exports = { BrowserManager, cleanUserAgent, normalizeBrowserURL, resolveBrowserURL, safeBounds };
+module.exports = { BrowserManager, cleanUserAgent, normalizeBrowserURL, parseBrowserKey, resolveBrowserURL, safeBounds };

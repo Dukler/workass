@@ -1,6 +1,7 @@
 import { memo } from 'react';
 import type { SignedBlock } from './blocks';
-import { renderInline, renderCode, type InlineMediaResolver } from './inline';
+import { renderInline, type InlineMediaResolver } from './inline';
+import { CodeBlock } from './CodeBlock';
 import { VisualizeBlock } from './VisualizeBlock';
 
 // One block. Memoized on its signature so a sealed block above the streaming
@@ -17,7 +18,7 @@ function BlockView({ sb, media, visualizeTabId, visualizeChatId }: { sb: SignedB
     case 'heading':
       return <div className={`mdh mdh${Math.min(b.level, 3)}`}>{renderInline(b.raw, 'h', true, media)}</div>;
     case 'code':
-      return <div className="codebox">{renderCode(b.raw)}</div>;
+      return <CodeBlock raw={b.raw} language={b.lang} />;
     case 'quote':
       return <div className="mdquote">{renderInline(b.raw, 'q', true, media)}</div>;
     case 'hr':
