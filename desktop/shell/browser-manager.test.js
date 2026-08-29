@@ -3,14 +3,15 @@
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
-const { BrowserManager, cleanUserAgent, normalizeBrowserURL, resolveBrowserURL, safeBounds } = require('./browser-manager');
+const { BrowserManager, cleanUserAgent, normalizeBrowserURL, parseBrowserKey, resolveBrowserURL, safeBounds } = require('./browser-manager');
 
 class FakeDebugger extends EventEmitter {
-  constructor() { super(); this.attached = false; this.commands = []; }
+  constructor() { super(); this.attached = false; this.commands = []; this.commandCalls = []; }
   isAttached() { return this.attached; }
   attach(version) { this.attached = true; this.version = version; }
   async sendCommand(method, params, sessionId) {
     this.commands.push(method);
+    this.commandCalls.push({ method, params, sessionId });
     this.lastCommand = { method, params, sessionId };
     if (method === 'Target.attachToTarget') return { sessionId: 'child-session-1' };
     return { targetInfo: { targetId: 'target-1' } };
@@ -42,6 +43,7 @@ class FakeWebContents extends EventEmitter {
   close() { this.closed = true; }
   setWindowOpenHandler(handler) { this.windowOpenHandler = handler; }
   async executeJavaScript(script) { this.lastScript = script; return { ok: true }; }
+  async insertText(text) { this.insertedTexts = [...(this.insertedTexts || []), text]; }
   // Electron resolves capturePage() with an EMPTY image for a view that is not
   // attached to the window, rather than rejecting. The fake has to model that
   // or it cannot guard the bug.
@@ -167,6 +169,173 @@ test('URL, UA, and bounds normalization stay constrained', () => {
   assert.doesNotMatch(cleanUserAgent('140.1.2.3', 'darwin'), /Electron/);
   assert.match(cleanUserAgent('140.1.2.3', 'darwin'), /Chrome\/140\.0\.0\.0/);
   assert.deepEqual(safeBounds({ x: -5, y: 90, width: 9999, height: 9999 }, [1000, 700]), { x: 0, y: 90, width: 1000, height: 610 });
+});
+
+test('browser shortcuts use CDP in a background tab and separate modifier chords from the actual key', async () => {
+  assert.deepEqual(parseBrowserKey('Meta+A', 'darwin'), { keyCode: 'A', modifiers: ['meta'] });
+  assert.deepEqual(parseBrowserKey('Control+Shift+P', 'darwin'), { keyCode: 'P', modifiers: ['control', 'shift'] });
+  assert.deepEqual(parseBrowserKey('CommandOrControl+A', 'darwin'), { keyCode: 'A', modifiers: ['meta'] });
+  assert.deepEqual(parseBrowserKey('CommandOrControl+A', 'win32'), { keyCode: 'A', modifiers: ['control'] });
+  assert.deepEqual(parseBrowserKey('Control+-', 'darwin'), { keyCode: '-', modifiers: ['control'] });
+  assert.throws(() => parseBrowserKey('Hyper+A', 'darwin'), /unsupported browser modifier/);
+  assert.throws(() => parseBrowserKey('Control+', 'darwin'), /invalid browser shortcut/);
+
+  const { manager, win } = fixture({ requestOpen: () => {} });
+  manager.setAgentControlReady(true);
+  const tab = await manager.browserControl('browser.open', { chatId: 'chat-keys', url: 'example.com' });
+  const wc = manager.browserEntries()[0].view.webContents;
+  assert.equal(tab.active, false);
+  assert.equal(win.contentView.children.length, 0);
+  wc.executeJavaScript = async (script) => {
+    assert.doesNotThrow(() => new Function(`return ${script};`));
+    if (script.includes('workass-browser-select-all')) {
+      return { found: true, selectionVerified: true, strategy: 'contenteditable-range' };
+    }
+    if (script.includes('workass-browser-key-barrier')) return undefined;
+    if (script.includes('workass-browser-delete-selection')) {
+      return { found: true, deletionVerified: true, strategy: 'contenteditable-command' };
+    }
+    throw new Error('unexpected browser shortcut script');
+  };
+  const result = await manager.browserControl('browser.key', { tabId: tab.id, key: 'Meta+A' });
+  assert.deepEqual(result, {
+    sent: true, key: 'A', modifiers: ['meta'], selectionVerified: true, selectionStrategy: 'contenteditable-range',
+  });
+  assert.equal(wc.inputEvents, undefined);
+  assert.deepEqual(wc.debugger.commandCalls.filter((call) => call.method === 'Input.dispatchKeyEvent'), [
+    {
+      method: 'Input.dispatchKeyEvent',
+      params: {
+        type: 'rawKeyDown', modifiers: 4, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, unmodifiedText: 'a',
+      },
+      sessionId: undefined,
+    },
+    {
+      method: 'Input.dispatchKeyEvent',
+      params: {
+        type: 'keyUp', modifiers: 4, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, unmodifiedText: 'a',
+      },
+      sessionId: undefined,
+    },
+  ]);
+
+  const deletion = await manager.browserControl('browser.key', { tabId: tab.id, key: 'Backspace' });
+  assert.deepEqual(deletion, {
+    sent: true, key: 'Backspace', modifiers: [], deletionVerified: true, deletionStrategy: 'contenteditable-command',
+  });
+  assert.deepEqual(
+    wc.debugger.commandCalls.filter((call) => call.method === 'Input.dispatchKeyEvent').slice(-2).map((call) => call.params),
+    [
+      { type: 'rawKeyDown', modifiers: 0, key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 },
+      { type: 'keyUp', modifiers: 0, key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 },
+    ],
+  );
+});
+
+test('browser.snapshot exposes Monaco roots and bounded model state to the agent', async () => {
+  const { manager } = fixture();
+  await manager.activate({ chatId: 'chat-snapshot-editor', bounds: { x: 0, y: 0, width: 500, height: 500 } });
+  const wc = manager.entries.get('chat-snapshot-editor').view.webContents;
+  wc.executeJavaScript = async (script) => {
+    assert.doesNotThrow(() => new Function(`return ${script};`));
+    assert.match(script, /\.monaco-editor/);
+    assert.match(script, /editors: editorRoots/);
+    return {
+      url: 'https://example.test/editor', title: 'Editor', text: '',
+      editors: [{ selector: '#editor > div', kind: 'monaco', text: 'const value = 1;', valueLength: 16, truncated: false }],
+      interactive: [],
+    };
+  };
+  const snapshot = await manager.browserControl('browser.snapshot', {});
+  assert.equal(snapshot.editors[0].kind, 'monaco');
+  assert.equal(snapshot.editors[0].text, 'const value = 1;');
+});
+
+test('browser.type replaces a multiline Monaco-style editor in a background tab and reports exact readback', async () => {
+  const { manager, win } = fixture({ requestOpen: () => {} });
+  manager.setAgentControlReady(true);
+  const tab = await manager.browserControl('browser.open', { chatId: 'chat-editor', url: 'example.com' });
+  const wc = manager.browserEntries()[0].view.webContents;
+  assert.equal(tab.active, false);
+  assert.equal(win.contentView.children.length, 0);
+  const scripts = [];
+  wc.executeJavaScript = async (script) => {
+    scripts.push(script);
+    assert.doesNotThrow(() => new Function(`return ${script};`));
+    if (script.includes('workass-browser-type-prepare')) {
+      return {
+        found: true, editable: true, strategy: 'native', focused: true, editor: 'monaco',
+        selectionVerified: false, selectionStrategy: 'keyboard-fallback',
+      };
+    }
+    if (script.includes('workass-browser-input-barrier')) return undefined;
+    if (script.includes('workass-browser-type-verify')) {
+      const clearing = script.includes('const expected = "";');
+      return {
+        found: true, focused: true, changed: true, inputAccepted: true,
+        exact: true, visibleMatch: true, verification: 'model', valueLength: clearing ? 0 : 550,
+      };
+    }
+    return undefined;
+  };
+  const replacement = Array.from({ length: 40 }, (_, index) => `line ${index + 1}: value`).join('\n');
+  const result = await manager.browserControl('browser.type', { tabId: tab.id, selector: '.monaco-editor textarea', text: replacement });
+
+  assert.equal(wc.insertedTexts, undefined);
+  assert.equal(wc.inputEvents, undefined);
+  assert.deepEqual(wc.debugger.commandCalls.filter((call) => call.method.startsWith('Input.')), [
+    {
+      method: 'Input.dispatchKeyEvent',
+      params: {
+        type: 'rawKeyDown', modifiers: 4, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65,
+        unmodifiedText: 'a', commands: ['selectAll'],
+      },
+      sessionId: undefined,
+    },
+    {
+      method: 'Input.dispatchKeyEvent',
+      params: {
+        type: 'keyUp', modifiers: 4, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, unmodifiedText: 'a',
+      },
+      sessionId: undefined,
+    },
+    { method: 'Input.insertText', params: { text: replacement }, sessionId: undefined },
+  ]);
+  assert.equal(result.strategy, 'native');
+  assert.equal(result.changed, true);
+  assert.equal(result.replacementVerified, true);
+  assert.equal(result.verification, 'model');
+  assert.equal(scripts.some((script) => script.includes('workass-browser-type-verify')), true);
+
+  const cleared = await manager.browserControl('browser.type', { tabId: tab.id, selector: '.monaco-editor', text: '' });
+  assert.equal(cleared.replacementVerified, true);
+  assert.equal(cleared.valueLength, 0);
+  assert.equal(scripts.some((script) => script.includes('workass-browser-delete-barrier')), true);
+  assert.equal(scripts.some((script) => script.includes('workass-browser-delete-selection')), true);
+  assert.deepEqual(
+    wc.debugger.commandCalls.filter((call) => call.method === 'Input.dispatchKeyEvent').slice(-4).map((call) => call.params.key),
+    ['a', 'a', 'Backspace', 'Backspace'],
+  );
+});
+
+test('browser.type rejects a false success when a form control does not retain the replacement', async () => {
+  const { manager } = fixture();
+  await manager.activate({ chatId: 'chat-controlled-input', bounds: { x: 0, y: 0, width: 400, height: 400 } });
+  const wc = manager.entries.get('chat-controlled-input').view.webContents;
+  wc.executeJavaScript = async (script) => {
+    assert.doesNotThrow(() => new Function(`return ${script};`));
+    if (script.includes('workass-browser-type-prepare')) {
+      return {
+        found: true, editable: true, strategy: 'value', focused: true,
+        changed: false, replacementVerified: false, valueLength: 3,
+      };
+    }
+    return undefined;
+  };
+  await assert.rejects(
+    manager.browserControl('browser.type', { selector: '#controlled', text: 'replacement' }),
+    /did not retain the replacement text/,
+  );
 });
 
 // Reported 2026-07-26: file:///…/chat-list.html became https://file///… and

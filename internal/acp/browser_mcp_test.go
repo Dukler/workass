@@ -32,6 +32,42 @@ func TestBrowserMCPServerIsInjectedForEveryConfiguredACPSession(t *testing.T) {
 	}
 }
 
+func TestConfiguredBrowserPromptIsAdjacentToEveryTopLevelTurn(t *testing.T) {
+	manager := NewManager(Options{WorkassMCPBaseURL: "https://localhost:8788"})
+	t.Cleanup(func() { manager.Reset() })
+
+	for _, request := range []string{"inspect the visible page", "continue with the same page"} {
+		prompt := manager.buildUserRequestBlock(request, true)
+		ruleAt := strings.LastIndex(prompt, "Browser tools: this top-level Workass chat")
+		requestAt := strings.LastIndex(prompt, "User request:\n"+request)
+		if ruleAt < 0 || requestAt < 0 || ruleAt > requestAt {
+			t.Fatalf("per-turn browser rule is missing or misplaced: rule=%d request=%d prompt=%q", ruleAt, requestAt, prompt)
+		}
+		for _, want := range []string{
+			"workass-browser MCP server",
+			"deferred from the initial tool list",
+			"search or discover the available tool catalog",
+			"workass_browser_list",
+			"workass_browser_snapshot",
+			"before concluding they are unavailable",
+			"report the exact Workass tool error",
+			"do not ask the user to remind you to use Workass",
+		} {
+			if !strings.Contains(prompt[ruleAt:requestAt], want) {
+				t.Fatalf("per-turn browser rule missing %q: %q", want, prompt[ruleAt:requestAt])
+			}
+		}
+	}
+}
+
+func TestUnconfiguredBrowserIsNotAdvertisedPerTurn(t *testing.T) {
+	manager := NewManager(Options{})
+	t.Cleanup(func() { manager.Reset() })
+	if prompt := manager.buildUserRequestBlock("inspect the page", true); strings.Contains(prompt, "workass_browser_") {
+		t.Fatalf("unconfigured browser was advertised: %q", prompt)
+	}
+}
+
 func TestBrowserMCPInjectionRejectsPlaintextURL(t *testing.T) {
 	got, err := browserMCPServers(Options{WorkassMCPBaseURL: "http://127.0.0.1:8788"}, SessionOptions{AgentOwnerKey: "owner"}, mcpServerHTTP)
 	if err != nil {

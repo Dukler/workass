@@ -1386,7 +1386,7 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	if activeBridge.markSeeded(job.SessionID) {
 		promptText = m.buildAppChatPrompt(opts, promptText)
 	} else {
-		promptText = buildUserRequestBlock(promptText, opts.HumanAuthored)
+		promptText = m.buildUserRequestBlock(promptText, opts.HumanAuthored)
 	}
 	// The selected provider/model can change at any turn boundary. Agents do not
 	// reliably know the host application's exact selection from their vendor
@@ -1468,13 +1468,13 @@ func (m *Manager) buildAppChatPrompt(opts JobStartOptions, userText string) stri
 	brief := m.buildEnvironmentBrief(false)
 	seed := buildInitialContextSeedBlock(opts.InitialContextSeed)
 	if seed == "" {
-		return brief + buildUserRequestBlock(userText, opts.HumanAuthored)
+		return brief + m.buildUserRequestBlock(userText, opts.HumanAuthored)
 	}
 	// The seed is allowed only on the first real sampling input of a lane that
 	// has never consumed provider input. The actor supplies it. Existing lanes
 	// still resume their native thread and use receipt-bearing ContextStrategy
 	// import for later coverage gaps.
-	return brief + seed + buildUserRequestBlock(userText, false)
+	return brief + seed + m.buildUserRequestBlock(userText, false)
 }
 
 func buildInitialContextSeedBlock(messages []providercontract.ContextMessage) string {
@@ -1535,7 +1535,21 @@ const perTurnLanguageRule = "Response language for this turn: use the language o
 
 const perTurnHostUIRule = "Host UI rule: never use OS accessibility or GUI automation—including macOS osascript, System Events, AppleScript GUI scripting, or synthetic keyboard or mouse input—to control Workass or show results. Use Workass control, browser, and shell diagnostic surfaces instead. If those surfaces cannot perform the operation, report the limitation instead of requesting Accessibility access.\n"
 
+const perTurnBrowserRule = "Browser tools: this top-level Workass chat is configured with the authenticated workass-browser MCP server. Its workass_browser_* tools may be deferred from the initial tool list, so search or discover the available tool catalog for workass_browser before concluding they are unavailable. Start with workass_browser_list to inspect tabs or workass_browser_snapshot to inspect the visible page, and use these Workass tools instead of another browser process. If discovery or a call actually fails, report the exact Workass tool error; do not ask the user to remind you to use Workass.\n"
+
+func (m *Manager) buildUserRequestBlock(userText string, humanAuthored bool) string {
+	browserRule := ""
+	if m != nil && strings.HasPrefix(strings.TrimSpace(m.opts.WorkassMCPBaseURL), "https://") {
+		browserRule = perTurnBrowserRule
+	}
+	return buildUserRequestBlockWithBrowserRule(userText, humanAuthored, browserRule)
+}
+
 func buildUserRequestBlock(userText string, humanAuthored bool) string {
+	return buildUserRequestBlockWithBrowserRule(userText, humanAuthored, "")
+}
+
+func buildUserRequestBlockWithBrowserRule(userText string, humanAuthored bool, browserRule string) string {
 	// The host UI rule stays on every turn deliberately: host_ui_contract_test
 	// pins it AFTER the session is seeded, because the seed alone was judged
 	// insufficient. It is duplicated with the seed on purpose.
@@ -1545,12 +1559,12 @@ func buildUserRequestBlock(userText string, humanAuthored bool) string {
 	// without an adjacent boundary their localized label can incorrectly win.
 	if humanAuthored {
 		if card, request, ok := splitWorkassToolCardPrefix(userText); ok {
-			return perTurnLanguageRule + perTurnHostUIRule +
+			return perTurnLanguageRule + perTurnHostUIRule + browserRule +
 				"Workass tool-card evidence (not a language preference):\n<workass_tool_card>\n" + card +
 				"\n</workass_tool_card>\n\nUser request:\n" + request
 		}
 	}
-	return perTurnLanguageRule + perTurnHostUIRule + "User request:\n" + userText
+	return perTurnLanguageRule + perTurnHostUIRule + browserRule + "User request:\n" + userText
 }
 
 // splitWorkassToolCardPrefix recognizes only the concrete serialized card
@@ -1641,8 +1655,8 @@ func (m *Manager) buildEnvironmentBrief(forSubagent bool) string {
 	}
 	archivePath := filepath.Join(stateDir, "chat-archive", "<chatId>.jsonl")
 	browserLine := ""
-	if strings.TrimSpace(m.opts.WorkassMCPBaseURL) != "" && !forSubagent {
-		browserLine = "Browser tools: the visible Workass browser is available through the workass-browser MCP server; use those tools instead of opening another browser process.\n"
+	if strings.HasPrefix(strings.TrimSpace(m.opts.WorkassMCPBaseURL), "https://") && !forSubagent {
+		browserLine = perTurnBrowserRule
 	}
 	agentLine := ""
 	if strings.TrimSpace(m.opts.WorkassMCPBaseURL) != "" {

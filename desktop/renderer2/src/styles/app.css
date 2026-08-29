@@ -542,10 +542,25 @@ table.mdtable th { background: var(--field); font-weight: 600; }
   .ping::after { animation: none; transform: scale(2.2); opacity: .28; }
 }
 
-.codebox { border: 1px solid var(--line); background: var(--field); border-radius: 10px; padding: 12px 14px; margin: 0 0 14px; overflow-x: auto; white-space: pre; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.6; color: var(--ink2); }
-.codebox .cm { color: var(--faint); }
-.codebox .kw { color: var(--ink); font-weight: 600; }
-.codebox .str { color: var(--acc); }
+.codebox { max-width: var(--read); border: 1px solid var(--line); background: var(--field); border-radius: 10px; margin: 0 0 14px; overflow: hidden; color: var(--ink2); }
+.code-head { min-height: 33px; display: flex; align-items: center; gap: 9px; padding: 5px 8px 5px 12px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 48%, var(--field)); }
+.code-lang { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 600 10.5px/1.2 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .025em; }
+.code-copy { flex: none; min-height: 23px; display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font: 500 10.5px/1 ui-monospace, "SF Mono", Menlo, monospace; cursor: pointer; transition: color .12s ease, border-color .12s ease, background .12s ease; }
+.code-copy:hover { color: var(--ink); border-color: var(--line2); background: color-mix(in srgb, var(--ink) 4%, transparent); }
+.code-copy:focus-visible { outline: 2px solid color-mix(in srgb, var(--link) 65%, transparent); outline-offset: 1px; }
+.code-copy[data-state="copied"] { color: var(--acc); }
+.code-copy[data-state="failed"] { color: var(--del); }
+.code-copy svg { width: 12px; height: 12px; }
+.code-body { margin: 0; padding: 12px 14px; overflow-x: auto; white-space: pre; tab-size: 2; font: 12px/1.65 ui-monospace, "SF Mono", Menlo, monospace; color: var(--ink2); }
+.code-body code { font: inherit; color: inherit; }
+.codebox .tk-cm, .codebox .cm { color: var(--faint); font-style: italic; }
+.codebox .tk-kw, .codebox .kw { color: var(--link); font-weight: 600; }
+.codebox .tk-str, .codebox .str { color: var(--acc); }
+.codebox .tk-num, .codebox .tk-lit { color: var(--amber); }
+.codebox .tk-fn { color: var(--ink); font-weight: 600; }
+.codebox .tk-ty { color: color-mix(in srgb, var(--link) 78%, var(--ink2)); }
+.codebox .tk-attr { color: color-mix(in srgb, var(--amber) 82%, var(--ink2)); }
+.codebox .tk-op { color: var(--muted); }
 
 .wcard { border: 1px solid var(--line); background: var(--card); border-radius: 10px; margin: 10px 0; overflow: hidden; }
 .wcard .whead { display: flex; align-items: center; gap: 9px; padding: 6px 10px; }
