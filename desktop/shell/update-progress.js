@@ -171,9 +171,12 @@ function phaseView(transaction, journal, receipt) {
 
 function progressHTML() {
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"><title>Workass Update</title><style>
-    :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#12110f;color:#f2efe9;font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;display:grid;place-items:center;height:100vh}
-    main{width:min(520px,calc(100vw - 56px));padding:34px;border:1px solid #3b3732;border-radius:18px;background:#1c1a18;box-shadow:0 24px 70px #0009}header{display:flex;align-items:center;gap:12px}.mark{width:14px;height:14px;border-radius:99px;background:#4fa583;box-shadow:0 0 0 6px #4fa58324}.rollback .mark{background:#d8a05a;box-shadow:0 0 0 6px #d8a05a24}.failed .mark{background:#d96b5f;box-shadow:0 0 0 6px #d96b5f24}.success .mark{background:#4cae7f;box-shadow:0 0 0 6px #4cae7f24}h1{font-size:22px;line-height:1.2;margin:0}p{margin:18px 0 0;color:#beb8af;min-height:46px}.track{height:3px;margin-top:24px;border-radius:99px;background:#302d29;overflow:hidden}.bar{width:34%;height:100%;border-radius:inherit;background:#4fa583;animation:move 1.25s ease-in-out infinite}.rollback .bar{background:#d8a05a}.failed .bar{background:#d96b5f;animation:none;width:100%}.success .bar{background:#4cae7f;animation:none;width:100%}button{display:none;margin:24px 0 0 auto;border:1px solid #5b554e;border-radius:9px;padding:8px 16px;background:#292622;color:#f2efe9;font:inherit;cursor:pointer}button.visible{display:block}@keyframes move{0%{transform:translateX(-110%)}50%{transform:translateX(190%)}100%{transform:translateX(-110%)}}</style></head><body><main id="card"><header><span class="mark"></span><h1 id="title">Actualizando Workass…</h1></header><p id="detail">Preparando el actualizador independiente.</p><div class="track"><div class="bar"></div></div><button id="close" type="button">Cerrar</button></main><script>
-    window.__workassRender=(view)=>{const card=document.getElementById('card');card.className=view.tone||'active';document.getElementById('title').textContent=view.title;document.getElementById('detail').textContent=view.detail;const button=document.getElementById('close');button.textContent=view.action||'Cerrar';button.className=view.action?'visible':'';button.onclick=()=>window.close()};
+    :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;overflow:hidden;background:radial-gradient(circle at 8% 12%,#4fa58315 0,transparent 38%),linear-gradient(145deg,#151412,#0f0e0d 68%,#0b0a09);color:#f2efe9;font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}main{--tone:#4fa583;--tone-soft:#4fa58324;--tone-border:#4fa58358;display:flex;flex-direction:column;width:100%;min-height:100vh;padding:28px 32px 24px}.rollback{--tone:#d8a05a;--tone-soft:#d8a05a24;--tone-border:#d8a05a58}.failed{--tone:#d96b5f;--tone-soft:#d96b5f24;--tone-border:#d96b5f58}.success{--tone:#4cae7f;--tone-soft:#4cae7f24;--tone-border:#4cae7f58}
+    .hero{display:grid;grid-template-columns:54px minmax(0,1fr);gap:18px;align-items:start;margin:auto 0 21px}.app-mark{position:relative;display:grid;place-items:center;width:54px;height:54px;border:1px solid #ffffff16;border-radius:16px;background:#1d1c1a;color:#6bb596;font-size:25px;line-height:1;box-shadow:inset 0 1px #ffffff0a}.app-mark::after{content:"";position:absolute;right:-2px;bottom:-2px;width:12px;height:12px;border:3px solid #11100f;border-radius:50%;background:var(--tone);animation:pulse 1.6s ease-in-out infinite}.failed .app-mark::after,.success .app-mark::after{animation:none}.state-label{margin:1px 0 3px;color:var(--tone);font-size:10px;font-weight:750;letter-spacing:.11em;text-transform:uppercase}h1{margin:0;font-size:25px;font-weight:680;letter-spacing:-.025em;line-height:1.15}#detail{max-height:66px;min-height:40px;margin:8px 0 0;overflow:auto;color:#9c978f;font-size:14px;line-height:1.45;scrollbar-width:thin}
+    footer{padding-top:15px;border-top:1px solid #ffffff12}.progress-copy{display:flex;align-items:center;gap:14px;min-height:26px}.owner{display:flex;align-items:center;gap:7px;color:#cfcbc4;font-size:11px;font-weight:620}.owner-dot{width:6px;height:6px;border-radius:50%;background:var(--tone);box-shadow:0 0 0 3px var(--tone-soft)}.hint{margin-left:auto;color:#6f6b63;font-size:11px}.track{height:3px;margin-top:10px;overflow:hidden;border-radius:99px;background:#252320}.bar{width:34%;height:100%;border-radius:inherit;background:var(--tone);animation:move 1.35s cubic-bezier(.65,0,.35,1) infinite}.failed .bar,.success .bar{width:100%;animation:none}.has-action .hint{display:none}button{display:none;margin-left:auto;border:1px solid #ffffff18;border-radius:8px;padding:6px 13px;background:#252320;color:#f2efe9;font:inherit;font-size:12px;font-weight:600;line-height:1.2;cursor:pointer}button.visible{display:block}button:hover{border-color:#ffffff2b;background:#302d29}button:focus-visible{outline:2px solid var(--tone);outline-offset:2px}
+    @keyframes move{from{transform:translateX(-70%)}to{transform:translateX(230%)}}@keyframes pulse{50%{box-shadow:0 0 0 5px var(--tone-soft)}}@media (prefers-reduced-motion:reduce){.bar,.app-mark::after{animation-duration:3s}}
+  </style></head><body><main id="surface" class="active"><section class="hero" aria-live="polite"><span class="app-mark" aria-hidden="true">✣</span><div><p id="state" class="state-label">Actualización en curso</p><h1 id="title">Actualizando Workass…</h1><p id="detail">Preparando el actualizador independiente.</p></div></section><footer><div class="progress-copy"><span class="owner"><span class="owner-dot" aria-hidden="true"></span>Actualizador independiente</span><span id="hint" class="hint">Instalando y verificando</span><button id="close" type="button">Cerrar</button></div><div id="track" class="track" role="progressbar" aria-label="Actualización en curso"><div class="bar"></div></div></footer></main><script>
+    window.__workassRender=(view)=>{const tone=view.tone||'active';const labels={active:['Actualización en curso','Instalando y verificando'],rollback:['Recuperación en curso','Restaurando la versión anterior'],failed:['Atención necesaria','La actualización se detuvo'],success:['Actualización completada','Workass está listo']};const copy=labels[tone]||labels.active;const surface=document.getElementById('surface');surface.className=tone+(view.action?' has-action':'');document.getElementById('state').textContent=copy[0];document.getElementById('title').textContent=view.title;document.getElementById('detail').textContent=view.detail;document.getElementById('hint').textContent=copy[1];document.getElementById('track').setAttribute('aria-label',copy[0]);const button=document.getElementById('close');button.textContent=view.action||'Cerrar';button.className=view.action?'visible':'';button.onclick=()=>window.close()};
   </script></body></html>`;
 }
 
@@ -204,16 +207,18 @@ async function runUpdateProgressProcess({
   await app.whenReady();
 
   const win = new BrowserWindow({
-    width: 680,
-    height: 400,
-    minWidth: 560,
-    minHeight: 340,
-    backgroundColor: '#12110f',
+    width: 560,
+    height: 300,
+    minWidth: 520,
+    minHeight: 280,
+    backgroundColor: '#0f0e0d',
     title: 'Workass Update',
     show: false,
     frame: true,
     autoHideMenuBar: true,
-    resizable: true,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
     ...(windowIcon ? { icon: windowIcon } : {}),
     webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },
   });

@@ -12,6 +12,7 @@ const {
   expectedProgressExecutable,
   installedProgressExecutable,
   phaseView,
+  progressHTML,
   progressExecutableIsAllowed,
   progressOwnerReceiptPath,
   progressProcessOwnership,
@@ -339,6 +340,15 @@ test('progress text shows honest rollback and failure states without leaking cre
   assert.equal(boundedUpdateError('password=hunter2 recovery failed'), 'password=[redacted] recovery failed');
 });
 
+test('the updater uses the native window as its only visual surface', () => {
+  const html = progressHTML();
+  assert.match(html, /<main id="surface" class="active">/);
+  assert.match(html, /aria-live="polite"/);
+  assert.match(html, /Actualizador independiente/);
+  assert.doesNotMatch(html, /id="card"/);
+  assert.doesNotMatch(html, /box-shadow:0 24px 70px/);
+});
+
 test('the progress process becomes ready only after its isolated window is visible', async () => {
   const { transaction, transactionPath } = progressFixture();
   const timers = fakeTimers();
@@ -357,6 +367,9 @@ test('the progress process becomes ready only after its isolated window is visib
   assert.equal(electron.app.name, 'Workass Update');
   assert.equal(electron.windows.length, 1);
   assert.equal(electron.windows[0].options.show, false);
+  assert.equal(electron.windows[0].options.width, 560);
+  assert.equal(electron.windows[0].options.height, 300);
+  assert.equal(electron.windows[0].options.resizable, false);
   assert.equal(electron.windows[0].visible, true);
   assert.equal(receipt.phase, 'visible');
   assert.equal(receipt.windowVisible, true);
