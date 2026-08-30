@@ -1074,6 +1074,13 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 	if bridge == nil {
 		return nil, errors.New("La sesión ACP expiró. Cerrá y reabrí la pestaña del chat.")
 	}
+	// Validate attachment support and bounds before reserving a job or invoking
+	// the actor admission callback. Renderer clients normally normalize large
+	// rasters first, but remote/older clients must still fail at this synchronous
+	// boundary instead of producing an accepted turn followed by an ACP error.
+	if _, err := bridge.promptImageBlocks(opts.Images); err != nil {
+		return nil, err
+	}
 	if live, ok := bridge.liveSession(opts.SessionID); ok && !liveSessionMatchesOptions(live, SessionOptions{TabID: opts.TabID, ChatID: opts.ChatID}) {
 		m.opts.Logf("rejected cross-chat ACP session binding", map[string]any{
 			"requestedTabId": opts.TabID, "requestedChatId": opts.ChatID,
@@ -3302,39 +3309,11 @@ func (b *Bridge) promptBlocks(promptText string, images []any) ([]any, error) {
 	blocks := []any{}
 	trailingNotice := ""
 	if len(images) > 0 {
-		b.mu.Lock()
-		imageSupport := b.imageSupport
-		b.mu.Unlock()
-		if !imageSupport {
-			return nil, errors.New("the selected agent does not support image input; the attachment was not sent as a text-only turn")
+		imageBlocks, err := b.promptImageBlocks(images)
+		if err != nil {
+			return nil, err
 		}
-		if len(images) > maxToolResultImages {
-			return nil, fmt.Errorf("too many attached images: got %d, maximum is %d", len(images), maxToolResultImages)
-		}
-		total := 0
-		for index, raw := range images {
-			img := mapFromAny(raw)
-			mimeType := strings.ToLower(strings.TrimSpace(firstNonEmpty(asString(img["mimeType"]), asString(img["mime_type"]))))
-			data := strings.TrimSpace(asString(img["data"]))
-			if strings.HasPrefix(data, "data:") {
-				comma := strings.IndexByte(data, ',')
-				if comma <= 5 || !strings.Contains(strings.ToLower(data[:comma]), ";base64") {
-					return nil, fmt.Errorf("attached image %d has an invalid data URL", index+1)
-				}
-				if mimeType == "" {
-					mimeType = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(data[:comma], "data:"), ";base64")))
-				}
-				data = strings.TrimSpace(data[comma+1:])
-			}
-			if !safeToolImageMIME(mimeType) || data == "" {
-				return nil, fmt.Errorf("attached image %d is not a supported PNG, JPEG, WebP, or GIF raster", index+1)
-			}
-			if len(data) > maxToolResultImageBytes || total+len(data) > maxToolResultTotalBytes {
-				return nil, fmt.Errorf("attached image %d exceeds Workass's bounded image payload", index+1)
-			}
-			total += len(data)
-			blocks = append(blocks, map[string]any{"type": "image", "mimeType": mimeType, "data": data})
-		}
+		blocks = append(blocks, imageBlocks...)
 		notice := fmt.Sprintf(
 			"[Workass attachment context]\nThe current human-authored message includes %d attached image(s). Inspect every attached image directly before answering; do not claim that no image was provided. This internal notice does not set the response language.",
 			len(blocks),
@@ -3354,6 +3333,47 @@ func (b *Bridge) promptBlocks(promptText string, images []any) ([]any, error) {
 	}
 	if trailingNotice != "" {
 		blocks = append(blocks, map[string]any{"type": "text", "text": trailingNotice})
+	}
+	return blocks, nil
+}
+
+func (b *Bridge) promptImageBlocks(images []any) ([]any, error) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+	b.mu.Lock()
+	imageSupport := b.imageSupport
+	b.mu.Unlock()
+	if !imageSupport {
+		return nil, errors.New("the selected agent does not support image input; the attachment was not sent as a text-only turn")
+	}
+	if len(images) > maxToolResultImages {
+		return nil, fmt.Errorf("too many attached images: got %d, maximum is %d", len(images), maxToolResultImages)
+	}
+	blocks := make([]any, 0, len(images))
+	total := 0
+	for index, raw := range images {
+		img := mapFromAny(raw)
+		mimeType := strings.ToLower(strings.TrimSpace(firstNonEmpty(asString(img["mimeType"]), asString(img["mime_type"]))))
+		data := strings.TrimSpace(asString(img["data"]))
+		if strings.HasPrefix(data, "data:") {
+			comma := strings.IndexByte(data, ',')
+			if comma <= 5 || !strings.Contains(strings.ToLower(data[:comma]), ";base64") {
+				return nil, fmt.Errorf("attached image %d has an invalid data URL", index+1)
+			}
+			if mimeType == "" {
+				mimeType = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(data[:comma], "data:"), ";base64")))
+			}
+			data = strings.TrimSpace(data[comma+1:])
+		}
+		if !safeToolImageMIME(mimeType) || data == "" {
+			return nil, fmt.Errorf("attached image %d is not a supported PNG, JPEG, WebP, or GIF raster", index+1)
+		}
+		if len(data) > maxToolResultImageBytes || total+len(data) > maxToolResultTotalBytes {
+			return nil, fmt.Errorf("attached image %d exceeds Workass's bounded image payload", index+1)
+		}
+		total += len(data)
+		blocks = append(blocks, map[string]any{"type": "image", "mimeType": mimeType, "data": data})
 	}
 	return blocks, nil
 }

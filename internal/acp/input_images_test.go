@@ -55,6 +55,41 @@ func TestAcceptedImageNeverSilentlyDegradesToTextForUnsupportedProvider(t *testi
 	}
 }
 
+func TestOversizedImageFailsBeforeDurableJobAdmission(t *testing.T) {
+	t.Parallel()
+	manager, _ := newFakeManager(t, "image-echo", Options{RSSSampleInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tabID, chatID := "oversized-image-tab", "oversized-image-chat"
+	session, err := manager.NewSession(ctx, SessionOptions{TabID: tabID, ChatID: chatID})
+	if err != nil {
+		t.Fatalf("new image-capable session: %v", err)
+	}
+	admitted := false
+	_, err = manager.StartJob(ctx, JobStartOptions{
+		Kind: "app-chat", SessionID: session.SessionID, TabID: tabID, ChatID: chatID,
+		ProviderID: session.ProviderID, Prompt: "must fail before a visible turn",
+		Images: []any{map[string]any{
+			"mimeType": "image/png",
+			"data":     strings.Repeat("a", maxToolResultImageBytes+1),
+		}},
+		CommitAdmission: func(map[string]any) error {
+			admitted = true
+			return nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds Workass's bounded image payload") {
+		t.Fatalf("oversized attachment failure = %v", err)
+	}
+	if admitted {
+		t.Fatal("oversized attachment reached durable job admission")
+	}
+	if _, running := manager.RunningJobForChat(tabID, chatID); running {
+		t.Fatal("oversized attachment left a running job behind")
+	}
+}
+
 func TestAttachedImageAndContextSurviveNativeSteeringForEveryFrontierProvider(t *testing.T) {
 	t.Parallel()
 	for _, providerID := range []string{"codex", "claude"} {
