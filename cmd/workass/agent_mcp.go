@@ -57,11 +57,11 @@ func agentMCPTools() []map[string]any {
 	}
 	return []map[string]any{
 		tool("workass_list_chats", "List Workass chats with exact tab_id/chat_id targets, per-chat provider/model/effort/permission state, and queue status. Use before controlling a chat; never infer a target from title or position.", object(map[string]any{}), true, false, true, false),
-		tool("workass_read_chat", "Read a bounded canonical transcript and current controls for one exact Workass chat.", object(map[string]any{
+		tool("workass_read_chat", "Read a byte-bounded canonical transcript and current controls for one exact Workass chat. Event-heavy reads preserve the newest complete event suffix and report eventCount, includedEventCount, and eventsTruncated instead of failing the MCP transport.", object(map[string]any{
 			"tab_id":         str("Tab id from workass_list_chats."),
 			"chat_id":        str("Exact conversation id paired with tab_id by workass_list_chats."),
 			"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Newest messages to return; defaults to 40."},
-			"include_events": boolean("Include persisted tool/plan event records; false by default."),
+			"include_events": boolean("Include persisted tool/plan event records; false by default. Oversized event history is explicitly tail-truncated to the MCP response budget."),
 		}, "tab_id", "chat_id"), true, false, true, false),
 		tool("workass_create_chat", "Create a durable Workass chat. Selection and cwd inherit the calling chat unless explicitly supplied and validated against the live catalog. Does not focus the UI unless focus=true.", mutationObject(map[string]any{
 			"title":             str("Chat title; defaults to Nuevo chat."),

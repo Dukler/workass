@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,6 +14,103 @@ import (
 	"workass/internal/chat"
 	providercontract "workass/internal/provider"
 )
+
+func TestProviderChatAgentReadBoundsEventHeavyTranscriptForMCPRelay(t *testing.T) {
+	stateDir := t.TempDir()
+	manager := acp.NewManager(acp.Options{StateDir: stateDir, RuntimeProfile: "test"})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+
+	const (
+		tabID      = "event-heavy-read-tab"
+		chatID     = "event-heavy-read-chat"
+		messageMax = 120
+		eventsEach = 4
+	)
+	messages := make([]chat.LedgerEvent, 0, messageMax)
+	for messageIndex := 0; messageIndex < messageMax; messageIndex++ {
+		timeline := make([]chat.TimelineEntry, 0, eventsEach)
+		for eventIndex := 0; eventIndex < eventsEach; eventIndex++ {
+			id := fmt.Sprintf("tool-%03d-%d", messageIndex, eventIndex)
+			timeline = append(timeline, chat.TimelineEntry{
+				Key: id, Kind: providercontract.EventToolUpdate,
+				Tool: &providercontract.ToolEvent{
+					ToolCallID: id, ToolKind: "terminal", Title: "Large persisted tool event", Status: "completed",
+					Command: "fixture command", Output: strings.Repeat("event payload ", 1400),
+				},
+			})
+		}
+		messages = append(messages, chat.LedgerEvent{
+			EventID: fmt.Sprintf("source-event-%03d", messageIndex), MessageID: fmt.Sprintf("message-%03d", messageIndex),
+			Role: "assistant", Text: fmt.Sprintf("assistant row %d", messageIndex), Status: "done",
+			OperationID: providercontract.OperationID(fmt.Sprintf("source-operation-%03d", messageIndex)), Timeline: timeline,
+		})
+	}
+	actor, err := runtime.actorForFork(chatID, chat.InitializeFork{
+		Presentation: chat.PresentationState{TabID: tabID, Title: "Event-heavy transcript"},
+		SourceChatID: "event-heavy-source", Messages: messages,
+		OperationID: "event-heavy-fork", Digest: "event-heavy-fork-digest",
+	})
+	if err != nil {
+		t.Fatalf("create event-heavy actor fixture: %v", err)
+	}
+	unbounded := map[string]any{}
+	if err := projectActorChat(unbounded, actor.engine.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	unboundedJSON, err := json.Marshal(unbounded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unboundedJSON) <= 4*1024*1024 {
+		t.Fatalf("regression fixture is only %d bytes and does not cross the MCP relay boundary", len(unboundedJSON))
+	}
+
+	result, err := runtime.ReadChat(tabID, chatID, messageMax, true)
+	if err != nil {
+		t.Fatalf("read event-heavy chat: %v", err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > maxAgentChatReadJSONBytes {
+		t.Fatalf("bounded chat result = %d bytes, want <= %d", len(encoded), maxAgentChatReadJSONBytes)
+	}
+	projectedMessages := anySlice(result["messages"])
+	if len(projectedMessages) != messageMax || result["truncated"] != false {
+		t.Fatalf("byte bound dropped ordinary transcript rows: messages=%d truncated=%v", len(projectedMessages), result["truncated"])
+	}
+	if result["eventsTruncated"] != true || intValue(result["eventCount"]) != messageMax*eventsEach {
+		t.Fatalf("event truncation receipt = %#v", result)
+	}
+	included := intValue(result["includedEventCount"])
+	if included <= 0 || included >= messageMax*eventsEach {
+		t.Fatalf("included event count = %d, want a nonempty bounded suffix", included)
+	}
+	if newest := anySlice(mapFromAnyMain(projectedMessages[len(projectedMessages)-1])["events"]); len(newest) != eventsEach {
+		t.Fatalf("newest message lost its complete event suffix: %d events", len(newest))
+	}
+
+	toolText, err := json.Marshal(redactValue(result))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1,
+		"result": map[string]any{
+			"resultType": "complete",
+			"content":    []any{map[string]any{"type": "text", "text": string(toolText)}},
+			"_meta":      map[string]any{"io.modelcontextprotocol/serverInfo": map[string]any{"name": "workass-agent", "version": "test"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response) > 4*1024*1024 {
+		t.Fatalf("chat read still exceeds the stdio relay boundary: %d bytes", len(response))
+	}
+}
 
 func seedAgentProviderTurn(t *testing.T, engine *chat.Engine, operationID providercontract.OperationID, nativeTurnID string) chat.ProviderActivityOwner {
 	t.Helper()
