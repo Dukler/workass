@@ -14,6 +14,12 @@ import (
 	providercontract "workass/internal/provider"
 )
 
+// workass_read_chat is returned as JSON inside an MCP text block, so its JSON
+// bytes are escaped once more by the stateless MCP response. Keep the inner
+// result well below the stdio relay's 4 MiB ceiling. This is a response budget,
+// not a persistence limit: the actor retains the complete semantic ledger.
+const maxAgentChatReadJSONBytes = 1 * 1024 * 1024
+
 func (r *providerChatRuntime) CreateRendererChat(raw map[string]any) (map[string]any, error) {
 	if r == nil {
 		return nil, errors.New("chat creation requires the authoritative actor runtime")
@@ -422,30 +428,132 @@ func (r *providerChatRuntime) ReadChat(tabID, chatID string, limit int, includeE
 		return nil, err
 	}
 	messages := anySlice(projected["messages"])
+	messageCount := len(messages)
 	truncated := false
 	if limit > 0 && len(messages) > limit {
 		messages = messages[len(messages)-limit:]
 		truncated = true
 	}
 	copyMessages := make([]any, 0, len(messages))
+	eventSources := make([][]any, 0, len(messages))
+	eventCount := 0
 	for _, raw := range messages {
 		message := mapFromAnyMain(cloneJSON(raw))
-		if !includeEvents {
-			message["events"] = []any{}
+		events := anySlice(message["events"])
+		if includeEvents {
+			eventCount += len(events)
+			eventSources = append(eventSources, events)
 		}
+		message["events"] = []any{}
 		copyMessages = append(copyMessages, message)
 	}
 	result := map[string]any{
 		"tabId": tabID, "chatId": chatID, "title": fieldString(projected, "title"),
 		"cwd": fieldString(projected, "cwd"), "providerId": fieldString(projected, "providerId"),
 		"modelId": fieldString(projected, "currentModelId"), "modeId": fieldString(projected, "currentModeId"),
-		"messages": copyMessages, "truncated": truncated,
+		"messages": copyMessages, "messageCount": messageCount, "truncated": truncated,
+	}
+	if includeEvents {
+		// Reserve the longest count and boolean encodings before adding event
+		// bytes. Updating these fields after selection can only shrink the JSON.
+		result["eventCount"] = eventCount
+		result["includedEventCount"] = eventCount
+		result["eventsTruncated"] = false
 	}
 	if actorForegroundRunning(state.Foreground) {
 		result["running"] = true
 		result["jobId"] = state.Foreground.Turn.NativeID
 	} else {
 		result["running"] = false
+	}
+
+	result["messages"] = []any{}
+	emptyBase, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("encode bounded chat read: %w", err)
+	}
+	// Preserve the newest complete transcript rows when ordinary message text
+	// alone exceeds the response budget. Event counts continue to describe the
+	// caller's requested window, making the omitted data explicit.
+	baseSize := len(emptyBase)
+	firstMessage := len(copyMessages)
+	for index := len(copyMessages) - 1; index >= 0; index-- {
+		encodedMessage, err := json.Marshal(copyMessages[index])
+		if err != nil {
+			return nil, fmt.Errorf("encode bounded chat message: %w", err)
+		}
+		delta := len(encodedMessage)
+		if firstMessage < len(copyMessages) {
+			delta++ // comma between adjacent array entries
+		}
+		if baseSize+delta > maxAgentChatReadJSONBytes {
+			break
+		}
+		firstMessage = index
+		baseSize += delta
+	}
+	if firstMessage > 0 {
+		copyMessages = copyMessages[firstMessage:]
+		if includeEvents {
+			eventSources = eventSources[firstMessage:]
+		}
+		result["truncated"] = true
+	}
+	result["messages"] = copyMessages
+	baseBytes, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("encode bounded chat read: %w", err)
+	}
+	if len(baseBytes) > maxAgentChatReadJSONBytes {
+		return nil, errors.New("chat metadata exceeds the bounded read response")
+	}
+	if !includeEvents {
+		return result, nil
+	}
+
+	remaining := maxAgentChatReadJSONBytes - len(baseBytes)
+	starts := make([]int, len(eventSources))
+	for index, events := range eventSources {
+		starts[index] = len(events)
+	}
+	includedEventCount := 0
+	selectionFull := true
+selectEvents:
+	for messageIndex := len(eventSources) - 1; messageIndex >= 0; messageIndex-- {
+		events := eventSources[messageIndex]
+		for eventIndex := len(events) - 1; eventIndex >= 0; eventIndex-- {
+			encodedEvent, err := json.Marshal(events[eventIndex])
+			if err != nil {
+				return nil, fmt.Errorf("encode bounded chat event: %w", err)
+			}
+			delta := len(encodedEvent)
+			if starts[messageIndex] < len(events) {
+				delta++ // comma between adjacent array entries
+			}
+			if delta > remaining {
+				selectionFull = false
+				break selectEvents
+			}
+			starts[messageIndex] = eventIndex
+			includedEventCount++
+			remaining -= delta
+		}
+	}
+	for index, start := range starts {
+		if start >= len(eventSources[index]) {
+			continue
+		}
+		message := mapFromAnyMain(copyMessages[index])
+		message["events"] = append([]any(nil), eventSources[index][start:]...)
+	}
+	result["includedEventCount"] = includedEventCount
+	result["eventsTruncated"] = !selectionFull || includedEventCount != eventCount
+	encodedResult, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("encode bounded chat read: %w", err)
+	}
+	if len(encodedResult) > maxAgentChatReadJSONBytes {
+		return nil, errors.New("chat read response exceeded its byte budget")
 	}
 	return result, nil
 }

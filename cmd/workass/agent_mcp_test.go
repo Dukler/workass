@@ -44,6 +44,9 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	if host := byName["workass_host_artifact"]; host == nil || !strings.Contains(toString(host["description"]), "stable URL") {
 		t.Fatalf("artifact hosting tool = %#v", host)
 	}
+	if read := byName["workass_read_chat"]; read == nil || !strings.Contains(toString(read["description"]), "eventsTruncated") {
+		t.Fatalf("chat read tool does not disclose bounded event truncation: %#v", read)
+	}
 	if byName["workass_host_html"] != nil {
 		t.Fatal("legacy workass_host_html alias must not be advertised")
 	}
