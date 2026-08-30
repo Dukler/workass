@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DraftImage } from '../src/store/types.ts';
-import { afterQueuedAcceptance, appendDraftImages, clipboardImageFiles, createDraftImages, draftImagePayloads, imageBase64, mergeMessageImages, messageImages, messageImageSrc, queuedAttachmentsReady, queuedDraftMessage, queuedJob, queuedMessage, releaseDraftImages, withoutDraftImages } from '../src/image-drafts.ts';
+import { afterQueuedAcceptance, appendDraftImages, clipboardImageFiles, createDraftImages, draftImagePayloads, imageBase64, MAX_ATTACHED_IMAGES, MAX_ATTACHMENT_IMAGE_BASE64_BYTES, mergeMessageImages, messageImages, messageImageSrc, queuedAttachmentsReady, queuedDraftMessage, queuedJob, queuedMessage, releaseDraftImages, withoutDraftImages } from '../src/image-drafts.ts';
 import { localMirror, type Mirror } from '../src/store/persistence.ts';
 
 function image(id: string): DraftImage {
@@ -36,6 +36,7 @@ test('job payload strips only the data URL header', () => {
 
 test('large attachment selection creates immediate zero-copy previews and defers reads until send', async () => {
   let reads = 0;
+  let normalizations = 0;
   let yields = 0;
   const files = Array.from({ length: 6 }, (_, index) => ({
     name: `large-${index}.png`, type: 'image/png', size: 24 * 1024 * 1024,
@@ -52,10 +53,66 @@ test('large attachment selection creates immediate zero-copy previews and defers
   const payloads = await draftImagePayloads(drafts, async (file) => {
     reads += 1;
     return `data:${file.type};base64,${file.name}`;
-  }, async () => { yields += 1; });
-  assert.equal(reads, 6);
+  }, async () => { yields += 1; }, async (draft, budget) => {
+    normalizations += 1;
+    assert.ok(budget > 0 && budget <= MAX_ATTACHMENT_IMAGE_BASE64_BYTES);
+    return { mimeType: 'image/webp', data: draft.name, name: draft.name };
+  });
+  assert.equal(reads, 0, 'oversized originals never expand into renderer base64');
+  assert.equal(normalizations, 6);
   assert.equal(yields, 6, 'large batches yield between every encoded file');
   assert.deepEqual(payloads.map((payload) => payload.data), files.map((file) => file.name));
+  assert.ok(payloads.every((payload) => payload.mimeType === 'image/webp'));
+});
+
+test('an oversized source is normalized before provider admission', async () => {
+  const file = { name: 'camera.png', type: 'image/png', size: 7 * 1024 * 1024 } as File;
+  const [draft] = createDraftImages([file], () => 'blob:camera-preview');
+  let reads = 0;
+  let normalizedBudget = 0;
+  const payloads = await draftImagePayloads([draft], async () => {
+    reads += 1;
+    throw new Error('the oversized original must not be read as base64');
+  }, async () => {}, async (candidate, budget) => {
+    assert.equal(candidate, draft);
+    normalizedBudget = budget;
+    return { mimeType: 'image/webp', data: 'bounded-provider-copy', name: candidate.name };
+  });
+  assert.equal(reads, 0);
+  assert.equal(normalizedBudget, MAX_ATTACHMENT_IMAGE_BASE64_BYTES);
+  assert.deepEqual(payloads, [{ mimeType: 'image/webp', data: 'bounded-provider-copy', name: 'camera.png' }]);
+});
+
+test('a bounded source still reads its original bytes only at send', async () => {
+  const file = { name: 'small.png', type: 'image/png', size: 512 } as File;
+  const [draft] = createDraftImages([file], () => 'blob:small-preview');
+  let reads = 0;
+  let normalizations = 0;
+  const payloads = await draftImagePayloads([draft], async (candidate) => {
+    reads += 1;
+    return `data:${candidate.type};base64,c21hbGw=`;
+  }, async () => {}, async () => {
+    normalizations += 1;
+    return { mimeType: 'image/webp', data: 'unexpected' };
+  });
+  assert.equal(reads, 1);
+  assert.equal(normalizations, 0);
+  assert.deepEqual(payloads, [{ mimeType: 'image/png', data: 'c21hbGw=', name: 'small.png' }]);
+});
+
+test('too many attachments fail before reading or normalizing any bytes', async () => {
+  const drafts = Array.from({ length: MAX_ATTACHED_IMAGES + 1 }, (_, index) => image(`extra-${index}`));
+  let normalizations = 0;
+  await assert.rejects(
+    draftImagePayloads(drafts, async () => {
+      throw new Error('no file reads expected');
+    }, async () => {}, async () => {
+      normalizations += 1;
+      return { mimeType: 'image/webp', data: 'bounded' };
+    }),
+    /hasta 6 imágenes/,
+  );
+  assert.equal(normalizations, 0);
 });
 
 test('removing object-url drafts releases only their browser previews', () => {

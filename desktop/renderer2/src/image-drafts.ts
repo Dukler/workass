@@ -17,6 +17,26 @@ export function imageBase64(dataURL: string): string {
   return comma >= 0 ? dataURL.slice(comma + 1) : dataURL;
 }
 
+// These limits mirror the daemon's provider boundary. The renderer must fit
+// ordinary pasted/chosen images before it creates a visible turn; the daemon
+// repeats the check as defense in depth for remote and older clients.
+export const MAX_ATTACHED_IMAGES = 6;
+export const MAX_ATTACHMENT_IMAGE_BASE64_BYTES = 8 * 1024 * 1024;
+export const MAX_ATTACHMENT_TOTAL_BASE64_BYTES = 16 * 1024 * 1024;
+
+const MAX_NORMALIZED_IMAGE_EDGE = 4096;
+const MIN_NORMALIZED_IMAGE_EDGE = 320;
+const SAFE_RASTER_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const NORMALIZED_WEBP_QUALITIES = [0.92, 0.82, 0.72, 0.62, 0.5];
+
+export interface PreparedImagePayload {
+  mimeType: string;
+  data: string;
+  name?: string;
+}
+
+export type DraftImageNormalizer = (draft: DraftImage, maxBase64Bytes: number) => Promise<PreparedImagePayload>;
+
 type ObjectURLFactory = (blob: Blob) => string;
 type ObjectURLRevoker = (url: string) => void;
 
@@ -60,6 +80,83 @@ function readFileDataURL(file: File): Promise<string> {
   });
 }
 
+function base64LengthForBytes(bytes: number): number {
+  return Math.ceil(Math.max(0, bytes) / 3) * 4;
+}
+
+function estimatedDraftBase64Length(draft: DraftImage): number {
+  if (draft.data) return draft.data.length;
+  return draft.file ? base64LengthForBytes(draft.file.size) : 0;
+}
+
+function readBlobDataURL(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(reader.error ?? new Error('No se pudo codificar la imagen reducida.'));
+    reader.onabort = () => reject(new Error('Se canceló la codificación de la imagen reducida.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function draftBlob(draft: DraftImage): Promise<Blob> {
+  if (draft.file) return draft.file;
+  if (!draft.data) throw new Error(`No se pudo leer ${draft.name || 'la imagen'}.`);
+  const response = await fetch(`data:${draft.mimeType};base64,${draft.data}`);
+  if (!response.ok) throw new Error(`No se pudo decodificar ${draft.name || 'la imagen'}.`);
+  return response.blob();
+}
+
+function canvasBlob(canvas: HTMLCanvasElement, mimeType: string, quality: number): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error('El navegador no pudo comprimir la imagen.'));
+    }, mimeType, quality);
+  });
+}
+
+// Oversized camera photos and lossless screenshots are normalized locally so
+// the user-visible attachment and the provider input have one successful
+// ownership boundary. The full-resolution File remains behind the object URL
+// until admission; only the bounded WebP crosses renderer/daemon/ACP JSON.
+export async function normalizeDraftImage(
+  draft: DraftImage,
+  maxBase64Bytes: number,
+): Promise<PreparedImagePayload> {
+  if (maxBase64Bytes <= 0 || typeof document === 'undefined' || typeof createImageBitmap !== 'function') {
+    throw new Error(`La imagen ${draft.name || ''} supera el límite seguro y no se pudo reducir.`.trim());
+  }
+  const bitmap = await createImageBitmap(await draftBlob(draft));
+  try {
+    const longest = Math.max(bitmap.width, bitmap.height);
+    if (!Number.isFinite(longest) || longest <= 0) throw new Error('La imagen no tiene dimensiones válidas.');
+    let scale = Math.min(1, MAX_NORMALIZED_IMAGE_EDGE / longest);
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d', { alpha: true });
+    if (!context) throw new Error('El navegador no pudo preparar la imagen.');
+
+    while (Math.max(1, Math.round(longest * scale)) >= MIN_NORMALIZED_IMAGE_EDGE) {
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      for (const quality of NORMALIZED_WEBP_QUALITIES) {
+        const blob = await canvasBlob(canvas, 'image/webp', quality);
+        if (base64LengthForBytes(blob.size) > maxBase64Bytes) continue;
+        const data = imageBase64(await readBlobDataURL(blob));
+        if (data && data.length <= maxBase64Bytes) {
+          return { mimeType: 'image/webp', data, name: draft.name };
+        }
+      }
+      scale *= 0.75;
+    }
+  } finally {
+    bitmap.close();
+  }
+  throw new Error(`La imagen ${draft.name || ''} supera el límite seguro incluso después de reducirla.`.trim());
+}
+
 // Encoding is deliberately a send-boundary concern. Read sequentially to avoid
 // the old Promise.all peak where every expanded base64 result landed together.
 // The injected reader keeps the transform deterministic in the Node test suite.
@@ -67,13 +164,47 @@ export async function draftImagePayloads(
   drafts: DraftImage[],
   readDataURL: (file: File) => Promise<string> = readFileDataURL,
   yieldBetween: () => Promise<void> = async () => {},
-): Promise<Array<{ mimeType: string; data: string; name?: string }>> {
-  const payloads: Array<{ mimeType: string; data: string; name?: string }> = [];
-  for (const draft of drafts) {
+  normalize: DraftImageNormalizer = normalizeDraftImage,
+): Promise<PreparedImagePayload[]> {
+  if (drafts.length > MAX_ATTACHED_IMAGES) {
+    throw new Error(`Podés adjuntar hasta ${MAX_ATTACHED_IMAGES} imágenes por mensaje.`);
+  }
+  const estimates = drafts.map(estimatedDraftBase64Length);
+  const batchNeedsNormalization = estimates.some((size) => size > MAX_ATTACHMENT_IMAGE_BASE64_BYTES)
+    || estimates.reduce((total, size) => total + size, 0) > MAX_ATTACHMENT_TOTAL_BASE64_BYTES;
+  const payloads: PreparedImagePayload[] = [];
+  let total = 0;
+  for (const [index, draft] of drafts.entries()) {
+    const remaining = drafts.length - index;
+    const remainingBudget = MAX_ATTACHMENT_TOTAL_BASE64_BYTES - total;
+    const fairBatchBudget = batchNeedsNormalization ? Math.floor(remainingBudget / remaining) : MAX_ATTACHMENT_IMAGE_BASE64_BYTES;
+    const imageBudget = Math.min(MAX_ATTACHMENT_IMAGE_BASE64_BYTES, fairBatchBudget);
+    if (imageBudget <= 0) throw new Error('Las imágenes adjuntas superan el límite seguro de Workass.');
+
     let data = draft.data ?? '';
-    if (!data && draft.file) data = imageBase64(await readDataURL(draft.file));
-    if (!draft.mimeType.startsWith('image/') || !data) continue;
-    payloads.push({ mimeType: draft.mimeType, data, name: draft.name });
+    let mimeType = draft.mimeType.toLowerCase();
+    const mustNormalize = !SAFE_RASTER_MIME.has(mimeType)
+      || estimatedDraftBase64Length(draft) > imageBudget;
+    if (mustNormalize) {
+      ({ data, mimeType } = await normalize(draft, imageBudget));
+      mimeType = mimeType.toLowerCase();
+    } else if (!data && draft.file) {
+      data = imageBase64(await readDataURL(draft.file));
+    }
+    if (!SAFE_RASTER_MIME.has(mimeType) || !data) {
+      throw new Error(`No se pudo preparar ${draft.name || 'una de las imágenes'} como PNG, JPEG, WebP o GIF.`);
+    }
+    if (data.length > imageBudget || total + data.length > MAX_ATTACHMENT_TOTAL_BASE64_BYTES) {
+      const normalized = await normalize(draft, imageBudget);
+      mimeType = normalized.mimeType.toLowerCase();
+      data = normalized.data;
+    }
+    if (!SAFE_RASTER_MIME.has(mimeType) || !data || data.length > imageBudget
+      || total + data.length > MAX_ATTACHMENT_TOTAL_BASE64_BYTES) {
+      throw new Error(`La imagen ${draft.name || ''} supera el límite seguro de Workass.`.trim());
+    }
+    payloads.push({ mimeType, data, name: draft.name });
+    total += data.length;
     await yieldBetween();
   }
   return payloads;
