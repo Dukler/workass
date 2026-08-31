@@ -71,11 +71,16 @@ type ProviderConfig struct {
 	// NeedsLogin is durable provider readiness, not Workass-owned credentials.
 	// It suppresses automatic probing/spawning until an explicit re-enable or a
 	// successful explicit provider probe proves the vendor CLI is authenticated.
-	NeedsLogin bool   `json:"needsLogin,omitempty"`
-	FixHint    string `json:"-"`
-	CWD        string `json:"-"`
-	Label      string `json:"-"`
-	enabledSet bool   `json:"-"`
+	NeedsLogin bool `json:"needsLogin,omitempty"`
+	// LaunchSanitizationRevision records which provider-owned launch boundary
+	// produced the durable readiness state. It never contains authentication
+	// material; it only prevents a legacy needs-login state from retrying more
+	// than once after that boundary changes.
+	LaunchSanitizationRevision int    `json:"launchSanitizationRevision,omitempty"`
+	FixHint                    string `json:"-"`
+	CWD                        string `json:"-"`
+	Label                      string `json:"-"`
+	enabledSet                 bool   `json:"-"`
 }
 
 // Options configures a bridge manager. Tests can shorten timeouts here.

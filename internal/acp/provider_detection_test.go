@@ -1077,6 +1077,7 @@ func TestStartupDetectionSkipsPersistedNeedsLoginUntilExplicitProbeSucceeds(t *t
 		Providers: []ProviderConfig{{
 			ID: "devin", Name: "Devin ACP", Command: filepath.Join(pathDir, "devin"), Args: []string{"acp"},
 			Enabled: false, NeedsLogin: true, Detected: true, ResolvedCommand: filepath.Join(pathDir, "devin"),
+			LaunchSanitizationRevision: 1,
 		}},
 		DefaultProviderID:              "devin",
 		ProviderConfigFile:             providersFile,
@@ -1104,6 +1105,150 @@ func TestStartupDetectionSkipsPersistedNeedsLoginUntilExplicitProbeSucceeds(t *t
 	if needsLogin {
 		t.Fatal("successful explicit Devin probe did not clear needs-login")
 	}
+}
+
+func TestStartupDetectionRecoversLegacyDevinNeedsLoginOnceUnderSanitizedLaunch(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	methodLog := filepath.Join(t.TempDir(), "methods.log")
+	installFakeAgentWrapperWithEnv(t, pathDir, "devin", "echo-prompt", map[string]string{
+		"WORKASS_FAKE_ACP_METHOD_LOG": methodLog,
+	})
+	providersFile := filepath.Join(t.TempDir(), "providers.json")
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "devin", Name: "Devin ACP", Command: filepath.Join(pathDir, "devin"), Args: []string{"acp"},
+			Enabled: false, NeedsLogin: true, Detected: true, ResolvedCommand: filepath.Join(pathDir, "devin"),
+		}},
+		DefaultProviderID:              "devin",
+		ProviderConfigFile:             providersFile,
+		InitTimeout:                    300 * time.Millisecond,
+		ProviderDetectionRetryBackoffs: []time.Duration{10 * time.Millisecond},
+		RSSSampleInterval:              time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	manager.StartProviderDetection(context.Background())
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		manager.mu.Lock()
+		cfg := manager.providers["devin"].Config
+		manager.mu.Unlock()
+		if cfg.Enabled && !cfg.NeedsLogin && cfg.LaunchSanitizationRevision == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("legacy Devin recovery did not become ready: %#v", cfg)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := countMethod(readMethodLog(t, methodLog), "initialize"); got != 1 {
+		t.Fatalf("legacy Devin recovery initialize attempts = %d, want 1", got)
+	}
+	reloaded, err := LoadProviderConfigs(providersFile, root)
+	if err != nil {
+		t.Fatalf("reload recovered Devin config: %v", err)
+	}
+	devin, ok := providerFromSlice(reloaded, "devin")
+	if !ok || devin.NeedsLogin || !devin.Enabled || devin.LaunchSanitizationRevision != 1 {
+		t.Fatalf("persisted recovered Devin config = %#v", devin)
+	}
+}
+
+func TestLegacyDevinNeedsLoginRecoveryFailureDoesNotLoopAcrossRestart(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	methodLog := filepath.Join(t.TempDir(), "methods.log")
+	installFakeAgentWrapperWithEnv(t, pathDir, "devin", "auth-stderr", map[string]string{
+		"WORKASS_FAKE_ACP_METHOD_LOG": methodLog,
+	})
+	providersFile := filepath.Join(t.TempDir(), "providers.json")
+	provider := ProviderConfig{
+		ID: "devin", Name: "Devin ACP", Command: filepath.Join(pathDir, "devin"), Args: []string{"acp"},
+		Enabled: false, NeedsLogin: true, Detected: true, ResolvedCommand: filepath.Join(pathDir, "devin"),
+	}
+	newManager := func(providers []ProviderConfig) *Manager {
+		return NewManager(Options{
+			RootDir: root, Providers: providers, DefaultProviderID: "devin", ProviderConfigFile: providersFile,
+			InitTimeout: 300 * time.Millisecond, ProviderDetectionRetryBackoffs: []time.Duration{10 * time.Millisecond, 20 * time.Millisecond},
+			RSSSampleInterval: time.Hour,
+		})
+	}
+
+	first := newManager([]ProviderConfig{provider})
+	first.StartProviderDetection(context.Background())
+	waitForMethodLog(t, methodLog, 2*time.Second, func(methods []string) bool {
+		return countMethod(methods, "initialize") == 1
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		first.mu.Lock()
+		cfg := first.providers["devin"].Config
+		first.mu.Unlock()
+		if cfg.NeedsLogin && cfg.LaunchSanitizationRevision == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			first.Reset()
+			t.Fatalf("failed legacy recovery was not latched: %#v", cfg)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(80 * time.Millisecond)
+	if got := countMethod(readMethodLog(t, methodLog), "initialize"); got != 1 {
+		first.Reset()
+		t.Fatalf("failed legacy recovery retried in-process %d times, want 1", got)
+	}
+	first.Reset()
+
+	reloaded, err := LoadProviderConfigs(providersFile, root)
+	if err != nil {
+		t.Fatalf("reload failed Devin recovery: %v", err)
+	}
+	devin, ok := providerFromSlice(reloaded, "devin")
+	if !ok || !devin.NeedsLogin || devin.LaunchSanitizationRevision != 1 {
+		t.Fatalf("persisted failed Devin recovery = %#v", devin)
+	}
+	second := newManager(reloaded)
+	t.Cleanup(func() { second.Reset() })
+	second.StartProviderDetection(context.Background())
+	time.Sleep(100 * time.Millisecond)
+	if got := countMethod(readMethodLog(t, methodLog), "initialize"); got != 1 {
+		t.Fatalf("failed legacy recovery retried after restart %d times, want 1", got)
+	}
+	assertProviderListItem(t, second.ProvidersList(), "devin", providerStatusNeedsLogin, false)
+}
+
+func TestLegacyDevinNeedsLoginRecoveryFailsClosedWhenClaimCannotPersist(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	methodLog := filepath.Join(t.TempDir(), "methods.log")
+	installFakeAgentWrapperWithEnv(t, pathDir, "devin", "echo-prompt", map[string]string{
+		"WORKASS_FAKE_ACP_METHOD_LOG": methodLog,
+	})
+	blockedParent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "devin", Name: "Devin ACP", Command: filepath.Join(pathDir, "devin"), Args: []string{"acp"},
+			Enabled: false, NeedsLogin: true, Detected: true, ResolvedCommand: filepath.Join(pathDir, "devin"),
+		}},
+		DefaultProviderID: "devin", ProviderConfigFile: filepath.Join(blockedParent, "providers.json"),
+		InitTimeout: 300 * time.Millisecond, ProviderDetectionRetryBackoffs: []time.Duration{10 * time.Millisecond},
+		RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	manager.StartProviderDetection(context.Background())
+	time.Sleep(100 * time.Millisecond)
+	if methods := readMethodLog(t, methodLog); len(methods) != 0 {
+		t.Fatalf("legacy recovery launched before its claim persisted: %v", methods)
+	}
+	assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusNeedsLogin, false)
 }
 
 func TestNeedsLoginRejectsStaleSessionAndChatProviderBindings(t *testing.T) {

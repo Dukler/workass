@@ -235,7 +235,8 @@ var providerRegistrations = map[string]providerRegistration{
 			// ACP_BACKEND is a Workass/test harness selector, not Devin auth
 			// configuration. Inheriting or persisting it makes the installed Windows
 			// Devin CLI enter the wrong backend and reject its valid vendor login.
-			blockedKeys: []string{"ACP_BACKEND"},
+			blockedKeys:          []string{"ACP_BACKEND"},
+			sanitizationRevision: 1,
 		}}},
 	},
 	"qwen": {

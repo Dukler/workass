@@ -64,7 +64,8 @@ type providerLaunchStrategy interface {
 // subprocess environment. It is owned by the provider launch adapter so the
 // process bridge never branches on provider identity.
 type providerEnvironmentPolicy struct {
-	blockedKeys []string
+	blockedKeys          []string
+	sanitizationRevision int
 }
 
 func (policy providerEnvironmentPolicy) allows(key string) bool {
@@ -75,6 +76,21 @@ func (policy providerEnvironmentPolicy) allows(key string) bool {
 		}
 	}
 	return true
+}
+
+// startupRecoveryRevision is opt-in. A positive revision grants a provider
+// with a legacy needs-login record exactly one startup probe after its launch
+// environment boundary changes. Increment it only when the sanitized child
+// environment can invalidate a readiness result produced by an older policy.
+func (policy providerEnvironmentPolicy) startupRecoveryRevision() int {
+	if policy.sanitizationRevision < 1 {
+		return 0
+	}
+	return policy.sanitizationRevision
+}
+
+func providerLaunchSanitizationRevision(providerID string) int {
+	return providerAdapterForID(providerID).launch.EnvironmentPolicy().startupRecoveryRevision()
 }
 
 type standardACPLaunchStrategy struct {
