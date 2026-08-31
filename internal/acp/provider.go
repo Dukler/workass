@@ -406,6 +406,7 @@ func mergeProviderConfig(base, raw ProviderConfig, rootDir string) ProviderConfi
 	provider.ResolvedCommand = strings.TrimSpace(raw.ResolvedCommand)
 	provider.DisabledByUser = raw.DisabledByUser
 	provider.NeedsLogin = raw.NeedsLogin
+	provider.LaunchSanitizationRevision = raw.LaunchSanitizationRevision
 	provider.enabledSet = raw.enabledSet
 	if cwd := strings.TrimSpace(raw.CWD); cwd != "" {
 		provider.CWD = cwd
@@ -865,8 +866,20 @@ func (m *Manager) markProviderNeedsLogin(ctx context.Context, providerID string,
 		m.mu.Unlock()
 		return "", fmt.Errorf("provider authentication policy references unknown provider %q", id)
 	}
+	policyRevision := providerLaunchSanitizationRevision(id)
+	revisionChanged := policyRevision > runtime.Config.LaunchSanitizationRevision
+	if revisionChanged {
+		runtime.Config.LaunchSanitizationRevision = policyRevision
+	}
 	if runtime.Config.NeedsLogin && runtime.Status == providerStatusNeedsLogin && !runtime.Config.Enabled {
+		providers := m.providerRecordsLocked()
+		filePath := m.providerConfigFile
 		m.mu.Unlock()
+		if revisionChanged {
+			if err := SaveProviderConfigs(filePath, providers); err != nil && m.opts.Logf != nil {
+				m.opts.Logf("provider needs-login revision persist failed", map[string]any{"provider": id, "error": redactSensitiveText(err.Error())})
+			}
+		}
 		return hint, nil
 	}
 	runtime.Status = providerStatusNeedsLogin
@@ -1136,9 +1149,10 @@ func (m *Manager) providerDetectionCandidates(intent providerDetectionIntent, pr
 	}
 	wantAll := len(wants) == 0
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	seen := map[string]bool{}
 	out := make([]ProviderConfig, 0, len(m.providerOrder))
+	recoveryIDs := make(map[string]bool)
+	recoveryOrder := make([]string, 0, 1)
 	for _, id := range m.providerOrder {
 		if !wantAll && !wants[id] {
 			continue
@@ -1148,7 +1162,16 @@ func (m *Manager) providerDetectionCandidates(intent providerDetectionIntent, pr
 		}
 		if runtime := m.providers[id]; runtime != nil {
 			if intent == providerDetectionStartup && runtime.Config.NeedsLogin {
-				continue
+				revision := providerLaunchSanitizationRevision(id)
+				if revision < 1 || runtime.Config.LaunchSanitizationRevision >= revision {
+					continue
+				}
+				// Claim the one-shot migration before launching. A failed persistence
+				// blocks the probe, so a daemon crash or restart cannot turn a vendor
+				// login failure into an automatic retry loop.
+				runtime.Config.LaunchSanitizationRevision = revision
+				recoveryIDs[id] = true
+				recoveryOrder = append(recoveryOrder, id)
 			}
 			out = append(out, runtime.Config)
 			seen[id] = true
@@ -1163,6 +1186,28 @@ func (m *Manager) providerDetectionCandidates(intent providerDetectionIntent, pr
 		}
 		out = append(out, m.localProviderConfigLocked(server))
 		seen[server.ProviderID] = true
+	}
+	if len(recoveryIDs) == 0 {
+		m.mu.Unlock()
+		return out
+	}
+	providers := m.providerRecordsLocked()
+	filePath := m.providerConfigFile
+	m.mu.Unlock()
+	if err := SaveProviderConfigs(filePath, providers); err != nil {
+		if m.opts.Logf != nil {
+			m.opts.Logf("provider startup recovery persist failed", map[string]any{
+				"providers": recoveryOrder,
+				"error":     redactSensitiveText(err.Error()),
+			})
+		}
+		filtered := make([]ProviderConfig, 0, len(out)-len(recoveryIDs))
+		for _, candidate := range out {
+			if !recoveryIDs[normalizeProviderID(candidate.ID)] {
+				filtered = append(filtered, candidate)
+			}
+		}
+		return filtered
 	}
 	return out
 }
@@ -1307,6 +1352,9 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 		}
 		if runtime == nil {
 			continue
+		}
+		if revision := providerLaunchSanitizationRevision(result.ProviderID); revision > runtime.Config.LaunchSanitizationRevision {
+			runtime.Config.LaunchSanitizationRevision = revision
 		}
 		wasNeedsLogin := runtime.Config.NeedsLogin
 		if runtime.Config.DisabledByUser || result.ExplicitDisabled {

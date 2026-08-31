@@ -54,10 +54,17 @@ func TestDevinLaunchOwnsACPBackendSanitization(t *testing.T) {
 	if !devin.allows("PATH") {
 		t.Fatal("Devin launch blocked unrelated environment")
 	}
+	if got := devin.startupRecoveryRevision(); got != 1 {
+		t.Fatalf("Devin launch sanitation revision = %d, want 1", got)
+	}
 
 	for _, providerID := range []string{"mock", "qwen", "claude", "codex", "custom"} {
-		if !providerAdapterForID(providerID).launch.EnvironmentPolicy().allows("ACP_BACKEND") {
+		policy := providerAdapterForID(providerID).launch.EnvironmentPolicy()
+		if !policy.allows("ACP_BACKEND") {
 			t.Fatalf("provider %q inherited Devin-only environment policy", providerID)
+		}
+		if got := policy.startupRecoveryRevision(); got != 0 {
+			t.Fatalf("provider %q inherited Devin recovery revision %d", providerID, got)
 		}
 	}
 }
