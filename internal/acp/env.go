@@ -158,6 +158,14 @@ type gitNumstat struct {
 }
 
 func (m *Manager) initChatEnvForSession(ctx context.Context, opts SessionOptions, info SessionInfo) {
+	if opts.ProviderLaneManaged && !opts.Spare && info.SessionID != "" {
+		go m.initChatEnvForSessionSync(context.Background(), opts, info)
+		return
+	}
+	m.initChatEnvForSessionSync(ctx, opts, info)
+}
+
+func (m *Manager) initChatEnvForSessionSync(ctx context.Context, opts SessionOptions, info SessionInfo) {
 	if opts.Spare || info.SessionID == "" {
 		return
 	}

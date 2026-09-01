@@ -42,6 +42,9 @@ func TestProviderAdapterDefaultsAllowSingleFacetOverride(t *testing.T) {
 			t.Fatalf("native provider %q lost its explicit input receipt boundary: %#v", providerID, got)
 		}
 	}
+	if got := providerAdapterForID("devin"); !got.creation.DeferredUntilInput || !got.input.StandardACPActivity() {
+		t.Fatalf("Devin lost its deferred standard ACP input boundary: %#v", got)
+	}
 }
 
 func TestDevinLaunchOwnsACPBackendSanitization(t *testing.T) {

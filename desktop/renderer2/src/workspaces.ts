@@ -30,6 +30,22 @@ function pathKey(path: string): string {
   return /^[A-Za-z]:/.test(clean) ? clean.toLowerCase() : clean;
 }
 
+function isNestedWorkspace(parent: string, child: string): boolean {
+  const base = normalizeWorkspacePath(parent);
+  const nested = normalizeWorkspacePath(child);
+  if (!base || !nested || pathKey(base) === pathKey(nested)) return false;
+  const sep = base.includes('\\') ? '\\' : '/';
+  const prefix = base.endsWith(sep) ? base : `${base}${sep}`;
+  return pathKey(nested).startsWith(pathKey(prefix));
+}
+
+function concreteWorkspacePath(path: string | null | undefined, workspaces: Workspace[]): string | null {
+  const clean = normalizeWorkspacePath(path);
+  if (!clean) return null;
+  const nested = normalizeWorkspaces(workspaces).find((workspace) => isNestedWorkspace(clean, workspace.path));
+  return nested?.path ?? clean;
+}
+
 export function workspaceFromPath(path: string): Workspace | null {
   const clean = normalizeWorkspacePath(path);
   return clean ? { path: clean, name: workspaceName(clean) } : null;
@@ -85,10 +101,11 @@ export function workspaceLabelForChat(group: Pick<WorkspaceGroup, 'path' | 'name
 }
 
 export function chooseWorkspacePath(explicit: string | null | undefined, active: Chat | null, workspaces: Workspace[], fallback: string | null | undefined): string | null {
-  return normalizeWorkspacePath(explicit)
-    || normalizeWorkspacePath(active?.cwd)
-    || normalizeWorkspacePath(workspaces[0]?.path)
-    || normalizeWorkspacePath(fallback)
+  const exact = normalizeWorkspacePath(explicit);
+  if (exact) return exact;
+  return concreteWorkspacePath(active?.cwd, workspaces)
+    || concreteWorkspacePath(workspaces[0]?.path, workspaces)
+    || concreteWorkspacePath(fallback, workspaces)
     || null;
 }
 
@@ -118,7 +135,8 @@ export function newChatTarget(scope: string | null, groups: WorkspaceGroup[], re
   if (scoped) return scoped;
   const last = normalizeWorkspacePath(remembered);
   if (!last) return null;
-  return groups.some((g) => normalizeWorkspacePath(g.path) === last) ? last : null;
+  if (!groups.some((g) => pathKey(g.path) === pathKey(last))) return null;
+  return concreteWorkspacePath(last, groups);
 }
 
 // Adding a folder changes only cwd. It must not silently reset the selected

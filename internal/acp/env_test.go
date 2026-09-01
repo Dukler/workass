@@ -11,6 +11,52 @@ import (
 	"time"
 )
 
+func TestProviderLaneManagedChatEnvInitializationDoesNotBlockSession(t *testing.T) {
+	workspace := t.TempDir()
+	manager, _ := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	initialized := make(chan struct{}, 1)
+	manager.SetChatEnvRestorer(func(_, _ string) error {
+		close(entered)
+		<-release
+		return nil
+	})
+	manager.SetChatEnvObserver(func(ChatEnvPayload) error {
+		initialized <- struct{}{}
+		return nil
+	})
+
+	returned := make(chan struct{})
+	go func() {
+		manager.initChatEnvForSession(context.Background(), SessionOptions{
+			CWD: workspace, TabID: "provider-lane-tab", ChatID: "provider-lane-chat", ProviderLaneManaged: true,
+		}, SessionInfo{SessionID: "provider-lane-session", CWD: workspace})
+		close(returned)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("provider-lane chat environment initialization did not start")
+	}
+	select {
+	case <-returned:
+	case <-time.After(250 * time.Millisecond):
+		close(release)
+		t.Fatal("provider-lane session creation waited for chat environment restoration")
+	}
+	close(release)
+	select {
+	case <-initialized:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider-lane chat environment initialization did not finish")
+	}
+}
+
 func TestChatEnvTracksRepoChangesAfterTurn(t *testing.T) {
 	t.Parallel()
 	requireGit(t)
