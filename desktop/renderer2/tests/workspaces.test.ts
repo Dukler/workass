@@ -71,6 +71,18 @@ test('new chats prefer an explicit folder, then active chat, then saved folders'
   assert.equal(chooseWorkspacePath(null, null, saved, '/fallback'), '/repo/one');
 });
 
+test('implicit broad workspaces resolve to a listed concrete child without rewriting explicit choices', () => {
+  const broad = 'C:\\Users\\a447079\\Workspace';
+  const concrete = 'C:\\Users\\a447079\\Workspace\\workass';
+  const saved = normalizeWorkspaces([
+    { path: broad, name: 'Workspace' },
+    { path: concrete, name: 'workass' },
+  ]);
+  assert.equal(chooseWorkspacePath(broad, chat('active', broad), saved, broad), broad);
+  assert.equal(chooseWorkspacePath(null, chat('active', broad), saved, broad), concrete);
+  assert.equal(chooseWorkspacePath(null, null, saved, broad), concrete);
+});
+
 test('the sidebar + targets the scoped project, else the last one a chat started in', () => {
   // The bug this encodes: with no target the store falls back to the ACTIVE
   // chat's cwd, so every chat started while reading a workass thread was another
@@ -85,6 +97,17 @@ test('the sidebar + targets the scoped project, else the last one a chat started
   assert.equal(newChatTarget('', groups, '/repo/depthcut'), '/repo/depthcut');                // unassigned bucket == "all"
   assert.equal(newChatTarget(null, groups, '/repo/removed'), null);                           // removing a folder stops it
   assert.equal(newChatTarget(null, groups, null), null);                                      // nothing remembered yet
+});
+
+test('the remembered broad workspace targets its listed concrete child', () => {
+  const broad = 'C:\\Users\\a447079\\Workspace';
+  const concrete = 'C:\\Users\\a447079\\Workspace\\workass';
+  const groups = buildWorkspaceGroups(
+    normalizeWorkspaces([{ path: broad, name: 'Workspace' }, { path: concrete, name: 'workass' }]),
+    [],
+  );
+  assert.equal(newChatTarget(null, groups, broad), concrete);
+  assert.equal(newChatTarget(broad, groups, concrete), broad);
 });
 
 test('the remembered project survives a reload and is never cleared by an empty path', () => {

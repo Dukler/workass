@@ -1107,14 +1107,18 @@ func TestProviderChatRuntimeSwitchesAndReturnsThroughVerifiedContextImport(t *te
 		t.Fatalf("old selection retry followed current desired lane: first=%#v retry=%#v", first, retriedFirst)
 	}
 	afterRetry, _ := runtime.Snapshot(chatID)
-	if afterRetry.DesiredLaneID != state.DesiredLaneID || afterRetry.ActiveLaneID != state.ActiveLaneID || afterRetry.Revision != state.Revision {
+	if afterRetry.DesiredLaneID != state.DesiredLaneID || afterRetry.ActiveLaneID != state.ActiveLaneID ||
+		afterRetry.Presentation.ProviderID != state.Presentation.ProviderID ||
+		afterRetry.Presentation.RuntimeControlRevision != state.Presentation.RuntimeControlRevision {
 		t.Fatalf("old selection retry mutated newer selection: before=%#v after=%#v", state, afterRetry)
 	}
 	if _, err := runtime.Start(context.Background(), firstTurnRequest, "human"); err != nil {
 		t.Fatalf("retry first turn after selecting second provider: %v", err)
 	}
 	afterTurnRetry, _ := runtime.Snapshot(chatID)
-	if afterTurnRetry.DesiredLaneID != state.DesiredLaneID || afterTurnRetry.ActiveLaneID != state.ActiveLaneID || afterTurnRetry.Revision != state.Revision {
+	if afterTurnRetry.DesiredLaneID != state.DesiredLaneID || afterTurnRetry.ActiveLaneID != state.ActiveLaneID ||
+		afterTurnRetry.Presentation.ProviderID != state.Presentation.ProviderID ||
+		afterTurnRetry.Presentation.RuntimeControlRevision != state.Presentation.RuntimeControlRevision {
 		t.Fatalf("old turn retry mutated newer provider selection: before=%#v after=%#v", state, afterTurnRetry)
 	}
 	changedFirstTurn := cloneJSON(firstTurnRequest).(map[string]any)

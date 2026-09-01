@@ -92,8 +92,8 @@ func TestRealWindowsDaemonWireDevinTurn(t *testing.T) {
 	}
 	session := mapFromAnyMain(sessionReply.Result)
 	sessionID := strings.TrimSpace(fieldString(session, "sessionId"))
-	if fieldString(session, "providerId") != "devin" || sessionID == "" {
-		t.Fatalf("real Devin daemon session receipt is incomplete: %#v", session)
+	if fieldString(session, "providerId") != "devin" || sessionID != "" {
+		t.Fatalf("real Devin daemon created a native session before input: %#v", session)
 	}
 
 	client.invoke(t, 2, "job:start", map[string]any{
@@ -107,13 +107,21 @@ func TestRealWindowsDaemonWireDevinTurn(t *testing.T) {
 	}
 	jobID := strings.TrimSpace(fieldString(mapFromAnyMain(startReply.Result), "id"))
 	if jobID == "" {
-		t.Fatalf("real Devin daemon turn receipt has no job identity: %#v", startReply.Result)
+		t.Fatalf("real Devin daemon first input was not admitted: %#v", startReply.Result)
 	}
 	end := client.waitJobEvent(t, jobID, "end", 180*time.Second)
 	job := mapFromAnyMain(end["job"])
 	if fieldString(job, "providerId") != "devin" || fieldString(job, "status") != "done" {
 		t.Fatalf("real Devin daemon terminal receipt provider=%q status=%q stopReason=%q",
 			fieldString(job, "providerId"), fieldString(job, "status"), fieldString(job, "stopReason"))
+	}
+	actor, ok := providerChats.Snapshot(chatID)
+	if !ok {
+		t.Fatal("real Devin actor disappeared after its first turn")
+	}
+	lane := actor.Lanes[actor.ActiveLaneID]
+	if lane.Identity.Realm.ProviderID != "devin" || lane.Thread.HeadID == "" {
+		t.Fatalf("real Devin first input did not establish its exact native thread: %#v", lane)
 	}
 
 	snapshot, err := providerChats.ProjectSession()

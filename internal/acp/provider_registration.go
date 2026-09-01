@@ -231,13 +231,16 @@ var providerRegistrations = map[string]providerRegistration{
 		Discovery: &cliProvider{id: "devin", defaultCommand: "devin", pathEnv: []string{"WORKASS_DEVIN", "ASSISTANT_DEVIN"}, pathNames: []string{"devin.exe", "devin"}, knownPaths: devinKnownPaths},
 		Detection: cliDetectionStrategy{}, ProbeTimeout: devinProbeTimeout,
 		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `devin auth login`"},
-		Adapter: providerAdapter{launch: standardACPLaunchStrategy{environment: providerEnvironmentPolicy{
-			// ACP_BACKEND is a Workass/test harness selector, not Devin auth
-			// configuration. Inheriting or persisting it makes the installed Windows
-			// Devin CLI enter the wrong backend and reject its valid vendor login.
-			blockedKeys:          []string{"ACP_BACKEND"},
-			sanitizationRevision: 1,
-		}}},
+		Adapter: providerAdapter{
+			creation: providercontract.CreationCapabilities{DeferredUntilInput: true},
+			launch: standardACPLaunchStrategy{environment: providerEnvironmentPolicy{
+				// ACP_BACKEND is a Workass/test harness selector, not Devin auth
+				// configuration. Inheriting or persisting it makes the installed Windows
+				// Devin CLI enter the wrong backend and reject its valid vendor login.
+				blockedKeys:          []string{"ACP_BACKEND"},
+				sanitizationRevision: 1,
+			}},
+		},
 	},
 	"qwen": {
 		ID: "qwen", Name: "Qwen Code ACP", DefaultCommand: "qwen", DefaultArgs: []string{"--acp"}, Badge: "agent",

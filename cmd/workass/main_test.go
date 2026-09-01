@@ -2174,6 +2174,13 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 	}
 	session := sessionReply.Result.(map[string]any)
 	oldSessionID := session["sessionId"].(string)
+	client.waitFor(t, 5*time.Second, func(msg wsMessage) bool {
+		if msg.T != "event" || msg.Channel != "chat:env" {
+			return false
+		}
+		payload, _ := msg.Payload.(map[string]any)
+		return payload["chatId"] == chatID && strings.Join(stringSliceFromAny(payload["unchanged"]), ",") == "alpha"
+	})
 	runWireChatTurn(t, client, 2, chatID, tabID, oldSessionID, "before hibernate checkpoint", workspace)
 	hibernated := waitWireProcStateForChat(t, manager, chatID, acp.StateHibernated, 2*time.Second)
 	t.Logf("trace lifecycle hibernated chat=%s pid=%v", chatID, hibernated["pid"])
@@ -2984,10 +2991,37 @@ func TestWireProvidersDetectInvokeEmitsAndEnablesStubs(t *testing.T) {
 		t.Fatalf("new-session error: %s", *sessionReply.Error)
 	}
 	session := sessionReply.Result.(map[string]any)
-	if session["providerId"] != "devin" || session["sessionId"] == "" {
-		t.Fatalf("detected devin session = %#v", session)
+	if session["providerId"] != "devin" || session["sessionId"] != "" {
+		t.Fatalf("Devin selection created a native session before input: %#v", session)
 	}
-	t.Logf("trace reply app-chat:new-session provider=%s session=%s", session["providerId"], session["sessionId"])
+	t.Logf("trace reply app-chat:new-session provider=%s deferred=true", session["providerId"])
+
+	client.invoke(t, 3, "job:start", map[string]any{
+		"kind": "app-chat", "tabId": "wire-detect-devin-tab", "chatId": "wire-detect-devin-chat", "providerId": "devin",
+		"prompt": "deferred Devin input", "operationId": "wire-detect-devin-turn",
+		"userMessageId": "wire-detect-devin-user", "assistantMessageId": "wire-detect-devin-assistant",
+	})
+	startReply := client.waitReply(t, 3, 5*time.Second)
+	if startReply.Error != nil {
+		t.Fatalf("deferred Devin job:start error: %s", *startReply.Error)
+	}
+	job := mapFromAnyMain(startReply.Result)
+	jobID := fieldString(job, "id")
+	if jobID == "" || fieldString(job, "providerId") != "devin" {
+		t.Fatalf("deferred Devin first input was not admitted: %#v", job)
+	}
+	end := client.waitJobEvent(t, jobID, "end", 5*time.Second)
+	if ended := mapFromAnyMain(end["job"]); fieldString(ended, "status") != "done" || fieldString(ended, "providerId") != "devin" {
+		t.Fatalf("deferred Devin first turn did not complete: %#v", ended)
+	}
+	state, ok := providerChats.Snapshot("wire-detect-devin-chat")
+	if !ok {
+		t.Fatal("deferred Devin actor disappeared after its first turn")
+	}
+	lane := state.Lanes[state.ActiveLaneID]
+	if lane.Identity.Realm.ProviderID != "devin" || lane.Thread.HeadID == "" || lane.Phase != chat.LaneReady {
+		t.Fatalf("deferred Devin first input did not establish its exact native thread: %#v", lane)
+	}
 }
 
 func TestWireTraceNativeLocalProviderColdStartAndTurn(t *testing.T) {
