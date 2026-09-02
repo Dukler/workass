@@ -471,9 +471,13 @@ export class Store {
     for (const chat of this.state.chats) {
       this.committedPresentationFingerprints.set(chat.id, presentationFingerprint(chat));
     }
-    this.committedGlobalPresentationFingerprint = globalPresentationFingerprint(this.state);
+    this.commitCurrentGlobalPresentation();
     this.markAllChatsDirty();
     this.rebuildJobRefs();
+  }
+
+  private commitCurrentGlobalPresentation() {
+    this.committedGlobalPresentationFingerprint = globalPresentationFingerprint(this.state);
   }
 
   // ---- subscription plumbing -------------------------------------------
@@ -825,17 +829,27 @@ export class Store {
     }
     const globalFingerprint = globalPresentationFingerprint(this.state);
     const globalChanged = this.committedGlobalPresentationFingerprint !== globalFingerprint;
-    if (!this.pendingGlobalPresentationOperation || this.pendingGlobalPresentationOperation.fingerprint !== globalFingerprint) {
-      this.pendingGlobalPresentationOperation = { fingerprint: globalFingerprint, operationId: rid(globalChanged ? 'global-op' : 'global-noop') };
-    }
-    snapshot.globalRevision = this.state.globalRevision;
-    snapshot._workassGlobalOperationId = this.pendingGlobalPresentationOperation.operationId;
-    const saved = await call('saveSession', snapshot);
-    const savedOK = saved === true || (!!saved && typeof saved === 'object' && saved.ok === true);
-    if (saved && typeof saved === 'object' && saved.ok === true) this.state.globalRevision = saved.globalRevision;
-    if (savedOK && this.pendingGlobalPresentationOperation?.fingerprint === globalFingerprint) {
-      this.committedGlobalPresentationFingerprint = globalFingerprint;
-      this.pendingGlobalPresentationOperation = null;
+    let savedOK = true;
+    // Chat presentation, queue, controls, usage, and transcript state are actor
+    // owned and were already handled by their exact commands above. Calling the
+    // daemon-global session writer when none of its fields changed minted a new
+    // durable `global-noop` receipt, fsynced it, and broadcast a refresh for
+    // every ordinary chat pulse. Once that receipt ledger grew large, one live
+    // turn became a permanent save/get/GC loop. Only a real global mutation (or
+    // the stable retry of one already in flight) crosses session:save now.
+    if (globalChanged || this.pendingGlobalPresentationOperation) {
+      if (!this.pendingGlobalPresentationOperation || this.pendingGlobalPresentationOperation.fingerprint !== globalFingerprint) {
+        this.pendingGlobalPresentationOperation = { fingerprint: globalFingerprint, operationId: rid('global-op') };
+      }
+      snapshot.globalRevision = this.state.globalRevision;
+      snapshot._workassGlobalOperationId = this.pendingGlobalPresentationOperation.operationId;
+      const saved = await call('saveSession', snapshot);
+      savedOK = saved === true || (!!saved && typeof saved === 'object' && saved.ok === true);
+      if (saved && typeof saved === 'object' && saved.ok === true) this.state.globalRevision = saved.globalRevision;
+      if (savedOK && this.pendingGlobalPresentationOperation?.fingerprint === globalFingerprint) {
+        this.committedGlobalPresentationFingerprint = globalFingerprint;
+        this.pendingGlobalPresentationOperation = null;
+      }
     }
     for (const [id, version] of sentDirtyVersions) {
       const live = this.chat(id);
@@ -2903,7 +2917,7 @@ export class Store {
     }
   }
   newChat(activate = true, workspacePath?: string | null, machineId?: string | null): Chat {
-    this.state.seq += 1;
+    const nextSeq = this.state.seq + 1;
     const active = this.active();
     const cwd = chooseWorkspacePath(workspacePath, active, this.state.workspaces, this.state.meta?.workspaceDir ?? this.state.meta?.rootDir);
     const workspace = cwd ? workspaceFromPath(cwd) : null;
@@ -2919,12 +2933,16 @@ export class Store {
     const targetMachine = String(
       machineId === undefined ? (sameAsActive ? activeMachine : '') : (machineId ?? ''),
     ).trim();
-    const localTabId = `tab-${Date.now()}-${this.state.seq}`;
+    // `seq` belongs to this daemon's global projection. A remote chat:create is
+    // already uniquely addressed by the remote actor and must not mutate the
+    // local daemon-global snapshot merely to choose a temporary display label.
+    if (!targetMachine) this.state.seq = nextSeq;
+    const localTabId = `tab-${Date.now()}-${nextSeq}`;
     const localChatId = newChatConvId();
     const chat: Chat = {
       id: tagId(targetMachine, localTabId), chatId: tagId(targetMachine, localChatId),
       machineId: targetMachine || undefined, sessionId: null,
-      title: `Chat ${this.state.seq}`, titleLocked: false, group: workspace?.name ?? 'chats', cwd,
+      title: `Chat ${nextSeq}`, titleLocked: false, group: workspace?.name ?? 'chats', cwd,
       currentModelId: controls.currentModelId, currentModeId: controls.currentModeId,
       providerId: controls.providerId, providerName: controls.providerName,
       // New chats paint with the right column closed from their first frame.

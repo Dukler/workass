@@ -1334,6 +1334,7 @@ test('remote presentation, queue, controls, workspace, history, create, and dele
     subject.dirtyChats.clear();
     subject.dirtyChatVersions.clear();
     subject.fullSavePending = false;
+    subject.commitCurrentGlobalPresentation();
 
     subject.setDraft(TAB, 'remote draft');
     await subject.flushSession();
@@ -1362,7 +1363,6 @@ test('remote presentation, queue, controls, workspace, history, create, and dele
   assert.ok(calls.some((entry) => entry.method === 'history' && entry.opts.tabId === TAB));
   assert.ok(calls.some((entry) => entry.method === 'create' && machineOf(entry.opts.tabId) === MACHINE && machineOf(entry.opts.chatId) === MACHINE));
   assert.ok(calls.some((entry) => entry.method === 'delete' && machineOf(entry.opts.tabId) === MACHINE && machineOf(entry.opts.chatId) === MACHINE));
-  assert.ok(sessionSaves.length > 0);
-  assert.ok(sessionSaves.every((snapshot) => snapshot.chats.every((chat) => machineOf(chat.id) === '')),
-    'remote rows never enter this machine\'s whole-session mirror');
+  assert.deepEqual(sessionSaves, [],
+    'remote actor commands must not mint an unchanged local daemon-global save');
 });

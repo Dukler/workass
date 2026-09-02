@@ -943,23 +943,19 @@ func registerSessionHandlersWithActor(hub *wire.Hub, store *sessionStore, manage
 		if len(args) > 0 && args[0] != nil {
 			snapshot = args[0]
 		}
-		saved := false
-		var err error
 		if providerChats == nil {
 			return false, errors.New("session:save requires the authoritative chat actor runtime")
 		}
-		saved, err = providerChats.ApplyRendererSnapshot(snapshot)
+		result, err := providerChats.applyRendererSnapshot(snapshot)
 		if err != nil {
 			return false, err
 		}
-		if saved {
+		// A retry/no-op still receives its durable success receipt, but it is not a
+		// new state transition and must not start a save -> refresh -> digest loop.
+		if result.Changed {
 			hub.Broadcast("agent:apply", map[string]any{"action": "session-refresh"})
 		}
-		if !saved {
-			return map[string]any{"ok": false}, nil
-		}
-		global := store.GlobalSnapshot()
-		return map[string]any{"ok": true, globalPresentationRevisionField: intValue(global[globalPresentationRevisionField])}, nil
+		return map[string]any{"ok": true, globalPresentationRevisionField: int(result.Revision)}, nil
 	})
 	hub.Register("chat:queue-replace", func(args []any) (any, error) {
 		if providerChats == nil {

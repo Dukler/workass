@@ -54,6 +54,7 @@ function subjectWithChats(chats = [chat('tab-a'), chat('tab-b')]): any {
   subject.dirtyChatVersions?.clear();
   if ('fullSavePending' in subject) subject.fullSavePending = false;
   if ('fullSaveRevision' in subject) subject.fullSaveRevision = 0;
+  subject.commitCurrentGlobalPresentation();
   subject.schedulePersist = () => {};
   return subject;
 }
@@ -138,18 +139,27 @@ function terminalJob(owner: Chat, overrides: Partial<PublicJob> = {}): PublicJob
   } as PublicJob;
 }
 
-test('lean save sends only the changed chat with the additive merge marker', async () => {
+test('lean chat save uses its exact actor command without a daemon-global no-op save', async () => {
   const subject = subjectWithChats();
-  const saves: Mirror[] = [];
+  const presentationSaves: Record<string, unknown>[] = [];
+  const globalSaves: Mirror[] = [];
   await withWindowApi({
-    saveSession: async (snapshot: Mirror) => { saves.push(snapshot); return true; },
+    chatPresentationSave: async (opts: any) => {
+      presentationSaves.push({ ...opts });
+      return {
+        ok: true, operationId: opts.operationId,
+        presentationRevision: (opts.expectedRevision ?? 0) + 1, actorRevision: 1,
+      };
+    },
+    saveSession: async (snapshot: Mirror) => { globalSaves.push(snapshot); return true; },
   }, async () => {
     subject.setDraft('tab-a', 'changed');
     await subject.flushSession();
   });
 
-  assert.deepEqual(saves.map((snapshot) => snapshot.chats.map((candidate) => candidate.id)), [['tab-a']]);
-  assert.equal(saves[0]._workassSave, LEAN_SESSION_SAVE_MODE);
+  assert.deepEqual(presentationSaves.map((save) => [save.tabId, save.draft]), [['tab-a', 'changed']]);
+  assert.deepEqual(globalSaves, []);
+  assert.equal(isDirty(subject, 'tab-a'), false);
 });
 
 test('every persisted chat-mutation family marks its exact chat dirty', async (t) => {
@@ -259,17 +269,20 @@ test('a transport disconnect preserves a daemon-owned running turn for reconnect
 test('false and throwing saves keep a chat dirty until a successful retry', async () => {
   for (const failure of ['false', 'throw'] as const) {
     const subject = subjectWithChats();
-    const payloads: Mirror[] = [];
+    const payloads: Record<string, unknown>[] = [];
     let calls = 0;
     await withWindowApi({
-      saveSession: async (snapshot: Mirror) => {
-        payloads.push(snapshot);
+      chatPresentationSave: async (opts: any) => {
+        payloads.push({ ...opts });
         calls += 1;
         if (calls === 1) {
           if (failure === 'throw') throw new Error('fixture save failure');
-          return false;
+          return { ok: false };
         }
-        return true;
+        return {
+          ok: true, operationId: opts.operationId,
+          presentationRevision: (opts.expectedRevision ?? 0) + 1, actorRevision: 1,
+        };
       },
     }, async () => {
       const oldWarn = console.warn;
@@ -283,41 +296,75 @@ test('false and throwing saves keep a chat dirty until a successful retry', asyn
         console.warn = oldWarn;
       }
     });
-    assert.deepEqual(payloads.map((snapshot) => snapshot.chats.map((candidate) => candidate.id)), [
-      ['tab-a'],
-      ['tab-a'],
-    ]);
+    assert.deepEqual(payloads.map((save) => save.tabId), ['tab-a', 'tab-a']);
+    assert.equal(payloads[1].operationId, payloads[0].operationId);
     assert.equal(isDirty(subject, 'tab-a'), false, failure);
   }
 });
 
 test('a mutation arriving during a save acknowledgement remains dirty and is resent', async () => {
   const subject = subjectWithChats();
-  const payloads: Mirror[] = [];
-  let release!: (saved: boolean) => void;
-  const firstAck = new Promise<boolean>((resolve) => { release = resolve; });
+  const payloads: Record<string, unknown>[] = [];
+  let release!: (saved: Record<string, unknown>) => void;
+  const firstAck = new Promise<Record<string, unknown>>((resolve) => { release = resolve; });
   let callCount = 0;
 
   await withWindowApi({
-    saveSession: async (snapshot: Mirror) => {
-      payloads.push(snapshot);
+    chatPresentationSave: async (opts: any) => {
+      payloads.push({ ...opts });
       callCount += 1;
-      return callCount === 1 ? firstAck : true;
+      return callCount === 1 ? firstAck : {
+        ok: true, operationId: opts.operationId,
+        presentationRevision: (opts.expectedRevision ?? 0) + 1, actorRevision: 2,
+      };
     },
   }, async () => {
     subject.setDraft('tab-a', 'first');
     const firstSave = subject.flushSession();
     await new Promise((resolve) => setTimeout(resolve, 0));
     subject.setDraft('tab-a', 'second');
-    release(true);
+    release({
+      ok: true, operationId: payloads[0].operationId,
+      presentationRevision: 1, actorRevision: 1,
+    });
     await firstSave;
 
     assert.equal(isDirty(subject, 'tab-a'), true);
     await subject.flushSession();
   });
 
-  assert.deepEqual(payloads.map((snapshot) => snapshot.chats[0]?.draft), ['first', 'second']);
+  assert.deepEqual(payloads.map((save) => save.draft), ['first', 'second']);
   assert.equal(isDirty(subject, 'tab-a'), false);
+});
+
+test('daemon-global saves happen only for changed global presentation and stable retries', async () => {
+  const subject = subjectWithChats();
+  const globalSaves: Mirror[] = [];
+  await withWindowApi({
+    saveSession: async (snapshot: Mirror) => {
+      globalSaves.push(snapshot);
+      return globalSaves.length === 1
+        ? { ok: false }
+        : { ok: true, globalRevision: 1 };
+    },
+  }, async () => {
+    await subject.flushSession();
+    assert.equal(globalSaves.length, 0, 'an unchanged flush must not mint a global-noop receipt');
+
+    subject.state.mode = 'assist';
+    subject.bumpApp();
+    await subject.flushSession();
+    assert.equal(globalSaves.length, 1);
+    assert.match(String(globalSaves[0]._workassGlobalOperationId), /^global-op-/);
+
+    await subject.flushSession();
+    assert.equal(globalSaves.length, 2);
+    assert.equal(globalSaves[1]._workassGlobalOperationId, globalSaves[0]._workassGlobalOperationId,
+      'a failed global save must retry one stable operation id');
+
+    await subject.flushSession();
+    assert.equal(globalSaves.length, 2, 'an acknowledged global value must not be saved again');
+  });
 });
 
 test('a successful queue save releases the refresh fence', async () => {
