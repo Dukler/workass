@@ -837,6 +837,7 @@ test('transaction cleanup reclaims inactive updater cache without touching live 
   const obsoleteRoot = seed('upd-obsolete-cache-1234');
   const receiptRoot = seed('upd-current-receipt-1234');
   const activeRoot = seed('upd-active-worker-1234');
+  const activeDownloadRoot = seed('upd-active-download-1234');
   const recoverableRoot = seed('upd-current-schema-1234', 4);
   const activeCommand = `${process.execPath} ${path.join(activeRoot, 'update-worker.js')} --transaction ${path.join(activeRoot, 'transaction.json')}`;
 
@@ -844,16 +845,18 @@ test('transaction cleanup reclaims inactive updater cache without touching live 
     transactionsRoot,
     platform: 'darwin',
     receipt: { updateId: 'upd-current-receipt-1234', phase: 'healthy' },
+    protectedUpdateIds: ['upd-active-download-1234'],
   }, {
     run: () => ({ status: 0, stdout: `${activeCommand}\n` }),
   });
 
-  assert.deepEqual(result, { removed: 1, pruned: 1, retained: 3 });
+  assert.deepEqual(result, { removed: 1, pruned: 1, retained: 4 });
   assert.equal(fs.existsSync(obsoleteRoot), false);
   assert.equal(fs.existsSync(receiptRoot), true);
   assert.equal(fs.existsSync(path.join(receiptRoot, 'release.zip')), false);
   assert.equal(fs.existsSync(path.join(receiptRoot, 'incoming-release')), false);
   assert.equal(fs.existsSync(path.join(activeRoot, 'release.zip')), true);
+  assert.equal(fs.existsSync(path.join(activeDownloadRoot, 'release.zip')), true);
   assert.equal(fs.existsSync(path.join(recoverableRoot, 'release.zip')), true);
 });
 
@@ -887,6 +890,61 @@ test('packaged startup schedules transaction cleanup outside the shell thread', 
   await manager.transactionCleanupPromise;
   assert.equal(cleanupRequest.transactionsRoot, path.join(manager.updateRoot, 'transactions'));
   assert.equal(cleanupRequest.platform, 'darwin');
+});
+
+test('download waits for startup cleanup and protects its staging id until the attempt finishes', async () => {
+  let releaseStartupCleanup;
+  const startupCleanupGate = new Promise((resolve) => { releaseStartupCleanup = resolve; });
+  let releaseDownload;
+  const downloadGate = new Promise((resolve) => { releaseDownload = resolve; });
+  let enterDownload;
+  const downloadEntered = new Promise((resolve) => { enterDownload = resolve; });
+  const cleanupRequests = [];
+  let cleanupCalls = 0;
+  const { manager } = managerFixture({
+    primeReady: false,
+    dependencyOverrides: {
+      cleanupUpdateTransactions: async (request) => {
+        cleanupCalls += 1;
+        cleanupRequests.push(request);
+        if (cleanupCalls === 1) await startupCleanupGate;
+        return { removed: 0, pruned: 0, retained: 0 };
+      },
+    },
+  });
+  manager.manifest = snapshotReleaseManifest(manifest());
+  manager.publish({ phase: 'available', targetVersion: '1.2.0' });
+  let downloadDestination = '';
+  manager.deps.downloadArtifact = async (_source, destination) => {
+    downloadDestination = destination;
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, 'partial');
+    enterDownload();
+    await downloadGate;
+    throw new Error('fixture download stopped');
+  };
+
+  const download = manager.download();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(downloadDestination, '');
+  assert.equal(manager.activeDownloadUpdateId, '');
+  assert.equal(fs.existsSync(path.join(manager.updateRoot, 'transactions')), false);
+
+  releaseStartupCleanup();
+  await downloadEntered;
+  const activeUpdateId = manager.activeDownloadUpdateId;
+  assert.match(activeUpdateId, /^upd-[A-Za-z0-9_-]+$/);
+  assert.equal(path.dirname(downloadDestination), path.join(manager.updateRoot, 'transactions', activeUpdateId));
+
+  await manager.requestTransactionCleanup();
+  assert.deepEqual(cleanupRequests.at(-1).protectedUpdateIds, [activeUpdateId]);
+
+  releaseDownload();
+  const state = await download;
+  assert.equal(state.phase, 'failed');
+  assert.match(state.error, /fixture download stopped/);
+  assert.equal(manager.activeDownloadUpdateId, '');
+  manager.dispose();
 });
 
 test('live progress cleanup retries stop after a bounded series and reset only after ownership changes', async () => {

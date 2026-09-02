@@ -812,11 +812,10 @@ func (m *Manager) providerCLIExecutable(providerID string) (string, error) {
 		if runtime := m.providers[id]; runtime != nil {
 			runtime.Config.ResolvedCommand = resolved
 		}
-		providers := m.providerRecordsLocked()
 		filePath := m.providerConfigFile
 		m.mu.Unlock()
 		if strings.TrimSpace(filePath) != "" {
-			if saveErr := SaveProviderConfigs(filePath, providers); saveErr != nil && m.opts.Logf != nil {
+			if saveErr := m.persistProviderConfigs(); saveErr != nil && m.opts.Logf != nil {
 				m.opts.Logf("provider executable refresh persist failed", map[string]any{
 					"provider": id,
 					"error":    redactSensitiveText(saveErr.Error()),

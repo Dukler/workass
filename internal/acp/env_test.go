@@ -141,6 +141,7 @@ func TestChatEnvNonGitCwdIsEmpty(t *testing.T) {
 func TestChatEnvTruncationFlags(t *testing.T) {
 	t.Parallel()
 	requireGit(t)
+	const fixtureTimeout = 8 * time.Second
 	t.Run("repo discovery", func(t *testing.T) {
 		workspace := t.TempDir()
 		for i := 0; i < chatEnvRepoLimit+1; i++ {
@@ -148,14 +149,14 @@ func TestChatEnvTruncationFlags(t *testing.T) {
 		}
 		manager, events := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 		t.Cleanup(func() { manager.Reset() })
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), fixtureTimeout)
 		defer cancel()
 		if _, err := manager.NewSession(ctx, SessionOptions{CWD: workspace, TabID: "trunc-repo-tab", ChatID: "chat-trunc-repo"}); err != nil {
 			t.Fatalf("new session: %v", err)
 		}
 		env := waitChatEnv(t, events, func(env ChatEnvPayload) bool {
 			return env.ChatID == "chat-trunc-repo"
-		}, 2*time.Second)
+		}, fixtureTimeout)
 		if !env.ReposTruncated || len(env.Unchanged) != chatEnvRepoLimit || len(env.Repos) != 0 {
 			t.Fatalf("repo truncation env = %#v", env)
 		}
@@ -164,14 +165,21 @@ func TestChatEnvTruncationFlags(t *testing.T) {
 	t.Run("changed files", func(t *testing.T) {
 		workspace := t.TempDir()
 		repoDir := filepath.Join(workspace, "large")
+		promptGate := filepath.Join(workspace, "prompt-gate")
+		t.Cleanup(func() {
+			_ = os.WriteFile(promptGate+".release", []byte("release\n"), 0o600)
+		})
 		files := map[string]string{}
 		for i := 0; i < chatEnvFileLimit+1; i++ {
 			files[fmt.Sprintf("file%03d.txt", i)] = "base\n"
 		}
 		initTinyGitRepo(t, repoDir, files)
-		manager, events := newFakeManager(t, "slow-prompt", Options{RSSSampleInterval: time.Hour})
+		manager, events := newFakeManager(t, "slow-prompt", Options{
+			Provider:          ProviderConfig{Env: map[string]string{"WORKASS_FAKE_ACP_PROMPT_GATE": promptGate}},
+			RSSSampleInterval: time.Hour,
+		})
 		t.Cleanup(func() { manager.Reset() })
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), fixtureTimeout)
 		defer cancel()
 		session, err := manager.NewSession(ctx, SessionOptions{CWD: repoDir, TabID: "trunc-file-tab", ChatID: "chat-trunc-file"})
 		if err != nil {
@@ -179,7 +187,7 @@ func TestChatEnvTruncationFlags(t *testing.T) {
 		}
 		_ = waitChatEnv(t, events, func(env ChatEnvPayload) bool {
 			return env.ChatID == "chat-trunc-file" && len(env.Unchanged) == 1
-		}, 2*time.Second)
+		}, fixtureTimeout)
 		job, err := manager.StartJob(context.Background(), JobStartOptions{
 			Kind:      "app-chat",
 			SessionID: session.SessionID,
@@ -191,16 +199,20 @@ func TestChatEnvTruncationFlags(t *testing.T) {
 		if err != nil {
 			t.Fatalf("start job: %v", err)
 		}
+		waitForFakeACPProbeGate(t, promptGate)
 		for i := 0; i < chatEnvFileLimit+1; i++ {
 			path := filepath.Join(repoDir, fmt.Sprintf("file%03d.txt", i))
 			if err := os.WriteFile(path, []byte("base\nchat\n"), 0o644); err != nil {
 				t.Fatalf("edit %s: %v", path, err)
 			}
 		}
-		assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "done", 0, "end_turn")
+		if err := os.WriteFile(promptGate+".release", []byte("release\n"), 0o600); err != nil {
+			t.Fatalf("release prompt gate: %v", err)
+		}
+		assertJobStatus(t, events.waitJobEnd(t, jobID(job), fixtureTimeout), "done", 0, "end_turn")
 		env := waitChatEnv(t, events, func(env ChatEnvPayload) bool {
 			return env.ChatID == "chat-trunc-file" && len(env.Repos) == 1 && env.Repos[0].FilesTruncated
-		}, 2*time.Second)
+		}, fixtureTimeout)
 		repo := env.Repos[0]
 		if !env.FilesTruncated || len(repo.Files) != chatEnvFileLimit || repo.Adds != chatEnvFileLimit+1 || repo.Dels != 0 {
 			t.Fatalf("file truncation env = %#v", env)

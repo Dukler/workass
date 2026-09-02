@@ -147,7 +147,7 @@ func TestProviderCLIExecutableRefreshesValidCacheFromPATH(t *testing.T) {
 }
 
 func TestProviderUpdateRunsResolvedProviderExecutable(t *testing.T) {
-	for _, providerID := range []string{"qwen", "claude"} {
+	for _, providerID := range []string{"qwen", "claude", "omp"} {
 		t.Run(providerID, func(t *testing.T) {
 			root := repoRoot(t)
 			pathDir := t.TempDir()
@@ -1004,7 +1004,10 @@ func TestProviderUpdateInvokeRejectsDoubleUnknownAndNoPending(t *testing.T) {
 		if err != nil {
 			t.Fatalf("first update: %v", err)
 		}
-		deadline := time.Now().Add(time.Second)
+		// The package runs many process-heavy fixtures in parallel. This is a
+		// synchronization boundary, not a performance assertion, so leave enough
+		// room for the child to be scheduled on a loaded release-gate host.
+		deadline := time.Now().Add(5 * time.Second)
 		for !fileExists(startedFile) {
 			if time.Now().After(deadline) {
 				t.Fatal("first update process never reached its start boundary")
@@ -1023,7 +1026,7 @@ func TestProviderUpdateInvokeRejectsDoubleUnknownAndNoPending(t *testing.T) {
 		}
 		done := waitProviderUpdateProgress(t, events, "qwen", func(progress ProviderUpdateProgress) bool {
 			return progress.Status == "done" || progress.Status == "failed"
-		}, 2*time.Second)
+		}, 5*time.Second)
 		if done.Status != "done" {
 			t.Fatalf("first update after release = %#v, want done", done)
 		}

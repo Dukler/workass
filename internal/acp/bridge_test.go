@@ -3482,7 +3482,11 @@ func (s *fakeACP) handlePrompt(id json.RawMessage, params map[string]any) {
 		return
 	}
 	if s.mode == "slow-prompt" {
-		time.Sleep(160 * time.Millisecond)
+		if gate := os.Getenv("WORKASS_FAKE_ACP_PROMPT_GATE"); gate != "" {
+			waitFakeACPProbeGate(gate)
+		} else {
+			time.Sleep(160 * time.Millisecond)
+		}
 		s.notify(sessionID, map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": fakePromptText(params["prompt"])}})
 		s.respond(id, map[string]any{"stopReason": "end_turn"})
 		return

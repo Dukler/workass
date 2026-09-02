@@ -586,6 +586,43 @@ test('chat reorder saves only global order and never dirties a chat actor', asyn
   assert.deepEqual(saves.at(-1)?.snapshot.chats, []);
 });
 
+test('chat reorder survives a session refresh crossing its global save reply', async () => {
+  const first = chat('tab-first');
+  const second = chat('tab-second');
+  const subject = subjectWithChats([first, second]);
+  subject.state.globalRevision = 7;
+  const beforeReorder = subject.toMirror(false) as Mirror;
+  let saveStarted!: () => void;
+  let releaseSave!: (receipt: { ok: true; globalRevision: number }) => void;
+  const started = new Promise<void>((resolve) => { saveStarted = resolve; });
+  const saveReply = new Promise<{ ok: true; globalRevision: number }>((resolve) => { releaseSave = resolve; });
+
+  await withWindowApi({
+    saveSession: async () => {
+      saveStarted();
+      return saveReply;
+    },
+  }, async () => {
+    assert.equal(subject.reorderChat(first.id, null), true);
+    await started;
+
+    // session:save broadcasts session-refresh before its invoke reply crosses
+    // back to the renderer. The resulting session:get can therefore still be
+    // carrying the pre-drag order while the matching operation is in flight.
+    assert.equal(subject.restoreSessionSnapshot(beforeReorder), true);
+    assert.deepEqual(subject.state.chats.map((candidate: Chat) => candidate.id), [second.id, first.id]);
+
+    releaseSave({ ok: true, globalRevision: 8 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // A session:get already in flight before the acknowledgement is stale by
+    // revision even though the operation fence has now cleared.
+    assert.equal(subject.restoreSessionSnapshot(beforeReorder), true);
+    assert.deepEqual(subject.state.chats.map((candidate: Chat) => candidate.id), [second.id, first.id]);
+    assert.equal(subject.state.globalRevision, 8);
+  });
+});
+
 test('server deltas carry chat commands while localStorage carries only view preferences', () => {
   const subject = subjectWithChats();
   subject.touchChat('tab-a');

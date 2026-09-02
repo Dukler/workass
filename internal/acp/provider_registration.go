@@ -206,8 +206,24 @@ func opencodeKnownPaths() []string {
 	}
 }
 
+func ompKnownPaths() []string {
+	home, _ := os.UserHomeDir()
+	var known []string
+	if home != "" {
+		if runtime.GOOS == "windows" {
+			known = append(known, filepath.Join(home, "AppData", "Local", "omp", "omp.exe"))
+		} else {
+			known = append(known, filepath.Join(home, ".local", "bin", "omp"))
+		}
+	}
+	if runtime.GOOS != "windows" {
+		known = append(known, "/opt/homebrew/bin/omp", "/usr/local/bin/omp")
+	}
+	return known
+}
+
 var providerRegistrationOrder = []string{
-	"mock", "devin", "qwen", "claude", "codex", "opencode",
+	"mock", "devin", "qwen", "claude", "codex", "opencode", "omp",
 	localLMStudioProviderID, localOllamaProviderID, localOMLXProviderID, "custom",
 }
 
@@ -313,6 +329,20 @@ var providerRegistrations = map[string]providerRegistration{
 		// behind the generic ACP adapter; only executable discovery and the
 		// scoped, free Ox Alpha default belong to this registration.
 		Adapter: providerAdapter{},
+	},
+	"omp": {
+		ID: "omp", Name: "Oh My Pi", DefaultCommand: "omp", DefaultArgs: []string{"acp"}, Badge: "agent",
+		Discovery: &cliProvider{id: "omp", defaultCommand: "omp", pathEnv: []string{"WORKASS_OMP"}, pathNames: []string{"omp.exe", "omp.cmd", "omp"}, knownPaths: ompKnownPaths},
+		Detection: cliDetectionStrategy{}, ProbeTimeout: frontierProbeTimeout,
+		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `omp` y usa `/login`"},
+		// OMP speaks standard ACP directly. Its own profile owns models,
+		// credentials, permissions, sessions, rules, and extension discovery.
+		Adapter: providerAdapter{},
+		Update: providerUpdateRegistration{
+			Source:  "https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest",
+			Command: ProviderUpdateCommand{Command: "omp", Args: []string{"update"}},
+			Hint:    "omp update",
+		},
 	},
 	localLMStudioProviderID: {
 		ID: localLMStudioProviderID, Name: "LM Studio (local)", DefaultCommand: "workass-agent", Badge: "native",

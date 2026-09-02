@@ -292,15 +292,25 @@ func SaveProviderConfigs(filePath string, providers []ProviderConfig) error {
 	if strings.TrimSpace(filePath) == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(providersForJSON(providers), "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := filePath + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+	temp, err := os.CreateTemp(dir, "."+filepath.Base(filePath)+"-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := temp.Name()
+	defer os.Remove(tmp)
+	if _, err := temp.Write(append(data, '\n')); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, filePath)
@@ -872,11 +882,9 @@ func (m *Manager) markProviderNeedsLogin(ctx context.Context, providerID string,
 		runtime.Config.LaunchSanitizationRevision = policyRevision
 	}
 	if runtime.Config.NeedsLogin && runtime.Status == providerStatusNeedsLogin && !runtime.Config.Enabled {
-		providers := m.providerRecordsLocked()
-		filePath := m.providerConfigFile
 		m.mu.Unlock()
 		if revisionChanged {
-			if err := SaveProviderConfigs(filePath, providers); err != nil && m.opts.Logf != nil {
+			if err := m.persistProviderConfigs(); err != nil && m.opts.Logf != nil {
 				m.opts.Logf("provider needs-login revision persist failed", map[string]any{"provider": id, "error": redactSensitiveText(err.Error())})
 			}
 		}
@@ -895,10 +903,8 @@ func (m *Manager) markProviderNeedsLogin(ctx context.Context, providerID string,
 	runtime.Modes = nil
 	runtime.AgentName = ""
 	m.spareBlocked[id] = true
-	providers := m.providerRecordsLocked()
-	filePath := m.providerConfigFile
 	m.mu.Unlock()
-	if err := SaveProviderConfigs(filePath, providers); err != nil && m.opts.Logf != nil {
+	if err := m.persistProviderConfigs(); err != nil && m.opts.Logf != nil {
 		m.opts.Logf("provider needs-login persist failed", map[string]any{"provider": id, "error": redactSensitiveText(err.Error())})
 	}
 	list := m.ProvidersList()
@@ -948,14 +954,12 @@ func (m *Manager) ToggleProvider(ctx context.Context, id string, enabled bool) (
 		runtime.Config.DisabledByUser = true
 	}
 	delete(m.spareBlocked, id)
-	providers := m.providerRecordsLocked()
-	filePath := m.providerConfigFile
 	if !enabled {
 		m.removeSpareProviderLocked(id)
 	}
 	m.mu.Unlock()
 
-	if err := SaveProviderConfigs(filePath, providers); err != nil {
+	if err := m.persistProviderConfigs(); err != nil {
 		return nil, err
 	}
 	m.EmitCatalog(ctx)
@@ -972,6 +976,21 @@ func (m *Manager) providerRecordsLocked() []ProviderConfig {
 		}
 	}
 	return out
+}
+
+// persistProviderConfigs serializes every manager-owned write and snapshots
+// provider state only after it owns that serialization boundary. A detection
+// or version refresh therefore cannot overwrite a newer explicit user toggle
+// with records captured before the toggle completed.
+func (m *Manager) persistProviderConfigs() error {
+	m.providerConfigMu.Lock()
+	defer m.providerConfigMu.Unlock()
+
+	m.mu.Lock()
+	providers := m.providerRecordsLocked()
+	filePath := m.providerConfigFile
+	m.mu.Unlock()
+	return SaveProviderConfigs(filePath, providers)
 }
 
 func (m *Manager) removeSpareProviderLocked(providerID string) {
@@ -1191,10 +1210,8 @@ func (m *Manager) providerDetectionCandidates(intent providerDetectionIntent, pr
 		m.mu.Unlock()
 		return out
 	}
-	providers := m.providerRecordsLocked()
-	filePath := m.providerConfigFile
 	m.mu.Unlock()
-	if err := SaveProviderConfigs(filePath, providers); err != nil {
+	if err := m.persistProviderConfigs(); err != nil {
 		if m.opts.Logf != nil {
 			m.opts.Logf("provider startup recovery persist failed", map[string]any{
 				"providers": recoveryOrder,
@@ -1457,10 +1474,8 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 			runtime.AgentName = ""
 		}
 	}
-	providers := m.providerRecordsLocked()
-	filePath := m.providerConfigFile
 	m.mu.Unlock()
-	err := SaveProviderConfigs(filePath, providers)
+	err := m.persistProviderConfigs()
 	if err != nil && m.opts.Logf != nil {
 		m.opts.Logf("provider detection persist failed", map[string]any{"error": err.Error()})
 	}

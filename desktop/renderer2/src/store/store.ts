@@ -443,6 +443,11 @@ export class Store {
   // preserve the user's local selection, while this exact tab+chat pair must
   // be adopted once the actor row is present.
   private pendingAgentFocus: { tabId: string; chatId: string } | null = null;
+  // An inactive actor row may carry metadata or a bounded tail only. Keep the
+  // current transcript mounted while the clicked row loads its complete ledger,
+  // and let only the newest selection intent perform the atomic handoff.
+  private chatSelectionVersion = 0;
+  private pendingChatSelection: { version: number; id: string; previousActiveId: string | null } | null = null;
   private sessionHydrationPending = false;
   private digestProbe: Promise<void> | null = null;
   private syncScopes = new Set<SyncScope>();
@@ -1517,11 +1522,33 @@ export class Store {
     return merged;
   }
 
+  private carryRendererChatOrder(previous: Chat[], next: Chat[]): Chat[] {
+    const byID = new Map(next.map((chat) => [chat.id, chat]));
+    const carried: Chat[] = [];
+    const seen = new Set<string>();
+    for (const prior of previous) {
+      const restored = byID.get(prior.id);
+      if (!restored || seen.has(restored.id)) continue;
+      carried.push(restored);
+      seen.add(restored.id);
+    }
+    // Membership remains actor-owned. A chat that became authoritative while
+    // the global projection was in flight is appended in daemon order; only
+    // rows common to both snapshots retain the renderer's newer drag order.
+    for (const restored of next) {
+      if (seen.has(restored.id)) continue;
+      carried.push(restored);
+      seen.add(restored.id);
+    }
+    return carried;
+  }
+
   private restoreSessionSnapshot(server: unknown, liveEventFence = this.liveTurnEventVersion): boolean {
     if (!server || typeof server !== 'object' || !Array.isArray((server as Mirror).chats)) return false;
     const authoritative = server as Mirror;
     const previousChats = this.state.chats;
     const previousWorkspaces = this.state.workspaces;
+    const previousGlobalRevision = this.state.globalRevision;
     const pendingQueues = new Map(this.pendingQueueSnapshots);
     const authoritativeChatIDs = new Set(authoritative.chats.map((chat) => chat.id));
     const restored = this.fromMirror(authoritative);
@@ -1532,6 +1559,14 @@ export class Store {
       previousChats,
       this.carryPendingCreatedChats(previousChats, restored.chats),
     );
+    // session:save broadcasts its refresh before the invoke reply. Preserve a
+    // drag while that exact global operation is still in flight, and reject a
+    // session:get that began before an already-acknowledged newer revision.
+    const preserveGlobalPresentation = !!this.pendingGlobalPresentationOperation
+      || restored.globalRevision < previousGlobalRevision;
+    if (preserveGlobalPresentation) {
+      this.state.chats = this.carryRendererChatOrder(previousChats, this.state.chats);
+    }
     // Keep the create fence alive through the merge above. The actor row can
     // become visible before daemon-global chatOrder catches up; clearing first
     // allowed that early echo to move a freshly created thread to the bottom.
@@ -1563,7 +1598,7 @@ export class Store {
       const chat = this.chat(tabId);
       if (chat?.chatId === queue.chatId) chat.queue = queue.value;
     }
-    if (this.pendingGlobalPresentationOperation) {
+    if (preserveGlobalPresentation) {
       this.state.workspaces = normalizeWorkspaces([...previousWorkspaces, ...restored.workspaces]);
     } else {
       this.state.workspaces = restored.workspaces;
@@ -3134,22 +3169,12 @@ export class Store {
     this.bumpApp();
     void this.flushSession(true);
   }
-  switchChat(id: string) {
-    // A direct row/keyboard/notification selection is newer local intent than
-    // any agent focus still waiting for its actor row to hydrate.
-    this.pendingAgentFocus = null;
-    if (this.state.activeId === id) {
-      // Re-focusing an already-selected row is still a recovery signal: its
-      // session snapshot may contain only a tail (or a prior archive read may
-      // have failed), so make the canonical actor ledger readable again.
-      void this.ensureFullHistory(id);
-      return;
-    }
+  private activateChat(chat: Chat) {
+    const id = chat.id;
     this.state.activeId = id;
     this.releaseInactiveHistories(id);
     void this.ensureFullHistory(id);
-    const chat = this.chat(id);
-    if (chat?.unread) {
+    if (chat.unread) {
       chat.unread = false;
       this.touchChat(chat.id);
     }
@@ -3161,7 +3186,53 @@ export class Store {
     this.bumpApp();
     this.refreshPlanUsage(id);
     void this.refreshSpawnedWork(chat);
-    if (chat) this.maybeFetchCommandCatalog(chat);
+    this.maybeFetchCommandCatalog(chat);
+  }
+
+  switchChat(id: string) {
+    // A direct row/keyboard/notification selection is newer local intent than
+    // any agent focus still waiting for its actor row to hydrate.
+    this.pendingAgentFocus = null;
+    const selectionVersion = ++this.chatSelectionVersion;
+    this.pendingChatSelection = null;
+    if (this.state.activeId === id) {
+      // Re-focusing an already-selected row is still a recovery signal: its
+      // session snapshot may contain only a tail (or a prior archive read may
+      // have failed), so make the canonical actor ledger readable again.
+      void this.ensureFullHistory(id);
+      return;
+    }
+    const target = this.chat(id);
+    if (!target) return;
+    if (target.historyComplete !== false || !has('archiveLoad')) {
+      this.activateChat(target);
+      return;
+    }
+    const previousActiveId = this.state.activeId;
+    const durableChatId = target.chatId;
+    this.pendingChatSelection = { version: selectionVersion, id, previousActiveId };
+    void (async () => {
+      await this.ensureFullHistory(id);
+      // A later click, new-chat activation, deletion, or exact agent focus owns
+      // selection now. The completed read may remain cached, but must not steal
+      // the visible transcript from that newer intent.
+      if (selectionVersion !== this.chatSelectionVersion || this.state.activeId !== previousActiveId) {
+        // Two clicks on the same incomplete row share one actor read. The older
+        // waiter must not evict the completed projection before the newer waiter
+        // performs its handoff; every other stale read remains non-resident.
+        const pending = this.pendingChatSelection;
+        const newerSameTarget = pending?.version === this.chatSelectionVersion
+          && pending.version !== selectionVersion
+          && pending.id === id
+          && this.state.activeId === pending.previousActiveId;
+        if (!newerSameTarget) this.releaseInactiveHistories(this.state.activeId);
+        return;
+      }
+      const restored = this.chat(id);
+      if (!restored || restored.chatId !== durableChatId) return;
+      if (this.pendingChatSelection?.version === selectionVersion) this.pendingChatSelection = null;
+      this.activateChat(restored);
+    })();
   }
 
   // The catalog is daemon-memory-only, so hydration cannot carry it: a

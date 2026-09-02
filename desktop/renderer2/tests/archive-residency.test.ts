@@ -84,6 +84,136 @@ test('switching chats releases an idle full history and reloads the actor ledger
   }
 });
 
+test('opening an incomplete chat keeps the current transcript visible until history is ready', async () => {
+  const firstRows = messages(85);
+  const targetRows = messages(92);
+  const previousWindow = (globalThis as any).window;
+  let releaseHistory!: (rows: Msg[]) => void;
+  let historyReleased = false;
+  const history = new Promise<Msg[]>((resolve) => { releaseHistory = resolve; });
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async (tabId: string) => tabId === 'tab-target' ? history : [],
+    },
+  };
+  try {
+    const subject = new StoreCtor();
+    const first = chat('tab-first', [...firstRows]);
+    const target = chat('tab-target', targetRows.slice(-60));
+    target.messageCount = targetRows.length;
+    target.historyComplete = false;
+    subject.state.chats = [first, target];
+    subject.state.activeId = first.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+    subject.fullHistoriesLoaded.add(first.id);
+
+    subject.switchChat(target.id);
+
+    assert.equal(subject.state.activeId, first.id);
+    assert.equal(first.messages.length, firstRows.length);
+    assert.equal(target.messages.length, 60);
+
+    historyReleased = true;
+    releaseHistory(targetRows);
+    await subject.fullHistoryLoads.get(target.id);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(subject.state.activeId, target.id);
+    assert.equal(target.messages.length, targetRows.length);
+    assert.equal(target.historyComplete, true);
+    assert.equal(first.messages.length, 60);
+    assert.equal(first.historyComplete, false);
+  } finally {
+    if (!historyReleased) releaseHistory([]);
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('a completed older history read cannot steal focus from a newer click', async () => {
+  const targetRows = messages(92);
+  const previousWindow = (globalThis as any).window;
+  let releaseHistory!: (rows: Msg[]) => void;
+  let historyReleased = false;
+  const history = new Promise<Msg[]>((resolve) => { releaseHistory = resolve; });
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async (tabId: string) => tabId === 'tab-target' ? history : [],
+    },
+  };
+  try {
+    const subject = new StoreCtor();
+    const first = chat('tab-first', messages(4));
+    const target = chat('tab-target', targetRows.slice(-60));
+    target.messageCount = targetRows.length;
+    target.historyComplete = false;
+    const latest = chat('tab-latest', messages(6));
+    subject.state.chats = [first, target, latest];
+    subject.state.activeId = first.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+    subject.switchChat(target.id);
+    subject.switchChat(latest.id);
+    assert.equal(subject.state.activeId, latest.id);
+
+    historyReleased = true;
+    releaseHistory(targetRows);
+    await subject.fullHistoryLoads.get(target.id);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(subject.state.activeId, latest.id);
+    assert.equal(target.messages.length, 60);
+    assert.equal(target.historyComplete, false);
+    assert.equal(subject.fullHistoriesLoaded.has(target.id), false);
+  } finally {
+    if (!historyReleased) releaseHistory([]);
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('repeated clicks on one incomplete chat share its completed history without an eviction flash', async () => {
+  const targetRows = messages(92);
+  const previousWindow = (globalThis as any).window;
+  let releaseHistory!: (rows: Msg[]) => void;
+  let historyReleased = false;
+  let archiveCalls = 0;
+  const history = new Promise<Msg[]>((resolve) => { releaseHistory = resolve; });
+  const blockedRepeat = new Promise<Msg[]>(() => {});
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async () => (++archiveCalls === 1 ? history : blockedRepeat),
+    },
+  };
+  try {
+    const subject = new StoreCtor();
+    const first = chat('tab-first', messages(4));
+    const target = chat('tab-target', targetRows.slice(-60));
+    target.messageCount = targetRows.length;
+    target.historyComplete = false;
+    subject.state.chats = [first, target];
+    subject.state.activeId = first.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+    subject.switchChat(target.id);
+    subject.switchChat(target.id);
+    assert.equal(subject.state.activeId, first.id);
+
+    historyReleased = true;
+    releaseHistory(targetRows);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(subject.state.activeId, target.id);
+    assert.equal(target.messages.length, targetRows.length);
+    assert.equal(target.historyComplete, true);
+    assert.equal(archiveCalls, 1);
+  } finally {
+    if (!historyReleased) releaseHistory([]);
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
 test('a daemon refresh releases every inactive complete history but keeps the active transcript visible', () => {
   const subject = new StoreCtor();
   const active = chat('tab-active', messages(80));
