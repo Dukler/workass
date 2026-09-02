@@ -241,22 +241,27 @@ func (r *providerChatRuntime) actorByTab(tabID string) (*providerChatActor, bool
 // bindings, permissions, usage and outbox state are ignored; after the actor
 // commit, the global presentation store receives only daemon-wide UI fields.
 func (r *providerChatRuntime) ApplyRendererSnapshot(snapshot any) (bool, error) {
+	_, err := r.applyRendererSnapshot(snapshot)
+	return err == nil, err
+}
+
+func (r *providerChatRuntime) applyRendererSnapshot(snapshot any) (globalPresentationSaveResult, error) {
 	if r == nil || r.sessions == nil {
-		return false, errors.New("provider chat projection is unavailable")
+		return globalPresentationSaveResult{}, errors.New("provider chat projection is unavailable")
 	}
 	detached := mapFromAnyMain(cloneJSON(redactSessionValue(snapshot)))
 	if detached == nil {
-		return false, errors.New("renderer session snapshot is not an object")
+		return globalPresentationSaveResult{}, errors.New("renderer session snapshot is not an object")
 	}
 	// Chat rows are deliberately ignored here. Each chat presentation and queue
 	// mutation, including deletion, has its own stable-id actor command;
 	// session:save persists daemon-global UI state only.
-	globalRevision, err := r.sessions.SaveActorGlobalSnapshot(detached)
+	result, err := r.sessions.SaveActorGlobalSnapshot(detached)
 	if err != nil {
-		return false, fmt.Errorf("persist daemon-global presentation state: %w", err)
+		return globalPresentationSaveResult{}, fmt.Errorf("persist daemon-global presentation state: %w", err)
 	}
-	detached[globalPresentationRevisionField] = int(globalRevision)
-	return true, nil
+	detached[globalPresentationRevisionField] = int(result.Revision)
+	return result, nil
 }
 
 func projectActorChat(out map[string]any, state chat.State) error {

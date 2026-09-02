@@ -11,6 +11,7 @@ import (
 	"hash/maphash"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,19 +23,25 @@ import (
 )
 
 const (
-	sessionStateFilename             = "session-state.json"
-	sessionImageDirname              = "images"
-	sessionImageDataRefField         = "_workassImageDataRef"
-	maxPersistedSessionImageBytes    = 64 * 1024 * 1024
-	workspaceRevisionField           = "workspaceRevision"
-	presentationRevisionField        = "presentationRevision"
-	agentQueueRevisionField          = "agentQueueRevision"
-	runtimeControlRevisionField      = "runtimeControlRevision"
-	globalPresentationRevisionField  = "globalRevision"
-	globalPresentationOperationField = "_workassGlobalOperationId"
-	globalPresentationReceiptsField  = "_workassGlobalMutationReceipts"
-	agentQueueMessageField           = "agentQueueId"
-	providerSessionImageRefPrefix    = "workass-session-image:"
+	sessionStateFilename                = "session-state.json"
+	sessionImageDirname                 = "images"
+	sessionImageDataRefField            = "_workassImageDataRef"
+	maxPersistedSessionImageBytes       = 64 * 1024 * 1024
+	workspaceRevisionField              = "workspaceRevision"
+	presentationRevisionField           = "presentationRevision"
+	agentQueueRevisionField             = "agentQueueRevision"
+	runtimeControlRevisionField         = "runtimeControlRevision"
+	globalPresentationRevisionField     = "globalRevision"
+	globalPresentationOperationField    = "_workassGlobalOperationId"
+	globalPresentationReceiptsField     = "_workassGlobalMutationReceipts"
+	globalPresentationReceiptOrderField = "_workassGlobalMutationReceiptOrder"
+	agentQueueMessageField              = "agentQueueId"
+	providerSessionImageRefPrefix       = "workass-session-image:"
+	// Global presentation operations are retried only across a bounded transport
+	// window. Retaining every completed id forever turned a tiny view-settings
+	// file into a multi-megabyte append-only ledger and made every save clone,
+	// hash, marshal, fsync, and garbage-collect the entire history.
+	globalPresentationReceiptLimit = 512
 )
 
 var (
@@ -120,8 +127,23 @@ func newSessionStore(path string) *sessionStore {
 		return store
 	}
 	store.snapshot = actorGlobalSessionSnapshot(snapshot)
-	if receipts, exists := snapshot[globalPresentationReceiptsField]; exists {
-		store.snapshot[globalPresentationReceiptsField] = cloneJSON(receipts)
+	receipts, receiptOrder, compacted := boundedGlobalPresentationReceipts(
+		snapshot[globalPresentationReceiptsField], snapshot[globalPresentationReceiptOrderField],
+	)
+	if len(receipts) != 0 {
+		store.snapshot[globalPresentationReceiptsField] = receipts
+		store.snapshot[globalPresentationReceiptOrderField] = stringsToAny(receiptOrder)
+	}
+	// Compact legacy unbounded receipt ledgers at the first boot on this build.
+	// A failed best-effort rewrite does not invalidate the already-valid global
+	// snapshot: memory is bounded now, and the next real mutation retries the
+	// same atomic persistence path.
+	if compacted {
+		if data, marshalErr := json.Marshal(store.snapshot); marshalErr == nil {
+			if persistErr := store.persistSnapshot(1, data, nil); persistErr == nil {
+				store.persistSeq = 1
+			}
+		}
 	}
 	store.published.Store(newSessionGeneration(store.snapshot))
 	return store
@@ -241,18 +263,23 @@ func (s *sessionStore) GlobalSnapshot() map[string]any {
 	return actorGlobalSessionSnapshot(generation.root)
 }
 
+type globalPresentationSaveResult struct {
+	Revision uint64
+	Changed  bool
+}
+
 // SaveActorGlobalSnapshot persists daemon-global UI preferences only.
-func (s *sessionStore) SaveActorGlobalSnapshot(raw any) (uint64, error) {
+func (s *sessionStore) SaveActorGlobalSnapshot(raw any) (globalPresentationSaveResult, error) {
 	if s == nil || !s.enabled() {
-		return 0, errors.New("session presentation store is unavailable")
+		return globalPresentationSaveResult{}, errors.New("session presentation store is unavailable")
 	}
 	incoming := mapFromAnyMain(redactSessionValue(raw))
 	if incoming == nil {
-		return 0, errors.New("renderer session snapshot is not an object")
+		return globalPresentationSaveResult{}, errors.New("renderer session snapshot is not an object")
 	}
-	operationID := providercontract.NormalizeOperationID(fieldString(incoming, globalPresentationOperationField))
-	if operationID == "" {
-		return 0, errors.New("global presentation save requires a stable operation id")
+	operationID, operationErr := providercontract.ValidateOperationID(fieldString(incoming, globalPresentationOperationField))
+	if operationErr != nil {
+		return globalPresentationSaveResult{}, fmt.Errorf("global presentation save requires a stable operation id: %w", operationErr)
 	}
 	expectedRevision := uint64(max(0, intValue(incoming[globalPresentationRevisionField])))
 	root := actorGlobalSessionSnapshot(incoming)
@@ -260,34 +287,187 @@ func (s *sessionStore) SaveActorGlobalSnapshot(raw any) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	currentRevision := uint64(max(0, intValue(s.snapshot[globalPresentationRevisionField])))
-	receipts := mapFromAnyMain(cloneJSON(s.snapshot[globalPresentationReceiptsField]))
+	receipts, receiptOrder, _ := boundedGlobalPresentationReceipts(
+		s.snapshot[globalPresentationReceiptsField], s.snapshot[globalPresentationReceiptOrderField],
+	)
 	if existing := mapFromAnyMain(receipts[string(operationID)]); len(existing) > 0 {
 		if fieldString(existing, "digest") != digest {
-			return 0, errors.New("global presentation operation id was reused for different content")
+			return globalPresentationSaveResult{}, errors.New("global presentation operation id was reused for different content")
 		}
-		return uint64(max(0, intValue(existing["revision"]))), nil
+		return globalPresentationSaveResult{Revision: uint64(max(0, intValue(existing["revision"])))}, nil
 	}
 	if expectedRevision != currentRevision {
-		return 0, errors.New("daemon-global presentation changed in another controller; reload before saving")
+		return globalPresentationSaveResult{}, errors.New("daemon-global presentation changed in another controller; reload before saving")
 	}
-	if digest != globalPresentationDigest(actorGlobalSessionSnapshot(s.snapshot)) {
+	changed := digest != globalPresentationDigest(actorGlobalSessionSnapshot(s.snapshot))
+	if changed {
 		currentRevision++
 	}
 	root[globalPresentationRevisionField] = json.Number(fmt.Sprint(currentRevision))
 	receipts[string(operationID)] = map[string]any{"digest": digest, "revision": json.Number(fmt.Sprint(currentRevision))}
+	receiptOrder = append(receiptOrder, string(operationID))
+	if len(receiptOrder) > globalPresentationReceiptLimit {
+		for _, expired := range receiptOrder[:len(receiptOrder)-globalPresentationReceiptLimit] {
+			delete(receipts, expired)
+		}
+		receiptOrder = receiptOrder[len(receiptOrder)-globalPresentationReceiptLimit:]
+	}
 	root[globalPresentationReceiptsField] = receipts
+	root[globalPresentationReceiptOrderField] = stringsToAny(receiptOrder)
 	data, err := json.Marshal(root)
 	if err != nil {
-		return 0, err
+		return globalPresentationSaveResult{}, err
 	}
 	seq := s.persistSeq + 1
 	if err := s.persistSnapshot(seq, data, nil); err != nil {
-		return 0, err
+		return globalPresentationSaveResult{}, err
 	}
 	s.persistSeq = seq
 	s.snapshot = root
 	s.published.Store(newSessionGeneration(root))
-	return currentRevision, nil
+	return globalPresentationSaveResult{Revision: currentRevision, Changed: changed}, nil
+}
+
+type globalPresentationReceiptCandidate struct {
+	id       string
+	receipt  any
+	revision int
+	timeKey  string
+}
+
+// boundedGlobalPresentationReceipts accepts both the current ordered shape and
+// the legacy map-only shape. Legacy entries are ranked by committed revision,
+// then by the base-36 timestamp embedded in Workass operation ids, so the first
+// bounded rewrite retains the newest retry window rather than an arbitrary map
+// iteration suffix.
+func boundedGlobalPresentationReceipts(rawReceipts, rawOrder any) (map[string]any, []string, bool) {
+	source := mapFromAnyMain(rawReceipts)
+	candidates := make(map[string]globalPresentationReceiptCandidate, min(len(source), globalPresentationReceiptLimit))
+	for rawID, rawReceipt := range source {
+		operationID, err := providercontract.ValidateOperationID(rawID)
+		receipt := mapFromAnyMain(rawReceipt)
+		digest := fieldString(receipt, "digest")
+		if err != nil || len(digest) != sha256.Size*2 || !isLowerHex(digest) || receipt["revision"] == nil || intValue(receipt["revision"]) < 0 {
+			continue
+		}
+		id := string(operationID)
+		candidates[id] = globalPresentationReceiptCandidate{
+			id: id, receipt: receipt, revision: intValue(receipt["revision"]), timeKey: globalPresentationOperationTimeKey(id),
+		}
+	}
+
+	rawOrderValues := stringValues(rawOrder)
+	explicitOrder := make([]string, 0, len(rawOrderValues))
+	explicitSet := make(map[string]struct{}, len(explicitOrder))
+	for _, rawID := range rawOrderValues {
+		id := rawID
+		id = strings.TrimSpace(id)
+		if _, exists := candidates[id]; !exists {
+			continue
+		}
+		if _, duplicate := explicitSet[id]; duplicate {
+			continue
+		}
+		explicitSet[id] = struct{}{}
+		explicitOrder = append(explicitOrder, id)
+	}
+
+	legacy := make([]globalPresentationReceiptCandidate, 0, len(candidates)-len(explicitOrder))
+	for id, candidate := range candidates {
+		if _, ordered := explicitSet[id]; !ordered {
+			legacy = append(legacy, candidate)
+		}
+	}
+	sort.Slice(legacy, func(i, j int) bool {
+		if legacy[i].revision != legacy[j].revision {
+			return legacy[i].revision < legacy[j].revision
+		}
+		if legacy[i].timeKey != legacy[j].timeKey {
+			return legacy[i].timeKey < legacy[j].timeKey
+		}
+		return legacy[i].id < legacy[j].id
+	})
+	order := make([]string, 0, len(candidates))
+	for _, candidate := range legacy {
+		order = append(order, candidate.id)
+	}
+	order = append(order, explicitOrder...)
+	if len(order) > globalPresentationReceiptLimit {
+		order = order[len(order)-globalPresentationReceiptLimit:]
+	}
+	out := make(map[string]any, len(order))
+	for _, id := range order {
+		out[id] = cloneJSON(candidates[id].receipt)
+	}
+	compacted := len(out) != len(source) || !sameStringOrder(rawOrder, order)
+	return out, order, compacted
+}
+
+func globalPresentationOperationTimeKey(operationID string) string {
+	parts := strings.FieldsFunc(operationID, func(char rune) bool { return char == '-' || char == ':' })
+	for _, part := range parts {
+		if len(part) < 8 || part[0] != 'm' {
+			continue
+		}
+		valid := true
+		for _, char := range part {
+			if (char < '0' || char > '9') && (char < 'a' || char > 'z') {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			return part
+		}
+	}
+	return ""
+}
+
+func isLowerHex(value string) bool {
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func stringsToAny(values []string) []any {
+	out := make([]any, len(values))
+	for index, value := range values {
+		out[index] = value
+	}
+	return out
+}
+
+func stringValues(raw any) []string {
+	switch values := raw.(type) {
+	case []string:
+		return append([]string(nil), values...)
+	case []any:
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			if text, ok := value.(string); ok {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func sameStringOrder(raw any, expected []string) bool {
+	values := stringValues(raw)
+	if len(values) != len(expected) {
+		return false
+	}
+	for index, value := range values {
+		if value != expected[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func globalPresentationDigest(root map[string]any) string {
@@ -331,7 +511,8 @@ func (s *sessionStore) SaveGlobalActiveTab(tabID string, operationID providercon
 		snapshot["activeId"] = strings.TrimSpace(tabID)
 	}
 	snapshot[globalPresentationOperationField] = string(operationID)
-	return s.SaveActorGlobalSnapshot(snapshot)
+	result, err := s.SaveActorGlobalSnapshot(snapshot)
+	return result.Revision, err
 }
 
 func (s *sessionStore) PersistProviderAttachments(images []any) ([]providercontract.Attachment, error) {
