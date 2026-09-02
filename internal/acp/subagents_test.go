@@ -902,12 +902,27 @@ func TestUnsupportedSubagentSteerKeepsOneDurableFollowupWithoutInterrupting(t *t
 	if err != nil {
 		t.Fatalf("spawn child: %v", err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		manager.mu.Lock()
 		child := manager.subagents[run.ID]
 		ready := child != nil && child.Status == "running" && child.acceptingMessages && child.SessionID != "" && child.JobID != ""
+		sessionID, childJobID := "", ""
+		if child != nil {
+			sessionID, childJobID = child.SessionID, child.JobID
+		}
 		manager.mu.Unlock()
+		// Session/Job ids are assigned immediately before the exact bridge bind.
+		// Check that binding directly so a loaded host cannot expose the tiny
+		// pre-bind window, while later provider activity phases remain valid.
+		if ready {
+			bridge := manager.bridgeForSession(sessionID, SessionOptions{SessionID: sessionID})
+			var boundJob *Job
+			if bridge != nil {
+				boundJob = bridge.jobForSession(sessionID)
+			}
+			ready = boundJob != nil && boundJob.ID == childJobID
+		}
 		if ready {
 			break
 		}

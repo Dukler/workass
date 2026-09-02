@@ -15,7 +15,7 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
 - **ACP bridge manager** — one engine subprocess per chat; lifecycle states
   `warm | active | idle | hibernated`; spare-session pre-warm pool.
   MULTI-PROVIDER MODEL (user law 2026-07-10): there is NO global provider.
-  The daemon holds a provider REGISTRY (mock/devin/qwen/claude/codex/custom
+  The daemon holds a provider REGISTRY (mock/devin/qwen/claude/codex/omp/custom
   from config); all enabled providers are available simultaneously; each chat
   binds its provider at session creation. Bridges/spares are per-provider.
   SELECTION UX (user law 2026-07-10b): ONE model selector in the composer,
@@ -46,7 +46,7 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
      if deleted. The only human input it persists is explicit
      enable/disable decisions made in Settings.
   2. On every daemon startup (async, non-blocking) and on providers:detect:
-     probe PATH for known agent CLIs (devin, qwen, claude) with ACP
+     probe PATH for known agent CLIs (devin, qwen, claude, omp) with ACP
      handshakes; probe local model servers (127.0.0.1:1234 LM Studio,
      127.0.0.1:11434 Ollama via /v1/models).
   3. Detected agent CLI → provider auto-enabled (status ready, latency).

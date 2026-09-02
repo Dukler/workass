@@ -50,6 +50,7 @@ type Manager struct {
 	providerAttachmentPersister func([]any) ([]providercontract.Attachment, error)
 	defaultProviderID           string
 	providerConfigFile          string
+	providerConfigMu            sync.Mutex
 	latestProvidersList         any
 	hasLatestProvidersList      bool
 	latestChatCatalog           any

@@ -1704,6 +1704,7 @@ class UpdateManager {
     this.installationIdentity = null;
     this.manifest = null;
     this.activeRelease = null;
+    this.activeDownloadUpdateId = '';
     this.prepared = null;
     this.receiptTimer = null;
     this.initialCheckTimer = null;
@@ -1938,7 +1939,7 @@ class UpdateManager {
       this.transactionCleanupQueued = true;
       return this.transactionCleanupPromise;
     }
-    const protectedUpdateIds = [this.prepared?.updateId, this.watchedUpdateId].filter(Boolean);
+    const protectedUpdateIds = [this.prepared?.updateId, this.activeDownloadUpdateId, this.watchedUpdateId].filter(Boolean);
     const operation = Promise.resolve().then(() => this.deps.cleanupUpdateTransactions({
       transactionsRoot: path.join(this.updateRoot, 'transactions'),
       platform: this.platform,
@@ -2512,14 +2513,23 @@ class UpdateManager {
   async download() {
     this.beginOperation('download');
     let release = null;
+    let updateId = '';
     try {
     if (this.state.phase !== 'available') throw new Error('the Workass update is not available for download');
     if (!this.manifest || compareVersions(this.currentVersion, this.manifest.version) >= 0) throw new Error('no Workass update is available');
     if (this.state.targetVersion !== this.manifest.version) throw new Error('the offered Workass release changed before download');
     release = snapshotReleaseManifest(this.manifest);
     this.activeRelease = release;
+    if (this.transactionCleanupPromise) {
+      // Startup cleanup runs in a worker against the same transactions tree.
+      // Do not create the new staging directory until that existing pass is
+      // done, otherwise it can classify the not-yet-journaled download as
+      // stale cache and delete files while the extraction worker verifies them.
+      try { await this.transactionCleanupPromise; } catch { /* cleanup is best-effort */ }
+    }
     this.prepared = null;
-    const updateId = `upd-${Date.now().toString(36)}-${crypto.randomBytes(8).toString('hex')}`;
+    updateId = `upd-${Date.now().toString(36)}-${crypto.randomBytes(8).toString('hex')}`;
+    this.activeDownloadUpdateId = updateId;
     const transactionRoot = path.join(this.updateRoot, 'transactions', updateId);
     const archive = path.join(transactionRoot, 'release.zip');
     const extracted = path.join(transactionRoot, 'extracted');
@@ -2603,6 +2613,7 @@ class UpdateManager {
     }
     } finally {
       if (this.activeRelease === release) this.activeRelease = null;
+      if (updateId && this.activeDownloadUpdateId === updateId) this.activeDownloadUpdateId = '';
       this.endOperation('download');
     }
   }

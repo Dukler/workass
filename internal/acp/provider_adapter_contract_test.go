@@ -61,7 +61,7 @@ func TestDevinLaunchOwnsACPBackendSanitization(t *testing.T) {
 		t.Fatalf("Devin launch sanitation revision = %d, want 1", got)
 	}
 
-	for _, providerID := range []string{"mock", "qwen", "claude", "codex", "custom"} {
+	for _, providerID := range []string{"mock", "qwen", "claude", "codex", "opencode", "omp", "custom"} {
 		policy := providerAdapterForID(providerID).launch.EnvironmentPolicy()
 		if !policy.allows("ACP_BACKEND") {
 			t.Fatalf("provider %q inherited Devin-only environment policy", providerID)
@@ -69,6 +69,26 @@ func TestDevinLaunchOwnsACPBackendSanitization(t *testing.T) {
 		if got := policy.startupRecoveryRevision(); got != 0 {
 			t.Fatalf("provider %q inherited Devin recovery revision %d", providerID, got)
 		}
+	}
+}
+
+func TestOMPRegistrationUsesOfficialGenericACPEntryPoint(t *testing.T) {
+	registration, ok := providerRegistrationForID("omp")
+	if !ok {
+		t.Fatal("OMP provider registration is missing")
+	}
+	if registration.DefaultCommand != "omp" || !reflect.DeepEqual(registration.DefaultArgs, []string{"acp"}) {
+		t.Fatalf("OMP launch = %q %#v, want omp acp", registration.DefaultCommand, registration.DefaultArgs)
+	}
+	if registration.Discovery == nil || registration.Detection == nil || registration.ProbeTimeout != frontierProbeTimeout {
+		t.Fatalf("OMP discovery registration is incomplete: %#v", registration)
+	}
+	if got := providerAdapterForID("omp"); reflect.TypeOf(got.delivery) != reflect.TypeOf(genericACPProviderAdapter.delivery) || got.creation.DeferredUntilInput {
+		t.Fatalf("OMP did not inherit the ordinary ACP lane contract: %#v", got)
+	}
+	if registration.Update.Source != "https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest" ||
+		registration.Update.Command.Command != "omp" || !reflect.DeepEqual(registration.Update.Command.Args, []string{"update"}) {
+		t.Fatalf("OMP update registration is incomplete: %#v", registration.Update)
 	}
 }
 

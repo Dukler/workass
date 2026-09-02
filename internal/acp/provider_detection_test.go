@@ -114,6 +114,7 @@ func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *test
 	installNodeWrapper(t, pathDir)
 	installFakeAgentWrapper(t, pathDir, "devin", "echo-prompt")
 	installFakeAgentWrapper(t, pathDir, "qwen", "echo-prompt")
+	installFakeAgentWrapper(t, pathDir, "omp", "echo-prompt")
 	t.Setenv("PATH", pathDir)
 	t.Setenv("ASSISTANT_DEVIN", filepath.Join(pathDir, "devin"))
 
@@ -148,10 +149,14 @@ func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *test
 	assertProviderListItem(t, list, "mock", providerStatusReady, true)
 	devin := assertProviderListItem(t, list, "devin", providerStatusReady, true)
 	qwen := assertProviderListItem(t, list, "qwen", providerStatusReady, true)
+	omp := assertProviderListItem(t, list, "omp", providerStatusReady, true)
 	assertProviderListItem(t, list, "claude", providerStatusNotFound, false)
 	assertProviderListItem(t, list, "codex", providerStatusNotFound, false)
 	if devin["resolvedCommand"] == "" {
 		t.Fatalf("devin missing resolvedCommand: %#v", devin)
+	}
+	if omp["resolvedCommand"] != filepath.Join(pathDir, "omp") {
+		t.Fatalf("OMP resolvedCommand = %#v", omp)
 	}
 	autoEnv, _ := qwen["autoEnv"].(map[string]string)
 	if autoEnv["OPENAI_BASE_URL"] != models.URL+"/v1" || autoEnv["OPENAI_MODEL"] != "qwen-test-model" || autoEnv["OPENAI_API_KEY"] != "[redacted]" {
@@ -165,6 +170,7 @@ func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *test
 	assertCatalogGroup(t, groups, "mock", providerStatusReady, true)
 	assertCatalogGroup(t, groups, "devin", providerStatusReady, true)
 	assertCatalogGroup(t, groups, "qwen", providerStatusReady, true)
+	assertCatalogGroup(t, groups, "omp", providerStatusReady, true)
 
 	saved := readProviderFile(t, providersFile)
 	qwenSaved := saved["qwen"]
@@ -186,6 +192,28 @@ func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *test
 		t.Fatalf("qwen session = %#v", session)
 	}
 	t.Logf("trace reply app-chat:new-session provider=%s session=%s models=%d", session.ProviderID, session.SessionID, len(session.Models))
+
+	ompCtx, ompCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer ompCancel()
+	ompSession, err := manager.NewSession(ompCtx, SessionOptions{TabID: "detect-omp-tab", ChatID: "detect-omp-chat", ProviderID: "omp"})
+	if err != nil {
+		t.Fatalf("new OMP session: %v", err)
+	}
+	if ompSession.ProviderID != "omp" || len(ompSession.Models) == 0 {
+		t.Fatalf("OMP session = %#v", ompSession)
+	}
+	job, err := manager.StartJob(context.Background(), JobStartOptions{
+		Kind: "app-chat", SessionID: ompSession.SessionID, TabID: "detect-omp-tab", ChatID: "detect-omp-chat",
+		ProviderID: "omp", Prompt: "OMP deterministic turn",
+	})
+	if err != nil {
+		t.Fatalf("start OMP job: %v", err)
+	}
+	end := events.waitJobEnd(t, jobID(job), 2*time.Second)
+	assertJobStatus(t, end, "done", 0, "end_turn")
+	if got := jobFromEnd(end)["providerId"]; got != "omp" {
+		t.Fatalf("OMP job provider = %v, want omp", got)
+	}
 }
 
 func TestDetectProvidersQwenInactiveWhenModelServerDown(t *testing.T) {
@@ -612,6 +640,7 @@ func TestAuthenticatedProvidersShareProviderContractStrategy(t *testing.T) {
 		"claude": "claude auth login",
 		"codex":  "codex login",
 		"devin":  "devin auth login",
+		"omp":    "omp` y usa `/login",
 	}
 	for providerID, hintFragment := range wants {
 		definition, err := manager.ProviderDefinition(providerID)
@@ -886,6 +915,48 @@ func TestDetectProvidersExplicitDisableSurvivesRedetection(t *testing.T) {
 	assertProviderListItem(t, manager2.ProvidersList(), "devin", providerStatusInactive, false)
 }
 
+func TestSaveProviderConfigsConcurrentWritersUseDistinctTemps(t *testing.T) {
+	dir := t.TempDir()
+	providersFile := filepath.Join(dir, "providers.json")
+	errs := make(chan error, 32)
+	var writers sync.WaitGroup
+	for i := 0; i < cap(errs); i++ {
+		i := i
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			errs <- SaveProviderConfigs(providersFile, []ProviderConfig{{
+				ID: "devin", Command: "devin", Args: []string{"acp"},
+				Enabled: i%2 == 0, ResolvedCommand: fmt.Sprintf("/fixture/devin-%02d", i),
+			}})
+		}()
+	}
+	writers.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent provider config write: %v", err)
+		}
+	}
+	raw, err := os.ReadFile(providersFile)
+	if err != nil {
+		t.Fatalf("read provider config: %v", err)
+	}
+	providers, err := decodeProviderConfigs(raw)
+	if err != nil || len(providers) != 1 || providers[0].ID != "devin" {
+		t.Fatalf("final provider config = %#v, err=%v", providers, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read provider config dir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".tmp") {
+			t.Fatalf("provider config temp was not reclaimed: %s", entry.Name())
+		}
+	}
+}
+
 func TestFailedDetectionDisablesPreviouslyReadyProviderWithoutUserDisable(t *testing.T) {
 	root := repoRoot(t)
 	pathDir := t.TempDir()
@@ -1146,13 +1217,23 @@ func TestStartupDetectionRecoversLegacyDevinNeedsLoginOnceUnderSanitizedLaunch(t
 	if got := countMethod(readMethodLog(t, methodLog), "initialize"); got != 1 {
 		t.Fatalf("legacy Devin recovery initialize attempts = %d, want 1", got)
 	}
-	reloaded, err := LoadProviderConfigs(providersFile, root)
-	if err != nil {
-		t.Fatalf("reload recovered Devin config: %v", err)
-	}
-	devin, ok := providerFromSlice(reloaded, "devin")
-	if !ok || devin.NeedsLogin || !devin.Enabled || devin.LaunchSanitizationRevision != 1 {
-		t.Fatalf("persisted recovered Devin config = %#v", devin)
+	// Runtime readiness is committed before the daemon-owned provider cache is
+	// flushed. Wait for that separate durable boundary instead of racing the
+	// writer immediately after observing the in-memory transition.
+	persistDeadline := time.Now().Add(5 * time.Second)
+	for {
+		reloaded, err := LoadProviderConfigs(providersFile, root)
+		devin, ok := providerFromSlice(reloaded, "devin")
+		if err == nil && ok && !devin.NeedsLogin && devin.Enabled && devin.LaunchSanitizationRevision == 1 {
+			break
+		}
+		if time.Now().After(persistDeadline) {
+			if err != nil {
+				t.Fatalf("reload recovered Devin config: %v", err)
+			}
+			t.Fatalf("persisted recovered Devin config = %#v", devin)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

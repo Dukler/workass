@@ -31,6 +31,7 @@ The launcher in `desktop/main.js` supports these providers through `app-config.j
 | `qwen` | `qwen --acp` | Real local inference canary |
 | `claude` | Official Agent SDK + installed `claude` | Native Claude Code session |
 | `codex` | Installed `codex app-server` | Native Codex session |
+| `omp` | `omp acp` | User-owned Oh My Pi profile over standard ACP |
 | `custom` | `acp.command` plus `acp.args` | Future Go agent or another ACP server |
 
 Selecting another provider chooses another lane inside the same Workass chat.
@@ -275,6 +276,24 @@ node desktop/scripts/probe-acp.mjs qwen --acp
 The verified setup used Qwen Code `0.19.8`, negotiated ACP version `1`, and completed a real
 prompt with `stopReason: end_turn`. A file-tool test was not reliable with the 2B model; that is an
 expected model limitation, not an ACP transport failure.
+
+## Oh My Pi
+
+Install the user-owned OMP CLI with one of its official installers. On macOS with Homebrew:
+
+```sh
+brew install can1357/tap/omp
+```
+
+OMP owns its profile, provider credentials, model catalog, sessions, rules, and extensions. Workass
+only detects the executable and launches its standard ACP entry point:
+
+```sh
+node desktop/scripts/probe-acp.mjs omp acp
+```
+
+Expected result: ACP protocol version `1` and agent name `oh-my-pi`. If OMP has no usable model,
+run `omp` and use `/login`; Workass never reads or stores OMP credentials.
 
 ## ACP Detection
 
