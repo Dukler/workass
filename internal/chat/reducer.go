@@ -1499,6 +1499,17 @@ func reduceSelectLane(state *State, command SelectLane) ([]Effect, error) {
 			// the failed create blocked or broken.
 			existing.Phase = LaneAbsent
 		}
+		if state.Foreground == nil && existing.PendingImport == nil && existing.Provision == nil &&
+			existing.Attachment == nil && !existing.Thread.IsZero() &&
+			(existing.Phase == LaneBlocked || existing.Phase == LaneBroken) &&
+			existing.LastError == provider.ErrorTransientTransport {
+			// The native Codex/provider session is already durably identified. A
+			// transport failure while attaching it does not require a separate
+			// recovery command: selecting the lane attaches that exact saved
+			// ThreadRef again. drive must emit ResumeLaneEffect, never CreateLaneEffect.
+			existing.Phase = LaneDetached
+			existing.LastError = ""
+		}
 		// Releases before the initial-seed law may already have created an exact
 		// target thread and then blocked it solely because context import was
 		// unsupported. If that lane provably never consumed provider input, it is
