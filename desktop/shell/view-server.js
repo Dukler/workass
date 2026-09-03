@@ -151,9 +151,14 @@ function proxyUpgrade(req, socket, head, daemon) {
     const headers = [];
     for (const [name, value] of Object.entries(req.headers)) {
       if (value == null) continue;
+      // This loopback-only stamp identifies the one renderer service that owns
+      // the mounted-machine credential book. It is transport metadata, never a
+      // device credential, and prevents a regular localhost tab from racing it.
+      if (name.toLowerCase() === 'x-workass-shell') continue;
       const rendered = name.toLowerCase() === 'host' ? daemon.host : (Array.isArray(value) ? value.join(', ') : value);
       headers.push(`${name}: ${rendered}`);
     }
+    headers.push('x-workass-shell: 1');
     const prefix = daemon.pathname === '/' ? '' : daemon.pathname.replace(/\/$/, '');
     upstream.write(`${req.method} ${prefix}${req.url} HTTP/${req.httpVersion}\r\n${headers.join('\r\n')}\r\n\r\n`);
     if (head && head.length) upstream.write(head);

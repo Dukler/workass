@@ -261,6 +261,10 @@ type client struct {
 	ip                string
 	deviceName        string
 	userAgent         string
+	// True only when the loopback Electron view proxy stamped this socket.
+	// A normal localhost browser is not the renderer service: it may have a
+	// different localStorage machine book and must not race daemon MCP routes.
+	localShell bool
 	// Auxiliary authenticated sockets preserve the frozen invoke/reply bytes but
 	// never receive projection events. `control` carries send-critical ordered
 	// mutations; `urgent` isolates Stop from a blocked steer handler.
@@ -490,6 +494,24 @@ func (h *Hub) Broadcast(channel string, payload any) {
 	started := time.Now()
 	h.broadcastWhere(channel, payload, nil)
 	h.recordEventEnqueue(time.Since(started))
+}
+
+// BroadcastLocalShell sends one event only to the approved Electron projection
+// connected through this host's view proxy. It is the renderer-service boundary
+// for daemon-local features that must never leak onto an approved LAN viewer or
+// race an ordinary localhost browser with a different machine credential book.
+//
+// The frozen event envelope is unchanged. The returned count lets a caller fail
+// immediately when no local renderer exists instead of waiting for a timeout.
+func (h *Hub) BroadcastLocalShell(channel string, payload any) int {
+	h.broadcastMu.Lock()
+	defer h.broadcastMu.Unlock()
+	started := time.Now()
+	delivered := h.broadcastWhere(channel, payload, func(c *client) bool {
+		return c != nil && c.receivesProjectionEvents() && isLocalIP(c.ip) && c.localShell
+	})
+	h.recordEventEnqueue(time.Since(started))
+	return delivered
 }
 
 // recordEventEnqueue measures JSON/frame preparation plus outbound queue
@@ -926,6 +948,7 @@ func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 		ip:              clientIP(r.RemoteAddr),
 		deviceName:      deviceNameFromRequest(r),
 		userAgent:       strings.TrimSpace(r.UserAgent()),
+		localShell:      isLocalIP(clientIP(r.RemoteAddr)) && strings.TrimSpace(r.Header.Get("X-Workass-Shell")) == "1",
 		purpose:         connectionPurpose(r),
 		connectionGroup: connectionGroup(r),
 	}

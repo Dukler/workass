@@ -325,6 +325,7 @@ func main() {
 		os.Exit(1)
 	}
 	agentControl.artifacts = artifactHosting
+	agentControl.remoteChats = registerRendererAgentRouter(hub)
 	var cleanupOnce sync.Once
 	cleanup := func() {
 		cleanupOnce.Do(func() {

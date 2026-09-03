@@ -130,7 +130,7 @@ test('TLS proxy never sends an IP literal as SNI', () => {
   });
 });
 
-test('serves local renderer, proxies HTTP, and tunnels WebSocket upgrade', async (t) => {
+test('serves local renderer, proxies HTTP, and stamps the tunneled shell WebSocket', async (t) => {
   const renderer = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-shell-renderer-'));
   fs.mkdirSync(path.join(renderer, 'assets'));
   fs.writeFileSync(path.join(renderer, 'index.html'), '<!doctype html><head></head><body>local-index</body>');
@@ -146,7 +146,9 @@ test('serves local renderer, proxies HTTP, and tunnels WebSocket upgrade', async
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('daemon-http');
   });
-  daemon.on('upgrade', (_req, socket) => {
+  let shellStamp = '';
+  daemon.on('upgrade', (req, socket) => {
+    shellStamp = String(req.headers['x-workass-shell'] || '');
     socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\nUPSTREAM');
   });
   await new Promise((resolve) => daemon.listen(0, '127.0.0.1', resolve));
@@ -228,6 +230,7 @@ test('serves local renderer, proxies HTTP, and tunnels WebSocket upgrade', async
   });
   assert.match(upgraded, /101 Switching Protocols/);
   assert.match(upgraded, /UPSTREAM/);
+  assert.equal(shellStamp, '1');
 });
 
 test('screenshot endpoint serves the registered capture and forwards ?click', async (t) => {

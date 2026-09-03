@@ -17,6 +17,7 @@ type agentControlHandler struct {
 	manager       *acp.Manager
 	chats         *chatControlCoordinator
 	artifacts     *artifacthost.Registry
+	remoteChats   agentChatRemoteRouter
 	validateOwner func(ownerKey, chatID, tabID string) bool
 }
 
@@ -92,9 +93,34 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "Workass chat control caller is not an owned ACP session"); err != nil {
 			return nil, err
 		}
+		if request.Method == "chat.list" {
+			local, err := h.chats.list()
+			if err != nil || h.remoteChats == nil {
+				return local, err
+			}
+			remote, routeErr := h.remoteChats.Call(r.Context(), request.Method, map[string]any{})
+			if routeErr != nil {
+				// Local chat control must remain usable while the shell is closed or
+				// every mounted machine is offline. Report the missing projection in
+				// the same result instead of hiding it or failing the local catalog.
+				local["remoteAvailable"] = false
+				local["remoteError"] = redactedSessionString(routeErr.Error())
+				return local, nil
+			}
+			local["remoteAvailable"] = true
+			return mergeRemoteAgentChatList(local, remote), nil
+		}
+		if machineID, remote, routeErr := remoteAgentChatTarget(params); routeErr != nil {
+			return nil, routeErr
+		} else if remote {
+			if h.remoteChats == nil {
+				return nil, errors.New("Workass remote-chat MCP router is unavailable")
+			}
+			forwarded := copyRemoteAgentRouteParams(params)
+			forwarded["machine_id"] = machineID
+			return h.remoteChats.Call(r.Context(), request.Method, forwarded)
+		}
 		switch request.Method {
-		case "chat.list":
-			return h.chats.list()
 		case "chat.read":
 			return h.chats.read(params)
 		case "chat.create":

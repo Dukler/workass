@@ -472,6 +472,21 @@ export interface AgentApply {
   error?: string;
 }
 
+// Daemon-hosted workass-agent MCP requests that need the renderer's mounted
+// machine links. The daemon emits these only to a loopback projection client;
+// requestId is an opaque one-shot response capability.
+export interface AgentRouteRequest {
+  requestId: string;
+  method: string;
+  params?: Record<string, unknown>;
+  expiresAt: number;
+}
+export interface AgentRouteResponse {
+  requestId: string;
+  result?: unknown;
+  error?: string;
+}
+
 // ---- Server-owned directory browsing ---------------------------------------
 // The daemon lists ITS OWN filesystem: `path`/`parent` are absolute paths on the
 // machine that runs Workass, never on the viewing device. `listDir(null)` opens
@@ -613,6 +628,7 @@ export interface WorkassApi {
     modelControls?: ModelControlMemory;
   }>;
   chatDelete?: (opts: { tabId: string; chatId: string; operationId: string; force: boolean }) => Promise<{ ok: boolean; operationId: string }>;
+  agentRouteReply?: (response: AgentRouteResponse) => Promise<{ ok?: boolean; stale?: boolean }>;
   // Folder browsing is server-owned: `listDir` walks the DAEMON's filesystem, so
   // an Electron, LAN or browser client all pick the same folders. The native
   // directory dialog (`dialog:pick-directory`, still on the bridge) is
@@ -734,6 +750,7 @@ export interface WorkassApi {
   // authoritative session snapshot. Exact identity is diagnostic; the snapshot
   // itself remains the authority.
   onAgentApply?: (cb: (e: AgentApply) => void) => void;
+  onAgentRouteRequest?: (cb: (request: AgentRouteRequest) => void) => void;
   // Per-chat provider catalog: live replaces via the event, late joins via the
   // invoke (the catalog is daemon-memory-only, so hydration cannot carry it).
   onChatCommands?: (cb: (e: ChatCommandsEvent) => void) => void;

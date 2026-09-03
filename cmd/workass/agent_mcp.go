@@ -56,8 +56,8 @@ func agentMCPTools() []map[string]any {
 		}
 	}
 	return []map[string]any{
-		tool("workass_list_chats", "List Workass chats with exact tab_id/chat_id targets, per-chat provider/model/effort/permission state, and queue status. Use before controlling a chat; never infer a target from title or position.", object(map[string]any{}), true, false, true, false),
-		tool("workass_read_chat", "Read a byte-bounded canonical transcript and current controls for one exact Workass chat. Event-heavy reads preserve the newest complete event suffix and report eventCount, includedEventCount, and eventsTruncated instead of failing the MCP transport.", object(map[string]any{
+		tool("workass_list_chats", "List local chats and chats mounted from connected Workass machines with exact tab_id/chat_id targets, machine identity, provider/model/effort/permission state, and queue status. Remote targets use the returned machine-tagged ids. Use before controlling a chat; never infer a target from title or position.", object(map[string]any{}), true, false, true, false),
+		tool("workass_read_chat", "Read a byte-bounded canonical transcript and current controls for one exact local or mounted remote Workass chat without focusing it. Event-heavy reads preserve the newest complete event suffix and report eventCount, includedEventCount, and eventsTruncated instead of failing the MCP transport.", object(map[string]any{
 			"tab_id":         str("Tab id from workass_list_chats."),
 			"chat_id":        str("Exact conversation id paired with tab_id by workass_list_chats."),
 			"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Newest messages to return; defaults to 40."},
@@ -93,7 +93,7 @@ func agentMCPTools() []map[string]any {
 			"tab_id": str("Tab id from workass_list_chats."), "chat_id": str("Paired conversation id."),
 			"force": boolean("Cancel a running turn before deleting."),
 		}, "tab_id", "chat_id"), false, true, false, false),
-		tool("workass_send_chat_message", "Send text to one exact chat without focusing it. auto sends at the next idle boundary, queue preserves FIFO order, and headless steer first records one durable FIFO owner, then removes that same owner only after acknowledged live delivery.", mutationObject(map[string]any{
+		tool("workass_send_chat_message", "Send text to one exact local or mounted remote chat without focusing it. auto sends at the next idle boundary and queue preserves FIFO order. Local chats also support steer; mounted remote chats reject steer and require auto or queue so a lost route reply cannot duplicate live input.", mutationObject(map[string]any{
 			"tab_id":   str("Tab id from workass_list_chats."),
 			"chat_id":  str("Paired conversation id."),
 			"message":  str("Message to send."),
