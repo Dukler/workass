@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"workass/internal/acp"
+	"workass/internal/chat"
 	"workass/internal/httpserve"
 	"workass/internal/wire"
 )
@@ -67,6 +68,18 @@ func TestWireMockBurstReachesClientAtDisplayCadence(t *testing.T) {
 		t.Fatalf("new-session error: %s", *sessionReply.Error)
 	}
 	sessionID := fmt.Sprint(mapFromAnyMain(sessionReply.Result)["sessionId"])
+
+	// Reproduce the real long-chat failure mode: provider publication must not
+	// rewrite a multi-megabyte actor snapshot for every 16 ms stream batch.
+	actor, err := providerChats.actor("burst-wire-chat")
+	if err != nil {
+		t.Fatalf("open burst actor: %v", err)
+	}
+	presentation := actor.engine.Snapshot().Presentation.Clone()
+	presentation.Draft = strings.Repeat("historical actor payload ", 1_000_000)
+	if err := actor.engine.Apply(chat.UpdatePresentation{Presentation: presentation}); err != nil {
+		t.Fatalf("inflate burst actor: %v", err)
+	}
 
 	started := time.Now()
 	client.invoke(t, 2, "job:start", map[string]any{

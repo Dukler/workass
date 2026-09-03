@@ -76,8 +76,18 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 		}
 	}
 	if e.store != nil {
-		if err := e.store.Save(next); err != nil {
-			return err
+		var persistErr error
+		if providerStore, ok := e.store.(providerEventStateStore); ok {
+			if providerEvent, ok := command.(ProviderEventReceived); ok {
+				persistErr = providerStore.commitProviderEvent(e.state.Revision, next, providerEvent)
+			} else {
+				persistErr = e.store.Save(next)
+			}
+		} else {
+			persistErr = e.store.Save(next)
+		}
+		if persistErr != nil {
+			return persistErr
 		}
 	}
 	e.state = next
