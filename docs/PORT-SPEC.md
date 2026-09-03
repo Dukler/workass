@@ -276,15 +276,19 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   runs npm. Perf doctrine from T3 Chat: local-first chat state, block-level
   markdown streaming (re-render only the block receiving tokens),
   virtualized lists.
-  SIDEBAR ORDER (user law 2026-09-03): every visible chat—local or remote,
-  active, settled, or archived—occupies one user-controlled order. Machine
-  hydration, daemon refresh, lifecycle/status changes, recency, search, and
-  workspace scope MUST NOT regroup or reposition rows. Tagged remote ids are
-  presentation metadata in the controller's daemon-global `chatOrder`; remote
-  chat payloads remain owned exclusively by their remote daemon. A newly
-  created or newly discovered chat is the sole automatic placement and enters
-  at the top. Dragging may cross all former lifecycle/machine boundaries and
-  its resulting order survives local refresh, remote refresh, and restart.
+  SIDEBAR ORDER (user correction 2026-09-03): remote ownership is not an
+  archive/lifecycle state and MUST NOT create an ordering boundary. Within the
+  established live list and settled/archive sections, local and remote rows
+  share the same user-controlled order. Machine hydration, daemon refresh,
+  status, recency, search, and workspace scope MUST NOT reposition rows within
+  their lifecycle section. Tagged remote ids are presentation metadata in the
+  controller's daemon-global `chatOrder`; remote chat payloads remain owned
+  exclusively by their remote daemon. A newly created or genuinely newly
+  discovered chat is the sole automatic placement and enters at the top.
+  Existing settled/archive presentation remains intact: ordering work MUST NOT
+  flatten those sections, render archived rows in the ordinary list, or mutate
+  a chat's settled state. Dragging across machines inside the same lifecycle
+  section survives local refresh, remote refresh, and restart.
 - **controller lease** — device tokens, exactly one controller;
   notify/show and `lan:access-request` route to the controller only (plan P3).
   SEEING IS NOT DECIDING (2026-07-26, for the phone client): permission

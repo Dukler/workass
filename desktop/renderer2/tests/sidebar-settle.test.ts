@@ -18,7 +18,13 @@ let resolveArchived: (chat: unknown, status: string, now: number, touched: numbe
 let lastTouchedAt: (chat: Chat) => number;
 let orderSearchRows: (rows: readonly any[]) => any[];
 let orderSidebarRows: (rows: readonly any[]) => any[];
-let canDropSidebarRow: (draggedId: string | null | undefined, targetId: string) => boolean;
+let partitionSidebarRows: (rows: readonly any[]) => { cards: any[]; tail: any[]; archived: any[] };
+let canDropSidebarRow: (
+  draggedId: string | null | undefined,
+  draggedSection: 'live' | 'settled' | 'archived' | null | undefined,
+  targetId: string,
+  targetSection: 'live' | 'settled' | 'archived',
+) => boolean;
 let canSettle: (status: string) => boolean;
 let resolveStatus: (chat: Chat, live: boolean, active: boolean, obligation?: { state: string }) => string;
 let isFullSizeSidebarRow: (settled: boolean, archived: boolean) => boolean;
@@ -37,6 +43,7 @@ before(async () => {
   lastTouchedAt = sidebar.lastTouchedAt;
   orderSearchRows = sidebar.orderSearchRows;
   orderSidebarRows = sidebar.orderSidebarRows;
+  partitionSidebarRows = sidebar.partitionSidebarRows;
   canDropSidebarRow = sidebar.canDropSidebarRow;
   canSettle = sidebar.canSettle;
   resolveStatus = sidebar.resolveStatus;
@@ -126,7 +133,7 @@ test('metadata-only old chats stay automatically settled without resident messag
   assert.equal(resolveArchived(subject, 'ready', now, touched), false);
 });
 
-test('search ordering preserves one manual order across every lifecycle state', () => {
+test('search keeps archived matches after ordinary rows and preserves manual order inside each section', () => {
   const row = (id: string, archived: boolean, order: number, card = false) => ({
     chat: { id }, archived, order, card, status: 'ready', settled: archived, touched: 0,
   });
@@ -137,14 +144,16 @@ test('search ordering preserves one manual order across every lifecycle state', 
     row('live', false, 1, true),
   ]);
 
-  assert.deepEqual(ordered.map((item) => item.chat.id), ['archived-top', 'live', 'archived-first', 'shelved-bottom']);
+  assert.deepEqual(ordered.map((item) => item.chat.id), ['live', 'shelved-bottom', 'archived-top', 'archived-first']);
 });
 
-test('dragging has no machine or lifecycle lane guard', () => {
-  assert.equal(canDropSidebarRow('remote-settled', 'local-live'), true);
-  assert.equal(canDropSidebarRow('local-archived', 'remote-working'), true);
-  assert.equal(canDropSidebarRow('same', 'same'), false);
-  assert.equal(canDropSidebarRow(null, 'target'), false);
+test('dragging ignores machine ownership but preserves the lifecycle sections', () => {
+  assert.equal(canDropSidebarRow('remote-live', 'live', 'local-live', 'live'), true);
+  assert.equal(canDropSidebarRow('local-live', 'live', 'remote-live', 'live'), true);
+  assert.equal(canDropSidebarRow('remote-settled', 'settled', 'local-live', 'live'), false);
+  assert.equal(canDropSidebarRow('local-archived', 'archived', 'remote-working', 'live'), false);
+  assert.equal(canDropSidebarRow('same', 'live', 'same', 'live'), false);
+  assert.equal(canDropSidebarRow(null, null, 'target', 'live'), false);
 });
 
 test('ordinary sidebar rows follow persisted manual order instead of status or recency', () => {
@@ -155,6 +164,23 @@ test('ordinary sidebar rows follow persisted manual order instead of status or r
   ]);
 
   assert.deepEqual(ordered.map((item) => item.chat.id), ['ready-old', 'working', 'done-new']);
+});
+
+test('normal browsing keeps archived rows out of the live list and restores the settled shelf', () => {
+  const row = (id: string, settled: boolean, archived: boolean, order: number) => ({
+    chat: { id }, settled, archived, order, card: !settled && !archived,
+    status: 'ready', touched: 0,
+  });
+  const partitioned = partitionSidebarRows([
+    row('archived', true, true, 0),
+    row('remote-live', false, false, 1),
+    row('settled', true, false, 2),
+    row('local-live', false, false, 3),
+  ]);
+
+  assert.deepEqual(partitioned.cards.map((item) => item.chat.id), ['remote-live', 'local-live']);
+  assert.deepEqual(partitioned.tail.map((item) => item.chat.id), ['settled']);
+  assert.deepEqual(partitioned.archived.map((item) => item.chat.id), ['archived']);
 });
 
 test('nothing still alive, awaiting approval, parked, or unread can sit on the shelf', () => {
