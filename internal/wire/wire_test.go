@@ -734,6 +734,45 @@ func waitForOutboundFrames(t *testing.T, client *client, want int) {
 	}
 }
 
+func TestBroadcastLocalShellTargetsOnlyStampedLoopbackProjection(t *testing.T) {
+	hub := NewHub()
+	newClient := func(remoteAddr, stamp, purpose string) *client {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/", nil)
+		req.RemoteAddr = remoteAddr
+		if stamp != "" {
+			req.Header.Set("X-Workass-Shell", stamp)
+		}
+		if purpose != "" {
+			query := req.URL.Query()
+			query.Set("purpose", purpose)
+			req.URL.RawQuery = query.Encode()
+		}
+		client := hub.newClient(nil, req)
+		hub.mu.Lock()
+		hub.clients[client] = struct{}{}
+		hub.mu.Unlock()
+		return client
+	}
+	shell := newClient("127.0.0.1:1001", "1", "")
+	localBrowser := newClient("127.0.0.1:1002", "", "")
+	remoteStamped := newClient("192.0.2.8:1003", "1", "")
+	localControl := newClient("127.0.0.1:1004", "1", "control")
+
+	if delivered := hub.BroadcastLocalShell("agent:route-request", map[string]any{"requestId": "opaque"}); delivered != 1 {
+		t.Fatalf("local shell delivery count = %d, want 1", delivered)
+	}
+	waitForOutboundFrames(t, shell, 1)
+	for name, client := range map[string]*client{
+		"ordinary localhost browser": localBrowser,
+		"remote stamped client":      remoteStamped,
+		"local auxiliary control":    localControl,
+	} {
+		if frames, _ := client.outboundSnapshot(); frames != 0 {
+			t.Fatalf("%s received %d renderer-service frames", name, frames)
+		}
+	}
+}
+
 func waitForClosed(t *testing.T, done <-chan struct{}, name string) {
 	t.Helper()
 	select {

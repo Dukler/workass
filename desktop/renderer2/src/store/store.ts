@@ -7,7 +7,7 @@
 
 import { useSyncExternalStore } from 'react';
 import type { AppState, Chat, Msg, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
-import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
+import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, AgentRouteRequest, AgentRouteResponse, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
 import { call, callThrow, has, on, bridgeReady } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
 import { LEAN_SESSION_SAVE_MODE, loadMirror, saveMirror, type Mirror, type MirrorMsg } from './persistence';
@@ -497,6 +497,10 @@ export class Store {
   // preserve the user's local selection, while this exact tab+chat pair must
   // be adopted once the actor row is present.
   private pendingAgentFocus: { tabId: string; chatId: string } | null = null;
+  // One-shot MCP route requests may be replayed by the bridge when a renderer
+  // subscribes after the event arrived. Cache a bounded response so replay can
+  // acknowledge the same request without executing a second remote mutation.
+  private agentRouteResponses = new Map<string, Omit<AgentRouteResponse, 'requestId'>>();
   // An inactive actor row may carry metadata or a bounded tail only. Keep the
   // current transcript mounted while the clicked row loads its complete ledger,
   // and let only the newest selection intent perform the atomic handoff.
@@ -2447,6 +2451,161 @@ export class Store {
     else this.scheduleScopedSync(['session', 'permissions']);
   }
 
+  private async answerAgentRouteRequest(request: AgentRouteRequest): Promise<void> {
+    const requestId = String(request?.requestId ?? '').trim();
+    const localBridge = typeof window !== 'undefined' ? window.api : undefined;
+    if (!requestId || typeof localBridge?.agentRouteReply !== 'function') return;
+    let response = this.agentRouteResponses.get(requestId);
+    if (!response) {
+      try {
+        response = { result: await this.routeAgentRequest(request) };
+      } catch (error) {
+        response = { error: redactSensitiveText(error instanceof Error ? error.message : String(error)).slice(0, 500) };
+      }
+      this.agentRouteResponses.set(requestId, response);
+      while (this.agentRouteResponses.size > 64) {
+        const oldest = this.agentRouteResponses.keys().next().value as string | undefined;
+        if (!oldest) break;
+        this.agentRouteResponses.delete(oldest);
+      }
+    }
+    try { await localBridge.agentRouteReply({ requestId, ...response }); }
+    catch (error) { console.warn('[agent-route] response failed', error); }
+  }
+
+  // Public for the deterministic renderer contract tests. Production ingress
+  // is answerAgentRouteRequest above; no UI selection or synthetic input is
+  // involved, only the same machine router used by normal chat operations.
+  async routeAgentRequest(request: AgentRouteRequest): Promise<unknown> {
+    if (!request || !Number.isFinite(request.expiresAt) || request.expiresAt < Date.now()) {
+      throw new Error('remote-chat MCP route expired before the renderer received it');
+    }
+    const params = request.params && typeof request.params === 'object' ? request.params : {};
+    switch (String(request.method ?? '').trim()) {
+      case 'chat.list':
+        return { chats: this.agentRemoteChatList() };
+      case 'chat.read':
+        return this.agentRemoteChatRead(params);
+      case 'chat.send':
+        return this.agentRemoteChatSend(params);
+      default:
+        throw new Error(`remote-chat MCP method is not supported: ${String(request.method ?? '')}`);
+    }
+  }
+
+  private agentRemoteChatList(): Array<Record<string, unknown>> {
+    return this.state.chats.flatMap((chat) => {
+      const machineId = ownerMachineId(chat);
+      if (!machineId || !chat.chatId) return [];
+      const running = [...chat.messages].reverse().find((message) => message.role === 'assistant' && message.status === 'running');
+      return [{
+        tabId: chat.id, chatId: chat.chatId, machineId,
+        machineName: this.machineNameMap[machineId] ?? machineId,
+        title: chat.title, cwd: chat.cwd ?? '', providerId: chat.providerId ?? '',
+        modelId: chat.currentModelId ?? '', modeId: chat.currentModeId ?? '',
+        active: this.state.activeId === chat.id, running: !!running,
+        ...(running?.jobId ? { jobId: running.jobId } : {}),
+        queueLength: chat.queue?.length ?? 0,
+      }];
+    });
+  }
+
+  private exactRemoteAgentChat(params: Record<string, unknown>): { chat: Chat; machineId: string } {
+    const tabId = String(params.tab_id ?? '').trim();
+    const chatId = String(params.chat_id ?? '').trim();
+    const requestedMachine = String(params.machine_id ?? '').trim();
+    const chat = this.chat(tabId);
+    const machineId = chat ? ownerMachineId(chat) : '';
+    if (!chat || !chat.chatId || chat.chatId !== chatId || !machineId || machineId !== requestedMachine) {
+      throw new Error('remote chat is unavailable for the exact tab_id + chat_id + machine_id');
+    }
+    return { chat, machineId };
+  }
+
+  private async agentRemoteChatRead(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const target = this.exactRemoteAgentChat(params);
+    await this.ensureFullHistory(target.chat.id);
+    const live = this.exactRemoteAgentChat(params).chat;
+    const requestedLimit = Number(params.limit ?? 40);
+    const limit = Number.isInteger(requestedLimit) && requestedLimit >= 1 && requestedLimit <= 200 ? requestedLimit : 40;
+    const includeEvents = params.include_events === true;
+    const messages = live.messages.slice(-limit).map((message) => ({
+      ...message,
+      events: includeEvents ? message.events : [],
+    }));
+    // Keep the proxy reply comfortably below the stateless MCP response ceiling.
+    // Drop oldest complete messages first, including the last one if that single
+    // message is itself oversized; never split an event or invent transcript text.
+    let bytesTruncated = false;
+    while (messages.length && new TextEncoder().encode(JSON.stringify(messages)).byteLength > 768 * 1024) {
+      messages.shift();
+      bytesTruncated = true;
+    }
+    const running = [...live.messages].reverse().find((message) => message.role === 'assistant' && message.status === 'running');
+    return {
+      tabId: live.id, chatId: live.chatId, machineId: target.machineId,
+      title: live.title, cwd: live.cwd ?? '', providerId: live.providerId ?? '',
+      modelId: live.currentModelId ?? '', modeId: live.currentModeId ?? '',
+      running: !!running, ...(running?.jobId ? { jobId: running.jobId } : {}),
+      messageCount: live.messageCount ?? live.messages.length,
+      truncated: bytesTruncated || (live.messageCount ?? live.messages.length) > messages.length,
+      messages,
+    };
+  }
+
+  private async agentRemoteChatSend(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    let { chat } = this.exactRemoteAgentChat(params);
+    const operationId = String(params.operation_id ?? '').trim();
+    const message = String(params.message ?? '');
+    const delivery = String(params.delivery ?? 'auto').trim() || 'auto';
+    if (!operationId) throw new Error('remote chat send requires operation_id');
+    if (!message.trim()) throw new Error('remote chat send requires message');
+    if (delivery !== 'auto' && delivery !== 'queue' && delivery !== 'steer') {
+      throw new Error('delivery must be auto, queue, or steer');
+    }
+    if (delivery === 'steer') {
+      // The ordinary renderer steer path mints fresh chronological ids. Until
+      // it accepts caller-supplied ids, replaying a lost MCP reply could duplicate
+      // a live steer, so fail closed and retain the safe auto/FIFO choices.
+      throw new Error('remote MCP steer is not supported; use auto or queue');
+    }
+
+    await this.ensureFullHistory(chat.id);
+    chat = this.exactRemoteAgentChat(params).chat;
+    const userId = ownedEntityId(chat, `agent-user-${operationId}`);
+    const assistantId = ownedEntityId(chat, `agent-assistant-${operationId}`);
+    const queueId = ownedEntityId(chat, `agent-queue-${operationId}`);
+    const existingQueue = chat.queue?.find((item) => item.id === queueId);
+    if (existingQueue) {
+      if (existingQueue.text !== redactSensitiveText(message) || existingQueue.delivery !== delivery) {
+        throw new Error('remote chat send operation_id was reused for different content or delivery');
+      }
+      return { ok: true, queued: true, queueId, operationId, delivery, tabId: chat.id, chatId: chat.chatId };
+    }
+    const existingUser = chat.messages.find((item) => item.id === userId && item.role === 'user');
+    if (existingUser) {
+      if (existingUser.content !== redactSensitiveText(message)) {
+        throw new Error('remote chat send operation_id was reused for different content');
+      }
+      return { ok: true, queued: false, operationId, delivery: 'auto', tabId: chat.id, chatId: chat.chatId };
+    }
+
+    if (delivery === 'queue' || this.isChatRunning(chat.id)) {
+      (chat.queue ??= []).push({
+        id: queueId, text: redactSensitiveText(message), source: 'agent', delivery,
+        queuedAt: new Date().toISOString(),
+      });
+      this.markQueueMutation(chat);
+      this.bumpChat(chat);
+      await this.flushSession();
+      return { ok: true, queued: true, queueId, operationId, delivery, tabId: chat.id, chatId: chat.chatId };
+    }
+
+    const accepted = await this._send(chat, message, undefined, undefined, { userId, assistantId });
+    if (!accepted) throw new Error('remote daemon did not accept the chat message');
+    return { ok: true, queued: false, operationId, delivery: 'auto', tabId: chat.id, chatId: chat.chatId };
+  }
+
   async init() {
     applyTheme(this.state.theme);
     applyDensity(this.state.density);
@@ -2466,6 +2625,10 @@ export class Store {
     // Mount the machine book before hydration, so a remote machine's chats
     // arrive in the same list rather than appearing a beat later (E3).
     void this.mountMachines();
+    const localBridge = typeof window !== 'undefined' ? window.api : undefined;
+    if (typeof localBridge?.onAgentRouteRequest === 'function') {
+      localBridge.onAgentRouteRequest((request) => { void this.answerAgentRouteRequest(request); });
+    }
     // Wire events before any network so nothing is missed.
     on('onJobEvent', (e) => this.onJobEvent(e as JobEvent));
     on('onChatCatalog', (c) => this.onCatalog(c as ChatCatalog));

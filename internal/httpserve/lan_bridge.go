@@ -175,6 +175,10 @@ const LANBridgeJS = `(() => {
     chatPresentationSave: (o) => invoke('chat:presentation-save', o),
     chatRuntimeControlsSave: (o) => invoke('chat:runtime-controls-save', o),
     chatDelete: (o) => invoke('chat:delete', o),
+    // Local agent MCP -> renderer machine router. The request event is emitted
+    // only to loopback projection clients by the daemon; the opaque request id
+    // is the response capability and no per-machine credential crosses here.
+    agentRouteReply: (o) => invoke('agent:route-response', o),
     // Dictation. The microphone belongs to the machine the human is sitting at,
     // so a remote view records here and sends the audio to whichever daemon owns
     // the chat — the reverse would record a machine with nobody in front of it.
@@ -202,7 +206,7 @@ const LANBridgeJS = `(() => {
     writeClipboard: (t) => invoke('clipboard:write', t), notify: (ti, b) => invoke('notify', { title: ti, body: b }), openExternal: (u) => invoke('external:open', u), openReview: (k) => invoke('review:open', k),
     browserCaptureRegion: (rect) => invoke('browser:capture-region', rect),
     onJobEvent: (cb) => on('job:event', cb), onChatCatalog: (cb) => on('chat:catalog', cb), onChatSessionReplaced: (cb) => on('chat:session-replaced', cb), onChatCompacted: (cb) => on('chat:compacted', cb), onProcChanged: (cb) => on('proc:changed', cb), onRefreshEvent: (cb) => on('refresh:event', cb), onAgentNavigate: (cb) => on('agent:navigate', cb),
-    onSettingsChanged: (cb) => on('settings:changed', cb), onConfigChanged: (cb) => on('config:changed', cb), onAgentApply: (cb) => on('agent:apply', cb),
+    onSettingsChanged: (cb) => on('settings:changed', cb), onConfigChanged: (cb) => on('config:changed', cb), onAgentApply: (cb) => on('agent:apply', cb), onAgentRouteRequest: (cb) => on('agent:route-request', cb),
     onChatCommands: (cb) => on('chat:commands', cb),
     onChatPermissionRequest: (cb) => on('chat:permission-request', cb), onChatPermissionResolved: (cb) => on('chat:permission-resolved', cb), onLanControllerChanged: (cb) => on('lan:controller-changed', cb), onLanAccessState: (cb) => on('lan:access-state', cb), onLanAccessRequest: (cb) => on('lan:access-request', cb),
     onChatCheckpointRestored: (cb) => on('chat:checkpoint-restored', cb), onChatEngineRecovered: (cb) => on('chat:engine-recovered', cb), onChatEnv: (cb) => on('chat:env', cb),
