@@ -66,7 +66,18 @@ func (e *Engine) Apply(command Command) error {
 func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	next, _, err := Reduce(e.state, command)
+	providerStore, hasProviderStore := e.store.(providerEventStateStore)
+	providerEvent, isProviderEvent := command.(ProviderEventReceived)
+	useProviderEventJournal := prepare == nil && hasProviderStore && isProviderEvent && journalableProviderEvent(providerEvent.Event.Kind)
+	var (
+		next State
+		err  error
+	)
+	if useProviderEventJournal {
+		next, err = reduceJournaledProviderEvent(e.state, providerEvent)
+	} else {
+		next, _, err = Reduce(e.state, command)
+	}
 	if err != nil {
 		return err
 	}
@@ -77,8 +88,8 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 	}
 	if e.store != nil {
 		var persistErr error
-		if providerStore, ok := e.store.(providerEventStateStore); ok {
-			if providerEvent, ok := command.(ProviderEventReceived); ok {
+		if hasProviderStore {
+			if isProviderEvent {
 				persistErr = providerStore.commitProviderEvent(e.state.Revision, next, providerEvent)
 			} else {
 				persistErr = e.store.Save(next)

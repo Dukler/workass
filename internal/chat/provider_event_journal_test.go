@@ -1,14 +1,39 @@
 package chat
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"workass/internal/provider"
 )
+
+type failingProviderEventStore struct {
+	err             error
+	providerCommits int
+	snapshotCommits int
+}
+
+func (s *failingProviderEventStore) Load(string) (State, bool, error) {
+	return State{}, false, nil
+}
+
+func (s *failingProviderEventStore) Save(State) error {
+	s.snapshotCommits++
+	return nil
+}
+
+func (s *failingProviderEventStore) commitProviderEvent(uint64, State, ProviderEventReceived) error {
+	s.providerCommits++
+	return s.err
+}
 
 func newJournalReadyEngine(t *testing.T, path string) (*Engine, provider.LaneIdentity) {
 	t.Helper()
@@ -47,6 +72,133 @@ func journalAssistantEvent(lane provider.LaneIdentity, sequence uint64, text str
 		},
 		Assistant: &provider.AssistantEvent{Phase: provider.AssistantPhaseFinal, Text: text, TypedPhase: true},
 	}}
+}
+
+func largeJournalReadyState(t *testing.T) (State, provider.LaneIdentity) {
+	t.Helper()
+	engine, lane := newJournalReadyEngine(t, filepath.Join(t.TempDir(), "provider-chats", "actor.json"))
+	state := engine.Snapshot()
+	const rows = 4_096
+	for len(state.Ledger) < rows {
+		sequence := len(state.Ledger) + 1
+		state.Ledger = append(state.Ledger, LedgerEvent{
+			EventID: fmt.Sprintf("history-event-%d", sequence), MessageID: fmt.Sprintf("history-message-%d", sequence),
+			Sequence: uint64(sequence), Role: "assistant", Status: "done",
+			OperationID: provider.OperationID(fmt.Sprintf("history-operation-%d", sequence)), ContextExcluded: true,
+			Timeline: []TimelineEntry{},
+		})
+	}
+	if err := state.Validate(); err != nil {
+		t.Fatalf("large journal-ready state: %v", err)
+	}
+	return state, lane
+}
+
+func TestJournaledProviderEventsMatchReducerWithoutCloningHistory(t *testing.T) {
+	base, lane := largeJournalReadyState(t)
+	events := []provider.Event{
+		{Kind: provider.EventAssistantChunk, Assistant: &provider.AssistantEvent{Phase: provider.AssistantPhaseContent, Text: "streamed content", TypedPhase: true}},
+		{Kind: provider.EventAssistantMedia, Media: &provider.AssistantMediaEvent{Attachments: []provider.Attachment{{ID: "assistant-image", MIMEType: "image/png", Ref: "workass-session-image:assistant-image"}}}},
+		{Kind: provider.EventThinkingUpdate, Thinking: &provider.ThinkingEvent{Text: "bounded reasoning"}},
+		{Kind: provider.EventToolUpdate, Tool: &provider.ToolEvent{ToolCallID: "tool-1", Title: "Run tests", Status: "running"}},
+		{Kind: provider.EventPlanUpdate, Plan: &provider.PlanEvent{Entries: []provider.PlanEntry{{ID: "one", Text: "Verify", Status: "in_progress"}}}},
+		{Kind: provider.EventUsageUpdated, Usage: &provider.UsageEvent{Used: 10, Size: 100, InputTokens: 7, OutputTokens: 3}},
+		{Kind: provider.EventCompactionStarted, Compaction: &provider.CompactionEvent{Coverage: 1}},
+		{Kind: provider.EventCompactionCheckpoint, Compaction: &provider.CompactionEvent{CheckpointID: "checkpoint", Coverage: 1, Digest: "digest"}},
+		{Kind: provider.EventBackgroundWork, Background: &provider.BackgroundEvent{WorkID: "work-1", Status: "running", Title: "Background check"}},
+	}
+	for _, event := range events {
+		event := event
+		t.Run(string(event.Kind), func(t *testing.T) {
+			event.Identity = provider.EventIdentity{
+				ChatID: "journal-chat", LaneID: lane.ID, OperationID: "journal-turn",
+				TurnID: "journal-native-turn", Sequence: 1, ObservedAtUnixMS: 1_786_446_010_001,
+			}
+			command := ProviderEventReceived{ConnectionGeneration: 1, Event: event}
+			expected, effects, err := Reduce(base, command)
+			if err != nil {
+				t.Fatalf("reference reducer: %v", err)
+			}
+			if len(effects) != 0 {
+				t.Fatalf("journalable event produced effects: %#v", effects)
+			}
+			before, err := json.Marshal(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			actual, err := reduceJournaledProviderEvent(base, command)
+			if err != nil {
+				t.Fatalf("journaled reducer: %v", err)
+			}
+			after, err := json.Marshal(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("journaled reducer mutated the installed actor state")
+			}
+			if !reflect.DeepEqual(actual, expected) {
+				t.Fatal("journaled reducer diverged from canonical reducer")
+			}
+			if err := actual.Validate(); err != nil {
+				t.Fatalf("journaled transition produced invalid state: %v", err)
+			}
+			if &actual.Ledger[0] != &base.Ledger[0] {
+				t.Fatal("journaled provider event deep-cloned immutable history")
+			}
+		})
+	}
+}
+
+func TestProviderEventJournalFailureDoesNotPublishCopyOnWriteState(t *testing.T) {
+	base, lane := largeJournalReadyState(t)
+	wantErr := errors.New("injected provider journal failure")
+	store := &failingProviderEventStore{err: wantErr}
+	engine := &Engine{state: base, store: store}
+	before, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Apply(journalAssistantEvent(lane, 1, "must remain unpublished")); !errors.Is(err, wantErr) {
+		t.Fatalf("provider journal failure = %v, want %v", err, wantErr)
+	}
+	after, err := json.Marshal(engine.state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("failed provider journal append changed installed actor state")
+	}
+	if store.providerCommits != 1 || store.snapshotCommits != 0 {
+		t.Fatalf("provider commits=%d snapshot commits=%d", store.providerCommits, store.snapshotCommits)
+	}
+}
+
+func TestJournaledSideActivityRejectsUnownedHistoryWithoutMutation(t *testing.T) {
+	base, lane := largeJournalReadyState(t)
+	before, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []provider.Event{
+		{Kind: provider.EventCompactionCheckpoint, Compaction: &provider.CompactionEvent{CheckpointID: "wrong-owner", Coverage: 1, Digest: "digest"}},
+		{Kind: provider.EventBackgroundWork, Background: &provider.BackgroundEvent{WorkID: "wrong-owner", Status: "running"}},
+	} {
+		event.Identity = provider.EventIdentity{
+			ChatID: "journal-chat", LaneID: lane.ID, OperationID: "not-a-real-operation",
+			TurnID: "not-a-real-turn", Sequence: 1, ObservedAtUnixMS: 1_786_446_010_001,
+		}
+		if _, err := reduceJournaledProviderEvent(base, ProviderEventReceived{ConnectionGeneration: 1, Event: event}); err == nil {
+			t.Fatalf("unowned %s event was accepted", event.Kind)
+		}
+	}
+	after, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("rejected side activity mutated the installed actor state")
+	}
 }
 
 func TestProviderEventJournalCommitsChunkWithoutRewritingActorSnapshot(t *testing.T) {

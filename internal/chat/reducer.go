@@ -705,6 +705,141 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 	return next, effects, nil
 }
 
+// reduceJournaledProviderEvent is the bounded in-memory companion to the
+// append-only provider event journal. Engine state is valid when installed;
+// these event kinds are effect-free and validate their typed payload, exact
+// owner, connection generation, and contiguous sequence in reduceProviderEvent.
+// Copying only the fields they can mutate keeps a failed journal append from
+// publishing partial state without cloning or revalidating the entire ledger
+// for every streamed token.
+func reduceJournaledProviderEvent(current State, command ProviderEventReceived) (State, error) {
+	if !journalableProviderEvent(command.Event.Kind) {
+		return current, errors.New("provider event is not eligible for the durable stream journal")
+	}
+	if current.Deleted {
+		return current, errors.New("chat was durably deleted")
+	}
+	next := cloneJournaledProviderEventState(current, command.Event.Kind)
+	effects, err := reduceProviderEvent(&next, command)
+	if err != nil {
+		return current, err
+	}
+	if len(effects) != 0 {
+		return current, errors.New("journaled provider event unexpectedly produced external effects")
+	}
+	if err := validateJournaledProviderEventMutation(next, command.Event); err != nil {
+		return current, fmt.Errorf("journaled provider event produced invalid state: %w", err)
+	}
+	next.Revision++
+	return next, nil
+}
+
+func validateJournaledProviderEventMutation(state State, event provider.Event) error {
+	switch event.Kind {
+	case provider.EventThinkingUpdate, provider.EventToolUpdate, provider.EventPlanUpdate:
+		if state.Foreground == nil {
+			return errors.New("provider timeline event lost its foreground owner")
+		}
+		if err := validateTimeline(state.Foreground.Timeline); err != nil {
+			return fmt.Errorf("foreground timeline: %w", err)
+		}
+	case provider.EventCompactionStarted, provider.EventCompactionCheckpoint:
+		if state.Foreground != nil {
+			if err := validateTimeline(state.Foreground.Timeline); err != nil {
+				return fmt.Errorf("foreground timeline: %w", err)
+			}
+		}
+	}
+
+	switch event.Kind {
+	case provider.EventToolUpdate:
+		activity := state.Tools[strings.TrimSpace(event.Tool.ToolCallID)]
+		return validateProviderActivityOwner(state, activity.Owner)
+	case provider.EventPlanUpdate:
+		operationID := provider.NormalizeOperationID(string(event.Identity.OperationID))
+		activity := state.Plans[operationID]
+		if activity.Owner.OperationID != operationID {
+			return errors.New("plan activity operation ownership mismatch")
+		}
+		return validateProviderActivityOwner(state, activity.Owner)
+	case provider.EventUsageUpdated:
+		if _, ok := state.Lanes[event.Identity.LaneID]; !ok {
+			return errors.New("usage activity belongs to an unknown lane")
+		}
+	case provider.EventCompactionStarted, provider.EventCompactionCheckpoint:
+		activity := state.Compactions[event.Identity.LaneID]
+		if activity.Owner.LaneID != event.Identity.LaneID {
+			return errors.New("compaction activity lane ownership mismatch")
+		}
+		return validateProviderActivityOwner(state, activity.Owner)
+	case provider.EventBackgroundWork:
+		activity := state.Background[strings.TrimSpace(event.Background.WorkID)]
+		return validateProviderActivityOwner(state, activity.Owner)
+	}
+	return nil
+}
+
+func cloneJournaledProviderEventState(current State, kind provider.EventKind) State {
+	next := current
+	next.Lanes = make(map[provider.LaneID]LaneState, len(current.Lanes))
+	for laneID, lane := range current.Lanes {
+		next.Lanes[laneID] = lane
+	}
+
+	cloneForeground := func(cloneEvents bool) {
+		if current.Foreground == nil {
+			return
+		}
+		foreground := *current.Foreground
+		if cloneEvents {
+			foreground.Timeline = cloneTimeline(current.Foreground.Timeline)
+		}
+		next.Foreground = &foreground
+	}
+	copyTools := func() {
+		next.Tools = make(map[string]ToolState, len(current.Tools))
+		for id, value := range current.Tools {
+			next.Tools[id] = value
+		}
+	}
+	copyPlans := func() {
+		next.Plans = make(map[provider.OperationID]PlanState, len(current.Plans))
+		for operationID, value := range current.Plans {
+			next.Plans[operationID] = value
+		}
+	}
+
+	switch kind {
+	case provider.EventAssistantChunk, provider.EventAssistantMedia:
+		cloneForeground(false)
+	case provider.EventThinkingUpdate:
+		cloneForeground(true)
+	case provider.EventToolUpdate:
+		cloneForeground(true)
+		copyTools()
+	case provider.EventPlanUpdate:
+		cloneForeground(true)
+		copyPlans()
+	case provider.EventUsageUpdated:
+		next.Usage = make(map[provider.LaneID]provider.UsageEvent, len(current.Usage))
+		for laneID, value := range current.Usage {
+			next.Usage[laneID] = value
+		}
+	case provider.EventCompactionStarted, provider.EventCompactionCheckpoint:
+		cloneForeground(true)
+		next.Compactions = make(map[provider.LaneID]CompactionState, len(current.Compactions))
+		for laneID, value := range current.Compactions {
+			next.Compactions[laneID] = value
+		}
+	case provider.EventBackgroundWork:
+		next.Background = make(map[string]BackgroundState, len(current.Background))
+		for id, value := range current.Background {
+			next.Background[id] = value
+		}
+	}
+	return next
+}
+
 func reduceInitializeChat(state *State, command InitializeChat) error {
 	if state.Initialized {
 		return errors.New("chat actor is already initialized")
