@@ -12,13 +12,15 @@ import (
 type LanePhase string
 
 const (
-	LaneAbsent      LanePhase = "absent"
-	LaneCreating    LanePhase = "creating"
-	LaneDetached    LanePhase = "detached"
-	LaneResuming    LanePhase = "resuming"
-	LaneReady       LanePhase = "ready"
-	LaneImporting   LanePhase = "importing"
-	LaneRunning     LanePhase = "running"
+	LaneAbsent    LanePhase = "absent"
+	LaneCreating  LanePhase = "creating"
+	LaneDetached  LanePhase = "detached"
+	LaneResuming  LanePhase = "resuming"
+	LaneReady     LanePhase = "ready"
+	LaneImporting LanePhase = "importing"
+	LaneRunning   LanePhase = "running"
+	// LaneReconciling is accepted only while loading actor files written by
+	// older builds. RecoverOutbox immediately converts it to detached/absent.
 	LaneReconciling LanePhase = "reconciling"
 	LaneBlocked     LanePhase = "blocked"
 	LaneBroken      LanePhase = "broken"
@@ -49,8 +51,10 @@ type LedgerEvent struct {
 	TurnTerminal         *bool
 	TurnStartedAt        int64
 	Interrupted          bool
-	RetryPrompt          string
-	Terminal             *provider.TerminalEvent
+	// RetryPrompt is a retired persisted field. Older actor snapshots may still
+	// decode it, but projections never expose it and no new failure populates it.
+	RetryPrompt string
+	Terminal    *provider.TerminalEvent
 	// ContextExcluded marks a visible row copied by an explicit user fork. It
 	// has no child-lane ownership and is never imported into the fresh provider
 	// thread.
@@ -255,6 +259,8 @@ type ForegroundStatus string
 const (
 	ForegroundDispatching ForegroundStatus = "dispatching"
 	ForegroundRunning     ForegroundStatus = "running"
+	// These values are legacy decode compatibility. New transitions never
+	// produce them; startup immediately terminalizes their old foreground turn.
 	ForegroundReconciling ForegroundStatus = "reconciling"
 	ForegroundUncertain   ForegroundStatus = "uncertain"
 )
@@ -584,10 +590,12 @@ const (
 type EffectKind string
 
 const (
-	EffectCreateLane        EffectKind = "create_lane"
-	EffectResumeLane        EffectKind = "resume_lane"
-	EffectImportContext     EffectKind = "import_context"
-	EffectStartTurn         EffectKind = "start_turn"
+	EffectCreateLane    EffectKind = "create_lane"
+	EffectResumeLane    EffectKind = "resume_lane"
+	EffectImportContext EffectKind = "import_context"
+	EffectStartTurn     EffectKind = "start_turn"
+	// EffectReconcileTurn is a retired persisted value. It has no executable
+	// effect type and RecoverOutbox seals any unfinished entry as failed.
 	EffectReconcileTurn     EffectKind = "reconcile_turn"
 	EffectSteerTurn         EffectKind = "steer_turn"
 	EffectCancelTurn        EffectKind = "cancel_turn"
@@ -600,8 +608,9 @@ const (
 )
 
 // OutboxEntry is the durable write-ahead record for one external effect. An
-// executor must claim Pending before making a provider call. On restart,
-// Dispatched delivery/import effects reconcile; they are never blindly resent.
+// executor must claim Pending before making a provider call. On restart, a
+// dispatched provider prompt is terminalized as interrupted and never resent;
+// independently idempotent non-turn effects retain their own policies.
 type OutboxEntry struct {
 	ID                          string
 	Kind                        EffectKind

@@ -208,18 +208,49 @@ func opencodeKnownPaths() []string {
 
 func ompKnownPaths() []string {
 	home, _ := os.UserHomeDir()
+	return ompKnownPathsForPlatform(
+		runtime.GOOS,
+		home,
+		os.Getenv("LOCALAPPDATA"),
+		os.Getenv("APPDATA"),
+		os.Getenv("PI_INSTALL_DIR"),
+	)
+}
+
+func ompKnownPathsForPlatform(goos, home, localAppData, appData, installDir string) []string {
 	var known []string
-	if home != "" {
-		if runtime.GOOS == "windows" {
-			known = append(known, filepath.Join(home, "AppData", "Local", "omp", "omp.exe"))
+	if installDir = strings.TrimSpace(installDir); installDir != "" {
+		known = append(known, filepath.Join(installDir, "omp.exe"))
+	}
+	if home = strings.TrimSpace(home); home != "" {
+		if goos == "windows" {
+			known = append(known,
+				filepath.Join(home, "AppData", "Local", "omp", "omp.exe"),
+				filepath.Join(home, ".bun", "bin", "omp.exe"),
+				filepath.Join(home, ".bun", "bin", "omp.cmd"),
+			)
 		} else {
 			known = append(known, filepath.Join(home, ".local", "bin", "omp"))
 		}
 	}
-	if runtime.GOOS != "windows" {
+	if goos == "windows" {
+		if localAppData = strings.TrimSpace(localAppData); localAppData != "" {
+			known = append(known,
+				filepath.Join(localAppData, "omp", "omp.exe"),
+				filepath.Join(localAppData, "Microsoft", "WinGet", "Links", "omp.exe"),
+			)
+		}
+		if appData = strings.TrimSpace(appData); appData != "" {
+			known = append(known,
+				filepath.Join(appData, "npm", "omp.exe"),
+				filepath.Join(appData, "npm", "omp.cmd"),
+			)
+		}
+	}
+	if goos != "windows" {
 		known = append(known, "/opt/homebrew/bin/omp", "/usr/local/bin/omp")
 	}
-	return known
+	return dedupeStrings(known)
 }
 
 var providerRegistrationOrder = []string{

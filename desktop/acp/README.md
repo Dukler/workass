@@ -156,17 +156,15 @@ reads vendor OAuth files, never sends credentials through its bridge, and treats
 either extension as optional: failure keeps the last transient snapshot and
 does not block session startup or prompting.
 
-## Provider terminal reconciliation
+## Provider terminal ownership
 
-The native Codex host advertises `_meta.workassTurnReconcileRequest` and
-implements `_workass/turn/reconcile`. After a quiet interval during an
-outstanding `session/prompt`, Workass asks the host to read the authoritative
-Codex thread. A completed/interrupted native turn reconciles a lost
-`turn/completed` notification and releases the original ACP prompt. Silence by
-itself never completes a turn; an explicitly active native turn keeps running.
-Repeated liveness failures or a terminal turn whose ACP prompt still cannot
-return recycle the wedged bridge, so the UI cannot remain in AI-turn mode
-forever.
+The ACP harness owns turn completion. Workass sends `session/prompt` once and
+uses that request's ordinary events and result; it has no terminal polling,
+custom turn-readback method, bridge-recycle watchdog, or prompt replay. If the
+transport closes first, Workass ends the visible row as interrupted, keeps any
+partial output, and retains the exact native session id for the next distinct
+prompt to resume. Explicit Stop is forwarded once and is not replayed after a
+daemon restart.
 
 ## Tool-result images
 
@@ -209,8 +207,8 @@ Special prompt markers:
   open and omits the terminal notification so PID/output-file reconciliation
   remains the only running-state authority.
 - `[mock:crash]` exits the mock process mid-turn after a thought update, exercising daemon crash recovery.
-- `[mock:lost-terminal]` streams a complete response, settles its tool/plan, and withholds the original `session/prompt` response until `_workass/turn/reconcile` confirms it.
-- `[mock:lost-terminal-unreleased]` reports a terminal provider turn but deliberately refuses to release the ACP prompt, exercising the bounded bridge-recycle fallback.
+- `[mock:lost-terminal]` streams a complete response and then leaves the original `session/prompt` pending until explicit cancellation, proving Workass does not invent completion or poll a second terminal source.
+- `[mock:lost-terminal-unreleased]` is the same permanently pending harness boundary under the older fixture name; Workass neither recycles the bridge nor resends the prompt.
 - `[mock:active-without-terminal]` goes quiet while still reporting an authoritative active turn, proving that silence is never guessed to mean completion.
 
 Run the handshake probe from the repository root:
@@ -291,6 +289,11 @@ only detects the executable and launches its standard ACP entry point:
 ```sh
 node desktop/scripts/probe-acp.mjs omp acp
 ```
+
+On Windows, detection covers OMP's native `%LOCALAPPDATA%\omp\omp.exe` install plus the common
+Bun and npm global-bin locations. When the resolved executable is an `omp.cmd` shim, Workass runs
+that shim through the hidden managed `cmd.exe` boundary; it never asks `CreateProcess` to execute
+the text launcher directly.
 
 Expected result: ACP protocol version `1` and agent name `oh-my-pi`. If OMP has no usable model,
 run `omp` and use `/login`; Workass never reads or stores OMP credentials.

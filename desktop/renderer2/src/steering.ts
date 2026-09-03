@@ -34,7 +34,6 @@ export interface ChronologicalMessageLike extends PendingSteerLike {
   steerContinuationFor?: string;
   permission?: unknown;
   interrupted?: boolean;
-  retryPrompt?: string;
 }
 
 function isEmptyAssistant(message: ChronologicalMessageLike): boolean {
@@ -140,7 +139,6 @@ function commitOneStagedSteer<T extends ChronologicalMessageLike>(
     active.at = null;
     active.permission = undefined;
     active.interrupted = false;
-    active.retryPrompt = undefined;
   }
 
   delete steer.steerBoundary;
@@ -251,7 +249,6 @@ export function insertChronologicalSteer<T extends ChronologicalMessageLike>(
     active.at = null;
     active.permission = undefined;
     active.interrupted = false;
-    active.retryPrompt = undefined;
   }
 
   steer.status = 'pending';
@@ -309,7 +306,6 @@ export function rejectChronologicalSteer<T extends ChronologicalMessageLike>(mes
     left.turnTerminal = right.turnTerminal;
     left.permission = right.permission;
     left.interrupted = right.interrupted;
-    left.retryPrompt = right.retryPrompt;
     messages.splice(index, 1);
   }
   return steer;

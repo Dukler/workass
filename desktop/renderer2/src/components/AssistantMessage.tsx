@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useSyncExternalStore } from 'react';
 import type { MessageImage, Msg, ThinkingEvent, TimelineEvent } from '../store/types';
-import { store, useApp, useMsgVersion, useConnStatus, useClock } from '../store/store';
+import { store, useApp, useMsgVersion, useClock } from '../store/store';
 import { parseBlocks } from '../markdown/blocks';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
 import { StepRow, StepWords, ToolGroup, PermCard, CompactionRow, RestoredRow } from './messages';
@@ -68,7 +68,6 @@ function AssistantSliceBody({
   owner,
   terminal,
   turnSeq,
-  connection,
   coalescedSegments,
 }: {
   tabId: string;
@@ -76,7 +75,6 @@ function AssistantSliceBody({
   owner: Msg;
   terminal: boolean;
   turnSeq?: number;
-  connection: ReturnType<typeof useConnStatus>;
   coalescedSegments?: TranscriptTimelineSegment[];
 }) {
   // Thinking is displayed once at the turn tail (or in the live dock), never
@@ -104,8 +102,8 @@ function AssistantSliceBody({
   // single thinking event per message anchored at `at: msg.content.length` from
   // when it first arrived (store.ts), so letting it fall back inline on
   // completion would snap it from the bottom of the turn up above the answer.
-  // A turn cut off by a daemon disconnect: shown as a quiet "sin conexión" row
-  // with a retry, not the generic model-error stamp.
+  // A turn cut off by a daemon disconnect: shown as a quiet "sin conexión" row,
+  // not the generic model-error stamp and never as a resend affordance.
   const interrupted = terminal && msg.status === 'failed' && !!msg.interrupted;
   const showStamp = terminal && (msg.status === 'done' || msg.status === 'failed' || msg.status === 'cancelled') && !interrupted;
   // R4/R5: a completed turn that recorded a checkpoint (changed tracked files)
@@ -140,14 +138,6 @@ function AssistantSliceBody({
           <span className="cftext">
             {msg.content !== '' || msg.events.length > 0 ? 'Interrumpido · conexión perdida' : 'No se pudo enviar · sin conexión'}
           </span>
-          {msg.retryPrompt && (
-            <button
-              className="cfretry"
-              disabled={connection !== 'connected'}
-              title={connection === 'connected' ? 'Reintentar el turno' : 'Sin conexión con el daemon'}
-              onClick={() => void store.retryTurn(tabId, owner.id)}
-            >Reintentar</button>
-          )}
         </div>
       )}
 
@@ -180,7 +170,6 @@ interface AssistantBodyProps {
 
 interface AssistantRowViewProps extends AssistantBodyProps {
   version: number;
-  connection: ReturnType<typeof useConnStatus>;
 }
 
 // Pure versioned view shared by singleton messages and multi-slice turn blocks.
@@ -193,7 +182,6 @@ const AssistantRowView = memo(function AssistantRowView({
   msg,
   turnSeq,
   coalescedSegments,
-  connection,
 }: AssistantRowViewProps) {
   return (
     <AssistantSliceBody
@@ -202,7 +190,6 @@ const AssistantRowView = memo(function AssistantRowView({
       owner={msg}
       terminal={msg.turnTerminal !== false}
       turnSeq={msg.turnTerminal === false ? undefined : turnSeq}
-      connection={connection}
       coalescedSegments={coalescedSegments}
     />
   );
@@ -211,23 +198,18 @@ const AssistantRowView = memo(function AssistantRowView({
   && a.msg === b.msg
   && a.version === b.version
   && a.turnSeq === b.turnSeq
-  && a.connection === b.connection
   && a.coalescedSegments === b.coalescedSegments
 ));
 
 function AssistantBody({ tabId, msg, turnSeq, coalescedSegments }: AssistantBodyProps) {
   // Subscribe to this canonical message's topic; token streams bump only this.
   const version = useMsgVersion(msg.id);
-  // Only re-renders on the rare connection transition (dedicated topic), so the
-  // Reintentar affordance can enable/disable live without APP-bump coupling.
-  const connection = useConnStatus();
   return (
     <AssistantRowView
       tabId={tabId}
       msg={msg}
       version={version}
       turnSeq={turnSeq}
-      connection={connection}
       coalescedSegments={coalescedSegments}
     />
   );
@@ -262,7 +244,6 @@ interface AssistantTurnBlockProps {
 export function AssistantTurnBlock({ tabId, messages, turnSeqs }: AssistantTurnBlockProps) {
   const messageIdsKey = messages.map((message) => message.id).join('\0');
   useTurnBlockMessageVersions(messageIdsKey);
-  const connection = useConnStatus();
   const coalesced = buildCoalescedTurnBlockTimelineSegments(messages);
   return (
     <>
@@ -273,7 +254,6 @@ export function AssistantTurnBlock({ tabId, messages, turnSeqs }: AssistantTurnB
             msg={msg}
             version={store.version(`msg:${msg.id}`)}
             turnSeq={turnSeqs[index]}
-            connection={connection}
             coalescedSegments={coalesced[index]}
           />
         </div>

@@ -70,3 +70,21 @@ func TestWindowsManagedProcessBoundaryOwnsEveryPortableCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsCommandScriptInvocationUsesHiddenShellBoundary(t *testing.T) {
+	command, args := windowsCommandScriptInvocation(
+		`C:\\Users\\Example User\\AppData\\Roaming\\npm\\omp.cmd`,
+		[]string{"acp"},
+		`C:\\Windows\\System32\\cmd.exe`,
+	)
+	if command != `C:\\Windows\\System32\\cmd.exe` {
+		t.Fatalf("command shell = %q", command)
+	}
+	want := []string{
+		"/d", "/s", "/c",
+		`call "C:\\Users\\Example User\\AppData\\Roaming\\npm\\omp.cmd" "acp"`,
+	}
+	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("Windows command-script argv = %#v, want %#v", args, want)
+	}
+}

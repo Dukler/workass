@@ -302,69 +302,6 @@ class CodexSession {
 
   modelRow() { return modelCatalog.find((row) => row.id === this.model) || modelCatalog[0]; }
 
-  operationInTurns(turns, clientId) {
-    const rows = Array.isArray(turns) ? turns : [];
-    for (let index = rows.length - 1; index >= 0; index -= 1) {
-      const turn = rows[index];
-      const item = (Array.isArray(turn?.items) ? turn.items : [])
-        .find((candidate) => candidate?.type === 'userMessage' && candidate.clientId === clientId);
-      if (item) return turn;
-    }
-    return null;
-  }
-
-  operationReadback(turn) {
-    if (!turn) return { found: false, consumed: false, status: 'absent', terminal: false };
-    const status = String(turn.status || 'unknown');
-    return {
-      found: true, consumed: true, turnId: String(turn.id || ''), status,
-      terminal: ['completed', 'failed', 'interrupted', 'cancelled', 'canceled'].includes(status),
-    };
-  }
-
-  itemsListUnavailable(error) {
-    const message = String(error?.message || '');
-    return Number(error?.code) === -32601
-      || /thread\/items\/list.*(?:not supported|not found|unknown method)/i.test(message);
-  }
-
-  async reconcileOperation(clientUserMessageId) {
-    const clientId = String(clientUserMessageId || '').trim();
-    if (!clientId) throw new Error('operation reconciliation requires clientUserMessageId');
-    if (this.activePromptClientId === clientId && this.activeTurnId) {
-      return {
-        found: true, consumed: true, turnId: this.activeTurnId, status: this.turnStatus,
-        terminal: ['completed', 'failed', 'interrupted'].includes(this.turnStatus),
-      };
-    }
-    let matched = null;
-    try {
-      let cursor = null;
-      for (let page = 0; page < 8 && !matched; page += 1) {
-        const response = await app.request('thread/items/list', {
-          threadId: this.threadId, cursor, limit: 256, sortDirection: 'desc',
-        });
-        matched = (Array.isArray(response?.data) ? response.data : [])
-          .find((entry) => entry?.item?.type === 'userMessage' && entry.item.clientId === clientId) || null;
-        cursor = response?.nextCursor || null;
-        if (!cursor) break;
-      }
-    } catch (error) {
-      if (!this.itemsListUnavailable(error)) throw error;
-      // Codex 0.148 publishes thread/items/list in its generated schema while
-      // the live app-server still rejects the method as unsupported. The
-      // official thread/read response carries the current turn ledger and the
-      // stable user-message clientId, which is sufficient for this exact
-      // operation readback without sampling or replaying the prompt.
-      const response = await app.request('thread/read', { threadId: this.threadId, includeTurns: true });
-      return this.operationReadback(this.operationInTurns(response?.thread?.turns, clientId));
-    }
-    if (!matched) return { found: false, consumed: false, status: 'absent', terminal: false };
-    const response = await app.request('thread/read', { threadId: this.threadId, includeTurns: true });
-    const turn = (response?.thread?.turns || []).find((candidate) => candidate.id === matched.turnId);
-    return this.operationReadback(turn || { id: matched.turnId, status: 'unknown' });
-  }
-
   startPrompt(blocks, clientUserMessageId = '') {
     if (this.activePrompt) throw new Error('A Codex turn is already running');
     this.turnStatus = 'starting';
@@ -934,7 +871,7 @@ async function handleWorkassRequest(message) {
       _meta: {
         workassCodexSteerRequest: true, workassCodexSteerReceipt: true, workassCodexSteerRaceV1: true,
         workassCodexRateLimitsRequest: true, workassCodexRateLimitResetRequest: true,
-		workassTurnReconcileRequest: true, workassStableTurnInputV1: true, workassOperationReadbackV1: true,
+		workassStableTurnInputV1: true,
       },
     });
     return;
@@ -967,21 +904,6 @@ async function handleWorkassRequest(message) {
     });
     const rateLimits = await app.request('account/rateLimits/read', {});
     respond(id, { ...outcome, rateLimits });
-    return;
-  }
-  if (method === '_workass/turn/reconcile') {
-	if (params.clientUserMessageId) {
-	  respond(id, await session.reconcileOperation(params.clientUserMessageId));
-	  return;
-	}
-    if (session.activeTurnId) {
-      const response = await app.request('thread/read', { threadId: session.threadId, includeTurns: true });
-      const turn = (response.thread?.turns || []).find((candidate) => candidate.id === session.activeTurnId);
-      const status = turn?.status || session.turnStatus;
-      const terminal = ['completed', 'failed', 'interrupted'].includes(status);
-      if (terminal && turn) session.complete(turn);
-      respond(id, { status, terminal, reconciled: terminal });
-    } else respond(id, { status: session.turnStatus, terminal: ['completed', 'failed', 'interrupted'].includes(session.turnStatus), reconciled: false });
     return;
   }
   if (method === 'session/close') {

@@ -1113,12 +1113,20 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 	if !liveSession && !opts.ProviderLaneManaged {
 		return nil, errors.New("La conexión ACP no está activa; el actor durable debe reanudar exactamente el hilo nativo antes de enviar.")
 	}
-	if _, running := m.RunningJobForChat(opts.TabID, opts.ChatID); running {
-		return nil, ErrChatBusy
+	if !opts.ProviderLaneManaged {
+		if _, running := m.RunningJobForChat(opts.TabID, opts.ChatID); running {
+			return nil, ErrChatBusy
+		}
+		if existing := bridge.jobForSession(opts.SessionID); liveSession && existing != nil && existing.Status == "running" {
+			return nil, ErrChatBusy
+		}
 	}
-	if existing := bridge.jobForSession(opts.SessionID); liveSession && existing != nil && existing.Status == "running" {
-		return nil, ErrChatBusy
-	}
+	// Actor-managed chats already serialize foreground ownership durably. Do not
+	// impose a second Manager-owned busy verdict: the terminal event may release
+	// the actor before the old Job wrapper finishes its defer cleanup, and a host
+	// loss may leave that wrapper on a closed bridge while the saved session is
+	// being attached to a new one. Bridge.promptMu remains the ACP transport's
+	// required per-process session/prompt serialization boundary.
 	// Switching providers is a lane transaction, not a session replacement.
 	// Until the lane coordinator can create/restore the target provider lane and
 	// verify a non-sampling context import, fail before detaching the active lane.
@@ -1297,18 +1305,27 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		m.rememberFinishedJobLocked(job.ID)
 		delete(m.jobs, job.ID)
 		m.mu.Unlock()
-		m.refreshChatEnvAfterJob(context.Background(), job)
-		actorRecovery := job.actorRecoveryPending.Load()
-		if job.Status == "done" && !actorRecovery {
+		m.classifyDispositionForJob(job)
+		// Preserve only the tiny in-memory checkpoint input before terminal
+		// publication. The actor is allowed to clear its foreground state as soon
+		// as it observes end, while the filesystem-heavy scan runs afterwards.
+		envSnapshot, hasEnvSnapshot := m.chatEnvSnapshot(job.SessionID, job.ChatID, job.TabID, job.ID)
+		if job.Status == "done" {
 			m.maybeCompactAfterTurn(context.Background(), activeBridge, job)
 		}
-		if !actorRecovery {
-			m.classifyDispositionForJob(job)
-			m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})
-		}
+		// Release the provider process's foreground pin before publishing the
+		// terminal actor event. A terminal event can immediately drive the next
+		// queued turn; leaving the old wrapper attached until after filesystem work
+		// made that next prompt wait behind a turn the harness had already ended.
 		activeBridge.clearJobForSession(job.SessionID, job)
-		if !actorRecovery {
-			m.notifyJobEnd(job.TabID, job.ChatID)
+		// The provider harness's session/prompt result is the terminal clock.
+		// Publish it before filesystem snapshots/checkpoints: those can take
+		// seconds on a large or remote workspace and must never keep the visible
+		// turn running after the harness has already stopped.
+		m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})
+		m.notifyJobEnd(job.TabID, job.ChatID)
+		if hasEnvSnapshot {
+			m.refreshChatEnvAfterJobSnapshot(context.Background(), job, envSnapshot)
 		}
 	}()
 	// Stop may win after the actor committed the deterministic native id but
@@ -1331,9 +1348,9 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	}
 	if !activeBridge.hasLiveSession(job.SessionID) {
 		job.CrashInterrupted = true
+		job.Interrupted = true
 		job.StopReason = "engine-crash"
 		if opts.ProviderLaneManaged {
-			job.actorRecoveryPending.Store(true)
 			if lane := m.providerLaneForSessionID(job.SessionID); lane != nil {
 				lane.attachmentClosed()
 			}
@@ -1419,6 +1436,16 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 			}
 		}
 		if job.CrashInterrupted {
+			job.Interrupted = true
+			if opts.ProviderLaneManaged {
+				// Close the actor attachment before publishing the manager's frozen
+				// job receipt. attachmentClosed is idempotent with Bridge.Close and
+				// waits if that teardown already won, so the durable HostLost terminal
+				// always precedes the projection-only job:end.
+				if lane := m.providerLaneForJob(job.ID); lane != nil {
+					lane.attachmentClosed()
+				}
+			}
 			if job.StopReason == "" {
 				job.StopReason = "engine-crash"
 			}
@@ -1848,6 +1875,19 @@ func (m *Manager) jobCancelled(job *Job) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return job.cancelled
+}
+
+// jobAcceptsProviderEvents proves that a bridge notification still belongs to
+// a live, actor-owned manager job. The manager deletes a job before publishing
+// its terminal event, so this also fences notifications that race the narrow
+// end/clearJobForSession window.
+func (m *Manager) jobAcceptsProviderEvents(job *Job) bool {
+	if m == nil || job == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.jobs[job.ID] == job && !job.admitting && job.Status == "running"
 }
 
 func (m *Manager) PermissionDecide(id, optionID string) bool {
@@ -3100,10 +3140,6 @@ func (b *Bridge) promptSystem(ctx context.Context, sessionID, promptText string)
 	return b.promptForJob(ctx, sessionID, job, "", promptText, nil)
 }
 
-func (b *Bridge) supportsPromptReconciliation() bool {
-	return b.hasProviderCapability("workassTurnReconcileRequest")
-}
-
 func boolMapField(m map[string]any, key string) bool {
 	if m == nil {
 		return false
@@ -3112,96 +3148,17 @@ func boolMapField(m map[string]any, key string) bool {
 	return ok && v
 }
 
-const promptReconcileFailureLimit = 3
-
-// requestPrompt waits for the ordinary ACP session/prompt response while a
-// capability-gated watchdog asks the provider adapter to reconcile its native
-// turn state after a quiet interval. Silence is never treated as completion:
-// the adapter must consult its authoritative provider thread and report a
-// terminal state. A terminal native turn should release the original prompt;
-// if it does not, or the advertised liveness request repeatedly fails, the
-// wedged bridge is recycled so the visible job cannot remain running forever.
-func (b *Bridge) requestPrompt(ctx context.Context, sessionID string, job *Job, params map[string]any) (map[string]any, error) {
+// requestPrompt is deliberately a transparent ACP request. The provider
+// harness owns turn completion and returns the terminal session/prompt reply;
+// Workass neither polls native turn state nor recycles a live harness based on
+// a second, competing notion of whether the turn ended.
+func (b *Bridge) requestPrompt(ctx context.Context, job *Job, params map[string]any) (map[string]any, error) {
 	afterWrite := func() {
 		if job != nil {
 			job.markInputDispatched()
 		}
 	}
-	if !b.supportsPromptReconciliation() {
-		return b.requestWithDispatch(ctx, "session/prompt", params, 0, afterWrite)
-	}
-
-	promptCtx, cancelPrompt := context.WithCancel(ctx)
-	defer cancelPrompt()
-	promptResult := make(chan rpcResult, 1)
-	go func() {
-		value, err := b.requestWithDispatch(promptCtx, "session/prompt", params, 0, afterWrite)
-		promptResult <- rpcResult{value: value, err: err}
-	}()
-
-	ticker := time.NewTicker(b.opts.PromptReconcileInterval)
-	defer ticker.Stop()
-	var terminalTimer *time.Timer
-	var terminalDeadline <-chan time.Time
-	defer func() {
-		if terminalTimer != nil {
-			terminalTimer.Stop()
-		}
-	}()
-	failedChecks := 0
-
-	closeWedgedBridge := func(reason string) {
-		cause := errors.New(reason)
-		b.opts.Logf("ACP prompt reconciliation recycled wedged bridge", map[string]any{
-			"providerId": b.ProviderID(), "reason": reason,
-		})
-		b.manager.handleUnexpectedBridgeExit(b, cause)
-	}
-
-	for {
-		select {
-		case result := <-promptResult:
-			return result.value, result.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-terminalDeadline:
-			terminalDeadline = nil
-			closeWedgedBridge("provider confirmed a terminal turn but the ACP prompt did not return")
-		case <-ticker.C:
-			if job != nil && (job.waitingPermission.Load() || job.inactiveFor(time.Now()) < b.opts.PromptReconcileInterval) {
-				failedChecks = 0
-				continue
-			}
-			checkCtx, cancelCheck := context.WithTimeout(ctx, b.opts.PromptReconcileTimeout)
-			status, err := b.request(checkCtx, "_workass/turn/reconcile", map[string]any{
-				"sessionId": sessionID,
-			}, b.opts.PromptReconcileTimeout)
-			cancelCheck()
-			if err != nil {
-				if job != nil && job.inactiveFor(time.Now()) < b.opts.PromptReconcileInterval {
-					failedChecks = 0
-					continue
-				}
-				failedChecks++
-				b.opts.Logf("ACP prompt reconciliation check failed", map[string]any{
-					"providerId": b.ProviderID(), "attempt": failedChecks, "error": err.Error(),
-				})
-				if failedChecks >= promptReconcileFailureLimit {
-					closeWedgedBridge("provider turn status was unavailable after repeated reconciliation checks")
-				}
-				continue
-			}
-			failedChecks = 0
-			terminal, _ := status["terminal"].(bool)
-			if terminal && terminalTimer == nil {
-				terminalTimer = time.NewTimer(b.opts.PromptTerminalGrace)
-				terminalDeadline = terminalTimer.C
-				b.opts.Logf("ACP prompt terminal state reconciled", map[string]any{
-					"providerId": b.ProviderID(), "status": asString(status["status"]),
-				})
-			}
-		}
-	}
+	return b.requestWithDispatch(ctx, "session/prompt", params, 0, afterWrite)
 }
 
 func (b *Bridge) Steer(sessionID, promptText string, images []any, clientUserMessageID string) map[string]any {
@@ -3243,10 +3200,6 @@ func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, o
 	if promptErr != nil {
 		return PromptResult{}, promptErr
 	}
-	dispatch, dispatchErr := b.manager.prepareNativeTurn(job, operationID, prompt)
-	if dispatchErr != nil {
-		return PromptResult{}, dispatchErr
-	}
 	params := map[string]any{
 		"sessionId": sessionID,
 		"prompt":    prompt,
@@ -3254,7 +3207,7 @@ func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, o
 	if operationID = strings.TrimSpace(operationID); operationID != "" {
 		params["clientUserMessageId"] = operationID
 	}
-	res, err := b.requestPrompt(ctx, sessionID, job, params)
+	res, err := b.requestPrompt(ctx, job, params)
 	if directJob != nil {
 		b.clearJobForSession(sessionID, directJob)
 	}
@@ -3270,9 +3223,6 @@ func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, o
 		return PromptResult{}, err
 	}
 	if err := b.acknowledgeStandardACPInput(job, sessionID); err != nil {
-		return PromptResult{}, err
-	}
-	if err := b.manager.finishNativeTurn(job, dispatch, res); err != nil {
 		return PromptResult{}, err
 	}
 	b.manager.recordPlanUsageCapture(sessionID, b.ProviderID(), res)

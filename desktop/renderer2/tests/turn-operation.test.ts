@@ -58,72 +58,66 @@ function possibleDeliveryError(): Error & { mayHaveBeenAccepted: true } {
   return error;
 }
 
-test('retryTurn reuses the original job:start OperationID and exact message pair', async () => {
+test('a failed start is never resent and the next prompt gets a distinct operation', async () => {
   const calls: Array<Record<string, unknown>> = [];
   let attempts = 0;
   const previousWindow = (globalThis as any).window;
   try {
-    const subject = setup(chat('tab-turn-retry'), async (opts: Record<string, unknown>) => {
+    const subject = setup(chat('tab-turn-no-retry'), async (opts: Record<string, unknown>) => {
       calls.push({ ...opts });
       attempts += 1;
       return attempts === 1 ? undefined : { id: 'job-retried' };
     });
-    const owner = subject.chat('tab-turn-retry');
+    const owner = subject.chat('tab-turn-no-retry');
     owner.messages.push(
       { id: 'prior-user', role: 'user', content: 'earlier prompt', status: 'done', at: '2026-08-12T00:00:00Z', events: [] },
       { id: 'prior-assistant', role: 'assistant', content: 'earlier answer', status: 'done', at: '2026-08-12T00:00:01Z', events: [] },
     );
 
-    assert.equal(await subject._send(owner, 'retry this'), false);
+    assert.equal(await subject._send(owner, 'first distinct prompt'), false);
     const failed = [...owner.messages].reverse().find((message: any) => message.role === 'assistant');
-    assert.ok(failed?.retryPrompt);
-    const userID = [...owner.messages].reverse().find((message: any) => message.role === 'user')?.id;
-    const assistantID = failed.id;
+    assert.equal((failed as Record<string, unknown> | undefined)?.retryPrompt, undefined);
+    const firstOperationID = calls[0].operationId;
+    const firstAssistantID = failed.id;
 
-    await subject.retryTurn(owner.id, assistantID);
+    assert.equal(await subject._send(owner, 'second distinct prompt'), true);
     assert.equal(calls.length, 2);
     assert.equal(calls[0].tabId, owner.id);
     assert.equal(calls[0].chatId, owner.chatId);
     assert.equal(calls[1].tabId, owner.id);
     assert.equal(calls[1].chatId, owner.chatId);
-    assert.equal(calls[1].operationId, calls[0].operationId);
-    assert.equal(calls[1].operationId, userID);
-    assert.equal(calls[1].userMessageId, userID);
-    assert.equal(calls[1].assistantMessageId, assistantID);
+    assert.notEqual(calls[1].operationId, firstOperationID);
+    assert.notEqual(calls[1].assistantMessageId, firstAssistantID);
     assert.equal(Object.hasOwn(calls[0], 'history'), false, 'the actor owns provider history');
-    assert.equal(Object.hasOwn(calls[1], 'history'), false, 'a retry must not replay renderer transcript state');
+    assert.equal(Object.hasOwn(calls[1], 'history'), false, 'a later prompt must not replay renderer transcript state');
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
   }
 });
 
-test('a queued head reuses its operation and assistant identities after a lost job:start reply', async () => {
+test('a queued head is sealed after a failed job:start and is never sent again', async () => {
   const calls: Array<Record<string, unknown>> = [];
-  let attempts = 0;
   const previousWindow = (globalThis as any).window;
   try {
-    const owner = chat('tab-queued-turn-retry');
-    owner.queue = [{ id: 'queue-head-retry', text: 'queued once' }];
+    const owner = chat('tab-queued-turn-no-retry');
+    owner.queue = [{ id: 'queue-head-no-retry', text: 'queued once' }];
     const subject = setup(owner, async (opts: Record<string, unknown>) => {
       calls.push({ ...opts });
-      attempts += 1;
-      return attempts === 1 ? undefined : { id: 'job-queued-retried' };
+      return undefined;
     });
 
     await subject.flushNextQueued(owner);
     await subject.flushNextQueued(owner);
 
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 1);
     assert.equal(calls[0].tabId, owner.id);
     assert.equal(calls[0].chatId, owner.chatId);
-    assert.equal(calls[1].tabId, owner.id);
-    assert.equal(calls[1].chatId, owner.chatId);
-    assert.equal(calls[1].operationId, calls[0].operationId);
-    assert.equal(calls[0].operationId, 'queue-head-retry');
-    assert.equal(calls[1].userMessageId, calls[0].userMessageId);
-    assert.equal(calls[1].assistantMessageId, calls[0].assistantMessageId);
+    assert.equal(calls[0].operationId, 'queue-head-no-retry');
     assert.equal(owner.queue, undefined);
+    const assistant = owner.messages.find((message) => message.role === 'assistant');
+    assert.equal(assistant?.status, 'failed');
+    assert.equal((assistant as unknown as Record<string, unknown>)?.retryPrompt, undefined);
     assert.equal(new Set(owner.messages.map((message: any) => message.id)).size, owner.messages.length);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
@@ -173,7 +167,7 @@ test('possible remote acceptance keeps one running owner until the late actor ev
     assert.deepEqual(owner.messages.map((message) => message.id), [submitted.userMessageId, submitted.assistantMessageId]);
     const assistant = owner.messages[1];
     assert.equal(assistant.status, 'running');
-    assert.equal(assistant.retryPrompt, undefined);
+    assert.equal((assistant as unknown as Record<string, unknown>).retryPrompt, undefined);
     assert.ok(subject.pendingTurnStarts.has(owner.id));
 
     subject.onJobEvent({

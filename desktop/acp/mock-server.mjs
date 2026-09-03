@@ -15,7 +15,7 @@ const persistentSessionFile = process.env.WORKASS_MOCK_ACP_SESSION_STORE || '';
 const sessionCapability = String(process.env.WORKASS_MOCK_ACP_SESSION_CAPABILITY || (persistentSessionFile ? 'both' : 'none')).toLowerCase();
 const failResume = process.env.WORKASS_MOCK_ACP_FAIL_RESUME === '1';
 const mismatchedAttachmentId = String(process.env.WORKASS_MOCK_ACP_MISMATCHED_ATTACHMENT_ID || '').trim();
-const operationReadback = process.env.WORKASS_MOCK_ACP_OPERATION_READBACK === '1';
+const stableTurnInput = process.env.WORKASS_MOCK_ACP_STABLE_TURN_INPUT === '1';
 const contextImport = process.env.WORKASS_MOCK_ACP_CONTEXT_IMPORT === '1';
 const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z5m8AAAAASUVORK5CYII=';
 // Test fixture for renderer plan-limit development only. This deliberately
@@ -40,23 +40,12 @@ function loadPersistentSessions() {
     const raw = JSON.parse(fs.readFileSync(persistentSessionFile, 'utf8'));
     for (const session of Array.isArray(raw?.sessions) ? raw.sessions : []) {
       if (!session?.id) continue;
-      const operations = session.operations && typeof session.operations === 'object' ? session.operations : {};
-      // A persisted "active" operation belonged to the ACP process that just
-      // disappeared. The replacement process can authoritatively read it back,
-      // but it cannot keep executing that dead process's turn. Model the native
-      // provider receipt as interrupted so Workass can settle the exact input
-      // without replaying it or leaving a permanent spinner.
-      for (const operation of Object.values(operations)) {
-        if (operation && operation.status === 'active') operation.status = 'interrupted';
-      }
       sessions.set(String(session.id), {
         id: String(session.id), cwd: String(session.cwd || process.cwd()),
         model: String(session.model || 'mock-deterministic'), mode: String(session.mode || 'ask'),
         turn: Math.max(0, Number(session.turn || 0)), cancelled: false, steers: [],
-        turnStatus: 'idle', pendingPromptId: null, reconcileRelease: true,
-		operations,
+		turnStatus: 'idle', pendingPromptId: null,
 		contextImports: session.contextImports && typeof session.contextImports === 'object' ? session.contextImports : {},
-		activeOperationId: '',
       });
     }
   } catch {
@@ -71,7 +60,7 @@ function persistSessions() {
     fs.mkdirSync(path.dirname(persistentSessionFile), { recursive: true });
     fs.writeFileSync(tmp, JSON.stringify({
       v: 1,
-      sessions: [...sessions.values()].map(({ cancelled, steers, turnStatus, pendingPromptId, reconcileRelease, ...session }) => session),
+		sessions: [...sessions.values()].map(({ cancelled, steers, turnStatus, pendingPromptId, ...session }) => session),
     }), { mode: 0o600 });
     fs.renameSync(tmp, persistentSessionFile);
   } catch (error) {
@@ -187,14 +176,6 @@ function holdPromptUntilSteer(session) {
   });
 }
 
-function completeOperation(session, status) {
-  const operationId = String(session.activeOperationId || '').trim();
-  if (!operationId || !session.operations?.[operationId]) return;
-  session.operations[operationId].status = status;
-  session.activeOperationId = '';
-  persistSessions();
-}
-
 function usageMeta(inputTokens, outputTokens) {
   return {
     'workass.mock/inputTokens': inputTokens,
@@ -221,19 +202,16 @@ async function runPrompt(id, params) {
   tracePrompt(session.id, text);
   session.turnStatus = 'active';
   session.pendingPromptId = null;
-  session.reconcileRelease = !text.includes('[mock:lost-terminal-unreleased]');
 	const operationId = String(params.clientUserMessageId || '').trim();
-	if (operationReadback && operationId) {
-		const turnId = `mock-native-turn-${session.turn + 1}`;
-		session.operations ||= {};
-		session.operations[operationId] = { turnId, status: 'active', consumed: true };
-		session.activeOperationId = operationId;
-		persistSessions();
-		notify(session.id, { sessionUpdate: '_workass_input_consumed', clientUserMessageId: operationId, turnId });
+	if (stableTurnInput && operationId) {
+		notify(session.id, {
+			sessionUpdate: '_workass_input_consumed',
+			clientUserMessageId: operationId,
+			turnId: `mock-native-turn-${session.turn + 1}`,
+		});
 	}
   if (text.includes('[mock:error]')) {
     session.turnStatus = 'failed';
-	completeOperation(session, 'failed');
     fail(id, -32001, 'Deterministic mock failure.');
     return;
   }
@@ -275,7 +253,6 @@ async function runPrompt(id, params) {
       _meta: usageMeta(Math.max(1, Math.ceil(text.length / 4)), burstChunks * burstChunkBytes),
     });
     session.turnStatus = session.cancelled ? 'interrupted' : 'completed';
-	completeOperation(session, session.turnStatus);
     respond(id, { stopReason: session.cancelled ? 'cancelled' : 'end_turn' });
     return;
   }
@@ -444,22 +421,15 @@ async function runPrompt(id, params) {
     });
   }
 
-  // Reproduce a provider-native turn that completed and streamed every visible
-  // update, while the ACP adapter lost the terminal session/prompt response.
-  // Workass must reconcile this state instead of leaving the chat running
-  // forever. The recovery extension is intentionally added by the fix, not by
-	// this failing fixture step.
+	// Broken-harness fixture: every visible update was streamed but the ACP
+	// session/prompt response is deliberately withheld. Workass must not invent
+	// a second terminal-status protocol; tests end it through explicit cancel.
 	session.turnStatus = session.cancelled ? 'interrupted' : 'completed';
 	if (text.includes('[mock:active-without-terminal]')) {
 		session.turnStatus = 'active';
-		if (session.activeOperationId && session.operations?.[session.activeOperationId]) {
-			session.operations[session.activeOperationId].status = 'active';
-			persistSessions();
-		}
 		session.pendingPromptId = id;
 		return;
 	}
-	completeOperation(session, session.turnStatus);
   if (text.includes('[mock:lost-terminal')) {
     session.pendingPromptId = id;
     return;
@@ -487,8 +457,7 @@ async function handleRequest(message) {
         deterministic: true,
         sessionSteer: true,
         steerNotification: true,
-        workassTurnReconcileRequest: true,
-		...(operationReadback ? { workassStableTurnInputV1: true, workassOperationReadbackV1: true } : {}),
+		...(stableTurnInput ? { workassStableTurnInputV1: true } : {}),
 		...(contextImport ? { workassContextImportV1: {
 		  mode: 'non_sampling', receipt: 'operation_readback_v1', idempotent: true,
 		  maxEvents: 64, maxBytes: 1048576,
@@ -508,10 +477,7 @@ async function handleRequest(message) {
       steers: [],
       turnStatus: 'idle',
       pendingPromptId: null,
-      reconcileRelease: true,
-	  operations: {},
 	  contextImports: {},
-	  activeOperationId: '',
     };
     sessions.set(session.id, session);
     persistSessions();
@@ -532,7 +498,6 @@ async function handleRequest(message) {
     session.steers = [];
     session.turnStatus = 'idle';
     session.pendingPromptId = null;
-    session.reconcileRelease = true;
     persistSessions();
     if (method === 'session/load') {
       // Stable ACP v1 load replays history through session/update. Workass must
@@ -559,32 +524,6 @@ async function handleRequest(message) {
   }
   if (method === 'session/prompt') {
     await runPrompt(id, params);
-    return;
-  }
-  if (method === '_workass/turn/reconcile') {
-    const session = sessions.get(params.sessionId);
-    if (!session) return fail(id, -32000, 'Unknown mock ACP session.');
-	if (params.clientUserMessageId) {
-	  if (!operationReadback) return fail(id, -32601, 'Mock operation readback is not enabled.');
-	  const operation = session.operations?.[String(params.clientUserMessageId)] || null;
-	  if (!operation) {
-		respond(id, { found: false, consumed: false, status: 'absent', terminal: false });
-		return;
-	  }
-	  const terminal = ['completed', 'failed', 'interrupted'].includes(operation.status);
-	  respond(id, { found: true, consumed: Boolean(operation.consumed), turnId: operation.turnId, status: operation.status, terminal });
-	  return;
-	}
-    const status = String(session.turnStatus || 'unknown');
-    const terminal = status === 'completed' || status === 'failed' || status === 'interrupted';
-    let reconciled = false;
-    if (terminal && session.pendingPromptId !== null && session.reconcileRelease !== false) {
-      const promptId = session.pendingPromptId;
-      session.pendingPromptId = null;
-      respond(promptId, { stopReason: status === 'completed' ? 'end_turn' : 'cancelled' });
-      reconciled = true;
-    }
-    respond(id, { status, terminal, reconciled });
     return;
   }
   if (method === '_workass/context/import') {
@@ -643,7 +582,6 @@ function handleNotification(message) {
     if (session) {
       session.cancelled = true;
       session.turnStatus = 'interrupted';
-	  completeOperation(session, 'interrupted');
       releaseHeldPrompt(session);
       if (session.pendingPromptId !== null) {
         const promptId = session.pendingPromptId;
@@ -677,14 +615,6 @@ function acceptLine(line) {
   if (!message.method) return;
   if (!Object.prototype.hasOwnProperty.call(message, 'id')) {
     handleNotification(message);
-    return;
-  }
-  // The real adapters service the capability-gated liveness request while an
-  // async session/prompt handler is still pending. Keep the oracle concurrent
-  // at this one boundary so a long permission or tool wait can authoritatively
-  // report "active" instead of looking like a dead adapter.
-  if (message.method === '_workass/turn/reconcile') {
-    void handleRequest(message).catch((err) => process.stderr.write(`${err.stack || err}\n`));
     return;
   }
   lineQueue = lineQueue.then(() => handleRequest(message)).catch((err) => process.stderr.write(`${err.stack || err}\n`));

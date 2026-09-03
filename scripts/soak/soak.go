@@ -190,13 +190,13 @@ func (r *runner) run(parent context.Context) error {
 			return err
 		}
 		r.stats.inc("cycles.completed", 1)
-		fmt.Printf("SOAK cycle=%d elapsed=%s compactions=%d cancels=%d/%d recoveries=%d\n",
+		fmt.Printf("SOAK cycle=%d elapsed=%s compactions=%d cancels=%d/%d crash_interruptions=%d\n",
 			cycle,
 			time.Since(r.startedAt).Round(time.Second),
 			r.stats.get("compactions"),
 			r.stats.get("cancels.succeeded"),
 			r.stats.get("cancels.started"),
-			r.stats.get("crash.recoveries"),
+			r.stats.get("crash.interruptions"),
 		)
 	}
 	if err := r.failed(); err != nil {
@@ -875,28 +875,12 @@ func (r *runner) scenarioCrashOrNormal(ctx context.Context, chat *chatState, cyc
 	}
 	ctl := r.currentController()
 	mark := ctl.mark()
-	oldSession := chat.session()
 	prompt := fmt.Sprintf("[mock:crash] crash cycle %d", cycle)
 	job, err := r.startJob(ctx, ctl, chat, prompt)
 	if err != nil {
 		return err
 	}
 	jobID := stringField(job, "id")
-	recovered, err := ctl.waitEventSince(ctx, mark, "chat:engine-recovered", 20*time.Second, func(payload map[string]any) bool {
-		return stringField(payload, "oldSessionId") == oldSession || stringField(payload, "tabId") == chat.tabID
-	})
-	if err != nil {
-		return err
-	}
-	newSession := stringField(recovered, "sessionId")
-	if newSession == "" || newSession == oldSession {
-		return fmt.Errorf("bad recovery payload old=%s payload=%#v", oldSession, recovered)
-	}
-	chat.setSession(newSession)
-	chat.mu.Lock()
-	chat.lastCrash = time.Now()
-	chat.mu.Unlock()
-	r.stats.inc("crash.recoveries", 1)
 	end, err := r.waitJobEnd(ctx, ctl, mark, jobID)
 	if err != nil {
 		return err
@@ -904,7 +888,14 @@ func (r *runner) scenarioCrashOrNormal(ctx context.Context, chat *chatState, cyc
 	if stringField(end, "status") != "failed" || stringField(end, "stopReason") != "engine-crash" || end["crashInterrupted"] != true {
 		return fmt.Errorf("crash end = %#v", end)
 	}
-	nextPrompt := fmt.Sprintf("after crash recovery cycle %d", cycle)
+	if err := ctl.expectNoEventSince(ctx, mark, "chat:engine-recovered", 250*time.Millisecond, nil); err != nil {
+		return err
+	}
+	chat.mu.Lock()
+	chat.lastCrash = time.Now()
+	chat.mu.Unlock()
+	r.stats.inc("crash.interruptions", 1)
+	nextPrompt := fmt.Sprintf("after crash interruption cycle %d", cycle)
 	next, err := r.runTurn(ctx, chat, nextPrompt, expectDone, true)
 	if err != nil {
 		return err
@@ -1347,8 +1338,8 @@ func (r *runner) finalAssertions() error {
 	if r.stats.get("cancels.started") != r.stats.get("cancels.succeeded") {
 		checks = append(checks, fmt.Sprintf("cancels started=%d succeeded=%d", r.stats.get("cancels.started"), r.stats.get("cancels.succeeded")))
 	}
-	if r.stats.get("crash.recoveries") <= 0 {
-		checks = append(checks, "no crash recoveries counted")
+	if r.stats.get("crash.interruptions") <= 0 {
+		checks = append(checks, "no crash interruptions counted")
 	}
 	if r.stats.get("replay.once.assertions") <= 0 {
 		checks = append(checks, "no replay-once assertions counted")
@@ -1656,12 +1647,12 @@ func (s *stats) printReport(w io.Writer, passed bool, started time.Time, duratio
 	fmt.Fprintf(w, "\nSOAK REPORT verdict=%s\n", verdict)
 	fmt.Fprintf(w, "duration_config=%s elapsed=%s started=%s\n", duration.Round(time.Second), time.Since(started).Round(time.Second), started.UTC().Format(time.RFC3339))
 	fmt.Fprintf(w, "temp_dir=%s daemon_log=%s\n", tempDir, logFile)
-	fmt.Fprintf(w, "cycles=%d jobs_started=%d jobs_ended=%d compactions=%d crash_recoveries=%d hibernations=%d forks=%d rewinds=%d\n",
+	fmt.Fprintf(w, "cycles=%d jobs_started=%d jobs_ended=%d compactions=%d crash_interruptions=%d hibernations=%d forks=%d rewinds=%d\n",
 		s.counters["cycles.completed"],
 		s.counters["jobs.started"],
 		s.counters["jobs.ended"],
 		s.counters["compactions"],
-		s.counters["crash.recoveries"],
+		s.counters["crash.interruptions"],
 		s.counters["hibernations"],
 		s.counters["forks"],
 		s.counters["checkpoints.rewinds"],

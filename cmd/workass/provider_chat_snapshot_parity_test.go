@@ -102,7 +102,7 @@ func TestActorRendererSessionSnapshotParityAcrossRestart(t *testing.T) {
 		},
 		Delivery: providercontract.DeliveryCapabilities{
 			StableInputIdentity: true, LiveSteer: true, SteerConsumptionReceipt: true,
-			ConsumptionReceipt: true, TurnReadback: true,
+			ConsumptionReceipt: true,
 		},
 		Attachment: &providercontract.LaneAttachmentSnapshot{
 			ConnectionID: "snapshot-connection", CWD: workspace, Agent: "Mock ACP",
@@ -567,7 +567,7 @@ func snapshotParityAssertRichRendererContract(
 	delivery := mapFromAnyMain(liveSession["deliveryCapabilities"])
 	if delivery["stableInputIdentity"] != true || delivery["liveSteer"] != true ||
 		delivery["steerConsumptionReceipt"] != true || delivery["consumptionReceipt"] != true ||
-		delivery["turnReadback"] != true {
+		delivery["turnReadback"] != false {
 		t.Fatalf("delivery capability projection = %#v", delivery)
 	}
 	catalog := mapFromAnyMain(liveSession["commandCatalog"])

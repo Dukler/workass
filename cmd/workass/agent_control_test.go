@@ -265,8 +265,8 @@ func TestAgentControlCodexOwnerCanRegisterExternalHandoff(t *testing.T) {
 	manager := acp.NewManager(acp.Options{
 		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
 		Provider: acp.ProviderConfig{ID: "codex", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true, Label: "Codex ACP fixture", Env: map[string]string{
-			"WORKASS_MOCK_ACP_SESSION_STORE":      filepath.Join(stateDir, "codex-mock-native.json"),
-			"WORKASS_MOCK_ACP_OPERATION_READBACK": "1",
+			"WORKASS_MOCK_ACP_SESSION_STORE":     filepath.Join(stateDir, "codex-mock-native.json"),
+			"WORKASS_MOCK_ACP_STABLE_TURN_INPUT": "1",
 		}},
 		DefaultProviderID: "codex",
 		RSSSampleInterval: time.Hour,

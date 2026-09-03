@@ -62,7 +62,7 @@ test('native Codex host drives app-server directly with turns, steering, permiss
   assert.equal(initialized.result._meta.workassCodexSteerRequest, true);
   assert.equal(initialized.result._meta.workassCodexSteerRaceV1, true);
 	assert.equal(initialized.result._meta.workassStableTurnInputV1, true);
-	assert.equal(initialized.result._meta.workassOperationReadbackV1, true);
+	assert.equal(initialized.result._meta.workassOperationReadbackV1, undefined);
 
   peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
   const opened = await peer.waitFor((message) => message.id === 2);
@@ -83,30 +83,18 @@ test('native Codex host drives app-server directly with turns, steering, permiss
   assert.equal(permission.params.toolCall.rawInput.command, 'printf fixture');
   peer.send({ jsonrpc: '2.0', id: permission.id, result: { outcome: { outcome: 'selected', optionId: 'allow_once' } } });
   await peer.waitFor((message) => message.method === 'session/update' && message.params.update.sessionUpdate === 'agent_message_chunk');
-  const firstResult = await peer.waitFor((message) => message.id === 3);
-  assert.equal(firstResult.result.stopReason, 'end_turn');
+	const firstResult = await peer.waitFor((message) => message.id === 3);
+	assert.equal(firstResult.result.stopReason, 'end_turn');
 	peer.send({ jsonrpc: '2.0', id: 31, method: '_workass/turn/reconcile', params: {
 	  sessionId: opened.result.sessionId, clientUserMessageId: 'workass-operation-1',
 	} });
-	const readback = await peer.waitFor((message) => message.id === 31);
-	assert.deepEqual(readback.result, {
-	  found: true, consumed: true, turnId: 'fixture-turn-1', status: 'completed', terminal: true,
-	});
-	peer.send({ jsonrpc: '2.0', id: 32, method: '_workass/turn/reconcile', params: {
-	  sessionId: opened.result.sessionId, clientUserMessageId: 'operation-never-sent',
-	} });
-	assert.equal((await peer.waitFor((message) => message.id === 32)).result.found, false);
+	assert.equal((await peer.waitFor((message) => message.id === 31)).error.code, -32601);
 	peer.send({ jsonrpc: '2.0', id: 33, method: 'session/close', params: { sessionId: opened.result.sessionId } });
 	assert.equal((await peer.waitFor((message) => message.id === 33)).error, undefined);
 	peer.send({ jsonrpc: '2.0', id: 34, method: 'session/resume', params: {
 	  sessionId: opened.result.sessionId, cwd: repoRoot, mcpServers: [],
 	} });
 	assert.equal((await peer.waitFor((message) => message.id === 34)).error, undefined);
-	peer.send({ jsonrpc: '2.0', id: 35, method: '_workass/turn/reconcile', params: {
-	  sessionId: opened.result.sessionId, clientUserMessageId: 'workass-operation-1',
-	} });
-	assert.equal((await peer.waitFor((message) => message.id === 35)).result.terminal, true,
-	  'operation readback must survive host-session replacement');
 
   peer.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: {
     sessionId: opened.result.sessionId,
@@ -201,35 +189,6 @@ test('native Codex host rejects non-live steering without interrupting or queuei
     peer.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: opened.result.sessionId } });
     assert.equal((await peer.waitFor((message) => message.id === 3)).result.stopReason, 'cancelled');
   }
-});
-
-test('native Codex operation readback falls back to thread/read when item listing is unavailable', async (t) => {
-  const peer = startHost({ WORKASS_CODEX_FIXTURE_ITEMS_LIST_UNSUPPORTED: '1' });
-  t.after(() => peer.child.kill('SIGKILL'));
-
-  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
-  await peer.waitFor((message) => message.id === 1);
-  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
-  const opened = await peer.waitFor((message) => message.id === 2);
-  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
-    sessionId: opened.result.sessionId,
-    prompt: [{ type: 'text', text: 'readback fallback fixture' }],
-    clientUserMessageId: 'fallback-operation-1',
-  } });
-  assert.equal((await peer.waitFor((message) => message.id === 3)).result.stopReason, 'end_turn');
-
-  peer.send({ jsonrpc: '2.0', id: 4, method: 'session/close', params: { sessionId: opened.result.sessionId } });
-  await peer.waitFor((message) => message.id === 4);
-  peer.send({ jsonrpc: '2.0', id: 5, method: 'session/resume', params: {
-    sessionId: opened.result.sessionId, cwd: repoRoot, mcpServers: [],
-  } });
-  await peer.waitFor((message) => message.id === 5);
-  peer.send({ jsonrpc: '2.0', id: 6, method: '_workass/turn/reconcile', params: {
-    sessionId: opened.result.sessionId, clientUserMessageId: 'fallback-operation-1',
-  } });
-  assert.deepEqual((await peer.waitFor((message) => message.id === 6)).result, {
-    found: true, consumed: true, turnId: 'fixture-turn-1', status: 'completed', terminal: true,
-  });
 });
 
 test('native Codex host maps Workass MCP through the CA-aware stdio bridge', async (t) => {

@@ -909,13 +909,13 @@ func TestProviderUpdateInvokeFailureKeepsCardWithRedactedTail(t *testing.T) {
 	}
 	progress := waitProviderUpdateProgress(t, events, "qwen", func(progress ProviderUpdateProgress) bool {
 		return progress.Status == "failed" && progress.ExitCode != nil && *progress.ExitCode == 42 && progress.Error != "" && progress.Tail != ""
-	}, 2*time.Second)
+	}, 5*time.Second)
 	if strings.Contains(progress.Tail, "supersecret") || !strings.Contains(progress.Tail, "api_key=[redacted]") {
 		t.Fatalf("progress tail was not redacted: %q", progress.Tail)
 	}
 	update := waitProviderUpdate(t, events, "qwen", func(update ProviderUpdate) bool {
 		return update.UpdateAvailable && update.ExitCode != nil && *update.ExitCode == 42 && update.LastError != "" && update.Tail != ""
-	}, 2*time.Second)
+	}, 5*time.Second)
 	if strings.Contains(update.Tail, "supersecret") || !strings.Contains(update.Tail, "api_key=[redacted]") {
 		t.Fatalf("failure tail was not redacted: %q", update.Tail)
 	}

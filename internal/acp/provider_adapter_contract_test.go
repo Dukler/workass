@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -89,6 +90,27 @@ func TestOMPRegistrationUsesOfficialGenericACPEntryPoint(t *testing.T) {
 	if registration.Update.Source != "https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest" ||
 		registration.Update.Command.Command != "omp" || !reflect.DeepEqual(registration.Update.Command.Args, []string{"update"}) {
 		t.Fatalf("OMP update registration is incomplete: %#v", registration.Update)
+	}
+}
+
+func TestOMPKnownPathsCoverOfficialWindowsInstallers(t *testing.T) {
+	home := `C:\\Users\\example`
+	localAppData := `C:\\Users\\example\\AppData\\Local`
+	appData := `C:\\Users\\example\\AppData\\Roaming`
+	installDir := `D:\\Tools\\omp`
+	got := ompKnownPathsForPlatform("windows", home, localAppData, appData, installDir)
+	wants := []string{
+		filepath.Join(installDir, "omp.exe"),
+		filepath.Join(localAppData, "omp", "omp.exe"),
+		filepath.Join(home, ".bun", "bin", "omp.exe"),
+		filepath.Join(home, ".bun", "bin", "omp.cmd"),
+		filepath.Join(appData, "npm", "omp.exe"),
+		filepath.Join(appData, "npm", "omp.cmd"),
+	}
+	for _, want := range wants {
+		if !slices.Contains(got, want) {
+			t.Fatalf("OMP Windows discovery paths = %#v, missing %q", got, want)
+		}
 	}
 }
 

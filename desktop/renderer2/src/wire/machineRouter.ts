@@ -87,7 +87,6 @@ const REMOTE_EVENTS: Array<[keyof WorkassApi, string]> = [
   ['onChatSessionReplaced', 'chat:session-replaced'],
   ['onChatCompacted', 'chat:compacted'],
   ['onChatCheckpointRestored', 'chat:checkpoint-restored'],
-  ['onChatEngineRecovered', 'chat:engine-recovered'],
   ['onChatEnv', 'chat:env'],
   ['onChatPermissionRequest', 'chat:permission-request'],
   ['onChatPermissionResolved', 'chat:permission-resolved'],

@@ -1114,7 +1114,6 @@ func (d managerLaneDelivery) Capabilities() providercontract.DeliveryCapabilitie
 	capabilities := adapter.delivery.Capabilities(bridge)
 	capabilities.StableInputIdentity = standardACPReceipt || explicitReceipt
 	capabilities.ConsumptionReceipt = standardACPReceipt || explicitReceipt
-	capabilities.TurnReadback = bridge.hasProviderCapability("workassOperationReadbackV1", "workassTurnReconcileRequest")
 	return capabilities
 }
 
@@ -1255,33 +1254,6 @@ func (d managerLaneDelivery) Cancel(_ context.Context, turn providercontract.Tur
 		return nil
 	}
 	return &providercontract.Error{Kind: providercontract.ErrorAdmissionRejected, Operation: turn.OperationID, Message: "provider turn is not owned by this lane"}
-}
-
-func (d managerLaneDelivery) Reconcile(ctx context.Context, request providercontract.ReconcileRequest) (providercontract.ReconcileResult, error) {
-	operationID := providercontract.NormalizeOperationID(string(request.OperationID))
-	if operationID == "" {
-		return providercontract.ReconcileResult{}, errors.New("turn reconciliation requires an operation id")
-	}
-	bridge := d.lane.manager.bridgeForSession(d.lane.info.SessionID, SessionOptions{
-		TabID: d.lane.owner.TabID, ChatID: d.lane.identity.ChatID, SessionID: d.lane.info.SessionID,
-		ProviderID: d.lane.info.ProviderID,
-	})
-	if bridge == nil {
-		return providercontract.ReconcileResult{}, &providercontract.Error{Kind: providercontract.ErrorTransientTransport, Operation: operationID, Message: "provider attachment is unavailable"}
-	}
-	readback, err := bridge.readbackOperation(ctx, d.lane.thread.HeadID, string(operationID))
-	if err != nil {
-		return providercontract.ReconcileResult{}, classifyLaneRuntimeError("reconcile turn", err)
-	}
-	// TurnRef.NativeID is the immutable Workass/provider-lane delivery identity
-	// used by cancellation and the frozen job event contract. The provider's
-	// operation readback may also expose its own vendor-native turn id; finding
-	// that id proves the operation mapping, but it must not replace the admitted
-	// lane turn owner after a host restart.
-	return providercontract.ReconcileResult{
-		Turn:  providercontract.TurnRef{OperationID: operationID, NativeID: request.Turn.NativeID},
-		Found: readback.Found, State: readback.Status, Terminal: readback.Terminal, Consumed: readback.Consumed,
-	}, nil
 }
 
 func (d managerLaneDelivery) ResolvePermission(_ context.Context, decision providercontract.PermissionDecision) (providercontract.PermissionReceipt, error) {
@@ -1437,7 +1409,7 @@ func (c managerLaneContext) ReconcileImport(ctx context.Context, request provide
 	if err != nil {
 		return providercontract.ContextImportReceipt{}, err
 	}
-	result, err := bridge.request(ctx, "_workass/context/import/readback", contextImportParams(info.SessionID, request, false), bridge.opts.PromptReconcileTimeout)
+	result, err := bridge.request(ctx, "_workass/context/import/readback", contextImportParams(info.SessionID, request, false), bridge.opts.ContextReadbackTimeout)
 	if err != nil {
 		return providercontract.ContextImportReceipt{}, &providercontract.Error{Kind: providercontract.ErrorTransientTransport, Operation: request.OperationID, Message: "context-import readback failed", Cause: err}
 	}

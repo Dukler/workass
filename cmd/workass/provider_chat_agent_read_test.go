@@ -112,17 +112,28 @@ func TestProviderChatAgentReadBoundsEventHeavyTranscriptForMCPRelay(t *testing.T
 	}
 }
 
-func seedAgentProviderTurn(t *testing.T, engine *chat.Engine, operationID providercontract.OperationID, nativeTurnID string) chat.ProviderActivityOwner {
+func seedAgentProviderTurn(t *testing.T, actor *providerChatActor, operationID providercontract.OperationID, nativeTurnID string) chat.ProviderActivityOwner {
 	t.Helper()
+	engine := actor.engine
 	state := engine.Snapshot()
 	if state.ActiveLaneID == "" {
 		t.Fatal("agent turn fixture has no active lane")
 	}
+	// This fixture fabricates an already-admitted provider turn. Fence the live
+	// coordinator while claiming its start effect so a stale wake cannot send the
+	// synthetic prompt and terminalize the owner under the assertion.
+	release := actor.coordinator.BeginReplyAdmission()
+	defer release()
 	if err := engine.Apply(chat.Submit{
 		OperationID: operationID, LaneID: state.ActiveLaneID, Text: "legitimate provider turn",
 		Presentation: providercontract.TurnPresentation{Origin: "human"},
 	}); err != nil {
 		t.Fatalf("seed provider turn: submit: %v", err)
+	}
+	if effect, claimed, err := engine.ClaimNext(); err != nil {
+		t.Fatalf("seed provider turn: claim: %v", err)
+	} else if _, ok := effect.(chat.StartTurnEffect); !claimed || !ok {
+		t.Fatalf("seed provider turn: claimed=%v effect=%T, want StartTurnEffect", claimed, effect)
 	}
 	if err := engine.Apply(chat.TurnAdmitted{
 		OperationID: operationID, Accepted: true,
@@ -199,7 +210,7 @@ func TestProviderChatAgentReadProjectsActorBackgroundState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := seedAgentProviderTurn(t, actor.engine, "agent-read-turn", "agent-read-native-turn")
+	owner := seedAgentProviderTurn(t, actor, "agent-read-turn", "agent-read-native-turn")
 	finished := "2026-08-11T12:00:01Z"
 	if err := actor.engine.Apply(chat.ReconcileBackgroundSnapshot{Items: []chat.BackgroundState{{
 		Owner: owner,
@@ -277,7 +288,7 @@ func newAgentWaitReceiptFixture(t *testing.T) (*providerChatRuntime, *acp.Manage
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := seedAgentProviderTurn(t, actor.engine, "agent-wait-owner-turn", "agent-wait-native-turn")
+	owner := seedAgentProviderTurn(t, actor, "agent-wait-owner-turn", "agent-wait-native-turn")
 	finished := "2026-08-12T12:00:01Z"
 	if err := actor.engine.Apply(chat.ReconcileBackgroundSnapshot{Items: []chat.BackgroundState{{
 		Owner: owner,

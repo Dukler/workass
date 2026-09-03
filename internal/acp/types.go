@@ -17,9 +17,7 @@ const (
 	ProtocolVersion = 1
 
 	defaultInitTimeout              = 60 * time.Second
-	defaultPromptReconcileInterval  = 10 * time.Second
-	defaultPromptReconcileTimeout   = 5 * time.Second
-	defaultPromptTerminalGrace      = 3 * time.Second
+	defaultContextReadbackTimeout   = 5 * time.Second
 	defaultStdoutFlush              = 16 * time.Millisecond
 	defaultThoughtFlush             = 24 * time.Millisecond
 	defaultStderrTailBytes          = 16 * 1024
@@ -120,9 +118,7 @@ type Options struct {
 	Version                        string
 	InitTimeout                    time.Duration
 	PermissionTimeout              time.Duration
-	PromptReconcileInterval        time.Duration
-	PromptReconcileTimeout         time.Duration
-	PromptTerminalGrace            time.Duration
+	ContextReadbackTimeout         time.Duration
 	StdoutFlushInterval            time.Duration
 	ThoughtFlushInterval           time.Duration
 	StderrTailBytes                int
@@ -184,14 +180,8 @@ func (o Options) withDefaults() Options {
 	// person, and Workass does not put its own clock on one. Zero means "no
 	// deadline here" — whatever the origin harness enforces is the only one
 	// (user 2026-07-25). A caller may still set it explicitly.
-	if o.PromptReconcileInterval <= 0 {
-		o.PromptReconcileInterval = defaultPromptReconcileInterval
-	}
-	if o.PromptReconcileTimeout <= 0 {
-		o.PromptReconcileTimeout = defaultPromptReconcileTimeout
-	}
-	if o.PromptTerminalGrace <= 0 {
-		o.PromptTerminalGrace = defaultPromptTerminalGrace
+	if o.ContextReadbackTimeout <= 0 {
+		o.ContextReadbackTimeout = defaultContextReadbackTimeout
 	}
 	if o.StdoutFlushInterval <= 0 {
 		o.StdoutFlushInterval = defaultStdoutFlush
@@ -395,7 +385,9 @@ type DeliveryCapabilities struct {
 	LiveSteer               bool `json:"liveSteer"`
 	SteerConsumptionReceipt bool `json:"steerConsumptionReceipt"`
 	ConsumptionReceipt      bool `json:"consumptionReceipt"`
-	TurnReadback            bool `json:"turnReadback"`
+	// TurnReadback is retained as an always-false frozen-wire compatibility
+	// field. Workass no longer performs provider-turn readback.
+	TurnReadback bool `json:"turnReadback"`
 }
 
 func DeliveryCapabilitiesForWire(capabilities providercontract.DeliveryCapabilities) DeliveryCapabilities {
@@ -404,7 +396,6 @@ func DeliveryCapabilitiesForWire(capabilities providercontract.DeliveryCapabilit
 		LiveSteer:               capabilities.LiveSteer,
 		SteerConsumptionReceipt: capabilities.SteerConsumptionReceipt,
 		ConsumptionReceipt:      capabilities.ConsumptionReceipt,
-		TurnReadback:            capabilities.TurnReadback,
 	}
 }
 
@@ -506,14 +497,14 @@ type JobStartOptions struct {
 	// through the same queue, so only the caller knows which this is; getting it
 	// wrong would either lose the user's request or invent a new one.
 	HumanAuthored bool
-	// ProviderLaneManaged fences crash/session recovery. The durable chat actor
-	// owns exact resume and readback for these jobs; Manager must never launch
-	// any recovery/replacement path for them.
+	// ProviderLaneManaged routes attachment loss through the durable chat actor.
+	// The actor ends the interrupted UI turn immediately; Manager must never
+	// launch a retry, replacement, status poll, or provider-turn readback.
 	ProviderLaneManaged bool
 	// OperationID is the actor-owned, immutable delivery identity. It is
 	// deliberately distinct from UserMessageID, which identifies the visible
-	// renderer row. Provider readback, normalized events, and native stable-input
-	// receipts use OperationID; the frozen wire projection keeps UserMessageID.
+	// renderer row. Normalized events and native stable-input receipts use
+	// OperationID; the frozen wire projection keeps UserMessageID.
 	OperationID        string
 	UserMessageID      string
 	AssistantMessageID string
@@ -591,11 +582,7 @@ type Job struct {
 	// reconciliation belongs to the provider bridge/native binding; keeping the
 	// admitted request immutable lets catalog and subagent readers safely inherit
 	// it while the provider turn is running.
-	startOpts JobStartOptions
-	// actorRecoveryPending is set only when an actor-managed provider host dies.
-	// The actor owns exact resume/readback; Manager only cleans up its
-	// process-local job and never starts a recovery session.
-	actorRecoveryPending  atomic.Bool
+	startOpts             JobStartOptions
 	inputDispatched       atomic.Bool
 	inputDispatchBoundary chan struct{}
 	inputDispatchOnce     sync.Once
@@ -604,8 +591,13 @@ type Job struct {
 	waitingPermission     atomic.Bool
 	consumedSteerIDs      sync.Map // map[string]struct{}
 
-	stdoutBuf   strings.Builder
-	stdoutPhase string
+	// streamPublishMu spans buffer extraction and frozen event publication. A
+	// timer flush may have emptied stdoutBuf without publishing it yet; the
+	// terminal flush must wait for that publication so job:end can never overtake
+	// the final text or thinking event.
+	streamPublishMu sync.Mutex
+	stdoutBuf       strings.Builder
+	stdoutPhase     string
 	// When the current stdout batch began buffering: flush age is the delay the
 	// daemon itself adds between the agent producing text and the renderer
 	// seeing it.

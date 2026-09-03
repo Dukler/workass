@@ -1474,7 +1474,7 @@ func TestWireJobStartReplyGateBlocksProviderAndProjectsFailureAfterReceipt(t *te
 	}
 }
 
-func TestWireLostTerminalReconciliationEmitsRendererEndEvent(t *testing.T) {
+func TestWireLostTerminalWaitsForHarnessOrExplicitCancel(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()
 	renderer := t.TempDir()
@@ -1489,13 +1489,10 @@ func TestWireLostTerminalReconciliationEmitsRendererEndEvent(t *testing.T) {
 			ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
 			CWD: root, Enabled: true, Label: "Workass Mock ACP",
 		},
-		DefaultProviderID:       "mock",
-		Broadcast:               hub.Broadcast,
-		StdoutFlushInterval:     5 * time.Millisecond,
-		ThoughtFlushInterval:    5 * time.Millisecond,
-		PromptReconcileInterval: 25 * time.Millisecond,
-		PromptReconcileTimeout:  100 * time.Millisecond,
-		PromptTerminalGrace:     100 * time.Millisecond,
+		DefaultProviderID:    "mock",
+		Broadcast:            hub.Broadcast,
+		StdoutFlushInterval:  5 * time.Millisecond,
+		ThoughtFlushInterval: 5 * time.Millisecond,
 	})
 	sessionState := sharedSessionStore(stateDir)
 	providerChats := newProviderChatRuntime(manager, sessionState, stateDir)
@@ -1531,15 +1528,23 @@ func TestWireLostTerminalReconciliationEmitsRendererEndEvent(t *testing.T) {
 		t.Fatalf("job:start error: %s", *startReply.Error)
 	}
 	jobID := fieldString(mapFromAnyMain(startReply.Result), "id")
+	time.Sleep(150 * time.Millisecond)
+	if running, ok := manager.RunningJobForChat(tabID, chatID); !ok || fieldString(running, "id") != jobID {
+		t.Fatalf("Workass invented completion for a pending harness prompt: running=%#v ok=%v", running, ok)
+	}
+	client.invoke(t, 3, "job:cancel", jobID)
+	cancelReply := client.waitReply(t, 3, 5*time.Second)
+	if cancelReply.Error != nil {
+		t.Fatalf("job:cancel error: %s", *cancelReply.Error)
+	}
 	end := client.waitJobEvent(t, jobID, "end", 3*time.Second)
 	ended := mapFromAnyMain(end["job"])
-	if ended["status"] != "done" || ended["stopReason"] != "end_turn" || ended["code"] != json.Number("0") {
-		t.Fatalf("reconciled wire end = %#v", ended)
+	if ended["status"] != "failed" || ended["stopReason"] != "cancelled" || ended["code"] != json.Number("130") {
+		t.Fatalf("explicitly cancelled wire end = %#v", ended)
 	}
 	if result := fieldString(ended, "result"); !strings.Contains(result, "[mock:lost-terminal] complete visibly over wire") {
-		t.Fatalf("reconciled wire result lost streamed output: %q", result)
+		t.Fatalf("cancelled wire result lost streamed output: %q", result)
 	}
-	t.Logf("trace lost terminal reconciled job=%s status=%s stopReason=%s", jobID, ended["status"], ended["stopReason"])
 }
 
 func TestWireTraceAppChatSteer(t *testing.T) {
@@ -1659,7 +1664,7 @@ func TestWireTraceAppChatSteer(t *testing.T) {
 	}
 }
 
-func TestWireTraceMockEngineCrashReattachesExactThread(t *testing.T) {
+func TestWireTraceMockEngineCrashTerminalizesThenNextPromptResumesExactThread(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()
 	renderer := t.TempDir()
@@ -1673,7 +1678,6 @@ func TestWireTraceMockEngineCrashReattachesExactThread(t *testing.T) {
 		StateDir: stateDir,
 		Provider: acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Env: map[string]string{
 			"WORKASS_MOCK_ACP_DELAY_MS": "5", "WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "mock-provider.json"),
-			"WORKASS_MOCK_ACP_OPERATION_READBACK": "1",
 		}, Enabled: true, Label: "Workass Mock ACP"},
 		DefaultProviderID:    "mock",
 		Broadcast:            hub.Broadcast,
@@ -1711,26 +1715,41 @@ func TestWireTraceMockEngineCrashReattachesExactThread(t *testing.T) {
 	}
 	job := startReply.Result.(map[string]any)
 	jobID := job["id"].(string)
-	recovered := client.waitChannelEvent(t, "chat:engine-recovered", 5*time.Second).Payload.(map[string]any)
-	resumedSessionID := fmt.Sprint(recovered["sessionId"])
-	if resumedSessionID != oldSessionID || recovered["oldSessionId"] != oldSessionID {
-		t.Fatalf("chat:engine-recovered payload = %#v old=%s", recovered, oldSessionID)
-	}
-	t.Logf("trace event chat:engine-recovered exactSession=%s tab=%v", oldSessionID, recovered["tabId"])
-	waitProviderChatIdle(t, providerChats, "wire-crash-turn", 5*time.Second)
 	end := client.waitJobEvent(t, jobID, "end", 5*time.Second)
+	waitProviderChatIdle(t, providerChats, "wire-crash-turn", 5*time.Second)
 	endJob := end["job"].(map[string]any)
 	if endJob["status"] != "failed" || endJob["stopReason"] != "engine-crash" || endJob["crashInterrupted"] != true {
 		t.Fatalf("crash end job = %#v", endJob)
 	}
 	t.Logf("trace event job:event type=end id=%s status=%s stopReason=%v crashInterrupted=%v", endJob["id"], endJob["status"], endJob["stopReason"], endJob["crashInterrupted"])
-	if live, ok := manager.LiveSession(oldSessionID); !ok || live.ChatID != "wire-crash-turn" {
-		t.Fatalf("exact provider thread was not reattached after host crash: %+v ok=%v", live, ok)
+	crashed, _ := providerChats.Snapshot("wire-crash-turn")
+	crashedLane := crashed.Lanes[crashed.DesiredLaneID]
+	if crashed.Foreground != nil || crashedLane.Phase != chat.LaneDetached || crashedLane.Thread.HeadID != oldSessionID {
+		t.Fatalf("host crash did not terminalize and detach the exact thread: %#v", crashed)
 	}
+
+	client.invoke(t, 3, "job:start", map[string]any{
+		"kind": "app-chat", "chatId": "wire-crash-turn", "sessionId": oldSessionID, "tabId": tabID,
+		"operationId": "after-engine-crash", "userMessageId": "after-engine-crash-user", "assistantMessageId": "after-engine-crash-assistant",
+		"prompt": "continue on the saved exact thread",
+	})
+	nextReply := client.waitReply(t, 3, 5*time.Second)
+	if nextReply.Error != nil {
+		t.Fatalf("next distinct prompt could not resume exact thread: %s", *nextReply.Error)
+	}
+	nextJob := nextReply.Result.(map[string]any)
+	nextEnd := client.waitJobEvent(t, nextJob["id"].(string), "end", 5*time.Second)
+	if finished := mapFromAnyMain(nextEnd["job"]); fieldString(finished, "status") != "done" {
+		t.Fatalf("next exact-session turn = %#v", finished)
+	}
+	if live, ok := manager.LiveSession(oldSessionID); !ok || live.ChatID != "wire-crash-turn" {
+		t.Fatalf("next prompt did not resume the saved exact provider thread: %+v ok=%v", live, ok)
+	}
+	client.expectNoEventChannel(t, "chat:engine-recovered", 150*time.Millisecond)
 	client.expectNoEventChannel(t, "chat:session-replaced", 150*time.Millisecond)
 }
 
-func TestWireTraceMockCrashAmbiguityDoesNotResendOrRespawn(t *testing.T) {
+func TestWireTraceMockCrashNeverReplaysAndNextDistinctPromptRuns(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()
 	traceFile := filepath.Join(stateDir, "crash-prompts.jsonl")
@@ -1778,23 +1797,9 @@ func TestWireTraceMockCrashAmbiguityDoesNotResendOrRespawn(t *testing.T) {
 		"prompt": "[mock:crash] first",
 	})
 	firstJob := client.waitReply(t, 2, 5*time.Second).Result.(map[string]any)
-	firstRecovered := client.waitChannelEvent(t, "chat:engine-recovered", 5*time.Second).Payload.(map[string]any)
-	resumedSessionID := fmt.Sprint(firstRecovered["sessionId"])
-	if resumedSessionID != firstSessionID {
-		t.Fatalf("first crash replaced the provider thread: %#v", firstRecovered)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	var terminalized chat.State
-	for time.Now().Before(deadline) {
-		terminalized, _ = providerChats.Snapshot(tabID)
-		if terminalized.Foreground == nil && len(terminalized.Ledger) >= 2 {
-			assistant := terminalized.Ledger[len(terminalized.Ledger)-1]
-			if assistant.OperationID == "ambiguous-crash-turn-1" && assistant.Terminal != nil {
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	end := client.waitJobEvent(t, firstJob["id"].(string), "end", 5*time.Second)
+	waitProviderChatIdle(t, providerChats, tabID, 5*time.Second)
+	terminalized, _ := providerChats.Snapshot(tabID)
 	if terminalized.Foreground != nil || len(terminalized.Ledger) < 2 {
 		t.Fatalf("crash without readback did not seal a terminal no-resend receipt: %#v", terminalized)
 	}
@@ -1805,55 +1810,63 @@ func TestWireTraceMockCrashAmbiguityDoesNotResendOrRespawn(t *testing.T) {
 	if assistant.NativeTurnID != firstJob["id"].(string) {
 		t.Fatalf("terminal crash changed turn identity: assistant=%#v job=%#v", assistant, firstJob)
 	}
-	if !strings.Contains(strings.ToLower(assistant.Text), "will not resend") {
-		t.Fatalf("terminal crash omitted no-resend explanation: %#v", assistant)
-	}
-	end := client.waitJobEvent(t, firstJob["id"].(string), "end", 5*time.Second)
 	endJob := mapFromAnyMain(end["job"])
 	if fieldString(endJob, "status") != "failed" || endJob["interrupted"] != true {
 		t.Fatalf("unrecoverable crash did not publish terminal job:end: %#v", endJob)
 	}
-	blockedLane := false
+	detachedLane := false
 	for _, lane := range terminalized.Lanes {
-		if lane.Phase == chat.LaneBlocked && lane.LastError != "" {
-			blockedLane = true
+		if lane.Phase == chat.LaneDetached && lane.Thread.HeadID == firstSessionID {
+			detachedLane = true
 			break
 		}
 	}
-	if !blockedLane {
-		t.Fatalf("unrecoverable crash did not block its exact lane: %#v", terminalized.Lanes)
+	if !detachedLane {
+		t.Fatalf("crash did not leave the exact lane detached for the next prompt: %#v", terminalized.Lanes)
 	}
-	t.Logf("trace first crash resumed exact session=%s and terminalized unresolved operation without resend", firstSessionID)
+	t.Logf("trace first crash terminalized session=%s without replay", firstSessionID)
 
 	client.invoke(t, 3, "job:start", map[string]any{
 		"kind": "app-chat", "chatId": tabID, "sessionId": firstSessionID, "tabId": tabID,
 		"operationId": "ambiguous-crash-turn-2", "userMessageId": "ambiguous-crash-user-2", "assistantMessageId": "ambiguous-crash-assistant-2",
 		"prompt": "must not be resent after crash ambiguity",
 	})
-	retryReply := client.waitReply(t, 3, 5*time.Second)
-	if retryReply.Error == nil {
-		t.Fatalf("ambiguous crash retry did not fail closed at actor admission: %#v", retryReply)
+	nextReply := client.waitReply(t, 3, 5*time.Second)
+	if nextReply.Error != nil {
+		t.Fatalf("next distinct prompt could not resume the exact thread: %s", *nextReply.Error)
+	}
+	nextJob := nextReply.Result.(map[string]any)
+	nextEnd := client.waitJobEvent(t, nextJob["id"].(string), "end", 5*time.Second)
+	if finished := mapFromAnyMain(nextEnd["job"]); fieldString(finished, "status") != "done" {
+		t.Fatalf("next distinct turn = %#v", finished)
 	}
 	client.expectNoEventChannel(t, "chat:engine-recovered", 300*time.Millisecond)
 	client.expectNoEventChannel(t, "chat:session-replaced", 150*time.Millisecond)
 	if live, ok := manager.LiveSession(firstSessionID); !ok || live.Info.SessionID != firstSessionID {
-		t.Fatalf("ambiguous operation changed the exact lane: %+v ok=%v", live, ok)
+		t.Fatalf("next prompt did not resume the exact lane: %+v ok=%v", live, ok)
 	}
 	prompts := readMockTracePrompts(t, traceFile)
 	providerInputs := 0
+	seenFirst, seenSecond := 0, 0
 	for _, prompt := range prompts {
 		if strings.HasPrefix(prompt["text"], "[mock:lifecycle]") {
 			continue
 		}
 		providerInputs++
+		if prompt["sessionId"] != firstSessionID {
+			t.Fatalf("next prompt replaced the exact provider session: %#v", prompts)
+		}
+		if strings.Contains(prompt["text"], "[mock:crash] first") {
+			seenFirst++
+		}
 		if strings.Contains(prompt["text"], "must not be resent") {
-			t.Fatalf("crash ambiguity resent provider input: %#v", prompts)
+			seenSecond++
 		}
 	}
-	if providerInputs != 1 || !strings.Contains(prompts[0]["text"], "[mock:crash] first") {
-		t.Fatalf("crash ambiguity resent provider input: %#v", prompts)
+	if providerInputs != 2 || seenFirst != 1 || seenSecond != 1 {
+		t.Fatalf("crash boundary replayed or lost provider input: %#v", prompts)
 	}
-	t.Logf("trace ambiguous crash preserved session=%s and refused input resend", firstSessionID)
+	t.Logf("trace crash preserved session=%s and sent each distinct input exactly once", firstSessionID)
 }
 
 func TestConfigAndSettingsPersistInStateDir(t *testing.T) {
@@ -2208,6 +2221,7 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 	if endJob["status"] != "done" || endJob["sessionId"] != oldSessionID {
 		t.Fatalf("hibernated checkpoint end = %#v", endJob)
 	}
+	waitWireChatCheckpointCount(t, manager, chatID, 1, 5*time.Second)
 	envMsg := client.waitFor(t, 5*time.Second, func(msg wsMessage) bool {
 		if msg.T != "event" || msg.Channel != "chat:env" {
 			return false
@@ -4414,6 +4428,21 @@ func envHasWireRepoFile(payload map[string]any, repoName, relPath string) bool {
 	return false
 }
 
+func waitWireChatCheckpointCount(t *testing.T, manager *acp.Manager, chatID string, count int, timeout time.Duration) []acp.ChatCheckpoint {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		checkpoints := manager.ChatCheckpoints(chatID, "")
+		if len(checkpoints) >= count {
+			return checkpoints
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("chat %s checkpoints = %#v, want at least %d", chatID, checkpoints, count)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func waitWireProcStateForChat(t *testing.T, manager *acp.Manager, chatID string, state acp.EngineState, timeout time.Duration) map[string]any {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -4562,7 +4591,6 @@ func runWireFakeACP() {
 			if mode == "plan-usage" || mode == "plan-limits" || mode == "codex-reset" {
 				meta := mapFromAnyMain(capabilities["_meta"])
 				meta["workassStableTurnInputV1"] = true
-				meta["workassOperationReadbackV1"] = true
 				capabilities["_meta"] = meta
 			}
 			respond(msg.ID, map[string]any{

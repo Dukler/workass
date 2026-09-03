@@ -449,7 +449,6 @@ export interface ChatEnvPayload {
 }
 
 export interface CheckpointRestored { chatId: string; turnSeq: number; repos: unknown[]; }
-export interface EngineRecovered { chatId: string | null; tabId: string | null; oldSessionId: unknown; sessionId: string; at: string; }
 
 // ---- R7 notifications (controller-only events; bridge does not subscribe yet) -
 export interface ChatCommandsEvent { tabId?: string; chatId?: string; sessionId?: string; commandCatalog?: CommandCatalog | null; }
@@ -726,10 +725,9 @@ export interface WorkassApi {
   onChatEnv?: (cb: (e: ChatEnvPayload) => void) => void;
   // Additive compaction indicator (D1). Feature-detected; degrades to no-op.
   onChatCompacted?: (cb: (e: ChatCompacted) => void) => void;
-  // R4 rewind confirmation + R7 notify events + D4 recovery notice. All
+  // R4 rewind confirmation + R7 notify events. All
   // feature-detected; the browser bridge does not subscribe to them yet (GAP).
   onChatCheckpointRestored?: (cb: (e: CheckpointRestored) => void) => void;
-  onChatEngineRecovered?: (cb: (e: EngineRecovered) => void) => void;
   onNotify?: (cb: (e: NotifyEvent) => void) => void;
   onNotifyBacklog?: (cb: (e: NotifyBacklog) => void) => void;
   // Daemon-owned agent chat mutations ask the renderer to rehydrate the

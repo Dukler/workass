@@ -280,29 +280,52 @@ func (m *Manager) refreshChatEnvAfterJob(ctx context.Context, job *Job) {
 	if !ok {
 		return
 	}
+	m.refreshChatEnvAfterJobSnapshot(ctx, job, snapshot)
+}
+
+// refreshChatEnvAfterJobSnapshot performs the filesystem-heavy half of the
+// post-turn environment refresh. The caller may capture snapshot before
+// publishing the terminal provider event, then run this work afterwards: the
+// actor is free to clear its foreground turn immediately without racing the
+// checkpoint inputs out from under this observer.
+func (m *Manager) refreshChatEnvAfterJobSnapshot(ctx context.Context, job *Job, snapshot chatEnvSnapshot) {
+	if job == nil {
+		return
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	payload, currentRepos := buildChatEnvPayloadAndRepos(ctx, snapshot)
 
 	m.envMu.Lock()
+	publish := false
 	tracker := m.chatEnvTrackerLocked(snapshot.sessionID, snapshot.chatID, snapshot.tabID)
 	if tracker != nil {
-		tracker.chatID = snapshot.chatID
-		tracker.tabID = snapshot.tabID
-		tracker.cwd = snapshot.cwd
-		tracker.payload = payload
-		if currentRepos != nil {
-			tracker.repos = currentRepos
+		// A newer turn may begin as soon as the provider terminal is durable. Do
+		// not let this older filesystem scan overwrite that turn's baseline or
+		// publish stale environment state after it. Its immutable checkpoint is
+		// still recorded below.
+		if snapshot.turnSeq >= tracker.turnSeq {
+			tracker.chatID = snapshot.chatID
+			tracker.tabID = snapshot.tabID
+			tracker.cwd = snapshot.cwd
+			tracker.payload = payload
+			if currentRepos != nil {
+				tracker.repos = currentRepos
+			}
+			m.storeChatEnvTrackerLocked(tracker)
+			publish = true
 		}
 		if job.ID != "" && tracker.pendingTurns != nil {
 			delete(tracker.pendingTurns, job.ID)
 		}
-		m.storeChatEnvTrackerLocked(tracker)
 	}
 	m.envMu.Unlock()
 
 	m.recordCheckpointAfterTurn(ctx, snapshot, payload, currentRepos)
+	if !publish {
+		return
+	}
 	if m.observeChatEnv(payload, job.startOpts.ProviderLaneManaged) {
 		return
 	}

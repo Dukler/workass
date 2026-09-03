@@ -21,7 +21,7 @@ type historyMessage struct {
 	At      string
 }
 
-func TestNativeSessionLedgerPersistsAndRejectsStaleGeneration(t *testing.T) {
+func TestNativeSessionLedgerPersistsExactSessionOnly(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir)
@@ -36,27 +36,9 @@ func TestNativeSessionLedgerPersistsAndRejectsStaleGeneration(t *testing.T) {
 	if !ok || saved.Generation != 1 || saved.SessionID != "native-thread-1" {
 		t.Fatalf("saved binding = %#v", saved)
 	}
-	if ledger.markInFlight("tab-ledger", "chat-ledger", "codex", saved.SessionID, saved.Generation+1, "gpt", "agent", "future-operation", "future-digest") {
-		t.Fatal("stale/future generation unexpectedly dispatched a native operation")
-	}
-	if !ledger.markInFlight("tab-ledger", "chat-ledger", "codex", saved.SessionID, saved.Generation, "gpt", "agent", "operation-1", "prompt-digest-1") {
-		t.Fatal("could not persist native operation dispatch")
-	}
-	crashReload := newNativeSessionLedger(stateDir)
-	dirty, ok := crashReload.get("tab-ledger", "chat-ledger", "codex")
-	if !ok || dirty.PendingOperation == nil || dirty.PendingOperation.State != nativeOperationDispatched || dirty.PendingOperation.OperationID != "operation-1" {
-		t.Fatalf("crash-reloaded binding lost its dispatched operation: %#v", dirty)
-	}
-	if !ledger.markOperationConsumed("tab-ledger", "chat-ledger", "codex", saved.SessionID, "operation-1", "native-turn-1") {
-		t.Fatal("input-consumed receipt was not durable")
-	}
-	if !ledger.settleOperation("tab-ledger", "chat-ledger", "codex", saved.SessionID, "operation-1", "end_turn", "result-digest-1", "gpt", "agent") {
-		t.Fatal("terminal operation receipt was not durable")
-	}
-
 	reloaded := newNativeSessionLedger(stateDir)
 	got, ok := reloaded.get("tab-ledger", "chat-ledger", "codex")
-	if !ok || got.PendingOperation != nil || got.LastOperation == nil || got.LastOperation.State != nativeOperationTerminal || got.LastOperation.NativeTurnID != "native-turn-1" || got.ModelID != "gpt" || got.ModeID != "agent" {
+	if !ok || got.SessionID != saved.SessionID || !got.ThreadCommitted {
 		t.Fatalf("reloaded binding = %#v", got)
 	}
 	info, err := os.Stat(filepath.Join(stateDir, nativeSessionLedgerFilename))
@@ -72,87 +54,37 @@ func TestNativeSessionLedgerPersistsAndRejectsStaleGeneration(t *testing.T) {
 	}
 }
 
-func TestNativeOperationReadbackTransitionsAreDurableAndContradictionsFailClosed(t *testing.T) {
+func TestNativeSessionLedgerDropsLegacyTurnGateOnLoad(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
-	ledger := newNativeSessionLedger(stateDir)
-	if err := ledger.put(nativeSessionBinding{
-		TabID: "operation-tab", ChatID: "operation-chat", ProviderID: "codex",
-		SessionID: "operation-thread", CWD: stateDir, ThreadCommitted: true,
-	}); err != nil {
+	path := filepath.Join(stateDir, nativeSessionLedgerFilename)
+	disk := nativeSessionLedgerFile{Version: currentNativeLaneStoreVersion, Bindings: []nativeSessionBinding{{
+		TabID: "legacy-tab", ChatID: "legacy-chat", ProviderID: "codex", SessionID: "saved-session",
+		CWD: stateDir, ThreadCommitted: true, Generation: 1,
+		LegacyPendingOperation: json.RawMessage(`{"operationId":"stale","state":"consumed"}`),
+		LegacyLastOperation:    json.RawMessage(`{"operationId":"older","state":"terminal"}`),
+	}}}
+	raw, err := json.Marshal(disk)
+	if err != nil {
 		t.Fatal(err)
 	}
-	binding, _ := ledger.get("operation-tab", "operation-chat", "codex")
-	if !ledger.markInFlight(
-		binding.TabID, binding.ChatID, binding.ProviderID, binding.SessionID,
-		binding.Generation, "", "", "operation-absent", "digest-absent",
-	) {
-		t.Fatal("could not persist absent-operation fixture")
-	}
-	if !ledger.recordOperationReadback(
-		binding.TabID, binding.ChatID, binding.ProviderID, binding.SessionID,
-		"operation-absent", "", "absent", false, false, false,
-	) {
-		t.Fatal("authoritative absent readback was rejected")
-	}
-	afterAbsent, _ := ledger.get(binding.TabID, binding.ChatID, binding.ProviderID)
-	if afterAbsent.PendingOperation != nil || afterAbsent.LastOperation == nil || afterAbsent.LastOperation.State != nativeOperationAbsent {
-		t.Fatalf("absent operation was not settled safely: %#v", afterAbsent)
-	}
-
-	if !ledger.markInFlight(
-		binding.TabID, binding.ChatID, binding.ProviderID, binding.SessionID,
-		binding.Generation, "", "", "operation-consumed", "digest-consumed",
-	) || !ledger.markOperationConsumed(
-		binding.TabID, binding.ChatID, binding.ProviderID, binding.SessionID,
-		"operation-consumed", "native-turn-2",
-	) {
-		t.Fatal("could not persist consumed-operation fixture")
-	}
-	if ledger.recordOperationReadback(
-		binding.TabID, binding.ChatID, binding.ProviderID, binding.SessionID,
-		"operation-consumed", "", "absent", false, false, false,
-	) {
-		t.Fatal("readback contradicted a durable consumption receipt")
-	}
-	stillPending, _ := ledger.get(binding.TabID, binding.ChatID, binding.ProviderID)
-	if stillPending.PendingOperation == nil || stillPending.PendingOperation.State != nativeOperationConsumed {
-		t.Fatalf("contradictory readback released the operation: %#v", stillPending)
-	}
-	if !ledger.recordOperationReadback(
-		binding.TabID, binding.ChatID, binding.ProviderID, binding.SessionID,
-		"operation-consumed", "native-turn-2", "completed", true, true, true,
-	) {
-		t.Fatal("matching terminal readback was rejected")
-	}
-	reloaded := newNativeSessionLedger(stateDir)
-	terminal, _ := reloaded.get(binding.TabID, binding.ChatID, binding.ProviderID)
-	if terminal.PendingOperation != nil || terminal.LastOperation == nil || terminal.LastOperation.State != nativeOperationTerminal || terminal.LastOperation.NativeTurnID != "native-turn-2" {
-		t.Fatalf("terminal readback was not durable: %#v", terminal)
-	}
-}
-
-func TestNativeOperationWriteFailureDoesNotPublishDispatchInMemory(t *testing.T) {
-	t.Parallel()
-	stateDir := t.TempDir()
-	ledger := newNativeSessionLedger(stateDir)
-	if err := ledger.put(nativeSessionBinding{
-		TabID: "write-failure-tab", ChatID: "write-failure-chat", ProviderID: "codex",
-		SessionID: "write-failure-thread", CWD: stateDir, ThreadCommitted: true,
-	}); err != nil {
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	binding, _ := ledger.get("write-failure-tab", "write-failure-chat", "codex")
-	ledger.path = stateDir // rename onto an existing directory must fail.
-	if ledger.markInFlight(
-		binding.TabID, binding.ChatID, binding.ProviderID, binding.SessionID,
-		binding.Generation, "", "", "must-not-publish", "digest",
-	) {
-		t.Fatal("dispatch succeeded despite a failed durable write")
+	ledger := newNativeSessionLedger(stateDir)
+	if ledger.loadErr != nil {
+		t.Fatalf("load legacy turn fields: %v", ledger.loadErr)
 	}
-	got, _ := ledger.get(binding.TabID, binding.ChatID, binding.ProviderID)
-	if got.PendingOperation != nil {
-		t.Fatalf("failed durable write leaked an executable operation into memory: %#v", got.PendingOperation)
+	binding, ok := ledger.get("legacy-tab", "legacy-chat", "codex")
+	if !ok || binding.SessionID != "saved-session" || len(binding.LegacyPendingOperation) != 0 || len(binding.LegacyLastOperation) != 0 {
+		t.Fatalf("legacy migration changed session or retained turn gate: %#v ok=%v", binding, ok)
+	}
+	migrated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(migrated, []byte("pendingOperation")) || bytes.Contains(migrated, []byte("lastOperation")) {
+		t.Fatalf("legacy provider-turn fields remained on disk: %s", migrated)
 	}
 }
 
@@ -177,7 +109,7 @@ func TestProviderLaneStoreRejectsUnsupportedVersionWithoutWriting(t *testing.T) 
 	}
 }
 
-func TestDeferredCandidateRoundTripAndConsumptionCommitAreAtomic(t *testing.T) {
+func TestDeferredCandidateRoundTripAndThreadCommitAreAtomic(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
 	ledger := newNativeSessionLedger(stateDir)
@@ -192,23 +124,14 @@ func TestDeferredCandidateRoundTripAndConsumptionCommitAreAtomic(t *testing.T) {
 	if !ok || candidate.ThreadCommitted {
 		t.Fatalf("unconsumed candidate did not round-trip provisionally: ok=%v binding=%#v", ok, candidate)
 	}
-	if !reloaded.markInFlight(
-		candidate.TabID, candidate.ChatID, candidate.ProviderID, candidate.SessionID, candidate.Generation,
-		"gpt", "agent", "candidate-operation", "candidate-prompt-digest",
-	) {
-		t.Fatal("could not persist candidate input dispatch")
-	}
-	committed, ok := reloaded.markOperationConsumedAndCommit(
-		candidate.TabID, candidate.ChatID, candidate.ProviderID, candidate.SessionID,
-		"candidate-operation", "candidate-native-turn",
-	)
-	if !ok || !committed.ThreadCommitted || committed.PendingOperation == nil || committed.PendingOperation.State != nativeOperationConsumed {
-		t.Fatalf("candidate consumption did not atomically commit both receipts: ok=%v binding=%#v", ok, committed)
+	committed, ok := reloaded.commitThread(candidate.TabID, candidate.ChatID, candidate.ProviderID, candidate.SessionID)
+	if !ok || !committed.ThreadCommitted {
+		t.Fatalf("candidate input receipt did not commit the thread: ok=%v binding=%#v", ok, committed)
 	}
 	crashReload := newNativeSessionLedger(stateDir)
 	durable, ok := crashReload.get(candidate.TabID, candidate.ChatID, candidate.ProviderID)
-	if !ok || !durable.ThreadCommitted || durable.PendingOperation == nil || durable.PendingOperation.State != nativeOperationConsumed {
-		t.Fatalf("crash readback split the thread and input receipts: ok=%v binding=%#v", ok, durable)
+	if !ok || !durable.ThreadCommitted {
+		t.Fatalf("thread commit did not survive reload: ok=%v binding=%#v", ok, durable)
 	}
 }
 
@@ -647,98 +570,6 @@ func TestMockNativeSessionUnseenWorkassHistoryDoesNotGovernExactResume(t *testin
 	}
 }
 
-func TestMockNativeSessionInFlightGuardResumesExactThreadAndBlocksAdmission(t *testing.T) {
-	t.Parallel()
-	fixture := newPersistentMockFixture(t, "resume")
-	firstManager, firstEvents := fixture.newManager()
-	firstSession := fixture.newSession(t, firstManager)
-	firstEnd := fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "durable turn")
-	archiveHistoryForEndedJob(t, fixture.stateDir, firstEnd, "durable turn")
-	binding, ok := firstManager.nativeSessions.get("native-tab", "native-chat", "mock")
-	if !ok || !firstManager.nativeSessions.markInFlight("native-tab", "native-chat", "mock", firstSession.SessionID, binding.Generation, "", "", "operation-crash", "prompt-digest-crash") {
-		t.Fatal("could not simulate daemon death after provider prompt dispatch")
-	}
-	firstManager.Reset()
-
-	secondManager, secondEvents := fixture.newManager()
-	t.Cleanup(func() { secondManager.Reset() })
-	resumed := fixture.newSession(t, secondManager)
-	if resumed.SessionID != firstSession.SessionID {
-		t.Fatalf("in-flight ambiguity replaced the native thread: first=%s resumed=%s", firstSession.SessionID, resumed.SessionID)
-	}
-	end := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "recover after daemon crash")
-	job := jobFromEnd(end)
-	if asString(job["status"]) != "failed" || !strings.Contains(asString(job["result"]), "unresolved delivery operation") {
-		t.Fatalf("ambiguous in-flight lane did not block admission: %#v", job)
-	}
-	trace := readNativeMockTrace(t, fixture.traceFile)
-	if traceContains(trace, "recover after daemon crash") || persistentMockSessionCount(t, fixture.sessionFile) != 1 {
-		t.Fatalf("crash ambiguity replayed/replaced the native thread: %#v", trace)
-	}
-}
-
-func TestMockNativeSessionTerminalOperationReadbackClearsOnlyExactPendingID(t *testing.T) {
-	t.Parallel()
-	fixture := newPersistentMockFixture(t, "resume")
-	fixture.operationReadback = true
-	firstManager, firstEvents := fixture.newManager()
-	firstSession := fixture.newSession(t, firstManager)
-	fixture.runTurn(t, firstManager, firstEvents, firstSession.SessionID, "provider completed this operation")
-	binding, ok := firstManager.nativeSessions.get("native-tab", "native-chat", "mock")
-	if !ok || binding.LastOperation == nil || binding.LastOperation.OperationID == "" {
-		t.Fatalf("completed operation receipt missing: %#v", binding)
-	}
-	completedOperationID := binding.LastOperation.OperationID
-	if !firstManager.nativeSessions.markInFlight(
-		binding.TabID, binding.ChatID, binding.ProviderID, binding.SessionID,
-		binding.Generation, "", "", completedOperationID, "simulated-pre-terminal-commit",
-	) {
-		t.Fatal("could not simulate crash before terminal journal commit")
-	}
-	firstManager.Reset()
-
-	secondManager, secondEvents := fixture.newManager()
-	t.Cleanup(func() { secondManager.Reset() })
-	resumed := fixture.newSession(t, secondManager)
-	if resumed.SessionID != firstSession.SessionID {
-		t.Fatalf("operation reconciliation replaced native thread: first=%s resumed=%s", firstSession.SessionID, resumed.SessionID)
-	}
-	reconciled, ok := secondManager.nativeSessions.get("native-tab", "native-chat", "mock")
-	if !ok || reconciled.PendingOperation != nil || reconciled.LastOperation == nil || reconciled.LastOperation.State != nativeOperationTerminal || reconciled.LastOperation.OperationID != completedOperationID {
-		t.Fatalf("terminal provider readback did not settle exact operation: %#v", reconciled)
-	}
-	end := fixture.runTurn(t, secondManager, secondEvents, resumed.SessionID, "turn after terminal reconciliation")
-	if job := jobFromEnd(end); asString(job["status"]) != "done" {
-		t.Fatalf("reconciled lane did not admit the next turn: %#v", job)
-	}
-
-	// Reuse the reconciled lane to prove the other authoritative readback state:
-	// an operation absent from the provider is unsent and may be cleared.
-	binding, ok = secondManager.nativeSessions.get("native-tab", "native-chat", "mock")
-	if !ok || !secondManager.nativeSessions.markInFlight(
-		binding.TabID, binding.ChatID, binding.ProviderID, binding.SessionID,
-		binding.Generation, "", "", "operation-never-sent", "unsent-prompt-digest",
-	) {
-		t.Fatal("could not persist unsent operation fixture")
-	}
-	secondManager.Reset()
-
-	thirdManager, thirdEvents := fixture.newManager()
-	t.Cleanup(func() { thirdManager.Reset() })
-	resumedAbsent := fixture.newSession(t, thirdManager)
-	if resumedAbsent.SessionID != firstSession.SessionID {
-		t.Fatalf("absent readback replaced native thread: first=%s resumed=%s", firstSession.SessionID, resumedAbsent.SessionID)
-	}
-	absent, ok := thirdManager.nativeSessions.get("native-tab", "native-chat", "mock")
-	if !ok || absent.PendingOperation != nil || absent.LastOperation == nil || absent.LastOperation.State != nativeOperationAbsent || absent.LastOperation.OperationID != "operation-never-sent" {
-		t.Fatalf("authoritative absence did not clear the unsent operation: %#v", absent)
-	}
-	absentEnd := fixture.runTurn(t, thirdManager, thirdEvents, resumedAbsent.SessionID, "turn after absent reconciliation")
-	if job := jobFromEnd(absentEnd); asString(job["status"]) != "done" {
-		t.Fatalf("absent-reconciled lane did not admit the next turn: %#v", job)
-	}
-}
-
 // Regression: a hibernated engine keeps its session→bridge mapping so the
 // chat stays resolvable, but the replacement bridge that session/resumes the
 // same provider-native session must take ownership instead of failing with
@@ -803,13 +634,12 @@ func TestMockNativeSessionForeignLiveCollisionFailsClosed(t *testing.T) {
 }
 
 type persistentMockFixture struct {
-	t                 *testing.T
-	root              string
-	stateDir          string
-	sessionFile       string
-	traceFile         string
-	capability        string
-	operationReadback bool
+	t           *testing.T
+	root        string
+	stateDir    string
+	sessionFile string
+	traceFile   string
+	capability  string
 }
 
 func newPersistentMockFixture(t *testing.T, capability string) *persistentMockFixture {
@@ -836,7 +666,6 @@ func (f *persistentMockFixture) newManagerTuned(tune func(*Options)) (*Manager, 
 			Env: map[string]string{
 				"WORKASS_MOCK_ACP_DELAY_MS": "0", "WORKASS_MOCK_ACP_SESSION_STORE": f.sessionFile,
 				"WORKASS_MOCK_ACP_SESSION_CAPABILITY": f.capability, "WORKASS_MOCK_ACP_TRACE_FILE": f.traceFile,
-				"WORKASS_MOCK_ACP_OPERATION_READBACK": map[bool]string{true: "1", false: "0"}[f.operationReadback],
 			},
 		},
 		Broadcast: events.Broadcast, StdoutFlushInterval: 5 * time.Millisecond,

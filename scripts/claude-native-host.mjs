@@ -417,9 +417,8 @@ class ClaudeSession {
     // Stop-hook evidence for the turn currently ending, held until its terminal
     // result so the daemon receives one atomic turn-end record.
     this.stopEvidence = null;
-    // True while a turn the harness started — not the user — is running. Cancel
-    // and turn reconciliation both key off it; without it they address the
-    // previous turn.
+    // True while a turn the harness started — not the user — is running.
+    // Explicit cancel keys off it so it cannot address the previous turn.
     this.harnessTurnActive = false;
     this.steers = new SteerLedger();
     this.startedTurns = false;
@@ -1595,7 +1594,6 @@ async function handleRequest(message) {
         workassClaudeSteerRequest: true,
         workassClaudeSteerReceipt: true,
         workassClaudeUsageRequest: true,
-		workassTurnReconcileRequest: true,
 		workassStableTurnInputV1: true,
         // Advertised so the daemon can tell "old host" (absent commandCatalog
         // = UNKNOWN) apart from "proven empty" ([] from a host that looked).
@@ -1632,15 +1630,6 @@ async function handleRequest(message) {
   }
   if (method === '_workass/claude/usage') {
     respond(id, await session.usage());
-    return;
-  }
-  if (method === '_workass/turn/reconcile') {
-    // D2: during an adopted harness turn the previous turn's status is still
-    // 'completed'. Reporting that as terminal would let the daemon reconcile a
-    // live turn out of existence.
-    const status = session.harnessTurnActive ? 'active' : session.turnStatus;
-    const terminal = ['completed', 'failed', 'interrupted'].includes(status);
-    respond(id, { status, terminal, reconciled: terminal });
     return;
   }
   if (method === 'session/close') {

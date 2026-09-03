@@ -160,7 +160,11 @@ func cancelReceiptForOperation(state chat.State, operationID providercontract.Op
 
 func cancelResultFromReceipt(entry chat.OutboxEntry) (acp.JobCancelResult, bool) {
 	switch entry.Status {
-	case chat.OutboxAccepted, chat.OutboxConsumed, chat.OutboxCompleted:
+	case chat.OutboxDispatched, chat.OutboxAccepted, chat.OutboxConsumed, chat.OutboxCompleted:
+		// Dispatched means the local coordinator has durably claimed this exact
+		// Stop. A generic drain can win that claim just before ExecuteCancel; do
+		// not misreport the accepted user control as pending merely because its
+		// in-process executor has not yet stored the acknowledgement.
 		return acp.JobCancelResult{Cancelled: true, Reason: "cancelled"}, true
 	case chat.OutboxAmbiguous:
 		return acp.JobCancelResult{Cancelled: false, Reason: "uncertain"}, true

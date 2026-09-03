@@ -83,14 +83,14 @@ func TestAdmissionRejectionPersistsVisibleFailedTurnWithoutClaimingNativeConsump
 	if user.MessageID != "public-user" || user.Text != "keep this prompt" || user.Status != "done" {
 		t.Fatalf("rejected user row = %#v", user)
 	}
-	if assistant.MessageID != "public-assistant" || assistant.Status != "failed" || !assistant.Interrupted || assistant.RetryPrompt != "keep this prompt" {
+	if assistant.MessageID != "public-assistant" || assistant.Status != "failed" || !assistant.Interrupted || assistant.RetryPrompt != "" {
 		t.Fatalf("rejected assistant row = %#v", assistant)
 	}
 	if assistant.Terminal == nil || assistant.Terminal.Status != "failed" || assistant.Terminal.Error != string(provider.ErrorProviderUnavailable) {
 		t.Fatalf("rejected terminal receipt = %#v", assistant.Terminal)
 	}
 	lane := state.Lanes[laneID.ID]
-	if lane.Phase != LaneBlocked || lane.CoveredThrough != 2 || lane.Coverage[1].Status != CoverageExcluded || lane.Coverage[2].Status != CoverageExcluded {
+	if lane.Phase != LaneDetached || lane.CoveredThrough != 2 || lane.Coverage[1].Status != CoverageExcluded || lane.Coverage[2].Status != CoverageExcluded {
 		t.Fatalf("rejected lane coverage = %#v", lane)
 	}
 	if err := state.Validate(); err != nil {
@@ -403,7 +403,11 @@ func TestCreateFailureRemainsAbsentUntilExplicitIntent(t *testing.T) {
 				t.Fatalf("create failure retried without user intent: %#v", effects)
 			}
 			lane := state.Lanes[identity.ID]
-			if lane.Phase != LaneAbsent || !lane.Thread.IsZero() || lane.Provision != nil || !lane.CreationFailedBeforeEstablishment() {
+			wantPhase := LaneAbsent
+			if test.ambiguous {
+				wantPhase = LaneBlocked
+			}
+			if lane.Phase != wantPhase || !lane.Thread.IsZero() || lane.Provision != nil || !lane.CreationFailedBeforeEstablishment() {
 				t.Fatalf("pre-establishment create failure = %#v", lane)
 			}
 			if len(state.Outbox) != 1 || state.Outbox[0].ID != firstCreate || state.Outbox[0].Status != test.status {
@@ -441,56 +445,31 @@ func TestCreateFailureRemainsAbsentUntilExplicitIntent(t *testing.T) {
 	}
 }
 
-func TestAmbiguousAdmissionUsesReadbackOrTerminalNoResendBoundary(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		readback bool
-	}{
-		{name: "readback available", readback: true},
-		{name: "readback unavailable", readback: false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			state, _ := NewState("ambiguous-admission-" + strings.ReplaceAll(test.name, " ", "-"))
-			laneID := testLane(state.ChatID, "provider")
-			state, _ = apply(t, state, SelectLane{Identity: laneID})
-			state, _ = apply(t, state, LaneOpened{
-				LaneID:               laneID.ID,
-				Thread:               provider.ThreadRef{ProviderID: "provider", RootID: "thread", HeadID: "thread", Lineage: 1},
-				ConnectionGeneration: 1,
-				Context:              exactContext(provider.ContextImportUnsupported),
-				Delivery:             provider.DeliveryCapabilities{StableInputIdentity: true, TurnReadback: test.readback},
-			})
-			state, _ = apply(t, state, Submit{
-				OperationID: "ambiguous", Text: "send once",
-				Presentation: provider.TurnPresentation{Origin: "human"},
-			})
-			state, effects := apply(t, state, TurnAdmitted{OperationID: "ambiguous", Ambiguous: true})
-			if test.readback {
-				if state.Foreground == nil || state.Foreground.Status != ForegroundReconciling || state.Lanes[laneID.ID].Phase != LaneReconciling {
-					t.Fatalf("safe ambiguous admission did not enter readback: %#v", state)
-				}
-				if len(effects) != 1 {
-					t.Fatalf("safe ambiguous admission effects = %#v", effects)
-				}
-				readback, ok := effects[0].(ReconcileTurnEffect)
-				if !ok || readback.OperationID != "ambiguous" || strings.TrimSpace(readback.Turn.NativeID) == "" {
-					t.Fatalf("safe ambiguous admission readback = %#v", effects[0])
-				}
-				return
-			}
-			if len(effects) != 0 {
-				t.Fatalf("unreadable ambiguous admission emitted provider effects: %#v", effects)
-			}
-			assertUnrecoverableTurnTerminalized(t, state, laneID.ID, "ambiguous", provider.ErrorAcceptanceAmbiguous)
-			revision := state.Revision
-			next, retryEffects, err := Reduce(state, Submit{
-				OperationID: "unsafe-retry", Text: "do not queue behind a broken lane",
-				Presentation: provider.TurnPresentation{Origin: "human"},
-			})
-			if err == nil || len(retryEffects) != 0 || next.Revision != revision || !reflect.DeepEqual(next, state) {
-				t.Fatalf("blocked lane accepted an undispatchable retry: err=%v effects=%#v", err, retryEffects)
-			}
-		})
+func TestAmbiguousAdmissionEndsTurnAndLeavesLaneAvailable(t *testing.T) {
+	state, _ := NewState("ambiguous-admission")
+	laneID := testLane(state.ChatID, "provider")
+	thread := provider.ThreadRef{ProviderID: "provider", RootID: "thread", HeadID: "thread", Lineage: 1}
+	state, _ = apply(t, state, SelectLane{Identity: laneID})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID: laneID.ID, Thread: thread, ConnectionGeneration: 1,
+		Context: exactContext(provider.ContextImportUnsupported), Delivery: provider.DeliveryCapabilities{StableInputIdentity: true},
+	})
+	state, _ = apply(t, state, Submit{
+		OperationID: "ambiguous", Text: "send once", Presentation: provider.TurnPresentation{Origin: "human"},
+	})
+	state, effects := apply(t, state, TurnAdmitted{OperationID: "ambiguous", Ambiguous: true})
+	if len(effects) != 0 || state.Foreground != nil || state.Lanes[laneID.ID].Phase != LaneDetached {
+		t.Fatalf("ambiguous admission retained Workass turn ownership: state=%#v effects=%#v", state, effects)
+	}
+	state, effects = apply(t, state, Submit{
+		OperationID: "next", Text: "continue", Presentation: provider.TurnPresentation{Origin: "human"},
+	})
+	if len(effects) != 1 {
+		t.Fatalf("next prompt effects = %#v", effects)
+	}
+	resume, ok := effects[0].(ResumeLaneEffect)
+	if !ok || !resume.Thread.Equal(thread) {
+		t.Fatalf("next prompt did not resume the saved provider session: %#v", effects[0])
 	}
 }
 
@@ -530,10 +509,9 @@ func TestEstablishedResumeFailureNeverCreatesReplacementThread(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		ambiguous bool
-		phase     LanePhase
 	}{
-		{name: "deterministic", phase: LaneBroken},
-		{name: "ambiguous", ambiguous: true, phase: LaneBlocked},
+		{name: "deterministic"},
+		{name: "ambiguous", ambiguous: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			state, _ := NewState("chat")
@@ -556,20 +534,16 @@ func TestEstablishedResumeFailureNeverCreatesReplacementThread(t *testing.T) {
 				LaneID: identity.ID, Kind: provider.ErrorNativeThreadMissing, Ambiguous: test.ambiguous,
 			})
 			lane := state.Lanes[identity.ID]
-			if lane.Phase != test.phase || !lane.Thread.Equal(thread) || lane.CreationFailedBeforeEstablishment() {
+			if lane.Phase != LaneDetached || !lane.Thread.Equal(thread) || lane.CreationFailedBeforeEstablishment() {
 				t.Fatalf("established resume failure changed identity: %#v", lane)
 			}
 			state, effects = apply(t, state, SelectLane{Identity: identity})
-			if len(effects) != 0 {
-				t.Fatalf("selection replaced an established failed thread: %#v", effects)
-			}
-			state, effects = apply(t, state, RetryLane{LaneID: identity.ID})
 			if len(effects) != 1 {
-				t.Fatalf("exact retry effects = %#v", effects)
+				t.Fatalf("new selection did not reattach the saved thread: %#v", effects)
 			}
 			resume, ok := effects[0].(ResumeLaneEffect)
 			if !ok || !resume.Thread.Equal(thread) {
-				t.Fatalf("exact retry changed native thread: %#v", effects[0])
+				t.Fatalf("new selection changed native thread: %#v", effects[0])
 			}
 		})
 	}
@@ -579,10 +553,9 @@ func TestSelectingTransientlyDisconnectedEstablishedLaneResumesSavedThread(t *te
 	for _, test := range []struct {
 		name      string
 		ambiguous bool
-		phase     LanePhase
 	}{
-		{name: "definitive transport failure", phase: LaneBroken},
-		{name: "ambiguous transport failure", ambiguous: true, phase: LaneBlocked},
+		{name: "definitive transport failure"},
+		{name: "ambiguous transport failure", ambiguous: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			state, _ := NewState("chat")
@@ -603,8 +576,8 @@ func TestSelectingTransientlyDisconnectedEstablishedLaneResumesSavedThread(t *te
 			state, _ = apply(t, state, LaneOpenFailed{
 				LaneID: identity.ID, Kind: provider.ErrorTransientTransport, Ambiguous: test.ambiguous,
 			})
-			if state.Lanes[identity.ID].Phase != test.phase {
-				t.Fatalf("transport failure phase = %q, want %q", state.Lanes[identity.ID].Phase, test.phase)
+			if state.Lanes[identity.ID].Phase != LaneDetached {
+				t.Fatalf("transport failure phase = %q, want detached", state.Lanes[identity.ID].Phase)
 			}
 
 			state, effects = apply(t, state, SelectLane{Identity: identity})
@@ -632,7 +605,7 @@ func TestDeferredProviderThreadExistsOnlyAfterMatchingInputReceipt(t *testing.T)
 	state, _ := NewState("chat")
 	laneID := testLane("chat", "codex")
 	creation := provider.CreationCapabilities{DeferredUntilInput: true}
-	delivery := provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true}
+	delivery := provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true}
 	candidate := provider.ThreadRef{ProviderID: "codex", RootID: "candidate", HeadID: "candidate", Lineage: 1}
 
 	state, effects := apply(t, state, SelectLane{Identity: laneID, Creation: creation})
@@ -717,7 +690,7 @@ func TestDeferredProviderCrashReconcilesExactCandidateBeforeAnyResend(t *testing
 	state, _ := NewState("chat")
 	laneID := testLane("chat", "codex")
 	creation := provider.CreationCapabilities{DeferredUntilInput: true}
-	delivery := provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true}
+	delivery := provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true}
 	first := provider.ThreadRef{ProviderID: "codex", RootID: "candidate-1", HeadID: "candidate-1", Lineage: 1}
 	second := provider.ThreadRef{ProviderID: "codex", RootID: "candidate-2", HeadID: "candidate-2", Lineage: 1}
 
@@ -755,31 +728,24 @@ func TestDeferredProviderCrashReconcilesExactCandidateBeforeAnyResend(t *testing
 		}
 	})
 
-	t.Run("successful exact resume proves the original candidate", func(t *testing.T) {
+	t.Run("admitted candidate loss ends turn and next input reattaches candidate", func(t *testing.T) {
 		admitted, _ := apply(t, state.Clone(), TurnAdmitted{
 			OperationID: "first-input", Accepted: true,
 			Turn: provider.TurnRef{OperationID: "first-input", NativeID: "native-turn"},
 		})
 		lost, effects := apply(t, admitted, HostLost{LaneID: laneID.ID, ConnectionGeneration: 1})
-		if len(effects) != 1 {
-			t.Fatalf("admitted candidate crash did not request exact reconciliation: %#v", effects)
+		if len(effects) != 0 || lost.Foreground != nil || lost.Lanes[laneID.ID].Phase != LaneAbsent {
+			t.Fatalf("admitted candidate crash retained turn control: state=%#v effects=%#v", lost, effects)
 		}
-		reconcile, ok := effects[0].(CreateLaneEffect)
-		if !ok || !reconcile.Reconcile || !reconcile.CreateAfterCandidateAbsence || reconcile.Generation != 2 {
-			t.Fatalf("admitted candidate crash effect = %#v", effects[0])
-		}
-		resumed, effects := apply(t, lost, LaneOpened{
-			LaneID: laneID.ID, Identity: laneID, Thread: first, ConnectionGeneration: 2,
-			Context: exactContext(provider.ContextImportUnsupported), Delivery: delivery, Reconciled: true,
+		lost, effects = apply(t, lost, Submit{
+			OperationID: "second-input", Text: "continue", Presentation: provider.TurnPresentation{Origin: "human"},
 		})
-		if !resumed.Lanes[laneID.ID].Thread.Equal(first) || resumed.Lanes[laneID.ID].Provision != nil {
-			t.Fatalf("exact resume did not prove the original candidate: %#v", resumed.Lanes[laneID.ID])
-		}
 		if len(effects) != 1 {
-			t.Fatalf("exact resume did not read back the admitted operation: %#v", effects)
+			t.Fatalf("next input did not request candidate attachment: %#v", effects)
 		}
-		if readback, ok := effects[0].(ReconcileTurnEffect); !ok || readback.OperationID != "first-input" {
-			t.Fatalf("exact resume effect = %#v", effects[0])
+		attach, ok := effects[0].(CreateLaneEffect)
+		if !ok || !attach.Reconcile || !attach.CreateAfterCandidateAbsence || attach.Generation != 2 {
+			t.Fatalf("next input candidate attachment = %#v", effects[0])
 		}
 	})
 }
@@ -1337,7 +1303,7 @@ func TestTerminalEventPreservesCompleteSemanticsAndSettlesOpenActivity(t *testin
 		t.Fatalf("terminal ledger = %#v", state.Ledger)
 	}
 	assistant := state.Ledger[1]
-	if assistant.Text != "canonical whole turn" || assistant.Status != "failed" || assistant.At != "2026-08-11T12:00:10Z" || !assistant.Interrupted || assistant.RetryPrompt != "question" || len(assistant.Attachments) != 1 {
+	if assistant.Text != "canonical whole turn" || assistant.Status != "failed" || assistant.At != "2026-08-11T12:00:10Z" || !assistant.Interrupted || assistant.RetryPrompt != "" || len(assistant.Attachments) != 1 {
 		t.Fatalf("terminal assistant projection state = %#v", assistant)
 	}
 	if assistant.Terminal == nil || assistant.Terminal.Error != "boom" || !assistant.Terminal.CrashInterrupted || assistant.Terminal.DispositionState != "needs_input" || assistant.Terminal.Code == nil || *assistant.Terminal.Code != 1 {

@@ -18,6 +18,7 @@ let resolveArchived: (chat: unknown, status: string, now: number, touched: numbe
 let lastTouchedAt: (chat: Chat) => number;
 let orderSearchRows: (rows: readonly any[]) => any[];
 let orderSidebarRows: (rows: readonly any[]) => any[];
+let canDropSidebarRow: (draggedId: string | null | undefined, targetId: string) => boolean;
 let canSettle: (status: string) => boolean;
 let resolveStatus: (chat: Chat, live: boolean, active: boolean, obligation?: { state: string }) => string;
 let isFullSizeSidebarRow: (settled: boolean, archived: boolean) => boolean;
@@ -36,6 +37,7 @@ before(async () => {
   lastTouchedAt = sidebar.lastTouchedAt;
   orderSearchRows = sidebar.orderSearchRows;
   orderSidebarRows = sidebar.orderSidebarRows;
+  canDropSidebarRow = sidebar.canDropSidebarRow;
   canSettle = sidebar.canSettle;
   resolveStatus = sidebar.resolveStatus;
   isFullSizeSidebarRow = sidebar.isFullSizeSidebarRow;
@@ -124,18 +126,25 @@ test('metadata-only old chats stay automatically settled without resident messag
   assert.equal(resolveArchived(subject, 'ready', now, touched), false);
 });
 
-test('search ordering appends archived matches while preserving manual order inside each shelf', () => {
+test('search ordering preserves one manual order across every lifecycle state', () => {
   const row = (id: string, archived: boolean, order: number, card = false) => ({
     chat: { id }, archived, order, card, status: 'ready', settled: archived, touched: 0,
   });
   const ordered = orderSearchRows([
-    row('archived-second', true, 3),
-    row('shelved', false, 1),
+    row('archived-top', true, 0),
+    row('shelved-bottom', false, 3),
     row('archived-first', true, 2),
-    row('live', false, 0, true),
+    row('live', false, 1, true),
   ]);
 
-  assert.deepEqual(ordered.map((item) => item.chat.id), ['live', 'shelved', 'archived-first', 'archived-second']);
+  assert.deepEqual(ordered.map((item) => item.chat.id), ['archived-top', 'live', 'archived-first', 'shelved-bottom']);
+});
+
+test('dragging has no machine or lifecycle lane guard', () => {
+  assert.equal(canDropSidebarRow('remote-settled', 'local-live'), true);
+  assert.equal(canDropSidebarRow('local-archived', 'remote-working'), true);
+  assert.equal(canDropSidebarRow('same', 'same'), false);
+  assert.equal(canDropSidebarRow(null, 'target'), false);
 });
 
 test('ordinary sidebar rows follow persisted manual order instead of status or recency', () => {

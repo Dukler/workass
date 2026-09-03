@@ -28,6 +28,10 @@ func (m *Manager) unregisterProviderLane(lane *managerLane) {
 	for jobID, owner := range m.providerLanesByJob {
 		if owner == lane {
 			delete(m.providerLanesByJob, jobID)
+			// Host loss is already a terminal actor event. Fence the abandoned
+			// attachment immediately so the same operation can never be rebound
+			// to a replacement process or resumed behind the user's back.
+			m.providerLaneClosedJobs[jobID] = struct{}{}
 		}
 	}
 	m.providerLaneMu.Unlock()
@@ -35,6 +39,9 @@ func (m *Manager) unregisterProviderLane(lane *managerLane) {
 
 func (m *Manager) bindProviderLaneJob(lane *managerLane, jobID string, operationID providercontract.OperationID) {
 	if m == nil || lane == nil || strings.TrimSpace(jobID) == "" || operationID == "" {
+		return
+	}
+	if m.providerLaneClosedJob(jobID) {
 		return
 	}
 	lane.mu.Lock()
@@ -453,6 +460,13 @@ func (m *Manager) observeProviderLaneJobEvent(payload map[string]any) error {
 	case "end":
 		job := mapFromAny(payload["job"])
 		jobID := strings.TrimSpace(asString(job["id"]))
+		if m.providerLaneClosedJob(jobID) && boolFromAny(job["crashInterrupted"]) {
+			// LaneDetached already terminalized the durable actor. This manager
+			// receipt only closes the frozen UI job card; feeding it back into the
+			// actor would create a second turn owner.
+			m.forgetProviderLaneManagedJob(jobID)
+			return nil
+		}
 		if err := m.rejectClosedProviderLaneJob(jobID, "terminal"); err != nil {
 			return err
 		}

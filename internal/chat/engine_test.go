@@ -41,7 +41,7 @@ func (s *memoryStateStore) Save(state State) error {
 
 func openReadyDurableLane(t *testing.T, engine *Engine, lane provider.LaneIdentity) {
 	openReadyDurableLaneWithDelivery(t, engine, lane, provider.DeliveryCapabilities{
-		StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true,
+		StableInputIdentity: true, ConsumptionReceipt: true,
 	})
 }
 
@@ -250,7 +250,7 @@ func TestCrashAfterTurnDispatchTerminalizesWithoutResend(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := restarted.Snapshot()
-	assertUnrecoverableTurnTerminalized(t, snapshot, lane.ID, "op", provider.ErrorAcceptanceAmbiguous)
+	assertInterruptedTurnTerminalized(t, snapshot, lane.ID, "op", provider.ErrorTransientTransport)
 	if got := snapshot.Outbox[len(snapshot.Outbox)-1].Status; got != OutboxAmbiguous {
 		t.Fatalf("turn outbox status = %q", got)
 	}
@@ -409,7 +409,7 @@ func TestRestartAttachesExactLaneBeforePendingTurn(t *testing.T) {
 	if err := restarted.Apply(LaneOpened{
 		LaneID: lane.ID, Identity: lane, Thread: resume.Thread,
 		ConnectionGeneration: resume.Generation, Context: exactContext(provider.ContextImportNonSampling),
-		Delivery: provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true},
+		Delivery: provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +423,7 @@ func TestRestartAttachesExactLaneBeforePendingTurn(t *testing.T) {
 	}
 }
 
-func TestCrashAfterAdmissionQueuesReadbackNotResend(t *testing.T) {
+func TestCrashAfterAdmissionTerminalizesAndNextPromptResumesSavedThread(t *testing.T) {
 	store := &memoryStateStore{}
 	engine, err := NewDurableEngine("chat", store)
 	if err != nil {
@@ -448,31 +448,27 @@ func TestCrashAfterAdmissionQueuesReadbackNotResend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	effect, ok, err := restarted.ClaimNext()
-	if err != nil || !ok {
-		t.Fatalf("claim exact resume: ok=%v err=%v", ok, err)
+	state := restarted.Snapshot()
+	if state.Foreground != nil || len(state.Ledger) != 2 || state.Lanes[lane.ID].Phase != LaneDetached {
+		t.Fatalf("restart retained provider-turn ownership: %#v", state)
 	}
-	resume, ok := effect.(ResumeLaneEffect)
-	if !ok {
-		t.Fatalf("post-admission crash claimed %T, want exact resume", effect)
+	if _, ok, err := restarted.ClaimNext(); err != nil || ok {
+		t.Fatalf("restart manufactured provider work: ok=%v err=%v", ok, err)
 	}
-	if err := restarted.Apply(LaneOpened{
-		LaneID: lane.ID, Identity: lane, Thread: resume.Thread,
-		ConnectionGeneration: resume.Generation, Context: exactContext(provider.ContextImportNonSampling),
-		Delivery: provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true},
-	}); err != nil {
+	if err := restarted.Apply(Submit{OperationID: "op-next", Text: "continue", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
-	effect, ok, err = restarted.ClaimNext()
+	effect, ok, err := restarted.ClaimNext()
 	if err != nil || !ok {
-		t.Fatalf("claim reconciliation after resume: ok=%v err=%v", ok, err)
+		t.Fatalf("claim next prompt attachment: ok=%v err=%v", ok, err)
 	}
-	if _, ok := effect.(ReconcileTurnEffect); !ok {
-		t.Fatalf("post-resume recovery claimed %T, want reconciliation", effect)
+	resume, ok := effect.(ResumeLaneEffect)
+	if !ok || resume.Thread.RootID != "native-thread" {
+		t.Fatalf("next prompt did not resume saved thread: %#v", effect)
 	}
 }
 
-func TestCrashDuringExactResumeMayRetrySameThread(t *testing.T) {
+func TestCrashDuringExactResumeWaitsForNewIntent(t *testing.T) {
 	store := &memoryStateStore{}
 	engine, err := NewDurableEngine("chat", store)
 	if err != nil {
@@ -496,13 +492,19 @@ func TestCrashDuringExactResumeMayRetrySameThread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if second, ok, err := restarted.ClaimNext(); err != nil || ok {
+		t.Fatalf("restart retried the stale attachment: effect=%#v ok=%v err=%v", second, ok, err)
+	}
+	if err := restarted.Apply(Submit{OperationID: "resume-next", Text: "new prompt", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
+		t.Fatal(err)
+	}
 	second, ok, err := restarted.ClaimNext()
 	if err != nil || !ok {
-		t.Fatalf("reclaim exact resume: ok=%v err=%v", ok, err)
+		t.Fatalf("new prompt did not request exact resume: ok=%v err=%v", ok, err)
 	}
 	retry := second.(ResumeLaneEffect)
-	if !retry.Thread.Equal(resume.Thread) || retry.Generation != resume.Generation {
-		t.Fatalf("resume retry changed identity: first=%#v retry=%#v", resume, retry)
+	if !retry.Thread.Equal(resume.Thread) || retry.Generation <= resume.Generation {
+		t.Fatalf("new prompt changed or reused stale attachment identity: first=%#v next=%#v", resume, retry)
 	}
 }
 
@@ -523,7 +525,7 @@ func TestPersistenceFailureDoesNotPublishTransition(t *testing.T) {
 	}
 }
 
-func TestCrashRecoveryNeverBlindlyResendsSteerButMayRepeatCancel(t *testing.T) {
+func TestCrashRecoveryNeverResendsTurnOrSteer(t *testing.T) {
 	store := &memoryStateStore{}
 	engine, err := NewDurableEngine("chat", store)
 	if err != nil {
@@ -556,57 +558,57 @@ func TestCrashRecoveryNeverBlindlyResendsSteerButMayRepeatCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := restarted.Snapshot()
-	if snapshot.PendingSteer == nil || snapshot.PendingSteer.Status != SteerUncertain || !outboxHas(&snapshot, steerEffectID("steer"), OutboxAmbiguous) {
-		t.Fatalf("crashed steer did not fail closed: %#v", snapshot)
+	if snapshot.Foreground != nil || snapshot.PendingSteer != nil || !outboxHas(&snapshot, steerEffectID("steer"), OutboxAmbiguous) {
+		t.Fatalf("crashed turn and steer were not terminalized fail-closed: %#v", snapshot)
+	}
+	if len(snapshot.Ledger) < 3 || snapshot.Ledger[len(snapshot.Ledger)-1].SteerState != string(SteerUncertain) {
+		t.Fatalf("crashed steer lost its visible uncertain receipt: %#v", snapshot.Ledger)
 	}
 	for _, entry := range snapshot.Outbox {
 		if entry.Kind == EffectSteerTurn && entry.Status == OutboxPending {
 			t.Fatalf("uncertain steer was made retryable: %#v", entry)
 		}
 	}
+}
 
-	// A cancellation is idempotent control of the exact same native turn, so it
-	// is the one control operation recovery may safely reclaim.
-	snapshot.PendingSteer = nil
-	for index := range snapshot.Outbox {
-		snapshot.Outbox[index].Status = OutboxCompleted
-	}
-	store.state = snapshot
-	recoveredForCancel, err := NewDurableEngine("chat", store)
+func TestCrashRecoveryNeverReplaysDispatchedCancel(t *testing.T) {
+	store := &memoryStateStore{}
+	engine, err := NewDurableEngine("cancel-crash-chat", store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := recoveredForCancel.Apply(CancelTurn{OperationID: "cancel"}); err != nil {
+	lane := testLane("cancel-crash-chat", "alpha")
+	openReadyDurableLane(t, engine, lane)
+	if err := engine.Apply(Submit{OperationID: "turn", Text: "work", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
 		t.Fatal(err)
 	}
-	firstRecovery, ok, err := recoveredForCancel.ClaimNext()
-	if err != nil || !ok {
-		t.Fatalf("claim lane recovery: ok=%v err=%v", ok, err)
+	if _, ok, err := engine.ClaimNext(); err != nil || !ok {
+		t.Fatalf("claim turn: ok=%v err=%v", ok, err)
 	}
-	resume, ok := firstRecovery.(ResumeLaneEffect)
-	if !ok {
-		t.Fatalf("claim before cancel = %T, want exact resume", firstRecovery)
-	}
-	if err := recoveredForCancel.Apply(LaneOpened{
-		LaneID: lane.ID, Identity: lane, Thread: resume.Thread,
-		ConnectionGeneration: resume.Generation, Context: exactContext(provider.ContextImportNonSampling),
-		Delivery: provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true},
+	if err := engine.Apply(TurnAdmitted{
+		OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if effect, ok, err := recoveredForCancel.ClaimNext(); err != nil || !ok {
-		t.Fatalf("claim cancellation after resume: ok=%v err=%v", ok, err)
-	} else if _, ok := effect.(CancelTurnEffect); !ok {
-		t.Fatalf("claimed %T after resume, want cancel", effect)
+	if err := engine.Apply(CancelTurn{OperationID: "cancel"}); err != nil {
+		t.Fatal(err)
 	}
-	restartedAgain, err := NewDurableEngine("chat", store)
+	if effect, ok, err := engine.ClaimNext(); err != nil || !ok {
+		t.Fatalf("claim cancel: ok=%v err=%v", ok, err)
+	} else if _, ok := effect.(CancelTurnEffect); !ok {
+		t.Fatalf("claimed %T, want cancel", effect)
+	}
+
+	restarted, err := NewDurableEngine("cancel-crash-chat", store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if effect, ok, err := restartedAgain.ClaimNext(); err != nil || !ok {
-		t.Fatalf("reclaim idempotent cancel: ok=%v err=%v", ok, err)
-	} else if _, ok := effect.(CancelTurnEffect); !ok {
-		t.Fatalf("reclaimed %T, want cancel", effect)
+	snapshot := restarted.Snapshot()
+	if snapshot.Foreground != nil || snapshot.PendingCancel != nil || !outboxHas(&snapshot, cancelEffectID("cancel"), OutboxAmbiguous) {
+		t.Fatalf("dispatched cancel survived restart as live turn control: %#v", snapshot)
+	}
+	if effect, claimed, err := restarted.ClaimNext(); err != nil || claimed {
+		t.Fatalf("restart replayed provider turn control: effect=%#v claimed=%v err=%v", effect, claimed, err)
 	}
 }
 
@@ -652,7 +654,7 @@ func TestCrashAfterPermissionDecisionFailsClosedWithoutResend(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := restarted.Snapshot()
-	if snapshot.Permissions["permission"].Event.Status != "uncertain" || !outboxHas(&snapshot, permissionEffectID("decision"), OutboxAmbiguous) {
+	if snapshot.Foreground != nil || len(snapshot.Permissions) != 0 || !outboxHas(&snapshot, permissionEffectID("decision"), OutboxAmbiguous) {
 		t.Fatalf("permission decision was not failed closed: %#v", snapshot)
 	}
 	for _, entry := range snapshot.Outbox {

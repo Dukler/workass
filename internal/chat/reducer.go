@@ -97,12 +97,6 @@ type LineageAdvanced struct {
 
 func (LineageAdvanced) chatCommand() {}
 
-type RetryLane struct {
-	LaneID provider.LaneID
-}
-
-func (RetryLane) chatCommand() {}
-
 type Submit struct {
 	OperationID  provider.OperationID
 	LaneID       provider.LaneID
@@ -248,18 +242,6 @@ type TurnAdmissionFailed struct {
 }
 
 func (TurnAdmissionFailed) chatCommand() {}
-
-type TurnReconciled struct {
-	OperationID provider.OperationID
-	Turn        provider.TurnRef
-	Kind        provider.ErrorKind
-	Found       bool
-	Consumed    bool
-	Terminal    bool
-	Status      string
-}
-
-func (TurnReconciled) chatCommand() {}
 
 type InputConsumed struct {
 	OperationID provider.OperationID
@@ -430,14 +412,6 @@ type StartTurnEffect struct {
 }
 
 func (StartTurnEffect) chatEffect() {}
-
-type ReconcileTurnEffect struct {
-	LaneID      provider.LaneID
-	OperationID provider.OperationID
-	Turn        provider.TurnRef
-}
-
-func (ReconcileTurnEffect) chatEffect() {}
 
 type SteerTurnEffect struct {
 	LaneID       provider.LaneID
@@ -613,8 +587,6 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 		effects, err = reduceLaneOpenFailed(&next, command)
 	case LineageAdvanced:
 		err = reduceLineageAdvanced(&next, command)
-	case RetryLane:
-		effects, err = reduceRetryLane(&next, command)
 	case Submit:
 		effects, err = reduceSubmit(&next, command)
 	case Steer:
@@ -661,8 +633,6 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 		effects, err = reduceTurnAdmitted(&next, command)
 	case TurnAdmissionFailed:
 		effects, err = reduceTurnAdmissionFailed(&next, command)
-	case TurnReconciled:
-		effects, err = reduceTurnReconciled(&next, command)
 	case InputConsumed:
 		err = reduceInputConsumed(&next, command)
 	case TurnCompleted:
@@ -1636,12 +1606,9 @@ func reduceSelectLane(state *State, command SelectLane) ([]Effect, error) {
 		}
 		if state.Foreground == nil && existing.PendingImport == nil && existing.Provision == nil &&
 			existing.Attachment == nil && !existing.Thread.IsZero() &&
-			(existing.Phase == LaneBlocked || existing.Phase == LaneBroken) &&
-			existing.LastError == provider.ErrorTransientTransport {
-			// The native Codex/provider session is already durably identified. A
-			// transport failure while attaching it does not require a separate
-			// recovery command: selecting the lane attaches that exact saved
-			// ThreadRef again. drive must emit ResumeLaneEffect, never CreateLaneEffect.
+			(existing.Phase == LaneBlocked || existing.Phase == LaneBroken || existing.Phase == LaneReconciling) {
+			// Retire legacy Workass-owned turn gates. Selection simply attaches the
+			// already-saved native session; it never creates a replacement thread.
 			existing.Phase = LaneDetached
 			existing.LastError = ""
 		}
@@ -1789,29 +1756,6 @@ func reduceLaneOpened(state *State, command LaneOpened) ([]Effect, error) {
 		lane.Phase = LaneImporting
 		state.Lanes[openedLaneID] = lane
 		return nil, nil
-	}
-	if state.Foreground != nil && state.Foreground.LaneID == openedLaneID && state.Foreground.Status == ForegroundReconciling {
-		if !lane.Delivery.TurnReadback {
-			lane.Phase = LaneBlocked
-			lane.LastError = provider.ErrorUnsupportedCapability
-			state.Lanes[openedLaneID] = lane
-			if err := terminalizeUnrecoverableForeground(
-				state,
-				provider.ErrorUnsupportedCapability,
-				"Workass recovered the provider thread, but this provider cannot read back the interrupted turn. It will not resend it.",
-				"recovery-unavailable",
-				true,
-			); err != nil {
-				return nil, err
-			}
-			return drive(state)
-		}
-		rearmTurnReconcileOutbox(state, state.Foreground.OperationID, state.Foreground.Turn)
-		lane.Phase = LaneReconciling
-		state.Lanes[openedLaneID] = lane
-		return []Effect{ReconcileTurnEffect{
-			LaneID: openedLaneID, OperationID: state.Foreground.OperationID, Turn: state.Foreground.Turn,
-		}}, nil
 	}
 	if state.Foreground != nil && state.Foreground.LaneID == openedLaneID && state.Foreground.Status == ForegroundDispatching {
 		// The user input is still only Pending in the durable outbox. Restoring
@@ -2002,7 +1946,7 @@ func reduceLaneOpenFailed(state *State, command LaneOpenFailed) ([]Effect, error
 	if !ok {
 		return nil, errors.New("failed lane is unknown")
 	}
-	if lane.Phase != LaneCreating && lane.Phase != LaneResuming && lane.Phase != LaneReconciling {
+	if lane.Phase != LaneCreating && lane.Phase != LaneResuming {
 		return nil, fmt.Errorf("lane open failed from illegal phase %q", lane.Phase)
 	}
 	if lane.Thread.IsZero() && lane.Provision == nil {
@@ -2010,11 +1954,17 @@ func reduceLaneOpenFailed(state *State, command LaneOpenFailed) ([]Effect, error
 		// Without a ThreadRef or provisional candidate there is no established
 		// lane to break and no input whose delivery could be duplicated. Preserve
 		// the failed receipt, remain absent, and wait for explicit user intent.
-		lane.Phase = LaneAbsent
-	} else if command.Ambiguous {
-		lane.Phase = LaneBlocked
+		if command.Ambiguous {
+			// No exact provider session id exists to attach. Preserve only this
+			// creation ambiguity; it is not a provider-turn gate.
+			lane.Phase = LaneBlocked
+		} else {
+			lane.Phase = LaneAbsent
+		}
+	} else if !lane.Thread.IsZero() {
+		lane.Phase = LaneDetached
 	} else {
-		lane.Phase = LaneBroken
+		lane.Phase = LaneAbsent
 	}
 	lane.LastError = command.Kind
 	state.Lanes[command.LaneID] = lane
@@ -2031,22 +1981,8 @@ func reduceLaneOpenFailed(state *State, command LaneOpenFailed) ([]Effect, error
 		}
 		updateOutbox(state, resumeEffectID(command.LaneID, lane.ConnectionGeneration), status, command.Kind)
 	}
-	if state.Foreground != nil && state.Foreground.LaneID == command.LaneID && state.Foreground.Status == ForegroundReconciling {
-		if err := terminalizeUnrecoverableForeground(
-			state,
-			command.Kind,
-			"Workass could not recover this accepted turn after the provider connection was lost. It will not resend it.",
-			"recovery-failed",
-			true,
-		); err != nil {
-			return nil, err
-		}
-		return drive(state)
-	}
-	if !command.Ambiguous {
-		if err := settleWaitingTurnAfterLaneFailure(state, command.LaneID, command.Kind); err != nil {
-			return nil, err
-		}
+	if err := settleWaitingTurnAfterLaneFailure(state, command.LaneID, command.Kind); err != nil {
+		return nil, err
 	}
 	return nil, nil
 }
@@ -2090,109 +2026,6 @@ func settleWaitingTurnAfterLaneFailure(state *State, laneID provider.LaneID, kin
 	return nil
 }
 
-func reduceRetryLane(state *State, command RetryLane) ([]Effect, error) {
-	lane, ok := state.Lanes[command.LaneID]
-	if !ok {
-		return nil, errors.New("retry lane is unknown")
-	}
-	retryingUnestablishedCreate := lane.CreationFailedBeforeEstablishment()
-	if lane.Phase != LaneBroken && lane.Phase != LaneDetached && lane.Phase != LaneBlocked && !retryingUnestablishedCreate {
-		return nil, fmt.Errorf("lane cannot retry from phase %q", lane.Phase)
-	}
-	if lane.PendingImport != nil {
-		if !lane.Context.ImportReadback || !lane.Context.IdempotentImport {
-			return nil, errors.New("context import cannot be reconciled safely")
-		}
-		found := false
-		for index := range state.Outbox {
-			entry := &state.Outbox[index]
-			if entry.Kind != EffectImportContext || entry.OperationID != lane.PendingImport.OperationID || entry.Status != OutboxAmbiguous {
-				continue
-			}
-			entry.Status = OutboxPending
-			entry.Reconcile = true
-			entry.LastError = ""
-			found = true
-			break
-		}
-		if !found {
-			return nil, errors.New("ambiguous context import lost its durable operation")
-		}
-		lane.LastError = ""
-		if lane.Phase == LaneDetached {
-			lane.Phase = LaneResuming
-			lane.ConnectionGeneration++
-			state.Lanes[command.LaneID] = lane
-			return []Effect{ResumeLaneEffect{
-				Identity: lane.Identity, Thread: lane.Thread, Owner: lane.Owner, CWD: lane.CWD,
-				ModelID: lane.ModelID, ModeID: lane.ModeID, Generation: lane.ConnectionGeneration,
-			}}, nil
-		}
-		lane.Phase = LaneImporting
-		state.Lanes[command.LaneID] = lane
-		return nil, nil
-	}
-	if lane.Provision != nil {
-		if !lane.Thread.IsZero() || !lane.Creation.DeferredUntilInput {
-			return nil, errors.New("provisional lane retry has contradictory thread ownership")
-		}
-		for i := len(state.Outbox) - 1; i >= 0; i-- {
-			entry := &state.Outbox[i]
-			if entry.Kind != EffectCreateLane || entry.LaneID != command.LaneID ||
-				(entry.Status != OutboxAmbiguous && entry.Status != OutboxFailed) {
-				continue
-			}
-			entry.Status = OutboxPending
-			entry.Reconcile = true
-			entry.LastError = ""
-			lane.Phase = LaneCreating
-			lane.LastError = ""
-			state.Lanes[command.LaneID] = lane
-			return nil, nil
-		}
-		lane.CreateGeneration++
-		if lane.CreateGeneration <= lane.ConnectionGeneration {
-			lane.CreateGeneration = lane.ConnectionGeneration + 1
-		}
-		lane.ConnectionGeneration = lane.CreateGeneration
-		lane.Phase = LaneCreating
-		lane.LastError = ""
-		state.Lanes[command.LaneID] = lane
-		return []Effect{CreateLaneEffect{
-			Identity: lane.Identity, Owner: lane.Owner, CWD: lane.CWD, ModelID: lane.ModelID, ModeID: lane.ModeID,
-			Generation: lane.CreateGeneration, Reconcile: true,
-			CreateAfterCandidateAbsence: lane.CreateAfterCandidateAbsence,
-		}}, nil
-	}
-	if lane.Thread.IsZero() {
-		if !retryingUnestablishedCreate {
-			lane.Phase = LaneBroken
-			lane.LastError = provider.ErrorProtocolViolation
-			state.Lanes[command.LaneID] = lane
-			return nil, nil
-		}
-		lane.Phase = LaneCreating
-		lane.CreateGeneration++
-		if lane.CreateGeneration <= lane.ConnectionGeneration {
-			lane.CreateGeneration = lane.ConnectionGeneration + 1
-		}
-		lane.LastError = ""
-		state.Lanes[command.LaneID] = lane
-		return []Effect{CreateLaneEffect{
-			Identity: lane.Identity, Owner: lane.Owner, CWD: lane.CWD, ModelID: lane.ModelID, ModeID: lane.ModeID,
-			Generation: lane.CreateGeneration, CreateAfterCandidateAbsence: lane.CreateAfterCandidateAbsence,
-		}}, nil
-	}
-	lane.Phase = LaneResuming
-	lane.LastError = ""
-	lane.ConnectionGeneration++
-	state.Lanes[command.LaneID] = lane
-	return []Effect{ResumeLaneEffect{
-		Identity: lane.Identity, Thread: lane.Thread, Owner: lane.Owner, CWD: lane.CWD, ModelID: lane.ModelID, ModeID: lane.ModeID,
-		Generation: lane.ConnectionGeneration,
-	}}, nil
-}
-
 func reduceSubmit(state *State, command Submit) ([]Effect, error) {
 	operationID := provider.NormalizeOperationID(string(command.OperationID))
 	if operationID == "" {
@@ -2217,12 +2050,20 @@ func reduceSubmit(state *State, command Submit) ([]Effect, error) {
 	}
 	if lane.CreationFailedBeforeEstablishment() {
 		// Submit is also explicit intent. Reopen only a create that never acquired
-		// native identity; established and provisional lanes retain their exact
-		// resume/reconciliation boundaries.
+		// native identity.
 		lane.Phase = LaneAbsent
 		state.Lanes[target] = lane
-	} else if (lane.Phase == LaneBlocked || lane.Phase == LaneBroken) && (!lane.Thread.IsZero() || lane.Provision != nil) {
-		return nil, fmt.Errorf("selected provider lane requires explicit recovery from %s", lane.LastError)
+	} else if lane.PendingImport == nil && (lane.Phase == LaneBlocked || lane.Phase == LaneBroken || lane.Phase == LaneReconciling) {
+		// Old releases could latch an exact native session behind a Workass-owned
+		// recovery state. A new user operation retires that local state and takes
+		// the ordinary exact-session attach path.
+		if !lane.Thread.IsZero() {
+			lane.Phase = LaneDetached
+		} else {
+			lane.Phase = LaneAbsent
+		}
+		lane.LastError = ""
+		state.Lanes[target] = lane
 	}
 	presentation, err := normalizeTurnPresentation(command.Presentation)
 	if err != nil {
@@ -2747,28 +2588,23 @@ func reduceTurnAdmitted(state *State, command TurnAdmitted) ([]Effect, error) {
 		}
 		state.Foreground.Turn = turn
 		updateOutbox(state, startTurnEffectID(command.OperationID), OutboxAmbiguous, provider.ErrorAcceptanceAmbiguous)
-		if lane.Delivery.TurnReadback && !lane.Thread.IsZero() {
-			state.Foreground.Status = ForegroundReconciling
-			lane.Phase = LaneReconciling
-			lane.LastError = provider.ErrorAcceptanceAmbiguous
-			state.Lanes[state.Foreground.LaneID] = lane
-			return []Effect{ReconcileTurnEffect{
-				LaneID: state.Foreground.LaneID, OperationID: command.OperationID, Turn: turn,
-			}}, nil
+		if lane.Thread.IsZero() {
+			lane.Phase = LaneAbsent
+		} else {
+			lane.Phase = LaneDetached
 		}
-		lane.Phase = LaneBlocked
 		lane.LastError = provider.ErrorAcceptanceAmbiguous
 		state.Lanes[state.Foreground.LaneID] = lane
-		if err := terminalizeUnrecoverableForeground(
+		if err := terminalizeInterruptedForeground(
 			state,
 			provider.ErrorAcceptanceAmbiguous,
-			"Workass could not confirm whether the provider accepted this turn. It will not resend it.",
-			"delivery-uncertain",
+			"The provider connection ended before this turn returned a terminal result.",
+			"connection-lost",
 			false,
 		); err != nil {
 			return nil, err
 		}
-		return drive(state)
+		return driveQueued(state)
 	}
 	if !command.Accepted {
 		return nil, errors.New("rejected turn admission requires an explicit failure transition")
@@ -2796,7 +2632,11 @@ func reduceTurnAdmissionFailed(state *State, command TurnAdmissionFailed) ([]Eff
 	}
 	laneID := state.Foreground.LaneID
 	lane := state.Lanes[laneID]
-	lane.Phase = LaneBlocked
+	if lane.Thread.IsZero() {
+		lane.Phase = LaneAbsent
+	} else {
+		lane.Phase = LaneDetached
+	}
 	lane.LastError = kind
 	state.Lanes[laneID] = lane
 	updateOutbox(state, startTurnEffectID(command.OperationID), OutboxFailed, kind)
@@ -2807,80 +2647,7 @@ func reduceTurnAdmissionFailed(state *State, command TurnAdmissionFailed) ([]Eff
 		Status: "failed", Error: string(kind), DispositionState: "needs_input", DispositionSource: "inferred",
 	}, 0)
 	state.Foreground = nil
-	return drive(state)
-}
-
-func reduceTurnReconciled(state *State, command TurnReconciled) ([]Effect, error) {
-	if state.Foreground == nil || state.Foreground.OperationID != command.OperationID || state.Foreground.Status != ForegroundReconciling {
-		return nil, errors.New("turn reconciliation does not match a reconciling foreground operation")
-	}
-	laneID := state.Foreground.LaneID
-	lane := state.Lanes[laneID]
-	if !command.Found {
-		kind := command.Kind
-		if kind == "" {
-			kind = provider.ErrorProtocolViolation
-		}
-		lane.Phase = LaneBlocked
-		lane.LastError = kind
-		state.Lanes[laneID] = lane
-		updateOutbox(state, reconcileTurnEffectID(command.OperationID), OutboxFailed, kind)
-		if err := terminalizeUnrecoverableForeground(
-			state,
-			kind,
-			"Workass could not confirm the interrupted turn after reconnecting to the provider. It will not resend it.",
-			"reconciliation-failed",
-			true,
-		); err != nil {
-			return nil, err
-		}
-		return drive(state)
-	}
-	if command.Turn.OperationID != command.OperationID || strings.TrimSpace(command.Turn.NativeID) == "" {
-		return nil, errors.New("turn reconciliation changed the native turn owner")
-	}
-	state.Foreground.Turn = command.Turn
-	state.Foreground.Status = ForegroundRunning
-	lane.Phase = LaneRunning
-	lane.LastError = ""
-	state.Lanes[laneID] = lane
-	updateOutbox(state, reconcileTurnEffectID(command.OperationID), OutboxCompleted, "")
-	if command.Consumed {
-		if err := reduceInputConsumed(state, InputConsumed{OperationID: command.OperationID}); err != nil {
-			return nil, err
-		}
-	}
-	if command.Terminal {
-		status := strings.TrimSpace(command.Status)
-		if status == "" {
-			status = "completed"
-		}
-		terminal := &provider.TerminalEvent{Status: status}
-		switch strings.ToLower(status) {
-		case "completed", "done":
-			terminal.Status = "completed"
-		case "cancelled", "canceled":
-			terminal.Status = "cancelled"
-			terminal.StopReason = "cancelled"
-		case "failed", "error":
-			terminal.Status = "failed"
-		case "interrupted":
-			// This command is reachable only after an accepted turn lost its
-			// disposable host and exact-resumed for operation readback. The native
-			// provider has proved the input existed and was interrupted; represent
-			// that terminal outcome honestly and never resend it.
-			terminal.Status = "failed"
-			terminal.StopReason = "engine-crash"
-			terminal.Interrupted = true
-			terminal.CrashInterrupted = true
-		default:
-			return nil, fmt.Errorf("unknown reconciled provider terminal status %q", command.Status)
-		}
-		return reduceTurnTerminated(state, TurnTerminated{
-			OperationID: command.OperationID, Status: terminal.Status, StopReason: terminal.StopReason, Terminal: terminal,
-		})
-	}
-	return nil, nil
+	return driveQueued(state)
 }
 
 func reduceInputConsumed(state *State, command InputConsumed) error {
@@ -3075,9 +2842,6 @@ func reduceTurnTerminated(state *State, command TurnTerminated) ([]Effect, error
 	assistant := &state.Ledger[len(state.Ledger)-1]
 	assistant.Terminal = cloneTerminal(terminal)
 	assistant.Interrupted = terminal.Interrupted
-	if terminal.Interrupted {
-		assistant.RetryPrompt = state.Foreground.Input.Text
-	}
 	if strings.TrimSpace(terminal.FinishedAt) != "" {
 		assistant.At = strings.TrimSpace(terminal.FinishedAt)
 	}
@@ -3135,12 +2899,10 @@ func settleForegroundObligation(state *State, status string, terminal *provider.
 		state.Obligation = nil
 		return
 	}
-	// A daemon-owned interruption says nothing about whether the user's request
-	// was fulfilled. Preserve the pre-crash obligation exactly; restart
-	// reconciliation may later supply authoritative evidence.
-	if terminal != nil && terminal.Interrupted && reason == "daemon-restart" {
-		return
-	}
+	// A transport interruption is already terminal for Workass's visible turn.
+	// Do not leave the request marked working while waiting for a second source
+	// of truth: the provider harness owns its turn result, and the next distinct
+	// prompt is free to resume the saved native session.
 	finishedAt := ""
 	if terminal != nil {
 		finishedAt = strings.TrimSpace(terminal.FinishedAt)
@@ -3377,15 +3139,11 @@ func settleForegroundActivities(state *State, status, finishedAt string, observe
 	}
 }
 
-// terminalizeUnrecoverableForeground closes the Workass owner for a provider
-// turn whose input may already have escaped but whose result can no longer be
-// read back. The original start receipt remains accepted/consumed/ambiguous
-// audit evidence and is never returned to Pending. Visible rows are marked
-// excluded from the origin lane's context coverage because provider
-// consumption is not known; that still advances the coverage fence and
-// prevents a later import from replaying either row into the same native
-// thread.
-func terminalizeUnrecoverableForeground(
+// terminalizeInterruptedForeground closes Workass's UI owner when the provider
+// transport ends without a terminal turn event. It records the partial result
+// once and never replays that input; the next distinct user operation remains
+// free to attach the saved session and continue.
+func terminalizeInterruptedForeground(
 	state *State,
 	kind provider.ErrorKind,
 	explanation string,
@@ -3393,23 +3151,23 @@ func terminalizeUnrecoverableForeground(
 	crashInterrupted bool,
 ) error {
 	if state == nil || state.Foreground == nil {
-		return errors.New("unrecoverable turn has no foreground owner")
+		return errors.New("interrupted turn has no foreground owner")
 	}
 	foreground := state.Foreground
 	lane, ok := state.Lanes[foreground.LaneID]
 	if !ok {
-		return errors.New("unrecoverable turn belongs to an unknown lane")
+		return errors.New("interrupted turn belongs to an unknown lane")
 	}
 	if kind == "" {
 		kind = provider.ErrorProtocolViolation
 	}
 	explanation = strings.TrimSpace(explanation)
 	if explanation == "" {
-		explanation = "Workass could not recover this provider turn. It will not resend it."
+		explanation = "The provider connection ended before this turn returned a terminal result."
 	}
 	stopReason = strings.TrimSpace(stopReason)
 	if stopReason == "" {
-		stopReason = "recovery-failed"
+		stopReason = "connection-lost"
 	}
 	finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	observedAtUnixMS := time.Now().UnixMilli()
@@ -3447,7 +3205,7 @@ func terminalizeUnrecoverableForeground(
 	}
 	for _, existing := range state.Ledger {
 		if existing.MessageID == assistantID {
-			assistantID = fmt.Sprintf("%s~recovery~%s", foreground.RootAssistantMessageID, foreground.OperationID)
+			assistantID = fmt.Sprintf("%s~interrupted~%s", foreground.RootAssistantMessageID, foreground.OperationID)
 			break
 		}
 	}
@@ -3700,9 +3458,13 @@ func reduceProviderEvent(state *State, command ProviderEventReceived) ([]Effect,
 	case provider.EventTransportHealth:
 		state.Transport[event.Identity.LaneID] = *event.Health
 		if event.Health.Error == provider.ErrorProtocolViolation || strings.EqualFold(strings.TrimSpace(event.Health.State), "protocol_failed") {
-			lane.Phase = LaneBroken
-			lane.LastError = provider.ErrorProtocolViolation
 			lane.Attachment = nil
+			if lane.Thread.IsZero() {
+				lane.Phase = LaneAbsent
+			} else {
+				lane.Phase = LaneDetached
+			}
+			lane.LastError = provider.ErrorProtocolViolation
 			state.Lanes[event.Identity.LaneID] = lane
 			if state.Foreground != nil && state.Foreground.LaneID == event.Identity.LaneID {
 				for i := range state.Outbox {
@@ -3712,16 +3474,16 @@ func reduceProviderEvent(state *State, command ProviderEventReceived) ([]Effect,
 						entry.LastError = provider.ErrorProtocolViolation
 					}
 				}
-				if err := terminalizeUnrecoverableForeground(
+				if err := terminalizeInterruptedForeground(
 					state,
 					provider.ErrorProtocolViolation,
-					"The provider connection violated the turn protocol, so Workass could not recover the result. It will not resend it.",
+					"The provider connection ended because it violated the turn protocol.",
 					"protocol-failed",
 					true,
 				); err != nil {
 					return nil, err
 				}
-				return drive(state)
+				return driveQueued(state)
 			}
 		}
 		return nil, nil
@@ -3980,49 +3742,70 @@ func reduceHostLost(state *State, command HostLost) ([]Effect, error) {
 			entry.LastError = ""
 		}
 	}
+	// A protocol-health event is durably committed before the adapter closes
+	// its attachment. The following LaneDetached receipt belongs to that same
+	// close and must not downgrade the already-authoritative protocol failure to
+	// a generic transport loss.
+	protocolFailed := lane.LastError == provider.ErrorProtocolViolation
 	lane.Attachment = nil
 	if lane.Provision != nil {
 		if !lane.Thread.IsZero() || !lane.Creation.DeferredUntilInput {
 			return nil, errors.New("lost provisional lane has contradictory thread ownership")
 		}
-		if state.Foreground != nil && state.Foreground.LaneID == command.LaneID && state.Foreground.Turn.NativeID != "" {
-			state.Foreground.Status = ForegroundReconciling
-		}
-		lane.CreateGeneration++
-		if lane.CreateGeneration <= lane.ConnectionGeneration {
-			lane.CreateGeneration = lane.ConnectionGeneration + 1
-		}
-		lane.ConnectionGeneration = lane.CreateGeneration
-		lane.Phase = LaneCreating
-		lane.LastError = ""
-		state.Lanes[command.LaneID] = lane
-		return []Effect{CreateLaneEffect{
-			Identity: lane.Identity, Owner: lane.Owner, CWD: lane.CWD,
-			ModelID: lane.ModelID, ModeID: lane.ModeID, Generation: lane.CreateGeneration, Reconcile: true,
-			CreateAfterCandidateAbsence: lane.CreateAfterCandidateAbsence,
-		}}, nil
-	}
-	if lane.Thread.IsZero() {
-		lane.Phase = LaneBroken
-		lane.LastError = provider.ErrorProtocolViolation
-		state.Lanes[command.LaneID] = lane
-		return nil, nil
-	}
-	lane.ConnectionGeneration++
-	if state.Foreground != nil && state.Foreground.LaneID == command.LaneID {
-		state.Foreground.Status = ForegroundReconciling
-		lane.Phase = LaneResuming
+		lane.Phase = LaneAbsent
+	} else if lane.Thread.IsZero() {
+		lane.Phase = LaneAbsent
 	} else {
 		lane.Phase = LaneDetached
 	}
-	state.Lanes[command.LaneID] = lane
-	if state.Foreground != nil && state.Foreground.LaneID == command.LaneID {
-		return []Effect{ResumeLaneEffect{
-			Identity: lane.Identity, Thread: lane.Thread, Owner: lane.Owner, CWD: lane.CWD, ModelID: lane.ModelID, ModeID: lane.ModeID,
-			Generation: lane.ConnectionGeneration,
-		}}, nil
+	lane.ConnectionGeneration++
+	if !protocolFailed {
+		lane.LastError = provider.ErrorTransientTransport
 	}
-	return nil, nil
+	state.Lanes[command.LaneID] = lane
+	if protocolFailed {
+		return driveQueued(state)
+	}
+	if state.Foreground != nil && state.Foreground.LaneID == command.LaneID {
+		if state.Foreground.Status == ForegroundDispatching && outboxHas(state, startTurnEffectID(state.Foreground.OperationID), OutboxPending) {
+			// The actor never dispatched this input. Reattach only so that exact
+			// pending operation can cross the provider boundary for the first time.
+			if lane.Provision != nil {
+				nextGeneration := lane.ConnectionGeneration
+				if lane.CreateGeneration >= nextGeneration {
+					nextGeneration = lane.CreateGeneration + 1
+				}
+				lane.CreateGeneration = nextGeneration
+				lane.ConnectionGeneration = nextGeneration
+				lane.Phase = LaneCreating
+				state.Lanes[command.LaneID] = lane
+				return []Effect{CreateLaneEffect{
+					Identity: lane.Identity, Owner: lane.Owner, CWD: lane.CWD,
+					ModelID: lane.ModelID, ModeID: lane.ModeID, Generation: lane.CreateGeneration, Reconcile: true,
+					CreateAfterCandidateAbsence: lane.CreateAfterCandidateAbsence,
+				}}, nil
+			}
+			if !lane.Thread.IsZero() {
+				lane.Phase = LaneResuming
+				state.Lanes[command.LaneID] = lane
+				return []Effect{ResumeLaneEffect{
+					Identity: lane.Identity, Thread: lane.Thread, Owner: lane.Owner, CWD: lane.CWD,
+					ModelID: lane.ModelID, ModeID: lane.ModeID, Generation: lane.ConnectionGeneration,
+				}}, nil
+			}
+		}
+		updateOutbox(state, startTurnEffectID(state.Foreground.OperationID), OutboxAmbiguous, provider.ErrorAcceptanceAmbiguous)
+		if err := terminalizeInterruptedForeground(
+			state,
+			provider.ErrorTransientTransport,
+			"The provider connection ended before the harness returned the terminal turn result.",
+			"connection-lost",
+			true,
+		); err != nil {
+			return nil, err
+		}
+	}
+	return driveQueued(state)
 }
 
 func reduceLaneProtocolFailed(state *State, command LaneProtocolFailed) ([]Effect, error) {
@@ -4033,23 +3816,37 @@ func reduceLaneProtocolFailed(state *State, command LaneProtocolFailed) ([]Effec
 	if command.ConnectionGeneration != lane.ConnectionGeneration {
 		return nil, nil
 	}
-	lane.Phase = LaneBroken
+	lane.Attachment = nil
+	if lane.Thread.IsZero() {
+		lane.Phase = LaneAbsent
+	} else {
+		lane.Phase = LaneDetached
+	}
 	lane.LastError = provider.ErrorProtocolViolation
 	state.Lanes[command.LaneID] = lane
 	if state.Foreground != nil && state.Foreground.LaneID == command.LaneID {
 		updateOutbox(state, startTurnEffectID(state.Foreground.OperationID), OutboxAmbiguous, provider.ErrorProtocolViolation)
-		if err := terminalizeUnrecoverableForeground(
+		if err := terminalizeInterruptedForeground(
 			state,
 			provider.ErrorProtocolViolation,
-			"The provider connection violated the turn protocol, so Workass could not recover the result. It will not resend it.",
+			"The provider connection ended because it violated the turn protocol.",
 			"protocol-failed",
 			true,
 		); err != nil {
 			return nil, err
 		}
-		return drive(state)
 	}
-	return nil, nil
+	return driveQueued(state)
+}
+
+// driveQueued advances only an explicitly queued user operation. Host loss and
+// protocol failure must not manufacture an idle resume merely because this is
+// still the selected lane; the next distinct prompt owns the next attachment.
+func driveQueued(state *State) ([]Effect, error) {
+	if state == nil || len(state.Queue) == 0 {
+		return nil, nil
+	}
+	return drive(state)
 }
 
 func drive(state *State) ([]Effect, error) {
@@ -4092,6 +3889,7 @@ func drive(state *State) ([]Effect, error) {
 		}
 		lane.Phase = LaneResuming
 		lane.ConnectionGeneration++
+		lane.LastError = ""
 		state.Lanes[target] = lane
 		return []Effect{ResumeLaneEffect{
 			Identity: lane.Identity, Thread: lane.Thread, Owner: lane.Owner, CWD: lane.CWD, ModelID: lane.ModelID, ModeID: lane.ModeID,
@@ -4300,7 +4098,7 @@ func appendForegroundAdmissionFailure(state *State, kind provider.ErrorKind) err
 		Sequence: state.LedgerHead() + 1, Role: "assistant", Text: errorText, Status: "failed",
 		At: foreground.StartedAt, LaneID: foreground.LaneID, ProviderID: lane.Identity.Realm.ProviderID,
 		ModelID: foreground.Input.ModelID, OperationID: foreground.OperationID, TerminalState: "failed",
-		Interrupted: true, RetryPrompt: foreground.Input.Text, Terminal: terminal,
+		Interrupted: true, Terminal: terminal,
 	}
 	state.Ledger = append(state.Ledger, assistant)
 	return markLedgerExcluded(state, assistant, foreground.OperationID)
@@ -4930,10 +4728,6 @@ func startTurnEffectID(operationID provider.OperationID) string {
 	return "turn-start:" + string(operationID)
 }
 
-func reconcileTurnEffectID(operationID provider.OperationID) string {
-	return "turn-reconcile:" + string(operationID)
-}
-
 func steerEffectID(operationID provider.OperationID) string {
 	return "turn-steer:" + string(operationID)
 }
@@ -4999,11 +4793,6 @@ func outboxEntryForEffect(effect Effect) (OutboxEntry, bool, error) {
 		return OutboxEntry{
 			ID: startTurnEffectID(effect.Input.OperationID), Kind: EffectStartTurn, Status: OutboxPending,
 			LaneID: effect.LaneID, OperationID: effect.Input.OperationID, Input: &input,
-		}, true, nil
-	case ReconcileTurnEffect:
-		return OutboxEntry{
-			ID: reconcileTurnEffectID(effect.OperationID), Kind: EffectReconcileTurn, Status: OutboxPending,
-			LaneID: effect.LaneID, OperationID: effect.OperationID, Turn: effect.Turn,
 		}, true, nil
 	case SteerTurnEffect:
 		input := QueueEntry{
@@ -5105,26 +4894,6 @@ func outboxHas(state *State, effectID string, status OutboxStatus) bool {
 	return false
 }
 
-// Reconciliation is a pure, non-sampling read of one immutable provider
-// operation. If a host/runtime version could not perform that read, an exact
-// later reattachment may safely try it again. Re-arm the existing receipt
-// instead of appending a duplicate effect or ever replaying the user input.
-func rearmTurnReconcileOutbox(state *State, operationID provider.OperationID, turn provider.TurnRef) {
-	effectID := reconcileTurnEffectID(operationID)
-	for index := range state.Outbox {
-		entry := &state.Outbox[index]
-		if entry.ID != effectID || entry.Kind != EffectReconcileTurn || entry.OperationID != operationID || entry.Turn != turn {
-			continue
-		}
-		switch entry.Status {
-		case OutboxCompleted, OutboxFailed, OutboxAmbiguous:
-			entry.Status = OutboxPending
-			entry.LastError = ""
-		}
-		return
-	}
-}
-
 func effectFromOutbox(state State, entry OutboxEntry) (Effect, error) {
 	if entry.Kind == EffectDeleteChat {
 		operationID := provider.NormalizeOperationID(string(entry.OperationID))
@@ -5219,11 +4988,6 @@ func effectFromOutbox(state State, entry OutboxEntry) (Effect, error) {
 			return StartTurnEffect{LaneID: entry.LaneID, Input: *entry.Input, Seed: seed}, nil
 		}
 		return nil, errors.New("start-turn outbox entry lost its immutable input")
-	case EffectReconcileTurn:
-		if state.Foreground == nil || state.Foreground.OperationID != entry.OperationID || entry.Turn.NativeID == "" {
-			return nil, errors.New("reconcile outbox entry lost its foreground turn")
-		}
-		return ReconcileTurnEffect{LaneID: entry.LaneID, OperationID: entry.OperationID, Turn: entry.Turn}, nil
 	case EffectSteerTurn:
 		if entry.Input == nil || entry.Input.OperationID != entry.OperationID || entry.Turn.NativeID == "" {
 			return nil, errors.New("steer outbox entry lost its immutable input or turn")
@@ -5278,53 +5042,39 @@ func pendingOutboxKind(state *State, laneID provider.LaneID, kind EffectKind) bo
 	return false
 }
 
-func recoverUnrecoverableForeground(state *State) (bool, error) {
+func retireRestartedForeground(state *State) (bool, error) {
 	if state == nil || state.Foreground == nil {
 		return false, nil
 	}
 	foreground := state.Foreground
-	lane, ok := state.Lanes[foreground.LaneID]
-	if !ok {
-		return false, errors.New("recovered foreground belongs to an unknown lane")
-	}
-	unrecoverable := false
-	kind := lane.LastError
-	explanation := "Workass could not recover this provider turn after restarting. It will not resend it."
-	switch foreground.Status {
-	case ForegroundReconciling:
-		if !lane.Delivery.TurnReadback {
-			unrecoverable = true
-			kind = provider.ErrorUnsupportedCapability
-			explanation = "Workass restarted while this turn was unresolved, and this provider cannot read it back. It will not resend it."
-		}
-	case ForegroundUncertain:
-		if !lane.Delivery.TurnReadback {
-			unrecoverable = true
-		}
+	// A Pending start effect has not crossed the actor's durable dispatch
+	// boundary. It is the one case that may continue after restart: attach the
+	// exact saved session, then send this never-dispatched input once.
+	if foreground.Status == ForegroundDispatching {
 		for _, entry := range state.Outbox {
-			if entry.Kind == EffectReconcileTurn && entry.OperationID == foreground.OperationID &&
-				(entry.Status == OutboxFailed || entry.Status == OutboxAmbiguous) {
-				unrecoverable = true
-				if kind == "" {
-					kind = entry.LastError
-				}
-				break
+			if entry.Kind == EffectStartTurn && entry.OperationID == foreground.OperationID && entry.Status == OutboxPending {
+				return false, nil
 			}
 		}
 	}
-	if !unrecoverable {
-		return false, nil
+	lane, ok := state.Lanes[foreground.LaneID]
+	if !ok {
+		return false, errors.New("restarted foreground belongs to an unknown lane")
 	}
-	if kind == "" {
-		kind = provider.ErrorProtocolViolation
+	if lane.Provision != nil || lane.Thread.IsZero() {
+		lane.Phase = LaneAbsent
+	} else {
+		lane.Phase = LaneDetached
 	}
-	if lane.Phase != LaneBroken {
-		lane.Phase = LaneBlocked
-	}
-	lane.LastError = kind
-	lane.Attachment = nil
+	lane.LastError = provider.ErrorTransientTransport
 	state.Lanes[foreground.LaneID] = lane
-	if err := terminalizeUnrecoverableForeground(state, kind, explanation, "recovery-failed", true); err != nil {
+	if err := terminalizeInterruptedForeground(
+		state,
+		provider.ErrorTransientTransport,
+		"Workass restarted before the provider harness returned the terminal turn result.",
+		"daemon-restart",
+		true,
+	); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -5334,6 +5084,15 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 	var effects []Effect
 	for i := range state.Outbox {
 		entry := &state.Outbox[i]
+		// v8 and earlier persisted provider-turn readback work. It is retired:
+		// Workass no longer polls or reconstructs provider turn completion.
+		if entry.Kind == EffectReconcileTurn {
+			if entry.Status != OutboxCompleted && entry.Status != OutboxFailed {
+				entry.Status = OutboxFailed
+				entry.LastError = provider.ErrorUnsupportedCapability
+			}
+			continue
+		}
 		switch entry.Status {
 		case OutboxPending, OutboxCompleted, OutboxFailed, OutboxAmbiguous:
 			continue
@@ -5360,10 +5119,21 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 					entry.Status = OutboxAmbiguous
 					entry.LastError = provider.ErrorAcceptanceAmbiguous
 				}
-			case EffectResumeLane, EffectReconcileTurn, EffectCancelTurn, EffectDeleteChat:
-				// Exact resume and readback are non-creating operations. Returning
-				// them to Pending lets the executor claim them again safely.
+			case EffectDeleteChat:
+				// Chat deletion is an idempotent data operation, not provider-turn
+				// control, so its existing crash replay contract remains intact.
 				entry.Status = OutboxPending
+			case EffectCancelTurn:
+				// The old provider process owned this Stop. Never replay turn control
+				// after restart; the provider harness/process lifecycle is authoritative.
+				entry.Status = OutboxAmbiguous
+				entry.LastError = provider.ErrorAcceptanceAmbiguous
+			case EffectResumeLane:
+				// A process-local attachment died with the daemon. If a never-sent
+				// prompt still needs it, the lane pass below creates a fresh exact
+				// resume generation; this stale attachment attempt is never polled.
+				entry.Status = OutboxFailed
+				entry.LastError = provider.ErrorTransientTransport
 			case EffectCreateLane:
 				// A provider create itself is not safe to repeat, but the daemon's
 				// durable native binding is an authoritative receipt when it exists.
@@ -5385,31 +5155,8 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 				lane.LastError = provider.ErrorAcceptanceAmbiguous
 				state.Lanes[entry.LaneID] = lane
 			case EffectStartTurn:
-				lane := state.Lanes[entry.LaneID]
-				if lane.Provision != nil {
-					if state.Foreground != nil && state.Foreground.OperationID == entry.OperationID && state.Foreground.Turn.NativeID == "" {
-						entry.Status = OutboxPending
-						entry.LastError = ""
-						state.Foreground.Status = ForegroundDispatching
-					} else {
-						entry.Status = OutboxAmbiguous
-						entry.LastError = provider.ErrorAcceptanceAmbiguous
-						if state.Foreground != nil && state.Foreground.OperationID == entry.OperationID {
-							state.Foreground.Status = ForegroundReconciling
-						}
-					}
-					state.Lanes[entry.LaneID] = lane
-					continue
-				}
 				entry.Status = OutboxAmbiguous
 				entry.LastError = provider.ErrorAcceptanceAmbiguous
-				lane = state.Lanes[entry.LaneID]
-				lane.Phase = LaneBlocked
-				lane.LastError = provider.ErrorAcceptanceAmbiguous
-				state.Lanes[entry.LaneID] = lane
-				if state.Foreground != nil && state.Foreground.OperationID == entry.OperationID {
-					state.Foreground.Status = ForegroundUncertain
-				}
 			case EffectSteerTurn:
 				entry.Status = OutboxAmbiguous
 				entry.LastError = provider.ErrorAcceptanceAmbiguous
@@ -5440,54 +5187,40 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 				continue
 			}
 			if entry.Kind == EffectCancelTurn {
-				entry.Status = OutboxPending
-				continue
-			}
-			if entry.Kind != EffectStartTurn || state.Foreground == nil || state.Foreground.OperationID != entry.OperationID || state.Foreground.Turn.NativeID == "" {
 				entry.Status = OutboxAmbiguous
 				entry.LastError = provider.ErrorAcceptanceAmbiguous
 				continue
 			}
-			lane := state.Lanes[entry.LaneID]
-			if lane.Phase == LaneBlocked || lane.Phase == LaneBroken {
-				// The accepted native turn is still owned by this exact lane, but a
-				// prior provider failure already made automatic attachment unsafe.
-				// Preserve the valid blocked/uncertain boundary until explicit
-				// reconciliation instead of manufacturing an impossible
-				// blocked/reconciling state during every daemon startup.
-				continue
-			}
-			// Native acceptance is known, but every provider attachment died with
-			// the daemon. Exact-resume the same lane first; LaneOpened will then
-			// enqueue readback. Reconciliation can never run against a missing
-			// disposable attachment.
-			state.Foreground.Status = ForegroundReconciling
+			entry.Status = OutboxAmbiguous
+			entry.LastError = provider.ErrorAcceptanceAmbiguous
 		default:
 			return nil, fmt.Errorf("unknown outbox status %q", entry.Status)
 		}
 	}
-	repairedForeground, err := recoverUnrecoverableForeground(state)
+	retiredForeground, err := retireRestartedForeground(state)
 	if err != nil {
 		return nil, err
 	}
 
 	// Provider attachments are process-local. Durable lanes therefore never
-	// remain Ready/Running merely because the daemon state file said so. Idle
-	// lanes become Detached; lanes that own a pending or accepted foreground
-	// operation schedule exact resume before delivery/readback can continue.
+	// remain Ready/Running merely because the daemon state file said so. Only a
+	// never-dispatched input may attach automatically; otherwise the next new
+	// prompt performs the ordinary exact saved-session resume.
 	for laneID, lane := range state.Lanes {
-		if lane.Provision != nil {
-			lane.Attachment = nil
-			if lane.Phase == LaneBlocked || lane.Phase == LaneBroken {
-				state.Lanes[laneID] = lane
-				continue
+		if lane.PendingImport == nil && (lane.Phase == LaneBlocked || lane.Phase == LaneBroken || lane.Phase == LaneReconciling) {
+			if lane.Provision != nil || lane.Thread.IsZero() {
+				lane.Phase = LaneAbsent
+			} else {
+				lane.Phase = LaneDetached
 			}
+		}
+		if lane.Provision != nil {
 			if pendingOutboxKind(state, laneID, EffectCreateLane) {
 				lane.Phase = LaneCreating
 				state.Lanes[laneID] = lane
 				continue
 			}
-			foreground := state.Foreground != nil && state.Foreground.LaneID == laneID
+			foreground := state.Foreground != nil && state.Foreground.LaneID == laneID && state.Foreground.Status == ForegroundDispatching
 			queued := false
 			for _, input := range state.Queue {
 				if input.LaneID == laneID {
@@ -5514,7 +5247,19 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 			})
 			continue
 		}
-		if lane.Thread.IsZero() || lane.Phase == LaneBlocked || lane.Phase == LaneBroken || lane.Phase == LaneCreating {
+		if pendingOutboxKind(state, laneID, EffectCreateLane) {
+			// Creation reconciliation is about recovering the durable native
+			// session binding, not reconstructing a provider turn. Keep this one
+			// fail-closed readback effect executable after a daemon restart.
+			lane.Phase = LaneCreating
+			state.Lanes[laneID] = lane
+			continue
+		}
+		if lane.Thread.IsZero() || lane.Phase == LaneCreating {
+			if lane.Thread.IsZero() && lane.Provision == nil && lane.PendingImport == nil {
+				lane.Phase = LaneAbsent
+				state.Lanes[laneID] = lane
+			}
 			continue
 		}
 		if pendingOutboxKind(state, laneID, EffectResumeLane) {
@@ -5522,8 +5267,8 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 			state.Lanes[laneID] = lane
 			continue
 		}
-		foreground := state.Foreground != nil && state.Foreground.LaneID == laneID
-		if foreground && (state.Foreground.Status == ForegroundDispatching || state.Foreground.Status == ForegroundReconciling) {
+		foreground := state.Foreground != nil && state.Foreground.LaneID == laneID && state.Foreground.Status == ForegroundDispatching
+		if foreground {
 			lane.Phase = LaneResuming
 			if !pendingOutboxKind(state, laneID, EffectResumeLane) {
 				lane.ConnectionGeneration++
@@ -5541,8 +5286,8 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 			state.Lanes[laneID] = lane
 		}
 	}
-	if repairedForeground {
-		driven, err := drive(state)
+	if retiredForeground {
+		driven, err := driveQueued(state)
 		if err != nil {
 			return nil, err
 		}

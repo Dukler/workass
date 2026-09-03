@@ -238,8 +238,8 @@ func TestProviderEventJournalCommitsChunkWithoutRewritingActorSnapshot(t *testin
 		t.Fatalf("restart journaled actor: %v", err)
 	}
 	restartedState := restarted.Snapshot()
-	if restartedState.Foreground == nil || restartedState.Foreground.AssistantResult != "streamed final" {
-		t.Fatalf("restart lost journaled provider output: %#v", restartedState.Foreground)
+	if restartedState.Foreground != nil || len(restartedState.Ledger) < 2 || restartedState.Ledger[len(restartedState.Ledger)-1].Result != "streamed final" {
+		t.Fatalf("restart did not terminalize the turn with its journaled provider output: %#v", restartedState)
 	}
 	if _, err := os.Stat(providerEventJournalPath(path)); !os.IsNotExist(err) {
 		t.Fatalf("restart checkpoint left provider event journal behind: %v", err)
