@@ -575,6 +575,59 @@ func TestEstablishedResumeFailureNeverCreatesReplacementThread(t *testing.T) {
 	}
 }
 
+func TestSelectingTransientlyDisconnectedEstablishedLaneResumesSavedThread(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		ambiguous bool
+		phase     LanePhase
+	}{
+		{name: "definitive transport failure", phase: LaneBroken},
+		{name: "ambiguous transport failure", ambiguous: true, phase: LaneBlocked},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state, _ := NewState("chat")
+			identity := testLane("chat", "codex")
+			thread := provider.ThreadRef{ProviderID: "codex", RootID: "saved-session", HeadID: "saved-session", Lineage: 1}
+			state, _ = apply(t, state, SelectLane{Identity: identity})
+			state, _ = apply(t, state, LaneOpened{
+				LaneID: identity.ID, Thread: thread, ConnectionGeneration: 1,
+				Context: exactContext(provider.ContextImportUnsupported),
+			})
+			state, _ = apply(t, state, HostLost{LaneID: identity.ID, ConnectionGeneration: 1})
+			state, effects := apply(t, state, SelectLane{Identity: identity})
+			if len(effects) != 1 {
+				t.Fatalf("initial exact attach effects = %#v", effects)
+			}
+			resume := effects[0].(ResumeLaneEffect)
+			state, _ = apply(t, state, ClaimEffect{EffectID: resumeEffectID(identity.ID, resume.Generation)})
+			state, _ = apply(t, state, LaneOpenFailed{
+				LaneID: identity.ID, Kind: provider.ErrorTransientTransport, Ambiguous: test.ambiguous,
+			})
+			if state.Lanes[identity.ID].Phase != test.phase {
+				t.Fatalf("transport failure phase = %q, want %q", state.Lanes[identity.ID].Phase, test.phase)
+			}
+
+			state, effects = apply(t, state, SelectLane{Identity: identity})
+			if len(effects) != 1 {
+				t.Fatalf("saved-session selection effects = %#v", effects)
+			}
+			attached, ok := effects[0].(ResumeLaneEffect)
+			if !ok || !attached.Thread.Equal(thread) || attached.Generation != resume.Generation+1 {
+				t.Fatalf("selection did not attach the exact saved session: %#v", effects[0])
+			}
+			lane := state.Lanes[identity.ID]
+			if lane.Phase != LaneResuming || lane.LastError != "" || !lane.Thread.Equal(thread) {
+				t.Fatalf("saved session identity changed while attaching: %#v", lane)
+			}
+			for _, effect := range effects {
+				if _, created := effect.(CreateLaneEffect); created {
+					t.Fatalf("saved-session attach attempted replacement creation: %#v", effects)
+				}
+			}
+		})
+	}
+}
+
 func TestDeferredProviderThreadExistsOnlyAfterMatchingInputReceipt(t *testing.T) {
 	state, _ := NewState("chat")
 	laneID := testLane("chat", "codex")
