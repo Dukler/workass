@@ -97,6 +97,41 @@ function remoteSubject(nextMirror: () => Mirror | Promise<Mirror>, ownsLink: () 
   return subject;
 }
 
+test('a San-laptop row keeps its dragged slot across remote and local hydration', async () => {
+  const subject = remoteSubject(() => mirror());
+  const local = {
+    id: 'tab-local', chatId: 'chat-local', sessionId: 'session-local',
+    sessionProviderId: 'codex', title: 'Local', titleLocked: true, group: null,
+    cwd: '/tmp/workass', currentModelId: null, currentModeId: null,
+    providerId: 'codex', pending: false, messages: [], draft: '',
+  } as Chat;
+  subject.state.chats = [local];
+  subject.state.activeId = local.id;
+  subject.commitCurrentGlobalPresentation();
+  subject.flushSession = async () => {};
+
+  await subject.hydrateMachine(MACHINE);
+  assert.deepEqual(subject.state.chats.map((chat: Chat) => chat.id), [TAB, local.id],
+    'a newly discovered chat is inserted at the top');
+
+  assert.equal(subject.reorderChat(TAB, null), true);
+  assert.deepEqual(subject.state.chats.map((chat: Chat) => chat.id), [local.id, TAB]);
+
+  await subject.hydrateMachine(MACHINE);
+  assert.deepEqual(subject.state.chats.map((chat: Chat) => chat.id), [local.id, TAB],
+    'refreshing the remote actor objects cannot append or otherwise move the row');
+
+  const localSnapshot = subject.toMirror(false) as Mirror;
+  assert.deepEqual(localSnapshot.chatOrder, [local.id, TAB],
+    'tagged remote ids participate in the local presentation order');
+  assert.deepEqual(localSnapshot.chats.map((chat) => chat.id), [local.id],
+    'remote chat payloads remain owned by their remote daemon');
+
+  assert.equal(subject.restoreSessionSnapshot(localSnapshot), true);
+  assert.deepEqual(subject.state.chats.map((chat: Chat) => chat.id), [local.id, TAB],
+    'refreshing the local daemon cannot move the carried remote row either');
+});
+
 test('remote settlement survives a session snapshot read before its actor receipt', async () => {
   let currentMirror = mirror([], { presentationRevision: 1 });
   let releaseStaleHydration!: (value: Mirror) => void;

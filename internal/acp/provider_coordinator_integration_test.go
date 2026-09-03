@@ -260,7 +260,7 @@ func TestProviderLaneRejectsUnknownFrozenSemanticEvents(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		state := engine.Snapshot()
-		if state.Lanes[state.ActiveLaneID].Phase == chatstate.LaneBroken {
+		if state.Lanes[state.ActiveLaneID].Phase == chatstate.LaneDetached {
 			if state.Lanes[state.ActiveLaneID].LastError != providercontract.ErrorProtocolViolation {
 				t.Fatalf("protocol failure kind = %q", state.Lanes[state.ActiveLaneID].LastError)
 			}
@@ -268,7 +268,7 @@ func TestProviderLaneRejectsUnknownFrozenSemanticEvents(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("rejected semantic event did not break its actor lane: %#v", engine.Snapshot())
+	t.Fatalf("rejected semantic event did not detach its actor lane: %#v", engine.Snapshot())
 }
 
 func TestProviderLaneCommandCatalogUpdateIsActorDurableBeforePublication(t *testing.T) {

@@ -47,7 +47,7 @@ function mirrorOf(chats: Chat[]) {
       messages: c.messages.map((m) => ({
         id: m.id, role: m.role, content: m.content, result: m.result, status: m.status, at: m.at,
         jobId: m.jobId, permission: m.permission, turnStartedAt: m.turnStartedAt,
-        interrupted: m.interrupted, retryPrompt: m.retryPrompt, events: m.events,
+        interrupted: m.interrupted, events: m.events,
       })),
     })),
     activeId: chats[0]?.id ?? null, seq: 0,
@@ -89,16 +89,16 @@ test('a restore does not resurrect a card on a message that no longer holds one'
 	assert.equal(store.state.chats[0].messages[0].permission, undefined);
 });
 
-test('actor hydration preserves terminal recovery and running-start fields', () => {
+test('actor hydration preserves interruption and running-start fields without retry state', () => {
   const authoritative = chat('tab-1', [message('m-1', {
-    status: 'failed', interrupted: true, retryPrompt: 'try again', turnStartedAt: 1234,
+    status: 'failed', interrupted: true, turnStartedAt: 1234,
   })]);
   const store = subject([]);
 
   assert.equal(store.restoreSessionSnapshot(mirrorOf([authoritative])), true);
   const restored = store.state.chats[0].messages[0];
   assert.equal(restored.interrupted, true);
-  assert.equal(restored.retryPrompt, 'try again');
+  assert.equal((restored as unknown as Record<string, unknown>).retryPrompt, undefined);
   assert.equal(restored.turnStartedAt, 1234);
 });
 

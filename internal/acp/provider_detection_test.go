@@ -54,13 +54,13 @@ func TestProviderDetectionAllowsFullInitializeAndSessionBudgets(t *testing.T) {
 
 	original := providerRegistrations["devin"]
 	registration := original
-	registration.ProbeTimeout = 1500 * time.Millisecond
+	registration.ProbeTimeout = 5 * time.Second
 	providerRegistrations["devin"] = registration
 	t.Cleanup(func() { providerRegistrations["devin"] = original })
 
 	manager := NewManager(Options{
 		RootDir:           root,
-		InitTimeout:       1500 * time.Millisecond,
+		InitTimeout:       5 * time.Second,
 		RSSSampleInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
@@ -73,15 +73,17 @@ func TestProviderDetectionAllowsFullInitializeAndSessionBudgets(t *testing.T) {
 		close(detected)
 	}()
 	waitForFakeACPProbeGate(t, initGate)
-	// Each stage is held for less than its 1500 ms request budget, while the
-	// pair is longer than one budget. A single outer timeout would therefore
-	// fail; the enclosing detection context must allow both requests.
-	time.Sleep(800 * time.Millisecond)
+	// Each stage is held for less than its five-second request budget, while the
+	// pair is longer than one budget. The extra margin keeps package-wide builds
+	// from turning scheduler pressure into a false timeout; a single outer
+	// timeout would still fail, so the test continues to prove that initialize
+	// and session/new each own a complete budget.
+	time.Sleep(2600 * time.Millisecond)
 	if err := os.WriteFile(initGate+".release", []byte("release\n"), 0o600); err != nil {
 		t.Fatalf("release initialize probe gate: %v", err)
 	}
 	waitForFakeACPProbeGate(t, sessionGate)
-	time.Sleep(800 * time.Millisecond)
+	time.Sleep(2600 * time.Millisecond)
 	if err := os.WriteFile(sessionGate+".release", []byte("release\n"), 0o600); err != nil {
 		t.Fatalf("release session probe gate: %v", err)
 	}

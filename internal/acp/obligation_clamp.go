@@ -71,24 +71,11 @@ func (m *Manager) chatHasLiveParkEvidence(tabID, chatID string) bool {
 	return false
 }
 
-func (m *Manager) chatHasPendingPermission(tabID, chatID string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, rec := range m.permissions {
-		if rec == nil {
-			continue
-		}
-		job := m.jobs[rec.jobID]
-		if job != nil && job.TabID == tabID && job.ChatID == chatID {
-			return true
-		}
-	}
-	return false
-}
-
-// classifyDispositionForJob combines provider, harness, permission, and
-// executor-liveness evidence into one typed terminal receipt. The chat actor is
-// the only owner that applies and persists the resulting obligation state.
+// classifyDispositionForJob projects only provider/harness evidence already in
+// memory into the terminal receipt. The chat actor combines that receipt with
+// its durable permission/background state. Filesystem and process liveness
+// probes belong to the separate obligation observer and must never delay the
+// harness's terminal turn boundary.
 func (m *Manager) classifyDispositionForJob(job *Job) {
 	if job == nil || job.internal || job.SubagentID != "" || job.TabID == "" || job.ChatID == "" {
 		return
@@ -102,9 +89,6 @@ func (m *Manager) classifyDispositionForJob(job *Job) {
 		job.DispositionNote = compactText(signal.Note, maxDispositionNote)
 		return
 	}
-	if m.chatHasPendingPermission(job.TabID, job.ChatID) {
-		signal = CompletionSignal{Disposition: DispositionNeedsInput, Source: dispositionSourceInferred}
-	}
 	harness := m.harnessTurns.get(job.SessionID)
 	if harness.Complete() {
 		switch {
@@ -114,19 +98,8 @@ func (m *Manager) classifyDispositionForJob(job *Job) {
 			signal = CompletionSignal{Disposition: DispositionDone, Source: dispositionSourceHarness}
 		}
 	}
-	evidence := false
-	if signal.Disposition == DispositionDone || signal.Disposition == DispositionUnknown {
-		evidence = m.chatHasLiveParkEvidence(job.TabID, job.ChatID)
-	}
 	if signal.Disposition == DispositionUnknown {
-		if evidence {
-			signal.Disposition = DispositionParked
-		} else {
-			signal.Disposition = DispositionDone
-		}
-		signal.Source = dispositionSourceInferred
-	} else if signal.Disposition == DispositionDone && evidence {
-		signal.Disposition = DispositionParked
+		signal.Disposition = DispositionDone
 		signal.Source = dispositionSourceInferred
 	}
 	job.DispositionState = string(signal.Disposition)

@@ -36,8 +36,6 @@ type LifecycleReceipt struct {
 }
 
 const (
-	LifecycleHostRecoveryResumed = "host_recovery_resumed"
-	LifecycleTurnReconciled      = "turn_reconciled"
 	LifecycleTurnAdmissionFailed = "turn_admission_failed"
 	LifecycleCheckpointRestored  = "checkpoint_restored"
 )
@@ -224,21 +222,11 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 		}
 		if err != nil {
 			c.discardLane(lane)
-			return true, err
+			return true, c.applyLaneFailure(effect.Identity.ID, err)
 		}
 		c.startLaneEvents(lane, effect.Generation)
 		return true, nil
 	case ResumeLaneEffect:
-		beforeResume := c.engine.Snapshot()
-		recoveringForeground := beforeResume.Foreground != nil &&
-			beforeResume.Foreground.LaneID == effect.Identity.ID &&
-			beforeResume.Foreground.Status == ForegroundReconciling
-		recoveryOperationID := provider.OperationID("")
-		recoveryTurn := provider.TurnRef{}
-		if recoveringForeground {
-			recoveryOperationID = beforeResume.Foreground.OperationID
-			recoveryTurn = beforeResume.Foreground.Turn
-		}
 		definition, err := c.definition(effect.Identity.Realm.ProviderID)
 		if err != nil {
 			return true, c.applyLaneFailure(effect.Identity.ID, err)
@@ -264,19 +252,6 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 			return true, err
 		}
 		c.startLaneEvents(lane, effect.Generation)
-		if recoveringForeground {
-			if recovered := c.engine.Snapshot(); recovered.Foreground == nil {
-				c.publishLifecycle(LifecycleReceipt{
-					Kind: LifecycleTurnReconciled, ChatID: effect.Identity.ChatID, LaneID: effect.Identity.ID,
-					OperationID: recoveryOperationID, Thread: effect.Thread, Turn: recoveryTurn, Terminal: true, Status: "failed",
-				})
-			} else {
-				c.publishLifecycle(LifecycleReceipt{
-					Kind: LifecycleHostRecoveryResumed, ChatID: effect.Identity.ChatID, LaneID: effect.Identity.ID,
-					OperationID: recoveryOperationID, Thread: effect.Thread, Turn: recoveryTurn,
-				})
-			}
-		}
 		return true, nil
 	case ImportContextEffect:
 		lane, err := c.lane(effect.LaneID)
@@ -333,9 +308,9 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 					NativeID:    provider.DeriveJobID(lane.Identity().ChatID, effect.Input.OperationID),
 				}
 				applyErr := c.engine.Apply(TurnAdmitted{OperationID: effect.Input.OperationID, Turn: turn, Ambiguous: true})
-				if applyErr == nil && c.engine.Snapshot().Foreground == nil {
+				if applyErr == nil {
 					c.publishLifecycle(LifecycleReceipt{
-						Kind: LifecycleTurnReconciled, ChatID: lane.Identity().ChatID, LaneID: effect.LaneID,
+						Kind: LifecycleTurnAdmissionFailed, ChatID: lane.Identity().ChatID, LaneID: effect.LaneID,
 						OperationID: effect.Input.OperationID, Turn: turn, Terminal: true, Status: "failed",
 					})
 				}
@@ -361,58 +336,13 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 		}
 		if !admission.Accepted && c.engine.Snapshot().Foreground == nil {
 			c.publishLifecycle(LifecycleReceipt{
-				Kind: LifecycleTurnReconciled, ChatID: lane.Identity().ChatID, LaneID: effect.LaneID,
+				Kind: LifecycleTurnAdmissionFailed, ChatID: lane.Identity().ChatID, LaneID: effect.LaneID,
 				OperationID: effect.Input.OperationID, Turn: admission.Turn, Terminal: true, Status: "failed",
 			})
 		}
 		if admission.Consumed {
 			return true, c.engine.Apply(InputConsumed{OperationID: effect.Input.OperationID})
 		}
-		return true, nil
-	case ReconcileTurnEffect:
-		lane, err := c.lane(effect.LaneID)
-		if err != nil {
-			return true, err
-		}
-		result, err := lane.Delivery().Reconcile(ctx, provider.ReconcileRequest{OperationID: effect.OperationID, Turn: effect.Turn})
-		if err != nil {
-			// Readback failure is not permission to leave a permanent spinner or
-			// resend. The actor seals a failed/interrupted no-resend receipt and
-			// blocks the exact lane.
-			applyErr := c.engine.Apply(TurnReconciled{
-				OperationID: effect.OperationID, Turn: effect.Turn, Kind: providerErrorKind(err), Found: false,
-			})
-			c.publishLifecycle(LifecycleReceipt{
-				Kind: LifecycleTurnReconciled, ChatID: lane.Identity().ChatID, LaneID: effect.LaneID,
-				OperationID: effect.OperationID, Turn: effect.Turn, Terminal: true, Status: "failed",
-			})
-			if applyErr != nil {
-				return true, errors.Join(err, applyErr)
-			}
-			return true, err
-		}
-		turn := result.Turn
-		if turn.OperationID == "" {
-			turn.OperationID = effect.OperationID
-		}
-		if turn.NativeID == "" {
-			turn.NativeID = effect.Turn.NativeID
-		}
-		command := TurnReconciled{
-			OperationID: effect.OperationID, Turn: turn, Found: result.Found,
-			Consumed: result.Consumed, Terminal: result.Terminal, Status: result.State,
-		}
-		if err := c.engine.Apply(command); err != nil {
-			return true, err
-		}
-		receiptStatus := result.State
-		if !result.Found {
-			receiptStatus = "failed"
-		}
-		c.publishLifecycle(LifecycleReceipt{
-			Kind: LifecycleTurnReconciled, ChatID: lane.Identity().ChatID, LaneID: effect.LaneID,
-			OperationID: effect.OperationID, Turn: turn, Terminal: result.Terminal || !result.Found, Status: receiptStatus,
-		})
 		return true, nil
 	case SteerTurnEffect:
 		return true, c.executeSteer(ctx, effect)
@@ -902,14 +832,8 @@ func acknowledgeProviderEvent(lane provider.Lane, sequence uint64, err error) {
 func (c *Coordinator) applyLaneFailure(laneID provider.LaneID, err error) error {
 	before := c.engine.Snapshot()
 	operationID := provider.OperationID("")
-	recoveryTurn := provider.TurnRef{}
-	recoveringForeground := false
 	if before.Foreground != nil && before.Foreground.LaneID == laneID && before.Foreground.Status == ForegroundDispatching {
 		operationID = before.Foreground.OperationID
-	} else if before.Foreground != nil && before.Foreground.LaneID == laneID && before.Foreground.Status == ForegroundReconciling {
-		operationID = before.Foreground.OperationID
-		recoveryTurn = before.Foreground.Turn
-		recoveringForeground = true
 	} else {
 		for _, queued := range before.Queue {
 			if queued.LaneID == laneID && strings.TrimSpace(queued.Presentation.QueueID) == "" {
@@ -925,12 +849,7 @@ func (c *Coordinator) applyLaneFailure(laneID provider.LaneID, err error) error 
 	if applyErr != nil {
 		return errors.Join(err, applyErr)
 	}
-	if recoveringForeground {
-		c.publishLifecycle(LifecycleReceipt{
-			Kind: LifecycleTurnReconciled, ChatID: before.ChatID,
-			LaneID: laneID, OperationID: operationID, Turn: recoveryTurn, Terminal: true, Status: "failed",
-		})
-	} else if operationID != "" && !provider.ErrorIs(err, provider.ErrorAcceptanceAmbiguous) {
+	if operationID != "" {
 		c.publishLifecycle(LifecycleReceipt{
 			Kind: LifecycleTurnAdmissionFailed, ChatID: before.ChatID,
 			LaneID: laneID, OperationID: operationID, Terminal: true, Status: "failed",

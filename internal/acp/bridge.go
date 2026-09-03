@@ -57,6 +57,13 @@ type Bridge struct {
 	// lineage event can be labeled with the spawning call's title.
 	// Guarded by mu because request and notification handling can overlap.
 	subagentTitles map[string]string
+	// Standard ACP tool updates do not carry Workass operation ids. Bind every
+	// provider tool-call id to the exact job that first announced it so a late
+	// update from a settled/background call can never be rehomed onto whichever
+	// turn happens to be current for the session. Entries are scoped by session
+	// and discarded at the next turn boundary; an update without a preceding
+	// tool_call is intentionally invisible.
+	toolCallOwners map[string]string
 
 	agentName    string
 	agentCaps    map[string]any
@@ -184,6 +191,7 @@ func newBridge(key string, opts Options, manager *Manager) *Bridge {
 		sessions:              make(map[string]struct{}),
 		seededSessions:        make(map[string]struct{}),
 		jobsBySession:         make(map[string]*Job),
+		toolCallOwners:        make(map[string]string),
 		loadingSessions:       make(map[string]uint64),
 	}
 }
@@ -776,8 +784,8 @@ func (b *Bridge) acknowledgeInputConsumption(job *Job, sessionID, operationID, n
 		return nil
 	}
 	if b.manager.providerLaneManagedJob(job.ID) {
-		binding, committed := b.manager.nativeSessions.markOperationConsumedAndCommit(
-			job.TabID, job.ChatID, job.ProviderID, sessionID, operationID, nativeTurnID,
+		binding, committed := b.manager.nativeSessions.commitThread(
+			job.TabID, job.ChatID, job.ProviderID, sessionID,
 		)
 		lane := b.manager.providerLaneForJob(job.ID)
 		if !committed || lane == nil || lane.commitThreadCreation(
@@ -785,12 +793,6 @@ func (b *Bridge) acknowledgeInputConsumption(job *Job, sessionID, operationID, n
 		) != nil {
 			return errors.New("provider input receipt could not commit its durable thread boundary")
 		}
-	} else if b.manager.nativeSessions != nil {
-		// Non-actor jobs may be intentionally ephemeral. Preserve a receipt when a
-		// ledger binding exists; durable chat lanes enforce the write above.
-		b.manager.nativeSessions.markOperationConsumed(
-			job.TabID, job.ChatID, job.ProviderID, sessionID, operationID, nativeTurnID,
-		)
 	}
 	b.manager.emit("job:event", map[string]any{
 		"type": "acp", "id": job.ID,
@@ -846,7 +848,7 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 			b.queueThinking(job, text)
 		}
 	case "tool_call", "tool_call_update":
-		if job != nil && !job.internal {
+		if b.acceptToolNotification(sessionID, job, kind, update) {
 			parent := adapter.notifications.ToolParentID(mapFromAny(update["_meta"]), mapFromAny(params["_meta"]))
 			b.emitToolEvent(job, kind, update, parent)
 		}
@@ -1015,12 +1017,51 @@ func safeToolImageMIME(mimeType string) bool {
 	}
 }
 
+func toolCallIDFromUpdate(update map[string]any) string {
+	toolCall := mapFromAny(update["toolCall"])
+	return strings.TrimSpace(firstNonEmpty(asString(update["toolCallId"]), asString(toolCall["toolCallId"])))
+}
+
+func toolCallOwnerKey(sessionID, toolCallID string) string {
+	return strings.TrimSpace(sessionID) + "\x00" + strings.TrimSpace(toolCallID)
+}
+
+// acceptToolNotification is the provider-neutral ownership fence for ACP tool
+// events. The initial tool_call is the only event allowed to claim an id. A
+// later tool_call_update must still belong to the exact live job that claimed
+// it; otherwise it is a stale/background provider update and has no foreground
+// transcript owner.
+func (b *Bridge) acceptToolNotification(sessionID string, job *Job, acpKind string, update map[string]any) bool {
+	if b == nil || job == nil || job.internal || b.manager == nil || !b.manager.jobAcceptsProviderEvents(job) {
+		return false
+	}
+	toolCallID := toolCallIDFromUpdate(update)
+	if toolCallID == "" {
+		return false
+	}
+	key := toolCallOwnerKey(sessionID, toolCallID)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.toolCallOwners == nil {
+		b.toolCallOwners = make(map[string]string)
+	}
+	switch acpKind {
+	case "tool_call":
+		b.toolCallOwners[key] = job.ID
+		return true
+	case "tool_call_update":
+		return b.toolCallOwners[key] == job.ID
+	default:
+		return false
+	}
+}
+
 func (b *Bridge) emitToolEvent(job *Job, acpKind string, update map[string]any, parentToolCallID string) {
 	rawInput := update["rawInput"]
 	outText := textFromContent(update["content"])
 	images := toolImagesFromContent(update["content"])
 	toolCall := mapFromAny(update["toolCall"])
-	toolCallID := firstNonEmpty(asString(update["toolCallId"]), asString(toolCall["toolCallId"]))
+	toolCallID := toolCallIDFromUpdate(update)
 	title := firstNonEmpty(asString(update["title"]), asString(toolCall["title"]), asString(update["kind"]), "tool")
 	spawnedWork := providerAdapterForID(b.ProviderID()).spawnedWork
 	if signal, ok := spawnedWork.DecodeTool(providerRawToolObservation{
@@ -1305,6 +1346,8 @@ func (b *Bridge) queueThinking(job *Job, text string) {
 }
 
 func (b *Bridge) flushStdout(job *Job) {
+	job.streamPublishMu.Lock()
+	defer job.streamPublishMu.Unlock()
 	b.manager.jobMu.Lock()
 	timer := job.stdoutTimer
 	chunk := job.stdoutBuf.String()
@@ -1335,6 +1378,8 @@ func (b *Bridge) flushStdout(job *Job) {
 }
 
 func (b *Bridge) flushThinking(job *Job) {
+	job.streamPublishMu.Lock()
+	defer job.streamPublishMu.Unlock()
 	b.manager.jobMu.Lock()
 	text := job.thoughtBuf
 	job.thoughtBuf = ""
@@ -1346,6 +1391,8 @@ func (b *Bridge) flushThinking(job *Job) {
 }
 
 func (b *Bridge) flushJobBuffers(job *Job) {
+	job.streamPublishMu.Lock()
+	defer job.streamPublishMu.Unlock()
 	b.manager.jobMu.Lock()
 	stdoutTimer := job.stdoutTimer
 	thinkTimer := job.thinkTimer
@@ -1385,6 +1432,15 @@ func (b *Bridge) jobForSession(sessionID string) *Job {
 func (b *Bridge) setJobForSession(sessionID string, job *Job) {
 	now := time.Now()
 	b.mu.Lock()
+	// A provider-declared terminal reply seals every foreground tool from the
+	// previous turn. Keep no ownership that a delayed update could reuse while a
+	// new prompt is active on the same native session.
+	prefix := strings.TrimSpace(sessionID) + "\x00"
+	for key := range b.toolCallOwners {
+		if strings.HasPrefix(key, prefix) {
+			delete(b.toolCallOwners, key)
+		}
+	}
 	b.jobsBySession[sessionID] = job
 	changed := false
 	if job != nil {

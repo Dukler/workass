@@ -24,26 +24,7 @@ const (
 	currentNativeLaneStoreVersion = 8
 )
 
-type nativeOperationState string
-
-const (
-	nativeOperationDispatched nativeOperationState = "dispatched"
-	nativeOperationConsumed   nativeOperationState = "consumed"
-	nativeOperationTerminal   nativeOperationState = "terminal"
-	nativeOperationAbsent     nativeOperationState = "absent"
-)
-
-type nativeOperationRecord struct {
-	OperationID  string               `json:"operationId"`
-	PromptDigest string               `json:"promptDigest"`
-	State        nativeOperationState `json:"state"`
-	NativeTurnID string               `json:"nativeTurnId,omitempty"`
-	Status       string               `json:"status,omitempty"`
-	ResultDigest string               `json:"resultDigest,omitempty"`
-	UpdatedAt    string               `json:"updatedAt"`
-}
-
-// nativeSessionBinding is daemon-owned recovery metadata. It deliberately
+// nativeSessionBinding is daemon-owned exact-session metadata. It deliberately
 // lives outside the renderer mirror: session:save may replace that mirror, but
 // a browser must never be able to erase or cross-wire provider-native threads.
 type nativeSessionBinding struct {
@@ -70,14 +51,17 @@ type nativeSessionBinding struct {
 	// SessionID (Claude's fork family: /clear, forkSession). Alias, never a
 	// mutation of SessionID — live-session guards key on SessionID, and the
 	// next successful restore folds this back into it.
-	ProviderSessionID string                 `json:"providerSessionId,omitempty"`
-	CWD               string                 `json:"cwd,omitempty"`
-	ModelID           string                 `json:"modelId,omitempty"`
-	ModeID            string                 `json:"modeId,omitempty"`
-	PendingOperation  *nativeOperationRecord `json:"pendingOperation,omitempty"`
-	LastOperation     *nativeOperationRecord `json:"lastOperation,omitempty"`
-	Generation        uint64                 `json:"generation"`
-	UpdatedAt         string                 `json:"updatedAt"`
+	ProviderSessionID string `json:"providerSessionId,omitempty"`
+	CWD               string `json:"cwd,omitempty"`
+	ModelID           string `json:"modelId,omitempty"`
+	ModeID            string `json:"modeId,omitempty"`
+	// These v8 fields are accepted only so old profiles can be migrated. They
+	// are cleared on load and never consulted: the provider harness owns turn
+	// lifecycle, and stale Workass delivery state must not gate future prompts.
+	LegacyPendingOperation json.RawMessage `json:"pendingOperation,omitempty"`
+	LegacyLastOperation    json.RawMessage `json:"lastOperation,omitempty"`
+	Generation             uint64          `json:"generation"`
+	UpdatedAt              string          `json:"updatedAt"`
 }
 
 type nativeSessionLedgerFile struct {
@@ -132,7 +116,9 @@ func newNativeSessionLedger(stateDir string, machineIDs ...string) *nativeSessio
 		return ledger
 	}
 	ownerBySessionID := make(map[string]string)
+	legacyTurnState := false
 	for index, binding := range disk.Bindings {
+		legacyTurnState = legacyTurnState || len(binding.LegacyPendingOperation) > 0 || len(binding.LegacyLastOperation) > 0
 		binding, err = ledger.normalizeBinding(binding)
 		if err != nil {
 			ledger.loadErr = fmt.Errorf("provider lane store binding %d is invalid: %w", index, err)
@@ -153,6 +139,11 @@ func newNativeSessionLedger(stateDir string, machineIDs ...string) *nativeSessio
 		}
 		ledger.bindings[key] = binding
 	}
+	if legacyTurnState {
+		if err := ledger.writeLocked(); err != nil {
+			ledger.loadErr = fmt.Errorf("retire legacy provider turn state: %w", err)
+		}
+	}
 	return ledger
 }
 
@@ -170,40 +161,11 @@ func (l *nativeSessionLedger) normalizeBinding(binding nativeSessionBinding) (na
 	binding.CWD = strings.TrimSpace(binding.CWD)
 	binding.ModelID = strings.TrimSpace(binding.ModelID)
 	binding.ModeID = strings.TrimSpace(binding.ModeID)
-	normalizeOperation := func(operation *nativeOperationRecord) (*nativeOperationRecord, error) {
-		if operation == nil {
-			return nil, nil
-		}
-		copy := *operation
-		copy.OperationID = strings.TrimSpace(copy.OperationID)
-		copy.PromptDigest = strings.TrimSpace(copy.PromptDigest)
-		copy.NativeTurnID = strings.TrimSpace(copy.NativeTurnID)
-		copy.Status = strings.TrimSpace(copy.Status)
-		copy.ResultDigest = strings.TrimSpace(copy.ResultDigest)
-		copy.UpdatedAt = strings.TrimSpace(copy.UpdatedAt)
-		if copy.OperationID == "" || copy.PromptDigest == "" {
-			return nil, errors.New("provider lane contains an incomplete delivery operation")
-		}
-		switch copy.State {
-		case nativeOperationDispatched, nativeOperationConsumed, nativeOperationTerminal, nativeOperationAbsent:
-		default:
-			return nil, errors.New("provider lane contains an unknown delivery state")
-		}
-		return &copy, nil
-	}
-	var err error
-	if binding.PendingOperation, err = normalizeOperation(binding.PendingOperation); err != nil {
-		return nativeSessionBinding{}, err
-	}
-	if binding.LastOperation, err = normalizeOperation(binding.LastOperation); err != nil {
-		return nativeSessionBinding{}, err
-	}
-	if binding.PendingOperation != nil && binding.PendingOperation.State != nativeOperationDispatched && binding.PendingOperation.State != nativeOperationConsumed {
-		return nativeSessionBinding{}, errors.New("provider lane pending slot contains a terminal delivery operation")
-	}
-	if binding.LastOperation != nil && binding.LastOperation.State != nativeOperationTerminal && binding.LastOperation.State != nativeOperationAbsent {
-		return nativeSessionBinding{}, errors.New("provider lane settled slot contains an unfinished delivery operation")
-	}
+	// Old builds persisted Workass-owned provider turn state here. It cannot be
+	// authoritative after the transport exits, so discard it without changing
+	// the exact session binding.
+	binding.LegacyPendingOperation = nil
+	binding.LegacyLastOperation = nil
 	if binding.Generation == 0 {
 		binding.Generation = 1
 	}
@@ -723,55 +685,10 @@ func (l *nativeSessionLedger) updateAttachment(tabID, chatID, providerID, sessio
 	return true
 }
 
-func (l *nativeSessionLedger) markInFlight(
-	tabID, chatID, providerID, sessionID string,
-	generation uint64,
-	modelID, modeID, operationID, promptDigest string,
-) bool {
-	if l == nil {
-		return false
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(chatID, providerID, sessionID)
-	if len(matches) != 1 || matches[0].binding.Generation != generation {
-		return false
-	}
-	key, binding := matches[0].key, matches[0].binding
-	operationID = strings.TrimSpace(operationID)
-	promptDigest = strings.TrimSpace(promptDigest)
-	if operationID == "" || promptDigest == "" || binding.PendingOperation != nil {
-		return false
-	}
-	if strings.TrimSpace(modelID) != "" {
-		binding.ModelID = strings.TrimSpace(modelID)
-	}
-	if strings.TrimSpace(modeID) != "" {
-		binding.ModeID = strings.TrimSpace(modeID)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	binding.PendingOperation = &nativeOperationRecord{
-		OperationID: operationID, PromptDigest: promptDigest, State: nativeOperationDispatched, UpdatedAt: now,
-	}
-	binding.UpdatedAt = now
-	l.bindings[key] = binding
-	if err := l.writeLocked(); err != nil {
-		l.bindings[key] = matches[0].binding
-		return false
-	}
-	return true
-}
-
-func (l *nativeSessionLedger) markOperationConsumed(tabID, chatID, providerID, sessionID, operationID, nativeTurnID string) bool {
-	_, committed := l.markOperationConsumedAndCommit(tabID, chatID, providerID, sessionID, operationID, nativeTurnID)
-	return committed
-}
-
-// markOperationConsumedAndCommit is the one atomic boundary that promotes a
-// deferred provider candidate into a durable native thread. The operation
-// receipt and ThreadCommitted flag reach disk together before the actor can
-// observe either fact.
-func (l *nativeSessionLedger) markOperationConsumedAndCommit(tabID, chatID, providerID, sessionID, operationID, nativeTurnID string) (nativeSessionBinding, bool) {
+// commitThread promotes a deferred provider candidate after the harness emits
+// its ordinary input-consumed signal. No Workass turn record is created: the
+// durable binding contains only the exact provider session identity.
+func (l *nativeSessionLedger) commitThread(tabID, chatID, providerID, sessionID string) (nativeSessionBinding, bool) {
 	if l == nil {
 		return nativeSessionBinding{}, false
 	}
@@ -782,15 +699,10 @@ func (l *nativeSessionLedger) markOperationConsumedAndCommit(tabID, chatID, prov
 		return nativeSessionBinding{}, false
 	}
 	key, binding := matches[0].key, matches[0].binding
-	if binding.PendingOperation == nil || binding.PendingOperation.OperationID != strings.TrimSpace(operationID) {
-		return nativeSessionBinding{}, false
+	if binding.ThreadCommitted {
+		return binding, true
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	operation := *binding.PendingOperation
-	operation.State = nativeOperationConsumed
-	operation.NativeTurnID = strings.TrimSpace(firstNonEmpty(nativeTurnID, operation.NativeTurnID))
-	operation.UpdatedAt = now
-	binding.PendingOperation = &operation
 	binding.ThreadCommitted = true
 	binding.UpdatedAt = now
 	l.bindings[key] = binding
@@ -799,100 +711,6 @@ func (l *nativeSessionLedger) markOperationConsumedAndCommit(tabID, chatID, prov
 		return nativeSessionBinding{}, false
 	}
 	return binding, true
-}
-
-func (l *nativeSessionLedger) settleOperation(
-	tabID, chatID, providerID, sessionID, operationID, status, resultDigest, modelID, modeID string,
-) bool {
-	if l == nil {
-		return false
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(chatID, providerID, sessionID)
-	if len(matches) != 1 {
-		return false
-	}
-	key, binding := matches[0].key, matches[0].binding
-	if binding.PendingOperation == nil || binding.PendingOperation.OperationID != strings.TrimSpace(operationID) {
-		return false
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	operation := *binding.PendingOperation
-	operation.State = nativeOperationTerminal
-	operation.Status = strings.TrimSpace(status)
-	operation.ResultDigest = strings.TrimSpace(resultDigest)
-	operation.UpdatedAt = now
-	binding.PendingOperation = nil
-	binding.LastOperation = &operation
-	if strings.TrimSpace(modelID) != "" {
-		binding.ModelID = strings.TrimSpace(modelID)
-	}
-	if strings.TrimSpace(modeID) != "" {
-		binding.ModeID = strings.TrimSpace(modeID)
-	}
-	binding.UpdatedAt = now
-	l.bindings[key] = binding
-	if err := l.writeLocked(); err != nil {
-		l.bindings[key] = matches[0].binding
-		return false
-	}
-	return true
-}
-
-func (l *nativeSessionLedger) recordOperationReadback(
-	tabID, chatID, providerID, sessionID, operationID, nativeTurnID, status string,
-	found, consumed, terminal bool,
-) bool {
-	if l == nil {
-		return false
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	matches := l.matchingBindingsLocked(chatID, providerID, sessionID)
-	if len(matches) != 1 {
-		return false
-	}
-	key, binding := matches[0].key, matches[0].binding
-	if binding.PendingOperation == nil || binding.PendingOperation.OperationID != strings.TrimSpace(operationID) {
-		return false
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	operation := *binding.PendingOperation
-	if (!found && (consumed || terminal)) || (terminal && !consumed) {
-		return false
-	}
-	if operation.State == nativeOperationConsumed && (!found || !consumed) {
-		return false
-	}
-	if operation.NativeTurnID != "" && strings.TrimSpace(nativeTurnID) != "" && operation.NativeTurnID != strings.TrimSpace(nativeTurnID) {
-		return false
-	}
-	operation.NativeTurnID = strings.TrimSpace(firstNonEmpty(nativeTurnID, operation.NativeTurnID))
-	operation.Status = strings.TrimSpace(status)
-	operation.UpdatedAt = now
-	switch {
-	case !found:
-		operation.State = nativeOperationAbsent
-		binding.PendingOperation = nil
-		binding.LastOperation = &operation
-	case terminal:
-		operation.State = nativeOperationTerminal
-		binding.PendingOperation = nil
-		binding.LastOperation = &operation
-	case consumed:
-		operation.State = nativeOperationConsumed
-		binding.PendingOperation = &operation
-	default:
-		binding.PendingOperation = &operation
-	}
-	binding.UpdatedAt = now
-	l.bindings[key] = binding
-	if err := l.writeLocked(); err != nil {
-		l.bindings[key] = matches[0].binding
-		return false
-	}
-	return true
 }
 
 func (l *nativeSessionLedger) delete(tabID, chatID, providerID, sessionID string) {
@@ -927,8 +745,7 @@ func (l *nativeSessionLedger) removeAbsentCandidate(identity providercontract.La
 	key := nativeLaneStorageKey(string(identity.ID))
 	binding, ok := l.bindings[key]
 	if !ok || bindingLaneIdentity(binding) != identity || binding.ThreadCommitted ||
-		bindingCurrentThreadID(binding) != sessionID ||
-		(binding.PendingOperation != nil && binding.PendingOperation.State == nativeOperationConsumed) {
+		bindingCurrentThreadID(binding) != sessionID {
 		return false
 	}
 	delete(l.bindings, key)
@@ -1027,96 +844,6 @@ func nativeResumeError(err error) error {
 	return nativeLaneError(kind, "could not resume the chat's exact provider-native thread", err)
 }
 
-type nativeOperationReadback struct {
-	Found        bool
-	Consumed     bool
-	Terminal     bool
-	NativeTurnID string
-	Status       string
-}
-
-// supportsOperationReadback requires both halves of the exactly-once
-// contract. A provider that can look up turns but did not durably bind the
-// Workass operation id to its native input cannot reconcile the right input.
-func (b *Bridge) supportsOperationReadback() bool {
-	return b != nil && b.hasProviderCapability(
-		"workassStableTurnInputV1",
-	) && b.hasProviderCapability(
-		"workassOperationReadbackV1",
-	) && b.hasProviderCapability(
-		"workassTurnReconcileRequest",
-	)
-}
-
-func (b *Bridge) readbackOperation(ctx context.Context, sessionID, operationID string) (nativeOperationReadback, error) {
-	if !b.supportsOperationReadback() {
-		return nativeOperationReadback{}, providercontract.Unsupported(
-			providercontract.OperationID(operationID),
-			"the provider does not expose authoritative operation-specific readback",
-		)
-	}
-	timeout := b.opts.PromptReconcileTimeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	readCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	result, err := b.request(readCtx, "_workass/turn/reconcile", map[string]any{
-		"sessionId": sessionID, "clientUserMessageId": operationID,
-	}, timeout)
-	if err != nil {
-		return nativeOperationReadback{}, err
-	}
-	found, foundOK := result["found"].(bool)
-	consumed, consumedOK := result["consumed"].(bool)
-	terminal, terminalOK := result["terminal"].(bool)
-	if !foundOK || !consumedOK || !terminalOK {
-		return nativeOperationReadback{}, errors.New("provider operation readback omitted required boolean receipts")
-	}
-	if (!found && (consumed || terminal)) || (terminal && !consumed) {
-		return nativeOperationReadback{}, errors.New("provider operation readback returned contradictory receipts")
-	}
-	readback := nativeOperationReadback{
-		Found: found, Consumed: consumed, Terminal: terminal,
-		NativeTurnID: strings.TrimSpace(asString(result["turnId"])),
-		Status:       strings.TrimSpace(asString(result["status"])),
-	}
-	if found && readback.NativeTurnID == "" {
-		return nativeOperationReadback{}, errors.New("provider operation readback found input without a native turn id")
-	}
-	return readback, nil
-}
-
-func (m *Manager) reconcilePendingNativeOperation(
-	ctx context.Context,
-	bridge *Bridge,
-	binding nativeSessionBinding,
-) (bool, error) {
-	pending := binding.PendingOperation
-	if pending == nil {
-		return true, nil
-	}
-	currentThreadID := bindingCurrentThreadID(binding)
-	readback, err := bridge.readbackOperation(ctx, currentThreadID, pending.OperationID)
-	if err != nil {
-		return false, err
-	}
-	if pending.State == nativeOperationConsumed && (!readback.Found || !readback.Consumed) {
-		return false, errors.New("provider readback contradicted a durable input-consumed receipt")
-	}
-	if pending.NativeTurnID != "" && readback.NativeTurnID != "" && pending.NativeTurnID != readback.NativeTurnID {
-		return false, errors.New("provider readback changed the native turn owner for one operation")
-	}
-	if !m.nativeSessions.recordOperationReadback(
-		binding.TabID, binding.ChatID, binding.ProviderID, currentThreadID,
-		pending.OperationID, readback.NativeTurnID, readback.Status,
-		readback.Found, readback.Consumed, readback.Terminal,
-	) {
-		return false, errors.New("could not durably commit provider operation readback")
-	}
-	return !readback.Found || readback.Terminal, nil
-}
-
 func (m *Manager) tryRestoreNativeSession(ctx context.Context, opts SessionOptions) (SessionInfo, bool, error) {
 	ledger := m.nativeSessions
 	if !ledger.enabledFor(opts) {
@@ -1207,25 +934,8 @@ func (m *Manager) tryRestoreNativeSession(ctx context.Context, opts SessionOptio
 		bridge.Close(false, err)
 		return SessionInfo{}, true, nativeLaneError(providercontract.ErrorProtocolViolation, "could not persist the exact attached thread binding", err)
 	}
-	operationState := "clear"
-	if binding.PendingOperation != nil {
-		operationState = string(binding.PendingOperation.State)
-		cleared, readbackErr := m.reconcilePendingNativeOperation(ctx, bridge, binding)
-		if readbackErr != nil {
-			m.opts.Logf("provider lane operation readback unavailable", map[string]any{
-				"tabId": opts.TabID, "chatId": opts.ChatID, "providerId": opts.ProviderID,
-				"operationId": binding.PendingOperation.OperationID,
-				"error":       redactSensitiveText(readbackErr.Error()),
-			})
-		} else if cleared {
-			operationState = "reconciled"
-		} else {
-			operationState = "provider-active"
-		}
-	}
 	m.opts.Logf("acp native session restored", map[string]any{
 		"tabId": opts.TabID, "providerId": opts.ProviderID, "method": method,
-		"operationState": operationState,
 	})
 	return info, true, nil
 }
@@ -1256,91 +966,4 @@ func stringPointer(value *string) string {
 		return ""
 	}
 	return strings.TrimSpace(*value)
-}
-
-type nativeTurnDispatch struct {
-	TabID        string
-	ChatID       string
-	ProviderID   string
-	SessionID    string
-	OperationID  string
-	PromptDigest string
-}
-
-func digestProviderPrompt(prompt []any) (string, error) {
-	raw, err := json.Marshal(prompt)
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(raw)
-	return hex.EncodeToString(digest[:]), nil
-}
-
-// prepareNativeTurn is the write-ahead admission boundary. It runs after the
-// provider payload has been validated but before session/prompt is written to
-// the host. Workass history is deliberately absent from this decision.
-func (m *Manager) prepareNativeTurn(job *Job, operationID string, prompt []any) (*nativeTurnDispatch, error) {
-	if m.nativeSessions == nil || m.nativeSessions.path == "" || job == nil || job.internal || job.TabID == "" || job.ProviderID == "" {
-		return nil, nil
-	}
-	binding, ok := m.nativeSessions.getForSession(job.TabID, job.ChatID, job.ProviderID, job.SessionID)
-	if !ok || bindingCurrentThreadID(binding) != job.SessionID {
-		return nil, nil
-	}
-	if binding.PendingOperation != nil {
-		return nil, &providercontract.Error{
-			Kind:      providercontract.ErrorAcceptanceAmbiguous,
-			Operation: providercontract.OperationID(binding.PendingOperation.OperationID),
-			Message:   "the exact provider thread has an unresolved delivery operation; Workass will not resend or admit another prompt",
-		}
-	}
-	operationID = strings.TrimSpace(operationID)
-	if operationID == "" {
-		return nil, errors.New("provider-native turn requires a stable Workass operation id")
-	}
-	promptDigest, err := digestProviderPrompt(prompt)
-	if err != nil {
-		return nil, fmt.Errorf("digest provider-native prompt: %w", err)
-	}
-	if !m.nativeSessions.markInFlight(
-		job.TabID, job.ChatID, job.ProviderID, job.SessionID, binding.Generation,
-		job.startOpts.ModelID, job.startOpts.ModeID, operationID, promptDigest,
-	) {
-		return nil, errors.New("could not durably persist provider-native operation before dispatch")
-	}
-	return &nativeTurnDispatch{
-		TabID: job.TabID, ChatID: job.ChatID, ProviderID: job.ProviderID,
-		SessionID: job.SessionID, OperationID: operationID, PromptDigest: promptDigest,
-	}, nil
-}
-
-func (m *Manager) finishNativeTurn(job *Job, dispatch *nativeTurnDispatch, result map[string]any) error {
-	if m.nativeSessions == nil || dispatch == nil {
-		return nil
-	}
-	resultReceipt := map[string]any{
-		"stopReason": strings.TrimSpace(asString(result["stopReason"])),
-		"output":     strings.TrimSpace(m.outputForJob(job)),
-	}
-	raw, err := json.Marshal(resultReceipt)
-	if err != nil {
-		return fmt.Errorf("digest provider-native terminal receipt: %w", err)
-	}
-	digest := sha256.Sum256(raw)
-	status := firstNonEmpty(asString(result["stopReason"]), "terminal")
-	modelID, modeID := "", ""
-	if job != nil {
-		modelID, modeID = job.startOpts.ModelID, job.startOpts.ModeID
-	}
-	if !m.nativeSessions.settleOperation(
-		dispatch.TabID, dispatch.ChatID, dispatch.ProviderID, dispatch.SessionID,
-		dispatch.OperationID, status, hex.EncodeToString(digest[:]), modelID, modeID,
-	) {
-		return nativeLaneError(
-			providercontract.ErrorProtocolViolation,
-			"the provider completed the turn, but Workass could not durably settle its delivery operation",
-			nil,
-		)
-	}
-	return nil
 }

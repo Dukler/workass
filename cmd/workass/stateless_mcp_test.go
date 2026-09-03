@@ -63,6 +63,22 @@ func newStatelessMCPTestHarness(t *testing.T) statelessMCPTestHarness {
 		manager.Reset()
 		t.Fatalf("start actor-owned MCP parent turn: %v", err)
 	}
+	// Start returns the durable admission owner before the asynchronous provider
+	// call necessarily reaches its native-id boundary. A real MCP call cannot
+	// arrive before that parent turn invokes a tool, so wait for the equivalent
+	// admitted state instead of racing the fixture's external HTTP request.
+	for {
+		state, ok := runtime.Snapshot("mcp-chat")
+		if ok && state.Foreground != nil && strings.TrimSpace(state.Foreground.Turn.NativeID) != "" {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			manager.Reset()
+			t.Fatalf("actor-owned MCP parent turn was not admitted: %v", ctx.Err())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 	control, err := newAgentControlHandler(manager, nil, newChatControlCoordinator(manager, nil, runtime))
 	if err != nil {
 		manager.Reset()

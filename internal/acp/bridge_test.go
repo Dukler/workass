@@ -16,6 +16,83 @@ import (
 	"time"
 )
 
+func TestTerminalFlushWaitsForInFlightStreamPublication(t *testing.T) {
+	publishStarted := make(chan struct{})
+	releasePublish := make(chan struct{})
+	var once sync.Once
+	manager := NewManager(Options{
+		StdoutFlushInterval: time.Millisecond,
+		Broadcast: func(channel string, payload any) {
+			if channel == "job:event" && asString(mapFromAny(payload)["type"]) == "data" {
+				once.Do(func() { close(publishStarted) })
+				<-releasePublish
+			}
+		},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	bridge := newBridge("terminal-stream-order", Options{StdoutFlushInterval: time.Millisecond}, manager)
+	job := &Job{ID: "terminal-stream-order-job", Status: "running"}
+	bridge.queueStdout(job, "final bytes", "")
+	select {
+	case <-publishStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timer flush did not begin publication")
+	}
+
+	terminalFlushReturned := make(chan struct{})
+	go func() {
+		bridge.flushJobBuffers(job)
+		close(terminalFlushReturned)
+	}()
+	select {
+	case <-terminalFlushReturned:
+		t.Fatal("terminal flush overtook an in-flight stdout publication")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releasePublish)
+	select {
+	case <-terminalFlushReturned:
+	case <-time.After(time.Second):
+		t.Fatal("terminal flush did not resume after stdout publication")
+	}
+}
+
+func TestActorManagedStartDoesNotInheritManagerBusyState(t *testing.T) {
+	manager, _ := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	session := newFakeSession(t, manager, "actor-busy-boundary-tab")
+	bridge := manager.bridgeForSession(session.SessionID, SessionOptions{
+		SessionID: session.SessionID, TabID: "actor-busy-boundary-tab", ChatID: "chat-actor-busy-boundary-tab",
+	})
+	if bridge == nil {
+		t.Fatal("provider bridge is unavailable")
+	}
+	stale := &Job{
+		ID: "old-wrapper", Kind: "app-chat", Status: "running", SessionID: session.SessionID,
+		TabID: "actor-busy-boundary-tab", ChatID: "chat-actor-busy-boundary-tab",
+	}
+	manager.mu.Lock()
+	manager.jobs[stale.ID] = stale
+	manager.mu.Unlock()
+	bridge.setJobForSession(session.SessionID, stale)
+	t.Cleanup(func() {
+		manager.mu.Lock()
+		delete(manager.jobs, stale.ID)
+		manager.mu.Unlock()
+		bridge.clearJobForSession(session.SessionID, stale)
+	})
+
+	stopBeforeProvider := errors.New("reached actor-owned start boundary")
+	_, err := manager.StartJob(context.Background(), JobStartOptions{
+		JobID: "job:actor-busy-boundary", OperationID: "actor-busy-boundary", ProviderLaneManaged: true,
+		Kind: "app-chat", SessionID: session.SessionID, TabID: stale.TabID, ChatID: stale.ChatID,
+		BeforeStart: func(*JobStartOptions) error { return stopBeforeProvider },
+	})
+	if !errors.Is(err, stopBeforeProvider) {
+		t.Fatalf("manager stale job vetoed actor-owned admission: %v", err)
+	}
+}
+
 func TestProviderTypedMessagePhaseBoundarySurvivesStdoutCoalescing(t *testing.T) {
 	t.Parallel()
 	events := newEventCollector()
@@ -218,7 +295,7 @@ func TestMockInitializeSessionPromptCancelErrorAndReuse(t *testing.T) {
 	assertJobStatus(t, events.waitJobEnd(t, jobID(afterError), 5*time.Second), "done", 0, "end_turn")
 }
 
-func TestMockLostTerminalEventuallyEnds(t *testing.T) {
+func TestMockLostTerminalIsOwnedByHarnessUntilExplicitCancel(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	events := newEventCollector()
@@ -228,13 +305,10 @@ func TestMockLostTerminalEventuallyEnds(t *testing.T) {
 			ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
 			CWD: root, Enabled: true, Label: "Workass Mock ACP",
 		},
-		DefaultProviderID:       "mock",
-		Broadcast:               events.Broadcast,
-		StdoutFlushInterval:     5 * time.Millisecond,
-		ThoughtFlushInterval:    5 * time.Millisecond,
-		PromptReconcileInterval: 25 * time.Millisecond,
-		PromptReconcileTimeout:  100 * time.Millisecond,
-		PromptTerminalGrace:     100 * time.Millisecond,
+		DefaultProviderID:    "mock",
+		Broadcast:            events.Broadcast,
+		StdoutFlushInterval:  5 * time.Millisecond,
+		ThoughtFlushInterval: 5 * time.Millisecond,
 	})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -246,11 +320,17 @@ func TestMockLostTerminalEventuallyEnds(t *testing.T) {
 	}
 	job := startAppChatJob(t, manager, session.SessionID, "lost-terminal-tab", "[mock:lost-terminal] complete visibly")
 	_ = events.waitJobType(t, jobID(job), "data", time.Second)
-	end := events.waitJobEnd(t, jobID(job), 750*time.Millisecond)
-	assertJobStatus(t, end, "done", 0, "end_turn")
+	time.Sleep(150 * time.Millisecond)
+	if running, ok := manager.RunningJobForChat("lost-terminal-tab", "chat-lost-terminal-tab"); !ok || running["id"] != jobID(job) {
+		t.Fatalf("Workass invented a terminal result for a live harness request: running=%#v ok=%v", running, ok)
+	}
+	if !manager.CancelJob(jobID(job)) {
+		t.Fatal("cancel lost-terminal fixture")
+	}
+	assertJobStatus(t, events.waitJobEnd(t, jobID(job), time.Second), "failed", 130, "cancelled")
 }
 
-func TestMockLostTerminalCannotLeaveJobRunningWhenAdapterDoesNotReleasePrompt(t *testing.T) {
+func TestMockLostTerminalDoesNotRecycleProviderBridge(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	events := newEventCollector()
@@ -260,13 +340,10 @@ func TestMockLostTerminalCannotLeaveJobRunningWhenAdapterDoesNotReleasePrompt(t 
 			ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
 			CWD: root, Enabled: true, Label: "Workass Mock ACP",
 		},
-		DefaultProviderID:       "mock",
-		Broadcast:               events.Broadcast,
-		StdoutFlushInterval:     5 * time.Millisecond,
-		ThoughtFlushInterval:    5 * time.Millisecond,
-		PromptReconcileInterval: 25 * time.Millisecond,
-		PromptReconcileTimeout:  100 * time.Millisecond,
-		PromptTerminalGrace:     50 * time.Millisecond,
+		DefaultProviderID:    "mock",
+		Broadcast:            events.Broadcast,
+		StdoutFlushInterval:  5 * time.Millisecond,
+		ThoughtFlushInterval: 5 * time.Millisecond,
 	})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -278,8 +355,14 @@ func TestMockLostTerminalCannotLeaveJobRunningWhenAdapterDoesNotReleasePrompt(t 
 	}
 	job := startAppChatJob(t, manager, session.SessionID, "unreleased-terminal-tab", "[mock:lost-terminal-unreleased] complete visibly")
 	_ = events.waitJobType(t, jobID(job), "data", time.Second)
-	end := events.waitJobEnd(t, jobID(job), 3*time.Second)
-	assertJobStatus(t, end, "failed", 1, "engine-crash")
+	time.Sleep(150 * time.Millisecond)
+	if running, ok := manager.RunningJobForChat("unreleased-terminal-tab", "chat-unreleased-terminal-tab"); !ok || running["id"] != jobID(job) {
+		t.Fatalf("Workass recycled the provider while its prompt RPC was pending: running=%#v ok=%v", running, ok)
+	}
+	if !manager.CancelJob(jobID(job)) {
+		t.Fatal("cancel unreleased-terminal fixture")
+	}
+	assertJobStatus(t, events.waitJobEnd(t, jobID(job), time.Second), "failed", 130, "cancelled")
 }
 
 func TestMockPromptSilenceDoesNotCompleteAnAuthoritativelyActiveTurn(t *testing.T) {
@@ -292,13 +375,10 @@ func TestMockPromptSilenceDoesNotCompleteAnAuthoritativelyActiveTurn(t *testing.
 			ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
 			CWD: root, Enabled: true, Label: "Workass Mock ACP",
 		},
-		DefaultProviderID:       "mock",
-		Broadcast:               events.Broadcast,
-		StdoutFlushInterval:     5 * time.Millisecond,
-		ThoughtFlushInterval:    5 * time.Millisecond,
-		PromptReconcileInterval: 20 * time.Millisecond,
-		PromptReconcileTimeout:  100 * time.Millisecond,
-		PromptTerminalGrace:     50 * time.Millisecond,
+		DefaultProviderID:    "mock",
+		Broadcast:            events.Broadcast,
+		StdoutFlushInterval:  5 * time.Millisecond,
+		ThoughtFlushInterval: 5 * time.Millisecond,
 	})
 	t.Cleanup(func() { manager.Reset() })
 
@@ -945,24 +1025,21 @@ func TestFakePermissionDecideRoundTrip(t *testing.T) {
 	}
 }
 
-func TestPermissionWaitSuppressesPromptReconciliationKill(t *testing.T) {
+func TestPermissionWaitRemainsOwnedByHarness(t *testing.T) {
 	t.Parallel()
-	manager, events := newFakeManager(t, "permission-reconcile-hang", Options{
-		PromptReconcileInterval: 15 * time.Millisecond,
-		PromptReconcileTimeout:  15 * time.Millisecond,
-		PromptTerminalGrace:     20 * time.Millisecond,
-		PermissionTimeout:       time.Second,
+	manager, events := newFakeManager(t, "permission-hang", Options{
+		PermissionTimeout: time.Second,
 	})
 	t.Cleanup(func() { manager.Reset() })
-	session := newFakeSession(t, manager, "permission-reconcile-hang-tab")
-	job := startAppChatJob(t, manager, session.SessionID, "permission-reconcile-hang-tab", "needs a long decision")
+	session := newFakeSession(t, manager, "permission-hang-tab")
+	job := startAppChatJob(t, manager, session.SessionID, "permission-hang-tab", "needs a long decision")
 	permission := events.waitChannel(t, "chat:permission-request", 2*time.Second).payload.(map[string]any)
 
-	// Three reconciliation timeouts would recycle the bridge in under 100ms if
-	// a healthy user decision wait were misclassified as provider silence.
+	// Workass does not run a competing terminal-status watchdog while the
+	// provider harness is waiting for a user decision.
 	time.Sleep(140 * time.Millisecond)
-	if running, ok := manager.RunningJobForChat("permission-reconcile-hang-tab", "chat-permission-reconcile-hang-tab"); !ok || running["id"] != jobID(job) {
-		t.Fatalf("permission-waiting job was killed by reconciliation: running=%#v ok=%v", running, ok)
+	if running, ok := manager.RunningJobForChat("permission-hang-tab", "chat-permission-hang-tab"); !ok || running["id"] != jobID(job) {
+		t.Fatalf("permission-waiting job ended before the harness replied: running=%#v ok=%v", running, ok)
 	}
 	if !manager.PermissionDecide(asString(permission["id"]), "allow") {
 		t.Fatal("permission decision was not accepted")
@@ -2314,7 +2391,10 @@ func TestFailedSpareWarmTripsCircuitBreakerInsteadOfRespawning(t *testing.T) {
 
 func TestLifecycleRSSSampledForLiveChild(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// The same context covers both the environment preflight and the child
+	// sample. Race-instrumented package-wide runs can spend more than a second in
+	// the first ps invocation under scheduler pressure.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, err := sampleProcessRSS(ctx, os.Getpid()); err != nil {
 		t.Skipf("RSS sampling unavailable in this environment: %v", err)
@@ -2998,7 +3078,6 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 		if strings.Contains(s.mode, "-stable-") {
 			meta := mapFromAny(capabilities["_meta"])
 			meta["workassStableTurnInputV1"] = true
-			meta["workassOperationReadbackV1"] = true
 			capabilities["_meta"] = meta
 		}
 		if s.mode == "codex-plan-limits" {
@@ -3006,9 +3085,6 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 				"workassCodexRateLimitsRequest":     true,
 				"workassCodexRateLimitResetRequest": true,
 			}
-		}
-		if s.mode == "permission-reconcile-hang" {
-			capabilities["_meta"] = map[string]any{"workassTurnReconcileRequest": true}
 		}
 		if s.mode == "claude-plan-limits" || s.mode == "claude-plan-limits-delay" || s.mode == "claude-plan-limits-hang" {
 			capabilities["_meta"] = map[string]any{"workassClaudeUsageRequest": true}
@@ -3263,12 +3339,6 @@ func (s *fakeACP) handleRequest(id json.RawMessage, method string, params map[st
 		credits := s.resetCredits
 		s.mu.Unlock()
 		s.respond(id, map[string]any{"outcome": outcome, "rateLimits": fakeCodexRateLimitsWithCredits(credits)})
-	case "_workass/turn/reconcile":
-		if s.mode != "permission-reconcile-hang" {
-			s.fail(id, -32601, "fake method not found: "+method)
-			return
-		}
-		select {}
 	case "_workass/claude/usage":
 		if s.mode == "claude-plan-limits-hang" {
 			select {}
@@ -3509,7 +3579,7 @@ func (s *fakeACP) handlePrompt(id json.RawMessage, params map[string]any) {
 		return
 	}
 
-	if s.mode == "permission" || s.mode == "permission-reconcile-hang" {
+	if s.mode == "permission" || s.mode == "permission-hang" {
 		result := s.serverRequest("perm-1", "session/request_permission", map[string]any{
 			"sessionId": sessionID,
 			"toolCall":  map[string]any{"title": "Run fake tool", "kind": "execute"},
@@ -3976,6 +4046,74 @@ func TestEmitToolEventPreservesVisibleRasterResults(t *testing.T) {
 	}
 	if second["mimeType"] != "image/webp" || second["data"] != "d2VicA==" || second["name"] != "Option B" {
 		t.Fatalf("nested data-url tool image = %#v", second)
+	}
+}
+
+func TestLateToolUpdateCannotAttachToTheNextTurn(t *testing.T) {
+	t.Parallel()
+	events := newEventCollector()
+	manager := NewManager(Options{Broadcast: events.Broadcast})
+	t.Cleanup(func() { manager.Reset() })
+	bridge := newBridge("tool-owner", Options{}, manager)
+	sessionID := "session-tool-owner"
+	oldJob := &Job{
+		ID: "job-old", Kind: "app-chat", Status: "running",
+		SessionID: sessionID, TabID: "tab-tool-owner", ChatID: "chat-tool-owner",
+	}
+	manager.mu.Lock()
+	manager.jobs[oldJob.ID] = oldJob
+	manager.mu.Unlock()
+	bridge.setJobForSession(sessionID, oldJob)
+	bridge.handleNotification("session/update", map[string]any{
+		"sessionId": sessionID,
+		"update": map[string]any{
+			"sessionUpdate": "tool_call", "toolCallId": "terminal-1",
+			"title": "Run build", "kind": "execute", "status": "in_progress",
+		},
+	})
+
+	manager.mu.Lock()
+	oldJob.Status = "done"
+	delete(manager.jobs, oldJob.ID)
+	newJob := &Job{
+		ID: "job-new", Kind: "app-chat", Status: "running",
+		SessionID: sessionID, TabID: oldJob.TabID, ChatID: oldJob.ChatID,
+	}
+	manager.jobs[newJob.ID] = newJob
+	manager.mu.Unlock()
+	bridge.setJobForSession(sessionID, newJob)
+
+	// This is the malformed shape observed in production: an output-only late
+	// update from the previous terminal arrives after the next prompt became the
+	// current session job. It must not synthesize a generic Tool row there.
+	bridge.handleNotification("session/update", map[string]any{
+		"sessionId": sessionID,
+		"update": map[string]any{
+			"sessionUpdate": "tool_call_update", "toolCallId": "terminal-1",
+			"content": map[string]any{"type": "text", "text": "late output"},
+		},
+	})
+	if got := len(events.jobEvents(newJob.ID, "acp")); got != 0 {
+		t.Fatalf("late tool update attached to the next turn: %#v", events.jobEvents(newJob.ID, "acp"))
+	}
+
+	// A real tool in the new turn still owns and receives its normal updates.
+	bridge.handleNotification("session/update", map[string]any{
+		"sessionId": sessionID,
+		"update": map[string]any{
+			"sessionUpdate": "tool_call", "toolCallId": "terminal-2",
+			"title": "Run tests", "kind": "execute", "status": "in_progress",
+		},
+	})
+	bridge.handleNotification("session/update", map[string]any{
+		"sessionId": sessionID,
+		"update": map[string]any{
+			"sessionUpdate": "tool_call_update", "toolCallId": "terminal-2",
+			"title": "Run tests", "kind": "execute", "status": "completed",
+		},
+	})
+	if got := len(events.jobEvents(newJob.ID, "acp")); got != 2 {
+		t.Fatalf("current tool lifecycle events = %d, want 2: %#v", got, events.jobEvents(newJob.ID, "acp"))
 	}
 }
 

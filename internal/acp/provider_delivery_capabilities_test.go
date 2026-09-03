@@ -68,7 +68,6 @@ func TestSessionDeliveryCapabilitiesUseTypedCamelCaseWireShape(t *testing.T) {
 		LiveSteer:               true,
 		SteerConsumptionReceipt: true,
 		ConsumptionReceipt:      true,
-		TurnReadback:            true,
 	}
 	raw, err := json.Marshal(SessionInfo{
 		PlanUsageSupported: true, PlanUsageResetSupported: true,
@@ -85,10 +84,13 @@ func TestSessionDeliveryCapabilitiesUseTypedCamelCaseWireShape(t *testing.T) {
 	if projected["planUsageSupported"] != true || projected["planUsageResetSupported"] != true {
 		t.Fatalf("typed plan usage capabilities = %#v", projected)
 	}
-	for _, field := range []string{"stableInputIdentity", "liveSteer", "steerConsumptionReceipt", "consumptionReceipt", "turnReadback"} {
+	for _, field := range []string{"stableInputIdentity", "liveSteer", "steerConsumptionReceipt", "consumptionReceipt"} {
 		if delivery[field] != true {
 			t.Fatalf("deliveryCapabilities.%s = %#v, full=%#v", field, delivery[field], delivery)
 		}
+	}
+	if delivery["turnReadback"] != false {
+		t.Fatalf("retired deliveryCapabilities.turnReadback = %#v, full=%#v", delivery["turnReadback"], delivery)
 	}
 	if _, leaked := delivery["LiveSteer"]; leaked {
 		t.Fatalf("wire projection leaked actor-storage field names: %#v", delivery)

@@ -523,7 +523,7 @@ test('a rejected job start terminates its optimistic row and the next send can s
     const failed = owner.messages.at(-1)!;
     assert.equal(failed.status, 'failed');
     assert.match(failed.content, /provider lane rejected the turn/);
-    assert.equal(failed.retryPrompt, 'first attempt');
+    assert.equal((failed as unknown as Record<string, unknown>).retryPrompt, undefined);
     assert.equal(owner.sessionId, null);
     assert.equal((subject as any).chatJobs.size, 0);
     assert.equal(subject.isChatRunning(owner.id), false);

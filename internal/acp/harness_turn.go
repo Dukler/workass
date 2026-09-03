@@ -23,8 +23,8 @@ const (
 	harnessTurnPhaseEnded   = "ended"
 	harnessTurnPhaseFailed  = "failed"
 	// attention is a receipt only. A mid-turn notification is usually resolved
-	// mid-turn, and the end-of-turn question is already answered from live
-	// state by chatHasPendingPermission — a verdict from a stale notification
+	// mid-turn, and the end-of-turn question is already answered from the chat
+	// actor's durable permission state — a verdict from a stale notification
 	// would be exactly the kind of guess this lane removes.
 	harnessTurnPhaseAttention = "attention"
 )

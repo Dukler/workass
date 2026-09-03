@@ -7,7 +7,7 @@
 
 import { useSyncExternalStore } from 'react';
 import type { AppState, Chat, Msg, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
-import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, EngineRecovered, NotifyEvent, NotifyBacklog, AgentApply, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
+import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
 import { call, callThrow, has, on, bridgeReady } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
 import { LEAN_SESSION_SAVE_MODE, loadMirror, saveMirror, type Mirror, type MirrorMsg } from './persistence';
@@ -176,6 +176,54 @@ function ownerMachineId(chat: Pick<Chat, 'id' | 'machineId'>): string {
   return String(chat.machineId ?? machineOf(chat.id)).trim();
 }
 
+const CHAT_ORDER_LIMIT = 4096;
+const CHAT_ORDER_ID_LIMIT = 256;
+
+function normalizeChatOrder(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const id = item.trim();
+    if (!id || id.length > CHAT_ORDER_ID_LIMIT || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length === CHAT_ORDER_LIMIT) break;
+  }
+  return out;
+}
+
+/**
+ * Fold the currently visible order into the durable order without moving ids
+ * whose machine is temporarily absent. New ids are the one automatic movement
+ * allowed by the sidebar contract: they are inserted at the top.
+ */
+function mergeVisibleChatOrder(saved: readonly string[], visible: readonly string[]): string[] {
+  const previous = normalizeChatOrder(saved);
+  const current = normalizeChatOrder(visible);
+  const previousSet = new Set(previous);
+  const currentSet = new Set(current);
+  const added = current.filter((id) => !previousSet.has(id));
+  const reordered = current.filter((id) => previousSet.has(id));
+  let cursor = 0;
+  const anchored = previous.map((id) => (currentSet.has(id) ? reordered[cursor++] : id));
+  if (cursor < reordered.length) anchored.push(...reordered.slice(cursor));
+  return normalizeChatOrder([...added, ...anchored]);
+}
+
+function orderChatsBySavedOrder<T extends Pick<Chat, 'id'>>(chats: readonly T[], rawOrder: readonly string[]): T[] {
+  const rank = new Map(normalizeChatOrder(rawOrder).map((id, index) => [id, index]));
+  const added: T[] = [];
+  const known: T[] = [];
+  for (const chat of chats) {
+    if (rank.has(chat.id)) known.push(chat);
+    else added.push(chat);
+  }
+  known.sort((a, b) => rank.get(a.id)! - rank.get(b.id)!);
+  return [...added, ...known];
+}
+
 function ownedEntityId(chat: Pick<Chat, 'id' | 'machineId'>, id: string): string {
   return tagId(ownerMachineId(chat), localId(id));
 }
@@ -304,7 +352,6 @@ function mergeLiveTurnMessage(
     next.at = live.at;
     next.interrupted = live.interrupted;
     next.permission = live.permission;
-    next.retryPrompt = live.retryPrompt;
   } else if ((startAfter || dataAfter || mediaAfter) && live.status === 'running') {
     next.status = 'running';
   } else if (steerAfter && live.status !== 'pending') {
@@ -314,9 +361,12 @@ function mergeLiveTurnMessage(
   return next;
 }
 
-function globalPresentationFingerprint(value: Pick<AppState, 'chats' | 'activeId' | 'seq' | 'workspaces' | 'collapsedWorkspaces' | 'removedWorkspaces' | 'theme' | 'themePref' | 'density' | 'panes' | 'mode' | 'notifEnabled'>): string {
+function globalPresentationFingerprint(
+  value: Pick<AppState, 'activeId' | 'seq' | 'workspaces' | 'collapsedWorkspaces' | 'removedWorkspaces' | 'theme' | 'themePref' | 'density' | 'panes' | 'mode' | 'notifEnabled'>,
+  chatOrder: readonly string[],
+): string {
   return JSON.stringify([
-    value.activeId, value.seq, value.chats.filter((chat) => !ownerMachineId(chat)).map((chat) => chat.id),
+    value.activeId, value.seq, normalizeChatOrder(chatOrder),
     value.workspaces, value.collapsedWorkspaces, value.removedWorkspaces,
     value.theme, value.themePref, value.density, value.panes, value.mode, value.notifEnabled,
   ]);
@@ -418,6 +468,10 @@ export class Store {
   private committedRuntimeControlFingerprints = new Map<string, string>();
   private pendingRuntimeControlOperations = new Map<string, { fingerprint: string; operationId: string }>();
   private pendingRuntimeControlSaves = new Map<string, Promise<boolean>>();
+  // One client-visible order spans local and remote actor rows. Chat payloads
+  // remain owned by their machines; only their tagged ids live in this local
+  // presentation list so a remote refresh cannot append a dragged row again.
+  private manualChatOrder: string[] = [];
   private committedGlobalPresentationFingerprint = '';
   private pendingGlobalPresentationOperation: { fingerprint: string; operationId: string } | null = null;
   // Draft edits have the same renderer-versus-digest race as queue edits. In
@@ -467,7 +521,9 @@ export class Store {
 
   constructor() {
     const mirror = loadMirror();
+    this.manualChatOrder = normalizeChatOrder(mirror?.chatOrder);
     this.state = this.fromMirror(mirror);
+    this.state.chats = this.orderChats(this.state.chats);
     for (const chat of this.state.chats) {
       this.committedPresentationFingerprints.set(chat.id, presentationFingerprint(chat));
     }
@@ -477,7 +533,38 @@ export class Store {
   }
 
   private commitCurrentGlobalPresentation() {
-    this.committedGlobalPresentationFingerprint = globalPresentationFingerprint(this.state);
+    this.committedGlobalPresentationFingerprint = this.currentGlobalPresentationFingerprint();
+  }
+
+  private captureChatOrder(): string[] {
+    this.manualChatOrder = mergeVisibleChatOrder(this.manualChatOrder, this.state.chats.map((chat) => chat.id));
+    return this.manualChatOrder;
+  }
+
+  private orderChats(chats: readonly Chat[]): Chat[] {
+    const ordered = orderChatsBySavedOrder(chats, this.manualChatOrder);
+    this.manualChatOrder = mergeVisibleChatOrder(this.manualChatOrder, ordered.map((chat) => chat.id));
+    return ordered;
+  }
+
+  private forgetChatOrder(ids: Iterable<string>) {
+    const removed = new Set(ids);
+    this.manualChatOrder = this.manualChatOrder.filter((id) => !removed.has(id));
+  }
+
+  private adoptLocalSnapshotOrder(mirror: Mirror, localChats: readonly Chat[]) {
+    const localIDs = new Set(localChats.map((chat) => chat.id));
+    // This daemon is authoritative for untagged membership. Tagged ids name
+    // another machine and may be absent from the snapshot while that link is
+    // reconnecting, so they remain anchored.
+    this.manualChatOrder = this.manualChatOrder.filter((id) => ownerMachineId({ id }) || localIDs.has(id));
+    const incoming = normalizeChatOrder(mirror.chatOrder)
+      .filter((id) => ownerMachineId({ id }) || localIDs.has(id));
+    this.manualChatOrder = mergeVisibleChatOrder(this.manualChatOrder, incoming);
+  }
+
+  private currentGlobalPresentationFingerprint(): string {
+    return globalPresentationFingerprint(this.state, this.captureChatOrder());
   }
 
   // ---- subscription plumbing -------------------------------------------
@@ -644,13 +731,16 @@ export class Store {
     const chats = onlyDirty && lean
       ? owned.filter((chat) => onlyDirty.has(chat.id))
       : owned;
+    const chatOrder = this.captureChatOrder();
     const snapshot: Mirror = {
       v: 1,
       _workassSave: lean ? LEAN_SESSION_SAVE_MODE : undefined,
       activeId: this.state.activeId,
       seq: this.state.seq,
       globalRevision: this.state.globalRevision,
-      chatOrder: owned.map((chat) => chat.id),
+      // The local daemon persists presentation for this controller, including
+      // tagged ids that anchor remote rows. Remote chat payloads remain absent.
+      chatOrder: [...chatOrder],
       workspaces: this.state.workspaces,
       collapsedWorkspaces: this.state.collapsedWorkspaces,
       removedWorkspaces: this.state.removedWorkspaces,
@@ -827,7 +917,7 @@ export class Store {
         this.pendingPresentationSnapshots.delete(tabId);
       }
     }
-    const globalFingerprint = globalPresentationFingerprint(this.state);
+    const globalFingerprint = this.currentGlobalPresentationFingerprint();
     const globalChanged = this.committedGlobalPresentationFingerprint !== globalFingerprint;
     let savedOK = true;
     // Chat presentation, queue, controls, usage, and transcript state are actor
@@ -1536,27 +1626,6 @@ export class Store {
     return merged;
   }
 
-  private carryRendererChatOrder(previous: Chat[], next: Chat[]): Chat[] {
-    const byID = new Map(next.map((chat) => [chat.id, chat]));
-    const carried: Chat[] = [];
-    const seen = new Set<string>();
-    for (const prior of previous) {
-      const restored = byID.get(prior.id);
-      if (!restored || seen.has(restored.id)) continue;
-      carried.push(restored);
-      seen.add(restored.id);
-    }
-    // Membership remains actor-owned. A chat that became authoritative while
-    // the global projection was in flight is appended in daemon order; only
-    // rows common to both snapshots retain the renderer's newer drag order.
-    for (const restored of next) {
-      if (seen.has(restored.id)) continue;
-      carried.push(restored);
-      seen.add(restored.id);
-    }
-    return carried;
-  }
-
   private restoreSessionSnapshot(server: unknown, liveEventFence = this.liveTurnEventVersion): boolean {
     if (!server || typeof server !== 'object' || !Array.isArray((server as Mirror).chats)) return false;
     const authoritative = server as Mirror;
@@ -1566,21 +1635,25 @@ export class Store {
     const pendingQueues = new Map(this.pendingQueueSnapshots);
     const authoritativeChatIDs = new Set(authoritative.chats.map((chat) => chat.id));
     const restored = this.fromMirror(authoritative);
-    this.preserveNewerLocalControls(previousChats, restored.chats);
-    this.preserveMatchingHydratedRuntime(previousChats, restored.chats);
-    this.preserveLiveTurnEvents(previousChats, restored.chats, liveEventFence, '');
-    this.state.chats = this.carryRemoteChats(
-      previousChats,
-      this.carryPendingCreatedChats(previousChats, restored.chats),
-    );
     // session:save broadcasts its refresh before the invoke reply. Preserve a
     // drag while that exact global operation is still in flight, and reject a
     // session:get that began before an already-acknowledged newer revision.
     const preserveGlobalPresentation = !!this.pendingGlobalPresentationOperation
       || restored.globalRevision < previousGlobalRevision;
-    if (preserveGlobalPresentation) {
-      this.state.chats = this.carryRendererChatOrder(previousChats, this.state.chats);
-    }
+    // Actor creation can become visible before the daemon-global chatOrder
+    // save. Until that exact row is echoed, its renderer-minted top position is
+    // newer than the otherwise-authoritative order beside it.
+    const preserveChatOrder = preserveGlobalPresentation
+      || this.pendingChatCreates.size > 0
+      || this.remoteChatCreateFences.size > 0;
+    if (!preserveChatOrder) this.adoptLocalSnapshotOrder(authoritative, restored.chats);
+    this.preserveNewerLocalControls(previousChats, restored.chats);
+    this.preserveMatchingHydratedRuntime(previousChats, restored.chats);
+    this.preserveLiveTurnEvents(previousChats, restored.chats, liveEventFence, '');
+    this.state.chats = this.orderChats(this.carryRemoteChats(
+      previousChats,
+      this.carryPendingCreatedChats(previousChats, restored.chats),
+    ));
     // Keep the create fence alive through the merge above. The actor row can
     // become visible before daemon-global chatOrder catches up; clearing first
     // allowed that early echo to move a freshly created thread to the bottom.
@@ -1625,7 +1698,7 @@ export class Store {
       this.state.mode = restored.mode;
       this.state.notifEnabled = restored.notifEnabled;
       this.state.globalRevision = restored.globalRevision;
-      this.committedGlobalPresentationFingerprint = globalPresentationFingerprint(restored);
+      this.committedGlobalPresentationFingerprint = this.currentGlobalPresentationFingerprint();
     }
     // Which chat you are looking at is a LOCAL choice. This runs on reconnect and
     // on the periodic session digest, so adopting the server's activeId here
@@ -2140,7 +2213,13 @@ export class Store {
         ...normalized.map((chat) => chat.id),
         ...pending.map((chat) => chat.id),
       ]);
-      this.state.chats = [...others, ...normalized, ...pending];
+      // Replacement changes actor objects, never their presentation slots.
+      // Rows proved absent by this machine's authoritative snapshot leave the
+      // order; rows never seen before are the only ones inserted at the top.
+      const retainedMachineIDs = new Set([...normalized, ...pending].map((chat) => chat.id));
+      this.manualChatOrder = this.manualChatOrder.filter((id) =>
+        ownerMachineId({ id }) !== machineId || retainedMachineIDs.has(id));
+      this.state.chats = this.orderChats([...others, ...normalized, ...pending]);
       this.rebuildJobRefs(affectedTabs);
       void replaceAll;
       this.machines?.setReason(machineId, normalized.length
@@ -2234,6 +2313,7 @@ export class Store {
     }
     const removedTabs = new Set(removed.map((chat) => chat.id));
     for (const chat of removed) this.discardChatProjection(chat);
+    this.forgetChatOrder(removedTabs);
     this.state.chats = this.state.chats.filter((chat) => !removedTabs.has(chat.id));
     if (!this.state.activeId || removedTabs.has(this.state.activeId)) {
       this.state.activeId = this.state.chats.find((chat) => !ownerMachineId(chat))?.id
@@ -2413,10 +2493,9 @@ export class Store {
     // D1 compaction indicator — feature-detected; degrades to no-op if the
     // daemon bridge does not expose the channel.
     on('onChatCompacted', (e) => this.onCompacted(e as ChatCompacted));
-    // R4 rewind confirmation + D4 crash-recovery notice. Feature-detected; the
-    // browser bridge does not subscribe to these yet (GAP) → no-op there.
+    // R4 rewind confirmation. Feature-detected; the browser bridge does not
+    // subscribe to this yet (GAP), so it is a no-op there.
     on('onChatCheckpointRestored', (e) => this.onCheckpointRestored(e as CheckpointRestored));
-    on('onChatEngineRecovered', (e) => this.onEngineRecovered(e as EngineRecovered));
     // R7 notifications — controller-only explicit agent events. Permission
     // requests retain their own attention path; ordinary turn completion never
     // creates a notification or backlog entry.
@@ -2482,11 +2561,12 @@ export class Store {
       const authoritative = server as Mirror;
       const live = this.state;
       this.state = this.fromMirror(authoritative);
+      this.adoptLocalSnapshotOrder(authoritative, this.state.chats);
       // Chats from another machine live in another machine's mirror, so a
       // wholesale replacement from THIS daemon would wipe them (E3). They are
       // carried across for the same reason the grouped catalog is below: the
       // local session store is not their source of truth.
-      this.state.chats = this.carryRemoteChats(live.chats, this.state.chats);
+      this.state.chats = this.orderChats(this.carryRemoteChats(live.chats, this.state.chats));
       if (live.activeId && this.state.chats.some((chat) => chat.id === live.activeId)) {
         this.state.activeId = live.activeId;
       }
@@ -2675,24 +2755,6 @@ export class Store {
       reportShellCatalog(this.state.groups);
     }
   }
-  // Retry an interrupted / failed-send turn: drop the failed assistant row and
-  // its paired user prompt, then re-send cleanly (which re-establishes a session
-  // if needed). No-op while still offline — the affordance is disabled there.
-  async retryTurn(tabId: string, msgId: string) {
-    if (!this.isConnected()) return;
-    const chat = this.chat(tabId); if (!chat) return;
-    const msg = chat.messages.find((candidate) => candidate.id === msgId); if (!msg) return;
-    const prompt = msg.retryPrompt;
-    if (!prompt) return;
-    const idx = chat.messages.indexOf(msg);
-    const priorUser = [...chat.messages.slice(0, idx)].reverse().find((candidate) => candidate.role === 'user');
-    const remove = new Set<string>([msg.id]);
-    for (let j = idx - 1; j >= 0; j--) { if (chat.messages[j].role === 'user') { remove.add(chat.messages[j].id); break; } }
-    chat.messages = chat.messages.filter((m) => !remove.has(m.id));
-    this.bumpChat(chat);
-    await this._send(chat, prompt, undefined, undefined, priorUser ? { userId: priorUser.id, assistantId: msg.id } : undefined);
-  }
-
   // ---- theme / density / panes -----------------------------------------
   private systemThemeMql?: MediaQueryList;
   private installSystemThemeListener() {
@@ -2952,6 +3014,7 @@ export class Store {
       pending: true, messages: [], draft: '',
     };
     this.state.chats.unshift(chat);
+    this.captureChatOrder();
     this.pendingChatCreates.add(chat.id);
     this.pendingChatCreateOperations.set(chat.id, { operationId: rid('chat-create'), focus: activate });
     // Recorded here, not at the button: "Nueva aquí", the per-folder + in the
@@ -3054,6 +3117,7 @@ export class Store {
     const chat = this.chat(chatId);
     if (!chat) return false;
     this.placeChat(chat, beforeId);
+    this.captureChatOrder();
     this.bumpApp(false);
     // chatOrder is daemon-global presentation state. Flush it immediately, but
     // do not force a full actor save or mark any chat presentation dirty.
@@ -3145,6 +3209,7 @@ export class Store {
       this.state.removedWorkspaces = this.state.removedWorkspaces.filter((path) => normalizeWorkspacePath(path) !== targetCwd);
     }
     this.placeChat(live, beforeId);
+    this.captureChatOrder();
     this.bumpChat(live);
     await this.flushSession(true);
     return true;
@@ -3331,6 +3396,7 @@ export class Store {
     }
     if (this.pendingChatDeleteOperations.get(id)?.operationId === operationId) this.pendingChatDeleteOperations.delete(id);
     this.discardChatProjection(live);
+    this.forgetChatOrder([live.id]);
     this.state.chats = this.state.chats.filter((c) => c.id !== live.id);
     if (this.state.activeId === live.id) this.state.activeId = this.state.chats[0]?.id ?? null;
     if (this.state.chats.length === 0) this.newChat();
@@ -3780,21 +3846,27 @@ export class Store {
     if (next.source === 'agent' || next.source === 'host') return;
     if (!queuedAttachmentsReady(next)) return;
     this.drainingQueues.add(chat.id);
-    let accepted = false;
+    let owned = false;
     try {
       const payload = queuedJob(next);
-      // Keep the exact FIFO owner until job:start has accepted the turn. A
-      // failed/throwing send leaves the same object at the head for retry.
-      accepted = await this._send(chat, payload.prompt, payload.images, next.id, {
+      // Keep the exact FIFO owner until the intent has either a daemon receipt
+      // or one local terminal failure row. Both outcomes consume this queue
+      // entry: a failed provider operation is never sent again after hydration.
+      owned = await this._send(chat, payload.prompt, payload.images, next.id, {
         userId: next.id,
         assistantId: ownedEntityId(chat, `queue-assistant-${localId(next.id)}`),
       });
-      if (!accepted) return;
       // A hydration during the send replaces every chat object wholesale
       // (restoreSessionSnapshot). Removing the accepted row from the captured
       // object would then strand it in the live chat's FIFO, where it looks
       // stuck forever and is re-sent as a duplicate at the next turn end.
       const live = this.chat(chat.id) ?? chat;
+      if (!owned) {
+        const assistantId = ownedEntityId(live, `queue-assistant-${localId(next.id)}`);
+        owned = live.messages.some((message) => message.id === assistantId
+          && message.role === 'assistant' && message.status !== 'running');
+      }
+      if (!owned) return;
       const current = live.queue ?? [];
       if (!current.some((item) => item.id === next.id)) return;
       const remaining = afterQueuedAcceptance(current, next.id, true);
@@ -3808,12 +3880,12 @@ export class Store {
       // A deterministic/very fast agent may emit `end` before the job:start
       // reply resolves. That end handler observes this drain lock and returns;
       // continue here once the accepted item has been removed. Never do this
-      // after a failed start, or an unavailable session would retry forever.
+      // unless that attempt has a durable or visible terminal owner.
       const tail = this.chat(chat.id) ?? chat;
-      if (accepted && tail.queue?.length && !this.isChatRunning(tail.id)) void this.flushNextQueued(tail);
+      if (owned && tail.queue?.length && !this.isChatRunning(tail.id)) void this.flushNextQueued(tail);
     }
   }
-  private failPendingSend(chat: Chat, assistant: Msg, prompt: string, chatId: string, detail?: unknown) {
+  private failPendingSend(chat: Chat, assistant: Msg, chatId: string, detail?: unknown) {
     const pending = this.pendingTurnStarts.get(chat.id);
     if (pending && pending.chatId === chat.chatId && pending.assistantId === assistant.id) this.pendingTurnStarts.delete(chat.id);
     const chatRef = this.chatJobs.get(chatId);
@@ -3824,7 +3896,6 @@ export class Store {
     assistant.content = reason ? `No se pudo iniciar el turno (${reason}).` : 'No se pudo iniciar el turno.';
     assistant.at = new Date().toISOString();
     assistant.interrupted = true;
-    assistant.retryPrompt = prompt;
     assistant.turnStartedAt = undefined;
     assistant.jobId = undefined;
     // A connection id is disposable. Force the next attempt through exact lane
@@ -3855,7 +3926,8 @@ export class Store {
     chat = afterMove;
     const now = new Date().toISOString();
     // Offline: never queue into a dead socket. Record the turn honestly as a
-    // failed send with a retry affordance rather than an eternal "Trabajando…".
+    // failed send rather than an eternal "Trabajando…". The next distinct
+    // prompt uses the normal saved-session resume path; this row is never resent.
     // (The composer disables Enviar while offline; this covers the send-clicked-
     // as-the-socket-drops race and any programmatic send.)
     // The daemon persists the user row redacted at ingestion (PrepareTurn);
@@ -3866,7 +3938,7 @@ export class Store {
     const assistantId = ownedEntityId(chat, identity?.assistantId ?? rid('a'));
     if (!this.isConnected()) {
       const user: Msg = { id: userId, role: 'user', content: display, status: 'done', at: now, events: [], images: messageImages(images) };
-      const asst: Msg = { id: assistantId, role: 'assistant', content: '', status: 'failed', at: now, events: [], interrupted: true, retryPrompt: prompt };
+      const asst: Msg = { id: assistantId, role: 'assistant', content: '', status: 'failed', at: now, events: [], interrupted: true };
       chat.messages.push(user, asst);
       if (!chat.titleLocked) { chat.title = display.trim().slice(0, 34) || chat.title; chat.titleLocked = true; }
       this.bumpChat(chat);
@@ -3891,7 +3963,6 @@ export class Store {
       asst.at = null;
       asst.events = [];
       asst.interrupted = undefined;
-      asst.retryPrompt = undefined;
       asst.jobId = undefined;
       asst.turnStartedAt = Date.now();
     }
@@ -3916,7 +3987,7 @@ export class Store {
         ? current.messages.find((message) => message.id === pendingStart.assistantId && message.role === 'assistant')
         : undefined;
       if (current && failedAssistant) {
-        this.failPendingSend(current, failedAssistant, prompt, durableChatId, current.sessionError);
+        this.failPendingSend(current, failedAssistant, durableChatId, current.sessionError);
       } else {
         releasePendingStart();
       }
@@ -4078,7 +4149,7 @@ export class Store {
       : job && typeof job === 'object' && 'error' in job
         ? String((job as { error?: unknown }).error ?? '')
         : undefined;
-    this.failPendingSend(current, failedAssistant, prompt, chatId, failure);
+    this.failPendingSend(current, failedAssistant, chatId, failure);
     return false;
   }
   cancelActive() {
@@ -5161,11 +5232,6 @@ export class Store {
     }
     this.bumpApp(false);
   }
-  private onEngineRecovered(e: EngineRecovered) {
-    const chat = this.chatByConvId(e?.chatId);
-    this.addToast(chat?.title ?? 'workass', 'El motor se reinició y reanudó el turno.');
-  }
-
   // ---- R5 Revisar diff panel -------------------------------------------
   async openReview(chat: Chat | null) {
     const c = chat ?? this.active();

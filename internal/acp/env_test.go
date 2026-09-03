@@ -57,6 +57,42 @@ func TestProviderLaneManagedChatEnvInitializationDoesNotBlockSession(t *testing.
 	}
 }
 
+func TestLateChatEnvRefreshCannotOverwriteOrPublishPastANewerTurn(t *testing.T) {
+	events := newEventCollector()
+	manager := NewManager(Options{Broadcast: events.Broadcast})
+	t.Cleanup(func() { manager.Reset() })
+	newer := emptyChatEnvPayload("env-order-chat", "env-order-tab", "/newer")
+	tracker := &chatEnvTracker{
+		sessionID: "env-order-session", chatID: newer.ChatID, tabID: newer.TabID, cwd: newer.CWD,
+		payload: newer, turnSeq: 2,
+		pendingTurns: map[string]chatTurnCheckpoint{
+			"env-order-old-job": {turnSeq: 1, jobID: "env-order-old-job"},
+		},
+	}
+	manager.envMu.Lock()
+	manager.storeChatEnvTrackerLocked(tracker)
+	manager.envMu.Unlock()
+
+	manager.refreshChatEnvAfterJobSnapshot(context.Background(), &Job{ID: "env-order-old-job"}, chatEnvSnapshot{
+		sessionID: tracker.sessionID, chatID: tracker.chatID, tabID: tracker.tabID,
+		cwd: "/older", turnSeq: 1, jobID: "env-order-old-job",
+	})
+	if got := manager.ChatEnvGet(tracker.chatID, tracker.tabID); got.CWD != newer.CWD {
+		t.Fatalf("late environment refresh replaced newer state: %#v", got)
+	}
+	manager.envMu.Lock()
+	_, pending := tracker.pendingTurns["env-order-old-job"]
+	manager.envMu.Unlock()
+	if pending {
+		t.Fatal("late environment refresh did not release its own pending checkpoint")
+	}
+	for _, event := range events.snapshot() {
+		if event.channel == "chat:env" {
+			t.Fatalf("late environment refresh was published: %#v", event.payload)
+		}
+	}
+}
+
 func TestChatEnvTracksRepoChangesAfterTurn(t *testing.T) {
 	t.Parallel()
 	requireGit(t)

@@ -130,7 +130,7 @@ type coordinatorDelivery struct {
 }
 
 func (d coordinatorDelivery) Capabilities() provider.DeliveryCapabilities {
-	return provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true, TurnReadback: true}
+	return provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true}
 }
 func (d coordinatorDelivery) StartTurn(_ context.Context, input provider.TurnInput) (provider.TurnAdmission, error) {
 	if d.startStarted != nil {
@@ -213,9 +213,6 @@ func (d coordinatorDelivery) Cancel(context.Context, provider.TurnRef) error {
 		d.cancelStarted <- struct{}{}
 	}
 	return nil
-}
-func (d coordinatorDelivery) Reconcile(_ context.Context, request provider.ReconcileRequest) (provider.ReconcileResult, error) {
-	return provider.ReconcileResult{Turn: request.Turn, Found: true, Consumed: true}, nil
 }
 func (d coordinatorDelivery) ResolvePermission(_ context.Context, decision provider.PermissionDecision) (provider.PermissionReceipt, error) {
 	return provider.PermissionReceipt{
@@ -590,8 +587,8 @@ func TestCoordinatorRetriesAmbiguousUnestablishedCreateOnlyAfterExplicitSelectio
 		t.Fatalf("ambiguous create execution: executed=%v err=%v", executed, err)
 	}
 	state := engine.Snapshot()
-	if state.Lanes[identity.ID].Phase != LaneAbsent || state.Outbox[0].Status != OutboxAmbiguous {
-		t.Fatalf("ambiguous unestablished create did not remain absent: %#v", state)
+	if state.Lanes[identity.ID].Phase != LaneBlocked || state.Outbox[0].Status != OutboxAmbiguous {
+		t.Fatalf("ambiguous unestablished create did not remain fail-closed: %#v", state)
 	}
 	if _, ok, err := engine.ClaimNext(); err != nil || ok {
 		t.Fatalf("ambiguous create retried without explicit intent: ok=%v err=%v", ok, err)

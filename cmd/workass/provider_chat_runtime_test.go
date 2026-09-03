@@ -142,7 +142,7 @@ func TestProjectSessionPreservesManualChatOrder(t *testing.T) {
 	for _, raw := range rows {
 		got = append(got, fieldString(mapFromAnyMain(raw), "id"))
 	}
-	want := []string{"manual-tab-c", "manual-tab-a", "manual-tab-b"}
+	want := []string{"manual-tab-b", "manual-tab-c", "manual-tab-a"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("projected chat order = %v, want %v", got, want)
 	}
@@ -592,7 +592,7 @@ func TestProviderLaneSelectionRetryCreatesAfterOldZeroThreadFailure(t *testing.T
 	failed, _ := runtime.Snapshot(chatID)
 	failedReceipt := failed.LaneSelectionMutationReceipts[opts.OperationID]
 	failedLane := failed.Lanes[failedReceipt.LaneID]
-	if failedLane.Phase != chat.LaneAbsent || !failedLane.Thread.IsZero() || !failedLane.CreationFailedBeforeEstablishment() {
+	if failedLane.Phase != chat.LaneBlocked || !failedLane.Thread.IsZero() || !failedLane.CreationFailedBeforeEstablishment() {
 		t.Fatalf("old zero-thread failure = %#v", failedLane)
 	}
 
@@ -694,8 +694,11 @@ func TestProjectLedgerMessageUsesOnlyRichActorState(t *testing.T) {
 	if fieldString(message, "content") != "A😀" || fieldString(message, "result") != "answer" || fieldString(message, "turnRootId") != "root" || message["turnTerminal"] != true {
 		t.Fatalf("assistant projection lost semantic fields: %#v", message)
 	}
-	if message["interrupted"] != true || fieldString(message, "retryPrompt") != "retry me" {
+	if message["interrupted"] != true {
 		t.Fatalf("interruption projection = %#v", message)
+	}
+	if _, retryable := message["retryPrompt"]; retryable {
+		t.Fatalf("retired retry prompt leaked into projection: %#v", message)
 	}
 	events := anySlice(message["events"])
 	if len(events) != 4 || intValue(mapFromAnyMain(events[0])["at"]) != 3 || fieldString(mapFromAnyMain(events[0]), "text") != "reason" {
@@ -779,7 +782,7 @@ func TestActorForegroundRunningExcludesLegacyUncertainState(t *testing.T) {
 	}{
 		{name: "dispatching", status: chat.ForegroundDispatching, want: true},
 		{name: "running", status: chat.ForegroundRunning, want: true},
-		{name: "reconciling", status: chat.ForegroundReconciling, want: true},
+		{name: "legacy reconciling", status: chat.ForegroundReconciling, want: false},
 		{name: "legacy uncertain", status: chat.ForegroundUncertain, want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {

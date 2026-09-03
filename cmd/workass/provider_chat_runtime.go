@@ -436,22 +436,6 @@ func (r *providerChatRuntime) publishLifecycleReceipt(receipt chat.LifecycleRece
 		return
 	}
 	switch receipt.Kind {
-	case chat.LifecycleHostRecoveryResumed:
-		r.publish("chat:engine-recovered", map[string]any{
-			"chatId": receipt.ChatID, "tabId": nullableString(state.Presentation.TabID),
-			"oldSessionId": receipt.Thread.HeadID, "sessionId": receipt.Thread.HeadID,
-			"at": time.Now().UTC().Format(time.RFC3339Nano),
-		})
-	case chat.LifecycleTurnReconciled:
-		if receipt.Terminal {
-			if event, err := projectReconciledTerminalJob(state, receipt.OperationID, receipt.Turn); err == nil {
-				r.publish("job:event", event)
-			}
-		}
-		// The actor snapshot carries the complete authoritative result, including
-		// rich timeline/media that an operation readback cannot reproduce in one
-		// terminal receipt. Ask connected renderers to reconcile from that state.
-		r.publish("agent:apply", map[string]any{"action": "session-refresh"})
 	case chat.LifecycleTurnAdmissionFailed:
 		if event, err := projectActorTerminalJob(state, receipt.OperationID, receipt.Turn); err == nil {
 			r.publish("job:event", event)
@@ -1435,7 +1419,7 @@ func (r *providerChatRuntime) selectLocked(ctx context.Context, actor *providerC
 		}
 		selection = providerLaneSelectionFromActorLane(lane)
 		switch lane.Phase {
-		case chat.LaneReady, chat.LaneRunning, chat.LaneReconciling:
+		case chat.LaneReady, chat.LaneRunning:
 			return selection, nil
 		case chat.LaneBlocked:
 			return selection, &providercontract.Error{Kind: lane.LastError, Message: "provider lane is blocked at a safe boundary"}
@@ -1482,7 +1466,7 @@ func (r *providerChatRuntime) selectLocked(ctx context.Context, actor *providerC
 	selection.Creation = lane.Creation
 	selection.Established = !lane.Thread.IsZero()
 	switch lane.Phase {
-	case chat.LaneReady, chat.LaneRunning, chat.LaneReconciling:
+	case chat.LaneReady, chat.LaneRunning:
 		// Tab ids are disposable attachment metadata. At an idle boundary, move
 		// the already-attached exact lane to the caller's current tab without
 		// creating/resuming/replaying any provider state.
@@ -2641,13 +2625,8 @@ func (r *providerChatRuntime) Cancel(ctx context.Context, jobID string) (acp.Job
 			if entry.Kind != chat.EffectCancelTurn || entry.OperationID != operationID {
 				continue
 			}
-			switch entry.Status {
-			case chat.OutboxAccepted, chat.OutboxCompleted:
-				return acp.JobCancelResult{Cancelled: true, Reason: "cancelled"}, true, nil
-			case chat.OutboxAmbiguous:
-				return acp.JobCancelResult{Cancelled: false, Reason: "uncertain"}, true, nil
-			case chat.OutboxFailed:
-				return acp.JobCancelResult{Cancelled: false, Reason: "not-owned"}, true, nil
+			if result, done := cancelResultFromReceipt(entry); done {
+				return result, true, nil
 			}
 		}
 		return acp.JobCancelResult{Cancelled: false, Reason: "pending"}, true, nil

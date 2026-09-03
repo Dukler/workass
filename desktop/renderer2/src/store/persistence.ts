@@ -21,7 +21,6 @@ export interface MirrorMsg {
   permission?: PermissionState;
   turnStartedAt?: number;
   interrupted?: boolean;
-  retryPrompt?: string;
   images?: MessageImage[];
   events: unknown[];
 }

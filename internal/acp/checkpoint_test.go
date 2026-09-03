@@ -49,6 +49,7 @@ func TestChatCheckpointsDiffRewindAndOutsideGuard(t *testing.T) {
 	}
 	writeFile(t, workPath, "one\ntwo\nthree\n")
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job1), 2*time.Second), "done", 0, "end_turn")
+	waitChatCheckpointCount(t, manager, "chat-cp", 1, 2*time.Second)
 	hashB := fileSHA256(t, workPath)
 
 	job2, err := manager.StartJob(context.Background(), JobStartOptions{
@@ -66,7 +67,7 @@ func TestChatCheckpointsDiffRewindAndOutsideGuard(t *testing.T) {
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job2), 2*time.Second), "done", 0, "end_turn")
 	hashC := fileSHA256(t, workPath)
 
-	checkpoints := manager.ChatCheckpoints("chat-cp", "")
+	checkpoints := waitChatCheckpointCount(t, manager, "chat-cp", 2, 2*time.Second)
 	if len(checkpoints) != 2 {
 		t.Fatalf("checkpoints = %#v", checkpoints)
 	}
@@ -237,7 +238,7 @@ func TestChatCheckpointRotationAndLargeRepoSkip(t *testing.T) {
 			writeFile(t, filepath.Join(repoDir, fmt.Sprintf("file%03d.txt", i)), "base\nchanged\n")
 		}
 		assertJobStatus(t, events.waitJobEnd(t, jobID(job), 3*time.Second), "done", 0, "end_turn")
-		checkpoints := manager.ChatCheckpoints("chat-large", "")
+		checkpoints := waitChatCheckpointCount(t, manager, "chat-large", 1, 3*time.Second)
 		if len(checkpoints) != 1 || len(checkpoints[0].Repos) != 1 {
 			t.Fatalf("large checkpoints = %#v", checkpoints)
 		}
@@ -250,6 +251,21 @@ func TestChatCheckpointRotationAndLargeRepoSkip(t *testing.T) {
 		}
 		t.Logf("trace checkpoint skipped repo=%s changedFiles=%d reason=%s", repo.Name, repo.ChangedFiles, repo.SkipReason)
 	})
+}
+
+func waitChatCheckpointCount(t *testing.T, manager *Manager, chatID string, count int, timeout time.Duration) []ChatCheckpoint {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		checkpoints := manager.ChatCheckpoints(chatID, "")
+		if len(checkpoints) >= count {
+			return checkpoints
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("chat %s checkpoints = %#v, want at least %d", chatID, checkpoints, count)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func fileSHA256(t *testing.T, path string) string {

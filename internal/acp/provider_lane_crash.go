@@ -1,8 +1,8 @@
 package acp
 
 // handleUnexpectedBridgeExit terminates process-local work and lets the chat
-// actor own the only durable recovery decision. The manager never creates,
-// resumes, aliases, or replays a chat in response to a host crash.
+// actor publish the interrupted terminal receipt. The manager never creates,
+// resumes, aliases, replays, or polls a chat in response to a host crash.
 //
 // An engine that was running and then died is a crash, never a login verdict:
 // its stderr routinely contains credential-flavored words from ordinary CLI
@@ -19,14 +19,13 @@ func (m *Manager) handleUnexpectedBridgeExit(bridge *Bridge, cause error) {
 			continue
 		}
 		job.CrashInterrupted = true
+		job.Interrupted = true
 		job.StopReason = "engine-crash"
-		if job.startOpts.ProviderLaneManaged {
-			job.actorRecoveryPending.Store(true)
-		}
 	}
 	bridge.mu.Unlock()
 
 	// Bridge.Close publishes LaneDetached for actor-owned attachments. The actor
-	// then retries only the same ThreadRef and reconciles the admitted operation.
+	// immediately terminalizes that visible turn and retains the saved ThreadRef
+	// for the next distinct prompt.
 	bridge.Close(false, cause)
 }

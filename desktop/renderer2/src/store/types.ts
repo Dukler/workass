@@ -122,11 +122,8 @@ export interface Msg {
   jobId?: string;
   turnStartedAt?: number;
   // A turn cut off by a daemon disconnect (not a model/agent error). Renders a
-  // quiet "sin conexión" row instead of the generic error stamp, and — when the
-  // originating prompt is known — a Reintentar affordance rather than spinning.
+  // quiet "sin conexión" row instead of the generic error stamp.
   interrupted?: boolean;
-  // The user prompt to resend when retrying an interrupted/failed-send turn.
-  retryPrompt?: string;
 }
 
 // A not-yet-sent image belongs to one chat draft, just like `draft` text. Keep

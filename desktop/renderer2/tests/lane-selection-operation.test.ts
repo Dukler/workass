@@ -64,19 +64,19 @@ test('a lost selected-lane start retries the exact OperationID and attaches only
     subject.state.connection = 'connected';
     subject.schedulePersist = () => {};
 
-    assert.equal(await subject._send(owner, 'retry selected lane'), false);
+    assert.equal(await subject._send(owner, 'first selected-lane prompt'), false);
     assert.equal(owner.sessionId, null);
     const failed = owner.messages.find((message) => message.role === 'assistant');
     const submitted = owner.messages.find((message) => message.role === 'user');
-    assert.ok(failed?.retryPrompt);
+    assert.equal((failed as unknown as Record<string, unknown> | undefined)?.retryPrompt, undefined);
     assert.ok(submitted);
 
-    await subject.retryTurn(owner.id, failed.id);
+    assert.equal(await subject._send(owner, 'second selected-lane prompt'), true);
     assert.equal(owner.sessionId, 'session-lane-retry');
     assert.equal(owner.sessionProviderId, 'codex');
     assert.equal(calls.length, 2);
     assert.equal(calls[0].operationId, submitted.id);
-    assert.equal(calls[1].operationId, submitted.id);
+    assert.notEqual(calls[1].operationId, submitted.id);
     assert.equal(calls[0].providerId, 'codex');
     assert.equal(calls[1].providerId, 'codex');
     assert.equal(calls[0].sessionId, undefined);

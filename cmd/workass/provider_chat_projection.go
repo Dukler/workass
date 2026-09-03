@@ -147,7 +147,7 @@ func orderActorChatStates(states []chat.State, rawOrder any) []chat.State {
 	for _, state := range states {
 		byTab[state.Presentation.TabID] = state
 	}
-	ordered := make([]chat.State, 0, len(states))
+	known := make([]chat.State, 0, len(states))
 	seen := make(map[string]struct{}, len(states))
 	for _, rawTabID := range normalizedActorChatOrder(rawOrder) {
 		tabID, _ := rawTabID.(string)
@@ -155,17 +155,20 @@ func orderActorChatStates(states []chat.State, rawOrder any) []chat.State {
 		if !exists {
 			continue
 		}
-		ordered = append(ordered, state)
+		known = append(known, state)
 		seen[tabID] = struct{}{}
 	}
-	// Actors unknown to the saved order are appended in knownChatIDs order,
-	// which is deterministic. A later renderer save folds them into chatOrder.
+	// An actor missing from the saved order is a newly discovered chat. New
+	// chats are the only automatic sidebar movement, so put them above the
+	// persisted manual order while retaining deterministic knownChatIDs order.
+	ordered := make([]chat.State, 0, len(states))
 	for _, state := range states {
 		if _, exists := seen[state.Presentation.TabID]; exists {
 			continue
 		}
 		ordered = append(ordered, state)
 	}
+	ordered = append(ordered, known...)
 	return ordered
 }
 
@@ -384,7 +387,7 @@ func actorForegroundRunning(foreground *chat.ForegroundTurn) bool {
 		return false
 	}
 	switch foreground.Status {
-	case chat.ForegroundDispatching, chat.ForegroundRunning, chat.ForegroundReconciling:
+	case chat.ForegroundDispatching, chat.ForegroundRunning:
 		return true
 	default:
 		return false
@@ -433,13 +436,9 @@ func projectActorMessages(state chat.State, history actorHistoryProjection) ([]a
 				userID = fmt.Sprintf("message:%s:user", foreground.OperationID)
 			}
 			if _, exists := seenMessage[userID]; !exists {
-				userStatus := "pending"
-				if foreground.Status == chat.ForegroundUncertain {
-					userStatus = "done"
-				}
 				user := map[string]any{
 					"id": userID, "role": "user", "content": foreground.Input.Text,
-					"status": userStatus, "at": nilIfEmpty(foreground.StartedAt), "events": []any{},
+					"status": "pending", "at": nilIfEmpty(foreground.StartedAt), "events": []any{},
 				}
 				if queueID := strings.TrimSpace(foreground.Input.Presentation.QueueID); queueID != "" {
 					user[agentQueueMessageField] = queueID
@@ -462,20 +461,9 @@ func projectActorMessages(state chat.State, history actorHistoryProjection) ([]a
 			if err != nil {
 				return nil, 0, err
 			}
-			assistantStatus := "running"
-			assistantContent := foreground.AssistantContent
-			if foreground.Status == chat.ForegroundUncertain {
-				assistantStatus = "failed"
-				if strings.TrimSpace(assistantContent) == "" {
-					assistantContent = "Workass could not confirm whether the provider accepted this turn. It will not resend it."
-				}
-			}
 			assistant := map[string]any{
-				"id": assistantID, "role": "assistant", "content": assistantContent,
-				"status": assistantStatus, "at": nil, "events": events,
-			}
-			if foreground.Status == chat.ForegroundUncertain {
-				assistant["interrupted"] = true
+				"id": assistantID, "role": "assistant", "content": foreground.AssistantContent,
+				"status": "running", "at": nil, "events": events,
 			}
 			if startedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(foreground.StartedAt)); err == nil {
 				assistant["turnStartedAt"] = startedAt.UnixMilli()
@@ -547,14 +535,6 @@ func projectActorMessages(state chat.State, history actorHistoryProjection) ([]a
 	return messages, total, nil
 }
 
-// projectReconciledTerminalJob keeps the frozen live job:end contract after a
-// host crash without reviving Manager as chat authority. The terminal ledger
-// row and lane binding have already been committed by the actor; this function
-// is a pure presentation projection of those bytes.
-func projectReconciledTerminalJob(state chat.State, operationID providercontract.OperationID, turn providercontract.TurnRef) (map[string]any, error) {
-	return projectActorTerminalJob(state, operationID, turn)
-}
-
 func projectActorTerminalJob(state chat.State, operationID providercontract.OperationID, turn providercontract.TurnRef) (map[string]any, error) {
 	var user *chat.LedgerEvent
 	var assistant *chat.LedgerEvent
@@ -571,7 +551,7 @@ func projectActorTerminalJob(state chat.State, operationID providercontract.Oper
 		}
 	}
 	if assistant == nil || assistant.Terminal == nil {
-		return nil, errors.New("reconciled terminal operation is missing its actor ledger receipt")
+		return nil, errors.New("terminal operation is missing its actor ledger receipt")
 	}
 	terminal := assistant.Terminal
 	lane, ok := state.Lanes[assistant.LaneID]
@@ -580,7 +560,7 @@ func projectActorTerminalJob(state chat.State, operationID providercontract.Oper
 	}
 	jobID := firstNonEmptyString(turn.NativeID, assistant.NativeTurnID, providercontract.DeriveJobID(state.ChatID, operationID))
 	if jobID == "" {
-		return nil, errors.New("reconciled terminal operation is missing its native turn id")
+		return nil, errors.New("terminal operation is missing its native turn id")
 	}
 	status := strings.ToLower(strings.TrimSpace(terminal.Status))
 	jobStatus := "failed"
@@ -662,7 +642,8 @@ func projectDeliveryCapabilities(capabilities providercontract.DeliveryCapabilit
 		"liveSteer":               capabilities.LiveSteer,
 		"steerConsumptionReceipt": capabilities.SteerConsumptionReceipt,
 		"consumptionReceipt":      capabilities.ConsumptionReceipt,
-		"turnReadback":            capabilities.TurnReadback,
+		// Frozen renderer compatibility; native turn readback is retired.
+		"turnReadback": false,
 	}
 }
 
@@ -770,11 +751,10 @@ func projectLedgerMessage(event chat.LedgerEvent) (map[string]any, error) {
 	} else {
 		delete(message, "interrupted")
 	}
-	if event.RetryPrompt != "" {
-		message["retryPrompt"] = event.RetryPrompt
-	} else {
-		delete(message, "retryPrompt")
-	}
+	// Old actor snapshots may contain the retired retryPrompt field. Never
+	// project it: recovery buttons could resend an already accepted provider
+	// prompt. A distinct new prompt resumes the saved native session instead.
+	delete(message, "retryPrompt")
 	return message, nil
 }
 

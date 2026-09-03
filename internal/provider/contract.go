@@ -157,19 +157,6 @@ type SteerReceipt struct {
 	Ambiguous        bool
 }
 
-type ReconcileRequest struct {
-	OperationID OperationID
-	Turn        TurnRef
-}
-
-type ReconcileResult struct {
-	Turn     TurnRef
-	Found    bool
-	State    string
-	Terminal bool
-	Consumed bool
-}
-
 type PermissionDecision struct {
 	OperationID OperationID
 	RequestID   string
@@ -194,7 +181,6 @@ type DeliveryCapabilities struct {
 	// steer-specific receipt.
 	SteerConsumptionReceipt bool
 	ConsumptionReceipt      bool
-	TurnReadback            bool
 }
 
 type DeliveryStrategy interface {
@@ -202,7 +188,6 @@ type DeliveryStrategy interface {
 	StartTurn(context.Context, TurnInput) (TurnAdmission, error)
 	Steer(context.Context, SteerInput) (SteerReceipt, error)
 	Cancel(context.Context, TurnRef) error
-	Reconcile(context.Context, ReconcileRequest) (ReconcileResult, error)
 	ResolvePermission(context.Context, PermissionDecision) (PermissionReceipt, error)
 }
 

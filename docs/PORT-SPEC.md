@@ -114,7 +114,7 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
      user's normal vendor settings rather than reimplementing authentication.
   6. All §3 landmines apply unchanged (one engine per chat, serialized
      `session/prompt`, bounded stderr tails, redaction before display, and
-     terminal reconciliation). Direct hosts preserve the frozen renderer wire
+     provider-harness terminal authority). Direct hosts preserve the frozen renderer wire
      contract; the renderer MUST NOT grow provider-specific transport logic.
   7. The direct hosts MUST preserve streaming text/thoughts, tool lifecycle,
      permissions, MCP configuration, images, resume, cancellation, live
@@ -276,6 +276,15 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   runs npm. Perf doctrine from T3 Chat: local-first chat state, block-level
   markdown streaming (re-render only the block receiving tokens),
   virtualized lists.
+  SIDEBAR ORDER (user law 2026-09-03): every visible chat—local or remote,
+  active, settled, or archived—occupies one user-controlled order. Machine
+  hydration, daemon refresh, lifecycle/status changes, recency, search, and
+  workspace scope MUST NOT regroup or reposition rows. Tagged remote ids are
+  presentation metadata in the controller's daemon-global `chatOrder`; remote
+  chat payloads remain owned exclusively by their remote daemon. A newly
+  created or newly discovered chat is the sole automatic placement and enters
+  at the top. Dragging may cross all former lifecycle/machine boundaries and
+  its resulting order survives local refresh, remote refresh, and restart.
 - **controller lease** — device tokens, exactly one controller;
   notify/show and `lan:access-request` route to the controller only (plan P3).
   SEEING IS NOT DECIDING (2026-07-26, for the phone client): permission
@@ -500,8 +509,10 @@ shell, NOT the daemon.
 
    Once a lane has a native binding, Workass MUST NOT call `session/new`, load a
    different thread, replay archived transcript text, or seed a replacement
-   session as recovery. Attach failures retry only the same native identity and
-   otherwise fail closed as a visible lane error.
+   session as recovery. An attach attempt may target only that saved native
+   identity. If it fails, Workass ends the visible attempt; a later distinct
+   prompt performs a fresh exact attach of the same identity. There is no
+   background retry loop.
 
    A lane is established only after its actor stores a nonzero `ThreadRef`. If
    `session/new` fails before either that `ThreadRef` or a provisional provider
@@ -532,6 +543,22 @@ shell, NOT the daemon.
    is never resent. Before any delivery, Workass durably records one
    stable operation id. An ambiguous acknowledgement never causes an automatic
    resend.
+
+   **Provider-turn ownership correction (user law 2026-09-03):** the provider
+   harness is the only authority for whether an admitted turn is running or
+   terminal. Workass sends one standard `session/prompt` for an actor operation
+   and consumes that request's ordinary events/result. It MUST NOT poll a
+   provider turn, request terminal readback, persist a pending-delivery veto,
+   recycle a bridge to manufacture completion, replay the prompt, or keep a
+   second Manager-owned busy gate for actor-managed chats. If the transport
+   disappears before the harness reply, Workass immediately records one
+   interrupted visible terminal row, preserves any partial output, and detaches
+   the lane while retaining its exact `ThreadRef`. The failed operation is never
+   resent and never exposes a Retry/Continue affordance. The next distinct user
+   prompt exact-resumes that saved thread. Per-bridge `session/prompt`
+   serialization remains solely as the ACP transport requirement; explicit
+   live steer and user Stop remain direct harness operations and are never
+   replayed after a daemon restart.
 
    Provider-native compaction stays inside the same native thread. Workass
    retains the full visible ledger and records only typed lane-private coverage

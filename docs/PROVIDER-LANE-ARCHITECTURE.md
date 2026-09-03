@@ -160,8 +160,8 @@ Provider semantic differences are composed through two strategies:
    - turn admission and consumption receipts;
    - stable client input identifiers;
    - live steering;
-   - terminal readback/reconciliation;
-   - ambiguous-delivery classification.
+   - direct provider-harness terminal results;
+   - ambiguous-delivery classification without resend.
 2. `ContextStrategy`
    - exact resume requirements;
    - non-sampling context import;
@@ -379,10 +379,14 @@ boundary before exhaustion. Any fork/reset is explicit.
 ### Delivery ambiguity
 
 - Persist an outbox operation before sending.
-- Admission, consumption, and terminal completion are separate receipts.
+- Admission and consumption are delivery receipts; the harness's ordinary
+  `session/prompt` result is the sole terminal receipt.
 - Timeout after possible acceptance is `AcceptanceAmbiguous`; never resend.
-- Use stable provider input ids/readback when supported. Otherwise surface the
-  uncertain operation for explicit reconciliation.
+- A lost transport immediately terminalizes Workass's visible turn, preserves
+  partial output, and detaches the exact lane. Workass performs no provider-turn
+  readback, polling, retry, recovery, or Manager-owned admission veto.
+- The next distinct prompt resumes the lane's saved native `ThreadRef`; the
+  failed operation is never replayed and exposes no Retry/Continue action.
 
 ### Import ambiguity
 
@@ -395,7 +399,7 @@ boundary before exhaustion. Any fork/reset is explicit.
 
 ### Concurrency
 
-- One chat actor serializes desktop, phone, agent, provider, and recovery input.
+- One chat actor serializes desktop, phone, agent, and provider input.
 - Multiple devices deduplicate by `OperationID`.
 - A provider switch during steering, permission, compaction, or reconciliation
   waits for the relevant safe boundary.
@@ -488,8 +492,8 @@ Every durable chat provider passes the same deterministic suite:
 - typed capability negotiation;
 - no diagnostics on ACP stdout.
 
-Optional capability suites cover live steer, consumption receipts, terminal
-readback, context import, native compaction, typed phases, images, catalogs,
+Optional capability suites cover live steer, consumption receipts, context
+import, native compaction, typed phases, images, catalogs,
 usage, and commands. Real providers are protocol canaries; deterministic mocks
 are the correctness oracle.
 
@@ -525,7 +529,7 @@ No intermediate phase is production-ready by itself.
 
 - [x] Replace the obsolete native-resume fallback law.
 - [x] Record this architecture and its acceptance gates.
-- [x] Characterize current create/resume/steer/reconcile/compaction behavior.
+- [x] Characterize current create/resume/steer/compaction behavior.
 - [x] Add source-contract tests for provider branching boundaries.
 
 ### Phase B — provider contract and registry
