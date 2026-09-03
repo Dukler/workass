@@ -50,10 +50,33 @@ export interface AppUpdaterState {
   size?: number | null;
 }
 
+export interface AppUpdaterDiagnostics {
+  schemaVersion: number;
+  state: Omit<AppUpdaterState, 'receipt' | 'notes' | 'size'>;
+  receipt?: Record<string, unknown> | null;
+  journal?: Record<string, unknown> | null;
+  progressReceipt?: Record<string, unknown> | null;
+  workerLogTail?: string;
+  lastAgentAuthorization?: Record<string, unknown> | null;
+}
+
+export interface AppUpdaterAuthorizedRequest {
+  operation_id: string;
+  machine_id: string;
+  expected_current_version: string;
+  expected_target_version: string;
+  authorization: string;
+}
+
 interface WorkassUpdaterApi {
   getState(): Promise<AppUpdaterState>;
+  diagnostics(): Promise<AppUpdaterDiagnostics>;
   check(): Promise<AppUpdaterState>;
   apply(): Promise<AppUpdaterState>;
+  applyAuthorized(request: AppUpdaterAuthorizedRequest): Promise<AppUpdaterState & {
+    authorizationReceipt?: Record<string, unknown>;
+    replayed?: boolean;
+  }>;
   onState(callback: (state: AppUpdaterState) => void): () => void;
 }
 

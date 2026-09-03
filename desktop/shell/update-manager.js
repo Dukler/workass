@@ -32,6 +32,8 @@ const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_WORKER_ARM_TIMEOUT_MS = 15_000;
 const DEFAULT_WORKER_ARM_POLL_MS = 25;
 const MAX_PROGRESS_CLEANUP_RETRIES = 4;
+const MAX_AGENT_UPDATE_OPERATIONS = 32;
+const MAX_UPDATE_DIAGNOSTIC_TAIL_CHARS = 16 * 1024;
 const INSTALLATION_IDENTITY_FILE = '.workass-installation.json';
 const RECEIPT_SCHEMA_VERSION = 2;
 // The worker writes once per second. Five seconds is only the cheap polling
@@ -1170,6 +1172,65 @@ function readJSONFile(file) {
   catch { return null; }
 }
 
+function redactUpdateDiagnosticText(value, maximum = MAX_UPDATE_DIAGNOSTIC_TAIL_CHARS) {
+  const redacted = String(value ?? '')
+    .replace(/(bearer\s+)[A-Za-z0-9._~+/=-]+|(["']?(?:api[_-]?key|token|secret|password|credential)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)/gi,
+      (match, bearerPrefix, assignmentPrefix) => {
+        if (bearerPrefix) return `${bearerPrefix}[redacted]`;
+        if (assignmentPrefix) return `${assignmentPrefix}[redacted]`;
+        return '[redacted]';
+      });
+  return redacted.length > maximum ? redacted.slice(-maximum) : redacted;
+}
+
+function updateDiagnosticRecord(value, fields) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const out = {};
+  for (const field of fields) {
+    const item = value[field];
+    if (item == null) {
+      out[field] = null;
+      continue;
+    }
+    if (typeof item === 'string') out[field] = redactUpdateDiagnosticText(item, 4096);
+    else if (typeof item === 'number' || typeof item === 'boolean') out[field] = item;
+    else if (field === 'interruptedWork' || field === 'blockers') {
+      out[field] = updateDiagnosticRecord(item, [
+        'reason', 'foregroundTurns', 'backgroundWork', 'providerUpdates', 'admissions', 'daemonUnavailable',
+      ]);
+    }
+  }
+  return out;
+}
+
+function readBoundedUpdateLogTail(file, maximum = MAX_UPDATE_DIAGNOSTIC_TAIL_CHARS) {
+  let descriptor;
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) return '';
+    descriptor = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    const opened = fs.fstatSync(descriptor);
+    if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino) return '';
+    const bytes = Math.min(opened.size, Math.max(maximum * 4, maximum));
+    if (bytes <= 0) return '';
+    const buffer = Buffer.alloc(bytes);
+    const read = fs.readSync(descriptor, buffer, 0, bytes, opened.size - bytes);
+    return redactUpdateDiagnosticText(buffer.subarray(0, read).toString('utf8'), maximum);
+  } catch {
+    return '';
+  } finally {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch { /* best effort read-only diagnostics */ }
+    }
+  }
+}
+
+function validAgentUpdateOperationID(value) {
+  const operationId = String(value ?? '').trim();
+  if (!operationId || operationId.length > 256 || !/^[A-Za-z0-9][A-Za-z0-9_.:/+\-=@]*$/.test(operationId)) return false;
+  return !/(api[_-]?key|apikey|token|secret|password|credential|bearer)/i.test(operationId);
+}
+
 function journalForTransaction(transaction) {
   const journal = readJSONFile(transaction?.journalPath);
   if (!journal || journal.schemaVersion !== 1 || journal.updateId !== transaction?.updateId ||
@@ -1699,6 +1760,7 @@ class UpdateManager {
     };
     this.updateRoot = path.join(runtime.dataRoot, 'updates');
     this.receiptPath = path.join(this.updateRoot, 'receipt.json');
+    this.agentOperationsPath = path.join(this.updateRoot, 'agent-operations.json');
     this.currentVersion = String(currentVersion || app?.getVersion?.() || '0.0.0');
     this.installTarget = installedRoot(this.resourcesPath, this.executablePath, this.platform);
     this.installationIdentity = null;
@@ -1736,6 +1798,110 @@ class UpdateManager {
   }
 
   snapshot() { return JSON.parse(JSON.stringify(this.state)); }
+
+  agentUpdateOperations() {
+    const stored = readJSONFile(this.agentOperationsPath);
+    if (stored?.schemaVersion !== 1 || !Array.isArray(stored.operations)) return [];
+    return stored.operations.filter((entry) => entry && validAgentUpdateOperationID(entry.operationId)).slice(-MAX_AGENT_UPDATE_OPERATIONS);
+  }
+
+  rememberAgentUpdateOperation(receipt) {
+    const operations = this.agentUpdateOperations();
+    operations.push(receipt);
+    atomicJSON(this.agentOperationsPath, {
+      schemaVersion: 1,
+      operations: operations.slice(-MAX_AGENT_UPDATE_OPERATIONS),
+    });
+  }
+
+  diagnostics() {
+    const state = this.snapshot();
+    const receipt = state.receipt;
+    let journal = null;
+    let progressReceipt = null;
+    let workerLogTail = '';
+    const transaction = this.transactionForReceipt(receipt) || this.transactionForUpdateId(receipt?.updateId);
+    if (transaction) {
+      journal = journalForTransaction(transaction);
+      progressReceipt = readJSONFile(transaction.progressReceiptPath);
+      workerLogTail = readBoundedUpdateLogTail(path.join(transaction.transactionRoot, 'worker.log'));
+    }
+    const operations = this.agentUpdateOperations();
+    return {
+      schemaVersion: 1,
+      state: updateDiagnosticRecord(state, [
+        'supported', 'phase', 'currentVersion', 'targetVersion', 'availableVersion',
+        'checkedAt', 'progress', 'error', 'blockers',
+      ]),
+      receipt: updateDiagnosticRecord(receipt, [
+        'schemaVersion', 'updateId', 'phase', 'previousVersion', 'targetVersion', 'installedVersion',
+        'updatedAt', 'activated', 'error', 'rollbackError', 'interruptedWork',
+      ]),
+      journal: updateDiagnosticRecord(journal, [
+        'schemaVersion', 'updateId', 'phase', 'previousVersion', 'targetVersion', 'installedVersion',
+        'createdAt', 'updatedAt', 'terminal', 'shellStopped', 'daemonStopped', 'incomingVerified',
+        'mutableStateSnapshotted', 'activated', 'healthVerified', 'rollbackStarted', 'rolledBack',
+        'mutableStateRestored', 'error', 'rollbackError',
+      ]),
+      progressReceipt: updateDiagnosticRecord(progressReceipt, [
+        'schemaVersion', 'updateId', 'phase', 'displayedPhase', 'windowVisible', 'updatedAt', 'error',
+      ]),
+      ...(workerLogTail ? { workerLogTail } : {}),
+      lastAgentAuthorization: updateDiagnosticRecord(operations.at(-1), [
+        'operationId', 'machineId', 'currentVersion', 'targetVersion', 'acceptedAt',
+      ]),
+    };
+  }
+
+  startAuthorizedApply(rawRequest) {
+    const request = rawRequest && typeof rawRequest === 'object' && !Array.isArray(rawRequest) ? rawRequest : {};
+    const operationId = String(request.operation_id ?? '').trim();
+    const machineId = String(request.machine_id ?? '').trim();
+    const currentVersion = String(request.expected_current_version ?? '').trim();
+    const targetVersion = String(request.expected_target_version ?? '').trim();
+    if (!validAgentUpdateOperationID(operationId)) throw new Error('authorized update requires a valid caller-stable operation_id');
+    if (!machineId) throw new Error('authorized update requires an exact machine_id');
+    if (!parseVersion(currentVersion) || !parseVersion(targetVersion)) throw new Error('authorized update requires exact X.Y.Z current and target versions');
+    const expectedAuthorization = `update ${machineId} from ${currentVersion} to ${targetVersion}`;
+    if (String(request.authorization ?? '') !== expectedAuthorization) {
+      throw new Error('authorized update text does not exactly match the machine and versions');
+    }
+    const existing = this.agentUpdateOperations().find((entry) => entry.operationId === operationId);
+    if (existing) {
+      if (existing.machineId !== machineId || existing.currentVersion !== currentVersion || existing.targetVersion !== targetVersion) {
+        throw new Error('authorized update operation_id was reused for a different machine or version');
+      }
+      // Replays are immutable receipt reads even after activation changes the
+      // installed version or background discovery changes the offered target.
+      return { ...this.snapshot(), authorizationReceipt: existing, replayed: true };
+    }
+    if (!this.state.supported) throw new Error(this.state.error || 'this Workass installation does not support updates');
+    if (currentVersion !== this.currentVersion) throw new Error(`Workass version changed: expected ${currentVersion}, found ${this.currentVersion}`);
+    // targetVersion is the release this click/apply path will act on. During a
+    // pinned handoff, availableVersion may advertise a newer release while the
+    // exact current transaction still owns targetVersion.
+    const offeredVersion = String(this.state.targetVersion || this.state.availableVersion || '');
+    if (targetVersion !== offeredVersion) {
+      throw new Error(`Workass update target changed: expected ${targetVersion}, found ${offeredVersion || 'none'}`);
+    }
+    if (compareVersions(currentVersion, targetVersion) >= 0) throw new Error('authorized update target is not newer than the installed version');
+
+    const authorizationReceipt = {
+      operationId,
+      machineId,
+      currentVersion,
+      targetVersion,
+      acceptedAt: new Date().toISOString(),
+    };
+    // Durable-before-effect: a lost MCP or wire reply may repeat this exact
+    // request, but it can only read this receipt and never start a second apply.
+    this.rememberAgentUpdateOperation(authorizationReceipt);
+    const started = this.startApply();
+    if (started && typeof started.then === 'function') {
+      return started.then((state) => ({ ...state, authorizationReceipt, replayed: false }));
+    }
+    return { ...started, authorizationReceipt, replayed: false };
+  }
 
   workerLeaseKey(lease, transaction) {
     if (!lease || !transaction) return '';

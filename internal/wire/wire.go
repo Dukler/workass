@@ -60,6 +60,7 @@ var mutatingChannels = map[string]struct{}{
 	"app-chat:close-session":        {},
 	"app-chat:set-model":            {},
 	"app-chat:set-mode":             {},
+	"app:update-apply":              {},
 	"providers:detect":              {},
 	"providers:update":              {},
 	"providers:toggle":              {},
@@ -96,6 +97,7 @@ var auxiliaryControlChannels = map[string]struct{}{
 	"chat:queue-replace":     {},
 	"job:start":              {},
 	"app-chat:steer":         {},
+	"app:update-apply":       {},
 	"chat:permission-decide": {},
 }
 

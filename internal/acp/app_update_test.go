@@ -29,7 +29,7 @@ func TestUpdateDrainNeverBlockedByInFlightAdmission(t *testing.T) {
 	m.updateGateMu.Unlock()
 	result := m.BeginUpdateDrain()
 	if !result.Ready || result.Admissions != 1 {
-		t.Fatalf("in-flight admission blocked a user-clicked update: %#v", result)
+		t.Fatalf("in-flight admission blocked an explicitly authorized update: %#v", result)
 	}
 	if err := m.beginWorkAdmission(); err != ErrUpdateDraining {
 		t.Fatalf("work admitted during update drain: %v", err)
@@ -46,7 +46,7 @@ func TestUpdateDrainRecordsActiveWorkWithoutBlocking(t *testing.T) {
 
 	result := m.BeginUpdateDrain()
 	if !result.Ready {
-		t.Fatalf("active work must never block a user-clicked update: %#v", result)
+		t.Fatalf("active work must never block an explicitly authorized update: %#v", result)
 	}
 	if result.ForegroundTurns != 1 {
 		t.Fatalf("foreground turns = %d, want 1", result.ForegroundTurns)

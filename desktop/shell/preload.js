@@ -41,8 +41,10 @@ contextBridge.exposeInMainWorld('workassMachines', {
 
 contextBridge.exposeInMainWorld('workassUpdater', {
   getState: () => ipcRenderer.invoke('workass-updater:get-state'),
+  diagnostics: () => ipcRenderer.invoke('workass-updater:diagnostics'),
   check: () => ipcRenderer.invoke('workass-updater:check'),
   apply: () => ipcRenderer.invoke('workass-updater:apply'),
+  applyAuthorized: (payload) => ipcRenderer.invoke('workass-updater:apply-authorized', payload),
   onState: (callback) => {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on('workass-updater:state', listener);

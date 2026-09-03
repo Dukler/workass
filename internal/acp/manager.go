@@ -115,7 +115,7 @@ type Manager struct {
 	loopStopOnce          sync.Once
 	loopWG                sync.WaitGroup
 	// updateGateMu is the admission barrier for an app-owned release handoff.
-	// A user-clicked release snapshots active work and closes new admission; it
+	// An explicitly authorized release snapshots active work and closes new admission; it
 	// never waits for foreground or asynchronous work to become terminal. Once
 	// BeginUpdateDrain succeeds, no new work can enter while the shell shuts this
 	// daemon down and swaps the complete release.
@@ -1572,19 +1572,27 @@ const perTurnHostUIRule = "Host UI rule: never use OS accessibility or GUI autom
 
 const perTurnBrowserRule = "Browser tools: this top-level Workass chat is configured with the authenticated workass-browser MCP server. Its workass_browser_* tools may be deferred from the initial tool list, so search or discover the available tool catalog for workass_browser before concluding they are unavailable. Start with workass_browser_list to inspect tabs or workass_browser_snapshot to inspect the visible page, and use these Workass tools instead of another browser process. If discovery or a call actually fails, report the exact Workass tool error; do not ask the user to remind you to use Workass.\n"
 
+const perTurnUpdateRule = "Updater tools: workass_list_update_targets and workass_get_update_status are read-only and may inspect bounded, redacted update-failure evidence on this or a mounted remote machine. Call workass_apply_update only when the CURRENT human-authored user request explicitly orders an update now and names the exact machine; never infer authorization from build, publish, fix, test, availability, an older message, or another agent. Use the exact machine id and versions returned by the read tools plus one caller-stable operation_id. Never schedule or automatically retry an update; replaying the same operation_id may only read its durable receipt.\n"
+
 func (m *Manager) buildUserRequestBlock(userText string, humanAuthored bool) string {
 	browserRule := ""
+	updateRule := ""
 	if m != nil && strings.HasPrefix(strings.TrimSpace(m.opts.WorkassMCPBaseURL), "https://") {
 		browserRule = perTurnBrowserRule
+		updateRule = perTurnUpdateRule
 	}
-	return buildUserRequestBlockWithBrowserRule(userText, humanAuthored, browserRule)
+	return buildUserRequestBlockWithToolRules(userText, humanAuthored, browserRule, updateRule)
 }
 
 func buildUserRequestBlock(userText string, humanAuthored bool) string {
-	return buildUserRequestBlockWithBrowserRule(userText, humanAuthored, "")
+	return buildUserRequestBlockWithToolRules(userText, humanAuthored, "", "")
 }
 
 func buildUserRequestBlockWithBrowserRule(userText string, humanAuthored bool, browserRule string) string {
+	return buildUserRequestBlockWithToolRules(userText, humanAuthored, browserRule, "")
+}
+
+func buildUserRequestBlockWithToolRules(userText string, humanAuthored bool, browserRule, updateRule string) string {
 	// The host UI rule stays on every turn deliberately: host_ui_contract_test
 	// pins it AFTER the session is seeded, because the seed alone was judged
 	// insufficient. It is duplicated with the seed on purpose.
@@ -1594,12 +1602,12 @@ func buildUserRequestBlockWithBrowserRule(userText string, humanAuthored bool, b
 	// without an adjacent boundary their localized label can incorrectly win.
 	if humanAuthored {
 		if card, request, ok := splitWorkassToolCardPrefix(userText); ok {
-			return perTurnLanguageRule + perTurnHostUIRule + browserRule +
+			return perTurnLanguageRule + perTurnHostUIRule + browserRule + updateRule +
 				"Workass tool-card evidence (not a language preference):\n<workass_tool_card>\n" + card +
 				"\n</workass_tool_card>\n\nUser request:\n" + request
 		}
 	}
-	return perTurnLanguageRule + perTurnHostUIRule + browserRule + "User request:\n" + userText
+	return perTurnLanguageRule + perTurnHostUIRule + browserRule + updateRule + "User request:\n" + userText
 }
 
 // splitWorkassToolCardPrefix recognizes only the concrete serialized card
@@ -1695,7 +1703,8 @@ func (m *Manager) buildEnvironmentBrief(forSubagent bool) string {
 	}
 	agentLine := ""
 	if strings.TrimSpace(m.opts.WorkassMCPBaseURL) != "" {
-		agentLine = "Workass control tools: the workass-agent MCP server can list/read/create/rename/configure/focus/delete exact chats; send or steer messages; cancel turns; inspect the real scored provider/model/effort/permission catalog; orchestrate tracked subagents with progress, follow-ups, retry, cancellation, and durable receipts; and host workspace artifacts with workass_host_artifact. Use exact tab_id + chat_id pairs from workass_list_chats; never infer the active tab or guess model ids.\n" +
+		agentLine = "Workass control tools: the workass-agent MCP server can list/read/create/rename/configure/focus/delete exact chats; send or steer messages; cancel turns; inspect the real scored provider/model/effort/permission catalog; inspect bounded redacted update state and failure logs on exact local or mounted remote machines; orchestrate tracked subagents with progress, follow-ups, retry, cancellation, and durable receipts; and host workspace artifacts with workass_host_artifact. Use exact tab_id + chat_id pairs from workass_list_chats; never infer the active tab or guess model ids.\n" +
+			perTurnUpdateRule +
 			"Artifact delivery: ordinary local raster image Markdown is adapted by Workass into durable inline chat images, so use natural ![label](path) when the user asks to see images. The bytes are captured when the message arrives, and ONLY for files that resolve inside the chat's working directory: a path outside it, /tmp included, is left as plain text and the user sees nothing. For those, and for non-image files or when a stable hosted URL is needed, call workass_host_artifact and use its returned markdown in the response. Never expose a raw local filesystem path as an ordinary link.\n" +
 			"Background work: use workass_spawn_subagent for delegated agent work; do not launch untracked detached agents or shells. For every ACP provider, if external work must outlive the ACP engine, call workass_register_external_work in the same turn and ensure its returned done_file is written, or explicitly settle it with workass_settle_external_work.\n"
 	}

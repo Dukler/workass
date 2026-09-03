@@ -17,8 +17,8 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	tools := agentMCPTools()
 	// The full list is paid on every authenticated tools/list request. Pin the
 	// count so new recurring context cost remains an explicit decision.
-	if len(tools) != 24 {
-		t.Fatalf("tool count = %d, want 24", len(tools))
+	if len(tools) != 27 {
+		t.Fatalf("tool count = %d, want 27", len(tools))
 	}
 	byName := make(map[string]map[string]any, len(tools))
 	for _, tool := range tools {
@@ -49,6 +49,23 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	}
 	if list := byName["workass_list_chats"]; list == nil || !strings.Contains(toString(list["description"]), "mounted") {
 		t.Fatalf("chat list tool does not disclose mounted remote targets: %#v", list)
+	}
+	if status := byName["workass_get_update_status"]; status == nil ||
+		!strings.Contains(toString(status["description"]), "failure evidence") ||
+		!strings.Contains(toString(status["description"]), "never checks") {
+		t.Fatalf("update status tool is not a read-only diagnostic surface: %#v", status)
+	}
+	apply := byName["workass_apply_update"]
+	if apply == nil || !strings.Contains(toString(apply["description"]), "CURRENT human-authored request") ||
+		!strings.Contains(toString(apply["description"]), "Never infer authority") {
+		t.Fatalf("update apply tool does not carry the current-human authority fence: %#v", apply)
+	}
+	applySchema := mapFromAnyMain(apply["inputSchema"])
+	applyRequired := applySchema["required"].([]string)
+	for _, field := range []string{"machine_id", "expected_current_version", "expected_target_version", "authorization", "operation_id"} {
+		if !containsString(applyRequired, field) {
+			t.Fatalf("update apply schema does not require %q: %#v", field, applySchema)
+		}
 	}
 	if byName["workass_host_html"] != nil {
 		t.Fatal("legacy workass_host_html alias must not be advertised")

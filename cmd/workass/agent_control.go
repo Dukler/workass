@@ -89,6 +89,14 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 	tabID := fieldString(params, "parent_tab_id")
 	ownerKey := fieldString(params, "owner_key")
 	switch request.Method {
+	case "update.targets", "update.status", "update.apply":
+		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
+			return nil, err
+		}
+		if h.remoteChats == nil {
+			return nil, errors.New("Workass updater MCP router has no local renderer")
+		}
+		return h.remoteChats.Call(r.Context(), request.Method, copyRemoteAgentRouteParams(params))
 	case "chat.list", "chat.read", "chat.create", "chat.rename", "chat.configure", "chat.focus", "chat.delete", "chat.send", "chat.cancel":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "Workass chat control caller is not an owned ACP session"); err != nil {
 			return nil, err

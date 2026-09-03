@@ -57,6 +57,16 @@ func agentMCPTools() []map[string]any {
 	}
 	return []map[string]any{
 		tool("workass_list_chats", "List local chats and chats mounted from connected Workass machines with exact tab_id/chat_id targets, machine identity, provider/model/effort/permission state, and queue status. Remote targets use the returned machine-tagged ids. Use before controlling a chat; never infer a target from title or position.", object(map[string]any{}), true, false, true, false),
+		tool("workass_list_update_targets", "List this Workass installation and mounted remote machines by exact machine_id. This does not check, download, stage, install, relaunch, or otherwise change an update.", object(map[string]any{}), true, false, true, false),
+		tool("workass_get_update_status", "Read the exact machine's current application-updater state plus bounded, secret-redacted failure evidence from its durable receipt, recovery journal, progress receipt, and worker-log tail. This never checks for, downloads, stages, installs, retries, or relaunches an update.", object(map[string]any{
+			"machine_id": str("Exact machine id from workass_list_update_targets."),
+		}, "machine_id"), true, false, true, false),
+		tool("workass_apply_update", "Apply the exact machine's already-discovered Workass update through its transactional updater. CALL ONLY when the CURRENT human-authored request explicitly names that exact machine and orders installation now. Never infer authority from build, publish, fix, test, an older message, or update availability; never schedule it or retry with a new operation_id. A transport replay with the same operation_id is read back and cannot start the update twice.", mutationObject(map[string]any{
+			"machine_id":               str("Exact machine id from workass_list_update_targets."),
+			"expected_current_version": str("Exact currentVersion returned by workass_get_update_status."),
+			"expected_target_version":  str("Exact targetVersion returned by workass_get_update_status."),
+			"authorization":            str("Exact text: update <machine_id> from <expected_current_version> to <expected_target_version>"),
+		}, "machine_id", "expected_current_version", "expected_target_version", "authorization"), false, true, true, true),
 		tool("workass_read_chat", "Read a byte-bounded canonical transcript and current controls for one exact local or mounted remote Workass chat without focusing it. Event-heavy reads preserve the newest complete event suffix and report eventCount, includedEventCount, and eventsTruncated instead of failing the MCP transport.", object(map[string]any{
 			"tab_id":         str("Tab id from workass_list_chats."),
 			"chat_id":        str("Exact conversation id paired with tab_id by workass_list_chats."),
@@ -199,6 +209,12 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 	switch call.Name {
 	case "workass_list_chats":
 		method = "chat.list"
+	case "workass_list_update_targets":
+		method = "update.targets"
+	case "workass_get_update_status":
+		method = "update.status"
+	case "workass_apply_update":
+		method = "update.apply"
 	case "workass_read_chat":
 		method = "chat.read"
 	case "workass_create_chat":
