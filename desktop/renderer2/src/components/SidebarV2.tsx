@@ -15,14 +15,14 @@ import { ModesSwitch, FooterUpdateCards, AccountMenu } from './Sidebar';
 // app.css `.sv2-*` for the matching geometry.
 //
 // Structure taken verbatim: the folder TREE becomes a project SCOPE FILTER;
-// rows have two densities (full card / 36px slim), but every row remains in one
-// persisted manual list. Lifecycle may change a row's density/status; it never
-// creates another ordering lane. One STATUS PILL per row has a fixed hue per
-// state.
+// rows have two densities (full card / 36px slim), but density follows an
+// explicit lifecycle boundary: ordinary threads stay full-size and only the
+// settled shelf/archive compacts them. One STATUS PILL per row has a fixed hue
+// per state.
 //
 // T3 drives density and lifecycle from stored settle/snooze state. Workass
-// keeps a smaller lifecycle as row metadata only. T3's PR/branch/diff line
-// remains absent.
+// keeps a smaller lifecycle: a quiet shelf followed by a hidden, searchable
+// archive. T3's PR/branch/diff line remains absent.
 //
 // Deliberately NOT ported: T3's footer settings button (excluded by the user)
 // and its nightly-stage header backdrop (branding).
@@ -32,6 +32,7 @@ import { ModesSwitch, FooterUpdateCards, AccountMenu } from './Sidebar';
 const AUTO_SETTLE_MS = 3 * 24 * 60 * 60 * 1000;
 export const ARCHIVE_AFTER_SETTLED_MS = 5 * 24 * 60 * 60 * 1000;
 const LIFECYCLE_TICK_MS = 60 * 60 * 1000;
+const TAIL_PAGE = 24;            // T3 pages its settled tail; deep history is rare
 const TOOLTIP_DELAY_MS = 150;    // T3's TooltipProvider delay
 const SCOPE_KEY = 'workass.sv2.scope';
 
@@ -262,11 +263,22 @@ export function orderSidebarRows<T extends { order: number }>(rows: readonly T[]
 }
 
 export function orderSearchRows(rows: readonly Row[]): Row[] {
-  return orderSidebarRows(rows);
+  return [...rows].sort((a, b) =>
+    Number(a.archived) - Number(b.archived)
+    || Number(b.card) - Number(a.card)
+    || a.order - b.order);
 }
 
-export function canDropSidebarRow(draggedId: string | null | undefined, targetId: string): boolean {
-  return !!draggedId && draggedId !== targetId;
+export function partitionSidebarRows(rows: readonly Row[]): {
+  cards: Row[];
+  tail: Row[];
+  archived: Row[];
+} {
+  return {
+    cards: orderSidebarRows(rows.filter((row) => !row.archived && !row.settled)),
+    tail: orderSidebarRows(rows.filter((row) => !row.archived && row.settled)),
+    archived: orderSidebarRows(rows.filter((row) => row.archived)),
+  };
 }
 
 // T3's canSettle, the client-side twin of the guards above: "anything the
@@ -281,7 +293,21 @@ export function canSettle(status: Status): boolean {
 }
 
 type Tip = { row: Row; top: number } | null;
-type DragItem = { id: string };
+type SidebarSection = 'live' | 'settled' | 'archived';
+type DragItem = { id: string; section: SidebarSection };
+
+export function rowSection(row: Pick<Row, 'settled' | 'archived'>): SidebarSection {
+  return row.archived ? 'archived' : row.settled ? 'settled' : 'live';
+}
+
+export function canDropSidebarRow(
+  draggedId: string | null | undefined,
+  draggedSection: SidebarSection | null | undefined,
+  targetId: string,
+  targetSection: SidebarSection,
+): boolean {
+  return !!draggedId && draggedId !== targetId && draggedSection === targetSection;
+}
 
 /* ---- row ---------------------------------------------------------------- */
 function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu, onSettle, onUnsettle }: {
@@ -298,7 +324,8 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
   const [value, setValue] = useState(chat.title);
   const [over, setOver] = useState(false);
   const hoverTimer = useRef<number | null>(null);
-  const canDrop = canDropSidebarRow(drag?.id, chat.id);
+  const section = rowSection(row);
+  const canDrop = canDropSidebarRow(drag?.id, drag?.section, chat.id, section);
   const commit = () => { setEditing(false); store.renameChat(chat.id, value); };
   const pill = row.archived
     ? { label: 'Archivado', icon: null, tone: 'archived' }
@@ -392,7 +419,7 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
         onClick={() => { if (!editing) { closeTip(); store.switchChat(chat.id); } }}
         onDoubleClick={() => { closeTip(); setValue(chat.title); setEditing(true); }}
         onContextMenu={(e) => { e.preventDefault(); closeTip(); onMenu(row, e.clientX, e.clientY); }}
-        onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', chat.id); setDrag({ id: chat.id }); closeTip(); }}
+        onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', chat.id); setDrag({ id: chat.id, section }); closeTip(); }}
         onDragEnd={() => { setDrag(null); setOver(false); }}
         onDragOver={(e) => { if (canDrop) { e.preventDefault(); setOver(true); } }}
         onDragLeave={() => setOver(false)}
@@ -589,6 +616,8 @@ export function SidebarV2() {
   });
   const [menu, setMenu] = useState(false);
   const [drag, setDrag] = useState<DragItem | null>(null);
+  const [tailOpen, setTailOpen] = useState(true);
+  const [tailShown, setTailShown] = useState(TAIL_PAGE);
   const [query, setQuery] = useState('');
   const [lifecycleNow, setLifecycleNow] = useState(() => Date.now());
   const [tip, setTip] = useState<Tip>(null);
@@ -663,12 +692,13 @@ export function SidebarV2() {
   }, [groups, scope, query, app.activeId, app.chats, lifecycleNow]);
 
   const searching = query.trim().length > 0;
-  // Search, lifecycle, status and machine ownership never introduce a second
-  // sort key. The list is exactly the persisted order in every view.
-  const visibleRows = useMemo(
-    () => searching ? orderSearchRows(rows) : orderSidebarRows(rows),
-    [rows, searching],
-  );
+  // Machine ownership is presentation metadata, never a grouping boundary.
+  // Lifecycle remains the established UI boundary: live rows, the settled
+  // shelf, and the hidden searchable archive each preserve manual order.
+  const { cards, tail, archived } = useMemo(() => partitionSidebarRows(rows), [rows]);
+  const searchRows = useMemo(() => orderSearchRows(rows), [rows]);
+  const tailVisible = tailOpen ? tail.slice(0, tailShown) : [];
+  const tailHidden = tail.length - tailVisible.length;
 
   const scopeLabel = scope === null
     ? 'Todos los proyectos'
@@ -689,11 +719,16 @@ export function SidebarV2() {
     ? (newTargetRemote ? `${newTargetRemote.machine}/${newTargetName}` : newTargetName)
     : null;
 
-  // Filing changes metadata and density only. It cannot move the row or select
-  // a neighbour; manual drag is the sole reorder operation.
+  // Filing returns the row to the established shelf and selects its neighbour.
+  // It never changes the manual order of either local or remote rows.
   const settleRow = useCallback((row: Row) => {
     store.settleChat(row.chat.id, true);
-  }, []);
+    if (row.chat.id !== app.activeId) return;
+    const at = cards.findIndex((candidate) => candidate.chat.id === row.chat.id);
+    const rest = cards.filter((candidate) => candidate.chat.id !== row.chat.id);
+    const next = rest[at] ?? rest[at - 1];
+    if (next) store.switchChat(next.chat.id);
+  }, [cards, app.activeId]);
   const unsettleRow = useCallback((row: Row) => { store.settleChat(row.chat.id, false); }, []);
 
   const rowProps = {
@@ -743,18 +778,49 @@ export function SidebarV2() {
       </div>
 
       <div className="sv2-list" onScroll={() => setTip(null)}>
-        {visibleRows.length === 0 && (
+        {(searching ? searchRows.length === 0 : cards.length + tail.length === 0) && (
           <div className="side-empty">{searching
             ? 'Nada coincide con la búsqueda.'
-            : 'Sin conversaciones todavía.'}</div>
+            : archived.length ? 'Las conversaciones están archivadas. Buscalas arriba.' : 'Sin conversaciones todavía.'}</div>
         )}
         <ul role="list">
-          {visibleRows.map((row) => (
+          {searching ? searchRows.map((row) => (
             <SidebarV2Row
-              key={`${row.chat.id}:${row.card ? 'card' : 'slim'}`} row={row} active={row.chat.id === app.activeId}
+              key={`${row.chat.id}:search`} row={row} active={row.chat.id === app.activeId}
               {...rowProps}
             />
-          ))}
+          )) : (
+            <>
+              {cards.map((row) => (
+                <SidebarV2Row
+                  key={`${row.chat.id}:${row.card ? 'card' : 'slim'}`} row={row} active={row.chat.id === app.activeId}
+                  {...rowProps}
+                />
+              ))}
+              {tail.length > 0 && (
+                <li className="sv2-shelf-li">
+                  <button className="sv2-shelf" onClick={() => setTailOpen((value) => !value)} aria-expanded={tailOpen}>
+                    <span className="sv2-shelf-label">{tailOpen ? 'En reposo' : `En reposo (${tail.length})`}</span>
+                    <span className="sv2-shelf-rule" />
+                    <span className={`sv2-shelf-chev ${tailOpen ? 'open' : ''}`}><IcChevron /></span>
+                  </button>
+                </li>
+              )}
+              {tailVisible.map((row) => (
+                <SidebarV2Row
+                  key={`${row.chat.id}:slim`} row={row} active={row.chat.id === app.activeId}
+                  {...rowProps}
+                />
+              ))}
+              {tailOpen && tailHidden > 0 && (
+                <li className="sv2-more-li">
+                  <button className="sv2-more" onClick={() => setTailShown((count) => count + TAIL_PAGE)}>
+                    Mostrar {Math.min(tailHidden, TAIL_PAGE)} más
+                  </button>
+                </li>
+              )}
+            </>
+          )}
         </ul>
       </div>
 
