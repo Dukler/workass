@@ -317,14 +317,18 @@ func (r *providerChatRuntime) openActor(chatID string, initialize *chat.Initiali
 		return nil, fmt.Errorf("discover provider chat actors: %w", r.bootErr)
 	}
 	if actor := r.actors[chatID]; actor != nil {
+		// Ordinary actor lookups are the hot path for heartbeat projections and
+		// streamed provider events. The actor is already authoritative here; only
+		// a repeated create needs to inspect its immutable creation receipt.
+		if initialize == nil {
+			return actor, nil
+		}
 		state := actor.engine.Snapshot()
-		if state.Deleted && initialize != nil {
+		if state.Deleted {
 			return nil, errors.New("chat was durably deleted")
 		}
-		if initialize != nil {
-			if state.CreationOperationID != providercontract.NormalizeOperationID(string(initialize.OperationID)) || state.CreationDigest != strings.TrimSpace(initialize.Digest) {
-				return nil, errors.New("chat creation operation conflicts with the existing actor")
-			}
+		if state.CreationOperationID != providercontract.NormalizeOperationID(string(initialize.OperationID)) || state.CreationDigest != strings.TrimSpace(initialize.Digest) {
+			return nil, errors.New("chat creation operation conflicts with the existing actor")
 		}
 		return actor, nil
 	}

@@ -27,6 +27,29 @@ func newTestProviderChatRuntime(t *testing.T, manager *acp.Manager, store *sessi
 	return runtime
 }
 
+func TestLoadedActorLookupDoesNotSnapshotActorState(t *testing.T) {
+	stateDir := t.TempDir()
+	engine, err := chat.NewEngine("lookup-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &providerChatRuntime{
+		manager: &acp.Manager{}, sessions: sharedSessionStore(stateDir), stateDir: stateDir,
+		actors: map[string]*providerChatActor{"lookup-chat": {engine: engine}},
+		known:  map[string]struct{}{"lookup-chat": {}},
+	}
+	var lookupErr error
+	allocations := testing.AllocsPerRun(100, func() {
+		_, lookupErr = runtime.actor("lookup-chat")
+	})
+	if lookupErr != nil {
+		t.Fatal(lookupErr)
+	}
+	if allocations > 1 {
+		t.Fatalf("loaded actor lookup allocations = %.1f, want <= 1 without a full state snapshot", allocations)
+	}
+}
+
 func TestRendererChatCreationIsDurableIdempotentAndIndependentFromProviderAttachment(t *testing.T) {
 	stateDir := t.TempDir()
 	store := sharedSessionStore(stateDir)
