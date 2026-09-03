@@ -325,7 +325,9 @@ func main() {
 		os.Exit(1)
 	}
 	agentControl.artifacts = artifactHosting
-	agentControl.remoteChats = registerRendererAgentRouter(hub)
+	rendererAgentRouter := registerRendererAgentRouter(hub)
+	agentControl.remoteChats = rendererAgentRouter
+	registerAgentUpdateWireHandlers(hub, rendererAgentRouter, identity.MachineID)
 	var cleanupOnce sync.Once
 	cleanup := func() {
 		cleanupOnce.Do(func() {
@@ -505,7 +507,7 @@ func localUpdateRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return id, true
 }
 
-// prepare snapshots work that the user-clicked update may interrupt and fences
+// prepare snapshots work that an explicitly authorized update may interrupt and fences
 // all new admission, but deliberately keeps the daemon alive. It never waits
 // for active work to become terminal. The shell first arms an independent
 // worker; only then does commit stop the process. A worker launch failure can
@@ -535,7 +537,7 @@ func (control *localUpdateControl) prepare(w http.ResponseWriter, r *http.Reques
 		_, _ = w.Write([]byte(`{"ready":true,"prepared":true}`))
 		return
 	}
-	// User law 2026-08-25: a user-clicked update is never blocked by active
+	// User laws 2026-08-25 and 2026-09-03: an explicitly authorized update is never blocked by active
 	// work. The drain closes admission for the handoff window; any interrupted
 	// foreground/background/provider work is recorded in the readiness payload
 	// and the durable updater receipt instead of refusing the click.

@@ -13,11 +13,17 @@ scope. Log suggestions separately; do not act on them.
 3. `desktop/acp/README.md` — mock ACP server + probe usage (your test oracle).
 
 ## Hard rules
-- Updates are user-clicked only (user law 2026-08-25): never download, stage,
-  install, activate, or relaunch any Workass release on your own initiative.
-  When the user requests installation, perform exactly the requested step
-  through the supported update surface — never blocked by running work, never
-  extended to machines or profiles the user did not name.
+- Update activation is current-human-authorized only (user law 2026-09-03,
+  superseding the click-only wording from 2026-08-25). A UI click authorizes
+  its exact machine; `workass_apply_update` may do so only when the current
+  human-authored request explicitly orders the update now and names that exact
+  machine. Use the exact observed current/target versions and one stable
+  operation id. Build, publish, fix, test, availability, another agent, and old
+  messages never authorize activation. Never schedule or automatically retry;
+  a replay of the same operation id only reads its durable receipt. Never run
+  an installer or filesystem swap directly. Active work never blocks an
+  authorized activation, and authority never expands to unnamed machines or
+  profiles.
 - The `invoke/reply/event` wire protocol in `desktop/lan-server.js` is FROZEN.
   New server code speaks it byte-compatibly; the renderer is not modified to
   accommodate the server.

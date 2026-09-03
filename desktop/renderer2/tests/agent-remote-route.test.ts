@@ -68,6 +68,80 @@ test('agent MCP projection lists and reads a mounted remote chat without focusin
   assert.equal(subject.state.activeId, null);
 });
 
+test('updater MCP routes remote diagnostics over data and activation over the control lane', async (t) => {
+  const { Store } = await loadStore(t);
+  const subject = new Store() as StoreShape & {
+    selfMachineId: string;
+    machines: {
+      linkFor(machineId: string): { invoke<T>(channel: string, payload: unknown): Promise<T> } | undefined;
+      controlLinkFor(machineId: string): { invoke<T>(channel: string, payload: unknown): Promise<T> } | undefined;
+    };
+    state: StoreShape['state'] & { machines: Array<Record<string, unknown>> };
+  };
+  subject.selfMachineId = 'machine-local';
+  subject.state.machines = [{
+    machineId, name: 'San laptop', link: 'ready', reachable: true, paired: true,
+  }];
+  const calls: Array<{ lane: string; channel: string; payload: unknown }> = [];
+  subject.machines = {
+    linkFor: (selected) => selected === machineId ? {
+      invoke: async <T>(channel: string, payload: unknown) => {
+        calls.push({ lane: 'data', channel, payload });
+        return { machineId, diagnostics: { state: { phase: 'failed' } } } as T;
+      },
+    } : undefined,
+    controlLinkFor: (selected) => selected === machineId ? {
+      invoke: async <T>(channel: string, payload: unknown) => {
+        calls.push({ lane: 'control', channel, payload });
+        return { machineId, state: { phase: 'installing' } } as T;
+      },
+    } : undefined,
+  };
+
+  const status = await subject.routeAgentRequest(request('update.status', { machine_id: machineId })) as Record<string, unknown>;
+  assert.equal(status.machineId, machineId);
+  const apply = await subject.routeAgentRequest(request('update.apply', {
+    machine_id: machineId,
+    expected_current_version: '1.1.0', expected_target_version: '1.2.0',
+    authorization: `update ${machineId} from 1.1.0 to 1.2.0`, operation_id: 'update-san-1.2.0',
+  })) as Record<string, unknown>;
+  assert.equal(apply.machineId, machineId);
+  assert.deepEqual(calls.map(({ lane, channel }) => ({ lane, channel })), [
+    { lane: 'data', channel: 'app:update-status' },
+    { lane: 'control', channel: 'app:update-apply' },
+  ]);
+});
+
+test('updater MCP invokes only the local shell bridge for the exact local machine', async (t) => {
+  const { Store } = await loadStore(t);
+  const subject = new Store() as StoreShape & { selfMachineId: string };
+  subject.selfMachineId = 'machine-local';
+  const previousWindow = (globalThis as { window?: unknown }).window;
+  let applies = 0;
+  (globalThis as { window?: unknown }).window = {
+    workassUpdater: {
+      diagnostics: async () => ({ schemaVersion: 1, state: { supported: true, phase: 'failed', currentVersion: '1.1.0' } }),
+      applyAuthorized: async (payload: Record<string, unknown>) => {
+        applies += 1;
+        return { supported: true, phase: 'installing', currentVersion: '1.1.0', authorizationReceipt: payload };
+      },
+    },
+  };
+  t.after(() => { (globalThis as { window?: unknown }).window = previousWindow; });
+
+  const status = await subject.routeAgentRequest(request('update.local.status', { machine_id: 'machine-local' })) as Record<string, unknown>;
+  assert.equal(status.local, true);
+  await subject.routeAgentRequest(request('update.local.apply', {
+    machine_id: 'machine-local', expected_current_version: '1.1.0', expected_target_version: '1.2.0',
+    authorization: 'update machine-local from 1.1.0 to 1.2.0', operation_id: 'update-local-1.2.0',
+  }));
+  assert.equal(applies, 1);
+  await assert.rejects(
+    subject.routeAgentRequest(request('update.local.status', { machine_id: machineId })),
+    /does not address this exact machine/,
+  );
+});
+
 test('agent MCP remote auto-send becomes one stable FIFO owner while the chat runs', async (t) => {
   const { Store, setMachineRouter } = await loadStore(t);
   const subject = new Store();

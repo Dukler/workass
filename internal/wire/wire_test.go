@@ -28,6 +28,18 @@ func TestServerFolderChannelsKeepReadsPassiveAndCreationMutating(t *testing.T) {
 	}
 }
 
+func TestUpdaterChannelsKeepDiagnosticsPassiveAndApplyOnTheControlMutationLane(t *testing.T) {
+	if _, ok := mutatingChannels["app:update-status"]; ok {
+		t.Fatal("reading updater failure evidence must remain passive")
+	}
+	if _, ok := mutatingChannels["app:update-apply"]; !ok {
+		t.Fatal("applying an update must take the controller lease")
+	}
+	if _, ok := auxiliaryControlChannels["app:update-apply"]; !ok {
+		t.Fatal("remote update apply must use the authenticated control lane")
+	}
+}
+
 func TestFrameDecoderVectors(t *testing.T) {
 	t.Run("masked short frame", func(t *testing.T) {
 		dec := &frameDecoder{}

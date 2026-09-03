@@ -201,7 +201,7 @@ func assertStatelessMCPModernLifecycle(t *testing.T, harness statelessMCPTestHar
 
 	status, response = harness.request(t, 2, "tools/list", "", statelessMCPProtocolVersion, map[string]any{})
 	result = mapFromAnyMain(response["result"])
-	if status != http.StatusOK || result["resultType"] != "complete" || len(result["tools"].([]any)) != 24 {
+	if status != http.StatusOK || result["resultType"] != "complete" || len(result["tools"].([]any)) != 27 {
 		t.Fatalf("tools/list status=%d response=%#v", status, response)
 	}
 
@@ -247,7 +247,7 @@ func assertStatelessMCPRejectsHeaderMismatchUnsupportedVersionAndBadAuth(t *test
 	}
 	status, response = harness.requestInitialized(t, 11, "tools/list", mcpprotocol.InitializedVersion, nil)
 	result = mapFromAnyMain(response["result"])
-	if status != http.StatusOK || len(result["tools"].([]any)) != 24 {
+	if status != http.StatusOK || len(result["tools"].([]any)) != 27 {
 		t.Fatalf("initialized tools/list status=%d response=%#v", status, response)
 	}
 	status, response = harness.requestInitialized(t, 12, "initialize", statelessMCPProtocolVersion, map[string]any{

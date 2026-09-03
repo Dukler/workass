@@ -195,6 +195,11 @@ export class MachineRegistry {
     return this.ready.get(machineId);
   }
 
+  /** Event-free authenticated mutation lane for exact-machine control. */
+  controlLinkFor(machineId: string): MachineSocket | undefined {
+    return this.controlSockets.get(machineId);
+  }
+
   /**
    * Proves that an async read still belongs to the currently-authorized link.
    * Socket generation alone is insufficient because forget/reject may replace

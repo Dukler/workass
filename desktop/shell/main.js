@@ -281,8 +281,10 @@ function createWindow(url, browserReporter, isController) {
 		catch (err) { return { ok: false, error: String(err && err.message || err) }; }
 	});
   ipcMain.handle('workass-updater:get-state', (event) => own(event) ? updateManager?.snapshot() || null : null);
+  ipcMain.handle('workass-updater:diagnostics', (event) => own(event) ? updateManager?.diagnostics() || null : null);
   ipcMain.handle('workass-updater:check', async (event) => own(event) ? updateManager?.check() || null : null);
   ipcMain.handle('workass-updater:apply', async (event) => own(event) ? updateManager?.startApply() || null : null);
+  ipcMain.handle('workass-updater:apply-authorized', async (event, payload) => own(event) ? updateManager?.startAuthorizedApply(payload) || null : null);
   win.on('closed', () => {
     viewServer?.reportWindowState?.({ visible: false, minimized: false, focused: false });
     removeImageCopyMenu();
@@ -297,7 +299,7 @@ function createWindow(url, browserReporter, isController) {
     try { ipcMain.removeHandler('workass-image:open-external'); } catch { /* ignore */ }
 		try { ipcMain.removeAllListeners('workass-machines:trust-endpoint'); } catch { /* ignore */ }
 		try { ipcMain.removeHandler('workass-recovery:restart-daemon'); } catch { /* ignore */ }
-    for (const channel of ['get-state', 'check', 'apply']) {
+    for (const channel of ['get-state', 'diagnostics', 'check', 'apply', 'apply-authorized']) {
       try { ipcMain.removeHandler(`workass-updater:${channel}`); } catch { /* ignore */ }
     }
   });

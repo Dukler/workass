@@ -56,6 +56,7 @@ import { machineScopeOf } from '../wire/machineRouter';
 import { normalizeMachineNickname } from '../machine-nickname';
 import { setMachineRouter } from '../wire/api';
 import { localId, machineOf, tagId, tagPayload } from '../wire/machineIds';
+import type { AppUpdaterAuthorizedRequest, AppUpdaterDiagnostics } from '../app-updater';
 
 const APP = 'app';
 const PROC = 'proc';
@@ -2482,6 +2483,16 @@ export class Store {
     }
     const params = request.params && typeof request.params === 'object' ? request.params : {};
     switch (String(request.method ?? '').trim()) {
+      case 'update.targets':
+        return this.agentUpdateTargets();
+      case 'update.status':
+        return this.agentUpdateStatus(params, false);
+      case 'update.apply':
+        return this.agentUpdateApply(params, false);
+      case 'update.local.status':
+        return this.agentUpdateStatus(params, true);
+      case 'update.local.apply':
+        return this.agentUpdateApply(params, true);
       case 'chat.list':
         return { chats: this.agentRemoteChatList() };
       case 'chat.read':
@@ -2491,6 +2502,90 @@ export class Store {
       default:
         throw new Error(`remote-chat MCP method is not supported: ${String(request.method ?? '')}`);
     }
+  }
+
+  private async ensureUpdateMachineIdentity(): Promise<string> {
+    if (this.selfMachineId) return this.selfMachineId;
+    const bridge = typeof window !== 'undefined' ? window.api : undefined;
+    if (typeof bridge?.machinesList === 'function') {
+      const reply = await bridge.machinesList();
+      this.selfMachineId = String(reply?.self?.machineId ?? '').trim();
+    }
+    if (!this.selfMachineId) throw new Error('the local Workass machine identity is unavailable');
+    return this.selfMachineId;
+  }
+
+  private async agentUpdateTargets(): Promise<Record<string, unknown>> {
+    const selfMachineId = await this.ensureUpdateMachineIdentity();
+    const updater = typeof window !== 'undefined' ? window.workassUpdater : undefined;
+    let localState: Record<string, unknown> | null = null;
+    try { localState = updater ? await updater.getState() as unknown as Record<string, unknown> : null; }
+    catch { /* status tool reports the exact shell error when selected */ }
+    const targets: Array<Record<string, unknown>> = [{
+      machineId: selfMachineId,
+      name: 'This machine',
+      local: true,
+      link: 'ready',
+      updaterMcpSupported: typeof updater?.diagnostics === 'function' && typeof updater?.applyAuthorized === 'function',
+      ...(localState ? {
+        currentVersion: localState.currentVersion,
+        targetVersion: localState.targetVersion,
+        phase: localState.phase,
+      } : {}),
+    }];
+    for (const machine of this.state.machines) {
+      if (!machine.machineId || machine.machineId === selfMachineId) continue;
+      targets.push({
+        machineId: machine.machineId,
+        name: machine.name || machine.machineId,
+        local: false,
+        link: machine.link,
+        reachable: machine.reachable,
+        paired: machine.paired,
+        updaterMcpSupported: machine.link === 'ready' ? 'unknown-until-status-read' : false,
+        ...(machine.reason ? { reason: machine.reason } : {}),
+      });
+    }
+    return { selfMachineId, targets };
+  }
+
+  private async agentUpdateStatus(params: Record<string, unknown>, localOnly: boolean): Promise<Record<string, unknown>> {
+    const machineId = String(params.machine_id ?? '').trim();
+    const selfMachineId = await this.ensureUpdateMachineIdentity();
+    if (!machineId) throw new Error('update status requires an exact machine_id');
+    if (machineId === selfMachineId) {
+      const updater = typeof window !== 'undefined' ? window.workassUpdater : undefined;
+      if (typeof updater?.diagnostics !== 'function') {
+        throw new Error('this Workass shell does not support MCP updater diagnostics');
+      }
+      const diagnostics: AppUpdaterDiagnostics = await updater.diagnostics();
+      return { machineId, local: true, diagnostics };
+    }
+    if (localOnly) throw new Error('the daemon-local updater request does not address this exact machine');
+    const machine = this.state.machines.find((candidate) => candidate.machineId === machineId);
+    const link = this.machines?.linkFor(machineId);
+    if (!machine || !link || machine.link !== 'ready') throw new Error(`remote machine ${machineId} is unavailable`);
+    return await link.invoke<Record<string, unknown>>('app:update-status', { machine_id: machineId });
+  }
+
+  private async agentUpdateApply(params: Record<string, unknown>, localOnly: boolean): Promise<Record<string, unknown>> {
+    const request = params as unknown as AppUpdaterAuthorizedRequest;
+    const machineId = String(request.machine_id ?? '').trim();
+    const selfMachineId = await this.ensureUpdateMachineIdentity();
+    if (!machineId) throw new Error('update activation requires an exact machine_id');
+    if (machineId === selfMachineId) {
+      const updater = typeof window !== 'undefined' ? window.workassUpdater : undefined;
+      if (typeof updater?.applyAuthorized !== 'function') {
+        throw new Error('this Workass shell does not support authorized MCP update activation');
+      }
+      const state = await updater.applyAuthorized(request);
+      return { machineId, local: true, state };
+    }
+    if (localOnly) throw new Error('the daemon-local updater request does not address this exact machine');
+    const machine = this.state.machines.find((candidate) => candidate.machineId === machineId);
+    const link = this.machines?.controlLinkFor(machineId);
+    if (!machine || !link || machine.link !== 'ready') throw new Error(`remote machine ${machineId} is unavailable`);
+    return await link.invoke<Record<string, unknown>>('app:update-apply', params);
   }
 
   private agentRemoteChatList(): Array<Record<string, unknown>> {

@@ -1158,8 +1158,76 @@ test('the renderer has one owned apply IPC for the complete update intent', () =
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
   assert.match(preload, /apply:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('workass-updater:apply'\)/);
   assert.match(main, /ipcMain\.handle\('workass-updater:apply',[\s\S]{0,160}own\(event\)[\s\S]{0,160}updateManager\?\.startApply\(\)/);
+  assert.match(preload, /diagnostics:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('workass-updater:diagnostics'\)/);
+  assert.match(preload, /applyAuthorized:\s*\(payload\)\s*=>\s*ipcRenderer\.invoke\('workass-updater:apply-authorized', payload\)/);
+  assert.match(main, /ipcMain\.handle\('workass-updater:apply-authorized',[\s\S]{0,180}own\(event\)[\s\S]{0,180}updateManager\?\.startAuthorizedApply\(payload\)/);
   assert.doesNotMatch(preload, /workass-updater:(?:download|install)/);
   assert.doesNotMatch(main, /workass-updater:(?:download|install)/);
+});
+
+test('an exact current-human MCP update authorization starts once and replays only its receipt', () => {
+  const { manager } = managerFixture();
+  let starts = 0;
+  manager.startApply = () => {
+    starts += 1;
+    return { ...manager.snapshot(), phase: 'installing' };
+  };
+  const request = {
+    operation_id: 'update-machine-san-1.2.0',
+    machine_id: 'machine-san',
+    expected_current_version: '1.1.0',
+    expected_target_version: '1.2.0',
+    authorization: 'update machine-san from 1.1.0 to 1.2.0',
+  };
+  const first = manager.startAuthorizedApply(request);
+  manager.currentVersion = '1.2.0';
+  manager.publish({ currentVersion: '1.2.0', targetVersion: null, availableVersion: null });
+  const replay = manager.startAuthorizedApply(request);
+  assert.equal(starts, 1);
+  assert.equal(first.replayed, false);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.authorizationReceipt.operationId, request.operation_id);
+});
+
+test('MCP update activation rejects changed machine, version, authorization, and operation identity', () => {
+  const { manager } = managerFixture();
+  let starts = 0;
+  manager.startApply = () => { starts += 1; return manager.snapshot(); };
+  const valid = {
+    operation_id: 'update-machine-san-1.2.0',
+    machine_id: 'machine-san',
+    expected_current_version: '1.1.0',
+    expected_target_version: '1.2.0',
+    authorization: 'update machine-san from 1.1.0 to 1.2.0',
+  };
+  for (const [field, value] of [
+    ['operation_id', ''],
+    ['expected_current_version', '1.0.0'],
+    ['expected_target_version', '1.2.1'],
+    ['authorization', 'update something eventually'],
+  ]) {
+    assert.throws(() => manager.startAuthorizedApply({ ...valid, [field]: value }));
+  }
+  assert.equal(starts, 0);
+});
+
+test('updater diagnostics expose only bounded redacted failure evidence', async () => {
+  const { manager } = managerFixture({ replies: [{ status: 409, body: { reason: 'busy' } }] });
+  await manager.install();
+  const receipt = JSON.parse(fs.readFileSync(manager.receiptPath, 'utf8'));
+  receipt.error = 'token=do-not-return';
+  manager.publish({ receipt, error: 'password=also-secret' });
+  const logPath = path.join(manager.prepared.transactionRoot, 'worker.log');
+  fs.writeFileSync(logPath, `${'x'.repeat(20_000)}\napi_key=hidden-value\n{"token":"json-hidden"}\n`);
+
+  const diagnostics = manager.diagnostics();
+  const encoded = JSON.stringify(diagnostics);
+  assert.equal(diagnostics.schemaVersion, 1);
+  assert.match(diagnostics.workerLogTail, /api_key=\[redacted\]/);
+  assert.ok(diagnostics.workerLogTail.length <= 16 * 1024);
+  assert.doesNotMatch(encoded, /do-not-return|also-secret|hidden-value|json-hidden/);
+  assert.doesNotMatch(encoded, new RegExp(manager.prepared.transactionRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.equal(Object.hasOwn(diagnostics.state, 'receipt'), false);
 });
 
 test('macOS dogfood resolves one stable local feed while public builds stay on GitHub', () => {
