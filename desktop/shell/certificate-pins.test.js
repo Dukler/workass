@@ -3,7 +3,14 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createHash } = require('node:crypto');
-const { CertificatePins, fingerprintCertificateData, normalizeCertFingerprint, privateLANHost } = require('./certificate-pins');
+const {
+  CertificatePins,
+  certificateVerificationSessions,
+  fingerprintCertificateData,
+  normalizeCertFingerprint,
+  privateLANHost,
+  trustCertificatePEM,
+} = require('./certificate-pins');
 
 const fingerprint = 'ab'.repeat(32);
 
@@ -55,6 +62,39 @@ test('the documented PEM certificate data yields the daemon SHA-256 identity', (
 		certificate: { fingerprint: '01:23:45', data: pem },
 	}), true);
 	assert.equal(fingerprintCertificateData('not a certificate'), '');
+});
+
+test('local daemon PEM establishes the exact loopback pin', () => {
+	const der = Buffer.from([7, 8, 9, 10]);
+	const pem = `-----BEGIN CERTIFICATE-----\n${der.toString('base64')}\n-----END CERTIFICATE-----`;
+	const pins = new CertificatePins();
+	assert.equal(trustCertificatePEM(pins, '127.0.0.1:8788', pem), true);
+	assert.equal(pins.verify({
+		hostname: '127.0.0.1',
+		verificationResult: 'net::ERR_CERT_AUTHORITY_INVALID',
+		certificate: { data: pem },
+	}), true);
+	assert.equal(trustCertificatePEM(pins, '127.0.0.1:8788', 'not a certificate'), false);
+});
+
+test('certificate verification covers the renderer and isolated in-app browser sessions', () => {
+	const defaultSession = { name: 'renderer' };
+	const browserSession = { name: 'browser' };
+	const calls = [];
+	const sessions = certificateVerificationSessions({
+		defaultSession,
+		fromPartition(partition, options) {
+			calls.push([partition, options]);
+			return browserSession;
+		},
+	}, 'persist:workass-browser');
+	assert.deepEqual(calls, [['persist:workass-browser', { cache: true }]]);
+	assert.deepEqual(sessions, [defaultSession, browserSession]);
+
+	assert.deepEqual(certificateVerificationSessions({
+		defaultSession,
+		fromPartition: () => defaultSession,
+	}, 'persist:workass-browser'), [defaultSession], 'the same Electron session is configured only once');
 });
 
 test('pins never relax public hosts, unrelated TLS failures, or malformed fingerprints', () => {

@@ -5,7 +5,7 @@ const { app, BrowserWindow, WebContentsView, session, net, ipcMain, shell, nativ
 const fs = require('node:fs');
 const path = require('node:path');
 const { createViewServer } = require('./view-server');
-const { BrowserManager } = require('./browser-manager');
+const { BrowserManager, DEFAULT_PARTITION: BROWSER_PARTITION } = require('./browser-manager');
 const { BrowserControlServer } = require('./browser-control-server');
 const { resolveRuntimeProfile } = require('./runtime-profile');
 const { applyMacDockIcon, refreshWindowsShortcutIconsAsync, resolveWindowFrameOptions, resolveWindowIconPath } = require('./app-icon');
@@ -24,7 +24,7 @@ const {
   progressTransactionArgument,
   runUpdateProgressProcess,
 } = require('./update-progress');
-const { CertificatePins } = require('./certificate-pins');
+const { CertificatePins, certificateVerificationSessions, trustCertificatePEM } = require('./certificate-pins');
 
 const updateProgressRequested = process.argv.includes(PROGRESS_ARGUMENT);
 let updateProgressTransaction = '';
@@ -166,12 +166,14 @@ async function recoverLocalDaemon() {
 
 // Workass daemons use persistent self-signed certificates rather than a public
 // CA. Chromium may reject the current DHCP address even though the certificate
-// is the same machine. Accept only the exact SHA-256 identity that discovery
-// handed to the renderer; an arbitrary self-signed private endpoint stays
-// rejected and never receives a stored device token.
+// is the same machine. Accept only an exact SHA-256 identity learned from the
+// local daemon certificate or authenticated discovery; an arbitrary
+// self-signed private endpoint stays rejected and never receives a stored
+// device token.
 function allowPrivateWorkassCertificates() {
-  try {
-    session.defaultSession.setCertificateVerifyProc((request, callback) => {
+  for (const target of certificateVerificationSessions(session, BROWSER_PARTITION)) {
+    try {
+      target.setCertificateVerifyProc((request, callback) => {
 		const decision = certificatePins.decision(request);
 		if (!decision.accepted && decision.privateLAN && decision.pinKnown) {
 			const receipt = JSON.stringify(decision);
@@ -181,10 +183,18 @@ function allowPrivateWorkassCertificates() {
 			}
 		}
 		callback(decision.accepted ? 0 : -3);
-    });
-  } catch (err) {
-    console.error(`[shell] certificate verifier unavailable: ${err.message}`);
+      });
+    } catch (err) {
+      console.error(`[shell] certificate verifier unavailable: ${err.message}`);
+    }
   }
+}
+
+function trustLocalDaemonCertificate() {
+  const daemon = new URL(DAEMON_URL);
+  if (daemon.protocol !== 'https:') return true;
+  const certificatePath = path.join(RUNTIME.stateDir, 'daemon-cert.pem');
+  return trustCertificatePEM(certificatePins, daemon.host, fs.readFileSync(certificatePath, 'utf8'));
 }
 
 // Dictation needs the microphone, and nothing in this shell needs any other
@@ -566,6 +576,11 @@ if (runsPrimaryRuntime) app.whenReady().then(async () => {
     } catch (err) {
       console.error(`[shell] packaged daemon bootstrap failed: ${err.message}`);
     }
+  }
+  try {
+    if (!trustLocalDaemonCertificate()) throw new Error('certificate identity is invalid');
+  } catch (err) {
+    console.error(`[shell] local daemon certificate pin unavailable: ${err.message}`);
   }
   const iconReceipt = applyMacDockIcon({
     app,
