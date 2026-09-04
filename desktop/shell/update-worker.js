@@ -14,6 +14,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const {
   PROGRESS_RECEIPT_SCHEMA_VERSION,
   TRANSACTION_SCHEMA_VERSION,
+  atomicJSON,
   expectedProgressExecutable,
   installedProgressExecutable,
   progressProcessOwnership,
@@ -133,19 +134,6 @@ function spawnDetached(command, args, options, { spawnProcess = spawn } = {}) {
       resolve(child);
     });
   });
-}
-
-function atomicJSON(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const incoming = `${file}.incoming-${process.pid}`;
-  const descriptor = fs.openSync(incoming, 'w', 0o600);
-  try {
-    fs.writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-    fs.fsyncSync(descriptor);
-  } finally {
-    fs.closeSync(descriptor);
-  }
-  fs.renameSync(incoming, file);
 }
 
 function updateReceipt(transaction, phase, extra = {}) {
