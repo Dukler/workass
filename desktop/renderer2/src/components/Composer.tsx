@@ -573,6 +573,8 @@ export function Composer({ chat }: { chat: Chat | null }) {
   }
 
   const running = store.isChatRunning(chat?.id ?? null);
+  const stopping = !![...(chat?.messages ?? [])].reverse()
+    .find((message) => message.status === 'running')?.stopState;
   const modelGroups = store.catalogGroupsForChat(chat);
   // The persisted id may be suffixed (`base[effort]`). Split it so the picker shows
   // the base name/selection and the effort control reflects the chosen stop.
@@ -687,6 +689,10 @@ export function Composer({ chat }: { chat: Chat | null }) {
     // Blocked while offline (mirrors the disabled send button); the banner above
     // the composer explains why. Enter must not silently drop into a dead socket.
     if (app.connection !== 'connected') return;
+    // The turn can still accept an explicit FIFO follow-up while its terminal
+    // event is pending. Only another Stop or a live steer into the cancelling
+    // turn is blocked.
+    if (stopping && intent !== 'queue') return;
     const submittedDraft = text;
     const t = text.trim();
     if (running && !t && intent === 'steer') {
@@ -773,7 +779,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
   // While the daemon socket is down, sending would vanish into a dead queue —
   // block it honestly (the banner above the composer explains why).
   const offline = app.connection !== 'connected';
-	const canSend = (running || hasText) && !offline && !preparingImages;
+	const canSend = (running || hasText) && !offline && !preparingImages && !stopping;
 	const sendGlyph = steerMode ? '⤴' : running ? '■' : '↑';
   const sendTitle = offline
     ? 'Sin conexión con el daemon'
@@ -781,7 +787,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
       ? (steerAvail
         ? 'Dirigir el turno en curso · ⌘Enter'
 		: 'Steering no disponible')
-      : running ? 'Detener' : 'Enviar';
+      : running ? (stopping ? 'Deteniendo…' : 'Detener') : 'Enviar';
 
   return (
     <div className="compwrap">
@@ -846,11 +852,13 @@ export function Composer({ chat }: { chat: Chat | null }) {
           aria-keyshortcuts="Enter Meta+Enter Shift+Enter"
           title={running ? 'Enter: encolar · ⌘Enter: dirigir el turno · ⇧Enter: nueva línea' : 'Enter: enviar · ⇧Enter: nueva línea'}
         />
-        <button className={`send ${running && !steerMode ? 'stop' : ''} ${steerMode ? 'steer' : ''}`} disabled={!canSend} onClick={() => void submit(running ? 'steer' : 'send')} title={sendTitle}>
+        <button className={`send ${running && !steerMode ? 'stop' : ''} ${stopping ? 'stopping' : ''} ${steerMode ? 'steer' : ''}`} disabled={!canSend} onClick={() => void submit(running ? 'steer' : 'send')} title={sendTitle} aria-label={sendTitle}>
           {running && !steerMode
             // Real centered SVG square — the `■` glyph's font bounding box is
             // asymmetric and renders visibly off-center (user report 2026-07-12).
-            ? <svg className="stopsq" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="2" /></svg>
+            ? stopping
+              ? <span className="stopspin" aria-hidden="true" />
+              : <svg className="stopsq" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="2" /></svg>
             : sendGlyph}
         </button>
       </div>

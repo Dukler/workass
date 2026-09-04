@@ -11,6 +11,7 @@ const styles = readFileSync(new URL('../src/styles/app.css', import.meta.url), '
 
 let vite: ViteDevServer;
 let Transcript: React.ComponentType<{ chat: Chat | null }>;
+let Composer: React.ComponentType<{ chat: Chat | null }>;
 let appStore: { state: Record<string, unknown> };
 
 before(async () => {
@@ -22,6 +23,9 @@ before(async () => {
   });
   ({ Transcript } = await vite.ssrLoadModule('/src/components/Transcript.tsx') as {
     Transcript: React.ComponentType<{ chat: Chat | null }>;
+  });
+  ({ Composer } = await vite.ssrLoadModule('/src/components/Composer.tsx') as {
+    Composer: React.ComponentType<{ chat: Chat | null }>;
   });
   appStore = (await vite.ssrLoadModule('/src/store/store.ts') as {
     store: { state: Record<string, unknown> };
@@ -84,4 +88,28 @@ test('the live pulse has a physical bottom anchor independent of document height
   assert.match(styles, /\.thinklive\s*\{[^}]*position:\s*absolute;[^}]*bottom:\s*0;/s);
   assert.doesNotMatch(styles, /\.thinklive\s*\{[^}]*position:\s*sticky;/s);
   assert.match(styles, /\.transcriptviewport\.has-live \.doc\s*\{[^}]*padding-bottom:\s*calc\(var\(--doc-pad-b\) \+ var\(--thinklive-h\)\);/s);
+});
+
+test('a requested Stop replaces live work chrome immediately without claiming completion', () => {
+  const chat = {
+    id: 'tab-stop-feedback', chatId: 'chat-stop-feedback', sessionId: 'session-stop-feedback',
+    title: 'Stop feedback', titleLocked: true, group: null, cwd: null,
+    providerId: 'codex', currentModelId: null, currentModeId: null,
+    pending: false, draft: '',
+    messages: [assistant('assistant-stop-feedback', '', {
+      status: 'running', jobId: 'job-stop-feedback', stopState: 'requesting',
+      events: [{ key: 'thinking-before-stop', at: 0, kind: 'thinking', text: 'OLD-LIVE-THINKING' }],
+    })],
+  } as Chat;
+  appStore.state.chats = [chat];
+  appStore.state.activeId = chat.id;
+  appStore.state.connection = 'connected';
+
+  const transcript = renderToStaticMarkup(React.createElement(Transcript, { chat }));
+  const composer = renderToStaticMarkup(React.createElement(Composer, { chat }));
+  assert.match(transcript, /Deteniendo…/);
+  assert.doesNotMatch(transcript, /detenido|OLD-LIVE-THINKING/);
+  assert.match(composer, /class="send stop stopping/);
+  assert.match(composer, /class="stopspin"/);
+  assert.match(composer, /disabled=""/);
 });

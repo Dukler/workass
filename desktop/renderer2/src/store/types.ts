@@ -121,6 +121,11 @@ export interface Msg {
   permission?: PermissionState;
   jobId?: string;
   turnStartedAt?: number;
+  // Renderer-only acknowledgement for an explicit Stop. It is deliberately
+  // non-terminal: the provider/harness still owns the eventual job:end and
+  // FIFO release. Actor hydration omits this field, so it never survives a
+  // readback or enters durable transcript state.
+  stopState?: 'requesting' | 'acknowledged';
   // A turn cut off by a daemon disconnect (not a model/agent error). Renders a
   // quiet "sin conexión" row instead of the generic error stamp.
   interrupted?: boolean;

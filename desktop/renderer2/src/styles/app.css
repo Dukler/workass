@@ -531,6 +531,8 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .ping { width: 6px; height: 6px; border-radius: 50%; background: var(--acc); position: relative; }
 .ping::after { content: ''; position: absolute; inset: -1px; border-radius: 50%; border: 1.5px solid var(--acc);
   animation: thinkping 1.9s cubic-bezier(.2, .6, .3, 1) infinite; }
+.steprow.stopping { color: var(--muted); }
+.stopdot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); opacity: .9; }
 @keyframes thinkping { 0% { transform: scale(1); opacity: .55 } 70%, 100% { transform: scale(3.4); opacity: 0 } }
 
 /* Each word fades and sharpens in, 34ms after the one before. Opacity + blur
@@ -839,6 +841,8 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .send:disabled { opacity: .4; cursor: default; }
 .send.stop { background: var(--del); color: #fff; }
 .send .stopsq { width: 13px; height: 13px; display: block; }
+.send.stop.stopping:disabled { opacity: 1; background: color-mix(in srgb, var(--del) 72%, var(--panel)); }
+.send .stopspin { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid color-mix(in srgb, #fff 38%, transparent); border-top-color: #fff; animation: conn-spin .7s linear infinite; }
 .send.steer { background: var(--ink2); color: var(--bg); }
 
 /* Session context stays a compact passive ring; exact values live in its
@@ -893,7 +897,7 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .connspin { width: 12px; height: 12px; flex: none; border-radius: 50%; border: 1.6px solid var(--line2); border-top-color: var(--amber); animation: conn-spin .7s linear infinite; }
 @keyframes conn-spin { to { transform: rotate(360deg); } }
 @keyframes conn-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-@media (prefers-reduced-motion: reduce) { .connspin { animation: none; } .connbar { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .connspin, .send .stopspin { animation: none; } .connbar { animation: none; } }
 
 /* interrupted / failed-send turn row (daemon dropped mid-turn): a quiet inline
    note with a retry, in place of the eternal "Trabajando…" spinner. */
