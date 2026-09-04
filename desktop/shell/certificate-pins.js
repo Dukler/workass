@@ -29,6 +29,27 @@ function fingerprintCertificateData(value) {
 	}
 }
 
+function trustCertificatePEM(pins, address, certificateData) {
+	if (!pins || typeof pins.trustEndpoint !== 'function') return false;
+	const fingerprint = fingerprintCertificateData(certificateData);
+	return !!fingerprint && pins.trustEndpoint(address, fingerprint);
+}
+
+// Electron certificate verification is scoped to a Session. The renderer uses
+// defaultSession, while every in-app browser view uses its own persistent
+// partition. Installing a verifier on only the former leaves browser.open
+// unable to load the same pinned Workass HTTPS endpoint the renderer can use.
+function certificateVerificationSessions(sessionModule, browserPartition) {
+	if (!sessionModule || !sessionModule.defaultSession || typeof sessionModule.fromPartition !== 'function') {
+		return [];
+	}
+	const targets = [
+		sessionModule.defaultSession,
+		sessionModule.fromPartition(browserPartition, { cache: true }),
+	];
+	return targets.filter((target, index) => target && targets.indexOf(target) === index);
+}
+
 class CertificatePins {
   constructor() {
     this.byHost = new Map();
@@ -81,4 +102,11 @@ class CertificatePins {
   }
 }
 
-module.exports = { CertificatePins, fingerprintCertificateData, normalizeCertFingerprint, privateLANHost };
+module.exports = {
+	CertificatePins,
+	certificateVerificationSessions,
+	fingerprintCertificateData,
+	normalizeCertFingerprint,
+	privateLANHost,
+	trustCertificatePEM,
+};

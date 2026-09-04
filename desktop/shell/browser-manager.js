@@ -1202,4 +1202,4 @@ class BrowserManager {
   }
 }
 
-module.exports = { BrowserManager, cleanUserAgent, normalizeBrowserURL, parseBrowserKey, resolveBrowserURL, safeBounds };
+module.exports = { BrowserManager, DEFAULT_PARTITION, cleanUserAgent, normalizeBrowserURL, parseBrowserKey, resolveBrowserURL, safeBounds };
