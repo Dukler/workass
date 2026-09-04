@@ -895,10 +895,18 @@ func TestDetectProvidersExplicitDisableSurvivesRedetection(t *testing.T) {
 	if _, err := manager.ToggleProvider(context.Background(), "devin", false); err != nil {
 		t.Fatalf("disable devin: %v", err)
 	}
+	disabledCatalog := manager.Catalog(context.Background())
+	disabledGroups, _ := disabledCatalog["groups"].([]CatalogGroup)
+	if group := findCatalogGroup(disabledGroups, "devin"); group != nil {
+		t.Fatalf("disabled devin remained in model catalog: %#v", group)
+	}
 	manager.DetectProviders(context.Background(), DetectOptions{ProviderID: "devin"})
 	devin := assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusInactive, false)
 	if devin["message"] != "disabled by user" {
 		t.Fatalf("disabled devin = %#v", devin)
+	}
+	if devin["disabledByUser"] != true {
+		t.Fatalf("disabled devin did not expose explicit user state: %#v", devin)
 	}
 
 	reloaded, err := LoadProviderConfigs(providersFile, root)
@@ -914,7 +922,31 @@ func TestDetectProvidersExplicitDisableSurvivesRedetection(t *testing.T) {
 	})
 	t.Cleanup(func() { manager2.Reset() })
 	manager2.DetectProviders(context.Background(), DetectOptions{ProviderID: "devin"})
-	assertProviderListItem(t, manager2.ProvidersList(), "devin", providerStatusInactive, false)
+	reloadedDevin := assertProviderListItem(t, manager2.ProvidersList(), "devin", providerStatusInactive, false)
+	if reloadedDevin["disabledByUser"] != true {
+		t.Fatalf("reloaded disabled devin did not expose explicit user state: %#v", reloadedDevin)
+	}
+}
+
+func TestProvidersListHidesOnlyUnconfiguredCustomPlaceholder(t *testing.T) {
+	root := repoRoot(t)
+	manager := NewManager(Options{RootDir: root, RSSSampleInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	for _, provider := range manager.ProvidersList() {
+		if provider["id"] == "custom" {
+			t.Fatalf("unconfigured custom placeholder leaked into providers:list: %#v", provider)
+		}
+	}
+
+	configured := NewManager(Options{
+		RootDir: root,
+		Providers: []ProviderConfig{{
+			ID: "custom", Name: "My ACP", Command: os.Args[0], Enabled: false,
+		}},
+		RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { configured.Reset() })
+	assertProviderListItem(t, configured.ProvidersList(), "custom", providerStatusInactive, false)
 }
 
 func TestSaveProviderConfigsConcurrentWritersUseDistinctTemps(t *testing.T) {

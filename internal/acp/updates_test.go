@@ -75,6 +75,20 @@ func TestProviderUpdateCheckFakeRegistry(t *testing.T) {
 	}
 }
 
+func TestProviderUpdateCheckSkipsExplicitlyDisabledProvider(t *testing.T) {
+	manager, _, _ := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
+	if _, err := manager.ToggleProvider(context.Background(), "qwen", false); err != nil {
+		t.Fatalf("disable qwen: %v", err)
+	}
+	payload := manager.CheckProviderUpdates(context.Background())
+	if len(payload.Updates) != 0 {
+		t.Fatalf("disabled provider remained in providers:updates: %#v", payload.Updates)
+	}
+	if candidates := manager.providerUpdateCandidates(); len(candidates) != 0 {
+		t.Fatalf("disabled provider remained an update candidate: %#v", candidates)
+	}
+}
+
 func TestProviderCLIExecutableUsesExplicitPathVariable(t *testing.T) {
 	root := repoRoot(t)
 	pathDir := t.TempDir()
