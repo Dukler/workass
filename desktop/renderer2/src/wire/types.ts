@@ -237,6 +237,9 @@ export interface ProviderRecord {
   id: string;
   name: string;
   enabled: boolean;
+  // Explicit human choice, distinct from enabled=false caused by a missing CLI
+  // or an external login requirement.
+  disabledByUser?: boolean;
   status: string;
   message?: string;
   error?: string;
@@ -684,6 +687,7 @@ export interface WorkassApi {
   appChatDetectAcp?: (opts?: Record<string, unknown>) => Promise<DetectAcpResult>;
   providersList?: () => Promise<ProviderRecord[]>;
   providersDetect?: (opts?: { provider?: string }) => Promise<DetectAcpResult>;
+  providersToggle?: (providerId: string, enabled: boolean) => Promise<ProviderRecord[]>;
   // Click-to-update: run the daemon's provider-owned updater for a provider
   // (WIRE-CONTRACT §4 providers:update). Resolves { ok, providerId } once the
   // update is accepted and progress starts; rejects with a structured JSON error

@@ -1522,6 +1522,33 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs .lrow .mt { font-size: 11.5px; color: var(--muted); margin-top: 1px; font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stgs .lrow .act { flex: none; display: flex; align-items: center; gap: 10px; }
 .stgs .lrow .empty { color: var(--faint); font-size: 12.5px; }
+.stgs .agent-phead { margin-bottom: 18px; }
+.stgs .agent-summary { display: flex; align-items: center; gap: 13px; min-height: 48px; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--acc) 24%, var(--line)); border-radius: 11px; background: color-mix(in srgb, var(--acc) 5%, var(--card)); }
+.stgs .agent-summary > div { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.stgs .agent-summary strong { color: var(--ink); font-size: 17px; line-height: 1; font-weight: 650; }
+.stgs .agent-summary span { color: var(--muted); font-size: 11.5px; }
+.stgs .agent-summary .agent-summary-rule { width: 1px; height: 24px; background: var(--line2); flex: none; }
+.stgs .agent-summary p { margin-left: auto; max-width: 34ch; color: var(--muted); font-size: 11.5px; line-height: 1.35; text-align: right; }
+.stgs .agent-provider-group { display: grid; gap: 8px; padding: 0; border: 0; background: transparent; }
+.stgs .agent-provider-row { min-height: 58px; padding: 12px 13px; border: 1px solid var(--line); border-radius: 11px; background: var(--card); transition: border-color .15s ease, background .15s ease, opacity .15s ease; }
+.stgs .agent-provider-row:first-child { border-top: 1px solid var(--line); }
+.stgs .agent-provider-row:hover { border-color: var(--line2); background: color-mix(in srgb, var(--card) 94%, var(--ink) 6%); }
+.stgs .agent-provider-row.ready .agent-provider-icon { color: var(--acc); border-color: color-mix(in srgb, var(--acc) 35%, var(--line)); background: color-mix(in srgb, var(--acc) 9%, var(--field)); }
+.stgs .agent-provider-row.disabled { background: color-mix(in srgb, var(--card) 80%, var(--bg)); }
+.stgs .agent-provider-row.disabled .agent-provider-icon { opacity: .62; }
+.stgs .agent-provider-row .agent-kind { padding-inline: 6px; color: var(--faint); }
+.stgs .agent-provider-row .agent-detail { max-width: 38ch; font-family: inherit; line-height: 1.35; }
+.stgs .agent-provider-row .agent-provider-actions { gap: 9px; }
+.stgs .agent-provider-state { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 96px; }
+.stgs .agent-switch { display: inline-flex; align-items: center; gap: 7px; padding: 3px 0 3px 7px; border: 0; border-left: 1px solid var(--line); background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
+.stgs .agent-switch:hover:not(:disabled) { color: var(--ink); }
+.stgs .agent-switch:focus-visible { outline: 2px solid color-mix(in srgb, var(--acc) 60%, transparent); outline-offset: 3px; border-radius: 6px; }
+.stgs .agent-switch:disabled { opacity: .58; cursor: wait; }
+.stgs .agent-switch-text { min-width: 65px; font-size: 11px; text-align: right; }
+.stgs .agent-switch-track { position: relative; width: 30px; height: 17px; border-radius: 999px; background: var(--line2); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ink) 8%, transparent); transition: background .15s ease; flex: none; }
+.stgs .agent-switch-track > span { position: absolute; top: 3px; left: 3px; width: 11px; height: 11px; border-radius: 50%; background: var(--muted); box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .15s ease, background .15s ease; }
+.stgs .agent-switch.on .agent-switch-track { background: color-mix(in srgb, var(--acc) 72%, var(--line2)); }
+.stgs .agent-switch.on .agent-switch-track > span { transform: translateX(13px); background: #fff; }
 .stgs .machine-nickname-input { width: min(280px, 100%); box-sizing: border-box; }
 .stgs .machine-nickname-error { margin-top: 4px; color: var(--del); font-size: 11.5px; }
 /* CLI update rows (Agentes): click-to-update. Primary is an accent-quiet

@@ -4,8 +4,9 @@
 //
 // REAL data only, feature-detected against the daemon LAN bridge:
 //  - Dispositivos: lan:devices + lan:access-request/decide + lan:revoke (live).
-//  - Agentes: the single ACP provider from config:get.acp (no providers:list on
-//    the daemon today); Probar is hidden unless app-chat:detect-acp is exposed.
+//  - Agentes: live providers:list/catalog state with explicit detect and
+//    enable/disable controls; the legacy config:get fallback remains for older
+//    daemons that do not expose the provider registry.
 //  - Engines: live fleet from proc:list; lifecycle values are daemon CLI-flag
 //    defaults shown read-only (no channel exposes them — no fake persistence).
 //  - Apariencia: theme + density, persisted locally.
@@ -147,7 +148,9 @@ function CliUpdateRow({ u }: { u: ProviderUpdate }) {
 }
 
 // ---- 1 · Agentes ---------------------------------------------------------
-function providerStatusLabel(status: string): string {
+function providerStatusLabel(provider: ProviderRecord): string {
+  if (provider.disabledByUser) return 'Desactivado';
+  const status = provider.status;
   switch (status) {
     case 'ready': return 'Listo';
     case 'needs-login': return 'Requiere login';
@@ -159,23 +162,51 @@ function providerStatusLabel(status: string): string {
 }
 function AgentProviderRow({ provider }: { provider: ProviderRecord }) {
   const app = useApp();
+  const [saving, setSaving] = useState(false);
   const group = app.groups.find((g) => g.providerId === provider.id);
   const modelCount = group?.models?.length ?? 0;
   const ready = provider.status === 'ready';
-  const retryable = provider.status === 'needs-login' || provider.status === 'error' || provider.status === 'inactive';
-  const detail = provider.fixHint || provider.error || provider.message || provider.resolvedCommand || '—';
+  const active = !provider.disabledByUser;
+  const retryable = active && (provider.status === 'needs-login' || provider.status === 'error' || provider.status === 'inactive');
+  const detail = provider.disabledByUser
+    ? 'Oculto del selector de modelos y de las actualizaciones.'
+    : provider.fixHint || provider.error || provider.message || provider.resolvedCommand
+      || (provider.status === 'not-found' ? 'CLI no encontrado en esta máquina.' : 'Esperando comprobación del agente.');
+  const canToggle = has('providersToggle');
+  const toggle = async () => {
+    if (!canToggle || saving) return;
+    setSaving(true);
+    try { await store.toggleProvider(provider.id, !active); }
+    finally { setSaving(false); }
+  };
   return (
-    <div className="lrow">
-      <div className="ic mono">{(provider.name || provider.id || '?').charAt(0)}</div>
+    <div className={`lrow agent-provider-row ${provider.disabledByUser ? 'disabled' : ''} ${ready ? 'ready' : ''}`}>
+      <div className="ic mono agent-provider-icon">{(provider.name || provider.id || '?').charAt(0)}</div>
       <div className="body">
-        <div className="nm">{provider.name || provider.id}{provider.badge && <span className="badge">{provider.badge}</span>}</div>
-        <div className={`mt ${provider.status === 'needs-login' || provider.status === 'error' ? 'cli-err' : ''}`}>{detail}</div>
+        <div className="nm">{provider.name || provider.id}<span className="badge agent-kind">{provider.badge === 'native' ? 'local' : 'ACP'}</span></div>
+        <div className={`mt agent-detail ${provider.status === 'needs-login' || provider.status === 'error' ? 'cli-err' : ''}`}>{detail}</div>
       </div>
-      <div className="act">
-        <span className="stat"><span className={`dot ${ready ? 'run' : ''}`} />{providerStatusLabel(provider.status)}</span>
-        {modelCount > 0 && <span className="badge">{modelCount} {modelCount === 1 ? 'modelo' : 'modelos'}</span>}
+      <div className="act agent-provider-actions">
+        <div className="agent-provider-state">
+          <span className="stat"><span className={`dot ${ready && active ? 'run' : provider.status === 'needs-login' ? 'warn' : ''}`} />{providerStatusLabel(provider)}</span>
+          {active && modelCount > 0 && <span className="badge">{modelCount} {modelCount === 1 ? 'modelo' : 'modelos'}</span>}
+        </div>
         {retryable && has('providersDetect') && (
           <button className="btn sm" onClick={() => void store.detectProvider(provider.id)}>Comprobar de nuevo</button>
+        )}
+        {canToggle && (
+          <button
+            className={`agent-switch ${active ? 'on' : ''}`}
+            role="switch"
+            aria-checked={active}
+            aria-label={`${active ? 'Desactivar' : 'Activar'} ${provider.name || provider.id}`}
+            title={active ? 'Ocultar agente' : 'Mostrar agente'}
+            disabled={saving}
+            onClick={() => void toggle()}
+          >
+            <span className="agent-switch-text">{saving ? 'Guardando…' : active ? 'Activado' : 'Desactivado'}</span>
+            <span className="agent-switch-track" aria-hidden="true"><span /></span>
+          </button>
         )}
       </div>
     </div>
@@ -192,18 +223,27 @@ function AgentesPanel() {
   const connected = app.chats.some((c) => c.sessionId);
   const models = app.groups.reduce((count, group) => count + group.models.length, 0);
   const canProbe = has('appChatDetectAcp');
+  const readyProviders = app.providers.filter((item) => item.status === 'ready' && !item.disabledByUser).length;
+  const disabledProviders = app.providers.filter((item) => item.disabledByUser).length;
 
   return (
     <section className="stgs-panel">
-      <div className="phead">
+      <div className="phead agent-phead">
         <h2>Agentes</h2>
-        <p>workass se conecta a los agentes ACP instalados en tu máquina; cada CLI conserva su propia sesión y autenticación.</p>
+        <p>Elegí qué agentes usa Workass en esta máquina. Cada CLI conserva su propia sesión y autenticación.</p>
       </div>
 
-      <div className="gtitle">Agente conectado</div>
+      <div className="agent-summary" aria-label="Resumen de agentes">
+        <div><strong>{readyProviders}</strong><span>{readyProviders === 1 ? 'listo' : 'listos'}</span></div>
+        <span className="agent-summary-rule" />
+        <div><strong>{disabledProviders}</strong><span>{disabledProviders === 1 ? 'desactivado' : 'desactivados'}</span></div>
+        <p>Los agentes desactivados no aparecen en el selector de modelos ni reciben avisos de actualización.</p>
+      </div>
+
+      <div className="gtitle">Agentes disponibles</div>
       {app.providers.length > 0 ? (
         <>
-          <div className="group">
+          <div className="group agent-provider-group">
             {app.providers.map((p) => <AgentProviderRow key={p.id} provider={p} />)}
           </div>
           <div className="ghint">

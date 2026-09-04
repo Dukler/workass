@@ -776,6 +776,14 @@ func (m *Manager) ProvidersList() []map[string]any {
 		if runtime == nil {
 			continue
 		}
+		// "custom" is a registration slot for an explicitly supplied ACP
+		// command, not an installed provider. The built-in empty slot used to
+		// leak into Settings as an inert "Custom ACP" row, even though there was
+		// nothing a human could launch, inspect, or enable. Keep real configured
+		// custom commands visible, including when the human disabled one.
+		if id == "custom" && strings.TrimSpace(runtime.Config.Command) == "" && strings.TrimSpace(runtime.Config.ResolvedCommand) == "" {
+			continue
+		}
 		status := runtime.Status
 		if status == "" {
 			status = providerStatusInactive
@@ -804,6 +812,9 @@ func (m *Manager) ProvidersList() []map[string]any {
 		}
 		if runtime.Config.NeedsLogin {
 			item["needsLogin"] = true
+		}
+		if runtime.Config.DisabledByUser {
+			item["disabledByUser"] = true
 		}
 		if runtime.Config.Badge != "" {
 			item["badge"] = runtime.Config.Badge

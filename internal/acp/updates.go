@@ -981,6 +981,10 @@ func (m *Manager) providerUpdatesPayload(ctx context.Context) (ProviderUpdatesPa
 
 func (m *Manager) providerUpdateCandidate(providerID string) (providerUpdateCandidate, bool) {
 	providerID = normalizeProviderID(providerID)
+	provider, ok := m.providerSnapshot(providerID)
+	if !ok || provider.DisabledByUser {
+		return providerUpdateCandidate{}, false
+	}
 	// CLIVersion is an asynchronous discovery cache. It must never be enough by
 	// itself to advertise machine-level maintenance after the actual provider
 	// executable disappears (or on a different machine that never had it).
@@ -991,7 +995,9 @@ func (m *Manager) providerUpdateCandidate(providerID string) (providerUpdateCand
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	runtime := m.providers[providerID]
-	if runtime == nil || runtime.CLIVersion == nil || runtime.CLIVersion.Version == "" {
+	// Recheck under the manager lock: a human may have disabled the provider
+	// while executable resolution was in flight.
+	if runtime == nil || runtime.Config.DisabledByUser || runtime.CLIVersion == nil || runtime.CLIVersion.Version == "" {
 		return providerUpdateCandidate{}, false
 	}
 	spec, ok := cliUpdateSpecForProvider(providerID, m.opts.ProviderUpdateSources, m.opts.ProviderUpdateAssetSources)

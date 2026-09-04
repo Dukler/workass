@@ -5076,12 +5076,45 @@ export class Store {
   private onProvidersList(providers: ProviderRecord[]) {
     if (!Array.isArray(providers)) return;
     this.state.providers = providers;
+    const disabled = new Set(providers.filter((provider) => provider.disabledByUser).map((provider) => provider.id));
+    if (disabled.size > 0) {
+      this.state.providersUpdates = this.state.providersUpdates.filter((update) => !disabled.has(update.providerId));
+      for (const id of disabled) {
+        if (this.state.updateProgress[id]?.status !== 'running') delete this.state.updateProgress[id];
+      }
+    }
     this.bumpApp(false);
   }
   async detectProvider(providerId: string) {
     if (!providerId || !has('providersDetect')) return;
     const result = await call('providersDetect', { provider: providerId });
     if (Array.isArray(result?.providers)) this.onProvidersList(result.providers);
+  }
+  async toggleProvider(providerId: string, enabled: boolean): Promise<boolean> {
+    if (!providerId || !has('providersToggle')) return false;
+    try {
+      const providers = await callThrow('providersToggle', providerId, enabled);
+      if (!Array.isArray(providers)) return false;
+      this.onProvidersList(providers);
+      // Re-enabling is an explicit request to make the provider usable now, not
+      // merely on the next background detection pass. The official CLI remains
+      // the sole owner of its login and session state.
+      if (enabled && has('providersDetect')) {
+        try {
+          const result = await callThrow('providersDetect', { provider: providerId });
+          if (Array.isArray(result?.providers)) this.onProvidersList(result.providers);
+        } catch (error) {
+          this.addToast('Agente activado', error instanceof Error ? error.message : 'No se pudo comprobar el agente todavía.');
+        }
+      }
+      return true;
+    } catch (error) {
+      this.addToast(
+        enabled ? 'No se pudo activar el agente' : 'No se pudo desactivar el agente',
+        error instanceof Error ? error.message : 'El daemon no confirmó el cambio.',
+      );
+      return false;
+    }
   }
   // Keep the latest plan-usage snapshot per provider. The daemon already merges
   // entries across captures, so the renderer just replaces by providerId.
@@ -5181,13 +5214,14 @@ export class Store {
   // the check cadence and replay, so the renderer just mirrors the latest.
   private onProvidersUpdates(e: ProvidersUpdates) {
     if (!e || !Array.isArray(e.updates)) return;
-    this.state.providersUpdates = e.updates;
+    const disabled = new Set(this.state.providers.filter((provider) => provider.disabledByUser).map((provider) => provider.id));
+    this.state.providersUpdates = e.updates.filter((update) => !disabled.has(update.providerId));
     this.state.providersCheckedAt = e.checkedAt;
     // Drop a lingering terminal progress entry once its provider disappears from
     // the update list (a successful update makes updateAvailable:false ⇒ the entry
     // is dropped). Running/pending providers stay in the list, so their live
     // progress is untouched.
-    const present = new Set(e.updates.map((u) => u.providerId));
+    const present = new Set(this.state.providersUpdates.map((u) => u.providerId));
     for (const id of Object.keys(this.state.updateProgress)) {
       if (!present.has(id) && this.state.updateProgress[id].status !== 'running') {
         delete this.state.updateProgress[id];
