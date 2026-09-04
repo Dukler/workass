@@ -1367,6 +1367,62 @@ test('a crashed progress owner is replaced visibly before the update continues',
   ]);
 });
 
+test('a transient stale progress heartbeat recovers before replacement or rollback', async () => {
+  const tx = transactionFixture();
+  let activationStarted = false;
+  let staleChecks = 0;
+  let replacementAttempts = 0;
+  const ops = operations({
+    activate: async () => {
+      ops.calls.push('activate');
+      activationStarted = true;
+    },
+    progressVisible: async () => {
+      if (!activationStarted) return true;
+      staleChecks += 1;
+      return staleChecks >= 4;
+    },
+    replaceProgress: async () => {
+      replacementAttempts += 1;
+      return false;
+    },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'healthy');
+  assert.equal(replacementAttempts, 0);
+  assert.equal(ops.calls.includes('rollback'), false);
+  assert.ok(staleChecks >= 4);
+});
+
+test('a transient first progress replacement failure does not roll back the target', async () => {
+  const tx = transactionFixture();
+  let activationStarted = false;
+  let visible = true;
+  let replacementAttempts = 0;
+  const ops = operations({
+    activate: async () => {
+      ops.calls.push('activate');
+      activationStarted = true;
+      visible = false;
+    },
+    progressVisible: async () => !activationStarted || visible,
+    replaceProgress: async () => {
+      replacementAttempts += 1;
+      ops.calls.push(`replace-progress:${replacementAttempts}`);
+      if (replacementAttempts === 1) return false;
+      visible = true;
+      return true;
+    },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'healthy');
+  assert.equal(replacementAttempts, 2);
+  assert.equal(ops.calls.includes('rollback'), false);
+  assert.deepEqual(ops.calls.slice(-5), [
+    'replace-progress:2', 'start-runtime', 'launch', 'healthy:1.1.0', 'cleanup',
+  ]);
+});
+
 test('progress replacement fences its exact old tree and durably rotates ownership before spawn', async () => {
   const tx = transactionFixture();
   fs.mkdirSync(path.dirname(tx.progressExecutable), { recursive: true });

@@ -31,6 +31,10 @@ const RECEIPT_SCHEMA_VERSION = 2;
 const JOURNAL_SCHEMA_VERSION = 1;
 const LEASE_SCHEMA_VERSION = 1;
 const WINDOWS_BACKUP_RECEIPT = 'installed-before-activation.complete.json';
+const PROGRESS_HEARTBEAT_RECOVERY_ATTEMPTS = 20;
+const PROGRESS_HEARTBEAT_RECOVERY_DELAY_MS = 250;
+const PROGRESS_REPLACEMENT_ATTEMPTS = 4;
+const PROGRESS_REPLACEMENT_DELAY_MS = 500;
 
 function validInstallationId(value) {
   return /^install-[a-f0-9]{32}$/.test(String(value || ''));
@@ -1262,8 +1266,32 @@ async function runTransaction(rawTransaction, operations) {
   const progressVisible = typeof ops.progressVisible === 'function' ? ops.progressVisible : async () => true;
   const progressReady = async () => {
     if (await progressVisible()) return true;
-    if (typeof ops.replaceProgress !== 'function' || !await ops.replaceProgress()) return false;
-    return progressVisible();
+    if (typeof ops.replaceProgress !== 'function') return false;
+    const pause = ops.pause || delay;
+
+    // A visible Electron owner can briefly miss its five-second heartbeat while
+    // Windows is mirroring the release or starting the replacement runtime. Do
+    // not reinterpret one stale receipt read as a permanently lost owner. No
+    // activation/rollback effect advances during this bounded grace period, and
+    // continuation still requires a fresh acknowledgement from the same window.
+    for (let attempt = 0; attempt < PROGRESS_HEARTBEAT_RECOVERY_ATTEMPTS; attempt += 1) {
+      await pause(PROGRESS_HEARTBEAT_RECOVERY_DELAY_MS);
+      if (await progressVisible()) return true;
+    }
+
+    // If the owner really exited, re-establish it without turning a transient
+    // launch/profile lock into a rollback. Each replacement attempt fences the
+    // exact prior process tree and succeeds only after the new window has
+    // rendered visibly and written a fresh receipt.
+    for (let attempt = 0; attempt < PROGRESS_REPLACEMENT_ATTEMPTS; attempt += 1) {
+      let replaced = false;
+      try { replaced = await ops.replaceProgress(); } catch { replaced = false; }
+      if (replaced && await progressVisible()) return true;
+      if (attempt + 1 >= PROGRESS_REPLACEMENT_ATTEMPTS) break;
+      await pause(PROGRESS_REPLACEMENT_DELAY_MS);
+      if (await progressVisible()) return true;
+    }
+    return false;
   };
 
   const save = (phase, patch = {}) => {
