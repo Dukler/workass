@@ -9,6 +9,10 @@ const PROGRESS_RECEIPT_SCHEMA_VERSION = 1;
 const TRANSACTION_SCHEMA_VERSION = 4;
 const ACTIVE_PROGRESS_PHASES = new Set(['visible', 'watching']);
 const TERMINAL_UPDATE_PHASES = new Set(['healthy', 'rollback_healthy', 'failed']);
+const ATOMIC_RENAME_ATTEMPTS = 40;
+const ATOMIC_RENAME_DELAY_MS = 50;
+const TRANSIENT_ATOMIC_RENAME_ERRORS = new Set(['EACCES', 'EBUSY', 'EEXIST', 'EPERM']);
+const ATOMIC_RENAME_WAIT = new Int32Array(new SharedArrayBuffer(4));
 
 function progressTransactionArgument(argv = process.argv) {
   const positions = [];
@@ -75,7 +79,16 @@ function validateProgressTransaction(transactionPath, transaction, {
   return transaction;
 }
 
-function atomicJSON(file, value) {
+function atomicJSON(file, value, {
+  rename = fs.renameSync,
+  remove = (target) => fs.rmSync(target, { force: true }),
+  pause = (milliseconds) => Atomics.wait(ATOMIC_RENAME_WAIT, 0, 0, milliseconds),
+  attempts = ATOMIC_RENAME_ATTEMPTS,
+  delayMs = ATOMIC_RENAME_DELAY_MS,
+} = {}) {
+  if (!Number.isSafeInteger(attempts) || attempts <= 0 || !Number.isFinite(delayMs) || delayMs < 0) {
+    throw new Error('invalid atomic JSON retry policy');
+  }
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const incoming = `${file}.incoming-${process.pid}`;
   const descriptor = fs.openSync(incoming, 'w', 0o600);
@@ -85,7 +98,19 @@ function atomicJSON(file, value) {
   } finally {
     fs.closeSync(descriptor);
   }
-  fs.renameSync(incoming, file);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      rename(incoming, file);
+      return;
+    } catch (err) {
+      const retryable = TRANSIENT_ATOMIC_RENAME_ERRORS.has(String(err?.code || ''));
+      if (!retryable || attempt + 1 >= attempts) {
+        try { remove(incoming); } catch {}
+        throw err;
+      }
+      pause(delayMs);
+    }
+  }
 }
 
 function exactJournal(transaction, value) {
@@ -609,6 +634,7 @@ module.exports = {
   PROGRESS_ARGUMENT,
   PROGRESS_RECEIPT_SCHEMA_VERSION,
   TRANSACTION_SCHEMA_VERSION,
+  atomicJSON,
   boundedUpdateError,
   expectedProgressExecutable,
   installedProgressExecutable,

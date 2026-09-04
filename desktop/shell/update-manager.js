@@ -12,6 +12,7 @@ const { pipeline } = require('node:stream/promises');
 const { isMainThread, parentPort, workerData, Worker } = require('node:worker_threads');
 const {
   TRANSACTION_SCHEMA_VERSION,
+  atomicJSON,
   expectedProgressExecutable,
   installedProgressExecutable,
   progressExecutableIsAllowed,
@@ -874,19 +875,6 @@ function postLocalUpdate(daemonURL, action, updateId, timeoutMs = 2500) {
     request.on('error', () => resolve({ status: 0, body: {} }));
     request.end(bytes);
   });
-}
-
-function atomicJSON(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const incoming = `${file}.incoming-${process.pid}`;
-  const descriptor = fs.openSync(incoming, 'w', 0o600);
-  try {
-    fs.writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-    fs.fsyncSync(descriptor);
-  } finally {
-    fs.closeSync(descriptor);
-  }
-  fs.renameSync(incoming, file);
 }
 
 function isExactArmedReceipt(receipt, {

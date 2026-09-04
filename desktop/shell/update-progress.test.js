@@ -8,6 +8,7 @@ const path = require('node:path');
 const test = require('node:test');
 const {
   PROGRESS_ARGUMENT,
+  atomicJSON,
   boundedUpdateError,
   expectedProgressExecutable,
   installedProgressExecutable,
@@ -24,6 +25,43 @@ const {
   terminateUpdateProgress,
   validateProgressTransaction,
 } = require('./update-progress');
+
+test('durable updater receipts survive transient Windows atomic replacement locks', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-atomic-'));
+  const file = path.join(root, 'receipt.json');
+  const pauses = [];
+  let renameAttempts = 0;
+  atomicJSON(file, { schemaVersion: 1, phase: 'watching' }, {
+    rename: (source, target) => {
+      renameAttempts += 1;
+      if (renameAttempts < 4) {
+        const error = new Error('temporarily locked by another process');
+        error.code = renameAttempts === 1 ? 'EPERM' : renameAttempts === 2 ? 'EACCES' : 'EBUSY';
+        throw error;
+      }
+      fs.renameSync(source, target);
+    },
+    pause: (milliseconds) => { pauses.push(milliseconds); },
+  });
+  assert.equal(renameAttempts, 4);
+  assert.deepEqual(pauses, [50, 50, 50]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), {
+    schemaVersion: 1,
+    phase: 'watching',
+  });
+});
+
+test('durable updater receipts fail immediately on a non-transient rename error', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-atomic-invalid-'));
+  const file = path.join(root, 'receipt.json');
+  let pauses = 0;
+  assert.throws(() => atomicJSON(file, { phase: 'watching' }, {
+    rename: () => { throw Object.assign(new Error('invalid target'), { code: 'EINVAL' }); },
+    pause: () => { pauses += 1; },
+  }), /invalid target/);
+  assert.equal(pauses, 0);
+  assert.equal(fs.existsSync(`${file}.incoming-${process.pid}`), false);
+});
 
 function progressFixture() {
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-progress-'));
