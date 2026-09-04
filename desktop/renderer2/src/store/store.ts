@@ -446,6 +446,7 @@ export class Store {
   // read-only archive channel for a tiny recent slice before handoff, so a
   // screenshot-heavy ledger is not expanded merely to paint the viewport.
   private recentHistoryLoads = new Map<string, Promise<void>>();
+  private olderHistoryLoads = new Map<string, Promise<boolean>>();
   // Keep a selected resident tail on screen while a metadata-only refresh with
   // a newer actor revision is reconciled. This is renderer residency state,
   // never transcript authority.
@@ -664,6 +665,26 @@ export class Store {
     const next = restored.find((chat) => chat.id === activeId);
     if (!next) return;
     if (next.messages.length > 0) {
+      // A session projection carries at most the actor tail. If the selected
+      // chat has already paged farther back, replace the overlapping suffix in
+      // place instead of collapsing the reader back to sixty rows on the next
+      // digest refresh. This is renderer residency only; the actor remains the
+      // sole transcript and turn owner.
+      if (prior?.messages.length && prior.chatId === next.chatId) {
+        const firstTailID = next.messages[0]?.id;
+        const overlap = firstTailID
+          ? prior.messages.findIndex((message) => message.id === firstTailID)
+          : -1;
+        if (!next.historyComplete && overlap >= 0 && prior.messages.length > next.messages.length) {
+          const merged = [...prior.messages.slice(0, overlap), ...next.messages];
+          const authoritativeCount = Math.max(next.messageCount ?? 0, prior.messageCount ?? 0, merged.length);
+          if (merged.length <= authoritativeCount) {
+            next.messages = merged;
+            next.messageCount = authoritativeCount;
+            next.historyComplete = prior.historyComplete && merged.length === authoritativeCount;
+          }
+        }
+      }
       this.staleRecentHistories.delete(next.id);
       return;
     }
@@ -1208,7 +1229,10 @@ export class Store {
           messages = merged;
           historyComplete = true;
         } else {
-          messages = merged.slice(-CHAT_MESSAGE_TAIL);
+          // Preserve a deliberately paged selected window. Inactive-chat
+          // release still returns it to CHAT_MESSAGE_TAIL when the user leaves.
+          const residentLimit = Math.max(CHAT_MESSAGE_TAIL, chat.messages.length);
+          messages = merged.slice(-residentLimit);
         }
       }
       const restored = {
@@ -1243,6 +1267,80 @@ export class Store {
     await this.ensureRecentHistory(chatId, limit);
     const chat = this.chat(chatId);
     return !!chat && (chat.messages.length > 0 || (chat.messageCount ?? 0) === 0);
+  }
+
+  // Prepend one actor-owned page immediately before the oldest resident stable
+  // message. This is read-only pagination: it never changes provider lanes,
+  // turn state, or delivery ownership. Old daemons ignore the additive options
+  // and return the full archive, which this merge also accepts safely.
+  async loadOlderHistory(chatId: string, requestedLimit: number): Promise<boolean> {
+    if (!has('archiveLoad') || !chatId) return false;
+    const recent = this.recentHistoryLoads.get(chatId);
+    if (recent) await recent;
+    const full = this.fullHistoryLoads.get(chatId);
+    if (full) await full;
+    const resident = this.chat(chatId);
+    if (!resident || resident.historyComplete) return false;
+    const beforeMessageId = resident.messages[0]?.id;
+    if (!beforeMessageId) return false;
+    const limit = Math.max(1, Math.min(CHAT_MESSAGE_TAIL, Math.floor(requestedLimit)));
+    const inflight = this.olderHistoryLoads.get(chatId);
+    if (inflight) return inflight;
+    const durableChatId = resident.chatId;
+    const residentBefore = resident.messages.length;
+    const load = (async (): Promise<boolean> => {
+      let projected: unknown;
+      try {
+        const step = await this.guardedStep(
+          `older actor history (${chatId})`,
+          () => call('archiveLoad', chatId, { beforeMessageId, limit }),
+        );
+        projected = step.ok ? step.value : undefined;
+        if (!step.ok) return false;
+      } catch { return false; }
+      const chat = this.chat(chatId);
+      if (!chat || chat.chatId !== durableChatId || chat.messages[0]?.id !== beforeMessageId || !Array.isArray(projected)) return false;
+      let page: Msg[];
+      try {
+        page = actorMessages(projected as MirrorMsg[]);
+      } catch (error) {
+        console.warn(`[store] older actor history rejected (${chatId})`, error);
+        return false;
+      }
+
+      // A mixed-version daemon may return the complete archive. If the stable
+      // boundary is present, take only its exact canonical prefix and retain the
+      // current resident suffix so post-read live events cannot be overwritten.
+      const boundaryIndex = page.findIndex((message) => message.id === beforeMessageId);
+      if (boundaryIndex < 0 && page.length > limit) {
+        console.warn(`[store] older actor history exceeded its requested page (${chatId})`);
+        return false;
+      }
+      const prefix = boundaryIndex >= 0 ? page.slice(0, boundaryIndex) : page;
+      const residentIDs = new Set(chat.messages.map((message) => message.id));
+      const prefixIDs = new Set<string>();
+      for (const message of prefix) {
+        if (residentIDs.has(message.id) || prefixIDs.has(message.id)) {
+          console.warn(`[store] older actor history overlaps resident rows (${chatId})`);
+          return false;
+        }
+        prefixIDs.add(message.id);
+      }
+      const merged = [...prefix, ...chat.messages];
+      const knownCount = Math.max(chat.messageCount ?? 0, chat.messages.length);
+      const reachedStart = boundaryIndex >= 0 || page.length < limit || merged.length >= knownCount;
+      chat.messages = merged;
+      chat.messageCount = Math.max(knownCount, merged.length);
+      chat.historyComplete = reachedStart && merged.length >= chat.messageCount;
+      if (chat.historyComplete) this.fullHistoriesLoaded.add(chatId);
+      else this.fullHistoriesLoaded.delete(chatId);
+      this.staleRecentHistories.delete(chatId);
+      this.rebuildJobRefs(new Set([chat.id]));
+      this.bumpApp(false);
+      return chat.messages.length > residentBefore;
+    })();
+    this.olderHistoryLoads.set(chatId, load);
+    try { return await load; } finally { this.olderHistoryLoads.delete(chatId); }
   }
 
   private refreshVisibleRecentHistory(chat: Chat | null) {

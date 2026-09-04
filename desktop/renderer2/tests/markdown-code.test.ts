@@ -49,6 +49,22 @@ test('Pine Script fences receive language-aware highlighting', () => {
   assert.match(html, /class="tk-fn">plot<\/span>/);
 });
 
+test('an open streaming fence stays one plain text node until it closes', () => {
+  const [block] = parseBlocks('```typescript\nconst answer: number = 42;');
+  const html = renderToStaticMarkup(React.createElement(MarkdownBlock, { sb: block }));
+  assert.match(html, /<code>const answer: number = 42;<\/code>/);
+  assert.doesNotMatch(html, /class="tk-/);
+});
+
+test('an oversized closed fence stays plain while preserving its exact text', () => {
+  const raw = `const payload = "${'x'.repeat(40 * 1024)}";`;
+  const [block] = parseBlocks(`\`\`\`typescript\n${raw}\n\`\`\``);
+  const html = renderToStaticMarkup(React.createElement(MarkdownBlock, { sb: block }));
+  assert.doesNotMatch(html, /class="tk-/);
+  assert.match(html, /<code>const payload = &quot;x+/);
+  assert.match(html, /x+&quot;;<\/code>/);
+});
+
 test('copy action writes the exact code bytes and reports clipboard failure', async () => {
   const writes: string[] = [];
   const raw = 'line 1\n  line 2\n';

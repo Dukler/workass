@@ -488,7 +488,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
       const recentTarget = Math.min(CHAT_MESSAGE_TAIL, knownTotal);
       const loaded = residentBefore < recentTarget
         ? await store.loadRecentHistory(chat.id, CHAT_MESSAGE_TAIL)
-        : await store.loadFullHistory(chat.id);
+        : await store.loadOlderHistory(chat.id, HISTORY_PAGE);
       const live = store.chat(chat.id);
       if (loaded && live && live.messages.length > residentBefore) {
         setReveal((current) => Math.min(residentBefore, current) + HISTORY_PAGE);

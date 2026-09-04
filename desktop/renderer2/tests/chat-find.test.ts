@@ -57,6 +57,7 @@ test('the transcript shortcut searches semantic history in a bounded render wind
   assert.match(transcript, /useState\(CHAT_INITIAL_HISTORY\)/);
   assert.match(transcript, /store\.loadFullHistory\(chat\.id\)/);
   assert.match(transcript, /store\.loadRecentHistory\(chat\.id, CHAT_MESSAGE_TAIL\)/);
+  assert.match(transcript, /store\.loadOlderHistory\(chat\.id, HISTORY_PAGE\)/);
   assert.doesNotMatch(transcript, /setReveal\(total\)/);
   assert.match(transcript, /data-chat-find-message=\{m\.id\}/);
   assert.match(styles, /::highlight\(workass-chat-find-current\)/);

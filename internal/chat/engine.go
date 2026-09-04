@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"errors"
 	"sort"
 	"strings"
 	"sync"
@@ -242,6 +243,83 @@ func (e *Engine) Snapshot() State {
 	return e.state.Clone()
 }
 
+// IdentitySnapshot is the constant-size identity needed to locate one actor by
+// its renderer tab. It deliberately excludes ledger and provider-turn state.
+type IdentitySnapshot struct {
+	ChatID  string
+	TabID   string
+	Deleted bool
+}
+
+func (e *Engine) IdentitySnapshot() IdentitySnapshot {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return IdentitySnapshot{
+		ChatID: e.state.ChatID, TabID: e.state.Presentation.TabID, Deleted: e.state.Deleted,
+	}
+}
+
+// ReadProjectionSnapshot is an isolated, bounded view for renderer reads. The
+// ledger slice represents [LedgerOffset, LedgerCount); LedgerCount preserves
+// exact history metadata without copying the omitted prefix. This has no write
+// path and no authority over provider turns.
+type ReadProjectionSnapshot struct {
+	State        State
+	LedgerOffset int
+	LedgerCount  int
+}
+
+func (e *Engine) ReadProjectionSnapshot(ledgerTail int) ReadProjectionSnapshot {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if ledgerTail < 0 {
+		ledgerTail = 0
+	}
+	ledgerCount := len(e.state.Ledger)
+	ledgerOffset := ledgerCount - min(ledgerCount, ledgerTail)
+	return ReadProjectionSnapshot{
+		State: e.state.cloneReadProjection(ledgerOffset), LedgerOffset: ledgerOffset, LedgerCount: ledgerCount,
+	}
+}
+
+// LedgerPageSnapshot is one immutable page immediately before a stable message
+// identity. It is a renderer read primitive only; actor persistence and provider
+// delivery continue to consume the complete canonical State.
+type LedgerPageSnapshot struct {
+	Events      []LedgerEvent
+	Start       int
+	End         int
+	LedgerCount int
+	Deleted     bool
+}
+
+func (e *Engine) ReadLedgerPageBefore(beforeMessageID string, limit int) (LedgerPageSnapshot, error) {
+	beforeMessageID = strings.TrimSpace(beforeMessageID)
+	if beforeMessageID == "" {
+		return LedgerPageSnapshot{}, errors.New("ledger page requires a stable before-message identity")
+	}
+	if limit < 1 {
+		return LedgerPageSnapshot{}, errors.New("ledger page limit must be positive")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	end := -1
+	for index := len(e.state.Ledger) - 1; index >= 0; index-- {
+		if e.state.Ledger[index].MessageID == beforeMessageID {
+			end = index
+			break
+		}
+	}
+	if end < 0 {
+		return LedgerPageSnapshot{}, errors.New("ledger page boundary does not exist")
+	}
+	start := max(0, end-limit)
+	return LedgerPageSnapshot{
+		Events: cloneLedgerEvents(e.state.Ledger[start:end]), Start: start, End: end,
+		LedgerCount: len(e.state.Ledger), Deleted: e.state.Deleted,
+	}, nil
+}
+
 // DigestSnapshot is the bounded, body-free view used by the five-second health
 // heartbeat. Snapshot intentionally deep-clones the complete semantic ledger;
 // doing that for every idle ping made large histories consume a full CPU core
@@ -293,19 +371,30 @@ func (e *Engine) DigestSnapshot() DigestSnapshot {
 		}
 	}
 
-	seen := make(map[string]struct{}, len(state.Ledger)+4)
-	addMessage := func(id string) {
-		if _, exists := seen[id]; exists {
-			return
+	if foreground := state.Foreground; foreground == nil {
+		// The actor ledger owns one stable visible message per event. An idle
+		// digest therefore needs only its slice header and final identity; no
+		// body scan or history-sized id map is necessary every five seconds.
+		digest.MessageCount = len(state.Ledger)
+		if digest.MessageCount > 0 {
+			digest.LastMessageID = state.Ledger[digest.MessageCount-1].MessageID
 		}
-		seen[id] = struct{}{}
-		digest.MessageCount++
-		digest.LastMessageID = id
-	}
-	for _, event := range state.Ledger {
-		addMessage(event.MessageID)
-	}
-	if foreground := state.Foreground; foreground != nil {
+	} else {
+		// A live foreground can contribute up to four not-yet-ledger rows. Keep
+		// the existing stable-id merge for that short-lived state so renderer
+		// counts remain exact across consumption and steering boundaries.
+		seen := make(map[string]struct{}, len(state.Ledger)+4)
+		addMessage := func(id string) {
+			if _, exists := seen[id]; exists {
+				return
+			}
+			seen[id] = struct{}{}
+			digest.MessageCount++
+			digest.LastMessageID = id
+		}
+		for _, event := range state.Ledger {
+			addMessage(event.MessageID)
+		}
 		digest.RunningJobID = foreground.Turn.NativeID
 		if !foreground.UserConsumed {
 			userID := strings.TrimSpace(foreground.Input.Presentation.UserMessageID)

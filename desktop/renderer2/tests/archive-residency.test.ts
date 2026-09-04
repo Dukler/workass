@@ -93,6 +93,83 @@ test('switching chats keeps a bounded recent tail and loads the full ledger only
   }
 });
 
+test('older history pages prepend by stable boundary until the canonical transcript is complete', async () => {
+  const complete = messages(145);
+  const previousWindow = (globalThis as any).window;
+  const archiveCalls: Array<{ tabId: string; options: { beforeMessageId: string; limit: number } }> = [];
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async (tabId: string, options: { beforeMessageId: string; limit: number }) => {
+        archiveCalls.push({ tabId, options });
+        const boundary = complete.findIndex((message) => message.id === options.beforeMessageId);
+        return complete.slice(Math.max(0, boundary - options.limit), boundary);
+      },
+    },
+  };
+  try {
+    const subject = new StoreCtor();
+    const target = chat('tab-paged', complete.slice(-60));
+    target.messageCount = complete.length;
+    target.historyComplete = false;
+    subject.state.chats = [target];
+    subject.state.activeId = target.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+    assert.equal(await subject.loadOlderHistory(target.id, 40), true);
+    assert.equal(target.messages.length, 100);
+    assert.equal(target.messageCount, 145);
+    assert.equal(target.historyComplete, false);
+
+    assert.equal(await subject.loadOlderHistory(target.id, 40), true);
+    assert.equal(target.messages.length, 140);
+    assert.equal(target.historyComplete, false);
+
+    assert.equal(await subject.loadOlderHistory(target.id, 40), true);
+    assert.deepEqual(target.messages.map((message) => message.id), complete.map((message) => message.id));
+    assert.equal(target.messageCount, 145);
+    assert.equal(target.historyComplete, true);
+    assert.deepEqual(archiveCalls, [
+      { tabId: target.id, options: { beforeMessageId: 'message-85', limit: 40 } },
+      { tabId: target.id, options: { beforeMessageId: 'message-45', limit: 40 } },
+      { tabId: target.id, options: { beforeMessageId: 'message-5', limit: 40 } },
+    ]);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('older history paging remains compatible with a daemon that returns the full archive', async () => {
+  const complete = messages(100);
+  const previousWindow = (globalThis as any).window;
+  const archiveCalls: unknown[] = [];
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async (_tabId: string, options?: unknown) => {
+        archiveCalls.push(options);
+        return complete;
+      },
+    },
+  };
+  try {
+    const subject = new StoreCtor();
+    const target = chat('tab-old-daemon', complete.slice(-60));
+    target.messageCount = complete.length;
+    target.historyComplete = false;
+    subject.state.chats = [target];
+    subject.state.activeId = target.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+    assert.equal(await subject.loadOlderHistory(target.id, 40), true);
+    assert.deepEqual(target.messages.map((message) => message.id), complete.map((message) => message.id));
+    assert.equal(target.historyComplete, true);
+    assert.deepEqual(archiveCalls, [{ beforeMessageId: 'message-40', limit: 40 }]);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
 test('opening an incomplete chat with a resident tail activates synchronously without an archive read', () => {
   const firstRows = messages(85);
   const targetRows = messages(92);
@@ -357,6 +434,32 @@ test('a newer metadata-only refresh reconciles a bounded recent suffix without c
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
   }
+});
+
+test('a selected paged window survives an authoritative tail refresh', () => {
+  const complete = messages(145);
+  const subject = new StoreCtor();
+  const active = chat('tab-active-paged', complete.slice(-100));
+  active.actorRevision = 7;
+  active.messageCount = complete.length;
+  active.historyComplete = false;
+  subject.state.chats = [active];
+  subject.state.activeId = active.id;
+  subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+  const server = subject.toMirror(false);
+  server.chats[0].actorRevision = 8;
+  server.chats[0].messages = complete.slice(-60);
+  server.chats[0].messageCount = complete.length;
+  server.chats[0].historyComplete = false;
+
+  assert.equal(subject.restoreSessionSnapshot(server), true);
+  assert.deepEqual(
+    subject.chat(active.id)?.messages.map((message: Msg) => message.id),
+    complete.slice(-100).map((message) => message.id),
+  );
+  assert.equal(subject.chat(active.id)?.messageCount, complete.length);
+  assert.equal(subject.chat(active.id)?.historyComplete, false);
 });
 
 test('an unchanged metadata-only refresh preserves a selected resident tail without another read', () => {

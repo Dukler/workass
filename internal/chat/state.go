@@ -731,18 +731,7 @@ func (s State) Clone() State {
 	out.Presentation = s.Presentation.Clone()
 	out.Environment = s.Environment.Clone()
 	out.Obligation = s.Obligation.Clone()
-	out.Ledger = make([]LedgerEvent, len(s.Ledger))
-	for i, event := range s.Ledger {
-		event.Attachments = append([]provider.Attachment(nil), event.Attachments...)
-		if event.TurnTerminal != nil {
-			terminal := *event.TurnTerminal
-			event.TurnTerminal = &terminal
-		}
-		event.Timeline = cloneTimeline(event.Timeline)
-		event.Permission = clonePermission(event.Permission)
-		event.Terminal = cloneTerminal(event.Terminal)
-		out.Ledger[i] = event
-	}
+	out.Ledger = cloneLedgerEvents(s.Ledger)
 	out.Queue = cloneQueue(s.Queue)
 	out.StagedQueue = cloneStagedQueue(s.StagedQueue)
 	out.QueueMutationReceipts = make(map[provider.OperationID]QueueMutationReceipt, len(s.QueueMutationReceipts))
@@ -869,6 +858,81 @@ func (s State) Clone() State {
 	if s.PendingCancel != nil {
 		cancel := *s.PendingCancel
 		out.PendingCancel = &cancel
+	}
+	return out
+}
+
+// cloneReadProjection copies only state consumed by the renderer's read-only
+// chat projection. In particular it omits coverage, receipts, operations and
+// the provider outbox, whose size grows with a long-lived actor but whose data
+// never appears in session:get or chat:archive-load. The returned State is an
+// isolated value and must never be fed back into Reduce or persistence.
+func (s State) cloneReadProjection(ledgerStart int) State {
+	if ledgerStart < 0 {
+		ledgerStart = 0
+	}
+	if ledgerStart > len(s.Ledger) {
+		ledgerStart = len(s.Ledger)
+	}
+	out := State{
+		ChatID:        s.ChatID,
+		Revision:      s.Revision,
+		Initialized:   s.Initialized,
+		Deleted:       s.Deleted,
+		Presentation:  s.Presentation.Clone(),
+		Ledger:        cloneLedgerEvents(s.Ledger[ledgerStart:]),
+		ActiveLaneID:  s.ActiveLaneID,
+		DesiredLaneID: s.DesiredLaneID,
+		Queue:         cloneQueue(s.Queue),
+		StagedQueue:   cloneStagedQueue(s.StagedQueue),
+		Lanes:         make(map[provider.LaneID]LaneState, len(s.Lanes)),
+		Usage:         make(map[provider.LaneID]provider.UsageEvent, len(s.Usage)),
+	}
+	for id, lane := range s.Lanes {
+		projected := LaneState{
+			Identity:  lane.Identity,
+			Phase:     lane.Phase,
+			Thread:    lane.Thread,
+			Delivery:  lane.Delivery,
+			LastError: lane.LastError,
+		}
+		if lane.Attachment != nil {
+			attachment := lane.Attachment.Clone()
+			projected.Attachment = &attachment
+		}
+		out.Lanes[id] = projected
+	}
+	for id, usage := range s.Usage {
+		out.Usage[id] = usage
+	}
+	if s.Foreground != nil {
+		foreground := *s.Foreground
+		foreground.Input.Attachments = append([]provider.Attachment(nil), s.Foreground.Input.Attachments...)
+		foreground.AssistantAttachments = append([]provider.Attachment(nil), s.Foreground.AssistantAttachments...)
+		foreground.Timeline = cloneTimeline(s.Foreground.Timeline)
+		foreground.Permission = clonePermission(s.Foreground.Permission)
+		out.Foreground = &foreground
+	}
+	if s.PendingSteer != nil {
+		steer := *s.PendingSteer
+		steer.Attachments = append([]provider.Attachment(nil), s.PendingSteer.Attachments...)
+		out.PendingSteer = &steer
+	}
+	return out
+}
+
+func cloneLedgerEvents(events []LedgerEvent) []LedgerEvent {
+	out := make([]LedgerEvent, len(events))
+	for i, event := range events {
+		event.Attachments = append([]provider.Attachment(nil), event.Attachments...)
+		if event.TurnTerminal != nil {
+			terminal := *event.TurnTerminal
+			event.TurnTerminal = &terminal
+		}
+		event.Timeline = cloneTimeline(event.Timeline)
+		event.Permission = clonePermission(event.Permission)
+		event.Terminal = cloneTerminal(event.Terminal)
+		out[i] = event
 	}
 	return out
 }

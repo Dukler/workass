@@ -77,10 +77,10 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 // ProjectSession is the pure actor -> frozen Mirror-v1 boundary. The session
 // store contributes daemon-global application preferences only. The selected
 // chat and any running chat carry a bounded actor tail; idle, unselected chats
-// carry metadata only. Opening a chat obtains its full ledger through the frozen
-// chat:archive-load read method. Bounding each chat independently was not a
-// bounded session: a machine with many chats still emitted a 90 MiB first
-// hydration and repeatedly lost the receiving WebSocket.
+// carry metadata only. Recent and explicit full-history reads use the frozen
+// chat:archive-load method. Both the wire result and the actor snapshot are
+// bounded here: limiting only the serialized rows still paid to deep-copy every
+// historical body before a large chat could paint.
 func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 	if r == nil || r.sessions == nil {
 		return nil, errors.New("provider chat projection is unavailable")
@@ -91,14 +91,17 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 	}
 	root := r.sessions.GlobalSnapshot()
 	states := make([]chat.State, 0, len(known))
+	windows := make(map[string]actorLedgerWindow, len(known))
 	for _, chatID := range known {
 		actor, err := r.actor(chatID)
 		if err != nil {
 			return nil, err
 		}
-		state := actor.engine.Snapshot()
+		snapshot := actor.engine.ReadProjectionSnapshot(sessionProjectionMessageTail)
+		state := snapshot.State
 		if !state.Deleted {
 			states = append(states, state)
+			windows[state.ChatID] = actorLedgerWindow{offset: snapshot.LedgerOffset, count: snapshot.LedgerCount}
 		}
 	}
 	states = orderActorChatStates(states, root["chatOrder"])
@@ -127,7 +130,8 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 	for _, state := range states {
 		projected := map[string]any{}
 		history := sessionHistoryProjection(state, activeID)
-		if err := projectActorChatWithHistory(projected, state, history); err != nil {
+		window := windows[state.ChatID]
+		if err := projectActorChatWithHistoryWindow(projected, state, history, sessionProjectionMessageTail, window); err != nil {
 			return nil, fmt.Errorf("project actor-native chat %q: %w", state.ChatID, err)
 		}
 		projectedChats = append(projectedChats, projected)
@@ -205,18 +209,62 @@ func (r *providerChatRuntime) ProjectRecentArchiveByTab(tabID string, limit int)
 	return r.projectArchiveByTab(tabID, actorHistoryTail, limit)
 }
 
+// ProjectArchivePageBeforeByTab returns one bounded canonical ledger page
+// immediately before a stable resident message. It is the ordinary upward
+// history path; explicit full-history reads remain available for search and
+// legacy clients.
+func (r *providerChatRuntime) ProjectArchivePageBeforeByTab(tabID, beforeMessageID string, limit int) ([]any, bool, error) {
+	if limit < 1 || limit > sessionProjectionMessageTail {
+		return nil, false, fmt.Errorf("archive page limit must be between 1 and %d", sessionProjectionMessageTail)
+	}
+	matched, found, err := r.actorByTab(tabID)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	page, err := matched.engine.ReadLedgerPageBefore(beforeMessageID, limit)
+	if err != nil {
+		return nil, false, err
+	}
+	if page.Deleted {
+		return []any{}, true, nil
+	}
+	messages := make([]any, 0, len(page.Events))
+	for _, event := range page.Events {
+		message, err := projectLedgerMessage(event)
+		if err != nil {
+			return nil, false, err
+		}
+		messages = append(messages, message)
+	}
+	if err := rehydrateExternalSessionImages(messages, filepath.Dir(r.sessions.path)); err != nil {
+		return nil, false, err
+	}
+	return messages, true, nil
+}
+
 func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHistoryProjection, tailLimit int) ([]any, bool, error) {
 	matched, found, err := r.actorByTab(tabID)
 	if err != nil || !found {
 		return nil, found, err
 	}
-	state := matched.engine.Snapshot()
+	var (
+		state  chat.State
+		window actorLedgerWindow
+	)
+	if history == actorHistoryFull {
+		state = matched.engine.Snapshot()
+		window = actorLedgerWindow{count: len(state.Ledger)}
+	} else {
+		snapshot := matched.engine.ReadProjectionSnapshot(max(1, tailLimit))
+		state = snapshot.State
+		window = actorLedgerWindow{offset: snapshot.LedgerOffset, count: snapshot.LedgerCount}
+	}
 	if state.Deleted {
 		// A tombstone owns this historical tab. Never recreate its transcript.
 		return []any{}, true, nil
 	}
 	projected := map[string]any{}
-	if err := projectActorChatWithHistoryLimit(projected, state, history, tailLimit); err != nil {
+	if err := projectActorChatWithHistoryWindow(projected, state, history, tailLimit, window); err != nil {
 		return nil, false, err
 	}
 	messages := anySlice(projected["messages"])
@@ -241,7 +289,7 @@ func (r *providerChatRuntime) actorByTab(tabID string) (*providerChatActor, bool
 		if err != nil {
 			return nil, false, err
 		}
-		if strings.TrimSpace(actor.engine.Snapshot().Presentation.TabID) != tabID {
+		if strings.TrimSpace(actor.engine.IdentitySnapshot().TabID) != tabID {
 			continue
 		}
 		if matched != nil {
@@ -292,8 +340,20 @@ func projectActorChatWithHistory(out map[string]any, state chat.State, history a
 }
 
 func projectActorChatWithHistoryLimit(out map[string]any, state chat.State, history actorHistoryProjection, tailLimit int) error {
+	return projectActorChatWithHistoryWindow(out, state, history, tailLimit, actorLedgerWindow{count: len(state.Ledger)})
+}
+
+type actorLedgerWindow struct {
+	offset int
+	count  int
+}
+
+func projectActorChatWithHistoryWindow(out map[string]any, state chat.State, history actorHistoryProjection, tailLimit int, window actorLedgerWindow) error {
 	if out == nil {
 		return errors.New("chat projection target is nil")
+	}
+	if window.offset < 0 || window.count < 0 || window.offset+len(state.Ledger) != window.count {
+		return errors.New("chat projection ledger window is invalid")
 	}
 	if !state.Initialized {
 		return errors.New("chat actor initialization is incomplete")
@@ -367,7 +427,7 @@ func projectActorChatWithHistoryLimit(out map[string]any, state chat.State, hist
 		out["planLatestMessageId"] = p.PlanLatestMessageID
 	}
 
-	messages, messageCount, err := projectActorMessagesWithTailLimit(state, history, tailLimit)
+	messages, messageCount, err := projectActorMessagesWithLedgerWindow(state, history, tailLimit, window)
 	if err != nil {
 		return err
 	}
@@ -435,17 +495,25 @@ func actorLastActivityAt(state chat.State) int64 {
 	return latest
 }
 
-// projectActorMessages scans stable ids for the full ledger but materializes
-// only the history requested by the projection policy. Full archive reads
-// carry every row; metadata-only session rows retain just live foreground rows
-// that have not reached the ledger yet.
+// projectActorMessages materializes only the history requested by the
+// projection policy. Full archive reads carry every row; bounded actor reads
+// supply a contiguous suffix plus its canonical absolute offset/count;
+// metadata-only session rows retain just live foreground rows that have not
+// reached the ledger yet.
 func projectActorMessages(state chat.State, history actorHistoryProjection) ([]any, int, error) {
 	return projectActorMessagesWithTailLimit(state, history, sessionProjectionMessageTail)
 }
 
 func projectActorMessagesWithTailLimit(state chat.State, history actorHistoryProjection, tailLimit int) ([]any, int, error) {
+	return projectActorMessagesWithLedgerWindow(state, history, tailLimit, actorLedgerWindow{count: len(state.Ledger)})
+}
+
+func projectActorMessagesWithLedgerWindow(state chat.State, history actorHistoryProjection, tailLimit int, window actorLedgerWindow) ([]any, int, error) {
 	if history == actorHistoryTail && (tailLimit < 1 || tailLimit > sessionProjectionMessageTail) {
 		return nil, 0, fmt.Errorf("actor history tail limit must be between 1 and %d", sessionProjectionMessageTail)
+	}
+	if window.offset < 0 || window.count < 0 || window.offset+len(state.Ledger) != window.count {
+		return nil, 0, errors.New("actor history ledger window is invalid")
 	}
 	seenMessage := make(map[string]struct{}, len(state.Ledger)+4)
 	for _, event := range state.Ledger {
@@ -533,11 +601,11 @@ func projectActorMessagesWithTailLimit(state chat.State, history actorHistoryPro
 		}
 	}
 
-	total := len(state.Ledger) + len(extra)
+	total := window.count + len(extra)
 	first := 0
 	switch history {
 	case actorHistoryMetadataOnly:
-		first = len(state.Ledger)
+		first = window.count
 	case actorHistoryTail:
 		if total > tailLimit {
 			first = total - tailLimit
@@ -547,15 +615,15 @@ func projectActorMessagesWithTailLimit(state chat.State, history actorHistoryPro
 		return nil, 0, fmt.Errorf("unknown actor history projection %d", history)
 	}
 	messages := make([]any, 0, total-first)
-	ledgerStart := min(first, len(state.Ledger))
-	for index := ledgerStart; index < len(state.Ledger); index++ {
-		message, err := projectLedgerMessage(state.Ledger[index])
+	ledgerStart := max(first, window.offset)
+	for absoluteIndex := ledgerStart; absoluteIndex < window.count; absoluteIndex++ {
+		message, err := projectLedgerMessage(state.Ledger[absoluteIndex-window.offset])
 		if err != nil {
 			return nil, 0, err
 		}
 		messages = append(messages, message)
 	}
-	extraStart := max(0, first-len(state.Ledger))
+	extraStart := max(0, first-window.count)
 	for index := extraStart; index < len(extra); index++ {
 		messages = append(messages, extra[index])
 	}
