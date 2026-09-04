@@ -98,6 +98,8 @@ func TestEnvironmentBriefAdvertisesAgentCatalogAndSpawnTools(t *testing.T) {
 		"natural ![label](path)",
 		"Never expose a raw local filesystem path",
 		"durable inline chat images",
+		"<chat-working-directory>-visualizations",
+		"Arbitrary siblings and /tmp are rejected",
 		"use workass_spawn_subagent for delegated agent work",
 		"do not launch untracked detached agents or shells",
 		"For every ACP provider",

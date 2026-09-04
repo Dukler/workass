@@ -70,6 +70,7 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?, RemoteLane?]> = 
   ['spawnedWorkStop', 'spawned-work:stop', (a) => [{ tabId: a[0], chatId: a[1], id: a[2] }]],
   ['providersList', 'providers:list'],
   ['providersDetect', 'providers:detect', (a) => [a[0] ?? {}]],
+  ['providersToggle', 'providers:toggle', (a) => [{ id: a[0], enabled: a[1] }], 'control'],
   ['procList', 'proc:list'],
   ['procKill', 'proc:kill', (a) => [{ id: a[0], tree: a[1] }]],
   // E4 — listing paths on the machine that runs the agent, which is the only
@@ -92,27 +93,27 @@ const REMOTE_EVENTS: Array<[keyof WorkassApi, string]> = [
   ['onChatPermissionResolved', 'chat:permission-resolved'],
   ['onSpawnedWorkChanged', 'spawned-work:changed'],
   ['onChatCommands', 'chat:commands'],
+  ['onProvidersList', 'providers:list'],
   ['onNotify', 'notify'],
   ['onNotifyBacklog', 'notify:backlog'],
 ];
 
 // Most machine-wide snapshots are deliberately absent from REMOTE_EVENTS:
 //
-//   chat:plan-usage, providers:list, proc:changed,
+//   chat:plan-usage, proc:changed,
 //   providers:updates, providers:update-progress, and app:update.
 //
-// Catalog is the one admitted exception because the renderer now partitions it
-// by chat owner: a remote chat cannot choose a model without the catalog of the
-// daemon that will run it. It is machine-scoped below without tagging catalog
-// fields (`ModeOption.id` is not an entity id). The other surfaces still have one
-// unpartitioned projection and matching local-only actions. Forwarding one would
-// therefore replace this window's provider/process/account/update state. The
-// update variant was especially dangerous: a machine without Claude Code
-// advertised another machine's Claude update, then sent the click to its own
-// daemon. Keep those subscriptions on the owning window until both projection
-// and action are machine-scoped.
+// Catalog and providers:list are admitted because the renderer partitions both
+// by immutable machine owner, and provider enable/detect actions carry that
+// same owner back to its daemon. They are machine-scoped below without tagging
+// provider/model ids. The other surfaces still have one unpartitioned projection
+// and matching local-only actions. Forwarding one would therefore replace this
+// window's process/account/update state. The update variant was especially
+// dangerous: a machine without Claude Code advertised another machine's Claude
+// update, then sent the click to its own daemon. Keep those subscriptions on the
+// owning window until both projection and action are machine-scoped.
 
-const MACHINE_SCOPED_REMOTE_EVENTS = new Set<keyof WorkassApi>(['onChatCatalog']);
+const MACHINE_SCOPED_REMOTE_EVENTS = new Set<keyof WorkassApi>(['onChatCatalog', 'onProvidersList']);
 const remoteEventMachines = new WeakMap<object, string>();
 
 /** Renderer-local ownership metadata. It never changes the frozen wire payload. */

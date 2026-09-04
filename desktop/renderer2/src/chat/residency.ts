@@ -1,9 +1,11 @@
 import type { Chat } from '../store/types';
 
 export const CHAT_MESSAGE_TAIL = 60;
+export const CHAT_INITIAL_HISTORY = 10;
 
-// Full transcripts are resident only for the chat being read. Inactive chats
-// keep a bounded actor tail and can reload their complete ledger on demand.
+// Full transcripts are resident only while explicitly reading older history or
+// searching it. Ordinary navigation keeps a small recent slice; inactive chats
+// retain at most the bounded actor tail.
 export function releaseInactiveHistories(chats: Chat[], activeId: string | null): string[] {
   const released: string[] = [];
   for (const chat of chats) {

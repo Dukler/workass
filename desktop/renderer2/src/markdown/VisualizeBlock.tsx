@@ -10,6 +10,21 @@ type HostState =
 
 const inflight = new Map<string, Promise<VisualizationRegistration>>();
 
+function visualizationErrorMessage(message: string): string {
+  const compact = String(message || '').replace(/\s+/g, ' ').trim();
+  if (!compact) return 'El daemon no informó la causa.';
+  if (compact.includes('must stay inside Workass visualizations storage')) {
+    return 'El archivo quedó fuera de la carpeta de visualizaciones permitida para este proyecto.';
+  }
+  if (compact.includes('visualization path is not readable') || compact.includes('visualization path is not a regular file')) {
+    return 'El archivo de la visualización ya no está disponible.';
+  }
+  if (compact.includes('visualization chat context is unavailable')) {
+    return 'Esta visualización perdió el contexto de su conversación.';
+  }
+  return compact.length > 240 ? `${compact.slice(0, 239)}…` : compact;
+}
+
 function safeArtifactPath(path: string): boolean {
   return path.startsWith('/workass/artifacts/') && !path.includes('://') && !path.includes('\\');
 }
@@ -74,8 +89,12 @@ export function VisualizeBlock({
       </div>
       {state.phase === 'loading' && <div className="visualize-status" role="status">Cargando visualización…</div>}
       {state.phase === 'error' && (
-        <div className="visualize-status visualize-failure" role="status">
-          <span>No se pudo cargar esta visualización.</span>
+        <div className="visualize-status visualize-failure" role="alert">
+          <span className="visualize-failure-mark" aria-hidden="true">!</span>
+          <span className="visualize-failure-copy">
+            <strong>No se pudo cargar</strong>
+            <span>{visualizationErrorMessage(state.message)}</span>
+          </span>
           {state.retryable && <button type="button" className="visualize-retry" onClick={() => setAttempt((value) => value + 1)}>Reintentar</button>}
         </div>
       )}

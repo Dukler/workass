@@ -78,6 +78,50 @@ func TestVisualizeHostCapturesAllowedExecutorHTML(t *testing.T) {
 	}
 }
 
+func TestResolveVisualizationPathAllowsOnlyExactWorkspaceSibling(t *testing.T) {
+	parent := t.TempDir()
+	workspace := filepath.Join(parent, "workass")
+	visualRoot := workspace + "-visualizations"
+	if err := os.MkdirAll(visualRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(visualRoot, "settings.html")
+	if err := os.WriteFile(source, []byte("<div>quiet list</div>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantSource, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, err := resolveVisualizationPathForWorkspace(source, t.TempDir(), workspace); err != nil || resolved != wantSource {
+		t.Fatalf("exact workspace sibling: resolved=%q err=%v", resolved, err)
+	}
+
+	otherRoot := filepath.Join(parent, "other-visualizations")
+	if err := os.MkdirAll(otherRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(otherRoot, "settings.html")
+	if err := os.WriteFile(other, []byte("<div>other</div>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveVisualizationPathForWorkspace(other, t.TempDir(), workspace); err == nil || !strings.Contains(err.Error(), "inside Workass visualizations") {
+		t.Fatalf("unrelated sibling was accepted: %v", err)
+	}
+
+	out := filepath.Join(parent, "outside.html")
+	if err := os.WriteFile(out, []byte("<div>outside</div>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(visualRoot, "escape.html")
+	if err := os.Symlink(out, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveVisualizationPathForWorkspace(link, t.TempDir(), workspace); err == nil || !strings.Contains(err.Error(), "inside Workass visualizations") {
+		t.Fatalf("workspace sibling symlink escape was accepted: %v", err)
+	}
+}
+
 type visualizeTestHarness struct {
 	stateDir string
 	source   string

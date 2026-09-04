@@ -469,8 +469,13 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .visualize-frame { display: block; width: 100%; height: 360px; border: 0; background: transparent; }
 .visualize-wide .visualize-frame { height: 440px; }
 .visualize-status { display: flex; align-items: center; gap: 10px; min-height: 84px; padding: 12px; color: var(--muted); font-size: 12px; }
-.visualize-failure { color: var(--ink2); }
+.visualize-failure { min-height: 64px; gap: 11px; color: var(--ink2); background: color-mix(in srgb, var(--amber) 4%, transparent); }
+.visualize-failure-mark { width: 22px; height: 22px; display: grid; place-items: center; flex: none; border-radius: 50%; color: var(--amber); background: color-mix(in srgb, var(--amber) 13%, transparent); font-size: 12px; font-weight: 700; }
+.visualize-failure-copy { display: grid; gap: 2px; min-width: 0; line-height: 1.35; }
+.visualize-failure-copy strong { color: var(--ink); font-size: 12.5px; font-weight: 600; }
+.visualize-failure-copy > span { color: var(--muted); overflow-wrap: anywhere; }
 .visualize-retry { flex: none; padding: 4px 9px; border: 1px solid var(--line2); border-radius: 7px; background: transparent; color: var(--link); font: inherit; font-size: 11.5px; cursor: pointer; }
+.visualize-failure .visualize-retry { margin-left: auto; }
 .visualize-retry:hover { background: var(--field); }
 
 .steprow { display: flex; align-items: flex-start; gap: 7px; color: var(--muted); font-size: 12.5px; margin: 12px 0; cursor: pointer; border: 0; background: transparent; font-family: inherit; text-align: left; padding: 0; width: fit-content; max-width: var(--read); }
@@ -1523,51 +1528,43 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs .lrow .act { flex: none; display: flex; align-items: center; gap: 10px; }
 .stgs .lrow .empty { color: var(--faint); font-size: 12.5px; }
 .stgs .agent-phead { margin-bottom: 18px; }
-.stgs .agent-summary { display: flex; align-items: center; gap: 13px; min-height: 48px; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--acc) 24%, var(--line)); border-radius: 11px; background: color-mix(in srgb, var(--acc) 5%, var(--card)); }
-.stgs .agent-summary > div { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
-.stgs .agent-summary strong { color: var(--ink); font-size: 17px; line-height: 1; font-weight: 650; }
-.stgs .agent-summary span { color: var(--muted); font-size: 11.5px; }
-.stgs .agent-summary .agent-summary-rule { width: 1px; height: 24px; background: var(--line2); flex: none; }
-.stgs .agent-summary p { margin-left: auto; max-width: 34ch; color: var(--muted); font-size: 11.5px; line-height: 1.35; text-align: right; }
-.stgs .agent-provider-group { display: grid; gap: 8px; padding: 0; border: 0; background: transparent; }
-.stgs .agent-provider-row { min-height: 58px; padding: 12px 13px; border: 1px solid var(--line); border-radius: 11px; background: var(--card); transition: border-color .15s ease, background .15s ease, opacity .15s ease; }
-.stgs .agent-provider-row:first-child { border-top: 1px solid var(--line); }
-.stgs .agent-provider-row:hover { border-color: var(--line2); background: color-mix(in srgb, var(--card) 94%, var(--ink) 6%); }
-.stgs .agent-provider-row.ready .agent-provider-icon { color: var(--acc); border-color: color-mix(in srgb, var(--acc) 35%, var(--line)); background: color-mix(in srgb, var(--acc) 9%, var(--field)); }
-.stgs .agent-provider-row.disabled { background: color-mix(in srgb, var(--card) 80%, var(--bg)); }
-.stgs .agent-provider-row.disabled .agent-provider-icon { opacity: .62; }
-.stgs .agent-provider-row .agent-kind { padding-inline: 6px; color: var(--faint); }
-.stgs .agent-provider-row .agent-detail { max-width: 38ch; font-family: inherit; line-height: 1.35; }
+.stgs .agent-provider-group { padding: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: transparent; }
+.stgs .agent-provider-empty { min-height: 48px; display: flex; align-items: center; padding: 0 2px; color: var(--faint); font-size: 11.5px; }
+.stgs .agent-provider-row { min-height: 58px; padding: 10px 2px; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; transition: opacity .15s ease; }
+.stgs .agent-provider-row:first-child { border-top: 0; }
+.stgs .agent-provider-row.disabled { opacity: .48; }
+.stgs .agent-provider-icon-wrap { position: relative; flex: none; }
+.stgs .agent-provider-icon { color: var(--ink2); }
+.stgs .agent-provider-icon.brand { background: transparent; border-color: transparent; }
+.stgs .agent-provider-icon.brand svg { width: 19px; height: 19px; opacity: 1; }
+.stgs .agent-status-dot { position: absolute; right: -2px; bottom: -2px; width: 8px; height: 8px; border: 2px solid var(--bg); border-radius: 50%; background: var(--faint); box-sizing: content-box; }
+.stgs .agent-status-dot.run { background: var(--acc); }
+.stgs .agent-status-dot.warn { background: var(--amber); }
+.stgs .agent-status-dot.error { background: var(--del); }
+.stgs .agent-status-dot.off { background: var(--faint); }
+.stgs .agent-status-dot.legacy { position: static; display: inline-block; box-sizing: border-box; border-width: 0; }
+.stgs .agent-provider-location { min-width: 0; margin-top: 3px; display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10.5px; line-height: 1.25; }
+.stgs .agent-provider-location.remote { color: var(--acc); }
+.stgs .agent-provider-location-icon { width: 12px; height: 12px; display: inline-grid; place-items: center; flex: none; }
+.stgs .agent-provider-location-icon svg { width: 12px; height: 12px; stroke-width: 1.6; }
+.stgs .agent-provider-location-kind { font-weight: 650; white-space: nowrap; }
+.stgs .agent-provider-location-separator { opacity: .55; }
+.stgs .agent-provider-location-machine { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink2); }
+.stgs .agent-provider-location.remote .agent-provider-location-machine { color: color-mix(in srgb, var(--acc) 78%, var(--ink)); }
+.stgs .agent-provider-location-offline { margin-left: 3px; color: var(--faint); font-style: italic; white-space: nowrap; }
+.stgs .agent-provider-issue { max-width: 48ch; margin-top: 2px; color: var(--amber); font-size: 11.5px; line-height: 1.35; }
+.stgs .agent-provider-issue.error { color: var(--del); }
 .stgs .agent-provider-row .agent-provider-actions { gap: 9px; }
-.stgs .agent-provider-state { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 96px; }
-.stgs .agent-switch { display: inline-flex; align-items: center; gap: 7px; padding: 3px 0 3px 7px; border: 0; border-left: 1px solid var(--line); background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
+.stgs .agent-switch { display: inline-flex; align-items: center; padding: 4px; border: 0; background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
 .stgs .agent-switch:hover:not(:disabled) { color: var(--ink); }
 .stgs .agent-switch:focus-visible { outline: 2px solid color-mix(in srgb, var(--acc) 60%, transparent); outline-offset: 3px; border-radius: 6px; }
 .stgs .agent-switch:disabled { opacity: .58; cursor: wait; }
-.stgs .agent-switch-text { min-width: 65px; font-size: 11px; text-align: right; }
 .stgs .agent-switch-track { position: relative; width: 30px; height: 17px; border-radius: 999px; background: var(--line2); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ink) 8%, transparent); transition: background .15s ease; flex: none; }
 .stgs .agent-switch-track > span { position: absolute; top: 3px; left: 3px; width: 11px; height: 11px; border-radius: 50%; background: var(--muted); box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .15s ease, background .15s ease; }
 .stgs .agent-switch.on .agent-switch-track { background: color-mix(in srgb, var(--acc) 72%, var(--line2)); }
 .stgs .agent-switch.on .agent-switch-track > span { transform: translateX(13px); background: #fff; }
 .stgs .machine-nickname-input { width: min(280px, 100%); box-sizing: border-box; }
 .stgs .machine-nickname-error { margin-top: 4px; color: var(--del); font-size: 11.5px; }
-/* CLI update rows (Agentes): click-to-update. Primary is an accent-quiet
-   "Actualizar" button that runs the daemon updater; live progress + failures
-   render inline under the row; the copy-command chip is the manual fallback. */
-.stgs .lrow .mt .upd-to { color: var(--acc); font-weight: 600; }
-.stgs .lrow.cli-lrow { align-items: flex-start; }
-.stgs .lrow.cli-lrow .ic { margin-top: 1px; }
-.stgs .lrow.cli-lrow .act { align-items: flex-start; padding-top: 1px; }
-.stgs .btn.accq { color: var(--acc); border-color: color-mix(in srgb, var(--acc) 42%, transparent); background: color-mix(in srgb, var(--acc) 8%, transparent); font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
-.stgs .btn.accq:hover:not(:disabled) { background: color-mix(in srgb, var(--acc) 16%, transparent); color: var(--acc); }
-.stgs .btn.accq:disabled { opacity: .55; cursor: default; }
-.stgs .btnspin { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid color-mix(in srgb, var(--acc) 30%, transparent); border-top-color: var(--acc); animation: conn-spin .7s linear infinite; flex: none; }
-@media (prefers-reduced-motion: reduce) { .stgs .btnspin { animation: none; } }
-.stgs .cli-prog { margin-top: 5px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.stgs .cli-err { margin-top: 5px; font-size: 11.5px; color: var(--del); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.stgs .cli-err .cli-err-tail { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
-.stgs .cli-hint { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); background: var(--field); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; cursor: pointer; white-space: nowrap; transition: color .15s ease, border-color .15s ease; }
-.stgs .cli-hint:hover { color: var(--ink); border-color: var(--line2); }
 
 .stgs .kb { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
 .stgs .kb:first-child { border-top: 0; }

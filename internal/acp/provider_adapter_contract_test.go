@@ -48,6 +48,25 @@ func TestProviderAdapterDefaultsAllowSingleFacetOverride(t *testing.T) {
 	}
 }
 
+func TestProviderRegistrationsPublishVerifiedAssistantBrands(t *testing.T) {
+	wants := map[string]string{
+		"codex":                 "gpt",
+		"claude":                "claude",
+		"devin":                 "devin",
+		"omp":                   "omp",
+		"opencode":              "opencode",
+		"qwen":                  "qwen",
+		localLMStudioProviderID: "lmstudio",
+		localOllamaProviderID:   "ollama",
+		localOMLXProviderID:     "omlx",
+	}
+	for providerID, want := range wants {
+		if got := providerAdapterForID(providerID).model.AssistantBrand; got != want {
+			t.Errorf("provider %q assistant brand = %q, want %q", providerID, got, want)
+		}
+	}
+}
+
 func TestDevinLaunchOwnsACPBackendSanitization(t *testing.T) {
 	devin := providerAdapterForID("devin").launch.EnvironmentPolicy()
 	for _, key := range []string{"ACP_BACKEND", "acp_backend", " Acp_Backend "} {

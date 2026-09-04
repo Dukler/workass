@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('workassBrowser', {
 
 contextBridge.exposeInMainWorld('workassClipboard', {
   supported: true,
+  copyText: (text) => ipcRenderer.invoke('workass-clipboard:copy-text', text),
   copyImageAt: (payload) => ipcRenderer.invoke('workass-clipboard:copy-image-at', payload),
   openImageExternal: (payload) => ipcRenderer.invoke('workass-image:open-external', payload),
 });

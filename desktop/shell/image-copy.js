@@ -36,6 +36,19 @@ function copyImageAt(win, payload) {
   }
 }
 
+// Page clipboard writes can be denied by Chromium's permission layer even for
+// a user-initiated click. Text copied from the renderer stays shell-local and
+// uses Electron's native clipboard implementation on every desktop platform.
+function copyText(clipboard, text) {
+  if (!clipboard || typeof clipboard.writeText !== 'function' || typeof text !== 'string') return false;
+  try {
+    clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Electron has no default context menu. Install the one native image action the
 // browser would normally provide; copyImageAt lets Chromium copy the decoded
 // pixels regardless of whether the source is a data URL or hosted artifact.
@@ -105,4 +118,4 @@ async function openImageExternally(payload, deps = {}) {
   }
 }
 
-module.exports = { copyImageAt, installImageCopyMenu, openImageExternally };
+module.exports = { copyImageAt, copyText, installImageCopyMenu, openImageExternally };

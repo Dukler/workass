@@ -132,7 +132,7 @@ test('a San-laptop row keeps its dragged slot across remote and local hydration'
     'refreshing the local daemon cannot move the carried remote row either');
 });
 
-test('a remote cancellation refresh keeps the selected transcript visible until full history reloads', async () => {
+test('a remote cancellation refresh keeps the selected transcript visible until bounded history catches up', async () => {
   const jobID = 'job-stop-refresh';
   const userID = 'user-stop-refresh';
   const assistantID = 'assistant-stop-refresh';
@@ -152,9 +152,11 @@ test('a remote cancellation refresh keeps the selected transcript visible until 
   subject.state.activeId = TAB;
 
   let historyReloads = 0;
-  subject.ensureFullHistory = async (tabId: string) => {
+  let historyLimit = 0;
+  subject.ensureRecentHistory = async (tabId: string, limit: number) => {
     assert.equal(tabId, TAB);
     historyReloads += 1;
+    historyLimit = limit;
   };
 
   // San-laptop's own activeId is independent of the controller's selection,
@@ -174,7 +176,8 @@ test('a remote cancellation refresh keeps the selected transcript visible until 
     'metadata-only hydration must not blank the transcript being read',
   );
   assert.equal(duringReadback.historyComplete, false, 'the retained view remains explicitly provisional');
-  assert.equal(historyReloads, 1, 'the exact actor ledger is reloaded in the background');
+  assert.equal(historyReloads, 1, 'the exact recent actor slice is reloaded in the background');
+  assert.equal(historyLimit, 10, 'cancellation readback must not expand the complete remote ledger');
 
   subject.onJobEvent(tagPayload(MACHINE, {
     type: 'end',

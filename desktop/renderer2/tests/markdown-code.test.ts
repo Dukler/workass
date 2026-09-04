@@ -8,7 +8,11 @@ import { createServer, type ViteDevServer } from 'vite';
 let server: ViteDevServer;
 let parseBlocks: (text: string) => Array<{ block: { kind: string }; sig: string }>;
 let MarkdownBlock: React.ComponentType<Record<string, unknown>>;
-let copyCodeText: (raw: string, clipboard?: { writeText: (text: string) => Promise<void> } | null) => Promise<boolean>;
+let copyCodeText: (
+  raw: string,
+  clipboard?: { writeText: (text: string) => Promise<void> } | null,
+  shellBridge?: { supported: boolean; copyText?: (text: string) => Promise<boolean> } | null,
+) => Promise<boolean>;
 
 before(async () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
@@ -52,4 +56,24 @@ test('copy action writes the exact code bytes and reports clipboard failure', as
   assert.deepEqual(writes, [raw]);
   assert.equal(await copyCodeText(raw, { writeText: async () => { throw new Error('denied'); } }), false);
   assert.equal(await copyCodeText(raw, null), false);
+});
+
+test('copy action prefers the Electron native clipboard and falls back to the page clipboard', async () => {
+  const nativeWrites: string[] = [];
+  const pageWrites: string[] = [];
+  const raw = 'console.log("windows clipboard");\n';
+  assert.equal(await copyCodeText(
+    raw,
+    { writeText: async (text) => { pageWrites.push(text); } },
+    { supported: true, copyText: async (text) => { nativeWrites.push(text); return true; } },
+  ), true);
+  assert.deepEqual(nativeWrites, [raw]);
+  assert.deepEqual(pageWrites, [], 'a successful native write must not duplicate through Chromium');
+
+  assert.equal(await copyCodeText(
+    raw,
+    { writeText: async (text) => { pageWrites.push(text); } },
+    { supported: true, copyText: async () => false },
+  ), true);
+  assert.deepEqual(pageWrites, [raw], 'plain-browser copy remains the fallback');
 });

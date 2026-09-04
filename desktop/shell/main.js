@@ -1,7 +1,7 @@
 // workass shell — minimal Electron window over the always-on Go daemon.
 // The daemon owns state/agents; the shell-owned loopback view server owns only
 // renderer bytes so Electron can rebuild/restart without touching ACP turns.
-const { app, BrowserWindow, WebContentsView, session, net, ipcMain, shell, nativeImage, dialog, Menu } = require('electron');
+const { app, BrowserWindow, WebContentsView, session, net, ipcMain, shell, nativeImage, clipboard, dialog, Menu } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createViewServer } = require('./view-server');
@@ -11,7 +11,7 @@ const { resolveRuntimeProfile } = require('./runtime-profile');
 const { applyMacDockIcon, refreshWindowsShortcutIconsAsync, resolveWindowFrameOptions, resolveWindowIconPath } = require('./app-icon');
 const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
 const { UpdateManager, ensureInstallationIdentity, installedRoot, resolveUpdateFeed } = require('./update-manager');
-const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
+const { copyImageAt, copyText, installImageCopyMenu, openImageExternally } = require('./image-copy');
 const { acquireProfileSingleton, focusPrimaryWindow, shouldShowWindowOnCreate } = require('./profile-singleton');
 const {
   createUpdateBootstrapWindow,
@@ -275,6 +275,7 @@ function createWindow(url, browserReporter, isController) {
   ipcMain.handle('workass-browser:hide', (event, chatId) => own(event) ? browserManager.hide(chatId) : false);
   ipcMain.handle('workass-browser:close', (event, chatId) => own(event) ? browserManager.close(chatId) : false);
   ipcMain.handle('workass-browser:command', (event, payload) => own(event) ? browserManager.command(payload && payload.chatId, payload && payload.command, payload && payload.value) : null);
+  ipcMain.handle('workass-clipboard:copy-text', (event, text) => own(event) ? copyText(clipboard, text) : false);
   ipcMain.handle('workass-clipboard:copy-image-at', (event, payload) => own(event) ? copyImageAt(win, payload) : false);
   ipcMain.handle('workass-image:open-external', async (event, payload) => {
     if (!own(event)) return false;
@@ -305,7 +306,9 @@ function createWindow(url, browserReporter, isController) {
     for (const channel of ['activate', 'resize', 'hide', 'close', 'command']) {
       try { ipcMain.removeHandler(`workass-browser:${channel}`); } catch { /* ignore */ }
     }
-    try { ipcMain.removeHandler('workass-clipboard:copy-image-at'); } catch { /* ignore */ }
+    for (const channel of ['copy-text', 'copy-image-at']) {
+      try { ipcMain.removeHandler(`workass-clipboard:${channel}`); } catch { /* ignore */ }
+    }
     try { ipcMain.removeHandler('workass-image:open-external'); } catch { /* ignore */ }
 		try { ipcMain.removeAllListeners('workass-machines:trust-endpoint'); } catch { /* ignore */ }
 		try { ipcMain.removeHandler('workass-recovery:restart-daemon'); } catch { /* ignore */ }

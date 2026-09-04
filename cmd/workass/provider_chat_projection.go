@@ -191,16 +191,32 @@ func (r *providerChatRuntime) ProjectSessionRaw() ([]byte, error) {
 // ledger as session:get. After eager cutover, found=false means the tab is not
 // an actor-owned chat; callers must never fall back to deleted JSONL storage.
 func (r *providerChatRuntime) ProjectArchiveByTab(tabID string) ([]any, bool, error) {
+	return r.projectArchiveByTab(tabID, actorHistoryFull, sessionProjectionMessageTail)
+}
+
+// ProjectRecentArchiveByTab returns only the newest bounded actor rows. It is
+// the navigation read: an idle chat is metadata-only in session:get, so opening
+// it must not expand every historical attachment merely to paint the current
+// viewport. The canonical ledger and the legacy full archive read are unchanged.
+func (r *providerChatRuntime) ProjectRecentArchiveByTab(tabID string, limit int) ([]any, bool, error) {
+	if limit < 1 || limit > sessionProjectionMessageTail {
+		return nil, false, fmt.Errorf("recent archive limit must be between 1 and %d", sessionProjectionMessageTail)
+	}
+	return r.projectArchiveByTab(tabID, actorHistoryTail, limit)
+}
+
+func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHistoryProjection, tailLimit int) ([]any, bool, error) {
 	matched, found, err := r.actorByTab(tabID)
 	if err != nil || !found {
 		return nil, found, err
 	}
-	if matched.engine.Snapshot().Deleted {
+	state := matched.engine.Snapshot()
+	if state.Deleted {
 		// A tombstone owns this historical tab. Never recreate its transcript.
 		return []any{}, true, nil
 	}
 	projected := map[string]any{}
-	if err := projectActorChat(projected, matched.engine.Snapshot()); err != nil {
+	if err := projectActorChatWithHistoryLimit(projected, state, history, tailLimit); err != nil {
 		return nil, false, err
 	}
 	messages := anySlice(projected["messages"])
@@ -272,6 +288,10 @@ func projectActorChat(out map[string]any, state chat.State) error {
 }
 
 func projectActorChatWithHistory(out map[string]any, state chat.State, history actorHistoryProjection) error {
+	return projectActorChatWithHistoryLimit(out, state, history, sessionProjectionMessageTail)
+}
+
+func projectActorChatWithHistoryLimit(out map[string]any, state chat.State, history actorHistoryProjection, tailLimit int) error {
 	if out == nil {
 		return errors.New("chat projection target is nil")
 	}
@@ -347,7 +367,7 @@ func projectActorChatWithHistory(out map[string]any, state chat.State, history a
 		out["planLatestMessageId"] = p.PlanLatestMessageID
 	}
 
-	messages, messageCount, err := projectActorMessages(state, history)
+	messages, messageCount, err := projectActorMessagesWithTailLimit(state, history, tailLimit)
 	if err != nil {
 		return err
 	}
@@ -420,6 +440,13 @@ func actorLastActivityAt(state chat.State) int64 {
 // carry every row; metadata-only session rows retain just live foreground rows
 // that have not reached the ledger yet.
 func projectActorMessages(state chat.State, history actorHistoryProjection) ([]any, int, error) {
+	return projectActorMessagesWithTailLimit(state, history, sessionProjectionMessageTail)
+}
+
+func projectActorMessagesWithTailLimit(state chat.State, history actorHistoryProjection, tailLimit int) ([]any, int, error) {
+	if history == actorHistoryTail && (tailLimit < 1 || tailLimit > sessionProjectionMessageTail) {
+		return nil, 0, fmt.Errorf("actor history tail limit must be between 1 and %d", sessionProjectionMessageTail)
+	}
 	seenMessage := make(map[string]struct{}, len(state.Ledger)+4)
 	for _, event := range state.Ledger {
 		if _, duplicate := seenMessage[event.MessageID]; duplicate {
@@ -512,8 +539,8 @@ func projectActorMessages(state chat.State, history actorHistoryProjection) ([]a
 	case actorHistoryMetadataOnly:
 		first = len(state.Ledger)
 	case actorHistoryTail:
-		if total > sessionProjectionMessageTail {
-			first = total - sessionProjectionMessageTail
+		if total > tailLimit {
+			first = total - tailLimit
 		}
 	case actorHistoryFull:
 	default:

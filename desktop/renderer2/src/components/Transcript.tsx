@@ -11,8 +11,10 @@ import { projectSteeringPresentation } from '../chat/steering-presentation';
 import { assistantTurnBlockRanges } from '../timeline-layout';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
 import { localBrowserOwnsChat } from '../browser';
+import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL } from '../chat/residency';
 
-const WINDOW = 40; // hand-rolled windowing: render the last N, reveal older on demand
+const HISTORY_PAGE = 40;
+const SEARCH_WINDOW = 40;
 
 // Transcript copy/export menu removed by user request (2026-07-11): agents
 // read chats through the daemon (archives + Agent API), humans don't paste
@@ -138,12 +140,13 @@ function transcriptFindRanges(doc: Element, messageId: string, query: string): R
 }
 
 function ChatFindBar({
-  inputRef, query, count, current, onQuery, onMove, onClose,
+  inputRef, query, count, current, loading, onQuery, onMove, onClose,
 }: {
   inputRef: RefObject<HTMLInputElement | null>;
   query: string;
   count: number;
   current: number;
+  loading: boolean;
   onQuery: (value: string) => void;
   onMove: (direction: 1 | -1) => void;
   onClose: () => void;
@@ -163,7 +166,7 @@ function ChatFindBar({
             if (event.key === 'Enter') { event.preventDefault(); onMove(event.shiftKey ? -1 : 1); }
           }}
         />
-        <span className="chatfind-count" aria-live="polite">{count > 0 ? `${current + 1}/${count}` : '0/0'}</span>
+        <span className="chatfind-count" aria-live="polite">{loading ? '…' : count > 0 ? `${current + 1}/${count}` : '0/0'}</span>
         <button disabled={count === 0} title="Coincidencia anterior · ⇧↩" aria-label="Coincidencia anterior" onClick={() => onMove(-1)}>‹</button>
         <button disabled={count === 0} title="Coincidencia siguiente · ↩" aria-label="Coincidencia siguiente" onClick={() => onMove(1)}>›</button>
         <button title="Cerrar búsqueda · Esc" aria-label="Cerrar búsqueda" onClick={onClose}><IcClose /></button>
@@ -239,7 +242,8 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // programmatic events: Chromium is allowed to coalesce several writes into one
   // event, which made the old counter drift and freeze following mid-stream.
   const userScrollUntil = useRef(0);
-  const [reveal, setReveal] = useState(WINDOW);
+  const [reveal, setReveal] = useState(CHAT_INITIAL_HISTORY);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
   const [findIndex, setFindIndex] = useState(0);
@@ -250,14 +254,18 @@ export function Transcript({ chat }: { chat: Chat | null }) {
 
   const visibleMessages = projectSteeringPresentation(chat?.messages ?? []).transcriptMessages;
   const total = visibleMessages.length;
+  const knownTotal = chat?.historyComplete === false
+    ? Math.max(total, chat.messageCount ?? 0)
+    : total;
   const findMatches = findOpen ? findChatMessageMatches(visibleMessages, findQuery) : [];
   const selectedFindMatch = findMatches.length ? findMatches[Math.min(findIndex, findMatches.length - 1)] : undefined;
-  const searchStart = selectedFindMatch ? Math.max(0, selectedFindMatch.messageIndex - Math.floor(WINDOW / 2)) : 0;
-  const searchEnd = selectedFindMatch ? Math.min(total, searchStart + WINDOW) : 0;
+  const searchStart = selectedFindMatch ? Math.max(0, selectedFindMatch.messageIndex - Math.floor(SEARCH_WINDOW / 2)) : 0;
+  const searchEnd = selectedFindMatch ? Math.min(total, searchStart + SEARCH_WINDOW) : 0;
   const shown = selectedFindMatch
-    ? visibleMessages.slice(Math.max(0, searchEnd - WINDOW), searchEnd)
+    ? visibleMessages.slice(Math.max(0, searchEnd - SEARCH_WINDOW), searchEnd)
     : visibleMessages.slice(Math.max(0, total - reveal));
-  const hidden = selectedFindMatch ? 0 : total - shown.length;
+  const residentHidden = selectedFindMatch ? 0 : total - shown.length;
+  const hidden = selectedFindMatch ? 0 : Math.max(0, knownTotal - shown.length);
   const runningMessage = [...shown].reverse().find((message) => (
     message.role === 'assistant'
     && message.status === 'running'
@@ -286,7 +294,8 @@ export function Transcript({ chat }: { chat: Chat | null }) {
 
   // Reset the window when switching chats.
   useEffect(() => {
-    setReveal(WINDOW);
+    setReveal(CHAT_INITIAL_HISTORY);
+    setHistoryLoading(false);
     stick.current = true;
     userScrollUntil.current = 0;
     seen.current = total;
@@ -301,11 +310,22 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     el.scrollTop = clamped;
   };
 
+  const loadCompleteHistory = useCallback(async () => {
+    if (!chat || chat.historyComplete) return true;
+    setHistoryLoading(true);
+    try {
+      return await store.loadFullHistory(chat.id);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [chat?.historyComplete, chat?.id]);
+
   const openFind = useCallback(() => {
     if (!findOpen) findReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setFindOpen(true);
+    void loadCompleteHistory();
     requestAnimationFrame(() => { findInputRef.current?.focus(); findInputRef.current?.select(); });
-  }, [findOpen]);
+  }, [findOpen, loadCompleteHistory]);
 
   const closeFind = useCallback(() => {
     setFindOpen(false);
@@ -451,10 +471,33 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     setScrollTop(el, el.scrollHeight);
   };
 
-  const revealOlder = () => {
+  const revealOlder = async () => {
     const el = scrollRef.current;
     if (el) keepFromBottom.current = el.scrollHeight - el.scrollTop;
-    setReveal((r) => r + WINDOW);
+    if (reveal < total) {
+      setReveal((current) => Math.min(total, current + HISTORY_PAGE));
+      return;
+    }
+    if (!chat || chat.historyComplete || historyLoading) {
+      keepFromBottom.current = null;
+      return;
+    }
+    setHistoryLoading(true);
+    const residentBefore = total;
+    try {
+      const recentTarget = Math.min(CHAT_MESSAGE_TAIL, knownTotal);
+      const loaded = residentBefore < recentTarget
+        ? await store.loadRecentHistory(chat.id, CHAT_MESSAGE_TAIL)
+        : await store.loadFullHistory(chat.id);
+      const live = store.chat(chat.id);
+      if (loaded && live && live.messages.length > residentBefore) {
+        setReveal((current) => Math.min(residentBefore, current) + HISTORY_PAGE);
+      } else {
+        keepFromBottom.current = null;
+      }
+    } finally {
+      setHistoryLoading(false);
+    }
   };
 
   // Restore read position after older messages prepend (windowing).
@@ -528,6 +571,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
           query={findQuery}
           count={findMatches.length}
           current={findIndex}
+          loading={historyLoading}
           onQuery={changeFindQuery}
           onMove={moveFind}
           onClose={closeFind}
@@ -552,8 +596,10 @@ export function Transcript({ chat }: { chat: Chat | null }) {
             ) : (
               <>
                 {hidden > 0 && (
-                  <button className="btn" style={{ margin: '4px auto 16px', display: 'block' }} onClick={revealOlder}>
-                    Ver {Math.min(WINDOW, hidden)} mensajes anteriores
+                  <button className="btn" style={{ margin: '4px auto 16px', display: 'block' }} disabled={historyLoading} onClick={() => { void revealOlder(); }}>
+                    {historyLoading
+                      ? 'Cargando historial…'
+                      : `Ver ${Math.min(HISTORY_PAGE, residentHidden > 0 ? residentHidden : hidden)} mensajes anteriores`}
                   </button>
                 )}
                 {shown.map((m, index) => {

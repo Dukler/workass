@@ -280,6 +280,7 @@ var providerRegistrations = map[string]providerRegistration{
 		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `devin auth login`"},
 		Adapter: providerAdapter{
 			creation: providercontract.CreationCapabilities{DeferredUntilInput: true},
+			model:    providerModelPolicy{AssistantBrand: "devin"},
 			launch: standardACPLaunchStrategy{environment: providerEnvironmentPolicy{
 				// ACP_BACKEND is a Workass/test harness selector, not Devin auth
 				// configuration. Inheriting or persisting it makes the installed Windows
@@ -296,6 +297,7 @@ var providerRegistrations = map[string]providerRegistration{
 		Adapter: providerAdapter{
 			permission: qwenProviderPermissionPolicy{},
 			launch:     omlxAwareACPLaunchStrategy{},
+			model:      providerModelPolicy{AssistantBrand: "qwen"},
 		},
 		Update: providerUpdateRegistration{
 			Source:      "https://registry.npmjs.org/@qwen-code/qwen-code/latest",
@@ -359,7 +361,7 @@ var providerRegistrations = map[string]providerRegistration{
 		// OpenCode is an ordinary ACP provider. Its model/session semantics stay
 		// behind the generic ACP adapter; only executable discovery and the
 		// scoped, free Ox Alpha default belong to this registration.
-		Adapter: providerAdapter{},
+		Adapter: providerAdapter{model: providerModelPolicy{AssistantBrand: "opencode"}},
 	},
 	"omp": {
 		ID: "omp", Name: "Oh My Pi", DefaultCommand: "omp", DefaultArgs: []string{"acp"}, Badge: "agent",
@@ -368,7 +370,7 @@ var providerRegistrations = map[string]providerRegistration{
 		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `omp` y usa `/login`"},
 		// OMP speaks standard ACP directly. Its own profile owns models,
 		// credentials, permissions, sessions, rules, and extension discovery.
-		Adapter: providerAdapter{},
+		Adapter: providerAdapter{model: providerModelPolicy{AssistantBrand: "omp"}},
 		Update: providerUpdateRegistration{
 			Source:  "https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest",
 			Command: ProviderUpdateCommand{Command: "omp", Args: []string{"update"}},
@@ -378,15 +380,17 @@ var providerRegistrations = map[string]providerRegistration{
 	localLMStudioProviderID: {
 		ID: localLMStudioProviderID, Name: "LM Studio (local)", DefaultCommand: "workass-agent", Badge: "native",
 		Detection: localModelDetectionStrategy{}, Local: true,
+		Adapter: providerAdapter{model: providerModelPolicy{AssistantBrand: "lmstudio"}},
 	},
 	localOllamaProviderID: {
 		ID: localOllamaProviderID, Name: "Ollama (local)", DefaultCommand: "workass-agent", Badge: "native",
 		Detection: localModelDetectionStrategy{}, Local: true,
+		Adapter: providerAdapter{model: providerModelPolicy{AssistantBrand: "ollama"}},
 	},
 	localOMLXProviderID: {
 		ID: localOMLXProviderID, Name: "oMLX (local)", DefaultCommand: "workass-agent", Badge: "native",
 		Detection: localModelDetectionStrategy{}, Local: true,
-		Adapter: providerAdapter{launch: omlxAwareACPLaunchStrategy{}},
+		Adapter: providerAdapter{launch: omlxAwareACPLaunchStrategy{}, model: providerModelPolicy{AssistantBrand: "omlx"}},
 	},
 	"custom": {ID: "custom", Name: "Custom ACP", Badge: "custom"},
 }

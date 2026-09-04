@@ -33,6 +33,9 @@ test('an untagged call goes local and a tagged one goes to its machine', async (
   assert.equal(await router.archiveLoad(tagId('m-remote', 'tab-9')), undefined);
   assert.deepEqual(remote.calls[0], { channel: 'chat:archive-load', args: ['tab-9'] },
     'the tag is stripped: the daemon only knows its own ids');
+  assert.equal(await router.archiveLoad(tagId('m-remote', 'tab-9'), { tail: 10 }), undefined);
+  assert.deepEqual(remote.calls[1], { channel: 'chat:archive-load', args: ['tab-9', { tail: 10 }] },
+    'a bounded history option reaches the owning daemon without changing the wire envelope');
   assert.equal(localCalls.length, 1, 'the local bridge saw only the untagged call');
 });
 
@@ -196,10 +199,49 @@ test('remote catalog keeps exact model and mode ids while carrying its machine o
   assert.deepEqual(seen, [local, remote], 'catalog identifiers stay byte-identical to their owning daemon');
 });
 
+test('remote provider snapshots keep provider ids and carry their exact machine owner', () => {
+  const seen: unknown[] = [];
+  const localSubs = new Map<string, (payload: unknown) => void>();
+  const remoteSubs = new Map<string, (payload: unknown, machineId: string) => void>();
+  const router = createMachineRouter({
+    local: () => ({ onProvidersList: (cb: (payload: unknown) => void) => { localSubs.set('providers:list', cb); } }) as never,
+    links: () => new Map(),
+    subscribeRemote: (channel, cb) => { remoteSubs.set(channel, cb); },
+  }) as unknown as { onProvidersList(cb: (payload: unknown) => void): void };
+
+  router.onProvidersList((payload) => seen.push(payload));
+  const local = [{ id: 'codex', name: 'Codex', enabled: true, status: 'ready' }];
+  const remote = [{ id: 'devin', name: 'Devin', enabled: true, status: 'ready' }];
+  localSubs.get('providers:list')?.(local);
+  remoteSubs.get('providers:list')?.(remote, 'm-san');
+
+  assert.equal(machineScopeOf(seen[0]), '');
+  assert.equal(machineScopeOf(seen[1]), 'm-san');
+  assert.deepEqual(seen, [local, remote], 'provider ids stay byte-identical to their owning daemon');
+});
+
+test('remote provider toggle uses the exact machine control lane', async () => {
+  const data = fakeLink();
+  const control = fakeLink({
+    'providers:toggle': [{ id: 'devin', name: 'Devin', enabled: false, disabledByUser: true, status: 'inactive' }],
+  });
+  const localCalls: unknown[][] = [];
+  const router = createMachineRouter({
+    local: () => ({ providersToggle: (...args: unknown[]) => { localCalls.push(args); return Promise.resolve([]); } }) as never,
+    links: () => new Map([['m-san', data.link]]),
+    controlLinks: () => new Map([['m-san', control.link]]),
+    subscribeRemote: () => {},
+  }) as unknown as { providersToggle(id: string, enabled: boolean): Promise<Array<Record<string, unknown>>> };
+
+  const result = await router.providersToggle(tagId('m-san', 'devin'), false);
+  assert.deepEqual(localCalls, []);
+  assert.deepEqual(control.calls, [{ channel: 'providers:toggle', args: [{ id: 'devin', enabled: false }] }]);
+  assert.equal(result[0]?.id, tagId('m-san', 'devin'));
+});
+
 test('unpartitioned machine-wide snapshots stay on their owning Workass window', () => {
   const machineWideSnapshots = [
     'onChatPlanUsage',
-    'onProvidersList',
     'onProcChanged',
     'onProvidersUpdates',
     'onProvidersUpdateProgress',

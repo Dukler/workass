@@ -47,7 +47,7 @@ test('every wholesale chat restore carries the other machines chats', () => {
   for (const site of sites) {
     const start = source.indexOf(site);
     assert.ok(start > 0, `restore path moved: ${site}`);
-    const window = source.slice(start, start + 1800);
+    const window = source.slice(start, start + 5000);
     const assignment = window.indexOf('this.state.chats = ');
     assert.ok(assignment > 0, `no chats assignment near ${site}`);
     const line = window.slice(assignment, window.indexOf('\n', assignment));

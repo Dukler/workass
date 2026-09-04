@@ -770,7 +770,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      void submit(composerSubmitIntent(running, e.metaKey));
+      void submit(composerSubmitIntent(running, { metaKey: e.metaKey, ctrlKey: e.ctrlKey }));
     }
   }
 
@@ -785,8 +785,8 @@ export function Composer({ chat }: { chat: Chat | null }) {
     ? 'Sin conexión con el daemon'
 	: steerMode
       ? (steerAvail
-        ? 'Dirigir el turno en curso · ⌘Enter'
-		: 'Steering no disponible')
+        ? `Dirigir el turno en curso · ${window.workassWindow?.platform === 'darwin' ? '⌘Enter' : 'Ctrl+Enter'}`
+        : 'Steering no disponible')
       : running ? (stopping ? 'Deteniendo…' : 'Detener') : 'Enviar';
 
   return (
