@@ -132,6 +132,63 @@ test('a San-laptop row keeps its dragged slot across remote and local hydration'
     'refreshing the local daemon cannot move the carried remote row either');
 });
 
+test('a remote cancellation refresh keeps the selected transcript visible until full history reloads', async () => {
+  const jobID = 'job-stop-refresh';
+  const userID = 'user-stop-refresh';
+  const assistantID = 'assistant-stop-refresh';
+  const completeMessages: MirrorMsg[] = [
+    { id: 'older-user', role: 'user', content: 'older question', status: 'done', at: '2026-09-04T03:33:00Z', events: [] },
+    { id: 'older-assistant', role: 'assistant', content: 'older answer', status: 'done', at: '2026-09-04T03:33:01Z', events: [] },
+    { id: userID, role: 'user', content: 'stop this turn', status: 'done', at: '2026-09-04T03:34:00Z', events: [] },
+    { id: assistantID, role: 'assistant', content: 'partial answer', status: 'running', at: null, jobId: jobID, events: [] },
+  ];
+  let remoteMirror = mirror(completeMessages, {
+    actorRevision: 7,
+    messageCount: completeMessages.length,
+    historyComplete: true,
+  });
+  const subject = remoteSubject(() => remoteMirror);
+  await subject.hydrateMachine(MACHINE);
+  subject.state.activeId = TAB;
+
+  let historyReloads = 0;
+  subject.ensureFullHistory = async (tabId: string) => {
+    assert.equal(tabId, TAB);
+    historyReloads += 1;
+  };
+
+  // San-laptop's own activeId is independent of the controller's selection,
+  // so its session:get legally returns this chat as metadata-only exactly when
+  // the cancellation commit asks controllers to refresh.
+  remoteMirror = mirror([], {
+    actorRevision: 8,
+    messageCount: completeMessages.length,
+    historyComplete: false,
+  });
+  await subject.hydrateMachine(MACHINE);
+
+  const duringReadback = subject.chat(TAB) as Chat;
+  assert.deepEqual(
+    duringReadback.messages.map((message) => message.id),
+    completeMessages.map((message) => tagId(MACHINE, message.id)),
+    'metadata-only hydration must not blank the transcript being read',
+  );
+  assert.equal(duringReadback.historyComplete, false, 'the retained view remains explicitly provisional');
+  assert.equal(historyReloads, 1, 'the exact actor ledger is reloaded in the background');
+
+  subject.onJobEvent(tagPayload(MACHINE, {
+    type: 'end',
+    job: {
+      ...terminalJob({ id: jobID, userMessageId: userID, assistantMessageId: assistantID }),
+      status: 'cancelled', code: 130, stopReason: 'cancelled',
+    },
+  }));
+  const cancelled = subject.chat(TAB) as Chat;
+  assert.equal(cancelled.messages.length, completeMessages.length);
+  assert.equal(cancelled.messages.at(-1)?.status, 'cancelled');
+  assert.equal(cancelled.messages.at(0)?.content, 'older question');
+});
+
 test('remote settlement survives a session snapshot read before its actor receipt', async () => {
   let currentMirror = mirror([], { presentationRevision: 1 });
   let releaseStaleHydration!: (value: Mirror) => void;

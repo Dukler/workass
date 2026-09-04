@@ -637,6 +637,22 @@ export class Store {
   private preserveUnchangedFullHistories(previous: Chat[], restored: Chat[]) {
     for (const chatId of preserveUnchangedFullHistories(previous, restored)) this.fullHistoriesLoaded.add(chatId);
   }
+  private retainSelectedHistoryDuringRemoteRefresh(previous: Chat[], restored: Chat[]) {
+    const activeId = this.state.activeId;
+    if (!activeId) return;
+    const prior = previous.find((chat) => chat.id === activeId);
+    const next = restored.find((chat) => chat.id === activeId);
+    if (!prior?.historyComplete || !next || next.historyComplete || prior.chatId !== next.chatId) return;
+    // The selected remote chat is a controller-local choice. Its owner daemon
+    // may consider another row active and therefore project this one as
+    // metadata-only in session:get. Never paint that empty transport shape over
+    // a complete transcript already on screen: keep it as an explicitly
+    // provisional view until chat:archive-load atomically supplies the newer
+    // ledger. Runtime events received after the read fence are overlaid below.
+    next.messages = prior.messages;
+    next.messageCount = Math.max(next.messageCount ?? 0, prior.messageCount ?? prior.messages.length);
+    next.historyComplete = false;
+  }
   private requireFullSave() {
     this.markAllChatsDirty();
     this.fullSavePending = true;
@@ -2188,6 +2204,8 @@ export class Store {
       const previousMachineChats = this.state.chats.filter((chat) => ownerMachineId(chat) === machineId);
       this.preserveNewerLocalControls(previousMachineChats, normalized);
       this.restoreDraftImages(previousMachineChats, normalized);
+      this.preserveUnchangedFullHistories(previousMachineChats, normalized);
+      this.retainSelectedHistoryDuringRemoteRefresh(previousMachineChats, normalized);
       this.preserveMatchingHydratedRuntime(previousMachineChats, normalized);
       this.preserveLiveTurnEvents(previousMachineChats, normalized, liveEventFence, machineId);
       for (const chat of normalized) {
@@ -2231,6 +2249,10 @@ export class Store {
         ? `conectada · ${normalized.length} ${normalized.length === 1 ? 'conversación' : 'conversaciones'}`
         : 'conectada, sin conversaciones');
       this.bumpApp(true);
+      const selected = this.active();
+      if (selected && ownerMachineId(selected) === machineId && !selected.historyComplete) {
+        void this.ensureFullHistory(selected.id);
+      }
       // An event that arrived before this machine had any mounted actor row
       // could not be applied safely (job chunks have no replay sequence). One
       // second authoritative read recovers it exactly once from actor state.
