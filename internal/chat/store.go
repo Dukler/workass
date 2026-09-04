@@ -34,9 +34,10 @@ const (
 const providerEventJournalMagic = "WORKASS_PROVIDER_EVENTS\x00\x01"
 
 // providerEventStateStore is the narrow durable fast path used by Engine for
-// high-frequency, effect-free provider observations. The journal remains part
-// of the same logical actor: Load folds it over the canonical snapshot before
-// returning any state, and every ordinary actor save checkpoints it.
+// high-frequency provider observations and the latency-critical terminal
+// receipt. The journal remains part of the same logical actor: Load folds it
+// over the canonical snapshot before returning any state, and every ordinary
+// actor save checkpoints it.
 type providerEventStateStore interface {
 	StateStore
 	commitProviderEvent(baseRevision uint64, next State, command ProviderEventReceived) error
@@ -206,7 +207,7 @@ func (s FileStore) Save(state State) error {
 }
 
 func (s FileStore) commitProviderEvent(baseRevision uint64, next State, command ProviderEventReceived) error {
-	if !journalableProviderEvent(command.Event.Kind) {
+	if !providerEventJournalEligible(command.Event.Kind) {
 		return s.Save(next)
 	}
 	if next.Revision == 0 || baseRevision != next.Revision-1 {
@@ -224,9 +225,21 @@ func (s FileStore) commitProviderEvent(baseRevision uint64, next State, command 
 	}
 	frame, err := encodeProviderEventJournalFrame(record)
 	if err != nil {
+		// Preserve the pre-journal behavior for a pathological terminal payload
+		// that exceeds the bounded record format. It may be slower, but it must not
+		// reject an otherwise valid provider terminal receipt.
+		if command.Event.Kind == provider.EventTurnTerminal {
+			return s.Save(next)
+		}
 		return err
 	}
-	appended, err := appendProviderEventJournalFrame(s.Path, frame)
+	// A terminal receipt must never fall back to rewriting the complete chat
+	// actor merely because the streaming journal is near its ordinary checkpoint
+	// threshold. Long chats can be tens of megabytes, and that rewrite kept the
+	// renderer in "running" for seconds or minutes after the provider had already
+	// ended. The terminal frame itself remains bounded by the record limit; the
+	// next ordinary actor mutation checkpoints it normally.
+	appended, err := appendProviderEventJournalFrame(s.Path, frame, command.Event.Kind == provider.EventTurnTerminal)
 	if err != nil {
 		return err
 	}
@@ -256,6 +269,10 @@ func journalableProviderEvent(kind provider.EventKind) bool {
 	}
 }
 
+func providerEventJournalEligible(kind provider.EventKind) bool {
+	return journalableProviderEvent(kind) || kind == provider.EventTurnTerminal
+}
+
 func providerEventJournalPath(actorPath string) string {
 	return strings.TrimSpace(actorPath) + ".events"
 }
@@ -264,7 +281,7 @@ func encodeProviderEventJournalFrame(record providerEventJournalRecord) ([]byte,
 	if record.Version != providerEventJournalVersion || record.Revision == 0 || record.BaseRevision != record.Revision-1 {
 		return nil, errors.New("provider event journal record has invalid version or revision")
 	}
-	if !journalableProviderEvent(record.Command.Event.Kind) {
+	if !providerEventJournalEligible(record.Command.Event.Kind) {
 		return nil, errors.New("provider event is not eligible for the durable stream journal")
 	}
 	payload, err := json.Marshal(record)
@@ -281,7 +298,7 @@ func encodeProviderEventJournalFrame(record providerEventJournalRecord) ([]byte,
 	return frame, nil
 }
 
-func appendProviderEventJournalFrame(actorPath string, frame []byte) (bool, error) {
+func appendProviderEventJournalFrame(actorPath string, frame []byte, terminal bool) (bool, error) {
 	journalPath := providerEventJournalPath(actorPath)
 	if strings.TrimSpace(actorPath) == "" {
 		return false, errors.New("chat state store path is empty")
@@ -298,7 +315,7 @@ func appendProviderEventJournalFrame(actorPath string, frame []byte) (bool, erro
 	created := false
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		if int64(len(providerEventJournalMagic)+len(frame)) > providerEventJournalCheckpointBytes {
+		if !terminal && int64(len(providerEventJournalMagic)+len(frame)) > providerEventJournalCheckpointBytes {
 			return false, nil
 		}
 		created = true
@@ -342,7 +359,14 @@ func appendProviderEventJournalFrame(actorPath string, frame []byte) (bool, erro
 	if initializedEmpty {
 		additional += int64(len(providerEventJournalMagic))
 	}
-	if originalSize+additional > providerEventJournalCheckpointBytes {
+	journalLimit := int64(providerEventJournalCheckpointBytes)
+	if terminal {
+		// Before a terminal append, every valid ordinary journal is at most the
+		// checkpoint threshold. Permit exactly one bounded terminal record beyond
+		// it; a second terminal cannot be contiguous for the same foreground turn.
+		journalLimit += int64(providerEventJournalMaxRecordBytes) + int64(len(providerEventJournalMagic)) + 8
+	}
+	if originalSize+additional > journalLimit {
 		if err := file.Close(); err != nil {
 			return false, err
 		}
@@ -460,8 +484,8 @@ func replayProviderEventJournal(actorPath string, state State) (State, error) {
 		if record.Revision == 0 || record.BaseRevision != record.Revision-1 {
 			return State{}, errors.New("provider event journal record revision is invalid")
 		}
-		if !journalableProviderEvent(record.Command.Event.Kind) {
-			return State{}, errors.New("provider event journal contains an effectful event")
+		if !providerEventJournalEligible(record.Command.Event.Kind) {
+			return State{}, errors.New("provider event journal contains an ineligible event")
 		}
 		if record.Revision <= state.Revision {
 			continue
@@ -472,14 +496,25 @@ func replayProviderEventJournal(actorPath string, state State) (State, error) {
 		if record.Command.Event.Identity.ChatID != state.ChatID {
 			return State{}, errors.New("provider event journal belongs to another chat")
 		}
-		effects, err := reduceProviderEvent(&state, record.Command)
-		if err != nil {
-			return State{}, err
+		if record.Command.Event.Kind == provider.EventTurnTerminal {
+			// Terminal delivery may promote an explicitly queued turn and therefore
+			// produce a durable outbox effect. Replay through the canonical reducer so
+			// that effect is reconstructed exactly once after a crash.
+			var reduceErr error
+			state, _, reduceErr = Reduce(state, record.Command)
+			if reduceErr != nil {
+				return State{}, reduceErr
+			}
+		} else {
+			effects, reduceErr := reduceProviderEvent(&state, record.Command)
+			if reduceErr != nil {
+				return State{}, reduceErr
+			}
+			if len(effects) != 0 {
+				return State{}, errors.New("streamed provider event journal unexpectedly produced external effects")
+			}
+			state.Revision++
 		}
-		if len(effects) != 0 {
-			return State{}, errors.New("provider event journal unexpectedly produced external effects")
-		}
-		state.Revision++
 		if state.Revision != record.Revision {
 			return State{}, errors.New("provider event journal replay changed actor revision")
 		}
