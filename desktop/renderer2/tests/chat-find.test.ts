@@ -53,7 +53,10 @@ test('the transcript shortcut searches semantic history in a bounded render wind
   assert.match(transcript, /window\.addEventListener\('keydown', onKey, true\)/);
   assert.match(transcript, /event\.stopImmediatePropagation\(\)/);
   assert.match(transcript, /findChatMessageMatches\(visibleMessages, findQuery\)/);
-  assert.match(transcript, /searchStart \+ WINDOW/);
+  assert.match(transcript, /searchStart \+ SEARCH_WINDOW/);
+  assert.match(transcript, /useState\(CHAT_INITIAL_HISTORY\)/);
+  assert.match(transcript, /store\.loadFullHistory\(chat\.id\)/);
+  assert.match(transcript, /store\.loadRecentHistory\(chat\.id, CHAT_MESSAGE_TAIL\)/);
   assert.doesNotMatch(transcript, /setReveal\(total\)/);
   assert.match(transcript, /data-chat-find-message=\{m\.id\}/);
   assert.match(styles, /::highlight\(workass-chat-find-current\)/);

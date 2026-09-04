@@ -641,7 +641,7 @@ export interface WorkassApi {
   createDir?: (parent: string, name: string) => Promise<DirCreateResult>;
   projectIcon?: (chatId: string, cwd: string) => Promise<ProjectIconResult>;
   archiveAppend?: (tabId: string, messages: unknown[]) => Promise<boolean>;
-  archiveLoad?: (tabId: string) => Promise<unknown[]>;
+  archiveLoad?: (tabId: string, options?: { tail?: number }) => Promise<unknown[]>;
   visualizeHost?: (options: { tabId: string; chatId: string; path: string; mode?: 'wide'; title?: string }) => Promise<VisualizationRegistration>;
   appChatNewSession?: (opts: { cwd?: string | null; tabId?: string; chatId?: string; operationId: string; bridgeKey?: string; providerId?: string | null; sessionId?: string; replaceSessionId?: string; workspaceRebind?: boolean; expectedWorkspaceRevision?: number }) => Promise<AcpSessionInfo>;
   // Account-scoped metadata read. It never binds/replaces a chat session and

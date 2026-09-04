@@ -167,45 +167,80 @@ const TYPED_LANGUAGES = new Set(['typescript', 'go', 'rust', 'c', 'cpp', 'csharp
 
 type CodeToken = 'cm' | 'kw' | 'str' | 'num' | 'lit' | 'fn' | 'ty' | 'attr' | 'op';
 
+const CODE_NUMBER = /(?:0[xob][0-9a-f_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:e[+-]?\d[\d_]*)?)/iuy;
+const CODE_IDENTIFIER = /[$@_\p{L}][$@_\p{L}\p{N}]*/uy;
+const CODE_OPERATOR = /(?:===|!==|=>|::|:=|\?\?|&&|\|\||==|!=|<=|>=|\+\+|--|<<|>>|\.\.\.?|[{}[\]();,.<>:+*/%=&|!?~-])/uy;
+const CODE_KEYWORDS = new Map<string, Set<string>>();
+
+function codeTokenAt(pattern: RegExp, raw: string, index: number): string | null {
+  pattern.lastIndex = index;
+  return pattern.exec(raw)?.[0] ?? null;
+}
+
+function isCodeWhitespace(value: string): boolean {
+  const code = value.charCodeAt(0);
+  return code === 32 || (code >= 9 && code <= 13) || code === 160 || /\s/u.test(value);
+}
+
+function codeKeywords(language: string, insensitive: boolean): Set<string> {
+  const cached = CODE_KEYWORDS.get(language);
+  if (cached) return cached;
+  const keywords = new Set(
+    [...COMMON_KEYWORDS, ...(LANGUAGE_KEYWORDS[language] || [])]
+      .map((word) => insensitive ? word.toLowerCase() : word),
+  );
+  CODE_KEYWORDS.set(language, keywords);
+  return keywords;
+}
+
 export function renderCode(raw: string, rawLanguage = '', keyBase = 'c'): ReactNode[] {
   const language = normalizeCodeLanguage(rawLanguage);
   const insensitive = CASE_INSENSITIVE_LANGUAGES.has(language);
-  const keywords = new Set([...COMMON_KEYWORDS, ...(LANGUAGE_KEYWORDS[language] || [])].map((word) => insensitive ? word.toLowerCase() : word));
+  const keywords = codeKeywords(language, insensitive);
   const out: ReactNode[] = [];
   let tokenIndex = 0;
   let index = 0;
+  let plainStart = 0;
+  let previousNonSpace = '';
 
-  const push = (value: string, kind?: CodeToken) => {
-    if (!value) return;
-    if (!kind) out.push(value);
-    else out.push(<span className={`tk-${kind}`} key={`${keyBase}-${tokenIndex++}`}>{value}</span>);
+  const advance = (next: number) => {
+    for (let cursor = next - 1; cursor >= index; cursor -= 1) {
+      if (isCodeWhitespace(raw[cursor])) continue;
+      previousNonSpace = raw[cursor];
+      break;
+    }
+    index = next;
+  };
+  const pushStyled = (next: number, kind: CodeToken) => {
+    if (index > plainStart) out.push(raw.slice(plainStart, index));
+    const value = raw.slice(index, next);
+    out.push(<span className={`tk-${kind}`} key={`${keyBase}-${tokenIndex++}`}>{value}</span>);
+    advance(next);
+    plainStart = next;
   };
   const lineStart = (at: number) => at === 0 || raw[at - 1] === '\n';
   const hashStartsComment = (at: number) => HASH_COMMENT_LANGUAGES.has(language)
-    && (lineStart(at) || /\s/u.test(raw[at - 1] || ''));
+    && (lineStart(at) || isCodeWhitespace(raw[at - 1] || ''));
 
   while (index < raw.length) {
-    const rest = raw.slice(index);
-
-    if (rest.startsWith('<!--')) {
+    if (raw.startsWith('<!--', index)) {
       const end = raw.indexOf('-->', index + 4);
       const next = end < 0 ? raw.length : end + 3;
-      push(raw.slice(index, next), 'cm');
-      index = next;
+      pushStyled(next, 'cm');
       continue;
     }
-    if (rest.startsWith('/*')) {
+    if (raw.startsWith('/*', index)) {
       const end = raw.indexOf('*/', index + 2);
       const next = end < 0 ? raw.length : end + 2;
-      push(raw.slice(index, next), 'cm');
-      index = next;
+      pushStyled(next, 'cm');
       continue;
     }
-    if (rest.startsWith('//') || (DASH_COMMENT_LANGUAGES.has(language) && rest.startsWith('--')) || (raw[index] === '#' && hashStartsComment(index))) {
+    if (raw.startsWith('//', index)
+      || (DASH_COMMENT_LANGUAGES.has(language) && raw.startsWith('--', index))
+      || (raw[index] === '#' && hashStartsComment(index))) {
       const end = raw.indexOf('\n', index);
       const next = end < 0 ? raw.length : end;
-      push(raw.slice(index, next), 'cm');
-      index = next;
+      pushStyled(next, 'cm');
       continue;
     }
 
@@ -217,46 +252,43 @@ export function renderCode(raw: string, rawLanguage = '', keyBase = 'c'): ReactN
         if (raw[next] === quote) { next += 1; break; }
         next += 1;
       }
-      push(raw.slice(index, Math.min(next, raw.length)), 'str');
-      index = Math.min(next, raw.length);
+      pushStyled(Math.min(next, raw.length), 'str');
       continue;
     }
 
-    const number = rest.match(/^(?:0[xob][0-9a-f_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:e[+-]?\d[\d_]*)?)/iu);
+    const number = codeTokenAt(CODE_NUMBER, raw, index);
     if (number) {
-      push(number[0], 'num');
-      index += number[0].length;
+      pushStyled(index + number.length, 'num');
       continue;
     }
 
-    const identifier = rest.match(/^[$@_\p{L}][$@_\p{L}\p{N}]*/u);
+    const identifier = codeTokenAt(CODE_IDENTIFIER, raw, index);
     if (identifier) {
-      const value = identifier[0];
+      const value = identifier;
       const comparable = insensitive ? value.toLowerCase() : value;
-      const tail = raw.slice(index + value.length);
-      const nextNonSpace = tail.match(/^\s*(.)/su)?.[1] || '';
-      const previous = raw.slice(0, index).match(/\S(?=\s*$)/su)?.[0] || '';
+      let nextIndex = index + value.length;
+      while (nextIndex < raw.length && isCodeWhitespace(raw[nextIndex])) nextIndex += 1;
+      const nextNonSpace = raw[nextIndex] || '';
       let kind: CodeToken | undefined;
       if (LITERAL_WORDS.has(comparable.toLowerCase())) kind = 'lit';
       else if (keywords.has(comparable)) kind = 'kw';
       else if (TYPE_WORDS.has(comparable.toLowerCase()) || (TYPED_LANGUAGES.has(language) && /^\p{Lu}/u.test(value))) kind = 'ty';
       else if (nextNonSpace === '(') kind = 'fn';
       else if ((language === 'yaml' || language === 'css' || language === 'toml') && nextNonSpace === ':') kind = 'attr';
-      else if (language === 'markup' && (previous === '<' || previous === '/')) kind = 'ty';
-      push(value, kind);
-      index += value.length;
+      else if (language === 'markup' && (previousNonSpace === '<' || previousNonSpace === '/')) kind = 'ty';
+      if (kind) pushStyled(index + value.length, kind);
+      else advance(index + value.length);
       continue;
     }
 
-    const operator = rest.match(/^(?:===|!==|=>|::|:=|\?\?|&&|\|\||==|!=|<=|>=|\+\+|--|<<|>>|\.\.\.?|[{}[\]();,.<>:+*/%=&|!?~-])/u);
+    const operator = codeTokenAt(CODE_OPERATOR, raw, index);
     if (operator) {
-      push(operator[0], 'op');
-      index += operator[0].length;
+      pushStyled(index + operator.length, 'op');
       continue;
     }
 
-    push(raw[index]);
-    index += 1;
+    advance(index + 1);
   }
+  if (plainStart < raw.length) out.push(raw.slice(plainStart));
   return out;
 }

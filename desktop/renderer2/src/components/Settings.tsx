@@ -11,12 +11,13 @@
 //    defaults shown read-only (no channel exposes them — no fake persistence).
 //  - Apariencia: theme + density, persisted locally.
 
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type { MachineView, SettingsSection } from '../store/types';
-import type { LanDevice, AccessRequest, ProcessSummary, ProviderRecord, ProviderUpdate } from '../wire/types';
-import { store, useApp, useProc } from '../store/store';
+import type { LanDevice, AccessRequest, ProcessSummary, ProviderRecord } from '../wire/types';
+import { store, useApp, useProc, type ProviderSettingsMachine } from '../store/store';
 import { call, has } from '../wire/api';
 import { normalizeMachineNickname } from '../machine-nickname';
+import { hasModelIcon, ModelIcon, providerIconBrand } from '../icons';
 import {
   countScoredModels, getModelScore, groupModelsForScoring, isEmptyScore,
   normalizeNote, NOTE_MAX, SCORE_DIMENSIONS, SCORE_MAX, SCORE_MIN,
@@ -70,83 +71,6 @@ function accentHex(): string {
   return getComputedStyle(document.documentElement).getPropertyValue('--acc').trim() || '#4fa583';
 }
 
-// Copy an upgrade command to the clipboard — notify-only, workass never runs it.
-function copyHint(hint: string) {
-  const done = () => store.addToast('Comando copiado', hint);
-  try {
-    const p = navigator.clipboard?.writeText(hint);
-    if (p && typeof p.then === 'function') { p.then(done).catch(() => store.addToast('Comando', hint)); }
-    else done();
-  } catch { store.addToast('Comando', hint); }
-}
-// Last non-empty line of a redacted updater tail (single truncated line under
-// the row while running / on failure).
-function tailLine(tail: string | undefined): string {
-  if (!tail) return '';
-  const lines = tail.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  return lines.length ? lines[lines.length - 1] : '';
-}
-// Secondary copy-command chip — manual fallback; workass never runs this itself.
-function CopyChip({ hint }: { hint: string }) {
-  return (
-    <code className="cli-hint" role="button" tabIndex={0} title="Copiar comando"
-      onClick={() => copyHint(hint)}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); copyHint(hint); } }}>{hint}</code>
-  );
-}
-function CliUpdateRow({ u }: { u: ProviderUpdate }) {
-  const app = useApp();
-  const prog = app.updateProgress[u.providerId];
-  const running = prog?.status === 'running';
-  // Failure surfaces from the live 'failed' snapshot, or — after a reload where
-  // the progress event was missed — from the entry's replayed failure fields.
-  const failed = prog?.status === 'failed' || (!prog && !!u.lastError);
-  const errText = prog?.error ?? u.lastError;
-  const exitCode = prog?.exitCode ?? u.exitCode;
-  const tail = tailLine(running ? prog?.tail : (prog?.tail ?? u.tail));
-  const canUpdate = has('providersUpdate');
-  const connected = app.connection === 'connected';
-  const disabled = running || !connected;
-
-  return (
-    <div className="lrow cli-lrow">
-      <div className="ic mono">{(u.cli || '?').charAt(0)}</div>
-      <div className="body">
-        <div className="nm">{u.cli}{u.updateAvailable && <span className="badge acc">Actualización</span>}</div>
-        <div className="mt">CLI {u.installed}{u.updateAvailable && <span className="upd-to"> → {u.latest}</span>}</div>
-        {running && <div className="cli-prog mono">{tail || 'iniciando…'}</div>}
-        {failed && !running && (
-          <div className="cli-err">
-            No se pudo actualizar{typeof exitCode === 'number' ? ` (código ${exitCode})` : ''}
-            {errText ? ` · ${errText}` : ''}
-            {tail && <span className="cli-err-tail mono"> — {tail}</span>}
-          </div>
-        )}
-      </div>
-      <div className="act cli-act">
-        {u.updateAvailable && canUpdate ? (
-          <>
-            <button
-              className="btn sm accq"
-              disabled={disabled}
-              title={connected ? undefined : 'Sin conexión con el daemon'}
-              onClick={() => void store.updateProvider(u.providerId)}
-            >
-              {running ? <><span className="btnspin" aria-hidden="true" />Actualizando…</> : failed ? 'Reintentar' : 'Actualizar'}
-            </button>
-            {!running && u.hint && <CopyChip hint={u.hint} />}
-          </>
-        ) : u.updateAvailable && u.hint ? (
-          // Older bridge without providers:update → the copy command stays primary.
-          <CopyChip hint={u.hint} />
-        ) : (
-          <span className="stat"><span className="dot run" />al día</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ---- 1 · Agentes ---------------------------------------------------------
 function providerStatusLabel(provider: ProviderRecord): string {
   if (provider.disabledByUser) return 'Desactivado';
@@ -160,51 +84,70 @@ function providerStatusLabel(provider: ProviderRecord): string {
     default: return status || 'Desconocido';
   }
 }
-function AgentProviderRow({ provider }: { provider: ProviderRecord }) {
+function AgentProviderRow({ provider, machine }: { provider: ProviderRecord; machine: ProviderSettingsMachine }) {
   const app = useApp();
   const [saving, setSaving] = useState(false);
-  const group = app.groups.find((g) => g.providerId === provider.id);
-  const modelCount = group?.models?.length ?? 0;
+  const group = machine.remote ? undefined : app.groups.find((g) => g.providerId === provider.id);
   const ready = provider.status === 'ready';
   const active = !provider.disabledByUser;
   const retryable = active && (provider.status === 'needs-login' || provider.status === 'error' || provider.status === 'inactive');
-  const detail = provider.disabledByUser
-    ? 'Oculto del selector de modelos y de las actualizaciones.'
-    : provider.fixHint || provider.error || provider.message || provider.resolvedCommand
-      || (provider.status === 'not-found' ? 'CLI no encontrado en esta máquina.' : 'Esperando comprobación del agente.');
-  const canToggle = has('providersToggle');
+  const brand = providerIconBrand(provider.id, provider.assistantBrand || group?.assistantBrand);
+  const hasBrandIcon = hasModelIcon(brand);
+  const label = provider.name || provider.id;
+  const statusLabel = providerStatusLabel(provider);
+  const issue = active && !ready && provider.status !== 'inactive'
+    ? provider.fixHint || provider.error || provider.message
+      || (provider.status === 'not-found' ? `CLI no encontrado en ${machine.name}.` : statusLabel)
+    : '';
+  const statusClass = !active ? 'off' : ready ? 'run' : provider.status === 'error' ? 'error' : provider.status === 'needs-login' || provider.status === 'not-found' ? 'warn' : 'off';
+  const canToggle = has('providersToggle') && machine.connected;
   const toggle = async () => {
     if (!canToggle || saving) return;
     setSaving(true);
-    try { await store.toggleProvider(provider.id, !active); }
+    try { await store.toggleProvider(provider.id, !active, machine.machineId); }
     finally { setSaving(false); }
   };
   return (
-    <div className={`lrow agent-provider-row ${provider.disabledByUser ? 'disabled' : ''} ${ready ? 'ready' : ''}`}>
-      <div className="ic mono agent-provider-icon">{(provider.name || provider.id || '?').charAt(0)}</div>
+    <div className={`lrow agent-provider-row ${provider.disabledByUser ? 'disabled' : ''} ${ready ? 'ready' : ''}`} role="listitem">
+      <div className="agent-provider-icon-wrap" role="img" aria-label={`${label} en ${machine.name}: ${statusLabel}`} title={statusLabel}>
+        <div className={`ic agent-provider-icon ${hasBrandIcon ? 'brand' : 'mono'}`}>
+          {hasBrandIcon ? <ModelIcon provider={brand} /> : label.charAt(0)}
+        </div>
+        <span className={`agent-status-dot ${statusClass}`} aria-hidden="true" />
+      </div>
       <div className="body">
-        <div className="nm">{provider.name || provider.id}<span className="badge agent-kind">{provider.badge === 'native' ? 'local' : 'ACP'}</span></div>
-        <div className={`mt agent-detail ${provider.status === 'needs-login' || provider.status === 'error' ? 'cli-err' : ''}`}>{detail}</div>
+        <div className="nm">{label}</div>
+        <div
+          className={`agent-provider-location ${machine.remote ? 'remote' : 'local'}`}
+          title={`${machine.remote ? 'Agente remoto' : 'Agente en este equipo'} · ${machine.name}${machine.connected ? '' : ' · sin conexión'}`}
+        >
+          <span className="agent-provider-location-icon" aria-hidden="true">
+            {machine.remote
+              ? <Svg><path d="M6.5 5.2l1.2-1.2a2.3 2.3 0 013.3 3.3L9.8 8.5M9.5 10.8 8.3 12a2.3 2.3 0 01-3.3-3.3l1.2-1.2M6.4 9.6l3.2-3.2" /></Svg>
+              : NavIcon.maquinas}
+          </span>
+          <span className="agent-provider-location-kind">{machine.remote ? 'Remoto' : 'Este equipo'}</span>
+          <span className="agent-provider-location-separator" aria-hidden="true">·</span>
+          <span className="agent-provider-location-machine">{machine.name}</span>
+          {!machine.connected && <span className="agent-provider-location-offline">sin conexión</span>}
+        </div>
+        {issue && <div className={`agent-provider-issue ${provider.status === 'error' ? 'error' : ''}`}>{issue}</div>}
       </div>
       <div className="act agent-provider-actions">
-        <div className="agent-provider-state">
-          <span className="stat"><span className={`dot ${ready && active ? 'run' : provider.status === 'needs-login' ? 'warn' : ''}`} />{providerStatusLabel(provider)}</span>
-          {active && modelCount > 0 && <span className="badge">{modelCount} {modelCount === 1 ? 'modelo' : 'modelos'}</span>}
-        </div>
-        {retryable && has('providersDetect') && (
-          <button className="btn sm" onClick={() => void store.detectProvider(provider.id)}>Comprobar de nuevo</button>
+        {retryable && has('providersDetect') && machine.connected && (
+          <button className="btn sm" onClick={() => void store.detectProvider(provider.id, machine.machineId)}>Comprobar de nuevo</button>
         )}
         {canToggle && (
           <button
             className={`agent-switch ${active ? 'on' : ''}`}
             role="switch"
             aria-checked={active}
-            aria-label={`${active ? 'Desactivar' : 'Activar'} ${provider.name || provider.id}`}
+            aria-label={`${active ? 'Desactivar' : 'Activar'} ${provider.name || provider.id} en ${machine.name}`}
             title={active ? 'Ocultar agente' : 'Mostrar agente'}
             disabled={saving}
+            aria-busy={saving}
             onClick={() => void toggle()}
           >
-            <span className="agent-switch-text">{saving ? 'Guardando…' : active ? 'Activado' : 'Desactivado'}</span>
             <span className="agent-switch-track" aria-hidden="true"><span /></span>
           </button>
         )}
@@ -214,42 +157,34 @@ function AgentProviderRow({ provider }: { provider: ProviderRecord }) {
 }
 function AgentesPanel() {
   const app = useApp();
-  const updates = app.providersUpdates;
+  const machines = store.providerSettingsMachines();
+  const agentRows = machines.flatMap((machine) => machine.providers.map((provider) => ({ machine, provider })));
   const acp = app.daemonConfig?.acp;
   const provider = (acp?.provider || '').trim();
   const command = [acp?.command, ...(Array.isArray(acp?.args) ? (acp!.args as unknown[]).map(String) : [])]
     .filter(Boolean).join(' ');
   const name = provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : 'Agente ACP';
   const connected = app.chats.some((c) => c.sessionId);
-  const models = app.groups.reduce((count, group) => count + group.models.length, 0);
   const canProbe = has('appChatDetectAcp');
-  const readyProviders = app.providers.filter((item) => item.status === 'ready' && !item.disabledByUser).length;
-  const disabledProviders = app.providers.filter((item) => item.disabledByUser).length;
+  const hasProviderRegistry = has('providersList') || app.providers.length > 0 || app.machines.length > 0;
+
+  useEffect(() => { void store.refreshProviderSettings(); }, []);
 
   return (
     <section className="stgs-panel">
       <div className="phead agent-phead">
         <h2>Agentes</h2>
-        <p>Elegí qué agentes usa Workass en esta máquina. Cada CLI conserva su propia sesión y autenticación.</p>
+        <p>Elegí qué agentes aparecen en cada computadora. Cada CLI conserva allí su propia sesión y autenticación.</p>
       </div>
 
-      <div className="agent-summary" aria-label="Resumen de agentes">
-        <div><strong>{readyProviders}</strong><span>{readyProviders === 1 ? 'listo' : 'listos'}</span></div>
-        <span className="agent-summary-rule" />
-        <div><strong>{disabledProviders}</strong><span>{disabledProviders === 1 ? 'desactivado' : 'desactivados'}</span></div>
-        <p>Los agentes desactivados no aparecen en el selector de modelos ni reciben avisos de actualización.</p>
-      </div>
-
-      <div className="gtitle">Agentes disponibles</div>
-      {app.providers.length > 0 ? (
-        <>
-          <div className="group agent-provider-group">
-            {app.providers.map((p) => <AgentProviderRow key={p.id} provider={p} />)}
-          </div>
-          <div className="ghint">
-            El login siempre se hace en el CLI oficial. Si un agente indica “Requiere login”, seguí la instrucción mostrada y después tocá <b>Comprobar de nuevo</b>.
-          </div>
-        </>
+      {hasProviderRegistry ? (
+        <div className="agent-provider-group" role="list" aria-label="Agentes por ubicación">
+          {agentRows.length > 0 ? agentRows.map(({ machine, provider }) => (
+            <AgentProviderRow key={`${machine.machineId || 'local'}:${provider.id}`} provider={provider} machine={machine} />
+          )) : (
+            <div className="agent-provider-empty">Sin agentes detectados</div>
+          )}
+        </div>
       ) : app.hasConfigChannel && acp ? (
         <>
           <div className="group">
@@ -260,8 +195,7 @@ function AgentesPanel() {
                 <div className="mt">{command || '—'}</div>
               </div>
               <div className="act">
-                <span className="stat"><span className={`dot ${connected ? 'run' : ''}`} />{connected ? 'Conectado' : 'Configurado'}</span>
-                {models > 0 && <span className="badge">{models} {models === 1 ? 'modelo' : 'modelos'}</span>}
+                <span className={`agent-status-dot legacy ${connected ? 'run' : 'off'}`} role="img" aria-label={connected ? 'Conectado' : 'Configurado'} />
                 {canProbe && <button className="btn sm" onClick={() => void call('appChatDetectAcp', acp ? { command: acp.command, args: acp.args, provider: acp.provider } : {})}>Probar</button>}
               </div>
             </div>
@@ -272,18 +206,6 @@ function AgentesPanel() {
         <div className="group"><div className="lrow"><div className="body"><span className="empty">El daemon no expone la configuración de agentes (config:get).</span></div></div></div>
       )}
 
-      {updates.length > 0 && (
-        <>
-          <div className="gtitle">Versiones de CLIs</div>
-          <div className="group">
-            {updates.map((u) => <CliUpdateRow key={u.providerId} u={u} />)}
-          </div>
-          <div className="ghint">
-            workass compara la versión instalada de cada CLI con la última publicada. Tocá <b>Actualizar</b> y el daemon corre el
-            actualizador oficial del CLI en el acto; el progreso aparece acá mismo. El comando queda como alternativa manual.
-          </div>
-        </>
-      )}
     </section>
   );
 }

@@ -1,12 +1,14 @@
 export type ComposerSubmitIntent = 'send' | 'queue' | 'steer';
+export type ComposerSubmitModifiers = { metaKey: boolean; ctrlKey: boolean };
 
 // The user-facing law while a turn is running: ordinary Enter is a durable FIFO
-// follow-up; Command+Enter is an explicit attempt to change the active turn.
+// follow-up; Command+Enter on macOS or Ctrl+Enter elsewhere is an explicit
+// attempt to change the active turn.
 // Idle chats always send normally. Shift+Enter is handled by the textarea and
 // never reaches this resolver.
-export function composerSubmitIntent(running: boolean, metaKey: boolean): ComposerSubmitIntent {
+export function composerSubmitIntent(running: boolean, modifiers: ComposerSubmitModifiers): ComposerSubmitIntent {
   if (!running) return 'send';
-  return metaKey ? 'steer' : 'queue';
+  return modifiers.metaKey || modifiers.ctrlKey ? 'steer' : 'queue';
 }
 
 // A definite steer rejection returns ownership of that exact input to the

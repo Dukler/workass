@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { copyImageAt, installImageCopyMenu, openImageExternally } = require('./image-copy');
+const { copyImageAt, copyText, installImageCopyMenu, openImageExternally } = require('./image-copy');
 
 class FakeWebContents extends EventEmitter {
   constructor() {
@@ -68,6 +68,16 @@ test('keyboard copy coordinates are bounded to the owning window', () => {
   assert.deepEqual(webContents.copies, [{ x: 120, y: 89 }]);
 });
 
+test('native text copy writes exact code bytes and fails closed', () => {
+  const writes = [];
+  const clipboard = { writeText: (value) => { writes.push(value); } };
+  const raw = 'line 1\r\n  line 2\n';
+  assert.equal(copyText(clipboard, raw), true);
+  assert.deepEqual(writes, [raw]);
+  assert.equal(copyText(clipboard, null), false);
+  assert.equal(copyText({ writeText: () => { throw new Error('clipboard unavailable'); } }, raw), false);
+});
+
 test('external image open materializes validated raster bytes for the OS default viewer', async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-image-open-test-'));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
@@ -104,4 +114,12 @@ test('preload and main wire the external image action through an owned IPC handl
   assert.match(main, /ipcMain\.handle\('workass-image:open-external'/);
   assert.match(main, /if \(!own\(event\)\) return false/);
   assert.match(main, /openImageExternally\(payload, \{[^}]*shell \}\)/);
+});
+
+test('preload and main wire native text copy through an owned IPC handler', () => {
+  const preload = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.match(preload, /copyText:[^\n]*workass-clipboard:copy-text/);
+  assert.match(main, /ipcMain\.handle\('workass-clipboard:copy-text'/);
+  assert.match(main, /own\(event\) \? copyText\(clipboard, text\) : false/);
 });

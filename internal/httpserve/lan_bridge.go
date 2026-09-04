@@ -183,7 +183,7 @@ const LANBridgeJS = `(() => {
     // so a remote view records here and sends the audio to whichever daemon owns
     // the chat — the reverse would record a machine with nobody in front of it.
     voiceStatus: () => invoke('voice:status'), voiceTranscribe: (audio, lang, vocab) => invoke('voice:transcribe', { audio, lang, vocab }),
-    archiveAppend: (tabId, messages) => invoke('chat:archive-append', { tabId, messages }), archiveLoad: (tabId) => invoke('chat:archive-load', tabId), visualizeHost: (o) => invoke('visualize:host', o),
+    archiveAppend: (tabId, messages) => invoke('chat:archive-append', { tabId, messages }), archiveLoad: (tabId, options) => invoke('chat:archive-load', tabId, options), visualizeHost: (o) => invoke('visualize:host', o),
     refresh: () => invoke('teams:refresh'), jiraSync: () => invoke('jira:sync'), deployAuth: (o) => invoke('deploy:auth', o), startJob: (o) => invoke('job:start', o), cancelJob: (id) => invoke('job:cancel', id), killTerminal: (t) => invoke('chat:kill-terminal', t),
     procList: () => invoke('proc:list'), procRead: (id) => invoke('proc:read', id), procKill: (id, tree) => invoke('proc:kill', { id, tree }), procKillAll: () => invoke('proc:kill-all'),
     clearActivity: (id) => invoke('activity:clear', id), appChatReset: () => invoke('app-chat:reset'), appChatNewSession: (o) => invoke('app-chat:new-session', o), appChatRefreshPlanUsage: (providerId) => invoke('app-chat:refresh-plan-usage', { providerId }),

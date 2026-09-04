@@ -52,6 +52,7 @@ func registerVisualizeHandler(hub *wire.Hub, registry *artifacthost.Registry, pr
 		if !state.Initialized || state.Deleted {
 			return nil, errors.New("visualization chat is not an active actor")
 		}
+		workspaceCWD := visualizationWorkspaceCWD(state)
 
 		mode, title, err := visualizeRequestPresentation(arg)
 		if err != nil {
@@ -79,7 +80,7 @@ func registerVisualizeHandler(hub *wire.Hub, registry *artifacthost.Registry, pr
 			// operation still prepares the capture so its immutable target can be
 			// checked before dispatch.
 			if !exists || existing.Status == chat.OutboxPending {
-				capture, prepareErr = prepareVisualizeCapture(rawPath, stateDir, mode, title, identityDigest)
+				capture, prepareErr = prepareVisualizeCaptureForWorkspace(rawPath, stateDir, workspaceCWD, mode, title, identityDigest)
 				captureReady = prepareErr == nil
 			}
 		} else {
@@ -87,7 +88,7 @@ func registerVisualizeHandler(hub *wire.Hub, registry *artifacthost.Registry, pr
 			// lets the immutable captured-content digest participate in the
 			// derived id, so overwriting one temp path is a new request rather than
 			// a permanent reuse conflict.
-			capture, prepareErr = prepareVisualizeCapture(rawPath, stateDir, mode, title, identityDigest)
+			capture, prepareErr = prepareVisualizeCaptureForWorkspace(rawPath, stateDir, workspaceCWD, mode, title, identityDigest)
 			captureReady = prepareErr == nil
 			if captureReady {
 				operationID = derivedVisualizeOperationID(identityDigest, capture)
@@ -251,7 +252,11 @@ func visualizeRequestIdentityDigest(tabID, chatID, rawPath, mode, title string) 
 }
 
 func prepareVisualizeCapture(rawPath, stateDir, mode, title, identityDigest string) (visualizeCapture, error) {
-	sourcePath, err := resolveVisualizationPath(rawPath, stateDir)
+	return prepareVisualizeCaptureForWorkspace(rawPath, stateDir, "", mode, title, identityDigest)
+}
+
+func prepareVisualizeCaptureForWorkspace(rawPath, stateDir, workspaceCWD, mode, title, identityDigest string) (visualizeCapture, error) {
+	sourcePath, err := resolveVisualizationPathForWorkspace(rawPath, stateDir, workspaceCWD)
 	if err != nil {
 		return visualizeCapture{}, err
 	}
@@ -395,6 +400,10 @@ func safeVisualizeError(err error) error {
 }
 
 func resolveVisualizationPath(rawPath, stateDir string) (string, error) {
+	return resolveVisualizationPathForWorkspace(rawPath, stateDir, "")
+}
+
+func resolveVisualizationPathForWorkspace(rawPath, stateDir, workspaceCWD string) (string, error) {
 	rawPath = strings.TrimSpace(rawPath)
 	if rawPath == "" {
 		return "", fmt.Errorf("visualization path is required")
@@ -418,7 +427,7 @@ func resolveVisualizationPath(rawPath, stateDir string) (string, error) {
 	if err != nil || !info.Mode().IsRegular() {
 		return "", fmt.Errorf("visualization path is not a regular file")
 	}
-	for _, root := range visualizationRoots(stateDir) {
+	for _, root := range visualizationRootsForWorkspace(stateDir, workspaceCWD) {
 		canonicalRoot, rootErr := filepath.EvalSymlinks(root)
 		if rootErr != nil {
 			continue
@@ -431,6 +440,10 @@ func resolveVisualizationPath(rawPath, stateDir string) (string, error) {
 }
 
 func visualizationRoots(stateDir string) []string {
+	return visualizationRootsForWorkspace(stateDir, "")
+}
+
+func visualizationRootsForWorkspace(stateDir, workspaceCWD string) []string {
 	stateDir = filepath.Clean(strings.TrimSpace(stateDir))
 	if stateDir == "." || stateDir == "" {
 		return nil
@@ -451,7 +464,24 @@ func visualizationRoots(stateDir string) []string {
 	if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
 		roots = append(roots, filepath.Join(appData, "Workass", "visualizations"))
 	}
+	// Visualizations are executor-owned artifacts, not source files. The
+	// visualize contract places them in one exact sibling of the chat's working
+	// directory so they stay outside the checkout without granting access to an
+	// arbitrary parent directory.
+	workspaceCWD = filepath.Clean(strings.TrimSpace(workspaceCWD))
+	if filepath.IsAbs(workspaceCWD) && workspaceCWD != string(filepath.Separator) {
+		roots = append(roots, workspaceCWD+"-visualizations")
+	}
 	return roots
+}
+
+func visualizationWorkspaceCWD(state chat.State) string {
+	if state.Presentation.CWD != nil {
+		if cwd := strings.TrimSpace(*state.Presentation.CWD); cwd != "" {
+			return cwd
+		}
+	}
+	return strings.TrimSpace(state.Environment.CWD)
 }
 
 func visualizationWithin(root, candidate string) bool {

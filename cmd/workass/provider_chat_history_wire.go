@@ -35,6 +35,21 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 		if providerChats == nil {
 			return nil, os.ErrInvalid
 		}
+		// The original positional tab id still means the complete ledger. Newer
+		// renderers may add {tail:N}; older daemons ignore the extra argument and
+		// older renderers keep receiving the byte-identical full response.
+		if len(args) > 1 {
+			options := mapFromAnyMain(args[1])
+			if rawLimit, requested := options["tail"]; requested {
+				limit := intValue(rawLimit)
+				if messages, found, err := providerChats.ProjectRecentArchiveByTab(stringArg(args, 0), limit); err != nil {
+					return nil, err
+				} else if found {
+					return messages, nil
+				}
+				return []any{}, nil
+			}
+		}
 		if messages, found, err := providerChats.ProjectArchiveByTab(stringArg(args, 0)); err != nil {
 			return nil, err
 		} else if found {

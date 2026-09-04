@@ -41,6 +41,23 @@ func TestActorHistoryProjectionMaterializesOnlyRequestedTail(t *testing.T) {
 	if first := fieldString(mapFromAnyMain(rows[0]), "id"); first != "message-25" {
 		t.Fatalf("bounded history began at %q, want message-25", first)
 	}
+	recent := map[string]any{}
+	if err := projectActorChatWithHistoryLimit(recent, state, actorHistoryTail, 10); err != nil {
+		t.Fatal(err)
+	}
+	recentRows := anySlice(recent["messages"])
+	if len(recentRows) != 10 || intValue(recent["messageCount"]) != 85 || recent["historyComplete"] != false {
+		t.Fatalf("recent history metadata = rows:%d count:%v complete:%v", len(recentRows), recent["messageCount"], recent["historyComplete"])
+	}
+	if first := fieldString(mapFromAnyMain(recentRows[0]), "id"); first != "message-75" {
+		t.Fatalf("recent history began at %q, want message-75", first)
+	}
+	if err := projectActorChatWithHistoryLimit(map[string]any{}, state, actorHistoryTail, 0); err == nil {
+		t.Fatal("zero recent history limit must be rejected instead of falling back to a full projection")
+	}
+	if err := projectActorChatWithHistoryLimit(map[string]any{}, state, actorHistoryTail, sessionProjectionMessageTail+1); err == nil {
+		t.Fatal("oversized recent history limit must be rejected")
+	}
 	if fieldString(bounded, "settled") != "settled" || intValue(bounded["settledAt"]) != 1_787_000_000_000 {
 		t.Fatalf("bounded presentation archive state = %#v", bounded)
 	}

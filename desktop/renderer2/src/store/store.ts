@@ -22,7 +22,7 @@ import { chooseWorkspacePath, inheritChatControls, normalizeWorkspacePath, norma
 import { WorkspaceMoveGate, workspaceMoveAccepted, workspaceRebindSupported } from '../workspace-move';
 import { chatPane, nextPane, type RightPane } from './right-pane';
 import { actorMessages } from '../chat/history';
-import { preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
+import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
 import { redactSensitiveText } from '../redact';
 import { resolveModelSelection } from '../model-selection';
 import { adoptsTerminalJobResult, appendAssistantChunk } from '../assistant-output.ts';
@@ -373,6 +373,15 @@ function globalPresentationFingerprint(
   ]);
 }
 
+export interface ProviderSettingsMachine {
+  machineId: string;
+  name: string;
+  remote: boolean;
+  connected: boolean;
+  reason: string;
+  providers: ProviderRecord[];
+}
+
 export class Store {
   state: AppState;
   private versions = new Map<string, number>();
@@ -420,15 +429,27 @@ export class Store {
   // installed and every call takes exactly the path it took before.
   private machines: MachineRegistry | null = null;
   private selfMachineId = '';
+  private selfMachineName = '';
   private machineNameMap: Record<string, string> = {};
   // Catalog snapshots are daemon-memory-only and machine-wide. Local remains
   // in AppState because Settings owns this daemon; remotes are partitioned by
   // immutable machine id so a chat never sees models installed somewhere else.
   private remoteCatalogGroups = new Map<string, CatalogGroup[]>();
+  // Provider state is owned by the daemon that owns the CLI. Remote snapshots
+  // stay partitioned here and can never replace this machine's Settings rows.
+  private remoteProviderRecords = new Map<string, ProviderRecord[]>();
   // Full actor history loads per chat, on demand. Session snapshots carry only
   // a bounded tail; these sets track complete read projections in memory.
   private fullHistoriesLoaded = new Set<string>();
   private fullHistoryLoads = new Map<string, Promise<void>>();
+  // Idle chats are metadata-only in session:get. Navigation asks the same
+  // read-only archive channel for a tiny recent slice before handoff, so a
+  // screenshot-heavy ledger is not expanded merely to paint the viewport.
+  private recentHistoryLoads = new Map<string, Promise<void>>();
+  // Keep a selected resident tail on screen while a metadata-only refresh with
+  // a newer actor revision is reconciled. This is renderer residency state,
+  // never transcript authority.
+  private staleRecentHistories = new Set<string>();
   // Chat creation is an immediate actor command. Keep only the optimistic row
   // mounted until the authoritative snapshot echoes its id; the operation id
   // and in-flight promise ensure every later draft/queue/session operation waits
@@ -502,11 +523,10 @@ export class Store {
   // subscribes after the event arrived. Cache a bounded response so replay can
   // acknowledge the same request without executing a second remote mutation.
   private agentRouteResponses = new Map<string, Omit<AgentRouteResponse, 'requestId'>>();
-  // An inactive actor row may carry metadata or a bounded tail only. Keep the
-  // current transcript mounted while the clicked row loads its complete ledger,
-  // and let only the newest selection intent perform the atomic handoff.
+  // An inactive actor row may be metadata-only. Keep the current transcript
+  // mounted for the tiny recent-slice read, and let only the newest selection
+  // intent perform the handoff. Resident tails activate synchronously.
   private chatSelectionVersion = 0;
-  private pendingChatSelection: { version: number; id: string; previousActiveId: string | null } | null = null;
   private sessionHydrationPending = false;
   private digestProbe: Promise<void> | null = null;
   private syncScopes = new Set<SyncScope>();
@@ -637,21 +657,27 @@ export class Store {
   private preserveUnchangedFullHistories(previous: Chat[], restored: Chat[]) {
     for (const chatId of preserveUnchangedFullHistories(previous, restored)) this.fullHistoriesLoaded.add(chatId);
   }
-  private retainSelectedHistoryDuringRemoteRefresh(previous: Chat[], restored: Chat[]) {
+  private retainSelectedHistoryDuringRefresh(previous: Chat[], restored: Chat[]) {
     const activeId = this.state.activeId;
     if (!activeId) return;
     const prior = previous.find((chat) => chat.id === activeId);
     const next = restored.find((chat) => chat.id === activeId);
-    if (!prior?.historyComplete || !next || next.historyComplete || prior.chatId !== next.chatId) return;
-    // The selected remote chat is a controller-local choice. Its owner daemon
-    // may consider another row active and therefore project this one as
-    // metadata-only in session:get. Never paint that empty transport shape over
-    // a complete transcript already on screen: keep it as an explicitly
-    // provisional view until chat:archive-load atomically supplies the newer
-    // ledger. Runtime events received after the read fence are overlaid below.
+    if (!next) return;
+    if (next.messages.length > 0) {
+      this.staleRecentHistories.delete(next.id);
+      return;
+    }
+    if (!prior?.messages.length || prior.chatId !== next.chatId) return;
+    // Selection is controller-local, while session:get chooses one daemon-global
+    // row for its bounded history. Never paint that metadata-only transport
+    // shape over a resident selected tail. If the actor moved, keep the old tail
+    // only as a provisional view while a bounded recent read catches it up.
+    const actorChanged = (next.actorRevision ?? 0) !== (prior.actorRevision ?? 0)
+      || (next.messageCount ?? 0) !== (prior.messageCount ?? prior.messages.length);
     next.messages = prior.messages;
     next.messageCount = Math.max(next.messageCount ?? 0, prior.messageCount ?? prior.messages.length);
-    next.historyComplete = false;
+    next.historyComplete = actorChanged ? false : prior.historyComplete;
+    if (actorChanged) this.staleRecentHistories.add(next.id);
   }
   private requireFullSave() {
     this.markAllChatsDirty();
@@ -1124,11 +1150,113 @@ export class Store {
     saveMirror(this.toMirror(true));
   }
 
-  // Session hydration carries a bounded tail. Opening a chat reads one complete
-  // projection from the actor, then overlays only ownership/events that became
-  // newer while that point-in-time read was in flight.
+  // Session hydration carries a bounded tail only for the daemon-global active
+  // chat. This tiny read is enough to paint any metadata-only chat without
+  // expanding the complete ledger or its historical image bytes.
+  private async ensureRecentHistory(chatId: string, requestedLimit = CHAT_INITIAL_HISTORY, force = false): Promise<void> {
+    if (!has('archiveLoad') || !chatId) return;
+    const limit = Math.max(1, Math.min(CHAT_MESSAGE_TAIL, Math.floor(requestedLimit)));
+    const resident = this.chat(chatId);
+    if (!resident || resident.historyComplete) return;
+    const knownCount = resident.messageCount ?? resident.messages.length;
+    const needed = Math.min(limit, knownCount);
+    const stale = force || this.staleRecentHistories.has(chatId);
+    if (!stale && resident.messages.length >= needed) return;
+    const full = this.fullHistoryLoads.get(chatId);
+    if (full) return full;
+    const inflight = this.recentHistoryLoads.get(chatId);
+    if (inflight) return inflight;
+
+    const durableChatId = resident.chatId;
+    const liveEventFence = this.liveTurnEventVersion;
+    const load = (async () => {
+      let projected: unknown;
+      try {
+        const step = await this.guardedStep(
+          `recent actor history (${chatId})`,
+          () => call('archiveLoad', chatId, { tail: limit }),
+        );
+        projected = step.ok ? step.value : undefined;
+        if (!step.ok) return;
+      } catch { return; }
+      const chat = this.chat(chatId);
+      if (!chat || chat.chatId !== durableChatId || !Array.isArray(projected)) return;
+      let messages: Msg[];
+      try {
+        messages = actorMessages(projected as MirrorMsg[]);
+      } catch (error) {
+        console.warn(`[store] recent actor history rejected (${chatId})`, error);
+        return;
+      }
+      // A complete read that crossed this bounded request always wins. An empty
+      // bounded response cannot erase a known non-empty actor transcript.
+      if (chat.historyComplete || (messages.length === 0 && (chat.messageCount ?? 0) > 0)) return;
+      const messageCount = Math.max(chat.messageCount ?? 0, messages.length);
+      let historyComplete = messages.length >= messageCount;
+      // A refresh may have retained a resident tail (or even a fully revealed
+      // transcript) while this recent slice was in flight. Replace its
+      // overlapping suffix instead of collapsing 60/400 visible rows to ten.
+      // Incomplete merges remain bounded; only an exact known-count merge may
+      // retain complete-history residency.
+      const firstRecentID = messages[0]?.id;
+      const overlap = firstRecentID
+        ? chat.messages.findIndex((message) => message.id === firstRecentID)
+        : -1;
+      if (overlap >= 0) {
+        const merged = [...chat.messages.slice(0, overlap), ...messages];
+        if (merged.length === messageCount) {
+          messages = merged;
+          historyComplete = true;
+        } else {
+          messages = merged.slice(-CHAT_MESSAGE_TAIL);
+        }
+      }
+      const restored = {
+        ...chat,
+        messages,
+        messageCount,
+        historyComplete,
+      };
+      this.preserveHydratedRuntime(chat, restored);
+      this.preserveLiveTurnEvents(
+        [chat],
+        [restored],
+        liveEventFence,
+        ownerMachineId(chat),
+        restored.historyComplete,
+      );
+      chat.messages = restored.messages;
+      chat.messageCount = Math.max(messageCount, restored.messages.length);
+      chat.historyComplete = restored.historyComplete
+        && restored.messages.length === chat.messageCount;
+      if (chat.historyComplete) this.fullHistoriesLoaded.add(chatId);
+      else this.fullHistoriesLoaded.delete(chatId);
+      this.staleRecentHistories.delete(chatId);
+      this.rebuildJobRefs(new Set([chat.id]));
+      this.bumpApp(false);
+    })();
+    this.recentHistoryLoads.set(chatId, load);
+    try { await load; } finally { this.recentHistoryLoads.delete(chatId); }
+  }
+
+  async loadRecentHistory(chatId: string, limit = CHAT_MESSAGE_TAIL): Promise<boolean> {
+    await this.ensureRecentHistory(chatId, limit);
+    const chat = this.chat(chatId);
+    return !!chat && (chat.messages.length > 0 || (chat.messageCount ?? 0) === 0);
+  }
+
+  private refreshVisibleRecentHistory(chat: Chat | null) {
+    if (!chat || chat.historyComplete) return;
+    const stale = this.staleRecentHistories.has(chat.id);
+    if (chat.messages.length === 0 || stale) {
+      void this.ensureRecentHistory(chat.id, CHAT_INITIAL_HISTORY, stale);
+    }
+  }
+
   private async ensureFullHistory(chatId: string): Promise<void> {
     if (!has('archiveLoad') || !chatId) return;
+    const recent = this.recentHistoryLoads.get(chatId);
+    if (recent) await recent;
     // The set is only a cache of the chat projection's own completeness bit.
     // A later session:get may legally replace that projection with metadata
     // only (for example when another surface updates daemon-global focus). If
@@ -1180,11 +1308,17 @@ export class Store {
       chat.messageCount = restored.messages.length;
       chat.historyComplete = true;
       this.fullHistoriesLoaded.add(chatId);
+      this.staleRecentHistories.delete(chatId);
       this.rebuildJobRefs(new Set([chat.id]));
       this.bumpApp(false);
     })();
     this.fullHistoryLoads.set(chatId, load);
     try { await load; } finally { this.fullHistoryLoads.delete(chatId); }
+  }
+
+  async loadFullHistory(chatId: string): Promise<boolean> {
+    await this.ensureFullHistory(chatId);
+    return this.chat(chatId)?.historyComplete === true;
   }
 
   private schedulePersist(delayOverride?: number) {
@@ -1669,6 +1803,8 @@ export class Store {
       || this.remoteChatCreateFences.size > 0;
     if (!preserveChatOrder) this.adoptLocalSnapshotOrder(authoritative, restored.chats);
     this.preserveNewerLocalControls(previousChats, restored.chats);
+    this.preserveUnchangedFullHistories(previousChats, restored.chats);
+    this.retainSelectedHistoryDuringRefresh(previousChats, restored.chats);
     this.preserveMatchingHydratedRuntime(previousChats, restored.chats);
     this.preserveLiveTurnEvents(previousChats, restored.chats, liveEventFence, '');
     this.state.chats = this.orderChats(this.carryRemoteChats(
@@ -1681,7 +1817,6 @@ export class Store {
     for (const id of this.pendingChatCreates) {
       if (authoritativeChatIDs.has(id)) this.pendingChatCreates.delete(id);
     }
-    this.preserveUnchangedFullHistories(previousChats, this.state.chats);
     for (const chat of restored.chats) {
       if (!this.pendingPresentationOperations.has(chat.id)) {
         this.committedPresentationFingerprints.set(chat.id, presentationFingerprint(chat));
@@ -1733,8 +1868,7 @@ export class Store {
     this.applyPendingAgentFocus();
     this.state.seq = restored.seq;
     if (this.state.meta?.daemon) this.releaseInactiveHistories(this.state.activeId);
-    const active = this.active();
-    if (active && !active.historyComplete) void this.ensureFullHistory(active.id);
+    this.refreshVisibleRecentHistory(this.active());
     this.reconcileWorkspaces();
     this.rebuildJobRefs();
     this.requireFullSave();
@@ -1962,6 +2096,60 @@ export class Store {
   /** This machine's id, so its own chats write no prefix. */
   localMachineId(): string { return this.selfMachineId; }
 
+  /** Human-readable owner of every untagged provider/settings operation. */
+  localMachineName(): string { return this.selfMachineName || 'Esta máquina'; }
+
+  /** Provider rows grouped by the daemon that actually owns each CLI. */
+  providerSettingsMachines(): ProviderSettingsMachine[] {
+    const local: ProviderSettingsMachine = {
+      machineId: '',
+      name: this.localMachineName(),
+      remote: false,
+      connected: this.state.connection === 'connected',
+      reason: '',
+      providers: this.state.providers,
+    };
+    const remotes = this.state.machines
+      .filter((machine) => machine.paired || machine.requested || this.remoteProviderRecords.has(machine.machineId))
+      .map((machine): ProviderSettingsMachine => ({
+        machineId: machine.machineId,
+        name: machine.name || machine.reportedName || machine.machineId,
+        remote: true,
+        connected: machine.link === 'ready',
+        reason: machine.reason,
+        providers: this.remoteProviderRecords.get(machine.machineId) ?? [],
+      }));
+    return [local, ...remotes];
+  }
+
+  /** Refresh Settings without crossing provider ownership between machines. */
+  async refreshProviderSettings(): Promise<void> {
+    const tasks: Promise<unknown>[] = [];
+    if (has('providersList')) {
+      tasks.push(call('providersList').then((providers) => {
+        if (Array.isArray(providers)) this.onProvidersList(providers);
+      }));
+    }
+    for (const machine of this.state.machines) {
+      if (machine.link === 'ready') tasks.push(this.refreshRemoteProviderSettings(machine.machineId));
+    }
+    await Promise.allSettled(tasks);
+  }
+
+  private async refreshRemoteProviderSettings(machineId: string): Promise<void> {
+    const link = this.machines?.linkFor(machineId);
+    if (!link) return;
+    try {
+      const providers = await link.invoke('providers:list');
+      if (this.machines?.ownsLink(machineId, link) && Array.isArray(providers)) {
+        this.onProvidersList(providers as ProviderRecord[], machineId);
+      }
+    } catch {
+      // Keep the last exact-machine snapshot while offline. Each agent's location
+      // exposes link state, so stale-but-owned data is never confused with local.
+    }
+  }
+
   /**
    * Mount every machine in the book (remote-plan E3).
    *
@@ -1977,12 +2165,13 @@ export class Store {
     let reply;
     try { reply = await call('machinesList'); } catch { return; }
     this.applyMachineBook(reply);
-    on('onMachinesChanged', (payload: { machines?: unknown[]; self?: { machineId?: string } }) => { this.applyMachineBook(payload); });
+    on('onMachinesChanged', (payload: { machines?: unknown[]; self?: { machineId?: string; name?: string } }) => { this.applyMachineBook(payload); });
   }
 
-  private applyMachineBook(reply: { machines?: unknown[]; self?: { machineId?: string } } | undefined): void {
+  private applyMachineBook(reply: { machines?: unknown[]; self?: { machineId?: string; name?: string } } | undefined): void {
     const entries = Array.isArray(reply?.machines) ? (reply?.machines as MachineEntry[]) : [];
     this.selfMachineId = String(reply?.self?.machineId ?? this.selfMachineId ?? '');
+    this.selfMachineName = String(reply?.self?.name ?? this.selfMachineName ?? '').trim();
     const remote = entries.filter((entry) => entry?.machineId && entry.machineId !== this.selfMachineId);
     if (!remote.length && !this.machines) { this.state.machines = []; this.bumpApp(false); return; }
     if (!this.machines) {
@@ -1994,7 +2183,11 @@ export class Store {
           // A reconnect reconciles; a daemon that RESTARTED lost every engine and
           // all in-memory session state, so its chats are re-read rather than
           // synchronized.
-          if (info.restarted) this.remoteCatalogGroups.delete(machineId);
+          if (info.restarted) {
+            this.remoteCatalogGroups.delete(machineId);
+            this.remoteProviderRecords.delete(machineId);
+          }
+          void this.refreshRemoteProviderSettings(machineId);
           void this.hydrateMachine(machineId, info.restarted);
         },
         onUnmount: (machineId) => this.evictMachineChats(machineId),
@@ -2205,7 +2398,7 @@ export class Store {
       this.preserveNewerLocalControls(previousMachineChats, normalized);
       this.restoreDraftImages(previousMachineChats, normalized);
       this.preserveUnchangedFullHistories(previousMachineChats, normalized);
-      this.retainSelectedHistoryDuringRemoteRefresh(previousMachineChats, normalized);
+      this.retainSelectedHistoryDuringRefresh(previousMachineChats, normalized);
       this.preserveMatchingHydratedRuntime(previousMachineChats, normalized);
       this.preserveLiveTurnEvents(previousMachineChats, normalized, liveEventFence, machineId);
       for (const chat of normalized) {
@@ -2250,8 +2443,8 @@ export class Store {
         : 'conectada, sin conversaciones');
       this.bumpApp(true);
       const selected = this.active();
-      if (selected && ownerMachineId(selected) === machineId && !selected.historyComplete) {
-        void this.ensureFullHistory(selected.id);
+      if (selected && ownerMachineId(selected) === machineId) {
+        this.refreshVisibleRecentHistory(selected);
       }
       // An event that arrived before this machine had any mounted actor row
       // could not be applied safely (job chunks have no replay sequence). One
@@ -2333,9 +2526,10 @@ export class Store {
     this.remoteMachineCatchups.delete(machineId);
     this.remoteMachineHydrationCounts.delete(machineId);
     const removedCatalog = this.remoteCatalogGroups.delete(machineId);
+    const removedProviders = this.remoteProviderRecords.delete(machineId);
     const removed = this.state.chats.filter((chat) => ownerMachineId(chat) === machineId);
     if (!removed.length) {
-      if (removedCatalog) this.bumpApp(false);
+      if (removedCatalog || removedProviders) this.bumpApp(false);
       return;
     }
     const removedTabs = new Set(removed.map((chat) => chat.id));
@@ -2391,6 +2585,8 @@ export class Store {
     this.pendingChatDeleteOperations.delete(tabId);
     this.fullHistoriesLoaded.delete(tabId);
     this.fullHistoryLoads.delete(tabId);
+    this.recentHistoryLoads.delete(tabId);
+    this.staleRecentHistories.delete(tabId);
     this.dirtyChats.delete(tabId);
     this.dirtyChatVersions.delete(tabId);
     this.pendingQueueMutationVersions.delete(tabId);
@@ -2532,6 +2728,7 @@ export class Store {
     if (typeof bridge?.machinesList === 'function') {
       const reply = await bridge.machinesList();
       this.selfMachineId = String(reply?.self?.machineId ?? '').trim();
+      this.selfMachineName = String(reply?.self?.name ?? '').trim();
     }
     if (!this.selfMachineId) throw new Error('the local Workass machine identity is unavailable');
     return this.selfMachineId;
@@ -2759,7 +2956,10 @@ export class Store {
     // in the provider replay set, so this only keeps the card live after turns;
     // fresh-client hydration is refreshChatEnv() via chat:env-get.
     on('onChatEnv', (e) => this.onChatEnv(e as ChatEnvPayload));
-    on('onProvidersList', (providers) => this.onProvidersList(providers as ProviderRecord[]));
+    on('onProvidersList', (providers) => this.onProvidersList(
+      providers as ProviderRecord[],
+      machineScopeOf(providers),
+    ));
     on('onProcChanged', (e) => this.onProcChanged(e as ProcChanged));
     on('onLanAccessRequest', (r) => this.onAccessRequest(r as AccessRequest));
     // Update notifications — feature-detected; the daemon replays the cached
@@ -2923,10 +3123,10 @@ export class Store {
     }
 
     // Session hydration is intentionally bounded. Paint it immediately, then
-    // replace only the selected chat with the complete actor projection.
+    // fetch only a tiny recent slice if the selected row is metadata-only.
     if (has('archiveLoad')) {
       this.releaseInactiveHistories(this.state.activeId);
-      if (this.state.activeId) void this.ensureFullHistory(this.state.activeId);
+      this.refreshVisibleRecentHistory(this.active());
     }
     await this.guardedStep('boot permissions', () => this.refreshPendingPermissions());
     } catch (error) {
@@ -3536,7 +3736,6 @@ export class Store {
     const id = chat.id;
     this.state.activeId = id;
     this.releaseInactiveHistories(id);
-    void this.ensureFullHistory(id);
     if (chat.unread) {
       chat.unread = false;
       this.touchChat(chat.id);
@@ -3557,43 +3756,30 @@ export class Store {
     // any agent focus still waiting for its actor row to hydrate.
     this.pendingAgentFocus = null;
     const selectionVersion = ++this.chatSelectionVersion;
-    this.pendingChatSelection = null;
     if (this.state.activeId === id) {
-      // Re-focusing an already-selected row is still a recovery signal: its
-      // session snapshot may contain only a tail (or a prior archive read may
-      // have failed), so make the canonical actor ledger readable again.
-      void this.ensureFullHistory(id);
+      this.refreshVisibleRecentHistory(this.chat(id));
       return;
     }
     const target = this.chat(id);
     if (!target) return;
-    if (target.historyComplete !== false || !has('archiveLoad')) {
+    // A resident recent slice is already the exact newest actor projection and
+    // can paint immediately. Complete history remains an explicit older/search
+    // request, never a prerequisite for selecting a row.
+    if (target.messages.length > 0 || (target.messageCount ?? 0) === 0 || !has('archiveLoad')) {
       this.activateChat(target);
       return;
     }
+    // Metadata-only rows retain the old transcript for the very short recent
+    // read, preserving the no-empty-flash contract without paying for the full
+    // archive. Only the newest selection intent may complete the handoff.
     const previousActiveId = this.state.activeId;
     const durableChatId = target.chatId;
-    this.pendingChatSelection = { version: selectionVersion, id, previousActiveId };
     void (async () => {
-      await this.ensureFullHistory(id);
-      // A later click, new-chat activation, deletion, or exact agent focus owns
-      // selection now. The completed read may remain cached, but must not steal
-      // the visible transcript from that newer intent.
-      if (selectionVersion !== this.chatSelectionVersion || this.state.activeId !== previousActiveId) {
-        // Two clicks on the same incomplete row share one actor read. The older
-        // waiter must not evict the completed projection before the newer waiter
-        // performs its handoff; every other stale read remains non-resident.
-        const pending = this.pendingChatSelection;
-        const newerSameTarget = pending?.version === this.chatSelectionVersion
-          && pending.version !== selectionVersion
-          && pending.id === id
-          && this.state.activeId === pending.previousActiveId;
-        if (!newerSameTarget) this.releaseInactiveHistories(this.state.activeId);
-        return;
-      }
+      await this.ensureRecentHistory(id, CHAT_INITIAL_HISTORY);
+      if (selectionVersion !== this.chatSelectionVersion || this.state.activeId !== previousActiveId) return;
       const restored = this.chat(id);
       if (!restored || restored.chatId !== durableChatId) return;
-      if (this.pendingChatSelection?.version === selectionVersion) this.pendingChatSelection = null;
+      if (restored.messages.length === 0 && (restored.messageCount ?? 0) > 0) return;
       this.activateChat(restored);
     })();
   }
@@ -5073,10 +5259,16 @@ export class Store {
       ?? (!machineId ? this.state.providers.find((provider) => provider.id === providerId)?.assistantBrand : null)
       ?? '';
   }
-  private onProvidersList(providers: ProviderRecord[]) {
+  private onProvidersList(providers: ProviderRecord[], machineId = '') {
     if (!Array.isArray(providers)) return;
-    this.state.providers = providers;
-    const disabled = new Set(providers.filter((provider) => provider.disabledByUser).map((provider) => provider.id));
+    const normalized = providers.map((provider) => ({ ...provider, id: localId(provider.id) }));
+    if (machineId) {
+      this.remoteProviderRecords.set(machineId, normalized);
+      this.bumpApp(false);
+      return;
+    }
+    this.state.providers = normalized;
+    const disabled = new Set(normalized.filter((provider) => provider.disabledByUser).map((provider) => provider.id));
     if (disabled.size > 0) {
       this.state.providersUpdates = this.state.providersUpdates.filter((update) => !disabled.has(update.providerId));
       for (const id of disabled) {
@@ -5085,24 +5277,25 @@ export class Store {
     }
     this.bumpApp(false);
   }
-  async detectProvider(providerId: string) {
+  async detectProvider(providerId: string, machineId = '') {
     if (!providerId || !has('providersDetect')) return;
-    const result = await call('providersDetect', { provider: providerId });
-    if (Array.isArray(result?.providers)) this.onProvidersList(result.providers);
+    const result = await call('providersDetect', { provider: machineId ? tagId(machineId, providerId) : providerId });
+    if (Array.isArray(result?.providers)) this.onProvidersList(result.providers, machineId);
   }
-  async toggleProvider(providerId: string, enabled: boolean): Promise<boolean> {
+  async toggleProvider(providerId: string, enabled: boolean, machineId = ''): Promise<boolean> {
     if (!providerId || !has('providersToggle')) return false;
     try {
-      const providers = await callThrow('providersToggle', providerId, enabled);
+      const addressedProviderId = machineId ? tagId(machineId, providerId) : providerId;
+      const providers = await callThrow('providersToggle', addressedProviderId, enabled);
       if (!Array.isArray(providers)) return false;
-      this.onProvidersList(providers);
+      this.onProvidersList(providers, machineId);
       // Re-enabling is an explicit request to make the provider usable now, not
       // merely on the next background detection pass. The official CLI remains
       // the sole owner of its login and session state.
       if (enabled && has('providersDetect')) {
         try {
-          const result = await callThrow('providersDetect', { provider: providerId });
-          if (Array.isArray(result?.providers)) this.onProvidersList(result.providers);
+          const result = await callThrow('providersDetect', { provider: addressedProviderId });
+          if (Array.isArray(result?.providers)) this.onProvidersList(result.providers, machineId);
         } catch (error) {
           this.addToast('Agente activado', error instanceof Error ? error.message : 'No se pudo comprobar el agente todavía.');
         }

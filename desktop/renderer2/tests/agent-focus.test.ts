@@ -118,22 +118,24 @@ test('a newer local selection cancels an agent focus still waiting for hydration
   assert.equal(subject.state.activeId, first.id);
 });
 
-test('re-focusing the selected chat retries its canonical history load', async () => {
+test('re-focusing a selected resident tail does not force a complete history load', async () => {
   const full = messages(80);
   const tail = full.slice(-60);
   const target = chat('tab-target', tail, false);
   const previousWindow = (globalThis as any).window;
+  let archiveReads = 0;
   (globalThis as any).window = {
-    api: { archiveLoad: async (tabId: string) => tabId === target.id ? full : [] },
+    api: { archiveLoad: async () => { archiveReads += 1; return full; } },
   };
   try {
     const subject = subjectWith([target], target.id);
     subject.onAgentApply({
       action: 'session-refresh', tabId: target.id, chatId: target.chatId, focus: true,
     });
-    await subject.fullHistoryLoads.get(target.id);
-    assert.equal(target.messages.length, 80);
-    assert.equal(target.historyComplete, true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(target.messages.length, 60);
+    assert.equal(target.historyComplete, false);
+    assert.equal(archiveReads, 0, 'focus is presentation intent, not a request to expand every historical attachment');
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;

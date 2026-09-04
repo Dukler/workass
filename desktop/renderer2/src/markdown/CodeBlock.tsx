@@ -1,10 +1,26 @@
 import { useEffect, useRef, useState } from 'react';
 import { IcStampCopy } from '../icons';
+import type { ImageClipboardBridge } from '../image-copy';
 import { codeLanguageLabel, renderCode } from './inline';
 
 type ClipboardWriter = { writeText: (text: string) => Promise<void> };
 
-export async function copyCodeText(raw: string, clipboard?: ClipboardWriter | null): Promise<boolean> {
+export async function copyCodeText(
+  raw: string,
+  clipboard?: ClipboardWriter | null,
+  shellBridge?: Pick<ImageClipboardBridge, 'supported' | 'copyText'> | null,
+): Promise<boolean> {
+  const nativeBridge = shellBridge === undefined
+    ? (typeof window === 'undefined' ? null : window.workassClipboard)
+    : shellBridge;
+  if (nativeBridge?.supported && typeof nativeBridge.copyText === 'function') {
+    try {
+      if (await nativeBridge.copyText(raw)) return true;
+    } catch {
+      // Plain-browser clipboard remains the fallback when the shell rejects a
+      // write or an older preload disappears during an Electron reload.
+    }
+  }
   const writer = clipboard === undefined
     ? (typeof navigator === 'undefined' ? null : navigator.clipboard)
     : clipboard;

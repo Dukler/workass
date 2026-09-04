@@ -1,5 +1,6 @@
 export interface ImageClipboardBridge {
   supported: boolean;
+  copyText?: (text: string) => Promise<boolean>;
   copyImageAt: (payload: { x: number; y: number }) => Promise<boolean>;
   openImageExternal?: (payload: { bytes: ArrayBuffer; mimeType: string }) => Promise<boolean>;
 }

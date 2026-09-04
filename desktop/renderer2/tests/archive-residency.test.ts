@@ -50,12 +50,16 @@ function chat(id: string, rows: Msg[]): Chat {
   } as Chat;
 }
 
-test('switching chats releases an idle full history and reloads the actor ledger on return', async () => {
+test('switching chats keeps a bounded recent tail and loads the full ledger only on demand', async () => {
   const complete = messages(85);
   const previousWindow = (globalThis as any).window;
+  const archiveCalls: Array<{ tabId: string; options: unknown }> = [];
   (globalThis as any).window = {
     api: {
-      archiveLoad: async (tabId: string) => tabId === 'tab-a' ? complete : [],
+      archiveLoad: async (tabId: string, options?: unknown) => {
+        archiveCalls.push({ tabId, options });
+        return tabId === 'tab-a' ? complete : [];
+      },
     },
   };
   try {
@@ -74,26 +78,29 @@ test('switching chats releases an idle full history and reloads the actor ledger
     assert.equal(subject.fullHistoriesLoaded.has(first.id), false);
 
     subject.switchChat(first.id);
-    await subject.fullHistoryLoads.get(first.id);
+    assert.equal(subject.state.activeId, first.id);
+    assert.equal(first.messages.length, 60);
+    assert.equal(archiveCalls.length, 0, 'ordinary selection must not request the complete archive');
+
+    assert.equal(await subject.loadFullHistory(first.id), true);
     assert.equal(first.messages.length, 85);
     assert.equal(first.historyComplete, true);
     assert.equal(subject.fullHistoriesLoaded.has(first.id), true);
+    assert.deepEqual(archiveCalls, [{ tabId: first.id, options: undefined }]);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
   }
 });
 
-test('opening an incomplete chat keeps the current transcript visible until history is ready', async () => {
+test('opening an incomplete chat with a resident tail activates synchronously without an archive read', () => {
   const firstRows = messages(85);
   const targetRows = messages(92);
   const previousWindow = (globalThis as any).window;
-  let releaseHistory!: (rows: Msg[]) => void;
-  let historyReleased = false;
-  const history = new Promise<Msg[]>((resolve) => { releaseHistory = resolve; });
+  let archiveCalls = 0;
   (globalThis as any).window = {
     api: {
-      archiveLoad: async (tabId: string) => tabId === 'tab-target' ? history : [],
+      archiveLoad: async () => { archiveCalls += 1; return []; },
     },
   };
   try {
@@ -109,20 +116,57 @@ test('opening an incomplete chat keeps the current transcript visible until hist
 
     subject.switchChat(target.id);
 
+    assert.equal(subject.state.activeId, target.id);
+    assert.equal(first.messages.length, 60);
+    assert.equal(target.messages.length, 60);
+    assert.equal(target.historyComplete, false);
+    assert.equal(archiveCalls, 0);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('opening a metadata-only chat fetches ten recent rows before the no-blank handoff', async () => {
+  const firstRows = messages(85);
+  const targetRows = messages(92);
+  const previousWindow = (globalThis as any).window;
+  let releaseHistory!: (rows: Msg[]) => void;
+  let historyReleased = false;
+  const history = new Promise<Msg[]>((resolve) => { releaseHistory = resolve; });
+  const archiveCalls: Array<{ tabId: string; options: unknown }> = [];
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async (tabId: string, options?: unknown) => {
+        archiveCalls.push({ tabId, options });
+        return tabId === 'tab-target' ? history : [];
+      },
+    },
+  };
+  try {
+    const subject = new StoreCtor();
+    const first = chat('tab-first', firstRows);
+    const target = chat('tab-target', []);
+    target.messageCount = targetRows.length;
+    target.historyComplete = false;
+    subject.state.chats = [first, target];
+    subject.state.activeId = first.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+    subject.switchChat(target.id);
     assert.equal(subject.state.activeId, first.id);
     assert.equal(first.messages.length, firstRows.length);
-    assert.equal(target.messages.length, 60);
+    assert.deepEqual(archiveCalls, [{ tabId: target.id, options: { tail: 10 } }]);
 
     historyReleased = true;
-    releaseHistory(targetRows);
-    await subject.fullHistoryLoads.get(target.id);
+    releaseHistory(targetRows.slice(-10));
+    await subject.recentHistoryLoads.get(target.id);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     assert.equal(subject.state.activeId, target.id);
-    assert.equal(target.messages.length, targetRows.length);
-    assert.equal(target.historyComplete, true);
+    assert.equal(target.messages.length, 10);
+    assert.equal(target.historyComplete, false);
     assert.equal(first.messages.length, 60);
-    assert.equal(first.historyComplete, false);
   } finally {
     if (!historyReleased) releaseHistory([]);
     if (previousWindow === undefined) delete (globalThis as any).window;
@@ -130,7 +174,7 @@ test('opening an incomplete chat keeps the current transcript visible until hist
   }
 });
 
-test('a completed older history read cannot steal focus from a newer click', async () => {
+test('a completed metadata-only recent read cannot steal focus from a newer click', async () => {
   const targetRows = messages(92);
   const previousWindow = (globalThis as any).window;
   let releaseHistory!: (rows: Msg[]) => void;
@@ -138,13 +182,13 @@ test('a completed older history read cannot steal focus from a newer click', asy
   const history = new Promise<Msg[]>((resolve) => { releaseHistory = resolve; });
   (globalThis as any).window = {
     api: {
-      archiveLoad: async (tabId: string) => tabId === 'tab-target' ? history : [],
+      archiveLoad: async () => history,
     },
   };
   try {
     const subject = new StoreCtor();
     const first = chat('tab-first', messages(4));
-    const target = chat('tab-target', targetRows.slice(-60));
+    const target = chat('tab-target', []);
     target.messageCount = targetRows.length;
     target.historyComplete = false;
     const latest = chat('tab-latest', messages(6));
@@ -157,14 +201,12 @@ test('a completed older history read cannot steal focus from a newer click', asy
     assert.equal(subject.state.activeId, latest.id);
 
     historyReleased = true;
-    releaseHistory(targetRows);
-    await subject.fullHistoryLoads.get(target.id);
+    releaseHistory(targetRows.slice(-10));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     assert.equal(subject.state.activeId, latest.id);
-    assert.equal(target.messages.length, 60);
+    assert.equal(target.messages.length, 10);
     assert.equal(target.historyComplete, false);
-    assert.equal(subject.fullHistoriesLoaded.has(target.id), false);
   } finally {
     if (!historyReleased) releaseHistory([]);
     if (previousWindow === undefined) delete (globalThis as any).window;
@@ -172,23 +214,22 @@ test('a completed older history read cannot steal focus from a newer click', asy
   }
 });
 
-test('repeated clicks on one incomplete chat share its completed history without an eviction flash', async () => {
+test('repeated clicks on one metadata-only chat share one recent read', async () => {
   const targetRows = messages(92);
   const previousWindow = (globalThis as any).window;
   let releaseHistory!: (rows: Msg[]) => void;
   let historyReleased = false;
   let archiveCalls = 0;
   const history = new Promise<Msg[]>((resolve) => { releaseHistory = resolve; });
-  const blockedRepeat = new Promise<Msg[]>(() => {});
   (globalThis as any).window = {
     api: {
-      archiveLoad: async () => (++archiveCalls === 1 ? history : blockedRepeat),
+      archiveLoad: async () => { archiveCalls += 1; return history; },
     },
   };
   try {
     const subject = new StoreCtor();
     const first = chat('tab-first', messages(4));
-    const target = chat('tab-target', targetRows.slice(-60));
+    const target = chat('tab-target', []);
     target.messageCount = targetRows.length;
     target.historyComplete = false;
     subject.state.chats = [first, target];
@@ -198,17 +239,40 @@ test('repeated clicks on one incomplete chat share its completed history without
     subject.switchChat(target.id);
     subject.switchChat(target.id);
     assert.equal(subject.state.activeId, first.id);
+    assert.equal(archiveCalls, 1);
 
     historyReleased = true;
-    releaseHistory(targetRows);
+    releaseHistory(targetRows.slice(-10));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     assert.equal(subject.state.activeId, target.id);
-    assert.equal(target.messages.length, targetRows.length);
-    assert.equal(target.historyComplete, true);
+    assert.equal(target.messages.length, 10);
+    assert.equal(target.historyComplete, false);
     assert.equal(archiveCalls, 1);
   } finally {
     if (!historyReleased) releaseHistory([]);
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('a genuinely empty new chat activates immediately without a history read', () => {
+  const previousWindow = (globalThis as any).window;
+  let archiveCalls = 0;
+  (globalThis as any).window = { api: { archiveLoad: async () => { archiveCalls += 1; return []; } } };
+  try {
+    const subject = new StoreCtor();
+    const first = chat('tab-first', messages(4));
+    const empty = chat('tab-empty', []);
+    subject.state.chats = [first, empty];
+    subject.state.activeId = first.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+    subject.switchChat(empty.id);
+
+    assert.equal(subject.state.activeId, empty.id);
+    assert.equal(archiveCalls, 0);
+  } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
   }
@@ -241,15 +305,19 @@ test('a daemon refresh releases every inactive complete history but keeps the ac
   assert.equal(subject.toMirror(false).chats[1].lastActivityAt, inactiveActivityAt);
 });
 
-test('a metadata-only refresh invalidates a stale loaded marker and reloads the visible chat', async () => {
+test('a newer metadata-only refresh reconciles a bounded recent suffix without collapsing visible history', async () => {
   const complete = messages(14);
   const previousWindow = (globalThis as any).window;
+  let releaseHistory!: (rows: Msg[]) => void;
+  const history = new Promise<Msg[]>((resolve) => { releaseHistory = resolve; });
   let archiveReads = 0;
+  let archiveOptions: unknown;
   (globalThis as any).window = {
     api: {
-      archiveLoad: async (tabId: string) => {
+      archiveLoad: async (tabId: string, options?: unknown) => {
         archiveReads += 1;
-        return tabId === 'tab-active' ? complete : [];
+        archiveOptions = options;
+        return tabId === 'tab-active' ? history : [];
       },
     },
   };
@@ -264,9 +332,9 @@ test('a metadata-only refresh invalidates a stale loaded marker and reloads the 
 
     // Another surface may be the daemon-global active tab, so session:get can
     // legally return only metadata for the chat this renderer is still reading.
-    // A newer actor revision prevents suffix preservation when that projection
-    // has no rows; the renderer must clear its old residency marker and pull
-    // the canonical actor ledger instead of painting an empty new chat.
+    // A newer actor revision makes the resident rows provisional. They stay on
+    // screen until the small current tail arrives, rather than blinking empty
+    // or forcing the complete archive through the renderer.
     const server = subject.toMirror(false);
     server.chats[0].actorRevision = 8;
     server.chats[0].messages = [];
@@ -274,14 +342,49 @@ test('a metadata-only refresh invalidates a stale loaded marker and reloads the 
     server.chats[0].historyComplete = false;
 
     assert.equal(subject.restoreSessionSnapshot(server), true);
-    const load = subject.fullHistoryLoads.get(active.id);
-    assert.ok(load, 'visible incomplete history must start an actor archive read');
+    assert.equal(subject.chat(active.id)?.messages.length, complete.length);
+    const load = subject.recentHistoryLoads.get(active.id);
+    assert.ok(load, 'visible stale history must start a bounded recent read');
+    releaseHistory(complete.slice(-10));
     await load;
 
     assert.equal(archiveReads, 1);
+    assert.deepEqual(archiveOptions, { tail: 10 });
     assert.equal(subject.chat(active.id)?.messages.length, complete.length);
     assert.equal(subject.chat(active.id)?.historyComplete, true);
     assert.equal(subject.fullHistoriesLoaded.has(active.id), true);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('an unchanged metadata-only refresh preserves a selected resident tail without another read', () => {
+  const previousWindow = (globalThis as any).window;
+  let archiveReads = 0;
+  (globalThis as any).window = {
+    api: { archiveLoad: async () => { archiveReads += 1; return []; } },
+  };
+  try {
+    const subject = new StoreCtor();
+    const active = chat('tab-active', messages(60));
+    active.actorRevision = 7;
+    active.messageCount = 90;
+    active.historyComplete = false;
+    subject.state.chats = [active];
+    subject.state.activeId = active.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+    const server = subject.toMirror(false);
+    server.chats[0].actorRevision = 7;
+    server.chats[0].messages = [];
+    server.chats[0].messageCount = 90;
+    server.chats[0].historyComplete = false;
+
+    assert.equal(subject.restoreSessionSnapshot(server), true);
+    assert.equal(subject.chat(active.id)?.messages.length, 60);
+    assert.equal(subject.chat(active.id)?.historyComplete, false);
+    assert.equal(archiveReads, 0);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
