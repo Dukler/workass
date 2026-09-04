@@ -18,7 +18,7 @@ function BlockView({ sb, media, visualizeTabId, visualizeChatId }: { sb: SignedB
     case 'heading':
       return <div className={`mdh mdh${Math.min(b.level, 3)}`}>{renderInline(b.raw, 'h', true, media)}</div>;
     case 'code':
-      return <CodeBlock raw={b.raw} language={b.lang} />;
+      return <CodeBlock raw={b.raw} language={b.lang} closed={b.closed} />;
     case 'quote':
       return <div className="mdquote">{renderInline(b.raw, 'q', true, media)}</div>;
     case 'hr':

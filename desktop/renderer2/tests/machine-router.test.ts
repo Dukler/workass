@@ -36,6 +36,12 @@ test('an untagged call goes local and a tagged one goes to its machine', async (
   assert.equal(await router.archiveLoad(tagId('m-remote', 'tab-9'), { tail: 10 }), undefined);
   assert.deepEqual(remote.calls[1], { channel: 'chat:archive-load', args: ['tab-9', { tail: 10 }] },
     'a bounded history option reaches the owning daemon without changing the wire envelope');
+  assert.equal(await router.archiveLoad(tagId('m-remote', 'tab-9'), {
+    beforeMessageId: tagId('m-remote', 'message-41'), limit: 40,
+  }), undefined);
+  assert.deepEqual(remote.calls[2], {
+    channel: 'chat:archive-load', args: ['tab-9', { beforeMessageId: 'message-41', limit: 40 }],
+  }, 'a remote page boundary is stripped before it reaches the owning actor');
   assert.equal(localCalls.length, 1, 'the local bridge saw only the untagged call');
 });
 

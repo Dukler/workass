@@ -5,8 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"workass/internal/acp"
 	"workass/internal/chat"
 	providercontract "workass/internal/provider"
+	"workass/internal/wire"
 )
 
 func TestActorHistoryProjectionMaterializesOnlyRequestedTail(t *testing.T) {
@@ -138,5 +140,95 @@ func TestSessionProjectionCarriesHistoryOnlyForActiveOrRunningChats(t *testing.T
 	idle.Foreground = &chat.ForegroundTurn{Status: chat.ForegroundRunning}
 	if got := sessionHistoryProjection(idle, "active-tab"); got != actorHistoryTail {
 		t.Fatalf("running inactive history projection = %d", got)
+	}
+}
+
+func TestBoundedActorSnapshotPreservesCanonicalHistoryCount(t *testing.T) {
+	state, err := chat.NewState("bounded-snapshot-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Initialized = true
+	state.Presentation.TabID = "bounded-snapshot-tab"
+	for index := 75; index < 85; index++ {
+		state.Ledger = append(state.Ledger, chat.LedgerEvent{
+			MessageID: fmt.Sprintf("message-%02d", index), Role: "assistant", Text: fmt.Sprintf("row %d", index), Status: "done",
+		})
+	}
+
+	projected := map[string]any{}
+	window := actorLedgerWindow{offset: 75, count: 85}
+	if err := projectActorChatWithHistoryWindow(projected, state, actorHistoryTail, 10, window); err != nil {
+		t.Fatal(err)
+	}
+	rows := anySlice(projected["messages"])
+	if len(rows) != 10 || intValue(projected["messageCount"]) != 85 || projected["historyComplete"] != false {
+		t.Fatalf("bounded projection metadata = rows:%d count:%v complete:%v", len(rows), projected["messageCount"], projected["historyComplete"])
+	}
+	if first := fieldString(mapFromAnyMain(rows[0]), "id"); first != "message-75" {
+		t.Fatalf("bounded projection began at %q", first)
+	}
+
+	metadata := map[string]any{}
+	if err := projectActorChatWithHistoryWindow(metadata, state, actorHistoryMetadataOnly, sessionProjectionMessageTail, window); err != nil {
+		t.Fatal(err)
+	}
+	if rows := anySlice(metadata["messages"]); len(rows) != 0 || intValue(metadata["messageCount"]) != 85 {
+		t.Fatalf("metadata projection = rows:%d count:%v", len(rows), metadata["messageCount"])
+	}
+}
+
+func TestArchiveWirePagesBeforeStableActorMessageWithoutChangingLegacyFullRead(t *testing.T) {
+	stateDir := t.TempDir()
+	engine, err := chat.NewEngine("paged-wire-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := make([]chat.LedgerEvent, 100)
+	for index := range messages {
+		messages[index] = chat.LedgerEvent{
+			EventID: fmt.Sprintf("event-%03d", index), MessageID: fmt.Sprintf("message-%03d", index),
+			OperationID: providercontract.OperationID(fmt.Sprintf("operation-%03d", index)),
+			Role:        "assistant", Text: fmt.Sprintf("row %d", index), Status: "done",
+		}
+	}
+	if err := engine.Apply(chat.InitializeFork{
+		Presentation: chat.PresentationState{TabID: "paged-wire-tab", Title: "Paged"},
+		SourceChatID: "source-chat", OperationID: "paged-wire-create", Digest: "paged-wire-digest",
+		Messages: messages,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &providerChatRuntime{
+		manager: &acp.Manager{}, sessions: sharedSessionStore(stateDir), stateDir: stateDir,
+		actors: map[string]*providerChatActor{"paged-wire-chat": {engine: engine}},
+		known:  map[string]struct{}{"paged-wire-chat": {}},
+	}
+	hub := wire.NewHub()
+	registerArchiveHandlers(hub, nil, runtime)
+
+	rawPage, err := hub.Invoke("chat:archive-load", []any{
+		"paged-wire-tab", map[string]any{"beforeMessageId": "message-060", "limit": 40},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := anySlice(rawPage)
+	if len(page) != 40 || fieldString(mapFromAnyMain(page[0]), "id") != "message-020" || fieldString(mapFromAnyMain(page[39]), "id") != "message-059" {
+		t.Fatalf("paged archive range = %#v", page)
+	}
+
+	rawFull, err := hub.Invoke("chat:archive-load", []any{"paged-wire-tab"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := anySlice(rawFull)
+	if len(full) != 100 || fieldString(mapFromAnyMain(full[0]), "id") != "message-000" || fieldString(mapFromAnyMain(full[99]), "id") != "message-099" {
+		t.Fatalf("legacy full archive range = rows:%d", len(full))
+	}
+	if _, err := hub.Invoke("chat:archive-load", []any{
+		"paged-wire-tab", map[string]any{"beforeMessageId": "missing", "limit": 40},
+	}); err == nil {
+		t.Fatal("missing page boundary must fail closed")
 	}
 }

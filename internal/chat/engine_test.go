@@ -767,7 +767,142 @@ func TestDigestSnapshotAllocationsStayBoundedByIdentityProjection(t *testing.T) 
 	if digest.MessageCount != rows || digest.LastMessageID != "message-09999" {
 		t.Fatalf("large digest identity = %#v", digest)
 	}
-	if allocations > 64 {
-		t.Fatalf("digest allocations = %.1f, want <= 64 independent of ledger payload volume", allocations)
+	if allocations > 8 {
+		t.Fatalf("idle digest allocations = %.1f, want <= 8 independent of ledger payload volume", allocations)
 	}
+}
+
+func BenchmarkDigestSnapshotLargeIdleLedger(b *testing.B) {
+	engine, err := NewEngine("chat-large-idle-digest-benchmark")
+	if err != nil {
+		b.Fatal(err)
+	}
+	engine.state.Initialized = true
+	engine.state.Presentation.TabID = "tab-large-idle-digest-benchmark"
+	engine.state.Ledger = make([]LedgerEvent, 100_000)
+	for index := range engine.state.Ledger {
+		engine.state.Ledger[index] = LedgerEvent{MessageID: fmt.Sprintf("message-%06d", index), Text: strings.Repeat("body ", 20)}
+	}
+	b.ReportAllocs()
+	for range b.N {
+		_ = engine.DigestSnapshot()
+	}
+}
+
+func TestReadProjectionSnapshotBoundsHistoryAndIsolatesMutableState(t *testing.T) {
+	engine, err := NewEngine("chat-read-projection")
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.state.Initialized = true
+	engine.state.Presentation = PresentationState{TabID: "tab-read-projection", Title: "Original"}
+	engine.state.Ledger = make([]LedgerEvent, 100)
+	for index := range engine.state.Ledger {
+		engine.state.Ledger[index] = LedgerEvent{
+			MessageID: fmt.Sprintf("message-%03d", index), Text: strings.Repeat("body ", 100),
+			Attachments: []provider.Attachment{{ID: "attachment", Ref: "session-image:fixture"}},
+			Timeline:    []TimelineEntry{{Key: "tool", Kind: provider.EventToolUpdate, Tool: &provider.ToolEvent{Title: "tool"}}},
+		}
+	}
+	laneID := provider.LaneID("lane")
+	engine.state.Lanes[laneID] = LaneState{
+		Identity: provider.LaneIdentity{ID: laneID},
+		Coverage: map[uint64]CoverageRecord{1: {Sequence: 1, EventID: "event-1"}},
+	}
+	engine.state.ActiveLaneID = laneID
+	engine.state.Usage[laneID] = provider.UsageEvent{Used: 12, Size: 100}
+	engine.state.Operations["historical-operation"] = struct{}{}
+
+	snapshot := engine.ReadProjectionSnapshot(10)
+	if snapshot.LedgerOffset != 90 || snapshot.LedgerCount != 100 || len(snapshot.State.Ledger) != 10 {
+		t.Fatalf("bounded snapshot = offset:%d count:%d rows:%d", snapshot.LedgerOffset, snapshot.LedgerCount, len(snapshot.State.Ledger))
+	}
+	if snapshot.State.Ledger[0].MessageID != "message-090" || snapshot.State.Ledger[9].MessageID != "message-099" {
+		t.Fatalf("bounded ledger range = %q..%q", snapshot.State.Ledger[0].MessageID, snapshot.State.Ledger[9].MessageID)
+	}
+	if snapshot.State.Lanes[laneID].Coverage != nil || snapshot.State.Operations != nil || snapshot.State.Outbox != nil {
+		t.Fatalf("read projection copied actor-internal history: %#v", snapshot.State)
+	}
+
+	snapshot.State.Presentation.Title = "Changed"
+	snapshot.State.Ledger[0].Attachments[0].Ref = "changed"
+	readback := engine.Snapshot()
+	if readback.Presentation.Title != "Original" || readback.Ledger[90].Attachments[0].Ref != "session-image:fixture" {
+		t.Fatal("read projection aliases mutable actor state")
+	}
+	identity := engine.IdentitySnapshot()
+	if identity.ChatID != "chat-read-projection" || identity.TabID != "tab-read-projection" || identity.Deleted {
+		t.Fatalf("identity snapshot = %#v", identity)
+	}
+}
+
+func TestReadLedgerPageBeforeUsesStableBoundaryAndCopiesOnlyThatPage(t *testing.T) {
+	engine, err := NewEngine("chat-ledger-page")
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.state.Ledger = make([]LedgerEvent, 100)
+	for index := range engine.state.Ledger {
+		engine.state.Ledger[index] = LedgerEvent{
+			MessageID: fmt.Sprintf("message-%03d", index), Text: fmt.Sprintf("row %d", index),
+			Attachments: []provider.Attachment{{Ref: "session-image:fixture"}},
+		}
+	}
+
+	page, err := engine.ReadLedgerPageBefore("message-060", 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Start != 20 || page.End != 60 || page.LedgerCount != 100 || len(page.Events) != 40 {
+		t.Fatalf("ledger page = start:%d end:%d total:%d rows:%d", page.Start, page.End, page.LedgerCount, len(page.Events))
+	}
+	if page.Events[0].MessageID != "message-020" || page.Events[39].MessageID != "message-059" {
+		t.Fatalf("ledger page range = %q..%q", page.Events[0].MessageID, page.Events[39].MessageID)
+	}
+	page.Events[0].Attachments[0].Ref = "changed"
+	if engine.Snapshot().Ledger[20].Attachments[0].Ref != "session-image:fixture" {
+		t.Fatal("ledger page aliases actor attachments")
+	}
+	if _, err := engine.ReadLedgerPageBefore("missing", 40); err == nil {
+		t.Fatal("missing stable page boundary must fail closed")
+	}
+	if _, err := engine.ReadLedgerPageBefore("message-060", 0); err == nil {
+		t.Fatal("non-positive page limit must fail closed")
+	}
+}
+
+func BenchmarkReadProjectionSnapshotLargeLedger(b *testing.B) {
+	engine, err := NewEngine("chat-read-projection-benchmark")
+	if err != nil {
+		b.Fatal(err)
+	}
+	engine.state.Initialized = true
+	engine.state.Presentation.TabID = "tab-read-projection-benchmark"
+	engine.state.Ledger = make([]LedgerEvent, 10_000)
+	for index := range engine.state.Ledger {
+		engine.state.Ledger[index] = LedgerEvent{
+			MessageID: fmt.Sprintf("message-%05d", index), Text: strings.Repeat("large body ", 100),
+			Timeline: []TimelineEntry{{Key: "tool", Kind: provider.EventToolUpdate, Tool: &provider.ToolEvent{Title: "tool payload"}}},
+		}
+	}
+	b.Run("full", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			_ = engine.Snapshot()
+		}
+	})
+	b.Run("tail-10", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			_ = engine.ReadProjectionSnapshot(10)
+		}
+	})
+	b.Run("page-40-before-tail", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := engine.ReadLedgerPageBefore("message-09940", 40); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }

@@ -35,10 +35,24 @@ export async function copyCodeText(
 
 type CopyState = 'idle' | 'copied' | 'failed';
 
-export function CodeBlock({ raw, language }: { raw: string; language: string }) {
+// Syntax highlighting expands source text into many React nodes. Repeating that
+// expansion for every streaming delta makes one large open fence dominate the
+// renderer even when the transcript itself is windowed. Open fences stay a
+// single text node until sealed; very large sealed fences remain plain because
+// highlighting them provides little value relative to the layout cost.
+export const MAX_HIGHLIGHTED_CODE_BYTES = 32 * 1024;
+
+export function shouldHighlightCode(raw: string, closed: boolean): boolean {
+  return closed
+    && raw.length <= MAX_HIGHLIGHTED_CODE_BYTES
+    && new TextEncoder().encode(raw).byteLength <= MAX_HIGHLIGHTED_CODE_BYTES;
+}
+
+export function CodeBlock({ raw, language, closed }: { raw: string; language: string; closed: boolean }) {
   const [copyState, setCopyState] = useState<CopyState>('idle');
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const label = codeLanguageLabel(language);
+  const highlighted = shouldHighlightCode(raw, closed);
 
   useEffect(() => {
     setCopyState('idle');
@@ -72,7 +86,7 @@ export function CodeBlock({ raw, language }: { raw: string; language: string }) 
           <span aria-live="polite">{copyLabel}</span>
         </button>
       </div>
-      <pre className="code-body"><code>{renderCode(raw, language)}</code></pre>
+      <pre className="code-body"><code>{highlighted ? renderCode(raw, language) : raw}</code></pre>
     </div>
   );
 }
