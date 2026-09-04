@@ -351,10 +351,84 @@ func TestOversizedProviderEventFallsBackToBoundedActorCheckpoint(t *testing.T) {
 	}
 }
 
-func TestTerminalProviderEventCheckpointsAndClearsJournal(t *testing.T) {
+func TestTerminalProviderEventJournalsWithoutRewritingActorSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "provider-chats", "actor.json")
 	engine, lane := newJournalReadyEngine(t, path)
-	if err := engine.Apply(journalAssistantEvent(lane, 1, "complete answer")); err != nil {
+	streamed := strings.Repeat("x", providerEventJournalCheckpointBytes*3/4)
+	if err := engine.Apply(journalAssistantEvent(lane, 1, streamed)); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := ProviderEventReceived{ConnectionGeneration: 1, Event: provider.Event{
+		Kind: provider.EventTurnTerminal,
+		Identity: provider.EventIdentity{
+			ChatID: "journal-chat", LaneID: lane.ID, OperationID: "journal-turn",
+			TurnID: "journal-native-turn", Sequence: 2, ObservedAtUnixMS: 2000,
+		},
+		// The terminal result intentionally pushes the journal beyond its ordinary
+		// streaming checkpoint threshold. Terminal durability must still remain an
+		// append, not a whole-actor rewrite.
+		Terminal: &provider.TerminalEvent{
+			Status: "completed", Result: strings.Repeat("y", providerEventJournalCheckpointBytes/2),
+			FinishedAt: "2026-09-02T22:00:00Z",
+		},
+	}}
+	if err := engine.Apply(terminal); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("terminal provider event rewrote the complete actor snapshot")
+	}
+	journalInfo, err := os.Stat(providerEventJournalPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if journalInfo.Size() <= providerEventJournalCheckpointBytes {
+		t.Fatalf("terminal journal size = %d, want overflow beyond ordinary checkpoint threshold", journalInfo.Size())
+	}
+	loaded, found, err := (FileStore{Path: path}).Load("journal-chat")
+	if err != nil || !found {
+		t.Fatalf("load terminal actor: found=%v err=%v", found, err)
+	}
+	if loaded.Foreground != nil || len(loaded.Ledger) < 2 || loaded.Ledger[len(loaded.Ledger)-1].Result != streamed {
+		t.Fatalf("terminal checkpoint lost streamed answer: foreground=%#v ledger=%#v", loaded.Foreground, loaded.Ledger)
+	}
+	restarted, err := NewDurableEngine("journal-chat", FileStore{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.Snapshot().Foreground != nil {
+		t.Fatal("restart lost the journaled terminal receipt")
+	}
+	if _, err := os.Stat(providerEventJournalPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("restart checkpoint left terminal journal behind: %v", err)
+	}
+}
+
+func TestTerminalProviderEventJournalReplaysQueuedTurnEffects(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "provider-chats", "actor.json")
+	engine, lane := newJournalReadyEngine(t, path)
+	if err := engine.Apply(journalAssistantEvent(lane, 1, "first answer")); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Apply(Submit{
+		OperationID: "queued-turn", Text: "next question",
+		Presentation: provider.TurnPresentation{
+			UserMessageID: "queued-user", AssistantMessageID: "queued-assistant", Origin: "human",
+			StartedAt: "2026-09-02T22:00:01Z",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
 		t.Fatal(err)
 	}
 	terminal := ProviderEventReceived{ConnectionGeneration: 1, Event: provider.Event{
@@ -368,14 +442,24 @@ func TestTerminalProviderEventCheckpointsAndClearsJournal(t *testing.T) {
 	if err := engine.Apply(terminal); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(providerEventJournalPath(path)); !os.IsNotExist(err) {
-		t.Fatalf("terminal checkpoint left provider event journal behind: %v", err)
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("effectful terminal provider event rewrote the complete actor snapshot")
 	}
 	loaded, found, err := (FileStore{Path: path}).Load("journal-chat")
 	if err != nil || !found {
-		t.Fatalf("load terminal actor: found=%v err=%v", found, err)
+		t.Fatalf("load terminal actor with queued turn: found=%v err=%v", found, err)
 	}
-	if loaded.Foreground != nil || len(loaded.Ledger) < 2 || loaded.Ledger[len(loaded.Ledger)-1].Result != "complete answer" {
-		t.Fatalf("terminal checkpoint lost streamed answer: foreground=%#v ledger=%#v", loaded.Foreground, loaded.Ledger)
+	want := engine.Snapshot()
+	if loaded.Revision != want.Revision || len(loaded.Ledger) != len(want.Ledger) {
+		t.Fatalf("terminal journal replay changed actor history: revision=%d/%d ledger=%d/%d",
+			loaded.Revision, want.Revision, len(loaded.Ledger), len(want.Ledger))
+	}
+	if loaded.Foreground == nil || loaded.Foreground.OperationID != "queued-turn" ||
+		!outboxHas(&loaded, startTurnEffectID("queued-turn"), OutboxPending) {
+		t.Fatalf("terminal replay lost queued turn effect: foreground=%#v outbox=%#v", loaded.Foreground, loaded.Outbox)
 	}
 }

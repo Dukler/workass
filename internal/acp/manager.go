@@ -1310,9 +1310,6 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		// publication. The actor is allowed to clear its foreground state as soon
 		// as it observes end, while the filesystem-heavy scan runs afterwards.
 		envSnapshot, hasEnvSnapshot := m.chatEnvSnapshot(job.SessionID, job.ChatID, job.TabID, job.ID)
-		if job.Status == "done" {
-			m.maybeCompactAfterTurn(context.Background(), activeBridge, job)
-		}
 		// Release the provider process's foreground pin before publishing the
 		// terminal actor event. A terminal event can immediately drive the next
 		// queued turn; leaving the old wrapper attached until after filesystem work
@@ -1324,6 +1321,9 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		// turn running after the harness has already stopped.
 		m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})
 		m.notifyJobEnd(job.TabID, job.ChatID)
+		if job.Status == "done" {
+			m.maybeCompactAfterTurn(context.Background(), activeBridge, job)
+		}
 		if hasEnvSnapshot {
 			m.refreshChatEnvAfterJobSnapshot(context.Background(), job, envSnapshot)
 		}
