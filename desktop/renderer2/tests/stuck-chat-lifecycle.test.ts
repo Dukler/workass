@@ -256,6 +256,70 @@ test('an in-flight cancel receipt never manufactures a local terminal turn', asy
   }
 });
 
+test('Stop acknowledges immediately while the provider remains terminal authority', async () => {
+  const previousWindow = (globalThis as any).window;
+  let releaseCancel!: (value: { cancelled: true; reason: 'cancelled' }) => void;
+  (globalThis as any).window = {
+    api: {
+      cancelJob: async () => await new Promise((resolve) => { releaseCancel = resolve; }),
+    },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    const assistant: Msg = {
+      id: 'assistant-canonical', role: 'assistant', content: 'partial', status: 'running',
+      at: null, jobId: 'job-1', events: [],
+    };
+    owner.messages = [assistant];
+    (subject as any).jobRef.set('job-1', { tabId: owner.id, msgId: assistant.id });
+    (subject as any).chatJobs.set(owner.chatId, { tabId: owner.id, msgId: assistant.id });
+
+    const stopping = subject.cancelChatTurn(owner.id);
+    assert.equal(assistant.stopState, 'requesting', 'the click paints before the remote receipt returns');
+    assert.equal(assistant.status, 'running', 'visual acknowledgement is never a synthetic terminal');
+
+    releaseCancel({ cancelled: true, reason: 'cancelled' });
+    await stopping;
+    assert.equal(assistant.stopState, 'acknowledged');
+    assert.equal(assistant.status, 'running', 'the provider terminal event remains authoritative');
+
+    (subject as any).onJobEvent({
+      type: 'end',
+      job: job({ status: 'failed', code: 130, stopReason: 'cancelled', finishedAt: '2026-07-24T12:00:02Z' }),
+    });
+    assert.equal(assistant.stopState, undefined);
+    assert.equal(assistant.status, 'cancelled');
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('a failed Stop delivery clears its transient acknowledgement without rejecting the UI action', async () => {
+  const previousWindow = (globalThis as any).window;
+  (globalThis as any).window = {
+    api: { cancelJob: async () => { throw new Error('remote route dropped'); } },
+  };
+  try {
+    const { subject, owner } = subjectWithChat();
+    const assistant: Msg = {
+      id: 'assistant-canonical', role: 'assistant', content: '', status: 'running',
+      at: null, jobId: 'job-1', events: [],
+    };
+    owner.messages = [assistant];
+    (subject as any).scheduleScopedSync = () => {};
+
+    await assert.doesNotReject(subject.cancelChatTurn(owner.id));
+    assert.equal(assistant.stopState, undefined);
+    assert.equal(assistant.status, 'running');
+    assert.equal(subject.state.toasts.at(-1)?.title, 'No se pudo detener');
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
 test('Stop before durable chat creation completes cancels the renderer-owned send without creating provider work', async () => {
   const previousWindow = (globalThis as any).window;
   let starts = 0;

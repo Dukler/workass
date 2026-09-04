@@ -4418,6 +4418,7 @@ export class Store {
     const chat = this.chat(chatId); if (!chat) return;
     const running = [...chat.messages].reverse().find((m) => m.status === 'running');
     if (!running) return;
+    this.setTurnStopState(chat, running, 'requesting');
     const candidatePendingStart = this.pendingTurnStarts.get(chat.id);
     const pendingStart = candidatePendingStart && candidatePendingStart.chatId === chat.chatId && candidatePendingStart.assistantId === running.id
       ? candidatePendingStart
@@ -4428,10 +4429,21 @@ export class Store {
       // job:start or cancel the exact job immediately after admission. Marking a
       // local terminal here created the old ownership hole: live provider work
       // could appear after the row had already claimed cancellation.
-      this.bumpChat(chat);
       return;
     }
     await this.cancelAdmittedTurn(chat, running, running.jobId, pendingStart);
+  }
+
+  private setTurnStopState(chat: Chat, running: Msg, state?: Msg['stopState']) {
+    // This is paint-only acknowledgement, never a synthetic terminal. Keep it
+    // off the actor/session persistence path and let job:end remain the single
+    // authority that closes the turn and advances FIFO.
+    if (state && running.status !== 'running') return;
+    if (running.stopState === state) return;
+    if (state) running.stopState = state;
+    else delete running.stopState;
+    this.bump('msg:' + running.id);
+    this.bumpChat(chat, false);
   }
 
   private cancelAdmittedTurn(chat: Chat, running: Msg, jobId: string, pendingStart?: PendingTurnStart): Promise<void> {
@@ -4458,13 +4470,32 @@ export class Store {
   }
 
   private async performAdmittedTurnCancel(chat: Chat, running: Msg, jobId: string): Promise<void> {
-    const result = await call('cancelJob', jobId);
+    let result: unknown;
+    try {
+      // Stop needs the transport outcome. The ordinary `call` helper converts
+      // bridge failures to undefined, which made a broken route look like a
+      // quiet readback and left the user with no explanation.
+      result = await callThrow('cancelJob', jobId);
+    } catch {
+      const failed = this.chat(chat.id);
+      const failedRunning = failed?.messages.find((message) => message.id === running.id && message.role === 'assistant');
+      if (failed && failedRunning) this.setTurnStopState(failed, failedRunning);
+      this.addToast('No se pudo detener', 'No se pudo entregar la detención. El turno conserva el estado del proveedor.');
+      this.requestChatReadback(failed ?? chat, true);
+      return;
+    }
     const live = this.chat(chat.id);
     if (!live || live.chatId !== chat.chatId) {
       this.requestChatReadback(chat);
       return;
     }
     const liveRunning = live.messages.find((message) => message.id === running.id && message.role === 'assistant') ?? running;
+    if (result === undefined) {
+      this.setTurnStopState(live, liveRunning);
+      this.addToast('No se pudo detener', 'El canal de detención no está disponible. El turno conserva el estado del proveedor.');
+      this.requestChatReadback(live, true);
+      return;
+    }
     const cancelled = result === true
       || (!!result && typeof result === 'object' && (result as { cancelled?: unknown }).cancelled === true);
     const preAdmission = !!result && typeof result === 'object'
@@ -4477,6 +4508,8 @@ export class Store {
         this.finalizeCancelledLocally(live, liveRunning, jobId);
         this.requestChatReadback(live, true);
         void this.flushNextQueued(live);
+      } else {
+        this.setTurnStopState(live, liveRunning, 'acknowledged');
       }
       return;
     }
@@ -4492,14 +4525,17 @@ export class Store {
         && (result as { cancelled?: unknown }).cancelled === false
         && (reason === 'idle' || reason === 'unknown' || reason === 'not-owned'));
     if (refused) {
+      this.setTurnStopState(live, liveRunning);
       this.addToast('No se pudo detener', 'El daemon no confirmó la cancelación; el turno sigue activo hasta que su estado se reconcilie.');
       this.requestChatReadback(live, true);
       return;
     }
+    this.setTurnStopState(live, liveRunning);
     this.requestChatReadback(live);
   }
 
   private finalizeCancelledLocally(chat: Chat, running: Msg, jobId?: string) {
+    delete running.stopState;
     running.status = 'cancelled';
     running.at = new Date().toISOString();
     settleTerminalToolEvents(running.events, 'cancelled');
@@ -4809,6 +4845,7 @@ export class Store {
             }
           }
           settleTerminalToolEvents(msg.events, terminalStatus);
+          delete msg.stopState;
           msg.status = terminalStatus;
           // The daemon reports its own interruptions now, so a restart-killed
           // turn reads as interrupted here exactly as it does after rehydration.

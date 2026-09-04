@@ -296,6 +296,7 @@ export function LiveTurnPulse({ msg }: { msg: Msg }) {
 function TurnPulse({ msg, thinkEv }: { msg: Msg; thinkEv: ThinkingEvent | null }) {
   const pulse = store.heartbeatFor(msg.jobId);
   const whimsy = `${whimsyFor(msg.jobId)}…`;
+  const stopping = !!msg.stopState;
   const phase = pulse?.phase ?? '';
   const phaseLabel = phase === 'writing' ? 'escribiendo…'
     : phase === 'compacting' ? 'compactando contexto…'
@@ -308,7 +309,12 @@ function TurnPulse({ msg, thinkEv }: { msg: Msg; thinkEv: ThinkingEvent | null }
   return (
     <div className="thinklive">
       <div className="pulseline">
-        {phaseLabel ? (
+        {stopping ? (
+          <div className="steprow steplive stopping" role="status" aria-live="polite">
+            <span className="stmark"><span className="stopdot" aria-hidden="true" /></span>
+            <span className="stbody">Deteniendo…</span>
+          </div>
+        ) : phaseLabel ? (
           <div className="steprow steplive" role="status" aria-live="polite">
             <span className="stmark"><span className="ping" aria-hidden="true" /></span>
             <span className="stbody"><StepWords key={phaseLabel} text={phaseLabel} /></span>
@@ -321,13 +327,13 @@ function TurnPulse({ msg, thinkEv }: { msg: Msg; thinkEv: ThinkingEvent | null }
             <span className="stbody"><StepWords key={whimsy} text={whimsy} /></span>
           </div>
         )}
-        {pulse?.retry && (
+        {!stopping && pulse?.retry && (
           <span className="retrychip" role="status">
             <IcRetryArc />
             {`reintentando${pulse.retry.code ? ` (${pulse.retry.code})` : ''}${pulse.retry.attempt ? ` · intento ${pulse.retry.attempt}` : ''}`}
           </span>
         )}
-        {vitals.length > 0 && <span className="pulsevitals mono">{vitals.join(' · ')}</span>}
+        {!stopping && vitals.length > 0 && <span className="pulsevitals mono">{vitals.join(' · ')}</span>}
       </div>
     </div>
   );
