@@ -88,6 +88,25 @@ test('agent MCP projection lists and reads a mounted remote chat without focusin
   assert.equal(subject.state.activeId, null);
 });
 
+test('remote pre-admission Stop closes its exact row even when the older daemon emits no end event', async (t) => {
+  const { Store, setMachineRouter } = await loadStore(t);
+  const subject = new Store();
+  const jobId = tagId(machineId, 'job-stop-before-attach');
+  const owner = remoteChat({ messages: [
+    { id: 'assistant-stop', role: 'assistant', content: '', status: 'running', at: null, events: [], jobId },
+  ] });
+  subject.state.chats = [owner];
+  const readbacks: string[] = [];
+  (subject as any).hydrateMachine = async (id: string) => { readbacks.push(id); };
+  setMachineRouter({ cancelJob: async () => ({ cancelled: true, preAdmission: true, reason: 'cancelled' }) });
+  t.after(() => setMachineRouter(undefined));
+  await subject.routeAgentRequest(request('chat.cancel', { tab_id: tabId, chat_id: chatId, machine_id: machineId }));
+  assert.equal(owner.messages[0].status, 'cancelled');
+  assert.deepEqual(readbacks, [machineId]);
+  const read = await subject.routeAgentRequest(request('chat.read', { tab_id: tabId, chat_id: chatId, machine_id: machineId })) as Record<string, unknown>;
+  assert.equal(read.running, false);
+});
+
 test('updater MCP routes remote diagnostics over data and activation over the control lane', async (t) => {
   const { Store } = await loadStore(t);
   const subject = new Store() as StoreShape & {
