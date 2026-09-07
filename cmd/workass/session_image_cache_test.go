@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -68,5 +70,70 @@ func reflectedStringBytes(value reflect.Value, seen map[uintptr]struct{}) int {
 		return total
 	default:
 		return 0
+	}
+}
+
+func imageReadFixture(tb testing.TB) (string, string, string) {
+	tb.Helper()
+	root := tb.TempDir()
+	data := "data:image/png;base64," + strings.Repeat("A", 1<<20)
+	name := sessionImageName(data)
+	if err := os.MkdirAll(filepath.Join(root, sessionImageDirname), 0700); err != nil {
+		tb.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, sessionImageDirname, name), []byte(data), 0600); err != nil {
+		tb.Fatal(err)
+	}
+	return root, sessionImageDirname + "/" + name, data
+}
+
+func repeatedImageProjection(ref string) []any {
+	rows := make([]any, 8)
+	for i := range rows {
+		rows[i] = map[string]any{sessionImageDataRefField: ref, "mimeType": "image/png"}
+	}
+	return rows
+}
+
+func BenchmarkRehydrateRepeatedSessionImage(b *testing.B) {
+	root, ref, _ := imageReadFixture(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if err := rehydrateExternalSessionImages(repeatedImageProjection(ref), root); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func TestRepeatedSessionImagesPreservePayloadAndVerifyEachNewRead(t *testing.T) {
+	root, ref, data := imageReadFixture(t)
+	rows := repeatedImageProjection(ref)
+	if err := rehydrateExternalSessionImages(rows, root); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range rows {
+		image := raw.(map[string]any)
+		if image["data"] != data {
+			t.Fatal("image payload changed")
+		}
+		if _, ok := image[sessionImageDataRefField]; ok {
+			t.Fatal("internal ref leaked")
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(ref)), []byte("corrupt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Deduplication must be scoped to this projection, never an unchecked
+	// process-lifetime cache that conceals a damaged or replaced sidecar.
+	rows = repeatedImageProjection(ref)
+	if err := rehydrateExternalSessionImages(rows, root); err == nil {
+		t.Fatal("new read reused an unverified old payload")
+	}
+	for _, raw := range rows {
+		image := raw.(map[string]any)
+		if _, ok := image["data"]; ok {
+			t.Fatal("broken sidecar was rendered")
+		}
 	}
 }

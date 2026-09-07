@@ -352,8 +352,32 @@ func backgroundEvent(item acp.SpawnedWorkItem, workID string) providercontract.B
 	}
 }
 
+// exactActivitySnapshot preserves the same immutable tab/chat ownership checks
+// as exactActor while keeping these read-only views independent of history size.
+func (r *providerChatRuntime) exactActivitySnapshot(tabID, chatID string) (chat.ActivitySnapshot, error) {
+	if r == nil {
+		return chat.ActivitySnapshot{}, errors.New("provider chat runtime is unavailable")
+	}
+	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
+	if tabID == "" || chatID == "" {
+		return chat.ActivitySnapshot{}, errors.New("exact tab and chat ids are required")
+	}
+	actor, err := r.actor(chatID)
+	if err != nil {
+		return chat.ActivitySnapshot{}, err
+	}
+	snapshot := actor.engine.ReadActivitySnapshot()
+	if snapshot.Deleted {
+		return chat.ActivitySnapshot{}, errors.New("chat was deleted")
+	}
+	if strings.TrimSpace(snapshot.TabID) != tabID {
+		return chat.ActivitySnapshot{}, errors.New("tab id does not own the requested chat")
+	}
+	return snapshot, nil
+}
+
 func (r *providerChatRuntime) ListBackground(tabID, chatID string) ([]map[string]any, error) {
-	_, state, err := r.exactActor(tabID, chatID)
+	state, err := r.exactActivitySnapshot(tabID, chatID)
 	if err != nil {
 		return nil, err
 	}
@@ -372,12 +396,12 @@ func (r *providerChatRuntime) ListBackground(tabID, chatID string) ([]map[string
 	for _, id := range ids {
 		item := state.Background[id].Event
 		row := map[string]any{
-			"id": item.WorkID, "taskId": item.TaskID, "tabId": state.Presentation.TabID, "chatId": state.ChatID,
+			"id": item.WorkID, "taskId": item.TaskID, "tabId": state.TabID, "chatId": state.ChatID,
 			"kind": item.Kind, "label": item.Title, "role": item.Role, "status": item.Status,
 			"startedAt": item.StartedAt, "updatedAt": item.UpdatedAt,
 		}
 		lane := state.Lanes[state.Background[id].Owner.LaneID]
-		row["providerId"] = string(lane.Identity.Realm.ProviderID)
+		row["providerId"] = string(lane.ProviderID)
 		for key, value := range map[string]any{
 			"toolCallId": item.ToolCallID, "finishedAt": item.FinishedAt, "exitCode": item.ExitCode,
 			"summary": item.Summary, "outputFile": item.OutputFile, "pid": item.PID,
@@ -393,7 +417,7 @@ func (r *providerChatRuntime) ListBackground(tabID, chatID string) ([]map[string
 }
 
 func (r *providerChatRuntime) Obligation(tabID, chatID string) (*acp.ChatObligationProjection, error) {
-	_, state, err := r.exactActor(tabID, chatID)
+	state, err := r.exactActivitySnapshot(tabID, chatID)
 	if err != nil {
 		return nil, err
 	}
@@ -401,7 +425,7 @@ func (r *providerChatRuntime) Obligation(tabID, chatID string) (*acp.ChatObligat
 }
 
 func (r *providerChatRuntime) ReadBackground(tabID, chatID, id string, tailBytes int) (map[string]any, error) {
-	_, state, err := r.exactActor(tabID, chatID)
+	state, err := r.exactActivitySnapshot(tabID, chatID)
 	if err != nil {
 		return nil, err
 	}
