@@ -23,7 +23,8 @@ type memoryStateStore struct {
 
 func TestStartingSendDigestMatchesTranscriptPresentation(t *testing.T) {
 	state, _ := NewState("starting-chat")
-	state.Queue = []QueueEntry{{OperationID: "starting-input", Text: "hello", Presentation: provider.TurnPresentation{
+	state.Lanes["starting-lane"] = LaneState{Phase: LaneCreating}
+	state.Queue = []QueueEntry{{OperationID: "starting-input", LaneID: "starting-lane", Text: "hello", Presentation: provider.TurnPresentation{
 		UserMessageID: "starting-user", AssistantMessageID: "starting-assistant",
 	}}}
 	engine := &Engine{state: state}
@@ -33,6 +34,35 @@ func TestStartingSendDigestMatchesTranscriptPresentation(t *testing.T) {
 	}
 	if engine.state.Foreground != nil || len(engine.state.Queue) != 1 {
 		t.Fatal("digest mutated dispatch ownership")
+	}
+}
+
+func TestQueuedSendPresentationRequiresActiveAttachment(t *testing.T) {
+	for _, phase := range []LanePhase{LaneAbsent, LaneDetached, LaneReady, LaneBlocked, LaneBroken, LaneReconciling, LaneCreating, LaneResuming, LaneImporting} {
+		t.Run(string(phase), func(t *testing.T) {
+			state, _ := NewState("queued-presentation")
+			state.Lanes["lane"] = LaneState{Phase: phase}
+			state.Queue = []QueueEntry{{OperationID: "old-input", LaneID: "lane", Text: "hello", Presentation: provider.TurnPresentation{
+				UserMessageID: "user", AssistantMessageID: "assistant", StartedAt: "2026-08-25T23:33:07Z",
+			}}}
+			engine := &Engine{state: state}
+			wantRunning := phase == LaneCreating || phase == LaneResuming || phase == LaneImporting
+			for _, view := range []State{state, engine.ReadProjectionSnapshot(60).State, engine.ReadSessionProjectionSnapshot("other-tab", 60).State} {
+				if got := view.PresentationState().Foreground != nil; got != wantRunning {
+					t.Fatalf("queued input running = %v, want %v for lane %s", got, wantRunning, phase)
+				}
+			}
+			digest := engine.DigestSnapshot()
+			if got := digest.RunningJobID != ""; got != wantRunning {
+				t.Fatalf("digest running = %v, want %v", got, wantRunning)
+			}
+			if !wantRunning && (digest.MessageCount != 0 || digest.QueueLen != 1) {
+				t.Fatalf("idle queue invented transcript rows or lost input: %#v", digest)
+			}
+			if engine.state.Foreground != nil || len(engine.state.Queue) != 1 {
+				t.Fatal("read changed durable dispatch ownership")
+			}
+		})
 	}
 }
 
@@ -521,6 +551,49 @@ func TestCrashDuringExactResumeWaitsForNewIntent(t *testing.T) {
 	retry := second.(ResumeLaneEffect)
 	if !retry.Thread.Equal(resume.Thread) || retry.Generation <= resume.Generation {
 		t.Fatalf("new prompt changed or reused stale attachment identity: first=%#v next=%#v", resume, retry)
+	}
+}
+
+func TestRestartedQueuedSendIsNotPresentedAsRunning(t *testing.T) {
+	store := FileStore{Path: filepath.Join(t.TempDir(), "actor.json")}
+	engine, err := NewDurableEngine("restart-queued", store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane := testLane("restart-queued", "mock")
+	openReadyDurableLane(t, engine, lane)
+	if err := engine.Apply(HostLost{LaneID: lane.ID, ConnectionGeneration: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Apply(Submit{OperationID: "unsent", Text: "hello", Presentation: provider.TurnPresentation{
+		Origin: "human", StartedAt: "2026-08-25T23:33:07Z",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if engine.DigestSnapshot().RunningJobID == "" {
+		t.Fatal("new direct send is not visible while attaching")
+	}
+	effect, ok, err := engine.ClaimNext()
+	if _, resume := effect.(ResumeLaneEffect); err != nil || !ok || !resume {
+		t.Fatalf("expected exact attachment: %T, ok=%v err=%v", effect, ok, err)
+	}
+	// Restart after claiming attachment, before the provider returned it. The
+	// queued prompt still exists, but recovery does not own an active turn.
+	for restart := 0; restart < 2; restart++ {
+		engine, err = NewDurableEngine("restart-queued", store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := engine.Snapshot()
+		if state.Foreground != nil || state.Lanes[lane.ID].Phase != LaneDetached || len(state.Queue) != 1 {
+			t.Fatal("restart lost the unsent input or retained live ownership")
+		}
+		if engine.DigestSnapshot().RunningJobID != "" || engine.ReadSessionProjectionSnapshot("", 60).State.PresentationState().Foreground != nil {
+			t.Fatal("restart presented a dormant queued input as a running turn")
+		}
+		if _, ok, err := engine.ClaimNext(); err != nil || ok {
+			t.Fatalf("reading restarted queue manufactured provider work: ok=%v err=%v", ok, err)
+		}
 	}
 }
 

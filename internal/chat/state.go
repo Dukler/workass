@@ -655,6 +655,15 @@ func (s State) PresentationState() State {
 		return s
 	}
 	input := s.Queue[0]
+	// Queue entries can outlive a failed attachment or daemon restart. They
+	// are not evidence of live work: only the lane's active preparation phases
+	// mean this direct send is currently progressing toward provider dispatch.
+	// Detached/failed entries remain queued without inventing a running turn.
+	switch s.Lanes[input.LaneID].Phase {
+	case LaneCreating, LaneResuming, LaneImporting:
+	default:
+		return s
+	}
 	assistantID := strings.TrimSpace(input.Presentation.AssistantMessageID)
 	if assistantID == "" {
 		assistantID = "message:" + string(input.OperationID) + ":assistant"

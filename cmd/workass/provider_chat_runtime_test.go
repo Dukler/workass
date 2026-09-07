@@ -54,7 +54,8 @@ func TestIdleSendStaysInTranscriptDuringProviderAttachment(t *testing.T) {
 	state, _ := chat.NewState("idle-send-chat")
 	state.Initialized = true
 	state.Presentation.TabID = "idle-send-tab"
-	input := chat.QueueEntry{OperationID: "idle-send", Text: "hello", Presentation: providercontract.TurnPresentation{
+	state.Lanes["idle-send-lane"] = chat.LaneState{Phase: chat.LaneCreating}
+	input := chat.QueueEntry{OperationID: "idle-send", LaneID: "idle-send-lane", Text: "hello", Presentation: providercontract.TurnPresentation{
 		UserMessageID: "user-idle", AssistantMessageID: "assistant-idle", StartedAt: "2026-09-07T00:00:00Z",
 	}}
 	state.Queue = []chat.QueueEntry{input}
@@ -75,6 +76,21 @@ func TestIdleSendStaysInTranscriptDuringProviderAttachment(t *testing.T) {
 	if state.Foreground != nil || len(state.Queue) != 1 {
 		t.Fatal("projection changed actor dispatch state")
 	}
+	// Old unsent inputs on a detached lane survive restart, but are not live
+	// turns. Every transcript projection must agree, including selected chats.
+	for _, phase := range []chat.LanePhase{chat.LaneDetached, chat.LaneAbsent, chat.LaneBlocked, chat.LaneBroken} {
+		state.Lanes[input.LaneID] = chat.LaneState{Phase: phase, LastError: providercontract.ErrorTransientTransport}
+		for _, history := range []actorHistoryProjection{actorHistoryFull, actorHistoryTail, actorHistoryMetadataOnly} {
+			out = map[string]any{}
+			if err := projectActorChatWithHistory(out, state, history); err != nil {
+				t.Fatal(err)
+			}
+			if len(anySlice(out["messages"])) != 0 || len(anySlice(out["queue"])) != 1 {
+				t.Fatalf("inactive lane %s fabricated live transcript or lost queued input", phase)
+			}
+		}
+	}
+	state.Lanes[input.LaneID] = chat.LaneState{Phase: chat.LaneCreating}
 	state.Queue[0].Presentation.QueueID = "explicit-follow-up"
 	out = map[string]any{}
 	if err := projectActorChat(out, state); err != nil {
