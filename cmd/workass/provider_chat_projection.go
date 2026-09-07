@@ -90,6 +90,7 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 		return nil, err
 	}
 	root := r.sessions.GlobalSnapshot()
+	activeID := strings.TrimSpace(fieldString(root, "activeId"))
 	states := make([]chat.State, 0, len(known))
 	windows := make(map[string]actorLedgerWindow, len(known))
 	for _, chatID := range known {
@@ -97,15 +98,14 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		snapshot := actor.engine.ReadProjectionSnapshot(sessionProjectionMessageTail)
+		snapshot := actor.engine.ReadSessionProjectionSnapshot(activeID, sessionProjectionMessageTail)
 		state := snapshot.State
 		if !state.Deleted {
 			states = append(states, state)
-			windows[state.ChatID] = actorLedgerWindow{offset: snapshot.LedgerOffset, count: snapshot.LedgerCount}
+			windows[state.ChatID] = actorLedgerWindow{offset: snapshot.LedgerOffset, count: snapshot.LedgerCount, lastActivityAt: snapshot.LastActivityAt}
 		}
 	}
 	states = orderActorChatStates(states, root["chatOrder"])
-	activeID := strings.TrimSpace(fieldString(root, "activeId"))
 	activeExists := false
 	firstTabID := ""
 	for _, state := range states {
@@ -119,6 +119,21 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 	}
 	if !activeExists {
 		activeID = firstTabID
+		// The fallback selection was not known when idle snapshots were taken.
+		// Fetch its bounded tail once, without copying any other idle history.
+		for i, state := range states {
+			if state.Presentation.TabID != activeID {
+				continue
+			}
+			actor, err := r.actor(state.ChatID)
+			if err != nil {
+				return nil, err
+			}
+			snapshot := actor.engine.ReadSessionProjectionSnapshot(activeID, sessionProjectionMessageTail)
+			states[i] = snapshot.State
+			windows[state.ChatID] = actorLedgerWindow{offset: snapshot.LedgerOffset, count: snapshot.LedgerCount, lastActivityAt: snapshot.LastActivityAt}
+			break
+		}
 	}
 	if activeID == "" {
 		root["activeId"] = nil
@@ -344,11 +359,13 @@ func projectActorChatWithHistoryLimit(out map[string]any, state chat.State, hist
 }
 
 type actorLedgerWindow struct {
-	offset int
-	count  int
+	lastActivityAt int64
+	offset         int
+	count          int
 }
 
 func projectActorChatWithHistoryWindow(out map[string]any, state chat.State, history actorHistoryProjection, tailLimit int, window actorLedgerWindow) error {
+	state = state.PresentationState()
 	if out == nil {
 		return errors.New("chat projection target is nil")
 	}
@@ -392,7 +409,7 @@ func projectActorChatWithHistoryWindow(out map[string]any, state chat.State, his
 	} else {
 		out["settledAt"] = p.SettledAt
 	}
-	if lastActivityAt := actorLastActivityAt(state); lastActivityAt > 0 {
+	if lastActivityAt := max(actorLastActivityAt(state), window.lastActivityAt); lastActivityAt > 0 {
 		out["lastActivityAt"] = lastActivityAt
 	} else {
 		delete(out, "lastActivityAt")
@@ -509,6 +526,7 @@ func projectActorMessagesWithTailLimit(state chat.State, history actorHistoryPro
 }
 
 func projectActorMessagesWithLedgerWindow(state chat.State, history actorHistoryProjection, tailLimit int, window actorLedgerWindow) ([]any, int, error) {
+	state = state.PresentationState()
 	if history == actorHistoryTail && (tailLimit < 1 || tailLimit > sessionProjectionMessageTail) {
 		return nil, 0, fmt.Errorf("actor history tail limit must be between 1 and %d", sessionProjectionMessageTail)
 	}

@@ -10,7 +10,7 @@ import { favoriteCatalogModels, isModelFavorite } from '../model-favorites';
 import { attachmentWorkBoundary, clipboardImageFiles, createDraftImages, draftImagePayloads, withoutDraftImages } from '../image-drafts';
 import { QueueList } from './QueueList';
 import { liveSteeringSupported } from '../steering';
-import { composerSubmitIntent, restoreRejectedSteerDraft, type ComposerSubmitIntent } from '../composer-submit';
+import { composerSubmitIntent, type ComposerSubmitIntent } from '../composer-submit';
 import { insertAtCaret, startRecording, transcribe, voiceStatus, type Recorder, type VoiceState } from '../voice';
 import { clampPlanUsagePercent, formatCountdown, formatPlanUsagePercent, isExpiredPlanReset, isHotRateLimit, isLiveReset, rateLimitLabel, relativePlanReset } from '../plan-usage';
 import { imageDraftCapability } from '../model-controls';
@@ -467,6 +467,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [text, setText] = useState(chat?.draft ?? '');
+  const visibleDraftEdit = useRef({});
   const [modelOpen, setModelOpen] = useState(false);
   const [modeOpen, setModeOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
@@ -485,11 +486,12 @@ export function Composer({ chat }: { chat: Chat | null }) {
 
   // Load this chat's saved draft when the active chat changes. useLayoutEffect so
   // the swap commits BEFORE paint — no flash of the previous tab's text.
-  useLayoutEffect(() => { setText(chat?.draft ?? ''); }, [chat?.id]);
-  // A send on another controller can clear the same draft while this composer
-  // stays mounted. Follow that clear without inserting remote text into a box
-  // the user is editing; the store preserves newer local keystrokes.
-  useLayoutEffect(() => { if (chat?.draft === '') setText(''); }, [chat?.draft]);
+  useLayoutEffect(() => {
+    visibleDraftEdit.current = {};
+    setText(chat?.draft ?? '');
+  }, [chat?.id, chat?.chatId]);
+  // Remote snapshots and delivery receipts never write into the editor.
+  // Only a local edit, chat switch, or explicit submission changes its value.
   // Single source of truth for the box height: re-measure whenever the COMMITTED
   // value changes — typing, tab switch, or send-clear. Keying on `text` (not a
   // rAF that races the value commit) guarantees we measure the value React
@@ -609,7 +611,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
     syncComposerTextareaFade(el);
   }
   // Height is handled by the useLayoutEffect on `text` above — just update state.
-  function change(v: string) { setText(v); if (chat) store.setDraft(chat.id, v); }
+  function change(v: string) { visibleDraftEdit.current = {}; setText(v); if (chat) store.setDraft(chat.id, v); }
   // Tap to open the microphone, tap to close it. Nothing is sent: the text is
   // inserted at the caret for the user to read and fix, and they press send.
   //
@@ -704,8 +706,15 @@ export function Composer({ chat }: { chat: Chat | null }) {
       return;
     }
     if (!t || !chat || preparingImages) return;
+    const submission = store.captureDraftSubmission(chat.id, submittedDraft);
+    const visibleEdit = visibleDraftEdit.current;
+    const finishSubmission = () => {
+      if (visibleDraftEdit.current !== visibleEdit || store.chat(chat.id)?.draft !== '') return;
+      visibleDraftEdit.current = {};
+      setText('');
+    };
     if (running && intent === 'queue') {
-      if (store.queueDraftMessage(chat.id, t, atts)) setText('');
+      if (store.queueDraftMessage(chat.id, t, atts, submission)) finishSubmission();
       return;
     }
     setPreparingImages(true);
@@ -724,14 +733,9 @@ export function Composer({ chat }: { chat: Chat | null }) {
     const sentImageIDs = atts.map((image) => image.id);
     if (running && intent === 'steer') {
       if (t && chat) {
-        const delivery = store.steerRunning(chat.id, t, images);
+        const delivery = store.steerRunning(chat.id, t, images, submission);
+        finishSubmission();
         setTransferredSteerImageIDs(sentImageIDs);
-        // A native acknowledgement can arrive seconds after Codex has already
-        // received the direction. Release the composer as soon as the store has
-        // synchronously created its pending transcript owner; do not make the
-        // text look stuck at the bottom or keep the composer send-locked.
-        store.setDraft(chat.id, '');
-        setText('');
         // Text-only steering can accept the next draft immediately. Attached
         // files keep the send gate until acknowledgement so the still-owned
         // previews cannot be submitted a second time during the receipt gap.
@@ -741,13 +745,6 @@ export function Composer({ chat }: { chat: Chat | null }) {
             store.removeDraftImages(sentChatID, sentImageIDs);
             return;
           }
-          // Rejection must never repopulate the editor with submitted text.
-          // Preserve only what the user typed while the receipt was in flight.
-          if (sentChatID) setText((current) => {
-            const restored = restoreRejectedSteerDraft(submittedDraft, current);
-            store.setDraft(sentChatID, restored);
-            return restored;
-          });
         }).finally(() => {
           setTransferredSteerImageIDs([]);
           setPreparingImages(false);
@@ -757,10 +754,10 @@ export function Composer({ chat }: { chat: Chat | null }) {
       setPreparingImages(false);
       return;
     }
-    void store.sendTo(chat.id, t, images, submittedDraft).then((accepted) => {
+    void store.sendTo(chat.id, t, images, submittedDraft, submission).then((accepted) => {
       if (accepted && sentChatID) store.removeDraftImages(sentChatID, sentImageIDs);
     }).finally(() => setPreparingImages(false));
-    setText('');
+    finishSubmission();
   }
   function keydown(e: React.KeyboardEvent) {
     // While the catalog popup is open it owns ↑↓/Enter/Tab/Esc: picking

@@ -1569,3 +1569,55 @@ test('remote presentation, queue, controls, workspace, history, create, and dele
   assert.deepEqual(sessionSaves, [],
     'remote actor commands must not mint an unchanged local daemon-global save');
 });
+
+test('remote Send stays consumed through delayed receipts, stale snapshots, and a fresh renderer', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const values = new Map<string, string>();
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
+  } });
+  try {
+    for (const nextDraft of ['', 'new unsent typing', 'already sent']) {
+      values.clear();
+      const stale = mirror([], { draft: 'already sent', presentationRevision: 999 });
+      const subject = remoteSubject(() => stale);
+      await subject.hydrateMachine(MACHINE);
+      assert.equal(subject.chat(TAB).draft, '', 'never import the laptop draft');
+      subject.setDraft(TAB, 'already sent');
+      let options!: Record<string, unknown>;
+      let release!: (reply: unknown) => void;
+      let calls = 0;
+      const receipt = new Promise((resolve) => { release = resolve; });
+      await withWindowApi({ startJob: async (opts: Record<string, unknown>) => {
+        calls += 1;
+        options = opts;
+        return receipt;
+      } }, async () => {
+        const sending = subject.sendTo(TAB, 'already sent');
+        assert.equal(subject.chat(TAB).draft, '');
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(options.prompt, 'already sent');
+        // A second renderer reloads before the delayed send receipt arrives.
+        const duringSend = remoteSubject(() => stale);
+        await duringSend.hydrateMachine(MACHINE);
+        assert.equal(duringSend.chat(TAB).draft, '');
+        if (nextDraft) subject.setDraft(TAB, nextDraft);
+        await subject.hydrateMachine(MACHINE);
+        assert.equal(subject.chat(TAB).draft, nextDraft);
+        assert.equal(subject.chat(TAB).messages.filter((message: Msg) => message.id === options.userMessageId && message.content === 'already sent').length, 1);
+        release({ id: tagId(MACHINE, 'draft-send-job') });
+        assert.equal(await sending, true);
+        await subject.hydrateMachine(MACHINE);
+        assert.equal(subject.chat(TAB).draft, nextDraft);
+        assert.equal(calls, 1);
+        const afterReload = remoteSubject(() => stale);
+        await afterReload.hydrateMachine(MACHINE);
+        assert.equal(afterReload.chat(TAB).draft, nextDraft);
+      });
+    }
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor);
+    else delete (globalThis as any).localStorage;
+  }
+});

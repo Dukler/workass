@@ -139,7 +139,7 @@ function terminalJob(owner: Chat, overrides: Partial<PublicJob> = {}): PublicJob
   } as PublicJob;
 }
 
-test('lean chat save uses its exact actor command without a daemon-global no-op save', async () => {
+test('composer edits do not send actor or daemon-global saves', async () => {
   const subject = subjectWithChats();
   const presentationSaves: Record<string, unknown>[] = [];
   const globalSaves: Mirror[] = [];
@@ -157,7 +157,7 @@ test('lean chat save uses its exact actor command without a daemon-global no-op 
     await subject.flushSession();
   });
 
-  assert.deepEqual(presentationSaves.map((save) => [save.tabId, save.draft]), [['tab-a', 'changed']]);
+  assert.deepEqual(presentationSaves, []);
   assert.deepEqual(globalSaves, []);
   assert.equal(isDirty(subject, 'tab-a'), false);
 });
@@ -169,7 +169,6 @@ test('every persisted chat-mutation family marks its exact chat dirty', async (t
     prepare?: (subject: any, owner: Chat) => void;
   }> = [
     { name: 'per-chat pane', mutate: (subject) => subject.toggleRail() },
-    { name: 'draft text', mutate: (subject, owner) => subject.setDraft(owner.id, 'draft') },
     { name: 'sidebar metadata', mutate: (subject, owner) => {
       subject.state.activeId = 'another-tab';
       subject.markUnread(owner.id);
@@ -288,7 +287,9 @@ test('false and throwing saves keep a chat dirty until a successful retry', asyn
       const oldWarn = console.warn;
       console.warn = () => {};
       try {
-        subject.setDraft('tab-a', `${failure}-retry`);
+        subject.chat('tab-a').title = `${failure}-retry`;
+        subject.markPresentationMutation(subject.chat('tab-a'));
+    subject.touchChat('tab-a');
         await subject.flushSession();
         assert.equal(isDirty(subject, 'tab-a'), true, failure);
         await subject.flushSession();
@@ -319,10 +320,14 @@ test('a mutation arriving during a save acknowledgement remains dirty and is res
       };
     },
   }, async () => {
-    subject.setDraft('tab-a', 'first');
+    subject.chat('tab-a').title = 'first';
+    subject.markPresentationMutation(subject.chat('tab-a'));
+    subject.touchChat('tab-a');
     const firstSave = subject.flushSession();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    subject.setDraft('tab-a', 'second');
+    subject.chat('tab-a').title = 'second';
+    subject.markPresentationMutation(subject.chat('tab-a'));
+    subject.touchChat('tab-a');
     release({
       ok: true, operationId: payloads[0].operationId,
       presentationRevision: 1, actorRevision: 1,
@@ -333,7 +338,7 @@ test('a mutation arriving during a save acknowledgement remains dirty and is res
     await subject.flushSession();
   });
 
-  assert.deepEqual(payloads.map((save) => save.draft), ['first', 'second']);
+  assert.deepEqual(payloads.map((save) => save.title), ['first', 'second']);
   assert.equal(isDirty(subject, 'tab-a'), false);
 });
 
@@ -797,4 +802,125 @@ test('a chat delta stays smaller than the equivalent complete session', () => {
   assert.deepEqual(delta.chats.map((candidate) => candidate.id), ['tab-1']);
   assert.equal(delta._workassSave, LEAN_SESSION_SAVE_MODE);
   assert.ok(deltaBytes < fullBytes);
+});
+
+
+test('model selection during chat creation persists the selected provider controls', async () => {
+  const subject = subjectWithChats([chat('source', { currentModeId: 'agent-full-access' })]);
+  subject.state.groups = [{ providerId: 'opencode', providerName: 'OpenCode', models: [
+    { modelId: 'opencode/muse-spark-1.3-contributor-free', name: 'Muse Spark 1.3' },
+  ], modes: [{ id: 'build', name: 'Build' }, { id: 'plan', name: 'Plan' }], permissionIntents: { read: 'plan' } }];
+  let releaseCreate!: () => void;
+  const createBarrier = new Promise<void>((resolve) => { releaseCreate = resolve; });
+  const saves: any[] = [];
+  let releaseControls!: () => void;
+  const controlsBarrier = new Promise<void>((resolve) => { releaseControls = resolve; });
+  let starts = 0;
+  subject.state.connection = 'connected';
+  await withWindowApi({
+    chatCreate: async (opts: any) => {
+      await createBarrier;
+      return actorApi().chatCreate(opts);
+    },
+    chatRuntimeControlsSave: async (opts: any) => {
+      saves.push(opts);
+      await controlsBarrier;
+      return actorApi().chatRuntimeControlsSave(opts);
+    },
+    startJob: async (opts: any) => {
+      starts += 1;
+      assert.equal(opts.providerId, 'opencode');
+      assert.equal(opts.modeId, null);
+      return { id: 'first-muse-job' };
+    },
+  }, async () => {
+    const created = subject.newChat(true, '/tmp/workass-delta-test');
+    const selection = subject.pickModel(created.id, 'opencode', 'opencode/muse-spark-1.3-contributor-free');
+    const sending = subject.sendTo(created.id, 'first prompt');
+    releaseCreate();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(starts, 0, 'send must not overtake the selected controls save');
+    releaseControls();
+    await selection;
+    assert.equal(await sending, true);
+    assert.equal(starts, 1);
+    assert.equal(saves.length, 1, 'creation must not acknowledge a selection it never saved');
+    assert.equal(saves[0].providerId, 'opencode');
+    assert.equal(saves[0].currentModelId, 'opencode/muse-spark-1.3-contributor-free');
+    assert.equal(saves[0].currentModeId, null, 'do not inherit Codex full-access as an OpenCode mode');
+  });
+});
+
+test('local composer edits survive remote draft replacements without a server save', async () => {
+  for (const value of ['unsent local writing', '']) {
+    const subject = subjectWithChats();
+    await withWindowApi({ saveSession: async () => true }, async () => {
+      subject.setDraft('tab-a', value);
+      await subject.flushSession(true);
+      const remote = subject.toMirror(false);
+      remote.chats[0].presentationRevision = (subject.chat('tab-a').presentationRevision ?? 0) + 1;
+      remote.chats[0].draft = value ? '' : 'text sent on another device';
+      subject.restoreSessionSnapshot(remote);
+      assert.equal(subject.chat('tab-a').draft, value);
+    });
+  }
+});
+
+test('local drafts survive reload until sent, and sent text never returns from storage or remote snapshots', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const values = new Map<string, string>();
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
+  } });
+  try {
+    const server = subjectWithChats().toMirror(false);
+    server.chats[0].draft = 'old text from laptop';
+    const fresh = new StoreCtor();
+    fresh.restoreSessionSnapshot(server);
+    assert.equal(fresh.chat('tab-a').draft, '');
+    fresh.setDraft('tab-a', 'local unsent input');
+    assert.ok(!JSON.stringify(fresh.toMirror(false)).includes('local unsent input'), 'draft is not shared');
+    const reloaded = new StoreCtor();
+    reloaded.restoreSessionSnapshot(server);
+    assert.equal(reloaded.chat('tab-a').draft, 'local unsent input');
+    const delivered: string[] = [];
+    reloaded.state.connection = 'connected';
+    reloaded.schedulePersist = () => {};
+    await withWindowApi({ startJob: async (opts: any) => {
+      delivered.push(opts.prompt);
+      return { id: 'draft-reload-job' };
+    } }, async () => {
+      assert.equal(await reloaded.sendTo('tab-a', 'local unsent input'), true);
+    });
+    assert.equal(reloaded.chat('tab-a').messages.filter((message: Msg) => message.role === 'user' && message.content === 'local unsent input').length, 1);
+    assert.deepEqual(delivered, ['local unsent input']);
+    assert.equal(reloaded.chat('tab-a').draft, '');
+    // Reload after Send, while a remote snapshot still carries the old draft.
+
+    const afterDeletion = new StoreCtor();
+    afterDeletion.restoreSessionSnapshot(server);
+    assert.equal(afterDeletion.chat('tab-a').draft, '');
+    assert.equal(afterDeletion.chat('tab-b').draft, '');
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor);
+    else delete (globalThis as any).localStorage;
+  }
+});
+
+test('a metadata acknowledgement does not invalidate an unrelated composer submission', async () => {
+  for (const typedAgain of [false, true]) {
+    const subject = subjectWithChats();
+    const owner = subject.chat('tab-a');
+    subject.setDraft(owner.id, 'captured input');
+    const submission = subject.captureDraftSubmission(owner.id, owner.draft);
+    owner.title = 'Metadata changed during attachment preparation';
+    subject.markPresentationMutation(owner);
+    subject.touchChat(owner.id);
+    if (typedAgain) subject.setDraft(owner.id, 'captured input');
+    await withWindowApi({}, () => subject.flushSession());
+    subject.consumeSubmittedDraft(submission);
+    assert.equal(subject.chat(owner.id).draft, typedAgain ? 'captured input' : '',
+      'only the captured edit is consumed; metadata replies do not own input');
+  }
 });

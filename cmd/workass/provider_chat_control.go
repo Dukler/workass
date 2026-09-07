@@ -135,7 +135,11 @@ func (r *providerChatRuntime) SavePresentation(tabID, chatID string, operationID
 	presentation.Title = redactedSessionString(fieldString(raw, "title"))
 	presentation.TitleLocked = boolFieldValue(raw, "titleLocked")
 	presentation.Group = optionalStringPointer(raw, "group")
-	presentation.Draft = redactedSessionString(stringValue(raw["draft"]))
+	var draftIntent any
+	if draft, exists := raw["draft"]; exists {
+		presentation.Draft = redactedSessionString(stringValue(draft))
+		draftIntent = presentation.Draft
+	}
 	presentation.Unread = boolFieldValue(raw, "unread")
 	presentation.Settled = fieldString(raw, "settled")
 	presentation.SettledAt = int64(max(0, intField(raw, "settledAt")))
@@ -150,12 +154,12 @@ func (r *providerChatRuntime) SavePresentation(tabID, chatID string, operationID
 		Title       string
 		TitleLocked bool
 		Group       *string
-		Draft       string
+		Draft       any
 		Unread      bool
 		Settled     string
 		SettledAt   int64
 		Pane        *string
-	}{presentation.Title, presentation.TitleLocked, presentation.Group, presentation.Draft, presentation.Unread, presentation.Settled, presentation.SettledAt, presentation.Pane}
+	}{presentation.Title, presentation.TitleLocked, presentation.Group, draftIntent, presentation.Unread, presentation.Settled, presentation.SettledAt, presentation.Pane}
 	digestRaw, err := json.Marshal(digestPayload)
 	if err != nil {
 		return nil, err

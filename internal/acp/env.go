@@ -204,8 +204,8 @@ func (m *Manager) initChatEnvForSessionSync(ctx context.Context, opts SessionOpt
 
 	m.envMu.Lock()
 	m.storeChatEnvTrackerLocked(tracker)
-	m.envMu.Unlock()
 	initial := cloneChatEnvPayload(tracker.payload)
+	m.envMu.Unlock()
 	if m.observeChatEnv(initial, opts.ProviderLaneManaged) {
 		return
 	}

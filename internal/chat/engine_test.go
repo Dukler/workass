@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"workass/internal/provider"
 )
@@ -18,6 +19,21 @@ type memoryStateStore struct {
 	state State
 	ok    bool
 	fail  bool
+}
+
+func TestStartingSendDigestMatchesTranscriptPresentation(t *testing.T) {
+	state, _ := NewState("starting-chat")
+	state.Queue = []QueueEntry{{OperationID: "starting-input", Text: "hello", Presentation: provider.TurnPresentation{
+		UserMessageID: "starting-user", AssistantMessageID: "starting-assistant",
+	}}}
+	engine := &Engine{state: state}
+	digest := engine.DigestSnapshot()
+	if digest.QueueLen != 0 || digest.QueueHeadID != "" || digest.MessageCount != 2 || digest.LastMessageID != "starting-assistant" || digest.RunningJobID != provider.DeriveJobID(state.ChatID, "starting-input") {
+		t.Fatalf("starting send digest mismatches transcript: %#v", digest)
+	}
+	if engine.state.Foreground != nil || len(engine.state.Queue) != 1 {
+		t.Fatal("digest mutated dispatch ownership")
+	}
 }
 
 func (s *memoryStateStore) Load(chatID string) (State, bool, error) {
@@ -903,6 +919,70 @@ func BenchmarkReadProjectionSnapshotLargeLedger(b *testing.B) {
 			if _, err := engine.ReadLedgerPageBefore("message-09940", 40); err != nil {
 				b.Fatal(err)
 			}
+		}
+	})
+}
+
+func TestSessionReadOmitsIdlePayloadsButKeepsCountAndActivity(t *testing.T) {
+	engine, err := NewEngine("idle-session-read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.state.Initialized = true
+	engine.state.Presentation.TabID = "idle-tab"
+	engine.state.Ledger = make([]LedgerEvent, 100)
+	for i := range engine.state.Ledger {
+		engine.state.Ledger[i] = LedgerEvent{
+			MessageID: fmt.Sprintf("message-%03d", i), Text: "body",
+			Timeline: []TimelineEntry{{Tool: &provider.ToolEvent{Title: "large tool result"}}},
+		}
+	}
+	engine.state.Ledger[98].At = "2026-09-07T12:00:00Z"
+	idle := engine.ReadSessionProjectionSnapshot("other-tab", 60)
+	if len(idle.State.Ledger) != 0 || idle.LedgerOffset != 100 || idle.LedgerCount != 100 {
+		t.Fatalf("idle snapshot copied history or lost count: offset=%d count=%d rows=%d", idle.LedgerOffset, idle.LedgerCount, len(idle.State.Ledger))
+	}
+	if idle.LastActivityAt != time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC).UnixMilli() {
+		t.Fatal("idle lifecycle timestamp was lost")
+	}
+	selected := engine.ReadSessionProjectionSnapshot("idle-tab", 60)
+	if len(selected.State.Ledger) != 60 || selected.LedgerOffset != 40 {
+		t.Fatal("selected tail missing")
+	}
+	selected.State.Ledger[0].Timeline[0].Tool.Title = "mutated"
+	if engine.state.Ledger[40].Timeline[0].Tool.Title != "large tool result" {
+		t.Fatal("snapshot aliases actor")
+	}
+	engine.state.Foreground = &ForegroundTurn{Status: ForegroundRunning}
+	running := engine.ReadSessionProjectionSnapshot("other-tab", 60)
+	if len(running.State.Ledger) != 60 || running.State.Foreground == nil {
+		t.Fatal("background live turn must carry its tail")
+	}
+}
+
+func BenchmarkSessionProjectionIdleToolHistory(b *testing.B) {
+	engine, err := NewEngine("idle-session-benchmark")
+	if err != nil {
+		b.Fatal(err)
+	}
+	engine.state.Presentation.TabID = "idle-tab"
+	engine.state.Ledger = make([]LedgerEvent, 60)
+	for i := range engine.state.Ledger {
+		engine.state.Ledger[i] = LedgerEvent{At: "2026-09-07T12:00:00Z", Timeline: make([]TimelineEntry, 100)}
+		for j := range engine.state.Ledger[i].Timeline {
+			engine.state.Ledger[i].Timeline[j] = TimelineEntry{Tool: &provider.ToolEvent{Title: "tool output"}}
+		}
+	}
+	b.Run("previous-copy-before-discard", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			_ = engine.ReadProjectionSnapshot(60)
+		}
+	})
+	b.Run("idle-metadata", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			_ = engine.ReadSessionProjectionSnapshot("other-tab", 60)
 		}
 	})
 }

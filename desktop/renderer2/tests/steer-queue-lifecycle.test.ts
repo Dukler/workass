@@ -308,3 +308,19 @@ test('a delayed queue save cannot strand a later accepted steer beside the compo
   assert.equal(steer!.steerBoundary, undefined, 'the receipt moves the same row out of the composer-adjacent preview');
   assert.deepEqual(replacement!.queue?.map((item) => item.text), ['first, keep this queued'], 'the older FIFO owner remains independent');
 });
+
+
+test('steering after attachment preparation preserves a newer draft through rejection', async () => {
+  let reject!: (value: unknown) => void;
+  const { store, owner } = subject({ appChatSteer: () => new Promise((resolve) => { reject = resolve; }) });
+  running(owner);
+  store.setDraft(owner.id, 'direction');
+  const submission = store.captureDraftSubmission(owner.id, 'direction');
+  store.setDraft(owner.id, 'new typing during encoding');
+  const delivery = store.steerRunning(owner.id, 'direction', undefined, submission);
+  assert.equal(owner.draft, 'new typing during encoding');
+  await new Promise((resolve) => setImmediate(resolve));
+  reject({ ok: false, strategy: 'rejected' });
+  await delivery;
+  assert.equal(owner.draft, 'new typing during encoding');
+});

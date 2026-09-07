@@ -142,3 +142,37 @@ func TestRendererPresentationReceiptSurvivesLostReplyAndRevisionHydration(t *tes
 		t.Fatalf("changed presentation mutated actor: %#v", unchanged)
 	}
 }
+
+func TestPresentationWithoutDraftNeverMutatesLegacyDraft(t *testing.T) {
+	stateDir := t.TempDir()
+	manager := acp.NewManager(acp.Options{StateDir: stateDir, RuntimeProfile: "dev"})
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	const tabID, chatID = "local-draft-tab", "local-draft-chat"
+	if _, err := runtime.CreateRendererChat(map[string]any{"tabId": tabID, "chatId": chatID, "operationId": "create-local-draft", "providerId": "mock", "currentModelId": "mock-deterministic"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.SavePresentation(tabID, chatID, "legacy-draft", 0, map[string]any{"draft": "legacy input"}); err != nil {
+		t.Fatal(err)
+	}
+	request := map[string]any{"title": "renamed"}
+	_, err := runtime.SavePresentation(tabID, chatID, "metadata-only", 1, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _ := runtime.Snapshot(chatID)
+	if state.Presentation.Draft != "legacy input" {
+		t.Fatal("metadata save cleared draft")
+	}
+	if _, err = runtime.SavePresentation(tabID, chatID, "another-legacy-edit", 2, map[string]any{"draft": "new legacy input"}); err != nil {
+		t.Fatal(err)
+	}
+	beforeRetry, _ := runtime.Snapshot(chatID)
+	_, err = runtime.SavePresentation(tabID, chatID, "metadata-only", 3, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _ = runtime.Snapshot(chatID)
+	if state.Presentation.Draft != "new legacy input" || state.Revision != beforeRetry.Revision {
+		t.Fatal("metadata retry rewrote another edit")
+	}
+}
