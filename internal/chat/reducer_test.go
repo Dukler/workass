@@ -356,7 +356,7 @@ func TestRendererQueueReplacementUsesActorRevisionAndCannotTouchProviderOutbox(t
 	}
 }
 
-func TestSubmittingInputAtomicallyReleasesMatchingDraft(t *testing.T) {
+func TestSubmittingInputNeverMutatesLegacyDraft(t *testing.T) {
 	for _, draft := range []string{"  sent text\n", "new typing"} {
 		for _, queued := range []bool{false, true} {
 			state, _ := NewState("chat")
@@ -373,17 +373,8 @@ func TestSubmittingInputAtomicallyReleasesMatchingDraft(t *testing.T) {
 			} else {
 				state, _ = apply(t, state, Submit{OperationID: "send", Text: "sent text", Presentation: provider.TurnPresentation{Origin: "human"}})
 			}
-			if draft == "new typing" {
-				if state.Presentation.Draft != draft {
-					t.Fatal("submission erased new typing")
-				}
-				continue
-			}
-			if state.Presentation.Draft != "" || state.Presentation.PresentationRevision <= before.PresentationRevision {
-				t.Fatal("submission did not durably release and fence its draft")
-			}
-			if _, _, err := Reduce(state, UpdatePresentation{Presentation: before}); err == nil {
-				t.Fatal("stale controller restored submitted draft")
+			if state.Presentation.Draft != draft || state.Presentation.PresentationRevision != before.PresentationRevision {
+				t.Fatal("submission changed legacy composer presentation")
 			}
 		}
 	}

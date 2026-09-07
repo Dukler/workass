@@ -618,7 +618,7 @@ export interface WorkassApi {
   }) => Promise<{ ok: boolean; tabId: string; chatId: string; operationId: string; actorRevision: number; presentationRevision: number; globalRevision: number }>;
   chatPresentationSave?: (opts: {
     tabId: string; chatId: string; operationId: string; expectedRevision: number;
-    title: string; titleLocked: boolean; group: string | null; draft: string; unread: boolean;
+    title: string; titleLocked: boolean; group: string | null; draft?: string; unread: boolean;
     settled: 'settled' | 'active' | ''; settledAt: number; pane: 'rail' | 'browser' | null;
   }) => Promise<{ ok: boolean; operationId: string; presentationRevision: number; actorRevision: number }>;
   chatRuntimeControlsSave?: (opts: {

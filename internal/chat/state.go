@@ -647,6 +647,28 @@ type OutboxEntry struct {
 	LastError                   provider.ErrorKind
 }
 
+// PresentationState keeps a direct idle send in the transcript during native
+// attachment. The internal dispatch queue is not the user's follow-up queue.
+// This shallow view never changes the actor or schedules provider work.
+func (s State) PresentationState() State {
+	if s.Foreground != nil || len(s.Queue) == 0 || s.Queue[0].Presentation.QueueID != "" {
+		return s
+	}
+	input := s.Queue[0]
+	assistantID := strings.TrimSpace(input.Presentation.AssistantMessageID)
+	if assistantID == "" {
+		assistantID = "message:" + string(input.OperationID) + ":assistant"
+	}
+	s.Queue = s.Queue[1:]
+	s.Foreground = &ForegroundTurn{
+		OperationID: input.OperationID, LaneID: input.LaneID, Input: input,
+		Status: ForegroundDispatching, StartedAt: input.Presentation.StartedAt,
+		RootAssistantMessageID: assistantID, CurrentAssistantMessageID: assistantID,
+		Turn: provider.TurnRef{NativeID: provider.DeriveJobID(s.ChatID, input.OperationID)},
+	}
+	return s
+}
+
 type State struct {
 	ChatID   string
 	Revision uint64

@@ -80,3 +80,44 @@ test('daemon liveness answers without waiting for a busy chat-state digest', asy
     else (globalThis as any).window = previousWindow;
   }
 });
+
+
+test('metadata-only idle chats converge after hydration instead of reloading on every heartbeat', () => {
+  const subject = new StoreCtor();
+  const mirror = { version: 1, activeId: 'tab-other', chats: [{
+    id: 'tab-live', chatId: 'chat-live', actorRevision: 11, presentationRevision: 3,
+    agentQueueRevision: 4, runtimeControlRevision: 5, providerId: 'codex',
+    currentModelId: 'gpt-test', currentModeId: 'agent', title: 'idle',
+    messages: [], messageCount: 40, historyComplete: false,
+  }] };
+  const restored = subject.fromMirror(mirror).chats[0];
+  const idleDigest = digest({ runningJobId: null, lastMessageId: 'omitted-last-row', messageCount: 40 });
+  for (let heartbeat = 0; heartbeat < 10; heartbeat++) {
+    assert.equal(digestChatSessionDiverged(restored, idleDigest), false);
+  }
+  assert.equal(digestChatSessionDiverged(restored, { ...idleDigest, messageCount: 42 }), true);
+  assert.equal(digestChatSessionDiverged(restored, { ...idleDigest, runningJobId: 'new-job' }), true);
+  assert.equal(digestChatSessionDiverged(restored, { ...idleDigest, presentationRevision: 4 }), true);
+});
+
+
+test('refresh requests merge while an earlier reconciliation is waiting', async () => {
+  const subject = new StoreCtor();
+  const tasks: (() => Promise<void>)[] = [];
+  const batches: Set<string>[] = [];
+  subject.queueAgentRefresh = (_reason: string, task: () => Promise<void>) => tasks.push(task);
+  subject.runScopedSync = async (scopes: Set<string>) => { batches.push(scopes); };
+  subject.scheduleScopedSync(['session']);
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  subject.scheduleScopedSync(['permissions']);
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  subject.scheduleScopedSync(['session', 'catalog']);
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  assert.equal(tasks.length, 1, 'slow hydration must not accumulate redundant full-session reads');
+  await tasks.shift()!();
+  assert.deepEqual([...batches[0]].sort(), ['catalog', 'permissions', 'session']);
+  subject.scheduleScopedSync(['session']);
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  assert.equal(tasks.length, 1, 'a later change still gets its reconciliation');
+  await tasks.shift()!();
+});

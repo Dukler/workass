@@ -5,6 +5,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
+
+	"workass/internal/provider"
 )
 
 // Engine is the single serialization boundary for one chat. Apply only commits
@@ -243,6 +246,25 @@ func (e *Engine) Snapshot() State {
 	return e.state.Clone()
 }
 
+// HasCancellableJob locates Stop's owner without copying transcript history or
+// taking the runtime's provider-attachment mutex. This is only a routing hint;
+// cancellation revalidates the exact job under the owning actor's lock.
+func (e *Engine) HasCancellableJob(jobID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if foreground := e.state.Foreground; foreground != nil {
+		if foreground.Turn.NativeID == jobID || provider.DeriveJobID(e.state.ChatID, foreground.OperationID) == jobID {
+			return true
+		}
+	}
+	for _, queued := range e.state.Queue {
+		if provider.DeriveJobID(e.state.ChatID, queued.OperationID) == jobID {
+			return true
+		}
+	}
+	return false
+}
+
 // IdentitySnapshot is the constant-size identity needed to locate one actor by
 // its renderer tab. It deliberately excludes ledger and provider-turn state.
 type IdentitySnapshot struct {
@@ -264,9 +286,10 @@ func (e *Engine) IdentitySnapshot() IdentitySnapshot {
 // exact history metadata without copying the omitted prefix. This has no write
 // path and no authority over provider turns.
 type ReadProjectionSnapshot struct {
-	State        State
-	LedgerOffset int
-	LedgerCount  int
+	LastActivityAt int64
+	State          State
+	LedgerOffset   int
+	LedgerCount    int
 }
 
 func (e *Engine) ReadProjectionSnapshot(ledgerTail int) ReadProjectionSnapshot {
@@ -280,6 +303,40 @@ func (e *Engine) ReadProjectionSnapshot(ledgerTail int) ReadProjectionSnapshot {
 	return ReadProjectionSnapshot{
 		State: e.state.cloneReadProjection(ledgerOffset), LedgerOffset: ledgerOffset, LedgerCount: ledgerCount,
 	}
+}
+
+// ReadSessionProjectionSnapshot omits committed bodies for unselected idle
+// chats at the copy boundary, rather than cloning their tool history only to
+// discard it during serialization. Selection and foreground are tested under
+// the same lock as the snapshot, so a newly running turn always carries history.
+func (e *Engine) ReadSessionProjectionSnapshot(activeTabID string, ledgerTail int) ReadProjectionSnapshot {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ledgerCount := len(e.state.Ledger)
+	if ledgerTail < 0 {
+		ledgerTail = 0
+	}
+	ledgerOffset := ledgerCount - min(ledgerCount, ledgerTail)
+	if e.state.Presentation.TabID != activeTabID && e.state.Foreground == nil {
+		ledgerOffset = ledgerCount
+	}
+	snapshot := ReadProjectionSnapshot{
+		State: e.state.cloneReadProjection(ledgerOffset), LedgerOffset: ledgerOffset, LedgerCount: ledgerCount,
+	}
+	// Metadata-only reads still need the lifecycle timestamp. Inspect scalar
+	// timestamps directly; none of the ledger's bodies or tool payloads escape.
+	if ledgerOffset == ledgerCount {
+		// Keep the same timestamp window as the previous bounded tail. Legacy
+		// undated history must not turn this cheap read into a whole-ledger scan.
+		activityStart := ledgerCount - min(ledgerCount, ledgerTail)
+		for i := ledgerCount - 1; i >= activityStart; i-- {
+			if at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(e.state.Ledger[i].At)); err == nil {
+				snapshot.LastActivityAt = at.UnixMilli()
+				break
+			}
+		}
+	}
+	return snapshot
 }
 
 // ActivitySnapshot contains only the actor-owned state used by background-work
@@ -402,7 +459,8 @@ type DigestSnapshot struct {
 func (e *Engine) DigestSnapshot() DigestSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	state := &e.state
+	view := e.state.PresentationState()
+	state := &view
 	digest := DigestSnapshot{
 		Initialized:            state.Initialized,
 		Deleted:                state.Deleted,

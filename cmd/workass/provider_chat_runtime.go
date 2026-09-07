@@ -2573,6 +2573,11 @@ func (r *providerChatRuntime) Cancel(ctx context.Context, jobID string) (acp.Job
 	}
 	operationID := providercontract.OperationID("cancel:" + jobID)
 	for _, actor := range r.actorSnapshot() {
+		// Provider attachment can hold another chat's runtime mutex for the
+		// duration of a native RPC. Stop must never join that unrelated work.
+		if !actor.engine.HasCancellableJob(jobID) {
+			continue
+		}
 		actor.mu.Lock()
 		state := actor.engine.Snapshot()
 		pendingOperationID := providercontract.OperationID("")

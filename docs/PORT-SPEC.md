@@ -623,15 +623,16 @@ shell, NOT the daemon.
     deterministic mock remains the oracle for path (c); real-adapter canaries
     verify protocol acknowledgement/cancellation, never model quality.
 14. **Queue and steer are separate user intents** (user correction 2026-07-13):
-    **Composer ownership correction (user 2026-09-07):** submitted text MUST
-    never be automatically inserted back into the composer, including after a
-    remote-controller refresh or a rejected steer. This supersedes the older
-    rejected-steer return-to-composer wording: rejection reports failure without
-    restoring or concatenating the old text. A submit or newly queued input
-    clears its matching actor-owned draft atomically and advances the presentation
-    revision; different newer typing survives. Metadata retries never own the
-    draft merely because it was present in their snapshot. A mounted composer
-    follows an authoritative clear without inserting incoming remote text.
+    **Composer ownership correction (user 2026-09-07):** the composer is local
+    input, not shared chat state. Draft text MUST NOT be restored from actor
+    snapshots, remote controllers, transcript content, or delivery receipts.
+    Persist only locally authored drafts on the controller, keyed by exact chat
+    identity, so reloads preserve unsent local input without importing legacy
+    shared drafts. Normal metadata saves omit draft text. Explicit Send, queue,
+    or steer moves the captured local edit into the chat and empties that draft
+    once, including its local saved copy. Anything typed afterward survives.
+    Provider events, remote snapshots, and delivery receipts never populate or
+    clear the editor. Remove matching-text deletion workarounds.
     while a turn is running, ordinary `Enter` appends one durable FIFO follow-up
     and never interrupts the active turn; `Cmd+Enter` explicitly invokes the
     provider-aware steering law above. `Shift+Enter` remains newline. The send

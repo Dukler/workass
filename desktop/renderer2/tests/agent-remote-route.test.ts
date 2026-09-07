@@ -44,6 +44,26 @@ interface StoreShape {
   routeAgentRequest(request: AgentRouteRequest): Promise<unknown>;
 }
 
+test('remote MCP Stop delivers the exact job through the normal cancellation router without loading history', async (t) => {
+  const { Store, setMachineRouter } = await loadStore(t);
+  const subject = new Store();
+  const jobId = tagId(machineId, 'job-stop');
+  const queue = [{ id: 'follow-up', text: 'keep queued' }];
+  subject.state.chats = [remoteChat({ historyComplete: false, queue, messages: [
+    { id: 'assistant-stop', role: 'assistant', content: '', status: 'running', at: null, events: [], jobId },
+  ] })];
+  const calls: string[] = [];
+  setMachineRouter({ cancelJob: async (id: string) => { calls.push(id); return { cancelled: true }; } });
+  t.after(() => setMachineRouter(undefined));
+  const params = { tab_id: tabId, chat_id: chatId, machine_id: machineId };
+  assert.deepEqual(await subject.routeAgentRequest(request('chat.cancel', params)), { cancelled: true });
+  assert.deepEqual(calls, [jobId]);
+  assert.deepEqual(subject.state.chats[0].queue, queue);
+  assert.equal(subject.state.activeId, null);
+  await assert.rejects(subject.routeAgentRequest(request('chat.cancel', { ...params, machine_id: 'wrong' })), /exact/);
+  assert.equal(calls.length, 1);
+});
+
 test('agent MCP projection lists and reads a mounted remote chat without focusing it', async (t) => {
   const { Store } = await loadStore(t);
   const subject = new Store();

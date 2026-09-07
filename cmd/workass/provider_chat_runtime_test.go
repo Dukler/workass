@@ -50,6 +50,41 @@ func TestLoadedActorLookupDoesNotSnapshotActorState(t *testing.T) {
 	}
 }
 
+func TestIdleSendStaysInTranscriptDuringProviderAttachment(t *testing.T) {
+	state, _ := chat.NewState("idle-send-chat")
+	state.Initialized = true
+	state.Presentation.TabID = "idle-send-tab"
+	input := chat.QueueEntry{OperationID: "idle-send", Text: "hello", Presentation: providercontract.TurnPresentation{
+		UserMessageID: "user-idle", AssistantMessageID: "assistant-idle", StartedAt: "2026-09-07T00:00:00Z",
+	}}
+	state.Queue = []chat.QueueEntry{input}
+	out := map[string]any{}
+	if err := projectActorChat(out, state); err != nil {
+		t.Fatal(err)
+	}
+	if len(out["queue"].([]any)) != 0 {
+		t.Fatal("idle send leaked into the follow-up queue")
+	}
+	rows := out["messages"].([]any)
+	if len(rows) != 2 || fieldString(rows[0].(map[string]any), "id") != "user-idle" || fieldString(rows[1].(map[string]any), "id") != "assistant-idle" {
+		t.Fatalf("starting transcript ownership: %#v", rows)
+	}
+	if fieldString(rows[1].(map[string]any), "status") != "running" || fieldString(rows[1].(map[string]any), "jobId") != providercontract.DeriveJobID(state.ChatID, input.OperationID) {
+		t.Fatal("starting send lost its Stop address")
+	}
+	if state.Foreground != nil || len(state.Queue) != 1 {
+		t.Fatal("projection changed actor dispatch state")
+	}
+	state.Queue[0].Presentation.QueueID = "explicit-follow-up"
+	out = map[string]any{}
+	if err := projectActorChat(out, state); err != nil {
+		t.Fatal(err)
+	}
+	if len(out["queue"].([]any)) != 1 || len(out["messages"].([]any)) != 0 {
+		t.Fatal("explicit follow-up did not remain queued")
+	}
+}
+
 func TestRendererChatCreationIsDurableIdempotentAndIndependentFromProviderAttachment(t *testing.T) {
 	stateDir := t.TempDir()
 	store := sharedSessionStore(stateDir)
@@ -1204,6 +1239,46 @@ func stopSteerRegressionTurn(t *testing.T, runtime *providerChatRuntime) {
 	if err != nil || !handled || !result.Cancelled {
 		t.Errorf("stop held steer regression turn: handled=%v result=%#v err=%v", handled, result, err)
 		return
+	}
+	waitProviderChatIdle(t, runtime, "steer-regression-chat", 5*time.Second)
+}
+
+func TestStopDoesNotWaitForUnrelatedProviderAttachment(t *testing.T) {
+	runtime, _, _, _, info := newSteerRegressionFixture(t)
+	startSteerRegressionTurn(t, runtime, info)
+	engine, err := chat.NewEngine("blocked-attachment-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := &providerChatActor{engine: engine}
+	blocked.mu.Lock() // Select holds this mutex while awaiting native setup.
+	defer blocked.mu.Unlock()
+	runtime.mu.Lock()
+	runtime.actors["blocked-attachment-chat"] = blocked
+	runtime.mu.Unlock()
+	defer func() {
+		runtime.mu.Lock()
+		delete(runtime.actors, "blocked-attachment-chat")
+		runtime.mu.Unlock()
+	}()
+	state, _ := runtime.Snapshot("steer-regression-chat")
+	for _, jobID := range []string{"unknown-job", state.Foreground.Turn.NativeID} {
+		done := make(chan error, 1)
+		go func() {
+			result, handled, err := runtime.Cancel(context.Background(), jobID)
+			if err == nil && (!handled || (jobID != "unknown-job" && !result.Cancelled)) {
+				err = fmt.Errorf("unexpected cancel result: handled=%v result=%#v", handled, result)
+			}
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Stop waited for an unrelated provider attachment")
+		}
 	}
 	waitProviderChatIdle(t, runtime, "steer-regression-chat", 5*time.Second)
 }

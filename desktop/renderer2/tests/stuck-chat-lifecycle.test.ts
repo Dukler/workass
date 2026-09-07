@@ -717,7 +717,7 @@ test('a digest cannot erase a queue mutation while its save is in flight', () =>
   assert.equal(subject.chat(owner.id)?.queue?.[0].text, 'must survive refresh');
 });
 
-test('a submitted draft is released before async send work and cannot reappear on refresh', async () => {
+test('Send consumes its draft once and stale snapshots cannot restore it', async () => {
   const { subject, owner } = subjectWithChat();
   owner.draft = 'already sent';
   subject.schedulePersist = () => {};
@@ -725,13 +725,13 @@ test('a submitted draft is released before async send work and cannot reappear o
   subject._send = () => new Promise<boolean>((resolve) => { release = resolve; });
 
   const delivery = subject.sendTo(owner.id, 'already sent', undefined, 'already sent');
-  assert.equal(owner.draft, '', 'the next tab mount must see the draft already released');
+  assert.equal(owner.draft, '', 'Send empties the editor immediately');
 
   // Model the periodic digest arriving before the draft-clear save. It still
   // carries the pre-send value and must not re-own text now represented by the
   // submitted turn.
   const staleServer = subject.toMirror(false);
-  staleServer.chats[0].draft = 'already sent';
+  staleServer.chats[0].draft = 'unrelated old remote text';
   assert.equal(subject.restoreSessionSnapshot(staleServer), true);
   assert.equal(subject.chat(owner.id)?.draft, '');
 
@@ -749,7 +749,7 @@ test('submission does not clear text typed after attachment preparation began', 
   assert.equal(owner.draft, 'newer text');
 });
 
-test('a pending metadata save cannot resurrect a draft sent on another controller', () => {
+test('a pending metadata save cannot replace local input with a remote clear', () => {
   const { subject, owner } = subjectWithChat();
   subject.schedulePersist = () => {};
   owner.draft = 'sent on the laptop';
@@ -762,26 +762,26 @@ test('a pending metadata save cannot resurrect a draft sent on another controlle
   server.chats[0].title = 'Old title';
 
   assert.equal(subject.restoreSessionSnapshot(server), true);
-  assert.equal(subject.chat(owner.id).draft, '');
+  assert.equal(subject.chat(owner.id).draft, 'sent on the laptop');
   assert.equal(subject.chat(owner.id).title, 'Local rename');
 });
 
-test('remote send releases the matching pending draft but preserves different new typing', () => {
+test('remote send preserves locally typed drafts even when their text matches', () => {
   for (const draft of ['canonical prompt', 'new typing']) {
     const { subject, owner } = subjectWithChat();
     subject.schedulePersist = () => {};
     subject.setDraft(owner.id, draft);
     subject.markPresentationMutation(owner);
     subject.onJobEvent({ type: 'start', job: job() });
-    assert.equal(owner.draft, draft === 'canonical prompt' ? '' : draft);
+    assert.equal(owner.draft, draft);
     const server = subject.toMirror(false);
     server.chats[0].draft = 'canonical prompt';
     subject.restoreSessionSnapshot(server);
-    assert.equal(subject.chat(owner.id).draft, draft === 'canonical prompt' ? '' : draft);
+    assert.equal(subject.chat(owner.id).draft, draft);
   }
 });
 
-test('missed remote start is reconciled from new canonical input during hydration', () => {
+test('missed remote start cannot clear matching locally edited text during hydration', () => {
   const { subject, owner } = subjectWithChat();
   subject.schedulePersist = () => {};
   subject.setDraft(owner.id, 'sent elsewhere');
@@ -791,7 +791,7 @@ test('missed remote start is reconciled from new canonical input during hydratio
   server.chats[0].messages = [{ id: 'remote-input', role: 'user', content: 'sent elsewhere', status: 'done', at: null, events: [] }];
   server.chats[0].messageCount = 1;
   subject.restoreSessionSnapshot(server);
-  assert.equal(subject.chat(owner.id).draft, '');
+  assert.equal(subject.chat(owner.id).draft, 'sent elsewhere');
 });
 
 test('digest heartbeat falls back to app:meta after an old daemon rejects state:digest', async () => {
@@ -934,4 +934,39 @@ test('opening plan usage on a fresh chat fetches account metadata before the fir
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
   }
+});
+
+
+test('a delayed submission cannot clear identical text retyped as a newer edit', async () => {
+  const { subject, owner } = subjectWithChat();
+  subject.schedulePersist = () => {};
+  subject._send = async () => true;
+  subject.setDraft(owner.id, 'repeat this');
+  const submission = subject.captureDraftSubmission(owner.id, 'repeat this');
+  subject.setDraft(owner.id, '');
+  subject.setDraft(owner.id, 'repeat this');
+  assert.equal(await subject.sendTo(owner.id, 'repeat this', undefined, 'repeat this', submission), true);
+  assert.equal(owner.draft, 'repeat this');
+});
+
+test('remote start never clears matching composer text, including an untouched loaded draft', () => {
+  const { subject, owner } = subjectWithChat();
+  owner.draft = 'canonical prompt';
+  subject.onJobEvent({ type: 'start', job: job() });
+  assert.equal(owner.draft, 'canonical prompt');
+});
+
+test('delayed submission owns its exact chat and leaves the newly active composer alone', async () => {
+  const { subject, owner } = subjectWithChat();
+  subject.schedulePersist = () => {};
+  subject._send = async () => true;
+  subject.setDraft(owner.id, 'first draft');
+  const submission = subject.captureDraftSubmission(owner.id, 'first draft');
+  const second = chat('second-tab', 'second-chat');
+  subject.state.chats.push(second);
+  subject.state.activeId = second.id;
+  subject.setDraft(second.id, 'second draft');
+  await subject.sendTo(owner.id, 'first draft', undefined, 'first draft', submission);
+  assert.equal(owner.draft, '');
+  assert.equal(second.draft, 'second draft');
 });

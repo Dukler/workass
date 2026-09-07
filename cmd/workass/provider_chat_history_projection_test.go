@@ -232,3 +232,51 @@ func TestArchiveWirePagesBeforeStableActorMessageWithoutChangingLegacyFullRead(t
 		t.Fatal("missing page boundary must fail closed")
 	}
 }
+
+func TestProjectSessionMetadataOptimizationPreservesFallbackAndActivity(t *testing.T) {
+	stateDir := t.TempDir()
+	runtime := &providerChatRuntime{
+		manager: &acp.Manager{}, sessions: sharedSessionStore(stateDir), stateDir: stateDir,
+		actors: map[string]*providerChatActor{}, known: map[string]struct{}{},
+	}
+	for _, id := range []string{"a", "b"} {
+		engine, err := chat.NewEngine("chat-" + id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := engine.Apply(chat.InitializeFork{
+			Presentation: chat.PresentationState{TabID: "tab-" + id, Title: id},
+			SourceChatID: "source", OperationID: providercontract.OperationID("create-" + id), Digest: "fixture",
+			Messages: []chat.LedgerEvent{{EventID: "event-" + id, MessageID: "message-" + id, OperationID: "original", Role: "assistant", Text: "kept in archive", Status: "done", At: "2026-09-07T12:00:00Z"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		runtime.actors["chat-"+id] = &providerChatActor{engine: engine}
+		runtime.known["chat-"+id] = struct{}{}
+	}
+	projection, err := runtime.ProjectSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := fieldString(projection, "activeId")
+	if active == "" {
+		t.Fatal("missing fallback selection")
+	}
+	for _, raw := range anySlice(projection["chats"]) {
+		row := mapFromAnyMain(raw)
+		wantRows := 0
+		if fieldString(row, "id") == active {
+			wantRows = 1
+		}
+		if len(anySlice(row["messages"])) != wantRows || intValue(row["messageCount"]) != 1 {
+			t.Fatal("session tail/count changed")
+		}
+		if int64(intValue(row["lastActivityAt"])) != time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC).UnixMilli() {
+			t.Fatal("metadata lifecycle timestamp missing")
+		}
+		full, found, err := runtime.ProjectArchiveByTab(fieldString(row, "id"))
+		if err != nil || !found || len(full) != 1 {
+			t.Fatal("canonical history lost")
+		}
+	}
+}
