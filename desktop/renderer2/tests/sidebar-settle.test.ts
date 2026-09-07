@@ -16,6 +16,7 @@ let StoreCtor: new () => any;
 let resolveSettled: (chat: unknown, status: string, active: boolean, now: number, touched: number) => boolean;
 let resolveArchived: (chat: unknown, status: string, now: number, touched: number) => boolean;
 let lastTouchedAt: (chat: Chat) => number;
+let workingSince: (chat: Chat, work: readonly { status: string; startedAt?: string; role?: string }[]) => number;
 let orderSearchRows: (rows: readonly any[]) => any[];
 let orderSidebarRows: (rows: readonly any[]) => any[];
 let partitionSidebarRows: (rows: readonly any[]) => { cards: any[]; tail: any[]; archived: any[] };
@@ -41,6 +42,7 @@ before(async () => {
   resolveSettled = sidebar.resolveSettled;
   resolveArchived = sidebar.resolveArchived;
   lastTouchedAt = sidebar.lastTouchedAt;
+  workingSince = sidebar.workingSince;
   orderSearchRows = sidebar.orderSearchRows;
   orderSidebarRows = sidebar.orderSidebarRows;
   partitionSidebarRows = sidebar.partitionSidebarRows;
@@ -71,6 +73,46 @@ function chat(over: Partial<Chat> = {}): Chat {
     ...over,
   } as Chat;
 }
+
+test('running duration keeps the original turn start across reordering, selection, and activity refresh', () => {
+  const started = Date.parse('2026-09-05T12:00:00Z');
+  const subject = chat({
+    lastActivityAt: started + 5 * 60_000,
+    messages: [{
+      id: 'assistant-running', role: 'assistant', content: '', status: 'running',
+      at: null, events: [], jobId: 'job-running', turnStartedAt: started,
+    }],
+  });
+  const other = chat({ id: 'tab-other', chatId: 'chat-other' });
+  const store = new StoreCtor();
+  store.state.chats = [other, subject];
+  store.state.activeId = other.id;
+  assert.equal(workingSince(subject, []), started);
+  assert.equal(store.reorderChat(subject.id, other.id), true);
+  store.switchChat(subject.id);
+  subject.lastActivityAt = started + 6 * 60_000;
+  assert.equal(workingSince(subject, []), started);
+  store.switchChat(other.id);
+  store.switchChat(subject.id);
+  assert.equal(workingSince(subject, []), started);
+});
+
+test('running duration retains timestamp and background-work fallbacks', () => {
+  const startedAt = '2026-09-05T12:00:00Z';
+  const started = Date.parse(startedAt);
+  const subject = chat({ messages: [{
+    id: 'assistant-running', role: 'assistant', content: '', status: 'running',
+    at: startedAt, events: [], turnStartedAt: NaN,
+  }] });
+  assert.equal(workingSince(subject, []), started);
+  subject.messages = [];
+  assert.equal(workingSince(subject, [
+    { status: 'running', startedAt: 'invalid' },
+    { status: 'running', startedAt },
+    { status: 'running', startedAt: '2026-09-05T12:03:00Z' },
+    { status: 'completed', startedAt: '2026-09-05T11:00:00Z' },
+  ]), started);
+});
 
 test('age files a quiet chat away on its own, but not before three days', () => {
   const now = Date.parse('2026-07-25T12:00:00Z');

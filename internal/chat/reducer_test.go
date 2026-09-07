@@ -356,6 +356,39 @@ func TestRendererQueueReplacementUsesActorRevisionAndCannotTouchProviderOutbox(t
 	}
 }
 
+func TestSubmittingInputAtomicallyReleasesMatchingDraft(t *testing.T) {
+	for _, draft := range []string{"  sent text\n", "new typing"} {
+		for _, queued := range []bool{false, true} {
+			state, _ := NewState("chat")
+			state, _ = apply(t, state, InitializeChat{
+				Presentation: PresentationState{TabID: "tab", Draft: draft}, OperationID: "create", Digest: "create",
+			})
+			lane := testLane("chat", "codex")
+			state, _ = apply(t, state, SelectLane{Identity: lane})
+			before := state.Presentation.Clone()
+			if queued {
+				state, _ = apply(t, state, ReplaceStagedQueue{
+					OperationID: "queue", Digest: "queue", Entries: []StagedQueueEntry{{ID: "input", Text: "sent text", Delivery: "queue", TargetProviderID: "codex"}},
+				})
+			} else {
+				state, _ = apply(t, state, Submit{OperationID: "send", Text: "sent text", Presentation: provider.TurnPresentation{Origin: "human"}})
+			}
+			if draft == "new typing" {
+				if state.Presentation.Draft != draft {
+					t.Fatal("submission erased new typing")
+				}
+				continue
+			}
+			if state.Presentation.Draft != "" || state.Presentation.PresentationRevision <= before.PresentationRevision {
+				t.Fatal("submission did not durably release and fence its draft")
+			}
+			if _, _, err := Reduce(state, UpdatePresentation{Presentation: before}); err == nil {
+				t.Fatal("stale controller restored submitted draft")
+			}
+		}
+	}
+}
+
 func TestResumeCannotReplaceNativeThread(t *testing.T) {
 	state, _ := NewState("chat")
 	lane := testLane("chat", "codex")

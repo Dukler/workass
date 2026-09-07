@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,97 @@ import (
 	"testing/synctest"
 	"time"
 )
+
+type cancelOrderWriter struct {
+	io.WriteCloser
+	methods           []string // protected by Bridge.writeMu
+	beforePromptWrite func()
+}
+
+func (w *cancelOrderWriter) Write(data []byte) (int, error) {
+	var call struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(data, &call); err != nil {
+		return 0, err
+	}
+	w.methods = append(w.methods, call.Method)
+	if call.Method == "session/prompt" && w.beforePromptWrite != nil {
+		w.beforePromptWrite()
+	}
+	return w.WriteCloser.Write(data)
+}
+
+func TestCancelInPromptPreparationGap(t *testing.T) {
+	for _, duringWrite := range []bool{false, true} {
+		t.Run(fmt.Sprintf("during-write=%t", duringWrite), func(t *testing.T) {
+			root := repoRoot(t)
+			manager := NewManager(Options{RootDir: root, Provider: ProviderConfig{
+				Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root,
+			}})
+			t.Cleanup(func() { manager.Reset() })
+			session := newMockSession(t, manager, "cancel-preparation-tab")
+			job := &Job{
+				ID: "cancel-preparation-job", Status: "running", SessionID: session.SessionID,
+				TabID: "cancel-preparation-tab", ChatID: "chat-cancel-preparation-tab",
+				inputDispatchBoundary: make(chan struct{}),
+			}
+			manager.mu.Lock()
+			manager.jobs[job.ID] = job
+			manager.mu.Unlock()
+			bridge := manager.bridgeForJob(job)
+			bridge.setJobForSession(session.SessionID, job)
+			bridge.mu.Lock()
+			writes := &cancelOrderWriter{WriteCloser: bridge.stdin}
+			bridge.stdin = writes
+			bridge.mu.Unlock()
+			t.Cleanup(func() {
+				bridge.clearJobForSession(session.SessionID, job)
+				manager.mu.Lock()
+				delete(manager.jobs, job.ID)
+				manager.mu.Unlock()
+			})
+			// Model the gap after promptForJob's cancellation check, while prompt
+			// attachments/JSON are still being prepared. Stop must not overtake the
+			// physical prompt write: ACP providers reset cancellation on a new prompt.
+			stop := func() {
+				if result := manager.CancelJobResult(job.ID); !result.Cancelled {
+					t.Fatalf("cancel preparation: %#v", result)
+				}
+			}
+			if duringWrite {
+				writes.beforePromptWrite = stop
+			} else {
+				stop()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, err := bridge.requestPrompt(ctx, job, map[string]any{
+				"sessionId": session.SessionID,
+				"prompt":    []any{map[string]any{"type": "text", "text": "[mock:slow] cancellation ordering"}},
+			})
+			if duringWrite && err != nil {
+				t.Fatal(err)
+			}
+			if !duringWrite && err == nil {
+				t.Fatal("cancelled preparation started a provider prompt")
+			}
+			// Terminal cancellation of an already admitted prompt is covered by the
+			// normal mock cancellation tests. This regression checks the physical wire
+			// boundary, independent of the mock's asynchronous request-start scheduling.
+			manager.CancelJobResult(job.ID)
+			bridge.writeMu.Lock()
+			defer bridge.writeMu.Unlock()
+			want := ""
+			if duringWrite {
+				want = "session/prompt,session/cancel"
+			}
+			if got := strings.Join(writes.methods, ","); got != want {
+				t.Fatalf("Stop must follow its prompt exactly once; wire methods=%s", got)
+			}
+		})
+	}
+}
 
 func TestTerminalFlushWaitsForInFlightStreamPublication(t *testing.T) {
 	publishStarted := make(chan struct{})

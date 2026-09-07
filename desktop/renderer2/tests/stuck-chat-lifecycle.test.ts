@@ -749,6 +749,51 @@ test('submission does not clear text typed after attachment preparation began', 
   assert.equal(owner.draft, 'newer text');
 });
 
+test('a pending metadata save cannot resurrect a draft sent on another controller', () => {
+  const { subject, owner } = subjectWithChat();
+  subject.schedulePersist = () => {};
+  owner.draft = 'sent on the laptop';
+  owner.presentationRevision = 4;
+  owner.title = 'Local rename';
+  subject.markPresentationMutation(owner);
+  const server = subject.toMirror(false);
+  server.chats[0].presentationRevision = 5;
+  server.chats[0].draft = '';
+  server.chats[0].title = 'Old title';
+
+  assert.equal(subject.restoreSessionSnapshot(server), true);
+  assert.equal(subject.chat(owner.id).draft, '');
+  assert.equal(subject.chat(owner.id).title, 'Local rename');
+});
+
+test('remote send releases the matching pending draft but preserves different new typing', () => {
+  for (const draft of ['canonical prompt', 'new typing']) {
+    const { subject, owner } = subjectWithChat();
+    subject.schedulePersist = () => {};
+    subject.setDraft(owner.id, draft);
+    subject.markPresentationMutation(owner);
+    subject.onJobEvent({ type: 'start', job: job() });
+    assert.equal(owner.draft, draft === 'canonical prompt' ? '' : draft);
+    const server = subject.toMirror(false);
+    server.chats[0].draft = 'canonical prompt';
+    subject.restoreSessionSnapshot(server);
+    assert.equal(subject.chat(owner.id).draft, draft === 'canonical prompt' ? '' : draft);
+  }
+});
+
+test('missed remote start is reconciled from new canonical input during hydration', () => {
+  const { subject, owner } = subjectWithChat();
+  subject.schedulePersist = () => {};
+  subject.setDraft(owner.id, 'sent elsewhere');
+  subject.markPresentationMutation(owner);
+  const server = subject.toMirror(false);
+  server.chats[0].draft = '';
+  server.chats[0].messages = [{ id: 'remote-input', role: 'user', content: 'sent elsewhere', status: 'done', at: null, events: [] }];
+  server.chats[0].messageCount = 1;
+  subject.restoreSessionSnapshot(server);
+  assert.equal(subject.chat(owner.id).draft, '');
+});
+
 test('digest heartbeat falls back to app:meta after an old daemon rejects state:digest', async () => {
   const previousWindow = (globalThis as any).window;
   let digestCalls = 0;

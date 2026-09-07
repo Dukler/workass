@@ -11,11 +11,11 @@ test('Enter queues and the platform command modifier steers only while a turn is
   assert.equal(composerSubmitIntent(false, { metaKey: false, ctrlKey: true }), 'send');
 });
 
-test('a rejected steer returns its exact draft without overwriting newer typing', () => {
-  assert.equal(restoreRejectedSteerDraft('rejected direction', ''), 'rejected direction');
+test('a rejected steer never puts submitted text back into the composer', () => {
+  assert.equal(restoreRejectedSteerDraft('rejected direction', ''), '');
   assert.equal(
     restoreRejectedSteerDraft('rejected direction', 'new draft typed during admission'),
-    'rejected direction\n\nnew draft typed during admission',
+    'new draft typed during admission',
   );
   assert.equal(restoreRejectedSteerDraft('already restored', 'already restored'), 'already restored');
 });

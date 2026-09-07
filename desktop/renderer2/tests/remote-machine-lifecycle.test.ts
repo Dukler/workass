@@ -97,6 +97,52 @@ function remoteSubject(nextMirror: () => Mirror | Promise<Mirror>, ownsLink: () 
   return subject;
 }
 
+test('remote metadata hydration cannot put submitted laptop text back into the Mac draft', async () => {
+  let current = mirror([], { draft: 'sent from laptop', presentationRevision: 1 });
+  const subject = remoteSubject(() => current);
+  await subject.hydrateMachine(MACHINE);
+  const owner = subject.chat(TAB);
+  owner.title = 'Local title edit';
+  subject.markPresentationMutation(owner);
+  current = mirror([], { draft: '', presentationRevision: 2 });
+  await subject.hydrateMachine(MACHINE);
+  assert.equal(subject.chat(TAB).draft, '');
+  assert.equal(subject.chat(TAB).title, 'Local title edit');
+
+  // A draft explicitly typed after that remote submission remains editable.
+  subject.setDraft(TAB, 'new Mac draft');
+  await subject.hydrateMachine(MACHINE);
+  assert.equal(subject.chat(TAB).draft, 'new Mac draft');
+});
+
+test('a delayed presentation save keeps the revision of its captured draft', async () => {
+  let current = mirror([], { draft: 'sent from laptop', presentationRevision: 1 });
+  const subject = remoteSubject(() => current);
+  await subject.hydrateMachine(MACHINE);
+  subject.commitCurrentGlobalPresentation();
+  const owner = subject.chat(TAB);
+  owner.title = 'Local rename';
+  owner.queue = [{ id: tagId(MACHINE, 'queue-draft-race'), text: 'different queued text' }];
+  subject.markPresentationMutation(owner);
+  subject.markQueueMutation(owner);
+  let presentation: any;
+  await withWindowApi({
+    chatQueueReplace: async (opts: any) => {
+      current = mirror([], { draft: '', presentationRevision: 2 });
+      await subject.hydrateMachine(MACHINE);
+      return { ok: true, operationId: opts.operationId, agentQueueRevision: 1, actorRevision: 3 };
+    },
+    chatPresentationSave: async (opts: any) => {
+      presentation = opts;
+      // Simulate the actor rejecting the stale draft instead of accepting it
+      // under the newer revision that arrived during the queue await.
+      return { ok: false };
+    },
+  }, async () => { await subject.flushSession(); });
+  assert.equal(presentation.expectedRevision, 1);
+  assert.equal(subject.chat(TAB).draft, '');
+});
+
 test('a San-laptop row keeps its dragged slot across remote and local hydration', async () => {
   const subject = remoteSubject(() => mirror());
   const local = {
