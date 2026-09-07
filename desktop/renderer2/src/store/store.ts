@@ -933,7 +933,7 @@ export class Store {
       });
       if (!receipt?.ok || receipt.operationId !== operationId) {
         failedQueueTabs.add(tabId);
-        this.scheduleScopedSync(['session']);
+        if (has('chatQueueReplace')) this.requestChatReadback(live);
         continue;
       }
       const current = this.chat(tabId);
@@ -971,7 +971,7 @@ export class Store {
       });
       if (!receipt?.ok || receipt.operationId !== plan.operationId) {
         failedPresentationTabs.add(tabId);
-        this.scheduleScopedSync(['session']);
+        if (has('chatPresentationSave')) this.requestChatReadback(live);
         continue;
       }
       const current = this.chat(tabId);
@@ -1467,7 +1467,7 @@ export class Store {
           modelControls: current.modelControls,
         });
         if (!receipt?.ok || receipt.operationId !== pending.operationId) {
-          this.scheduleScopedSync(['session']);
+          if (has('chatRuntimeControlsSave')) this.requestChatReadback(current);
           return false;
         }
         const latest = this.chat(tabId);
@@ -1853,17 +1853,21 @@ export class Store {
     const localByID = new Map(previous.map((chat) => [chat.id, chat]));
     for (const chat of restored) {
       const local = localByID.get(chat.id);
-      if (!local || local.chatId !== chat.chatId || (local._controlRevision ?? 0) <= 0) continue;
+      if (!local || local.chatId !== chat.chatId) continue;
+      const pending = this.pendingRuntimeControlOperations.has(chat.id);
+      if (!pending && (local._controlRevision ?? 0) <= 0) continue;
       const daemonRevision = chat.runtimeControlRevision ?? 0;
       const localDaemonRevision = local.runtimeControlRevision ?? 0;
-      if (daemonRevision > localDaemonRevision) continue;
+      if (!pending && daemonRevision > localDaemonRevision) continue;
       chat.providerId = local.providerId;
       chat.providerName = local.providerName;
       chat.currentModelId = local.currentModelId;
       chat.currentModeId = local.currentModeId;
       chat.modelControls = local.modelControls;
       chat._controlRevision = local._controlRevision;
-      chat.runtimeControlRevision = local.runtimeControlRevision;
+      // Reconciliation supplies the new CAS revision, while the unacknowledged
+      // picker intent remains the operation being retried against that revision.
+      chat.runtimeControlRevision = Math.max(daemonRevision, localDaemonRevision);
     }
   }
 
@@ -3163,6 +3167,17 @@ export class Store {
       const authoritative = server as Mirror;
       const live = this.state;
       this.state = this.fromMirror(authoritative);
+      // These values just came from the actor. Seed acknowledgements before
+      // carrying any newer local intent over them: otherwise the first send
+      // rewrites every restored chat's presentation and runtime controls.
+      for (const chat of this.state.chats) {
+        if (!this.pendingPresentationOperations.has(chat.id)) {
+          this.committedPresentationFingerprints.set(chat.id, presentationFingerprint(chat));
+        }
+        if (!this.pendingRuntimeControlOperations.has(chat.id)) {
+          this.committedRuntimeControlFingerprints.set(chat.id, runtimeControlsFingerprint(chat));
+        }
+      }
       this.adoptLocalSnapshotOrder(authoritative, this.state.chats);
       // Chats from another machine live in another machine's mirror, so a
       // wholesale replacement from THIS daemon would wipe them (E3). They are
@@ -5485,7 +5500,7 @@ export class Store {
     if (!chat?.chatId) return [];
     return this.state.spawnedWorkByChat[spawnedWorkChatKey(chat.id, chat.chatId)] ?? [];
   }
-  async readSpawnedWork(chat: Chat, id: string, tailBytes = 12000): Promise<SpawnedWorkRead | undefined> {
+  async readSpawnedWork(chat: Pick<Chat, 'id' | 'chatId'>, id: string, tailBytes = 12000): Promise<SpawnedWorkRead | undefined> {
     if (!chat.chatId || !id || !this.state.hasSpawnedWorkChannels) return undefined;
     return call('spawnedWorkRead', chat.id, chat.chatId, id, tailBytes);
   }
