@@ -1197,6 +1197,8 @@ func reduceReplaceStagedQueue(state *State, command ReplaceStagedQueue) error {
 			entries[index].ModelID = previous.ModelID
 			entries[index].ModeID = previous.ModeID
 			entries[index].Permission = previous.Permission
+		} else {
+			clearSubmittedDraft(state, entries[index].Text)
 		}
 	}
 	state.StagedQueue = entries
@@ -2070,6 +2072,7 @@ func reduceSubmit(state *State, command Submit) ([]Effect, error) {
 		return nil, err
 	}
 	state.Operations[operationID] = struct{}{}
+	clearSubmittedDraft(state, command.Text)
 	state.Queue = append(state.Queue, QueueEntry{
 		OperationID:  operationID,
 		LaneID:       target,
@@ -2109,6 +2112,7 @@ func reduceSteer(state *State, command Steer) ([]Effect, error) {
 		return nil, err
 	}
 	state.Operations[operationID] = struct{}{}
+	clearSubmittedDraft(state, command.Text)
 	state.PendingSteer = &PendingSteer{
 		OperationID: operationID, LaneID: state.Foreground.LaneID, Turn: state.Foreground.Turn,
 		Text: strings.TrimSpace(command.Text), Attachments: append([]provider.Attachment(nil), command.Attachments...),
@@ -2119,6 +2123,16 @@ func reduceSteer(state *State, command Steer) ([]Effect, error) {
 		Text: strings.TrimSpace(command.Text), Attachments: append([]provider.Attachment(nil), command.Attachments...),
 		Presentation: presentation,
 	}}, nil
+}
+
+// Moving input into a turn also releases its saved composer ownership. This
+// must be one actor transaction: a separate renderer save can arrive late or
+// never arrive, leaving another controller with the already-submitted draft.
+func clearSubmittedDraft(state *State, text string) {
+	if strings.TrimSpace(text) != "" && strings.TrimSpace(state.Presentation.Draft) == strings.TrimSpace(text) {
+		state.Presentation.Draft = ""
+		state.Presentation.PresentationRevision++
+	}
 }
 
 func reduceSteerAdmitted(state *State, command SteerAdmitted) error {

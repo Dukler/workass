@@ -584,6 +584,7 @@ type Job struct {
 	// it while the provider turn is running.
 	startOpts             JobStartOptions
 	inputDispatched       atomic.Bool
+	cancelDispatched      atomic.Bool
 	inputDispatchBoundary chan struct{}
 	inputDispatchOnce     sync.Once
 	inputConsumed         atomic.Bool

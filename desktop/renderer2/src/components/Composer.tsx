@@ -486,6 +486,10 @@ export function Composer({ chat }: { chat: Chat | null }) {
   // Load this chat's saved draft when the active chat changes. useLayoutEffect so
   // the swap commits BEFORE paint — no flash of the previous tab's text.
   useLayoutEffect(() => { setText(chat?.draft ?? ''); }, [chat?.id]);
+  // A send on another controller can clear the same draft while this composer
+  // stays mounted. Follow that clear without inserting remote text into a box
+  // the user is editing; the store preserves newer local keystrokes.
+  useLayoutEffect(() => { if (chat?.draft === '') setText(''); }, [chat?.draft]);
   // Single source of truth for the box height: re-measure whenever the COMMITTED
   // value changes — typing, tab switch, or send-clear. Keying on `text` (not a
   // rAF that races the value commit) guarantees we measure the value React
@@ -737,9 +741,8 @@ export function Composer({ chat }: { chat: Chat | null }) {
             store.removeDraftImages(sentChatID, sentImageIDs);
             return;
           }
-          // The dispatch boundary rejected the direction before it acquired a
-          // visible owner. Return that exact input without overwriting anything
-          // the user typed while the receipt was in flight.
+          // Rejection must never repopulate the editor with submitted text.
+          // Preserve only what the user typed while the receipt was in flight.
           if (sentChatID) setText((current) => {
             const restored = restoreRejectedSteerDraft(submittedDraft, current);
             store.setDraft(sentChatID, restored);

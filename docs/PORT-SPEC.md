@@ -623,6 +623,15 @@ shell, NOT the daemon.
     deterministic mock remains the oracle for path (c); real-adapter canaries
     verify protocol acknowledgement/cancellation, never model quality.
 14. **Queue and steer are separate user intents** (user correction 2026-07-13):
+    **Composer ownership correction (user 2026-09-07):** submitted text MUST
+    never be automatically inserted back into the composer, including after a
+    remote-controller refresh or a rejected steer. This supersedes the older
+    rejected-steer return-to-composer wording: rejection reports failure without
+    restoring or concatenating the old text. A submit or newly queued input
+    clears its matching actor-owned draft atomically and advances the presentation
+    revision; different newer typing survives. Metadata retries never own the
+    draft merely because it was present in their snapshot. A mounted composer
+    follows an authoritative clear without inserting incoming remote text.
     while a turn is running, ordinary `Enter` appends one durable FIFO follow-up
     and never interrupts the active turn; `Cmd+Enter` explicitly invokes the
     provider-aware steering law above. `Shift+Enter` remains newline. The send

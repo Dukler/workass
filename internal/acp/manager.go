@@ -1798,8 +1798,21 @@ func (m *Manager) CancelJobResult(id string) JobCancelResult {
 	if bridge == nil {
 		return JobCancelResult{Reason: "unknown"}
 	}
-	bridge.notify("session/cancel", map[string]any{"sessionId": job.SessionID})
+	bridge.cancelDispatchedJob(job)
 	return JobCancelResult{Cancelled: true, Reason: "cancelled"}
+}
+
+// Stop may arrive while the prompt is still being prepared. Sending cancel
+// before session/prompt loses it when the harness starts that new prompt.
+// The prompt's physical-write callback and the caller both check this latch:
+// whichever observes both dispatch and cancellation sends the single cancel.
+func (b *Bridge) cancelDispatchedJob(job *Job) {
+	if job == nil || (job.inputDispatchBoundary != nil && !job.inputWasDispatched()) {
+		return
+	}
+	if job.cancelDispatched.CompareAndSwap(false, true) {
+		b.notify("session/cancel", map[string]any{"sessionId": job.SessionID})
+	}
 }
 
 func (m *Manager) CancelJob(id string) bool {
@@ -3163,9 +3176,17 @@ func boolMapField(m map[string]any, key string) bool {
 // Workass neither polls native turn state nor recycles a live harness based on
 // a second, competing notion of whether the turn ended.
 func (b *Bridge) requestPrompt(ctx context.Context, job *Job, params map[string]any) (map[string]any, error) {
+	// Attachment preparation can be slow. Recheck Stop at the transport boundary
+	// so cancellation during that work does not start a new provider turn.
+	if job != nil && b.manager.jobCancelled(job) {
+		return nil, errors.New("Turno cancelado antes de enviarse al agente ACP.")
+	}
 	afterWrite := func() {
 		if job != nil {
 			job.markInputDispatched()
+			if b.manager.jobCancelled(job) {
+				b.cancelDispatchedJob(job)
+			}
 		}
 	}
 	return b.requestWithDispatch(ctx, "session/prompt", params, 0, afterWrite)

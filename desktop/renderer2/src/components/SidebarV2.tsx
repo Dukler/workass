@@ -177,8 +177,13 @@ export function lastTouchedAt(chat: Chat): number {
 // outlived it, so the elapsed clock follows whichever is actually alive. A
 // running service is excluded for the same reason it does not make the chat
 // working: a server started this morning would otherwise date the clock to it.
-function workingSince(chat: Chat, work: readonly { status: string; startedAt?: string; role?: string }[]): number {
+export function workingSince(chat: Chat, work: readonly { status: string; startedAt?: string; role?: string }[]): number {
   const running = chat.messages.find((m) => m.status === 'running');
+  // Running actor rows leave `at` empty until completion. Their immutable
+  // turn start survives selection, reordering, and projection refreshes;
+  // last activity advances during the turn and is not an elapsed-time origin.
+  const started = running?.turnStartedAt;
+  if (typeof started === 'number' && Number.isFinite(started) && started > 0) return started;
   const turnAt = running?.at ? Date.parse(running.at) : NaN;
   if (!Number.isNaN(turnAt) && turnAt > 0) return turnAt;
   let earliest = 0;

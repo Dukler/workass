@@ -873,6 +873,7 @@ export class Store {
       snapshot: ChatPresentationSnapshot;
       fingerprint: string;
       operationId: string;
+      expectedRevision: number;
     }>();
     // Per-chat actor commands are addressed by their exact tab+chat pair and
     // therefore include remote chats. The whole-session mirror below remains
@@ -904,7 +905,7 @@ export class Store {
         this.pendingPresentationOperations.set(tabId, pending);
       }
       this.pendingPresentationSnapshots.set(tabId, { chatId: chat.chatId, value: projected });
-      presentationPlans.set(tabId, { snapshot: projected, fingerprint, operationId: pending.operationId });
+      presentationPlans.set(tabId, { snapshot: projected, fingerprint, operationId: pending.operationId, expectedRevision: chat.presentationRevision ?? 0 });
     }
     const failedCreateTabs = new Set<string>();
     const failedQueueTabs = new Set<string>();
@@ -962,7 +963,7 @@ export class Store {
       }
       const receipt = await call('chatPresentationSave', {
         tabId, chatId, operationId: plan.operationId,
-        expectedRevision: live.presentationRevision ?? 0,
+        expectedRevision: plan.expectedRevision,
         title: plan.snapshot.title, titleLocked: plan.snapshot.titleLocked, group: plan.snapshot.group,
         draft: plan.snapshot.draft ?? '', unread: !!plan.snapshot.unread,
         settled: plan.snapshot.settled ?? '', settledAt: plan.snapshot.settledAt ?? 0,
@@ -975,8 +976,8 @@ export class Store {
       }
       const current = this.chat(tabId);
       if (sameChatPair(current, tabId, chatId)) {
-        current.presentationRevision = receipt.presentationRevision;
-        current.actorRevision = receipt.actorRevision;
+        current.presentationRevision = Math.max(current.presentationRevision ?? 0, receipt.presentationRevision);
+        current.actorRevision = Math.max(current.actorRevision ?? 0, receipt.actorRevision);
       }
       this.committedPresentationFingerprints.set(tabId, plan.fingerprint);
       if (this.pendingPresentationOperations.get(tabId)?.operationId === plan.operationId
@@ -1533,6 +1534,20 @@ export class Store {
     }
   }
 
+  private applyPendingPresentation(chat: Chat, snapshot: ChatPresentationSnapshot) {
+    // A rename/settle/pane save owns those edits, not the draft that happened
+    // to be visible when it started. Draft edits have their own exact fence.
+    const draft = chat.draft;
+    applyPresentationSnapshot(chat, snapshot);
+    chat.draft = draft;
+  }
+
+  private releaseSubmittedDraft(chat: Chat, prompt: string) {
+    if (prompt.trim() && redactSensitiveText(chat.draft.trim()) === redactSensitiveText(prompt.trim())) {
+      this.setDraft(chat.id, '');
+    }
+  }
+
   private carryPendingMessages(previous: Chat, restored: Chat, ids: ReadonlySet<string>) {
     if (!ids.size) return;
     const present = new Set(restored.messages.map((message) => message.id));
@@ -1557,6 +1572,15 @@ export class Store {
   }
 
   private preserveHydratedRuntime(previous: Chat, restored: Chat) {
+    // The send may have happened on another controller while this device
+    // still has its last keystroke save pending. New canonical input releases
+    // that same draft; a different, newly typed value keeps its ownership.
+    const previousMessageIDs = new Set(previous.messages.map((message) => message.id));
+    for (const message of restored.messages) {
+      if (message.role === 'user' && message.status === 'done' && !message.steerState && !previousMessageIDs.has(message.id)) {
+        this.releaseSubmittedDraft(previous, message.content);
+      }
+    }
     restored._sessionOperationId = previous._sessionOperationId;
     restored._controlRevision = previous._controlRevision;
     restored.commandCatalog ??= previous.commandCatalog;
@@ -1603,7 +1627,7 @@ export class Store {
     this.carryPendingMessages(previous, restored, pendingIDs);
 
     const presentation = this.pendingPresentationSnapshots.get(restored.id);
-    if (presentation && presentation.chatId === restored.chatId) applyPresentationSnapshot(restored, presentation.value);
+    if (presentation && presentation.chatId === restored.chatId) this.applyPendingPresentation(restored, presentation.value);
     const draft = this.pendingDraftSnapshots.get(restored.id);
     if (draft && draft.chatId === restored.chatId) restored.draft = draft.value;
     const queue = this.pendingQueueSnapshots.get(restored.id);
@@ -1929,7 +1953,7 @@ export class Store {
     // crossing the wire, so retain the exact values until the matching receipt.
     for (const [tabId, snapshot] of this.pendingPresentationSnapshots) {
       const chat = this.chat(tabId);
-      if (chat?.chatId === snapshot.chatId) applyPresentationSnapshot(chat, snapshot.value);
+      if (chat?.chatId === snapshot.chatId) this.applyPendingPresentation(chat, snapshot.value);
     }
     this.restorePendingDrafts(this.state.chats);
     // A digest can legitimately arrive before the renderer's queue save reply.
@@ -4115,7 +4139,7 @@ export class Store {
     return this._send(chat, prompt, images);
   }
   // Submit explicit live-steer intent to the exact running lane. Unsupported or
-  // definitively rejected steering returns ownership to the composer; FIFO is
+  // definitively rejected steering reports failure without refilling the composer; FIFO is
   // available only through the separate explicit queue action.
   async steerRunning(chatId: string, prompt: string, images?: StartJobOpts['images']): Promise<boolean> {
     const chat = this.chat(chatId);
@@ -4127,7 +4151,7 @@ export class Store {
       // Explicit steer intent is never permission to create a fresh turn. The
       // active turn may have ended between the composer's render and this
       // click; leave the draft untouched so ordinary Enter can own that send.
-      this.addToast('No se pudo dirigir', 'El turno activo ya terminó; el mensaje quedó en el editor.');
+      this.addToast('No se pudo dirigir', 'El turno activo ya terminó; no se envió el mensaje.');
       return false;
     }
     if (has('appChatSteer') && chat.sessionId && chat.chatId && liveSteeringSupported(chat.deliveryCapabilities)) {
@@ -4235,7 +4259,7 @@ export class Store {
           }
           if (destination === 'rejected') {
             // A definite rejection releases the temporary transcript owner and
-            // returns the text to the composer. It never changes user intent by
+            // reports failure without refilling the composer. It never changes intent by
             // manufacturing an ordinary FIFO row.
             const removed = rejectChronologicalSteer(live.messages, pendingUser.id);
             // A receipt/acknowledgement may have beaten a late response. Once that
@@ -4243,7 +4267,7 @@ export class Store {
             if (!removed) return true;
             markSteerOwnership(live, true);
             this.rebuildJobRefs(new Set([live.id]));
-			this.addToast('No se pudo dirigir', r?.error ?? 'El turno activo rechazó el steering; el mensaje quedó en el editor.');
+			this.addToast('No se pudo dirigir', r?.error ?? 'El turno activo rechazó el steering; no se envió el mensaje.');
 			this.bumpChat(live);
             await this.flushSession();
 			return false;
@@ -4274,7 +4298,7 @@ export class Store {
 		  markSteerOwnership(live, true);
 		  this.rebuildJobRefs(new Set([live.id]));
 		  this.touchChat(live.id);
-		  this.addToast('No se pudo dirigir', error instanceof Error ? error.message : 'El turno activo rechazó el steering; el mensaje quedó en el editor.');
+		  this.addToast('No se pudo dirigir', error instanceof Error ? error.message : 'El turno activo rechazó el steering; no se envió el mensaje.');
 		  await this.flushSession();
 		  return false;
 		} finally {
@@ -4282,7 +4306,7 @@ export class Store {
         }
       });
     }
-	this.addToast('No se pudo dirigir', 'El proveedor activo no admite steering en vivo; el mensaje quedó en el editor.');
+	this.addToast('No se pudo dirigir', 'El proveedor activo no admite steering en vivo; no se envió el mensaje.');
 	return false;
   }
   queueDraftMessage(chatId: string, prompt: string, drafts: DraftImage[]): boolean {
@@ -4937,6 +4961,9 @@ export class Store {
         }
         const chat = e.job.tabId ? this.chat(e.job.tabId) : (chatId ? this.chatByConvId(chatId) : null);
         if (chat) this.attachJobSession(chat, e.job);
+        if (chat?.chatId === chatId && typeof e.job.promptText === 'string') {
+          this.releaseSubmittedDraft(chat, e.job.promptText);
+        }
         // New work in a shelved chat retires the shelf override: T3's server
         // auto-unsettles on real activity, and a chat you just started a turn
         // in has plainly stopped being history.

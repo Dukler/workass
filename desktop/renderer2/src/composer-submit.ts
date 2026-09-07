@@ -11,12 +11,11 @@ export function composerSubmitIntent(running: boolean, modifiers: ComposerSubmit
   return modifiers.metaKey || modifiers.ctrlKey ? 'steer' : 'queue';
 }
 
-// A definite steer rejection returns ownership of that exact input to the
-// composer. The rejected text predates anything typed while provider admission
-// was pending, so keep that chronological order without overwriting either
-// draft. An exact duplicate is already restored and must not be inserted twice.
+// Explicit submission releases the editor. Even a later rejection must not
+// insert the old text again or concatenate it with a new draft (user 2026-09-07).
+// Keep the exported name for existing callers; only explicit typing/paste may
+// populate the editor after submission.
 export function restoreRejectedSteerDraft(rejectedDraft: string, currentDraft: string): string {
-  if (!rejectedDraft) return currentDraft;
-  if (!currentDraft || currentDraft === rejectedDraft) return rejectedDraft;
-  return `${rejectedDraft}\n\n${currentDraft}`;
+  void rejectedDraft;
+  return currentDraft;
 }
