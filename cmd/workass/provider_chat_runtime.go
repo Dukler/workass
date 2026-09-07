@@ -2705,7 +2705,7 @@ func (r *providerChatRuntime) PendingPermissions() ([]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		state := actor.engine.Snapshot()
+		state := actor.engine.ReadActivitySnapshot()
 		if state.Deleted {
 			continue
 		}
@@ -2721,10 +2721,10 @@ func (r *providerChatRuntime) PendingPermissions() ([]any, error) {
 				continue
 			}
 			projected["jobId"] = nullableString(permission.Owner.TurnID)
-			projected["tabId"] = nullableString(state.Presentation.TabID)
+			projected["tabId"] = nullableString(state.TabID)
 			projected["chatId"] = nullableString(state.ChatID)
 			if lane, ok := state.Lanes[permission.Owner.LaneID]; ok {
-				projected["sessionId"] = nullableString(lane.Thread.HeadID)
+				projected["sessionId"] = nullableString(lane.SessionID)
 			} else {
 				projected["sessionId"] = nil
 			}

@@ -916,13 +916,24 @@ func syncDirectory(path string) error {
 }
 
 func rehydrateExternalSessionImages(value any, stateDir string) error {
+	// A tool image may occur in multiple message/timeline rows. Resolve each
+	// immutable reference once for this response and share its string bytes.
+	// Nothing survives the traversal: the next read still verifies the sidecar.
+	resolved := make(map[string]string)
 	var warnings []error
 	var visit func(any)
 	visit = func(value any) {
 		switch item := value.(type) {
 		case map[string]any:
 			if ref := fieldString(item, sessionImageDataRefField); ref != "" {
-				data, err := readExternalSessionImage(ref, stateDir)
+				data, found := resolved[ref]
+				var err error
+				if !found {
+					data, err = readExternalSessionImage(ref, stateDir)
+					if err == nil {
+						resolved[ref] = data
+					}
+				}
 				if err != nil {
 					// Keep the surrounding message/event and its metadata, but
 					// make this image inert so downstream validation/rendering

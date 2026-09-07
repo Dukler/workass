@@ -282,6 +282,61 @@ func (e *Engine) ReadProjectionSnapshot(ledgerTail int) ReadProjectionSnapshot {
 	}
 }
 
+// ActivitySnapshot contains only the actor-owned state used by background-work
+// and permission reads. It cannot be applied as an actor State, and copying it
+// never traverses committed messages, tool history, coverage or receipts.
+type ActivitySnapshot struct {
+	ChatID      string
+	TabID       string
+	Deleted     bool
+	Background  map[string]BackgroundState
+	Permissions map[string]PermissionState
+	Obligation  *ObligationState
+	Lanes       map[provider.LaneID]ActivityLaneSnapshot
+}
+
+type ActivityLaneSnapshot struct {
+	ProviderID provider.ID
+	SessionID  string
+}
+
+func (e *Engine) ReadActivitySnapshot() ActivitySnapshot {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	snapshot := ActivitySnapshot{
+		ChatID: e.state.ChatID, TabID: e.state.Presentation.TabID, Deleted: e.state.Deleted,
+		Obligation: e.state.Obligation.Clone(),
+	}
+	if len(e.state.Background) > 0 {
+		snapshot.Background = make(map[string]BackgroundState, len(e.state.Background))
+		for id, value := range e.state.Background {
+			if value.Event.PID != nil {
+				pid := *value.Event.PID
+				value.Event.PID = &pid
+			}
+			if value.Event.ExitCode != nil {
+				code := *value.Event.ExitCode
+				value.Event.ExitCode = &code
+			}
+			snapshot.Background[id] = value
+		}
+	}
+	if len(e.state.Permissions) > 0 {
+		snapshot.Permissions = make(map[string]PermissionState, len(e.state.Permissions))
+		for id, value := range e.state.Permissions {
+			value.Event = *clonePermission(&value.Event)
+			snapshot.Permissions[id] = value
+		}
+	}
+	if len(e.state.Lanes) > 0 {
+		snapshot.Lanes = make(map[provider.LaneID]ActivityLaneSnapshot, len(e.state.Lanes))
+		for id, lane := range e.state.Lanes {
+			snapshot.Lanes[id] = ActivityLaneSnapshot{ProviderID: lane.Identity.Realm.ProviderID, SessionID: lane.Thread.HeadID}
+		}
+	}
+	return snapshot
+}
+
 // LedgerPageSnapshot is one immutable page immediately before a stable message
 // identity. It is a renderer read primitive only; actor persistence and provider
 // delivery continue to consume the complete canonical State.

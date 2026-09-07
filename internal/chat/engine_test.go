@@ -906,3 +906,34 @@ func BenchmarkReadProjectionSnapshotLargeLedger(b *testing.B) {
 		}
 	})
 }
+
+func TestActivitySnapshotCopiesOnlyOwnedStatusAndIsolatesMutableFields(t *testing.T) {
+	e, err := NewEngine("activity-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.state.Presentation.TabID = "activity-tab"
+	e.state.Lanes["lane"] = LaneState{Identity: provider.LaneIdentity{Realm: provider.Realm{ProviderID: "mock"}}, Thread: provider.ThreadRef{HeadID: "native-thread"}, Coverage: map[uint64]CoverageRecord{1: {Sequence: 1}}}
+	pid, code := 42, 0
+	e.state.Background["work"] = BackgroundState{Owner: ProviderActivityOwner{LaneID: "lane"}, Event: provider.BackgroundEvent{WorkID: "work", PID: &pid, ExitCode: &code}}
+	e.state.Permissions["request"] = PermissionState{Owner: ProviderActivityOwner{LaneID: "lane"}, Event: provider.PermissionEvent{RequestID: "request", Options: []string{"allow", "deny"}}}
+	e.state.Obligation = &ObligationState{State: "working", Source: "background"}
+	snapshot := e.ReadActivitySnapshot()
+	if snapshot.ChatID != "activity-chat" || snapshot.TabID != "activity-tab" || snapshot.Lanes["lane"].ProviderID != "mock" || snapshot.Lanes["lane"].SessionID != "native-thread" {
+		t.Fatal("activity ownership was lost")
+	}
+	if len(snapshot.Background) != 1 || len(snapshot.Permissions) != 1 || snapshot.Obligation.State != "working" {
+		t.Fatal("activity status was lost")
+	}
+	*snapshot.Background["work"].Event.PID = 999
+	*snapshot.Background["work"].Event.ExitCode = 9
+	snapshot.Permissions["request"].Event.Options[0] = "changed"
+	snapshot.Obligation.State = "done"
+	if pid != 42 || code != 0 || e.state.Permissions["request"].Event.Options[0] != "allow" || e.state.Obligation.State != "working" {
+		t.Fatal("activity read aliases mutable actor state")
+	}
+	e.state.Deleted = true
+	if !e.ReadActivitySnapshot().Deleted {
+		t.Fatal("deleted status was lost")
+	}
+}
