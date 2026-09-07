@@ -90,6 +90,7 @@ type PendingTurnStart = {
   userId: string;
   assistantId: string;
   cancelRequested: boolean;
+  startInvoked: boolean;
   cancelJobId?: string;
 };
 
@@ -2807,6 +2808,13 @@ export class Store {
         if (!running.jobId) throw new Error('remote turn has no cancellation address yet');
         const result = await callThrow('cancelJob', running.jobId);
         if (result === undefined) throw new Error('remote cancellation route is unavailable');
+        // Older remote daemons return this durable receipt without a terminal
+        // event. Apply it to the exact row just as the user-facing Stop does.
+        if (result && typeof result === 'object' && result.cancelled === true && result.preAdmission === true) {
+          const live = this.chat(chat.id);
+          const stopped = live?.messages.find((message) => message.id === running.id);
+          if (live && live.chatId === chat.chatId && stopped?.status === 'running') this.finalizeCancelledLocally(live, stopped, running.jobId);
+        }
         return result;
       }
       default:
@@ -4551,6 +4559,7 @@ export class Store {
       userId: user.id,
       assistantId: asst.id,
       cancelRequested: false,
+      startInvoked: false,
     };
     this.pendingTurnStarts.set(tabId, pendingStart);
     const releasePendingStart = () => {
@@ -4563,8 +4572,17 @@ export class Store {
     // that existing save so nullable native defaults cannot fall back to the
     // controls captured by the earlier chat-create request.
     const created = await this.ensureChatCreated(chat);
+    if (pendingStart.cancelRequested) {
+      releasePendingStart();
+      return false;
+    }
     const controlSave = this.pendingRuntimeControlSaves.get(tabId);
-    if (!created || (controlSave && !(await controlSave))) {
+    const controlsSaved = created && (!controlSave || await controlSave);
+    if (pendingStart.cancelRequested) {
+      releasePendingStart();
+      return false;
+    }
+    if (!created || !controlsSaved) {
       const current = this.chat(tabId);
       const failedAssistant = sameChatPair(current, tabId, durableChatId)
         ? current.messages.find((message) => message.id === pendingStart.assistantId && message.role === 'assistant')
@@ -4612,6 +4630,7 @@ export class Store {
     let job: StartJobReply | undefined;
     let startFailure: unknown;
     try {
+      pendingStart.startInvoked = true;
       job = await callThrow('startJob', {
         kind: 'app-chat', operationId: userId, title: `${chat.providerName ?? 'Agente'} · ${chat.title}`, chatId, tabId: chat.id,
         sessionId: chat.sessionId || undefined, cwd: chat.cwd ?? null,
@@ -4750,10 +4769,11 @@ export class Store {
       : undefined;
     if (pendingStart) pendingStart.cancelRequested = true;
     if (!running.jobId) {
-      // The optimistic row still belongs to _send. It will either abort before
-      // job:start or cancel the exact job immediately after admission. Marking a
-      // local terminal here created the old ownership hole: live provider work
-      // could appear after the row had already claimed cancellation.
+      // Until startJob is invoked, this input belongs only to the renderer.
+      // Finish Stop now; _send keeps the latch and must never dispatch it when
+      // the outstanding creation/control save eventually returns.
+      if (pendingStart?.startInvoked === false) this.finalizeCancelledLocally(chat, running);
+      // Once the request has escaped, bind Stop to its exact admission receipt.
       return;
     }
     await this.cancelAdmittedTurn(chat, running, running.jobId, pendingStart);
@@ -4826,12 +4846,10 @@ export class Store {
     const preAdmission = !!result && typeof result === 'object'
       && (result as { preAdmission?: unknown }).preAdmission === true;
     if (cancelled) {
-      // A pre-admission Stop has no provider job and therefore no job:end.
-      // The actor already settled the exact canonical rows; finish the matching
-      // optimistic owner now and let scoped hydration confirm that same state.
+      // The actor already settled these exact canonical rows. Older daemons
+      // omit job:end for this case, so the durable reply also closes the row.
       if (preAdmission) {
         this.finalizeCancelledLocally(live, liveRunning, jobId);
-        this.requestChatReadback(live, true);
         void this.flushNextQueued(live);
       } else {
         this.setTurnStopState(live, liveRunning, 'acknowledged');
@@ -4871,7 +4889,7 @@ export class Store {
     }
     this.bump('msg:' + running.id);
     this.bumpChat(chat);
-    this.scheduleScopedSync(['session', 'permissions']);
+    this.requestChatReadback(chat, true);
   }
   async decidePermission(tabId: string, msgId: string, permId: string, optionId: string) {
     const msg = this.chat(tabId)?.messages.find((candidate) => candidate.id === msgId); if (!msg) return;

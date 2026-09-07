@@ -1299,6 +1299,57 @@ func TestStopDoesNotWaitForUnrelatedProviderAttachment(t *testing.T) {
 	waitProviderChatIdle(t, runtime, "steer-regression-chat", 5*time.Second)
 }
 
+func TestImmediateStopPublishesCommittedTerminalBeforeReply(t *testing.T) {
+	for _, attached := range []bool{false, true} {
+		t.Run(fmt.Sprintf("attached=%v", attached), func(t *testing.T) {
+			runtime, _, root, _, _ := newSteerRegressionFixture(t)
+			tabID, chatID := "steer-regression-tab", "steer-regression-chat"
+			if !attached {
+				tabID, chatID = "cold-stop-tab", "cold-stop-chat"
+				if _, err := runtime.CreateRendererChat(map[string]any{
+					"tabId": tabID, "chatId": chatID, "operationId": "cold-stop-create",
+					"title": "Cold stop", "cwd": root, "providerId": "mock", "currentModelId": "mock-deterministic",
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			terminal := make(chan map[string]any, 2)
+			runtime.publish = func(channel string, payload any) {
+				event := mapFromAnyMain(payload)
+				if channel == "job:event" && fieldString(event, "type") == "end" {
+					terminal <- mapFromAnyMain(event["job"])
+				}
+			}
+			admission, err := runtime.AdmitStart(context.Background(), map[string]any{
+				"kind": "app-chat", "tabId": tabID, "chatId": chatID, "providerId": "mock",
+				"prompt": "[mock:slow] immediate stop", "operationId": "immediate-stop",
+				"userMessageId": "stop-user", "assistantMessageId": "stop-assistant",
+			}, "human")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer admission.Dispatch()
+			jobID := fieldString(admission.Receipt, "id")
+			result, handled, err := runtime.Cancel(context.Background(), jobID)
+			if err != nil || !handled || !result.Cancelled || !result.PreAdmission {
+				t.Fatalf("immediate stop = %#v handled=%v err=%v", result, handled, err)
+			}
+			select {
+			case job := <-terminal:
+				if fieldString(job, "id") != jobID || fieldString(job, "assistantMessageId") != "stop-assistant" || fieldString(job, "stopReason") != "cancelled" {
+					t.Fatal("completion event did not identify the cancelled input")
+				}
+			default:
+				t.Fatal("Stop replied without publishing completion to connected views")
+			}
+			state, _ := runtime.Snapshot(chatID)
+			if state.Foreground != nil || len(state.Queue) != 0 || len(state.Ledger) != 2 {
+				t.Fatal("completion was published before the input was durably cancelled")
+			}
+		})
+	}
+}
+
 func waitProviderChatLedger(t *testing.T, runtime *providerChatRuntime, chatID string, want uint64, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

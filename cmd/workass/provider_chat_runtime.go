@@ -2596,6 +2596,15 @@ func (r *providerChatRuntime) Cancel(ctx context.Context, jobID string) (acp.Job
 			if applyErr == nil {
 				state = actor.engine.Snapshot()
 				actor.mu.Unlock()
+				// No provider worker owns this input, so no later provider end event
+				// will arrive. Publish the committed cancellation through the normal
+				// terminal wire event before replying, including to remote observers.
+				if r.publish != nil {
+					if event, err := projectActorTerminalJob(state, pendingOperationID, providercontract.TurnRef{OperationID: pendingOperationID}); err == nil {
+						r.publish("job:event", event)
+					}
+					r.publish("agent:apply", map[string]any{"action": "session-refresh"})
+				}
 				r.wakeCoordinatorIfStarted(actor.coordinator)
 				return acp.JobCancelResult{Cancelled: true, Reason: "cancelled", PreAdmission: true}, true, nil
 			}

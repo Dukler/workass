@@ -344,6 +344,8 @@ test('Stop before durable chat creation completes cancels the renderer-owned sen
     assert.equal(assistant.status, 'running');
 
     await subject.cancelChatTurn(owner.id);
+    assert.equal(assistant.status, 'cancelled', 'Stop must finish before chat creation returns');
+    assert.equal(starts, 0);
     releaseCreation();
     assert.equal(await sending, false);
     assert.equal(starts, 0);
@@ -388,7 +390,7 @@ test('Stop during job:start admission cancels the exact accepted job once', asyn
   }
 });
 
-test('a durable pre-admission Stop settles locally because no provider end event exists', async () => {
+test('a durable pre-admission Stop settles locally when an older daemon omits the end event', async () => {
   const previousWindow = (globalThis as any).window;
   (globalThis as any).window = {
     api: {
@@ -411,6 +413,31 @@ test('a durable pre-admission Stop settles locally because no provider end event
     assert.equal(assistant.status, 'cancelled');
     assert.equal((subject as any).jobRef.has('job-pre-admission'), false);
     assert.equal((subject as any).chatJobs.has(owner.chatId), false);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('Stop during a control save is immediate and a later rejected save cannot overwrite cancellation', async () => {
+  const previousWindow = (globalThis as any).window;
+  let starts = 0;
+  (globalThis as any).window = { api: { startJob: async () => { starts += 1; return job(); } } };
+  try {
+    const { subject, owner } = subjectWithChat();
+    subject.state.connection = 'connected';
+    subject.ensureChatCreated = async () => true;
+    let releaseSave!: (ok: boolean) => void;
+    subject.pendingRuntimeControlSaves.set(owner.id, new Promise<boolean>((resolve) => { releaseSave = resolve; }));
+    const sending = subject.sendTo(owner.id, 'stop while saving controls');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const assistant = owner.messages.find((message) => message.role === 'assistant')!;
+    await subject.cancelChatTurn(owner.id);
+    assert.equal(assistant.status, 'cancelled');
+    releaseSave(false);
+    assert.equal(await sending, false);
+    assert.equal(assistant.status, 'cancelled');
+    assert.equal(starts, 0);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
