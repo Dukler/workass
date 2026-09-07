@@ -6,6 +6,7 @@ import { fmtDur } from './messages';
 import { ActionGlyph, IcStopSquare, IcTerminal, ModelIcon } from '../icons';
 import { spawnedWorkActivity, spawnedWorkKindWord } from '../tool-names';
 import { displayDetail } from '../tool-display';
+import { startSerialPoll } from '../serial-poll';
 
 function itemDuration(item: SpawnedWorkItem, nowMs: number): string {
   const start = Date.parse(item.startedAt);
@@ -35,12 +36,14 @@ function RunningRow({ chat, item, nowMs }: { chat: Chat; item: SpawnedWorkItem; 
   const [tailLimited, setTailLimited] = useState(false);
   const [tailError, setTailError] = useState('');
   const [stopping, setStopping] = useState(false);
+  const tabId = chat.id;
+  const chatId = chat.chatId;
 
   useEffect(() => {
     if (!tailOpen || !item.outputFile) return;
     let alive = true;
     const refresh = async () => {
-      const result = await store.readSpawnedWork(chat, item.id);
+      const result = await store.readSpawnedWork({ id: tabId, chatId }, item.id);
       if (!alive || !result) return;
       if (!result.ok) {
         setTailError(result.error || 'Salida no disponible.');
@@ -50,10 +53,9 @@ function RunningRow({ chat, item, nowMs }: { chat: Chat; item: SpawnedWorkItem; 
       setTailLimited(!!result.tailLimited);
       setTailError('');
     };
-    void refresh();
-    const timer = setInterval(refresh, 2000);
-    return () => { alive = false; clearInterval(timer); };
-  }, [chat, item.id, item.outputFile, tailOpen]);
+    const stop = startSerialPoll(refresh, 2000);
+    return () => { alive = false; stop(); };
+  }, [tabId, chatId, item.id, item.outputFile, tailOpen]);
 
   const meta = [
     spawnedWorkKindWord(item.kind),

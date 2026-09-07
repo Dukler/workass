@@ -97,6 +97,68 @@ function remoteSubject(nextMirror: () => Mirror | Promise<Mirror>, ownsLink: () 
   return subject;
 }
 
+test('remote save conflicts read the owning machine and converge without reloading the local session', async () => {
+  for (const kind of ['queue', 'presentation', 'controls'] as const) {
+    let remoteReads = 0;
+    let localReads = 0;
+    let revised = false;
+    const subject = remoteSubject(() => {
+      remoteReads++;
+      return mirror([], revised ? {
+        agentQueueRevision: 8, presentationRevision: 8, runtimeControlRevision: 8,
+      } : {});
+    });
+    subject.scheduleScopedSync = () => { localReads++; };
+    await subject.hydrateMachine(MACHINE);
+    subject.commitCurrentGlobalPresentation();
+    const owner = subject.chat(TAB);
+    if (kind === 'queue') {
+      owner.queue = [{ id: tagId(MACHINE, 'queued-intent'), text: 'Keep this queued intent' }];
+      subject.markQueueMutation(owner);
+    } else if (kind === 'presentation') {
+      owner.title = 'Keep this local rename';
+      subject.markPresentationMutation(owner);
+    } else {
+      owner.currentModelId = 'changed-model';
+    }
+    subject.touchChat(TAB);
+    revised = true;
+    const attempts: any[] = [];
+    const save = async (opts: any) => {
+      assert.equal(opts.tabId, TAB);
+      assert.equal(opts.chatId, CHAT);
+      attempts.push(opts);
+      if (opts.expectedRevision !== 8) return { ok: false };
+      return { ...opts, ok: true, actorRevision: 9,
+        agentQueueRevision: 9, presentationRevision: 9, runtimeControlRevision: 9 };
+    };
+    await withWindowApi({
+      chatQueueReplace: save, chatPresentationSave: save, chatRuntimeControlsSave: save,
+    }, async () => {
+      const flush = () => kind === 'controls'
+        ? subject.persistRuntimeControls(subject.chat(TAB)) : subject.flushSession();
+      await flush();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await flush();
+    });
+    assert.equal(localReads, 0, `${kind}: local hydration cannot repair a remote revision`);
+    assert.equal(remoteReads, 2, `${kind}: one initial read and one conflict reconciliation`);
+    assert.equal(attempts.length, 2, kind);
+    assert.equal(attempts[0].operationId, attempts[1].operationId);
+    assert.equal(attempts[1].expectedRevision, 8);
+    if (kind === 'queue') {
+      assert.equal(subject.pendingQueueMutationVersions.size, 0);
+      assert.equal(subject.chat(TAB).queue[0].text, 'Keep this queued intent');
+    } else if (kind === 'presentation') {
+      assert.equal(subject.pendingPresentationOperations.size, 0);
+      assert.equal(subject.chat(TAB).title, 'Keep this local rename');
+    } else {
+      assert.equal(subject.pendingRuntimeControlOperations.size, 0);
+      assert.equal(subject.chat(TAB).currentModelId, 'changed-model');
+    }
+  }
+});
+
 test('remote metadata hydration cannot put submitted laptop text back into the Mac draft', async () => {
   let current = mirror([], { draft: 'sent from laptop', presentationRevision: 1 });
   const subject = remoteSubject(() => current);
