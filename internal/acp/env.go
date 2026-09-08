@@ -499,7 +499,13 @@ func (m *Manager) beginChatTurnCheckpoint(ctx context.Context, job *Job) {
 	currentRepos := make([]gitRepoBaseline, 0, len(repos))
 	pendingRepos := make([]pendingCheckpointRepo, 0, len(repos))
 	for _, repo := range repos {
+		if ctx.Err() != nil {
+			return
+		}
 		current := captureRepoBaseline(ctx, repo.path)
+		if ctx.Err() != nil {
+			return
+		}
 		currentRepos = append(currentRepos, current)
 		ref := checkpointRef(chatID, turnSeq)
 		commit, err := createWorktreeCheckpointCommit(ctx, repo.path, checkpointCommitMessage(chatID, turnSeq, job.ID))
@@ -508,6 +514,9 @@ func (m *Manager) beginChatTurnCheckpoint(ctx context.Context, job *Job) {
 			pending.err = err.Error()
 		}
 		pendingRepos = append(pendingRepos, pending)
+	}
+	if ctx.Err() != nil {
+		return
 	}
 
 	m.envMu.Lock()
@@ -953,9 +962,9 @@ func gitOutputAllowExit(ctx context.Context, repo string, allowed map[int]struct
 	gitCtx, cancel := context.WithTimeout(ctx, chatEnvGitTimeout)
 	defer cancel()
 	cmdArgs := append([]string{"-C", repo}, args...)
-	cmd := managedCommandContext(gitCtx, "git", cmdArgs...)
+	cmd := managedCommand("git", cmdArgs...)
 	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
-	out, err := cmd.Output()
+	out, err := gitCommandOutput(gitCtx, cmd)
 	if gitCtx.Err() != nil {
 		return out, gitCtx.Err()
 	}

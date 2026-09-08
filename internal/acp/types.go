@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"regexp"
@@ -571,6 +572,10 @@ type Job struct {
 	harnessTurn bool
 
 	cancelled bool
+	// Preparation can run Git commands or reconcile controls before the prompt.
+	// Stop cancels this work without cancelling the terminal ACP response wait.
+	preparationCtx    context.Context
+	cancelPreparation context.CancelFunc
 	// admitting reserves the deterministic public id before the actor admission
 	// callback commits. It is manager-private: cancellation may claim the exact
 	// reservation, but read projections must not expose it as running until the
