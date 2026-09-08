@@ -431,6 +431,11 @@ schemas and keep transport tests against `mock-server.mjs` until the Go fixture 
 
 ## Safety Notes
 
+For cancellation tests, `WORKASS_MOCK_ACP_CONTROL_GATE=/absolute/fixture/path`
+makes `session/set_config_option` create that marker and wait for
+`/absolute/fixture/path.release` before replying. This lets tests prove Stop
+finishes pre-prompt preparation without waiting for a blocked control response.
+
 - Never write logs or diagnostics to ACP stdout; stdout must contain JSON-RPC messages only.
 - Send diagnostics to stderr.
 - Keep `shell: false` for normal executables. Workass only enables a shell for Windows npm `.cmd`

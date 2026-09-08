@@ -1176,6 +1176,13 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 		}
 	}
 	opts.PromptText = strings.TrimSpace(RedactSensitiveText(opts.PromptText))
+	preparationCtx, cancelPreparation := context.WithCancel(ctx)
+	workerStarted := false
+	defer func() {
+		if !workerStarted {
+			cancelPreparation()
+		}
+	}()
 	job := &Job{
 		ID:                    id,
 		Kind:                  "app-chat",
@@ -1191,6 +1198,8 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 		CWD:                   cwd,
 		startOpts:             opts,
 		inputDispatchBoundary: make(chan struct{}),
+		preparationCtx:        preparationCtx,
+		cancelPreparation:     cancelPreparation,
 	}
 	job.touchActivity()
 	// Reserve the deterministic id before actor admission. Stop can now claim the
@@ -1265,18 +1274,22 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 			m.bindProviderLaneJob(lane, job.ID, operationID)
 		}
 	}
-	m.beginChatTurnCheckpoint(context.Background(), job)
+	m.beginChatTurnCheckpoint(preparationCtx, job)
 	// Snapshot the public start state before the worker can mutate the job. The
 	// old order launched runAppChatJob and then called job.Public(), racing fast
 	// providers that completed while the start reply was still being built.
 	m.emit("job:event", map[string]any{"type": "start", "job": public})
 
+	workerStarted = true
 	go m.runAppChatJob(ctx, bridge, job, opts)
 	return public, nil
 }
 
 func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, opts JobStartOptions) {
 	defer m.jobWG.Done()
+	if job.cancelPreparation != nil {
+		defer job.cancelPreparation()
+	}
 	defer job.settleInputDispatch()
 	activeBridge := bridge
 	defer func() {
@@ -1364,7 +1377,20 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	// adapter-side reset, or another tab's lifecycle can never silently fall back
 	// to the provider default (notably Codex "guardian").
 	requestedModelID := strings.TrimSpace(opts.ModelID)
-	controlResult, controlsErr := activeBridge.ensureSessionControls(ctx, job.SessionID, opts.ModelID, opts.ModeID)
+	preparationCtx := job.preparationCtx
+	if preparationCtx == nil {
+		preparationCtx = ctx
+	}
+	controlResult, controlsErr := activeBridge.ensureSessionControls(preparationCtx, job.SessionID, opts.ModelID, opts.ModeID)
+	if m.jobCancelled(job) {
+		code := 130
+		job.Code = &code
+		job.Status = "failed"
+		job.StopReason = "cancelled"
+		job.Interrupted = true
+		job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return
+	}
 	if controlsErr != nil {
 		// A stale or temporarily rejected adapter control is not a prompt
 		// failure. Continue with the adapter's authoritative current controls;
@@ -1789,7 +1815,11 @@ func (m *Manager) CancelJobResult(id string) JobCancelResult {
 	}
 	job.cancelled = true
 	admitting := job.admitting
+	cancelPreparation := job.cancelPreparation
 	m.mu.Unlock()
+	if cancelPreparation != nil {
+		cancelPreparation()
+	}
 	if admitting {
 		return JobCancelResult{Cancelled: true, Reason: "cancelled", PreAdmission: true}
 	}

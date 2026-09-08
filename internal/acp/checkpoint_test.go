@@ -14,6 +14,73 @@ import (
 	providercontract "workass/internal/provider"
 )
 
+func TestStopCancelsBlockedPreTurnCheckpoint(t *testing.T) {
+	requireGit(t)
+	workspace := t.TempDir()
+	repo := filepath.Join(workspace, "repo")
+	initTinyGitRepo(t, repo, map[string]string{"work.txt": "before\n"})
+	root := repoRoot(t)
+	traceFile := filepath.Join(t.TempDir(), "prompt-trace.jsonl")
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root, StateDir: t.TempDir(), RSSSampleInterval: time.Hour,
+		Provider: ProviderConfig{Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root,
+			Env: map[string]string{"WORKASS_MOCK_ACP_TRACE_FILE": traceFile}},
+		Broadcast: events.Broadcast,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	session, err := manager.NewSession(context.Background(), SessionOptions{CWD: workspace, TabID: "blocked-cp", ChatID: "blocked-cp-chat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitChatEnv(t, events, func(env ChatEnvPayload) bool { return env.ChatID == "blocked-cp-chat" && len(env.Unchanged) == 1 }, 3*time.Second)
+	marker, release := filepath.Join(workspace, "filter-started"), filepath.Join(workspace, "filter-release")
+	script := filepath.Join(workspace, "filter.cjs")
+	markerJSON, _ := json.Marshal(marker)
+	releaseJSON, _ := json.Marshal(release)
+	writeFile(t, script, fmt.Sprintf("const fs=require('node:fs');fs.writeFileSync(%s,'started');process.stdin.resume();setInterval(()=>{if(fs.existsSync(%s))process.exit(0)},10);", markerJSON, releaseJSON))
+	runGitFixture(t, repo, "config", "filter.blockstop.clean", "node \""+filepath.ToSlash(script)+"\"")
+	writeFile(t, filepath.Join(repo, ".gitattributes"), "work.txt filter=blockstop\n")
+	writeFile(t, filepath.Join(repo, "work.txt"), "changed\n")
+	started := make(chan error, 1)
+	go func() {
+		_, err := manager.StartJob(context.Background(), JobStartOptions{JobID: "blocked-cp-job", ProviderLaneManaged: true, OperationID: "blocked-cp-operation", Kind: "app-chat", SessionID: session.SessionID, TabID: "blocked-cp", ChatID: "blocked-cp-chat", CWD: workspace, Prompt: "must not reach provider"})
+		started <- err
+	}()
+	t.Cleanup(func() { _ = os.WriteFile(release, []byte("release"), 0o600) })
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("checkpoint did not enter blocking Git filter")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	stopAt := time.Now()
+	if result := manager.CancelJobResult("blocked-cp-job"); !result.Cancelled {
+		t.Fatalf("Stop: %#v", result)
+	}
+	select {
+	case err := <-started:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Stop waited behind the pre-turn Git checkpoint")
+	}
+	assertJobStatus(t, events.waitJobEnd(t, "blocked-cp-job", time.Second), "failed", 130, "cancelled")
+	t.Logf("Stop to terminal while Git filter is blocked: %s", time.Since(stopAt))
+	trace, err := os.ReadFile(traceFile)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(trace), "must not reach provider") {
+		t.Fatal("cancelled preparation reached the provider")
+	}
+}
+
 func TestChatCheckpointsDiffRewindAndOutsideGuard(t *testing.T) {
 	t.Parallel()
 	requireGit(t)

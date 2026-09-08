@@ -516,6 +516,11 @@ async function handleRequest(message) {
   if (method === 'session/set_config_option') {
     const session = sessions.get(params.sessionId);
     if (!session) return fail(id, -32000, 'Unknown mock ACP session.');
+    const controlGate = process.env.WORKASS_MOCK_ACP_CONTROL_GATE;
+    if (controlGate) {
+      fs.writeFileSync(controlGate, 'waiting');
+      while (!fs.existsSync(`${controlGate}.release`)) await sleep(10);
+    }
     if (params.configId === 'model') session.model = String(params.value);
     if (params.configId === 'mode') session.mode = String(params.value);
     persistSessions();

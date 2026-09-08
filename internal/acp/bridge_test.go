@@ -1417,6 +1417,52 @@ func TestTurnRoutesCodexCrossModelRestoreThroughSeparateEffortAxis(t *testing.T)
 	}
 }
 
+func TestStopCancelsBlockedTurnControlPreparation(t *testing.T) {
+	root := repoRoot(t)
+	fixtureDir := t.TempDir()
+	gate := filepath.Join(fixtureDir, "control-gate")
+	traceFile := filepath.Join(fixtureDir, "prompt-trace.jsonl")
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root, RSSSampleInterval: time.Hour,
+		Provider: ProviderConfig{Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root,
+			Env: map[string]string{"WORKASS_MOCK_ACP_TRACE_FILE": traceFile, "WORKASS_MOCK_ACP_CONTROL_GATE": gate}},
+		Broadcast: events.Broadcast,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	session := newMockSession(t, manager, "blocked-control-tab")
+	job, err := manager.StartJob(context.Background(), JobStartOptions{
+		Kind: "app-chat", SessionID: session.SessionID, TabID: "blocked-control-tab", ChatID: "chat-blocked-control-tab",
+		ModelID: "mock-blocked-control", Prompt: "cancelled control must not start prompt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(gate); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("provider never received the control request")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	stopAt := time.Now()
+	if !manager.CancelJob(jobID(job)) {
+		t.Fatal("Stop was rejected")
+	}
+	assertJobStatus(t, events.waitJobEnd(t, jobID(job), time.Second), "failed", 130, "cancelled")
+	t.Logf("Stop to terminal while provider control reply is blocked: %s", time.Since(stopAt))
+	trace, err := os.ReadFile(traceFile)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if bytes.Contains(trace, []byte("cancelled control must not start prompt")) {
+		t.Fatal("cancelled control preparation reached the provider prompt")
+	}
+}
+
 func TestTurnControlRestoreRejectionFallsBackToPrompt(t *testing.T) {
 	t.Parallel()
 	manager, events := newFakeManager(t, "control-reject", Options{RSSSampleInterval: time.Hour})
