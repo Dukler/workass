@@ -1294,8 +1294,10 @@ async function runTransaction(rawTransaction, operations) {
   };
   const settleBeforeDaemonStop = async (error, extra = {}) => {
     let fenceCleared = false;
+    let daemonAlreadyDown = false;
     try {
-      fenceCleared = await ops.daemonDown(600) ||
+      daemonAlreadyDown = await ops.daemonDown(600);
+      fenceCleared = daemonAlreadyDown ||
         (typeof ops.clearUpdateFence === 'function' && await ops.clearUpdateFence());
     } catch { fenceCleared = false; }
     if (!fenceCleared) {
@@ -1308,7 +1310,31 @@ async function runTransaction(rawTransaction, operations) {
       });
     }
     save('daemon_fence_cleared', { daemonFenceCleared: true });
-    return finish('failed', { activated: false, error, ...extra });
+    // Commit can stop the daemon before Windows finishes checking the old
+    // shell's executable locks. No release or state files have changed here;
+    // an unsuccessful shell cleanup must recover that unchanged installation,
+    // just like an unsuccessful daemon shutdown does below.
+    try {
+      if (daemonAlreadyDown) await ops.startRuntime?.();
+      const recovered = await launchUntilHealthy(ops, transaction.currentVersion, {
+        updateRelaunch: transaction.platform === 'darwin',
+      });
+      return finish(recovered ? 'rollback_healthy' : 'failed', {
+        activated: false,
+        rolledBack: false,
+        error,
+        ...extra,
+        ...(recovered ? {} : { rollbackError: 'previous release did not recover' }),
+      });
+    } catch (recoveryError) {
+      return finish('failed', {
+        activated: false,
+        rolledBack: false,
+        error,
+        ...extra,
+        rollbackError: String(recoveryError && recoveryError.message || recoveryError),
+      });
+    }
   };
   const requireProgress = async () => {
     if (await progressReady()) return;
@@ -1424,7 +1450,13 @@ async function runTransaction(rawTransaction, operations) {
     catch (progressError) { return await failBeforeDestructiveWork(progressError); }
 
     if (!journal.daemonStopped) {
-      await ops.stopDaemonService();
+      try {
+        await ops.stopDaemonService();
+      } catch (stopError) {
+        return await settleBeforeDaemonStop(
+          `the old Workass daemon cleanup failed: ${String(stopError && stopError.message || stopError)}`,
+        );
+      }
       if (!await waitForDeadline((probeTimeoutMs) => ops.daemonDown(probeTimeoutMs), {
         timeoutMs: 30000,
         delayMs: 250,
