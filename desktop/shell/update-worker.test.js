@@ -1543,6 +1543,56 @@ test('Windows force-stops the exact old Electron tree after the graceful quit bo
   ]);
 });
 
+test('shell cleanup failure recovers the unchanged runtime after commit already stopped the daemon', async () => {
+  const tx = windowsTransactionFixture();
+  const ops = operations({
+    stopOldShell: async () => { throw new Error('executable is still locked'); },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'rollback_healthy');
+  assert.equal(receipt.activated, false);
+  assert.equal(receipt.rolledBack, false);
+  assert.match(receipt.error, /executable is still locked/);
+  assert.deepEqual(ops.calls, ['start-runtime', 'launch', `healthy:${tx.currentVersion}`]);
+});
+
+test('shell cleanup failure proves recovery after clearing a still-running daemon admission fence', async () => {
+  const tx = windowsTransactionFixture();
+  const ops = operations({
+    stopOldShell: async () => { throw new Error('executable is still locked'); },
+    daemonDown: async () => false,
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'rollback_healthy');
+  assert.deepEqual(ops.calls, ['clear-fence', 'launch', `healthy:${tx.currentVersion}`]);
+});
+
+test('shell cleanup recovery preserves both errors if the unchanged runtime cannot restart', async () => {
+  const tx = windowsTransactionFixture();
+  const ops = operations({
+    stopOldShell: async () => { throw new Error('executable is still locked'); },
+    startRuntime: async () => { throw new Error('daemon could not restart'); },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'failed');
+  assert.match(receipt.error, /executable is still locked/);
+  assert.match(receipt.rollbackError, /daemon could not restart/);
+  assert.equal(receipt.activated, false);
+});
+
+test('daemon cleanup exceptions recover the unchanged runtime and produce a terminal receipt', async () => {
+  const tx = windowsTransactionFixture();
+  const ops = operations({
+    stopDaemonService: async () => { throw new Error('daemon cleanup command failed'); },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'rollback_healthy');
+  assert.equal(receipt.activated, false);
+  assert.match(receipt.error, /daemon cleanup command failed/);
+  assert.deepEqual(ops.calls, ['start-runtime', 'launch', `healthy:${tx.currentVersion}`]);
+  assert.equal(JSON.parse(fs.readFileSync(tx.journalPath, 'utf8')).terminal, true);
+});
+
 test('commit-never-arrived shell-stop failure stays nonterminal until exact daemon admission is cleared', async () => {
   const tx = windowsTransactionFixture();
   const ops = operations({
