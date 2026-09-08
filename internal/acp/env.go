@@ -541,6 +541,17 @@ func (m *Manager) beginChatTurnCheckpoint(ctx context.Context, job *Job) {
 	m.envMu.Unlock()
 }
 
+func (m *Manager) discardChatTurnCheckpoint(job *Job) {
+	if job == nil {
+		return
+	}
+	m.envMu.Lock()
+	defer m.envMu.Unlock()
+	if tracker := m.chatEnvTrackerLocked(job.SessionID, job.ChatID, job.TabID); tracker != nil {
+		delete(tracker.pendingTurns, job.ID)
+	}
+}
+
 func (m *Manager) chatEnvSnapshot(sessionID, chatID, tabID, jobID string) (chatEnvSnapshot, bool) {
 	m.envMu.Lock()
 	defer m.envMu.Unlock()

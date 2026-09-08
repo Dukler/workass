@@ -72,6 +72,16 @@ func TestStopCancelsBlockedPreTurnCheckpoint(t *testing.T) {
 	}
 	assertJobStatus(t, events.waitJobEnd(t, "blocked-cp-job", time.Second), "failed", 130, "cancelled")
 	t.Logf("Stop to terminal while Git filter is blocked: %s", time.Since(stopAt))
+	workerDone := make(chan struct{})
+	go func() {
+		manager.jobWG.Wait()
+		close(workerDone)
+	}()
+	select {
+	case <-workerDone:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled preparation started another blocking Git scan after terminal publication")
+	}
 	trace, err := os.ReadFile(traceFile)
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
