@@ -1322,7 +1322,16 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		// Preserve only the tiny in-memory checkpoint input before terminal
 		// publication. The actor is allowed to clear its foreground state as soon
 		// as it observes end, while the filesystem-heavy scan runs afterwards.
-		envSnapshot, hasEnvSnapshot := m.chatEnvSnapshot(job.SessionID, job.ChatID, job.TabID, job.ID)
+		var envSnapshot chatEnvSnapshot
+		var hasEnvSnapshot bool
+		if job.StopReason == "cancelled" && !job.inputWasDispatched() {
+			// No provider prompt ran, so there are no turn edits to collect.
+			// Restarting Git here defeats cancellation of blocked preparation and
+			// accumulates background scans across repeated Send/Stop operations.
+			m.discardChatTurnCheckpoint(job)
+		} else {
+			envSnapshot, hasEnvSnapshot = m.chatEnvSnapshot(job.SessionID, job.ChatID, job.TabID, job.ID)
+		}
 		// Release the provider process's foreground pin before publishing the
 		// terminal actor event. A terminal event can immediately drive the next
 		// queued turn; leaving the old wrapper attached until after filesystem work
