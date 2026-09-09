@@ -1301,7 +1301,7 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		// Markdown image links. Normalize the latter once at the terminal boundary
 		// so every provider gets durable Workass media without a provider-specific
 		// prompt/tool contract.
-		job.addAssistantImages(ResolveAssistantMarkdownImages(job.Result, job.CWD))
+		job.addAssistantImages(job.resolveAssistantMarkdownImages(assistantMarkdownImageRefs(job.Result), true))
 		m.mu.Lock()
 		if rec := m.jobs[job.ID]; rec != nil {
 			rec.Status = job.Status

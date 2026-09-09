@@ -69,10 +69,8 @@ func (m *Manager) recordStdoutFlush(size int, age time.Duration) {
 	}
 }
 
-// recordMarkdownScan measures per-chunk work that grows with the answer. Once a
-// chunk contains "![", every later chunk rescans the whole accumulated output
-// until the reference closes, so scanBytes climbing far above chunkBytes is the
-// signature of quadratic work inside a single turn.
+// recordMarkdownScan measures incremental parser input. Each output byte should
+// be consumed once; amplification above one indicates a repeated-scan regression.
 func (m *Manager) recordMarkdownScan(scanBytes int, elapsed time.Duration) {
 	atomic.AddUint64(&m.stream.markdownScans, 1)
 	atomic.AddUint64(&m.stream.markdownScanBytes, uint64(scanBytes))

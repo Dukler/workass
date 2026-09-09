@@ -9,6 +9,14 @@ receipts, redaction and current-human update authorization remain binding.
 Ordinary session/turn lifecycle must not capture automatic Git snapshots.
 See `WORKASS-TOOLS.md` for the CLI contract.
 
+User law 2026-09-09 (performance): retain automatic new-machine discovery,
+but back off unchanged full LAN scans (10, 20, 40, at most 60 seconds).
+Keep known-machine liveness checks at 10 seconds; detect interface changes at
+that cadence and reset the discovery delay on topology or discovered-machine
+changes. Do not rewrite unchanged provider controls or chat obligations, copy
+committed chat history for periodic obligation checks, or repeatedly resolve
+already-imported assistant images during streaming.
+
 Status: v1 (2026-07-09, Fable). The wire-contract inventory (§2b) is produced
 by an extraction lane and reviewed before P1 starts; everything else here is
 final unless the user changes scope.

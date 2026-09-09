@@ -5,9 +5,11 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,6 +21,7 @@ const DiscoveryPort = 80
 const (
 	defaultScanConcurrency = 32
 	defaultProbeTimeout    = 450 * time.Millisecond
+	maxStableScanInterval  = time.Minute
 )
 
 // Scanner discovers Workass daemons by probing /workass/health on TCP port 80
@@ -37,7 +40,9 @@ type Scanner struct {
 	Candidates []string
 }
 
-// Run performs an immediate scan, then repeats until ctx ends.
+// Run keeps discovering new machines while backing off full subnet sweeps on
+// a stable network. Cheap interface checks and known-machine liveness keep
+// their original cadence; a topology change starts a fresh sweep immediately.
 func (s *Scanner) Run(ctx context.Context) error {
 	if s == nil || s.Book == nil {
 		return errors.New("port-80 scanner needs a machine book")
@@ -46,26 +51,66 @@ func (s *Scanner) Run(ctx context.Context) error {
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
-	s.scan(ctx)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	schedule := scanSchedule{base: interval}
+	step := func() {
+		candidates := s.candidates()
+		if schedule.due(time.Now(), strings.Join(candidates, "\n")) {
+			changed := s.scanCandidates(ctx, candidates)
+			schedule.finished(time.Now(), changed)
+		}
+	}
 	for {
+		step()
+		// Wake for either the next interface check or the exact scan deadline;
+		// a sweep's duration must not round a 60-second delay up to 70 seconds.
+		timer := time.NewTimer(max(time.Millisecond, min(interval, time.Until(schedule.next))))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return nil
-		case <-ticker.C:
-			s.scan(ctx)
+		case <-timer.C:
 		}
 	}
 }
 
-func (s *Scanner) scan(ctx context.Context) {
+type scanSchedule struct {
+	base, delay time.Duration
+	next        time.Time
+	topology    string
+}
+
+func (s *scanSchedule) due(now time.Time, topology string) bool {
+	if topology != s.topology {
+		s.topology, s.delay, s.next = topology, 0, time.Time{}
+	}
+	return !now.Before(s.next)
+}
+
+func (s *scanSchedule) finished(now time.Time, changed bool) {
+	if changed || s.delay == 0 {
+		s.delay = s.base
+	} else {
+		s.delay = min(s.delay*2, max(s.base, maxStableScanInterval))
+	}
+	s.next = now.Add(s.delay)
+}
+
+func (s *Scanner) candidates() []string {
 	candidates := append([]string(nil), s.Candidates...)
 	if len(candidates) == 0 {
 		candidates = privateLANPort80Candidates()
 	}
+	sort.Strings(candidates)
+	return candidates
+}
+
+func (s *Scanner) scan(ctx context.Context) bool {
+	return s.scanCandidates(ctx, s.candidates())
+}
+
+func (s *Scanner) scanCandidates(ctx context.Context, candidates []string) bool {
 	if len(candidates) == 0 {
-		return
+		return false
 	}
 	concurrency := s.Concurrency
 	if concurrency <= 0 {
@@ -85,6 +130,7 @@ func (s *Scanner) scan(ctx context.Context) {
 	}
 
 	jobs := make(chan string)
+	var discovered atomic.Bool
 	var workers sync.WaitGroup
 	workers.Add(concurrency)
 	for i := 0; i < concurrency; i++ {
@@ -98,6 +144,7 @@ func (s *Scanner) scan(ctx context.Context) {
 					continue
 				}
 				if changed {
+					discovered.Store(true)
 					s.logf("[machines] auto-detected %s (%s) at %s over TCP 80", entry.Name, entry.MachineID, address)
 					if s.OnChange != nil {
 						s.OnChange(entry)
@@ -111,12 +158,13 @@ func (s *Scanner) scan(ctx context.Context) {
 		case <-ctx.Done():
 			close(jobs)
 			workers.Wait()
-			return
+			return discovered.Load()
 		case jobs <- candidate:
 		}
 	}
 	close(jobs)
 	workers.Wait()
+	return discovered.Load()
 }
 
 // scanProbeClient gives one LAN sweep its own transport. A request context is

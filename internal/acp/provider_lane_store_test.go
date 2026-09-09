@@ -775,3 +775,40 @@ func persistentMockSessionCount(t *testing.T, path string) int {
 	}
 	return len(disk.Sessions)
 }
+
+func TestNativeSessionControlsWriteOnlyChangesAndRetryFailedWrite(t *testing.T) {
+	ledger := newNativeSessionLedger(t.TempDir())
+	if err := ledger.put(nativeSessionBinding{TabID: "tab", ChatID: "chat", ProviderID: "mock", SessionID: "session", ModelID: "model", ModeID: "ask", CWD: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(ledger.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, _ := ledger.get("tab", "chat", "mock")
+	for i := 0; i < 10; i++ {
+		ledger.updateControls("tab", "chat", "mock", "session", " model ", "ask")
+	}
+	after, err := os.Stat(ledger.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchanged, _ := ledger.get("tab", "chat", "mock")
+	if !os.SameFile(before, after) || unchanged.UpdatedAt != original.UpdatedAt {
+		t.Fatal("unchanged controls rewrote the ledger")
+	}
+	path := ledger.path
+	ledger.path = filepath.Join(path, "cannot-write-below-file")
+	ledger.updateControls("tab", "chat", "mock", "session", "new-model", "bypass")
+	failed, _ := ledger.get("tab", "chat", "mock")
+	if failed.ModelID != original.ModelID || failed.ModeID != original.ModeID {
+		t.Fatal("failed persistence poisoned the cached selection")
+	}
+	ledger.path = path
+	ledger.updateControls("tab", "chat", "mock", "session", "new-model", "bypass")
+	reloaded := newNativeSessionLedger(filepath.Dir(path))
+	got, _ := reloaded.get("tab", "chat", "mock")
+	if got.ModelID != "new-model" || got.ModeID != "bypass" {
+		t.Fatal("changed controls did not survive reload")
+	}
+}
