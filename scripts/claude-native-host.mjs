@@ -1585,8 +1585,7 @@ async function handleRequest(message) {
       agentCapabilities: {
         sessionCapabilities: { resume: {}, close: {} },
         promptCapabilities: { image: true, audio: false, embeddedContext: false },
-        // Workass MCP is served over private-CA HTTPS. The packaged stdio
-        // bridge pins that CA; the SDK's direct URL transport cannot.
+        // External MCP servers retain the host's supported stdio transport.
         mcpCapabilities: { http: false, sse: false },
       },
       authMethods: [],

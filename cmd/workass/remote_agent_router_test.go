@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -110,21 +109,17 @@ func TestStatelessMCPRoutesTaggedRemoteReadWithoutExposingOwner(t *testing.T) {
 		"machineId": "m-san", "messages": []any{}, "running": false,
 	}}
 	harness.handler.agentControl.remoteChats = remote
-	status, response := harness.request(t, 501, "tools/call", "workass_read_chat", statelessMCPProtocolVersion, map[string]any{
+	status, response := harness.request(t, http.MethodPost, map[string]any{
 		"name": "workass_read_chat",
 		"arguments": map[string]any{
 			"tab_id": "M~m-san~tab-hello", "chat_id": "M~m-san~chat-hello", "limit": 10,
 		},
 	})
 	result := mapFromAnyMain(response["result"])
-	if status != http.StatusOK || result["isError"] == true {
+	if status != http.StatusOK || response["error"] != nil {
 		t.Fatalf("remote read status=%d response=%#v", status, response)
 	}
-	content := result["content"].([]any)
-	var read map[string]any
-	if err := json.Unmarshal([]byte(toString(mapFromAnyMain(content[0])["text"])), &read); err != nil {
-		t.Fatal(err)
-	}
+	read := result
 	if remote.method != "chat.read" || fieldString(remote.params, "machine_id") != "m-san" || read["machineId"] != "m-san" {
 		t.Fatalf("remote route method=%q params=%#v read=%#v", remote.method, remote.params, read)
 	}
@@ -138,24 +133,24 @@ func TestStatelessMCPRoutesUpdaterStatusAndAuthorizedApplyWithoutExposingOwner(t
 	remote := &stubAgentChatRemoteRouter{result: map[string]any{"machineId": "m-san", "ok": true}}
 	harness.handler.agentControl.remoteChats = remote
 
-	status, response := harness.request(t, 601, "tools/call", "workass_get_update_status", statelessMCPProtocolVersion, map[string]any{
+	status, response := harness.request(t, http.MethodPost, map[string]any{
 		"name": "workass_get_update_status", "arguments": map[string]any{"machine_id": "m-san"},
 	})
-	if status != http.StatusOK || mapFromAnyMain(response["result"])["isError"] == true || remote.method != "update.status" {
+	if status != http.StatusOK || response["error"] != nil || remote.method != "update.status" {
 		t.Fatalf("update status HTTP=%d response=%#v method=%q", status, response, remote.method)
 	}
 	if remote.params["owner_key"] != nil || remote.params["parent_chat_id"] != nil || remote.params["parent_tab_id"] != nil {
 		t.Fatalf("owner capability reached updater renderer route: %#v", remote.params)
 	}
 
-	status, response = harness.request(t, 602, "tools/call", "workass_apply_update", statelessMCPProtocolVersion, map[string]any{
+	status, response = harness.request(t, http.MethodPost, map[string]any{
 		"name": "workass_apply_update",
 		"arguments": map[string]any{
 			"machine_id": "m-san", "expected_current_version": "1.2.3", "expected_target_version": "1.2.4",
 			"authorization": "update m-san from 1.2.3 to 1.2.4", "operation_id": "update-san-1.2.4",
 		},
 	})
-	if status != http.StatusOK || mapFromAnyMain(response["result"])["isError"] == true || remote.method != "update.apply" {
+	if status != http.StatusOK || response["error"] != nil || remote.method != "update.apply" {
 		t.Fatalf("update apply HTTP=%d response=%#v method=%q", status, response, remote.method)
 	}
 	if fieldString(remote.params, "operation_id") != "update-san-1.2.4" || remote.params["owner_key"] != nil {

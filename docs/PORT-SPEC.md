@@ -1,5 +1,14 @@
 # PORT-SPEC — binding laws for the workass Go daemon
 
+User law 2026-09-09: Workass-owned tools use the direct authenticated Workass
+CLI/API, not MCP. Remove their MCP endpoints, stdio proxy, descriptors, protocol
+negotiation and discovery instructions, with no backward-compatible exposure.
+Existing vendor/user MCP integrations remain supported. This supersedes older
+Workass MCP transport requirements below; exact chat ownership, mutation
+receipts, redaction and current-human update authorization remain binding.
+Ordinary session/turn lifecycle must not capture automatic Git snapshots.
+See `WORKASS-TOOLS.md` for the CLI contract.
+
 Status: v1 (2026-07-09, Fable). The wire-contract inventory (§2b) is produced
 by an extraction lane and reviewed before P1 starts; everything else here is
 final unless the user changes scope.

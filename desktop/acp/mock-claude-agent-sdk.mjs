@@ -705,11 +705,11 @@ class FixtureQuery {
 
 export function query(input) {
 	if (process.env.WORKASS_CLAUDE_FIXTURE_REQUIRE_STDIO_MCP === '1') {
-		const server = input.options?.mcpServers?.['workass-browser'];
-		if (server?.command !== '/fixture/workass-daemon'
-				|| JSON.stringify(server?.args) !== JSON.stringify(['mcp-stdio'])
-				|| server?.env?.WORKASS_MCP_CA_FILE !== '/fixture/workass-ca.pem'
-				|| server?.env?.WORKASS_MCP_ENDPOINT !== 'https://mcp.localhost:8788/workass/mcp/browser') {
+		const server = input.options?.mcpServers?.['fixture-browser'];
+		if (server?.command !== '/fixture/external-tool-server'
+				|| JSON.stringify(server?.args) !== JSON.stringify(['serve-external-mcp'])
+				|| server?.env?.FIXTURE_MCP_CA_FILE !== '/fixture/workass-ca.pem'
+				|| server?.env?.FIXTURE_MCP_ENDPOINT !== 'https://external.invalid/mcp') {
 			throw new Error('Claude SDK MCP descriptor was not normalized');
 		}
 	}

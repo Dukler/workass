@@ -1983,7 +1983,8 @@ func TestWireTraceChatEnvNumstat(t *testing.T) {
 	beta := filepath.Join(workspace, "beta")
 	initWireGitRepo(t, alpha, map[string]string{"work.txt": "one\n"})
 	initWireGitRepo(t, beta, map[string]string{"other.txt": "base\n"})
-	baseHash := wireFileSHA256(t, filepath.Join(alpha, "work.txt"))
+	gitTrace := filepath.Join(t.TempDir(), "git-trace.log")
+	t.Setenv("GIT_TRACE", gitTrace)
 
 	hub := wire.NewHub()
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -2021,7 +2022,7 @@ func TestWireTraceChatEnvNumstat(t *testing.T) {
 	session := sessionReply.Result.(map[string]any)
 	sessionID := session["sessionId"].(string)
 	created := client.waitChannelEvent(t, "chat:env", 5*time.Second).Payload.(map[string]any)
-	if created["chatId"] != chatID || created["tabId"] != tabID || filepath.Clean(fmt.Sprint(created["cwd"])) != filepath.Clean(workspace) || len(created["repos"].([]any)) != 0 || strings.Join(stringSliceFromAny(created["unchanged"]), ",") != "alpha,beta" {
+	if created["chatId"] != chatID || created["tabId"] != tabID || filepath.Clean(fmt.Sprint(created["cwd"])) != filepath.Clean(workspace) || len(created["repos"].([]any)) != 0 || len(stringSliceFromAny(created["unchanged"])) != 0 {
 		t.Fatalf("session chat:env = %#v", created)
 	}
 	t.Logf("trace event chat:env session-create chatId=%s tabId=%s cwd=%s repos=%d unchanged=%s", created["chatId"], created["tabId"], created["cwd"], len(created["repos"].([]any)), strings.Join(stringSliceFromAny(created["unchanged"]), ","))
@@ -2048,83 +2049,30 @@ func TestWireTraceChatEnvNumstat(t *testing.T) {
 	if endJob["status"] != "done" || endJob["stopReason"] != "end_turn" {
 		t.Fatalf("end job = %#v", endJob)
 	}
-	envMsg := client.waitFor(t, 5*time.Second, func(msg wsMessage) bool {
-		if msg.T != "event" || msg.Channel != "chat:env" {
-			return false
-		}
-		payload, _ := msg.Payload.(map[string]any)
-		repos, _ := payload["repos"].([]any)
-		if len(repos) != 1 {
-			return false
-		}
-		repo, _ := repos[0].(map[string]any)
-		return repo["name"] == "alpha"
-	})
-	env := envMsg.Payload.(map[string]any)
-	repo := env["repos"].([]any)[0].(map[string]any)
-	files := repo["files"].([]any)
-	file := files[0].(map[string]any)
-	if repo["adds"] != json.Number("2") || repo["dels"] != json.Number("0") || file["path"] != "work.txt" || file["adds"] != json.Number("2") || file["dels"] != json.Number("0") || strings.Join(stringSliceFromAny(env["unchanged"]), ",") != "beta" {
-		t.Fatalf("turn chat:env = %#v", env)
-	}
-	t.Logf("trace event chat:env after-turn chatId=%s repo=%s branch=%s file=%s adds=%v dels=%v unchanged=%s", env["chatId"], repo["name"], repo["branch"], file["path"], file["adds"], file["dels"], strings.Join(stringSliceFromAny(env["unchanged"]), ","))
-
+	// Chat turns no longer collect repository diffs or create file checkpoints.
+	// Keep the frozen read endpoints compatible, returning the empty projection.
 	client.invoke(t, 3, "chat:env-get", map[string]any{"chatId": chatID, "tabId": tabID})
 	getReply := client.waitReply(t, 3, 5*time.Second)
 	if getReply.Error != nil {
-		t.Fatalf("chat:env-get error: %s", *getReply.Error)
+		t.Fatalf("chat:env-get: %s", *getReply.Error)
 	}
 	got := getReply.Result.(map[string]any)
-	gotRepo := got["repos"].([]any)[0].(map[string]any)
-	if gotRepo["name"] != "alpha" || gotRepo["adds"] != json.Number("2") {
-		t.Fatalf("chat:env-get result = %#v", got)
+	if len(got["repos"].([]any)) != 0 || len(stringSliceFromAny(got["unchanged"])) != 0 {
+		t.Fatalf("automatic repository projection: %#v", got)
 	}
-	t.Logf("trace reply chat:env-get chatId=%s repos=%d firstRepo=%s adds=%v", got["chatId"], len(got["repos"].([]any)), gotRepo["name"], gotRepo["adds"])
-
 	client.invoke(t, 4, "chat:checkpoints", map[string]any{"chatId": chatID, "tabId": tabID})
 	cpReply := client.waitReply(t, 4, 5*time.Second)
 	if cpReply.Error != nil {
-		t.Fatalf("chat:checkpoints error: %s", *cpReply.Error)
+		t.Fatalf("chat:checkpoints: %s", *cpReply.Error)
 	}
-	checkpoints := cpReply.Result.([]any)
-	if len(checkpoints) != 1 {
-		t.Fatalf("chat:checkpoints result = %#v", checkpoints)
+	if checkpoints := cpReply.Result.([]any); len(checkpoints) != 0 {
+		t.Fatalf("automatic checkpoints: %#v", checkpoints)
 	}
-	cp := checkpoints[0].(map[string]any)
-	repos := cp["repos"].([]any)
-	cpRepo := repos[0].(map[string]any)
-	if cp["turnSeq"] != json.Number("1") || cpRepo["name"] != "alpha" || (cpRepo["skipped"] != nil && cpRepo["skipped"] != false) || cpRepo["ref"] == "" {
-		t.Fatalf("chat:checkpoints checkpoint = %#v", cp)
+	if body, err := os.ReadFile(filepath.Join(alpha, "work.txt")); err != nil || string(body) != "one\ntwo\nthree\n" {
+		t.Fatalf("chat changed workspace contents: %v", err)
 	}
-	t.Logf("trace reply chat:checkpoints turnSeq=%v repo=%s ref=%s", cp["turnSeq"], cpRepo["name"], cpRepo["ref"])
-
-	client.invoke(t, 5, "chat:diff", map[string]any{"chatId": chatID, "tabId": tabID, "repo": "alpha", "path": "work.txt"})
-	diffReply := client.waitReply(t, 5, 5*time.Second)
-	if diffReply.Error != nil {
-		t.Fatalf("chat:diff error: %s", *diffReply.Error)
-	}
-	diff := diffReply.Result.(map[string]any)
-	diffText := diff["text"].(string)
-	if diff["truncated"] != false || !strings.Contains(diffText, "+two") || !strings.Contains(diffText, "+three") {
-		t.Fatalf("chat:diff result = %#v", diff)
-	}
-	t.Logf("trace reply chat:diff turnSeq=%v hunk=%t truncated=%v", diff["turnSeq"], strings.Contains(diffText, "@@"), diff["truncated"])
-
-	client.invoke(t, 6, "chat:rewind", map[string]any{
-		"tabId": tabID, "chatId": chatID, "turnSeq": 1, "operationId": "wire-env-rewind-1",
-	})
-	rewindReply := client.waitReply(t, 6, 5*time.Second)
-	if rewindReply.Error != nil {
-		t.Fatalf("chat:rewind error: %s", *rewindReply.Error)
-	}
-	restored := client.waitChannelEvent(t, "chat:checkpoint-restored", 5*time.Second).Payload.(map[string]any)
-	if restored["chatId"] != chatID || restored["turnSeq"] != json.Number("1") {
-		t.Fatalf("chat:checkpoint-restored = %#v", restored)
-	}
-	if gotHash := wireFileSHA256(t, filepath.Join(alpha, "work.txt")); gotHash != baseHash {
-		t.Fatalf("rewind hash=%s want=%s", gotHash, baseHash)
-	}
-	t.Logf("trace event chat:checkpoint-restored chatId=%s turnSeq=%v hash=%s", restored["chatId"], restored["turnSeq"], baseHash)
+	manager.Reset() // wait for post-terminal workers before inspecting Git trace
+	assertWireChatDidNotRunGit(t, gitTrace)
 }
 
 func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
@@ -2139,6 +2087,8 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 	workspace := filepath.Join(root, "workspace")
 	alpha := filepath.Join(workspace, "alpha")
 	initWireGitRepo(t, alpha, map[string]string{"work.txt": "one\n"})
+	gitTrace := filepath.Join(t.TempDir(), "git-trace.log")
+	t.Setenv("GIT_TRACE", gitTrace)
 
 	hub := wire.NewHub()
 	manager := acp.NewManager(acp.Options{
@@ -2192,7 +2142,7 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 			return false
 		}
 		payload, _ := msg.Payload.(map[string]any)
-		return payload["chatId"] == chatID && strings.Join(stringSliceFromAny(payload["unchanged"]), ",") == "alpha"
+		return payload["chatId"] == chatID && len(stringSliceFromAny(payload["unchanged"])) == 0
 	})
 	runWireChatTurn(t, client, 2, chatID, tabID, oldSessionID, "before hibernate checkpoint", workspace)
 	hibernated := waitWireProcStateForChat(t, manager, chatID, acp.StateHibernated, 2*time.Second)
@@ -2221,40 +2171,27 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 	if endJob["status"] != "done" || endJob["sessionId"] != oldSessionID {
 		t.Fatalf("hibernated checkpoint end = %#v", endJob)
 	}
-	waitWireChatCheckpointCount(t, manager, chatID, 1, 5*time.Second)
-	envMsg := client.waitFor(t, 5*time.Second, func(msg wsMessage) bool {
-		if msg.T != "event" || msg.Channel != "chat:env" {
-			return false
-		}
-		payload, _ := msg.Payload.(map[string]any)
-		return payload["chatId"] == chatID && envHasWireRepoFile(payload, "alpha", "work.txt")
-	})
-	env := envMsg.Payload.(map[string]any)
-	t.Logf("trace event chat:env hibernated checkpoint chatId=%s repos=%d", env["chatId"], len(env["repos"].([]any)))
-
 	client.invoke(t, 4, "chat:checkpoints", map[string]any{"chatId": chatID, "tabId": tabID})
 	cpReply := client.waitReply(t, 4, 5*time.Second)
 	if cpReply.Error != nil {
-		t.Fatalf("chat:checkpoints error: %s", *cpReply.Error)
+		t.Fatalf("chat:checkpoints: %s", *cpReply.Error)
 	}
-	checkpoints := cpReply.Result.([]any)
-	if len(checkpoints) != 1 {
-		t.Fatalf("checkpoints after hibernated turn = %#v", checkpoints)
+	if checkpoints := cpReply.Result.([]any); len(checkpoints) != 0 {
+		t.Fatalf("resumed chat created automatic checkpoints: %#v", checkpoints)
 	}
-	latest := checkpoints[len(checkpoints)-1].(map[string]any)
-	if latest["turnSeq"] != json.Number("2") {
-		t.Fatalf("latest checkpoint = %#v", latest)
+	manager.Reset()
+	assertWireChatDidNotRunGit(t, gitTrace)
+}
+
+func assertWireChatDidNotRunGit(t *testing.T, path string) {
+	t.Helper()
+	trace, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
 	}
-	client.invoke(t, 5, "chat:diff", map[string]any{"chatId": chatID, "tabId": tabID, "repo": "alpha", "path": "work.txt"})
-	diffReply := client.waitReply(t, 5, 5*time.Second)
-	if diffReply.Error != nil {
-		t.Fatalf("chat:diff error: %s", *diffReply.Error)
+	if len(trace) != 0 {
+		t.Fatalf("chat lifecycle invoked Git: %s", trace)
 	}
-	diff := diffReply.Result.(map[string]any)
-	if !strings.Contains(fmt.Sprint(diff["text"]), "+two") {
-		t.Fatalf("hibernated diff = %#v", diff)
-	}
-	t.Logf("trace reply chat:diff hibernated turnSeq=%v", diff["turnSeq"])
 }
 
 func TestWireTraceGroupedCatalogAndInterleavedProviders(t *testing.T) {

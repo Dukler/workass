@@ -110,8 +110,9 @@ func TestChatEnvTracksRepoChangesAfterTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
+	seedLegacyChatEnvFixture(t, manager, session.SessionID, "chat-env", "env-tab", workspace)
 	created := waitChatEnv(t, events, func(env ChatEnvPayload) bool {
-		return env.ChatID == "chat-env" && env.TabID == "env-tab" && sameFilesystemPath(env.CWD, workspace)
+		return env.ChatID == "chat-env" && env.TabID == "env-tab" && sameFilesystemPath(env.CWD, workspace) && len(env.Unchanged) == 2
 	}, 2*time.Second)
 	if len(created.Repos) != 0 || strings.Join(created.Unchanged, ",") != "alpha,beta" {
 		t.Fatalf("session env = %#v", created)
@@ -128,10 +129,12 @@ func TestChatEnvTracksRepoChangesAfterTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start job: %v", err)
 	}
+	cpJob := beginLegacyCheckpointFixture(manager, job, session.SessionID, "chat-env", "env-tab", workspace)
 	if err := os.WriteFile(filepath.Join(alpha, "work.txt"), []byte("one\ntwo\nthree\n"), 0o644); err != nil {
 		t.Fatalf("edit alpha: %v", err)
 	}
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "done", 0, "end_turn")
+	manager.refreshChatEnvAfterJob(context.Background(), cpJob)
 	changed := waitChatEnv(t, events, func(env ChatEnvPayload) bool {
 		return env.ChatID == "chat-env" && len(env.Repos) == 1 && env.Repos[0].Name == "alpha"
 	}, 2*time.Second)
@@ -190,8 +193,9 @@ func TestChatEnvTruncationFlags(t *testing.T) {
 		if _, err := manager.NewSession(ctx, SessionOptions{CWD: workspace, TabID: "trunc-repo-tab", ChatID: "chat-trunc-repo"}); err != nil {
 			t.Fatalf("new session: %v", err)
 		}
+		seedLegacyChatEnvFixture(t, manager, "trunc-repo-session", "chat-trunc-repo", "trunc-repo-tab", workspace)
 		env := waitChatEnv(t, events, func(env ChatEnvPayload) bool {
-			return env.ChatID == "chat-trunc-repo"
+			return env.ChatID == "chat-trunc-repo" && len(env.Unchanged) > 0
 		}, fixtureTimeout)
 		if !env.ReposTruncated || len(env.Unchanged) != chatEnvRepoLimit || len(env.Repos) != 0 {
 			t.Fatalf("repo truncation env = %#v", env)
@@ -221,6 +225,7 @@ func TestChatEnvTruncationFlags(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new session: %v", err)
 		}
+		seedLegacyChatEnvFixture(t, manager, session.SessionID, "chat-trunc-file", "trunc-file-tab", repoDir)
 		_ = waitChatEnv(t, events, func(env ChatEnvPayload) bool {
 			return env.ChatID == "chat-trunc-file" && len(env.Unchanged) == 1
 		}, fixtureTimeout)
@@ -235,6 +240,7 @@ func TestChatEnvTruncationFlags(t *testing.T) {
 		if err != nil {
 			t.Fatalf("start job: %v", err)
 		}
+		cpJob := beginLegacyCheckpointFixture(manager, job, session.SessionID, "chat-trunc-file", "trunc-file-tab", repoDir)
 		waitForFakeACPProbeGate(t, promptGate)
 		for i := 0; i < chatEnvFileLimit+1; i++ {
 			path := filepath.Join(repoDir, fmt.Sprintf("file%03d.txt", i))
@@ -246,6 +252,7 @@ func TestChatEnvTruncationFlags(t *testing.T) {
 			t.Fatalf("release prompt gate: %v", err)
 		}
 		assertJobStatus(t, events.waitJobEnd(t, jobID(job), fixtureTimeout), "done", 0, "end_turn")
+		manager.refreshChatEnvAfterJob(context.Background(), cpJob)
 		env := waitChatEnv(t, events, func(env ChatEnvPayload) bool {
 			return env.ChatID == "chat-trunc-file" && len(env.Repos) == 1 && env.Repos[0].FilesTruncated
 		}, fixtureTimeout)
@@ -317,4 +324,23 @@ func runCommandFixture(t *testing.T, dir, command string, args ...string) {
 	if err != nil {
 		t.Fatalf("%s %s: %v\n%s", command, strings.Join(args, " "), err, out)
 	}
+}
+
+// Seed historical snapshot data explicitly. Production chat lifecycle no longer
+// creates it; legacy diff/rewind and persisted-data compatibility remain tested.
+func seedLegacyChatEnvFixture(t *testing.T, manager *Manager, sessionID, chatID, tabID, cwd string) {
+	t.Helper()
+	repos, truncated := discoverChatEnvRepos(context.Background(), cwd)
+	tracker := &chatEnvTracker{sessionID: sessionID, chatID: chatID, tabID: tabID, cwd: cwd, repos: repos, reposTruncated: truncated}
+	tracker.payload = tracker.initialPayload()
+	manager.envMu.Lock()
+	manager.storeChatEnvTrackerLocked(tracker)
+	manager.envMu.Unlock()
+	manager.emit("chat:env", cloneChatEnvPayload(tracker.payload))
+}
+
+func beginLegacyCheckpointFixture(manager *Manager, public map[string]any, sessionID, chatID, tabID, cwd string) *Job {
+	job := &Job{ID: jobID(public), SessionID: sessionID, ChatID: chatID, TabID: tabID, CWD: cwd}
+	manager.beginChatTurnCheckpoint(context.Background(), job)
+	return job
 }

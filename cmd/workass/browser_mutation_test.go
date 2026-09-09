@@ -109,10 +109,8 @@ func TestBrowserReadReleasesActorLockDuringShellHTTP(t *testing.T) {
 			close(release)
 		}
 	}()
-	handler, ok := newBrowserStatelessMCPHandler(harness.manager, controlFile, harness.runtime).(*statelessMCPHandler)
-	if !ok {
-		t.Fatal("browser stateless MCP handler has unexpected concrete type")
-	}
+	handler := newWorkassToolHandler(harness.manager, nil, controlFile, harness.runtime)
+	handler.kind = browserToolKind
 	handler.browserClient = &http.Client{Transport: browserRoundTripFunc(func(*http.Request) (*http.Response, error) {
 		close(started)
 		<-release

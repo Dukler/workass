@@ -67,11 +67,11 @@ func agentMCPTools() []map[string]any {
 			"expected_target_version":  str("Exact targetVersion returned by workass_get_update_status."),
 			"authorization":            str("Exact text: update <machine_id> from <expected_current_version> to <expected_target_version>"),
 		}, "machine_id", "expected_current_version", "expected_target_version", "authorization"), false, true, true, true),
-		tool("workass_read_chat", "Read a byte-bounded canonical transcript and current controls for one exact local or mounted remote Workass chat without focusing it. Event-heavy reads preserve the newest complete event suffix and report eventCount, includedEventCount, and eventsTruncated instead of failing the MCP transport.", object(map[string]any{
+		tool("workass_read_chat", "Read a byte-bounded canonical transcript and current controls for one exact local or mounted remote Workass chat without focusing it. Event-heavy reads preserve the newest complete event suffix and report eventCount, includedEventCount, and eventsTruncated instead of failing the tool transport.", object(map[string]any{
 			"tab_id":         str("Tab id from workass_list_chats."),
 			"chat_id":        str("Exact conversation id paired with tab_id by workass_list_chats."),
 			"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Newest messages to return; defaults to 40."},
-			"include_events": boolean("Include persisted tool/plan event records; false by default. Oversized event history is explicitly tail-truncated to the MCP response budget."),
+			"include_events": boolean("Include persisted tool/plan event records; false by default. Oversized event history is explicitly tail-truncated to the tool response budget."),
 		}, "tab_id", "chat_id"), true, false, true, false),
 		tool("workass_create_chat", "Create a durable Workass chat. Selection and cwd inherit the calling chat unless explicitly supplied and validated against the live catalog. Does not focus the UI unless focus=true.", mutationObject(map[string]any{
 			"title":             str("Chat title; defaults to Nuevo chat."),
@@ -196,7 +196,7 @@ func agentMCPTools() []map[string]any {
 func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options agentMCPOptions, control *agentControlHandler) (any, error) {
 	method := ""
 	params := copyAnyMap(call.Arguments)
-	operationID, operationErr := requiredStatelessMCPOperationID(agentMCPKind, call)
+	operationID, operationErr := requiredToolOperationID(agentToolKind, call)
 	if operationErr != nil {
 		return agentMCPErrorResult(operationErr.Error()), nil
 	}
@@ -204,7 +204,7 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		params["operation_id"] = string(operationID)
 	}
 	if _, exists := params["operationId"]; exists {
-		return agentMCPErrorResult("MCP uses operation_id; operationId is not accepted"), nil
+		return agentMCPErrorResult("Workass tools use operation_id; operationId is not accepted"), nil
 	}
 	switch call.Name {
 	case "workass_list_chats":
@@ -240,7 +240,7 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		params["prompt"] = params["task"]
 		delete(params, "task")
 		if _, exists := params["permission_mode"]; exists {
-			return agentMCPErrorResult("MCP uses mode_id; permission_mode is not accepted"), nil
+			return agentMCPErrorResult("Workass tools use mode_id; permission_mode is not accepted"), nil
 		}
 	case "workass_wait_subagents":
 		method = "agent.wait_many"

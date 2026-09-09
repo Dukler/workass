@@ -929,14 +929,14 @@ func TestPhaseCStatelessMCPOperationManifest(t *testing.T) {
 		"workass_browser_batch": {}, "workass_browser_history": {},
 	}
 
-	check := func(kind statelessMCPKind, tools []map[string]any, expected map[string]struct{}) {
+	check := func(kind toolKind, tools []map[string]any, expected map[string]struct{}) {
 		t.Helper()
 		seen := make(map[string]struct{}, len(tools))
 		for _, tool := range tools {
 			name := toString(tool["name"])
 			seen[name] = struct{}{}
 			_, mutates := expected[name]
-			if statelessMCPToolMutates(kind, name) != mutates {
+			if workassToolMutates(kind, name) != mutates {
 				t.Errorf("%s tool %s disagrees with the mutation manifest", kind, name)
 			}
 			schema := mapFromAnyMain(tool["inputSchema"])
@@ -964,8 +964,8 @@ func TestPhaseCStatelessMCPOperationManifest(t *testing.T) {
 			}
 		}
 	}
-	check(agentMCPKind, agentMCPTools(), agentMutations)
-	check(browserMCPKind, browserMCPTools(), browserMutations)
+	check(agentToolKind, agentMCPTools(), agentMutations)
+	check(browserToolKind, browserMCPTools(), browserMutations)
 
 	statelessSource, err := os.ReadFile(filepath.Join(phaseCRepositoryRoot(t), "cmd", "workass", "stateless_mcp.go"))
 	if err != nil {

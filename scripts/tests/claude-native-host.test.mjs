@@ -126,7 +126,7 @@ test('official Claude SDK host provides session, streaming, steering, and permis
   await peer.waitFor((message) => message.id === 4);
 });
 
-test('native Claude host maps Workass MCP through the CA-aware stdio bridge', async (t) => {
+test('native Claude host preserves external MCP stdio configuration', async (t) => {
   const peer = startHost({ WORKASS_CLAUDE_FIXTURE_REQUIRE_STDIO_MCP: '1' });
   t.after(() => peer.child.kill('SIGKILL'));
 
@@ -135,10 +135,10 @@ test('native Claude host maps Workass MCP through the CA-aware stdio bridge', as
   peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: {
     cwd: repoRoot,
     mcpServers: [{
-      name: 'workass-browser', command: '/fixture/workass-daemon', args: ['mcp-stdio'],
+      name: 'fixture-browser', command: '/fixture/external-tool-server', args: ['serve-external-mcp'],
       env: [
-        { name: 'WORKASS_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
-        { name: 'WORKASS_MCP_ENDPOINT', value: 'https://mcp.localhost:8788/workass/mcp/browser' },
+        { name: 'FIXTURE_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
+        { name: 'FIXTURE_MCP_ENDPOINT', value: 'https://external.invalid/mcp' },
       ],
     }],
   } });

@@ -98,18 +98,12 @@ type Options struct {
 	// unfiltered for package/test callers; the production binary always passes
 	// "prod", while isolated development passes "dev" or "test".
 	RuntimeProfile string
-	// WorkassMCPBaseURL is the daemon-owned HTTPS origin that serves the
-	// stateless 2026-07-28 Workass MCP endpoints.
-	WorkassMCPBaseURL string
-	// WorkassMCPCACertFile is the public certificate providers add to their TLS
-	// trust store for the daemon's self-signed, pinned Workass identity. It is
-	// never the private key and verification is never disabled.
-	WorkassMCPCACertFile string
-	// WorkassMCPStdioCommand is the absolute daemon executable used to expose
-	// those same endpoints to ACP agents that negotiate MCP over stdio. ACP
-	// requires every agent to support stdio; HTTP remains capability-gated.
-	WorkassMCPStdioCommand string
-	LocalModelEndpoints    []string
+	// Workass tools are called by the provider's native shell through the
+	// packaged CLI. Only that CLI trusts this public daemon certificate.
+	WorkassToolsOrigin  string
+	WorkassToolsCAFile  string
+	WorkassToolsCommand string
+	LocalModelEndpoints []string
 	// OMLXSettingsFile overrides the provider-owned oMLX settings location.
 	// Production leaves it empty and follows oMLX's own base-path resolution;
 	// tests use an isolated file. Workass reads the API key only at probe/launch
@@ -130,7 +124,7 @@ type Options struct {
 	EngineMaxRSSKB                 int
 	SpareSessions                  int
 	// DeferProviderStartup keeps provider-owned session work, including spare
-	// prewarming, stopped until the daemon has published its MCP listener.
+	// prewarming, stopped until the daemon has published its tool listener.
 	// Normal embedders retain the historical eager behavior.
 	DeferProviderStartup         bool
 	SpareTTL                     time.Duration

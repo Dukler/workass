@@ -37,7 +37,7 @@ func TestAgentControlIsInProcessAndCreatesNoLegacyDescriptor(t *testing.T) {
 
 func TestAgentControlRejectsOutOfRangeWaitTimeout(t *testing.T) {
 	handler := &agentControlHandler{manager: acp.NewManager(acp.Options{})}
-	request := httptest.NewRequest(http.MethodPost, agentMCPPath, nil)
+	request := httptest.NewRequest(http.MethodPost, toolsPath, nil)
 	for _, timeoutMS := range []int{999, 3600001} {
 		_, err := handler.call(request, agentControlRequest{
 			Method: "agent.wait",
@@ -81,7 +81,7 @@ func TestAgentControlCreatedChatSurvivesStaleSessionSaveBeforeSend(t *testing.T)
 		t.Fatalf("new owner session: %v", err)
 	}
 	handler := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime)}
-	request := httptest.NewRequest(http.MethodPost, agentMCPPath, nil)
+	request := httptest.NewRequest(http.MethodPost, toolsPath, nil)
 	ownerParams := map[string]any{"owner_key": "control-owner", "parent_chat_id": "control-parent-chat", "parent_tab_id": "control-parent-tab"}
 	createdRaw, err := handler.call(request, agentControlRequest{
 		Method: "chat.create",
@@ -152,7 +152,7 @@ func TestAgentControlTurnlessSpawnNeverUsesLegacySessionMirrorAsOwner(t *testing
 	if err != nil {
 		t.Fatalf("new actor-owned agent control: %v", err)
 	}
-	result, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
+	result, err := handler.call(httptest.NewRequest(http.MethodPost, toolsPath, nil), agentControlRequest{
 		Method: "agent.spawn",
 		Params: map[string]any{
 			"owner_key": "known-control-owner", "parent_chat_id": "control-chat", "parent_tab_id": "control-tab",
@@ -204,7 +204,7 @@ func TestT7AgentControlExternalSettleIsIdempotentAndOwnerValidated(t *testing.T)
 	}
 	waitProviderChatIdle(t, runtime, chatID, 5*time.Second)
 	handler := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime)}
-	request := httptest.NewRequest(http.MethodPost, agentMCPPath, nil)
+	request := httptest.NewRequest(http.MethodPost, toolsPath, nil)
 	output := externalControlTestPath(t, "control.output")
 	baseParams := map[string]any{"owner_key": ownerKey, "parent_chat_id": chatID, "parent_tab_id": tabID}
 	registeredRaw, err := handler.call(request, agentControlRequest{
@@ -299,7 +299,7 @@ func TestAgentControlCodexOwnerCanRegisterExternalHandoff(t *testing.T) {
 	waitProviderChatIdle(t, runtime, chatID, 5*time.Second)
 	handler := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime)}
 	output := externalControlTestPath(t, "codex-handoff.output")
-	registeredRaw, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
+	registeredRaw, err := handler.call(httptest.NewRequest(http.MethodPost, toolsPath, nil), agentControlRequest{
 		Method: "external.register",
 		Params: map[string]any{
 			"owner_key": ownerKey, "parent_chat_id": chatID, "parent_tab_id": tabID, "operation_id": "codex-external-register-op",
@@ -332,7 +332,7 @@ func TestAgentControlInvalidOwnerKeepsSubagentOwnershipError(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime)}
-	_, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
+	_, err := handler.call(httptest.NewRequest(http.MethodPost, toolsPath, nil), agentControlRequest{
 		Method: "agent.list",
 		Params: map[string]any{"owner_key": "missing", "parent_chat_id": "chat", "parent_tab_id": "tab"},
 	})
@@ -384,7 +384,7 @@ func TestAgentControlRejectsDeletedActorBeforeLiveManagerAuthorization(t *testin
 		ownerValidations++
 		return true
 	}
-	request := httptest.NewRequest(http.MethodPost, agentMCPPath, nil)
+	request := httptest.NewRequest(http.MethodPost, toolsPath, nil)
 	base := map[string]any{"owner_key": ownerKey, "parent_chat_id": chatID, "parent_tab_id": tabID}
 	if _, err := handler.call(request, agentControlRequest{Method: "chat.list", Params: copyAnyMap(base)}); err != nil {
 		t.Fatalf("live actor control read: %v", err)
@@ -468,7 +468,7 @@ func TestAgentControlHostsArtifactsOnlyFromTheCallingAgentWorkspace(t *testing.T
 		t.Fatal(err)
 	}
 	handler := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime), artifacts: registry}
-	result, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
+	result, err := handler.call(httptest.NewRequest(http.MethodPost, toolsPath, nil), agentControlRequest{
 		Method: "artifact.host",
 		Params: map[string]any{
 			"owner_key": "artifact-owner", "parent_chat_id": "artifact-chat", "parent_tab_id": "artifact-tab",
@@ -483,7 +483,7 @@ func TestAgentControlHostsArtifactsOnlyFromTheCallingAgentWorkspace(t *testing.T
 		hosted.ContentType != "application/pdf" || !strings.Contains(hosted.Markdown, hosted.URLPath) {
 		t.Fatalf("artifact.host result = %#v", result)
 	}
-	if _, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
+	if _, err := handler.call(httptest.NewRequest(http.MethodPost, toolsPath, nil), agentControlRequest{
 		Method: "html.host",
 		Params: map[string]any{
 			"owner_key": "artifact-owner", "parent_chat_id": "artifact-chat", "parent_tab_id": "artifact-tab",
@@ -496,7 +496,7 @@ func TestAgentControlHostsArtifactsOnlyFromTheCallingAgentWorkspace(t *testing.T
 	if err := os.WriteFile(changedSource, []byte("changed"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
+	if _, err := handler.call(httptest.NewRequest(http.MethodPost, toolsPath, nil), agentControlRequest{
 		Method: "artifact.host",
 		Params: map[string]any{
 			"owner_key": "artifact-owner", "parent_chat_id": "artifact-chat", "parent_tab_id": "artifact-tab",
@@ -515,7 +515,7 @@ func TestAgentControlHostsArtifactsOnlyFromTheCallingAgentWorkspace(t *testing.T
 	if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
+	if _, err := handler.call(httptest.NewRequest(http.MethodPost, toolsPath, nil), agentControlRequest{
 		Method: "artifact.host",
 		Params: map[string]any{
 			"owner_key": "artifact-owner", "parent_chat_id": "artifact-chat", "parent_tab_id": "artifact-tab",
@@ -566,7 +566,7 @@ func TestArtifactValidationFailureIsTerminalAndRetryDoesNotInspectSource(t *test
 			"operation_id": operationID, "source_path": "appears-later.pdf", "name": "Appears later",
 		}
 	}
-	if _, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
+	if _, err := handler.call(httptest.NewRequest(http.MethodPost, toolsPath, nil), agentControlRequest{
 		Method: "artifact.host", Params: params(),
 	}); err == nil || !strings.Contains(err.Error(), "artifact source is not readable") {
 		t.Fatalf("initial validation failure = %v", err)
@@ -574,7 +574,7 @@ func TestArtifactValidationFailureIsTerminalAndRetryDoesNotInspectSource(t *test
 	if err := os.WriteFile(filepath.Join(workspace, "appears-later.pdf"), []byte("now valid"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := handler.call(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), agentControlRequest{
+	if _, err := handler.call(httptest.NewRequest(http.MethodPost, toolsPath, nil), agentControlRequest{
 		Method: "artifact.host", Params: params(),
 	}); err == nil || err.Error() != "browser mutation was rejected" {
 		t.Fatalf("retry after source appeared = %v, want terminal rejection", err)
