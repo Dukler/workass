@@ -149,6 +149,12 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 		if err := projectActorChatWithHistoryWindow(projected, state, history, sessionProjectionMessageTail, window); err != nil {
 			return nil, fmt.Errorf("project actor-native chat %q: %w", state.ChatID, err)
 		}
+		messages, err := boundedActorHistory(anySlice(projected["messages"]), filepath.Dir(r.sessions.path))
+		if err != nil {
+			return nil, err
+		}
+		projected["messages"] = messages
+		projected["historyComplete"] = len(messages) == intValue(projected["messageCount"])
 		projectedChats = append(projectedChats, projected)
 	}
 	root["chats"] = projectedChats
@@ -251,6 +257,10 @@ func (r *providerChatRuntime) ProjectArchivePageBeforeByTab(tabID, beforeMessage
 		}
 		messages = append(messages, message)
 	}
+	messages, err = boundedActorHistory(messages, filepath.Dir(r.sessions.path))
+	if err != nil {
+		return nil, false, err
+	}
 	if err := rehydrateExternalSessionImages(messages, filepath.Dir(r.sessions.path)); err != nil {
 		return nil, false, err
 	}
@@ -283,6 +293,12 @@ func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHis
 		return nil, false, err
 	}
 	messages := anySlice(projected["messages"])
+	if history != actorHistoryFull {
+		messages, err = boundedActorHistory(messages, filepath.Dir(r.sessions.path))
+		if err != nil {
+			return nil, false, err
+		}
+	}
 	if err := rehydrateExternalSessionImages(messages, filepath.Dir(r.sessions.path)); err != nil {
 		return nil, false, err
 	}

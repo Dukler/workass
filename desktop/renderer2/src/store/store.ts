@@ -1336,6 +1336,42 @@ export class Store {
     }
   }
 
+  private async readFullHistoryPages(chatId: string): Promise<Msg[] | null> {
+    const pages: Msg[][] = [];
+    const seen = new Set<string>();
+    let beforeMessageId: string | undefined;
+    for (;;) {
+      const options = beforeMessageId
+        ? { beforeMessageId, limit: CHAT_MESSAGE_TAIL }
+        : { tail: CHAT_MESSAGE_TAIL };
+      const step = await this.guardedStep(
+        `actor history (${chatId})`, () => call('archiveLoad', chatId, options),
+      );
+      if (!step.ok || !Array.isArray(step.value)) return null;
+      const page = actorMessages(step.value as MirrorMsg[]);
+      if (page.length === 0) break;
+      // Older daemons return the complete archive even when options are
+      // supplied. Its exact boundary gives the remaining canonical prefix.
+      const boundary = beforeMessageId
+        ? page.findIndex((message) => message.id === beforeMessageId)
+        : -1;
+      const prefix = boundary >= 0 ? page.slice(0, boundary) : page;
+      if (beforeMessageId && boundary < 0 && prefix.length > CHAT_MESSAGE_TAIL) {
+        throw new Error('Actor history page exceeded its requested limit');
+      }
+      for (const message of prefix) {
+        if (seen.has(message.id)) throw new Error('Actor history pages overlap');
+        seen.add(message.id);
+      }
+      pages.push(prefix);
+      if (boundary >= 0) break;
+      beforeMessageId = prefix[0].id;
+      // A short page may be bounded by image bytes. Only the stable boundary
+      // reaching an empty prefix proves that the complete archive was read.
+    }
+    return pages.reverse().flat();
+  }
+
   private async ensureFullHistory(chatId: string): Promise<void> {
     if (!has('archiveLoad') || !chatId) return;
     const recent = this.recentHistoryLoads.get(chatId);
@@ -1353,21 +1389,15 @@ export class Store {
     const inflight = this.fullHistoryLoads.get(chatId);
     if (inflight) return inflight;
     const load = (async () => {
-      let projected: unknown;
+      let messages: Msg[] | null;
       try {
-        const step = await this.guardedStep(`actor history (${chatId})`, () => call('archiveLoad', chatId));
-        projected = step.ok ? step.value : undefined;
-        if (!step.ok) return;
-      } catch { return; }
-      const chat = this.chat(chatId);
-      if (!chat || chat.chatId !== durableChatId || !Array.isArray(projected)) return;
-      let messages: Msg[];
-      try {
-        messages = actorMessages(projected as MirrorMsg[]);
+        messages = await this.readFullHistoryPages(chatId);
       } catch (error) {
         console.warn(`[store] actor history rejected (${chatId})`, error);
         return;
       }
+      const chat = this.chat(chatId);
+      if (!chat || chat.chatId !== durableChatId || messages === null) return;
       const restored = {
         ...chat,
         messages,
