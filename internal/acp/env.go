@@ -508,7 +508,10 @@ func (m *Manager) beginChatTurnCheckpoint(ctx context.Context, job *Job) {
 		}
 		currentRepos = append(currentRepos, current)
 		ref := checkpointRef(chatID, turnSeq)
-		commit, err := createWorktreeCheckpointCommit(ctx, repo.path, checkpointCommitMessage(chatID, turnSeq, job.ID))
+		// The baseline already captured the complete worktree. Committing a
+		// second snapshot both delays dispatch and can give rewind a different
+		// tree from the baseline used to attribute the turn's changes.
+		commit, err := createCheckpointCommitFromTree(ctx, repo.path, current.tree, checkpointCommitMessage(chatID, turnSeq, job.ID))
 		pending := pendingCheckpointRepo{name: current.name, path: current.path, branch: current.branch, ref: ref, commit: commit}
 		if err != nil {
 			pending.err = err.Error()

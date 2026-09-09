@@ -588,6 +588,13 @@ func createWorktreeCheckpointCommit(ctx context.Context, repo, message string) (
 	if err != nil {
 		return "", err
 	}
+	return createCheckpointCommitFromTree(ctx, repo, tree, message)
+}
+
+func createCheckpointCommitFromTree(ctx context.Context, repo, tree, message string) (string, error) {
+	if tree == "" {
+		return "", errors.New("checkpoint baseline tree is unavailable")
+	}
 	args := []string{"commit-tree", tree}
 	if head, ok := gitHead(ctx, repo); ok {
 		args = append(args, "-p", head)
