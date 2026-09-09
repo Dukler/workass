@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -196,6 +197,19 @@ func TestChatControlMutationPreflightRejectsBeforeManagerSideEffects(t *testing.
 }
 
 func TestChatControlInvalidOperationCannotCancelOrDeleteRunningTurn(t *testing.T) {
+	// Provider acknowledgements may advance the whole actor revision while a
+	// readback is in flight. Compare the cancellation state and exact foreground
+	// instead; unrelated provider observations are allowed to progress.
+	cancellationState := func(state chat.State) string {
+		var effects []chat.OutboxEntry
+		for _, entry := range state.Outbox {
+			if entry.Kind == chat.EffectCancelTurn {
+				effects = append(effects, entry)
+			}
+		}
+		value, _ := json.Marshal([]any{state.Deleted, state.DeletionOperationID, state.PendingCancel, state.CancelMutationReceipts, effects})
+		return string(value)
+	}
 	root := repoRoot(t)
 	stateDir := t.TempDir()
 	manager := acp.NewManager(acp.Options{
@@ -203,7 +217,10 @@ func TestChatControlInvalidOperationCannotCancelOrDeleteRunningTurn(t *testing.T
 		Provider: acp.ProviderConfig{
 			ID: "mock", Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")},
 			CWD: root, Enabled: true, Label: "Workass Mock ACP",
-			Env: map[string]string{"WORKASS_MOCK_ACP_DELAY_MS": "1000"},
+			// A timed stream may advance the actor revision during the receipt
+			// assertions. Hold an acknowledged provider turn without emitting
+			// unrelated updates until the test explicitly cancels it.
+			Env: map[string]string{"WORKASS_MOCK_ACP_STABLE_TURN_INPUT": "1"},
 		},
 		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
 	})
@@ -226,7 +243,7 @@ func TestChatControlInvalidOperationCannotCancelOrDeleteRunningTurn(t *testing.T
 	if _, err := runtime.Start(context.Background(), map[string]any{
 		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "sessionId": info.SessionID,
 		"operationId": "control-running-turn", "userMessageId": "control-running-user",
-		"assistantMessageId": "control-running-assistant", "prompt": "[mock:slow] remain active",
+		"assistantMessageId": "control-running-assistant", "prompt": "[mock:hold-until-steer] remain active",
 	}, "agent"); err != nil {
 		t.Fatalf("start running provider turn: %v", err)
 	}
@@ -235,7 +252,7 @@ func TestChatControlInvalidOperationCannotCancelOrDeleteRunningTurn(t *testing.T
 	for time.Now().Before(deadline) {
 		state, ok := runtime.Snapshot(chatID)
 		if ok && state.Foreground != nil && strings.TrimSpace(state.Foreground.Turn.NativeID) != "" &&
-			(state.Foreground.Status == chat.ForegroundDispatching || state.Foreground.Status == chat.ForegroundRunning) {
+			(state.Foreground.Status == chat.ForegroundRunning) {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -321,7 +338,7 @@ func TestChatControlInvalidOperationCannotCancelOrDeleteRunningTurn(t *testing.T
 	if _, done := cancelResultFromReceipt(cancelReceipt); !done {
 		t.Fatalf("cancel receipt is not terminal after idle boundary: %#v", cancelReceipt)
 	}
-	revisionBeforeRetry := state.Revision
+	cancelStateBeforeRetry := cancellationState(state)
 	retryCancel, err := coordinator.cancel(map[string]any{
 		"operation_id": cancelOperationID, "tab_id": tabID, "chat_id": chatID,
 	})
@@ -333,8 +350,8 @@ func TestChatControlInvalidOperationCannotCancelOrDeleteRunningTurn(t *testing.T
 		t.Fatalf("lost-reply cancel receipt = %#v", retryCancel)
 	}
 	state, _ = runtime.Snapshot(chatID)
-	if state.Revision != revisionBeforeRetry {
-		t.Fatalf("lost-reply receipt readback mutated actor revision: before=%d after=%d", revisionBeforeRetry, state.Revision)
+	if cancellationState(state) != cancelStateBeforeRetry {
+		t.Fatal("lost-reply receipt readback mutated cancellation state")
 	}
 
 	const idleCancelOperationID = "control-cancel-idle-receipt"
@@ -352,7 +369,7 @@ func TestChatControlInvalidOperationCannotCancelOrDeleteRunningTurn(t *testing.T
 	if _, err := runtime.Start(context.Background(), map[string]any{
 		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "sessionId": info.SessionID,
 		"operationId": "control-running-turn-again", "userMessageId": "control-running-user-again",
-		"assistantMessageId": "control-running-assistant-again", "prompt": "[mock:slow] remain active again",
+		"assistantMessageId": "control-running-assistant-again", "prompt": "[mock:hold-until-steer] remain active again",
 	}, "agent"); err != nil {
 		t.Fatalf("start second provider turn: %v", err)
 	}
@@ -360,7 +377,7 @@ func TestChatControlInvalidOperationCannotCancelOrDeleteRunningTurn(t *testing.T
 	for time.Now().Before(deadline) {
 		state, ok = runtime.Snapshot(chatID)
 		if ok && state.Foreground != nil && strings.TrimSpace(state.Foreground.Turn.NativeID) != "" &&
-			(state.Foreground.Status == chat.ForegroundDispatching || state.Foreground.Status == chat.ForegroundRunning) {
+			(state.Foreground.Status == chat.ForegroundRunning) {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -373,7 +390,7 @@ func TestChatControlInvalidOperationCannotCancelOrDeleteRunningTurn(t *testing.T
 	if secondJobID == jobID {
 		t.Fatalf("provider reused native job id across turns: %s", secondJobID)
 	}
-	revisionBeforeIdleRetry := state.Revision
+	cancelStateBeforeIdleRetry := cancellationState(state)
 	idleRetry, err := coordinator.cancel(map[string]any{
 		"operation_id": idleCancelOperationID, "tab_id": tabID, "chat_id": chatID,
 	})
@@ -381,18 +398,18 @@ func TestChatControlInvalidOperationCannotCancelOrDeleteRunningTurn(t *testing.T
 		t.Fatalf("lost-reply idle cancel receipt = %#v, err=%v", idleRetry, err)
 	}
 	state, ok = runtime.Snapshot(chatID)
-	if !ok || state.Revision != revisionBeforeIdleRetry || state.Foreground == nil || state.Foreground.Turn.NativeID != secondJobID {
-		t.Fatalf("lost-reply idle receipt touched later foreground: %#v", state)
+	if !ok || cancellationState(state) != cancelStateBeforeIdleRetry || state.Foreground == nil || state.Foreground.Turn.NativeID != secondJobID {
+		t.Fatalf("lost-reply idle receipt touched cancellation state or later foreground: %#v", state.Foreground)
 	}
-	revisionBeforeChangedOperation := state.Revision
+	cancelStateBeforeChangedOperation := cancellationState(state)
 	if _, err := coordinator.cancel(map[string]any{
 		"operation_id": cancelOperationID, "tab_id": tabID, "chat_id": chatID,
 	}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "different foreground turn") {
 		t.Fatalf("changed-operation cancel error = %v", err)
 	}
 	state, ok = runtime.Snapshot(chatID)
-	if !ok || state.Revision != revisionBeforeChangedOperation || state.Foreground == nil || state.Foreground.Turn.NativeID != secondJobID {
-		t.Fatalf("changed-operation cancel touched current turn: %#v", state)
+	if !ok || cancellationState(state) != cancelStateBeforeChangedOperation || state.Foreground == nil || state.Foreground.Turn.NativeID != secondJobID {
+		t.Fatalf("changed-operation cancel touched cancellation state or current turn: %#v", state.Foreground)
 	}
 	secondCancel, err := coordinator.cancel(map[string]any{
 		"operation_id": "control-cancel-second", "tab_id": tabID, "chat_id": chatID,
