@@ -64,6 +64,12 @@ func main() {
 		}
 		return
 	}
+	// Removed subcommands (including the former MCP stdio server) must not
+	// fall through Go's flag parser and accidentally start a second daemon.
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		fmt.Fprintln(os.Stderr, "unknown Workass command; use tools --help or fleet --help")
+		os.Exit(2)
+	}
 	prod := flag.Bool("prod", prodModeDefault(), "use production daemon defaults where applicable; on Windows this defaults --port 80 and --bind lan")
 	port := flag.Int("port", 8788, "HTTP/WebSocket port")
 	bind := flag.String("bind", "localhost", "bind mode: localhost or lan")
