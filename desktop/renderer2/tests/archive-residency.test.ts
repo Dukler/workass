@@ -86,7 +86,10 @@ test('switching chats keeps a bounded recent tail and loads the full ledger only
     assert.equal(first.messages.length, 85);
     assert.equal(first.historyComplete, true);
     assert.equal(subject.fullHistoriesLoaded.has(first.id), true);
-    assert.deepEqual(archiveCalls, [{ tabId: first.id, options: undefined }]);
+    assert.deepEqual(archiveCalls, [
+      { tabId: first.id, options: { tail: 60 } },
+      { tabId: first.id, options: { beforeMessageId: 'message-0', limit: 60 } },
+    ]);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
@@ -133,6 +136,70 @@ test('older history pages prepend by stable boundary until the canonical transcr
       { tabId: target.id, options: { beforeMessageId: 'message-45', limit: 40 } },
       { tabId: target.id, options: { beforeMessageId: 'message-5', limit: 40 } },
     ]);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('short image-rich pages keep advancing without marking history complete early', async () => {
+  const complete = messages(9);
+  const previousWindow = (globalThis as any).window;
+  const boundaries: string[] = [];
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async (_tabId: string, options: { beforeMessageId: string; limit: number }) => {
+        boundaries.push(options.beforeMessageId);
+        const boundary = complete.findIndex((message) => message.id === options.beforeMessageId);
+        return complete.slice(Math.max(0, boundary - 2), boundary);
+      },
+    },
+  };
+  try {
+    const subject = new StoreCtor();
+    const target = chat('tab-short-pages', complete.slice(-1));
+    target.messageCount = complete.length;
+    target.historyComplete = false;
+    subject.state.chats = [target];
+    subject.state.activeId = target.id;
+    for (let page = 0; page < 4; page += 1) {
+      assert.equal(await subject.loadOlderHistory(target.id, 40), true);
+      assert.equal(target.historyComplete, page === 3);
+    }
+    assert.deepEqual(boundaries, ['message-8', 'message-6', 'message-4', 'message-2']);
+    assert.deepEqual(target.messages.map((message) => message.id), complete.map((message) => message.id));
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('full-history search assembles every short page and commits only after reaching the start', async () => {
+  const complete = messages(9);
+  const previousWindow = (globalThis as any).window;
+  const boundaries: Array<string | undefined> = [];
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async (_tabId: string, options: { beforeMessageId?: string; tail?: number }) => {
+        assert.ok(options, 'full history must not request one unbounded reply');
+        boundaries.push(options.beforeMessageId);
+        const end = options.beforeMessageId
+          ? complete.findIndex((message) => message.id === options.beforeMessageId)
+          : complete.length;
+        return complete.slice(Math.max(0, end - 2), end);
+      },
+    },
+  };
+  try {
+    const subject = new StoreCtor();
+    const target = chat('tab-full-short-pages', complete.slice(-1));
+    target.messageCount = complete.length;
+    target.historyComplete = false;
+    subject.state.chats = [target];
+    subject.state.activeId = target.id;
+    assert.equal(await subject.loadFullHistory(target.id), true);
+    assert.deepEqual(boundaries, [undefined, 'message-7', 'message-5', 'message-3', 'message-1', 'message-0']);
+    assert.deepEqual(target.messages.map((message) => message.id), complete.map((message) => message.id));
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;

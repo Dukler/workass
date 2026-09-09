@@ -485,8 +485,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     setHistoryLoading(true);
     const residentBefore = total;
     try {
-      const recentTarget = Math.min(CHAT_MESSAGE_TAIL, knownTotal);
-      const loaded = residentBefore < recentTarget
+      const loaded = residentBefore === 0
         ? await store.loadRecentHistory(chat.id, CHAT_MESSAGE_TAIL)
         : await store.loadOlderHistory(chat.id, HISTORY_PAGE);
       const live = store.chat(chat.id);
