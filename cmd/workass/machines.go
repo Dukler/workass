@@ -16,7 +16,8 @@ import (
 // first, per E1: the book is provable from a CLI before a pixel exists.
 const machineChannelCount = 5
 
-// machineRefreshInterval matches discovery, so a machine that dies is marked
+// machineRefreshInterval stays fast even when full discovery sweeps back off,
+// so a machine that dies is marked
 // unreachable within one interval rather than one of two competing clocks.
 const machineRefreshInterval = machinebook.DefaultInterval
 

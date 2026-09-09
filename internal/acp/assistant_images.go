@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const maxAssistantImageFileBytes int64 = 6 * 1024 * 1024
@@ -28,6 +30,13 @@ func ResolveAssistantMarkdownImages(markdown, cwd string) []any {
 	if cwd == "" || !strings.Contains(markdown, "![") {
 		return nil
 	}
+	return resolveAssistantImageRefs(assistantMarkdownImageRefs(markdown), cwd, maxToolResultImages, maxToolResultTotalBytes)
+}
+
+func resolveAssistantImageRefs(refs []assistantMarkdownImageRef, cwd string, imageLimit, byteLimit int) []any {
+	if len(refs) == 0 || strings.TrimSpace(cwd) == "" || imageLimit <= 0 || byteLimit <= 0 {
+		return nil
+	}
 	root, err := filepath.Abs(cwd)
 	if err != nil {
 		return nil
@@ -40,8 +49,8 @@ func ResolveAssistantMarkdownImages(markdown, cwd string) []any {
 	images := make([]any, 0, 2)
 	seen := make(map[string]struct{})
 	totalEncoded := 0
-	for _, ref := range assistantMarkdownImageRefs(markdown) {
-		if len(images) >= maxToolResultImages || totalEncoded >= maxToolResultTotalBytes {
+	for _, ref := range refs {
+		if len(images) >= imageLimit || totalEncoded >= byteLimit {
 			break
 		}
 		if _, duplicate := seen[ref.source]; duplicate {
@@ -71,7 +80,7 @@ func ResolveAssistantMarkdownImages(markdown, cwd string) []any {
 			continue
 		}
 		encoded := base64.StdEncoding.EncodeToString(data)
-		if len(encoded) > maxToolResultImageBytes || totalEncoded+len(encoded) > maxToolResultTotalBytes {
+		if len(encoded) > maxToolResultImageBytes || totalEncoded+len(encoded) > byteLimit {
 			continue
 		}
 		name := compactText(ref.name, 160)
@@ -218,4 +227,158 @@ func assistantImageFilename(root, source string) (string, bool) {
 		return "", false
 	}
 	return resolved, true
+}
+
+// resolveAssistantMarkdownImages attempts each completed source once during
+// streaming. Terminal sealing retries unavailable files, but never rereads an
+// image already captured into the job's durable media collection.
+func (j *Job) resolveAssistantMarkdownImages(refs []assistantMarkdownImageRef, terminal bool) []any {
+	if j == nil || len(refs) == 0 {
+		return nil
+	}
+	j.assistantImagesMu.Lock()
+	if j.assistantImageAttempts == nil {
+		j.assistantImageAttempts = make(map[string]struct{})
+	}
+	seen := make(map[string]struct{}, len(j.assistantImages))
+	remainingImages, remainingBytes := maxToolResultImages-len(j.assistantImages), maxToolResultTotalBytes
+	for _, raw := range j.assistantImages {
+		img := mapFromAny(raw)
+		seen[asString(img["source"])] = struct{}{}
+		remainingBytes -= len(asString(img["data"]))
+	}
+	pending := make([]assistantMarkdownImageRef, 0, len(refs))
+	for _, ref := range refs {
+		if _, imported := seen[ref.source]; imported {
+			continue
+		}
+		if _, attempted := j.assistantImageAttempts[ref.source]; attempted && !terminal {
+			continue
+		}
+		seen[ref.source] = struct{}{}
+		j.assistantImageAttempts[ref.source] = struct{}{}
+		pending = append(pending, ref)
+	}
+	j.assistantImagesMu.Unlock()
+	return resolveAssistantImageRefs(pending, j.CWD, remainingImages, remainingBytes)
+}
+
+// assistantMarkdownScanner tracks line/fence/inline-code context and a single
+// unfinished image token across transport chunks. No completed prose is retained
+// or rescanned. The existing parser interprets each completed token once.
+type assistantMarkdownScanner struct {
+	inFence       bool
+	fenceChar     byte
+	skipLine      bool
+	prefixLen     int
+	prefixChar    byte
+	prefixUTF8    [utf8.UTFMax]byte
+	prefixUTF8Len int
+	inlineCode    bool
+	previous      byte
+	stage         byte // 0 outside, 1 label, 2 first target byte, 3 plain target, 4 <target>
+	candidate     strings.Builder
+}
+
+func (s *assistantMarkdownScanner) feed(text string) []assistantMarkdownImageRef {
+	var refs []assistantMarkdownImageRef
+	for i := 0; i < len(text); i++ {
+		if s.prefixLen == 3 && s.stage == 0 {
+			// Ordinary prose and fenced bodies need no byte-by-byte parser work.
+			// Retain the preceding byte for escaped-backtick/split-token handling.
+			next := strings.IndexAny(text[i:], "\n`![")
+			if s.skipLine || s.inFence {
+				next = strings.IndexByte(text[i:], '\n')
+			}
+			if next < 0 {
+				s.previous = text[len(text)-1]
+				break
+			}
+			if next > 0 {
+				s.previous = text[i+next-1]
+				i += next
+			}
+		}
+		c := text[i]
+		if c == '\n' {
+			s.skipLine = s.inFence
+			s.prefixLen, s.prefixChar, s.previous, s.stage = 0, 0, 0, 0
+			s.prefixUTF8Len = 0
+			s.inlineCode = false
+			s.candidate.Reset()
+			continue
+		}
+		// A fence can arrive one byte at a time, including its indentation.
+		if s.prefixLen < 3 {
+			// Match the whole-answer parser's Unicode TrimSpace even when a
+			// transport chunk splits an indented fence's whitespace rune.
+			if s.prefixLen == 0 && (c >= utf8.RuneSelf || s.prefixUTF8Len > 0) {
+				s.prefixUTF8[s.prefixUTF8Len] = c
+				s.prefixUTF8Len++
+				bytes := s.prefixUTF8[:s.prefixUTF8Len]
+				if !utf8.FullRune(bytes) {
+					continue
+				}
+				r, size := utf8.DecodeRune(bytes)
+				s.prefixUTF8Len = 0
+				if unicode.IsSpace(r) {
+					continue
+				}
+				s.prefixLen = 3
+				if size != 1 || c >= utf8.RuneSelf {
+					s.previous = c
+					continue
+				}
+			}
+			if s.prefixLen == 0 && (c == ' ' || c == '\t' || c == '\r' || c == '\v' || c == '\f') {
+				continue
+			}
+			if s.prefixLen == 0 && (c == '`' || c == '~') {
+				s.prefixChar = c
+			}
+			if s.prefixChar != 0 && c == s.prefixChar {
+				s.prefixLen++
+				if s.prefixLen == 3 {
+					if !s.inFence {
+						s.inFence, s.fenceChar = true, c
+					} else if s.fenceChar == c {
+						s.inFence, s.fenceChar = false, 0
+					}
+					s.skipLine = true
+				}
+			} else {
+				s.prefixLen = 3
+			}
+		}
+		if s.skipLine || s.inFence {
+			continue
+		}
+		if s.stage != 0 {
+			s.candidate.WriteByte(c)
+			switch s.stage {
+			case 1:
+				if s.previous == ']' && c == '(' {
+					s.stage = 2
+				}
+			case 2:
+				s.stage = 3
+				if c == '<' {
+					s.stage = 4
+				}
+			}
+			if c == ')' && (s.stage == 3 || s.stage == 4 && s.previous == '>') {
+				refs = append(refs, assistantMarkdownImageRefs(s.candidate.String())...)
+				s.candidate.Reset()
+				s.stage = 0
+			}
+		} else if !s.inlineCode && s.previous == '!' && c == '[' {
+			s.candidate.WriteString("![")
+			s.stage = 1
+		}
+		if c == '`' && s.previous != '\\' {
+			s.inlineCode = !s.inlineCode
+		}
+		s.previous = c
+	}
+	return refs
 }

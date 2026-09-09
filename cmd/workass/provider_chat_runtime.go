@@ -2802,11 +2802,11 @@ func (r *providerChatRuntime) reconcileObligations(daemonBoot bool) error {
 		if err != nil {
 			return err
 		}
-		state := actor.engine.Snapshot()
+		state := actor.engine.ReadActivitySnapshot()
 		if state.Deleted || state.Obligation == nil {
 			continue
 		}
-		evidence := r.manager.ChatObligationEvidence(state.Presentation.TabID, state.ChatID)
+		evidence := r.manager.ChatObligationEvidence(state.TabID, state.ChatID)
 		actor.mu.Lock()
 		err = actor.engine.Apply(chat.ReconcileObligation{
 			ObservedAt: observedAt, LiveEvidence: evidence.Live,

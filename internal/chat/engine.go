@@ -70,6 +70,18 @@ func (e *Engine) Apply(command Command) error {
 func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if observation, ok := command.(ReconcileObligation); ok && prepare == nil && !e.state.Deleted {
+		// A periodic observation has no operation receipt to commit. Run the
+		// obligation-only reducer on an isolated status copy first: unchanged
+		// evidence must not clone, validate or rewrite the entire transcript.
+		probe := State{Foreground: e.state.Foreground, Obligation: e.state.Obligation.Clone()}
+		if err := reduceReconcileObligation(&probe, observation); err != nil {
+			return err
+		}
+		if probe.Obligation == nil || *probe.Obligation == *e.state.Obligation {
+			return nil
+		}
+	}
 	providerStore, hasProviderStore := e.store.(providerEventStateStore)
 	providerEvent, isProviderEvent := command.(ProviderEventReceived)
 	useProviderEventJournal := prepare == nil && hasProviderStore && isProviderEvent && journalableProviderEvent(providerEvent.Event.Kind)

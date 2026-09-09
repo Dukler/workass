@@ -645,15 +645,22 @@ func (l *nativeSessionLedger) updateControls(tabID, chatID, providerID, sessionI
 		return
 	}
 	key, binding := matches[0].key, matches[0].binding
+	previous := binding
 	if strings.TrimSpace(modelID) != "" {
 		binding.ModelID = strings.TrimSpace(modelID)
 	}
 	if strings.TrimSpace(modeID) != "" {
 		binding.ModeID = strings.TrimSpace(modeID)
 	}
+	if binding.ModelID == previous.ModelID && binding.ModeID == previous.ModeID {
+		return
+	}
 	binding.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	l.bindings[key] = binding
-	_ = l.writeLocked()
+	if err := l.writeLocked(); err != nil {
+		// Leave the durable selection eligible for the next reconciliation.
+		l.bindings[key] = previous
+	}
 }
 
 // updateAttachment changes only disposable routing metadata for an immutable

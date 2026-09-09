@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -234,5 +235,78 @@ func TestMockNaturalAssistantImageCompletesAsDurableJobMedia(t *testing.T) {
 	source := asString(image["source"])
 	if source == "" || filepath.Dir(source) != workspace {
 		t.Fatalf("terminal mock assistant source escaped workspace: %q", source)
+	}
+}
+
+func TestIncrementalAssistantImageParserMatchesWholeAnswerAcrossSplits(t *testing.T) {
+	fixtures := []string{
+		"prose ![First](a.png) then ![Second](<b c.png>) final",
+		"```markdown\n![hidden](x.png)\n```\n![shown](yes.png)",
+		"  ~~~\n![hidden](x.png)\n  ~~~\n![shown](yes.png)",
+		"\u00a0```\n![hidden](x.png)\n\u2003```\n![shown](yes.png)",
+		"`![hidden](x.png)` and ![shown](yes.png)",
+		"![unfinished\nnext ![complete](y.png)",
+		"![empty]() and ![unclosed](<bad\n![good](z.png)",
+		"![label ] x]( path.png ) and ![other](<x)y.png>)",
+		"\\` literal ![visible](a.png)",
+	}
+	for _, source := range fixtures {
+		want := assistantMarkdownImageRefs(source)
+		for size := 1; size <= len(source); size++ {
+			var scanner assistantMarkdownScanner
+			var got []assistantMarkdownImageRef
+			for start := 0; start < len(source); start += size {
+				got = append(got, scanner.feed(source[start:min(start+size, len(source))])...)
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("chunk size %d: got %+v, want %+v for %q", size, got, want, source)
+			}
+		}
+	}
+}
+
+func TestAssistantImagesDoNotRereadImportedFilesAndRetryMissingAtTerminal(t *testing.T) {
+	cwd := t.TempDir()
+	path := writeAssistantImageFixture(t, filepath.Join(cwd, "first.png"))
+	job := &Job{CWD: cwd}
+	first := []assistantMarkdownImageRef{{name: "First", source: path}}
+	job.addAssistantImages(job.resolveAssistantMarkdownImages(first, false))
+	if len(job.assistantImagesSnapshot()) != 1 {
+		t.Fatal("initial image was not captured")
+	}
+	// Keep the file readable: an uncached resolver would return it again.
+	if got := job.resolveAssistantMarkdownImages(first, true); len(got) != 0 {
+		t.Fatal("terminal reread an imported source")
+	}
+	missing := filepath.Join(cwd, "later.png")
+	later := []assistantMarkdownImageRef{{name: "Later", source: missing}}
+	if got := job.resolveAssistantMarkdownImages(later, false); len(got) != 0 {
+		t.Fatal("missing image unexpectedly resolved")
+	}
+	writeAssistantImageFixture(t, missing)
+	if got := job.resolveAssistantMarkdownImages(later, false); len(got) != 0 {
+		t.Fatal("streaming retried an already attempted path")
+	}
+	if got := job.resolveAssistantMarkdownImages(later, true); len(got) != 1 {
+		t.Fatal("terminal did not retry a newly available file")
+	}
+}
+
+func TestIncompleteImageDoesNotRescanOutputOrResolveFilesPerChunk(t *testing.T) {
+	mgr := NewManager(Options{})
+	t.Cleanup(func() { mgr.Reset() })
+	bridge := &Bridge{manager: mgr, opts: Options{StdoutFlushInterval: time.Hour}}
+	job := &Job{ID: "incremental-image", CWD: t.TempDir()}
+	bridge.queueStdout(job, strings.Repeat("prefix ", 10000)+"![unfinished", "")
+	for i := 0; i < 1000; i++ {
+		bridge.queueStdout(job, "x", "")
+	}
+	bridge.flushJobBuffers(job)
+	stats := mapFromAny(mgr.Stats()["stream"])
+	if stats["markdownScanBytes"] != stats["chunkBytes"] {
+		t.Fatal("streaming rescanned bytes from earlier chunks")
+	}
+	if stats["imageResolves"] != uint64(0) {
+		t.Fatal("incomplete image triggered filesystem resolution")
 	}
 }

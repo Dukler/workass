@@ -1273,21 +1273,11 @@ func (b *Bridge) queueStdout(job *Job, text, phase string) {
 	}
 	b.recordStdoutChunk(len(text))
 	b.manager.jobMu.Lock()
-	priorEndedWithBang := strings.HasSuffix(job.output.String(), "!")
 	job.output.WriteString(text)
-	if strings.Contains(text, "![") || (priorEndedWithBang && strings.HasPrefix(text, "[")) {
-		job.assistantMarkdownPending = true
-	}
-	scanMarkdown := job.assistantMarkdownPending
-	markdown := ""
-	if scanMarkdown {
-		// This copies and rescans the whole answer so far, on every chunk, until
-		// the image reference closes. Metrics exist so its real cost is visible.
-		scanStartedAt := time.Now()
-		markdown = job.output.String()
-		job.assistantMarkdownPending = assistantMarkdownImagePending(markdown)
-		b.manager.recordMarkdownScan(len(markdown), time.Since(scanStartedAt))
-	}
+	scanStartedAt := time.Now()
+	refs := job.assistantMarkdownScanner.feed(text)
+	job.assistantMarkdownPending = job.assistantMarkdownScanner.stage != 0
+	b.manager.recordMarkdownScan(len(text), time.Since(scanStartedAt))
 	if job.internal {
 		b.manager.jobMu.Unlock()
 		return
@@ -1303,10 +1293,10 @@ func (b *Bridge) queueStdout(job *Job, text, phase string) {
 		})
 	}
 	b.manager.jobMu.Unlock()
-	if scanMarkdown {
-		// The filesystem half of the same per-chunk work.
+	if len(refs) > 0 {
+		// Resolve only newly completed references, never the accumulated answer.
 		resolveStartedAt := time.Now()
-		resolved := ResolveAssistantMarkdownImages(markdown, job.CWD)
+		resolved := job.resolveAssistantMarkdownImages(refs, false)
 		b.manager.recordImageResolve(time.Since(resolveStartedAt))
 		b.publishAssistantImages(job, resolved)
 	}

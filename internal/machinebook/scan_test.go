@@ -2,8 +2,10 @@ package machinebook
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -79,5 +81,63 @@ func TestScannerAutoDetectsWithoutManualAddressUI(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("scanner stopped: %v", err)
+	}
+}
+
+func TestStableDiscoveryBackoffKeepsScanningAndResetsOnChanges(t *testing.T) {
+	now := time.Unix(1000, 0)
+	schedule := scanSchedule{base: 10 * time.Second}
+	if !schedule.due(now, "network-a") {
+		t.Fatal("initial discovery was delayed")
+	}
+	for _, delay := range []time.Duration{10, 20, 40, 60, 60} {
+		schedule.finished(now, false)
+		want := delay * time.Second
+		if schedule.delay != want || schedule.due(now.Add(want-time.Nanosecond), "network-a") {
+			t.Fatalf("bad stable delay: %v, want %v", schedule.delay, want)
+		}
+		now = now.Add(want)
+		if !schedule.due(now, "network-a") {
+			t.Fatal("backoff stopped discovery of new machines")
+		}
+	}
+	schedule.finished(now, true)
+	if schedule.delay != 10*time.Second {
+		t.Fatal("newly discovered machine did not reset backoff")
+	}
+	schedule.finished(now, false)
+	if !schedule.due(now.Add(time.Second), "network-b") {
+		t.Fatal("network change waited for the old discovery deadline")
+	}
+	schedule.finished(now, false)
+	if schedule.delay != 10*time.Second {
+		t.Fatal("network change did not restore fast scans")
+	}
+}
+
+func TestDiscoveryRescanFindsMachineAppearingAfterStableScan(t *testing.T) {
+	daemon := newFakeDaemon(t, identityDoc("m-new-after-backoff", "new machine", 1))
+	var online atomic.Bool
+	transport := &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		if !online.Load() {
+			return nil, errors.New("not online yet")
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, daemon.address())
+	}}
+	defer transport.CloseIdleConnections()
+	book, err := Open(Options{StateDir: t.TempDir(), SelfID: "m-self", WireVersion: 1, HTTPClient: &http.Client{Transport: transport}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner := &Scanner{Book: book, Candidates: []string{"192.168.0.71:80"}}
+	if scanner.scan(t.Context()) {
+		t.Fatal("offline host appeared in discovery")
+	}
+	online.Store(true)
+	if !scanner.scan(t.Context()) {
+		t.Fatal("later discovery missed a new machine")
+	}
+	if scanner.scan(t.Context()) {
+		t.Fatal("unchanged endpoint prevents discovery backoff")
 	}
 }

@@ -1090,3 +1090,85 @@ func TestActivitySnapshotCopiesOnlyOwnedStatusAndIsolatesMutableFields(t *testin
 		t.Fatal("deleted status was lost")
 	}
 }
+
+func TestObligationObservationSkipsUnchangedPersistence(t *testing.T) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, status := range []string{"", "done", "needs_input", "stalled", "working", "parked"} {
+		t.Run(status, func(t *testing.T) {
+			engine, err := NewEngine("obligation-noop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status != "" {
+				engine.state.Obligation = &ObligationState{State: status, OpenedAt: now, UpdatedAt: now, ParkedSince: now}
+			}
+			engine.store = &memoryStateStore{fail: true}
+			before := engine.state.Revision
+			if err := engine.Apply(ReconcileObligation{ObservedAt: now, LiveEvidence: status == "parked"}); err != nil {
+				t.Fatalf("unchanged observation tried persistence: %v", err)
+			}
+			if engine.state.Revision != before {
+				t.Fatal("unchanged observation advanced actor revision")
+			}
+		})
+	}
+}
+
+func TestObligationObservationPersistsRealTransitionAndRetriesFailure(t *testing.T) {
+	engine, _ := NewEngine("obligation-transition")
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	engine.state.Obligation = &ObligationState{State: "working", OpenedAt: now, UpdatedAt: now}
+	store := &memoryStateStore{fail: true}
+	engine.store = store
+	command := ReconcileObligation{ObservedAt: now, DaemonBoot: true}
+	if err := engine.Apply(command); err == nil {
+		t.Fatal("real transition ignored persistence failure")
+	}
+	if engine.state.Obligation.State != "working" {
+		t.Fatal("failed transition mutated the live obligation")
+	}
+	store.fail = false
+	if err := engine.Apply(command); err != nil {
+		t.Fatal(err)
+	}
+	if store.state.Obligation.State != "stalled" || engine.state.Obligation.State != "stalled" {
+		t.Fatal("real transition did not persist")
+	}
+}
+
+func BenchmarkObligationHistoryOverhead(b *testing.B) {
+	engine, _ := NewEngine("obligation-benchmark")
+	engine.state.Ledger = make([]LedgerEvent, 10000)
+	for i := range engine.state.Ledger {
+		engine.state.Ledger[i] = LedgerEvent{MessageID: fmt.Sprintf("row-%d", i), Text: strings.Repeat("synthetic ", 20)}
+		for j := 0; j < 10; j++ {
+			engine.state.Ledger[i].Timeline = append(engine.state.Ledger[i].Timeline, TimelineEntry{Kind: provider.EventToolUpdate, Tool: &provider.ToolEvent{Title: "synthetic"}})
+		}
+	}
+	for _, mode := range []string{"full-history-snapshot", "activity-snapshot", "unchanged-observation"} {
+		b.Run(mode, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				switch mode {
+				case "full-history-snapshot":
+					_ = engine.Snapshot()
+				case "activity-snapshot":
+					_ = engine.ReadActivitySnapshot()
+				case "unchanged-observation":
+					if err := engine.Apply(ReconcileObligation{}); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestObligationReadsDoNotAllocateHistory(t *testing.T) {
+	engine, _ := NewEngine("obligation-allocation")
+	engine.state.Ledger = make([]LedgerEvent, 10000)
+	allocations := testing.AllocsPerRun(10, func() { _ = engine.ReadActivitySnapshot(); _ = engine.Apply(ReconcileObligation{}) })
+	if allocations > 4 {
+		t.Fatalf("quiet background check allocated %.0f objects", allocations)
+	}
+}

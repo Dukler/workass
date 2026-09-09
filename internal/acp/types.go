@@ -566,7 +566,7 @@ type Job struct {
 	harnessTurn bool
 
 	cancelled bool
-	// Preparation can run Git commands or reconcile controls before the prompt.
+	// Preparation reconciles controls before the prompt.
 	// Stop cancels this work without cancelling the terminal ACP response wait.
 	preparationCtx    context.Context
 	cancelPreparation context.CancelFunc
@@ -606,11 +606,13 @@ type Job struct {
 	stdoutTimer        *time.Timer
 	thinkTimer         *time.Timer
 	// Guarded by Manager.jobMu. A local image Markdown token may span provider
-	// chunks, so keep scanning until the newest token is syntactically complete.
+	// chunks. The scanner consumes only new bytes and emits completed references.
 	assistantMarkdownPending bool
+	assistantMarkdownScanner assistantMarkdownScanner
 
-	assistantImagesMu sync.Mutex
-	assistantImages   []any
+	assistantImagesMu      sync.Mutex
+	assistantImages        []any
+	assistantImageAttempts map[string]struct{} // guarded by assistantImagesMu
 }
 
 func (j *Job) touchActivity() {
