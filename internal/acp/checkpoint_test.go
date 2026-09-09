@@ -91,6 +91,45 @@ func TestStopCancelsBlockedPreTurnCheckpoint(t *testing.T) {
 	}
 }
 
+func TestPreTurnCheckpointCapturesWorktreeOnce(t *testing.T) {
+	requireGit(t)
+	workspace := t.TempDir()
+	repo := filepath.Join(workspace, "repo")
+	initTinyGitRepo(t, repo, map[string]string{"work.txt": "before\n"})
+	root := repoRoot(t)
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root, StateDir: t.TempDir(), RSSSampleInterval: time.Hour,
+		Provider:  ProviderConfig{Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root},
+		Broadcast: events.Broadcast,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	session, err := manager.NewSession(context.Background(), SessionOptions{CWD: workspace, TabID: "single-cp-tab", ChatID: "single-cp-chat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitChatEnv(t, events, func(env ChatEnvPayload) bool { return env.ChatID == "single-cp-chat" && len(env.Unchanged) == 1 }, 3*time.Second)
+	writeFile(t, filepath.Join(repo, "work.txt"), "changed\n")
+	traceFile := filepath.Join(t.TempDir(), "git-trace.log")
+	t.Setenv("GIT_TRACE", traceFile)
+	job := &Job{ID: "single-cp-job", SessionID: session.SessionID, TabID: "single-cp-tab", ChatID: "single-cp-chat", CWD: workspace}
+	manager.beginChatTurnCheckpoint(context.Background(), job)
+	trace, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(trace), " add -A -- ."); count != 1 {
+		t.Fatalf("one pre-turn snapshot rebuilt the full worktree %d times; want 1", count)
+	}
+	snapshot, ok := manager.chatEnvSnapshot(job.SessionID, job.ChatID, job.TabID, job.ID)
+	if !ok || len(snapshot.repos) != 1 || len(snapshot.preRefs) != 1 {
+		t.Fatal("missing pre-turn snapshot")
+	}
+	if got := gitTreeishTree(context.Background(), repo, snapshot.preRefs[0].commit); got != snapshot.repos[0].tree {
+		t.Fatal("checkpoint commit must use the exact captured baseline tree")
+	}
+}
+
 func TestChatCheckpointsDiffRewindAndOutsideGuard(t *testing.T) {
 	t.Parallel()
 	requireGit(t)
