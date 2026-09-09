@@ -519,11 +519,6 @@ function sessionConfig(cwd, mcpServers) {
   }
   return {
     projects: { [cwd]: { trust_level: 'trusted' } },
-    // Codex 0.147 ships MCP 2026-07-28 behind an explicit feature while
-    // retaining the stateful lifecycle by default. The Workass stdio bridge
-    // carries that stateless protocol to the daemon without mutating the
-    // user's global Codex configuration.
-    features: { mcp_2026_07_28: true },
     ...(Object.keys(servers).length ? { mcp_servers: servers } : {}),
   };
 }
@@ -862,9 +857,7 @@ async function handleWorkassRequest(message) {
       agentCapabilities: {
         sessionCapabilities: { resume: {}, close: {} },
         promptCapabilities: { image: true, audio: false, embeddedContext: false },
-        // Workass MCP is served over private-CA HTTPS. The packaged stdio
-        // bridge pins that CA; handing the URL directly to app-server makes
-        // registration appear present while startup fails with zero tools.
+        // External MCP servers retain the host's supported stdio transport.
         mcpCapabilities: { http: false, sse: false },
       },
       authMethods: [],

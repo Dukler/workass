@@ -145,12 +145,12 @@ async function handle(message) {
       return write({ id, error: { code: -32000, message: 'Authentication required: run codex login' } });
     }
     if (process.env.WORKASS_CODEX_FIXTURE_REQUIRE_STDIO_MCP === '1') {
-      const server = params.config?.mcp_servers?.['workass-browser'];
-      if (params.config?.features?.mcp_2026_07_28 !== true
-          || server?.command !== '/fixture/workass-daemon'
-          || JSON.stringify(server?.args) !== JSON.stringify(['mcp-stdio'])
-          || server?.env?.WORKASS_MCP_CA_FILE !== '/fixture/workass-ca.pem'
-          || server?.env?.WORKASS_MCP_ENDPOINT !== 'https://mcp.localhost:8788/workass/mcp/browser') {
+      const server = params.config?.mcp_servers?.['fixture-browser'];
+      if (params.config?.features?.mcp_2026_07_28 !== undefined
+          || server?.command !== '/fixture/external-tool-server'
+          || JSON.stringify(server?.args) !== JSON.stringify(['serve-external-mcp'])
+          || server?.env?.FIXTURE_MCP_CA_FILE !== '/fixture/workass-ca.pem'
+          || server?.env?.FIXTURE_MCP_ENDPOINT !== 'https://external.invalid/mcp') {
         return write({ id, error: { code: -32602, message: 'missing CA-aware stdio MCP session configuration' } });
       }
     }

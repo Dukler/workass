@@ -102,7 +102,7 @@ func TestAgentMCPToolCallsDirectInProcessControl(t *testing.T) {
 		t.Fatal("new session did not retain its MCP owner binding")
 	}
 	control := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime)}
-	request := httptest.NewRequest(http.MethodPost, agentMCPPath, nil).WithContext(ctx)
+	request := httptest.NewRequest(http.MethodPost, toolsPath, nil).WithContext(ctx)
 	result, err := callAgentMCPTool(request, browserMCPCallParams{
 		Name: "workass_list_subagents", Arguments: map[string]any{},
 	}, agentMCPOptions{ChatID: "parent-chat", TabID: "parent-tab", OwnerKey: "owner-1"}, control)
@@ -122,7 +122,7 @@ func TestAgentMCPToolCallsDirectInProcessControl(t *testing.T) {
 }
 
 func TestAgentMCPRedactsReflectedToolErrors(t *testing.T) {
-	result, err := callAgentMCPTool(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), browserMCPCallParams{
+	result, err := callAgentMCPTool(httptest.NewRequest(http.MethodPost, toolsPath, nil), browserMCPCallParams{
 		Name: "api_key=do-not-echo", Arguments: map[string]any{},
 	}, agentMCPOptions{}, &agentControlHandler{})
 	if err != nil {
@@ -147,7 +147,7 @@ func TestAgentMCPRejectsLegacyArgumentAliases(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result, err := callAgentMCPTool(httptest.NewRequest(http.MethodPost, agentMCPPath, nil), test.call, agentMCPOptions{}, &agentControlHandler{})
+			result, err := callAgentMCPTool(httptest.NewRequest(http.MethodPost, toolsPath, nil), test.call, agentMCPOptions{}, &agentControlHandler{})
 			if err != nil {
 				t.Fatal(err)
 			}

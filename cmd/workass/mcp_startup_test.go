@@ -12,12 +12,12 @@ import (
 	"workass/internal/tlscert"
 )
 
-func TestMCPListenerReadinessPrecedesProviderStartupRelease(t *testing.T) {
+func TestToolListenerReadinessPrecedesProviderStartupRelease(t *testing.T) {
 	certificate, err := tlscert.Ensure(filepath.Join(t.TempDir(), "state"))
 	if err != nil {
 		t.Fatalf("ensure readiness certificate: %v", err)
 	}
-	loopback, err := tlscert.NewLoopbackServerCertificateRotator(certificate, "mcp.localhost")
+	loopback, err := tlscert.NewLoopbackServerCertificateRotator(certificate, "tools.localhost")
 	if err != nil {
 		t.Fatalf("create loopback certificate: %v", err)
 	}
@@ -27,7 +27,7 @@ func TestMCPListenerReadinessPrecedesProviderStartupRelease(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	seen := make(chan string, 2)
-	for _, path := range []string{agentMCPPath, browserMCPPath} {
+	for _, path := range []string{toolsPath} {
 		path := path
 		mux.HandleFunc(path, func(w http.ResponseWriter, _ *http.Request) {
 			seen <- path
@@ -40,7 +40,7 @@ func TestMCPListenerReadinessPrecedesProviderStartupRelease(t *testing.T) {
 			Certificates: []tls.Certificate{certificate.TLS},
 			MinVersion:   tls.VersionTLS13,
 			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-				if hello.ServerName == "mcp.localhost" {
+				if hello.ServerName == "tools.localhost" {
 					return loopback.GetCertificate(hello)
 				}
 				return &certificate.TLS, nil
@@ -61,23 +61,23 @@ func TestMCPListenerReadinessPrecedesProviderStartupRelease(t *testing.T) {
 	if err := releaseProviderStartupAfterHTTPReady(ctx, listener, readinessTLS, serveErr, func() error {
 		select {
 		case path := <-seen:
-			if path != agentMCPPath {
-				t.Fatalf("readiness probe reached %q, want %q", path, agentMCPPath)
+			if path != toolsPath {
+				t.Fatalf("readiness probe reached %q, want %q", path, toolsPath)
 			}
 		default:
-			t.Fatal("provider startup released before the agent MCP route answered")
+			t.Fatal("provider startup released before the agent Tool route answered")
 		}
 		released = true
 		return nil
 	}); err != nil {
-		t.Fatalf("release provider startup after TLS MCP readiness: %v", err)
+		t.Fatalf("release provider startup after TLS Tool readiness: %v", err)
 	}
 	if !released {
-		t.Fatal("provider startup was not released after MCP readiness")
+		t.Fatal("provider startup was not released after Tool readiness")
 	}
 	select {
 	case path := <-seen:
-		t.Fatalf("unexpected extra MCP readiness request on %q", path)
+		t.Fatalf("unexpected extra Tool readiness request on %q", path)
 	default:
 	}
 
@@ -87,16 +87,16 @@ func TestMCPListenerReadinessPrecedesProviderStartupRelease(t *testing.T) {
 	}
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: readinessTLS}}
 	defer client.Transport.(*http.Transport).CloseIdleConnections()
-	request, err := http.NewRequest(http.MethodGet, "https://127.0.0.1:"+port+browserMCPPath, nil)
+	request, err := http.NewRequest(http.MethodGet, "https://127.0.0.1:"+port+toolsPath, nil)
 	if err != nil {
-		t.Fatalf("browser MCP probe request: %v", err)
+		t.Fatalf("browser Tool probe request: %v", err)
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		t.Fatalf("browser MCP listener probe: %v", err)
+		t.Fatalf("browser Tool listener probe: %v", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("browser MCP probe status = %d, want %d", response.StatusCode, http.StatusMethodNotAllowed)
+		t.Fatalf("browser Tool probe status = %d, want %d", response.StatusCode, http.StatusMethodNotAllowed)
 	}
 }

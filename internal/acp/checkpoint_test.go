@@ -14,80 +14,92 @@ import (
 	providercontract "workass/internal/provider"
 )
 
-func TestStopCancelsBlockedPreTurnCheckpoint(t *testing.T) {
+// Ordinary chat lifecycle must never run Git, including when an older install
+// left a repository baseline attached to the chat.
+func TestChatLifecycleDoesNotRunAutomaticGit(t *testing.T) {
 	requireGit(t)
-	workspace := t.TempDir()
-	repo := filepath.Join(workspace, "repo")
-	initTinyGitRepo(t, repo, map[string]string{"work.txt": "before\n"})
-	root := repoRoot(t)
-	traceFile := filepath.Join(t.TempDir(), "prompt-trace.jsonl")
-	events := newEventCollector()
-	manager := NewManager(Options{
-		RootDir: root, StateDir: t.TempDir(), RSSSampleInterval: time.Hour,
-		Provider: ProviderConfig{Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root,
-			Env: map[string]string{"WORKASS_MOCK_ACP_TRACE_FILE": traceFile}},
-		Broadcast: events.Broadcast,
-	})
-	t.Cleanup(func() { manager.Reset() })
-	session, err := manager.NewSession(context.Background(), SessionOptions{CWD: workspace, TabID: "blocked-cp", ChatID: "blocked-cp-chat"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitChatEnv(t, events, func(env ChatEnvPayload) bool { return env.ChatID == "blocked-cp-chat" && len(env.Unchanged) == 1 }, 3*time.Second)
-	marker, release := filepath.Join(workspace, "filter-started"), filepath.Join(workspace, "filter-release")
-	script := filepath.Join(workspace, "filter.cjs")
-	markerJSON, _ := json.Marshal(marker)
-	releaseJSON, _ := json.Marshal(release)
-	writeFile(t, script, fmt.Sprintf("const fs=require('node:fs');fs.writeFileSync(%s,'started');process.stdin.resume();setInterval(()=>{if(fs.existsSync(%s))process.exit(0)},10);", markerJSON, releaseJSON))
-	runGitFixture(t, repo, "config", "filter.blockstop.clean", "node \""+filepath.ToSlash(script)+"\"")
-	writeFile(t, filepath.Join(repo, ".gitattributes"), "work.txt filter=blockstop\n")
-	writeFile(t, filepath.Join(repo, "work.txt"), "changed\n")
-	started := make(chan error, 1)
-	go func() {
-		_, err := manager.StartJob(context.Background(), JobStartOptions{JobID: "blocked-cp-job", ProviderLaneManaged: true, OperationID: "blocked-cp-operation", Kind: "app-chat", SessionID: session.SessionID, TabID: "blocked-cp", ChatID: "blocked-cp-chat", CWD: workspace, Prompt: "must not reach provider"})
-		started <- err
-	}()
-	t.Cleanup(func() { _ = os.WriteFile(release, []byte("release"), 0o600) })
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if _, err := os.Stat(marker); err == nil {
-			break
+	for _, managed := range []bool{false, true} {
+		for _, restored := range []bool{false, true} {
+			t.Run(fmt.Sprintf("managed=%t/restored=%t", managed, restored), func(t *testing.T) {
+				workspace := t.TempDir()
+				repo := filepath.Join(workspace, "repo")
+				initTinyGitRepo(t, repo, map[string]string{"work.txt": "before\n"})
+				root := repoRoot(t)
+				events := newEventCollector()
+				manager := NewManager(Options{
+					RootDir: root, StateDir: t.TempDir(), RSSSampleInterval: time.Hour,
+					Provider:  ProviderConfig{Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")}, CWD: root},
+					Broadcast: events.Broadcast,
+				})
+				t.Cleanup(func() { manager.Reset() })
+				initialized := make(chan struct{}, 1)
+				manager.SetChatEnvObserver(func(env ChatEnvPayload) error {
+					events.Broadcast("chat:env", env)
+					initialized <- struct{}{}
+					return nil
+				})
+				if restored {
+					seedLegacyChatEnvFixture(t, manager, "old-session", "no-git-chat", "no-git-tab", workspace)
+				}
+				writeFile(t, filepath.Join(repo, "work.txt"), "changed\n")
+				traceFile := filepath.Join(t.TempDir(), "git-trace.log")
+				t.Setenv("GIT_TRACE", traceFile)
+				session, err := manager.NewSession(context.Background(), SessionOptions{
+					CWD: workspace, TabID: "no-git-tab", ChatID: "no-git-chat", ProviderLaneManaged: managed,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if managed {
+					select {
+					case <-initialized:
+					case <-time.After(2 * time.Second):
+						t.Fatal("session environment initialization did not finish")
+					}
+				}
+
+				for i, prompt := range []string{"ordinary chat", "[mock:slow] stop after dispatch", "[mock:slow] immediate stop"} {
+					id := ""
+					if managed {
+						id = fmt.Sprintf("no-git-job-%d", i)
+					}
+					started := time.Now()
+					job, err := manager.StartJob(context.Background(), JobStartOptions{
+						JobID: id, OperationID: "no-git-operation-" + fmt.Sprint(i), ProviderLaneManaged: managed,
+						Kind: "app-chat", SessionID: session.SessionID, TabID: "no-git-tab", ChatID: "no-git-chat", CWD: workspace, Prompt: prompt,
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					id = jobID(job)
+					if time.Since(started) > time.Second {
+						t.Fatal("prompt admission blocked")
+					}
+					if i == 1 {
+						events.waitJobType(t, id, "data", 2*time.Second)
+					}
+					if i > 0 {
+						if result := manager.CancelJobResult(jobID(job)); !result.Cancelled {
+							t.Fatalf("Stop: %#v", result)
+						}
+						assertJobStatus(t, events.waitJobEnd(t, id, time.Second), "failed", 130, "cancelled")
+					} else {
+						assertJobStatus(t, events.waitJobEnd(t, id, 3*time.Second), "done", 0, "end_turn")
+					}
+					manager.jobWG.Wait() // includes everything scheduled after terminal publication
+				}
+				if checkpoints := manager.ChatCheckpoints("no-git-chat", "no-git-tab"); len(checkpoints) != 0 {
+					t.Fatal("chat created automatic checkpoints")
+				}
+				trace, err := os.ReadFile(traceFile)
+				if err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+				if len(trace) != 0 {
+					t.Fatalf("ordinary chat invoked Git: %s", trace)
+				}
+			})
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("checkpoint did not enter blocking Git filter")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	stopAt := time.Now()
-	if result := manager.CancelJobResult("blocked-cp-job"); !result.Cancelled {
-		t.Fatalf("Stop: %#v", result)
-	}
-	select {
-	case err := <-started:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Stop waited behind the pre-turn Git checkpoint")
-	}
-	assertJobStatus(t, events.waitJobEnd(t, "blocked-cp-job", time.Second), "failed", 130, "cancelled")
-	t.Logf("Stop to terminal while Git filter is blocked: %s", time.Since(stopAt))
-	workerDone := make(chan struct{})
-	go func() {
-		manager.jobWG.Wait()
-		close(workerDone)
-	}()
-	select {
-	case <-workerDone:
-	case <-time.After(time.Second):
-		t.Fatal("cancelled preparation started another blocking Git scan after terminal publication")
-	}
-	trace, err := os.ReadFile(traceFile)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(trace), "must not reach provider") {
-		t.Fatal("cancelled preparation reached the provider")
 	}
 }
 
@@ -108,7 +120,7 @@ func TestPreTurnCheckpointCapturesWorktreeOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitChatEnv(t, events, func(env ChatEnvPayload) bool { return env.ChatID == "single-cp-chat" && len(env.Unchanged) == 1 }, 3*time.Second)
+	seedLegacyChatEnvFixture(t, manager, session.SessionID, "single-cp-chat", "single-cp-tab", workspace)
 	writeFile(t, filepath.Join(repo, "work.txt"), "changed\n")
 	traceFile := filepath.Join(t.TempDir(), "git-trace.log")
 	t.Setenv("GIT_TRACE", traceFile)
@@ -146,9 +158,7 @@ func TestChatCheckpointsDiffRewindAndOutsideGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
-	_ = waitChatEnv(t, events, func(env ChatEnvPayload) bool {
-		return env.ChatID == "chat-cp" && strings.Join(env.Unchanged, ",") == "alpha"
-	}, 2*time.Second)
+	seedLegacyChatEnvFixture(t, manager, session.SessionID, "chat-cp", "cp-tab", workspace)
 
 	workPath := filepath.Join(repoDir, "work.txt")
 	hashA := fileSHA256(t, workPath)
@@ -163,8 +173,10 @@ func TestChatCheckpointsDiffRewindAndOutsideGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start job1: %v", err)
 	}
+	cpJob1 := beginLegacyCheckpointFixture(manager, job1, session.SessionID, "chat-cp", "cp-tab", workspace)
 	writeFile(t, workPath, "one\ntwo\nthree\n")
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job1), 2*time.Second), "done", 0, "end_turn")
+	manager.refreshChatEnvAfterJob(context.Background(), cpJob1)
 	waitChatCheckpointCount(t, manager, "chat-cp", 1, 2*time.Second)
 	hashB := fileSHA256(t, workPath)
 
@@ -179,8 +191,10 @@ func TestChatCheckpointsDiffRewindAndOutsideGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start job2: %v", err)
 	}
+	cpJob2 := beginLegacyCheckpointFixture(manager, job2, session.SessionID, "chat-cp", "cp-tab", workspace)
 	writeFile(t, workPath, "one\ntwo\nthree\nfour\n")
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job2), 2*time.Second), "done", 0, "end_turn")
+	manager.refreshChatEnvAfterJob(context.Background(), cpJob2)
 	hashC := fileSHA256(t, workPath)
 
 	checkpoints := waitChatCheckpointCount(t, manager, "chat-cp", 2, 2*time.Second)
@@ -338,7 +352,7 @@ func TestChatCheckpointRotationAndLargeRepoSkip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new session: %v", err)
 		}
-		_ = waitChatEnv(t, events, func(env ChatEnvPayload) bool { return env.ChatID == "chat-large" }, 2*time.Second)
+		seedLegacyChatEnvFixture(t, manager, session.SessionID, "chat-large", "large-tab", repoDir)
 		job, err := manager.StartJob(context.Background(), JobStartOptions{
 			Kind:      "app-chat",
 			SessionID: session.SessionID,
@@ -350,10 +364,12 @@ func TestChatCheckpointRotationAndLargeRepoSkip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("start large job: %v", err)
 		}
+		cpJob := beginLegacyCheckpointFixture(manager, job, session.SessionID, "chat-large", "large-tab", repoDir)
 		for i := 0; i < checkpointFileLimit+1; i++ {
 			writeFile(t, filepath.Join(repoDir, fmt.Sprintf("file%03d.txt", i)), "base\nchanged\n")
 		}
 		assertJobStatus(t, events.waitJobEnd(t, jobID(job), 3*time.Second), "done", 0, "end_turn")
+		manager.refreshChatEnvAfterJob(context.Background(), cpJob)
 		checkpoints := waitChatCheckpointCount(t, manager, "chat-large", 1, 3*time.Second)
 		if len(checkpoints) != 1 || len(checkpoints[0].Repos) != 1 {
 			t.Fatalf("large checkpoints = %#v", checkpoints)

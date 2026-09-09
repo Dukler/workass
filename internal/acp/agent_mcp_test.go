@@ -9,42 +9,19 @@ import (
 	"time"
 )
 
-func TestAgentMCPIsInjectedIntoSpareSessionsWithOpaqueOwnerKey(t *testing.T) {
-	t.Parallel()
-	servers, err := agentMCPServers(Options{
-		WorkassMCPBaseURL: "https://localhost:8788",
-	}, SessionOptions{Spare: true, AgentOwnerKey: "owner-spare-1"}, mcpServerHTTP)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(servers) != 1 {
-		t.Fatalf("agent MCP servers = %#v, want one for spare session", servers)
-	}
-	server := mapFromAny(servers[0])
-	headers := mcpDescriptorValues(server["headers"])
-	if server["name"] != "workass-agent" || server["type"] != "http" ||
-		server["url"] != "https://localhost:8788/workass/mcp/agent" ||
-		headers["Authorization"] != "Bearer owner-spare-1" || server["command"] != nil {
-		t.Fatalf("agent MCP descriptor = %#v", server)
-	}
-	if got, err := agentMCPServers(Options{WorkassMCPBaseURL: "https://localhost:8788"}, SessionOptions{Ephemeral: true, AgentOwnerKey: "probe"}, mcpServerHTTP); err != nil || len(got) != 0 {
-		t.Fatalf("catalog probe received agent MCP: %#v", got)
-	}
-}
-
 func TestSpareAdoptionRebindsInjectedAgentOwnerToRealChat(t *testing.T) {
 	t.Parallel()
 	manager, _ := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })
-	manager.opts.WorkassMCPBaseURL = "https://localhost:8788"
+	manager.opts.WorkassToolsOrigin = "https://localhost:8788"
 	// MCP trust is prepared at provider launch (provider_adapter.go), so the
 	// fixture CA must exist on disk like the daemon's real certificate does.
 	caFile := filepath.Join(t.TempDir(), "daemon-cert.pem")
 	if err := os.WriteFile(caFile, []byte("-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	manager.opts.WorkassMCPCACertFile = caFile
-	manager.opts.WorkassMCPStdioCommand = "/workass/workass-daemon"
+	manager.opts.WorkassToolsCAFile = caFile
+	manager.opts.WorkassToolsCommand = "/workass/workass-daemon"
 	manager.mu.Lock()
 	providerID := manager.defaultProviderID
 	gen := manager.spareGen
@@ -77,11 +54,11 @@ func TestSpareAdoptionRebindsInjectedAgentOwnerToRealChat(t *testing.T) {
 
 func TestEnvironmentBriefAdvertisesAgentCatalogAndSpawnTools(t *testing.T) {
 	t.Parallel()
-	manager := NewManager(Options{WorkassMCPBaseURL: "https://localhost:8788"})
+	manager := NewManager(Options{WorkassToolsOrigin: "https://localhost:8788"})
 	t.Cleanup(func() { manager.Reset() })
 	brief := manager.buildEnvironmentBrief(false)
 	for _, want := range []string{
-		"workass-agent MCP server",
+		"Workass CLI",
 		"list/read/create/rename/configure/focus/delete exact chats",
 		"provider/model/effort/permission catalog",
 		"inspect bounded redacted update state and failure logs",

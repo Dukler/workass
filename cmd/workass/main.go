@@ -34,9 +34,9 @@ import (
 	"workass/internal/httpserve"
 	"workass/internal/lease"
 	"workass/internal/machineid"
-	"workass/internal/mcpstdio"
 	providercontract "workass/internal/provider"
 	"workass/internal/tlscert"
+	"workass/internal/toolcli"
 	"workass/internal/voice"
 	"workass/internal/wire"
 )
@@ -48,9 +48,11 @@ var daemonVersion = "0.0.1-dev"
 var secretKeyRE = regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|credential|bearer)`)
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "mcp-stdio" {
-		if err := mcpstdio.ServeEnvironment(context.Background(), os.Stdin, os.Stdout, os.Getenv); err != nil {
-			fmt.Fprintf(os.Stderr, "workass mcp stdio: %v\n", err)
+	if len(os.Args) > 1 && os.Args[1] == "tools" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := runToolsCommand(ctx, os.Args[2:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+			_ = json.NewEncoder(os.Stderr).Encode(toolcli.Response{Error: acp.RedactSensitiveText(err.Error())})
 			os.Exit(1)
 		}
 		return
@@ -215,15 +217,15 @@ func main() {
 		logger.Printf("[workass] tls: %v", certErr)
 		os.Exit(1)
 	}
-	mcpBaseURL := "https://mcp.localhost:" + strconv.Itoa(*port)
+	toolsOrigin := "https://tools.localhost:" + strconv.Itoa(*port)
 	acpManager := acp.NewManager(acp.Options{
 		RootDir:                 cwd,
 		StateDir:                stateDir,
 		MachineID:               identity.MachineID,
 		RuntimeProfile:          workassRuntimeProfile(),
-		WorkassMCPBaseURL:       mcpBaseURL,
-		WorkassMCPCACertFile:    filepath.Join(stateDir, tlscert.CertFileName),
-		WorkassMCPStdioCommand:  currentExecutablePath(),
+		WorkassToolsOrigin:      toolsOrigin,
+		WorkassToolsCAFile:      filepath.Join(stateDir, tlscert.CertFileName),
+		WorkassToolsCommand:     currentExecutablePath(),
 		Version:                 daemonVersion,
 		Providers:               providers,
 		DefaultProviderID:       defaultProviderID,
@@ -351,8 +353,9 @@ func main() {
 	mux.HandleFunc("/workass/update/prepare", updateControl.prepare)
 	mux.HandleFunc("/workass/update/commit", updateControl.commit)
 	mux.HandleFunc("/workass/update/cancel", updateControl.cancel)
-	mux.Handle(agentMCPPath, newAgentStatelessMCPHandler(acpManager, agentControl))
-	mux.Handle(browserMCPPath, newBrowserStatelessMCPHandler(acpManager, defaultBrowserControlFile(stateDir), providerChats))
+	mux.Handle(toolsPath, newWorkassToolHandler(acpManager, agentControl, defaultBrowserControlFile(stateDir), providerChats))
+	// Retired Workass MCP routes are intentionally unavailable, including to old clients.
+	mux.HandleFunc("/workass/mcp/", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
 	mux.Handle(fleetQRPath, newFleetQRHandler(fleetKeys, *port, *bind, logger.Printf))
 	mux.Handle("/", handler)
 	listener, err := net.Listen("tcp", addr)
@@ -365,18 +368,18 @@ func main() {
 	// E5. TLS is not a port: the daemon keeps listening exactly where the
 	// firewall already allows it, and only the bytes change.
 	if *useTLS {
-		mcpCertificates, err := tlscert.NewLoopbackServerCertificateRotator(certificate, "mcp.localhost")
+		toolCertificates, err := tlscert.NewLoopbackServerCertificateRotator(certificate, "tools.localhost")
 		if err != nil {
 			cleanup()
-			logger.Printf("[workass] mint MCP loopback certificate: %v", err)
+			logger.Printf("[workass] mint tool loopback certificate: %v", err)
 			os.Exit(1)
 		}
 		server.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{certificate.TLS},
 			MinVersion:   tls.VersionTLS13,
 			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-				if strings.EqualFold(strings.TrimSpace(hello.ServerName), "mcp.localhost") {
-					return mcpCertificates.GetCertificate(hello)
+				if strings.EqualFold(strings.TrimSpace(hello.ServerName), "tools.localhost") {
+					return toolCertificates.GetCertificate(hello)
 				}
 				return &certificate.TLS, nil
 			},
@@ -406,7 +409,7 @@ func main() {
 	}); err != nil {
 		stopStartedDaemonHTTP(server, listener)
 		cleanup()
-		logger.Printf("[workass] release provider startup after MCP readiness: %v", err)
+		logger.Printf("[workass] release provider startup after tool listener readiness: %v", err)
 		os.Exit(1)
 	}
 	startMachinePresence(signalCtx, machineBook, hub, identity, machinePresenceOptions{
@@ -636,7 +639,7 @@ func daemonReadinessTLSConfig(certificate tlscert.Certificate, useTLS bool) (*tl
 	roots.AddCert(root)
 	return &tls.Config{
 		RootCAs:    roots,
-		ServerName: "mcp.localhost",
+		ServerName: "tools.localhost",
 		MinVersion: tls.VersionTLS13,
 	}, nil
 }
@@ -656,7 +659,7 @@ func waitForDaemonHTTP(ctx context.Context, listener net.Listener, readinessTLS 
 	if readinessTLS != nil {
 		scheme = "https"
 	}
-	probeURL := scheme + "://" + net.JoinHostPort("127.0.0.1", port) + agentMCPPath
+	probeURL := scheme + "://" + net.JoinHostPort("127.0.0.1", port) + toolsPath
 	transport := &http.Transport{TLSClientConfig: readinessTLS}
 	client := &http.Client{Transport: transport, Timeout: 250 * time.Millisecond}
 	defer transport.CloseIdleConnections()
@@ -700,9 +703,8 @@ func releaseProviderStartupAfterHTTPReady(
 	if release == nil {
 		return errors.New("provider startup release is unavailable")
 	}
-	// Provider sessions receive the stateless MCP descriptors during
-	// session/new/session/resume. Nothing provider-owned may be released until
-	// the exact listener those descriptors name has answered this probe.
+	// Publish the daemon service before resuming actors. Tool calls themselves
+	// are direct requests and have no startup or per-turn discovery handshake.
 	return release()
 }
 

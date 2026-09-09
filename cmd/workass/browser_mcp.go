@@ -103,7 +103,7 @@ func callBrowserMCPTool(call browserMCPCallParams, options browserMCPOptions, cl
 	if err != nil {
 		return browserMCPErrorResult(err.Error()), nil
 	}
-	operationID, operationErr := requiredStatelessMCPOperationID(browserMCPKind, call)
+	operationID, operationErr := requiredToolOperationID(browserToolKind, call)
 	if operationErr != nil {
 		return browserMCPErrorResult(operationErr.Error()), nil
 	}
@@ -135,7 +135,7 @@ func callBrowserMCPTool(call browserMCPCallParams, options browserMCPOptions, cl
 
 func prepareBrowserMCPCall(call browserMCPCallParams) (preparedBrowserMCPCall, error) {
 	prepared := preparedBrowserMCPCall{Params: copyAnyMap(call.Arguments)}
-	// MCP schemas are snake_case while the frozen shell control surface is
+	// Tool schemas are snake_case while the frozen shell control surface is
 	// camelCase. Normalize at this boundary; otherwise an explicit tab choice is
 	// silently ignored and the shell resolves its default tab instead.
 	if tabID, exists := prepared.Params["tab_id"]; exists {
@@ -144,7 +144,7 @@ func prepareBrowserMCPCall(call browserMCPCallParams) (preparedBrowserMCPCall, e
 	}
 	delete(prepared.Params, "operation_id")
 	if _, exists := prepared.Params["operationId"]; exists {
-		return preparedBrowserMCPCall{}, errors.New("MCP uses operation_id; operationId is not accepted")
+		return preparedBrowserMCPCall{}, errors.New("Workass tools use operation_id; operationId is not accepted")
 	}
 	switch call.Name {
 	case "workass_browser_list":

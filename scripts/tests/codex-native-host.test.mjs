@@ -191,7 +191,7 @@ test('native Codex host rejects non-live steering without interrupting or queuei
   }
 });
 
-test('native Codex host maps Workass MCP through the CA-aware stdio bridge', async (t) => {
+test('native Codex host preserves external MCP stdio configuration', async (t) => {
   const peer = startHost({ WORKASS_CODEX_FIXTURE_REQUIRE_STDIO_MCP: '1' });
   t.after(() => peer.child.kill('SIGKILL'));
 
@@ -201,10 +201,10 @@ test('native Codex host maps Workass MCP through the CA-aware stdio bridge', asy
     jsonrpc: '2.0', id: 2, method: 'session/new', params: {
       cwd: repoRoot,
       mcpServers: [{
-        name: 'workass-browser', command: '/fixture/workass-daemon', args: ['mcp-stdio'],
+        name: 'fixture-browser', command: '/fixture/external-tool-server', args: ['serve-external-mcp'],
         env: [
-          { name: 'WORKASS_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
-          { name: 'WORKASS_MCP_ENDPOINT', value: 'https://mcp.localhost:8788/workass/mcp/browser' },
+          { name: 'FIXTURE_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
+          { name: 'FIXTURE_MCP_ENDPOINT', value: 'https://external.invalid/mcp' },
         ],
       }],
     },
@@ -223,13 +223,13 @@ test('native Codex host waits for delayed official MCP readiness and proves ever
 
   const mcpServers = [
     {
-      name: 'workass-browser', command: '/fixture/workass-daemon', args: ['mcp-stdio'],
+      name: 'fixture-browser', command: '/fixture/external-tool-server', args: ['serve-external-mcp'],
       env: [
-        { name: 'WORKASS_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
-        { name: 'WORKASS_MCP_ENDPOINT', value: 'https://mcp.localhost:8788/workass/mcp/browser' },
+        { name: 'FIXTURE_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
+        { name: 'FIXTURE_MCP_ENDPOINT', value: 'https://external.invalid/mcp' },
       ],
     },
-    { name: 'workass-agent', command: '/fixture/workass-daemon', args: ['mcp-stdio'], env: [] },
+    { name: 'fixture-agent', command: '/fixture/external-tool-server', args: ['serve-external-mcp'], env: [] },
   ];
 
   peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
@@ -267,17 +267,17 @@ test('native Codex host refuses a session whose configured MCP has no discovered
     jsonrpc: '2.0', id: 2, method: 'session/new', params: {
       cwd: repoRoot,
       mcpServers: [{
-        name: 'workass-browser', command: '/fixture/workass-daemon', args: ['mcp-stdio'],
+        name: 'fixture-browser', command: '/fixture/external-tool-server', args: ['serve-external-mcp'],
         env: [
-          { name: 'WORKASS_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
-          { name: 'WORKASS_MCP_ENDPOINT', value: 'https://mcp.localhost:8788/workass/mcp/browser' },
+          { name: 'FIXTURE_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
+          { name: 'FIXTURE_MCP_ENDPOINT', value: 'https://external.invalid/mcp' },
         ],
       }],
     },
   });
   const opened = await peer.waitFor((message) => message.id === 2);
   assert.equal(opened.result, undefined);
-  assert.match(opened.error?.message || '', /MCP tool catalog is unavailable for: workass-browser/);
+  assert.match(opened.error?.message || '', /MCP tool catalog is unavailable for: fixture-browser/);
 });
 
 test('native Codex host reports terminal MCP startup failure instead of publishing the session', async (t) => {
@@ -293,17 +293,17 @@ test('native Codex host reports terminal MCP startup failure instead of publishi
     jsonrpc: '2.0', id: 2, method: 'session/new', params: {
       cwd: repoRoot,
       mcpServers: [{
-        name: 'workass-browser', command: '/fixture/workass-daemon', args: ['mcp-stdio'],
+        name: 'fixture-browser', command: '/fixture/external-tool-server', args: ['serve-external-mcp'],
         env: [
-          { name: 'WORKASS_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
-          { name: 'WORKASS_MCP_ENDPOINT', value: 'https://mcp.localhost:8788/workass/mcp/browser' },
+          { name: 'FIXTURE_MCP_CA_FILE', value: '/fixture/workass-ca.pem' },
+          { name: 'FIXTURE_MCP_ENDPOINT', value: 'https://external.invalid/mcp' },
         ],
       }],
     },
   });
   const opened = await peer.waitFor((message) => message.id === 2);
   assert.equal(opened.result, undefined);
-  assert.match(opened.error?.message || '', /workass-browser startup failed: fixture MCP startup failed/);
+  assert.match(opened.error?.message || '', /fixture-browser startup failed: fixture MCP startup failed/);
 });
 
 test('native Codex host classifies an absent provisional candidate without parsing in chat state', async (t) => {

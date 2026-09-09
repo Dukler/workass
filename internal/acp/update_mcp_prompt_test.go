@@ -6,7 +6,7 @@ import (
 )
 
 func TestUpdaterMCPAuthorityRuleIsAdjacentToEveryConfiguredTurn(t *testing.T) {
-	manager := NewManager(Options{WorkassMCPBaseURL: "https://localhost:8788"})
+	manager := NewManager(Options{WorkassToolsOrigin: "https://localhost:8788"})
 	t.Cleanup(func() { manager.Reset() })
 	for _, request := range []string{"inspect the failed update", "continue"} {
 		prompt := manager.buildUserRequestBlock(request, true)

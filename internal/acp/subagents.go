@@ -2,6 +2,8 @@ package acp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -18,7 +20,7 @@ const (
 )
 
 // SubagentSpawnOptions is the provider-neutral contract used by the injected
-// workass-agent MCP server. ParentChatID/ParentTabID identify the calling ACP
+// Workass tools CLI. ParentChatID/ParentTabID identify the calling ACP
 // session without exposing a transient session id before session/new returns.
 type SubagentSpawnOptions struct {
 	OwnerKey         string `json:"ownerKey,omitempty"`
@@ -61,8 +63,11 @@ type SubagentAttention struct {
 }
 
 func (m *Manager) newAgentOwnerKeyLocked() string {
-	m.agentOwnerSeq++
-	return fmt.Sprintf("agent-owner-%d-%d", time.Now().UnixNano(), m.agentOwnerSeq)
+	var capability [32]byte
+	if _, err := rand.Read(capability[:]); err != nil {
+		panic("cannot generate Workass session capability")
+	}
+	return hex.EncodeToString(capability[:])
 }
 
 func (m *Manager) bindAgentOwnerLocked(ownerKey, chatID, tabID string) {
@@ -392,7 +397,11 @@ func (m *Manager) runSubagent(runCtx context.Context, run *SubagentRun, prompt, 
 	}()
 	defer m.cancelAndDrainSubagentsForOwner(jobID, 5*time.Second)
 
-	nextPrompt := buildTurnRuntimeIdentity(bridge, providerID, selectedModel) +
+	toolBrief, toolErr := m.toolContextBrief(info.SessionID, job.ChatID, job.TabID)
+	if toolErr != nil {
+		toolBrief = "Workass CLI context is unavailable: " + redactSensitiveText(toolErr.Error()) + ".\n"
+	}
+	nextPrompt := toolBrief + buildTurnRuntimeIdentity(bridge, providerID, selectedModel) +
 		m.buildEnvironmentBrief(true) + "Subagent task:\n" + prompt
 	var result PromptResult
 	promptSequence := int64(0)

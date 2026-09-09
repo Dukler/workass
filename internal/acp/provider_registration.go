@@ -115,10 +115,8 @@ func (qwenDetectionStrategy) Prepare(ctx context.Context, manager *Manager, cfg 
 		"OPENAI_MODEL":    model,
 	}
 	if openAIBaseURLUsesOMLX(baseURL, manager.opts) {
-		// Qwen's normal bootstrap plus Workass's ACP-supplied tools can exceed
-		// oMLX's default 32k context before the first user token. Safe mode strips
-		// ambient extensions, skills, memory, and context while Qwen 0.21.13 keeps
-		// the explicit session/new MCP servers supplied by Workass.
+		// Keep this existing local-model safe-mode selection. Workass tools use
+		// the native shell CLI and no longer add MCP schemas to the context.
 		env["QWEN_CODE_SAFE_MODE"] = "true"
 	}
 	return resolved, append([]string(nil), cfg.Args...), env, "", nil

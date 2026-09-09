@@ -191,14 +191,13 @@ func (m *Manager) initChatEnvForSessionSync(ctx context.Context, opts SessionOpt
 		m.emit("chat:env", cloneChatEnvPayload(reused))
 		return
 	}
-	repos, reposTruncated := discoverChatEnvRepos(ctx, cwd)
+	// Session setup only binds metadata. Automatic repository discovery and
+	// worktree snapshots must never be part of opening or talking in a chat.
 	tracker := &chatEnvTracker{
-		sessionID:      info.SessionID,
-		chatID:         strings.TrimSpace(opts.ChatID),
-		tabID:          strings.TrimSpace(opts.TabID),
-		cwd:            cwd,
-		repos:          repos,
-		reposTruncated: reposTruncated,
+		sessionID: info.SessionID,
+		chatID:    strings.TrimSpace(opts.ChatID),
+		tabID:     strings.TrimSpace(opts.TabID),
+		cwd:       cwd,
 	}
 	tracker.payload = tracker.initialPayload()
 
