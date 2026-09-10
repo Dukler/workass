@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workass/internal/provider"
@@ -14,9 +15,10 @@ import (
 // commands. External effects become executable exclusively through ClaimNext,
 // after their Pending -> Dispatched transition is durably stored.
 type Engine struct {
-	mu    sync.Mutex
-	state State
-	store StateStore
+	mu            sync.Mutex
+	state         State
+	store         StateStore
+	cancelRouting atomic.Pointer[cancelRoutingSnapshot]
 }
 
 func NewEngine(chatID string) (*Engine, error) {
@@ -24,7 +26,9 @@ func NewEngine(chatID string) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{state: state}, nil
+	engine := &Engine{}
+	engine.installCommittedState(state)
+	return engine, nil
 }
 
 func NewDurableEngine(chatID string, store StateStore) (*Engine, error) {
@@ -51,7 +55,9 @@ func NewDurableEngine(chatID string, store StateStore) (*Engine, error) {
 	if err := store.Save(next); err != nil {
 		return nil, err
 	}
-	return &Engine{state: next, store: store}, nil
+	engine := &Engine{store: store}
+	engine.installCommittedState(next)
+	return engine, nil
 }
 
 type storeError struct{ message string }
@@ -115,7 +121,7 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 			return persistErr
 		}
 	}
-	e.state = next
+	e.installCommittedState(next)
 	return nil
 }
 
@@ -141,7 +147,7 @@ func (e *Engine) ClaimNext() (Effect, bool, error) {
 				return nil, false, err
 			}
 		}
-		e.state = next
+		e.installCommittedState(next)
 		return effects[0], true, nil
 	}
 	return nil, false, nil
@@ -173,7 +179,7 @@ func (e *Engine) ClaimEffect(effectID string) (Effect, bool, error) {
 				return nil, false, err
 			}
 		}
-		e.state = next
+		e.installCommittedState(next)
 		return effects[0], true, nil
 	}
 	return nil, false, nil
@@ -260,19 +266,12 @@ func (e *Engine) Snapshot() State {
 // taking the runtime's provider-attachment mutex. This is only a routing hint;
 // cancellation revalidates the exact job under the owning actor's lock.
 func (e *Engine) HasCancellableJob(jobID string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if foreground := e.state.Foreground; foreground != nil {
-		if foreground.Turn.NativeID == jobID || provider.DeriveJobID(e.state.ChatID, foreground.OperationID) == jobID {
-			return true
-		}
+	routing := e.cancelRouting.Load()
+	if routing == nil || jobID == "" {
+		return false
 	}
-	for _, queued := range e.state.Queue {
-		if provider.DeriveJobID(e.state.ChatID, queued.OperationID) == jobID {
-			return true
-		}
-	}
-	return false
+	_, found := routing.jobs[jobID]
+	return found
 }
 
 // IdentitySnapshot is the constant-size identity needed to locate one actor by
