@@ -1048,6 +1048,7 @@ func (m *Manager) endWorkAdmission() {
 }
 
 func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[string]any, error) {
+	startupStarted := time.Now()
 	if err := m.beginWorkAdmission(); err != nil {
 		return nil, err
 	}
@@ -1199,6 +1200,7 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 		ProviderID:            providerID,
 		CWD:                   cwd,
 		startOpts:             opts,
+		startupTiming:         &turnStartupTiming{started: startupStarted},
 		inputDispatchBoundary: make(chan struct{}),
 		preparationCtx:        preparationCtx,
 		cancelPreparation:     cancelPreparation,
@@ -1288,6 +1290,14 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 
 func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, opts JobStartOptions) {
 	defer m.jobWG.Done()
+	job.startupTiming.mark(startupWorker)
+	defer func() {
+		if fields := job.startupTiming.fields(); fields != nil {
+			fields["jobId"] = job.ID
+			fields["providerId"] = job.ProviderID
+			m.opts.Logf("acp turn startup timing", fields)
+		}
+	}()
 	if job.cancelPreparation != nil {
 		defer job.cancelPreparation()
 	}
@@ -1372,6 +1382,7 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		preparationCtx = ctx
 	}
 	controlResult, controlsErr := activeBridge.ensureSessionControls(preparationCtx, job.SessionID, opts.ModelID, opts.ModeID)
+	job.startupTiming.mark(startupControls)
 	if m.jobCancelled(job) {
 		code := 130
 		job.Code = &code
@@ -3214,6 +3225,7 @@ func (b *Bridge) requestPrompt(ctx context.Context, job *Job, params map[string]
 	}
 	afterWrite := func() {
 		if job != nil {
+			job.startupTiming.mark(startupWritten)
 			job.markInputDispatched()
 			if b.manager.jobCancelled(job) {
 				b.cancelDispatchedJob(job)
@@ -3268,6 +3280,9 @@ func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, o
 	}
 	if operationID = strings.TrimSpace(operationID); operationID != "" {
 		params["clientUserMessageId"] = operationID
+	}
+	if job != nil {
+		job.startupTiming.mark(startupPrepared)
 	}
 	res, err := b.requestPrompt(ctx, job, params)
 	if directJob != nil {
