@@ -17,9 +17,9 @@ import (
 	providercontract "workass/internal/provider"
 )
 
-func newTestProviderChatRuntime(t *testing.T, manager *acp.Manager, store *sessionStore, stateDir string) *providerChatRuntime {
+func newTestProviderChatRuntime(t *testing.T, manager *acp.Manager, store *sessionStore, stateDir string, publishers ...func(string, any)) *providerChatRuntime {
 	t.Helper()
-	runtime := newProviderChatRuntime(manager, store, stateDir)
+	runtime := newProviderChatRuntime(manager, store, stateDir, publishers...)
 	if err := runtime.StartupError(); err != nil {
 		t.Fatalf("start authoritative provider chat runtime: %v", err)
 	}
@@ -1302,7 +1302,14 @@ func TestStopDoesNotWaitForUnrelatedProviderAttachment(t *testing.T) {
 func TestImmediateStopPublishesCommittedTerminalBeforeReply(t *testing.T) {
 	for _, attached := range []bool{false, true} {
 		t.Run(fmt.Sprintf("attached=%v", attached), func(t *testing.T) {
-			runtime, _, root, _, _ := newSteerRegressionFixture(t)
+			terminal := make(chan map[string]any, 2)
+			publish := func(channel string, payload any) {
+				event := mapFromAnyMain(payload)
+				if channel == "job:event" && fieldString(event, "type") == "end" {
+					terminal <- mapFromAnyMain(event["job"])
+				}
+			}
+			runtime, _, root, _, _ := newSteerRegressionFixture(t, publish)
 			tabID, chatID := "steer-regression-tab", "steer-regression-chat"
 			if !attached {
 				tabID, chatID = "cold-stop-tab", "cold-stop-chat"
@@ -1311,13 +1318,6 @@ func TestImmediateStopPublishesCommittedTerminalBeforeReply(t *testing.T) {
 					"title": "Cold stop", "cwd": root, "providerId": "mock", "currentModelId": "mock-deterministic",
 				}); err != nil {
 					t.Fatal(err)
-				}
-			}
-			terminal := make(chan map[string]any, 2)
-			runtime.publish = func(channel string, payload any) {
-				event := mapFromAnyMain(payload)
-				if channel == "job:event" && fieldString(event, "type") == "end" {
-					terminal <- mapFromAnyMain(event["job"])
 				}
 			}
 			admission, err := runtime.AdmitStart(context.Background(), map[string]any{
@@ -1364,7 +1364,7 @@ func waitProviderChatLedger(t *testing.T, runtime *providerChatRuntime, chatID s
 	t.Fatalf("provider chat ledger did not reach %d events: %#v", want, state)
 }
 
-func newSteerRegressionFixture(t *testing.T) (*providerChatRuntime, *acp.Manager, string, string, acp.SessionInfo) {
+func newSteerRegressionFixture(t *testing.T, publishers ...func(string, any)) (*providerChatRuntime, *acp.Manager, string, string, acp.SessionInfo) {
 	t.Helper()
 	root := repoRoot(t)
 	stateDir := t.TempDir()
@@ -1378,7 +1378,7 @@ func newSteerRegressionFixture(t *testing.T) (*providerChatRuntime, *acp.Manager
 		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
-	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir, publishers...)
 	if _, err := runtime.CreateRendererChat(map[string]any{
 		"tabId": "steer-regression-tab", "chatId": "steer-regression-chat", "operationId": "steer-regression-create",
 		"title": "Steer regression", "cwd": root, "providerId": "mock", "currentModelId": "mock-deterministic",

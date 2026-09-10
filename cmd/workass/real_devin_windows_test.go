@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"workass/internal/acp"
+	"workass/internal/chat"
 	"workass/internal/httpserve"
 	"workass/internal/wire"
 )
@@ -23,6 +24,14 @@ import (
 // provider selection, actor admission, frozen wire delivery, and durable
 // projection as one path.
 func TestRealWindowsDaemonWireDevinTurn(t *testing.T) {
+	runRealWindowsDaemonWireDevinTurn(t, false)
+}
+
+func TestRealWindowsDevinStopWhileAnotherActorSaves(t *testing.T) {
+	runRealWindowsDaemonWireDevinTurn(t, true)
+}
+
+func runRealWindowsDaemonWireDevinTurn(t *testing.T, cancelTurn bool) {
 	if os.Getenv("WORKASS_REAL_DEVIN") != "1" {
 		t.Skip("set WORKASS_REAL_DEVIN=1 on a Windows Devin installation")
 	}
@@ -96,11 +105,20 @@ func TestRealWindowsDaemonWireDevinTurn(t *testing.T) {
 		t.Fatalf("real Devin daemon created a native session before input: %#v", session)
 	}
 
-	client.invoke(t, 2, "job:start", map[string]any{
+	prompt := "Reply with a short acknowledgement."
+	if cancelTurn {
+		prompt = "Cancellation diagnostic only. Immediately run PowerShell: Start-Sleep -Seconds 60. Do not read files, change files, or do other work. The client will cancel this turn."
+	}
+	startArgs := map[string]any{
 		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "sessionId": sessionID, "providerId": "devin",
-		"prompt":      "Reply with a short acknowledgement.",
+		"prompt":      prompt,
 		"operationId": "real-wire-devin:turn", "userMessageId": "real-wire-devin:user", "assistantMessageId": "real-wire-devin:assistant",
-	})
+	}
+	if cancelTurn {
+		startArgs["modelId"] = "claude-opus-4-8-high"
+		startArgs["modeId"] = "bypass"
+	}
+	client.invoke(t, 2, "job:start", startArgs)
 	startReply := client.waitReply(t, 2, 120*time.Second)
 	if startReply.Error != nil {
 		t.Fatalf("real Devin daemon turn admission failed: %s", *startReply.Error)
@@ -109,8 +127,66 @@ func TestRealWindowsDaemonWireDevinTurn(t *testing.T) {
 	if jobID == "" {
 		t.Fatalf("real Devin daemon first input was not admitted: %#v", startReply.Result)
 	}
-	end := client.waitJobEvent(t, jobID, "end", 180*time.Second)
+	var cancelledAt time.Time
+	if cancelTurn {
+		deadline := time.Now().Add(90 * time.Second)
+		for {
+			event := client.waitJobEvent(t, jobID, "acp", time.Until(deadline))
+			if fieldString(mapFromAnyMain(event["event"]), "kind") == "tool" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("native tool did not start")
+			}
+		}
+		blockedEngine, err := chat.NewEngine("blocked-save-chat")
+		if err != nil {
+			t.Fatal(err)
+		}
+		entered, release, committed := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+		providerChats.mu.Lock()
+		providerChats.actors["blocked-save-chat"] = &providerChatActor{engine: blockedEngine}
+		providerChats.mu.Unlock()
+		defer func() {
+			close(release)
+			if err := <-committed; err != nil {
+				t.Errorf("blocked fixture commit: %v", err)
+			}
+			providerChats.mu.Lock()
+			delete(providerChats.actors, "blocked-save-chat")
+			providerChats.mu.Unlock()
+		}()
+		go func() {
+			committed <- blockedEngine.ApplyPrepared(chat.InitializeChat{
+				Presentation: chat.PresentationState{TabID: "blocked-save-tab"}, OperationID: "blocked-create", Digest: "blocked-digest",
+			}, func() error { close(entered); <-release; return nil })
+		}()
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("fixture did not enter actor storage")
+		}
+		cancelledAt = time.Now()
+		client.invoke(t, 3, "job:cancel", jobID)
+		reply := client.waitReply(t, 3, 5*time.Second)
+		if reply.Error != nil || mapFromAnyMain(reply.Result)["cancelled"] != true {
+			t.Fatal("native cancellation was not accepted")
+		}
+		t.Logf("native cancellation wire reply_ms=%d", time.Since(cancelledAt).Milliseconds())
+	}
+	terminalTimeout := 180 * time.Second
+	if cancelTurn {
+		terminalTimeout = 20 * time.Second
+	}
+	end := client.waitJobEvent(t, jobID, "end", terminalTimeout)
 	job := mapFromAnyMain(end["job"])
+	if cancelTurn {
+		if fieldString(job, "stopReason") != "cancelled" {
+			t.Fatal("native terminal was not cancelled")
+		}
+		t.Logf("native cancellation wire terminal_ms=%d unrelated_actor_still_blocked=true", time.Since(cancelledAt).Milliseconds())
+		return
+	}
 	if fieldString(job, "providerId") != "devin" || fieldString(job, "status") != "done" {
 		t.Fatalf("real Devin daemon terminal receipt provider=%q status=%q stopReason=%q",
 			fieldString(job, "providerId"), fieldString(job, "status"), fieldString(job, "stopReason"))
