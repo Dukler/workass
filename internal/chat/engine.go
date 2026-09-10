@@ -76,6 +76,18 @@ func (e *Engine) Apply(command Command) error {
 func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if admission, ok := command.(TurnAdmitted); ok && prepare == nil && !e.state.Deleted {
+		// StartTurn commits admission before publishing provider output, then
+		// returns the same receipt to the coordinator. That second observation
+		// is already durable. Match the reducer's exact no-op before cloning or
+		// checkpointing the whole history on every turn.
+		foreground := e.state.Foreground
+		if foreground != nil && foreground.OperationID == admission.OperationID &&
+			foreground.Status == ForegroundRunning && foreground.Turn == admission.Turn &&
+			admission.Accepted && !admission.Ambiguous {
+			return nil
+		}
+	}
 	if observation, ok := command.(ReconcileObligation); ok && prepare == nil && !e.state.Deleted {
 		// A periodic observation has no operation receipt to commit. Run the
 		// obligation-only reducer on an isolated status copy first: unchanged
