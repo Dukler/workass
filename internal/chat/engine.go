@@ -104,12 +104,10 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 	}
 	if e.store != nil {
 		var persistErr error
-		if hasProviderStore {
-			if isProviderEvent {
-				persistErr = providerStore.commitProviderEvent(e.state.Revision, next, providerEvent)
-			} else {
-				persistErr = e.store.Save(next)
-			}
+		if hasProviderStore && isProviderEvent {
+			persistErr = providerStore.commitProviderEvent(e.state.Revision, next, providerEvent)
+		} else if prepare == nil {
+			persistErr = e.persistCommand(next, command)
 		} else {
 			persistErr = e.store.Save(next)
 		}
@@ -139,7 +137,7 @@ func (e *Engine) ClaimNext() (Effect, bool, error) {
 			return nil, false, &storeError{"claim did not produce exactly one provider effect"}
 		}
 		if e.store != nil {
-			if err := e.store.Save(next); err != nil {
+			if err := e.persistCommand(next, ClaimEffect{EffectID: entry.ID}); err != nil {
 				return nil, false, err
 			}
 		}
@@ -171,7 +169,7 @@ func (e *Engine) ClaimEffect(effectID string) (Effect, bool, error) {
 			return nil, false, &storeError{"claim did not produce exactly one provider effect"}
 		}
 		if e.store != nil {
-			if err := e.store.Save(next); err != nil {
+			if err := e.persistCommand(next, ClaimEffect{EffectID: effectID}); err != nil {
 				return nil, false, err
 			}
 		}

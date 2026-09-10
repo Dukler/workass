@@ -48,6 +48,7 @@ type providerEventJournalRecord struct {
 	BaseRevision uint64                `json:"baseRevision"`
 	Revision     uint64                `json:"revision"`
 	Command      ProviderEventReceived `json:"command"`
+	Cancel       *cancelJournalCommand `json:"cancel,omitempty"`
 }
 
 type stateEnvelope struct {
@@ -278,11 +279,11 @@ func providerEventJournalPath(actorPath string) string {
 }
 
 func encodeProviderEventJournalFrame(record providerEventJournalRecord) ([]byte, error) {
-	if record.Version != providerEventJournalVersion || record.Revision == 0 || record.BaseRevision != record.Revision-1 {
+	if record.Revision == 0 || record.BaseRevision != record.Revision-1 {
 		return nil, errors.New("provider event journal record has invalid version or revision")
 	}
-	if !providerEventJournalEligible(record.Command.Event.Kind) {
-		return nil, errors.New("provider event is not eligible for the durable stream journal")
+	if err := record.validateCommand(); err != nil {
+		return nil, err
 	}
 	payload, err := json.Marshal(record)
 	if err != nil {
@@ -361,9 +362,9 @@ func appendProviderEventJournalFrame(actorPath string, frame []byte, terminal bo
 	}
 	journalLimit := int64(providerEventJournalCheckpointBytes)
 	if terminal {
-		// Before a terminal append, every valid ordinary journal is at most the
-		// checkpoint threshold. Permit exactly one bounded terminal record beyond
-		// it; a second terminal cannot be contiguous for the same foreground turn.
+		// Cancellation commands and the terminal receipt may pass the ordinary
+		// checkpoint threshold. Keep this urgent region bounded as well; a later
+		// ordinary mutation checkpoints the combined stream and control records.
 		journalLimit += int64(providerEventJournalMaxRecordBytes) + int64(len(providerEventJournalMagic)) + 8
 	}
 	if originalSize+additional > journalLimit {
@@ -478,14 +479,11 @@ func replayProviderEventJournal(actorPath string, state State) (State, error) {
 		if err := json.Unmarshal(payload, &record); err != nil {
 			return State{}, fmt.Errorf("decode provider event journal record: %w", err)
 		}
-		if record.Version != providerEventJournalVersion {
-			return State{}, fmt.Errorf("unsupported provider event journal version %d", record.Version)
-		}
 		if record.Revision == 0 || record.BaseRevision != record.Revision-1 {
 			return State{}, errors.New("provider event journal record revision is invalid")
 		}
-		if !providerEventJournalEligible(record.Command.Event.Kind) {
-			return State{}, errors.New("provider event journal contains an ineligible event")
+		if err := record.validateCommand(); err != nil {
+			return State{}, err
 		}
 		if record.Revision <= state.Revision {
 			continue
@@ -493,10 +491,21 @@ func replayProviderEventJournal(actorPath string, state State) (State, error) {
 		if record.BaseRevision != state.Revision {
 			return State{}, fmt.Errorf("provider event journal revision gap: got base %d, want %d", record.BaseRevision, state.Revision)
 		}
-		if record.Command.Event.Identity.ChatID != state.ChatID {
+		if record.Cancel != nil {
+			command, err := record.Cancel.command()
+			if err != nil {
+				return State{}, err
+			}
+			if record.Cancel.ChatID != state.ChatID || !cancellationCommand(state, command) {
+				return State{}, errors.New("cancel journal changed chat or effect ownership")
+			}
+			state, _, err = Reduce(state, command)
+			if err != nil {
+				return State{}, err
+			}
+		} else if record.Command.Event.Identity.ChatID != state.ChatID {
 			return State{}, errors.New("provider event journal belongs to another chat")
-		}
-		if record.Command.Event.Kind == provider.EventTurnTerminal {
+		} else if record.Command.Event.Kind == provider.EventTurnTerminal {
 			// Terminal delivery may promote an explicitly queued turn and therefore
 			// produce a durable outbox effect. Replay through the canonical reducer so
 			// that effect is reconstructed exactly once after a crash.

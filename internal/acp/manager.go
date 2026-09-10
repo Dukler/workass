@@ -39,11 +39,10 @@ type Manager struct {
 	// pointers. Late provider callbacks must remain fail-closed for the daemon
 	// lifetime, but terminal tombstones must not pin every historical lane.
 	providerLaneClosedJobs map[string]struct{}
-	// providerPublicationMu spans normalized observation, durable ACK, and the
-	// frozen Broadcast call. It is deliberately non-reentrant: a publication
-	// callback must not synchronously re-enter Manager.emit, or it could publish
-	// a later sequence ahead of the callback that owns this boundary.
+	// providerPublicationMu protects the short-lived per-chat publication lock
+	// registry only. It is never held across a durable ACK or Broadcast.
 	providerPublicationMu       sync.Mutex
+	providerPublications        map[string]*providerPublication
 	providerAdmissionMu         sync.Mutex
 	providerAdmissions          map[string]map[string]any
 	providerAdmissionOrder      []string
@@ -2187,12 +2186,17 @@ func (m *Manager) emit(channel string, payload any) {
 	if m == nil {
 		return
 	}
-	// Keep normalized observation, its durable actor ACK, and frozen publication
-	// in one non-reentrant critical section. Without this boundary a later
-	// provider callback can receive its ACK and enter Broadcast while an earlier
-	// callback is still finishing its own publication.
-	m.providerPublicationMu.Lock()
-	defer m.providerPublicationMu.Unlock()
+	// Keep observation, durable ACK and frozen publication ordered within the
+	// owning chat, including across its provider lanes. A manager-wide lock here
+	// made every chat wait for the slowest actor commit, including already-read
+	// native cancellation results.
+	// This boundary remains non-reentrant for callbacks from the same chat.
+	chatID := ""
+	if lane := m.providerLaneForFrozenPayload(mapFromAny(payload)); lane != nil {
+		chatID = lane.identity.ChatID
+	}
+	publication := m.lockProviderPublication(chatID)
+	defer m.unlockProviderPublication(chatID, publication)
 	if err := m.observeProviderLaneEvent(channel, payload); err != nil {
 		fields := map[string]any{"channel": channel, "error": redactSensitiveText(err.Error())}
 		if envelope := mapFromAny(payload); len(envelope) > 0 {
