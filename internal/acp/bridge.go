@@ -820,10 +820,18 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 	adapter := providerAdapterForID(b.providerID)
 	if job != nil {
 		job.startupTiming.mark(startupUpdate)
+		if job.startupTiming != nil {
+			job.startupTiming.lastUpdate.Store(int64(time.Since(job.startupTiming.started)) + 1)
+		}
 		switch kind {
 		case "agent_message_chunk", "agent_thought_chunk":
 			if textFromContent(update["content"]) != "" {
 				job.startupTiming.mark(startupContent)
+				if kind == "agent_thought_chunk" {
+					job.startupTiming.mark(startupThought)
+				} else {
+					job.startupTiming.mark(startupText)
+				}
 			}
 		case "tool_call", "tool_call_update":
 			job.startupTiming.mark(startupTool)
@@ -1373,6 +1381,7 @@ func (b *Bridge) flushStdout(job *Job) {
 			payload["phase"] = phase
 		}
 		b.manager.emit("job:event", payload)
+		job.startupTiming.mark(startupContentPublished)
 	}
 }
 
@@ -1386,6 +1395,7 @@ func (b *Bridge) flushThinking(job *Job) {
 	b.manager.jobMu.Unlock()
 	if text != "" {
 		b.manager.emit("job:event", map[string]any{"type": "acp", "id": job.ID, "event": map[string]any{"kind": "thinking", "text": text}})
+		job.startupTiming.mark(startupContentPublished)
 	}
 }
 
@@ -1416,9 +1426,11 @@ func (b *Bridge) flushJobBuffers(job *Job) {
 			payload["phase"] = stdoutPhase
 		}
 		b.manager.emit("job:event", payload)
+		job.startupTiming.mark(startupContentPublished)
 	}
 	if thinking != "" {
 		b.manager.emit("job:event", map[string]any{"type": "acp", "id": job.ID, "event": map[string]any{"kind": "thinking", "text": thinking}})
+		job.startupTiming.mark(startupContentPublished)
 	}
 }
 

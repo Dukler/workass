@@ -56,6 +56,11 @@ func agentMCPTools() []map[string]any {
 		}
 	}
 	return []map[string]any{
+		tool("workass_get_chat_diagnostics", "Read live and recent turn timing metadata for one exact local or mounted remote chat: host preparation, prompt write, first thinking/text/tool, Stop delivery and terminal reply. Includes actor queue/permission counts. No transcript contents, provider calls, polling, or UI changes. Timings cover the current daemon lifetime; omitted stages are unobserved, and old turns cannot be reconstructed. Returns at most 20 of the newest 256 recorded turns.", object(map[string]any{
+			"tab_id":  str("Exact tab id from workass_list_chats."),
+			"chat_id": str("Exact paired chat id from workass_list_chats."),
+			"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": "Newest matching turns; defaults to 5."},
+		}, "tab_id", "chat_id"), true, false, true, false),
 		tool("workass_list_chats", "List local chats and chats mounted from connected Workass machines with exact tab_id/chat_id targets, machine identity, provider/model/effort/permission state, and queue status. Remote targets use the returned machine-tagged ids. Use before controlling a chat; never infer a target from title or position.", object(map[string]any{}), true, false, true, false),
 		tool("workass_list_update_targets", "List this Workass installation and mounted remote machines by exact machine_id. This does not check, download, stage, install, relaunch, or otherwise change an update.", object(map[string]any{}), true, false, true, false),
 		tool("workass_get_update_status", "Read the exact machine's current application-updater state plus bounded, secret-redacted failure evidence from its durable receipt, recovery journal, progress receipt, and worker-log tail. This never checks for, downloads, stages, installs, retries, or relaunches an update.", object(map[string]any{
@@ -207,6 +212,8 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		return agentMCPErrorResult("Workass tools use operation_id; operationId is not accepted"), nil
 	}
 	switch call.Name {
+	case "workass_get_chat_diagnostics":
+		method = "chat.diagnostics"
 	case "workass_list_chats":
 		method = "chat.list"
 	case "workass_list_update_targets":

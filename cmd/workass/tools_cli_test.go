@@ -86,7 +86,7 @@ func TestToolsCLICatalogCallAndMutationReceiptsWithoutMCP(t *testing.T) {
 	if len(catalog["tools"].([]any)) != len(agentMCPTools())+len(browserMCPTools()) {
 		t.Fatal("CLI did not expose the full catalog")
 	}
-	for _, name := range []string{"workass_read_chat", "workass_browser_snapshot", "workass_apply_update", "workass_host_artifact", "workass_register_external_work"} {
+	for _, name := range []string{"workass_get_chat_diagnostics", "workass_read_chat", "workass_browser_snapshot", "workass_apply_update", "workass_host_artifact", "workass_register_external_work"} {
 		schema, err := run([]string{"list", name}, "")
 		if err != nil || schema["name"] != name {
 			t.Fatalf("missing schema %s", name)
@@ -97,6 +97,10 @@ func TestToolsCLICatalogCallAndMutationReceiptsWithoutMCP(t *testing.T) {
 		t.Fatalf("direct read failed: %v", err)
 	}
 	arguments := `{"tab_id":"mcp-tab","chat_id":"mcp-chat","title":"CLI renamed","operation_id":"cli-rename-once"}`
+	diagnostics, err := run([]string{"call", "workass_get_chat_diagnostics"}, `{"tab_id":"mcp-tab","chat_id":"mcp-chat","limit":1}`)
+	if err != nil || diagnostics["chatId"] != "mcp-chat" || diagnostics["available"] == nil || diagnostics["actor"] == nil {
+		t.Fatalf("diagnostics must report measurement availability explicitly: %v %#v", err, diagnostics)
+	}
 	if _, err := run([]string{"call", "workass_rename_chat"}, arguments); err != nil {
 		t.Fatal(err)
 	}

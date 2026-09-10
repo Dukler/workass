@@ -59,8 +59,22 @@ func (h *agentControlHandler) fenceActor(tabID, chatID string) error {
 	if h == nil || h.chats == nil || h.chats.providerChats == nil {
 		return errors.New("Workass agent control is unavailable")
 	}
-	_, _, err := h.chats.providerChats.exactActor(tabID, chatID)
-	return err
+	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
+	if tabID == "" || chatID == "" {
+		return errors.New("exact tab and chat ids are required")
+	}
+	actor, err := h.chats.providerChats.actor(chatID)
+	if err != nil {
+		return err
+	}
+	identity := actor.engine.IdentitySnapshot()
+	if identity.Deleted {
+		return errors.New("chat was deleted")
+	}
+	if strings.TrimSpace(identity.TabID) != tabID {
+		return errors.New("tab id does not own the requested chat")
+	}
+	return nil
 }
 
 func (h *agentControlHandler) authorizeActorOwner(ownerKey, tabID, chatID, message string) error {
@@ -97,7 +111,7 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			return nil, errors.New("Workass updater MCP router has no local renderer")
 		}
 		return h.remoteChats.Call(r.Context(), request.Method, copyRemoteAgentRouteParams(params))
-	case "chat.list", "chat.read", "chat.create", "chat.rename", "chat.configure", "chat.focus", "chat.delete", "chat.send", "chat.cancel":
+	case "chat.list", "chat.read", "chat.diagnostics", "chat.create", "chat.rename", "chat.configure", "chat.focus", "chat.delete", "chat.send", "chat.cancel":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "Workass chat control caller is not an owned ACP session"); err != nil {
 			return nil, err
 		}
@@ -129,6 +143,8 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			return h.remoteChats.Call(r.Context(), request.Method, forwarded)
 		}
 		switch request.Method {
+		case "chat.diagnostics":
+			return h.chats.providerChats.TurnDiagnostics(params)
 		case "chat.read":
 			return h.chats.read(params)
 		case "chat.create":

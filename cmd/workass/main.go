@@ -903,7 +903,8 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 		}
 		chatControl.providerChats = providerChats
 		registerAcpHandlers(hub, acpManager, state.stateDir, sessionState, chatControl, providerChats)
-		count += 23
+		registerChatDiagnosticsWire(hub, providerChats)
+		count += 24
 	}
 	return count
 }

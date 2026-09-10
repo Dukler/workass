@@ -14,9 +14,11 @@ import (
 )
 
 type Manager struct {
-	opts          Options
-	toolContextMu sync.Mutex
-	toolContexts  map[string]sessionToolContext
+	diagnosticsMu   sync.Mutex
+	turnDiagnostics []turnDiagnostic
+	opts            Options
+	toolContextMu   sync.Mutex
+	toolContexts    map[string]sessionToolContext
 
 	mu                      sync.Mutex
 	stream                  streamStats
@@ -1224,6 +1226,12 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 	m.jobs[id] = job
 	m.jobWG.Add(1)
 	m.mu.Unlock()
+	m.retainTurnDiagnostic(job)
+	defer func() {
+		if !workerStarted {
+			job.startupTiming.finish("admission_failed")
+		}
+	}()
 	if liveSession {
 		// Make the exact reserved owner discoverable before the actor commit can
 		// become visible to another control request. Bridge.Steer waits for the
@@ -1292,6 +1300,11 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	defer m.jobWG.Done()
 	job.startupTiming.mark(startupWorker)
 	defer func() {
+		outcome := job.Status
+		if job.StopReason == "cancelled" {
+			outcome = "cancelled"
+		}
+		job.startupTiming.finish(outcome)
 		if fields := job.startupTiming.fields(); fields != nil {
 			fields["jobId"] = job.ID
 			fields["providerId"] = job.ProviderID
@@ -1820,6 +1833,7 @@ func (m *Manager) CancelJobResult(id string) JobCancelResult {
 		return JobCancelResult{Reason: "idle"}
 	}
 	job.cancelled = true
+	job.startupTiming.mark(startupCancelRequested)
 	admitting := job.admitting
 	cancelPreparation := job.cancelPreparation
 	m.mu.Unlock()
@@ -1847,7 +1861,11 @@ func (b *Bridge) cancelDispatchedJob(job *Job) {
 		return
 	}
 	if job.cancelDispatched.CompareAndSwap(false, true) {
-		b.notify("session/cancel", map[string]any{"sessionId": job.SessionID})
+		if b.notify("session/cancel", map[string]any{"sessionId": job.SessionID}) {
+			job.startupTiming.mark(startupCancelWritten)
+		} else {
+			job.startupTiming.mark(startupCancelWriteFailed)
+		}
 	}
 }
 
@@ -3285,6 +3303,9 @@ func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, o
 		job.startupTiming.mark(startupPrepared)
 	}
 	res, err := b.requestPrompt(ctx, job, params)
+	if err == nil && job != nil {
+		job.startupTiming.mark(startupTerminalReply)
+	}
 	if directJob != nil {
 		b.clearJobForSession(sessionID, directJob)
 	}
