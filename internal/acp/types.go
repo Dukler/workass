@@ -582,6 +582,7 @@ type Job struct {
 	// admitted request immutable lets catalog and subagent readers safely inherit
 	// it while the provider turn is running.
 	startOpts             JobStartOptions
+	startupTiming         *turnStartupTiming
 	inputDispatched       atomic.Bool
 	cancelDispatched      atomic.Bool
 	inputDispatchBoundary chan struct{}

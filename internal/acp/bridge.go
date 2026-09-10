@@ -819,6 +819,15 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 	kind := asString(update["sessionUpdate"])
 	adapter := providerAdapterForID(b.providerID)
 	if job != nil {
+		job.startupTiming.mark(startupUpdate)
+		switch kind {
+		case "agent_message_chunk", "agent_thought_chunk":
+			if textFromContent(update["content"]) != "" {
+				job.startupTiming.mark(startupContent)
+			}
+		case "tool_call", "tool_call_update":
+			job.startupTiming.mark(startupTool)
+		}
 		job.touchActivity()
 		if kind != "_workass_input_consumed" {
 			if err := b.acknowledgeStandardACPInput(job, sessionID); err != nil {
