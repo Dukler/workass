@@ -44,6 +44,30 @@ interface StoreShape {
   routeAgentRequest(request: AgentRouteRequest): Promise<unknown>;
 }
 
+test('remote turn diagnostics reads the owning daemon without history hydration or UI changes', async (t) => {
+  const { Store } = await loadStore(t);
+  const subject = new Store() as StoreShape & {
+    machines: { linkFor(id: string): { invoke<T>(channel: string, payload: unknown): Promise<T> } | undefined };
+    ensureFullHistory(): Promise<void>;
+  };
+  subject.state.chats = [remoteChat({ historyComplete: false, messageCount: 5000 })];
+  subject.ensureFullHistory = async () => { throw new Error('diagnostics must not read history'); };
+  const calls: unknown[] = [];
+  subject.machines = { linkFor: (id) => id === machineId ? { invoke: async <T>(channel: string, payload: unknown) => {
+    calls.push({ channel, payload });
+    return { tabId: 'tab-hello', chatId: 'chat-hello', turns: [{ jobId: 'diagnostic-job', firstThinkingMs: 3500 }] } as T;
+  } } : undefined };
+  const params = { tab_id: tabId, chat_id: chatId, machine_id: machineId, limit: 3 };
+  const result = await subject.routeAgentRequest(request('chat.diagnostics', params)) as Record<string, unknown>;
+  assert.deepEqual(calls, [{ channel: 'chat:turn-diagnostics', payload: { tab_id: 'tab-hello', chat_id: 'chat-hello', limit: 3 } }]);
+  assert.equal(result.chatId, chatId);
+  assert.equal((result.turns as Array<Record<string, unknown>>)[0].jobId, tagId(machineId, 'diagnostic-job'));
+  assert.equal(subject.state.activeId, null);
+  assert.equal(subject.state.chats[0].messages.length, 0);
+  await assert.rejects(subject.routeAgentRequest(request('chat.diagnostics', { ...params, chat_id: tagId('wrong', 'chat-hello') })), /exact/);
+  assert.equal(calls.length, 1);
+});
+
 test('remote MCP Stop delivers the exact job through the normal cancellation router without loading history', async (t) => {
   const { Store, setMachineRouter } = await loadStore(t);
   const subject = new Store();

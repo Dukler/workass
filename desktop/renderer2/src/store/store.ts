@@ -2829,6 +2829,18 @@ export class Store {
         return { chats: this.agentRemoteChatList() };
       case 'chat.read':
         return this.agentRemoteChatRead(params);
+      case 'chat.diagnostics': {
+        const { chat, machineId } = this.exactRemoteAgentChat(params);
+        const link = this.machines?.linkFor(machineId);
+        if (!link) throw new Error(`remote machine ${machineId} is unavailable`);
+        // Ask the owning daemon directly; never load history or infer timing
+        // from this controller's cached transcript or animation state.
+        const result = await link.invoke<Record<string, unknown>>('chat:turn-diagnostics', {
+          tab_id: localId(chat.id), chat_id: localId(chat.chatId!),
+          ...(params.limit === undefined ? {} : { limit: params.limit }),
+        });
+        return { ...tagPayload(machineId, result), machineId };
+      }
       case 'chat.send':
         return this.agentRemoteChatSend(params);
       case 'chat.cancel': {

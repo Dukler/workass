@@ -257,6 +257,7 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 	return map[string]phaseCManagerRule{
 		"cmd/workass/agent_control.go:ownerAuthorized:ValidateAgentOwner":                                   {1, "owner authorization after actor fencing"},
 		"cmd/workass/agent_control.go:call:AgentCatalog":                                                    {1, "actor-authorized catalog projection"},
+		"cmd/workass/chat_diagnostics.go:TurnDiagnostics:TurnDiagnostics":                                 {1, "exact actor-fenced, bounded timing-only executor read"},
 		"cmd/workass/chat_control.go:authorize:ValidateAgentOwner":                                          {1, "owner authorization after actor fencing"},
 		"cmd/workass/chat_control.go:resolveControls:Catalog":                                               {1, "provider catalog lookup"},
 		"cmd/workass/main.go:registerAcpHandlers:LiveSession":                                               {1, "known transient session lookup after actor route"},
