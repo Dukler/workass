@@ -50,6 +50,7 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?, RemoteLane?]> = 
   ['appChatReset', 'app-chat:reset'],
   ['appChatNewSession', 'app-chat:new-session'],
   ['appChatRefreshPlanUsage', 'app-chat:refresh-plan-usage', (a) => [{ providerId: a[0] }]],
+  ['appChatUseRateLimitReset', 'app-chat:use-rate-limit-reset', (a) => [{ providerId: a[0], sessionId: a[1], idempotencyKey: a[2], creditId: a[3] }]],
   ['appChatCloseSession', 'app-chat:close-session'],
   ['appChatDetectAcp', 'app-chat:detect-acp', (a) => [a[0] ?? {}]],
   ['appChatSteer', 'app-chat:steer', (a) => [{
@@ -228,7 +229,25 @@ export function createMachineRouter(options: MachineRouterOptions): WorkassApi {
     };
   }
 
-  return out as WorkassApi;
+  // A Proxy keeps methods added to the local bridge after this router was
+  // created visible to feature detection (`has`) and calls. Without it a
+  // router built before the bridge was ready permanently hides those methods.
+  return new Proxy(out, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'string' && !(prop in target)) {
+        const fn = (local() as Record<string, unknown> | undefined)?.[prop];
+        if (typeof fn === 'function') return fn;
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+    has(target, prop) {
+      if (typeof prop === 'string' && !(prop in target)) {
+        const fn = (local() as Record<string, unknown> | undefined)?.[prop];
+        if (typeof fn === 'function') return true;
+      }
+      return Reflect.has(target, prop);
+    },
+  }) as WorkassApi;
 }
 
 /** method → channel, so a replayed subscription can reach the remote sink
