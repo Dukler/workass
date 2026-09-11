@@ -123,3 +123,80 @@ func TestCompletedAppChatJobsArePruned(t *testing.T) {
 		t.Fatalf("completed job %s was retained", jobID(job))
 	}
 }
+
+func TestContextDeltaPromptPreservesSessionAndCurrentRequestBoundary(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(Options{})
+	t.Cleanup(func() { manager.Reset() })
+	prompt := manager.buildAppChatPrompt(JobStartOptions{HumanAuthored: true, ContextDelta: []providercontract.ContextMessage{
+		{LedgerSequence: 113, Role: "user", Text: "missing question", Inert: true},
+		{LedgerSequence: 116, Role: "assistant", Text: "missing answer", Inert: true},
+	}}, "current request")
+	if !strings.Contains(prompt, "same native session") || !strings.Contains(prompt, "User: missing question") ||
+		!strings.Contains(prompt, "Assistant: missing answer") || !strings.Contains(prompt, "User request:\ncurrent request") ||
+		strings.Contains(prompt, "newly created") || strings.Contains(prompt, "one-time") || strings.Contains(prompt, "history was omitted") {
+		t.Fatal("delta prompt misrepresented its session or historical context")
+	}
+	next := manager.buildAppChatPrompt(JobStartOptions{HumanAuthored: true}, "next request")
+	if strings.Contains(next, "missing question") || strings.Contains(next, "conversation_transcript") {
+		t.Fatal("delta leaked to another turn")
+	}
+}
+
+func TestContextDeltaTraversesRuntimeIntoExactResumedMockThread(t *testing.T) {
+	t.Parallel()
+	fixture := newPersistentMockFixture(t, "resume")
+	first, events := fixture.newManager()
+	session := fixture.newSession(t, first)
+	fixture.runTurn(t, first, events, session.SessionID, "original-native-history")
+	binding, ok := first.nativeSessions.get("native-tab", "native-chat", "mock")
+	if !ok {
+		t.Fatal("missing original binding")
+	}
+	first.Reset()
+	manager, _ := fixture.newManager()
+	t.Cleanup(func() { manager.Reset() })
+	lane, err := (managerLaneFactory{manager: manager, providerID: "mock"}).Resume(context.Background(), providercontract.ResumeLaneRequest{
+		Identity: bindingLaneIdentity(binding), Thread: bindingThreadRef(binding), Owner: providercontract.AttachmentOwner{TabID: "native-tab"}, CWD: binding.CWD,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := lane.(*managerLane)
+	terminal := make(chan providercontract.Event, 2)
+	go func() {
+		for event := range lane.Events() {
+			managed.AcknowledgeDurableEvent(event.Identity.Sequence, nil)
+			if event.Kind == providercontract.EventTurnTerminal {
+				terminal <- event
+			}
+		}
+	}()
+	for i, op := range []string{"delta-turn", "plain-turn"} {
+		input := providercontract.TurnInput{OperationID: providercontract.OperationID(op), Text: op}
+		if i == 0 {
+			input.ContextDelta = []providercontract.ContextMessage{{EventID: "missing", LedgerSequence: 3, Role: "user", Text: "only-missing-history", Inert: true}}
+		}
+		if _, err := lane.Delivery().StartTurn(context.Background(), input); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case event := <-terminal:
+			if event.Terminal == nil || event.Terminal.Status != "completed" {
+				t.Fatalf("mock terminal: %#v", event.Terminal)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("resumed mock did not finish")
+		}
+	}
+	if !lane.Thread().Equal(bindingThreadRef(binding)) || persistentMockSessionCount(t, fixture.sessionFile) != 1 {
+		t.Fatal("delta replaced the native thread")
+	}
+	trace := strings.Join(readNativeMockTrace(t, fixture.traceFile), "\n")
+	if !strings.Contains(trace, "session/resume") || strings.Count(trace, "only-missing-history") != 1 {
+		t.Fatalf("missing delta was not delivered exactly once: %s", trace)
+	}
+	if err := lane.Detach(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}

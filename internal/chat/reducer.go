@@ -1628,6 +1628,11 @@ func reduceSelectLane(state *State, command SelectLane) ([]Effect, error) {
 				existing.Phase = LaneDetached
 			}
 		}
+		if existing.Phase == LaneBlocked && existing.LastError == provider.ErrorUnsupportedCapability &&
+			existing.PendingImport == nil && !existing.Thread.IsZero() && existing.Attachment != nil {
+			existing.Phase = LaneReady
+			existing.LastError = ""
+		}
 		state.Lanes[identity.ID] = existing
 	} else {
 		lane := LaneState{
@@ -1657,7 +1662,7 @@ func laneCanUseInitialSeed(state State, lane LaneState) bool {
 		return false
 	}
 	for _, record := range lane.Coverage {
-		if record.Status == CoverageNativeSeen || record.Status == CoverageImported || record.Status == CoverageSeeded {
+		if record.Status == CoverageNativeSeen || record.Status == CoverageImported || record.Status == CoverageSeeded || record.Status == CoveragePromptSeen || record.Status == CoverageUncertain {
 			return false
 		}
 	}
@@ -2709,15 +2714,19 @@ func reduceInputConsumed(state *State, command InputConsumed) error {
 	} else if lane.Provision != nil {
 		return errors.New("deferred provider input was consumed without a durable thread receipt")
 	}
+	if state.Foreground.UserConsumed {
+		return nil
+	}
+	if err := commitContextDelta(state, &lane, state.Foreground.Input, CoveragePromptSeen); err != nil {
+		return err
+	}
+	state.Lanes[state.Foreground.LaneID] = lane
 	if lane.InitialSeedPending {
 		if err := commitInitialSeedCoverage(state, &lane, state.Foreground.Input); err != nil {
 			return err
 		}
 		lane.InitialSeedPending = false
 		state.Lanes[state.Foreground.LaneID] = lane
-	}
-	if state.Foreground.UserConsumed {
-		return nil
 	}
 	if _, err := appendForegroundUser(state); err != nil {
 		return err
@@ -3173,6 +3182,10 @@ func terminalizeInterruptedForeground(
 	observedAtUnixMS := time.Now().UnixMilli()
 
 	if !foreground.UserConsumed {
+		if err := commitContextDelta(state, &lane, foreground.Input, CoverageUncertain); err != nil {
+			return err
+		}
+		state.Lanes[foreground.LaneID] = lane
 		messageID := strings.TrimSpace(foreground.Input.Presentation.UserMessageID)
 		if messageID == "" {
 			messageID = fmt.Sprintf("message:%s:user", foreground.OperationID)
@@ -3897,17 +3910,11 @@ func drive(state *State) ([]Effect, error) {
 		}}, nil
 	case LaneReady:
 		if lane.CoveredThrough < state.LedgerHead() {
-			if lane.InitialSeedPending && lane.Context.ImportMode != provider.ContextImportNonSampling {
+			if lane.Context.ImportMode != provider.ContextImportNonSampling {
 				if len(state.Queue) == 0 || state.Queue[0].LaneID != target {
 					return nil, nil
 				}
 				return beginQueuedForeground(state, target, lane, false)
-			}
-			if lane.Context.ImportMode != provider.ContextImportNonSampling {
-				lane.Phase = LaneBlocked
-				lane.LastError = provider.ErrorUnsupportedCapability
-				state.Lanes[target] = lane
-				return nil, nil
 			}
 			batch, from, to, buildErr := buildContextBatch(*state, lane.CoveredThrough, lane.Context)
 			if buildErr != nil {
@@ -3954,6 +3961,17 @@ func beginQueuedForeground(state *State, target provider.LaneID, lane LaneState,
 		input.InitialSeedFrom = lane.CoveredThrough
 		input.InitialSeedThrough = state.LedgerHead()
 		input.InitialSeedDigest = seed.Digest
+	}
+	if !lane.InitialSeedPending && lane.CoveredThrough < state.LedgerHead() && lane.Context.ImportMode != provider.ContextImportNonSampling {
+		var err error
+		seed, err = buildContextDelta(*state, lane)
+		if err != nil {
+			lane.Phase = LaneBlocked
+			lane.LastError = provider.ErrorContextLimitReached
+			state.Lanes[target] = lane
+			return nil, nil
+		}
+		input.DeltaFrom, input.DeltaThrough, input.DeltaDigest = lane.CoveredThrough, state.LedgerHead(), seed.Digest
 	}
 	state.Queue = append([]QueueEntry(nil), state.Queue[1:]...)
 	rootAssistantID := strings.TrimSpace(input.Presentation.AssistantMessageID)
@@ -4783,7 +4801,11 @@ func outboxEntryForEffect(effect Effect) (OutboxEntry, bool, error) {
 	case StartTurnEffect:
 		input := effect.Input
 		input.Attachments = append([]provider.Attachment(nil), effect.Input.Attachments...)
-		if input.InitialSeedDigest != "" {
+		if input.DeltaDigest != "" {
+			if input.InitialSeedDigest != "" || effect.Seed.Digest != input.DeltaDigest || input.DeltaThrough <= input.DeltaFrom {
+				return OutboxEntry{}, false, errors.New("start-turn effect lost its immutable context delta")
+			}
+		} else if input.InitialSeedDigest != "" {
 			if effect.Seed.Digest != input.InitialSeedDigest || input.InitialSeedThrough <= input.InitialSeedFrom {
 				return OutboxEntry{}, false, errors.New("start-turn effect lost its immutable initial context seed")
 			}
@@ -4793,6 +4815,7 @@ func outboxEntryForEffect(effect Effect) (OutboxEntry, bool, error) {
 		return OutboxEntry{
 			ID: startTurnEffectID(effect.Input.OperationID), Kind: EffectStartTurn, Status: OutboxPending,
 			LaneID: effect.LaneID, OperationID: effect.Input.OperationID, Input: &input,
+			Batch: contextDeltaBatch(input, effect.Seed),
 		}, true, nil
 	case SteerTurnEffect:
 		input := QueueEntry{
@@ -4975,7 +4998,12 @@ func effectFromOutbox(state State, entry OutboxEntry) (Effect, error) {
 	case EffectStartTurn:
 		if entry.Input != nil && entry.Input.OperationID == entry.OperationID {
 			seed := ContextBatch{}
-			if entry.Input.InitialSeedDigest != "" {
+			if entry.Input.DeltaDigest != "" {
+				if err := validateContextDelta(*entry.Input, entry.Batch); err != nil {
+					return nil, err
+				}
+				seed = cloneContextBatch(*entry.Batch)
+			} else if entry.Input.InitialSeedDigest != "" {
 				var err error
 				seed, err = buildInitialSeedBatch(state, entry.Input.InitialSeedFrom, entry.Input.InitialSeedThrough)
 				if err != nil {

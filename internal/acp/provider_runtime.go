@@ -390,7 +390,11 @@ type managerLaneFactory struct {
 	providerID string
 }
 
-func (f managerLaneFactory) Create(ctx context.Context, request providercontract.CreateLaneRequest) (providercontract.Lane, providercontract.ThreadRef, error) {
+func (f managerLaneFactory) Create(ctx context.Context, request providercontract.CreateLaneRequest) (created providercontract.Lane, threadRef providercontract.ThreadRef, resultErr error) {
+	started := time.Now()
+	defer func() {
+		f.manager.recordLaneDiagnostic(request.Owner.TabID, request.Identity.ChatID, f.providerID, "create", started, resultErr)
+	}()
 	identity, opts, err := f.validateCreate(request)
 	if err != nil {
 		return nil, providercontract.ThreadRef{}, err
@@ -515,7 +519,12 @@ func validateCanonicalCreatedLane(proposed, canonical providercontract.LaneIdent
 	return nil
 }
 
-func (f managerLaneFactory) Resume(ctx context.Context, request providercontract.ResumeLaneRequest) (providercontract.Lane, error) {
+func (f managerLaneFactory) Resume(ctx context.Context, request providercontract.ResumeLaneRequest) (attached providercontract.Lane, resultErr error) {
+	started := time.Now()
+	defer func() {
+		f.manager.recordLaneDiagnostic(request.Owner.TabID, request.Identity.ChatID, f.providerID, "resume", started, resultErr,
+			request.Thread.RootID, request.Thread.HeadID)
+	}()
 	identity, opts, err := f.validateResume(request)
 	if err != nil {
 		return nil, err
@@ -1172,6 +1181,7 @@ func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontra
 		DeliveryCapabilities: &deliveryCapabilities,
 		Prompt:               input.Text, Images: images, ModelID: strings.TrimSpace(input.ModelID), ModeID: strings.TrimSpace(input.ModeID),
 		InitialContextSeed:  append([]providercontract.ContextMessage(nil), input.InitialContext...),
+		ContextDelta:        append([]providercontract.ContextMessage(nil), input.ContextDelta...),
 		HumanAuthored:       humanAuthored,
 		ProviderLaneManaged: true,
 		OperationID:         string(operationID),

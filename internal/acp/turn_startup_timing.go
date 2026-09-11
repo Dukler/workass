@@ -184,11 +184,13 @@ func (m *Manager) TurnDiagnostics(tabID, chatID string, limit int) map[string]an
 		fields["intervalsMs"] = delays
 		turns = append(turns, fields)
 	}
+	attachments := m.recentLaneDiagnostics(tabID, chatID, limit)
 	return map[string]any{
 		"schemaVersion": 1, "tabId": strings.TrimSpace(tabID), "chatId": strings.TrimSpace(chatID),
 		"machineId": m.opts.MachineID, "version": m.opts.Version,
 		"sampledAt": time.Now().UTC().Format(time.RFC3339Nano), "turns": turns,
-		"available": len(turns) > 0, "retention": "newest 256 recorded start attempts in this daemon lifetime; at most 20 returned for this exact chat",
+		"available": len(turns) > 0 || len(attachments) > 0, "retention": "newest 256 recorded start attempts in this daemon lifetime; at most 20 returned for this exact chat",
+		"laneAttachments": attachments, "attachmentRetention": "newest 64 completed create/resume attempts in this daemon lifetime; at most 20 returned for this exact chat",
 		"timingOrigin":       "Manager.StartJob; excludes controller/network transit and native session creation before admission",
 		"phaseMeaning":       "last observed boundary, not an inference about provider internal work; omitted timestamps were not observed",
 		"publicationMeaning": "content published by the daemon; does not measure network transit or controller paint",

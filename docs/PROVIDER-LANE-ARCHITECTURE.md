@@ -312,20 +312,28 @@ Switching is one durable transaction:
    request. Commit seeded/excluded coverage only when that exact input is
    consumed. This seed is never available again for that lane.
 5. Otherwise import unseen events through `ContextStrategy` using stable
-   operation ids and bounded, receipt-bearing chunks.
+   operation ids and bounded, receipt-bearing chunks. If this capability is
+   unavailable, attach only uncovered semantic messages to the next real user
+   input in the exact existing thread (user correction 2026-09-11). Persist
+   the complete bounded delta, range, and digest in that input's outbox.
 6. Reconcile ambiguous import results without resending unknown chunks.
-7. Advance coverage only for consumed seed events or confirmed import chunks.
+7. Advance confirmed coverage only for consumed seed/delta events or confirmed
+   import chunks. Record uncertain delta delivery separately and never resend
+   it. Definite rejection leaves the delta available to a later distinct input.
 8. Commit the active lane and dispatch that lane's next queued message.
 
 Until step 7, the previous lane remains the active, usable lane. Failure leaves
 the target lane blocked with a precise reason; it does not half-switch the chat.
 
-An established lane with a later nonempty handoff requires a non-sampling
-context-import capability. An ordinary prompt, synthetic user message,
-provider sampling turn, `session/load` of another thread, or transcript replay
-is not an import implementation for that gap. A provider without safe import
-may still join an established Workass chat only while its own lane has never
-consumed input, through step 4's one-time seed.
+An established lane's prompt delta is not a non-sampling import capability.
+It is inert missing history attached immediately before the current request,
+using that request's ordinary admission/consumption receipts. There is no extra
+provider turn and no replacement session. The complete missing delta must fit
+the existing 512-event/120000-byte history budget; otherwise retain the queued
+request and block with `ContextLimitReached`. Never silently truncate a later
+delta. Covered or uncertain events, UI/internal notices, and provider-private
+context are never replayed. Selection alone sends no prompt; the previous lane
+remains active until the target has a real input to dispatch.
 
 ## 7. History and compaction
 
@@ -335,9 +343,11 @@ switching, and deterministic ownership reconciliation.
 
 Provider-native context remains private to its lane:
 
-- same-provider resume sends no Workass transcript seed;
+- same-provider resume with no coverage gap sends no Workass history;
 - a provider lane that has never consumed input may receive the bounded
   first-input seed once; this never replaces or recovers an established lane;
+- an established lane lacking non-sampling import receives only uncovered
+  messages with its next real input, under §6;
 - native compaction stays in the same thread;
 - Workass stores coverage cursor, context usage, optional checkpoint id/hash,
   and verified lineage metadata;
@@ -455,11 +465,11 @@ thread resume plus readback; the payload is resent only after authoritative
 The current Codex native protocol can accept injected input but does not expose
 authoritative readback for that non-sampling import operation. Codex and Claude
 therefore advertise exact resume but not cross-provider context import today.
-That is an explicit capability boundary: a never-used Codex or Claude lane may
-receive the one-time first-input seed, but returning after another provider adds
-new unseen events blocks safely. The deterministic mock implements the full V1
-protocol and is the conformance oracle. No later prompt, replay, or replacement
-session disguises the missing provider capability.
+That is an explicit capability boundary: a never-used lane may receive the
+one-time first-input seed; an established lane uses §6's missing-message delta
+with its next real input. This does not advertise non-sampling import support.
+The deterministic mock implements the full V1 protocol and remains the
+conformance oracle. Neither delivery path replaces the native session.
 
 ## 9. Anti-slop enforcement
 

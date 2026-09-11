@@ -98,6 +98,8 @@ const (
 	CoverageNativeSeen CoverageStatus = "native_seen"
 	CoverageImported   CoverageStatus = "imported"
 	CoverageSeeded     CoverageStatus = "initial_seed"
+	CoveragePromptSeen CoverageStatus = "prompt_seen"
+	CoverageUncertain  CoverageStatus = "delivery_uncertain"
 	CoverageExcluded   CoverageStatus = "excluded"
 )
 
@@ -126,7 +128,7 @@ type LaneState struct {
 	// InitialSeedPending is true only while this lane has never consumed a real
 	// provider input. It allows an absent lane to receive the existing Workass
 	// ledger once as part of its first sampling turn. Once input is consumed it
-	// can never become true again; later coverage gaps require ContextStrategy.
+	// can never become true again; later gaps use import or an exact-thread delta.
 	InitialSeedPending   bool
 	Phase                LanePhase
 	CoveredThrough       uint64
@@ -174,7 +176,12 @@ type QueueEntry struct {
 	InitialSeedFrom    uint64
 	InitialSeedThrough uint64
 	InitialSeedDigest  string
-	Revision           uint64
+	// ContextDelta freezes the missing-history range for an established lane.
+	// Its exact batch is persisted in the start-turn outbox before delivery.
+	DeltaFrom    uint64
+	DeltaThrough uint64
+	DeltaDigest  string
+	Revision     uint64
 }
 
 // StagedQueueEntry is a visible follow-up that has not yet been promoted to a
@@ -1251,7 +1258,7 @@ func (s State) Validate() error {
 				return errors.New("lane coverage record does not match the immutable ledger event")
 			}
 			switch record.Status {
-			case CoverageNativeSeen, CoverageImported, CoverageSeeded, CoverageExcluded:
+			case CoverageNativeSeen, CoverageImported, CoverageSeeded, CoveragePromptSeen, CoverageUncertain, CoverageExcluded:
 			default:
 				return fmt.Errorf("lane coverage record has unknown status %q", record.Status)
 			}
@@ -1292,14 +1299,14 @@ func (s State) Validate() error {
 				return errors.New("candidate absence may create only on an unestablished deferred lane")
 			}
 			for _, record := range lane.Coverage {
-				if record.Status == CoverageNativeSeen || record.Status == CoverageImported || record.Status == CoverageSeeded {
+				if record.Status == CoverageNativeSeen || record.Status == CoverageImported || record.Status == CoverageSeeded || record.Status == CoveragePromptSeen || record.Status == CoverageUncertain {
 					return errors.New("lane with provider-native coverage may not create after candidate absence")
 				}
 			}
 		}
 		if lane.InitialSeedPending {
 			for _, record := range lane.Coverage {
-				if record.Status == CoverageNativeSeen || record.Status == CoverageImported || record.Status == CoverageSeeded {
+				if record.Status == CoverageNativeSeen || record.Status == CoverageImported || record.Status == CoverageSeeded || record.Status == CoveragePromptSeen || record.Status == CoverageUncertain {
 					return errors.New("lane with consumed provider context still has an initial seed pending")
 				}
 			}
@@ -1522,6 +1529,19 @@ func (s State) Validate() error {
 		}
 		if effect.Kind == EffectStartTurn && effect.Input == nil {
 			return errors.New("start-turn outbox effect is missing its immutable input")
+		}
+		if effect.Kind == EffectStartTurn && effect.Input != nil {
+			input := *effect.Input
+			if input.DeltaDigest != "" {
+				if input.OperationID != effect.OperationID || input.LaneID != effect.LaneID || input.DeltaThrough > s.LedgerHead() {
+					return errors.New("context delta lost its input owner or ledger range")
+				}
+				if err := validateContextDelta(input, effect.Batch); err != nil {
+					return err
+				}
+			} else if input.DeltaFrom != 0 || input.DeltaThrough != 0 {
+				return errors.New("context delta is missing its digest")
+			}
 		}
 		if effect.Input != nil {
 			if err := validateTurnPresentation(effect.Input.Presentation); err != nil {

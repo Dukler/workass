@@ -93,7 +93,14 @@ func (c *chatControlCoordinator) list() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"chats": chats}, nil
+	// The remote merge consumes the same []any representation as decoded wire
+	// replies. A typed []map here marshals correctly on its own but disappears
+	// when merged before JSON encoding.
+	items := make([]any, len(chats))
+	for i, item := range chats {
+		items[i] = item
+	}
+	return map[string]any{"chats": items}, nil
 }
 
 func exactAgentTarget(params map[string]any) (string, string, error) {
