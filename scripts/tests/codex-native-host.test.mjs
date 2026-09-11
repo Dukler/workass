@@ -414,3 +414,35 @@ test('native Codex host lets a permission outlive the plumbing timeout', async (
   const promptResult = await peer.waitFor((message) => message.id === 3);
   assert.equal(promptResult.result.stopReason, 'end_turn', JSON.stringify(promptResult));
 });
+
+
+test('native Codex retries preserve failure details and terminal authority', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((m) => m.id === 1);
+  peer.send({ id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((m) => m.id === 2)).result.sessionId;
+  for (const [id, scenario] of [[3, 'retry-failed'], [4, 'retry-recovered']]) {
+    peer.send({ id, method: 'session/prompt', params: {
+      sessionId, prompt: [{ type: 'text', text: `[fixture:${scenario}]` }],
+    } });
+    const result = await peer.waitFor((m) => m.id === id);
+    if (id === 3) {
+      assert.match(result.error?.message || '', /Retry limit exhausted/);
+      assert.match(result.error.message, /responseTooManyFailedAttempts/);
+      assert.match(result.error.message, /HTTP 503/);
+      assert.match(result.error.message, /upstream unavailable/);
+      assert.doesNotMatch(result.error.message, /Reconnecting|fixture-bearer-value/);
+    } else {
+      assert.equal(result.error, undefined);
+      assert.equal(result.result.stopReason, 'end_turn');
+    }
+  }
+  const notices = peer.messages.filter((m) => m.params?.update?.sessionUpdate === 'agent_message_chunk')
+    .map((m) => m.params.update.content.text).join('');
+  assert.match(notices, /responseStreamDisconnected/);
+  assert.match(notices, /HTTP 502/);
+  assert.match(notices, /upstream connection reset/);
+  assert.doesNotMatch(JSON.stringify(peer.messages), /fixture-private-value|fixture-bearer-value|private phrase|with spaces/);
+});
