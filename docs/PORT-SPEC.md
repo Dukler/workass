@@ -468,8 +468,8 @@ shell, NOT the daemon.
       consumed provider input, its first real sampling prompt carries one
       deterministic, bounded semantic Workass-history seed immediately before
       the current user request. This is legal only for that unused lane. Once
-      any input is consumed, all later gaps use the receipt-bearing import law
-      in item 6 and can never fall back to another seed. Mid-turn switch
+      any input is consumed, later gaps follow item 6's exact-thread delta or
+      receipt-bearing import law; they never receive another initial seed. Mid-turn switch
       rejected. Regression:
       TestWireProviderSwitchMidChatSharesContext.
    c. DELIBERATE multi-agent per chat (subagents) is implemented and is not a
@@ -560,12 +560,19 @@ shell, NOT the daemon.
    moving the chat detaches them but never deletes them. Changing provider
    inside one Workass chat selects another
    lane; returning to a previous provider resumes that lane's exact thread.
-   After a lane has consumed provider input, cross-provider context enters it
-   only through a capability-gated, non-sampling, receipt-bearing context-import
-   operation. Missing or ambiguous import support blocks the switch; ordinary
-   prompts and transcript replay are forbidden substitutes for an established
-   lane's later gap. The sole exception is item 4b's first-input seed for a
-   provably unused lane. Import support requires versioned capability
+   MISSING-MESSAGE HANDOFF (user correction 2026-09-11): after a lane has
+   consumed input, prefer capability-gated, non-sampling context import. When
+   that capability is unavailable, attach only its uncovered semantic messages
+   to the next real user input in the same exact native thread. Never create a
+   replacement, replay covered history, or manufacture an extra sampling turn.
+   Persist the bounded complete delta and its range/digest with that input's
+   durable outbox before dispatch. Advance confirmed coverage only on input
+   consumption; fence uncertain delivery separately so later inputs cannot
+   resend it. Definite rejection leaves missing history eligible for a later
+   distinct request. If the complete delta exceeds the prompt budget, block
+   without silently dropping messages. The one-time initial seed in item 4b
+   remains exclusive to a provably unused lane. Non-sampling import still
+   requires versioned capability
    negotiation, deterministic operation/range/digest identity, idempotency, and
    authoritative operation readback. After a crash Workass reads that receipt
    before deciding whether an absent operation may be sent; unknown acceptance

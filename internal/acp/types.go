@@ -478,6 +478,7 @@ type JobStartOptions struct {
 	// InitialContextSeed is actor-authored and appears only on the first real
 	// sampling input of a provider lane that has never consumed input.
 	InitialContextSeed []providercontract.ContextMessage
+	ContextDelta       []providercontract.ContextMessage
 	ContextSize        int
 	Images             []any
 	ModelID            string

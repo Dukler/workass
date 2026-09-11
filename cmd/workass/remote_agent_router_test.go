@@ -128,6 +128,29 @@ func TestStatelessMCPRoutesTaggedRemoteReadWithoutExposingOwner(t *testing.T) {
 	}
 }
 
+func TestChatListToolPreservesLocalChatsWithMountedRemote(t *testing.T) {
+	harness := newStatelessMCPTestHarness(t)
+	harness.handler.agentControl.remoteChats = &stubAgentChatRemoteRouter{result: map[string]any{
+		"chats": []any{map[string]any{"tabId": "M~m-san~tab-1", "chatId": "M~m-san~chat-1"}},
+	}}
+	status, response := harness.request(t, http.MethodPost, map[string]any{
+		"name": "workass_list_chats", "arguments": map[string]any{},
+	})
+	if status != http.StatusOK || response["error"] != nil {
+		t.Fatalf("chat list failed: status=%d response=%#v", status, response)
+	}
+	chats := anySlice(mapFromAnyMain(response["result"])["chats"])
+	local, remote := false, false
+	for _, raw := range chats {
+		item := mapFromAnyMain(raw)
+		local = local || fieldString(item, "tabId") == "mcp-tab" && fieldString(item, "chatId") == "mcp-chat"
+		remote = remote || fieldString(item, "tabId") == "M~m-san~tab-1" && fieldString(item, "chatId") == "M~m-san~chat-1"
+	}
+	if !local || !remote {
+		t.Fatalf("chat list lost exact local/remote pair: %#v", chats)
+	}
+}
+
 func TestStatelessMCPRoutesUpdaterStatusAndAuthorizedApplyWithoutExposingOwner(t *testing.T) {
 	harness := newStatelessMCPTestHarness(t)
 	remote := &stubAgentChatRemoteRouter{result: map[string]any{"machineId": "m-san", "ok": true}}
