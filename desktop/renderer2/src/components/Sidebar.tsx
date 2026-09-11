@@ -673,6 +673,9 @@ export function AccountMenu() {
 
   useEffect(() => {
     if (!open) return;
+    // Cold account snapshot so the earned-reset row appears even when no chat
+    // for that provider is open. Read-only; never sends a prompt or a reset.
+    store.ensureAccountResetSnapshots();
     const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
     // Capture Esc so the menu closes before App.tsx's layered Esc handler runs.
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); setOpen(false); } };

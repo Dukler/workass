@@ -146,6 +146,25 @@ func TestCodexEarnedRateLimitResetIsIdempotentAndRefreshesPlanUsage(t *testing.T
 	}
 }
 
+func TestCodexEarnedRateLimitResetWithoutLiveSessionUsesEphemeralFallback(t *testing.T) {
+	t.Parallel()
+	manager, _ := newPlanUsageFakeManager(t, "codex", "codex-plan-limits")
+	t.Cleanup(func() { manager.Reset() })
+
+	// No live session exists: the account-level reset must still work through
+	// a disposable ephemeral session instead of failing.
+	result, err := manager.ConsumeRateLimitResetCredit(context.Background(), "codex", "", "reset-ephemeral-1", "RateLimitResetCredit_test")
+	if err != nil {
+		t.Fatalf("ephemeral consume earned reset: %v", err)
+	}
+	if result["outcome"] != "reset" {
+		t.Fatalf("ephemeral consume outcome = %#v, want reset", result["outcome"])
+	}
+	if jsonMap(t, result["planUsage"])["providerId"] != "codex" {
+		t.Fatalf("ephemeral consume planUsage = %#v, want codex snapshot", result["planUsage"])
+	}
+}
+
 func TestNormalizedPlanUsageCaptureClearsExplicitResetSnapshot(t *testing.T) {
 	t.Parallel()
 	manager := NewManager(Options{})

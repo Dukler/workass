@@ -822,6 +822,12 @@ func (m *Manager) ProvidersList() []map[string]any {
 		if brand := providerAdapterForID(id).model.AssistantBrand; brand != "" {
 			item["assistantBrand"] = brand
 		}
+		// Neutral account-level reset capability. The renderer cold-refreshes
+		// plan usage for flagged providers so the earned-reset row appears
+		// without requiring an open chat for that provider.
+		if providerAdapterForID(id).planUsage.ResetCapable() {
+			item["accountResetSupported"] = true
+		}
 		if hint := firstNonEmpty(runtime.FixHint, runtime.Config.FixHint); hint != "" {
 			item["fixHint"] = hint
 		}

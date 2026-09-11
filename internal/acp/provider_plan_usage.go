@@ -16,6 +16,11 @@ type providerPlanUsageStrategy interface {
 	Refresh(context.Context, *Bridge, string) (planUsageCapture, error)
 	SupportsReset(*Bridge) bool
 	ConsumeReset(context.Context, *Bridge, string, string) (map[string]any, planUsageCapture, error)
+	// ResetCapable reports whether this provider family can ever offer earned
+	// rate-limit resets, independent of any live bridge. It lets the daemon
+	// advertise account-level reset support neutrally (providers:list) so the
+	// renderer never branches on a provider id.
+	ResetCapable() bool
 }
 
 type unsupportedPlanUsageStrategy struct{}
@@ -33,6 +38,8 @@ func (unsupportedPlanUsageStrategy) Refresh(context.Context, *Bridge, string) (p
 }
 
 func (unsupportedPlanUsageStrategy) SupportsReset(*Bridge) bool { return false }
+
+func (unsupportedPlanUsageStrategy) ResetCapable() bool { return false }
 
 func (unsupportedPlanUsageStrategy) ConsumeReset(context.Context, *Bridge, string, string) (map[string]any, planUsageCapture, error) {
 	return nil, planUsageCapture{}, errors.New("this provider does not expose earned rate-limit resets")
@@ -66,6 +73,8 @@ func (strategy codexPlanUsageStrategy) Refresh(ctx context.Context, bridge *Brid
 func (codexPlanUsageStrategy) SupportsReset(bridge *Bridge) bool {
 	return bridge != nil && bridge.hasProviderCapability("workassCodexRateLimitResetRequest")
 }
+
+func (codexPlanUsageStrategy) ResetCapable() bool { return true }
 
 func (codexPlanUsageStrategy) ConsumeReset(
 	ctx context.Context,
@@ -118,6 +127,8 @@ func (strategy claudePlanUsageStrategy) Refresh(ctx context.Context, bridge *Bri
 }
 
 func (claudePlanUsageStrategy) SupportsReset(*Bridge) bool { return false }
+
+func (claudePlanUsageStrategy) ResetCapable() bool { return false }
 
 func (claudePlanUsageStrategy) ConsumeReset(context.Context, *Bridge, string, string) (map[string]any, planUsageCapture, error) {
 	return nil, planUsageCapture{}, errors.New("this provider does not expose earned rate-limit resets")
