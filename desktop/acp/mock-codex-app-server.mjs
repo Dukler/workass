@@ -34,7 +34,7 @@ const secondaryModel = {
   supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Low' }],
 };
 
-function completeTurn(turnId, status = 'completed') {
+function completeTurn(turnId, status = 'completed', error) {
   activeTurn = null;
 	activeTurnScenario = '';
 	rapidSteerSequence = 0;
@@ -42,7 +42,7 @@ function completeTurn(turnId, status = 'completed') {
 	if (record) record.status = status;
   notify('turn/completed', {
     threadId: fixtureThreadId,
-    turn: { id: turnId, status, items: [] },
+    turn: { id: turnId, status, items: [], ...(error ? { error } : {}) },
   });
 }
 
@@ -89,6 +89,22 @@ async function runTurn(id, params) {
 	}
   const text = (params.input || []).filter((item) => item.type === 'text').map((item) => item.text).join('\n');
   const images = (params.input || []).filter((item) => item.type === 'image');
+  if (text.includes('[fixture:retry-')) {
+    notify('error', { threadId: params.threadId, turnId, willRetry: true, error: {
+      message: 'Reconnecting... 2/5',
+      codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 502 } },
+      additionalDetails: 'upstream connection reset; token=fixture-private-value; password="private phrase with spaces"',
+    } });
+    if (text.includes('[fixture:retry-failed]')) {
+      completeTurn(turnId, 'failed', {
+        message: 'Retry limit exhausted',
+        codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 503 } },
+        additionalDetails: 'upstream unavailable; Bearer fixture-bearer-value',
+      });
+      return;
+    }
+  }
+
   notify('item/reasoning/summaryTextDelta', { threadId: params.threadId, turnId, itemId: 'reasoning-fixture', summaryIndex: 0, delta: 'Fixture reasoning' });
   if (text.includes('[fixture:rapid-steer-commentary]')) {
     activeTurnScenario = 'rapid-steer-commentary';
