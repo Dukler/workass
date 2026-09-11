@@ -247,6 +247,10 @@ export interface ProviderRecord {
   badge?: string;
   detected?: boolean;
   latencyMs?: number;
+  // Daemon-authored account capability: this provider family can offer earned
+  // rate-limit resets. Drives cold account-level plan refreshes; never branch
+  // on a provider id in the renderer.
+  accountResetSupported?: boolean;
   // Absolute executable path selected from the provider override or daemon PATH.
   resolvedCommand?: string;
   cliVersion?: CliVersion;

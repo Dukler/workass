@@ -3296,6 +3296,9 @@ export class Store {
     // populated before the user sends anything.
     const active = this.active();
     if (active) this.refreshPlanUsage(active.id);
+    // The account menu needs a snapshot even when no chat is open for a
+    // reset-capable provider; otherwise the earned-reset row never appears.
+    this.ensureAccountResetSnapshots();
   }
 
   // ---- connection health ----------------------------------------------
@@ -4114,6 +4117,33 @@ export class Store {
         }
       }
     })();
+  }
+  // Account-level plan refresh without a visible chat for that provider.
+  // Providers are selected by the daemon-authored accountResetSupported flag,
+  // never by provider id. Uses the daemon's disposable provider-scoped
+  // metadata session; never creates a chat or sends a prompt.
+  ensureAccountResetSnapshots(): void {
+    if (!this.isConnected() || !has('appChatRefreshPlanUsage')) return;
+    const ids = this.state.providers
+      .filter((p) => p.enabled && p.accountResetSupported && !this.state.planUsageByProvider[p.id] && !this.state.planUsageLoadingByProvider[p.id])
+      .map((p) => p.id);
+    for (const id of ids) {
+      this.state.planUsageLoadingByProvider[id] = true;
+      this.bumpApp(false);
+      void (async () => {
+        try {
+          await call('appChatRefreshPlanUsage', id);
+        } catch {
+          // The account menu keeps the last authoritative snapshot. Metadata
+          // failure is retried on the next menu open.
+        } finally {
+          if (this.state.planUsageLoadingByProvider[id]) {
+            this.state.planUsageLoadingByProvider[id] = false;
+            this.bumpApp(false);
+          }
+        }
+      })();
+    }
   }
   async setModel(chatId: string, modelId: string) {
     const chat = this.chat(chatId); if (!chat) return;

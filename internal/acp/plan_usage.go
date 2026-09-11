@@ -427,6 +427,9 @@ func (b *Bridge) supportsPlanUsageReset() bool {
 // logical click. The adapter performs the required authoritative rate-limit
 // refetch before replying; Workass records that snapshot before returning.
 func (m *Manager) ConsumeRateLimitResetCredit(ctx context.Context, providerID, sessionID, idempotencyKey, creditID string) (map[string]any, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	providerID = normalizeProviderID(providerID)
 	sessionID = strings.TrimSpace(sessionID)
 	idempotencyKey = strings.TrimSpace(idempotencyKey)
@@ -458,7 +461,41 @@ func (m *Manager) ConsumeRateLimitResetCredit(ctx context.Context, providerID, s
 		}
 	}
 	if b == nil {
-		return nil, errors.New("no initialized Codex account bridge is available")
+		// No live session for this provider (e.g. no Codex chat open). Fall
+		// back to a disposable ephemeral session, mirroring
+		// RefreshProviderPlanUsage, so the account-level reset stays usable.
+		// It is closed before returning and never sends a model prompt.
+		m.mu.Lock()
+		if m.resetting {
+			m.mu.Unlock()
+			return nil, errors.New("ACP manager is resetting")
+		}
+		if _, err := m.providerConfigLocked(providerID); err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
+		providerOptions, err := m.optionsForProviderLocked(providerID)
+		if err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
+		m.bridgeSeq++
+		bridgeKey := fmt.Sprintf("plan-usage-reset:%s:%d", providerID, m.bridgeSeq)
+		m.mu.Unlock()
+		ephemeral := newBridge(bridgeKey, providerOptions, m)
+		info, err := ephemeral.NewSession(ctx, SessionOptions{
+			BridgeKey: bridgeKey, ProviderID: providerID, Ephemeral: true,
+		})
+		if err != nil {
+			ephemeral.Close(false, err)
+			return nil, err
+		}
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			ephemeral.CloseSession(closeCtx, info.SessionID)
+		}()
+		b = ephemeral
 	}
 	if !b.supportsPlanUsageReset() {
 		return nil, errors.New("this provider does not expose earned rate-limit resets")
