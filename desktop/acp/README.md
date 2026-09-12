@@ -99,6 +99,12 @@ Workass deliberately does not model steering as one universal cancel action:
   agents without that capability reject explicit steering back to the composer.
   Only a separate ordinary queue intent creates durable FIFO work.
 
+The official Devin CLI bundle `3000.10.21` was probed in isolation on 2026-09-11.
+Its `initialize` response advertises neither `sessionSteer` nor
+`steerNotification`; live steering is therefore unavailable through that ACP
+contract. A second `session/prompt` or cancel-and-restart is not a live-steer
+implementation. This is independent of exact-session attachment failures.
+
 Real native-provider sessions are canaries for these protocol shapes only. The
 deterministic mock and direct-host fixtures remain the correctness oracle.
 
@@ -129,6 +135,21 @@ ring. Exact percentages and token counts remain in the ring's popover; no
 permanent text or numeric badge is added beside it. Switching providers selects
 that provider's last known reading; it never relabels the previous provider's
 context as the new model's.
+
+## Codex speed controls
+
+The native host projects Fast only when the selected model's official catalog
+advertises it. Modern `serviceTiers` supplies the native request id; the older
+`additionalSpeedTiers` field is used only when modern tier metadata is absent.
+An explicitly empty modern catalog never inherits a legacy Fast flag.
+
+The composer remembers Standard/Fast per chat, provider, and base model, separately
+from reasoning effort and permissions. Submission freezes that choice in the
+durable turn input, including FIFO work. The host sends the official
+`turn/start.serviceTierForTurn` override; Standard explicitly sends `default`.
+Changing a control does not steer or restart a running turn, and provider rejection
+never silently downgrades Fast. The UI notes Fast's higher usage without hardcoding
+a multiplier. See [OpenAI speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed).
 
 ## Provider plan-limit extensions
 

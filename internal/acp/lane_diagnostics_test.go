@@ -92,3 +92,48 @@ func TestLaneDiagnosticsBoundRedactAndIsolateExactPairs(t *testing.T) {
 		t.Fatal("unbounded provider failure text")
 	}
 }
+
+func TestLaneDiagnosticsRetainFailureAfterSuccessfulResume(t *testing.T) {
+	t.Parallel()
+	fixture := newPersistentMockFixture(t, "resume")
+	manager, events := fixture.newManager()
+	session := fixture.newSession(t, manager)
+	fixture.runTurn(t, manager, events, session.SessionID, "establish")
+	binding, ok := manager.nativeSessions.get("native-tab", "native-chat", "mock")
+	if !ok {
+		t.Fatal("missing native binding")
+	}
+	lane, err := (managerLaneFactory{manager: manager, providerID: "mock"}).Resume(context.Background(), providercontract.ResumeLaneRequest{
+		Identity: bindingLaneIdentity(binding), Thread: bindingThreadRef(binding), Owner: providercontract.AttachmentOwner{TabID: "native-tab"}, CWD: binding.CWD,
+	})
+	if err != nil {
+		manager.Reset()
+		t.Fatal(err)
+	}
+	managed := lane.(*managerLane)
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for event := range lane.Events() {
+			managed.AcknowledgeDurableEvent(event.Identity.Sequence, nil)
+		}
+	}()
+	t.Cleanup(func() { _ = lane.Detach(context.Background()); manager.Reset(); <-drained })
+	_, err = lane.Delivery().StartTurn(context.Background(), providercontract.TurnInput{
+		OperationID: "invalid-attachment", Text: "do not submit", Attachments: []providercontract.Attachment{{Name: "missing reference"}},
+	})
+	if err == nil {
+		t.Fatal("invalid attachment admitted")
+	}
+	attempts := manager.recentLaneDiagnostics("native-tab", "native-chat", 1)
+	if len(attempts) != 1 {
+		t.Fatal("turn-preparation failure was lost")
+	}
+	attempt := mapFromAny(attempts[0])
+	if attempt["operation"] != "start" || attempt["outcome"] != "failed" || !strings.Contains(asString(attempt["error"]), "immutable content reference") {
+		t.Fatalf("lost post-resume error: %#v", attempt)
+	}
+	if persistentMockSessionCount(t, fixture.sessionFile) != 1 {
+		t.Fatal("diagnostics replaced native thread")
+	}
+}

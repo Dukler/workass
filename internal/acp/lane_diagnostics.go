@@ -12,8 +12,8 @@ import (
 
 const maxLaneDiagnostics = 64
 
-// Attachment happens before Manager.StartJob. Keep its outcome separately so a
-// failed exact resume cannot disappear merely because no prompt was admitted.
+// Attachment and control preparation happen before Manager.StartJob. Keep their
+// failures separately so they cannot disappear merely because no input was admitted.
 // This is bounded diagnostic evidence, never a retry or lifecycle authority.
 type laneDiagnostic struct {
 	tabID, chatID, providerID, operation string

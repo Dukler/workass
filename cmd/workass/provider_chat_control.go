@@ -872,6 +872,10 @@ func updateActorModelControls(raw json.RawMessage, controls resolvedChatControls
 	if controls.ProviderID != "" && controls.BaseModel != "" {
 		providerMemory := mapFromAnyMain(memory[controls.ProviderID])
 		entry := map[string]any{}
+		previous := mapFromAnyMain(providerMemory[canonicalModelControlKey(controls.BaseModel)])
+		if tier := fieldString(previous, "serviceTier"); tier == "fast" || tier == "default" {
+			entry["serviceTier"] = tier
+		}
 		if controls.Effort != "" {
 			entry["effort"] = controls.Effort
 		}

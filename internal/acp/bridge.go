@@ -82,11 +82,13 @@ type Bridge struct {
 	// it back into the adapter-native writes. Config ids are retained because an
 	// option may be categorized as mode/thought_level without literally using the
 	// ids "mode" or "effort".
-	efforts        []string
-	currentEffort  *string
-	effortConfigID string
-	modeConfigID   string
-	imageSupport   bool
+	efforts             []string
+	currentEffort       *string
+	serviceTierConfigID string
+	serviceTiers        []string
+	effortConfigID      string
+	modeConfigID        string
+	imageSupport        bool
 	// Effort config options are model-specific. A present key with an empty
 	// slice means the adapter authoritatively omitted the effort axis for that
 	// model (Claude Haiku); absence means the model has not been observed yet.
@@ -1144,6 +1146,14 @@ func (b *Bridge) emitToolEvent(job *Job, acpKind string, update map[string]any, 
 	// registered adapter did not report a parent.
 	if parentToolCallID != "" {
 		event["subagentId"] = parentToolCallID
+		// Host metadata enriches linkage only after the registered adapter has
+		// attributed this tool. It confers no spawned-work/control ownership.
+		attribution := mapFromAny(mapFromAny(update["_meta"])["workassSubagent"])
+		if job.SubagentID == "" && asString(attribution["id"]) == parentToolCallID {
+			event["subagentModel"] = asString(attribution["model"])
+			event["subagentLabel"] = asString(attribution["label"])
+			event["subagentHeader"] = eventToolCallID == parentToolCallID
+		}
 		label := ""
 		if job.SubagentID != "" {
 			label = job.SubagentLabel

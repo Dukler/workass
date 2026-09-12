@@ -1,4 +1,5 @@
 import type { ToolEvent } from './store/types';
+import type { SpawnedWorkItem } from './wire/types';
 import { toolPresentation, type ToolPresentation } from './tool-names.ts';
 
 // The spawning header of a subagent (rendered inline as one "Subagente · …" task
@@ -22,6 +23,37 @@ export interface SubagentNode {
   model: string | null;
   header?: ToolEvent;
   calls: ToolEvent[];
+}
+
+// Foreground settlement cannot decide the lifetime of an independently
+// tracked child. Join by explicit tool identity, never by label/provider.
+export function reconcileSubagentWork(nodes: SubagentNode[], items: readonly SpawnedWorkItem[]): { nodes: SubagentNode[]; liveIds: Set<string> } {
+  const byId = new Map<string, SpawnedWorkItem>();
+  const liveIds = new Set<string>();
+  for (const item of items) {
+    if (item.kind !== 'agent' && item.kind !== 'subagent') continue;
+    const id = item.kind === 'subagent' ? item.id : item.toolCallId || item.id;
+    if (item.status === 'running') liveIds.add(id);
+    const previous = byId.get(id);
+    if (!previous || (item.status === 'running' && previous.status !== 'running')
+      || ((item.status === 'running') === (previous.status === 'running') && Date.parse(item.startedAt) >= Date.parse(previous.startedAt))) {
+      byId.set(id, item);
+    }
+  }
+  return { liveIds, nodes: nodes.map((node) => {
+    const item = byId.get(node.id);
+    if (!item || !node.header) return node;
+    const status = item.status === 'running' ? 'in_progress'
+      : item.status === 'failed' || item.status === 'orphaned' ? 'failed' : 'completed';
+    const endedAt = item.finishedAt ? Date.parse(item.finishedAt) : undefined;
+    return { ...node, model: item.modelLabel || node.model,
+      header: { ...node.header, status, output: item.summary || node.header.output,
+        endedAt: endedAt !== undefined && Number.isFinite(endedAt) ? endedAt : undefined } };
+  }) };
+}
+
+export function canStopSpawnedWorkItem(item: Pick<SpawnedWorkItem, 'kind' | 'pid' | 'outputFile'>): boolean {
+  return !((item.kind === 'agent' || item.kind === 'workflow') && !item.pid && !item.outputFile);
 }
 
 const ACTIVE_TOOL_STATUS = new Set(['in_progress', 'pending', 'running']);

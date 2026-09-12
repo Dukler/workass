@@ -34,6 +34,7 @@ type providerSpawnedWorkTask struct {
 	OutputFile   string
 	Summary      string
 	LastToolName string
+	ModelLabel   string
 	Status       string
 }
 

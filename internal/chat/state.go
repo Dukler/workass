@@ -162,6 +162,7 @@ func (l LaneState) CreationFailedBeforeEstablishment() bool {
 }
 
 type QueueEntry struct {
+	ServiceTier  string
 	OperationID  provider.OperationID
 	LaneID       provider.LaneID
 	Text         string

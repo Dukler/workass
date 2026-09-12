@@ -96,3 +96,21 @@ func TestSessionDeliveryCapabilitiesUseTypedCamelCaseWireShape(t *testing.T) {
 		t.Fatalf("wire projection leaked actor-storage field names: %#v", delivery)
 	}
 }
+
+// Structural capability evidence from the official 3000.10.21 bundle,
+// initialized without credentials in an isolated XDG profile on 2026-09-11.
+// The vendor's other ACP extensions must not be mistaken for live steering.
+func TestDevinObservedHandshakeDoesNotAdvertiseLiveSteering(t *testing.T) {
+	bridge := &Bridge{providerID: "devin", agentCaps: map[string]any{
+		"loadSession": true,
+		"_meta":       map[string]any{"cognition.ai/userEdits": true, "cognition.ai/userShellCommand": true, "cognition.ai/chains": true},
+	}, agentMeta: map[string]any{"mcpConfigPath": "/fixture/mcp_config.json"}}
+	strategy := providerAdapterForID("devin").delivery
+	if strategy.Capabilities(bridge).LiveSteer {
+		t.Fatal("unadvertised Devin live steering was enabled")
+	}
+	outcome := strategy.Steer(bridge, providerSteerRequest{sessionID: "fixture", clientUserMessageID: "direction"})
+	if outcome.ok || outcome.live || outcome.queued || !outcome.unsupported {
+		t.Fatalf("unsupported direction was misreported or queued: %#v", outcome)
+	}
+}

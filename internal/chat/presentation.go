@@ -218,6 +218,7 @@ func (CommitLaneSelection) chatCommand() {}
 // provider operation. The same queue id can therefore never remain both a
 // staged row and a dispatched turn across a renderer crash/reload.
 type PromoteStagedQueue struct {
+	ServiceTier  string
 	QueueID      string
 	OperationID  provider.OperationID
 	LaneID       provider.LaneID

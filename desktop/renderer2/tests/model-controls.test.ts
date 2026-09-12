@@ -125,3 +125,17 @@ test('reload keeps a staged provider pick separate from the provider owning the 
     useLiveControls: true,
   });
 });
+
+
+test('speed survives model-control updates and hydration without crossing providers or models', () => {
+  let memory = rememberModelControls(undefined, 'codex', 'gpt[high]', { serviceTier: 'fast', effort: 'high' });
+  memory = rememberModelControls(memory, 'codex', 'gpt', { effort: 'low', modeId: 'agent' });
+  const restored = normalizeModelControlMemory(JSON.parse(JSON.stringify(memory)));
+  assert.equal(rememberedModelControls(restored, 'codex', 'gpt')?.serviceTier, 'fast');
+  assert.equal(rememberedModelControls(restored, 'codex', 'gpt')?.effort, 'low');
+  assert.equal(rememberedModelControls(restored, 'codex', 'other'), undefined);
+  assert.equal(rememberedModelControls(restored, 'other', 'gpt'), undefined);
+  memory = rememberModelControls(restored, 'codex', 'gpt', { serviceTier: 'default' });
+  assert.equal(rememberedModelControls(memory, 'codex', 'gpt')?.serviceTier, 'default');
+  assert.equal(normalizeModelControlMemory({ codex: { gpt: { serviceTier: 'invented' } } }), undefined);
+});

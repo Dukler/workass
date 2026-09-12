@@ -776,6 +776,7 @@ func (l *managerLane) AttachmentSnapshot() providercontract.LaneAttachmentSnapsh
 	for i, model := range info.Models {
 		snapshot.Models[i] = providercontract.RuntimeModel{
 			ID: model.ModelID, Name: model.Name, Efforts: append([]string(nil), model.Efforts...),
+			ServiceTiers: append([]string(nil), model.ServiceTiers...),
 		}
 	}
 	for i, mode := range info.Modes {
@@ -1126,7 +1127,8 @@ func (d managerLaneDelivery) Capabilities() providercontract.DeliveryCapabilitie
 	return capabilities
 }
 
-func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontract.TurnInput) (providercontract.TurnAdmission, error) {
+func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontract.TurnInput) (receipt providercontract.TurnAdmission, resultErr error) {
+	started := time.Now()
 	operationID := providercontract.NormalizeOperationID(string(input.OperationID))
 	if operationID == "" {
 		return providercontract.TurnAdmission{}, errors.New("turn admission requires an operation id")
@@ -1136,6 +1138,11 @@ func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontra
 	owner := d.lane.owner
 	identity := d.lane.identity
 	d.lane.mu.Unlock()
+	defer func() {
+		if resultErr != nil {
+			d.lane.manager.recordLaneDiagnostic(owner.TabID, identity.ChatID, info.ProviderID, "start", started, resultErr, info.SessionID)
+		}
+	}()
 	if modelID := strings.TrimSpace(input.ModelID); modelID != "" && modelID != stringPointer(info.CurrentModelID) {
 		result, err := d.lane.manager.SetModel(ctx, info.SessionID, modelID)
 		if err != nil {
@@ -1157,6 +1164,9 @@ func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontra
 		d.lane.info.CurrentModeID = &applied
 		d.lane.mu.Unlock()
 		info.CurrentModeID = &applied
+	}
+	if err := d.lane.manager.applyServiceTier(ctx, info.SessionID, input.ServiceTier); err != nil {
+		return providercontract.TurnAdmission{}, classifyLaneRuntimeError("apply lane service tier", err)
 	}
 	images := make([]any, 0, len(input.Attachments))
 	for _, attachment := range input.Attachments {

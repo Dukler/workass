@@ -8,7 +8,7 @@ import type { ModelControlMemory } from '../model-controls';
 // without a separate effort axis omit it.
 // Selecting effort E binds the chat to the model id `${modelId}[${E}]` through the
 // existing set-model path; a bare `modelId` means no explicit effort.
-export interface ModelOption { modelId: string; name: string; efforts?: string[]; }
+export interface ModelOption { modelId: string; name: string; efforts?: string[]; serviceTiers?: string[]; }
 export type PermissionIntent = 'read' | 'edit' | 'full';
 export interface ModeOption { id: string; name: string; }
 
@@ -385,6 +385,7 @@ export interface SpawnedWorkItem {
   exitCode?: number;
   summary?: string;
   lastToolName?: string;
+  modelLabel?: string;
 }
 // obligation is additive: what this chat still owes the user, which is a
 // different question from what is running. Older daemons omit it.

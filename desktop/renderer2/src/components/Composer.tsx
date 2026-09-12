@@ -1,3 +1,4 @@
+import { rememberedModelControls } from '../model-controls';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Chat } from '../store/types';
 import type { CatalogGroup, CatalogCommand, PlanUsageSnapshot, PlanUsageEntry } from '../wire/types';
@@ -471,6 +472,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
   const [modelOpen, setModelOpen] = useState(false);
   const [modeOpen, setModeOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
+  const [speedOpen, setSpeedOpen] = useState(false);
   const [preparingImages, setPreparingImages] = useState(false);
   // Dictation. `level` drives the meter: it is the only proof the microphone is
   // hearing anything, and the common failure is recording happily from a muted
@@ -588,6 +590,8 @@ export function Composer({ chat }: { chat: Chat | null }) {
   const modelSelection = resolveModelSelection(providerGroup ? [providerGroup] : [], [], chat?.currentModelId);
   const { base: modelBase, effort: modelEffort } = modelSelection;
   const modelName = modelSelection.model?.name ?? resolveModelName(modelGroups, modelBase) ?? providerGroup?.models[0]?.name ?? 'Modelo';
+  const serviceTiers = modelSelection.model?.serviceTiers ?? [];
+  const serviceTier = rememberedModelControls(chat?.modelControls, chat?.providerId, modelBase)?.serviceTier ?? 'default';
   const efforts = modelSelection.model?.efforts ?? [];
   const curEffort = efforts.length
     ? (modelEffort && efforts.includes(modelEffort) ? modelEffort : defaultEffort(efforts))
@@ -913,6 +917,15 @@ export function Composer({ chat }: { chat: Chat | null }) {
                   onPick={(eff) => chat && void store.setModel(chat.id, `${modelBase}[${eff}]`)}
                   onClose={() => setEffortOpen(false)} />
               )}
+            </div>
+          )}
+          {serviceTiers.includes('fast') && (
+            <div className="selectoranchor">
+              <button className="effortsel" onClick={() => setSpeedOpen((v) => !v)} title="Velocidad · Fast consume más créditos">
+                {serviceTier === 'fast' ? 'Fast' : 'Standard'}
+              </button>
+              {speedOpen && <Popover cap="Velocidad" items={serviceTiers.map((id) => ({ id, name: id === 'fast' ? 'Fast · mayor consumo' : 'Standard' }))}
+                current={serviceTier} onPick={(tier) => chat && void store.setServiceTier(chat.id, tier)} onClose={() => setSpeedOpen(false)} />}
             </div>
           )}
           {/* One shared-height cluster keeps model, effort and context on the

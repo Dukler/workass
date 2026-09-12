@@ -1,4 +1,5 @@
 import readline from 'node:readline';
+import { existsSync } from 'node:fs';
 
 const pending = new Map();
 let requestSequence = 0;
@@ -6,6 +7,7 @@ let turnSequence = 0;
 let activeTurn = null;
 let activeTurnScenario = '';
 let rapidSteerSequence = 0;
+let pendingNativeChild = null;
 const turnRecords = [];
 const threadMCPConfigs = new Map();
 const threadMCPStartup = new Map();
@@ -23,6 +25,7 @@ function request(method, params) {
 const model = {
   id: 'gpt-fixture', model: 'gpt-fixture', displayName: 'GPT Fixture', description: 'Fixture model',
   hidden: false, isDefault: true, defaultReasoningEffort: 'high', inputModalities: ['text', 'image'],
+  serviceTiers: [{ id: 'priority', name: 'Fast', description: 'Increased usage' }],
   supportedReasoningEfforts: [
     { reasoningEffort: 'low', description: 'Low' },
     { reasoningEffort: 'high', description: 'High' },
@@ -73,6 +76,11 @@ function startMCPFixtures(threadId, configured) {
 }
 
 async function runTurn(id, params) {
+  const expectedTier = (params.input || []).map((item) => item.text || '').join('\n').match(/\[fixture:speed:(fast|default)\]/)?.[1];
+  if (expectedTier && (params.serviceTierForTurn !== (expectedTier === 'fast' && process.env.WORKASS_CODEX_FIXTURE_SPEED_CATALOG !== 'legacy' ? 'priority' : expectedTier) || params.effort !== 'high')) {
+    return write({ id, error: { code: -32602, message: 'fixture speed/effort mismatch' } });
+  }
+
   const turnId = `fixture-turn-${++turnSequence}`;
 	const turnRecord = { id: turnId, status: 'inProgress', items: [] };
 	turnRecords.push(turnRecord);
@@ -89,6 +97,55 @@ async function runTurn(id, params) {
 	}
   const text = (params.input || []).filter((item) => item.type === 'text').map((item) => item.text).join('\n');
   const images = (params.input || []).filter((item) => item.type === 'image');
+  if (text.includes('[fixture:native-background]')) {
+    pendingNativeChild = 'background-child';
+    notify('item/completed', { threadId: params.threadId, turnId,
+      item: { type: 'collabAgentToolCall', id: 'background-spawn', tool: 'spawnAgent', status: 'completed',
+        senderThreadId: params.threadId, receiverThreadIds: [pendingNativeChild],
+        agentsStates: { [pendingNativeChild]: { status: 'running' } }, prompt: 'Background review', model: 'gpt-fixture-mini' } });
+    notify('item/agentMessage/delta', { threadId: params.threadId, turnId, itemId: 'parent-answer', delta: 'Child is still running.' });
+    completeTurn(turnId);
+    return;
+  }
+  if (text.includes('[fixture:native-discovery]')) {
+    notify('thread/started', { thread: { id: 'discovered-child', agentNickname: 'Transport reviewer',
+      source: { subAgent: { thread_spawn: { parent_thread_id: params.threadId, depth: 1 } } } } });
+    notify('thread/started', { thread: { id: 'foreign-child', agentNickname: 'FOREIGN',
+      source: { subAgent: { thread_spawn: { parent_thread_id: 'foreign-parent', depth: 1 } } } } });
+    notify('turn/started', { threadId: 'discovered-child', turn: { id: 'discovered-turn', status: 'inProgress' } });
+    const approval = await request('item/commandExecution/requestApproval', {
+      threadId: 'discovered-child', turnId: 'discovered-turn', itemId: 'child-approval', command: 'printf child',
+    });
+    if (approval?.decision !== 'accept') throw new Error('native child approval lost its parent route');
+    notify('turn/completed', { threadId: 'discovered-child', turn: { id: 'discovered-turn', status: 'failed', items: [] } });
+    for (const kind of ['interacted', 'started', 'completed']) {
+      notify('item/completed', { threadId: params.threadId, turnId,
+        item: { type: 'subAgentActivity', id: `activity-${kind}`, agentThreadId: 'discovered-child', agentPath: '/root/review', kind } });
+    }
+  }
+  if (text.includes('[fixture:native-agents]')) {
+    const collab = (tool, agentsStates, receivers = ['native-child-1', 'native-child-2']) => notify('item/completed', {
+      threadId: params.threadId, turnId,
+      item: { type: 'collabAgentToolCall', id: `collab-${tool}`, tool, status: 'completed',
+        senderThreadId: params.threadId, receiverThreadIds: receivers, agentsStates,
+        prompt: 'Review transport lifecycle', model: 'gpt-fixture-mini', reasoningEffort: 'high' },
+    });
+    collab('spawnAgent', { 'native-child-1': { status: 'running', message: '' }, 'native-child-2': { status: 'pendingInit' } });
+    notify('item/started', { threadId: 'native-child-1', turnId: 'child-turn',
+      item: { type: 'commandExecution', id: 'command-fixture', command: 'printf child', status: 'inProgress' } });
+    notify('item/completed', { threadId: 'native-child-1', turnId: 'child-turn',
+      item: { type: 'commandExecution', id: 'command-fixture', command: 'printf child', status: 'completed', aggregatedOutput: 'child output' } });
+    notify('item/agentMessage/delta', { threadId: 'native-child-1', turnId: 'child-turn', itemId: 'child-message', delta: 'Child result' });
+    notify('turn/completed', { threadId: 'native-child-1', turn: { id: 'child-turn', status: 'completed', items: [] } });
+    // Unknown threads and child usage/consumption must not alter the parent.
+    notify('item/agentMessage/delta', { threadId: 'unrelated', itemId: 'other', delta: 'UNRELATED' });
+    notify('item/started', { threadId: 'native-child-1', item: { type: 'userMessage', id: 'child-user', clientId: 'child-input' } });
+    collab('wait', { 'native-child-1': { status: 'completed', message: 'Child result' }, 'native-child-2': { status: 'running' } });
+    collab('interruptAgent', { 'native-child-2': { status: 'interrupted' } }, ['native-child-2']);
+    // Keep the parent active so the test can prove child completion did not
+    // resolve session/prompt and that native parent steering still works.
+    return;
+  }
   if (text.includes('[fixture:retry-')) {
     notify('error', { threadId: params.threadId, turnId, willRetry: true, error: {
       message: 'Reconnecting... 2/5',
@@ -155,6 +212,11 @@ async function handle(message) {
   const { id, method, params = {} } = message;
   if (method === 'initialize') return respond(id, { userAgent: 'fixture', platformFamily: 'unix', platformOs: 'fixture', codexHome: '/fixture' });
   if (method === 'initialized') return;
+  if (method === 'model/list' && process.env.WORKASS_CODEX_FIXTURE_SPEED_CATALOG) {
+    model.additionalSpeedTiers = ['fast'];
+    if (process.env.WORKASS_CODEX_FIXTURE_SPEED_CATALOG === 'legacy') delete model.serviceTiers;
+    else model.serviceTiers = [];
+  }
   if (method === 'model/list') return respond(id, { data: [model, secondaryModel], nextCursor: null });
   if (method === 'thread/start') {
     if (process.env.WORKASS_CODEX_FIXTURE_AUTH_ERROR === '1') {
@@ -276,7 +338,14 @@ async function handle(message) {
 	  const data = turnRecords.flatMap((turn) => turn.items.map((item) => ({ turnId: turn.id, item }))).reverse();
 	  return respond(id, { data, nextCursor: null, backwardsCursor: null });
 	}
-  if (method === 'account/rateLimits/read') return respond(id, { rateLimits: { planType: 'plus', primary: { usedPercent: 17, resetsAt: 1, windowDurationMins: 300 } } });
+  if (method === 'account/rateLimits/read') {
+    if (pendingNativeChild && (!process.env.WORKASS_CODEX_FIXTURE_CHILD_RELEASE_FILE || existsSync(process.env.WORKASS_CODEX_FIXTURE_CHILD_RELEASE_FILE))) {
+      notify('item/agentMessage/delta', { threadId: pendingNativeChild, itemId: 'background-answer', delta: 'Background review failed' });
+      notify('turn/completed', { threadId: pendingNativeChild, turn: { id: 'background-turn', status: 'failed', items: [] } });
+      pendingNativeChild = null;
+    }
+    return respond(id, { rateLimits: { planType: 'plus', primary: { usedPercent: 17, resetsAt: 1, windowDurationMins: 300 } } });
+  }
   if (method === 'account/rateLimitResetCredit/consume') return respond(id, { consumed: true });
   if (method === 'thread/unsubscribe') return respond(id, {});
   write({ id, error: { code: -32601, message: `fixture method not found: ${method}` } });

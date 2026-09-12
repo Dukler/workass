@@ -1742,7 +1742,8 @@ func (r *providerChatRuntime) queueBusyTurnLocked(
 		OperationID: operationID, LaneID: selection.Identity.ID,
 		Text:        fieldString(arg, "prompt"),
 		Attachments: attachments, ModelID: selection.ModelID, ModeID: selection.ModeID,
-		Permission: fieldString(arg, "permissionMode"), Presentation: presentation,
+		ServiceTier: selectedTurnServiceTier(state, selection),
+		Permission:  fieldString(arg, "permissionMode"), Presentation: presentation,
 	}, attachmentPlan.Materialize); err != nil {
 		return nil, err
 	}
@@ -1822,6 +1823,7 @@ func (r *providerChatRuntime) promoteStagedLocked(
 	if err := actor.engine.Apply(chat.PromoteStagedQueue{
 		QueueID: queueID, OperationID: operationID, LaneID: selection.Identity.ID,
 		ModelID: selection.ModelID, ModeID: selection.ModeID, Permission: fieldString(arg, "permissionMode"),
+		ServiceTier:  selectedTurnServiceTier(state, selection),
 		Presentation: presentation,
 	}); err != nil {
 		return nil, err
@@ -1962,7 +1964,8 @@ func (r *providerChatRuntime) admitPreparedLocked(
 	if operationID == "" {
 		return nil, errors.New("canonical turn is missing its stable operation id")
 	}
-	if _, exists := actor.engine.Snapshot().Operations[operationID]; exists {
+	state := actor.engine.Snapshot()
+	if _, exists := state.Operations[operationID]; exists {
 		return r.admissionOutcomeLocked(actor, tabID, chatID, operationID)
 	}
 	prompt := fieldString(arg, "prompt")
@@ -1970,11 +1973,12 @@ func (r *providerChatRuntime) admitPreparedLocked(
 	if err := actor.engine.ApplyPrepared(chat.Submit{
 		OperationID: operationID, LaneID: selection.Identity.ID, Text: prompt, Attachments: attachmentPlan.Attachments,
 		ModelID: selection.ModelID, ModeID: selection.ModeID, Permission: fieldString(arg, "permissionMode"),
+		ServiceTier:  selectedTurnServiceTier(state, selection),
 		Presentation: presentation,
 	}, attachmentPlan.Materialize); err != nil {
 		return nil, err
 	}
-	state := actor.engine.Snapshot()
+	state = actor.engine.Snapshot()
 	if state.Foreground != nil && state.Foreground.OperationID == operationID {
 		return actorJobReceipt(state, state.Foreground.Input, tabID, chatID), nil
 	}
@@ -2847,4 +2851,16 @@ func (r *providerChatRuntime) Close(ctx context.Context) error {
 		closeErr = errors.Join(closeErr, err)
 	}
 	return closeErr
+}
+
+// The selected speed belongs to this provider/model, and is frozen in the
+// durable turn input so later control edits cannot alter queued work.
+func selectedTurnServiceTier(state chat.State, selection acp.ProviderLaneSelection) string {
+	var memory map[string]map[string]struct {
+		ServiceTier string `json:"serviceTier"`
+	}
+	if json.Unmarshal(state.Presentation.ModelControls, &memory) != nil {
+		return ""
+	}
+	return memory[string(selection.Identity.Realm.ProviderID)][canonicalModelControlKey(selection.ModelID)].ServiceTier
 }
