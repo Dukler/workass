@@ -25,9 +25,11 @@ func newCloseSessionTestRuntime(t *testing.T) (*providerChatRuntime, *acp.Manage
 		},
 		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
 	})
+	// Close the actor event consumers before resetting the manager and removing
+	// the temporary store; cleanup callbacks execute in reverse order.
+	t.Cleanup(func() { manager.Reset() })
 	store := sharedSessionStore(stateDir)
 	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
-	t.Cleanup(func() { manager.Reset() })
 	return runtime, manager, root
 }
 
@@ -156,6 +158,17 @@ func TestProviderChatCloseSessionChangedActorTargetFailsClosed(t *testing.T) {
 	state, ok := runtime.Snapshot("close-chat")
 	if !ok {
 		t.Fatal("missing actor before target change")
+	}
+	// Select returns after attachment, before its initial event is necessarily
+	// consumed. Finish that handshake before injecting a synthetic host loss;
+	// otherwise this test races the stale-event cleanup rather than CloseSession.
+	deadline := time.Now().Add(5 * time.Second)
+	for state.Lanes[state.ActiveLaneID].LastEventSequence == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("initial attachment event was not consumed")
+		}
+		time.Sleep(5 * time.Millisecond)
+		state, _ = runtime.Snapshot("close-chat")
 	}
 	lane := state.Lanes[state.ActiveLaneID]
 	actor.mu.Lock()

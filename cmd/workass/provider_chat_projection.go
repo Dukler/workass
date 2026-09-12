@@ -743,6 +743,7 @@ func projectLaneAttachment(snapshot providercontract.LaneAttachmentSnapshot, del
 	for _, model := range snapshot.Models {
 		models = append(models, map[string]any{
 			"modelId": model.ID, "name": model.Name, "efforts": append([]string(nil), model.Efforts...),
+			"serviceTiers": append([]string(nil), model.ServiceTiers...),
 		})
 	}
 	modes := make([]any, 0, len(snapshot.Modes))

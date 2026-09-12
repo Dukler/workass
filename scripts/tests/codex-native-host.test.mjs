@@ -69,7 +69,7 @@ test('native Codex host drives app-server directly with turns, steering, permiss
   assert.equal(opened.result.sessionId, 'fixture-codex-thread');
   assert.equal(opened.result._meta.workassProviderRealm.verified, false);
   assert.match(opened.result._meta.workassProviderRealm.installScope, /^install-[0-9a-f]{32}$/);
-  assert.deepEqual(opened.result.configOptions.map((option) => option.id), ['mode', 'model', 'reasoning_effort']);
+  assert.deepEqual(opened.result.configOptions.map((option) => option.id), ['service_tier', 'mode', 'model', 'reasoning_effort']);
 
   peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
     sessionId: opened.result.sessionId,
@@ -445,4 +445,128 @@ test('native Codex retries preserve failure details and terminal authority', asy
   assert.match(notices, /HTTP 502/);
   assert.match(notices, /upstream connection reset/);
   assert.doesNotMatch(JSON.stringify(peer.messages), /fixture-private-value|fixture-bearer-value|private phrase|with spaces/);
+});
+
+test('native Codex children use stable subagent cards without completing or consuming the parent turn', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:native-agents]' }],
+  } });
+  await peer.waitFor((message) => message.params?.update?.title === 'interruptAgent');
+  const updates = peer.messages.filter((message) => message.method === 'session/update').map((message) => message.params.update);
+  const headers = updates.filter((update) => update.toolCallId && update.toolCallId === update._meta?.workassSubagent?.id);
+  assert.equal(new Set(headers.map((header) => header.toolCallId)).size, 2);
+  assert.equal(headers[0].sessionUpdate, 'tool_call', 'header must establish daemon tool ownership');
+  assert.equal(headers[0].status, 'in_progress', 'completed spawn must not complete the child');
+  assert.equal(headers[0].content, undefined, 'an empty child message is not an error');
+  assert.equal(headers[0].title, 'Review transport lifecycle');
+  assert.equal(headers[0]._meta.workassSubagent.model, 'gpt-fixture-mini[high]');
+  assert.equal(headers.filter((header) => header.toolCallId === headers[1].toolCallId).at(-1).status, 'cancelled');
+  const childTool = updates.find((update) => update.title === 'printf child' && update.status === 'completed');
+  assert.ok(childTool);
+  assert.equal(childTool.toolCallId, `${headers[0].toolCallId}:command-fixture`);
+  assert.equal(childTool._meta.workassSubagent.id, headers[0].toolCallId);
+  assert.ok(headers.some((header) => header.status === 'completed' && header.content?.text === 'Child result'));
+  assert.equal(updates.some((update) => update.sessionUpdate === 'agent_message_chunk'), false);
+  assert.equal(updates.some((update) => update.clientUserMessageId === 'child-input'), false);
+  assert.equal(peer.messages.some((message) => message.id === 3), false, 'child completion must not resolve parent prompt');
+  peer.send({ jsonrpc: '2.0', id: 4, method: '_workass/codex/steer', params: {
+    sessionId, prompt: [{ type: 'text', text: 'finish the parent' }], clientUserMessageId: 'parent-steer',
+  } });
+  assert.equal((await peer.waitFor((message) => message.id === 4)).result.turnId, 'fixture-turn-1');
+  assert.equal((await peer.waitFor((message) => message.id === 3)).result.stopReason, 'end_turn');
+  const nextStart = peer.messages.length;
+  peer.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:native-agents]' }],
+  } });
+  await peer.waitFor((message) => peer.messages.indexOf(message) >= nextStart && message.params?.update?.title === 'interruptAgent');
+  const nextHeaders = peer.messages.slice(nextStart).map((message) => message.params?.update)
+    .filter((update) => update?.toolCallId && update.toolCallId === update._meta?.workassSubagent?.id);
+  assert.equal(nextHeaders[0].toolCallId, headers[0].toolCallId, 'follow-up must preserve the native child identity');
+  assert.equal(nextHeaders[0].sessionUpdate, 'tool_call', 'a new parent turn needs fresh tool ownership');
+  assert.equal(nextHeaders[0].status, 'in_progress', 'authoritative running state revives a finished child');
+  const firstWork = updates.find((update) => update.sessionUpdate === '_workass_codex_spawned_work' && update.event.toolCallId === headers[0].toolCallId);
+  const nextWork = peer.messages.slice(nextStart).map((message) => message.params?.update)
+    .find((update) => update?.sessionUpdate === '_workass_codex_spawned_work' && update.event.toolCallId === headers[0].toolCallId);
+  assert.equal(firstWork.event.type, 'started');
+  assert.equal(nextWork.event.type, 'started');
+  assert.notEqual(nextWork.event.taskId, firstWork.event.taskId, 'a new execution must not reuse the previous terminal receipt');
+  peer.send({ jsonrpc: '2.0', id: 6, method: '_workass/codex/steer', params: {
+    sessionId, prompt: [{ type: 'text', text: 'finish again' }], clientUserMessageId: 'parent-steer-2',
+  } });
+  assert.equal((await peer.waitFor((message) => message.id === 6)).result.turnId, 'fixture-turn-2');
+  assert.equal((await peer.waitFor((message) => message.id === 5)).result.stopReason, 'end_turn');
+});
+
+test('native child discovery requires parent provenance and preserves permission and failure routing', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:native-discovery]' }],
+  } });
+  const permission = await peer.waitFor((message) => message.method === 'session/request_permission');
+  assert.equal(permission.params.sessionId, sessionId);
+  peer.send({ jsonrpc: '2.0', id: permission.id, result: { outcome: { outcome: 'selected', optionId: 'allow_once' } } });
+  assert.equal((await peer.waitFor((message) => message.id === 3)).result.stopReason, 'end_turn');
+  const updates = peer.messages.filter((message) => message.method === 'session/update').map((message) => message.params.update);
+  assert.ok(updates.some((update) => update.title === 'Transport reviewer' && update.status === 'failed'));
+  const activity = updates.filter((update) => update.title === '/root/review');
+  assert.deepEqual(activity.map((update) => update.status), ['failed', 'in_progress', 'completed']);
+  assert.equal(new Set(updates.filter((update) => update._meta?.workassSubagent).map((update) => update.toolCallId)).size, 1,
+    'thread discovery and activity items must update the same child');
+  assert.ok(updates.some((update) => update.sessionUpdate === 'agent_message_chunk' && update.content.text === 'Fixture answer'));
+  assert.equal(updates.some((update) => update.title === 'FOREIGN'), false);
+});
+
+
+test('Fast is orthogonal to effort and Standard explicitly clears the per-turn override', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc:'2.0',id:1,method:'initialize',params:{} });
+  await peer.waitFor((m)=>m.id===1);
+  peer.send({jsonrpc:'2.0',id:2,method:'session/new',params:{cwd:repoRoot,mcpServers:[]}});
+  const opened=(await peer.waitFor((m)=>m.id===2)).result;
+  assert.deepEqual(opened.availableModels[0].serviceTiers,['default','fast']);
+  let id=3;
+  for (const tier of ['fast','default']) {
+    const configID=id++;
+    peer.send({jsonrpc:'2.0',id:configID,method:'session/set_config_option',params:{sessionId:opened.sessionId,configId:'service_tier',value:tier}});
+    const config=(await peer.waitFor((m)=>m.id===configID)).result.configOptions;
+    assert.equal(config.find((o)=>o.id==='reasoning_effort').currentValue,'high');
+    assert.equal(config.find((o)=>o.id==='service_tier').currentValue,tier);
+    const promptID=id++;
+    peer.send({jsonrpc:'2.0',id:promptID,method:'session/prompt',params:{sessionId:opened.sessionId,prompt:[{type:'text',text:`[fixture:speed:${tier}]`}]}});
+    assert.equal((await peer.waitFor((m)=>m.id===promptID)).result?.stopReason,'end_turn');
+  }
+  peer.send({jsonrpc:'2.0',id:99,method:'session/set_config_option',params:{sessionId:opened.sessionId,configId:'service_tier',value:'invented'}});
+  assert.ok((await peer.waitFor((m)=>m.id===99)).error);
+});
+
+
+test('Fast availability follows modern catalog authority and legacy advertised speed tiers', async (t) => {
+  for (const catalog of ['legacy','none']) {
+    const peer=startHost({WORKASS_CODEX_FIXTURE_SPEED_CATALOG:catalog});
+    t.after(()=>peer.child.kill('SIGKILL'));
+    peer.send({jsonrpc:'2.0',id:1,method:'initialize',params:{}});
+    await peer.waitFor((m)=>m.id===1);
+    peer.send({jsonrpc:'2.0',id:2,method:'session/new',params:{cwd:repoRoot,mcpServers:[]}});
+    const opened=(await peer.waitFor((m)=>m.id===2)).result;
+    assert.deepEqual(opened.availableModels[0].serviceTiers,catalog==='legacy'?['default','fast']:[]);
+    assert.deepEqual(opened.availableModels[1].serviceTiers,[]);
+    peer.send({jsonrpc:'2.0',id:3,method:'session/set_config_option',params:{sessionId:opened.sessionId,configId:'service_tier',value:'fast'}});
+    const reply=await peer.waitFor((m)=>m.id===3);
+    if(catalog==='none') { assert.ok(reply.error);continue; }
+    assert.ok(reply.result);
+    peer.send({jsonrpc:'2.0',id:4,method:'session/prompt',params:{sessionId:opened.sessionId,prompt:[{type:'text',text:'[fixture:speed:fast]'}]}});
+    assert.equal((await peer.waitFor((m)=>m.id===4)).result?.stopReason,'end_turn');
+  }
 });

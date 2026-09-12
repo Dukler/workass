@@ -4444,3 +4444,86 @@ func TestEngineCrashMidTurnDoesNotDisableProviderAsNeedsLogin(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexNativeSubagentMetadataUsesExistingToolProjection(t *testing.T) {
+	t.Parallel()
+	var events []map[string]any
+	mgr := NewManager(Options{Broadcast: func(channel string, payload any) {
+		if channel == "job:event" {
+			events = append(events, mapFromAny(mapFromAny(payload)["event"]))
+		}
+	}})
+	t.Cleanup(func() { mgr.Reset() })
+	b := &Bridge{providerID: "codex", manager: mgr}
+	job := &Job{ID: "parent-job"}
+	meta := map[string]any{"workassSubagent": map[string]any{"id": "native-child", "label": "Review transport", "model": "gpt-fixture[high]"}}
+	parent := providerAdapterForID("codex").notifications.ToolParentID(meta, nil)
+	for _, id := range []string{"native-child", "native-child:read"} {
+		b.emitToolEvent(job, "tool_call_update", map[string]any{
+			"toolCallId": id, "title": "Review transport", "kind": "agent", "status": "in_progress", "_meta": meta,
+		}, parent)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events", len(events))
+	}
+	for i, event := range events {
+		if event["subagentId"] != "native-child" || event["subagentModel"] != "gpt-fixture[high]" || event["subagentLabel"] != "Review transport" {
+			t.Fatalf("lost child attribution: %#v", event)
+		}
+		if event["subagentHeader"] != (i == 0) {
+			t.Fatalf("incorrect header flag: %#v", event)
+		}
+	}
+	if got := providerAdapterForID("devin").notifications.ToolParentID(meta, nil); got != "" {
+		t.Fatalf("native Codex metadata escaped its adapter: %q", got)
+	}
+}
+
+func TestNativeCodexSubagentsReachDaemonToolEvents(t *testing.T) {
+	t.Parallel()
+	events := newEventCollector()
+	manager := newCodexCandidateManager(t, t.TempDir(), "subagent-fixture-parent", false)
+	manager.opts.Broadcast = events.Broadcast
+	t.Cleanup(func() { manager.Reset() })
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	session, err := manager.NewSession(ctx, SessionOptions{TabID: "native-agents-tab", ChatID: "native-agents-chat", ProviderID: "codex", CWD: repoRoot(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := manager.StartJob(ctx, JobStartOptions{Kind: "app-chat", SessionID: session.SessionID,
+		TabID: "native-agents-tab", ChatID: "native-agents-chat", Prompt: "[fixture:native-agents]"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events.waitFor(t, 5*time.Second, func(event collectedEvent) bool {
+		payload := mapFromAny(event.payload)
+		tool := mapFromAny(payload["event"])
+		return payload["id"] == jobID(started) && tool["subagentHeader"] == true && tool["status"] == "cancelled"
+	})
+	events.waitFor(t, 5*time.Second, func(event collectedEvent) bool {
+		payload := mapFromAny(event.payload)
+		tool := mapFromAny(payload["event"])
+		return payload["id"] == jobID(started) && asString(tool["subagentId"]) != "" && tool["subagentHeader"] != true && tool["status"] == "completed"
+	})
+	headers := map[string]bool{}
+	children := 0
+	for _, event := range events.jobEvents(jobID(started), "acp") {
+		tool := mapFromAny(event["event"])
+		if tool["subagentHeader"] == true {
+			headers[asString(tool["id"])] = true
+			if tool["subagentModel"] != "gpt-fixture-mini[high]" || tool["subagentProvider"] != "gpt" {
+				t.Fatalf("missing native model/brand: %#v", tool)
+			}
+		} else if asString(tool["subagentId"]) != "" {
+			children++
+		}
+	}
+	if len(headers) != 2 || children < 2 {
+		t.Fatalf("headers=%d child events=%d; native updates were lost at the bridge", len(headers), children)
+	}
+	if outcome := manager.Steer(session.SessionID, "finish parent", nil, "native-parent-steer"); outcome["ok"] != true {
+		t.Fatalf("child terminal disturbed the parent: %#v", outcome)
+	}
+	assertJobStatus(t, events.waitJobEnd(t, jobID(started), 5*time.Second), "done", 0, "end_turn")
+}

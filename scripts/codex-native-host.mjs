@@ -5,7 +5,7 @@
 // Zed compatibility package participates in this process tree.
 
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { open } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
@@ -276,6 +276,17 @@ const modes = [
   { value: 'agent-full-access', name: 'Agent (full access)', description: 'Run with full file and network access.' },
 ];
 
+// New catalogs provide the actual native request id (currently "priority").
+// Respect an explicit empty list; only older catalogs use additionalSpeedTiers.
+function fastServiceTier(model) {
+  if (Array.isArray(model?.serviceTiers)) {
+    return model.serviceTiers.find((tier) => tier?.id === 'priority' || tier?.id === 'fast')?.id || null;
+  }
+  return model?.additionalSpeedTiers?.includes('fast') ? 'fast' : null;
+}
+
+function speedChoices(model) { return fastServiceTier(model) ? ['default', 'fast'] : []; }
+
 function configOptions(session) {
   const model = session.modelRow();
   const effortOptions = (model?.supportedReasoningEfforts || []).map((option) => ({
@@ -284,10 +295,12 @@ function configOptions(session) {
     description: option.description || '',
   }));
   return [
+    { id: 'service_tier', category: 'service_tier', name: 'Speed', type: 'select',
+      currentValue: session.serviceTier, options: [{ value: 'default', name: 'Standard' }, ...(fastServiceTier(model) ? [{ value: 'fast', name: 'Fast · higher usage' }] : [])] },
     { id: 'mode', category: 'mode', name: 'Mode', type: 'select', currentValue: session.mode, options: modes },
     {
       id: 'model', category: 'model', name: 'Model', type: 'select', currentValue: session.model,
-      options: modelCatalog.map((row) => ({ value: row.id, name: row.displayName || row.id, description: row.description || '' })),
+      options: modelCatalog.map((row) => ({ value: row.id, name: row.displayName || row.id, description: row.description || '', serviceTiers: speedChoices(row) })),
     },
     ...(effortOptions.length ? [{
       id: 'reasoning_effort', category: 'thought_level', name: 'Reasoning effort', type: 'select',
@@ -297,7 +310,7 @@ function configOptions(session) {
 }
 
 function availableModels() {
-  return modelCatalog.map((row) => ({ modelId: row.id, name: row.displayName || row.id, description: row.description || '' }));
+  return modelCatalog.map((row) => ({ modelId: row.id, name: row.displayName || row.id, description: row.description || '', serviceTiers: speedChoices(row) }));
 }
 
 class CodexSession {
@@ -307,6 +320,7 @@ class CodexSession {
     this.model = model;
     this.effort = effort;
     this.mode = 'agent';
+    this.serviceTier = 'default';
     this.mcpServers = mcpServers;
     this.activeTurnId = '';
 	this.activePromptClientId = '';
@@ -314,6 +328,8 @@ class CodexSession {
     this.turnStatus = 'idle';
     this.lastUsage = null;
     this.agentPhases = new Map();
+    this.nativeAgents = new Map();
+    this.nativeAgentEpoch = 0;
     this.agentMessageItemsWithText = new Set();
     this.lastAgentMessageItem = null;
     this.turnError = null;
@@ -327,6 +343,9 @@ class CodexSession {
 
   startPrompt(blocks, clientUserMessageId = '') {
     if (this.activePrompt) throw new Error('A Codex turn is already running');
+    const serviceTier = this.serviceTier === 'fast' ? fastServiceTier(this.modelRow()) : 'default';
+    if (!serviceTier) throw new Error('The selected Codex model does not advertise Fast mode');
+    this.nativeAgentEpoch++;
     this.turnStatus = 'starting';
 	this.agentPhases.clear();
 	this.agentMessageItemsWithText.clear();
@@ -349,6 +368,7 @@ class CodexSession {
       cwd: this.cwd,
       model: this.model,
       effort: this.effort,
+      serviceTierForTurn: serviceTier,
       summary: 'auto',
       ...modeTurnParams(this.mode),
     }).then((response) => {
@@ -474,7 +494,10 @@ class CodexSession {
 
   setConfig(configId, value) {
     const normalized = String(value || '').trim();
-    if (configId === 'mode') {
+    if (configId === 'service_tier') {
+      if (normalized !== 'default' && (normalized !== 'fast' || !fastServiceTier(this.modelRow()))) throw new Error(`Unsupported Codex service tier: ${normalized}`);
+      this.serviceTier = normalized;
+    } else if (configId === 'mode') {
       if (!modes.some((mode) => mode.value === normalized)) throw new Error(`Unsupported Codex mode: ${normalized}`);
       this.mode = normalized;
     } else if (configId === 'model') {
@@ -644,7 +667,7 @@ async function openSession(params, resume) {
 
 async function handleAppRequest(message) {
   const params = message.params || {};
-  const session = sessions.get(String(params.threadId || ''));
+  const session = nativeAgentOwner(String(params.threadId || ''));
   if (message.method === 'item/commandExecution/requestApproval') {
     return approvalResponse(await requestApproval(session, {
       toolCallId: params.itemId, kind: 'execute', title: params.reason || params.command || 'Run command',
@@ -698,8 +721,27 @@ function approvalResponse(option, kind, params) {
 }
 
 async function handleAppNotification(method, params) {
+  // Only native threads with an explicit parent link belong to this chat.
+  // Child turns must never touch the parent's prompt/steering state machine.
+  if (method === 'thread/started') {
+    const thread = params.thread;
+    const parentId = thread?.source?.subAgent?.thread_spawn?.parent_thread_id;
+    const owner = nativeAgentOwner(parentId);
+    if (owner && thread?.id && thread.id !== owner.threadId) {
+      const agent = ensureNativeAgent(owner, thread.id);
+      if (agent) {
+        agent.label = safeErrorText(thread.agentNickname || thread.agentRole || agent.label).slice(0, 160);
+        emitNativeAgent(owner, agent);
+      }
+    }
+    return;
+  }
   const session = sessions.get(String(params.threadId || ''));
-  if (!session) return;
+  if (!session) {
+    const owner = nativeAgentOwner(params.threadId);
+    if (owner) await emitNativeAgentNotification(owner, method, params);
+    return;
+  }
   if (method === 'turn/started') {
     if (params.turn?.id) session.setActiveTurn(params.turn.id);
     session.turnStatus = params.turn?.status || 'inProgress';
@@ -765,6 +807,8 @@ async function handleAppNotification(method, params) {
 
 async function emitItem(session, item, completed) {
   if (!item || typeof item !== 'object') return;
+  if (item.type === 'subAgentActivity') { observeNativeAgentActivity(session, item); return; }
+  if (item.type === 'collabAgentToolCall') observeNativeAgents(session, item);
   if (item.type === 'agentMessage') { session.agentPhases.set(item.id, item.phase); return; }
   if (item.type === 'userMessage') {
 	if (item.clientId && item.clientId === session.activePromptClientId) {
@@ -781,6 +825,138 @@ async function emitItem(session, item, completed) {
   }
   const update = await itemUpdate(item, completed);
   if (update) notify(session.threadId, update);
+}
+
+function nativeAgentOwner(threadId) {
+  if (!threadId) return null;
+  if (sessions.has(threadId)) return sessions.get(threadId);
+  for (const session of sessions.values()) if (session.nativeAgents.has(threadId)) return session;
+  return null;
+}
+
+function ensureNativeAgent(session, threadId) {
+  if (typeof threadId !== 'string' || !threadId || threadId === session.threadId) return null;
+  let agent = session.nativeAgents.get(threadId);
+  if (!agent) {
+    // Keep attribution bounded over a long-lived session. A later observed
+    // lifecycle can reconstruct an evicted terminal agent with the same id.
+    if (session.nativeAgents.size >= 1024) {
+      const terminal = [...session.nativeAgents].find(([, entry]) => entry.status !== 'in_progress');
+      if (!terminal) return null;
+      session.nativeAgents.delete(terminal[0]);
+    }
+    agent = { id: `codex-agent-${createHash('sha256').update(threadId).digest('hex').slice(0, 24)}`,
+      label: 'Codex subagent', model: '', status: 'in_progress', output: '' };
+    session.nativeAgents.set(threadId, agent);
+  }
+  return agent;
+}
+
+function nativeAgentStatus(status) {
+  switch (status) {
+    case 'pendingInit': case 'running': case 'inProgress': return 'in_progress';
+    case 'completed': case 'shutdown': return 'completed';
+    case 'interrupted': return 'cancelled';
+    case 'errored': case 'failed': case 'notFound': return 'failed';
+    default: return null;
+  }
+}
+
+function nativeAgentMeta(agent, header = false) {
+  return { workassSubagent: { id: agent.id, label: agent.label, model: agent.model, header } };
+}
+
+function emitNativeAgent(session, agent) {
+  const first = agent.emittedEpoch !== session.nativeAgentEpoch;
+  agent.emittedEpoch = session.nativeAgentEpoch;
+  notify(session.threadId, {
+    sessionUpdate: first ? 'tool_call' : 'tool_call_update', toolCallId: agent.id, kind: 'agent',
+    title: agent.label, status: agent.status, _meta: nativeAgentMeta(agent, first),
+    ...(agent.output ? { content: { type: 'text', text: safeErrorText(agent.output) } } : {}),
+  });
+  // A child owns its lifetime independently of the foreground prompt. Publish
+  // bounded state changes through the existing durable background-work facet,
+  // including after the parent has completed. Text deltas stay in memory.
+  const newRun = !agent.workTaskId || (agent.workStatus !== 'in_progress' && agent.status === 'in_progress');
+  // Card identity follows the native child, while each observed execution gets
+  // its own receipt identity, including after host restart or bounded eviction.
+  if (newRun) agent.workTaskId = `${agent.id}-run-${randomUUID()}`;
+  const status = agent.status === 'in_progress' ? 'running' : agent.status === 'cancelled' ? 'stopped' : agent.status;
+  const task = { taskId: agent.workTaskId, toolCallId: agent.id,
+    description: agent.label, modelLabel: agent.model, status, lastToolName: agent.lastToolName || '',
+    summary: status !== 'running' && agent.output ? safeErrorText(agent.output) : '' };
+  const fingerprint = JSON.stringify(task);
+  if (fingerprint !== agent.workFingerprint) {
+    notify(session.threadId, { sessionUpdate: '_workass_codex_spawned_work', event: {
+      type: newRun ? 'started' : 'progress', ...task,
+    } });
+    agent.workFingerprint = fingerprint;
+  }
+  agent.workStatus = agent.status;
+}
+
+function observeNativeAgents(session, item) {
+  const ids = new Set([...(item.receiverThreadIds || []), ...Object.keys(item.agentsStates || {})]);
+  for (const id of ids) {
+    const agent = ensureNativeAgent(session, id);
+    if (!agent) continue;
+    if (item.tool === 'spawnAgent') {
+      if (item.prompt) agent.label = safeErrorText(item.prompt).split('\n')[0].slice(0, 160);
+      if (item.model) agent.model = safeErrorText(`${item.model}${item.reasoningEffort ? `[${item.reasoningEffort}]` : ''}`);
+    }
+    // A completed spawn/wait tool does not mean that the child has completed.
+    const state = item.agentsStates?.[id];
+    const status = nativeAgentStatus(state?.status);
+    if (status) agent.status = status;
+    if (typeof state?.message === 'string') agent.output = state.message ? safeErrorText(state.message) : '';
+    emitNativeAgent(session, agent);
+  }
+}
+
+function observeNativeAgentActivity(session, item) {
+  const agent = ensureNativeAgent(session, item.agentThreadId);
+  if (!agent) return;
+  if (item.agentPath) agent.label = safeErrorText(item.agentPath).slice(0, 160);
+  // "interacted" proves contact, not execution or completion.
+  switch (item.kind) {
+    case 'started': agent.status = 'in_progress'; break;
+    case 'completed': agent.status = 'completed'; break;
+    case 'interrupted': agent.status = 'cancelled'; break;
+  }
+  emitNativeAgent(session, agent);
+}
+
+async function emitNativeAgentNotification(session, method, params) {
+  const agent = session.nativeAgents.get(params.threadId);
+  if (!agent) return;
+  if (method === 'turn/started' || method === 'turn/completed') {
+    if (method === 'turn/started') agent.output = '';
+    agent.status = nativeAgentStatus(params.turn?.status) || agent.status;
+    emitNativeAgent(session, agent);
+    return;
+  }
+  if (method === 'item/agentMessage/delta') {
+    if (!params.delta) return;
+    agent.output = ((agent.output || '') + params.delta).slice(0, 2000);
+    return;
+  }
+  if (method === 'item/started' || method === 'item/completed') {
+    if (params.item?.type === 'subAgentActivity') { observeNativeAgentActivity(session, params.item); return; }
+    if (params.item?.type === 'collabAgentToolCall') observeNativeAgents(session, params.item);
+    const update = await itemUpdate(params.item || {}, method === 'item/completed');
+    if (update) {
+      agent.lastToolName = update.kind;
+      emitNativeAgent(session, agent);
+      notify(session.threadId, { ...update,
+        toolCallId: `${agent.id}:${update.toolCallId}`, _meta: { ...update._meta, ...nativeAgentMeta(agent) },
+      });
+    }
+    return;
+  }
+  if (method === 'item/commandExecution/outputDelta' || method === 'item/mcpToolCall/progress') {
+    notify(session.threadId, { sessionUpdate: 'tool_call_update', toolCallId: `${agent.id}:${params.itemId}`,
+      content: { type: 'text', text: params.delta || params.message || '' }, _meta: nativeAgentMeta(agent) });
+  }
 }
 
 async function itemUpdate(item, completed) {

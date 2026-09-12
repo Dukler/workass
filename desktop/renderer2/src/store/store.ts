@@ -4191,6 +4191,16 @@ export class Store {
     await this.persistRuntimeControls(chat);
     this.refreshPlanUsage(chat.id);
   }
+  async setServiceTier(chatId: string, tier: string) {
+    const chat = this.chat(chatId); if (!chat) return;
+    const group = this.providerGroup(chat.providerId, chat);
+    const selected = resolveModelSelection(group ? [group] : [], [], chat.currentModelId);
+    if (!selected.model?.serviceTiers?.includes(tier) || !selected.base) return;
+    chat.modelControls = rememberModelControls(chat.modelControls, chat.providerId, selected.base, { serviceTier: tier });
+    chat._controlRevision = nextModelControlRevision(chat._controlRevision);
+    this.bumpChat(chat);
+    await this.persistRuntimeControls(chat);
+  }
   async setModeSel(chatId: string, modeId: string) {
     const chat = this.chat(chatId); if (!chat) return;
     chat.currentModeId = modeId;

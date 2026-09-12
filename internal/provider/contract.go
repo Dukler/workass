@@ -111,6 +111,7 @@ type TurnPresentation struct {
 }
 
 type TurnInput struct {
+	ServiceTier string
 	OperationID OperationID
 	Text        string
 	Attachments []Attachment
@@ -306,9 +307,10 @@ type LaneAttachmentSnapshot struct {
 }
 
 type RuntimeModel struct {
-	ID      string
-	Name    string
-	Efforts []string
+	ServiceTiers []string
+	ID           string
+	Name         string
+	Efforts      []string
 }
 
 type RuntimeMode struct {
@@ -345,6 +347,7 @@ func (s LaneAttachmentSnapshot) Clone() LaneAttachmentSnapshot {
 	out.Models = make([]RuntimeModel, len(s.Models))
 	for i, model := range s.Models {
 		model.Efforts = append([]string(nil), model.Efforts...)
+		model.ServiceTiers = append([]string(nil), model.ServiceTiers...)
 		out.Models[i] = model
 	}
 	out.Modes = append([]RuntimeMode(nil), s.Modes...)

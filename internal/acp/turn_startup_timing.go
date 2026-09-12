@@ -190,7 +190,7 @@ func (m *Manager) TurnDiagnostics(tabID, chatID string, limit int) map[string]an
 		"machineId": m.opts.MachineID, "version": m.opts.Version,
 		"sampledAt": time.Now().UTC().Format(time.RFC3339Nano), "turns": turns,
 		"available": len(turns) > 0 || len(attachments) > 0, "retention": "newest 256 recorded start attempts in this daemon lifetime; at most 20 returned for this exact chat",
-		"laneAttachments": attachments, "attachmentRetention": "newest 64 completed create/resume attempts in this daemon lifetime; at most 20 returned for this exact chat",
+		"laneAttachments": attachments, "attachmentRetention": "newest 64 completed create/resume attempts or failed turn preparations in this daemon lifetime; at most 20 returned for this exact chat",
 		"timingOrigin":       "Manager.StartJob; excludes controller/network transit and native session creation before admission",
 		"phaseMeaning":       "last observed boundary, not an inference about provider internal work; omitted timestamps were not observed",
 		"publicationMeaning": "content published by the daemon; does not measure network transit or controller paint",

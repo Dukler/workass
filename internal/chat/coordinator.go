@@ -196,6 +196,9 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 		if err != nil {
 			return true, c.applyLaneFailure(effect.Identity.ID, err)
 		}
+		if err := c.retireLaneAttachment(ctx, effect.Identity.ID); err != nil {
+			return true, c.applyLaneFailure(effect.Identity.ID, err)
+		}
 		lane, thread, err := definition.Runtime.Create(ctx, provider.CreateLaneRequest{
 			Identity: effect.Identity, Owner: effect.Owner, CWD: effect.CWD, ModelID: effect.ModelID, ModeID: effect.ModeID,
 			Reconcile: effect.Reconcile, CreateAfterCandidateAbsence: effect.CreateAfterCandidateAbsence,
@@ -229,6 +232,9 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 	case ResumeLaneEffect:
 		definition, err := c.definition(effect.Identity.Realm.ProviderID)
 		if err != nil {
+			return true, c.applyLaneFailure(effect.Identity.ID, err)
+		}
+		if err := c.retireLaneAttachment(ctx, effect.Identity.ID); err != nil {
 			return true, c.applyLaneFailure(effect.Identity.ID, err)
 		}
 		lane, err := definition.Runtime.Resume(ctx, provider.ResumeLaneRequest{
@@ -294,7 +300,7 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 			Attachments:    append([]provider.Attachment(nil), effect.Input.Attachments...),
 			InitialContext: append([]provider.ContextMessage(nil), initialContext...),
 			ContextDelta:   append([]provider.ContextMessage(nil), delta...),
-			ModelID:        effect.Input.ModelID, ModeID: effect.Input.ModeID, Permission: effect.Input.Permission,
+			ModelID:        effect.Input.ModelID, ModeID: effect.Input.ModeID, ServiceTier: effect.Input.ServiceTier, Permission: effect.Input.Permission,
 			Presentation: effect.Input.Presentation,
 			CommitAdmission: func(admission provider.TurnAdmission) error {
 				return c.engine.Apply(TurnAdmitted{
@@ -724,13 +730,32 @@ func (c *Coordinator) lane(id provider.LaneID) (provider.Lane, error) {
 func (c *Coordinator) attachLane(lane provider.Lane, generation uint64) {
 	id := lane.Identity().ID
 	c.mu.Lock()
-	previous := c.lanes[id]
 	c.lanes[id] = lane
 	c.generations[id] = generation
 	c.mu.Unlock()
-	if previous != nil && previous != lane {
-		_ = previous.Detach(context.Background())
+}
+
+// An actor may detach after a rejected admission while its old transport is
+// still alive. Retire that attachment before asking the runtime to resume:
+// both generations use the same native ThreadRef, so closing the previous
+// attachment after Resume could destroy the newly attached session.
+func (c *Coordinator) retireLaneAttachment(ctx context.Context, id provider.LaneID) error {
+	c.mu.Lock()
+	previous := c.lanes[id]
+	c.mu.Unlock()
+	if previous == nil {
+		return nil
 	}
+	if err := previous.Detach(ctx); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if c.lanes[id] == previous {
+		delete(c.lanes, id)
+		delete(c.generations, id)
+	}
+	c.mu.Unlock()
+	return nil
 }
 
 func (c *Coordinator) startLaneEvents(lane provider.Lane, generation uint64) {

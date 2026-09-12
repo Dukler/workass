@@ -88,9 +88,10 @@ func normalizeCatalogModels(models []Model) []Model {
 			return canonicalEffortIndex[group.variants[i].key] < canonicalEffortIndex[group.variants[j].key]
 		})
 		collapsed := Model{
-			ModelID: base,
-			Name:    effortBaseName(group.variants[0].model, base, group.variants[0].effort),
-			Efforts: make([]string, 0, len(group.variants)),
+			ModelID:      base,
+			Name:         effortBaseName(group.variants[0].model, base, group.variants[0].effort),
+			Efforts:      make([]string, 0, len(group.variants)),
+			ServiceTiers: append([]string(nil), group.variants[0].model.ServiceTiers...),
 		}
 		for _, variant := range group.variants {
 			collapsed.Efforts = append(collapsed.Efforts, variant.effort)
@@ -194,8 +195,8 @@ func modelsFromAvailableModelsForProvider(raw any, providerID string) []Model {
 				continue
 			}
 			models = append(models, providerCatalogModel(providerID, Model{
-				ModelID: modelID,
-				Name:    firstNonEmpty(asString(item["name"]), asString(item["displayName"]), modelID),
+				ModelID: modelID, ServiceTiers: serviceTierValues(item["serviceTiers"]),
+				Name: firstNonEmpty(asString(item["name"]), asString(item["displayName"]), modelID),
 			}, asString(item["description"])))
 		}
 	}
@@ -385,6 +386,7 @@ func appendOrMergeCatalogModel(out *[]Model, indexByID map[string]int, model Mod
 		(*out)[idx].Name = firstNonEmpty(model.Name, model.ModelID)
 	}
 	(*out)[idx].Efforts = appendMissingStrings((*out)[idx].Efforts, model.Efforts...)
+	(*out)[idx].ServiceTiers = appendMissingStrings((*out)[idx].ServiceTiers, model.ServiceTiers...)
 }
 
 func appendMissingStrings(values []string, more ...string) []string {

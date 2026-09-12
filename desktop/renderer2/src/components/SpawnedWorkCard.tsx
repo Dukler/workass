@@ -7,6 +7,7 @@ import { ActionGlyph, IcStopSquare, IcTerminal, ModelIcon } from '../icons';
 import { spawnedWorkActivity, spawnedWorkKindWord } from '../tool-names';
 import { displayDetail } from '../tool-display';
 import { startSerialPoll } from '../serial-poll';
+import { canStopSpawnedWorkItem } from '../subagent-layout';
 
 function itemDuration(item: SpawnedWorkItem, nowMs: number): string {
   const start = Date.parse(item.startedAt);
@@ -60,6 +61,7 @@ function RunningRow({ chat, item, nowMs }: { chat: Chat; item: SpawnedWorkItem; 
   const meta = [
     spawnedWorkKindWord(item.kind),
     item.kind === 'agent' ? item.providerId : '',
+    item.modelLabel || '',
     item.pid ? `pid ${item.pid}` : '',
   ].filter(Boolean).join(' · ');
   // The live line is an ACTION like every other row in the rail: glyph + human
@@ -75,7 +77,7 @@ function RunningRow({ chat, item, nowMs }: { chat: Chat; item: SpawnedWorkItem; 
   // offering: a lane whose process died without a done-file reads "running"
   // until someone settles it, and a dev server nobody needs any more keeps its
   // chat's rail busy. The daemon does both; this is the button.
-  const canStop = store.canStopSpawnedWork();
+  const canStop = store.canStopSpawnedWork() && canStopSpawnedWorkItem(item);
   const stop = async () => {
     if (stopping) return;
     setStopping(true);

@@ -21,7 +21,7 @@ test('a running background row carries a stop square, and only a running one', (
 });
 
 test('the stop square is feature-detected, so an older daemon draws no dead button', () => {
-  assert.match(card, /const canStop = store\.canStopSpawnedWork\(\);/);
+  assert.match(card, /const canStop = store\.canStopSpawnedWork\(\) && canStopSpawnedWorkItem\(item\);/);
   assert.match(card, /\{canStop && \(/);
   assert.match(store, /canStopSpawnedWork\(\): boolean \{ return has\('spawnedWorkStop'\); \}/);
 });

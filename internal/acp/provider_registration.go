@@ -342,6 +342,7 @@ var providerRegistrations = map[string]providerRegistration{
 			planUsage:     codexPlanUsageStrategy{},
 			commands:      unsupportedCommandCatalogStrategy{},
 			notifications: codexProviderNotificationStrategy{},
+			spawnedWork:   codexProviderSpawnedWorkStrategy{},
 			model: providerModelPolicy{
 				SeparateEffortAxis: true, AssistantBrand: "gpt",
 				InspectAllEfforts: func(config ProviderConfig) bool { return isOfficialNativeCommand(config, "codex") },

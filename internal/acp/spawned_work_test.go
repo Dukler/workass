@@ -1328,3 +1328,69 @@ func TestNormalizeSpawnedWorkRoleAcceptsOnlyCanonicalRoles(t *testing.T) {
 		t.Fatal("canonical spawned-work roles were not preserved")
 	}
 }
+
+func TestNativeCodexBackgroundChildOutlivesParentAndRetainsReceipt(t *testing.T) {
+	t.Parallel()
+	events := newEventCollector()
+	stateDir := t.TempDir()
+	manager := newCodexCandidateManager(t, stateDir, "native-background-parent", false)
+	manager.opts.Broadcast = events.Broadcast
+	releaseFile := filepath.Join(stateDir, "release-child")
+	manager.providers["codex"].Config.Env["WORKASS_CODEX_FIXTURE_CHILD_RELEASE_FILE"] = releaseFile
+	if err := manager.InstallSpawnedWorkObserver(func(_ string, _ string, items []SpawnedWorkItem) (SpawnedWorkActorProjection, error) {
+		return SpawnedWorkActorProjection{ActorRevision: 1, Items: items}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Reset() })
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	session, err := manager.NewSession(ctx, SessionOptions{TabID: "bg-tab", ChatID: "bg-chat", ProviderID: "codex", CWD: repoRoot(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := manager.StartJob(ctx, JobStartOptions{Kind: "app-chat", SessionID: session.SessionID,
+		TabID: "bg-tab", ChatID: "bg-chat", Prompt: "[fixture:native-background]"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertJobStatus(t, events.waitJobEnd(t, jobID(started), 5*time.Second), "done", 0, "end_turn")
+	items := manager.ListSpawnedWork("bg-tab", "bg-chat")
+	if len(items) != 1 || items[0].Status != "running" || items[0].Kind != "agent" || items[0].ModelLabel != "gpt-fixture-mini" {
+		t.Fatalf("parent terminal lost child lifetime: %#v", items)
+	}
+	childID := items[0].ID
+	if result := manager.StopSpawnedWork("bg-tab", "bg-chat", childID); result["ok"] != false {
+		t.Fatalf("unsupported native Stop claimed success: %#v", result)
+	}
+	if got := manager.ListSpawnedWork("bg-tab", "bg-chat")[0].Status; got != "running" {
+		t.Fatalf("unsupported Stop changed status: %s", got)
+	}
+	bridge := manager.bridgeForSession(session.SessionID, SessionOptions{TabID: "bg-tab", ChatID: "bg-chat", ProviderID: "codex"})
+	if bridge == nil {
+		t.Fatal("parent completion detached the child's host")
+	}
+	if err := os.WriteFile(releaseFile, []byte("release"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bridge.request(ctx, "_workass/codex/rate-limits", map[string]any{}, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	events.waitFor(t, 5*time.Second, func(event collectedEvent) bool {
+		if event.channel != "spawned-work:changed" {
+			return false
+		}
+		payload, _ := event.payload.(map[string]any)
+		items, _ := payload["items"].([]SpawnedWorkItem)
+		return len(items) == 1 && items[0].ID == childID && items[0].Status == "failed" && items[0].Summary == "Background review failed"
+	})
+	if items = manager.ListSpawnedWork("bg-tab", "bg-chat"); len(items) != 0 {
+		t.Fatalf("terminal child retained a live runtime record: %#v", items)
+	}
+	if receipt, ok := manager.findSpawnedWorkReceipt("bg-tab", "bg-chat", childID); !ok || receipt.Status != "failed" {
+		t.Fatalf("missing durable child failure receipt: %#v %v", receipt, ok)
+	}
+	if len(manager.ListSpawnedWork("other-tab", "bg-chat")) != 0 {
+		t.Fatal("child crossed exact chat ownership")
+	}
+}

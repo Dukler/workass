@@ -438,9 +438,10 @@ type LiveSession struct {
 }
 
 type Model struct {
-	ModelID string   `json:"modelId"`
-	Name    string   `json:"name"`
-	Efforts []string `json:"efforts,omitempty"`
+	ServiceTiers []string `json:"serviceTiers,omitempty"`
+	ModelID      string   `json:"modelId"`
+	Name         string   `json:"name"`
+	Efforts      []string `json:"efforts,omitempty"`
 }
 
 type Mode struct {

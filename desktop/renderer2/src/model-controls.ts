@@ -2,6 +2,7 @@ import type { ModeOption, ModelOption, PermissionIntent } from './wire/types.ts'
 import { canonicalModelControlKey } from './model-selection.ts';
 
 export interface RememberedModelControls {
+  serviceTier?: string;
   effort?: string;
   modeId?: string;
 }
@@ -172,8 +173,10 @@ export function rememberModelControls(
   provider[modelId] = {
     ...(previous.effort ? { effort: previous.effort } : {}),
     ...(previous.modeId ? { modeId: previous.modeId } : {}),
+    ...(previous.serviceTier ? { serviceTier: previous.serviceTier } : {}),
     ...(controls.effort ? { effort: controls.effort } : {}),
     ...(controls.modeId ? { modeId: controls.modeId } : {}),
+    ...(controls.serviceTier ? { serviceTier: controls.serviceTier } : {}),
   };
   return next;
 }
@@ -189,12 +192,13 @@ export function normalizeModelControlMemory(raw: unknown): ModelControlMemory | 
       const controls = controlsRaw as Record<string, unknown>;
       const effort = typeof controls.effort === 'string' && controls.effort ? controls.effort : undefined;
       const modeId = typeof controls.modeId === 'string' && controls.modeId ? controls.modeId : undefined;
-      if (!effort && !modeId) continue;
+      const serviceTier = controls.serviceTier === 'fast' || controls.serviceTier === 'default' ? controls.serviceTier : undefined;
+      if (!effort && !modeId && !serviceTier) continue;
       // Persisted memory is already canonical: composite effort ids are not
       // model keys. Ignore an obsolete suffixed key instead of migrating it
       // back into the current shape during hydration.
       if (canonicalModelControlKey(modelId) !== modelId) continue;
-      provider[modelId] = { ...(effort ? { effort } : {}), ...(modeId ? { modeId } : {}) };
+      provider[modelId] = { ...(serviceTier ? { serviceTier } : {}), ...(effort ? { effort } : {}), ...(modeId ? { modeId } : {}) };
     }
     if (Object.keys(provider).length) out[providerId] = provider;
   }

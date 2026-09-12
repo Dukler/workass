@@ -609,6 +609,11 @@ func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerI
 	rec, changed := m.upsertSpawnedWorkLocked(candidate, taskID, task.Description, task.TaskType, task.SubagentType, task.OutputFile)
 	if rec != nil {
 		rec.LastLevelSeen = now
+		if model := compactText(redactSensitiveText(task.ModelLabel), 160); model != "" && model != rec.Item.ModelLabel {
+			rec.Item.ModelLabel = model
+			rec.Item.UpdatedAt = isoNow()
+			changed = true
+		}
 		if event.Kind == "started" || event.Kind == "progress" || spawnedWorkStatus(task.Status) == "running" {
 			rec.MissingSince = time.Time{}
 		}
@@ -1533,6 +1538,9 @@ func (m *Manager) StopSpawnedWork(tabID, chatID, id string) map[string]any {
 			return map[string]any{"ok": false, "error": "spawned work item is no longer cancellable"}
 		}
 		return map[string]any{"ok": true, "id": item.ID, "status": "cancelling", "cancelled": true}
+	}
+	if spawnedWorkLivenessClassFor(item) == spawnedWorkLivenessInProcess && item.PID == nil && item.OutputFile == "" {
+		return map[string]any{"ok": false, "id": item.ID, "error": "provider-owned work has no supported stop operation"}
 	}
 	signalled, forced := m.terminateSpawnedWorkPIDs(m.spawnedWorkStopPIDs(item))
 	summary := "Stopped on request: no live process remained"

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ToolEvent, PlanEntry } from '../store/types';
 import { store, useApp, useActivity, useSpawnedWork } from '../store/store';
 import { toolState, fmtDur, extractSubagents, nodeState, nodeDuration, ToolDetail } from './messages';
-import { subagentActivity, type SubagentNode } from '../subagent-layout';
+import { reconcileSubagentWork, subagentActivity, type SubagentNode } from '../subagent-layout';
 import { SpawnedWorkLive } from './SpawnedWorkCard';
 import { renderInline } from '../markdown/inline';
 import { IcActivity, ActionGlyph, ModelIcon } from '../icons';
@@ -183,19 +183,12 @@ export function TareasCard() {
   const running = turnMessages.some((message) => message.status === 'running');
   const events = turnMessages.flatMap((message) => message.events);
   const tools = events.filter((e): e is ToolEvent => e.kind === 'tool');
-  const { nodes, mainTools } = extractSubagents(tools);
-  // ONE row per subagent. A tracked subagent is registered as spawned work under
-  // the same id the header event carries (daemon: registerSubagentSpawnedWork
-  // uses run.ID, emitSubagentHeader emits subagentId=run.ID), so while it is
-  // live BOTH surfaces would draw it. The live row wins that overlap: it carries
-  // the true elapsed and current activity, while the node has been observed
-  // reading as settled ("2 llamadas") for a child still working. When the child
-  // really ends, the item leaves `running` and the node takes over with its calls.
-  const liveSubagentIds = new Set(
-    (chat ? store.spawnedWork(chat) : [])
-      .filter((item) => item.status === 'running' && item.kind === 'subagent')
-      .map((item) => item.id),
-  );
+  const grouped = extractSubagents(tools);
+  const mainTools = grouped.mainTools;
+  // Tracked child lifetime survives foreground settlement. While the child is
+  // live its spawned-work row owns activity and elapsed time; after completion
+  // the grouped tool row uses the durable child result.
+  const { nodes, liveIds: liveSubagentIds } = reconcileSubagentWork(grouped.nodes, chat ? store.spawnedWork(chat) : []);
   const runningNodes = nodes.filter((n) => nodeState(n) === 'running' && !liveSubagentIds.has(n.id));
   const doneNodes = nodes.filter((n) => nodeState(n) !== 'running' && !liveSubagentIds.has(n.id));
   const runningTools = mainTools.filter((t) => toolState(t.status) === 'running');

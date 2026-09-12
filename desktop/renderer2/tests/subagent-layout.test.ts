@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ToolEvent } from '../src/store/types.ts';
-import { extractSubagents, isSubagentHeader, isSubagentChild, subagentActivity } from '../src/subagent-layout.ts';
+import { extractSubagents, isSubagentHeader, isSubagentChild, subagentActivity, reconcileSubagentWork, canStopSpawnedWorkItem } from '../src/subagent-layout.ts';
 
 function tool(partial: Partial<ToolEvent> & Pick<ToolEvent, 'key' | 'title'>): ToolEvent {
   return {
@@ -89,4 +89,48 @@ test('compact activity falls back through old titles and idle gaps safely', () =
     tool({ key: 'done', id: 'wa-3:done', title: 'Search', status: 'completed', subagentId: 'wa-3' }),
   ]).nodes[0];
   assert.equal(subagentActivity(betweenCalls).label, 'Trabajando');
+});
+
+test('native Codex cards share Workass grouping, model chips and child activity', () => {
+  const grouped = extractSubagents([
+    tool({ key: 'main', id: 'spawn', title: 'spawnAgent' }),
+    tool({ key: 'header', id: 'codex-agent-1', title: 'Review transport', toolKind: 'agent', status: 'in_progress',
+      subagentId: 'codex-agent-1', subagentHeader: true, subagentModel: 'gpt-fixture[high]', subagentProvider: 'gpt' }),
+    tool({ key: 'child', id: 'codex-agent-1:read', title: 'Read', toolKind: 'read', status: 'in_progress', subagentId: 'codex-agent-1' }),
+  ]);
+  assert.equal(grouped.nodes.length, 1);
+  assert.equal(grouped.nodes[0].model, 'gpt-fixture[high]');
+  assert.equal(grouped.nodes[0].label, 'Review transport');
+  assert.equal(subagentActivity(grouped.nodes[0]).icon, 'read');
+  assert.equal(isSubagentHeader(grouped.nodes[0].header!), true);
+  assert.deepEqual(grouped.mainTools.map((event) => event.id), ['spawn']);
+});
+
+
+test('tracked native child lifetime overrides foreground settlement without mutating the transcript', () => {
+  const nodes = extractSubagents([
+    tool({ key: 'header', id: 'native-child', title: 'Review', status: 'completed', subagentId: 'native-child', subagentHeader: true }),
+  ]).nodes;
+  const item = { id: 'native-child-run-1', taskId: 'native-child-run-1', toolCallId: 'native-child',
+    tabId: 't', chatId: 'c', providerId: 'codex', kind: 'agent', label: 'Review', status: 'running',
+    startedAt: '2026-09-11T10:00:00Z', updatedAt: '2026-09-11T10:00:00Z', modelLabel: 'gpt-fixture[high]' };
+  const live = reconcileSubagentWork(nodes, [item]);
+  assert.equal(live.nodes[0].header?.status, 'in_progress');
+  assert.equal(live.nodes[0].model, 'gpt-fixture[high]');
+  assert.equal(live.liveIds.has('native-child'), true);
+  const done = reconcileSubagentWork(nodes, [{ ...item, status: 'failed', summary: 'Review failed', finishedAt: '2026-09-11T10:01:00Z' }]);
+  assert.equal(done.nodes[0].header?.status, 'failed');
+  assert.equal(done.nodes[0].header?.output, 'Review failed');
+  assert.equal(done.liveIds.size, 0);
+  assert.equal(nodes[0].header?.status, 'completed');
+  const followup = { ...item, id: 'native-child-run-2', status: 'running', startedAt: '2026-09-11T11:00:00Z' };
+  assert.equal(reconcileSubagentWork(nodes, [followup, { ...item, status: 'failed' }]).nodes[0].header?.status, 'in_progress');
+  assert.equal(reconcileSubagentWork(nodes, [{ ...item, kind: 'subagent', id: 'native-child', toolCallId: 'mcp-spawn-call' }]).liveIds.has('native-child'), true);
+});
+
+test('provider-owned agents never show an unsupported process Stop control', () => {
+  assert.equal(canStopSpawnedWorkItem({ kind: 'agent' }), false);
+  assert.equal(canStopSpawnedWorkItem({ kind: 'workflow' }), false);
+  assert.equal(canStopSpawnedWorkItem({ kind: 'subagent' }), true);
+  assert.equal(canStopSpawnedWorkItem({ kind: 'agent', pid: 123 }), true);
 });

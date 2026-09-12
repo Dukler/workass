@@ -5,6 +5,13 @@ import "strings"
 type codexProviderNotificationStrategy struct{}
 
 func (codexProviderNotificationStrategy) Decode(update, _ map[string]any) (providerNotification, bool) {
+	if asString(update["sessionUpdate"]) == "_workass_codex_spawned_work" {
+		decoded, ok := (codexProviderSpawnedWorkStrategy{}).DecodeLifecycle(update["event"])
+		if !ok {
+			return providerNotification{}, false
+		}
+		return providerNotification{Kind: providerNotificationSpawnedWork, SpawnedWork: &decoded}, true
+	}
 	if strings.TrimSpace(asString(update["sessionUpdate"])) != "_workass_codex_steer_consumed" {
 		return providerNotification{}, false
 	}
@@ -12,6 +19,6 @@ func (codexProviderNotificationStrategy) Decode(update, _ map[string]any) (provi
 	return providerNotification{Kind: providerNotificationSteerConsumed, SteerConsumed: &decoded}, true
 }
 
-func (codexProviderNotificationStrategy) ToolParentID(map[string]any, map[string]any) string {
-	return ""
+func (codexProviderNotificationStrategy) ToolParentID(updateMeta, _ map[string]any) string {
+	return strings.TrimSpace(asString(mapFromAny(updateMeta["workassSubagent"])["id"]))
 }

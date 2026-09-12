@@ -3472,6 +3472,8 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 	var modeConfigID string
 	var efforts []string
 	var currentEffort *string
+	var serviceTierConfigID string
+	var serviceTiers []string
 	var effortConfigID string
 	modelSeen := false
 	effortSeen := false
@@ -3479,6 +3481,13 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 		opt := mapFromAny(item)
 		id := asString(opt["id"])
 		category := asString(opt["category"])
+		if category == "service_tier" {
+			serviceTierConfigID = strings.TrimSpace(id)
+			tierOptions, _ := opt["options"].([]any)
+			for _, value := range tierOptions {
+				serviceTiers = append(serviceTiers, asString(mapFromAny(value)["value"]))
+			}
+		}
 		values, _ := opt["options"].([]any)
 		if id == "model" || category == "model" {
 			modelSeen = true
@@ -3487,8 +3496,8 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 				modelID := asString(value["value"])
 				if modelID != "" {
 					models = append(models, providerCatalogModel(b.providerID, Model{
-						ModelID: modelID,
-						Name:    firstNonEmpty(asString(value["name"]), modelID),
+						ModelID: modelID, ServiceTiers: serviceTierValues(value["serviceTiers"]),
+						Name: firstNonEmpty(asString(value["name"]), modelID),
 					}, asString(value["description"])))
 				}
 			}
@@ -3571,6 +3580,9 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 	if modes != nil {
 		b.modes = modes
 		changed = true
+	}
+	if serviceTierConfigID != "" {
+		b.serviceTierConfigID, b.serviceTiers = serviceTierConfigID, serviceTiers
 	}
 	if modeConfigID != "" {
 		b.modeConfigID = modeConfigID

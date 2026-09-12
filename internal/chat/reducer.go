@@ -98,6 +98,7 @@ type LineageAdvanced struct {
 func (LineageAdvanced) chatCommand() {}
 
 type Submit struct {
+	ServiceTier  string
 	OperationID  provider.OperationID
 	LaneID       provider.LaneID
 	Text         string
@@ -1382,6 +1383,7 @@ func reducePromoteStagedQueue(state *State, command PromoteStagedQueue) ([]Effec
 		Attachments:  append([]provider.Attachment(nil), staged.Attachments...),
 		ModelID:      firstNonEmptyString(strings.TrimSpace(command.ModelID), staged.ModelID),
 		ModeID:       firstNonEmptyString(strings.TrimSpace(command.ModeID), staged.ModeID),
+		ServiceTier:  strings.TrimSpace(command.ServiceTier),
 		Permission:   firstNonEmptyString(strings.TrimSpace(command.Permission), staged.Permission),
 		Presentation: presentation, Revision: state.Revision + 1,
 	})
@@ -2082,6 +2084,7 @@ func reduceSubmit(state *State, command Submit) ([]Effect, error) {
 		Attachments:  append([]provider.Attachment(nil), command.Attachments...),
 		ModelID:      strings.TrimSpace(command.ModelID),
 		ModeID:       strings.TrimSpace(command.ModeID),
+		ServiceTier:  strings.TrimSpace(command.ServiceTier),
 		Permission:   strings.TrimSpace(command.Permission),
 		Presentation: presentation,
 		Revision:     state.Revision + 1,
