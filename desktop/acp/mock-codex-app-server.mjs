@@ -1,5 +1,6 @@
 import readline from 'node:readline';
-import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const pending = new Map();
 let requestSequence = 0;
@@ -9,12 +10,52 @@ let activeTurnScenario = '';
 let rapidSteerSequence = 0;
 let pendingNativeChild = null;
 const turnRecords = [];
+if (process.env.WORKASS_CODEX_FIXTURE_LARGE_RESUME === '1') {
+  for (let index = 0; index < 512; index++) {
+    turnRecords.push({ id: `history-${index}`, status: 'completed', items: [
+      { type: 'agentMessage', id: `history-item-${index}`, text: 'historical-fixture-only '.padEnd(8192, 'x') },
+    ] });
+  }
+}
 const threadMCPConfigs = new Map();
 const threadMCPStartup = new Map();
 const fixtureThreadId = String(process.env.WORKASS_CODEX_FIXTURE_THREAD_ID || 'fixture-codex-thread');
+const goalStore = process.env.WORKASS_CODEX_FIXTURE_GOAL_STORE;
+let goal = goalStore && existsSync(goalStore) ? JSON.parse(readFileSync(goalStore, 'utf8')) : null;
+let goalSettings = null;
+let goalContext = null;
+
+function updateGoalFixture(status) {
+  if (goal) goal = { ...goal, status, tokensUsed: goal.tokensUsed + 10, updatedAt: goal.updatedAt + 1 };
+  if (goalStore) writeFileSync(goalStore, JSON.stringify(goal));
+  notify(goal ? 'thread/goal/updated' : 'thread/goal/cleared', { threadId: fixtureThreadId, ...(goal ? { goal } : {}) });
+}
+
+function runGoalFixture() {
+  const start = () => {
+    activeTurn = `fixture-goal-${++turnSequence}`;
+    notify('turn/started', { threadId: fixtureThreadId, turn: { id: activeTurn, status: 'inProgress' } });
+    notify('item/agentMessage/delta', { threadId: fixtureThreadId, turnId: activeTurn, itemId: activeTurn, delta: 'Native goal checkpoint.\n' });
+  };
+  start();
+  completeTurn(activeTurn);
+  setTimeout(() => {
+    if (goal?.status !== 'active') return;
+    start();
+    if (goal.objective.includes('[fixture:goal-hold]')) return;
+    const terminal = /\[fixture:goal-(blocked|usageLimited|budgetLimited)\]/.exec(goal.objective)?.[1] || 'complete';
+    updateGoalFixture(terminal);
+    completeTurn(activeTurn);
+  }, 25);
+}
 
 function write(message) { process.stdout.write(`${JSON.stringify(message)}\n`); }
-function respond(id, result) { write({ id, result }); }
+function respond(id, result) {
+  if (process.env.WORKASS_CODEX_FIXTURE_DIAGNOSTIC_TRACE && result?.thread) {
+    appendFileSync(process.env.WORKASS_CODEX_FIXTURE_DIAGNOSTIC_TRACE, `${JSON.stringify({ replyBytes: Buffer.byteLength(JSON.stringify({ id, result })) })}\n`);
+  }
+  write({ id, result });
+}
 function notify(method, params) { write({ method, params }); }
 function request(method, params) {
   const id = `fixture-app-${++requestSequence}`;
@@ -76,6 +117,9 @@ function startMCPFixtures(threadId, configured) {
 }
 
 async function runTurn(id, params) {
+  if ((params.input || []).some((item) => item.text?.includes('[fixture:goal-'))) {
+    return write({ id, error: { code: -32602, message: 'native goal command incorrectly sent to turn/start' } });
+  }
   const expectedTier = (params.input || []).map((item) => item.text || '').join('\n').match(/\[fixture:speed:(fast|default)\]/)?.[1];
   if (expectedTier && (params.serviceTierForTurn !== (expectedTier === 'fast' && process.env.WORKASS_CODEX_FIXTURE_SPEED_CATALOG !== 'legacy' ? 'priority' : expectedTier) || params.effort !== 'high')) {
     return write({ id, error: { code: -32602, message: 'fixture speed/effort mismatch' } });
@@ -85,8 +129,30 @@ async function runTurn(id, params) {
 	const turnRecord = { id: turnId, status: 'inProgress', items: [] };
 	turnRecords.push(turnRecord);
   activeTurn = turnId;
+  const diagnosticScenario = (params.input || []).some((item) => item.text?.includes('[fixture:diagnostic'));
+  const diagnosticUsage = { last: { totalTokens: 123, inputTokens: 100, cachedInputTokens: 20, outputTokens: 23, reasoningOutputTokens: 7 }, modelContextWindow: 1000 };
+  if (diagnosticScenario) {
+    // Native events can precede the response. Only its exact turn may survive admission.
+    notify('error', { threadId: params.threadId, turnId: 'wrong-early-turn', willRetry: true, error: { codexErrorInfo: 'unauthorized' } });
+    notify('thread/tokenUsage/updated', { threadId: params.threadId, turnId, tokenUsage: diagnosticUsage });
+  }
   respond(id, { turn: { id: turnId, status: 'inProgress', items: [] } });
+  if (diagnosticScenario && turnSequence > 1) {
+    const stale = `fixture-turn-${turnSequence - 1}`;
+    notify('turn/started', { threadId: params.threadId, turn: { id: stale, status: 'inProgress' } });
+    for (const [threadId, staleTurn] of [[params.threadId, stale], ['wrong-thread', turnId], [params.threadId, 'wrong-current-turn']]) {
+      notify('thread/tokenUsage/updated', { threadId, turnId: staleTurn, tokenUsage: { last: { totalTokens: 999 }, modelContextWindow: 999 } });
+      notify('error', { threadId, turnId: staleTurn, willRetry: true, error: { codexErrorInfo: 'unauthorized' } });
+      notify('item/completed', { threadId, turnId: staleTurn, item: { type: 'contextCompaction', id: 'stale-compaction' } });
+    }
+  }
   notify('turn/started', { threadId: params.threadId, turn: { id: turnId, status: 'inProgress', items: [] } });
+  if (diagnosticScenario && turnSequence > 1) {
+    for (const [threadId, id] of [[params.threadId, `fixture-turn-${turnSequence - 1}`], ['wrong-thread', turnId], [params.threadId, 'wrong-current-turn']]) {
+      notify('turn/completed', { threadId, turn: { id, status: 'failed', error: { codexErrorInfo: 'unauthorized' } } });
+    }
+    notify('thread/tokenUsage/updated', { threadId: params.threadId, tokenUsage: { last: { totalTokens: 999 } } });
+  }
 	if (params.clientUserMessageId) {
 	  const userItem = { type: 'userMessage', id: `prompt-user-${turnId}`, clientId: params.clientUserMessageId, content: params.input };
 	  turnRecord.items.push(userItem);
@@ -97,6 +163,67 @@ async function runTurn(id, params) {
 	}
   const text = (params.input || []).filter((item) => item.type === 'text').map((item) => item.text).join('\n');
   const images = (params.input || []).filter((item) => item.type === 'image');
+  if (text.includes('[fixture:error-category]')) {
+    const error = JSON.parse(process.env.WORKASS_CODEX_FIXTURE_DIAGNOSTIC_ERROR || '{}');
+    notify('error', { threadId: params.threadId, turnId, willRetry: true, error });
+    completeTurn(turnId);
+    return;
+  }
+  if (diagnosticScenario) {
+    const error = {
+      message: 'Reconnecting... 2/5; token=fixture-private-value; https://private.invalid/native-id',
+      codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 502, socketCode: 'private-native-id' } },
+      additionalDetails: 'websocket closed by server before response.completed; api_key=fixture-key; password="fixture private phrase"; credential=fixture-credential; Bearer fixture-bearer; /private/native/path',
+    };
+    notify('error', { threadId: params.threadId, turnId, willRetry: true, error });
+    // Official WarningNotification: message + optional threadId, never turnId.
+    const warning = { message: 'Falling back from WebSockets to HTTPS transport. token=fixture-warning' };
+    notify('warning', { ...warning, threadId: params.threadId });
+    notify('warning', { ...warning, threadId: 'wrong-thread' });
+    notify('warning', warning);
+    notify('item/started', { threadId: params.threadId, turnId, item: { type: 'contextCompaction', id: 'diagnostic-compaction' } });
+    notify('item/completed', { threadId: params.threadId, turnId, item: { type: 'contextCompaction', id: 'diagnostic-compaction' } });
+    notify('thread/compacted', { threadId: params.threadId, turnId });
+    notify('item/completed', { threadId: params.threadId, turnId, item: { type: 'contextCompaction', id: 'diagnostic-compaction' } });
+    notify('thread/tokenUsage/updated', { threadId: params.threadId, turnId, tokenUsage: {
+      last: { totalTokens: 0, inputTokens: -1, cachedInputTokens: '42', outputTokens: 2.5, reasoningOutputTokens: 9007199254740992 }, modelContextWindow: null,
+    } });
+    notify('thread/tokenUsage/updated', { threadId: params.threadId, turnId, tokenUsage: diagnosticUsage });
+    if (text.includes('[fixture:diagnostic-failed]')) {
+      completeTurn(turnId, 'failed', { message: 'Retry limit exhausted', codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 503 } }, additionalDetails: error.additionalDetails });
+    } else completeTurn(turnId);
+    // Idle notifications must not emit events or become the next input's prior usage.
+    notify('thread/tokenUsage/updated', { threadId: params.threadId, turnId, tokenUsage: { last: { totalTokens: 888 }, modelContextWindow: 888 } });
+    notify('error', { threadId: params.threadId, turnId, willRetry: true, error });
+    notify('warning', { ...warning, threadId: params.threadId });
+    return;
+  }
+  if (text.includes('[fixture:fallback-warning]')) {
+    const warning = { message: process.env.WORKASS_CODEX_FIXTURE_WARNING || 'Reconnecting... 2/5' };
+    notify('warning', { ...warning, threadId: params.threadId });
+    notify('warning', { ...warning, threadId: 'wrong-thread' });
+    notify('warning', { ...warning, threadId: null });
+    notify('warning', warning);
+    completeTurn(turnId);
+    notify('warning', { ...warning, threadId: params.threadId });
+    return;
+  }
+  if (text.includes('[fixture:socket-disconnected') || text.includes('[fixture:socket-recovered]')) {
+    notify('item/agentMessage/delta', {
+      threadId: params.threadId, turnId, itemId: 'socket-partial', delta: 'Partial work before upstream disconnect.',
+    });
+    const error = {
+      message: 'stream disconnected before completion: websocket closed by server before response.completed',
+      codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+      additionalDetails: null,
+    };
+    notify('error', { threadId: params.threadId, turnId, willRetry: true, error });
+    if (!text.includes('[fixture:socket-recovered]')) {
+      notify('error', { threadId: params.threadId, turnId, willRetry: false, error });
+      completeTurn(turnId, 'failed', text.includes('[fixture:socket-disconnected-notification]') ? undefined : error);
+      return;
+    }
+  }
   if (text.includes('[fixture:native-background]')) {
     pendingNativeChild = 'background-child';
     notify('item/completed', { threadId: params.threadId, turnId,
@@ -169,6 +296,9 @@ async function runTurn(id, params) {
     return;
   }
   if (text.includes('keep running')) return;
+  if (text.includes('[fixture:compact-missing-turn]')) {
+    notify('thread/compacted', { threadId: params.threadId });
+  }
   if (text.includes('[fixture:compact]')) {
     notify('thread/compacted', {
       threadId: params.threadId,
@@ -210,8 +340,51 @@ async function handle(message) {
     return;
   }
   const { id, method, params = {} } = message;
+  if (process.env.WORKASS_CODEX_FIXTURE_RPC_TRACE) {
+    appendFileSync(process.env.WORKASS_CODEX_FIXTURE_RPC_TRACE, `${JSON.stringify({
+      method, ...(params.threadId ? { exactThread: params.threadId === fixtureThreadId } : {}),
+      ...(process.env.WORKASS_CODEX_FIXTURE_LARGE_RESUME === '1' && method === 'turn/start' ? {
+        inputBytes: Buffer.byteLength(JSON.stringify(params.input)),
+        inputDigest: createHash('sha256').update(JSON.stringify(params.input)).digest('hex'),
+        inputCount: params.input?.length,
+      } : {}),
+    })}\n`);
+  }
   if (method === 'initialize') return respond(id, { userAgent: 'fixture', platformFamily: 'unix', platformOs: 'fixture', codexHome: '/fixture' });
   if (method === 'initialized') return;
+  if (method === 'experimentalFeature/list') return respond(id, params.cursor
+    ? { data: [{ name: 'goals', enabled: process.env.WORKASS_CODEX_FIXTURE_GOALS_UNAVAILABLE !== '1' }], nextCursor: null }
+    : { data: [], nextCursor: 'goal-features' });
+  if (method.startsWith('thread/goal/') && params.threadId !== fixtureThreadId) throw new Error('goal changed its exact thread');
+  if (method === 'thread/goal/get') return respond(id, { goal });
+  if (method === 'thread/settings/update') {
+    if (process.env.WORKASS_CODEX_FIXTURE_GOAL_SETTINGS_FAIL === '1') return write({ id, error: { code: -32601, message: 'settings method unavailable' } });
+    if (params.model !== 'gpt-fixture' || params.effort !== 'high' || !['default', 'priority'].includes(params.serviceTier) || !params.sandboxPolicy || !params.approvalPolicy) throw new Error('goal settings lost model/effort/speed/permissions');
+    goalSettings = params;
+    return respond(id, {});
+  }
+  if (method === 'thread/inject_items') {
+    if (params.threadId !== fixtureThreadId || params.items?.length !== 1 || params.items[0].role !== 'user') throw new Error('goal context thread/shape incorrect');
+    goalContext = params.items;
+    return respond(id, {});
+  }
+  if (method === 'thread/goal/clear') {
+    const cleared = Boolean(goal);
+    goal = null;
+    respond(id, { cleared });
+    updateGoalFixture();
+    return;
+  }
+  if (method === 'thread/goal/set') {
+    if (!goal && !params.objective) return write({ id, error: { code: -32602, message: 'no goal exists' } });
+    if (params.status === 'active' && (!goalSettings || !goalContext)) throw new Error('goal started before settings/context');
+    goal = { threadId: fixtureThreadId, objective: params.objective || goal?.objective, status: params.status,
+      tokensUsed: goal?.tokensUsed || 0, timeUsedSeconds: 1, tokenBudget: null, createdAt: 1, updatedAt: (goal?.updatedAt || 0) + 1 };
+    respond(id, { goal });
+    updateGoalFixture(params.status);
+    if (params.status === 'active') runGoalFixture();
+    return;
+  }
   if (method === 'model/list' && process.env.WORKASS_CODEX_FIXTURE_SPEED_CATALOG) {
     model.additionalSpeedTiers = ['fast'];
     if (process.env.WORKASS_CODEX_FIXTURE_SPEED_CATALOG === 'legacy') delete model.serviceTiers;
@@ -249,10 +422,19 @@ async function handle(message) {
     }
     threadMCPConfigs.set(params.threadId, params.config?.mcp_servers || {});
     startMCPFixtures(params.threadId, params.config?.mcp_servers || {});
-    return respond(id, {
-    thread: { id: params.threadId, turns: [] }, model: model.id, reasoningEffort: 'high', modelProvider: 'openai', cwd: params.cwd,
+    const result = {
+    thread: { id: params.threadId, turns: params.excludeTurns === true ? [] : turnRecords,
+      ...(process.env.WORKASS_CODEX_FIXTURE_HISTORY_MODE ? { historyMode: process.env.WORKASS_CODEX_FIXTURE_HISTORY_MODE } : {}) }, model: model.id, reasoningEffort: 'high', modelProvider: 'openai', cwd: params.cwd,
     approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'workspaceWrite', writableRoots: [], networkAccess: false },
-    });
+    };
+    if (process.env.WORKASS_CODEX_FIXTURE_LARGE_RESUME === '1' && process.env.WORKASS_CODEX_FIXTURE_RPC_TRACE) {
+      appendFileSync(process.env.WORKASS_CODEX_FIXTURE_RPC_TRACE, `${JSON.stringify({
+        method: 'fixture/resume-shape', responseBytes: Buffer.byteLength(JSON.stringify(result)),
+        returnedTurns: result.thread.turns.length, storedTurns: turnRecords.length,
+        hasHistoryOverride: Object.hasOwn(params, 'history'), hasPathOverride: Object.hasOwn(params, 'path'),
+      })}\n`);
+    }
+    return respond(id, result);
   }
   if (method === 'mcpServerStatus/list') {
     const configured = threadMCPConfigs.get(params.threadId) || {};

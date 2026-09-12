@@ -7,7 +7,9 @@ import { ActionGlyph, IcStopSquare, IcTerminal, ModelIcon } from '../icons';
 import { spawnedWorkActivity, spawnedWorkKindWord } from '../tool-names';
 import { displayDetail } from '../tool-display';
 import { startSerialPoll } from '../serial-poll';
-import { canStopSpawnedWorkItem } from '../subagent-layout';
+import { canStopSpawnedWorkItem, currentTurnMessages, extractSubagents, isAgentWork, nodeForSpawnedWork, subagentWorkId } from '../subagent-layout';
+import { SubagentRow } from './SubagentRow';
+import type { ToolEvent } from '../store/types';
 
 function itemDuration(item: SpawnedWorkItem, nowMs: number): string {
   const start = Date.parse(item.startedAt);
@@ -146,7 +148,7 @@ function RunningRow({ chat, item, nowMs }: { chat: Chat; item: SpawnedWorkItem; 
 // registry), so it renders whether or not a turn is streaming.
 export function SpawnedWorkLive({ chat }: { chat: Chat }) {
   useSpawnedWork();
-  const running = store.spawnedWork(chat).filter((item) => item.status === 'running');
+  const running = store.spawnedWork(chat).filter((item) => item.status === 'running' && !isAgentWork(item));
   const [nowMs, setNowMs] = useState(Date.now());
 
   useEffect(() => {
@@ -171,20 +173,31 @@ export function SpawnedWorkLive({ chat }: { chat: Chat }) {
 // (user, 2026-07-25) — same rule the subagent rows follow.
 export function SpawnedWorkCard({ chat }: { chat: Chat }) {
   useSpawnedWork();
-  const finished = store.spawnedWork(chat).filter((item) => item.status !== 'running');
+  const currentNodes = extractSubagents(currentTurnMessages(chat).flatMap((message) => message.events)
+    .filter((event): event is ToolEvent => event.kind === 'tool')).nodes;
+  const represented = new Set(currentNodes.map((node) => node.id));
+  const work = store.spawnedWork(chat);
+  for (const item of work) if (isAgentWork(item) && item.status === 'running') represented.add(subagentWorkId(item));
+  const finished = work.filter((item) => item.status !== 'running'
+    && (!isAgentWork(item) || !represented.has(subagentWorkId(item))));
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const historicalNodes = new Map((historyOpen ? extractSubagents(chat.messages.flatMap((message) => message.events)
+    .filter((event): event is ToolEvent => event.kind === 'tool')).nodes : []).map((node) => [node.id, node]));
 
   useEffect(() => { void store.refreshSpawnedWork(chat); }, [chat]);
 
   if (finished.length === 0) return null;
   const nowMs = Date.now();
   return (
-    <details className="r-meta">
+    <details className="r-meta" onToggle={(event) => { if (event.target === event.currentTarget) setHistoryOpen(event.currentTarget.open); }}>
       <summary>
         <span className="r-ml">Segundo plano</span>
         <span className="r-count">{finished.length}</span>
       </summary>
       <div className="r-meta-b">
-        {finished.map((item) => (
+        {finished.map((item) => isAgentWork(item)
+          ? <SubagentRow key={item.id} chat={chat} n={nodeForSpawnedWork(item, historicalNodes.get(subagentWorkId(item)))} nowMs={nowMs} />
+          : (
           <div key={item.id} className="r-dline" data-status={item.status}>
             <span className="r-dt" title={item.label || item.taskId}>{item.label || item.taskId}</span>
             {itemDuration(item, nowMs) && <span className="r-dl">{itemDuration(item, nowMs)}</span>}

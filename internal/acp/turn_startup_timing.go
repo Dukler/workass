@@ -2,6 +2,7 @@ package acp
 
 import (
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -36,6 +37,11 @@ type turnStartupTiming struct {
 	stages     [startupStageCount]atomic.Int64
 	lastUpdate atomic.Int64
 	outcome    atomic.Int32
+	detailMu   sync.Mutex
+	input      map[string]int64
+	runtime    runtimeDiagnosticState
+	// Restored receipts are observations from an earlier daemon, never live work.
+	restoredElapsed *time.Duration
 }
 
 func (s *turnStartupTiming) finish(outcome string) {
@@ -69,6 +75,9 @@ func (s *turnStartupTiming) fields() map[string]any {
 		return nil
 	}
 	elapsed := time.Since(s.started)
+	if s.restoredElapsed != nil {
+		elapsed = *s.restoredElapsed
+	}
 	if finished := s.stages[startupFinished].Load(); finished != 0 {
 		elapsed = time.Duration(finished - 1)
 	}
@@ -85,6 +94,21 @@ func (s *turnStartupTiming) fields() map[string]any {
 	if last := s.lastUpdate.Load(); last != 0 {
 		fields["lastUpdateMs"] = time.Duration(last - 1).Milliseconds()
 		fields["silenceMs"] = max(int64(0), (elapsed - time.Duration(last-1)).Milliseconds())
+	}
+	s.detailMu.Lock()
+	if s.input != nil {
+		input := make(map[string]int64, len(s.input))
+		for key, value := range s.input {
+			input[key] = value
+		}
+		fields["input"] = input
+	}
+	if s.runtime.Observed > 0 {
+		fields["runtime"] = s.runtime.clone()
+	}
+	s.detailMu.Unlock()
+	if s.restoredElapsed != nil {
+		fields["historical"] = true
 	}
 	return fields
 }
@@ -111,8 +135,8 @@ func (m *Manager) retainTurnDiagnostic(job *Job) {
 
 // TurnDiagnostics reads only bounded timing metadata, including live turns.
 // It never attaches a provider, reads a transcript, changes a turn, or polls.
-// Retention is deliberately memory-only; ordinary completion logs retain the
-// receipt without another synchronous disk write on the turn-control path.
+// Completed and failure-checkpoint receipts also survive a daemon restart in
+// the bounded diagnostic store; restored observations never imply a live turn.
 func (m *Manager) TurnDiagnostics(tabID, chatID string, limit int) map[string]any {
 	if limit < 1 || limit > 20 {
 		limit = 5
@@ -165,6 +189,12 @@ func (m *Manager) TurnDiagnostics(tabID, chatID string, limit int) map[string]an
 		if fields["finishedMs"] != nil {
 			phase = "finished"
 		}
+		if fields["historical"] == true {
+			fields["active"] = false
+			if fields["finishedMs"] == nil {
+				phase = "previous_daemon_observation"
+			}
+		}
 		fields["phase"] = phase
 		delays := map[string]any{}
 		for _, interval := range [][3]string{
@@ -189,7 +219,9 @@ func (m *Manager) TurnDiagnostics(tabID, chatID string, limit int) map[string]an
 		"schemaVersion": 1, "tabId": strings.TrimSpace(tabID), "chatId": strings.TrimSpace(chatID),
 		"machineId": m.opts.MachineID, "version": m.opts.Version,
 		"sampledAt": time.Now().UTC().Format(time.RFC3339Nano), "turns": turns,
-		"available": len(turns) > 0 || len(attachments) > 0, "retention": "newest 256 recorded start attempts in this daemon lifetime; at most 20 returned for this exact chat",
+		"available": len(turns) > 0 || len(attachments) > 0, "retention": "newest 256 turn observations, at most 20 per exact chat read; completed turns and throttled failure checkpoints survive restart within a 4 MiB store",
+		"persistence":     m.turnDiagnosticPersistence(),
+		"runtimeMeaning":  "content-free host observations; input sizes measure current Workass/native-host input, not the upstream model request or entire model context; omitted socket details were not exposed by the provider",
 		"laneAttachments": attachments, "attachmentRetention": "newest 64 completed create/resume attempts or failed turn preparations in this daemon lifetime; at most 20 returned for this exact chat",
 		"timingOrigin":       "Manager.StartJob; excludes controller/network transit and native session creation before admission",
 		"phaseMeaning":       "last observed boundary, not an inference about provider internal work; omitted timestamps were not observed",

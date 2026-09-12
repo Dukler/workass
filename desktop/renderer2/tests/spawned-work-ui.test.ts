@@ -68,7 +68,8 @@ test('running spawned work is inline; finished work is a single flat fold', asyn
   assert.match(card, /r-dline/);
   assert.doesNotMatch(card, /trabajos terminados/);
   assert.doesNotMatch(card, /Serve the complete interactive comparison gallery/);
-  assert.equal((card.match(/<details/g) ?? []).length, 1, 'exactly one fold — no nested compaction');
+  assert.equal((card.match(/class="r-meta"/g) ?? []).length, 1, 'one background fold');
+  assert.equal((card.match(/class="r-sa"/g) ?? []).length, 1, 'historical agents use the shared inspection row');
 });
 
 test('spawned-work rail CSS clamps titles and bounds output tails', () => {

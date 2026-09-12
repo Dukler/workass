@@ -340,7 +340,7 @@ var providerRegistrations = map[string]providerRegistration{
 			input:         explicitHostInputReceiptPolicy{},
 			delivery:      codexDeliveryStrategy{},
 			planUsage:     codexPlanUsageStrategy{},
-			commands:      unsupportedCommandCatalogStrategy{},
+			commands:      capabilityCommandCatalogStrategy{capability: "workassCodexCommandCatalog"},
 			notifications: codexProviderNotificationStrategy{},
 			spawnedWork:   codexProviderSpawnedWorkStrategy{},
 			model: providerModelPolicy{

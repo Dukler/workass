@@ -11,6 +11,7 @@ import path from 'node:path';
 import process from 'node:process';
 import readline from 'node:readline';
 
+const hostInstanceId = randomUUID();
 const sessions = new Map();
 const pendingWorkassRequests = new Map();
 let workassRequestSequence = 0;
@@ -18,8 +19,10 @@ let app;
 let initializePromise;
 let providerRealm;
 let modelCatalog = [];
+let goalsAvailable = false;
 const MAX_MCP_STARTUP_STATES = 512;
 const WORKASS_MCP_STARTUP_RPC_CODE = -32045;
+const GOAL_STATUSES = new Set(['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete']);
 
 function workassMCPStartupError(value) {
   const error = value instanceof Error ? value : new Error(String(value || 'Codex Workass MCP startup failed'));
@@ -58,6 +61,48 @@ function nativeTurnError(value) {
 
 function diagnostic(label, error) {
   process.stderr.write(`${label}: ${safeErrorText(error)}\n`);
+}
+
+const diagnosticCount = (value) => Number.isSafeInteger(value) && value >= 0;
+
+function usageDiagnostic(value) {
+  const last = value?.last;
+  const event = {};
+  for (const [key, count] of Object.entries({ used: last?.totalTokens, size: value?.modelContextWindow,
+    input: last?.inputTokens, cachedInput: last?.cachedInputTokens,
+    output: last?.outputTokens, reasoningOutput: last?.reasoningOutputTokens })) {
+    if (diagnosticCount(count)) event[key] = count;
+  }
+  return Object.keys(event).length ? event : null;
+}
+
+function errorDiagnostic(error, willRetry = false) {
+  const info = error?.codexErrorInfo;
+  const nativeKind = typeof info === 'string' ? info : Object.keys(info || {})[0];
+  const categories = {
+    responseStreamDisconnected: 'stream_disconnected', responseStreamConnectionFailed: 'connection_failed',
+    httpConnectionFailed: 'connection_failed', contextWindowExceeded: 'context_limit',
+    rateLimitExceeded: 'rate_limit', usageLimitExceeded: 'rate_limit', unauthorized: 'authentication',
+    internalServerError: 'server_error', serverOverloaded: 'server_error', responseTooManyFailedAttempts: 'retry_exhausted',
+  };
+  const message = typeof error?.message === 'string' ? error.message : '';
+  // Socket causes may live only in additionalDetails. Classify transiently;
+  // neither this combined text nor either native string enters retained metadata.
+  const reasonText = `${message}\n${typeof error?.additionalDetails === 'string' ? error.additionalDetails : ''}`;
+  const category = Object.hasOwn(categories, nativeKind) ? categories[nativeKind] : 'other';
+  const reason = /idle\s+timeout|idle\s+timed\s+out/i.test(reasonText) ? 'idle_timeout'
+    : /(?:websocket|connection|stream)\s+(?:was\s+)?closed\s+by\s+(?:the\s+)?(?:server|peer)|peer\s+closed/i.test(reasonText) ? 'peer_closed'
+    : category === 'connection_failed' ? 'connection_failed'
+    : category === 'retry_exhausted' ? 'retry_exhausted' : 'other';
+  const event = { kind: 'error', willRetry: willRetry === true, category, reason, closeDetailsAvailable: false };
+  const status = info?.[nativeKind]?.httpStatusCode;
+  if (diagnosticCount(status) && status >= 100 && status <= 599) event.httpStatus = status;
+  const retry = /\b(?:reconnecting|retry(?:ing)?)\s*(?:\.{3}|…)?\s*(\d+)\s*\/\s*(\d+)\b/i.exec(message);
+  if (retry && diagnosticCount(Number(retry[1])) && diagnosticCount(Number(retry[2]))) {
+    event.retryAttempt = Number(retry[1]);
+    event.retryLimit = Number(retry[2]);
+  }
+  return event;
 }
 
 function write(message) { process.stdout.write(`${JSON.stringify(message)}\n`); }
@@ -122,6 +167,8 @@ class AppServerPeer {
       const pending = this.pending.get(String(message.id));
       if (!pending) return;
       this.pending.delete(String(message.id));
+      // Metrics observers are private, synchronous, and never own RPC success.
+      try { pending.observe?.(message.result, { replyBytes: Buffer.byteLength(line, 'utf8'), elapsedMs: Math.max(0, Math.round(performance.now() - pending.startedAt)) }); } catch {}
       if (message.error) {
         const error = Object.assign(new Error(message.error.message || 'Codex app-server request failed'), {
           code: message.error.code,
@@ -142,14 +189,17 @@ class AppServerPeer {
       if (message.method === 'mcpServer/startupStatus/updated') {
         this.recordMCPStartupStatus(message.params || {});
       }
-      void handleAppNotification(message.method, message.params || {});
+      void handleAppNotification(message.method, message.params || {}).catch((error) => {
+        diagnostic('Codex notification failed', error);
+        sessions.get(String(message.params?.threadId || ''))?.failPrompt(error);
+      });
     }
   }
 
-  request(method, params = {}) {
+  request(method, params = {}, observe) {
     const id = `workass-${++this.sequence}`;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { resolve, reject, observe, startedAt: performance.now() });
       try { this.write({ id, method, params }); }
       catch (error) { this.pending.delete(id); reject(error); }
     });
@@ -221,7 +271,7 @@ class AppServerPeer {
 
 function appServerArgs() {
   const configured = String(process.env.WORKASS_CODEX_APP_SERVER_ARGS || '').trim();
-  if (!configured) return ['app-server'];
+  if (!configured) return ['app-server', '-c', 'features.goals=true'];
   const parsed = JSON.parse(configured);
   if (!Array.isArray(parsed) || !parsed.every((value) => typeof value === 'string')) {
     throw new Error('WORKASS_CODEX_APP_SERVER_ARGS must be a JSON string array');
@@ -254,6 +304,21 @@ async function ensureInitialized() {
       app.notify('initialized');
       modelCatalog = await fetchModels();
       if (!modelCatalog.length) throw new Error('Codex app-server returned no models');
+      // This is a read-only capability query. Older installations continue to
+      // support ordinary turns, but never silently treat /goal as prose.
+      try {
+        let cursor = null;
+        const seen = new Set();
+        do {
+          const features = await app.request('experimentalFeature/list', { cursor, limit: 100 });
+          goalsAvailable ||= features.data?.some((row) => row.name === 'goals' && row.enabled === true) === true;
+          cursor = features.nextCursor || null;
+          if (cursor && seen.has(cursor)) throw new Error('Codex feature pagination repeated a cursor');
+          seen.add(cursor);
+        } while (cursor);
+      } catch (error) {
+        if (error.code !== -32601) throw error;
+      }
     })();
   }
   return initializePromise;
@@ -327,6 +392,10 @@ class CodexSession {
     this.activePrompt = null;
     this.turnStatus = 'idle';
     this.lastUsage = null;
+    this.diagnosticUsage = null;
+    this.diagnosticPrompt = null;
+    this.diagnosticRetiredTurns = new Set();
+    this.attachmentMetrics = { resumed: false, historyMode: 'unknown' };
     this.agentPhases = new Map();
     this.nativeAgents = new Map();
     this.nativeAgentEpoch = 0;
@@ -337,20 +406,164 @@ class CodexSession {
     this.turnStartedPromise = null;
     this.resolveTurnStarted = null;
     this.rejectTurnStarted = null;
+    this.goal = null;
+    this.goalRun = false;
+    this.goalLastCompleted = null;
+    this.goalCardShown = false;
+    this.goalControlTail = Promise.resolve();
+    this.goalSetupPending = false;
+    this.goalCancelled = false;
+    this.goalRevision = 0;
+    this.goalControlsPending = 0;
   }
 
   modelRow() { return modelCatalog.find((row) => row.id === this.model) || modelCatalog[0]; }
+
+  emitDiagnostic(event) {
+    if (!this.activePrompt || !this.activePromptClientId) return;
+    notify(this.threadId, { sessionUpdate: '_workass_diagnostic', schemaVersion: 1,
+      clientUserMessageId: this.activePromptClientId, event });
+  }
+
+  emitInputDiagnostic(input, serviceTier) {
+    this.emitDiagnostic({ kind: 'input', hostInstanceId, ...this.attachmentMetrics,
+      inputBytes: Buffer.byteLength(JSON.stringify(input), 'utf8'),
+      textBytes: input.reduce((sum, item) => sum + (typeof item.text === 'string' ? Buffer.byteLength(item.text, 'utf8') : 0), 0),
+      imageCount: input.filter((item) => item.type === 'image').length,
+      // Encoded image payload bytes, excluding the data URL prefix; never upstream request bytes.
+      imageDataBytes: input.reduce((sum, item) => sum + (item.type === 'image' ? Buffer.byteLength(item.url.slice(item.url.indexOf(',') + 1), 'utf8') : 0), 0),
+      ...(['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'minimal', 'none'].includes(this.effort) ? { effort: this.effort } : {}),
+      ...(['default', 'fast', 'priority'].includes(serviceTier) ? { serviceTier } : {}),
+    });
+  }
+
+  admitDiagnosticTurn(turnId) {
+    const state = this.diagnosticPrompt;
+    if (!this.activePrompt || !state || typeof turnId !== 'string' || !turnId || this.diagnosticRetiredTurns.has(turnId)) return;
+    state.turnId = turnId;
+    state.awaitingStart = false;
+    const pending = state.pending;
+    state.pending = [];
+    for (const entry of pending) if (entry.turnId === turnId) this.applyDiagnostic(entry.event, entry.itemId);
+  }
+
+  applyDiagnostic(event, itemId) {
+    const state = this.diagnosticPrompt;
+    if (!state || !this.activePrompt) return;
+    if (event.kind === 'usage') {
+      const { kind, ...counts } = event;
+      this.diagnosticUsage = counts;
+    }
+    if (event.kind === 'compaction') {
+      if (itemId) {
+        const key = `${event.phase}:${itemId}`;
+        if (state.compactItems.has(key)) return;
+        if (state.compactItems.size >= 256) return;
+        state.compactItems.add(key);
+      }
+      // Modern item completion and legacy thread/compacted can describe one checkpoint.
+      if (event.phase === 'completed' && state.compactCompleted && !itemId) return;
+      if (event.phase === 'completed') state.compactCompleted = true;
+      if (event.phase === 'started') state.compactCompleted = false;
+    }
+    if (event.kind === 'turn') {
+      if (state.phases.has(event.phase)) return;
+      state.phases.add(event.phase);
+    }
+    this.emitDiagnostic(event);
+    if (event.kind === 'turn' && event.phase !== 'started') {
+      this.diagnosticRetiredTurns.add(state.turnId);
+      if (this.diagnosticRetiredTurns.size > 1024) this.diagnosticRetiredTurns.delete(this.diagnosticRetiredTurns.values().next().value);
+      state.turnId = '';
+      state.phases.clear();
+      state.compactItems.clear();
+      state.compactCompleted = false;
+    }
+  }
+
+  observeDiagnostic(method, params) {
+    const state = this.diagnosticPrompt;
+    if (!this.activePrompt || !state || params.threadId !== this.threadId) return;
+    if (method === 'warning') {
+      // Official WarningNotification has optional threadId and NO turnId.
+      // Observe within the current prompt, without claiming native turn attribution:
+      // a delayed warning from this same thread cannot be distinguished here.
+      if (typeof params.message === 'string' && /\bfall(?:ing)?\s+back\b[^\n]*\b(?:to|using)\s+(?:HTTPS|HTTP\(S\))(?=\s|[.,:;]|$)/i.test(params.message)) {
+        this.emitDiagnostic({ kind: 'fallback', transport: 'https', scope: 'thread' });
+      }
+      return;
+    }
+    const turnId = method === 'turn/started' || method === 'turn/completed' ? params.turn?.id : params.turnId;
+    if (typeof turnId !== 'string' || !turnId || this.diagnosticRetiredTurns.has(turnId)) return;
+    if (method === 'turn/started' && state.goal && !state.turnId) this.admitDiagnosticTurn(turnId);
+    const events = [];
+    if (method === 'turn/started') events.push({ kind: 'turn', phase: 'started' });
+    if (method === 'turn/completed') {
+      if (params.turn?.error) events.push(errorDiagnostic(params.turn.error));
+      const phase = ['completed', 'failed', 'interrupted'].includes(params.turn?.status) ? params.turn.status : null;
+      if (phase) events.push({ kind: 'turn', phase });
+    }
+    if (method === 'error') events.push(errorDiagnostic(params.error, params.willRetry));
+    if (method === 'thread/tokenUsage/updated') {
+      const counts = usageDiagnostic(params.tokenUsage);
+      if (counts) events.push({ kind: 'usage', ...counts });
+    }
+    if (method === 'thread/compacted') events.push({ kind: 'compaction', phase: 'completed' });
+    if ((method === 'item/started' || method === 'item/completed') && params.item?.type === 'contextCompaction') {
+      events.push({ kind: 'compaction', phase: method === 'item/started' ? 'started' : 'completed' });
+    }
+    for (const event of events) {
+      if (state.turnId === turnId) this.applyDiagnostic(event, params.item?.id);
+      // Only sanitized counts/enums are buffered while the turn/start reply establishes identity.
+      else if (state.awaitingStart && state.pending.length < 128) state.pending.push({ turnId, event, itemId: params.item?.id });
+    }
+  }
 
   startPrompt(blocks, clientUserMessageId = '') {
     if (this.activePrompt) throw new Error('A Codex turn is already running');
     const serviceTier = this.serviceTier === 'fast' ? fastServiceTier(this.modelRow()) : 'default';
     if (!serviceTier) throw new Error('The selected Codex model does not advertise Fast mode');
+    const input = codexInput(blocks);
+    const promise = this.beginPrompt(clientUserMessageId);
+    this.emitInputDiagnostic(input, serviceTier);
+    const diagnosticOwner = this.diagnosticPrompt;
+    void app.request('turn/start', {
+      threadId: this.threadId,
+      input,
+      ...(clientUserMessageId ? { clientUserMessageId } : {}),
+      cwd: this.cwd,
+      model: this.model,
+      effort: this.effort,
+      serviceTierForTurn: serviceTier,
+      summary: 'auto',
+      ...modeTurnParams(this.mode),
+    }, (response) => {
+      if (this.diagnosticPrompt === diagnosticOwner) this.admitDiagnosticTurn(response?.turn?.id);
+    }).then((response) => {
+      const turnId = String(response?.turn?.id || '');
+      if (!turnId) throw new Error('Codex turn/start returned no turn id');
+      this.setActiveTurn(turnId);
+      this.turnStatus = response.turn.status || 'inProgress';
+      const early = this.completedTurns.get(turnId);
+      if (early) { this.completedTurns.delete(turnId); this.complete(early); }
+    }).catch((error) => this.failPrompt(error));
+    return promise;
+  }
+
+  beginPrompt(clientUserMessageId) {
+    if (this.activePrompt) throw new Error('A Codex turn is already running');
+    this.goalRun = this.goal?.status === 'active';
+    this.goalLastCompleted = null;
+    this.goalCardShown = false;
+    this.goalCancelled = false;
     this.nativeAgentEpoch++;
     this.turnStatus = 'starting';
 	this.agentPhases.clear();
 	this.agentMessageItemsWithText.clear();
 	this.lastAgentMessageItem = null;
 	this.activePromptClientId = String(clientUserMessageId || '').trim();
+    this.activePromptConsumed = false;
+    this.diagnosticPrompt = { turnId: '', awaitingStart: true, goal: false, pending: [], phases: new Set(), compactItems: new Set(), compactCompleted: false };
     this.turnError = null;
     this.turnStartedPromise = new Promise((resolve, reject) => {
       this.resolveTurnStarted = resolve;
@@ -361,24 +574,126 @@ class CodexSession {
     // that protocol race into an unhandled-rejection process crash.
     this.turnStartedPromise.catch(() => {});
     const promise = new Promise((resolve, reject) => { this.activePrompt = { resolve, reject }; });
-    void app.request('turn/start', {
-      threadId: this.threadId,
-      input: codexInput(blocks),
-	  ...(clientUserMessageId ? { clientUserMessageId } : {}),
-      cwd: this.cwd,
-      model: this.model,
-      effort: this.effort,
-      serviceTierForTurn: serviceTier,
-      summary: 'auto',
-      ...modeTurnParams(this.mode),
-    }).then((response) => {
-      const turnId = String(response?.turn?.id || '');
-      if (!turnId) throw new Error('Codex turn/start returned no turn id');
-      this.setActiveTurn(turnId);
-      this.turnStatus = response.turn.status || 'inProgress';
-      const early = this.completedTurns.get(turnId);
-      if (early) { this.completedTurns.delete(turnId); this.complete(early); }
-    }).catch((error) => this.failPrompt(error));
+    if (this.diagnosticUsage) this.emitDiagnostic({ kind: 'usage', ...this.diagnosticUsage, prior: true });
+    return promise;
+  }
+
+  serializeGoalControl(action) {
+    const result = this.goalControlTail.then(action);
+    this.goalControlTail = result.catch(() => {});
+    return result;
+  }
+
+  updateGoal(goal) {
+    if (goal && goal.threadId !== this.threadId) throw new Error('Codex goal belongs to a different thread');
+    if (goal && (!GOAL_STATUSES.has(goal.status) || typeof goal.objective !== 'string')) throw new Error('Codex returned an invalid goal state');
+    this.goal = goal || null;
+    this.goalRevision++;
+    if (this.activePrompt && goal?.status === 'active') this.goalRun = true;
+    if (this.activePrompt) {
+      notify(this.threadId, {
+        sessionUpdate: this.goalCardShown ? 'tool_call_update' : 'tool_call',
+        toolCallId: 'workass-native-goal', kind: 'other', title: 'Codex goal',
+        status: goal?.status === 'active' ? 'in_progress' : 'completed',
+        content: { type: 'text', text: this.goalSummary() },
+      });
+      this.goalCardShown = true;
+    }
+    this.settleGoalRun();
+  }
+
+  goalSummary() {
+    if (!this.goal) return 'No native goal is set. Use /goal <objective>.';
+    const goal = this.goal;
+    return `Goal: ${goal.status}\n${safeErrorText(goal.objective)}\nUsage: ${goal.tokensUsed ?? 0}${goal.tokenBudget == null ? '' : ` / ${goal.tokenBudget}`} tokens; ${goal.timeUsedSeconds ?? 0}s`;
+  }
+
+  settleGoalRun() {
+    if (!this.goalRun || this.goalSetupPending || this.goalControlsPending || this.activeTurnId || !this.goalLastCompleted || this.goal?.status === 'active') return;
+    const terminal = this.goalLastCompleted;
+    this.goalRun = false;
+    this.complete(this.goalCancelled ? { ...terminal, status: 'interrupted' } : terminal);
+  }
+
+  async goalRequest(method, params) {
+    const revision = this.goalRevision;
+    const result = await app.request(method, { threadId: this.threadId, ...params });
+    if (result.goal && result.goal.threadId !== this.threadId) throw new Error('Codex goal belongs to a different thread');
+    // A response may precede a newer notification in the same stdout batch.
+    // Never let its older snapshot resurrect a goal that already stopped.
+    if (this.goalRevision === revision) this.updateGoal(method === 'thread/goal/clear' ? null : result.goal);
+    return result;
+  }
+
+  async executeGoal(command, blocks, clientId, steer = false) {
+    if (!goalsAvailable) throw new Error('This Codex installation does not expose enabled native goals');
+    if (blocks.some((block) => block.type !== 'text')) throw new Error('/goal accepts text only; send attachments in a normal message first');
+    this.goalControlsPending++;
+    return this.serializeGoalControl(async () => {
+      await this.goalRequest('thread/goal/get');
+      const starts = command.action === 'set' || command.action === 'resume';
+      if (starts) {
+        if (steer) throw new Error('Pause or finish the current run before starting a goal');
+        if (command.action === 'resume' && !this.goal) throw new Error('No native goal to resume');
+        if (command.action === 'set' && this.goal && this.goal.status !== 'complete') throw new Error('A native goal already exists. Use /goal clear before replacing it');
+        if (this.goalCancelled) throw new Error('Goal cancelled before it started');
+        const tier = this.serviceTier === 'fast' ? fastServiceTier(this.modelRow()) : 'default';
+        if (!tier) throw new Error('The selected Codex model does not advertise Fast mode');
+        // Goal/set may start inference immediately: commit controls and this
+        // input's context first, without creating a competing sampling turn.
+        await app.request('thread/settings/update', {
+          threadId: this.threadId, model: this.model, effort: this.effort,
+          serviceTier: tier, summary: 'auto', ...modeTurnParams(this.mode),
+        });
+        if (this.goalCancelled) throw new Error('Goal cancelled before it started');
+      }
+      if (!steer) {
+        // Even an inspect/clear input can carry the actor's one-time context
+        // seed. Preserve that input without sampling; later turns must not lose it.
+        await app.request('thread/inject_items', { threadId: this.threadId, items: [{
+          type: 'message', role: 'user', content: blocks.map((block) => ({ type: 'input_text', text: block.text })),
+        }] });
+        if (this.goalCancelled) throw new Error('Goal cancelled before it started');
+      }
+      if (command.action === 'set' && this.goal) await this.goalRequest('thread/goal/clear');
+      if (command.action === 'clear') {
+        await this.goalRequest('thread/goal/clear');
+      } else if (command.action !== 'get') {
+        if (starts && this.diagnosticPrompt) { this.diagnosticPrompt.goal = true; this.diagnosticPrompt.awaitingStart = false; }
+        await this.goalRequest('thread/goal/set', {
+          status: command.action === 'pause' ? 'paused' : 'active',
+          ...(command.action === 'set' ? { objective: command.objective } : {}),
+        });
+      }
+      if (clientId) notify(this.threadId, {
+        sessionUpdate: steer ? '_workass_codex_steer_consumed' : '_workass_input_consumed', clientUserMessageId: clientId,
+      });
+      if (!starts) notify(this.threadId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `${this.goalSummary()}\n\n` } });
+      return { disposition: 'command-applied', receipt: Boolean(clientId) };
+    }).finally(() => {
+      this.goalControlsPending--;
+      // Native pause/clear notifications can precede the command response.
+      // Commit its consumption receipt before releasing the owning prompt.
+      this.settleGoalRun();
+    });
+  }
+
+  startGoal(command, blocks, clientId) {
+    const promise = this.beginPrompt(clientId);
+    // Goal commands inject this exact native message content without turn/start.
+    this.emitInputDiagnostic(blocks.map((block) => ({ type: 'input_text', text: block.text })),
+      this.serviceTier === 'fast' ? fastServiceTier(this.modelRow()) : 'default');
+    const starts = command.action === 'set' || command.action === 'resume';
+    this.goalRun = starts;
+    this.goalSetupPending = true;
+    void this.executeGoal(command, blocks, clientId).then(() => {
+      this.goalSetupPending = false;
+      if (starts) this.settleGoalRun();
+      else {
+        this.goalRun = false;
+        this.complete({ id: '', status: 'completed' });
+      }
+    }).catch((error) => { this.goalSetupPending = false; this.failPrompt(error); });
     return promise;
   }
 
@@ -403,12 +718,20 @@ class CodexSession {
   }
 
   complete(turn) {
+    if (this.goalRun && this.activePrompt && (!this.activeTurnId || turn.id === this.activeTurnId)) {
+      this.goalLastCompleted = turn;
+      this.activeTurnId = '';
+      if (turn.status === 'completed') { this.settleGoalRun(); return; }
+      this.goalRun = false;
+    }
     if (!this.activePrompt || (this.activeTurnId && turn.id !== this.activeTurnId)) {
       this.completedTurns.set(turn.id, turn);
       return;
     }
     const prompt = this.activePrompt;
     this.activePrompt = null;
+    this.activePromptClientId = '';
+    this.diagnosticPrompt = null;
     this.activeTurnId = '';
     this.turnStartedPromise = null;
     this.resolveTurnStarted = null;
@@ -428,6 +751,8 @@ class CodexSession {
     if (!this.activePrompt) return;
     const prompt = this.activePrompt;
     this.activePrompt = null;
+    this.activePromptClientId = '';
+    this.diagnosticPrompt = null;
     this.activeTurnId = '';
     this.rejectTurnStarted?.(error);
     this.turnStartedPromise = null;
@@ -438,6 +763,8 @@ class CodexSession {
   }
 
   async steer(blocks, clientUserMessageId) {
+    const command = nativeGoalCommand(blocks);
+    if (command) return this.executeGoal(command, blocks, clientUserMessageId, true);
     if (!this.activeTurnId && this.activePrompt && this.turnStartedPromise) {
       await this.turnStartedPromise;
     }
@@ -473,6 +800,14 @@ class CodexSession {
   }
 
   async interrupt() {
+    this.goalCancelled = true;
+    if (this.goalRun || this.goalSetupPending) {
+      await this.serializeGoalControl(async () => {
+        if (this.goal?.status === 'active') {
+          await this.goalRequest('thread/goal/set', { status: 'paused' });
+        }
+      });
+    }
     const turnId = this.activeTurnId;
     if (!turnId) {
       // The app-server can reject a steer with "no active turn" while the ACP
@@ -632,10 +967,17 @@ async function openSession(params, resume) {
     throw new Error('Codex session/resume requires the exact provider thread id');
   }
   let response;
+  let attachmentMetrics;
+  const observeAttachment = (result, metrics) => {
+    attachmentMetrics = { resumed: resume, resumeReplyBytes: metrics.replyBytes, resumeElapsedMs: metrics.elapsedMs,
+      historyMode: ['paginated', 'legacy'].includes(result?.thread?.historyMode) ? result.thread.historyMode : 'unknown' };
+  };
   try {
+    // Workass owns display history and consumes only metadata from this reply.
+    // Omit native turn hydration; Codex still resumes its full saved context.
     response = resume
-      ? await app.request('thread/resume', { ...common, threadId: requestedThreadId })
-      : await app.request('thread/start', common);
+      ? await app.request('thread/resume', { ...common, threadId: requestedThreadId, excludeTurns: true }, observeAttachment)
+      : await app.request('thread/start', common, observeAttachment);
   } catch (error) {
     if (resume && /no rollout found for thread id/i.test(String(error?.message || ''))) {
       throw Object.assign(new Error('Codex provider candidate was never materialized'), { rpcCode: -32044 });
@@ -661,7 +1003,9 @@ async function openSession(params, resume) {
       effort: response.reasoningEffort || selectedModel.defaultReasoningEffort,
     });
     sessions.set(threadId, session);
+    if (goalsAvailable) await session.goalRequest('thread/goal/get');
   }
+  session.attachmentMetrics = attachmentMetrics;
   return session;
 }
 
@@ -742,11 +1086,14 @@ async function handleAppNotification(method, params) {
     if (owner) await emitNativeAgentNotification(owner, method, params);
     return;
   }
+  session.observeDiagnostic(method, params);
   if (method === 'turn/started') {
     if (params.turn?.id) session.setActiveTurn(params.turn.id);
     session.turnStatus = params.turn?.status || 'inProgress';
     return;
   }
+  if (method === 'thread/goal/updated') { session.updateGoal(params.goal); return; }
+  if (method === 'thread/goal/cleared') { session.updateGoal(null); return; }
   if (method === 'turn/completed') { session.complete(params.turn || {}); return; }
   if (method === 'item/agentMessage/delta') {
     const item = session.agentMessageDelta(params.itemId, params.delta);
@@ -812,8 +1159,9 @@ async function emitItem(session, item, completed) {
   if (item.type === 'agentMessage') { session.agentPhases.set(item.id, item.phase); return; }
   if (item.type === 'userMessage') {
 	if (item.clientId && item.clientId === session.activePromptClientId) {
+      if (session.activePromptConsumed) return;
 	  notify(session.threadId, { sessionUpdate: '_workass_input_consumed', clientUserMessageId: item.clientId });
-	  session.activePromptClientId = '';
+	  session.activePromptConsumed = true;
 	} else if (item.clientId) {
 	  notify(session.threadId, { sessionUpdate: '_workass_codex_steer_consumed', clientUserMessageId: item.clientId });
 	}
@@ -1066,6 +1414,7 @@ async function handleWorkassRequest(message) {
         workassCodexSteerRequest: true, workassCodexSteerReceipt: true, workassCodexSteerRaceV1: true,
         workassCodexRateLimitsRequest: true, workassCodexRateLimitResetRequest: true,
 		workassStableTurnInputV1: true,
+        workassNativeCommandInputV1: true, workassCodexCommandCatalog: true,
       },
     });
     return;
@@ -1075,6 +1424,7 @@ async function handleWorkassRequest(message) {
     respond(id, {
       ...(method === 'session/new' ? { sessionId: session.threadId } : {}),
       configOptions: configOptions(session), availableModels: availableModels(),
+      commandCatalog: { asOf: Date.now(), commands: goalsAvailable ? [{ name: 'goal', description: 'Native persistent goal: inspect, start, pause, resume, or clear', argumentHint: '[objective | pause | resume | clear]' }] : [] },
       _meta: { workassProviderRealm: providerRealm },
     });
     return;
@@ -1084,7 +1434,10 @@ async function handleWorkassRequest(message) {
     throw Object.assign(new Error('Codex session not found'), { rpcCode: -32000 });
   }
   if (method === 'session/prompt') {
-	respond(id, await session.startPrompt(params.prompt, String(params.clientUserMessageId || '').trim()));
+    const command = nativeGoalCommand(params.prompt, params._meta?.workassCommandInput);
+    respond(id, await (command
+      ? session.startGoal(command, params.prompt, String(params.clientUserMessageId || '').trim())
+      : session.startPrompt(params.prompt, String(params.clientUserMessageId || '').trim())));
 	return;
 	}
   if (method === 'session/set_config_option') { respond(id, session.setConfig(String(params.configId || ''), params.value)); return; }
@@ -1101,13 +1454,24 @@ async function handleWorkassRequest(message) {
     return;
   }
   if (method === 'session/close') {
-    if (session.activeTurnId) await session.interrupt().catch(() => {});
+    if (session.activeTurnId || session.activePrompt) await session.interrupt();
     await app.request('thread/unsubscribe', { threadId: session.threadId }).catch(() => {});
     sessions.delete(session.threadId);
     respond(id, {});
     return;
   }
   throw Object.assign(new Error(`Codex host method not found: ${method}`), { rpcCode: -32601 });
+}
+
+function nativeGoalCommand(blocks, intent) {
+  if (intent && intent.humanAuthored !== true) return null;
+  const text = String(intent ? intent.text : blocks?.find((block) => block.type === 'text')?.text || '').trim();
+  const match = /^\/goal(?:\s+([\s\S]*))?$/.exec(text);
+  if (!match) return null;
+  const argument = (match[1] || '').trim();
+  return !argument ? { action: 'get' }
+    : ['pause', 'resume', 'clear'].includes(argument) ? { action: argument }
+    : { action: 'set', objective: argument };
 }
 
 function handleWorkassNotification(message) {

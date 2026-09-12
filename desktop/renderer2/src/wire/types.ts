@@ -386,6 +386,7 @@ export interface SpawnedWorkItem {
   summary?: string;
   lastToolName?: string;
   modelLabel?: string;
+  resultExcerpt?: string;
 }
 // obligation is additive: what this chat still owes the user, which is a
 // different question from what is running. Older daemons omit it.

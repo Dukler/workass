@@ -405,6 +405,11 @@ export function nodeState(n: SubagentNode): ToolState {
   return groupState(n.calls);
 }
 export function nodeDuration(n: SubagentNode, nowMs: number): string {
+  if (n.work) {
+    const start = Date.parse(n.work.startedAt);
+    const end = n.work.finishedAt ? Date.parse(n.work.finishedAt) : nowMs;
+    return Number.isFinite(start) && Number.isFinite(end) ? fmtDur(Math.max(0, end - start)) : '';
+  }
   const evs = n.header ? [n.header, ...n.calls] : n.calls;
   return groupDuration(evs, nowMs, nodeState(n) === 'running');
 }

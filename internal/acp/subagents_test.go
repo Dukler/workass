@@ -127,7 +127,7 @@ func assertRunningSubagentSpawnedWorkItem(t *testing.T, manager *Manager, sessio
 	items := spawnedWorkItemsByTaskID(manager.ListSpawnedWork(session.TabID, session.ChatID))
 	item, ok := items[run.ID]
 	if !ok || item.ID != run.ID || item.Kind != "subagent" || item.Status != "running" ||
-		item.Label != label || item.ProviderID != run.ProviderID || item.StartedAt == "" || item.UpdatedAt == "" {
+		item.Label != label || item.ModelLabel != run.ModelLabel || item.ProviderID != run.ProviderID || item.StartedAt == "" || item.UpdatedAt == "" {
 		t.Fatalf("running subagent spawned-work item = %#v; all items = %#v", item, items)
 	}
 }

@@ -819,6 +819,17 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 	job := b.jobForSession(sessionID)
 	update := mapFromAny(params["update"])
 	kind := asString(update["sessionUpdate"])
+	// Diagnostics are observational only: never acknowledge input consumption,
+	// extend activity timers, publish transcript content or affect turn state.
+	if kind == "_workass_diagnostic" {
+		if sessionID != "" && job != nil && !job.internal && asString(update["clientUserMessageId"]) != "" && numberOrZero(update["schemaVersion"]) == 1 &&
+			asString(update["clientUserMessageId"]) == strings.TrimSpace(firstNonEmpty(job.startOpts.OperationID, job.startOpts.UserMessageID, job.ID)) {
+			if job.startupTiming.observeRuntimeDiagnostic(mapFromAny(update["event"])) {
+				b.manager.queueTurnDiagnostics(false)
+			}
+		}
+		return
+	}
 	adapter := providerAdapterForID(b.providerID)
 	if job != nil {
 		job.startupTiming.mark(startupUpdate)

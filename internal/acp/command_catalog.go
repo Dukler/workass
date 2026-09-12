@@ -25,6 +25,13 @@ const (
 	maxCatalogAliases  = 4
 )
 
+// Keep native command intent separate from the model-visible context envelope.
+// Only explicitly human-authored input may invoke a provider command.
+type providerCommandInput struct {
+	Text          string
+	HumanAuthored bool
+}
+
 // commandCatalogEntry is one chat's cached catalog. Keyed by tab/chat, NOT by
 // session id — compaction and recovery rotate the session id while the chat
 // identity stays put — so the current session id lives inside the entry. A nil
@@ -252,7 +259,7 @@ func (s capabilityCommandCatalogStrategy) Supported(bridge *Bridge) bool {
 }
 
 func (s capabilityCommandCatalogStrategy) Apply(bridge *Bridge, sessionID string, raw any) *CommandCatalog {
-	if bridge == nil {
+	if !s.Supported(bridge) {
 		return nil
 	}
 	catalog := parseCommandCatalog(raw)

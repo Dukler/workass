@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ToolEvent, PlanEntry } from '../store/types';
 import { store, useApp, useActivity, useSpawnedWork } from '../store/store';
-import { toolState, fmtDur, extractSubagents, nodeState, nodeDuration, ToolDetail } from './messages';
-import { reconcileSubagentWork, subagentActivity, type SubagentNode } from '../subagent-layout';
+import { toolState, fmtDur, extractSubagents, nodeState } from './messages';
+import { currentTurnMessages, reconcileSubagentWork } from '../subagent-layout';
+import { SubagentRow } from './SubagentRow';
 import { SpawnedWorkLive } from './SpawnedWorkCard';
 import { renderInline } from '../markdown/inline';
-import { IcActivity, ActionGlyph, ModelIcon } from '../icons';
+import { IcActivity, ActionGlyph } from '../icons';
 import { toolPresentation } from '../tool-names';
 import { displayDetail } from '../tool-display';
 
@@ -106,57 +107,6 @@ function relTime(ms: number): string {
   return `hace ${Math.floor(h / 24)} d`;
 }
 
-// One subagent as a compact disclosure: model icon + label + elapsed on top, then
-// model id + a human live activity. Long labels and model ids ellipsize; the
-// elapsed is never pushed off. Exact calls stay one tap away in the body.
-function SubagentRow({ n, nowMs }: { n: SubagentNode; nowMs: number }) {
-  const st = nodeState(n);
-  const running = st === 'running';
-  const failed = st === 'failed';
-  const dur = nodeDuration(n, nowMs);
-  // The row says what it did, not how it ended: no outcome word, no red (user,
-  // 2026-07-25). A settled subagent reads the same whatever its exit was.
-  const activity = running ? subagentActivity(n) : null;
-  const settled = `${n.calls.length} ${n.calls.length === 1 ? 'llamada' : 'llamadas'}`;
-  return (
-    <details className="r-sa" data-status={st}>
-      <summary>
-        {/* No chevron: the model icon is the row's anchor, and it reads bigger
-            without one (user, 2026-07-24). Hover + open body carry the affordance. */}
-        <span className="r-mi" data-p={n.provider ?? undefined}><ModelIcon provider={n.provider} /></span>
-        <span className="r-said">
-          <span className="r-satop">
-            <span className="r-nm" title={n.label}>{n.label}</span>
-            {dur && <span className="r-el">{dur}</span>}
-          </span>
-          <span className="r-sasub">
-            {n.model && <span className="r-mdl">{n.model}</span>}
-            {n.model && <span className="r-sep" aria-hidden="true">·</span>}
-            {activity
-              ? (
-                <span className="r-act">
-                  <span className="a-ic" aria-hidden="true"><ActionGlyph icon={activity.icon} /></span>
-                  <span className="a-n">{activity.label}</span>
-                </span>
-              )
-              : (
-                <span className="r-act">
-                  <span className="a-n">{settled}</span>
-                  {failed && <span className="dc-fail"> · falló</span>}
-                </span>
-              )}
-          </span>
-        </span>
-      </summary>
-      {n.calls.length > 0 && (
-        <div className="r-sa-b">
-          {n.calls.map((t) => <ToolDetail key={t.key} t={t} />)}
-        </div>
-      )}
-    </details>
-  );
-}
-
 export function TareasCard() {
   const app = useApp();
   useActivity(); // re-render on live tool/plan events
@@ -165,21 +115,7 @@ export function TareasCard() {
   const cardRef = useRef<HTMLElement>(null);
 
   const chat = store.active();
-  const msg = chat ? [...chat.messages].reverse().find((m) => m.role === 'assistant') ?? null : null;
-  // Steering splits one provider turn into assistant continuations separated by
-  // canonical user rows. The newest continuation may still be empty (or only a
-  // staged placeholder), while every subagent/tool event seen so far remains on
-  // an earlier segment. Turnos projects the whole logical turn, not whichever
-  // transcript segment happens to be last, so steering cannot make live child
-  // work disappear or make the still-running turn look settled.
-  const turnRootId = msg?.turnRootId?.trim();
-  const turnMessages = !msg
-    ? []
-    : !turnRootId
-      ? [msg]
-      : (chat?.messages.filter((message) => message.role === 'assistant' && (
-          message.id === turnRootId || message.turnRootId?.trim() === turnRootId
-        )) ?? [msg]);
+  const turnMessages = currentTurnMessages(chat);
   const running = turnMessages.some((message) => message.status === 'running');
   const events = turnMessages.flatMap((message) => message.events);
   const tools = events.filter((e): e is ToolEvent => e.kind === 'tool');
@@ -188,9 +124,9 @@ export function TareasCard() {
   // Tracked child lifetime survives foreground settlement. While the child is
   // live its spawned-work row owns activity and elapsed time; after completion
   // the grouped tool row uses the durable child result.
-  const { nodes, liveIds: liveSubagentIds } = reconcileSubagentWork(grouped.nodes, chat ? store.spawnedWork(chat) : []);
-  const runningNodes = nodes.filter((n) => nodeState(n) === 'running' && !liveSubagentIds.has(n.id));
-  const doneNodes = nodes.filter((n) => nodeState(n) !== 'running' && !liveSubagentIds.has(n.id));
+  const { nodes } = reconcileSubagentWork(grouped.nodes, chat ? store.spawnedWork(chat) : []);
+  const runningNodes = nodes.filter((n) => nodeState(n) === 'running');
+  const doneNodes = nodes.filter((n) => nodeState(n) !== 'running');
   const runningTools = mainTools.filter((t) => toolState(t.status) === 'running');
   const doneTools = mainTools.filter((t) => toolState(t.status) !== 'running');
   // The most recent main-thread call: the running one if any, else the last
@@ -218,10 +154,10 @@ export function TareasCard() {
   const hasContent = hasPlan || nodes.length > 0 || mainTools.length > 0;
 
   useEffect(() => {
-    if (!running) return;
+    if (!running && runningNodes.length === 0) return;
     const iv = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(iv);
-  }, [running]);
+  }, [running, runningNodes.length]);
   useEffect(() => {
     if (app.flashTareas) cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [app.flashTareas]);
@@ -287,8 +223,8 @@ export function TareasCard() {
           first, then settled; each still opens to its own calls. */}
       {(runningNodes.length > 0 || doneNodes.length > 0) && (
         <div className="r-subs">
-          {runningNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} />)}
-          {doneNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} />)}
+          {runningNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} />)}
+          {doneNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} />)}
         </div>
       )}
       {/* Running background processes live HERE — inline with the live call and

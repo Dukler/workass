@@ -163,6 +163,9 @@ func (codexDeliveryStrategy) Steer(b *Bridge, request providerSteerRequest) prov
 			params["clientUserMessageId"] = request.clientUserMessageID
 		}
 		result, err := b.request(ctx, "_workass/codex/steer", params, 15*time.Second)
+		if err == nil && asString(result["disposition"]) == "command-applied" && b.hasProviderCapability("workassNativeCommandInputV1") {
+			return providerSteerOutcome{ok: true, live: true, strategy: "codex-command", receipt: request.clientUserMessageID != ""}
+		}
 		if err == nil {
 			switch strings.TrimSpace(asString(result["disposition"])) {
 			case "rejected", "queue", "next-turn":
