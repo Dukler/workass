@@ -187,6 +187,54 @@ partial output, and retains the exact native session id for the next distinct
 prompt to resume. Explicit Stop is forwarded once and is not replayed after a
 daemon restart.
 
+### Codex upstream WebSocket disconnects
+
+The native host uses stdio JSON-RPC to the installed official app-server.
+`responseStreamDisconnected` with `websocket closed by server before
+response.completed` describes Codex's upstream Responses connection, not the
+Workass renderer socket. Native `error.willRetry` notices leave terminal
+authority with `turn/completed`; a failed completion preserves the native cause
+and partial output. Workass does not replay a prompt, poll the turn, or replace
+its exact thread to recover it.
+
+On official Codex 0.154.0, `codex features list` reports
+`responses_websockets` and `responses_websockets_v2` as removed. The documented
+`model_providers.<id>.supports_websockets` setting applies to configurable
+providers; overriding the reserved built-in `openai` provider is rejected by
+this installation. Do not ship either as a built-in transport workaround or
+substitute a custom provider to bypass the rejection. See the
+[official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+`codex doctor --json` provides vendor-owned, redacted HTTP/WebSocket diagnostics
+without sending a model prompt. A successful handshake does not prove a long
+response stream will complete; no supported built-in transport override has
+been verified for this version.
+
+The direct-host regression includes successful native recovery after retry
+notices, both terminal error payloads and a native
+terminal notification whose cause was supplied by the preceding `error` event:
+`node --test --test-name-pattern='WebSocket disconnect' scripts/tests/codex-native-host.test.mjs`.
+Its fixture records only RPC method names and an exact-thread boolean, proving
+two distinct user requests cause exactly two native turn admissions and no
+replacement thread, terminal polling, or failed-input replay.
+
+### Large Codex thread resume
+
+The host requests `thread/resume` with `excludeTurns: true`: Workass already
+owns display history and does not consume native `thread.turns` in the reply.
+The installed 0.154.0 schema supports this field; it omits returned turn items
+while Codex still loads the exact saved thread's inference context. It does not
+truncate that context, compact it, or reduce the next inference request's size.
+See the [official 0.154.0 resume regression](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/app-server/tests/suite/v2/thread_resume.rs#L2446).
+
+`node --test --test-name-pattern='large exact resume' scripts/tests/codex-native-host.test.mjs`
+uses 512 synthetic historical turns (over 4 MiB), verifies a small metadata
+reply across two exact attachments, retained native history, and one intact
+current input with no history override, readback, or replacement. This removes
+unnecessary resume serialization and parsing. It is not evidence that large
+history caused `responseStreamDisconnected`, nor a fix for that socket close.
+The native error identifies a Responses close before completion; it does not
+identify why the peer closed or establish an upstream service defect.
+
 ## Tool-result images
 
 ACP tool updates may return structured raster image blocks alongside text.
@@ -465,3 +513,138 @@ finishes pre-prompt preparation without waiting for a blocked control response.
   keys when configuration is exposed to clients or agents.
 - Do not treat a successful handshake as a successful inference test. Detection and prompting are
   intentionally separate checks.
+
+## Codex native goals
+
+The native host advertises `/goal` through the attached lane's command catalog
+when the official app-server reports the enabled `goals` feature. Workass enables
+that feature for its child process without editing the user's Codex config.
+
+- `/goal <objective>` creates a native persistent goal and starts it.
+- `/goal` reads its native status, objective, usage, and budget, if present.
+- `/goal pause` stops automatic continuation after the current native turn.
+- `/goal resume` resumes the existing objective in the exact native thread.
+- `/goal clear` removes the objective. Clear an unfinished goal before replacing it.
+- Workass Stop pauses the native goal and interrupts its current turn.
+
+While running, send inspect/pause/clear through the normal live-steer surface.
+Starting or resuming a goal requires an idle foreground. Commands accept text;
+attachments must first be sent as an ordinary message. State remains owned by
+Codex and is read again on exact resume; Workass does not restart goals after a
+transport failure or maintain a second continuation scheduler.
+
+Before `thread/goal/set` can start inference, the host uses
+`thread/settings/update` for the selected model, effort, service tier, and
+permissions, then `thread/inject_items` for that input's actor-authored context.
+Inspect/clear inputs also preserve their context without sampling. Explicit
+command-intent metadata keeps seeded or quoted text from becoming a command.
+One Workass prompt remains owned across native continuation turns until the goal
+stops and its current turn completes. Native goal notifications update the
+existing tool card; the renderer does not interpret vendor goal state.
+
+Deterministic coverage: `node --test scripts/tests/codex-native-host.test.mjs`
+and `go test -race ./cmd/workass -run TestCodexNativeGoal`.
+
+## Native subagent observation
+
+Codex owns spawning, steering, stopping, and completing its native child agents.
+Workass passively projects native collaboration/child-thread events into the
+same expandable subagent row used for Workass-managed agents. Live and completed
+rows retain provider branding, observed model, elapsed time, calls, and available
+results; a durable child record overrides foreground settlement without rewriting
+transcript events. Explicit tool identity joins the two observations, avoiding a
+second generic background row. Earlier live children remain visible after the
+parent turn ends; historical results remain inspectable in the background fold.
+
+Native agent rows are read-only. They have no Workass Stop button, and the daemon
+rejects a native-agent stop even when a record includes PID/output metadata.
+Only Workass-managed subagent records use Workass's subagent cancellation path.
+Inspecting a row does not spawn, steer, resume, or interrupt any native agent.
+
+## Codex private runtime diagnostics
+
+The native host emits a private `session/update` only while an admitted prompt
+has a nonempty Workass client input id:
+
+```json
+{"sessionUpdate":"_workass_diagnostic","schemaVersion":1,"clientUserMessageId":"<current Workass input id>","event":{"kind":"turn","phase":"started"}}
+```
+
+This is diagnostic metadata for the daemon's private storage/read boundary.
+The frozen renderer protocol and native terminal, cancellation, context, and
+checkpoint authority remain unchanged. No native ids, paths, URLs, transcript
+text, error messages, or additional error details enter `event`.
+
+- `input`: `inputBytes` is the UTF-8 JSON size of the current native input array;
+  `textBytes` counts its text, `imageCount` counts images, and `imageDataBytes`
+  counts encoded base64 payload bytes without data URL prefixes. Goal commands
+  measure the current native injected message content array. These are current
+  input measurements, **not the total upstream model request**. `resumed`,
+  `resumeReplyBytes`, and `resumeElapsedMs` describe this host attachment's
+  `thread/start` or exact `thread/resume` reply. Reply bytes include the actual
+  received JSON-RPC envelope, excluding its line terminator; elapsed time uses
+  a monotonic clock and rounded milliseconds. An optional request observer
+  records these metrics synchronously and cannot fail the RPC. `historyMode`
+  accepts native `paginated`/`legacy`, otherwise `unknown`. `hostInstanceId` is
+  one fresh random UUID per host process, with no vendor identity. Observed
+  `effort` and resolved native `serviceTier` use only their declared enums.
+- `usage`: only observed safe nonnegative integer `used`, `size`, `input`,
+  `cachedInput`, `output`, and `reasoningOutput` counts are included. The next
+  prompt may receive its last exact-turn observation with `prior:true`.
+  Missing or malformed counts are omitted, never coerced into zero.
+- `error`: `willRetry`, neutral `category` and `reason`, and
+  `closeDetailsAvailable:false`. Numeric `httpStatus` is included only when
+  native error metadata supplies a valid status; `retryAttempt`/`retryLimit`
+  are parsed only from an explicit native reconnect/retry count. There are no
+  invented close codes or upstream request sizes. Retry notices retain native
+  success/failure authority. Socket reason classification examines the native
+  message and additional details transiently; only the neutral enum is retained.
+- `fallback`: `transport:"https", scope:"thread"` only after an explicit native
+  fallback warning targeting the exact thread during an active Workass prompt.
+  Both `HTTP(S)` and `HTTPS` transport spellings are recognized. Official
+  `WarningNotification` has a message and optional thread id, **no turn id**:
+  this records a thread-scoped observation, not native turn attribution. A
+  delayed same-thread warning cannot be distinguished from a current warning.
+  Idle, wrong-thread, and untargeted warnings are discarded. Retry counts never
+  imply a fallback.
+- `compaction`: `phase:"started"|"completed"` from current native
+  `contextCompaction` item events or legacy `thread/compacted`. Duplicate item
+  completions and the modern-completion/legacy-checkpoint pair are suppressed;
+  the existing semantic checkpoint is still emitted independently. The installed
+  deprecated `ContextCompactedNotification` schema requires a turn id; if an
+  older producer omits it, no compaction diagnostic is emitted or turn guessed.
+- `turn`: native `started`, `completed`, `failed`, or `interrupted`. Native
+  goal continuations retain the same owning Workass input id.
+
+Turn-scoped diagnostics have their own exact thread/turn fence. Before a normal start reply
+establishes its turn id, only bounded sanitized metadata is buffered; mismatched
+entries are discarded. Retired, missing-turn, wrong-thread, child-thread, and
+idle notifications cannot populate the next input's turn diagnostics or prior
+usage. Thread-scoped fallback observations follow the explicit exception above.
+The input consumption receipt stays deduplicated while its client id remains
+available until prompt settlement. Resume history produces no diagnostics and
+is never fetched or replayed for this feature.
+
+`workass_get_chat_diagnostics` reads these observations for an exact tab/chat
+pair, including daemon-side startup timing, prepared input sizes, and separate
+host transport failures. It returns at most 20 turns from a global retention
+limit of 256. Each turn keeps at most 32 chronological events, counters, and the
+latest usage snapshot. All payloads pass a fixed field/type allowlist; prompt
+contents, native ids, and raw errors are excluded.
+
+The manager persists bounded snapshots in `turn-diagnostics.json` under its
+state directory. The canonical file and its single pending staging file are
+each limited to 4 MiB. A manager-owned writer coalesces failure checkpoints with
+a trailing flush, at most once per second; turn completion and shutdown force
+a flush. Provider reads and diagnostic reads never wait for disk I/O. Storage
+failure is reported in diagnostic persistence status without failing the turn.
+After restart, retained observations are historical and inactive; an unfinished
+checkpoint does not become a fabricated completion or a resumed live job.
+These measurements cannot expose the full upstream request or WebSocket close
+details that the native client does not report.
+
+Verification: `node --test scripts/tests/codex-native-host.test.mjs` covers
+retries that recover or exhaust, adversarial error details, malformed usage,
+actual resume envelope bytes, modern and legacy compaction, exact-turn event
+ordering, thread-only fallback warnings, missing-turn legacy compaction, goal
+continuation, cancellation, and the existing native behaviors.

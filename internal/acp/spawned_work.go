@@ -765,7 +765,8 @@ func (m *Manager) registerSubagentSpawnedWork(tabID, chatID string, run Subagent
 	item := SpawnedWorkItem{
 		ID: run.ID, TaskID: run.ID, TabID: tabID, ChatID: chatID,
 		ProviderID: strings.TrimSpace(run.ProviderID), Kind: trackedSubagentSpawnedWorkKind,
-		Label: compactText(redactSensitiveText(run.Label), 240), Status: "running",
+		ModelLabel: compactText(redactSensitiveText(run.ModelLabel), 120),
+		Label:      compactText(redactSensitiveText(run.Label), 240), Status: "running",
 		StartedAt: startedAt, UpdatedAt: updatedAt,
 		Summary:      compactText(redactSensitiveText(run.LatestActivity), 1000),
 		LastToolName: compactText(redactSensitiveText(run.Phase), 120),
@@ -1523,6 +1524,11 @@ func (m *Manager) StopSpawnedWork(tabID, chatID, id string) map[string]any {
 			}
 		}
 		return map[string]any{"ok": false, "error": "spawned work item not found"}
+	}
+	// Provider-native agents are observation-only. Process metadata must never
+	// grant Workass control over their execution.
+	if item.Kind == "agent" {
+		return map[string]any{"ok": false, "id": item.ID, "error": "provider-native agents are read-only in Workass"}
 	}
 	if item.Status != "running" {
 		// Idempotent on purpose: a second tap, a stale row on a slow client, and

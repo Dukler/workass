@@ -86,8 +86,9 @@ const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 // the half-offset + travel math so the pill never overflows the strip at the extremes.
 const THUMB_W = 14;  // .sl-cc .sl-thumb pill width — drives half-offset + travel math
 
-function EffortPopover({ efforts, current, onPick, onClose }: {
+function EffortPopover({ efforts, current, onPick, onClose, fastSupported, fastEnabled, onToggleFast }: {
   efforts: string[]; current: string; onPick: (effort: string) => void; onClose: () => void;
+  fastSupported: boolean; fastEnabled: boolean; onToggleFast: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
@@ -158,6 +159,14 @@ function EffortPopover({ efforts, current, onPick, onClose }: {
   return (
     <div className="pop pop-effort" ref={ref} style={{ bottom: '130%', right: 0 }}>
       <div className="pcaprow">
+        {fastSupported && (
+          <button type="button" className="effort-fast" aria-label="Fast · mayor consumo" aria-pressed={fastEnabled}
+            title={`${fastEnabled ? 'Desactivar Fast' : 'Activar Fast'} · mayor consumo`} onClick={onToggleFast}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M13.3 2.5 4.5 14h6.2l-1 7.5L19.5 10h-6.2l1-7.5Z" />
+            </svg>
+          </button>
+        )}
         <span className="sl-lab">Esfuerzo</span>
         <span className="sl-value">{cap(efforts[val])}</span>
         <span className="sp" />
@@ -472,7 +481,6 @@ export function Composer({ chat }: { chat: Chat | null }) {
   const [modelOpen, setModelOpen] = useState(false);
   const [modeOpen, setModeOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
-  const [speedOpen, setSpeedOpen] = useState(false);
   const [preparingImages, setPreparingImages] = useState(false);
   // Dictation. `level` drives the meter: it is the only proof the microphone is
   // hearing anything, and the common failure is recording happily from a muted
@@ -914,18 +922,11 @@ export function Composer({ chat }: { chat: Chat | null }) {
               </button>
               {effortOpen && (
                 <EffortPopover efforts={efforts} current={curEffort}
+                  fastSupported={serviceTiers.includes('fast')} fastEnabled={serviceTier === 'fast'}
+                  onToggleFast={() => chat && void store.setServiceTier(chat.id, serviceTier === 'fast' ? 'default' : 'fast')}
                   onPick={(eff) => chat && void store.setModel(chat.id, `${modelBase}[${eff}]`)}
                   onClose={() => setEffortOpen(false)} />
               )}
-            </div>
-          )}
-          {serviceTiers.includes('fast') && (
-            <div className="selectoranchor">
-              <button className="effortsel" onClick={() => setSpeedOpen((v) => !v)} title="Velocidad · Fast consume más créditos">
-                {serviceTier === 'fast' ? 'Fast' : 'Standard'}
-              </button>
-              {speedOpen && <Popover cap="Velocidad" items={serviceTiers.map((id) => ({ id, name: id === 'fast' ? 'Fast · mayor consumo' : 'Standard' }))}
-                current={serviceTier} onPick={(tier) => chat && void store.setServiceTier(chat.id, tier)} onClose={() => setSpeedOpen(false)} />}
             </div>
           )}
           {/* One shared-height cluster keeps model, effort and context on the

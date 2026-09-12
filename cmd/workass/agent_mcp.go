@@ -56,7 +56,7 @@ func agentMCPTools() []map[string]any {
 		}
 	}
 	return []map[string]any{
-		tool("workass_get_chat_diagnostics", "Read live and recent turn timing metadata for one exact local or mounted remote chat: host preparation, prompt write, first thinking/text/tool, Stop delivery and terminal reply. Includes actor queue/permission counts and bounded, redacted create/resume and turn-preparation failures before prompt admission. No transcript contents, provider calls, polling, or UI changes. Evidence covers the current daemon lifetime; omitted stages are unobserved, and old failures cannot be reconstructed. Returns at most 20 turns and 20 attachment attempts.", object(map[string]any{
+		tool("workass_get_chat_diagnostics", "Read bounded, content-free diagnostics for one exact local or mounted remote chat: turn timings, current input sizes, provider retry/error categories, context usage, compaction and observed fallback. Completed turns and throttled failure checkpoints survive daemon restarts; historical records never imply a live turn. Includes actor queue/permission counts and current-daemon attachment failures. No transcript contents, provider calls, polling or UI changes. Input sizes are not upstream model-request sizes; omitted details were not observed. Returns at most 20 turns and 20 attachment attempts.", object(map[string]any{
 			"tab_id":  str("Exact tab id from workass_list_chats."),
 			"chat_id": str("Exact paired chat id from workass_list_chats."),
 			"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": "Newest matching turns; defaults to 5."},

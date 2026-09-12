@@ -1,4 +1,4 @@
-import type { ToolEvent } from './store/types';
+import type { Chat, ToolEvent } from './store/types';
 import type { SpawnedWorkItem } from './wire/types';
 import { toolPresentation, type ToolPresentation } from './tool-names.ts';
 
@@ -23,16 +23,58 @@ export interface SubagentNode {
   model: string | null;
   header?: ToolEvent;
   calls: ToolEvent[];
+  work?: SpawnedWorkItem;
 }
 
-// Foreground settlement cannot decide the lifetime of an independently
-// tracked child. Join by explicit tool identity, never by label/provider.
+// Steering continuations share one logical turn. All views use the same
+// transcript boundary so a child cannot disappear or render twice.
+export function currentTurnMessages(chat: Chat | null) {
+  const latest = chat ? [...chat.messages].reverse().find((message) => message.role === 'assistant') : undefined;
+  if (!latest) return [];
+  const root = latest.turnRootId?.trim();
+  return root ? chat!.messages.filter((message) => message.role === 'assistant'
+    && (message.id === root || message.turnRootId?.trim() === root)) : [latest];
+}
+
+export function isAgentWork(item: Pick<SpawnedWorkItem, 'kind'>): boolean {
+  return item.kind === 'agent' || item.kind === 'subagent';
+}
+
+export function subagentWorkId(item: SpawnedWorkItem): string {
+  return item.kind === 'subagent' ? item.id : item.toolCallId || item.id;
+}
+
+// Lifetime and metadata come from the durable record; calls remain attributed
+// by exact tool identity. This projection grants no control over native work.
+export function nodeForSpawnedWork(item: SpawnedWorkItem, node?: SubagentNode): SubagentNode {
+  const id = subagentWorkId(item);
+  const status = item.status === 'running' ? 'in_progress'
+    : item.status === 'failed' || item.status === 'orphaned' ? 'failed'
+    : item.status === 'stopped' || item.status === 'cancelled' ? 'cancelled' : 'completed';
+  const start = Date.parse(item.startedAt);
+  const end = item.finishedAt ? Date.parse(item.finishedAt) : NaN;
+  const header: ToolEvent = node?.header ?? {
+    key: id, id, at: Number.isFinite(start) ? start : 0, kind: 'tool', toolKind: 'agent', title: item.label,
+    status, command: null, location: null, input: null, output: null, terminalId: null,
+    subagentId: id, subagentHeader: true,
+  };
+  return { id, label: item.label || node?.label || 'Subagente',
+    provider: item.assistantBrand || node?.provider || null,
+    model: item.modelLabel || node?.model || null, calls: node?.calls ?? [], work: item,
+    header: { ...header, status,
+      output: item.resultExcerpt || (item.status !== 'running' ? item.summary : '') || header.output,
+      startedAt: Number.isFinite(start) ? start : header.startedAt,
+      endedAt: Number.isFinite(end) ? end : undefined } };
+}
+
+// Foreground settlement cannot decide an independently tracked child's life.
+// Running children from earlier turns stay visible even without a current header.
 export function reconcileSubagentWork(nodes: SubagentNode[], items: readonly SpawnedWorkItem[]): { nodes: SubagentNode[]; liveIds: Set<string> } {
   const byId = new Map<string, SpawnedWorkItem>();
   const liveIds = new Set<string>();
   for (const item of items) {
-    if (item.kind !== 'agent' && item.kind !== 'subagent') continue;
-    const id = item.kind === 'subagent' ? item.id : item.toolCallId || item.id;
+    if (!isAgentWork(item)) continue;
+    const id = subagentWorkId(item);
     if (item.status === 'running') liveIds.add(id);
     const previous = byId.get(id);
     if (!previous || (item.status === 'running' && previous.status !== 'running')
@@ -40,20 +82,20 @@ export function reconcileSubagentWork(nodes: SubagentNode[], items: readonly Spa
       byId.set(id, item);
     }
   }
-  return { liveIds, nodes: nodes.map((node) => {
+  const represented = new Set(nodes.map((node) => node.id));
+  const reconciled = nodes.map((node) => {
     const item = byId.get(node.id);
-    if (!item || !node.header) return node;
-    const status = item.status === 'running' ? 'in_progress'
-      : item.status === 'failed' || item.status === 'orphaned' ? 'failed' : 'completed';
-    const endedAt = item.finishedAt ? Date.parse(item.finishedAt) : undefined;
-    return { ...node, model: item.modelLabel || node.model,
-      header: { ...node.header, status, output: item.summary || node.header.output,
-        endedAt: endedAt !== undefined && Number.isFinite(endedAt) ? endedAt : undefined } };
-  }) };
+    return item ? nodeForSpawnedWork(item, node) : node;
+  });
+  for (const [id, item] of byId) {
+    if (item.status === 'running' && !represented.has(id)) reconciled.push(nodeForSpawnedWork(item));
+  }
+  return { liveIds, nodes: reconciled };
 }
 
 export function canStopSpawnedWorkItem(item: Pick<SpawnedWorkItem, 'kind' | 'pid' | 'outputFile'>): boolean {
-  return !((item.kind === 'agent' || item.kind === 'workflow') && !item.pid && !item.outputFile);
+  // Native agents are observed only, even if a provider includes process metadata.
+  return item.kind !== 'agent' && !(item.kind === 'workflow' && !item.pid && !item.outputFile);
 }
 
 const ACTIVE_TOOL_STATUS = new Set(['in_progress', 'pending', 'running']);

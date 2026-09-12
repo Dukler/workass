@@ -8,18 +8,28 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	providercontract "workass/internal/provider"
 )
 
 type Manager struct {
-	diagnosticsMu   sync.Mutex
-	laneDiagnostics []laneDiagnostic
-	turnDiagnostics []turnDiagnostic
-	opts            Options
-	toolContextMu   sync.Mutex
-	toolContexts    map[string]sessionToolContext
+	diagnosticsMu              sync.Mutex
+	diagnosticWriteMu          sync.Mutex
+	diagnosticLastCheckpoint   time.Time
+	diagnosticPersistenceError string
+	diagnosticStatusMu         sync.Mutex
+	diagnosticWake             chan struct{}
+	diagnosticStop             chan struct{}
+	diagnosticDone             chan struct{}
+	diagnosticStopOnce         sync.Once
+	diagnosticForce            atomic.Bool
+	laneDiagnostics            []laneDiagnostic
+	turnDiagnostics            []turnDiagnostic
+	opts                       Options
+	toolContextMu              sync.Mutex
+	toolContexts               map[string]sessionToolContext
 
 	mu                      sync.Mutex
 	stream                  streamStats
@@ -250,6 +260,8 @@ func NewManager(opts Options) *Manager {
 	if m.nativeSessions != nil && m.nativeSessions.loadErr != nil {
 		m.opts.Logf("native session ledger unreadable; native resume disabled", map[string]any{"error": m.nativeSessions.loadErr.Error()})
 	}
+	m.loadTurnDiagnostics()
+	m.startDiagnosticWriter()
 	m.initProviders(opts)
 	m.initProviderRegistry()
 	m.initializePersistedProviderAuthenticationState()
@@ -932,6 +944,7 @@ func (m *Manager) Reset() bool {
 	// returning; otherwise a test teardown or daemon handoff can remove StateDir
 	// while a late worker recreates provider-lanes.json behind it.
 	m.jobWG.Wait()
+	m.stopDiagnosticWriter()
 	m.removeToolContexts()
 	m.mu.Lock()
 	m.resetting = false
@@ -1231,6 +1244,8 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 	defer func() {
 		if !workerStarted {
 			job.startupTiming.finish("admission_failed")
+			m.queueTurnDiagnostics(true)
+			m.jobWG.Done()
 		}
 	}()
 	if liveSession {
@@ -1260,7 +1275,6 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 				}
 			}
 			m.mu.Unlock()
-			m.jobWG.Done()
 			return nil, err
 		}
 	}
@@ -1272,7 +1286,6 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 		if liveSession {
 			bridge.clearJobForSession(opts.SessionID, job)
 		}
-		m.jobWG.Done()
 		return nil, errors.New("stable job admission reservation was lost")
 	}
 	job.admitting = false
@@ -1306,6 +1319,7 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 			outcome = "cancelled"
 		}
 		job.startupTiming.finish(outcome)
+		m.queueTurnDiagnostics(true)
 		if fields := job.startupTiming.fields(); fields != nil {
 			fields["jobId"] = job.ID
 			fields["providerId"] = job.ProviderID
@@ -1373,6 +1387,7 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	if promptText == "" {
 		promptText = strings.TrimSpace(opts.Message)
 	}
+	commandInput := providerCommandInput{Text: promptText, HumanAuthored: opts.HumanAuthored}
 	if !activeBridge.hasLiveSession(job.SessionID) {
 		job.CrashInterrupted = true
 		job.Interrupted = true
@@ -1449,7 +1464,8 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	if controlResult.CurrentModeID != "" {
 		opts.ModeID = controlResult.CurrentModeID
 	}
-	if activeBridge.markSeeded(job.SessionID) {
+	seedEnvironment := activeBridge.markSeeded(job.SessionID)
+	if seedEnvironment {
 		promptText = m.buildAppChatPrompt(opts, promptText)
 	} else if delta := buildContextDeltaBlock(opts.ContextDelta); delta != "" {
 		// Exact resume deliberately skips the one-time environment seed. A
@@ -1473,8 +1489,17 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		toolBrief = "Workass CLI context is unavailable: " + redactSensitiveText(toolErr.Error()) + ". Report this error if a Workass tool is needed.\n\n"
 	}
 	promptText = toolBrief + buildTurnRuntimeIdentity(activeBridge, job.ProviderID, opts.ModelID) + promptText
+	initialSeedMessages := 0
+	if seedEnvironment && len(opts.ContextDelta) == 0 {
+		initialSeedMessages = len(opts.InitialContextSeed)
+	}
+	job.startupTiming.recordInput(map[string]int64{
+		"preparedTextBytes": int64(len(promptText)), "requestTextBytes": int64(len(opts.Prompt)),
+		"initialSeedMessages": int64(initialSeedMessages), "contextDeltaMessages": int64(len(opts.ContextDelta)),
+		"imageCount": int64(len(opts.Images)), "toolBriefBytes": int64(len(toolBrief)),
+	})
 	operationID := strings.TrimSpace(firstNonEmpty(opts.OperationID, opts.UserMessageID, job.ID))
-	res, err := activeBridge.promptForJob(ctx, job.SessionID, job, operationID, promptText, opts.Images)
+	res, err := activeBridge.promptForJob(ctx, job.SessionID, job, operationID, promptText, opts.Images, commandInput)
 	if err != nil {
 		displayError := redactSensitiveText(err.Error())
 		if !job.CrashInterrupted {
@@ -3287,7 +3312,7 @@ func (b *Bridge) Steer(sessionID, promptText string, images []any, clientUserMes
 	}
 	return providerAdapterForID(b.ProviderID()).delivery.Steer(b, request).payload()
 }
-func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, operationID, promptText string, images []any) (PromptResult, error) {
+func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, operationID, promptText string, images []any, commandInput ...providerCommandInput) (PromptResult, error) {
 	b.mu.Lock()
 	_, ok := b.sessions[sessionID]
 	state := b.state
@@ -3313,6 +3338,11 @@ func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, o
 		"sessionId": sessionID,
 		"prompt":    prompt,
 	}
+	if b.hasProviderCapability("workassNativeCommandInputV1") && len(commandInput) == 1 {
+		params["_meta"] = map[string]any{"workassCommandInput": map[string]any{
+			"text": commandInput[0].Text, "humanAuthored": commandInput[0].HumanAuthored,
+		}}
+	}
 	if operationID = strings.TrimSpace(operationID); operationID != "" {
 		params["clientUserMessageId"] = operationID
 	}
@@ -3320,6 +3350,9 @@ func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, o
 		job.startupTiming.mark(startupPrepared)
 	}
 	res, err := b.requestPrompt(ctx, job, params)
+	if err != nil && job != nil {
+		job.startupTiming.observeHostFailure(err)
+	}
 	if err == nil && job != nil {
 		job.startupTiming.mark(startupTerminalReply)
 	}

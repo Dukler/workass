@@ -191,3 +191,23 @@ func TestStopSpawnedWorkRejectsUnknownRows(t *testing.T) {
 		t.Fatalf("empty request = %#v", reply)
 	}
 }
+
+func TestNativeAgentStopIsReadOnlyEvenWithProcessMetadata(t *testing.T) {
+	signals := [][2]int{}
+	output := externalWorkTestPath(t, "native-agent.output")
+	pid := 2_000_000_101
+	manager := stopTestManager(t, map[string][]int{output: {pid}}, &signals)
+	item := SpawnedWorkItem{ID: "native-agent", TaskID: "native-agent", TabID: "tab-stop", ChatID: "chat-stop",
+		ProviderID: "codex", Kind: "agent", Status: "running", PID: &pid, OutputFile: output}
+	key := spawnedWorkKey(item.TabID, item.ChatID, item.ID)
+	manager.spawnedWorkMu.Lock()
+	manager.spawnedWork[key] = &spawnedWorkRecord{Item: item}
+	manager.spawnedWorkMu.Unlock()
+	result := manager.StopSpawnedWork(item.TabID, item.ChatID, item.ID)
+	if result["ok"] != false || len(signals) != 0 {
+		t.Fatalf("native observation gained process control: result=%#v signals=%v", result, signals)
+	}
+	if got := stopTestItem(t, manager); got.Status != "running" || got.FinishedAt != "" {
+		t.Fatalf("read-only refusal changed native lifetime: %#v", got)
+	}
+}

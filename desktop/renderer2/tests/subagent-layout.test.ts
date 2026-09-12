@@ -132,5 +132,5 @@ test('provider-owned agents never show an unsupported process Stop control', () 
   assert.equal(canStopSpawnedWorkItem({ kind: 'agent' }), false);
   assert.equal(canStopSpawnedWorkItem({ kind: 'workflow' }), false);
   assert.equal(canStopSpawnedWorkItem({ kind: 'subagent' }), true);
-  assert.equal(canStopSpawnedWorkItem({ kind: 'agent', pid: 123 }), true);
+  assert.equal(canStopSpawnedWorkItem({ kind: 'agent', pid: 123, outputFile: '/fixture/output' }), false);
 });

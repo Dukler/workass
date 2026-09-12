@@ -21,6 +21,11 @@ func TestLaneDiagnosticsRetainExactResumeFailureBeforePrompt(t *testing.T) {
 	if !ok {
 		t.Fatal("missing mock binding")
 	}
+	originalTurns := first.TurnDiagnostics("native-tab", "native-chat", 5)["turns"].([]any)
+	if len(originalTurns) != 1 {
+		t.Fatalf("expected the original turn observation: %#v", originalTurns)
+	}
+	originalJobID := mapFromAny(originalTurns[0])["jobId"]
 	first.Reset()
 
 	restarted, _ := fixture.newManagerTuned(func(opts *Options) {
@@ -37,8 +42,16 @@ func TestLaneDiagnosticsRetainExactResumeFailureBeforePrompt(t *testing.T) {
 	}
 	result := restarted.TurnDiagnostics("native-tab", "native-chat", 5)
 	attempts := result["laneAttachments"].([]any)
-	if result["available"] != true || len(attempts) != 1 || len(result["turns"].([]any)) != 0 {
+	if result["available"] != true || len(attempts) != 1 {
 		t.Fatalf("pre-prompt failure disappeared: %#v", result)
+	}
+	turns := result["turns"].([]any)
+	if len(turns) != 1 {
+		t.Fatalf("resume failure must preserve only the original turn: %#v", turns)
+	}
+	retained := mapFromAny(turns[0])
+	if retained["jobId"] != originalJobID || retained["historical"] != true || retained["active"] != false || retained["outcome"] != "completed" {
+		t.Fatalf("resume failure changed the original turn observation: %#v", retained)
 	}
 	attempt := mapFromAny(attempts[0])
 	if attempt["operation"] != "resume" || attempt["rpcCode"] != -32098 || !strings.Contains(asString(attempt["error"]), "Mock exact resume failure") {
