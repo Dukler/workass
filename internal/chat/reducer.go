@@ -4109,17 +4109,17 @@ func appendForegroundAdmissionFailure(state *State, kind provider.ErrorKind) err
 	if assistantID == "" {
 		assistantID = fmt.Sprintf("message:%s:assistant", foreground.OperationID)
 	}
-	errorText := AdmissionFailureMessage(kind)
-	// Rejected admission is not an interrupted connection. Only a transport
-	// failure may drive the frozen renderer's connection-loss presentation.
-	interrupted := kind == provider.ErrorTransientTransport
-	terminal := &provider.TerminalEvent{Status: "failed", Error: string(kind), Interrupted: interrupted}
+	errorText := "The provider could not start this turn."
+	if kind != "" {
+		errorText += " " + string(kind) + "."
+	}
+	terminal := &provider.TerminalEvent{Status: "failed", Error: string(kind), Interrupted: true}
 	assistant := LedgerEvent{
 		EventID: fmt.Sprintf("event:%s:assistant:%s", foreground.OperationID, assistantID), MessageID: assistantID,
 		Sequence: state.LedgerHead() + 1, Role: "assistant", Text: errorText, Status: "failed",
 		At: foreground.StartedAt, LaneID: foreground.LaneID, ProviderID: lane.Identity.Realm.ProviderID,
 		ModelID: foreground.Input.ModelID, OperationID: foreground.OperationID, TerminalState: "failed",
-		Interrupted: interrupted, Terminal: terminal,
+		Interrupted: true, Terminal: terminal,
 	}
 	state.Ledger = append(state.Ledger, assistant)
 	return markLedgerExcluded(state, assistant, foreground.OperationID)

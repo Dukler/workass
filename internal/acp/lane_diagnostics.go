@@ -68,7 +68,8 @@ func (m *Manager) recordLaneDiagnostic(tabID, chatID, providerID, operation, req
 			// Some ACP servers put a human-readable resource description in uri.
 			// Retain only this recognized category, never the URI, arbitrary data,
 			// available-model list, or provider-supplied identifiers.
-			if modelNotFoundRPC(err) {
+			if rpcErr.Code == -32002 && rpcErr.Msg == "Resource not found" &&
+				strings.HasPrefix(asString(mapFromAny(rpcErr.Data)["uri"]), "Model not found: ") {
 				d.rpcReason = "model_not_found"
 			}
 		}
