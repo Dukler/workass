@@ -279,6 +279,107 @@ func TestBindEstablishedLaneOnlySchedulesExactResume(t *testing.T) {
 	}
 }
 
+func TestRecoverCreateUsesEstablishedThreadAsReceipt(t *testing.T) {
+	for _, status := range []OutboxStatus{OutboxDispatched, OutboxAccepted, OutboxConsumed} {
+		t.Run(string(status), func(t *testing.T) {
+			state, _ := NewState("chat-" + string(status))
+			identity := testLane(state.ChatID, "devin")
+			state, _ = apply(t, state, SelectLane{Identity: identity})
+			state, _ = apply(t, state, ClaimEffect{EffectID: createEffectID(identity.ID, 1)})
+			thread := provider.ThreadRef{
+				ProviderID: "devin", RootID: "native-thread",
+				HeadID: "native-thread", Lineage: 1,
+			}
+			state, _ = apply(t, state, LaneOpened{
+				LaneID: identity.ID, Thread: thread, ConnectionGeneration: 1,
+				Context: exactContext(provider.ContextImportUnsupported),
+			})
+			state.Outbox[0].Status = status
+			state.Outbox[0].Reconcile = false
+			state.Outbox[0].LastError = provider.ErrorTransientTransport
+			lane := state.Lanes[identity.ID]
+			lane.Phase = LaneDetached
+			lane.Attachment = nil
+			state.Lanes[identity.ID] = lane
+			if err := state.Validate(); err != nil {
+				t.Fatalf("established lane with stale create receipt is unreadable: %v", err)
+			}
+
+			recovered, effects, err := Reduce(state, RecoverOutbox{})
+			if err != nil {
+				t.Fatalf("recover established lane: %v", err)
+			}
+			if len(effects) != 0 {
+				t.Fatalf("established lane recovery emitted create effects: %#v", effects)
+			}
+			entry := recovered.Outbox[0]
+			if entry.Status != OutboxCompleted || entry.Reconcile || entry.LastError != "" {
+				t.Fatalf("native binding did not complete stale create receipt: %#v", entry)
+			}
+			lane = recovered.Lanes[identity.ID]
+			if lane.Phase != LaneDetached || !lane.Thread.Equal(thread) {
+				t.Fatalf("create receipt recovery changed established lane: %#v", lane)
+			}
+
+			// Exercise the actual startup path from a persisted stale receipt,
+			// then reopen it again to prove recovery stays settled across restarts.
+			store := FileStore{Path: filepath.Join(t.TempDir(), "chat.json")}
+			if err := store.Save(state); err != nil {
+				t.Fatal(err)
+			}
+			var engine *Engine
+			for restart := 0; restart < 2; restart++ {
+				engine, err = NewDurableEngine(state.ChatID, store)
+				if err != nil {
+					t.Fatalf("restart %d failed: %v", restart, err)
+				}
+				if effect, claimed, err := engine.ClaimNext(); err != nil || claimed {
+					t.Fatalf("restart %d scheduled stale work: effect=%#v claimed=%v err=%v", restart, effect, claimed, err)
+				}
+				loaded := engine.Snapshot()
+				if loaded.Outbox[0].Status != OutboxCompleted || !loaded.Lanes[identity.ID].Thread.Equal(thread) {
+					t.Fatalf("restart %d lost settled receipt or native binding", restart)
+				}
+			}
+			if err := engine.Apply(Submit{OperationID: "next-input", Text: "continue", Presentation: provider.TurnPresentation{Origin: "human"}}); err != nil {
+				t.Fatalf("submit after recovery: %v", err)
+			}
+			effect, claimed, err := engine.ClaimNext()
+			resume, ok := effect.(ResumeLaneEffect)
+			if err != nil || !claimed || !ok || !resume.Thread.Equal(thread) {
+				t.Fatalf("next input did not exact-resume the saved thread: effect=%#v claimed=%v err=%v", effect, claimed, err)
+			}
+		})
+	}
+}
+
+func TestRecoverCreateWithoutEstablishedThreadRemainsReconcileOnly(t *testing.T) {
+	for _, status := range []OutboxStatus{OutboxDispatched, OutboxAccepted, OutboxConsumed} {
+		t.Run(string(status), func(t *testing.T) {
+			state, _ := NewState("chat-" + string(status))
+			identity := testLane(state.ChatID, "devin")
+			state, _ = apply(t, state, SelectLane{Identity: identity})
+			effectID := createEffectID(identity.ID, 1)
+			state, _ = apply(t, state, ClaimEffect{EffectID: effectID})
+			state.Outbox[0].Status = status
+
+			state, _ = apply(t, state, RecoverOutbox{})
+			entry := state.Outbox[0]
+			if entry.Status != OutboxPending || !entry.Reconcile || !state.Lanes[identity.ID].Thread.IsZero() {
+				t.Fatalf("unreceipted create was falsely completed: %#v", entry)
+			}
+			_, effects := apply(t, state, ClaimEffect{EffectID: effectID})
+			if len(effects) != 1 {
+				t.Fatalf("claim reconciliation effects: %#v", effects)
+			}
+			create, ok := effects[0].(CreateLaneEffect)
+			if !ok || !create.Reconcile || create.Generation != 1 {
+				t.Fatalf("unreceipted create lost reconcile-only boundary: %#v", effects[0])
+			}
+		})
+	}
+}
+
 func TestRendererPresentationCannotOverwriteActorRuntimeState(t *testing.T) {
 	state, _ := NewState("chat")
 	group, cwd, pane := "original-group", "/authoritative", "rail"
