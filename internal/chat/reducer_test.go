@@ -83,7 +83,7 @@ func TestAdmissionRejectionPersistsVisibleFailedTurnWithoutClaimingNativeConsump
 	if user.MessageID != "public-user" || user.Text != "keep this prompt" || user.Status != "done" {
 		t.Fatalf("rejected user row = %#v", user)
 	}
-	if assistant.MessageID != "public-assistant" || assistant.Status != "failed" || !assistant.Interrupted || assistant.RetryPrompt != "" {
+	if assistant.MessageID != "public-assistant" || assistant.Status != "failed" || assistant.Interrupted || assistant.RetryPrompt != "" {
 		t.Fatalf("rejected assistant row = %#v", assistant)
 	}
 	if assistant.Terminal == nil || assistant.Terminal.Status != "failed" || assistant.Terminal.Error != string(provider.ErrorProviderUnavailable) {

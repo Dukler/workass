@@ -78,8 +78,8 @@ function respond(id, result) {
   write({ jsonrpc: '2.0', id, result });
 }
 
-function fail(id, code, message) {
-  write({ jsonrpc: '2.0', id, error: { code, message } });
+function fail(id, code, message, data) {
+  write({ jsonrpc: '2.0', id, error: { code, message, ...(data === undefined ? {} : { data }) } });
 }
 
 function notify(sessionId, update) {
@@ -519,6 +519,9 @@ async function handleRequest(message) {
     return;
   }
   if (method === 'session/set_config_option') {
+    if (process.env.WORKASS_MOCK_ACP_REJECT_MODEL === 'missing' && params.configId === 'model') {
+      return fail(id, -32002, 'Resource not found', { uri: 'Model not found: removed-model. Available models: do-not-log-list' });
+    }
     if (process.env.WORKASS_MOCK_ACP_REJECT_MODEL === '1' && params.configId === 'model') {
       return fail(id, -32002, 'Resource not found');
     }

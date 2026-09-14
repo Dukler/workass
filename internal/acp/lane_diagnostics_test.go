@@ -182,7 +182,7 @@ func TestLaneDiagnosticsModelRejectionDoesNotSubmitOrReplaceThread(t *testing.T)
 	t.Parallel()
 	fixture := newPersistentMockFixture(t, "resume")
 	manager, events := fixture.newManagerTuned(func(opts *Options) {
-		opts.Provider.Env["WORKASS_MOCK_ACP_REJECT_MODEL"] = "1"
+		opts.Provider.Env["WORKASS_MOCK_ACP_REJECT_MODEL"] = "missing"
 	})
 	session := fixture.newSession(t, manager)
 	fixture.runTurn(t, manager, events, session.SessionID, "establish")
@@ -209,7 +209,7 @@ func TestLaneDiagnosticsModelRejectionDoesNotSubmitOrReplaceThread(t *testing.T)
 	_, err = lane.Delivery().StartTurn(context.Background(), providercontract.TurnInput{
 		OperationID: "rejected-model", Text: "MUST_NOT_REACH_PROVIDER", ModelID: "mock-other",
 	})
-	if !providercontract.ErrorIs(err, providercontract.ErrorAdmissionRejected) {
+	if !providercontract.ErrorIs(err, providercontract.ErrorModelUnavailable) {
 		t.Fatalf("model rejection = %v", err)
 	}
 	attempts := manager.recentLaneDiagnostics("native-tab", "native-chat", 1)
@@ -217,7 +217,7 @@ func TestLaneDiagnosticsModelRejectionDoesNotSubmitOrReplaceThread(t *testing.T)
 		t.Fatal("model rejection was not diagnosed")
 	}
 	attempt := mapFromAny(attempts[0])
-	if attempt["errorKind"] != providercontract.ErrorAdmissionRejected || attempt["rpcCode"] != -32002 {
+	if attempt["errorKind"] != providercontract.ErrorModelUnavailable || attempt["rpcCode"] != -32002 {
 		t.Fatalf("lost explicit model RPC rejection: %#v", attempt)
 	}
 	if traceContains(readNativeMockTrace(t, fixture.traceFile), "MUST_NOT_REACH_PROVIDER") {

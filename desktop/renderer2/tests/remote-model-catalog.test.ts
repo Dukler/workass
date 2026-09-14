@@ -90,3 +90,20 @@ test('local and remote chats render and validate only their owning machine catal
   assert.doesNotMatch(lagpcMarkup, /LOCAL-ONE|SAN-ONE/);
 });
 
+
+test('an unavailable saved model is never displayed as another available model', () => {
+  for (const machineId of ['', 'm-san']) {
+    const owner = chat(machineId, 'removed-model');
+    appStore.state.chats = [owner];
+    appStore.state.activeId = owner.id;
+    appStore.state.connection = 'connected';
+    const catalog = { groups: [group('Agent', 'brand', 'available-model')], models: [], modes: [] };
+    appStore.onCatalog(machineId
+      ? projectRemoteEvent('onChatCatalog', machineId, catalog) as ChatCatalog
+      : catalog);
+    const markup = renderToStaticMarkup(React.createElement(Composer, { chat: owner }));
+    assert.match(markup, />removed-model<\/button>/);
+    assert.doesNotMatch(markup, />AVAILABLE-MODEL<\/button>/);
+    assert.equal(owner.currentModelId, 'removed-model');
+  }
+});
