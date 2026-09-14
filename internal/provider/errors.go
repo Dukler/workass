@@ -16,6 +16,7 @@ const (
 	ErrorNativeIdentityConflict ErrorKind = "native_identity_conflict"
 	ErrorUnsupportedCapability  ErrorKind = "unsupported_capability"
 	ErrorAdmissionRejected      ErrorKind = "admission_rejected"
+	ErrorModelUnavailable       ErrorKind = "model_unavailable"
 	ErrorAcceptanceAmbiguous    ErrorKind = "acceptance_ambiguous"
 	ErrorPermissionPending      ErrorKind = "permission_pending"
 	ErrorProtocolViolation      ErrorKind = "protocol_violation"

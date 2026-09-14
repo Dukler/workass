@@ -2015,7 +2015,7 @@ func (r *providerChatRuntime) admissionOutcomeLocked(actor *providerChatActor, t
 			if kind == "" {
 				kind = providercontract.ErrorAdmissionRejected
 			}
-			return nil, &providercontract.Error{Kind: kind, Operation: operationID, Message: "provider turn admission failed"}
+			return nil, &providercontract.Error{Kind: kind, Operation: operationID, Message: chat.AdmissionFailureMessage(kind)}
 		}
 	}
 	return nil, &providercontract.Error{Kind: providercontract.ErrorProtocolViolation, Operation: operationID, Message: "provider turn admission omitted its frozen wire receipt"}

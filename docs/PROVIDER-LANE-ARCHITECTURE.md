@@ -223,6 +223,7 @@ Errors use one typed taxonomy:
 - `NativeIdentityConflict`;
 - `UnsupportedCapability`;
 - `AdmissionRejected`;
+- `ModelUnavailable` (definite pre-prompt model rejection; preserve input and require an explicit new selection, never choose a fallback);
 - `AcceptanceAmbiguous`;
 - `PermissionPending`;
 - `ProtocolViolation`;

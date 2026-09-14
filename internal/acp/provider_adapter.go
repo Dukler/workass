@@ -47,6 +47,9 @@ func (standardACPInputReceiptPolicy) StandardACPActivity() bool  { return true }
 func (explicitHostInputReceiptPolicy) StandardACPActivity() bool { return false }
 
 type providerModelPolicy struct {
+	// A complete model select from this adapter is an authoritative allowlist.
+	// Open/custom catalogs continue to let the provider judge unlisted ids.
+	ClosedCatalog         bool
 	SeparateEffortAxis    bool
 	SyntheticDefaultAlias bool
 	AssistantBrand        string

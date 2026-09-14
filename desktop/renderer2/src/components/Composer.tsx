@@ -597,7 +597,9 @@ export function Composer({ chat }: { chat: Chat | null }) {
   const providerGroup = modelGroups.find((group) => group.providerId === chat?.providerId);
   const modelSelection = resolveModelSelection(providerGroup ? [providerGroup] : [], [], chat?.currentModelId);
   const { base: modelBase, effort: modelEffort } = modelSelection;
-  const modelName = modelSelection.model?.name ?? resolveModelName(modelGroups, modelBase) ?? providerGroup?.models[0]?.name ?? 'Modelo';
+  // Never display the provider's first model for a different persisted selection.
+  // An unavailable saved id must stay visible until the user picks a replacement.
+  const modelName = modelSelection.model?.name ?? resolveModelName(providerGroup ? [providerGroup] : [], modelBase) ?? (modelBase || 'Modelo');
   const serviceTiers = modelSelection.model?.serviceTiers ?? [];
   const serviceTier = rememberedModelControls(chat?.modelControls, chat?.providerId, modelBase)?.serviceTier ?? 'default';
   const efforts = modelSelection.model?.efforts ?? [];
