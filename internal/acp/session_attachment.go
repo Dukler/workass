@@ -120,7 +120,7 @@ func (b *Bridge) RestoreSession(ctx context.Context, binding nativeSessionBindin
 	res, err := b.request(ctx, string(attachment.method), params, b.opts.InitTimeout)
 	if err != nil {
 		releaseOwner()
-		return SessionInfo{}, string(attachment.method), b.withStderrTail(err)
+		return SessionInfo{}, string(attachment.method), providerAdapterForID(b.providerID).context.ExactAttachmentError(attachment.method, b.withStderrTail(err))
 	}
 	if returnedID := strings.TrimSpace(asString(res["sessionId"])); returnedID != "" && returnedID != sessionID {
 		releaseOwner()

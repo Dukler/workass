@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { createServer } from 'vite';
 import type { Chat } from '../src/store/types.ts';
-import type { AgentRouteRequest } from '../src/wire/types.ts';
+import type { AgentRouteRequest, StartJobOpts } from '../src/wire/types.ts';
 import { tagId } from '../src/wire/machineIds.ts';
 
 const machineId = 'm-san';
@@ -42,6 +42,7 @@ async function loadStore(t: { after(fn: () => void | Promise<void>): void }) {
 interface StoreShape {
   state: { chats: Chat[]; activeId: string | null; connection: string };
   routeAgentRequest(request: AgentRouteRequest): Promise<unknown>;
+  sendTo(chatId: string, prompt: string): Promise<boolean>;
 }
 
 test('remote turn diagnostics reads the owning daemon without history hydration or UI changes', async (t) => {
@@ -203,6 +204,61 @@ test('updater MCP invokes only the local shell bridge for the exact local machin
     subject.routeAgentRequest(request('update.local.status', { machine_id: machineId })),
     /does not address this exact machine/,
   );
+});
+
+test('agent remote idle auto-send omits stale runtime controls and keeps one operation owner', async (t) => {
+  const { Store, setMachineRouter } = await loadStore(t);
+  const subject = new Store();
+  subject.state.connection = 'connected';
+  subject.state.chats = [remoteChat({
+    currentModelId: 'swe-1-6-fast', currentModeId: 'ask', runtimeControlRevision: 2,
+  })];
+  const starts: StartJobOpts[] = [];
+  // The owning daemon already committed revision 3; history hydration can
+  // legitimately leave this complete mounted mirror at revision 2.
+  const committed = { providerId: 'devin', modelId: 'swe-2-medium', modeId: 'bypass' };
+  setMachineRouter({ startJob: async (opts: StartJobOpts) => {
+    starts.push(opts);
+    for (const key of ['providerId', 'modelId', 'modeId']) {
+      assert.equal(Object.hasOwn(opts, key), false, `cached ${key} must be omitted`);
+    }
+    return { id: tagId(machineId, 'job-current-controls'), status: 'running', ...committed };
+  } });
+  t.after(() => setMachineRouter(undefined));
+  const params = {
+    tab_id: tabId, chat_id: chatId, machine_id: machineId,
+    operation_id: 'send-current-controls', message: 'continue with committed controls', delivery: 'auto',
+  };
+  const first = await subject.routeAgentRequest(request('chat.send', params)) as Record<string, unknown>;
+  const replay = await subject.routeAgentRequest(request('chat.send', params));
+  assert.equal(first.queued, false);
+  assert.deepEqual(replay, first);
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].operationId, tagId(machineId, 'agent-user-send-current-controls'));
+  assert.equal(starts[0].tabId, tabId);
+  assert.equal(starts[0].chatId, chatId);
+  assert.equal(starts[0].busyMode, 'queue-v1');
+  assert.equal(subject.state.chats[0].messages.length, 2);
+  assert.equal(subject.state.chats[0].queue?.length ?? 0, 0);
+  assert.equal(subject.state.activeId, null);
+});
+
+test('human remote send still carries the explicit picker controls', async (t) => {
+  const { Store, setMachineRouter } = await loadStore(t);
+  const subject = new Store();
+  subject.state.connection = 'connected';
+  subject.state.chats = [remoteChat({ currentModelId: 'swe-2-medium', currentModeId: 'bypass' })];
+  const starts: StartJobOpts[] = [];
+  setMachineRouter({ startJob: async (opts: StartJobOpts) => {
+    starts.push(opts);
+    return { id: tagId(machineId, 'job-human-picker'), status: 'running' };
+  } });
+  t.after(() => setMachineRouter(undefined));
+  assert.equal(await subject.sendTo(tabId, 'use my selection'), true);
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].providerId, 'devin');
+  assert.equal(starts[0].modelId, 'swe-2-medium');
+  assert.equal(starts[0].modeId, 'bypass');
 });
 
 test('agent MCP remote auto-send becomes one stable FIFO owner while the chat runs', async (t) => {

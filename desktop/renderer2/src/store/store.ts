@@ -3057,7 +3057,7 @@ export class Store {
       return { ok: true, queued: true, queueId, operationId, delivery, tabId: chat.id, chatId: chat.chatId };
     }
 
-    const accepted = await this._send(chat, message, undefined, undefined, { userId, assistantId });
+    const accepted = await this._send(chat, message, undefined, undefined, { userId, assistantId }, { useDaemonRuntimeControls: true });
     if (!accepted) throw new Error('remote daemon did not accept the chat message');
     return { ok: true, queued: false, operationId, delivery: 'auto', tabId: chat.id, chatId: chat.chatId };
   }
@@ -4583,6 +4583,7 @@ export class Store {
     images?: StartJobOpts['images'],
     queueId?: string,
     identity?: { userId: string; assistantId: string },
+    options: { useDaemonRuntimeControls?: boolean } = {},
   ): Promise<boolean> {
     if (!prompt.trim() || this.isChatRunning(chat.id)) return false;
     const tabId = chat.id;
@@ -4716,12 +4717,13 @@ export class Store {
       job = await callThrow('startJob', {
         kind: 'app-chat', operationId: userId, title: `${chat.providerName ?? 'Agente'} · ${chat.title}`, chatId, tabId: chat.id,
         sessionId: chat.sessionId || undefined, cwd: chat.cwd ?? null,
-        // providerId rides every turn: when it differs from the session's bound
-        // provider, the daemon treats it as a desired-lane selection. It starts
-        // only after a verified non-sampling context import; unsupported switches
-        // fail before the active provider lane is detached.
-        providerId: chat.providerId ?? undefined,
-        modelId: chat.currentModelId, modeId: chat.currentModeId,
+        // Human sends carry the picker selection. Agent idle auto-send uses
+        // the owning daemon's controls: this mounted mirror may predate an
+        // exact-chat control save and must not turn that cache into a new pick.
+        ...(options.useDaemonRuntimeControls ? {} : {
+          providerId: chat.providerId ?? undefined,
+          modelId: chat.currentModelId, modeId: chat.currentModeId,
+        }),
         prompt, images: images && images.length ? images : undefined,
         userMessageId: userId, assistantMessageId: assistantId,
         queueId,

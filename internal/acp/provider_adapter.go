@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -191,14 +192,30 @@ func (strategy nativeHostLaunchStrategy) Prepare(config ProviderConfig, opts Opt
 
 type providerContextPolicy interface {
 	Capabilities() providercontract.ContextCapabilities
+	ExactAttachmentError(exactSessionAttachmentMethod, error) error
 }
 
 type staticProviderContextPolicy struct {
-	capabilities providercontract.ContextCapabilities
+	capabilities        providercontract.ContextCapabilities
+	exactLoadMissingRPC *acpError
 }
 
 func (p staticProviderContextPolicy) Capabilities() providercontract.ContextCapabilities {
 	return p.capabilities
+}
+
+func (p staticProviderContextPolicy) ExactAttachmentError(method exactSessionAttachmentMethod, err error) error {
+	// Only a registered exact-load RPC pair proves additional thread absence.
+	// Lifecycle policy still decides whether creation is legal.
+	var providerErr *providercontract.Error
+	if errors.As(err, &providerErr) {
+		return err
+	}
+	var rpcErr *acpError
+	if missing := p.exactLoadMissingRPC; missing != nil && method == exactSessionLoad && errors.As(err, &rpcErr) && rpcErr.Code == missing.Code && rpcErr.Msg == missing.Msg {
+		return nativeLaneError(providercontract.ErrorNativeThreadMissing, "could not resume the chat's exact provider-native thread", err)
+	}
+	return exactSessionAttachmentError(err)
 }
 
 var genericACPProviderAdapter = providerAdapter{

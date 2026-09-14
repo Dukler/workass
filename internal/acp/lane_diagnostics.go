@@ -21,11 +21,12 @@ type laneDiagnostic struct {
 	elapsedMS                            int64
 	kind                                 providercontract.ErrorKind
 	message, transport                   string
+	requestedModel, rpcReason            string
 	rpcCode                              int
 	hasRPCCode                           bool
 }
 
-func (m *Manager) recordLaneDiagnostic(tabID, chatID, providerID, operation string, started time.Time, err error, nativeIDs ...string) {
+func (m *Manager) recordLaneDiagnostic(tabID, chatID, providerID, operation, requestedModel string, started time.Time, err error, nativeIDs ...string) {
 	if m == nil || tabID == "" || chatID == "" {
 		return
 	}
@@ -40,18 +41,37 @@ func (m *Manager) recordLaneDiagnostic(tabID, chatID, providerID, operation stri
 			}
 		}
 		message := err.Error()
+		model := strings.TrimSpace(requestedModel)
 		for _, id := range nativeIDs {
 			if id != "" {
 				message = strings.ReplaceAll(message, id, "[native-thread]")
+				model = strings.ReplaceAll(model, id, "[native-thread]")
 			}
 		}
 		d.message = redactSensitiveText(message)
+		d.requestedModel = redactSensitiveText(model)
+		for _, marker := range []string{"api_key", "token", "secret", "password", "credential", "bearer"} {
+			if strings.Contains(strings.ToLower(d.requestedModel), marker) {
+				d.requestedModel = "[redacted]"
+				break
+			}
+		}
+		if len(d.requestedModel) > 192 {
+			d.requestedModel = strings.ToValidUTF8(d.requestedModel[:192], "")
+		}
 		if len(d.message) > 2048 {
 			d.message = strings.ToValidUTF8(d.message[:2048], "")
 		}
 		var rpcErr *acpError
 		if errors.As(err, &rpcErr) {
 			d.rpcCode, d.hasRPCCode = rpcErr.Code, true
+			// Some ACP servers put a human-readable resource description in uri.
+			// Retain only this recognized category, never the URI, arbitrary data,
+			// available-model list, or provider-supplied identifiers.
+			if rpcErr.Code == -32002 && rpcErr.Msg == "Resource not found" &&
+				strings.HasPrefix(asString(mapFromAny(rpcErr.Data)["uri"]), "Model not found: ") {
+				d.rpcReason = "model_not_found"
+			}
 		}
 		switch {
 		case errors.Is(err, context.Canceled):
@@ -87,6 +107,12 @@ func (d laneDiagnostic) fields() map[string]any {
 	}
 	if d.transport != "" {
 		fields["transport"] = d.transport
+	}
+	if d.requestedModel != "" {
+		fields["requestedModelId"] = d.requestedModel
+	}
+	if d.rpcReason != "" {
+		fields["rpcReason"] = d.rpcReason
 	}
 	if d.hasRPCCode {
 		fields["rpcCode"] = d.rpcCode

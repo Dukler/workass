@@ -477,11 +477,15 @@ func TestRuntimeControlsCommitToActorBeforeProviderAndApplyOnlyAtTurnBoundary(t 
 	if stringPointerValue(stillLive.Info.CurrentModelID) != stringPointerValue(before.Info.CurrentModelID) || stringPointerValue(stillLive.Info.CurrentModeID) != stringPointerValue(before.Info.CurrentModeID) {
 		t.Fatalf("control save mutated provider before a journaled turn: before=%#v after=%#v", before.Info, stillLive.Info)
 	}
-	if _, err := runtime.Start(context.Background(), map[string]any{
+	// A mounted renderer can still hold the old model/mode. Agent idle sends
+	// omit those overrides so the actor's latest committed controls win.
+	turnRequest := map[string]any{
 		"kind": "app-chat", "tabId": "controls-tab", "chatId": "controls-chat", "sessionId": info.SessionID,
 		"operationId": "controls-turn", "userMessageId": "controls-user", "assistantMessageId": "controls-assistant",
 		"prompt": "apply actor controls at the turn boundary",
-	}, "human"); err != nil {
+	}
+	turnReceipt, err := runtime.Start(context.Background(), turnRequest, "human")
+	if err != nil {
 		t.Fatalf("start actor-controlled turn: %v", err)
 	}
 	waitProviderChatIdle(t, runtime, "controls-chat", 5*time.Second)
@@ -505,6 +509,20 @@ func TestRuntimeControlsCommitToActorBeforeProviderAndApplyOnlyAtTurnBoundary(t 
 	state, _ = runtime.Snapshot("controls-chat")
 	if state.Presentation.CurrentModeID != "" {
 		t.Fatalf("nullable mode retained stale provider value %q", state.Presentation.CurrentModeID)
+	}
+	// Replaying an omitted-controls input reads the original receipt; it must
+	// neither restore its earlier mode nor resolve it against today's defaults.
+	beforeReplay := state
+	replayed, err := runtime.Start(context.Background(), turnRequest, "human")
+	if err != nil {
+		t.Fatalf("replay omitted-controls turn: %v", err)
+	}
+	if fieldString(replayed, "id") != fieldString(turnReceipt, "id") || fieldString(replayed, "status") != "done" {
+		t.Fatal("omitted-controls replay did not return the original terminal job")
+	}
+	afterReplay, _ := runtime.Snapshot("controls-chat")
+	if !reflect.DeepEqual(beforeReplay, afterReplay) {
+		t.Fatal("omitted-controls replay changed durable actor state")
 	}
 }
 

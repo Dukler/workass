@@ -277,6 +277,15 @@ var providerRegistrations = map[string]providerRegistration{
 		Detection: cliDetectionStrategy{}, ProbeTimeout: devinProbeTimeout,
 		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `devin auth login`"},
 		Adapter: providerAdapter{
+			context: staticProviderContextPolicy{
+				capabilities: providercontract.ContextCapabilities{
+					ExactResume: true,
+					ImportMode:  providercontract.ContextImportUnsupported,
+				},
+				// Devin's exact load reports this pair for an absent session.
+				// Generic -32002 control errors do not prove thread absence.
+				exactLoadMissingRPC: &acpError{Code: -32016, Msg: "Session not found"},
+			},
 			creation: providercontract.CreationCapabilities{DeferredUntilInput: true},
 			model:    providerModelPolicy{AssistantBrand: "devin"},
 			launch: standardACPLaunchStrategy{environment: providerEnvironmentPolicy{
