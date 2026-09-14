@@ -5168,8 +5168,15 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 			case EffectCreateLane:
 				// A provider create itself is not safe to repeat, but the daemon's
 				// durable native binding is an authoritative receipt when it exists.
-				// Reclaim this effect in reconcile-only mode: the runtime may exact-
-				// resume that binding or fail ambiguous; it may never call create.
+				lane := state.Lanes[entry.LaneID]
+				if !lane.Thread.IsZero() {
+					entry.Status = OutboxCompleted
+					entry.Reconcile = false
+					entry.LastError = ""
+					continue
+				}
+				// Without that receipt, reclaim in reconcile-only mode. The runtime
+				// may recover the exact binding or fail ambiguous, never repeat create.
 				entry.Status = OutboxPending
 				entry.Reconcile = true
 			case EffectImportContext:
@@ -5204,6 +5211,13 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 			}
 		case OutboxAccepted, OutboxConsumed:
 			if entry.Kind == EffectCreateLane {
+				lane := state.Lanes[entry.LaneID]
+				if !lane.Thread.IsZero() {
+					entry.Status = OutboxCompleted
+					entry.Reconcile = false
+					entry.LastError = ""
+					continue
+				}
 				entry.Status = OutboxPending
 				entry.Reconcile = true
 				entry.LastError = ""
