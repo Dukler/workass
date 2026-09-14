@@ -65,16 +65,13 @@ type Bridge struct {
 	// tool_call is intentionally invisible.
 	toolCallOwners map[string]string
 
-	agentName string
-	agentCaps map[string]any
-	agentMeta map[string]any
-	models    []Model
-	// Raw model-select values, before catalog aliases/effort folding. nil means
-	// no complete select has been observed; an empty map means none are offered.
-	modelSelectValues map[string]struct{}
-	modes             []Mode
-	currentModel      *string
-	currentMode       *string
+	agentName    string
+	agentCaps    map[string]any
+	agentMeta    map[string]any
+	models       []Model
+	modes        []Mode
+	currentModel *string
+	currentMode  *string
 	// Claude's adapter can report currentValue "default" for a synthetic row
 	// that aliases one explicit model. This is populated only from a unique
 	// metadata match in the unfiltered provider catalog and is guarded by mu.

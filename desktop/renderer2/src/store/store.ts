@@ -4560,15 +4560,10 @@ export class Store {
     if (chatRef?.tabId === chat.id && chatRef.msgId === assistant.id) this.chatJobs.delete(chatId);
     if (assistant.jobId) this.jobRef.delete(assistant.jobId);
     const reason = typeof detail === 'string' ? redactSensitiveText(detail).trim().slice(0, 240) : '';
-    // A durable terminal event may beat the rejected invoke reply. Keep its
-    // explanation and failure category; the reply must not turn a model or
-    // permission rejection into a fabricated connection interruption.
-    if (!isTerminalMessage(assistant)) {
-      assistant.content = reason ? `No se pudo iniciar el turno (${reason}).` : 'No se pudo iniciar el turno.';
-      assistant.interrupted = undefined;
-    }
     assistant.status = 'failed';
+    assistant.content = reason ? `No se pudo iniciar el turno (${reason}).` : 'No se pudo iniciar el turno.';
     assistant.at = new Date().toISOString();
+    assistant.interrupted = true;
     assistant.turnStartedAt = undefined;
     assistant.jobId = undefined;
     // A connection id is disposable. Force the next attempt through exact lane
@@ -5281,7 +5276,7 @@ export class Store {
           msg.status = terminalStatus;
           // The daemon reports its own interruptions now, so a restart-killed
           // turn reads as interrupted here exactly as it does after rehydration.
-          msg.interrupted = e.job.interrupted ? true : undefined;
+          if (e.job.interrupted) msg.interrupted = true;
           if (msg.status === 'failed' && !msg.content && !msg.result) msg.content = e.job.error ? `Error: ${e.job.error}` : 'La tarea falló.';
           msg.at = e.job.finishedAt ?? new Date().toISOString();
           if (e.job.images?.length) {

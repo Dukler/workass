@@ -287,7 +287,7 @@ var providerRegistrations = map[string]providerRegistration{
 				exactLoadMissingRPC: &acpError{Code: -32016, Msg: "Session not found"},
 			},
 			creation: providercontract.CreationCapabilities{DeferredUntilInput: true},
-			model:    providerModelPolicy{AssistantBrand: "devin", ClosedCatalog: true},
+			model:    providerModelPolicy{AssistantBrand: "devin"},
 			launch: standardACPLaunchStrategy{environment: providerEnvironmentPolicy{
 				// ACP_BACKEND is a Workass/test harness selector, not Devin auth
 				// configuration. Inheriting or persisting it makes the installed Windows

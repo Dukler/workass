@@ -1158,13 +1158,6 @@ func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontra
 			d.lane.manager.recordLaneDiagnostic(owner.TabID, identity.ChatID, info.ProviderID, "start", input.ModelID, started, resultErr, info.SessionID)
 		}
 	}()
-	// Validate even when the saved selection equals the lane's current model:
-	// a model can disappear from a live session's advertised select.
-	if bridge := d.lane.manager.bridgeForSession(info.SessionID, SessionOptions{SessionID: info.SessionID}); bridge != nil {
-		if err := bridge.validateModelSelection(input.ModelID); err != nil {
-			return providercontract.TurnAdmission{}, err
-		}
-	}
 	if modelID := strings.TrimSpace(input.ModelID); modelID != "" && modelID != stringPointer(info.CurrentModelID) {
 		result, err := d.lane.manager.SetModel(ctx, info.SessionID, modelID)
 		if err != nil {

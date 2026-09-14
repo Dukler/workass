@@ -614,7 +614,6 @@ test('a rejected job start terminates its optimistic row and the next send can s
     const failed = owner.messages.at(-1)!;
     assert.equal(failed.status, 'failed');
     assert.match(failed.content, /provider lane rejected the turn/);
-    assert.equal(failed.interrupted, undefined, 'a provider rejection is not a connection failure');
     assert.equal((failed as unknown as Record<string, unknown>).retryPrompt, undefined);
     assert.equal(owner.sessionId, null);
     assert.equal((subject as any).chatJobs.size, 0);
@@ -997,35 +996,4 @@ test('delayed submission owns its exact chat and leaves the newly active compose
   await subject.sendTo(owner.id, 'first draft', undefined, 'first draft', submission);
   assert.equal(owner.draft, '');
   assert.equal(second.draft, 'second draft');
-});
-
-test('a model rejection event beating the invoke reply keeps its durable explanation', async () => {
-  const previousWindow = (globalThis as any).window;
-  const { subject, owner } = subjectWithChat();
-  subject.state.connection = 'connected';
-  subject.scheduleScopedSync = () => {};
-  const explanation = 'The selected model is no longer available. Choose an available model.';
-  (globalThis as any).window = { api: {
-    startJob: async (args: { userMessageId: string; assistantMessageId: string }) => {
-      subject.onJobEvent({ type: 'end', job: job({
-        status: 'failed', finishedAt: '2026-09-14T00:00:00Z',
-        userMessageId: args.userMessageId, assistantMessageId: args.assistantMessageId,
-        result: explanation, error: 'model_unavailable', interrupted: false,
-      }) });
-      return { error: 'generic late rejection' };
-    },
-  } };
-  try {
-    await subject._send(owner, 'keep my question');
-    const failed = owner.messages.at(-1)!;
-    assert.equal(failed.status, 'failed');
-    assert.equal(failed.interrupted, undefined);
-    assert.equal(failed.result, explanation);
-    assert.doesNotMatch(failed.content, /generic late rejection/);
-    assert.equal(owner.messages.filter((message) => message.role === 'user').length, 1);
-    assert.equal(owner.messages[0].content, 'keep my question');
-  } finally {
-    if (previousWindow === undefined) delete (globalThis as any).window;
-    else (globalThis as any).window = previousWindow;
-  }
 });

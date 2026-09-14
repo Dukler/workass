@@ -2877,19 +2877,15 @@ func (b *Bridge) SetModel(ctx context.Context, sessionID, modelID string) (map[s
 	// on a model that may no longer support one.
 	b.mu.Lock()
 	resolution := b.resolveModelWriteLocked(modelID)
-	selectionErr := b.validateModelSelectionLocked(resolution)
 	effortConfigID := firstNonEmpty(b.effortConfigID, "effort")
 	b.mu.Unlock()
-	if selectionErr != nil {
-		return nil, selectionErr
-	}
 	finishWrite := b.beginWorkassModelWrite(sessionID)
 	defer finishWrite()
 	finishConfigWrite := b.beginWorkassConfigWrite(sessionID)
 	defer finishConfigWrite()
 	res, err := b.request(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": "model", "value": resolution.modelValue}, 15*time.Second)
 	if err != nil {
-		return nil, classifyModelSelectionError(err)
+		return nil, err
 	}
 	// A successful model write is authoritative even when an adapter omits the
 	// configOptions echo. Seed the bridge with that applied value before parsing
@@ -3513,7 +3509,6 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 	var serviceTiers []string
 	var effortConfigID string
 	modelSeen := false
-	var modelSelectValues map[string]struct{}
 	effortSeen := false
 	for _, item := range options {
 		opt := mapFromAny(item)
@@ -3529,7 +3524,6 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 		values, _ := opt["options"].([]any)
 		if id == "model" || category == "model" {
 			modelSeen = true
-			modelSelectValues = completeModelSelectValues(opt["options"])
 			for _, rawValue := range values {
 				value := mapFromAny(rawValue)
 				modelID := asString(value["value"])
@@ -3609,9 +3603,6 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 		// An unresolved synthetic alias is not an explicit model capability.
 		// Keep the current selection literal, but never invent an effort owner.
 		effectiveModel = ""
-	}
-	if modelSeen {
-		b.modelSelectValues = modelSelectValues
 	}
 	if models != nil {
 		models = normalizeProviderCatalogModels(b.providerID, models)
