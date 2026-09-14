@@ -393,7 +393,7 @@ type managerLaneFactory struct {
 func (f managerLaneFactory) Create(ctx context.Context, request providercontract.CreateLaneRequest) (created providercontract.Lane, threadRef providercontract.ThreadRef, resultErr error) {
 	started := time.Now()
 	defer func() {
-		f.manager.recordLaneDiagnostic(request.Owner.TabID, request.Identity.ChatID, f.providerID, "create", started, resultErr)
+		f.manager.recordLaneDiagnostic(request.Owner.TabID, request.Identity.ChatID, f.providerID, "create", request.ModelID, started, resultErr)
 	}()
 	identity, opts, err := f.validateCreate(request)
 	if err != nil {
@@ -522,7 +522,7 @@ func validateCanonicalCreatedLane(proposed, canonical providercontract.LaneIdent
 func (f managerLaneFactory) Resume(ctx context.Context, request providercontract.ResumeLaneRequest) (attached providercontract.Lane, resultErr error) {
 	started := time.Now()
 	defer func() {
-		f.manager.recordLaneDiagnostic(request.Owner.TabID, request.Identity.ChatID, f.providerID, "resume", started, resultErr,
+		f.manager.recordLaneDiagnostic(request.Owner.TabID, request.Identity.ChatID, f.providerID, "resume", request.ModelID, started, resultErr,
 			request.Thread.RootID, request.Thread.HeadID)
 	}()
 	identity, opts, err := f.validateResume(request)
@@ -619,6 +619,21 @@ func classifyLaneRuntimeError(operation string, err error) error {
 		return err
 	}
 	return &providercontract.Error{Kind: providercontract.ErrorTransientTransport, Message: operation + " failed", Cause: err}
+}
+
+// A failed control RPC is an explicit rejection before any prompt is sent.
+// Preserve typed adapter errors, and distinguish RPC rejection from a lost
+// transport without guessing which native resource a provider could not find.
+func classifyLaneControlError(operation string, err error) error {
+	var typed *providercontract.Error
+	if err == nil || errors.As(err, &typed) {
+		return err
+	}
+	var rpcErr *acpError
+	if errors.As(err, &rpcErr) {
+		return &providercontract.Error{Kind: providercontract.ErrorAdmissionRejected, Message: operation + " failed", Cause: err}
+	}
+	return classifyLaneRuntimeError(operation, err)
 }
 
 type managerLane struct {
@@ -1140,13 +1155,13 @@ func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontra
 	d.lane.mu.Unlock()
 	defer func() {
 		if resultErr != nil {
-			d.lane.manager.recordLaneDiagnostic(owner.TabID, identity.ChatID, info.ProviderID, "start", started, resultErr, info.SessionID)
+			d.lane.manager.recordLaneDiagnostic(owner.TabID, identity.ChatID, info.ProviderID, "start", input.ModelID, started, resultErr, info.SessionID)
 		}
 	}()
 	if modelID := strings.TrimSpace(input.ModelID); modelID != "" && modelID != stringPointer(info.CurrentModelID) {
 		result, err := d.lane.manager.SetModel(ctx, info.SessionID, modelID)
 		if err != nil {
-			return providercontract.TurnAdmission{}, classifyLaneRuntimeError("apply lane model", err)
+			return providercontract.TurnAdmission{}, classifyLaneControlError("apply lane model", err)
 		}
 		applied := firstNonEmpty(strings.TrimSpace(asString(result["currentModelId"])), modelID)
 		d.lane.mu.Lock()
@@ -1157,7 +1172,7 @@ func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontra
 	if modeID := strings.TrimSpace(input.ModeID); modeID != "" && modeID != stringPointer(info.CurrentModeID) {
 		result, err := d.lane.manager.SetMode(ctx, info.SessionID, modeID)
 		if err != nil {
-			return providercontract.TurnAdmission{}, classifyLaneRuntimeError("apply lane mode", err)
+			return providercontract.TurnAdmission{}, classifyLaneControlError("apply lane mode", err)
 		}
 		applied := firstNonEmpty(strings.TrimSpace(asString(result["currentModeId"])), modeID)
 		d.lane.mu.Lock()
@@ -1166,7 +1181,7 @@ func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontra
 		info.CurrentModeID = &applied
 	}
 	if err := d.lane.manager.applyServiceTier(ctx, info.SessionID, input.ServiceTier); err != nil {
-		return providercontract.TurnAdmission{}, classifyLaneRuntimeError("apply lane service tier", err)
+		return providercontract.TurnAdmission{}, classifyLaneControlError("apply lane service tier", err)
 	}
 	images := make([]any, 0, len(input.Attachments))
 	for _, attachment := range input.Attachments {

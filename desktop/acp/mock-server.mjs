@@ -492,7 +492,12 @@ async function handleRequest(message) {
     tracePrompt(String(params.sessionId || ''), `[mock:lifecycle] ${method}`);
     if (method === 'session/resume' && failResume) return fail(id, -32098, 'Mock exact resume failure.');
     const session = sessions.get(params.sessionId);
-    if (!session) return fail(id, -32044, 'Unknown persistent mock ACP session.');
+    if (!session) {
+      if (method === 'session/load' && process.env.WORKASS_MOCK_ACP_DEVIN_LOAD_ABSENCE === '1') {
+        return fail(id, -32016, 'Session not found');
+      }
+      return fail(id, -32044, 'Unknown persistent mock ACP session.');
+    }
     session.cwd = params.cwd || session.cwd;
     session.cancelled = false;
     session.steers = [];
@@ -514,6 +519,9 @@ async function handleRequest(message) {
     return;
   }
   if (method === 'session/set_config_option') {
+    if (process.env.WORKASS_MOCK_ACP_REJECT_MODEL === '1' && params.configId === 'model') {
+      return fail(id, -32002, 'Resource not found');
+    }
     const session = sessions.get(params.sessionId);
     if (!session) return fail(id, -32000, 'Unknown mock ACP session.');
     const controlGate = process.env.WORKASS_MOCK_ACP_CONTROL_GATE;
