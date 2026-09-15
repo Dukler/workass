@@ -1275,7 +1275,12 @@ func TestProviderRegistryCatalogToggleFailureAndConcurrentIsolation(t *testing.T
 
 func TestSetModelPassesEffortSuffixedIDUnchanged(t *testing.T) {
 	t.Parallel()
-	manager, _ := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
+	manager, _ := newFakeManager(t, "echo-prompt", Options{
+		RSSSampleInterval: time.Hour,
+		Provider: ProviderConfig{Env: map[string]string{
+			"WORKASS_FAKE_ACP_LITERAL_MODEL": "1",
+		}},
+	})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -1310,7 +1315,8 @@ func TestTurnReappliesPersistedModelAndPermissionMode(t *testing.T) {
 	manager, events := newFakeManager(t, "echo-prompt", Options{
 		RSSSampleInterval: time.Hour,
 		Provider: ProviderConfig{Env: map[string]string{
-			"WORKASS_FAKE_ACP_CONFIG_LOG": logPath,
+			"WORKASS_FAKE_ACP_CONFIG_LOG":    logPath,
+			"WORKASS_FAKE_ACP_LITERAL_MODEL": "1",
 		}},
 	})
 	t.Cleanup(func() { manager.Reset() })
@@ -3897,8 +3903,14 @@ func fakePromptImageObservation(raw any) string {
 }
 
 func fakeConfigOptions(model, mode string) []any {
+	models := []any{map[string]any{"value": "fake-model", "name": "Fake model"}}
+	if os.Getenv("WORKASS_FAKE_ACP_LITERAL_MODEL") == "1" {
+		// Literal-ID tests must advertise the suffix as a real model value.
+		// An unadvertised suffix on a known base is a Workass effort selection.
+		models = append(models, map[string]any{"value": "fake-model[high]", "name": "Fake literal model"})
+	}
 	return []any{
-		map[string]any{"id": "model", "category": "model", "currentValue": model, "options": []any{map[string]any{"value": "fake-model", "name": "Fake model"}}},
+		map[string]any{"id": "model", "category": "model", "currentValue": model, "options": models},
 		map[string]any{"id": "mode", "category": "mode", "currentValue": mode, "options": []any{
 			map[string]any{"value": "ask", "name": "Ask"},
 			map[string]any{"value": "bypass", "name": "Bypass"},

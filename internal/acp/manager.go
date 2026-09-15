@@ -3119,6 +3119,9 @@ func (b *Bridge) currentSessionControlResult() sessionControlResult {
 func (b *Bridge) resolveModelWriteLocked(modelID string) modelWriteResolution {
 	modelID = strings.TrimSpace(modelID)
 	out := modelWriteResolution{requested: modelID, modelValue: modelID, baseModelID: modelID}
+	if b.modelConfigValues[modelID] {
+		return out
+	}
 	for _, model := range b.models {
 		if strings.TrimSpace(model.ModelID) == modelID {
 			return out
@@ -3135,6 +3138,13 @@ func (b *Bridge) resolveModelWriteLocked(modelID string) modelWriteResolution {
 	}
 	out.baseModelID = base
 	out.effort = canonical
+	if b.modelConfigValues[base] {
+		// The model control advertises the base, not this UI composite. Select
+		// it first so its reply can expose the target model's effort control.
+		out.modelValue = base
+		out.separateAxis = true
+		return out
+	}
 	var baseModel *Model
 	for i := range b.models {
 		if strings.TrimSpace(b.models[i].ModelID) == base {
@@ -3163,33 +3173,26 @@ func (b *Bridge) resolveModelWriteLocked(modelID string) modelWriteResolution {
 		out.separateAxis = true
 		return out
 	}
-	separateAxisProvider := providerAdapterForID(b.providerID).model.SeparateEffortAxis
-	if !separateAxisProvider {
-		for _, levels := range b.axisEffortsByModel {
-			if len(levels) > 0 {
-				separateAxisProvider = true
-				break
-			}
+	// Normalization collapses literal model variants for the UI. Those remain
+	// wire model IDs even if a different model exposes a separate effort option.
+	// The native Claude/Codex hosts explicitly use base + effort for these rows.
+	variants := b.variantEffortsByModel[base]
+	if !providerAdapterForID(b.providerID).model.SeparateEffortAxis {
+		if variantEffort := matchingStringFold(variants, canonical); variantEffort != "" {
+			out.effort = variantEffort
+			out.variantMatched = true
+			return out
+		}
+		if len(variants) > 0 && len(axisLevels) == 0 {
+			// This base row may exist only because literal variants were collapsed.
+			// Without a target effort axis, do not invent a writable base model.
+			return out
 		}
 	}
-	// A catalog effort without a matching separate-axis capability came from
-	// direct model-id variants. Preserve the composite byte-for-byte only for an
-	// adapter that has never exposed a separate effort axis. Codex and Claude
-	// also advertise composite catalog rows, but their config write contract is
-	// base model first followed by the provider's effort option.
-	if variantEffort := matchingStringFold(b.variantEffortsByModel[base], canonical); variantEffort != "" && !separateAxisProvider {
-		out.effort = variantEffort
-		out.variantMatched = true
-		return out
-	}
-	if !separateAxisProvider {
-		// A custom adapter that has never exposed an effort axis owns its model ids
-		// byte-for-byte. Preserve unknown canonical brackets for compatibility.
-		return out
-	}
-	// The base exists but does not currently advertise this effort. Switch the
-	// valid base first: its returned configOptions may discover an effort axis, or
-	// may authoritatively confirm that this is a stale unsupported suffix.
+	// The adapter advertises this base model, not the composite selection. Its
+	// model-specific effort controls may only appear after selecting it. Write
+	// the base first for every ACP provider, then use the returned configOptions
+	// to discover the effort axis or reconcile an unsupported saved suffix.
 	out.modelValue = base
 	out.separateAxis = true
 	return out
@@ -3589,6 +3592,12 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 		// An unresolved synthetic alias is not an explicit model capability.
 		// Keep the current selection literal, but never invent an effort owner.
 		effectiveModel = ""
+	}
+	if modelSeen {
+		b.modelConfigValues = make(map[string]bool, len(models))
+		for _, model := range models {
+			b.modelConfigValues[strings.TrimSpace(model.ModelID)] = true
+		}
 	}
 	if models != nil {
 		models = normalizeProviderCatalogModels(b.providerID, models)

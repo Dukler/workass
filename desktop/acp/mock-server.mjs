@@ -17,6 +17,8 @@ const failResume = process.env.WORKASS_MOCK_ACP_FAIL_RESUME === '1';
 const mismatchedAttachmentId = String(process.env.WORKASS_MOCK_ACP_MISMATCHED_ATTACHMENT_ID || '').trim();
 const stableTurnInput = process.env.WORKASS_MOCK_ACP_STABLE_TURN_INPUT === '1';
 const contextImport = process.env.WORKASS_MOCK_ACP_CONTEXT_IMPORT === '1';
+const modelEffortAxis = process.env.WORKASS_MOCK_ACP_MODEL_EFFORT_AXIS === '1';
+const effortOptionID = process.env.WORKASS_MOCK_ACP_EFFORT_OPTION_ID || 'effort';
 const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z5m8AAAAASUVORK5CYII=';
 // Test fixture for renderer plan-limit development only. This deliberately
 // uses a mock marker alongside the Claude-shaped key so no paid adapter turn is
@@ -43,6 +45,7 @@ function loadPersistentSessions() {
       sessions.set(String(session.id), {
         id: String(session.id), cwd: String(session.cwd || process.cwd()),
         model: String(session.model || 'mock-deterministic'), mode: String(session.mode || 'ask'),
+        effort: String(session.effort || 'minimal'),
         turn: Math.max(0, Number(session.turn || 0)), cancelled: false, steers: [],
 		turnStatus: 'idle', pendingPromptId: null,
 		contextImports: session.contextImports && typeof session.contextImports === 'object' ? session.contextImports : {},
@@ -114,11 +117,21 @@ function configOptions(session) {
   return [
     {
       id: 'model', category: 'model', name: 'Model', type: 'select', currentValue: session.model,
-      options: [
+      options: modelEffortAxis ? [
+        { value: 'mock-deterministic', name: 'Mock deterministic' },
+        { value: 'mock-reasoning', name: 'Mock reasoning' },
+        { value: 'mock-literal[low]', name: 'Mock literal (low)' },
+        { value: 'mock-literal[HIGH]', name: 'Mock literal (HIGH)' },
+      ] : [
         { value: 'mock-deterministic[low]', name: 'Mock deterministic (low)' },
         { value: 'mock-deterministic[high]', name: 'Mock deterministic (high)' },
       ],
     },
+    ...(modelEffortAxis && session.model === 'mock-reasoning' ? [{
+      id: effortOptionID, category: 'thought_level', name: 'Effort', type: 'select',
+      currentValue: session.effort || 'minimal',
+      options: ['minimal', 'low', 'medium', 'high', 'xhigh'].map(value => ({ value, name: value })),
+    }] : []),
     {
       id: 'mode', category: 'mode', name: 'Mode', type: 'select', currentValue: session.mode,
       options: [
@@ -524,6 +537,13 @@ async function handleRequest(message) {
     }
     const session = sessions.get(params.sessionId);
     if (!session) return fail(id, -32000, 'Unknown mock ACP session.');
+    if (modelEffortAxis) {
+      const option = configOptions(session).find(option => option.id === params.configId);
+      if (!option || !option.options.some(item => item.value === params.value)) {
+        return fail(id, -32602, `unsupported config selection: ${params.configId}=${params.value}`);
+      }
+      if (params.configId === effortOptionID) session.effort = params.value;
+    }
     const controlGate = process.env.WORKASS_MOCK_ACP_CONTROL_GATE;
     if (controlGate) {
       fs.writeFileSync(controlGate, 'waiting');
