@@ -262,7 +262,7 @@ func TestPromptBlocksKeepsTheLeadingSlashAheadOfTheImageNotice(t *testing.T) {
 	if text := asString(mapFromAny(blocks[1])["text"]); text != "/review 123" {
 		t.Fatalf("slash prompt text block = %q", text)
 	}
-	if notice := asString(mapFromAny(blocks[2])["text"]); !strings.HasPrefix(notice, "[Workass attachment context]") {
+	if notice := asString(mapFromAny(blocks[2])["text"]); notice != "[Workass attachment context]\nThe current human-authored message includes 1 attached image(s)." {
 		t.Fatalf("trailing notice block = %q", notice)
 	}
 

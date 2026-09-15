@@ -73,14 +73,8 @@ func TestEnvironmentBriefAdvertisesAgentCatalogAndSpawnTools(t *testing.T) {
 		"workass_host_artifact",
 		"use its returned markdown",
 		"natural ![label](path)",
-		"Never expose a raw local filesystem path",
 		"durable inline chat images",
-		"<chat-working-directory>-visualizations",
-		"Arbitrary siblings and /tmp are rejected",
-		"use workass_spawn_subagent for delegated agent work",
-		"do not launch untracked detached agents or shells",
-		"For every ACP provider",
-		"workass_register_external_work in the same turn",
+		"Local file links are not accessible from the controller",
 	} {
 		if !strings.Contains(brief, want) {
 			t.Fatalf("environment brief missing %q:\n%s", want, brief)
@@ -91,14 +85,14 @@ func TestEnvironmentBriefAdvertisesAgentCatalogAndSpawnTools(t *testing.T) {
 	}
 }
 
-func TestEnvironmentBriefKeepsVerificationReceiptsInternal(t *testing.T) {
+func TestEnvironmentBriefOmitsDelegationAndResponseStyleDirectives(t *testing.T) {
 	t.Parallel()
-	manager := NewManager(Options{})
+	manager := NewManager(Options{WorkassToolsOrigin: "https://localhost:8788"})
 	t.Cleanup(func() { manager.Reset() })
 	brief := manager.buildEnvironmentBrief(false)
-	for _, want := range []string{"preserves command and tool output in internal event history", "Do not repeat raw command output", "name failures or skipped checks", "only when the user explicitly asks"} {
-		if !strings.Contains(brief, want) {
-			t.Fatalf("environment brief missing internal receipt policy %q:\n%s", want, brief)
+	for _, removed := range []string{"Verification receipts:", "Do not repeat raw command output", "Background work:", "Visualization delivery:", "Language rule:"} {
+		if strings.Contains(brief, removed) {
+			t.Fatalf("environment brief still includes removed directive %q:\n%s", removed, brief)
 		}
 	}
 }
