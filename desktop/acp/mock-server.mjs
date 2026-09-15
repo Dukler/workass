@@ -18,6 +18,7 @@ const mismatchedAttachmentId = String(process.env.WORKASS_MOCK_ACP_MISMATCHED_AT
 const stableTurnInput = process.env.WORKASS_MOCK_ACP_STABLE_TURN_INPUT === '1';
 const contextImport = process.env.WORKASS_MOCK_ACP_CONTEXT_IMPORT === '1';
 const modelEffortAxis = process.env.WORKASS_MOCK_ACP_MODEL_EFFORT_AXIS === '1';
+const modelOptionID = process.env.WORKASS_MOCK_ACP_MODEL_OPTION_ID || 'model';
 const effortOptionID = process.env.WORKASS_MOCK_ACP_EFFORT_OPTION_ID || 'effort';
 const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z5m8AAAAASUVORK5CYII=';
 // Test fixture for renderer plan-limit development only. This deliberately
@@ -116,7 +117,7 @@ function requestClient(method, params, timeoutMs = 30000) {
 function configOptions(session) {
   return [
     {
-      id: 'model', category: 'model', name: 'Model', type: 'select', currentValue: session.model,
+      id: modelOptionID, category: 'model', name: 'Model', type: 'select', currentValue: session.model,
       options: modelEffortAxis ? [
         { value: 'mock-deterministic', name: 'Mock deterministic' },
         { value: 'mock-reasoning', name: 'Mock reasoning' },
@@ -532,7 +533,7 @@ async function handleRequest(message) {
     return;
   }
   if (method === 'session/set_config_option') {
-    if (process.env.WORKASS_MOCK_ACP_REJECT_MODEL === '1' && params.configId === 'model') {
+    if (process.env.WORKASS_MOCK_ACP_REJECT_MODEL === '1' && params.configId === modelOptionID) {
       return fail(id, -32002, 'Resource not found');
     }
     const session = sessions.get(params.sessionId);
@@ -549,9 +550,12 @@ async function handleRequest(message) {
       fs.writeFileSync(controlGate, 'waiting');
       while (!fs.existsSync(`${controlGate}.release`)) await sleep(10);
     }
-    if (params.configId === 'model') session.model = String(params.value);
+    if (params.configId === modelOptionID) session.model = String(params.value);
     if (params.configId === 'mode') session.mode = String(params.value);
     persistSessions();
+    if (process.env.WORKASS_MOCK_ACP_CONFIG_NOTIFY === '1') {
+      notify(session.id, { sessionUpdate: 'config_options_update', configOptions: configOptions(session) });
+    }
     respond(id, { configOptions: configOptions(session) });
     return;
   }

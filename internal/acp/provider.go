@@ -2283,6 +2283,7 @@ func (m *Manager) probeProviderCatalogWithInitTimeout(ctx context.Context, cfg P
 		opts.InitTimeout = initTimeout
 	}
 	bridge := newBridge("catalog-"+cfg.ID, opts, m)
+	bridge.catalogProbe = true
 	timeout := opts.InitTimeout
 	if timeout <= 0 {
 		timeout = defaultInitTimeout
@@ -2294,34 +2295,46 @@ func (m *Manager) probeProviderCatalogWithInitTimeout(ctx context.Context, cfg P
 		bridge.Close(true, err)
 		return nil, nil, "", err
 	}
-	modelPolicy := providerAdapterForID(cfg.ID).model
-	if modelPolicy.InspectAllEfforts != nil && modelPolicy.InspectAllEfforts(cfg) {
-		m.probeFrontierModelEfforts(catalogCtx, bridge, info.SessionID, info.Models)
-		bridge.mu.Lock()
-		info.Models = append([]Model(nil), bridge.models...)
-		bridge.mu.Unlock()
-	}
+	m.probeFrontierModelEfforts(catalogCtx, bridge, info.SessionID, info.Models)
+	bridge.mu.Lock()
+	info.Models = append([]Model(nil), bridge.models...)
+	bridge.mu.Unlock()
 	_ = bridge.CloseSession(context.Background(), info.SessionID)
 	return info.Models, info.Modes, info.Agent, nil
 }
 
 // probeFrontierModelEfforts asks an already-open ephemeral catalog session for
-// each advertised model's config surface. The direct Claude and Codex hosts
-// expose effort as a model-specific option; without this metadata-only pass,
-// Workass learns only the startup model's vocabulary. No provider prompt is
-// sent and the original model is restored before close.
+// each advertised model's config surface. ACP providers may expose effort only
+// after selecting a model; discover it before the first user prompt. Literal
+// variants already carry their effort metadata and must not be probed as
+// synthesized base IDs. No prompt is sent, and this disposable session's
+// original model is restored before close.
 func (m *Manager) probeFrontierModelEfforts(ctx context.Context, bridge *Bridge, sessionID string, models []Model) {
+	// Individual model replies may narrow the available-model list. Preserve
+	// the catalog we opened with and enrich it only with discovered controls.
+	defer func() {
+		bridge.mu.Lock()
+		bridge.models = append([]Model(nil), models...)
+		bridge.refreshCatalogModelEffortsLocked()
+		bridge.mu.Unlock()
+	}()
+	modelPolicy := providerAdapterForID(bridge.ProviderID()).model
+	inspectAll := modelPolicy.InspectAllEfforts != nil && modelPolicy.InspectAllEfforts(bridge.opts.Provider)
 	bridge.mu.Lock()
 	restoreModel := ""
 	if bridge.currentModel != nil {
-		restoreModel = strings.TrimSpace(*bridge.currentModel)
+		restoreModel = bridge.resolveModelWriteLocked(*bridge.currentModel).modelValue
 	}
 	bridge.mu.Unlock()
+	changedModel := false
 
 	inspect := func(modelID string) error {
+		bridge.mu.Lock()
+		modelConfigID := firstNonEmpty(bridge.modelConfigID, "model")
+		bridge.mu.Unlock()
 		res, err := bridge.request(ctx, "session/set_config_option", map[string]any{
 			"sessionId": sessionID,
-			"configId":  "model",
+			"configId":  modelConfigID,
 			"value":     modelID,
 		}, 15*time.Second)
 		if err != nil {
@@ -2335,10 +2348,21 @@ func (m *Manager) probeFrontierModelEfforts(ctx context.Context, bridge *Bridge,
 	}
 
 	for _, model := range models {
+		if ctx.Err() != nil {
+			break
+		}
 		modelID := strings.TrimSpace(model.ModelID)
 		if modelID == "" || modelID == restoreModel {
 			continue
 		}
+		bridge.mu.Lock()
+		_, known := bridge.axisEffortsByModel[modelID]
+		advertised := bridge.modelConfigValues[modelID]
+		bridge.mu.Unlock()
+		if !inspectAll && (!advertised || known || len(model.Efforts) != 0) {
+			continue
+		}
+		changedModel = true
 		if err := inspect(modelID); err != nil && m.opts.Logf != nil {
 			m.opts.Logf("frontier model effort probe failed", map[string]any{
 				"providerId": bridge.ProviderID(),
@@ -2347,7 +2371,7 @@ func (m *Manager) probeFrontierModelEfforts(ctx context.Context, bridge *Bridge,
 			})
 		}
 	}
-	if restoreModel == "" {
+	if restoreModel == "" || !changedModel {
 		return
 	}
 	if err := inspect(restoreModel); err != nil && m.opts.Logf != nil {

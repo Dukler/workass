@@ -2,10 +2,91 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestACPCatalogDiscoversEffortBeforeFirstPrompt(t *testing.T) {
+	for _, providerID := range []string{"opencode", "custom-acp"} {
+		t.Run(providerID, func(t *testing.T) {
+			root, fixtureDir := repoRoot(t), t.TempDir()
+			store := filepath.Join(fixtureDir, "sessions.json")
+			trace := filepath.Join(fixtureDir, "prompts.jsonl")
+			events := newEventCollector()
+			manager := NewManager(Options{
+				RootDir: root, StateDir: fixtureDir, InitTimeout: 2 * time.Second, RSSSampleInterval: time.Hour,
+				Broadcast: events.Broadcast,
+				Providers: []ProviderConfig{{
+					ID: providerID, Enabled: true, Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")},
+					Env: map[string]string{
+						"WORKASS_MOCK_ACP_MODEL_EFFORT_AXIS": "1",
+						"WORKASS_MOCK_ACP_MODEL_OPTION_ID":   "custom_model",
+						"WORKASS_MOCK_ACP_CONFIG_NOTIFY":     "1",
+						"WORKASS_MOCK_ACP_EFFORT_OPTION_ID":  "custom_reasoning",
+						"WORKASS_MOCK_ACP_SESSION_STORE":     store,
+						"WORKASS_MOCK_ACP_TRACE_FILE":        trace,
+					},
+				}},
+			})
+			t.Cleanup(func() { manager.Reset() })
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			groups := manager.Catalog(ctx)["groups"].([]CatalogGroup)
+			group := findCatalogGroup(groups, providerID)
+			if group == nil || group.Status != providerStatusReady {
+				t.Fatalf("catalog unavailable: %#v", group)
+			}
+			reasoning := findCatalogModel(group.Models, "mock-reasoning")
+			if reasoning == nil || !stringSlicesEqual(reasoning.Efforts, []string{"minimal", "low", "medium", "high", "xhigh"}) {
+				t.Fatalf("first catalog lacks selectable efforts: %#v", reasoning)
+			}
+			if plain := findCatalogModel(group.Models, "mock-deterministic"); plain == nil || len(plain.Efforts) != 0 {
+				t.Fatalf("discovery invented effort for a plain model: %#v", plain)
+			}
+			if literal := findCatalogModel(group.Models, "mock-literal"); literal == nil || !stringSlicesEqual(literal.Efforts, []string{"low", "HIGH"}) {
+				t.Fatalf("discovery changed literal model variants: %#v", literal)
+			}
+			if data, err := os.ReadFile(trace); !os.IsNotExist(err) && (err != nil || len(data) != 0) {
+				t.Fatalf("catalog discovery sent a prompt or resumed a chat: bytes=%d err=%v", len(data), err)
+			}
+			data, err := os.ReadFile(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stored struct {
+				Sessions []struct {
+					Model string `json:"model"`
+					Turn  int    `json:"turn"`
+				} `json:"sessions"`
+			}
+			if err := json.Unmarshal(data, &stored); err != nil {
+				t.Fatal(err)
+			}
+			if len(stored.Sessions) != 1 || stored.Sessions[0].Model != "mock-deterministic" || stored.Sessions[0].Turn != 0 {
+				t.Fatalf("discovery failed to restore its disposable session: %#v", stored)
+			}
+			for _, event := range events.snapshot() {
+				if event.channel == "agent:apply" || event.channel == "chat:catalog" {
+					t.Fatalf("catalog probe leaked a live control update: %s", event.channel)
+				}
+			}
+			// A fresh chat can apply an effort selected from that first catalog,
+			// including providers with their own model and effort option IDs.
+			session, err := manager.NewSession(ctx, SessionOptions{ProviderID: providerID, CWD: fixtureDir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			selection := "mock-reasoning[high]"
+			result, err := manager.SetModel(ctx, session.SessionID, selection)
+			if err != nil || result["appliedModelId"] != selection {
+				t.Fatalf("first-turn effort could not be configured: result=%#v err=%v", result, err)
+			}
+		})
+	}
+}
 
 // Model-specific controls may be absent until the model is selected. Exercise
 // that protocol through both OpenCode and an unregistered ACP adapter: wire

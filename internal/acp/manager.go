@@ -2863,13 +2863,14 @@ func (b *Bridge) SetModel(ctx context.Context, sessionID, modelID string) (map[s
 	// on a model that may no longer support one.
 	b.mu.Lock()
 	resolution := b.resolveModelWriteLocked(modelID)
+	modelConfigID := firstNonEmpty(b.modelConfigID, "model")
 	effortConfigID := firstNonEmpty(b.effortConfigID, "effort")
 	b.mu.Unlock()
 	finishWrite := b.beginWorkassModelWrite(sessionID)
 	defer finishWrite()
 	finishConfigWrite := b.beginWorkassConfigWrite(sessionID)
 	defer finishConfigWrite()
-	res, err := b.request(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": "model", "value": resolution.modelValue}, 15*time.Second)
+	res, err := b.request(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": modelConfigID, "value": resolution.modelValue}, 15*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -3483,6 +3484,9 @@ func (b *Bridge) canonicalProviderModelIDLocked(modelID string) string {
 }
 
 func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadcast bool, workassWrite bool) {
+	if b.catalogProbe {
+		broadcast = false
+	}
 	options, ok := raw.([]any)
 	if !ok {
 		return
@@ -3490,6 +3494,7 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 	var models []Model
 	var modes []Mode
 	var currentModel *string
+	var modelConfigID string
 	var currentMode *string
 	var modeConfigID string
 	var efforts []string
@@ -3513,6 +3518,7 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 		values, _ := opt["options"].([]any)
 		if id == "model" || category == "model" {
 			modelSeen = true
+			modelConfigID = strings.TrimSpace(id)
 			for _, rawValue := range values {
 				value := mapFromAny(rawValue)
 				modelID := asString(value["value"])
@@ -3594,6 +3600,9 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 		effectiveModel = ""
 	}
 	if modelSeen {
+		if modelConfigID != "" {
+			b.modelConfigID = modelConfigID
+		}
 		b.modelConfigValues = make(map[string]bool, len(models))
 		for _, model := range models {
 			b.modelConfigValues[strings.TrimSpace(model.ModelID)] = true
