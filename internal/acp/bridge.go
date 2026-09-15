@@ -89,6 +89,9 @@ type Bridge struct {
 	effortConfigID      string
 	modeConfigID        string
 	imageSupport        bool
+	// Keep the model option's wire values before UI catalog normalization.
+	// Collapsed effort variants in b.models are not necessarily writable IDs.
+	modelConfigValues map[string]bool
 	// Effort config options are model-specific. A present key with an empty
 	// slice means the adapter authoritatively omitted the effort axis for that
 	// model (Claude Haiku); absence means the model has not been observed yet.
