@@ -298,7 +298,10 @@ func TestStartupDetectProvidersRetriesOnlyStatusErrors(t *testing.T) {
 
 	providers := BuiltInProviderConfigs(root)
 	for i := range providers {
-		if providers[i].ID == "qwen" {
+		// This retry test owns only the fake Devin executable. OpenCode and
+		// OMP also discover absolute user-install paths outside the test PATH;
+		// keep their real catalogs out of this deterministic timing assertion.
+		if providers[i].ID == "qwen" || providers[i].ID == "opencode" || providers[i].ID == "omp" {
 			providers[i].DisabledByUser = true
 		}
 	}
