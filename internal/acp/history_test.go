@@ -19,8 +19,6 @@ func TestEnvironmentBriefIncludesChatArchivePath(t *testing.T) {
 	archivePath := filepath.Join(stateDir, "chat-archive", "<chatId>.jsonl")
 	if !strings.Contains(result, archivePath) ||
 		!strings.Contains(result, "{role, content, status, at}") ||
-		!strings.Contains(result, "to read another conversation the user references, read that file") ||
-		!strings.Contains(result, "reply in the language of the current human-authored user request") ||
 		!strings.Contains(result, expectedPerTurnLanguageRule) ||
 		!strings.Contains(result, "User request:\nread referenced chat") {
 		t.Fatalf("environment brief missing archive discovery paragraph:\n%s", result)
@@ -33,7 +31,6 @@ func TestEnvironmentBriefCurrentRequestLanguageUsesHumanRequest(t *testing.T) {
 	result := buildUserRequestBlock("Continue this work in English.", true)
 	rule := expectedPerTurnLanguageRule
 	if !strings.Contains(result, rule) ||
-		!strings.Contains(result, "restored transcripts") ||
 		!strings.Contains(result, "User request:\nContinue this work in English.") {
 		t.Fatalf("current-request language boundary is missing:\n%s", result)
 	}
@@ -62,7 +59,8 @@ func TestFirstInputInitialContextSeedIsIncludedOnce(t *testing.T) {
 	if !strings.Contains(firstResult, "one-time restored context seed") ||
 		!strings.Contains(firstResult, "User: earlier question") ||
 		!strings.Contains(firstResult, "Assistant: earlier answer") ||
-		!strings.Contains(firstResult, "User request:\ncurrent request") {
+		!strings.Contains(firstResult, "User request:\ncurrent request") ||
+		strings.Contains(firstResult, "without greeting") {
 		t.Fatalf("initial context seed was not separated from the current request:\n%s", firstResult)
 	}
 
@@ -85,8 +83,8 @@ func TestEnvironmentBriefIncludesActiveModelOnEveryTurn(t *testing.T) {
 	first := start("model-alpha", "what model are you?")
 	if !strings.Contains(first, `provider "mock"`) ||
 		!strings.Contains(first, `model "model-alpha"`) ||
-		!strings.Contains(first, "answer with this exact Workass runtime identity") ||
-		!strings.Contains(first, "User request:\nwhat model are you?") {
+		!strings.Contains(first, "User request:\nwhat model are you?") ||
+		strings.Contains(first, "When asked what model or agent you are") {
 		t.Fatalf("first turn missing active runtime identity:\n%s", first)
 	}
 

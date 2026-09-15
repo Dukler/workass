@@ -858,25 +858,17 @@ shell, NOT the daemon.
   mutable data root), with the env override honored by both and the legacy
   `~/.workass` location retained as a read fallback — never as a silently
   divergent default.
-- **Environment brief**: injected at ACP session seed AND prepended to
-  headless spawn prompts: app identity, available surfaces, user
-  presence, controller device, and the Show API instruction ("never open
-  OS windows to show the user something"). INTERNAL RECEIPTS (user law
-  2026-07-15): command/tool output remains in Workass's authoritative event
-  history and profile/build logs. The brief MUST tell providers not to echo
-  raw receipts or exhaustive file manifests into final answers; user-facing
-  handoffs summarize relevant command outcomes and disclose failures, skipped
-  checks, or uncertainty. Raw output is included only when the user explicitly
-  requests it or it is necessary to explain a failure. LANGUAGE PRECEDENCE
-  (user correction 2026-07-20): Workass-owned restore, replay, compaction,
-  maintenance, wake, tool, UI, and locale text is internal context and MUST
-  NEVER choose an agent's reply language. The language of the current
-  human-authored user request wins. This rule is repeated immediately before
-  every ACP turn, including already-seeded and provider-resumed sessions; a
-  Workass-generated notice continues in the language of the latest human
-  request unless that user explicitly asks for another language. All
-  Workass-owned prompt scaffolding and role labels are provider-neutral English,
-  and restored content is clearly delimited from the current request.
+- **Environment brief** (user law 2026-09-15, superseding the earlier
+  environment-prompt rules): use the user's minimal template to describe
+  Workass context, available tools, artifact delivery, and archive location.
+  Runtime identity and attachment counts are facts, not response directives.
+  Do not inject UI/external-browser prohibitions, delegation mandates,
+  greeting/continuation instructions, visualization workflow, or final-answer
+  style rules. One short language line precedes each current request; omit
+  duplicate language prose from the seed. Preserve current-human updater
+  authorization, exact targets, stable operation IDs, context-file secrecy,
+  and clearly delimited historical context. These prompt changes do not alter
+  tool permissions, provider-native instructions, or provider lifecycle.
 
 ## 5. Verification strategy (how lanes prove their work cheaply)
 

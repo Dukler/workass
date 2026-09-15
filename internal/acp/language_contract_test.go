@@ -39,10 +39,6 @@ func TestLocalizedWorkassToolCardCannotSelectHumanReplyLanguage(t *testing.T) {
 		strings.Count(prompt, "Workass agent coordinator is unavailable") != 1 {
 		t.Fatalf("tool-card evidence was lost or duplicated: %q", prompt)
 	}
-	if !strings.Contains(prompt[ruleAt:humanAt], "not human-authored language selection") ||
-		!strings.Contains(prompt[ruleAt:humanAt], "use the language of that prose") {
-		t.Fatalf("language boundary does not neutralize generated card text: %q", prompt[ruleAt:humanAt])
-	}
 }
 
 func TestOrdinaryMCPMentionIsNotMisclassifiedAsToolCard(t *testing.T) {
@@ -56,6 +52,9 @@ func TestOrdinaryMCPMentionIsNotMisclassifiedAsToolCard(t *testing.T) {
 
 func assertPerTurnLanguageBoundary(t *testing.T, prompt, request string) {
 	t.Helper()
+	if strings.Count(prompt, expectedPerTurnLanguageRule) != 1 || strings.Contains(prompt, "Language rule:") {
+		t.Fatalf("language guidance must appear once per turn: %q", prompt)
+	}
 	ruleAt := strings.LastIndex(prompt, expectedPerTurnLanguageRule)
 	requestAt := strings.LastIndex(prompt, "User request:\n"+request)
 	if ruleAt < 0 || requestAt < 0 || ruleAt > requestAt {

@@ -191,7 +191,7 @@ func agentMCPTools() []map[string]any {
 		tool("workass_cancel_subagent", "Cancel one tracked subagent owned by the current Workass turn.", mutationObject(map[string]any{
 			"subagent_id": str("Subagent id returned by spawn/list."),
 		}, "subagent_id"), false, true, false, false),
-		tool("workass_decide_subagent_permission", "Answer a permission request from one of your tracked subagents rather than leaving it parked on a human. You may always deny; you may allow only what this chat's own mode already does without asking.", mutationObject(map[string]any{
+		tool("workass_decide_subagent_permission", "Allow or deny a permission request from one of your tracked subagents. Allowed actions are limited to this chat's current permission mode.", mutationObject(map[string]any{
 			"subagent_id": str("Subagent id reported with needsAttention by wait/list."),
 			"decision":    enum("Allow or deny the action the subagent asked to take.", "allow", "deny"),
 		}, "subagent_id", "decision"), false, true, false, false),

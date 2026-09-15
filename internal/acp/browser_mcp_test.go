@@ -23,8 +23,6 @@ func TestConfiguredBrowserPromptIsAdjacentToEveryTopLevelTurn(t *testing.T) {
 			"workass_browser_list",
 			"workass_browser_snapshot",
 			"then call it",
-			"report the exact Workass tool error",
-			"do not ask the user to remind you to use Workass",
 		} {
 			if !strings.Contains(prompt[ruleAt:requestAt], want) {
 				t.Fatalf("per-turn browser rule missing %q: %q", want, prompt[ruleAt:requestAt])
