@@ -271,7 +271,7 @@ func main() {
 		os.Exit(1)
 	}
 	chatControl := newChatControlCoordinator(acpManager, hub.Broadcast, providerChats)
-	artifactHosting, err := artifacthost.New(stateDir, "https://"+net.JoinHostPort("127.0.0.1", strconv.Itoa(*port)))
+	artifactHosting, err := artifacthost.New(stateDir, "https://"+net.JoinHostPort("127.0.0.1", strconv.Itoa(*port)), identity.MachineID)
 	if err != nil {
 		acpManager.Reset()
 		logger.Printf("[workass] initialize artifact hosting: %v", err)

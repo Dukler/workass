@@ -25,7 +25,7 @@ function assistantMediaResolver(tabId: string, images: MessageImage[] | undefine
       const image = bySource.get(normalizeMarkdownTarget(target));
       return image ? { src: messageImageSrc(image), alt: image.name || 'Imagen' } : null;
     },
-    resolveLink: (target) => connectedArtifactURL(artifactOrigin, target),
+    resolveLink: (target) => connectedArtifactURL(artifactOrigin, target, undefined, undefined, store.localMachineId()),
     openLink: (target) => store.openHostedArtifact(tabId, target, artifactOrigin),
     open: (media) => store.openImageLightbox(media.src, media.alt),
   };

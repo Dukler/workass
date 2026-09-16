@@ -213,6 +213,7 @@ type Registry struct {
 	receiptMu sync.Mutex
 	path      string
 	origin    string
+	machineID string
 	artifacts map[string]artifactRecord
 	now       func() time.Time
 	logf      func(string, ...any)
@@ -249,7 +250,11 @@ func (r *Registry) noteWithheld(id, path, reason string) {
 	logf("[workass] artifact %s withheld %s: %s", id, displayName(path), reason)
 }
 
-func New(stateDir, origin string) (*Registry, error) {
+// New accepts an optional persistent machine identity. When present, public
+// registrations use the owner-qualified canonical route and omit LocalURL.
+// The variadic form preserves the old two-argument callers and their legacy
+// output.
+func New(stateDir, origin string, machineIDs ...string) (*Registry, error) {
 	stateDir = strings.TrimSpace(stateDir)
 	if stateDir == "" {
 		return nil, errors.New("artifact hosting state directory is empty")
@@ -262,6 +267,12 @@ func New(stateDir, origin string) (*Registry, error) {
 		origin:    strings.TrimRight(strings.TrimSpace(origin), "/"),
 		artifacts: make(map[string]artifactRecord),
 		now:       time.Now,
+	}
+	if len(machineIDs) > 0 {
+		registry.machineID = strings.TrimSpace(machineIDs[0])
+		if registry.machineID != "" && safeID(registry.machineID) != registry.machineID {
+			return nil, errors.New("artifact hosting machine identity is invalid")
+		}
 	}
 	_, err := registry.loadPath(registry.path)
 	if err != nil {
@@ -552,14 +563,18 @@ func (r *Registry) commit(record artifactRecord, receiptKey string, withheld []W
 		registration := r.registration(record)
 		registration.Withheld = append([]WithheldAsset(nil), withheld...)
 		registration.WithheldMore = withheldMore
-		localURL := registration.LocalURL
-		record.Receipts = append(record.Receipts, artifactReceipt{
+		receipt := artifactReceipt{
 			Key: receiptKey, ID: record.ID, Label: record.Label, Entry: record.Entry, Kind: record.Kind,
-			ContentType: registration.ContentType, URLPath: registration.URLPath, LocalURL: &localURL,
+			ContentType: registration.ContentType, URLPath: registration.URLPath,
 			Markdown:  registration.Markdown,
 			CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
 			Withheld: append([]WithheldAsset(nil), withheld...), WithheldMore: withheldMore,
-		})
+		}
+		if r.machineID == "" {
+			localURL := registration.LocalURL
+			receipt.LocalURL = &localURL
+		}
+		record.Receipts = append(record.Receipts, receipt)
 	}
 	previous, existed := r.artifacts[record.ID]
 	r.artifacts[record.ID] = record
@@ -604,24 +619,11 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		http.Error(w, "bad path", http.StatusBadRequest)
 		return
 	}
-	prefix := artifactPathPrefix(requestPath)
-	if prefix == "" {
+	prefix, owner, id, rest, ok := parseArtifactPath(requestPath)
+	if !ok || (owner != "" && owner != r.machineID) {
 		http.NotFound(w, request)
 		return
 	}
-	rest := strings.TrimPrefix(requestPath, prefix)
-	if rest == "" || rest == "/" {
-		http.NotFound(w, request)
-		return
-	}
-	rest = strings.TrimPrefix(rest, "/")
-	parts := strings.SplitN(rest, "/", 2)
-	id := parts[0]
-	if id == "" {
-		http.NotFound(w, request)
-		return
-	}
-
 	r.mu.RLock()
 	record, ok := r.artifacts[id]
 	r.mu.RUnlock()
@@ -629,7 +631,7 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		http.NotFound(w, request)
 		return
 	}
-	if len(parts) == 1 {
+	if rest == "" {
 		target := prefix + "/" + id + "/"
 		if request.URL.RawQuery != "" {
 			target += "?" + request.URL.RawQuery
@@ -637,8 +639,7 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		http.Redirect(w, request, target, http.StatusTemporaryRedirect)
 		return
 	}
-
-	rel := parts[1]
+	rel := strings.TrimPrefix(rest, "/")
 	if rel == "" {
 		rel = record.Entry
 	} else if strings.HasSuffix(rel, "/") {
@@ -691,6 +692,46 @@ func artifactPathPrefix(path string) string {
 	return ""
 }
 
+// parseArtifactPath accepts the old /artifacts/<id>/... route and the
+// owner-qualified /artifacts/@<machine>/<id>/... route. It validates the
+// identity and artifact segments before any path cleaning or normalization.
+func parseArtifactPath(path string) (prefix, owner, id, rest string, ok bool) {
+	if path == PathPrefix || !strings.HasPrefix(path, PathPrefix+"/") {
+		return "", "", "", "", false
+	}
+	remaining := strings.TrimPrefix(path, PathPrefix+"/")
+	if strings.HasPrefix(remaining, "@") {
+		ownerPart, afterOwner, hasOwnerSlash := strings.Cut(remaining, "/")
+		if !hasOwnerSlash || len(ownerPart) < 2 || safeID(ownerPart[1:]) != ownerPart[1:] {
+			return "", "", "", "", false
+		}
+		owner = ownerPart[1:]
+		remaining = afterOwner
+		prefix = PathPrefix + "/@" + owner
+	} else {
+		prefix = PathPrefix
+	}
+	id, tail, hasSlash := strings.Cut(remaining, "/")
+	if hasSlash {
+		rest = "/" + tail
+	}
+	if safeID(id) != id || id == "" {
+		return "", "", "", "", false
+	}
+	return prefix, owner, id, rest, true
+}
+
+func validReceiptURLPath(path, id, machineID string) bool {
+	if strings.Contains(path, "://") {
+		return false
+	}
+	legacy := PathPrefix + "/" + id + "/"
+	if path == legacy {
+		return true
+	}
+	return machineID != "" && path == PathPrefix+"/@"+machineID+"/"+id+"/"
+}
+
 func artifactContentType(path string) string {
 	extension := strings.ToLower(filepath.Ext(path))
 	if contentType := artifactMIMEByExtension[extension]; contentType != "" {
@@ -724,13 +765,13 @@ func (r *Registry) registrationFromReceipt(receipt artifactReceipt) Registration
 	if receipt.ContentType != "" {
 		registration.ContentType = receipt.ContentType
 	}
-	if receipt.URLPath != "" {
+	if r.machineID == "" && receipt.URLPath != "" {
 		registration.URLPath = receipt.URLPath
 	}
-	if receipt.LocalURL != nil {
+	if r.machineID == "" && receipt.LocalURL != nil {
 		registration.LocalURL = *receipt.LocalURL
 	}
-	if receipt.Markdown != "" {
+	if r.machineID == "" && receipt.Markdown != "" {
 		registration.Markdown = receipt.Markdown
 	}
 	registration.Withheld = append([]WithheldAsset(nil), receipt.Withheld...)
@@ -740,8 +781,11 @@ func (r *Registry) registrationFromReceipt(receipt artifactReceipt) Registration
 
 func (r *Registry) registrationFields(id, label, kind, entry, createdAt, updatedAt string) Registration {
 	path := PathPrefix + "/" + id + "/"
+	if r.machineID != "" {
+		path = PathPrefix + "/@" + r.machineID + "/" + id + "/"
+	}
 	localURL := ""
-	if r.origin != "" {
+	if r.origin != "" && r.machineID == "" {
 		localURL = r.origin + path
 	}
 	return Registration{
@@ -801,7 +845,7 @@ func (r *Registry) loadPath(path string) (bool, error) {
 	}
 	records := stored.Artifacts
 	for _, record := range records {
-		if !validStoredRecord(record) {
+		if !r.validStoredRecord(record) {
 			return false, fmt.Errorf("invalid artifact hosting registry record %q", record.ID)
 		}
 		r.artifacts[record.ID] = record
@@ -844,7 +888,7 @@ func (r *Registry) persistLocked() error {
 	return nil
 }
 
-func validStoredRecord(record artifactRecord) bool {
+func (r *Registry) validStoredRecord(record artifactRecord) bool {
 	if record.ID == "" || record.ID != safeID(record.ID) || record.Label == "" ||
 		!filepath.IsAbs(record.SourcePath) || !filepath.IsAbs(record.RootPath) ||
 		(record.Kind != "file" && record.Kind != "directory") {
@@ -872,7 +916,7 @@ func validStoredRecord(record artifactRecord) bool {
 			return false
 		}
 		if (receipt.ContentType != "" && !validReceiptField(receipt.ContentType)) ||
-			(receipt.URLPath != "" && (receipt.URLPath != PathPrefix+"/"+record.ID+"/" || strings.Contains(receipt.URLPath, "://"))) ||
+			(receipt.URLPath != "" && !validReceiptURLPath(receipt.URLPath, record.ID, r.machineID)) ||
 			(receipt.LocalURL != nil && !validReceiptField(*receipt.LocalURL)) ||
 			(receipt.Markdown != "" && !validReceiptField(receipt.Markdown)) ||
 			len(receipt.Withheld) > maxWithheldReported || receipt.WithheldMore < 0 || receipt.WithheldMore > maxInspectedEntries {
@@ -885,6 +929,11 @@ func validStoredRecord(record artifactRecord) bool {
 		}
 	}
 	return true
+}
+
+// validStoredRecord preserves the original helper name for package callers.
+func validStoredRecord(record artifactRecord) bool {
+	return (&Registry{}).validStoredRecord(record)
 }
 
 func validReceiptField(value string) bool {

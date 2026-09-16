@@ -6,7 +6,7 @@ import { installWorkassArtifactsBridge } from '../src/connected-artifacts.ts';
 const require = createRequire(import.meta.url);
 const { createConnectedArtifactBridge } = require('../../shell/connected-artifacts.js');
 
-test('HTTP bridge and frozen preload contract stream binary through exact machine RPC', async (t) => {
+for (const local of [false, true]) test(`HTTP bridge streams binary through exact ${local ? 'local' : 'remote'} machine RPC`, async (t) => {
   let onRequest: (payload: any) => void = () => {};
   let onCancel: (payload: any) => void = () => {};
   const mainFrame = {};
@@ -35,8 +35,16 @@ test('HTTP bridge and frozen preload contract stream binary through exact machin
     offset += chunk.length;
     return { bodyBase64: chunk.toString('base64'), eof: offset === expected.length };
   } } as any;
+  const localAPI = {
+    artifactConnectionGeneration: () => 1,
+    artifactOpen: (payload: any) => link.invoke('artifact:open', payload),
+    artifactRead: (payload: any) => link.invoke('artifact:read', payload),
+    artifactClose: (payload: any) => link.invoke('artifact:close', payload),
+  };
   const dispose = installWorkassArtifactsBridge({
-    linkFor: (id) => { assert.equal(id, 'remote'); return link; },
+    local: () => localAPI,
+    localMachineId: () => local ? 'remote' : 'other',
+    linkFor: (id) => { assert.equal(local, false, 'local reads must not require a remote peer'); assert.equal(id, 'remote'); return link; },
     ownsLink: (id, current) => id === 'remote' && current === link,
   }, {
     supported: true,
@@ -45,7 +53,7 @@ test('HTTP bridge and frozen preload contract stream binary through exact machin
     reply: async (payload) => bridge.reply({ sender: webContents, senderFrame: mainFrame }, payload),
   });
   t.after(() => { dispose(); bridge.close(); server.closeAllConnections(); server.close(); });
-  const path = `${origin}/workass/connected-artifacts/remote/report/data.bin?version=1`;
+  const path = `${origin}/workass/artifacts/@remote/report/data.bin?version=1`;
   const denied = await fetch(path);
   assert.equal(denied.status, 403);
   assert.deepEqual(calls, []);

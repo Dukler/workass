@@ -13,6 +13,125 @@ import (
 	"testing"
 )
 
+func TestCanonicalArtifactOwnershipPersistenceAndLegacyUpgrade(t *testing.T) {
+	stateDir, workspace := t.TempDir(), t.TempDir()
+	site := filepath.Join(workspace, "site")
+	if err := os.Mkdir(site, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(site, "index.html"), []byte(`<link rel="stylesheet" href="css/site.css">ok`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(site, "css"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(site, "css", "site.css"), []byte("body{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := New(stateDir, "http://127.0.0.1:8788")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyReceipt, err := legacy.RegisterForOperation(RegisterOptions{BaseDir: workspace, SourcePath: "site"}, "legacy-op", strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(legacyReceipt.URLPath, PathPrefix+"/") || strings.Contains(legacyReceipt.URLPath, "/@") {
+		t.Fatalf("legacy URL = %q", legacyReceipt.URLPath)
+	}
+	reg, err := New(stateDir, "http://127.0.0.1:8788", "m-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := reg.ReadOperation("legacy-op", strings.Repeat("a", 64))
+	if err != nil || !found {
+		t.Fatalf("legacy readback found=%v err=%v", found, err)
+	}
+	if got.URLPath != PathPrefix+"/@m-owner/"+got.ID+"/" || got.LocalURL != "" || !strings.Contains(got.Markdown, got.URLPath) {
+		t.Fatalf("canonical readback = %#v", got)
+	}
+	server := httptest.NewServer(reg)
+	defer server.Close()
+	response, err := http.Get(server.URL + got.URLPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("canonical root status=%d", response.StatusCode)
+	}
+	css, err := http.Get(server.URL + got.URLPath + "css/site.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer css.Body.Close()
+	if css.StatusCode != http.StatusOK {
+		t.Fatalf("nested CSS status=%d", css.StatusCode)
+	}
+	wrong, err := http.Get(server.URL + PathPrefix + "/@other/" + got.ID + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wrong.Body.Close()
+	if wrong.StatusCode != http.StatusNotFound {
+		t.Fatalf("wrong owner status=%d", wrong.StatusCode)
+	}
+	missing := httptest.NewRecorder()
+	reg.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, PathPrefix+"/missing-id", nil))
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing id status=%d", missing.Code)
+	}
+	legacyURL := PathPrefix + "/" + got.ID + "/"
+	legacyResponse, err := http.Get(server.URL + legacyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacyResponse.Body.Close()
+	if legacyResponse.StatusCode != http.StatusOK {
+		t.Fatalf("legacy route status=%d", legacyResponse.StatusCode)
+	}
+	head := httptest.NewRecorder()
+	reg.ServeHTTP(head, httptest.NewRequest(http.MethodHead, got.URLPath, nil))
+	if head.Code != http.StatusOK || head.Body.Len() != 0 || head.Header().Get("Content-Type") == "" {
+		t.Fatalf("canonical HEAD = status %d body %d headers %#v", head.Code, head.Body.Len(), head.Header())
+	}
+	ranged := httptest.NewRecorder()
+	rangeRequest := httptest.NewRequest(http.MethodGet, got.URLPath, nil)
+	rangeRequest.Header.Set("Range", "bytes=0-4")
+	reg.ServeHTTP(ranged, rangeRequest)
+	if ranged.Code != http.StatusPartialContent || ranged.Body.String() != "<link" {
+		t.Fatalf("canonical range = status %d body %q", ranged.Code, ranged.Body.String())
+	}
+
+	canonicalState := t.TempDir()
+	canonical, err := New(canonicalState, "http://127.0.0.1:8788", "m-canonical")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := canonical.RegisterForOperation(RegisterOptions{BaseDir: workspace, SourcePath: "site"}, "canonical-op", strings.Repeat("b", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := canonical.RegisterForOperation(RegisterOptions{BaseDir: workspace, SourcePath: "site"}, "canonical-op", strings.Repeat("b", 64))
+	if err != nil || !reflect.DeepEqual(replay, first) {
+		t.Fatalf("canonical replay = %#v err=%v first=%#v", replay, err, first)
+	}
+	reloaded, err := New(canonicalState, "http://different-origin.invalid", "m-canonical")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readback, found, err := reloaded.ReadOperation("canonical-op", strings.Repeat("b", 64))
+	if err != nil || !found || !reflect.DeepEqual(readback, first) {
+		t.Fatalf("canonical reload = %#v found=%v err=%v first=%#v", readback, found, err, first)
+	}
+}
+
+func TestCanonicalRegistryRejectsMalformedMachineIdentity(t *testing.T) {
+	if _, err := New(t.TempDir(), "", "bad/owner"); err == nil {
+		t.Fatal("malformed machine identity accepted")
+	}
+}
+
 func TestRegisterStandaloneArtifactsReturnsStableLiveURLs(t *testing.T) {
 	stateDir := t.TempDir()
 	workspace := t.TempDir()

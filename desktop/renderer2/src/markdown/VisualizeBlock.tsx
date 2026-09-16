@@ -92,7 +92,7 @@ export function VisualizeBlock({
   }, [tabId, chatId, error, spec, attempt]);
 
   const wide = spec?.mode === 'wide';
-  const artifactURL = state.phase === 'ready' ? connectedArtifactURL(artifactOrigin ?? '', state.registration.urlPath) : '';
+  const artifactURL = state.phase === 'ready' ? connectedArtifactURL(artifactOrigin ?? '', state.registration.urlPath, undefined, undefined, store.localMachineId()) : '';
   const unavailable = state.phase === 'ready' && !artifactURL;
   return (
     <section className={`visualize-card${wide ? ' visualize-wide' : ''}`} aria-label={title}>

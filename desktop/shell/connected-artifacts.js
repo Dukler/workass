@@ -21,18 +21,32 @@ function validPart(value) {
 
 function parseArtifactURL(url) {
   const rawURL = String(url || '');
-  const rawPath = rawURL.split('?')[0];
-  if (/%(?:2e|2f|5c)/iu.test(rawPath) || rawPath.split('/').some((part) => part === '..' || part.includes('\\'))) return null;
+  const rawPath = rawURL.split(/[?#]/u)[0];
+  if (/[\\\r\n\0]/u.test(rawPath) || /%(?:2e|2f|5c)/iu.test(rawPath)
+    || rawPath.split('/').some((part) => part === '.' || part === '..')) return null;
   const parsed = new URL(rawURL, 'http://127.0.0.1');
-  const prefix = '/workass/connected-artifacts/';
+  const legacyPrefix = '/workass/connected-artifacts/';
+  const canonicalPrefix = '/workass/artifacts/';
+  const canonical = parsed.pathname.startsWith(canonicalPrefix);
+  const prefix = canonical ? canonicalPrefix : legacyPrefix;
   if (!parsed.pathname.startsWith(prefix)) return null;
   const rest = parsed.pathname.slice(prefix.length).split('/');
-  if (rest.length < 2 || !validPart(rest[0]) || !validPart(rest[1])) return null;
+  let machineId;
+  if (canonical) {
+    machineId = String(rest[0] || '').slice(1);
+    if (!String(rest[0] || '').startsWith('@') || !validPart(machineId)) return null;
+  } else {
+    if (!validPart(rest[0])) return null;
+    machineId = rest[0];
+  }
+  if (!validPart(rest[1])) return null;
+  const artifactId = rest[1];
   const tail = rest.slice(2);
   if (tail.some((part, index) => (index !== tail.length - 1 && !part) || part === '.' || part === '..' || part.includes('\\'))) return null;
   return {
-    machineId: rest[0], artifactId: rest[1],
-    path: `/workass/artifacts/${rest[1]}${tail.length ? `/${tail.join('/')}` : ''}${parsed.search}`,
+    machineId, artifactId,
+    path: `/workass/artifacts/${artifactId}${tail.length ? `/${tail.join('/')}` : ''}${parsed.search}`,
+    routeFamily: canonical ? 'canonical' : 'legacy',
   };
 }
 
@@ -75,9 +89,8 @@ function sameOrigin(a, origin) {
 // from borrowing the bridge capability for fetches or subresources.
 function shouldInjectArtifactHeader(details, { origin, targetURL, owned, authorizedNavigation } = {}) {
   if (!details || typeof owned !== 'function' || !owned(details.webContents)) return false;
-  let targetPath;
-  try { targetPath = new URL(targetURL).pathname; } catch { return false; }
-  if (!sameOrigin(targetURL, origin) || !targetPath.startsWith('/workass/connected-artifacts/')) return false;
+  try { new URL(targetURL); } catch { return false; }
+  if (!sameOrigin(targetURL, origin) || !parseArtifactURL(targetURL)) return false;
   if (details.resourceType === 'mainFrame' && authorizedNavigation?.(details.webContents, targetURL)) return true;
   let frame = details.frame;
   if (!frame) return false;
@@ -171,7 +184,10 @@ function createConnectedArtifactBridge({ win, viewServer, getOwnedWebContents, t
         if (redirected.origin !== 'http://artifact.invalid'
           || !redirected.pathname.startsWith(`/workass/artifacts/${target.artifactId}/`)) throw new Error('invalid artifact redirect');
         const suffix = redirected.pathname.slice('/workass/artifacts/'.length);
-        const route = `/workass/connected-artifacts/${target.machineId}/${suffix}${redirected.search}`;
+        const routePrefix = target.routeFamily === 'canonical'
+          ? `/workass/artifacts/@${target.machineId}/`
+          : `/workass/connected-artifacts/${target.machineId}/`;
+        const route = `${routePrefix}${suffix}${redirected.search}${redirected.hash}`;
         if (!parseArtifactURL(route)) throw new Error('invalid artifact redirect');
         headers.location = route;
       }

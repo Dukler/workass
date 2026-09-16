@@ -18,9 +18,20 @@ function fixture(viewURL = 'http://127.0.0.1:32123') {
 test('artifact URL parsing rejects traversal and retains query', () => {
   assert.deepEqual(parseArtifactURL('/workass/connected-artifacts/m1/a1/css/main.css?v=2'), {
     machineId: 'm1', artifactId: 'a1', path: '/workass/artifacts/a1/css/main.css?v=2',
+    routeFamily: 'legacy',
   });
+  assert.deepEqual(parseArtifactURL('/workass/artifacts/@m1/a1/css/main.css?v=2#x'), {
+    machineId: 'm1', artifactId: 'a1', path: '/workass/artifacts/a1/css/main.css?v=2',
+    routeFamily: 'canonical',
+  });
+  assert.equal(parseArtifactURL('/workass/artifacts/m1/a1/file'), null);
+  assert.equal(parseArtifactURL('/workass/artifacts/@./a1/file'), null);
+  assert.equal(parseArtifactURL('/workass/artifacts/@../a1/file'), null);
+  assert.equal(parseArtifactURL('/workass/artifacts/@m1/../secret'), null);
   assert.equal(parseArtifactURL('/workass/connected-artifacts/m1/a1/../secret'), null);
   assert.equal(parseArtifactURL('/workass/connected-artifacts/m1/a1/%2e%2e/secret'), null);
+  assert.equal(parseArtifactURL('/workass/artifacts/@m1/a1/%2fsecret'), null);
+  assert.equal(parseArtifactURL('/workass/artifacts/@m1/a1/..%2fsecret'), null);
 });
 
 test('request and response headers are narrowly allowlisted', () => {
@@ -74,24 +85,61 @@ test('timeout rejects and late replies are discarded', async () => {
 test('oversized or malformed chunks fail safely', async () => {
   const { bridge, sent, wc } = fixture();
   const req = new EventEmitter(); req.method = 'GET'; req.url = '/workass/connected-artifacts/m/a/x'; req.headers = { host: '127.0.0.1:32123', 'x-workass-artifact-access': bridge.capability }; req.socket = { remoteAddress: '127.0.0.1' };
-  const res = new EventEmitter(); res.headersSent = false; res.writableEnded = false; res.writeHead = (s) => { res.status = s; res.headersSent = true; }; res.end = () => { res.writableEnded = true; };
+  const res = new EventEmitter(); res.headersSent = false; res.writableEnded = false; res.writeHead = (s) => { res.status = s; res.headersSent = true; }; res.end = () => { res.writableEnded = true; }; res.destroy = () => { res.destroyed = true; };
   const running = bridge.handle(req, res); await new Promise((r) => setTimeout(r, 20));
-  bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: sent[0].requestId, ok: true, status: 200, transferId: 't' });
+  bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: sent[0].requestId, ok: true, status: 200, headers: {}, transferId: 't' });
   await new Promise((r) => setTimeout(r, 20));
   bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: sent[1].requestId, ok: true, bodyBase64: Buffer.alloc(128 * 1024 + 1).toString('base64'), eof: false });
-  await running; assert.equal(res.status, 503); bridge.close();
+  await new Promise((r) => setTimeout(r, 20));
+  const close = sent.find((item) => item.op === 'close'); assert.ok(close);
+  bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: close.requestId, ok: true });
+  await running; assert.equal(res.destroyed, true); bridge.close();
 });
 
 test('HEAD never requests a body and closes its transfer', async () => {
   const { bridge, sent, wc } = fixture();
   const req = new EventEmitter(); req.method = 'HEAD'; req.url = '/workass/connected-artifacts/m/a/x'; req.headers = { host: '127.0.0.1:32123', 'x-workass-artifact-access': bridge.capability }; req.socket = { remoteAddress: '127.0.0.1' };
-  const res = new EventEmitter(); res.headersSent = false; res.writableEnded = false; res.writeHead = (s) => { res.status = s; res.headersSent = true; }; res.end = () => { res.writableEnded = true; };
+  const res = new EventEmitter(); res.headersSent = false; res.writableEnded = false; res.writeHead = (s) => { res.status = s; res.headersSent = true; }; res.end = () => { res.writableEnded = true; }; res.destroy = () => { res.destroyed = true; };
   const running = bridge.handle(req, res); await new Promise((r) => setTimeout(r, 20));
-  bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: sent[0].requestId, ok: true, status: 200, transferId: 't' });
+  bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: sent[0].requestId, ok: true, status: 200, headers: {}, transferId: 't' });
   await new Promise((r) => setTimeout(r, 20));
   const close = sent.find((x) => x.op === 'close'); assert.ok(close);
   bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: close.requestId, ok: true });
-  await running; assert.equal(sent.some((x) => x.op === 'read'), false); bridge.close();
+  await running; assert.equal(res.status, 200); assert.equal(sent.some((x) => x.op === 'read'), false); bridge.close();
+});
+
+test('redirects preserve canonical or legacy family, owner, query, and fragment', async () => {
+  async function check(route, family, expectedPath) {
+    const { bridge, sent, wc } = fixture();
+    const req = new EventEmitter(); req.method = 'GET'; req.url = route;
+    req.headers = { host: '127.0.0.1:32123', 'x-workass-artifact-access': bridge.capability };
+    req.socket = { remoteAddress: '127.0.0.1' };
+    const res = new EventEmitter(); res.headersSent = false; res.writableEnded = false;
+    res.writeHead = (status, headers) => { res.status = status; res.headers = headers; res.headersSent = true; };
+    res.write = () => true; res.end = () => { res.writableEnded = true; };
+    const running = bridge.handle(req, res);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const open = sent.find((item) => item.op === 'open'); assert.ok(open);
+    assert.equal(open.machineId, 'm1'); assert.equal(open.path, expectedPath);
+    bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, {
+      requestId: open.requestId, ok: true, status: 302, transferId: 'redirect',
+      headers: { Location: '/workass/artifacts/a1/index.html?next=1#fragment' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const read = sent.find((item) => item.op === 'read'); assert.ok(read);
+    bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: read.requestId, ok: true, bodyBase64: '', eof: true });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const close = sent.find((item) => item.op === 'close'); assert.ok(close);
+    bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: close.requestId, ok: true });
+    await running;
+    assert.equal(res.status, 302);
+    assert.equal(res.headers.location, family === 'canonical'
+      ? '/workass/artifacts/@m1/a1/index.html?next=1#fragment'
+      : '/workass/connected-artifacts/m1/a1/index.html?next=1#fragment');
+    bridge.close();
+  }
+  await check('/workass/artifacts/@m1/a1/index.html', 'canonical', '/workass/artifacts/a1/index.html');
+  await check('/workass/connected-artifacts/m1/a1/index.html', 'legacy', '/workass/artifacts/a1/index.html');
 });
 
 test('aborting one request does not cancel another transfer', async () => {
