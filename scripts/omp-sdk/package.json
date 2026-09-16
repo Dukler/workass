@@ -1,0 +1,8 @@
+{
+  "name": "workass-omp-sdk-staging",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.1.8"
+  }
+}

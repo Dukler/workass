@@ -4154,6 +4154,10 @@ func installWireNativeFrontierFixtures(t *testing.T, root, dir string) {
 	t.Setenv("WORKASS_NODE", node)
 	t.Setenv("WORKASS_CLAUDE_SDK_MODULE", filepath.Join(root, "desktop", "acp", "mock-claude-agent-sdk.mjs"))
 	t.Setenv("WORKASS_CODEX_APP_SERVER_ARGS", string(appServerArgs))
+	t.Setenv("WORKASS_BUN", node)
+	t.Setenv("WORKASS_OMP_HOST", filepath.Join(root, "scripts", "omp-native-host.mjs"))
+	t.Setenv("WORKASS_OMP_SDK_MODULE", filepath.Join(root, "desktop", "acp", "mock-omp-sdk.mjs"))
+	t.Setenv("WORKASS_OMP_FIXTURE_DIR", t.TempDir())
 }
 
 func installWireBlockingFakeAgentWrapper(t *testing.T, dir, name, startedPath, releasePath string) {
