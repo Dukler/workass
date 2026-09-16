@@ -272,6 +272,7 @@ func (p Plan) writeReceipt(phase, step, message string, installed bool) error {
 
 func ownedFiles(p Plan, root *os.Root, incoming []string) ([]string, error) {
 	files := make(map[string]string)
+	checked := make(map[string]bool)
 	prior := inventory{}
 	err := readJSON(filepath.Join(p.InstallTarget, inventoryName), 16<<20, &prior)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -288,7 +289,11 @@ func ownedFiles(p Plan, root *os.Root, incoming []string) ([]string, error) {
 		// symlink, even if that link happens to resolve inside the install root.
 		parts := strings.Split(name, "/")
 		for i := range parts {
-			stat, e := root.Lstat(filepath.Join(parts[:i+1]...))
+			relative := filepath.Join(parts[:i+1]...)
+			if i < len(parts)-1 && checked[relative] {
+				continue
+			}
+			stat, e := root.Lstat(relative)
 			if errors.Is(e, os.ErrNotExist) {
 				break
 			}
@@ -300,6 +305,7 @@ func ownedFiles(p Plan, root *os.Root, incoming []string) ([]string, error) {
 				(i == len(parts)-1 && !stat.Mode().IsRegular()) {
 				return nil, errors.New("application file path conflicts with an existing directory or link")
 			}
+			checked[relative] = stat.IsDir()
 		}
 		files[strings.ToLower(name)] = name
 	}
@@ -334,10 +340,18 @@ type operations struct {
 	waitShell func() error
 	waitFiles func(string, []string) error
 	launch    func(string) error
+	status    func(string)
+}
+
+func (ops operations) report(step string) {
+	if ops.status != nil {
+		ops.status(step)
+	}
 }
 
 func replace(p Plan, archive *payload, ops operations) (err error) {
 	step, installed := "waiting_for_shutdown", false
+	ops.report(step)
 	defer func() {
 		if err != nil {
 			err = errors.Join(err, p.writeReceipt("failed", step, err.Error(), installed))
@@ -347,6 +361,11 @@ func replace(p Plan, archive *payload, ops operations) (err error) {
 		return err
 	}
 	if err = ops.waitShell(); err != nil {
+		return err
+	}
+	step = "checking_paths"
+	ops.report(step)
+	if err = p.writeReceipt("activating", step, "", false); err != nil {
 		return err
 	}
 	root, err := os.OpenRoot(p.InstallTarget)
@@ -363,6 +382,11 @@ func replace(p Plan, archive *payload, ops operations) (err error) {
 	}
 	// Check every file before deleting any. A surviving provider or antivirus
 	// lock causes a clean failure, never a process kill or a blind partial purge.
+	step = "waiting_for_files"
+	ops.report(step)
+	if err = p.writeReceipt("activating", step, "", false); err != nil {
+		return err
+	}
 	if err = ops.waitFiles(p.InstallTarget, names); err != nil {
 		return err
 	}
@@ -370,6 +394,7 @@ func replace(p Plan, archive *payload, ops operations) (err error) {
 		return err
 	}
 	step = "replacing_files"
+	ops.report(step)
 	if err = p.writeReceipt("activating", step, "", false); err != nil {
 		return err
 	}
@@ -379,6 +404,7 @@ func replace(p Plan, archive *payload, ops operations) (err error) {
 		}
 	}
 	step = "extracting_zip"
+	ops.report(step)
 	if err = p.writeReceipt("activating", step, "", false); err != nil {
 		return err
 	}
@@ -400,6 +426,7 @@ func replace(p Plan, archive *payload, ops operations) (err error) {
 	inventoryErr := atomicJSON(filepath.Join(p.InstallTarget, inventoryName), inventory{1, p.InstallationID, archive.names})
 	installed = true
 	step = "launching"
+	ops.report(step)
 	// Record completed replacement before launching. The new shell never
 	// resumes this installer or interprets normal provider startup as failure.
 	return errors.Join(inventoryErr, launchInstalled(p, ops.launch))
@@ -446,7 +473,7 @@ func committed(input io.Reader, timeout time.Duration) bool {
 
 // Run arms the incoming native binary, then waits for one explicit commit on
 // stdin. EOF/timeout means no installation. There is no restart/retry loop.
-func Run(planPath string, input io.Reader, output io.Writer) error {
+func Run(planPath string, input io.Reader, output io.Writer) (err error) {
 	if err := supportedPlatform(); err != nil {
 		return err
 	}
@@ -480,5 +507,8 @@ func Run(planPath string, input io.Reader, output io.Writer) error {
 	if !committed(input, 30*time.Second) {
 		return p.writeReceipt("failed", "waiting_for_commit", "installation was not committed; application files unchanged", false)
 	}
+	status, finish := installerUI(p.TargetVersion)
+	defer func() { finish(err) }()
+	ops.status = status
 	return replace(p, archive, ops)
 }

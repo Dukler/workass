@@ -57,32 +57,26 @@ func platformOperations(p Plan) (operations, func(), error) {
 	}, func() { syscall.CloseHandle(handle) }, nil
 }
 
-func waitForFiles(root string, names []string) error {
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		var blocked error
-		for _, name := range names {
-			file := filepath.Join(root, filepath.FromSlash(name))
-			pointer, err := syscall.UTF16PtrFromString(file)
-			if err != nil {
-				return err
-			}
-			h, err := syscall.CreateFile(pointer, syscall.GENERIC_READ|syscall.GENERIC_WRITE|0x10000, 0, nil, syscall.OPEN_EXISTING, syscall.FILE_ATTRIBUTE_NORMAL, 0)
-			if errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) || errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
-				continue
-			}
-			if err != nil {
-				blocked = err
-				break
-			}
-			syscall.CloseHandle(h)
-		}
-		if blocked == nil {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return errors.New("Workass application files remain locked or access was denied; no files replaced")
-		}
-		time.Sleep(250 * time.Millisecond)
+func probeReplacementFile(root, name string) error {
+	pointer, err := syscall.UTF16PtrFromString(filepath.Join(root, filepath.FromSlash(name)))
+	if err != nil {
+		return err
 	}
+	// Write access also detects live executable mappings and read-only files;
+	// delete access checks replacement rights. Do not demand exclusive read
+	// access: a reader that shares write/delete is not a replacement blocker.
+	h, err := syscall.CreateFile(pointer, syscall.GENERIC_WRITE|0x10000, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE, nil, syscall.OPEN_EXISTING, syscall.FILE_ATTRIBUTE_NORMAL, 0)
+	if errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) || errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return syscall.CloseHandle(h)
+}
+
+func waitForFiles(root string, names []string) error {
+	return waitForUnlockedFiles(names, func(name string) error { return probeReplacementFile(root, name) }, func(err error) bool {
+		return errors.Is(err, syscall.Errno(32)) || errors.Is(err, syscall.ERROR_ACCESS_DENIED)
+	}, time.Now, time.Sleep)
 }
