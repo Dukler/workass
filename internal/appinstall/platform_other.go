@@ -10,3 +10,5 @@ func supportedPlatform() error { return errors.New("install-update is available 
 func platformOperations(Plan) (operations, func(), error) {
 	return operations{}, nil, supportedPlatform()
 }
+
+func installerUI(string) (func(string), func(error)) { return func(string) {}, func(error) {} }

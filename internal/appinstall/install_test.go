@@ -335,3 +335,46 @@ func TestReceiptWriteFailureDoesNotPreventLaunchingInstalledApp(t *testing.T) {
 	}
 	intactUserFiles(t, p)
 }
+
+func TestFailureReceiptNamesActualStageAndStatusTracksReplacement(t *testing.T) {
+	p := fixture(t, nil)
+	a, err := openPayload(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.archive.Close()
+	var stages []string
+	err = replace(p, a, operations{
+		waitShell: func() error { return nil },
+		waitFiles: func(string, []string) error { return errors.New("busy.dll: sharing violation") },
+		status:    func(step string) { stages = append(stages, step) },
+	})
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	var r receipt
+	if err := readJSON(filepath.Join(p.DataRoot, "updates", "receipt.json"), 65536, &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Step != "waiting_for_files" || r.Phase != "failed" || !strings.Contains(r.Error, "busy.dll") {
+		t.Fatalf("incorrect failure: %+v", r)
+	}
+	if !reflect.DeepEqual(stages, []string{"waiting_for_shutdown", "checking_paths", "waiting_for_files"}) {
+		t.Fatal(stages)
+	}
+	contents(t, filepath.Join(p.InstallTarget, "Workass.exe"), "old-app")
+}
+
+func TestCachedParentCannotHideIncomingFileDirectoryConflict(t *testing.T) {
+	p := fixture(t, nil)
+	write(t, filepath.Join(p.InstallTarget, "shared", "first.dll"), "library")
+	root, err := os.OpenRoot(p.InstallTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	_, err = ownedFiles(p, root, []string{"shared/first.dll", "shared"})
+	if err == nil {
+		t.Fatal("cached directory was accepted as a file")
+	}
+}
