@@ -1465,30 +1465,30 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		opts.ModeID = controlResult.CurrentModeID
 	}
 	seedEnvironment := activeBridge.markSeeded(job.SessionID)
-	if seedEnvironment {
-		promptText = m.buildAppChatPrompt(opts, promptText)
-	} else if delta := buildContextDeltaBlock(opts.ContextDelta); delta != "" {
-		// Exact resume deliberately skips the one-time environment seed. A
-		// durable actor-authored delta still belongs to this specific input.
-		promptText = delta + m.buildUserRequestBlock(promptText, false)
+	toolBrief := ""
+	if activeBridge.usesNativeInstructions() {
+		m.mu.Lock()
+		owner := m.agentOwnerBySession[job.SessionID]
+		m.mu.Unlock()
+		promptText = nativeChatPrompt(opts, promptText, seedEnvironment)
+		if err := activeBridge.bindNativeToolContext(owner, job.ChatID, job.TabID); err != nil {
+			promptText = "Workass CLI context is unavailable: " + redactSensitiveText(err.Error()) + ". Report this error if a Workass tool is needed.\n\n" + promptText
+		}
 	} else {
-		promptText = m.buildUserRequestBlock(promptText, opts.HumanAuthored)
+		if seedEnvironment {
+			promptText = m.buildAppChatPrompt(opts, promptText)
+		} else if delta := buildContextDeltaBlock(opts.ContextDelta); delta != "" {
+			promptText = delta + m.buildUserRequestBlock(promptText, false)
+		} else {
+			promptText = m.buildUserRequestBlock(promptText, opts.HumanAuthored)
+		}
+		var toolErr error
+		toolBrief, toolErr = m.toolContextBrief(job.SessionID, job.ChatID, job.TabID)
+		if toolErr != nil {
+			toolBrief = "Workass CLI context is unavailable: " + redactSensitiveText(toolErr.Error()) + ". Report this error if a Workass tool is needed.\n\n"
+		}
+		promptText = toolBrief + buildTurnRuntimeIdentity(activeBridge, job.ProviderID, opts.ModelID) + promptText
 	}
-	// The selected provider/model can change at any turn boundary. Agents do not
-	// reliably know the host application's exact selection from their vendor
-	// system prompt, so Workass supplies the authoritative runtime identity on
-	// EVERY turn (not only the seed prompt).
-	//
-	// Sending it only when it changes was tried and reverted: compaction is
-	// provider-owned for claude and codex, so the daemon cannot see the model
-	// forget, and "only on change" degrades to "once, ever" the first time a
-	// conversation compacts.
-	toolBrief, toolErr := m.toolContextBrief(job.SessionID, job.ChatID, job.TabID)
-	if toolErr != nil {
-		// A local tool setup failure must not prevent sending the user's prompt.
-		toolBrief = "Workass CLI context is unavailable: " + redactSensitiveText(toolErr.Error()) + ". Report this error if a Workass tool is needed.\n\n"
-	}
-	promptText = toolBrief + buildTurnRuntimeIdentity(activeBridge, job.ProviderID, opts.ModelID) + promptText
 	initialSeedMessages := 0
 	if seedEnvironment && len(opts.ContextDelta) == 0 {
 		initialSeedMessages = len(opts.InitialContextSeed)
@@ -2679,6 +2679,10 @@ func (b *Bridge) NewSession(ctx context.Context, opts SessionOptions) (SessionIn
 		return SessionInfo{}, err
 	}
 	releaseOwner := b.manager.provisionAgentOwner(opts)
+	if err := b.bindNativeToolContext(opts.AgentOwnerKey, opts.ChatID, opts.TabID); err != nil {
+		releaseOwner()
+		return SessionInfo{}, err
+	}
 	cwd := b.sessionCWD(opts.CWD)
 	mcpServers, err := b.sessionMCPServers(opts)
 	if err != nil {

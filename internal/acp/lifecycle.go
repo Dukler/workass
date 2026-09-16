@@ -242,6 +242,7 @@ func (m *Manager) hibernateBridgeIfEligible(b *Bridge, reason string, ttl time.D
 		_ = stopProcessTree(child.Process, processTree)
 	}
 	b.waitForChildExit(childExited, "hibernate")
+	b.removeNativeInstructions()
 	m.orphanInProcessSpawnedWorkForChat(tabID, chatID, reason)
 	if spare {
 		m.removeSpareForBridge(b)

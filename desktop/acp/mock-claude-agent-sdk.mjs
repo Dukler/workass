@@ -704,6 +704,11 @@ class FixtureQuery {
 }
 
 export function query(input) {
+  if (process.env.WORKASS_FIXTURE_NATIVE_INSTRUCTIONS) {
+    const system = input.options?.systemPrompt;
+    if (system?.type !== 'preset' || system?.preset !== 'claude_code' || system?.append !== 'Fixture Workass instructions.') throw new Error('native instruction preset not preserved');
+  }
+
 	if (process.env.WORKASS_CLAUDE_FIXTURE_REQUIRE_STDIO_MCP === '1') {
 		const server = input.options?.mcpServers?.['fixture-browser'];
 		if (server?.command !== '/fixture/external-tool-server'

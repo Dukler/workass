@@ -20,11 +20,12 @@ import (
 )
 
 type Bridge struct {
-	key          string
-	providerID   string
-	providerName string
-	manager      *Manager
-	opts         Options
+	nativeInstructionsDir string
+	key                   string
+	providerID            string
+	providerName          string
+	manager               *Manager
+	opts                  Options
 
 	mu                sync.Mutex
 	child             *exec.Cmd
@@ -330,6 +331,11 @@ func (b *Bridge) start() error {
 	b.mu.Unlock()
 	launchStrategy := providerAdapterForID(b.providerID).launch
 	provider, err := launchStrategy.Prepare(providerConfig, b.opts)
+	if err != nil {
+		return err
+	}
+
+	provider, err = b.prepareNativeInstructions(provider)
 	if err != nil {
 		return err
 	}
@@ -1578,6 +1584,7 @@ func (b *Bridge) Close(intentional bool, cause error) {
 		_ = stopProcessTree(child.Process, processTree)
 	}
 	b.waitForChildExit(childExited, "close")
+	b.removeNativeInstructions()
 	if b.manager != nil {
 		b.manager.orphanInProcessSpawnedWorkForChat(tabID, chatID, firstNonEmpty(errString(safeCause), "bridge-close"))
 	}

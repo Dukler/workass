@@ -6,7 +6,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { open } from 'node:fs/promises';
+import { open, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import readline from 'node:readline';
@@ -961,6 +961,12 @@ async function openSession(params, resume) {
   const cwd = String(params.cwd || process.cwd());
   const config = sessionConfig(cwd, params.mcpServers);
   const common = { cwd, config };
+  if (process.env.WORKASS_INSTRUCTIONS_FILE) {
+    const extra = await readFile(process.env.WORKASS_INSTRUCTIONS_FILE, 'utf8');
+    const effective = await app.request('config/read', { cwd, includeLayers: false });
+    const existing = effective?.config?.developer_instructions;
+    common.developerInstructions = [typeof existing === 'string' ? existing : '', extra].filter(Boolean).join('\n\n');
+  }
   const mcpStartupRevision = app.mcpStartupRevision;
   const requestedThreadId = String(params.sessionId || '').trim();
   if (resume && !requestedThreadId) {

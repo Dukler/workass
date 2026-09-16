@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -944,3 +944,27 @@ test('legacy compaction without a turn id cannot claim diagnostic turn attributi
   assert.equal(peer.messages.filter((message) => message.params?.update?.sessionUpdate === '_workass_compaction').length, 1,
     'the existing semantic checkpoint behavior remains unchanged');
 });
+
+ test('native Workass instructions append at creation and exact resume', async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'workass-instruction-test-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const instructions = path.join(dir, 'instructions.md');
+  await writeFile(instructions, 'Fixture Workass instructions.');
+  const peer = startHost({ WORKASS_INSTRUCTIONS_FILE: instructions, WORKASS_FIXTURE_NATIVE_INSTRUCTIONS: '1' });
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 901, method: 'initialize', params: {} });
+  await peer.waitFor(m => m.id === 901);
+  peer.send({ jsonrpc: '2.0', id: 902, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const created = await peer.waitFor(m => m.id === 902);
+  assert.equal(created.error, undefined);
+  const sessionId = created.result.sessionId;
+  peer.send({ jsonrpc: '2.0', id: 903, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'ordinary request' }] } });
+  // Fixtures may request permission; retain the normal approval surface.
+  const permission = await peer.waitFor(m => m.method === 'session/request_permission' || m.id === 903);
+  if (permission.method) peer.send({ jsonrpc: '2.0', id: permission.id, result: { outcome: { outcome: 'selected', optionId: 'allow_once' } } });
+  assert.equal((await peer.waitFor(m => m.id === 903)).error, undefined);
+  peer.send({ jsonrpc: '2.0', id: 904, method: 'session/close', params: { sessionId } });
+  assert.equal((await peer.waitFor(m => m.id === 904)).error, undefined);
+  peer.send({ jsonrpc: '2.0', id: 905, method: 'session/resume', params: { sessionId, cwd: repoRoot, mcpServers: [] } });
+  assert.equal((await peer.waitFor(m => m.id === 905)).error, undefined);
+ });

@@ -188,3 +188,22 @@ func TestToolsAPIRejectsMCPAndWrongOwner(t *testing.T) {
 		}
 	}
 }
+
+func TestToolsCLIEnvironmentDiscoveryAndExplicitOverride(t *testing.T) {
+	path, _ := toolCLIContextFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{"result":{"tools":[]}}`) }))
+	t.Setenv("WORKASS_TOOL_CONTEXT", path)
+	var output, diagnostics bytes.Buffer
+	if err := runToolsCommand(context.Background(), []string{"list"}, strings.NewReader(""), &output, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	if err := runToolsCommand(context.Background(), []string{"--context", filepath.Join(t.TempDir(), "missing"), "list"}, strings.NewReader(""), &output, &diagnostics); err == nil {
+		t.Fatal("ignored explicit context override")
+	}
+	guide := filepath.Join(t.TempDir(), "guide.md")
+	os.WriteFile(guide, []byte("fixture guide"), 0600)
+	t.Setenv("WORKASS_TOOLS_GUIDE", guide)
+	output.Reset()
+	if err := runToolsCommand(context.Background(), []string{"guide"}, strings.NewReader(""), &output, &diagnostics); err != nil || output.String() != "fixture guide" {
+		t.Fatal("guide not available", err)
+	}
+}
