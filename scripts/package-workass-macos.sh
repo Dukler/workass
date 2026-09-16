@@ -144,9 +144,10 @@ mkdir -p "$stage/Contents/Resources/app" "$stage/Contents/Resources/renderer" "$
 
 mv "$stage/Contents/MacOS/Electron" "$stage/Contents/MacOS/Workass"
 rm -f "$stage/Contents/Resources/default_app.asar"
-for shell_file in main.js preload.js view-server.js browser-manager.js browser-control-server.js runtime-profile.js runtime-bootstrap.js certificate-pins.js app-icon.js image-copy.js profile-singleton.js update-lock-recovery.js update-progress.js update-manager.js update-worker.js; do
+for shell_file in main.js preload.js view-server.js connected-artifacts.js browser-manager.js browser-control-server.js runtime-profile.js runtime-bootstrap.js certificate-pins.js app-icon.js image-copy.js profile-singleton.js update-lock-recovery.js update-progress.js update-manager.js update-worker.js; do
   cp "$repo_root/desktop/shell/$shell_file" "$stage/Contents/Resources/app/$shell_file"
 done
+node "$repo_root/desktop/scripts/check-shell-dependencies.cjs" "$stage/Contents/Resources/app"
 cp "$repo_root/desktop/shell/package.production.json" "$stage/Contents/Resources/app/package.json"
 plutil -replace version -string "$bundle_version" "$stage/Contents/Resources/app/package.json"
 ditto "$renderer_source" "$stage/Contents/Resources/renderer"
