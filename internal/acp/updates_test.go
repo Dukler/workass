@@ -161,7 +161,7 @@ func TestProviderCLIExecutableRefreshesValidCacheFromPATH(t *testing.T) {
 }
 
 func TestProviderUpdateRunsResolvedProviderExecutable(t *testing.T) {
-	for _, providerID := range []string{"qwen", "claude", "omp"} {
+	for _, providerID := range []string{"qwen", "claude"} {
 		t.Run(providerID, func(t *testing.T) {
 			root := repoRoot(t)
 			pathDir := t.TempDir()

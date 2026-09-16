@@ -117,6 +117,10 @@ func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *test
 	installFakeAgentWrapper(t, pathDir, "devin", "echo-prompt")
 	installFakeAgentWrapper(t, pathDir, "qwen", "echo-prompt")
 	installFakeAgentWrapper(t, pathDir, "omp", "echo-prompt")
+	t.Setenv("WORKASS_BUN", filepath.Join(pathDir, "node"))
+	t.Setenv("WORKASS_OMP_FIXTURE_DIR", t.TempDir())
+	t.Setenv("WORKASS_OMP_HOST", filepath.Join(root, "scripts", "omp-native-host.mjs"))
+	t.Setenv("WORKASS_OMP_SDK_MODULE", filepath.Join(root, "desktop", "acp", "mock-omp-sdk.mjs"))
 	t.Setenv("PATH", pathDir)
 	t.Setenv("ASSISTANT_DEVIN", filepath.Join(pathDir, "devin"))
 

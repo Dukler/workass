@@ -92,23 +92,22 @@ func TestDevinLaunchOwnsACPBackendSanitization(t *testing.T) {
 	}
 }
 
-func TestOMPRegistrationUsesOfficialGenericACPEntryPoint(t *testing.T) {
+func TestOMPRegistrationUsesNativeSDKEntryPoint(t *testing.T) {
 	registration, ok := providerRegistrationForID("omp")
 	if !ok {
 		t.Fatal("OMP provider registration is missing")
 	}
-	if registration.DefaultCommand != "omp" || !reflect.DeepEqual(registration.DefaultArgs, []string{"acp"}) {
-		t.Fatalf("OMP launch = %q %#v, want omp acp", registration.DefaultCommand, registration.DefaultArgs)
+	if registration.DefaultCommand != "omp" || len(registration.DefaultArgs) != 0 || registration.Badge != "native" {
+		t.Fatalf("OMP launch = %q %#v, want native OMP SDK", registration.DefaultCommand, registration.DefaultArgs)
 	}
 	if registration.Discovery == nil || registration.Detection == nil || registration.ProbeTimeout != frontierProbeTimeout {
 		t.Fatalf("OMP discovery registration is incomplete: %#v", registration)
 	}
-	if got := providerAdapterForID("omp"); reflect.TypeOf(got.delivery) != reflect.TypeOf(genericACPProviderAdapter.delivery) || got.creation.DeferredUntilInput {
-		t.Fatalf("OMP did not inherit the ordinary ACP lane contract: %#v", got)
+	if got := providerAdapterForID("omp"); !got.creation.DeferredUntilInput || got.input.StandardACPActivity() || got.instructions.HostEnvironment != "WORKASS_OMP_SDK_MODULE" {
+		t.Fatalf("OMP lost the native SDK lane contract: %#v", got)
 	}
-	if registration.Update.Source != "https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest" ||
-		registration.Update.Command.Command != "omp" || !reflect.DeepEqual(registration.Update.Command.Args, []string{"update"}) {
-		t.Fatalf("OMP update registration is incomplete: %#v", registration.Update)
+	if registration.Update.Source != "" || registration.Update.Command.Command != "" {
+		t.Fatalf("bundled OMP SDK must not advertise an unrelated CLI update: %#v", registration.Update)
 	}
 }
 

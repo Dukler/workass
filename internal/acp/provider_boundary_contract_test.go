@@ -187,7 +187,7 @@ func isRegisteredGoProviderBoundary(rel string) bool {
 	return false
 }
 
-var providerBoundaryIDs = []string{"claude", "codex", "devin", "qwen"}
+var providerBoundaryIDs = []string{"claude", "codex", "devin", "qwen", "omp"}
 
 var providerPrivateMarkers = []string{
 	"_workass_claude",
@@ -220,7 +220,7 @@ func forbiddenProviderLiteral(raw string) string {
 func forbiddenGoProviderIdentifier(identifier string) string {
 	lower := strings.ToLower(identifier)
 	for _, providerID := range providerBoundaryIDs {
-		if strings.Contains(lower, providerID) {
+		if strings.Contains(lower, providerID) && (providerID != "omp" || strings.HasPrefix(lower, "omp") || strings.Contains(identifier, "OMP") || strings.Contains(identifier, "Omp")) {
 			return "provider-named behavior belongs in registration or an adapter"
 		}
 	}
@@ -240,7 +240,7 @@ func forbiddenScriptProviderIdentifier(identifier string) string {
 	// branch while still rejecting providerId, shellStatus.claude, and variables
 	// such as claudeSession outside an allowed boundary.
 	for _, providerID := range providerBoundaryIDs {
-		if strings.Contains(identifier, providerID) {
+		if strings.Contains(identifier, providerID) && (providerID != "omp" || strings.HasPrefix(identifier, "omp")) {
 			return "provider-named renderer/shell behavior belongs behind daemon-authored neutral data"
 		}
 	}

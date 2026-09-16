@@ -374,18 +374,24 @@ var providerRegistrations = map[string]providerRegistration{
 		Adapter: providerAdapter{instructions: nativeInstructionDelivery{ConfigEnvironment: "OPENCODE_CONFIG_CONTENT"}, model: providerModelPolicy{AssistantBrand: "opencode"}},
 	},
 	"omp": {
-		ID: "omp", Name: "Oh My Pi", DefaultCommand: "omp", DefaultArgs: []string{"acp"}, Badge: "agent",
+		ID: "omp", Name: "Oh My Pi", DefaultCommand: "omp", Badge: "native",
 		Discovery: &cliProvider{id: "omp", defaultCommand: "omp", pathEnv: []string{"WORKASS_OMP"}, pathNames: []string{"omp.exe", "omp.cmd", "omp"}, knownPaths: ompKnownPaths},
 		Detection: cliDetectionStrategy{}, ProbeTimeout: frontierProbeTimeout,
 		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `omp` y usa `/login`"},
-		// OMP speaks standard ACP directly. Its own profile owns models,
-		// credentials, permissions, sessions, rules, and extension discovery.
-		Adapter: providerAdapter{model: providerModelPolicy{AssistantBrand: "omp"}},
-		Update: providerUpdateRegistration{
-			Source:  "https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest",
-			Command: ProviderUpdateCommand{Command: "omp", Args: []string{"update"}},
-			Hint:    "omp update",
+		// OMP owns its engine, native sessions, profile and tools through the SDK.
+		Native: &frontierNativeSpec{ProviderID: "omp", DefaultCommand: "omp", OverrideEnv: "WORKASS_OMP", PathNames: []string{"omp", "omp.exe", "omp.cmd"}},
+		Adapter: providerAdapter{
+			model:        providerModelPolicy{AssistantBrand: "omp", SeparateEffortAxis: true},
+			permission:   ompPermissionPolicy{},
+			launch:       nativeHostLaunchStrategy{command: "omp", prepare: ompNativeHostLaunch},
+			instructions: nativeInstructionDelivery{HostEnvironment: "WORKASS_OMP_SDK_MODULE"},
+			creation:     providercontract.CreationCapabilities{DeferredUntilInput: true},
+			input:        explicitHostInputReceiptPolicy{},
+			context:      staticProviderContextPolicy{capabilities: exactNativeContextCapabilities()},
 		},
+		// The SDK is pinned in the Workass bundle. Updating the separate OMP
+		// CLI would not update this engine; it must ship with Workass.
+
 	},
 	localLMStudioProviderID: {
 		ID: localLMStudioProviderID, Name: "LM Studio (local)", DefaultCommand: "workass-agent", Badge: "native",
