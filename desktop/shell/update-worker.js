@@ -1658,8 +1658,47 @@ async function main(argv = process.argv.slice(2), {
   const transactionPath = path.resolve(argv[1]);
   const transaction = JSON.parse(fs.readFileSync(transactionPath, 'utf8'));
   validateWorkerEntrypoint(transactionPath, transaction);
+  if (transaction.platform === 'win32') {
+    await bootstrapWindowsZip(transaction);
+    return 0;
+  }
   await runTransaction(transaction);
   return 0;
+}
+
+// An older installed shell still launches the incoming JS entrypoint. Bridge
+// that one handoff to the native installer; never enter the old Windows mirror,
+// process-kill, snapshot, health-probe, or rollback sequence. Updated shells
+// launch the native command directly and do not use this compatibility entry.
+async function bootstrapWindowsZip(rawTransaction, dependencies = {}) {
+  const transaction = validateTransaction(rawTransaction);
+  const manager = dependencies.manager || require(path.join(transaction.incomingTarget, 'resources', 'app', 'update-manager.js'));
+  const lease = (dependencies.startLease || startWorkerLease)(transaction);
+  let installer;
+  try {
+    installer = await manager.spawnNativeWindowsInstaller({
+      schemaVersion: 1, strategy: 'windows-zip', updateId: transaction.updateId,
+      workerId: transaction.workerId,
+      installationId: transaction.installationId, currentVersion: transaction.currentVersion,
+      targetVersion: transaction.targetVersion, installTarget: transaction.installTarget,
+      dataRoot: path.dirname(transaction.mutableStateTarget), transactionRoot: transaction.transactionRoot,
+      shellPID: transaction.shellPID,
+      interruptedWork: transaction.interruptedWork,
+    });
+    updateReceipt(transaction, 'armed');
+    const wait = dependencies.waitUntil || waitUntil;
+    if (!await wait(() => !(dependencies.pidAlive || pidAlive)(transaction.shellPID), { attempts: 100, delayMs: 250 })) {
+      throw new Error('Workass did not close for the ZIP installation; application files unchanged');
+    }
+    if (manager.readHandoffState(transaction)?.state !== 'committed') {
+      throw new Error('the Windows ZIP installation was not committed; application files unchanged');
+    }
+    await installer.commit();
+  } catch (err) {
+    installer?.abort();
+    updateReceipt(transaction, 'failed', { error: String(err?.message || err), activated: false });
+    throw err;
+  } finally { lease.stop('terminal'); }
 }
 
 if (require.main === module) {
@@ -1671,6 +1710,7 @@ if (require.main === module) {
 
 module.exports = {
   atomicJSON,
+  bootstrapWindowsZip,
   checkpoint,
   daemonServiceIsDown,
   defaultOperations,

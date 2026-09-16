@@ -8,7 +8,7 @@ const PROGRESS_ARGUMENT = '--workass-update-progress';
 const PROGRESS_RECEIPT_SCHEMA_VERSION = 1;
 const TRANSACTION_SCHEMA_VERSION = 4;
 const ACTIVE_PROGRESS_PHASES = new Set(['visible', 'watching']);
-const TERMINAL_UPDATE_PHASES = new Set(['healthy', 'rollback_healthy', 'failed']);
+const TERMINAL_UPDATE_PHASES = new Set(['healthy', 'installed', 'rollback_healthy', 'failed']);
 const ATOMIC_RENAME_ATTEMPTS = 40;
 const ATOMIC_RENAME_DELAY_MS = 50;
 const TRANSIENT_ATOMIC_RENAME_ERRORS = new Set(['EACCES', 'EBUSY', 'EEXIST', 'EPERM']);
@@ -147,7 +147,7 @@ function phaseView(transaction, journal, receipt) {
   const state = terminal || journal || receipt || { phase: 'preparing' };
   const phase = String(state.phase || 'preparing');
   const common = { phase, terminal: Boolean(terminal), tone: 'active', action: '' };
-  if (phase === 'healthy') return {
+  if (phase === 'healthy' || phase === 'installed') return {
     ...common,
     tone: 'success',
     title: `Workass ${transaction.targetVersion} está listo`,
@@ -300,7 +300,7 @@ async function runUpdateProgressProcess({
     terminalAckTimer = null;
     writeProgress('terminal', { result: view.phase, windowVisible: !win.isDestroyed() && win.isVisible() });
     terminal = true;
-    if (view.phase === 'healthy') {
+    if (view.phase === 'healthy' || view.phase === 'installed') {
       closeTimer = schedule(() => {
         closeTimer = null;
         if (!win.isDestroyed()) win.close();

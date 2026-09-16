@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"workass/internal/acp"
+	"workass/internal/appinstall"
 	"workass/internal/artifacthost"
 	"workass/internal/chat"
 	"workass/internal/fleet"
@@ -48,6 +49,17 @@ var daemonVersion = "0.0.1-dev"
 var secretKeyRE = regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|credential|bearer)`)
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "install-update" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: workass install-update <native-install.json>")
+			os.Exit(2)
+		}
+		if err := appinstall.Run(os.Args[2], os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, acp.RedactSensitiveText(err.Error()))
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "tools" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()

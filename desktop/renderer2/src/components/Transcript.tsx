@@ -253,6 +253,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const findReturnFocusRef = useRef<HTMLElement | null>(null);
 
   const visibleMessages = projectSteeringPresentation(chat?.messages ?? []).transcriptMessages;
+  const artifactOrigin = store.browserArtifactOrigin(chat?.machineId);
   const total = visibleMessages.length;
   const knownTotal = chat?.historyComplete === false
     ? Math.max(total, chat.messageCount ?? 0)
@@ -611,6 +612,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                         tabId={chat.id}
                         messages={messages}
                         turnSeqs={messages.map((message) => store.checkpointForJob(chat, message.jobId)?.turnSeq)}
+                        artifactOrigin={artifactOrigin}
                       />
                     );
                   }
@@ -624,6 +626,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                           tabId={chat.id}
                           msg={m}
                           turnSeq={store.checkpointForJob(chat, m.jobId)?.turnSeq}
+                          artifactOrigin={artifactOrigin}
                         />
                       )}
                     </div>

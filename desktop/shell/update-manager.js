@@ -157,6 +157,7 @@ function receiptAppliesToInstalledVersion(receipt, currentVersion, {
     case 'activating':
       return currentVersion === previousVersion || currentVersion === targetVersion;
     case 'healthy':
+    case 'installed':
       return currentVersion === String(receipt.installedVersion || targetVersion);
     case 'rollback_healthy':
     case 'failed':
@@ -400,6 +401,34 @@ async function fetchReleaseManifest(url, options = {}) {
   let parsed;
   try { parsed = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('update manifest is not valid JSON'); }
   return parsed;
+}
+
+async function artifactMatches(file, artifact) {
+  try {
+    const info = await fs.promises.lstat(file);
+    if (!info.isFile() || info.size !== artifact.size || info.size > MAX_UPDATE_BYTES) return false;
+    const hash = crypto.createHash('sha256');
+    let received = 0;
+    for await (const chunk of fs.createReadStream(file)) {
+      received += chunk.length;
+      if (received > artifact.size) return false;
+      hash.update(chunk);
+    }
+    return received === artifact.size && hash.digest('hex') === artifact.sha256.toLowerCase();
+  } catch (err) {
+    if (err.code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
+async function cacheArtifact(source, destination, updateId) {
+  const partial = `${destination}.${updateId}.partial`;
+  try {
+    await fs.promises.copyFile(source, partial, fs.constants.COPYFILE_EXCL);
+    await fs.promises.rename(partial, destination);
+  } finally {
+    await fs.promises.rm(partial, { force: true });
+  }
 }
 
 function copyLocalArtifact(source, destination, artifact, { onProgress = () => {} } = {}) {
@@ -1034,6 +1063,67 @@ function createProgressPublisher(publish, {
     lastPublishedAt = current;
     publish(progress);
   };
+}
+
+// The Windows installer is the incoming native daemon's install-only command.
+// Its single ready line proves it opened the ZIP and the outgoing shell handle.
+// Closing stdin before commit is an abort; it never kills another process.
+function spawnNativeWindowsInstaller(plan, { spawnProcess = spawn, timeoutMs = 15000 } = {}) {
+  const planPath = path.join(plan.transactionRoot, 'native-install.json');
+  atomicJSON(planPath, plan);
+  const logFD = fs.openSync(path.join(plan.transactionRoot, 'worker.log'), 'a', 0o600);
+  let child;
+  try {
+    child = spawnProcess(path.join(plan.transactionRoot, 'incoming-release', 'workass-daemon.exe'),
+      ['install-update', planPath], {
+        cwd: plan.transactionRoot, detached: true, windowsHide: true,
+        stdio: ['pipe', 'pipe', logFD],
+      });
+  } finally { fs.closeSync(logFD); }
+  return new Promise((resolve, reject) => {
+    let output = '';
+    let settled = false;
+    const timer = setTimeout(() => fail(new Error('Windows installer did not become ready')), timeoutMs);
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.stdin?.destroy();
+      reject(err);
+    };
+    child.once('error', fail);
+    child.once('exit', (code) => fail(new Error(`Windows installer exited before it was ready (${code})`)));
+    child.stdin.on('error', fail);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      if (settled) return;
+      output += chunk;
+      if (output.length > 1024) return fail(new Error('Windows installer returned invalid startup data'));
+      if (!output.includes('\n')) return;
+      let ready;
+      try { ready = JSON.parse(output.slice(0, output.indexOf('\n'))); } catch { /* rejected below */ }
+      if (ready?.ready !== true) return fail(new Error('Windows installer did not acknowledge startup'));
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        abort: () => child.stdin.end(),
+        commit: () => new Promise((accept, decline) => {
+          if (child.exitCode != null || child.signalCode != null || child.stdin.destroyed) {
+            decline(new Error('Windows installer stopped before commit'));
+            return;
+          }
+          child.stdin.once('error', decline);
+          child.stdin.end('install\n', (err) => {
+            child.stdin.removeListener('error', decline);
+            if (err) { decline(err); return; }
+            child.stdout.destroy();
+            child.unref();
+            accept();
+          });
+        }),
+      });
+    });
+  });
 }
 
 function prepareUpdateWorkerRuntime({
@@ -1727,6 +1817,7 @@ class UpdateManager {
       ),
       postLocalUpdate,
       spawn,
+      spawnNativeInstaller: (plan) => spawnNativeWindowsInstaller(plan),
       stageAndVerify: runUpdateStageWorker,
       schedule: setTimeout,
       cancelSchedule: clearTimeout,
@@ -1814,6 +1905,9 @@ class UpdateManager {
       progressReceipt = readJSONFile(transaction.progressReceiptPath);
       workerLogTail = readBoundedUpdateLogTail(path.join(transaction.transactionRoot, 'worker.log'));
     }
+    if (receipt?.strategy === 'windows-zip' && /^[A-Za-z0-9_-]{8,96}$/.test(receipt.updateId || '')) {
+      workerLogTail = readBoundedUpdateLogTail(path.join(this.updateRoot, 'transactions', receipt.updateId, 'worker.log'));
+    }
     const operations = this.agentUpdateOperations();
     return {
       schemaVersion: 1,
@@ -1823,7 +1917,7 @@ class UpdateManager {
       ]),
       receipt: updateDiagnosticRecord(receipt, [
         'schemaVersion', 'updateId', 'phase', 'previousVersion', 'targetVersion', 'installedVersion',
-        'updatedAt', 'activated', 'error', 'rollbackError', 'interruptedWork',
+        'updatedAt', 'activated', 'error', 'rollbackError', 'interruptedWork', 'strategy', 'step',
       ]),
       journal: updateDiagnosticRecord(journal, [
         'schemaVersion', 'updateId', 'phase', 'previousVersion', 'targetVersion', 'installedVersion',
@@ -2088,6 +2182,9 @@ class UpdateManager {
   }
 
   requestTransactionCleanup(receipt = this.state.receipt) {
+    // Native Windows installs never run CIM/process sweeps or recovery during
+    // startup. Completed downloads are reclaimed on the next explicit update.
+    if (this.platform === 'win32') return Promise.resolve({ removed: 0, pruned: 0, retained: 0 });
     if (!this.isPackaged || !['darwin', 'win32'].includes(this.platform) || !this.installationIdentity) return null;
     if (this.transactionCleanupPromise) {
       this.transactionCleanupQueued = true;
@@ -2170,6 +2267,12 @@ class UpdateManager {
         installationId: this.installationIdentity?.installationId,
         installTarget: this.installTarget,
       })) {
+        if (receipt.strategy === 'windows-zip') {
+          const active = ['armed', 'activating'].includes(receipt.phase);
+          this.publish({ phase: active ? 'installing' : receipt.phase, receipt, error: receipt.error || null });
+          if (active) this.watchNativeReceipt(receipt.updateId);
+          return this.snapshot();
+        }
         const active = ['preparing', 'armed', 'activating'].includes(receipt.phase);
         const transaction = this.transactionForReceipt(receipt);
         // The target shell can become visible before the outgoing worker seals
@@ -2551,6 +2654,119 @@ class UpdateManager {
     this.receiptTimer.unref?.();
   }
 
+  watchNativeReceipt(updateId) {
+    if (this.receiptTimer) return;
+    this.receiptTimer = this.deps.repeat(() => {
+      const receipt = readJSONFile(this.receiptPath);
+      if (receipt?.strategy !== 'windows-zip' || receipt.updateId !== updateId ||
+          !receiptAppliesToInstalledVersion(receipt, this.currentVersion, {
+            installationId: this.installationIdentity?.installationId, installTarget: this.installTarget,
+          })) return;
+      let terminal = ['installed', 'failed'].includes(receipt.phase);
+      if (!terminal && Number.isInteger(receipt.workerPID) && receipt.workerPID > 1) {
+        try { process.kill(receipt.workerPID, 0); }
+        catch (err) {
+          if (err.code === 'ESRCH') {
+            receipt.phase = 'failed';
+            receipt.error = 'The Windows installer stopped before completion. The downloaded ZIP was retained; no rollback or automatic retry was attempted.';
+            atomicJSON(this.receiptPath, receipt);
+            terminal = true;
+          }
+        }
+      }
+      this.publish({ phase: terminal ? receipt.phase : 'installing', receipt, error: receipt.error || null });
+      if (terminal) {
+        this.deps.cancelRepeat(this.receiptTimer);
+        this.receiptTimer = null;
+      }
+    }, 1000);
+    this.receiptTimer.unref?.();
+  }
+
+  async cleanupCompletedWindowsDownloads() {
+    const root = path.join(this.updateRoot, 'transactions');
+    let entries;
+    try { entries = await fs.promises.readdir(root, { withFileTypes: true }); }
+    catch (err) { if (err.code === 'ENOENT') return; throw err; }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^[A-Za-z0-9_-]{8,96}$/.test(entry.name)) continue;
+      const directory = path.join(root, entry.name);
+      const receipt = readJSONFile(path.join(directory, 'install-receipt.json'));
+      if (receipt?.strategy !== 'windows-zip' || receipt.phase !== 'installed' || receipt.step !== 'launched' ||
+          receipt.updateId !== entry.name || receipt.installationId !== this.installationIdentity?.installationId ||
+          receipt.installTarget !== this.installTarget) continue;
+      try { await fs.promises.rm(directory, { recursive: true, force: true }); }
+      catch { /* a locked completed download can stay until a later explicit update */ }
+    }
+  }
+
+  async obtainWindowsArchive(source, archive, artifact, updateId, onProgress) {
+    const cacheRoot = path.join(this.updateRoot, 'downloads');
+    const cached = path.join(cacheRoot, `${artifact.sha256.toLowerCase()}.zip`);
+    await fs.promises.mkdir(cacheRoot, { recursive: true, mode: 0o700 });
+    await fs.promises.mkdir(path.dirname(archive), { recursive: true, mode: 0o700 });
+    if (await artifactMatches(cached, artifact)) {
+      await fs.promises.copyFile(cached, archive);
+      onProgress(artifact.size, artifact.size);
+      return;
+    }
+
+    // Earlier versions kept complete downloads inside transactions. Import those
+    // bytes too; only the new explicit action owns the new install transaction.
+    const transactions = await fs.promises.opendir(path.join(this.updateRoot, 'transactions'));
+    for await (const entry of transactions) {
+      if (!entry.isDirectory() || entry.name === updateId || !/^upd-[A-Za-z0-9_-]{4,92}$/.test(entry.name)) continue;
+      const previous = path.join(this.updateRoot, 'transactions', entry.name, 'release.zip');
+      if (!await artifactMatches(previous, artifact)) continue;
+      await cacheArtifact(previous, cached, updateId);
+      await fs.promises.copyFile(cached, archive);
+      onProgress(artifact.size, artifact.size);
+      return;
+    }
+    await this.deps.downloadArtifact(source, archive, artifact, { onProgress });
+    await cacheArtifact(archive, cached, updateId);
+  }
+
+  async installWindowsZip(prepared) {
+    const reply = await this.prepareHandoff(prepared.updateId);
+    if (reply.status === 409) return this.publish({ phase: 'busy', blockers: reply.body, error: null });
+    const daemonUnavailable = reply.status === 0;
+    if (!daemonUnavailable && (reply.status !== 200 || reply.body?.ready !== true)) {
+      await this.cancelHandoff(prepared.updateId);
+      throw new Error('Workass could not prepare to close for the update; application files unchanged');
+    }
+    const plan = {
+      schemaVersion: 1, strategy: 'windows-zip', updateId: prepared.updateId,
+      installationId: prepared.installationId, currentVersion: this.currentVersion,
+      targetVersion: prepared.targetVersion, installTarget: prepared.installTarget,
+      dataRoot: this.runtime.dataRoot, transactionRoot: prepared.transactionRoot,
+      shellPID: process.pid, interruptedWork: interruptedWorkFromReadiness(reply.body, { daemonUnavailable }),
+    };
+    let installer;
+    try {
+      installer = await this.deps.spawnNativeInstaller(plan);
+      const committed = await this.commitHandoff(prepared.updateId);
+      if (!committed.accepted) throw new Error('Workass did not accept the update shutdown');
+      await installer.commit();
+    } catch (err) {
+      installer?.abort();
+      await this.cancelHandoff(prepared.updateId);
+      const receipt = {
+        ...plan, schemaVersion: RECEIPT_SCHEMA_VERSION, previousVersion: this.currentVersion,
+        phase: 'failed', step: 'handoff', activated: false,
+        updatedAt: new Date().toISOString(), error: String(err?.message || err),
+      };
+      atomicJSON(this.receiptPath, receipt);
+      return this.publish({ phase: 'failed', receipt, error: receipt.error, blockers: null });
+    }
+    this.publish({ phase: 'installing', targetVersion: prepared.targetVersion,
+      receipt: readJSONFile(this.receiptPath), error: null, blockers: null });
+    // No progress-owner process or readiness loop. The native installer waits
+    // for this exact shell to exit, replaces files, and starts the new shell.
+    this.deps.schedule(() => this.exitCommittedHandoff(), 100)?.unref?.();
+    return this.snapshot();
+  }
+
   async runDiscovery({ background = false } = {}) {
     if (!this.state.supported) return this.snapshot();
     const previous = this.snapshot();
@@ -2637,7 +2853,7 @@ class UpdateManager {
     if (!this.state.supported || this.activeOperation) return this.snapshot();
     // A plain offer has no downloaded payload and may advance to a newer
     // release. Once download/staging begins, that exact transaction is pinned.
-    if (!['idle', 'current', 'available', 'healthy', 'check_failed', 'failed', 'rollback_healthy'].includes(this.state.phase)) return this.snapshot();
+    if (!['idle', 'current', 'available', 'healthy', 'installed', 'check_failed', 'failed', 'rollback_healthy'].includes(this.state.phase)) return this.snapshot();
     try { return await this.check({ background: true }); }
     catch { return this.snapshot(); }
   }
@@ -2704,7 +2920,12 @@ class UpdateManager {
         (progress) => this.publish({ progress }),
         { now: this.deps.now || Date.now },
       );
-      await this.deps.downloadArtifact(artifactSource, archive, artifact, { onProgress: reportProgress });
+      if (this.platform === 'win32') {
+        await this.obtainWindowsArchive(artifactSource, archive, artifact, updateId, reportProgress);
+        await this.cleanupCompletedWindowsDownloads();
+      } else {
+        await this.deps.downloadArtifact(artifactSource, archive, artifact, { onProgress: reportProgress });
+      }
       this.publish({ phase: 'staging', progress: 1 });
       const installTarget = installedRoot(this.resourcesPath, this.executablePath, this.platform);
       const parent = path.dirname(installTarget);
@@ -2729,7 +2950,7 @@ class UpdateManager {
       });
       const designatedRequirement = String(staged?.designatedRequirement || '');
       const targetAppCode = incomingAppCode(incomingTarget, this.platform);
-      const runtime = await this.deps.prepareWorkerRuntime({
+      const runtime = this.platform === 'win32' ? {} : await this.deps.prepareWorkerRuntime({
         transactionRoot,
         workerSource: path.join(targetAppCode, 'update-worker.js'),
         progressSource: path.join(targetAppCode, 'update-progress.js'),
@@ -2756,8 +2977,13 @@ class UpdateManager {
         try { fs.rmSync(incomingTarget, { recursive: true, force: true }); }
         catch (cleanupError) { cleanupErrors.push(String(cleanupError && cleanupError.message || cleanupError)); }
       }
-      try { fs.rmSync(transactionRoot, { recursive: true, force: true }); }
-      catch (cleanupError) { cleanupErrors.push(String(cleanupError && cleanupError.message || cleanupError)); }
+      // Keep the Windows ZIP even when caching or extraction fails. A later
+      // explicit attempt can rediscover it without downloading the same release.
+      for (const directory of this.platform === 'win32' ? [incomingTarget, extracted] : [transactionRoot]) {
+        if (!directory) continue;
+        try { fs.rmSync(directory, { recursive: true, force: true }); }
+        catch (cleanupError) { cleanupErrors.push(String(cleanupError && cleanupError.message || cleanupError)); }
+      }
       this.prepared = null;
       const error = String(err && err.message || err);
       return this.publish({
@@ -2782,6 +3008,7 @@ class UpdateManager {
         release.artifacts?.update !== prepared.artifact || this.state.targetVersion !== prepared.targetVersion) {
       throw new Error('the verified Workass transaction lost its exact release metadata');
     }
+    if (this.platform === 'win32') return await this.installWindowsZip(prepared);
     const expectedWorkerPath = path.join(prepared.transactionRoot, 'update-worker.js');
     const expectedNodePath = path.join(prepared.transactionRoot, this.platform === 'win32' ? 'updater-node.exe' : 'updater-node');
     if (prepared.workerPath !== expectedWorkerPath || prepared.nodePath !== expectedNodePath ||
@@ -3086,12 +3313,14 @@ module.exports = {
   releasePlatform,
   receiptAppliesToInstalledVersion,
   readInstallationIdentity,
+  readHandoffState,
   resolveArtifactSource,
   resolveUpdateFeed,
   runUpdateStageWorker,
   runUpdateTransactionCleanupWorker,
   snapshotReleaseManifest,
   spawnArmedUpdateWorker,
+  spawnNativeWindowsInstaller,
   spawnVisibleUpdateProgress,
   stageAndVerifyRelease,
   stageRelease,

@@ -12,7 +12,7 @@ import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolv
 import { call, callThrow, has, on, bridgeReady } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
 import { LEAN_SESSION_SAVE_MODE, loadMirror, saveMirror, type Mirror, type MirrorMsg } from './persistence';
-import { browserApi } from '../browser';
+import { browserApi, hostedArtifactURL, localBrowserOwnsChat } from '../browser';
 import {
   afterQueuedAcceptance, appendDraftImages, attachmentWorkBoundary, draftImagePayloads, mergeMessageImages, messageImages,
   queuedAttachmentsReady, queuedDraftMessage, queuedJob, queuedMessage, releaseDraftImages,
@@ -2329,6 +2329,33 @@ export class Store {
   private refreshMachineNames(): void {
     this.machineNameMap = this.machines ? this.machines.names() : {};
     this.state.machines = this.machines ? this.machines.list() : [];
+  }
+
+  /** Origin for controller-local viewing of one remote daemon's hosted files. */
+  browserArtifactOrigin(machineId?: string): string {
+    const id = String(machineId ?? '').trim();
+    if (!id) return typeof window !== 'undefined' ? window.location.origin : '';
+    const machine = this.state.machines.find((candidate) => candidate.machineId === id);
+    const address = String(machine?.address ?? '').trim();
+    if (!address) return '';
+    return `${machine?.secure ? 'https' : 'http'}://${address}`;
+  }
+
+  openHostedArtifact(chatId: string, target: string, origin?: string): boolean {
+    const chat = this.chat(chatId);
+    if (!browserApi()?.supported || !chat || !localBrowserOwnsChat(chat.id, chat.machineId)
+      || !String(target ?? '').trim().startsWith('/workass/artifacts/')) return false;
+    const url = hostedArtifactURL(target, origin);
+    if (!url) {
+      this.addToast('No se pudo abrir el artefacto', 'No se encontró el origen de la máquina remota.');
+      return true;
+    }
+    void browserApi()?.command(chatId, 'navigate', url).catch((error: unknown) => {
+      this.addToast('No se pudo abrir el artefacto', error instanceof Error ? error.message : 'El navegador no pudo navegar.');
+    });
+    chat.pane = 'browser';
+    this.bumpChat(chat);
+    return true;
   }
 
   /**

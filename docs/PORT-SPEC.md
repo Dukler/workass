@@ -1,5 +1,19 @@
 # PORT-SPEC — binding laws for the workass Go daemon
 
+User law 2026-09-16 (Windows updater simplification): an authorized Windows
+update downloads the release ZIP once outside the installation, cleanly closes
+the shell/daemon, replaces release-owned application files, and launches Workass.
+Use the incoming native installer command, not a renamed Node worker,
+PowerShell process sweeps, or robocopy. Do not snapshot or restore mutable state,
+roll back, or gate success on daemon health, model discovery, controller state,
+or a progress-window heartbeat. Preserve chats, settings, workspaces, unrelated
+files, download integrity/path checks, exact installation identity, explicit
+current-human activation authority, and durable failure receipts. Locks fail
+before deletion; interrupted extraction retains the ZIP without automatic retry.
+This supersedes the older Windows mirror/rollback/progress requirements below;
+macOS update behavior and development verification gates are unchanged.
+See `specs/windows-zip-updater.md` for the implementation lane and acceptance.
+
 User law 2026-09-09: Workass-owned tools use the direct authenticated Workass
 CLI/API, not MCP. Remove their MCP endpoints, stdio proxy, descriptors, protocol
 negotiation and discovery instructions, with no backward-compatible exposure.

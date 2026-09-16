@@ -12,6 +12,8 @@ export interface InlineMediaResolver {
   // resolver object itself may be recreated without repainting sealed blocks.
   revision: unknown;
   resolve: (target: string) => InlineMedia | null;
+  resolveLink?: (target: string) => string;
+  openLink?: (target: string) => boolean;
   open: (media: InlineMedia) => void;
 }
 
@@ -64,7 +66,13 @@ export function renderInline(text: string, keyBase = 'i', allowLinks = true, med
             </button>,
           );
         } else if (looksLikeHostedArtifact(href)) {
-          const hosted = { src: href, alt: label || 'Artifact image' };
+          const src = media?.resolveLink?.(href) ?? href;
+          if (!src) {
+            out.push(<span key={key} className="assistant-image-pending">Imagen no disponible: no se encontró el origen de la máquina remota.</span>);
+            rest = rest.slice(m.index + tok.length);
+            continue;
+          }
+          const hosted = { src, alt: label || 'Artifact image' };
           out.push(
             <button key={key} type="button" className="assistant-inline-image" title="Ampliar" onClick={() => media?.open(hosted)}>
               <img src={hosted.src} alt={hosted.alt} />
@@ -82,7 +90,22 @@ export function renderInline(text: string, keyBase = 'i', allowLinks = true, med
         // the ordinary anchor path below.
       } else if (media && looksLikeLocalRaster(href)) {
         out.push(<span key={key} className="assistant-image-pending">{renderInline(label, key, false)}</span>);
-      } else if (allowLinks) out.push(<a key={key} href={href} target="_blank" rel="noreferrer">{renderInline(label, key, allowLinks, media)}</a>);
+      } else if (allowLinks) {
+        const hosted = looksLikeHostedArtifact(href);
+        const destination = media?.resolveLink?.(href) ?? href;
+        if (!destination) {
+          out.push(<span key={key} title="No se encontró el origen de la máquina remota.">{renderInline(label, key, false)} · No disponible</span>);
+          rest = rest.slice(m.index + tok.length);
+          continue;
+        }
+        out.push(<a
+          key={key}
+          href={destination}
+          target="_blank"
+          rel="noreferrer"
+          onClick={hosted && media?.openLink ? (event) => { if (media.openLink?.(href)) event.preventDefault(); } : undefined}
+        >{renderInline(label, key, allowLinks, media)}</a>);
+      }
       else out.push(...renderInline(label, key, allowLinks, media));
     } else if (m[3] || m[4]) {
       out.push(<b key={key}>{renderInline(tok.slice(2, -2), key, allowLinks, media)}</b>);

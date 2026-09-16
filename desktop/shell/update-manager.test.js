@@ -31,6 +31,7 @@ const {
   runUpdateTransactionCleanupWorker,
   snapshotReleaseManifest,
   spawnArmedUpdateWorker,
+  spawnNativeWindowsInstaller,
   spawnVisibleUpdateProgress,
   stageAndVerifyRelease,
   validateArchiveLinksBeforeExtraction,
@@ -411,6 +412,201 @@ function managerFixture({
   return { manager, calls, didQuit: () => quit, initialState };
 }
 
+function windowsDownloadFixture(t) {
+  const bytes = Buffer.from('complete Windows ZIP fixture');
+  const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  const release = manifest({ platform: 'windows', arch: 'amd64', artifacts: { update: {
+    name: 'Workass-1.2.0-windows-amd64.zip', url: 'https://releases.example.test/windows.zip', sha256, size: bytes.length,
+  } } });
+  let downloads = 0;
+  const { manager } = managerFixture({ platform: 'win32', primeReady: false, dependencyOverrides: {
+    downloadArtifact: async (_source, destination) => {
+      downloads += 1;
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.writeFileSync(destination, bytes);
+    },
+    stageAndVerify: async () => ({}),
+    prepareWorkerRuntime: async () => { throw new Error('Windows must not copy the legacy runtime'); },
+  } });
+  const offer = (target = manager, value = release) => {
+    target.manifest = snapshotReleaseManifest(value);
+    target.publish({ phase: 'available', targetVersion: value.version });
+  };
+  const restart = () => {
+    manager.dispose();
+    const next = new UpdateManager({ app: { getVersion: () => manager.currentVersion }, runtime: manager.runtime,
+      resourcesPath: manager.resourcesPath, executablePath: manager.executablePath,
+      platform: 'win32', arch: 'x64', isPackaged: true,
+      deps: { ...manager.deps, networkRequest: () => { throw new Error('fixture network request was not expected'); } } });
+    next.init();
+    t.after(() => next.dispose());
+    return next;
+  };
+  t.after(() => { manager.dispose(); fs.rmSync(path.dirname(manager.installTarget), { recursive: true, force: true }); });
+  offer();
+  return { manager, bytes, release, offer, restart, downloads: () => downloads,
+    cached: path.join(manager.updateRoot, 'downloads', `${sha256}.zip`) };
+}
+
+test('Windows reuses a complete ZIP after staging failure and an app restart', async (t) => {
+  const fixture = windowsDownloadFixture(t);
+  fixture.manager.deps.stageAndVerify = async () => { throw new Error('extraction blocked'); };
+  assert.equal((await fixture.manager.download()).phase, 'failed');
+  assert.equal(fixture.downloads(), 1);
+  assert.deepEqual(fs.readFileSync(fixture.cached), fixture.bytes);
+  const restarted = fixture.restart();
+  restarted.deps.stageAndVerify = async ({ archive }) => { assert.deepEqual(fs.readFileSync(archive), fixture.bytes); };
+  fixture.offer(restarted);
+  const state = await restarted.download();
+  assert.equal(state.phase, 'ready', state.error);
+  assert.equal(fixture.downloads(), 1);
+});
+
+test('Windows reuses a complete ZIP after installer startup fails', async (t) => {
+  const fixture = windowsDownloadFixture(t);
+  assert.equal((await fixture.manager.download()).phase, 'ready');
+  const previousId = fixture.manager.prepared.updateId;
+  fixture.manager.deps.postLocalUpdate = async (_url, action) => ({ status: 200, body: { ready: action === 'prepare' } });
+  fixture.manager.deps.spawnNativeInstaller = async () => { throw new Error('installer blocked'); };
+  assert.equal((await fixture.manager.install()).phase, 'failed');
+  fixture.offer();
+  assert.equal((await fixture.manager.download()).phase, 'ready');
+  assert.notEqual(fixture.manager.prepared.updateId, previousId);
+  assert.equal(fixture.downloads(), 1);
+});
+
+test('Windows discovers a ZIP retained by an older updater before any network download', async (t) => {
+  const fixture = windowsDownloadFixture(t);
+  const previous = path.join(fixture.manager.updateRoot, 'transactions', 'upd-old-failure-1234', 'release.zip');
+  fs.mkdirSync(path.dirname(previous), { recursive: true });
+  fs.writeFileSync(previous, fixture.bytes);
+  assert.equal((await fixture.manager.download()).phase, 'ready');
+  assert.equal(fixture.downloads(), 0);
+  assert.deepEqual(fs.readFileSync(fixture.cached), fixture.bytes);
+});
+
+test('Windows ignores incomplete, wrong-size, wrong-checksum and symlink ZIP caches', async (t) => {
+  for (const kind of ['partial', 'size', 'checksum', 'symlink']) {
+    await t.test(kind, async (subtest) => {
+      const fixture = windowsDownloadFixture(subtest);
+      fs.mkdirSync(path.dirname(fixture.cached), { recursive: true });
+      if (kind === 'partial') fs.writeFileSync(`${fixture.cached}.partial`, fixture.bytes);
+      if (kind === 'size') fs.writeFileSync(fixture.cached, fixture.bytes.subarray(1));
+      if (kind === 'checksum') fs.writeFileSync(fixture.cached, Buffer.alloc(fixture.bytes.length));
+      if (kind === 'symlink') {
+        const unrelated = path.join(fixture.manager.runtime.dataRoot, 'unrelated.zip');
+        fs.writeFileSync(unrelated, fixture.bytes);
+        fs.symlinkSync(unrelated, fixture.cached);
+      }
+      assert.equal((await fixture.manager.download()).phase, 'ready');
+      assert.equal(fixture.downloads(), 1);
+      assert.deepEqual(fs.readFileSync(fixture.cached), fixture.bytes);
+      assert.equal(fs.lstatSync(fixture.cached).isSymbolicLink(), false);
+    });
+  }
+});
+
+test('Windows cache is bound to artifact bytes, not version or URL', async (t) => {
+  const fixture = windowsDownloadFixture(t);
+  assert.equal((await fixture.manager.download()).phase, 'ready');
+  fixture.offer(fixture.manager, { ...fixture.release, artifacts: { update: {
+    ...fixture.release.artifacts.update, url: 'https://releases.example.test/new-mirror.zip',
+  } } });
+  assert.equal((await fixture.manager.download()).phase, 'ready');
+  assert.equal(fixture.downloads(), 1);
+  const other = Buffer.from('different artifact with the same version');
+  const sha256 = require('node:crypto').createHash('sha256').update(other).digest('hex');
+  fixture.offer(fixture.manager, { ...fixture.release, artifacts: { update: {
+    ...fixture.release.artifacts.update, sha256, size: other.length,
+  } } });
+  let replaced = false;
+  fixture.manager.deps.downloadArtifact = async (_source, destination) => { replaced = true; fs.writeFileSync(destination, other); };
+  assert.equal((await fixture.manager.download()).phase, 'ready');
+  assert.equal(replaced, true);
+  assert.deepEqual(fs.readFileSync(path.join(fixture.manager.prepared.transactionRoot, 'release.zip')), other);
+});
+
+test('Windows install uses one native command and graceful handoff without the legacy worker or progress owner', async () => {
+  let plan;
+  const actions = [];
+  const { manager, calls, didQuit } = managerFixture({
+    platform: 'win32',
+    replies: [{ status: 200, body: { ready: true, foregroundTurns: 2 } }, { status: 202, body: {} }],
+    dependencyOverrides: {
+      spawnNativeInstaller: async (value) => {
+        plan = value;
+        actions.push('arm');
+        return { commit: async () => actions.push('commit'), abort: () => actions.push('abort') };
+      },
+    },
+  });
+  const result = await manager.install();
+  assert.equal(result.phase, 'installing');
+  assert.deepEqual(calls, ['prepare', 'commit']);
+  assert.deepEqual(actions, ['arm', 'commit']);
+  assert.equal(plan.strategy, 'windows-zip');
+  assert.equal(plan.interruptedWork.foregroundTurns, 2);
+  assert.equal(plan.installTarget, manager.installTarget);
+  assert.equal(plan.dataRoot, manager.runtime.dataRoot);
+  assert.equal(didQuit(), true);
+});
+
+test('a blocked Windows installer cancels the prepared fence and never commits or exits the app', async () => {
+  const { manager, calls, didQuit } = managerFixture({
+    platform: 'win32',
+    replies: [{ status: 200, body: { ready: true } }, { status: 200, body: { cancelled: true } }],
+    dependencyOverrides: { spawnNativeInstaller: async () => { throw new Error('installer blocked'); } },
+  });
+  const result = await manager.install();
+  assert.equal(result.phase, 'failed');
+  assert.match(result.error, /installer blocked/);
+  assert.deepEqual(calls, ['prepare', 'cancel']);
+  assert.equal(didQuit(), false);
+  assert.equal(result.receipt.strategy, 'windows-zip');
+  assert.equal(result.receipt.activated, false);
+});
+
+test('Windows startup only observes native install receipts and never resumes, rolls back, or sweeps processes', () => {
+  let cleanup = 0;
+  for (const phase of ['armed', 'activating', 'failed', 'installed']) {
+    const { manager, calls, initialState } = managerFixture({
+      platform: 'win32', primeReady: false,
+      currentVersion: phase === 'installed' ? '1.2.0' : '1.1.0',
+      initialReceipt: { strategy: 'windows-zip', updateId: 'upd-native-startup', phase,
+        previousVersion: '1.1.0', targetVersion: '1.2.0', ...(phase === 'installed' ? { installedVersion: '1.2.0' } : {}) },
+      dependencyOverrides: { cleanupUpdateTransactions: async () => { cleanup += 1; }, repeat: () => ({ unref() {} }), cancelRepeat: () => {} },
+    });
+    assert.equal(initialState.phase, ['armed', 'activating'].includes(phase) ? 'installing' : phase);
+    assert.deepEqual(calls, []);
+    manager.dispose();
+  }
+  assert.equal(cleanup, 0);
+});
+
+test('native Windows process launch uses the incoming executable and only sends install after commit', async () => {
+  const transactionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-native-spawn-'));
+  const child = new EventEmitter();
+  child.stdin = new PassThrough(); child.stdout = new PassThrough();
+  child.unref = () => {};
+  let sent = '';
+  child.stdin.on('data', (bytes) => { sent += bytes.toString(); });
+  let request;
+  const arming = spawnNativeWindowsInstaller({ transactionRoot }, {
+    spawnProcess: (executable, args, options) => {
+      request = { executable, args, options };
+      queueMicrotask(() => child.stdout.write('{"ready":true}\n'));
+      return child;
+    },
+  });
+  const installer = await arming;
+  assert.equal(sent, '');
+  assert.equal(request.executable, path.join(transactionRoot, 'incoming-release', 'workass-daemon.exe'));
+  assert.deepEqual(request.args, ['install-update', path.join(transactionRoot, 'native-install.json')]);
+  assert.equal(request.options.detached, true);
+  await installer.commit();
+  assert.equal(sent, 'install\n');
+});
+
 test('the default committed handoff exits Electron without a cancellable window close', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-exit-'));
   const calls = [];
@@ -675,7 +871,7 @@ test('the actual rolled-back Windows release retains its own failure receipt', (
   assert.equal(path.isAbsolute(initialState.receipt.installTarget), true);
 });
 
-test('terminal pruning removes updater payloads off-main, retries state cleanup, bounds logs, and retains only eight journals', async () => {
+test('legacy terminal cleanup helper bounds logs and retains only eight journals', async () => {
   const { manager } = managerFixture({ platform: 'win32', primeReady: false });
   await manager.transactionCleanupPromise;
   manager.deps.cleanupUpdateTransactions = async (request) => cleanupUpdateTransactions(request, {
@@ -745,8 +941,13 @@ test('terminal pruning removes updater payloads off-main, retries state cleanup,
     fs.writeFileSync(path.join(root, 'updater-node.exe'), 'old-node');
   }
 
-  manager.pruneTerminalPayload(receipt);
-  await manager.transactionCleanupPromise;
+  // The current Windows manager no longer invokes the legacy process-sweeping
+  // cleanup at startup. Its helper remains available for old journal fixtures.
+  cleanupUpdateTransactions({
+    transactionsRoot: path.join(manager.updateRoot, 'transactions'),
+    platform: 'win32', receipt, receiptPath: manager.receiptPath,
+    installationId: manager.installationIdentity.installationId, installTarget: manager.installTarget,
+  }, { run: () => ({ status: 0, stdout: '[]' }) });
   for (const target of [
     transaction.incomingTarget, transaction.backupTarget,
     transaction.mutableStateBackupTarget, transaction.failedMutableStateTarget,
@@ -1413,7 +1614,7 @@ test('the Windows manager stages both release trees inside the external update t
   assert.notEqual(path.dirname(manager.prepared.incomingTarget), path.dirname(manager.prepared.installTarget));
 });
 
-test('pre-worker staging failure removes every exact temporary payload on Mac and Windows', async () => {
+test('staging failure removes extracted payloads and retains the reusable Windows ZIP', async () => {
   for (const platform of ['darwin', 'win32']) {
     const { manager } = managerFixture({ platform, primeReady: false });
     const release = platform === 'win32' ? manifest({
@@ -1437,7 +1638,9 @@ test('pre-worker staging failure removes every exact temporary payload on Mac an
     const state = await manager.download();
     assert.equal(state.phase, 'failed');
     assert.match(state.error, /fixture staging failure/);
-    assert.equal(fs.existsSync(staging.transactionRoot), false);
+    assert.equal(fs.existsSync(staging.transactionRoot), platform === 'win32');
+    assert.equal(fs.existsSync(staging.archive), platform === 'win32');
+    assert.equal(fs.existsSync(staging.extracted), false);
     assert.equal(fs.existsSync(staging.incomingTarget), false);
     assert.equal(fs.existsSync(staging.currentRoot), true);
   }
@@ -2445,4 +2648,23 @@ test('rediscovering the staged version leaves the verified payload untouched', a
   assert.ok(manager.prepared);
   assert.ok(fs.existsSync(manager.prepared.incomingTarget));
   manager.dispose();
+});
+
+test('an unavailable old daemon does not block a native install, whose file-lock boundary remains authoritative', async () => {
+  let observed;
+  const { manager, calls, didQuit } = managerFixture({
+    platform: 'win32',
+    replies: [{ status: 0, body: {} }, { status: 0, body: {} }, { status: 0, body: {} }],
+    dependencyOverrides: {
+      spawnNativeInstaller: async (plan) => {
+        observed = plan;
+        return { commit: async () => {}, abort: () => assert.fail('unexpected abort') };
+      },
+    },
+  });
+  const result = await manager.install();
+  assert.equal(result.phase, 'installing');
+  assert.equal(observed.interruptedWork.daemonUnavailable, true);
+  assert.deepEqual(calls, ['prepare', 'prepare', 'commit']);
+  assert.equal(didQuit(), true);
 });

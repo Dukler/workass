@@ -2,6 +2,15 @@ import { useEffect, useState } from 'react';
 import { callThrow } from '../wire/api';
 import type { VisualizationRegistration } from '../wire/types';
 import type { VisualizeSpec } from '../visualize';
+import { hostedArtifactURL } from '../browser';
+import { store } from '../store/store';
+
+export function visualizationNeedsTopLevelOpen(artifactOrigin?: string, currentOrigin?: string): boolean {
+  const origin = String(artifactOrigin ?? '').trim().replace(/\/+$/, '');
+  const local = String(currentOrigin ?? (typeof window !== 'undefined' ? window.location.origin : '')).trim().replace(/\/+$/, '');
+  if (!origin || !local) return false;
+  return origin !== local;
+}
 
 type HostState =
   | { phase: 'loading' }
@@ -55,11 +64,13 @@ export function VisualizeBlock({
   error,
   tabId,
   chatId,
+  artifactOrigin,
 }: {
   spec?: VisualizeSpec;
   error?: string;
   tabId?: string;
   chatId?: string;
+  artifactOrigin?: string;
 }) {
   const [state, setState] = useState<HostState>({ phase: error || !spec ? 'error' : 'loading', message: error ?? 'missing visualization metadata', retryable: false });
   const [attempt, setAttempt] = useState(0);
@@ -81,11 +92,16 @@ export function VisualizeBlock({
   }, [tabId, chatId, error, spec, attempt]);
 
   const wide = spec?.mode === 'wide';
+  const artifactURL = state.phase === 'ready' ? hostedArtifactURL(state.registration.urlPath, artifactOrigin) : '';
+  const unavailable = state.phase === 'ready' && !artifactURL;
+  const topLevelOnly = state.phase === 'ready' && visualizationNeedsTopLevelOpen(artifactOrigin);
   return (
     <section className={`visualize-card${wide ? ' visualize-wide' : ''}`} aria-label={title}>
       <div className="visualize-head">
         <span className="visualize-title">{title}</span>
-        {state.phase === 'ready' && <a className="visualize-open" href={state.registration.urlPath} target="_blank" rel="noreferrer">Abrir en navegador</a>}
+        {state.phase === 'ready' && !unavailable && <a className="visualize-open" href={artifactURL} target="_blank" rel="noreferrer" onClick={(event) => {
+          if (tabId && store.openHostedArtifact(tabId, state.registration.urlPath, artifactOrigin)) event.preventDefault();
+        }}>Abrir en navegador</a>}
       </div>
       {state.phase === 'loading' && <div className="visualize-status" role="status">Cargando visualización…</div>}
       {state.phase === 'error' && (
@@ -98,11 +114,13 @@ export function VisualizeBlock({
           {state.retryable && <button type="button" className="visualize-retry" onClick={() => setAttempt((value) => value + 1)}>Reintentar</button>}
         </div>
       )}
-      {state.phase === 'ready' && (
+      {unavailable && <div className="visualize-status" role="alert">Visualización no disponible: no se encontró el origen de la máquina remota.</div>}
+      {topLevelOnly && <div className="visualize-status">Abrí la visualización en el navegador.</div>}
+      {state.phase === 'ready' && !unavailable && !topLevelOnly && (
         <iframe
           className="visualize-frame"
           title={title}
-          src={state.registration.urlPath}
+          src={artifactURL}
           sandbox="allow-scripts"
           referrerPolicy="no-referrer"
           loading="lazy"

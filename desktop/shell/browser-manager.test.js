@@ -485,6 +485,26 @@ test('agent browser control is owner-scoped and never falls back to another chat
   assert.equal(scoped.tabs[0].conversationId, 'conv-owned');
 });
 
+test('browser entries keep local and machine-tagged chats with the same raw id separate', async () => {
+  const { manager } = fixture({ requestOpen: () => {} });
+  manager.setAgentControlReady(true);
+
+  const local = await manager.browserControl('browser.open', { chatId: 'same-chat', url: 'local.example' });
+  const remote = await manager.browserControl('browser.open', { chatId: 'M~san-laptop~same-chat', url: 'remote.example' });
+
+  assert.notEqual(local.id, remote.id);
+  assert.equal(local.conversationId, 'same-chat');
+  assert.equal(remote.conversationId, 'M~san-laptop~same-chat');
+  assert.deepEqual(
+    (await manager.browserControl('browser.list', { chatId: 'same-chat' })).tabs.map((tab) => tab.conversationId),
+    ['same-chat'],
+  );
+  assert.deepEqual(
+    (await manager.browserControl('browser.list', { chatId: 'M~san-laptop~same-chat' })).tabs.map((tab) => tab.conversationId),
+    ['M~san-laptop~same-chat'],
+  );
+});
+
 test('CDP adapter forwards root and child-target commands and events', async () => {
   const { manager } = fixture();
   const tab = await manager.activate({ chatId: 'chat-cdp', bounds: { x: 700, y: 60, width: 460, height: 680 } });

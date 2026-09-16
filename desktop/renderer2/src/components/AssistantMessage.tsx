@@ -11,9 +11,10 @@ import type { TranscriptTimelineSegment } from '../timeline-layout';
 import { fullAssistantText } from '../assistant-output';
 import { relTime } from '../rel-time';
 import { messageImageSrc } from '../image-drafts';
+import { hostedArtifactURL } from '../browser';
 import { normalizeMarkdownTarget, type InlineMediaResolver } from '../markdown/inline';
 
-function assistantMediaResolver(images: MessageImage[] | undefined): InlineMediaResolver {
+function assistantMediaResolver(tabId: string, images: MessageImage[] | undefined, artifactOrigin = ''): InlineMediaResolver {
   const bySource = new Map<string, MessageImage>();
   for (const image of images ?? []) {
     if (image.source) bySource.set(normalizeMarkdownTarget(image.source), image);
@@ -24,6 +25,8 @@ function assistantMediaResolver(images: MessageImage[] | undefined): InlineMedia
       const image = bySource.get(normalizeMarkdownTarget(target));
       return image ? { src: messageImageSrc(image), alt: image.name || 'Imagen' } : null;
     },
+    resolveLink: (target) => hostedArtifactURL(target, artifactOrigin),
+    openLink: (target) => store.openHostedArtifact(tabId, target, artifactOrigin),
     open: (media) => store.openImageLightbox(media.src, media.alt),
   };
 }
@@ -69,6 +72,7 @@ function AssistantSliceBody({
   terminal,
   turnSeq,
   coalescedSegments,
+  artifactOrigin,
 }: {
   tabId: string;
   msg: Msg;
@@ -76,6 +80,7 @@ function AssistantSliceBody({
   terminal: boolean;
   turnSeq?: number;
   coalescedSegments?: TranscriptTimelineSegment[];
+  artifactOrigin?: string;
 }) {
   // Thinking is displayed once at the turn tail (or in the live dock), never
   // inline. Remove its capture marker from the prose layout too; otherwise a
@@ -89,7 +94,7 @@ function AssistantSliceBody({
   );
   const parsedSegments = segs.map((segment) => 'prose' in segment ? parseBlocks(segment.prose) : null);
   const resultBlocks = msg.result ? parseBlocks(msg.result) : [];
-  const media = assistantMediaResolver(msg.images);
+  const media = assistantMediaResolver(tabId, msg.images, artifactOrigin);
   const visualizeChatId = store.chat(tabId)?.chatId ?? '';
   const blockKeys = stableMarkdownBlockKeys(msg, parsedSegments.flatMap((blocks) => blocks?.map((block) => block.sig) ?? []));
   let blockIndex = 0;
@@ -118,14 +123,14 @@ function AssistantSliceBody({
         if ('event' in s) return s.event.key === thinkEv?.key ? null : <EventView key={s.event.key} ev={s.event} />;
         return (
           <div className="chatfind-text" data-chat-find-text key={`prose-${segmentIndex}`}>
-            {parsedSegments[segmentIndex]!.map((sb) => <MarkdownBlock key={blockKeys[blockIndex++]} sb={sb} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} />)}
+            {parsedSegments[segmentIndex]!.map((sb) => <MarkdownBlock key={blockKeys[blockIndex++]} sb={sb} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} artifactOrigin={artifactOrigin} />)}
           </div>
         );
       })}
 
       {!!resultBlocks.length && (
         <div className="chatfind-text" data-chat-find-text>
-          {resultBlocks.map((block, index) => <MarkdownBlock key={`result-${index}-${block.sig}`} sb={block} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} />)}
+          {resultBlocks.map((block, index) => <MarkdownBlock key={`result-${index}-${block.sig}`} sb={block} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} artifactOrigin={artifactOrigin} />)}
         </div>
       )}
       <StructuredAssistantImages images={msg.images} />
@@ -166,6 +171,7 @@ interface AssistantBodyProps {
   msg: Msg;
   turnSeq?: number;
   coalescedSegments?: TranscriptTimelineSegment[];
+  artifactOrigin?: string;
 }
 
 interface AssistantRowViewProps extends AssistantBodyProps {
@@ -182,6 +188,7 @@ const AssistantRowView = memo(function AssistantRowView({
   msg,
   turnSeq,
   coalescedSegments,
+  artifactOrigin,
 }: AssistantRowViewProps) {
   return (
     <AssistantSliceBody
@@ -191,6 +198,7 @@ const AssistantRowView = memo(function AssistantRowView({
       terminal={msg.turnTerminal !== false}
       turnSeq={msg.turnTerminal === false ? undefined : turnSeq}
       coalescedSegments={coalescedSegments}
+      artifactOrigin={artifactOrigin}
     />
   );
 }, (a, b) => (
@@ -199,9 +207,10 @@ const AssistantRowView = memo(function AssistantRowView({
   && a.version === b.version
   && a.turnSeq === b.turnSeq
   && a.coalescedSegments === b.coalescedSegments
+  && a.artifactOrigin === b.artifactOrigin
 ));
 
-function AssistantBody({ tabId, msg, turnSeq, coalescedSegments }: AssistantBodyProps) {
+function AssistantBody({ tabId, msg, turnSeq, coalescedSegments, artifactOrigin }: AssistantBodyProps) {
   // Subscribe to this canonical message's topic; token streams bump only this.
   const version = useMsgVersion(msg.id);
   return (
@@ -211,6 +220,7 @@ function AssistantBody({ tabId, msg, turnSeq, coalescedSegments }: AssistantBody
       version={version}
       turnSeq={turnSeq}
       coalescedSegments={coalescedSegments}
+      artifactOrigin={artifactOrigin}
     />
   );
 }
@@ -233,6 +243,7 @@ interface AssistantTurnBlockProps {
   tabId: string;
   messages: Msg[];
   turnSeqs: Array<number | undefined>;
+  artifactOrigin?: string;
 }
 
 // A steered turn can span several canonical assistant rows. Cross-row tool
@@ -241,7 +252,7 @@ interface AssistantTurnBlockProps {
 // sole multi-row subscription owner; its pure row views receive primitive topic
 // versions, so only the changed slice reconciles. Fragments preserve the exact
 // per-message DOM shape used by ordinary singleton rows.
-export function AssistantTurnBlock({ tabId, messages, turnSeqs }: AssistantTurnBlockProps) {
+export function AssistantTurnBlock({ tabId, messages, turnSeqs, artifactOrigin }: AssistantTurnBlockProps) {
   const messageIdsKey = messages.map((message) => message.id).join('\0');
   useTurnBlockMessageVersions(messageIdsKey);
   const coalesced = buildCoalescedTurnBlockTimelineSegments(messages);
@@ -255,6 +266,7 @@ export function AssistantTurnBlock({ tabId, messages, turnSeqs }: AssistantTurnB
             version={store.version(`msg:${msg.id}`)}
             turnSeq={turnSeqs[index]}
             coalescedSegments={coalesced[index]}
+            artifactOrigin={artifactOrigin}
           />
         </div>
       ))}
