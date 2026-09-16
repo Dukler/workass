@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"workass/internal/agenttext"
 
 	"workass/internal/toolcli"
 )
@@ -70,7 +71,7 @@ func (m *Manager) toolContextBrief(sessionID, chatID, tabID string) (string, err
 		quote = func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 	}
 	command := prefix + quote(m.opts.WorkassToolsCommand) + " tools --context " + quote(entry.path)
-	return fmt.Sprintf("Workass tools for this turn: use your built-in shell tool to run `%s list` for the complete catalog, or append `list TOOL_NAME` for one schema. To invoke a tool run `%s call TOOL_NAME --input ARGUMENTS_JSON_FILE`, or pipe one JSON object into the same command without --input. Keep operation_id stable for retries of the same mutation. This is the current session context; use this path instead of paths from earlier turns. Never print or read the context file into chat. Workass tools are CLI commands, not MCP tools. Screenshots return image paths for your built-in image reader.\n\n", command, command), nil
+	return fmt.Sprintf(agenttext.Get("cli.bootstrap"), command, command), nil
 }
 
 func (m *Manager) removeToolContexts() {

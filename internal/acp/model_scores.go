@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+	"workass/internal/agenttext"
 )
 
 // ModelScore is an explicitly user-authored preference. Workass never fills
@@ -178,11 +179,11 @@ type recommendationProfile struct {
 }
 
 var recommendationProfiles = []recommendationProfile{
-	{ID: "smart", Name: "Smart", Description: "Prefer your intelligence rating; use the note for task-specific guidance.", Weights: map[string]int{"intelligence": 75, "taste": 20, "cost": 5}, Effort: "xhigh"},
-	{ID: "tasteful", Name: "Tasteful", Description: "Prefer your taste rating for design and judgment-heavy work.", Weights: map[string]int{"taste": 70, "intelligence": 25, "cost": 5}, Effort: "high"},
-	{ID: "budget", Name: "Budget", Description: "Prefer lower-cost models while retaining intelligence and taste.", Weights: map[string]int{"cost": 60, "intelligence": 25, "taste": 15}, Effort: "medium"},
-	{ID: "balanced", Name: "Balanced", Description: "Balance your intelligence, taste, and inverse-cost ratings.", Weights: map[string]int{"intelligence": 40, "taste": 35, "cost": 25}, Effort: "high"},
-	{ID: "independent-review", Name: "Independent review", Description: "Prefer a smart, tasteful model on another provider when possible.", Weights: map[string]int{"intelligence": 55, "taste": 40, "cost": 5}, Effort: "xhigh"},
+	{ID: "smart", Name: "Smart", Description: agenttext.Get("catalog.recommendation.smart"), Weights: map[string]int{"intelligence": 75, "taste": 20, "cost": 5}, Effort: "xhigh"},
+	{ID: "tasteful", Name: "Tasteful", Description: agenttext.Get("catalog.recommendation.tasteful"), Weights: map[string]int{"taste": 70, "intelligence": 25, "cost": 5}, Effort: "high"},
+	{ID: "budget", Name: "Budget", Description: agenttext.Get("catalog.recommendation.budget"), Weights: map[string]int{"cost": 60, "intelligence": 25, "taste": 15}, Effort: "medium"},
+	{ID: "balanced", Name: "Balanced", Description: agenttext.Get("catalog.recommendation.balanced"), Weights: map[string]int{"intelligence": 40, "taste": 35, "cost": 25}, Effort: "high"},
+	{ID: "independent-review", Name: "Independent review", Description: agenttext.Get("catalog.recommendation.independent-review"), Weights: map[string]int{"intelligence": 55, "taste": 40, "cost": 5}, Effort: "xhigh"},
 }
 
 func recommendationProfileByID(id string) (recommendationProfile, bool) {

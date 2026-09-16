@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"workass/internal/agenttext"
 
 	"workass/internal/acp"
 )
@@ -72,8 +73,8 @@ func browserMCPTools() []map[string]any {
 		}
 		return schema
 	}
-	tabID := map[string]any{"type": "integer", "minimum": 1, "description": "Optional id of a Workass browser tab owned by this chat; defaults to this chat's browser."}
-	operationID := map[string]any{"type": "string", "description": "Caller-stable logical operation id, distinct from the JSON-RPC transport id. Reuse it only for the same immutable request."}
+	tabID := map[string]any{"type": "integer", "minimum": 1, "description": agenttext.Get("schema.browserMCPTools.01")}
+	operationID := map[string]any{"type": "string", "description": agenttext.Get("schema.browserMCPTools.02")}
 	tool := func(name, description string, inputSchema map[string]any, readOnly, idempotent bool) map[string]any {
 		return map[string]any{
 			"name": name, "description": description, "inputSchema": inputSchema,
@@ -84,17 +85,17 @@ func browserMCPTools() []map[string]any {
 		}
 	}
 	return []map[string]any{
-		tool("workass_browser_list", "List Workass browser tabs owned by this chat.", object(map[string]any{}), true, true),
-		tool("workass_browser_open", "Open this chat's Workass browser and optionally navigate it.", object(map[string]any{"url": map[string]any{"type": "string"}, "operation_id": operationID}, "operation_id"), false, false),
-		tool("workass_browser_navigate", "Navigate this chat's Workass browser tab to an HTTP(S) URL.", object(map[string]any{"tab_id": tabID, "url": map[string]any{"type": "string"}, "operation_id": operationID}, "url", "operation_id"), false, false),
-		tool("workass_browser_snapshot", "Read page text plus interactive element roles, focus, editability, bounds, and selectors from this chat's Workass browser.", object(map[string]any{"tab_id": tabID}), true, true),
-		tool("workass_browser_click", "Click an element in this chat's Workass browser using a selector returned by snapshot.", object(map[string]any{"tab_id": tabID, "selector": map[string]any{"type": "string"}, "operation_id": operationID}, "selector", "operation_id"), false, false),
-		tool("workass_browser_type", "Replace the text in an input or editable code surface in this chat's Workass browser and optionally submit it.", object(map[string]any{"tab_id": tabID, "selector": map[string]any{"type": "string"}, "text": map[string]any{"type": "string"}, "submit": map[string]any{"type": "boolean"}, "operation_id": operationID}, "selector", "text", "operation_id"), false, false),
-		tool("workass_browser_scroll", "Scroll this chat's Workass browser tab by pixel offsets.", object(map[string]any{"tab_id": tabID, "x": map[string]any{"type": "number"}, "y": map[string]any{"type": "number"}, "operation_id": operationID}, "operation_id"), false, false),
-		tool("workass_browser_key", "Send a key or modifier shortcut such as Meta+A or Control+Shift+P to this chat's Workass browser tab.", object(map[string]any{"tab_id": tabID, "key": map[string]any{"type": "string"}, "operation_id": operationID}, "key", "operation_id"), false, false),
-		tool("workass_browser_screenshot", "Capture this chat's Workass browser tab as PNG.", object(map[string]any{"tab_id": tabID}), true, true),
-		tool("workass_browser_batch", "Run 1-20 click, type, scroll, key, or snapshot actions against one browser tab owned by this chat.", object(map[string]any{"tab_id": tabID, "actions": map[string]any{"type": "array", "minItems": 1, "maxItems": 20, "items": map[string]any{"type": "object"}}, "operation_id": operationID}, "actions", "operation_id"), false, false),
-		tool("workass_browser_history", "Navigate browser history or reload this chat's Workass browser tab.", object(map[string]any{"tab_id": tabID, "action": map[string]any{"type": "string", "enum": []string{"back", "forward", "reload"}}, "operation_id": operationID}, "action", "operation_id"), false, false),
+		tool("workass_browser_list", agenttext.Get("tools.workass_browser_list"), object(map[string]any{}), true, true),
+		tool("workass_browser_open", agenttext.Get("tools.workass_browser_open"), object(map[string]any{"url": map[string]any{"type": "string"}, "operation_id": operationID}, "operation_id"), false, false),
+		tool("workass_browser_navigate", agenttext.Get("tools.workass_browser_navigate"), object(map[string]any{"tab_id": tabID, "url": map[string]any{"type": "string"}, "operation_id": operationID}, "url", "operation_id"), false, false),
+		tool("workass_browser_snapshot", agenttext.Get("tools.workass_browser_snapshot"), object(map[string]any{"tab_id": tabID}), true, true),
+		tool("workass_browser_click", agenttext.Get("tools.workass_browser_click"), object(map[string]any{"tab_id": tabID, "selector": map[string]any{"type": "string"}, "operation_id": operationID}, "selector", "operation_id"), false, false),
+		tool("workass_browser_type", agenttext.Get("tools.workass_browser_type"), object(map[string]any{"tab_id": tabID, "selector": map[string]any{"type": "string"}, "text": map[string]any{"type": "string"}, "submit": map[string]any{"type": "boolean"}, "operation_id": operationID}, "selector", "text", "operation_id"), false, false),
+		tool("workass_browser_scroll", agenttext.Get("tools.workass_browser_scroll"), object(map[string]any{"tab_id": tabID, "x": map[string]any{"type": "number"}, "y": map[string]any{"type": "number"}, "operation_id": operationID}, "operation_id"), false, false),
+		tool("workass_browser_key", agenttext.Get("tools.workass_browser_key"), object(map[string]any{"tab_id": tabID, "key": map[string]any{"type": "string"}, "operation_id": operationID}, "key", "operation_id"), false, false),
+		tool("workass_browser_screenshot", agenttext.Get("tools.workass_browser_screenshot"), object(map[string]any{"tab_id": tabID}), true, true),
+		tool("workass_browser_batch", agenttext.Get("tools.workass_browser_batch"), object(map[string]any{"tab_id": tabID, "actions": map[string]any{"type": "array", "minItems": 1, "maxItems": 20, "items": map[string]any{"type": "object"}}, "operation_id": operationID}, "actions", "operation_id"), false, false),
+		tool("workass_browser_history", agenttext.Get("tools.workass_browser_history"), object(map[string]any{"tab_id": tabID, "action": map[string]any{"type": "string", "enum": []string{"back", "forward", "reload"}}, "operation_id": operationID}, "action", "operation_id"), false, false),
 	}
 }
 
