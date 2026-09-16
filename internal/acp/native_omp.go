@@ -9,7 +9,6 @@ import (
 	"strings"
 )
 
-// OMP's native default can be yolo; never label it as read-only.
 type ompPermissionPolicy struct{}
 
 func (ompPermissionPolicy) Candidates(intent string) []string {
@@ -23,7 +22,6 @@ func (ompPermissionPolicy) Candidates(intent string) []string {
 	}
 	return nil
 }
-
 func (ompPermissionPolicy) Intent(modeID string) string {
 	switch modeID {
 	case "plan":
@@ -36,29 +34,20 @@ func (ompPermissionPolicy) Intent(modeID string) string {
 	return ""
 }
 
-// ompNativeHostLaunch loads OMP's SDK in Bun. Persisted "acp" arguments are
-// deliberately not forwarded: the SDK owns the native agent/session engine.
+// ompNativeHostLaunch connects the Workass host to the user's installed OMP.
+// Workass does not package OMP's engine, SDK, or Bun runtime.
 func ompNativeHostLaunch(provider ProviderConfig, opts Options, daemonExecutable string) (ProviderConfig, error) {
-	root := strings.TrimSpace(opts.RootDir)
-	platform := runtime.GOOS + "-" + runtime.GOARCH
+	root, platform := strings.TrimSpace(opts.RootDir), runtime.GOOS+"-"+runtime.GOARCH
 	daemonDir := filepath.Dir(strings.TrimSpace(daemonExecutable))
-	host, err := firstNativeFile(strings.TrimSpace(os.Getenv("WORKASS_OMP_HOST")), []string{
-		filepath.Join(daemonDir, "frontier-hosts", platform, "omp-native-host.mjs"),
-		filepath.Join(daemonDir, "frontier-hosts", "omp-native-host.mjs"),
-		filepath.Join(root, "scripts", "omp-native-host.mjs"),
-	})
+	installed, err := resolveInstalledOMPExecutable(provider)
 	if err != nil {
-		return ProviderConfig{}, fmt.Errorf("OMP SDK host: %w", err)
+		return ProviderConfig{}, err
 	}
-	sdk, err := firstNativeFile(strings.TrimSpace(firstNonEmpty(provider.Env["WORKASS_OMP_SDK_MODULE"], os.Getenv("WORKASS_OMP_SDK_MODULE"))), []string{
-		filepath.Join(daemonDir, "frontier-hosts", platform, "node_modules", "@oh-my-pi", "pi-coding-agent", "src", "index.ts"),
-		filepath.Join(daemonDir, "frontier-hosts", "node_modules", "@oh-my-pi", "pi-coding-agent", "src", "index.ts"),
-		filepath.Join(root, "dist-bin", "frontier-hosts", platform, "node_modules", "@oh-my-pi", "pi-coding-agent", "src", "index.ts"),
-	})
+	host, err := firstNativeFile(strings.TrimSpace(os.Getenv("WORKASS_OMP_HOST")), []string{filepath.Join(daemonDir, "frontier-hosts", platform, "omp-installed-host.mjs"), filepath.Join(daemonDir, "frontier-hosts", "omp-installed-host.mjs"), filepath.Join(root, "scripts", "omp-installed-host.mjs")})
 	if err != nil {
-		return ProviderConfig{}, fmt.Errorf("OMP SDK module: %w", err)
+		return ProviderConfig{}, fmt.Errorf("OMP native host: %w", err)
 	}
-	bun, err := resolveOMPHostBun(daemonDir, root, platform)
+	node, err := resolveNativeNode(daemonDir, platform)
 	if err != nil {
 		return ProviderConfig{}, err
 	}
@@ -66,31 +55,28 @@ func ompNativeHostLaunch(provider ProviderConfig, opts Options, daemonExecutable
 	if env == nil {
 		env = map[string]string{}
 	}
-	env["WORKASS_OMP_SDK_MODULE"] = sdk
-	provider.Command = bun
-	provider.ResolvedCommand = ""
-	provider.Args = []string{host}
-	provider.Env = env
+	env["WORKASS_OMP_EXECUTABLE"] = installed
+	provider.Command, provider.ResolvedCommand, provider.Args, provider.Env = node, "", []string{host}, env
 	return provider, nil
 }
 
-func resolveOMPHostBun(daemonDir, root, platform string) (string, error) {
-	if explicit := strings.TrimSpace(os.Getenv("WORKASS_BUN")); explicit != "" {
-		return resolveFrontierNativeCommand(explicit, "WORKASS_BUN")
+func resolveInstalledOMPExecutable(provider ProviderConfig) (string, error) {
+	if explicit := strings.TrimSpace(os.Getenv("WORKASS_OMP")); explicit != "" {
+		return resolveFrontierNativeCommand(explicit, "WORKASS_OMP")
 	}
-	name := "bun"
-	if runtime.GOOS == "windows" {
-		name = "bun.exe"
+	command := strings.TrimSpace(provider.Command)
+	if command != "" && command != "omp" {
+		return resolveFrontierNativeCommand(command, "provider command")
 	}
-	for _, base := range []string{filepath.Join(daemonDir, "frontier-hosts", platform), filepath.Join(daemonDir, "frontier-hosts"), filepath.Join(root, "dist-bin", "frontier-hosts", platform)} {
-		for _, candidate := range []string{filepath.Join(base, name), filepath.Join(base, "bun", name), filepath.Join(base, "bun", "bin", name)} {
-			if executableFile(candidate) {
-				return candidate, nil
-			}
+	if cached := strings.TrimSpace(provider.ResolvedCommand); cached != "" {
+		if resolved, err := resolveFrontierNativeCommand(cached, "resolved OMP command"); err == nil {
+			return resolved, nil
 		}
 	}
-	if resolved, err := exec.LookPath(name); err == nil && executableFile(resolved) {
-		return resolved, nil
+	for _, name := range []string{"omp", "omp.exe", "omp.cmd"} {
+		if resolved, err := exec.LookPath(name); err == nil && executableFile(resolved) {
+			return resolved, nil
+		}
 	}
-	return "", fmt.Errorf("OMP native SDK requires the staged Bun runtime")
+	return "", fmt.Errorf("OMP installed executable: omp was not found on PATH (set WORKASS_OMP to the existing install)")
 }

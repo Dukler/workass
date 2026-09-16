@@ -24,48 +24,63 @@ func TestOMPNativeHostContract(t *testing.T) {
 	}
 }
 
-func TestOMPHostUsesPackagedSDKAndDropsLegacyACPArguments(t *testing.T) {
+func TestOMPInstalledHostContract(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node unavailable for installed host fixture")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, node, "--test", "scripts/tests/omp-native-host.test.mjs")
+	cmd.Dir = repoRoot(t)
+	cmd.Env = append(os.Environ(), "WORKASS_TEST_INSTALLED_OMP=1")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("OMP installed host contract: %v\n%s", err, output)
+	}
+}
+
+func TestOMPHostUsesInstalledCommandAndSharedNode(t *testing.T) {
 	root := t.TempDir()
 	runtimeDir := t.TempDir()
 	bundle := filepath.Join(runtimeDir, "frontier-hosts", runtime.GOOS+"-"+runtime.GOARCH)
-	host := filepath.Join(bundle, "omp-native-host.mjs")
-	sdk := filepath.Join(bundle, "node_modules", "@oh-my-pi", "pi-coding-agent", "src", "index.ts")
-	for _, file := range []string{host, sdk, filepath.Join(root, "scripts", "omp-native-host.mjs")} {
+	host := filepath.Join(bundle, "omp-installed-host.mjs")
+	for _, file := range []string{host, filepath.Join(root, "scripts", "omp-installed-host.mjs")} {
 		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		writeFile(t, file, "// fixture\n")
 	}
-	name := "bun"
-	if runtime.GOOS == "windows" {
-		name = "bun.exe"
-	}
-	bun := filepath.Join(bundle, name)
-	writeExecutable(t, bun, nativeNoopScript())
-	for _, key := range []string{"WORKASS_OMP_HOST", "WORKASS_OMP_SDK_MODULE", "WORKASS_BUN"} {
+	node := filepath.Join(bundle, executableName("node"))
+	writeExecutable(t, node, nativeNoopScript())
+	ompp := filepath.Join(runtimeDir, executableName("omp"))
+	writeExecutable(t, ompp, nativeNoopScript())
+	for _, key := range []string{"WORKASS_OMP_HOST", "WORKASS_OMP_SDK_MODULE", "WORKASS_BUN", "WORKASS_NODE"} {
 		t.Setenv(key, "")
 	}
-	input := ProviderConfig{ID: "omp", Command: "omp", Args: []string{"acp"}, Env: map[string]string{"FIXTURE": "keep"}}
+	t.Setenv("WORKASS_NODE", node)
+	input := ProviderConfig{ID: "omp", Command: ompp, Args: []string{"acp"}, Env: map[string]string{"FIXTURE": "keep"}}
 	got, err := ompNativeHostLaunch(input, Options{RootDir: root}, filepath.Join(runtimeDir, "workass"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Command != bun || len(got.Args) != 1 || got.Args[0] != host || got.Env["WORKASS_OMP_SDK_MODULE"] != sdk || got.Env["FIXTURE"] != "keep" {
+	if got.Command != node || len(got.Args) != 1 || got.Args[0] != host || got.Env["WORKASS_OMP_EXECUTABLE"] != ompp || got.Env["FIXTURE"] != "keep" {
 		t.Fatalf("incorrect native launch: %#v", got)
 	}
-	if input.Env["WORKASS_OMP_SDK_MODULE"] != "" {
+	if input.Env["WORKASS_OMP_EXECUTABLE"] != "" {
 		t.Fatal("mutated provider environment")
-	}
-	t.Setenv("WORKASS_OMP_SDK_MODULE", filepath.Join(root, "missing-sdk.ts"))
-	if _, err := ompNativeHostLaunch(input, Options{RootDir: root}, filepath.Join(runtimeDir, "workass")); err == nil {
-		t.Fatal("explicit missing SDK silently fell back")
 	}
 }
 
-func TestOMPExplicitBunOverrideFailsClosed(t *testing.T) {
-	t.Setenv("WORKASS_BUN", filepath.Join(t.TempDir(), "missing-bun"))
-	if _, err := resolveOMPHostBun(t.TempDir(), t.TempDir(), runtime.GOOS+"-"+runtime.GOARCH); err == nil {
-		t.Fatal("missing explicit Bun silently fell back")
+func TestOMPRejectsMissingInstalledExecutable(t *testing.T) {
+	root := t.TempDir()
+	host := filepath.Join(root, "scripts", "omp-native-host.mjs")
+	os.MkdirAll(filepath.Dir(host), 0o755)
+	writeFile(t, host, "// fixture")
+	t.Setenv("WORKASS_OMP_HOST", host)
+	t.Setenv("WORKASS_OMP_SDK_MODULE", filepath.Join(root, "sdk.mjs"))
+	t.Setenv("WORKASS_BUN", filepath.Join(root, "bun"))
+	if _, err := ompNativeHostLaunch(ProviderConfig{ID: "omp", Command: filepath.Join(root, "missing-omp")}, Options{RootDir: root}, filepath.Join(root, "workass")); err == nil {
+		t.Fatal("missing installed OMP executable was accepted")
 	}
 }
 

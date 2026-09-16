@@ -7,7 +7,7 @@ import path from 'node:path';
 
 if (!process.argv[2]) throw new Error('usage: scripts/tests/omp-sdk-smoke.mjs <frontier-hosts-target-dir>');
 const bundle = path.resolve(process.argv[2]);
-const bun = path.join(bundle, process.platform === 'win32' ? 'bun.exe' : 'bun');
+const bun = process.execPath;
 const sdk = path.join(bundle, 'node_modules/@oh-my-pi/pi-coding-agent/src/index.ts');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'workass-omp-smoke-'));
 const agentDir = path.join(temp, 'agent');
