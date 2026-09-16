@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"workass/internal/agenttext"
 )
 
 const (
@@ -397,11 +398,11 @@ func (m *Manager) runSubagent(runCtx context.Context, run *SubagentRun, prompt, 
 	}()
 	defer m.cancelAndDrainSubagentsForOwner(jobID, 5*time.Second)
 
-	nextPrompt := "Subagent task:\n" + prompt
+	nextPrompt := agenttext.Get("subagent.task") + prompt
 	if !bridge.usesNativeInstructions() {
 		toolBrief, toolErr := m.toolContextBrief(info.SessionID, job.ChatID, job.TabID)
 		if toolErr != nil {
-			toolBrief = "Workass CLI context is unavailable: " + redactSensitiveText(toolErr.Error()) + ".\n"
+			toolBrief = agenttext.Get("cli.unavailable.prefix") + redactSensitiveText(toolErr.Error()) + ".\n"
 		}
 		nextPrompt = toolBrief + buildTurnRuntimeIdentity(bridge, providerID, selectedModel) + m.buildEnvironmentBrief(true) + nextPrompt
 	}
@@ -419,7 +420,7 @@ func (m *Manager) runSubagent(runCtx context.Context, run *SubagentRun, prompt, 
 			// brief were sent with the original task and are still in context.
 			// Resending them bought nothing and cost their full size on every
 			// follow-up.
-			nextPrompt = "Coordinator follow-up for the same delegated task:\n" + followup.Text
+			nextPrompt = agenttext.Get("subagent.followup") + followup.Text
 			continue
 		}
 		if promptErr != nil {

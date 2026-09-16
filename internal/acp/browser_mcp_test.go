@@ -11,18 +11,20 @@ func TestConfiguredBrowserPromptIsAdjacentToEveryTopLevelTurn(t *testing.T) {
 
 	for _, request := range []string{"inspect the visible page", "continue with the same page"} {
 		prompt := manager.buildUserRequestBlock(request, true)
-		ruleAt := strings.LastIndex(prompt, "Browser tools: this top-level Workass chat")
+		ruleAt := strings.LastIndex(prompt, "Browser tools: Workass browser tools are available when useful")
 		requestAt := strings.LastIndex(prompt, "User request:\n"+request)
 		if ruleAt < 0 || requestAt < 0 || ruleAt > requestAt {
 			t.Fatalf("per-turn browser rule is missing or misplaced: rule=%d request=%d prompt=%q", ruleAt, requestAt, prompt)
 		}
+		if strings.Contains(prompt[ruleAt:requestAt], "then call it") || strings.Contains(prompt[ruleAt:requestAt], "only use") {
+			t.Fatal("browser guidance imposes a tool choice")
+		}
 		for _, want := range []string{
 			"Browser tools:",
-			"Workass CLI catalog",
-			"inspect its schema",
+			"CLI catalog",
+			"available when useful",
 			"workass_browser_list",
 			"workass_browser_snapshot",
-			"then call it",
 		} {
 			if !strings.Contains(prompt[ruleAt:requestAt], want) {
 				t.Fatalf("per-turn browser rule missing %q: %q", want, prompt[ruleAt:requestAt])

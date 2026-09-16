@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"workass/internal/agenttext"
 
 	"workass/internal/acp"
 )
@@ -39,7 +40,7 @@ func agentMCPTools() []map[string]any {
 		return map[string]any{"type": "integer", "minimum": min, "description": description}
 	}
 	operationID := func() map[string]any {
-		return str("Caller-stable logical operation id, distinct from the JSON-RPC transport id. Reuse it only for the same immutable request.")
+		return str(agenttext.Get("schema.browserMCPTools.02"))
 	}
 	mutationObject := func(properties map[string]any, required ...string) map[string]any {
 		properties["operation_id"] = operationID()
@@ -56,144 +57,144 @@ func agentMCPTools() []map[string]any {
 		}
 	}
 	return []map[string]any{
-		tool("workass_get_chat_diagnostics", "Read bounded, content-free diagnostics for one exact local or mounted remote chat: turn timings, current input sizes, provider retry/error categories, context usage, compaction and observed fallback. Completed turns and throttled failure checkpoints survive daemon restarts; historical records never imply a live turn. Includes actor queue/permission counts and current-daemon attachment failures. No transcript contents, provider calls, polling or UI changes. Input sizes are not upstream model-request sizes; omitted details were not observed. Returns at most 20 turns and 20 attachment attempts.", object(map[string]any{
-			"tab_id":  str("Exact tab id from workass_list_chats."),
-			"chat_id": str("Exact paired chat id from workass_list_chats."),
-			"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": "Newest matching turns; defaults to 5."},
+		tool("workass_get_chat_diagnostics", agenttext.Get("tools.workass_get_chat_diagnostics"), object(map[string]any{
+			"tab_id":  str(agenttext.Get("schema.agentMCPTools.guidance.02")),
+			"chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.03")),
+			"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": agenttext.Get("schema.agentMCPTools.01")},
 		}, "tab_id", "chat_id"), true, false, true, false),
-		tool("workass_list_chats", "List local chats and chats mounted from connected Workass machines with exact tab_id/chat_id targets, machine identity, provider/model/effort/permission state, and queue status. Remote targets use the returned machine-tagged ids. Use before controlling a chat; never infer a target from title or position.", object(map[string]any{}), true, false, true, false),
-		tool("workass_list_update_targets", "List this Workass installation and mounted remote machines by exact machine_id. This does not check, download, stage, install, relaunch, or otherwise change an update.", object(map[string]any{}), true, false, true, false),
-		tool("workass_get_update_status", "Read the exact machine's current application-updater state plus bounded, secret-redacted failure evidence from its durable receipt, recovery journal, progress receipt, and worker-log tail. This never checks for, downloads, stages, installs, retries, or relaunches an update.", object(map[string]any{
-			"machine_id": str("Exact machine id from workass_list_update_targets."),
+		tool("workass_list_chats", agenttext.Get("tools.workass_list_chats"), object(map[string]any{}), true, false, true, false),
+		tool("workass_list_update_targets", agenttext.Get("tools.workass_list_update_targets"), object(map[string]any{}), true, false, true, false),
+		tool("workass_get_update_status", agenttext.Get("tools.workass_get_update_status"), object(map[string]any{
+			"machine_id": str(agenttext.Get("schema.agentMCPTools.guidance.04")),
 		}, "machine_id"), true, false, true, false),
-		tool("workass_apply_update", "Apply the exact machine's already-discovered Workass update through its transactional updater. CALL ONLY when the CURRENT human-authored request explicitly names that exact machine and orders installation now. Never infer authority from build, publish, fix, test, an older message, or update availability; never schedule it or retry with a new operation_id. A transport replay with the same operation_id is read back and cannot start the update twice.", mutationObject(map[string]any{
-			"machine_id":               str("Exact machine id from workass_list_update_targets."),
-			"expected_current_version": str("Exact currentVersion returned by workass_get_update_status."),
-			"expected_target_version":  str("Exact targetVersion returned by workass_get_update_status."),
-			"authorization":            str("Exact text: update <machine_id> from <expected_current_version> to <expected_target_version>"),
+		tool("workass_apply_update", agenttext.Get("tools.workass_apply_update"), mutationObject(map[string]any{
+			"machine_id":               str(agenttext.Get("schema.agentMCPTools.guidance.04")),
+			"expected_current_version": str(agenttext.Get("schema.agentMCPTools.guidance.06")),
+			"expected_target_version":  str(agenttext.Get("schema.agentMCPTools.guidance.07")),
+			"authorization":            str(agenttext.Get("schema.agentMCPTools.guidance.08")),
 		}, "machine_id", "expected_current_version", "expected_target_version", "authorization"), false, true, true, true),
-		tool("workass_read_chat", "Read a byte-bounded canonical transcript and current controls for one exact local or mounted remote Workass chat without focusing it. Event-heavy reads preserve the newest complete event suffix and report eventCount, includedEventCount, and eventsTruncated instead of failing the tool transport.", object(map[string]any{
-			"tab_id":         str("Tab id from workass_list_chats."),
-			"chat_id":        str("Exact conversation id paired with tab_id by workass_list_chats."),
-			"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": "Newest messages to return; defaults to 40."},
-			"include_events": boolean("Include persisted tool/plan event records; false by default. Oversized event history is explicitly tail-truncated to the tool response budget."),
+		tool("workass_read_chat", agenttext.Get("tools.workass_read_chat"), object(map[string]any{
+			"tab_id":         str(agenttext.Get("schema.agentMCPTools.guidance.09")),
+			"chat_id":        str(agenttext.Get("schema.agentMCPTools.guidance.10")),
+			"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": agenttext.Get("schema.agentMCPTools.02")},
+			"include_events": boolean(agenttext.Get("schema.agentMCPTools.guidance.11")),
 		}, "tab_id", "chat_id"), true, false, true, false),
-		tool("workass_create_chat", "Create a durable Workass chat. Selection and cwd inherit the calling chat unless explicitly supplied and validated against the live catalog. Does not focus the UI unless focus=true.", mutationObject(map[string]any{
-			"title":             str("Chat title; defaults to Nuevo chat."),
-			"cwd":               str("Absolute server directory, or inherit."),
-			"provider_id":       str("Provider id from workass_agent_catalog."),
-			"model_id":          str("Base model id from workass_agent_catalog."),
-			"effort":            str("Exact effort exposed by the selected model."),
-			"mode_id":           str("Exact provider-native permission mode."),
-			"permission_intent": enum("Provider-neutral permission intent; mutually exclusive with mode_id.", "read", "edit", "full"),
-			"focus":             boolean("Select the created chat in the user's UI."),
+		tool("workass_create_chat", agenttext.Get("tools.workass_create_chat"), mutationObject(map[string]any{
+			"title":             str(agenttext.Get("schema.agentMCPTools.guidance.12")),
+			"cwd":               str(agenttext.Get("schema.agentMCPTools.guidance.13")),
+			"provider_id":       str(agenttext.Get("schema.agentMCPTools.guidance.14")),
+			"model_id":          str(agenttext.Get("schema.agentMCPTools.guidance.15")),
+			"effort":            str(agenttext.Get("schema.agentMCPTools.guidance.16")),
+			"mode_id":           str(agenttext.Get("schema.agentMCPTools.guidance.17")),
+			"permission_intent": enum(agenttext.Get("schema.agentMCPTools.guidance.18"), "read", "edit", "full"),
+			"focus":             boolean(agenttext.Get("schema.agentMCPTools.guidance.19")),
 		}), false, false, false, false),
-		tool("workass_rename_chat", "Rename one exact Workass chat without changing the active tab or any other chat state.", mutationObject(map[string]any{
-			"tab_id": str("Tab id from workass_list_chats."), "chat_id": str("Paired conversation id."), "title": str("New title."),
+		tool("workass_rename_chat", agenttext.Get("tools.workass_rename_chat"), mutationObject(map[string]any{
+			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")), "title": str(agenttext.Get("schema.agentMCPTools.guidance.22")),
 		}, "tab_id", "chat_id", "title"), false, false, false, false),
-		tool("workass_configure_chat", "Set cwd/provider/model/effort/permission for one exact chat. Every selection is validated against the live provider catalog and the resolved native ids are returned.", mutationObject(map[string]any{
-			"tab_id":            str("Tab id from workass_list_chats."),
-			"chat_id":           str("Paired conversation id."),
-			"cwd":               str("Absolute server directory; omit to preserve."),
-			"provider_id":       str("Provider id from workass_agent_catalog; omit to preserve."),
-			"model_id":          str("Base model id from workass_agent_catalog; omit to preserve."),
-			"effort":            str("Exact effort exposed by the selected model; omit to use the provider default."),
-			"mode_id":           str("Exact provider-native permission mode; mutually exclusive with permission_intent."),
-			"permission_intent": enum("Provider-neutral permission intent.", "read", "edit", "full"),
+		tool("workass_configure_chat", agenttext.Get("tools.workass_configure_chat"), mutationObject(map[string]any{
+			"tab_id":            str(agenttext.Get("schema.agentMCPTools.guidance.09")),
+			"chat_id":           str(agenttext.Get("schema.agentMCPTools.guidance.21")),
+			"cwd":               str(agenttext.Get("schema.agentMCPTools.guidance.25")),
+			"provider_id":       str(agenttext.Get("schema.agentMCPTools.guidance.26")),
+			"model_id":          str(agenttext.Get("schema.agentMCPTools.guidance.27")),
+			"effort":            str(agenttext.Get("schema.agentMCPTools.guidance.28")),
+			"mode_id":           str(agenttext.Get("schema.agentMCPTools.guidance.29")),
+			"permission_intent": enum(agenttext.Get("schema.agentMCPTools.guidance.30"), "read", "edit", "full"),
 		}, "tab_id", "chat_id"), false, false, false, false),
-		tool("workass_focus_chat", "Focus one exact Workass chat in the user's UI. This is the only chat tool that changes the active tab by default.", mutationObject(map[string]any{
-			"tab_id": str("Tab id from workass_list_chats."), "chat_id": str("Paired conversation id."),
+		tool("workass_focus_chat", agenttext.Get("tools.workass_focus_chat"), mutationObject(map[string]any{
+			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")),
 		}, "tab_id", "chat_id"), false, false, true, false),
-		tool("workass_delete_chat", "Delete one exact Workass chat and its native binding. Refuses a running turn unless force=true explicitly authorizes cancellation and deletion.", mutationObject(map[string]any{
-			"tab_id": str("Tab id from workass_list_chats."), "chat_id": str("Paired conversation id."),
-			"force": boolean("Cancel a running turn before deleting."),
+		tool("workass_delete_chat", agenttext.Get("tools.workass_delete_chat"), mutationObject(map[string]any{
+			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")),
+			"force": boolean(agenttext.Get("schema.agentMCPTools.guidance.35")),
 		}, "tab_id", "chat_id"), false, true, false, false),
-		tool("workass_send_chat_message", "Send text to one exact local or mounted remote chat without focusing it. auto sends at the next idle boundary and queue preserves FIFO order. Local chats also support steer; mounted remote chats reject steer and require auto or queue so a lost route reply cannot duplicate live input.", mutationObject(map[string]any{
-			"tab_id":   str("Tab id from workass_list_chats."),
-			"chat_id":  str("Paired conversation id."),
-			"message":  str("Message to send."),
-			"delivery": enum("Delivery behavior; defaults to auto.", "auto", "queue", "steer"),
+		tool("workass_send_chat_message", agenttext.Get("tools.workass_send_chat_message"), mutationObject(map[string]any{
+			"tab_id":   str(agenttext.Get("schema.agentMCPTools.guidance.09")),
+			"chat_id":  str(agenttext.Get("schema.agentMCPTools.guidance.21")),
+			"message":  str(agenttext.Get("schema.agentMCPTools.guidance.38")),
+			"delivery": enum(agenttext.Get("schema.agentMCPTools.guidance.39"), "auto", "queue", "steer"),
 		}, "tab_id", "chat_id", "message"), false, false, false, true),
-		tool("workass_cancel_chat_turn", "Cancel the currently running turn in one exact chat. Does not delete queued follow-ups.", mutationObject(map[string]any{
-			"tab_id": str("Tab id from workass_list_chats."), "chat_id": str("Paired conversation id."),
+		tool("workass_cancel_chat_turn", agenttext.Get("tools.workass_cancel_chat_turn"), mutationObject(map[string]any{
+			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")),
 		}, "tab_id", "chat_id"), false, true, false, false),
-		tool("workass_agent_catalog", "List the actual Workass providers, models, reasoning effort levels, and permission/mode ids available for tracked subagents. Call this instead of guessing model ids from config files.", object(map[string]any{}), true, false, true, false),
-		tool("workass_host_artifact", "Host a file or static directory once from the calling agent's Workass cwd. Returns one stable URL (a Workass link) and ready-to-use markdown usable by connected Workass instances; put that markdown in your response rather than a local path. Any file type. A directory defaults to index.html, else pass entry.", mutationObject(map[string]any{
-			"source_path": str("Supported artifact file or static directory, absolute or relative to the calling agent's Workass cwd."),
-			"entry":       str("Relative entry artifact for a directory; defaults to index.html when present and is ignored for a file."),
-			"name":        str("Optional short human label used in the stable hosted id."),
+		tool("workass_agent_catalog", agenttext.Get("tools.workass_agent_catalog"), object(map[string]any{}), true, false, true, false),
+		tool("workass_host_artifact", agenttext.Get("tools.workass_host_artifact"), mutationObject(map[string]any{
+			"source_path": str(agenttext.Get("schema.agentMCPTools.guidance.42")),
+			"entry":       str(agenttext.Get("schema.agentMCPTools.guidance.43")),
+			"name":        str(agenttext.Get("schema.agentMCPTools.guidance.44")),
 		}, "source_path"), false, false, true, true),
-		tool("workass_spawn_subagent", "Start a tracked subagent and return immediately. Omitted selection/cwd inherits the current turn. Explicit ids must come from workass_agent_catalog. Available even when the owning chat has no running turn.", map[string]any{
+		tool("workass_spawn_subagent", agenttext.Get("tools.workass_spawn_subagent"), map[string]any{
 			"type":                 "object",
 			"additionalProperties": false,
 			"required":             []string{"task", "operation_id"},
 			"properties": map[string]any{
 				"operation_id":      operationID(),
-				"task":              str("Complete task for the child agent."),
-				"label":             str("Short name shown in the Workass Turnos rail."),
-				"profile":           enum("Optional user-scored selection profile.", "smart", "tasteful", "budget", "balanced", "independent-review"),
-				"provider_id":       str("Optional provider id from workass_agent_catalog; defaults to the profile recommendation or current provider."),
-				"model_id":          str("Optional base model id from workass_agent_catalog; defaults to the profile recommendation or current model."),
-				"effort":            str("Optional exact effort from the selected catalog model; defaults to profile/current/high."),
-				"mode_id":           str("Optional provider-native permission mode from workass_agent_catalog."),
-				"permission_intent": enum("Provider-neutral permission intent used when mode_id is omitted. DEFAULTS TO inherit, which gives the child this chat's own effective mode — usually what you want. read and edit are NARROWER than inherit, not safer defaults: they select modes that stop and ask, so the child can park on a request only a human can answer. Reach for them when you mean to restrict the child, and be ready to answer with workass_decide_subagent_permission.", "inherit", "read", "edit", "full"),
-				"cwd":               str("Absolute or Workass-root-relative working directory; omit or use inherit for the parent cwd."),
+				"task":              str(agenttext.Get("schema.agentMCPTools.guidance.45")),
+				"label":             str(agenttext.Get("schema.agentMCPTools.guidance.46")),
+				"profile":           enum(agenttext.Get("schema.agentMCPTools.guidance.47"), "smart", "tasteful", "budget", "balanced", "independent-review"),
+				"provider_id":       str(agenttext.Get("schema.agentMCPTools.guidance.48")),
+				"model_id":          str(agenttext.Get("schema.agentMCPTools.guidance.49")),
+				"effort":            str(agenttext.Get("schema.agentMCPTools.guidance.50")),
+				"mode_id":           str(agenttext.Get("schema.agentMCPTools.guidance.51")),
+				"permission_intent": enum(agenttext.Get("schema.agentMCPTools.guidance.52"), "inherit", "read", "edit", "full"),
+				"cwd":               str(agenttext.Get("schema.agentMCPTools.guidance.53")),
 			},
 		}, false, true, false, true),
-		tool("workass_list_subagents", "List tracked subagents owned by the current Workass turn, including selection, status, and bounded result/error text. Adopted runs from the same chat remain listed across turns and while the chat is idle.", object(map[string]any{}), true, false, true, false),
-		tool("workass_wait_subagent", "Wait for one tracked subagent and durably record the wait observation. A child permission request forcibly ends the wait with needsAttention=true, which you must read before continuing; otherwise returns the final result or error.", mutationObject(map[string]any{
-			"subagent_id": str("Subagent id returned by spawn/list."),
-			"timeout_ms":  map[string]any{"type": "integer", "minimum": 1000, "maximum": 3600000, "description": "Wait timeout in milliseconds; defaults to 10 minutes."},
+		tool("workass_list_subagents", agenttext.Get("tools.workass_list_subagents"), object(map[string]any{}), true, false, true, false),
+		tool("workass_wait_subagent", agenttext.Get("tools.workass_wait_subagent"), mutationObject(map[string]any{
+			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.54")),
+			"timeout_ms":  map[string]any{"type": "integer", "minimum": 1000, "maximum": 3600000, "description": agenttext.Get("schema.agentMCPTools.03")},
 		}, "subagent_id"), false, false, false, false),
-		tool("workass_wait_subagents", "Wait for the first or all selected subagents and durably record the wait observation; returns completed plus still-running snapshots. A child permission request ends the wait with a latched attention list to read. Timeout is a normal result, not an error.", mutationObject(map[string]any{
+		tool("workass_wait_subagents", agenttext.Get("tools.workass_wait_subagents"), mutationObject(map[string]any{
 			"subagent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 8},
-			"return_when":  enum("Return after the first completion or after all complete.", "first", "all"),
-			"timeout_ms":   map[string]any{"type": "integer", "minimum": 1000, "maximum": 3600000, "description": "Wait timeout in milliseconds; defaults to 10 minutes."},
+			"return_when":  enum(agenttext.Get("schema.agentMCPTools.guidance.55"), "first", "all"),
+			"timeout_ms":   map[string]any{"type": "integer", "minimum": 1000, "maximum": 3600000, "description": agenttext.Get("schema.agentMCPTools.03")},
 		}, "subagent_ids"), false, false, false, false),
-		tool("workass_message_subagent", "Send coordinator feedback to a running subagent. It persists one immediate follow-up before attempting acknowledged live steering; unsupported or rejected steering leaves that same follow-up queued without interrupting the child.", mutationObject(map[string]any{
-			"subagent_id": str("Running subagent id."),
-			"message":     str("Correction, clarification, or additional direction."),
+		tool("workass_message_subagent", agenttext.Get("tools.workass_message_subagent"), mutationObject(map[string]any{
+			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.56")),
+			"message":     str(agenttext.Get("schema.agentMCPTools.guidance.57")),
 		}, "subagent_id", "message"), false, false, false, true),
-		tool("workass_retry_subagent", "Retry a completed/failed/cancelled subagent with the same resolved selection and optional additional guidance.", mutationObject(map[string]any{
-			"subagent_id": str("Settled subagent id to retry."),
-			"message":     str("Optional retry guidance."),
+		tool("workass_retry_subagent", agenttext.Get("tools.workass_retry_subagent"), mutationObject(map[string]any{
+			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.58")),
+			"message":     str(agenttext.Get("schema.agentMCPTools.guidance.59")),
 		}, "subagent_id"), false, true, false, true),
-		tool("workass_list_subagent_receipts", "List bounded durable subagent result receipts from this chat, including previous turns.", object(map[string]any{
-			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 256, "description": "Newest receipts to return; defaults to 32."},
+		tool("workass_list_subagent_receipts", agenttext.Get("tools.workass_list_subagent_receipts"), object(map[string]any{
+			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 256, "description": agenttext.Get("schema.agentMCPTools.05")},
 		}), true, false, true, false),
-		tool("workass_list_spawned_work", "List background Bash, Agent, and Workflow work passively observed for one exact Workass chat, including live status and an optional bounded output tail.", object(map[string]any{
-			"tab_id":     str("Tab id from workass_list_chats."),
-			"chat_id":    str("Paired conversation id."),
-			"tail_chars": map[string]any{"type": "integer", "minimum": 0, "maximum": 12000, "description": "Optional redacted output tail characters per item; 0 omits tails."},
+		tool("workass_list_spawned_work", agenttext.Get("tools.workass_list_spawned_work"), object(map[string]any{
+			"tab_id":     str(agenttext.Get("schema.agentMCPTools.guidance.09")),
+			"chat_id":    str(agenttext.Get("schema.agentMCPTools.guidance.21")),
+			"tail_chars": map[string]any{"type": "integer", "minimum": 0, "maximum": 12000, "description": agenttext.Get("schema.agentMCPTools.06")},
 		}, "tab_id", "chat_id"), true, false, true, false),
-		tool("workass_register_external_work", "Register a detached lane that will finish outside the ACP engine. For every ACP provider, work that must outlive the engine must be registered in the same turn; use native subagents for ordinary delegation and workass_spawn_subagent when Workass tracking or cross-provider orchestration is needed. Returns the output and done-marker paths to use.", mutationObject(map[string]any{
-			"label":       str("Short label for the lane; required."),
-			"role":        enum("Lifecycle of the lane. Use work (default) when it finishes and its completion is the answer; use service for a process expected to keep running, such as a dev server, so it does not report this chat as working.", "work", "service"),
-			"pid":         integer("Detached process id, if known.", 2),
-			"output_file": str("Optional absolute output file path under an allowed temp or Workass external-work directory."),
-			"done_file":   str("Optional absolute done marker path; defaults to output_file.done."),
-			"tab_id":      str("Owning tab id; omit for the calling chat."),
-			"chat_id":     str("Owning chat id; omit for the calling chat."),
+		tool("workass_register_external_work", agenttext.Get("tools.workass_register_external_work"), mutationObject(map[string]any{
+			"label":       str(agenttext.Get("schema.agentMCPTools.guidance.62")),
+			"role":        enum(agenttext.Get("schema.agentMCPTools.guidance.63"), "work", "service"),
+			"pid":         integer(agenttext.Get("schema.agentMCPTools.guidance.64"), 2),
+			"output_file": str(agenttext.Get("schema.agentMCPTools.guidance.65")),
+			"done_file":   str(agenttext.Get("schema.agentMCPTools.guidance.66")),
+			"tab_id":      str(agenttext.Get("schema.agentMCPTools.guidance.67")),
+			"chat_id":     str(agenttext.Get("schema.agentMCPTools.guidance.68")),
 		}, "label"), false, false, false, true),
-		tool("workass_settle_external_work", "Mark a registered external lane finished. Repeating the same settle is idempotent.", mutationObject(map[string]any{
-			"work_id":   str("workId returned by workass_register_external_work."),
-			"status":    enum("Terminal status.", "exited", "failed"),
-			"exit_code": integer("Process exit code, if known.", 0),
-			"summary":   str("Optional short completion summary; Workass redacts secret-shaped text."),
-			"tab_id":    str("Owning tab id; omit for the calling chat."),
-			"chat_id":   str("Owning chat id; omit for the calling chat."),
+		tool("workass_settle_external_work", agenttext.Get("tools.workass_settle_external_work"), mutationObject(map[string]any{
+			"work_id":   str(agenttext.Get("schema.agentMCPTools.guidance.69")),
+			"status":    enum(agenttext.Get("schema.agentMCPTools.guidance.70"), "exited", "failed"),
+			"exit_code": integer(agenttext.Get("schema.agentMCPTools.guidance.71"), 0),
+			"summary":   str(agenttext.Get("schema.agentMCPTools.guidance.72")),
+			"tab_id":    str(agenttext.Get("schema.agentMCPTools.guidance.67")),
+			"chat_id":   str(agenttext.Get("schema.agentMCPTools.guidance.68")),
 		}, "work_id", "status"), false, false, true, true),
-		tool("workass_list_spawned_work_receipts", "List bounded durable completion receipts for passively observed background work in one exact Workass chat.", object(map[string]any{
-			"tab_id":  str("Tab id from workass_list_chats."),
-			"chat_id": str("Paired conversation id."),
-			"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 256, "description": "Newest receipts to return; defaults to 32."},
+		tool("workass_list_spawned_work_receipts", agenttext.Get("tools.workass_list_spawned_work_receipts"), object(map[string]any{
+			"tab_id":  str(agenttext.Get("schema.agentMCPTools.guidance.09")),
+			"chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")),
+			"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 256, "description": agenttext.Get("schema.agentMCPTools.05")},
 		}, "tab_id", "chat_id"), true, false, true, false),
-		tool("workass_cancel_subagent", "Cancel one tracked subagent owned by the current Workass turn.", mutationObject(map[string]any{
-			"subagent_id": str("Subagent id returned by spawn/list."),
+		tool("workass_cancel_subagent", agenttext.Get("tools.workass_cancel_subagent"), mutationObject(map[string]any{
+			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.54")),
 		}, "subagent_id"), false, true, false, false),
-		tool("workass_decide_subagent_permission", "Allow or deny a permission request from one of your tracked subagents. Allowed actions are limited to this chat's current permission mode.", mutationObject(map[string]any{
-			"subagent_id": str("Subagent id reported with needsAttention by wait/list."),
-			"decision":    enum("Allow or deny the action the subagent asked to take.", "allow", "deny"),
+		tool("workass_decide_subagent_permission", agenttext.Get("tools.workass_decide_subagent_permission"), mutationObject(map[string]any{
+			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.78")),
+			"decision":    enum(agenttext.Get("schema.agentMCPTools.guidance.79"), "allow", "deny"),
 		}, "subagent_id", "decision"), false, true, false, false),
 	}
 }
