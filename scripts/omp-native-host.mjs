@@ -13,7 +13,8 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 const sessions = new Map();
 const pending = new Map();
 let seq = 0;
-const write = (x) => process.stdout.write(`${JSON.stringify(x)}\n`);
+let protocolOutput = process.stdout;
+const write = (x) => protocolOutput.write(`${JSON.stringify(x)}\n`);
 const respond = (id, result) => write({ jsonrpc: '2.0', id, result });
 const safe = (x) => String(x?.message || x || 'OMP request failed')
   .replace(/((?:api[_-]?key|token|secret|password|credential|bearer)\s*[:=]\s*)[^\s,;}]+/gi, '$1[redacted]')
@@ -84,6 +85,8 @@ export class OmpSession {
     const extra = await instructions();
     const result = await mod.createAgentSession({ cwd: this.cwd, sessionManager: manager, model: this.params.modelObject, thinkingLevel: this.currentEffort, appendSystemPrompt: extra || undefined, hasUI: false, interactivePrompts: true, autoApprove: false, agentRegistry: new mod.AgentRegistry() });
     this.native = result.session;
+    await manager.ensureOnDisk();
+    await manager.flush();
     const ui = {
       select: async (title, options, dialog) => {
         const labels = options.map(x => typeof x === 'string' ? x : x.label);
@@ -223,8 +226,8 @@ export class OmpSession {
 async function open(params, resume) { const id = String(params?.sessionId || '').trim() || randomUUID(); if (resume && !params?.sessionFile && !params?.sessionId) throw new Error('OMP session/resume requires exact session id'); if (sessions.has(id)) return sessions.get(id); const s = new OmpSession(id, String(params?.cwd || process.cwd()), resume, params); await s.start(); if (!resume) s.id = String(s.native?.sessionManager?.getSessionId?.() || s.native?.sessionId || s.id); sessions.set(s.id, s); return s; }
 async function request(m) {
   const { id, method, params = {} } = m;
-  if (method === 'initialize') return respond(id, { protocolVersion: Number(params.protocolVersion || 1), agentInfo: { name: 'oh-my-pi', version: '18.1.8' }, agentCapabilities: { sessionCapabilities: { resume: {}, close: {} }, promptCapabilities: { image: true, audio: false, embeddedContext: false }, mcpCapabilities: { http: false, sse: false } }, authMethods: [], _meta: { workassNativeOMP: true, workassStableTurnInputV1: true } });
-  if (method === 'session/new' || method === 'session/resume' || method === 'session/load') { const s = await open(params, method !== 'session/new'); return respond(id, { ...(method === 'session/new' ? { sessionId: s.id } : {}), configOptions: s.options(), availableModels: s.models, _meta: { workassProviderRealm: { accountScope: 'unverified-account', installScope: 'omp-sdk-18.1.8', verified: false } } }); }
+  if (method === 'initialize') return respond(id, { protocolVersion: Number(params.protocolVersion || 1), agentInfo: { name: 'oh-my-pi', version: String((await sdk()).VERSION || 'unknown') }, agentCapabilities: { sessionCapabilities: { resume: {}, close: {} }, promptCapabilities: { image: true, audio: false, embeddedContext: false }, mcpCapabilities: { http: false, sse: false } }, authMethods: [], _meta: { workassNativeOMP: true, workassStableTurnInputV1: true } });
+  if (method === 'session/new' || method === 'session/resume' || method === 'session/load') { const s = await open(params, method !== 'session/new'); return respond(id, { ...(method === 'session/new' ? { sessionId: s.id } : {}), configOptions: s.options(), availableModels: s.models, _meta: { workassProviderRealm: { accountScope: 'unverified-account', installScope: 'omp-sdk', verified: false } } }); }
   const s = sessions.get(String(params.sessionId || '')); if (!s) throw Object.assign(new Error('OMP session not found'), { rpcCode: -32000 });
   if (method === 'session/prompt') return respond(id, await s.prompt(params));
   if (method === 'session/set_config_option') return respond(id, await s.setConfig(String(params.configId || ''), params.value));
@@ -233,9 +236,13 @@ async function request(m) {
   if (method === 'session/close') { await s.close(); sessions.delete(s.id); return respond(id, {}); }
   throw Object.assign(new Error(`OMP host method not found: ${method}`), { rpcCode: -32601 });
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+export function serveOMP({ sdkModule, input = process.stdin, output = process.stdout } = {}) {
+if (sdkModule) sdkPromise = Promise.resolve(sdkModule);
+protocolOutput = output;
+const lines = readline.createInterface({ input, crlfDelay: Infinity });
 lines.on('line', line => { let m; try { m = JSON.parse(line); } catch { return diagnostic('OMP host invalid JSON', 'parse failure'); } if (m && Object.hasOwn(m, 'id') && !m.method) { const p = pending.get(String(m.id)); if (p) { pending.delete(String(m.id)); p(m.result ?? null); } return; } if (m?.method && Object.hasOwn(m, 'id')) void request(m).catch(e => fail(m.id, e.rpcCode || -32603, e)); if (m?.method === 'session/cancel') { const s=sessions.get(String(m.params?.sessionId || '')); if(s) { s.turnAbort?.abort(); s.lastStopReason='cancelled'; void s.native.abort({reason:'interrupted'}).catch(e=>diagnostic('OMP cancel failed',e)); } } });
-lines.on('close', () => { for (const s of sessions.values()) void s.close(); });
+return new Promise(resolve => lines.on('close', async () => { await Promise.allSettled([...sessions.values()].map(s => s.close())); sessions.clear(); resolve(); }));
 
 }
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await serveOMP();

@@ -12,7 +12,7 @@ async function setup(t) {
   return dir;
 }
 function run(t,dir,env={}) {
-  const p=spawn(process.execPath,[host],{env:{...process.env,WORKASS_OMP_SDK_MODULE:fixture,WORKASS_OMP_FIXTURE_DIR:dir,...env},stdio:['pipe','pipe','pipe']});
+  const p=spawn(process.execPath,[process.env.WORKASS_TEST_INSTALLED_OMP ? path.resolve('scripts/omp-installed-host.mjs') : host],{env:{...process.env,WORKASS_OMP_SDK_MODULE:fixture,WORKASS_OMP_EXECUTABLE:path.resolve('desktop/acp/mock-omp-cli.mjs'),WORKASS_OMP_FIXTURE_DIR:dir,...env},stdio:['pipe','pipe','pipe']});
   t.after(()=>p.kill());
   const out=[], waiters=[];
   readline.createInterface({input:p.stdout}).on('line',line=>{
@@ -78,4 +78,21 @@ test('permissions reach Workass; full access skips ordinary approval; cancellati
   await h.wait(x=>x.params?.update?.clientUserMessageId==='waiting');h.send({method:'session/cancel',params:{sessionId:s.sessionId}});assert.equal((await waiting).stopReason,'cancelled');
   await h.call('session/prompt',{sessionId:s.sessionId,prompt:'COMPACT'});
   assert.ok(h.out.some(x=>x.params?.update?.sessionUpdate==='_workass_compaction'&&x.params.update.phase==='checkpoint'));
+});
+
+
+test('installed OMP commands preserve argument boundaries for binaries and Windows shims', async () => {
+  const {installedOMPCommand} = await import('../omp-installed-host.mjs');
+  const direct=installedOMPCommand('/installed/omp','/host/extension.mjs',{},'darwin');
+  assert.equal(direct.command,'/installed/omp');
+  assert.equal(direct.args.at(-1),'/host/extension.mjs');
+  const executable=String.raw`C:\Users\A&B %name%!\omp.cmd`;
+  const extension=String.raw`C:\Workass space\extension.mjs`;
+  const shim=installedOMPCommand(executable,extension,{},'win32');
+  assert.equal(shim.command,'cmd.exe');
+  assert.deepEqual(shim.args.slice(0,4),['/d','/v:off','/s','/c']);
+  assert.ok(!shim.args.at(-1).includes(executable));
+  assert.equal(shim.env.WORKASS_OMP_EXECUTABLE,executable);
+  assert.equal(shim.env.WORKASS_OMP_EXTENSION,extension);
+  assert.throws(()=>installedOMPCommand('bad".cmd',extension,{},'win32'),/Invalid/);
 });

@@ -122,7 +122,7 @@ if [ "$runtime_input_root" = "$repo_root/dist-bin" ]; then
   packaged_daemon="$package_root/workass-$bundle_version-$bundle_build"
   echo "[package] building bundled daemon $bundle_version" | tee -a "$log_file"
   (cd "$repo_root" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath \
-    -ldflags "-X main.daemonVersion=$bundle_version" -o "$packaged_daemon" ./cmd/workass) >>"$log_file" 2>&1
+    -ldflags "-s -w -X main.daemonVersion=$bundle_version" -o "$packaged_daemon" ./cmd/workass) >>"$log_file" 2>&1
   echo "[package] staging native provider hosts" | tee -a "$log_file"
   "$repo_root/scripts/vendor-frontier-hosts.sh" --target darwin-arm64 --offline >>"$log_file" 2>&1
   echo "[package] staging portable Node runtime" | tee -a "$log_file"

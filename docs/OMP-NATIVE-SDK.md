@@ -37,9 +37,11 @@ Per-tool native policy remains authoritative. Default preserves native settings
 and is never claimed to be read-only. Plan proposals use the SDK review handler;
 leaving Plan requires the user's mode selection. No global OMP settings are saved.
 
-OMP SDK 18.1.8 and Bun 1.3.14 are bundled with a committed npm integrity lock.
-The standalone OMP CLI remains the discovery/login entrypoint; its `update` action
-is not advertised as an SDK update. Bundled engine upgrades ship with Workass.
+Superseding user authority (2026-09-16): OMP must already be installed; no engine
+or Bun is bundled. See INTEGRATION-PACKAGING.md for the installed executable's
+public extension/SDK bridge. WORKASS_OMP selects the install and the launcher
+passes WORKASS_OMP_EXECUTABLE to the small transport wrapper. SDK upgrades are
+owned by that installed OMP, not Workass releases.
 Native tools, local auth and extensions are discovered by the SDK. Extension
 operations that replace the current native session fail explicitly because they
 would invalidate Workass's exact thread binding. Terminal-only custom UI/text
