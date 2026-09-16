@@ -7,6 +7,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import process from 'node:process';
 import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
@@ -475,7 +476,7 @@ class ClaudeSession {
     return {
       cwd: this.cwd,
       pathToClaudeCodeExecutable: executable,
-      systemPrompt: { type: 'preset', preset: 'claude_code' },
+      systemPrompt: { type: 'preset', preset: 'claude_code', ...(process.env.WORKASS_INSTRUCTIONS_FILE ? { append: readFileSync(process.env.WORKASS_INSTRUCTIONS_FILE, 'utf8') } : {}) },
       // A delegated child does not load the user's own instruction file. The
       // repo's does still load: the laws a child works under belong to the
       // repository, not to the person who happens to be driving.

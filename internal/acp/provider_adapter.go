@@ -14,6 +14,7 @@ import (
 // semantic differences. Chat, lifecycle, persistence, and renderer code consume
 // these strategies and never branch on provider branding.
 type providerAdapter struct {
+	instructions  nativeInstructionDelivery
 	delivery      providerDeliveryStrategy
 	context       providerContextPolicy
 	creation      providercontract.CreationCapabilities

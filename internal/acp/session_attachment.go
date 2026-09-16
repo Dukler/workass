@@ -113,6 +113,10 @@ func (b *Bridge) RestoreSession(ctx context.Context, binding nativeSessionBindin
 		"mcpServers": mcpServers,
 	}
 	releaseOwner := b.manager.provisionAgentOwner(opts)
+	if err := b.bindNativeToolContext(opts.AgentOwnerKey, opts.ChatID, opts.TabID); err != nil {
+		releaseOwner()
+		return SessionInfo{}, string(attachment.method), err
+	}
 	if attachment.replaysHistory {
 		b.beginSessionLoad(sessionID)
 		defer b.endSessionLoad(sessionID)

@@ -391,6 +391,12 @@ async function handle(message) {
     else model.serviceTiers = [];
   }
   if (method === 'model/list') return respond(id, { data: [model, secondaryModel], nextCursor: null });
+  if (method === 'config/read') return respond(id, { config: { developer_instructions: 'User developer instructions.' } });
+  if ((method === 'thread/start' || method === 'thread/resume') && process.env.WORKASS_FIXTURE_NATIVE_INSTRUCTIONS) {
+    if (params.developerInstructions !== 'User developer instructions.\n\nFixture Workass instructions.' || 'baseInstructions' in params || 'history' in params) {
+      return write({ id, error: { code: -32602, message: 'native instructions not appended independently of history and base prompt' } });
+    }
+  }
   if (method === 'thread/start') {
     if (process.env.WORKASS_CODEX_FIXTURE_AUTH_ERROR === '1') {
       return write({ id, error: { code: -32000, message: 'Authentication required: run codex login' } });

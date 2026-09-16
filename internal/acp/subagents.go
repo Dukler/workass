@@ -397,12 +397,14 @@ func (m *Manager) runSubagent(runCtx context.Context, run *SubagentRun, prompt, 
 	}()
 	defer m.cancelAndDrainSubagentsForOwner(jobID, 5*time.Second)
 
-	toolBrief, toolErr := m.toolContextBrief(info.SessionID, job.ChatID, job.TabID)
-	if toolErr != nil {
-		toolBrief = "Workass CLI context is unavailable: " + redactSensitiveText(toolErr.Error()) + ".\n"
+	nextPrompt := "Subagent task:\n" + prompt
+	if !bridge.usesNativeInstructions() {
+		toolBrief, toolErr := m.toolContextBrief(info.SessionID, job.ChatID, job.TabID)
+		if toolErr != nil {
+			toolBrief = "Workass CLI context is unavailable: " + redactSensitiveText(toolErr.Error()) + ".\n"
+		}
+		nextPrompt = toolBrief + buildTurnRuntimeIdentity(bridge, providerID, selectedModel) + m.buildEnvironmentBrief(true) + nextPrompt
 	}
-	nextPrompt := toolBrief + buildTurnRuntimeIdentity(bridge, providerID, selectedModel) +
-		m.buildEnvironmentBrief(true) + "Subagent task:\n" + prompt
 	var result PromptResult
 	promptSequence := int64(0)
 	for {

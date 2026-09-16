@@ -332,6 +332,7 @@ var providerRegistrations = map[string]providerRegistration{
 				InspectAllEfforts: func(ProviderConfig) bool { return true },
 			},
 			catalog:             claudeProviderCatalogStrategy{},
+			instructions:        nativeInstructionDelivery{HostEnvironment: "WORKASS_CLAUDE_EXECUTABLE"},
 			launch:              nativeHostLaunchStrategy{command: "claude", prepare: claudeNativeHostLaunch},
 			subagentEnvironment: map[string]string{"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
 			context:             staticProviderContextPolicy{capabilities: exactNativeContextCapabilities()},
@@ -356,8 +357,9 @@ var providerRegistrations = map[string]providerRegistration{
 				SeparateEffortAxis: true, AssistantBrand: "gpt",
 				InspectAllEfforts: func(config ProviderConfig) bool { return isOfficialNativeCommand(config, "codex") },
 			},
-			launch:  nativeHostLaunchStrategy{command: "codex", prepare: codexNativeHostLaunch},
-			context: staticProviderContextPolicy{capabilities: exactNativeContextCapabilities()},
+			instructions: nativeInstructionDelivery{HostEnvironment: "WORKASS_CODEX_EXECUTABLE"},
+			launch:       nativeHostLaunchStrategy{command: "codex", prepare: codexNativeHostLaunch},
+			context:      staticProviderContextPolicy{capabilities: exactNativeContextCapabilities()},
 		},
 		Update: providerUpdateRegistration{Source: "https://registry.npmjs.org/@openai/codex/latest", Command: ProviderUpdateCommand{Command: "codex", Args: []string{"update"}}, Hint: "codex update"},
 	},
@@ -369,7 +371,7 @@ var providerRegistrations = map[string]providerRegistration{
 		// OpenCode is an ordinary ACP provider. Its model/session semantics stay
 		// behind the generic ACP adapter; only executable discovery and the
 		// scoped, free Ox Alpha default belong to this registration.
-		Adapter: providerAdapter{model: providerModelPolicy{AssistantBrand: "opencode"}},
+		Adapter: providerAdapter{instructions: nativeInstructionDelivery{ConfigEnvironment: "OPENCODE_CONFIG_CONTENT"}, model: providerModelPolicy{AssistantBrand: "opencode"}},
 	},
 	"omp": {
 		ID: "omp", Name: "Oh My Pi", DefaultCommand: "omp", DefaultArgs: []string{"acp"}, Badge: "agent",

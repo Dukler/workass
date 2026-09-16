@@ -20,7 +20,7 @@ import (
 func runToolsCommand(ctx context.Context, args []string, input io.Reader, output, diagnostics io.Writer) error {
 	flags := flag.NewFlagSet("workass tools", flag.ContinueOnError)
 	flags.SetOutput(diagnostics)
-	contextFile := flags.String("context", "", "private context file supplied by the current Workass turn")
+	contextFile := flags.String("context", os.Getenv("WORKASS_TOOL_CONTEXT"), "private context file supplied by the current Workass turn")
 	flags.Usage = func() {
 		fmt.Fprintln(diagnostics, "workass tools --context FILE list [NAME]\nworkass tools --context FILE call NAME [--input FILE]\nCall arguments are one JSON object read from stdin, or --input FILE. Mutations require operation_id; retry only with the same id and arguments.")
 	}
@@ -38,6 +38,16 @@ func runToolsCommand(ctx context.Context, args []string, input io.Reader, output
 	var call *toolcli.Call
 	name := ""
 	switch args[0] {
+	case "guide":
+		if len(args) != 1 {
+			return errors.New("guide accepts no arguments")
+		}
+		guide, err := os.ReadFile(os.Getenv("WORKASS_TOOLS_GUIDE"))
+		if err != nil {
+			return errors.New("Workass guide is unavailable in this process")
+		}
+		_, err = output.Write(guide)
+		return err
 	case "list":
 		if len(args) > 2 {
 			return errors.New("list accepts at most one exact tool name")

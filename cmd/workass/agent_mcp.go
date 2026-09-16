@@ -166,7 +166,7 @@ func agentMCPTools() []map[string]any {
 			"chat_id":    str("Paired conversation id."),
 			"tail_chars": map[string]any{"type": "integer", "minimum": 0, "maximum": 12000, "description": "Optional redacted output tail characters per item; 0 omits tails."},
 		}, "tab_id", "chat_id"), true, false, true, false),
-		tool("workass_register_external_work", "Register a detached lane that will finish outside the ACP engine. For every ACP provider, work that must outlive the engine must be registered in the same turn; prefer workass_spawn_subagent for delegated agents. Returns the output and done-marker paths to use.", mutationObject(map[string]any{
+		tool("workass_register_external_work", "Register a detached lane that will finish outside the ACP engine. For every ACP provider, work that must outlive the engine must be registered in the same turn; use native subagents for ordinary delegation and workass_spawn_subagent when Workass tracking or cross-provider orchestration is needed. Returns the output and done-marker paths to use.", mutationObject(map[string]any{
 			"label":       str("Short label for the lane; required."),
 			"role":        enum("Lifecycle of the lane. Use work (default) when it finishes and its completion is the answer; use service for a process expected to keep running, such as a dev server, so it does not report this chat as working.", "work", "service"),
 			"pid":         integer("Detached process id, if known.", 2),
