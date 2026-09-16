@@ -6,12 +6,22 @@ export function sameBrowserBounds(a: WorkassBrowserBounds | null, b: WorkassBrow
   return !!a && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
 }
 
-// The Electron browser belongs to this shell process. A remote chat's ids are
-// routed to its owning daemon, so mounting the local native view there would
-// display and control an unrelated page. Check both ownership fields and the
-// boundary tag so incomplete remote hydration also fails closed.
+// The Electron browser belongs to this controller shell. It may display a
+// remote chat's hosted artifact, but its page and controls remain local to this
+// shell; the machine tag keeps entries for equal chat ids isolated.
 export function localBrowserOwnsChat(chatId: string, machineId?: string): boolean {
-  return String(machineId ?? '').trim() === '' && machineOf(chatId) === '';
+  if (!String(chatId ?? '').trim()) return false;
+  const machine = String(machineId ?? '').trim();
+  return machine === machineOf(chatId);
+}
+
+export function hostedArtifactURL(target: string, origin?: string): string {
+  const value = String(target ?? '').trim();
+  const base = String(origin ?? '').trim().replace(/\/+$/, '');
+  if (!value.startsWith('/workass/artifacts/')) return value;
+  if (origin !== undefined && !base) return '';
+  if (!base) return value;
+  return `${base}${value}`;
 }
 
 export interface WorkassBrowserState {

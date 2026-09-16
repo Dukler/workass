@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
-  browserApi, localBrowserOwnsChat, sameBrowserBounds,
+  browserApi, hostedArtifactURL, localBrowserOwnsChat, sameBrowserBounds,
   type WorkassBrowserApi, type WorkassBrowserBounds, type WorkassBrowserState,
 } from '../browser';
 import { useApp } from '../store/store';
@@ -33,6 +33,7 @@ export function BrowserPanel(props: {
   chatId: string;
   conversationId?: string;
   machineId?: string;
+  artifactOrigin?: string;
   onClose: () => void;
 }) {
   const api = browserApi();
@@ -41,11 +42,13 @@ export function BrowserPanel(props: {
 }
 
 function LocalBrowserPanel({
-  api, chatId, conversationId, onClose,
+  api, chatId, conversationId, machineId, artifactOrigin, onClose,
 }: {
   api: WorkassBrowserApi;
   chatId: string;
   conversationId?: string;
+  machineId?: string;
+  artifactOrigin?: string;
   onClose: () => void;
 }) {
   const app = useApp();
@@ -70,7 +73,7 @@ function LocalBrowserPanel({
   useEffect(() => {
     setState(initialState(chatId));
     setAddress('');
-  }, [chatId]);
+  }, [chatId, machineId]);
 
   useEffect(() => {
     if (!api) return;
@@ -120,7 +123,7 @@ function LocalBrowserPanel({
       removeEventListener('resize', sync);
       void api.hide(chatId);
     };
-  }, [api, chatId, conversationId]);
+  }, [api, chatId, machineId, conversationId]);
 
   const run = (command: 'back' | 'forward' | 'reload' | 'stop') => {
     if (!api) return;
@@ -129,7 +132,12 @@ function LocalBrowserPanel({
   const navigate = (event: FormEvent) => {
     event.preventDefault();
     if (!api || !address.trim()) return;
-    void api.command(chatId, 'navigate', address).then((next) => {
+    const target = hostedArtifactURL(address, artifactOrigin);
+    if (!target) {
+      setState((current) => ({ ...current, error: 'No se encontró el origen de la máquina remota.' }));
+      return;
+    }
+    void api.command(chatId, 'navigate', target).then((next) => {
       setState(next);
       setAddress(next.url === 'about:blank' ? '' : next.url);
     });

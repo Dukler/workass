@@ -454,7 +454,7 @@ export function FooterUpdateCards() {
   useEffect(() => {
     if (selfCheckFailed || selfFailed) { setSelfPhase('hidden'); return; }
     if (selfActive) { setSelfPhase('running'); return; }
-    if (selfUpdate.phase === 'healthy') {
+    if (selfUpdate.phase === 'healthy' || selfUpdate.phase === 'installed') {
       setSelfPhase((prev) => prev === 'running' || appUpdaterReceiptIsRecent(selfUpdate.receipt) ? 'done' : 'hidden');
       return;
     }

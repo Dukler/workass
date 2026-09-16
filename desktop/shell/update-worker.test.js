@@ -13,6 +13,7 @@ const {
   defaultOperations,
   launchUntilHealthy,
   mirrorWindowsDirectory,
+  bootstrapWindowsZip,
   pidAlive,
   replaceVisibleProgress,
   renamePathWithRetry,
@@ -1780,4 +1781,36 @@ test('failed activation restores the exact pre-upgrade mutable state before star
   assert.equal(fs.readFileSync(path.join(tx.installTarget, 'release.txt'), 'utf8'), 'old-release');
   assert.equal(fs.existsSync(tx.mutableStateBackupTarget), false);
   assert.equal(fs.existsSync(tx.failedMutableStateTarget), false);
+});
+
+test('older Windows shells hand off to the native ZIP installer without running the mirror/rollback path', async () => {
+  const tx = windowsTransactionFixture();
+  const calls = [];
+  await bootstrapWindowsZip(tx, {
+    startLease: () => ({ stop: () => calls.push('lease-stop') }),
+    pidAlive: () => false,
+    manager: {
+      spawnNativeWindowsInstaller: async (plan) => {
+        assert.equal(plan.installTarget, tx.installTarget);
+        assert.equal(plan.workerId, tx.workerId);
+        calls.push('arm-native');
+        return { commit: async () => calls.push('commit-native'), abort: () => calls.push('abort-native') };
+      },
+      readHandoffState: () => ({ state: 'committed' }),
+    },
+  });
+  assert.deepEqual(calls, ['arm-native', 'commit-native', 'lease-stop']);
+});
+
+test('closing an older Windows shell without committed update authority never installs the ZIP', async () => {
+  const tx = windowsTransactionFixture();
+  const calls = [];
+  await assert.rejects(() => bootstrapWindowsZip(tx, {
+    startLease: () => ({ stop() {} }), pidAlive: () => false,
+    manager: {
+      spawnNativeWindowsInstaller: async () => ({ commit: async () => calls.push('commit'), abort: () => calls.push('abort') }),
+      readHandoffState: () => ({ state: 'prepared' }),
+    },
+  }), /not committed/);
+  assert.deepEqual(calls, ['abort']);
 });

@@ -6,7 +6,7 @@ import { VisualizeBlock } from './VisualizeBlock';
 
 // One block. Memoized on its signature so a sealed block above the streaming
 // tail never re-renders while tokens flow into the last block.
-function BlockView({ sb, media, visualizeTabId, visualizeChatId }: { sb: SignedBlock; media?: InlineMediaResolver; visualizeTabId?: string; visualizeChatId?: string }) {
+function BlockView({ sb, media, visualizeTabId, visualizeChatId, artifactOrigin }: { sb: SignedBlock; media?: InlineMediaResolver; visualizeTabId?: string; visualizeChatId?: string; artifactOrigin?: string }) {
   // Dev-only render probe: inert unless a global collector is present. Used to
   // verify that memo keeps sealed blocks from re-rendering during streaming.
   const probe = (globalThis as { __blockRenders?: string[] }).__blockRenders;
@@ -47,7 +47,7 @@ function BlockView({ sb, media, visualizeTabId, visualizeChatId }: { sb: SignedB
         </div>
       );
     case 'visualize':
-      return <VisualizeBlock spec={b.spec} error={b.error} tabId={visualizeTabId} chatId={visualizeChatId} />;
+      return <VisualizeBlock spec={b.spec} error={b.error} tabId={visualizeTabId} chatId={visualizeChatId} artifactOrigin={artifactOrigin} />;
   }
 }
 
@@ -56,4 +56,5 @@ export const MarkdownBlock = memo(BlockView, (a, b) => (
   && a.media?.revision === b.media?.revision
   && a.visualizeTabId === b.visualizeTabId
   && a.visualizeChatId === b.visualizeChatId
+  && a.artifactOrigin === b.artifactOrigin
 ));

@@ -13,6 +13,7 @@ export type AppUpdaterPhase =
   | 'busy'
   | 'installing'
   | 'healthy'
+  | 'installed'
   | 'rollback_healthy'
   | 'failed';
 
@@ -125,7 +126,8 @@ export function appUpdaterPhaseText(state: AppUpdaterState): string {
     case 'ready': return `Workass ${state.targetVersion || ''} está verificado y listo.`.trim();
     case 'busy': return appUpdaterBlockerText(state.blockers);
     case 'installing': return `Instalando Workass ${state.targetVersion || ''} de forma segura…`.trim();
-    case 'healthy': return `Workass ${state.targetVersion || state.receipt?.targetVersion || state.currentVersion} quedó actualizado.`;
+    case 'healthy':
+    case 'installed': return `Workass ${state.targetVersion || state.receipt?.targetVersion || state.currentVersion} quedó actualizado.`;
     case 'rollback_healthy': return newerOffer
       ? `Workass ${newerOffer} está disponible; la actualización anterior falló y se restauró la versión saludable.`
       : 'La actualización falló; Workass restauró la versión anterior saludable.';
@@ -145,7 +147,8 @@ export function appUpdaterCardTitle(state: AppUpdaterState): string {
     case 'check_failed': return 'No se pudo buscar actualizaciones';
     case 'rollback_healthy': return 'Workass volvió a la versión anterior';
     case 'failed': return 'No se pudo actualizar Workass';
-    case 'healthy': return 'Listo';
+    case 'healthy':
+    case 'installed': return 'Listo';
     default: return 'Actualizando Workass';
   }
 }

@@ -99,3 +99,9 @@ test('provider updates keep the left footer card as their only renderer surface'
   assert.match(providerCard, /className=\{`updcard/);
   assert.doesNotMatch(providerCard, /addToast|fireNotify|<Toasts/);
 });
+
+test('native ZIP installation has a completed state without claiming provider health or rollback', () => {
+  assert.equal(appUpdaterCardTitle(state('installed')), 'Listo');
+  assert.match(appUpdaterPhaseText(state('installed')), /1\.1\.0 quedó actualizado/);
+  assert.doesNotMatch(appUpdaterPhaseText(state('installed')), /saludable|restaur/);
+});
