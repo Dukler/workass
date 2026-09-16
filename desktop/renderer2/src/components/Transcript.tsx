@@ -253,7 +253,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const findReturnFocusRef = useRef<HTMLElement | null>(null);
 
   const visibleMessages = projectSteeringPresentation(chat?.messages ?? []).transcriptMessages;
-  const artifactOrigin = store.browserArtifactOrigin(chat?.machineId);
+  const artifactOrigin = store.browserArtifactMachineId(chat?.machineId);
   const total = visibleMessages.length;
   const knownTotal = chat?.historyComplete === false
     ? Math.max(total, chat.messageCount ?? 0)

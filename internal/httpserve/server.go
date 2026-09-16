@@ -111,6 +111,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rel == artifacthost.PathPrefix || strings.HasPrefix(rel, artifacthost.PathPrefix+"/") {
+		// Remote artifact sharing is authenticated over the paired wire socket.
+		// Keep the loopback route for existing local consumers, but never expose
+		// registered files through the daemon's LAN HTTP listener.
+		if r != nil && !IsLocalIP(ClientIP(r.RemoteAddr)) {
+			http.Error(w, "artifact access requires a paired Workass connection", http.StatusForbidden)
+			return
+		}
 		if s.ArtifactHosts == nil {
 			http.NotFound(w, r)
 			return

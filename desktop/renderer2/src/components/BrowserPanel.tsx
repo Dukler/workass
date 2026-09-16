@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
-  browserApi, hostedArtifactURL, localBrowserOwnsChat, sameBrowserBounds,
+  browserApi, localBrowserOwnsChat, sameBrowserBounds,
   type WorkassBrowserApi, type WorkassBrowserBounds, type WorkassBrowserState,
 } from '../browser';
+import { connectedArtifactURL } from '../connected-artifacts';
 import { useApp } from '../store/store';
 import { IcBrowser } from '../icons';
 
@@ -132,7 +133,7 @@ function LocalBrowserPanel({
   const navigate = (event: FormEvent) => {
     event.preventDefault();
     if (!api || !address.trim()) return;
-    const target = hostedArtifactURL(address, artifactOrigin);
+    const target = connectedArtifactURL(artifactOrigin ?? '', address);
     if (!target) {
       setState((current) => ({ ...current, error: 'No se encontró el origen de la máquina remota.' }));
       return;

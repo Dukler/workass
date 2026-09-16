@@ -21,6 +21,24 @@ contextBridge.exposeInMainWorld('workassBrowser', {
   },
 });
 
+// The main process owns the loopback capability. The renderer only receives
+// narrowly scoped artifact work and returns remote daemon chunks over the
+// authenticated MachineSocket it already owns.
+contextBridge.exposeInMainWorld('workassArtifacts', {
+  supported: true,
+  onRequest: (callback) => {
+    const listener = (_event, request) => callback(request);
+    ipcRenderer.on('workass-artifact:request', listener);
+    return () => ipcRenderer.removeListener('workass-artifact:request', listener);
+  },
+  onCancel: (callback) => {
+    const listener = (_event, request) => callback(request);
+    ipcRenderer.on('workass-artifact:cancel', listener);
+    return () => ipcRenderer.removeListener('workass-artifact:cancel', listener);
+  },
+  reply: (payload) => ipcRenderer.invoke('workass-artifact:reply', payload),
+});
+
 contextBridge.exposeInMainWorld('workassClipboard', {
   supported: true,
   copyText: (text) => ipcRenderer.invoke('workass-clipboard:copy-text', text),

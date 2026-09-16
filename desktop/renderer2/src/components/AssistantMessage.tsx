@@ -11,7 +11,7 @@ import type { TranscriptTimelineSegment } from '../timeline-layout';
 import { fullAssistantText } from '../assistant-output';
 import { relTime } from '../rel-time';
 import { messageImageSrc } from '../image-drafts';
-import { hostedArtifactURL } from '../browser';
+import { connectedArtifactURL } from '../connected-artifacts';
 import { normalizeMarkdownTarget, type InlineMediaResolver } from '../markdown/inline';
 
 function assistantMediaResolver(tabId: string, images: MessageImage[] | undefined, artifactOrigin = ''): InlineMediaResolver {
@@ -25,7 +25,7 @@ function assistantMediaResolver(tabId: string, images: MessageImage[] | undefine
       const image = bySource.get(normalizeMarkdownTarget(target));
       return image ? { src: messageImageSrc(image), alt: image.name || 'Imagen' } : null;
     },
-    resolveLink: (target) => hostedArtifactURL(target, artifactOrigin),
+    resolveLink: (target) => connectedArtifactURL(artifactOrigin, target),
     openLink: (target) => store.openHostedArtifact(tabId, target, artifactOrigin),
     open: (media) => store.openImageLightbox(media.src, media.alt),
   };

@@ -2,14 +2,14 @@ import { useEffect, useState } from 'react';
 import { callThrow } from '../wire/api';
 import type { VisualizationRegistration } from '../wire/types';
 import type { VisualizeSpec } from '../visualize';
-import { hostedArtifactURL } from '../browser';
+import { connectedArtifactURL } from '../connected-artifacts';
 import { store } from '../store/store';
 
 export function visualizationNeedsTopLevelOpen(artifactOrigin?: string, currentOrigin?: string): boolean {
   const origin = String(artifactOrigin ?? '').trim().replace(/\/+$/, '');
   const local = String(currentOrigin ?? (typeof window !== 'undefined' ? window.location.origin : '')).trim().replace(/\/+$/, '');
   if (!origin || !local) return false;
-  return origin !== local;
+  return origin !== local && !origin.includes('/workass/connected-artifacts/');
 }
 
 type HostState =
@@ -92,9 +92,8 @@ export function VisualizeBlock({
   }, [tabId, chatId, error, spec, attempt]);
 
   const wide = spec?.mode === 'wide';
-  const artifactURL = state.phase === 'ready' ? hostedArtifactURL(state.registration.urlPath, artifactOrigin) : '';
+  const artifactURL = state.phase === 'ready' ? connectedArtifactURL(artifactOrigin ?? '', state.registration.urlPath) : '';
   const unavailable = state.phase === 'ready' && !artifactURL;
-  const topLevelOnly = state.phase === 'ready' && visualizationNeedsTopLevelOpen(artifactOrigin);
   return (
     <section className={`visualize-card${wide ? ' visualize-wide' : ''}`} aria-label={title}>
       <div className="visualize-head">
@@ -115,8 +114,7 @@ export function VisualizeBlock({
         </div>
       )}
       {unavailable && <div className="visualize-status" role="alert">Visualización no disponible: no se encontró el origen de la máquina remota.</div>}
-      {topLevelOnly && <div className="visualize-status">Abrí la visualización en el navegador.</div>}
-      {state.phase === 'ready' && !unavailable && !topLevelOnly && (
+      {state.phase === 'ready' && !unavailable && (
         <iframe
           className="visualize-frame"
           title={title}

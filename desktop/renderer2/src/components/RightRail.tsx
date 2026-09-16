@@ -29,7 +29,7 @@ export function RightRail({ chat }: { chat: Chat | null }) {
           chatId={chat.id}
           conversationId={chat.chatId}
           machineId={chat.machineId}
-          artifactOrigin={store.browserArtifactOrigin(chat.machineId)}
+          artifactOrigin={store.browserArtifactMachineId(chat.machineId)}
           onClose={() => store.toggleBrowser()}
         />
       </aside>

@@ -12,7 +12,7 @@ import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolv
 import { call, callThrow, has, on, bridgeReady } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
 import { LEAN_SESSION_SAVE_MODE, loadMirror, saveMirror, type Mirror, type MirrorMsg } from './persistence';
-import { browserApi, hostedArtifactURL, localBrowserOwnsChat } from '../browser';
+import { browserApi, localBrowserOwnsChat } from '../browser';
 import {
   afterQueuedAcceptance, appendDraftImages, attachmentWorkBoundary, draftImagePayloads, mergeMessageImages, messageImages,
   queuedAttachmentsReady, queuedDraftMessage, queuedJob, queuedMessage, releaseDraftImages,
@@ -56,6 +56,7 @@ import { MachineRegistry, type MachineEntry } from '../wire/machineRegistry';
 import { machineScopeOf } from '../wire/machineRouter';
 import { normalizeMachineNickname } from '../machine-nickname';
 import { setMachineRouter } from '../wire/api';
+import { installWorkassArtifactsBridge, connectedArtifactURL } from '../connected-artifacts';
 import { localId, machineOf, tagId, tagPayload } from '../wire/machineIds';
 import type { AppUpdaterAuthorizedRequest, AppUpdaterDiagnostics } from '../app-updater';
 
@@ -2306,6 +2307,7 @@ export class Store {
         },
         onUnmount: (machineId) => this.evictMachineChats(machineId),
       });
+      if (typeof window !== 'undefined') installWorkassArtifactsBridge(this.machines);
     }
     // The key a client holds so it can enrol with a newly-found machine without
     // asking anyone. Read from storage rather than typed here: a settings field
@@ -2331,21 +2333,29 @@ export class Store {
     this.state.machines = this.machines ? this.machines.list() : [];
   }
 
-  /** Origin for controller-local viewing of one remote daemon's hosted files. */
-  browserArtifactOrigin(machineId?: string): string {
+  /** Machine identity used by the private local connected-artifact bridge. */
+  browserArtifactMachineId(machineId?: string): string {
     const id = String(machineId ?? '').trim();
-    if (!id) return typeof window !== 'undefined' ? window.location.origin : '';
-    const machine = this.state.machines.find((candidate) => candidate.machineId === id);
-    const address = String(machine?.address ?? '').trim();
-    if (!address) return '';
-    return `${machine?.secure ? 'https' : 'http'}://${address}`;
+    if (!id) return '';
+    return id;
   }
 
-  openHostedArtifact(chatId: string, target: string, origin?: string): boolean {
+  /** Kept for older renderer callers; remote origins are no longer addresses. */
+  browserArtifactOrigin(machineId?: string): string { return this.browserArtifactMachineId(machineId); }
+
+  openHostedArtifact(chatId: string, target: string, machineId?: string): boolean {
     const chat = this.chat(chatId);
     if (!browserApi()?.supported || !chat || !localBrowserOwnsChat(chat.id, chat.machineId)
       || !String(target ?? '').trim().startsWith('/workass/artifacts/')) return false;
-    const url = hostedArtifactURL(target, origin);
+    const owner = String(chat.machineId ?? '').trim();
+    const requested = String(machineId ?? '').trim();
+    const machine = owner ? this.state.machines.find((candidate) => candidate.machineId === owner) : undefined;
+    const supported = typeof window !== 'undefined' && !!window.workassArtifacts?.supported;
+    if (owner && (requested !== owner || machine?.link !== 'ready' || !supported)) {
+      this.addToast('No se pudo abrir el artefacto', 'La máquina remota no está disponible.');
+      return true;
+    }
+    const url = owner ? connectedArtifactURL(machineId ?? '', target) : target;
     if (!url) {
       this.addToast('No se pudo abrir el artefacto', 'No se encontró el origen de la máquina remota.');
       return true;
