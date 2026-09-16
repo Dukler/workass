@@ -142,3 +142,15 @@ or isolated fixtures; production use is limited to authorized live verification.
    Prove direct unauthenticated remote artifact HTTP is denied, while the paired
    tunnel succeeds; switch chats and reconnect without crossing identities.
 9. Explicitly report any remaining platform/transport or live coverage gap.
+
+
+## Packaging correction — 2026-09-16
+
+Release 0.1.159 omitted connected-artifacts.js from both explicit shell packaging
+lists, causing startup to fail. Recovery lane: scripts/package-workass-macos.sh,
+scripts/stage-windows-portable.sh, desktop/scripts/check-shell-dependencies.cjs,
+and desktop/shell/package-dependencies.test.js. Include the module on both
+platforms and resolve every staged relative CommonJS dependency before packaging.
+The regression must use the actual platform file lists and fail when the module
+is removed. This corrects packaging only; no installer activation or direct
+filesystem replacement is authorized by a report of the failure.
