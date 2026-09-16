@@ -118,7 +118,7 @@ func agentMCPTools() []map[string]any {
 			"tab_id": str("Tab id from workass_list_chats."), "chat_id": str("Paired conversation id."),
 		}, "tab_id", "chat_id"), false, true, false, false),
 		tool("workass_agent_catalog", "List the actual Workass providers, models, reasoning effort levels, and permission/mode ids available for tracked subagents. Call this instead of guessing model ids from config files.", object(map[string]any{}), true, false, true, false),
-		tool("workass_host_artifact", "Host a file or static directory from the calling agent's Workass cwd. Returns a stable URL and ready-to-use markdown; put that markdown in your response rather than a local path. Any file type. A directory defaults to index.html, else pass entry.", mutationObject(map[string]any{
+		tool("workass_host_artifact", "Host a file or static directory once from the calling agent's Workass cwd. Returns one stable URL (a Workass link) and ready-to-use markdown usable by connected Workass instances; put that markdown in your response rather than a local path. Any file type. A directory defaults to index.html, else pass entry.", mutationObject(map[string]any{
 			"source_path": str("Supported artifact file or static directory, absolute or relative to the calling agent's Workass cwd."),
 			"entry":       str("Relative entry artifact for a directory; defaults to index.html when present and is ignored for a file."),
 			"name":        str("Optional short human label used in the stable hosted id."),

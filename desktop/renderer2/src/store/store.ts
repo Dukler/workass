@@ -56,7 +56,7 @@ import { MachineRegistry, type MachineEntry } from '../wire/machineRegistry';
 import { machineScopeOf } from '../wire/machineRouter';
 import { normalizeMachineNickname } from '../machine-nickname';
 import { setMachineRouter } from '../wire/api';
-import { installWorkassArtifactsBridge, connectedArtifactURL } from '../connected-artifacts';
+import { installWorkassArtifactsBridge, connectedArtifactURL, parseArtifactLink, isArtifactLink } from '../connected-artifacts';
 import { localId, machineOf, tagId, tagPayload } from '../wire/machineIds';
 import type { AppUpdaterAuthorizedRequest, AppUpdaterDiagnostics } from '../app-updater';
 
@@ -554,6 +554,14 @@ export class Store {
     this.commitCurrentGlobalPresentation();
     this.markAllChatsDirty();
     this.rebuildJobRefs();
+    if (typeof window !== 'undefined') {
+      installWorkassArtifactsBridge({
+        linkFor: (machineId) => this.machines?.linkFor(machineId),
+        ownsLink: (machineId, link) => !!this.machines?.ownsLink(machineId, link),
+        local: () => window.api,
+        localMachineId: () => this.selfMachineId,
+      });
+    }
   }
 
   private commitCurrentGlobalPresentation() {
@@ -2307,7 +2315,6 @@ export class Store {
         },
         onUnmount: (machineId) => this.evictMachineChats(machineId),
       });
-      if (typeof window !== 'undefined') installWorkassArtifactsBridge(this.machines);
     }
     // The key a client holds so it can enrol with a newly-found machine without
     // asking anyone. Read from storage rather than typed here: a settings field
@@ -2346,16 +2353,19 @@ export class Store {
   openHostedArtifact(chatId: string, target: string, machineId?: string): boolean {
     const chat = this.chat(chatId);
     if (!browserApi()?.supported || !chat || !localBrowserOwnsChat(chat.id, chat.machineId)
-      || !String(target ?? '').trim().startsWith('/workass/artifacts/')) return false;
-    const owner = String(chat.machineId ?? '').trim();
-    const requested = String(machineId ?? '').trim();
+      || !isArtifactLink(target)) return false;
+    const parsed = parseArtifactLink(target);
+    const chatOwner = String(chat.machineId ?? '').trim();
+    const owner = parsed?.machineId ?? chatOwner;
     const machine = owner ? this.state.machines.find((candidate) => candidate.machineId === owner) : undefined;
     const supported = typeof window !== 'undefined' && !!window.workassArtifacts?.supported;
-    if (owner && (requested !== owner || machine?.link !== 'ready' || !supported)) {
-      this.addToast('No se pudo abrir el artefacto', 'La máquina remota no está disponible.');
+    const local = !owner || owner === this.selfMachineId;
+    if ((!parsed?.machineId && machineId !== undefined && machineId !== chatOwner)
+      || (!local && (machine?.link !== 'ready' || !supported))) {
+      this.addToast('No se pudo abrir el artefacto', 'La máquina del artefacto no está disponible.');
       return true;
     }
-    const url = owner ? connectedArtifactURL(machineId ?? '', target) : target;
+    const url = connectedArtifactURL(owner, target, undefined, undefined, this.selfMachineId);
     if (!url) {
       this.addToast('No se pudo abrir el artefacto', 'No se encontró el origen de la máquina remota.');
       return true;

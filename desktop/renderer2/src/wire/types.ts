@@ -602,6 +602,12 @@ export interface StateDigest {
 // The subset of window.api this renderer consumes. Every method is optional so
 // we can feature-detect against an older/newer bridge and degrade gracefully.
 export interface WorkassApi {
+  // Local connected-artifact reads. These are intentionally narrower than the
+  // general bridge and are feature-detected for older shells.
+  artifactOpen?: (request: { path: string; method: 'GET' | 'HEAD'; headers: Record<string, string> }) => Promise<Record<string, unknown>>;
+  artifactRead?: (request: { transferId: string }) => Promise<Record<string, unknown>>;
+  artifactClose?: (request: { transferId: string }) => Promise<unknown>;
+  artifactConnectionGeneration?: () => number;
   appMeta?: () => Promise<{ rootDir: string; workspaceDir: string; version: string; profile?: 'prod' | 'dev' | 'test' } & Record<string, unknown>>;
   // Additive, body-free reconciliation digest. Liveness uses appMeta so an
   // actor busy resuming a provider cannot masquerade as a daemon disconnect.

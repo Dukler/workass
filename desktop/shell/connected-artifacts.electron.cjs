@@ -63,7 +63,7 @@ if (!process.argv.includes('--child')) {
     const external = http.createServer((_req,res)=>{res.setHeader('Content-Type','text/html');res.end('<p>external</p>');});
     await Promise.all([new Promise(r=>server.listen(0,'127.0.0.1',r)),new Promise(r=>external.listen(0,'127.0.0.1',r))]);
     const origin = `http://127.0.0.1:${server.address().port}`;
-    const target = `${origin}/workass/connected-artifacts/m/a/index.html`;
+    const target = `${origin}/workass/artifacts/@m/a/index.html`;
     const main = new BrowserWindow({show:false,webPreferences:{contextIsolation:true,sandbox:true,preload:path.join(__dirname,'preload.js')}});
     const guest = new BrowserWindow({show:false,webPreferences:{contextIsolation:true,sandbox:true}});
     bridge = createConnectedArtifactBridge({win:main,viewServer:{url:origin},getOwnedWebContents:()=>[guest.webContents]});

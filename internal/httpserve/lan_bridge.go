@@ -135,6 +135,12 @@ const LANBridgeJS = `(() => {
       (ready || PRE_READY_CHANNELS.has(channel)) ? send(entry) : queue.push(entry);
     });
   }
+  function artifactInvoke(channel, ...args) {
+    if (!ready || !open || !ws || ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new WorkassInvokeError('socket-not-ready', channel, socketGen));
+    }
+    return invoke(channel, ...args);
+  }
   const on = (channel, cb) => {
     (subs[channel] = subs[channel] || []).push(cb);
     if (Object.prototype.hasOwnProperty.call(eventCache, channel)) {
@@ -184,6 +190,8 @@ const LANBridgeJS = `(() => {
     // the chat — the reverse would record a machine with nobody in front of it.
     voiceStatus: () => invoke('voice:status'), voiceTranscribe: (audio, lang, vocab) => invoke('voice:transcribe', { audio, lang, vocab }),
     archiveAppend: (tabId, messages) => invoke('chat:archive-append', { tabId, messages }), archiveLoad: (tabId, options) => invoke('chat:archive-load', tabId, options), visualizeHost: (o) => invoke('visualize:host', o),
+    artifactConnectionGeneration: () => ready && open && ws && ws.readyState === WebSocket.OPEN ? socketGen : 0,
+    artifactOpen: (o) => artifactInvoke('artifact:open', o), artifactRead: (o) => artifactInvoke('artifact:read', o), artifactClose: (o) => artifactInvoke('artifact:close', o),
     refresh: () => invoke('teams:refresh'), jiraSync: () => invoke('jira:sync'), deployAuth: (o) => invoke('deploy:auth', o), startJob: (o) => invoke('job:start', o), cancelJob: (id) => invoke('job:cancel', id), killTerminal: (t) => invoke('chat:kill-terminal', t),
     procList: () => invoke('proc:list'), procRead: (id) => invoke('proc:read', id), procKill: (id, tree) => invoke('proc:kill', { id, tree }), procKillAll: () => invoke('proc:kill-all'),
     clearActivity: (id) => invoke('activity:clear', id), appChatReset: () => invoke('app-chat:reset'), appChatNewSession: (o) => invoke('app-chat:new-session', o), appChatRefreshPlanUsage: (providerId) => invoke('app-chat:refresh-plan-usage', { providerId }),

@@ -5,7 +5,7 @@ import {
   type WorkassBrowserApi, type WorkassBrowserBounds, type WorkassBrowserState,
 } from '../browser';
 import { connectedArtifactURL } from '../connected-artifacts';
-import { useApp } from '../store/store';
+import { store, useApp } from '../store/store';
 import { IcBrowser } from '../icons';
 
 function boundsFor(el: HTMLElement): WorkassBrowserBounds {
@@ -133,7 +133,7 @@ function LocalBrowserPanel({
   const navigate = (event: FormEvent) => {
     event.preventDefault();
     if (!api || !address.trim()) return;
-    const target = connectedArtifactURL(artifactOrigin ?? '', address);
+    const target = connectedArtifactURL(artifactOrigin ?? '', address, undefined, undefined, store.localMachineId());
     if (!target) {
       setState((current) => ({ ...current, error: 'No se encontró el origen de la máquina remota.' }));
       return;

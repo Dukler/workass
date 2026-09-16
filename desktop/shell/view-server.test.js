@@ -164,12 +164,17 @@ test('serves local renderer, proxies HTTP, and stamps the tunneled shell WebSock
     installTarget: '/Applications/Workass.app',
   });
   t.after(() => view.close());
+  const artifactRequests = [];
+  view.setArtifactBridge({ handle: (req, res) => { artifactRequests.push(req.url); res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('artifact-bridge'); }, close() {} });
   const index = await fetch(view.url + '/').then((r) => r.text());
   assert.match(index, /local-index/);
   assert.match(index, /lan-bridge\.js/);
   assert.equal(await fetch(view.url + '/assets/app.js').then((r) => r.text()), 'window.localBundle=true;');
   assert.equal(await fetch(view.url + '/lan-bridge.js').then((r) => r.text()), 'window.daemonBridge=true;');
   assert.equal(await fetch(view.url + '/daemon-only').then((r) => r.text()), 'daemon-http');
+  assert.equal(await fetch(view.url + '/workass/artifacts/plain/index.html').then((r) => r.text()), 'daemon-http');
+  assert.equal(await fetch(view.url + '/workass/artifacts/@remote/a/index.html').then((r) => r.text()), 'artifact-bridge');
+  assert.deepEqual(artifactRequests, ['/workass/artifacts/@remote/a/index.html']);
   let status = await fetch(view.url + '/__workass-shell/status').then((r) => r.json());
   assert.equal(status.controller, null);
   assert.equal(status.browser, null);

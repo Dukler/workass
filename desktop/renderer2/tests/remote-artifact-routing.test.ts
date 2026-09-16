@@ -10,9 +10,9 @@ test('artifact URL qualification preserves local paths and binds remote paths to
   assert.equal(connectedArtifactURL('', '/workass/artifacts/local-id/'), '/workass/artifacts/local-id/');
   assert.equal(
     connectedArtifactURL('san-laptop', '/workass/artifacts/remote-id/', 'http://127.0.0.1:8799', true),
-    'http://127.0.0.1:8799/workass/connected-artifacts/san-laptop/remote-id/',
+    'http://127.0.0.1:8799/workass/artifacts/@san-laptop/remote-id/',
   );
-  assert.equal(connectedArtifactURL('san-laptop', 'https://already.absolute/workass/artifacts/id/', 'http://127.0.0.1:8799', true), 'http://127.0.0.1:8799/workass/connected-artifacts/san-laptop/id/');
+  assert.equal(connectedArtifactURL('san-laptop', 'https://already.absolute/workass/artifacts/id/', 'http://127.0.0.1:8799', true), 'http://127.0.0.1:8799/workass/artifacts/@san-laptop/id/');
   assert.equal(connectedArtifactURL('', 'https://example.com/a'), 'https://example.com/a');
 });
 
@@ -40,7 +40,7 @@ test('remote hosted artifact links and images use the owning machine private bri
   const { renderInline } = await server.ssrLoadModule('/src/markdown/inline.tsx') as {
     renderInline: (text: string, keyBase?: string, allowLinks?: boolean, media?: unknown) => React.ReactNode[];
   };
-  const remoteArtifact = 'http://127.0.0.1:8799/workass/connected-artifacts/san-laptop/report-id/';
+  const remoteArtifact = 'http://127.0.0.1:8799/workass/artifacts/@san-laptop/report-id/';
   const nodes = renderInline(
     '[report](/workass/artifacts/report-id/) ![preview](/workass/artifacts/report-id/preview.png)',
     'remote',
@@ -135,8 +135,8 @@ test('artifact clicks navigate the exact remote chat repeatedly without changing
   assert.equal(subject.openHostedArtifact(remote.id, artifact, origin), true);
   assert.equal(subject.openHostedArtifact(remote.id, artifact, origin), true);
   assert.deepEqual(calls, [
-    [remote.id, 'navigate', 'http://127.0.0.1:8799/workass/connected-artifacts/san-laptop/report/'],
-    [remote.id, 'navigate', 'http://127.0.0.1:8799/workass/connected-artifacts/san-laptop/report/'],
+    [remote.id, 'navigate', 'http://127.0.0.1:8799/workass/artifacts/@san-laptop/report/'],
+    [remote.id, 'navigate', 'http://127.0.0.1:8799/workass/artifacts/@san-laptop/report/'],
   ]);
   assert.equal(remote.pane, 'browser');
   assert.equal(local.pane, 'rail');
@@ -144,7 +144,19 @@ test('artifact clicks navigate the exact remote chat repeatedly without changing
   assert.equal(subject.openHostedArtifact(remote.id, artifact, ''), true);
   assert.equal(calls.length, 2);
   assert.equal(notices.length, 1);
+  // A copied canonical link keeps its explicit owner, independently of the
+  // browser/chat that contains it. Local routing needs no mounted peer.
+  subject.selfMachineId = 'this-machine';
+  assert.equal(subject.openHostedArtifact(local.id, '/workass/artifacts/@san-laptop/report/'), true);
+  assert.deepEqual(calls.at(-1), [local.id, 'navigate', 'http://127.0.0.1:8799/workass/artifacts/@san-laptop/report/']);
+  assert.equal(subject.openHostedArtifact(remote.id, '/workass/artifacts/@this-machine/report/', 'san-laptop'), true);
+  assert.deepEqual(calls.at(-1), [remote.id, 'navigate', 'http://127.0.0.1:8799/workass/artifacts/@this-machine/report/']);
+  subject.state.machines = [];
+  assert.equal(subject.openHostedArtifact(local.id, '/workass/artifacts/@this-machine/report/'), true);
+  assert.equal(calls.length, 5);
+  assert.equal(subject.openHostedArtifact(local.id, '/workass/artifacts/@san-laptop/report/'), true);
+  assert.equal(calls.length, 5, 'offline explicit owner must not fall back to local');
   nativeBrowser.supported = false;
   assert.equal(subject.openHostedArtifact(remote.id, artifact, origin), false);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 5);
 });

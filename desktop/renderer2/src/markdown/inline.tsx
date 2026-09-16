@@ -37,7 +37,11 @@ function looksLikeLocalRaster(target: string): boolean {
 
 function looksLikeHostedArtifact(target: string): boolean {
   const normalized = normalizeMarkdownTarget(target);
-  return normalized.startsWith('/workass/artifacts/');
+  let pathname = normalized;
+  if (/^https?:\/\//iu.test(normalized)) {
+    try { pathname = new URL(normalized).pathname; } catch { return false; }
+  }
+  return pathname.startsWith('/workass/artifacts/') || pathname.startsWith('/workass/connected-artifacts/');
 }
 
 export function renderInline(text: string, keyBase = 'i', allowLinks = true, media?: InlineMediaResolver): ReactNode[] {
@@ -88,7 +92,7 @@ export function renderInline(text: string, keyBase = 'i', allowLinks = true, med
         // two controls for one action and leaves noisy text above the preview.
         // Suppress only this resolved companion; unrelated links still follow
         // the ordinary anchor path below.
-      } else if (media && looksLikeLocalRaster(href)) {
+      } else if (media && looksLikeLocalRaster(href) && !looksLikeHostedArtifact(href)) {
         out.push(<span key={key} className="assistant-image-pending">{renderInline(label, key, false)}</span>);
       } else if (allowLinks) {
         const hosted = looksLikeHostedArtifact(href);

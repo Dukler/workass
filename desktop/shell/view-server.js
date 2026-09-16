@@ -207,7 +207,8 @@ function createViewServer({
   const server = http.createServer((req, res) => {
     const parsedUrl = new URL(req.url || '/', 'http://shell.local');
     const pathname = parsedUrl.pathname;
-    if (String(req.url || '').startsWith('/workass/connected-artifacts/') || pathname.startsWith('/workass/connected-artifacts/')) {
+    const rawPath = String(req.url || '').split('?')[0];
+    if (rawPath.startsWith('/workass/connected-artifacts/') || rawPath.startsWith('/workass/artifacts/@')) {
       if (!artifactBridge) { res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('artifact bridge unavailable'); return; }
       void artifactBridge.handle(req, res);
       return;
