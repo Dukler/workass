@@ -203,9 +203,15 @@ function createViewServer({
   let reloadFn = null;
   let recoveryFn = null;
   let takeControlFn = null;
+  let artifactBridge = null;
   const server = http.createServer((req, res) => {
     const parsedUrl = new URL(req.url || '/', 'http://shell.local');
     const pathname = parsedUrl.pathname;
+    if (String(req.url || '').startsWith('/workass/connected-artifacts/') || pathname.startsWith('/workass/connected-artifacts/')) {
+      if (!artifactBridge) { res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('artifact bridge unavailable'); return; }
+      void artifactBridge.handle(req, res);
+      return;
+    }
     if (pathname === '/__workass-shell/probe' && req.method === 'GET') {
       if (typeof probeFn !== 'function') { res.writeHead(503, { 'Content-Type': 'text/plain' }); res.end('renderer window not ready'); return; }
       const selector = parsedUrl.searchParams.get('selector') || '*';
@@ -440,7 +446,9 @@ function createViewServer({
         setReload: (fn) => { reloadFn = typeof fn === 'function' ? fn : null; },
         setRecovery: (fn) => { recoveryFn = typeof fn === 'function' ? fn : null; },
         setTakeControl: (fn) => { takeControlFn = typeof fn === 'function' ? fn : null; },
+        setArtifactBridge: (bridge) => { artifactBridge = bridge || null; },
         close: () => new Promise((done) => {
+          artifactBridge?.close();
           for (const socket of sockets) socket.destroy();
           server.close(() => done());
         }),

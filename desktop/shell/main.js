@@ -5,6 +5,7 @@ const { app, BrowserWindow, WebContentsView, session, net, ipcMain, shell, nativ
 const fs = require('node:fs');
 const path = require('node:path');
 const { createViewServer } = require('./view-server');
+const { createConnectedArtifactBridge, shouldInjectArtifactHeader } = require('./connected-artifacts');
 const { BrowserManager, DEFAULT_PARTITION: BROWSER_PARTITION } = require('./browser-manager');
 const { BrowserControlServer } = require('./browser-control-server');
 const { resolveRuntimeProfile } = require('./runtime-profile');
@@ -112,6 +113,7 @@ const VIEW_PORT = RUNTIME.viewPort;
 let viewServer = null;
 let browserManager = null;
 let browserControlServer = null;
+let connectedArtifactBridge = null;
 let updateManager = null;
 const externalImageTempDirs = new Set();
 const certificatePins = new CertificatePins();
@@ -256,6 +258,37 @@ function createWindow(url, browserReporter, isController) {
       if (!win.isDestroyed()) win.webContents.send('workass-browser:state', state);
     },
   });
+  connectedArtifactBridge = createConnectedArtifactBridge({
+    win,
+    viewServer,
+    getOwnedWebContents: () => browserManager ? browserManager.ownedWebContents() : [],
+  });
+  viewServer?.setArtifactBridge?.(connectedArtifactBridge);
+  // This is the sole onBeforeSendHeaders listener on these two owned sessions.
+  // Other webRequest phases retain their existing listeners.
+  const artifactHeaderListener = (details, callback) => {
+    const target = (() => { try { return new URL(details.url); } catch { return null; } })();
+    const origin = viewServer && (() => { try { return new URL(viewServer.url); } catch { return null; } })();
+    const headers = { ...(details.requestHeaders || {}) };
+    // Never let a capability supplied by a caller survive a denied request or
+    // redirect. The bridge adds it back only after frame authorization.
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === connectedArtifactBridge.accessHeader) delete headers[name];
+    }
+    if (target && origin && shouldInjectArtifactHeader(details, {
+      origin: origin.href,
+      targetURL: target.href,
+      owned: (contents) => browserManager && connectedArtifactBridge.owned(contents),
+      authorizedNavigation: (contents, targetURL) => browserManager?.consumeArtifactNavigation(contents, targetURL),
+    })) {
+      headers[connectedArtifactBridge.accessHeader] = connectedArtifactBridge.capability;
+    }
+    callback({ requestHeaders: headers });
+  };
+  const artifactRequestSessions = [session.defaultSession, browserManager.profile].filter(Boolean);
+  for (const requestSession of artifactRequestSessions) {
+    try { requestSession.webRequest.onBeforeSendHeaders(artifactHeaderListener); } catch (err) { console.error(`[shell] artifact header injection unavailable: ${err.message}`); }
+  }
   browserControlServer = new BrowserControlServer({
     manager: browserManager,
     isController,
@@ -283,6 +316,7 @@ function createWindow(url, browserReporter, isController) {
     if (result.opened && result.cleanupPath) externalImageTempDirs.add(result.cleanupPath);
     return result.opened;
   });
+  ipcMain.handle('workass-artifact:reply', (event, payload) => own(event) && connectedArtifactBridge?.reply(event, payload) === true);
 	ipcMain.on('workass-machines:trust-endpoint', (event, payload) => {
 		event.returnValue = own(event) && certificatePins.trustEndpoint(payload?.address, payload?.certFingerprint);
 	});
@@ -303,6 +337,11 @@ function createWindow(url, browserReporter, isController) {
     browserControlServer = null;
     if (browserManager) browserManager.destroy();
     browserManager = null;
+    connectedArtifactBridge?.close();
+    connectedArtifactBridge = null;
+    for (const requestSession of artifactRequestSessions) {
+      try { requestSession.webRequest.onBeforeSendHeaders(null); } catch { /* older Electron */ }
+    }
     for (const channel of ['activate', 'resize', 'hide', 'close', 'command']) {
       try { ipcMain.removeHandler(`workass-browser:${channel}`); } catch { /* ignore */ }
     }
@@ -310,6 +349,7 @@ function createWindow(url, browserReporter, isController) {
       try { ipcMain.removeHandler(`workass-clipboard:${channel}`); } catch { /* ignore */ }
     }
     try { ipcMain.removeHandler('workass-image:open-external'); } catch { /* ignore */ }
+    try { ipcMain.removeHandler('workass-artifact:reply'); } catch { /* ignore */ }
 		try { ipcMain.removeAllListeners('workass-machines:trust-endpoint'); } catch { /* ignore */ }
 		try { ipcMain.removeHandler('workass-recovery:restart-daemon'); } catch { /* ignore */ }
     for (const channel of ['get-state', 'diagnostics', 'check', 'apply', 'apply-authorized']) {

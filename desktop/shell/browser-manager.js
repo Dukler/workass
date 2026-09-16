@@ -208,6 +208,7 @@ class BrowserManager {
     this.win = win;
     this.WebContentsView = WebContentsView;
     this.partition = partition;
+    this.artifactNavigations = new WeakMap();
     this.platform = platform || process.platform;
     this.profile = session.fromPartition(partition, { cache: true });
     this.userAgent = cleanUserAgent(chromeVersion, platform);
@@ -249,6 +250,19 @@ class BrowserManager {
   setAgentControlReady(ready) {
     this.agentControl = ready === true;
     for (const entry of this.entries.values()) this.publish(entry);
+  }
+
+  // Main-process artifact authorization needs the exact native views mounted
+  // by this manager; callers never receive their browsing credentials.
+  consumeArtifactNavigation(contents, targetURL) {
+    const expected = this.artifactNavigations.get(contents);
+    if (!expected || expected.split('#')[0] !== targetURL.split('#')[0]) return false;
+    this.artifactNavigations.delete(contents);
+    return true;
+  }
+
+  ownedWebContents() {
+    return this.browserEntries().map((entry) => entry.view && entry.view.webContents).filter(Boolean);
   }
 
   onCDP(listener) {
@@ -393,6 +407,7 @@ class BrowserManager {
     if (target !== DEFAULT_URL && (!entry.view.webContents.getURL() || entry.view.webContents.getURL() === DEFAULT_URL)) {
       entry.loading = true;
       entry.url = target;
+      this.artifactNavigations.set(entry.view.webContents, target);
       void entry.view.webContents.loadURL(target).catch((err) => {
         entry.loading = false;
         entry.error = String(err && err.message || err);
@@ -440,6 +455,7 @@ class BrowserManager {
         entry.url = target;
         entry.error = null;
         this.publish(entry);
+        this.artifactNavigations.set(wc, target);
         await wc.loadURL(target);
         break;
       }

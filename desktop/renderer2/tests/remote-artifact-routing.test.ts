@@ -4,16 +4,16 @@ import { fileURLToPath } from 'node:url';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer } from 'vite';
-import { hostedArtifactURL } from '../src/browser.ts';
+import { connectedArtifactURL } from '../src/connected-artifacts.ts';
 
-test('artifact URL qualification preserves local paths and binds remote paths to one machine origin', () => {
-  assert.equal(hostedArtifactURL('/workass/artifacts/local-id/'), '/workass/artifacts/local-id/');
+test('artifact URL qualification preserves local paths and binds remote paths to the local shell', () => {
+  assert.equal(connectedArtifactURL('', '/workass/artifacts/local-id/'), '/workass/artifacts/local-id/');
   assert.equal(
-    hostedArtifactURL('/workass/artifacts/remote-id/', 'https://san-laptop.example:8788/'),
-    'https://san-laptop.example:8788/workass/artifacts/remote-id/',
+    connectedArtifactURL('san-laptop', '/workass/artifacts/remote-id/', 'http://127.0.0.1:8799', true),
+    'http://127.0.0.1:8799/workass/connected-artifacts/san-laptop/remote-id/',
   );
-  assert.equal(hostedArtifactURL('https://already.absolute/workass/artifacts/id/', 'https://san-laptop.example:8788'), 'https://already.absolute/workass/artifacts/id/');
-  assert.equal(hostedArtifactURL('/workass/artifacts/id/', ''), '');
+  assert.equal(connectedArtifactURL('san-laptop', 'https://already.absolute/workass/artifacts/id/', 'http://127.0.0.1:8799', true), 'http://127.0.0.1:8799/workass/connected-artifacts/san-laptop/id/');
+  assert.equal(connectedArtifactURL('', 'https://example.com/a'), 'https://example.com/a');
 });
 
 test('visualized artifact navigation keeps the cross-origin iframe decision executable', async (t) => {
@@ -30,7 +30,7 @@ test('visualized artifact navigation keeps the cross-origin iframe decision exec
   assert.equal(visualizationNeedsTopLevelOpen('http://127.0.0.1:8799', 'http://127.0.0.1:8799'), false);
 });
 
-test('remote hosted artifact links and images use the owning machine HTTP origin', async (t) => {
+test('remote hosted artifact links and images use the owning machine private bridge', async (t) => {
   const server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
     server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
@@ -40,7 +40,7 @@ test('remote hosted artifact links and images use the owning machine HTTP origin
   const { renderInline } = await server.ssrLoadModule('/src/markdown/inline.tsx') as {
     renderInline: (text: string, keyBase?: string, allowLinks?: boolean, media?: unknown) => React.ReactNode[];
   };
-  const remoteArtifact = 'https://san-laptop.example:8788/workass/artifacts/report-id/';
+  const remoteArtifact = 'http://127.0.0.1:8799/workass/connected-artifacts/san-laptop/report-id/';
   const nodes = renderInline(
     '[report](/workass/artifacts/report-id/) ![preview](/workass/artifacts/report-id/preview.png)',
     'remote',
@@ -48,7 +48,7 @@ test('remote hosted artifact links and images use the owning machine HTTP origin
     {
       revision: 'remote-v1',
       resolve: () => null,
-      resolveLink: (target: string) => hostedArtifactURL(target, 'https://san-laptop.example:8788'),
+      resolveLink: (target: string) => connectedArtifactURL('san-laptop', target, 'http://127.0.0.1:8799', true),
       open: () => {},
     },
   );
@@ -64,7 +64,7 @@ test('remote hosted artifact links and images use the owning machine HTTP origin
   const clickNodes = renderInline(
     '[report](/workass/artifacts/report-id/)', 'click', true, {
       revision: 'click-v1', resolve: () => null,
-      resolveLink: (target: string) => hostedArtifactURL(target, 'https://san-laptop.example:8788'),
+      resolveLink: (target: string) => connectedArtifactURL('san-laptop', target, 'http://127.0.0.1:8799', true),
       openLink: (target: string) => { opened = target; return true; }, open: () => {},
     },
   );
@@ -127,14 +127,16 @@ test('artifact clicks navigate the exact remote chat repeatedly without changing
   subject.bumpChat = () => {};
   const notices: unknown[][] = [];
   subject.addToast = (...args: unknown[]) => notices.push(args);
+  subject.state.machines[0].link = 'ready';
+  (globalThis as any).window.workassArtifacts = { supported: true };
   const origin = subject.browserArtifactOrigin(remote.machineId);
-  assert.equal(origin, 'https://192.0.2.10:8788');
+  assert.equal(origin, 'san-laptop');
   const artifact = '/workass/artifacts/report/';
   assert.equal(subject.openHostedArtifact(remote.id, artifact, origin), true);
   assert.equal(subject.openHostedArtifact(remote.id, artifact, origin), true);
   assert.deepEqual(calls, [
-    [remote.id, 'navigate', `${origin}${artifact}`],
-    [remote.id, 'navigate', `${origin}${artifact}`],
+    [remote.id, 'navigate', 'http://127.0.0.1:8799/workass/connected-artifacts/san-laptop/report/'],
+    [remote.id, 'navigate', 'http://127.0.0.1:8799/workass/connected-artifacts/san-laptop/report/'],
   ]);
   assert.equal(remote.pane, 'browser');
   assert.equal(local.pane, 'rail');

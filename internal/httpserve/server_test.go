@@ -206,12 +206,25 @@ func TestArtifactHostingRoutesThroughTheAllowedDaemonHTTPServer(t *testing.T) {
 	})
 	for _, requestPath := range []string{"/workass/artifacts/report-id/"} {
 		request := httptest.NewRequest(http.MethodGet, "http://example.test"+requestPath, nil)
+		request.RemoteAddr = "127.0.0.1:12345"
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusOK || recorder.Header().Get("X-Workass-Artifact-Host") != "yes" ||
 			recorder.Body.String() != requestPath {
 			t.Fatalf("artifact host route %s response = status %d headers=%v body=%q", requestPath, recorder.Code, recorder.Header(), recorder.Body.String())
 		}
+	}
+}
+
+func TestArtifactHostingRejectsNonLoopbackHTTP(t *testing.T) {
+	handler := New("", nil, nil)
+	handler.ArtifactHosts = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Fatal("artifact handler reached") })
+	request := httptest.NewRequest(http.MethodGet, "http://example.test/workass/artifacts/report-id/file.html", nil)
+	request.RemoteAddr = "192.0.2.10:1234"
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", recorder.Code)
 	}
 }
 

@@ -902,6 +902,7 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 	count += 2
 	registerVisualizeHandler(hub, opts.Artifacts, providerChats, state.stateDir)
 	count++
+	count += registerArtifactTransferHandlers(hub, opts.Artifacts)
 	registerNotifyHandlers(hub)
 	count++
 	registerConfigSettingsHandlers(hub, state, acpManager)
