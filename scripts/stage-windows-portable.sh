@@ -109,7 +109,7 @@ fi
 #    to the windows-amd64 output, so we build just the windows binary here.
 if [ -z "$release_input" ]; then
   echo "building dist-bin/workass-windows-amd64.exe"
-  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.daemonVersion=$version" \
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -buildvcs=false -trimpath -ldflags "-s -w -X main.daemonVersion=$version" \
     -o "$repo_root/dist-bin/workass-windows-amd64.exe" ./cmd/workass
 fi
 [ -f "$daemon_source" ] || {
