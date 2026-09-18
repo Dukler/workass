@@ -398,6 +398,37 @@ func TestRefreshProviderPlanUsageColdStartIsEphemeralAndPromptFree(t *testing.T)
 	}
 }
 
+func TestAccountPlanUsageWithNativeToolsNeedsNoChatOwner(t *testing.T) {
+	for _, provider := range []string{"codex", "claude"} {
+		t.Run(provider, func(t *testing.T) {
+			trace := filepath.Join(t.TempDir(), "methods.log")
+			m, events := newPlanUsageFakeManagerWithProviders(t, trace,
+				planUsageFakeProvider{id: provider, mode: provider + "-plan-limits"})
+			t.Cleanup(func() { m.Reset() })
+			m.mu.Lock()
+			m.opts.WorkassToolsOrigin = "https://tools.localhost:8788"
+			m.opts.WorkassToolsCommand = filepath.Join(t.TempDir(), "workass")
+			m.opts.WorkassToolsCAFile = filepath.Join(t.TempDir(), "ca.pem")
+			m.providers[provider].Config.Env[providerAdapterForID(provider).instructions.HostEnvironment] = os.Args[0]
+			m.mu.Unlock()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := m.RefreshProviderPlanUsage(ctx, provider); err != nil {
+				t.Fatalf("account metadata incorrectly requires chat ownership: %v", err)
+			}
+			snapshot := jsonMap(t, events.waitFor(t, time.Second, func(ev collectedEvent) bool {
+				return ev.channel == "chat:plan-usage"
+			}).payload)
+			if len(snapshot["entries"].([]any)) == 0 {
+				t.Fatal("missing plan windows")
+			}
+			if len(m.LiveSessions()) != 0 || countMethod(readMethodLog(t, trace), "session/prompt") != 0 {
+				t.Fatal("account read created visible work")
+			}
+		})
+	}
+}
+
 func TestNormalizedPlanUsageCaptureStoresRawWithoutFabricatingEntries(t *testing.T) {
 	t.Parallel()
 	manager := NewManager(Options{})

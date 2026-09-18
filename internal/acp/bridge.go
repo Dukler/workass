@@ -94,8 +94,8 @@ type Bridge struct {
 	// Keep the model option's wire values before UI catalog normalization.
 	// Collapsed effort variants in b.models are not necessarily writable IDs.
 	modelConfigValues map[string]bool
-	// Set before starting a disposable catalog bridge; its notifications are
-	// metadata, not changes to an attached user chat.
+	// Set before starting a disposable catalog or account-metadata bridge;
+	// it has no chat owner and cannot change an attached user chat's config.
 	catalogProbe bool
 	// Effort config options are model-specific. A present key with an empty
 	// slice means the adapter authoritatively omitted the effort axis for that
