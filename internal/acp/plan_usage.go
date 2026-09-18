@@ -297,6 +297,9 @@ func (m *Manager) RefreshProviderPlanUsage(ctx context.Context, providerID strin
 	}
 
 	bridge := newBridge(bridgeKey, providerOptions, m)
+	// Account metadata has no chat owner. Use the same isolated bootstrap as
+	// catalog discovery: no chat tool credentials or attached-chat config events.
+	bridge.catalogProbe = true
 	info, err := bridge.NewSession(ctx, SessionOptions{
 		BridgeKey: bridgeKey, ProviderID: providerID, Ephemeral: true,
 	})
@@ -483,6 +486,7 @@ func (m *Manager) ConsumeRateLimitResetCredit(ctx context.Context, providerID, s
 		bridgeKey := fmt.Sprintf("plan-usage-reset:%s:%d", providerID, m.bridgeSeq)
 		m.mu.Unlock()
 		ephemeral := newBridge(bridgeKey, providerOptions, m)
+		ephemeral.catalogProbe = true
 		info, err := ephemeral.NewSession(ctx, SessionOptions{
 			BridgeKey: bridgeKey, ProviderID: providerID, Ephemeral: true,
 		})
