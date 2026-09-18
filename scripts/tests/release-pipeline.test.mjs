@@ -566,6 +566,8 @@ test('canonical pipeline stages both platforms from one verified input and publi
   assert.match(preparer, /node "\$input_tool" create/);
   assert.match(preparer, /node "\$input_tool" verify/);
   assert.match(preparer, /workass_release_run_parallel_pair macos_daemon build_macos_daemon windows_daemon build_windows_daemon/);
+  assert.equal((preparer.match(/go build -buildvcs=false -trimpath/g) || []).length, 2);
+  assert.match(windowsStage, /GOOS=windows GOARCH=amd64 go build -buildvcs=false -trimpath/);
 
   assert.ok(sourcePreparer.indexOf('npm run build') < sourcePreparer.indexOf('scripts/sync-renderer2.sh'));
   assert.match(sourcePreparer, /diff -qr desktop\/renderer2\/dist cmd\/workass\/embedded\/dist/);

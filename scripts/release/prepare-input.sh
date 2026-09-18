@@ -98,12 +98,12 @@ stage_renderer() {
 }
 
 build_macos_daemon() {
-  (cd "$repo_root" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath \
+  (cd "$repo_root" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -buildvcs=false -trimpath \
     -ldflags "-s -w -X main.daemonVersion=$version" -o "$incoming/macos/runtime/workass" ./cmd/workass)
 }
 
 build_windows_daemon() {
-  (cd "$repo_root" && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+  (cd "$repo_root" && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -buildvcs=false -trimpath \
     -ldflags "-s -w -X main.daemonVersion=$version" -o "$incoming/windows/runtime/workass-daemon.exe" ./cmd/workass)
 }
 
