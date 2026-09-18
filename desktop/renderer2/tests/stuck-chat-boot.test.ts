@@ -19,6 +19,62 @@ before(async () => {
 
 after(async () => { await vite.close(); });
 
+test('fresh app boot loads Codex account limits without cached usage, a chat session, or a prompt', async () => {
+  const previousWindow = (globalThis as any).window;
+  const previousDocument = (globalThis as any).document;
+  const metadataCalls: string[] = [];
+  let promptCalls = 0;
+  let sessionCalls = 0;
+  let receiveUsage: (value: unknown) => void = () => {};
+  let finishRead: () => void = () => {};
+  const snapshot = { providerId: 'codex', capturedAt: '2026-09-18T12:00:00Z',
+    entries: [{ kind: 'rate-limit', id: 'seven_day', usedPercent: 42 }] };
+  (globalThis as any).window = {
+    api: {
+      appMeta: async () => ({ rootDir: '/tmp', workspaceDir: '/tmp', version: 'test' }),
+      providersList: async () => [{ id: 'codex', enabled: true, accountResetSupported: true }],
+      onChatPlanUsage: (cb: typeof receiveUsage) => { receiveUsage = cb; },
+      appChatRefreshPlanUsage: async (providerId: string) => {
+        metadataCalls.push(providerId);
+        await new Promise<void>((resolve) => { finishRead = resolve; });
+        receiveUsage(snapshot);
+        return { ok: true, providerId };
+      },
+      appChatNewSession: async () => { sessionCalls++; throw new Error('no chat session allowed'); },
+      startJob: async () => { promptCalls++; throw new Error('no model prompt allowed'); },
+    },
+    addEventListener: () => {},
+  };
+  (globalThis as any).document = { documentElement: { setAttribute: () => {}, removeAttribute: () => {} } };
+  let subject: any;
+  try {
+    for (let boot = 0; boot < 2; boot++) {
+      subject = new StoreCtor();
+      subject.schedulePersist = () => {};
+      assert.deepEqual(subject.state.planUsageByProvider, {});
+      assert.equal(subject.state.chats.length, 0);
+      await subject.init();
+      assert.equal(subject.state.planUsageLoadingByProvider.codex, true);
+      assert.equal(metadataCalls.length, boot + 1, 'boot must request limits without opening a menu');
+      finishRead();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.deepEqual(subject.state.planUsageByProvider.codex, snapshot);
+      assert.equal(subject.state.planUsageLoadingByProvider.codex, false);
+      assert.equal(sessionCalls, 0);
+      assert.equal(promptCalls, 0);
+      subject.monitor.stop();
+    }
+    assert.deepEqual(metadataCalls, ['codex', 'codex']);
+  } finally {
+    finishRead();
+    subject?.monitor?.stop();
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+    if (previousDocument === undefined) delete (globalThis as any).document;
+    else (globalThis as any).document = previousDocument;
+  }
+});
+
 test('the first persistence after boot does not rewrite every acknowledged chat', async () => {
   const previousWindow = (globalThis as any).window;
   const previousDocument = (globalThis as any).document;
