@@ -13,7 +13,7 @@ import { QueueList } from './QueueList';
 import { liveSteeringSupported } from '../steering';
 import { composerSubmitIntent, type ComposerSubmitIntent } from '../composer-submit';
 import { insertAtCaret, startRecording, transcribe, voiceStatus, type Recorder, type VoiceState } from '../voice';
-import { clampPlanUsagePercent, formatCountdown, formatPlanUsagePercent, isExpiredPlanReset, isHotRateLimit, isLiveReset, rateLimitLabel, relativePlanReset } from '../plan-usage';
+import { clampPlanUsagePercent, formatAbsolutePlanReset, formatCountdown, formatPlanUsagePercent, isExpiredPlanReset, isHotRateLimit, isLiveReset, rateLimitLabel, relativePlanReset } from '../plan-usage';
 import { imageDraftCapability } from '../model-controls';
 import { autosizeComposerTextarea, observeComposerTextareaWidth, syncComposerTextareaFade } from '../composer-autosize';
 import {
@@ -332,10 +332,17 @@ function PlanSection({ providerLabel, snapshot, loading }: {
       const percent = expired ? null : clampPlanUsagePercent(e.usedPercent);
       const pctText = expired ? null : formatPlanUsagePercent(e.usedPercent);
       const reset = expired ? '' : relativePlanReset(e.resetsAt, now);
+      // Exact wall-clock time, Codex-style: relative labels alone ("en 2 d")
+      // never say when the window comes back. Absolute is primary; the
+      // relative/countdown stays as secondary context in parens.
+      const absolute = expired ? '' : formatAbsolutePlanReset(e.resetsAt, now);
       // Under 24h the coarse "en 3 h" becomes a live H:MM:SS countdown that ticks
       // down each second; a day or more away stays the static relative label.
       const live = isLiveReset(e.resetsAt, now);
       const countdown = live ? formatCountdown(Date.parse(e.resetsAt!) - now) : null;
+      const fullTitle = !expired && e.resetsAt && Number.isFinite(Date.parse(e.resetsAt))
+        ? new Date(e.resetsAt).toLocaleString()
+        : undefined;
       // Label (truncates), the percentage pinned right (never shrinks), the bar,
       // and the reset time as a small caption underneath — so a long provider
       // label + reset string can never push text out of the popover box.
@@ -346,15 +353,19 @@ function PlanSection({ providerLabel, snapshot, loading }: {
             <span className={`planpct ${hot ? 'hot' : ''}`}>{pctText != null ? `${pctText}%` : '—'}</span>
           </div>
           <div className="planbar"><div className={`planbarfill ${hot ? 'hot' : ''}`} style={{ width: `${percent ?? 0}%` }} /></div>
-          {(expired || reset || e.isUsingOverage) && (
+          {(expired || reset || absolute || e.isUsingOverage) && (
             <div className="plansub">
               {expired ? (
                 <span className="planreset">Actualizando límites…</span>
-              ) : reset ? (
-                <span className="planreset">
+              ) : (reset || absolute) ? (
+                <span className="planreset" title={fullTitle}>
                   {live
-                    ? <>Se reinicia en <span className={`plantick ${hot ? 'hot' : ''}`}>{countdown}</span></>
-                    : `Se reinicia ${reset}`}
+                    ? (absolute
+                      ? <>Se reinicia {absolute} · en <span className={`plantick ${hot ? 'hot' : ''}`}>{countdown}</span></>
+                      : <>Se reinicia en <span className={`plantick ${hot ? 'hot' : ''}`}>{countdown}</span></>)
+                    : (absolute
+                      ? (reset ? `Se reinicia ${absolute} (${reset})` : `Se reinicia ${absolute}`)
+                      : `Se reinicia ${reset}`)}
                 </span>
               ) : null}
               {e.isUsingOverage ? <span className="planover">usando excedente</span> : null}
