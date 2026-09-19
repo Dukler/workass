@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   availableRateLimitReset,
   clampPlanUsagePercent,
+  formatAbsolutePlanReset,
   formatCountdown,
   formatPlanUsagePercent,
   isExpiredPlanReset,
@@ -29,7 +30,11 @@ test('earned Codex resets stay separate from ordinary reset clocks and honor the
   });
   assert.deepEqual(availableRateLimitReset({ availableCount: 3, credits: null }), { count: 3, credit: undefined });
   assert.equal(availableRateLimitReset({ availableCount: 0, credits: [] }), null);
-  assert.equal(rateLimitResetExpiry('2026-07-15T20:00:00Z', Date.parse('2026-07-13T20:00:00Z')), 'Vence en 2 d');
+  // Exact expiry pairs the wall-clock time with the coarse relative label.
+  const expiryIso = new Date(2026, 6, 15, 20, 0, 0).toISOString();
+  const expiryNow = new Date(2026, 6, 13, 20, 0, 0).getTime();
+  const expiry = rateLimitResetExpiry(expiryIso, expiryNow);
+  assert.match(expiry, /^Vence 15 jul 20:00 \(en 2 d\)$/);
 });
 
 test('retrying one earned reset reuses its idempotency key while another credit gets a new one', () => {
@@ -89,6 +94,21 @@ test('plan usage clamps malformed provider percentages without inventing data', 
 test('plan usage formats percentage and exact reset relative to a fixed clock', () => {
   const now = Date.parse('2026-07-13T16:20:00Z');
   assert.equal(relativePlanReset('2026-07-13T20:00:00Z', now), 'en 3 h 40 min');
+});
+
+test('plan usage names the exact local reset time Codex-style', () => {
+  // Local calendar dates keep the test independent of the machine timezone.
+  const now = new Date(2026, 6, 13, 16, 20, 0).getTime();
+  const sameDay = new Date(2026, 6, 13, 20, 0, 0).toISOString();
+  const tomorrow = new Date(2026, 6, 14, 1, 5, 0).toISOString();
+  const distant = new Date(2026, 6, 20, 13, 4, 0).toISOString();
+  const nextYear = new Date(2027, 0, 2, 9, 30, 0).toISOString();
+  assert.equal(formatAbsolutePlanReset(sameDay, now), 'hoy 20:00');
+  assert.equal(formatAbsolutePlanReset(tomorrow, now), 'mañana 01:05');
+  assert.equal(formatAbsolutePlanReset(distant, now), '20 jul 13:04');
+  assert.equal(formatAbsolutePlanReset(nextYear, now), '2 ene 2027 09:30');
+  assert.equal(formatAbsolutePlanReset(undefined, now), '');
+  assert.equal(formatAbsolutePlanReset('not-a-date', now), '');
 });
 
 test('plan usage highlights provider rejection and utilization at eighty percent', () => {

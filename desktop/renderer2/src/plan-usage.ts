@@ -46,6 +46,34 @@ export function relativePlanReset(iso: string | undefined, now: number = Date.no
   return `en ${Math.floor(d / 365)} a`;
 }
 
+// Exact wall-clock reset, Codex-style ("resets 21:22" / "resets 13:04 on 8 Oct").
+// Relative labels ("en 3 h", "en 2 d") are too coarse: a weekly "en 2 d" spans
+// a 24h range. This returns the local calendar time so the user knows exactly
+// when the window comes back: "hoy 21:22", "mañana 13:04", "8 oct 13:04"
+// (with year when it differs, "8 oct 2027 13:04"). Empty on missing/invalid.
+export function formatAbsolutePlanReset(iso: string | undefined, now: number = Date.now()): string {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const d = new Date(t);
+  const n = new Date(now);
+  if (!Number.isFinite(d.getTime()) || !Number.isFinite(n.getTime())) return '';
+  const p = (v: number) => String(v).padStart(2, '0');
+  const time = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  const sameDay = d.getFullYear() === n.getFullYear()
+    && d.getMonth() === n.getMonth()
+    && d.getDate() === n.getDate();
+  if (sameDay) return `hoy ${time}`;
+  const tomorrow = new Date(n.getFullYear(), n.getMonth(), n.getDate() + 1);
+  if (d.getFullYear() === tomorrow.getFullYear()
+    && d.getMonth() === tomorrow.getMonth()
+    && d.getDate() === tomorrow.getDate()) return `mañana ${time}`;
+  const MONTHS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+  const date = `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+  if (d.getFullYear() !== n.getFullYear()) return `${date} ${d.getFullYear()} ${time}`;
+  return `${date} ${time}`;
+}
+
 // A reset within the next 24h gets a live, second-by-second countdown instead of
 // the coarse "en 3 h" label; anything a day or more away stays static.
 export function isLiveReset(iso: string | undefined, now: number = Date.now()): boolean {
@@ -106,7 +134,9 @@ export function rateLimitResetExpiry(iso: string | undefined, now: number = Date
   if (!iso) return '';
   const relative = relativePlanReset(iso, now);
   if (!relative) return '';
-  return relative === 'reiniciado' ? 'Venció' : `Vence ${relative}`;
+  if (relative === 'reiniciado') return 'Venció';
+  const absolute = formatAbsolutePlanReset(iso, now);
+  return absolute ? `Vence ${absolute} (${relative})` : `Vence ${relative}`;
 }
 
 export function prepareRateLimitResetAttempt(
