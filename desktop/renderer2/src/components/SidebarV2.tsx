@@ -29,7 +29,11 @@ import { ModesSwitch, FooterUpdateCards, AccountMenu } from './Sidebar';
 
 // T3's sidebarAutoSettleAfterDays, whose default is 3. Age files a quiet chat
 // away on its own; the row action and the menu do it on demand.
+// User law 2026-09-21: age-based auto-settle is DISABLED (kept, not removed).
+// Active chats never file by age; only explicitly settled chats settle, and
+// those still archive via ARCHIVE_AFTER_SETTLED_MS below.
 const AUTO_SETTLE_MS = 3 * 24 * 60 * 60 * 1000;
+const AUTO_SETTLE_BY_AGE_ENABLED = false;
 export const ARCHIVE_AFTER_SETTLED_MS = 5 * 24 * 60 * 60 * 1000;
 const LIFECYCLE_TICK_MS = 60 * 60 * 1000;
 const TAIL_PAGE = 24;            // T3 pages its settled tail; deep history is rare
@@ -238,6 +242,9 @@ export function resolveSettled(chat: Chat, status: Status, _active: boolean, now
   // with no messages has a zero timestamp, and treating that as "last touched
   // in 1970" would drop every freshly created chat straight onto the shelf.
   if (!touched) return false;
+  // Age rule disabled by user law 2026-09-21 (kept for re-enable): without an
+  // explicit 'settled' override nothing files by age.
+  if (!AUTO_SETTLE_BY_AGE_ENABLED) return false;
   return now - touched >= AUTO_SETTLE_MS;
 }
 
