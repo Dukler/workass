@@ -20,12 +20,13 @@ import (
 )
 
 type Bridge struct {
-	nativeInstructionsDir string
-	key                   string
-	providerID            string
-	providerName          string
-	manager               *Manager
-	opts                  Options
+	nativeInstructionsDir     string
+	nativeInstructionsEnabled bool
+	key                       string
+	providerID                string
+	providerName              string
+	manager                   *Manager
+	opts                      Options
 
 	mu                sync.Mutex
 	child             *exec.Cmd

@@ -4,7 +4,6 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import readline from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -25,13 +24,24 @@ function startHost(env = {}) {
   });
   const messages = [];
   const waiters = [];
-  readline.createInterface({ input: child.stdout }).on('line', (line) => {
+  const accept = (line) => {
     const message = JSON.parse(line);
     messages.push(message);
     for (const waiter of [...waiters]) {
       if (!waiter.match(message)) continue;
       waiters.splice(waiters.indexOf(waiter), 1);
       waiter.resolve(message);
+    }
+  };
+  let buffer = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    buffer += chunk;
+    let end;
+    while ((end = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, end);
+      buffer = buffer.slice(end + 1);
+      accept(line);
     }
   });
   const waitFor = (match, timeout = 3000) => new Promise((resolve, reject) => {
@@ -531,6 +541,38 @@ test('native Codex large exact resume omits display history and preserves native
   assert.equal(starts[0].inputBytes, Buffer.byteLength(expectedInput));
   assert.equal(starts[0].inputDigest, createHash('sha256').update(expectedInput).digest('hex'));
   assert.doesNotMatch(JSON.stringify(peer.messages), /historical-fixture-only/);
+});
+
+test('native Codex exact resume and current input preserve Unicode line separators across UTF-8 chunks', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'workass-codex-unicode-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const trace = path.join(temp, 'calls.jsonl');
+  const peer = startHost({ WORKASS_CODEX_FIXTURE_RPC_TRACE: trace,
+    WORKASS_CODEX_FIXTURE_LARGE_RESUME: '1', WORKASS_CODEX_FIXTURE_UNICODE_RESUME: '1' });
+  t.after(() => peer.child.kill('SIGKILL'));
+  const sessionId = 'fixture-codex-thread';
+  peer.send({ id: 1, method: 'session/resume', params: { sessionId, cwd: repoRoot, mcpServers: [] } });
+  const resumed = await peer.waitFor((m) => m.id === 1);
+  assert.equal(resumed.error, undefined);
+  assert.ok(resumed.result.configOptions.length > 0);
+  const text = 'Current input before\u2028between\u2029after 🟢.';
+  const frame = Buffer.from(`${JSON.stringify({ id: 2, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text }], clientUserMessageId: 'unicode-input',
+  } })}\r\n`);
+  const split = frame.indexOf(Buffer.from('\u2029')) + 1;
+  peer.child.stdin.write(frame.subarray(0, split));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  peer.child.stdin.write(frame.subarray(split));
+  assert.equal((await peer.waitFor((m) => m.id === 2)).result.stopReason, 'end_turn');
+  const calls = (await readFile(trace, 'utf8')).trim().split('\n').map(JSON.parse);
+  const starts = calls.filter((c) => c.method === 'turn/start');
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].inputDigest, createHash('sha256').update(JSON.stringify([
+    { type: 'text', text, text_elements: [] },
+  ])).digest('hex'));
+  assert.equal(calls.filter((c) => c.method === 'thread/resume').length, 1);
+  assert.ok(calls.every((c) => c.exactThread !== false));
+  assert.ok(calls.every((c) => !['thread/start', 'thread/read', 'thread/items/list', 'thread/inject_items'].includes(c.method)));
 });
 
 test('native Codex children use stable subagent cards without completing or consuming the parent turn', async (t) => {

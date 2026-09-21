@@ -98,7 +98,7 @@ func runToolsCommand(ctx context.Context, args []string, input io.Reader, output
 	}
 	config, err := toolcli.ReadConfig(*contextFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w; use the current process WORKASS_TOOL_CONTEXT, not a context path copied from conversation history", err)
 	}
 	response, err := toolcli.Do(ctx, config, name, call)
 	if err != nil {

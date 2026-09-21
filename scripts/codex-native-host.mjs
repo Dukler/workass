@@ -9,7 +9,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import { open, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
-import readline from 'node:readline';
 
 const hostInstanceId = randomUUID();
 const sessions = new Map();
@@ -61,6 +60,30 @@ function nativeTurnError(value) {
 
 function diagnostic(label, error) {
   process.stderr.write(`${label}: ${safeErrorText(error)}\n`);
+}
+
+// JSON-RPC stdio is LF-delimited. Node readline also treats U+2028/U+2029
+// inside valid JSON strings as line endings, corrupting exact resume replies
+// (and user/tool input). Decode UTF-8 across chunks and split only on LF.
+function readJSONLines(stream, accept) {
+  let fragments = [];
+  stream.setEncoding('utf8');
+  stream.on('data', (chunk) => {
+    let start = 0;
+    let end;
+    while ((end = chunk.indexOf('\n', start)) !== -1) {
+      fragments.push(chunk.slice(start, end));
+      const line = fragments.join('');
+      fragments = [];
+      accept(line);
+      start = end + 1;
+    }
+    if (start < chunk.length) fragments.push(chunk.slice(start));
+  });
+  stream.on('end', () => {
+    if (fragments.length) accept(fragments.join(''));
+    fragments = [];
+  });
 }
 
 const diagnosticCount = (value) => Number.isSafeInteger(value) && value >= 0;
@@ -150,7 +173,7 @@ class AppServerPeer {
     this.mcpStartupRevision = 0;
     this.closing = false;
     this.child = spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
-    readline.createInterface({ input: this.child.stdout }).on('line', (line) => this.accept(line));
+    readJSONLines(this.child.stdout, (line) => this.accept(line));
     this.child.stderr.on('data', (chunk) => diagnostic('codex app-server', chunk.toString('utf8')));
     this.child.on('error', (error) => this.terminate(error));
     this.child.on('exit', (code, signal) => {
@@ -1487,7 +1510,7 @@ function handleWorkassNotification(message) {
   if (message.method === '_session/steer') void session.steer(message.params?.prompt, '').catch((error) => diagnostic('Codex steer failed', error));
 }
 
-readline.createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', (line) => {
+readJSONLines(process.stdin, (line) => {
   let message;
   try { message = JSON.parse(line); } catch { diagnostic('Codex host received invalid JSON', 'parse failure'); return; }
   if (Object.hasOwn(message, 'id') && !message.method) {
@@ -1498,4 +1521,5 @@ readline.createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line
   if (!message?.method) return;
   if (!Object.hasOwn(message, 'id')) { handleWorkassNotification(message); return; }
   void handleWorkassRequest(message).catch((error) => fail(message.id, error.rpcCode || error.code || -32603, error, error.data));
-}).on('close', () => app?.close());
+});
+process.stdin.on('end', () => app?.close());

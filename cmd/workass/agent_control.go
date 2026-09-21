@@ -200,8 +200,8 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			return nil, errors.New("subagent id is required")
 		}
 		timeoutMS := intField(params, "timeout_ms")
-		if timeoutMS != 0 && (timeoutMS < 1000 || timeoutMS > 3600000) {
-			return nil, errors.New("subagent wait timeout_ms must be between 1000 and 3600000")
+		if timeoutMS != -1 && timeoutMS != 0 && (timeoutMS < 1000 || timeoutMS > 3600000) {
+			return nil, errors.New("subagent wait timeout_ms must be -1 (event-only), 0 (default), or between 1000 and 3600000")
 		}
 		if h.chats == nil || h.chats.providerChats == nil {
 			return nil, errors.New("agent wait requires the durable chat actor")
@@ -215,8 +215,8 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			return nil, errors.New("at least one subagent id is required")
 		}
 		timeoutMS := intField(params, "timeout_ms")
-		if timeoutMS != 0 && (timeoutMS < 1000 || timeoutMS > 3600000) {
-			return nil, errors.New("subagent wait timeout_ms must be between 1000 and 3600000")
+		if timeoutMS != -1 && timeoutMS != 0 && (timeoutMS < 1000 || timeoutMS > 3600000) {
+			return nil, errors.New("subagent wait timeout_ms must be -1 (event-only), 0 (default), or between 1000 and 3600000")
 		}
 		if h.chats == nil || h.chats.providerChats == nil {
 			return nil, errors.New("agent wait requires the durable chat actor")

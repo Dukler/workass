@@ -545,6 +545,7 @@ func (m *Manager) notifySubagentPermissionForJob(job *Job, title string) {
 			Kind: "permission", Sequence: sequence, Message: message,
 			Active: true, RequestedAt: now, GrantableBy: grantableBy,
 		}
+		m.signalSubagentWaitersLocked()
 		run.Phase = "waiting_permission"
 		run.LatestActivity = message
 		run.LastActivityAt = now
@@ -811,6 +812,9 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 	if done != nil {
 		close(done)
 	}
+	m.mu.Lock()
+	m.signalSubagentWaitersLocked()
+	m.mu.Unlock()
 }
 
 func (m *Manager) emitSubagentHeader(parentJobID, id, label, provider, model, status, output string) {
@@ -1000,17 +1004,48 @@ func (m *Manager) ListSubagents(ownerKey, parentChatID, parentTabID string) []Su
 	return out
 }
 
+// Wait notifications concern terminal receipts and latched attention only.
+// Routine progress never wakes the model; subscribers observe a channel before
+// reading state so a concurrent completion cannot be lost between the two.
+func (m *Manager) signalSubagentWaitersLocked() {
+	if m.subagentWake != nil {
+		close(m.subagentWake)
+	}
+	m.subagentWake = make(chan struct{})
+}
+
+func (m *Manager) subagentWaitNotification() <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.subagentWake == nil {
+		m.subagentWake = make(chan struct{})
+	}
+	return m.subagentWake
+}
+
+// Zero retains the historical ten-minute default. A negative duration opts
+// into an event-only wait, still cancellable by the caller or daemon shutdown.
+func subagentWaitDeadline(timeout time.Duration) (<-chan time.Time, func()) {
+	if timeout < 0 {
+		return nil, func() {}
+	}
+	if timeout == 0 {
+		timeout = 10 * time.Minute
+	}
+	timer := time.NewTimer(timeout)
+	return timer.C, func() { timer.Stop() }
+}
+
 func (m *Manager) WaitSubagent(ctx context.Context, ownerKey, parentChatID, parentTabID, id string, timeout time.Duration) (SubagentRun, error) {
 	chatID, tabID, parent, ok := m.subagentOwnerContext(ownerKey, parentChatID, parentTabID)
 	if !ok {
 		return SubagentRun{}, errors.New("no running Workass turn owns this subagent request")
 	}
 	id = strings.TrimSpace(id)
-	if timeout <= 0 {
-		timeout = 10 * time.Minute
-	}
-	deadline := time.Now().Add(timeout)
+	deadline, stop := subagentWaitDeadline(timeout)
+	defer stop()
 	for {
+		wake := m.subagentWaitNotification()
 		m.mu.Lock()
 		run := m.subagents[id]
 		if !m.addressSubagentLocked(run, parent, chatID, tabID) {
@@ -1019,7 +1054,6 @@ func (m *Manager) WaitSubagent(ctx context.Context, ownerKey, parentChatID, pare
 		}
 		snapshot := copySubagentRun(run)
 		settled := subagentRunSettled(run)
-		done := run.done
 		if snapshot.NeedsAttention && run.Attention != nil && run.Attention.Sequence > run.attentionDeliveredSequence {
 			run.attentionDeliveredSequence = run.Attention.Sequence
 		}
@@ -1027,22 +1061,12 @@ func (m *Manager) WaitSubagent(ctx context.Context, ownerKey, parentChatID, pare
 		if settled || snapshot.NeedsAttention {
 			return snapshot, nil
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return SubagentRun{}, errors.New("timed out waiting for subagent; it is still running")
-		}
-		poll := 50 * time.Millisecond
-		if remaining < poll {
-			poll = remaining
-		}
-		timer := time.NewTimer(poll)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return SubagentRun{}, ctx.Err()
-		case <-done:
-			timer.Stop()
-		case <-timer.C:
+		case <-wake:
+		case <-deadline:
+			return SubagentRun{}, errors.New("timed out waiting for subagent; it is still running")
 		}
 	}
 }
@@ -1074,11 +1098,10 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 	if len(cleanIDs) == 0 {
 		return nil, errors.New("at least one subagent id is required")
 	}
-	if timeout <= 0 {
-		timeout = 10 * time.Minute
-	}
-	deadline := time.Now().Add(timeout)
+	deadline, stop := subagentWaitDeadline(timeout)
+	defer stop()
 	for {
+		wake := m.subagentWaitNotification()
 		completed, running, err := m.subagentSnapshotsForOwner(parent, chatID, tabID, cleanIDs)
 		if err != nil {
 			return nil, err
@@ -1091,23 +1114,20 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 				"needsAttention": len(attention) > 0, "timedOut": false,
 			}, nil
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-wake:
+		case <-deadline:
+			completed, running, err = m.subagentSnapshotsForOwner(parent, chatID, tabID, cleanIDs)
+			if err != nil {
+				return nil, err
+			}
+			attention = subagentsNeedingAttention(running)
 			return map[string]any{
 				"completed": completed, "running": running, "attention": attention,
 				"needsAttention": len(attention) > 0, "timedOut": true,
 			}, nil
-		}
-		wait := 50 * time.Millisecond
-		if remaining < wait {
-			wait = remaining
-		}
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
 		}
 	}
 }
