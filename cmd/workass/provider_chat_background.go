@@ -290,7 +290,7 @@ func (r *providerChatRuntime) syncSpawnedWorkSnapshots() error {
 func exactBackgroundOwner(state chat.State, item acp.SpawnedWorkItem) (chat.ProviderActivityOwner, bool) {
 	workID := firstNonEmptyString(strings.TrimSpace(item.ID), strings.TrimSpace(item.TaskID))
 	if existing, ok := state.Background[workID]; ok {
-		if backgroundOwnerIsExact(state, existing.Owner) && backgroundOwnerProviderMatches(state, existing.Owner, item.ProviderID) {
+		if backgroundOwnerIsExact(state, existing.Owner) && backgroundOwnerProviderMatches(state, existing.Owner, item) {
 			return existing.Owner, true
 		}
 		return chat.ProviderActivityOwner{}, false
@@ -304,13 +304,13 @@ func exactBackgroundOwner(state chat.State, item acp.SpawnedWorkItem) (chat.Prov
 	hasDirectOrigin := laneID != "" || operationID != "" || turnID != ""
 	if hasDirectOrigin {
 		owner, ok := state.ResolveProviderActivityOwner(laneID, operationID, turnID)
-		if !ok || !backgroundOwnerProviderMatches(state, owner, item.ProviderID) {
+		if !ok || !backgroundOwnerProviderMatches(state, owner, item) {
 			return chat.ProviderActivityOwner{}, false
 		}
 		return owner, true
 	}
 	if toolCallID := strings.TrimSpace(item.ToolCallID); toolCallID != "" {
-		if tool := state.Tools[toolCallID]; backgroundOwnerIsExact(state, tool.Owner) && backgroundOwnerProviderMatches(state, tool.Owner, item.ProviderID) {
+		if tool := state.Tools[toolCallID]; backgroundOwnerIsExact(state, tool.Owner) && backgroundOwnerProviderMatches(state, tool.Owner, item) {
 			return tool.Owner, true
 		}
 	}
@@ -333,8 +333,13 @@ func backgroundOwnerIsExact(state chat.State, owner chat.ProviderActivityOwner) 
 		resolved.TurnID == strings.TrimSpace(owner.TurnID)
 }
 
-func backgroundOwnerProviderMatches(state chat.State, owner chat.ProviderActivityOwner, rawProviderID string) bool {
-	providerID := providercontract.NormalizeID(rawProviderID)
+func backgroundOwnerProviderMatches(state chat.State, owner chat.ProviderActivityOwner, item acp.SpawnedWorkItem) bool {
+	// A tracked child's provider is its execution target, not its parent's
+	// origin lane. Exact lane/operation/turn ownership is still required above.
+	if item.Kind == "subagent" {
+		return true
+	}
+	providerID := providercontract.NormalizeID(item.ProviderID)
 	if providerID == "" {
 		return true
 	}
@@ -344,6 +349,7 @@ func backgroundOwnerProviderMatches(state chat.State, owner chat.ProviderActivit
 
 func backgroundEvent(item acp.SpawnedWorkItem, workID string) providercontract.BackgroundEvent {
 	return providercontract.BackgroundEvent{
+		ProviderID: item.ProviderID, AssistantBrand: item.AssistantBrand,
 		WorkID: workID, TaskID: item.TaskID, ToolCallID: item.ToolCallID, Title: item.Label,
 		Kind: item.Kind, Role: item.Role, Status: item.Status, StartedAt: item.StartedAt,
 		UpdatedAt: item.UpdatedAt, FinishedAt: item.FinishedAt, ExitCode: item.ExitCode,

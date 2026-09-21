@@ -194,7 +194,7 @@ func TestCoordinatedSubagentUsesExplicitSelectionRoutesPermissionAndNamespacesTo
 	waitAttention := make(chan SubagentRun, 1)
 	waitAttentionErr := make(chan error, 1)
 	go func() {
-		attention, waitErr := manager.WaitSubagent(ctx, ownerKey, "", "", run.ID, 4*time.Second)
+		attention, waitErr := manager.WaitSubagent(ctx, ownerKey, "", "", run.ID, -time.Millisecond)
 		waitAttention <- attention
 		waitAttentionErr <- waitErr
 	}()
@@ -214,7 +214,7 @@ func TestCoordinatedSubagentUsesExplicitSelectionRoutesPermissionAndNamespacesTo
 		!strings.Contains(attention.LatestActivity, "Mock permission gate") {
 		t.Fatalf("permission attention snapshot = %#v", attention)
 	}
-	wake, err := manager.WaitSubagents(ctx, ownerKey, "", "", []string{run.ID}, "all", 2*time.Second)
+	wake, err := manager.WaitSubagents(ctx, ownerKey, "", "", []string{run.ID}, "all", -time.Millisecond)
 	if err != nil {
 		t.Fatalf("wait-many permission attention: %v", err)
 	}
@@ -1264,4 +1264,50 @@ func subagentHeadersFor(events *eventCollector, jobID, subagentID string) []map[
 		}
 	}
 	return out
+}
+
+func TestSubagentEventOnlyWaitCancellationDoesNotCancelChild(t *testing.T) {
+	t.Parallel()
+	manager, _, session, ownerKey, root, _ := newSubagentLifecycleFixture(t, "event-only-cancel")
+	run, err := manager.SpawnSubagent(context.Background(), SubagentSpawnOptions{
+		OwnerKey: ownerKey, ParentChatID: session.ChatID, ParentTabID: session.TabID,
+		Prompt: "[mock:hold-until-steer] harmless wait fixture", ModeID: "ask", CWD: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, many := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		finished := make(chan error, 1)
+		go func() {
+			var err error
+			if many {
+				_, err = manager.WaitSubagents(ctx, ownerKey, session.ChatID, session.TabID, []string{run.ID}, "all", -time.Millisecond)
+			} else {
+				_, err = manager.WaitSubagent(ctx, ownerKey, session.ChatID, session.TabID, run.ID, -time.Millisecond)
+			}
+			finished <- err
+		}()
+		select {
+		case err := <-finished:
+			cancel()
+			t.Fatalf("wait returned without an event: %v", err)
+		case <-time.After(50 * time.Millisecond):
+		}
+		cancel()
+		select {
+		case err := <-finished:
+			if err != context.Canceled {
+				t.Fatalf("cancellation: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("wait ignored caller cancellation")
+		}
+		listed := manager.ListSubagents(ownerKey, session.ChatID, session.TabID)
+		if len(listed) != 1 || listed[0].Status != "running" {
+			t.Fatal("cancelling observation cancelled worker")
+		}
+	}
+	manager.CancelSubagent(ownerKey, session.ChatID, session.TabID, run.ID)
+	waitForSubagentTerminal(t, manager, ownerKey, session, run.ID, 5*time.Second)
 }

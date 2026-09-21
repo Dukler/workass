@@ -48,6 +48,16 @@ func TestToolContextIsPrivateStableAndBoundToCurrentSession(t *testing.T) {
 	if !info.ModTime().Equal(after.ModTime()) || !os.SameFile(info, after) {
 		t.Fatal("later turn rewrote context")
 	}
+	if err := os.Remove(entry.path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.toolContextBrief("session", "chat", "tab"); err != nil {
+		t.Fatal("missing context was not repaired", err)
+	}
+	entry = m.toolContexts[owner]
+	if repaired, err := toolcli.ReadConfig(entry.path); err != nil || repaired != config {
+		t.Fatal("repaired context lost its owner")
+	}
 	if _, err := m.toolContextBrief("session", "other-chat", "tab"); err == nil {
 		t.Fatal("context accepted another chat")
 	}

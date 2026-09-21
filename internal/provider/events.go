@@ -166,23 +166,26 @@ type CompactionEvent struct {
 type CheckpointRestoredEvent struct{ TurnSequence int }
 
 type BackgroundEvent struct {
-	WorkID        string
-	TaskID        string
-	ToolCallID    string
-	Title         string
-	Kind          string
-	Role          string
-	Status        string
-	StartedAt     string
-	UpdatedAt     string
-	FinishedAt    string
-	ExitCode      *int
-	Summary       string
-	OutputFile    string
-	PID           *int
-	LastToolName  string
-	ModelLabel    string
-	ResultExcerpt string
+	// The executor can differ from the origin lane for tracked subagents.
+	ProviderID     string `json:",omitempty"`
+	AssistantBrand string `json:",omitempty"`
+	WorkID         string
+	TaskID         string
+	ToolCallID     string
+	Title          string
+	Kind           string
+	Role           string
+	Status         string
+	StartedAt      string
+	UpdatedAt      string
+	FinishedAt     string
+	ExitCode       *int
+	Summary        string
+	OutputFile     string
+	PID            *int
+	LastToolName   string
+	ModelLabel     string
+	ResultExcerpt  string
 }
 
 type TransportHealthEvent struct {

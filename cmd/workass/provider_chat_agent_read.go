@@ -426,8 +426,8 @@ func actorSubagentRun(state chat.State, item chat.BackgroundState) acp.SubagentR
 	case "orphaned":
 		status = "failed"
 	}
-	providerID := ""
-	if lane, ok := state.Lanes[item.Owner.LaneID]; ok {
+	providerID := event.ProviderID
+	if lane, ok := state.Lanes[item.Owner.LaneID]; ok && providerID == "" {
 		providerID = string(lane.Identity.Realm.ProviderID)
 	}
 	finished := strings.TrimSpace(event.FinishedAt)
@@ -552,14 +552,15 @@ func actorSpawnedWorkItems(state chat.State) []actorSpawnedWorkProjection {
 func actorBackgroundWorkItem(state chat.State, background chat.BackgroundState) acp.SpawnedWorkItem {
 	event := background.Event
 	id := firstNonEmptyString(event.WorkID, event.TaskID)
-	providerID := ""
-	if lane, ok := state.Lanes[background.Owner.LaneID]; ok {
+	providerID := event.ProviderID
+	if lane, ok := state.Lanes[background.Owner.LaneID]; ok && providerID == "" {
 		providerID = string(lane.Identity.Realm.ProviderID)
 	}
 	return acp.SpawnedWorkItem{
 		ID: id, TaskID: firstNonEmptyString(event.TaskID, id), ToolCallID: event.ToolCallID,
 		TabID: state.Presentation.TabID, ChatID: state.ChatID, ProviderID: providerID,
-		Kind: event.Kind, Label: acp.RedactSensitiveText(event.Title), Role: event.Role,
+		AssistantBrand: event.AssistantBrand,
+		Kind:           event.Kind, Label: acp.RedactSensitiveText(event.Title), Role: event.Role,
 		Status: event.Status, StartedAt: event.StartedAt, UpdatedAt: event.UpdatedAt, FinishedAt: event.FinishedAt,
 		OutputFile: acp.RedactSensitiveText(event.OutputFile), PID: cloneIntPointer(event.PID), ExitCode: cloneIntPointer(event.ExitCode),
 		Summary: acp.RedactSensitiveText(event.Summary), LastToolName: acp.RedactSensitiveText(event.LastToolName),

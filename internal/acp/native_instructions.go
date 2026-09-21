@@ -26,13 +26,14 @@ func (b *Bridge) prepareNativeInstructions(provider ProviderConfig) (ProviderCon
 	probe := b.catalogProbe
 	b.mu.Unlock()
 	style := providerAdapterForID(b.providerID).instructions
-	if probe || style == (nativeInstructionDelivery{}) || b.opts.WorkassToolsOrigin == "" {
+	if probe || b.opts.WorkassToolsOrigin == "" {
 		return provider, nil
 	}
+	native := style != (nativeInstructionDelivery{})
 	// A custom command registered under a native provider name need not implement
 	// our private host contract. Keep its existing prompt behavior.
 	if style.HostEnvironment != "" && provider.Env[style.HostEnvironment] == "" {
-		return provider, nil
+		native = false
 	}
 	if !filepath.IsAbs(b.opts.WorkassToolsCommand) || !filepath.IsAbs(b.opts.WorkassToolsCAFile) {
 		return provider, errors.New("Workass tools require absolute command and certificate paths")
@@ -71,7 +72,7 @@ func (b *Bridge) prepareNativeInstructions(provider ProviderConfig) (ProviderCon
 	provider.Env["WORKASS_TOOL_CONTEXT"] = filepath.Join(b.nativeInstructionsDir, "context.json")
 	provider.Env["WORKASS_INSTRUCTIONS_FILE"] = filepath.Join(b.nativeInstructionsDir, "instructions.md")
 	provider.Env["WORKASS_TOOLS_GUIDE"] = filepath.Join(b.nativeInstructionsDir, "guide.md")
-	if style.ConfigEnvironment != "" {
+	if native && style.ConfigEnvironment != "" {
 		raw, exists := provider.Env[style.ConfigEnvironment]
 		if !exists {
 			raw = os.Getenv(style.ConfigEnvironment)
@@ -82,6 +83,7 @@ func (b *Bridge) prepareNativeInstructions(provider ProviderConfig) (ProviderCon
 		}
 		provider.Env[style.ConfigEnvironment] = merged
 	}
+	b.nativeInstructionsEnabled = native
 	return provider, nil
 }
 
@@ -117,7 +119,7 @@ func appendInstructionFile(raw, path string) (string, error) {
 func (b *Bridge) usesNativeInstructions() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.nativeInstructionsDir != ""
+	return b.nativeInstructionsDir != "" && b.nativeInstructionsEnabled
 }
 
 func (b *Bridge) bindNativeToolContext(owner, chatID, tabID string) error {
@@ -133,6 +135,9 @@ func (b *Bridge) bindNativeToolContext(owner, chatID, tabID string) error {
 	m.mu.Unlock()
 	if !ok || owner == "" || binding.ChatID != chatID || binding.TabID != tabID {
 		return errors.New("Workass tools have no owner for this session")
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return errors.New("cannot prepare Workass tool context directory")
 	}
 	config := toolcli.Config{Endpoint: strings.TrimRight(b.opts.WorkassToolsOrigin, "/") + "/workass/tools", CAFile: b.opts.WorkassToolsCAFile, Credential: owner, ChatID: chatID, TabID: tabID}
 	data, err := json.Marshal(config)
@@ -183,6 +188,7 @@ func (b *Bridge) removeNativeInstructions() {
 	b.mu.Lock()
 	dir := b.nativeInstructionsDir
 	b.nativeInstructionsDir = ""
+	b.nativeInstructionsEnabled = false
 	b.mu.Unlock()
 	if dir != "" {
 		_ = os.RemoveAll(dir)

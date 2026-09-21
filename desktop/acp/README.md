@@ -235,6 +235,14 @@ history caused `responseStreamDisconnected`, nor a fix for that socket close.
 The native error identifies a Responses close before completion; it does not
 identify why the peer closed or establish an upstream service defect.
 
+The Codex host frames both stdio directions strictly at LF, with UTF-8 decoding
+across chunks. Node's general-purpose `readline` also splits U+2028/U+2029,
+which are legal inside JSON strings. A saved thread preview containing them
+previously broke an otherwise valid resume reply into invalid fragments and
+left attachment waiting for its timeout. The `Unicode line separators`
+direct-host regression covers exact resume and intact current input, including
+split UTF-8 bytes and CRLF framing, without replacement or replay.
+
 ## Tool-result images
 
 ACP tool updates may return structured raster image blocks alongside text.

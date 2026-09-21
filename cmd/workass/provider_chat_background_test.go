@@ -51,6 +51,25 @@ func TestRuntimeBackgroundOwnerRequiresExactOrigin(t *testing.T) {
 	if owner, ok := exactBackgroundOwner(state, item); ok {
 		t.Fatalf("mismatched operation/turn origin was accepted: %#v", owner)
 	}
+	child := acp.SpawnedWorkItem{ID: "child", Kind: "subagent", ProviderID: "claude", AssistantBrand: "Claude",
+		OriginOperationID: "turn-op", OriginTurnID: "native-turn"}
+	childOwner, ok := exactBackgroundOwner(state, child)
+	if !ok || childOwner != owner {
+		t.Fatal("cross-provider child lost exact parent origin")
+	}
+	childEvent := backgroundEvent(child, child.ID)
+	backgroundChild := chat.BackgroundState{Owner: childOwner, Event: childEvent}
+	if actorSubagentRun(state, backgroundChild).ProviderID != "claude" || actorBackgroundWorkItem(state, backgroundChild).AssistantBrand != "Claude" {
+		t.Fatal("child projection borrowed parent provider")
+	}
+	child.OriginTurnID = "wrong-turn"
+	if _, ok := exactBackgroundOwner(state, child); ok {
+		t.Fatal("cross-provider exemption bypassed exact turn ownership")
+	}
+	child.OriginTurnID, child.Kind = "native-turn", "native-agent"
+	if _, ok := exactBackgroundOwner(state, child); ok {
+		t.Fatal("native background work bypassed origin provider fence")
+	}
 
 	valid := acp.SpawnedWorkItem{ID: "owned", TaskID: "owned", TabID: "tab", ChatID: "chat", ProviderID: "codex", Status: "running", OriginOperationID: "turn-op"}
 	orphan := acp.SpawnedWorkItem{ID: "orphan", TaskID: "orphan", TabID: "tab", ChatID: "chat", ProviderID: "codex", Status: "running"}

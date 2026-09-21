@@ -28,8 +28,15 @@ type statelessMCPTestHarness struct {
 }
 
 func newStatelessMCPTestHarness(t *testing.T) statelessMCPTestHarness {
+	return newStatelessMCPTestHarnessWithProviders(t, nil)
+}
+
+func newStatelessMCPTestHarnessWithProviders(t *testing.T, providers []acp.ProviderConfig) statelessMCPTestHarness {
 	t.Helper()
 	root := repoRoot(t)
+	if len(providers) > 0 {
+		providers = append(providers, acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true})
+	}
 	manager := acp.NewManager(acp.Options{
 		RootDir: root, StateDir: filepath.Join(t.TempDir(), "state"), RuntimeProfile: "test",
 		Provider: acp.ProviderConfig{
@@ -37,6 +44,7 @@ func newStatelessMCPTestHarness(t *testing.T) statelessMCPTestHarness {
 			CWD: root, Enabled: true, Label: "Workass Mock ACP",
 		},
 		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+		Providers: providers,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	t.Cleanup(cancel)

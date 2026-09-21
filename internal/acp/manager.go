@@ -80,6 +80,7 @@ type Manager struct {
 	finishedJobOrder            []string
 	permissions                 map[string]*permissionResolver
 	subagents                   map[string]*SubagentRun
+	subagentWake                chan struct{}
 	modelScores                 ModelScores
 	providerUpdateRuns          map[string]*providerUpdateRun
 	providerUpdateFailures      map[string]providerUpdateFailure
@@ -919,6 +920,7 @@ func (m *Manager) Reset() bool {
 	m.agentOwnerBySession = make(map[string]string)
 	m.permissions = make(map[string]*permissionResolver)
 	m.subagents = make(map[string]*SubagentRun)
+	m.signalSubagentWaitersLocked()
 	m.spareGen++
 	m.spareSessions = nil
 	m.spareWarming = make(map[string]int)

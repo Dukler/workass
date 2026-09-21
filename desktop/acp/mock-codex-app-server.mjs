@@ -1,4 +1,3 @@
-import readline from 'node:readline';
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 
@@ -433,6 +432,14 @@ async function handle(message) {
       ...(process.env.WORKASS_CODEX_FIXTURE_HISTORY_MODE ? { historyMode: process.env.WORKASS_CODEX_FIXTURE_HISTORY_MODE } : {}) }, model: model.id, reasoningEffort: 'high', modelProvider: 'openai', cwd: params.cwd,
     approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'workspaceWrite', writableRoots: [], networkAccess: false },
     };
+    if (process.env.WORKASS_CODEX_FIXTURE_UNICODE_RESUME === '1') {
+      result.thread.preview = 'first\u2028second\u2029third';
+      const frame = Buffer.from(`${JSON.stringify({ id, result })}\r\n`);
+      const split = frame.indexOf(Buffer.from('\u2028')) + 1;
+      process.stdout.write(frame.subarray(0, split));
+      setTimeout(() => process.stdout.write(frame.subarray(split)), 5);
+      return;
+    }
     if (process.env.WORKASS_CODEX_FIXTURE_LARGE_RESUME === '1' && process.env.WORKASS_CODEX_FIXTURE_RPC_TRACE) {
       appendFileSync(process.env.WORKASS_CODEX_FIXTURE_RPC_TRACE, `${JSON.stringify({
         method: 'fixture/resume-shape', responseBytes: Buffer.byteLength(JSON.stringify(result)),
@@ -539,6 +546,14 @@ async function handle(message) {
   write({ id, error: { code: -32601, message: `fixture method not found: ${method}` } });
 }
 
-readline.createInterface({ input: process.stdin }).on('line', (line) => {
-  void handle(JSON.parse(line));
+let inputBuffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  inputBuffer += chunk;
+  let end;
+  while ((end = inputBuffer.indexOf('\n')) !== -1) {
+    const line = inputBuffer.slice(0, end);
+    inputBuffer = inputBuffer.slice(end + 1);
+    void handle(JSON.parse(line));
+  }
 });

@@ -15,6 +15,16 @@ type agentMCPOptions struct {
 	OperationID string
 }
 
+func subagentWaitTimeoutSchema() map[string]any {
+	return map[string]any{
+		"type": "integer", "description": agenttext.Get("schema.agentMCPTools.03"),
+		"anyOf": []any{
+			map[string]any{"enum": []int{-1, 0}},
+			map[string]any{"minimum": 1000, "maximum": 3600000},
+		},
+	}
+}
+
 func agentMCPTools() []map[string]any {
 	object := func(properties map[string]any, required ...string) map[string]any {
 		schema := map[string]any{"type": "object", "properties": properties, "additionalProperties": false}
@@ -144,12 +154,12 @@ func agentMCPTools() []map[string]any {
 		tool("workass_list_subagents", agenttext.Get("tools.workass_list_subagents"), object(map[string]any{}), true, false, true, false),
 		tool("workass_wait_subagent", agenttext.Get("tools.workass_wait_subagent"), mutationObject(map[string]any{
 			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.54")),
-			"timeout_ms":  map[string]any{"type": "integer", "minimum": 1000, "maximum": 3600000, "description": agenttext.Get("schema.agentMCPTools.03")},
+			"timeout_ms":  subagentWaitTimeoutSchema(),
 		}, "subagent_id"), false, false, false, false),
 		tool("workass_wait_subagents", agenttext.Get("tools.workass_wait_subagents"), mutationObject(map[string]any{
 			"subagent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 8},
 			"return_when":  enum(agenttext.Get("schema.agentMCPTools.guidance.55"), "first", "all"),
-			"timeout_ms":   map[string]any{"type": "integer", "minimum": 1000, "maximum": 3600000, "description": agenttext.Get("schema.agentMCPTools.03")},
+			"timeout_ms":   subagentWaitTimeoutSchema(),
 		}, "subagent_ids"), false, false, false, false),
 		tool("workass_message_subagent", agenttext.Get("tools.workass_message_subagent"), mutationObject(map[string]any{
 			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.56")),

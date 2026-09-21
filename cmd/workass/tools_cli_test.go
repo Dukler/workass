@@ -15,7 +15,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"workass/internal/acp"
 	"workass/internal/tlscert"
 	"workass/internal/toolcli"
 )
@@ -205,5 +207,120 @@ func TestToolsCLIEnvironmentDiscoveryAndExplicitOverride(t *testing.T) {
 	output.Reset()
 	if err := runToolsCommand(context.Background(), []string{"guide"}, strings.NewReader(""), &output, &diagnostics); err != nil || output.String() != "fixture guide" {
 		t.Fatal("guide not available", err)
+	}
+}
+
+func TestToolsCLICrossProviderDelegationAndCrossChatMessaging(t *testing.T) {
+	root := repoRoot(t)
+	h := newStatelessMCPTestHarnessWithProviders(t, []acp.ProviderConfig{{
+		ID: "custom", Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")},
+		CWD: root, Enabled: true, Label: "Other fixture provider",
+	}})
+	contextFile, _ := toolCLIContextFixture(t, h.handler)
+	t.Setenv("WORKASS_TOOL_CONTEXT", contextFile)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	call := func(name string, args map[string]any) (map[string]any, error) {
+		raw, _ := json.Marshal(args)
+		var output bytes.Buffer
+		err := runToolsCommand(ctx, []string{"call", name}, bytes.NewReader(raw), &output, io.Discard)
+		var result map[string]any
+		if err == nil {
+			err = json.Unmarshal(output.Bytes(), &result)
+		}
+		return result, err
+	}
+	mustCall := func(name string, args map[string]any) map[string]any {
+		t.Helper()
+		result, err := call(name, args)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return result
+	}
+	catalog := mustCall("workass_agent_catalog", map[string]any{})
+	if catalog["schemaVersion"] != float64(2) {
+		t.Fatal("missing live catalog")
+	}
+	spawn := mustCall("workass_spawn_subagent", map[string]any{
+		"operation_id": "cross-provider-spawn", "provider_id": "custom", "model_id": "mock-deterministic", "mode_id": "ask",
+		"task": "[mock:hold-until-steer] [mock:steer] harmless delegation fixture", "label": "cross-provider child",
+	})
+	id := toString(spawn["id"])
+	if id == "" || spawn["providerId"] != "custom" {
+		t.Fatal("spawn lost child selection")
+	}
+	listed := mustCall("workass_list_subagents", map[string]any{})
+	rows := listed["subagents"].([]any)
+	if len(rows) != 1 || rows[0].(map[string]any)["providerId"] != "custom" {
+		t.Fatal("cross-provider child is invisible or mislabeled")
+	}
+	state, _ := h.runtime.Snapshot("mcp-chat")
+	origin := state.Background[id].Owner
+	if string(state.Lanes[origin.LaneID].Identity.Realm.ProviderID) != "mock" {
+		t.Fatal("child replaced its parent's origin lane")
+	}
+
+	// Wait once, while routine child startup/progress occurs. Only its terminal
+	// receipt or latched attention may release the CLI request.
+	type result struct {
+		value map[string]any
+		err   error
+	}
+	waited := make(chan result, 1)
+	go func() {
+		v, err := call("workass_wait_subagents", map[string]any{"operation_id": "event-only-wait", "subagent_ids": []string{id}, "return_when": "all", "timeout_ms": -1})
+		waited <- result{v, err}
+	}()
+	select {
+	case got := <-waited:
+		t.Fatalf("event-only wait woke on progress: %v %#v", got.err, got.value)
+	case <-time.After(100 * time.Millisecond):
+	}
+	message := mustCall("workass_message_subagent", map[string]any{"operation_id": "cross-provider-message", "subagent_id": id, "message": "finish the harmless fixture"})
+	if message["ok"] != true {
+		t.Fatal("cross-provider messaging failed")
+	}
+	select {
+	case got := <-waited:
+		if got.err != nil || got.value["timedOut"] != false {
+			t.Fatalf("event-only wait: %v %#v", got.err, got.value)
+		}
+		completed := got.value["completed"].([]any)
+		if len(completed) != 1 || completed[0].(map[string]any)["status"] != "done" {
+			t.Fatal("lost completion receipt")
+		}
+	case <-ctx.Done():
+		t.Fatal("completion did not wake the coordinator")
+	}
+	receipts := mustCall("workass_list_subagent_receipts", map[string]any{})
+	encoded, _ := json.Marshal(receipts)
+	if !bytes.Contains(encoded, []byte(id)) || !bytes.Contains(encoded, []byte(`"providerId":"custom"`)) {
+		t.Fatal("durable receipt lost child identity")
+	}
+	state, _ = h.runtime.Snapshot("mcp-chat")
+	if state.Background[id].Owner != origin {
+		t.Fatal("completion moved child ownership")
+	}
+
+	created := mustCall("workass_create_chat", map[string]any{"operation_id": "cross-chat-create", "title": "CLI destination"})
+	tabID, chatID := toString(created["tabId"]), toString(created["chatId"])
+	if tabID == "" || chatID == "" {
+		t.Fatalf("create has no exact target: %#v", created)
+	}
+	args := map[string]any{"operation_id": "cross-chat-send", "tab_id": tabID, "chat_id": chatID, "message": "harmless cross-chat fixture"}
+	mustCall("workass_send_chat_message", args)
+	mustCall("workass_send_chat_message", args)
+	waitProviderChatIdle(t, h.runtime, chatID, 5*time.Second)
+	read := mustCall("workass_read_chat", map[string]any{"tab_id": tabID, "chat_id": chatID})
+	matches := 0
+	for _, raw := range read["messages"].([]any) {
+		m := raw.(map[string]any)
+		if m["role"] == "user" && m["content"] == "harmless cross-chat fixture" {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("cross-chat send had %d visible owners", matches)
 	}
 }
