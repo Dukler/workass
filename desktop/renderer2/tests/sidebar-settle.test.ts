@@ -7,7 +7,9 @@ import type { PublicJob } from '../src/wire/types.ts';
 
 // Settling is T3's third sidebar lane: a chat leaves the live list without being
 // deleted. After five days there it moves into the searchable archive, so these
-// pin the age rules, explicit overrides, and archive ordering together.
+// pin the explicit-settle, archive, and ordering rules together. User law
+// 2026-09-21: the age rule is disabled (kept, not removed) — only an explicit
+// settle files a chat, and only settled chats archive.
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -114,12 +116,16 @@ test('running duration retains timestamp and background-work fallbacks', () => {
   ]), started);
 });
 
-test('age files a quiet chat away on its own, but not before three days', () => {
+test('age never files a quiet chat away on its own (auto-settle disabled)', () => {
   const now = Date.parse('2026-07-25T12:00:00Z');
   const quiet = chat();
 
+  // User law 2026-09-21: the age rule is disabled (kept, not removed). Only an
+  // explicit settle files a chat, no matter how quiet it is.
   assert.equal(resolveSettled(quiet, 'ready', false, now, now - 2 * DAY), false);
-  assert.equal(resolveSettled(quiet, 'ready', false, now, now - 4 * DAY), true);
+  assert.equal(resolveSettled(quiet, 'ready', false, now, now - 4 * DAY), false);
+  assert.equal(resolveSettled(quiet, 'ready', false, now, now - 40 * DAY), false);
+  assert.equal(resolveSettled(chat({ settled: 'settled' }), 'ready', false, now, now - 40 * DAY), true);
 });
 
 test('a chat with no activity yet is never aged onto the shelf', () => {
@@ -134,7 +140,8 @@ test('the explicit overrides beat the age rule in both directions', () => {
 
   // Filed by hand while still fresh.
   assert.equal(resolveSettled(chat({ settled: 'settled' }), 'ready', false, now, now - 1000), true);
-  // Pulled back out: without the 'active' pin, age would re-file it instantly.
+  // Pulled back out and pinned: stays live even at 40 days (and with the age
+  // rule disabled it would stay live even without the pin).
   assert.equal(resolveSettled(chat({ settled: 'active' }), 'ready', false, now, now - 40 * DAY), false);
 });
 
@@ -146,10 +153,10 @@ test('a chat archives after five days on the settled shelf', () => {
   explicit.settledAt = now - 5 * DAY;
   assert.equal(resolveArchived(explicit, 'ready', now, now - 40 * DAY), true);
 
-  // Automatic filing starts at day three, then gets the same five days on the
-  // shelf. The chat therefore archives at day eight since activity.
+  // With auto-settle disabled, a chat that was never explicitly settled never
+  // archives by age either — only the settled shelf carries an archive clock.
   assert.equal(resolveArchived(chat(), 'ready', now, now - 7 * DAY), false);
-  assert.equal(resolveArchived(chat(), 'ready', now, now - 8 * DAY), true);
+  assert.equal(resolveArchived(chat(), 'ready', now, now - 40 * DAY), false);
 });
 
 test('settled chats without settledAt use their last activity as the archive lower bound', () => {
@@ -160,7 +167,7 @@ test('settled chats without settledAt use their last activity as the archive low
   assert.equal(resolveArchived(chat({ settled: 'settled' }), 'ready', now, 0), true);
 });
 
-test('metadata-only old chats stay automatically settled without resident messages', () => {
+test('metadata-only old chats stay live without an explicit settle', () => {
   const now = Date.parse('2026-07-25T12:00:00Z');
   const subject = chat({
     lastActivityAt: now - 4 * DAY,
@@ -169,9 +176,11 @@ test('metadata-only old chats stay automatically settled without resident messag
     historyComplete: false,
   });
 
+  // The lifecycle clock still derives from activity even when the transcript
+  // is non-resident — but with auto-settle disabled that clock files nothing.
   const touched = lastTouchedAt(subject);
   assert.equal(touched, now - 4 * DAY);
-  assert.equal(resolveSettled(subject, 'ready', false, now, touched), true);
+  assert.equal(resolveSettled(subject, 'ready', false, now, touched), false);
   assert.equal(resolveArchived(subject, 'ready', now, touched), false);
 });
 
@@ -239,10 +248,10 @@ test('nothing still alive, awaiting approval, parked, or unread can sit on the s
 test('selecting a settled thread leaves it compact and in the same shelf', () => {
   const now = Date.parse('2026-07-25T12:00:00Z');
   const old = now - 4 * DAY;
-  const automatic = chat();
-  const explicit = chat({ settled: 'settled', settledAt: now - DAY });
+  const first = chat({ settled: 'settled', settledAt: now - DAY });
+  const second = chat({ settled: 'settled', settledAt: now - 2 * DAY });
 
-  for (const subject of [automatic, explicit]) {
+  for (const subject of [first, second]) {
     assert.equal(resolveSettled(subject, 'ready', false, now, old), true);
     const afterSelection = resolveSettled(subject, 'ready', true, now, old);
     assert.equal(afterSelection, true, 'selection alone cannot reactivate or promote the thread');
