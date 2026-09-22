@@ -51,6 +51,8 @@ func TestDeliveryStrategyProjectsNegotiatedSteerSemantics(t *testing.T) {
 			bridge: bridgeWithDeliveryCapabilities("sessionSteer"),
 		},
 		{name: "missing handshake is unsupported", strategy: genericACPDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities()},
+		{name: "native OMP requires acknowledged SDK steering", strategy: ompDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities("workassOMPSteerRequest"), live: true},
+		{name: "old OMP host cannot inherit generic steering", strategy: ompDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities("sessionSteer")},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

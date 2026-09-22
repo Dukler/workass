@@ -6,9 +6,60 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestOMPBridgeSteersNativeSDKWithoutQueueOrInterrupt(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node unavailable for native host fixture")
+	}
+	root, state := repoRoot(t), t.TempDir()
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root, StateDir: state, Broadcast: events.Broadcast,
+		Provider: ProviderConfig{ID: "omp", Command: node, Args: []string{filepath.Join(root, "scripts", "omp-native-host.mjs")}, CWD: root,
+			Env: map[string]string{"WORKASS_OMP_SDK_MODULE": filepath.Join(root, "desktop", "acp", "mock-omp-sdk.mjs"), "WORKASS_OMP_FIXTURE_DIR": state}},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	session := newMockSession(t, manager, "omp-steer-tab")
+	bridge := manager.bridgeForSession(session.SessionID, SessionOptions{SessionID: session.SessionID})
+	capabilities := providerAdapterForID("omp").delivery.Capabilities(bridge)
+	if !capabilities.LiveSteer || capabilities.SteerConsumptionReceipt {
+		t.Fatalf("native OMP steering capabilities = %#v", capabilities)
+	}
+	job := startAppChatJob(t, manager, session.SessionID, "omp-steer-tab", "[fixture:wait]")
+	journal := filepath.Join(state, session.SessionID+".jsonl")
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		data, _ := os.ReadFile(journal)
+		if strings.Contains(string(data), "[fixture:wait]") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("native OMP prompt did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	result := manager.Steer(session.SessionID, "one direction", nil, "steer-user")
+	if result["ok"] != true || result["live"] != true || result["queued"] != false || result["strategy"] != "omp-live" || asString(result["turnId"]) == "" {
+		t.Fatalf("native OMP admission = %#v", result)
+	}
+	data, err := os.ReadFile(journal)
+	if err != nil || strings.Count(string(data), `"steering":true`) != 1 || strings.Count(string(data), `"role":"user"`) != 2 {
+		t.Fatalf("expected one initial prompt and one native steer: %v\n%s", err, data)
+	}
+	rejected := manager.Steer(session.SessionID, "REJECT", nil, "rejected-user")
+	if rejected["ok"] != false || rejected["queued"] != false || rejected["strategy"] != "rejected" {
+		t.Fatalf("native OMP rejection = %#v", rejected)
+	}
+	if !manager.CancelJobResult(jobID(job)).Cancelled {
+		t.Fatal("steering must leave the original turn running")
+	}
+	events.waitJobEnd(t, jobID(job), 3*time.Second)
+}
 
 func TestOMPNativeHostContract(t *testing.T) {
 	node, err := exec.LookPath("node")

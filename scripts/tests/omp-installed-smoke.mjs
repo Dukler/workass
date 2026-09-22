@@ -30,7 +30,9 @@ const stop=async()=>{if(child.exitCode!==null)return;const done=new Promise(reso
 try {
   let call=start();
   const init=await call('initialize'); assert.equal(init.agentInfo.name,'oh-my-pi');
+  assert.equal(init._meta.workassOMPSteerRequest,true);
   const session=await call('session/new',{cwd:temp}); assert.ok(session.sessionId);
+  await assert.rejects(call('_workass/omp/steer',{sessionId:session.sessionId,prompt:'idle direction'}),/no active turn/);
   for(const mode of ['always-ask','write','yolo','plan','default']) {
     const result=await call('session/set_mode',{sessionId:session.sessionId,modeId:mode});
     assert.equal(result.configOptions.find(x=>x.id==='mode').currentValue,mode);
@@ -40,5 +42,5 @@ try {
   await call('session/resume',{sessionId:session.sessionId,cwd:temp});
   await assert.rejects(call('session/resume',{sessionId:'missing-session',cwd:temp}),/never materialized/);
   await call('session/close',{sessionId:session.sessionId});await stop();
-  console.log('PASS: installed OMP SDK, all modes, process restart/exact resume, missing session rejection; no inference');
+  console.log('PASS: installed OMP SDK, steering handshake/idle rejection, all modes, process restart/exact resume, missing session rejection; no inference');
 } finally {child?.kill();await fs.rm(temp,{recursive:true,force:true});}

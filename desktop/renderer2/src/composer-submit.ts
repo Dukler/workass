@@ -1,5 +1,22 @@
 export type ComposerSubmitIntent = 'send' | 'queue' | 'steer';
 export type ComposerSubmitModifiers = { metaKey: boolean; ctrlKey: boolean };
+type ComposerKey = ComposerSubmitModifiers & { key: string; shiftKey: boolean };
+export type ComposerKeyAction = ComposerSubmitIntent | 'next' | 'previous' | 'pick' | 'dismiss';
+
+// Explicit submission wins over autocomplete. A catalog suggestion must never
+// consume the first steering shortcut or make the user submit twice.
+export function composerKeyAction(running: boolean, event: ComposerKey, popupOpen: boolean): ComposerKeyAction | null {
+  if (event.key === 'Enter' && !event.shiftKey && (event.metaKey || event.ctrlKey)) {
+    return composerSubmitIntent(running, event);
+  }
+  if (popupOpen) {
+    if (event.key === 'ArrowDown') return 'next';
+    if (event.key === 'ArrowUp') return 'previous';
+    if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) return 'pick';
+    if (event.key === 'Escape') return 'dismiss';
+  }
+  return event.key === 'Enter' && !event.shiftKey ? composerSubmitIntent(running, event) : null;
+}
 
 // The user-facing law while a turn is running: ordinary Enter is a durable FIFO
 // follow-up; Command+Enter on macOS or Ctrl+Enter elsewhere is an explicit

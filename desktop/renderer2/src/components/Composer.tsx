@@ -11,7 +11,7 @@ import { favoriteCatalogModels, isModelFavorite } from '../model-favorites';
 import { attachmentWorkBoundary, clipboardImageFiles, createDraftImages, draftImagePayloads, withoutDraftImages } from '../image-drafts';
 import { QueueList } from './QueueList';
 import { liveSteeringSupported } from '../steering';
-import { composerSubmitIntent, type ComposerSubmitIntent } from '../composer-submit';
+import { composerKeyAction, type ComposerSubmitIntent } from '../composer-submit';
 import { insertAtCaret, startRecording, transcribe, voiceStatus, type Recorder, type VoiceState } from '../voice';
 import { clampPlanUsagePercent, formatAbsolutePlanReset, formatCountdown, formatPlanUsagePercent, isExpiredPlanReset, isHotRateLimit, isLiveReset, rateLimitLabel, relativePlanReset } from '../plan-usage';
 import { imageDraftCapability } from '../model-controls';
@@ -783,18 +783,14 @@ export function Composer({ chat }: { chat: Chat | null }) {
     finishSubmission();
   }
   function keydown(e: React.KeyboardEvent) {
-    // While the catalog popup is open it owns ↑↓/Enter/Tab/Esc: picking
-    // INSERTS and never sends (approved composer-skills mock, 2026-07-28).
-    if (popOpen) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); setPopIndex((i) => Math.min(i + 1, popCount - 1)); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); setPopIndex((i) => Math.max(i - 1, 0)); return; }
-      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); pickPopRow(popActive); return; }
-      if (e.key === 'Escape') { e.preventDefault(); setPopDismissed(popToken); return; }
-    }
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      void submit(composerSubmitIntent(running, { metaKey: e.metaKey, ctrlKey: e.ctrlKey }));
-    }
+    const action = composerKeyAction(running, e, popOpen);
+    if (!action) return;
+    e.preventDefault();
+    if (action === 'next') { setPopIndex((i) => Math.min(i + 1, popCount - 1)); return; }
+    if (action === 'previous') { setPopIndex((i) => Math.max(i - 1, 0)); return; }
+    if (action === 'pick') { pickPopRow(popActive); return; }
+    if (action === 'dismiss') { setPopDismissed(popToken); return; }
+    void submit(action);
   }
 
   const hasText = text.trim().length > 0;
@@ -802,13 +798,14 @@ export function Composer({ chat }: { chat: Chat | null }) {
   // While the daemon socket is down, sending would vanish into a dead queue —
   // block it honestly (the banner above the composer explains why).
   const offline = app.connection !== 'connected';
+	const steerShortcut = typeof window !== 'undefined' && window.workassWindow?.platform === 'darwin' ? '⌘Enter' : 'Ctrl+Enter';
 	const canSend = (running || hasText) && !offline && !preparingImages && !stopping;
 	const sendGlyph = steerMode ? '⤴' : running ? '■' : '↑';
   const sendTitle = offline
     ? 'Sin conexión con el daemon'
 	: steerMode
       ? (steerAvail
-        ? `Dirigir el turno en curso · ${window.workassWindow?.platform === 'darwin' ? '⌘Enter' : 'Ctrl+Enter'}`
+        ? `Dirigir el turno en curso · ${steerShortcut}`
         : 'Steering no disponible')
       : running ? (stopping ? 'Deteniendo…' : 'Detener') : 'Enviar';
 
@@ -872,8 +869,8 @@ export function Composer({ chat }: { chat: Chat | null }) {
         <textarea
           ref={taRef} rows={1} value={text} placeholder="Contale a tu agente qué sigue…"
           onChange={(e) => change(e.target.value)} onKeyDown={keydown} onPaste={onPaste} onScroll={fade}
-          aria-keyshortcuts="Enter Meta+Enter Shift+Enter"
-          title={running ? 'Enter: encolar · ⌘Enter: dirigir el turno · ⇧Enter: nueva línea' : 'Enter: enviar · ⇧Enter: nueva línea'}
+          aria-keyshortcuts="Enter Meta+Enter Control+Enter Shift+Enter"
+          title={running ? `Enter: encolar · ${steerShortcut}: dirigir el turno · ⇧Enter: nueva línea` : 'Enter: enviar · ⇧Enter: nueva línea'}
         />
         <button className={`send ${running && !steerMode ? 'stop' : ''} ${stopping ? 'stopping' : ''} ${steerMode ? 'steer' : ''}`} disabled={!canSend} onClick={() => void submit(running ? 'steer' : 'send')} title={sendTitle} aria-label={sendTitle}>
           {running && !steerMode

@@ -39,6 +39,33 @@ test('native receipt follows durable user content; startup failure has no receip
   assert.ok(!h.out.some(x=>x.params?.update?.clientUserMessageId==='bad'));
   await assert.rejects(h.call('session/prompt',{sessionId:s.sessionId,prompt:'ERROR'}),/model failed/);
 });
+test('one native steer carries text and images into the active turn without a preliminary prompt or follow-up',async t=>{
+  const dir=await setup(t),h=run(t,dir);
+  assert.equal((await h.call('initialize'))._meta.workassOMPSteerRequest,true);
+  const s=await h.call('session/new',{cwd:dir});
+  const params={sessionId:s.sessionId,prompt:[{type:'text',text:'change direction'},{type:'image',data:'aW1hZ2U=',mimeType:'image/png'}]};
+  await assert.rejects(h.call('_workass/omp/steer',params),/no active turn/);
+  let ended=false;
+  const active=h.call('session/prompt',{sessionId:s.sessionId,prompt:'WAIT',clientUserMessageId:'initial'}).then(result=>{ended=true;return result});
+  await h.wait(x=>x.params?.update?.clientUserMessageId==='initial');
+  const steer=await h.call('_workass/omp/steer',params);
+  assert.ok(steer.turnId);
+  assert.equal(ended,false,'steer must keep the original prompt running');
+  const rows=(await readFile(path.join(dir,`${s.sessionId}.jsonl`),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(rows.filter(x=>x.message?.role==='user').map(x=>x.message),[
+    {role:'user',content:'WAIT'},
+    {role:'user',content:'change direction',images:[{type:'image',data:'aW1hZ2U=',mimeType:'image/png'}],steering:true},
+  ]);
+  const again=await h.call('_workass/omp/steer',{sessionId:s.sessionId,prompt:'second steer'});
+  assert.equal(again.turnId,steer.turnId);
+  await assert.rejects(h.call('_workass/omp/steer',{sessionId:s.sessionId,prompt:'REJECT'}),/steer rejected/);
+  await assert.rejects(h.call('_workass/omp/steer',{sessionId:s.sessionId,prompt:[{type:'audio'}]}),/Unsupported/);
+  assert.equal(ended,false,'rejection must not interrupt the turn');
+  h.send({method:'session/cancel',params:{sessionId:s.sessionId}});
+  assert.equal((await active).stopReason,'cancelled');
+  await assert.rejects(h.call('_workass/omp/steer',params),/no active turn/);
+  assert.equal(h.out.filter(x=>x.params?.update?.sessionUpdate==='_workass_input_consumed').length,1);
+});
 test('exact restart resume preserves journal and instructions; missing ID creates no replacement',async t=>{
   const dir=await setup(t),ins=path.join(dir,'instructions');await writeFile(ins,'WORKASS_APPEND');
   let h=run(t,dir,{WORKASS_INSTRUCTIONS_FILE:ins});const s=await h.call('session/new',{cwd:dir});

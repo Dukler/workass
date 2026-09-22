@@ -382,6 +382,7 @@ var providerRegistrations = map[string]providerRegistration{
 		Native: &frontierNativeSpec{ProviderID: "omp", DefaultCommand: "omp", OverrideEnv: "WORKASS_OMP", PathNames: []string{"omp", "omp.exe", "omp.cmd"}},
 		Adapter: providerAdapter{
 			model:        providerModelPolicy{AssistantBrand: "omp", SeparateEffortAxis: true},
+			delivery:     ompDeliveryStrategy{},
 			permission:   ompPermissionPolicy{},
 			launch:       nativeHostLaunchStrategy{command: "omp", prepare: ompNativeHostLaunch},
 			instructions: nativeInstructionDelivery{HostEnvironment: "WORKASS_OMP_SDK_MODULE"},
