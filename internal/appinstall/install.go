@@ -6,6 +6,7 @@ package appinstall
 import (
 	"archive/zip"
 	"bufio"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -237,9 +238,14 @@ func openPayload(p Plan) (*payload, error) {
 		fileNames[key] = true
 		out.names = append(out.names, name)
 	}
-	for _, required := range []string{"Workass.exe", "workass-daemon.exe", "resources/app/package.json", "manifest.json"} {
+	for _, required := range []string{"Workass.exe", "workass-daemon.exe", "workass-tools.exe", "resources/app/package.json", "manifest.json"} {
 		if out.files[required] == nil {
 			return nil, fmt.Errorf("release ZIP is missing %s", required)
+		}
+	}
+	for _, executable := range []string{"Workass.exe", "workass-daemon.exe", "workass-tools.exe"} {
+		if err := verifyWindowsPE(out.files[executable], executable); err != nil {
+			return nil, err
 		}
 	}
 	for name := range seen {
@@ -254,6 +260,34 @@ func openPayload(p Plan) (*payload, error) {
 	sort.Strings(out.names)
 	ok = true
 	return out, nil
+}
+
+func verifyWindowsPE(file *zip.File, label string) error {
+	if file.UncompressedSize64 < 64 {
+		return fmt.Errorf("release %s is not a Windows executable", label)
+	}
+	reader, err := file.Open()
+	if err != nil {
+		return fmt.Errorf("read release %s: %w", label, err)
+	}
+	defer reader.Close()
+	dos := make([]byte, 64)
+	if _, err := io.ReadFull(reader, dos); err != nil || string(dos[:2]) != "MZ" {
+		return fmt.Errorf("release %s is not a Windows executable", label)
+	}
+	peOffset := binary.LittleEndian.Uint32(dos[0x3c:])
+	if peOffset < 64 || peOffset > 1<<20 || uint64(peOffset)+26 > file.UncompressedSize64 {
+		return fmt.Errorf("release %s has an invalid PE header", label)
+	}
+	if _, err := io.CopyN(io.Discard, reader, int64(peOffset)-64); err != nil {
+		return fmt.Errorf("release %s has an invalid PE header", label)
+	}
+	pe := make([]byte, 26)
+	if _, err := io.ReadFull(reader, pe); err != nil || string(pe[:4]) != "PE\x00\x00" ||
+		binary.LittleEndian.Uint16(pe[4:]) != 0x8664 || binary.LittleEndian.Uint16(pe[24:]) != 0x20b {
+		return fmt.Errorf("release %s is not PE32+ x86-64", label)
+	}
+	return nil
 }
 
 func (p Plan) writeReceipt(phase, step, message string, installed bool) error {

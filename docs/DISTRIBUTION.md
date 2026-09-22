@@ -204,7 +204,7 @@ Mac build host runs:
 scripts/stage-windows-portable.sh --version X.Y.Z
 ```
 
-The resulting zip contains `Workass.exe`, `workass-daemon.exe`, the renderer,
+The resulting zip contains `Workass.exe`, `workass-daemon.exe`, `workass-tools.exe`, the renderer,
 the checksum-pinned portable `node.exe`, and the vendored Claude/Codex native
 hosts in one extracted directory. Launching `Workass.exe` starts the sibling
 daemon with `--headless` when its health endpoint is unavailable; otherwise the
@@ -248,7 +248,7 @@ must be self-contained at extraction time.
    `scripts/stage-windows-portable.sh --version X.Y.Z --output-root
    "$PWD/dist-release/windows"`.
 4. Inspect the Windows ZIP before publishing. Its top-level extracted folder
-   must contain `Workass.exe`, `workass-daemon.exe`, `resources/app`,
+   must contain `Workass.exe`, `workass-daemon.exe`, `workass-tools.exe`, `resources/app`,
    `resources/renderer`, `node/windows-amd64/node.exe`, and
    `frontier-hosts/windows-amd64/`. If any is absent, the artifact is rejected.
 5. On a clean Windows test folder, launch only `Workass.exe`. It must start

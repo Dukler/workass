@@ -38,10 +38,12 @@ function makeReleaseInput(root, version = '1.2.3') {
   for (const relative of [
     'renderer/index.html',
     'macos/runtime/workass',
+    'macos/runtime/workass-tools',
     'macos/electron/darwin-arm64/Electron.app/Contents/MacOS/Electron',
     'macos/runtime/node/darwin-arm64/bin/node',
     'macos/runtime/frontier-hosts/darwin-arm64/claude-native-host.mjs',
     'windows/runtime/workass-daemon.exe',
+    'windows/runtime/workass-tools.exe',
     'windows/electron/win32-x64/electron.exe',
     'windows/runtime/node/windows-amd64/node.exe',
     'windows/runtime/frontier-hosts/windows-amd64/codex-native-host.mjs',
@@ -293,6 +295,7 @@ test('candidate receipt binds both archives, both feeds, input, version, and com
   for (const relative of [
     'Workass.exe',
     'workass-daemon.exe',
+    'workass-tools.exe',
     'resources/renderer/index.html',
     'node/windows-amd64/node.exe',
     'frontier-hosts/windows-amd64/claude-native-host.mjs',
@@ -566,8 +569,10 @@ test('canonical pipeline stages both platforms from one verified input and publi
   assert.match(preparer, /node "\$input_tool" create/);
   assert.match(preparer, /node "\$input_tool" verify/);
   assert.match(preparer, /workass_release_run_parallel_pair macos_daemon build_macos_daemon windows_daemon build_windows_daemon/);
-  assert.equal((preparer.match(/go build -buildvcs=false -trimpath/g) || []).length, 2);
-  assert.match(windowsStage, /GOOS=windows GOARCH=amd64 go build -buildvcs=false -trimpath/);
+  assert.equal((preparer.match(/go build -buildvcs=false -trimpath/g) || []).length, 0);
+  assert.match(preparer, /workass-tools\.exe/);
+  assert.match(windowsStage, /GOOS=windows GOARCH=amd64 go build -trimpath/);
+  assert.match(windowsStage, /workass-tools-windows-amd64\.exe/);
 
   assert.ok(sourcePreparer.indexOf('npm run build') < sourcePreparer.indexOf('scripts/sync-renderer2.sh'));
   assert.match(sourcePreparer, /diff -qr desktop\/renderer2\/dist cmd\/workass\/embedded\/dist/);

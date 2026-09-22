@@ -62,6 +62,7 @@ build_one() {
   goarch="$2"
   suffix="$3"
   build_pkg "$goos" "$goarch" "$suffix" workass ./cmd/workass
+  build_pkg "$goos" "$goarch" "$suffix" workass-tools ./cmd/workass-tools
   build_pkg "$goos" "$goarch" "$suffix" workass-agent ./cmd/workass-agent
 }
 
@@ -88,5 +89,6 @@ build_pkg() {
 }
 
 build_one darwin arm64 ""
+cp "$repo_root/dist-bin/workass-tools-darwin-arm64" "$repo_root/dist-bin/workass-tools"
 build_one windows amd64 ".exe"
 build_one linux amd64 ""

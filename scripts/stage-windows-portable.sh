@@ -21,6 +21,7 @@ Builds and stages the portable Windows bundle:
     Workass-X.Y.Z-windows-amd64/
       Workass.exe                    portable Electron executable
       workass-daemon.exe             Go daemon beside the app
+      workass-tools.exe              authenticated short-lived tools client
       resources/app/                  Electron shell
       resources/renderer/             built renderer
       node/windows-amd64/node.exe    pinned portable Node (SHA-256 verified)
@@ -80,6 +81,7 @@ if [ -n "$release_input" ]; then
   frontier_hosts_source="$release_input/windows/runtime/frontier-hosts/$target"
   renderer_source="$release_input/renderer"
   daemon_source="$release_input/windows/runtime/workass-daemon.exe"
+  tools_source="$release_input/windows/runtime/workass-tools.exe"
 else
   # Vendored runtimes are checksum-pinned at build time and never fetched on Windows.
   "$repo_root/scripts/vendor-electron-runtime.sh" --target win32-x64 $offline_flags
@@ -90,6 +92,7 @@ else
   frontier_hosts_source="$repo_root/dist-bin/frontier-hosts/$target"
   renderer_source="$repo_root/desktop/renderer2/dist"
   daemon_source="$repo_root/dist-bin/workass-windows-amd64.exe"
+  tools_source="$repo_root/dist-bin/workass-tools-windows-amd64.exe"
 fi
 
 # 2. Build the renderer first and sync the exact static bundle into the Go
@@ -109,11 +112,18 @@ fi
 #    to the windows-amd64 output, so we build just the windows binary here.
 if [ -z "$release_input" ]; then
   echo "building dist-bin/workass-windows-amd64.exe"
-  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -buildvcs=false -trimpath -ldflags "-s -w -X main.daemonVersion=$version" \
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.daemonVersion=$version" \
     -o "$repo_root/dist-bin/workass-windows-amd64.exe" ./cmd/workass
+  echo "building dist-bin/workass-tools-windows-amd64.exe"
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+    -o "$repo_root/dist-bin/workass-tools-windows-amd64.exe" ./cmd/workass-tools
 fi
 [ -f "$daemon_source" ] || {
   echo "windows daemon is missing: $daemon_source" >&2
+  exit 1
+}
+[ -f "$tools_source" ] || {
+  echo "windows tools client is missing: $tools_source" >&2
   exit 1
 }
 
@@ -127,6 +137,7 @@ node "$repo_root/desktop/scripts/make-icon.mjs" --verify
 node "$repo_root/desktop/scripts/stamp-windows-icon.mjs" --exe "$stage/Workass.exe" --icon "$repo_root/desktop/assets/icon.ico"
 rm -f "$stage/resources/default_app.asar"
 cp "$daemon_source" "$stage/workass-daemon.exe"
+cp "$tools_source" "$stage/workass-tools.exe"
 ditto "$node_source" "$stage/node/$target"
 ditto "$frontier_hosts_source" "$stage/frontier-hosts/$target"
 
@@ -148,6 +159,7 @@ cp "$repo_root/desktop/assets/icon.ico" "$stage/resources/Workass.ico"
 
 # Sanity: the exact files the daemon's native lookup requires.
 [ -f "$stage/node/$target/node.exe" ] || { echo "staged node.exe missing" >&2; exit 1; }
+[ -f "$stage/workass-tools.exe" ] || { echo "staged workass-tools.exe missing" >&2; exit 1; }
 [ -f "$stage/frontier-hosts/$target/claude-native-host.mjs" ] || { echo "staged claude host missing" >&2; exit 1; }
 [ -f "$stage/frontier-hosts/$target/codex-native-host.mjs" ] || { echo "staged codex host missing" >&2; exit 1; }
 [ -f "$stage/frontier-hosts/$target/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs" ] || {

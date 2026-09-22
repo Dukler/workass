@@ -113,6 +113,7 @@ function writeWindowsRelease(root, version = '1.1.0', installationId = `install-
   ]) write(relative, 'fixture');
   writeFakeWindowsPE(path.join(root, 'Workass.exe'));
   writeFakeWindowsPE(path.join(root, 'workass-daemon.exe'));
+  writeFakeWindowsPE(path.join(root, 'workass-tools.exe'));
   writeFakeWindowsPE(path.join(root, 'node', 'windows-amd64', 'node.exe'));
 }
 

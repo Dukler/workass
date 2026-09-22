@@ -110,6 +110,7 @@ function verify(args) {
   for (const relative of [
     'Workass.exe',
     'workass-daemon.exe',
+    'workass-tools.exe',
     'resources/renderer/index.html',
     'node/windows-amd64/node.exe',
     'frontier-hosts/windows-amd64/claude-native-host.mjs',

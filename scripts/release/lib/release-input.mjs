@@ -8,10 +8,12 @@ import process from 'node:process';
 const inputPaths = Object.freeze({
   renderer: 'renderer',
   macosDaemon: 'macos/runtime/workass',
+  macosTools: 'macos/runtime/workass-tools',
   macosElectron: 'macos/electron/darwin-arm64/Electron.app',
   macosNode: 'macos/runtime/node/darwin-arm64',
   macosFrontierHosts: 'macos/runtime/frontier-hosts/darwin-arm64',
   windowsDaemon: 'windows/runtime/workass-daemon.exe',
+  windowsTools: 'windows/runtime/workass-tools.exe',
   windowsElectron: 'windows/electron/win32-x64',
   windowsNode: 'windows/runtime/node/windows-amd64',
   windowsFrontierHosts: 'windows/runtime/frontier-hosts/windows-amd64',

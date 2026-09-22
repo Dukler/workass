@@ -8,6 +8,7 @@ import { isSubagentHeader, type SubagentNode } from '../subagent-layout';
 import { steerStatusLabel } from '../steering';
 import { displayDetail, splitTail } from '../tool-display';
 import { toolPresentation } from '../tool-names';
+import { permissionChoices } from '../permissions';
 
 export { extractSubagents } from '../subagent-layout';
 export type { SubagentNode } from '../subagent-layout';
@@ -413,10 +414,6 @@ export function nodeDuration(n: SubagentNode, nowMs: number): string {
   const evs = n.header ? [n.header, ...n.calls] : n.calls;
   return groupDuration(evs, nowMs, nodeState(n) === 'running');
 }
-const PERM_LABEL: Record<string, string> = {
-  allow_once: 'Permitir una vez', allow_always: 'Permitir siempre', allow: 'Permitir',
-  reject_once: 'Rechazar', reject_always: 'Rechazar siempre', reject: 'Rechazar', cancel: 'Cancelar',
-};
 export function PermCard({ perm, tabId, msgId }: { perm: PermissionState; tabId: string; msgId: string }) {
   const decide = (optionId: string) => { if (!perm.resolved) void store.decidePermission(tabId, msgId, perm.id, optionId); };
   // A question carries its own answers: `options` holds one entry per choice
@@ -458,8 +455,7 @@ export function PermCard({ perm, tabId, msgId }: { perm: PermissionState; tabId:
       </div>
       <span className="sp" />
       <div className="btns">
-        {perm.options.map((o) => {
-          const label = PERM_LABEL[o.kind] ?? o.name ?? o.kind;
+        {permissionChoices(perm.options).map((o) => {
           const isAllow = /allow/i.test(o.kind) || /allow/i.test(o.name || '');
           const chosen = perm.resolved === o.optionId;
           return (
@@ -469,7 +465,7 @@ export function PermCard({ perm, tabId, msgId }: { perm: PermissionState; tabId:
               disabled={!!perm.resolved}
               style={chosen ? { borderColor: 'var(--acc)', color: 'var(--acc)' } : undefined}
               onClick={() => decide(o.optionId)}
-            >{label}</button>
+            >{o.label}</button>
           );
         })}
       </div>

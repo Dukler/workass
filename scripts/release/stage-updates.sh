@@ -152,6 +152,7 @@ NODE
   safe_zip_entries "$windows_zip"
   file "$extracted_windows_bundle/Workass.exe" | grep -Eq 'PE32\+ executable.*x86-64'
   file "$extracted_windows_bundle/workass-daemon.exe" | grep -Eq 'PE32\+ executable.*x86-64'
+  file "$extracted_windows_bundle/workass-tools.exe" | grep -Eq 'PE32\+ executable.*x86-64'
   node "$repo_root/desktop/scripts/stamp-windows-icon.mjs" --verify \
     --exe "$extracted_windows_bundle/Workass.exe" --icon "$repo_root/desktop/assets/icon.ico"
 
