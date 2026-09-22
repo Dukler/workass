@@ -1,5 +1,5 @@
 // Package toolcommand contains the short-lived authenticated Workass tools
-// client. It is deliberately separate from the long-lived daemon executable.
+// client shared by the daemon's early tools entrypoint and compatibility helper.
 package toolcommand
 
 import (

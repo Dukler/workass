@@ -15,6 +15,11 @@ import (
 
 func fixture(t *testing.T, extra map[string]string) Plan {
 	t.Helper()
+	return fixtureWithExecutables(t, extra, nil)
+}
+
+func fixtureWithExecutables(t *testing.T, extra map[string]string, executables map[string][]byte) Plan {
+	t.Helper()
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -48,6 +53,9 @@ func fixture(t *testing.T, extra map[string]string) Plan {
 	}
 	z := zip.NewWriter(f)
 	for name, body := range files {
+		if replacement, ok := executables[name]; ok && replacement == nil {
+			continue
+		}
 		entry := "Workass-1.2.0-windows-amd64/" + name
 		w, err := z.Create(entry)
 		if err != nil {
@@ -59,6 +67,9 @@ func fixture(t *testing.T, extra map[string]string) Plan {
 		payload := []byte(body)
 		if name == "Workass.exe" || name == "workass-daemon.exe" || name == "workass-tools.exe" {
 			payload = fakeWindowsPE(body)
+		}
+		if replacement, ok := executables[name]; ok {
+			payload = replacement
 		}
 		if _, err = w.Write(payload); err != nil {
 			t.Fatal(err)
@@ -83,6 +94,45 @@ func fakeWindowsPE(payload string) []byte {
 	bytes[152] = 0x0b
 	bytes[153] = 0x02
 	return append(bytes, []byte(payload)...)
+}
+
+func TestInstallAcceptsMissingCompatibilityToolsHelper(t *testing.T) {
+	p := fixtureWithExecutables(t, nil, map[string][]byte{"workass-tools.exe": nil})
+	a, err := openPayload(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.archive.Close()
+	launched := false
+	err = replace(p, a, operations{
+		waitShell: func() error { return nil },
+		waitFiles: func(string, []string) error { return nil },
+		launch:    func(string) error { launched = true; return nil },
+	})
+	if err != nil || !launched {
+		t.Fatalf("install without helper: launched=%v err=%v", launched, err)
+	}
+	contents(t, filepath.Join(p.InstallTarget, "Workass.exe"), "new-app")
+	contents(t, filepath.Join(p.InstallTarget, "workass-daemon.exe"), "new-daemon")
+	intactUserFiles(t, p)
+}
+
+func TestPayloadRejectsInvalidWindowsExecutables(t *testing.T) {
+	for _, name := range []string{"Workass.exe", "workass-daemon.exe", "workass-tools.exe"} {
+		t.Run(name, func(t *testing.T) {
+			wrongArch := fakeWindowsPE("wrong-arch")
+			wrongArch[132] = 0
+			for _, payload := range [][]byte{[]byte("not PE"), wrongArch} {
+				p := fixtureWithExecutables(t, nil, map[string][]byte{name: payload})
+				if a, err := openPayload(p); err == nil {
+					a.archive.Close()
+					t.Fatal("accepted invalid executable", name)
+				}
+				contents(t, filepath.Join(p.InstallTarget, "Workass.exe"), "old-app")
+				intactUserFiles(t, p)
+			}
+		})
+	}
 }
 
 func TestIncomingDirectoryCollisionFailsBeforeDeletingOwnedFiles(t *testing.T) {
