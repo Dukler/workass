@@ -105,6 +105,7 @@ log_file="$package_root/package-$(date -u +%Y%m%dT%H%M%SZ).log"
 mkdir -p "$package_root" "$WORKASS_LOG_ROOT"
 : > "$log_file"
 packaged_daemon=''
+packaged_tools=''
 
 # The repository gate already owns every shell test. Run only package-specific
 # contracts here so packaging never repeats the complete shell suite.
@@ -120,9 +121,12 @@ if [ "$runtime_input_root" = "$repo_root/dist-bin" ]; then
     WORKASS_GATE_FRESH=1 \
     scripts/gate.sh) >>"$log_file" 2>&1
   packaged_daemon="$package_root/workass-$bundle_version-$bundle_build"
+  packaged_tools="$package_root/workass-tools-$bundle_version-$bundle_build"
   echo "[package] building bundled daemon $bundle_version" | tee -a "$log_file"
   (cd "$repo_root" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath \
     -ldflags "-s -w -X main.daemonVersion=$bundle_version" -o "$packaged_daemon" ./cmd/workass) >>"$log_file" 2>&1
+  (cd "$repo_root" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath \
+    -o "$packaged_tools" ./cmd/workass-tools) >>"$log_file" 2>&1
   echo "[package] staging native provider hosts" | tee -a "$log_file"
   "$repo_root/scripts/vendor-frontier-hosts.sh" --target darwin-arm64 --offline >>"$log_file" 2>&1
   echo "[package] staging portable Node runtime" | tee -a "$log_file"
@@ -182,12 +186,15 @@ plutil -remove ElectronAsarIntegrity "$plist" >/dev/null 2>&1 || true
 
 if [ "$portable_runtime" -eq 1 ]; then
   daemon_source="$runtime_input_root/workass"
+  tools_source="$runtime_input_root/workass-tools"
   if [ "$runtime_input_root" = "$repo_root/dist-bin" ]; then
     daemon_source="$packaged_daemon"
+    tools_source="$packaged_tools"
   fi
   frontier_hosts_source="$runtime_input_root/frontier-hosts/darwin-arm64"
   node_source="$runtime_input_root/node/darwin-arm64"
   [ -x "$daemon_source" ] || { echo "portable daemon is missing from runtime root: $daemon_source" >&2; exit 1; }
+  [ -x "$tools_source" ] || { echo "portable tools client is missing from runtime root: $tools_source" >&2; exit 1; }
   [ -x "$frontier_hosts_source/claude-native-host.mjs" ] && \
     [ -x "$frontier_hosts_source/codex-native-host.mjs" ] && \
     [ -f "$frontier_hosts_source/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs" ] || {
@@ -201,7 +208,9 @@ if [ "$portable_runtime" -eq 1 ]; then
   runtime_stage="$stage/Contents/Resources/runtime"
   mkdir -p "$runtime_stage/frontier-hosts" "$runtime_stage/node"
   cp "$daemon_source" "$runtime_stage/workass"
+  cp "$tools_source" "$runtime_stage/workass-tools"
   chmod 755 "$runtime_stage/workass"
+  chmod 755 "$runtime_stage/workass-tools"
   ditto "$frontier_hosts_source" "$runtime_stage/frontier-hosts/darwin-arm64"
   ditto "$node_source" "$runtime_stage/node/darwin-arm64"
   printf '{"schemaVersion":1,"platform":"darwin","arch":"%s","version":"%s","build":"%s"}\n' \

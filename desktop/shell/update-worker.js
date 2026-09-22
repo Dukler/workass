@@ -639,6 +639,7 @@ function verifyWindowsIncoming(transaction) {
   if (packageManifest.version !== transaction.targetVersion) throw new Error('incoming Windows shell version does not match the release manifest');
   verifyWindowsPE(path.join(root, 'Workass.exe'), 'Workass.exe');
   verifyWindowsPE(path.join(root, 'workass-daemon.exe'), 'workass-daemon.exe');
+  verifyWindowsPE(path.join(root, 'workass-tools.exe'), 'workass-tools.exe');
   verifyWindowsPE(path.join(root, 'node', 'windows-amd64', 'node.exe'), 'portable node.exe');
   for (const [relative, label] of [
     [['resources', 'app', 'update-manager.js'], 'update manager'],

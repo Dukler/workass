@@ -2,6 +2,7 @@ package appinstall
 
 import (
 	"archive/zip"
+	"bytes"
 	"errors"
 	"io"
 	"os"
@@ -37,7 +38,7 @@ func fixture(t *testing.T, extra map[string]string) Plan {
 	if err := atomicJSON(filepath.Join(p.InstallTarget, inventoryName), inventory{1, p.InstallationID, []string{"Workass.exe", "obsolete.dll"}}); err != nil {
 		t.Fatal(err)
 	}
-	files := map[string]string{"Workass.exe": "new-app", "workass-daemon.exe": "new-daemon", "manifest.json": "{}", "resources/app/package.json": "{}"}
+	files := map[string]string{"Workass.exe": "new-app", "workass-daemon.exe": "new-daemon", "workass-tools.exe": "new-tools", "manifest.json": "{}", "resources/app/package.json": "{}"}
 	for key, value := range extra {
 		files[key] = value
 	}
@@ -55,7 +56,11 @@ func fixture(t *testing.T, extra map[string]string) Plan {
 		if strings.HasSuffix(name, "/") {
 			continue
 		}
-		if _, err = w.Write([]byte(body)); err != nil {
+		payload := []byte(body)
+		if name == "Workass.exe" || name == "workass-daemon.exe" || name == "workass-tools.exe" {
+			payload = fakeWindowsPE(body)
+		}
+		if _, err = w.Write(payload); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -66,6 +71,18 @@ func fixture(t *testing.T, extra map[string]string) Plan {
 		t.Fatal(err)
 	}
 	return p
+}
+
+func fakeWindowsPE(payload string) []byte {
+	bytes := make([]byte, 256)
+	copy(bytes[:2], "MZ")
+	bytes[0x3c] = 128
+	copy(bytes[128:132], []byte{'P', 'E', 0, 0})
+	bytes[132] = 0x64
+	bytes[133] = 0x86
+	bytes[152] = 0x0b
+	bytes[153] = 0x02
+	return append(bytes, []byte(payload)...)
 }
 
 func TestIncomingDirectoryCollisionFailsBeforeDeletingOwnedFiles(t *testing.T) {
@@ -101,7 +118,7 @@ func write(t *testing.T, file, body string) {
 func contents(t *testing.T, file, want string) {
 	t.Helper()
 	got, err := os.ReadFile(file)
-	if err != nil || string(got) != want {
+	if err != nil || (string(got) != want && !bytes.HasSuffix(got, []byte(want))) {
 		t.Fatalf("%s: got %q, %v; want %q", filepath.Base(file), got, err, want)
 	}
 }

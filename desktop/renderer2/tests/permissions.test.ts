@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Chat } from '../src/store/types.ts';
-import { clearPermissionById, clearPermissionsOutsideSnapshot } from '../src/permissions.ts';
+import { clearPermissionById, clearPermissionsOutsideSnapshot, permissionChoices } from '../src/permissions.ts';
 
 function chatWithPermissions(): Chat {
   return {
@@ -24,4 +24,17 @@ test('pending-permission hydration removes stale cards but retains live requests
   assert.deepEqual(clearPermissionsOutsideSnapshot([chat], new Set(['perm-live'])), ['m-2']);
   assert.equal(chat.messages[0].permission?.id, 'perm-live');
   assert.equal(chat.messages[1].permission, undefined);
+});
+
+test('permission choices preserve provider-native names when coarse kinds collide', () => {
+  const choices = permissionChoices([
+    { optionId: 'once-read', name: 'Read the file', kind: 'allow_once' },
+    { optionId: 'once-write', name: 'Write the file', kind: 'allow_once' },
+    { optionId: 'canonical', name: 'allow_once', kind: 'allow_once' },
+  ]);
+  assert.deepEqual(choices.map(({ optionId, label }) => ({ optionId, label })), [
+    { optionId: 'once-read', label: 'Read the file' },
+    { optionId: 'once-write', label: 'Write the file' },
+    { optionId: 'canonical', label: 'Permitir una vez' },
+  ]);
 });

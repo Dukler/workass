@@ -24,3 +24,39 @@ export function clearPermissionsOutsideSnapshot(chats: Chat[], pendingIds: Reado
   }
   return touched;
 }
+
+export const PERM_LABEL: Readonly<Record<string, string>> = {
+  allow_once: 'Permitir una vez',
+  allow_always: 'Permitir siempre',
+  allow: 'Permitir',
+  reject_once: 'Rechazar',
+  reject_always: 'Rechazar siempre',
+  reject: 'Rechazar',
+  cancel: 'Cancelar',
+};
+
+export interface PermissionOption {
+  optionId: string;
+  name: string;
+  kind: string;
+}
+
+export interface PresentedPermissionChoice extends PermissionOption {
+  label: string;
+}
+
+export function normalizedPermissionLabel(value: string): string {
+  return value.trim().toLocaleLowerCase().replace(/[\s_-]+/g, ' ');
+}
+
+export function permissionChoices(options: readonly PermissionOption[]): PresentedPermissionChoice[] {
+  return options.map((option) => {
+    const name = option.name.trim();
+    const fallback = PERM_LABEL[option.kind] ?? option.kind;
+    const normalizedName = normalizedPermissionLabel(name);
+    const redundant = !name ||
+      normalizedName === normalizedPermissionLabel(option.kind) ||
+      normalizedName === normalizedPermissionLabel(fallback);
+    return { ...option, label: redundant ? fallback : name };
+  });
+}
