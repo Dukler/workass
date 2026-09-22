@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -107,6 +108,53 @@ func TestPiDiscoveryUsesOfficialSDKHost(t *testing.T) {
 	assertProviderListItem(t, unauthenticated.ProvidersList(), "pi", providerStatusNeedsLogin, false)
 }
 
+func TestPiNativeWindowsTrustEnvironment(t *testing.T) {
+	for _, platform := range []string{"windows", "darwin", "linux"} {
+		for _, existing := range []string{"", "0", "1"} {
+			t.Run(platform+"/configured="+existing, func(t *testing.T) {
+				configured := map[string]string{"FIXTURE": "preserved", "NODE_EXTRA_CA_CERTS": "/fixture/extra.pem"}
+				if existing != "" {
+					configured["NODE_USE_SYSTEM_CA"] = existing
+				}
+				before := copyStringMap(configured)
+				got := piNativeHostEnvironment(configured, "/fixture/pi", platform)
+				want := copyStringMap(before)
+				want["WORKASS_PI_EXECUTABLE"] = "/fixture/pi"
+				if platform == "windows" {
+					want["NODE_USE_SYSTEM_CA"] = "1"
+				}
+				if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(configured, before) {
+					t.Fatalf("Pi trust environment changed unrelated configuration: got=%v want=%v original=%v", got, want, configured)
+				}
+			})
+		}
+	}
+	if got := piNativeHostEnvironment(nil, "/fixture/pi", "windows"); got["NODE_USE_SYSTEM_CA"] != "1" || got["NODE_TLS_REJECT_UNAUTHORIZED"] != "" {
+		t.Fatal("Windows Pi must use system trust without disabling TLS verification")
+	}
+}
+
+func TestPiNativeSDKProviderContext(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node unavailable for installed Pi SDK provider-request fixture")
+	}
+	cli, err := resolveInstalledPiExecutable(ProviderConfig{Command: "pi"})
+	if err != nil {
+		t.Skip("Installed Pi unavailable for SDK provider-request fixture")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, node, "--test", "scripts/tests/pi-native-sdk-context.test.mjs")
+	cmd.Dir = repoRoot(t)
+	cmd.Env = append(os.Environ(), "WORKASS_TEST_PI_EXECUTABLE="+cli)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Pi SDK provider-request contract: %v\n%s", err, output)
+	}
+	t.Logf("%s", output)
+}
+
 func TestPiHostUsesInstalledCommandAndSharedNode(t *testing.T) {
 	root := t.TempDir()
 	runtimeDir := t.TempDir()
@@ -136,6 +184,9 @@ func TestPiHostUsesInstalledCommandAndSharedNode(t *testing.T) {
 	}
 	if input.Env["WORKASS_PI_EXECUTABLE"] != "" {
 		t.Fatal("mutated provider environment")
+	}
+	if runtime.GOOS == "windows" && got.Env["NODE_USE_SYSTEM_CA"] != "1" {
+		t.Fatal("Pi Node launch omitted Windows system certificate roots")
 	}
 }
 

@@ -43,13 +43,23 @@ func piNativeHostLaunch(provider ProviderConfig, opts Options, daemonExecutable 
 	if err != nil {
 		return ProviderConfig{}, err
 	}
-	env := copyStringMap(provider.Env)
+	env := piNativeHostEnvironment(provider.Env, installed, runtime.GOOS)
+	provider.Command, provider.ResolvedCommand, provider.Args, provider.Env = node, "", []string{host}, env
+	return provider, nil
+}
+
+func piNativeHostEnvironment(configured map[string]string, installed, goos string) map[string]string {
+	env := copyStringMap(configured)
 	if env == nil {
 		env = map[string]string{}
 	}
+	// Node reads this at startup. Trust enterprise roots installed in Windows
+	// without disabling certificate verification or modifying the user's profile.
+	if goos == "windows" {
+		env["NODE_USE_SYSTEM_CA"] = "1"
+	}
 	env["WORKASS_PI_EXECUTABLE"] = installed
-	provider.Command, provider.ResolvedCommand, provider.Args, provider.Env = node, "", []string{host}, env
-	return provider, nil
+	return env
 }
 
 func resolveInstalledPiExecutable(provider ProviderConfig) (string, error) {
