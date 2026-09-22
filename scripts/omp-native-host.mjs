@@ -57,6 +57,11 @@ function contentText(prompt) {
   if (typeof prompt === 'string') return prompt;
   return (Array.isArray(prompt) ? prompt : []).map(x => typeof x === 'string' ? x : String(x?.text || '')).join('');
 }
+function promptContent(prompt) {
+  const blocks = typeof prompt === 'string' ? [{type:'text',text:prompt}] : prompt || [];
+  if (!Array.isArray(blocks) || blocks.some(x => !x || (x.type !== 'text' && x.type !== 'image'))) throw new Error('Unsupported OMP prompt content');
+  return {text:contentText(blocks),images:blocks.filter(x => x.type === 'image').map(x => ({type:'image',data:x.data,mimeType:x.mimeType}))};
+}
 function renderToolContent(value) {
   if (value === undefined || value === null) return '';
   if (typeof value === 'string') return value;
@@ -179,21 +184,29 @@ export class OmpSession {
   }
   async prompt(value) {
     if (this.running) throw new Error('OMP session already has an active prompt');
-    const blocks = typeof value.prompt === 'string' ? [{type:'text',text:value.prompt}] : value.prompt || [];
-    if (blocks.some(x => x.type !== 'text' && x.type !== 'image')) throw new Error('Unsupported OMP prompt content');
-    const images = blocks.filter(x => x.type === 'image').map(x => ({type:'image',data:x.data,mimeType:x.mimeType}));
+    const {text,images} = promptContent(value.prompt);
     this.pendingInput = String(value.clientUserMessageId || '');
     this.receipt = null;
     this.turnError = null;
     this.lastStopReason = 'end_turn';
     this.running = true;
+    this.turnId = randomUUID();
     this.turnAbort = new AbortController();
     try {
-      await this.native.prompt(contentText(blocks), {images,userInitiated:true});
+      await this.native.prompt(text, {images,userInitiated:true});
       if (this.receipt) await this.receipt;
       if (this.turnError) throw this.turnError;
       return {stopReason:this.lastStopReason};
-    } finally { this.turnAbort?.abort(); this.running = false; this.pendingInput = null; }
+    } finally { this.turnAbort?.abort(); this.running = false; this.turnId = null; this.pendingInput = null; }
+  }
+  async steer(value) {
+    if (!this.running || this.turnAbort?.signal.aborted || !this.native.isStreaming) throw new Error('OMP has no active turn to steer');
+    if (typeof this.native.steer !== 'function') throw new Error('OMP SDK does not support native steering');
+    const {text,images} = promptContent(value.prompt);
+    if (!text.trim() && !images.length) throw new Error('OMP steer requires content');
+    const turnId = this.turnId;
+    await this.native.steer(text, images);
+    return {turnId};
   }
   async setConfig(id, value) {
     if (this.running) throw new Error('Cannot change OMP configuration during an active prompt');
@@ -226,10 +239,11 @@ export class OmpSession {
 async function open(params, resume) { const id = String(params?.sessionId || '').trim() || randomUUID(); if (resume && !params?.sessionFile && !params?.sessionId) throw new Error('OMP session/resume requires exact session id'); if (sessions.has(id)) return sessions.get(id); const s = new OmpSession(id, String(params?.cwd || process.cwd()), resume, params); await s.start(); if (!resume) s.id = String(s.native?.sessionManager?.getSessionId?.() || s.native?.sessionId || s.id); sessions.set(s.id, s); return s; }
 async function request(m) {
   const { id, method, params = {} } = m;
-  if (method === 'initialize') return respond(id, { protocolVersion: Number(params.protocolVersion || 1), agentInfo: { name: 'oh-my-pi', version: String((await sdk()).VERSION || 'unknown') }, agentCapabilities: { sessionCapabilities: { resume: {}, close: {} }, promptCapabilities: { image: true, audio: false, embeddedContext: false }, mcpCapabilities: { http: false, sse: false } }, authMethods: [], _meta: { workassNativeOMP: true, workassStableTurnInputV1: true } });
+  if (method === 'initialize') return respond(id, { protocolVersion: Number(params.protocolVersion || 1), agentInfo: { name: 'oh-my-pi', version: String((await sdk()).VERSION || 'unknown') }, agentCapabilities: { sessionCapabilities: { resume: {}, close: {} }, promptCapabilities: { image: true, audio: false, embeddedContext: false }, mcpCapabilities: { http: false, sse: false } }, authMethods: [], _meta: { workassNativeOMP: true, workassStableTurnInputV1: true, workassOMPSteerRequest: true } });
   if (method === 'session/new' || method === 'session/resume' || method === 'session/load') { const s = await open(params, method !== 'session/new'); return respond(id, { ...(method === 'session/new' ? { sessionId: s.id } : {}), configOptions: s.options(), availableModels: s.models, _meta: { workassProviderRealm: { accountScope: 'unverified-account', installScope: 'omp-sdk', verified: false } } }); }
   const s = sessions.get(String(params.sessionId || '')); if (!s) throw Object.assign(new Error('OMP session not found'), { rpcCode: -32000 });
   if (method === 'session/prompt') return respond(id, await s.prompt(params));
+  if (method === '_workass/omp/steer') return respond(id, await s.steer(params));
   if (method === 'session/set_config_option') return respond(id, await s.setConfig(String(params.configId || ''), params.value));
   if (method === 'session/set_model') return respond(id, await s.setConfig('model', params.modelId ?? params.model));
   if (method === 'session/set_mode') return respond(id, await s.setConfig('mode', params.modeId ?? params.mode));

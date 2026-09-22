@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { createServer, type ViteDevServer } from 'vite';
 import type { Chat, Msg } from '../src/store/types.ts';
 import type { DeliveryCapabilities } from '../src/wire/types.ts';
+import { composerKeyAction } from '../src/composer-submit.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
@@ -87,6 +88,27 @@ function subject(
   store.writeLocalMirrorNow = () => {};
   return { store, owner };
 }
+
+test('one keyboard submission calls live steering directly across native and ACP lanes', async () => {
+  for (const providerId of ['codex', 'claude', 'omp', 'mock', 'custom-acp']) {
+    for (const modifier of ['ctrlKey', 'metaKey']) {
+      let calls = 0;
+      const { store, owner } = subject({
+        appChatSteer: async () => { calls++; return { ok: true, live: true, strategy: 'generic-live' }; },
+      }, providerId, genericLiveDelivery);
+      running(owner);
+      store.setDraft(owner.id, 'use this direction @agent');
+      const action = composerKeyAction(true, { key: 'Enter', shiftKey: false, ctrlKey: false, metaKey: false, [modifier]: true }, true);
+      assert.equal(action, 'steer');
+      const submission = store.captureDraftSubmission(owner.id, owner.draft);
+      assert.equal(await store.steerRunning(owner.id, owner.draft, undefined, submission), true);
+      assert.equal(calls, 1, providerId);
+      assert.equal(owner.queue, undefined, providerId);
+      assert.equal(owner.draft, '');
+      assert.equal(owner.messages.filter(m => m.content === 'use this direction @agent').length, 1);
+    }
+  }
+});
 
 test('a receipt-capable live steer stays staged and never bounces through the queue', async () => {
   const steerCalls: unknown[][] = [];

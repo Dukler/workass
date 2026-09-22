@@ -23,12 +23,15 @@ export async function createAgentSession({sessionManager:manager,appendSystemPro
   const models=[{provider:'fixture',id:'same',name:'Fixture Same',reasoning:true},{provider:'other',id:'same',name:'Other Same',reasoning:true}];
   let release, ui;
   const session={
+    isStreaming:false,
     sessionManager:manager, modelRegistry:{getAvailable:()=>models}, model:models[0],thinkingLevel:'off',
     settings:{get:k=>overrides.has(k)?overrides.get(k):k==='plan.enabled',override:(k,v)=>overrides.set(k,v),clearOverride:k=>overrides.delete(k)},
     subscribe(fn){listeners.add(fn);return()=>listeners.delete(fn)},
     setClientBridge(b){this.bridge=b}, setModel(m){this.model=m}, setThinkingLevel(v){this.thinkingLevel=v}, setPlanModeState(v){this.plan=v},
     async prompt(text, options) {
       if(text==='FAIL') throw Error('native startup failure');
+      if(this.isStreaming) throw Error('fixture duplicate prompt');
+      this.isStreaming=true;
       const message={role:'user',content:text};
       emit({type:'message_start',message});
       manager.entries.push({type:'message',message});
@@ -38,7 +41,7 @@ export async function createAgentSession({sessionManager:manager,appendSystemPro
         const outcome={optionId:choice};
         emit({type:'tool_execution_end',toolCallId:'tool',result:{content:[{type:'text',text:outcome.optionId}]}});
       }
-      if(text==='WAIT') await new Promise(resolve=>{release=resolve});
+      if(text==='WAIT' || text.includes('[fixture:wait]')) await new Promise(resolve=>{release=resolve});
       if(text==='COMPACT') { emit({type:'auto_compaction_start'}); emit({type:'auto_compaction_end',result:{summary:'fixture native summary'}}); }
       const answer= text==='STATE' ? JSON.stringify({approval:overrides.get('tools.approvalMode'),plan:this.plan,images:options.images}) : 'Fixture answer';
       emit({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:answer}});
@@ -47,7 +50,20 @@ export async function createAgentSession({sessionManager:manager,appendSystemPro
       await manager.ensureOnDisk();
       emit({type:'message_end',message:assistant});
       emit({type:'agent_end',messages:[assistant]});
+      this.isStreaming=false;
     },
+    async steer(text, images) {
+      if(!this.isStreaming) throw Error('fixture idle steer');
+      if(text==='REJECT') throw Error('fixture steer rejected');
+      const message={role:'user',content:text,images,steering:true};
+      manager.entries.push({type:'message',message});
+      await manager.flush();
+      emit({type:'message_end',message});
+      emit({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'Native steer accepted'}});
+      // Leave the original prompt open so tests can detect an abort/restart or
+      // accidental second prompt instead of the one native steer call.
+    },
+    async followUp(){throw Error('fixture follow-up must never receive a steer')},
     async abort(){release?.()}, async dispose(){await manager.flush()},
   };
   fs.writeFileSync(path.join(root,'prompt.txt'),'NATIVE DEFAULT\n'+(appendSystemPrompt||''));

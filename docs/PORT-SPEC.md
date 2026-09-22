@@ -655,10 +655,15 @@ shell, NOT the daemon.
     interrupts either. The `_workass_claude_steer_consumed` session update is
     the semantic "applied" receipt. An adapter without that live capability does
     not receive an explicit steer and cannot convert it into another intent;
-    (c) every other agent keeps the capability-gated `_session/steer`
+    (c) native OMP uses the version-gated `_workass/omp/steer` host request
+    (user correction 2026-09-22), calling SDK `steer(text, images)` directly and
+    awaiting admission with the active turn identity. It never submits a
+    preliminary prompt or follow-up; admission commits the visible direction,
+    with no later consumption receipt advertised;
+    (d) every other ACP agent keeps the capability-gated `_session/steer`
     notification. Unsupported or explicitly rejected steering returns ownership
     to the composer; only ordinary `Enter` creates client FIFO work. The
-    deterministic mock remains the oracle for path (c); real-adapter canaries
+    deterministic mock remains the oracle for path (d); real-adapter canaries
     verify protocol acknowledgement/cancellation, never model quality.
 14. **Queue and steer are separate user intents** (user correction 2026-07-13):
     **Composer ownership correction (user 2026-09-07):** the composer is local
@@ -673,7 +678,10 @@ shell, NOT the daemon.
     clear the editor. Remove matching-text deletion workarounds.
     while a turn is running, ordinary `Enter` appends one durable FIFO follow-up
     and never interrupts the active turn; `Cmd+Enter` explicitly invokes the
-    provider-aware steering law above. `Shift+Enter` remains newline. The send
+    provider-aware steering law above (`Ctrl+Enter` on Windows/Linux). One
+    shortcut submits directly, even with slash/@ autocomplete open, without
+    first placing the direction in the FIFO (user correction 2026-09-22).
+    `Shift+Enter` remains newline. The send
     button is the explicit live-steer/stop control and must not erase the normal
     queue shortcut. Explicit Stop cancels only the exact active turn. It never
     pauses, resumes, clears, or otherwise mutates durable FIFO rows, and there is
