@@ -90,10 +90,10 @@ for sdk_file in sdk.mjs package.json LICENSE.md README.md; do
 done
 cp "$repo_root/scripts/claude-native-host.mjs" "$incoming/claude-native-host.mjs"
 cp "$repo_root/scripts/codex-native-host.mjs" "$incoming/codex-native-host.mjs"
-for host in omp-native-host.mjs omp-installed-host.mjs omp-sdk-extension.mjs; do
+for host in omp-native-host.mjs omp-installed-host.mjs omp-sdk-extension.mjs pi-native-host.mjs; do
   cp "$repo_root/scripts/$host" "$incoming/$host"
 done
-chmod 755 "$incoming/claude-native-host.mjs" "$incoming/codex-native-host.mjs" "$incoming/omp-native-host.mjs"
+chmod 755 "$incoming/claude-native-host.mjs" "$incoming/codex-native-host.mjs" "$incoming/omp-native-host.mjs" "$incoming/pi-native-host.mjs"
 mkdir -p "$(dirname -- "$destination")"
 rm -rf "$destination"
 mv "$incoming" "$destination"

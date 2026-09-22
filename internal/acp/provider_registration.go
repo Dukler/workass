@@ -251,8 +251,16 @@ func ompKnownPathsForPlatform(goos, home, localAppData, appData, installDir stri
 	return dedupeStrings(known)
 }
 
+func piKnownPaths() []string {
+	home, _ := os.UserHomeDir()
+	if runtime.GOOS == "windows" {
+		return []string{filepath.Join(os.Getenv("APPDATA"), "npm", "pi.cmd"), filepath.Join(home, "AppData", "Roaming", "npm", "pi.cmd")}
+	}
+	return []string{"/opt/homebrew/bin/pi", "/usr/local/bin/pi", filepath.Join(home, ".local", "bin", "pi")}
+}
+
 var providerRegistrationOrder = []string{
-	"mock", "devin", "qwen", "claude", "codex", "opencode", "omp",
+	"mock", "devin", "qwen", "claude", "codex", "opencode", "omp", "pi",
 	localLMStudioProviderID, localOllamaProviderID, localOMLXProviderID, "custom",
 }
 
@@ -394,6 +402,24 @@ var providerRegistrations = map[string]providerRegistration{
 		// CLI would not update this engine; it must ship with Workass.
 
 	},
+	"pi": {
+		ID: "pi", Name: "Pi", DefaultCommand: "pi", Badge: "native",
+		Discovery: &cliProvider{id: "pi", defaultCommand: "pi", pathEnv: []string{"WORKASS_PI"}, pathNames: []string{"pi", "pi.cmd", "pi.exe"}, knownPaths: piKnownPaths},
+		Detection: cliDetectionStrategy{}, ProbeTimeout: frontierProbeTimeout,
+		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `pi` y usa `/login`"},
+		Native:         &frontierNativeSpec{ProviderID: "pi", DefaultCommand: "pi", OverrideEnv: "WORKASS_PI", PathNames: []string{"pi", "pi.cmd", "pi.exe"}},
+		Adapter: providerAdapter{
+			model:        providerModelPolicy{AssistantBrand: "pi", SeparateEffortAxis: true},
+			delivery:     piDeliveryStrategy{},
+			permission:   piPermissionPolicy{},
+			launch:       nativeHostLaunchStrategy{command: "pi", prepare: piNativeHostLaunch},
+			instructions: nativeInstructionDelivery{HostEnvironment: "WORKASS_PI_EXECUTABLE"},
+			creation:     providercontract.CreationCapabilities{DeferredUntilInput: true},
+			input:        explicitHostInputReceiptPolicy{},
+			context:      staticProviderContextPolicy{capabilities: exactNativeContextCapabilities()},
+		},
+	},
+
 	localLMStudioProviderID: {
 		ID: localLMStudioProviderID, Name: "LM Studio (local)", DefaultCommand: "workass-agent", Badge: "native",
 		Detection: localModelDetectionStrategy{}, Local: true,

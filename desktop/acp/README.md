@@ -32,6 +32,7 @@ The launcher in `desktop/main.js` supports these providers through `app-config.j
 | `claude` | Official Agent SDK + installed `claude` | Native Claude Code session |
 | `codex` | Installed `codex app-server` | Native Codex session |
 | `omp` | `omp acp` | User-owned Oh My Pi profile over standard ACP |
+| `pi` | Installed official `@earendil-works/pi-coding-agent` SDK | Native Pi session and user-installed extensions |
 | `custom` | `acp.command` plus `acp.args` | Future Go agent or another ACP server |
 
 Selecting another provider chooses another lane inside the same Workass chat.
@@ -107,6 +108,34 @@ implementation. This is independent of exact-session attachment failures.
 
 Real native-provider sessions are canaries for these protocol shapes only. The
 deterministic mock and direct-host fixtures remain the correctness oracle.
+
+## Pi SDK integration (user request, 2026-09-22)
+
+Pi is a separate native provider from Oh My Pi. Install the official CLI/SDK
+with `npm install -g @earendil-works/pi-coding-agent`, then install the optional
+third-party subagent extension with `pi install npm:pi-subagents`. The host uses
+the installed package's public SDK; Pi owns authentication, native journals,
+model discovery, settings and extension/resource loading. Workass appends its
+central tool instructions while preserving Pi's system prompt and resources.
+No Pi engine, extension dependency, or user profile is bundled with Workass.
+Validated with Pi `0.87.0` and `pi-subagents` `0.70.1`. If the daemon has no
+authenticated models, Settings reports `needs-login`: run `pi` and `/login`,
+or configure a local model through Pi's own settings.
+
+The adapter calls native `steer()` once for an active turn and acknowledges SDK
+admission. It never sends a preliminary prompt, follow-up, or interrupt. Pi's
+first journal is deferred until an assistant message; input consumption is
+acknowledged only after Pi persists that input. Resume requires the exact
+existing native session, including its working directory. Pi has one mode,
+"Pi defaults"; extension guards retain authority. Native terminal widgets and
+interactive slash-command screens are not Workass UI surfaces.
+
+This lane's manifest is `internal/acp/native_pi*.go`,
+`internal/acp/provider_delivery_pi.go`, the shared registration and boundary
+contract and discovery tests, `scripts/pi-native-host.mjs`, its test in `scripts/tests/`,
+`desktop/acp/mock-pi-sdk.mjs`, this README and host staging in
+`scripts/vendor-frontier-hosts.sh`. The deterministic SDK fixture covers the
+transport contract without accessing a user's profile or a model service.
 
 ## Tracked subagent permission attention
 
