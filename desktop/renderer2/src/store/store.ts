@@ -18,7 +18,7 @@ import {
   queuedAttachmentsReady, queuedDraftMessage, queuedJob, queuedMessage, releaseDraftImages,
   shouldDrainRecoveredQueue, withoutDraftImages,
 } from '../image-drafts';
-import { acceptPendingSteer, commitChronologicalSteer, hasSteerConsumptionReceipt, insertChronologicalSteer, liveSteeringSupported, markPendingSteerUncertain, normalizeDeliveryCapabilities, rejectChronologicalSteer, settlePendingSteer, settleSendingSteersAtTurnEnd, settleStagedSteersAtTurnEnd, stageChronologicalSteer, SteeringDispatchLane, steeringDestination, steeringStagesBoundary } from '../steering';
+import { acceptPendingSteer, commitChronologicalSteer, hasSteerConsumptionReceipt, insertChronologicalSteer, liveSteeringSupported, markPendingSteerUncertain, normalizeDeliveryCapabilities, rejectChronologicalSteer, settlePendingSteer, settleSendingSteersAtTurnEnd, settleStagedSteersAtTurnEnd, stageChronologicalSteer, SteeringDispatchLane, steeringDestination, steeringStagesBoundary, stopAndSendSupported } from '../steering';
 import { chooseWorkspacePath, inheritChatControls, normalizeWorkspacePath, normalizeWorkspaces, rememberLastProject, workspaceFromPath } from '../workspaces';
 import { WorkspaceMoveGate, workspaceMoveAccepted, workspaceRebindSupported } from '../workspace-move';
 import { chatPane, nextPane, type RightPane } from './right-pane';
@@ -919,36 +919,10 @@ export class Store {
     for (const [tabId, version] of sentQueueVersions) {
       const operationId = sentQueueOperations.get(tabId);
       const chatId = chatPairs.get(tabId);
-      const live = this.chat(tabId);
-      const queued = this.pendingQueueSnapshots.get(tabId);
-      if (!operationId || !chatId || !sameChatPair(live, tabId, chatId)
-        || queued?.chatId !== chatId || failedCreateTabs.has(tabId)
-        || this.pendingQueueMutationVersions.get(tabId) !== version
-        || this.pendingQueueOperationIds.get(tabId) !== operationId) {
+      if (!operationId || !chatId || failedCreateTabs.has(tabId)
+        || !(await this.persistQueueMutation(tabId, chatId, version, operationId))) {
         failedQueueTabs.add(tabId);
-        continue;
       }
-      const receipt = await call('chatQueueReplace', {
-        tabId, chatId, operationId,
-        expectedRevision: live.agentQueueRevision ?? 0,
-        queue: (queued.value ?? []).map(({ draftImages: _draftImages, ...item }) => item),
-      });
-      if (!receipt?.ok || receipt.operationId !== operationId) {
-        failedQueueTabs.add(tabId);
-        if (has('chatQueueReplace')) this.requestChatReadback(live);
-        continue;
-      }
-      const current = this.chat(tabId);
-      if (sameChatPair(current, tabId, chatId)) {
-        current.agentQueueRevision = receipt.agentQueueRevision;
-        current.actorRevision = receipt.actorRevision;
-      }
-      if (this.pendingQueueMutationVersions.get(tabId) !== version
-        || this.pendingQueueOperationIds.get(tabId) !== operationId
-        || this.pendingQueueSnapshots.get(tabId)?.chatId !== chatId) continue;
-      this.pendingQueueMutationVersions.delete(tabId);
-      this.pendingQueueSnapshots.delete(tabId);
-      this.pendingQueueOperationIds.delete(tabId);
     }
     const failedPresentationTabs = new Set<string>();
     for (const [tabId, plan] of presentationPlans) {
@@ -1530,6 +1504,38 @@ export class Store {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = null;
     await this.saveServerSnapshot(save.snapshot, save.full, save.fullRevision);
+  }
+
+  // Also used by stop-and-send so its exact queue command does not wait for
+  // unrelated chats' presentation or queue saves before cancelling a turn.
+  private async persistQueueMutation(tabId: string, chatId: string, version: number, operationId: string): Promise<boolean> {
+    const live = this.chat(tabId);
+    const queued = this.pendingQueueSnapshots.get(tabId);
+    if (!sameChatPair(live, tabId, chatId) || queued?.chatId !== chatId
+      || this.pendingQueueMutationVersions.get(tabId) !== version
+      || this.pendingQueueOperationIds.get(tabId) !== operationId) return false;
+    const receipt = await call('chatQueueReplace', {
+      tabId, chatId, operationId,
+      expectedRevision: live.agentQueueRevision ?? 0,
+      queue: (queued.value ?? []).map(({ draftImages: _draftImages, ...item }) => item),
+    });
+    if (!receipt?.ok || receipt.operationId !== operationId) {
+      if (has('chatQueueReplace')) this.requestChatReadback(live);
+      return false;
+    }
+    const current = this.chat(tabId);
+    if (sameChatPair(current, tabId, chatId)) {
+      current.agentQueueRevision = receipt.agentQueueRevision;
+      current.actorRevision = receipt.actorRevision;
+    }
+    if (this.pendingQueueMutationVersions.get(tabId) === version
+      && this.pendingQueueOperationIds.get(tabId) === operationId
+      && this.pendingQueueSnapshots.get(tabId)?.chatId === chatId) {
+      this.pendingQueueMutationVersions.delete(tabId);
+      this.pendingQueueSnapshots.delete(tabId);
+      this.pendingQueueOperationIds.delete(tabId);
+    }
+    return true;
   }
 
   private restoreDraftImages(previous: Chat[], restored: Chat[]) {
@@ -4281,6 +4287,9 @@ export class Store {
       this.addToast('No se pudo dirigir', 'El turno activo ya terminó; no se envió el mensaje.');
       return false;
     }
+    if (stopAndSendSupported(chat.deliveryCapabilities)) {
+      return this.stopAndSendRunning(chat, prompt, images, submission);
+    }
     if (has('appChatSteer') && chat.sessionId && chat.chatId && liveSteeringSupported(chat.deliveryCapabilities)) {
       const steerSessionId = chat.sessionId;
       const deliveryCapabilities = chat.deliveryCapabilities;
@@ -4436,6 +4445,44 @@ export class Store {
 	this.addToast('No se pudo dirigir', 'El proveedor activo no admite steering en vivo; no se envió el mensaje.');
 	return false;
   }
+  private async stopAndSendRunning(chat: Chat, prompt: string, images: StartJobOpts['images'] | undefined, submission: ReturnType<Store['captureDraftSubmission']>): Promise<boolean> {
+    const running = [...chat.messages].reverse().find((message) => message.role === 'assistant' && message.status === 'running');
+    if (!chat.chatId || !running || !has('chatQueueReplace') || !has('cancelJob')) {
+      this.addToast('No se pudo detener y enviar', 'El canal de cola y detención no está disponible; no se envió el mensaje.');
+      return false;
+    }
+    const tabId = chat.id;
+    const chatId = chat.chatId;
+    const assistantId = running.id;
+    const jobId = running.jobId;
+    const item = queuedMessage(ownedEntityId(chat, rid('q')), redactSensitiveText(prompt), messageImages(images));
+    chat.queue = [...(chat.queue ?? []), item];
+    this.consumeSubmittedDraft(submission);
+    this.markQueueMutation(chat);
+    const version = this.pendingQueueMutationVersions.get(tabId)!;
+    const operationId = this.pendingQueueOperationIds.get(tabId)!;
+    this.bumpChat(chat);
+    this.scheduleQueuePersist();
+    // Ownership has transferred once. Failed/uncertain persistence leaves this
+    // same queue row visible; it is never permission to stop or replay input.
+    if (!(await this.persistQueueMutation(tabId, chatId, version, operationId))) {
+      this.addToast('No se pudo detener y enviar', 'No se confirmó el mensaje en la cola; no se detuvo el turno.');
+      return true;
+    }
+    const live = this.chat(tabId);
+    if (!sameChatPair(live, tabId, chatId) || !live.queue?.some((queued) => queued.id === item.id)
+      || this.pendingQueueMutationVersions.has(tabId)) return true;
+    const current = [...live.messages].reverse().find((message) => message.role === 'assistant' && message.status === 'running');
+    if (current?.id === assistantId && (!jobId || current.jobId === jobId)) {
+      await this.cancelChatTurn(tabId);
+    } else if (!current) {
+      // A terminal boundary may have won while the queue receipt was in flight.
+      // Let the ordinary FIFO drainer handle it; never cancel the next turn.
+      void this.flushNextQueued(live);
+    }
+    return true;
+  }
+
   queueDraftMessage(chatId: string, prompt: string, drafts: DraftImage[], submission = this.captureDraftSubmission(chatId, prompt)): boolean {
     const chat = this.chat(chatId);
     if (!chat || !prompt.trim() || !this.isConnected() || !this.isChatRunning(chat.id)) return false;

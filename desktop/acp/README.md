@@ -100,11 +100,17 @@ Workass deliberately does not model steering as one universal cancel action:
   agents without that capability reject explicit steering back to the composer.
   Only a separate ordinary queue intent creates durable FIFO work.
 
-The official Devin CLI bundle `3000.10.21` was probed in isolation on 2026-09-11.
+The official Devin CLI bundles `3000.10.21` and `3000.11.1` were probed in
+isolation on 2026-09-11 and 2026-09-22 respectively.
 Its `initialize` response advertises neither `sessionSteer` nor
 `steerNotification`; live steering is therefore unavailable through that ACP
 contract. A second `session/prompt` or cancel-and-restart is not a live-steer
 implementation. This is independent of exact-session attachment failures.
+The user-authorized Devin `stopAndSend` UI action (2026-09-22) therefore exposes
+“Detener y enviar”: one Ctrl/Cmd+Enter persists the new message and attachments
+through the ordinary queue command, then stops only the captured turn. It waits
+for a matching durable queue receipt before Stop and never cancels a replacement
+turn. Other providers retain their negotiated live-steering behavior.
 
 Real native-provider sessions are canaries for these protocol shapes only. The
 deterministic mock and direct-host fixtures remain the correctness oracle.

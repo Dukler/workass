@@ -347,6 +347,7 @@ export function normalizeDeliveryCapabilities(value: unknown): DeliveryCapabilit
   return {
     stableInputIdentity: capabilities.stableInputIdentity === true,
     liveSteer: capabilities.liveSteer === true,
+    ...(capabilities.stopAndSend === true ? { stopAndSend: true } : {}),
     steerConsumptionReceipt: capabilities.steerConsumptionReceipt === true,
     consumptionReceipt: capabilities.consumptionReceipt === true,
     turnReadback: capabilities.turnReadback === true,
@@ -355,6 +356,10 @@ export function normalizeDeliveryCapabilities(value: unknown): DeliveryCapabilit
 
 export function liveSteeringSupported(capabilities: DeliveryCapabilities | null | undefined): boolean {
   return capabilities?.liveSteer === true;
+}
+
+export function stopAndSendSupported(capabilities: DeliveryCapabilities | null | undefined): boolean {
+  return capabilities?.stopAndSend === true && !liveSteeringSupported(capabilities);
 }
 
 // A later, stable steer-consumption receipt is the only reason to stage the

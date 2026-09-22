@@ -61,6 +61,7 @@ type providerDeliveryStrategy interface {
 }
 
 type genericACPDeliveryStrategy struct{}
+type devinDeliveryStrategy struct{ genericACPDeliveryStrategy }
 type codexDeliveryStrategy struct{}
 type claudeDeliveryStrategy struct{}
 
@@ -73,6 +74,12 @@ func standardACPSteerCapabilities(b *Bridge) (providercontract.DeliveryCapabilit
 
 func (genericACPDeliveryStrategy) Capabilities(b *Bridge) providercontract.DeliveryCapabilities {
 	capabilities, _ := standardACPSteerCapabilities(b)
+	return capabilities
+}
+
+func (devinDeliveryStrategy) Capabilities(b *Bridge) providercontract.DeliveryCapabilities {
+	capabilities, _ := standardACPSteerCapabilities(b)
+	capabilities.StopAndSend = b != nil && !capabilities.LiveSteer
 	return capabilities
 }
 

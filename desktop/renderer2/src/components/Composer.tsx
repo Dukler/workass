@@ -10,7 +10,7 @@ import { modelContextQualifier, resolveModelSelection } from '../model-selection
 import { favoriteCatalogModels, isModelFavorite } from '../model-favorites';
 import { attachmentWorkBoundary, clipboardImageFiles, createDraftImages, draftImagePayloads, withoutDraftImages } from '../image-drafts';
 import { QueueList } from './QueueList';
-import { liveSteeringSupported } from '../steering';
+import { liveSteeringSupported, stopAndSendSupported } from '../steering';
 import { composerKeyAction, type ComposerSubmitIntent } from '../composer-submit';
 import { insertAtCaret, startRecording, transcribe, voiceStatus, type Recorder, type VoiceState } from '../voice';
 import { clampPlanUsagePercent, formatAbsolutePlanReset, formatCountdown, formatPlanUsagePercent, isExpiredPlanReset, isHotRateLimit, isLiveReset, rateLimitLabel, relativePlanReset } from '../plan-usage';
@@ -620,6 +620,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
   const modeName = modes.find((m) => m.id === modeId)?.name ?? '';
   const permLabel = (modeId && MODE_LABEL[modeId]) || (modeName ? modeName : 'Preguntar permisos');
   const steerAvail = has('appChatSteer') && liveSteeringSupported(chat?.deliveryCapabilities);
+  const stopAndSendAvail = has('chatQueueReplace') && has('cancelJob') && stopAndSendSupported(chat?.deliveryCapabilities);
 
   function autosize() {
     const el = taRef.current; if (!el) return;
@@ -762,7 +763,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
         // Text-only steering can accept the next draft immediately. Attached
         // files keep the send gate until acknowledgement so the still-owned
         // previews cannot be submitted a second time during the receipt gap.
-        if (sentImageIDs.length === 0) setPreparingImages(false);
+        if (sentImageIDs.length === 0 && !stopAndSendAvail) setPreparingImages(false);
         void delivery.then((accepted) => {
           if (accepted && sentChatID) {
             store.removeDraftImages(sentChatID, sentImageIDs);
@@ -804,7 +805,9 @@ export function Composer({ chat }: { chat: Chat | null }) {
   const sendTitle = offline
     ? 'Sin conexión con el daemon'
 	: steerMode
-      ? (steerAvail
+      ? (stopAndSendAvail
+        ? `Detener y enviar · ${steerShortcut}`
+        : steerAvail
         ? `Dirigir el turno en curso · ${steerShortcut}`
         : 'Steering no disponible')
       : running ? (stopping ? 'Deteniendo…' : 'Detener') : 'Enviar';
@@ -870,7 +873,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
           ref={taRef} rows={1} value={text} placeholder="Contale a tu agente qué sigue…"
           onChange={(e) => change(e.target.value)} onKeyDown={keydown} onPaste={onPaste} onScroll={fade}
           aria-keyshortcuts="Enter Meta+Enter Control+Enter Shift+Enter"
-          title={running ? `Enter: encolar · ${steerShortcut}: dirigir el turno · ⇧Enter: nueva línea` : 'Enter: enviar · ⇧Enter: nueva línea'}
+          title={running ? `Enter: encolar · ${steerShortcut}: ${stopAndSendAvail ? 'detener y enviar' : 'dirigir el turno'} · ⇧Enter: nueva línea` : 'Enter: enviar · ⇧Enter: nueva línea'}
         />
         <button className={`send ${running && !steerMode ? 'stop' : ''} ${stopping ? 'stopping' : ''} ${steerMode ? 'steer' : ''}`} disabled={!canSend} onClick={() => void submit(running ? 'steer' : 'send')} title={sendTitle} aria-label={sendTitle}>
           {running && !steerMode

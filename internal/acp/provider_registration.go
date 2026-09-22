@@ -285,6 +285,7 @@ var providerRegistrations = map[string]providerRegistration{
 		Detection: cliDetectionStrategy{}, ProbeTimeout: devinProbeTimeout,
 		Authentication: vendorCLIAuthenticationStrategy{loginHint: "Ejecuta `devin auth login`"},
 		Adapter: providerAdapter{
+			delivery: devinDeliveryStrategy{},
 			context: staticProviderContextPolicy{
 				capabilities: providercontract.ContextCapabilities{
 					ExactResume: true,

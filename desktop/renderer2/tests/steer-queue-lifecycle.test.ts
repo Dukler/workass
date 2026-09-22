@@ -5,6 +5,7 @@ import { createServer, type ViteDevServer } from 'vite';
 import type { Chat, Msg } from '../src/store/types.ts';
 import type { DeliveryCapabilities } from '../src/wire/types.ts';
 import { composerKeyAction } from '../src/composer-submit.ts';
+import { normalizeDeliveryCapabilities, stopAndSendSupported } from '../src/steering.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
@@ -90,7 +91,7 @@ function subject(
 }
 
 test('one keyboard submission calls live steering directly across native and ACP lanes', async () => {
-  for (const providerId of ['codex', 'claude', 'omp', 'mock', 'custom-acp']) {
+  for (const providerId of ['codex', 'claude', 'omp', 'pi', 'devin', 'mock', 'custom-acp']) {
     for (const modifier of ['ctrlKey', 'metaKey']) {
       let calls = 0;
       const { store, owner } = subject({
@@ -108,6 +109,127 @@ test('one keyboard submission calls live steering directly across native and ACP
       assert.equal(owner.messages.filter(m => m.content === 'use this direction @agent').length, 1);
     }
   }
+});
+
+test('stop-and-send is a separate typed action; a real live-steer capability always wins', () => {
+  assert.equal(stopAndSendSupported(normalizeDeliveryCapabilities({ stopAndSend: true, liveSteer: false })), true);
+  assert.equal(stopAndSendSupported(normalizeDeliveryCapabilities({ stopAndSend: true, liveSteer: true })), false);
+  assert.equal(stopAndSendSupported(normalizeDeliveryCapabilities({})), false);
+  assert.equal(stopAndSendSupported(undefined), false);
+});
+
+test('one stop-and-send shortcut durably queues attachments before cancelling its exact turn', async () => {
+  const calls: string[] = [];
+  let queueRequest: any;
+  let acceptQueue!: (value: unknown) => void;
+  const { store, owner } = subject({
+    appChatSteer: async () => { assert.fail('stop-and-send is not ACP live steering'); },
+    chatQueueReplace: (request: any) => {
+      calls.push('queue'); queueRequest = request;
+      return new Promise((resolve) => { acceptQueue = resolve; });
+    },
+    cancelJob: async (jobId: string) => { calls.push(`cancel:${jobId}`); return { cancelled: true, reason: 'pending' }; },
+  }, 'capability-fixture', { ...queuedDelivery, stopAndSend: true });
+  running(owner);
+  owner.queue = [{ id: 'earlier', text: 'earlier FIFO message' }];
+  store.setDraft(owner.id, 'new direction');
+  const images = [{ mimeType: 'image/png', data: 'aGVsbG8=', name: 'fixture.png' }];
+  const action = composerKeyAction(true, { key: 'Enter', shiftKey: false, ctrlKey: true, metaKey: false }, true);
+  assert.equal(action, 'steer');
+  const pending = store.steerRunning(owner.id, owner.draft, images);
+  assert.deepEqual(calls, ['queue']);
+  assert.equal(owner.draft, '');
+  assert.equal(queueRequest.tabId, owner.id);
+  assert.equal(queueRequest.chatId, owner.chatId);
+  assert.deepEqual(queueRequest.queue.map((q: any) => q.text), ['earlier FIFO message', 'new direction']);
+  assert.deepEqual(queueRequest.queue[1].images, images);
+  // Hydration may replace objects while the durable receipt is in flight.
+  const hydrated = { ...owner, messages: owner.messages.map(m => ({ ...m })), queue: owner.queue.map(q => ({ ...q })) };
+  store.state.chats = [hydrated];
+  store.setDraft(owner.id, 'next local draft');
+  acceptQueue({ ok: true, operationId: queueRequest.operationId, agentQueueRevision: 1, actorRevision: 2 });
+  assert.equal(await pending, true);
+  assert.deepEqual(calls, ['queue', 'cancel:job-1']);
+  assert.equal(hydrated.draft, 'next local draft');
+  assert.equal(hydrated.queue.length, 2);
+  assert.equal(hydrated.messages.filter(m => m.role === 'user' && m.content === 'new direction').length, 0);
+});
+
+test('failed or mismatched queue admission never stops and retains the same pending operation', async () => {
+  for (const failure of ['missing', 'rejected', 'wrong-operation', 'transport']) {
+    let cancels = 0;
+    let operationId = '';
+    const { store, owner } = subject({
+      chatQueueReplace: async (request: any) => {
+        operationId = request.operationId;
+        if (failure === 'transport') throw new Error('offline');
+        if (failure === 'missing') return undefined;
+        return { ok: failure !== 'rejected', operationId: failure === 'wrong-operation' ? 'other-operation' : request.operationId };
+      },
+      cancelJob: async () => { cancels++; return true; },
+    }, 'capability-fixture', { ...queuedDelivery, stopAndSend: true });
+    store.requestChatReadback = () => {};
+    running(owner);
+    store.setDraft(owner.id, 'keep this input');
+    assert.equal(await store.steerRunning(owner.id, owner.draft), true);
+    assert.equal(cancels, 0, failure);
+    assert.equal(owner.queue?.length, 1, failure);
+    assert.equal(owner.queue?.[0].text, 'keep this input');
+    assert.equal(store.pendingQueueOperationIds.get(owner.id), operationId);
+  }
+});
+
+test('queue receipt cannot cancel a replacement turn, replacement chat, or removed input', async () => {
+  for (const race of ['turn', 'job', 'chat', 'removed']) {
+    let cancels = 0;
+    const { store, owner } = subject({
+      chatQueueReplace: async (request: any) => {
+        if (race === 'turn') { owner.messages[1].status = 'done'; owner.messages.push({ id: 'replacement', role: 'assistant', status: 'running', content: '', events: [], at: null, jobId: 'job-2' }); }
+        if (race === 'job') owner.messages[1].jobId = 'job-2';
+        if (race === 'chat') owner.chatId = 'replacement-chat';
+        if (race === 'removed') store.removeQueued(owner.id, owner.queue![0].id);
+        return { ok: true, operationId: request.operationId, agentQueueRevision: 1, actorRevision: 2 };
+      },
+      cancelJob: async () => { cancels++; return true; },
+    }, 'capability-fixture', { ...queuedDelivery, stopAndSend: true });
+    running(owner);
+    assert.equal(await store.steerRunning(owner.id, 'direction'), true);
+    assert.equal(cancels, 0, race);
+  }
+});
+
+test('a failed stop leaves one durable FIFO owner without automatic cancellation retry', async () => {
+  let cancels = 0;
+  const { store, owner } = subject({
+    chatQueueReplace: async (request: any) => ({ ok: true, operationId: request.operationId, agentQueueRevision: 1, actorRevision: 2 }),
+    cancelJob: async () => { cancels++; throw new Error('offline'); },
+  }, 'capability-fixture', { ...queuedDelivery, stopAndSend: true });
+  store.requestChatReadback = () => {};
+  running(owner);
+  assert.equal(await store.steerRunning(owner.id, 'direction'), true);
+  assert.equal(cancels, 1);
+  assert.equal(owner.queue?.length, 1);
+  assert.equal(store.pendingQueueOperationIds.has(owner.id), false);
+  assert.equal(owner.messages[1].status, 'running');
+});
+
+test('a terminal event during queue admission drains the existing FIFO without cancelling', async () => {
+  let cancels = 0;
+  const { store, owner } = subject({
+    chatQueueReplace: async (request: any) => {
+      owner.messages[1].status = 'done';
+      return { ok: true, operationId: request.operationId, agentQueueRevision: 1, actorRevision: 2 };
+    },
+    cancelJob: async () => { cancels++; return true; },
+  }, 'capability-fixture', { ...queuedDelivery, stopAndSend: true });
+  running(owner);
+  owner.queue = [{ id: 'earlier', text: 'earlier FIFO message' }];
+  let drained: Chat | undefined;
+  store.flushNextQueued = async (chat: Chat) => { drained = chat; };
+  assert.equal(await store.steerRunning(owner.id, 'direction'), true);
+  assert.equal(cancels, 0);
+  assert.equal(drained, owner);
+  assert.deepEqual(owner.queue?.map(item => item.text), ['earlier FIFO message', 'direction']);
 });
 
 test('a receipt-capable live steer stays staged and never bounces through the queue', async () => {
