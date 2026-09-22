@@ -128,6 +128,23 @@ Validated with Pi `0.87.0` and `pi-subagents` `0.70.1`. If the daemon has no
 authenticated models, Settings reports `needs-login`: run `pi` and `/login`,
 or configure a local model through Pi's own settings.
 
+On Windows, the native launcher sets `NODE_USE_SYSTEM_CA=1` before starting
+Node, so Pi trusts enterprise roots installed in the Windows certificate store
+while retaining TLS certificate verification. Other provider environment
+settings, including additional CA files, remain intact.
+
+`go test ./internal/acp -run TestPiNativeSDKProviderContext -count=1 -v` runs
+the installed official SDK against a loopback fixture model. It asserts the
+actual outgoing provider requests contain the central Workass bootstrap,
+project instructions, built-in and extension tool schemas, and current tool
+additions/removals through fresh input and exact resume after a host restart.
+The resumed fixture also checks Pi's configured PowerShell selection without
+a Workass tool allowlist. Responses are fixed protocol fixtures; no vendor
+model, credentials or user Pi profile are used. This check skips explicitly
+when Pi is not installed; run it on the release host with Pi installed before
+publication. Windows trust settings are covered by
+`TestPiNativeWindowsTrustEnvironment` and the native launch test.
+
 The adapter calls native `steer()` once for an active turn and acknowledges SDK
 admission. It never sends a preliminary prompt, follow-up, or interrupt. Pi's
 first journal is deferred until an assistant message; input consumption is
