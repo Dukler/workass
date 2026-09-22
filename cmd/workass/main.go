@@ -37,6 +37,7 @@ import (
 	"workass/internal/machineid"
 	providercontract "workass/internal/provider"
 	"workass/internal/tlscert"
+	"workass/internal/toolcli"
 	"workass/internal/voice"
 	"workass/internal/wire"
 )
@@ -59,6 +60,15 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "tools" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := runToolsCommand(ctx, os.Args[2:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+			_ = json.NewEncoder(os.Stderr).Encode(toolcli.Response{Error: acp.RedactSensitiveText(err.Error())})
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "fleet" {
 		if err := runFleetCommand(os.Args[2:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintf(os.Stderr, "workass fleet: %v\n", err)
@@ -69,7 +79,7 @@ func main() {
 	// Removed subcommands (including the former MCP stdio server) must not
 	// fall through Go's flag parser and accidentally start a second daemon.
 	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
-		fmt.Fprintln(os.Stderr, "unknown Workass command; use fleet --help")
+		fmt.Fprintln(os.Stderr, "unknown Workass command; use tools list or fleet --help")
 		os.Exit(2)
 	}
 	prod := flag.Bool("prod", prodModeDefault(), "use production daemon defaults where applicable; on Windows this defaults --port 80 and --bind lan")
@@ -81,7 +91,7 @@ func main() {
 	mocksDirFlag := flag.String("mocks-dir", "", "design mocks directory override")
 	acpCommand := flag.String("acp-command", "node", "ACP provider command")
 	acpArgsJSON := flag.String("acp-args", `["desktop/acp/mock-server.mjs"]`, "ACP provider args as a JSON array")
-	toolsCommandFlag := flag.String("tools-command", "", "dedicated Workass tools executable; development only")
+	toolsCommandFlag := flag.String("tools-command", "", "absolute Workass tools executable override; development only, ignored in production")
 	stateDirFlag := flag.String("state-dir", "state", "daemon state directory")
 	headless := flag.Bool("headless", false, "run only the daemon; do not expect an Electron shell")
 	installService := flag.Bool("install-service", false, "install and start the headless daemon as the current user's service")

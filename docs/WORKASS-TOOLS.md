@@ -12,6 +12,14 @@ environment; paths quoted in earlier conversation turns expire when their
 attachment closes. Generic ACP prompts and native instructions both use this
 process binding. Do not guess the machine, active chat, or context file.
 
+In production, the executable is the running Workass daemon itself. Its `tools`
+subcommand dispatches before daemon startup. No sibling helper is selected or
+retried. Development may supply an explicit absolute `--tools-command` override;
+production ignores that override. The standalone helper remains packaged for
+compatibility with older Windows updaters, but is no longer a runtime dependency.
+New Windows installer and updater validators accept its absence and check its
+executable format when it is present.
+
 ```sh
 "$WORKASS_TOOLS_COMMAND" tools guide
 "$WORKASS_TOOLS_COMMAND" tools list

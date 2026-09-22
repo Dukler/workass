@@ -238,12 +238,17 @@ func openPayload(p Plan) (*payload, error) {
 		fileNames[key] = true
 		out.names = append(out.names, name)
 	}
-	for _, required := range []string{"Workass.exe", "workass-daemon.exe", "workass-tools.exe", "resources/app/package.json", "manifest.json"} {
+	for _, required := range []string{"Workass.exe", "workass-daemon.exe", "resources/app/package.json", "manifest.json"} {
 		if out.files[required] == nil {
 			return nil, fmt.Errorf("release ZIP is missing %s", required)
 		}
 	}
 	for _, executable := range []string{"Workass.exe", "workass-daemon.exe", "workass-tools.exe"} {
+		// The tools helper remains bundled for older updaters, but the daemon
+		// now serves tools itself. Validate the helper only when present.
+		if executable == "workass-tools.exe" && out.files[executable] == nil {
+			continue
+		}
 		if err := verifyWindowsPE(out.files[executable], executable); err != nil {
 			return nil, err
 		}

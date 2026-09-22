@@ -1805,6 +1805,12 @@ test('unsigned Windows staging verifies the complete portable x86-64 runtime', (
   })}\n`);
   assert.doesNotThrow(() => verifyWindowsRelease(path.join(root, 'current'), incoming, '1.2.0', 'x64', installationId));
 
+  fs.rmSync(path.join(incoming, 'workass-tools.exe'));
+  assert.doesNotThrow(() => verifyWindowsRelease(path.join(root, 'current'), incoming, '1.2.0', 'x64', installationId));
+  fs.writeFileSync(path.join(incoming, 'workass-tools.exe'), 'invalid compatibility helper');
+  assert.throws(() => verifyWindowsRelease(path.join(root, 'current'), incoming, '1.2.0', 'x64', installationId), /workass-tools.exe.*Windows executable/);
+  fs.rmSync(path.join(incoming, 'workass-tools.exe'));
+
   fs.writeFileSync(path.join(incoming, 'resources', 'app', 'package.json'), '{"version":"9.9.9"}\n');
   assert.throws(() => verifyWindowsRelease(path.join(root, 'current'), incoming, '1.2.0', 'x64', installationId), /shell version/);
   fs.writeFileSync(path.join(incoming, 'resources', 'app', 'package.json'), '{"version":"1.2.0"}\n');

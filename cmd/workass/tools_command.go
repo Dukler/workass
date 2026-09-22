@@ -5,27 +5,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-func resolveWorkassToolsCommand(daemonExecutable, explicit string, prod bool, goos string) (string, error) {
-	if !prod && explicit != "" {
-		command, err := existingRegularExecutable(explicit)
-		if err != nil {
-			return "", err
-		}
-		if daemonExecutable != "" && filepath.Clean(command) == filepath.Clean(daemonExecutable) {
-			return "", errors.New("tools executable must not be the daemon executable")
-		}
-		return command, nil
+func resolveWorkassToolsCommand(daemonExecutable, explicit string, prod bool, _ string) (string, error) {
+	if !prod && strings.TrimSpace(explicit) != "" {
+		return existingRegularExecutable(explicit)
 	}
-	if daemonExecutable == "" || !filepath.IsAbs(daemonExecutable) {
+	if strings.TrimSpace(daemonExecutable) == "" || !filepath.IsAbs(daemonExecutable) {
 		return "", errors.New("daemon executable path is unavailable")
 	}
-	name := "workass-tools"
-	if goos == "windows" {
-		name += ".exe"
-	}
-	return existingRegularExecutable(filepath.Join(filepath.Dir(daemonExecutable), name))
+	// The running daemon already contains the tools client. A quarantined or
+	// absent compatibility helper must not disable provider tools.
+	return filepath.Clean(daemonExecutable), nil
 }
 
 func existingRegularExecutable(path string) (string, error) {

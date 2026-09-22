@@ -1320,6 +1320,14 @@ test('the independent worker accepts the checksum-staged unsigned Windows portab
     targetVersion: '1.1.0',
     installationId: `install-${'1'.repeat(32)}`,
   }));
+  const transaction = { incomingTarget, targetVersion: '1.1.0', installationId: `install-${'1'.repeat(32)}` };
+  fs.rmSync(path.join(incomingTarget, 'workass-tools.exe'));
+  assert.doesNotThrow(() => verifyWindowsIncoming(transaction));
+  fs.writeFileSync(path.join(incomingTarget, 'workass-tools.exe'), 'invalid compatibility helper');
+  assert.throws(() => verifyWindowsIncoming(transaction), /workass-tools.exe.*Windows executable/);
+  fs.rmSync(path.join(incomingTarget, 'workass-tools.exe'));
+  fs.rmSync(path.join(incomingTarget, 'workass-daemon.exe'));
+  assert.throws(() => verifyWindowsIncoming(transaction), /no workass-daemon.exe/);
   const worker = fs.readFileSync(path.join(__dirname, 'update-worker.js'), 'utf8');
   assert.doesNotMatch(worker, /Get-AuthenticodeSignature/);
   assert.match(worker, /stopWindowsExecutableProcesses/);
