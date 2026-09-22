@@ -177,6 +177,9 @@ type PermissionReceipt struct {
 type DeliveryCapabilities struct {
 	StableInputIdentity bool
 	LiveSteer           bool
+	// StopAndSend permits the explicit UI action: durably queue input, then
+	// cancel the exact foreground turn. It is not native live steering.
+	StopAndSend bool
 	// SteerConsumptionReceipt is narrower than ConsumptionReceipt. It proves
 	// that an admitted live steer has a later, stable input-consumption receipt
 	// which defines its semantic boundary inside the running turn. Generic ACP

@@ -378,6 +378,7 @@ type SessionInfo struct {
 type DeliveryCapabilities struct {
 	StableInputIdentity     bool `json:"stableInputIdentity"`
 	LiveSteer               bool `json:"liveSteer"`
+	StopAndSend             bool `json:"stopAndSend,omitempty"`
 	SteerConsumptionReceipt bool `json:"steerConsumptionReceipt"`
 	ConsumptionReceipt      bool `json:"consumptionReceipt"`
 	// TurnReadback is retained as an always-false frozen-wire compatibility
@@ -389,6 +390,7 @@ func DeliveryCapabilitiesForWire(capabilities providercontract.DeliveryCapabilit
 	return DeliveryCapabilities{
 		StableInputIdentity:     capabilities.StableInputIdentity,
 		LiveSteer:               capabilities.LiveSteer,
+		StopAndSend:             capabilities.StopAndSend,
 		SteerConsumptionReceipt: capabilities.SteerConsumptionReceipt,
 		ConsumptionReceipt:      capabilities.ConsumptionReceipt,
 	}

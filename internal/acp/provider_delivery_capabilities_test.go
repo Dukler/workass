@@ -22,6 +22,7 @@ func TestDeliveryStrategyProjectsNegotiatedSteerSemantics(t *testing.T) {
 		bridge       *Bridge
 		live         bool
 		steerReceipt bool
+		stopAndSend  bool
 	}{
 		{
 			name: "standard live admission has no later steer receipt", strategy: genericACPDeliveryStrategy{},
@@ -53,11 +54,14 @@ func TestDeliveryStrategyProjectsNegotiatedSteerSemantics(t *testing.T) {
 		{name: "missing handshake is unsupported", strategy: genericACPDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities()},
 		{name: "native OMP requires acknowledged SDK steering", strategy: ompDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities("workassOMPSteerRequest"), live: true},
 		{name: "old OMP host cannot inherit generic steering", strategy: ompDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities("sessionSteer")},
+		{name: "Devin explicitly supports stop and send without live steering", strategy: devinDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities(), stopAndSend: true},
+		{name: "Devin real live steering takes precedence", strategy: devinDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities("sessionSteer"), live: true},
+		{name: "Devin requires an attached bridge", strategy: devinDeliveryStrategy{}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			capabilities := test.strategy.Capabilities(test.bridge)
-			if capabilities.LiveSteer != test.live || capabilities.SteerConsumptionReceipt != test.steerReceipt {
+			if capabilities.LiveSteer != test.live || capabilities.SteerConsumptionReceipt != test.steerReceipt || capabilities.StopAndSend != test.stopAndSend {
 				t.Fatalf("capabilities = %#v, want live=%v steerReceipt=%v", capabilities, test.live, test.steerReceipt)
 			}
 		})
@@ -68,6 +72,7 @@ func TestSessionDeliveryCapabilitiesUseTypedCamelCaseWireShape(t *testing.T) {
 	capabilities := providercontract.DeliveryCapabilities{
 		StableInputIdentity:     true,
 		LiveSteer:               true,
+		StopAndSend:             true,
 		SteerConsumptionReceipt: true,
 		ConsumptionReceipt:      true,
 	}
@@ -86,7 +91,7 @@ func TestSessionDeliveryCapabilitiesUseTypedCamelCaseWireShape(t *testing.T) {
 	if projected["planUsageSupported"] != true || projected["planUsageResetSupported"] != true {
 		t.Fatalf("typed plan usage capabilities = %#v", projected)
 	}
-	for _, field := range []string{"stableInputIdentity", "liveSteer", "steerConsumptionReceipt", "consumptionReceipt"} {
+	for _, field := range []string{"stableInputIdentity", "liveSteer", "stopAndSend", "steerConsumptionReceipt", "consumptionReceipt"} {
 		if delivery[field] != true {
 			t.Fatalf("deliveryCapabilities.%s = %#v, full=%#v", field, delivery[field], delivery)
 		}
@@ -99,8 +104,8 @@ func TestSessionDeliveryCapabilitiesUseTypedCamelCaseWireShape(t *testing.T) {
 	}
 }
 
-// Structural capability evidence from the official 3000.10.21 bundle,
-// initialized without credentials in an isolated XDG profile on 2026-09-11.
+// Structural capability evidence from the official 3000.10.21 and 3000.11.1
+// bundles, initialized in isolated XDG profiles on 2026-09-11 and 2026-09-22.
 // The vendor's other ACP extensions must not be mistaken for live steering.
 func TestDevinObservedHandshakeDoesNotAdvertiseLiveSteering(t *testing.T) {
 	bridge := &Bridge{providerID: "devin", agentCaps: map[string]any{
@@ -110,6 +115,9 @@ func TestDevinObservedHandshakeDoesNotAdvertiseLiveSteering(t *testing.T) {
 	strategy := providerAdapterForID("devin").delivery
 	if strategy.Capabilities(bridge).LiveSteer {
 		t.Fatal("unadvertised Devin live steering was enabled")
+	}
+	if !strategy.Capabilities(bridge).StopAndSend {
+		t.Fatal("explicit Devin stop-and-send action is unavailable")
 	}
 	outcome := strategy.Steer(bridge, providerSteerRequest{sessionID: "fixture", clientUserMessageID: "direction"})
 	if outcome.ok || outcome.live || outcome.queued || !outcome.unsupported {

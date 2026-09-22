@@ -660,6 +660,13 @@ shell, NOT the daemon.
     awaiting admission with the active turn identity. It never submits a
     preliminary prompt or follow-up; admission commits the visible direction,
     with no later consumption receipt advertised;
+    **Devin stop-and-send exception (user 2026-09-22):** when Devin lacks
+    real live steering, its typed `stopAndSend` capability enables one composer
+    action to persist the new FIFO input and then cancel only the captured
+    foreground turn. Label it “Detener y enviar”; do not claim native steering.
+    A missing/uncertain queue receipt never permits cancellation, and a terminal
+    race never retargets Stop to the next turn. Preserve the existing FIFO and
+    other providers' live-steering behavior; see `specs/devin-stop-and-send.md`.
     (d) every other ACP agent keeps the capability-gated `_session/steer`
     notification. Unsupported or explicitly rejected steering returns ownership
     to the composer; only ordinary `Enter` creates client FIFO work. The

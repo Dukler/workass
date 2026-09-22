@@ -1412,6 +1412,128 @@ func newSteerRegressionFixture(t *testing.T, publishers ...func(string, any)) (*
 	return runtime, manager, root, stateDir, info
 }
 
+func TestDevinStopAndSendUsesDurableQueueAndExactCancellation(t *testing.T) {
+	root, stateDir := repoRoot(t), t.TempDir()
+	traceFile := filepath.Join(stateDir, "prompts.jsonl")
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{
+			ID: "devin", Name: "Devin fixture", Command: "node", CWD: root, Enabled: true,
+			Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")},
+			Env: map[string]string{
+				"WORKASS_MOCK_ACP_DISABLE_STEER": "1", "WORKASS_MOCK_ACP_DELAY_MS": "1",
+				"WORKASS_MOCK_ACP_TRACE_FILE": traceFile, "WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "mock-sessions.json"),
+			},
+		},
+		DefaultProviderID: "devin", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	const tabID, chatID = "stop-send-tab", "stop-send-chat"
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "create-stop-send", "title": "Stop and send",
+		"cwd": root, "providerId": "devin", "currentModelId": "mock-deterministic",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := runtime.Select(context.Background(), acp.SessionOptions{TabID: tabID, ChatID: chatID, ProviderID: "devin", CWD: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Start(context.Background(), map[string]any{
+		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "providerId": "devin", "sessionId": info.SessionID,
+		"prompt": "[mock:hold-until-steer] first turn", "userMessageId": "base-user", "assistantMessageId": "base-assistant",
+	}, "human"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var originalJobID string
+	for time.Now().Before(deadline) {
+		state, _ := runtime.Snapshot(chatID)
+		if state.Foreground != nil && state.Foreground.Status == chat.ForegroundRunning {
+			originalJobID = state.Foreground.Turn.NativeID
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if originalJobID == "" {
+		state, _ := runtime.Snapshot(chatID)
+		t.Fatalf("base turn did not start: foreground=%#v lanes=%#v outbox=%#v", state.Foreground, state.Lanes, state.Outbox)
+	}
+	// Devin intentionally defers creating its native attachment until input.
+	// Negotiate the capability from that running attachment, not catalog-only selection.
+	info, err = runtime.Select(context.Background(), acp.SessionOptions{TabID: tabID, ChatID: chatID, ProviderID: "devin", CWD: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.DeliveryCapabilities.LiveSteer || !info.DeliveryCapabilities.StopAndSend {
+		t.Fatalf("Devin fixture capabilities = %#v", info.DeliveryCapabilities)
+	}
+	state, _ := runtime.Snapshot(chatID)
+	const direction = "stop-and-send fixture direction"
+	entries := []any{map[string]any{"id": "direction", "text": direction}}
+	receipt, err := runtime.ReplaceStagedQueue(tabID, chatID, "queue-direction", state.Presentation.AgentQueueRevision, entries)
+	if err != nil || receipt["ok"] != true {
+		t.Fatalf("queue admission = %#v, %v", receipt, err)
+	}
+	state, _ = runtime.Snapshot(chatID)
+	if len(state.StagedQueue) != 1 || state.Foreground == nil || state.Foreground.Turn.NativeID != originalJobID {
+		t.Fatal("queue admission changed the original foreground or lost input")
+	}
+	if result, _, err := runtime.Cancel(context.Background(), originalJobID); err != nil || !result.Cancelled {
+		t.Fatalf("exact stop = %#v, %v", result, err)
+	}
+	waitProviderChatIdle(t, runtime, chatID, 5*time.Second)
+	// Ordinary renderer FIFO promotion supplies the same immutable queue owner.
+	start := map[string]any{
+		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "providerId": "devin", "sessionId": info.SessionID,
+		"prompt": direction, "queueId": "direction", "userMessageId": "direction", "assistantMessageId": "queue-assistant-direction",
+	}
+	if _, err := runtime.Start(context.Background(), start, "human"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	completed := false
+	for time.Now().Before(deadline) {
+		state, _ = runtime.Snapshot(chatID)
+		var terminal map[string]any
+		if terminal, completed = actorTerminalJobReceipt(state, "direction"); completed {
+			if terminal["status"] != "done" {
+				t.Fatalf("queued direction terminal status=%v error=%v", terminal["status"], terminal["error"])
+			}
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !completed {
+		t.Fatal("queued direction did not reach its own terminal boundary")
+	}
+	// A delayed duplicate send receipt must not submit a second provider prompt.
+	if _, err := runtime.Start(context.Background(), start, "human"); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = runtime.Snapshot(chatID)
+	if len(state.StagedQueue) != 0 || len(state.Queue) != 0 {
+		t.Fatal("accepted queue input was retained")
+	}
+	userCount := 0
+	for _, event := range state.Ledger {
+		if event.Text == direction {
+			userCount++
+		}
+	}
+	if userCount != 1 {
+		t.Fatalf("direction has %d ledger owners", userCount)
+	}
+	trace, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(trace), direction); count != 1 {
+		t.Fatalf("direction appeared %d times in mock ACP trace, want exactly one", count)
+	}
+}
+
 func steerRegressionImage(data, name string) map[string]any {
 	return map[string]any{"mimeType": "image/png", "name": name, "data": data}
 }

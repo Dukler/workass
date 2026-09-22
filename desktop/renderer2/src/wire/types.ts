@@ -33,6 +33,7 @@ export interface CatalogGroup {
 export interface DeliveryCapabilities {
   stableInputIdentity: boolean;
   liveSteer: boolean;
+  stopAndSend?: boolean;
   steerConsumptionReceipt: boolean;
   consumptionReceipt: boolean;
   turnReadback: boolean;

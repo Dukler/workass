@@ -16,6 +16,7 @@ const sessionCapability = String(process.env.WORKASS_MOCK_ACP_SESSION_CAPABILITY
 const failResume = process.env.WORKASS_MOCK_ACP_FAIL_RESUME === '1';
 const mismatchedAttachmentId = String(process.env.WORKASS_MOCK_ACP_MISMATCHED_ATTACHMENT_ID || '').trim();
 const stableTurnInput = process.env.WORKASS_MOCK_ACP_STABLE_TURN_INPUT === '1';
+const liveSteer = process.env.WORKASS_MOCK_ACP_DISABLE_STEER !== '1';
 const contextImport = process.env.WORKASS_MOCK_ACP_CONTEXT_IMPORT === '1';
 const modelEffortAxis = process.env.WORKASS_MOCK_ACP_MODEL_EFFORT_AXIS === '1';
 const modelOptionID = process.env.WORKASS_MOCK_ACP_MODEL_OPTION_ID || 'model';
@@ -461,16 +462,16 @@ async function handleRequest(message) {
       agentCapabilities: {
         sessionCapabilities: sessionCapability === 'both' || sessionCapability === 'resume' ? { resume: {}, close: {} } : { close: {} },
         loadSession: sessionCapability === 'both' || sessionCapability === 'load',
-        sessionSteer: true,
-        steerNotification: true,
+        sessionSteer: liveSteer,
+        steerNotification: liveSteer,
         promptCapabilities: { image: false, audio: false, embeddedContext: false },
         mcpCapabilities: { http: false, sse: false },
       },
       authMethods: [],
       _meta: {
         deterministic: true,
-        sessionSteer: true,
-        steerNotification: true,
+        sessionSteer: liveSteer,
+        steerNotification: liveSteer,
 		...(stableTurnInput ? { workassStableTurnInputV1: true } : {}),
 		...(contextImport ? { workassContextImportV1: {
 		  mode: 'non_sampling', receipt: 'operation_readback_v1', idempotent: true,

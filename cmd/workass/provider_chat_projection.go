@@ -767,7 +767,7 @@ func projectLaneAttachment(snapshot providercontract.LaneAttachmentSnapshot, del
 }
 
 func projectDeliveryCapabilities(capabilities providercontract.DeliveryCapabilities) map[string]any {
-	return map[string]any{
+	projected := map[string]any{
 		"stableInputIdentity":     capabilities.StableInputIdentity,
 		"liveSteer":               capabilities.LiveSteer,
 		"steerConsumptionReceipt": capabilities.SteerConsumptionReceipt,
@@ -775,6 +775,10 @@ func projectDeliveryCapabilities(capabilities providercontract.DeliveryCapabilit
 		// Frozen renderer compatibility; native turn readback is retired.
 		"turnReadback": false,
 	}
+	if capabilities.StopAndSend {
+		projected["stopAndSend"] = true
+	}
+	return projected
 }
 
 func projectRuntimeCommandCatalog(catalog *providercontract.RuntimeCommandCatalog) any {
