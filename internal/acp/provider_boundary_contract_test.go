@@ -187,13 +187,15 @@ func isRegisteredGoProviderBoundary(rel string) bool {
 	return false
 }
 
-var providerBoundaryIDs = []string{"claude", "codex", "devin", "qwen", "omp"}
+var providerBoundaryIDs = []string{"claude", "codex", "devin", "qwen", "omp", "pi"}
 
 var providerPrivateMarkers = []string{
 	"_workass_claude",
 	"_workass_codex",
 	"_workass/claude",
 	"_workass/codex",
+	"_workass/pi",
+	"workasspisteer",
 	"workass.claude",
 	"workass.codex",
 	"claudecode",
@@ -217,9 +219,29 @@ func forbiddenProviderLiteral(raw string) string {
 	return ""
 }
 
+// A two-letter ID must be a whole camel-case component, not "api", "PID",
+// "pipeline", or "spinner" in otherwise provider-neutral code.
+func isPiBoundaryIdentifier(identifier string) bool {
+	for _, component := range []string{"pi", "Pi"} {
+		for start := 0; start < len(identifier); start++ {
+			if !strings.HasPrefix(identifier[start:], component) {
+				continue
+			}
+			end := start + len(component)
+			if (start == 0 || component == "Pi" || identifier[start-1] == '_') && (end == len(identifier) || identifier[end] == '_' || (identifier[end] >= 'A' && identifier[end] <= 'Z')) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func forbiddenGoProviderIdentifier(identifier string) string {
 	lower := strings.ToLower(identifier)
 	for _, providerID := range providerBoundaryIDs {
+		if providerID == "pi" && !isPiBoundaryIdentifier(identifier) {
+			continue
+		}
 		if strings.Contains(lower, providerID) && (providerID != "omp" || strings.HasPrefix(lower, "omp") || strings.Contains(identifier, "OMP") || strings.Contains(identifier, "Omp")) {
 			return "provider-named behavior belongs in registration or an adapter"
 		}
@@ -240,6 +262,9 @@ func forbiddenScriptProviderIdentifier(identifier string) string {
 	// branch while still rejecting providerId, shellStatus.claude, and variables
 	// such as claudeSession outside an allowed boundary.
 	for _, providerID := range providerBoundaryIDs {
+		if providerID == "pi" && !isPiBoundaryIdentifier(identifier) {
+			continue
+		}
 		if strings.Contains(identifier, providerID) && (providerID != "omp" || strings.HasPrefix(identifier, "omp")) {
 			return "provider-named renderer/shell behavior belongs behind daemon-authored neutral data"
 		}
