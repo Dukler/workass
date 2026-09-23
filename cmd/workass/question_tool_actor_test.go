@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -164,8 +165,8 @@ func TestWorkassQuestionActorWireAnswerUnicodeIsolationAndReplay(t *testing.T) {
 		"operation_id": "ask-deploy-target-once", "question_id": "deploy-target",
 		"header": "Destino", "question": "¿Qué destino preparo?",
 		"options": []any{
-			map[string]any{"id": "canary", "label": "Canary", "description": "Prueba con menor riesgo"},
-			map[string]any{"id": "production", "label": "Producción"},
+			map[string]any{"id": "yes", "label": "Yes", "description": "Confirmar"},
+			map[string]any{"id": "no", "label": "No"},
 		},
 		"multi_select": true, "allow_free_text": true,
 	}
@@ -208,16 +209,28 @@ func TestWorkassQuestionActorWireAnswerUnicodeIsolationAndReplay(t *testing.T) {
 		t.Fatalf("provider-neutral CLI schema did not reach the existing question card: %#v", question)
 	}
 	choices := anySlice(question["options"])
-	if len(choices) != 2 || fieldString(mapFromAnyMain(choices[0]), "id") != "canary" {
+	if len(choices) != 2 || fieldString(mapFromAnyMain(choices[0]), "id") != "yes" || fieldString(mapFromAnyMain(choices[1]), "id") != "no" {
 		t.Fatalf("question card lost stable option ids: %#v", choices)
 	}
 
-	freeText := strings.Repeat("界🙂", 500) // 1000 Unicode code points, more than 1000 UTF-8 bytes.
-	answerToken, err := providercontract.EncodeWorkassQuestionAnswer(providercontract.QuestionAnswer{
-		Status: "answered", SelectedOptionIDs: []string{"production", "canary"}, FreeText: freeText,
-	})
+	expectedAnswer := providercontract.QuestionAnswer{
+		Status: "answered", SelectedOptionIDs: []string{"yes", "no"}, FreeText: strings.Repeat("界🙂", 500),
+	}
+	answerToken, err := providercontract.EncodeWorkassQuestionAnswer(expectedAnswer)
 	if err != nil {
-		t.Fatalf("encode long Unicode answer: %v", err)
+		t.Fatalf("encode structured answer: %v", err)
+	}
+	if tokenPath := os.Getenv("WORKASS_QUESTION_ANSWER_TOKEN_FILE"); tokenPath != "" {
+		tokenBytes, readErr := os.ReadFile(tokenPath)
+		if readErr != nil {
+			t.Fatalf("read actual renderer option callback token: %v", readErr)
+		}
+		answerToken = strings.TrimSpace(string(tokenBytes))
+		encoded := strings.TrimPrefix(answerToken, "workass-question-v1:")
+		decoded, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
+		if decodeErr != nil || json.Unmarshal(decoded, &expectedAnswer) != nil {
+			t.Fatalf("decode actual renderer option callback token: %v", decodeErr)
+		}
 	}
 	// Under the frozen wire's existing mutation rule, an approved viewer taking
 	// an answer action first acquires the controller lease. A malformed answer
@@ -266,15 +279,21 @@ func TestWorkassQuestionActorWireAnswerUnicodeIsolationAndReplay(t *testing.T) {
 	}
 	firstResult := decodeQuestionToolResult(t, first.value)
 	secondResult := decodeQuestionToolResult(t, second.value)
-	if !reflect.DeepEqual(firstResult, secondResult) || firstResult["free_text"] != freeText || firstResult["status"] != "answered" {
-		t.Fatalf("Unicode answer or stable operation replay changed: first=%#v second=%#v", firstResult, secondResult)
+	selectedOptions := anySlice(firstResult["selected_options"])
+	selectedIDs := make([]string, 0, len(selectedOptions))
+	for _, selected := range selectedOptions {
+		selectedIDs = append(selectedIDs, fieldString(mapFromAnyMain(selected), "id"))
+	}
+	if !reflect.DeepEqual(firstResult, secondResult) || firstResult["free_text"] != expectedAnswer.FreeText || firstResult["status"] != "answered" ||
+		!reflect.DeepEqual(selectedIDs, expectedAnswer.SelectedOptionIDs) {
+		t.Fatalf("structured answer or stable operation replay changed: first=%#v second=%#v", firstResult, secondResult)
 	}
 	state, ok := runtime.Snapshot(chatID)
 	if !ok {
 		t.Fatal("question owning actor disappeared")
 	}
 	permission := state.Permissions[fieldString(request, "id")]
-	if permission.Event.Question == nil || permission.Event.Question.Answer == nil || permission.Event.Question.Answer.FreeText != freeText {
+	if permission.Event.Question == nil || permission.Event.Question.Answer == nil || permission.Event.Question.Answer.FreeText != expectedAnswer.FreeText {
 		t.Fatalf("actor did not durably retain the exact user answer: %#v", permission.Event.Question)
 	}
 	var answerOperationID string
@@ -283,7 +302,8 @@ func TestWorkassQuestionActorWireAnswerUnicodeIsolationAndReplay(t *testing.T) {
 			answerOperationID = string(entry.OperationID)
 		}
 	}
-	if !strings.HasPrefix(answerOperationID, "permission-answer-v1:") || len(answerOperationID) > 256 || strings.Contains(answerOperationID, freeText) || strings.Contains(answerOperationID, answerToken) {
+	if !strings.HasPrefix(answerOperationID, "permission-answer-v1:") || len(answerOperationID) > 256 ||
+		(expectedAnswer.FreeText != "" && strings.Contains(answerOperationID, expectedAnswer.FreeText)) || strings.Contains(answerOperationID, answerToken) {
 		t.Fatalf("structured answer leaked into or overflowed its durable operation identity: %q", answerOperationID)
 	}
 	entry, found := externalBrowserMutationEntry(state, providercontract.OperationID("ask-deploy-target-once"))
@@ -291,8 +311,8 @@ func TestWorkassQuestionActorWireAnswerUnicodeIsolationAndReplay(t *testing.T) {
 		t.Fatalf("question result was not durably receipted: %#v", entry)
 	}
 	var durableResult map[string]any
-	if err := json.Unmarshal(entry.Result, &durableResult); err != nil || durableResult["free_text"] != freeText {
-		t.Fatalf("durable Unicode question receipt did not round trip: result=%#v err=%v", durableResult, err)
+	if err := json.Unmarshal(entry.Result, &durableResult); err != nil || durableResult["free_text"] != expectedAnswer.FreeText {
+		t.Fatalf("durable question receipt did not round trip: result=%#v err=%v", durableResult, err)
 	}
 	requestEventsMu.Lock()
 	gotRequestEvents := requestEvents

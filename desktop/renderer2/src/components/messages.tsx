@@ -419,84 +419,52 @@ export function PermCard({ perm, tabId, msgId }: { perm: PermissionState; tabId:
   const decide = (optionId: string) => { if (!perm.resolved) void store.decidePermission(tabId, msgId, perm.id, optionId); };
   const [selected, setSelected] = useState<string[]>([]);
   const [freeText, setFreeText] = useState('');
-  if (perm.question?.workassTool) {
-    const q = perm.question;
-    const hasAnswer = selected.length > 0 || freeText.trim().length > 0;
-    const submit = () => decide(encodeWorkassQuestionAnswer({
-      status: 'answered', selectedOptionIds: selected, freeText,
-    }));
-    const dismiss = () => decide(encodeWorkassQuestionAnswer({ status: 'dismissed' }));
-    return (
-      <div className="permcard ask" data-testid="workass-question-card">
-        {q.header && <div className="askhead">{q.header}</div>}
-        <div className="askq">{q.question}</div>
-        <div className="askopts">
-          {q.options.map((option) => {
-            const selectedOption = !!option.id && selected.includes(option.id);
-            return (
-              <button
-                key={option.id || option.label}
-                className={`askopt ${selectedOption ? 'on' : ''}`}
-                data-testid="workass-question-option"
-                aria-pressed={selectedOption}
-                disabled={!!perm.resolved || !option.id}
-                onClick={() => {
-                  if (!option.id) return;
-                  setSelected((current) => q.multiSelect
-                    ? current.includes(option.id!) ? current.filter((id) => id !== option.id) : [...current, option.id!]
-                    : current.includes(option.id!) ? [] : [option.id!]);
-                }}
-              >
-                <div className="asklabel">{option.label}</div>
-                {option.description && <div className="askdesc">{option.description}</div>}
-              </button>
-            );
-          })}
-        </div>
-        {q.allowFreeText && (
-          <textarea
-            className="askfree-text"
-            data-testid="workass-question-free-text"
-            aria-label="Respuesta adicional"
-            value={freeText}
-            disabled={!!perm.resolved}
-            onChange={(event) => setFreeText(limitWorkassQuestionText(event.target.value))}
-          />
-        )}
-        <div className="ask-actions">
-          <button className="askskip" data-testid="workass-question-dismiss" disabled={!!perm.resolved} onClick={dismiss}>Descartar</button>
-          <button className="ask-submit" data-testid="workass-question-submit" disabled={!!perm.resolved || !hasAnswer} onClick={submit}>Enviar respuesta</button>
-        </div>
-      </div>
-    );
-  }
   // A question carries its own answers: `options` holds one entry per choice
   // (kind 'answer') plus the escape hatch, so they are answered here rather than
   // allowed/rejected. Falls back to the permission card if the daemon predates
   // the question field.
   if (perm.question) {
-    const answers = perm.options.filter((o) => o.kind === 'answer');
+    const q = perm.question;
+    const workassTool = !!q.workassTool;
+    const answers = workassTool
+      ? q.options.filter((o) => !!o.id).map((o) => ({ optionId: o.id!, name: o.label, description: o.description }))
+      : perm.options.filter((o) => o.kind === 'answer').map((o, i) => ({ optionId: o.optionId, name: o.name, description: q.options[i]?.description }));
     const skip = perm.options.find((o) => o.kind !== 'answer');
+    const hasAnswer = selected.length > 0 || freeText.trim().length > 0;
+    const decideWorkassAnswer = (answer: string) => decide(answer);
+    const submit = () => decideWorkassAnswer(encodeWorkassQuestionAnswer({ status: 'answered', selectedOptionIds: selected, freeText }));
+    const dismiss = () => decideWorkassAnswer(encodeWorkassQuestionAnswer({ status: 'dismissed' }));
     return (
-      <div className="permcard ask">
-        {perm.question.header && <div className="askhead">{perm.question.header}</div>}
-        <div className="askq">{perm.question.question}</div>
+      <div className="permcard ask" data-testid={workassTool ? 'workass-question-card' : undefined}>
+        {q.header && <div className="askhead">{q.header}</div>}
+        <div className="askq">{q.question}</div>
         <div className="askopts">
-          {answers.map((o, i) => (
+          {answers.map((o) => (
             <button
               key={o.optionId}
-              className={`askopt ${perm.resolved === o.optionId ? 'on' : ''}`}
+              className={`askopt ${workassTool ? selected.includes(o.optionId) ? 'on' : '' : perm.resolved === o.optionId ? 'on' : ''}`}
+              data-testid={workassTool ? 'workass-question-option' : undefined}
+              aria-pressed={workassTool ? selected.includes(o.optionId) : undefined}
               disabled={!!perm.resolved}
-              onClick={() => decide(o.optionId)}
+              onClick={() => {
+                if (!workassTool) return decide(o.optionId);
+                if (!q.multiSelect) return decideWorkassAnswer(encodeWorkassQuestionAnswer({ status: 'answered', selectedOptionIds: [o.optionId], freeText }));
+                setSelected((current) => q.multiSelect
+                  ? current.includes(o.optionId) ? current.filter((id) => id !== o.optionId) : [...current, o.optionId]
+                  : [o.optionId]);
+              }}
             >
               <div className="asklabel">{o.name}</div>
-              {perm.question?.options[i]?.description && <div className="askdesc">{perm.question.options[i].description}</div>}
+              {o.description && <div className="askdesc">{o.description}</div>}
             </button>
           ))}
         </div>
-        {skip && (
-          <button className="askskip" disabled={!!perm.resolved} onClick={() => decide(skip.optionId)}>{skip.name}</button>
-        )}
+        {workassTool && q.allowFreeText && <textarea className="askfree-text" data-testid="workass-question-free-text" aria-label="Respuesta adicional" value={freeText} disabled={!!perm.resolved} onChange={(event) => setFreeText(limitWorkassQuestionText(event.target.value))} />}
+        {workassTool && <div className="ask-actions">
+          <button className="askskip" data-testid="workass-question-dismiss" disabled={!!perm.resolved} onClick={dismiss}>Descartar</button>
+          {(q.multiSelect || q.allowFreeText) && <button className="ask-submit" data-testid="workass-question-submit" disabled={!!perm.resolved || !hasAnswer} onClick={submit}>Enviar respuesta</button>}
+        </div>}
+        {!workassTool && skip && <button className="askskip" disabled={!!perm.resolved} onClick={() => decide(skip.optionId)}>{skip.name}</button>}
       </div>
     );
   }

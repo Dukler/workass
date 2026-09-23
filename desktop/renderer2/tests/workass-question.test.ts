@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { createServer, type ViteDevServer } from 'vite';
 import { fileURLToPath } from 'node:url';
 import React from 'react';
@@ -9,6 +11,7 @@ import { encodeWorkassQuestionAnswer, limitWorkassQuestionText } from '../src/qu
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
 let PermCard: (props: any) => React.ReactElement;
+let rendererStore: any;
 
 before(async () => {
   vite = await createServer({
@@ -17,7 +20,9 @@ before(async () => {
     server: { middlewareMode: true },
     appType: 'custom',
   });
-  StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
+  const storeModule = await vite.ssrLoadModule('/src/store/store.ts');
+  StoreCtor = storeModule.Store;
+  rendererStore = storeModule.store;
   PermCard = (await vite.ssrLoadModule('/src/components/messages.tsx')).PermCard;
 });
 
@@ -62,6 +67,133 @@ test('the real Workass card renders structured options, free text, and localized
   assert.match(html, /Descartar/);
   assert.match(html, /Enviar respuesta/);
   assert.doesNotMatch(html, /run .*AskUserQuestion/);
+});
+
+test('single-choice Workass questions keep choices unselected and retain submit for text-only answers', () => {
+  const html = renderToStaticMarkup(React.createElement(PermCard, {
+    tabId: 'question-tab', msgId: 'question-message',
+    perm: {
+      id: 'question-request', title: 'Assistant question', kind: 'workass_question', resolved: null,
+      options: [], question: { workassTool: true, questionId: 'deploy-target', operationId: 'ask-deploy-target',
+        question: '¿Deployamos?', header: 'Confirmar', multiSelect: false, allowFreeText: true,
+        options: [{ id: 'yes', label: 'Yes', description: '' }, { id: 'no', label: 'No', description: '' }] },
+    },
+  }));
+  assert.equal((html.match(/data-testid="workass-question-option"/g) ?? []).length, 2);
+  assert.match(html, /data-testid="workass-question-submit" disabled/);
+  assert.doesNotMatch(html, /aria-pressed="true"/);
+  assert.match(html, /Yes/);
+  assert.match(html, /No/);
+});
+
+test('actual single-choice option callbacks preserve yes/no ids through the machine router and deliver once', async () => {
+  const { createMachineRouter } = await import('../src/wire/machineRouter.ts');
+  const machineId = 'question-owner';
+  const calls: Array<{ channel: string; args: unknown[] }> = [];
+  let failFirst = true;
+  const router = createMachineRouter({
+    local: () => ({} as never), links: () => new Map(),
+    controlLinks: () => new Map([[machineId, {
+      invoke: async (channel: string, ...args: unknown[]) => {
+        calls.push({ channel, args });
+        if (failFirst) { failFirst = false; return { ok: false }; }
+        return { ok: true };
+      },
+      on: () => () => {},
+    } as any]]),
+  }) as any;
+  const previousWindow = (globalThis as any).window;
+  (globalThis as any).window = { api: { chatPermissionDecide: router.chatPermissionDecide } };
+
+  const reactInternals = (React as any).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+  const previousDispatcher = reactInternals.H;
+  const hooks: any[] = [];
+  let hookIndex = 0;
+  reactInternals.H = {
+    useState(initial: unknown) {
+      const index = hookIndex++;
+      if (!(index in hooks)) hooks[index] = initial;
+      return [hooks[index], (value: unknown) => { hooks[index] = typeof value === 'function' ? value(hooks[index]) : value; }];
+    },
+  };
+  const findOptions = (node: any, found: any[] = []): any[] => {
+    if (!node) return found;
+    if (Array.isArray(node)) { for (const child of node) findOptions(child, found); return found; }
+    if (node.props?.['data-testid'] === 'workass-question-option') found.push(node);
+    findOptions(node.props?.children, found);
+    return found;
+  };
+
+  try {
+    for (const selectedId of ['yes', 'no']) {
+      const permission = {
+        id: `M~${machineId}~request-${selectedId}`, title: 'Question', kind: 'workass_question', resolved: null,
+        options: [], question: { workassTool: true, questionId: 'binary-choice', operationId: `binary-${selectedId}`,
+          question: 'Continue?', multiSelect: false, allowFreeText: true,
+          options: [{ id: 'yes', label: 'Yes' }, { id: 'no', label: 'No' }] },
+      };
+      const owner = { id: 'question-tab', chatId: 'question-chat', messages: [{
+        id: 'question-message', role: 'assistant', content: '', status: 'running', at: null, events: [], permission,
+      }] };
+      rendererStore.state.chats = [owner];
+      rendererStore.state.activeId = owner.id;
+      rendererStore.bump = () => {};
+      rendererStore.bumpChat = () => {};
+
+      hooks.length = 0;
+      hookIndex = 0;
+      const tree = PermCard({ tabId: owner.id, msgId: 'question-message', perm: permission });
+      const textarea = (tree.props.children as any[]).find((child: any) => child?.props?.['data-testid'] === 'workass-question-free-text');
+      textarea.props.onChange({ target: { value: 'keep this optional detail' } });
+      hookIndex = 0;
+      const updatedTree = PermCard({ tabId: owner.id, msgId: 'question-message', perm: permission });
+      const options = findOptions(updatedTree);
+      const option = options[selectedId === 'yes' ? 0 : 1];
+      assert.ok(option, `missing ${selectedId} option callback; got ${options.length}`);
+      option.props.onClick();
+      option.props.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const expectedAfterFirstAttempt = selectedId === 'yes' ? 1 : 3;
+      assert.equal(calls.length, expectedAfterFirstAttempt, 'a double click must deliver only once');
+      if (selectedId === 'yes') {
+        assert.equal(permission.resolved, undefined, 'a rejected first request should re-enable the card');
+        option.props.onClick();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(calls.length, 2, 'the same callback should retry successfully after rejection');
+      }
+      const sent = calls.at(-1)!;
+      assert.equal(sent.channel, 'chat:permission-decide');
+      assert.equal((sent.args[0] as any).id, `request-${selectedId}`, 'the router must remove its machine tag from the request id');
+      const payload = (sent.args[0] as any).optionId as string;
+      assert.match(payload, /^workass-question-v1:/);
+      const decoded = JSON.parse(Buffer.from(payload.slice('workass-question-v1:'.length), 'base64url').toString('utf8'));
+      assert.deepEqual(decoded, { status: 'answered', selectedOptionIds: [selectedId], freeText: 'keep this optional detail' });
+      if (selectedId === 'no' && process.env.WORKASS_QUESTION_ANSWER_TOKEN_FILE) {
+        const tokenPath = process.env.WORKASS_QUESTION_ANSWER_TOKEN_FILE;
+        await mkdir(dirname(tokenPath), { recursive: true });
+        await writeFile(tokenPath, payload, { mode: 0o600 });
+      }
+    }
+  } finally {
+    reactInternals.H = previousDispatcher;
+    rendererStore.state.chats = [];
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('native SDK questions keep their original one-click answer and skip behavior', () => {
+  const html = renderToStaticMarkup(React.createElement(PermCard, {
+    tabId: 'native-tab', msgId: 'native-message',
+    perm: { id: 'native-request', title: 'AskUserQuestion', kind: 'permission', resolved: null,
+      options: [{ optionId: 'yes', name: 'Yes', label: 'Yes', kind: 'answer' }, { optionId: 'skip', name: 'Skip', label: 'Skip', kind: 'cancel' }],
+      question: { question: 'Continue?', options: [{ label: 'Yes', description: '' }] } },
+  }));
+  assert.match(html, /Continue\?/);
+  assert.match(html, /Yes/);
+  assert.match(html, /Skip/);
+  assert.doesNotMatch(html, /Enviar respuesta/);
 });
 
 test('Unicode free text uses the shared code-point bound rather than UTF-16 length', () => {
