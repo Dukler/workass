@@ -24,7 +24,7 @@ const profileEnvVar = "WORKASS_PROFILE"
 // this daemon is, what it speaks, where it listens, and what it can actually
 // run. Everything here is answerable before a client has paired, so it stays
 // free of anything a stranger should not read.
-func daemonIdentity(identity machineid.Identity, profile, bind string, port int, manager *acp.Manager, keys fleetKeyIDs, certFingerprint string) map[string]any {
+func daemonIdentity(identity machineid.Identity, profile, bind string, port int, manager *acp.Manager, keys fleetKeyIDs, certFingerprint string, instanceIDs ...string) map[string]any {
 	doc := map[string]any{
 		"wireVersion": daemonWireVersion,
 		"os":          runtime.GOOS,
@@ -37,6 +37,13 @@ func daemonIdentity(identity machineid.Identity, profile, bind string, port int,
 		// encrypted machine needs no client change at all.
 		"secure":    strings.TrimSpace(certFingerprint) != "",
 		"providers": spawnableProviderIDs(manager),
+	}
+	// Local shell recovery compares this process-scoped id before and after a
+	// restart. The health handler's public allowlist keeps it off the LAN.
+	if len(instanceIDs) > 0 {
+		if instanceID := strings.TrimSpace(instanceIDs[0]); instanceID != "" {
+			doc["instanceId"] = instanceID
+		}
 	}
 	if profile = strings.TrimSpace(profile); profile != "" {
 		doc["profile"] = profile

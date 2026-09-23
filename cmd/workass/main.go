@@ -337,7 +337,7 @@ func main() {
 		logger.Printf("[workass] no fleet key yet; run `workass fleet key` to mint one or `workass fleet join` to use another machine's")
 	}
 	handler.Identity = func() map[string]any {
-		return daemonIdentity(identity, os.Getenv(profileEnvVar), *bind, *port, acpManager, fleetKeys, tlsFingerprint)
+		return daemonIdentity(identity, os.Getenv(profileEnvVar), *bind, *port, acpManager, fleetKeys, tlsFingerprint, hub.InstanceID())
 	}
 	machineBook := openMachineBook(stateDir, identity, logger)
 	if machineBook != nil {

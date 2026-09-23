@@ -1045,12 +1045,23 @@ func projectPermission(permission *providercontract.PermissionEvent) map[string]
 	if permission.Question != nil {
 		questionOptions := make([]any, 0, len(permission.Question.Options))
 		for _, option := range permission.Question.Options {
-			questionOptions = append(questionOptions, map[string]any{"label": option.Label, "description": option.Description})
+			item := map[string]any{"label": option.Label, "description": option.Description}
+			if option.ID != "" {
+				item["id"] = option.ID
+			}
+			questionOptions = append(questionOptions, item)
 		}
-		out["question"] = map[string]any{
+		question := map[string]any{
 			"question": permission.Question.Question, "header": permission.Question.Header,
 			"options": questionOptions, "multiSelect": permission.Question.MultiSelect,
 		}
+		if permission.Question.WorkassTool {
+			question["workassTool"] = true
+			question["questionId"] = permission.Question.ID
+			question["operationId"] = permission.Question.OperationID
+			question["allowFreeText"] = permission.Question.AllowFreeText
+		}
+		out["question"] = question
 	}
 	return out
 }

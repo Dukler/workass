@@ -136,7 +136,7 @@ type OwnedChatSnapshot<T> = {
   value: T;
 };
 
-type DraftSubmission = { tabId: string; chatId: string; value: string; edit: object | undefined };
+type DraftSubmission = { tabId: string; chatId: string; value: string; edit: object };
 
 type ChatPresentationSnapshot = Pick<Chat, 'title' | 'titleLocked' | 'group' | 'unread' | 'settled' | 'settledAt' | 'pane'>;
 
@@ -421,6 +421,11 @@ export class Store {
   // The exact actor pair and renderer-minted row ids keep that staged ownership
   // resident until the matching admission reply settles it.
   private pendingSteers = new Map<string, PendingSteerDispatch>();
+  // A repeated shortcut event for the same captured composer edit and exact
+  // foreground turn must reuse the one queue-and-stop action. Weak ownership
+  // lets settled submissions disappear as soon as the composer drops them.
+  private stopAndSendSubmissions = new WeakMap<object, Map<string, Promise<boolean>>>();
+  private fallbackDraftSubmissionEdits = new WeakMap<object, object>();
   private workspaceMoves = new WorkspaceMoveGate();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   // The local mirror is a first-paint cache, not the durable copy, so its write
@@ -4089,13 +4094,29 @@ export class Store {
   }
 
   captureDraftSubmission(id: string, value: string): DraftSubmission {
-    return { tabId: id, chatId: this.chat(id)?.chatId ?? '', value, edit: this.composerEdits.get(id) };
+    let edit = this.composerEdits.get(id);
+    if (!edit) {
+      edit = {};
+      this.composerEdits.set(id, edit);
+    }
+    return { tabId: id, chatId: this.chat(id)?.chatId ?? '', value, edit };
+  }
+
+  private draftSubmissionEdit(submission: DraftSubmission): object {
+    const edit: unknown = submission.edit;
+    if (edit && typeof edit === 'object') return edit;
+    let fallback = this.fallbackDraftSubmissionEdits.get(submission);
+    if (!fallback) {
+      fallback = this.composerEdits.get(submission.tabId) ?? {};
+      this.fallbackDraftSubmissionEdits.set(submission, fallback);
+    }
+    return fallback;
   }
 
   private consumeSubmittedDraft(submission: DraftSubmission) {
     const chat = this.chat(submission.tabId);
     if (sameChatPair(chat, submission.tabId, submission.chatId)
-      && chat.draft === submission.value && this.composerEdits.get(chat.id) === submission.edit) {
+      && chat.draft === submission.value && this.composerEdits.get(chat.id) === this.draftSubmissionEdit(submission)) {
       this.setDraft(chat.id, '');
     }
   }
@@ -4288,7 +4309,30 @@ export class Store {
       return false;
     }
     if (stopAndSendSupported(chat.deliveryCapabilities)) {
-      return this.stopAndSendRunning(chat, prompt, images, submission);
+      const activeAssistant = [...chat.messages].reverse().find((message) => message.role === 'assistant' && message.status === 'running');
+      const actionKey = activeAssistant?.id ?? '';
+      const submissionEdit = this.draftSubmissionEdit(submission);
+      let submissions = this.stopAndSendSubmissions.get(submissionEdit);
+      const existing = submissions?.get(actionKey);
+      if (existing) return existing;
+      if (!submissions) {
+        submissions = new Map<string, Promise<boolean>>();
+        this.stopAndSendSubmissions.set(submissionEdit, submissions);
+      }
+      const dispatch = this.stopAndSendRunning(chat, prompt, images, submission);
+      let trackedDispatch: Promise<boolean>;
+      trackedDispatch = dispatch.then((owned) => {
+        if (!owned) {
+          const current = this.stopAndSendSubmissions.get(submissionEdit);
+          if (current?.get(actionKey) === trackedDispatch) {
+            current.delete(actionKey);
+            if (current.size === 0) this.stopAndSendSubmissions.delete(submissionEdit);
+          }
+        }
+        return owned;
+      });
+      submissions.set(actionKey, trackedDispatch);
+      return trackedDispatch;
     }
     if (has('appChatSteer') && chat.sessionId && chat.chatId && liveSteeringSupported(chat.deliveryCapabilities)) {
       const steerSessionId = chat.sessionId;
@@ -5071,10 +5115,24 @@ export class Store {
   }
   async decidePermission(tabId: string, msgId: string, permId: string, optionId: string) {
     const msg = this.chat(tabId)?.messages.find((candidate) => candidate.id === msgId); if (!msg) return;
-    if (msg.permission) msg.permission.resolved = optionId;
+    const permission = msg.permission;
+    if (!permission || permission.id !== permId) return;
+    permission.resolved = optionId;
     this.bump('msg:' + msgId);
-    await call('chatPermissionDecide', permId, optionId);
-    if (msg.permission?.id === permId) { msg.permission = undefined; this.bump('msg:' + msgId); }
+    try {
+      const reply = await callThrow('chatPermissionDecide', permId, optionId) as { ok?: boolean } | undefined;
+      if (reply?.ok !== true) throw new Error('permission decision was not accepted');
+      if (msg.permission?.id === permId) { msg.permission = undefined; this.bump('msg:' + msgId); }
+    } catch (error) {
+      // A failed invoke may have crossed the daemon boundary. Re-enabling the
+      // exact card lets the same encoded answer be retried with the same
+      // operation identity; the actor deduplicates it and never reopens a card.
+      if (msg.permission?.id === permId && msg.permission.resolved === optionId) {
+        msg.permission.resolved = undefined;
+        this.bump('msg:' + msgId);
+        this.addToast('No se envió la respuesta', error instanceof Error ? error.message : 'La conexión no confirmó la respuesta. Podés volver a enviarla.');
+      }
+    }
   }
 
   // ---- event handlers --------------------------------------------------

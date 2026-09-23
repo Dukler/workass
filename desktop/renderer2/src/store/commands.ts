@@ -4,10 +4,10 @@
 // catalog, every send refused with lan:not-controller — with nothing in the UI
 // able to recover it. That state cost the user a terminal on 2026-07-26.
 //
-// So "Recargar" is a recovery hatch, and the rule that shapes it is: it must not
-// depend on the machinery that might be the broken thing. No store round-trip,
-// no daemon reply it waits on, no controller privilege it must already hold.
-// The only step it truly relies on is location.reload(), which cannot fail.
+// The recovery command avoids the renderer store. In a shell it asks main for
+// a local daemon restart and waits for its verified receipt; in a plain browser
+// it clears local controller recovery state and reloads without claiming a
+// daemon restart.
 
 /** Marker the shell's controller-migration script writes once it has taken the
  *  lease for a device. Its presence is what stops that device stealing control
@@ -19,6 +19,9 @@ export const CONTROLLER_MIGRATION_KEY = 'workass.shell.controllerMigration.v1';
 /** A wedged socket must not hold the reload hostage: take-control is attempted,
  *  never awaited past this. */
 export const TAKE_CONTROL_TIMEOUT_MS = 1500;
+export const RESTART_TRANSACTION_TIMEOUT_MS = 60000;
+export const RESTART_FAILURE_MESSAGE = 'No se pudo confirmar el reinicio del daemon local. La ventana sigue abierta; podés reintentarlo.';
+export const RESTART_TIMEOUT_MESSAGE = 'El daemon local no confirmó el reinicio a tiempo. La ventana sigue abierta; podés reintentarlo.';
 
 export interface ReconnectDeps {
   /** localStorage, or a stand-in. Absent/throwing storage is survivable. */
@@ -30,6 +33,7 @@ export interface ReconnectDeps {
 	 * absent in a plain browser client, where reconnect still degrades safely. */
 	 restartDaemon?: () => Promise<unknown>;
   reload?: () => void;
+  restartTimeoutMs?: number;
   timeoutMs?: number;
 }
 
@@ -64,18 +68,27 @@ function defaultRestartDaemon(): (() => Promise<unknown>) | undefined {
 	return typeof fn === 'function' ? () => fn() : undefined;
 }
 
+export function localDaemonRestartAvailable(): boolean {
+  return defaultRestartDaemon() !== undefined;
+}
+
+export function reconnectCommandTitle(restartAvailable: boolean): string {
+  return restartAvailable ? 'Reiniciar daemon y reconectar' : 'Reconectar Workass';
+}
+
 /**
  * Force this client back into a known-good relationship with its daemon.
  *
- * Three steps, each best-effort except the last:
+ * Recovery sequence:
  *  1. clear the controller marker, so the next load's migration script is
  *     allowed to re-take the lease (the actual fix for "running but not the
  *     controller" — a plain browser reload does NOT do this);
  *  2. ask for the lease on the CURRENT socket, bounded, in case the page never
  *     gets to reload for some reason we haven't met yet;
- *  3. reload. The wire bridge is a script inside the page, so this tears the
- *     socket down and dials a fresh one with a new generation, then re-hydrates
- *     the whole session from the daemon.
+ *  3. when the local shell bridge exists, await a confirmed daemon restart;
+ *     an error, negative receipt, or timeout leaves the renderer in place;
+ *  4. reload only after restart confirmation, or immediately when no shell
+ *     restart bridge exists. The wire bridge then dials and rehydrates.
  */
 export async function forceReconnect(deps: ReconnectDeps = {}): Promise<ReconnectReceipt> {
   const receipt: ReconnectReceipt = {
@@ -100,11 +113,21 @@ export async function forceReconnect(deps: ReconnectDeps = {}): Promise<Reconnec
 	const restartDaemon = deps.restartDaemon ?? defaultRestartDaemon();
 	if (restartDaemon) {
 		receipt.daemonRestartAttempted = true;
-		const ms = deps.timeoutMs ?? TAKE_CONTROL_TIMEOUT_MS;
-		receipt.daemonRestartSettled = await Promise.race([
-			Promise.resolve().then(restartDaemon).then(() => true, () => true),
-			new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms)),
-		]);
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const outcome = await Promise.race([
+			Promise.resolve().then(restartDaemon).then(
+				(result) => ({ result }),
+				() => ({ failed: true as const }),
+			),
+			new Promise<{ timedOut: true }>((resolve) => {
+				timeout = setTimeout(() => resolve({ timedOut: true }), deps.restartTimeoutMs ?? RESTART_TRANSACTION_TIMEOUT_MS);
+			}),
+		]).finally(() => { if (timeout) clearTimeout(timeout); });
+		if ('timedOut' in outcome || 'failed' in outcome || !outcome.result ||
+			typeof outcome.result !== 'object' || (outcome.result as { ok?: unknown }).ok !== true) {
+			throw new Error('timedOut' in outcome ? RESTART_TIMEOUT_MESSAGE : RESTART_FAILURE_MESSAGE);
+		}
+		receipt.daemonRestartSettled = true;
 	}
 
   const reload = deps.reload ?? (typeof location === 'undefined' ? undefined : () => location.reload());

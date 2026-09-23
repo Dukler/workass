@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('workassBrowser', {
   hide: (chatId) => ipcRenderer.invoke('workass-browser:hide', chatId),
   close: (chatId) => ipcRenderer.invoke('workass-browser:close', chatId),
   command: (chatId, command, value) => ipcRenderer.invoke('workass-browser:command', { chatId, command, value }),
+  setViewport: (chatId, width, height) => ipcRenderer.invoke('workass-browser:set-viewport', { chatId, width, height }),
+  resetViewport: (chatId) => ipcRenderer.invoke('workass-browser:reset-viewport', { chatId }),
   onOpenRequest: (callback) => {
     const listener = (_event, chatId) => callback(chatId || undefined);
     ipcRenderer.on('workass-browser:open-request', listener);

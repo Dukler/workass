@@ -6,9 +6,17 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { BrowserControlServer, MAX_MUTATION_RECEIPTS } = require('./browser-control-server');
+const { BrowserControlServer, MAX_MUTATION_RECEIPTS, MUTATING_METHODS } = require('./browser-control-server');
 
 const digest = (value) => crypto.createHash('sha256').update(String(value)).digest('hex');
+
+test('viewport set and reset remain durable controller mutations', () => {
+  assert.equal(MUTATING_METHODS.has('browser.setViewport'), true);
+  assert.equal(MUTATING_METHODS.has('browser.resetViewport'), true);
+  assert.equal(MUTATING_METHODS.has('browser.wait'), false);
+  assert.equal(MUTATING_METHODS.has('browser.diagnostics'), false);
+  assert.equal(MUTATING_METHODS.has('browser.screenshot'), false);
+});
 
 test('authenticated provider-neutral control file routes RPC without leaking the token', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-browser-control-'));

@@ -17,8 +17,8 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	tools := agentMCPTools()
 	// The full list is paid on every authenticated tools/list request. Pin the
 	// count so new recurring context cost remains an explicit decision.
-	if len(tools) != 28 {
-		t.Fatalf("tool count = %d, want 28", len(tools))
+	if len(tools) != 29 {
+		t.Fatalf("tool count = %d, want 29", len(tools))
 	}
 	byName := make(map[string]map[string]any, len(tools))
 	for _, tool := range tools {
@@ -40,6 +40,17 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	}
 	if wait := byName["workass_wait_subagent"]; wait == nil || !strings.Contains(toString(wait["description"]), "forcibly ends the wait") {
 		t.Fatalf("wait tool does not advertise permission attention: %#v", wait)
+	}
+	question := byName["workass_ask_user_question"]
+	if question == nil || !strings.Contains(toString(question["description"]), "never opens a second card") {
+		t.Fatalf("provider-neutral question tool is missing its replay contract: %#v", question)
+	}
+	questionSchema := mapFromAnyMain(question["inputSchema"])
+	questionRequired := questionSchema["required"].([]string)
+	questionProperties := mapFromAnyMain(questionSchema["properties"])
+	if len(questionRequired) != 4 || questionRequired[0] != "question_id" || questionRequired[1] != "question" || questionRequired[2] != "options" || questionRequired[3] != "operation_id" ||
+		questionProperties["multi_select"] == nil || questionProperties["allow_free_text"] == nil || questionProperties["timeout_ms"] == nil {
+		t.Fatalf("question schema = %#v", questionSchema)
 	}
 	if host := byName["workass_host_artifact"]; host == nil || !strings.Contains(toString(host["description"]), "stable URL") {
 		t.Fatalf("artifact hosting tool = %#v", host)

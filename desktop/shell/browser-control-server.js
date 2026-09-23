@@ -14,7 +14,7 @@ const RECEIPT_VERSION = 1;
 const MUTATING_METHODS = new Set([
   'browser.open', 'browser.navigate', 'browser.back', 'browser.forward',
   'browser.reload', 'browser.click', 'browser.type',
-  'browser.scroll', 'browser.key', 'browser.batch',
+  'browser.scroll', 'browser.key', 'browser.batch', 'browser.setViewport', 'browser.resetViewport',
 ]);
 
 function mutationReceiptKey(operationId) {
@@ -416,4 +416,4 @@ class BrowserControlServer {
   }
 }
 
-module.exports = { BrowserControlServer, MAX_MUTATION_RECEIPTS, mutationReceiptKey };
+module.exports = { BrowserControlServer, MAX_MUTATION_RECEIPTS, MUTATING_METHODS, mutationReceiptKey };

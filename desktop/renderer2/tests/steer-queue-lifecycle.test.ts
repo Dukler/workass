@@ -155,6 +155,133 @@ test('one stop-and-send shortcut durably queues attachments before cancelling it
   assert.equal(hydrated.messages.filter(m => m.role === 'user' && m.content === 'new direction').length, 0);
 });
 
+test('one Devin steering shortcut owns a fresh message with an empty FIFO before stopping the exact turn', async () => {
+  for (const modifier of ['ctrlKey', 'metaKey']) {
+    const calls: string[] = [];
+    let request: any;
+    const { store, owner } = subject({
+      appChatSteer: async () => { assert.fail('Devin stop-and-send must not claim native live steering'); },
+      chatQueueReplace: async (value: any) => {
+        calls.push('queue'); request = value;
+        return { ok: true, operationId: value.operationId, agentQueueRevision: 1, actorRevision: 2 };
+      },
+      cancelJob: async (jobId: string) => { calls.push(`cancel:${jobId}`); return { cancelled: true }; },
+    }, 'devin', { ...queuedDelivery, stopAndSend: true });
+    running(owner);
+    assert.equal(owner.queue, undefined);
+    store.setDraft(owner.id, 'send this direction once');
+    const action = composerKeyAction(true, { key: 'Enter', shiftKey: false, ctrlKey: false, metaKey: false, [modifier]: true }, true);
+    assert.equal(action, 'steer');
+    assert.equal(await store.steerRunning(owner.id, owner.draft), true);
+    assert.deepEqual(calls, ['queue', 'cancel:job-1']);
+    assert.equal(request.queue.length, 1);
+    assert.equal(request.queue[0].text, 'send this direction once');
+    assert.ok(request.queue[0].id);
+    assert.ok(request.operationId);
+    assert.equal(owner.draft, '');
+  }
+});
+
+test('a repeated Devin steering shortcut reuses the same queue identity and exact cancellation', async () => {
+  const calls: string[] = [];
+  let request: any;
+  let acceptQueue!: (value: unknown) => void;
+  let acceptCancel!: (value: unknown) => void;
+  const { store, owner } = subject({
+    chatQueueReplace: (value: any) => {
+      calls.push('queue'); request = value;
+      return new Promise((resolve) => { acceptQueue = resolve; });
+    },
+    cancelJob: (jobId: string) => {
+      calls.push(`cancel:${jobId}`);
+      return new Promise((resolve) => { acceptCancel = resolve; });
+    },
+  }, 'devin', { ...queuedDelivery, stopAndSend: true });
+  running(owner);
+  store.setDraft(owner.id, 'one immutable action');
+  const submission = store.captureDraftSubmission(owner.id, owner.draft);
+  const first = store.steerRunning(owner.id, owner.draft, undefined, submission);
+  const repeated = store.steerRunning(owner.id, 'one immutable action', undefined, submission);
+  assert.deepEqual(calls, ['queue']);
+  assert.equal(owner.queue?.length, 1);
+  assert.equal(request.queue.length, 1);
+  const queueId = request.queue[0].id;
+  const operationId = request.operationId;
+  acceptQueue({ ok: true, operationId, agentQueueRevision: 1, actorRevision: 2 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ['queue', 'cancel:job-1']);
+  const repeatedAfterReceipt = store.steerRunning(owner.id, 'one immutable action', undefined, submission);
+  assert.equal(owner.queue?.length, 1);
+  assert.equal(owner.queue?.[0].id, queueId);
+  acceptCancel({ cancelled: true });
+  assert.deepEqual(await Promise.all([first, repeated, repeatedAfterReceipt]), [true, true, true]);
+  assert.deepEqual(calls, ['queue', 'cancel:job-1']);
+});
+
+test('a pre-ownership Devin rejection releases the same captured edit for retry', async () => {
+  const calls: string[] = [];
+  const { store, owner } = subject({}, 'devin', { ...queuedDelivery, stopAndSend: true });
+  running(owner);
+  store.setDraft(owner.id, 'retry this exact direction');
+  const submission = store.captureDraftSubmission(owner.id, owner.draft);
+
+  assert.equal(typeof submission.edit, 'object');
+  assert.equal(await store.steerRunning(owner.id, owner.draft, undefined, submission), false);
+  assert.equal(owner.queue, undefined);
+  assert.equal(owner.draft, 'retry this exact direction');
+  assert.deepEqual(calls, []);
+
+  const api = (globalThis as any).window.api;
+  api.chatQueueReplace = async (request: any) => {
+    calls.push('queue');
+    return { ok: true, operationId: request.operationId, agentQueueRevision: 1, actorRevision: 2 };
+  };
+  api.cancelJob = async (jobId: string) => { calls.push(`cancel:${jobId}`); return { cancelled: true }; };
+
+  assert.equal(await store.steerRunning(owner.id, owner.draft, undefined, submission), true);
+  assert.deepEqual(calls, ['queue', 'cancel:job-1']);
+  assert.equal(owner.queue?.length, 1);
+  assert.equal(owner.queue?.[0].text, 'retry this exact direction');
+  assert.equal(owner.draft, '');
+
+  // Once queue ownership transfers, a retry of the same captured edit reuses
+  // that action even after its durable queue and cancellation receipts settle.
+  assert.equal(await store.steerRunning(owner.id, 'retry this exact direction', undefined, submission), true);
+  assert.deepEqual(calls, ['queue', 'cancel:job-1']);
+  assert.equal(owner.queue?.length, 1);
+});
+
+test('an absent runtime edit identity uses one stable captured-submission fallback', async () => {
+  const calls: string[] = [];
+  let request: any;
+  let acceptQueue!: (value: unknown) => void;
+  const { store, owner } = subject({
+    chatQueueReplace: (value: any) => {
+      calls.push('queue'); request = value;
+      return new Promise((resolve) => { acceptQueue = resolve; });
+    },
+    cancelJob: async (jobId: string) => { calls.push(`cancel:${jobId}`); return { cancelled: true }; },
+  }, 'devin', { ...queuedDelivery, stopAndSend: true });
+  running(owner);
+  store.setDraft(owner.id, 'stable fallback identity');
+  const submission = store.captureDraftSubmission(owner.id, owner.draft) as any;
+  submission.edit = undefined;
+
+  const first = store.steerRunning(owner.id, owner.draft, undefined, submission);
+  assert.equal(owner.queue?.length, 1);
+  assert.equal(owner.draft, '');
+  const repeatedInFlight = store.steerRunning(owner.id, 'stable fallback identity', undefined, submission);
+  assert.equal(owner.queue?.length, 1);
+  assert.deepEqual(calls, ['queue']);
+
+  acceptQueue({ ok: true, operationId: request.operationId, agentQueueRevision: 1, actorRevision: 2 });
+  assert.deepEqual(await Promise.all([first, repeatedInFlight]), [true, true]);
+  assert.deepEqual(calls, ['queue', 'cancel:job-1']);
+  assert.equal(await store.steerRunning(owner.id, 'stable fallback identity', undefined, submission), true);
+  assert.deepEqual(calls, ['queue', 'cancel:job-1']);
+  assert.equal(owner.queue?.length, 1);
+});
+
 test('failed or mismatched queue admission never stops and retains the same pending operation', async () => {
   for (const failure of ['missing', 'rejected', 'wrong-operation', 'transport']) {
     let cancels = 0;
@@ -321,11 +448,13 @@ test('a lane without live-steer capability rejects visibly without invoking stee
     appChatSteer: async () => { steerCalls += 1; return { ok: true }; },
   }, 'arbitrary-queued-provider', queuedDelivery);
   running(owner);
+  store.setDraft(owner.id, 'keep on unsupported provider');
 
-  assert.equal(await store.steerRunning(owner.id, 'queue by capability'), false);
+  assert.equal(await store.steerRunning(owner.id, owner.draft), false);
   assert.equal(steerCalls, 0);
   assert.equal(owner.queue, undefined);
-  assert.equal(owner.messages.some((message) => message.content === 'queue by capability'), false);
+  assert.equal(owner.draft, 'keep on unsupported provider');
+  assert.equal(owner.messages.some((message) => message.content === 'keep on unsupported provider'), false);
 	assert.equal(store.state.toasts.at(-1)?.title, 'No se pudo dirigir');
 });
 
@@ -338,12 +467,14 @@ test('an explicit steer whose active turn just ended restores the composer witho
   });
   running(owner);
   owner.messages[1].status = 'done';
+  store.setDraft(owner.id, 'retain after turn end');
 
-  assert.equal(await store.steerRunning(owner.id, 'do not turn this into a new turn'), false);
+  assert.equal(await store.steerRunning(owner.id, owner.draft), false);
   assert.equal(steerCalls, 0);
   assert.equal(startCalls, 0);
   assert.equal(owner.queue, undefined);
-  assert.equal(owner.messages.some((message) => message.content === 'do not turn this into a new turn'), false);
+  assert.equal(owner.draft, 'retain after turn end');
+  assert.equal(owner.messages.some((message) => message.content === 'retain after turn end'), false);
   assert.equal(store.state.toasts.at(-1)?.title, 'No se pudo dirigir');
 });
 

@@ -206,6 +206,25 @@ func agentMCPTools() []map[string]any {
 			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.78")),
 			"decision":    enum(agenttext.Get("schema.agentMCPTools.guidance.79"), "allow", "deny"),
 		}, "subagent_id", "decision"), false, true, false, false),
+		tool("workass_ask_user_question", agenttext.Get("tools.workass_ask_user_question"), mutationObject(map[string]any{
+			"question_id": map[string]any{"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_-]+$", "description": agenttext.Get("schema.agentMCPTools.question.id")},
+			"question":    map[string]any{"type": "string", "minLength": 1, "maxLength": 400, "description": agenttext.Get("schema.agentMCPTools.question.prompt")},
+			"header":      map[string]any{"type": "string", "maxLength": 40, "description": agenttext.Get("schema.agentMCPTools.question.header")},
+			"options": map[string]any{
+				"type": "array", "minItems": 1, "maxItems": 4, "description": agenttext.Get("schema.agentMCPTools.question.options"),
+				"items": map[string]any{
+					"type": "object", "additionalProperties": false, "required": []string{"id", "label"},
+					"properties": map[string]any{
+						"id":          map[string]any{"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_-]+$"},
+						"label":       map[string]any{"type": "string", "minLength": 1, "maxLength": 120},
+						"description": map[string]any{"type": "string", "maxLength": 240},
+					},
+				},
+			},
+			"multi_select":    map[string]any{"type": "boolean", "description": agenttext.Get("schema.agentMCPTools.question.multi_select")},
+			"allow_free_text": map[string]any{"type": "boolean", "description": agenttext.Get("schema.agentMCPTools.question.allow_free_text")},
+			"timeout_ms":      map[string]any{"type": "integer", "minimum": 1000, "maximum": 3600000, "description": agenttext.Get("schema.agentMCPTools.question.timeout")},
+		}, "question_id", "question", "options"), false, false, true, false),
 	}
 }
 
@@ -294,6 +313,8 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		delete(params, "subagent_id")
 	case "workass_decide_subagent_permission":
 		method = "agent.decide_permission"
+	case "workass_ask_user_question":
+		method = "agent.question"
 	default:
 		return agentMCPErrorResult("unknown agent tool: " + call.Name), nil
 	}

@@ -195,6 +195,8 @@ type permissionRequest struct {
 	Options           []any
 	FallbackOptionID  string
 	PermissionTimeout time.Duration
+	WorkassQuestion   *providercontract.PermissionQuestion
+	WorkassTimeout    time.Duration
 	// A spawned subagent's request. Its card already attaches to the PARENT
 	// chat's turn (JobID is the visible job), which is right for a permission the
 	// user must grant — and wrong for a question, which belongs to the agent that
@@ -208,14 +210,103 @@ type permissionRequest struct {
 const subagentQuestionOptionID = "question-subagent"
 
 type permissionResolver struct {
-	id        string
-	jobID     string
-	sessionID string
-	payload   map[string]any
-	ch        chan string
-	once      sync.Once
-	timerMu   sync.Mutex
-	timer     *time.Timer
+	id              string
+	jobID           string
+	sessionID       string
+	payload         map[string]any
+	question        *providercontract.PermissionQuestion
+	workassQuestion bool
+	answerMu        sync.Mutex
+	answer          *providercontract.QuestionAnswer
+	ch              chan string
+	done            chan struct{}
+	once            sync.Once
+	timerMu         sync.Mutex
+	timer           *time.Timer
+}
+
+var errNoRunningWorkassQuestionCaller = errors.New("no running foreground Workass turn owns this question")
+
+// ValidateWorkassQuestionCaller fences provider-neutral questions to the exact
+// live foreground session that supplied the CLI capability. It intentionally
+// does not inspect provider capabilities: every attached ACP can use the tool.
+func (m *Manager) ValidateWorkassQuestionCaller(ownerKey, chatID, tabID string) error {
+	if m == nil || strings.TrimSpace(ownerKey) == "" || strings.TrimSpace(chatID) == "" || strings.TrimSpace(tabID) == "" {
+		return errNoRunningWorkassQuestionCaller
+	}
+	ownerKey, chatID, tabID = strings.TrimSpace(ownerKey), strings.TrimSpace(chatID), strings.TrimSpace(tabID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, err := m.workassQuestionJobLocked(ownerKey, chatID, tabID)
+	return err
+}
+
+// workassQuestionJobLocked checks the exact foreground owner while m.mu is
+// held. AskAgentQuestion keeps that same lock through resolver registration,
+// so job end/reset either sees and settles the request or wins first and makes
+// admission fail; no unowned gap can leave a waiter behind.
+func (m *Manager) workassQuestionJobLocked(ownerKey, chatID, tabID string) (*Job, error) {
+	if m == nil || m.resetting || ownerKey == "" || chatID == "" || tabID == "" {
+		return nil, errNoRunningWorkassQuestionCaller
+	}
+	binding, bound := m.agentOwners[ownerKey]
+	if !bound || binding.ChatID != chatID || binding.TabID != tabID {
+		return nil, errNoRunningWorkassQuestionCaller
+	}
+	var match *Job
+	matches := 0
+	for _, job := range m.jobs {
+		if job == nil || m.jobs[job.ID] != job || job.Status != "running" || job.admitting || job.cancelled || job.SubagentID != "" ||
+			strings.TrimSpace(job.ChatID) != chatID || strings.TrimSpace(job.TabID) != tabID ||
+			strings.TrimSpace(m.agentOwnerBySession[job.SessionID]) != ownerKey {
+			continue
+		}
+		match = job
+		matches++
+	}
+	if matches != 1 || match == nil {
+		return nil, errNoRunningWorkassQuestionCaller
+	}
+	return match, nil
+}
+
+// AskAgentQuestion opens the same typed permission card used by native SDK
+// questions and waits for its structured user response. The tool is provider
+// neutral; the active session and exact owner capability provide its routing.
+func (m *Manager) AskAgentQuestion(ctx context.Context, ownerKey, chatID, tabID string, question providercontract.PermissionQuestion, timeout time.Duration) (*providercontract.QuestionAnswer, error) {
+	if m == nil {
+		return nil, errNoRunningWorkassQuestionCaller
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := providercontract.ValidateWorkassQuestion(question); err != nil {
+		return nil, err
+	}
+	ownerKey, chatID, tabID = strings.TrimSpace(ownerKey), strings.TrimSpace(chatID), strings.TrimSpace(tabID)
+	m.mu.Lock()
+	job, err := m.workassQuestionJobLocked(ownerKey, chatID, tabID)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+	req := permissionRequest{
+		JobID: job.ID, SessionID: job.SessionID, WorkassQuestion: &question, WorkassTimeout: timeout,
+		ToolCall: map[string]any{"title": "Assistant question", "kind": "workass_question"},
+	}
+	for _, option := range question.Options {
+		req.Options = append(req.Options, map[string]any{"optionId": option.ID, "name": option.Label, "kind": "answer"})
+	}
+	rec := m.registerWorkassQuestionLocked(req, job)
+	m.mu.Unlock()
+	m.awaitPermission(req, rec, ctx)
+	answer := rec.questionAnswer()
+	if answer == nil {
+		return nil, errors.New("Workass question ended without a structured result")
+	}
+	copyAnswer := *answer
+	copyAnswer.SelectedOptionIDs = append([]string(nil), answer.SelectedOptionIDs...)
+	return &copyAnswer, nil
 }
 
 func NewManager(opts Options) *Manager {
@@ -907,6 +998,7 @@ func (m *Manager) Reset() bool {
 	m.stopPlanUsageRefreshes()
 	m.cancelAllSubagents(5 * time.Second)
 	m.killAllProviderUpdates()
+	m.cancelWorkassQuestionsForReset()
 	m.mu.Lock()
 	bridges := make([]*Bridge, 0, len(m.bridges))
 	for _, bridge := range m.bridges {
@@ -1337,6 +1429,10 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	defer func() {
 		m.adoptSubagentsForParent(firstNonEmpty(job.VisibleJobID, job.ID))
 		activeBridge.flushJobBuffers(job)
+		// A Workass CLI question is owned by this exact foreground turn. Settle it
+		// before removing the job so its terminal event can still cross the actor
+		// ingress and clear the owning chat card.
+		m.cancelWorkassQuestionsForJob(job.ID)
 		// ACP agents naturally author either structured image blocks or ordinary
 		// Markdown image links. Normalize the latter once at the terminal boundary
 		// so every provider gets durable Workass media without a provider-specific
@@ -2005,9 +2101,20 @@ func (m *Manager) PermissionDecide(id, optionID string) bool {
 	m.mu.Lock()
 	rec := m.permissions[id]
 	m.mu.Unlock()
-	if rec != nil {
-		rec.finish(optionID)
+	if rec == nil {
+		return false
 	}
+	if rec.workassQuestion {
+		if rec.question == nil {
+			return false
+		}
+		answer, err := providercontract.DecodeWorkassQuestionAnswer(optionID, *rec.question)
+		if err != nil {
+			return false
+		}
+		return rec.finishWorkassQuestionAnswer(answer)
+	}
+	rec.finish(optionID)
 	return true
 }
 
@@ -2043,6 +2150,27 @@ func (m *Manager) PendingPermissions() []any {
 	return out
 }
 
+// registerWorkassQuestionLocked is called while m.mu is held by the same
+// critical section that proved the exact foreground job is live.
+func (m *Manager) registerWorkassQuestionLocked(req permissionRequest, job *Job) *permissionResolver {
+	m.permSeq++
+	id := fmt.Sprintf("perm-%d-%d", time.Now().UnixMilli(), m.permSeq)
+	question := *req.WorkassQuestion
+	question.Options = append([]providercontract.PermissionQuestionOption(nil), req.WorkassQuestion.Options...)
+	payload := map[string]any{
+		"id": id, "jobId": nullableString(req.JobID), "sessionId": nullableString(req.SessionID),
+		"tabId": nullableString(job.TabID), "chatId": nullableString(job.ChatID),
+		"title": "Assistant question", "kind": "workass_question",
+		"options": permissionOptions(req.Options), "question": workassQuestionPayload(question),
+	}
+	rec := &permissionResolver{
+		id: id, jobID: req.JobID, sessionID: req.SessionID, payload: payload,
+		question: &question, workassQuestion: true, ch: make(chan string, 1), done: make(chan struct{}),
+	}
+	m.permissions[id] = rec
+	return rec
+}
+
 func (m *Manager) requestPermission(req permissionRequest) string {
 	m.mu.Lock()
 	m.permSeq++
@@ -2072,6 +2200,13 @@ func (m *Manager) requestPermission(req permissionRequest) string {
 	if question != nil {
 		payload["question"] = question
 	}
+	var workassQuestion *providercontract.PermissionQuestion
+	if req.WorkassQuestion != nil {
+		copyQuestion := *req.WorkassQuestion
+		copyQuestion.Options = append([]providercontract.PermissionQuestionOption(nil), req.WorkassQuestion.Options...)
+		workassQuestion = &copyQuestion
+		payload["question"] = workassQuestionPayload(copyQuestion)
+	}
 	// A subagent's question never reaches the user's screen: it goes back to the
 	// agent that spawned it, which holds the chat and can answer or ask on its
 	// behalf. Parking it here would hang a background lane on a human, on a card
@@ -2092,10 +2227,25 @@ func (m *Manager) requestPermission(req permissionRequest) string {
 			return optionID
 		}
 	}
-	rec := &permissionResolver{id: id, jobID: req.JobID, sessionID: req.SessionID, payload: payload, ch: make(chan string, 1)}
+	rec := &permissionResolver{
+		id: id, jobID: req.JobID, sessionID: req.SessionID, payload: payload,
+		question: workassQuestion, workassQuestion: workassQuestion != nil, ch: make(chan string, 1), done: make(chan struct{}),
+	}
 	m.permissions[id] = rec
 	m.mu.Unlock()
+	return m.awaitPermission(req, rec, context.Background())
+}
 
+func (m *Manager) awaitPermission(req permissionRequest, rec *permissionResolver, ctx context.Context) string {
+	if rec == nil {
+		return ""
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	id := rec.id
+	payload := rec.payload
+	question := permissionQuestion(req.ToolCall["rawInput"])
 	// A card WAITS — Workass arms no clock of its own. Every deadline we invented
 	// here expired something a person was still reading: applied to a question it
 	// answered "no answer" for a user who had merely stepped away, and applied to
@@ -2109,7 +2259,14 @@ func (m *Manager) requestPermission(req permissionRequest) string {
 	if timeout <= 0 {
 		timeout = m.opts.PermissionTimeout
 	}
-	if question == nil && timeout > 0 {
+	if rec.workassQuestion && req.WorkassTimeout > 0 {
+		timer := time.AfterFunc(req.WorkassTimeout, func() {
+			rec.finishWorkassQuestion("timed_out", "timeout")
+		})
+		rec.timerMu.Lock()
+		rec.timer = timer
+		rec.timerMu.Unlock()
+	} else if question == nil && !rec.workassQuestion && timeout > 0 {
 		timer := time.AfterFunc(timeout, func() {
 			rec.finish(req.FallbackOptionID)
 		})
@@ -2119,16 +2276,43 @@ func (m *Manager) requestPermission(req permissionRequest) string {
 	}
 
 	m.emit("chat:permission-request", payload)
-	optionID := <-rec.ch
+	var optionID string
+	if rec.workassQuestion {
+		select {
+		case optionID = <-rec.ch:
+		case <-ctx.Done():
+			// An explicit caller cancellation settles the accepted question and
+			// releases the waiter. If a user answer won the race, Once preserves it.
+			rec.finishWorkassQuestion("cancelled", "caller_cancelled")
+			optionID = <-rec.ch
+		}
+	} else {
+		optionID = <-rec.ch
+	}
 	m.mu.Lock()
 	if m.permissions[id] == rec {
 		delete(m.permissions, id)
 	}
 	m.mu.Unlock()
-	m.emit("chat:permission-resolved", map[string]any{
+	resolvedPayload := map[string]any{
 		"id": id, "jobId": nullableString(req.JobID), "sessionId": nullableString(req.SessionID),
 		"optionId": nullableString(optionID), "resolvedAt": time.Now().UTC().Format(time.RFC3339Nano),
-	})
+	}
+	if rec.workassQuestion {
+		resolvedPayload["optionId"] = providercontract.WorkassQuestionResolvedOptionID
+		if rec.question != nil {
+			// Re-emitting the typed question lets the actor recover terminal status
+			// if this event commits before the external CLI answer receipt does.
+			resolvedPayload["question"] = workassQuestionPayload(*rec.question)
+		}
+		if answer := rec.questionAnswer(); answer != nil {
+			// User text stays in the durable actor answer and the owning tool result;
+			// the frozen resolved event carries only terminal status metadata.
+			resolvedPayload["questionAnswer"] = map[string]any{"status": answer.Status, "reason": answer.Reason}
+		}
+	}
+	m.emit("chat:permission-resolved", resolvedPayload)
+	close(rec.done)
 	return optionID
 }
 
@@ -2151,6 +2335,21 @@ func copyPermissionPayload(in map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
+}
+
+func workassQuestionPayload(question providercontract.PermissionQuestion) map[string]any {
+	options := make([]any, 0, len(question.Options))
+	for _, option := range question.Options {
+		options = append(options, map[string]any{
+			"id": option.ID, "label": clipPermissionText(option.Label, 120),
+			"description": clipPermissionText(option.Description, 240),
+		})
+	}
+	return map[string]any{
+		"workassTool": true, "questionId": question.ID, "operationId": question.OperationID,
+		"question": clipPermissionText(question.Question, 400), "header": clipPermissionText(question.Header, 40),
+		"options": options, "multiSelect": question.MultiSelect, "allowFreeText": question.AllowFreeText,
+	}
 }
 
 // permissionQuestion extracts a model-authored question from a permission
@@ -2215,13 +2414,56 @@ func permissionOptions(options []any) []any {
 
 func (r *permissionResolver) finish(optionID string) {
 	r.once.Do(func() {
-		r.timerMu.Lock()
-		if r.timer != nil {
-			r.timer.Stop()
-		}
-		r.timerMu.Unlock()
+		r.stopTimer()
 		r.ch <- optionID
 	})
+}
+
+func (r *permissionResolver) stopTimer() {
+	r.timerMu.Lock()
+	if r.timer != nil {
+		r.timer.Stop()
+	}
+	r.timerMu.Unlock()
+}
+
+func (r *permissionResolver) finishWorkassQuestion(status, reason string) {
+	if r == nil || r.question == nil {
+		return
+	}
+	r.finishWorkassQuestionAnswer(&providercontract.QuestionAnswer{Status: status, Reason: reason})
+}
+
+func (r *permissionResolver) finishWorkassQuestionAnswer(answer *providercontract.QuestionAnswer) bool {
+	if r == nil || answer == nil {
+		return false
+	}
+	copyAnswer := *answer
+	copyAnswer.SelectedOptionIDs = append([]string(nil), answer.SelectedOptionIDs...)
+	won := false
+	r.once.Do(func() {
+		won = true
+		r.stopTimer()
+		r.answerMu.Lock()
+		r.answer = &copyAnswer
+		r.answerMu.Unlock()
+		r.ch <- providercontract.WorkassQuestionResolvedOptionID
+	})
+	return won
+}
+
+func (r *permissionResolver) questionAnswer() *providercontract.QuestionAnswer {
+	if r == nil {
+		return nil
+	}
+	r.answerMu.Lock()
+	defer r.answerMu.Unlock()
+	if r.answer == nil {
+		return nil
+	}
+	copyAnswer := *r.answer
+	copyAnswer.SelectedOptionIDs = append([]string(nil), r.answer.SelectedOptionIDs...)
+	return &copyAnswer
 }
 
 func (m *Manager) cancelPermissionsForSession(sessionID string) {
@@ -2238,7 +2480,54 @@ func (m *Manager) cancelPermissionsForSession(sessionID string) {
 	}
 	m.mu.Unlock()
 	for _, rec := range recs {
-		rec.finish("")
+		if rec.workassQuestion {
+			rec.finishWorkassQuestion("cancelled", "session_ended")
+		} else {
+			rec.finish("")
+		}
+	}
+}
+
+func (m *Manager) cancelWorkassQuestionsForJob(jobID string) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return
+	}
+	m.mu.Lock()
+	var recs []*permissionResolver
+	for id, rec := range m.permissions {
+		if rec != nil && rec.workassQuestion && rec.jobID == jobID {
+			delete(m.permissions, id)
+			recs = append(recs, rec)
+		}
+	}
+	m.mu.Unlock()
+	for _, rec := range recs {
+		rec.finishWorkassQuestion("cancelled", "provider_turn_ended")
+		if rec.done != nil {
+			<-rec.done
+		}
+	}
+}
+
+func (m *Manager) cancelWorkassQuestionsForReset() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	var recs []*permissionResolver
+	for id, rec := range m.permissions {
+		if rec != nil && rec.workassQuestion {
+			delete(m.permissions, id)
+			recs = append(recs, rec)
+		}
+	}
+	m.mu.Unlock()
+	for _, rec := range recs {
+		rec.finishWorkassQuestion("cancelled", "daemon_reset")
+		if rec.done != nil {
+			<-rec.done
+		}
 	}
 }
 
@@ -2472,6 +2761,9 @@ func (m *Manager) getBridge(opts SessionOptions) *Bridge {
 	bridge := m.bridges[key]
 	if bridge == nil || bridge.Closed() || bridge.Hibernated() {
 		bridge = newBridge(key, providerOptions, m)
+		if runtime := m.providers[providerID]; runtime != nil {
+			bridge.catalogRevision = runtime.CatalogRevision
+		}
 		m.bridges[key] = bridge
 	}
 	return bridge
@@ -2491,6 +2783,9 @@ func (m *Manager) replaceBridge(opts SessionOptions) *Bridge {
 	}
 	key := m.normalizeBridgeKeyLocked(opts)
 	bridge := newBridge(key, providerOptions, m)
+	if runtime := m.providers[opts.ProviderID]; runtime != nil {
+		bridge.catalogRevision = runtime.CatalogRevision
+	}
 	m.bridges[key] = bridge
 	return bridge
 }
@@ -2745,7 +3040,9 @@ func (b *Bridge) attachSession(sessionID, cwd string, opts SessionOptions, res m
 	commandCatalogSupported := b.supportsProviderCommandCatalog()
 	planUsageSupported := b.supportsNativePlanUsage()
 	planUsageResetSupported := b.supportsPlanUsageReset()
-	b.manager.bridgeChanged(b, reason)
+	if !b.catalogProbe {
+		b.manager.bridgeChanged(b, reason)
+	}
 
 	b.mu.Lock()
 	currentModelID := b.currentModelSelectionLocked()
@@ -3692,7 +3989,7 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 	modesCopy := append([]Mode(nil), b.modes...)
 	b.mu.Unlock()
 	if changed {
-		b.manager.updateProviderCatalogFromBridge(b, modelsCopy, modesCopy)
+		b.manager.updateProviderCatalogFromBridge(b, modelsCopy, modesCopy, false)
 	}
 	if changed && broadcast {
 		b.manager.EmitCatalog(context.Background())
@@ -3729,15 +4026,11 @@ func (b *Bridge) refreshCatalogModelEffortsLocked() bool {
 }
 
 func (b *Bridge) applyAvailableModels(raw any) {
-	models := modelsFromAvailableModelsForProvider(raw, b.providerID)
-	if len(models) == 0 {
+	models, authoritative := parseAvailableModels(raw, b.providerID)
+	if !authoritative {
 		return
 	}
-	hasEffortVariants := catalogModelsContainEffortVariants(models)
 	models = normalizeProviderCatalogModels(b.providerID, models)
-	if len(models) == 0 {
-		return
-	}
 	changed := false
 	b.mu.Lock()
 	if b.axisEffortsByModel == nil {
@@ -3746,19 +4039,27 @@ func (b *Bridge) applyAvailableModels(raw any) {
 	if b.variantEffortsByModel == nil {
 		b.variantEffortsByModel = make(map[string][]string)
 	}
-	b.rememberVariantEffortsLocked(models)
-	if hasEffortVariants || len(b.models) == 0 {
-		b.models = models
-		changed = true
+	previous := cloneModels(b.models)
+	known := make(map[string]bool, len(b.axisEffortsByModel)+len(b.variantEffortsByModel))
+	for modelID := range b.axisEffortsByModel {
+		known[strings.TrimSpace(modelID)] = true
 	}
+	for modelID := range b.variantEffortsByModel {
+		known[strings.TrimSpace(modelID)] = true
+	}
+	b.rememberVariantEffortsLocked(models)
+	b.models, _ = providerAdapterForID(b.providerID).catalog.ReconcileAuthoritative(previous, models, known)
+	changed = !sameModelCatalog(previous, b.models)
 	if b.refreshCatalogModelEffortsLocked() {
 		changed = true
 	}
-	modelsCopy := append([]Model(nil), b.models...)
+	modelsCopy := cloneModels(b.models)
 	modesCopy := append([]Mode(nil), b.modes...)
 	b.mu.Unlock()
 	if changed {
-		b.manager.updateProviderCatalogFromBridge(b, modelsCopy, modesCopy)
+		if b.manager.updateProviderCatalogFromBridge(b, modelsCopy, modesCopy, true) {
+			b.manager.emitCatalogSnapshot()
+		}
 	}
 }
 

@@ -168,6 +168,18 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			return nil, err
 		}
 		return h.manager.AgentCatalog(r.Context(), ownerKey, chatID, tabID)
+	case "agent.question":
+		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
+			return nil, err
+		}
+		if h.chats == nil || h.chats.providerChats == nil {
+			return nil, errors.New("question tool requires the durable chat actor")
+		}
+		question, err := parseWorkassQuestion(params)
+		if err != nil {
+			return nil, err
+		}
+		return h.chats.providerChats.executeAgentQuestion(r.Context(), h.manager, ownerKey, tabID, chatID, question)
 	case "agent.spawn":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
 			return nil, err

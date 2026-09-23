@@ -670,14 +670,26 @@ func (m *Manager) observeProviderLanePermission(channel string, payload map[stri
 	var question *providercontract.PermissionQuestion
 	if rawQuestion := mapFromAny(payload["question"]); len(rawQuestion) > 0 {
 		parsed := providercontract.PermissionQuestion{
+			WorkassTool: boolFromAny(rawQuestion["workassTool"]),
+			ID:          asString(rawQuestion["questionId"]), OperationID: asString(rawQuestion["operationId"]),
 			Question: asString(rawQuestion["question"]), Header: asString(rawQuestion["header"]),
-			MultiSelect: boolFromAny(rawQuestion["multiSelect"]),
+			MultiSelect: boolFromAny(rawQuestion["multiSelect"]), AllowFreeText: boolFromAny(rawQuestion["allowFreeText"]),
 		}
 		for _, rawOption := range providerEventSlice(rawQuestion["options"]) {
 			option := mapFromAny(rawOption)
 			parsed.Options = append(parsed.Options, providercontract.PermissionQuestionOption{
-				Label: asString(option["label"]), Description: asString(option["description"]),
+				ID: asString(option["id"]), Label: asString(option["label"]), Description: asString(option["description"]),
 			})
+		}
+		if parsed.WorkassTool && channel == "chat:permission-resolved" {
+			answerSummary := mapFromAny(payload["questionAnswer"])
+			status := strings.TrimSpace(asString(answerSummary["status"]))
+			if status != "" {
+				if status != "answered" && status != "dismissed" && status != "cancelled" && status != "timed_out" {
+					return errors.New("resolved Workass question event has an invalid status")
+				}
+				parsed.Answer = &providercontract.QuestionAnswer{Status: status, Reason: asString(answerSummary["reason"])}
+			}
 		}
 		question = &parsed
 	}

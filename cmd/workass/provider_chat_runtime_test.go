@@ -1412,6 +1412,21 @@ func newSteerRegressionFixture(t *testing.T, publishers ...func(string, any)) (*
 	return runtime, manager, root, stateDir, info
 }
 
+func TestNegotiatedACPSteeringSurvivesProviderLaneSelection(t *testing.T) {
+	runtime, _, _, _, info := newSteerRegressionFixture(t)
+	if !info.DeliveryCapabilities.LiveSteer || info.DeliveryCapabilities.StopAndSend || !info.DeliveryCapabilities.StableInputIdentity {
+		t.Fatalf("mock ACP selection capabilities = %#v", info.DeliveryCapabilities)
+	}
+	state, ok := runtime.Snapshot("steer-regression-chat")
+	if !ok {
+		t.Fatal("provider chat actor missing after lane selection")
+	}
+	lane, ok := state.Lanes[state.DesiredLaneID]
+	if !ok || !lane.Delivery.LiveSteer || lane.Delivery.StopAndSend || !lane.Delivery.StableInputIdentity {
+		t.Fatalf("mock ACP actor capability snapshot = %#v", lane.Delivery)
+	}
+}
+
 func TestDevinStopAndSendUsesDurableQueueAndExactCancellation(t *testing.T) {
 	root, stateDir := repoRoot(t), t.TempDir()
 	traceFile := filepath.Join(stateDir, "prompts.jsonl")
@@ -1439,6 +1454,14 @@ func TestDevinStopAndSendUsesDurableQueueAndExactCancellation(t *testing.T) {
 	info, err := runtime.Select(context.Background(), acp.SessionOptions{TabID: tabID, ChatID: chatID, ProviderID: "devin", CWD: root})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if info.SessionID != "" || info.DeliveryCapabilities.LiveSteer || !info.DeliveryCapabilities.StopAndSend {
+		t.Fatalf("deferred Devin selection capabilities = %#v, session=%q", info.DeliveryCapabilities, info.SessionID)
+	}
+	state, _ := runtime.Snapshot(chatID)
+	selectedLane, ok := state.Lanes[state.DesiredLaneID]
+	if !ok || !selectedLane.Delivery.StopAndSend || selectedLane.Delivery.LiveSteer {
+		t.Fatalf("deferred Devin actor capabilities = %#v", selectedLane.Delivery)
 	}
 	if _, err := runtime.Start(context.Background(), map[string]any{
 		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "providerId": "devin", "sessionId": info.SessionID,
@@ -1469,7 +1492,7 @@ func TestDevinStopAndSendUsesDurableQueueAndExactCancellation(t *testing.T) {
 	if info.DeliveryCapabilities.LiveSteer || !info.DeliveryCapabilities.StopAndSend {
 		t.Fatalf("Devin fixture capabilities = %#v", info.DeliveryCapabilities)
 	}
-	state, _ := runtime.Snapshot(chatID)
+	state, _ = runtime.Snapshot(chatID)
 	const direction = "stop-and-send fixture direction"
 	entries := []any{map[string]any{"id": "direction", "text": direction}}
 	receipt, err := runtime.ReplaceStagedQueue(tabID, chatID, "queue-direction", state.Presentation.AgentQueueRevision, entries)

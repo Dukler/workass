@@ -520,6 +520,7 @@ func TestHealthEndpointTellsAStrangerOnlyWhatPairingNeeds(t *testing.T) {
 			"bind":        "lan",
 			"port":        80,
 			"providers":   []string{"claude", "codex"},
+			"instanceId":  "i-0123456789abcdef",
 		}
 	}
 
@@ -537,7 +538,7 @@ func TestHealthEndpointTellsAStrangerOnlyWhatPairingNeeds(t *testing.T) {
 			t.Errorf("a stranger needs %q to recognise this machine, and it was withheld", key)
 		}
 	}
-	for _, key := range []string{"profile", "os", "arch", "bind", "port", "providers"} {
+	for _, key := range []string{"profile", "os", "arch", "bind", "port", "providers", "instanceId"} {
 		if value, present := body[key]; present {
 			t.Errorf("unauthenticated caller was told %q = %v", key, value)
 		}
@@ -554,6 +555,9 @@ func TestHealthEndpointTellsAStrangerOnlyWhatPairingNeeds(t *testing.T) {
 	}
 	if _, present := localBody["providers"]; !present {
 		t.Error("a loopback caller should still get the full identity")
+	}
+	if localBody["instanceId"] != "i-0123456789abcdef" {
+		t.Errorf("loopback recovery identity = %#v", localBody["instanceId"])
 	}
 }
 

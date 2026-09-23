@@ -143,7 +143,8 @@ func (m *Manager) ResolveProviderLaneSelection(ctx context.Context, opts Session
 	selection := ProviderLaneSelection{
 		Owner: providercontract.AttachmentOwner{TabID: opts.TabID, AgentOwnerKey: strings.TrimSpace(opts.AgentOwnerKey)},
 		CWD:   strings.TrimSpace(opts.CWD), ModelID: strings.TrimSpace(opts.ModelID), ModeID: strings.TrimSpace(opts.ModeID),
-		Context: contextCapabilities, Creation: providerAdapterForID(providerID).creation,
+		Context: contextCapabilities, Delivery: providerAdapterForID(providerID).delivery.Capabilities(nil),
+		Creation: providerAdapterForID(providerID).creation,
 	}
 	if binding, exists := m.nativeSessions.getForOptions(opts); exists {
 		identity, thread := bindingLaneIdentity(binding), bindingThreadRef(binding)
@@ -166,6 +167,12 @@ func (m *Manager) ResolveProviderLaneSelection(ctx context.Context, opts Session
 		selection.CWD = firstNonEmpty(strings.TrimSpace(binding.CWD), selection.CWD)
 		selection.ModelID = firstNonEmpty(strings.TrimSpace(opts.ModelID), binding.ModelID)
 		selection.ModeID = firstNonEmpty(strings.TrimSpace(opts.ModeID), binding.ModeID)
+		if binding.ThreadCommitted {
+			bridge := m.bridgeForSession(thread.HeadID, SessionOptions{
+				TabID: opts.TabID, ChatID: opts.ChatID, SessionID: thread.HeadID, ProviderID: providerID,
+			})
+			selection.Delivery = deliveryCapabilitiesForProvider(providerID, bridge)
+		}
 		selection.Established = binding.ThreadCommitted
 		if !binding.ThreadCommitted {
 			selection.Creation.DeferredUntilInput = true
@@ -1130,13 +1137,17 @@ func (d managerLaneDelivery) Capabilities() providercontract.DeliveryCapabilitie
 		TabID: d.lane.owner.TabID, ChatID: d.lane.identity.ChatID, SessionID: d.lane.info.SessionID,
 		ProviderID: d.lane.info.ProviderID,
 	})
+	return deliveryCapabilitiesForProvider(d.lane.info.ProviderID, bridge)
+}
+
+func deliveryCapabilitiesForProvider(providerID string, bridge *Bridge) providercontract.DeliveryCapabilities {
+	adapter := providerAdapterForID(providerID)
+	capabilities := adapter.delivery.Capabilities(bridge)
 	if bridge == nil {
-		return providercontract.DeliveryCapabilities{}
+		return capabilities
 	}
-	adapter := providerAdapterForID(d.lane.info.ProviderID)
 	standardACPReceipt := adapter.input != nil && adapter.input.StandardACPActivity()
 	explicitReceipt := bridge.hasProviderCapability("workassStableTurnInputV1")
-	capabilities := adapter.delivery.Capabilities(bridge)
 	capabilities.StableInputIdentity = standardACPReceipt || explicitReceipt
 	capabilities.ConsumptionReceipt = standardACPReceipt || explicitReceipt
 	return capabilities

@@ -2,6 +2,32 @@ import { machineOf } from './wire/machineIds.ts';
 
 export interface WorkassBrowserBounds { x: number; y: number; width: number; height: number; }
 
+export const BROWSER_VIEWPORT_PRESETS = Object.freeze({
+  desktop: Object.freeze({ width: 1440, height: 900 }),
+  laptop: Object.freeze({ width: 1280, height: 800 }),
+  narrow: Object.freeze({ width: 390, height: 844 }),
+});
+
+export function browserViewportPreset(width?: number, height?: number): string {
+  if (width == null || height == null) return 'desktop';
+  for (const [name, dimensions] of Object.entries(BROWSER_VIEWPORT_PRESETS)) {
+    if (width === dimensions.width && height === dimensions.height) return name;
+  }
+  return 'custom';
+}
+
+export function browserViewportInputError(width: string, height: string): string | null {
+  const parsedWidth = width.trim();
+  if (!/^\d+$/.test(parsedWidth)) return 'El ancho debe ser un número entero entre 320 y 3840.';
+  const widthValue = Number(parsedWidth);
+  if (!Number.isSafeInteger(widthValue) || widthValue < 320 || widthValue > 3840) return 'El ancho debe ser un número entero entre 320 y 3840.';
+  const parsedHeight = height.trim();
+  if (!/^\d+$/.test(parsedHeight)) return 'El alto debe ser un número entero entre 240 y 2160.';
+  const heightValue = Number(parsedHeight);
+  if (!Number.isSafeInteger(heightValue) || heightValue < 240 || heightValue > 2160) return 'El alto debe ser un número entero entre 240 y 2160.';
+  return null;
+}
+
 export function sameBrowserBounds(a: WorkassBrowserBounds | null, b: WorkassBrowserBounds): boolean {
   return !!a && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
 }
@@ -34,6 +60,11 @@ export interface WorkassBrowserState {
   canGoForward: boolean;
   cdpAttached: boolean;
   persistent: boolean;
+  viewport?: { width: number; height: number; deviceScaleFactor: number };
+  effectiveViewport?: { width: number; height: number; deviceScaleFactor: number; scrollX?: number; scrollY?: number } | null;
+  viewportGeneration?: number;
+  documentGeneration?: number;
+  visible?: boolean;
 }
 
 export interface WorkassBrowserApi {
@@ -43,6 +74,8 @@ export interface WorkassBrowserApi {
   hide(chatId: string): Promise<boolean>;
   close(chatId: string): Promise<boolean>;
   command(chatId: string, command: 'navigate' | 'back' | 'forward' | 'reload' | 'stop', value?: string): Promise<WorkassBrowserState>;
+  setViewport(chatId: string, width: number, height: number): Promise<WorkassBrowserState>;
+  resetViewport(chatId: string): Promise<WorkassBrowserState>;
   onOpenRequest(callback: (chatId?: string) => void): () => void;
   onState(callback: (state: WorkassBrowserState) => void): () => void;
 }

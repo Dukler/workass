@@ -54,6 +54,59 @@ authority is rejected after detachment even if a caller retained the file.
 An explicit `--context` remains available for controlled CLI callers; an
 invalid explicit path fails instead of silently switching to another owner.
 
+`workass_ask_user_question` is available to a foreground ACP turn even when
+its native manifest has no ask-question capability. It opens the existing
+question card in the exact owning chat and waits for a structured answer. This
+asks for a decision only; it never approves a tool or executes an action.
+Keep `operation_id` and every question argument unchanged when retrying: the
+actor returns the same durable answer or terminal status and never opens a
+second card. Caller cancellation settles the card as `cancelled`; a same-id
+retry reads that durable result. A controller reconnect can recover the same
+pending card while its owning turn remains live. Turn/session cancellation also
+settles the card as `cancelled`. Omit `timeout_ms` to wait for the owning turn
+or user; an explicit 1000..3600000 deadline returns `timed_out`.
+
+```sh
+"$WORKASS_TOOLS_COMMAND" tools call workass_ask_user_question <<'JSON'
+{"operation_id":"choose-deploy-target-1","question_id":"deploy-target","header":"Deploy target","question":"Which target should I prepare?","options":[{"id":"canary","label":"Canary","description":"Lower-risk test"},{"id":"production","label":"Production"}],"multi_select":false,"allow_free_text":true}
+JSON
+```
+
+The result contains `status` (`answered`, `dismissed`, `cancelled`, or
+`timed_out`), `selected_options` with original ids and labels, `free_text`, and
+the question and operation ids. An `answered` result needs a selection or
+nonblank free text. Selections and free text may be returned together. Child
+and subagent catalogs omit this tool because their owner model does not allow
+them to open a human question; they can report the blocker to the parent.
+
+## Owned browser observations
+
+`workass_browser_open` creates the page for the exact owning chat. Omit
+`visible` to keep the legacy pane request, or pass `visible:false` to navigate
+in the background. A new page starts at a logical 1440×900 CSS viewport at DPR
+1 regardless of rail width or visibility. `workass_browser_list` and
+`workass_browser_snapshot` report requested/effective metrics and generations.
+Use `workass_browser_set_viewport` for an intentional responsive size and
+`workass_browser_reset_viewport` to return to the desktop default.
+
+`workass_browser_screenshot` supports `viewport` (default), `full_page`, and a
+document-CSS `clip`. Its image is accompanied by `screenshot_id`, exact tab and
+generation identity, CSS capture rectangle, scroll origin, image dimensions,
+and pixel-to-CSS scale. Pass screenshot pixel `x`/`y` with that `screenshot_id`
+to click a visual target. Selector clicks remain supported; snapshot
+`element_ref` values must be paired with their `snapshot_id`. Refresh the
+snapshot after navigation or a stale-reference result. Ambiguous, disabled,
+covered, blocked, stale, and missing targets are not reported as successful
+clicks.
+
+Snapshots retain editor information and add bounded semantic nodes, open
+shadow roots, owned same-origin frame boundaries, scroll and loading state, and
+explicit truncation counts. `workass_browser_wait` observes DOM/load/element
+conditions for at most 15 seconds and returns safe current state on timeout.
+`workass_browser_batch` prevalidates 1–20 sequential actions and can return one
+final snapshot with `observe_after:true`. `workass_browser_diagnostics` reads a
+redacted in-memory warning/error cursor; page diagnostics are not persisted.
+
 Calls reuse the existing action handlers, remote routing, redaction, ownership,
 and durable operation receipts. Mutations require a caller-stable
 `operation_id`. An uncertain response is not permission to issue a fresh

@@ -1016,6 +1016,11 @@ func clonePermission(permission *provider.PermissionEvent) *provider.PermissionE
 	if permission.Question != nil {
 		question := *permission.Question
 		question.Options = append([]provider.PermissionQuestionOption(nil), permission.Question.Options...)
+		if permission.Question.Answer != nil {
+			answer := *permission.Question.Answer
+			answer.SelectedOptionIDs = append([]string(nil), permission.Question.Answer.SelectedOptionIDs...)
+			question.Answer = &answer
+		}
 		out.Question = &question
 	}
 	return &out

@@ -355,6 +355,7 @@ type ExternalMutationReceipt struct {
 	Failed      bool
 	Ambiguous   bool
 	ErrorKind   provider.ErrorKind
+	Result      json.RawMessage
 }
 
 func (ExternalMutationReceipt) chatCommand() {}
@@ -1323,6 +1324,13 @@ func reduceCommitLaneSelection(state *State, command CommitLaneSelection) ([]Eff
 	})
 	if err != nil {
 		return nil, err
+	}
+	if lane, exists := state.Lanes[identity.ID]; exists && !lane.Delivery.LiveSteer && !lane.Delivery.StopAndSend {
+		// Carry safe pre-attachment strategies through the actor selection. A
+		// later LaneOpened command replaces this provisional capability snapshot
+		// with the exact negotiated capabilities for the attached bridge.
+		lane.Delivery = command.Delivery
+		state.Lanes[identity.ID] = lane
 	}
 	update := command.Update
 	update.ProviderID = identity.Realm.ProviderID
@@ -2467,7 +2475,13 @@ func reduceResolvePermission(state *State, command ResolvePermission) ([]Effect,
 	if !ok || permission.Event.Status != "pending" {
 		return nil, errors.New("permission request is not pending")
 	}
-	if len(permission.Event.Options) > 0 {
+	if permission.Event.Question != nil && permission.Event.Question.WorkassTool {
+		answer, err := provider.DecodeWorkassQuestionAnswer(optionID, *permission.Event.Question)
+		if err != nil {
+			return nil, err
+		}
+		permission.Event.Question.Answer = answer
+	} else if len(permission.Event.Options) > 0 {
 		found := false
 		for _, candidate := range permission.Event.Options {
 			if candidate == optionID {
@@ -3428,6 +3442,15 @@ func reduceProviderEvent(state *State, command ProviderEventReceived) ([]Effect,
 				return nil, errors.New("permission event changed its provider turn owner")
 			}
 			owner = existing.Owner
+			if permission.Question == nil {
+				permission.Question = clonePermission(&existing.Event).Question
+			} else if existing.Event.Question != nil && existing.Event.Question.WorkassTool {
+				if existing.Event.Question.Answer != nil {
+					answer := *existing.Event.Question.Answer
+					answer.SelectedOptionIDs = append([]string(nil), existing.Event.Question.Answer.SelectedOptionIDs...)
+					permission.Question.Answer = &answer
+				}
+			}
 		}
 		state.Permissions[id] = PermissionState{Owner: owner, Event: permission}
 		if state.Foreground != nil && state.Foreground.LaneID == owner.LaneID && state.Foreground.Turn.NativeID == owner.TurnID {
@@ -3692,6 +3715,12 @@ func reduceExternalMutationReceipt(state *State, command ExternalMutationReceipt
 	if command.Ambiguous && command.Failed {
 		return errors.New("external mutation receipt cannot be both failed and ambiguous")
 	}
+	if len(command.Result) > 16*1024 || len(command.Result) > 0 && !json.Valid(command.Result) {
+		return errors.New("external mutation result is invalid or too large")
+	}
+	if (command.Ambiguous || command.Failed) && len(command.Result) > 0 {
+		return errors.New("failed or ambiguous external mutation cannot carry a result")
+	}
 	entry := externalMutationEntryForOperation(*state, operationID)
 	if entry == nil {
 		return errors.New("external mutation receipt has no durable operation")
@@ -3718,6 +3747,12 @@ func reduceExternalMutationReceipt(state *State, command ExternalMutationReceipt
 		if command.Failed {
 			return errors.New("external mutation receipt conflicts with a completed result")
 		}
+		if len(command.Result) > 0 && len(entry.Result) > 0 && string(command.Result) != string(entry.Result) {
+			return errors.New("external mutation result changed after completion")
+		}
+		if len(command.Result) > 0 && len(entry.Result) == 0 {
+			entry.Result = append(json.RawMessage(nil), command.Result...)
+		}
 		return nil
 	}
 	if entry.Status == OutboxFailed {
@@ -3740,6 +3775,7 @@ func reduceExternalMutationReceipt(state *State, command ExternalMutationReceipt
 	}
 	entry.Status = OutboxCompleted
 	entry.LastError = ""
+	entry.Result = append(json.RawMessage(nil), command.Result...)
 	return nil
 }
 
