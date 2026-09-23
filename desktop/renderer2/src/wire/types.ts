@@ -317,8 +317,14 @@ export interface PermissionRequest {
 export interface PermissionQuestion {
   question: string;
   header: string;
-  options: Array<{ label: string; description: string }>;
+  options: Array<{ id?: string; label: string; description: string }>;
   multiSelect: boolean;
+  // Additive provider-neutral Workass CLI question metadata. Native SDK
+  // questions omit these fields and keep the existing one-click behavior.
+  workassTool?: boolean;
+  questionId?: string;
+  operationId?: string;
+  allowFreeText?: boolean;
 }
 export interface PermissionResolved {
   id: string;

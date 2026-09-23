@@ -9,6 +9,7 @@ import { steerStatusLabel } from '../steering';
 import { displayDetail, splitTail } from '../tool-display';
 import { toolPresentation } from '../tool-names';
 import { permissionChoices } from '../permissions';
+import { encodeWorkassQuestionAnswer, limitWorkassQuestionText } from '../question-answer';
 
 export { extractSubagents } from '../subagent-layout';
 export type { SubagentNode } from '../subagent-layout';
@@ -416,6 +417,59 @@ export function nodeDuration(n: SubagentNode, nowMs: number): string {
 }
 export function PermCard({ perm, tabId, msgId }: { perm: PermissionState; tabId: string; msgId: string }) {
   const decide = (optionId: string) => { if (!perm.resolved) void store.decidePermission(tabId, msgId, perm.id, optionId); };
+  const [selected, setSelected] = useState<string[]>([]);
+  const [freeText, setFreeText] = useState('');
+  if (perm.question?.workassTool) {
+    const q = perm.question;
+    const hasAnswer = selected.length > 0 || freeText.trim().length > 0;
+    const submit = () => decide(encodeWorkassQuestionAnswer({
+      status: 'answered', selectedOptionIds: selected, freeText,
+    }));
+    const dismiss = () => decide(encodeWorkassQuestionAnswer({ status: 'dismissed' }));
+    return (
+      <div className="permcard ask" data-testid="workass-question-card">
+        {q.header && <div className="askhead">{q.header}</div>}
+        <div className="askq">{q.question}</div>
+        <div className="askopts">
+          {q.options.map((option) => {
+            const selectedOption = !!option.id && selected.includes(option.id);
+            return (
+              <button
+                key={option.id || option.label}
+                className={`askopt ${selectedOption ? 'on' : ''}`}
+                data-testid="workass-question-option"
+                aria-pressed={selectedOption}
+                disabled={!!perm.resolved || !option.id}
+                onClick={() => {
+                  if (!option.id) return;
+                  setSelected((current) => q.multiSelect
+                    ? current.includes(option.id!) ? current.filter((id) => id !== option.id) : [...current, option.id!]
+                    : current.includes(option.id!) ? [] : [option.id!]);
+                }}
+              >
+                <div className="asklabel">{option.label}</div>
+                {option.description && <div className="askdesc">{option.description}</div>}
+              </button>
+            );
+          })}
+        </div>
+        {q.allowFreeText && (
+          <textarea
+            className="askfree-text"
+            data-testid="workass-question-free-text"
+            aria-label="Respuesta adicional"
+            value={freeText}
+            disabled={!!perm.resolved}
+            onChange={(event) => setFreeText(limitWorkassQuestionText(event.target.value))}
+          />
+        )}
+        <div className="ask-actions">
+          <button className="askskip" data-testid="workass-question-dismiss" disabled={!!perm.resolved} onClick={dismiss}>Descartar</button>
+          <button className="ask-submit" data-testid="workass-question-submit" disabled={!!perm.resolved || !hasAnswer} onClick={submit}>Enviar respuesta</button>
+        </div>
+      </div>
+    );
+  }
   // A question carries its own answers: `options` holds one entry per choice
   // (kind 'answer') plus the escape hatch, so they are answered here rather than
   // allowed/rejected. Falls back to the permission card if the daemon predates

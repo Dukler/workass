@@ -6,7 +6,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { ensurePackagedDaemon, ensurePortableDaemon, healthCheck, launchAgentPlist, restartDaemonAndRecover } = require('./runtime-bootstrap');
+const { ensurePackagedDaemon, ensurePortableDaemon, healthCheck, healthInstanceId, launchAgentPlist, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-runtime-bootstrap-'));
@@ -128,6 +128,18 @@ test('health probe rejects unrelated services occupying the Workass port', async
   assert.equal(await healthCheck(url, 700, '9.9.9'), true);
 });
 
+test('loopback health exposes a bounded daemon instance id for restart confirmation', async (t) => {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ app: 'workass', instanceId: 'i-0123456789abcdef' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = 'http://127.0.0.1:' + server.address().port;
+  assert.equal(await healthInstanceId(url), 'i-0123456789abcdef');
+  assert.equal(await healthInstanceId('http://192.0.2.1:80'), '');
+});
+
 test('portable bootstrap starts the sibling Windows daemon when no daemon is healthy', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-bootstrap-'));
   const executablePath = path.join(root, 'Workass.exe');
@@ -197,9 +209,11 @@ test('recovery stops and starts the same sibling daemon without mutating state',
   const runtime = { profile: 'prod', daemonURL: 'http://127.0.0.1:8788', daemonPort: 8788, daemonBind: 'localhost', dataRoot: root, stateDir: path.join(root, 'state'), logRoot: path.join(root, 'logs'), browserControlFile: path.join(root, 'run', 'browser.json') };
   const calls = [];
   let checks = 0;
+  const identities = ['i-before', 'i-after'];
   const result = await restartDaemonAndRecover({
     runtime, resourcesPath: path.join(root, 'resources'), executablePath: path.join(root, 'Workass.exe'), platform: 'win32', daemonExecutable: daemonPath,
     check: async () => { checks += 1; return checks === 1; },
+    readInstanceId: async () => identities.shift() || '',
     shutdown: async () => { calls.push('shutdown'); return true; },
     waitForDown: async () => { calls.push('down'); return true; },
     wait: async () => true,
@@ -207,6 +221,83 @@ test('recovery stops and starts the same sibling daemon without mutating state',
   });
   assert.equal(result.shutdownAccepted, true);
 	assert.equal(result.stoppedObserved, true);
+  assert.equal(result.oldInstanceId, 'i-before');
+  assert.equal(result.newInstanceId, 'i-after');
   assert.deepEqual(calls.slice(0, 2), ['shutdown', 'down']);
   assert.equal(calls[2].start[0], daemonPath);
+});
+
+test('recovery rejects a healthy endpoint that still reports the old daemon instance', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-unchanged-'));
+  const daemonPath = path.join(root, 'workass-daemon.exe');
+  fs.writeFileSync(daemonPath, 'daemon');
+  const runtime = { profile: 'prod', daemonURL: 'http://127.0.0.1:8788', daemonPort: 8788, daemonBind: 'localhost', dataRoot: root, stateDir: path.join(root, 'state'), logRoot: path.join(root, 'logs'), browserControlFile: path.join(root, 'run', 'browser.json') };
+  let starts = 0;
+  await assert.rejects(restartDaemonAndRecover({
+    runtime, resourcesPath: path.join(root, 'resources'), platform: 'win32', daemonExecutable: daemonPath,
+    check: async () => true,
+    readInstanceId: async () => 'i-unchanged',
+    shutdown: async () => true,
+    waitForDown: async () => false,
+    childSpawn: () => { starts += 1; return { pid: 13, unref() {} }; },
+  }), /daemon restart was not confirmed/);
+  assert.equal(starts, 0, 'a healthy unchanged instance is detected without starting a duplicate');
+});
+
+test('recovery accepts a newly started instance when the exact profile was initially down', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-down-'));
+  const daemonPath = path.join(root, 'workass-daemon.exe');
+  fs.writeFileSync(daemonPath, 'daemon');
+  const runtime = { profile: 'dev', daemonURL: 'http://127.0.0.1:18788', daemonPort: 18788, daemonBind: 'localhost', dataRoot: root, stateDir: path.join(root, 'state'), logRoot: path.join(root, 'logs'), browserControlFile: path.join(root, 'run', 'browser.json') };
+  const calls = [];
+  let checks = 0;
+  const result = await restartDaemonAndRecover({
+    runtime, resourcesPath: path.join(root, 'resources'), platform: 'win32', daemonExecutable: daemonPath,
+    check: async () => { checks += 1; return checks > 2; },
+    readInstanceId: async () => 'i-started',
+    wait: async () => true,
+    childSpawn: (executable, args, options) => { calls.push({ executable, args, options }); return { pid: 15, unref() {} }; },
+  });
+  assert.equal(result.oldInstanceId, null);
+  assert.equal(result.newInstanceId, 'i-started');
+  assert.equal(calls[0].executable, daemonPath);
+  assert.ok(calls[0].args.includes('--state-dir'));
+  assert.equal(calls[0].options.env.WORKASS_PROFILE, 'dev');
+});
+
+test('recovery accepts an immediate supervisor replacement without observing downtime', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-replaced-'));
+  const daemonPath = path.join(root, 'workass-daemon.exe');
+  fs.writeFileSync(daemonPath, 'daemon');
+  const runtime = { profile: 'prod', daemonURL: 'http://127.0.0.1:8788', daemonPort: 8788, daemonBind: 'localhost', dataRoot: root, stateDir: path.join(root, 'state'), logRoot: path.join(root, 'logs'), browserControlFile: path.join(root, 'run', 'browser.json') };
+  const ids = ['i-old', 'i-new'];
+  let starts = 0;
+  const result = await restartDaemonAndRecover({
+    runtime, resourcesPath: path.join(root, 'resources'), platform: 'win32', daemonExecutable: daemonPath,
+    check: async () => true,
+    readInstanceId: async () => ids.shift() || 'i-new',
+    shutdown: async () => true,
+    waitForDown: async () => false,
+    childSpawn: () => { starts += 1; return { pid: 14, unref() {} }; },
+  });
+  assert.equal(result.newInstanceId, 'i-new');
+  assert.equal(result.stoppedObserved, false);
+  assert.equal(starts, 0, 'the existing supervisor replacement is reused');
+});
+
+test('packaged macOS recovery also requires a changed daemon instance', async () => {
+  const { runtime, resourcesPath, home } = fixture();
+  const ids = ['i-old', 'i-new'];
+  const launchctl = [];
+  const result = await restartPackagedDaemonAndRecover({
+    runtime, resourcesPath, home, uid: 501,
+    check: async () => true,
+    readInstanceId: async () => ids.shift() || '',
+    shutdown: async () => true,
+    waitForDown: async () => false,
+    launchctlSpawn: (_bin, args) => { launchctl.push(args); return { status: 0 }; },
+  });
+  assert.equal(result.oldInstanceId, 'i-old');
+  assert.equal(result.newInstanceId, 'i-new');
+  assert.equal(launchctl.at(-1)[0], 'kickstart');
 });

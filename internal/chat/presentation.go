@@ -207,6 +207,7 @@ type CommitLaneSelection struct {
 	ModelID     string
 	ModeID      string
 	Context     provider.ContextCapabilities
+	Delivery    provider.DeliveryCapabilities
 	Creation    provider.CreationCapabilities
 	Established bool
 	Update      UpdateRuntimeControls

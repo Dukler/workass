@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -53,16 +54,23 @@ type localModelServer struct {
 }
 
 type providerRuntime struct {
-	Config     ProviderConfig
-	Status     string
-	LatencyMs  *int64
-	Error      string
-	FixHint    string
-	Models     []Model
-	Modes      []Mode
-	AgentName  string
-	Probed     bool
-	CLIVersion *CLIVersion
+	Config                ProviderConfig
+	Status                string
+	LatencyMs             *int64
+	Error                 string
+	CatalogRefreshError   string
+	CatalogRefreshPending bool
+	CatalogRefreshing     bool
+	CatalogRefreshDone    chan struct{}
+	CatalogCLIVersion     string
+	CatalogRevision       uint64
+	CatalogRefreshedAt    time.Time
+	FixHint               string
+	Models                []Model
+	Modes                 []Mode
+	AgentName             string
+	Probed                bool
+	CLIVersion            *CLIVersion
 }
 
 type CatalogGroup struct {
@@ -955,7 +963,7 @@ func (m *Manager) ToggleProvider(ctx context.Context, id string, enabled bool) (
 		return nil, fmt.Errorf("unknown ACP provider: %s", id)
 	}
 	runtime.Config.Enabled = enabled
-	runtime.Probed = false
+	invalidateProviderCatalogLocked(runtime)
 	runtime.Models = nil
 	runtime.Modes = nil
 	runtime.AgentName = ""
@@ -1424,7 +1432,12 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 			if isLocalProviderID(result.ProviderID) && result.ResolvedCommand != "" {
 				runtime.Config.Command = result.ResolvedCommand
 			}
+			invalidateProviderCatalogLocked(runtime)
 			runtime.Probed = true
+			runtime.CatalogRefreshError = ""
+			runtime.CatalogRefreshPending = false
+			runtime.CatalogCLIVersion = providerVersionIdentity(runtime.CLIVersion)
+			runtime.CatalogRefreshedAt = time.Now()
 			runtime.Status = providerStatusReady
 			runtime.Error = ""
 			runtime.FixHint = ""
@@ -1442,6 +1455,7 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 			runtime.Config.DetectedAt = now
 			runtime.Config.ResolvedCommand = result.ResolvedCommand
 			runtime.Probed = true
+			runtime.CatalogCLIVersion = providerVersionIdentity(runtime.CLIVersion)
 			runtime.Models = nil
 			runtime.Modes = nil
 			runtime.AgentName = ""
@@ -1457,6 +1471,7 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 			runtime.FixHint = firstNonEmpty(runtime.FixHint, runtime.Config.FixHint)
 			runtime.Config.FixHint = runtime.FixHint
 			runtime.Probed = true
+			runtime.CatalogCLIVersion = providerVersionIdentity(runtime.CLIVersion)
 			runtime.Models = nil
 			runtime.Modes = nil
 			runtime.AgentName = ""
@@ -1486,6 +1501,7 @@ func (m *Manager) applyDetectionResults(results []providerDetectionResult) {
 			runtime.FixHint = ""
 			runtime.Config.FixHint = ""
 			runtime.Probed = true
+			runtime.CatalogCLIVersion = providerVersionIdentity(runtime.CLIVersion)
 			runtime.Models = nil
 			runtime.Modes = nil
 			runtime.AgentName = ""
@@ -2103,6 +2119,10 @@ func (m *Manager) Catalog(ctx context.Context) map[string]any {
 		groups = append(groups, m.catalogGroup(ctx, id))
 	}
 	groups = m.userFacingCatalogGroups(groups)
+	return catalogPayload(groups, defaultID)
+}
+
+func catalogPayload(groups []CatalogGroup, defaultID string) map[string]any {
 	models, modes := []Model{}, []Mode{}
 	var fallback *CatalogGroup
 	for i := range groups {
@@ -2152,10 +2172,12 @@ func (m *Manager) EmitCatalog(ctx context.Context) {
 	m.emit("chat:catalog", m.Catalog(ctx))
 }
 
-func (m *Manager) updateProviderCatalogFromBridge(b *Bridge, models []Model, modes []Mode) {
+func (m *Manager) updateProviderCatalogFromBridge(b *Bridge, models []Model, modes []Mode, authoritative bool) bool {
 	b.mu.Lock()
 	providerID := b.providerID
 	agentName := b.agentName
+	catalogProbe := b.catalogProbe
+	catalogRevision := b.catalogRevision
 	knownEffortModels := make(map[string]bool, len(b.axisEffortsByModel)+len(b.variantEffortsByModel))
 	for modelID := range b.axisEffortsByModel {
 		knownEffortModels[strings.TrimSpace(modelID)] = true
@@ -2164,17 +2186,34 @@ func (m *Manager) updateProviderCatalogFromBridge(b *Bridge, models []Model, mod
 		knownEffortModels[strings.TrimSpace(modelID)] = true
 	}
 	b.mu.Unlock()
+	if catalogProbe {
+		return false
+	}
+	changed := false
 	m.mu.Lock()
 	if runtime := m.providers[providerID]; runtime != nil && runtime.Config.Enabled && !runtime.Config.NeedsLogin {
+		if runtime.CatalogRevision != catalogRevision {
+			m.mu.Unlock()
+			return false
+		}
+		before := runtime.catalogGroupLocked()
 		runtime.Probed = true
 		runtime.Status = providerStatusReady
 		runtime.Error = ""
-		incomingModels := normalizeProviderCatalogModels(providerID, append([]Model(nil), models...))
-		runtime.Models, knownEffortModels = providerAdapterForID(providerID).catalog.Reconcile(runtime.Models, incomingModels, knownEffortModels)
+		incomingModels := normalizeProviderCatalogModels(providerID, cloneModels(models))
+		catalog := providerAdapterForID(providerID).catalog
+		if authoritative {
+			runtime.Models, knownEffortModels = catalog.ReconcileAuthoritative(runtime.Models, incomingModels, knownEffortModels)
+		} else {
+			runtime.Models, knownEffortModels = catalog.Reconcile(runtime.Models, incomingModels, knownEffortModels)
+		}
 		runtime.Modes = append([]Mode(nil), modes...)
 		runtime.AgentName = agentName
+		after := runtime.catalogGroupLocked()
+		changed = !sameUsableCatalog(before, after)
 	}
 	m.mu.Unlock()
+	return changed
 }
 
 func (m *Manager) catalogGroup(ctx context.Context, id string) CatalogGroup {
@@ -2184,58 +2223,190 @@ func (m *Manager) catalogGroup(ctx context.Context, id string) CatalogGroup {
 		m.mu.Unlock()
 		return CatalogGroup{ProviderID: id, ProviderName: id, Models: []Model{}, Modes: []Mode{}, Status: providerStatusError, Error: "unknown provider"}
 	}
-	if runtime.Probed {
-		group := runtime.catalogGroupLocked()
-		m.mu.Unlock()
-		return group
+	if runtime.Probed && len(runtime.Models) > 0 && runtime.CatalogRefreshedAt.IsZero() {
+		// Start a bounded refresh window for a usable catalog loaded from an older
+		// runtime that predates the refresh timestamp.
+		runtime.CatalogRefreshedAt = time.Now()
 	}
-	cfg := runtime.Config
-	runtime.Status = providerStatusInactive
+	shouldProbe := (!runtime.Probed || runtime.CatalogCLIVersion != providerVersionIdentity(runtime.CLIVersion) ||
+		(runtime.CatalogRefreshedAt.IsZero() && len(runtime.Models) == 0) ||
+		(!runtime.CatalogRefreshedAt.IsZero() && time.Since(runtime.CatalogRefreshedAt) >= providerCatalogReadExpiry)) &&
+		runtime.Config.Enabled && !runtime.Config.NeedsLogin
 	m.mu.Unlock()
-
-	start := time.Now()
-	models, modes, agentName, err := m.probeProviderCatalog(ctx, cfg)
-	latencyMs := time.Since(start).Milliseconds()
-	if err != nil {
-		hint, policyErr := m.markProviderNeedsLogin(ctx, id, err)
-		if policyErr != nil {
-			err = policyErr
-		} else if hint != "" {
-			m.mu.Lock()
-			runtime = m.providers[id]
-			if runtime == nil {
-				m.mu.Unlock()
-				return CatalogGroup{ProviderID: id, ProviderName: id, Models: []Model{}, Modes: []Mode{}, Status: providerStatusError, Error: "unknown provider"}
-			}
-			group := runtime.catalogGroupLocked()
-			m.mu.Unlock()
-			return group
-		}
+	if shouldProbe {
+		m.refreshProviderCatalogNow(ctx, id)
 	}
-
 	m.mu.Lock()
 	runtime = m.providers[id]
-	if runtime == nil {
-		m.mu.Unlock()
-		return CatalogGroup{ProviderID: id, ProviderName: id, Models: []Model{}, Modes: []Mode{}, Status: providerStatusError, Error: "unknown provider"}
-	}
-	runtime.Probed = true
-	runtime.LatencyMs = &latencyMs
-	if err != nil {
-		runtime.Status = providerStatusError
-		runtime.Error = redactSensitiveText(err.Error())
-		runtime.Models = nil
-		runtime.Modes = nil
-	} else {
-		runtime.Status = providerStatusReady
-		runtime.Error = ""
-		runtime.Models = normalizeProviderCatalogModels(id, append([]Model(nil), models...))
-		runtime.Modes = append([]Mode(nil), modes...)
-		runtime.AgentName = agentName
-	}
 	group := runtime.catalogGroupLocked()
 	m.mu.Unlock()
 	return group
+}
+
+// refreshProviderCatalogNow coalesces explicit refreshes and expired catalog
+// reads. A stale catalog stays visible while the disposable probe runs; failure
+// never erases a previously usable list.
+func (m *Manager) refreshProviderCatalogNow(ctx context.Context, providerID string) bool {
+	providerID = normalizeProviderID(providerID)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.Lock()
+	runtime := m.providers[providerID]
+	if runtime == nil || !runtime.Config.Enabled || runtime.Config.NeedsLogin || m.resetting {
+		m.mu.Unlock()
+		return false
+	}
+	if runtime.CatalogRefreshing {
+		done := runtime.CatalogRefreshDone
+		m.mu.Unlock()
+		if done != nil {
+			select {
+			case <-done:
+			case <-ctx.Done():
+			}
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		m.mu.Lock()
+		runtime = m.providers[providerID]
+		retry := runtime != nil && runtime.Config.Enabled && !runtime.Config.NeedsLogin &&
+			(!runtime.Probed || runtime.CatalogCLIVersion != providerVersionIdentity(runtime.CLIVersion))
+		m.mu.Unlock()
+		if retry {
+			return m.refreshProviderCatalogNow(ctx, providerID)
+		}
+		return false
+	}
+	runtime.CatalogRefreshing = true
+	done := make(chan struct{})
+	runtime.CatalogRefreshDone = done
+	cfg := runtime.Config
+	cliVersion := providerVersionIdentity(runtime.CLIVersion)
+	catalogRevision := runtime.CatalogRevision
+	before := runtime.catalogGroupLocked()
+	initialNoUsableCache := len(runtime.Models) == 0
+	m.mu.Unlock()
+
+	start := time.Now()
+	timeout := providerProbeTimeout(providerID)
+	probeCtx, cancel := context.WithTimeout(ctx, timeout*2)
+	models, modes, agentName, err := m.probeProviderCatalogWithInitTimeout(probeCtx, cfg, timeout)
+	cancel()
+	latencyMs := time.Since(start).Milliseconds()
+
+	changed := false
+	committed := false
+	m.mu.Lock()
+	runtime = m.providers[providerID]
+	if runtime != nil {
+		// Detection/configuration may have changed while the old executable was
+		// being probed. A result from that old launch snapshot cannot replace the
+		// current catalog.
+		if runtime.CatalogRevision == catalogRevision && sameProviderLaunchConfig(runtime.Config, cfg) && cliVersion == providerVersionIdentity(runtime.CLIVersion) && runtime.Config.Enabled && !runtime.Config.NeedsLogin {
+			committed = true
+			runtime.Probed = true
+			runtime.CatalogCLIVersion = cliVersion
+			runtime.CatalogRefreshedAt = time.Now()
+			runtime.LatencyMs = &latencyMs
+			if err != nil {
+				runtime.CatalogRefreshError = redactSensitiveText(err.Error())
+				if len(runtime.Models) == 0 {
+					runtime.Status = providerStatusError
+					runtime.Error = runtime.CatalogRefreshError
+				}
+			} else {
+				runtime.CatalogRevision++
+				known := make(map[string]bool, len(models))
+				runtime.Models, _ = providerAdapterForID(providerID).catalog.ReconcileAuthoritative(
+					runtime.Models,
+					normalizeProviderCatalogModels(providerID, cloneModels(models)),
+					known,
+				)
+				runtime.Modes = append([]Mode(nil), modes...)
+				runtime.AgentName = agentName
+				runtime.Status = providerStatusReady
+				runtime.Error = ""
+				runtime.CatalogRefreshError = ""
+			}
+			after := runtime.catalogGroupLocked()
+			changed = !sameUsableCatalog(before, after)
+		}
+		if runtime.CatalogRefreshDone == done {
+			runtime.CatalogRefreshing = false
+			runtime.CatalogRefreshDone = nil
+			close(done)
+		}
+	}
+	m.mu.Unlock()
+	if changed && !initialNoUsableCache {
+		m.emitCatalogSnapshot()
+	}
+	if committed && initialNoUsableCache && err != nil && ctx.Err() == nil {
+		if _, policyErr := m.markProviderNeedsLogin(ctx, providerID, err); policyErr != nil && m.opts.Logf != nil {
+			m.opts.Logf("provider catalog authentication policy failed", map[string]any{"provider": providerID, "error": redactSensitiveText(policyErr.Error())})
+		}
+	}
+	return true
+}
+
+const providerCatalogReadExpiry = 5 * time.Minute
+
+func cloneModels(models []Model) []Model {
+	if models == nil {
+		return nil
+	}
+	out := make([]Model, len(models))
+	for i, model := range models {
+		out[i] = model
+		out[i].Efforts = append([]string(nil), model.Efforts...)
+		out[i].ServiceTiers = append([]string(nil), model.ServiceTiers...)
+	}
+	return out
+}
+
+func sameProviderLaunchConfig(a, b ProviderConfig) bool {
+	return a.ID == b.ID && a.Command == b.Command && a.ResolvedCommand == b.ResolvedCommand &&
+		reflect.DeepEqual(a.Args, b.Args) && reflect.DeepEqual(a.Env, b.Env) &&
+		reflect.DeepEqual(a.AutoEnv, b.AutoEnv) && a.CWD == b.CWD
+}
+
+func providerVersionIdentity(version *CLIVersion) string {
+	if version == nil {
+		return ""
+	}
+	return strings.TrimSpace(version.Version)
+}
+
+func sameModelCatalog(a, b []Model) bool {
+	return reflect.DeepEqual(a, b)
+}
+
+func sameUsableCatalog(a, b CatalogGroup) bool {
+	return a.ProviderName == b.ProviderName && a.Status == b.Status &&
+		reflect.DeepEqual(a.Models, b.Models) && reflect.DeepEqual(a.Modes, b.Modes)
+}
+
+func (m *Manager) invalidateProviderCatalog(providerID string) {
+	m.mu.Lock()
+	if runtime := m.providers[normalizeProviderID(providerID)]; runtime != nil {
+		invalidateProviderCatalogLocked(runtime)
+	}
+	m.mu.Unlock()
+}
+
+func invalidateProviderCatalogLocked(runtime *providerRuntime) {
+	runtime.CatalogRevision++
+	runtime.Probed = false
+}
+
+func (m *Manager) emitCatalogSnapshot() {
+	m.mu.Lock()
+	defaultID := m.defaultProviderID
+	m.mu.Unlock()
+	groups := m.CatalogSnapshotGroups()
+	m.emit("chat:catalog", catalogPayload(groups, defaultID))
 }
 
 func (r *providerRuntime) catalogGroupLocked() CatalogGroup {

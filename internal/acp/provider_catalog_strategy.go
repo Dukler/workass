@@ -5,6 +5,7 @@ package acp
 type providerCatalogStrategy interface {
 	Normalize([]Model) []Model
 	Reconcile(previous, current []Model, known map[string]bool) ([]Model, map[string]bool)
+	ReconcileAuthoritative(previous, current []Model, known map[string]bool) ([]Model, map[string]bool)
 	Present(Model, string) Model
 	ResolveSyntheticDefault([]Model) (string, bool)
 }
@@ -16,6 +17,10 @@ func (genericProviderCatalogStrategy) Normalize(models []Model) []Model {
 }
 
 func (genericProviderCatalogStrategy) Reconcile(previous, current []Model, known map[string]bool) ([]Model, map[string]bool) {
+	return preserveUnknownModelEfforts(previous, current, known), known
+}
+
+func (genericProviderCatalogStrategy) ReconcileAuthoritative(previous, current []Model, known map[string]bool) ([]Model, map[string]bool) {
 	return preserveUnknownModelEfforts(previous, current, known), known
 }
 
@@ -33,6 +38,11 @@ func (claudeProviderCatalogStrategy) Normalize(models []Model) []Model {
 
 func (claudeProviderCatalogStrategy) Reconcile(previous, current []Model, known map[string]bool) ([]Model, map[string]bool) {
 	return reconcileClaudeLiveCatalog(previous, current, known)
+}
+
+func (claudeProviderCatalogStrategy) ReconcileAuthoritative(previous, current []Model, known map[string]bool) ([]Model, map[string]bool) {
+	current = normalizeClaudeCatalogModels(current)
+	return preserveUnknownModelEfforts(previous, current, known), known
 }
 
 func (claudeProviderCatalogStrategy) Present(model Model, description string) Model {

@@ -79,7 +79,11 @@ func (genericACPDeliveryStrategy) Capabilities(b *Bridge) providercontract.Deliv
 
 func (devinDeliveryStrategy) Capabilities(b *Bridge) providercontract.DeliveryCapabilities {
 	capabilities, _ := standardACPSteerCapabilities(b)
-	capabilities.StopAndSend = b != nil && !capabilities.LiveSteer
+	// Stop-and-send is a Workass queue-and-cancel action, not an ACP feature.
+	// Devin lanes defer attachment until the first input, so the composer needs
+	// this safe fallback before a bridge exists. A real negotiated live-steer
+	// capability takes precedence once the bridge is attached.
+	capabilities.StopAndSend = !capabilities.LiveSteer
 	return capabilities
 }
 

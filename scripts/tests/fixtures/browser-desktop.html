@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Workass browser desktop fixture</title>
+  <style>
+    :root { color-scheme: light; font: 16px/1.4 system-ui, sans-serif; }
+    body { margin: 0; color: #15202c; background: #fff; }
+    header { padding: 20px 32px; background: #1769ff; color: white; }
+    #desktop-marker, #mobile-marker { display: none; padding: 12px 20px; color: white; font-weight: 700; }
+    @media (min-width: 1000px) { #desktop-marker { display: block; background: #1769ff; } }
+    @media (max-width: 999px) { #mobile-marker { display: block; background: #c02a42; } }
+    main { padding: 24px 32px; }
+    .tall { height: 1400px; padding-top: 220px; background: linear-gradient(#fff, #eef4ff); }
+    #bottom-marker { padding: 18px; background: #12a05c; color: #fff; font-weight: 700; }
+    #nested-scroll { width: 280px; height: 130px; overflow: auto; border: 2px solid #333; }
+    #nested-scroll > div { height: 500px; padding: 12px; }
+    #covered-target { position: absolute; left: 1040px; top: 530px; z-index: 1; width: 140px; height: 52px; }
+    #overlay { position: absolute; left: 1000px; top: 500px; z-index: 2; width: 240px; height: 110px; padding: 24px; box-sizing: border-box; background: #111a; color: white; }
+    #coordinate-target { position: absolute; left: 500px; top: 780px; width: 160px; height: 56px; }
+    #cross-message-proof { position: absolute; left: 1px; top: 1px; width: 1px; height: 1px; }
+    #diagnostics-ready { position: fixed; left: 0; top: 0; width: 1px; height: 1px; visibility: hidden; }
+    #pointer-target { position: absolute; left: 180px; top: 680px; width: 120px; height: 90px; background: #ffca28; }
+    #canvas { width: 100px; height: 70px; background: #7b2cbf; }
+  </style>
+</head>
+<body>
+  <header><h1>Desktop page</h1></header>
+  <div id="desktop-marker">DESKTOP_LAYOUT_1440</div>
+  <div id="mobile-marker">MOBILE_LAYOUT</div>
+  <main>
+    <h2>Observation fixture</h2>
+    <nav aria-label="Primary"><a href="#bottom-marker">Bottom</a></nav>
+    <form aria-label="Fixture form">
+      <label for="first-name">Name</label><input id="first-name" value="Keep this state">
+      <label for="second-name">Name</label><input id="second-name" value="Repeated label">
+      <label for="password">Password</label><input id="password" type="password" value="never expose">
+      <button id="disabled-button" type="button" disabled>Disabled action</button>
+      <button id="label-target" type="button">Label action</button>
+      <button id="replace-target" type="button">Replaceable action</button>
+      <div id="editor" class="monaco-editor" role="textbox" aria-label="Code editor" contenteditable="true">const editorFixture = true;</div>
+    </form>
+    <div id="nested-scroll" role="region" aria-label="Nested scroll region"><div>Nested scroll bottom content</div></div>
+    <div id="shadow-root-host"></div>
+    <iframe title="Same origin frame" src="/frame-same"></iframe>
+    <iframe title="Cross origin frame" src="http://localhost:PORT/frame-cross"></iframe>
+    <button id="covered-target" type="button">Covered action</button>
+    <button id="coordinate-target" type="button">Coordinate action</button>
+    <div id="cross-message-proof" hidden></div>
+    <div id="diagnostics-ready"></div>
+    <canvas id="canvas" width="100" height="70" aria-label="Canvas target"></canvas>
+    <div id="pointer-target" role="button" aria-label="Scaled pointer target">Pointer target</div>
+    <div id="delayed" hidden>DELAYED_UI_READY</div>
+    <div id="overlay" aria-label="Visual overlay">Overlay</div>
+    <div class="tall"></div>
+    <div id="bottom-marker">BOTTOM_OF_DOCUMENT</div>
+  </main>
+  <script>
+    const shadow = document.querySelector('#shadow-root-host').attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<button aria-label="Shadow action">Shadow action</button>';
+    window.pointerProof = null;
+    window.labelActionProof = null;
+    window.shadowActionProof = null;
+    window.coordinateActionProof = null;
+    window.canvasActionProof = null;
+    window.crossFrameActionProof = null;
+    window.addEventListener('message', (event) => {
+      if (/^http:\/\/localhost:\d+$/u.test(event.origin) && event.data?.kind === 'workass-cross-frame-click') {
+        window.crossFrameActionProof = { trusted: event.data.trusted, origin: event.origin };
+        document.querySelector('#cross-message-proof').hidden = false;
+      }
+    });
+    shadow.querySelector('button').addEventListener('click', (event) => {
+      window.shadowActionProof = { trusted: event.isTrusted };
+    });
+    document.querySelector('#label-target').addEventListener('click', (event) => {
+      window.labelActionProof = { trusted: event.isTrusted, count: (window.labelActionProof?.count || 0) + 1 };
+    });
+    document.querySelector('#coordinate-target').addEventListener('click', (event) => {
+      window.coordinateActionProof = { trusted: event.isTrusted, x: event.clientX, y: event.clientY };
+    });
+    document.querySelector('#canvas').addEventListener('click', (event) => {
+      window.canvasActionProof = { trusted: event.isTrusted };
+    });
+    document.querySelector('#canvas').getContext('2d').fillRect(0, 0, 100, 70);
+    document.querySelector('#pointer-target').addEventListener('click', (event) => {
+      window.pointerProof = { trusted: event.isTrusted, x: event.clientX, y: event.clientY };
+    });
+    setTimeout(() => { document.querySelector('#delayed').hidden = false; }, 350);
+    setTimeout(() => {
+      console.warn('browser fixture warning');
+      console.error('browser fixture error');
+    }, 4500);
+    setTimeout(() => { document.querySelector('#diagnostics-ready').style.visibility = 'visible'; }, 4700);
+    setTimeout(() => { throw new Error('browser fixture exception'); }, 4540);
+  </script>
+</body>
+</html>

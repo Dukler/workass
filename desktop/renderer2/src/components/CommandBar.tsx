@@ -9,7 +9,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { store, useApp } from '../store/store';
-import { filterCommands, forceReconnect, type Command } from '../store/commands';
+import { filterCommands, forceReconnect, localDaemonRestartAvailable, RESTART_FAILURE_MESSAGE, reconnectCommandTitle, type Command } from '../store/commands';
 
 export function CommandBar() {
   const app = useApp();
@@ -17,17 +17,22 @@ export function CommandBar() {
   const [q, setQ] = useState('');
   const [sel, setSel] = useState(0);
   const [busy, setBusy] = useState('');
+  const [failure, setFailure] = useState('');
+  const restartAvailable = localDaemonRestartAvailable();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
 
   const commands = useMemo<Command[]>(() => [
     {
       id: 'reload',
-      title: 'Reiniciar daemon y reconectar',
-		detail: 'Reinicia el daemon local, repara archivos de inicio dañados y recarga la ventana.',
+		title: reconnectCommandTitle(restartAvailable),
+		detail: restartAvailable
+		  ? 'Reinicia el daemon local y recarga la ventana cuando confirme una instancia nueva.'
+		  : 'Limpia el estado de control local y vuelve a conectar esta ventana.',
       keywords: 'reload reconectar reconnect refrescar refresh arreglar reparar control controller atascado colgado stuck',
       run: async () => {
-        setBusy('Reconectando…');
+        setFailure('');
+        setBusy(restartAvailable ? 'Reiniciando el daemon local y verificando la conexión…' : 'Reconectando…');
         await forceReconnect();
       },
     },
@@ -64,7 +69,7 @@ export function CommandBar() {
       keywords: 'sidebar panel lateral ocultar mostrar',
       run: () => { store.closeCommandBar(); store.toggleSide(); },
     },
-  ], [app.panes.side]);
+  ], [app.panes.side, restartAvailable]);
 
   const shown = useMemo(() => filterCommands(commands, q), [commands, q]);
 
@@ -72,7 +77,7 @@ export function CommandBar() {
   // command under Enter than the one the muscle expects.
   useEffect(() => {
     if (!open) return;
-    setQ(''); setSel(0); setBusy('');
+    setQ(''); setSel(0); setBusy(''); setFailure('');
     const t = setTimeout(() => inputRef.current?.focus(), 0);
     return () => clearTimeout(t);
   }, [open]);
@@ -91,7 +96,8 @@ export function CommandBar() {
   const run = (cmd: Command | undefined) => {
     if (!cmd || busy) return;
     void Promise.resolve(cmd.run()).catch((err) => {
-      console.warn('[commandbar] command failed', cmd.id, err);
+      if (cmd.id === 'reload') setFailure(err instanceof Error ? err.message : RESTART_FAILURE_MESSAGE);
+      else console.warn('[commandbar] command failed', cmd.id, err);
       setBusy('');
     });
   };
@@ -116,6 +122,7 @@ export function CommandBar() {
           onChange={(e) => setQ(e.target.value)}
           spellCheck={false}
         />
+        {failure && <div className="cmdbusy" role="alert">{failure}</div>}
         {busy ? (
           <div className="cmdbusy">{busy}</div>
         ) : (

@@ -257,9 +257,11 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 	return map[string]phaseCManagerRule{
 		"cmd/workass/agent_control.go:ownerAuthorized:ValidateAgentOwner":                                   {1, "owner authorization after actor fencing"},
 		"cmd/workass/agent_control.go:call:AgentCatalog":                                                    {1, "actor-authorized catalog projection"},
-		"cmd/workass/chat_diagnostics.go:TurnDiagnostics:TurnDiagnostics":                                 {1, "exact actor-fenced, bounded timing-only executor read"},
+		"cmd/workass/chat_diagnostics.go:TurnDiagnostics:TurnDiagnostics":                                   {1, "exact actor-fenced, bounded timing-only executor read"},
 		"cmd/workass/chat_control.go:authorize:ValidateAgentOwner":                                          {1, "owner authorization after actor fencing"},
 		"cmd/workass/chat_control.go:resolveControls:Catalog":                                               {1, "provider catalog lookup"},
+		"cmd/workass/question_tool.go:executeAgentQuestion:ValidateWorkassQuestionCaller":                   {1, "exact foreground owner and turn fence before question admission"},
+		"cmd/workass/question_tool.go:executeAgentQuestion:AskAgentQuestion":                                {1, "typed provider-neutral question through the owning foreground turn"},
 		"cmd/workass/main.go:registerAcpHandlers:LiveSession":                                               {1, "known transient session lookup after actor route"},
 		"cmd/workass/metrics.go:metrics:Stats":                                                              {1, "global metrics projection"},
 		"cmd/workass/provider_chat_agent_read.go:agentOwnerAuthorized:ValidateAgentOwner":                   {1, "owner authorization after actor fencing"},
@@ -922,12 +924,13 @@ func TestPhaseCStatelessMCPOperationManifest(t *testing.T) {
 		"workass_cancel_chat_turn": {}, "workass_host_artifact": {}, "workass_apply_update": {}, "workass_spawn_subagent": {},
 		"workass_wait_subagent": {}, "workass_wait_subagents": {}, "workass_message_subagent": {},
 		"workass_retry_subagent": {}, "workass_register_external_work": {}, "workass_settle_external_work": {},
-		"workass_cancel_subagent": {}, "workass_decide_subagent_permission": {},
+		"workass_cancel_subagent": {}, "workass_decide_subagent_permission": {}, "workass_ask_user_question": {},
 	}
 	browserMutations := map[string]struct{}{
 		"workass_browser_open": {}, "workass_browser_navigate": {}, "workass_browser_click": {},
 		"workass_browser_type": {}, "workass_browser_scroll": {}, "workass_browser_key": {},
 		"workass_browser_batch": {}, "workass_browser_history": {},
+		"workass_browser_set_viewport": {}, "workass_browser_reset_viewport": {},
 	}
 
 	check := func(kind toolKind, tools []map[string]any, expected map[string]struct{}) {

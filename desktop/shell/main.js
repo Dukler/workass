@@ -248,6 +248,8 @@ function createWindow(url, browserReporter, isController) {
   browserManager = new BrowserManager({
     win,
     WebContentsView,
+    BrowserWindow,
+    nativeImage,
     session,
     chromeVersion: process.versions.chrome,
     requestOpen: (chatId) => {
@@ -308,6 +310,12 @@ function createWindow(url, browserReporter, isController) {
   ipcMain.handle('workass-browser:hide', (event, chatId) => own(event) ? browserManager.hide(chatId) : false);
   ipcMain.handle('workass-browser:close', (event, chatId) => own(event) ? browserManager.close(chatId) : false);
   ipcMain.handle('workass-browser:command', (event, payload) => own(event) ? browserManager.command(payload && payload.chatId, payload && payload.command, payload && payload.value) : null);
+  ipcMain.handle('workass-browser:set-viewport', (event, payload) => own(event) && payload
+    ? browserManager.browserControl('browser.setViewport', { chatId: payload.chatId, width: payload.width, height: payload.height })
+    : null);
+  ipcMain.handle('workass-browser:reset-viewport', (event, payload) => own(event) && payload
+    ? browserManager.browserControl('browser.resetViewport', { chatId: payload.chatId })
+    : null);
   ipcMain.handle('workass-clipboard:copy-text', (event, text) => own(event) ? copyText(clipboard, text) : false);
   ipcMain.handle('workass-clipboard:copy-image-at', (event, payload) => own(event) ? copyImageAt(win, payload) : false);
   ipcMain.handle('workass-image:open-external', async (event, payload) => {
@@ -342,7 +350,7 @@ function createWindow(url, browserReporter, isController) {
     for (const requestSession of artifactRequestSessions) {
       try { requestSession.webRequest.onBeforeSendHeaders(null); } catch { /* older Electron */ }
     }
-    for (const channel of ['activate', 'resize', 'hide', 'close', 'command']) {
+    for (const channel of ['activate', 'resize', 'hide', 'close', 'command', 'set-viewport', 'reset-viewport']) {
       try { ipcMain.removeHandler(`workass-browser:${channel}`); } catch { /* ignore */ }
     }
     for (const channel of ['copy-text', 'copy-image-at']) {

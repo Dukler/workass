@@ -98,6 +98,9 @@ type Bridge struct {
 	// Set before starting a disposable catalog or account-metadata bridge;
 	// it has no chat owner and cannot change an attached user chat's config.
 	catalogProbe bool
+	// catalogRevision fences provider-wide updates from a bridge that predates
+	// the latest authoritative disposable catalog probe.
+	catalogRevision uint64
 	// Effort config options are model-specific. A present key with an empty
 	// slice means the adapter authoritatively omitted the effort axis for that
 	// model (Claude Haiku); absence means the model has not been observed yet.
@@ -401,7 +404,9 @@ func (b *Bridge) start() error {
 	go b.readStdout(stdout)
 	go b.readStderr(stderr)
 	go b.waitChild(cmd, childExited)
-	b.manager.bridgeChanged(b, "spawn")
+	if !b.catalogProbe {
+		b.manager.bridgeChanged(b, "spawn")
+	}
 	return nil
 }
 
@@ -1497,7 +1502,9 @@ func (b *Bridge) setJobForSession(sessionID string, job *Job) {
 	}
 	b.mu.Unlock()
 	if changed {
-		b.manager.bridgeChanged(b, "active")
+		if !b.catalogProbe {
+			b.manager.bridgeChanged(b, "active")
+		}
 	}
 }
 
@@ -1524,7 +1531,9 @@ func (b *Bridge) clearJobForSession(sessionID string, job *Job) {
 	}
 	b.mu.Unlock()
 	if changed {
-		b.manager.bridgeChanged(b, "idle")
+		if !b.catalogProbe {
+			b.manager.bridgeChanged(b, "idle")
+		}
 	}
 	if shouldRecycle {
 		go b.manager.hibernateBridgeIfEligible(b, recycleReason, 0, lastActivity, now, nil)
@@ -1591,7 +1600,9 @@ func (b *Bridge) Close(intentional bool, cause error) {
 	}
 	b.opts.Logf("acp bridge closed", map[string]any{"key": b.key, "intentional": intentional, "error": errString(safeCause)})
 	if b.manager != nil {
-		b.manager.bridgeChanged(b, "closed")
+		if !b.catalogProbe {
+			b.manager.bridgeChanged(b, "closed")
+		}
 	}
 }
 

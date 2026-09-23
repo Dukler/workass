@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  CONTROLLER_MIGRATION_KEY, filterCommands, fold, forceReconnect, type Command,
+  CONTROLLER_MIGRATION_KEY, filterCommands, fold, forceReconnect, localDaemonRestartAvailable,
+  reconnectCommandTitle, RESTART_FAILURE_MESSAGE, RESTART_TIMEOUT_MESSAGE, type Command,
 } from '../src/store/commands.ts';
 
 function cmd(id: string, title: string, keywords?: string): Command {
@@ -41,6 +42,52 @@ test('the recovery command restarts the local daemon before reloading', async ()
   assert.equal(receipt.daemonRestartSettled, true);
 });
 
+test('the renderer does not reload on a structured daemon restart failure', async () => {
+  let reloaded = 0;
+  await assert.rejects(forceReconnect({
+    storage: { removeItem: () => {} }, takeControl: undefined,
+    restartDaemon: async () => ({ ok: false, error: 'private bootstrap detail' }),
+    reload: () => { reloaded += 1; },
+  }), { message: RESTART_FAILURE_MESSAGE });
+  assert.equal(reloaded, 0);
+});
+
+test('the renderer does not reload when the daemon restart promise rejects', async () => {
+  let reloaded = 0;
+  await assert.rejects(forceReconnect({
+    storage: { removeItem: () => {} }, takeControl: undefined,
+    restartDaemon: async () => { throw new Error('private shell detail'); },
+    reload: () => { reloaded += 1; },
+  }), { message: RESTART_FAILURE_MESSAGE });
+  assert.equal(reloaded, 0);
+});
+
+test('restart taking longer than the take-control budget finishes before renderer reload', async () => {
+  let finishRestart!: (value: unknown) => void;
+  let reloaded = 0;
+  const operation = forceReconnect({
+    storage: { removeItem: () => {} }, takeControl: undefined,
+    restartDaemon: () => new Promise((resolve) => { finishRestart = resolve; }),
+    reload: () => { reloaded += 1; }, restartTimeoutMs: 5000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1650));
+  assert.equal(reloaded, 0, 'settling the old 1.5 second race must not reload');
+  finishRestart({ ok: true });
+  const receipt = await operation;
+  assert.equal(receipt.daemonRestartSettled, true);
+  assert.equal(reloaded, 1);
+});
+
+test('restart timeout keeps the renderer open and tells the user to retry', async () => {
+  let reloaded = 0;
+  await assert.rejects(forceReconnect({
+    storage: { removeItem: () => {} }, takeControl: undefined,
+    restartDaemon: () => new Promise(() => {}),
+    reload: () => { reloaded += 1; }, restartTimeoutMs: 5,
+  }), { message: RESTART_TIMEOUT_MESSAGE });
+  assert.equal(reloaded, 0);
+});
+
 // The state this is FOR is a wedged socket, so an invoke that never answers must
 // not eat the reload. The timeout is the guarantee.
 test('a take-control that never answers still reloads', async () => {
@@ -74,6 +121,18 @@ test('a bridge with no take-control reloads without one', async () => {
     storage: { removeItem: () => {} }, takeControl: undefined, reload: () => { reloaded += 1; },
   });
   assert.equal(receipt.takeControlAttempted, false);
+  assert.equal(reloaded, 1);
+});
+
+test('without the shell restart bridge this action is an honest reconnect', async () => {
+  let reloaded = 0;
+  const receipt = await forceReconnect({
+    storage: { removeItem: () => {} }, takeControl: undefined, restartDaemon: undefined,
+    reload: () => { reloaded += 1; },
+  });
+  assert.equal(localDaemonRestartAvailable(), false);
+  assert.equal(reconnectCommandTitle(false), 'Reconectar Workass');
+  assert.equal(receipt.daemonRestartAttempted, false);
   assert.equal(reloaded, 1);
 });
 

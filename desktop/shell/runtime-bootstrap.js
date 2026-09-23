@@ -92,6 +92,36 @@ function healthCheck(url, timeoutMs = 700, expectedVersion = '') {
   });
 }
 
+function healthInstanceId(url, timeoutMs = 700) {
+  return new Promise((resolve) => {
+    let parsed;
+    try { parsed = new URL(url); } catch { resolve(''); return; }
+    if (!['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname)) { resolve(''); return; }
+    const healthURL = new URL('/workass/health', parsed);
+    const transport = healthURL.protocol === 'https:' ? https : healthURL.protocol === 'http:' ? http : null;
+    if (!transport) { resolve(''); return; }
+    const request = transport.get(healthURL, { timeout: timeoutMs, rejectUnauthorized: false }, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => {
+        if (body.length < 4096) body += chunk;
+        if (body.length > 4096) request.destroy();
+      });
+      response.on('end', () => {
+        try {
+          const identity = JSON.parse(body);
+          const instanceId = typeof identity.instanceId === 'string' ? identity.instanceId.trim() : '';
+          resolve(response.statusCode >= 200 && response.statusCode < 300 && identity.app === 'workass' &&
+            /^i-[a-z0-9_-]{1,32}$/iu.test(instanceId) ? instanceId : '');
+        } catch { resolve(''); }
+      });
+      response.on('error', () => resolve(''));
+    });
+    request.on('timeout', () => { request.destroy(); resolve(''); });
+    request.on('error', () => resolve(''));
+  });
+}
+
 function runLaunchctl(args, spawn = spawnSync) {
   return spawn('/bin/launchctl', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
@@ -240,7 +270,7 @@ async function waitForUnhealthy(url, { attempts = 40, delayMs = 100, check = hea
 async function restartDaemonAndRecover({
   runtime, resourcesPath, executablePath = process.execPath, platform = process.platform,
   daemonExecutable = '', check = healthCheck, childSpawn = spawn, wait = waitForHealth,
-  waitForDown = waitForUnhealthy, shutdown = postLocalRecoveryShutdown,
+  waitForDown = waitForUnhealthy, shutdown = postLocalRecoveryShutdown, readInstanceId = healthInstanceId,
 } = {}) {
   if (!runtime || !resourcesPath) throw new Error('runtime and resourcesPath are required');
   const executable = daemonExecutable && fs.existsSync(daemonExecutable)
@@ -249,6 +279,8 @@ async function restartDaemonAndRecover({
   if (!executable) throw new Error('bundled Workass daemon was not found');
 
   const wasHealthy = await check(runtime.daemonURL);
+  const oldInstanceId = wasHealthy ? await readInstanceId(runtime.daemonURL) : '';
+  if (wasHealthy && !oldInstanceId) throw new Error('daemon instance identity is unavailable; restart was not attempted');
   const shutdownAccepted = wasHealthy ? await shutdown(runtime.daemonURL) : false;
   if (wasHealthy && !shutdownAccepted) throw new Error('daemon refused the local recovery shutdown');
   // launchd and Task Scheduler can restart a healthy daemon in less than our
@@ -259,7 +291,11 @@ async function restartDaemonAndRecover({
   const receipt = await ensurePortableDaemon({
     runtime, resourcesPath, executablePath, platform, daemonExecutable: executable, check, childSpawn, wait,
   });
-  return { ...receipt, shutdownAccepted, stoppedObserved };
+  const newInstanceId = await readInstanceId(runtime.daemonURL);
+  if (!newInstanceId || (wasHealthy && newInstanceId === oldInstanceId)) {
+    throw new Error('daemon restart was not confirmed; the running instance did not change');
+  }
+  return { ...receipt, shutdownAccepted, stoppedObserved, oldInstanceId: oldInstanceId || null, newInstanceId };
 }
 
 async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process.platform, home = os.homedir(), uid = process.getuid?.(), spawn = spawnSync, check = healthCheck, forceInstall = false } = {}) {
@@ -361,19 +397,25 @@ async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process
 async function restartPackagedDaemonAndRecover({
   runtime, resourcesPath, platform = process.platform, home = os.homedir(), uid = process.getuid?.(),
   check = healthCheck, waitForDown = waitForUnhealthy, shutdown = postLocalRecoveryShutdown,
-  launchctlSpawn = spawnSync,
+  launchctlSpawn = spawnSync, readInstanceId = healthInstanceId,
 } = {}) {
   if (platform !== 'darwin') throw new Error('packaged daemon recovery is supported on macOS only');
   const executable = path.join(resourcesPath, 'runtime', 'workass');
   if (!fs.existsSync(executable)) throw new Error('bundled Workass daemon was not found');
   const wasHealthy = await check(runtime.daemonURL);
+  const oldInstanceId = wasHealthy ? await readInstanceId(runtime.daemonURL) : '';
+  if (wasHealthy && !oldInstanceId) throw new Error('daemon instance identity is unavailable; restart was not attempted');
   const shutdownAccepted = wasHealthy ? await shutdown(runtime.daemonURL) : false;
   if (wasHealthy && !shutdownAccepted) throw new Error('daemon refused the local recovery shutdown');
   const stoppedObserved = wasHealthy ? await waitForDown(runtime.daemonURL, { check }) : true;
   const receipt = await ensurePackagedDaemon({
     runtime, resourcesPath, platform, home, uid, spawn: launchctlSpawn, check, forceInstall: true,
   });
-  return { ...receipt, shutdownAccepted, stoppedObserved };
+  const newInstanceId = await readInstanceId(runtime.daemonURL);
+  if (!newInstanceId || (wasHealthy && newInstanceId === oldInstanceId)) {
+    throw new Error('daemon restart was not confirmed; the running instance did not change');
+  }
+  return { ...receipt, shutdownAccepted, stoppedObserved, oldInstanceId: oldInstanceId || null, newInstanceId };
 }
 
 module.exports = {
@@ -381,6 +423,7 @@ module.exports = {
   ensurePackagedDaemon,
   ensurePortableDaemon,
   healthCheck,
+  healthInstanceId,
   launchAgentPlist,
   portableDaemonCandidates,
 	portableReleaseManifest,

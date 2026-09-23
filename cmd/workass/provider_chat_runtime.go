@@ -1550,7 +1550,8 @@ func (r *providerChatRuntime) commitLaneSelectionLocked(actor *providerChatActor
 		OperationID: operationID, Digest: digest,
 		Identity: selection.Identity, Thread: selection.Thread, Owner: selection.Owner,
 		CWD: selection.CWD, ModelID: selection.ModelID, ModeID: selection.ModeID,
-		Context: selection.Context, Creation: selection.Creation, Established: selection.Established, Update: update,
+		Context: selection.Context, Delivery: selection.Delivery, Creation: selection.Creation,
+		Established: selection.Established, Update: update,
 	})
 }
 
@@ -2667,7 +2668,6 @@ func (r *providerChatRuntime) ResolvePermission(ctx context.Context, requestID, 
 	if requestID == "" || optionID == "" {
 		return false, true, nil
 	}
-	operationID := providercontract.OperationID("permission:" + requestID + ":" + optionID)
 	for _, actor := range r.actorSnapshot() {
 		actor.mu.Lock()
 		state := actor.engine.Snapshot()
@@ -2676,6 +2676,8 @@ func (r *providerChatRuntime) ResolvePermission(ctx context.Context, requestID, 
 			actor.mu.Unlock()
 			continue
 		}
+		operationID := permissionDecisionOperationID(requestID, optionID,
+			permission.Event.Question != nil && permission.Event.Question.WorkassTool)
 		if _, exists := state.Operations[operationID]; !exists {
 			if err := actor.engine.Apply(chat.ResolvePermission{
 				OperationID: operationID, RequestID: requestID, OptionID: optionID,
@@ -2710,6 +2712,16 @@ func (r *providerChatRuntime) ResolvePermission(ctx context.Context, requestID, 
 		return false, true, errors.New("actor-owned permission request is missing from durable chat state")
 	}
 	return false, false, nil
+}
+
+func permissionDecisionOperationID(requestID, optionID string, structuredQuestion bool) providercontract.OperationID {
+	if !structuredQuestion {
+		// Preserve the established identity for native SDK permission and question
+		// decisions; only Workass CLI answers need opaque content-free ids.
+		return providercontract.OperationID("permission:" + requestID + ":" + optionID)
+	}
+	digest := sha256.Sum256([]byte("workass-question-permission-v1\x00" + requestID + "\x00" + optionID))
+	return providercontract.OperationID("permission-answer-v1:" + hex.EncodeToString(digest[:]))
 }
 
 func (r *providerChatRuntime) PendingPermissions() ([]any, error) {

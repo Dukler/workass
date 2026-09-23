@@ -177,22 +177,35 @@ func modelsFromAvailableModels(raw any) []Model {
 }
 
 func modelsFromAvailableModelsForProvider(raw any, providerID string) []Model {
+	models, authoritative := parseAvailableModels(raw, providerID)
+	if !authoritative {
+		return nil
+	}
+	return models
+}
+
+// parseAvailableModels accepts only a complete ACP model list. Skipping one
+// malformed row would turn a partial payload into an authoritative deletion
+// of every omitted model.
+func parseAvailableModels(raw any, providerID string) ([]Model, bool) {
 	values, ok := raw.([]any)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	models := make([]Model, 0, len(values))
 	for _, rawValue := range values {
 		switch value := rawValue.(type) {
 		case string:
-			if id := strings.TrimSpace(value); id != "" {
-				models = append(models, Model{ModelID: id, Name: id})
+			id := strings.TrimSpace(value)
+			if id == "" {
+				return nil, false
 			}
+			models = append(models, Model{ModelID: id, Name: id})
 		default:
 			item := mapFromAny(rawValue)
 			modelID := firstNonEmpty(asString(item["modelId"]), asString(item["id"]), asString(item["value"]))
 			if modelID == "" {
-				continue
+				return nil, false
 			}
 			models = append(models, providerCatalogModel(providerID, Model{
 				ModelID: modelID, ServiceTiers: serviceTierValues(item["serviceTiers"]),
@@ -200,7 +213,7 @@ func modelsFromAvailableModelsForProvider(raw any, providerID string) []Model {
 			}, asString(item["description"])))
 		}
 	}
-	return models
+	return models, true
 }
 
 func catalogModelsContainEffortVariants(models []Model) bool {

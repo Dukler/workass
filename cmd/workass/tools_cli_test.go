@@ -137,23 +137,36 @@ func TestToolsCLIBrowserImageAndArgumentsFile(t *testing.T) {
 		if params["chatId"] != "mcp-chat" {
 			t.Error("browser call lost exact chat")
 		}
-		raw, _ := json.Marshal(map[string]any{"id": request["id"], "result": map[string]any{"base64": pixel, "mimeType": "image/png"}})
+		clip := mapFromAnyMain(params["clip"])
+		if params["mode"] != "clip" || clip["x"] != float64(1) || clip["height"] != float64(4) {
+			t.Errorf("screenshot options were lost: %#v", params)
+		}
+		raw, _ := json.Marshal(map[string]any{"id": request["id"], "result": map[string]any{
+			"base64": pixel, "mimeType": "image/png", "metadata": map[string]any{
+				"screenshot_id": "shot-cli-1", "mode": "clip", "tab_id": 23,
+				"image": map[string]any{"width": 3, "height": 4},
+			},
+		}})
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw))}, nil
 	})}
 	contextFile, _ := toolCLIContextFixture(t, h.handler)
 	arguments := filepath.Join(dir, "arguments.json")
-	_ = os.WriteFile(arguments, []byte(`{}`), 0o600)
+	_ = os.WriteFile(arguments, []byte(`{"mode":"clip","clip":{"x":1,"y":2,"width":3,"height":4}}`), 0o600)
 	var output bytes.Buffer
 	if err := runToolsCommand(context.Background(), []string{"--context", contextFile, "call", "workass_browser_screenshot", "--input", arguments}, strings.NewReader(""), &output, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	var result struct {
+		Result map[string]any `json:"result"`
 		Images []struct {
 			Path string `json:"path"`
 		} `json:"images"`
 	}
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil || len(result.Images) != 1 {
 		t.Fatal("missing screenshot path")
+	}
+	if result.Result["screenshot_id"] != "shot-cli-1" || result.Result["mode"] != "clip" || result.Result["tab_id"] != float64(23) {
+		t.Fatalf("screenshot metadata was lost during CLI materialization: %#v", result.Result)
 	}
 	data, err := os.ReadFile(result.Images[0].Path)
 	want, _ := base64.StdEncoding.DecodeString(pixel)

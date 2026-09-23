@@ -135,15 +135,33 @@ type PermissionOption struct {
 }
 
 type PermissionQuestion struct {
-	Question    string
-	Header      string
-	Options     []PermissionQuestionOption
-	MultiSelect bool
+	// WorkassTool marks the additive provider-neutral CLI question contract.
+	// Native SDK questions leave this false and keep their existing behavior.
+	WorkassTool   bool
+	ID            string
+	OperationID   string
+	Question      string
+	Header        string
+	Options       []PermissionQuestionOption
+	MultiSelect   bool
+	AllowFreeText bool
+	Answer        *QuestionAnswer
 }
 
 type PermissionQuestionOption struct {
+	ID          string
 	Label       string
 	Description string
+}
+
+// QuestionAnswer is the durable answer contract for a Workass CLI question.
+// SelectedOptionIDs retain the caller's identifiers; free text is carried
+// without trimming so the caller receives exactly what the user entered.
+type QuestionAnswer struct {
+	Status            string   `json:"status"`
+	SelectedOptionIDs []string `json:"selectedOptionIds"`
+	FreeText          string   `json:"freeText"`
+	Reason            string   `json:"reason,omitempty"`
 }
 
 type UsageEvent struct {

@@ -84,7 +84,7 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	catalog := append(agentMCPTools(), browserMCPTools()...)
 	if child {
-		catalog = agentMCPTools()
+		catalog = agentToolsForChild()
 	}
 	if r.Method == http.MethodGet {
 		name := r.URL.Query().Get("name")
@@ -195,7 +195,8 @@ func workassToolMutates(kind toolKind, name string) bool {
 		switch name {
 		case "workass_browser_open", "workass_browser_navigate", "workass_browser_click",
 			"workass_browser_type", "workass_browser_scroll", "workass_browser_key",
-			"workass_browser_batch", "workass_browser_history":
+			"workass_browser_batch", "workass_browser_history", "workass_browser_set_viewport",
+			"workass_browser_reset_viewport":
 			return true
 		default:
 			return false
@@ -207,11 +208,24 @@ func workassToolMutates(kind toolKind, name string) bool {
 		"workass_apply_update",
 		"workass_spawn_subagent", "workass_wait_subagent", "workass_wait_subagents",
 		"workass_message_subagent", "workass_retry_subagent", "workass_register_external_work",
-		"workass_settle_external_work", "workass_cancel_subagent", "workass_decide_subagent_permission":
+		"workass_settle_external_work", "workass_cancel_subagent", "workass_decide_subagent_permission",
+		"workass_ask_user_question":
 		return true
 	default:
 		return false
 	}
+}
+
+func agentToolsForChild() []map[string]any {
+	tools := agentMCPTools()
+	filtered := make([]map[string]any, 0, len(tools)-1)
+	for _, tool := range tools {
+		if tool["name"] == "workass_ask_user_question" {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
 }
 
 func requiredToolOperationID(kind toolKind, call browserMCPCallParams) (providercontract.OperationID, error) {

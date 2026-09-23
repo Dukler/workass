@@ -597,8 +597,9 @@ func (m *Manager) finishProviderUpdateRun(providerID string, run *providerUpdate
 		lastError = "actualizacion fallida"
 	}
 	if exitCode == 0 && status == "done" {
+		catalogRefreshed := false
 		if version, recheckError := m.detectInstalledCLIVersionAfterProviderUpdate(providerID); version != nil {
-			m.setProviderCLIVersion(providerID, version)
+			catalogRefreshed = m.setProviderCLIVersion(providerID, version)
 			if comparison, comparable := compareLenientSemver(version.Version, run.target); comparable && comparison > 0 {
 				status = "failed"
 				exitCode = -1
@@ -607,6 +608,10 @@ func (m *Manager) finishProviderUpdateRun(providerID string, run *providerUpdate
 			}
 		} else {
 			m.setProviderUpdateRecheckError(providerID, recheckError)
+		}
+		if !catalogRefreshed {
+			m.invalidateProviderCatalog(providerID)
+			m.refreshProviderCatalogNow(context.Background(), providerID)
 		}
 	} else if version := m.detectInstalledCLIVersion(context.Background(), providerID); version != nil {
 		m.setProviderCLIVersion(providerID, version)
@@ -645,16 +650,45 @@ func (m *Manager) providerExists(providerID string) bool {
 	return m.providers[normalizeProviderID(providerID)] != nil
 }
 
-func (m *Manager) setProviderCLIVersion(providerID string, version *CLIVersion) {
+func (m *Manager) setProviderCLIVersion(providerID string, version *CLIVersion) bool {
 	if version == nil {
-		return
+		return false
 	}
+	providerID = normalizeProviderID(providerID)
+	refresh := false
+	previousStatus := providerStatusInactive
+	previousError := ""
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if runtime := m.providers[normalizeProviderID(providerID)]; runtime != nil {
+	if runtime := m.providers[providerID]; runtime != nil {
+		previousStatus = runtime.Status
+		previousError = runtime.Error
+		versionChanged := runtime.CLIVersion != nil && runtime.CLIVersion.Version != "" &&
+			version.Version != "" && runtime.CLIVersion.Version != version.Version
+		refresh = versionChanged || runtime.CatalogRefreshPending
 		runtime.CLIVersion = copyCLIVersion(version)
+		if refresh {
+			invalidateProviderCatalogLocked(runtime)
+			runtime.CatalogRefreshPending = false
+		}
 	}
+	m.mu.Unlock()
 	m.clearProviderUpdateRecheckError(providerID)
+	if refresh {
+		m.refreshProviderCatalogNow(context.Background(), providerID)
+		// A catalog-only update probe does not activate an inactive provider.
+		// Keep its previous readiness state when the fresh executable cannot
+		// provide a catalog; authentication policy may still disable it above.
+		if previousStatus == providerStatusInactive {
+			m.mu.Lock()
+			if runtime := m.providers[providerID]; runtime != nil && runtime.Config.Enabled && !runtime.Config.NeedsLogin &&
+				runtime.CatalogRefreshError != "" && len(runtime.Models) == 0 {
+				runtime.Status = previousStatus
+				runtime.Error = previousError
+			}
+			m.mu.Unlock()
+		}
+	}
+	return refresh
 }
 
 func (m *Manager) providerUpdateRunning(providerID string) bool {
@@ -811,6 +845,8 @@ func (m *Manager) providerCLIExecutable(providerID string) (string, error) {
 		m.mu.Lock()
 		if runtime := m.providers[id]; runtime != nil {
 			runtime.Config.ResolvedCommand = resolved
+			runtime.CatalogRefreshPending = true
+			invalidateProviderCatalogLocked(runtime)
 		}
 		filePath := m.providerConfigFile
 		m.mu.Unlock()

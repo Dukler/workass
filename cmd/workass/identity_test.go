@@ -10,7 +10,7 @@ import (
 
 func TestDaemonIdentityDescribesTheMachineAndWhatItSpeaks(t *testing.T) {
 	identity := machineid.Identity{MachineID: "m-abc", DisplayName: "Builder"}
-	doc := daemonIdentity(identity, "prod", "lan", 80, nil, testFleetIDs{"fleet-one"}, "")
+	doc := daemonIdentity(identity, "prod", "lan", 80, nil, testFleetIDs{"fleet-one"}, "", "i-0123456789abcdef")
 
 	for key, want := range map[string]any{
 		"machineId":   "m-abc",
@@ -23,6 +23,7 @@ func TestDaemonIdentityDescribesTheMachineAndWhatItSpeaks(t *testing.T) {
 		"bind":        "lan",
 		"port":        80,
 		"secure":      false,
+		"instanceId":  "i-0123456789abcdef",
 	} {
 		if got := doc[key]; got != want {
 			t.Errorf("identity[%q] = %v, want %v", key, got, want)

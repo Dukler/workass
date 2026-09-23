@@ -746,6 +746,10 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .permcard.ask .askskip { margin-top: 8px; background: transparent; border: 0; padding: 0; font-family: inherit; font-size: 11.5px; color: var(--faint); cursor: pointer; transition: color .14s ease; }
 .permcard.ask .askskip:hover:not(:disabled) { color: var(--ink2); }
 .permcard.ask .askskip:disabled { cursor: default; }
+.permcard.ask .askfree-text { display: block; width: 100%; min-height: 72px; margin-top: 9px; resize: vertical; box-sizing: border-box; border: 1px solid var(--line2); border-radius: 8px; padding: 8px 10px; background: var(--field); color: var(--ink); font: inherit; font-size: 12.5px; }
+.permcard.ask .ask-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; }
+.permcard.ask .ask-submit { border: 1px solid var(--acc); border-radius: 7px; padding: 5px 10px; background: var(--acc); color: var(--on-acc, white); font: inherit; font-size: 11.5px; cursor: pointer; }
+.permcard.ask .ask-submit:disabled { opacity: .5; cursor: default; }
 
 .stamp { display: flex; align-items: center; gap: 12px; color: var(--faint); font-size: 12px; margin: 14px 0 0; }
 .stamp svg { width: 13px; height: 13px; cursor: pointer; }
@@ -1431,6 +1435,18 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .brw2close { width: 30px; height: 30px; display: grid; place-items: center; flex: none; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
 .brw2close svg { width: 15px; height: 15px; }
 .brw2close:hover { background: var(--line); color: var(--ink); }
+.brw2viewportbar { display: flex; align-items: center; gap: 5px; flex: none; min-width: 0; min-height: 30px; flex-wrap: wrap; color: var(--muted); font-size: 10px; }
+.brw2viewport-preset { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.brw2viewport-preset select { min-width: 0; max-width: 168px; border: 1px solid var(--line2); border-radius: 6px; padding: 4px 5px; background: var(--field); color: var(--ink2); font: inherit; font-size: 10px; }
+.brw2viewport-custom { display: flex; align-items: center; gap: 4px; min-width: 0; flex-wrap: wrap; }
+.brw2viewport-custom label { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.brw2viewport-custom input { width: 52px; min-width: 0; padding: 3px 4px; border: 1px solid var(--line2); border-radius: 5px; background: var(--field); color: var(--ink2); font: inherit; }
+.brw2viewport-custom input[aria-invalid="true"] { border-color: var(--danger, #c44); }
+.brw2viewport-effective { flex: 1; min-width: 86px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.brw2viewport-action { border: 1px solid var(--line2); border-radius: 6px; padding: 4px 7px; background: var(--field); color: var(--ink2); font: inherit; cursor: pointer; }
+.brw2viewport-action:hover:not(:disabled) { border-color: color-mix(in srgb, var(--acc) 55%, var(--line2)); color: var(--ink); }
+.brw2viewport-action:disabled { opacity: .5; cursor: default; }
+.brw2viewport-error { flex: 0 0 100%; min-width: 0; color: var(--danger, #c44); line-height: 1.35; overflow-wrap: anywhere; }
 .brw2view { flex: 1; min-height: 0; position: relative; background: #fff; border: 1px solid var(--line2); border-radius: 10px; overflow: hidden; }
 .brw2empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: #9a9a9a; font-size: 12px; background: #fff; }
 .brw2empty svg { width: 30px; height: 30px; opacity: .5; color: #b8b8b8; }
