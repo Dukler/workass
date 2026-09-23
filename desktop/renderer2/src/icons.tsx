@@ -23,6 +23,8 @@ export const IcEdit = () => <S><path d="M11 2l3 3-8.5 8.5H2.5V10.5z" /></S>;
 export const IcShield = () => <S><path d="M8 2l5 2.5v4C13 11.5 10.8 13.4 8 14 5.2 13.4 3 11.5 3 8.5v-4z" /></S>;
 export const IcExpand = () => <S><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5L9 7M2.5 13.5L7 9" /></S>;
 export const IcClose = () => <S><path d="M4 4l8 8M12 4l-8 8" /></S>;
+export const IcCheck = () => <S><path d="M3.6 8.4l2.9 2.9 5.9-6.4" /></S>;
+export const IcArrowUp = () => <S><path d="M8 13V3.5M4 7.5l4-4 4 4" /></S>;
 export const IcWarnTri = () => <S><path d="M8 2.8L14 13H2z" /><path d="M8 6.6v3M8 11.4v.1" /></S>;
 export const IcRetryArc = () => <S><path d="M13 8a5 5 0 1 1-1.5-3.6" /><path d="M13 2.8v2.7h-2.7" /></S>;
 export const IcChevron = () => <S><path d="M6 4l4 4-4 4" /></S>;
