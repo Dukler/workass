@@ -10,6 +10,7 @@ import { modelContextQualifier, resolveModelSelection } from '../model-selection
 import { favoriteCatalogModels, isModelFavorite } from '../model-favorites';
 import { attachmentWorkBoundary, clipboardImageFiles, createDraftImages, draftImagePayloads, withoutDraftImages } from '../image-drafts';
 import { QueueList } from './QueueList';
+import { PermCard } from './messages';
 import { liveSteeringSupported, stopAndSendSupported } from '../steering';
 import { composerKeyAction, type ComposerSubmitIntent } from '../composer-submit';
 import { insertAtCaret, startRecording, transcribe, voiceStatus, type Recorder, type VoiceState } from '../voice';
@@ -484,6 +485,7 @@ function dictationVocab(chat: Chat | null): string[] {
 
 export function Composer({ chat }: { chat: Chat | null }) {
   const app = useApp();
+  const pendingQuestion = chat?.messages.find((message) => message.permission?.question && !message.permission.resolved);
   const contextUsage = contextUsageForProvider(chat?.contextUsageByProvider, chat?.providerId);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -868,7 +870,9 @@ export function Composer({ chat }: { chat: Chat | null }) {
       {/* The box now holds ONLY the textarea + the round send/stop button pinned at
           its bottom-right edge (Claude-Code style). Every control moved to the
           external .comprow below, outside the box border. */}
-      <div className="comp">
+      {chat && pendingQuestion?.permission ? (
+        <PermCard key={`${pendingQuestion.permission.id}:${pendingQuestion.permission.question?.questionId ?? ''}`} docked perm={pendingQuestion.permission} tabId={chat.id} msgId={pendingQuestion.id} />
+      ) : <div className="comp">
         <textarea
           ref={taRef} rows={1} value={text} placeholder="Contale a tu agente qué sigue…"
           onChange={(e) => change(e.target.value)} onKeyDown={keydown} onPaste={onPaste} onScroll={fade}
@@ -884,7 +888,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
               : <svg className="stopsq" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="2" /></svg>
             : sendGlyph}
         </button>
-      </div>
+      </div>}
       <div className="comprow">
         <div style={{ position: 'relative' }}>
           <button className="permchip" onClick={() => setModeOpen((v) => !v)} disabled={modes.length === 0}>{permLabel}</button>

@@ -415,7 +415,7 @@ export function nodeDuration(n: SubagentNode, nowMs: number): string {
   const evs = n.header ? [n.header, ...n.calls] : n.calls;
   return groupDuration(evs, nowMs, nodeState(n) === 'running');
 }
-export function PermCard({ perm, tabId, msgId }: { perm: PermissionState; tabId: string; msgId: string }) {
+export function PermCard({ perm, tabId, msgId, docked = false }: { perm: PermissionState; tabId: string; msgId: string; docked?: boolean }) {
   const decide = (optionId: string) => { if (!perm.resolved) void store.decidePermission(tabId, msgId, perm.id, optionId); };
   const [selected, setSelected] = useState<string[]>([]);
   const [freeText, setFreeText] = useState('');
@@ -435,8 +435,8 @@ export function PermCard({ perm, tabId, msgId }: { perm: PermissionState; tabId:
     const submit = () => decideWorkassAnswer(encodeWorkassQuestionAnswer({ status: 'answered', selectedOptionIds: selected, freeText }));
     const dismiss = () => decideWorkassAnswer(encodeWorkassQuestionAnswer({ status: 'dismissed' }));
     return (
-      <div className="permcard ask" data-testid={workassTool ? 'workass-question-card' : undefined}>
-        {q.header && <div className="askhead">{q.header}</div>}
+      <div className={`permcard ask${docked ? ' ask-docked' : ''}`} data-testid={workassTool ? 'workass-question-card' : 'native-question-card'}>
+        {(q.header || docked) && <div className="askhead">{q.header || 'Pregunta'}</div>}
         <div className="askq">{q.question}</div>
         <div className="askopts">
           {answers.map((o) => (
@@ -454,15 +454,17 @@ export function PermCard({ perm, tabId, msgId }: { perm: PermissionState; tabId:
                   : [o.optionId]);
               }}
             >
-              <div className="asklabel">{o.name}</div>
+              <span className="asknumber" aria-hidden="true">{answers.indexOf(o) + 1}</span>
+              <span className="askchoice"><span className="asklabel">{o.name}</span>
               {o.description && <div className="askdesc">{o.description}</div>}
+              </span>
             </button>
           ))}
         </div>
-        {workassTool && q.allowFreeText && <textarea className="askfree-text" data-testid="workass-question-free-text" aria-label="Respuesta adicional" value={freeText} disabled={!!perm.resolved} onChange={(event) => setFreeText(limitWorkassQuestionText(event.target.value))} />}
+        {workassTool && q.allowFreeText && <textarea className="askfree-text" data-testid="workass-question-free-text" aria-label="Respuesta adicional" placeholder="Escribí otra respuesta…" rows={1} value={freeText} disabled={!!perm.resolved} onChange={(event) => setFreeText(limitWorkassQuestionText(event.target.value))} />}
         {workassTool && <div className="ask-actions">
-          <button className="askskip" data-testid="workass-question-dismiss" disabled={!!perm.resolved} onClick={dismiss}>Descartar</button>
-          {(q.multiSelect || q.allowFreeText) && <button className="ask-submit" data-testid="workass-question-submit" disabled={!!perm.resolved || !hasAnswer} onClick={submit}>Enviar respuesta</button>}
+          <button className="askskip" data-testid="workass-question-dismiss" disabled={!!perm.resolved} onClick={dismiss}>Omitir</button>
+          {(q.multiSelect || (q.allowFreeText && (answers.length === 0 || (freeText.trim().length > 0 && selected.length === 0)))) && <button className="ask-submit" data-testid="workass-question-submit" disabled={!!perm.resolved || !hasAnswer} onClick={submit}>{q.multiSelect ? `Enviar (${selected.length})` : 'Enviar'}</button>}
         </div>}
         {!workassTool && skip && <button className="askskip" disabled={!!perm.resolved} onClick={() => decide(skip.optionId)}>{skip.name}</button>}
       </div>

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createServer, type ViteDevServer } from 'vite';
 import { fileURLToPath } from 'node:url';
@@ -46,8 +47,16 @@ test('question UI encodes selected ids and free text in the frozen optionId enve
   assert.deepEqual(JSON.parse(new TextDecoder().decode(bytes)), answer);
 });
 
-test('the real Workass card renders structured options, free text, and localized actions', () => {
+test('pending question takes the composer input slot while controls remain below it', () => {
+  const composer = readFileSync(new URL('../src/components/Composer.tsx', import.meta.url), 'utf8');
+  assert.match(composer, /pendingQuestion\?\.permission\s*\?\s*\(/);
+  assert.match(composer, /<PermCard key=\{`\$\{pendingQuestion\.permission\.id\}:\$\{pendingQuestion\.permission\.question\?\.questionId \?\? ''\}`\} docked perm=\{pendingQuestion\.permission\}/);
+  assert.match(composer, /<div className="comprow">/);
+});
+
+test('the docked Workass question renders compact numbered choices and structured actions', () => {
   const html = renderToStaticMarkup(React.createElement(PermCard, {
+    docked: true,
     tabId: 'question-tab', msgId: 'question-message',
     perm: {
       id: 'question-request', title: 'Assistant question', kind: 'workass_question', resolved: null,
@@ -59,13 +68,15 @@ test('the real Workass card renders structured options, free text, and localized
     },
   }));
   assert.match(html, /data-testid="workass-question-card"/);
+  assert.match(html, /ask-docked/);
+  assert.match(html, /asknumber/);
   assert.match(html, /¿Qué destino preparo\?/);
   assert.match(html, /Canary/);
   assert.match(html, /Producción/);
   assert.match(html, /data-testid="workass-question-free-text"/);
   assert.match(html, /Respuesta adicional/);
-  assert.match(html, /Descartar/);
-  assert.match(html, /Enviar respuesta/);
+  assert.match(html, /Omitir/);
+  assert.match(html, />Enviar \(0\)</);
   assert.doesNotMatch(html, /run .*AskUserQuestion/);
 });
 
@@ -80,7 +91,7 @@ test('single-choice Workass questions keep choices unselected and retain submit 
     },
   }));
   assert.equal((html.match(/data-testid="workass-question-option"/g) ?? []).length, 2);
-  assert.match(html, /data-testid="workass-question-submit" disabled/);
+  assert.doesNotMatch(html, /data-testid="workass-question-submit"/);
   assert.doesNotMatch(html, /aria-pressed="true"/);
   assert.match(html, /Yes/);
   assert.match(html, /No/);

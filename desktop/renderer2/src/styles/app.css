@@ -750,6 +750,23 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .permcard.ask .ask-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; }
 .permcard.ask .ask-submit { border: 1px solid var(--acc); border-radius: 7px; padding: 5px 10px; background: var(--acc); color: var(--on-acc, white); font: inherit; font-size: 11.5px; cursor: pointer; }
 .permcard.ask .ask-submit:disabled { opacity: .5; cursor: default; }
+.permcard.ask-docked { display: block; width: min(100%, 780px); margin: 0 auto; padding: 2px 0 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.ask-docked .askhead { display: inline; margin-right: 7px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.ask-docked .askq { display: inline; margin: 0; font-size: 12.5px; }
+.ask-docked .askopts { display: flex; flex-direction: column; gap: 1px; margin-top: 8px; }
+.ask-docked .askopt { box-sizing: border-box; display: flex; align-items: flex-start; gap: 9px; width: 100%; padding: 6px 9px; text-align: left; border: 0; border-radius: 6px; background: transparent; transition: background .14s ease; }
+.ask-docked .askopt:hover:not(:disabled) { background: var(--line); }
+.ask-docked .askopt.on { border: 0; background: var(--field); opacity: 1; }
+.ask-docked .askopt:disabled { cursor: default; opacity: .5; }
+.ask-docked .asknumber { box-sizing: border-box; flex: 0 0 19px; width: 19px; height: 19px; display: grid; place-items: center; margin-top: 0; border-radius: 5px; background: var(--field); color: var(--muted); font-size: 10px; line-height: 1; }
+.ask-docked .askopt:hover:not(:disabled) .asknumber, .ask-docked .askopt.on .asknumber { background: var(--line); }
+.ask-docked .askchoice { min-width: 0; flex: 1; line-height: 1.3; }
+.ask-docked .asklabel { font-size: 11.5px; line-height: inherit; }
+.ask-docked .askdesc { margin-top: 2px; font-size: 11px; line-height: 1.4; color: var(--muted); white-space: normal; overflow-wrap: anywhere; }
+.ask-docked .askfree-text { min-height: 32px; height: 32px; resize: none; margin-top: 6px; padding: 5px 8px; font-size: 11.5px; }
+.ask-docked .ask-actions { margin-top: 5px; }
+.ask-docked .askskip { margin-top: 0; border: 0; padding: 3px 0; background: transparent; color: var(--muted); font-size: 11px; }
+.ask-docked .ask-submit { padding: 3px 9px; }
 
 .stamp { display: flex; align-items: center; gap: 12px; color: var(--faint); font-size: 12px; margin: 14px 0 0; }
 .stamp svg { width: 13px; height: 13px; cursor: pointer; }

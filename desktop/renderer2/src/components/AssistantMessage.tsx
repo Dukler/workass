@@ -146,7 +146,7 @@ function AssistantSliceBody({
         </div>
       )}
 
-      {terminal && msg.permission && <PermCard perm={msg.permission} tabId={tabId} msgId={owner.id} />}
+      {terminal && msg.permission && !msg.permission.question && <PermCard perm={msg.permission} tabId={tabId} msgId={owner.id} />}
 
       {showStamp && (
         <div className="stamp">
