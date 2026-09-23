@@ -319,6 +319,29 @@ async function runTurn(id, params) {
       item: { type: 'commandExecution', id: 'command-fixture', command: 'printf fixture', commandActions: [], cwd: params.cwd || process.cwd(), status: 'completed', aggregatedOutput: 'fixture' },
     });
   }
+  if (text.includes('[fixture:request-user-input]') || text.includes('[fixture:question-cancel]')
+      || text.includes('[fixture:question-unsupported]') || text.includes('[fixture:question-wrong-owner]')
+      || text.includes('[fixture:question-stale-turn]')) {
+    let answer;
+    try {
+      answer = await request('item/tool/requestUserInput', {
+      threadId: text.includes('[fixture:question-wrong-owner]') ? 'wrong-thread' : params.threadId,
+      turnId: text.includes('[fixture:question-stale-turn]') ? 'stale-turn' : turnId,
+      itemId: 'question-fixture', isBlocking: true,
+      autoResolutionMs: null,
+      questions: [{ id: 'question-1', header: 'Choice', question: 'Pick one?',
+        isOther: true, isSecret: text.includes('[fixture:question-unsupported]'),
+        options: [{ label: 'Alpha', description: 'First' }, { label: 'Beta', description: 'Second' }] }],
+      });
+    } catch (error) {
+      answer = { error: { message: error.message } };
+    }
+    if (text.includes('[fixture:request-user-input]')
+        && answer?.answers?.['question-1']?.answers?.[0] !== 'Beta') throw new Error('fixture question answer mismatch');
+    if (text.includes('[fixture:question-cancel]') && Object.keys(answer?.answers || {}).length !== 0) {
+      throw new Error('fixture cancellation invented an answer');
+    }
+  }
   notify('item/agentMessage/delta', {
     threadId: params.threadId, turnId, itemId: 'message-fixture',
     delta: text.includes('[fixture:image]')

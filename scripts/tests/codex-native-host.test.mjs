@@ -11,6 +11,62 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../
 const host = path.join(repoRoot, 'scripts', 'codex-native-host.mjs');
 const fixture = path.join(repoRoot, 'desktop', 'acp', 'mock-codex-app-server.mjs');
 
+async function startQuestion(peer, promptText) {
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const opened = await peer.waitFor((message) => message.id === 2);
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId: opened.result.sessionId, prompt: [{ type: 'text', text: promptText }],
+  } });
+  return { sessionId: opened.result.sessionId };
+}
+
+test('native Codex requestUserInput uses the existing answer question card and maps the selected label', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  await startQuestion(peer, '[fixture:request-user-input]');
+  const card = await peer.waitFor((m) => m.method === 'session/request_permission');
+  assert.equal(card.params.toolCall.kind, 'other');
+  assert.deepEqual(card.params.toolCall.rawInput, {
+    question: 'Pick one?', header: 'Choice',
+    options: [{ label: 'Alpha', description: 'First' }, { label: 'Beta', description: 'Second' }],
+    multiSelect: false,
+  });
+  assert.deepEqual(card.params.options.map((o) => o.kind), ['answer', 'answer', 'reject_once']);
+  peer.send({ jsonrpc: '2.0', id: card.id, result: { outcome: { outcome: 'selected', optionId: 'answer-1' } } });
+  assert.equal((await peer.waitFor((m) => m.id === 3)).error, undefined);
+  assert.equal(peer.messages.find((m) => m.method === 'session/update' && m.params?.update?.sessionUpdate === 'agent_message_chunk')?.params.update.content.text, 'Fixture answer');
+});
+
+test('native Codex requestUserInput cancellation returns no invented answer', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  await startQuestion(peer, '[fixture:question-cancel]');
+  const card = await peer.waitFor((m) => m.method === 'session/request_permission');
+  peer.send({ jsonrpc: '2.0', id: card.id, result: { outcome: { outcome: 'selected', optionId: 'question-cancel' } } });
+  assert.equal((await peer.waitFor((m) => m.id === 3)).error, undefined);
+  assert.equal(peer.messages.some((m) => m.method === 'session/request_permission' && m.id !== card.id), false);
+});
+
+test('native Codex requestUserInput rejects secret question shapes', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  await startQuestion(peer, '[fixture:question-unsupported]');
+  await peer.waitFor((m) => m.id === 3);
+  assert.equal(peer.messages.some((m) => m.method === 'session/request_permission'), false);
+});
+
+test('native Codex requestUserInput ignores wrong-owner and stale-turn requests', async (t) => {
+  for (const marker of ['[fixture:question-wrong-owner]', '[fixture:question-stale-turn]']) {
+    const peer = startHost();
+    t.after(() => peer.child.kill('SIGKILL'));
+    await startQuestion(peer, marker);
+    await peer.waitFor((m) => m.id === 3);
+    assert.equal(peer.messages.some((m) => m.method === 'session/request_permission'), false, marker);
+  }
+});
+
 function startHost(env = {}) {
   const child = spawn(process.execPath, [host], {
     cwd: repoRoot,
