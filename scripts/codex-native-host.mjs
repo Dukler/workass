@@ -1065,8 +1065,61 @@ async function handleAppRequest(message) {
     return { permissions: {}, scope: 'turn', strictAutoReview: true };
   }
   if (message.method === 'mcpServer/elicitation/request') return { action: 'cancel', content: null, _meta: null };
-  if (message.method === 'item/tool/requestUserInput') return { answers: {} };
+  if (message.method === 'item/tool/requestUserInput') return await requestUserInput(session, params);
   throw new Error(`Unsupported Codex app-server client request: ${message.method}`);
+}
+
+async function requestUserInput(session, params) {
+  // app-server requestUserInput params (installed Codex protocol):
+  // {threadId, turnId, questions:[{id,header,question,options:[{label,description}],isOther?}]}
+  // Only the current foreground turn may park its owner on Workass's existing
+  // question card. A stale or child-thread request is cancelled without an
+  // answer; malformed/unsupported question shapes fail explicitly.
+  if (!session || params.threadId !== session.threadId || !session.activePrompt
+      || !session.activeTurnId || params.turnId !== session.activeTurnId) {
+    return { answers: {} };
+  }
+  const questions = Array.isArray(params.questions) ? params.questions : [];
+  if (!questions.length || questions.some((q) => !q || typeof q.id !== 'string' || !q.id
+      || typeof q.question !== 'string' || !q.question.trim()
+      || q.isSecret === true
+      || !Array.isArray(q.options) || !q.options.length
+      || q.options.some((o) => !o || typeof o.label !== 'string' || !o.label.trim()))) {
+    throw new Error('Unsupported Codex requestUserInput question shape');
+  }
+  const answers = {};
+  for (const q of questions) {
+    const header = typeof q.header === 'string' && q.header.trim() ? q.header.trim() : 'Question';
+    const choices = q.options;
+    const result = await requestWorkass('session/request_permission', {
+      sessionId: session.threadId,
+      toolCall: {
+        toolCallId: params.itemId,
+        title: header,
+        kind: 'other',
+        rawInput: {
+          question: q.question.trim(), header,
+          options: choices.map((choice) => ({
+            label: choice.label.trim(), description: typeof choice.description === 'string' ? choice.description : '',
+          })),
+          multiSelect: false,
+        },
+      },
+      options: [
+        ...choices.map((choice, index) => ({ optionId: `answer-${index}`, name: choice.label.trim(), kind: 'answer' })),
+        { optionId: 'question-cancel', name: 'Answer in chat', kind: 'reject_once' },
+      ],
+    }, 0);
+    // The request may resolve after its turn was cancelled or superseded.
+    if (session.activeTurnId !== params.turnId || !session.activePrompt) return { answers: {} };
+    const outcome = result?.outcome || {};
+    if (outcome.outcome !== 'selected' || outcome.optionId === 'question-cancel') return { answers: {} };
+    const picked = /^answer-(\d+)$/.exec(String(outcome.optionId || ''));
+    const choice = picked && choices[Number(picked[1])];
+    if (!choice) return { answers: {} };
+    answers[q.id] = { answers: [choice.label] };
+  }
+  return { answers };
 }
 
 async function requestApproval(session, toolCall, permissions = false) {
