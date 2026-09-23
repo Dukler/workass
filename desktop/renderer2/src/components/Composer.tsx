@@ -10,7 +10,7 @@ import { modelContextQualifier, resolveModelSelection } from '../model-selection
 import { favoriteCatalogModels, isModelFavorite } from '../model-favorites';
 import { attachmentWorkBoundary, clipboardImageFiles, createDraftImages, draftImagePayloads, withoutDraftImages } from '../image-drafts';
 import { QueueList } from './QueueList';
-import { PermCard } from './messages';
+import { QuestionDock, usePendingQuestion } from './QuestionDock';
 import { liveSteeringSupported, stopAndSendSupported } from '../steering';
 import { composerKeyAction, type ComposerSubmitIntent } from '../composer-submit';
 import { insertAtCaret, startRecording, transcribe, voiceStatus, type Recorder, type VoiceState } from '../voice';
@@ -485,7 +485,7 @@ function dictationVocab(chat: Chat | null): string[] {
 
 export function Composer({ chat }: { chat: Chat | null }) {
   const app = useApp();
-  const pendingQuestion = chat?.messages.find((message) => message.permission?.question && !message.permission.resolved);
+  const pendingQuestion = usePendingQuestion(chat);
   const contextUsage = contextUsageForProvider(chat?.contextUsageByProvider, chat?.providerId);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -521,6 +521,9 @@ export function Composer({ chat }: { chat: Chat | null }) {
   // actually rendered, so the box never collapses on a multi-line draft nor
   // balloons on an empty one when switching tabs.
   useLayoutEffect(() => { autosize(); }, [text]);
+  // The box is display:none while a question docks in its place; re-measure the
+  // draft when it comes back.
+  useLayoutEffect(() => { if (!pendingQuestion) autosize(); }, [!!pendingQuestion]);
   // The selected chat can change the per-chat right column after this keyed
   // composer mounts. Re-measure when that layout change alters the actual text
   // width, otherwise wrapped drafts keep the previous chat's too-short height.
@@ -870,9 +873,8 @@ export function Composer({ chat }: { chat: Chat | null }) {
       {/* The box now holds ONLY the textarea + the round send/stop button pinned at
           its bottom-right edge (Claude-Code style). Every control moved to the
           external .comprow below, outside the box border. */}
-      {chat && pendingQuestion?.permission ? (
-        <PermCard key={`${pendingQuestion.permission.id}:${pendingQuestion.permission.question?.questionId ?? ''}`} docked perm={pendingQuestion.permission} tabId={chat.id} msgId={pendingQuestion.id} />
-      ) : <div className="comp">
+      {chat && pendingQuestion && <QuestionDock chatId={chat.id} pending={pendingQuestion} />}
+      <div className="comp" hidden={!!pendingQuestion}>
         <textarea
           ref={taRef} rows={1} value={text} placeholder="Contale a tu agente qué sigue…"
           onChange={(e) => change(e.target.value)} onKeyDown={keydown} onPaste={onPaste} onScroll={fade}
@@ -888,7 +890,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
               : <svg className="stopsq" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="2" /></svg>
             : sendGlyph}
         </button>
-      </div>}
+      </div>
       <div className="comprow">
         <div style={{ position: 'relative' }}>
           <button className="permchip" onClick={() => setModeOpen((v) => !v)} disabled={modes.length === 0}>{permLabel}</button>

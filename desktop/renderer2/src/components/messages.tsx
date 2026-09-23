@@ -1,7 +1,7 @@
-import { memo, useEffect, useState, type ReactNode } from 'react';
+import { memo, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import type { ThinkingEvent, PlanEvent, ToolEvent, PermissionState, RestoredEvent, MessageImage, SteerState } from '../store/types';
 import { renderInline } from '../markdown/inline';
-import { IcShield, ModelIcon, ActionGlyph } from '../icons';
+import { IcShield, IcCheck, IcArrowUp, IcClose, ModelIcon, ActionGlyph } from '../icons';
 import { store } from '../store/store';
 import { messageImageSrc } from '../image-drafts';
 import { isSubagentHeader, type SubagentNode } from '../subagent-layout';
@@ -415,61 +415,195 @@ export function nodeDuration(n: SubagentNode, nowMs: number): string {
   const evs = n.header ? [n.header, ...n.calls] : n.calls;
   return groupDuration(evs, nowMs, nodeState(n) === 'running');
 }
-export function PermCard({ perm, tabId, msgId, docked = false }: { perm: PermissionState; tabId: string; msgId: string; docked?: boolean }) {
+// ── Question dock ────────────────────────────────────────────────────────────
+// An agent QUESTION (Workass CLI question or native AskUserQuestion). Modeled on
+// Claude Code's and Codex's docked question: it takes the composer's place (the
+// Composer mounts it; the transcript never shows it), reads as a short list of
+// numbered choices, the last row is a free-text answer, and the footer only
+// carries keyboard hints plus Dismiss/Send.
+//
+// Behavior contract (tests/workass-question.test.ts):
+//   - single-choice rows answer on click (Workass: that id + any typed text);
+//   - multi-choice rows toggle and are sent with Send;
+//   - typed text alone is a valid answer; Descartar dismisses;
+//   - native SDK questions stay one-click, keep their own skip option, and
+//     never render the Workass send button.
+// Rendered as a plain function from PermCard (not its own component) so the
+// state hooks stay PermCard's and the textarea stays a direct child of the root.
+const QUESTION_KEY_LIMIT = 9;
+
+interface QuestionChoice { optionId: string; label: string; description?: string }
+interface QuestionViewArgs {
+  perm: PermissionState;
+  decide: (optionId: string) => void;
+  selected: string[];
+  setSelected: (next: string[] | ((current: string[]) => string[])) => void;
+  freeText: string;
+  setFreeText: (next: string) => void;
+}
+
+function questionRows(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>('[data-qrow]'));
+}
+
+function renderQuestion({ perm, decide, selected, setSelected, freeText, setFreeText }: QuestionViewArgs) {
+  const q = perm.question!;
+  const workassTool = !!q.workassTool;
+  const multi = workassTool && !!q.multiSelect;
+  const allowText = workassTool && !!q.allowFreeText;
+  const canSubmit = workassTool && (multi || allowText);
+  const pending = !!perm.resolved;
+  const choices: QuestionChoice[] = workassTool
+    ? q.options.filter((o) => !!o.id).map((o) => ({ optionId: o.id!, label: o.label, description: o.description }))
+    : perm.options.filter((o) => o.kind === 'answer').map((o, i) => ({ optionId: o.optionId, label: o.name, description: q.options[i]?.description }));
+  const skip = workassTool ? undefined : perm.options.find((o) => o.kind !== 'answer');
+  const hasAnswer = selected.length > 0 || freeText.trim().length > 0;
+  const isChosen = (optionId: string) => workassTool ? selected.includes(optionId) : perm.resolved === optionId;
+  const answer = (optionIds: string[]) => decide(encodeWorkassQuestionAnswer({ status: 'answered', selectedOptionIds: optionIds, freeText }));
+  const submit = () => { if (hasAnswer) answer(selected); };
+  const dismiss = () => {
+    if (workassTool) decide(encodeWorkassQuestionAnswer({ status: 'dismissed' }));
+    else if (skip) decide(skip.optionId);
+  };
+  const pick = (optionId: string) => {
+    if (!workassTool) return decide(optionId);
+    if (multi) {
+      setSelected((current) => current.includes(optionId) ? current.filter((id) => id !== optionId) : [...current, optionId]);
+      return;
+    }
+    setSelected([optionId]);
+    answer([optionId]);
+  };
+  // Keyboard, while focus is inside the dock (the Composer focuses the first
+  // row when a question arrives): ↑↓ move, 1–9 pick, Enter sends typed text,
+  // Esc dismisses. Esc stops here so it never reaches the global turn cancel.
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (pending || event.altKey || event.metaKey || event.ctrlKey) return;
+    const target = event.target as HTMLElement;
+    const inText = target.tagName === 'TEXTAREA';
+    const rows = questionRows(event.currentTarget);
+    const at = rows.indexOf(target);
+    if (event.key === 'Escape') {
+      if (workassTool || skip) { event.preventDefault(); event.stopPropagation(); dismiss(); }
+      return;
+    }
+    if (inText && event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      if (canSubmit) submit();
+      return;
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (inText && (event.key === 'ArrowDown' || (target as HTMLTextAreaElement).selectionStart !== 0)) return;
+      const next = rows[at + (event.key === 'ArrowDown' ? 1 : -1)];
+      if (next) { event.preventDefault(); next.focus(); }
+      return;
+    }
+    if (inText || event.shiftKey || !/^[1-9]$/.test(event.key)) return;
+    const index = Number(event.key) - 1;
+    if (index < Math.min(QUESTION_KEY_LIMIT, choices.length)) { event.preventDefault(); rows[index]?.focus(); pick(choices[index].optionId); }
+    else if (allowText && index === choices.length) { event.preventDefault(); rows[index]?.focus(); }
+  };
+
+  const titleId = `qdock-title-${perm.id}`;
+  // One send control, only where a click can't already answer: the round
+  // button inside the free-text tile (appears once there is text), or a footer
+  // pill for multi-choice without text. Single-choice tiles answer on click.
+  const footerSend = multi && !allowText;
+  const closeLabel = workassTool ? 'Descartar' : skip?.name;
+
+  return (
+    <section
+      className="qdock"
+      data-testid={workassTool ? 'workass-question-card' : undefined}
+      data-state={pending ? 'sending' : 'waiting'}
+      data-mode={multi ? 'multi' : 'single'}
+      aria-labelledby={titleId}
+      aria-busy={pending || undefined}
+      onKeyDown={onKeyDown}
+    >
+      <header className="qdock-head">
+        <div className="qdock-heading">
+          {q.header && <p className="qdock-eyebrow">{q.header}</p>}
+          <h3 className="qdock-title" id={titleId}>{q.question}</h3>
+        </div>
+        {closeLabel && (
+          <button
+            type="button"
+            className="qclose"
+            data-testid={workassTool ? 'workass-question-dismiss' : undefined}
+            disabled={pending}
+            onClick={dismiss}
+            aria-label={closeLabel}
+            title={`${closeLabel} (Esc)`}
+          ><IcClose /></button>
+        )}
+      </header>
+      {choices.length > 0 && (
+        <div className="qdock-list" role="group" aria-labelledby={titleId}>
+          {choices.map((choice, index) => {
+            const on = isChosen(choice.optionId);
+            return (
+              <button
+                key={choice.optionId}
+                type="button"
+                className={`qchoice${on ? ' on' : ''}`}
+                data-qrow=""
+                data-testid={workassTool ? 'workass-question-option' : undefined}
+                aria-pressed={multi ? on : undefined}
+                aria-keyshortcuts={index < QUESTION_KEY_LIMIT ? String(index + 1) : undefined}
+                disabled={pending}
+                onClick={() => pick(choice.optionId)}
+              >
+                <span className="qchoice-body">
+                  <span className="qchoice-label">{choice.label}</span>
+                  {choice.description && <span className="qchoice-desc">{choice.description}</span>}
+                </span>
+                <span className="qchoice-end" aria-hidden="true">
+                  {pending && on && !multi ? <span className="qspin" /> : multi && on ? <IcCheck /> : index < QUESTION_KEY_LIMIT ? index + 1 : null}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {allowText && (
+        <textarea
+          className="qfree"
+          data-qrow=""
+          data-testid="workass-question-free-text"
+          aria-label="Respuesta adicional"
+          placeholder={choices.length ? 'Escribir otra respuesta' : 'Escribir una respuesta'}
+          rows={1}
+          value={freeText}
+          disabled={pending}
+          onChange={(event) => setFreeText(limitWorkassQuestionText(event.target.value))}
+        />
+      )}
+      {allowText && (
+        <button type="button" className="qsend" data-testid="workass-question-submit" disabled={pending || !hasAnswer} onClick={submit} aria-label="Enviar respuesta" title="Enviar respuesta (Enter)">
+          {pending && (multi || selected.length === 0) ? <span className="qspin" /> : <IcArrowUp />}
+        </button>
+      )}
+      {footerSend && (
+        <footer className="qdock-foot">
+          <span className="qdock-hint">{selected.length ? `${selected.length} de ${choices.length} marcadas` : 'Marcá todas las que apliquen'}</span>
+          <button type="button" className="qbtn primary" data-testid="workass-question-submit" disabled={pending || !hasAnswer} onClick={submit} aria-label="Enviar respuesta">
+            {pending ? <span className="qspin" /> : 'Enviar'}
+          </button>
+        </footer>
+      )}
+    </section>
+  );
+}
+
+export function PermCard({ perm, tabId, msgId }: { perm: PermissionState; tabId: string; msgId: string }) {
   const decide = (optionId: string) => { if (!perm.resolved) void store.decidePermission(tabId, msgId, perm.id, optionId); };
   const [selected, setSelected] = useState<string[]>([]);
   const [freeText, setFreeText] = useState('');
-  // A question carries its own answers: `options` holds one entry per choice
-  // (kind 'answer') plus the escape hatch, so they are answered here rather than
+  // A question carries its own answers, so it is answered rather than
   // allowed/rejected. Falls back to the permission card if the daemon predates
   // the question field.
-  if (perm.question) {
-    const q = perm.question;
-    const workassTool = !!q.workassTool;
-    const answers = workassTool
-      ? q.options.filter((o) => !!o.id).map((o) => ({ optionId: o.id!, name: o.label, description: o.description }))
-      : perm.options.filter((o) => o.kind === 'answer').map((o, i) => ({ optionId: o.optionId, name: o.name, description: q.options[i]?.description }));
-    const skip = perm.options.find((o) => o.kind !== 'answer');
-    const hasAnswer = selected.length > 0 || freeText.trim().length > 0;
-    const decideWorkassAnswer = (answer: string) => decide(answer);
-    const submit = () => decideWorkassAnswer(encodeWorkassQuestionAnswer({ status: 'answered', selectedOptionIds: selected, freeText }));
-    const dismiss = () => decideWorkassAnswer(encodeWorkassQuestionAnswer({ status: 'dismissed' }));
-    return (
-      <div className={`permcard ask${docked ? ' ask-docked' : ''}`} data-testid={workassTool ? 'workass-question-card' : 'native-question-card'}>
-        {(q.header || docked) && <div className="askhead">{q.header || 'Pregunta'}</div>}
-        <div className="askq">{q.question}</div>
-        <div className="askopts">
-          {answers.map((o) => (
-            <button
-              key={o.optionId}
-              className={`askopt ${workassTool ? selected.includes(o.optionId) ? 'on' : '' : perm.resolved === o.optionId ? 'on' : ''}`}
-              data-testid={workassTool ? 'workass-question-option' : undefined}
-              aria-pressed={workassTool ? selected.includes(o.optionId) : undefined}
-              disabled={!!perm.resolved}
-              onClick={() => {
-                if (!workassTool) return decide(o.optionId);
-                if (!q.multiSelect) return decideWorkassAnswer(encodeWorkassQuestionAnswer({ status: 'answered', selectedOptionIds: [o.optionId], freeText }));
-                setSelected((current) => q.multiSelect
-                  ? current.includes(o.optionId) ? current.filter((id) => id !== o.optionId) : [...current, o.optionId]
-                  : [o.optionId]);
-              }}
-            >
-              <span className="asknumber" aria-hidden="true">{answers.indexOf(o) + 1}</span>
-              <span className="askchoice"><span className="asklabel">{o.name}</span>
-              {o.description && <div className="askdesc">{o.description}</div>}
-              </span>
-            </button>
-          ))}
-        </div>
-        {workassTool && q.allowFreeText && <textarea className="askfree-text" data-testid="workass-question-free-text" aria-label="Respuesta adicional" placeholder="Escribí otra respuesta…" rows={1} value={freeText} disabled={!!perm.resolved} onChange={(event) => setFreeText(limitWorkassQuestionText(event.target.value))} />}
-        {workassTool && <div className="ask-actions">
-          <button className="askskip" data-testid="workass-question-dismiss" disabled={!!perm.resolved} onClick={dismiss}>Omitir</button>
-          {(q.multiSelect || (q.allowFreeText && (answers.length === 0 || (freeText.trim().length > 0 && selected.length === 0)))) && <button className="ask-submit" data-testid="workass-question-submit" disabled={!!perm.resolved || !hasAnswer} onClick={submit}>{q.multiSelect ? `Enviar (${selected.length})` : 'Enviar'}</button>}
-        </div>}
-        {!workassTool && skip && <button className="askskip" disabled={!!perm.resolved} onClick={() => decide(skip.optionId)}>{skip.name}</button>}
-      </div>
-    );
-  }
+  if (perm.question) return renderQuestion({ perm, decide, selected, setSelected, freeText, setFreeText });
   return (
     <div className="permcard">
       <div className="wicon"><IcShield /></div>

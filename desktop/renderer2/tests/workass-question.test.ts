@@ -49,14 +49,17 @@ test('question UI encodes selected ids and free text in the frozen optionId enve
 
 test('pending question takes the composer input slot while controls remain below it', () => {
   const composer = readFileSync(new URL('../src/components/Composer.tsx', import.meta.url), 'utf8');
-  assert.match(composer, /pendingQuestion\?\.permission\s*\?\s*\(/);
-  assert.match(composer, /<PermCard key=\{`\$\{pendingQuestion\.permission\.id\}:\$\{pendingQuestion\.permission\.question\?\.questionId \?\? ''\}`\} docked perm=\{pendingQuestion\.permission\}/);
+  const dock = readFileSync(new URL('../src/components/QuestionDock.tsx', import.meta.url), 'utf8');
+  assert.match(composer, /usePendingQuestion\(chat\)/);
+  assert.match(composer, /<QuestionDock chatId=\{chat\.id\} pending=\{pendingQuestion\} \/>/);
+  assert.match(composer, /<div className="comp" hidden=\{!!pendingQuestion\}>/);
+  assert.match(dock, /export function findPendingQuestion/);
+  assert.match(dock, /<PermCard key=\{pending\.perm\.id\} perm=\{pending\.perm\}/);
   assert.match(composer, /<div className="comprow">/);
 });
 
-test('the docked Workass question renders compact numbered choices and structured actions', () => {
+test('the question dock renders grouped choices, free text, and an icon-only send control', () => {
   const html = renderToStaticMarkup(React.createElement(PermCard, {
-    docked: true,
     tabId: 'question-tab', msgId: 'question-message',
     perm: {
       id: 'question-request', title: 'Assistant question', kind: 'workass_question', resolved: null,
@@ -68,19 +71,21 @@ test('the docked Workass question renders compact numbered choices and structure
     },
   }));
   assert.match(html, /data-testid="workass-question-card"/);
-  assert.match(html, /ask-docked/);
-  assert.match(html, /asknumber/);
+  assert.match(html, /class="qdock"/);
+  assert.match(html, /class="qchoice/);
+  assert.match(html, /class="qchoice-end/);
   assert.match(html, /¿Qué destino preparo\?/);
   assert.match(html, /Canary/);
   assert.match(html, /Producción/);
   assert.match(html, /data-testid="workass-question-free-text"/);
   assert.match(html, /Respuesta adicional/);
-  assert.match(html, /Omitir/);
-  assert.match(html, />Enviar \(0\)</);
+  assert.match(html, /data-testid="workass-question-dismiss" aria-label="Descartar"/);
+  assert.match(html, /data-testid="workass-question-submit" disabled="" aria-label="Enviar respuesta"/);
+  assert.equal(html.includes('Enviar (0)'), false);
   assert.doesNotMatch(html, /run .*AskUserQuestion/);
 });
 
-test('single-choice Workass questions keep choices unselected and retain submit for text-only answers', () => {
+test('single-choice questions answer by clicking a choice and keep optional text available', () => {
   const html = renderToStaticMarkup(React.createElement(PermCard, {
     tabId: 'question-tab', msgId: 'question-message',
     perm: {
@@ -91,8 +96,10 @@ test('single-choice Workass questions keep choices unselected and retain submit 
     },
   }));
   assert.equal((html.match(/data-testid="workass-question-option"/g) ?? []).length, 2);
-  assert.doesNotMatch(html, /data-testid="workass-question-submit"/);
+  assert.match(html, /data-testid="workass-question-submit" disabled=""/);
   assert.doesNotMatch(html, /aria-pressed="true"/);
+  assert.match(html, /aria-keyshortcuts="1"/);
+  assert.match(html, /class="qsend"/);
   assert.match(html, /Yes/);
   assert.match(html, /No/);
 });

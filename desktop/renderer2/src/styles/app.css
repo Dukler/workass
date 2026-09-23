@@ -723,50 +723,131 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .permcard .sp { flex: 1; }
 .permcard .btns { display: flex; gap: 6px; }
 
-/* A QUESTION from the agent (AskUserQuestion), not a permission. Same card
-   surface as its permission sibling — this is an interrupt that blocks the turn
-   either way — but it shows what is being asked and answers with the model's own
-   choices instead of "Quiere ejecutar <herramienta>" (user 2026-07-25).
-   Own class names (ask*): .qlabel/.qtext are the queue list's, and a bare name
-   in this shared sheet silently repaints someone else's component. */
-.permcard.ask { display: block; padding: 11px 13px 12px; }
-.permcard.ask .askhead { font-size: 10px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--faint); }
-.permcard.ask .askq { margin-top: 5px; font-size: 13.5px; line-height: 1.45; color: var(--ink); }
-.permcard.ask .askopts { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
-/* Each choice is one row: label, then the model's own explanation of it. */
-.permcard.ask .askopt { display: block; width: 100%; text-align: left; font-family: inherit; background: transparent; border: 1px solid var(--line2); border-radius: 9px; padding: 7px 11px; cursor: pointer; transition: background .14s ease, border-color .14s ease; }
-.permcard.ask .askopt:hover:not(:disabled) { background: var(--line); }
-.permcard.ask .askopt:disabled { cursor: default; opacity: .5; }
-.permcard.ask .askopt.on { border-color: var(--acc); opacity: 1; }
-.permcard.ask .asklabel { font-size: 12.5px; font-weight: 500; color: var(--ink); }
-.permcard.ask .askdesc { margin-top: 2px; font-size: 11.5px; line-height: 1.4; color: var(--muted); }
-.permcard.ask .askopt:hover:not(:disabled) .askdesc { color: var(--ink2); }
-/* The escape hatch is quieter than the answers: it is not a choice, it is a
-   refusal to use them. */
-.permcard.ask .askskip { margin-top: 8px; background: transparent; border: 0; padding: 0; font-family: inherit; font-size: 11.5px; color: var(--faint); cursor: pointer; transition: color .14s ease; }
-.permcard.ask .askskip:hover:not(:disabled) { color: var(--ink2); }
-.permcard.ask .askskip:disabled { cursor: default; }
-.permcard.ask .askfree-text { display: block; width: 100%; min-height: 72px; margin-top: 9px; resize: vertical; box-sizing: border-box; border: 1px solid var(--line2); border-radius: 8px; padding: 8px 10px; background: var(--field); color: var(--ink); font: inherit; font-size: 12.5px; }
-.permcard.ask .ask-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; }
-.permcard.ask .ask-submit { border: 1px solid var(--acc); border-radius: 7px; padding: 5px 10px; background: var(--acc); color: var(--on-acc, white); font: inherit; font-size: 11.5px; cursor: pointer; }
-.permcard.ask .ask-submit:disabled { opacity: .5; cursor: default; }
-.permcard.ask-docked { display: block; width: min(100%, 780px); margin: 0 auto; padding: 2px 0 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
-.ask-docked .askhead { display: inline; margin-right: 7px; color: var(--muted); font-size: 11px; font-weight: 600; }
-.ask-docked .askq { display: inline; margin: 0; font-size: 12.5px; }
-.ask-docked .askopts { display: flex; flex-direction: column; gap: 1px; margin-top: 8px; }
-.ask-docked .askopt { box-sizing: border-box; display: flex; align-items: flex-start; gap: 9px; width: 100%; padding: 6px 9px; text-align: left; border: 0; border-radius: 6px; background: transparent; transition: background .14s ease; }
-.ask-docked .askopt:hover:not(:disabled) { background: var(--line); }
-.ask-docked .askopt.on { border: 0; background: var(--field); opacity: 1; }
-.ask-docked .askopt:disabled { cursor: default; opacity: .5; }
-.ask-docked .asknumber { box-sizing: border-box; flex: 0 0 19px; width: 19px; height: 19px; display: grid; place-items: center; margin-top: 0; border-radius: 5px; background: var(--field); color: var(--muted); font-size: 10px; line-height: 1; }
-.ask-docked .askopt:hover:not(:disabled) .asknumber, .ask-docked .askopt.on .asknumber { background: var(--line); }
-.ask-docked .askchoice { min-width: 0; flex: 1; line-height: 1.3; }
-.ask-docked .asklabel { font-size: 11.5px; line-height: inherit; }
-.ask-docked .askdesc { margin-top: 2px; font-size: 11px; line-height: 1.4; color: var(--muted); white-space: normal; overflow-wrap: anywhere; }
-.ask-docked .askfree-text { min-height: 32px; height: 32px; resize: none; margin-top: 6px; padding: 5px 8px; font-size: 11.5px; }
-.ask-docked .ask-actions { margin-top: 5px; }
-.ask-docked .askskip { margin-top: 0; border: 0; padding: 3px 0; background: transparent; color: var(--muted); font-size: 11px; }
-.ask-docked .ask-submit { padding: 3px 9px; }
+/* ============ question dock ============
+   An agent QUESTION docked in the composer's place. One grouped answer stack:
+   flat tiles joined by 2px gaps with concentric outer corners, the free-text
+   tile as the last member of the group, and a single accent edge that marks
+   the tile under the pointer/keyboard cursor. Single-choice tiles answer on
+   click; the only send controls are the round button inside the free-text tile
+   and, for multi-choice without text, one footer pill.
+   Class names are unique on purpose: .qrow/.qtext belong to the queue list. */
+.qdock-slot { max-width: var(--read); margin: 0 auto; }
+.qdock {
+  --q-tile: color-mix(in srgb, var(--ink) 4.5%, transparent);
+  --q-tile-hover: color-mix(in srgb, var(--ink) 8%, transparent);
+  --q-outer: 11px;            /* dock radius 17 - padding 6 = concentric */
+  --q-inner: 4px;
+  display: grid; grid-template-columns: minmax(0, 1fr);
+  background: var(--panel); border: 1px solid var(--line2); border-radius: 17px;
+  padding: 6px;
+  box-shadow: 0 18px 40px -28px rgba(0, 0, 0, .8);
+  animation: qdock-in .22s cubic-bezier(.2, .7, .2, 1);
+}
+:root[data-theme="light"] .qdock { --q-tile: color-mix(in srgb, var(--ink) 4%, transparent); --q-tile-hover: color-mix(in srgb, var(--ink) 7%, transparent); box-shadow: 0 16px 34px -26px rgba(0, 0, 0, .3); }
+.qdock svg { stroke-linecap: round; stroke-linejoin: round; }
+
+/* The question reads as the agent speaking, not a form title. */
+.qdock-head { grid-row: 1; display: flex; align-items: flex-start; gap: 12px; padding: 10px 6px 14px 12px; }
+.qdock-heading { flex: 1; min-width: 0; }
+.qdock-eyebrow { margin: 0 0 3px; font-size: 12px; line-height: 16px; color: var(--muted); }
+.qdock-title { margin: 0; font-size: 15px; line-height: 22px; font-weight: 500; letter-spacing: -.005em; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.qclose {
+  flex: none; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; margin: -3px 0 0; padding: 0; border: 0; border-radius: 8px;
+  background: transparent; color: var(--faint); cursor: pointer; transition: background .12s ease, color .12s ease;
+}
+.qclose svg { width: 13px; height: 13px; stroke-width: 1.6; display: block; }
+.qclose:hover:not(:disabled), .qclose:focus-visible { background: var(--q-tile-hover); color: var(--ink); }
+.qclose:disabled { opacity: .35; cursor: default; }
+
+/* Answer stack. */
+.qdock-list { grid-row: 2; display: flex; flex-direction: column; gap: 2px; }
+.qchoice {
+  position: relative; display: flex; align-items: center; gap: 14px; width: 100%; min-height: 44px; margin: 0;
+  padding: 11px 14px 11px 16px; border: 0; border-radius: var(--q-inner);
+  background: var(--q-tile); color: var(--ink2); text-align: left; font: inherit; cursor: pointer;
+  transition: background .12s ease, opacity .15s ease;
+}
+.qchoice:first-child { border-top-left-radius: var(--q-outer); border-top-right-radius: var(--q-outer); }
+.qchoice:last-child { border-bottom-left-radius: var(--q-outer); border-bottom-right-radius: var(--q-outer); }
+.qdock-list:has(~ .qfree) .qchoice:last-child { border-bottom-left-radius: var(--q-inner); border-bottom-right-radius: var(--q-inner); }
+/* The cursor edge: the one accent moment. It follows hover and ↑↓. */
+.qchoice::before {
+  content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; border-radius: 0 2px 2px 0;
+  background: var(--acc); opacity: 0; transform: scaleY(.4); transition: opacity .14s ease, transform .18s cubic-bezier(.2, .8, .2, 1);
+}
+.qchoice:hover:not(:disabled), .qchoice:focus-visible { background: var(--q-tile-hover); }
+.qchoice:hover:not(:disabled)::before, .qchoice:focus-visible::before { opacity: 1; transform: none; }
+.qchoice:active:not(:disabled) { background: color-mix(in srgb, var(--ink) 11%, transparent); }
+.qchoice:disabled { cursor: default; }
+.qchoice.on { background: color-mix(in srgb, var(--acc) 15%, transparent); }
+.qchoice.on::before { opacity: 1; transform: none; }
+.qdock[data-state="sending"] .qchoice:not(.on) { opacity: .38; }
+
+.qchoice-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.qchoice-label { font-size: 13.5px; line-height: 20px; font-weight: 500; color: var(--ink); overflow-wrap: anywhere; }
+.qchoice-desc { font-size: 12.5px; line-height: 18px; color: var(--muted); overflow-wrap: anywhere; }
+/* Right slot: the digit is a real shortcut (1–9), so it is quiet until the
+   tile is active; it becomes the check (multi) or the spinner (sending). */
+.qchoice-end {
+  flex: none; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+  font-size: 12px; line-height: 1; font-variant-numeric: tabular-nums; color: var(--faint); opacity: .7;
+  transition: color .12s ease, opacity .12s ease;
+}
+.qchoice:hover:not(:disabled) .qchoice-end, .qchoice:focus-visible .qchoice-end { color: var(--muted); opacity: 1; }
+.qchoice.on .qchoice-end { color: var(--acc); opacity: 1; }
+.qchoice-end svg { width: 15px; height: 15px; stroke-width: 2; display: block; }
+
+/* Free-text tile: the last member of the stack. The textarea and its round send
+   share one grid cell so the textarea stays a direct child of the dock. */
+.qfree, .qsend { grid-row: 3; grid-column: 1; }
+.qdock-list ~ .qfree { margin-top: 2px; border-top-left-radius: var(--q-inner); border-top-right-radius: var(--q-inner); }
+.qfree {
+  display: block; box-sizing: border-box; width: 100%; min-height: 44px; max-height: 168px; margin: 0;
+  field-sizing: content; resize: none; padding: 12px 52px 12px 16px;
+  border: 0; border-radius: var(--q-outer); background: var(--q-tile); color: var(--ink);
+  font: inherit; font-size: 13.5px; line-height: 20px; transition: background .12s ease, box-shadow .14s ease;
+}
+.qfree::placeholder { color: var(--faint); }
+.qfree:hover:not(:disabled) { background: var(--q-tile-hover); }
+.qfree:focus { background: var(--q-tile-hover); box-shadow: inset 2px 0 0 var(--acc); }
+.qfree:disabled { opacity: .38; }
+/* Round send, same shape and colors as the composer's .send. Hidden until
+   there is something to send, so the tile rests as a plain row. */
+.qsend {
+  align-self: end; justify-self: end; margin: 0 8px 8px 0; z-index: 1;
+  box-sizing: border-box; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--ink); color: var(--bg); cursor: pointer;
+  transition: opacity .14s ease, transform .14s ease;
+}
+.qsend svg { width: 14px; height: 14px; stroke-width: 2; display: block; }
+.qsend:hover:not(:disabled) { background: var(--ink2); }
+.qsend:active:not(:disabled) { transform: scale(.92); }
+.qsend:disabled { opacity: 0; transform: scale(.8); pointer-events: none; }
+.qdock[data-state="sending"] .qsend:disabled { opacity: .7; transform: none; }
+
+/* Multi-choice without text only. */
+.qdock-foot { grid-row: 4; display: flex; align-items: center; gap: 10px; margin-top: 6px; padding: 2px 2px 2px 12px; }
+.qdock-hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; line-height: 18px; color: var(--muted); }
+.qbtn {
+  flex: none; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center;
+  min-width: 76px; height: 32px; margin: 0; padding: 0 16px; border: 0; border-radius: 10px;
+  font: inherit; font-size: 13px; font-weight: 600; line-height: 1; white-space: nowrap; cursor: pointer;
+  transition: background .12s ease, opacity .12s ease;
+}
+.qbtn.primary { background: var(--ink); color: var(--bg); }
+.qbtn.primary:hover:not(:disabled) { background: var(--ink2); }
+.qbtn:disabled { cursor: default; opacity: .25; }
+.qdock[data-state="sending"] .qbtn:disabled { opacity: .7; }
+
+.qspin { display: block; box-sizing: border-box; width: 13px; height: 13px; border-radius: 50%; border: 1.6px solid currentColor; border-right-color: transparent; animation: conn-spin .7s linear infinite; }
+
+@keyframes qdock-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .qdock { animation: none; }
+  .qchoice, .qchoice::before, .qchoice-end, .qfree, .qsend, .qbtn, .qclose { transition: none; }
+}
 
 .stamp { display: flex; align-items: center; gap: 12px; color: var(--faint); font-size: 12px; margin: 14px 0 0; }
 .stamp svg { width: 13px; height: 13px; cursor: pointer; }

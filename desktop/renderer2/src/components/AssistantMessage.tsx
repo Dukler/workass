@@ -146,6 +146,8 @@ function AssistantSliceBody({
         </div>
       )}
 
+      {/* Questions dock in the composer's place (Composer → QuestionDock); only
+          permission prompts stay inline in the transcript. */}
       {terminal && msg.permission && !msg.permission.question && <PermCard perm={msg.permission} tabId={tabId} msgId={owner.id} />}
 
       {showStamp && (
