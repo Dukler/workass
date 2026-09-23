@@ -92,25 +92,25 @@ export function untagPayload<T>(value: T): T {
 export function untagFor<T>(machineId: string, value: T): T {
   const machine = String(machineId ?? '').trim();
   if (!machine) return value;
-  return deepMap(value, (text) => (machineOf(text) === machine ? localId(text) : text)) as T;
+  return deepMap(value, (text, key) => (key !== 'optionId' && machineOf(text) === machine ? localId(text) : text)) as T;
 }
 
-function deepMap(value: unknown, map: (text: string) => string): unknown {
-  if (typeof value === 'string') return map(value);
-  if (Array.isArray(value)) return value.map((item) => deepMap(item, map));
+function deepMap(value: unknown, map: (text: string, key: string) => string, ownerKey = ''): unknown {
+  if (typeof value === 'string') return map(value, ownerKey);
+  if (Array.isArray(value)) return value.map((item) => deepMap(item, map, ownerKey));
   if (!value || typeof value !== 'object') return value;
   const source = value as Record<string, unknown>;
   const out: Record<string, unknown> = {};
-  for (const key of Object.keys(source)) out[key] = deepMap(source[key], map);
+  for (const key of Object.keys(source)) out[key] = deepMap(source[key], map, key);
   return out;
 }
 
-function walk(value: unknown, map: (id: string) => string, ownerKey = ''): unknown {
+function walk(value: unknown, map: (id: string) => string, ownerKey = '', inQuestion = false): unknown {
   if (Array.isArray(value)) {
     return value.map((item) => (
       typeof item === 'string' && ID_ARRAY_KEYS.has(ownerKey)
         ? map(item)
-        : walk(item, map)
+        : walk(item, map, ownerKey, inQuestion)
     ));
   }
   if (!value || typeof value !== 'object') return value;
@@ -118,8 +118,9 @@ function walk(value: unknown, map: (id: string) => string, ownerKey = ''): unkno
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(source)) {
     const item = source[key];
-    if (typeof item === 'string' && ID_KEYS.has(key)) out[key] = map(item);
-    else out[key] = walk(item, map, key);
+    const questionPayload = inQuestion || key === 'question';
+    if (typeof item === 'string' && ID_KEYS.has(key) && !(questionPayload && key === 'id')) out[key] = map(item);
+    else out[key] = walk(item, map, key, questionPayload);
   }
   return out;
 }

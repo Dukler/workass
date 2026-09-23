@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createMachineRouter, machineScopeOf, RemoteMachineUnavailableError, routeOf } from '../src/wire/machineRouter.ts';
+import { createMachineRouter, machineScopeOf, projectRemoteEvent, RemoteMachineUnavailableError, routeOf } from '../src/wire/machineRouter.ts';
 import { MachineRegistry, type MachineEntry } from '../src/wire/machineRegistry.ts';
-import { tagId } from '../src/wire/machineIds.ts';
+import { tagId, tagPayload } from '../src/wire/machineIds.ts';
 import type { MachineSocket, MachineSocketLike } from '../src/wire/machineSocket.ts';
 import { fleetDeviceToken, fleetProof } from '../src/wire/fleet.ts';
 
@@ -182,6 +182,32 @@ test('a remote event arrives tagged, so a card raised elsewhere finds its chat',
     { chatId: 'chat-local' },
     { chatId: 'M~m-remote~chat-remote', title: 'chat-remote' },
   ]);
+});
+
+test('mounted remote question ids stay opaque in request and pending snapshot projection', async () => {
+  const machineId = 'm-remote';
+  const questionId = 'yes';
+  const opaqueOptionId = 'M~m-remote~yes';
+  const request = { id: 'permission-1', chatId: 'chat-1', question: { workassTool: true, questionId: 'q-1', options: [{ id: questionId, label: 'Yes' }, { id: opaqueOptionId, label: 'opaque' }] } };
+  const projected = projectRemoteEvent('onChatPermissionRequest', machineId, request) as typeof request;
+  assert.equal(projected.id, tagId(machineId, 'permission-1'));
+  assert.equal(projected.chatId, tagId(machineId, 'chat-1'));
+  assert.deepEqual(projected.question.options.map((option) => option.id), [questionId, opaqueOptionId]);
+
+  const snapshot = tagPayload(machineId, { permissions: [request] });
+  assert.equal(snapshot.permissions[0].id, tagId(machineId, 'permission-1'));
+  assert.equal(snapshot.permissions[0].chatId, tagId(machineId, 'chat-1'));
+  assert.deepEqual(snapshot.permissions[0].question.options.map((option) => option.id), [questionId, opaqueOptionId]);
+
+  const remote = fakeLink();
+  const router = createMachineRouter({
+    local: () => ({} as never),
+    links: () => new Map(),
+    controlLinks: () => new Map([[machineId, remote.link]]),
+  }) as unknown as { chatPermissionDecide(id: string, optionId: string): Promise<unknown> };
+
+  await router.chatPermissionDecide(projected.id, opaqueOptionId);
+  assert.deepEqual(remote.calls, [{ channel: 'chat:permission-decide', args: [{ id: 'permission-1', optionId: opaqueOptionId }] }]);
 });
 
 test('remote catalog keeps exact model and mode ids while carrying its machine owner', () => {
