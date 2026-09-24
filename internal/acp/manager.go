@@ -3033,6 +3033,12 @@ func (b *Bridge) attachSession(sessionID, cwd string, opts SessionOptions, res m
 	b.sessions[sessionID] = struct{}{}
 	b.jobsBySession[sessionID] = nil
 	b.mu.Unlock()
+	// A provider catalog probe can advance CatalogRevision while this bridge's
+	// engine remains alive. The just-attached native session has supplied fresh
+	// controls from that engine, so let those values reconcile against the
+	// current provider revision. Ordinary updates from older bridges remain
+	// fenced by updateProviderCatalogFromBridge.
+	b.syncCatalogRevisionForSessionAttach()
 	b.applyConfigOptionsForSession(sessionID, res["configOptions"], false, false)
 	b.applyAvailableModels(res["availableModels"])
 	b.applySessionModels(res["models"])
@@ -3071,6 +3077,37 @@ func (b *Bridge) attachSession(sessionID, cwd string, opts SessionOptions, res m
 		b.manager.schedulePlanUsageRefresh(b, sessionID)
 	}
 	return info, nil
+}
+
+func (b *Bridge) syncCatalogRevisionForSessionAttach() {
+	if b == nil || b.manager == nil {
+		return
+	}
+	b.mu.Lock()
+	providerID := b.providerID
+	b.mu.Unlock()
+	b.manager.mu.Lock()
+	runtime := b.manager.providers[providerID]
+	if runtime == nil {
+		b.manager.mu.Unlock()
+		return
+	}
+	revision := runtime.CatalogRevision
+	config := runtime.Config
+	catalogRefreshedAt := runtime.CatalogRefreshedAt
+	currentCatalogProbed := runtime.Probed && runtime.CatalogCLIVersion == providerVersionIdentity(runtime.CLIVersion)
+	b.manager.mu.Unlock()
+	b.mu.Lock()
+	// A newly attached session can refresh same-generation catalogs that were
+	// fenced by a disposable read, but a bridge from an older executable or
+	// launch configuration must retain its old revision and stay fenced. The
+	// process itself must also have started after the last authoritative probe:
+	// remote model lists can change without a CLI version change.
+	processStartedAfterCatalog := catalogRefreshedAt.IsZero() || b.startedAt.After(catalogRefreshedAt)
+	if sameProviderLaunchConfig(b.opts.Provider, config) && processStartedAfterCatalog && currentCatalogProbed {
+		b.catalogRevision = revision
+	}
+	b.mu.Unlock()
 }
 
 func (b *Bridge) liveSession(sessionID string) (LiveSession, bool) {
