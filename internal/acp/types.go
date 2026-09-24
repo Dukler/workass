@@ -141,11 +141,14 @@ type Options struct {
 	ProviderUpdateAssetSources   map[string]string
 	ProviderUpdateRunTimeout     time.Duration
 	ProviderUpdateCommands       map[string]ProviderUpdateCommand
-	CompactionEnabled            bool
-	CompactionThresholdPct       int
-	CompactionKeepLastTurns      int
-	Broadcast                    func(channel string, payload any)
-	Logf                         func(message string, fields map[string]any)
+	// catalogProbeBridge is an unexported test seam for exercising provider
+	// detection's real bridge request budgets without launching a subprocess.
+	catalogProbeBridge      func(key string, opts Options, manager *Manager) *Bridge
+	CompactionEnabled       bool
+	CompactionThresholdPct  int
+	CompactionKeepLastTurns int
+	Broadcast               func(channel string, payload any)
+	Logf                    func(message string, fields map[string]any)
 }
 
 func (o Options) withDefaults() Options {

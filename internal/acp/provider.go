@@ -2468,7 +2468,11 @@ func (m *Manager) probeProviderCatalogWithInitTimeout(ctx context.Context, cfg P
 	if initTimeout > 0 {
 		opts.InitTimeout = initTimeout
 	}
-	bridge := newBridge("catalog-"+cfg.ID, opts, m)
+	bridgeKey := "catalog-" + cfg.ID
+	bridge := newBridge(bridgeKey, opts, m)
+	if m.opts.catalogProbeBridge != nil {
+		bridge = m.opts.catalogProbeBridge(bridgeKey, opts, m)
+	}
 	bridge.catalogProbe = true
 	timeout := opts.InitTimeout
 	if timeout <= 0 {
