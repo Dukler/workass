@@ -84,7 +84,30 @@ func TestGlobalSessionStoreCompactsLegacyMutationReceipts(t *testing.T) {
 }
 
 func TestGlobalSessionStoreNoopReceiptIsBoundedAndUnchanged(t *testing.T) {
-	store := newSessionStore(filepath.Join(t.TempDir(), sessionStateFilename))
+	path := filepath.Join(t.TempDir(), sessionStateFilename)
+	seededReceipts := make(map[string]any, globalPresentationReceiptLimit-1)
+	seededOrder := make([]any, 0, globalPresentationReceiptLimit-1)
+	for index := 0; index < globalPresentationReceiptLimit-1; index++ {
+		id := fmt.Sprintf("global-seed-m%08x-bounded", index+1)
+		seededReceipts[id] = map[string]any{"digest": strings.Repeat("a", 64), "revision": 0}
+		seededOrder = append(seededOrder, id)
+	}
+	seed := map[string]any{
+		"v": 1, "chats": []any{}, "theme": "light",
+		globalPresentationReceiptsField:     seededReceipts,
+		globalPresentationReceiptOrderField: seededOrder,
+	}
+	seedRaw, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatalf("marshal near-capacity persisted receipt fixture: %v", err)
+	}
+	if err := os.WriteFile(path, seedRaw, 0o600); err != nil {
+		t.Fatalf("write near-capacity persisted receipt fixture: %v", err)
+	}
+	store := newSessionStore(path)
+	if err := store.LoadError(); err != nil {
+		t.Fatalf("load near-capacity persisted receipt fixture: %v", err)
+	}
 	changed, err := store.SaveActorGlobalSnapshot(map[string]any{
 		"v": 1, "chats": []any{}, "theme": "dark",
 		globalPresentationRevisionField:  0,
@@ -93,21 +116,28 @@ func TestGlobalSessionStoreNoopReceiptIsBoundedAndUnchanged(t *testing.T) {
 	if err != nil || !changed.Changed || changed.Revision != 1 {
 		t.Fatalf("changed global save = %#v, err=%v", changed, err)
 	}
-	var noopInput map[string]any
-	var noop globalPresentationSaveResult
-	for index := 0; index < globalPresentationReceiptLimit+8; index++ {
-		noopInput = map[string]any{
-			"v": 1, "chats": []any{}, "theme": "dark",
-			globalPresentationRevisionField:  changed.Revision,
-			globalPresentationOperationField: fmt.Sprintf("global-noop-m%08x-bounded", index+2),
-		}
-		noop, err = store.SaveActorGlobalSnapshot(noopInput)
-		if err != nil || noop.Changed || noop.Revision != changed.Revision {
-			t.Fatalf("no-op global save %d = %#v, err=%v", index, noop, err)
-		}
+	noopInput := map[string]any{
+		"v": 1, "chats": []any{}, "theme": "dark",
+		globalPresentationRevisionField:  changed.Revision,
+		globalPresentationOperationField: "global-noop-m00000002-bounded",
 	}
-	if got := len(mapFromAnyMain(store.snapshot[globalPresentationReceiptsField])); got != globalPresentationReceiptLimit {
+	noop, err := store.SaveActorGlobalSnapshot(noopInput)
+	if err != nil || noop.Changed || noop.Revision != changed.Revision {
+		t.Fatalf("no-op global save at receipt boundary = %#v, err=%v", noop, err)
+	}
+	bounded := mapFromAnyMain(store.snapshot[globalPresentationReceiptsField])
+	if len(bounded) != globalPresentationReceiptLimit {
+		got := len(bounded)
 		t.Fatalf("runtime receipt window = %d, want %d", got, globalPresentationReceiptLimit)
+	}
+	if _, exists := bounded["global-seed-m00000001-bounded"]; exists {
+		t.Fatal("oldest preexisting receipt survived exact boundary eviction")
+	}
+	if _, exists := bounded[noopInput[globalPresentationOperationField].(string)]; !exists {
+		t.Fatal("boundary no-op receipt was not retained")
+	}
+	if got := store.snapshot["theme"]; got != "dark" || uint64(max(0, intValue(store.snapshot[globalPresentationRevisionField]))) != changed.Revision {
+		t.Fatalf("no-op save changed persisted payload or revision: theme=%v revision=%v", got, store.snapshot[globalPresentationRevisionField])
 	}
 	beforeRetry := len(mapFromAnyMain(store.snapshot[globalPresentationReceiptsField]))
 	retry, err := store.SaveActorGlobalSnapshot(noopInput)
