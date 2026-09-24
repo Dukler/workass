@@ -65,6 +65,28 @@ test('requested worker capacity is honored without the legacy six-worker clamp',
   assert.ok(tracker.maximum() <= 8);
 });
 
+test('only test binary listing and execution cap GOMAXPROCS; Go commands inherit it', async t => {
+  const f = await fixture(t);
+  const prior = process.env.GOMAXPROCS;
+  process.env.GOMAXPROCS = '18';
+  t.after(() => {
+    if (prior === undefined) delete process.env.GOMAXPROCS;
+    else process.env.GOMAXPROCS = prior;
+  });
+  const invocations = [];
+  const fake = inProcessGoSpawn({ record: (command, args, options) => invocations.push({ command, args, env: options.env }) });
+  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 2, spawn: fake.spawn, signalHandlers: false });
+  assert.equal(result.ok, true, result.error);
+  const goCommands = invocations.filter(item => item.command === f.go);
+  assert.ok(goCommands.length > 0);
+  assert.ok(goCommands.every(item => item.env.GOMAXPROCS === '18'), 'compiler and package-list commands keep the inherited Go setting');
+  const binaryCommands = invocations.filter(item => String(item.command).endsWith('.test'));
+  assert.ok(binaryCommands.some(item => item.args[0] === '-test.list'));
+  assert.ok(binaryCommands.some(item => item.args[0] === '-test.v'));
+  assert.ok(binaryCommands.every(item => item.env.GOMAXPROCS === '1'), 'listing and test execution use one Go runtime CPU');
+  assert.ok(binaryCommands.filter(item => item.args.includes('-test.v')).every(item => item.args.includes('-test.parallel=2')));
+});
+
 async function fixture(t, { fail = '', delay = '0.04', packageFail = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'workass-go-suite-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -235,11 +257,16 @@ test('other-package command failures propagate with complete output', async t =>
 test('race flags follow the Go subcommand for compiled and remaining packages', async t => {
   const f = await fixture(t);
   const invocations = [];
-  const fake = inProcessGoSpawn({ record: (command, args) => { if (command === f.go) invocations.push(args); } });
+  const binaryInvocations = [];
+  const fake = inProcessGoSpawn({ record: (command, args, options) => {
+    if (command === f.go) invocations.push(args);
+    else if (String(command).endsWith('.test')) binaryInvocations.push({ args, env: options.env });
+  } });
   const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, race: true, workers: 2, signalHandlers: false, spawn: fake.spawn });
   assert.equal(result.ok, true, result.error);
   assert.ok(invocations.some(args => args[0] === 'test' && args[1] === '-race' && args[2] === '-c'));
   assert.ok(invocations.some(args => args[0] === 'test' && args[1] === '-race' && args.includes('-c') && args.at(-1).startsWith('workass/')));
+  assert.ok(binaryInvocations.length > 0 && binaryInvocations.every(item => item.env.GOMAXPROCS === '1'));
 });
 
 test('abort terminates process group and records interruption', async t => {
