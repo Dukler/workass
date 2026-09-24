@@ -12,6 +12,7 @@ import { fullAssistantText } from '../assistant-output';
 import { relTime } from '../rel-time';
 import { messageImageSrc } from '../image-drafts';
 import { connectedArtifactURL } from '../connected-artifacts';
+import { configuredModelUnavailable } from '../model-selection';
 import { normalizeMarkdownTarget, type InlineMediaResolver } from '../markdown/inline';
 
 function assistantMediaResolver(tabId: string, images: MessageImage[] | undefined, artifactOrigin = ''): InlineMediaResolver {
@@ -363,17 +364,19 @@ function ControlsSkippedRow({ tabId }: { tabId: string }) {
   const skipped = chat?.controlsSkipped;
   if (!chat || !skipped) return null;
   if (chat.currentModelId === skipped.requestedModelId) return null;
+  const group = store.catalogGroupsForChat(chat).find((item) => item.providerId === chat.providerId);
+  const unavailable = configuredModelUnavailable(group, skipped.requestedModelId);
   return (
     <div className="mismatchrow" role="status">
       <span className="mmicon" aria-hidden="true"><IcWarnTri /></span>
       <span className="mmtext">
         <b>Modelo distinto al configurado</b> — pediste <code className="mono">{skipped.requestedModelId}</code>, está corriendo <code className="mono">{chat.currentModelId ?? 'otro modelo'}</code>.
       </span>
-      <button
+      {unavailable ? <span className="mmtext">Elegí otro modelo abajo para continuar.</span> : <button
         className="mmretry"
         title="Volver a aplicar el modelo configurado"
         onClick={() => void store.setModel(chat.id, skipped.requestedModelId)}
-      >Reintentar</button>
+      >Reintentar</button>}
     </div>
   );
 }

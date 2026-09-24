@@ -120,6 +120,7 @@ test('remote save conflicts read the owning machine and converge without reloadi
       subject.markPresentationMutation(owner);
     } else {
       owner.currentModelId = 'changed-model';
+      owner.configuredModelId = 'changed-model';
     }
     subject.touchChat(TAB);
     revised = true;
@@ -157,6 +158,27 @@ test('remote save conflicts read the owning machine and converge without reloadi
       assert.equal(subject.chat(TAB).currentModelId, 'changed-model');
     }
   }
+});
+
+test('choosing the live default still saves over a rejected actor model', async () => {
+  const snapshot = mirror();
+  snapshot.chats[0].currentModelId = 'retired-model';
+  snapshot.chats[0].liveSession!.currentModelId = 'gpt-test';
+  const subject = remoteSubject(() => snapshot);
+  await subject.hydrateMachine(MACHINE);
+  const chat = subject.chat(TAB) as Chat;
+  assert.equal(chat.currentModelId, 'gpt-test');
+  assert.equal(chat.configuredModelId, 'retired-model');
+  chat.configuredModelId = chat.currentModelId;
+  const writes: any[] = [];
+  await withWindowApi({
+    chatRuntimeControlsSave: async (opts: any) => {
+      writes.push(opts);
+      return { ...opts, ok: true, runtimeControlRevision: 1, actorRevision: 2 };
+    },
+  }, async () => { await subject.persistRuntimeControls(chat); });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].currentModelId, 'gpt-test');
 });
 
 test('remote metadata hydration cannot put submitted laptop text back into the Mac draft', async () => {
@@ -1548,6 +1570,7 @@ test('remote presentation, queue, controls, workspace, history, create, and dele
 
     const remote = subject.chat(TAB) as Chat;
     remote.currentModelId = 'gpt-next';
+    remote.configuredModelId = 'gpt-next';
     await subject.persistRuntimeControls(remote);
     assert.equal(await subject.moveChatToWorkspace(TAB, null, 'C:\\workass-next'), true);
     await subject.ensureFullHistory(TAB);

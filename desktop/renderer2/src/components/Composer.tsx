@@ -6,7 +6,7 @@ import type { ModelFavorite } from '../model-favorites';
 import { store, useApp } from '../store/store';
 import { has } from '../wire/api';
 import { IcPlus, IcMic, IcGauge, IcStar } from '../icons';
-import { modelContextQualifier, resolveModelSelection } from '../model-selection';
+import { configuredModelUnavailable, modelContextQualifier, resolveModelSelection } from '../model-selection';
 import { favoriteCatalogModels, isModelFavorite } from '../model-favorites';
 import { attachmentWorkBoundary, clipboardImageFiles, createDraftImages, draftImagePayloads, withoutDraftImages } from '../image-drafts';
 import { QueueList } from './QueueList';
@@ -611,9 +611,12 @@ export function Composer({ chat }: { chat: Chat | null }) {
   // The persisted id may be suffixed (`base[effort]`). Split it so the picker shows
   // the base name/selection and the effort control reflects the chosen stop.
   const providerGroup = modelGroups.find((group) => group.providerId === chat?.providerId);
-  const modelSelection = resolveModelSelection(providerGroup ? [providerGroup] : [], [], chat?.currentModelId);
+  const configuredModelId = chat?.configuredModelId ?? chat?.currentModelId;
+  const modelSelection = resolveModelSelection(providerGroup ? [providerGroup] : [], [], configuredModelId);
   const { base: modelBase, effort: modelEffort } = modelSelection;
-  const modelName = modelSelection.model?.name ?? resolveModelName(modelGroups, modelBase) ?? providerGroup?.models[0]?.name ?? 'Modelo';
+  const modelUnavailable = configuredModelUnavailable(providerGroup, configuredModelId);
+  const modelName = modelUnavailable ? 'Modelo no disponible'
+    : modelSelection.model?.name ?? resolveModelName(modelGroups, modelBase) ?? providerGroup?.models[0]?.name ?? 'Modelo';
   const serviceTiers = modelSelection.model?.serviceTiers ?? [];
   const serviceTier = rememberedModelControls(chat?.modelControls, chat?.providerId, modelBase)?.serviceTier ?? 'default';
   const efforts = modelSelection.model?.efforts ?? [];
@@ -724,6 +727,11 @@ export function Composer({ chat }: { chat: Chat | null }) {
     // Blocked while offline (mirrors the disabled send button); the banner above
     // the composer explains why. Enter must not silently drop into a dead socket.
     if (app.connection !== 'connected') return;
+    if (!running && modelUnavailable) {
+      setModelOpen(true);
+      store.addToast('Modelo no disponible', 'Elegí otro modelo para continuar.');
+      return;
+    }
     // The turn can still accept an explicit FIFO follow-up while its terminal
     // event is pending. Only another Stop or a live steer into the cancelling
     // turn is blocked.
@@ -809,6 +817,8 @@ export function Composer({ chat }: { chat: Chat | null }) {
 	const sendGlyph = steerMode ? '⤴' : running ? '■' : '↑';
   const sendTitle = offline
     ? 'Sin conexión con el daemon'
+	: !running && modelUnavailable
+      ? 'Elegí otro modelo para continuar'
 	: steerMode
       ? (stopAndSendAvail
         ? `Detener y enviar · ${steerShortcut}`
@@ -921,7 +931,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
         <span className="sp" />
         <div className="selectorcluster">
           <div className="selectoranchor">
-            <button className="modelsel" onClick={() => setModelOpen((v) => !v)}>{modelName}</button>
+            <button className={`modelsel${modelUnavailable ? ' unavailable' : ''}`} title={modelUnavailable ? 'Elegí otro modelo para continuar' : undefined} onClick={() => setModelOpen((v) => !v)}>{modelName}</button>
             {modelOpen && <GroupedModelPopover groups={modelGroups} currentProvider={chat?.providerId ?? null} current={modelBase || null}
                 favorites={app.modelFavorites}
                 onPick={(providerId, modelId) => chat && void store.pickModel(chat.id, providerId, modelId)}

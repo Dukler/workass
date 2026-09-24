@@ -3988,11 +3988,18 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 	modelsCopy := append([]Model(nil), b.models...)
 	modesCopy := append([]Mode(nil), b.modes...)
 	b.mu.Unlock()
+	catalogChanged := false
 	if changed {
-		b.manager.updateProviderCatalogFromBridge(b, modelsCopy, modesCopy, false)
+		catalogChanged = b.manager.updateProviderCatalogFromBridge(b, modelsCopy, modesCopy, false)
 	}
 	if changed && broadcast {
 		b.manager.EmitCatalog(context.Background())
+	} else if catalogChanged {
+		// Session attach uses broadcast=false while it assembles its controls.
+		// The live host can still replace a stale provider catalog here, before
+		// availableModels is parsed. Publish that authoritative change so the
+		// composer never keeps offering a model the attached host just removed.
+		b.manager.emitCatalogSnapshot()
 	}
 	if capturedModelID != "" {
 		b.manager.captureAdapterModelSelection(b, sessionID, capturedModelID)

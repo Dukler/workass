@@ -169,11 +169,15 @@ function presentationFingerprint(chat: Pick<Chat, 'title' | 'titleLocked' | 'gro
   ]);
 }
 
-function runtimeControlsFingerprint(chat: Pick<Chat, 'providerId' | 'currentModelId' | 'currentModeId' | 'modelControls'>): string {
+function runtimeControlsFingerprint(chat: Pick<Chat, 'providerId' | 'currentModelId' | 'currentModeId' | 'modelControls'> & { configuredModelId?: string | null }): string {
   return JSON.stringify([
-    chat.providerId ?? null, chat.currentModelId ?? null, chat.currentModeId ?? null,
+    chat.providerId ?? null, actorSelectedModelId(chat), chat.currentModeId ?? null,
     normalizeModelControlMemory(chat.modelControls) ?? null,
   ]);
+}
+
+function actorSelectedModelId(chat: Pick<Chat, 'currentModelId'> & { configuredModelId?: string | null }): string | null {
+  return chat.configuredModelId === undefined ? chat.currentModelId : chat.configuredModelId;
 }
 
 function ownerMachineId(chat: Pick<Chat, 'id' | 'machineId'>): string {
@@ -839,7 +843,7 @@ export class Store {
         runtimeControlRevision: c.runtimeControlRevision,
         planLatest: c.planLatest,
         planLatestMessageId: c.planLatestMessageId,
-        currentModelId: c.currentModelId, currentModeId: c.currentModeId, modelControls: c.modelControls,
+        currentModelId: actorSelectedModelId(c), currentModeId: c.currentModeId, modelControls: c.modelControls,
         pane: c.pane,
         draft: '', unread: c.unread, settled: c.settled, settledAt: c.settledAt,
         lastActivityAt: c.lastActivityAt,
@@ -1087,6 +1091,7 @@ export class Store {
           : undefined,
         planLatestMessageId: typeof c.planLatestMessageId === 'string' ? c.planLatestMessageId : undefined,
         currentModelId: controls.modelId,
+        configuredModelId: c.currentModelId,
         currentModeId: controls.modeId,
         modelControls,
         providerId, providerName: binding.useLiveControls ? c.liveSession?.providerName ?? null : null,
@@ -1481,6 +1486,7 @@ export class Store {
           latest.providerId = receipt.providerId;
           latest.providerName = this.providerName(receipt.providerId, latest) ?? latest.providerName ?? null;
           latest.currentModelId = receipt.currentModelId;
+          latest.configuredModelId = receipt.currentModelId;
           latest.currentModeId = receipt.currentModeId;
           latest.modelControls = normalizeModelControlMemory(receipt.modelControls);
           this.committedRuntimeControlFingerprints.set(tabId, runtimeControlsFingerprint(latest));
@@ -1865,6 +1871,7 @@ export class Store {
       chat.providerId = local.providerId;
       chat.providerName = local.providerName;
       chat.currentModelId = local.currentModelId;
+      chat.configuredModelId = local.configuredModelId;
       chat.currentModeId = local.currentModeId;
       chat.modelControls = local.modelControls;
       chat._controlRevision = local._controlRevision;
@@ -4232,6 +4239,8 @@ export class Store {
         fallbackModeIntent: previous.modeIntent,
         explicitEffort: selected.effort,
     });
+    chat.configuredModelId = chat.currentModelId;
+    chat.controlsSkipped = undefined;
     chat._controlRevision = nextModelControlRevision(chat._controlRevision);
     this.bumpChat(chat);
     await this.persistRuntimeControls(chat);
@@ -4260,6 +4269,8 @@ export class Store {
       fallbackModeIntent: previous.modeIntent,
       explicitEffort: selected.effort,
     });
+    chat.configuredModelId = chat.currentModelId;
+    chat.controlsSkipped = undefined;
     chat._controlRevision = nextModelControlRevision(chat._controlRevision);
     this.bumpChat(chat);
     await this.persistRuntimeControls(chat);
@@ -4860,7 +4871,7 @@ export class Store {
         // exact-chat control save and must not turn that cache into a new pick.
         ...(options.useDaemonRuntimeControls ? {} : {
           providerId: chat.providerId ?? undefined,
-          modelId: chat.currentModelId, modeId: chat.currentModeId,
+          modelId: actorSelectedModelId(chat), modeId: chat.currentModeId,
         }),
         prompt, images: images && images.length ? images : undefined,
         userMessageId: userId, assistantMessageId: assistantId,
@@ -6367,7 +6378,7 @@ export function digestChatSessionDiverged(chat: Chat, digest: StateDigestChat): 
 	|| (chat.agentQueueRevision ?? 0) !== digest.agentQueueRevision
     || (chat.runtimeControlRevision ?? 0) !== digest.runtimeControlRevision
     || (chat.providerId ?? null) !== (digest.providerId ?? null)
-    || chat.currentModelId !== (digest.currentModelId ?? null)
+    || actorSelectedModelId(chat) !== (digest.currentModelId ?? null)
     || chat.currentModeId !== (digest.currentModeId ?? null);
 }
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {

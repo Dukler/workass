@@ -60,6 +60,13 @@ export function resolveModelSelection(
   return { base: selectedId, effort: null, model: null };
 }
 
+// Only a ready, nonempty catalog can disprove a saved selection. A resumed
+// session's live model may differ after the adapter rejected that selection.
+export function configuredModelUnavailable(group: CatalogGroup | undefined, configuredId: string | null | undefined): boolean {
+  return !!configuredId && group?.status === 'ready' && group.models.length > 0
+    && !resolveModelSelection([group], [], configuredId).model;
+}
+
 export function modelContextQualifier(modelId: string | null | undefined): string | null {
   if (!modelId) return null;
   const suffix = /^(.*)\[([^\[\]]+)\]$/.exec(modelId);
