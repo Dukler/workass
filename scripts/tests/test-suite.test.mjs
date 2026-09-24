@@ -29,6 +29,7 @@ test('full suite partitions every renderer test across four sequential isolated 
   const rendererFiles = fs.readdirSync(path.join(root, 'desktop/renderer2/tests')).filter(name => name.endsWith('.test.ts')).sort();
   const shell = commands.find(command => command.name === 'shell_tests');
   const scripts = commands.find(command => command.name === 'script_tests');
+  const go = commands.find(command => command.name === 'go_tests');
   const shellContracts = commands.filter(command => command.name.startsWith('script_contract_'));
   assert.deepEqual(renderer.map(command => command.name), ['renderer_tests_1', 'renderer_tests_2', 'renderer_tests_3', 'renderer_tests_4']);
   const rendererGroups = renderer.map(command => {
@@ -43,6 +44,7 @@ test('full suite partitions every renderer test across four sequential isolated 
   assert.equal(shell.args[1], '--test-concurrency=4');
   assert.equal(shell.args.filter(arg => arg.endsWith('.test.js')).length, fs.readdirSync(path.join(root, 'desktop/shell')).filter(name => name.endsWith('.test.js')).length);
   assert.equal(scripts.args[1], '--test-concurrency=6');
+  assert.equal(go.args.includes('--workers'), false, 'Go suite selects its host-aware default worker count');
   assert.equal(scripts.args.filter(arg => arg.endsWith('.test.mjs')).length, fs.readdirSync(path.join(root, 'scripts/tests')).filter(name => name.endsWith('.test.mjs')).length);
   const shellFiles = fs.readdirSync(path.join(root, 'scripts/tests')).filter(name => name.endsWith('.test.sh')).sort();
   assert.equal(shellContracts.length, shellFiles.length);

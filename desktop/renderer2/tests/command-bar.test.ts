@@ -62,20 +62,36 @@ test('the renderer does not reload when the daemon restart promise rejects', asy
   assert.equal(reloaded, 0);
 });
 
-test('restart taking longer than the take-control budget finishes before renderer reload', async () => {
+test('restart remains pending until confirmation before renderer reload', async () => {
   let finishRestart!: (value: unknown) => void;
   let reloaded = 0;
-  const operation = forceReconnect({
-    storage: { removeItem: () => {} }, takeControl: undefined,
-    restartDaemon: () => new Promise((resolve) => { finishRestart = resolve; }),
-    reload: () => { reloaded += 1; }, restartTimeoutMs: 5000,
-  });
-  await new Promise((resolve) => setTimeout(resolve, 1650));
-  assert.equal(reloaded, 0, 'settling the old 1.5 second race must not reload');
-  finishRestart({ ok: true });
-  const receipt = await operation;
-  assert.equal(receipt.daemonRestartSettled, true);
-  assert.equal(reloaded, 1);
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  let now = 0;
+  const timers: Array<{ callback: () => void; dueAt: number }> = [];
+  (globalThis as any).setTimeout = (callback: () => void, delay: number) => {
+    timers.push({ callback, dueAt: now + delay });
+    return timers.length;
+  };
+  (globalThis as any).clearTimeout = () => {};
+  try {
+    const operation = forceReconnect({
+      storage: { removeItem: () => {} }, takeControl: undefined,
+      restartDaemon: () => new Promise((resolve) => { finishRestart = resolve; }),
+      reload: () => { reloaded += 1; }, restartTimeoutMs: 5000,
+    });
+    await Promise.resolve();
+    assert.equal(timers[0]?.dueAt, 5000, 'the complete restart timeout remains armed');
+    now = 1650;
+    assert.equal(reloaded, 0, 'crossing the old take-control timeout does not reload before restart confirmation');
+    finishRestart({ ok: true });
+    const receipt = await operation;
+    assert.equal(receipt.daemonRestartSettled, true);
+    assert.equal(reloaded, 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
 });
 
 test('restart timeout keeps the renderer open and tells the user to retry', async () => {
