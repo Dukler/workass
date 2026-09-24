@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { runSuiteMatrix, runSuiteLifecycle, testSummary, fullSuiteCommands, isMainModule } from '../test-suite.mjs';
 
@@ -195,7 +196,7 @@ test('interrupt is forwarded to running children and waits for cleanup', async t
   assert.match(fs.readFileSync(path.join(dir, 'child.log'), 'utf8'), /cleaned/);
 });
 
-test('interrupt during fixture provisioning skips the matrix and cleans the allocated fixture', async () => {
+test('interrupt during fixture provisioning joins the prestarted matrix and cleans the allocated fixture', async () => {
   const signals = new EventEmitter();
   let finishProvisioning;
   let cleaned = false;
@@ -203,18 +204,50 @@ test('interrupt during fixture provisioning skips the matrix and cleans the allo
   const lifecycle = runSuiteLifecycle({
     signalTarget: signals,
     createFixture: () => new Promise(resolve => { finishProvisioning = resolve; }),
-    runMatrix: async () => { matrixStarted = true; throw new Error('matrix must not start'); },
+    runMatrix: async (_commands, { fixturePromise }) => {
+      matrixStarted = true;
+      await fixturePromise;
+      return { results: [], correctness: false, performanceStatus: 'over_budget', elapsedMs: 0, logDir: '(test)' };
+    },
   });
+  await new Promise(resolve => setImmediate(resolve));
   signals.emit('SIGTERM');
   finishProvisioning({ root: '/unused-test-fixture', cleanup: async () => { cleaned = true; } });
   const result = await lifecycle;
-  assert.equal(matrixStarted, false);
+  assert.equal(matrixStarted, true);
   assert.equal(cleaned, true);
   assert.equal(result.interrupted, true);
   assert.equal(result.report.correctness, false);
   assert.equal(result.report.results[0].name, 'fixture_volume_interrupted');
   assert.equal(signals.listenerCount('SIGINT'), 0);
   assert.equal(signals.listenerCount('SIGTERM'), 0);
+});
+
+test('fixture failure and interruption both kill and join the prestarted Go child', async t => {
+  for (const mode of ['fixture-failure', 'interrupt']) {
+    const dir = temp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const controller = new AbortController();
+    let rejectFixture;
+    const fixturePromise = new Promise((resolve, reject) => { rejectFixture = reject; });
+    let killed = false, closed = false;
+    const report = runSuiteMatrix([{ name: 'go_tests', command: 'node', fixtureRootIpc: true, requireTestReport: true }], {
+      logDir: dir, fixturePromise, abortSignal: controller.signal,
+      spawnCommand: () => {
+        const child = new EventEmitter();
+        child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdio = [null, child.stdout, child.stderr, new PassThrough()];
+        child.kill = () => { killed = true; setImmediate(() => { closed = true; child.emit('close', null, 'SIGINT'); }); return true; };
+        setImmediate(() => child.emit('spawn'));
+        child.on('close', () => { closed = true; });
+        return child;
+      },
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    if (mode === 'fixture-failure') rejectFixture(new Error('provision failed'));
+    else controller.abort();
+    await report;
+    assert.equal(killed, true, `${mode} cancels the prestarted Go child`);
+    assert.equal(closed, true, `${mode} joins the Go child before returning`);
+  }
 });
 
 test('interrupt during fixture cleanup waits for cleanup before returning a failed report', async () => {

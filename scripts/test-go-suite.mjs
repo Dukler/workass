@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn as nodeSpawn } from 'node:child_process';
+import { createReadStream } from 'node:fs';
 import { createWriteStream, existsSync, realpathSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -285,7 +286,7 @@ function parseGoJson(output) {
   return events;
 }
 
-export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtureRoot = process.env.WORKASS_TEST_FIXTURE_ROOT, workers = DEFAULT_WORKERS, race = false, go = 'go', spawn = nodeSpawn, signalHandlers = true, abortSignal } = {}) {
+export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtureRoot = process.env.WORKASS_TEST_FIXTURE_ROOT, fixtureRootPromise, workers = DEFAULT_WORKERS, race = false, go = 'go', spawn = nodeSpawn, signalHandlers = true, abortSignal } = {}) {
   if (!Number.isInteger(workers) || workers < 1) throw new Error('workers must be a positive integer');
   const wallStart = performance.now();
   const root = await mkdtemp(path.join(os.tmpdir(), 'workass-go-matrix-'));
@@ -294,6 +295,15 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
     await mkdir(fixtureRoot, { recursive: true });
     fixtureTempRoot = await mkdtemp(path.join(fixtureRoot, 'workass-go-fixtures-'));
   }
+  let resolvedFixtureRoot = fixtureRoot;
+  const ensureFixtureRoot = async () => {
+    if (!resolvedFixtureRoot && fixtureRootPromise) resolvedFixtureRoot = await fixtureRootPromise;
+    if (resolvedFixtureRoot && !fixtureTempRoot) {
+      await mkdir(resolvedFixtureRoot, { recursive: true });
+      fixtureTempRoot = await mkdtemp(path.join(resolvedFixtureRoot, 'workass-go-fixtures-'));
+    }
+    return fixtureTempRoot;
+  };
   const repoKey = createHash('sha256').update(realpathSync(cwd)).digest('hex').slice(0, 24);
   const binaryCache = cacheDir ?? (spawn === nodeSpawn
     ? path.join(os.tmpdir(), 'workass-go-test-binaries', repoKey, race ? 'race' : 'normal')
@@ -331,7 +341,10 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
   const onAbort = () => onInterrupt('ABORT');
   abortSignal?.addEventListener('abort', onAbort, { once: true });
   const commandTemp = async (label, { testBinary = false } = {}) => {
-    if (testBinary && fixtureTempRoot) return mkdtemp(path.join(fixtureTempRoot, `${label}-`));
+    if (testBinary) {
+      const fixture = await ensureFixtureRoot();
+      if (fixture) return mkdtemp(path.join(fixture, `${label}-`));
+    }
     const dir = path.join(root, `command-${label}`);
     await mkdir(dir, { recursive: true });
     return dir;
@@ -567,6 +580,28 @@ async function main() {
     else if (args[i] === '--race') options.race = true;
     else if (args[i] === '--help') { process.stdout.write('Usage: node scripts/test-go-suite.mjs [--workers N] [--race] [--cwd DIR] [--log-dir DIR]\n'); return 0; }
     else throw new Error(`unknown argument: ${args[i]}`);
+  }
+  if (process.env.WORKASS_TEST_FIXTURE_IPC === '1') {
+    options.fixtureRootPromise = new Promise((resolve, reject) => {
+      let input = '';
+      const pipe = createReadStream(null, { fd: 3, autoClose: true });
+      pipe.setEncoding('utf8');
+      pipe.on('data', chunk => {
+        input += chunk;
+        const newline = input.indexOf('\n');
+        if (newline < 0) return;
+        try {
+          if (input.slice(newline + 1).trim()) throw new Error('duplicate fixture-root handshake');
+          const message = JSON.parse(input.slice(0, newline));
+          if (typeof message.root !== 'string' || !path.isAbsolute(message.root)) throw new Error('invalid fixture-root handshake');
+          options.fixtureRoot = undefined;
+          resolve(message.root);
+          pipe.destroy();
+        } catch (error) { reject(error); pipe.destroy(); }
+      });
+      pipe.on('end', () => { if (!input.includes('\n')) reject(new Error('fixture-root handshake closed before delivery')); });
+      pipe.on('error', reject);
+    });
   }
   const summary = await runGoSuite(options);
   const packages = Object.values(summary.heavyPackages);

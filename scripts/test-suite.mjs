@@ -107,7 +107,7 @@ function failureDetail(output) {
   return (details.length ? details.slice(-12) : lines.filter(Boolean).slice(-6)).join('\n').slice(-2_000);
 }
 
-export async function runSuiteMatrix(commands, { logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-test-suite-')), budgetMs = limitMs, startedAt = performance.now() } = {}) {
+export async function runSuiteMatrix(commands, { logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-test-suite-')), budgetMs = limitMs, startedAt = performance.now(), fixturePromise, abortSignal, spawnCommand = spawn } = {}) {
   fs.mkdirSync(logDir, { recursive: true });
   let interrupted = false;
   const children = new Set();
@@ -120,6 +120,8 @@ export async function runSuiteMatrix(commands, { logDir = fs.mkdtempSync(path.jo
   };
   process.on('SIGINT', onInterrupt);
   process.on('SIGTERM', onInterrupt);
+  const onAbort = () => onInterrupt();
+  abortSignal?.addEventListener('abort', onAbort, { once: true });
   const results = await Promise.all(commands.map(spec => new Promise(resolve => {
     const logPath = path.join(logDir, `${spec.name}.log`);
     const log = fs.createWriteStream(logPath, { flags: 'w' });
@@ -139,8 +141,17 @@ export async function runSuiteMatrix(commands, { logDir = fs.mkdtempSync(path.jo
       if (!sinkError) log.write(chunk, error => { if (error) { sinkError = error; stopChildren(); } });
     };
     log.on('error', error => { sinkError = error; stopChildren(); });
-    try {
-      child = spawn(spec.command, spec.args ?? [], { cwd: spec.cwd ?? root, env: spec.env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    const finishSpawnError = error => {
+      spawnError = error;
+      log.end(() => resolve({ name: spec.name, code: 127, signal: null, elapsedMs: performance.now() - childStarted, ...testSummary(output), logPath, spawnError: error.message, failureDetail: failureDetail(output) }));
+    };
+    const launch = fixture => {
+      if (interrupted) return finishSpawnError(new Error('interrupted before suite start'));
+      const env = { ...(spec.env ?? process.env) };
+      if (fixture && spec.fixtureTempEnv) Object.assign(env, { TMPDIR: fixture.root, TMP: fixture.root, TEMP: fixture.root });
+      if (spec.fixtureRootIpc) { env.WORKASS_TEST_FIXTURE_IPC = '1'; delete env.WORKASS_TEST_FIXTURE_ROOT; }
+      try {
+      child = spawnCommand(spec.command, spec.args ?? [], { cwd: spec.cwd ?? root, env, stdio: spec.fixtureRootIpc ? ['ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
       children.add(child);
       child.stdout.on('data', append);
       child.stderr.on('data', append);
@@ -157,13 +168,28 @@ export async function runSuiteMatrix(commands, { logDir = fs.mkdtempSync(path.jo
         if (sinkError) { log.destroy(); finish(); }
         else log.end(finish);
       });
+      if (spec.fixtureRootIpc && fixture) {
+        child.stdio[3].end(`${JSON.stringify({ root: fixture.root })}\n`);
+      }
     } catch (error) {
-      spawnError = error;
-      log.end(() => resolve({ name: spec.name, code: 127, signal: null, elapsedMs: performance.now() - childStarted, ...testSummary(output), logPath, spawnError: error.message, failureDetail: failureDetail(output) }));
+      finishSpawnError(error);
     }
+    };
+    if (spec.fixtureRootIpc) launch(null);
+    else if (spec.fixtureTempEnv && fixturePromise) fixturePromise.then(launch, finishSpawnError);
+    else launch(null);
+    if (spec.fixtureRootIpc && fixturePromise) fixturePromise.then(fixture => {
+      if (child && child.stdio?.[3]?.writable) child.stdio[3].end(`${JSON.stringify({ root: fixture.root })}\n`);
+    }, error => {
+      if (child?.stdio?.[3]?.writable) child.stdio[3].end();
+      if (child) {
+        try { if (child.pid && process.platform !== 'win32') process.kill(-child.pid, 'SIGINT'); else child.kill('SIGINT'); } catch { child.kill('SIGINT'); }
+      }
+    });
   })));
   process.removeListener('SIGINT', onInterrupt);
   process.removeListener('SIGTERM', onInterrupt);
+  abortSignal?.removeEventListener('abort', onAbort);
   const elapsedMs = performance.now() - startedAt;
   const correctness = !interrupted && results.every(result => result.code === 0 && !result.spawnError && !result.sinkError && !result.reportError);
   const performanceStatus = elapsedMs <= budgetMs ? 'within_budget' : 'over_budget';
@@ -195,18 +221,22 @@ export async function runSuiteLifecycle({
   let report;
   let lifecycleError;
   let interrupted = false;
-  const latchInterrupt = () => { interrupted = true; };
+  const abortController = new AbortController();
+  const latchInterrupt = () => { interrupted = true; abortController.abort(); };
   signalTarget.on('SIGINT', latchInterrupt);
   signalTarget.on('SIGTERM', latchInterrupt);
   try {
-    fixture = await createFixture();
-    if (!interrupted) {
-      const commands = fullSuiteCommands().map(spec => {
-        if (spec.name === 'go_tests') return { ...spec, env: { ...process.env, WORKASS_TEST_FIXTURE_ROOT: fixture.root } };
-        return { ...spec, env: { ...process.env, TMPDIR: fixture.root, TMP: fixture.root, TEMP: fixture.root } };
-      });
-      report = await runMatrix(commands, { startedAt });
-    }
+    let resolveFixture, rejectFixture;
+    const fixturePromise = new Promise((resolve, reject) => { resolveFixture = resolve; rejectFixture = reject; });
+    const creation = Promise.resolve().then(createFixture).then(value => { fixture = value; resolveFixture(value); return value; }, error => { rejectFixture(error); throw error; });
+    const commands = fullSuiteCommands().map(spec => spec.name === 'go_tests'
+      ? { ...spec, fixtureRootIpc: true }
+      : { ...spec, fixtureTempEnv: true });
+    if (interrupted) rejectFixture(new Error('interrupted during fixture provisioning'));
+    const matrix = runMatrix(commands, { startedAt, fixturePromise, abortSignal: abortController.signal });
+    try { await creation; } catch (error) { lifecycleError = error; }
+    if (!interrupted) report = await matrix;
+    else { await matrix; }
   } catch (error) {
     lifecycleError = error;
   } finally {
