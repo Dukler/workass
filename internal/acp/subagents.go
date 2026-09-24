@@ -818,12 +818,17 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 	parentChatID, parentTabID := run.parentChatID, run.parentTabID
 	receipt := copySubagentRun(run)
 	eligibleCompletion := status == "done" || status == "failed"
-	run.completionPending = eligibleCompletion && !run.completionSuppressed && !m.resetting
-	deliverCompletion := run.completionPending
 	m.mu.Unlock()
 	m.settleSubagentSpawnedWork(parentTabID, parentChatID, receipt)
-	persisted := m.persistSubagentReceipt(parentChatID, parentTabID, receipt, deliverCompletion)
 	m.mu.Lock()
+	run.completionPending = eligibleCompletion && !run.completionSuppressed && !m.resetting
+	receipt = copySubagentRun(run)
+	receipt.parentChatID, receipt.parentTabID = parentChatID, parentTabID
+	deliverCompletion := run.completionPending
+	if m.subagentReceiptPersisting != nil {
+		m.subagentReceiptPersisting()
+	}
+	persisted := m.persistSubagentReceipt(parentChatID, parentTabID, receipt, deliverCompletion)
 	run.receiptCommitted = true
 	m.mu.Unlock()
 	if rootJobID != "" {
@@ -1309,6 +1314,9 @@ func (m *Manager) suppressSubagentCompletionsForParent(parentJobID, operationID 
 				snapshot := copySubagentRun(run)
 				snapshot.parentChatID, snapshot.parentTabID = run.parentChatID, run.parentTabID
 				suppressed = append(suppressed, snapshot)
+				if run.receiptCommitted {
+					_ = m.persistSubagentReceipt(run.parentChatID, run.parentTabID, snapshot, false)
+				}
 			}
 		}
 	}
