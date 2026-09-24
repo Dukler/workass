@@ -936,6 +936,7 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .selectorcluster .ctxring-wrap { display: flex; align-items: center; height: 20px; line-height: 0; }
 .modelsel, .effortsel, .ctxring { height: 20px; align-items: center; }
 .modelsel { color: var(--ink2); font-size: 12.5px; cursor: pointer; background: transparent; border: 0; padding: 0; font-family: inherit; display: inline-flex; line-height: 20px; }
+.modelsel.unavailable { color: var(--amber); }
 /* Effort selector: same shared control box as model and context, with a full-size
    gauge so it reads as an equal peer instead of a tiny baseline decoration. */
 .effortsel { color: var(--ink2); font-size: 12.5px; cursor: pointer; background: transparent; border: 0; padding: 0; font-family: inherit; display: inline-flex; gap: 6px; line-height: 20px; }

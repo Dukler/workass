@@ -90,3 +90,14 @@ test('local and remote chats render and validate only their owning machine catal
   assert.doesNotMatch(desktoppcMarkup, /LOCAL-ONE|SAN-ONE/);
 });
 
+test('remote composer exposes a saved model rejected by the live host instead of displaying its default', () => {
+  const san = chat('m-work', 'live-default');
+  san.configuredModelId = 'retired-model[high]';
+  appStore.onCatalog(projectRemoteEvent('onChatCatalog', 'm-work', {
+    groups: [{ ...group('San Agent', 'san-brand', 'live-default'), status: 'ready' }],
+    models: [], modes: [],
+  }) as ChatCatalog);
+  const markup = renderToStaticMarkup(React.createElement(Composer, { chat: san }));
+  assert.match(markup, /Modelo no disponible/);
+  assert.doesNotMatch(markup, />LIVE-DEFAULT<\/button>/);
+});

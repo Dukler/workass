@@ -195,6 +195,9 @@ export interface Chat {
   // mirrors echo it unchanged so an older save cannot undo agent-side recovery.
   runtimeControlRevision?: number;
   currentModelId: string | null;
+  // Actor-owned selection for the next turn. A resumed ACP session may be
+  // running its default after rejecting this saved selection.
+  configuredModelId?: string | null;
   currentModeId: string | null;
   // Last explicit effort + permission selection for each provider/model in
   // THIS chat. Switching away and back restores the same setup without leaking

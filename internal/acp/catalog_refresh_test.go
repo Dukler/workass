@@ -56,6 +56,32 @@ func TestProviderVersionChangeReprobesAndPublishesCatalog(t *testing.T) {
 	}
 }
 
+func TestSessionAttachPublishesChangedModelOptions(t *testing.T) {
+	events := newEventCollector()
+	manager := catalogRefreshTestManager(t, events)
+	manager.mu.Lock()
+	runtime := manager.providers["mock"]
+	runtime.Probed = true
+	runtime.Status = providerStatusReady
+	runtime.Models = []Model{{ModelID: "removed-model", Name: "Removed model"}}
+	manager.mu.Unlock()
+
+	bridge := newBridge("live-mock", Options{Provider: ProviderConfig{ID: "mock", Name: "Mock Provider"}}, manager)
+	bridge.agentName = "Mock ACP"
+	bridge.applyConfigOptionsForSession("resumed-session", []any{map[string]any{
+		"id": "model", "category": "model", "currentValue": "mock-deterministic",
+		"options": []any{map[string]any{"value": "mock-deterministic", "name": "Mock deterministic"}},
+	}}, false, false)
+
+	event := events.waitChannel(t, "chat:catalog", 5*time.Second)
+	payload, _ := event.payload.(map[string]any)
+	groups, _ := payload["groups"].([]CatalogGroup)
+	group := findCatalogGroup(groups, "mock")
+	if group == nil || len(group.Models) != 1 || group.Models[0].ModelID != "mock-deterministic" {
+		t.Fatalf("attached host did not publish its current models: %#v", group)
+	}
+}
+
 func TestAuthoritativeAvailableModelsReplaceRenamedAddedAndRemovedModels(t *testing.T) {
 	events := newEventCollector()
 	manager := catalogRefreshTestManager(t, events)

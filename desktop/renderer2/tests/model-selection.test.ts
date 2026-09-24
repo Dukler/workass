@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  configuredModelUnavailable,
   modelContextQualifier,
   resolveModelSelection,
 } from '../src/model-selection.ts';
@@ -15,6 +16,14 @@ const claudeModels: ModelOption[] = [
 const groups: CatalogGroup[] = [{
   providerId: 'claude', providerName: 'Claude', status: 'ready', models: claudeModels, modes: [],
 }];
+
+test('a rejected saved model stays unavailable even when the resumed session has a valid live default', () => {
+  const fresh = { ...groups[0], models: [claudeModels[2]] };
+  assert.ok(resolveModelSelection([fresh], [], 'sonnet').model);
+  assert.equal(configuredModelUnavailable(fresh, 'retired-opus[high]'), true);
+  assert.equal(configuredModelUnavailable(fresh, 'sonnet'), false);
+  assert.equal(configuredModelUnavailable({ ...fresh, status: 'loading' }, 'retired-opus[high]'), false);
+});
 
 test('keeps Claude Fable literal [1m] model id intact', () => {
   const selected = resolveModelSelection(groups, [], 'claude-fable-5[1m]');
