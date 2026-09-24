@@ -71,7 +71,14 @@ test('scheduler orders measured heavy batches globally and starts machinebook fi
 
 test('requested worker capacity is honored without the legacy six-worker clamp', async t => {
   const f = await fixture(t);
-  const tracker = inProcessGoSpawn();
+  let executions = 0;
+  let releaseExecutions;
+  const executionBarrier = new Promise(resolve => { releaseExecutions = resolve; });
+  const tracker = inProcessGoSpawn({ testExecutionGate: () => {
+    executions++;
+    if (executions === 4) releaseExecutions();
+    return executionBarrier;
+  } });
   const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 8, spawn: tracker.spawn, signalHandlers: false });
   assert.equal(result.ok, true, result.error);
   assert.equal(result.workers, 8);
@@ -141,6 +148,45 @@ test('metadata and all compile groups run while fixture is pending; test binarie
   assert.equal(events.filter(event => event === 'compile-finished').length, 3);
 });
 
+test('concurrent Go workers share one asynchronously provisioned fixture subtree', async t => {
+  const f = await fixture(t);
+  let provideRoot;
+  const fixtureRootPromise = new Promise(resolve => { provideRoot = resolve; });
+  const binaryTemps = [];
+  let compileFinishes = 0;
+  const fake = inProcessGoSpawn({ record: (command, _args, options) => {
+    if (String(command).endsWith('.test')) binaryTemps.push(options.env.TMPDIR);
+  }, onCompileFinish: () => { compileFinishes++; }});
+  const running = runGoSuite({ cwd: f.root, logDir: f.logs, fixtureRootPromise, go: f.go, workers: 18, spawn: fake.spawn, signalHandlers: false });
+  while (compileFinishes < 3) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(binaryTemps.length, 0, 'no test binary starts while fixture provisioning is held');
+  const fixtureRoot = path.join(f.root, 'shared-fixture');
+  await mkdir(fixtureRoot);
+  provideRoot(fixtureRoot);
+  const result = await running;
+  assert.equal(result.ok, true, result.error);
+  assert.ok(binaryTemps.length > 2, 'multiple workers reached fixture temp creation');
+  assert.equal(new Set(binaryTemps.map(dir => path.dirname(dir))).size, 1, 'all test commands use one memoized owned fixture root');
+  assert.deepEqual(await import('node:fs/promises').then(fs => fs.readdir(fixtureRoot)), [], 'the single owned fixture subtree was removed');
+});
+
+test('abort while waiting for fixture delivery settles workers and joins active compilers', async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  const fixtureRootPromise = new Promise(() => {});
+  const spawned = [];
+  let compileStarts = 0;
+  const fake = inProcessGoSpawn({ record: (_command, args) => spawned.push(args[0]), onCompileStart: () => { compileStarts++; }, compileDelayMs: 500 });
+  const running = runGoSuite({ cwd: f.root, logDir: f.logs, fixtureRootPromise, go: f.go, workers: 3, spawn: fake.spawn, signalHandlers: false, abortSignal: controller.signal });
+  while (compileStarts < 3) await new Promise(resolve => setTimeout(resolve, 5));
+  controller.abort();
+  const result = await running;
+  assert.equal(result.ok, false);
+  assert.equal(result.interrupted, 'ABORT');
+  assert.equal(spawned.includes('-test.v'), false, 'no Go test binary ran without fixture delivery');
+  assert.equal(fake.active(), 0, 'the prestarted compile process groups are joined before return');
+});
+
 async function fixture(t, { fail = '', delay = '0.04', packageFail = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'workass-go-suite-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -158,20 +204,23 @@ async function fixture(t, { fail = '', delay = '0.04', packageFail = false } = {
   return { root, logs, go: goSource };
 }
 
-function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/chat', 'workass/internal/appinstall', 'workass/internal/two'], noTestPackages = [], failCase = '', packageFail = false, record = () => {}, compileDelayMs = 0, compileDelays = {}, failCompile = '', onCompileStart = () => {}, onCompileFinish = () => {}, onPackageStart = () => {}, onTestBinaryStart = () => {} } = {}) {
+function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/chat', 'workass/internal/appinstall', 'workass/internal/two'], noTestPackages = [], failCase = '', packageFail = false, record = () => {}, compileDelayMs = 0, compileDelays = {}, failCompile = '', onCompileStart = () => {}, onCompileFinish = () => {}, onPackageStart = () => {}, onTestBinaryStart = () => {}, testExecutionGate = () => Promise.resolve() } = {}) {
   let active = 0, maximum = 0;
   const spawn = (command, args, options) => {
     const child = new EventEmitter();
     child.stdout = new PassThrough(); child.stderr = new PassThrough();
-    child.kill = () => { setImmediate(() => child.emit('close', null, 'SIGTERM')); return true; };
+    let closed = false;
     active++; maximum = Math.max(maximum, active);
     const finish = (code, stdout = '', stderr = '') => {
+      if (closed) return;
+      closed = true;
       if (stdout) child.stdout.end(stdout);
       else child.stdout.end();
       if (stderr) child.stderr.end(stderr);
       else child.stderr.end();
       setImmediate(() => { active--; child.emit('close', code, null); });
     };
+    child.kill = () => { finish(null); return true; };
     setImmediate(() => child.emit('spawn'));
     record(command, args, options);
     if (String(command).endsWith('.test')) {
@@ -181,7 +230,8 @@ function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/interna
       const selected = names.filter(name => new RegExp(pattern).test(name));
       const out = selected.flatMap(name => [`=== RUN ${name}`, `=== RUN ${name}/child`, `complete output for ${name}`, `--- PASS: ${name}/child (0.01s)`, name === failCase ? `--- FAIL: ${name} (0.01s)` : `--- PASS: ${name} (0.01s)`]).join('\n') + '\n';
       const otherPackageFailure = packageFail && options.cwd?.endsWith('/internal/one');
-      finish(failCase && selected.includes(failCase) ? 7 : otherPackageFailure ? 9 : 0, `${out}other-package-output\n`, failCase && selected.includes(failCase) || otherPackageFailure ? 'deliberate failure detail\n' : ''); return child;
+      Promise.resolve(testExecutionGate()).then(() => finish(failCase && selected.includes(failCase) ? 7 : otherPackageFailure ? 9 : 0, `${out}other-package-output\n`, failCase && selected.includes(failCase) || otherPackageFailure ? 'deliberate failure detail\n' : ''));
+      return child;
     }
     if (command === 'go' || path.basename(String(command)).startsWith('fake-go')) {
       if (args[0] === 'test' && args.includes('-c')) {
@@ -203,7 +253,7 @@ function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/interna
     }
     finish(90, '', `unexpected fake invocation: ${command} ${args.join(' ')}\n`); return child;
   };
-  return { spawn, maximum: () => maximum };
+  return { spawn, maximum: () => maximum, active: () => active };
 }
 
 test('fresh matrix covers all four heavy packages once, with unique labels and paths, within the bound, and retains full logs', async t => {

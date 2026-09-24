@@ -296,11 +296,27 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
     fixtureTempRoot = await mkdtemp(path.join(fixtureRoot, 'workass-go-fixtures-'));
   }
   let resolvedFixtureRoot = fixtureRoot;
+  let fixtureInitPromise;
+  let rejectFixtureWait;
+  const fixtureWaitAborted = new Promise((_, reject) => { rejectFixtureWait = reject; });
+  fixtureWaitAborted.catch(() => {});
+  // A rejected IPC handshake can arrive while compilation is still running.
+  // Mark it handled immediately; workers still observe the rejection when they
+  // reach test-binary setup.
+  fixtureRootPromise?.catch(() => {});
+  const abortFixtureWait = () => rejectFixtureWait(new Error(`interrupted by ${interrupted ?? 'ABORT'}`));
+  if (abortSignal?.aborted) abortFixtureWait();
+  else abortSignal?.addEventListener('abort', abortFixtureWait, { once: true });
   const ensureFixtureRoot = async () => {
-    if (!resolvedFixtureRoot && fixtureRootPromise) resolvedFixtureRoot = await fixtureRootPromise;
+    if (!resolvedFixtureRoot && fixtureRootPromise) {
+      resolvedFixtureRoot = await Promise.race([fixtureRootPromise, fixtureWaitAborted]);
+    }
     if (resolvedFixtureRoot && !fixtureTempRoot) {
-      await mkdir(resolvedFixtureRoot, { recursive: true });
-      fixtureTempRoot = await mkdtemp(path.join(resolvedFixtureRoot, 'workass-go-fixtures-'));
+      fixtureInitPromise ??= (async () => {
+        await mkdir(resolvedFixtureRoot, { recursive: true });
+        return mkdtemp(path.join(resolvedFixtureRoot, 'workass-go-fixtures-'));
+      })();
+      fixtureTempRoot = await fixtureInitPromise;
     }
     return fixtureTempRoot;
   };
@@ -560,6 +576,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
   } finally {
     if (signalHandlers) { process.off('SIGINT', onInterrupt); process.off('SIGTERM', onInterrupt); }
     abortSignal?.removeEventListener('abort', onAbort);
+    abortSignal?.removeEventListener('abort', abortFixtureWait);
     await rm(root, { recursive: true, force: true });
     if (fixtureTempRoot) await rm(fixtureTempRoot, { recursive: true, force: true });
     summary.elapsedMs = performance.now() - wallStart;
