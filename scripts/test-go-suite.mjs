@@ -40,6 +40,7 @@ const HINTS = new Map([
   ["TestChatEnvTracksRepoChangesAfterTurn", 0.63],
   ["TestChatEnvTruncationFlags", 2.46],
   ["TestChatListToolPreservesLocalChatsWithMountedRemote", 1.13],
+  ["TestChatLifecycleDoesNotRunAutomaticGit", 3.2],
   ["TestClaudeUpdateReresolvesTransientShimAndAtomicInstallSwap", 4.65],
   ["TestCodexNativeGoalThroughActorAndExactResume", 5.32],
   ["TestCodexRuntimeDiagnosticsThroughActorAndRestart", 1.63],

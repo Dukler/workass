@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { runSuiteMatrix, testSummary, fullSuiteCommands, isMainModule } from '../test-suite.mjs';
+import { runSuiteMatrix, runSuiteLifecycle, testSummary, fullSuiteCommands, isMainModule } from '../test-suite.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../..');
@@ -192,4 +193,52 @@ test('interrupt is forwarded to running children and waits for cleanup', async t
   assert.equal(await finished, 0);
   assert.match(output, /"interrupted":true/);
   assert.match(fs.readFileSync(path.join(dir, 'child.log'), 'utf8'), /cleaned/);
+});
+
+test('interrupt during fixture provisioning skips the matrix and cleans the allocated fixture', async () => {
+  const signals = new EventEmitter();
+  let finishProvisioning;
+  let cleaned = false;
+  let matrixStarted = false;
+  const lifecycle = runSuiteLifecycle({
+    signalTarget: signals,
+    createFixture: () => new Promise(resolve => { finishProvisioning = resolve; }),
+    runMatrix: async () => { matrixStarted = true; throw new Error('matrix must not start'); },
+  });
+  signals.emit('SIGTERM');
+  finishProvisioning({ root: '/unused-test-fixture', cleanup: async () => { cleaned = true; } });
+  const result = await lifecycle;
+  assert.equal(matrixStarted, false);
+  assert.equal(cleaned, true);
+  assert.equal(result.interrupted, true);
+  assert.equal(result.report.correctness, false);
+  assert.equal(result.report.results[0].name, 'fixture_volume_interrupted');
+  assert.equal(signals.listenerCount('SIGINT'), 0);
+  assert.equal(signals.listenerCount('SIGTERM'), 0);
+});
+
+test('interrupt during fixture cleanup waits for cleanup before returning a failed report', async () => {
+  const signals = new EventEmitter();
+  let finishCleanup;
+  let cleanupStarted = false;
+  const lifecycle = runSuiteLifecycle({
+    signalTarget: signals,
+    createFixture: async () => ({ root: '/unused-test-fixture', cleanup: () => {
+      cleanupStarted = true;
+      return new Promise(resolve => { finishCleanup = resolve; });
+    } }),
+    runMatrix: async () => ({ results: [], correctness: true, performanceStatus: 'within_budget', elapsedMs: 0, logDir: '(test)' }),
+  });
+  while (!cleanupStarted) await new Promise(resolve => setImmediate(resolve));
+  signals.emit('SIGINT');
+  let returned = false;
+  lifecycle.then(() => { returned = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(returned, false);
+  finishCleanup();
+  const result = await lifecycle;
+  assert.equal(result.interrupted, true);
+  assert.equal(result.report.correctness, false);
+  assert.equal(signals.listenerCount('SIGINT'), 0);
+  assert.equal(signals.listenerCount('SIGTERM'), 0);
 });

@@ -185,18 +185,28 @@ export function isMainModule(argvPath = process.argv[1], modulePath = fileURLToP
   catch { return false; }
 }
 
-if (isMainModule()) {
+export async function runSuiteLifecycle({
+  createFixture = createTemporaryFixtureVolume,
+  runMatrix = runSuiteMatrix,
+  signalTarget = process,
+} = {}) {
   const startedAt = performance.now();
   let fixture;
   let report;
   let lifecycleError;
+  let interrupted = false;
+  const latchInterrupt = () => { interrupted = true; };
+  signalTarget.on('SIGINT', latchInterrupt);
+  signalTarget.on('SIGTERM', latchInterrupt);
   try {
-    fixture = await createTemporaryFixtureVolume();
-    const commands = fullSuiteCommands().map(spec => {
-      if (spec.name === 'go_tests') return { ...spec, env: { ...process.env, WORKASS_TEST_FIXTURE_ROOT: fixture.root } };
-      return { ...spec, env: { ...process.env, TMPDIR: fixture.root, TMP: fixture.root, TEMP: fixture.root } };
-    });
-    report = await runSuiteMatrix(commands, { startedAt });
+    fixture = await createFixture();
+    if (!interrupted) {
+      const commands = fullSuiteCommands().map(spec => {
+        if (spec.name === 'go_tests') return { ...spec, env: { ...process.env, WORKASS_TEST_FIXTURE_ROOT: fixture.root } };
+        return { ...spec, env: { ...process.env, TMPDIR: fixture.root, TMP: fixture.root, TEMP: fixture.root } };
+      });
+      report = await runMatrix(commands, { startedAt });
+    }
   } catch (error) {
     lifecycleError = error;
   } finally {
@@ -204,14 +214,22 @@ if (isMainModule()) {
       try { await fixture.cleanup(); }
       catch (error) { lifecycleError = lifecycleError ? new AggregateError([lifecycleError, error], 'suite and fixture cleanup failed') : error; }
     }
+    signalTarget.removeListener('SIGINT', latchInterrupt);
+    signalTarget.removeListener('SIGTERM', latchInterrupt);
   }
-  if (!report) report = { results: [{ name: 'fixture_volume', code: 1, elapsedMs: 0, tests: null, topLevelTests: null, subtests: null, passed: null, failed: 1, skipped: 0, logPath: '(no suite log)', failureDetail: lifecycleError?.stack ?? String(lifecycleError) }], correctness: false, performanceStatus: 'over_budget', elapsedMs: 0, logDir: '(not created)' };
+  if (!report) report = { results: [{ name: interrupted ? 'fixture_volume_interrupted' : 'fixture_volume', code: 1, elapsedMs: 0, tests: null, topLevelTests: null, subtests: null, passed: null, failed: 1, skipped: 0, logPath: '(no suite log)', failureDetail: interrupted ? 'interrupted before test matrix started' : lifecycleError?.stack ?? String(lifecycleError) }], correctness: false, performanceStatus: 'over_budget', elapsedMs: 0, logDir: '(not created)' };
+  if (interrupted) report.correctness = false;
   if (lifecycleError) {
     report.correctness = false;
     report.results.push({ name: 'fixture_volume_lifecycle', code: 1, elapsedMs: 0, tests: null, topLevelTests: null, subtests: null, passed: null, failed: 1, skipped: 0, logPath: '(lifecycle error)', failureDetail: lifecycleError.stack ?? String(lifecycleError) });
   }
   report.elapsedMs = performance.now() - startedAt;
   report.performanceStatus = report.elapsedMs <= limitMs ? 'within_budget' : 'over_budget';
+  return { report, lifecycleError, interrupted };
+}
+
+if (isMainModule()) {
+  const { report, lifecycleError } = await runSuiteLifecycle();
   printReport(report);
   if (lifecycleError) console.error(`WORKASS_TEST_SUITE_FIXTURE_FAILURE ${lifecycleError.stack ?? lifecycleError}`);
   process.exitCode = report.correctness ? 0 : 1;
