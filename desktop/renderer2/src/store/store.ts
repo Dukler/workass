@@ -390,6 +390,7 @@ export interface ProviderSettingsMachine {
 }
 
 export class Store {
+  private readonly toastTimers = new Set<ReturnType<typeof setTimeout>>();
   state: AppState;
   private versions = new Map<string, number>();
   private listeners = new Map<string, Set<() => void>>();
@@ -6228,7 +6229,15 @@ export class Store {
     const t: Toast = { id: rid('to'), title, body };
     this.state.toasts = [...this.state.toasts, t];
     this.bumpApp(false);
-    setTimeout(() => this.dismissToast(t.id), 6500);
+    const timer = setTimeout(() => {
+      this.toastTimers.delete(timer);
+      this.dismissToast(t.id);
+    }, 6500);
+    this.toastTimers.add(timer);
+  }
+  clearToastTimers() {
+    for (const timer of this.toastTimers) clearTimeout(timer);
+    this.toastTimers.clear();
   }
   dismissToast(id: string) {
     this.state.toasts = this.state.toasts.filter((t) => t.id !== id);

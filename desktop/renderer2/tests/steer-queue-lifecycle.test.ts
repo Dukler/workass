@@ -9,6 +9,7 @@ import { normalizeDeliveryCapabilities, stopAndSendSupported } from '../src/stee
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
 
 before(async () => {
   vite = await createServer({
@@ -21,6 +22,7 @@ before(async () => {
 });
 
 after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
   await vite.close();
   delete (globalThis as any).window;
 });
@@ -78,6 +80,7 @@ function subject(
 ): { store: any; owner: Chat } {
   (globalThis as any).window = { api: { appChatSteer: async () => ({ ok: true }), ...api } };
   const store = new StoreCtor();
+  fixtureStores.push(store);
   const owner = chat(providerId, deliveryCapabilities);
   store.state.chats = [owner];
   store.state.activeId = owner.id;

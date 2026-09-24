@@ -5,6 +5,7 @@ import { createServer, type ViteDevServer } from 'vite';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
 
 before(async () => {
   vite = await createServer({
@@ -17,7 +18,10 @@ before(async () => {
   StoreCtor = loaded.Store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 test('fresh app boot loads Codex account limits without cached usage, a chat session, or a prompt', async () => {
   const previousWindow = (globalThis as any).window;
@@ -50,6 +54,7 @@ test('fresh app boot loads Codex account limits without cached usage, a chat ses
   try {
     for (let boot = 0; boot < 2; boot++) {
       subject = new StoreCtor();
+      fixtureStores.push(subject);
       subject.schedulePersist = () => {};
       assert.deepEqual(subject.state.planUsageByProvider, {});
       assert.equal(subject.state.chats.length, 0);
@@ -99,6 +104,7 @@ test('the first persistence after boot does not rewrite every acknowledged chat'
   let subject: any;
   try {
     subject = new StoreCtor();
+    fixtureStores.push(subject);
     subject.schedulePersist = () => {};
     await subject.init();
     await subject.flushSession();
@@ -136,6 +142,7 @@ test('init reaches hydrated state and constructs the monitor when session:get fa
   };
   try {
     const subject = new StoreCtor();
+    fixtureStores.push(subject);
     await subject.init();
     assert.equal(subject.state.hydrated, true);
     assert.ok((subject as any).monitor, 'connection monitor was not constructed before hydration');
