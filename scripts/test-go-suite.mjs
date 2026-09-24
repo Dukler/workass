@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { spawn as nodeSpawn } from 'node:child_process';
-import { createWriteStream, existsSync } from 'node:fs';
+import { createWriteStream, existsSync, realpathSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { link } from 'node:fs/promises';
 
@@ -477,6 +477,12 @@ async function main() {
   return summary.ok ? 0 : 1;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+export function isMainModule(argvPath = process.argv[1], modulePath = fileURLToPath(import.meta.url)) {
+  if (!argvPath) return false;
+  try { return realpathSync(argvPath) === realpathSync(modulePath); }
+  catch { return false; }
+}
+
+if (isMainModule()) {
   main().then(code => { process.exitCode = code; }).catch(error => { process.stderr.write(`${error.stack ?? error}\n`); process.exitCode = 1; });
 }
