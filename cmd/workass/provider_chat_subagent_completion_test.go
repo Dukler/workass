@@ -192,7 +192,25 @@ func TestExplicitParentStopDropsOnlyItsQueuedSubagentCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := actor.engine.Snapshot()
+	// Start admits the actor operation before the asynchronous coordinator has
+	// necessarily attached the native job. Wait for this exact operation's
+	// observable admission before arranging queued work and exercising Stop.
+	deadline := time.NewTimer(30 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	var state chat.State
+	for {
+		state = actor.engine.Snapshot()
+		if state.Foreground != nil && state.Foreground.OperationID == parentOperation && state.Foreground.Turn.NativeID != "" {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("parent operation was not admitted before Stop: foreground=%#v (%v)", state.Foreground, started)
+		}
+	}
 	if err := actor.engine.Apply(chat.Submit{
 		OperationID: "human-waiting", LaneID: state.DesiredLaneID, Text: "human queued work",
 		Presentation: providercontract.TurnPresentation{UserMessageID: "human-waiting-user", Origin: "human"},
@@ -222,13 +240,7 @@ func TestExplicitParentStopDropsOnlyItsQueuedSubagentCompletion(t *testing.T) {
 	if len(state.Queue) != 2 {
 		t.Fatalf("expected human work and child completion queued: %#v", state.Queue)
 	}
-	jobID := ""
-	if state.Foreground != nil {
-		jobID = state.Foreground.Turn.NativeID
-	}
-	if jobID == "" {
-		t.Fatalf("fixture parent has no native job identity: %#v (%v)", state.Foreground, started)
-	}
+	jobID := state.Foreground.Turn.NativeID
 	result, handled, err := runtime.Cancel(context.Background(), jobID)
 	if err != nil || !handled || !result.Cancelled {
 		t.Fatalf("explicit parent Stop = %#v handled=%v err=%v", result, handled, err)

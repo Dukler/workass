@@ -293,6 +293,7 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		"cmd/workass/provider_chat_runtime.go:observeChatEnv:ChatCheckpoints":                               {1, "environment projection enrichment"},
 		"cmd/workass/provider_chat_runtime.go:observeChatEnv:ChatEnvReference":                              {1, "environment projection enrichment"},
 		"cmd/workass/provider_chat_runtime.go:ChatDiff:ChatDiffFromCheckpoints":                             {1, "checkpoint projection read"},
+		"cmd/workass/provider_chat_runtime.go:cancelQueuedSubagentCompletionsLocked:SubagentCompletionReceiptsForParent": {1, "read-only exact-parent tracked-child Stop receipt identity lookup"},
 		"cmd/workass/provider_chat_runtime.go:Fork:ResolveProviderLaneSelection":                            {1, "known child selection before child actor attachment"},
 		"cmd/workass/provider_chat_runtime.go:attachForkChild:LiveProviderLaneInfo":                         {1, "fork attachment projection"},
 		"cmd/workass/provider_chat_runtime.go:resolveSelectionLocked:ResolveProviderLaneSelection":          {1, "actor selection command bridge"},
