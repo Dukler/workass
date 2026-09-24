@@ -40,7 +40,7 @@ func TestProviderDetectionDefaultRetryCadenceMatchesPortContract(t *testing.T) {
 	}
 }
 
-func TestProviderDetectionAllowsFullInitializeAndSessionBudgets(t *testing.T) {
+func TestProviderDetectionRealACPInitializeAndSessionIntegration(t *testing.T) {
 	root := repoRoot(t)
 	pathDir := t.TempDir()
 	initGate := filepath.Join(pathDir, "initialize-gate")
@@ -73,17 +73,10 @@ func TestProviderDetectionAllowsFullInitializeAndSessionBudgets(t *testing.T) {
 		close(detected)
 	}()
 	waitForFakeACPProbeGate(t, initGate)
-	// Each stage is held for less than its five-second request budget, while the
-	// pair is longer than one budget. The extra margin keeps package-wide builds
-	// from turning scheduler pressure into a false timeout; a single outer
-	// timeout would still fail, so the test continues to prove that initialize
-	// and session/new each own a complete budget.
-	time.Sleep(2600 * time.Millisecond)
 	if err := os.WriteFile(initGate+".release", []byte("release\n"), 0o600); err != nil {
 		t.Fatalf("release initialize probe gate: %v", err)
 	}
 	waitForFakeACPProbeGate(t, sessionGate)
-	time.Sleep(2600 * time.Millisecond)
 	if err := os.WriteFile(sessionGate+".release", []byte("release\n"), 0o600); err != nil {
 		t.Fatalf("release session probe gate: %v", err)
 	}
@@ -93,6 +86,17 @@ func TestProviderDetectionAllowsFullInitializeAndSessionBudgets(t *testing.T) {
 		t.Fatal("provider detection did not finish after releasing both probe stages")
 	}
 	assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusReady, true)
+	manager.mu.Lock()
+	runtime := manager.providers["devin"]
+	models := append([]Model(nil), runtime.Models...)
+	modes := append([]Mode(nil), runtime.Modes...)
+	manager.mu.Unlock()
+	if len(models) != 1 || models[0].ModelID != "fake-model" {
+		t.Fatalf("real ACP detected models = %#v, want fake-model", models)
+	}
+	if len(modes) != 2 || modes[0].ID != "ask" || modes[1].ID != "bypass" {
+		t.Fatalf("real ACP detected modes = %#v, want ask and bypass", modes)
+	}
 }
 
 func waitForFakeACPProbeGate(t *testing.T, gate string) {
