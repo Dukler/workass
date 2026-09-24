@@ -218,11 +218,7 @@ func TestChatEnvTruncationFlags(t *testing.T) {
 		t.Cleanup(func() {
 			_ = os.WriteFile(promptGate+".release", []byte("release\n"), 0o600)
 		})
-		files := map[string]string{}
-		for i := 0; i < chatEnvFileLimit+1; i++ {
-			files[fmt.Sprintf("file%03d.txt", i)] = "base\n"
-		}
-		initTinyGitRepo(t, repoDir, files)
+		fixture := initUniformLargeGitRepo(t, repoDir, chatEnvFileLimit+1)
 		manager, events := newFakeManager(t, "slow-prompt", Options{
 			Provider:          ProviderConfig{Env: map[string]string{"WORKASS_FAKE_ACP_PROMPT_GATE": promptGate}},
 			RSSSampleInterval: time.Hour,
@@ -251,12 +247,7 @@ func TestChatEnvTruncationFlags(t *testing.T) {
 		}
 		cpJob := beginLegacyCheckpointFixture(manager, job, session.SessionID, "chat-trunc-file", "trunc-file-tab", repoDir)
 		waitForFakeACPProbeGate(t, promptGate)
-		for i := 0; i < chatEnvFileLimit+1; i++ {
-			path := filepath.Join(repoDir, fmt.Sprintf("file%03d.txt", i))
-			if err := os.WriteFile(path, []byte("base\nchat\n"), 0o644); err != nil {
-				t.Fatalf("edit %s: %v", path, err)
-			}
-		}
+		fixture.writeAll(t, "base\nchat\n")
 		if err := os.WriteFile(promptGate+".release", []byte("release\n"), 0o600); err != nil {
 			t.Fatalf("release prompt gate: %v", err)
 		}
@@ -340,8 +331,72 @@ func initEmptyGitRepo(t *testing.T, dir string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir repo: %v", err)
 	}
-	runCommandFixture(t, "", "git", "init", dir)
-	runGitFixture(t, dir, "checkout", "-b", "main")
+	template := t.TempDir()
+	runCommandFixture(t, "", "git", "init", "--template="+template, "--initial-branch=main", dir)
+}
+
+// uniformLargeGitFixture is opt-in for fixtures whose every tracked file is
+// deliberately identical and always mutated together. Its shared content
+// file lives outside the repository; unsupported hardlinks use ordinary files.
+type uniformLargeGitFixture struct {
+	shared   string
+	paths    []string
+	hardlink bool
+}
+
+func initUniformLargeGitRepo(t *testing.T, dir string, count int) uniformLargeGitFixture {
+	t.Helper()
+	initEmptyGitRepo(t, dir)
+	runGitFixture(t, dir, "config", "user.email", "workass-test@example.com")
+	runGitFixture(t, dir, "config", "user.name", "Workass Test")
+	shared := filepath.Join(filepath.Dir(dir), "uniform-fixture-content")
+	if err := os.WriteFile(shared, []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write shared fixture content: %v", err)
+	}
+	fixture := uniformLargeGitFixture{shared: shared, hardlink: true}
+	for i := 0; i < count; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("file%03d.txt", i))
+		if err := os.Link(shared, path); err != nil {
+			fixture.hardlink = false
+		}
+		fixture.paths = append(fixture.paths, path)
+		if !fixture.hardlink {
+			break
+		}
+	}
+	if !fixture.hardlink {
+		for _, path := range fixture.paths {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Fatalf("remove partial hardlink %s: %v", path, err)
+			}
+		}
+		fixture.paths = fixture.paths[:0]
+		for i := 0; i < count; i++ {
+			path := filepath.Join(dir, fmt.Sprintf("file%03d.txt", i))
+			if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
+				t.Fatalf("write fallback fixture file %s: %v", path, err)
+			}
+			fixture.paths = append(fixture.paths, path)
+		}
+	}
+	runGitFixture(t, dir, "add", ".")
+	runGitFixture(t, dir, "commit", "-m", "init")
+	return fixture
+}
+
+func (fixture uniformLargeGitFixture) writeAll(t *testing.T, content string) {
+	t.Helper()
+	if fixture.hardlink {
+		if err := os.WriteFile(fixture.shared, []byte(content), 0o644); err != nil {
+			t.Fatalf("mutate shared fixture content: %v", err)
+		}
+		return
+	}
+	for _, path := range fixture.paths {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("mutate fixture file %s: %v", path, err)
+		}
+	}
 }
 
 func initTinyGitRepo(t *testing.T, dir string, files map[string]string) {

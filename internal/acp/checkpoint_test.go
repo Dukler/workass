@@ -362,11 +362,7 @@ func TestChatCheckpointRotationAndLargeRepoSkip(t *testing.T) {
 	t.Run("large repo skip", func(t *testing.T) {
 		workspace := t.TempDir()
 		repoDir := filepath.Join(workspace, "large")
-		files := map[string]string{}
-		for i := 0; i < checkpointFileLimit+1; i++ {
-			files[fmt.Sprintf("file%03d.txt", i)] = "base\n"
-		}
-		initTinyGitRepo(t, repoDir, files)
+		fixture := initUniformLargeGitRepo(t, repoDir, checkpointFileLimit+1)
 		manager, events := newFakeManager(t, "slow-prompt", Options{StateDir: filepath.Join(t.TempDir(), "state"), RSSSampleInterval: time.Hour})
 		t.Cleanup(func() { manager.Reset() })
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -388,9 +384,7 @@ func TestChatCheckpointRotationAndLargeRepoSkip(t *testing.T) {
 			t.Fatalf("start large job: %v", err)
 		}
 		cpJob := beginLegacyCheckpointFixture(manager, job, session.SessionID, "chat-large", "large-tab", repoDir)
-		for i := 0; i < checkpointFileLimit+1; i++ {
-			writeFile(t, filepath.Join(repoDir, fmt.Sprintf("file%03d.txt", i)), "base\nchanged\n")
-		}
+		fixture.writeAll(t, "base\nchanged\n")
 		assertJobStatus(t, events.waitJobEnd(t, jobID(job), 3*time.Second), "done", 0, "end_turn")
 		manager.refreshChatEnvAfterJob(context.Background(), cpJob)
 		checkpoints := waitChatCheckpointCount(t, manager, "chat-large", 1, 3*time.Second)
