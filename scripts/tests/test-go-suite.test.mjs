@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { writeFileSync } from 'node:fs';
+import * as awaitImportChildProcess from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile, access } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -55,24 +59,50 @@ async function fixture(t, { fail = '', delay = '0.04', packageFail = false, chil
   return { root, logs, go: goSource };
 }
 
-function trackingSpawn() {
-  const { spawn } = awaitImportChildProcess;
+function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/two'], failCase = '', packageFail = false, record = () => {} } = {}) {
   let active = 0, maximum = 0;
-  return {
-    spawn(command, args, options) {
-      const child = spawn(command, args, options);
-      child.once('spawn', () => { active++; maximum = Math.max(maximum, active); });
-      child.once('close', () => { active--; });
-      return child;
-    },
-    maximum: () => maximum,
+  const spawn = (command, args, options) => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    child.kill = () => { setImmediate(() => child.emit('close', null, 'SIGTERM')); return true; };
+    active++; maximum = Math.max(maximum, active);
+    const finish = (code, stdout = '', stderr = '') => {
+      if (stdout) child.stdout.end(stdout);
+      else child.stdout.end();
+      if (stderr) child.stderr.end(stderr);
+      else child.stderr.end();
+      setImmediate(() => { active--; child.emit('close', code, null); });
+    };
+    setImmediate(() => child.emit('spawn'));
+    record(command, args, options);
+    if (String(command).endsWith('.test')) {
+      if (args[0] === '-test.list') { finish(0, `${names.join('\n')}\n`); return child; }
+      const pattern = args.find(arg => arg.startsWith('-test.run='))?.slice('-test.run='.length) ?? '';
+      const selected = names.filter(name => new RegExp(pattern).test(name));
+      const out = selected.flatMap(name => [`=== RUN ${name}`, `=== RUN ${name}/child`, `complete output for ${name}`, `--- PASS: ${name}/child (0.01s)`, name === failCase ? `--- FAIL: ${name} (0.01s)` : `--- PASS: ${name} (0.01s)`]).join('\n') + '\n';
+      finish(failCase && selected.includes(failCase) ? 7 : 0, out, failCase && selected.includes(failCase) ? 'deliberate failure detail\n' : ''); return child;
+    }
+    if (command === 'go' || path.basename(String(command)).startsWith('fake-go')) {
+      if (args[0] === 'test' && args.includes('-c')) {
+        const binary = args[args.indexOf('-o') + 1];
+        writeFileSync(binary, 'fake test binary');
+        finish(0); return child;
+      }
+      if (args[0] === 'list') { finish(0, `${packages.join('\n')}\n`); return child; }
+      if (args[0] === 'test' && args.includes('-json')) {
+        const pkg = args.at(-1);
+        const events = [{ Action: packageFail ? 'fail' : 'pass', Package: pkg }, { Action: 'pass', Package: pkg, Test: 'TestOther' }];
+        finish(packageFail ? 9 : 0, `${events.map(event => JSON.stringify(event)).join('\n')}\nother-package-output\n`); return child;
+      }
+    }
+    finish(90, '', `unexpected fake invocation: ${command} ${args.join(' ')}\n`); return child;
   };
+  return { spawn, maximum: () => maximum };
 }
-import * as awaitImportChildProcess from 'node:child_process';
 
 test('fresh matrix covers both heavy packages once, overlaps within the bound, and retains full logs', async t => {
   const f = await fixture(t);
-  const tracker = trackingSpawn();
+  const tracker = inProcessGoSpawn();
   const spawn = (command, args, options) => {
     if (String(command).includes('acp.test')) assert.equal(options.cwd, path.join(f.root, 'internal', 'acp'));
     return tracker.spawn(command, args, options);
@@ -99,7 +129,8 @@ test('fresh matrix covers both heavy packages once, overlaps within the bound, a
 
 test('case failures propagate after other cases run and preserve failure detail', async t => {
   const f = await fixture(t, { fail: 'TestBeta' });
-  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 2, signalHandlers: false });
+  const fake = inProcessGoSpawn({ failCase: 'TestBeta' });
+  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 2, signalHandlers: false, spawn: fake.spawn });
   assert.equal(result.ok, false);
   assert.equal(result.heavyPackages['./internal/acp'].failed, 1);
   assert.equal(result.heavyPackages['./internal/acp'].cases.length, names.length);
@@ -110,19 +141,17 @@ test('case failures propagate after other cases run and preserve failure detail'
 
 test('other-package command failures propagate with complete output', async t => {
   const f = await fixture(t, { packageFail: true });
-  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 2, signalHandlers: false });
+  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 2, signalHandlers: false, spawn: inProcessGoSpawn({ packageFail: true }).spawn });
   assert.equal(result.ok, false);
   assert.match(result.commandFailure.label, /^other-go-workass\/internal\//);
   assert.match(await readFile(result.jsonlPath, 'utf8'), /other-package-output/);
 });
 
 test('race flags follow the Go subcommand for compiled and remaining packages', async t => {
-  const f = await fixture(t, { delay: '0.001' });
+  const f = await fixture(t);
   const invocations = [];
-  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, race: true, workers: 2, signalHandlers: false, spawn: (command, args, options) => {
-    if (command === f.go) invocations.push(args);
-    return awaitImportChildProcess.spawn(command, args, options);
-  } });
+  const fake = inProcessGoSpawn({ record: (command, args) => { if (command === f.go) invocations.push(args); } });
+  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, race: true, workers: 2, signalHandlers: false, spawn: fake.spawn });
   assert.equal(result.ok, true, result.error);
   assert.ok(invocations.some(args => args[0] === 'test' && args[1] === '-race' && args[2] === '-c'));
   assert.ok(invocations.some(args => args[0] === 'test' && args[1] === '-race' && args.includes('-json')));
