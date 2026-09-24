@@ -14,6 +14,14 @@ function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
   return store;
 }
 
+function clearFixtureStoreTimers(store: any) {
+  store.clearToastTimers();
+  if (store.saveTimer) clearTimeout(store.saveTimer);
+  store.saveTimer = null;
+  if (store.mirrorTimer) clearTimeout(store.mirrorTimer);
+  store.mirrorTimer = null;
+}
+
 before(async () => {
   vite = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
@@ -26,7 +34,7 @@ before(async () => {
 });
 
 after(async () => {
-  for (const store of fixtureStores) store.clearToastTimers();
+  for (const store of fixtureStores) clearFixtureStoreTimers(store);
   await vite.close();
 });
 

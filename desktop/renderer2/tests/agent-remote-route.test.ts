@@ -9,6 +9,20 @@ import { tagId } from '../src/wire/machineIds.ts';
 const machineId = 'm-san';
 const tabId = tagId(machineId, 'tab-hello');
 const chatId = tagId(machineId, 'chat-hello');
+const fixtureStores: any[] = [];
+
+function ownStore<T>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
+
+function clearFixtureStoreTimers(store: any) {
+  store.clearToastTimers();
+  if (store.saveTimer) clearTimeout(store.saveTimer);
+  store.saveTimer = null;
+  if (store.mirrorTimer) clearTimeout(store.mirrorTimer);
+  store.mirrorTimer = null;
+}
 
 function remoteChat(overrides: Partial<Chat> = {}): Chat {
   return {
@@ -31,10 +45,16 @@ async function loadStore(t: { after(fn: () => void | Promise<void>): void }) {
     server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
   });
   const storeModule = await server.ssrLoadModule('/src/store/store.ts');
-  t.after(async () => { storeModule.store.clearToastTimers(); await server.close(); });
+  ownStore(storeModule.store);
+  t.after(async () => {
+    for (const store of fixtureStores) clearFixtureStoreTimers(store);
+    await server.close();
+  });
   const apiModule = await server.ssrLoadModule('/src/wire/api.ts');
   return {
-    Store: storeModule.Store as new () => StoreShape,
+    Store: class extends (storeModule.Store as new () => StoreShape) {
+      constructor() { super(); ownStore(this); }
+    },
     setMachineRouter: apiModule.setMachineRouter as (api: unknown) => void,
   };
 }
