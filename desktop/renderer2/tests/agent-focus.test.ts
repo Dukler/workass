@@ -6,6 +6,7 @@ import type { Chat, Msg } from '../src/store/types.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
 
 before(async () => {
   vite = await createServer({
@@ -17,7 +18,10 @@ before(async () => {
   StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 function messages(count: number): Msg[] {
   return Array.from({ length: count }, (_, index) => ({
@@ -52,6 +56,7 @@ function chat(id: string, rows = messages(2), complete = true): Chat {
 
 function subjectWith(chats: Chat[], activeId: string): any {
   const subject = new StoreCtor();
+  fixtureStores.push(subject);
   subject.state.chats = chats;
   subject.state.activeId = activeId;
   subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
@@ -59,6 +64,24 @@ function subjectWith(chats: Chat[], activeId: string): any {
   subject.schedulePersist = () => {};
   return subject;
 }
+
+test('toast timers keep the 6500ms dismissal and cleanup is store-owned', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const first = new StoreCtor();
+  const second = new StoreCtor();
+  fixtureStores.push(first, second);
+  first.addToast('first', 'owned');
+  second.addToast('second', 'independent');
+
+  t.mock.timers.tick(6499);
+  assert.equal(first.state.toasts.length, 1);
+  assert.equal(second.state.toasts.length, 1);
+
+  first.clearToastTimers();
+  t.mock.timers.tick(1);
+  assert.equal(first.state.toasts.length, 1, 'clearing one store leaves its toast visible');
+  assert.equal(second.state.toasts.length, 0, 'the other store still dismisses at 6500ms');
+});
 
 test('an exact one-shot agent focus changes the visible chat and a generic refresh does not replay it', () => {
   const first = chat('tab-first');
