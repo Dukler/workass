@@ -12,6 +12,19 @@ scope. Log suggestions separately; do not act on them.
    more specific.
 3. `desktop/acp/README.md` — mock ACP server + probe usage (your test oracle).
 
+## Fast handoff for Workass changes
+- A completed agent handoff with a scoped commit/diff and passing test commands
+  is test evidence. Inspect the changed code once; do not rerun the same tests
+  merely to duplicate the agent's result.
+- Run one focused dev-profile acceptance for the behavior being shipped. Add a
+  new test or send a correction only when that review or acceptance reveals a
+  concrete gap. Keep the correction limited to that gap.
+- Once the handoff and dev acceptance pass, move promptly to the canonical
+  release command when publication is authorized. That command owns the broad
+  repository gate; do not run another full gate in advance just for review.
+- A child handoff never authorizes publication or update activation by itself.
+  Apply the current-human authorization rules below for those actions.
+
 ## Hard rules
 - Update activation is current-human-authorized only (user law 2026-09-03,
   superseding the click-only wording from 2026-08-25). A UI click authorizes
