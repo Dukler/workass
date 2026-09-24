@@ -190,7 +190,30 @@ func TestLanDevicesRefreshesLastSeenAndConnectedIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("approve controller: %v", err)
 	}
-	hub := NewHub(Options{Lease: manager, TrustLocalhost: false, DeviceRefreshInterval: 10 * time.Millisecond})
+	// Keep the refresh operation exercised at its normal interval while owning
+	// the test ticker here: NewHub's daemon-owned ticker intentionally has no
+	// production close contract and must not outlive this temporary state dir.
+	hub := NewHub(Options{TrustLocalhost: false, DeviceRefreshInterval: 10 * time.Millisecond})
+	hub.lease = manager
+	refreshStop := make(chan struct{})
+	refreshDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(hub.deviceRefresh)
+		defer ticker.Stop()
+		defer close(refreshDone)
+		for {
+			select {
+			case <-refreshStop:
+				return
+			case <-ticker.C:
+				hub.refreshConnectedDevices()
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(refreshStop)
+		<-refreshDone
+	})
 	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
 	defer server.Close()
 
