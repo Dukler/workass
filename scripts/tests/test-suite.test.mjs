@@ -5,12 +5,27 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { runSuiteMatrix } from '../test-suite.mjs';
+import { runSuiteMatrix, testSummary } from '../test-suite.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const node = process.execPath;
 const fixture = (name, source) => ({ name, command: node, args: ['-e', source] });
 const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'workass-suite-test-'));
+
+test('summarizes Node TAP reporter totals and keeps top-level and nested tests distinct', () => {
+  const tap = `TAP version 13\n# Subtest: outer\n    # Subtest: inner\n    ok 1 - inner\n    1..1\nok 1 - outer\n# tests 2\n# pass 2\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n`;
+  assert.deepEqual(testSummary(tap), { tests: 2, topLevelTests: 1, subtests: 1, passed: 2, failed: 0, skipped: 0 });
+});
+
+test('counts Go JSON pass, fail, skip outcomes and separates nested tests', () => {
+  const go = [
+    { Action: 'pass', Test: 'TestOuter' },
+    { Action: 'fail', Test: 'TestOuter/child' },
+    { Action: 'skip', Test: 'TestSkipped' },
+    { Action: 'fail', Package: 'example/pkg' },
+  ].map(event => JSON.stringify(event)).join('\n');
+  assert.deepEqual(testSummary(go), { tests: 3, topLevelTests: 2, subtests: 1, passed: 1, failed: 1, skipped: 1 });
+});
 
 test('suite matrix runs commands concurrently and retains complete logs', async t => {
   const dir = temp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -37,6 +52,18 @@ test('nonzero exit and spawn errors are reported without losing the other suite'
   assert.equal(report.results.find(result => result.name === 'failure').code, 7);
   assert.match(fs.readFileSync(path.join(dir, 'failure.log'), 'utf8'), /assertion detail/);
   assert.equal(report.results.find(result => result.name === 'success').code, 0);
+});
+
+test('log sink errors become controlled suite failures and stop sibling children', async t => {
+  const dir = temp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'broken.log'));
+  const report = await runSuiteMatrix([
+    fixture('broken', "setInterval(() => console.log('still running'), 5)"),
+    fixture('sibling', "setInterval(() => {}, 1000)"),
+  ], { logDir: dir });
+  assert.equal(report.correctness, false);
+  assert.ok(report.results.find(result => result.name === 'broken').sinkError);
+  assert.ok(report.results.every(result => result.code !== 0));
 });
 
 test('over-budget suites finish before reporting the performance miss', async t => {

@@ -395,9 +395,7 @@ test('Windows verify-only mode performs readback without a release mutation', (t
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-windows-readback-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const devState = path.join(repoRoot, '.dev');
-  const madeDevState = !fs.existsSync(devState);
   fs.mkdirSync(devState, { recursive: true });
-  if (madeDevState) t.after(() => fs.rmSync(devState, { recursive: true, force: true }));
   const bin = path.join(root, 'bin');
   const releaseDir = path.join(root, 'release');
   const version = '1.2.3';
