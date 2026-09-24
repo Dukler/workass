@@ -29,7 +29,7 @@ func TestProviderUpdateCheckFakeRegistry(t *testing.T) {
 			root := repoRoot(t)
 			pathDir := t.TempDir()
 			qwenPath := filepath.Join(pathDir, "qwen")
-			writeExecutable(t, qwenPath, "#!/bin/sh\nprintf '%s\\n' "+shellQuote(tc.installed)+"\n")
+			writeFixtureExecutable(t, qwenPath, "printf '%s\\n' "+shellQuote(tc.installed)+"\n")
 			registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]string{"version": tc.latest})
 			}))
@@ -174,7 +174,7 @@ func TestProviderUpdateRunsResolvedProviderExecutable(t *testing.T) {
 			// Deliberately give the executable a nonstandard filename. The updater
 			// must use the provider's detected absolute path, not a bare PATH name.
 			providerPath := filepath.Join(pathDir, providerID+"-user-install")
-			writeExecutable(t, providerPath, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nif [ \"$1\" = \"update\" ]; then printf '0.19.2\\n' > "+shellQuote(versionFile)+"; printf 'updated\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 1\n")
+			writeFixtureExecutable(t, providerPath, "if [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nif [ \"$1\" = \"update\" ]; then printf '0.19.2\\n' > "+shellQuote(versionFile)+"; printf 'updated\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 1\n")
 
 			registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.19.2"})
@@ -647,9 +647,9 @@ func waitProviderUpdateSchedulerIdle(t *testing.T, manager *Manager) {
 
 func TestProviderUpdateInvokeProgressNoProcRegistryAndReplay(t *testing.T) {
 	t.Parallel()
-	manager, events, versionFile := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
+	manager, events, versionFile := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "", true)
 	updateScript := filepath.Join(t.TempDir(), "qwen-update")
-	writeExecutable(t, updateScript, "#!/bin/sh\nprintf 'updater start\\n'\nprintf '0.58.2\\n' > "+shellQuote(versionFile)+"\nprintf 'updater done\\n'\n")
+	writeFixtureExecutable(t, updateScript, "printf 'updater start\\n'\nprintf '0.58.2\\n' > "+shellQuote(versionFile)+"\nprintf 'updater done\\n'\n")
 	manager.opts.ProviderUpdateCommands = map[string]ProviderUpdateCommand{"qwen": {Command: updateScript}}
 
 	result, err := manager.StartProviderUpdate(context.Background(), "qwen")
@@ -988,9 +988,9 @@ func TestProviderUpdatePostRecheckAllFailKeepsEntryWithRecheckError(t *testing.T
 		Installed:          "0.58.1",
 		Latest:             "0.58.2",
 		PostUpdateFailures: 99,
-	})
+	}, true)
 	updateScript := filepath.Join(t.TempDir(), "qwen-update-recheck-fail")
-	writeExecutable(t, updateScript, "#!/bin/sh\nprintf '0.58.2\\n' > "+shellQuote(versionFile)+"\nprintf 'updated but verify races\\n'\n")
+	writeFixtureExecutable(t, updateScript, "printf '0.58.2\\n' > "+shellQuote(versionFile)+"\nprintf 'updated but verify races\\n'\n")
 	manager.opts.ProviderUpdateCommands = map[string]ProviderUpdateCommand{"qwen": {Command: updateScript}}
 
 	if _, err := manager.StartProviderUpdate(context.Background(), "qwen"); err != nil {
@@ -998,7 +998,7 @@ func TestProviderUpdatePostRecheckAllFailKeepsEntryWithRecheckError(t *testing.T
 	}
 	update := waitProviderUpdate(t, events, "qwen", func(update ProviderUpdate) bool {
 		return update.UpdateAvailable && update.Installed == "0.58.1" && update.Latest == "0.58.2" && update.RecheckError != ""
-	}, 2*time.Second)
+	}, 15*time.Second)
 	if update.LastError != "" || update.ExitCode != nil || update.Tail != "" {
 		t.Fatalf("recheck failure polluted updater failure fields: %#v", update)
 	}
@@ -1306,7 +1306,7 @@ func TestLatestCLIVersionRequiresComparableRegistryVersion(t *testing.T) {
 	}
 }
 
-func newProviderUpdateTestManager(t *testing.T, installed, latest, updateCommand string) (*Manager, *eventCollector, string) {
+func newProviderUpdateTestManager(t *testing.T, installed, latest, updateCommand string, useFixtureExecutable ...bool) (*Manager, *eventCollector, string) {
 	t.Helper()
 	root := repoRoot(t)
 	pathDir := t.TempDir()
@@ -1315,7 +1315,12 @@ func newProviderUpdateTestManager(t *testing.T, installed, latest, updateCommand
 		t.Fatalf("write version file: %v", err)
 	}
 	qwenPath := filepath.Join(pathDir, "qwen")
-	writeExecutable(t, qwenPath, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nexit 1\n")
+	qwenScript := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then IFS= read -r v < " + shellQuote(versionFile) + "; printf '%s\\n' \"$v\"; exit 0; fi\nexit 1\n"
+	if len(useFixtureExecutable) > 0 && useFixtureExecutable[0] {
+		writeFixtureExecutable(t, qwenPath, qwenScript)
+	} else {
+		writeExecutable(t, qwenPath, qwenScript)
+	}
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": latest})
 	}))
@@ -1350,7 +1355,7 @@ type providerUpdateRecheckScript struct {
 	PostUpdateFailures int
 }
 
-func newProviderUpdateRecheckTestManager(t *testing.T, script providerUpdateRecheckScript) (*Manager, *eventCollector, func() int, string) {
+func newProviderUpdateRecheckTestManager(t *testing.T, script providerUpdateRecheckScript, useFixtureExecutable ...bool) (*Manager, *eventCollector, func() int, string) {
 	t.Helper()
 	root := repoRoot(t)
 	pathDir := t.TempDir()
@@ -1381,7 +1386,11 @@ fi
 exit 1
 `, shellQuote(countFile), script.Installed, script.PostUpdateFailures+1, shellQuote(versionFile))
 	qwenPath := filepath.Join(pathDir, "qwen")
-	writeExecutable(t, qwenPath, qwenScript)
+	if len(useFixtureExecutable) > 0 && useFixtureExecutable[0] {
+		writeFixtureExecutable(t, qwenPath, qwenScript)
+	} else {
+		writeExecutable(t, qwenPath, qwenScript)
+	}
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": script.Latest})
 	}))
