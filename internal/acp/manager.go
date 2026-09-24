@@ -1992,6 +1992,9 @@ func (m *Manager) CancelJobResult(id string) JobCancelResult {
 	admitting := job.admitting
 	cancelPreparation := job.cancelPreparation
 	m.mu.Unlock()
+	// Fence internal child completions at the explicit stop boundary. The
+	// deferred worker cleanup remains a second safe-boundary check.
+	m.suppressSubagentCompletionsForParent(firstNonEmpty(job.VisibleJobID, job.ID), job.startOpts.OperationID)
 	if cancelPreparation != nil {
 		cancelPreparation()
 	}

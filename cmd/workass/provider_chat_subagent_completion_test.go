@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"workass/internal/acp"
 )
@@ -52,6 +53,59 @@ func TestTrackedSubagentCompletionUsesExactActorAndReceiptIdempotency(t *testing
 	}
 	if got := formatSubagentCompletion(receipt); !strings.Contains(got, "Internal agent completion notice") || !strings.Contains(got, "not a human message") {
 		t.Fatalf("completion did not carry internal attribution: %q", got)
+	}
+}
+
+func TestTrackedSubagentCompletionRunsOnOwningMockCoordinator(t *testing.T) {
+	runtime, manager, _, _, info := newSteerRegressionFixture(t)
+	const tabID, chatID = "steer-regression-tab", "steer-regression-chat"
+	ended := make(chan struct{}, 4)
+	manager.SetJobEndFunc(func(tab, chat string) {
+		if tab == tabID && chat == chatID {
+			ended <- struct{}{}
+		}
+	})
+	start := func(op, prompt string) {
+		t.Helper()
+		if _, err := runtime.Start(context.Background(), map[string]any{"kind": "app-chat", "tabId": tabID, "chatId": chatID, "sessionId": info.SessionID, "operationId": op, "userMessageId": op + "-u", "assistantMessageId": op + "-a", "prompt": prompt}, "human"); err != nil {
+			t.Fatalf("start %s: %v", op, err)
+		}
+	}
+	start("parent-finished", "finish parent turn")
+	select {
+	case <-ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("parent did not finish")
+	}
+	actor, err := runtime.actor(chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := actor.engine.Snapshot()
+	if state.Foreground != nil {
+		t.Fatalf("parent was not idle before child settlement: %#v", state.Foreground)
+	}
+	receipt := acp.SubagentReceipt{ReceiptID: "actual-mock-child", SubagentID: "actual-mock-child", Label: "child", Status: "done", Result: "FINAL_HANDOFF_MARKER", ParentChatID: chatID, ParentTabID: tabID, OriginLaneID: string(state.DesiredLaneID), DeliveryPending: true}
+	if err := runtime.deliverSubagentCompletion(tabID, chatID, receipt); err != nil {
+		t.Fatalf("admit settled unwaited child receipt: %v", err)
+	}
+	select {
+	case <-ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("owning coordinator did not execute subagent follow-up")
+	}
+	if err := runtime.deliverSubagentCompletion(tabID, chatID, receipt); err != nil {
+		t.Fatalf("duplicate settlement delivery: %v", err)
+	}
+	state = actor.engine.Snapshot()
+	markerCount := 0
+	for _, event := range state.Ledger {
+		if event.Role == "assistant" && strings.Contains(event.Text, "FINAL_HANDOFF_MARKER") {
+			markerCount++
+		}
+	}
+	if markerCount != 1 {
+		t.Fatalf("mock coordinator did not execute exactly one final handoff: marker count=%d ledger=%#v", markerCount, state.Ledger)
 	}
 }
 

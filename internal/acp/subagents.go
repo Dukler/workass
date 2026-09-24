@@ -185,6 +185,8 @@ type SubagentRun struct {
 	attentionDeliveredSequence int64
 	completionWaiters          int
 	completionSuppressed       bool
+	completionPending          bool
+	completionDeliveryInFlight bool
 	originLaneID               string
 	originOperationID          string
 }
@@ -815,7 +817,9 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 	rootJobID := run.RootJobID
 	parentChatID, parentTabID := run.parentChatID, run.parentTabID
 	receipt := copySubagentRun(run)
-	deliverCompletion := (status == "done" || status == "failed") && run.completionWaiters == 0 && !run.completionSuppressed && !m.resetting
+	eligibleCompletion := status == "done" || status == "failed"
+	run.completionPending = eligibleCompletion && !run.completionSuppressed && !m.resetting
+	deliverCompletion := run.completionPending
 	m.mu.Unlock()
 	m.settleSubagentSpawnedWork(parentTabID, parentChatID, receipt)
 	persisted := m.persistSubagentReceipt(parentChatID, parentTabID, receipt, deliverCompletion)
@@ -838,17 +842,29 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 	m.signalSubagentWaitersLocked()
 	suppressed := run.completionSuppressed || m.resetting
 	m.mu.Unlock()
-	if persisted && deliverCompletion {
-		completionReceipt := receiptFromRun(receipt)
-		completionReceipt.ParentChatID, completionReceipt.ParentTabID = parentChatID, parentTabID
-		completionReceipt.DeliveryPending = true
-		if suppressed {
-			completionReceipt.DeliveryPending = false
-			_ = m.writeSubagentReceipt(parentTabID, parentChatID, completionReceipt)
-		} else {
-			m.deliverSubagentCompletion(parentTabID, parentChatID, completionReceipt)
-		}
+	if persisted && deliverCompletion && !suppressed {
+		m.tryDeliverSubagentCompletion(run)
 	}
+}
+
+func (m *Manager) tryDeliverSubagentCompletion(run *SubagentRun) {
+	m.mu.Lock()
+	if run == nil || !run.receiptCommitted || !run.completionPending || run.completionSuppressed || run.completionWaiters != 0 || run.completionDeliveryInFlight || m.resetting {
+		m.mu.Unlock()
+		return
+	}
+	run.completionDeliveryInFlight = true
+	receipt := receiptFromRun(copySubagentRun(run))
+	tabID, chatID := run.parentTabID, run.parentChatID
+	m.mu.Unlock()
+	receipt.ParentTabID, receipt.ParentChatID, receipt.DeliveryPending = tabID, chatID, true
+	acknowledged := m.deliverSubagentCompletion(tabID, chatID, receipt)
+	m.mu.Lock()
+	run.completionDeliveryInFlight = false
+	if acknowledged {
+		run.completionPending = false
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) emitSubagentHeader(parentJobID, id, label, provider, model, status, output string) {
@@ -1103,13 +1119,22 @@ func (m *Manager) WaitSubagent(ctx context.Context, ownerKey, parentChatID, pare
 		if snapshot.NeedsAttention && run.Attention != nil && run.Attention.Sequence > run.attentionDeliveredSequence {
 			run.attentionDeliveredSequence = run.Attention.Sequence
 		}
+		consumedCompletion := settled && snapshot.Status != "cancelled" && !run.completionSuppressed
 		if settled || snapshot.NeedsAttention {
 			if waiting && run.completionWaiters > 0 {
 				run.completionWaiters--
 				waiting = false
 			}
+			if consumedCompletion {
+				run.completionPending = false
+				run.completionSuppressed = true
+				snapshot.parentChatID, snapshot.parentTabID = run.parentChatID, run.parentTabID
+			}
 		}
 		m.mu.Unlock()
+		if consumedCompletion {
+			m.markSubagentCompletionConsumed(snapshot)
+		}
 		if settled || snapshot.NeedsAttention {
 			return snapshot, nil
 		}
@@ -1125,10 +1150,22 @@ func (m *Manager) WaitSubagent(ctx context.Context, ownerKey, parentChatID, pare
 
 func (m *Manager) releaseSubagentCompletionWaiter(id string) {
 	m.mu.Lock()
-	if run := m.subagents[id]; run != nil && run.completionWaiters > 0 {
+	run := m.subagents[id]
+	if run != nil && run.completionWaiters > 0 {
 		run.completionWaiters--
 	}
+	eligible := run != nil && run.completionWaiters == 0 && run.completionPending
 	m.mu.Unlock()
+	if eligible {
+		m.tryDeliverSubagentCompletion(run)
+	}
+}
+
+func (m *Manager) markSubagentCompletionConsumed(run SubagentRun) {
+	receipt := receiptFromRun(run)
+	receipt.ParentChatID, receipt.ParentTabID = run.parentChatID, run.parentTabID
+	receipt.DeliveryPending = false
+	_ = m.writeSubagentReceipt(run.parentTabID, run.parentChatID, receipt)
 }
 
 // WaitSubagents waits for the first or all selected children while always
@@ -1185,7 +1222,7 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 		attention := subagentsNeedingAttention(running)
 		ready := len(attention) > 0 || returnWhen == "first" && len(completed) > 0 || returnWhen == "all" && len(running) == 0
 		if ready {
-			completed, running, attention = m.finishSubagentWait(parent, chatID, tabID, cleanIDs, waitingIDs)
+			completed, running, attention = m.finishSubagentWait(parent, chatID, tabID, cleanIDs, waitingIDs, true)
 			return map[string]any{
 				"completed": completed, "running": running, "attention": attention,
 				"needsAttention": len(attention) > 0, "timedOut": false,
@@ -1196,7 +1233,7 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 			return nil, ctx.Err()
 		case <-wake:
 		case <-deadline:
-			completed, running, attention = m.finishSubagentWait(parent, chatID, tabID, cleanIDs, waitingIDs)
+			completed, running, attention = m.finishSubagentWait(parent, chatID, tabID, cleanIDs, waitingIDs, false)
 			return map[string]any{
 				"completed": completed, "running": running, "attention": attention,
 				"needsAttention": len(attention) > 0, "timedOut": true,
@@ -1205,11 +1242,12 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 	}
 }
 
-func (m *Manager) finishSubagentWait(parent *Job, chatID, tabID string, ids []string, waitingIDs map[string]bool) ([]SubagentRun, []SubagentRun, []SubagentRun) {
+func (m *Manager) finishSubagentWait(parent *Job, chatID, tabID string, ids []string, waitingIDs map[string]bool, consumeCompletion bool) ([]SubagentRun, []SubagentRun, []SubagentRun) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	completed := make([]SubagentRun, 0, len(ids))
 	running := make([]SubagentRun, 0, len(ids))
+	consumed := make([]SubagentRun, 0, len(ids))
+	released := make([]*SubagentRun, 0, len(ids))
 	for _, id := range ids {
 		run := m.subagents[id]
 		if !m.addressSubagentLocked(run, parent, chatID, tabID) {
@@ -1221,6 +1259,12 @@ func (m *Manager) finishSubagentWait(parent *Job, chatID, tabID string, ids []st
 		}
 		if subagentRunSettled(run) {
 			completed = append(completed, snapshot)
+			if consumeCompletion && waitingIDs[id] && !run.completionSuppressed {
+				run.completionPending = false
+				run.completionSuppressed = true
+				snapshot.parentChatID, snapshot.parentTabID = run.parentChatID, run.parentTabID
+				consumed = append(consumed, snapshot)
+			}
 		} else {
 			running = append(running, snapshot)
 		}
@@ -1231,7 +1275,19 @@ func (m *Manager) finishSubagentWait(parent *Job, chatID, tabID string, ids []st
 				run.completionWaiters--
 			}
 			waitingIDs[id] = false
+			if run := m.subagents[id]; run != nil && run.completionWaiters == 0 && run.completionPending {
+				released = append(released, run)
+			}
 		}
+	}
+	m.mu.Unlock()
+	for _, run := range consumed {
+		if run.Status == "done" || run.Status == "failed" {
+			m.markSubagentCompletionConsumed(run)
+		}
+	}
+	for _, run := range released {
+		m.tryDeliverSubagentCompletion(run)
 	}
 	return completed, running, subagentsNeedingAttention(running)
 }
@@ -1243,13 +1299,23 @@ func (m *Manager) suppressSubagentCompletionsForParent(parentJobID, operationID 
 		return
 	}
 	m.mu.Lock()
+	suppressed := make([]SubagentRun, 0)
 	for _, run := range m.subagents {
-		if run != nil && run.Status == "running" &&
+		if run != nil &&
 			((parentJobID != "" && run.RootJobID == parentJobID) || (operationID != "" && run.originOperationID == operationID)) {
 			run.completionSuppressed = true
+			run.completionPending = false
+			if run.Status == "done" || run.Status == "failed" {
+				snapshot := copySubagentRun(run)
+				snapshot.parentChatID, snapshot.parentTabID = run.parentChatID, run.parentTabID
+				suppressed = append(suppressed, snapshot)
+			}
 		}
 	}
 	m.mu.Unlock()
+	for _, run := range suppressed {
+		m.markSubagentCompletionConsumed(run)
+	}
 }
 
 func (m *Manager) subagentSnapshotsForOwner(parent *Job, chatID, tabID string, ids []string) ([]SubagentRun, []SubagentRun, error) {

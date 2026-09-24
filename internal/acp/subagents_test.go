@@ -101,6 +101,32 @@ func TestTrackedSubagentCompletionWaitSuppressesContinuation(t *testing.T) {
 	}
 }
 
+func TestTrackedSubagentCancelledWaitReleasesDurableCompletion(t *testing.T) {
+	manager, _, session, _, _, _ := newSubagentLifecycleFixture(t, "cancelled-wait-releases-completion")
+	calls := 0
+	if err := manager.InstallSubagentCompletionObserver(func(_, _ string, receipt SubagentReceipt) error {
+		calls++
+		if !receipt.DeliveryPending {
+			t.Fatal("delivery was not pending at actor admission")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run := &SubagentRun{ID: "cancelled-wait-child", Status: "running", parentChatID: session.ChatID, parentTabID: session.TabID, completionWaiters: 1, done: make(chan struct{})}
+	manager.mu.Lock()
+	manager.subagents[run.ID] = run
+	manager.mu.Unlock()
+	manager.finishSubagent(run, nil, nil)
+	if calls != 0 || len(manager.pendingSubagentCompletions()) != 1 {
+		t.Fatalf("live wait should defer delivery: calls=%d pending=%#v", calls, manager.pendingSubagentCompletions())
+	}
+	manager.releaseSubagentCompletionWaiter(run.ID)
+	if calls != 1 || len(manager.pendingSubagentCompletions()) != 0 {
+		t.Fatalf("cancelled waiter lost or duplicated delivery: calls=%d pending=%#v", calls, manager.pendingSubagentCompletions())
+	}
+}
+
 func TestTrackedSubagentCompletionNotifiesAfterReceiptCommit(t *testing.T) {
 	manager, _, session, _, _, _ := newSubagentLifecycleFixture(t, "idle-parent-completion-delivery")
 	calls := 0
@@ -133,10 +159,8 @@ func TestTrackedSubagentCompletionSuppressedByParentStop(t *testing.T) {
 	manager, _, session, ownerKey, _, _ := newSubagentLifecycleFixture(t, "parent-stop-suppresses-delivery")
 	manager.mu.Lock()
 	manager.bindAgentOwnerLocked(ownerKey, session.ChatID, session.TabID)
-	run := &SubagentRun{
-		ID: "stopped-parent-child", Status: "running", RootJobID: "stopped-parent",
-		parentChatID: session.ChatID, parentTabID: session.TabID, done: make(chan struct{}),
-	}
+	run := &SubagentRun{ID: "stopped-parent-child", Status: "done", RootJobID: "stopped-parent", parentChatID: session.ChatID, parentTabID: session.TabID, FinishedAt: "2026-09-24T10:00:00Z", ReceiptID: "stopped-parent-child", completionPending: true, receiptCommitted: true, done: make(chan struct{})}
+	close(run.done)
 	manager.subagents[run.ID] = run
 	manager.mu.Unlock()
 	calls := 0
@@ -146,8 +170,10 @@ func TestTrackedSubagentCompletionSuppressedByParentStop(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if !manager.persistSubagentReceipt(session.ChatID, session.TabID, *run, true) {
+		t.Fatal("pending receipt setup failed")
+	}
 	manager.suppressSubagentCompletionsForParent("stopped-parent", "")
-	manager.finishSubagent(run, nil, nil)
 	if calls != 0 || len(manager.pendingSubagentCompletions()) != 0 {
 		t.Fatalf("stopped parent completion was resurrected: callbacks=%d pending=%#v", calls, manager.pendingSubagentCompletions())
 	}
