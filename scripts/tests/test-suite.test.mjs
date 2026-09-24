@@ -28,12 +28,18 @@ test('full suite caps Node concurrency without changing renderer or shell test i
   const renderer = commands.find(command => command.name === 'renderer_tests');
   const shell = commands.find(command => command.name === 'shell_tests');
   const scripts = commands.find(command => command.name === 'script_tests');
+  const shellContracts = commands.filter(command => command.name.startsWith('script_contract_'));
   assert.deepEqual(renderer.args.slice(0, 4), ['--experimental-strip-types', '--test', '--test-concurrency=4', path.join(root, 'desktop/renderer2/tests', fs.readdirSync(path.join(root, 'desktop/renderer2/tests')).filter(name => name.endsWith('.test.ts')).sort()[0])]);
   assert.equal(renderer.args.filter(arg => arg.endsWith('.test.ts')).length, fs.readdirSync(path.join(root, 'desktop/renderer2/tests')).filter(name => name.endsWith('.test.ts')).length);
-  assert.equal(shell.args[1], '--test-concurrency=2');
+  assert.equal(renderer.cwd, path.join(root, 'desktop/renderer2'));
+  assert.equal(shell.args[1], '--test-concurrency=4');
   assert.equal(shell.args.filter(arg => arg.endsWith('.test.js')).length, fs.readdirSync(path.join(root, 'desktop/shell')).filter(name => name.endsWith('.test.js')).length);
-  assert.equal(scripts.args[1], '--test-concurrency=2');
+  assert.equal(scripts.args[1], '--test-concurrency=6');
   assert.equal(scripts.args.filter(arg => arg.endsWith('.test.mjs')).length, fs.readdirSync(path.join(root, 'scripts/tests')).filter(name => name.endsWith('.test.mjs')).length);
+  const shellFiles = fs.readdirSync(path.join(root, 'scripts/tests')).filter(name => name.endsWith('.test.sh')).sort();
+  assert.equal(shellContracts.length, shellFiles.length);
+  assert.deepEqual(shellContracts.map(command => path.basename(command.args[0])).sort(), shellFiles);
+  assert.ok(shellContracts.every(command => command.command === 'sh' && command.args.length === 1 && command.cwd === root));
 });
 
 test('counts Go JSON pass, fail, skip outcomes and separates nested tests', () => {

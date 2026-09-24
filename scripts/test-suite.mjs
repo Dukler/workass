@@ -10,11 +10,15 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const limitMs = 10_000;
 
 export function fullSuiteCommands(repo = root) {
+  const shellContracts = files(path.join(repo, 'scripts/tests'), /\.test\.sh$/).map(file => ({
+    name: `script_contract_${path.basename(file, '.test.sh')}`, command: 'sh', args: [file], cwd: repo,
+  }));
   return [
-    { name: 'renderer_tests', command: 'node', args: ['--experimental-strip-types', '--test', '--test-concurrency=4', ...files(path.join(repo, 'desktop/renderer2/tests'), /\.test\.ts$/)], cwd: repo },
-    { name: 'shell_tests', command: 'node', args: ['--test', '--test-concurrency=2', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo },
+    { name: 'renderer_tests', command: 'node', args: ['--experimental-strip-types', '--test', '--test-concurrency=4', ...files(path.join(repo, 'desktop/renderer2/tests'), /\.test\.ts$/)], cwd: path.join(repo, 'desktop/renderer2') },
+    { name: 'shell_tests', command: 'node', args: ['--test', '--test-concurrency=4', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo },
     { name: 'go_tests', command: 'node', args: [path.join(repo, 'scripts/test-go-suite.mjs'), '--workers', '6', '--cwd', repo], cwd: repo },
-    { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=2', ...files(path.join(repo, 'scripts/tests'), /\.test\.mjs$/)], cwd: repo },
+    { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=6', ...files(path.join(repo, 'scripts/tests'), /\.test\.mjs$/)], cwd: repo },
+    ...shellContracts,
   ];
 }
 
