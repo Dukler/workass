@@ -64,7 +64,12 @@ func TestBuiltInOpenCodeProviderDefaultsToOxAlphaFree(t *testing.T) {
 }
 
 func TestResolveFrontierNativeLaunchUsesOfficialCLIsAndIgnoresZedAdapters(t *testing.T) {
-	pathDir := t.TempDir()
+	// Keep "acp" in an ancestor directory: adapter detection must inspect the
+	// executable identity, not incidental parts of its absolute path.
+	pathDir := filepath.Join(t.TempDir(), "worker-3-acp-batch-39", "bin")
+	if err := os.MkdirAll(pathDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	claude := filepath.Join(pathDir, executableName("claude"))
 	codex := filepath.Join(pathDir, executableName("codex"))
 	writeExecutable(t, claude, nativeNoopScript())
@@ -90,7 +95,7 @@ func TestResolveFrontierNativeLaunchUsesOfficialCLIsAndIgnoresZedAdapters(t *tes
 	if codexLaunch.Command != codex || len(codexLaunch.Args) != 0 {
 		t.Fatalf("Codex launch = %#v", codexLaunch)
 	}
-	if strings.Contains(claudeLaunch.Command, "acp") || strings.Contains(codexLaunch.Command, "acp") {
+	if filepath.Base(claudeLaunch.Command) != executableName("claude") || filepath.Base(codexLaunch.Command) != executableName("codex") {
 		t.Fatalf("Zed adapter leaked into native launches: Claude=%#v Codex=%#v", claudeLaunch, codexLaunch)
 	}
 }
