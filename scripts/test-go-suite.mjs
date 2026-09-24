@@ -234,7 +234,7 @@ export function partitionBatches(names, hints = HINTS, { maxWeight = MAX_BATCH_S
 }
 
 export function orderWorkByWeight(work, { slowPackage = 'workass/internal/machinebook' } = {}) {
-  const rank = item => item.package === slowPackage ? 0 : item.kind === 'build' ? 1 : item.kind === 'heavy' ? 2 : 3;
+  const rank = item => item.kind === 'compile' ? -1 : item.package === slowPackage ? 0 : item.kind === 'build' ? 1 : item.kind === 'heavy' ? 2 : 3;
   return [...work].sort((a, b) => rank(a) - rank(b) ||
     (b.weight ?? DEFAULT_SECONDS) - (a.weight ?? DEFAULT_SECONDS) ||
     String(a.package ?? '').localeCompare(String(b.package ?? '')) || String(a.id ?? '').localeCompare(String(b.id ?? '')));
@@ -378,13 +378,18 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
       if (previous) throw new Error(`Go test binary basename collision: ${previous} and ${pkg.importPath} both produce ${basename}.test`);
       packageBasenames.set(basename, pkg.importPath);
     }
-    await run(go, ['test', ...raceFlag, '-p', String(workers), '-c', '-o', `${binaryCache}${path.sep}`, './...'], 'compile-all-packages');
     const buildAndList = [];
     const failures = [];
-    const workQueue = orderWorkByWeight([
-      ...otherPackages.map(pkg => ({ kind: 'package', package: pkg.importPath, dir: pkg.dir, hasTests: pkg.hasTests, id: pkg.importPath, weight: pkg.importPath.endsWith('/machinebook') ? 10 : DEFAULT_SECONDS })),
-      ...HEAVY_PACKAGES.map(pkg => ({ kind: 'build', pkg, package: packages.find(name => name.endsWith(pkg.slice(1))) ?? `workass/${pkg.slice(2)}`, weight: DEFAULT_SECONDS })),
-    ]);
+    const groups = [
+      { id: 'acp', packages: packageMetadata.filter(pkg => pkg.importPath === 'workass/internal/acp') },
+      { id: 'workass', packages: packageMetadata.filter(pkg => pkg.importPath === 'workass/cmd/workass') },
+      { id: 'remaining', packages: packageMetadata.filter(pkg => pkg.importPath !== 'workass/internal/acp' && pkg.importPath !== 'workass/cmd/workass') },
+    ];
+    const workForGroup = group => [
+      ...otherPackages.filter(pkg => group.packages.includes(pkg)).map(pkg => ({ kind: 'package', package: pkg.importPath, dir: pkg.dir, hasTests: pkg.hasTests, id: pkg.importPath, weight: pkg.importPath.endsWith('/machinebook') ? 10 : DEFAULT_SECONDS })),
+      ...HEAVY_PACKAGES.map(pkg => ({ pkg, package: packages.find(name => name.endsWith(pkg.slice(1))) ?? `workass/${pkg.slice(2)}` })).filter(item => group.packages.some(meta => meta.importPath === item.package)).map(item => ({ kind: 'build', ...item, weight: DEFAULT_SECONDS })),
+    ];
+    const workQueue = orderWorkByWeight(groups.map(group => ({ kind: 'compile', group, id: `compile-${group.id}`, weight: DEFAULT_SECONDS })));
     let pendingTasks = workQueue.length;
     const wakeups = new Set();
     const wakeAll = () => { for (const wake of wakeups) wake(); wakeups.clear(); };
@@ -429,6 +434,13 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
       };
       for (const batch of item.batches) enqueue({ kind: 'heavy', ...batch, item, boundary: 'weighted', package: work.package });
       for (const [serialIndex, name] of serial.entries()) enqueue({ kind: 'heavy', id: `serial-${serialIndex}`, names: [name], weight: HINTS.get(name) ?? DEFAULT_SECONDS, item, boundary: 'serial', package: work.package });
+    };
+    const executeCompile = async work => {
+      const { group } = work;
+      const packageIds = group.packages.map(pkg => pkg.importPath);
+      const compilerParallelism = Math.max(1, Math.floor(workers / 3));
+      await run(go, ['test', ...raceFlag, '-p', String(compilerParallelism), '-c', '-o', `${binaryCache}${path.sep}`, ...packageIds], `compile-${group.id}`);
+      for (const task of workForGroup(group)) enqueue(task);
     };
     const executeBatch = async (batch, worker) => {
       const { item } = batch;
@@ -491,12 +503,13 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
       if (result.code !== 0) { summary.commandFailure ??= { label: `other-go-${work.package}`, code: result.code, signal: result.signal, spawnError: result.spawnError, stdout: result.stdout, stderr: result.stderr }; failures.push(`${work.package} failed with exit ${result.code}`); }
       if (packageOutcome === 'fail' && result.code === 0) failures.push(`${work.package} test output was incomplete or failed`);
     };
-    const pool = Array.from({ length: Math.min(workers, workQueue.length) }, async (_, worker) => {
+    const pool = Array.from({ length: workers }, async (_, worker) => {
       while (!interrupted) {
         const work = await takeWork();
         if (!work) return;
         try {
-          if (work.kind === 'build') await executeBuild(work);
+          if (work.kind === 'compile') await executeCompile(work);
+          else if (work.kind === 'build') await executeBuild(work);
           else if (work.kind === 'heavy') await executeBatch(work, worker);
           else await executePackage(work);
         } catch (error) {
