@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { spawn as nodeSpawn } from 'node:child_process';
-import { createWriteStream } from 'node:fs';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { createWriteStream, existsSync } from 'node:fs';
+import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { link } from 'node:fs/promises';
 
 const HINTS = new Map([
   ["TestACPEffortSelectionBeforeAxisDiscovery", 1.3],
@@ -209,11 +210,31 @@ function parseGoJson(output) {
   return events;
 }
 
-export async function runGoSuite({ cwd = process.cwd(), logDir, workers = 6, race = false, go = 'go', spawn = nodeSpawn, signalHandlers = true, abortSignal } = {}) {
+export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, workers = 6, race = false, go = 'go', spawn = nodeSpawn, signalHandlers = true, abortSignal } = {}) {
   if (!Number.isInteger(workers) || workers < 1) throw new Error('workers must be a positive integer');
   workers = Math.min(workers, 6);
   const wallStart = performance.now();
   const root = await mkdtemp(path.join(os.tmpdir(), 'workass-go-matrix-'));
+  const repoKey = createHash('sha256').update(path.resolve(cwd)).digest('hex').slice(0, 24);
+  const binaryCache = cacheDir ?? (spawn === nodeSpawn
+    ? path.join(os.tmpdir(), 'workass-go-test-binaries', repoKey, race ? 'race' : 'normal')
+    : path.join(root, 'test-binaries'));
+  await mkdir(binaryCache, { recursive: true });
+  const cacheMarker = path.join(binaryCache, '.workass-go-test-cache');
+  const markerValue = `workass-go-test-cache-v1\n${repoKey}\n${race ? 'race' : 'normal'}\n`;
+  if (existsSync(cacheMarker)) {
+    if (await readFile(cacheMarker, 'utf8') !== markerValue) throw new Error(`Go test binary cache ownership mismatch: ${binaryCache}`);
+  } else {
+    for (const label of ['acp', 'workass']) {
+      if (existsSync(path.join(binaryCache, `${label}.test`))) throw new Error(`Refusing to overwrite an unowned Go test binary: ${path.join(binaryCache, `${label}.test`)}`);
+    }
+    const markerTemp = path.join(binaryCache, `.workass-go-test-cache-${randomUUID()}`);
+    await writeFile(markerTemp, markerValue, { flag: 'wx' });
+    try { await link(markerTemp, cacheMarker); }
+    catch (error) {
+      if (error.code !== 'EEXIST' || await readFile(cacheMarker, 'utf8') !== markerValue) throw error;
+    } finally { await unlink(markerTemp).catch(() => {}); }
+  }
   const logs = logDir ?? path.join(os.tmpdir(), `workass-go-matrix-logs-${new Date().toISOString().replaceAll(':', '').replaceAll('.', '')}`);
   await mkdir(logs, { recursive: true });
   const runId = `${new Date().toISOString().replaceAll(':', '').replaceAll('.', '')}-${process.pid}-${randomUUID()}`;
@@ -285,9 +306,14 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, workers = 6, rac
     const executeBuild = async work => {
       const { pkg, index } = work;
       const label = index === 0 ? 'acp' : 'workass';
+      const cachedBinary = path.join(binaryCache, `${label}.test`);
       const binary = path.join(root, `${label}.test`);
       const packageCwd = path.join(cwd, pkg.replace(/^\.\//, ''));
-      await run(go, ['test', ...raceFlag, '-c', '-o', binary, pkg], `compile-${label}`);
+      await run(go, ['test', ...raceFlag, '-c', '-o', cachedBinary, pkg], `compile-${label}`);
+      // Pin this invocation to the compiled inode. Go replaces changed outputs
+      // atomically; the hard link keeps an older binary runnable during another
+      // suite's compiler pass without copying its startup cost onto each batch.
+      await link(cachedBinary, binary);
       const listing = await run(binary, ['-test.list', '.'], `list-${label}`, packageCwd);
       const names = parseTestList(listing.stdout);
       if (!names.length) throw new Error(`${pkg} test binary discovered no Test, Example, or Fuzz cases`);
