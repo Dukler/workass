@@ -34,6 +34,14 @@ test('weighted batches stay bounded and retain every discovered root once', () =
   assert.ok(batches.every(batch => batch.weight <= 3 || batch.names.length === 1));
 });
 
+test('default heavy batches target two seconds and cap at 24 cases', () => {
+  const testNames = Array.from({ length: 60 }, (_, index) => `TestBatch${String(index).padStart(2, '0')}`);
+  const batches = partitionBatches(testNames);
+  assert.equal(batches.flatMap(batch => batch.names).length, testNames.length);
+  assert.ok(batches.every(batch => batch.names.length <= 24));
+  assert.ok(batches.every(batch => batch.weight <= 2));
+});
+
 test('scheduler orders measured heavy batches globally and starts machinebook first', () => {
   const work = orderWorkByWeight([
     { kind: 'heavy', package: 'workass/cmd/workass', id: 1, weight: 3 },
@@ -44,6 +52,16 @@ test('scheduler orders measured heavy batches globally and starts machinebook fi
   ]);
   assert.deepEqual(work.map(item => item.id), ['machinebook', 'build-acp', 2, 1, 'fast']);
   assert.deepEqual(partitionBatches(['TestFallback']).map(batch => batch.weight), [0.1]);
+});
+
+test('requested worker capacity is honored without the legacy six-worker clamp', async t => {
+  const f = await fixture(t);
+  const tracker = inProcessGoSpawn();
+  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 8, spawn: tracker.spawn, signalHandlers: false });
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.workers, 8);
+  assert.ok(tracker.maximum() >= 1);
+  assert.ok(tracker.maximum() <= 8);
 });
 
 async function fixture(t, { fail = '', delay = '0.04', packageFail = false } = {}) {
@@ -82,7 +100,8 @@ function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/interna
       const pattern = args.find(arg => arg.startsWith('-test.run='))?.slice('-test.run='.length) ?? '';
       const selected = names.filter(name => new RegExp(pattern).test(name));
       const out = selected.flatMap(name => [`=== RUN ${name}`, `=== RUN ${name}/child`, `complete output for ${name}`, `--- PASS: ${name}/child (0.01s)`, name === failCase ? `--- FAIL: ${name} (0.01s)` : `--- PASS: ${name} (0.01s)`]).join('\n') + '\n';
-      finish(failCase && selected.includes(failCase) ? 7 : 0, out, failCase && selected.includes(failCase) ? 'deliberate failure detail\n' : ''); return child;
+      const otherPackageFailure = packageFail && options.cwd?.endsWith('/internal/one');
+      finish(failCase && selected.includes(failCase) ? 7 : otherPackageFailure ? 9 : 0, `${out}other-package-output\n`, failCase && selected.includes(failCase) || otherPackageFailure ? 'deliberate failure detail\n' : ''); return child;
     }
     if (command === 'go' || path.basename(String(command)).startsWith('fake-go')) {
       if (args[0] === 'test' && args.includes('-c')) {
@@ -122,6 +141,8 @@ test('fresh matrix covers both heavy packages once, overlaps within the bound, a
   assert.ok(tracker.maximum() > 1);
   assert.ok(tracker.maximum() <= 3);
   assert.equal(result.otherPackages.length, 2);
+  assert.equal(result.otherGo.tests, 16);
+  assert.equal(result.otherGo.passed, 16, 'remaining package totals include nested passing outcomes');
   const fullLog = await readFile(result.jsonlPath, 'utf8');
   assert.match(fullLog, /complete output for/);
   assert.match(fullLog, /other-package-output/);
@@ -139,12 +160,11 @@ test('remaining package work starts while heavy test binaries are still compilin
     compileDelayMs: 60,
     onCompileStart: pkg => events.push(`compile-start:${pkg}`),
     onCompileFinish: pkg => events.push(`compile-finish:${pkg}`),
-    onPackageStart: pkg => events.push(`package-start:${pkg}`),
   });
   const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 3, signalHandlers: false, spawn: fake.spawn });
   assert.equal(result.ok, true, result.error);
   const compileStarted = events.findIndex(event => event.startsWith('compile-start:'));
-  const packageStarted = events.findIndex(event => event.startsWith('package-start:'));
+  const packageStarted = events.findIndex(event => event.startsWith('compile-start:workass/'));
   const firstCompileFinished = events.findIndex(event => event.startsWith('compile-finish:'));
   assert.ok(compileStarted >= 0 && packageStarted >= 0 && packageStarted < firstCompileFinished, events.join(', '));
 });
@@ -157,7 +177,7 @@ test('case failures propagate after other cases run and preserve failure detail'
   assert.equal(result.heavyPackages['./internal/acp'].failed, 1);
   assert.equal(result.heavyPackages['./internal/acp'].cases.length, names.length);
   assert.equal(result.heavyPackages['./cmd/workass'].cases.length, names.length, 'assigned work drains after a worker sees a failed batch');
-  assert.equal(result.otherGo.tests, 2, 'remaining package work also drains after a heavy batch failure');
+  assert.equal(result.otherGo.tests, 16, 'remaining package work also drains after a heavy batch failure');
   assert.match(await readFile(result.jsonlPath, 'utf8'), /deliberate failure detail/);
 });
 
@@ -176,7 +196,7 @@ test('race flags follow the Go subcommand for compiled and remaining packages', 
   const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, race: true, workers: 2, signalHandlers: false, spawn: fake.spawn });
   assert.equal(result.ok, true, result.error);
   assert.ok(invocations.some(args => args[0] === 'test' && args[1] === '-race' && args[2] === '-c'));
-  assert.ok(invocations.some(args => args[0] === 'test' && args[1] === '-race' && args.includes('-json')));
+  assert.ok(invocations.some(args => args[0] === 'test' && args[1] === '-race' && args.includes('-c') && args.at(-1).startsWith('workass/')));
 });
 
 test('abort terminates process group and records interruption', async t => {

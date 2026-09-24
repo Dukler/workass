@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn as nodeSpawn } from 'node:child_process';
 import { createWriteStream, existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -87,8 +87,9 @@ const HINTS = new Map([
   ["TestWorkspaceReturnCreatesCurrentRevisionLaneAndAcceptsNextTurn", 1.01],
 ]);
 const DEFAULT_SECONDS = 0.1;
-const MAX_BATCH_SECONDS = 4;
-const MAX_BATCH_CASES = 64;
+const DEFAULT_WORKERS = os.availableParallelism();
+const MAX_BATCH_SECONDS = 2;
+const MAX_BATCH_CASES = 24;
 const HEAVY_PACKAGES = ['./internal/acp', './cmd/workass'];
 // Startup probes retain their real readiness deadlines and run in one explicit
 // serial batch until their fixtures can be isolated.
@@ -165,6 +166,8 @@ export function orderWorkByWeight(work, { slowPackage = 'workass/internal/machin
     String(a.package ?? '').localeCompare(String(b.package ?? '')) || String(a.id ?? '').localeCompare(String(b.id ?? '')));
 }
 
+function cacheLabel(pkg) { return `pkg-${createHash('sha256').update(pkg).digest('hex').slice(0, 24)}.test`; }
+
 function appendJsonLine(stream, value) { stream.write(`${JSON.stringify(value)}\n`); }
 
 function spawnLogged(command, args, options, active) {
@@ -210,9 +213,8 @@ function parseGoJson(output) {
   return events;
 }
 
-export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, workers = 6, race = false, go = 'go', spawn = nodeSpawn, signalHandlers = true, abortSignal } = {}) {
+export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, workers = DEFAULT_WORKERS, race = false, go = 'go', spawn = nodeSpawn, signalHandlers = true, abortSignal } = {}) {
   if (!Number.isInteger(workers) || workers < 1) throw new Error('workers must be a positive integer');
-  workers = Math.min(workers, 6);
   const wallStart = performance.now();
   const root = await mkdtemp(path.join(os.tmpdir(), 'workass-go-matrix-'));
   const repoKey = createHash('sha256').update(path.resolve(cwd)).digest('hex').slice(0, 24);
@@ -359,29 +361,41 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
     const executePackage = async work => {
       const tempDir = await commandTemp(`other-${work.package.replace(/[^a-zA-Z0-9_-]/g, '-')}`);
       if (interrupted) return;
-      const flags = ['test', ...raceFlag, '-json', '-count=1', '-p=1', '-parallel=2', work.package];
-      appendJsonLine(jsonl, { event: 'command-start', label: `other-go-${work.package}`, command: go, args: flags, cwd, at: new Date().toISOString() });
-      const result = await spawnLogged(go, flags, { cwd, spawn, env: envFor(tempDir) }, active);
-      appendJsonLine(jsonl, { event: 'command-end', label: `other-go-${work.package}`, ...result });
+      const label = `package-${createHash('sha256').update(work.package).digest('hex').slice(0, 16)}`;
+      const packageCwd = path.join(cwd, work.package.replace(/^workass\//, ''));
+      const cachePath = path.join(binaryCache, cacheLabel(work.package));
+      const compiledPath = path.join(root, `${label}.test`);
+      const compile = await run(go, ['test', ...raceFlag, '-c', '-o', compiledPath, work.package], `compile-${label}`);
+      if (!existsSync(compiledPath)) {
+        appendJsonLine(jsonl, { event: 'package-test', package: work.package, cwd: packageCwd, code: 0, noTestFiles: true, compileStdout: compile.stdout, compileStderr: compile.stderr });
+        summary.packageOutcomes.push({ package: work.package, action: 'pass', noTestFiles: true });
+        return;
+      }
+      await rename(compiledPath, cachePath);
+      const binary = path.join(root, `${label}-run.test`);
+      await link(cachePath, binary);
+      const listing = await run(binary, ['-test.list', '.'], `list-${label}`, packageCwd);
+      const names = parseTestList(listing.stdout);
+      if (!names.length || new Set(names).size !== names.length) throw new Error(`${work.package} test binary has an empty or duplicate listing`);
+      const result = await spawnLogged(binary, ['-test.v', '-test.count=1', '-test.parallel=2'], { cwd: packageCwd, spawn, env: envFor(tempDir) }, active);
+      const inspected = names.map(name => ({ name, ...inspectCaseOutput(name, result.code, result.stdout) }));
+      let packageOutcome = result.code === 0 && inspected.every(item => !item.coverageError && !item.rootFailures) ? 'pass' : 'fail';
+      for (const item of inspected) {
+        summary.otherGo.topLevelTests++;
+        summary.otherGo.tests++;
+        summary.otherGo.nestedTests += item.nestedRun;
+        summary.otherGo.tests += item.nestedRun;
+        summary.otherGo.passed += item.rootPasses + item.nestedPassed;
+        summary.otherGo.failed += item.rootFailures + item.nestedFailed + (item.coverageError ? 1 : 0);
+        summary.otherGo.skipped += item.rootSkips + item.nestedSkipped;
+      }
+      appendJsonLine(jsonl, { event: 'package-test', package: work.package, cwd: packageCwd, elapsedMs: result.elapsedMs, code: result.code, stdout: result.stdout, stderr: result.stderr });
       if (result.stdout) appendJsonLine(jsonl, { event: 'stdout', label: `other-go-${work.package}`, text: result.stdout });
       if (result.stderr) appendJsonLine(jsonl, { event: 'stderr', label: `other-go-${work.package}`, text: result.stderr });
-      const events = parseGoJson(result.stdout);
-      const outcomes = events.filter(event => ['pass', 'fail', 'skip'].includes(event.Action));
-      let packageOutcome;
-      for (const event of outcomes) {
-        if (event.Test) {
-          summary.otherGo.tests++;
-          if (event.Test.includes('/')) summary.otherGo.nestedTests++;
-          else summary.otherGo.topLevelTests++;
-          summary.otherGo[event.Action === 'pass' ? 'passed' : event.Action === 'fail' ? 'failed' : 'skipped']++;
-        } else if (event.Package) packageOutcome = event.Action;
-      }
-      if (!packageOutcome) failures.push(`${work.package} package result missing`);
-      else summary.packageOutcomes.push({ package: work.package, action: packageOutcome });
-      if (result.code !== 0) {
-        summary.commandFailure ??= { label: `other-go-${work.package}`, code: result.code, signal: result.signal, spawnError: result.spawnError, stdout: result.stdout, stderr: result.stderr };
-        failures.push(`${work.package} failed with exit ${result.code}`);
-      }
+      if (inspected.some(item => item.coverageError || item.rootFailures || item.nestedFailed)) packageOutcome = 'fail';
+      summary.packageOutcomes.push({ package: work.package, action: packageOutcome });
+      if (result.code !== 0) { summary.commandFailure ??= { label: `other-go-${work.package}`, code: result.code, signal: result.signal, spawnError: result.spawnError, stdout: result.stdout, stderr: result.stderr }; failures.push(`${work.package} failed with exit ${result.code}`); }
+      if (packageOutcome === 'fail' && result.code === 0) failures.push(`${work.package} test output was incomplete or failed`);
     };
     const pool = Array.from({ length: Math.min(workers, workQueue.length) }, async (worker) => {
       while (!interrupted) {
@@ -437,7 +451,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
 
 async function main() {
   const args = process.argv.slice(2);
-  const options = { workers: 6, cwd: process.cwd() };
+  const options = { workers: DEFAULT_WORKERS, cwd: process.cwd() };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--workers') options.workers = Number(args[++i]);
     else if (args[i] === '--cwd') options.cwd = path.resolve(args[++i]);
