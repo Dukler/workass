@@ -39,9 +39,11 @@ test('scheduler orders measured heavy batches globally and starts machinebook fi
     { kind: 'heavy', package: 'workass/cmd/workass', id: 1, weight: 3 },
     { kind: 'package', package: 'workass/internal/fast', id: 'fast', weight: 0.25 },
     { kind: 'package', package: 'workass/internal/machinebook', id: 'machinebook', weight: 10 },
+    { kind: 'build', package: 'workass/internal/acp', id: 'build-acp', weight: 0.1 },
     { kind: 'heavy', package: 'workass/internal/acp', id: 2, weight: 4 },
   ]);
-  assert.deepEqual(work.map(item => item.id), ['machinebook', 2, 1, 'fast']);
+  assert.deepEqual(work.map(item => item.id), ['machinebook', 'build-acp', 2, 1, 'fast']);
+  assert.deepEqual(partitionBatches(['TestFallback']).map(batch => batch.weight), [0.1]);
 });
 
 async function fixture(t, { fail = '', delay = '0.04', packageFail = false, childWait = false } = {}) {
@@ -199,6 +201,46 @@ test('abort terminates process group and records interruption', async t => {
     await new Promise(resolve => setTimeout(resolve, 30));
     try { process.kill(pid, 0); assert.fail(`helper child ${pid} survived interruption`); } catch (error) { assert.equal(error.code, 'ESRCH'); }
   }
+});
+
+test('in-process abort releases a waiting worker and leaves queued batches unspawned', async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  const testNames = Array.from({ length: 70 }, (_, index) => `TestQueued${String(index).padStart(2, '0')}`);
+  let heavySpawns = 0;
+  let active = 0;
+  const spawn = (command, args) => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    let closed = false;
+    let counted = false;
+    const finish = (code, stdout = '') => {
+      if (closed) return;
+      closed = true;
+      child.stdout.end(stdout); child.stderr.end();
+      setImmediate(() => { if (counted) active--; child.emit('close', code, null); });
+    };
+    child.kill = () => { finish(null); return true; };
+    setImmediate(() => child.emit('spawn'));
+    if (args[0] === 'list') { finish(0, 'workass/internal/one\nworkass/internal/acp\nworkass/cmd/workass\n'); return child; }
+    if (args[0] === 'test' && args.includes('-c')) {
+      writeFileSync(args[args.indexOf('-o') + 1], 'fake test binary'); finish(0); return child;
+    }
+    if (String(command).endsWith('.test')) {
+      if (args[0] === '-test.list') { finish(0, `${testNames.join('\n')}\n`); return child; }
+      heavySpawns++; active++; counted = true;
+      if (heavySpawns === 3) setImmediate(() => controller.abort());
+      return child;
+    }
+    if (args[0] === 'test' && args.includes('-json')) { finish(0); return child; }
+    finish(90);
+    return child;
+  };
+  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, workers: 3, abortSignal: controller.signal, signalHandlers: false, spawn });
+  assert.equal(result.interrupted, 'ABORT');
+  assert.equal(result.ok, false);
+  assert.equal(heavySpawns, 3, 'the queued fourth batch must not spawn after interruption');
+  assert.equal(active, 0, 'all acquired in-process children must be cleaned up');
 });
 
 test('spawn errors are returned and written to the command log', async t => {

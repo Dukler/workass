@@ -85,7 +85,7 @@ const HINTS = new Map([
   ["TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCWD", 0.63],
   ["TestWorkspaceReturnCreatesCurrentRevisionLaneAndAcceptsNextTurn", 1.01],
 ]);
-const DEFAULT_SECONDS = 0;
+const DEFAULT_SECONDS = 0.1;
 const MAX_BATCH_SECONDS = 4;
 const MAX_BATCH_CASES = 64;
 const HEAVY_PACKAGES = ['./internal/acp', './cmd/workass'];
@@ -158,7 +158,8 @@ export function partitionBatches(names, hints = HINTS, { maxWeight = MAX_BATCH_S
 }
 
 export function orderWorkByWeight(work, { slowPackage = 'workass/internal/machinebook' } = {}) {
-  return [...work].sort((a, b) => Number(b.package === slowPackage) - Number(a.package === slowPackage) ||
+  const rank = item => item.package === slowPackage ? 0 : item.kind === 'build' ? 1 : item.kind === 'heavy' ? 2 : 3;
+  return [...work].sort((a, b) => rank(a) - rank(b) ||
     (b.weight ?? DEFAULT_SECONDS) - (a.weight ?? DEFAULT_SECONDS) ||
     String(a.package ?? '').localeCompare(String(b.package ?? '')) || String(a.id ?? '').localeCompare(String(b.id ?? '')));
 }
@@ -222,7 +223,8 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, workers = 6, rac
   const active = new Set();
   let interrupted = null;
   let jsonlError = null;
-  const onInterrupt = signal => { interrupted ??= signal; void stopChildren(active); };
+  let wakeWorkers = () => {};
+  const onInterrupt = signal => { interrupted ??= signal; wakeWorkers(); void stopChildren(active); };
   jsonl.on('error', error => { jsonlError ??= error; onInterrupt('LOG_ERROR'); });
   if (signalHandlers) { process.on('SIGINT', onInterrupt); process.on('SIGTERM', onInterrupt); }
   const onAbort = () => onInterrupt('ABORT');
@@ -238,6 +240,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, workers = 6, rac
     if (jsonlError) throw new Error(`Go matrix log write failed: ${jsonlError.message}`);
     appendJsonLine(jsonl, { event: 'command-start', label, command, args, cwd: commandCwd, at: new Date().toISOString() });
     const tempDir = await commandTemp(label);
+    if (interrupted) throw new Error(`interrupted by ${interrupted}`);
     const result = await spawnLogged(command, args, { cwd: commandCwd, spawn, env: envFor(tempDir) }, active);
     appendJsonLine(jsonl, { event: 'command-end', label, ...result });
     if (result.stdout) appendJsonLine(jsonl, { event: 'stdout', label, text: result.stdout });
@@ -259,7 +262,6 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, workers = 6, rac
     summary.otherPackages = otherPackages;
     const buildAndList = [];
     const failures = [];
-    let nextWork = 0;
     const workQueue = orderWorkByWeight([
       ...otherPackages.map(pkg => ({ kind: 'package', package: pkg, id: pkg, weight: pkg.endsWith('/machinebook') ? 10 : DEFAULT_SECONDS })),
       ...HEAVY_PACKAGES.map((pkg, index) => ({ kind: 'build', pkg, index, package: packages.find(name => name.endsWith(pkg.slice(1))) ?? `workass/${pkg.slice(2)}`, weight: DEFAULT_SECONDS })),
@@ -267,10 +269,15 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, workers = 6, rac
     let pendingTasks = workQueue.length;
     const wakeups = new Set();
     const wakeAll = () => { for (const wake of wakeups) wake(); wakeups.clear(); };
+    wakeWorkers = wakeAll;
     const enqueue = work => { pendingTasks++; workQueue.push(work); wakeAll(); };
     const takeWork = async () => {
       while (true) {
-        if (nextWork < workQueue.length) return workQueue[nextWork++];
+        if (interrupted) return null;
+        if (workQueue.length) {
+          const selected = orderWorkByWeight(workQueue)[0];
+          return workQueue.splice(workQueue.indexOf(selected), 1)[0];
+        }
         if (pendingTasks === 0) return null;
         await new Promise(resolve => wakeups.add(resolve));
       }
@@ -325,6 +332,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, workers = 6, rac
     };
     const executePackage = async work => {
       const tempDir = await commandTemp(`other-${work.package.replace(/[^a-zA-Z0-9_-]/g, '-')}`);
+      if (interrupted) return;
       const flags = ['test', ...raceFlag, '-json', '-count=1', '-p=1', '-parallel=2', work.package];
       appendJsonLine(jsonl, { event: 'command-start', label: `other-go-${work.package}`, command: go, args: flags, cwd, at: new Date().toISOString() });
       const result = await spawnLogged(go, flags, { cwd, spawn, env: envFor(tempDir) }, active);
