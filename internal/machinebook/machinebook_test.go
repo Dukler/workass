@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -596,60 +597,99 @@ func TestSightedTrustsTheCardNotThePacket(t *testing.T) {
 // The first acceptance gate, run for real: two daemons on one host find each
 // other by beacon alone, with nobody typing an address.
 func TestBeaconFindsPeer(t *testing.T) {
-	lanIP := firstLANIPv4(t)
-	remote := lanDaemon(t, lanIP, identityDoc("m-peer", "peer daemon", 1))
+	remote := newFakeDaemon(t, identityDoc("m-peer", "peer daemon", 1))
+	_, remotePortText, err := net.SplitHostPort(remote.address())
+	if err != nil {
+		t.Fatalf("remote address: %v", err)
+	}
+	remotePort, err := strconv.Atoi(remotePortText)
+	if err != nil {
+		t.Fatalf("remote port: %v", err)
+	}
 	book := openBook(t, "m-listener")
 
-	// Off the group real daemons listen on. These are real packets on a real
-	// network, and a test must not be able to write an invented machine into
-	// the book of a daemon someone is actually using.
-	const testGroup = "239.87.87.99:48799"
+	// Keep actual UDP traffic on loopback. Beacon.Run, packet encoding and
+	// decoding, HTTP identity verification, and Book registration remain real;
+	// only host multicast interface routing is removed from this test.
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen loopback UDP: %v", err)
+	}
+	t.Cleanup(func() { _ = udp.Close() })
+	testGroup := net.JoinHostPort("127.0.0.1", strconv.Itoa(udp.LocalAddr().(*net.UDPAddr).Port))
 
 	found := make(chan Entry, 4)
+	ready := make(chan struct{}, 1)
 	listener := &Beacon{
 		Book:        book,
 		MachineID:   "m-listener",
 		Name:        "listener",
-		Port:        remote.port,
+		Port:        remotePort,
 		Interval:    200 * time.Millisecond,
 		Group:       testGroup,
 		ReceiveOnly: true,
 		OnChange:    func(entry Entry) { found <- entry },
+		listenDatagramFn: func(*net.UDPAddr) (*net.UDPConn, string, error) {
+			return udp, "loopback-test", nil
+		},
+		readReadyFn: func() { ready <- struct{}{} },
 	}
 	announcer := &Beacon{
 		MachineID: "m-peer",
 		Name:      "peer daemon",
-		Port:      remote.port,
+		Port:      remotePort,
 		Interval:  200 * time.Millisecond,
 		Group:     testGroup,
+		announceIPsFn: func() []*net.IPNet {
+			return []*net.IPNet{{IP: net.IPv4(127, 0, 0, 1), Mask: net.CIDRMask(8, 32)}}
+		},
 		// A listening book is not needed on the announcing side; this beacon
 		// exists only to put packets on the wire.
 		Book: openBook(t, "m-peer"),
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	listenerDone := make(chan error, 1)
+	announcerDone := make(chan error, 1)
 	go func() {
-		if err := listener.Run(ctx); err != nil {
-			t.Errorf("listener beacon: %v", err)
-		}
+		listenerDone <- listener.Run(ctx)
 	}()
+	<-ready
 	go func() {
-		if err := announcer.Run(ctx); err != nil {
-			t.Errorf("announcer beacon: %v", err)
-		}
+		announcerDone <- announcer.Run(ctx)
 	}()
 
-	select {
-	case entry := <-found:
-		if entry.MachineID != "m-peer" {
-			t.Fatalf("found %+v, want the announcing peer", entry)
-		}
-		if entry.AddedBy != SourceBeacon {
-			t.Fatalf("addedBy = %q", entry.AddedBy)
-		}
-	case <-ctx.Done():
-		t.Skip("no multicast between processes on this host — the live gate covers this path")
+	entry := <-found
+	if entry.MachineID != "m-peer" {
+		t.Fatalf("found %+v, want the announcing peer", entry)
+	}
+	if entry.AddedBy != SourceBeacon {
+		t.Fatalf("addedBy = %q", entry.AddedBy)
+	}
+	cancel()
+	if err := <-listenerDone; err != nil {
+		t.Fatalf("listener beacon: %v", err)
+	}
+	if err := <-announcerDone; err != nil {
+		t.Fatalf("announcer beacon: %v", err)
+	}
+}
+
+func TestBeaconGroupConstruction(t *testing.T) {
+	group, err := beaconGroup(" ")
+	if err != nil {
+		t.Fatalf("default beacon group: %v", err)
+	}
+	if !group.IP.Equal(net.ParseIP(GroupIP)) || group.Port != GroupPort {
+		t.Fatalf("default group = %v, want %s:%d", group, GroupIP, GroupPort)
+	}
+	custom, err := beaconGroup("127.0.0.1:12345")
+	if err != nil {
+		t.Fatalf("custom beacon group: %v", err)
+	}
+	if !custom.IP.Equal(net.IPv4(127, 0, 0, 1)) || custom.Port != 12345 {
+		t.Fatalf("custom group = %v, want 127.0.0.1:12345", custom)
 	}
 }
 

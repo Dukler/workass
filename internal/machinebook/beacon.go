@@ -73,6 +73,11 @@ type Beacon struct {
 	mu         sync.Mutex
 	listeners  map[int]*net.UDPConn
 	announceFn func(*net.UDPAddr)
+	// The following private seams keep discovery integration tests on real UDP
+	// sockets while avoiding dependence on host multicast routing.
+	listenDatagramFn func(*net.UDPAddr) (*net.UDPConn, string, error)
+	announceIPsFn    func() []*net.IPNet
+	readReadyFn      func()
 }
 
 // Run listens until ctx ends and, unless ReceiveOnly is set, announces on a
@@ -91,13 +96,9 @@ func (b *Beacon) Run(ctx context.Context) error {
 	b.listeners = map[int]*net.UDPConn{}
 	defer b.closeListeners()
 
-	group := &net.UDPAddr{IP: net.ParseIP(GroupIP), Port: GroupPort}
-	if custom := strings.TrimSpace(b.Group); custom != "" {
-		resolved, resolveErr := net.ResolveUDPAddr("udp4", custom)
-		if resolveErr != nil {
-			return resolveErr
-		}
-		group = resolved
+	group, resolveErr := beaconGroup(b.Group)
+	if resolveErr != nil {
+		return resolveErr
 	}
 	b.refreshListeners(ctx, group)
 	if !b.ReceiveOnly {
@@ -122,6 +123,13 @@ func (b *Beacon) Run(ctx context.Context) error {
 	}
 }
 
+func beaconGroup(custom string) (*net.UDPAddr, error) {
+	if custom = strings.TrimSpace(custom); custom != "" {
+		return net.ResolveUDPAddr("udp4", custom)
+	}
+	return &net.UDPAddr{IP: net.ParseIP(GroupIP), Port: GroupPort}, nil
+}
+
 func (b *Beacon) sendAnnouncement(group *net.UDPAddr) {
 	if b.announceFn != nil {
 		b.announceFn(group)
@@ -144,7 +152,11 @@ func (b *Beacon) announce(group *net.UDPAddr) {
 	if err != nil {
 		return
 	}
-	for _, addr := range multicastAddrs() {
+	addrs := multicastAddrs()
+	if b.announceIPsFn != nil {
+		addrs = b.announceIPsFn()
+	}
+	for _, addr := range addrs {
 		conn, dialErr := net.DialUDP("udp4", &net.UDPAddr{IP: addr.IP}, group)
 		if dialErr != nil {
 			continue
@@ -157,6 +169,23 @@ func (b *Beacon) announce(group *net.UDPAddr) {
 // refreshListeners joins the group on every interface that can carry it, and
 // starts a reader for each newly joined one.
 func (b *Beacon) refreshListeners(ctx context.Context, group *net.UDPAddr) {
+	if b.listenDatagramFn != nil {
+		b.mu.Lock()
+		_, joined := b.listeners[0]
+		b.mu.Unlock()
+		if joined {
+			return
+		}
+		conn, ifaceName, err := b.listenDatagramFn(group)
+		if err != nil {
+			return
+		}
+		b.mu.Lock()
+		b.listeners[0] = conn
+		b.mu.Unlock()
+		go b.read(ctx, conn, ifaceName)
+		return
+	}
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return
@@ -190,6 +219,9 @@ func (b *Beacon) read(ctx context.Context, conn *net.UDPConn, ifaceName string) 
 	}()
 
 	buffer := make([]byte, 2048)
+	if b.readReadyFn != nil {
+		b.readReadyFn()
+	}
 	window := time.Now()
 	probed := 0
 	for {
