@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,89 +18,111 @@ import (
 // Ordinary chat lifecycle must never run Git, including when an older install
 // left a repository baseline attached to the chat.
 func TestChatLifecycleDoesNotRunAutomaticGit(t *testing.T) {
-	requireGit(t)
 	for _, managed := range []bool{false, true} {
 		for _, restored := range []bool{false, true} {
+			managed, restored := managed, restored
 			t.Run(fmt.Sprintf("managed=%t/restored=%t", managed, restored), func(t *testing.T) {
-				workspace := t.TempDir()
-				repo := filepath.Join(workspace, "repo")
-				initTinyGitRepo(t, repo, map[string]string{"work.txt": "before\n"})
-				root := repoRoot(t)
-				events := newEventCollector()
-				manager := NewManager(Options{
-					RootDir: root, StateDir: t.TempDir(), RSSSampleInterval: time.Hour,
-					Provider:  ProviderConfig{Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")}, CWD: root},
-					Broadcast: events.Broadcast,
-				})
-				t.Cleanup(func() { manager.Reset() })
-				initialized := make(chan struct{}, 1)
-				manager.SetChatEnvObserver(func(env ChatEnvPayload) error {
-					events.Broadcast("chat:env", env)
-					initialized <- struct{}{}
-					return nil
-				})
-				if restored {
-					seedLegacyChatEnvFixture(t, manager, "old-session", "no-git-chat", "no-git-tab", workspace)
-				}
-				writeFile(t, filepath.Join(repo, "work.txt"), "changed\n")
-				traceFile := filepath.Join(t.TempDir(), "git-trace.log")
-				t.Setenv("GIT_TRACE", traceFile)
-				session, err := manager.NewSession(context.Background(), SessionOptions{
-					CWD: workspace, TabID: "no-git-tab", ChatID: "no-git-chat", ProviderLaneManaged: managed,
-				})
+				t.Parallel()
+				cmd := exec.Command(os.Args[0], "-test.run=^TestChatLifecycleDoesNotRunAutomaticGitCase$")
+				cmd.Env = append(os.Environ(), fmt.Sprintf("WORKASS_TEST_NO_AUTOMATIC_GIT_CASE=%t,%t", managed, restored))
+				output, err := cmd.CombinedOutput()
 				if err != nil {
-					t.Fatal(err)
-				}
-				if managed {
-					select {
-					case <-initialized:
-					case <-time.After(2 * time.Second):
-						t.Fatal("session environment initialization did not finish")
-					}
-				}
-
-				for i, prompt := range []string{"ordinary chat", "[mock:slow] stop after dispatch", "[mock:slow] immediate stop"} {
-					id := ""
-					if managed {
-						id = fmt.Sprintf("no-git-job-%d", i)
-					}
-					started := time.Now()
-					job, err := manager.StartJob(context.Background(), JobStartOptions{
-						JobID: id, OperationID: "no-git-operation-" + fmt.Sprint(i), ProviderLaneManaged: managed,
-						Kind: "app-chat", SessionID: session.SessionID, TabID: "no-git-tab", ChatID: "no-git-chat", CWD: workspace, Prompt: prompt,
-					})
-					if err != nil {
-						t.Fatal(err)
-					}
-					id = jobID(job)
-					if time.Since(started) > time.Second {
-						t.Fatal("prompt admission blocked")
-					}
-					if i == 1 {
-						events.waitJobType(t, id, "data", 2*time.Second)
-					}
-					if i > 0 {
-						if result := manager.CancelJobResult(jobID(job)); !result.Cancelled {
-							t.Fatalf("Stop: %#v", result)
-						}
-						assertJobStatus(t, events.waitJobEnd(t, id, time.Second), "failed", 130, "cancelled")
-					} else {
-						assertJobStatus(t, events.waitJobEnd(t, id, 3*time.Second), "done", 0, "end_turn")
-					}
-					manager.jobWG.Wait() // includes everything scheduled after terminal publication
-				}
-				if checkpoints := manager.ChatCheckpoints("no-git-chat", "no-git-tab"); len(checkpoints) != 0 {
-					t.Fatal("chat created automatic checkpoints")
-				}
-				trace, err := os.ReadFile(traceFile)
-				if err != nil && !os.IsNotExist(err) {
-					t.Fatal(err)
-				}
-				if len(trace) != 0 {
-					t.Fatalf("ordinary chat invoked Git: %s", trace)
+					t.Fatalf("isolated lifecycle case failed: %v\n%s", err, output)
 				}
 			})
 		}
+	}
+}
+
+// Each case changes process-wide environment to enable Git tracing. Running
+// the four real ACP lifecycle cases in helper processes keeps those settings
+// isolated while allowing independent provider processes to overlap.
+func TestChatLifecycleDoesNotRunAutomaticGitCase(t *testing.T) {
+	caseEnv := os.Getenv("WORKASS_TEST_NO_AUTOMATIC_GIT_CASE")
+	if caseEnv == "" {
+		return
+	}
+	var managed, restored bool
+	if _, err := fmt.Sscanf(caseEnv, "%t,%t", &managed, &restored); err != nil {
+		t.Fatalf("parse isolated lifecycle case %q: %v", caseEnv, err)
+	}
+	requireGit(t)
+	workspace := t.TempDir()
+	repo := filepath.Join(workspace, "repo")
+	initTinyGitRepo(t, repo, map[string]string{"work.txt": "before\n"})
+	root := repoRoot(t)
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root, StateDir: t.TempDir(), RSSSampleInterval: time.Hour,
+		Provider:  ProviderConfig{Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")}, CWD: root},
+		Broadcast: events.Broadcast,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	initialized := make(chan struct{}, 1)
+	manager.SetChatEnvObserver(func(env ChatEnvPayload) error {
+		events.Broadcast("chat:env", env)
+		initialized <- struct{}{}
+		return nil
+	})
+	if restored {
+		seedLegacyChatEnvFixture(t, manager, "old-session", "no-git-chat", "no-git-tab", workspace)
+	}
+	writeFile(t, filepath.Join(repo, "work.txt"), "changed\n")
+	traceFile := filepath.Join(t.TempDir(), "git-trace.log")
+	t.Setenv("GIT_TRACE", traceFile)
+	session, err := manager.NewSession(context.Background(), SessionOptions{
+		CWD: workspace, TabID: "no-git-tab", ChatID: "no-git-chat", ProviderLaneManaged: managed,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if managed {
+		select {
+		case <-initialized:
+		case <-time.After(2 * time.Second):
+			t.Fatal("session environment initialization did not finish")
+		}
+	}
+
+	for i, prompt := range []string{"ordinary chat", "[mock:slow] stop after dispatch", "[mock:slow] immediate stop"} {
+		id := ""
+		if managed {
+			id = fmt.Sprintf("no-git-job-%d", i)
+		}
+		started := time.Now()
+		job, err := manager.StartJob(context.Background(), JobStartOptions{
+			JobID: id, OperationID: "no-git-operation-" + fmt.Sprint(i), ProviderLaneManaged: managed,
+			Kind: "app-chat", SessionID: session.SessionID, TabID: "no-git-tab", ChatID: "no-git-chat", CWD: workspace, Prompt: prompt,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = jobID(job)
+		if time.Since(started) > time.Second {
+			t.Fatal("prompt admission blocked")
+		}
+		if i == 1 {
+			events.waitJobType(t, id, "data", 2*time.Second)
+		}
+		if i > 0 {
+			if result := manager.CancelJobResult(jobID(job)); !result.Cancelled {
+				t.Fatalf("Stop: %#v", result)
+			}
+			assertJobStatus(t, events.waitJobEnd(t, id, time.Second), "failed", 130, "cancelled")
+		} else {
+			assertJobStatus(t, events.waitJobEnd(t, id, 3*time.Second), "done", 0, "end_turn")
+		}
+		manager.jobWG.Wait() // includes everything scheduled after terminal publication
+	}
+	if checkpoints := manager.ChatCheckpoints("no-git-chat", "no-git-tab"); len(checkpoints) != 0 {
+		t.Fatal("chat created automatic checkpoints")
+	}
+	trace, err := os.ReadFile(traceFile)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if len(trace) != 0 {
+		t.Fatalf("ordinary chat invoked Git: %s", trace)
 	}
 }
 
