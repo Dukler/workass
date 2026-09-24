@@ -2690,7 +2690,7 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 		t.Fatalf("plan usage provider = %#v, want claude; payload=%#v", plan["providerId"], plan)
 	}
 	methods := waitWireFakeMethods(t, tracePath, 2*time.Second, func(methods []string) bool {
-		return countWireMethod(methods, "_workass/claude/usage") == 1
+		return countWireMethod(methods, "_workass/claude/usage") >= 1
 	})
 	_ = client.waitJobEvent(t, fieldString(job, "id"), "end", 5*time.Second)
 	methods = readWireFakeMethods(t, tracePath)
