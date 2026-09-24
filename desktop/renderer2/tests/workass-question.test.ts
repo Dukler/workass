@@ -35,6 +35,7 @@ before(async () => {
 
 after(async () => {
   for (const store of fixtureStores) store.clearToastTimers();
+  rendererStore.clearToastTimers();
   await vite.close();
 });
 
