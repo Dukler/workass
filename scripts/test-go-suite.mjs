@@ -366,6 +366,9 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
     const executePackage = async work => {
       const { hasTests } = work;
       const packageCwd = work.dir;
+      const label = `package-${createHash('sha256').update(work.package).digest('hex').slice(0, 16)}`;
+      const cachePath = path.join(binaryCache, cacheLabel(work.package));
+      await run(go, ['test', ...raceFlag, '-c', '-o', cachePath, work.package], `compile-${label}`);
       if (!hasTests) {
         appendJsonLine(jsonl, { event: 'package-test', package: work.package, cwd: packageCwd, code: 0, noTestFiles: true });
         summary.packageOutcomes.push({ package: work.package, action: 'pass', noTestFiles: true });
@@ -373,9 +376,6 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
       }
       const tempDir = await commandTemp(`other-${work.package.replace(/[^a-zA-Z0-9_-]/g, '-')}`);
       if (interrupted) return;
-      const label = `package-${createHash('sha256').update(work.package).digest('hex').slice(0, 16)}`;
-      const cachePath = path.join(binaryCache, cacheLabel(work.package));
-      await run(go, ['test', ...raceFlag, '-c', '-o', cachePath, work.package], `compile-${label}`);
       const binary = path.join(root, `${label}-run.test`);
       await link(cachePath, binary);
       const listing = await run(binary, ['-test.list', '.'], `list-${label}`, packageCwd);
