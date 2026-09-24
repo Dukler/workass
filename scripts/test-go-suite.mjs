@@ -140,6 +140,7 @@ const HINTS = new Map([
   ["TestWireE2EAppChatAssertsJobEventChannel", 1.56],
   ["TestWireFreshProviderGetsHistorySeedAndEstablishedLaneUsesSafeImport", 3.88],
   ["TestWireJobStartReplyGateBlocksProviderAndProjectsFailureAfterReceipt", 1.30],
+  ["TestWireMockBurstReachesClientAtDisplayCadence", 1.6],
   ["TestWireProviderCatalogConnectBeforeDetectionGetsSingleBroadcast", 2.68],
   ["TestWireProvidersDetectInvokeEmitsAndEnablesStubs", 5.31],
   ["TestWireReconnectRestoresLiveSessionControlsAndPendingPermission", 3.58],

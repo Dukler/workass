@@ -27,7 +27,7 @@ export function fullSuiteCommands(repo = root) {
     { name: 'shell_tests', command: 'node', args: ['--test', '--test-concurrency=4', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo, requireTestReport: true },
     { name: 'go_tests', command: 'node', args: [path.join(repo, 'scripts/test-go-suite.mjs'), '--cwd', repo], cwd: repo, requireTestReport: true, requireGoReport: true },
     { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=6', ...orderedScriptTests], cwd: repo, requireTestReport: true },
-    ...(isolatedCodexHostTest ? [{ name: 'codex_native_host_tests', command: 'node', args: ['--test', '--test-isolation=none', '--test-concurrency=4', isolatedCodexHostTest], cwd: repo, requireTestReport: true }] : []),
+    ...(isolatedCodexHostTest ? [{ name: 'codex_native_host_tests', command: 'node', args: [path.join(repo, 'scripts/test-native-host-suite.mjs'), isolatedCodexHostTest], cwd: repo, requireTestReport: true }] : []),
     ...shellContracts,
   ];
 }
