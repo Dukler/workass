@@ -233,6 +233,11 @@ func TestExplicitParentStopDropsOnlyItsQueuedSubagentCompletion(t *testing.T) {
 	if err != nil || !handled || !result.Cancelled {
 		t.Fatalf("explicit parent Stop = %#v handled=%v err=%v", result, handled, err)
 	}
+	// Re-deliver the callback after Stop has committed, as happens when its
+	// manager callback was already in flight while Stop held actor admission.
+	if err := runtime.deliverSubagentCompletion(tabID, chatID, receipt); err != nil {
+		t.Fatalf("late callback after committed Stop: %v", err)
+	}
 	state = actor.engine.Snapshot()
 	if state.Foreground != nil && state.Foreground.OperationID == completionID {
 		t.Fatalf("stopped parent's completion became the foreground turn: %#v", state.Foreground)
@@ -248,5 +253,46 @@ func TestExplicitParentStopDropsOnlyItsQueuedSubagentCompletion(t *testing.T) {
 	}
 	if !humanRetained {
 		t.Fatalf("unrelated human work was removed by Stop: foreground=%#v queue=%#v", state.Foreground, state.Queue)
+	}
+	// Reopen the durable actor and replay the pending receipt. The same actor
+	// fence must survive restart, while a receipt from a different parent stays
+	// eligible.
+	runtime.mu.Lock()
+	delete(runtime.actors, chatID)
+	runtime.mu.Unlock()
+	restartedActor, err := runtime.actor(chatID)
+	if err != nil {
+		t.Fatalf("reopen stopped actor: %v", err)
+	}
+	if err := runtime.deliverSubagentCompletion(tabID, chatID, receipt); err != nil {
+		t.Fatalf("replay stopped-parent receipt: %v", err)
+	}
+	state = restartedActor.engine.Snapshot()
+	completionLive := state.Foreground != nil && state.Foreground.OperationID == completionID
+	for _, queued := range state.Queue {
+		completionLive = completionLive || queued.OperationID == completionID
+	}
+	if completionLive {
+		t.Fatalf("replayed stopped-parent receipt resurrected after actor reload: queue=%#v foreground=%#v", state.Queue, state.Foreground)
+	}
+	otherParentReceipt := acp.SubagentReceipt{
+		ReceiptID: "different-parent-receipt", SubagentID: "other-child", Label: "other child", Status: "done",
+		Result: "belongs to an unrelated parent", ParentTabID: tabID, ParentChatID: chatID,
+		OriginLaneID: string(state.DesiredLaneID), OriginOperationID: "other-parent-operation",
+	}
+	if err := runtime.deliverSubagentCompletion(tabID, chatID, otherParentReceipt); err != nil {
+		t.Fatalf("admit unrelated parent's completion: %v", err)
+	}
+	otherCompletionID := subagentCompletionOperationID(tabID, chatID, otherParentReceipt.ReceiptID)
+	state = restartedActor.engine.Snapshot()
+	if !actorHasSubagentCompletion(state, otherCompletionID, providercontract.LaneID(state.DesiredLaneID), formatSubagentCompletion(otherParentReceipt)) {
+		t.Fatalf("Stop suppressed a completion from an unrelated parent: queue=%#v foreground=%#v", state.Queue, state.Foreground)
+	}
+	humanRetained = false
+	for _, queued := range state.Queue {
+		humanRetained = humanRetained || queued.OperationID == "human-waiting"
+	}
+	if !humanRetained {
+		t.Fatalf("late callback disturbed unrelated human queue after restart: %#v", state.Queue)
 	}
 }
