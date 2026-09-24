@@ -63,21 +63,57 @@ func TestWorkassQuestionActorWireAnswerUnicodeIsolationAndReplay(t *testing.T) {
 		},
 	})
 	runtime := newProviderChatRuntime(manager, sessionState, stateDir)
+	var controller *testWS
+	var viewer *testWS
+	var cancelController *testWS
+	var server *httptest.Server
+	var jobID string
 	t.Cleanup(func() {
-		_ = runtime.Close(context.Background())
-		manager.Reset()
+		defer func() {
+			_ = runtime.Close(context.Background())
+			manager.Reset()
+		}()
+		if jobID != "" {
+			cleanupController := cancelController
+			if cleanupController == nil {
+				cleanupController = controller
+			}
+			if cleanupController == nil {
+				t.Errorf("cannot cancel held question fixture: no controller websocket")
+			} else {
+				cleanupController.invoke(t, 999, "job:cancel", jobID)
+				cancelReply := cleanupController.waitReply(t, 999, 2*time.Second)
+				if cancelReply.Error != nil {
+					t.Errorf("cancel held question fixture before shutdown: %s", *cancelReply.Error)
+				}
+				end := cleanupController.waitJobEvent(t, jobID, "end", 3*time.Second)
+				endedJob := mapFromAnyMain(end["job"])
+				if endedJob["status"] != "failed" || endedJob["stopReason"] != "cancelled" {
+					t.Errorf("held question fixture terminal event = %#v", endedJob)
+				}
+			}
+		}
+		if controller != nil {
+			_ = controller.conn.Close()
+		}
+		if viewer != nil {
+			_ = viewer.conn.Close()
+		}
+		if cancelController != nil && cancelController != viewer {
+			_ = cancelController.conn.Close()
+		}
+		if server != nil {
+			server.Close()
+		}
 	})
 	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: runtime})
-	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
-	defer server.Close()
-	controller := dialTestWSPath(t, server.URL, "/?deviceToken="+controllerToken+"&deviceName=question-controller")
-	defer controller.conn.Close()
+	server = httptest.NewServer(httpserve.New(renderer, hub, nil))
+	controller = dialTestWSPath(t, server.URL, "/?deviceToken="+controllerToken+"&deviceName=question-controller")
 	controllerState := mapFromAnyMain(controller.waitChannelEvent(t, "lan:access-state", 2*time.Second).Payload)
 	if controllerState["controller"] != true {
 		t.Fatalf("question UI connection does not own the controller lease: %#v", controllerState)
 	}
-	viewer := dialTestWSPath(t, server.URL, "/?deviceToken="+viewerToken+"&deviceName=question-viewer")
-	defer viewer.conn.Close()
+	viewer = dialTestWSPath(t, server.URL, "/?deviceToken="+viewerToken+"&deviceName=question-viewer")
 	viewerState := mapFromAnyMain(viewer.waitChannelEvent(t, "lan:access-state", 2*time.Second).Payload)
 	if viewerState["controller"] == true {
 		t.Fatalf("second approved device unexpectedly owns the controller lease: %#v", viewerState)
@@ -145,7 +181,7 @@ func TestWorkassQuestionActorWireAnswerUnicodeIsolationAndReplay(t *testing.T) {
 		t.Fatalf("start actor-backed foreground turn: %s", *startReply.Error)
 	}
 	job := mapFromAnyMain(startReply.Result)
-	jobID := fieldString(job, "id")
+	jobID = fieldString(job, "id")
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if manager.ValidateWorkassQuestionCaller(ownerKey, chatID, tabID) == nil {
@@ -246,6 +282,7 @@ func TestWorkassQuestionActorWireAnswerUnicodeIsolationAndReplay(t *testing.T) {
 	if !leaseManager.IsController(viewerDevice.ID) || leaseManager.IsController(controllerDevice.ID) {
 		t.Fatal("question answer route did not honor the wire's exact controller lease transition")
 	}
+	cancelController = viewer // the viewer owns the controller lease after its answer action
 
 	secondStarted := make(chan struct{})
 	secondDone := make(chan struct {
