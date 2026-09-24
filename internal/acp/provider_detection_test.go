@@ -540,7 +540,7 @@ func TestDetectFrontierProvidersNeedsLogin(t *testing.T) {
 func TestDetectClaudeUsesOfficialSDKSessionNotSeparateCLIAuthPreflight(t *testing.T) {
 	root := repoRoot(t)
 	pathDir := t.TempDir()
-	installNativeFrontierFixtures(t, root, pathDir)
+	installNativeFrontierFixtures(t, root, pathDir, true)
 	writeExecutable(t, filepath.Join(pathDir, "claude"), `#!/bin/sh
 if [ "$1" = "auth" ]; then
   echo '{"loggedIn":false,"authMethod":"none"}'
@@ -1733,7 +1733,7 @@ func installNodeWrapper(t *testing.T, dir string) {
 	writeFixtureExecutable(t, filepath.Join(dir, "node"), fmt.Sprintf("#!/bin/sh\nexec %s \"$@\"\n", shellQuote(node)))
 }
 
-func installNativeFrontierFixtures(t *testing.T, root, dir string) (string, string) {
+func installNativeFrontierFixtures(t *testing.T, root, dir string, rawScripts ...bool) (string, string) {
 	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -1741,8 +1741,15 @@ func installNativeFrontierFixtures(t *testing.T, root, dir string) (string, stri
 	}
 	claude := filepath.Join(dir, "claude")
 	codex := filepath.Join(dir, "codex")
-	writeExecutable(t, claude, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'fixture Claude Code'; fi\nexit 0\n")
-	writeExecutable(t, codex, fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'fixture Codex'; exit 0; fi\nexec %s \"$@\"\n", shellQuote(node)))
+	claudeScript := "if [ \"$1\" = \"--version\" ]; then echo 'fixture Claude Code'; fi\nexit 0\n"
+	codexScript := fmt.Sprintf("if [ \"$1\" = \"--version\" ]; then echo 'fixture Codex'; exit 0; fi\nexec %s \"$@\"\n", shellQuote(node))
+	if len(rawScripts) > 0 && rawScripts[0] {
+		writeExecutable(t, claude, "#!/bin/sh\n"+claudeScript)
+		writeExecutable(t, codex, "#!/bin/sh\n"+codexScript)
+	} else {
+		writeFixtureExecutable(t, claude, claudeScript)
+		writeFixtureExecutable(t, codex, codexScript)
+	}
 	t.Setenv("PATH", dir)
 	t.Setenv("WORKASS_NODE", node)
 	t.Setenv("WORKASS_CLAUDE_CODE", "")
