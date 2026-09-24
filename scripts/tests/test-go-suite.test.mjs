@@ -101,6 +101,22 @@ test('only test binary listing and execution cap GOMAXPROCS; Go commands inherit
   assert.ok(binaryCommands.filter(item => item.args.includes('-test.v')).every(item => item.args.includes('-test.parallel=2')));
 });
 
+test('optional fixture root routes only Go test binary temp files there and removes its invocation subtree', async t => {
+  const f = await fixture(t);
+  const fixtureRoot = path.join(f.root, 'ram-fixtures');
+  await mkdir(fixtureRoot);
+  const invocations = [];
+  const fake = inProcessGoSpawn({ record: (command, args, options) => invocations.push({ command, args, env: options.env }) });
+  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, fixtureRoot, go: f.go, workers: 2, spawn: fake.spawn, signalHandlers: false });
+  assert.equal(result.ok, true, result.error);
+  const binaries = invocations.filter(item => String(item.command).endsWith('.test'));
+  assert.ok(binaries.length > 0);
+  assert.ok(binaries.every(item => item.env.TMPDIR.startsWith(fixtureRoot + path.sep)));
+  assert.ok(binaries.every(item => item.env.TMPDIR === item.env.TMP && item.env.TMPDIR === item.env.TEMP));
+  assert.ok(invocations.filter(item => item.command === f.go).every(item => !item.env.TMPDIR.startsWith(fixtureRoot + path.sep)));
+  assert.deepEqual(await import('node:fs/promises').then(fs => fs.readdir(fixtureRoot)), []);
+});
+
 async function fixture(t, { fail = '', delay = '0.04', packageFail = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'workass-go-suite-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));

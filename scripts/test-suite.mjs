@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
+import { createTemporaryFixtureVolume } from './test-fixture-volume.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const limitMs = 10_000;
@@ -186,8 +187,32 @@ export function isMainModule(argvPath = process.argv[1], modulePath = fileURLToP
 
 if (isMainModule()) {
   const startedAt = performance.now();
-  const commands = fullSuiteCommands();
-  const report = await runSuiteMatrix(commands, { startedAt });
+  let fixture;
+  let report;
+  let lifecycleError;
+  try {
+    fixture = await createTemporaryFixtureVolume();
+    const commands = fullSuiteCommands().map(spec => {
+      if (spec.name === 'go_tests') return { ...spec, env: { ...process.env, WORKASS_TEST_FIXTURE_ROOT: fixture.root } };
+      return { ...spec, env: { ...process.env, TMPDIR: fixture.root, TMP: fixture.root, TEMP: fixture.root } };
+    });
+    report = await runSuiteMatrix(commands, { startedAt });
+  } catch (error) {
+    lifecycleError = error;
+  } finally {
+    if (fixture) {
+      try { await fixture.cleanup(); }
+      catch (error) { lifecycleError = lifecycleError ? new AggregateError([lifecycleError, error], 'suite and fixture cleanup failed') : error; }
+    }
+  }
+  if (!report) report = { results: [{ name: 'fixture_volume', code: 1, elapsedMs: 0, tests: null, topLevelTests: null, subtests: null, passed: null, failed: 1, skipped: 0, logPath: '(no suite log)', failureDetail: lifecycleError?.stack ?? String(lifecycleError) }], correctness: false, performanceStatus: 'over_budget', elapsedMs: 0, logDir: '(not created)' };
+  if (lifecycleError) {
+    report.correctness = false;
+    report.results.push({ name: 'fixture_volume_lifecycle', code: 1, elapsedMs: 0, tests: null, topLevelTests: null, subtests: null, passed: null, failed: 1, skipped: 0, logPath: '(lifecycle error)', failureDetail: lifecycleError.stack ?? String(lifecycleError) });
+  }
+  report.elapsedMs = performance.now() - startedAt;
+  report.performanceStatus = report.elapsedMs <= limitMs ? 'within_budget' : 'over_budget';
   printReport(report);
+  if (lifecycleError) console.error(`WORKASS_TEST_SUITE_FIXTURE_FAILURE ${lifecycleError.stack ?? lifecycleError}`);
   process.exitCode = report.correctness ? 0 : 1;
 }
