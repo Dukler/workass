@@ -2634,12 +2634,22 @@ func (r *providerChatRuntime) Cancel(ctx context.Context, jobID string) (acp.Job
 				return acp.JobCancelResult{}, true, err
 			}
 		}
-		actor.mu.Unlock()
+		parentOperationID := providercontract.OperationID("")
+		if state.Foreground != nil {
+			parentOperationID = state.Foreground.OperationID
+		}
+		// Hold actor admission across provider cancellation. This removes already
+		// admitted internal child receipts before the cancellation can release the
+		// FIFO; the manager's suppression fence prevents any later admission.
+		r.cancelQueuedSubagentCompletionsLocked(actor, state.Presentation.TabID, state.ChatID, parentOperationID)
 		_, err := actor.coordinator.ExecuteCancel(ctx, operationID)
 		state = actor.engine.Snapshot()
 		if err != nil {
+			actor.mu.Unlock()
 			return acp.JobCancelResult{}, true, err
 		}
+		r.cancelQueuedSubagentCompletionsLocked(actor, state.Presentation.TabID, state.ChatID, parentOperationID)
+		actor.mu.Unlock()
 		for _, entry := range state.Outbox {
 			if entry.Kind != chat.EffectCancelTurn || entry.OperationID != operationID {
 				continue
@@ -2659,6 +2669,28 @@ func (r *providerChatRuntime) Cancel(ctx context.Context, jobID string) (acp.Job
 		}
 	}
 	return acp.JobCancelResult{Cancelled: false, Reason: "unknown"}, true, nil
+}
+
+func (r *providerChatRuntime) cancelQueuedSubagentCompletionsLocked(actor *providerChatActor, tabID, chatID string, parentOperationID providercontract.OperationID) {
+	if actor == nil || r.manager == nil || parentOperationID == "" {
+		return
+	}
+	state := actor.engine.Snapshot()
+	receipts := r.manager.SubagentCompletionReceiptsForParent(tabID, chatID, string(parentOperationID))
+	ids := make(map[providercontract.OperationID]struct{}, len(receipts))
+	for _, receipt := range receipts {
+		ids[subagentCompletionOperationID(tabID, chatID, receipt.ReceiptID)] = struct{}{}
+	}
+	for _, entry := range state.Queue {
+		if entry.Presentation.Origin != "agent" {
+			continue
+		}
+		if _, ok := ids[entry.OperationID]; !ok {
+			continue
+		}
+		_ = actor.engine.Apply(chat.CancelPendingTurn{OperationID: entry.OperationID})
+		state = actor.engine.Snapshot()
+	}
 }
 
 // ResolvePermission preserves the origin lane recorded by the normalized

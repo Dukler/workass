@@ -179,6 +179,33 @@ func TestTrackedSubagentCompletionSuppressedByParentStop(t *testing.T) {
 	}
 }
 
+func TestTrackedSubagentStopSerializesWithPendingReceiptCommit(t *testing.T) {
+	manager, _, session, _, _, _ := newSubagentLifecycleFixture(t, "parent-stop-receipt-commit-race")
+	run := &SubagentRun{ID: "commit-race-child", Status: "running", RootJobID: "commit-race-parent", parentChatID: session.ChatID, parentTabID: session.TabID, done: make(chan struct{})}
+	manager.mu.Lock()
+	manager.subagents[run.ID] = run
+	manager.mu.Unlock()
+
+	persisting := make(chan struct{})
+	releasePersist := make(chan struct{})
+	manager.subagentReceiptPersisting = func() {
+		close(persisting)
+		<-releasePersist
+	}
+	finished := make(chan struct{})
+	go func() { manager.finishSubagent(run, nil, nil); close(finished) }()
+	<-persisting
+	suppressed := make(chan struct{})
+	go func() { manager.suppressSubagentCompletionsForParent("commit-race-parent", ""); close(suppressed) }()
+	close(releasePersist)
+	<-finished
+	<-suppressed
+	manager.subagentReceiptPersisting = nil
+	if pending := manager.pendingSubagentCompletions(); len(pending) != 0 {
+		t.Fatalf("stop suppression was overwritten by a stale pending receipt: %#v", pending)
+	}
+}
+
 func TestTrackedSubagentAppearsAndUpdatesInOwningSpawnedWorkFeed(t *testing.T) {
 	t.Parallel()
 	manager, _, session, ownerKey, root, _ := newSubagentLifecycleFixture(t, "spawned-work-feed")

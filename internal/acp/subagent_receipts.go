@@ -20,30 +20,31 @@ const (
 // turns in the same Workass chat. Provider-native/session ids are deliberately
 // excluded: receipts describe work, not transient transport ownership.
 type SubagentReceipt struct {
-	ReceiptID       string `json:"receiptId"`
-	SubagentID      string `json:"subagentId"`
-	Label           string `json:"label"`
-	Status          string `json:"status"`
-	ProviderID      string `json:"providerId"`
-	ModelID         string `json:"modelId,omitempty"`
-	Effort          string `json:"effort,omitempty"`
-	ModelLabel      string `json:"modelLabel,omitempty"`
-	ModeID          string `json:"modeId,omitempty"`
-	Profile         string `json:"profile,omitempty"`
-	RetryOf         string `json:"retryOf,omitempty"`
-	StartedAt       string `json:"startedAt"`
-	FinishedAt      string `json:"finishedAt"`
-	ElapsedMs       int64  `json:"elapsedMs"`
-	StopReason      string `json:"stopReason,omitempty"`
-	Result          string `json:"result,omitempty"`
-	Error           string `json:"error,omitempty"`
-	ResultTruncated bool   `json:"resultTruncated,omitempty"`
-	ErrorTruncated  bool   `json:"errorTruncated,omitempty"`
-	ParentChatID    string `json:"parentChatId,omitempty"`
-	ParentTabID     string `json:"parentTabId,omitempty"`
-	OriginLaneID    string `json:"originLaneId,omitempty"`
-	DeliveryPending bool   `json:"deliveryPending,omitempty"`
-	DeliveryError   string `json:"deliveryError,omitempty"`
+	ReceiptID         string `json:"receiptId"`
+	SubagentID        string `json:"subagentId"`
+	Label             string `json:"label"`
+	Status            string `json:"status"`
+	ProviderID        string `json:"providerId"`
+	ModelID           string `json:"modelId,omitempty"`
+	Effort            string `json:"effort,omitempty"`
+	ModelLabel        string `json:"modelLabel,omitempty"`
+	ModeID            string `json:"modeId,omitempty"`
+	Profile           string `json:"profile,omitempty"`
+	RetryOf           string `json:"retryOf,omitempty"`
+	StartedAt         string `json:"startedAt"`
+	FinishedAt        string `json:"finishedAt"`
+	ElapsedMs         int64  `json:"elapsedMs"`
+	StopReason        string `json:"stopReason,omitempty"`
+	Result            string `json:"result,omitempty"`
+	Error             string `json:"error,omitempty"`
+	ResultTruncated   bool   `json:"resultTruncated,omitempty"`
+	ErrorTruncated    bool   `json:"errorTruncated,omitempty"`
+	ParentChatID      string `json:"parentChatId,omitempty"`
+	ParentTabID       string `json:"parentTabId,omitempty"`
+	OriginLaneID      string `json:"originLaneId,omitempty"`
+	OriginOperationID string `json:"originOperationId,omitempty"`
+	DeliveryPending   bool   `json:"deliveryPending,omitempty"`
+	DeliveryError     string `json:"deliveryError,omitempty"`
 }
 
 func receiptFromRun(run SubagentRun) SubagentReceipt {
@@ -54,7 +55,8 @@ func receiptFromRun(run SubagentRun) SubagentReceipt {
 		StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, ElapsedMs: run.ElapsedMs,
 		StopReason: run.StopReason, Result: run.Result, Error: run.Error,
 		ResultTruncated: run.ResultTruncated, ErrorTruncated: run.ErrorTruncated,
-		OriginLaneID: run.originLaneID,
+		OriginLaneID:      run.originLaneID,
+		OriginOperationID: run.originOperationID,
 	}
 }
 
@@ -138,6 +140,51 @@ func (m *Manager) pendingSubagentCompletions() []SubagentReceipt {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].FinishedAt < out[j].FinishedAt })
+	return out
+}
+
+// SubagentCompletionReceiptsForParent returns durable receipt identities
+// created by one exact parent operation in one exact tab/chat.
+func (m *Manager) SubagentCompletionReceiptsForParent(tabID, chatID, operationID string) []SubagentReceipt {
+	path := m.subagentReceiptPath(chatID, tabID)
+	if path == "" || strings.TrimSpace(operationID) == "" {
+		return nil
+	}
+	m.receiptMu.Lock()
+	data, err := os.ReadFile(path)
+	m.receiptMu.Unlock()
+	if err != nil {
+		return nil
+	}
+	latest := make(map[string]SubagentReceipt)
+	for _, line := range boundedReceiptLines(data) {
+		var receipt SubagentReceipt
+		if json.Unmarshal(line, &receipt) == nil && receipt.ReceiptID != "" {
+			latest[receipt.ReceiptID] = receipt
+		}
+	}
+	out := make([]SubagentReceipt, 0)
+	for _, receipt := range latest {
+		if receipt.ParentTabID == strings.TrimSpace(tabID) && receipt.ParentChatID == strings.TrimSpace(chatID) && receipt.OriginOperationID == strings.TrimSpace(operationID) {
+			out = append(out, receipt)
+		}
+	}
+	m.mu.Lock()
+	for _, run := range m.subagents {
+		if run != nil && run.parentTabID == strings.TrimSpace(tabID) && run.parentChatID == strings.TrimSpace(chatID) && run.originOperationID == strings.TrimSpace(operationID) && run.ReceiptID != "" {
+			found := false
+			for _, receipt := range out {
+				if receipt.ReceiptID == run.ReceiptID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				out = append(out, SubagentReceipt{ReceiptID: run.ReceiptID, ParentTabID: run.parentTabID, ParentChatID: run.parentChatID, OriginOperationID: run.originOperationID})
+			}
+		}
+	}
+	m.mu.Unlock()
 	return out
 }
 

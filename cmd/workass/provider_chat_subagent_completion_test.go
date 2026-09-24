@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"workass/internal/acp"
+	"workass/internal/chat"
+	providercontract "workass/internal/provider"
 )
 
 func TestTrackedSubagentCompletionUsesExactActorAndReceiptIdempotency(t *testing.T) {
@@ -169,5 +174,79 @@ func TestTrackedSubagentCompletionQueuesBehindUnrelatedForegroundTurn(t *testing
 	jobID := strings.TrimSpace(fieldString(started, "jobId"))
 	if jobID != "" {
 		_, _, _ = runtime.Cancel(context.Background(), jobID)
+	}
+}
+
+func TestExplicitParentStopDropsOnlyItsQueuedSubagentCompletion(t *testing.T) {
+	runtime, _, _, stateDir, info := newSteerRegressionFixture(t)
+	const tabID, chatID, parentOperation = "steer-regression-tab", "steer-regression-chat", "stopped-parent-operation"
+	started, err := runtime.Start(context.Background(), map[string]any{
+		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "sessionId": info.SessionID,
+		"operationId": parentOperation, "userMessageId": "parent-user", "assistantMessageId": "parent-assistant",
+		"prompt": "[mock:active-without-terminal] keep parent open",
+	}, "human")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor, err := runtime.actor(chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := actor.engine.Snapshot()
+	if err := actor.engine.Apply(chat.Submit{
+		OperationID: "human-waiting", LaneID: state.DesiredLaneID, Text: "human queued work",
+		Presentation: providercontract.TurnPresentation{UserMessageID: "human-waiting-user", Origin: "human"},
+	}); err != nil {
+		t.Fatalf("queue human work: %v", err)
+	}
+	receipt := acp.SubagentReceipt{
+		ReceiptID: "child-receipt-before-stop", SubagentID: "child", Label: "child", Status: "done",
+		Result: "must not run after explicit Stop", ParentTabID: tabID, ParentChatID: chatID, OriginOperationID: parentOperation,
+	}
+	path := filepath.Join(stateDir, "subagent-receipts", tabID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.deliverSubagentCompletion(tabID, chatID, receipt); err != nil {
+		t.Fatalf("admit queued child completion: %v", err)
+	}
+	completionID := subagentCompletionOperationID(tabID, chatID, receipt.ReceiptID)
+	state = actor.engine.Snapshot()
+	if len(state.Queue) != 2 {
+		t.Fatalf("expected human work and child completion queued: %#v", state.Queue)
+	}
+	jobID := ""
+	if state.Foreground != nil {
+		jobID = state.Foreground.Turn.NativeID
+	}
+	if jobID == "" {
+		t.Fatalf("fixture parent has no native job identity: %#v (%v)", state.Foreground, started)
+	}
+	result, handled, err := runtime.Cancel(context.Background(), jobID)
+	if err != nil || !handled || !result.Cancelled {
+		t.Fatalf("explicit parent Stop = %#v handled=%v err=%v", result, handled, err)
+	}
+	state = actor.engine.Snapshot()
+	if state.Foreground != nil && state.Foreground.OperationID == completionID {
+		t.Fatalf("stopped parent's completion became the foreground turn: %#v", state.Foreground)
+	}
+	for _, queued := range state.Queue {
+		if queued.OperationID == completionID {
+			t.Fatalf("stopped parent's queued completion survived Stop: %#v", state.Queue)
+		}
+	}
+	humanRetained := state.Foreground != nil && state.Foreground.OperationID == "human-waiting"
+	for _, queued := range state.Queue {
+		humanRetained = humanRetained || queued.OperationID == "human-waiting"
+	}
+	if !humanRetained {
+		t.Fatalf("unrelated human work was removed by Stop: foreground=%#v queue=%#v", state.Foreground, state.Queue)
 	}
 }

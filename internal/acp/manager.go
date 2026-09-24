@@ -32,23 +32,24 @@ type Manager struct {
 	toolContextMu              sync.Mutex
 	toolContexts               map[string]sessionToolContext
 
-	mu                      sync.Mutex
-	stream                  streamStats
-	bridges                 map[string]*Bridge
-	sessionBridge           map[string]*Bridge
-	sessionProvider         map[string]string
-	chatProviders           map[string]string
-	nativeSessions          *nativeSessionLedger
-	agentOwners             map[string]agentOwnerBinding
-	agentOwnerBySession     map[string]string
-	providers               map[string]*providerRuntime
-	providerOrder           []string
-	providerRegistry        *providercontract.Registry
-	providerRegistryErr     error
-	providerLaneMu          sync.RWMutex
-	providerLanesBySession  map[string]*managerLane
-	providerLanesByJob      map[string]*managerLane
-	providerLaneManagedJobs map[string]struct{}
+	mu                        sync.Mutex
+	subagentReceiptPersisting func()
+	stream                    streamStats
+	bridges                   map[string]*Bridge
+	sessionBridge             map[string]*Bridge
+	sessionProvider           map[string]string
+	chatProviders             map[string]string
+	nativeSessions            *nativeSessionLedger
+	agentOwners               map[string]agentOwnerBinding
+	agentOwnerBySession       map[string]string
+	providers                 map[string]*providerRuntime
+	providerOrder             []string
+	providerRegistry          *providercontract.Registry
+	providerRegistryErr       error
+	providerLaneMu            sync.RWMutex
+	providerLanesBySession    map[string]*managerLane
+	providerLanesByJob        map[string]*managerLane
+	providerLaneManagedJobs   map[string]struct{}
 	// providerLaneClosedJobs retains only immutable ids, never lane/bridge
 	// pointers. Late provider callbacks must remain fail-closed for the daemon
 	// lifetime, but terminal tombstones must not pin every historical lane.
