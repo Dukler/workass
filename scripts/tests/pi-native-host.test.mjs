@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import readline from 'node:readline';
-import {resolvePiSDK} from '../pi-native-host.mjs';
+import {pairToolResults,resolvePiSDK} from '../pi-native-host.mjs';
 const host=path.resolve('scripts/pi-native-host.mjs'),fixture=path.resolve('desktop/acp/mock-pi-sdk.mjs');
 async function setup(t) {
   const dir=await mkdtemp(path.join(tmpdir(),'workass-pi-test-'));
@@ -35,6 +35,39 @@ test('official import-only SDK resolves from npm symlink and Windows shim; unrel
   const shim=path.join(dir,'pi.cmd');await writeFile(shim,'');assert.equal(resolvePiSDK(shim),await realpath(path.join(pkg,'dist/index.js')));
   if(process.platform!=='win32'){const bin=path.join(dir,'pi');await symlink(path.join(pkg,'dist/bundle/cli.js'),bin);assert.equal(resolvePiSDK(bin),await realpath(path.join(pkg,'dist/index.js')))}
   const wrong=await setup(t);await writeFile(path.join(wrong,'pi'),'');assert.throws(()=>resolvePiSDK(path.join(wrong,'pi')),/official SDK/);
+});
+test('pairToolResults repairs only unmatched tool calls and preserves valid history identity',()=>{
+  const valid=[
+    {role:'assistant',content:[{type:'toolCall',id:'call-1',name:'fixture',arguments:{}}],stopReason:'toolUse'},
+    {role:'toolResult',toolCallId:'call-1',toolName:'fixture',content:[{type:'text',text:'ok'}],isError:false},
+  ];
+  assert.equal(pairToolResults(valid),valid);
+  const broken=[
+    valid[0],
+    {role:'assistant',content:[{type:'text',text:'continued'}],stopReason:'stop'},
+    {role:'toolResult',toolCallId:'orphan',toolName:'fixture',content:[],isError:false},
+  ];
+  const repaired=pairToolResults(broken);
+  assert.equal(repaired.length,3);
+  assert.equal(repaired[0],valid[0]);
+  const synthetic=repaired[1];
+  assert.deepEqual({...synthetic,timestamp:undefined},{
+    role:'toolResult',toolCallId:'call-1',toolName:'fixture',content:[{type:'text',text:'Tool execution outcome is unknown because the Pi session ended before a result was recorded.'}],isError:true,
+    timestamp:undefined,
+  });
+  assert.ok(Number.isFinite(synthetic.timestamp));
+  assert.equal(repaired[2].role,'assistant');
+  assert.deepEqual(pairToolResults([
+    {role:'assistant',stopReason:'error',content:[{type:'toolCall',id:'failed-call',name:'fixture',arguments:{}}]},
+    {role:'assistant',stopReason:'aborted',content:[{type:'toolCall',id:'aborted-call',name:'fixture',arguments:{}}]},
+  ]),[]);
+  const call={role:'assistant',content:[{type:'toolCall',id:'held-call',name:'fixture',arguments:{}}],stopReason:'toolUse'};
+  const system={role:'system',content:'between call and result'};
+  const result={role:'toolResult',toolCallId:'held-call',toolName:'fixture',content:[],isError:false};
+  const history=[call,system,result];
+  const reordered=pairToolResults(history);
+  assert.notEqual(reordered,history);
+  assert.deepEqual(reordered,[call,result,system]);
 });
 test('deferred journal receipt, exact restart resume, instructions and write failures',async t=>{
   const dir=await setup(t),ins=path.join(dir,'instructions');await writeFile(ins,'WORKASS_APPEND');
