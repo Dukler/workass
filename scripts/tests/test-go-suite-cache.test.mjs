@@ -18,11 +18,11 @@ function fakeSpawn(observed, root) {
       setImmediate(() => child.emit('close', code, null));
     };
     setImmediate(() => child.emit('spawn'));
-    if (args[0] === 'list') { finish(0, ['workass/internal/acp', 'workass/cmd/workass', 'workass/internal/cache'].map(pkg => `${pkg}\t${path.join(root, pkg.replace('workass/', ''))}\ttrue`).join('\n') + '\n'); return child; }
+    if (args[0] === 'list') { finish(0, ['workass/internal/acp', 'workass/cmd/workass', 'workass/internal/cache', 'workass/internal/chat', 'workass/internal/appinstall'].map(pkg => `${pkg}\t${path.join(root, pkg.replace('workass/', ''))}\ttrue`).join('\n') + '\n'); return child; }
     if (args[0] === 'test' && args.includes('-c')) {
       const outputDir = args[args.indexOf('-o') + 1];
       observed.compiles.push({ outputDir, packages: args.filter(arg => arg.startsWith('workass/') || arg === './...') });
-      const outputs = ['acp', 'workass', 'cache'].map(name => path.join(outputDir, `${name}.test`));
+      const outputs = ['acp', 'workass', 'cache', 'chat', 'appinstall'].map(name => path.join(outputDir, `${name}.test`));
       Promise.all(outputs.map(async output => {
         const staging = `${output}.${process.pid}.${Math.random()}.tmp`;
         await writeFile(staging, 'compiled fake binary');
@@ -60,10 +60,10 @@ test('Go binaries compile on every invocation and each run pins its compiled ino
   assert.equal(observed.compiles.length, 2, 'all test packages compile in one process on every run');
   assert.ok(observed.compiles.every(item => item.outputDir === `${cacheDir}${path.sep}`));
   assert.ok(observed.compiles.every(item => item.packages.at(-1) === './...'));
-  assert.equal(observed.executions.length, 12, 'each invocation lists and runs all three packages');
-  assert.equal(new Set(observed.executions).size, 6, 'each run executes its own pinned artifact path');
-  for (const name of ['acp', 'workass', 'cache']) assert.equal(await readFile(path.join(cacheDir, `${name}.test`), 'utf8'), 'compiled fake binary');
+  assert.equal(observed.executions.length, 20, 'each invocation lists and runs all five packages');
+  assert.equal(new Set(observed.executions).size, 10, 'each run executes its own pinned artifact path');
+  for (const name of ['acp', 'workass', 'cache', 'chat', 'appinstall']) assert.equal(await readFile(path.join(cacheDir, `${name}.test`), 'utf8'), 'compiled fake binary');
   const compiledInodes = new Set(observed.compiledInodes);
   assert.ok(observed.executionInodes.every(inode => compiledInodes.has(inode)), 'run hard links pin a compiler-produced inode');
-  assert.equal(observed.executionInodes.length, 6, 'each test binary executes once per invocation');
+  assert.equal(observed.executionInodes.length, 10, 'each test binary executes once per invocation');
 });
