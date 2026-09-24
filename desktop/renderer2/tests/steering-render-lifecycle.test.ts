@@ -9,7 +9,7 @@ import type { Chat, Msg } from '../src/store/types.ts';
 let vite: ViteDevServer;
 let Transcript: React.ComponentType<{ chat: Chat | null }>;
 let QueueList: React.ComponentType<{ chat: Chat }>;
-let appStore: { state: Record<string, unknown> };
+let appStore: { state: Record<string, unknown>; clearToastTimers(): void };
 
 before(async () => {
   vite = await createServer({
@@ -25,11 +25,11 @@ before(async () => {
     QueueList: React.ComponentType<{ chat: Chat }>;
   });
   appStore = (await vite.ssrLoadModule('/src/store/store.ts') as {
-    store: { state: Record<string, unknown> };
+    store: { state: Record<string, unknown>; clearToastTimers(): void };
   }).store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => { appStore.clearToastTimers(); await vite.close(); });
 
 function user(id: string, content: string, extra: Partial<Msg> = {}): Msg {
   return { id, role: 'user', content, status: 'done', at: null, events: [], ...extra };

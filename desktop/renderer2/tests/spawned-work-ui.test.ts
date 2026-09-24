@@ -12,12 +12,14 @@ import { createServer } from 'vite';
 test('running spawned work is inline; finished work is a single flat fold', async (t) => {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
-  t.after(async () => { await server.close(); });
+  let store: { state: Record<string, unknown>; clearToastTimers(): void } | undefined;
+  t.after(async () => { store?.clearToastTimers(); await server.close(); });
   const loaded = await server.ssrLoadModule('/src/components/SpawnedWorkCard.tsx') as {
     SpawnedWorkCard: React.ComponentType<{ chat: unknown }>;
     SpawnedWorkLive: React.ComponentType<{ chat: unknown }>;
   };
-  const storeModule = await server.ssrLoadModule('/src/store/store.ts') as { store: { state: Record<string, unknown> } };
+  const storeModule = await server.ssrLoadModule('/src/store/store.ts') as { store: { state: Record<string, unknown>; clearToastTimers(): void } };
+  store = storeModule.store;
   const chat = { id: 'tab-1', chatId: 'chat-1', messages: [] };
   storeModule.store.state.hasSpawnedWorkChannels = false;
   storeModule.store.state.spawnedWorkByChat = {

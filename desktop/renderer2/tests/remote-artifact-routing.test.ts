@@ -107,8 +107,9 @@ test('artifact clicks navigate the exact remote chat repeatedly without changing
     root: fileURLToPath(new URL('..', import.meta.url)),
     server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
   });
-  t.after(() => server.close());
   const { Store } = await server.ssrLoadModule('/src/store/store.ts');
+  const { store } = await server.ssrLoadModule('/src/store/store.ts') as { store: { clearToastTimers(): void } };
+  t.after(async () => { store.clearToastTimers(); await server.close(); });
   const previousWindow = (globalThis as any).window;
   const calls: unknown[][] = [];
   const nativeBrowser = { supported: true, command: async (...args: unknown[]) => { calls.push(args); } };

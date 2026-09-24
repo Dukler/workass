@@ -30,8 +30,8 @@ async function loadStore(t: { after(fn: () => void | Promise<void>): void }) {
     root: fileURLToPath(new URL('..', import.meta.url)),
     server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
   });
-  t.after(async () => { await server.close(); });
   const storeModule = await server.ssrLoadModule('/src/store/store.ts');
+  t.after(async () => { storeModule.store.clearToastTimers(); await server.close(); });
   const apiModule = await server.ssrLoadModule('/src/wire/api.ts');
   return {
     Store: storeModule.Store as new () => StoreShape,

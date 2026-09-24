@@ -9,14 +9,16 @@ import type { ToolEvent } from '../src/store/types.ts';
 test('a running subagent defaults closed with model and live activity in its two-line summary', async (t) => {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
-  t.after(async () => { await server.close(); });
+  let store: { state: Record<string, unknown>; clearToastTimers(): void } | undefined;
+  t.after(async () => { store?.clearToastTimers(); await server.close(); });
 
   const loaded = await server.ssrLoadModule('/src/components/TareasCard.tsx') as {
     TareasCard: React.ComponentType;
   };
   const storeModule = await server.ssrLoadModule('/src/store/store.ts') as {
-    store: { state: Record<string, unknown> };
+    store: { state: Record<string, unknown>; clearToastTimers(): void };
   };
+  store = storeModule.store;
   const events: ToolEvent[] = [
     {
       key: 'subagent-1', at: 0, kind: 'tool', id: 'subagent-1', toolKind: 'agent',
@@ -56,14 +58,16 @@ test('a running subagent defaults closed with model and live activity in its two
 test('steering keeps every subagent from the same logical turn visible', async (t) => {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
-  t.after(async () => { await server.close(); });
+  let store: { state: Record<string, unknown>; clearToastTimers(): void } | undefined;
+  t.after(async () => { store?.clearToastTimers(); await server.close(); });
 
   const loaded = await server.ssrLoadModule('/src/components/TareasCard.tsx') as {
     TareasCard: React.ComponentType;
   };
   const storeModule = await server.ssrLoadModule('/src/store/store.ts') as {
-    store: { state: Record<string, unknown> };
+    store: { state: Record<string, unknown>; clearToastTimers(): void };
   };
+  store = storeModule.store;
   const events: ToolEvent[] = [
     {
       key: 'subagent-1', at: 0, kind: 'tool', id: 'subagent-1', toolKind: 'agent',

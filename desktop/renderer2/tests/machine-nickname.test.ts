@@ -18,11 +18,18 @@ test('saving a nickname updates the local machine projection from the daemon rec
     appType: 'custom',
     logLevel: 'silent',
   });
-  t.after(async () => { await server.close(); });
-  const Store = (await server.ssrLoadModule('/src/store/store.ts')).Store as new () => {
-    state: { machines: Array<{ name: string; nickname: string; reportedName: string }> };
-    setMachineNickname(machineId: string, nickname: string): Promise<{ ok: boolean; error?: string }>;
+  let singleton: { clearToastTimers(): void } | undefined;
+  let target: { clearToastTimers(): void; state: { machines: Array<{ name: string; nickname: string; reportedName: string }> }; setMachineNickname(machineId: string, nickname: string): Promise<{ ok: boolean; error?: string }> } | undefined;
+  t.after(async () => { target?.clearToastTimers(); singleton?.clearToastTimers(); await server.close(); });
+  const module = await server.ssrLoadModule('/src/store/store.ts') as {
+    store: { clearToastTimers(): void };
+    Store: new () => {
+      state: { machines: Array<{ name: string; nickname: string; reportedName: string }> };
+      clearToastTimers(): void;
+      setMachineNickname(machineId: string, nickname: string): Promise<{ ok: boolean; error?: string }>;
+    };
   };
+  singleton = module.store;
   const previousWindow = (globalThis as any).window;
   const calls: unknown[][] = [];
   (globalThis as any).window = {
@@ -45,10 +52,11 @@ test('saving a nickname updates the local machine projection from the daemon rec
     else (globalThis as any).window = previousWindow;
   });
 
-  const target = new Store();
-  assert.deepEqual(await target.setMachineNickname('m-builder', '  Taller  '), { ok: true });
+  const subject = new module.Store();
+  target = subject;
+  assert.deepEqual(await subject.setMachineNickname('m-builder', '  Taller  '), { ok: true });
   assert.deepEqual(calls, [['m-builder', 'Taller']]);
-  assert.equal(target.state.machines[0]?.name, 'Taller');
-  assert.equal(target.state.machines[0]?.nickname, 'Taller');
-  assert.equal(target.state.machines[0]?.reportedName, 'builder-hostname');
+  assert.equal(subject.state.machines[0]?.name, 'Taller');
+  assert.equal(subject.state.machines[0]?.nickname, 'Taller');
+  assert.equal(subject.state.machines[0]?.reportedName, 'builder-hostname');
 });

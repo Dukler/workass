@@ -33,33 +33,41 @@ test('manual provider disable hides its updates and enable probes it again', asy
     root: fileURLToPath(new URL('..', import.meta.url)),
     server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
   });
-  t.after(async () => { await server.close(); });
-  const Store = (await server.ssrLoadModule('/src/store/store.ts')).Store as new () => {
-    state: Record<string, any>;
-    toggleProvider(providerId: string, enabled: boolean): Promise<boolean>;
+  let singleton: { clearToastTimers(): void } | undefined;
+  let target: { clearToastTimers(): void; state: Record<string, any>; toggleProvider(providerId: string, enabled: boolean): Promise<boolean> } | undefined;
+  t.after(async () => { target?.clearToastTimers(); singleton?.clearToastTimers(); await server.close(); });
+  const module = await server.ssrLoadModule('/src/store/store.ts') as {
+    store: { clearToastTimers(): void };
+    Store: new () => {
+      state: Record<string, any>;
+      clearToastTimers(): void;
+      toggleProvider(providerId: string, enabled: boolean): Promise<boolean>;
+    };
   };
-  const target = new Store();
-  target.state.providers = [{ id: 'qwen', name: 'Qwen Code', enabled: true, status: 'ready' }];
-  target.state.providersUpdates = [{
+  singleton = module.store;
+  const targetStore = new module.Store();
+  target = targetStore;
+  targetStore.state.providers = [{ id: 'qwen', name: 'Qwen Code', enabled: true, status: 'ready' }];
+  targetStore.state.providersUpdates = [{
     providerId: 'qwen', cli: 'qwen', installed: '1.0.0', latest: '1.0.1', updateAvailable: true,
   }];
 
-  assert.equal(await target.toggleProvider('qwen', false), true);
+  assert.equal(await targetStore.toggleProvider('qwen', false), true);
   assert.deepEqual(calls, [['toggle', 'qwen', false]]);
-  assert.deepEqual(target.state.providersUpdates, []);
-  assert.equal(target.state.providers[0]?.disabledByUser, true);
-  (target as any).onProvidersUpdates({
+  assert.deepEqual(targetStore.state.providersUpdates, []);
+  assert.equal(targetStore.state.providers[0]?.disabledByUser, true);
+  (targetStore as any).onProvidersUpdates({
     updates: [{ providerId: 'qwen', cli: 'qwen', installed: '1.0.0', latest: '1.0.1', updateAvailable: true }],
   });
-  assert.deepEqual(target.state.providersUpdates, [], 'a replay cannot restore a disabled provider update');
+  assert.deepEqual(targetStore.state.providersUpdates, [], 'a replay cannot restore a disabled provider update');
 
-  assert.equal(await target.toggleProvider('qwen', true), true);
+  assert.equal(await targetStore.toggleProvider('qwen', true), true);
   assert.deepEqual(calls, [
     ['toggle', 'qwen', false],
     ['toggle', 'qwen', true],
     ['detect', { provider: 'qwen' }],
   ]);
-  assert.equal(target.state.providers[0]?.status, 'ready');
+  assert.equal(targetStore.state.providers[0]?.status, 'ready');
 });
 
 test('agent settings render a quiet list with provider marks and accessible manual switches', async (t) => {
@@ -74,11 +82,12 @@ test('agent settings render a quiet list with provider marks and accessible manu
     root: fileURLToPath(new URL('..', import.meta.url)),
     server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
   });
-  t.after(async () => { await server.close(); });
+  let store: { state: Record<string, any>; clearToastTimers(): void } | undefined;
+  t.after(async () => { store?.clearToastTimers(); await server.close(); });
   const { Settings } = await server.ssrLoadModule('/src/components/Settings.tsx') as {
     Settings: React.ComponentType;
   };
-  const { store } = await server.ssrLoadModule('/src/store/store.ts') as { store: { state: Record<string, any> } };
+  ({ store } = await server.ssrLoadModule('/src/store/store.ts') as { store: { state: Record<string, any>; clearToastTimers(): void } });
   (store as any).applyMachineBook({
     machines: [{ machineId: 'm-san', name: 'San-laptop', status: 'ok' }],
     self: { machineId: 'm-mac', name: 'Dukler Mac Studio' },

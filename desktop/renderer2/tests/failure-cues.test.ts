@@ -10,7 +10,7 @@ import type { ToolEvent } from '../src/store/types.ts';
 let server: ViteDevServer;
 let ToolDetail: React.ComponentType<{ t: ToolEvent }>;
 let TareasCard: React.ComponentType;
-let store: { state: Record<string, unknown> };
+let store: { state: Record<string, unknown>; clearToastTimers(): void };
 
 before(async () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
@@ -27,11 +27,11 @@ before(async () => {
     TareasCard: React.ComponentType;
   });
   ({ store } = await server.ssrLoadModule('/src/store/store.ts') as {
-    store: { state: Record<string, unknown> };
+    store: { state: Record<string, unknown>; clearToastTimers(): void };
   });
 });
 
-after(async () => { await server.close(); });
+after(async () => { store.clearToastTimers(); await server.close(); });
 
 test('a failed tool with no command or location renders a quiet falló trail without a cross', () => {
   const tool: ToolEvent = {
