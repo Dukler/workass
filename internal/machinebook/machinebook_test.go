@@ -648,31 +648,70 @@ func TestBeaconFindsPeer(t *testing.T) {
 		Book: openBook(t, "m-peer"),
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	listenerDone := make(chan error, 1)
 	announcerDone := make(chan error, 1)
+	listenerStarted := false
+	announcerStarted := false
+	listenerFinished := false
+	announcerFinished := false
+	t.Cleanup(func() {
+		cancel()
+		if (!listenerStarted || listenerFinished) && (!announcerStarted || announcerFinished) {
+			return
+		}
+		joined := make(chan struct{})
+		go func() {
+			if listenerStarted && !listenerFinished {
+				<-listenerDone
+			}
+			if announcerStarted && !announcerFinished {
+				<-announcerDone
+			}
+			close(joined)
+		}()
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cleanupCancel()
+		select {
+		case <-joined:
+		case <-cleanupCtx.Done():
+			t.Fatal("beacon Run goroutines did not stop before the 8s cleanup deadline")
+		}
+	})
 	go func() {
 		listenerDone <- listener.Run(ctx)
 	}()
-	<-ready
+	listenerStarted = true
+	select {
+	case <-ready:
+	case err := <-listenerDone:
+		listenerFinished = true
+		t.Fatalf("listener beacon exited before becoming ready: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("listener did not become ready before the 8s deadline: %v", ctx.Err())
+	}
 	go func() {
 		announcerDone <- announcer.Run(ctx)
 	}()
+	announcerStarted = true
 
-	entry := <-found
+	var entry Entry
+	select {
+	case entry = <-found:
+	case err := <-listenerDone:
+		listenerFinished = true
+		t.Fatalf("listener beacon exited before finding the peer: %v", err)
+	case err := <-announcerDone:
+		announcerFinished = true
+		t.Fatalf("announcer beacon exited before the peer was found: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("peer was not found before the 8s deadline: %v", ctx.Err())
+	}
 	if entry.MachineID != "m-peer" {
 		t.Fatalf("found %+v, want the announcing peer", entry)
 	}
 	if entry.AddedBy != SourceBeacon {
 		t.Fatalf("addedBy = %q", entry.AddedBy)
-	}
-	cancel()
-	if err := <-listenerDone; err != nil {
-		t.Fatalf("listener beacon: %v", err)
-	}
-	if err := <-announcerDone; err != nil {
-		t.Fatalf("announcer beacon: %v", err)
 	}
 }
 
