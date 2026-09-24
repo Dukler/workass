@@ -162,7 +162,7 @@ const DEFAULT_SECONDS = 0.1;
 const DEFAULT_WORKERS = os.availableParallelism();
 const MAX_BATCH_SECONDS = 2;
 const MAX_BATCH_CASES = 8;
-const HEAVY_PACKAGES = ['./internal/acp', './cmd/workass'];
+const HEAVY_PACKAGES = ['./internal/acp', './cmd/workass', './internal/chat', './internal/appinstall'];
 // Startup probes retain their real readiness deadlines and run in one explicit
 // serial batch until their fixtures can be isolated.
 const SERIAL_TESTS = new Set([
@@ -297,7 +297,8 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
   if (existsSync(cacheMarker)) {
     if (await readFile(cacheMarker, 'utf8') !== markerValue) throw new Error(`Go test binary cache ownership mismatch: ${binaryCache}`);
   } else {
-    for (const label of ['acp', 'workass']) {
+    for (const pkg of HEAVY_PACKAGES) {
+      const label = path.posix.basename(pkg);
       if (existsSync(path.join(binaryCache, `${label}.test`))) throw new Error(`Refusing to overwrite an unowned Go test binary: ${path.join(binaryCache, `${label}.test`)}`);
     }
     const markerTemp = path.join(binaryCache, `.workass-go-test-cache-${randomUUID()}`);
@@ -374,7 +375,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
     const failures = [];
     const workQueue = orderWorkByWeight([
       ...otherPackages.map(pkg => ({ kind: 'package', package: pkg.importPath, dir: pkg.dir, hasTests: pkg.hasTests, id: pkg.importPath, weight: pkg.importPath.endsWith('/machinebook') ? 10 : DEFAULT_SECONDS })),
-      ...HEAVY_PACKAGES.map((pkg, index) => ({ kind: 'build', pkg, index, package: packages.find(name => name.endsWith(pkg.slice(1))) ?? `workass/${pkg.slice(2)}`, weight: DEFAULT_SECONDS })),
+      ...HEAVY_PACKAGES.map(pkg => ({ kind: 'build', pkg, package: packages.find(name => name.endsWith(pkg.slice(1))) ?? `workass/${pkg.slice(2)}`, weight: DEFAULT_SECONDS })),
     ]);
     let pendingTasks = workQueue.length;
     const wakeups = new Set();
@@ -393,9 +394,9 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
       }
     };
     const executeBuild = async work => {
-      const { pkg, index } = work;
-      const label = index === 0 ? 'acp' : 'workass';
+      const { pkg } = work;
       const importPath = packages.find(name => name.endsWith(pkg.slice(1))) ?? `workass/${pkg.slice(2)}`;
+      const label = path.posix.basename(importPath);
       const cachedBinary = path.join(binaryCache, `${path.posix.basename(importPath)}.test`);
       const binary = path.join(root, `${label}.test`);
       const packageCwd = path.join(cwd, pkg.replace(/^\.\//, ''));

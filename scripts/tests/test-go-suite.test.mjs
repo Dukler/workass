@@ -106,6 +106,8 @@ async function fixture(t, { fail = '', delay = '0.04', packageFail = false } = {
   t.after(() => rm(root, { recursive: true, force: true }));
   const logs = path.join(root, 'logs');
   await mkdir(path.join(root, 'internal', 'acp'), { recursive: true });
+  await mkdir(path.join(root, 'internal', 'chat'), { recursive: true });
+  await mkdir(path.join(root, 'internal', 'appinstall'), { recursive: true });
   await mkdir(path.join(root, 'cmd', 'workass'), { recursive: true });
   await mkdir(logs);
   const binarySource = path.join(root, 'fake-acp-test.sh');
@@ -116,7 +118,7 @@ async function fixture(t, { fail = '', delay = '0.04', packageFail = false } = {
   return { root, logs, go: goSource };
 }
 
-function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/two'], noTestPackages = [], failCase = '', packageFail = false, record = () => {}, compileDelayMs = 0, onCompileStart = () => {}, onCompileFinish = () => {}, onPackageStart = () => {}, onTestBinaryStart = () => {} } = {}) {
+function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/chat', 'workass/internal/appinstall', 'workass/internal/two'], noTestPackages = [], failCase = '', packageFail = false, record = () => {}, compileDelayMs = 0, onCompileStart = () => {}, onCompileFinish = () => {}, onPackageStart = () => {}, onTestBinaryStart = () => {} } = {}) {
   let active = 0, maximum = 0;
   const spawn = (command, args, options) => {
     const child = new EventEmitter();
@@ -162,20 +164,31 @@ function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/interna
   return { spawn, maximum: () => maximum };
 }
 
-test('fresh matrix covers both heavy packages once, overlaps within the bound, and retains full logs', async t => {
+test('fresh matrix covers all four heavy packages once, with unique labels and paths, within the bound, and retains full logs', async t => {
   const f = await fixture(t);
-  const tracker = inProcessGoSpawn();
+  const executions = [];
+  const tracker = inProcessGoSpawn({ record: (command, args, options) => {
+    if (['acp.test', 'workass.test', 'chat.test', 'appinstall.test'].includes(path.basename(String(command))) && args[0] === '-test.v') executions.push({ binary: String(command), args, cwd: options.cwd });
+  } });
   const spawn = (command, args, options) => {
     if (String(command).includes('acp.test')) assert.equal(options.cwd, path.join(f.root, 'internal', 'acp'));
     return tracker.spawn(command, args, options);
   };
   const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 3, spawn, signalHandlers: false });
   assert.equal(result.ok, true, result.error);
-  for (const pkg of ['./internal/acp', './cmd/workass']) {
+  const heavyPackages = ['./internal/acp', './cmd/workass', './internal/chat', './internal/appinstall'];
+  for (const pkg of heavyPackages) {
     assert.deepEqual(result.heavyPackages[pkg].cases.map(item => item.name).sort(), names.slice().sort());
     assert.equal(new Set(result.heavyPackages[pkg].cases.map(item => item.name)).size, names.length);
+    assert.ok(result.heavyPackages[pkg].cases.every(item => item.nestedRun === 1 && item.nestedPassed === 1), `${pkg} subtests execute exactly once`);
     assert.equal(result.heavyPackages[pkg].nestedPassed, names.length);
   }
+  const byBinary = new Map();
+  for (const execution of executions) byBinary.set(execution.binary, (byBinary.get(execution.binary) ?? 0) + execution.args[1].split('|').length);
+  assert.equal(byBinary.size, 4, 'each heavy package has its own pinned test binary path');
+  assert.deepEqual([...byBinary.keys()].map(binary => path.basename(binary, '.test')).sort(), ['acp', 'appinstall', 'chat', 'workass']);
+  assert.equal([...byBinary.values()].reduce((sum, count) => sum + count, 0), names.length * 4, 'every heavy-package test is assigned and executed once');
+  assert.deepEqual(new Set(executions.map(item => item.cwd)).size, 4, 'each package executes from its own package directory');
   assert.ok(tracker.maximum() > 1);
   assert.ok(tracker.maximum() <= 3);
   assert.equal(result.otherPackages.length, 2);
@@ -186,9 +199,9 @@ test('fresh matrix covers both heavy packages once, overlaps within the bound, a
   assert.match(fullLog, /other-package-output/);
   assert.match(fullLog, /TestAlpha\/child/);
   const completedBatches = fullLog.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)).filter(event => event.event === 'batch-end');
-  assert.equal(completedBatches.length, 2);
+  assert.equal(completedBatches.length, 4);
   assert.ok(completedBatches.every(batch => batch.names.length > 1));
-  assert.equal(Object.values(result.heavyPackages).reduce((sum, pkg) => sum + pkg.cases.reduce((n, item) => n + item.nestedRun, 0), 0), names.length * 2);
+  assert.equal(Object.values(result.heavyPackages).reduce((sum, pkg) => sum + pkg.cases.reduce((n, item) => n + item.nestedRun, 0), 0), names.length * 4);
 });
 
 test('one bounded compile covers every package on every invocation', async t => {
@@ -349,10 +362,10 @@ test('in-process abort releases a waiting worker and leaves queued batches unspa
     };
     child.kill = () => { finish(null); return true; };
     setImmediate(() => child.emit('spawn'));
-    if (args[0] === 'list') { finish(0, ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass'].map(pkg => `${pkg}\t${path.join(f.root, pkg.replace('workass/', ''))}\ttrue`).join('\n') + '\n'); return child; }
+    if (args[0] === 'list') { finish(0, ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/chat', 'workass/internal/appinstall'].map(pkg => `${pkg}\t${path.join(f.root, pkg.replace('workass/', ''))}\ttrue`).join('\n') + '\n'); return child; }
     if (args[0] === 'test' && args.includes('-c')) {
       const outputDir = args[args.indexOf('-o') + 1];
-      for (const pkg of ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/two']) writeFileSync(path.join(outputDir, `${path.posix.basename(pkg)}.test`), 'fake test binary');
+      for (const pkg of ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/chat', 'workass/internal/appinstall', 'workass/internal/two']) writeFileSync(path.join(outputDir, `${path.posix.basename(pkg)}.test`), 'fake test binary');
       finish(0); return child;
     }
     if (String(command).endsWith('.test')) {
