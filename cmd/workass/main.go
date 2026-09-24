@@ -1380,6 +1380,12 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 			return nil, err
 		}
 		return wire.ReplyThen(admission.Receipt, func() {
+			// Project the durably admitted user turn before provider attach/resume.
+			// The renderer keys canonical rows by these stable message IDs, so the
+			// manager's later start event enriches this projection without duplicates.
+			if !boolFieldValue(admission.Receipt, "queued") {
+				hub.Broadcast("job:event", map[string]any{"type": "start", "job": admission.Receipt})
+			}
 			admission.Dispatch()
 			if boolFieldValue(admission.Receipt, "queued") && chatControl != nil {
 				chatControl.refresh(fieldString(arg, "tabId"), fieldString(arg, "chatId"), false)
