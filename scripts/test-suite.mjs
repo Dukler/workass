@@ -17,10 +17,10 @@ export function fullSuiteCommands(repo = root) {
   const rendererGroups = Array.from({ length: 6 }, () => []);
   rendererFiles.forEach((file, index) => rendererGroups[index % rendererGroups.length].push(file));
   return [
-    ...rendererGroups.map((group, index) => ({ name: `renderer_tests_${index + 1}`, command: 'node', args: ['--experimental-strip-types', '--test', '--test-isolation=none', '--test-concurrency=1', ...group], cwd: path.join(repo, 'desktop/renderer2') })),
-    { name: 'shell_tests', command: 'node', args: ['--test', '--test-concurrency=4', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo },
-    { name: 'go_tests', command: 'node', args: [path.join(repo, 'scripts/test-go-suite.mjs'), '--cwd', repo], cwd: repo },
-    { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=6', ...files(path.join(repo, 'scripts/tests'), /\.test\.mjs$/)], cwd: repo },
+    ...rendererGroups.map((group, index) => ({ name: `renderer_tests_${index + 1}`, command: 'node', args: ['--experimental-strip-types', '--test', '--test-isolation=none', '--test-concurrency=1', ...group], cwd: path.join(repo, 'desktop/renderer2'), requireTestReport: true })),
+    { name: 'shell_tests', command: 'node', args: ['--test', '--test-concurrency=4', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo, requireTestReport: true },
+    { name: 'go_tests', command: 'node', args: [path.join(repo, 'scripts/test-go-suite.mjs'), '--cwd', repo], cwd: repo, requireTestReport: true, requireGoReport: true },
+    { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=6', ...files(path.join(repo, 'scripts/tests'), /\.test\.mjs$/)], cwd: repo, requireTestReport: true },
     ...shellContracts,
   ];
 }
@@ -61,12 +61,28 @@ export function testSummary(output) {
     const topLevelTests = lines.filter(line => /^# Subtest:/.test(line)).length || lines.filter(line => /^(?:✔ |✖ |﹣ ).+ \([\d.]+(?:ms|s)\)/.test(line)).length;
     const allSubtests = lines.filter(line => /^(?:\s+# Subtest:|\s+✔ |\s+✖ |\s+﹣ )/.test(line)).length;
     const skipped = totals.skipped ?? 0;
-    const failed = totals.fail ?? 0;
+    const failed = (totals.fail ?? 0) + (totals.cancelled ?? 0);
     return { tests: totals.tests, topLevelTests: topLevelTests || null,
       subtests: allSubtests || (topLevelTests ? Math.max(0, totals.tests - topLevelTests) : null),
       passed: totals.pass ?? Math.max(0, totals.tests - failed - skipped), failed, skipped };
   }
   return { tests: null, topLevelTests: null, subtests: null, passed: null, failed: null, skipped: 0 };
+}
+
+function validTestReport(output, { go = false } = {}) {
+  if (go) {
+    let report = output.split('\n').map(line => { try { return JSON.parse(line); } catch { return null; } })
+      .find(event => event && typeof event.ok === 'boolean' && Number.isInteger(event.discovered) && event.otherGo);
+    if (!report) {
+      try {
+        const parsed = JSON.parse(output.trim());
+        if (parsed && typeof parsed.ok === 'boolean' && Number.isInteger(parsed.discovered) && parsed.otherGo) report = parsed;
+      } catch {}
+    }
+    return Boolean(report?.ok && Number.isInteger(report.tests) && report.tests > 0 && report.failed === 0 && report.otherGo.failed === 0);
+  }
+  const summary = testSummary(output);
+  return Number.isInteger(summary.tests) && summary.tests > 0 && Number.isInteger(summary.failed) && summary.failed === 0;
 }
 
 function failureDetail(output) {
@@ -128,7 +144,8 @@ export async function runSuiteMatrix(commands, { logDir = fs.mkdtempSync(path.jo
           let completeOutput = output;
           try { completeOutput = fs.readFileSync(logPath, 'utf8'); } catch {}
           const summary = testSummary(completeOutput);
-          resolve({ name: spec.name, code: sinkError ? 1 : (code ?? 127), signal, elapsedMs: performance.now() - childStarted, ...summary, logPath, spawnError: spawnError?.message, sinkError: sinkError?.message, failureDetail: code === 0 && !sinkError ? undefined : failureDetail(completeOutput) });
+          const reportError = spec.requireTestReport && !validTestReport(completeOutput, { go: spec.requireGoReport });
+          resolve({ name: spec.name, code: sinkError || reportError ? 1 : (code ?? 127), signal, elapsedMs: performance.now() - childStarted, ...summary, logPath, spawnError: spawnError?.message, sinkError: sinkError?.message, reportError: reportError ? 'required test report missing, empty, or failed' : undefined, failureDetail: code === 0 && !sinkError ? (reportError ? failureDetail(completeOutput) : undefined) : failureDetail(completeOutput) });
         };
         if (sinkError) { log.destroy(); finish(); }
         else log.end(finish);
@@ -141,7 +158,7 @@ export async function runSuiteMatrix(commands, { logDir = fs.mkdtempSync(path.jo
   process.removeListener('SIGINT', onInterrupt);
   process.removeListener('SIGTERM', onInterrupt);
   const elapsedMs = performance.now() - startedAt;
-  const correctness = !interrupted && results.every(result => result.code === 0 && !result.spawnError && !result.sinkError);
+  const correctness = !interrupted && results.every(result => result.code === 0 && !result.spawnError && !result.sinkError && !result.reportError);
   const performanceStatus = elapsedMs <= budgetMs ? 'within_budget' : 'over_budget';
   return { results, elapsedMs, correctness, performanceStatus, logDir, interrupted };
 }
@@ -150,12 +167,18 @@ function printReport(report) {
   for (const result of report.results) {
     const state = result.code === 0 && !result.spawnError ? 'passed' : 'failed';
     console.log(`WORKASS_TEST_SUITE name=${result.name} status=${state} exit=${result.code} seconds=${(result.elapsedMs / 1000).toFixed(3)} tests=${result.tests ?? 'unknown'} top_level=${result.topLevelTests ?? 'unknown'} subtests=${result.subtests ?? 'unknown'} passed=${result.passed ?? 'unknown'} failed=${result.failed ?? 'unknown'} skipped=${result.skipped ?? 0} log=${result.logPath}`);
-    if (state === 'failed') console.error(`WORKASS_TEST_SUITE_FAILURE name=${result.name} exit=${result.code} signal=${result.signal ?? 'none'}${result.spawnError ? ` spawn_error=${result.spawnError}` : ''}${result.sinkError ? ` log_sink_error=${result.sinkError}` : ''}${result.failureDetail ? `\n${result.failureDetail}` : ''} log=${result.logPath}`);
+    if (state === 'failed') console.error(`WORKASS_TEST_SUITE_FAILURE name=${result.name} exit=${result.code} signal=${result.signal ?? 'none'}${result.spawnError ? ` spawn_error=${result.spawnError}` : ''}${result.sinkError ? ` log_sink_error=${result.sinkError}` : ''}${result.reportError ? ` report_error=${result.reportError}` : ''}${result.failureDetail ? `\n${result.failureDetail}` : ''} log=${result.logPath}`);
   }
   console.log(`WORKASS_TEST_SUITE_TOTAL correctness=${report.correctness ? 'passed' : 'failed'} performance=${report.performanceStatus} seconds=${(report.elapsedMs / 1000).toFixed(3)} budget_seconds=10.000 logs=${report.logDir}`);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+export function isMainModule(argvPath = process.argv[1], modulePath = fileURLToPath(import.meta.url)) {
+  if (!argvPath) return false;
+  try { return fs.realpathSync(argvPath) === fs.realpathSync(modulePath); }
+  catch { return false; }
+}
+
+if (isMainModule()) {
   const startedAt = performance.now();
   const commands = fullSuiteCommands();
   const report = await runSuiteMatrix(commands, { startedAt });

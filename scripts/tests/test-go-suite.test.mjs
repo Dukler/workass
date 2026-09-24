@@ -3,14 +3,28 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { watch, writeFileSync } from 'node:fs';
-import { spawn as realSpawn } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, writeFile, access } from 'node:fs/promises';
+import { spawn as realSpawn, spawnSync } from 'node:child_process';
+import { mkdtemp, mkdir, readFile, rm, writeFile, access, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { runGoSuite, parseTestList, anchoredTestPattern, partitionBatches, partitionSerialCases, inspectCaseOutput, orderWorkByWeight } from '../test-go-suite.mjs';
+import { fileURLToPath } from 'node:url';
+import { runGoSuite, parseTestList, anchoredTestPattern, partitionBatches, partitionSerialCases, inspectCaseOutput, orderWorkByWeight, isMainModule } from '../test-go-suite.mjs';
 
 const names = ['TestAlpha', 'TestBeta', 'ExampleWidget', 'FuzzParse'];
+
+test('symlinked Go runner executes its main entry and help without starting suites', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'workass-go-entry-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../test-go-suite.mjs');
+  const alias = path.join(dir, 'runner.mjs');
+  await symlink(source, alias);
+  assert.equal(isMainModule(alias, source), true);
+  const result = spawnSync(process.execPath, [alias, '--help'], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Usage: node scripts\/test-go-suite\.mjs/);
+  assert.doesNotMatch(result.stdout, /"ok"\s*:/, 'help exits before Go suite execution');
+});
 
 test('test listing keeps test, example, and fuzz roots; selection is anchored and escaped', () => {
   assert.deepEqual(parseTestList('TestAlpha\nExampleWidget\nFuzzParse\nBenchmarkIgnored\nTest字\nTestAlpha\n'), ['TestAlpha', 'ExampleWidget', 'FuzzParse', 'Test字', 'TestAlpha']);

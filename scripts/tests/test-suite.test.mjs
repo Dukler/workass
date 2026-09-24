@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { runSuiteMatrix, testSummary, fullSuiteCommands } from '../test-suite.mjs';
+import { runSuiteMatrix, testSummary, fullSuiteCommands, isMainModule } from '../test-suite.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../..');
@@ -45,6 +45,9 @@ test('full suite partitions every renderer test across six sequential isolated N
   assert.equal(shell.args.filter(arg => arg.endsWith('.test.js')).length, fs.readdirSync(path.join(root, 'desktop/shell')).filter(name => name.endsWith('.test.js')).length);
   assert.equal(scripts.args[1], '--test-concurrency=6');
   assert.equal(go.args.includes('--workers'), false, 'Go suite selects its host-aware default worker count');
+  assert.equal(go.requireTestReport, true);
+  assert.equal(go.requireGoReport, true);
+  assert.equal(scripts.requireTestReport, true);
   assert.equal(scripts.args.filter(arg => arg.endsWith('.test.mjs')).length, fs.readdirSync(path.join(root, 'scripts/tests')).filter(name => name.endsWith('.test.mjs')).length);
   const shellFiles = fs.readdirSync(path.join(root, 'scripts/tests')).filter(name => name.endsWith('.test.sh')).sort();
   assert.equal(shellContracts.length, shellFiles.length);
@@ -67,6 +70,15 @@ test('counts the grouped Go runner summary instead of an output tail', () => {
   assert.deepEqual(testSummary(JSON.stringify(result, null, 2)), { tests: 34, topLevelTests: 25, subtests: 9, passed: 29, failed: 0, skipped: 0 });
 });
 
+test('canonical main detection accepts a symlinked entry and safely rejects missing paths', t => {
+  const dir = temp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const alias = path.join(dir, 'runner.mjs');
+  fs.symlinkSync(path.join(root, 'scripts/test-suite.mjs'), alias);
+  assert.equal(isMainModule(alias, path.join(root, 'scripts/test-suite.mjs')), true);
+  assert.equal(isMainModule(path.join(dir, 'missing'), path.join(root, 'scripts/test-suite.mjs')), false);
+  assert.equal(isMainModule(undefined, path.join(root, 'scripts/test-suite.mjs')), false);
+});
+
 test('suite matrix runs commands concurrently and retains complete logs', async t => {
   const dir = temp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const source = mark => `const fs=require('node:fs'),p=${JSON.stringify(dir)};fs.writeFileSync(p+'/${mark}','ready');const end=Date.now()+5000;const timer=setInterval(()=>{if(fs.existsSync(p+'/one-ready')&&fs.existsSync(p+'/two-ready')){clearInterval(timer);console.log('both-ready');process.exit(0)}if(Date.now()>end){clearInterval(timer);console.error('concurrency timeout');process.exit(8)}},10)`;
@@ -78,6 +90,30 @@ test('suite matrix runs commands concurrently and retains complete logs', async 
   assert.match(fs.readFileSync(path.join(dir, 'one.log'), 'utf8'), /both-ready/);
   assert.match(fs.readFileSync(path.join(dir, 'two.log'), 'utf8'), /both-ready/);
   assert.ok(report.results.every(result => result.code === 0));
+});
+
+test('required test command with exit zero and no report fails while generic fixtures remain valid', async t => {
+  const dir = temp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const report = await runSuiteMatrix([
+    { ...fixture('missing_report', "console.log('no tests ran')"), requireTestReport: true },
+    fixture('generic_fixture', "console.log('fixture succeeded')"),
+  ], { logDir: dir });
+  assert.equal(report.correctness, false);
+  assert.equal(report.results.find(result => result.name === 'missing_report').code, 1);
+  assert.match(report.results.find(result => result.name === 'missing_report').reportError, /missing/);
+  assert.equal(report.results.find(result => result.name === 'generic_fixture').code, 0);
+  assert.equal(report.results.find(result => result.name === 'generic_fixture').reportError, undefined);
+  assert.match(fs.readFileSync(path.join(dir, 'missing_report.log'), 'utf8'), /no tests ran/);
+});
+
+test('required Go report with ok false fails even when its output parses', async t => {
+  const dir = temp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const output = JSON.stringify({ ok: false, discovered: 3, tests: 3, passed: 3, failed: 0, otherGo: { tests: 1, passed: 1, failed: 0 } }, null, 2);
+  const report = await runSuiteMatrix([{ ...fixture('false_go', `console.log(${JSON.stringify(output)})`), requireTestReport: true, requireGoReport: true }], { logDir: dir });
+  assert.equal(report.correctness, false);
+  assert.equal(report.results[0].tests, 3);
+  assert.match(report.results[0].reportError, /failed/);
+  assert.match(fs.readFileSync(path.join(dir, 'false_go.log'), 'utf8'), /"ok": false/);
 });
 
 test('counts TAP totals after output has exceeded the former 32 KB tail', async t => {
