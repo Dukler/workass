@@ -59,7 +59,7 @@ async function fixture(t, { fail = '', delay = '0.04', packageFail = false, chil
   return { root, logs, go: goSource };
 }
 
-function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/two'], failCase = '', packageFail = false, record = () => {} } = {}) {
+function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/two'], failCase = '', packageFail = false, record = () => {}, compileDelayMs = 0, onCompileStart = () => {}, onCompileFinish = () => {}, onPackageStart = () => {} } = {}) {
   let active = 0, maximum = 0;
   const spawn = (command, args, options) => {
     const child = new EventEmitter();
@@ -86,11 +86,14 @@ function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/interna
       if (args[0] === 'test' && args.includes('-c')) {
         const binary = args[args.indexOf('-o') + 1];
         writeFileSync(binary, 'fake test binary');
-        finish(0); return child;
+        onCompileStart(args.at(-1));
+        setTimeout(() => { onCompileFinish(args.at(-1)); finish(0); }, compileDelayMs);
+        return child;
       }
       if (args[0] === 'list') { finish(0, `${packages.join('\n')}\n`); return child; }
       if (args[0] === 'test' && args.includes('-json')) {
         const pkg = args.at(-1);
+        onPackageStart(pkg);
         const events = [{ Action: packageFail ? 'fail' : 'pass', Package: pkg }, { Action: 'pass', Package: pkg, Test: 'TestOther' }];
         finish(packageFail ? 9 : 0, `${events.map(event => JSON.stringify(event)).join('\n')}\nother-package-output\n`); return child;
       }
@@ -125,6 +128,23 @@ test('fresh matrix covers both heavy packages once, overlaps within the bound, a
   assert.equal(completedBatches.length, 2);
   assert.ok(completedBatches.every(batch => batch.names.length > 1));
   assert.equal(Object.values(result.heavyPackages).reduce((sum, pkg) => sum + pkg.cases.reduce((n, item) => n + item.nestedRun, 0), 0), names.length * 2);
+});
+
+test('remaining package work starts while heavy test binaries are still compiling', async t => {
+  const f = await fixture(t);
+  const events = [];
+  const fake = inProcessGoSpawn({
+    compileDelayMs: 60,
+    onCompileStart: pkg => events.push(`compile-start:${pkg}`),
+    onCompileFinish: pkg => events.push(`compile-finish:${pkg}`),
+    onPackageStart: pkg => events.push(`package-start:${pkg}`),
+  });
+  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 3, signalHandlers: false, spawn: fake.spawn });
+  assert.equal(result.ok, true, result.error);
+  const compileStarted = events.findIndex(event => event.startsWith('compile-start:'));
+  const packageStarted = events.findIndex(event => event.startsWith('package-start:'));
+  const firstCompileFinished = events.findIndex(event => event.startsWith('compile-finish:'));
+  assert.ok(compileStarted >= 0 && packageStarted >= 0 && packageStarted < firstCompileFinished, events.join(', '));
 });
 
 test('case failures propagate after other cases run and preserve failure detail', async t => {
@@ -185,7 +205,7 @@ test('spawn errors are returned and written to the command log', async t => {
   const f = await fixture(t);
   const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: path.join(f.root, 'missing-go'), workers: 2, signalHandlers: false });
   assert.equal(result.ok, false);
-  assert.ok(['compile-acp', 'compile-workass'].includes(result.commandFailure.label));
+  assert.equal(result.commandFailure.label, 'list-packages');
   assert.match(result.commandFailure.spawnError, /ENOENT/);
   assert.match(await readFile(result.jsonlPath, 'utf8'), /ENOENT/);
 });
