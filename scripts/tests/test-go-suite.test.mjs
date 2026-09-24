@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile, access } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { runGoSuite, parseTestList, anchoredTestPattern, partitionBatches, partitionSerialCases, inspectCaseOutput } from '../test-go-suite.mjs';
+import { runGoSuite, parseTestList, anchoredTestPattern, partitionBatches, partitionSerialCases, inspectCaseOutput, orderWorkByWeight } from '../test-go-suite.mjs';
 
 const names = ['TestAlpha', 'TestBeta', 'ExampleWidget', 'FuzzParse'];
 
@@ -28,6 +28,16 @@ test('weighted batches stay bounded and retain every discovered root once', () =
   assert.deepEqual([...batched].sort(), ['TestA', 'TestFast', 'TestSlow', 'TestZ']);
   assert.ok(batches.every(batch => batch.names.length <= 2));
   assert.ok(batches.every(batch => batch.weight <= 3 || batch.names.length === 1));
+});
+
+test('scheduler orders measured heavy batches globally and starts machinebook first', () => {
+  const work = orderWorkByWeight([
+    { kind: 'heavy', package: 'workass/cmd/workass', id: 1, weight: 3 },
+    { kind: 'package', package: 'workass/internal/fast', id: 'fast', weight: 0.25 },
+    { kind: 'package', package: 'workass/internal/machinebook', id: 'machinebook', weight: 10 },
+    { kind: 'heavy', package: 'workass/internal/acp', id: 2, weight: 4 },
+  ]);
+  assert.deepEqual(work.map(item => item.id), ['machinebook', 2, 1, 'fast']);
 });
 
 async function fixture(t, { fail = '', delay = '0.04', packageFail = false, childWait = false } = {}) {
@@ -93,6 +103,8 @@ test('case failures propagate after other cases run and preserve failure detail'
   assert.equal(result.ok, false);
   assert.equal(result.heavyPackages['./internal/acp'].failed, 1);
   assert.equal(result.heavyPackages['./internal/acp'].cases.length, names.length);
+  assert.equal(result.heavyPackages['./cmd/workass'].cases.length, names.length, 'assigned work drains after a worker sees a failed batch');
+  assert.equal(result.otherGo.tests, 2, 'remaining package work also drains after a heavy batch failure');
   assert.match(await readFile(result.jsonlPath, 'utf8'), /deliberate failure detail/);
 });
 
@@ -100,7 +112,7 @@ test('other-package command failures propagate with complete output', async t =>
   const f = await fixture(t, { packageFail: true });
   const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 2, signalHandlers: false });
   assert.equal(result.ok, false);
-  assert.equal(result.commandFailure.label, 'other-go-packages');
+  assert.match(result.commandFailure.label, /^other-go-workass\/internal\//);
   assert.match(await readFile(result.jsonlPath, 'utf8'), /other-package-output/);
 });
 
@@ -144,7 +156,7 @@ test('spawn errors are returned and written to the command log', async t => {
   const f = await fixture(t);
   const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: path.join(f.root, 'missing-go'), workers: 2, signalHandlers: false });
   assert.equal(result.ok, false);
-  assert.equal(result.commandFailure.label, 'compile-acp');
+  assert.ok(['compile-acp', 'compile-workass'].includes(result.commandFailure.label));
   assert.match(result.commandFailure.spawnError, /ENOENT/);
   assert.match(await readFile(result.jsonlPath, 'utf8'), /ENOENT/);
 });
