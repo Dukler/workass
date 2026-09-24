@@ -10,86 +10,158 @@ import { createHash, randomUUID } from 'node:crypto';
 import { link } from 'node:fs/promises';
 
 const HINTS = new Map([
-  ["TestACPEffortSelectionBeforeAxisDiscovery", 1.3],
-  ["TestBrowserStatelessMCPMutationJournalReadbackConflictAndActorFence", 0.6],
-  ["TestCancelInPromptPreparationGap", 1.35],
-  ["TestChatCheckpointsDiffRewindAndOutsideGuard", 0.63],
-  ["TestChatEnvTruncationFlags", 0.95],
-  ["TestChatLifecycleDoesNotRunAutomaticGit", 1.54],
-  ["TestClaudeUpdateReresolvesTransientShimAndAtomicInstallSwap", 2.64],
-  ["TestCodexNativeGoalThroughActorAndExactResume", 1.29],
-  ["TestCodexServiceTierSurvivesExactResumeAndClearsExplicitly", 1.07],
-  ["TestDeclaredWorkIsNeverReclassifiedByInference", 0.65],
-  ["TestDeferredCodexCreatesAgainOnlyForAProvablyEmptyLane", 0.56],
-  ["TestDetectFrontierProvidersNeedsLogin", 1.25],
-  ["TestDetectFrontierProvidersReadyWithNativeProtocolFixtures", 1.26],
-  ["TestDetectProvidersExplicitDisableSurvivesRedetection", 0.9],
-  ["TestDetectProvidersLocalServerRegistersNativeProviderAndStreamsThroughAgent", 1.93],
-  ["TestDetectProvidersOMLXAuthenticatesQwenAndNativeProviderWithoutPersistingKey", 1.49],
-  ["TestDetectProviderStoresRedactedCLIVersionRaw", 1.26],
-  ["TestDevinAuthenticationFailureBecomesNeedsLoginWithoutRetryLoop", 1.29],
-  ["TestDevinStopAndSendUsesDurableQueueAndExactCancellation", 0.57],
-  ["TestFailedDetectionDisablesPreviouslyReadyProviderWithoutUserDisable", 0.86],
-  ["TestImmediateStopPublishesCommittedTerminalBeforeReply", 0.6],
-  ["TestLegacyDevinNeedsLoginRecoveryFailureDoesNotLoopAcrossRestart", 1.07],
-  ["TestMockBurstStreamsAtDisplayCadenceWithoutDroppingText", 2.35],
-  ["TestMockClaudeProviderKeepsUnnotifiedBackgroundWorkRunningViaOutputOwner", 0.59],
-  ["TestMockInitializeSessionPromptCancelErrorAndReuse", 1.29],
-  ["TestMockSteerMidSlowTurnReflectedInOutput", 1.3],
-  ["TestNextTurnListsAndWaitsOnAdoptedSubagent", 3.19],
-  ["TestOMPInstalledHostContract", 1.07],
-  ["TestPiNativeSDKProviderContext", 1.72],
-  ["TestProviderChatRuntimeResumesExactLaneAcrossActorAndTabRestart", 0.59],
-  ["TestProviderChatRuntimeSwitchesAndReturnsThroughVerifiedContextImport", 0.8],
-  ["TestProviderCLIExecutableRefreshesValidCacheFromPATH", 1.08],
-  ["TestProviderDetectionAllowsFullInitializeAndSessionBudgets", 6.14],
-  ["TestProviderRegistryCatalogToggleFailureAndConcurrentIsolation", 1.37],
-  ["TestProviderUpdateCheckFakeRegistry", 1.82],
-  ["TestProviderUpdateInvokeFailureKeepsCardWithRedactedTail", 2.26],
-  ["TestProviderUpdateInvokeProgressNoProcRegistryAndReplay", 2.81],
-  ["TestProviderUpdateInvokeRejectsDoubleUnknownAndNoPending", 3.81],
-  ["TestProviderUpdatePostRecheckAllFailKeepsEntryWithRecheckError", 1.31],
-  ["TestProviderUpdatePostRecheckRetriesUntilVersionLands", 1.35],
-  ["TestProviderUpdateRunsResolvedProviderExecutable", 2.15],
-  ["TestProviderUpdateTerminalReceiptDoesNotWaitForRegistryRefresh", 1.18],
-  ["TestProviderUpdateZeroExitWithoutVersionAdvanceFailsVerification", 2.11],
+  ["TestACPCatalogDiscoversEffortBeforeFirstPrompt", 0.92],
+  ["TestACPEffortSelectionBeforeAxisDiscovery", 1.66],
+  ["TestActorDeleteCrashRecoveryCompletesNativeCleanupFromTombstone", 1.21],
+  ["TestActorEnvironmentProjectionSurvivesRuntimeRestartAndRejectsWrongTab", 0.72],
+  ["TestActorNativeChatProjectsAfterRestartFromCanonicalStorage", 0.84],
+  ["TestActorRendererSessionSnapshotParityAcrossRestart", 4.36],
+  ["TestAdapterSessionRefreshCannotOverwriteActorFromStaleAttachment", 1.08],
+  ["TestAgentChatSendQueuedOwnershipAndImmutableRetries", 1.20],
+  ["TestAgentChatSendSteerDerivedOperationRejectsChangedMessageAndDelivery", 2.15],
+  ["TestAgentControlCodexOwnerCanRegisterExternalHandoff", 1.73],
+  ["TestAgentControlCreatedChatSurvivesStaleSessionSaveBeforeSend", 0.53],
+  ["TestAgentControlHostsArtifactsOnlyFromTheCallingAgentWorkspace", 0.90],
+  ["TestAgentControlRejectsDeletedActorBeforeLiveManagerAuthorization", 0.62],
+  ["TestAgentControlTurnlessSpawnNeverUsesLegacySessionMirrorAsOwner", 0.55],
+  ["TestAgentStatelessMCPFencesDeletedActorBeforeOwnerValidation", 1.56],
+  ["TestArtifactValidationFailureIsTerminalAndRetryDoesNotInspectSource", 0.67],
+  ["TestBrowserReadReleasesActorLockDuringShellHTTP", 1.61],
+  ["TestBrowserStatelessMCPMutationJournalReadbackConflictAndActorFence", 3.22],
+  ["TestBrowserStatelessMCPRejectsLiveManagerOwnerAfterActorDeletion", 1.58],
+  ["TestBrowserStatelessMCPUnreadyControlDoesNotClaimActorMutation", 1.97],
+  ["TestCancelInPromptPreparationGap", 1.37],
+  ["TestChatCheckpointRotationAndLargeRepoSkip", 0.75],
+  ["TestChatCheckpointsDiffRewindAndOutsideGuard", 1.40],
+  ["TestChatControlInvalidOperationCannotCancelOrDeleteRunningTurn", 2.41],
+  ["TestChatControlVisibleMutationRefreshesAreImmediate", 0.68],
+  ["TestChatDiagnosticsExactActorAndNoMutation", 2.10],
+  ["TestChatDiagnosticsToolRemoteRoute", 1.67],
+  ["TestChatEnvTracksRepoChangesAfterTurn", 0.63],
+  ["TestChatEnvTruncationFlags", 2.46],
+  ["TestChatListToolPreservesLocalChatsWithMountedRemote", 1.13],
+  ["TestClaudeUpdateReresolvesTransientShimAndAtomicInstallSwap", 4.65],
+  ["TestCodexNativeGoalThroughActorAndExactResume", 5.32],
+  ["TestCodexRuntimeDiagnosticsThroughActorAndRestart", 1.63],
+  ["TestCodexServiceTierSurvivesExactResumeAndClearsExplicitly", 5.11],
+  ["TestCompositeModelCreateValidation", 0.56],
+  ["TestDeclaredWorkIsNeverReclassifiedByInference", 0.75],
+  ["TestDeferredCodexCreatesAgainOnlyForAProvablyEmptyLane", 0.71],
+  ["TestDeferredDevinCandidateAbsencePreservesCommittedThreadProtection", 1.03],
+  ["TestDeletedActorDoesNotBlockStartupReconciliation", 0.67],
+  ["TestDeletedActorRejectsOriginalCreateReplay", 0.53],
+  ["TestDetectProvidersLocalServerRegistersNativeProviderAndStreamsThroughAgent", 3.30],
+  ["TestDetectProvidersOMLXAuthenticatesQwenAndNativeProviderWithoutPersistingKey", 3.00],
+  ["TestDevinStopAndSendUsesDurableQueueAndExactCancellation", 2.82],
+  ["TestDreamSubagentCatalogProgressMessageWaitManyAndDurableReceipt", 0.56],
+  ["TestExplicitParentStopDropsOnlyItsQueuedSubagentCompletion", 2.50],
+  ["TestForkProviderFailureCommitsChildBeforeSelectionAndRetryIsDurable", 0.59],
+  ["TestForkRetryAfterChildActorCommitAttachesExactlyOnce", 1.22],
+  ["TestForkRetryAfterChildCommitDoesNotReadSourceOrRecreateLane", 1.39],
+  ["TestImmediateStopPublishesCommittedTerminalBeforeReply", 2.30],
+  ["TestLifecyclePinnedNeverReapedTinyTTL", 0.52],
+  ["TestLifecycleRaceReapAbortedByArrivingPrompt", 0.61],
+  ["TestLifecycleWithoutExactResumeFailsClosedAfterHibernation", 0.58],
+  ["TestMockBurstStreamsAtDisplayCadenceWithoutDroppingText", 2.40],
+  ["TestMockClaudeProviderForwardsSpawnedWorkWithoutAgentCooperation", 0.55],
+  ["TestMockInitializeSessionPromptCancelErrorAndReuse", 1.39],
+  ["TestMockNativeSessionLoadAttachesTheExactThreadWithoutPublishingReplay", 1.09],
+  ["TestMockNativeSessionNeverResumesAfterConversationIdentityChanges", 0.71],
+  ["TestMockNativeSessionResumeAfterHibernationDoesNotCollide", 0.74],
+  ["TestMockNativeSessionResumesExactThreadAcrossManagerRestart", 1.24],
+  ["TestMockNativeSessionUnseenWorkassHistoryDoesNotGovernExactResume", 1.40],
+  ["TestMockSteerMidSlowTurnReflectedInOutput", 1.31],
+  ["TestMoveWorkspaceReceiptReplayFinishesCrashWindowWithoutNewEpoch", 1.36],
+  ["TestMoveWorkspaceReceiptRetryDoesNotCloseProviderHostAgain", 1.28],
+  ["TestNativeCodexBackgroundChildOutlivesParentAndRetainsReceipt", 0.59],
+  ["TestNativeCodexBackgroundLifecycleIsOwnedByChatActor", 2.15],
+  ["TestNegotiatedACPSteeringSurvivesProviderLaneSelection", 1.29],
+  ["TestNextTurnListsAndWaitsOnAdoptedSubagent", 3.31],
+  ["TestOMPInstalledHostContract", 1.09],
+  ["TestOMPNativeHostContract", 1.52],
+  ["TestPermissionWaitRemainsOwnedByHarness", 0.51],
+  ["TestPhaseCManagerPublicationWaitsForDurableActorState", 0.55],
+  ["TestPiDiscoveryUsesOfficialSDKHost", 0.52],
+  ["TestPiNativeHostContract", 1.33],
+  ["TestPiNativeSDKProviderContext", 2.45],
+  ["TestPreTurnCheckpointCapturesWorktreeOnce", 3.04],
+  ["TestPresentationWithoutDraftNeverMutatesLegacyDraft", 0.63],
+  ["TestProviderChatAgentReadProjectsActorBackgroundState", 1.38],
+  ["TestProviderChatAgentWaitChangedIntentWinsWhenTargetIsMissing", 1.31],
+  ["TestProviderChatAgentWaitFencesStalePairBeforeOwnerManager", 0.80],
+  ["TestProviderChatAgentWaitManyUsesTerminalActorRows", 1.14],
+  ["TestProviderChatAgentWaitObservationRaceReservesOneReceipt", 1.11],
+  ["TestProviderChatAgentWaitUsesDurableObservationReceipt", 1.41],
+  ["TestProviderChatCloseSessionDetachesCurrentAttachmentPreservingThread", 0.50],
+  ["TestProviderChatCloseSessionRetryCannotCloseExactResumedAttachment", 0.69],
+  ["TestProviderChatRuntimeResumesExactLaneAcrossActorAndTabRestart", 1.89],
+  ["TestProviderChatRuntimeSwitchesAndReturnsThroughVerifiedContextImport", 1.27],
+  ["TestProviderChatSteerRejectedInputDoesNotPersistAttachmentSidecar", 0.80],
+  ["TestProviderChatSteerRejectsAfterForegroundEndWithoutTakingOwnership", 0.68],
+  ["TestProviderChatSteerRejectsStaleDurableAttachmentBeforeManagerOrSidecars", 0.95],
+  ["TestProviderDetectionAllowsFullInitializeAndSessionBudgets", 5.36],
+  ["TestProviderLaneSelectionIsReadOnlyUntilAtomicReceiptCommit", 1.15],
+  ["TestProviderLaneSelectionRetryCreatesAfterOldZeroThreadFailure", 1.91],
+  ["TestProviderNativeCompactionBypassesWorkassFallback", 0.51],
+  ["TestProviderRegistryCatalogToggleFailureAndConcurrentIsolation", 1.48],
+  ["TestProviderUpdateAvailabilityUsesCardWithoutNotify", 0.50],
   ["TestQuestionWaitsForTheUserWhileAPermissionStillExpires", 0.62],
-  ["TestQwenStandaloneUpdateUsesBundledUpdaterAtCompatibleRelease", 2.79],
-  ["TestRuntimeDiagnosticsCoalescedFailureGetsTrailingCheckpoint", 1.01],
-  ["TestStartupDetectionRecoversLegacyDevinNeedsLoginOnceUnderSanitizedLaunch", 0.67],
-  ["TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession", 1.08],
-  ["TestStartupDetectProvidersRetriesOnlyStatusErrors", 0.88],
-  ["TestStatelessMCPSpawnsAndWaitsForTrackedSubagent", 0.89],
-  ["TestStopSpawnedWorkKillsARealProcessThatIgnoresSIGTERM", 2.02],
-  ["TestSubagentLatchedPermissionAttentionSurfacesToAdoptingTurn", 1.84],
-  ["TestSubagentSurvivesCancelledParentSettlesAndWritesReceipt", 2.68],
-  ["TestT7AgentControlExternalSettleIsIdempotentAndOwnerValidated", 0.66],
-  ["TestToolsCLICrossProviderDelegationAndCrossChatMessaging", 1.22],
-  ["TestTurnDiagnosticsMockCancellationRecordsWireBoundaries", 1.05],
-  ["TestWireBusyStartQueuesCapabilityAwareFollowUpWithoutFailedTranscript", 0.54],
-  ["TestWireDaemonQueueDrainsWithoutControllerAndReplaysPermissionOnAttach", 0.52],
-  ["TestWireE2EAppChatAssertsJobEventChannel", 1.37],
-  ["TestWireFreshProviderGetsHistorySeedAndEstablishedLaneUsesSafeImport", 0.52],
-  ["TestWireMockBurstReachesClientAtDisplayCadence", 1],
-  ["TestWireProviderCatalogConnectBeforeDetectionGetsSingleBroadcast", 0.62],
-  ["TestWireProvidersDetectInvokeEmitsAndEnablesStubs", 1.88],
-  ["TestWireReconnectRestoresLiveSessionControlsAndPendingPermission", 1.72],
-  ["TestWireSessionRecoversTurnCompletedWithoutRenderer", 1.49],
-  ["TestWireTraceAppChatSteer", 1.49],
-  ["TestWireTraceForkChatSeedsPrefixAndDiverges", 0.82],
-  ["TestWireTraceGroupedCatalogAndInterleavedProviders", 1.64],
-  ["TestWireTraceHibernatedCheckpointKeepsTurnBaseline", 1.81],
-  ["TestWireTraceMockCrashNeverReplaysAndNextDistinctPromptRuns", 0.83],
-  ["TestWireTraceMockEngineCrashTerminalizesThenNextPromptResumesExactThread", 0.7],
-  ["TestWireTraceNativeLocalProviderColdStartAndTurn", 0.78],
-  ["TestWireTraceNotifyControllerOnlyRedactionAndNoTurnEndBacklog", 0.7],
-  ["TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCWD", 0.63],
-  ["TestWorkspaceReturnCreatesCurrentRevisionLaneAndAcceptsNextTurn", 1.01],
+  ["TestRejectedSteerDoesNotEndParentOrPrematurelyAdoptRunningSubagents", 0.70],
+  ["TestReplaceStagedQueueStaleRevisionDoesNotPersistAttachmentSidecar", 0.77],
+  ["TestRuntimeControlsCommitToActorBeforeProviderAndApplyOnlyAtTurnBoundary", 2.17],
+  ["TestRuntimeDiagnosticsCoalescedFailureGetsTrailingCheckpoint", 1.06],
+  ["TestSaveProviderConfigsConcurrentWritersUseDistinctTemps", 0.74],
+  ["TestSpawnedWorkListCarriesTheObligation", 2.00],
+  ["TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession", 1.44],
+  ["TestStatelessMCPMutationsRequireCallerStableOperationID", 0.67],
+  ["TestStatelessMCPRoutesTaggedRemoteReadWithoutExposingOwner", 1.45],
+  ["TestStatelessMCPRoutesUpdaterStatusAndAuthorizedApplyWithoutExposingOwner", 1.08],
+  ["TestStatelessMCPSpawnsAndWaitsForTrackedSubagent", 3.15],
+  ["TestStopDoesNotWaitForUnrelatedProviderAttachment", 1.82],
+  ["TestStopSpawnedWorkKillsARealProcessThatIgnoresSIGTERM", 2.17],
+  ["TestSubagentCancelClearsPermissionAndValidOwnerIsolation", 0.70],
+  ["TestSubagentEventOnlyWaitCancellationDoesNotCancelChild", 0.54],
+  ["TestSubagentLatchedPermissionAttentionSurfacesToAdoptingTurn", 2.08],
+  ["TestSubagentSurvivesCancelledParentSettlesAndWritesReceipt", 2.76],
+  ["TestSubagentTurnlessOwnerListsWaitsAndSpawnsBornAdoptedWithOptionalVisibleHint", 1.23],
+  ["TestT3ExternalDoneFileSettlesAndWritesRedactedReceiptTail", 0.80],
+  ["TestT7AgentControlExternalSettleIsIdempotentAndOwnerValidated", 1.79],
+  ["TestToolAPIRefusesPlaintextAndBrowserOrigin", 0.70],
+  ["TestToolsCLICrossProviderDelegationAndCrossChatMessaging", 6.56],
+  ["TestTrackedSubagentCompletionDoesNotResurrectDeletedChat", 0.78],
+  ["TestTrackedSubagentCompletionQueuesBehindUnrelatedForegroundTurn", 0.69],
+  ["TestTrackedSubagentCompletionRunsOnOwningMockCoordinator", 1.98],
+  ["TestTrackedSubagentCompletionUsesExactActorAndReceiptIdempotency", 1.14],
+  ["TestTrackedSubagentTerminalStatusesSettleWithoutSyntheticWake", 0.87],
+  ["TestTurnDiagnosticsMockCancellationRecordsWireBoundaries", 1.06],
+  ["TestWireBusyStartQueuesCapabilityAwareFollowUpWithoutFailedTranscript", 1.39],
+  ["TestWireDaemonQueueDrainsWithoutControllerAndReplaysPermissionOnAttach", 1.65],
+  ["TestWireE2EAppChatAssertsJobEventChannel", 1.56],
+  ["TestWireFreshProviderGetsHistorySeedAndEstablishedLaneUsesSafeImport", 3.88],
+  ["TestWireJobStartReplyGateBlocksProviderAndProjectsFailureAfterReceipt", 1.30],
+  ["TestWireProviderCatalogConnectBeforeDetectionGetsSingleBroadcast", 2.68],
+  ["TestWireProvidersDetectInvokeEmitsAndEnablesStubs", 5.31],
+  ["TestWireReconnectRestoresLiveSessionControlsAndPendingPermission", 3.58],
+  ["TestWireSessionRecoversTurnCompletedWithoutRenderer", 2.16],
+  ["TestWireTraceAppChatSteer", 3.01],
+  ["TestWireTraceChatEnvNumstat", 0.80],
+  ["TestWireTraceForkChatSeedsPrefixAndDiverges", 4.83],
+  ["TestWireTraceGroupedCatalogAndInterleavedProviders", 3.19],
+  ["TestWireTraceHibernatedCheckpointKeepsTurnBaseline", 5.78],
+  ["TestWireTraceMockCrashNeverReplaysAndNextDistinctPromptRuns", 2.70],
+  ["TestWireTraceMockEngineCrashTerminalizesThenNextPromptResumesExactThread", 2.08],
+  ["TestWireTraceMockPermissionTurn", 2.31],
+  ["TestWireTraceNativeLocalProviderColdStartAndTurn", 5.19],
+  ["TestWireTraceNotifyControllerOnlyRedactionAndNoTurnEndBacklog", 1.16],
+  ["TestWireWorkspaceMoveCommitsBeforeInvalidationAndStaleReconnectUsesTargetCWD", 2.16],
+  ["TestWorkassQuestionActorWireAnswerUnicodeIsolationAndReplay", 1.85],
+  ["TestWorkspaceMoveCreatesFreshEpochWithoutTranscriptReplay", 0.60],
+  ["TestWorkspaceReturnCreatesCurrentRevisionLaneAndAcceptsNextTurn", 5.02],
 ]);
 const DEFAULT_SECONDS = 0.1;
 const DEFAULT_WORKERS = os.availableParallelism();
 const MAX_BATCH_SECONDS = 2;
-const MAX_BATCH_CASES = 24;
+const MAX_BATCH_CASES = 8;
 const HEAVY_PACKAGES = ['./internal/acp', './cmd/workass'];
 // Startup probes retain their real readiness deadlines and run in one explicit
 // serial batch until their fixtures can be isolated.
@@ -166,8 +238,6 @@ export function orderWorkByWeight(work, { slowPackage = 'workass/internal/machin
     String(a.package ?? '').localeCompare(String(b.package ?? '')) || String(a.id ?? '').localeCompare(String(b.id ?? '')));
 }
 
-function cacheLabel(pkg) { return `pkg-${createHash('sha256').update(pkg).digest('hex').slice(0, 24)}.test`; }
-
 function appendJsonLine(stream, value) { stream.write(`${JSON.stringify(value)}\n`); }
 
 function spawnLogged(command, args, options, active) {
@@ -217,7 +287,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
   if (!Number.isInteger(workers) || workers < 1) throw new Error('workers must be a positive integer');
   const wallStart = performance.now();
   const root = await mkdtemp(path.join(os.tmpdir(), 'workass-go-matrix-'));
-  const repoKey = createHash('sha256').update(path.resolve(cwd)).digest('hex').slice(0, 24);
+  const repoKey = createHash('sha256').update(realpathSync(cwd)).digest('hex').slice(0, 24);
   const binaryCache = cacheDir ?? (spawn === nodeSpawn
     ? path.join(os.tmpdir(), 'workass-go-test-binaries', repoKey, race ? 'race' : 'normal')
     : path.join(root, 'test-binaries'));
@@ -292,6 +362,14 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
     const heavyImportPaths = new Set(HEAVY_PACKAGES.map(pkg => packages.find(name => name.endsWith(pkg.slice(1))) ?? `workass/${pkg.slice(2)}`));
     const otherPackages = packageMetadata.filter(pkg => !heavyImportPaths.has(pkg.importPath));
     summary.otherPackages = otherPackages.map(pkg => pkg.importPath);
+    const packageBasenames = new Map();
+    for (const pkg of packageMetadata) {
+      const basename = path.posix.basename(pkg.importPath);
+      const previous = packageBasenames.get(basename);
+      if (previous) throw new Error(`Go test binary basename collision: ${previous} and ${pkg.importPath} both produce ${basename}.test`);
+      packageBasenames.set(basename, pkg.importPath);
+    }
+    await run(go, ['test', ...raceFlag, '-p', String(workers), '-c', '-o', `${binaryCache}${path.sep}`, './...'], 'compile-all-packages');
     const buildAndList = [];
     const failures = [];
     const workQueue = orderWorkByWeight([
@@ -317,10 +395,11 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
     const executeBuild = async work => {
       const { pkg, index } = work;
       const label = index === 0 ? 'acp' : 'workass';
-      const cachedBinary = path.join(binaryCache, `${label}.test`);
+      const importPath = packages.find(name => name.endsWith(pkg.slice(1))) ?? `workass/${pkg.slice(2)}`;
+      const cachedBinary = path.join(binaryCache, `${path.posix.basename(importPath)}.test`);
       const binary = path.join(root, `${label}.test`);
       const packageCwd = path.join(cwd, pkg.replace(/^\.\//, ''));
-      await run(go, ['test', ...raceFlag, '-c', '-o', cachedBinary, pkg], `compile-${label}`);
+      if (!packageMetadata.find(item => item.importPath === importPath)?.hasTests) throw new Error(`${pkg} was unexpectedly classified as having no test files`);
       // Pin this invocation to the compiled inode. Go replaces changed outputs
       // atomically; the hard link keeps an older binary runnable during another
       // suite's compiler pass without copying its startup cost onto each batch.
@@ -371,13 +450,12 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
       const { hasTests } = work;
       const packageCwd = work.dir;
       const label = `package-${createHash('sha256').update(work.package).digest('hex').slice(0, 16)}`;
-      const cachePath = path.join(binaryCache, cacheLabel(work.package));
-      await run(go, ['test', ...raceFlag, '-c', '-o', cachePath, work.package], `compile-${label}`);
       if (!hasTests) {
         appendJsonLine(jsonl, { event: 'package-test', package: work.package, cwd: packageCwd, code: 0, noTestFiles: true });
         summary.packageOutcomes.push({ package: work.package, action: 'pass', noTestFiles: true });
         return;
       }
+      const cachePath = path.join(binaryCache, `${path.posix.basename(work.package)}.test`);
       const tempDir = await commandTemp(`other-${work.package.replace(/[^a-zA-Z0-9_-]/g, '-')}`);
       if (interrupted) return;
       const binary = path.join(root, `${label}-run.test`);
@@ -405,7 +483,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
       if (result.code !== 0) { summary.commandFailure ??= { label: `other-go-${work.package}`, code: result.code, signal: result.signal, spawnError: result.spawnError, stdout: result.stdout, stderr: result.stderr }; failures.push(`${work.package} failed with exit ${result.code}`); }
       if (packageOutcome === 'fail' && result.code === 0) failures.push(`${work.package} test output was incomplete or failed`);
     };
-    const pool = Array.from({ length: Math.min(workers, workQueue.length) }, async (worker) => {
+    const pool = Array.from({ length: Math.min(workers, workQueue.length) }, async (_, worker) => {
       while (!interrupted) {
         const work = await takeWork();
         if (!work) return;
