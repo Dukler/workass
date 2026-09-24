@@ -599,7 +599,8 @@ test('canonical pipeline stages both platforms from one verified input and publi
   assert.match(gate, /run_gate_phase go_build go build \.\/\.\.\./);
   assert.match(gate, /run_gate_phase go_vet go vet \.\/\.\.\./);
   const suiteSource = fs.readFileSync(path.join(repoRoot, 'scripts', 'test-suite.mjs'), 'utf8');
-  assert.match(suiteSource, /args: \['test', '\.\/\.\.\.', '-count=1', '-p=2', '-parallel=2', '-json'\]/);
+  assert.match(suiteSource, /scripts\/test-go-suite\.mjs/);
+  assert.match(suiteSource, /args: \[path\.join\(repo, 'scripts\/test-go-suite\.mjs'\), '--workers', '6', '--cwd', repo\]/);
   assert.match(suiteSource, /path\.join\(repo, 'scripts\/tests'\)/);
 
   assert.match(macStage, /release-input\.mjs" verify/);

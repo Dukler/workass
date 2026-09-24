@@ -17,6 +17,11 @@ test('summarizes Node TAP reporter totals and keeps top-level and nested tests d
   assert.deepEqual(testSummary(tap), { tests: 2, topLevelTests: 1, subtests: 1, passed: 2, failed: 0, skipped: 0 });
 });
 
+test('summarizes Node spec reporter totals from complete output', () => {
+  const spec = `✔ outer (2ms)\n  ✔ inner (1ms)\n✔ parent suite\nℹ tests 2\nℹ suites 1\nℹ pass 2\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\n`;
+  assert.deepEqual(testSummary(spec), { tests: 2, topLevelTests: 1, subtests: 1, passed: 2, failed: 0, skipped: 0 });
+});
+
 test('counts Go JSON pass, fail, skip outcomes and separates nested tests', () => {
   const go = [
     { Action: 'pass', Test: 'TestOuter' },
@@ -25,6 +30,11 @@ test('counts Go JSON pass, fail, skip outcomes and separates nested tests', () =
     { Action: 'fail', Package: 'example/pkg' },
   ].map(event => JSON.stringify(event)).join('\n');
   assert.deepEqual(testSummary(go), { tests: 3, topLevelTests: 2, subtests: 1, passed: 1, failed: 1, skipped: 1 });
+});
+
+test('counts the grouped Go runner summary instead of an output tail', () => {
+  const result = { ok: true, discovered: 20, topLevelTests: 25, tests: 34, nestedRun: 5, passed: 20, failed: 0, skipped: 0, otherGo: { tests: 9, topLevelTests: 5, nestedTests: 4, passed: 9, failed: 0, skipped: 0 } };
+  assert.deepEqual(testSummary(JSON.stringify(result, null, 2)), { tests: 34, topLevelTests: 25, subtests: 9, passed: 29, failed: 0, skipped: 0 });
 });
 
 test('suite matrix runs commands concurrently and retains complete logs', async t => {
@@ -38,6 +48,16 @@ test('suite matrix runs commands concurrently and retains complete logs', async 
   assert.match(fs.readFileSync(path.join(dir, 'one.log'), 'utf8'), /both-ready/);
   assert.match(fs.readFileSync(path.join(dir, 'two.log'), 'utf8'), /both-ready/);
   assert.ok(report.results.every(result => result.code === 0));
+});
+
+test('counts TAP totals after output has exceeded the former 32 KB tail', async t => {
+  const dir = temp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const source = `process.stdout.write('x'.repeat(40000)+'\\n# tests 1\\n# pass 1\\n# fail 0\\n# skipped 0\\n')`;
+  const report = await runSuiteMatrix([fixture('long_tap', source)], { logDir: dir });
+  assert.equal(report.correctness, true);
+  assert.equal(report.results[0].tests, 1);
+  assert.equal(report.results[0].passed, 1);
+  assert.equal(fs.statSync(path.join(dir, 'long_tap.log')).size > 40000, true);
 });
 
 test('nonzero exit and spawn errors are reported without losing the other suite', async t => {

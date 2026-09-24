@@ -13,7 +13,7 @@ export function fullSuiteCommands(repo = root) {
   return [
     { name: 'renderer_tests', command: 'npm', args: ['test', '--silent'], cwd: path.join(repo, 'desktop/renderer2') },
     { name: 'shell_tests', command: 'node', args: ['--test', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo },
-    { name: 'go_tests', command: 'go', args: ['test', './...', '-count=1', '-p=2', '-parallel=2', '-json'], cwd: repo },
+    { name: 'go_tests', command: 'node', args: [path.join(repo, 'scripts/test-go-suite.mjs'), '--workers', '6', '--cwd', repo], cwd: repo },
     { name: 'script_tests', command: 'node', args: ['--test', ...files(path.join(repo, 'scripts/tests'), /\.test\.mjs$/)], cwd: repo },
   ];
 }
@@ -24,6 +24,21 @@ function files(dir, pattern) {
 
 export function testSummary(output) {
   const lines = output.split('\n');
+  let jsonSummary = lines.map(line => { try { return JSON.parse(line); } catch { return null; } }).find(event => event && typeof event.ok === 'boolean' && Number.isInteger(event.discovered) && event.otherGo);
+  if (!jsonSummary) {
+    try {
+      const parsed = JSON.parse(output.trim());
+      if (parsed && typeof parsed.ok === 'boolean' && Number.isInteger(parsed.discovered) && parsed.otherGo) jsonSummary = parsed;
+    } catch {}
+  }
+  if (jsonSummary) {
+    const tests = jsonSummary.tests ?? (jsonSummary.discovered + (jsonSummary.nestedRun ?? 0) + (jsonSummary.otherGo.tests ?? 0));
+    const passed = jsonSummary.passed + (jsonSummary.otherGo.passed ?? 0);
+    const failed = jsonSummary.failed + (jsonSummary.otherGo.failed ?? 0);
+    const skipped = jsonSummary.skipped + (jsonSummary.otherGo.skipped ?? 0);
+    const subtests = (jsonSummary.nestedRun ?? 0) + (jsonSummary.otherGo.nestedTests ?? 0);
+    return { tests, topLevelTests: jsonSummary.topLevelTests ?? (tests - subtests), subtests, passed, failed, skipped };
+  }
   const events = lines.flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
   if (events.some(event => event && typeof event.Action === 'string')) {
     const outcomes = events.filter(event => event.Test && ['pass', 'fail', 'skip'].includes(event.Action));
@@ -34,10 +49,10 @@ export function testSummary(output) {
       failed: outcomes.filter(e => e.Action === 'fail').length,
       skipped: outcomes.filter(e => e.Action === 'skip').length };
   }
-  const totals = Object.fromEntries([...output.matchAll(/^# (tests|pass|fail|cancelled|skipped)\s+(\d+)\s*$/gm)].map(m => [m[1], Number(m[2])]));
+  const totals = Object.fromEntries([...output.matchAll(/^(?:#|ℹ)\s*(tests|pass|fail|cancelled|skipped)\s+(\d+)\s*$/gm)].map(m => [m[1], Number(m[2])]));
   if (totals.tests !== undefined) {
-    const topLevelTests = lines.filter(line => /^# Subtest:/.test(line)).length;
-    const allSubtests = lines.filter(line => /^\s+# Subtest:/.test(line)).length;
+    const topLevelTests = lines.filter(line => /^# Subtest:/.test(line)).length || lines.filter(line => /^(?:✔ |✖ |﹣ ).+ \([\d.]+(?:ms|s)\)/.test(line)).length;
+    const allSubtests = lines.filter(line => /^(?:\s+# Subtest:|\s+✔ |\s+✖ |\s+﹣ )/.test(line)).length;
     const skipped = totals.skipped ?? 0;
     const failed = totals.fail ?? 0;
     return { tests: totals.tests, topLevelTests: topLevelTests || null,
@@ -102,8 +117,12 @@ export async function runSuiteMatrix(commands, { logDir = fs.mkdtempSync(path.jo
       child.on('error', error => { spawnError = error; });
       child.on('close', (code, signal) => {
         children.delete(child);
-        const summary = testSummary(output);
-        const finish = () => resolve({ name: spec.name, code: sinkError ? 1 : (code ?? 127), signal, elapsedMs: performance.now() - childStarted, ...summary, logPath, spawnError: spawnError?.message, sinkError: sinkError?.message, failureDetail: code === 0 && !sinkError ? undefined : failureDetail(output) });
+        const finish = () => {
+          let completeOutput = output;
+          try { completeOutput = fs.readFileSync(logPath, 'utf8'); } catch {}
+          const summary = testSummary(completeOutput);
+          resolve({ name: spec.name, code: sinkError ? 1 : (code ?? 127), signal, elapsedMs: performance.now() - childStarted, ...summary, logPath, spawnError: spawnError?.message, sinkError: sinkError?.message, failureDetail: code === 0 && !sinkError ? undefined : failureDetail(completeOutput) });
+        };
         if (sinkError) { log.destroy(); finish(); }
         else log.end(finish);
       });
