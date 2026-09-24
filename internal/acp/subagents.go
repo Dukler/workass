@@ -24,20 +24,22 @@ const (
 // Workass tools CLI. ParentChatID/ParentTabID identify the calling ACP
 // session without exposing a transient session id before session/new returns.
 type SubagentSpawnOptions struct {
-	OwnerKey         string `json:"ownerKey,omitempty"`
-	ParentChatID     string `json:"parentChatId,omitempty"`
-	ParentTabID      string `json:"parentTabId,omitempty"`
-	RootJobIDHint    string `json:"rootJobIdHint,omitempty"`
-	Prompt           string `json:"prompt"`
-	Label            string `json:"label,omitempty"`
-	ProviderID       string `json:"providerId,omitempty"`
-	ModelID          string `json:"modelId,omitempty"`
-	Effort           string `json:"effort,omitempty"`
-	ModeID           string `json:"modeId,omitempty"`
-	CWD              string `json:"cwd,omitempty"`
-	Profile          string `json:"profile,omitempty"`
-	PermissionIntent string `json:"permissionIntent,omitempty"`
-	RetryOf          string `json:"retryOf,omitempty"`
+	OwnerKey          string `json:"ownerKey,omitempty"`
+	ParentChatID      string `json:"parentChatId,omitempty"`
+	ParentTabID       string `json:"parentTabId,omitempty"`
+	RootJobIDHint     string `json:"rootJobIdHint,omitempty"`
+	OriginLaneID      string `json:"-"`
+	OriginOperationID string `json:"-"`
+	Prompt            string `json:"prompt"`
+	Label             string `json:"label,omitempty"`
+	ProviderID        string `json:"providerId,omitempty"`
+	ModelID           string `json:"modelId,omitempty"`
+	Effort            string `json:"effort,omitempty"`
+	ModeID            string `json:"modeId,omitempty"`
+	CWD               string `json:"cwd,omitempty"`
+	Profile           string `json:"profile,omitempty"`
+	PermissionIntent  string `json:"permissionIntent,omitempty"`
+	RetryOf           string `json:"retryOf,omitempty"`
 }
 
 type subagentFollowup struct {
@@ -181,6 +183,10 @@ type SubagentRun struct {
 	acceptingMessages          bool
 	receiptCommitted           bool
 	attentionDeliveredSequence int64
+	completionWaiters          int
+	completionSuppressed       bool
+	originLaneID               string
+	originOperationID          string
 }
 
 // AgentCatalog exposes the exact daemon-owned provider/model/effort/mode
@@ -241,6 +247,20 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 		label = "Subagent"
 	}
 
+	originSessionID := defaults.SessionID
+	if parent != nil {
+		originSessionID = parent.SessionID
+	}
+	originLaneID := strings.TrimSpace(opts.OriginLaneID)
+	originOperationID := strings.TrimSpace(opts.OriginOperationID)
+	if originOperationID == "" && parent != nil {
+		originOperationID = strings.TrimSpace(parent.startOpts.OperationID)
+	}
+	if originLaneID == "" {
+		if lane := m.providerLaneForSessionID(originSessionID); lane != nil {
+			originLaneID = string(lane.identity.ID)
+		}
+	}
 	now := time.Now().UTC()
 	m.mu.Lock()
 	activeParent := parent != nil && m.runningOwnerJobLocked(parent, ownerChatID, ownerTabID)
@@ -292,6 +312,7 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 		ParentJobID: parentJobID, RootJobID: rootJobID,
 		Adopted: adopted, AdoptedAt: adoptedAt,
 		ParentSessionID: parentSessionID, RootSessionID: rootSessionID,
+		originLaneID: originLaneID, originOperationID: originOperationID,
 		StartedAt: now.Format(time.RFC3339Nano), LastActivityAt: now.Format(time.RFC3339Nano),
 		ProgressSequence: 1, cancel: cancel, done: make(chan struct{}), prompt: prompt,
 		parentChatID: ownerChatID, parentTabID: ownerTabID,
@@ -794,9 +815,10 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 	rootJobID := run.RootJobID
 	parentChatID, parentTabID := run.parentChatID, run.parentTabID
 	receipt := copySubagentRun(run)
+	deliverCompletion := (status == "done" || status == "failed") && run.completionWaiters == 0 && !run.completionSuppressed && !m.resetting
 	m.mu.Unlock()
 	m.settleSubagentSpawnedWork(parentTabID, parentChatID, receipt)
-	m.persistSubagentReceipt(parentChatID, parentTabID, receipt)
+	persisted := m.persistSubagentReceipt(parentChatID, parentTabID, receipt, deliverCompletion)
 	m.mu.Lock()
 	run.receiptCommitted = true
 	m.mu.Unlock()
@@ -814,7 +836,19 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 	}
 	m.mu.Lock()
 	m.signalSubagentWaitersLocked()
+	suppressed := run.completionSuppressed || m.resetting
 	m.mu.Unlock()
+	if persisted && deliverCompletion {
+		completionReceipt := receiptFromRun(receipt)
+		completionReceipt.ParentChatID, completionReceipt.ParentTabID = parentChatID, parentTabID
+		completionReceipt.DeliveryPending = true
+		if suppressed {
+			completionReceipt.DeliveryPending = false
+			_ = m.writeSubagentReceipt(parentTabID, parentChatID, completionReceipt)
+		} else {
+			m.deliverSubagentCompletion(parentTabID, parentChatID, completionReceipt)
+		}
+	}
 }
 
 func (m *Manager) emitSubagentHeader(parentJobID, id, label, provider, model, status, output string) {
@@ -1042,6 +1076,18 @@ func (m *Manager) WaitSubagent(ctx context.Context, ownerKey, parentChatID, pare
 		return SubagentRun{}, errors.New("no running Workass turn owns this subagent request")
 	}
 	id = strings.TrimSpace(id)
+	waiting := false
+	m.mu.Lock()
+	if run := m.subagents[id]; run != nil && m.addressSubagentLocked(run, parent, chatID, tabID) && !subagentRunSettled(run) {
+		run.completionWaiters++
+		waiting = true
+	}
+	m.mu.Unlock()
+	defer func() {
+		if waiting {
+			m.releaseSubagentCompletionWaiter(id)
+		}
+	}()
 	deadline, stop := subagentWaitDeadline(timeout)
 	defer stop()
 	for {
@@ -1057,6 +1103,12 @@ func (m *Manager) WaitSubagent(ctx context.Context, ownerKey, parentChatID, pare
 		if snapshot.NeedsAttention && run.Attention != nil && run.Attention.Sequence > run.attentionDeliveredSequence {
 			run.attentionDeliveredSequence = run.Attention.Sequence
 		}
+		if settled || snapshot.NeedsAttention {
+			if waiting && run.completionWaiters > 0 {
+				run.completionWaiters--
+				waiting = false
+			}
+		}
 		m.mu.Unlock()
 		if settled || snapshot.NeedsAttention {
 			return snapshot, nil
@@ -1069,6 +1121,14 @@ func (m *Manager) WaitSubagent(ctx context.Context, ownerKey, parentChatID, pare
 			return SubagentRun{}, errors.New("timed out waiting for subagent; it is still running")
 		}
 	}
+}
+
+func (m *Manager) releaseSubagentCompletionWaiter(id string) {
+	m.mu.Lock()
+	if run := m.subagents[id]; run != nil && run.completionWaiters > 0 {
+		run.completionWaiters--
+	}
+	m.mu.Unlock()
 }
 
 // WaitSubagents waits for the first or all selected children while always
@@ -1098,6 +1158,22 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 	if len(cleanIDs) == 0 {
 		return nil, errors.New("at least one subagent id is required")
 	}
+	waitingIDs := make(map[string]bool)
+	m.mu.Lock()
+	for _, id := range cleanIDs {
+		if run := m.subagents[id]; run != nil && m.addressSubagentLocked(run, parent, chatID, tabID) && !subagentRunSettled(run) {
+			run.completionWaiters++
+			waitingIDs[id] = true
+		}
+	}
+	m.mu.Unlock()
+	defer func() {
+		for id, waiting := range waitingIDs {
+			if waiting {
+				m.releaseSubagentCompletionWaiter(id)
+			}
+		}
+	}()
 	deadline, stop := subagentWaitDeadline(timeout)
 	defer stop()
 	for {
@@ -1109,6 +1185,7 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 		attention := subagentsNeedingAttention(running)
 		ready := len(attention) > 0 || returnWhen == "first" && len(completed) > 0 || returnWhen == "all" && len(running) == 0
 		if ready {
+			completed, running, attention = m.finishSubagentWait(parent, chatID, tabID, cleanIDs, waitingIDs)
 			return map[string]any{
 				"completed": completed, "running": running, "attention": attention,
 				"needsAttention": len(attention) > 0, "timedOut": false,
@@ -1119,17 +1196,60 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 			return nil, ctx.Err()
 		case <-wake:
 		case <-deadline:
-			completed, running, err = m.subagentSnapshotsForOwner(parent, chatID, tabID, cleanIDs)
-			if err != nil {
-				return nil, err
-			}
-			attention = subagentsNeedingAttention(running)
+			completed, running, attention = m.finishSubagentWait(parent, chatID, tabID, cleanIDs, waitingIDs)
 			return map[string]any{
 				"completed": completed, "running": running, "attention": attention,
 				"needsAttention": len(attention) > 0, "timedOut": true,
 			}, nil
 		}
 	}
+}
+
+func (m *Manager) finishSubagentWait(parent *Job, chatID, tabID string, ids []string, waitingIDs map[string]bool) ([]SubagentRun, []SubagentRun, []SubagentRun) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	completed := make([]SubagentRun, 0, len(ids))
+	running := make([]SubagentRun, 0, len(ids))
+	for _, id := range ids {
+		run := m.subagents[id]
+		if !m.addressSubagentLocked(run, parent, chatID, tabID) {
+			continue
+		}
+		snapshot := copySubagentRun(run)
+		if snapshot.NeedsAttention && run.Attention != nil && run.Attention.Sequence > run.attentionDeliveredSequence {
+			run.attentionDeliveredSequence = run.Attention.Sequence
+		}
+		if subagentRunSettled(run) {
+			completed = append(completed, snapshot)
+		} else {
+			running = append(running, snapshot)
+		}
+	}
+	for id, waiting := range waitingIDs {
+		if waiting {
+			if run := m.subagents[id]; run != nil && run.completionWaiters > 0 {
+				run.completionWaiters--
+			}
+			waitingIDs[id] = false
+		}
+	}
+	return completed, running, subagentsNeedingAttention(running)
+}
+
+func (m *Manager) suppressSubagentCompletionsForParent(parentJobID, operationID string) {
+	parentJobID = strings.TrimSpace(parentJobID)
+	operationID = strings.TrimSpace(operationID)
+	if parentJobID == "" && operationID == "" {
+		return
+	}
+	m.mu.Lock()
+	for _, run := range m.subagents {
+		if run != nil && run.Status == "running" &&
+			((parentJobID != "" && run.RootJobID == parentJobID) || (operationID != "" && run.originOperationID == operationID)) {
+			run.completionSuppressed = true
+		}
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) subagentSnapshotsForOwner(parent *Job, chatID, tabID string, ids []string) ([]SubagentRun, []SubagentRun, error) {

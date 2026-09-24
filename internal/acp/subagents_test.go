@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +26,130 @@ func TestSubagentModelLabelBuildsTurnosChip(t *testing.T) {
 		if got := subagentModelLabel(tc.name, tc.model, tc.effort); got != tc.want {
 			t.Errorf("subagentModelLabel(%q,%q,%q) = %q, want %q", tc.name, tc.model, tc.effort, got, tc.want)
 		}
+	}
+}
+
+func TestTrackedSubagentCompletionDeliveryIsDurableAndRecoversOnlyPending(t *testing.T) {
+	stateDir := t.TempDir()
+	manager := NewManager(Options{StateDir: stateDir})
+	defer manager.Reset()
+	run := SubagentRun{ID: "receipt-new", Status: "done", FinishedAt: "2026-09-24T10:00:00Z", ReceiptID: "receipt-new"}
+	if !manager.persistSubagentReceipt("owner-chat", "owner-tab", run, true) {
+		t.Fatal("pending completion receipt was not durably written")
+	}
+	historical := SubagentRun{ID: "receipt-old", Status: "done", FinishedAt: "2026-09-23T10:00:00Z", ReceiptID: "receipt-old"}
+	if !manager.persistSubagentReceipt("owner-chat", "owner-tab", historical, false) {
+		t.Fatal("historical receipt was not durably written")
+	}
+	firstCalls := 0
+	if err := manager.InstallSubagentCompletionObserver(func(tabID, chatID string, receipt SubagentReceipt) error {
+		firstCalls++
+		if tabID != "owner-tab" || chatID != "owner-chat" || receipt.ReceiptID != "receipt-new" || !receipt.DeliveryPending {
+			t.Fatalf("recovered completion owner/receipt = %q %q %#v", tabID, chatID, receipt)
+		}
+		return errors.New("simulate actor admission failure")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending := manager.pendingSubagentCompletions()
+	if firstCalls != 1 || len(pending) != 1 || pending[0].DeliveryError != "simulate actor admission failure" || len(pending[0].DeliveryError) > 300 {
+		t.Fatalf("failed delivery should remain pending with a bounded reason: calls=%d pending=%#v", firstCalls, pending)
+	}
+	manager.Reset()
+
+	restarted := NewManager(Options{StateDir: stateDir})
+	defer restarted.Reset()
+	secondCalls := 0
+	if err := restarted.InstallSubagentCompletionObserver(func(tabID, chatID string, receipt SubagentReceipt) error {
+		secondCalls++
+		if tabID != "owner-tab" || chatID != "owner-chat" || receipt.ReceiptID != "receipt-new" {
+			t.Fatalf("restart delivered to wrong owner/receipt: %q %q %#v", tabID, chatID, receipt)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if secondCalls != 1 || len(restarted.pendingSubagentCompletions()) != 0 {
+		t.Fatalf("acknowledged receipt was not settled once: calls=%d pending=%#v", secondCalls, restarted.pendingSubagentCompletions())
+	}
+}
+
+func TestTrackedSubagentCompletionWaitSuppressesContinuation(t *testing.T) {
+	manager, _, session, _, _, _ := newSubagentLifecycleFixture(t, "active-wait-suppresses-delivery")
+	calls := 0
+	if err := manager.InstallSubagentCompletionObserver(func(string, string, SubagentReceipt) error {
+		calls++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run := &SubagentRun{
+		ID: "waited-child", Status: "running", parentChatID: session.ChatID, parentTabID: session.TabID,
+		completionWaiters: 1, done: make(chan struct{}),
+	}
+	manager.mu.Lock()
+	manager.subagents[run.ID] = run
+	manager.bindAgentOwnerLocked("wait-owner", session.ChatID, session.TabID)
+	manager.mu.Unlock()
+	manager.finishSubagent(run, nil, nil)
+	if calls != 0 {
+		t.Fatalf("active wait got a duplicate continuation: %d", calls)
+	}
+	receipts := manager.ListSubagentReceipts("wait-owner", session.ChatID, session.TabID, 10)
+	if len(receipts) != 1 || receipts[0].ReceiptID != run.ID {
+		t.Fatalf("active wait did not retain the terminal result: %#v", receipts)
+	}
+}
+
+func TestTrackedSubagentCompletionNotifiesAfterReceiptCommit(t *testing.T) {
+	manager, _, session, _, _, _ := newSubagentLifecycleFixture(t, "idle-parent-completion-delivery")
+	calls := 0
+	if err := manager.InstallSubagentCompletionObserver(func(tabID, chatID string, receipt SubagentReceipt) error {
+		calls++
+		if tabID != session.TabID || chatID != session.ChatID || !receipt.DeliveryPending || receipt.Status != "done" {
+			t.Fatalf("completion delivery owner/receipt = %q %q %#v", tabID, chatID, receipt)
+		}
+		if pending := manager.pendingSubagentCompletions(); len(pending) != 1 || pending[0].ReceiptID != receipt.ReceiptID {
+			t.Fatalf("completion notified before durable receipt commit: %#v", pending)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run := &SubagentRun{
+		ID: "idle-child", Status: "running", parentChatID: session.ChatID, parentTabID: session.TabID,
+		done: make(chan struct{}),
+	}
+	manager.mu.Lock()
+	manager.subagents[run.ID] = run
+	manager.mu.Unlock()
+	manager.finishSubagent(run, nil, nil)
+	if calls != 1 || len(manager.pendingSubagentCompletions()) != 0 {
+		t.Fatalf("idle completion was not delivered and acknowledged once: calls=%d pending=%#v", calls, manager.pendingSubagentCompletions())
+	}
+}
+
+func TestTrackedSubagentCompletionSuppressedByParentStop(t *testing.T) {
+	manager, _, session, ownerKey, _, _ := newSubagentLifecycleFixture(t, "parent-stop-suppresses-delivery")
+	manager.mu.Lock()
+	manager.bindAgentOwnerLocked(ownerKey, session.ChatID, session.TabID)
+	run := &SubagentRun{
+		ID: "stopped-parent-child", Status: "running", RootJobID: "stopped-parent",
+		parentChatID: session.ChatID, parentTabID: session.TabID, done: make(chan struct{}),
+	}
+	manager.subagents[run.ID] = run
+	manager.mu.Unlock()
+	calls := 0
+	if err := manager.InstallSubagentCompletionObserver(func(string, string, SubagentReceipt) error {
+		calls++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager.suppressSubagentCompletionsForParent("stopped-parent", "")
+	manager.finishSubagent(run, nil, nil)
+	if calls != 0 || len(manager.pendingSubagentCompletions()) != 0 {
+		t.Fatalf("stopped parent completion was resurrected: callbacks=%d pending=%#v", calls, manager.pendingSubagentCompletions())
 	}
 }
 

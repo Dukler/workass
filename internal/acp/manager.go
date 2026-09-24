@@ -103,33 +103,35 @@ type Manager struct {
 	subagentSeq     int64
 	agentOwnerSeq   int64
 
-	jobMu                 sync.Mutex
-	jobEndMu              sync.RWMutex
-	jobEndFunc            func(tabID, chatID string)
-	sessionRefreshMu      sync.RWMutex
-	sessionRefreshFunc    func(payload map[string]any)
-	updateMu              sync.Mutex
-	updateCheckMu         sync.Mutex
-	updateCheckRunning    bool
-	updateCheckCancel     context.CancelFunc
-	updateCheckWG         sync.WaitGroup
-	planUsageRefreshMu    sync.Mutex
-	planUsageRefreshes    map[string]*planUsageRefreshRun
-	planUsageRefreshWG    sync.WaitGroup
-	receiptMu             sync.Mutex
-	harnessTurns          *harnessTurnStore
-	spawnedWorkMu         sync.Mutex
-	spawnedWorkCommitMu   sync.Mutex
-	spawnedWork           map[string]*spawnedWorkRecord
-	spawnedCandidates     map[string]spawnedWorkCandidate
-	spawnedWorkObserverMu sync.RWMutex
-	spawnedWorkObserver   func(string, string, []SpawnedWorkItem) (SpawnedWorkActorProjection, error)
-	resetMu               sync.Mutex
-	jobWG                 sync.WaitGroup
-	resetting             bool
-	loopStop              chan struct{}
-	loopStopOnce          sync.Once
-	loopWG                sync.WaitGroup
+	jobMu                        sync.Mutex
+	jobEndMu                     sync.RWMutex
+	jobEndFunc                   func(tabID, chatID string)
+	sessionRefreshMu             sync.RWMutex
+	sessionRefreshFunc           func(payload map[string]any)
+	updateMu                     sync.Mutex
+	updateCheckMu                sync.Mutex
+	updateCheckRunning           bool
+	updateCheckCancel            context.CancelFunc
+	updateCheckWG                sync.WaitGroup
+	planUsageRefreshMu           sync.Mutex
+	planUsageRefreshes           map[string]*planUsageRefreshRun
+	planUsageRefreshWG           sync.WaitGroup
+	receiptMu                    sync.Mutex
+	subagentCompletionObserverMu sync.RWMutex
+	subagentCompletionObserver   func(tabID, chatID string, receipt SubagentReceipt) error
+	harnessTurns                 *harnessTurnStore
+	spawnedWorkMu                sync.Mutex
+	spawnedWorkCommitMu          sync.Mutex
+	spawnedWork                  map[string]*spawnedWorkRecord
+	spawnedCandidates            map[string]spawnedWorkCandidate
+	spawnedWorkObserverMu        sync.RWMutex
+	spawnedWorkObserver          func(string, string, []SpawnedWorkItem) (SpawnedWorkActorProjection, error)
+	resetMu                      sync.Mutex
+	jobWG                        sync.WaitGroup
+	resetting                    bool
+	loopStop                     chan struct{}
+	loopStopOnce                 sync.Once
+	loopWG                       sync.WaitGroup
 	// updateGateMu is the admission barrier for an app-owned release handoff.
 	// An explicitly authorized release snapshots active work and closes new admission; it
 	// never waits for foreground or asynchronous work to become terminal. Once
@@ -428,15 +430,37 @@ func (m *Manager) SetSessionRefreshFunc(fn func(payload map[string]any)) {
 
 // SetChatEnvObserver installs the actor ingress for actor-managed chats. The
 // observer must durably commit the typed Entorno snapshot before returning;
-// Manager then publishes no chat:env event for that snapshot. Standalone ACP
+// Manager then publishes no chat:env event for that snapshot. An optional
+// completion observer installs the actor ingress for durable tracked-subagent
+// receipts and replays only receipts still pending delivery. Standalone ACP
 // fixtures retain direct publication when no daemon actor runtime is installed.
-func (m *Manager) SetChatEnvObserver(fn func(ChatEnvPayload) error) {
+func (m *Manager) SetChatEnvObserver(
+	fn func(ChatEnvPayload) error,
+	completionObservers ...func(tabID, chatID string, receipt SubagentReceipt) error,
+) {
 	if m == nil {
+		return
+	}
+	if len(completionObservers) > 1 {
 		return
 	}
 	m.chatEnvObserverMu.Lock()
 	m.chatEnvObserver = fn
 	m.chatEnvObserverMu.Unlock()
+	if fn == nil || len(completionObservers) == 1 {
+		m.subagentCompletionObserverMu.Lock()
+		if fn == nil {
+			m.subagentCompletionObserver = nil
+		} else {
+			m.subagentCompletionObserver = completionObservers[0]
+		}
+		m.subagentCompletionObserverMu.Unlock()
+		if fn != nil {
+			for _, receipt := range m.pendingSubagentCompletions() {
+				m.deliverSubagentCompletion(receipt.ParentTabID, receipt.ParentChatID, receipt)
+			}
+		}
+	}
 }
 
 // SetChatEnvRestorer lets the actor runtime rehydrate a previously committed
@@ -990,10 +1014,10 @@ func (m *Manager) Reset() bool {
 	m.resetMu.Lock()
 	defer m.resetMu.Unlock()
 	m.loopStopOnce.Do(func() { close(m.loopStop) })
-	m.loopWG.Wait()
 	m.mu.Lock()
 	m.resetting = true
 	m.mu.Unlock()
+	m.loopWG.Wait()
 	m.stopScheduledProviderUpdateCheck()
 	m.stopPlanUsageRefreshes()
 	m.cancelAllSubagents(5 * time.Second)
@@ -1427,7 +1451,11 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	defer job.settleInputDispatch()
 	activeBridge := bridge
 	defer func() {
-		m.adoptSubagentsForParent(firstNonEmpty(job.VisibleJobID, job.ID))
+		parentJobID := firstNonEmpty(job.VisibleJobID, job.ID)
+		if job.StopReason == "cancelled" {
+			m.suppressSubagentCompletionsForParent(parentJobID, job.startOpts.OperationID)
+		}
+		m.adoptSubagentsForParent(parentJobID)
 		activeBridge.flushJobBuffers(job)
 		// A Workass CLI question is owned by this exact foreground turn. Settle it
 		// before removing the job so its terminal event can still cross the actor
