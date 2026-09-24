@@ -83,6 +83,19 @@ test-infrastructure changes only.
    suite command and focused commands for iterative checks. Preserve existing
    trust in scoped handoff evidence and the single acceptance-review policy.
    Keep referenced script names compatible; do not add agent time budgets.
+7. On macOS, provision one disposable APFS RAM filesystem for fixture data.
+   Measured filesystem contention kept a correct full run at 26.405s;
+   the same chat-package assertions took 14.41s on the ordinary temporary
+   filesystem and 0.375s on the disposable volume. Keep all real filesystem
+   operations, sync calls, process boundaries, and recovery assertions.
+   Keep compiler caches and pinned executables on the host filesystem.
+   Allocate only a new RAM device, verify its physical-store ownership before
+   using its mount, and clean up only that exact device. Include provisioning,
+   fixture removal, and detach in the suite's total elapsed time, including on
+   interruption. Fail visibly if provisioning or cleanup fails. Other platforms
+   use fresh ordinary temporary directories; the ten-second acceptance claim
+   remains specific to the measured Mac host. No pre-mounted volume or saved
+   test results may be required to meet the target.
 
 ## Closed implementation handoffs
 
