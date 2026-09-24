@@ -33,6 +33,33 @@ scope. Log suggestions separately; do not act on them.
 - A child handoff never authorizes publication or update activation by itself.
   Apply the current-human authorization rules below for those actions.
 
+## Keep the test suite fast and useful
+- The full automated suite must finish within 10 seconds on the current Mac
+  reference host with normal compiler caching and fresh execution (`-count=1`).
+  Measure from command start through fixture provisioning and child/volume
+  cleanup. Include renderer, shell, all Go packages, JS script tests, and every
+  shell contract. Time typecheck, build, vet, and package separately; they do
+  not count toward the whole-suite 10-second target.
+- Use virtual clocks or stdlib `synctest` for timing assertions where
+  applicable. Use explicit barriers/events for async readiness; never use
+  arbitrary wall-clock sleeps. Preserve real ACP stdio/process integration and
+  assertions against actual production paths, not copied logic.
+- Each fixture owns and cleans its timers, subprocesses, pipes, servers, and
+  temporary data. Cancel and join children/readers before cleanup or terminal
+  receipts; cover pending-startup cancellation. Parallelize only genuinely
+  isolated environment/global state, use bounded workers, and memoize shared
+  async setup.
+- Never delete assertions, add skips to hit the budget, reuse cached pass
+  results, retry until green, shorten production/safety timeouts, or kill work
+  at 10 seconds. Report existing conditional skips.
+- For test/harness changes, reuse one measured full-suite result from the
+  owning gate or Luna handoff; do not duplicate full gates for review. If
+  performance regresses, inspect the logged critical path and make one bounded
+  fix; do not blindly rerun or profile unrelated code. Docs-only changes need
+  `git diff --check` and no test execution.
+- See [docs/TEST-SUITE-10S-SPEC.md](docs/TEST-SUITE-10S-SPEC.md) for design and
+  acceptance.
+
 ## Hard rules
 - Update activation is current-human-authorized only (user law 2026-09-03,
   superseding the click-only wording from 2026-08-25). A UI click authorizes
