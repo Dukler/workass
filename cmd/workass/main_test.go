@@ -1537,7 +1537,15 @@ func TestWireLostTerminalWaitsForHarnessOrExplicitCancel(t *testing.T) {
 		t.Fatalf("job:start error: %s", *startReply.Error)
 	}
 	jobID := fieldString(mapFromAnyMain(startReply.Result), "id")
-	time.Sleep(150 * time.Millisecond)
+	const streamedMarker = "complete visibly over wire"
+	client.waitFor(t, 5*time.Second, func(msg wsMessage) bool {
+		if msg.T != "event" || msg.Channel != "job:event" {
+			return false
+		}
+		payload, _ := msg.Payload.(map[string]any)
+		return payload["type"] == "data" && payload["id"] == jobID &&
+			strings.Contains(fmt.Sprint(payload["chunk"]), streamedMarker)
+	})
 	if running, ok := manager.RunningJobForChat(tabID, chatID); !ok || fieldString(running, "id") != jobID {
 		t.Fatalf("Workass invented completion for a pending harness prompt: running=%#v ok=%v", running, ok)
 	}
@@ -1551,7 +1559,7 @@ func TestWireLostTerminalWaitsForHarnessOrExplicitCancel(t *testing.T) {
 	if ended["status"] != "failed" || ended["stopReason"] != "cancelled" || ended["code"] != json.Number("130") {
 		t.Fatalf("explicitly cancelled wire end = %#v", ended)
 	}
-	if result := fieldString(ended, "result"); !strings.Contains(result, "[mock:lost-terminal] complete visibly over wire") {
+	if result := fieldString(ended, "result"); !strings.Contains(result, "[mock:lost-terminal] "+streamedMarker) {
 		t.Fatalf("cancelled wire result lost streamed output: %q", result)
 	}
 }
