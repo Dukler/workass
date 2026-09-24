@@ -2778,6 +2778,24 @@ func TestWireProviderUpdatesAndMockAppUpdateReplayToLateClient(t *testing.T) {
 	if detected["ok"] != true {
 		t.Fatalf("detect providers = %#v", detected)
 	}
+	versionDeadline := time.Now().Add(2 * time.Second)
+	for {
+		ready := false
+		for _, provider := range manager.ProvidersList() {
+			if provider["id"] != "qwen" {
+				continue
+			}
+			version, ok := provider["cliVersion"].(*acp.CLIVersion)
+			ready = ok && version.Version == "0.58.1"
+		}
+		if ready {
+			break
+		}
+		if time.Now().After(versionDeadline) {
+			t.Fatalf("installed qwen version metadata was not ready before update check: %#v", manager.ProvidersList())
+		}
+		time.Sleep(time.Millisecond)
+	}
 	manager.CheckProviderUpdates(context.Background())
 
 	server := httptest.NewServer(httpserve.New(renderer, hub, nil))

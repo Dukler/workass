@@ -422,27 +422,177 @@ func (m *Manager) stopScheduledProviderUpdateCheck() {
 	m.updateCheckWG.Wait()
 }
 
-func (m *Manager) startInstalledCLIVersionCheck(parent context.Context, providerID string) <-chan *CLIVersion {
-	if _, ok := cliVersionCommandForProvider(providerID); !ok {
-		return nil
+func (m *Manager) beginInstalledCLIVersionGeneration(providerID string) uint64 {
+	providerID = normalizeProviderID(providerID)
+	m.installedVersionMu.Lock()
+	defer m.installedVersionMu.Unlock()
+	m.mu.Lock()
+	resetting := m.resetting
+	m.mu.Unlock()
+	if resetting {
+		return 0
 	}
-	ch := make(chan *CLIVersion, 1)
-	go func() {
-		ch <- m.detectInstalledCLIVersion(parent, providerID)
-	}()
-	return ch
+	if m.installedVersionGeneration == nil {
+		m.installedVersionGeneration = make(map[string]uint64)
+	}
+	if m.installedVersionCancel == nil {
+		m.installedVersionCancel = make(map[string]context.CancelFunc)
+	}
+	if cancel := m.installedVersionCancel[providerID]; cancel != nil {
+		cancel()
+		delete(m.installedVersionCancel, providerID)
+	}
+	m.installedVersionGeneration[providerID]++
+	return m.installedVersionGeneration[providerID]
 }
 
-func collectInstalledCLIVersion(ch <-chan *CLIVersion) *CLIVersion {
-	if ch == nil {
+func (m *Manager) startInstalledCLIVersionCheck(parent context.Context, providerID, resolved string, generation uint64) (<-chan *CLIVersion, uint64) {
+	if _, ok := cliVersionCommandForProvider(providerID); !ok {
+		return nil, 0
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	m.installedVersionMu.Lock()
+	if m.installedVersionGeneration == nil {
+		m.installedVersionGeneration = make(map[string]uint64)
+	}
+	if m.installedVersionCancel == nil {
+		m.installedVersionCancel = make(map[string]context.CancelFunc)
+	}
+	id := normalizeProviderID(providerID)
+	m.mu.Lock()
+	resetting := m.resetting
+	m.mu.Unlock()
+	if resetting || generation == 0 || m.installedVersionGeneration[id] != generation {
+		m.installedVersionMu.Unlock()
+		cancel()
+		return nil, 0
+	}
+	if old := m.installedVersionCancel[id]; old != nil {
+		old()
+	}
+	m.installedVersionCancel[id] = cancel
+	m.installedVersionWG.Add(1)
+	m.installedVersionMu.Unlock()
+	ch := make(chan *CLIVersion, 1)
+	go func() {
+		defer m.installedVersionWG.Done()
+		ch <- m.detectInstalledCLIVersionAt(ctx, providerID, resolved)
+	}()
+	return ch, generation
+}
+
+func (m *Manager) detectInstalledCLIVersionAt(parent context.Context, providerID, resolved string) *CLIVersion {
+	version, err := m.detectInstalledCLIVersionWithTimeoutAt(parent, providerID, cliVersionTimeout, resolved)
+	if err != nil {
 		return nil
+	}
+	return version
+}
+
+func (m *Manager) finishInstalledCLIVersionCheck(ch <-chan *CLIVersion, result *providerDetectionResult) {
+	if ch == nil {
+		return
 	}
 	select {
 	case version := <-ch:
-		return version
+		result.CLIVersion = version
+		m.finishInstalledCLIVersionGeneration(result.ProviderID, result.versionCheckGeneration)
 	default:
-		return nil
+		result.pendingCLIVersion = ch
 	}
+}
+
+func (m *Manager) finishInstalledCLIVersionGeneration(providerID string, generation uint64) {
+	m.installedVersionMu.Lock()
+	if m.installedVersionGeneration[providerID] == generation {
+		if cancel := m.installedVersionCancel[providerID]; cancel != nil {
+			cancel()
+			delete(m.installedVersionCancel, providerID)
+		}
+	}
+	m.installedVersionMu.Unlock()
+}
+
+func (m *Manager) watchLateInstalledCLIVersion(ch <-chan *CLIVersion, result providerDetectionResult) {
+	providerID := normalizeProviderID(result.ProviderID)
+	m.installedVersionMu.Lock()
+	m.mu.Lock()
+	admitted := !m.resetting && m.installedVersionGeneration[providerID] == result.versionCheckGeneration
+	m.mu.Unlock()
+	if !admitted {
+		m.installedVersionMu.Unlock()
+		m.finishInstalledCLIVersionGeneration(providerID, result.versionCheckGeneration)
+		return
+	}
+	m.installedVersionWG.Add(1)
+	m.installedVersionMu.Unlock()
+	go func() {
+		defer m.installedVersionWG.Done()
+		version := <-ch
+		m.installedVersionMu.Lock()
+		current := m.installedVersionGeneration[providerID] == result.versionCheckGeneration
+		if !current || version == nil {
+			m.installedVersionMu.Unlock()
+			m.finishInstalledCLIVersionGeneration(providerID, result.versionCheckGeneration)
+			return
+		}
+		m.mu.Lock()
+		runtime := m.providers[providerID]
+		if runtime == nil || runtime.Config.DisabledByUser || !sameProviderLaunchConfig(runtime.Config, result.config) || m.resetting {
+			m.mu.Unlock()
+			m.installedVersionMu.Unlock()
+			m.finishInstalledCLIVersionGeneration(providerID, result.versionCheckGeneration)
+			return
+		}
+		versionChanged := runtime.CLIVersion != nil && runtime.CLIVersion.Version != "" && version.Version != "" && runtime.CLIVersion.Version != version.Version
+		refresh := versionChanged || runtime.CatalogRefreshPending
+		runtime.CLIVersion = copyCLIVersion(version)
+		if refresh {
+			invalidateProviderCatalogLocked(runtime)
+			runtime.CatalogRefreshPending = false
+		}
+		m.mu.Unlock()
+		m.installedVersionMu.Unlock()
+		m.finishInstalledCLIVersionGeneration(providerID, result.versionCheckGeneration)
+		if refresh {
+			m.refreshProviderCatalogNow(context.Background(), providerID)
+		}
+		m.emit("providers:list", m.ProvidersList())
+		m.scheduleProviderUpdateCheck()
+	}()
+}
+
+func (m *Manager) cancelInstalledCLIVersionCheck(providerID string) {
+	providerID = normalizeProviderID(providerID)
+	m.installedVersionMu.Lock()
+	if m.installedVersionGeneration == nil {
+		m.installedVersionGeneration = make(map[string]uint64)
+	}
+	if m.installedVersionCancel == nil {
+		m.installedVersionCancel = make(map[string]context.CancelFunc)
+	}
+	m.installedVersionGeneration[providerID]++
+	if cancel := m.installedVersionCancel[providerID]; cancel != nil {
+		cancel()
+		delete(m.installedVersionCancel, providerID)
+	}
+	m.installedVersionMu.Unlock()
+}
+
+func (m *Manager) stopInstalledCLIVersionChecks() {
+	m.installedVersionMu.Lock()
+	for id, cancel := range m.installedVersionCancel {
+		cancel()
+		delete(m.installedVersionCancel, id)
+	}
+	for id := range m.installedVersionGeneration {
+		m.installedVersionGeneration[id]++
+	}
+	m.installedVersionMu.Unlock()
+	m.installedVersionWG.Wait()
 }
 
 func (m *Manager) StartProviderUpdate(parent context.Context, providerID string) (map[string]any, error) {
@@ -826,6 +976,17 @@ func (m *Manager) detectInstalledCLIVersionWithTimeout(parent context.Context, p
 	resolved, err := m.providerCLIExecutable(providerID)
 	if err != nil {
 		return nil, err
+	}
+	return m.detectInstalledCLIVersionWithTimeoutAt(parent, providerID, timeout, resolved)
+}
+
+func (m *Manager) detectInstalledCLIVersionWithTimeoutAt(parent context.Context, providerID string, timeout time.Duration, resolved string) (*CLIVersion, error) {
+	if strings.TrimSpace(resolved) == "" {
+		var err error
+		resolved, err = m.providerCLIExecutable(providerID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if parent == nil {
 		parent = context.Background()

@@ -983,6 +983,9 @@ func (m *Manager) ToggleProvider(ctx context.Context, id string, enabled bool) (
 		m.removeSpareProviderLocked(id)
 	}
 	m.mu.Unlock()
+	if !enabled {
+		m.cancelInstalledCLIVersionCheck(id)
+	}
 
 	if err := m.persistProviderConfigs(); err != nil {
 		return nil, err
@@ -1034,27 +1037,29 @@ type DetectOptions struct {
 }
 
 type providerDetectionResult struct {
-	ProviderID       string            `json:"provider"`
-	Label            string            `json:"label,omitempty"`
-	OK               bool              `json:"ok"`
-	Status           string            `json:"status"`
-	Message          string            `json:"message,omitempty"`
-	Error            string            `json:"error,omitempty"`
-	FixHint          string            `json:"fixHint,omitempty"`
-	LatencyMs        *int64            `json:"latencyMs,omitempty"`
-	ResolvedCommand  string            `json:"resolvedCommand,omitempty"`
-	AutoEnv          map[string]string `json:"autoEnv,omitempty"`
-	Models           []Model           `json:"models,omitempty"`
-	Modes            []Mode            `json:"modes,omitempty"`
-	AgentName        string            `json:"agentName,omitempty"`
-	ProtocolVersion  int               `json:"protocolVersion,omitempty"`
-	CLIVersion       *CLIVersion       `json:"cliVersion,omitempty"`
-	Detected         bool              `json:"detected,omitempty"`
-	ExplicitDisabled bool              `json:"explicitDisabled,omitempty"`
-	Terminal         bool              `json:"-"`
-	autoEnv          map[string]string
-	args             []string
-	config           ProviderConfig
+	ProviderID             string            `json:"provider"`
+	Label                  string            `json:"label,omitempty"`
+	OK                     bool              `json:"ok"`
+	Status                 string            `json:"status"`
+	Message                string            `json:"message,omitempty"`
+	Error                  string            `json:"error,omitempty"`
+	FixHint                string            `json:"fixHint,omitempty"`
+	LatencyMs              *int64            `json:"latencyMs,omitempty"`
+	ResolvedCommand        string            `json:"resolvedCommand,omitempty"`
+	AutoEnv                map[string]string `json:"autoEnv,omitempty"`
+	Models                 []Model           `json:"models,omitempty"`
+	Modes                  []Mode            `json:"modes,omitempty"`
+	AgentName              string            `json:"agentName,omitempty"`
+	ProtocolVersion        int               `json:"protocolVersion,omitempty"`
+	CLIVersion             *CLIVersion       `json:"cliVersion,omitempty"`
+	Detected               bool              `json:"detected,omitempty"`
+	ExplicitDisabled       bool              `json:"explicitDisabled,omitempty"`
+	Terminal               bool              `json:"-"`
+	autoEnv                map[string]string
+	args                   []string
+	config                 ProviderConfig
+	versionCheckGeneration uint64
+	pendingCLIVersion      <-chan *CLIVersion
 }
 
 type providerDetectionStatusError struct {
@@ -1093,18 +1098,27 @@ func (m *Manager) runProviderDetectionPass(ctx context.Context, providerIDs []st
 	}
 	candidates := m.providerDetectionCandidates(intent, providerIDs...)
 	results := make([]providerDetectionResult, len(candidates))
+	generations := make([]uint64, len(candidates))
+	for i, cfg := range candidates {
+		generations[i] = m.beginInstalledCLIVersionGeneration(cfg.ID)
+	}
 	var wg sync.WaitGroup
 	for i, cfg := range candidates {
-		i, cfg := i, cfg
+		i, cfg, generation := i, cfg, generations[i]
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i] = m.detectProvider(ctx, cfg)
+			results[i] = m.detectProvider(ctx, cfg, generation)
 		}()
 	}
 	wg.Wait()
 
 	m.applyDetectionResults(results)
+	for i := range results {
+		if results[i].pendingCLIVersion != nil {
+			m.watchLateInstalledCLIVersion(results[i].pendingCLIVersion, results[i])
+		}
+	}
 	list := m.ProvidersList()
 	m.emit("providers:list", list)
 	m.EmitCatalog(ctx)
@@ -1254,7 +1268,7 @@ func (m *Manager) providerDetectionCandidates(intent providerDetectionIntent, pr
 	return out
 }
 
-func (m *Manager) detectProvider(parent context.Context, cfg ProviderConfig) providerDetectionResult {
+func (m *Manager) detectProvider(parent context.Context, cfg ProviderConfig, versionGeneration uint64) providerDetectionResult {
 	cfg = normalizeProviderConfig(cfg, m.opts.RootDir, cfg.ID)
 	result := providerDetectionResult{
 		ProviderID: cfg.ID,
@@ -1301,11 +1315,12 @@ func (m *Manager) detectProvider(parent context.Context, cfg ProviderConfig) pro
 	result.autoEnv = copyStringMap(autoEnv)
 	result.args = append([]string(nil), args...)
 	result.config = cfg
-	cliVersion := m.startInstalledCLIVersionCheck(parent, cfg.ID)
+	cliVersion, versionGeneration := m.startInstalledCLIVersionCheck(parent, cfg.ID, cfg.ResolvedCommand, versionGeneration)
+	result.versionCheckGeneration = versionGeneration
 	if inactive != "" {
 		result.Status = providerStatusInactive
 		result.Message = inactive
-		result.CLIVersion = collectInstalledCLIVersion(cliVersion)
+		m.finishInstalledCLIVersionCheck(cliVersion, &result)
 		m.logProviderDetection(result)
 		return result
 	}
@@ -1326,7 +1341,7 @@ func (m *Manager) detectProvider(parent context.Context, cfg ProviderConfig) pro
 	result.LatencyMs = &latencyMs
 	if err != nil {
 		message := redactSensitiveText(err.Error())
-		result.CLIVersion = collectInstalledCLIVersion(cliVersion)
+		m.finishInstalledCLIVersionCheck(cliVersion, &result)
 		if authentication.IsAuthenticationFailure(err) {
 			result.Status = providerStatusNeedsLogin
 			result.FixHint = strings.TrimSpace(authentication.LoginHint())
@@ -1354,7 +1369,7 @@ func (m *Manager) detectProvider(parent context.Context, cfg ProviderConfig) pro
 	result.AgentName = agentName
 	result.Detected = true
 	result.ProtocolVersion = ProtocolVersion
-	result.CLIVersion = collectInstalledCLIVersion(cliVersion)
+	m.finishInstalledCLIVersionCheck(cliVersion, &result)
 	m.logProviderDetection(result)
 	return result
 }
