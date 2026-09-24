@@ -187,6 +187,43 @@ test('abort while waiting for fixture delivery settles workers and joins active 
   assert.equal(fake.active(), 0, 'the prestarted compile process groups are joined before return');
 });
 
+test('pre-aborted fixture wait returns an interrupted summary and cleans up', async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  controller.abort();
+  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, fixtureRootPromise: new Promise(() => {}), go: f.go, workers: 3, spawn: inProcessGoSpawn().spawn, signalHandlers: false, abortSignal: controller.signal });
+  assert.equal(result.ok, false);
+  assert.equal(result.interrupted, 'ABORT');
+  assert.match(result.error, /interrupted by ABORT/);
+});
+
+test('abort after compilation while workers wait for fixture delivery joins all children', async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  let compileFinishes = 0;
+  const fake = inProcessGoSpawn({ onCompileFinish: () => { compileFinishes++; } });
+  const running = runGoSuite({ cwd: f.root, logDir: f.logs, fixtureRootPromise: new Promise(() => {}), go: f.go, workers: 3, spawn: fake.spawn, signalHandlers: false, abortSignal: controller.signal });
+  while (compileFinishes < 3) await new Promise(resolve => setTimeout(resolve, 5));
+  controller.abort();
+  const result = await running;
+  assert.equal(result.interrupted, 'ABORT');
+  assert.equal(fake.active(), 0);
+});
+
+test('process signal after compilation rejects fixture wait and joins all children', async t => {
+  const f = await fixture(t);
+  let compileFinishes = 0;
+  const fake = inProcessGoSpawn({ onCompileFinish: () => { compileFinishes++; } });
+  const running = runGoSuite({ cwd: f.root, logDir: f.logs, fixtureRootPromise: new Promise(() => {}), go: f.go, workers: 3, spawn: fake.spawn });
+  while (compileFinishes < 3) await new Promise(resolve => setTimeout(resolve, 5));
+  const signalHandler = process.listeners('SIGTERM').at(-1);
+  assert.equal(typeof signalHandler, 'function', 'runner installs its SIGTERM handler while active');
+  signalHandler('SIGTERM');
+  const result = await running;
+  assert.equal(result.interrupted, 'SIGTERM');
+  assert.equal(fake.active(), 0);
+});
+
 async function fixture(t, { fail = '', delay = '0.04', packageFail = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'workass-go-suite-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));

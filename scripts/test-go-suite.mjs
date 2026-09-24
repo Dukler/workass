@@ -295,6 +295,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
     await mkdir(fixtureRoot, { recursive: true });
     fixtureTempRoot = await mkdtemp(path.join(fixtureRoot, 'workass-go-fixtures-'));
   }
+  let interrupted = null;
   let resolvedFixtureRoot = fixtureRoot;
   let fixtureInitPromise;
   let rejectFixtureWait;
@@ -305,8 +306,6 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
   // reach test-binary setup.
   fixtureRootPromise?.catch(() => {});
   const abortFixtureWait = () => rejectFixtureWait(new Error(`interrupted by ${interrupted ?? 'ABORT'}`));
-  if (abortSignal?.aborted) abortFixtureWait();
-  else abortSignal?.addEventListener('abort', abortFixtureWait, { once: true });
   const ensureFixtureRoot = async () => {
     if (!resolvedFixtureRoot && fixtureRootPromise) {
       resolvedFixtureRoot = await Promise.race([fixtureRootPromise, fixtureWaitAborted]);
@@ -348,14 +347,19 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
   const summaryPath = path.join(logs, `go-matrix-${runId}.json`);
   const jsonl = createWriteStream(jsonlPath, { flags: 'wx' });
   const active = new Set();
-  let interrupted = null;
   let jsonlError = null;
   let wakeWorkers = () => {};
-  const onInterrupt = signal => { interrupted ??= signal; wakeWorkers(); void stopChildren(active); };
+  const onInterrupt = signal => {
+    interrupted ??= signal;
+    abortFixtureWait();
+    wakeWorkers();
+    void stopChildren(active);
+  };
+  if (abortSignal?.aborted) onInterrupt('ABORT');
   jsonl.on('error', error => { jsonlError ??= error; onInterrupt('LOG_ERROR'); });
   if (signalHandlers) { process.on('SIGINT', onInterrupt); process.on('SIGTERM', onInterrupt); }
   const onAbort = () => onInterrupt('ABORT');
-  abortSignal?.addEventListener('abort', onAbort, { once: true });
+  if (!abortSignal?.aborted) abortSignal?.addEventListener('abort', onAbort, { once: true });
   const commandTemp = async (label, { testBinary = false } = {}) => {
     if (testBinary) {
       const fixture = await ensureFixtureRoot();
