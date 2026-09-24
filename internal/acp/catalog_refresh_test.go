@@ -82,6 +82,115 @@ func TestSessionAttachPublishesChangedModelOptions(t *testing.T) {
 	}
 }
 
+func TestSessionAttachRefreshesCatalogRevisionForLiveBridge(t *testing.T) {
+	events := newEventCollector()
+	manager := catalogRefreshTestManager(t, events)
+	manager.mu.Lock()
+	providerConfig := manager.providers["mock"].Config
+	manager.mu.Unlock()
+	bridge := newBridge("live-mock", Options{Provider: providerConfig}, manager)
+	bridge.catalogRevision = 1
+	bridge.agentName = "Mock ACP"
+
+	manager.mu.Lock()
+	runtime := manager.providers["mock"]
+	runtime.Probed = true
+	runtime.Status = providerStatusReady
+	runtime.Models = []Model{{ModelID: "removed-model", Name: "Removed model"}}
+	runtime.CLIVersion = &CLIVersion{Version: "1.0.0", Raw: "1.0.0"}
+	runtime.CatalogCLIVersion = "1.0.0"
+	runtime.CatalogRevision = 2 // a same-version probe committed after bridge construction
+	runtime.CatalogRefreshedAt = time.Now().Add(-time.Second)
+	manager.mu.Unlock()
+
+	// The bridge object predates provider detection, but its process starts after
+	// the latest probe and uses the same launch configuration, so its session
+	// options belong to the current host generation.
+	bridge.startedAt = time.Now()
+	_, err := bridge.attachSession("resumed-session", repoRoot(t), SessionOptions{TabID: "mock-tab", ChatID: "mock-chat"}, map[string]any{
+		"configOptions": []any{map[string]any{
+			"id": "model", "category": "model", "currentValue": "mock-deterministic",
+			"options": []any{map[string]any{"value": "mock-deterministic", "name": "Mock deterministic"}},
+		}},
+	}, "session-resume")
+	if err != nil {
+		t.Fatalf("attach session: %v", err)
+	}
+
+	group := findCatalogGroup(manager.CatalogSnapshotGroups(), "mock")
+	if group == nil || len(group.Models) != 1 || group.Models[0].ModelID != "mock-deterministic" {
+		t.Fatalf("fresh attached-host catalog was fenced by a completed probe: %#v", group)
+	}
+}
+
+func TestSessionAttachFromOlderSameVersionProcessRetainsCatalogRevisionFence(t *testing.T) {
+	manager := catalogRefreshTestManager(t, newEventCollector())
+	manager.mu.Lock()
+	runtime := manager.providers["mock"]
+	runtime.Probed = true
+	runtime.Status = providerStatusReady
+	runtime.Models = []Model{{ModelID: "renamed-model", Name: "Renamed model"}}
+	runtime.CLIVersion = &CLIVersion{Version: "1.0.0", Raw: "1.0.0"}
+	runtime.CatalogCLIVersion = "1.0.0"
+	runtime.CatalogRevision = 2
+	runtime.CatalogRefreshedAt = time.Now()
+	providerConfig := runtime.Config
+	manager.mu.Unlock()
+
+	bridge := newBridge("same-version-old-live-mock", Options{Provider: providerConfig}, manager)
+	bridge.catalogRevision = 1
+	bridge.startedAt = time.Now().Add(-time.Minute)
+	bridge.agentName = "Older Mock ACP"
+	_, err := bridge.attachSession("old-same-version-session", repoRoot(t), SessionOptions{TabID: "mock-tab", ChatID: "mock-chat"}, map[string]any{
+		"configOptions": []any{map[string]any{
+			"id": "model", "category": "model", "currentValue": "old-model",
+			"options": []any{map[string]any{"value": "old-model", "name": "Old model"}},
+		}},
+	}, "session-resume")
+	if err != nil {
+		t.Fatalf("attach older same-version session: %v", err)
+	}
+
+	group := findCatalogGroup(manager.CatalogSnapshotGroups(), "mock")
+	if group == nil || len(group.Models) != 1 || group.Models[0].ModelID != "renamed-model" {
+		t.Fatalf("older same-version host replaced the later provider probe: %#v", group)
+	}
+}
+
+func TestSessionAttachCannotCrossUnprobedCLIVersionInvalidation(t *testing.T) {
+	manager := catalogRefreshTestManager(t, newEventCollector())
+	manager.mu.Lock()
+	runtime := manager.providers["mock"]
+	runtime.Probed = false
+	runtime.Status = providerStatusReady
+	runtime.Models = []Model{{ModelID: "last-probe-model", Name: "Last probe model"}}
+	runtime.CLIVersion = &CLIVersion{Version: "2.0.0", Raw: "2.0.0"}
+	runtime.CatalogCLIVersion = "1.0.0"
+	runtime.CatalogRevision = 2
+	runtime.CatalogRefreshedAt = time.Now().Add(-time.Minute)
+	providerConfig := runtime.Config
+	manager.mu.Unlock()
+
+	bridge := newBridge("pre-version-invalidation-mock", Options{Provider: providerConfig}, manager)
+	bridge.catalogRevision = 1
+	bridge.startedAt = time.Now().Add(-time.Second) // after the prior probe, before invalidation
+	bridge.agentName = "Pre-invalidation Mock ACP"
+	_, err := bridge.attachSession("pre-invalidation-session", repoRoot(t), SessionOptions{TabID: "mock-tab", ChatID: "mock-chat"}, map[string]any{
+		"configOptions": []any{map[string]any{
+			"id": "model", "category": "model", "currentValue": "stale-model",
+			"options": []any{map[string]any{"value": "stale-model", "name": "Stale model"}},
+		}},
+	}, "session-resume")
+	if err != nil {
+		t.Fatalf("attach pre-invalidation session: %v", err)
+	}
+
+	group := findCatalogGroup(manager.CatalogSnapshotGroups(), "mock")
+	if group == nil || len(group.Models) != 1 || group.Models[0].ModelID != "last-probe-model" {
+		t.Fatalf("bridge crossed an unprobed CLI-version invalidation: %#v", group)
+	}
+}
+
 func TestAuthoritativeAvailableModelsReplaceRenamedAddedAndRemovedModels(t *testing.T) {
 	events := newEventCollector()
 	manager := catalogRefreshTestManager(t, events)
