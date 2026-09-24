@@ -31,9 +31,11 @@ type providerChatRuntime struct {
 	publish  func(string, any)
 
 	mu      sync.Mutex
+	closeMu sync.Mutex
 	actors  map[string]*providerChatActor
 	known   map[string]struct{}
 	bootErr error
+	closed  bool
 	// actorsPaused is used only by the daemon's staged startup path. Durable
 	// actor construction may happen before the network listener,
 	// but no coordinator may resume a provider effect until that listener is
@@ -212,6 +214,10 @@ func (r *providerChatRuntime) actorForFork(chatID string, command chat.Initializ
 		return nil, errors.New("fork requires an immutable child chat id")
 	}
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil, errors.New("provider chat runtime is closed")
+	}
 	if r.bootErr != nil {
 		r.mu.Unlock()
 		return nil, fmt.Errorf("discover provider chat actors: %w", r.bootErr)
@@ -313,6 +319,9 @@ func (r *providerChatRuntime) openActor(chatID string, initialize *chat.Initiali
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return nil, errors.New("provider chat runtime is closed")
+	}
 	if r.bootErr != nil {
 		return nil, fmt.Errorf("discover provider chat actors: %w", r.bootErr)
 	}
@@ -2872,6 +2881,17 @@ func (r *providerChatRuntime) Close(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
+	// Serialize callers so a second Close cannot report completion while the
+	// first caller is still draining coordinator workers.
+	r.closeMu.Lock()
+	defer r.closeMu.Unlock()
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	r.mu.Unlock()
 	if r.cancel != nil {
 		r.cancel()
 		r.wg.Wait()

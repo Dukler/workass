@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -47,6 +48,53 @@ func TestLoadedActorLookupDoesNotSnapshotActorState(t *testing.T) {
 	}
 	if allocations > 1 {
 		t.Fatalf("loaded actor lookup allocations = %.1f, want <= 1 without a full state snapshot", allocations)
+	}
+}
+
+func TestClosedRuntimeCallbacksCannotReopenOrRewriteActorFiles(t *testing.T) {
+	stateDir := t.TempDir()
+	manager := acp.NewManager(acp.Options{StateDir: stateDir})
+	store := sharedSessionStore(stateDir)
+	runtime := newTestProviderChatRuntime(t, manager, store, stateDir)
+	chatID := "closed-runtime-chat"
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": "closed-runtime-tab", "chatId": chatID, "operationId": "closed-runtime-create",
+		"title": "Closed runtime", "cwd": stateDir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	statePath := providerChatStatePath(stateDir, chatID)
+	before, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.actor(chatID); err == nil {
+		t.Fatal("actor lookup succeeded after Close")
+	}
+	if _, err := runtime.actorForFork(chatID, chat.InitializeFork{}); err == nil {
+		t.Fatal("fork actor lookup succeeded after Close")
+	}
+	if err := runtime.deliverSubagentCompletion("closed-runtime-tab", chatID, acp.SubagentReceipt{ReceiptID: "receipt", Status: "done"}); err == nil {
+		t.Fatal("completion callback was acknowledged after Close")
+	}
+	if _, err := runtime.applySpawnedWorkSnapshot("closed-runtime-tab", chatID, nil); err == nil {
+		t.Fatal("spawned-work callback succeeded after Close")
+	}
+	after, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("callback after Close rewrote the durable actor file")
+	}
+	runtime.mu.Lock()
+	actorCount := len(runtime.actors)
+	runtime.mu.Unlock()
+	if actorCount != 0 {
+		t.Fatalf("closed runtime retained/reopened %d actors", actorCount)
 	}
 }
 
