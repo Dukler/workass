@@ -1,56 +1,23 @@
 import assert from 'node:assert/strict';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
-
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const releaseRoot = path.join(repoRoot, 'scripts', 'release');
-const inputTool = path.join(releaseRoot, 'lib', 'release-input.mjs');
-const candidateTool = path.join(releaseRoot, 'lib', 'verify-candidate.mjs');
-const publicationTool = path.join(releaseRoot, 'lib', 'verify-publication.mjs');
-const nextVersionTool = path.join(releaseRoot, 'lib', 'next-version.mjs');
-const gateReceiptTool = path.join(releaseRoot, 'lib', 'repository-gate.mjs');
-const commit = '1'.repeat(40);
-
-function run(command, args, options = {}) {
-  return spawnSync(command, args, { encoding: 'utf8', ...options });
-}
-
-function write(file, contents = file) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, contents);
-}
-
-function sha256(contents) {
-  return crypto.createHash('sha256').update(contents).digest('hex');
-}
-
-function fileArtifact(file) {
-  const bytes = fs.readFileSync(file);
-  return { name: path.basename(file), sha256: sha256(bytes), size: bytes.length };
-}
-
-function makeReleaseInput(root, version = '1.2.3') {
-  for (const relative of [
-    'renderer/index.html',
-    'macos/runtime/workass',
-    'macos/runtime/workass-tools',
-    'macos/electron/darwin-arm64/Electron.app/Contents/MacOS/Electron',
-    'macos/runtime/node/darwin-arm64/bin/node',
-    'macos/runtime/frontier-hosts/darwin-arm64/claude-native-host.mjs',
-    'windows/runtime/workass-daemon.exe',
-    'windows/runtime/workass-tools.exe',
-    'windows/electron/win32-x64/electron.exe',
-    'windows/runtime/node/windows-amd64/node.exe',
-    'windows/runtime/frontier-hosts/windows-amd64/codex-native-host.mjs',
-  ]) write(path.join(root, ...relative.split('/')), relative);
-  const created = run(process.execPath, [inputTool, 'create', '--root', root, '--version', version, '--commit', commit]);
-  assert.equal(created.status, 0, created.stderr);
-}
+import {
+  candidateTool,
+  commit,
+  fileArtifact,
+  gateReceiptTool,
+  inputTool,
+  makeReleaseInput,
+  nextVersionTool,
+  publicationTool,
+  releaseRoot,
+  repoRoot,
+  run,
+  sha256,
+  write,
+} from './release-pipeline-helpers.mjs';
 
 test('release input is exact-version, exact-commit, and content addressed', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-release-input-'));
@@ -119,66 +86,6 @@ test('parallel phase helper waits for both isolated phases and propagates failur
   assert.equal(fs.readFileSync(path.join(root, 'right.done'), 'utf8'), 'right');
   assert.equal(fs.readFileSync(path.join(root, 'phases', 'left.log'), 'utf8'), '');
   assert.equal(fs.readFileSync(path.join(root, 'phases', 'right.log'), 'utf8'), '');
-});
-
-test('repository gate receipt binds the exact commit, gate, OS, and toolchain', (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-release-gate-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const repo = path.join(root, 'repo');
-  const receipt = path.join(root, 'receipt.json');
-  const gate = path.join(repo, 'scripts', 'gate.sh');
-  write(gate, '#!/bin/sh\necho first\n');
-
-  const record = () => run(process.execPath, [gateReceiptTool, 'record', '--repo', repo,
-    '--receipt', receipt, '--commit', commit]);
-  const verify = (candidateCommit = commit) => run(process.execPath, [gateReceiptTool, 'verify', '--repo', repo,
-    '--receipt', receipt, '--commit', candidateCommit]);
-
-  assert.equal(record().status, 0);
-  assert.equal(verify().status, 0);
-  assert.notEqual(verify('2'.repeat(40)).status, 0);
-
-  write(gate, '#!/bin/sh\necho changed\n');
-  assert.notEqual(verify().status, 0);
-  assert.equal(record().status, 0);
-  assert.equal(verify().status, 0);
-
-  write(receipt, '{broken');
-  assert.notEqual(verify().status, 0);
-  assert.equal(record().status, 0);
-  assert.equal(verify().status, 0);
-});
-
-test('release renderer mismatch fails before the slow Go gate', (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-release-renderer-gate-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const gate = path.join(root, 'scripts', 'gate.sh');
-  const bin = path.join(root, 'bin');
-  const goMarker = path.join(root, 'go-was-called');
-  fs.mkdirSync(path.join(root, 'desktop', 'renderer2', 'node_modules'), { recursive: true });
-  write(path.join(root, 'desktop', 'renderer2', 'dist', 'index.html'), 'fresh renderer');
-  write(path.join(root, 'cmd', 'workass', 'embedded', 'dist', 'index.html'), 'stale renderer');
-  fs.mkdirSync(path.dirname(gate), { recursive: true });
-  const gateSource = fs.readFileSync(path.join(repoRoot, 'scripts', 'gate.sh'), 'utf8')
-    .replace('export PATH="/opt/homebrew/bin:$PATH"', 'export PATH="$PATH"');
-  write(gate, gateSource);
-  fs.chmodSync(gate, 0o755);
-  for (const name of ['npx', 'npm']) {
-    const command = path.join(bin, name);
-    write(command, '#!/bin/sh\nexit 0\n');
-    fs.chmodSync(command, 0o755);
-  }
-  const go = path.join(bin, 'go');
-  write(go, `#!/bin/sh\ntouch "${goMarker}"\nexit 0\n`);
-  fs.chmodSync(go, 0o755);
-
-  const result = run('sh', [gate], {
-    cwd: root,
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER: '1' },
-  });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /renderer build differs from committed embedded output/);
-  assert.equal(fs.existsSync(goMarker), false);
 });
 
 test('source-state gate rejects dirty or unpublished main', (t) => {
@@ -389,147 +296,6 @@ test('paired publication receipt binds exact Mac bytes and verified GitHub asset
 
   fs.appendFileSync(path.join(macosOutput, archiveName), 'changed');
   assert.notEqual(run(process.execPath, [publicationTool, 'verify', ...args]).status, 0);
-});
-
-test('Windows verify-only mode performs readback without a release mutation', (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-windows-readback-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const devState = path.join(repoRoot, '.dev');
-  fs.mkdirSync(devState, { recursive: true });
-  const bin = path.join(root, 'bin');
-  const releaseDir = path.join(root, 'release');
-  const version = '1.2.3';
-  const archiveName = `Workass-${version}-windows-amd64.zip`;
-  const manifestName = 'workass-windows-amd64-release.json';
-  const archive = Buffer.from('windows archive');
-  write(path.join(releaseDir, archiveName), archive);
-  write(path.join(releaseDir, manifestName), 'windows manifest');
-  write(path.join(releaseDir, 'SHA256SUMS'), `${sha256(archive)}  ${archiveName}\n`);
-  const asset = (name) => {
-    const local = fileArtifact(path.join(releaseDir, name));
-    return { name, size: local.size, digest: `sha256:${local.sha256}` };
-  };
-  const fullView = path.join(root, 'full-view.json');
-  const latestView = path.join(root, 'latest-view.json');
-  write(fullView, JSON.stringify({
-    tagName: `v${version}`,
-    targetCommitish: commit,
-    name: `Workass ${version} — Windows portable`,
-    isDraft: false,
-    isPrerelease: false,
-    assets: [asset(archiveName), asset(manifestName), asset('SHA256SUMS')],
-    url: `https://github.com/Dukler/workass/releases/tag/v${version}`,
-  }));
-  write(latestView, JSON.stringify({ tagName: `v${version}`, isDraft: false, isPrerelease: false }));
-  const calls = path.join(root, 'gh-calls.log');
-  write(path.join(bin, 'gh'), `#!/bin/sh
-printf '%s\\n' "$*" >> "$WORKASS_TEST_GH_CALLS"
-if [ "$1" = auth ] && [ "$2" = status ]; then exit 0; fi
-if [ "$1" = release ] && [ "$2" = view ]; then
-  case "$3" in v*) command cat "$WORKASS_TEST_GH_FULL" ;; *) command cat "$WORKASS_TEST_GH_LATEST" ;; esac
-  exit 0
-fi
-exit 97
-`);
-  write(path.join(bin, 'curl'), `#!/bin/sh
-output=''
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = -o ]; then output=$2; shift 2; else shift; fi
-done
-[ -n "$output" ] || exit 2
-command cp "$WORKASS_TEST_MANIFEST" "$output"
-`);
-  fs.chmodSync(path.join(bin, 'gh'), 0o755);
-  fs.chmodSync(path.join(bin, 'curl'), 0o755);
-  const receipt = path.join(root, 'windows-publication.json');
-  const result = run('sh', [path.join(releaseRoot, 'publish-windows.sh'),
-    '--version', version, '--commit', commit, '--release-dir', releaseDir,
-    '--verify-only', '--receipt', receipt], {
-    env: {
-      ...process.env,
-      PATH: `${bin}:${process.env.PATH}`,
-      WORKASS_TEST_GH_CALLS: calls,
-      WORKASS_TEST_GH_FULL: fullView,
-      WORKASS_TEST_GH_LATEST: latestView,
-      WORKASS_TEST_MANIFEST: path.join(releaseDir, manifestName),
-    },
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(fs.readFileSync(receipt, 'utf8')).kind, 'windows-publication');
-  const ghCalls = fs.readFileSync(calls, 'utf8');
-  assert.match(ghCalls, /release view/);
-  assert.doesNotMatch(ghCalls, /release (create|upload)/);
-});
-
-test('ship is one quiet command from clean pushed main to one final receipt', (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-release-ship-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const remote = path.join(root, 'remote.git');
-  const repo = path.join(root, 'repo');
-  const bin = path.join(root, 'bin');
-  const feed = path.join(root, 'feed');
-  const localRelease = path.join(repo, 'scripts', 'release');
-  assert.equal(run('git', ['init', '--bare', remote]).status, 0);
-  assert.equal(run('git', ['init', '-b', 'main', repo]).status, 0);
-  for (const relative of ['ship.sh', 'lib/source-state.sh', 'lib/next-version.mjs']) {
-    const source = path.join(releaseRoot, relative);
-    const target = path.join(localRelease, relative);
-    write(target, fs.readFileSync(source));
-    fs.chmodSync(target, 0o755);
-  }
-  write(path.join(repo, '.gitignore'), '.dev/\n');
-  write(path.join(localRelease, 'stage-updates.sh'), `#!/bin/sh
-version=''
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = --version ]; then version=$2; shift 2; else shift; fi
-done
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-commit=$(git -C "$repo_root" rev-parse HEAD)
-candidate="$repo_root/.dev/fake-candidate"
-mkdir -p "$candidate"
-publication="$candidate/publication.json"
-printf '{"schemaVersion":1,"product":"Workass","kind":"paired-publication","status":"verified","version":"%s","commit":"%s","windows":{"releaseUrl":"https://github.com/Dukler/workass/releases/tag/v%s"}}\\n' "$version" "$commit" "$version" > "$publication"
-line=1
-while [ "$line" -le 100 ]; do printf 'verbose internal line %03d\\n' "$line"; line=$((line + 1)); done
-printf 'publication=%s\\n' "$publication"
-`);
-  fs.chmodSync(path.join(localRelease, 'stage-updates.sh'), 0o755);
-  write(path.join(feed, 'workass-darwin-arm64-release.json'), JSON.stringify({ version: '0.1.93' }));
-  write(path.join(bin, 'gh'), `#!/bin/sh
-if [ "$1" = auth ] && [ "$2" = status ]; then exit 0; fi
-if [ "$1" = release ] && [ "$2" = view ]; then
-  printf '{"tagName":"v0.1.93","isDraft":false,"isPrerelease":false}\\n'
-  exit 0
-fi
-exit 97
-`);
-  write(path.join(bin, 'plutil'), '#!/bin/sh\nprintf "0.1.92\\n"\n');
-  fs.chmodSync(path.join(bin, 'gh'), 0o755);
-  fs.chmodSync(path.join(bin, 'plutil'), 0o755);
-  for (const args of [
-    ['-C', repo, 'config', 'user.name', 'Workass Test'],
-    ['-C', repo, 'config', 'user.email', 'workass-test@example.invalid'],
-    ['-C', repo, 'add', '.'],
-    ['-C', repo, 'commit', '-m', 'release source'],
-    ['-C', repo, 'remote', 'add', 'origin', remote],
-    ['-C', repo, 'push', '-u', 'origin', 'main'],
-  ]) assert.equal(run('git', args).status, 0);
-
-  const result = run('sh', [path.join(localRelease, 'ship.sh'), '--macos-output', feed], {
-    cwd: repo,
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /WORKASS_RELEASE_PUBLISHED/);
-  assert.match(result.stdout, /version=0\.1\.94/);
-  assert.match(result.stdout, /activation=not-requested/);
-  assert.doesNotMatch(result.stdout, /verbose internal line/);
-  assert.ok(result.stdout.trim().split('\n').length <= 9);
-  const log = result.stdout.match(/^log=(.+)$/m)?.[1];
-  assert.ok(log);
-  const fullOutput = fs.readFileSync(log, 'utf8');
-  assert.match(fullOutput, /verbose internal line 001/);
-  assert.match(fullOutput, /verbose internal line 100/);
 });
 
 test('canonical pipeline stages both platforms from one verified input and publishes only explicitly', () => {
