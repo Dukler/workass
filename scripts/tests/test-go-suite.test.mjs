@@ -175,19 +175,25 @@ test('remaining Go packages compile directly to their stable cache path on every
   assert.ok(invocations.filter(args => args[0] === 'test' && args.includes('-c')).length > 0);
 });
 
-test('Go metadata identifies a package with removed test files despite a stale cached binary', async t => {
+test('no-test packages compile every invocation but never execute a stale cached binary', async t => {
   const f = await fixture(t);
   const cacheDir = path.join(f.root, 'stable-cache');
   await mkdir(cacheDir);
   const stale = path.join(cacheDir, `pkg-${createHash('sha256').update('workass/internal/one').digest('hex').slice(0, 24)}.test`);
   await writeFile(stale, 'stale binary');
-  const compiles = [];
-  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, cacheDir, go: f.go, workers: 3, spawn: inProcessGoSpawn({ noTestPackages: ['workass/internal/one'], record: (command, args) => {
+  const compiles = [], executions = [];
+  const fake = inProcessGoSpawn({ noTestPackages: ['workass/internal/one'], record: (command, args) => {
     if (command === f.go && args[0] === 'test' && args.includes('-c')) compiles.push(args.at(-1));
-  } }).spawn, signalHandlers: false });
-  assert.equal(result.ok, true, result.error);
-  assert.equal(result.packageOutcomes.find(item => item.package === 'workass/internal/one')?.noTestFiles, true);
-  assert.ok(!compiles.includes('workass/internal/one'), 'no-test classification must come from current go list metadata');
+    if (String(command).endsWith('.test')) executions.push(command);
+  } });
+  for (let invocation = 0; invocation < 2; invocation++) {
+    const result = await runGoSuite({ cwd: f.root, logDir: f.logs, cacheDir, go: f.go, workers: 3, spawn: fake.spawn, signalHandlers: false });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.packageOutcomes.find(item => item.package === 'workass/internal/one')?.noTestFiles, true);
+  }
+  assert.equal(compiles.filter(pkg => pkg === 'workass/internal/one').length, 2, 'current no-test metadata still receives a compiler validation on every invocation');
+  const staleRunner = path.join(f.root, `package-${createHash('sha256').update('workass/internal/one').digest('hex').slice(0, 16)}-run.test`);
+  assert.ok(!executions.includes(staleRunner), 'current no-test metadata must prevent listing or executing any cached binary');
 });
 
 test('remaining package work starts while heavy test binaries are still compiling', async t => {
