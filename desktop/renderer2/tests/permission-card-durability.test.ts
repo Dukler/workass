@@ -15,6 +15,12 @@ import type { StateDigest, StateDigestChat } from '../src/wire/types.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 
 before(async () => {
   vite = await createServer({
@@ -26,7 +32,10 @@ before(async () => {
   StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 function message(id: string, extra: Partial<Msg> = {}): Msg {
   return { id, role: 'assistant', content: '', result: '', events: [], status: 'running', at: null, ...extra } as Msg;
@@ -55,7 +64,7 @@ function mirrorOf(chats: Chat[]) {
 }
 
 function subject(chats: Chat[]): any {
-  const store = new StoreCtor();
+  const store = ownStore(new StoreCtor());
   store.state.chats = chats;
   store.state.activeId = chats[0]?.id ?? null;
   store.schedulePersist = () => {};

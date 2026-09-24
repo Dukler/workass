@@ -6,6 +6,12 @@ import type { Chat, Msg } from '../src/store/types.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 
 before(async () => {
   vite = await createServer({
@@ -17,7 +23,10 @@ before(async () => {
   StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 function messages(count: number): Msg[] {
   return Array.from({ length: count }, (_, index) => ({
@@ -63,7 +72,7 @@ test('switching chats keeps a bounded recent tail and loads the full ledger only
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const first = chat('tab-a', [...complete]);
     const second = chat('tab-b', messages(2));
     subject.state.chats = [first, second];
@@ -110,7 +119,7 @@ test('older history pages prepend by stable boundary until the canonical transcr
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const target = chat('tab-paged', complete.slice(-60));
     target.messageCount = complete.length;
     target.historyComplete = false;
@@ -156,7 +165,7 @@ test('short image-rich pages keep advancing without marking history complete ear
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const target = chat('tab-short-pages', complete.slice(-1));
     target.messageCount = complete.length;
     target.historyComplete = false;
@@ -191,7 +200,7 @@ test('full-history search assembles every short page and commits only after reac
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const target = chat('tab-full-short-pages', complete.slice(-1));
     target.messageCount = complete.length;
     target.historyComplete = false;
@@ -219,7 +228,7 @@ test('older history paging remains compatible with a daemon that returns the ful
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const target = chat('tab-old-daemon', complete.slice(-60));
     target.messageCount = complete.length;
     target.historyComplete = false;
@@ -248,7 +257,7 @@ test('opening an incomplete chat with a resident tail activates synchronously wi
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const first = chat('tab-first', [...firstRows]);
     const target = chat('tab-target', targetRows.slice(-60));
     target.messageCount = targetRows.length;
@@ -288,7 +297,7 @@ test('opening a metadata-only chat fetches ten recent rows before the no-blank h
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const first = chat('tab-first', firstRows);
     const target = chat('tab-target', []);
     target.messageCount = targetRows.length;
@@ -330,7 +339,7 @@ test('a completed metadata-only recent read cannot steal focus from a newer clic
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const first = chat('tab-first', messages(4));
     const target = chat('tab-target', []);
     target.messageCount = targetRows.length;
@@ -371,7 +380,7 @@ test('repeated clicks on one metadata-only chat share one recent read', async ()
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const first = chat('tab-first', messages(4));
     const target = chat('tab-target', []);
     target.messageCount = targetRows.length;
@@ -405,7 +414,7 @@ test('a genuinely empty new chat activates immediately without a history read', 
   let archiveCalls = 0;
   (globalThis as any).window = { api: { archiveLoad: async () => { archiveCalls += 1; return []; } } };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const first = chat('tab-first', messages(4));
     const empty = chat('tab-empty', []);
     subject.state.chats = [first, empty];
@@ -423,7 +432,7 @@ test('a genuinely empty new chat activates immediately without a history read', 
 });
 
 test('a daemon refresh releases every inactive complete history but keeps the active transcript visible', () => {
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   const active = chat('tab-active', messages(80));
   const inactive = chat('tab-inactive', messages(90));
   subject.state.chats = [active, inactive];
@@ -466,7 +475,7 @@ test('a newer metadata-only refresh reconciles a bounded recent suffix without c
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const active = chat('tab-active', [...complete]);
     active.actorRevision = 7;
     subject.state.chats = [active];
@@ -505,7 +514,7 @@ test('a newer metadata-only refresh reconciles a bounded recent suffix without c
 
 test('a selected paged window survives an authoritative tail refresh', () => {
   const complete = messages(145);
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   const active = chat('tab-active-paged', complete.slice(-100));
   active.actorRevision = 7;
   active.messageCount = complete.length;
@@ -536,7 +545,7 @@ test('an unchanged metadata-only refresh preserves a selected resident tail with
     api: { archiveLoad: async () => { archiveReads += 1; return []; } },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const active = chat('tab-active', messages(60));
     active.actorRevision = 7;
     active.messageCount = 90;

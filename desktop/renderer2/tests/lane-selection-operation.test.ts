@@ -6,6 +6,12 @@ import type { Chat } from '../src/store/types.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 
 before(async () => {
   vite = await createServer({
@@ -17,7 +23,10 @@ before(async () => {
   StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 function chat(): Chat {
   return {
@@ -56,7 +65,7 @@ test('a lost selected-lane start retries the exact OperationID and attaches only
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const owner = chat();
     subject.state.chats = [owner];
     subject.state.activeId = owner.id;
@@ -88,7 +97,7 @@ test('a lost selected-lane start retries the exact OperationID and attaches only
 });
 
 test('missing additive image capability stays unknown through hydration and late job attachment', () => {
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   const restored = subject.fromMirror({
     v: 1,
     activeId: 'tab-image-unknown',
@@ -137,7 +146,7 @@ test('missing additive image capability stays unknown through hydration and late
 });
 
 test('explicit image rejection from a live matching session remains authoritative', () => {
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   const restored = subject.fromMirror({
     v: 1,
     activeId: 'tab-image-false',
@@ -191,7 +200,7 @@ test('explicit image rejection from a live matching session remains authoritativ
 });
 
 test('a job session without provider identity cannot become a chat attachment', () => {
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   const owner = chat();
   subject.state.chats = [owner];
 

@@ -6,6 +6,12 @@ import type { Chat } from '../src/store/types.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 
 before(async () => {
   vite = await createServer({
@@ -17,10 +23,13 @@ before(async () => {
   StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 test('row reordering across projects changes only persisted order', async () => {
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   const local = {
     id: 'tab-local', chatId: 'chat-local', sessionId: 'session-local',
     title: 'Local target', titleLocked: true, group: 'local', cwd: '/tmp/local',
@@ -67,7 +76,7 @@ test('a lost workspace-move reply retries one stable operation and clears it onl
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const owner = {
       id: 'tab-workspace-retry', chatId: 'chat-workspace-retry', sessionId: 'session-old',
       sessionProviderId: 'mock', title: 'Workspace retry', titleLocked: true, group: null,

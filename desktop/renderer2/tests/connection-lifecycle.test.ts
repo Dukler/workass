@@ -7,6 +7,12 @@ import type { StateDigestChat } from '../src/wire/types.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 let digestChatSessionDiverged: (chat: Chat, digest: StateDigestChat) => boolean;
 
 before(async () => {
@@ -21,7 +27,10 @@ before(async () => {
   digestChatSessionDiverged = loaded.digestChatSessionDiverged;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 function runningChat(): Chat {
   return {
@@ -69,7 +78,7 @@ test('daemon liveness answers without waiting for a busy chat-state digest', asy
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const result = await subject.pingConnection();
     assert.deepEqual(result, { version: 'test' });
     assert.equal(metaCalls, 1);
@@ -83,7 +92,7 @@ test('daemon liveness answers without waiting for a busy chat-state digest', asy
 
 
 test('metadata-only idle chats converge after hydration instead of reloading on every heartbeat', () => {
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   const mirror = { version: 1, activeId: 'tab-other', chats: [{
     id: 'tab-live', chatId: 'chat-live', actorRevision: 11, presentationRevision: 3,
     agentQueueRevision: 4, runtimeControlRevision: 5, providerId: 'codex',
@@ -102,7 +111,7 @@ test('metadata-only idle chats converge after hydration instead of reloading on 
 
 
 test('refresh requests merge while an earlier reconciliation is waiting', async (t) => {
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   const tasks: (() => Promise<void>)[] = [];
   const batches: Set<string>[] = [];
   const timers = t.mock.timers;

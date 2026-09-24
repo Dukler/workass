@@ -15,6 +15,12 @@ const DAY = 24 * 60 * 60 * 1000;
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 let resolveSettled: (chat: unknown, status: string, active: boolean, now: number, touched: number) => boolean;
 let resolveArchived: (chat: unknown, status: string, now: number, touched: number) => boolean;
 let lastTouchedAt: (chat: Chat) => number;
@@ -54,7 +60,10 @@ before(async () => {
   isFullSizeSidebarRow = sidebar.isFullSizeSidebarRow;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 function chat(over: Partial<Chat> = {}): Chat {
   return {
@@ -86,7 +95,7 @@ test('running duration keeps the original turn start across reordering, selectio
     }],
   });
   const other = chat({ id: 'tab-other', chatId: 'chat-other' });
-  const store = new StoreCtor();
+  const store = ownStore(new StoreCtor());
   store.state.chats = [other, subject];
   store.state.activeId = other.id;
   assert.equal(workingSince(subject, []), started);
@@ -266,7 +275,7 @@ test('every ordinary thread stays full-size until it is settled', () => {
 });
 
 test('settle and un-settle store opposite overrides, and new work retires the shelf', () => {
-  const store = new StoreCtor();
+  const store = ownStore(new StoreCtor());
   const subject = chat();
   store.state.chats = [subject];
   store.state.activeId = 'tab-other';
@@ -286,7 +295,7 @@ test('settle and un-settle store opposite overrides, and new work retires the sh
 });
 
 test('new work resets a manual reactivation so the lifecycle can start fresh', () => {
-  const store = new StoreCtor();
+  const store = ownStore(new StoreCtor());
   const subject = chat({ settled: 'active' });
   store.state.chats = [subject];
   store.state.activeId = 'tab-other';
@@ -298,7 +307,7 @@ test('new work resets a manual reactivation so the lifecycle can start fresh', (
 });
 
 test('a replayed start for an already-terminal job does not resurrect a settled chat', () => {
-  const store = new StoreCtor();
+  const store = ownStore(new StoreCtor());
   const subject = chat({
     settled: 'settled',
     messages: [{
@@ -352,7 +361,7 @@ test('attention from a terminal error can be acknowledged and settled', () => {
 
 test('filing a finished chat acknowledges it, so the click actually lands', () => {
   const now = Date.parse('2026-07-25T12:00:00Z');
-  const store = new StoreCtor();
+  const store = ownStore(new StoreCtor());
   const finished = chat({ unread: true });
   store.state.chats = [finished];
   store.state.activeId = 'tab-other';
