@@ -1842,9 +1842,18 @@ func TestProviderChatSteerTerminalWinnerNeverFallsBackToFIFO(t *testing.T) {
 		"prompt": "queue the concurrent foreground end", "clientUserMessageId": "race-steer-concurrent-operation",
 		"continuationAssistantMessageId": "race-steer-concurrent-assistant",
 	}
+	type steerResponse struct {
+		result  map[string]any
+		handled bool
+		err     error
+	}
+	responses := make(chan steerResponse, 1)
+	started := make(chan struct{})
 	// Fence generic effect claims while arranging the synthetic foreground. In
 	// particular, the coordinator must not consume its submit outbox and mutate
-	// the lane attachment while this test chooses the terminal winner.
+	// the lane attachment while this test races the Steer request with terminal
+	// commit. Exact attachment readiness was checked above; started only signals
+	// that the request goroutine launched, not that it resolved the boundary.
 	releaseClaims := actor.coordinator.BeginReplyAdmission()
 	defer releaseClaims()
 	// Build the synthetic foreground directly in the actor to avoid an
@@ -1873,16 +1882,12 @@ func TestProviderChatSteerTerminalWinnerNeverFallsBackToFIFO(t *testing.T) {
 		actor.mu.Unlock()
 		t.Fatalf("admit synthetic foreground: %v", err)
 	}
-	// Resolve through the same exact-session boundary Steer uses before choosing
-	// the terminal winner. This proves attachment routing is valid; a later
-	// rejection therefore exercises terminal admission, not stale setup.
-	resolvedActor, _, resolvedLaneID, resolvedGeneration, resolveErr := runtime.actorForSteerSession(
-		info.SessionID, fieldString(request, "tabId"), fieldString(request, "chatId"),
-	)
-	if resolveErr != nil || resolvedActor != actor || resolvedLaneID != baseState.ActiveLaneID || resolvedGeneration == 0 {
-		actor.mu.Unlock()
-		t.Fatalf("exact steer attachment did not resolve before terminal race: actor=%v lane=%q generation=%d err=%v", resolvedActor == actor, resolvedLaneID, resolvedGeneration, resolveErr)
-	}
+	go func() {
+		close(started)
+		result, handled, err := runtime.Steer(context.Background(), request)
+		responses <- steerResponse{result: result, handled: handled, err: err}
+	}()
+	<-started
 	state := actor.engine.Snapshot()
 	if state.Foreground == nil {
 		actor.mu.Unlock()
@@ -1893,9 +1898,9 @@ func TestProviderChatSteerTerminalWinnerNeverFallsBackToFIFO(t *testing.T) {
 	if terminalErr != nil {
 		t.Fatalf("commit concurrent foreground terminal: %v", terminalErr)
 	}
-	result, handled, steerErr := runtime.Steer(context.Background(), request)
-	if !handled || !providercontract.ErrorIs(steerErr, providercontract.ErrorAdmissionRejected) || result != nil {
-		t.Fatalf("terminal-winning steer did not reject before ownership: handled=%v err=%v result=%#v", handled, steerErr, result)
+	response := <-responses
+	if !response.handled || !providercontract.ErrorIs(response.err, providercontract.ErrorAdmissionRejected) || response.result != nil {
+		t.Fatalf("terminal-winning steer did not reject before ownership: handled=%v err=%v result=%#v", response.handled, response.err, response.result)
 	}
 	after, _ := runtime.Snapshot("steer-regression-chat")
 	if _, exists := after.Operations["race-steer-concurrent-operation"]; exists || len(after.Queue) != 0 || after.PendingSteer != nil {
