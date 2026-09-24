@@ -382,6 +382,21 @@ class FixtureQuery {
       // A turn that opens and stays silent — the window in which a steer's
       // interrupt leaves the provider with nothing valid to end on.
       if (text.includes('[fixture:silent-turn]')) { this.openTurn = true; continue; }
+      // Deterministic boundary fixture: keep the turn open until a steer, but
+      // mark it as a valid completed segment so the next queued direction is
+      // answered on the following turn.
+      if (text.includes('[fixture:steer-boundary]')) {
+        this.openTurn = true;
+        this.turnProducedContent = true;
+        this.emit({
+          type: 'stream_event',
+          event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'Fixture boundary ready' } },
+          parent_tool_use_id: null,
+          uuid: randomUUID(),
+          session_id: this.sessionId,
+        });
+        continue;
+      }
       // Context compaction mid-turn: status(compacting) then compact_boundary,
       // exactly the frames the real CLI emits, after which the answer continues
       // inside the same turn.

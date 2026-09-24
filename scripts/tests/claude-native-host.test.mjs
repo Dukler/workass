@@ -163,7 +163,7 @@ test('official Claude SDK host keeps the steered turn open until the direction i
 
   peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
     sessionId,
-    prompt: [{ type: 'text', text: 'keep running' }],
+    prompt: [{ type: 'text', text: '[fixture:steer-boundary]' }],
   } });
   await peer.waitFor((message) => message.method === 'session/update' && message.params.update.sessionUpdate === 'agent_thought_chunk');
 
@@ -181,11 +181,17 @@ test('official Claude SDK host keeps the steered turn open until the direction i
   const receipt = await peer.waitFor((message) => message.method === 'session/update'
     && message.params.update.sessionUpdate === '_workass_claude_steer_consumed');
   assert.equal(receipt.params.update.clientUserMessageId, 'client-steer-boundary');
-  assert.equal(peer.messages.some((message) => message.id === 3), false,
-    'the steered prompt must still be open when its boundary receipt is emitted');
-
-  // No cancel: the same session/prompt settles on the steered turn's own result.
+  // The provider can stream the answer and terminal result before this JS
+  // continuation resumes. Assert captured wire order, which proves the
+  // direction was answered before the prompt's terminal reply.
   const settled = await peer.waitFor((message) => message.id === 3);
+  const receiptIndex = peer.messages.indexOf(receipt);
+  const answerIndex = peer.messages.findIndex((message) => message.method === 'session/update'
+    && message.params.update.sessionUpdate === 'agent_message_chunk'
+    && String(message.params.update.content?.text || '').includes('Fixture answer'));
+  const settledIndex = peer.messages.indexOf(settled);
+  assert.ok(receiptIndex >= 0 && answerIndex > receiptIndex && settledIndex > answerIndex,
+    `expected steer receipt, answer, then terminal reply; indexes=${receiptIndex},${answerIndex},${settledIndex}`);
   assert.equal(settled.result.stopReason, 'end_turn');
 });
 
