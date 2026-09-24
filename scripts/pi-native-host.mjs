@@ -39,6 +39,55 @@ function promptContent(prompt) {
   };
 }
 const modelID = model => model ? `${model.provider}/${model.id}` : '';
+const unknownToolOutcome = 'Tool execution outcome is unknown because the Pi session ended before a result was recorded.';
+export function pairToolResults(messages) {
+  const pending = new Map();
+  const output = [];
+  const heldSystems = [];
+  let changed = false;
+  const append = message => output.push(message);
+  const appendHeldSystems = () => { for (const message of heldSystems.splice(0)) append(message); };
+  const repairPending = () => {
+    if (pending.size) {
+      changed = true;
+      for (const [toolCallId,toolName] of pending) append({
+        role:'toolResult',toolCallId,toolName,
+        content:[{type:'text',text:unknownToolOutcome}],isError:true,timestamp:Date.now(),
+      });
+      pending.clear();
+    }
+    appendHeldSystems();
+  };
+  for (const message of messages) {
+    if (message?.role === 'system') {
+      if (pending.size) { heldSystems.push(message); changed = true; }
+      else append(message);
+      continue;
+    }
+    if (message?.role === 'assistant' && ['error','aborted'].includes(message.stopReason)) {
+      repairPending();
+      changed = true;
+      continue;
+    }
+    if (message?.role === 'toolResult') {
+      const toolCallId = message.toolCallId;
+      if (pending.has(toolCallId)) {
+        append(message); pending.delete(toolCallId);
+        if (!pending.size) appendHeldSystems();
+      } else { repairPending(); changed = true; }
+      continue;
+    }
+    repairPending();
+    append(message);
+    if (message?.role === 'assistant' && !['error','aborted'].includes(message.stopReason)) {
+      for (const block of message.content || []) {
+        if (block?.type === 'toolCall' && block.id) pending.set(block.id,block.name);
+      }
+    }
+  }
+  repairPending();
+  return changed ? output : messages;
+}
 function toolContent(result) {
   return (result?.content || []).flatMap(content => {
     if (content.type === 'text') return [{type:'content',content:{type:'text',text:String(content.text || '')}}];
@@ -77,6 +126,11 @@ export class PiSession {
     await this.loader.reload();
     const result = await createAgentSession({cwd:this.cwd, sessionManager:manager, resourceLoader:this.loader});
     this.native = result.session;
+    const agent = this.native.agent;
+    if (typeof agent?.convertToLlm === 'function') {
+      const convertToLlm = agent.convertToLlm.bind(agent);
+      agent.convertToLlm = async messages => pairToolResults(await convertToLlm(messages));
+    }
     // Discovery is Pi's own DefaultResourceLoader, including pi-subagents and
     // any user/project extensions. A broken configured extension is explicit.
     if (result.extensionsResult?.errors?.length) {

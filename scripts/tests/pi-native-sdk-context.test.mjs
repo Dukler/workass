@@ -3,7 +3,7 @@
 // model inference, vendor account, or user Pi profile is used as an oracle.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,mkdir,readFile,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,readFile,writeFile,rm,access} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {createServer} from 'node:http';
@@ -172,4 +172,66 @@ test('official Pi SDK preserves provider instructions and tool deltas across fre
   const resumedUsers = requests[2].messages.filter(message => message.role === 'user').map(message => JSON.stringify(message.content));
   assert.ok(resumedUsers.some(text => text.includes('fixture fresh')),'exact resume lost prior user input');
   assert.ok(resumedUsers.some(text => text.includes('fixture resumed')),'resumed input did not reach provider');
+});
+
+test('official Pi SDK repairs an interrupted extension tool result before resumed provider request', {
+  skip: !process.env.WORKASS_TEST_PI_EXECUTABLE && 'Run through TestPiNativeSDKProviderContext with an installed official Pi SDK',
+  timeout: 30000,
+}, async t => {
+  const root = await mkdtemp(path.join(tmpdir(),'workass-pi-repair-'));
+  let host,server;
+  t.after(async () => {
+    try { await host?.stop(); }
+    finally {
+      if (server?.listening) {
+        server.closeAllConnections();
+        await new Promise(resolve => server.close(resolve));
+      }
+      await rm(root,{recursive:true,force:true});
+    }
+  });
+  const cwd=path.join(root,'project'),agent=path.join(root,'agent');
+  await mkdir(cwd);await mkdir(agent);
+  const marker=path.join(root,'tool-started'),extension=path.join(root,'crash-extension.mjs');
+  await writeFile(extension,`import {writeFileSync} from 'node:fs';
+function stream(){const queue=[],waiters=[];let done=false,final;return {push(event){if(event.type==='done'){done=true;final=event.message;}const waiter=waiters.shift();waiter?waiter({value:event,done:false}):queue.push(event);},end(){done=true;while(waiters.length)waiters.shift()({done:true});},result(){return Promise.resolve(final);},async *[Symbol.asyncIterator](){while(true){if(queue.length){yield queue.shift();continue;}if(done)return;const next=await new Promise(resolve=>waiters.push(resolve));if(next.done)return;yield next.value;}}};}
+export default function(pi){
+ pi.registerTool({name:'fixture_crash',label:'Fixture crash',description:'Leaves a persisted call without a result.',parameters:{type:'object',properties:{},additionalProperties:false},async execute(){writeFileSync(${JSON.stringify(marker)},'started');return new Promise(()=>{});}});
+ pi.registerProvider('workass-repair-fixture',{api:'openai-completions',apiKey:'fixture',baseUrl:${JSON.stringify('__ENDPOINT__')},models:[{id:'fixed',name:'Repair fixture',api:'openai-completions',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:32768,maxTokens:1024}],streamSimple(model,context){const output={role:'assistant',content:[],api:model.api,provider:model.provider,model:model.id,usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},stopReason:'pending',timestamp:Date.now()};const result=stream();(async()=>{try{const response=await fetch(${JSON.stringify('__ENDPOINT__')},{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({messages:context.messages})});const receipt=await response.json();result.push({type:'start',partial:output});if(receipt.turn===1){result.push({type:'done',reason:'toolUse',message:{...output,content:[{type:'toolCall',id:'fixture-crash-call',name:'fixture_crash',arguments:{}}],stopReason:'toolUse'}});}else result.push({type:'done',reason:'stop',message:{...output,content:[{type:'text',text:'resumed after interrupted tool'}],stopReason:'stop'}});}catch(error){result.push({type:'error',error});}finally{result.end();}})();return result;}});
+}`);
+  const requests=[];
+  server=createServer(async(req,res)=>{
+    try {
+      let bytes='';for await(const chunk of req)bytes+=chunk;
+      requests.push(JSON.parse(bytes));
+      res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({turn:requests.length}));
+    } catch(error) { res.writeHead(500);res.end('invalid fixture request'); }
+  });
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  const source=await readFile(extension,'utf8');
+  await writeFile(extension,source.replaceAll('__ENDPOINT__',`http://127.0.0.1:${server.address().port}/capture`));
+  const settingsFile=path.join(agent,'settings.json');
+  await writeFile(settingsFile,JSON.stringify({defaultProvider:'workass-repair-fixture',defaultModel:'fixed',defaultThinkingLevel:'off',retry:{enabled:false},extensions:[extension]}));
+  await writeFile(path.join(agent,'models.json'),JSON.stringify({providers:{'workass-repair-fixture':{baseUrl:`http://127.0.0.1:${server.address().port}/capture`,api:'openai-completions',apiKey:'fixture',models:[{id:'fixed',contextWindow:32768,maxTokens:1024}]}}}));
+  const env={};
+  for(const name of ['PATH','HOME','USERPROFILE','SystemRoot','WINDIR','COMSPEC','TEMP','TMP'])if(process.env[name])env[name]=process.env[name];
+  Object.assign(env,{PI_CODING_AGENT_DIR:agent,WORKASS_PI_EXECUTABLE:process.env.WORKASS_TEST_PI_EXECUTABLE,WORKASS_INSTRUCTIONS_FILE:''});
+  host=hostClient(env,cwd);
+  await host.call('initialize');
+  const session=await host.call('session/new',{cwd});
+  const interrupted=host.call('session/prompt',{sessionId:session.sessionId,prompt:'start fixture tool'});
+  const until=Date.now()+10000;
+  while(Date.now()<until){try{await access(marker);break;}catch{await new Promise(resolve=>setTimeout(resolve,25));}}
+  await access(marker);
+  await host.stop();host=undefined;
+  await assert.rejects(interrupted);
+
+  host=hostClient(env,cwd);
+  const resumed=await host.call('session/resume',{cwd,sessionId:session.sessionId});
+  assert.equal(resumed.sessionId,session.sessionId);
+  await host.call('session/prompt',{sessionId:session.sessionId,prompt:'resume exact session'});
+  assert.equal(requests.length,2,'resume must reach the extension-backed fixture provider');
+  const repaired=requests[1].messages.find(message=>message.role==='toolResult'&&JSON.stringify(message.content).includes('Tool execution outcome is unknown'));
+  assert.ok(repaired,'resumed provider request must receive an explicit unknown-outcome tool result');
+  assert.ok(requests[1].messages.some(message=>message.role==='assistant'&&message.content?.some(block=>block.type==='toolCall'&&block.id==='fixture-crash-call')),'resumed provider context must retain the original assistant tool call');
 });
