@@ -29,7 +29,7 @@ test('full suite caps Node concurrency without changing renderer or shell test i
   const shell = commands.find(command => command.name === 'shell_tests');
   const scripts = commands.find(command => command.name === 'script_tests');
   const shellContracts = commands.filter(command => command.name.startsWith('script_contract_'));
-  assert.deepEqual(renderer.args.slice(0, 4), ['--experimental-strip-types', '--test', '--test-concurrency=4', path.join(root, 'desktop/renderer2/tests', fs.readdirSync(path.join(root, 'desktop/renderer2/tests')).filter(name => name.endsWith('.test.ts')).sort()[0])]);
+  assert.deepEqual(renderer.args.slice(0, 5), ['--experimental-strip-types', '--test', '--test-isolation=none', '--test-concurrency=1', path.join(root, 'desktop/renderer2/tests', fs.readdirSync(path.join(root, 'desktop/renderer2/tests')).filter(name => name.endsWith('.test.ts')).sort()[0])]);
   assert.equal(renderer.args.filter(arg => arg.endsWith('.test.ts')).length, fs.readdirSync(path.join(root, 'desktop/renderer2/tests')).filter(name => name.endsWith('.test.ts')).length);
   assert.equal(renderer.cwd, path.join(root, 'desktop/renderer2'));
   assert.equal(shell.args[1], '--test-concurrency=4');
