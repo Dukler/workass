@@ -52,6 +52,19 @@ listener_pid() {
   lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -n 1
 }
 
+stop_expected_listener() {
+  [ "$(listener_pid)" = "$expected_pid" ] || return 0
+  kill -TERM "$expected_pid" 2>/dev/null || true
+  attempts=60
+  while [ "$attempts" -gt 0 ] && [ "$(listener_pid)" = "$expected_pid" ]; do
+    attempts=$((attempts - 1))
+    sleep 0.25
+  done
+  if [ "$(listener_pid)" = "$expected_pid" ]; then
+    kill -KILL "$expected_pid" 2>/dev/null || true
+  fi
+}
+
 wait_health() {
   attempts=120
   while [ "$attempts" -gt 0 ]; do
@@ -232,17 +245,21 @@ chmod 755 "$target"
 if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
   echo "[handoff] replacing existing launchd daemon"
   launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || rollback "could not stop existing launchd daemon"
-else
-  echo "[handoff] stopping directly launched daemon pid=$expected_pid"
-  kill -TERM "$expected_pid" 2>/dev/null || true
-  attempts=60
-  while [ "$attempts" -gt 0 ] && kill -0 "$expected_pid" 2>/dev/null; do
+  # A stale registered job may coexist with a directly launched listener.
+  # Bootout cannot stop that process; only the exact preflighted listener may
+  # be terminated before installing the candidate.
+  attempts=20
+  while [ "$attempts" -gt 0 ] && [ "$(listener_pid)" = "$expected_pid" ]; do
     attempts=$((attempts - 1))
     sleep 0.25
   done
-  if kill -0 "$expected_pid" 2>/dev/null; then
-    kill -KILL "$expected_pid" 2>/dev/null || true
+  if [ "$(listener_pid)" = "$expected_pid" ]; then
+    echo "[handoff] stopping exact listener left after launchd bootout pid=$expected_pid"
+    stop_expected_listener
   fi
+else
+  echo "[handoff] stopping directly launched daemon pid=$expected_pid"
+  stop_expected_listener
 fi
 
 attempts=80
