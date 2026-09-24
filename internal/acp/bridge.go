@@ -372,17 +372,25 @@ func (b *Bridge) start() error {
 	if err != nil {
 		return err
 	}
-	stderr, err := cmd.StderrPipe()
+	// Keep ownership of stderr's pipe so cmd.Wait cannot close it before the
+	// reader has consumed the child's final diagnostics. StderrPipe is unsafe
+	// here because Wait may close it while the independent drain is scheduled.
+	stderr, stderrWriter, err := os.Pipe()
 	if err != nil {
 		return err
 	}
+	cmd.Stderr = stderrWriter
 	processTree, err := startProcessTree(cmd)
 	if err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
 		_ = stderr.Close()
+		_ = stderrWriter.Close()
 		return fmt.Errorf("attach ACP process tree: %w", err)
 	}
+	// The child owns its copy now. Closing our writer lets the reader observe
+	// EOF as soon as the process tree no longer has stderr open.
+	_ = stderrWriter.Close()
 
 	childExited := make(chan struct{})
 	b.mu.Lock()
@@ -402,8 +410,12 @@ func (b *Bridge) start() error {
 	b.recycleReason = ""
 	b.mu.Unlock()
 	go b.readStdout(stdout)
-	go b.readStderr(stderr)
-	go b.waitChild(cmd, childExited)
+	stderrDrained := make(chan struct{})
+	go func() {
+		b.readStderr(stderr)
+		close(stderrDrained)
+	}()
+	go b.waitChild(cmd, childExited, stderr, stderrDrained)
 	if !b.catalogProbe {
 		b.manager.bridgeChanged(b, "spawn")
 	}
@@ -464,8 +476,15 @@ func (b *Bridge) appendStderrTail(chunk []byte) {
 	}
 }
 
-func (b *Bridge) waitChild(cmd *exec.Cmd, childExited chan struct{}) {
+func (b *Bridge) waitChild(cmd *exec.Cmd, childExited chan struct{}, stderr *os.File, stderrDrained <-chan struct{}) {
 	err := cmd.Wait()
+	// Usually EOF arrives immediately after the child exits. A descendant may
+	// have inherited stderr, so bound this fence and close our reader on expiry.
+	select {
+	case <-stderrDrained:
+	case <-time.After(250 * time.Millisecond):
+		_ = stderr.Close()
+	}
 	code, signal := exitCodeSignal(cmd.ProcessState, err)
 	uptime := time.Duration(0)
 	processTree := processTreeHandle{}
