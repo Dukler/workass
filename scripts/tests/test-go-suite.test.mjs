@@ -117,6 +117,30 @@ test('optional fixture root routes only Go test binary temp files there and remo
   assert.deepEqual(await import('node:fs/promises').then(fs => fs.readdir(fixtureRoot)), []);
 });
 
+test('metadata and all compile groups run while fixture is pending; test binaries wait for its root', async t => {
+  const f = await fixture(t);
+  let provideRoot;
+  const fixtureRootPromise = new Promise(resolve => { provideRoot = resolve; });
+  const events = [];
+  const fake = inProcessGoSpawn({
+    record: (command, args) => events.push(String(command).endsWith('.test') ? `binary:${args[0]}` : args[0] === 'test' && args.includes('-c') ? 'compile' : args[0]),
+    onCompileFinish: () => events.push('compile-finished'),
+    onTestBinaryStart: () => events.push('binary-started'),
+  });
+  const running = runGoSuite({ cwd: f.root, logDir: f.logs, fixtureRootPromise, go: f.go, workers: 3, spawn: fake.spawn, signalHandlers: false });
+  const deadline = Date.now() + 2000;
+  while (events.filter(event => event === 'compile-finished').length < 3 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(events.filter(event => event === 'compile-finished').length, 3, 'three compile groups completed before fixture delivery');
+  assert.equal(events.includes('binary-started'), false, 'listing and execution binaries remain gated on the fixture root');
+  const fixtureRoot = path.join(f.root, 'delivered-fixture');
+  await mkdir(fixtureRoot);
+  provideRoot(fixtureRoot);
+  const result = await running;
+  assert.equal(result.ok, true, result.error);
+  assert.equal(events.filter(event => event === 'binary-started').length > 0, true);
+  assert.equal(events.filter(event => event === 'compile-finished').length, 3);
+});
+
 async function fixture(t, { fail = '', delay = '0.04', packageFail = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'workass-go-suite-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
