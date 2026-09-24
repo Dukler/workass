@@ -4,12 +4,25 @@ set -e -o pipefail
 export PATH="/opt/homebrew/bin:$PATH"
 cd "$(dirname "$0")/.."
 
+run_gate_phase() {
+  phase_name=$1
+  shift
+  phase_started=$(date +%s)
+  if "$@"; then
+    phase_status=passed
+  else
+    phase_status=failed
+  fi
+  echo "WORKASS_GATE_PHASE name=$phase_name status=$phase_status seconds=$(($(date +%s) - phase_started))"
+  [ "$phase_status" = passed ]
+}
+
 # Renderer failures are cheap compared with the full Go matrix. Release input
 # preparation additionally requires the freshly built renderer to match the
 # committed go:embed snapshot, so a stale snapshot fails before any slow test.
 renderer_built=0
 if [ -d desktop/renderer2/node_modules ]; then
-  (cd desktop/renderer2 && npm test --silent && npx tsc --noEmit && npm run build --silent >/dev/null)
+  run_gate_phase renderer sh -c 'cd desktop/renderer2 && npm test --silent && npx tsc --noEmit && npm run build --silent >/dev/null'
   renderer_built=1
 fi
 if [ "${WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER:-0}" = 1 ]; then
@@ -24,8 +37,9 @@ if [ "${WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER:-0}" = 1 ]; then
   echo "WORKASS_RENDERER_SNAPSHOT_VERIFIED"
 fi
 
-node --test desktop/shell/*.test.js
-go build ./... && go vet ./...
+run_gate_phase shell_tests node --test desktop/shell/*.test.js
+run_gate_phase go_build go build ./...
+run_gate_phase go_vet go vet ./...
 # Brevity is right on the happy path and exactly backwards on the failing one:
 # `| tail -12` shows the alphabetical tail, so a failing package early in the
 # list loses both its `--- FAIL:` detail and its `FAIL <package>` line, and the
@@ -40,8 +54,10 @@ run_go_tests() {
     go test ./... -p=2 -parallel=2
   fi
 }
+go_tests_started=$(date +%s)
 if run_go_tests >"$test_log" 2>&1; then
   tail -12 "$test_log"
+  echo "WORKASS_GATE_PHASE name=go_tests status=passed seconds=$(($(date +%s) - go_tests_started))"
 else
   # Dropping the packages that passed is what leaves room for the ones that did
   # not, with the assertion text still attached to the name that produced it.
@@ -56,6 +72,7 @@ else
   # the one line the next command cannot proceed without.
   echo "--- failing packages ---"
   grep -E '^(FAIL|panic)' "$test_log" | head -20
+  echo "WORKASS_GATE_PHASE name=go_tests status=failed seconds=$(($(date +%s) - go_tests_started))"
   exit 1
 fi
 echo "GATE_PASS"
