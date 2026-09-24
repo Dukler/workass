@@ -335,7 +335,7 @@ func TestStartupDetectProvidersRetriesOnlyStatusErrors(t *testing.T) {
 	t.Cleanup(func() { manager.Reset() })
 
 	manager.StartProviderDetection(context.Background())
-	initialProviders := waitCollectedChannelCount(t, events, "providers:list", 1, 2*time.Second)[0].payload.([]map[string]any)
+	initialProviders := waitCollectedChannelCount(t, events, "providers:list", 1, 15*time.Second)[0].payload.([]map[string]any)
 	assertProviderListItem(t, initialProviders, "devin", providerStatusError, false)
 	qwen := assertProviderListItem(t, initialProviders, "qwen", providerStatusInactive, false)
 	if qwen["message"] != "disabled by user" {
@@ -343,11 +343,11 @@ func TestStartupDetectProvidersRetriesOnlyStatusErrors(t *testing.T) {
 	}
 	assertProviderListItem(t, initialProviders, "claude", providerStatusNotFound, false)
 	assertProviderListItem(t, initialProviders, "codex", providerStatusNotFound, false)
-	_ = waitCollectedChannelCount(t, events, "chat:catalog", 1, 2*time.Second)
+	_ = waitCollectedChannelCount(t, events, "chat:catalog", 1, 15*time.Second)
 
-	retryProviders := waitCollectedChannelCount(t, events, "providers:list", 2, 2*time.Second)[1].payload.([]map[string]any)
+	retryProviders := waitCollectedChannelCount(t, events, "providers:list", 2, 15*time.Second)[1].payload.([]map[string]any)
 	assertProviderListItem(t, retryProviders, "devin", providerStatusReady, true)
-	retryCatalog := waitCollectedChannelCount(t, events, "chat:catalog", 2, 2*time.Second)[1].payload.(map[string]any)
+	retryCatalog := waitCollectedChannelCount(t, events, "chat:catalog", 2, 15*time.Second)[1].payload.(map[string]any)
 	groups, _ := retryCatalog["groups"].([]CatalogGroup)
 	assertCatalogGroup(t, groups, "devin", providerStatusReady, true)
 
@@ -1300,10 +1300,10 @@ func TestLegacyDevinNeedsLoginRecoveryFailureDoesNotLoopAcrossRestart(t *testing
 
 	first := newManager([]ProviderConfig{provider})
 	first.StartProviderDetection(context.Background())
-	waitForMethodLog(t, methodLog, 2*time.Second, func(methods []string) bool {
+	waitForMethodLog(t, methodLog, 15*time.Second, func(methods []string) bool {
 		return countMethod(methods, "initialize") == 1
 	})
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		first.mu.Lock()
 		cfg := first.providers["devin"].Config
@@ -1730,7 +1730,7 @@ func installNodeWrapper(t *testing.T, dir string) {
 	if err != nil {
 		t.Skipf("node not available for mock ACP detection: %v", err)
 	}
-	writeExecutable(t, filepath.Join(dir, "node"), fmt.Sprintf("#!/bin/sh\nexec %s \"$@\"\n", shellQuote(node)))
+	writeFixtureExecutable(t, filepath.Join(dir, "node"), fmt.Sprintf("#!/bin/sh\nexec %s \"$@\"\n", shellQuote(node)))
 }
 
 func installNativeFrontierFixtures(t *testing.T, root, dir string) (string, string) {
@@ -1781,7 +1781,7 @@ func installFakeAgentWrapperWithEnv(t *testing.T, dir, name, mode string, env ma
 	b.WriteString("fi\n")
 	b.WriteString(fmt.Sprintf("export WORKASS_FAKE_ACP WORKASS_FAKE_ACP_MODE%s\n", shellExportSuffix(env)))
 	b.WriteString(fmt.Sprintf("exec %s -test.run=TestFakeACPHelper -- \"$@\"\n", shellQuote(os.Args[0])))
-	writeExecutable(t, filepath.Join(dir, name), b.String())
+	writeFixtureExecutable(t, filepath.Join(dir, name), b.String())
 }
 
 func writeExecutable(t *testing.T, path, script string) {

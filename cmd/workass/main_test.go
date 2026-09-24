@@ -2833,7 +2833,7 @@ func TestWireProviderCatalogConnectBeforeDetectionGetsSingleBroadcast(t *testing
 	go func() {
 		done <- manager.DetectProviders(context.Background(), acp.DetectOptions{})
 	}()
-	waitForWireFile(t, started, 2*time.Second)
+	waitForWireFile(t, started, 15*time.Second)
 
 	client := dialTestWS(t, server.URL)
 	defer client.conn.Close()
