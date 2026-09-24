@@ -283,10 +283,15 @@ function parseGoJson(output) {
   return events;
 }
 
-export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, workers = DEFAULT_WORKERS, race = false, go = 'go', spawn = nodeSpawn, signalHandlers = true, abortSignal } = {}) {
+export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtureRoot = process.env.WORKASS_TEST_FIXTURE_ROOT, workers = DEFAULT_WORKERS, race = false, go = 'go', spawn = nodeSpawn, signalHandlers = true, abortSignal } = {}) {
   if (!Number.isInteger(workers) || workers < 1) throw new Error('workers must be a positive integer');
   const wallStart = performance.now();
   const root = await mkdtemp(path.join(os.tmpdir(), 'workass-go-matrix-'));
+  let fixtureTempRoot;
+  if (fixtureRoot) {
+    await mkdir(fixtureRoot, { recursive: true });
+    fixtureTempRoot = await mkdtemp(path.join(fixtureRoot, 'workass-go-fixtures-'));
+  }
   const repoKey = createHash('sha256').update(realpathSync(cwd)).digest('hex').slice(0, 24);
   const binaryCache = cacheDir ?? (spawn === nodeSpawn
     ? path.join(os.tmpdir(), 'workass-go-test-binaries', repoKey, race ? 'race' : 'normal')
@@ -323,7 +328,8 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
   if (signalHandlers) { process.on('SIGINT', onInterrupt); process.on('SIGTERM', onInterrupt); }
   const onAbort = () => onInterrupt('ABORT');
   abortSignal?.addEventListener('abort', onAbort, { once: true });
-  const commandTemp = async label => {
+  const commandTemp = async (label, { testBinary = false } = {}) => {
+    if (testBinary && fixtureTempRoot) return mkdtemp(path.join(fixtureTempRoot, `${label}-`));
     const dir = path.join(root, `command-${label}`);
     await mkdir(dir, { recursive: true });
     return dir;
@@ -337,7 +343,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
     if (interrupted) throw new Error(`interrupted by ${interrupted}`);
     if (jsonlError) throw new Error(`Go matrix log write failed: ${jsonlError.message}`);
     appendJsonLine(jsonl, { event: 'command-start', label, command, args, cwd: commandCwd, at: new Date().toISOString() });
-    const tempDir = await commandTemp(label);
+    const tempDir = await commandTemp(label, { testBinary });
     if (interrupted) throw new Error(`interrupted by ${interrupted}`);
     const result = await spawnLogged(command, args, { cwd: commandCwd, spawn, env: envFor(tempDir, { testBinary }) }, active);
     appendJsonLine(jsonl, { event: 'command-end', label, ...result });
@@ -424,8 +430,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
     };
     const executeBatch = async (batch, worker) => {
       const { item } = batch;
-      const tempDir = path.join(root, `worker-${worker}-${item.label}-batch-${batch.id}`);
-      await mkdir(tempDir, { recursive: true });
+      const tempDir = await commandTemp(`worker-${worker}-${item.label}-batch-${batch.id}`, { testBinary: true });
       if (interrupted) return;
       const pattern = `^(?:${batch.names.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`;
       const result = await spawnLogged(item.binary, ['-test.v', `-test.run=${pattern}`, '-test.count=1', '-test.parallel=2'], { cwd: item.packageCwd, spawn, env: envFor(tempDir, { testBinary: true }) }, active);
@@ -457,7 +462,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
         return;
       }
       const cachePath = path.join(binaryCache, `${path.posix.basename(work.package)}.test`);
-      const tempDir = await commandTemp(`other-${work.package.replace(/[^a-zA-Z0-9_-]/g, '-')}`);
+      const tempDir = await commandTemp(`other-${work.package.replace(/[^a-zA-Z0-9_-]/g, '-')}`, { testBinary: true });
       if (interrupted) return;
       const binary = path.join(root, `${label}-run.test`);
       await link(cachePath, binary);
@@ -528,6 +533,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
     if (signalHandlers) { process.off('SIGINT', onInterrupt); process.off('SIGTERM', onInterrupt); }
     abortSignal?.removeEventListener('abort', onAbort);
     await rm(root, { recursive: true, force: true });
+    if (fixtureTempRoot) await rm(fixtureTempRoot, { recursive: true, force: true });
     summary.elapsedMs = performance.now() - wallStart;
     if (!jsonlError) appendJsonLine(jsonl, { event: 'summary', ...summary });
     await new Promise(resolve => jsonl.end(resolve));
