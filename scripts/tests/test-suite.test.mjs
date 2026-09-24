@@ -5,9 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { runSuiteMatrix, testSummary } from '../test-suite.mjs';
+import { runSuiteMatrix, testSummary, fullSuiteCommands } from '../test-suite.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(here, '../..');
 const node = process.execPath;
 const fixture = (name, source) => ({ name, command: node, args: ['-e', source] });
 const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'workass-suite-test-'));
@@ -20,6 +21,19 @@ test('summarizes Node TAP reporter totals and keeps top-level and nested tests d
 test('summarizes Node spec reporter totals from complete output', () => {
   const spec = `✔ outer (2ms)\n  ✔ inner (1ms)\n✔ parent suite\nℹ tests 2\nℹ suites 1\nℹ pass 2\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\n`;
   assert.deepEqual(testSummary(spec), { tests: 2, topLevelTests: 1, subtests: 1, passed: 2, failed: 0, skipped: 0 });
+});
+
+test('full suite caps Node concurrency without changing renderer or shell test inventories', () => {
+  const commands = fullSuiteCommands();
+  const renderer = commands.find(command => command.name === 'renderer_tests');
+  const shell = commands.find(command => command.name === 'shell_tests');
+  const scripts = commands.find(command => command.name === 'script_tests');
+  assert.deepEqual(renderer.args.slice(0, 4), ['--experimental-strip-types', '--test', '--test-concurrency=4', path.join(root, 'desktop/renderer2/tests', fs.readdirSync(path.join(root, 'desktop/renderer2/tests')).filter(name => name.endsWith('.test.ts')).sort()[0])]);
+  assert.equal(renderer.args.filter(arg => arg.endsWith('.test.ts')).length, fs.readdirSync(path.join(root, 'desktop/renderer2/tests')).filter(name => name.endsWith('.test.ts')).length);
+  assert.equal(shell.args[1], '--test-concurrency=2');
+  assert.equal(shell.args.filter(arg => arg.endsWith('.test.js')).length, fs.readdirSync(path.join(root, 'desktop/shell')).filter(name => name.endsWith('.test.js')).length);
+  assert.equal(scripts.args[1], '--test-concurrency=2');
+  assert.equal(scripts.args.filter(arg => arg.endsWith('.test.mjs')).length, fs.readdirSync(path.join(root, 'scripts/tests')).filter(name => name.endsWith('.test.mjs')).length);
 });
 
 test('counts Go JSON pass, fail, skip outcomes and separates nested tests', () => {
