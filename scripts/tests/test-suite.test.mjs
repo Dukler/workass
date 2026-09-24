@@ -23,15 +23,23 @@ test('summarizes Node spec reporter totals from complete output', () => {
   assert.deepEqual(testSummary(spec), { tests: 2, topLevelTests: 1, subtests: 1, passed: 2, failed: 0, skipped: 0 });
 });
 
-test('full suite caps Node concurrency without changing renderer or shell test inventories', () => {
+test('full suite partitions every renderer test across four sequential isolated Node processes', () => {
   const commands = fullSuiteCommands();
-  const renderer = commands.find(command => command.name === 'renderer_tests');
+  const renderer = commands.filter(command => /^renderer_tests_[1-4]$/.test(command.name));
+  const rendererFiles = fs.readdirSync(path.join(root, 'desktop/renderer2/tests')).filter(name => name.endsWith('.test.ts')).sort();
   const shell = commands.find(command => command.name === 'shell_tests');
   const scripts = commands.find(command => command.name === 'script_tests');
   const shellContracts = commands.filter(command => command.name.startsWith('script_contract_'));
-  assert.deepEqual(renderer.args.slice(0, 5), ['--experimental-strip-types', '--test', '--test-isolation=none', '--test-concurrency=1', path.join(root, 'desktop/renderer2/tests', fs.readdirSync(path.join(root, 'desktop/renderer2/tests')).filter(name => name.endsWith('.test.ts')).sort()[0])]);
-  assert.equal(renderer.args.filter(arg => arg.endsWith('.test.ts')).length, fs.readdirSync(path.join(root, 'desktop/renderer2/tests')).filter(name => name.endsWith('.test.ts')).length);
-  assert.equal(renderer.cwd, path.join(root, 'desktop/renderer2'));
+  assert.deepEqual(renderer.map(command => command.name), ['renderer_tests_1', 'renderer_tests_2', 'renderer_tests_3', 'renderer_tests_4']);
+  const rendererGroups = renderer.map(command => {
+    assert.deepEqual(command.args.slice(0, 4), ['--experimental-strip-types', '--test', '--test-isolation=none', '--test-concurrency=1']);
+    assert.equal(command.cwd, path.join(root, 'desktop/renderer2'));
+    return command.args.slice(4).map(file => path.relative(path.join(root, 'desktop/renderer2/tests'), file));
+  });
+  const assignedRendererFiles = rendererGroups.flat();
+  assert.equal(new Set(assignedRendererFiles).size, rendererFiles.length);
+  assert.deepEqual(assignedRendererFiles.slice().sort(), rendererFiles);
+  assert.ok(rendererGroups.every(group => group.length > 0));
   assert.equal(shell.args[1], '--test-concurrency=4');
   assert.equal(shell.args.filter(arg => arg.endsWith('.test.js')).length, fs.readdirSync(path.join(root, 'desktop/shell')).filter(name => name.endsWith('.test.js')).length);
   assert.equal(scripts.args[1], '--test-concurrency=6');
