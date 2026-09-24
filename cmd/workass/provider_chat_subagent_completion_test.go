@@ -213,7 +213,7 @@ func TestExplicitParentStopDropsOnlyItsQueuedSubagentCompletion(t *testing.T) {
 	}
 	if err := actor.engine.Apply(chat.Submit{
 		OperationID: "human-waiting", LaneID: state.DesiredLaneID, Text: "human queued work",
-		Presentation: providercontract.TurnPresentation{UserMessageID: "human-waiting-user", Origin: "human"},
+		Presentation: providercontract.TurnPresentation{UserMessageID: "human-waiting-user", AssistantMessageID: "human-waiting-assistant", Origin: "human"},
 	}); err != nil {
 		t.Fatalf("queue human work: %v", err)
 	}
@@ -259,24 +259,29 @@ func TestExplicitParentStopDropsOnlyItsQueuedSubagentCompletion(t *testing.T) {
 			t.Fatalf("stopped parent's queued completion survived Stop: %#v", state.Queue)
 		}
 	}
-	humanRetained := state.Foreground != nil && state.Foreground.OperationID == "human-waiting"
-	for _, queued := range state.Queue {
-		humanRetained = humanRetained || queued.OperationID == "human-waiting"
-	}
+	humanRetained := trackedHumanWorkPresent(state)
 	if !humanRetained {
 		t.Fatalf("unrelated human work was removed by Stop: foreground=%#v queue=%#v", state.Foreground, state.Queue)
 	}
 	// Reopen the durable actor and replay the pending receipt. The same actor
 	// fence must survive restart, while a receipt from a different parent stays
 	// eligible.
-	runtime.mu.Lock()
-	delete(runtime.actors, chatID)
-	runtime.mu.Unlock()
-	restartedActor, err := runtime.actor(chatID)
+	root := repoRoot(t)
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("close runtime before reload: %v", err)
+	}
+	manager := acp.NewManager(acp.Options{RootDir: root, StateDir: stateDir, RuntimeProfile: "dev"})
+	t.Cleanup(func() { manager.Reset() })
+	restarted := newProviderChatRuntimeBeforeProviderStartup(manager, newSessionStore(filepath.Join(stateDir, sessionStateFilename)), stateDir)
+	t.Cleanup(func() { _ = restarted.Close(context.Background()) })
+	if err := restarted.StartupError(); err != nil {
+		t.Fatalf("reload actor runtime: %v", err)
+	}
+	restartedActor, err := restarted.actor(chatID)
 	if err != nil {
 		t.Fatalf("reopen stopped actor: %v", err)
 	}
-	if err := runtime.deliverSubagentCompletion(tabID, chatID, receipt); err != nil {
+	if err := restarted.deliverSubagentCompletion(tabID, chatID, receipt); err != nil {
 		t.Fatalf("replay stopped-parent receipt: %v", err)
 	}
 	state = restartedActor.engine.Snapshot()
@@ -292,7 +297,7 @@ func TestExplicitParentStopDropsOnlyItsQueuedSubagentCompletion(t *testing.T) {
 		Result: "belongs to an unrelated parent", ParentTabID: tabID, ParentChatID: chatID,
 		OriginLaneID: string(state.DesiredLaneID), OriginOperationID: "other-parent-operation",
 	}
-	if err := runtime.deliverSubagentCompletion(tabID, chatID, otherParentReceipt); err != nil {
+	if err := restarted.deliverSubagentCompletion(tabID, chatID, otherParentReceipt); err != nil {
 		t.Fatalf("admit unrelated parent's completion: %v", err)
 	}
 	otherCompletionID := subagentCompletionOperationID(tabID, chatID, otherParentReceipt.ReceiptID)
@@ -300,11 +305,26 @@ func TestExplicitParentStopDropsOnlyItsQueuedSubagentCompletion(t *testing.T) {
 	if !actorHasSubagentCompletion(state, otherCompletionID, providercontract.LaneID(state.DesiredLaneID), formatSubagentCompletion(otherParentReceipt)) {
 		t.Fatalf("Stop suppressed a completion from an unrelated parent: queue=%#v foreground=%#v", state.Queue, state.Foreground)
 	}
-	humanRetained = false
-	for _, queued := range state.Queue {
-		humanRetained = humanRetained || queued.OperationID == "human-waiting"
-	}
+	humanRetained = trackedHumanWorkPresent(state)
 	if !humanRetained {
 		t.Fatalf("late callback disturbed unrelated human queue after restart: %#v", state.Queue)
 	}
+}
+
+func trackedHumanWorkPresent(state chat.State) bool {
+	const operationID = providercontract.OperationID("human-waiting")
+	if state.Foreground != nil && state.Foreground.OperationID == operationID {
+		return true
+	}
+	for _, queued := range state.Queue {
+		if queued.OperationID == operationID {
+			return true
+		}
+	}
+	for _, event := range state.Ledger {
+		if event.OperationID == operationID {
+			return true
+		}
+	}
+	return false
 }
