@@ -14,7 +14,7 @@ export function fullSuiteCommands(repo = root) {
     name: `script_contract_${path.basename(file, '.test.sh')}`, command: 'sh', args: [file], cwd: repo,
   }));
   const rendererFiles = files(path.join(repo, 'desktop/renderer2/tests'), /\.test\.ts$/);
-  const rendererGroups = Array.from({ length: 4 }, () => []);
+  const rendererGroups = Array.from({ length: 6 }, () => []);
   rendererFiles.forEach((file, index) => rendererGroups[index % rendererGroups.length].push(file));
   return [
     ...rendererGroups.map((group, index) => ({ name: `renderer_tests_${index + 1}`, command: 'node', args: ['--experimental-strip-types', '--test', '--test-isolation=none', '--test-concurrency=1', ...group], cwd: path.join(repo, 'desktop/renderer2') })),
