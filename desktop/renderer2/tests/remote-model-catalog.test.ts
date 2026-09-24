@@ -15,6 +15,7 @@ let appStore: {
   providerName(providerId: string, chat: Chat): string | null;
   providerBrand(providerId: string, chat: Chat): string;
   onCatalog(catalog: ChatCatalog): void;
+  clearToastTimers(): void;
 };
 let projectRemoteEvent: (method: string, machineId: string, payload: unknown) => unknown;
 
@@ -34,7 +35,7 @@ before(async () => {
   });
 });
 
-after(async () => { await vite.close(); });
+after(async () => { appStore.clearToastTimers(); await vite.close(); });
 
 function chat(machineId: string, modelId: string): Chat {
   const prefix = machineId ? `M~${machineId}~` : '';

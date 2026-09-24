@@ -12,7 +12,7 @@ const styles = readFileSync(new URL('../src/styles/app.css', import.meta.url), '
 let vite: ViteDevServer;
 let Transcript: React.ComponentType<{ chat: Chat | null }>;
 let Composer: React.ComponentType<{ chat: Chat | null }>;
-let appStore: { state: Record<string, unknown> };
+let appStore: { state: Record<string, unknown>; clearToastTimers(): void };
 
 before(async () => {
   vite = await createServer({
@@ -28,11 +28,11 @@ before(async () => {
     Composer: React.ComponentType<{ chat: Chat | null }>;
   });
   appStore = (await vite.ssrLoadModule('/src/store/store.ts') as {
-    store: { state: Record<string, unknown> };
+    store: { state: Record<string, unknown>; clearToastTimers(): void };
   }).store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => { appStore.clearToastTimers(); await vite.close(); });
 
 function user(id: string, content: string, extra: Partial<Msg> = {}): Msg {
   return { id, role: 'user', content, status: 'done', at: null, events: [], ...extra };

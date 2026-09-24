@@ -23,7 +23,7 @@ const plan = (entries: Array<{ status: string; content: string }>, key = 'plan-1
 
 let server: ViteDevServer;
 let TareasCard: React.ComponentType;
-let appStore: { state: Record<string, unknown> };
+let appStore: { state: Record<string, unknown>; clearToastTimers(): void };
 
 before(async () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
@@ -32,11 +32,11 @@ before(async () => {
     TareasCard: React.ComponentType;
   });
   appStore = (await server.ssrLoadModule('/src/store/store.ts') as {
-    store: { state: Record<string, unknown> };
+    store: { state: Record<string, unknown>; clearToastTimers(): void };
   }).store;
 });
 
-after(async () => { await server.close(); });
+after(async () => { appStore.clearToastTimers(); await server.close(); });
 
 function renderRail(
   messages: unknown[],

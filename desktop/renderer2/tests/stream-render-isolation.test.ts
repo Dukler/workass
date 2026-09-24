@@ -12,6 +12,7 @@ let Transcript: React.ComponentType<{ chat: Chat | null }>;
 let appStore: {
   state: Record<string, unknown>;
   bump(topic: string): void;
+  clearToastTimers(): void;
 };
 
 before(async () => {
@@ -25,11 +26,11 @@ before(async () => {
     Transcript: React.ComponentType<{ chat: Chat | null }>;
   });
   appStore = (await vite.ssrLoadModule('/src/store/store.ts') as {
-    store: { state: Record<string, unknown>; bump(topic: string): void };
+    store: { state: Record<string, unknown>; bump(topic: string): void; clearToastTimers(): void };
   }).store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => { appStore.clearToastTimers(); await vite.close(); });
 
 function user(id: string, content: string, extra: Partial<Msg> = {}): Msg {
   return { id, role: 'user', content, status: 'done', at: null, events: [], ...extra };
