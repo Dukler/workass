@@ -19,7 +19,7 @@ export function fullSuiteCommands(repo = root) {
   return [
     ...rendererGroups.map((group, index) => ({ name: `renderer_tests_${index + 1}`, command: 'node', args: ['--experimental-strip-types', '--test', '--test-isolation=none', '--test-concurrency=1', ...group], cwd: path.join(repo, 'desktop/renderer2') })),
     { name: 'shell_tests', command: 'node', args: ['--test', '--test-concurrency=4', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo },
-    { name: 'go_tests', command: 'node', args: [path.join(repo, 'scripts/test-go-suite.mjs'), '--workers', '6', '--cwd', repo], cwd: repo },
+    { name: 'go_tests', command: 'node', args: [path.join(repo, 'scripts/test-go-suite.mjs'), '--cwd', repo], cwd: repo },
     { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=6', ...files(path.join(repo, 'scripts/tests'), /\.test\.mjs$/)], cwd: repo },
     ...shellContracts,
   ];

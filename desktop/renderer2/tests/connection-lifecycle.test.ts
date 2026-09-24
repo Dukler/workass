@@ -105,19 +105,37 @@ test('refresh requests merge while an earlier reconciliation is waiting', async 
   const subject = new StoreCtor();
   const tasks: (() => Promise<void>)[] = [];
   const batches: Set<string>[] = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const timers: Array<{ callback: () => void; delay: number }> = [];
+  (globalThis as any).setTimeout = (callback: () => void, delay: number) => {
+    timers.push({ callback, delay });
+    return timers.length;
+  };
+  (globalThis as any).clearTimeout = () => {};
   subject.queueAgentRefresh = (_reason: string, task: () => Promise<void>) => tasks.push(task);
   subject.runScopedSync = async (scopes: Set<string>) => { batches.push(scopes); };
-  subject.scheduleScopedSync(['session']);
-  await new Promise((resolve) => setTimeout(resolve, 350));
-  subject.scheduleScopedSync(['permissions']);
-  await new Promise((resolve) => setTimeout(resolve, 350));
-  subject.scheduleScopedSync(['session', 'catalog']);
-  await new Promise((resolve) => setTimeout(resolve, 350));
-  assert.equal(tasks.length, 1, 'slow hydration must not accumulate redundant full-session reads');
-  await tasks.shift()!();
-  assert.deepEqual([...batches[0]].sort(), ['catalog', 'permissions', 'session']);
-  subject.scheduleScopedSync(['session']);
-  await new Promise((resolve) => setTimeout(resolve, 350));
-  assert.equal(tasks.length, 1, 'a later change still gets its reconciliation');
-  await tasks.shift()!();
+  const flushDebounce = () => {
+    const timer = timers.shift();
+    assert.ok(timer, 'a reconciliation debounce is scheduled');
+    assert.equal(timer.delay, 250, 'the full digest debounce remains in force');
+    timer.callback();
+  };
+  try {
+    subject.scheduleScopedSync(['session']);
+    subject.scheduleScopedSync(['permissions']);
+    subject.scheduleScopedSync(['session', 'catalog']);
+    assert.equal(timers.length, 1, 'requests share one full-length debounce');
+    flushDebounce();
+    assert.equal(tasks.length, 1, 'slow hydration must not accumulate redundant full-session reads');
+    await tasks.shift()!();
+    assert.deepEqual([...batches[0]].sort(), ['catalog', 'permissions', 'session']);
+    subject.scheduleScopedSync(['session']);
+    flushDebounce();
+    assert.equal(tasks.length, 1, 'a later change still gets its reconciliation');
+    await tasks.shift()!();
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
 });
