@@ -41,6 +41,10 @@ func (r *providerChatRuntime) deliverSubagentCompletion(tabID, chatID string, re
 		actor.mu.Unlock()
 		return nil
 	}
+	if subagentCompletionParentStopped(state, receipt.OriginOperationID) {
+		actor.mu.Unlock()
+		return nil
+	}
 	if _, exists := state.Operations[operationID]; exists {
 		if actorHasSubagentCompletion(state, operationID, laneID, message) {
 			actor.mu.Unlock()
@@ -73,6 +77,32 @@ func (r *providerChatRuntime) deliverSubagentCompletion(tabID, chatID string, re
 	actor.mu.Unlock()
 	actor.coordinator.Wake()
 	return nil
+}
+
+// subagentCompletionParentStopped is the final actor-side admission fence for
+// a callback that was already in flight when Stop suppressed manager delivery.
+// The deterministic job id and completed cancel outbox entry bind the receipt
+// to exactly its originating parent operation.
+func subagentCompletionParentStopped(state chat.State, parentOperationID string) bool {
+	parentOperationID = strings.TrimSpace(parentOperationID)
+	if parentOperationID == "" {
+		return false
+	}
+	jobID := providercontract.DeriveJobID(state.ChatID, providercontract.OperationID(parentOperationID))
+	if jobID == "" {
+		return false
+	}
+	cancelOperationID := providercontract.OperationID("cancel:" + jobID)
+	if _, exists := state.Operations[cancelOperationID]; !exists {
+		return false
+	}
+	for _, entry := range state.Outbox {
+		if entry.Kind == chat.EffectCancelTurn && entry.OperationID == cancelOperationID &&
+			entry.Turn.NativeID == jobID && entry.Status == chat.OutboxCompleted {
+			return true
+		}
+	}
+	return false
 }
 
 func actorHasSubagentCompletion(state chat.State, operationID providercontract.OperationID, laneID providercontract.LaneID, message string) bool {
