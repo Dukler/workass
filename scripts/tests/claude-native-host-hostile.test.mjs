@@ -73,7 +73,23 @@ function startHost(env = {}) {
   });
   const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
   const stderrText = () => stderrChunks.join('');
-  return { child, messages, rawLines, parseFailures, stderrText, waitFor, send };
+  const waitForStderr = (match, timeout = 5000) => new Promise((resolve, reject) => {
+    const existing = stderrText();
+    if (match(existing)) return resolve(existing);
+    const onData = () => {
+      const current = stderrText();
+      if (!match(current)) return;
+      clearTimeout(timer);
+      child.stderr.off('data', onData);
+      resolve(current);
+    };
+    const timer = setTimeout(() => {
+      child.stderr.off('data', onData);
+      reject(new Error(`timed out waiting for host stderr; got ${JSON.stringify(stderrText())}`));
+    }, timeout);
+    child.stderr.on('data', onData);
+  });
+  return { child, messages, rawLines, parseFailures, stderrText, waitFor, waitForStderr, send };
 }
 
 function answerChunks(peer) {
@@ -349,8 +365,10 @@ test('hostile: stderr noise interleaved with lifecycle never corrupts or leaks i
   assert.ok(answerChunks(peer).includes('Fixture answer'));
 
   // Non-vacuous: the hostile noise really flowed on stderr.
-  assert.ok(peer.stderrText().includes('sk-ant-oat01-STDERR-SECRET'));
-  assert.ok(peer.stderrText().includes('"sessionId":"stderr-fake"'));
+  const stderr = await peer.waitForStderr((text) => text.includes('sk-ant-oat01-STDERR-SECRET')
+    && text.includes('"sessionId":"stderr-fake"'));
+  assert.ok(stderr.includes('sk-ant-oat01-STDERR-SECRET'));
+  assert.ok(stderr.includes('"sessionId":"stderr-fake"'));
 
   // stdout purity: every line parsed, nothing from stderr crossed streams, and
   // the forged session/update on stderr never became a wire update.
