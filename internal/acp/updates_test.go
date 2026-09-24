@@ -93,7 +93,7 @@ func TestProviderCLIExecutableUsesExplicitPathVariable(t *testing.T) {
 	root := repoRoot(t)
 	pathDir := t.TempDir()
 	providerPath := filepath.Join(pathDir, "qwen-real")
-	writeExecutable(t, providerPath, "#!/bin/sh\nprintf 'qwen-code 0.19.11\\n'\n")
+	writeFixtureExecutable(t, providerPath, "printf 'qwen-code 0.19.11\\n'\n")
 	t.Setenv("WORKASS_QWEN", providerPath)
 
 	manager := NewManager(Options{
@@ -125,8 +125,8 @@ func TestProviderCLIExecutableRefreshesValidCacheFromPATH(t *testing.T) {
 	cachedDir := t.TempDir()
 	currentPath := filepath.Join(pathDir, "qwen")
 	cachedPath := filepath.Join(cachedDir, "qwen")
-	writeExecutable(t, currentPath, "#!/bin/sh\nprintf '0.21.12\\n'\n")
-	writeExecutable(t, cachedPath, "#!/bin/sh\nprintf '0.19.11\\n'\n")
+	writeFixtureExecutable(t, currentPath, "printf '0.21.12\\n'\n")
+	writeFixtureExecutable(t, cachedPath, "printf '0.19.11\\n'\n")
 	t.Setenv("PATH", pathDir)
 	t.Setenv("WORKASS_QWEN", "")
 	t.Setenv("ASSISTANT_QWEN", "")
@@ -313,7 +313,7 @@ func TestProviderUpdateAvailabilityUsesCardWithoutNotify(t *testing.T) {
 	root := repoRoot(t)
 	pathDir := t.TempDir()
 	providerPath := filepath.Join(pathDir, "codex")
-	writeExecutable(t, providerPath, "#!/bin/sh\nprintf '0.146.1\\n'\n")
+	writeFixtureExecutable(t, providerPath, "printf '0.146.1\\n'\n")
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.146.2"})
 	}))
@@ -373,7 +373,7 @@ func TestProviderUpdatesRequireInstalledCLIAndPublishCardRemoval(t *testing.T) {
 	root := repoRoot(t)
 	pathDir := t.TempDir()
 	claudePath := filepath.Join(pathDir, "claude-user-install")
-	writeExecutable(t, claudePath, "#!/bin/sh\nprintf '2.1.207\\n'\n")
+	writeFixtureExecutable(t, claudePath, "printf '2.1.207\\n'\n")
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("WORKASS_CLAUDE_CODE", "")
 
@@ -647,7 +647,7 @@ func waitProviderUpdateSchedulerIdle(t *testing.T, manager *Manager) {
 
 func TestProviderUpdateInvokeProgressNoProcRegistryAndReplay(t *testing.T) {
 	t.Parallel()
-	manager, events, versionFile := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "", true)
+	manager, events, versionFile := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
 	updateScript := filepath.Join(t.TempDir(), "qwen-update")
 	writeFixtureExecutable(t, updateScript, "printf 'updater start\\n'\nprintf '0.58.2\\n' > "+shellQuote(versionFile)+"\nprintf 'updater done\\n'\n")
 	manager.opts.ProviderUpdateCommands = map[string]ProviderUpdateCommand{"qwen": {Command: updateScript}}
@@ -732,12 +732,12 @@ func TestQwenStandaloneUpdateUsesBundledUpdaterAtCompatibleRelease(t *testing.T)
 		t.Fatal(err)
 	}
 	launcher := filepath.Join(binDir, "qwen")
-	writeExecutable(t, launcher, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nprintf 'public qwen update must not run\\n' >&2\nexit 91\n")
+	writeFixtureExecutable(t, launcher, "if [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nprintf 'public qwen update must not run\\n' >&2\nexit 91\n")
 	nodePath := filepath.Join(standaloneRoot, "node", "bin", "node")
 	if target == "win-x64" {
 		nodePath += ".exe"
 	}
-	writeExecutable(t, nodePath, "#!/bin/sh\nif [ \"$1\" = \"--input-type=module\" ] && [ \"$2\" = \"--eval\" ] && [ \"$4\" = "+shellQuote(updateModule)+" ] && [ \"$5\" = "+shellQuote(standaloneRoot)+" ] && [ \"$6\" = \"0.58.2\" ]; then printf '0.58.2\\n' > "+shellQuote(versionFile)+"; printf 'bundled standalone updater\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 92\n")
+	writeFixtureExecutable(t, nodePath, "if [ \"$1\" = \"--input-type=module\" ] && [ \"$2\" = \"--eval\" ] && [ \"$4\" = "+shellQuote(updateModule)+" ] && [ \"$5\" = "+shellQuote(standaloneRoot)+" ] && [ \"$6\" = \"0.58.2\" ]; then printf '0.58.2\\n' > "+shellQuote(versionFile)+"; printf 'bundled standalone updater\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 92\n")
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/latest" {
 			_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.58.3"})
@@ -824,7 +824,7 @@ func TestProviderUpdateZeroExitWithoutVersionAdvanceFailsVerification(t *testing
 	t.Parallel()
 	manager, events, _ := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
 	updateScript := filepath.Join(t.TempDir(), "qwen-update-no-change")
-	writeExecutable(t, updateScript, "#!/bin/sh\nprintf 'Run the following to update:\\n  npm install -g @qwen-code/qwen-code@0.58.2\\n'\nexit 0\n")
+	writeFixtureExecutable(t, updateScript, "printf 'Run the following to update:\\n  npm install -g @qwen-code/qwen-code@0.58.2\\n'\nexit 0\n")
 	manager.opts.ProviderUpdateCommands = map[string]ProviderUpdateCommand{"qwen": {Command: updateScript}}
 
 	if _, err := manager.StartProviderUpdate(context.Background(), "qwen"); err != nil {
@@ -853,7 +853,7 @@ func TestProviderUpdateTerminalReceiptDoesNotWaitForRegistryRefresh(t *testing.T
 		t.Fatal(err)
 	}
 	claudePath := filepath.Join(pathDir, "claude")
-	writeExecutable(t, claudePath, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nif [ \"$1\" = \"update\" ]; then printf '2.1.224\\n' > "+shellQuote(versionFile)+"; exit 0; fi\nexit 1\n")
+	writeFixtureExecutable(t, claudePath, "if [ \"$1\" = \"--version\" ]; then IFS= read -r v < "+shellQuote(versionFile)+"; printf '%s\\n' \"$v\"; exit 0; fi\nif [ \"$1\" = \"update\" ]; then printf '2.1.224\\n' > "+shellQuote(versionFile)+"; exit 0; fi\nexit 1\n")
 
 	var requestsMu sync.Mutex
 	requests := 0
@@ -915,7 +915,7 @@ func TestProviderUpdateInvokeFailureKeepsCardWithRedactedTail(t *testing.T) {
 	// parallel load before the shell has emitted its output.
 	manager.opts.ProviderUpdateRunTimeout = 10 * time.Second
 	updateScript := filepath.Join(t.TempDir(), "qwen-update-fail")
-	writeExecutable(t, updateScript, "#!/bin/sh\ni=0\nwhile [ $i -lt 260 ]; do printf 'line %s api_key=supersecret\\n' \"$i\"; i=$((i+1)); done\nexit 42\n")
+	writeFixtureExecutable(t, updateScript, "i=0\nwhile [ $i -lt 260 ]; do printf 'line %s api_key=supersecret\\n' \"$i\"; i=$((i+1)); done\nexit 42\n")
 	manager.opts.ProviderUpdateCommands = map[string]ProviderUpdateCommand{"qwen": {Command: updateScript}}
 
 	result, err := manager.StartProviderUpdate(context.Background(), "qwen")
@@ -966,7 +966,7 @@ func TestProviderUpdatePostRecheckRetriesUntilVersionLands(t *testing.T) {
 		PostUpdateFailures: 2,
 	})
 	updateScript := filepath.Join(t.TempDir(), "qwen-update-recheck")
-	writeExecutable(t, updateScript, "#!/bin/sh\nprintf '0.58.2\\n' > "+shellQuote(versionFile)+"\nprintf 'updated\\n'\n")
+	writeFixtureExecutable(t, updateScript, "printf '0.58.2\\n' > "+shellQuote(versionFile)+"\nprintf 'updated\\n'\n")
 	manager.opts.ProviderUpdateCommands = map[string]ProviderUpdateCommand{"qwen": {Command: updateScript}}
 
 	if _, err := manager.StartProviderUpdate(context.Background(), "qwen"); err != nil {
@@ -988,7 +988,7 @@ func TestProviderUpdatePostRecheckAllFailKeepsEntryWithRecheckError(t *testing.T
 		Installed:          "0.58.1",
 		Latest:             "0.58.2",
 		PostUpdateFailures: 99,
-	}, true)
+	})
 	updateScript := filepath.Join(t.TempDir(), "qwen-update-recheck-fail")
 	writeFixtureExecutable(t, updateScript, "printf '0.58.2\\n' > "+shellQuote(versionFile)+"\nprintf 'updated but verify races\\n'\n")
 	manager.opts.ProviderUpdateCommands = map[string]ProviderUpdateCommand{"qwen": {Command: updateScript}}
@@ -1016,7 +1016,7 @@ func TestProviderUpdateInvokeRejectsDoubleUnknownAndNoPending(t *testing.T) {
 		startedFile := filepath.Join(t.TempDir(), "started-update")
 		releaseFile := filepath.Join(t.TempDir(), "release-update")
 		t.Cleanup(func() { _ = os.WriteFile(releaseFile, []byte("release\n"), 0o600) })
-		writeExecutable(t, updateScript, "#!/bin/sh\nprintf 'started\\n' > "+shellQuote(startedFile)+"\nwhile [ ! -f "+shellQuote(releaseFile)+" ]; do /bin/sleep 0.01; done\nprintf '0.58.2\\n' > "+shellQuote(versionFile)+"\nprintf 'slow update\\n'\n")
+		writeFixtureExecutable(t, updateScript, "printf 'started\\n' > "+shellQuote(startedFile)+"\nwhile [ ! -f "+shellQuote(releaseFile)+" ]; do /bin/sleep 0.01; done\nprintf '0.58.2\\n' > "+shellQuote(versionFile)+"\nprintf 'slow update\\n'\n")
 		manager.opts.ProviderUpdateCommands = map[string]ProviderUpdateCommand{"qwen": {Command: updateScript}}
 		first, err := manager.StartProviderUpdate(context.Background(), "qwen")
 		if err != nil {
@@ -1062,7 +1062,7 @@ func TestProviderUpdateInvokeRejectsDoubleUnknownAndNoPending(t *testing.T) {
 	t.Run("no pending", func(t *testing.T) {
 		manager, _, _ := newProviderUpdateTestManager(t, "0.58.2", "0.58.2", "")
 		updateScript := filepath.Join(t.TempDir(), "qwen-update-noop")
-		writeExecutable(t, updateScript, "#!/bin/sh\nexit 0\n")
+		writeFixtureExecutable(t, updateScript, "exit 0\n")
 		manager.opts.ProviderUpdateCommands = map[string]ProviderUpdateCommand{"qwen": {Command: updateScript}}
 		_, err := manager.StartProviderUpdate(context.Background(), "qwen")
 		if structuredErrorCode(err) != "providers:update-no-pending" {
@@ -1112,7 +1112,7 @@ func TestProviderUpdateCheckRegistryFailuresOmitEntries(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := repoRoot(t)
 			qwenPath := filepath.Join(t.TempDir(), "qwen")
-			writeExecutable(t, qwenPath, "#!/bin/sh\nprintf '0.58.1\\n'\n")
+			writeFixtureExecutable(t, qwenPath, "printf '0.58.1\\n'\n")
 
 			manager := NewManager(Options{
 				RootDir: root,
@@ -1306,7 +1306,7 @@ func TestLatestCLIVersionRequiresComparableRegistryVersion(t *testing.T) {
 	}
 }
 
-func newProviderUpdateTestManager(t *testing.T, installed, latest, updateCommand string, useFixtureExecutable ...bool) (*Manager, *eventCollector, string) {
+func newProviderUpdateTestManager(t *testing.T, installed, latest, updateCommand string) (*Manager, *eventCollector, string) {
 	t.Helper()
 	root := repoRoot(t)
 	pathDir := t.TempDir()
@@ -1316,11 +1316,7 @@ func newProviderUpdateTestManager(t *testing.T, installed, latest, updateCommand
 	}
 	qwenPath := filepath.Join(pathDir, "qwen")
 	qwenScript := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then IFS= read -r v < " + shellQuote(versionFile) + "; printf '%s\\n' \"$v\"; exit 0; fi\nexit 1\n"
-	if len(useFixtureExecutable) > 0 && useFixtureExecutable[0] {
-		writeFixtureExecutable(t, qwenPath, qwenScript)
-	} else {
-		writeExecutable(t, qwenPath, qwenScript)
-	}
+	writeFixtureExecutable(t, qwenPath, qwenScript)
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": latest})
 	}))
@@ -1355,7 +1351,7 @@ type providerUpdateRecheckScript struct {
 	PostUpdateFailures int
 }
 
-func newProviderUpdateRecheckTestManager(t *testing.T, script providerUpdateRecheckScript, useFixtureExecutable ...bool) (*Manager, *eventCollector, func() int, string) {
+func newProviderUpdateRecheckTestManager(t *testing.T, script providerUpdateRecheckScript) (*Manager, *eventCollector, func() int, string) {
 	t.Helper()
 	root := repoRoot(t)
 	pathDir := t.TempDir()
@@ -1386,11 +1382,7 @@ fi
 exit 1
 `, shellQuote(countFile), script.Installed, script.PostUpdateFailures+1, shellQuote(versionFile))
 	qwenPath := filepath.Join(pathDir, "qwen")
-	if len(useFixtureExecutable) > 0 && useFixtureExecutable[0] {
-		writeFixtureExecutable(t, qwenPath, qwenScript)
-	} else {
-		writeExecutable(t, qwenPath, qwenScript)
-	}
+	writeFixtureExecutable(t, qwenPath, qwenScript)
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": script.Latest})
 	}))
