@@ -27,6 +27,24 @@ func finishTrackedSubagentForTest(manager *Manager, tabID, chatID, id, status, r
 	})
 }
 
+func TestTrackedSubagentSpawnedWorkPreservesExplicitOriginWithoutJobLookup(t *testing.T) {
+	manager := NewManager(Options{StateDir: t.TempDir()})
+	t.Cleanup(func() { manager.Reset() })
+	manager.registerSubagentSpawnedWork("tab-origin", "chat-origin", SubagentRun{
+		ID: "wa-subagent-fast", Label: "fast child", ProviderID: "codex", Status: "running",
+		RootJobID: "finished-parent-job", originLaneID: "lane-from-actor", originOperationID: "operation-from-actor",
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	items := manager.ListSpawnedWork("tab-origin", "chat-origin")
+	if len(items) != 1 {
+		t.Fatalf("spawned work snapshot has %d items, want 1", len(items))
+	}
+	item := items[0]
+	if item.OriginLaneID != "lane-from-actor" || item.OriginOperationID != "operation-from-actor" || item.OriginTurnID != "finished-parent-job" {
+		t.Fatalf("spawned work lost its explicit actor origin: %#v", item)
+	}
+}
+
 func TestSettledBackgroundWorkNeverExposesOrSchedulesWakeState(t *testing.T) {
 	manager := NewManager(Options{StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { manager.Reset() })

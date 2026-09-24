@@ -771,10 +771,17 @@ func (m *Manager) registerSubagentSpawnedWork(tabID, chatID string, run Subagent
 		Summary:      compactText(redactSensitiveText(run.LatestActivity), 1000),
 		LastToolName: compactText(redactSensitiveText(run.Phase), 120),
 		OriginTurnID: strings.TrimSpace(run.RootJobID),
+		OriginLaneID: strings.TrimSpace(run.originLaneID), OriginOperationID: strings.TrimSpace(run.originOperationID),
 	}
-	if lane := m.providerLaneForJob(run.RootJobID); lane != nil {
-		item.OriginLaneID = string(lane.identity.ID)
-		item.OriginOperationID = string(lane.operationForJob(run.RootJobID))
+	if (item.OriginLaneID == "" || item.OriginOperationID == "") && run.RootJobID != "" {
+		if lane := m.providerLaneForJob(run.RootJobID); lane != nil {
+			if item.OriginLaneID == "" {
+				item.OriginLaneID = string(lane.identity.ID)
+			}
+			if item.OriginOperationID == "" {
+				item.OriginOperationID = string(lane.operationForJob(run.RootJobID))
+			}
+		}
 	}
 	m.spawnedWorkMu.Lock()
 	m.spawnedWork[spawnedWorkKey(tabID, chatID, run.ID)] = &spawnedWorkRecord{Item: item}
