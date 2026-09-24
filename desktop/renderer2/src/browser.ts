@@ -2,30 +2,14 @@ import { machineOf } from './wire/machineIds.ts';
 
 export interface WorkassBrowserBounds { x: number; y: number; width: number; height: number; }
 
-export const BROWSER_VIEWPORT_PRESETS = Object.freeze({
-  desktop: Object.freeze({ width: 1440, height: 900 }),
-  laptop: Object.freeze({ width: 1280, height: 800 }),
-  narrow: Object.freeze({ width: 390, height: 844 }),
-});
-
-export function browserViewportPreset(width?: number, height?: number): string {
-  if (width == null || height == null) return 'desktop';
-  for (const [name, dimensions] of Object.entries(BROWSER_VIEWPORT_PRESETS)) {
-    if (width === dimensions.width && height === dimensions.height) return name;
-  }
-  return 'custom';
-}
-
-export function browserViewportInputError(width: string, height: string): string | null {
-  const parsedWidth = width.trim();
-  if (!/^\d+$/.test(parsedWidth)) return 'El ancho debe ser un número entero entre 320 y 3840.';
-  const widthValue = Number(parsedWidth);
-  if (!Number.isSafeInteger(widthValue) || widthValue < 320 || widthValue > 3840) return 'El ancho debe ser un número entero entre 320 y 3840.';
-  const parsedHeight = height.trim();
-  if (!/^\d+$/.test(parsedHeight)) return 'El alto debe ser un número entero entre 240 y 2160.';
-  const heightValue = Number(parsedHeight);
-  if (!Number.isSafeInteger(heightValue) || heightValue < 240 || heightValue > 2160) return 'El alto debe ser un número entero entre 240 y 2160.';
-  return null;
+export function browserViewportForBounds(bounds: WorkassBrowserBounds): { width: number; height: number } {
+  const minScale = Math.max(320 / bounds.width, 240 / bounds.height);
+  const maxScale = Math.min(3840 / bounds.width, 2160 / bounds.height);
+  const scale = Math.max(minScale, Math.min(1, maxScale));
+  return {
+    width: Math.min(3840, Math.max(320, Math.round(bounds.width * scale))),
+    height: Math.min(2160, Math.max(240, Math.round(bounds.height * scale))),
+  };
 }
 
 export function sameBrowserBounds(a: WorkassBrowserBounds | null, b: WorkassBrowserBounds): boolean {
