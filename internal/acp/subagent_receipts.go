@@ -100,21 +100,22 @@ func (m *Manager) InstallSubagentCompletionObserver(observer func(tabID, chatID 
 	return nil
 }
 
-func (m *Manager) deliverSubagentCompletion(tabID, chatID string, receipt SubagentReceipt) {
+func (m *Manager) deliverSubagentCompletion(tabID, chatID string, receipt SubagentReceipt) bool {
 	m.subagentCompletionObserverMu.RLock()
 	observer := m.subagentCompletionObserver
 	m.subagentCompletionObserverMu.RUnlock()
 	if observer == nil || !receipt.DeliveryPending {
-		return
+		return false
 	}
 	if err := observer(tabID, chatID, receipt); err != nil {
 		receipt.DeliveryError = compactText(redactSensitiveText(err.Error()), 300)
 		_ = m.writeSubagentReceipt(tabID, chatID, receipt)
-		return // pending receipt remains durable for restart recovery
+		return false // pending receipt remains durable for restart recovery
 	}
 	receipt.DeliveryPending = false
 	receipt.DeliveryError = ""
 	_ = m.writeSubagentReceipt(tabID, chatID, receipt)
+	return true
 }
 
 func (m *Manager) pendingSubagentCompletions() []SubagentReceipt {
