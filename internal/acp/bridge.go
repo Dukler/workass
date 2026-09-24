@@ -412,6 +412,7 @@ func (b *Bridge) start() error {
 	go b.readStdout(stdout)
 	stderrDrained := make(chan struct{})
 	go func() {
+		defer stderr.Close()
 		b.readStderr(stderr)
 		close(stderrDrained)
 	}()
@@ -484,6 +485,7 @@ func (b *Bridge) waitChild(cmd *exec.Cmd, childExited chan struct{}, stderr *os.
 	case <-stderrDrained:
 	case <-time.After(250 * time.Millisecond):
 		_ = stderr.Close()
+		<-stderrDrained
 	}
 	code, signal := exitCodeSignal(cmd.ProcessState, err)
 	uptime := time.Duration(0)
