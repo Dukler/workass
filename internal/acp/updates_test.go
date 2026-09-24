@@ -910,6 +910,10 @@ func TestProviderUpdateTerminalReceiptDoesNotWaitForRegistryRefresh(t *testing.T
 func TestProviderUpdateInvokeFailureKeepsCardWithRedactedTail(t *testing.T) {
 	t.Parallel()
 	manager, events, _ := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
+	// This test exercises redaction of a verbose failing command, not timeout
+	// handling. The shared two-second deadline can expire under the full gate's
+	// parallel load before the shell has emitted its output.
+	manager.opts.ProviderUpdateRunTimeout = 10 * time.Second
 	updateScript := filepath.Join(t.TempDir(), "qwen-update-fail")
 	writeExecutable(t, updateScript, "#!/bin/sh\ni=0\nwhile [ $i -lt 260 ]; do printf 'line %s api_key=supersecret\\n' \"$i\"; i=$((i+1)); done\nexit 42\n")
 	manager.opts.ProviderUpdateCommands = map[string]ProviderUpdateCommand{"qwen": {Command: updateScript}}
