@@ -36,6 +36,7 @@ func (r *providerChatRuntime) executeBackgroundAction(ctx context.Context, actio
 			return r.manager.SpawnSubagent(ctx, acp.SubagentSpawnOptions{
 				OwnerKey: ownerKey, ParentChatID: action.ChatID, ParentTabID: action.TabID,
 				RootJobIDHint: action.Owner.TurnID, Prompt: value.Prompt, Label: value.Label,
+				OriginLaneID: string(action.Owner.LaneID), OriginOperationID: string(action.Owner.OperationID),
 				ProviderID: value.ProviderID, ModelID: value.ModelID, Effort: value.Effort,
 				ModeID: value.ModeID, CWD: value.CWD, Profile: value.Profile, PermissionIntent: value.PermissionIntent,
 			})

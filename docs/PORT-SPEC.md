@@ -272,11 +272,18 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
      mix these items into the global proc/engine surface or require optional
      explicit registration. Agent MCP exposes exact-pair read-only list and
      receipt tools; a pair mismatch is rejected. TERMINAL DELIVERY (user law
-     2026-08-10): those receipts remain internal state only. Settling background
-     work MUST NOT enqueue a synthetic chat message, start or resume an agent
-     turn, create pending wake state, hold an obligation open, or block an app
-     update. The user or an explicitly running coordinator may read receipts on
-     demand; completion never speaks as the user.
+     2026-08-10): ordinary Claude background receipts remain internal state
+     only. Settling that work MUST NOT enqueue a synthetic chat message, start
+     or resume an agent turn, create pending wake state, hold an obligation
+     open, or block an app update. Narrow exception (current human request,
+     2026-09-24): a Workass tracked subagent's durable done/failed receipt may
+     enqueue one receipt-keyed, internal agent-origin continuation for its exact
+     owning tab/chat. An active coordinator wait consumes the existing result
+     and suppresses that continuation. The actor queue/outbox owns delivery and
+     acknowledgement; completion never speaks as the user. Explicit child or
+     parent stop, chat deletion, and daemon shutdown must not resurrect stopped
+     work. This exception never applies to generic Bash, service, or other
+     background work.
   10. PERMISSION CARD TERMINALITY (user correction 2026-07-15): a permission
       request has one transcript owner only while its daemon resolver is live.
       Every terminal path—explicit decision, timeout fallback, session cancel,

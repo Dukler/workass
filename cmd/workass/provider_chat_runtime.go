@@ -109,7 +109,7 @@ func newProviderChatRuntimeWithStartupMode(manager *acp.Manager, sessions *sessi
 	// Actor-managed Entorno snapshots must be committed by the chat actor before
 	// the frozen chat:env event is published. The observer is installed before
 	// any resumed lane can execute a provider effect.
-	manager.SetChatEnvObserver(runtime.observeChatEnv)
+	manager.SetChatEnvObserver(runtime.observeChatEnv, runtime.deliverSubagentCompletion)
 	manager.SetChatEnvRestorer(runtime.restoreActorChatEnvReference)
 	if runtime.bootErr == nil {
 		// Install semantic ingress before any resumed lane or manager recovery can
