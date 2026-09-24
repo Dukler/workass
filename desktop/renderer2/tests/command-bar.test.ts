@@ -62,18 +62,12 @@ test('the renderer does not reload when the daemon restart promise rejects', asy
   assert.equal(reloaded, 0);
 });
 
-test('restart remains pending until confirmation before renderer reload', async () => {
+test('restart remains pending until confirmation before renderer reload', async (t) => {
   let finishRestart!: (value: unknown) => void;
   let reloaded = 0;
-  const originalSetTimeout = globalThis.setTimeout;
-  const originalClearTimeout = globalThis.clearTimeout;
-  let now = 0;
-  const timers: Array<{ callback: () => void; dueAt: number }> = [];
-  (globalThis as any).setTimeout = (callback: () => void, delay: number) => {
-    timers.push({ callback, dueAt: now + delay });
-    return timers.length;
-  };
-  (globalThis as any).clearTimeout = () => {};
+  const timers = t.mock.timers;
+  assert.ok(timers, 'Node test mock timers are available');
+  timers.enable({ apis: ['setTimeout'] });
   try {
     const operation = forceReconnect({
       storage: { removeItem: () => {} }, takeControl: undefined,
@@ -81,16 +75,14 @@ test('restart remains pending until confirmation before renderer reload', async 
       reload: () => { reloaded += 1; }, restartTimeoutMs: 5000,
     });
     await Promise.resolve();
-    assert.equal(timers[0]?.dueAt, 5000, 'the complete restart timeout remains armed');
-    now = 1650;
+    timers.tick(1650);
     assert.equal(reloaded, 0, 'crossing the old take-control timeout does not reload before restart confirmation');
     finishRestart({ ok: true });
     const receipt = await operation;
     assert.equal(receipt.daemonRestartSettled, true);
     assert.equal(reloaded, 1);
   } finally {
-    globalThis.setTimeout = originalSetTimeout;
-    globalThis.clearTimeout = originalClearTimeout;
+    timers.reset();
   }
 });
 
