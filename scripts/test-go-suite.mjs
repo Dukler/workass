@@ -257,14 +257,18 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
     await mkdir(dir, { recursive: true });
     return dir;
   };
-  const envFor = dir => ({ ...process.env, TMPDIR: dir, TMP: dir, TEMP: dir });
-  const run = async (command, args, label, commandCwd = cwd) => {
+  const envFor = (dir, { testBinary = false } = {}) => ({
+    ...process.env,
+    TMPDIR: dir, TMP: dir, TEMP: dir,
+    ...(testBinary ? { GOMAXPROCS: '1' } : {}),
+  });
+  const run = async (command, args, label, commandCwd = cwd, { testBinary = false } = {}) => {
     if (interrupted) throw new Error(`interrupted by ${interrupted}`);
     if (jsonlError) throw new Error(`Go matrix log write failed: ${jsonlError.message}`);
     appendJsonLine(jsonl, { event: 'command-start', label, command, args, cwd: commandCwd, at: new Date().toISOString() });
     const tempDir = await commandTemp(label);
     if (interrupted) throw new Error(`interrupted by ${interrupted}`);
-    const result = await spawnLogged(command, args, { cwd: commandCwd, spawn, env: envFor(tempDir) }, active);
+    const result = await spawnLogged(command, args, { cwd: commandCwd, spawn, env: envFor(tempDir, { testBinary }) }, active);
     appendJsonLine(jsonl, { event: 'command-end', label, ...result });
     if (result.stdout) appendJsonLine(jsonl, { event: 'stdout', label, text: result.stdout });
     if (result.stderr) appendJsonLine(jsonl, { event: 'stderr', label, text: result.stderr });
@@ -321,7 +325,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
       // atomically; the hard link keeps an older binary runnable during another
       // suite's compiler pass without copying its startup cost onto each batch.
       await link(cachedBinary, binary);
-      const listing = await run(binary, ['-test.list', '.'], `list-${label}`, packageCwd);
+      const listing = await run(binary, ['-test.list', '.'], `list-${label}`, packageCwd, { testBinary: true });
       const names = parseTestList(listing.stdout);
       if (!names.length) throw new Error(`${pkg} test binary discovered no Test, Example, or Fuzz cases`);
       if (new Set(names).size !== names.length) throw new Error(`${pkg} test listing contains duplicate case names`);
@@ -344,7 +348,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
       await mkdir(tempDir, { recursive: true });
       if (interrupted) return;
       const pattern = `^(?:${batch.names.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`;
-      const result = await spawnLogged(item.binary, ['-test.v', `-test.run=${pattern}`, '-test.count=1', '-test.parallel=2'], { cwd: item.packageCwd, spawn, env: envFor(tempDir) }, active);
+      const result = await spawnLogged(item.binary, ['-test.v', `-test.run=${pattern}`, '-test.count=1', '-test.parallel=2'], { cwd: item.packageCwd, spawn, env: envFor(tempDir, { testBinary: true }) }, active);
       const target = summary.heavyPackages[item.pkg];
       if (batch.boundary === 'serial') target.serialElapsedMs += result.elapsedMs;
       appendJsonLine(jsonl, { event: 'batch-end', package: item.pkg, batch: batch.id, worker, names: batch.names, elapsedMs: result.elapsedMs, code: result.code, signal: result.signal, spawnError: result.spawnError, stdout: result.stdout, stderr: result.stderr });
@@ -378,10 +382,10 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
       if (interrupted) return;
       const binary = path.join(root, `${label}-run.test`);
       await link(cachePath, binary);
-      const listing = await run(binary, ['-test.list', '.'], `list-${label}`, packageCwd);
+      const listing = await run(binary, ['-test.list', '.'], `list-${label}`, packageCwd, { testBinary: true });
       const names = parseTestList(listing.stdout);
       if (!names.length || new Set(names).size !== names.length) throw new Error(`${work.package} test binary has an empty or duplicate listing`);
-      const result = await spawnLogged(binary, ['-test.v', '-test.count=1', '-test.parallel=2'], { cwd: packageCwd, spawn, env: envFor(tempDir) }, active);
+      const result = await spawnLogged(binary, ['-test.v', '-test.count=1', '-test.parallel=2'], { cwd: packageCwd, spawn, env: envFor(tempDir, { testBinary: true }) }, active);
       const inspected = names.map(name => ({ name, ...inspectCaseOutput(name, result.code, result.stdout) }));
       let packageOutcome = result.code === 0 && inspected.every(item => !item.coverageError && !item.rootFailures) ? 'pass' : 'fail';
       for (const item of inspected) {
