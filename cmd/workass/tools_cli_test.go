@@ -225,9 +225,13 @@ func TestToolsCLIEnvironmentDiscoveryAndExplicitOverride(t *testing.T) {
 
 func TestToolsCLICrossProviderDelegationAndCrossChatMessaging(t *testing.T) {
 	root := repoRoot(t)
+	tracePath := filepath.Join(t.TempDir(), "cross-provider-mock-trace.jsonl")
 	h := newStatelessMCPTestHarnessWithProviders(t, []acp.ProviderConfig{{
 		ID: "custom", Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")},
-		CWD: root, Enabled: true, Label: "Other fixture provider",
+		CWD: root, Env: map[string]string{
+			"WORKASS_MOCK_ACP_TRACE_FILE": tracePath,
+			"WORKASS_MOCK_ACP_DELAY_MS":   "150",
+		}, Enabled: true, Label: "Other fixture provider",
 	}})
 	contextFile, _ := toolCLIContextFixture(t, h.handler)
 	t.Setenv("WORKASS_TOOL_CONTEXT", contextFile)
@@ -274,8 +278,9 @@ func TestToolsCLICrossProviderDelegationAndCrossChatMessaging(t *testing.T) {
 		t.Fatal("child replaced its parent's origin lane")
 	}
 
-	// Wait once, while routine child startup/progress occurs. Only its terminal
-	// receipt or latched attention may release the CLI request.
+	// Wait once, while child startup proceeds. The mock trace is written as soon
+	// as session/prompt reaches the provider, proving that live steering can now
+	// reach the held prompt instead of being queued for its next turn.
 	type result struct {
 		value map[string]any
 		err   error
@@ -285,10 +290,23 @@ func TestToolsCLICrossProviderDelegationAndCrossChatMessaging(t *testing.T) {
 		v, err := call("workass_wait_subagents", map[string]any{"operation_id": "event-only-wait", "subagent_ids": []string{id}, "return_when": "all", "timeout_ms": -1})
 		waited <- result{v, err}
 	}()
+	for {
+		trace, err := os.ReadFile(tracePath)
+		if err == nil && strings.Contains(string(trace), "harmless delegation fixture") {
+			break
+		}
+		select {
+		case got := <-waited:
+			t.Fatalf("event-only wait woke before child prompt readiness: %v %#v", got.err, got.value)
+		case <-ctx.Done():
+			t.Fatal("child prompt did not reach the mock provider before the test deadline")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	select {
 	case got := <-waited:
-		t.Fatalf("event-only wait woke on progress: %v %#v", got.err, got.value)
-	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("event-only wait woke while the child prompt was held: %v %#v", got.err, got.value)
+	default:
 	}
 	message := mustCall("workass_message_subagent", map[string]any{"operation_id": "cross-provider-message", "subagent_id": id, "message": "finish the harmless fixture"})
 	if message["ok"] != true {
