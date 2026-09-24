@@ -143,10 +143,13 @@ not a passing test with mocked image bytes or an instruction to open the panel.
 ## 4. Viewport and presentation contract
 
 Default every new page to **1440×900 CSS pixels, DPR 1**, desktop pointer/UA
-behavior. This holds when never shown, hidden, minimized, and in a narrow rail.
-Do not derive logical dimensions from `getContentSize()`, monitor resolution,
-or the panel's resize observer. A zero-size/collapsed panel changes only
-presentation. Preserve explicit responsive dimensions until reset or page close.
+behavior while it runs in the background. The agent's explicit viewport tools
+continue to use that logical page size and the limits below. When the human
+opens the browser pane, its measured bounds set the visible page viewport;
+resizing the pane updates it again within the supported limits. A collapsed
+panel does not request an invalid size. An explicit agent viewport remains in
+effect until the human opens or resizes the pane, another explicit viewport
+request, reset, or page close.
 
 Agent tools, all using the existing optional exact `tab_id`:
 
@@ -168,13 +171,11 @@ Keep viewport selection as shell-owned ephemeral page runtime state, retained
 while that page lives. Do not add a new durable chat/preferences store in this
 lane. After shell recreation, a fresh page defaults to desktop and reports it.
 
-Human UI: add a compact accessible viewport selector in BrowserPanel with
-Desktop 1440×900, Laptop 1280×800, Narrow 390×844, and Custom width/height.
-Narrow tests layout only; do not claim a complete mobile device emulation.
-Show the effective dimensions. Provide Reset. Fit the fixed page into the panel
-without changing its CSS layout. Reuse the existing rail expansion control;
-do not redesign the global shell. Native mouse hit testing, text selection,
-keyboard focus and browser scrolling must match the displayed scaled page.
+Human UI correction (2026-09-24): viewport presets, dimensions, and Reset are
+agent controls, not visible browser chrome. The human changes the visible page
+size by resizing the pane with the existing rail control. Keep the navigation
+row and page surface free of viewport controls. Native mouse hit testing, text
+selection, keyboard focus and browser scrolling must match the displayed page.
 
 ## 5. Screenshot contract
 
@@ -190,8 +191,9 @@ image pixel width/height, CSS capture rectangle, scroll origin, document and
 viewport generations, and pixel-to-CSS scale. Preserve metadata through the
 Workass CLI image-file materialization path. No base64 in ordinary text/logs.
 
-The default 1440×900 viewport screenshot must be 1440×900 actual PNG pixels,
-regardless of Retina display, narrow rail, background state or shell zoom.
+The default background 1440×900 viewport screenshot must be 1440×900 actual PNG
+pixels, regardless of Retina display or shell zoom. A visible page captures
+its current pane-derived or explicitly requested logical viewport.
 Do not stretch a tiny screenshot or silently downsample the requested view.
 Bound allocation before capture: at most 16 million pixels and 8 MiB PNG bytes,
 within existing transport limits. Oversized full pages return an explicit

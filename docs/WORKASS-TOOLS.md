@@ -84,10 +84,12 @@ them to open a human question; they can report the blocker to the parent.
 `workass_browser_open` creates the page for the exact owning chat. Omit
 `visible` to keep the legacy pane request, or pass `visible:false` to navigate
 in the background. A new page starts at a logical 1440×900 CSS viewport at DPR
-1 regardless of rail width or visibility. `workass_browser_list` and
+1. When shown, the browser pane sets the visible page viewport from its bounds;
+human resizing updates it again. `workass_browser_list` and
 `workass_browser_snapshot` report requested/effective metrics and generations.
-Use `workass_browser_set_viewport` for an intentional responsive size and
-`workass_browser_reset_viewport` to return to the desktop default.
+Agents use `workass_browser_set_viewport` for an intentional responsive size and
+`workass_browser_reset_viewport` to return to the desktop default. Opening or
+resizing the human pane may then set its visible size.
 
 `workass_browser_screenshot` supports `viewport` (default), `full_page`, and a
 document-CSS `clip`. Its image is accompanied by `screenshot_id`, exact tab and

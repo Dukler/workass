@@ -1,22 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BROWSER_VIEWPORT_PRESETS, browserViewportInputError, browserViewportPreset } from '../src/browser.ts';
+import { browserViewportForBounds } from '../src/browser.ts';
 
-test('browser viewport presets describe deliberate logical page sizes', () => {
-  assert.deepEqual(BROWSER_VIEWPORT_PRESETS.desktop, { width: 1440, height: 900 });
-  assert.deepEqual(BROWSER_VIEWPORT_PRESETS.laptop, { width: 1280, height: 800 });
-  assert.deepEqual(BROWSER_VIEWPORT_PRESETS.narrow, { width: 390, height: 844 });
-  assert.equal(browserViewportPreset(), 'desktop');
-  assert.equal(browserViewportPreset(1280, 800), 'laptop');
-  assert.equal(browserViewportPreset(390, 844), 'narrow');
-  assert.equal(browserViewportPreset(1024, 768), 'custom');
-});
-
-test('custom browser dimensions accept only whole values in the supported range', () => {
-  assert.equal(browserViewportInputError('320', '240'), null);
-  assert.equal(browserViewportInputError('3840', '2160'), null);
-  assert.match(browserViewportInputError('', '844') ?? '', /ancho/iu);
-  assert.match(browserViewportInputError('390.5', '844') ?? '', /ancho/iu);
-  assert.match(browserViewportInputError('390', '2161') ?? '', /alto/iu);
-  assert.match(browserViewportInputError('390', '8e2') ?? '', /alto/iu);
+test('visible browser uses pane dimensions within the shell viewport limits', () => {
+  assert.deepEqual(browserViewportForBounds({ x: 10, y: 20, width: 800, height: 600 }), { width: 800, height: 600 });
+  assert.deepEqual(browserViewportForBounds({ x: 0, y: 0, width: 280, height: 200 }), { width: 336, height: 240 });
+  assert.deepEqual(browserViewportForBounds({ x: 0, y: 0, width: 263, height: 838 }), { width: 320, height: 1020 });
+  assert.deepEqual(browserViewportForBounds({ x: 0, y: 0, width: 4000, height: 2500 }), { width: 3456, height: 2160 });
 });

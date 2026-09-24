@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
-  BROWSER_VIEWPORT_PRESETS, browserApi, browserViewportInputError, browserViewportPreset, localBrowserOwnsChat, sameBrowserBounds,
+  browserApi, browserViewportForBounds, localBrowserOwnsChat, sameBrowserBounds,
   type WorkassBrowserApi, type WorkassBrowserBounds, type WorkassBrowserState,
 } from '../browser';
 import { connectedArtifactURL } from '../connected-artifacts';
@@ -56,16 +56,6 @@ function LocalBrowserPanel({
   const viewport = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<WorkassBrowserState>(() => initialState(chatId));
   const [address, setAddress] = useState('');
-  const [customWidth, setCustomWidth] = useState('1440');
-  const [customHeight, setCustomHeight] = useState('900');
-  const [customMode, setCustomMode] = useState(false);
-  const [viewportActionError, setViewportActionError] = useState<string | null>(null);
-  const viewportRequestSequence = useRef(0);
-  const customDraftDirty = useRef(false);
-  const visibleChatId = useRef(chatId);
-  const visibleMachineId = useRef(machineId);
-  visibleChatId.current = chatId;
-  visibleMachineId.current = machineId;
 
   // The browser is a native WebContentsView that paints ABOVE all HTML, so an
   // HTML overlay (the image lightbox) can't cover it — it would show through the
@@ -82,25 +72,9 @@ function LocalBrowserPanel({
   }, [api, chatId, conversationId, overlayOpen]);
 
   useEffect(() => {
-    viewportRequestSequence.current += 1;
     setState(initialState(chatId));
     setAddress('');
-    setCustomWidth('1440');
-    setCustomHeight('900');
-    setCustomMode(false);
-    customDraftDirty.current = false;
-    setViewportActionError(null);
-    return () => {
-      if (visibleChatId.current === chatId) viewportRequestSequence.current += 1;
-    };
   }, [chatId, machineId]);
-
-  useEffect(() => {
-    if (!state.viewport || customDraftDirty.current) return;
-    setCustomWidth(String(state.viewport.width));
-    setCustomHeight(String(state.viewport.height));
-    setCustomMode(browserViewportPreset(state.viewport.width, state.viewport.height) === 'custom');
-  }, [state.viewport?.width, state.viewport?.height]);
 
   useEffect(() => {
     if (!api) return;
@@ -127,17 +101,39 @@ function LocalBrowserPanel({
     const el = viewport.current;
     if (!api || !el) return;
     let disposed = false;
-    let frame = 0;
+    let activated = false;
+    let syncing = false;
+    let pendingBounds: WorkassBrowserBounds | null = null;
     let lastBounds: WorkassBrowserBounds | null = null;
+    const flushBounds = async () => {
+      if (!activated || syncing) return;
+      syncing = true;
+      try {
+        while (!disposed && pendingBounds) {
+          const bounds = pendingBounds;
+          pendingBounds = null;
+          if (sameBrowserBounds(lastBounds, bounds)) continue;
+          await api.resize({ chatId, bounds });
+          if (disposed) return;
+          const size = browserViewportForBounds(bounds);
+          await api.setViewport(chatId, size.width, size.height);
+          lastBounds = bounds;
+        }
+      } catch (error) {
+        if (!disposed) setState((current) => ({ ...current, error: error instanceof Error ? error.message : String(error) }));
+      } finally {
+        syncing = false;
+        if (!disposed && pendingBounds) void flushBounds();
+      }
+    };
     const sync = () => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        if (disposed || !el.isConnected) return;
-        const bounds = boundsFor(el);
-        if (sameBrowserBounds(lastBounds, bounds)) return;
-        lastBounds = bounds;
-        void api.resize({ chatId, bounds });
-      });
+      if (disposed || !el.isConnected) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const bounds = boundsFor(el);
+      if (sameBrowserBounds(lastBounds, bounds)) return;
+      pendingBounds = bounds;
+      void flushBounds();
     };
     const observer = new ResizeObserver(sync);
     observer.observe(el);
@@ -146,15 +142,15 @@ function LocalBrowserPanel({
     if (root) layoutObserver.observe(root, { attributes: true, attributeFilter: ['class', 'style'] });
     addEventListener('resize', sync);
     const bounds = boundsFor(el);
-    lastBounds = bounds;
     void api.activate({ chatId, conversationId, bounds }).then((next) => {
       if (disposed) return;
       setState(next);
       setAddress(next.url === 'about:blank' ? '' : next.url);
+      activated = true;
+      sync();
     });
     return () => {
       disposed = true;
-      cancelAnimationFrame(frame);
       observer.disconnect();
       layoutObserver.disconnect();
       removeEventListener('resize', sync);
@@ -178,63 +174,6 @@ function LocalBrowserPanel({
       setState(next);
       setAddress(next.url === 'about:blank' ? '' : next.url);
     });
-  };
-
-  const viewportInputError = customMode ? browserViewportInputError(customWidth, customHeight) : null;
-  const runViewportRequest = (request: () => Promise<WorkassBrowserState>) => {
-    const requestSequence = ++viewportRequestSequence.current;
-    const requestChatId = chatId;
-    const requestMachineId = machineId;
-    setViewportActionError(null);
-    void request().then((next) => {
-      if (visibleChatId.current !== requestChatId || visibleMachineId.current !== requestMachineId || viewportRequestSequence.current !== requestSequence || next.chatId !== requestChatId) return;
-      setViewportActionError(null);
-      setState((current) => current.chatId === requestChatId ? {
-        ...current,
-        viewport: next.viewport,
-        effectiveViewport: next.effectiveViewport,
-        viewportGeneration: next.viewportGeneration,
-      } : current);
-      if (next.viewport) {
-        customDraftDirty.current = false;
-        setCustomWidth(String(next.viewport.width));
-        setCustomHeight(String(next.viewport.height));
-      }
-      setCustomMode(browserViewportPreset(next.viewport?.width, next.viewport?.height) === 'custom');
-    }).catch((error: unknown) => {
-      if (visibleChatId.current !== requestChatId || visibleMachineId.current !== requestMachineId || viewportRequestSequence.current !== requestSequence) return;
-      setViewportActionError(error instanceof Error ? error.message : String(error));
-    });
-  };
-  const applyViewport = (width: number, height: number) => {
-    runViewportRequest(() => api.setViewport(chatId, width, height));
-  };
-  const chooseViewport = (value: string) => {
-    if (value === 'custom') {
-      viewportRequestSequence.current += 1;
-      customDraftDirty.current = false;
-      setCustomWidth(String(state.viewport?.width ?? 1440));
-      setCustomHeight(String(state.viewport?.height ?? 900));
-      setCustomMode(true);
-      return;
-    }
-    customDraftDirty.current = false;
-    setCustomMode(false);
-    const preset = BROWSER_VIEWPORT_PRESETS[value as keyof typeof BROWSER_VIEWPORT_PRESETS];
-    if (preset) applyViewport(preset.width, preset.height);
-  };
-  const applyCustomViewport = () => {
-    if (viewportInputError) return;
-    applyViewport(Number(customWidth), Number(customHeight));
-  };
-  const customWidthInvalid = !!viewportInputError && (
-    !/^\d+$/.test(customWidth.trim()) || Number(customWidth) < 320 || Number(customWidth) > 3840
-  );
-  const customHeightInvalid = !!viewportInputError && (
-    !/^\d+$/.test(customHeight.trim()) || Number(customHeight) < 240 || Number(customHeight) > 2160
-  );
-  const resetViewport = () => {
-    runViewportRequest(() => api.resetViewport(chatId));
   };
 
   const blank = state.url === 'about:blank' && !state.loading;
@@ -266,54 +205,7 @@ function LocalBrowserPanel({
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M4 4l8 8M12 4l-8 8" /></svg>
         </button>
       </form>
-      <div className="brw2viewportbar">
-        <label className="brw2viewport-preset">
-          <span>Tamaño</span>
-          <select aria-label="Tamaño del navegador" value={customMode ? 'custom' : browserViewportPreset(state.viewport?.width, state.viewport?.height)} onChange={(event) => chooseViewport(event.target.value)}>
-            <option value="desktop">Escritorio 1440×900</option>
-            <option value="laptop">Portátil 1280×800</option>
-            <option value="narrow">Estrecho 390×844</option>
-            <option value="custom">Personalizado</option>
-          </select>
-        </label>
-        {customMode && (
-          <div className="brw2viewport-custom">
-            <label>
-              <span>Ancho</span>
-              <input
-                aria-label="Ancho"
-                aria-invalid={customWidthInvalid}
-                aria-describedby={viewportInputError ? 'brw2viewport-error' : undefined}
-                type="text"
-                inputMode="numeric"
-                value={customWidth}
-                onChange={(event) => { viewportRequestSequence.current += 1; customDraftDirty.current = true; setCustomWidth(event.target.value); }}
-              />
-            </label>
-            <span aria-hidden="true">×</span>
-            <label>
-              <span>Alto</span>
-              <input
-                aria-label="Alto"
-                aria-invalid={customHeightInvalid}
-                aria-describedby={viewportInputError ? 'brw2viewport-error' : undefined}
-                type="text"
-                inputMode="numeric"
-                value={customHeight}
-                onChange={(event) => { viewportRequestSequence.current += 1; customDraftDirty.current = true; setCustomHeight(event.target.value); }}
-              />
-            </label>
-            <button type="button" className="brw2viewport-action" onClick={applyCustomViewport} disabled={!!viewportInputError}>Aplicar</button>
-          </div>
-        )}
-        <span className="brw2viewport-effective" aria-live="polite">
-          {state.effectiveViewport
-            ? `Actual: ${state.effectiveViewport.width} × ${state.effectiveViewport.height}`
-            : 'Cargando tamaño…'}
-        </span>
-        <button type="button" className="brw2viewport-action" onClick={resetViewport} disabled={!customMode && browserViewportPreset(state.viewport?.width, state.viewport?.height) === 'desktop'}>Restablecer</button>
-      </div>
-      {(viewportInputError || viewportActionError || state.error) && <div id="brw2viewport-error" className="brw2viewport-error" role="alert">{viewportInputError || viewportActionError || state.error}</div>}
+      {state.error && <div className="brw2viewport-error" role="alert">{state.error}</div>}
       <div className="brw2view" ref={viewport}>
         {blank && (
           <div className="brw2empty"><IcBrowser /><span>Ingresá una URL para navegar.</span></div>
