@@ -183,8 +183,17 @@ func TestChatEnvTruncationFlags(t *testing.T) {
 	const fixtureTimeout = 8 * time.Second
 	t.Run("repo discovery", func(t *testing.T) {
 		workspace := t.TempDir()
+		template := t.TempDir()
+		initEmptyGitRepo(t, template)
+		gitTemplate := filepath.Join(template, ".git")
 		for i := 0; i < chatEnvRepoLimit+1; i++ {
-			initEmptyGitRepo(t, filepath.Join(workspace, fmt.Sprintf("repo%02d", i)))
+			repoDir := filepath.Join(workspace, fmt.Sprintf("repo%02d", i))
+			if err := os.MkdirAll(repoDir, 0o755); err != nil {
+				t.Fatalf("mkdir repo: %v", err)
+			}
+			if err := copyFixtureTree(gitTemplate, filepath.Join(repoDir, ".git")); err != nil {
+				t.Fatalf("copy git fixture: %v", err)
+			}
 		}
 		manager, events := newFakeManager(t, "echo-prompt", Options{RSSSampleInterval: time.Hour})
 		t.Cleanup(func() { manager.Reset() })
@@ -260,6 +269,50 @@ func TestChatEnvTruncationFlags(t *testing.T) {
 		if !env.FilesTruncated || len(repo.Files) != chatEnvFileLimit || repo.Adds != chatEnvFileLimit+1 || repo.Dels != 0 {
 			t.Fatalf("file truncation env = %#v", env)
 		}
+	})
+}
+
+func copyFixtureTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := dst
+		if rel != "." {
+			target = filepath.Join(dst, rel)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		}
+		if info.IsDir() {
+			if err := os.Mkdir(target, info.Mode().Perm()); err != nil {
+				return err
+			}
+			return os.Chmod(target, info.Mode().Perm())
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported fixture file mode %s: %s", info.Mode(), path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, data, info.Mode().Perm()); err != nil {
+			return err
+		}
+		return os.Chmod(target, info.Mode().Perm())
 	})
 }
 
