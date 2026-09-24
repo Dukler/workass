@@ -7,6 +7,12 @@ import type { PublicJob, StartJobReply, StateDigest } from '../src/wire/types.ts
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 
 before(async () => {
   vite = await createServer({
@@ -19,7 +25,10 @@ before(async () => {
   StoreCtor = loaded.Store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 function chat(id = 'tab-1', chatId = 'chat-1'): Chat {
   return {
@@ -67,7 +76,7 @@ function job(overrides: Partial<PublicJob> = {}): PublicJob {
 }
 
 function subjectWithChat(): { subject: any; owner: Chat } {
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   const owner = chat();
   subject.state.chats = [owner];
   subject.state.activeId = owner.id;
@@ -838,7 +847,7 @@ test('digest heartbeat falls back to app:meta after an old daemon rejects state:
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     await (subject as any).pingConnection();
     await (subject as any).pingConnection();
     assert.equal(digestCalls, 1);

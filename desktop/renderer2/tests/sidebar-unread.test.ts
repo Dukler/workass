@@ -12,6 +12,12 @@ import type { PublicJob } from '../src/wire/types.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 let resolveStatus: (chat: unknown, live: boolean, active: boolean) => string;
 
 before(async () => {
@@ -25,7 +31,10 @@ before(async () => {
   resolveStatus = (await vite.ssrLoadModule('/src/components/SidebarV2.tsx')).resolveStatus;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 function chat(id: string, chatId: string): Chat {
   return {
@@ -73,7 +82,7 @@ function job(overrides: Partial<PublicJob> = {}): PublicJob {
 }
 
 function subject(): { store: any; watched: Chat; background: Chat } {
-  const store = new StoreCtor();
+  const store = ownStore(new StoreCtor());
   const watched = chat('tab-1', 'chat-1');
   const background = chat('tab-2', 'chat-2');
   store.state.chats = [watched, background];

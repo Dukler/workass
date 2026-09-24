@@ -6,6 +6,12 @@ import type { Chat } from '../src/store/types.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 
 before(async () => {
   vite = await createServer({
@@ -17,7 +23,10 @@ before(async () => {
   StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 function chat(id: string): Chat {
   return {
@@ -52,7 +61,7 @@ test('a lost delete reply retries the exact OperationID until the actor receipt 
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const owner = chat('tab-delete-retry');
     const other = chat('tab-delete-survivor');
     subject.state.chats = [owner, other];

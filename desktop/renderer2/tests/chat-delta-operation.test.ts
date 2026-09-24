@@ -7,6 +7,12 @@ import { LEAN_SESSION_SAVE_MODE } from '../src/store/persistence.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 
 before(async () => {
   vite = await createServer({
@@ -18,7 +24,10 @@ before(async () => {
   StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 function chat(id: string): Chat {
   return {
@@ -39,7 +48,7 @@ function chat(id: string): Chat {
 }
 
 function setup(owner: Chat): any {
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   subject.state.chats = [owner];
   subject.state.activeId = owner.id;
   subject.state.meta = { daemon: true, sessionSaveMode: LEAN_SESSION_SAVE_MODE };

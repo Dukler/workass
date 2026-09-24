@@ -11,6 +11,12 @@ import { encodeWorkassQuestionAnswer, limitWorkassQuestionText } from '../src/qu
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 let PermCard: (props: any) => React.ReactElement;
 let rendererStore: any;
 
@@ -27,7 +33,10 @@ before(async () => {
   PermCard = (await vite.ssrLoadModule('/src/components/messages.tsx')).PermCard;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 test('question UI encodes selected ids and free text in the frozen optionId envelope', () => {
   const answer = {
@@ -235,7 +244,7 @@ test('a rejected question answer unlocks the same card for an idempotent retry',
         return { ok: true };
       },
     } };
-    const store = new StoreCtor();
+    const store = ownStore(new StoreCtor());
     const question = {
       id: 'question-request', title: 'Assistant question', kind: 'workass_question',
       options: [], resolved: undefined,

@@ -15,6 +15,12 @@ const CHAT = tagId(MACHINE, 'chat-remote');
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 let resolveSettled: (chat: unknown, status: string, active: boolean, now: number, touched: number) => boolean;
 
 before(async () => {
@@ -28,7 +34,10 @@ before(async () => {
   resolveSettled = (await vite.ssrLoadModule('/src/components/SidebarV2.tsx')).resolveSettled;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 function mirror(messages: MirrorMsg[] = [], overrides: Record<string, unknown> = {}): Mirror {
   return {
@@ -79,7 +88,7 @@ function mirror(messages: MirrorMsg[] = [], overrides: Record<string, unknown> =
 }
 
 function remoteSubject(nextMirror: () => Mirror | Promise<Mirror>, ownsLink: () => boolean = () => true): any {
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   subject.schedulePersist = () => {};
   subject.state.meta = { daemon: true, sessionSaveMode: LEAN_SESSION_SAVE_MODE, workspaceRebindMode: 'transactional-v1' };
   subject.state.connection = 'connected';
@@ -1201,7 +1210,7 @@ function rawRemoteMessages(messages: Msg[]): MirrorMsg[] {
 }
 
 test('local session hydration preserves the exact pre-admission owner and Stop intent', () => {
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   subject.schedulePersist = () => {};
   const owner = {
     id: 'tab-local', chatId: 'chat-local', sessionId: null,

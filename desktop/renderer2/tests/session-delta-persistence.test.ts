@@ -10,6 +10,12 @@ import { splitId, tagId } from '../src/wire/machineIds.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 
 const rendererRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -23,7 +29,10 @@ before(async () => {
   StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 function chat(id: string, overrides: Partial<Chat> = {}): Chat {
   return {
@@ -46,7 +55,7 @@ function chat(id: string, overrides: Partial<Chat> = {}): Chat {
 }
 
 function subjectWithChats(chats = [chat('tab-a'), chat('tab-b')]): any {
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   subject.state.chats = chats;
   subject.state.activeId = chats[0]?.id ?? null;
   subject.state.meta = { daemon: true, sessionSaveMode: LEAN_SESSION_SAVE_MODE };
@@ -541,7 +550,7 @@ test('the authoritative create echo keeps a newly created thread at the top', as
 
 test('delete, structural, first-save, and post-restore boundaries force a complete save', async (t) => {
   await t.test('first save after boot', () => {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     subject.state.chats = [chat('tab-a'), chat('tab-b')];
     const save = serverSave(subject, true);
     assert.equal(save.full, true);
@@ -876,12 +885,12 @@ test('local drafts survive reload until sent, and sent text never returns from s
   try {
     const server = subjectWithChats().toMirror(false);
     server.chats[0].draft = 'old text from laptop';
-    const fresh = new StoreCtor();
+    const fresh = ownStore(new StoreCtor());
     fresh.restoreSessionSnapshot(server);
     assert.equal(fresh.chat('tab-a').draft, '');
     fresh.setDraft('tab-a', 'local unsent input');
     assert.ok(!JSON.stringify(fresh.toMirror(false)).includes('local unsent input'), 'draft is not shared');
-    const reloaded = new StoreCtor();
+    const reloaded = ownStore(new StoreCtor());
     reloaded.restoreSessionSnapshot(server);
     assert.equal(reloaded.chat('tab-a').draft, 'local unsent input');
     const delivered: string[] = [];
@@ -898,7 +907,7 @@ test('local drafts survive reload until sent, and sent text never returns from s
     assert.equal(reloaded.chat('tab-a').draft, '');
     // Reload after Send, while a remote snapshot still carries the old draft.
 
-    const afterDeletion = new StoreCtor();
+    const afterDeletion = ownStore(new StoreCtor());
     afterDeletion.restoreSessionSnapshot(server);
     assert.equal(afterDeletion.chat('tab-a').draft, '');
     assert.equal(afterDeletion.chat('tab-b').draft, '');

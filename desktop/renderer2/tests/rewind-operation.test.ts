@@ -6,6 +6,12 @@ import type { Chat } from '../src/store/types.ts';
 
 let vite: ViteDevServer;
 let StoreCtor: new () => any;
+const fixtureStores: any[] = [];
+
+function ownStore<T extends { clearToastTimers(): void }>(store: T): T {
+  fixtureStores.push(store);
+  return store;
+}
 
 before(async () => {
   vite = await createServer({
@@ -17,7 +23,10 @@ before(async () => {
   StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
 });
 
-after(async () => { await vite.close(); });
+after(async () => {
+  for (const store of fixtureStores) store.clearToastTimers();
+  await vite.close();
+});
 
 function chat(): Chat {
   return {
@@ -52,7 +61,7 @@ test('a failed rewind reply keeps its OperationID until the authoritative receip
     },
   };
   try {
-    const subject = new StoreCtor();
+    const subject = ownStore(new StoreCtor());
     const owner = chat();
     subject.state.chats = [owner];
     subject.state.activeId = owner.id;
@@ -86,7 +95,7 @@ test('a failed rewind reply keeps its OperationID until the authoritative receip
 });
 
 test('a checkpoint receipt cannot close another chat or machine rewind panel', () => {
-  const subject = new StoreCtor();
+  const subject = ownStore(new StoreCtor());
   const current = chat();
   const other = {
     ...chat(),
