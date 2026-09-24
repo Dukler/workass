@@ -114,6 +114,10 @@ type Manager struct {
 	updateCheckRunning           bool
 	updateCheckCancel            context.CancelFunc
 	updateCheckWG                sync.WaitGroup
+	installedVersionMu           sync.Mutex
+	installedVersionGeneration   map[string]uint64
+	installedVersionCancel       map[string]context.CancelFunc
+	installedVersionWG           sync.WaitGroup
 	planUsageRefreshMu           sync.Mutex
 	planUsageRefreshes           map[string]*planUsageRefreshRun
 	planUsageRefreshWG           sync.WaitGroup
@@ -1019,6 +1023,7 @@ func (m *Manager) Reset() bool {
 	m.resetting = true
 	m.mu.Unlock()
 	m.loopWG.Wait()
+	m.stopInstalledCLIVersionChecks()
 	m.stopScheduledProviderUpdateCheck()
 	m.stopPlanUsageRefreshes()
 	m.cancelAllSubagents(5 * time.Second)

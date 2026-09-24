@@ -2008,3 +2008,121 @@ func (f *fakeLocalOpenAI) handle(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
+
+func TestDetectProvidersAppliesLateInstalledVersionAfterFastACPProbe(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	versionStarted := filepath.Join(t.TempDir(), "version-started")
+	versionRelease := filepath.Join(t.TempDir(), "version-release")
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n: > %s\nwhile [ ! -e %s ]; do sleep 0.01; done\necho 'qwen-code 1.2.3'\nexit 0\nfi\nWORKASS_FAKE_ACP=1 exec %s -test.run=TestFakeACPHelper -- \"$@\"\n", shellQuote(versionStarted), shellQuote(versionRelease), shellQuote(os.Args[0]))
+	writeFixtureExecutable(t, filepath.Join(pathDir, "qwen"), script)
+	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	models := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"late-version-model"}]}`))
+	}))
+	defer models.Close()
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"version":"1.2.4"}`)) }))
+	defer registry.Close()
+	events := newEventCollector()
+	manager := NewManager(Options{RootDir: root, RSSSampleInterval: time.Hour, Broadcast: events.Broadcast,
+		LocalModelEndpoints: []string{models.URL + "/v1/models"}, ProviderUpdateSources: map[string]string{"qwen": registry.URL}})
+	t.Cleanup(func() { manager.Reset() })
+
+	result := manager.DetectProviders(context.Background(), DetectOptions{ProviderID: "qwen"})
+	if result["ok"] != true {
+		t.Fatalf("detect result = %#v", result)
+	}
+	waitForPath(t, versionStarted, 2*time.Second)
+	if got := assertProviderListItem(t, manager.ProvidersList(), "qwen", providerStatusReady, true); got["cliVersion"] != nil {
+		t.Fatalf("version unexpectedly completed while gated: %#v", got["cliVersion"])
+	}
+	if err := os.WriteFile(versionRelease, []byte("release\n"), 0o600); err != nil {
+		t.Fatalf("release --version gate: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	listReady := false
+	for time.Now().Before(deadline) && !listReady {
+		for _, event := range events.snapshot() {
+			if event.channel != "providers:list" {
+				continue
+			}
+			payload, ok := event.payload.([]map[string]any)
+			if !ok {
+				continue
+			}
+			for _, item := range payload {
+				version, ok := item["cliVersion"].(*CLIVersion)
+				if item["id"] == "qwen" && ok && version.Version == "1.2.3" {
+					listReady = true
+					break
+				}
+			}
+		}
+		if !listReady {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if !listReady {
+		t.Fatalf("late version providers:list event was not emitted: %#v", manager.ProvidersList())
+	}
+	updatesReady := false
+	for time.Now().Before(deadline) && !updatesReady {
+		for _, event := range events.snapshot() {
+			if event.channel != "providers:updates" {
+				continue
+			}
+			payload, ok := event.payload.(ProviderUpdatesPayload)
+			if ok && len(payload.Updates) == 1 && payload.Updates[0].ProviderID == "qwen" && payload.Updates[0].Installed == "1.2.3" && payload.Updates[0].Latest == "1.2.4" && payload.Updates[0].UpdateAvailable && payload.Updates[0].Hint == "qwen update" {
+				updatesReady = true
+				break
+			}
+		}
+		if !updatesReady {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if !updatesReady {
+		t.Fatal("late version did not produce the exact qwen provider update event")
+	}
+}
+
+func TestLateInstalledVersionCheckIsFencedByManagerReset(t *testing.T) {
+	root := repoRoot(t)
+	pathDir := t.TempDir()
+	versionStarted := filepath.Join(t.TempDir(), "version-started")
+	versionRelease := filepath.Join(t.TempDir(), "version-release")
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n: > %s\nwhile [ ! -e %s ]; do :; done\necho 'qwen-code 1.2.3'\nexit 0\nfi\nWORKASS_FAKE_ACP=1 exec %s -test.run=TestFakeACPHelper -- \"$@\"\n", shellQuote(versionStarted), shellQuote(versionRelease), shellQuote(os.Args[0]))
+	writeFixtureExecutable(t, filepath.Join(pathDir, "qwen"), script)
+	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	models := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"late-version-model"}]}`))
+	}))
+	defer models.Close()
+	manager := NewManager(Options{RootDir: root, RSSSampleInterval: time.Hour, LocalModelEndpoints: []string{models.URL + "/v1/models"}})
+	result := manager.DetectProviders(context.Background(), DetectOptions{ProviderID: "qwen"})
+	if result["ok"] != true {
+		t.Fatalf("detect result = %#v", result)
+	}
+	waitForPath(t, versionStarted, 2*time.Second)
+	manager.Reset()
+	if err := os.WriteFile(versionRelease, []byte("release\n"), 0o600); err != nil {
+		t.Fatalf("release --version gate: %v", err)
+	}
+	for _, item := range manager.ProvidersList() {
+		if item["id"] == "qwen" && item["cliVersion"] != nil {
+			t.Fatalf("reset manager accepted late version: %#v", item)
+		}
+	}
+}
+
+func waitForPath(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", path)
+}
