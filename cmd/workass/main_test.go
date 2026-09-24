@@ -511,7 +511,7 @@ func TestWireE2EAppChatAssertsJobEventChannel(t *testing.T) {
 		t.Fatalf("public canonical turn fields = %#v", job)
 	}
 
-	startEvent := client.waitJobEvent(t, jobID, "start", 5*time.Second)
+	startEvent := waitProviderAttachedJobStartEvent(t, client, jobID, sessionID, 5*time.Second)
 	startEventJob, ok := startEvent["job"].(map[string]any)
 	if !ok || startEvent["type"] != "start" || startEventJob["chatId"] != chatID || startEventJob["status"] != "running" || startEventJob["sessionId"] != sessionID {
 		t.Fatalf("start event shape = %#v", startEvent)
@@ -1142,7 +1142,7 @@ func TestWireReconnectRestoresLiveSessionControlsAndPendingPermission(t *testing
 		t.Fatalf("slow job start error: %s", *slowReply.Error)
 	}
 	slowJobID := mapFromAnyMain(slowReply.Result)["id"].(string)
-	_ = reconnected.waitJobEvent(t, slowJobID, "start", 3*time.Second)
+	_ = waitProviderAttachedJobStartEvent(t, reconnected, slowJobID, sessionID, 3*time.Second)
 	if err := reconnected.conn.Close(); err != nil {
 		t.Fatalf("close second controller: %v", err)
 	}
@@ -1361,8 +1361,17 @@ func TestWireTraceMockPermissionTurn(t *testing.T) {
 		switch payload["type"] {
 		case "start":
 			evJob := payload["job"].(map[string]any)
-			if evJob["id"] != jobID || evJob["status"] != "running" || evJob["chatId"] != chatID || evJob["sessionId"] != sessionID {
+			if evJob["id"] != jobID || evJob["status"] != "running" || evJob["chatId"] != chatID {
 				t.Fatalf("start payload = %#v", payload)
+			}
+			if evJob["sessionId"] == nil {
+				if evJob["userMessageId"] != job["userMessageId"] || evJob["assistantMessageId"] != job["assistantMessageId"] {
+					t.Fatalf("admission start canonical IDs = %#v, reply = %#v", evJob, job)
+				}
+				continue
+			}
+			if evJob["sessionId"] != sessionID {
+				t.Fatalf("provider-attached start payload = %#v, want session %s", payload, sessionID)
 			}
 			assertRendererRunningFixture(t, job, payload, chatID)
 			sawStart = true
@@ -1463,7 +1472,7 @@ func TestWireJobStartReplyGateBlocksProviderAndProjectsFailureAfterReceipt(t *te
 	if jobID == "" || fieldString(job, "status") != "running" || job["sessionId"] != nil {
 		t.Fatalf("durable job receipt = %#v", job)
 	}
-	start := client.waitJobEvent(t, jobID, "start", 5*time.Second)
+	start := waitProviderAttachedJobStartEvent(t, client, jobID, "", 5*time.Second)
 	if fieldString(mapFromAnyMain(start["job"]), "sessionId") == "" {
 		t.Fatalf("provider start omitted native attachment: %#v", start)
 	}
@@ -2037,7 +2046,7 @@ func TestWireTraceChatEnvNumstat(t *testing.T) {
 	}
 	job := startReply.Result.(map[string]any)
 	jobID := job["id"].(string)
-	startEvent := client.waitJobEvent(t, jobID, "start", 5*time.Second)
+	startEvent := waitProviderAttachedJobStartEvent(t, client, jobID, sessionID, 5*time.Second)
 	if startJob := mapFromAnyMain(startEvent["job"]); fieldString(startJob, "sessionId") != sessionID {
 		t.Fatalf("job:start event session = %#v, want %s", startJob, sessionID)
 	}
@@ -2159,7 +2168,7 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 	}
 	job := startReply.Result.(map[string]any)
 	jobID := job["id"].(string)
-	startEvent := client.waitJobEvent(t, jobID, "start", 5*time.Second)
+	startEvent := waitProviderAttachedJobStartEvent(t, client, jobID, oldSessionID, 5*time.Second)
 	if startJob := mapFromAnyMain(startEvent["job"]); fieldString(startJob, "sessionId") != oldSessionID {
 		t.Fatalf("hibernated checkpoint start = %#v, want session %s", startJob, oldSessionID)
 	}
@@ -2502,7 +2511,7 @@ func TestWireCodexEarnedRateLimitResetConsume(t *testing.T) {
 	if sessionID := fieldString(job, "sessionId"); sessionID != "" {
 		t.Fatalf("durable Codex admission prematurely exposed native session identity: %q", sessionID)
 	}
-	startEvent := client.waitJobEvent(t, fieldString(job, "id"), "start", 5*time.Second)
+	startEvent := waitProviderAttachedJobStartEvent(t, client, fieldString(job, "id"), "", 5*time.Second)
 	sessionID := fieldString(mapFromAnyMain(startEvent["job"]), "sessionId")
 	if sessionID == "" {
 		t.Fatal("Codex start event omitted its materialized session identity")
@@ -2662,7 +2671,7 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 	if sessionID = fieldString(job, "sessionId"); sessionID != "" {
 		t.Fatalf("durable Claude admission prematurely exposed native session identity: %q", sessionID)
 	}
-	startEvent := client.waitJobEvent(t, fieldString(job, "id"), "start", 5*time.Second)
+	startEvent := waitProviderAttachedJobStartEvent(t, client, fieldString(job, "id"), "", 5*time.Second)
 	sessionID = fieldString(mapFromAnyMain(startEvent["job"]), "sessionId")
 	if sessionID == "" {
 		t.Fatal("Claude start event omitted native session identity")
@@ -3831,6 +3840,33 @@ func (c *testWS) waitJobEvent(t *testing.T, jobID, typ string, timeout time.Dura
 		return payload["id"] == jobID
 	})
 	return msg.Payload.(map[string]any)
+}
+
+func waitProviderAttachedJobStartEvent(t *testing.T, c *testWS, jobID, wantSessionID string, timeout time.Duration) map[string]any {
+	t.Helper()
+	admission := c.waitJobEvent(t, jobID, "start", timeout)
+	admissionJob := mapFromAnyMain(admission["job"])
+	if admissionJob["sessionId"] != nil || admissionJob["status"] != "running" {
+		t.Fatalf("admission start = %#v, want running job without native session", admissionJob)
+	}
+
+	attached := c.waitFor(t, timeout, func(msg wsMessage) bool {
+		if msg.T != "event" || msg.Channel != "job:event" {
+			return false
+		}
+		payload, _ := msg.Payload.(map[string]any)
+		if payload["type"] != "start" {
+			return false
+		}
+		job := mapFromAnyMain(payload["job"])
+		return job["id"] == jobID && fieldString(job, "sessionId") != ""
+	})
+	attachedPayload := attached.Payload.(map[string]any)
+	attachedJob := mapFromAnyMain(attachedPayload["job"])
+	if wantSessionID != "" && fieldString(attachedJob, "sessionId") != wantSessionID {
+		t.Fatalf("provider-attached start session = %#v, want %s", attachedJob, wantSessionID)
+	}
+	return attachedPayload
 }
 
 func (c *testWS) waitEvent(t *testing.T, timeout time.Duration) wsMessage {
