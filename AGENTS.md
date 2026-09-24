@@ -19,6 +19,10 @@ scope. Log suggestions separately; do not act on them.
 - Run one focused dev-profile acceptance for the behavior being shipped. Add a
   new test or send a correction only when that review or acceptance reveals a
   concrete gap. Keep the correction limited to that gap.
+- Run focused handoff tests with `node scripts/test-focused.mjs -- COMMAND ...`
+  (use `:::` between independent commands). It gives the selected checks one
+  10-second wall-clock budget. A timeout is a failed check: narrow or repair the
+  fixture and report the gap, never claim that skipped tests passed.
 - Once the handoff and dev acceptance pass, move promptly to the canonical
   release command when publication is authorized. That command owns the broad
   repository gate; do not run another full gate in advance just for review.
