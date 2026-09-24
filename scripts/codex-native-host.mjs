@@ -1223,7 +1223,6 @@ async function handleAppNotification(method, params) {
     const error = nativeTurnError(params.error);
     if (params.willRetry !== true) session.turnError = error;
     diagnostic(params.willRetry === true ? 'Codex upstream retry' : 'Codex upstream failure', error);
-    notify(session.threadId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `${safeErrorText(error)}\n\n` } });
     return;
   }
   if (method === 'thread/compacted') {

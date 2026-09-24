@@ -485,7 +485,7 @@ test('native Codex host lets a permission outlive the plumbing timeout', async (
 });
 
 
-test('native Codex retries preserve failure details and terminal authority', async (t) => {
+test('native Codex retries keep transport notices out of assistant text and preserve terminal errors', async (t) => {
   const peer = startHost();
   t.after(() => peer.child.kill('SIGKILL'));
   peer.send({ id: 1, method: 'initialize', params: {} });
@@ -510,9 +510,7 @@ test('native Codex retries preserve failure details and terminal authority', asy
   }
   const notices = peer.messages.filter((m) => m.params?.update?.sessionUpdate === 'agent_message_chunk')
     .map((m) => m.params.update.content.text).join('');
-  assert.match(notices, /responseStreamDisconnected/);
-  assert.match(notices, /HTTP 502/);
-  assert.match(notices, /upstream connection reset/);
+  assert.doesNotMatch(notices, /responseStreamDisconnected|Reconnecting|HTTP 502|upstream connection reset/);
   assert.doesNotMatch(JSON.stringify(peer.messages), /fixture-private-value|fixture-bearer-value|private phrase|with spaces/);
 });
 

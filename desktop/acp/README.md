@@ -244,10 +244,11 @@ daemon restart.
 The native host uses stdio JSON-RPC to the installed official app-server.
 `responseStreamDisconnected` with `websocket closed by server before
 response.completed` describes Codex's upstream Responses connection, not the
-Workass renderer socket. Native `error.willRetry` notices leave terminal
-authority with `turn/completed`; a failed completion preserves the native cause
-and partial output. Workass does not replay a prompt, poll the turn, or replace
-its exact thread to recover it.
+Workass renderer socket. Native `error.willRetry` notices remain private
+diagnostics rather than assistant text, and terminal authority stays with
+`turn/completed`; a failed completion preserves the native cause and partial
+output. Workass does not replay a prompt, poll the turn, or replace its exact
+thread to recover it.
 
 On official Codex 0.154.0, `codex features list` reports
 `responses_websockets` and `responses_websockets_v2` as removed. The documented
