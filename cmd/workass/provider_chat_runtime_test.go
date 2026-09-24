@@ -1818,6 +1818,22 @@ func TestProviderChatSteerTerminalWinnerNeverFallsBackToFIFO(t *testing.T) {
 	if !ok || baseState.ActiveLaneID == "" {
 		t.Fatalf("missing synthetic race lane: %#v", baseState)
 	}
+	// Select returns the provider session before the coordinator's durable lane
+	// attachment is necessarily visible. Establish that exact attachment before
+	// entering the terminal/admission race so a setup-late rejection cannot
+	// masquerade as the terminal winner.
+	attachmentDeadline := time.Now().Add(5 * time.Second)
+	for {
+		state, exists := runtime.Snapshot("steer-regression-chat")
+		lane := state.Lanes[baseState.ActiveLaneID]
+		if exists && lane.Attachment != nil && lane.Attachment.ConnectionID == info.SessionID && lane.ConnectionGeneration != 0 {
+			break
+		}
+		if time.Now().After(attachmentDeadline) {
+			t.Fatalf("exact steer session attachment did not become ready: session=%q lane=%#v", info.SessionID, lane)
+		}
+		time.Sleep(time.Millisecond)
+	}
 	request := map[string]any{
 		"sessionId": info.SessionID, "tabId": "steer-regression-tab", "chatId": "steer-regression-chat",
 		"prompt": "queue the concurrent foreground end", "clientUserMessageId": "race-steer-concurrent-operation",
