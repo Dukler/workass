@@ -54,8 +54,13 @@ fi
 grep -Fq 'version=24.17.0' "$vendor_node"
 grep -Fq 'archive="node-v$version-darwin-arm64.tar.xz"' "$vendor_node"
 grep -Fq 'cf7e9152d7bd86c140f6eccf3577abfbaf8960be1ca49d9d900e8484984dcb9a' "$vendor_node"
-grep -Fq '"$incoming/bin/npm" "$incoming/bin/npx" "$incoming/bin/corepack"' "$vendor_node"
-grep -Fq '"$incoming/npm" "$incoming/npm.cmd"' "$vendor_node"
+grep -Fq '# Whitelist the executable and its license. Headers, npm, launchers, docs and' "$vendor_node"
+grep -Fq 'cp "$source_root/LICENSE" "$incoming/LICENSE"' "$vendor_node"
+grep -Fq 'cp "$source_root/bin/node" "$incoming/bin/node"' "$vendor_node"
+if grep -Eq '^[[:space:]]*cp .*npm' "$vendor_node"; then
+  echo "portable Node runtime must not copy npm" >&2
+  exit 1
+fi
 grep -Fq 'config/macos/electron.version' "$repo_root/scripts/lib/workass-electron.sh"
 grep -Fq 'd6d0598d042ef4d146278d08d84deac9dde145eae31eb4f32ef46206d6bd6169' "$vendor_electron"
 [ "$(sed -n '1p' "$repo_root/config/macos/electron.version")" = 43.1.1 ]

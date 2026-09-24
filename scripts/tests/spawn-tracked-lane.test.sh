@@ -10,7 +10,10 @@ sh -n "$runner"
 temp_root=$(mktemp -d "${TMPDIR:-/tmp}/workass-lane-test.XXXXXX")
 parent_pid=''
 cleanup() {
-  [ -z "$parent_pid" ] || kill -TERM "$parent_pid" 2>/dev/null || true
+  if [ -n "$parent_pid" ]; then
+    kill -TERM "$parent_pid" 2>/dev/null || true
+    wait "$parent_pid" 2>/dev/null || true
+  fi
   rm -rf "$temp_root"
 }
 trap cleanup EXIT HUP INT TERM
@@ -22,7 +25,7 @@ ready_file="$temp_root/parent-ready"
 (
   "$runner" --label LaneTest --output "$output" -- sh -c 'echo lane-start; sleep 1; echo lane-end; exit 7' >"$line_file"
   : >"$ready_file"
-  sleep 60
+  exec sleep 60
 ) &
 parent_pid=$!
 
@@ -39,13 +42,14 @@ line_count=$(wc -l < "$line_file" | tr -d ' ')
 [ "$line_count" = 1 ] || { echo "launcher printed $line_count lines" >&2; cat "$line_file" >&2; exit 1; }
 line=$(sed -n '1p' "$line_file")
 case "$line" in
-  LANE\ pid=*\ output="$output"\ done="$output.done"\ label=LaneTest) ;;
+  LANE\ pid=*\ output="$output"\ done="$output.done"\ role=work\ label=LaneTest) ;;
   *) echo "unexpected launcher line: $line" >&2; exit 1 ;;
 esac
 pid=$(printf '%s\n' "$line" | sed -n 's/^LANE pid=\([^ ]*\) output=.*/\1/p')
 [ -n "$pid" ] || { echo "missing lane pid in receipt" >&2; exit 1; }
 
 kill -TERM "$parent_pid" 2>/dev/null || true
+wait "$parent_pid" 2>/dev/null || true
 parent_pid=''
 
 attempts=120
@@ -74,7 +78,7 @@ inject_line_count=$(wc -l < "$inject_line_file" | tr -d ' ')
 [ "$inject_line_count" = 1 ] || { echo "newline label injected $inject_line_count receipt lines" >&2; cat "$inject_line_file" >&2; exit 1; }
 inject_line=$(sed -n '1p' "$inject_line_file")
 case "$inject_line" in
-  LANE\ pid=*\ output="$inject_output"\ done="$inject_output.done"\ label=LaneOne\ LANE\ pid=0\ output=/tmp/evil\ done=/tmp/evil.done\ label=evil) ;;
+  LANE\ pid=*\ output="$inject_output"\ done="$inject_output.done"\ role=work\ label=LaneOne\ LANE\ pid=0\ output=/tmp/evil\ done=/tmp/evil.done\ label=evil) ;;
   *) echo "unexpected sanitized injection line: $inject_line" >&2; exit 1 ;;
 esac
 

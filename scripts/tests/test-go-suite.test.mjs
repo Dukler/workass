@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { writeFileSync } from 'node:fs';
-import * as awaitImportChildProcess from 'node:child_process';
+import { watch, writeFileSync } from 'node:fs';
+import { spawn as realSpawn } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile, access } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -46,7 +46,7 @@ test('scheduler orders measured heavy batches globally and starts machinebook fi
   assert.deepEqual(partitionBatches(['TestFallback']).map(batch => batch.weight), [0.1]);
 });
 
-async function fixture(t, { fail = '', delay = '0.04', packageFail = false, childWait = false } = {}) {
+async function fixture(t, { fail = '', delay = '0.04', packageFail = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'workass-go-suite-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const logs = path.join(root, 'logs');
@@ -56,7 +56,7 @@ async function fixture(t, { fail = '', delay = '0.04', packageFail = false, chil
   const binarySource = path.join(root, 'fake-acp-test.sh');
   const goSource = path.join(root, 'fake-go.sh');
   const namesShell = names.map(name => `'${name}'`).join(' ');
-  await writeFile(binarySource, `#!/bin/sh\nRUN=""; for ARG in "$@"; do case "$ARG" in -test.run=*) RUN=$(printf '%s' "$ARG" | sed 's/^-test.run=//') ;; esac; done; case "$*" in\n  *-test.list*) printf '%s\\n' ${namesShell} ;;\n  *) for CASE in ${namesShell}; do case "$RUN" in *"$CASE"*) echo "=== RUN $CASE"; echo "=== RUN $CASE/child"; echo "complete output for $CASE"; echo "--- PASS: $CASE/child (0.01s)"; if [ "$CASE" = '${fail}' ]; then echo '--- FAIL: $CASE (0.01s)'; echo 'deliberate failure detail' >&2; else echo "--- PASS: $CASE (0.01s)"; fi ;; esac; done; ${childWait ? 'sleep 30 & echo $! > "$CHILD_PID_FILE"; wait' : `sleep ${delay}`}; [ '${fail}' = '' ] || case "$RUN" in *'${fail}'*) exit 7 ;; esac ;;\nesac\n`, { mode: 0o755 });
+  await writeFile(binarySource, `#!/bin/sh\nRUN=""; for ARG in "$@"; do case "$ARG" in -test.run=*) RUN=$(printf '%s' "$ARG" | sed 's/^-test.run=//') ;; esac; done; case "$*" in\n  *-test.list*) printf '%s\\n' ${namesShell} ;;\n  *) for CASE in ${namesShell}; do case "$RUN" in *"$CASE"*) echo "=== RUN $CASE"; echo "=== RUN $CASE/child"; echo "complete output for $CASE"; echo "--- PASS: $CASE/child (0.01s)"; if [ "$CASE" = '${fail}' ]; then echo '--- FAIL: $CASE (0.01s)'; echo 'deliberate failure detail' >&2; else echo "--- PASS: $CASE (0.01s)"; fi ;; esac; done; sleep ${delay}; [ '${fail}' = '' ] || case "$RUN" in *'${fail}'*) exit 7 ;; esac ;;\nesac\n`, { mode: 0o755 });
   await writeFile(goSource, `#!/bin/sh\ncase "$*" in\n  *' -c -o '* ) while [ "$1" != '-o' ]; do shift; done; shift; cp '${binarySource}' "$1"; chmod +x "$1" ;;\n  *'list ./...'*) printf '%s\\n' 'workass/internal/one' 'workass/internal/acp' 'workass/cmd/workass' 'workass/internal/two' ;;\n  *'test -json'*|*'test -race -json'*) for PACKAGE in "$@"; do case "$PACKAGE" in workass/*) echo "{\\\"Action\\\":\\\"pass\\\",\\\"Package\\\":\\\"$PACKAGE\\\"}"; echo "{\\\"Action\\\":\\\"pass\\\",\\\"Package\\\":\\\"$PACKAGE\\\",\\\"Test\\\":\\\"TestOther\\\"}" ;; esac; done; echo other-package-output; ${packageFail ? 'exit 9' : 'exit 0'} ;;\n  *) echo "unexpected go invocation: $*" >&2; exit 90 ;;\nesac\n`, { mode: 0o755 });
   return { root, logs, go: goSource };
 }
@@ -180,18 +180,35 @@ test('race flags follow the Go subcommand for compiled and remaining packages', 
 });
 
 test('abort terminates process group and records interruption', async t => {
-  const f = await fixture(t, { childWait: true });
+  const f = await fixture(t);
   const pidFile = path.join(f.root, 'child.pid');
   const controller = new AbortController();
-  const promise = runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 1, abortSignal: controller.signal, signalHandlers: false, spawn: (command, args, options) => {
+  let promise;
+  t.after(async () => {
+    controller.abort();
+    if (promise) await promise;
+  });
+  const fakeGo = inProcessGoSpawn();
+  const spawn = (command, args, options) => {
+    if (String(command).endsWith('.test')) {
+      if (args[0] === '-test.list') return fakeGo.spawn(command, args, options);
+      return realSpawn('/bin/sh', ['-c', 'sleep 30 & echo "$!" > "$CHILD_PID_FILE"; wait'], options);
+    }
+    return fakeGo.spawn(command, args, options);
+  };
+  promise = runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 1, abortSignal: controller.signal, signalHandlers: false, spawn: (command, args, options) => {
     options = { ...options, env: { ...options.env, CHILD_PID_FILE: pidFile } };
-    return awaitImportChildProcess.spawn(command, args, options);
+    return spawn(command, args, options);
   } });
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    try { await access(pidFile); break; } catch { await new Promise(resolve => setTimeout(resolve, 10)); }
-  }
-  await access(pidFile);
+  await new Promise((resolve, reject) => {
+    const watcher = watch(f.root, (event, filename) => {
+      if (filename?.toString() === path.basename(pidFile)) {
+        watcher.close(); clearTimeout(timer); resolve();
+      }
+    });
+    const timer = setTimeout(() => { watcher.close(); reject(new Error('real process fixture did not publish its child pid')); }, 5000);
+    access(pidFile).then(() => { watcher.close(); clearTimeout(timer); resolve(); }, () => {});
+  });
   controller.abort();
   const result = await promise;
   assert.equal(result.ok, false);
