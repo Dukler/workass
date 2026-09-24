@@ -3,6 +3,7 @@ package wire
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -190,29 +191,11 @@ func TestLanDevicesRefreshesLastSeenAndConnectedIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("approve controller: %v", err)
 	}
-	// Keep the refresh operation exercised at its normal interval while owning
-	// the test ticker here: NewHub's daemon-owned ticker intentionally has no
-	// production close contract and must not outlive this temporary state dir.
-	hub := NewHub(Options{TrustLocalhost: false, DeviceRefreshInterval: 10 * time.Millisecond})
-	hub.lease = manager
-	refreshStop := make(chan struct{})
-	refreshDone := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(hub.deviceRefresh)
-		defer ticker.Stop()
-		defer close(refreshDone)
-		for {
-			select {
-			case <-refreshStop:
-				return
-			case <-ticker.C:
-				hub.refreshConnectedDevices()
-			}
-		}
-	}()
+	refreshContext, cancelRefresh := context.WithCancel(context.Background())
+	hub := NewHub(Options{Context: refreshContext, Lease: manager, TrustLocalhost: false, DeviceRefreshInterval: 10 * time.Millisecond})
 	t.Cleanup(func() {
-		close(refreshStop)
-		<-refreshDone
+		cancelRefresh()
+		<-hub.deviceRefreshDone
 	})
 	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
 	defer server.Close()

@@ -2,6 +2,7 @@ package wire
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
@@ -192,6 +193,7 @@ func (r RawResult) MarshalJSON() ([]byte, error) {
 
 // Options configures optional P3 pairing/controller behavior for a hub.
 type Options struct {
+	Context               context.Context
 	Lease                 *lease.Manager
 	TrustLocalhost        bool
 	AccessRequestTimeout  time.Duration
@@ -238,6 +240,7 @@ type Hub struct {
 	trustLocalhost    bool
 	accessTimeout     time.Duration
 	deviceRefresh     time.Duration
+	deviceRefreshDone chan struct{}
 	onClientReady     func(send func(channel string, payload any) error)
 	onControllerReady func(send func(channel string, payload any) error)
 	logf              func(format string, args ...any)
@@ -336,7 +339,12 @@ func NewHub(options ...Options) *Hub {
 		logf:              opts.Logf,
 	}
 	if hub.lease != nil && hub.deviceRefresh > 0 {
-		go hub.deviceRefreshLoop()
+		refreshContext := opts.Context
+		if refreshContext == nil {
+			refreshContext = context.Background()
+		}
+		hub.deviceRefreshDone = make(chan struct{})
+		go hub.deviceRefreshLoop(refreshContext)
 	}
 	return hub
 }
@@ -1642,11 +1650,17 @@ func (h *Hub) handleDevices() map[string]any {
 	return map[string]any{"devices": out}
 }
 
-func (h *Hub) deviceRefreshLoop() {
+func (h *Hub) deviceRefreshLoop(ctx context.Context) {
+	defer close(h.deviceRefreshDone)
 	ticker := time.NewTicker(h.deviceRefresh)
 	defer ticker.Stop()
-	for range ticker.C {
-		h.refreshConnectedDevices()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			h.refreshConnectedDevices()
+		}
 	}
 }
 
