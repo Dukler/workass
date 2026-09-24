@@ -4211,9 +4211,7 @@ func installWireBlockingFakeAgentWrapper(t *testing.T, dir, name, startedPath, r
 
 func writeWireExecutable(t *testing.T, path, script string) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write executable %s: %v", path, err)
-	}
+	writeWireFixtureExecutable(t, path, script)
 }
 
 func waitForWireFile(t *testing.T, path string, timeout time.Duration) {
