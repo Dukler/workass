@@ -572,6 +572,11 @@ No intermediate phase is production-ready by itself.
       renderer saves presentation-command-only.
 - [x] Remove legacy runtime dual writes and every direct manager/session-store
       bypass for ChatID-bearing mutations.
+- [x] Permit the tracked-child Stop path one read-only
+      `SubagentCompletionReceiptsForParent` identity lookup, scoped to the exact
+      tab, chat, and parent operation; it removes only that parent's queued
+      tracked-child completion receipts. This does not grant manager mutation
+      authority or general receipt access.
 
 ### Phase D — lane storage and exact resume
 
