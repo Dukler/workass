@@ -7,6 +7,7 @@ import { spawn as realSpawn } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile, access } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { runGoSuite, parseTestList, anchoredTestPattern, partitionBatches, partitionSerialCases, inspectCaseOutput, orderWorkByWeight } from '../test-go-suite.mjs';
 
 const names = ['TestAlpha', 'TestBeta', 'ExampleWidget', 'FuzzParse'];
@@ -79,7 +80,7 @@ async function fixture(t, { fail = '', delay = '0.04', packageFail = false } = {
   return { root, logs, go: goSource };
 }
 
-function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/two'], failCase = '', packageFail = false, record = () => {}, compileDelayMs = 0, onCompileStart = () => {}, onCompileFinish = () => {}, onPackageStart = () => {} } = {}) {
+function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/two'], noTestPackages = [], failCase = '', packageFail = false, record = () => {}, compileDelayMs = 0, onCompileStart = () => {}, onCompileFinish = () => {}, onPackageStart = () => {} } = {}) {
   let active = 0, maximum = 0;
   const spawn = (command, args, options) => {
     const child = new EventEmitter();
@@ -111,7 +112,7 @@ function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/interna
         setTimeout(() => { onCompileFinish(args.at(-1)); finish(0); }, compileDelayMs);
         return child;
       }
-      if (args[0] === 'list') { finish(0, `${packages.join('\n')}\n`); return child; }
+      if (args[0] === 'list') { finish(0, `${packages.map(pkg => `${pkg}\t${path.join(options.cwd, pkg.replace(/^workass\//, ''))}\t${noTestPackages.includes(pkg) ? 'false' : 'true'}`).join('\n')}\n`); return child; }
       if (args[0] === 'test' && args.includes('-json')) {
         const pkg = args.at(-1);
         onPackageStart(pkg);
@@ -151,6 +152,42 @@ test('fresh matrix covers both heavy packages once, overlaps within the bound, a
   assert.equal(completedBatches.length, 2);
   assert.ok(completedBatches.every(batch => batch.names.length > 1));
   assert.equal(Object.values(result.heavyPackages).reduce((sum, pkg) => sum + pkg.cases.reduce((n, item) => n + item.nestedRun, 0), 0), names.length * 2);
+});
+
+test('remaining Go packages compile directly to their stable cache path on every invocation', async t => {
+  const f = await fixture(t);
+  const cacheDir = path.join(f.root, 'stable-cache');
+  const compiles = [];
+  const invocations = [];
+  const fake = inProcessGoSpawn({ record: (command, args) => {
+    if (command === f.go) {
+      invocations.push(args);
+      if (args[0] === 'test' && args.includes('-c')) compiles.push({ pkg: args.at(-1), output: args[args.indexOf('-o') + 1] });
+    }
+  } });
+  for (let invocation = 0; invocation < 2; invocation++) {
+    const result = await runGoSuite({ cwd: f.root, logDir: f.logs, cacheDir, go: f.go, workers: 3, spawn: fake.spawn, signalHandlers: false });
+    assert.equal(result.ok, true, result.error);
+  }
+  const remaining = compiles.filter(item => item.pkg === 'workass/internal/one' || item.pkg === 'workass/internal/two');
+  assert.equal(remaining.length, 4, 'each remaining package compiles on each suite invocation');
+  for (const item of remaining) assert.equal(item.output, path.join(cacheDir, `pkg-${createHash('sha256').update(item.pkg).digest('hex').slice(0, 24)}.test`));
+  assert.ok(invocations.filter(args => args[0] === 'test' && args.includes('-c')).length > 0);
+});
+
+test('Go metadata identifies a package with removed test files despite a stale cached binary', async t => {
+  const f = await fixture(t);
+  const cacheDir = path.join(f.root, 'stable-cache');
+  await mkdir(cacheDir);
+  const stale = path.join(cacheDir, `pkg-${createHash('sha256').update('workass/internal/one').digest('hex').slice(0, 24)}.test`);
+  await writeFile(stale, 'stale binary');
+  const compiles = [];
+  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, cacheDir, go: f.go, workers: 3, spawn: inProcessGoSpawn({ noTestPackages: ['workass/internal/one'], record: (command, args) => {
+    if (command === f.go && args[0] === 'test' && args.includes('-c')) compiles.push(args.at(-1));
+  } }).spawn, signalHandlers: false });
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.packageOutcomes.find(item => item.package === 'workass/internal/one')?.noTestFiles, true);
+  assert.ok(!compiles.includes('workass/internal/one'), 'no-test classification must come from current go list metadata');
 });
 
 test('remaining package work starts while heavy test binaries are still compiling', async t => {
@@ -259,7 +296,7 @@ test('in-process abort releases a waiting worker and leaves queued batches unspa
     };
     child.kill = () => { finish(null); return true; };
     setImmediate(() => child.emit('spawn'));
-    if (args[0] === 'list') { finish(0, 'workass/internal/one\nworkass/internal/acp\nworkass/cmd/workass\n'); return child; }
+    if (args[0] === 'list') { finish(0, ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass'].map(pkg => `${pkg}\t${path.join(f.root, pkg.replace('workass/', ''))}\ttrue`).join('\n') + '\n'); return child; }
     if (args[0] === 'test' && args.includes('-c')) {
       writeFileSync(args[args.indexOf('-o') + 1], 'fake test binary'); finish(0); return child;
     }

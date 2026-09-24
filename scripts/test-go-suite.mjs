@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn as nodeSpawn } from 'node:child_process';
 import { createWriteStream, existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -279,14 +279,19 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
   };
   try {
     const raceFlag = race ? ['-race'] : [];
-    const packages = (await run(go, ['list', './...'], 'list-packages')).stdout.trim().split(/\r?\n/).filter(Boolean);
+    const packageMetadata = (await run(go, ['list', '-f', '{{.ImportPath}}\t{{.Dir}}\t{{if or .TestGoFiles .XTestGoFiles}}true{{else}}false{{end}}', './...'], 'list-packages')).stdout.trim().split(/\r?\n/).filter(Boolean).map(line => {
+      const [importPath, dir, hasTests] = line.split('\t');
+      if (!importPath || !dir || (hasTests !== 'true' && hasTests !== 'false')) throw new Error(`invalid Go package metadata: ${line}`);
+      return { importPath, dir, hasTests: hasTests === 'true' };
+    });
+    const packages = packageMetadata.map(pkg => pkg.importPath);
     const heavyImportPaths = new Set(HEAVY_PACKAGES.map(pkg => packages.find(name => name.endsWith(pkg.slice(1))) ?? `workass/${pkg.slice(2)}`));
-    const otherPackages = packages.filter(pkg => !heavyImportPaths.has(pkg));
-    summary.otherPackages = otherPackages;
+    const otherPackages = packageMetadata.filter(pkg => !heavyImportPaths.has(pkg.importPath));
+    summary.otherPackages = otherPackages.map(pkg => pkg.importPath);
     const buildAndList = [];
     const failures = [];
     const workQueue = orderWorkByWeight([
-      ...otherPackages.map(pkg => ({ kind: 'package', package: pkg, id: pkg, weight: pkg.endsWith('/machinebook') ? 10 : DEFAULT_SECONDS })),
+      ...otherPackages.map(pkg => ({ kind: 'package', package: pkg.importPath, dir: pkg.dir, hasTests: pkg.hasTests, id: pkg.importPath, weight: pkg.importPath.endsWith('/machinebook') ? 10 : DEFAULT_SECONDS })),
       ...HEAVY_PACKAGES.map((pkg, index) => ({ kind: 'build', pkg, index, package: packages.find(name => name.endsWith(pkg.slice(1))) ?? `workass/${pkg.slice(2)}`, weight: DEFAULT_SECONDS })),
     ]);
     let pendingTasks = workQueue.length;
@@ -359,19 +364,18 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, worker
       if (result.code !== 0) failures.push(`${item.pkg} batch ${batch.id} failed with exit ${result.code}`);
     };
     const executePackage = async work => {
-      const tempDir = await commandTemp(`other-${work.package.replace(/[^a-zA-Z0-9_-]/g, '-')}`);
-      if (interrupted) return;
-      const label = `package-${createHash('sha256').update(work.package).digest('hex').slice(0, 16)}`;
-      const packageCwd = path.join(cwd, work.package.replace(/^workass\//, ''));
-      const cachePath = path.join(binaryCache, cacheLabel(work.package));
-      const compiledPath = path.join(root, `${label}.test`);
-      const compile = await run(go, ['test', ...raceFlag, '-c', '-o', compiledPath, work.package], `compile-${label}`);
-      if (!existsSync(compiledPath)) {
-        appendJsonLine(jsonl, { event: 'package-test', package: work.package, cwd: packageCwd, code: 0, noTestFiles: true, compileStdout: compile.stdout, compileStderr: compile.stderr });
+      const { hasTests } = work;
+      const packageCwd = work.dir;
+      if (!hasTests) {
+        appendJsonLine(jsonl, { event: 'package-test', package: work.package, cwd: packageCwd, code: 0, noTestFiles: true });
         summary.packageOutcomes.push({ package: work.package, action: 'pass', noTestFiles: true });
         return;
       }
-      await rename(compiledPath, cachePath);
+      const tempDir = await commandTemp(`other-${work.package.replace(/[^a-zA-Z0-9_-]/g, '-')}`);
+      if (interrupted) return;
+      const label = `package-${createHash('sha256').update(work.package).digest('hex').slice(0, 16)}`;
+      const cachePath = path.join(binaryCache, cacheLabel(work.package));
+      await run(go, ['test', ...raceFlag, '-c', '-o', cachePath, work.package], `compile-${label}`);
       const binary = path.join(root, `${label}-run.test`);
       await link(cachePath, binary);
       const listing = await run(binary, ['-test.list', '.'], `list-${label}`, packageCwd);
