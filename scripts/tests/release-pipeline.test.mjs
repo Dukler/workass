@@ -394,6 +394,10 @@ test('paired publication receipt binds exact Mac bytes and verified GitHub asset
 test('Windows verify-only mode performs readback without a release mutation', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-windows-readback-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const devState = path.join(repoRoot, '.dev');
+  const madeDevState = !fs.existsSync(devState);
+  fs.mkdirSync(devState, { recursive: true });
+  if (madeDevState) t.after(() => fs.rmSync(devState, { recursive: true, force: true }));
   const bin = path.join(root, 'bin');
   const releaseDir = path.join(root, 'release');
   const version = '1.2.3';
@@ -585,17 +589,20 @@ test('canonical pipeline stages both platforms from one verified input and publi
   assert.match(publisher, /windows-publication/);
 
   const rendererBuild = gate.indexOf('npm run build --silent');
-  const rendererTests = gate.indexOf('npm test --silent');
-  const shellTests = gate.indexOf('node --test desktop/shell/*.test.js');
   const rendererSnapshot = gate.indexOf('WORKASS_GATE_REQUIRE_EMBEDDED_RENDERER');
   const goBuild = gate.indexOf('go build ./...');
+  const suiteRunner = gate.indexOf('test_suites node scripts/test-suite.mjs');
   assert.equal(rendererPackage.scripts.test, 'node --experimental-strip-types --test tests/*.test.ts');
   assert.equal(rendererPackage.scripts.benchmark, 'node --experimental-strip-types --test tests/*.bench.ts');
-  assert.ok(rendererTests >= 0 && rendererTests < goBuild);
-  assert.ok(shellTests >= 0 && shellTests < goBuild);
+  assert.ok(suiteRunner > goBuild);
+  assert.match(gate, /renderer_prepare sh -c 'cd desktop\/renderer2 && npx tsc --noEmit && npm run build --silent/);
   assert.ok(rendererBuild >= 0 && rendererBuild < goBuild);
   assert.ok(rendererSnapshot >= 0 && rendererSnapshot < goBuild);
-  assert.match(gate, /if \[ "\$\{WORKASS_GATE_FRESH:-0\}" = 1 \]; then[\s\S]*go test \.\/\.\.\. -count=1 -p=2 -parallel=2[\s\S]*else[\s\S]*go test \.\/\.\.\. -p=2 -parallel=2/);
+  assert.match(gate, /run_gate_phase go_build go build \.\/\.\.\./);
+  assert.match(gate, /run_gate_phase go_vet go vet \.\/\.\.\./);
+  const suiteSource = fs.readFileSync(path.join(repoRoot, 'scripts', 'test-suite.mjs'), 'utf8');
+  assert.match(suiteSource, /args: \['test', '\.\/\.\.\.', '-count=1', '-p=2', '-parallel=2', '-json'\]/);
+  assert.match(suiteSource, /path\.join\(repo, 'scripts\/tests'\)/);
 
   assert.match(macStage, /release-input\.mjs" verify/);
   assert.match(macStage, /--renderer-root "\$release_input\/renderer"/);

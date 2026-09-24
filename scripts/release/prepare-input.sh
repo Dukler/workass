@@ -76,10 +76,6 @@ repository_gate() {
     scripts/gate.sh)
 }
 
-release_contracts() {
-  (cd "$repo_root" && node --test scripts/tests/release-pipeline.test.mjs)
-}
-
 verify_gate_receipt() {
   node "$gate_tool" verify --repo "$repo_root" --receipt "$gate_receipt" --commit "$commit"
 }
@@ -141,7 +137,6 @@ write_manifest() {
   node "$input_tool" verify --root "$incoming" --version "$version" --commit "$commit"
 }
 
-workass_release_run_phase release_contracts release_contracts
 if [ -f "$gate_receipt" ] && verify_gate_receipt >/dev/null 2>&1; then
   workass_release_run_phase repository_gate_cached verify_gate_receipt
 else
