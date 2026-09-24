@@ -53,7 +53,7 @@ test('full suite partitions every renderer test across six sequential isolated N
   const codexHostFile = 'codex-native-host.test.mjs';
   assert.deepEqual(scheduled, [...measuredHeavy, ...inventory.filter(name => !measuredHeavy.includes(name) && name !== codexHostFile)]);
   assert.ok(codexHost, 'Codex native host tests have their own command');
-  assert.deepEqual(codexHost.args, ['--test', '--test-isolation=none', '--test-concurrency=4', path.join(scriptTestDir, codexHostFile)]);
+  assert.deepEqual(codexHost.args, [path.join(root, 'scripts/test-native-host-suite.mjs'), path.join(scriptTestDir, codexHostFile)]);
   assert.equal(codexHost.cwd, root);
   assert.equal(codexHost.requireTestReport, true);
   const allScheduledScriptTests = [...scheduled, ...codexHost.args.filter(arg => arg.endsWith('.test.mjs')).map(file => path.basename(file))];
