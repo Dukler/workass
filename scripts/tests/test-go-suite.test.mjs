@@ -75,7 +75,7 @@ test('requested worker capacity is honored without the legacy six-worker clamp',
   const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 8, spawn: tracker.spawn, signalHandlers: false });
   assert.equal(result.ok, true, result.error);
   assert.equal(result.workers, 8);
-  assert.ok(tracker.maximum() >= 1);
+  assert.ok(tracker.maximum() > 3, 'workers beyond the initial three compile jobs take dynamically enqueued tests');
   assert.ok(tracker.maximum() <= 8);
 });
 
@@ -134,7 +134,7 @@ async function fixture(t, { fail = '', delay = '0.04', packageFail = false } = {
   return { root, logs, go: goSource };
 }
 
-function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/chat', 'workass/internal/appinstall', 'workass/internal/two'], noTestPackages = [], failCase = '', packageFail = false, record = () => {}, compileDelayMs = 0, onCompileStart = () => {}, onCompileFinish = () => {}, onPackageStart = () => {}, onTestBinaryStart = () => {} } = {}) {
+function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/internal/acp', 'workass/cmd/workass', 'workass/internal/chat', 'workass/internal/appinstall', 'workass/internal/two'], noTestPackages = [], failCase = '', packageFail = false, record = () => {}, compileDelayMs = 0, compileDelays = {}, failCompile = '', onCompileStart = () => {}, onCompileFinish = () => {}, onPackageStart = () => {}, onTestBinaryStart = () => {} } = {}) {
   let active = 0, maximum = 0;
   const spawn = (command, args, options) => {
     const child = new EventEmitter();
@@ -162,9 +162,11 @@ function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/interna
     if (command === 'go' || path.basename(String(command)).startsWith('fake-go')) {
       if (args[0] === 'test' && args.includes('-c')) {
         const outputDir = args[args.indexOf('-o') + 1];
-        for (const pkg of packages) if (!noTestPackages.includes(pkg)) writeFileSync(path.join(outputDir, `${path.posix.basename(pkg)}.test`), 'fake test binary');
-        onCompileStart(args.at(-1));
-        setTimeout(() => { onCompileFinish(args.at(-1)); finish(0); }, compileDelayMs);
+        const selectedPackages = args.slice(args.indexOf('-o') + 2);
+        const group = selectedPackages.join(',');
+        for (const pkg of selectedPackages) if (packages.includes(pkg) && pkg !== failCompile && !noTestPackages.includes(pkg)) writeFileSync(path.join(outputDir, `${path.posix.basename(pkg)}.test`), 'fake test binary');
+        onCompileStart(group);
+        setTimeout(() => { onCompileFinish(group); finish(failCompile && selectedPackages.includes(failCompile) ? 8 : 0); }, compileDelays[group] ?? compileDelayMs);
         return child;
       }
       if (args[0] === 'list') { finish(0, `${packages.map(pkg => `${pkg}\t${path.join(options.cwd, pkg.replace(/^workass\//, ''))}\t${noTestPackages.includes(pkg) ? 'false' : 'true'}`).join('\n')}\n`); return child; }
@@ -220,7 +222,7 @@ test('fresh matrix covers all four heavy packages once, with unique labels and p
   assert.equal(Object.values(result.heavyPackages).reduce((sum, pkg) => sum + pkg.cases.reduce((n, item) => n + item.nestedRun, 0), 0), names.length * 4);
 });
 
-test('one bounded compile covers every package on every invocation', async t => {
+test('three disjoint bounded compiles cover every package once on every invocation', async t => {
   const f = await fixture(t);
   const cacheDir = path.join(f.root, 'stable-cache');
   const compiles = [];
@@ -228,22 +230,23 @@ test('one bounded compile covers every package on every invocation', async t => 
   const fake = inProcessGoSpawn({ record: (command, args) => {
     if (command === f.go) {
       invocations.push(args);
-      if (args[0] === 'test' && args.includes('-c')) compiles.push({ pkg: args.at(-1), output: args[args.indexOf('-o') + 1] });
+      if (args[0] === 'test' && args.includes('-c')) compiles.push({ pkg: args.slice(args.indexOf('-o') + 2).join(','), output: args[args.indexOf('-o') + 1] });
     }
   } });
   for (let invocation = 0; invocation < 2; invocation++) {
     const result = await runGoSuite({ cwd: f.root, logDir: f.logs, cacheDir, go: f.go, workers: 3, spawn: fake.spawn, signalHandlers: false });
     assert.equal(result.ok, true, result.error);
   }
-  assert.equal(compiles.length, 2, 'all packages compile in one process per suite invocation');
-  assert.ok(compiles.every(item => item.pkg === './...'));
+  assert.equal(compiles.length, 6, 'each of three groups compiles once per invocation');
+  assert.deepEqual(compiles.slice(0, 3).map(item => item.pkg).sort(), ['workass/cmd/workass', 'workass/internal/acp', 'workass/internal/one,workass/internal/chat,workass/internal/appinstall,workass/internal/two'].sort());
   assert.ok(compiles.every(item => item.output === `${cacheDir}${path.sep}`));
   const compileArgs = invocations.filter(args => args[0] === 'test' && args.includes('-c'));
-  assert.equal(compileArgs.length, 2);
-  assert.ok(compileArgs.every(args => args.includes('-p') && args[args.indexOf('-p') + 1] === '3'));
+  assert.equal(compileArgs.length, 6);
+  assert.ok(compileArgs.every(args => args.includes('-p') && args[args.indexOf('-p') + 1] === '1'));
+  for (let i = 0; i < 2; i++) assert.equal(new Set(compileArgs.slice(i * 3, (i + 1) * 3).flatMap(args => args.slice(args.indexOf('-o') + 2))).size, 6);
 });
 
-test('one all-package compile retains stale no-test artifacts but metadata prevents execution', async t => {
+test('three group compiles retain stale no-test artifacts but metadata prevents execution', async t => {
   const f = await fixture(t);
   const cacheDir = path.join(f.root, 'stable-cache');
   await mkdir(cacheDir);
@@ -251,7 +254,7 @@ test('one all-package compile retains stale no-test artifacts but metadata preve
   await writeFile(stale, 'stale binary');
   const compiles = [], executions = [];
   const fake = inProcessGoSpawn({ noTestPackages: ['workass/internal/one'], record: (command, args) => {
-    if (command === f.go && args[0] === 'test' && args.includes('-c')) compiles.push(args.at(-1));
+    if (command === f.go && args[0] === 'test' && args.includes('-c')) compiles.push(args.slice(args.indexOf('-o') + 2).join(','));
     if (String(command).endsWith('.test')) executions.push(command);
   } });
   for (let invocation = 0; invocation < 2; invocation++) {
@@ -259,27 +262,59 @@ test('one all-package compile retains stale no-test artifacts but metadata preve
     assert.equal(result.ok, true, result.error);
     assert.equal(result.packageOutcomes.find(item => item.package === 'workass/internal/one')?.noTestFiles, true);
   }
-  assert.equal(compiles.filter(pkg => pkg === './...').length, 2, 'current no-test metadata is compiler validated in the all-package invocation each run');
+  assert.equal(compiles.length, 6, 'all groups including no-test packages compile on every invocation');
+  assert.equal(compiles.filter(group => group.includes('workass/internal/one')).length, 2, 'no-test package remains in the remaining compiler group on each invocation');
   assert.equal(await readFile(stale, 'utf8'), 'stale binary', 'the compiler may leave stale outputs when a package has no test files');
   const staleRunner = path.join(f.root, `package-${createHash('sha256').update('workass/internal/one').digest('hex').slice(0, 16)}-run.test`);
   assert.ok(!executions.includes(staleRunner), 'current no-test metadata must prevent listing or executing any cached binary');
 });
 
-test('all test execution waits until the single all-package compile finishes', async t => {
+test('a group waits for its own compile while ready ACP tests overlap another blocked group compiler', async t => {
   const f = await fixture(t);
   const events = [];
   const fake = inProcessGoSpawn({
-    compileDelayMs: 60,
+    compileDelays: { 'workass/internal/one,workass/internal/chat,workass/internal/appinstall,workass/internal/two': 100 },
     onCompileStart: pkg => events.push(`compile-start:${pkg}`),
     onCompileFinish: pkg => events.push(`compile-finish:${pkg}`),
     onTestBinaryStart: label => events.push(`test-start:${label}`),
   });
   const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 3, signalHandlers: false, spawn: fake.spawn });
   assert.equal(result.ok, true, result.error);
-  const compileStarted = events.findIndex(event => event.startsWith('compile-start:'));
-  const firstCompileFinished = events.findIndex(event => event.startsWith('compile-finish:'));
-  const firstTest = events.findIndex(event => event.startsWith('test-start:'));
-  assert.ok(compileStarted >= 0 && firstCompileFinished > compileStarted && firstTest > firstCompileFinished, events.join(', '));
+  const remainingGroup = 'workass/internal/one,workass/internal/chat,workass/internal/appinstall,workass/internal/two';
+  const remainingStart = events.indexOf(`compile-start:${remainingGroup}`);
+  const remainingFinish = events.indexOf(`compile-finish:${remainingGroup}`);
+  const acpStart = events.indexOf('compile-start:workass/internal/acp');
+  const acpFinish = events.indexOf('compile-finish:workass/internal/acp');
+  const acpTest = events.findIndex(event => event.startsWith('test-start:acp'));
+  assert.ok(acpStart >= 0 && acpFinish > acpStart && acpTest > acpFinish, events.join(', '));
+  assert.ok(remainingStart >= 0 && remainingFinish > remainingStart && acpTest < remainingFinish, events.join(', '));
+});
+
+test('failed group compilation never lists or runs its stale cached binary', async t => {
+  const f = await fixture(t);
+  const cacheDir = path.join(f.root, 'stable-cache');
+  let fail = false;
+  const executions = [];
+  const fake = inProcessGoSpawn({ failCompile: '', record: (command, args) => {
+    if (String(command).endsWith('.test')) executions.push(String(command));
+  } });
+  const run = () => runGoSuite({ cwd: f.root, logDir: f.logs, cacheDir, go: f.go, workers: 3, spawn: (command, args, options) => {
+    if (fail && command === f.go && args[0] === 'test' && args.includes('-c') && args.includes('workass/internal/acp')) {
+      const failing = inProcessGoSpawn({ failCompile: 'workass/internal/acp' });
+      return failing.spawn(command, args, options);
+    }
+    return fake.spawn(command, args, options);
+  }, signalHandlers: false });
+  assert.equal((await run()).ok, true);
+  executions.length = 0;
+  const stale = path.join(cacheDir, 'acp.test');
+  await writeFile(stale, 'stale ACP binary');
+  fail = true;
+  const result = await run();
+  assert.equal(result.ok, false);
+  assert.match(result.error, /compile-acp failed with exit 8/);
+  assert.equal(await readFile(stale, 'utf8'), 'stale ACP binary');
+  assert.ok(!executions.some(command => command.endsWith(`${path.sep}acp.test`)), 'the failed group does not inspect or execute the old artifact');
 });
 
 test('case failures propagate after other cases run and preserve failure detail', async t => {
@@ -313,8 +348,10 @@ test('race flags follow the Go subcommand for compiled and remaining packages', 
   const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, race: true, workers: 2, signalHandlers: false, spawn: fake.spawn });
   assert.equal(result.ok, true, result.error);
   const compile = invocations.filter(args => args[0] === 'test' && args.includes('-c'));
-  assert.equal(compile.length, 1);
-  assert.ok(compile[0].includes('-race') && compile[0].at(-1) === './...');
+  assert.equal(compile.length, 3);
+  assert.ok(compile.every(args => args.includes('-race')));
+  assert.ok(compile.some(args => args.at(-1) === 'workass/internal/acp'));
+  assert.ok(compile.some(args => args.at(-1) === 'workass/cmd/workass'));
   assert.ok(binaryInvocations.length > 0 && binaryInvocations.every(item => item.env.GOMAXPROCS === '1'));
 });
 

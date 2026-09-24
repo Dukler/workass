@@ -21,8 +21,9 @@ function fakeSpawn(observed, root) {
     if (args[0] === 'list') { finish(0, ['workass/internal/acp', 'workass/cmd/workass', 'workass/internal/cache', 'workass/internal/chat', 'workass/internal/appinstall'].map(pkg => `${pkg}\t${path.join(root, pkg.replace('workass/', ''))}\ttrue`).join('\n') + '\n'); return child; }
     if (args[0] === 'test' && args.includes('-c')) {
       const outputDir = args[args.indexOf('-o') + 1];
-      observed.compiles.push({ outputDir, packages: args.filter(arg => arg.startsWith('workass/') || arg === './...') });
-      const outputs = ['acp', 'workass', 'cache', 'chat', 'appinstall'].map(name => path.join(outputDir, `${name}.test`));
+      const packages = args.slice(args.indexOf('-o') + 2);
+      observed.compiles.push({ outputDir, packages });
+      const outputs = packages.map(pkg => path.join(outputDir, `${path.posix.basename(pkg)}.test`));
       Promise.all(outputs.map(async output => {
         const staging = `${output}.${process.pid}.${Math.random()}.tmp`;
         await writeFile(staging, 'compiled fake binary');
@@ -57,9 +58,15 @@ test('Go binaries compile on every invocation and each run pins its compiled ino
   const results = [];
   for (let i = 0; i < 2; i++) results.push(await runGoSuite({ cwd: root, logDir: logs, cacheDir, workers: 2, spawn, signalHandlers: false }));
   assert.ok(results.every(result => result.ok), results.map(result => result.error).join('; '));
-  assert.equal(observed.compiles.length, 2, 'all test packages compile in one process on every run');
+  assert.equal(observed.compiles.length, 6, 'three disjoint compiler groups run on every suite invocation');
   assert.ok(observed.compiles.every(item => item.outputDir === `${cacheDir}${path.sep}`));
-  assert.ok(observed.compiles.every(item => item.packages.at(-1) === './...'));
+  for (let i = 0; i < 2; i++) {
+    const groups = observed.compiles.slice(i * 3, (i + 1) * 3).map(item => item.packages);
+    assert.deepEqual(groups.map(group => group.length).sort(), [1, 1, 3]);
+    assert.equal(new Set(groups.flat()).size, 5, 'every discovered package, including those outside test execution, compiles exactly once');
+    assert.ok(groups.some(group => group[0] === 'workass/internal/acp'));
+    assert.ok(groups.some(group => group[0] === 'workass/cmd/workass'));
+  }
   assert.equal(observed.executions.length, 20, 'each invocation lists and runs all five packages');
   assert.equal(new Set(observed.executions).size, 10, 'each run executes its own pinned artifact path');
   for (const name of ['acp', 'workass', 'cache', 'chat', 'appinstall']) assert.equal(await readFile(path.join(cacheDir, `${name}.test`), 'utf8'), 'compiled fake binary');
