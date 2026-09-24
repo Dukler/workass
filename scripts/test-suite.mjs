@@ -13,6 +13,9 @@ export function fullSuiteCommands(repo = root) {
   const shellContracts = files(path.join(repo, 'scripts/tests'), /\.test\.sh$/).map(file => ({
     name: `script_contract_${path.basename(file, '.test.sh')}`, command: 'sh', args: [file], cwd: repo,
   }));
+  const scriptTestFiles = files(path.join(repo, 'scripts/tests'), /\.test\.mjs$/);
+  const heavyScriptTests = ['release-pipeline-gates.test.mjs', 'release-pipeline-ship.test.mjs', 'release-pipeline-receipts.test.mjs', 'release-pipeline.test.mjs'];
+  const orderedScriptTests = [...heavyScriptTests.map(name => path.join(repo, 'scripts/tests', name)), ...scriptTestFiles.filter(file => !heavyScriptTests.includes(path.basename(file)))];
   const rendererFiles = files(path.join(repo, 'desktop/renderer2/tests'), /\.test\.ts$/);
   const rendererGroups = Array.from({ length: 6 }, () => []);
   rendererFiles.forEach((file, index) => rendererGroups[index % rendererGroups.length].push(file));
@@ -20,7 +23,7 @@ export function fullSuiteCommands(repo = root) {
     ...rendererGroups.map((group, index) => ({ name: `renderer_tests_${index + 1}`, command: 'node', args: ['--experimental-strip-types', '--test', '--test-isolation=none', '--test-concurrency=1', ...group], cwd: path.join(repo, 'desktop/renderer2'), requireTestReport: true })),
     { name: 'shell_tests', command: 'node', args: ['--test', '--test-concurrency=4', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo, requireTestReport: true },
     { name: 'go_tests', command: 'node', args: [path.join(repo, 'scripts/test-go-suite.mjs'), '--cwd', repo], cwd: repo, requireTestReport: true, requireGoReport: true },
-    { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=6', ...files(path.join(repo, 'scripts/tests'), /\.test\.mjs$/)], cwd: repo, requireTestReport: true },
+    { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=6', ...orderedScriptTests], cwd: repo, requireTestReport: true },
     ...shellContracts,
   ];
 }
