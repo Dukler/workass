@@ -523,40 +523,67 @@ func (m *Manager) startProviderUpdateRun(providerID string, run *providerUpdateR
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	cmd := managedCommandContext(ctx, command.Command, command.Args...)
 	cmd.Dir = m.providerCLIWorkingDir(providerID)
-	stdout, err := cmd.StdoutPipe()
+	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
 		cancel()
 		run.appendOutput("system", "stdout pipe: "+err.Error())
 		m.finishProviderUpdateRun(providerID, run, 1, "failed", "stdout pipe: "+err.Error())
 		return
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, stderrWriter, err := os.Pipe()
 	if err != nil {
+		_ = stdout.Close()
+		_ = stdoutWriter.Close()
 		cancel()
 		run.appendOutput("system", "stderr pipe: "+err.Error())
 		m.finishProviderUpdateRun(providerID, run, 1, "failed", "stderr pipe: "+err.Error())
 		return
 	}
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
 	if err := cmd.Start(); err != nil {
+		_ = stdout.Close()
+		_ = stdoutWriter.Close()
+		_ = stderr.Close()
+		_ = stderrWriter.Close()
 		cancel()
 		run.appendOutput("system", err.Error())
 		m.finishProviderUpdateRun(providerID, run, 1, "failed", err.Error())
 		return
 	}
+	// Keep the parent readers open after cmd.Wait; it may close Cmd-managed
+	// pipes before a scheduled reader consumes the child's final output.
+	_ = stdoutWriter.Close()
+	_ = stderrWriter.Close()
 	run.setStarted(cmd, cancel)
 	var readers sync.WaitGroup
 	readers.Add(2)
 	go func() {
 		defer readers.Done()
+		defer stdout.Close()
 		m.readProviderUpdateOutput(stdout, "stdout", run)
 	}()
 	go func() {
 		defer readers.Done()
+		defer stderr.Close()
 		m.readProviderUpdateOutput(stderr, "stderr", run)
 	}()
 	go func() {
 		err := cmd.Wait()
-		readers.Wait()
+		readersDone := make(chan struct{})
+		go func() {
+			readers.Wait()
+			close(readersDone)
+		}()
+		// A descendant may inherit either writer. Let normal EOF drain without
+		// delay, but bound that inherited-descriptor case as in Bridge.waitChild.
+		select {
+		case <-readersDone:
+		case <-time.After(250 * time.Millisecond):
+			_ = stdout.Close()
+			_ = stderr.Close()
+			<-readersDone
+		}
 		cancel()
 		exitCode := 0
 		status := "done"
