@@ -13,7 +13,7 @@ import process from 'node:process';
 const MAX_ARGUMENT_BYTES = 4 * 1024 * 1024;
 const MAX_CONTEXT_BYTES = 64 * 1024;
 export const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
-const CONNECT_TIMEOUT_MS = 5000;
+const CONNECT_TIMEOUT_MS = 10_000;
 const ENDPOINT_RE = /^https:\/\/tools\.localhost:([0-9]{1,5})\/workass\/tools$/;
 const SECRET_TEXT_RE = /(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:api[_-]?key|token|secret|password|credential)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)/gi;
 const USAGE = 'workass tools --context FILE list [NAME]\nworkass tools --context FILE call NAME [--input FILE]\nCall arguments are one JSON object read from stdin, or --input FILE. Mutations require operation_id; retry only with the same id and arguments.';
@@ -77,6 +77,15 @@ export function parseArguments(raw) {
   return value;
 }
 
+function rawArgumentObject(raw) {
+  let start = raw.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])) ? 3 : 0;
+  let end = raw.length;
+  const whitespace = (byte) => byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d;
+  while (start < end && whitespace(raw[start])) start += 1;
+  while (end > start && whitespace(raw[end - 1])) end -= 1;
+  return raw.subarray(start, end);
+}
+
 export function readConfig(path) {
   let info;
   try { info = lstatSync(path); } catch { info = null; }
@@ -98,7 +107,18 @@ export function doRequest(config, name, call, { signal, requestImpl = httpsReque
   if (!/-----BEGIN CERTIFICATE-----/.test(ca)) return Promise.reject(new ToolError('invalid Workass public certificate'));
   let requestPath = '/workass/tools';
   let body = null;
-  if (call) body = Buffer.from(JSON.stringify({ name: call.name, arguments: call.arguments }), 'utf8');
+  if (call) {
+    // Keep JSON number lexemes intact. JSON.parse rounds integers above 2^53,
+    // while the Go client preserves them with json.Number.
+    const argumentsJSON = Buffer.isBuffer(call.rawArguments)
+      ? call.rawArguments
+      : Buffer.from(JSON.stringify(call.arguments), 'utf8');
+    body = Buffer.concat([
+      Buffer.from(`{"name":${JSON.stringify(call.name)},"arguments":`, 'utf8'),
+      argumentsJSON,
+      Buffer.from('}', 'utf8'),
+    ]);
+  }
   else if (name) requestPath += `?${new URLSearchParams({ name }).toString()}`;
   const headers = {
     Host: `tools.localhost:${port}`,
@@ -206,7 +226,7 @@ export async function run(args, { env = process.env, stdout = process.stdout, st
       } else {
         try { raw = readStdin(); } catch { throw new ToolError('tool arguments are unreadable or exceed 4 MiB'); }
       }
-      call = { name, arguments: parseArguments(raw) };
+      call = { name, arguments: parseArguments(raw), rawArguments: rawArgumentObject(raw) };
       break;
     }
     default: throw new ToolError('unknown tools command: use list or call');
