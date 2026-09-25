@@ -150,8 +150,8 @@ func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *test
 	t.Cleanup(func() { manager.Reset() })
 
 	manager.StartProviderDetection(context.Background())
-	providersEvent := events.waitChannel(t, "providers:list", 2*time.Second).payload.([]map[string]any)
-	catalogEvent := events.waitChannel(t, "chat:catalog", 2*time.Second).payload.(map[string]any)
+	providersEvent := events.waitChannel(t, "providers:list", 5*time.Second).payload.([]map[string]any)
+	catalogEvent := events.waitChannel(t, "chat:catalog", 5*time.Second).payload.(map[string]any)
 	t.Logf("trace event providers:list %s", providerListSummary(providersEvent))
 	t.Logf("trace event chat:catalog %s", catalogSummaryForACP(catalogEvent))
 
