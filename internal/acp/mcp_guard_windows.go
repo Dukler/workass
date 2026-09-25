@@ -3,16 +3,15 @@
 package acp
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unicode/utf16"
+	"unsafe"
 )
 
 const defaultMCPFanoutGuardInterval = 30 * time.Second
@@ -95,69 +94,78 @@ func (m *Manager) guardAcpMCPFanout(reason string) {
 }
 
 func rawMCPDockerChildren(bridges map[int]*Bridge) (map[int][]windowsDockerProcess, error) {
-	ids := make([]string, 0, len(bridges))
-	for pid := range bridges {
-		ids = append(ids, strconv.Itoa(pid))
-	}
-	powershell := "powershell.exe"
-	if resolved, err := exec.LookPath("pwsh.exe"); err == nil {
-		powershell = resolved
-	}
-	script := fmt.Sprintf(`$ErrorActionPreference='SilentlyContinue'; $ids=@(%s); Get-CimInstance Win32_Process -Filter "name = 'docker.exe'" | Where-Object { $ids -contains [int]$_.ParentProcessId } | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress -Depth 3`, strings.Join(ids, ","))
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	cmd := managedCommandContext(ctx, powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
-	var stdout limitedOutputBuffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &limitedOutputBuffer{}
-	if err := cmd.Run(); err != nil && len(bytes.TrimSpace(stdout.Bytes())) == 0 {
+	snapshot, err := syscall.CreateToolhelp32Snapshot(syscall.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
 		return nil, err
 	}
-	if stdout.overflow {
-		return nil, errors.New("Docker MCP process snapshot exceeded 2 MiB")
-	}
-	data := bytes.TrimSpace(stdout.Bytes())
-	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
-		return map[int][]windowsDockerProcess{}, nil
-	}
-	var list []windowsDockerProcess
-	if data[0] == '{' {
-		var one windowsDockerProcess
-		if err := json.Unmarshal(data, &one); err != nil {
-			return nil, err
-		}
-		list = []windowsDockerProcess{one}
-	} else if err := json.Unmarshal(data, &list); err != nil {
-		return nil, err
-	}
+	defer syscall.CloseHandle(snapshot)
+	var entry syscall.ProcessEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
 	out := make(map[int][]windowsDockerProcess)
-	for _, row := range list {
-		if row.ProcessID > 0 && bridges[row.ParentProcessID] != nil && isRawMCPDockerCommandLine(row.CommandLine) {
-			out[row.ParentProcessID] = append(out[row.ParentProcessID], row)
+	for err = syscall.Process32First(snapshot, &entry); err == nil; err = syscall.Process32Next(snapshot, &entry) {
+		parent := int(entry.ParentProcessID)
+		if bridges[parent] == nil || !strings.EqualFold(syscall.UTF16ToString(entry.ExeFile[:]), "docker.exe") {
+			continue
 		}
+		command, commandErr := windowsProcessCommandLine(entry.ProcessID)
+		if commandErr != nil {
+			continue // exited between snapshot and query
+		}
+		row := windowsDockerProcess{ProcessID: int(entry.ProcessID), ParentProcessID: parent, CommandLine: command}
+		if row.ProcessID > 0 && isRawMCPDockerCommandLine(row.CommandLine) {
+			out[parent] = append(out[parent], row)
+		}
+	}
+	if !errors.Is(err, syscall.ERROR_NO_MORE_FILES) {
+		return nil, err
 	}
 	return out, nil
 }
 
-type limitedOutputBuffer struct {
-	buf      bytes.Buffer
-	overflow bool
+var procNtQueryInformationProcess = syscall.NewLazyDLL("ntdll.dll").NewProc("NtQueryInformationProcess")
+
+const (
+	processCommandLineInformation = 60 // PROCESSINFOCLASS, Windows 8.1+
+	statusInfoLengthMismatch      = 0xC0000004
+	maxProcessCommandLineBytes    = 1 << 20
+)
+
+type unicodeString struct {
+	Length        uint16
+	MaximumLength uint16
+	Buffer        *uint16
 }
 
-func (b *limitedOutputBuffer) Write(p []byte) (int, error) {
-	const limit = 2 * 1024 * 1024
-	written := len(p)
-	remaining := limit - b.buf.Len()
-	if remaining <= 0 {
-		b.overflow = true
-		return written, nil
+// windowsProcessCommandLine reads another process's command line with
+// PROCESS_QUERY_LIMITED_INFORMATION only; it never reads process memory.
+func windowsProcessCommandLine(pid uint32) (string, error) {
+	handle, err := syscall.OpenProcess(processQueryLimitedInformation, false, pid)
+	if err != nil {
+		return "", err
 	}
-	if len(p) > remaining {
-		p = p[:remaining]
-		b.overflow = true
+	defer syscall.CloseHandle(handle)
+	size := uint32(4096)
+	for size <= maxProcessCommandLineBytes {
+		buffer := make([]byte, size)
+		var needed uint32
+		status, _, _ := procNtQueryInformationProcess.Call(uintptr(handle), processCommandLineInformation,
+			uintptr(unsafe.Pointer(&buffer[0])), uintptr(size), uintptr(unsafe.Pointer(&needed)))
+		if uint32(status) == statusInfoLengthMismatch {
+			if needed <= size {
+				needed = size * 2
+			}
+			size = needed
+			continue
+		}
+		if status != 0 {
+			return "", fmt.Errorf("NtQueryInformationProcess status 0x%08x", uint32(status))
+		}
+		value := (*unicodeString)(unsafe.Pointer(&buffer[0]))
+		if value.Buffer == nil || value.Length == 0 {
+			return "", nil
+		}
+		units := unsafe.Slice(value.Buffer, int(value.Length)/2)
+		return string(utf16.Decode(units)), nil
 	}
-	_, _ = b.buf.Write(p)
-	return written, nil
+	return "", errors.New("process command line exceeds 1 MiB")
 }
-
-func (b *limitedOutputBuffer) Bytes() []byte { return b.buf.Bytes() }
