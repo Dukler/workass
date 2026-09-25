@@ -83,6 +83,7 @@ test('official Pi SDK preserves provider instructions and tool deltas across fre
 
   const requests = [];
   let serverError;
+  let freshRequestCount=0;
   let releasePause, markPauseStarted;
   const pauseStarted = new Promise(resolve => { markPauseStarted = resolve; });
   server = createServer(async (req,res) => {
@@ -99,7 +100,7 @@ test('official Pi SDK preserves provider instructions and tool deltas across fre
       const body = JSON.parse(bytes);
       assert.equal(body.model,'fixed');
       requests.push(body);
-      const tool = requests.length % 2 === 1;
+      const tool = requests.length === 1 || requests.length === freshRequestCount + 1 && freshRequestCount > 0;
       const delta = tool
         ? {role:'assistant',tool_calls:[{index:0,id:`fixture-call-${requests.length}`,type:'function',function:{name:'fixture_swap',arguments:'{}'}}]}
         : {role:'assistant',content:'fixture complete'};
@@ -144,15 +145,22 @@ test('official Pi SDK preserves provider instructions and tool deltas across fre
   try {
     const admitted=await host.call('_workass/pi/steer',{sessionId:fresh.sessionId,clientUserMessageId:'fixture-steer',prompt:[{type:'text',text:'fixture steer'},{type:'image',data:imageData,mimeType:'image/png'}]});
     assert.ok(admitted.turnId);
+    const second=await host.call('_workass/pi/steer',{sessionId:fresh.sessionId,clientUserMessageId:'fixture-steer-two',prompt:[{type:'text',text:'fixture steer two'},{type:'image',data:imageData,mimeType:'image/png'}]});
+    assert.equal(second.turnId,admitted.turnId);
     assert.equal(host.updates.some(update=>update.sessionUpdate==='_workass_pi_steer_consumed'),false,'queue admission must precede consumption');
   } finally { releasePause(); }
   await freshPrompt;
   assert.ifError(serverError);
-  assert.equal(requests.length,2,'fresh turn must reach the provider, execute the fixture tool, and finish');
+  freshRequestCount=requests.length;
+  assert.ok(freshRequestCount >= 2 && freshRequestCount <= 3,'fresh turn must reach the provider, execute the fixture tool, and finish');
   assert.ok(JSON.stringify(requests[0].messages.filter(message=>message.role==='user')).includes(imageData),`image bytes did not reach the provider request: ${JSON.stringify(requests[0].messages.filter(message=>message.role==='user')).slice(0,1000)}`);
-  const secondUsers=JSON.stringify(requests[1].messages.filter(message=>message.role==='user'));
-  assert.ok(secondUsers.includes('fixture steer') && secondUsers.includes(imageData),'steered text and image did not reach the next provider request');
+  const steeredUsers=requests[freshRequestCount-1].messages.filter(message=>message.role==='user').map(message=>JSON.stringify(message.content));
+  const firstSteer=steeredUsers.findIndex(content=>content.includes('fixture steer')&&!content.includes('fixture steer two'));
+  const secondSteer=steeredUsers.findIndex(content=>content.includes('fixture steer two'));
+  assert.ok(firstSteer>=0&&secondSteer>firstSteer,'two steers did not reach Pi in order');
+  assert.ok(steeredUsers[firstSteer].includes(imageData)&&steeredUsers[secondSteer].includes(imageData),'both steered images must reach their own provider messages');
   assert.equal(host.updates.filter(update=>update.sessionUpdate==='_workass_pi_steer_consumed'&&update.clientUserMessageId==='fixture-steer').length,1,'Pi consumption receipt must follow the native user message');
+  assert.equal(host.updates.filter(update=>update.sessionUpdate==='_workass_pi_steer_consumed'&&update.clientUserMessageId==='fixture-steer-two').length,1,'the second Pi steer needs its own receipt');
   assert.equal(host.updates.filter(update => update.clientUserMessageId === 'fresh-input').length,1);
   await host.call('session/close',{sessionId:fresh.sessionId});
   await host.stop();
@@ -167,7 +175,7 @@ test('official Pi SDK preserves provider instructions and tool deltas across fre
   assert.equal(resumed.sessionId,fresh.sessionId,'resume must retain the exact Pi journal');
   await host.call('session/prompt',{sessionId:fresh.sessionId,prompt:'fixture resumed',clientUserMessageId:'resumed-input'});
   assert.ifError(serverError);
-  assert.equal(requests.length,4,'resume must reach the provider and finish after the fixture tool');
+  assert.equal(requests.length,freshRequestCount+2,'resume must reach the provider and finish after the fixture tool');
   assert.equal(host.updates.filter(update => update.clientUserMessageId === 'resumed-input').length,1);
   await host.call('session/close',{sessionId:fresh.sessionId});
 
@@ -183,14 +191,14 @@ test('official Pi SDK preserves provider instructions and tool deltas across fre
     }
     if (index === 0) assert.ok(tools.has('bash'),'fresh session must retain Pi defaults');
     else assert.ok(tools.has('powershell'),'added/configured PowerShell schema must reach the provider');
-    if (index % 2 === 1) {
+    if (index !== 0 && index !== freshRequestCount) {
       assert.equal(tools.has('bash'),false,'removed built-in tool survived transcript delta');
       assert.equal(tools.has('fixture_removed'),false,'removed extension tool survived transcript delta');
       assert.ok(request.messages.some(message => message.role === 'tool' && message.content.includes('fixture tool state changed')));
     } else assert.ok(tools.has('fixture_removed'),'fresh/resumed extension discovery lost a tool');
     assert.equal(request.messages.filter(message => message.role === 'user').some(message => JSON.stringify(message.content).includes('WORKASS_TOOLS_COMMAND')),false,'bootstrap leaked into user transcript guidance');
   }
-  const resumedUsers = requests[2].messages.filter(message => message.role === 'user').map(message => JSON.stringify(message.content));
+  const resumedUsers = requests[freshRequestCount].messages.filter(message => message.role === 'user').map(message => JSON.stringify(message.content));
   assert.ok(resumedUsers.some(text => text.includes('fixture fresh')),'exact resume lost prior user input');
   assert.ok(resumedUsers.some(text => text.includes('fixture resumed')),'resumed input did not reach provider');
 });

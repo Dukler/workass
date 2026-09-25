@@ -237,7 +237,9 @@ func outboxEntryExecutable(state State, entry OutboxEntry) bool {
 			state.Foreground.LaneID == entry.LaneID && state.Foreground.OperationID == entry.OperationID &&
 			state.Foreground.Status == ForegroundDispatching
 	case EffectSteerTurn:
-		return lane.Phase == LaneRunning && state.PendingSteer != nil &&
+		laneCanSteer := lane.Phase == LaneRunning ||
+			(lane.Phase == LaneCreating && lane.Provision != nil && lane.Creation.DeferredUntilInput && lane.Thread.IsZero() && lane.Attachment != nil)
+		return laneCanSteer && state.PendingSteer != nil &&
 			state.PendingSteer.LaneID == entry.LaneID && state.PendingSteer.OperationID == entry.OperationID &&
 			state.PendingSteer.Status == SteerDispatching
 	case EffectCancelTurn:

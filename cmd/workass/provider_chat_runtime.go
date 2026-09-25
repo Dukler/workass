@@ -2323,7 +2323,8 @@ func steerForegroundTarget(state chat.State, laneID providercontract.LaneID, gen
 		return errors.New("steer session does not own the foreground turn")
 	}
 	lane, ok := state.Lanes[laneID]
-	if !ok || lane.Phase != chat.LaneRunning || lane.ConnectionGeneration != generation || lane.Attachment == nil || strings.TrimSpace(lane.Attachment.ConnectionID) != strings.TrimSpace(sessionID) {
+	provisional := lane.Phase == chat.LaneCreating && lane.Provision != nil && lane.Creation.DeferredUntilInput && lane.Thread.IsZero()
+	if !ok || (lane.Phase != chat.LaneRunning && !provisional) || lane.ConnectionGeneration != generation || lane.Attachment == nil || strings.TrimSpace(lane.Attachment.ConnectionID) != strings.TrimSpace(sessionID) {
 		return errors.New("steer session attachment generation is stale")
 	}
 	if state.PendingSteer != nil {

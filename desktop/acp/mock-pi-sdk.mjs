@@ -52,6 +52,12 @@ export async function createAgentSession({sessionManager:manager}) {
         emit({type:'message_update',assistantMessageEvent:{type:'thinking_delta',delta:'Fixture thinking'}});
         // Tests can steer/cancel before the first assistant creates the journal.
         if(text==='WAIT' || text.includes('[fixture:wait]')) await new Promise(resolve=>{release=resolve});
+        if(text.includes('[fixture:wait-file]')) await new Promise(resolve=>{
+          const marker=path.join(root,`${manager.id}.release`);
+          const watcher=fs.watch(root,(_event,name)=>{if(name===path.basename(marker)&&fs.existsSync(marker)){watcher.close();resolve()}});
+          release=()=>{watcher.close();resolve()};
+          if(fs.existsSync(marker)) release();
+        });
         if (!aborted) for (const steer of steers.splice(0)) end({role:'user',content:[{type:'text',text:steer.text},...steer.images]});
         if(text==='PERMISSION') {
           const choice=await ui.select('Extension guard',['Approve','Deny']);

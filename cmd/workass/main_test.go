@@ -1681,6 +1681,103 @@ func TestWireTraceAppChatSteer(t *testing.T) {
 	}
 }
 
+func TestWirePiImageSteerConsumptionAndArchive(t *testing.T) {
+	root, stateDir, renderer := repoRoot(t), t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(renderer, "index.html"), []byte("<!doctype html><body></body>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hub := wire.NewHub()
+	sessionState := sharedSessionStore(stateDir)
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir,
+		Provider: acp.ProviderConfig{ID: "pi", Command: "node", Args: []string{filepath.Join(root, "scripts", "pi-native-host.mjs")}, CWD: root, Enabled: true,
+			Env: map[string]string{"WORKASS_PI_SDK_MODULE": filepath.Join(root, "desktop", "acp", "mock-pi-sdk.mjs"), "WORKASS_PI_FIXTURE_DIR": stateDir}},
+		DefaultProviderID: "pi", Broadcast: daemonEventBroadcaster(sessionState, hub.Broadcast),
+	})
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir, hub.Broadcast)
+	t.Cleanup(func() { _ = providerChats.Close(context.Background()); manager.Reset() })
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
+	client := dialTestWSHandler(t, httpserve.New(renderer, hub, nil), "/")
+	defer client.conn.Close()
+	const tabID, chatID = "pi-image-wire-tab", "pi-image-wire-chat"
+	const imageData = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAIklEQVR4nGNUSFjAQApgIkk1w6gG4gATkergYFQDMYBkDQCjfQFAXhZ9+QAAAABJRU5ErkJggg=="
+	image := map[string]any{"mimeType": "image/png", "data": imageData, "name": "wire.png"}
+	createWireActorChat(t, client, 100, tabID, chatID, "pi")
+	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": tabID, "chatId": chatID, "providerId": "pi"})
+	sessionReply := client.waitReply(t, 1, 5*time.Second)
+	if sessionReply.Error != nil {
+		t.Fatalf("Pi session: %s", *sessionReply.Error)
+	}
+	sessionID := fieldString(mapFromAnyMain(sessionReply.Result), "sessionId")
+	client.invoke(t, 2, "job:start", map[string]any{
+		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "sessionId": sessionID,
+		"providerId": "pi", "prompt": "[fixture:wait-file] inspect initial image", "images": []any{image},
+		"operationId": "pi-image-turn", "userMessageId": "pi-image-user", "assistantMessageId": "pi-image-assistant",
+	})
+	start := client.waitReply(t, 2, 5*time.Second)
+	if start.Error != nil {
+		t.Fatalf("Pi image start: %s", *start.Error)
+	}
+	jobID := fieldString(mapFromAnyMain(start.Result), "id")
+	startEvent := waitProviderAttachedJobStartEvent(t, client, jobID, "", 5*time.Second)
+	sessionID = fieldString(mapFromAnyMain(startEvent["job"]), "sessionId")
+	client.waitJobEvent(t, jobID, "acp", 5*time.Second)
+	client.invoke(t, 3, "app-chat:steer", map[string]any{
+		"sessionId": sessionID, "prompt": "inspect steered image", "images": []any{image},
+		"clientUserMessageId": "pi-image-steer", "continuationAssistantMessageId": "pi-image-continuation",
+		"boundary": map[string]any{"assistantMessageId": "pi-image-assistant", "deferUntilConsumed": true},
+	})
+	steer := client.waitReply(t, 3, 5*time.Second)
+	if steer.Error != nil {
+		state, _ := providerChats.Snapshot(chatID)
+		t.Fatalf("Pi image steer: %s session=%q foreground=%#v lanes=%#v", *steer.Error, sessionID, state.Foreground, state.Lanes)
+	}
+	accepted := mapFromAnyMain(steer.Result)
+	if accepted["ok"] != true || accepted["receipt"] != true {
+		t.Fatalf("Pi image steer admission = %#v", accepted)
+	}
+	client.invoke(t, 4, "chat:archive-load", tabID)
+	pending := client.waitReply(t, 4, 5*time.Second)
+	if pending.Error != nil {
+		t.Fatalf("pending Pi archive: %s", *pending.Error)
+	}
+	assertWireImage := func(rows []any, id string) map[string]any {
+		t.Helper()
+		for _, raw := range rows {
+			row := mapFromAnyMain(raw)
+			if fieldString(row, "id") != id {
+				continue
+			}
+			images := anySlice(row["images"])
+			if len(images) != 1 || fieldString(mapFromAnyMain(images[0]), "data") != imageData {
+				t.Fatalf("%s image lost across wire/archive: %#v", id, images)
+			}
+			return row
+		}
+		t.Fatalf("missing %s in wire archive", id)
+		return nil
+	}
+	rows := anySlice(pending.Result)
+	assertWireImage(rows, "pi-image-user")
+	pendingSteer := assertWireImage(rows, "pi-image-steer")
+	if fieldString(pendingSteer, "steerState") == "applied" {
+		t.Fatal("Pi queue admission incorrectly marked the steer consumed")
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, sessionID+".release"), []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client.waitJobEvent(t, jobID, "end", 5*time.Second)
+	client.invoke(t, 5, "chat:archive-load", tabID)
+	consumed := client.waitReply(t, 5, 5*time.Second)
+	if consumed.Error != nil {
+		t.Fatalf("consumed Pi archive: %s", *consumed.Error)
+	}
+	finalSteer := assertWireImage(anySlice(consumed.Result), "pi-image-steer")
+	if fieldString(finalSteer, "steerState") != "applied" {
+		t.Fatalf("Pi consumed steer state = %#v", finalSteer)
+	}
+}
+
 func TestWireTraceMockEngineCrashTerminalizesThenNextPromptResumesExactThread(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()
