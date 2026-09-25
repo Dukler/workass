@@ -90,6 +90,13 @@ for sdk_file in sdk.mjs package.json LICENSE.md README.md; do
 done
 cp "$repo_root/scripts/claude-native-host.mjs" "$incoming/claude-native-host.mjs"
 cp "$repo_root/scripts/codex-native-host.mjs" "$incoming/codex-native-host.mjs"
+case "$target" in
+  windows-*)
+    # Windows agents reach Workass tools through signed bundled node.exe.
+    cp "$repo_root/scripts/workass-tools.mjs" "$incoming/workass-tools.mjs"
+    cp "$repo_root/scripts/workass-tools.cmd" "$incoming/workass-tools.cmd"
+    ;;
+esac
 for host in omp-native-host.mjs omp-installed-host.mjs omp-sdk-extension.mjs pi-native-host.mjs; do
   cp "$repo_root/scripts/$host" "$incoming/$host"
 done

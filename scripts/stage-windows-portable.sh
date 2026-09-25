@@ -21,11 +21,12 @@ Builds and stages the portable Windows bundle:
     Workass-X.Y.Z-windows-amd64/
       Workass.exe                    portable Electron executable
       workass-daemon.exe             Go daemon beside the app
-      workass-tools.exe              authenticated short-lived tools client
+      workass-tools.exe              legacy tools client (compatibility only; never launched)
       resources/app/                  Electron shell
       resources/renderer/             built renderer
       node/windows-amd64/node.exe    pinned portable Node (SHA-256 verified)
-      frontier-hosts/windows-amd64/  Claude/Codex native hosts + Agent SDK
+      frontier-hosts/windows-amd64/  Claude/Codex native hosts + Agent SDK +
+                                     workass-tools.cmd/.mjs (tools via signed node)
       manifest.json
     Workass-X.Y.Z-windows-amd64.zip
     SHA256SUMS
@@ -162,6 +163,8 @@ cp "$repo_root/desktop/assets/icon.ico" "$stage/resources/Workass.ico"
 [ -f "$stage/workass-tools.exe" ] || { echo "staged workass-tools.exe missing" >&2; exit 1; }
 [ -f "$stage/frontier-hosts/$target/claude-native-host.mjs" ] || { echo "staged claude host missing" >&2; exit 1; }
 [ -f "$stage/frontier-hosts/$target/codex-native-host.mjs" ] || { echo "staged codex host missing" >&2; exit 1; }
+[ -f "$stage/frontier-hosts/$target/workass-tools.mjs" ] || { echo "staged workass-tools.mjs missing" >&2; exit 1; }
+[ -f "$stage/frontier-hosts/$target/workass-tools.cmd" ] || { echo "staged workass-tools.cmd missing" >&2; exit 1; }
 [ -f "$stage/frontier-hosts/$target/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs" ] || {
   echo "staged Claude Agent SDK missing" >&2; exit 1;
 }

@@ -236,6 +236,8 @@ func main() {
 		logger.Printf("[workass] tls: %v", certErr)
 		os.Exit(1)
 	}
+	// Windows portable releases resolve tools to the signed Node launcher when
+	// its complete bundle is present; older layouts retain the daemon entrypoint.
 	toolsCommand, err := resolveWorkassToolsCommand(currentExecutablePath(), *toolsCommandFlag, *prod, runtime.GOOS)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "workass: resolve tools executable: %v\n", err)
