@@ -694,9 +694,9 @@ if (runsPrimaryRuntime) app.whenReady().then(async () => {
   const updateState = updateManager.init();
   createWindow(viewURL, browserReporter, isController);
   if (process.platform === 'win32' && app.isPackaged) {
-    // The window and health surface come first. Shortcut traversal, PowerShell,
-    // and Explorer cache notification then run in a worker so update recovery
-    // refreshes the desktop icon without delaying or freezing the usable app.
+    // The window and health surface come first. Shortcut icons are then
+    // repaired in-process through Electron's native shell-link API: no
+    // PowerShell, WScript.Shell sweep, or ie4uinit.exe child process.
     void refreshWindowsShortcutIconsAsync({
       platform: process.platform,
       isPackaged: app.isPackaged,
@@ -704,6 +704,8 @@ if (runsPrimaryRuntime) app.whenReady().then(async () => {
       resourcesPath: process.resourcesPath,
       dataRoot: RUNTIME.dataRoot,
       appVersion: APP_VERSION,
+      desktopPath: app.getPath('desktop'),
+      shell,
     }).then((receipt) => {
       console.error(`[shell] Windows icon refresh receipt ${JSON.stringify(receipt)}`);
     });
