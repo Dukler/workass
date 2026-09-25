@@ -28,7 +28,7 @@ func TestPiBridgeSteersNativeSDKWithoutQueueOrInterrupt(t *testing.T) {
 	session := newMockSession(t, manager, "pi-steer-tab")
 	bridge := manager.bridgeForSession(session.SessionID, SessionOptions{SessionID: session.SessionID})
 	capabilities := providerAdapterForID("pi").delivery.Capabilities(bridge)
-	if !capabilities.LiveSteer || capabilities.SteerConsumptionReceipt {
+	if !capabilities.LiveSteer || !capabilities.SteerConsumptionReceipt {
 		t.Fatalf("native Pi steering capabilities = %#v", capabilities)
 	}
 	job := startAppChatJob(t, manager, session.SessionID, "pi-steer-tab", "[fixture:wait]")
@@ -45,7 +45,7 @@ func TestPiBridgeSteersNativeSDKWithoutQueueOrInterrupt(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	result := manager.Steer(session.SessionID, "one direction", nil, "steer-user")
-	if result["ok"] != true || result["live"] != true || result["queued"] != false || result["strategy"] != "pi-live" || asString(result["turnId"]) == "" {
+	if result["ok"] != true || result["live"] != true || result["queued"] != false || result["receipt"] != true || result["strategy"] != "pi-live" || asString(result["turnId"]) == "" {
 		t.Fatalf("native Pi admission = %#v", result)
 	}
 	data, err := os.ReadFile(filepath.Join(state, "calls.jsonl"))
@@ -59,6 +59,53 @@ func TestPiBridgeSteersNativeSDKWithoutQueueOrInterrupt(t *testing.T) {
 	if !manager.CancelJobResult(jobID(job)).Cancelled {
 		t.Fatal("steering must leave the original turn running")
 	}
+	events.waitJobEnd(t, jobID(job), 3*time.Second)
+}
+
+func TestPiBridgeReportsSteerOnlyAfterNativeConsumption(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node unavailable for native host fixture")
+	}
+	root, state := repoRoot(t), t.TempDir()
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root, StateDir: state, Broadcast: events.Broadcast,
+		Provider: ProviderConfig{ID: "pi", Command: node, Args: []string{filepath.Join(root, "scripts", "pi-native-host.mjs")}, CWD: root,
+			Env: map[string]string{"WORKASS_PI_SDK_MODULE": filepath.Join(root, "desktop", "acp", "mock-pi-sdk.mjs"), "WORKASS_PI_FIXTURE_DIR": state}},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	session := newMockSession(t, manager, "pi-consumption-tab")
+	job := startAppChatJob(t, manager, session.SessionID, "pi-consumption-tab", "[fixture:wait]")
+	events.waitFor(t, 3*time.Second, func(ev collectedEvent) bool {
+		if ev.channel != "job:event" {
+			return false
+		}
+		payload, _ := ev.payload.(map[string]any)
+		return payload["id"] == jobID(job) && payload["type"] == "acp"
+	})
+	accepted := manager.Steer(session.SessionID, "first direction", nil, "pi-consumed-user")
+	if accepted["ok"] != true || accepted["receipt"] != true {
+		t.Fatalf("Pi admission = %#v", accepted)
+	}
+	for _, event := range events.jobEvents(jobID(job), "acp") {
+		update, _ := event["event"].(map[string]any)
+		if update["kind"] == "steer-consumed" {
+			t.Fatal("Pi acknowledged a queued steer before consumption")
+		}
+	}
+	released := manager.Steer(session.SessionID, "[fixture:consume]", nil, "pi-release-user")
+	if released["ok"] != true {
+		t.Fatalf("Pi release steer = %#v", released)
+	}
+	events.waitFor(t, 3*time.Second, func(ev collectedEvent) bool {
+		if ev.channel != "job:event" {
+			return false
+		}
+		payload, _ := ev.payload.(map[string]any)
+		update, _ := payload["event"].(map[string]any)
+		return payload["id"] == jobID(job) && update["kind"] == "steer-consumed" && update["clientUserMessageId"] == "pi-consumed-user"
+	})
 	events.waitJobEnd(t, jobID(job), 3*time.Second)
 }
 

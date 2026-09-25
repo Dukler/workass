@@ -101,6 +101,7 @@ export class PiSession {
     Object.assign(this, {sdk,params,notify,peerRequest});
     this.cwd = String(params.cwd || process.cwd());
     this.running = false;
+    this.pendingSteers = [];
   }
   async start(resume) {
     const {SessionManager,DefaultResourceLoader,createAgentSession,getAgentDir} = this.sdk;
@@ -183,11 +184,43 @@ export class PiSession {
     this.update({sessionUpdate:'_workass_input_consumed',clientUserMessageId:this.pendingInput});
     this.pendingInput = null;
   }
+  commitSteers() {
+    if (!this.pendingSteers.some(steer => steer.accepted && steer.message)) return;
+    const file = this.manager.getSessionFile();
+    if (!file || !existsSync(file)) return;
+    const entries = this.manager.getEntries();
+    const candidates = this.pendingSteers.flatMap(steer => {
+      if (!steer.accepted || !steer.message) return [];
+      const entry = entries.find(e => e.type === 'message' && e.message === steer.message);
+      return entry ? [{steer,entry}] : [];
+    });
+    if (!candidates.length) return;
+    const persisted = new Set(readFileSync(file,'utf8').split('\n').flatMap(line => {
+      try { const row = JSON.parse(line); return row.type === 'message' && row.message?.role === 'user' ? [row.id] : []; }
+      catch { return []; }
+    }));
+    for (const {steer,entry} of candidates) {
+      if (!persisted.has(entry.id)) continue;
+      const index = this.pendingSteers.indexOf(steer);
+      if (index < 0) continue;
+      this.pendingSteers.splice(index,1);
+      this.update({sessionUpdate:'_workass_pi_steer_consumed',clientUserMessageId:steer.id});
+    }
+  }
   event(event) {
     if (event.type === 'message_end') {
       if (event.message?.role === 'user' && !this.inputMessage) this.inputMessage = event.message;
+      else if (event.message?.role === 'user') {
+        const blocks = event.message.content;
+        const text = Array.isArray(blocks) ? blocks.filter(block => block?.type === 'text').map(block => block.text).join('') : blocks;
+        const images = Array.isArray(blocks) ? blocks.filter(block => block?.type === 'image') : [];
+        const steer = this.pendingSteers.find(item => !item.message && item.text === text &&
+          item.images.length === images.length && item.images.every((image,index) =>
+            image.data === images[index].data && image.mimeType === images[index].mimeType));
+        if (steer) steer.message = event.message;
+      }
       if (event.message?.role === 'assistant') this.lastAssistant = event.message;
-      queueMicrotask(() => { try { this.commitInput(); } catch (error) { diagnostic(error); } });
+      queueMicrotask(() => { try { this.commitInput(); this.commitSteers(); } catch (error) { diagnostic(error); } });
     } else if (event.type === 'message_update') {
       const d = event.assistantMessageEvent;
       if (d?.type === 'text_delta' || d?.type === 'thinking_delta') this.update({sessionUpdate:d.type === 'text_delta' ? 'agent_message_chunk':'agent_thought_chunk',content:{type:'text',text:String(d.delta || '')}});
@@ -241,16 +274,26 @@ export class PiSession {
       await this.native.prompt(text,{images,source:'rpc',expandPromptTemplates:false});
       await this.native.waitForIdle();
       this.commitInput();
+      this.commitSteers();
       if (this.lastAssistant?.stopReason === 'error') throw new Error(safe(this.lastAssistant.errorMessage || 'Pi model request failed'));
       return {stopReason:this.turnAbort.signal.aborted || this.lastAssistant?.stopReason === 'aborted' ? 'cancelled':'end_turn'};
-    } finally { this.turnAbort.abort(); this.running = false; this.turnId = null; this.pendingInput = null; }
+    } finally { this.turnAbort.abort(); this.running = false; this.turnId = null; this.pendingInput = null; this.pendingSteers = []; }
   }
   async steer(params) {
     if (!this.running || this.turnAbort.signal.aborted || !this.native.isStreaming) throw new Error('Pi has no active turn to steer');
     const {text,images} = promptContent(params.prompt);
     if (!text.trim() && !images.length) throw new Error('Pi steer requires content');
     const turnId = this.turnId;
-    await this.native.steer(text,images,{source:'rpc'});
+    const steer = {id:String(params.clientUserMessageId || ''),text,images,accepted:false,message:null};
+    if (steer.id) this.pendingSteers.push(steer);
+    try { await this.native.steer(text,images,{source:'rpc'}); }
+    catch (error) {
+      const index = this.pendingSteers.indexOf(steer);
+      if (index >= 0) this.pendingSteers.splice(index,1);
+      throw error;
+    }
+    steer.accepted = true;
+    if (steer.id) this.commitSteers();
     return {turnId};
   }
   async cancel() { this.turnAbort?.abort(); await this.native.abort(); }
@@ -286,7 +329,7 @@ export async function servePi({sdkModule,input=process.stdin,output=process.stdo
     });
   };
   const request = async ({method,params={}}) => {
-    if (method === 'initialize') return {protocolVersion:1,agentInfo:{name:'Pi',version:'sdk'},agentCapabilities:{sessionCapabilities:{resume:{},close:{}},promptCapabilities:{image:true},mcpCapabilities:{http:false,sse:false}},authMethods:[],_meta:{workassNativePi:true,workassStableTurnInputV1:true,workassPiSteerRequest:true}};
+    if (method === 'initialize') return {protocolVersion:1,agentInfo:{name:'Pi',version:'sdk'},agentCapabilities:{sessionCapabilities:{resume:{},close:{}},promptCapabilities:{image:true},mcpCapabilities:{http:false,sse:false}},authMethods:[],_meta:{workassNativePi:true,workassStableTurnInputV1:true,workassPiSteerRequest:true,workassPiSteerReceipt:true}};
     if (['session/new','session/resume','session/load'].includes(method)) {
       if (sessions.has(params.sessionId)) throw new Error('Pi session already attached');
       const s = new PiSession(sdk,params,notify,peerRequest);

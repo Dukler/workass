@@ -2490,6 +2490,12 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 	// explicit Stop cannot even persist its cancellation until steering returns.
 	actor.mu.Unlock()
 	actorLocked = false
+	// The accepted steer is already durable, but job events only identify its
+	// foreground job. Other renderers need an actor read to see this user's
+	// text, attachments, and boundary before the provider consumes it.
+	if r.publish != nil {
+		r.publish("agent:apply", map[string]any{"action": "session-refresh"})
+	}
 	_, executeErr := actor.coordinator.ExecuteSteer(ctx, operationID)
 	result, readErr := r.durableSteerReply(actor.engine.Snapshot(), operationID)
 	if readErr != nil {

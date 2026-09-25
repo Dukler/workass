@@ -83,8 +83,15 @@ test('official Pi SDK preserves provider instructions and tool deltas across fre
 
   const requests = [];
   let serverError;
+  let releasePause, markPauseStarted;
+  const pauseStarted = new Promise(resolve => { markPauseStarted = resolve; });
   server = createServer(async (req,res) => {
     try {
+      if (req.url === '/pause') {
+        releasePause = () => { res.writeHead(200); res.end('released'); };
+        markPauseStarted();
+        return;
+      }
       assert.equal(req.method,'POST');
       assert.equal(req.url,'/v1/chat/completions');
       let bytes = '';
@@ -116,7 +123,7 @@ test('official Pi SDK preserves provider instructions and tool deltas across fre
   await writeFile(settingsFile,JSON.stringify(settings));
   await writeFile(path.join(agent,'models.json'),JSON.stringify({providers:{'workass-context-fixture':{
     baseUrl:`http://127.0.0.1:${server.address().port}/v1`,api:'openai-completions',apiKey:'fixture',
-    models:[{id:'fixed',contextWindow:32768,maxTokens:1024}],
+    models:[{id:'fixed',contextWindow:32768,maxTokens:1024,input:['text','image']}],
   }}}));
   const env = {};
   for (const name of ['PATH','HOME','USERPROFILE','SystemRoot','WINDIR','COMSPEC','TEMP','TMP']) {
@@ -125,14 +132,27 @@ test('official Pi SDK preserves provider instructions and tool deltas across fre
   Object.assign(env,{
     PI_CODING_AGENT_DIR:agent,WORKASS_PI_EXECUTABLE:process.env.WORKASS_TEST_PI_EXECUTABLE,
     WORKASS_INSTRUCTIONS_FILE:instructions,WORKASS_TOOLS_COMMAND:path.join(root,'fixture-workass'),
+    WORKASS_TEST_PI_PAUSE_URL:`http://127.0.0.1:${server.address().port}/pause`,
   });
   host = hostClient(env,cwd);
   await host.call('initialize');
   const fresh = await host.call('session/new',{cwd});
   assert.ok(fresh.availableModels.some(model => model.modelId === 'workass-context-fixture/fixed'));
-  await host.call('session/prompt',{sessionId:fresh.sessionId,prompt:'fixture fresh',clientUserMessageId:'fresh-input'});
+  const imageData='iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAIklEQVR4nGNUSFjAQApgIkk1w6gG4gATkergYFQDMYBkDQCjfQFAXhZ9+QAAAABJRU5ErkJggg==';
+  const freshPrompt=host.call('session/prompt',{sessionId:fresh.sessionId,prompt:[{type:'text',text:'fixture fresh'},{type:'image',data:imageData,mimeType:'image/png'}],clientUserMessageId:'fresh-input'});
+  await pauseStarted;
+  try {
+    const admitted=await host.call('_workass/pi/steer',{sessionId:fresh.sessionId,clientUserMessageId:'fixture-steer',prompt:[{type:'text',text:'fixture steer'},{type:'image',data:imageData,mimeType:'image/png'}]});
+    assert.ok(admitted.turnId);
+    assert.equal(host.updates.some(update=>update.sessionUpdate==='_workass_pi_steer_consumed'),false,'queue admission must precede consumption');
+  } finally { releasePause(); }
+  await freshPrompt;
   assert.ifError(serverError);
   assert.equal(requests.length,2,'fresh turn must reach the provider, execute the fixture tool, and finish');
+  assert.ok(JSON.stringify(requests[0].messages.filter(message=>message.role==='user')).includes(imageData),`image bytes did not reach the provider request: ${JSON.stringify(requests[0].messages.filter(message=>message.role==='user')).slice(0,1000)}`);
+  const secondUsers=JSON.stringify(requests[1].messages.filter(message=>message.role==='user'));
+  assert.ok(secondUsers.includes('fixture steer') && secondUsers.includes(imageData),'steered text and image did not reach the next provider request');
+  assert.equal(host.updates.filter(update=>update.sessionUpdate==='_workass_pi_steer_consumed'&&update.clientUserMessageId==='fixture-steer').length,1,'Pi consumption receipt must follow the native user message');
   assert.equal(host.updates.filter(update => update.clientUserMessageId === 'fresh-input').length,1);
   await host.call('session/close',{sessionId:fresh.sessionId});
   await host.stop();
@@ -141,6 +161,7 @@ test('official Pi SDK preserves provider instructions and tool deltas across fre
   // allowlist may remove extension tools or replace the chosen shell tool.
   settings.defaultTools = ['read','powershell','edit','write'];
   await writeFile(settingsFile,JSON.stringify(settings));
+  env.WORKASS_TEST_PI_PAUSE_URL='';
   host = hostClient(env,cwd);
   const resumed = await host.call('session/resume',{cwd,sessionId:fresh.sessionId});
   assert.equal(resumed.sessionId,fresh.sessionId,'resume must retain the exact Pi journal');

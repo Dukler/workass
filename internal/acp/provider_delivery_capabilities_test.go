@@ -54,6 +54,7 @@ func TestDeliveryStrategyProjectsNegotiatedSteerSemantics(t *testing.T) {
 		},
 		{name: "missing handshake is unsupported", strategy: genericACPDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities()},
 		{name: "native OMP requires acknowledged SDK steering", strategy: ompDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities("workassOMPSteerRequest"), live: true},
+		{name: "Pi reports durable steer consumption separately from queue admission", strategy: piDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities("workassPiSteerRequest", "workassPiSteerReceipt"), live: true, steerReceipt: true},
 		{name: "old OMP host cannot inherit generic steering", strategy: ompDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities("sessionSteer")},
 		{name: "Devin explicitly supports stop and send without live steering", strategy: devinDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities(), stopAndSend: true},
 		{name: "Devin real live steering takes precedence", strategy: devinDeliveryStrategy{}, bridge: bridgeWithDeliveryCapabilities("sessionSteer"), live: true},

@@ -59,6 +59,43 @@ function chat(id: string, rows: Msg[]): Chat {
   } as Chat;
 }
 
+test('opening a byte-bounded recent tail fetches the missing user image and steer row', async () => {
+  const image = { mimeType: 'image/png', data: 'aGVsbG8=' };
+  const complete = [
+    { ...messages(1)[0], id: 'root-user' },
+    { ...messages(2)[1], id: 'root-assistant' },
+    { ...messages(1)[0], id: 'steer-user', content: 'see image', steerState: 'applied', images: [image] },
+    { ...messages(2)[1], id: 'steer-assistant' },
+  ] as Msg[];
+  const previousWindow = (globalThis as any).window;
+  const reads: Array<{ beforeMessageId?: string; tail?: number }> = [];
+  (globalThis as any).window = {
+    api: { archiveLoad: async (_tabId: string, options: { beforeMessageId?: string; tail?: number }) => {
+      reads.push(options);
+      if (options.beforeMessageId === 'steer-assistant') return [complete[2]];
+      if (options.beforeMessageId === 'steer-user') return complete.slice(0, 2);
+      return [complete[3]]; // 8 MiB expanded-image budget split the tail.
+    } },
+  };
+  try {
+    const subject = ownStore(new StoreCtor());
+    const target = chat('tab-image-tail', [complete[3]]);
+    target.messageCount = complete.length;
+    target.historyComplete = false;
+    subject.state.chats = [target];
+    subject.state.activeId = null;
+    subject.switchChat(target.id);
+    await subject.recentHistoryLoads.get(target.id);
+    assert.deepEqual(target.messages.map((row) => row.id), complete.map((row) => row.id));
+    assert.deepEqual(target.messages[2].images, [image]);
+    assert.equal(target.messages[2].steerState, 'applied');
+    assert.deepEqual(reads.map((options) => options.beforeMessageId), [undefined, 'steer-assistant', 'steer-user']);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
 test('switching chats keeps a bounded recent tail and loads the full ledger only on demand', async () => {
   const complete = messages(85);
   const previousWindow = (globalThis as any).window;

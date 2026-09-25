@@ -88,14 +88,15 @@ test('deferred journal receipt, exact restart resume, instructions and write fai
   const other=run(t,dir);await assert.rejects(other.call('session/resume',{cwd:path.dirname(dir),sessionId:s.sessionId}),/identity mismatch/);
 });
 test('single native steer accepts text/images without materializing, restarting or queueing the turn',async t=>{
-  const dir=await setup(t),h=run(t,dir),init=await h.call('initialize');assert.equal(init._meta.workassPiSteerRequest,true);
+  const dir=await setup(t),h=run(t,dir),init=await h.call('initialize');assert.equal(init._meta.workassPiSteerRequest,true);assert.equal(init._meta.workassPiSteerReceipt,true);
   const s=await h.call('session/new',{cwd:dir}),sessionId=s.sessionId;
-  const params={sessionId,prompt:[{type:'text',text:'one direction'},{type:'image',data:'aW1hZ2U=',mimeType:'image/png'}]};
+  const params={sessionId,clientUserMessageId:'image-steer',prompt:[{type:'text',text:'one direction'},{type:'image',data:'aW1hZ2U=',mimeType:'image/png'}]};
   await assert.rejects(h.call('_workass/pi/steer',params),/no active turn/);
   let ended=false;const active=h.call('session/prompt',{sessionId,prompt:'WAIT',clientUserMessageId:'initial'}).then(r=>{ended=true;return r});
   await h.wait(x=>x.params?.update?.sessionUpdate==='agent_thought_chunk');
   assert.ok(!h.out.some(x=>x.params?.update?.clientUserMessageId==='initial'));
   const first=await h.call('_workass/pi/steer',params);assert.ok(first.turnId);
+  assert.ok(!h.out.some(x=>x.params?.update?.clientUserMessageId==='image-steer'),'queue admission is not consumption');
   assert.equal(ended,false);
   const calls=(await readFile(path.join(dir,'calls.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
   assert.deepEqual(calls,[{method:'steer',text:'one direction',images:[{type:'image',data:'aW1hZ2U=',mimeType:'image/png'}]}]);
@@ -103,8 +104,22 @@ test('single native steer accepts text/images without materializing, restarting 
   await assert.rejects(h.call('session/prompt',{sessionId,prompt:'duplicate'}),/active prompt/);
   assert.equal((await h.call('_workass/pi/steer',{sessionId,prompt:'second'})).turnId,first.turnId);
   h.send({method:'session/cancel',params:{sessionId}});assert.equal((await active).stopReason,'cancelled');
+  assert.ok(!h.out.some(x=>x.params?.update?.clientUserMessageId==='image-steer'),'cancelled queued steer was not consumed');
   assert.equal(h.out.filter(x=>x.params?.update?.clientUserMessageId==='initial').length,1);
   await assert.rejects(h.call('_workass/pi/steer',params),/no active turn/);
+});
+test('Pi steer receipt follows matching persisted user message and preserves images',async t=>{
+  const dir=await setup(t),h=run(t,dir),s=await h.call('session/new',{cwd:dir});
+  const active=h.call('session/prompt',{sessionId:s.sessionId,prompt:'WAIT',clientUserMessageId:'initial'});
+  await h.wait(x=>x.params?.update?.sessionUpdate==='agent_thought_chunk');
+  await h.call('_workass/pi/steer',{sessionId:s.sessionId,clientUserMessageId:'image-steer',prompt:[{type:'text',text:'see this'},{type:'image',data:'aW1hZ2U=',mimeType:'image/png'}]});
+  assert.ok(!h.out.some(x=>x.params?.update?.clientUserMessageId==='image-steer'));
+  await h.call('_workass/pi/steer',{sessionId:s.sessionId,clientUserMessageId:'release-steer',prompt:'[fixture:consume]'});
+  await active;
+  await h.wait(x=>x.params?.update?.sessionUpdate==='_workass_pi_steer_consumed'&&x.params.update.clientUserMessageId==='image-steer');
+  assert.equal(h.out.filter(x=>x.params?.update?.sessionUpdate==='_workass_pi_steer_consumed'&&x.params.update.clientUserMessageId==='image-steer').length,1);
+  const journal=await readFile(path.join(dir,`${s.sessionId}.jsonl`),'utf8');
+  assert.ok(journal.includes('aW1hZ2U='));
 });
 test('native model/effort controls, extension tools/guards, compaction, usage and model errors',async t=>{
   const dir=await setup(t),h=run(t,dir),s=await h.call('session/new',{cwd:dir}),sessionId=s.sessionId;

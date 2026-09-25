@@ -106,6 +106,61 @@ function remoteSubject(nextMirror: () => Mirror | Promise<Mirror>, ownsLink: () 
   return subject;
 }
 
+test('remote actor revisions recover steered rows and both user and assistant images', async () => {
+  let current = mirror([
+    { id: 'user-1', role: 'user', content: 'start', status: 'done', at: '2026-08-19T12:00:00Z', events: [] },
+    { id: 'assistant-1', role: 'assistant', content: 'working', status: 'running', at: null, jobId: 'job-1', events: [] },
+  ]);
+  let sessionReads = 0;
+  const subject = remoteSubject(() => { sessionReads++; return current; });
+  await subject.hydrateMachine(MACHINE);
+  const originalLink = subject.machines.linkFor(MACHINE);
+  const image = { mimeType: 'image/png', data: 'aGVsbG8=' };
+  let actorRevision = 2;
+  const digest = () => ({
+    chats: [{
+      tabId: 'tab-remote', chatId: 'chat-remote', actorRevision,
+      presentationRevision: 1, runningJobId: 'job-1', lastMessageId: 'assistant-2',
+      messageCount: 4, queueLen: 0, queueHeadId: null,
+      agentQueueRevision: 0, runtimeControlRevision: 0,
+      providerId: 'codex', currentModelId: 'gpt-test', currentModeId: 'agent',
+      pendingPermissionIds: [],
+    }],
+    globalRevision: 0, catalogHash: {}, settingsRevision: '', procHash: '',
+  });
+  subject.machines.linkFor = () => ({
+    invoke: (channel: string) => channel === 'state:digest' ? Promise.resolve(digest()) : originalLink.invoke(channel),
+  });
+  subject.machines.ownsLink = () => true;
+  current = mirror([
+    { id: 'user-1', role: 'user', content: 'start', status: 'done', at: '2026-08-19T12:00:00Z', events: [] },
+    { id: 'assistant-1', role: 'assistant', content: 'working', status: 'running', at: null, jobId: 'job-1', events: [] },
+    { id: 'steer-1', role: 'user', content: 'look here', status: 'done', steerState: 'applied', at: '2026-08-19T12:00:01Z', images: [image], events: [] },
+    { id: 'assistant-2', role: 'assistant', content: 'found it', status: 'running', at: null, jobId: 'job-1', images: [image], events: [] },
+  ], { actorRevision: 2 });
+
+  subject.probeRemoteStateDigest(MACHINE);
+  await subject.remoteDigestProbes.get(MACHINE);
+  const rows = subject.chat(TAB).messages as Msg[];
+  assert.equal(sessionReads, 2);
+  assert.equal(rows.find((row) => row.id === tagId(MACHINE, 'steer-1'))?.steerState, 'applied');
+  assert.deepEqual(rows.find((row) => row.id === tagId(MACHINE, 'steer-1'))?.images, [image]);
+  assert.deepEqual(rows.find((row) => row.id === tagId(MACHINE, 'assistant-2'))?.images, [image]);
+
+  subject.probeRemoteStateDigest(MACHINE);
+  await subject.remoteDigestProbes.get(MACHINE);
+  assert.equal(sessionReads, 2, 'an unchanged actor revision must not reload image bodies');
+
+  actorRevision = 3;
+  current = mirror(current.chats[0].messages.map((row) => row.id === 'assistant-2'
+    ? { ...row, images: [{ mimeType: 'image/png', data: 'd29ybGQ=' }] }
+    : row), { actorRevision });
+  subject.probeRemoteStateDigest(MACHINE);
+  await subject.remoteDigestProbes.get(MACHINE);
+  assert.equal(sessionReads, 3, 'image changes need a read even when message count is unchanged');
+  assert.equal(subject.chat(TAB).messages.at(-1)?.images?.[0]?.data, 'd29ybGQ=');
+});
+
 test('remote save conflicts read the owning machine and converge without reloading the local session', async () => {
   for (const kind of ['queue', 'presentation', 'controls'] as const) {
     let remoteReads = 0;
