@@ -120,7 +120,7 @@ test('remote actor revisions recover steered rows and both user and assistant im
   const digest = () => ({
     chats: [{
       tabId: 'tab-remote', chatId: 'chat-remote', actorRevision,
-      presentationRevision: 1, runningJobId: 'job-1', lastMessageId: 'assistant-2',
+      presentationRevision: 1, runningJobId: actorRevision >= 4 ? null : 'job-1', lastMessageId: 'assistant-2',
       messageCount: 4, queueLen: 0, queueHeadId: null,
       agentQueueRevision: 0, runtimeControlRevision: 0,
       providerId: 'codex', currentModelId: 'gpt-test', currentModeId: 'agent',
@@ -159,6 +159,14 @@ test('remote actor revisions recover steered rows and both user and assistant im
   await subject.remoteDigestProbes.get(MACHINE);
   assert.equal(sessionReads, 3, 'image changes need a read even when message count is unchanged');
   assert.equal(subject.chat(TAB).messages.at(-1)?.images?.[0]?.data, 'd29ybGQ=');
+
+  actorRevision = 4;
+  current = mirror(current.chats[0].messages.map((row) => row.role === 'assistant'
+    ? { ...row, status: 'done' }
+    : row), { actorRevision });
+  subject.probeRemoteStateDigest(MACHINE);
+  await subject.remoteDigestProbes.get(MACHINE);
+  assert.equal(subject.isChatRunning(TAB), false, 'terminal remote actor revision must clear stale steering controls');
 });
 
 test('remote save conflicts read the owning machine and converge without reloading the local session', async () => {
