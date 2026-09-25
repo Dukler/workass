@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestResolveWorkassToolsCommandUsesDaemonWithoutSibling(t *testing.T) {
+func TestResolveWorkassToolsCommandUsesDaemonForLegacyWindowsLayouts(t *testing.T) {
 	dir := t.TempDir()
 	daemon := filepath.Join(dir, "workass-daemon.exe")
 	tools := filepath.Join(dir, "workass-tools.exe")
@@ -25,6 +25,50 @@ func TestResolveWorkassToolsCommandUsesDaemonWithoutSibling(t *testing.T) {
 				t.Fatalf("helper present=%v, prod=%v: resolved %q, %v; want %q", present, prod, got, err, daemon)
 			}
 		}
+	}
+}
+
+func TestResolveWorkassToolsCommandUsesSignedNodeLauncherOnlyForCompleteWindowsLayout(t *testing.T) {
+	dir := t.TempDir()
+	daemon := filepath.Join(dir, "workass-daemon.exe")
+	if err := os.WriteFile(daemon, []byte("daemon"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(dir, windowsToolsLauncher.launcher)
+	client := filepath.Join(dir, windowsToolsLauncher.client)
+	node := filepath.Join(dir, windowsToolsLauncher.node)
+	for _, file := range []string{launcher, client, node} {
+		if got, err := resolveWorkassToolsCommand(daemon, "", true, "windows"); err != nil || got != daemon {
+			t.Fatalf("incomplete bundle selected %q, %v; want legacy daemon %q", got, err, daemon)
+		}
+		if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte("fixture"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, prod := range []bool{false, true} {
+		got, err := resolveWorkassToolsCommand(daemon, "", prod, "windows")
+		if err != nil || got != launcher {
+			t.Fatalf("complete bundle prod=%v resolved %q, %v; want launcher %q", prod, got, err, launcher)
+		}
+	}
+	explicit := filepath.Join(dir, "dev-tools")
+	if err := os.WriteFile(explicit, []byte("dev"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := resolveWorkassToolsCommand(daemon, explicit, false, "windows"); err != nil || got != explicit {
+		t.Fatalf("explicit dev override resolved %q, %v; want %q", got, err, explicit)
+	}
+	if got, err := resolveWorkassToolsCommand(daemon, explicit, true, "windows"); err != nil || got != launcher {
+		t.Fatalf("production override resolved %q, %v; want launcher %q", got, err, launcher)
+	}
+	if err := os.Remove(client); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := resolveWorkassToolsCommand(daemon, "", true, "windows"); err != nil || got != daemon {
+		t.Fatalf("bundle missing client resolved %q, %v; want legacy daemon %q", got, err, daemon)
 	}
 }
 
