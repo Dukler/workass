@@ -38,7 +38,7 @@ for (const target of ['darwin-arm64', 'windows-amd64']) {
       const fixtureHash = crypto.createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
       fixtureStager = fixtureStager.replace(/claude_sdk_sha256=[a-f0-9]{64}/, `claude_sdk_sha256=${fixtureHash}`);
       fs.writeFileSync(path.join(fixtureScripts, 'vendor-frontier-hosts.sh'), fixtureStager);
-      for (const file of ['claude-native-host.mjs', 'codex-native-host.mjs', 'omp-native-host.mjs', 'omp-installed-host.mjs', 'omp-sdk-extension.mjs', 'pi-native-host.mjs']) {
+      for (const file of ['claude-native-host.mjs', 'codex-native-host.mjs', 'omp-native-host.mjs', 'omp-installed-host.mjs', 'omp-sdk-extension.mjs', 'pi-native-host.mjs', 'workass-tools.mjs', 'workass-tools.cmd']) {
         fs.copyFileSync(path.join('scripts', file), path.join(fixtureScripts, file));
       }
       let nodeStager = fs.readFileSync('scripts/vendor-node-runtime.sh', 'utf8');
@@ -64,6 +64,14 @@ for (const target of ['darwin-arm64', 'windows-amd64']) {
       fs.writeFileSync(path.join(old, 'stale'), 'must disappear');
       execFileSync('sh', [path.join(fixtureScripts, 'vendor-frontier-hosts.sh'), '--target', target, '--output-root', root, '--offline']);
       const staged = path.join(root, target);
+      if (target === 'windows-amd64') {
+        for (const file of ['workass-tools.mjs', 'workass-tools.cmd']) {
+          assert.equal(fs.readFileSync(path.join(staged, file), 'utf8'), fs.readFileSync(path.join('scripts', file), 'utf8'));
+        }
+      } else {
+        assert.ok(!fs.existsSync(path.join(staged, 'workass-tools.mjs')));
+        assert.ok(!fs.existsSync(path.join(staged, 'workass-tools.cmd')));
+      }
       for (const provider of ['claude', 'codex', 'omp']) assert.ok(fs.existsSync(path.join(staged, `${provider}-native-host.mjs`)));
       assert.ok(fs.existsSync(path.join(staged, 'omp-sdk-extension.mjs')));
       assert.ok(fs.existsSync(path.join(staged, 'omp-installed-host.mjs')));

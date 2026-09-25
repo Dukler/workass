@@ -205,6 +205,8 @@ test('candidate receipt binds both archives, both feeds, input, version, and com
     'workass-tools.exe',
     'resources/renderer/index.html',
     'node/windows-amd64/node.exe',
+    'frontier-hosts/windows-amd64/workass-tools.mjs',
+    'frontier-hosts/windows-amd64/workass-tools.cmd',
     'frontier-hosts/windows-amd64/claude-native-host.mjs',
     'frontier-hosts/windows-amd64/codex-native-host.mjs',
     'frontier-hosts/windows-amd64/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs',
