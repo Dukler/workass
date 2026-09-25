@@ -31,6 +31,19 @@ changes. Do not rewrite unchanged provider controls or chat obligations, copy
 committed chat history for periodic obligation checks, or repeatedly resolve
 already-imported assistant images during streaming.
 
+User law 2026-09-25 (Windows endpoint protection): production Windows provider
+tools use the signed bundled Node runtime and Workass tools client; never launch
+the unsigned Workass Go PE as a transient shell CLI. The signed Node shim is
+the only new Windows-layout exception. Legacy layouts use the in-process
+daemon entrypoint. Do not use tasklist or PowerShell process-query loops for
+RSS sampling or the raw-MCP guard, and do not sweep shortcuts through
+PowerShell, WScript, or ie4uinit. Preserve tool capabilities, security checks,
+the frozen protocol, and package compatibility. On the San-laptop Windows
+development machine, do not build or run unsigned Go executables or tests; use
+the Mac development machine or Windows CI. This policy does not guarantee
+CrowdStrike approval or establish that all alerts are fixed. LAN peer discovery
+and updater behavior are unchanged; related design options remain outstanding.
+
 Status: v1 (2026-07-09, Fable). The wire-contract inventory (§2b) is produced
 by an extraction lane and reviewed before P1 starts; everything else here is
 final unless the user changes scope.

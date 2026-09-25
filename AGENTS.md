@@ -94,6 +94,21 @@ scope. Log suggestions separately; do not act on them.
   NEVER a test oracle.
 - Do not modify files outside your lane's declared manifest.
 
+## Windows endpoint-protection constraints
+- Production Windows provider tools use the signed bundled Node runtime and
+  Workass tools client. Never launch the unsigned Workass Go PE as a transient
+  shell CLI. The signed Node shim is the sole new Windows-layout exception;
+  legacy layouts use the in-process daemon entrypoint.
+- Do not use tasklist or PowerShell process-query loops for RSS sampling or the
+  raw-MCP guard. Do not sweep shortcuts through PowerShell, WScript, or
+  ie4uinit. Preserve the existing tool capabilities, frozen LAN protocol,
+  security checks, and package compatibility.
+- On the San-laptop Windows development machine, do not build or run unsigned
+  Go executables or tests. Use the Mac development machine or Windows CI.
+- These constraints do not establish CrowdStrike approval or prove that all
+  endpoint-protection alerts are resolved. LAN peer-discovery and updater
+  behavior are unchanged by this lane; related design options remain open.
+
 ## Internal evidence and final handoff
 - Keep exact commands and their complete output in Workass's internal tool/event
   history and existing profile/build logs. Do not repeat raw receipts in the

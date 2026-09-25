@@ -12,13 +12,27 @@ environment; paths quoted in earlier conversation turns expire when their
 attachment closes. Generic ACP prompts and native instructions both use this
 process binding. Do not guess the machine, active chat, or context file.
 
-In production, the executable is the running Workass daemon itself. Its `tools`
-subcommand dispatches before daemon startup. No sibling helper is selected or
-retried. Development may supply an explicit absolute `--tools-command` override;
-production ignores that override. The standalone helper remains packaged for
-compatibility with older Windows updaters, but is no longer a runtime dependency.
-New Windows installer and updater validators accept its absence and check its
-executable format when it is present.
+On production Windows, providers invoke the signed bundled Node runtime through
+the `workass-tools.cmd` shim and its packaged `workass-tools.mjs` client. The
+client makes the same authenticated request and preserves the tool catalog,
+argument validation, context ownership, redaction, and security checks. Do not
+launch the unsigned Workass Go PE as a transient shell CLI. This signed Node
+shim is the only new Windows-layout exception. Older Windows layouts without
+the shim continue using the in-process daemon tools entrypoint; do not search
+for or retry a sibling executable. Other production layouts use the running
+daemon's early `tools` dispatch. Development may supply an explicit absolute
+`--tools-command` override; production ignores that override. Retain the legacy
+standalone helper where package compatibility requires it, but never select it
+as a runtime fallback.
+
+On the San-laptop Windows development machine, do not build or run unsigned Go
+executables or tests; use the Mac development machine or Windows CI. Windows
+RSS sampling and the raw-MCP guard must not use tasklist or PowerShell
+process-query loops. Shortcut discovery and icon repair must not use a
+PowerShell or WScript sweep, or launch ie4uinit. These constraints do not
+guarantee CrowdStrike approval and do not establish that every alert is fixed.
+They do not change LAN peer discovery or updater behavior; related design
+options remain outstanding.
 
 ```sh
 "$WORKASS_TOOLS_COMMAND" tools guide
