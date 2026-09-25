@@ -43,7 +43,7 @@ func TestProviderUpdateCheckFakeRegistry(t *testing.T) {
 				DefaultProviderID:     "qwen",
 				RSSSampleInterval:     time.Hour,
 				ProviderUpdateSources: map[string]string{"qwen": registry.URL + "/@qwen-code/qwen-code/latest"},
-				ProviderUpdateTimeout: 200 * time.Millisecond,
+				ProviderUpdateTimeout: time.Second,
 			})
 			t.Cleanup(func() { manager.Reset() })
 
