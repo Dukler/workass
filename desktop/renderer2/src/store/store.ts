@@ -522,6 +522,7 @@ export class Store {
   private settingsSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private monitor?: ConnectionMonitor;
   private agentRefresh: Promise<void> = Promise.resolve();
+  private digestProbeDirty = false;
   // A workass_focus_chat call is an explicit, one-shot UI intent. Keep it
   // separate from the daemon snapshot's activeId: periodic hydration must
   // preserve the user's local selection, while this exact tab+chat pair must
@@ -2122,11 +2123,20 @@ export class Store {
   }
 
   private probeStateDigest(bridge: NonNullable<typeof window.api>) {
-    if (this.digestProbe || typeof bridge.stateDigest !== 'function') return;
-    this.digestProbe = this.readStateDigest(bridge)
-      .then(() => undefined)
+    if (typeof bridge.stateDigest !== 'function') return;
+    this.digestProbeDirty = true;
+    if (this.digestProbe) return;
+    this.digestProbe = (async () => {
+      while (this.digestProbeDirty) {
+        this.digestProbeDirty = false;
+        await this.readStateDigest(bridge);
+      }
+    })()
       .catch(() => undefined)
-      .finally(() => { this.digestProbe = null; });
+      .finally(() => {
+        this.digestProbe = null;
+        if (this.digestProbeDirty) this.probeStateDigest(bridge);
+      });
   }
 
   private async readStateDigest(bridge: NonNullable<typeof window.api>): Promise<unknown> {
@@ -2909,7 +2919,8 @@ export class Store {
     // replace the mirror. Directly scheduling a session pull here made every
     // renderer save echo back as a wholesale hydration.
     // A genuine reconnection is still driven by the socket-open path below.
-    if (this.monitor) this.monitor.probeNow();
+    const bridge = typeof window !== 'undefined' ? window.api : undefined;
+    if (this.monitor && bridge) this.probeStateDigest(bridge);
     else this.scheduleScopedSync(['session', 'permissions']);
   }
 

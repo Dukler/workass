@@ -505,6 +505,108 @@ test('a stale remote hydration cannot erase a chat after its durable create rece
   });
 });
 
+test('a local session refresh during a digest probe picks up an agent-created chat', async () => {
+  const existing = chat('tab-local');
+  const subject = subjectWithChats([existing]);
+  const created = chat('tab-622b2b358a765534627ef683', {
+    chatId: 'chat-7c0ae4712f2ec5945ab66305',
+    title: 'Sidebar refresh probe',
+  });
+  const staleGlobalRevision = subject.state.globalRevision ?? 0;
+  let committedMirror = subject.toMirror(false) as Mirror;
+  let committedGlobalRevision = staleGlobalRevision;
+  let digestCalls = 0;
+  let createCalls = 0;
+  let syncCalls = 0;
+  let hydrationCalls = 0;
+  let resolveFirstDigest!: (value: unknown) => void;
+  let signalFirstDigestStarted!: () => void;
+  let signalSecondDigestStarted!: () => void;
+  let signalSyncFinished!: () => void;
+  const firstDigestStarted = new Promise<void>((resolve) => { signalFirstDigestStarted = resolve; });
+  const secondDigestStarted = new Promise<void>((resolve) => { signalSecondDigestStarted = resolve; });
+  const syncFinished = new Promise<void>((resolve) => { signalSyncFinished = resolve; });
+
+  const digestFor = (chats: Chat[], globalRevision: number) => ({
+    chats: chats.map((row) => ({
+      tabId: row.id,
+      chatId: row.chatId!,
+      runningJobId: null,
+      lastMessageId: null,
+      messageCount: 0,
+      queueLen: 0,
+      queueHeadId: null,
+      agentQueueRevision: 0,
+      runtimeControlRevision: 0,
+      providerId: row.providerId ?? null,
+      currentModelId: row.currentModelId ?? null,
+      currentModeId: row.currentModeId ?? null,
+      pendingPermissionIds: [],
+    })),
+    globalRevision,
+    catalogHash: {},
+    settingsRevision: '',
+    procHash: '',
+  });
+
+  await withWindowApi({
+    chatCreate: async (opts: any) => {
+      createCalls += 1;
+      assert.equal(opts.tabId, created.id);
+      assert.equal(opts.chatId, created.chatId);
+      assert.equal(opts.focus, false);
+      committedMirror = subject.toMirror(false) as Mirror;
+      committedMirror.chats.push(created);
+      return {
+        ok: true, tabId: opts.tabId, chatId: opts.chatId, operationId: opts.operationId,
+        actorRevision: 1, presentationRevision: 1, globalRevision: committedGlobalRevision,
+      };
+    },
+    stateDigest: async () => {
+      digestCalls += 1;
+      if (digestCalls === 1) {
+        signalFirstDigestStarted();
+        return await new Promise((resolve) => { resolveFirstDigest = resolve; });
+      }
+      signalSecondDigestStarted();
+      return digestFor(committedMirror.chats, committedGlobalRevision);
+    },
+    getSession: async () => {
+      return committedMirror;
+    },
+  }, async () => {
+    subject.monitor = { probeNow: () => {} };
+    subject.scheduleScopedSync = (scopes: Iterable<string>) => {
+      syncCalls += 1;
+      void subject.runScopedSync(new Set(scopes)).finally(signalSyncFinished);
+    };
+    const restoreSessionSnapshot = subject.restoreSessionSnapshot.bind(subject);
+    subject.restoreSessionSnapshot = (...args: Parameters<typeof subject.restoreSessionSnapshot>) => {
+      hydrationCalls += 1;
+      return restoreSessionSnapshot(...args);
+    };
+    (subject as any).probeStateDigest((globalThis as any).window.api);
+    await firstDigestStarted;
+
+    const receipt = await (globalThis as any).window.api.chatCreate({
+      tabId: created.id, chatId: created.chatId, operationId: 'agent-create-op', focus: false,
+    });
+    assert.equal(receipt.ok, true, 'the actor confirms the create durably before refresh');
+    subject.onAgentApply({ action: 'session-refresh' });
+
+    resolveFirstDigest(digestFor([existing], staleGlobalRevision));
+    await secondDigestStarted;
+    await syncFinished;
+
+    assert.equal(createCalls, 1, 'the renderer does not repeat the agent create');
+    assert.equal(digestCalls, 2, 'the refresh joins the active probe with one follow-up digest');
+    assert.equal(syncCalls, 1, 'one scoped sync is scheduled for the changed chat list');
+    assert.equal(hydrationCalls, 1, 'the changed chat list causes one session hydration');
+    assert.equal(subject.state.chats.filter((row: Chat) => row.id === created.id).length, 1);
+    assert.equal(subject.chat(created.id)?.title, 'Sidebar refresh probe');
+  });
+});
+
 test('the create fence releases after the daemon echoes the new chat', () => {
   const running = chat('tab-running');
   const subject = subjectWithChats([running]);
