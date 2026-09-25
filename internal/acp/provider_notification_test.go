@@ -11,6 +11,7 @@ func TestProviderNotificationAdaptersIsolateVendorFrames(t *testing.T) {
 		"sessionUpdate":       "_workass_codex_steer_consumed",
 		"clientUserMessageId": "codex-message",
 	}
+	piFrame := map[string]any{"sessionUpdate": "_workass_pi_steer_consumed", "clientUserMessageId": "pi-message"}
 
 	generic := providerAdapterForID("custom").notifications
 	if _, ok := generic.Decode(claudeFrame, nil); ok {
@@ -18,6 +19,9 @@ func TestProviderNotificationAdaptersIsolateVendorFrames(t *testing.T) {
 	}
 	if _, ok := generic.Decode(codexFrame, nil); ok {
 		t.Fatal("generic ACP notification adapter consumed a vendor frame")
+	}
+	if _, ok := generic.Decode(piFrame, nil); ok {
+		t.Fatal("generic ACP notification adapter consumed a Pi frame")
 	}
 
 	claude := providerAdapterForID("claude").notifications
@@ -31,6 +35,14 @@ func TestProviderNotificationAdaptersIsolateVendorFrames(t *testing.T) {
 	notification, ok := codex.Decode(codexFrame, nil)
 	if !ok || notification.Kind != providerNotificationSteerConsumed || notification.SteerConsumed == nil || notification.SteerConsumed.ClientUserMessageID != "codex-message" {
 		t.Fatalf("Codex steer frame = %#v, recognized=%v", notification, ok)
+	}
+	pi := providerAdapterForID("pi").notifications
+	if _, ok := pi.Decode(codexFrame, nil); ok {
+		t.Fatal("Pi accepted a Codex frame")
+	}
+	consumed, ok := pi.Decode(piFrame, nil)
+	if !ok || consumed.Kind != providerNotificationSteerConsumed || consumed.SteerConsumed == nil || consumed.SteerConsumed.ClientUserMessageID != "pi-message" {
+		t.Fatalf("Pi steer frame = %#v, recognized=%v", consumed, ok)
 	}
 }
 

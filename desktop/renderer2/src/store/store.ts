@@ -537,6 +537,8 @@ export class Store {
   private chatSelectionVersion = 0;
   private sessionHydrationPending = false;
   private digestProbe: Promise<void> | null = null;
+  private remoteDigestProbes = new Map<string, Promise<void>>();
+  private remoteDigestDirty = new Set<string>();
   private syncScopes = new Set<SyncScope>();
   private syncQueued = false;
   private syncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1192,6 +1194,26 @@ export class Store {
       // bounded response cannot erase a known non-empty actor transcript.
       if (chat.historyComplete || (messages.length === 0 && (chat.messageCount ?? 0) > 0)) return;
       const messageCount = Math.max(chat.messageCount ?? 0, messages.length);
+      // The actor bounds image-rich replies by expanded bytes as well as row
+      // count. A one-row assistant suffix can therefore hide the immediately
+      // preceding user image (or steer) even though both are in the newest ten.
+      // Fetch the missing contiguous prefix by stable cursor, one bounded page
+      // at a time. A single oversized row is still returned by the daemon.
+      while (messages.length < Math.min(limit, messageCount) && messages[0]?.id) {
+        const boundary = messages[0].id;
+        const step = await this.guardedStep(
+          `recent actor history prefix (${chatId})`,
+          () => call('archiveLoad', chatId, { beforeMessageId: boundary, limit: Math.min(limit, messageCount) - messages.length }),
+        );
+        if (!step.ok || !Array.isArray(step.value)) break;
+        let page: Msg[];
+        try { page = actorMessages(step.value as MirrorMsg[]); } catch { break; }
+        const boundaryIndex = page.findIndex((message) => message.id === boundary);
+        const prefix = boundaryIndex >= 0 ? page.slice(0, boundaryIndex) : page;
+        const seen = new Set(messages.map((message) => message.id));
+        if (!prefix.length || prefix.some((message) => seen.has(message.id))) break;
+        messages = [...prefix.slice(-(Math.min(limit, messageCount) - messages.length)), ...messages];
+      }
       let historyComplete = messages.length >= messageCount;
       // A refresh may have retained a resident tail (or even a fully revealed
       // transcript) while this recent slice was in flight. Replace its
@@ -1325,7 +1347,7 @@ export class Store {
   private refreshVisibleRecentHistory(chat: Chat | null) {
     if (!chat || chat.historyComplete) return;
     const stale = this.staleRecentHistories.has(chat.id);
-    if (chat.messages.length === 0 || stale) {
+    if (chat.messages.length < Math.min(CHAT_INITIAL_HISTORY, chat.messageCount ?? chat.messages.length) || stale) {
       void this.ensureRecentHistory(chat.id, CHAT_INITIAL_HISTORY, stale);
     }
   }
@@ -2334,6 +2356,20 @@ export class Store {
         },
         onUnmount: (machineId) => this.evictMachineChats(machineId),
       });
+      // Another renderer can mutate the actor without this window issuing a
+      // command. Job events do not contain user attachments or every steer
+      // boundary, so reconcile the owning actor's revision on its refresh
+      // signal. Start/end/media also cover older daemons that omit a refresh.
+      this.machines.subscribeRemote('agent:apply', (payload, machineId) => {
+        if ((payload as AgentApply | null)?.action === 'session-refresh') this.probeRemoteStateDigest(machineId);
+      });
+      this.machines.subscribeRemote('job:event', (payload, machineId) => {
+        const event = payload as JobEvent | null;
+        if (event?.type === 'start' || event?.type === 'end' || event?.type === 'assistant-media'
+          || (event?.type === 'acp' && event.event?.kind === 'steer-consumed')) {
+          this.probeRemoteStateDigest(machineId);
+        }
+      });
     }
     // The key a client holds so it can enrol with a newly-found machine without
     // asking anyone. Read from storage rather than typed here: a settings field
@@ -2646,6 +2682,33 @@ export class Store {
         else this.remoteMachineHydrationCounts.delete(machineId);
       }
     }
+  }
+
+  private probeRemoteStateDigest(machineId: string): void {
+    this.remoteDigestDirty.add(machineId);
+    if (this.remoteDigestProbes.has(machineId)) return;
+    const probe = (async () => {
+      while (this.remoteDigestDirty.delete(machineId)) {
+        const link = this.machines?.linkFor(machineId);
+        if (!link) return;
+        try {
+          const digest = await link.invoke('state:digest') as StateDigest;
+          if (!this.machines?.ownsLink(machineId, link) || !isStateDigest(digest)) return;
+          const owned = this.state.chats.filter((chat) => ownerMachineId(chat) === machineId);
+          const changed = digest.chats.length !== owned.length || digest.chats.some((row) => {
+            const chat = owned.find((candidate) => candidate.id === tagId(machineId, row.tabId)
+              && candidate.chatId === tagId(machineId, row.chatId));
+            return !chat || (chat.actorRevision ?? 0) !== row.actorRevision;
+          });
+          if (changed) await this.hydrateMachine(machineId);
+        } catch { return; /* the next remote event or reconnect retries */ }
+      }
+    })();
+    this.remoteDigestProbes.set(machineId, probe);
+    void probe.finally(() => {
+      if (this.remoteDigestProbes.get(machineId) === probe) this.remoteDigestProbes.delete(machineId);
+      if (this.remoteDigestDirty.has(machineId)) this.probeRemoteStateDigest(machineId);
+    });
   }
 
   private remoteMachineCatchupEpoch(machineId: string): number {
@@ -3969,6 +4032,7 @@ export class Store {
     if (this.state.rewind.open) this.state.rewind = { ...this.state.rewind, open: false, error: undefined };
     if (this.state.review.open) this.state.review = { ...this.state.review, open: false, diff: undefined, error: undefined };
     this.bumpApp();
+    this.refreshVisibleRecentHistory(chat);
     this.refreshPlanUsage(id);
     void this.refreshSpawnedWork(chat);
     this.maybeFetchCommandCatalog(chat);

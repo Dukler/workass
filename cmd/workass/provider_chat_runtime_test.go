@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1687,9 +1688,15 @@ func TestProviderChatSteerRejectsStaleDurableAttachmentBeforeManagerOrSidecars(t
 }
 
 func TestProviderChatSteerDuplicateAndChangedRetryAreDurableReadbackOnly(t *testing.T) {
-	runtime, _, _, stateDir, info := newSteerRegressionFixture(t)
+	var refreshes atomic.Int32
+	runtime, _, _, stateDir, info := newSteerRegressionFixture(t, func(channel string, payload any) {
+		if channel == "agent:apply" && fieldString(mapFromAnyMain(payload), "action") == "session-refresh" {
+			refreshes.Add(1)
+		}
+	})
 	startSteerRegressionTurn(t, runtime, info)
 	t.Cleanup(func() { stopSteerRegressionTurn(t, runtime) })
+	beforeRefresh := refreshes.Load()
 	request := map[string]any{
 		"sessionId": info.SessionID, "prompt": "steer exactly once", "clientUserMessageId": "steer-once-operation",
 		"continuationAssistantMessageId": "steer-once-assistant",
@@ -1697,12 +1704,18 @@ func TestProviderChatSteerDuplicateAndChangedRetryAreDurableReadbackOnly(t *test
 	if _, handled, err := runtime.Steer(context.Background(), request); !handled || err != nil {
 		t.Fatalf("initial steer admission failed: handled=%v err=%v", handled, err)
 	}
+	if got := refreshes.Load(); got != beforeRefresh+1 {
+		t.Fatalf("durable steer published %d remote refreshes, want one", got-beforeRefresh)
+	}
 	firstCount := sessionImageFileCount(t, stateDir)
 	if firstCount != 0 {
 		t.Fatalf("text steer unexpectedly wrote %d sidecars", firstCount)
 	}
 	if _, handled, err := runtime.Steer(context.Background(), cloneJSON(request).(map[string]any)); !handled || err != nil {
 		t.Fatalf("identical steer retry was not durable readback: handled=%v err=%v", handled, err)
+	}
+	if got := refreshes.Load(); got != beforeRefresh+1 {
+		t.Fatalf("duplicate steer published another remote refresh: got %d", got-beforeRefresh)
 	}
 	if got := sessionImageFileCount(t, stateDir); got != firstCount {
 		t.Fatalf("identical steer retry wrote sidecars: before=%d after=%d", firstCount, got)

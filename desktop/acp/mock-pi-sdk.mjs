@@ -32,6 +32,7 @@ export async function createAgentSession({sessionManager:manager}) {
   const end=message=>{emit({type:'message_end',message});manager.appendMessage(message)};
   const models=[{provider:'fixture',id:'same',name:'Fixture Same'},{provider:'other',id:'same',name:'Other Same'}];
   let release,ui,aborted=false;
+  const steers=[];
   const session={
     isStreaming:false,model:models[0],thinkingLevel:'off',modelRuntime:{getAvailable:async()=>process.env.WORKASS_PI_FIXTURE_NO_MODELS ? [] : models},
     extensionRunner:{emit:async()=>{}},
@@ -51,6 +52,7 @@ export async function createAgentSession({sessionManager:manager}) {
         emit({type:'message_update',assistantMessageEvent:{type:'thinking_delta',delta:'Fixture thinking'}});
         // Tests can steer/cancel before the first assistant creates the journal.
         if(text==='WAIT' || text.includes('[fixture:wait]')) await new Promise(resolve=>{release=resolve});
+        if (!aborted) for (const steer of steers.splice(0)) end({role:'user',content:[{type:'text',text:steer.text},...steer.images]});
         if(text==='PERMISSION') {
           const choice=await ui.select('Extension guard',['Approve','Deny']);
           emit({type:'tool_execution_end',toolCallId:'permission',result:{content:[{type:'text',text:String(choice)}]}});
@@ -71,6 +73,8 @@ export async function createAgentSession({sessionManager:manager}) {
       if(!this.isStreaming)throw Error('idle steer');
       if(text==='REJECT')throw Error('fixture steer rejected');
       fs.appendFileSync(path.join(root,'calls.jsonl'),JSON.stringify({method:'steer',text,images})+'\n');
+      steers.push({text,images});
+      if (text === '[fixture:consume]') release?.();
     },
     async followUp(){throw Error('a steer must not call followUp')},
     async abort(){aborted=true;release?.()},async waitForIdle(){},dispose(){},

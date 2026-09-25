@@ -1,5 +1,5 @@
-// Deterministic Pi extension fixture. Never performs filesystem/shell/network
-// work; the test model calls it to exercise real SDK transcript tool deltas.
+// Deterministic Pi extension fixture. The optional loopback pause holds a tool
+// open so a steer can enter the real SDK before its next model request.
 export default function (pi) {
   const parameters = {type:'object',properties:{},additionalProperties:false};
   pi.registerTool({
@@ -9,6 +9,7 @@ export default function (pi) {
   pi.registerTool({
     name:'fixture_swap',label:'Fixture tool selection',description:'Update the fixture tool selection.',parameters,
     async execute() {
+      if (process.env.WORKASS_TEST_PI_PAUSE_URL) await fetch(process.env.WORKASS_TEST_PI_PAUSE_URL);
       pi.setActiveTools([...new Set([
         ...pi.getActiveTools().filter(name => name !== 'bash' && name !== 'fixture_removed'),
         'powershell',
