@@ -5,7 +5,6 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const {
   applyMacDockIcon,
@@ -78,29 +77,25 @@ test('Windows resolves the packaged ICO used by the native window and taskbar', 
   assert.match(main, /refreshWindowsShortcutIconsAsync\(\{[\s\S]{0,300}resourcesPath:\s*process\.resourcesPath[\s\S]{0,300}appVersion:\s*APP_VERSION/);
 });
 
-test('Windows update recovery refreshes shortcuts off the Electron main thread', async () => {
-  const calls = [];
-  class FakeWorker extends EventEmitter {
-    constructor(source, options) {
-      super();
-      calls.push({ source, options });
-      queueMicrotask(() => this.emit('message', { ok: true, receipt: { applied: true, shortcutCount: 1, cacheRefresh: true } }));
-    }
-    unref() { this.unrefCalled = true; }
-  }
-  const receipt = await refreshWindowsShortcutIconsAsync({
+test('Windows shortcut refresh is deferred until after the first window and runs in process', async () => {
+  const scheduled = [];
+  let unrefCalled = false;
+  const options = {
     platform: 'win32', isPackaged: true,
     executablePath: 'C:\\Apps\\Workass\\Workass.exe',
     resourcesPath: 'C:\\Apps\\Workass\\resources',
     dataRoot: 'C:\\Users\\test\\AppData\\Local\\Workass',
     appVersion: '2.0.0',
-  }, { WorkerClass: FakeWorker });
+  };
+  const pending = refreshWindowsShortcutIconsAsync(options, {
+    schedule: (task) => { scheduled.push(task); return { unref() { unrefCalled = true; } }; },
+    refresh: (value) => ({ applied: true, shortcutCount: value.appVersion === '2.0.0' ? 1 : 0, cacheRefresh: true }),
+  });
+  assert.equal(scheduled.length, 1);
+  scheduled[0]();
+  const receipt = await pending;
   assert.deepEqual(receipt, { applied: true, shortcutCount: 1, cacheRefresh: true });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].options.eval, true);
-  assert.equal(calls[0].options.workerData.options.appVersion, '2.0.0');
-  assert.equal(calls[0].options.workerData.options.executablePath, 'C:\\Apps\\Workass\\Workass.exe');
-  assert.match(calls[0].source, /refreshWindowsShortcutIcons/);
+  assert.equal(unrefCalled, true);
 
   const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
   assert.doesNotMatch(main, /deferred-update-relaunch/);
@@ -116,11 +111,9 @@ test('Windows refreshes only shortcuts whose native TargetPath is the exact inst
   const unrelated = path.join(desktop, 'Other.lnk');
   const resourcesPath = path.join(root, 'resources');
   const iconPath = path.join(resourcesPath, 'Workass.ico');
-  const cacheTool = path.join(root, 'ie4uinit.exe');
   fs.mkdirSync(desktop, { recursive: true });
   fs.mkdirSync(resourcesPath, { recursive: true });
   fs.writeFileSync(iconPath, 'ico');
-  fs.writeFileSync(cacheTool, 'cache');
   fs.writeFileSync(matching, 'shortcut');
   fs.writeFileSync(unrelated, 'shortcut');
   const old = new Date('2020-01-01T00:00:00Z');
@@ -134,9 +127,9 @@ test('Windows refreshes only shortcuts whose native TargetPath is the exact inst
   let matchingIcon = `${iconPath},0`;
   const receipt = refreshWindowsShortcutIcons({
     platform: 'win32', isPackaged: true, executablePath, dataRoot, appVersion: '1.2.3',
-    resourcesPath, roots: [desktop], markerFile, cacheToolPath: cacheTool,
+    resourcesPath, roots: [desktop], markerFile,
     env: { SystemRoot: root }, now: () => refreshed,
-    run: (...args) => { runs.push(args); return { status: 0 }; },
+    run: (...args) => runs.push(args),
     resolveShortcutTargets: () => ({ applied: true, shortcuts: [
       { path: matching, targetPath: executablePath, iconLocation: matchingIcon },
       { path: unrelated, targetPath: 'C:\\Other\\Other.exe' },
@@ -153,11 +146,11 @@ test('Windows refreshes only shortcuts whose native TargetPath is the exact inst
   assert.deepEqual(shortcutWrites.map(({ shortcutPaths, iconPath: source }) => ({ shortcutPaths, iconPath: source })), [
     { shortcutPaths: [matching], iconPath: cachedIcon },
   ]);
-  assert.deepEqual(runs, [[cacheTool, ['-show'], { windowsHide: true, stdio: 'ignore' }]]);
+  assert.deepEqual(runs, []);
 
   const repeated = refreshWindowsShortcutIcons({
     platform: 'win32', isPackaged: true, executablePath, dataRoot, appVersion: '1.2.3',
-    resourcesPath, roots: [desktop], markerFile, cacheToolPath: cacheTool,
+    resourcesPath, roots: [desktop], markerFile,
     env: { SystemRoot: root },
     now: () => new Date('2027-01-01T00:00:00Z'),
     resolveShortcutTargets: () => ({ applied: true, shortcuts: [
@@ -169,13 +162,8 @@ test('Windows refreshes only shortcuts whose native TargetPath is the exact inst
   assert.equal(fs.statSync(matching).mtime.toISOString(), refreshed.toISOString());
 });
 
-test('Windows invokes the built-in icon notifier after a packaged release changes', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-icon-notifier-'));
-  const systemRoot = path.join(root, 'Windows');
-  const cacheTool = path.join(systemRoot, 'System32', 'ie4uinit.exe');
-  fs.mkdirSync(path.dirname(cacheTool), { recursive: true });
-  fs.writeFileSync(cacheTool, 'fixture');
-  const calls = [];
+test('Windows shortcut refresh records the cache receipt without an external notifier', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-icon-cache-'));
   const resourcesPath = path.join(root, 'resources');
   fs.mkdirSync(resourcesPath, { recursive: true });
   fs.writeFileSync(path.join(resourcesPath, 'Workass.ico'), 'ico');
@@ -188,9 +176,7 @@ test('Windows invokes the built-in icon notifier after a packaged release change
     platform: 'win32', isPackaged: true,
     executablePath,
     dataRoot: 'C:\\Users\\test\\AppData\\Local\\Workass',
-    resourcesPath, appVersion: '2.0.0', roots: [], markerFile, cacheToolPath: cacheTool,
-    env: { SystemRoot: systemRoot },
-    run: (...args) => { calls.push(args); return { status: 0 }; },
+    resourcesPath, appVersion: '2.0.0', roots: [], markerFile,
     resolveShortcutTargets: () => ({ applied: true, shortcuts: [
       { path: shortcut, targetPath: executablePath, iconLocation: currentIcon },
     ] }),
@@ -199,32 +185,40 @@ test('Windows invokes the built-in icon notifier after a packaged release change
       return { applied: true, shortcutCount: shortcutPaths.length, shortcutPaths };
     },
   });
+  assert.equal(receipt.applied, true);
   assert.equal(receipt.cacheRefresh, true);
-  assert.deepEqual(calls, [[cacheTool, ['-show'], { windowsHide: true, stdio: 'ignore' }]]);
+  assert.equal(fs.existsSync(markerFile), true);
 });
 
-test('Windows discovers known-folder shortcuts and reads TargetPath through built-in COM', () => {
-  let invocation = null;
+test('Windows resolves known shortcut roots and reads native shell-link fields', () => {
+  let selectedRoots = null;
+  const read = [];
   const receipt = resolveWindowsShortcutTargets({
-    env: { SystemRoot: 'C:\\Windows' },
-    run: (command, args, options) => {
-      invocation = { command, args, options };
-      return {
-        status: 0,
-        stdout: JSON.stringify([
-          { path: 'C:\\Users\\test\\Desktop\\Workass.lnk', targetPath: 'C:\\Apps\\Workass\\Workass.exe' },
-        ]),
-      };
+    env: {
+      USERPROFILE: 'C:\\Users\\test',
+      APPDATA: 'C:\\Users\\test\\AppData\\Roaming',
+      PUBLIC: 'C:\\Users\\Public',
+      ProgramData: 'C:\\ProgramData',
+    },
+    shell: { readShortcutLink: (shortcut) => {
+      read.push(shortcut);
+      return { target: 'C:\\Apps\\Workass\\Workass.exe', icon: 'C:\\Icons\\Workass.ico', iconIndex: 0 };
+    } },
+    enumerateFiles: (roots) => {
+      selectedRoots = roots;
+      return ['C:\\Users\\test\\Desktop\\Workass.lnk'];
     },
   });
   assert.deepEqual(receipt.shortcuts, [
-    { path: 'C:\\Users\\test\\Desktop\\Workass.lnk', targetPath: 'C:\\Apps\\Workass\\Workass.exe', iconLocation: '' },
+    { path: 'C:\\Users\\test\\Desktop\\Workass.lnk', targetPath: 'C:\\Apps\\Workass\\Workass.exe', iconLocation: 'C:\\Icons\\Workass.ico,0' },
   ]);
-  assert.equal(invocation.command, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
-  assert.match(invocation.args.at(-1), /GetFolderPath\('Desktop'\)/);
-  assert.match(invocation.args.at(-1), /CreateShortcut\(\$file\.FullName\)/);
-  assert.match(invocation.args.at(-1), /TargetPath/);
-  assert.match(invocation.args.at(-1), /IconLocation/);
+  assert.deepEqual(read, ['C:\\Users\\test\\Desktop\\Workass.lnk']);
+  assert.deepEqual(selectedRoots, [
+    'C:\\Users\\test\\Desktop',
+    'C:\\Users\\Public\\Desktop',
+    'C:\\Users\\test\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs',
+    'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs',
+  ]);
 });
 
 test('Windows retries after zero shortcuts and refreshes when the matched shortcut set changes', () => {
@@ -239,14 +233,11 @@ test('Windows retries after zero shortcuts and refreshes when the matched shortc
   fs.mkdirSync(resourcesPath, { recursive: true });
   fs.writeFileSync(path.join(resourcesPath, 'Workass.ico'), 'icon-v1');
   const iconPath = path.join(resourcesPath, 'Workass.ico');
-  const cacheTool = path.join(root, 'ie4uinit.exe');
-  fs.writeFileSync(cacheTool, 'cache');
   fs.writeFileSync(firstShortcut, 'shortcut');
   fs.writeFileSync(secondShortcut, 'shortcut');
   const base = {
     platform: 'win32', isPackaged: true, executablePath, resourcesPath,
-    dataRoot: 'C:\\Users\\test\\AppData\\Local\\Workass', appVersion: '3.0.0', markerFile, cacheToolPath: cacheTool,
-    run: () => ({ status: 0 }),
+    dataRoot: 'C:\\Users\\test\\AppData\\Local\\Workass', appVersion: '3.0.0', markerFile,
   };
   let shortcuts = [];
   let writes = 0;
@@ -301,7 +292,7 @@ test('Windows writes no success marker after a partial matching-shortcut update'
   assert.equal(fs.existsSync(markerFile), false);
 });
 
-test('Windows retries when COM readback does not confirm every shortcut IconLocation', () => {
+test('Windows retries when native shell readback does not confirm every shortcut icon', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-icon-readback-'));
   const resourcesPath = path.join(root, 'resources');
   const markerFile = path.join(root, 'marker.json');
@@ -323,24 +314,22 @@ test('Windows retries when COM readback does not confirm every shortcut IconLoca
   assert.equal(fs.existsSync(markerFile), false);
 });
 
-test('Windows retries shortcut repair until Explorer accepts the icon cache notification', () => {
+test('Windows shortcut repair succeeds without an external icon-cache process', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-icon-cache-retry-'));
   const resourcesPath = path.join(root, 'resources');
   const markerFile = path.join(root, 'marker.json');
-  const cacheTool = path.join(root, 'ie4uinit.exe');
   const shortcut = path.join(root, 'Workass.lnk');
   const executablePath = 'C:\\Apps\\Workass\\Workass.exe';
   const iconPath = path.join(resourcesPath, 'Workass.ico');
   fs.mkdirSync(resourcesPath, { recursive: true });
   fs.writeFileSync(iconPath, 'icon');
-  fs.writeFileSync(cacheTool, 'cache');
   fs.writeFileSync(shortcut, 'shortcut');
-  let notifierAttempts = 0;
+  let externalProcessAttempts = 0;
   let shortcutWrites = 0;
   let currentIcon = `${iconPath},0`;
   const options = {
     platform: 'win32', isPackaged: true, executablePath, resourcesPath,
-    dataRoot: 'C:\\Users\\test\\AppData\\Local\\Workass', appVersion: '3.0.0', markerFile, cacheToolPath: cacheTool,
+    dataRoot: 'C:\\Users\\test\\AppData\\Local\\Workass', appVersion: '3.0.0', markerFile,
     resolveShortcutTargets: () => ({ applied: true, shortcuts: [{
       path: shortcut, targetPath: executablePath, iconLocation: currentIcon,
     }] }),
@@ -349,39 +338,26 @@ test('Windows retries shortcut repair until Explorer accepts the icon cache noti
       currentIcon = `${targetIcon},0`;
       return { applied: true, shortcutCount: 1, shortcutPaths };
     },
-    run: () => { notifierAttempts += 1; return { status: notifierAttempts === 1 ? 1 : 0 }; },
+    run: () => { externalProcessAttempts += 1; return { status: 0 }; },
   };
-  assert.equal(refreshWindowsShortcutIcons(options).reason, 'icon-cache-refresh-failed');
-  assert.equal(fs.existsSync(markerFile), false);
   assert.equal(refreshWindowsShortcutIcons(options).applied, true);
   assert.equal(refreshWindowsShortcutIcons(options).reason, 'current');
   assert.equal(shortcutWrites, 1);
-  assert.equal(notifierAttempts, 2);
+  assert.equal(externalProcessAttempts, 0);
+  assert.equal(JSON.parse(fs.readFileSync(markerFile, 'utf8')).cacheRefresh, true);
 });
 
-test('Windows binds matching shortcuts to the packaged ICO through the built-in shortcut writer', () => {
+test('Windows binds matching shortcuts to the packaged ICO through Electron shell APIs', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-icon-writer-'));
-  const systemRoot = path.join(root, 'Windows');
-  const powershell = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const iconPath = path.join(root, 'resources', 'Workass.ico');
-  fs.mkdirSync(path.dirname(powershell), { recursive: true });
   fs.mkdirSync(path.dirname(iconPath), { recursive: true });
-  fs.writeFileSync(powershell, 'fixture');
   fs.writeFileSync(iconPath, 'ico');
   const calls = [];
   const shortcutPaths = ['C:\\Users\\test\\Desktop\\Workass.lnk', 'C:\\Users\\test\\Start Menu\\Workass.lnk'];
   const receipt = writeWindowsShortcutIcons({
     shortcutPaths,
     iconPath,
-    env: { SystemRoot: systemRoot },
-    run: (...args) => {
-      calls.push(args);
-      const request = JSON.parse(args[2].env.WORKASS_SHORTCUT_ICON_REQUEST);
-      return {
-        status: 0,
-        stdout: JSON.stringify(request.shortcutPaths.map((shortcutPath) => ({ path: shortcutPath, applied: true }))),
-      };
-    },
+    shell: { writeShortcutLink: (...args) => { calls.push(args); return true; } },
   });
   assert.deepEqual(receipt, {
     applied: true,
@@ -389,36 +365,24 @@ test('Windows binds matching shortcuts to the packaged ICO through the built-in 
     shortcutPaths,
     failedShortcutPaths: [],
   });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0][0], powershell);
-  assert.deepEqual(JSON.parse(calls[0][2].env.WORKASS_SHORTCUT_ICON_REQUEST), { iconPath, shortcutPaths });
-  assert.deepEqual(calls[0][2], {
-    windowsHide: true,
-    encoding: 'utf8',
-    maxBuffer: 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'ignore'],
-    env: { SystemRoot: systemRoot, WORKASS_SHORTCUT_ICON_REQUEST: JSON.stringify({ iconPath, shortcutPaths }) },
-  });
+  assert.deepEqual(calls, shortcutPaths.map((shortcut) => [shortcut, 'update', { icon: iconPath, iconIndex: 0 }]));
 });
 
 test('Windows retries a shortcut recreated at the same path after a successful marker', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-icon-reset-'));
   const resourcesPath = path.join(root, 'resources');
   const markerFile = path.join(root, 'run', 'marker.json');
-  const cacheTool = path.join(root, 'ie4uinit.exe');
   const shortcut = path.join(root, 'Desktop', 'Workass.lnk');
   const executablePath = 'C:\\Apps\\Workass\\Workass.exe';
   fs.mkdirSync(resourcesPath, { recursive: true });
   fs.mkdirSync(path.dirname(shortcut), { recursive: true });
   fs.writeFileSync(path.join(resourcesPath, 'Workass.ico'), 'release-icon');
-  fs.writeFileSync(cacheTool, 'cache');
   fs.writeFileSync(shortcut, 'shortcut');
   let currentIcon = `${path.join(resourcesPath, 'Workass.ico')},0`;
   let writes = 0;
   const options = {
     platform: 'win32', isPackaged: true, executablePath, resourcesPath,
-    dataRoot: 'C:\\Users\\test\\AppData\\Local\\Workass', appVersion: '4.0.0', markerFile, cacheToolPath: cacheTool,
-    run: () => ({ status: 0 }),
+    dataRoot: 'C:\\Users\\test\\AppData\\Local\\Workass', appVersion: '4.0.0', markerFile,
     resolveShortcutTargets: () => ({ applied: true, shortcuts: [{
       path: shortcut, targetPath: executablePath, iconLocation: currentIcon,
     }] }),
@@ -439,7 +403,6 @@ test('one protected shared shortcut does not block a writable user shortcut or i
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-icon-partial-permission-'));
   const resourcesPath = path.join(root, 'resources');
   const markerFile = path.join(root, 'run', 'marker.json');
-  const cacheTool = path.join(root, 'ie4uinit.exe');
   const desktop = path.join(root, 'Desktop', 'Workass.lnk');
   const shared = path.join(root, 'Public Desktop', 'Workass.lnk');
   const executablePath = 'C:\\Apps\\Workass\\Workass.exe';
@@ -447,7 +410,6 @@ test('one protected shared shortcut does not block a writable user shortcut or i
   fs.mkdirSync(path.dirname(desktop), { recursive: true });
   fs.mkdirSync(path.dirname(shared), { recursive: true });
   fs.writeFileSync(path.join(resourcesPath, 'Workass.ico'), 'release-icon');
-  fs.writeFileSync(cacheTool, 'cache');
   fs.writeFileSync(desktop, 'shortcut');
   fs.writeFileSync(shared, 'shortcut');
   const shortcuts = [
@@ -456,12 +418,12 @@ test('one protected shared shortcut does not block a writable user shortcut or i
   ];
   const batches = [];
   let attempt = 0;
-  let notifications = 0;
+  let externalProcessAttempts = 0;
   const options = {
     platform: 'win32', isPackaged: true, executablePath, resourcesPath,
-    dataRoot: 'C:\\Users\\test\\AppData\\Local\\Workass', appVersion: '4.0.0', markerFile, cacheToolPath: cacheTool,
+    dataRoot: 'C:\\Users\\test\\AppData\\Local\\Workass', appVersion: '4.0.0', markerFile,
     resolveShortcutTargets: () => ({ applied: true, shortcuts }),
-    run: () => { notifications += 1; return { status: 0 }; },
+    run: () => { externalProcessAttempts += 1; return { status: 0 }; },
     writeShortcutIcons: ({ shortcutPaths, iconPath }) => {
       attempt += 1;
       batches.push([...shortcutPaths]);
@@ -485,7 +447,7 @@ test('one protected shared shortcut does not block a writable user shortcut or i
   const complete = refreshWindowsShortcutIcons(options);
   assert.equal(complete.applied, true);
   assert.deepEqual(batches, [[desktop, shared], [shared]]);
-  assert.equal(notifications, 2);
+  assert.equal(externalProcessAttempts, 0);
   assert.equal(fs.existsSync(markerFile), true);
 });
 
@@ -494,7 +456,6 @@ test('Windows shortcuts use a digest-specific cached ICO and prune only unrefere
   const resourcesPath = path.join(root, 'resources');
   const markerFile = path.join(root, 'run', 'marker.json');
   const iconCacheDir = path.join(root, 'run', 'shortcut-icons');
-  const cacheTool = path.join(root, 'ie4uinit.exe');
   const shortcut = path.join(root, 'Desktop', 'Workass.lnk');
   const retainedShortcut = path.join(root, 'Desktop', 'Other.lnk');
   const executablePath = 'C:\\Apps\\Workass\\Workass.exe';
@@ -503,7 +464,6 @@ test('Windows shortcuts use a digest-specific cached ICO and prune only unrefere
   fs.mkdirSync(path.dirname(shortcut), { recursive: true });
   const sourceIcon = path.join(resourcesPath, 'Workass.ico');
   fs.writeFileSync(sourceIcon, 'release-icon-v4');
-  fs.writeFileSync(cacheTool, 'cache');
   fs.writeFileSync(shortcut, 'shortcut');
   fs.writeFileSync(retainedShortcut, 'shortcut');
   const unreferenced = path.join(iconCacheDir, `Workass-${'a'.repeat(24)}.ico`);
@@ -517,8 +477,7 @@ test('Windows shortcuts use a digest-specific cached ICO and prune only unrefere
   let writtenIcon = '';
   const receipt = refreshWindowsShortcutIcons({
     platform: 'win32', isPackaged: true, executablePath, resourcesPath,
-    dataRoot: 'C:\\Users\\test\\AppData\\Local\\Workass', appVersion: '4.0.0', markerFile, iconCacheDir, cacheToolPath: cacheTool,
-    run: () => ({ status: 0 }),
+    dataRoot: 'C:\\Users\\test\\AppData\\Local\\Workass', appVersion: '4.0.0', markerFile, iconCacheDir,
     resolveShortcutTargets: () => ({ applied: true, shortcuts }),
     writeShortcutIcons: ({ shortcutPaths, iconPath }) => {
       writtenIcon = iconPath;

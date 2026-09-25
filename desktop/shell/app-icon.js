@@ -90,13 +90,13 @@ function listShortcutFiles(roots, limit = MAX_WINDOWS_SHORTCUTS) {
   return files;
 }
 
-function resolveWindowsShortcutTargets({ roots = null, env = process.env, shell = null, desktopPath = '' } = {}) {
+function resolveWindowsShortcutTargets({ roots = null, env = process.env, shell = null, desktopPath = '', enumerateFiles = listShortcutFiles } = {}) {
   if (!shell || typeof shell.readShortcutLink !== 'function') {
     return { applied: false, reason: 'shortcut-reader-missing', shortcuts: [] };
   }
   const searchRoots = Array.isArray(roots) ? roots : windowsShortcutRoots({ env, desktopPath });
   const shortcuts = [];
-  for (const file of listShortcutFiles(searchRoots)) {
+  for (const file of enumerateFiles(searchRoots)) {
     let details;
     try { details = shell.readShortcutLink(file); } catch { continue; }
     const targetPath = String(details?.target || '');
