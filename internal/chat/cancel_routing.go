@@ -17,6 +17,15 @@ type cancelRoutingSnapshot struct {
 // succeeds. Streaming content and effect claims do not change owners, so they
 // reuse the same routing snapshot without allocating or hashing job IDs.
 func (e *Engine) installCommittedState(next State) {
+	previousSteer := e.state.PendingSteer
+	nextSteer := next.PendingSteer
+	if previousSteer != nil && (nextSteer == nil || nextSteer.OperationID != previousSteer.OperationID) {
+		close(e.pendingSteerSettled)
+		e.pendingSteerSettled = nil
+	}
+	if nextSteer != nil && e.pendingSteerSettled == nil {
+		e.pendingSteerSettled = make(chan struct{})
+	}
 	e.state = next
 	var operation provider.OperationID
 	var nativeID string

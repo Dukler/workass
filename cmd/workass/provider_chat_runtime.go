@@ -2422,6 +2422,34 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 		}
 	}()
 	state := actor.engine.Snapshot()
+	for state.PendingSteer != nil {
+		if currentLaneID, currentGeneration, targetErr := steerAttachmentTarget(state, sessionID, requestedTabID, requestedChatID); targetErr != nil || currentLaneID != laneID || currentGeneration != generation {
+			if targetErr != nil {
+				return nil, true, targetErr
+			}
+			return nil, true, errors.New("steer session attachment generation is stale")
+		}
+		if durable, found := durableSteerInputForOperation(state, operationID); found {
+			if !sameSteerImmutableInput(durable, operationID, prompt, inputAttachments, continuationID) {
+				return nil, true, errors.New("steer operation id was reused for different content")
+			}
+			result, readErr := r.durableSteerReply(state, operationID)
+			return result, true, readErr
+		}
+		settled := actor.engine.PendingSteerSettled()
+		actor.mu.Unlock()
+		actorLocked = false
+		if settled != nil {
+			select {
+			case <-settled:
+			case <-ctx.Done():
+				return nil, true, ctx.Err()
+			}
+		}
+		actor.mu.Lock()
+		actorLocked = true
+		state = actor.engine.Snapshot()
+	}
 	if currentLaneID, currentGeneration, targetErr := steerAttachmentTarget(state, sessionID, requestedTabID, requestedChatID); targetErr != nil || currentLaneID != laneID || currentGeneration != generation {
 		if targetErr != nil {
 			return nil, true, targetErr

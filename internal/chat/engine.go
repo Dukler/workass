@@ -15,10 +15,20 @@ import (
 // commands. External effects become executable exclusively through ClaimNext,
 // after their Pending -> Dispatched transition is durably stored.
 type Engine struct {
-	mu            sync.Mutex
-	state         State
-	store         StateStore
-	cancelRouting atomic.Pointer[cancelRoutingSnapshot]
+	mu                  sync.Mutex
+	state               State
+	store               StateStore
+	cancelRouting       atomic.Pointer[cancelRoutingSnapshot]
+	pendingSteerSettled chan struct{}
+}
+
+// PendingSteerSettled returns a signal for the current steer receipt boundary.
+// A nil channel means the actor can admit a new steer now. Callers recheck the
+// actor state after the signal because another caller may have admitted first.
+func (e *Engine) PendingSteerSettled() <-chan struct{} {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.pendingSteerSettled
 }
 
 func NewEngine(chatID string) (*Engine, error) {
