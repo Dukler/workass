@@ -91,6 +91,23 @@ func (c *sessionRefreshCoordinator) RequestFocus(tabID, chatID string) {
 	c.broadcast("agent:apply", map[string]any{"action": "session-refresh"})
 }
 
+// RequestCreated publishes an exact membership change. A newly created chat
+// must not depend on a best-effort digest probe before it can appear in the
+// renderer; the following generic refresh clears the bridge's replay cache.
+func (c *sessionRefreshCoordinator) RequestCreated(tabID, chatID string, focus bool) {
+	if c == nil {
+		return
+	}
+	c.broadcast("agent:apply", map[string]any{
+		"action":  "session-refresh",
+		"tabId":   tabID,
+		"chatId":  chatID,
+		"created": true,
+		"focus":   focus,
+	})
+	c.broadcast("agent:apply", map[string]any{"action": "session-refresh"})
+}
+
 func (c *sessionRefreshCoordinator) ensureTimerLocked() {
 	if c.timer != nil {
 		return

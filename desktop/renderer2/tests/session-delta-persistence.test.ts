@@ -607,6 +607,37 @@ test('a local session refresh during a digest probe picks up an agent-created ch
   });
 });
 
+test('an exact agent create appears and focuses without waiting for a successful digest', async () => {
+  const existing = chat('tab-local');
+  const subject = subjectWithChats([existing]);
+  const created = chat('tab-agent-created', { chatId: 'chat-agent-created', title: 'Agent created live' });
+  const authoritative = subject.toMirror(false) as Mirror;
+  authoritative.chats.push(created);
+  let digestCalls = 0;
+  let sessionReads = 0;
+  let syncFinished!: () => void;
+  const synced = new Promise<void>((resolve) => { syncFinished = resolve; });
+
+  await withWindowApi({
+    stateDigest: async () => { digestCalls += 1; throw new Error('digest temporarily unavailable'); },
+    getSession: async () => { sessionReads += 1; return authoritative; },
+  }, async () => {
+    subject.monitor = { probeNow: () => {} };
+    subject.scheduleScopedSync = (scopes: Iterable<string>) => {
+      void subject.runScopedSync(new Set(scopes)).finally(syncFinished);
+    };
+    subject.onAgentApply({
+      action: 'session-refresh', tabId: created.id, chatId: created.chatId,
+      created: true, focus: true,
+    });
+    await synced;
+    assert.equal(subject.chat(created.id)?.title, 'Agent created live');
+    assert.equal(subject.state.activeId, created.id);
+    assert.equal(sessionReads, 1);
+    assert.equal(digestCalls, 0, 'exact membership refresh does not depend on the digest');
+  });
+});
+
 test('the create fence releases after the daemon echoes the new chat', () => {
   const running = chat('tab-running');
   const subject = subjectWithChats([running]);
