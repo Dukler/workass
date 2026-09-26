@@ -2371,7 +2371,17 @@ export class Store {
       // boundary, so reconcile the owning actor's revision on its refresh
       // signal. Start/end/media also cover older daemons that omit a refresh.
       this.machines.subscribeRemote('agent:apply', (payload, machineId) => {
-        if ((payload as AgentApply | null)?.action === 'session-refresh') this.probeRemoteStateDigest(machineId);
+        const event = payload as AgentApply | null;
+        if (event?.action !== 'session-refresh') return;
+        if (event.created === true && event.tabId && event.chatId) {
+          const id = tagId(machineId, event.tabId);
+          const chatId = tagId(machineId, event.chatId);
+          if (!this.state.chats.some((chat) => chat.id === id && chat.chatId === chatId)) {
+            void this.hydrateMachine(machineId);
+            return;
+          }
+        }
+        this.probeRemoteStateDigest(machineId);
       });
       this.machines.subscribeRemote('job:event', (payload, machineId) => {
         const event = payload as JobEvent | null;
@@ -2903,6 +2913,11 @@ export class Store {
       && typeof event.chatId === 'string' && event.chatId) {
       this.pendingAgentFocus = { tabId: event.tabId, chatId: event.chatId };
       this.applyPendingAgentFocus();
+    }
+    if (event.created === true && event.tabId && event.chatId
+      && !this.state.chats.some((chat) => chat.id === event.tabId && chat.chatId === event.chatId)) {
+      this.scheduleScopedSync(['session']);
+      return;
     }
     // A session-refresh is a session/permissions delta, not a reconnection.
     // Running the full cold-reconnect reconciliation per event cost one

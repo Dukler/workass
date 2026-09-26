@@ -327,7 +327,7 @@ func (c *chatControlCoordinator) create(ctx context.Context, parentTabID, parent
 		if err != nil {
 			return nil, err
 		}
-		c.refresh(fieldString(existing, "tabId"), fieldString(existing, "chatId"), focus)
+		c.refreshCreated(fieldString(existing, "tabId"), fieldString(existing, "chatId"), focus)
 		return existing, nil
 	}
 	parent, err := c.providerChats.ReadChat(parentTabID, parentChatID, 1, false)
@@ -352,7 +352,7 @@ func (c *chatControlCoordinator) create(ctx context.Context, parentTabID, parent
 	if _, err := c.providerChats.ReadChat(fieldString(created, "tabId"), fieldString(created, "chatId"), 1, false); err != nil {
 		return nil, fmt.Errorf("created chat is not addressable: %w", err)
 	}
-	c.refresh(fieldString(created, "tabId"), fieldString(created, "chatId"), focus)
+	c.refreshCreated(fieldString(created, "tabId"), fieldString(created, "chatId"), focus)
 	created["providerId"], created["modelId"], created["effort"], created["modeId"] = controls.ProviderID, controls.BaseModel, controls.Effort, controls.ModeID
 	created["resolvedModelId"] = controls.ModelID
 	return created, nil
@@ -556,6 +556,16 @@ func (c *chatControlCoordinator) refresh(tabID, chatID string, focus bool) {
 		return
 	}
 	c.refreshes.Request(tabID, chatID, state.Revision, refreshImmediate)
+}
+
+func (c *chatControlCoordinator) refreshCreated(tabID, chatID string, focus bool) {
+	if c == nil || c.refreshes == nil || c.providerChats == nil {
+		return
+	}
+	if _, ok := c.providerChats.Snapshot(chatID); !ok {
+		return
+	}
+	c.refreshes.RequestCreated(tabID, chatID, focus)
 }
 
 func (c *chatControlCoordinator) resolveControls(ctx context.Context, current, params map[string]any) (resolvedChatControls, error) {

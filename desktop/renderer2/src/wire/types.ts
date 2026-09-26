@@ -477,6 +477,7 @@ export interface AgentApply {
   tabId?: string;
   chatId?: string;
   focus?: boolean;
+  created?: boolean;
   // action === 'session-controls-skipped' (additive): the daemon could not
   // apply the chat's stored model/mode at session startup — the chat is
   // RUNNING on something other than what the user configured.

@@ -75,6 +75,33 @@ test('reports detach failure without retrying or broad device discovery', async 
   assert.equal(calls.some(call => call[1] === 'info' && call[2] === '-plist' && call[3] === 'all'), false);
 });
 
+test('a busy owned fixture volume force-unmounts only its verified volume before detach', async t => {
+  const { volumes } = await testDirs(t);
+  let volumeName;
+  let detachCalls = 0;
+  const calls = [];
+  const execute = async (command, args) => {
+    calls.push([command, ...args]);
+    if (command === 'hdiutil' && args[0] === 'attach') return { stdout: '/dev/disk42\n' };
+    if (command === 'diskutil' && args[0] === 'eraseVolume') { volumeName = args[2]; await mkdir(path.join(volumes, volumeName)); return { stdout: '' }; }
+    if (command === 'diskutil' && args[0] === 'info') return { stdout: `<plist><dict><key>DeviceIdentifier</key><string>disk7s1</string><key>APFSPhysicalStores</key><array><dict><key>APFSPhysicalStore</key><string>disk42</string></dict></array><key>VolumeName</key><string>${volumeName}</string><key>MountPoint</key><string>${path.join(volumes, volumeName)}</string></dict></plist>` };
+    if (command === 'hdiutil' && args[0] === 'detach') {
+      detachCalls += 1;
+      if (detachCalls === 1) throw new Error('hdiutil: Resource busy');
+      return { stdout: '' };
+    }
+    if (command === 'diskutil' && args[0] === 'unmount') return { stdout: '' };
+    throw new Error(`unexpected command ${command} ${args.join(' ')}`);
+  };
+  const fixture = await createTemporaryFixtureVolume({ platform: 'darwin', volumesDir: volumes, execute });
+  await fixture.cleanup();
+  assert.deepEqual(calls.slice(-3), [
+    ['hdiutil', 'detach', '/dev/disk42'],
+    ['diskutil', 'unmount', 'force', '/dev/disk7s1'],
+    ['hdiutil', 'detach', '/dev/disk42'],
+  ]);
+});
+
 test('non-macOS uses an ordinary temporary directory', async t => {
   const { base } = await testDirs(t);
   const fixture = await createTemporaryFixtureVolume({ platform: 'linux', tempDir: base, execute: async () => { throw new Error('must not execute'); } });

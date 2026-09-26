@@ -155,6 +155,24 @@ func TestSessionRefreshCoordinatorFocusIsOneShotBeforeGenericRefresh(t *testing.
 	}
 }
 
+func TestSessionRefreshCoordinatorCreatedIsExactBeforeGenericRefresh(t *testing.T) {
+	emissions := make(chan refreshEmission, 4)
+	coordinator := newSessionRefreshCoordinator(func(channel string, payload any) {
+		emissions <- refreshEmission{channel: channel, payload: mapFromAnyMain(payload)}
+	})
+	coordinator.RequestCreated("tab-new", "chat-new", true)
+	created := waitRefreshEmission(t, emissions, time.Second)
+	if created.channel != "agent:apply" || fieldString(created.payload, "action") != "session-refresh" ||
+		fieldString(created.payload, "tabId") != "tab-new" || fieldString(created.payload, "chatId") != "chat-new" ||
+		created.payload["created"] != true || created.payload["focus"] != true {
+		t.Fatalf("created refresh = %#v", created)
+	}
+	generic := waitRefreshEmission(t, emissions, time.Second)
+	if generic.channel != "agent:apply" || len(generic.payload) != 1 || fieldString(generic.payload, "action") != "session-refresh" {
+		t.Fatalf("created trailing refresh = %#v", generic)
+	}
+}
+
 func TestSessionRefreshCoordinatorMeasuredBurst(t *testing.T) {
 	emissions := make(chan refreshEmission, 64)
 	coordinator := newSessionRefreshCoordinator(func(channel string, payload any) {
@@ -231,7 +249,7 @@ func TestChatControlVisibleMutationRefreshesAreImmediate(t *testing.T) {
 	}
 
 	var created map[string]any
-	assertImmediate("create", func() error {
+	createdEvent := assertImmediate("create", func() error {
 		var createErr error
 		created, createErr = coordinator.create(
 			context.Background(), parentTabID, parentChatID,
@@ -240,6 +258,14 @@ func TestChatControlVisibleMutationRefreshesAreImmediate(t *testing.T) {
 		return createErr
 	})
 	tabID, chatID := fieldString(created, "tabId"), fieldString(created, "chatId")
+	if createdEvent.payload["created"] != true || fieldString(createdEvent.payload, "tabId") != tabID ||
+		fieldString(createdEvent.payload, "chatId") != chatID {
+		t.Fatalf("create intent = %#v", createdEvent)
+	}
+	trailingCreate := waitRefreshEmission(t, emissions, time.Second)
+	if len(trailingCreate.payload) != 1 || fieldString(trailingCreate.payload, "action") != "session-refresh" {
+		t.Fatalf("create trailing refresh = %#v", trailingCreate)
+	}
 	assertImmediate("rename", func() error {
 		_, err := coordinator.rename(map[string]any{"operation_id": "test:refresh-rename", "tab_id": tabID, "chat_id": chatID, "title": "Renamed child"})
 		return err

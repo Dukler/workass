@@ -50,6 +50,7 @@ export async function createTemporaryFixtureVolume({
 
   let device;
   let root;
+  let ownedVolume;
   let cleaned = false;
   const cleanup = async () => {
     if (cleaned) return;
@@ -60,7 +61,14 @@ export async function createTemporaryFixtureVolume({
     }
     if (device) {
       try { await run('hdiutil', ['detach', device], execute); }
-      catch (error) { errors.push(error); }
+      catch (error) {
+        if (ownedVolume && /Resource busy/i.test(error.message)) {
+          try {
+            await run('diskutil', ['unmount', 'force', `/dev/${ownedVolume}`], execute);
+            await run('hdiutil', ['detach', device], execute);
+          } catch (fallbackError) { errors.push(fallbackError); }
+        } else errors.push(error);
+      }
     }
     cleaned = true;
     if (errors.length) throw new Error(`temporary fixture volume cleanup failed: ${errors.map(error => error.message).join('; ')}`);
@@ -84,6 +92,7 @@ export async function createTemporaryFixtureVolume({
     if (!identifier || !/^disk\d+s\d+$/.test(identifier) || observedName !== volumeName || observedMount !== mountPoint || !stores || stores.length !== 1 || stores[0] !== disk) {
       throw new Error(`fixture volume ownership verification failed for ${device}`);
     }
+    ownedVolume = identifier;
     if (!(await exists(mountPoint))) throw new Error(`fixture volume mountpoint is missing: ${mountPoint}`);
     root = await mkdtemp(path.join(mountPoint, 'fixtures-'));
     return { root, device, mountPoint, async cleanup() { await cleanup(); } };
