@@ -7,6 +7,7 @@ let turnSequence = 0;
 let activeTurn = null;
 let activeTurnScenario = '';
 let rapidSteerSequence = 0;
+let rapidSteerTools = false;
 let pendingNativeChild = null;
 const turnRecords = [];
 if (process.env.WORKASS_CODEX_FIXTURE_LARGE_RESUME === '1') {
@@ -81,6 +82,7 @@ function completeTurn(turnId, status = 'completed', error) {
   activeTurn = null;
 	activeTurnScenario = '';
 	rapidSteerSequence = 0;
+	rapidSteerTools = false;
 	const record = turnRecords.find((turn) => turn.id === turnId);
 	if (record) record.status = status;
   notify('turn/completed', {
@@ -113,6 +115,17 @@ function startMCPFixtures(threadId, configured) {
     startup.set(name, 'ready');
     notify('mcpServer/startupStatus/updated', { threadId, name, status: 'ready' });
   }
+}
+
+function rapidSteerTool(threadId, turnId, sequence, status) {
+  const item = {
+    type: 'commandExecution', id: `rapid-tool-${sequence}`, command: `printf rapid-tool-${sequence}`,
+    commandActions: [], status,
+    ...(status === 'completed' ? { aggregatedOutput: `rapid-tool-${sequence}` } : {}),
+  };
+  notify(status === 'completed' ? 'item/completed' : 'item/started', {
+    threadId, turnId, [status === 'completed' ? 'completedAtMs' : 'startedAtMs']: Date.now(), item,
+  });
 }
 
 async function runTurn(id, params) {
@@ -292,6 +305,8 @@ async function runTurn(id, params) {
   if (text.includes('[fixture:rapid-steer-commentary]')) {
     activeTurnScenario = 'rapid-steer-commentary';
     rapidSteerSequence = 0;
+    rapidSteerTools = text.includes('[fixture:rapid-steer-tools]');
+    if (rapidSteerTools) rapidSteerTool(params.threadId, turnId, 1, 'inProgress');
     return;
   }
   if (text.includes('keep running')) return;
@@ -504,47 +519,58 @@ async function handle(message) {
     if (process.env.WORKASS_CODEX_FIXTURE_STEER_REJECTION === 'no-active-turn') {
       return write({ id, error: { code: -32000, message: 'no active turn' } });
     }
-    respond(id, { turnId: activeTurn });
-    notify('item/started', {
-      threadId: params.threadId, turnId: activeTurn, startedAtMs: Date.now(),
-      item: {
-        type: 'userMessage',
-        id: activeTurnScenario === 'rapid-steer-commentary' ? `steer-user-fixture-${rapidSteerSequence + 1}` : 'steer-user-fixture',
-        clientId: params.clientUserMessageId,
-        content: params.input,
-      },
-    });
-    if (activeTurnScenario === 'rapid-steer-commentary') {
-      const sequence = ++rapidSteerSequence;
-      const messageId = `rapid-commentary-${sequence}`;
-      const item = { type: 'agentMessage', id: messageId, phase: 'commentary', text: '' };
+    const turnId = activeTurn;
+    respond(id, { turnId });
+    const deliverSteer = () => {
+      if (activeTurn !== turnId) return;
       notify('item/started', {
-        threadId: params.threadId, turnId: activeTurn, startedAtMs: Date.now(), item,
+        threadId: params.threadId, turnId, startedAtMs: Date.now(),
+        item: {
+          type: 'userMessage',
+          id: activeTurnScenario === 'rapid-steer-commentary' ? `steer-user-fixture-${rapidSteerSequence + 1}` : 'steer-user-fixture',
+          clientId: params.clientUserMessageId,
+          content: params.input,
+        },
       });
+      if (activeTurnScenario === 'rapid-steer-commentary') {
+        const sequence = ++rapidSteerSequence;
+        if (rapidSteerTools) rapidSteerTool(params.threadId, turnId, sequence, 'completed');
+        const messageId = `rapid-commentary-${sequence}`;
+        const item = { type: 'agentMessage', id: messageId, phase: 'commentary', text: '' };
+        notify('item/started', {
+          threadId: params.threadId, turnId, startedAtMs: Date.now(), item,
+        });
+        notify('item/agentMessage/delta', {
+          threadId: params.threadId, turnId, itemId: messageId,
+          delta: `Steer ${sequence} commentary A.`,
+        });
+        notify('item/agentMessage/delta', {
+          threadId: params.threadId, turnId, itemId: messageId,
+          delta: ' continuation.',
+        });
+        notify('item/completed', {
+          threadId: params.threadId, turnId, completedAtMs: Date.now(),
+          item: { ...item, status: 'completed' },
+        });
+        const steerTarget = Number(process.env.WORKASS_CODEX_FIXTURE_RAPID_STEER_TARGET || 2);
+        if (sequence >= steerTarget) completeTurn(turnId);
+        else if (rapidSteerTools) rapidSteerTool(params.threadId, turnId, sequence + 1, 'inProgress');
+        return;
+      }
+      const images = (params.input || []).filter((item) => item.type === 'image');
+      const text = (params.input || []).filter((item) => item.type === 'text').map((item) => item.text).join('\n');
       notify('item/agentMessage/delta', {
-        threadId: params.threadId, turnId: activeTurn, itemId: messageId,
-        delta: `Steer ${sequence} commentary A.`,
+        threadId: params.threadId, turnId, itemId: 'message-steer-fixture',
+        delta: text.includes('[fixture:image]')
+          ? `Fixture steer image count: ${images.length}; ${String(images[0]?.url || '').slice(0, 23)}`
+          : 'Redirected answer',
       });
-      notify('item/agentMessage/delta', {
-        threadId: params.threadId, turnId: activeTurn, itemId: messageId,
-        delta: ' continuation.',
-      });
-      notify('item/completed', {
-        threadId: params.threadId, turnId: activeTurn, completedAtMs: Date.now(),
-        item: { ...item, status: 'completed' },
-      });
-      if (sequence >= 2) completeTurn(activeTurn);
-      return;
-    }
-    const images = (params.input || []).filter((item) => item.type === 'image');
-    const text = (params.input || []).filter((item) => item.type === 'text').map((item) => item.text).join('\n');
-    notify('item/agentMessage/delta', {
-      threadId: params.threadId, turnId: activeTurn, itemId: 'message-steer-fixture',
-      delta: text.includes('[fixture:image]')
-        ? `Fixture steer image count: ${images.length}; ${String(images[0]?.url || '').slice(0, 23)}`
-        : 'Redirected answer',
-    });
-    completeTurn(activeTurn);
+      completeTurn(turnId);
+    };
+    const receiptDelayMs = activeTurnScenario === 'rapid-steer-commentary'
+      ? Number(process.env.WORKASS_CODEX_FIXTURE_RAPID_STEER_RECEIPT_DELAY_MS || 0) : 0;
+    if (receiptDelayMs > 0) setTimeout(deliverSteer, receiptDelayMs);
+    else deliverSteer();
     return;
   }
   if (method === 'turn/interrupt') { respond(id, {}); completeTurn(params.turnId, 'interrupted'); return; }

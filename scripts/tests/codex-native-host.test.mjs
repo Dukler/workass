@@ -221,6 +221,53 @@ test('native Codex host preserves commentary item boundaries across two rapid st
   assert.ok(commentary.every((message) => message.params.update._meta?.codex?.phase === 'commentary'));
 });
 
+test('native Codex host consumes eight text steers around live tool calls without interrupting the turn', async (t) => {
+  const peer = startHost({ WORKASS_CODEX_FIXTURE_RAPID_STEER_TARGET: '8' });
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const opened = await peer.waitFor((message) => message.id === 2);
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId: opened.result.sessionId,
+    prompt: [{ type: 'text', text: '[fixture:rapid-steer-commentary] [fixture:rapid-steer-tools] keep the turn open' }],
+  } });
+  await peer.waitFor((message) => message.method === 'session/update'
+    && message.params?.update?.sessionUpdate === 'agent_thought_chunk');
+  await peer.waitFor((message) => message.method === 'session/update'
+    && message.params?.update?.sessionUpdate === 'tool_call'
+    && message.params.update.status === 'in_progress');
+
+  for (let sequence = 1; sequence <= 8; sequence++) {
+    peer.send({ jsonrpc: '2.0', id: sequence + 3, method: '_workass/codex/steer', params: {
+      sessionId: opened.result.sessionId,
+      prompt: [{ type: 'text', text: `rapid-steer-${sequence}` }],
+      clientUserMessageId: `rapid-steer-${sequence}`,
+    } });
+  }
+  for (let sequence = 1; sequence <= 8; sequence++) {
+    const reply = await peer.waitFor((message) => message.id === sequence + 3);
+    assert.equal(reply.error, undefined, JSON.stringify(reply));
+    assert.equal(reply.result.turnId, 'fixture-turn-1');
+    assert.equal(reply.result.receipt, true);
+    await peer.waitFor((message) => message.method === 'session/update'
+      && message.params?.update?.sessionUpdate === '_workass_codex_steer_consumed'
+      && message.params.update.clientUserMessageId === `rapid-steer-${sequence}`);
+  }
+  assert.equal((await peer.waitFor((message) => message.id === 3)).result.stopReason, 'end_turn');
+  const commentary = peer.messages.filter((message) => message.method === 'session/update'
+    && message.params?.update?.sessionUpdate === 'agent_message_chunk');
+  assert.equal(commentary.map((message) => message.params.update.content.text).join(''),
+    Array.from({ length: 8 }, (_, index) => `Steer ${index + 1} commentary A. continuation.`).join('\n\n'));
+  assert.equal(peer.messages.some((message) => message.method === 'session/update'
+    && message.params?.update?.sessionUpdate === '_workass_codex_steer_rejected'), false);
+  const tools = peer.messages.filter((message) => message.method === 'session/update'
+    && ['tool_call', 'tool_call_update'].includes(message.params?.update?.sessionUpdate));
+  assert.equal(tools.filter((message) => message.params.update.status === 'in_progress').length, 8);
+  assert.equal(tools.filter((message) => message.params.update.status === 'completed').length, 8);
+});
+
 test('native Codex host rejects non-live steering without interrupting or queueing the active turn', async (t) => {
   for (const [fixtureRejection, reason] of [
     ['active-turn-not-steerable', 'active-turn-not-steerable'],

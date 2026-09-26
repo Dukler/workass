@@ -12,7 +12,7 @@ import { attachmentWorkBoundary, clipboardImageFiles, createDraftImages, draftIm
 import { QueueList } from './QueueList';
 import { QuestionDock, usePendingQuestion } from './QuestionDock';
 import { liveSteeringSupported, stopAndSendSupported } from '../steering';
-import { composerKeyAction, type ComposerSubmitIntent } from '../composer-submit';
+import { composerButtonAction, composerKeyAction, type ComposerSubmitIntent } from '../composer-submit';
 import { insertAtCaret, startRecording, transcribe, voiceStatus, type Recorder, type VoiceState } from '../voice';
 import { clampPlanUsagePercent, formatAbsolutePlanReset, formatCountdown, formatPlanUsagePercent, isExpiredPlanReset, isHotRateLimit, isLiveReset, rateLimitLabel, relativePlanReset } from '../plan-usage';
 import { imageDraftCapability } from '../model-controls';
@@ -738,10 +738,6 @@ export function Composer({ chat }: { chat: Chat | null }) {
     if (stopping && intent !== 'queue') return;
     const submittedDraft = text;
     const t = text.trim();
-    if (running && !t && intent === 'steer') {
-      if (chat) store.cancelChatTurn(chat.id);
-      return;
-    }
     if (!t || !chat || preparingImages) return;
     const submission = store.captureDraftSubmission(chat.id, submittedDraft);
     const visibleEdit = visibleDraftEdit.current;
@@ -891,7 +887,11 @@ export function Composer({ chat }: { chat: Chat | null }) {
           aria-keyshortcuts="Enter Meta+Enter Control+Enter Shift+Enter"
           title={running ? `Enter: encolar · ${steerShortcut}: ${stopAndSendAvail ? 'detener y enviar' : 'dirigir el turno'} · ⇧Enter: nueva línea` : 'Enter: enviar · ⇧Enter: nueva línea'}
         />
-        <button className={`send ${running && !steerMode ? 'stop' : ''} ${stopping ? 'stopping' : ''} ${steerMode ? 'steer' : ''}`} disabled={!canSend} onClick={() => void submit(running ? 'steer' : 'send')} title={sendTitle} aria-label={sendTitle}>
+        <button className={`send ${running && !steerMode ? 'stop' : ''} ${stopping ? 'stopping' : ''} ${steerMode ? 'steer' : ''}`} disabled={!canSend} onClick={(event) => {
+          const action = composerButtonAction(running, hasText, event.detail);
+          if (action === 'stop') { if (chat) void store.cancelChatTurn(chat.id); }
+          else if (action) void submit(action);
+        }} title={sendTitle} aria-label={sendTitle}>
           {running && !steerMode
             // Real centered SVG square — the `■` glyph's font bounding box is
             // asymmetric and renders visibly off-center (user report 2026-07-12).
