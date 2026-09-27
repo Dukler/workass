@@ -89,6 +89,8 @@ type Attachment struct {
 	MIMEType string
 	Digest   string
 	Size     int64
+	// Source binds an imported assistant image to its authored Markdown target.
+	Source string
 	// Ref is an immutable, daemon-resolvable content reference. Durable chat
 	// state never embeds arbitrary provider payloads or renderer-local blobs.
 	Ref string

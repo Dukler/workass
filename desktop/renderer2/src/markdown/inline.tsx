@@ -28,6 +28,24 @@ export function normalizeMarkdownTarget(raw: string): string {
   return target;
 }
 
+// Use the same token boundaries as renderInline when recovering image targets
+// from older durable messages that omitted the imported image's source.
+export function markdownImageReferences(text: string): Array<{ label: string; target: string }> {
+  const references: Array<{ label: string; target: string }> = [];
+  let rest = text;
+  while (rest.length) {
+    const match = rest.match(TOKEN);
+    if (!match || match.index === undefined) break;
+    if (match[2]?.startsWith('![')) {
+      const token = match[2];
+      const close = token.indexOf('](');
+      references.push({ label: token.slice(2, close), target: normalizeMarkdownTarget(token.slice(close + 2, -1)) });
+    }
+    rest = rest.slice(match.index + match[0].length);
+  }
+  return references;
+}
+
 function looksLikeLocalRaster(target: string): boolean {
   const normalized = normalizeMarkdownTarget(target);
   const pathLike = normalized.startsWith('/') || normalized.startsWith('./') || normalized.startsWith('../')
