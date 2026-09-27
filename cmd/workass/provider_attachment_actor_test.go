@@ -22,13 +22,16 @@ func TestActorFileStoreRetainsContentAddressedProviderAttachmentAcrossRestart(t 
 	sessions := newSessionStore(filepath.Join(stateDir, sessionStateFilename))
 	imageData := base64.StdEncoding.EncodeToString([]byte("actor-owned-image"))
 	attachments, err := sessions.PersistProviderAttachments([]any{map[string]any{
-		"mimeType": "image/png", "name": "proof.png", "data": imageData,
+		"mimeType": "image/png", "name": "proof.png", "data": imageData, "source": "/workspace/proof.png",
 	}})
 	if err != nil {
 		t.Fatalf("persist provider attachment: %v", err)
 	}
 	if len(attachments) != 1 || attachments[0].Ref == "" || attachments[0].Digest == "" {
 		t.Fatalf("provider attachment receipt = %#v", attachments)
+	}
+	if attachments[0].Source != "/workspace/proof.png" {
+		t.Fatalf("provider attachment lost authored source: %#v", attachments[0])
 	}
 
 	chatID := "actor-image-chat"
@@ -68,7 +71,7 @@ func TestActorFileStoreRetainsContentAddressedProviderAttachmentAcrossRestart(t 
 		t.Fatalf("restarted actor attachments = %#v", state.Ledger)
 	}
 	gotAttachment := state.Ledger[0].Attachments[0]
-	if gotAttachment.Ref != attachments[0].Ref || gotAttachment.Digest != attachments[0].Digest {
+	if gotAttachment.Ref != attachments[0].Ref || gotAttachment.Digest != attachments[0].Digest || gotAttachment.Source != attachments[0].Source {
 		t.Fatalf("restarted actor changed attachment identity: got=%#v want=%#v", gotAttachment, attachments[0])
 	}
 	resolved, err := sessions.ResolveProviderAttachment(context.Background(), gotAttachment)
@@ -76,7 +79,11 @@ func TestActorFileStoreRetainsContentAddressedProviderAttachmentAcrossRestart(t 
 		t.Fatalf("resolve restarted actor attachment: %v", err)
 	}
 	resolvedImage, ok := resolved.(map[string]any)
-	if !ok || resolvedImage["data"] != imageData || resolvedImage["mimeType"] != "image/png" || resolvedImage["name"] != "proof.png" {
+	if !ok || resolvedImage["data"] != imageData || resolvedImage["mimeType"] != "image/png" || resolvedImage["name"] != "proof.png" || resolvedImage["source"] != "/workspace/proof.png" {
 		t.Fatalf("resolved actor attachment = %#v", resolved)
+	}
+	projected, err := projectionAttachments(state.Ledger[0].Attachments)
+	if err != nil || len(projected) != 1 || mapFromAnyMain(projected[0])["source"] != "/workspace/proof.png" {
+		t.Fatalf("projected actor attachment lost authored source: %v %#v", err, projected)
 	}
 }

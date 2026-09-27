@@ -1149,6 +1149,9 @@ func projectionAttachments(attachments []providercontract.Attachment) ([]any, er
 			"mimeType": attachment.MIMEType, "name": attachment.Name,
 			sessionImageDataRefField: ref,
 		}
+		if attachment.Source != "" {
+			item["source"] = attachment.Source
+		}
 		out = append(out, item)
 	}
 	return out, nil

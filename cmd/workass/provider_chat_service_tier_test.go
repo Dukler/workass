@@ -52,6 +52,21 @@ func TestCodexServiceTierSurvivesExactResumeAndClearsExplicitly(t *testing.T) {
 	}
 	save("fast", "speed-fast")
 	run("fast", "speed-first")
+	// The actor can publish its terminal row before the native host finishes
+	// releasing the active turn. Select requires that host boundary too.
+	settled := time.NewTicker(10 * time.Millisecond)
+	defer settled.Stop()
+	for {
+		turns, _ := manager.TurnDiagnostics("speed-tab", "speed-chat", 1)["turns"].([]any)
+		if len(turns) > 0 && mapFromAnyMain(turns[0])["active"] == false {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("native turn did not settle before exact selection")
+		case <-settled.C:
+		}
+	}
 	info, err = runtime.Select(ctx, acp.SessionOptions{TabID: "speed-tab", ChatID: "speed-chat", ProviderID: "codex", CWD: root})
 	if err != nil {
 		t.Fatal(err)

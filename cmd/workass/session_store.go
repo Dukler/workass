@@ -601,7 +601,7 @@ func (s *sessionStore) PlanProviderAttachments(images []any) (providerAttachment
 		attachmentName := firstNonEmptyString(fieldString(image, "name"), fmt.Sprintf("image-%d", index+1))
 		attachments = append(attachments, providercontract.Attachment{
 			ID: "image-" + name[:16], Name: attachmentName, MIMEType: mimeType,
-			Digest: name, Size: size, Ref: providerSessionImageRefPrefix + ref,
+			Digest: name, Size: size, Source: fieldString(image, "source"), Ref: providerSessionImageRefPrefix + ref,
 		})
 	}
 	return providerAttachmentPlan{Attachments: attachments, writes: writes, stateDir: stateDir}, nil
@@ -622,9 +622,13 @@ func (s *sessionStore) ResolveProviderAttachment(_ context.Context, attachment p
 	if attachment.Digest != "" && sessionImageName(data) != strings.TrimSpace(attachment.Digest) {
 		return nil, errors.New("provider attachment digest changed after persistence")
 	}
-	return map[string]any{
+	resolved := map[string]any{
 		"mimeType": strings.TrimSpace(attachment.MIMEType), "data": data, "name": strings.TrimSpace(attachment.Name),
-	}, nil
+	}
+	if attachment.Source != "" {
+		resolved["source"] = attachment.Source
+	}
+	return resolved, nil
 }
 
 // The subagent: namespace is reserved for internal ACP sessions. A subagent

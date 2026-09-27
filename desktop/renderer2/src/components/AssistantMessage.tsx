@@ -1,7 +1,7 @@
 import { memo, useCallback, useMemo, useSyncExternalStore } from 'react';
 import type { MessageImage, Msg, ThinkingEvent, TimelineEvent } from '../store/types';
 import { store, useApp, useMsgVersion, useClock } from '../store/store';
-import { parseBlocks } from '../markdown/blocks';
+import { parseBlocks, type SignedBlock } from '../markdown/blocks';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
 import { StepRow, StepWords, ToolGroup, PermCard, CompactionRow, RestoredRow } from './messages';
 import { IcStampCopy, IcWarnTri, IcRetryArc } from '../icons';
@@ -13,14 +13,41 @@ import { relTime } from '../rel-time';
 import { messageImageSrc } from '../image-drafts';
 import { connectedArtifactURL } from '../connected-artifacts';
 import { configuredModelUnavailable } from '../model-selection';
-import { normalizeMarkdownTarget, type InlineMediaResolver } from '../markdown/inline';
+import { markdownImageReferences, normalizeMarkdownTarget, type InlineMediaResolver } from '../markdown/inline';
 
-function assistantMediaResolver(tabId: string, images: MessageImage[] | undefined, artifactOrigin = ''): InlineMediaResolver {
+function renderedImageReferences(blocks: SignedBlock[]): Array<{ label: string; target: string }> {
+  return blocks.flatMap(({ block }) => {
+    switch (block.kind) {
+      case 'p': case 'heading': case 'quote': return markdownImageReferences(block.raw);
+      case 'list': return block.items.flatMap(markdownImageReferences);
+      case 'table': return [...block.header, ...block.rows.flat()].flatMap(markdownImageReferences);
+      default: return [];
+    }
+  });
+}
+
+function assistantMediaResolver(tabId: string, images: MessageImage[] | undefined, blocks: SignedBlock[], artifactOrigin = ''): { media: InlineMediaResolver; gallery: MessageImage[] } {
   const bySource = new Map<string, MessageImage>();
   for (const image of images ?? []) {
     if (image.source) bySource.set(normalizeMarkdownTarget(image.source), image);
   }
-  return {
+  const references = renderedImageReferences(blocks);
+  const gallery: MessageImage[] = [];
+  const legacyImages = (images ?? []).filter((image) => !image.source);
+  const imageNameCounts = new Map<string, number>();
+  for (const image of legacyImages) imageNameCounts.set(image.name ?? '', (imageNameCounts.get(image.name ?? '') ?? 0) + 1);
+  for (const image of legacyImages) {
+    // The importer accepts eligible Markdown images in document order. Older
+    // records lost source, so a repeated label belongs to its first target.
+    const reference = references.find(({ label }) => label === image.name);
+    const target = reference && normalizeMarkdownTarget(reference.target);
+    if (image.name && imageNameCounts.get(image.name) === 1 && target && !bySource.has(target)) {
+      bySource.set(target, image);
+    } else {
+      gallery.push(image);
+    }
+  }
+  return { gallery, media: {
     revision: images ?? null,
     resolve: (target) => {
       const image = bySource.get(normalizeMarkdownTarget(target));
@@ -29,11 +56,11 @@ function assistantMediaResolver(tabId: string, images: MessageImage[] | undefine
     resolveLink: (target) => connectedArtifactURL(artifactOrigin, target, undefined, undefined, store.localMachineId()),
     openLink: (target) => store.openHostedArtifact(tabId, target, artifactOrigin),
     open: (media) => store.openImageLightbox(media.src, media.alt),
-  };
+  } };
 }
 
 function StructuredAssistantImages({ images }: { images: MessageImage[] | undefined }) {
-  const structured = (images ?? []).filter((image) => !image.source);
+  const structured = images ?? [];
   if (!structured.length) return null;
   return (
     <div className="assistant-images" aria-label="Imágenes de la respuesta">
@@ -95,7 +122,7 @@ function AssistantSliceBody({
   );
   const parsedSegments = segs.map((segment) => 'prose' in segment ? parseBlocks(segment.prose) : null);
   const resultBlocks = msg.result ? parseBlocks(msg.result) : [];
-  const media = assistantMediaResolver(tabId, msg.images, artifactOrigin);
+  const { media, gallery } = assistantMediaResolver(tabId, msg.images, parsedSegments.flatMap((blocks) => blocks ?? []).concat(resultBlocks), artifactOrigin);
   const visualizeChatId = store.chat(tabId)?.chatId ?? '';
   const blockKeys = stableMarkdownBlockKeys(msg, parsedSegments.flatMap((blocks) => blocks?.map((block) => block.sig) ?? []));
   let blockIndex = 0;
@@ -134,7 +161,7 @@ function AssistantSliceBody({
           {resultBlocks.map((block, index) => <MarkdownBlock key={`result-${index}-${block.sig}`} sb={block} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} artifactOrigin={artifactOrigin} />)}
         </div>
       )}
-      <StructuredAssistantImages images={msg.images} />
+      <StructuredAssistantImages images={gallery} />
 
       {!running && thinkEv && <StepRow ev={thinkEv} />}
 
