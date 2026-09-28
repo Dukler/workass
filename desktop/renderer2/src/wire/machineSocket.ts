@@ -150,14 +150,18 @@ export class MachineSocket {
   get instanceId(): string { return this.lastInstanceId; }
   get connectionGroup(): string { return this.activeConnectionGroup; }
 
-  connect(credentials?: MachineCredentials): void {
+  connect(credentials?: MachineCredentials, automaticReconnect = false): void {
 	if (credentials) this.credentials = { ...credentials };
 	this.cancelReconnect();
     this.closedByCaller = false;
-    // A superseded socket's in-flight invokes are rejected, never resolved by
-    // whatever the new socket happens to answer (lan_bridge.go:64).
+    // A superseded socket's dispatched invokes are rejected, never resolved by
+    // whatever the new socket happens to answer (lan_bridge.go:64). Invokes
+    // queued while the old socket was closed have not left this client, so an
+    // automatic reconnect can carry them to the next approved generation.
     const firstConnect = this.gen === 0 && this.socket === null;
-    if (this.pending.size && !firstConnect) this.rejectPending('socket-replaced');
+    const carryQueued = (firstConnect || automaticReconnect) && this.socket === null
+      && Array.from(this.pending.values()).every((pending) => !pending.dispatched);
+    if (this.pending.size && !carryQueued) this.rejectPending('socket-replaced');
     if (this.socket) {
       const prior = this.socket;
       this.socket = null;
@@ -170,10 +174,11 @@ export class MachineSocket {
 		? this.opts.connectionGroup()
 		: this.opts.connectionGroup;
 	this.activeConnectionGroup = String(configuredGroup ?? '').trim();
-	if (firstConnect) {
+	if (carryQueued) {
 		// Registry-owned auxiliary placeholders accept the user's first click while
-		// fleet enrolment persists the derived token. Rebind those undispatched
-		// invokes to the first real socket generation instead of rejecting them.
+		// fleet enrolment persists the derived token. The same rule applies to
+		// commands queued during an automatic reconnect delay. Rebind only
+		// undispatched invokes to the new socket generation.
 		for (const pending of this.pending.values()) pending.generation = gen;
 		for (const queued of this.queue) queued.generation = gen;
 	}
@@ -196,7 +201,7 @@ export class MachineSocket {
 		if (!this.closedByCaller) {
 			this.reconnectTimer = this.later(() => {
 				this.reconnectTimer = null;
-				if (!this.closedByCaller) this.connect();
+				if (!this.closedByCaller) this.connect(undefined, true);
 			}, RECONNECT_DELAY_MS);
 		}
     };
