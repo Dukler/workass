@@ -153,6 +153,27 @@ test('socket loss after job:start dispatch reports possible actor acceptance', a
   });
 });
 
+test('a job:start queued during the reconnect delay reaches the next approved socket', async () => {
+  const h = harness();
+  h.link.connect();
+  h.last().onopen?.();
+  h.last().access({ state: 'approved', instanceId: 'i-1' });
+  h.last().close();
+
+  const start = h.link.invoke('job:start', { operationId: 'queued-during-reconnect' });
+  const outcome = start.then((value) => value, (error) => error);
+  const reconnect = h.timers.find((timer) => timer.ms === 1_500);
+  assert.ok(reconnect);
+  reconnect.fn();
+  h.last().onopen?.();
+  h.last().access({ state: 'approved', instanceId: 'i-1' });
+
+  const frame = h.last().frames().find((candidate) => candidate.channel === 'job:start');
+  assert.ok(frame, 'the unsent request keeps its owner across automatic reconnect');
+  h.last().reply(frame.id, { id: 'accepted-job' });
+  assert.deepEqual(await outcome, { id: 'accepted-job' });
+});
+
 // ---- generation and restart ---------------------------------------------
 
 test('a reply from a superseded socket is dropped, and its invoke is rejected', async () => {
