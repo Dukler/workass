@@ -60,8 +60,7 @@ test('full suite partitions every renderer test across six sequential isolated N
   const allScheduledScriptTests = [...scheduled, ...codexHost.args.filter(arg => arg.endsWith('.test.mjs')).map(file => path.basename(file))];
   assert.equal(new Set(allScheduledScriptTests).size, inventory.length, 'every script test is scheduled exactly once across both commands');
   assert.deepEqual(allScheduledScriptTests.slice().sort(), inventory, 'both commands cover the complete script test inventory');
-  assert.equal(go.args[3], '--workers');
-  assert.equal(Number(go.args[4]), Math.max(1, os.availableParallelism() - 4));
+  assert.equal(go.args.includes('--workers'), false, 'Go suite selects its host-aware default worker count');
   assert.equal(go.requireTestReport, true);
   assert.equal(go.requireGoReport, true);
   assert.equal(scripts.requireTestReport, true);
