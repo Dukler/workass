@@ -306,7 +306,7 @@ function createWindow(url, browserReporter, isController) {
   const own = (event) => event.sender === win.webContents;
   const removeImageCopyMenu = installImageCopyMenu({ win, Menu });
   ipcMain.handle('workass-browser:activate', (event, payload) => own(event) ? browserManager.activate(payload || {}) : null);
-  ipcMain.handle('workass-browser:resize', (event, payload) => own(event) ? browserManager.resize(payload && payload.chatId, payload && payload.bounds) : false);
+  ipcMain.handle('workass-browser:resize', (event, payload) => own(event) ? browserManager.resize(payload && payload.chatId, payload && payload.bounds, payload && payload.viewport) : false);
   ipcMain.handle('workass-browser:hide', (event, chatId) => own(event) ? browserManager.hide(chatId) : false);
   ipcMain.handle('workass-browser:close', (event, chatId) => own(event) ? browserManager.close(chatId) : false);
   ipcMain.handle('workass-browser:command', (event, payload) => own(event) ? browserManager.command(payload && payload.chatId, payload && payload.command, payload && payload.value) : null);

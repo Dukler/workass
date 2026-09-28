@@ -114,7 +114,7 @@ const HINTS = new Map([
   ["TestRuntimeDiagnosticsCoalescedFailureGetsTrailingCheckpoint", 1.06],
   ["TestSaveProviderConfigsConcurrentWritersUseDistinctTemps", 0.74],
   ["TestSpawnedWorkListCarriesTheObligation", 2.00],
-  ["TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession", 1.44],
+  ["TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession", 2.50],
   ["TestStatelessMCPMutationsRequireCallerStableOperationID", 0.67],
   ["TestStatelessMCPRoutesTaggedRemoteReadWithoutExposingOwner", 1.45],
   ["TestStatelessMCPRoutesUpdaterStatusAndAuthorizedApplyWithoutExposingOwner", 1.08],

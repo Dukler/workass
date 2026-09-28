@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import test from 'node:test';
-import { createServer } from 'vite';
+import test, { after } from 'node:test';
+import { createServer, type ViteDevServer } from 'vite';
 import type { Chat } from '../src/store/types.ts';
 import type { AgentRouteRequest, StartJobOpts } from '../src/wire/types.ts';
 import { tagId } from '../src/wire/machineIds.ts';
@@ -39,24 +39,34 @@ function request(method: string, params: Record<string, unknown> = {}): AgentRou
   return { requestId: `request-${method}`, method, params, expiresAt: Date.now() + 10_000 };
 }
 
+let sharedServer: ViteDevServer | undefined;
+let sharedStore: Promise<{
+  Store: new () => StoreShape;
+  setMachineRouter: (api: unknown) => void;
+}> | undefined;
+after(async () => { await sharedServer?.close(); });
+
 async function loadStore(t: { after(fn: () => void | Promise<void>): void }) {
-  const server = await createServer({
-    root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
-  });
-  const storeModule = await server.ssrLoadModule('/src/store/store.ts');
-  ownStore(storeModule.store);
-  t.after(async () => {
+  sharedStore ??= (async () => {
+    sharedServer = await createServer({
+      root: fileURLToPath(new URL('..', import.meta.url)),
+      server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
+    });
+    const storeModule = await sharedServer.ssrLoadModule('/src/store/store.ts');
+    ownStore(storeModule.store);
+    const apiModule = await sharedServer.ssrLoadModule('/src/wire/api.ts');
+    return {
+      Store: class extends (storeModule.Store as new () => StoreShape) {
+        constructor() { super(); ownStore(this); }
+      },
+      setMachineRouter: apiModule.setMachineRouter as (api: unknown) => void,
+    };
+  })();
+  t.after(() => {
     for (const store of fixtureStores) clearFixtureStoreTimers(store);
-    await server.close();
+    fixtureStores.length = 0;
   });
-  const apiModule = await server.ssrLoadModule('/src/wire/api.ts');
-  return {
-    Store: class extends (storeModule.Store as new () => StoreShape) {
-      constructor() { super(); ownStore(this); }
-    },
-    setMachineRouter: apiModule.setMachineRouter as (api: unknown) => void,
-  };
+  return sharedStore;
 }
 
 interface StoreShape {

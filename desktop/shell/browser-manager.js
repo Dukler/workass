@@ -1225,7 +1225,7 @@ class BrowserManager {
     return this.serializePresentation(() => this.setViewportSerialized(entry, viewport));
   }
 
-  async setViewportSerialized(entry, viewport) {
+  async setViewportSerialized(entry, viewport, present = true) {
     this.assertCurrentEntry(entry);
     const next = validateViewport(viewport.width, viewport.height);
     if (entry.viewport.width === next.width && entry.viewport.height === next.height && entry.viewport.deviceScaleFactor === next.deviceScaleFactor) {
@@ -1241,7 +1241,7 @@ class BrowserManager {
     entry.effectiveViewport = effective;
     entry.viewportGeneration += 1;
     entry.screenshots.clear();
-    if (this.attachedView === entry.view) await this.attach(entry);
+    if (present && this.attachedView === entry.view) await this.attach(entry);
     else if (entry.captureHostAttached && entry.captureHost && !entry.captureHost.isDestroyed()) {
       try { entry.captureHost.setBounds({ x: 0, y: 0, width: next.width, height: next.height }); } catch { /* the hidden surface keeps the page metrics */ }
       entry.view.setBounds({ x: 0, y: 0, width: next.width, height: next.height });
@@ -1343,6 +1343,15 @@ class BrowserManager {
 
   async attach(entry) {
     this.assertCurrentEntry(entry);
+    // The capture host keeps a background page at its logical viewport size.
+    // Prepare the fitted bounds and metrics while it is still hidden: adding
+    // that full-size view to the visible window first paints over the chat.
+    const fitted = entry.presentationBounds ? presentationFor(entry.viewport, entry.presentationBounds) : null;
+    if (fitted) {
+      entry.presentationScale = fitted.scale || 1;
+      entry.effectiveViewport = await this.applyAndReadDeviceEmulation(entry, entry.viewport, entry.presentationScale);
+      this.assertCurrentEntry(entry);
+    }
     if (this.attachedView !== entry.view) {
       if (this.attachedView) {
         const previous = this.browserEntries().find((candidate) => candidate.view === this.attachedView);
@@ -1365,24 +1374,20 @@ class BrowserManager {
         entry.captureHost.contentView.removeChildView(entry.view);
         entry.captureHostAttached = false;
       }
+      if (fitted) entry.view.setBounds(fitted.bounds);
       this.win.contentView.addChildView(entry.view);
       this.attachedView = entry.view;
-    }
-    entry.visible = true;
-    if (entry.presentationBounds) {
-      const fitted = presentationFor(entry.viewport, entry.presentationBounds);
-      entry.presentationScale = fitted.scale || 1;
-      entry.effectiveViewport = await this.applyAndReadDeviceEmulation(entry, entry.viewport, entry.presentationScale);
-      this.assertCurrentEntry(entry);
+    } else if (fitted) {
       entry.view.setBounds(fitted.bounds);
     }
+    entry.visible = true;
   }
 
   activate(options) {
     return this.serializePresentation(() => this.activateSerialized(options));
   }
 
-  async activateSerialized({ chatId, conversationId, bounds, url }) {
+  async activateSerialized({ chatId, conversationId, bounds, viewport, url }) {
     const id = safeChatId(chatId);
     // Adopt any background entry the agent opened for this conversation (keyed by
     // its conversation id) so the user's visible view and the agent's browser are
@@ -1394,6 +1399,7 @@ class BrowserManager {
     entry.presentationBounds = safeBounds(bounds, this.win.getContentSize());
     entry.bounds = entry.presentationBounds;
     if (entry.ready && await entry.ready !== true) throw new Error(entry.error || 'browser page initialization failed');
+    if (viewport) await this.setViewportSerialized(entry, viewport, false);
     // Opening the pane must always leave the user with a browser, so an
     // unsupported URL becomes a visible pane error instead of a failed open.
     const resolved = resolveBrowserURL(url);
@@ -1413,16 +1419,17 @@ class BrowserManager {
     return this.publish(entry);
   }
 
-  resize(chatId, bounds) {
-    return this.serializePresentation(() => this.resizeSerialized(chatId, bounds));
+  resize(chatId, bounds, viewport) {
+    return this.serializePresentation(() => this.resizeSerialized(chatId, bounds, viewport));
   }
 
-  async resizeSerialized(chatId, bounds) {
+  async resizeSerialized(chatId, bounds, viewport) {
     const id = safeChatId(chatId);
     const entry = this.entries.get(id);
     if (!entry || this.activeId !== id) return false;
     entry.presentationBounds = safeBounds(bounds, this.win.getContentSize());
     entry.bounds = entry.presentationBounds;
+    if (viewport) await this.setViewportSerialized(entry, viewport, false);
     if (this.attachedView === entry.view) await this.attach(entry);
     return true;
   }

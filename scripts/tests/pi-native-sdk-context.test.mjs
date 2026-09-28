@@ -1,7 +1,7 @@
 // The installed official SDK is the integration boundary. A loopback fixture
 // captures actual provider requests and returns fixed protocol responses; no
 // model inference, vendor account, or user Pi profile is used as an oracle.
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,readFile,writeFile,rm,access} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -56,6 +56,8 @@ function hostClient(env, cwd) {
   };
 }
 
+// Each case owns a separate Pi host, project, agent state, and loopback server.
+describe('official Pi SDK context fixtures', { concurrency: true }, () => {
 test('official Pi SDK preserves provider instructions and tool deltas across fresh input and exact host-restart resume', {
   skip: !process.env.WORKASS_TEST_PI_EXECUTABLE && 'Run through TestPiNativeSDKProviderContext with an installed official Pi SDK',
   timeout: 40000,
@@ -263,4 +265,5 @@ export default function(pi){
   const repaired=requests[1].messages.find(message=>message.role==='toolResult'&&JSON.stringify(message.content).includes('Tool execution outcome is unknown'));
   assert.ok(repaired,'resumed provider request must receive an explicit unknown-outcome tool result');
   assert.ok(requests[1].messages.some(message=>message.role==='assistant'&&message.content?.some(block=>block.type==='toolCall'&&block.id==='fixture-crash-call')),'resumed provider context must retain the original assistant tool call');
+});
 });

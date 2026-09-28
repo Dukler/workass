@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useInsertionEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { store, useApp } from '../store/store';
 import { chatPane } from '../store/right-pane';
@@ -81,9 +81,11 @@ export function App() {
   }, []);
 
   // Reflect pane / settings state onto #root (the grid host lives in index.html).
+  // Install the grid before BrowserPanel's layout effect measures its native view;
+  // a passive effect leaves the old chat's columns in place for that first read.
   // Custom drag widths drive CSS vars the grid templates consume; rail-wide folds
   // into the effective rail width so ⤢ composes with a custom width.
-  useEffect(() => {
+  useInsertionEffect(() => {
     const root = document.getElementById('root');
     if (!root) return;
     root.style.setProperty('--side-w', `${app.panes.sideW}px`);

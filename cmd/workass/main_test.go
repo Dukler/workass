@@ -2790,7 +2790,11 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 		return countWireMethod(methods, "_workass/claude/usage") >= 1
 	})
 	_ = client.waitJobEvent(t, fieldString(job, "id"), "end", 5*time.Second)
-	methods = readWireFakeMethods(t, tracePath)
+	// The terminal turn schedules its own plan refresh after the attach-time
+	// read. Wait for that request before measuring the explicit refresh below.
+	methods = waitWireFakeMethods(t, tracePath, 2*time.Second, func(methods []string) bool {
+		return countWireMethod(methods, "_workass/claude/usage") >= 2
+	})
 	if countWireMethod(methods, "session/new") != 1 || countWireMethod(methods, "session/resume") != 0 || countWireMethod(methods, "session/load") != 0 {
 		t.Fatalf("real attach raced a duplicate session: methods=%v", methods)
 	}

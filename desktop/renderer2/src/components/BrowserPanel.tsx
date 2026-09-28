@@ -67,7 +67,10 @@ function LocalBrowserPanel({
     void api.hide(chatId);
     return () => {
       const el = viewport.current;
-      if (el && el.isConnected) void api.activate({ chatId, conversationId, bounds: boundsFor(el) });
+      if (el && el.isConnected) {
+        const bounds = boundsFor(el);
+        void api.activate({ chatId, conversationId, bounds, viewport: browserViewportForBounds(bounds) });
+      }
     };
   }, [api, chatId, conversationId, overlayOpen]);
 
@@ -113,10 +116,9 @@ function LocalBrowserPanel({
           const bounds = pendingBounds;
           pendingBounds = null;
           if (sameBrowserBounds(lastBounds, bounds)) continue;
-          await api.resize({ chatId, bounds });
-          if (disposed) return;
           const size = browserViewportForBounds(bounds);
-          await api.setViewport(chatId, size.width, size.height);
+          await api.resize({ chatId, bounds, viewport: size });
+          if (disposed) return;
           lastBounds = bounds;
         }
       } catch (error) {
@@ -142,11 +144,12 @@ function LocalBrowserPanel({
     if (root) layoutObserver.observe(root, { attributes: true, attributeFilter: ['class', 'style'] });
     addEventListener('resize', sync);
     const bounds = boundsFor(el);
-    void api.activate({ chatId, conversationId, bounds }).then((next) => {
+    void api.activate({ chatId, conversationId, bounds, viewport: browserViewportForBounds(bounds) }).then((next) => {
       if (disposed) return;
       setState(next);
       setAddress(next.url === 'about:blank' ? '' : next.url);
       activated = true;
+      lastBounds = bounds;
       sync();
     });
     return () => {
