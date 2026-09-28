@@ -123,6 +123,7 @@ func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *test
 	installFakeAgentWrapper(t, pathDir, "omp", "echo-prompt")
 	t.Setenv("HOME", pathDir)
 	t.Setenv("WORKASS_OPENCODE", "")
+	t.Setenv("WORKASS_PI", filepath.Join(pathDir, "missing-pi"))
 	t.Setenv("WORKASS_BUN", filepath.Join(pathDir, "node"))
 	t.Setenv("WORKASS_OMP_FIXTURE_DIR", t.TempDir())
 	t.Setenv("WORKASS_OMP_HOST", filepath.Join(root, "scripts", "omp-native-host.mjs"))
@@ -165,6 +166,7 @@ func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *test
 	assertProviderListItem(t, list, "claude", providerStatusNotFound, false)
 	assertProviderListItem(t, list, "codex", providerStatusNotFound, false)
 	assertProviderListItem(t, list, "opencode", providerStatusNotFound, false)
+	assertProviderListItem(t, list, "pi", providerStatusNotFound, false)
 	if devin["resolvedCommand"] == "" {
 		t.Fatalf("devin missing resolvedCommand: %#v", devin)
 	}
