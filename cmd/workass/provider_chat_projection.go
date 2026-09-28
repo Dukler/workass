@@ -155,6 +155,7 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 		}
 		projected["messages"] = messages
 		projected["historyComplete"] = len(messages) == intValue(projected["messageCount"])
+		deferArchiveToolImages(messages)
 		projectedChats = append(projectedChats, projected)
 	}
 	root["chats"] = projectedChats
@@ -261,6 +262,7 @@ func (r *providerChatRuntime) ProjectArchivePageBeforeByTab(tabID, beforeMessage
 	if err != nil {
 		return nil, false, err
 	}
+	deferArchiveToolImages(messages)
 	if err := rehydrateExternalSessionImages(messages, filepath.Dir(r.sessions.path)); err != nil {
 		return nil, false, err
 	}
@@ -299,10 +301,80 @@ func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHis
 			return nil, false, err
 		}
 	}
+	deferArchiveToolImages(messages)
 	if err := rehydrateExternalSessionImages(messages, filepath.Dir(r.sessions.path)); err != nil {
 		return nil, false, err
 	}
 	return messages, true, nil
+}
+
+// Tool media stays in the canonical ledger. Archive reads carry only its
+// immutable reference so one image-heavy assistant row cannot exceed the
+// websocket frame limit before the user can enter the chat. The renderer reads
+// each visible image through the same authenticated archive channel.
+func deferArchiveToolImages(messages []any) {
+	for _, raw := range messages {
+		message := mapFromAnyMain(raw)
+		for _, rawEvent := range anySlice(message["events"]) {
+			event := mapFromAnyMain(rawEvent)
+			if fieldString(event, "kind") != "tool" {
+				continue
+			}
+			for _, rawImage := range anySlice(event["images"]) {
+				image := mapFromAnyMain(rawImage)
+				if ref := fieldString(image, sessionImageDataRefField); ref != "" {
+					image["deferredImageRef"] = ref
+					image["data"] = ""
+					delete(image, sessionImageDataRefField)
+				}
+			}
+		}
+	}
+}
+
+func (r *providerChatRuntime) ProjectToolImageByTab(tabID, ref string) ([]any, bool, error) {
+	if _, ok := validSessionImageRef(ref); !ok {
+		return nil, false, errors.New("invalid archive image reference")
+	}
+	actor, found, err := r.actorByTab(tabID)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	state := actor.engine.Snapshot()
+	if state.Deleted {
+		return nil, false, errors.New("chat is deleted")
+	}
+	owned := func(timeline []chat.TimelineEntry) bool {
+		for _, event := range timeline {
+			if event.Tool == nil {
+				continue
+			}
+			for _, image := range event.Tool.Attachments {
+				if image.Ref == providerSessionImageRefPrefix+ref {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	allowed := false
+	for _, row := range state.Ledger {
+		if owned(row.Timeline) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed && state.Foreground != nil {
+		allowed = owned(state.Foreground.Timeline)
+	}
+	if !allowed {
+		return nil, false, errors.New("archive image does not belong to this chat")
+	}
+	data, err := readExternalSessionImage(ref, filepath.Dir(r.sessions.path))
+	if err != nil {
+		return nil, false, err
+	}
+	return []any{map[string]any{"data": data}}, true, nil
 }
 
 func (r *providerChatRuntime) actorByTab(tabID string) (*providerChatActor, bool, error) {

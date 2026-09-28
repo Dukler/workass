@@ -41,6 +41,16 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 		// byte-identical full response.
 		if len(args) > 1 {
 			options := mapFromAnyMain(args[1])
+			if _, requested := options["imageRef"]; requested {
+				image, found, err := providerChats.ProjectToolImageByTab(stringArg(args, 0), fieldString(options, "imageRef"))
+				if err != nil {
+					return nil, err
+				}
+				if found {
+					return image, nil
+				}
+				return []any{}, nil
+			}
 			if _, requested := options["beforeMessageId"]; requested {
 				if messages, found, err := providerChats.ProjectArchivePageBeforeByTab(
 					stringArg(args, 0), fieldString(options, "beforeMessageId"), intValue(options["limit"]),

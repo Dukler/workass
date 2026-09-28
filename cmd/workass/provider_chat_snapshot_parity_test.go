@@ -499,12 +499,20 @@ func snapshotParityAssertRichRendererContract(
 		t.Fatalf("thinking timeline = %#v", events[0])
 	}
 	tool := mapFromAnyMain(events[1])
+	toolImages := anySlice(tool["images"])
 	if fieldString(tool, "kind") != "tool" || fieldString(tool, "status") != "completed" ||
 		fieldString(tool, "output") != "verification output" || intValue(tool["startedAt"]) != 1786440010100 ||
 		intValue(tool["endedAt"]) != 1786440010200 || tool["subagentHeader"] != true ||
-		fieldString(tool, "subagentId") != "snapshot-child" || len(anySlice(tool["images"])) != 1 ||
-		fieldString(mapFromAnyMain(anySlice(tool["images"])[0]), "data") != "actor-owned image bytes" {
+		fieldString(tool, "subagentId") != "snapshot-child" || len(toolImages) != 1 {
 		t.Fatalf("tool timing/image/subagent projection = %#v", tool)
+	}
+	toolImage := mapFromAnyMain(toolImages[0])
+	if fieldString(toolImage, "deferredImageRef") == "" || fieldString(toolImage, "data") != "" {
+		t.Fatalf("tool image was not deferred: %#v", toolImage)
+	}
+	loadedToolImage, found, err := runtime.ProjectToolImageByTab(tabID, fieldString(toolImage, "deferredImageRef"))
+	if err != nil || !found || fieldString(mapFromAnyMain(loadedToolImage[0]), "data") != "actor-owned image bytes" {
+		t.Fatalf("deferred tool image = found:%v err:%v", found, err)
 	}
 	plan := mapFromAnyMain(events[2])
 	if fieldString(plan, "kind") != "plan" || len(anySlice(plan["entries"])) != 2 {

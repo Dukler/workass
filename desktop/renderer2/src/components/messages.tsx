@@ -1,9 +1,10 @@
-import { memo, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { memo, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import type { ThinkingEvent, PlanEvent, ToolEvent, PermissionState, RestoredEvent, MessageImage, SteerState } from '../store/types';
 import { renderInline } from '../markdown/inline';
 import { IcShield, IcCheck, IcArrowUp, IcClose, ModelIcon, ActionGlyph } from '../icons';
 import { store } from '../store/store';
 import { messageImageSrc } from '../image-drafts';
+import { call } from '../wire/api';
 import { isSubagentHeader, type SubagentNode } from '../subagent-layout';
 import { steerStatusLabel } from '../steering';
 import { displayDetail, splitTail } from '../tool-display';
@@ -304,27 +305,60 @@ export function ToolDetail({ t, standalone, trail }: { t: ToolEvent; standalone?
   );
 }
 
-function ToolImageGallery({ tools }: { tools: ToolEvent[] }) {
+function ToolImage({ image, tabId, alt }: { image: MessageImage; tabId: string; alt: string }) {
+  const button = useRef<HTMLButtonElement>(null);
+  const [visible, setVisible] = useState(false);
+  const [src, setSrc] = useState(() => image.deferredImageRef ? '' : messageImageSrc(image));
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!image.deferredImageRef) setSrc(messageImageSrc(image));
+  }, [image]);
+  useEffect(() => {
+    if (!image.deferredImageRef) return;
+    if (typeof IntersectionObserver === 'undefined') { setVisible(true); return; }
+    const observer = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting), { rootMargin: '400px' });
+    if (button.current) observer.observe(button.current);
+    return () => observer.disconnect();
+  }, [image.deferredImageRef]);
+  useEffect(() => {
+    if (!image.deferredImageRef) return;
+    if (!visible) { setSrc(''); return; }
+    let current = true;
+    setFailed(false);
+    void call('archiveLoad', tabId, { imageRef: image.deferredImageRef }).then((reply) => {
+      if (!current) return;
+      const data = Array.isArray(reply) && reply[0] && typeof reply[0] === 'object'
+        ? (reply[0] as { data?: unknown }).data : null;
+      if (typeof data === 'string' && data.length > 0) setSrc(data.startsWith('data:') ? data : `data:${image.mimeType};base64,${data}`);
+      else setFailed(true);
+    }).catch(() => { if (current) setFailed(true); });
+    return () => { current = false; };
+  }, [image.deferredImageRef, image.mimeType, tabId, visible]);
+  return (
+    <button ref={button} className="tool-image" disabled={!src} onClick={() => src && store.openImageLightbox(src, alt)} title={src ? 'Ampliar' : alt}>
+      {src ? <img src={src} alt={alt} /> : <span className="tool-image-pending">{failed ? 'Imagen no disponible' : 'Cargando imagen…'}</span>}
+    </button>
+  );
+}
+
+function ToolImageGallery({ tools, tabId }: { tools: ToolEvent[]; tabId: string }) {
   const images = tools.flatMap((tool) => (tool.images ?? []).map((image) => ({ image, tool })));
   if (!images.length) return null;
   return (
     <div className="tool-images" aria-label="Imágenes devueltas por herramientas">
       {images.map(({ image, tool }, index) => {
-        const src = messageImageSrc(image);
         const alt = image.name || `${tool.title || 'Herramienta'} · imagen ${index + 1}`;
         return (
-          <button className="tool-image" key={`${tool.key}-${image.mimeType}-${index}`} onClick={() => store.openImageLightbox(src, alt)} title="Ampliar">
-            <img src={src} alt={alt} />
-          </button>
+          <ToolImage image={image} tabId={tabId} alt={alt} key={`${tool.key}-${image.mimeType}-${index}`} />
         );
       })}
     </div>
   );
 }
 
-interface ToolGroupProps { tools: ToolEvent[]; revision?: readonly unknown[] }
+interface ToolGroupProps { tools: ToolEvent[]; tabId: string; revision?: readonly unknown[] }
 
-function ToolGroupView({ tools }: ToolGroupProps) {
+function ToolGroupView({ tools, tabId }: ToolGroupProps) {
   const st = groupState(tools);
   const running = st === 'running';
   // Always start collapsed — one clean line whether running or done. No
@@ -350,7 +384,7 @@ function ToolGroupView({ tools }: ToolGroupProps) {
       : dur ? <span className="evt-dur-head">{dur}</span> : null;
     return (
       <>
-        <ToolImageGallery tools={tools} />
+        <ToolImageGallery tools={tools} tabId={tabId} />
         <div className="toolsolo" data-status={st}>
           <ToolDetail t={tools[0]} standalone trail={trail} />
         </div>
@@ -360,7 +394,7 @@ function ToolGroupView({ tools }: ToolGroupProps) {
 
   return (
     <>
-      <ToolImageGallery tools={tools} />
+      <ToolImageGallery tools={tools} tabId={tabId} />
       <div className="toolgroup" data-status={st}>
         <button
           type="button"
@@ -394,7 +428,7 @@ function sameRevision(previous: readonly unknown[] | undefined, next: readonly u
   return true;
 }
 
-export const ToolGroup = memo(ToolGroupView, (previous, next) => sameRevision(previous.revision, next.revision));
+export const ToolGroup = memo(ToolGroupView, (previous, next) => previous.tabId === next.tabId && sameRevision(previous.revision, next.revision));
 
 // ── Subagent tracking (rail-owned) ───────────────────────────────────────────
 // When the agent spawns Task subagents, the daemon stamps each nested tool call
