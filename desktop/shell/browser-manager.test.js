@@ -668,6 +668,22 @@ test('viewport changes are per-tab, explicit, and independent from fitted panel 
   assert.equal(reset.viewportGeneration, 3);
 });
 
+test('background browser enters the visible pane at its final bounds and viewport', async () => {
+  const { manager, win } = fixture({ requestOpen: () => {} });
+  const tab = await manager.browserControl('browser.open', { chatId: 'pane-attach', url: 'example.com', visible: false });
+  const entry = manager.entries.get('pane-attach');
+  assert.equal(tab.viewport.width, 1440);
+  const attachedBounds = [];
+  const addChildView = win.contentView.addChildView;
+  win.contentView.addChildView = function (view) {
+    attachedBounds.push({ ...view.getBounds(), viewport: { ...entry.viewport } });
+    return addChildView.call(this, view);
+  };
+  await manager.activate({ chatId: 'pane-attach', bounds: { x: 900, y: 48, width: 285, height: 700 }, viewport: { width: 320, height: 786 } });
+  assert.deepEqual(attachedBounds, [{ x: 900, y: 48, width: 284, height: 700, viewport: { width: 320, height: 786, deviceScaleFactor: 1 } }]);
+  assert.equal(entry.viewportGeneration, 2);
+});
+
 test('full-page and clip screenshots return exact dimensions and preserve screenshot origins', async () => {
   const { manager } = fixture({ requestOpen: () => {}, nativeDpr: 2, fullPageHeight: 1801 });
   const tab = await manager.browserControl('browser.open', { chatId: 'capture-modes', visible: false });

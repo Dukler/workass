@@ -53,8 +53,8 @@ export interface WorkassBrowserState {
 
 export interface WorkassBrowserApi {
   supported: boolean;
-  activate(payload: { chatId: string; conversationId?: string; bounds: WorkassBrowserBounds; url?: string }): Promise<WorkassBrowserState>;
-  resize(payload: { chatId: string; bounds: WorkassBrowserBounds }): Promise<boolean>;
+  activate(payload: { chatId: string; conversationId?: string; bounds: WorkassBrowserBounds; viewport?: { width: number; height: number }; url?: string }): Promise<WorkassBrowserState>;
+  resize(payload: { chatId: string; bounds: WorkassBrowserBounds; viewport?: { width: number; height: number } }): Promise<boolean>;
   hide(chatId: string): Promise<boolean>;
   close(chatId: string): Promise<boolean>;
   command(chatId: string, command: 'navigate' | 'back' | 'forward' | 'reload' | 'stop', value?: string): Promise<WorkassBrowserState>;

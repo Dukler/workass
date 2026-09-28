@@ -22,11 +22,15 @@ export function fullSuiteCommands(repo = root) {
   const rendererFiles = files(path.join(repo, 'desktop/renderer2/tests'), /\.test\.ts$/);
   const rendererGroups = Array.from({ length: 6 }, () => []);
   rendererFiles.forEach((file, index) => rendererGroups[index % rendererGroups.length].push(file));
+  // This Vite-backed fixture is measured at roughly half a second. Move it
+  // from the longest renderer group to a shorter one without changing coverage.
+  const artifactFixture = rendererGroups[2].findIndex(file => path.basename(file) === 'remote-artifact-routing.test.ts');
+  if (artifactFixture >= 0) rendererGroups[0].push(...rendererGroups[2].splice(artifactFixture, 1));
   return [
     ...rendererGroups.map((group, index) => ({ name: `renderer_tests_${index + 1}`, command: 'node', args: ['--experimental-strip-types', '--test', '--test-isolation=none', '--test-concurrency=1', ...group], cwd: path.join(repo, 'desktop/renderer2'), requireTestReport: true })),
-    { name: 'shell_tests', command: 'node', args: ['--test', '--test-concurrency=4', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo, requireTestReport: true },
+    { name: 'shell_tests', command: 'node', args: ['--test', '--test-concurrency=3', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo, requireTestReport: true },
     { name: 'go_tests', command: 'node', args: [path.join(repo, 'scripts/test-go-suite.mjs'), '--cwd', repo], cwd: repo, requireTestReport: true, requireGoReport: true },
-    { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=6', ...orderedScriptTests], cwd: repo, requireTestReport: true },
+    { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=4', ...orderedScriptTests], cwd: repo, requireTestReport: true },
     ...(isolatedCodexHostTest ? [{ name: 'codex_native_host_tests', command: 'node', args: [path.join(repo, 'scripts/test-native-host-suite.mjs'), isolatedCodexHostTest], cwd: repo, requireTestReport: true }] : []),
     ...shellContracts,
   ];

@@ -31,7 +31,12 @@ func TestCodexNativeGoalThroughActorAndExactResume(t *testing.T) {
 	run := func(operation, prompt string) {
 		t.Helper()
 		if _, err := runtime.Start(ctx, map[string]any{"kind": "app-chat", "tabId": "goal-tab", "chatId": "goal-chat", "sessionId": info.SessionID, "operationId": operation, "userMessageId": operation + "-user", "assistantMessageId": operation + "-assistant", "prompt": prompt}, "human"); err != nil {
-			t.Fatal(err)
+			state, _ := runtime.Snapshot("goal-chat")
+			foreground := ""
+			if state.Foreground != nil {
+				foreground = string(state.Foreground.OperationID)
+			}
+			t.Fatalf("start %s: %v (foreground=%s)", operation, err, foreground)
 		}
 		waitProviderChatIdle(t, runtime, "goal-chat", 5*time.Second)
 		state, _ := runtime.Snapshot("goal-chat")
@@ -43,17 +48,13 @@ func TestCodexNativeGoalThroughActorAndExactResume(t *testing.T) {
 	// The fixture rejects this marker on turn/start: success proves the actor's
 	// wrapped context retained explicit command intent all the way to goal/set.
 	run("goal-start", "/goal [fixture:goal-complete] finish the migration")
-	info, err = runtime.Select(ctx, acp.SessionOptions{TabID: "goal-tab", ChatID: "goal-chat", ProviderID: "codex", CWD: root})
-	if err != nil {
-		t.Fatal(err)
-	}
 	before, _ := runtime.Snapshot("goal-chat")
 	attachment := before.Lanes[before.ActiveLaneID].Attachment
 	if attachment == nil || !attachment.CommandCatalogSupported || attachment.CommandCatalog == nil || len(attachment.CommandCatalog.Commands) != 1 || attachment.CommandCatalog.Commands[0].Name != "goal" {
 		t.Fatalf("native slash catalog lost from actor: %#v", attachment)
 	}
 	thread := before.Lanes[before.ActiveLaneID].Thread
-	if !runtime.CloseSession(ctx, info.SessionID) {
+	if !runtime.CloseSession(ctx, attachment.ConnectionID) {
 		t.Fatal("cannot detach goal session")
 	}
 	info, err = runtime.Select(ctx, acp.SessionOptions{TabID: "goal-tab", ChatID: "goal-chat", ProviderID: "codex", CWD: root})

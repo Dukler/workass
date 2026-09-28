@@ -13,6 +13,10 @@ scope. Log suggestions separately; do not act on them.
 3. `desktop/acp/README.md` — mock ACP server + probe usage (your test oracle).
 
 ## Fast handoff for Workass changes
+- For every bugfix request, reproduce the reported failure in an isolated dev
+  or test profile before changing the product code. Record the observed behavior
+  and its cause, then repeat the same scenario after the fix. If reproduction
+  is blocked, report the blocker rather than guessing at a fix.
 - A completed agent handoff with a scoped commit/diff and passing test commands
   is test evidence. Inspect the changed code once; do not rerun the same tests
   merely to duplicate the agent's result.

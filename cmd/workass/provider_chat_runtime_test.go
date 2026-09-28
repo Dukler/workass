@@ -1640,7 +1640,10 @@ func startSteerRegressionTurn(t *testing.T, runtime *providerChatRuntime, info a
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		state, ok := runtime.Snapshot("steer-regression-chat")
-		if ok && state.Foreground != nil && state.Foreground.Status == chat.ForegroundRunning {
+		diagnostics := runtime.manager.TurnDiagnostics("steer-regression-tab", "steer-regression-chat", 1)
+		turns, _ := diagnostics["turns"].([]any)
+		if ok && state.Foreground != nil && state.Foreground.Status == chat.ForegroundRunning &&
+			len(turns) > 0 && mapFromAnyMain(turns[0])["promptWrittenMs"] != nil {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

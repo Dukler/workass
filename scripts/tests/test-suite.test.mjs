@@ -44,9 +44,9 @@ test('full suite partitions every renderer test across six sequential isolated N
   assert.equal(new Set(assignedRendererFiles).size, rendererFiles.length);
   assert.deepEqual(assignedRendererFiles.slice().sort(), rendererFiles);
   assert.ok(rendererGroups.every(group => group.length > 0));
-  assert.equal(shell.args[1], '--test-concurrency=4');
+  assert.equal(shell.args[1], '--test-concurrency=3');
   assert.equal(shell.args.filter(arg => arg.endsWith('.test.js')).length, fs.readdirSync(path.join(root, 'desktop/shell')).filter(name => name.endsWith('.test.js')).length);
-  assert.equal(scripts.args[1], '--test-concurrency=6');
+  assert.equal(scripts.args[1], '--test-concurrency=4');
   const scriptTestDir = path.join(root, 'scripts/tests');
   const inventory = fs.readdirSync(scriptTestDir).filter(name => name.endsWith('.test.mjs')).sort();
   const measuredHeavy = ['release-pipeline-gates.test.mjs', 'release-pipeline-ship.test.mjs', 'release-pipeline-receipts.test.mjs', 'release-pipeline.test.mjs'];
