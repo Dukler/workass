@@ -2269,7 +2269,7 @@ test('resume rotates worker identity durably before arm and never terminalizes a
   assert.equal(scheduled.length, 1);
   scheduled.shift()();
   await manager.recoveryPromise;
-  assert.equal(manager.snapshot().phase, 'busy');
+  assert.equal(manager.snapshot().phase, 'busy', JSON.stringify(manager.snapshot()));
   assert.notEqual(manager.snapshot().phase, 'failed');
 });
 

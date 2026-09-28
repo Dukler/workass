@@ -1440,7 +1440,7 @@ func newSteerRegressionFixture(t *testing.T, publishers ...func(string, any)) (*
 		Provider: acp.ProviderConfig{
 			ID: "mock", Name: "Mock", Command: "node",
 			Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")}, CWD: root,
-			Env: map[string]string{"WORKASS_MOCK_ACP_DELAY_MS": "1"}, Enabled: true,
+			Env: map[string]string{"WORKASS_MOCK_ACP_DELAY_MS": "1", "WORKASS_MOCK_ACP_TRACE_FILE": filepath.Join(stateDir, "steer-prompt-trace.jsonl")}, Enabled: true,
 		},
 		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
 	})
@@ -1640,10 +1640,17 @@ func startSteerRegressionTurn(t *testing.T, runtime *providerChatRuntime, info a
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		state, ok := runtime.Snapshot("steer-regression-chat")
-		diagnostics := runtime.manager.TurnDiagnostics("steer-regression-tab", "steer-regression-chat", 1)
-		turns, _ := diagnostics["turns"].([]any)
+		trace, _ := os.ReadFile(filepath.Join(runtime.stateDir, "steer-prompt-trace.jsonl"))
+		enteredHold := false
+		for _, line := range bytes.Split(trace, []byte{'\n'}) {
+			var prompt struct{ SessionID, Text string }
+			if json.Unmarshal(line, &prompt) == nil && prompt.SessionID == info.SessionID && strings.Contains(prompt.Text, "[mock:hold-until-steer]") {
+				enteredHold = true
+				break
+			}
+		}
 		if ok && state.Foreground != nil && state.Foreground.Status == chat.ForegroundRunning &&
-			len(turns) > 0 && mapFromAnyMain(turns[0])["promptWrittenMs"] != nil {
+			enteredHold {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
