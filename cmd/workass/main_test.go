@@ -3002,6 +3002,8 @@ func TestWireProvidersDetectInvokeEmitsAndEnablesStubs(t *testing.T) {
 	installWireFakeAgentWrapper(t, pathDir, "devin")
 	installWireFakeAgentWrapper(t, pathDir, "qwen")
 	installWireNativeFrontierFixtures(t, root, pathDir)
+	t.Setenv("HOME", pathDir)
+	t.Setenv("WORKASS_OPENCODE", "")
 	t.Setenv("PATH", pathDir)
 	t.Setenv("WORKASS_PROD", "1")
 	t.Setenv("ASSISTANT_DEVIN", filepath.Join(pathDir, "devin"))
@@ -3055,6 +3057,7 @@ func TestWireProvidersDetectInvokeEmitsAndEnablesStubs(t *testing.T) {
 	qwen := assertWireProvider(t, providers, "qwen", "ready", true)
 	assertWireProvider(t, providers, "claude", "ready", true)
 	assertWireProvider(t, providers, "codex", "ready", true)
+	assertWireProvider(t, providers, "opencode", "not-found", false)
 	autoEnv, _ := qwen["autoEnv"].(map[string]any)
 	if autoEnv["OPENAI_BASE_URL"] != models.URL+"/v1" || autoEnv["OPENAI_MODEL"] != "wire-qwen-model" || autoEnv["OPENAI_API_KEY"] != "[redacted]" {
 		t.Fatalf("wire qwen autoEnv = %#v", autoEnv)
