@@ -28,9 +28,9 @@ export function fullSuiteCommands(repo = root) {
   if (artifactFixture >= 0) rendererGroups[0].push(...rendererGroups[2].splice(artifactFixture, 1));
   return [
     ...rendererGroups.map((group, index) => ({ name: `renderer_tests_${index + 1}`, command: 'node', args: ['--experimental-strip-types', '--test', '--test-isolation=none', '--test-concurrency=1', ...group], cwd: path.join(repo, 'desktop/renderer2'), requireTestReport: true })),
-    { name: 'shell_tests', command: 'node', args: ['--test', '--test-concurrency=3', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo, requireTestReport: true },
+    { name: 'shell_tests', command: 'node', args: ['--test', '--test-concurrency=2', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo, requireTestReport: true },
     { name: 'go_tests', command: 'node', args: [path.join(repo, 'scripts/test-go-suite.mjs'), '--cwd', repo], cwd: repo, requireTestReport: true, requireGoReport: true },
-    { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=4', ...orderedScriptTests], cwd: repo, requireTestReport: true },
+    { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=3', ...orderedScriptTests], cwd: repo, requireTestReport: true },
     ...(isolatedCodexHostTest ? [{ name: 'codex_native_host_tests', command: 'node', args: [path.join(repo, 'scripts/test-native-host-suite.mjs'), isolatedCodexHostTest], cwd: repo, requireTestReport: true }] : []),
     ...shellContracts,
   ];
