@@ -9,6 +9,7 @@ import (
 	"workass/internal/acp"
 	"workass/internal/chat"
 	providercontract "workass/internal/provider"
+	"workass/internal/wire"
 )
 
 func TestActorHistoryBudgetCountsRepeatedImageOccurrencesBeforeHydration(t *testing.T) {
@@ -47,6 +48,58 @@ func TestActorHistoryBudgetCountsRepeatedImageOccurrencesBeforeHydration(t *test
 		if mapFromAnyMain(image)["data"] != data {
 			t.Fatal("large row lost an image occurrence")
 		}
+	}
+}
+
+func TestImageHeavySingleAssistantRowOpensWithDeferredToolMedia(t *testing.T) {
+	stateDir, ref, data := imageReadFixture(t)
+	engine, err := chat.NewEngine("heavy-image-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeline := make([]chat.TimelineEntry, 50)
+	for index := range timeline {
+		images := make([]providercontract.Attachment, 6)
+		for image := range images {
+			images[image] = providercontract.Attachment{ID: fmt.Sprintf("image-%d-%d", index, image), MIMEType: "image/png", Ref: providerSessionImageRefPrefix + ref}
+		}
+		timeline[index] = chat.TimelineEntry{Key: fmt.Sprintf("tool-%d", index), Kind: providercontract.EventToolUpdate,
+			Tool: &providercontract.ToolEvent{ToolCallID: fmt.Sprintf("call-%d", index), Title: "Review", Attachments: images}}
+	}
+	if err := engine.Apply(chat.InitializeFork{Presentation: chat.PresentationState{TabID: "heavy-image-tab", Title: "Heavy images"},
+		SourceChatID: "source", OperationID: "create-heavy-images", Digest: "fixture", Messages: []chat.LedgerEvent{{
+			EventID: "image-row", MessageID: "assistant-row", OperationID: "image-turn", Role: "assistant", Text: "review", Status: "done", Timeline: timeline,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &providerChatRuntime{manager: &acp.Manager{}, sessions: sharedSessionStore(stateDir), stateDir: stateDir,
+		actors: map[string]*providerChatActor{"heavy-image-chat": {engine: engine}}, known: map[string]struct{}{"heavy-image-chat": {}}}
+	page, found, err := runtime.ProjectRecentArchiveByTab("heavy-image-tab", 10)
+	if err != nil || !found || len(page) != 1 {
+		t.Fatalf("recent image row: found=%v rows=%d err=%v", found, len(page), err)
+	}
+	encoded, err := json.Marshal(page)
+	if err != nil || len(encoded) >= actorHistoryPageBytes {
+		t.Fatalf("navigation row expanded past budget: bytes=%d err=%v", len(encoded), err)
+	}
+	first := mapFromAnyMain(anySlice(mapFromAnyMain(page[0])["events"])[0])
+	image := mapFromAnyMain(anySlice(first["images"])[0])
+	if fieldString(image, "deferredImageRef") != ref || fieldString(image, "data") != "" {
+		t.Fatalf("navigation image was not deferred: %#v", image)
+	}
+	loaded, found, err := runtime.ProjectToolImageByTab("heavy-image-tab", ref)
+	if err != nil || !found || fieldString(mapFromAnyMain(loaded[0]), "data") != data {
+		t.Fatalf("exact image read failed: found=%v err=%v", found, err)
+	}
+	if _, _, err := runtime.ProjectToolImageByTab("heavy-image-tab", "images/"+fmt.Sprintf("%064d", 0)); err == nil {
+		t.Fatal("unowned image reference was accepted")
+	}
+	hub := wire.NewHub()
+	registerArchiveHandlers(hub, nil, runtime)
+	wireImage, err := hub.Invoke("chat:archive-load", []any{"heavy-image-tab", map[string]any{"imageRef": ref}})
+	if err != nil || fieldString(mapFromAnyMain(anySlice(wireImage)[0]), "data") != data {
+		t.Fatalf("archive image wire read failed: err=%v", err)
 	}
 }
 

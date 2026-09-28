@@ -270,7 +270,7 @@ function foldToolGroups(segments: TimelineSegment[]): TranscriptTimelineSegment[
 // ToolGroup/ToolDetail paint; unchanged collapsed groups then skip prose-frame
 // renders while live status/output changes still invalidate immediately.
 function toolRenderSnapshot(tool: ToolEvent): unknown[] {
-  const imageSnapshot = (tool.images ?? []).flatMap((image) => [image.mimeType, image.data, image.name]);
+  const imageSnapshot = (tool.images ?? []).flatMap((image) => [image.mimeType, image.data, image.name, image.deferredImageRef]);
   return [
     tool.key, tool.status, tool.title, tool.toolKind, tool.command, tool.location, tool.output,
     tool.subagentHeader, tool.subagentProvider, tool.subagentModel, tool.startedAt, tool.endedAt,

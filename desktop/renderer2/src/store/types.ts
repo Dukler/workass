@@ -59,6 +59,8 @@ export interface MessageImage {
   mimeType: string;
   data: string;
   name?: string;
+  // Archive-only tool media is fetched when its thumbnail reaches the viewport.
+  deferredImageRef?: string;
   // Present when Workass imported ordinary ACP-authored ![label](path)
   // Markdown. It binds the image token to durable bytes and lets the renderer
   // suppress a redundant matching Open link; source-less structured ACP images

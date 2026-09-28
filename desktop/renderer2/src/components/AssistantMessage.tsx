@@ -147,7 +147,7 @@ function AssistantSliceBody({
     <div className="amsg">
       {running && <ControlsSkippedRow tabId={tabId} />}
       {segs.map((s, segmentIndex) => {
-        if ('tools' in s) return <ToolGroup key={s.key} tools={s.tools} revision={s.revision} />;
+        if ('tools' in s) return <ToolGroup key={s.key} tabId={tabId} tools={s.tools} revision={s.revision} />;
         if ('event' in s) return s.event.key === thinkEv?.key ? null : <EventView key={s.event.key} ev={s.event} />;
         return (
           <div className="chatfind-text" data-chat-find-text key={`prose-${segmentIndex}`}>

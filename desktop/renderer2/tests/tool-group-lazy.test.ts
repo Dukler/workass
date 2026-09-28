@@ -117,6 +117,19 @@ test('a multi-call image result renders as assistant media before its grouped to
   assert.doesNotMatch(html, /<details|class="tg-body"|hidden image-tool output|hidden-command|hidden command output/);
 });
 
+test('a saved tool image reserves its place before the tool row while its bytes load', () => {
+  const tool: ToolEvent = {
+    key: 'saved-image', at: 0, kind: 'tool', id: 'saved-image', toolKind: 'read',
+    title: 'View saved image', status: 'completed', command: null,
+    terminalId: null, input: null, output: null, location: null,
+    images: [{ mimeType: 'image/png', data: '', name: 'Saved frame', deferredImageRef: 'images/abc' }],
+  };
+  const html = renderToStaticMarkup(React.createElement(ToolGroup, { tabId: 'image-chat', tools: [tool] }));
+  assert.ok(html.indexOf('class="tool-images"') < html.indexOf('class="toolsolo"'));
+  assert.match(html, /Cargando imagen/);
+  assert.doesNotMatch(html, /<img|data:image\/png;base64/);
+});
+
 // v2 contract (approved mock toolrow-redesign, 2026-07-15): the tool NAME never
 // yields to the detail (no flex-shrink) so «Terminal» can't collapse to «T…»,
 // but a pathological sentence-length title is still capped so it can't blow the
