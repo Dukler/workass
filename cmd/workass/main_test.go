@@ -4358,6 +4358,9 @@ func shellQuoteForWire(s string) string {
 
 func buildWireWorkassAgentBinary(t *testing.T, root string) string {
 	t.Helper()
+	if binary := os.Getenv("WORKASS_TEST_AGENT_BINARY"); binary != "" {
+		return binary
+	}
 	suffix := ""
 	if filepath.Ext(os.Args[0]) == ".exe" {
 		suffix = ".exe"

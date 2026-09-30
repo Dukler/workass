@@ -250,10 +250,14 @@ func TestNodeProbeAgainstGoRun(t *testing.T) {
 	// The probe must start the real agent executable, rather than the in-process
 	// test helper, so this remains an end-to-end ACP initialize oracle.
 	agentPath := filepath.Join(t.TempDir(), "workass-agent")
-	build := exec.Command("go", "build", "-o", agentPath, "./cmd/workass-agent")
-	build.Dir = root
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build workass-agent for ACP probe: %v\n%s", err, output)
+	if binary := os.Getenv("WORKASS_TEST_AGENT_BINARY"); binary != "" {
+		agentPath = binary
+	} else {
+		build := exec.Command("go", "build", "-o", agentPath, "./cmd/workass-agent")
+		build.Dir = root
+		if output, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build workass-agent for ACP probe: %v\n%s", err, output)
+		}
 	}
 	cmd := exec.Command("node", "desktop/scripts/probe-acp.mjs", agentPath)
 	cmd.Dir = root

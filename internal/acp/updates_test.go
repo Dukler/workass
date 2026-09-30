@@ -226,8 +226,8 @@ func TestClaudeUpdateReresolvesTransientShimAndAtomicInstallSwap(t *testing.T) {
 	oldTarget := filepath.Join(versionsDir, "2.1.223")
 	newTarget := filepath.Join(versionsDir, "2.1.224")
 	marker := filepath.Join(home, "claude-update-ran")
-	writeExecutable(t, newTarget, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '2.1.224 (Claude Code)\\n'; exit 0; fi\nexit 1\n")
-	writeExecutable(t, oldTarget, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '2.1.223 (Claude Code)\\n'; exit 0; fi\nif [ \"$1\" = \"update\" ]; then ln -s "+shellQuote(newTarget)+" "+shellQuote(linkPath+".next")+" && mv -f "+shellQuote(linkPath+".next")+" "+shellQuote(linkPath)+" && rm -f "+shellQuote(oldTarget)+" && printf 'done\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 1\n")
+	writeFixtureExecutable(t, newTarget, "if [ \"$1\" = \"--version\" ]; then printf '2.1.224 (Claude Code)\\n'; exit 0; fi\nexit 1\n")
+	writeFixtureExecutable(t, oldTarget, "if [ \"$1\" = \"--version\" ]; then printf '2.1.223 (Claude Code)\\n'; exit 0; fi\nif [ \"$1\" = \"update\" ]; then ln -s "+shellQuote(newTarget)+" "+shellQuote(linkPath+".next")+" && mv -f "+shellQuote(linkPath+".next")+" "+shellQuote(linkPath)+" && rm -f "+shellQuote(oldTarget)+" && printf 'done\\n' > "+shellQuote(marker)+"; exit 0; fi\nexit 1\n")
 	if err := os.Symlink(oldTarget, linkPath); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestClaudeUpdateReresolvesTransientShimAndAtomicInstallSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 	staleShim := filepath.Join(shimDir, "claude")
-	writeExecutable(t, staleShim, "#!/bin/sh\nprintf 'transient shim must not run\\n' >&2\nexit 97\n")
+	writeFixtureExecutable(t, staleShim, "printf 'transient shim must not run\\n' >&2\nexit 97\n")
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+installDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

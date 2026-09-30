@@ -51,8 +51,21 @@ func writeFixtureExecutable(t *testing.T, path, script string) {
 }
 
 func init() {
-	path := os.Args[0] + fixtureExecutableSidecarSuffix
-	data, err := os.ReadFile(path)
+	path := os.Args[0]
+	data, err := os.ReadFile(path + fixtureExecutableSidecarSuffix)
+	// Cross-volume fixtures link to the host test binary. Stop at the first
+	// sidecar along the CLI's symlink chain rather than resolving past it.
+	for depth := 0; errors.Is(err, os.ErrNotExist) && depth < 32; depth++ {
+		target, linkErr := os.Readlink(path)
+		if linkErr != nil {
+			break
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(path), target)
+		}
+		path = target
+		data, err = os.ReadFile(path + fixtureExecutableSidecarSuffix)
+	}
 	if err != nil {
 		return
 	}
