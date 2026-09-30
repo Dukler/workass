@@ -372,8 +372,9 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
   const envFor = (dir, { testBinary = false } = {}) => ({
     ...process.env,
     TMPDIR: dir, TMP: dir, TEMP: dir,
-    ...(testBinary ? { GOMAXPROCS: '1' } : {}),
+    ...(testBinary ? { GOMAXPROCS: '1', ...(agentFixture ? { WORKASS_TEST_AGENT_BINARY: agentFixture } : {}) } : {}),
   });
+  let agentFixture;
   const run = async (command, args, label, commandCwd = cwd, { testBinary = false } = {}) => {
     if (interrupted) throw new Error(`interrupted by ${interrupted}`);
     if (jsonlError) throw new Error(`Go matrix log write failed: ${jsonlError.message}`);
@@ -401,6 +402,16 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
       return { importPath, dir, hasTests: hasTests === 'true' };
     });
     const packages = packageMetadata.map(pkg => pkg.importPath);
+    if (packages.includes('workass/cmd/workass-agent')) {
+      // Compile the production ACP executable once on the host filesystem.
+      // Pin its inode for this invocation just like the test binaries: mutable
+      // fixture data stays on RAM, while concurrent tests share real stdio code
+      // without paying macOS's fresh-executable launch penalty for every case.
+      const cachedAgent = path.join(binaryCache, 'workass-agent');
+      await run(go, ['build', '-trimpath', '-o', cachedAgent, './cmd/workass-agent'], 'compile-agent-fixture');
+      agentFixture = path.join(root, 'native-acp-fixture');
+      await link(cachedAgent, agentFixture);
+    }
     const heavyImportPaths = new Set(HEAVY_PACKAGES.map(pkg => packages.find(name => name.endsWith(pkg.slice(1))) ?? `workass/${pkg.slice(2)}`));
     const otherPackages = packageMetadata.filter(pkg => !heavyImportPaths.has(pkg.importPath));
     summary.otherPackages = otherPackages.map(pkg => pkg.importPath);

@@ -1899,6 +1899,9 @@ func catalogSummaryForACP(catalog map[string]any) string {
 
 func buildWorkassAgentBinary(t *testing.T, root string) string {
 	t.Helper()
+	if binary := os.Getenv("WORKASS_TEST_AGENT_BINARY"); binary != "" {
+		return binary
+	}
 	suffix := executableSuffix()
 	out := filepath.Join(t.TempDir(), "workass-agent"+suffix)
 	cmd := exec.Command("go", "build", "-trimpath", "-o", out, "./cmd/workass-agent")

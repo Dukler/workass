@@ -37,6 +37,8 @@ func (m *Manager) applyServiceTier(ctx context.Context, sessionID, tier string) 
 	if !supported {
 		return errors.New("requested service tier is not advertised by this provider")
 	}
+	finishConfigWrite := b.beginWorkassConfigWrite(sessionID)
+	defer finishConfigWrite()
 	result, err := b.request(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": configID, "value": tier}, 15*time.Second)
 	if err != nil {
 		return err

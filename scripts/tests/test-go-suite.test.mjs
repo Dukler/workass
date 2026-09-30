@@ -124,6 +124,32 @@ test('optional fixture root routes only Go test binary temp files there and remo
   assert.deepEqual(await import('node:fs/promises').then(fs => fs.readdir(fixtureRoot)), []);
 });
 
+test('native ACP fixtures share one freshly built pinned host executable and cleanup joins its users', async t => {
+  const f = await fixture(t);
+  const fixtureRoot = path.join(f.root, 'ram-fixtures');
+  await mkdir(fixtureRoot);
+  const invocations = [];
+  const fake = inProcessGoSpawn({
+    packages: ['workass/internal/acp', 'workass/cmd/workass', 'workass/cmd/workass-agent'],
+    record: (command, args, options) => invocations.push({ command, args, env: options.env }),
+  });
+  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, fixtureRoot, go: f.go, workers: 3, spawn: fake.spawn, signalHandlers: false });
+  assert.equal(result.ok, true, result.error);
+  const builds = invocations.filter(item => item.command === f.go && item.args[0] === 'build');
+  assert.equal(builds.length, 1, 'the real agent executable is rebuilt once per invocation');
+  assert.equal(builds[0].args.at(-1), './cmd/workass-agent');
+  assert.ok(!builds[0].args[builds[0].args.indexOf('-o') + 1].startsWith(fixtureRoot + path.sep));
+  const binaries = invocations.filter(item => String(item.command).endsWith('.test'));
+  const agents = new Set(binaries.map(item => item.env.WORKASS_TEST_AGENT_BINARY));
+  assert.equal(agents.size, 1, 'all isolated cases share the invocation-pinned executable');
+  const [agent] = agents;
+  assert.ok(path.isAbsolute(agent));
+  assert.ok(!agent.startsWith(fixtureRoot + path.sep));
+  assert.ok(binaries.every(item => item.env.TMPDIR.startsWith(fixtureRoot + path.sep)));
+  assert.equal(fake.active(), 0, 'all fixture users exited before cleanup');
+  await assert.rejects(access(agent), { code: 'ENOENT' });
+});
+
 test('metadata and all compile groups run while fixture is pending; test binaries wait for its root', async t => {
   const f = await fixture(t);
   let provideRoot;
@@ -271,6 +297,11 @@ function inProcessGoSpawn({ packages = ['workass/internal/one', 'workass/interna
       return child;
     }
     if (command === 'go' || path.basename(String(command)).startsWith('fake-go')) {
+      if (args[0] === 'build') {
+        writeFileSync(args[args.indexOf('-o') + 1], 'fake agent executable');
+        finish(0);
+        return child;
+      }
       if (args[0] === 'test' && args.includes('-c')) {
         const outputDir = args[args.indexOf('-o') + 1];
         const selectedPackages = args.slice(args.indexOf('-o') + 2);
