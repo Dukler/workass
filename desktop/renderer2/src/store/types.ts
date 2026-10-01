@@ -105,6 +105,7 @@ export interface Msg {
   // is the official turn/steer boundary, applied is the canonical client-id
   // receipt, and uncertain is a transport outcome that must not be replayed.
   steerState?: SteerState;
+  agentQueueId?: string;
   // Native Codex stages the continuation until its canonical userMessage
   // receipt arrives between sampling steps. Only a genuinely unresolved live
   // steer remains in the composer-adjacent tray; acknowledgement transfers the

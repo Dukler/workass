@@ -58,7 +58,7 @@ const ID_KEYS = new Set([
   'id', 'chatId', 'tabId', 'conversationId', 'parentChatId', 'parentTabId',
   'jobId', 'workId', 'subagentId', 'sessionId', 'requestId',
   'userMessageId', 'assistantMessageId', 'messageId', 'clientUserMessageId',
-  'continuationAssistantMessageId', 'queueId', 'planLatestMessageId',
+  'continuationAssistantMessageId', 'queueId', 'agentQueueId', 'queuedMessageId', 'planLatestMessageId',
   'steerContinuationId', 'steerContinuationFor', 'turnRootId', 'runningJobId',
   'lastMessageId', 'queueHeadId',
 ]);

@@ -184,6 +184,9 @@ function holdPromptUntilSteer(session) {
         if (String(filename || '') === path.basename(releaseFile) && fs.existsSync(releaseFile)) finish();
       });
       watcher.on('error', () => {});
+      // Release may win between the first exists check and watcher attachment.
+      // A file created before registration need not emit a later notification.
+      if (fs.existsSync(releaseFile)) finish();
     } catch {
       // The steer notification remains the primary release path. Tests use an
       // existing temporary directory, so a watcher failure is not expected.

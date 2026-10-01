@@ -2106,8 +2106,7 @@ func durableSteerInputForOperation(state chat.State, operationID providercontrac
 		found = true
 		break
 	}
-	if state.PendingSteer != nil && state.PendingSteer.OperationID == operationID {
-		pending := state.PendingSteer
+	if pending := state.PendingSteerFor(operationID); pending != nil {
 		input.Text = strings.TrimSpace(pending.Text)
 		input.Attachments = append([]providercontract.Attachment(nil), pending.Attachments...)
 		input.Presentation = pending.Presentation
@@ -2327,9 +2326,6 @@ func steerForegroundTarget(state chat.State, laneID providercontract.LaneID, gen
 	if !ok || (lane.Phase != chat.LaneRunning && !provisional) || lane.ConnectionGeneration != generation || lane.Attachment == nil || strings.TrimSpace(lane.Attachment.ConnectionID) != strings.TrimSpace(sessionID) {
 		return errors.New("steer session attachment generation is stale")
 	}
-	if state.PendingSteer != nil {
-		return errors.New("another steer is awaiting a provider receipt")
-	}
 	return nil
 }
 
@@ -2337,7 +2333,13 @@ func steerForegroundEnded(state chat.State) bool {
 	return state.Foreground == nil
 }
 
-func (r *providerChatRuntime) durableSteerReply(state chat.State, operationID providercontract.OperationID) (map[string]any, error) {
+func (r *providerChatRuntime) durableSteerReply(state chat.State, operationID providercontract.OperationID) (result map[string]any, err error) {
+	defer func() {
+		if result != nil {
+			result["agentQueueRevision"] = state.Presentation.AgentQueueRevision
+			result["actorRevision"] = state.Revision
+		}
+	}()
 	operationID = providercontract.NormalizeOperationID(string(operationID))
 	for _, entry := range state.Queue {
 		if entry.OperationID == operationID {
@@ -2361,11 +2363,14 @@ func (r *providerChatRuntime) durableSteerReply(state chat.State, operationID pr
 		switch entry.Status {
 		case chat.OutboxAmbiguous:
 			result := map[string]any{"ok": false, "live": false, "queued": false, "strategy": "uncertain", "error": "the provider did not confirm steering acceptance; input was not resent"}
-			if state.PendingSteer != nil && state.PendingSteer.OperationID == operationID && state.PendingSteer.AwaitConsumption {
+			if pending := state.PendingSteerFor(operationID); pending != nil && pending.AwaitConsumption {
 				result["receipt"] = true
 			}
 			return result, nil
 		case chat.OutboxFailed:
+			if entry.Input != nil && entry.Input.Presentation.Origin == "human" && entry.Input.Presentation.QueueID != "" {
+				return map[string]any{"ok": false, "strategy": "rejected", "error": "provider rejected steering; the original message remains queued"}, nil
+			}
 			return nil, &providercontract.Error{Kind: entry.LastError, Operation: operationID, Message: "provider rejected live steering without a safe queue transfer"}
 		case chat.OutboxAccepted, chat.OutboxConsumed, chat.OutboxCompleted, chat.OutboxPending, chat.OutboxDispatched:
 			strategy := "generic-live"
@@ -2373,11 +2378,9 @@ func (r *providerChatRuntime) durableSteerReply(state chat.State, operationID pr
 			if turnID != "" {
 				result["turnId"] = turnID
 			}
-			if state.PendingSteer != nil && state.PendingSteer.OperationID == operationID {
-				if state.PendingSteer.AwaitConsumption {
-					result["strategy"] = "receipt-live"
-					result["receipt"] = true
-				}
+			if state.Lanes[entry.LaneID].Delivery.SteerConsumptionReceipt {
+				result["strategy"] = "receipt-live"
+				result["receipt"] = true
 			}
 			return result, nil
 		}
@@ -2407,6 +2410,12 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 	if operationID == "" {
 		return nil, true, errors.New("live steer requires a stable client user message id")
 	}
+	boundary := mapFromAnyMain(arg["boundary"])
+	queueID := strings.TrimSpace(fieldString(boundary, "queuedMessageId"))
+	queueRevision := uint64(max(0, intValue(boundary["expectedQueueRevision"])))
+	if queueID != "" && boundary["expectedQueueRevision"] == nil {
+		return nil, true, errors.New("queued steer requires the observed queue revision")
+	}
 	rawImages := sliceArg(arg["images"])
 	attachmentPlan, err := r.sessions.PlanProviderAttachments(rawImages)
 	if err != nil {
@@ -2422,34 +2431,6 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 		}
 	}()
 	state := actor.engine.Snapshot()
-	for state.PendingSteer != nil {
-		if currentLaneID, currentGeneration, targetErr := steerAttachmentTarget(state, sessionID, requestedTabID, requestedChatID); targetErr != nil || currentLaneID != laneID || currentGeneration != generation {
-			if targetErr != nil {
-				return nil, true, targetErr
-			}
-			return nil, true, errors.New("steer session attachment generation is stale")
-		}
-		if durable, found := durableSteerInputForOperation(state, operationID); found {
-			if !sameSteerImmutableInput(durable, operationID, prompt, inputAttachments, continuationID) {
-				return nil, true, errors.New("steer operation id was reused for different content")
-			}
-			result, readErr := r.durableSteerReply(state, operationID)
-			return result, true, readErr
-		}
-		settled := actor.engine.PendingSteerSettled()
-		actor.mu.Unlock()
-		actorLocked = false
-		if settled != nil {
-			select {
-			case <-settled:
-			case <-ctx.Done():
-				return nil, true, ctx.Err()
-			}
-		}
-		actor.mu.Lock()
-		actorLocked = true
-		state = actor.engine.Snapshot()
-	}
 	if currentLaneID, currentGeneration, targetErr := steerAttachmentTarget(state, sessionID, requestedTabID, requestedChatID); targetErr != nil || currentLaneID != laneID || currentGeneration != generation {
 		if targetErr != nil {
 			return nil, true, targetErr
@@ -2457,6 +2438,9 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 		return nil, true, errors.New("steer session attachment generation is stale")
 	}
 	if durable, found := durableSteerInputForOperation(state, operationID); found {
+		if strings.TrimSpace(durable.Presentation.QueueID) != queueID {
+			return nil, true, errors.New("steer operation id was reused for a different queue owner")
+		}
 		if !sameSteerImmutableInput(durable, operationID, prompt, inputAttachments, continuationID) {
 			return nil, true, errors.New("steer operation id was reused for different content")
 		}
@@ -2490,6 +2474,7 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 	}
 	if err := actor.engine.ApplyPrepared(chat.Steer{
 		OperationID: operationID, Text: prompt, Attachments: inputAttachments, Presentation: presentation,
+		QueueID: queueID, QueueRevision: queueRevision,
 	}, attachmentPlan.Materialize); err != nil {
 		state = actor.engine.Snapshot()
 		if _, exists := state.Operations[operationID]; exists {
@@ -2531,6 +2516,9 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 		return nil, true, readErr
 	}
 	if executeErr != nil {
+		if result["strategy"] == "rejected" {
+			return result, true, nil
+		}
 		return nil, true, executeErr
 	}
 	return result, true, nil

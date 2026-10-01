@@ -12,6 +12,7 @@ export interface MirrorMsg {
   result?: string;
   status: 'pending' | 'running' | 'done' | 'failed' | 'cancelled'; at: string | null;
   steerState?: 'sending' | 'accepted' | 'applied' | 'uncertain';
+  agentQueueId?: string;
   steerBoundary?: 'waiting';
   steerContinuationId?: string;
   steerContinuationFor?: string;

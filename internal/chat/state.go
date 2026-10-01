@@ -308,6 +308,57 @@ type PendingSteer struct {
 	Presentation     provider.TurnPresentation
 	Status           SteerStatus
 	AwaitConsumption bool
+	QueuedEntry      *StagedQueueEntry `json:",omitempty"`
+	QueuedIndex      int               `json:",omitempty"`
+	// Rapid directions share the foreground turn, but each owns its input and
+	// delivery receipt independently until consumption or terminal settlement.
+	Next *PendingSteer `json:",omitempty"`
+}
+
+func (s State) PendingSteerFor(operationID provider.OperationID) *PendingSteer {
+	for pending := s.PendingSteer; pending != nil; pending = pending.Next {
+		if pending.OperationID == operationID {
+			return pending
+		}
+	}
+	return nil
+}
+
+func (s *State) appendPendingSteer(pending *PendingSteer) {
+	tail := &s.PendingSteer
+	for *tail != nil {
+		tail = &(*tail).Next
+	}
+	*tail = pending
+}
+
+func (s *State) removePendingSteer(operationID provider.OperationID) {
+	link := &s.PendingSteer
+	for *link != nil {
+		if (*link).OperationID == operationID {
+			*link = (*link).Next
+			return
+		}
+		link = &(*link).Next
+	}
+}
+
+func clonePendingSteers(pending *PendingSteer) *PendingSteer {
+	var head *PendingSteer
+	tail := &head
+	for pending != nil {
+		copy := *pending
+		copy.Attachments = append([]provider.Attachment(nil), pending.Attachments...)
+		if pending.QueuedEntry != nil {
+			entries := cloneStagedQueue([]StagedQueueEntry{*pending.QueuedEntry})
+			copy.QueuedEntry = &entries[0]
+		}
+		copy.Next = nil
+		*tail = &copy
+		tail = &copy.Next
+		pending = pending.Next
+	}
+	return head
 }
 
 type PendingCancel struct {
@@ -889,11 +940,7 @@ func (s State) Clone() State {
 		foreground.Permission = clonePermission(s.Foreground.Permission)
 		out.Foreground = &foreground
 	}
-	if s.PendingSteer != nil {
-		steer := *s.PendingSteer
-		steer.Attachments = append([]provider.Attachment(nil), s.PendingSteer.Attachments...)
-		out.PendingSteer = &steer
-	}
+	out.PendingSteer = clonePendingSteers(s.PendingSteer)
 	if s.PendingCancel != nil {
 		cancel := *s.PendingCancel
 		out.PendingCancel = &cancel
@@ -952,11 +999,7 @@ func (s State) cloneReadProjection(ledgerStart int) State {
 		foreground.Permission = clonePermission(s.Foreground.Permission)
 		out.Foreground = &foreground
 	}
-	if s.PendingSteer != nil {
-		steer := *s.PendingSteer
-		steer.Attachments = append([]provider.Attachment(nil), s.PendingSteer.Attachments...)
-		out.PendingSteer = &steer
-	}
+	out.PendingSteer = clonePendingSteers(s.PendingSteer)
 	return out
 }
 
@@ -1438,17 +1481,22 @@ func (s State) Validate() error {
 			return errors.New("foreground turn is missing assistant segment identity")
 		}
 	}
-	if s.PendingSteer != nil {
-		if err := validateTurnPresentation(s.PendingSteer.Presentation); err != nil {
+	seenSteers := make(map[provider.OperationID]struct{})
+	for pending := s.PendingSteer; pending != nil; pending = pending.Next {
+		if _, duplicate := seenSteers[pending.OperationID]; duplicate {
+			return errors.New("pending steer has duplicate ownership")
+		}
+		seenSteers[pending.OperationID] = struct{}{}
+		if err := validateTurnPresentation(pending.Presentation); err != nil {
 			return fmt.Errorf("pending steer: %w", err)
 		}
-		if s.Foreground == nil || s.PendingSteer.LaneID != s.Foreground.LaneID || s.PendingSteer.Turn != s.Foreground.Turn {
+		if s.Foreground == nil || pending.LaneID != s.Foreground.LaneID || pending.Turn != s.Foreground.Turn {
 			return errors.New("pending steer lost its foreground turn owner")
 		}
-		if s.PendingSteer.OperationID == "" || strings.TrimSpace(s.PendingSteer.Text) == "" && len(s.PendingSteer.Attachments) == 0 {
+		if pending.OperationID == "" || strings.TrimSpace(pending.Text) == "" && len(pending.Attachments) == 0 {
 			return errors.New("pending steer is incomplete")
 		}
-		switch s.PendingSteer.Status {
+		switch pending.Status {
 		case SteerDispatching, SteerAccepted, SteerUncertain:
 		default:
 			return errors.New("pending steer has an unknown status")
