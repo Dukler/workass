@@ -693,17 +693,19 @@ func projectActorMessagesWithLedgerWindow(state chat.State, history actorHistory
 			seenMessage[assistantID] = struct{}{}
 		}
 
-		steerRows, err := projectPendingSteer(state.PendingSteer, foreground)
-		if err != nil {
-			return nil, 0, err
-		}
-		for _, row := range steerRows {
-			id := fieldString(row, "id")
-			if _, duplicate := seenMessage[id]; duplicate {
-				return nil, 0, fmt.Errorf("pending steer duplicates message id %q", id)
+		for pending := state.PendingSteer; pending != nil; pending = pending.Next {
+			steerRows, err := projectPendingSteer(pending, foreground)
+			if err != nil {
+				return nil, 0, err
 			}
-			seenMessage[id] = struct{}{}
-			extra = append(extra, row)
+			for _, row := range steerRows {
+				id := fieldString(row, "id")
+				if _, duplicate := seenMessage[id]; duplicate {
+					return nil, 0, fmt.Errorf("pending steer duplicates message id %q", id)
+				}
+				seenMessage[id] = struct{}{}
+				extra = append(extra, row)
+			}
 		}
 	}
 

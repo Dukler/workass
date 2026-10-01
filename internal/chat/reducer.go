@@ -112,10 +112,12 @@ type Submit struct {
 func (Submit) chatCommand() {}
 
 type Steer struct {
-	OperationID  provider.OperationID
-	Text         string
-	Attachments  []provider.Attachment
-	Presentation provider.TurnPresentation
+	OperationID   provider.OperationID
+	Text          string
+	Attachments   []provider.Attachment
+	Presentation  provider.TurnPresentation
+	QueueID       string
+	QueueRevision uint64
 }
 
 func (Steer) chatCommand() {}
@@ -1194,6 +1196,11 @@ func reduceReplaceStagedQueue(state *State, command ReplaceStagedQueue) error {
 		existing[entry.ID] = entry
 	}
 	for index := range entries {
+		for _, effect := range state.Outbox {
+			if effect.Kind == EffectSteerTurn && effect.Status != OutboxFailed && effect.Input != nil && effect.Input.Presentation.QueueID == entries[index].ID {
+				return errors.New("staged queue row is already owned by steering")
+			}
+		}
 		if previous, ok := existing[entries[index].ID]; ok {
 			entries[index].TargetProviderID = previous.TargetProviderID
 			entries[index].ModelID = previous.ModelID
@@ -2117,29 +2124,56 @@ func reduceSteer(state *State, command Steer) ([]Effect, error) {
 	if state.Foreground == nil || state.Foreground.Status != ForegroundRunning || state.Foreground.Turn.NativeID == "" {
 		return nil, errors.New("steer requires a running foreground turn")
 	}
-	if state.PendingSteer != nil {
-		return nil, errors.New("another steer is awaiting a provider receipt")
-	}
 	presentation, err := normalizeTurnPresentation(command.Presentation)
 	if err != nil {
 		return nil, err
 	}
-	state.Operations[operationID] = struct{}{}
-	state.PendingSteer = &PendingSteer{
+	pending := &PendingSteer{
 		OperationID: operationID, LaneID: state.Foreground.LaneID, Turn: state.Foreground.Turn,
 		Text: strings.TrimSpace(command.Text), Attachments: append([]provider.Attachment(nil), command.Attachments...),
 		Presentation: presentation, Status: SteerDispatching,
 	}
+	if queueID := strings.TrimSpace(command.QueueID); queueID != "" {
+		if command.QueueRevision != state.Presentation.AgentQueueRevision {
+			return nil, errors.New("queued steer revision is stale")
+		}
+		index := -1
+		for i, entry := range state.StagedQueue {
+			if entry.ID == queueID {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			return nil, errors.New("queued steer row is no longer owned by this chat")
+		}
+		entry := state.StagedQueue[index]
+		if entry.TargetProviderID != "" && entry.TargetProviderID != state.Lanes[state.Foreground.LaneID].Identity.Realm.ProviderID {
+			return nil, errors.New("queued steer targets a different provider lane")
+		}
+		if entry.AttachmentState == "preparing" || entry.AttachmentState == "failed" {
+			return nil, errors.New("queued steer attachments are not ready")
+		}
+		pending.Text, pending.Attachments = entry.Text, append([]provider.Attachment(nil), entry.Attachments...)
+		pending.Presentation.QueueID = queueID
+		pending.Presentation.PromptText = entry.Text
+		pending.QueuedEntry, pending.QueuedIndex = &entry, index
+		state.StagedQueue = append(state.StagedQueue[:index:index], state.StagedQueue[index+1:]...)
+		state.Presentation.AgentQueueRevision++
+	}
+	state.Operations[operationID] = struct{}{}
+	state.appendPendingSteer(pending)
 	return []Effect{SteerTurnEffect{
 		LaneID: state.Foreground.LaneID, OperationID: operationID, Turn: state.Foreground.Turn,
-		Text: strings.TrimSpace(command.Text), Attachments: append([]provider.Attachment(nil), command.Attachments...),
-		Presentation: presentation,
+		Text: pending.Text, Attachments: append([]provider.Attachment(nil), pending.Attachments...),
+		Presentation: pending.Presentation,
 	}}, nil
 }
 
 func reduceSteerAdmitted(state *State, command SteerAdmitted) error {
 	operationID := provider.NormalizeOperationID(string(command.OperationID))
-	if state.PendingSteer == nil || state.PendingSteer.OperationID != operationID {
+	pending := state.PendingSteerFor(operationID)
+	if pending == nil {
 		if outboxHas(state, steerEffectID(operationID), OutboxConsumed) || outboxHas(state, steerEffectID(operationID), OutboxCompleted) || outboxHas(state, steerEffectID(operationID), OutboxAmbiguous) {
 			return nil
 		}
@@ -2148,8 +2182,8 @@ func reduceSteerAdmitted(state *State, command SteerAdmitted) error {
 	if !command.Accepted {
 		return errors.New("rejected steer requires an explicit failure transition")
 	}
-	state.PendingSteer.Status = SteerAccepted
-	state.PendingSteer.AwaitConsumption = command.AwaitConsumption
+	pending.Status = SteerAccepted
+	pending.AwaitConsumption = command.AwaitConsumption
 	updateOutbox(state, steerEffectID(operationID), OutboxAccepted, "")
 	if command.Consumed {
 		return reduceInputConsumed(state, InputConsumed{OperationID: operationID})
@@ -2159,7 +2193,8 @@ func reduceSteerAdmitted(state *State, command SteerAdmitted) error {
 
 func reduceSteerFailed(state *State, command SteerFailed) ([]Effect, error) {
 	operationID := provider.NormalizeOperationID(string(command.OperationID))
-	if state.PendingSteer == nil || state.PendingSteer.OperationID != operationID {
+	pending := state.PendingSteerFor(operationID)
+	if pending == nil {
 		// An urgent explicit cancellation may terminate the foreground while a
 		// provider steer acknowledgement is still in flight. The terminal reducer
 		// has already preserved that input exactly once as unconsumed/uncertain;
@@ -2169,18 +2204,27 @@ func reduceSteerFailed(state *State, command SteerFailed) ([]Effect, error) {
 		}
 		return nil, errors.New("steer failure does not match pending steer")
 	}
-	pending := state.PendingSteer
 	kind := command.Kind
 	if kind == "" {
 		kind = provider.ErrorAdmissionRejected
 	}
 	if command.Ambiguous {
 		pending.Status = SteerUncertain
-		state.PendingSteer = pending
 		updateOutbox(state, steerEffectID(operationID), OutboxAmbiguous, provider.ErrorAcceptanceAmbiguous)
 		return nil, nil
 	}
-	state.PendingSteer = nil
+	state.removePendingSteer(operationID)
+	if pending.QueuedEntry != nil {
+		// The user chose to steer an existing FIFO owner. Definite rejection
+		// returns that same row and targeting metadata, rather than creating work.
+		index := min(pending.QueuedIndex, len(state.StagedQueue))
+		state.StagedQueue = append(state.StagedQueue, StagedQueueEntry{})
+		copy(state.StagedQueue[index+1:], state.StagedQueue[index:])
+		state.StagedQueue[index] = *pending.QueuedEntry
+		state.Presentation.AgentQueueRevision++
+		updateOutbox(state, steerEffectID(operationID), OutboxFailed, kind)
+		return nil, nil
+	}
 	if pending.Presentation.Origin == "agent" && strings.TrimSpace(pending.Presentation.QueueID) != "" {
 		// Headless chat.send(delivery=steer) already gave this exact input a
 		// durable FIFO identity. A definite native rejection transfers that same
@@ -2673,11 +2717,17 @@ func reduceTurnAdmissionFailed(state *State, command TurnAdmissionFailed) ([]Eff
 }
 
 func reduceInputConsumed(state *State, command InputConsumed) error {
-	if state.PendingSteer != nil && state.PendingSteer.OperationID == command.OperationID {
+	if pending := state.PendingSteerFor(command.OperationID); pending != nil {
 		if command.Thread != nil {
 			return errors.New("steer consumption cannot establish a provider thread")
 		}
-		pending := state.PendingSteer
+		// A later FIFO receipt proves earlier directions were consumed too. Keep
+		// the durable ledger in submission order when native events cross replies.
+		for state.PendingSteer != pending {
+			if err := reduceInputConsumed(state, InputConsumed{OperationID: state.PendingSteer.OperationID}); err != nil {
+				return err
+			}
+		}
 		if state.Foreground == nil || state.Foreground.LaneID != pending.LaneID || state.Foreground.Turn != pending.Turn {
 			return errors.New("consumed steer lost its foreground turn owner")
 		}
@@ -2706,8 +2756,11 @@ func reduceInputConsumed(state *State, command InputConsumed) error {
 		state.Foreground.AssistantAttachments = nil
 		state.Foreground.Timeline = nil
 		state.Foreground.Permission = nil
-		state.PendingSteer = nil
+		state.removePendingSteer(command.OperationID)
 		updateOutbox(state, steerEffectID(command.OperationID), OutboxConsumed, "")
+		return nil
+	}
+	if command.Thread == nil && (outboxHas(state, steerEffectID(command.OperationID), OutboxConsumed) || outboxHas(state, steerEffectID(command.OperationID), OutboxCompleted)) {
 		return nil
 	}
 	if state.Foreground == nil || state.Foreground.OperationID != command.OperationID {
@@ -2884,13 +2937,13 @@ func reduceTurnTerminated(state *State, command TurnTerminated) ([]Effect, error
 			entry.LastError = ""
 		}
 	}
-	if state.PendingSteer != nil && state.PendingSteer.Turn == state.Foreground.Turn {
+	for state.PendingSteer != nil && state.PendingSteer.Turn == state.Foreground.Turn {
 		pending := state.PendingSteer
 		if err := appendUnconsumedSteerAtTerminal(state, pending); err != nil {
 			return nil, err
 		}
 		updateOutbox(state, steerEffectID(pending.OperationID), OutboxAmbiguous, provider.ErrorAcceptanceAmbiguous)
-		state.PendingSteer = nil
+		state.removePendingSteer(pending.OperationID)
 	}
 	if state.PendingCancel != nil && state.PendingCancel.Turn == state.Foreground.Turn {
 		updateOutbox(state, cancelEffectID(state.PendingCancel.OperationID), OutboxCompleted, "")
@@ -3078,7 +3131,7 @@ func consumeTerminalSteerReceipt(state *State, operationID provider.OperationID)
 	if operationID == "" {
 		return errors.New("terminal steer receipt is missing operation identity")
 	}
-	if state.PendingSteer != nil && state.PendingSteer.OperationID == operationID {
+	if state.PendingSteerFor(operationID) != nil {
 		return reduceInputConsumed(state, InputConsumed{OperationID: operationID})
 	}
 	for _, event := range state.Ledger {
@@ -3266,13 +3319,13 @@ func terminalizeInterruptedForeground(
 		return err
 	}
 
-	if state.PendingSteer != nil && state.PendingSteer.Turn == foreground.Turn {
+	for state.PendingSteer != nil && state.PendingSteer.Turn == foreground.Turn {
 		pending := state.PendingSteer
 		if err := appendUnconsumedSteerAtTerminal(state, pending); err != nil {
 			return err
 		}
 		updateOutbox(state, steerEffectID(pending.OperationID), OutboxAmbiguous, provider.ErrorAcceptanceAmbiguous)
-		state.PendingSteer = nil
+		state.removePendingSteer(pending.OperationID)
 	}
 	for index := range state.Outbox {
 		entry := &state.Outbox[index]
@@ -5234,8 +5287,8 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 			case EffectSteerTurn:
 				entry.Status = OutboxAmbiguous
 				entry.LastError = provider.ErrorAcceptanceAmbiguous
-				if state.PendingSteer != nil && state.PendingSteer.OperationID == entry.OperationID {
-					state.PendingSteer.Status = SteerUncertain
+				if pending := state.PendingSteerFor(entry.OperationID); pending != nil {
+					pending.Status = SteerUncertain
 				}
 			case EffectPermission:
 				entry.Status = OutboxAmbiguous
@@ -5262,8 +5315,8 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 			if entry.Kind == EffectSteerTurn || entry.Kind == EffectPermission {
 				entry.Status = OutboxAmbiguous
 				entry.LastError = provider.ErrorAcceptanceAmbiguous
-				if entry.Kind == EffectSteerTurn && state.PendingSteer != nil && state.PendingSteer.OperationID == entry.OperationID {
-					state.PendingSteer.Status = SteerUncertain
+				if pending := state.PendingSteerFor(entry.OperationID); entry.Kind == EffectSteerTurn && pending != nil {
+					pending.Status = SteerUncertain
 				}
 				continue
 			}

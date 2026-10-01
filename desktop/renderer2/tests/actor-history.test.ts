@@ -30,3 +30,8 @@ test('an in-flight steer from a replaced renderer becomes uncertain without repl
   assert.equal(restored.status, 'done');
   assert.equal(restored.steerState, 'uncertain');
 });
+test('queued steering retains its original FIFO identity when actor history hydrates', () => {
+  const message = { ...row('steer-user', 'user', 'queued direction'), agentQueueId: 'original-queued-row', steerState: 'applied' as const };
+  const [restored] = actorMessages([message]);
+  assert.equal(restored.agentQueueId, 'original-queued-row');
+});

@@ -8,6 +8,7 @@ let activeTurn = null;
 let activeTurnScenario = '';
 let rapidSteerSequence = 0;
 let rapidSteerTools = false;
+const pendingSteerReceipts = [];
 let pendingNativeChild = null;
 const turnRecords = [];
 if (process.env.WORKASS_CODEX_FIXTURE_LARGE_RESUME === '1') {
@@ -569,7 +570,12 @@ async function handle(message) {
     };
     const receiptDelayMs = activeTurnScenario === 'rapid-steer-commentary'
       ? Number(process.env.WORKASS_CODEX_FIXTURE_RAPID_STEER_RECEIPT_DELAY_MS || 0) : 0;
-    if (receiptDelayMs > 0) setTimeout(deliverSteer, receiptDelayMs);
+    if (process.env.WORKASS_CODEX_FIXTURE_RAPID_STEER_BATCH_RECEIPTS === '1') {
+      pendingSteerReceipts.push(deliverSteer);
+      if (pendingSteerReceipts.length >= Number(process.env.WORKASS_CODEX_FIXTURE_RAPID_STEER_TARGET || 2)) {
+        for (const deliver of pendingSteerReceipts.splice(0)) deliver();
+      }
+    } else if (receiptDelayMs > 0) setTimeout(deliverSteer, receiptDelayMs);
     else deliverSteer();
     return;
   }

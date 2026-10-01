@@ -26,6 +26,7 @@ export function actorMessages(records: readonly MirrorMsg[]): Msg[] {
       result: record.result == null ? undefined : String(record.result),
       status: interruptedSteer ? 'done' : record.status,
       steerState: interruptedSteer ? 'uncertain' : record.steerState,
+      agentQueueId: record.agentQueueId,
       steerBoundary: record.steerBoundary,
       steerContinuationId: record.steerContinuationId,
       steerContinuationFor: record.steerContinuationFor,

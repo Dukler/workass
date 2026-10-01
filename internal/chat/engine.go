@@ -249,9 +249,8 @@ func outboxEntryExecutable(state State, entry OutboxEntry) bool {
 	case EffectSteerTurn:
 		laneCanSteer := lane.Phase == LaneRunning ||
 			(lane.Phase == LaneCreating && lane.Provision != nil && lane.Creation.DeferredUntilInput && lane.Thread.IsZero() && lane.Attachment != nil)
-		return laneCanSteer && state.PendingSteer != nil &&
-			state.PendingSteer.LaneID == entry.LaneID && state.PendingSteer.OperationID == entry.OperationID &&
-			state.PendingSteer.Status == SteerDispatching
+		pending := state.PendingSteerFor(entry.OperationID)
+		return laneCanSteer && pending != nil && pending.LaneID == entry.LaneID && pending.Status == SteerDispatching
 	case EffectCancelTurn:
 		return state.PendingCancel != nil && state.PendingCancel.LaneID == entry.LaneID &&
 			state.PendingCancel.OperationID == entry.OperationID
@@ -550,7 +549,7 @@ func (e *Engine) DigestSnapshot() DigestSnapshot {
 			addMessage(userID)
 		}
 		addMessage(strings.TrimSpace(foreground.CurrentAssistantMessageID))
-		if pending := state.PendingSteer; pending != nil {
+		for pending := state.PendingSteer; pending != nil; pending = pending.Next {
 			userID := strings.TrimSpace(pending.Presentation.UserMessageID)
 			if userID == "" {
 				userID = "message:" + string(pending.OperationID) + ":user"

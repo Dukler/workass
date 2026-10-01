@@ -352,7 +352,7 @@ test('only id-shaped keys are rewritten, and a round trip is lossless', () => {
     nested: {
       jobId: 'job-2', userMessageId: 'user-1', assistantMessageId: 'assistant-1',
       clientUserMessageId: 'steer-1', continuationAssistantMessageId: 'assistant-2',
-      queueId: 'queue-1', steerContinuationId: 'assistant-3', steerContinuationFor: 'steer-2',
+      queueId: 'queue-1', agentQueueId: 'queue-1', queuedMessageId: 'queue-1', steerContinuationId: 'assistant-3', steerContinuationFor: 'steer-2',
       turnRootId: 'assistant-root', planLatestMessageId: 'assistant-plan',
       consumedSteerIds: ['steer-1', 'steer-2'], pendingPermissionIds: ['permission-1'],
       items: [{ id: 'a' }, { id: 'b' }],
@@ -368,6 +368,8 @@ test('only id-shaped keys are rewritten, and a round trip is lossless', () => {
   assert.equal(tagged.nested.queueId, 'M~m-remote~queue-1');
   assert.equal(tagged.nested.steerContinuationId, 'M~m-remote~assistant-3');
   assert.equal(tagged.nested.steerContinuationFor, 'M~m-remote~steer-2');
+  assert.equal(tagged.nested.agentQueueId, tagged.nested.queueId);
+  assert.equal(tagged.nested.queuedMessageId, tagged.nested.queueId);
   assert.equal(tagged.nested.turnRootId, 'M~m-remote~assistant-root');
   assert.equal(tagged.nested.planLatestMessageId, 'M~m-remote~assistant-plan');
   assert.deepEqual(tagged.nested.consumedSteerIds, ['M~m-remote~steer-1', 'M~m-remote~steer-2']);

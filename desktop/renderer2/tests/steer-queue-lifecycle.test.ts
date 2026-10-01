@@ -114,6 +114,87 @@ test('one keyboard submission calls live steering directly across native and ACP
   }
 });
 
+test('queued Steer transfers only its saved row while fresh steering still bypasses FIFO', async () => {
+  const calls: any[] = [];
+  let queueReceipt!: (value: unknown) => void;
+  let saved: any;
+  const { store, owner } = subject({
+    chatQueueReplace: (request: any) => { saved = request; return new Promise(resolve => { queueReceipt = resolve; }); },
+    appChatSteer: async (...args: any[]) => { calls.push(args); return { ok: true, strategy: 'receipt-live', receipt: true, agentQueueRevision: 2, actorRevision: 3 }; },
+  });
+  running(owner);
+  owner.queue = [{ id: 'earlier', text: 'ordinary FIFO' }];
+  store.setDraft(owner.id, 'queued direction');
+  assert.equal(store.queueDraftMessage(owner.id, owner.draft, []), true);
+  const queuedId = owner.queue[1].id;
+  const images = [{ mimeType: 'image/png', data: 'aGVsbG8=', name: 'fixture.png' }];
+  owner.queue[1].images = images;
+  store.setDraft(owner.id, 'new composer edit');
+  const transfer = store.steerQueued(owner.id, queuedId);
+  const repeated = store.steerQueued(owner.id, queuedId);
+  assert.equal(transfer, repeated);
+  assert.equal(calls.length, 0, 'the durable FIFO receipt must precede transfer');
+  assert.equal(saved.queue.length, 2);
+  queueReceipt({ ok: true, operationId: saved.operationId, agentQueueRevision: 1, actorRevision: 2 });
+  assert.equal(await transfer, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][5].queuedMessageId, queuedId);
+  assert.equal(calls[0][5].expectedQueueRevision, 1);
+  assert.deepEqual(calls[0][2], images);
+  assert.deepEqual(owner.queue.map(q => q.id), ['earlier']);
+  assert.equal(owner.draft, 'new composer edit');
+  const message = owner.messages.find(m => m.agentQueueId === queuedId);
+  assert.equal(message?.content, 'queued direction');
+  assert.deepEqual(message.images, images);
+  assert.equal(await store.steerRunning(owner.id, 'fresh direct direction'), true);
+  assert.equal(calls[1][5].queuedMessageId, undefined);
+  assert.deepEqual(owner.queue.map(q => q.id), ['earlier']);
+});
+
+test('queued Steer rejection restores its original row; uncertainty retains a single steer owner', async () => {
+  for (const strategy of ['rejected', 'uncertain']) {
+    const { store, owner } = subject({ appChatSteer: async () => ({ ok: false, strategy, receipt: true, agentQueueRevision: 3, actorRevision: 4 }) });
+    running(owner);
+    const selected = { id: 'selected', text: 'queued direction', images: [{ mimeType: 'image/png', data: 'aGVsbG8=', name: 'fixture.png' }] };
+    owner.queue = [{ id: 'before', text: 'before' }, selected, { id: 'after', text: 'after' }];
+    owner.agentQueueRevision = 1;
+    store.setDraft(owner.id, 'new composer edit');
+    assert.equal(await store.steerQueued(owner.id, selected.id), strategy !== 'rejected');
+    assert.equal(owner.draft, 'new composer edit');
+    assert.equal(owner.agentQueueRevision, 3);
+    if (strategy === 'rejected') {
+      assert.deepEqual(owner.queue.map(q => q.id), ['before', 'selected', 'after']);
+      assert.equal(owner.queue[1], selected);
+      assert.equal(owner.messages.filter(m => m.agentQueueId === selected.id).length, 0);
+    } else {
+      assert.deepEqual(owner.queue.map(q => q.id), ['before', 'after']);
+      assert.equal(owner.messages.filter(m => m.agentQueueId === selected.id).length, 1);
+    }
+  }
+});
+
+test('stale hydration cannot resurrect a queued row during the steer acknowledgement', async () => {
+  let acknowledge!: (value: unknown) => void;
+  let invoked!: () => void;
+  const ready = new Promise<void>(resolve => { invoked = resolve; });
+  const { store, owner } = subject({ appChatSteer: () => new Promise(resolve => { acknowledge = resolve; invoked(); }) });
+  running(owner);
+  owner.queue = [{ id: 'selected', text: 'queued direction' }, { id: 'keep', text: 'keep FIFO' }];
+  const oldQueue = owner.queue.map(q => ({ ...q }));
+  const transfer = store.steerQueued(owner.id, 'selected');
+  await ready;
+  const restored = { ...owner, messages: owner.messages.map(m => ({ ...m })), queue: oldQueue };
+  store.preserveHydratedRuntime(owner, restored);
+  store.state.chats = [restored];
+  assert.deepEqual(restored.queue.map(q => q.id), ['keep']);
+  acknowledge({ ok: true, strategy: 'receipt-live', receipt: true, agentQueueRevision: 2, actorRevision: 3 });
+  assert.equal(await transfer, true);
+  assert.equal(restored.messages.filter(m => m.agentQueueId === 'selected').length, 1);
+  const afterReply = { ...restored, messages: restored.messages.map(m => ({ ...m })), queue: oldQueue };
+  store.preserveHydratedRuntime(restored, afterReply);
+  assert.deepEqual(afterReply.queue.map(q => q.id), ['keep']);
+});
+
 test('stop-and-send is a separate typed action; a real live-steer capability always wins', () => {
   assert.equal(stopAndSendSupported(normalizeDeliveryCapabilities({ stopAndSend: true, liveSteer: false })), true);
   assert.equal(stopAndSendSupported(normalizeDeliveryCapabilities({ stopAndSend: true, liveSteer: true })), false);

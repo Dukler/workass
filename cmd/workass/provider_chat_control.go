@@ -1256,7 +1256,7 @@ func (r *providerChatRuntime) agentSteerQueuedResultLocked(state chat.State, ope
 			return map[string]any{"ok": true, "live": true, "queued": false, "strategy": "generic-live"}, nil
 		case chat.OutboxAccepted:
 			result := map[string]any{"ok": true, "live": true, "queued": false, "strategy": "generic-live"}
-			if state.PendingSteer != nil && state.PendingSteer.AwaitConsumption {
+			if pending := state.PendingSteerFor(operationID); pending != nil && pending.AwaitConsumption {
 				result["strategy"] = "receipt-live"
 				result["receipt"] = true
 			}

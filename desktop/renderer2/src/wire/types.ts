@@ -679,8 +679,8 @@ export interface WorkassApi {
     images?: unknown[],
     clientUserMessageId?: string,
     continuationAssistantMessageId?: string,
-    boundary?: { assistantMessageId: string; contentOffset: number; resultOffset: number; eventCount: number },
-  ) => Promise<{ ok: boolean; live?: boolean; queued?: boolean; daemonQueued?: boolean; interrupted?: boolean; unsupported?: boolean; strategy?: 'receipt-live' | 'generic-live' | 'rejected' | 'unsupported' | 'uncertain' | 'interrupt-queue' | 'queue'; turnId?: string; receipt?: boolean; error?: string }>;
+    boundary?: { assistantMessageId: string; contentOffset: number; resultOffset: number; eventCount: number; queuedMessageId?: string; expectedQueueRevision?: number },
+  ) => Promise<{ ok: boolean; live?: boolean; queued?: boolean; daemonQueued?: boolean; interrupted?: boolean; unsupported?: boolean; strategy?: 'receipt-live' | 'generic-live' | 'rejected' | 'unsupported' | 'uncertain' | 'interrupt-queue' | 'queue'; turnId?: string; receipt?: boolean; error?: string; agentQueueRevision?: number; actorRevision?: number }>;
   appChatUseRateLimitReset?: (
     providerId: string,
     sessionId: string | undefined,

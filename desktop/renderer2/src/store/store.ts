@@ -100,6 +100,7 @@ type PendingSteerDispatch = {
   chatId: string;
   userId: string;
   continuationId: string;
+  queuedId?: string;
 };
 
 type LiveTurnEventKind = 'start' | 'data' | 'media' | 'acp' | 'plan' | 'steer' | 'end';
@@ -426,6 +427,7 @@ export class Store {
   // The exact actor pair and renderer-minted row ids keep that staged ownership
   // resident until the matching admission reply settles it.
   private pendingSteers = new Map<string, PendingSteerDispatch>();
+  private queuedSteers = new Map<string, Promise<boolean>>();
   // A repeated shortcut event for the same captured composer edit and exact
   // foreground turn must reuse the one queue-and-stop action. Weak ownership
   // lets settled submissions disappear as soon as the composer drops them.
@@ -1665,6 +1667,16 @@ export class Store {
     if (presentation && presentation.chatId === restored.chatId) applyPresentationSnapshot(restored, presentation.value);
     const queue = this.pendingQueueSnapshots.get(restored.id);
     if (queue && queue.chatId === restored.chatId) restored.queue = queue.value;
+    this.pruneSteeredQueue(restored);
+  }
+
+  private pruneSteeredQueue(chat: Chat) {
+    const owned = new Set(chat.messages.filter(message => message.role === 'user' && message.steerState)
+      .map(message => message.agentQueueId).filter((id): id is string => !!id));
+    for (const pending of this.pendingSteers.values()) {
+      if (pending.tabId === chat.id && pending.chatId === chat.chatId && pending.queuedId) owned.add(pending.queuedId);
+    }
+    if (chat.queue?.some(item => owned.has(item.id))) chat.queue = chat.queue.filter(item => !owned.has(item.id));
   }
 
   private preserveMatchingHydratedRuntime(previous: Chat[], restored: Chat[]) {
@@ -1880,6 +1892,7 @@ export class Store {
         next.sessionError = prior.sessionError;
       }
     }
+    for (const chat of restored) this.pruneSteeredQueue(chat);
   }
 
   private preserveNewerLocalControls(previous: Chat[], restored: Chat[]) {
@@ -4397,7 +4410,7 @@ export class Store {
   // Submit explicit live-steer intent to the exact running lane. Unsupported or
   // definitively rejected steering reports failure without refilling the composer; FIFO is
   // available only through the separate explicit queue action.
-  async steerRunning(chatId: string, prompt: string, images?: StartJobOpts['images'], submission = this.captureDraftSubmission(chatId, prompt)): Promise<boolean> {
+  async steerRunning(chatId: string, prompt: string, images?: StartJobOpts['images'], submission = this.captureDraftSubmission(chatId, prompt), queuedSource?: { item: QueuedMsg; index: number }): Promise<boolean> {
     const chat = this.chat(chatId);
     if (!chat || !prompt.trim()) return false;
     // Offline: steering/queuing into a dead socket would silently vanish. Keep
@@ -4452,6 +4465,8 @@ export class Store {
         resultOffset: number;
         eventCount: number;
         deferUntilConsumed?: boolean;
+        queuedMessageId?: string;
+        expectedQueueRevision?: number;
       } = {
         assistantMessageId: activeAssistant.id,
         contentOffset: activeAssistant.content.length,
@@ -4463,6 +4478,7 @@ export class Store {
         // same bytes so the settle/reload swap never rewrites visible text.
         id: ownedEntityId(chat, rid('u')), role: 'user', content: redactSensitiveText(prompt), status: 'pending', at: now,
         events: [], images: messageImages(images),
+        agentQueueId: queuedSource?.item.id,
       };
       const continuation: Msg = {
         id: ownedEntityId(chat, rid('a')), role: 'assistant', content: '', status: 'running', at: null,
@@ -4480,6 +4496,7 @@ export class Store {
         chatId: chat.chatId,
         userId: pendingUser.id,
         continuationId: continuation.id,
+        queuedId: queuedSource?.item.id,
       };
       const pendingSteerID = steerDispatchKey(chat.id, chat.chatId, pendingUser.id);
       this.pendingSteers.set(pendingSteerID, pendingSteer);
@@ -4498,13 +4515,28 @@ export class Store {
           removed ? [pendingUser.id, continuation.id] : [],
         );
       };
-      this.consumeSubmittedDraft(submission);
+      if (queuedSource) chat.queue = (chat.queue ?? []).filter(item => item.id !== queuedSource.item.id);
+      else this.consumeSubmittedDraft(submission);
+      const restoreQueuedOwner = (owner: Chat) => {
+        pendingSteer.queuedId = undefined;
+        if (!queuedSource || owner.queue?.some(item => item.id === queuedSource.item.id)) return;
+        const queue = [...(owner.queue ?? [])];
+        queue.splice(Math.min(queuedSource.index, queue.length), 0, queuedSource.item);
+        owner.queue = queue;
+        // The daemon returns the original row atomically on a definite failure.
+        // A subsequent local edit must save that same owner, never a new row.
+        if (this.pendingQueueMutationVersions.has(owner.id)) this.markQueueMutation(owner);
+      };
       this.bumpChat(chat);
       return this.steerDispatches.run(chat.id, async () => {
         try {
           // The daemon persists the same staged ownership before turn/steer. For
           // native hosts it advances that boundary on the canonical consumption
           // receipt; older/generic adapters retain acknowledgement-time behavior.
+          if (queuedSource) {
+            boundary.queuedMessageId = queuedSource.item.id;
+            boundary.expectedQueueRevision = this.chat(chatId)?.agentQueueRevision ?? 0;
+          }
           const r = await callThrow('appChatSteer', steerSessionId, prompt, images ?? [], pendingUser.id, continuation.id, boundary);
           // Queue persistence and the actor digest may replace the renderer Chat
           // object while this native acknowledgement is in flight. Identity is
@@ -4514,6 +4546,8 @@ export class Store {
           // delivered text beside the send button after a delayed queue -> steer.
           const live = this.chat(chatId);
           if (!sameChatPair(live, pendingSteer.tabId, pendingSteer.chatId)) return false;
+          if (r?.agentQueueRevision !== undefined) live.agentQueueRevision = Math.max(live.agentQueueRevision ?? 0, r.agentQueueRevision);
+          if (r?.actorRevision !== undefined) live.actorRevision = Math.max(live.actorRevision ?? 0, r.actorRevision);
           if (r?.strategy === 'uncertain') {
             this.addToast('Steering no confirmado', r.error ?? 'El agente no confirmó el steer; no se reenvió para evitar duplicarlo.');
             // A timeout is explicitly not a rejection. Keep the same visible owner,
@@ -4547,6 +4581,7 @@ export class Store {
             // A receipt/acknowledgement may have beaten a late response. Once that
             // happens the transcript row owns delivery and cannot be duplicated.
             if (!removed) return true;
+            restoreQueuedOwner(live);
             markSteerOwnership(live, true);
             this.rebuildJobRefs(new Set([live.id]));
 			this.addToast('No se pudo dirigir', r?.error ?? 'El turno activo rechazó el steering; no se envió el mensaje.');
@@ -4577,6 +4612,8 @@ export class Store {
 		  // receive a duplicate. A definite rejection dirties the chat explicitly;
 		  // addToast performs the single renderer bump for both changes.
 		  if (!removed) return true;
+		  restoreQueuedOwner(live);
+		  if (queuedSource) this.requestChatReadback(live);
 		  markSteerOwnership(live, true);
 		  this.rebuildJobRefs(new Set([live.id]));
 		  this.touchChat(live.id);
@@ -4584,12 +4621,40 @@ export class Store {
 		  await this.flushSession();
 		  return false;
 		} finally {
+          if (queuedSource && this.chat(chatId)?.messages.some(message => message.id === pendingUser.id)) releaseDraftImages(queuedSource.item.draftImages ?? []);
           if (this.pendingSteers.get(pendingSteerID) === pendingSteer) this.pendingSteers.delete(pendingSteerID);
         }
       });
     }
 	this.addToast('No se pudo dirigir', 'El proveedor activo no admite steering en vivo; no se envió el mensaje.');
 	return false;
+  }
+  steerQueued(chatId: string, queuedId: string): Promise<boolean> {
+    const chat = this.chat(chatId);
+    if (!chat?.chatId) return Promise.resolve(false);
+    const key = JSON.stringify([chat.id, chat.chatId, queuedId]);
+    const existing = this.queuedSteers.get(key);
+    if (existing) return existing;
+    const durableChatId = chat.chatId;
+    const dispatch = (async () => {
+      if (!this.isConnected() || !this.isChatRunning(chatId) || !liveSteeringSupported(chat.deliveryCapabilities)) return false;
+      // Flush this FIFO's pending edit first. Claiming a renderer-only row would
+      // leave the daemon unable to transfer its durable owner atomically.
+      const version = this.pendingQueueMutationVersions.get(chatId);
+      if (version !== undefined) {
+        const operationId = this.pendingQueueOperationIds.get(chatId)!;
+        if (!(await this.persistQueueMutation(chatId, durableChatId, version, operationId))) return false;
+      }
+      const live = this.chat(chatId);
+      if (!sameChatPair(live, chatId, durableChatId) || this.pendingQueueMutationVersions.has(chatId)) return false;
+      const index = live.queue?.findIndex(item => item.id === queuedId) ?? -1;
+      const item = live.queue?.[index];
+      if (!item || !queuedAttachmentsReady(item)) return false;
+      return this.steerRunning(chatId, item.text, item.images, undefined, { item, index });
+    })();
+    this.queuedSteers.set(key, dispatch);
+    void dispatch.finally(() => { if (this.queuedSteers.get(key) === dispatch) this.queuedSteers.delete(key); }).catch(() => {});
+    return dispatch;
   }
   private async stopAndSendRunning(chat: Chat, prompt: string, images: StartJobOpts['images'] | undefined, submission: ReturnType<Store['captureDraftSubmission']>): Promise<boolean> {
     const running = [...chat.messages].reverse().find((message) => message.role === 'assistant' && message.status === 'running');

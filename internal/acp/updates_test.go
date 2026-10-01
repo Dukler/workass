@@ -873,7 +873,10 @@ func TestProviderUpdateTerminalReceiptDoesNotWaitForRegistryRefresh(t *testing.T
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": "2.1.224"})
 	}))
-	t.Cleanup(registry.Close)
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(refreshRelease) })
+		registry.Close()
+	})
 
 	events := newEventCollector()
 	manager := NewManager(Options{
@@ -893,16 +896,23 @@ func TestProviderUpdateTerminalReceiptDoesNotWaitForRegistryRefresh(t *testing.T
 	if _, err := manager.StartProviderUpdate(context.Background(), "claude"); err != nil {
 		t.Fatal(err)
 	}
-	progress := waitProviderUpdateProgress(t, events, "claude", func(progress ProviderUpdateProgress) bool {
-		return progress.Status == "done" || progress.Status == "failed"
-	}, time.Second)
-	if progress.Status != "done" {
-		t.Fatalf("Claude terminal progress = %#v", progress)
-	}
 	select {
 	case <-refreshStarted:
-	case <-time.After(time.Second):
+	case <-time.After(manager.opts.ProviderUpdateTimeout + manager.opts.ProviderUpdateRunTimeout):
 		t.Fatal("post-update registry refresh did not start")
+	}
+	// The refresh is blocked now. Inspect the receipt at this exact barrier:
+	// startup/CLI scheduling speed cannot decide whether publication preceded
+	// registry IO, and publishing only after refresh still fails immediately.
+	var terminal *ProviderUpdateProgress
+	for _, event := range events.snapshot() {
+		progress, ok := event.payload.(ProviderUpdateProgress)
+		if event.channel == "providers:update-progress" && ok && progress.ProviderID == "claude" && (progress.Status == "done" || progress.Status == "failed") {
+			terminal = &progress
+		}
+	}
+	if terminal == nil || terminal.Status != "done" {
+		t.Fatalf("Claude terminal receipt must precede blocked registry refresh: %#v", terminal)
 	}
 	releaseOnce.Do(func() { close(refreshRelease) })
 }

@@ -1,8 +1,8 @@
 import { useRef, useState } from 'react';
 import type { Chat } from '../store/types';
 import { store } from '../store/store';
-import { messageImageSrc } from '../image-drafts';
-import { steerStatusLabel } from '../steering';
+import { messageImageSrc, queuedAttachmentsReady } from '../image-drafts';
+import { liveSteeringSupported, steerStatusLabel } from '../steering';
 import { projectSteeringPresentation } from '../chat/steering-presentation';
 
 // Minimalist message queue (redesign 2026-07-12): each queued follow-up is its
@@ -50,6 +50,7 @@ export function QueueList({ chat }: { chat: Chat }) {
       )}
       {queue.map((q) => {
         const isEditing = editing === q.id;
+        const canSteer = store.isChatRunning(chat.id) && liveSteeringSupported(chat.deliveryCapabilities) && queuedAttachmentsReady(q);
         const overCls = over?.id === q.id ? (over.after ? 'over-after' : 'over-before') : '';
         return (
           <div
@@ -82,6 +83,11 @@ export function QueueList({ chat }: { chat: Chat }) {
                 }}
                 onBlur={() => setEditing(null)}
                 onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    if (canSteer) { setEditing(null); void store.steerQueued(chat.id, q.id); }
+                    return;
+                  }
                   if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Escape') { e.preventDefault(); setEditing(null); }
                 }}
               />
@@ -114,6 +120,14 @@ export function QueueList({ chat }: { chat: Chat }) {
                     <span className="qattachstate" title={q.attachmentError}>Volvé a adjuntar: {q.attachmentNames?.join(', ') || 'preparación interrumpida'}</span>
                   )}
                 </span>
+                <button
+                  className="qsteer"
+                  title="Steer"
+                  disabled={!canSteer}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  onClick={() => { void store.steerQueued(chat.id, q.id); }}
+                >Steer</button>
                 <button
                   className="qx"
                   title="Quitar"
