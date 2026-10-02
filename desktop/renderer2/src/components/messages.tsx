@@ -11,6 +11,7 @@ import { displayDetail, splitTail } from '../tool-display';
 import { toolPresentation } from '../tool-names';
 import { permissionChoices } from '../permissions';
 import { encodeWorkassQuestionAnswer, limitWorkassQuestionText } from '../question-answer';
+import { observeTranscriptImageOnce } from '../transcript-images';
 
 export { extractSubagents } from '../subagent-layout';
 export type { SubagentNode } from '../subagent-layout';
@@ -314,15 +315,12 @@ function ToolImage({ image, tabId, alt }: { image: MessageImage; tabId: string; 
     if (!image.deferredImageRef) setSrc(messageImageSrc(image));
   }, [image]);
   useEffect(() => {
-    if (!image.deferredImageRef) return;
-    if (typeof IntersectionObserver === 'undefined') { setVisible(true); return; }
-    const observer = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting), { rootMargin: '400px' });
-    if (button.current) observer.observe(button.current);
-    return () => observer.disconnect();
+    if (!image.deferredImageRef || !button.current) return;
+    return observeTranscriptImageOnce(button.current, () => setVisible(true));
   }, [image.deferredImageRef]);
   useEffect(() => {
     if (!image.deferredImageRef) return;
-    if (!visible) { setSrc(''); return; }
+    if (!visible) return;
     let current = true;
     setFailed(false);
     void call('archiveLoad', tabId, { imageRef: image.deferredImageRef }).then((reply) => {

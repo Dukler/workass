@@ -36,12 +36,29 @@ const farFromBottom = { scrollHeight: 2_400, scrollTop: 900, clientHeight: 700 }
 const nearBottom = { scrollHeight: 2_400, scrollTop: 1_630, clientHeight: 700 };
 
 test('coalesced programmatic scroll events cannot unpin a followed transcript', () => {
-  assert.equal(transcriptPinnedAfterScroll(true, false, farFromBottom), true);
+  assert.equal(transcriptPinnedAfterScroll(true, false, farFromBottom, -800), true);
 });
 
 test('an explicit user scroll can leave and re-enter the followed bottom', () => {
-  assert.equal(transcriptPinnedAfterScroll(true, true, farFromBottom), false);
-  assert.equal(transcriptPinnedAfterScroll(false, true, nearBottom), true);
+  assert.equal(transcriptPinnedAfterScroll(true, true, farFromBottom, -800), false);
+  assert.equal(transcriptPinnedAfterScroll(false, true, nearBottom, 730), true);
+});
+
+test('a small upward scroll cannot re-enable following before image or stream growth', () => {
+  // onWheel has already released following. Its ensuing scroll event is still
+  // within the 80px proximity zone, but the reader is moving away from bottom.
+  const afterUpwardWheel = false;
+  const metrics = { scrollHeight: 2_400, scrollTop: 1_660, clientHeight: 700 };
+  assert.equal(transcriptPinnedAfterScroll(afterUpwardWheel, true, metrics, -40), false);
+});
+
+test('image anchoring during an upward wheel intent cannot re-pin even at bottom', () => {
+  const bottom = { scrollHeight: 2_400, scrollTop: 1_700, clientHeight: 700 };
+  assert.equal(transcriptPinnedAfterScroll(false, true, bottom, -40), false);
+});
+
+test('a coalesced programmatic scroll inside the input window cannot re-pin', () => {
+  assert.equal(transcriptPinnedAfterScroll(false, true, nearBottom, 0), false);
 });
 
 test('the transcript bottom threshold preserves the existing 80px contract', () => {

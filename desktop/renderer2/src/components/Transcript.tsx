@@ -242,6 +242,8 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // programmatic events: Chromium is allowed to coalesce several writes into one
   // event, which made the old counter drift and freeze following mid-stream.
   const userScrollUntil = useRef(0);
+  const userScrollDelta = useRef(0);
+  const lastScrollTop = useRef(0);
   const [reveal, setReveal] = useState(CHAT_INITIAL_HISTORY);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
@@ -307,8 +309,8 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // onScroll unless a wheel/touch/scrollbar intent preceded them.
   const setScrollTop = (el: HTMLDivElement, top: number) => {
     const clamped = Math.max(0, Math.min(top, el.scrollHeight - el.clientHeight));
-    if (Math.abs(el.scrollTop - clamped) < 1) return;
-    el.scrollTop = clamped;
+    if (Math.abs(el.scrollTop - clamped) >= 1) el.scrollTop = clamped;
+    lastScrollTop.current = el.scrollTop;
   };
 
   const loadCompleteHistory = useCallback(async () => {
@@ -430,8 +432,10 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [total]);
 
-  const markUserScroll = (durationMs = 240) => {
+  const markUserScroll = (durationMs = 240, delta = 0) => {
     userScrollUntil.current = performance.now() + durationMs;
+    userScrollDelta.current = delta;
+    lastScrollTop.current = scrollRef.current?.scrollTop ?? 0;
   };
 
   // Track whether the user is pinned to the bottom; re-pinning clears the pill.
@@ -439,13 +443,16 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const el = scrollRef.current;
     if (!el) return;
     const userInitiated = performance.now() <= userScrollUntil.current;
-    const atBottom = transcriptPinnedAfterScroll(stick.current, userInitiated, el);
+    const delta = userScrollDelta.current || el.scrollTop - lastScrollTop.current;
+    lastScrollTop.current = el.scrollTop;
+    const atBottom = transcriptPinnedAfterScroll(stick.current, userInitiated, el, delta);
     stick.current = atBottom;
     if (atBottom) { seen.current = total; if (newCount !== 0) setNewCount(0); }
   };
 
   const onWheel = (event: WheelEvent<HTMLDivElement>) => {
-    markUserScroll();
+    if (event.deltaY === 0) return;
+    markUserScroll(240, event.deltaY);
     // Stop a pending observer frame before the browser applies an upward wheel
     // delta; otherwise that frame can pull the reader back to the bottom once.
     if (event.deltaY < 0) stick.current = false;
