@@ -41,8 +41,13 @@ export function transcriptPinnedAfterScroll(
   pinned: boolean,
   userInitiated: boolean,
   metrics: TranscriptScrollMetrics,
+  scrollDelta: number,
 ): boolean {
-  return userInitiated ? transcriptIsAtBottom(metrics) : pinned;
+  if (!userInitiated || scrollDelta === 0) return pinned;
+  // Proximity alone cannot establish intent: a small upward wheel delta is
+  // still inside the bottom threshold. Image/layout changes must not turn that
+  // deliberate departure into a request to follow again.
+  return scrollDelta < 0 ? false : transcriptIsAtBottom(metrics);
 }
 
 export const TRANSCRIPT_BACKGROUND_PIN_DELAY_MS = 100;
