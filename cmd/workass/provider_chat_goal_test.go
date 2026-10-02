@@ -8,17 +8,25 @@ import (
 	"time"
 
 	"workass/internal/acp"
+	"workass/internal/chat"
 	providercontract "workass/internal/provider"
 )
 
 func TestCodexNativeGoalThroughActorAndExactResume(t *testing.T) {
 	t.Parallel()
 	root, stateDir := repoRoot(t), t.TempDir()
+	activity := make(chan struct{}, 1)
+	signalActivity := func(string, any) {
+		select {
+		case activity <- struct{}{}:
+		default:
+		}
+	}
 	args, _ := json.Marshal([]string{filepath.Join(root, "desktop", "acp", "mock-codex-app-server.mjs")})
-	manager := acp.NewManager(acp.Options{RootDir: root, StateDir: stateDir, RuntimeProfile: "dev", DefaultProviderID: "codex", InitTimeout: 10 * time.Second, RSSSampleInterval: time.Hour,
+	manager := acp.NewManager(acp.Options{RootDir: root, StateDir: stateDir, RuntimeProfile: "dev", DefaultProviderID: "codex", InitTimeout: 10 * time.Second, RSSSampleInterval: time.Hour, Broadcast: signalActivity,
 		Provider: acp.ProviderConfig{ID: "codex", Command: "node", Args: []string{filepath.Join(root, "scripts", "codex-native-host.mjs")}, CWD: root, Enabled: true, Env: map[string]string{"WORKASS_CODEX_EXECUTABLE": "node", "WORKASS_CODEX_APP_SERVER_ARGS": string(args), "WORKASS_CODEX_FIXTURE_GOAL_STORE": filepath.Join(stateDir, "native-goal-fixture.json")}}})
 	t.Cleanup(func() { manager.Reset() })
-	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir, signalActivity)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if _, err := runtime.CreateRendererChat(map[string]any{"tabId": "goal-tab", "chatId": "goal-chat", "operationId": "goal-create", "cwd": root, "providerId": "codex"}); err != nil {
@@ -70,18 +78,20 @@ func TestCodexNativeGoalThroughActorAndExactResume(t *testing.T) {
 	if _, err := runtime.Start(ctx, map[string]any{"kind": "app-chat", "tabId": "goal-tab", "chatId": "goal-chat", "sessionId": info.SessionID, "operationId": "goal-held", "userMessageId": "goal-held-user", "assistantMessageId": "goal-held-assistant", "prompt": "/goal [fixture:goal-hold] keep checking"}, "human"); err != nil {
 		t.Fatal(err)
 	}
-	ready := false
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+	for {
 		diagnostics := manager.TurnDiagnostics("goal-tab", "goal-chat", 1)
 		turns, _ := diagnostics["turns"].([]any)
-		if len(turns) > 0 && mapFromAnyMain(turns[0])["active"] == true && mapFromAnyMain(turns[0])["firstUpdateMs"] != nil {
-			ready = true
+		state, _ := runtime.Snapshot("goal-chat")
+		// Transport diagnostics may arrive before the actor has admitted this
+		// turn. Live control needs the actor's exact running owner as well.
+		if state.Foreground != nil && state.Foreground.OperationID == "goal-held" && state.Foreground.Status == chat.ForegroundRunning && state.Foreground.Turn.NativeID != "" && len(turns) > 0 && mapFromAnyMain(turns[0])["active"] == true && mapFromAnyMain(turns[0])["firstUpdateMs"] != nil {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !ready {
-		t.Fatal("goal did not reach native host")
+		select {
+		case <-activity:
+		case <-ctx.Done():
+			t.Fatal("goal did not reach the actor's running native turn:", ctx.Err())
+		}
 	}
 	result, handled, err := runtime.Steer(ctx, map[string]any{"tabId": "goal-tab", "chatId": "goal-chat", "sessionId": info.SessionID, "clientUserMessageId": "goal-live-status", "prompt": "/goal", "continuationAssistantMessageId": "goal-status-assistant"})
 	if err != nil || !handled || result["ok"] != true {
