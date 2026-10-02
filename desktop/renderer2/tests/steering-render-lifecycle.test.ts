@@ -120,11 +120,11 @@ test('actual transcript and composer tray transfer one steer owner at acknowledg
   assert.deepEqual(reloaded.messages.map((message) => message.id), canonicalOrder);
 });
 
-test('a queued message retains its own Steer action while fresh steering bypasses FIFO', () => {
+test('queued rows retain their existing controls without a new Steer button', () => {
   const chat = chatWithLiveSteer();
   chat.deliveryCapabilities = { stableInputIdentity: true, liveSteer: true, steerConsumptionReceipt: true, consumptionReceipt: true, turnReadback: false };
   chat.queue = [{ id: 'queued-direction', text: 'QUEUED-DIRECTION' }];
   const markup = renderQueue(chat);
-  assert.match(markup, /title="Steer"/);
+  assert.doesNotMatch(markup, /title="Steer"|class="qsteer"/);
   assert.match(markup, /QUEUED-DIRECTION/);
 });

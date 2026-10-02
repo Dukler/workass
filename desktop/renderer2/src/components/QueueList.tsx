@@ -121,14 +121,6 @@ export function QueueList({ chat }: { chat: Chat }) {
                   )}
                 </span>
                 <button
-                  className="qsteer"
-                  title="Steer"
-                  disabled={!canSteer}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onDoubleClick={(e) => e.stopPropagation()}
-                  onClick={() => { void store.steerQueued(chat.id, q.id); }}
-                >Steer</button>
-                <button
                   className="qx"
                   title="Quitar"
                   onMouseDown={(e) => e.stopPropagation()}

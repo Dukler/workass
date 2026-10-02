@@ -1042,9 +1042,6 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .qrow:hover .qx { opacity: 1; }
 .qrow .qx:hover { background: var(--line); color: var(--del); }
 .qrow .qx svg { width: 12px; height: 12px; }
-.qrow .qsteer { flex: none; border: 0; border-radius: 5px; background: transparent; color: var(--acc); padding: 2px 4px; font: inherit; font-size: 11px; cursor: pointer; }
-.qrow .qsteer:hover { background: var(--line); }
-.qrow .qsteer:disabled { color: var(--faint); cursor: default; }
 /* Editing: seamless in-place field, no buttons. Grows to full width for comfort. */
 .qrow.editing { cursor: default; width: 100%; background: color-mix(in srgb, var(--acc) 5%, var(--card)); border-color: color-mix(in srgb, var(--acc) 40%, var(--line)); }
 .qrow .qedit { flex: 1; background: transparent; border: 0; color: var(--ink); font: inherit; font-size: 12.5px; line-height: 1.5; resize: none; outline: none; padding: 0; overflow: hidden; }
