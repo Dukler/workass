@@ -76,6 +76,15 @@ type TimelineEntry struct {
 	Plan       *provider.PlanEvent
 	Compaction *provider.CompactionEvent
 	Restored   *provider.CheckpointRestoredEvent
+	Result     *AssistantResultSpan
+}
+
+// AssistantResultSpan locates provider-typed final text in the ordinary
+// timeline without copying it out of the assistant's result field.
+// Start and End use UTF-16 offsets, matching the renderer's strings.
+type AssistantResultSpan struct {
+	Start int
+	End   int
 }
 
 type ContextBatch struct {
@@ -1044,6 +1053,10 @@ func cloneTimeline(entries []TimelineEntry) []TimelineEntry {
 			value := *entry.Restored
 			entry.Restored = &value
 		}
+		if entry.Result != nil {
+			value := *entry.Result
+			entry.Result = &value
+		}
 		out[index] = entry
 	}
 	return out
@@ -1664,7 +1677,7 @@ func validateTimeline(entries []TimelineEntry) error {
 		}
 		seen[entry.Key] = struct{}{}
 		payloads := 0
-		for _, present := range []bool{entry.Thinking != nil, entry.Tool != nil, entry.Plan != nil, entry.Compaction != nil, entry.Restored != nil} {
+		for _, present := range []bool{entry.Thinking != nil, entry.Tool != nil, entry.Plan != nil, entry.Compaction != nil, entry.Restored != nil, entry.Result != nil} {
 			if present {
 				payloads++
 			}
@@ -1673,6 +1686,10 @@ func validateTimeline(entries []TimelineEntry) error {
 			return errors.New("timeline entry does not have exactly one typed payload")
 		}
 		switch entry.Kind {
+		case provider.EventAssistantChunk:
+			if entry.Result == nil || entry.Result.Start < 0 || entry.Result.End <= entry.Result.Start {
+				return errors.New("assistant result timeline entry has wrong payload")
+			}
 		case provider.EventThinkingUpdate:
 			if entry.Thinking == nil {
 				return errors.New("thinking timeline entry has wrong payload")

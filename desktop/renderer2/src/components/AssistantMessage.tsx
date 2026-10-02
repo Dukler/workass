@@ -121,7 +121,7 @@ function AssistantSliceBody({
     thinkEv?.key,
   );
   const parsedSegments = segs.map((segment) => 'prose' in segment ? parseBlocks(segment.prose) : null);
-  const resultBlocks = msg.result ? parseBlocks(msg.result) : [];
+  const resultBlocks = msg.result && !msg.events.some(event => event.kind === 'result') ? parseBlocks(msg.result) : [];
   const { media, gallery } = assistantMediaResolver(tabId, msg.images, parsedSegments.flatMap((blocks) => blocks ?? []).concat(resultBlocks), artifactOrigin);
   const visualizeChatId = store.chat(tabId)?.chatId ?? '';
   const blockKeys = stableMarkdownBlockKeys(msg, parsedSegments.flatMap((blocks) => blocks?.map((block) => block.sig) ?? []));

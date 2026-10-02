@@ -33,16 +33,30 @@ function updateGoalFixture(status) {
 }
 
 function runGoalFixture() {
+  const phases = process.env.WORKASS_CODEX_FIXTURE_GOAL_PHASES === '1';
+  const prose = (phase, text) => {
+    const itemId = `${activeTurn}-${phase}`;
+    notify('item/started', { threadId: fixtureThreadId, turnId: activeTurn, item: { type: 'agentMessage', id: itemId, phase } });
+    notify('item/agentMessage/delta', { threadId: fixtureThreadId, turnId: activeTurn, itemId, delta: text });
+  };
   const start = () => {
     activeTurn = `fixture-goal-${++turnSequence}`;
     notify('turn/started', { threadId: fixtureThreadId, turn: { id: activeTurn, status: 'inProgress' } });
     notify('item/agentMessage/delta', { threadId: fixtureThreadId, turnId: activeTurn, itemId: activeTurn, delta: 'Native goal checkpoint.\n' });
   };
   start();
+  if (phases) prose('final_answer', 'Goal checkpoint answer 🧭.\n\n');
   completeTurn(activeTurn);
   setTimeout(() => {
     if (goal?.status !== 'active') return;
     start();
+    if (phases) {
+      const item = { type: 'commandExecution', id: `${activeTurn}-continuation-tool`, command: 'echo goal-continuation', status: 'completed', aggregatedOutput: 'fixture continuation', exitCode: 0 };
+      notify('item/started', { threadId: fixtureThreadId, turnId: activeTurn, item: { ...item, status: 'inProgress' } });
+      notify('item/completed', { threadId: fixtureThreadId, turnId: activeTurn, item });
+      prose('commentary', 'Goal continuation commentary.\n\n');
+      prose('final_answer', 'Goal completion answer.');
+    }
     if (goal.objective.includes('[fixture:goal-hold]')) return;
     const terminal = /\[fixture:goal-(blocked|usageLimited|budgetLimited)\]/.exec(goal.objective)?.[1] || 'complete';
     updateGoalFixture(terminal);

@@ -492,13 +492,16 @@ func snapshotParityAssertRichRendererContract(
 	}
 
 	events := anySlice(rootAssistant["events"])
-	if len(events) != 4 {
+	if len(events) != 5 {
 		t.Fatalf("rich assistant timeline = %#v", events)
 	}
-	if fieldString(mapFromAnyMain(events[0]), "kind") != "thinking" || fieldString(mapFromAnyMain(events[0]), "text") != "thinking window" {
-		t.Fatalf("thinking timeline = %#v", events[0])
+	if final := mapFromAnyMain(events[0]); fieldString(final, "kind") != "result" || intValue(final["at"]) != 26 || intValue(final["start"]) != 0 || intValue(final["end"]) != len("final before steer") {
+		t.Fatalf("final answer timeline = %#v", final)
 	}
-	tool := mapFromAnyMain(events[1])
+	if fieldString(mapFromAnyMain(events[1]), "kind") != "thinking" || fieldString(mapFromAnyMain(events[1]), "text") != "thinking window" {
+		t.Fatalf("thinking timeline = %#v", events[1])
+	}
+	tool := mapFromAnyMain(events[2])
 	toolImages := anySlice(tool["images"])
 	if fieldString(tool, "kind") != "tool" || fieldString(tool, "status") != "completed" ||
 		fieldString(tool, "output") != "verification output" || intValue(tool["startedAt"]) != 1786440010100 ||
@@ -514,12 +517,12 @@ func snapshotParityAssertRichRendererContract(
 	if err != nil || !found || fieldString(mapFromAnyMain(loadedToolImage[0]), "data") != "actor-owned image bytes" {
 		t.Fatalf("deferred tool image = found:%v err:%v", found, err)
 	}
-	plan := mapFromAnyMain(events[2])
+	plan := mapFromAnyMain(events[3])
 	if fieldString(plan, "kind") != "plan" || len(anySlice(plan["entries"])) != 2 {
 		t.Fatalf("plan timeline = %#v", plan)
 	}
-	if fieldString(mapFromAnyMain(events[3]), "kind") != "compaction" {
-		t.Fatalf("compaction timeline = %#v", events[3])
+	if fieldString(mapFromAnyMain(events[4]), "kind") != "compaction" {
+		t.Fatalf("compaction timeline = %#v", events[4])
 	}
 
 	queue := anySlice(projectedChat["queue"])

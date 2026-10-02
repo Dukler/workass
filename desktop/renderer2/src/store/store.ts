@@ -26,7 +26,7 @@ import { actorMessages } from '../chat/history';
 import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
 import { redactSensitiveText } from '../redact';
 import { resolveModelSelection } from '../model-selection';
-import { adoptsTerminalJobResult, appendAssistantChunk } from '../assistant-output.ts';
+import { adoptsTerminalJobResult, appendAssistantChunk, ensureAssistantResultAnchor } from '../assistant-output.ts';
 import {
   contextUsageIdentityMatches,
   normalizeContextUsage,
@@ -5484,6 +5484,7 @@ export class Store {
         // Keep the newest plan on the CHAT too: its emitting message eventually
         // ages out of the retained window, and losing it blanked the rail's
         // step-by-step for the rest of the conversation.
+        ensureAssistantResultAnchor(msg);
         if (e.event.kind === 'plan') {
           const planRef = this.jobRef.get(e.id);
           const planChat = planRef ? this.chat(planRef.tabId) : null;

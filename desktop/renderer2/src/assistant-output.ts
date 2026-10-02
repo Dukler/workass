@@ -1,4 +1,4 @@
-import type { Msg } from './store/types';
+import type { Msg, ResultEvent } from './store/types';
 
 export type AssistantMessagePhase = 'commentary' | 'final_answer';
 
@@ -8,16 +8,48 @@ export function normalizeAssistantMessagePhase(value: unknown): AssistantMessage
 
 // Mutates the already-owned live assistant row. Phase-less/unknown providers
 // keep the ordinary content path; only an explicitly provider-typed final
-// answer gets a second transcript surface.
-export function appendAssistantChunk(msg: Pick<Msg, 'content' | 'result'>, chunk: string, phase: unknown): void {
+// answer is stored separately and anchored in the shared transcript timeline.
+type AssistantOutput = Pick<Msg, 'content' | 'result'> & Partial<Pick<Msg, 'id' | 'events'>>;
+
+function appendResultSpan(msg: AssistantOutput, start: number, end: number): void {
+  if (!msg.events || !msg.id || end <= start) return;
+  const last = msg.events.at(-1);
+  if (last?.kind === 'result' && last.at === msg.content.length && last.end === start) {
+    last.end = end;
+    return;
+  }
+  msg.events.push({ key: `timeline:result:${msg.id}:${start}`, kind: 'result', at: msg.content.length, start, end });
+}
+
+export function ensureAssistantResultAnchor(msg: AssistantOutput): void {
+  if (msg.result && !msg.events?.some(event => event.kind === 'result')) appendResultSpan(msg, 0, msg.result.length);
+}
+
+export function appendAssistantChunk(msg: AssistantOutput, chunk: string, phase: unknown): void {
+  ensureAssistantResultAnchor(msg);
   if (normalizeAssistantMessagePhase(phase) === 'final_answer') {
+    const start = msg.result?.length ?? 0;
     msg.result = (msg.result ?? '') + chunk;
+    appendResultSpan(msg, start, msg.result.length);
   } else {
     msg.content += chunk;
   }
 }
 
-export function fullAssistantText(msg: Pick<Msg, 'content' | 'result'>): string {
+export function fullAssistantText(msg: AssistantOutput): string {
+  const spans = (msg.events ?? []).filter((event): event is ResultEvent => event.kind === 'result')
+    .map((event, order) => ({ event, order }))
+    .sort((a, b) => a.event.at - b.event.at || a.order - b.order);
+  if (spans.length) {
+    let cursor = 0;
+    let text = '';
+    for (const { event } of spans) {
+      const at = Math.max(cursor, Math.min(event.at, msg.content.length));
+      text += msg.content.slice(cursor, at) + (msg.result ?? '').slice(event.start, event.end);
+      cursor = at;
+    }
+    return (text + msg.content.slice(cursor)).trim();
+  }
   const commentary = msg.content.trim();
   const result = (msg.result ?? '').trim();
   return [commentary, result].filter(Boolean).join('\n\n');

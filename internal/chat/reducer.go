@@ -3390,6 +3390,9 @@ func reduceProviderEvent(state *State, command ProviderEventReceived) ([]Effect,
 		LaneID: event.Identity.LaneID, OperationID: event.Identity.OperationID,
 		TurnID: event.Identity.TurnID, ConnectionGeneration: command.ConnectionGeneration,
 	}
+	if foreground := state.Foreground; foreground != nil && foreground.LaneID == event.Identity.LaneID && foreground.OperationID == event.Identity.OperationID {
+		ensureForegroundResultAnchor(foreground)
+	}
 	switch event.Kind {
 	case provider.EventLaneAttached:
 		expectedThread := lane.Thread
@@ -3433,7 +3436,9 @@ func reduceProviderEvent(state *State, command ProviderEventReceived) ([]Effect,
 		}
 		switch event.Assistant.Phase {
 		case provider.AssistantPhaseFinal:
+			start := len(utf16.Encode([]rune(state.Foreground.AssistantResult)))
 			state.Foreground.AssistantResult += event.Assistant.Text
+			appendForegroundResultSpan(state.Foreground, start, start+len(utf16.Encode([]rune(event.Assistant.Text))))
 		case provider.AssistantPhaseContent, provider.AssistantPhaseCommentary, "":
 			state.Foreground.AssistantContent += event.Assistant.Text
 		default:
@@ -4319,6 +4324,38 @@ func foregroundUTF16Offset(foreground *ForegroundTurn) int {
 		return 0
 	}
 	return len(utf16.Encode([]rune(foreground.AssistantContent)))
+}
+
+func ensureForegroundResultAnchor(foreground *ForegroundTurn) {
+	if foreground.AssistantResult == "" {
+		return
+	}
+	for _, entry := range foreground.Timeline {
+		if entry.Result != nil {
+			return
+		}
+	}
+	// Older live snapshots have no final-answer anchor. Preserve their current
+	// visible position once, so subsequent activity can advance below them.
+	appendForegroundResultSpan(foreground, 0, len(utf16.Encode([]rune(foreground.AssistantResult))))
+}
+
+func appendForegroundResultSpan(foreground *ForegroundTurn, start, end int) {
+	if end <= start {
+		return
+	}
+	at := foregroundUTF16Offset(foreground)
+	if last := len(foreground.Timeline) - 1; last >= 0 {
+		entry := &foreground.Timeline[last]
+		if entry.Result != nil && entry.At == at && entry.Result.End == start {
+			entry.Result.End = end
+			return
+		}
+	}
+	foreground.Timeline = append(foreground.Timeline, TimelineEntry{
+		Key: fmt.Sprintf("timeline:result:%s:%d", foreground.CurrentAssistantMessageID, start),
+		At:  at, Kind: provider.EventAssistantChunk, Result: &AssistantResultSpan{Start: start, End: end},
+	})
 }
 
 func requireForegroundEventOwner(state *State, event provider.Event) error {

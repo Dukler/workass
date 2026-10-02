@@ -40,7 +40,8 @@ export interface CompactionEvent { key: string; at: number; kind: 'compaction'; 
 // Quiet step row emitted after a successful rewind (R4/D3): "Estado restaurado
 // a antes del turno N ›". Also used to render an honest rewind refusal inline.
 export interface RestoredEvent { key: string; at: number; kind: 'restored'; turnSeq: number; }
-export type TimelineEvent = ThinkingEvent | PlanEvent | ToolEvent | CompactionEvent | RestoredEvent;
+export interface ResultEvent { key: string; at: number; kind: 'result'; start: number; end: number; }
+export type TimelineEvent = ThinkingEvent | PlanEvent | ToolEvent | CompactionEvent | RestoredEvent | ResultEvent;
 
 export interface PermissionState {
   id: string; title: string; kind: string | null;
