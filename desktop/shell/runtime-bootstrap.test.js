@@ -6,7 +6,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { ensurePackagedDaemon, ensurePortableDaemon, healthCheck, healthInstanceId, launchAgentPlist, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
+const { ensurePackagedDaemon, ensurePortableDaemon, healthCheck, healthInstanceId, launchAgentPlist, restartDaemonAndRecover, restartPackagedDaemonAndRecover, waitForHealth } = require('./runtime-bootstrap');
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-runtime-bootstrap-'));
@@ -83,6 +83,86 @@ test('clean-Mac bootstrap installs the bundled runtime as a user LaunchAgent', a
   assert.match(plist, /Contents\/Resources\/runtime\/node\/darwin-arm64\/bin/);
   assert.doesNotMatch(plist, /Contents\/Resources\/runtime\/adapters/);
   assert.doesNotMatch(plist, /node_modules\/electron/);
+});
+
+test('macOS update bootstrap permits chat hydration beyond the old 30 second cutoff', async (t) => {
+  const { root, runtime, resourcesPath, home } = fixture();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  let checks = 0;
+  let settled = false;
+  const installing = ensurePackagedDaemon({
+    runtime, resourcesPath, home, uid: 501, forceInstall: true,
+    check: async (_url, timeout, version) => {
+      assert.equal(timeout, 700);
+      assert.equal(version, '1.2.3');
+      return ++checks > 160;
+    },
+    spawn: () => ({ status: 0, stdout: '', stderr: '' }),
+  }).then(receipt => ({ receipt }), error => ({ error })).finally(() => { settled = true; });
+  for (let tick = 0; tick < 500 && !settled; tick++) {
+    await new Promise(setImmediate);
+    if (!settled) t.mock.timers.tick(250);
+  }
+  const { receipt, error } = await installing;
+  assert.equal(error, undefined, 'A healthy target at 40 seconds must not roll back at 30 seconds');
+  assert.equal(receipt.status, 'installed-and-running');
+  assert.equal(checks, 161);
+  assert.equal(Date.now(), 40000);
+});
+
+test('macOS update bootstrap still fails closed after its bounded recovery window', async (t) => {
+  const { root, runtime, resourcesPath, home } = fixture();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  let checks = 0;
+  let settled = false;
+  const probeTimeouts = [];
+  const installing = ensurePackagedDaemon({
+    runtime, resourcesPath, home, uid: 501, forceInstall: true,
+    check: async (_url, timeout, version) => {
+      assert.ok(timeout > 0 && timeout <= 700);
+      probeTimeouts.push(timeout);
+      assert.equal(version, '1.2.3');
+      checks++;
+      return false;
+    },
+    spawn: () => ({ status: 0, stdout: '', stderr: '' }),
+  }).then(receipt => ({ receipt }), error => ({ error })).finally(() => { settled = true; });
+  for (let tick = 0; tick < 500 && !settled; tick++) {
+    await new Promise(setImmediate);
+    if (!settled) t.mock.timers.tick(250);
+  }
+  const { receipt, error } = await installing;
+  assert.equal(receipt, undefined);
+  assert.match(error.message, /bundled Workass daemon did not become healthy/);
+  assert.equal(checks, 480);
+  assert.equal(Date.now(), 120000);
+  assert.equal(probeTimeouts.at(-1), 250);
+  assert.equal(fs.existsSync(path.join(runtime.dataRoot, 'runtime-release.json')), false);
+});
+
+test('health probes share the startup deadline when each request uses its timeout', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const timeouts = [];
+  let settled = false;
+  const waiting = waitForHealth('https://127.0.0.1:18788', {
+    attempts: 480, timeoutMs: 120000, expectedVersion: '1.2.3',
+    check: async (_url, timeout, version) => {
+      assert.equal(version, '1.2.3');
+      timeouts.push(timeout);
+      t.mock.timers.tick(timeout);
+      return false;
+    },
+  }).finally(() => { settled = true; });
+  for (let tick = 0; tick < 500 && !settled; tick++) {
+    await new Promise(setImmediate);
+    if (!settled) t.mock.timers.tick(Math.min(250, 120000 - Date.now()));
+  }
+  assert.equal(await waiting, false);
+  assert.equal(Date.now(), 120000);
+  assert.ok(timeouts.every(timeout => timeout > 0 && timeout <= 700));
+  assert.ok(timeouts.length < 130);
 });
 
 test('launchd plist escapes paths rather than injecting XML', () => {

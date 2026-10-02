@@ -126,10 +126,15 @@ function runLaunchctl(args, spawn = spawnSync) {
   return spawn('/bin/launchctl', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
-async function waitForHealth(url, { attempts = 120, delayMs = 250, check = healthCheck, expectedVersion = '' } = {}) {
+async function waitForHealth(url, { attempts = 120, delayMs = 250, check = healthCheck, expectedVersion = '', timeoutMs = Infinity } = {}) {
+  const deadline = Date.now() + timeoutMs;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (await check(url, 700, expectedVersion)) return true;
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    if (await check(url, Math.min(700, remaining), expectedVersion)) return true;
+    const pauseMs = Math.min(delayMs, Math.max(0, deadline - Date.now()));
+    if (pauseMs <= 0) return false;
+    await new Promise((resolve) => setTimeout(resolve, pauseMs));
   }
   return false;
 }
@@ -381,7 +386,9 @@ async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process
   if (enable.status !== 0) throw new Error(`could not enable Workass LaunchAgent: ${(enable.stderr || '').trim() || `exit ${enable.status}`}`);
   const kickstart = runLaunchctl(['kickstart', '-k', `${domain}/${runtime.launchdLabel}`], spawn);
   if (kickstart.status !== 0) throw new Error(`could not start Workass LaunchAgent: ${(kickstart.stderr || '').trim() || `exit ${kickstart.status}`}`);
-  if (!await waitForHealth(runtime.daemonURL, { check, expectedVersion: manifest.version })) throw new Error('bundled Workass daemon did not become healthy');
+  // Chat hydration belongs to the same 120-second recovery window used by
+  // the macOS update worker, rather than the generic 30-second startup probe.
+  if (!await waitForHealth(runtime.daemonURL, { check, expectedVersion: manifest.version, attempts: 480, timeoutMs: 120000 })) throw new Error('bundled Workass daemon did not become healthy');
   fs.mkdirSync(runtime.dataRoot, { recursive: true });
   const markerIncoming = `${releaseMarkerPath}.incoming-${process.pid}`;
   fs.writeFileSync(markerIncoming, `${JSON.stringify({
