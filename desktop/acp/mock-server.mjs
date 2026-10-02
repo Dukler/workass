@@ -395,7 +395,8 @@ async function runPrompt(id, params) {
 
   if (!session.cancelled && !text.includes('[mock:silent]')) {
     const prefix = `Mock ACP turn ${session.turn}: `;
-    const typedPhases = text.includes('[mock:phases]');
+    const phaseContinuation = text.includes('[mock:phase-continuation]');
+    const typedPhases = phaseContinuation || text.includes('[mock:phases]');
     if (thoughtMidToken) {
       notify(session.id, {
         sessionUpdate: 'agent_message_chunk',
@@ -420,9 +421,34 @@ async function runPrompt(id, params) {
       await pause();
       notify(session.id, {
         sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: responseText },
+        content: { type: 'text', text: phaseContinuation ? 'Goal checkpoint answer.\n\n' : responseText },
         ...(typedPhases ? { _meta: { workassAssistantPhase: 'final_answer' } } : {}),
       });
+      if (phaseContinuation) {
+        // One logical prompt may continue after a typed checkpoint answer.
+        // This reproduces native goal ordering through the ordinary ACP path.
+        const continuationTool = `${toolCallId}-continuation`;
+        notify(session.id, {
+          sessionUpdate: 'tool_call', toolCallId: continuationTool,
+          title: 'Goal continuation tool', kind: 'execute', status: 'in_progress',
+          rawInput: { command: 'echo goal-continuation' },
+        });
+        notify(session.id, {
+          sessionUpdate: 'tool_call_update', toolCallId: continuationTool,
+          title: 'Goal continuation tool', kind: 'execute',
+          status: 'completed', content: { type: 'text', text: 'goal-continuation' },
+        });
+        notify(session.id, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Goal continuation commentary.\n\n' },
+          _meta: { workassAssistantPhase: 'commentary' },
+        });
+        notify(session.id, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Goal completion answer.' },
+          _meta: { workassAssistantPhase: 'final_answer' },
+        });
+      }
     }
     notify(session.id, {
       sessionUpdate: 'usage_update',

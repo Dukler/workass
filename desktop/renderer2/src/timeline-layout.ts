@@ -216,6 +216,8 @@ export function buildTimelineSegments(msg: Msg, sourceEvents: readonly TimelineE
     .sort((a, b) => a.event.at - b.event.at || a.order - b.order);
   const hasTools = events.some(({ event }) => event.kind === 'tool');
   const index = hasTools ? boundaryIndexFor(msg) : null;
+  const resultBoundaries = events.filter(({ event }) => event.kind === 'result')
+    .map(({ event }) => Math.min(Math.max(event.at, 0), msg.content.length));
   const placed: Array<{ event: TimelineEvent; at: number }> = [];
   let lastAt = 0;
   let blocked = false;
@@ -223,9 +225,13 @@ export function buildTimelineSegments(msg: Msg, sourceEvents: readonly TimelineE
   for (const { event } of events) {
     if (blocked) continue;
     const raw = Math.min(Math.max(event.at, 0), msg.content.length);
-    const safe = event.kind === 'tool'
-      ? eventBoundary(msg.content, index!, raw, msg.status === 'running')
-      : raw;
+    let safe = event.kind === 'tool' ? eventBoundary(msg.content, index!, raw, msg.status === 'running') : raw;
+    // A provider-typed final starts a new prose phase. It releases deferred
+    // tools even when preceding commentary ended without punctuation.
+    if (event.kind === 'tool') {
+      const phaseBoundary = resultBoundaries[upperBound(resultBoundaries, raw - 1)];
+      if (phaseBoundary != null) safe = safe == null ? phaseBoundary : Math.min(safe, phaseBoundary);
+    }
     if (safe == null) { blocked = true; continue; }
     const at = Math.max(lastAt, safe);
     placed.push({ event, at });
@@ -239,7 +245,11 @@ export function buildTimelineSegments(msg: Msg, sourceEvents: readonly TimelineE
       segments.push({ prose: msg.content.slice(cursor, item.at), start: cursor, end: item.at });
       cursor = item.at;
     }
-    segments.push({ event: item.event });
+    if (item.event.kind === 'result') {
+      segments.push({ prose: (msg.result ?? '').slice(item.event.start, item.event.end), start: item.at, end: item.at });
+    } else {
+      segments.push({ event: item.event });
+    }
   }
   if (cursor < msg.content.length || segments.length === 0) {
     segments.push({ prose: msg.content.slice(cursor), start: cursor, end: msg.content.length });
@@ -290,9 +300,10 @@ function transcriptTimelineSnapshot(
   msg: Msg,
   visibleEvents: readonly TimelineEvent[],
 ): unknown[] {
-  const snapshot: unknown[] = [msg.content, msg.status, visibleEvents.length];
+  const snapshot: unknown[] = [msg.content, msg.result, msg.status, visibleEvents.length];
   for (const event of visibleEvents) {
     snapshot.push(event, event.key, event.at, event.kind);
+    if (event.kind === 'result') snapshot.push(event.start, event.end);
     if (event.kind === 'tool') {
       snapshot.push(event.id, event.subagentId, event.subagentHeader, event.subagentProvider, event.subagentModel);
       snapshot.push(...toolRenderSnapshot(event));

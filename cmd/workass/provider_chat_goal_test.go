@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"workass/internal/acp"
 	"workass/internal/chat"
@@ -24,7 +25,7 @@ func TestCodexNativeGoalThroughActorAndExactResume(t *testing.T) {
 	}
 	args, _ := json.Marshal([]string{filepath.Join(root, "desktop", "acp", "mock-codex-app-server.mjs")})
 	manager := acp.NewManager(acp.Options{RootDir: root, StateDir: stateDir, RuntimeProfile: "dev", DefaultProviderID: "codex", InitTimeout: 10 * time.Second, RSSSampleInterval: time.Hour, Broadcast: signalActivity,
-		Provider: acp.ProviderConfig{ID: "codex", Command: "node", Args: []string{filepath.Join(root, "scripts", "codex-native-host.mjs")}, CWD: root, Enabled: true, Env: map[string]string{"WORKASS_CODEX_EXECUTABLE": "node", "WORKASS_CODEX_APP_SERVER_ARGS": string(args), "WORKASS_CODEX_FIXTURE_GOAL_STORE": filepath.Join(stateDir, "native-goal-fixture.json")}}})
+		Provider: acp.ProviderConfig{ID: "codex", Command: "node", Args: []string{filepath.Join(root, "scripts", "codex-native-host.mjs")}, CWD: root, Enabled: true, Env: map[string]string{"WORKASS_CODEX_EXECUTABLE": "node", "WORKASS_CODEX_APP_SERVER_ARGS": string(args), "WORKASS_CODEX_FIXTURE_GOAL_STORE": filepath.Join(stateDir, "native-goal-fixture.json"), "WORKASS_CODEX_FIXTURE_GOAL_PHASES": "1"}}})
 	t.Cleanup(func() { manager.Reset() })
 	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir, signalActivity)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -57,6 +58,55 @@ func TestCodexNativeGoalThroughActorAndExactResume(t *testing.T) {
 	// wrapped context retained explicit command intent all the way to goal/set.
 	run("goal-start", "/goal [fixture:goal-complete] finish the migration")
 	before, _ := runtime.Snapshot("goal-chat")
+	projected, err := projectLedgerMessage(before.Ledger[len(before.Ledger)-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultSpans := 0
+	checkpointEnd := len(utf16.Encode([]rune("Goal checkpoint answer 🧭.\n\n")))
+	checkpointOffset := -1
+	continuationToolOffset := -1
+	for _, raw := range projected["events"].([]any) {
+		event := mapFromAnyMain(raw)
+		if event["kind"] == "result" {
+			if resultSpans == 0 {
+				if event["start"] != 0 || event["end"] != checkpointEnd {
+					t.Fatalf("checkpoint final range lost its original UTF-16 text: %v..%v", event["start"], event["end"])
+				}
+				checkpointOffset = event["at"].(int)
+			}
+			resultSpans++
+		}
+		if event["kind"] == "tool" && event["command"] == "echo goal-continuation" {
+			continuationToolOffset = event["at"].(int)
+		}
+	}
+	if resultSpans != 2 {
+		t.Fatalf("goal checkpoint finals lost their chronological anchors: spans=%d, want 2", resultSpans)
+	}
+	if checkpointOffset < 0 || continuationToolOffset <= checkpointOffset {
+		t.Fatal("continued goal work does not follow the first checkpoint final")
+	}
+	encoded, err := json.Marshal(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rehydrated chat.State
+	if err := json.Unmarshal(encoded, &rehydrated); err != nil {
+		t.Fatal(err)
+	}
+	if err := rehydrated.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := projectLedgerMessage(rehydrated.Ledger[len(rehydrated.Ledger)-1]); err != nil {
+		t.Fatal(err)
+	} else {
+		original, _ := json.Marshal(projected)
+		reloaded, _ := json.Marshal(got)
+		if string(original) != string(reloaded) {
+			t.Fatal("goal phase positions changed after actor snapshot hydration")
+		}
+	}
 	attachment := before.Lanes[before.ActiveLaneID].Attachment
 	if attachment == nil || !attachment.CommandCatalogSupported || attachment.CommandCatalog == nil || len(attachment.CommandCatalog.Commands) != 1 || attachment.CommandCatalog.Commands[0].Name != "goal" {
 		t.Fatalf("native slash catalog lost from actor: %#v", attachment)

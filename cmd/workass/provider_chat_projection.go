@@ -1020,6 +1020,11 @@ func projectTimeline(entries []chat.TimelineEntry) ([]any, error) {
 	for _, entry := range entries {
 		item := map[string]any{"key": entry.Key, "at": entry.At}
 		switch entry.Kind {
+		case providercontract.EventAssistantChunk:
+			if entry.Result == nil {
+				return nil, errors.New("assistant result timeline entry lost its typed payload")
+			}
+			item["kind"], item["start"], item["end"] = "result", entry.Result.Start, entry.Result.End
 		case providercontract.EventThinkingUpdate:
 			if entry.Thinking == nil {
 				return nil, errors.New("thinking timeline entry lost its typed payload")

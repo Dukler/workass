@@ -87,6 +87,13 @@ function groups(row: TranscriptTimelineSegment[] | null): ToolEvent[][] {
   return (row ?? []).filter((segment) => 'tools' in segment).map((segment) => segment.tools);
 }
 
+test('a typed final boundary releases an earlier deferred tool while the goal stays running', () => {
+  const msg = message('unfinished commentary', 10);
+  msg.result = 'CHECKPOINT-FINAL';
+  msg.events.push({ key: 'checkpoint', kind: 'result', at: msg.content.length, start: 0, end: msg.result.length });
+  assert.deepEqual(shape(msg), ['p:unfinished commentary', 'e:tool-1', 'p:CHECKPOINT-FINAL']);
+});
+
 test('defers a tool while its surrounding sentence is still streaming', () => {
   assert.deepEqual(shape(message('I am inspecting the', 8)), ['p:I am inspecting the']);
 });

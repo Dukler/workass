@@ -267,6 +267,50 @@ func TestMockProviderTypedPhasesAreExplicitAndPhaseLessTurnsStayPlain(t *testing
 	}
 }
 
+func TestMockGoalCheckpointPrecedesContinuationActivity(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir:   root,
+		Provider:  ProviderConfig{Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Label: "Workass Mock ACP"},
+		Broadcast: events.Broadcast, StdoutFlushInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	session, err := manager.NewSession(ctx, SessionOptions{TabID: "goal-order-tab", ChatID: "chat-goal-order-tab"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := startAppChatJob(t, manager, session.SessionID, "goal-order-tab", "[mock:phase-continuation] Goal checkpoint answer.")
+	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 5*time.Second), "done", 0, "end_turn")
+	checkpoint, tool, commentary, completion := -1, -1, -1, -1
+	for index, collected := range events.snapshot() {
+		event, _ := collected.payload.(map[string]any)
+		if collected.channel != "job:event" || event["id"] != jobID(job) {
+			continue
+		}
+		if event["type"] == "data" {
+			text, _ := event["chunk"].(string)
+			if event["phase"] == "final_answer" && strings.Contains(text, "Goal checkpoint answer.") {
+				checkpoint = index
+			}
+			if event["phase"] == "commentary" && strings.Contains(text, "Goal continuation commentary.") {
+				commentary = index
+			}
+			if event["phase"] == "final_answer" && text == "Goal completion answer." {
+				completion = index
+			}
+		} else if activity := mapFromAny(event["event"]); activity["kind"] == "tool" && activity["command"] == "echo goal-continuation" {
+			tool = index
+		}
+	}
+	if checkpoint < 0 || tool <= checkpoint || commentary <= tool || completion <= commentary {
+		t.Fatalf("goal publication reordered checkpoint/tool/commentary/completion: %d/%d/%d/%d", checkpoint, tool, commentary, completion)
+	}
+}
+
 func TestSilentAgentTurnSurfacesEmptyCompletionNotice(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
@@ -315,10 +359,12 @@ func TestMockInitializeSessionPromptCancelErrorAndReuse(t *testing.T) {
 	root := repoRoot(t)
 	events := newEventCollector()
 	manager := NewManager(Options{
-		RootDir:              root,
-		Provider:             ProviderConfig{Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Label: "Workass Mock ACP"},
-		Broadcast:            events.Broadcast,
-		StdoutFlushInterval:  50 * time.Millisecond,
+		RootDir:   root,
+		Provider:  ProviderConfig{Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Label: "Workass Mock ACP"},
+		Broadcast: events.Broadcast,
+		// Assert terminal coalescing without racing external-process scheduling
+		// against a 50 ms timer. Display cadence has its own integration tests.
+		StdoutFlushInterval:  time.Hour,
 		ThoughtFlushInterval: 40 * time.Millisecond,
 	})
 	t.Cleanup(func() { manager.Reset() })

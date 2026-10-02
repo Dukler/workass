@@ -899,6 +899,16 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 			}
 		}
 	}
+	if job != nil && kind != "agent_message_chunk" {
+		// A goal can continue with activity after a typed final checkpoint.
+		// Publish that phase before recording the activity's timeline position.
+		b.manager.jobMu.Lock()
+		pendingFinal := job.stdoutPhase == "final_answer" && job.stdoutBuf.Len() > 0
+		b.manager.jobMu.Unlock()
+		if pendingFinal {
+			b.flushStdout(job)
+		}
+	}
 	if notification, ok := adapter.notifications.Decode(update, params); ok {
 		b.handleProviderNotification(sessionID, job, notification)
 		return

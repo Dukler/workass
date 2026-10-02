@@ -1357,7 +1357,7 @@ func TestRichProviderTimelineSurvivesActorRestartLosslessly(t *testing.T) {
 		t.Fatalf("rich turn ledger = %#v", state.Ledger)
 	}
 	assistant := state.Ledger[1]
-	if assistant.Text != "A😀" || assistant.Result != "final answer" || len(assistant.Attachments) != 1 || len(assistant.Timeline) != 4 || assistant.Permission == nil {
+	if assistant.Text != "A😀" || assistant.Result != "final answer" || len(assistant.Attachments) != 1 || len(assistant.Timeline) != 5 || assistant.Permission == nil {
 		t.Fatalf("rich assistant state was collapsed: %#v", assistant)
 	}
 	if assistant.Timeline[0].At != 3 || assistant.Timeline[0].Thinking == nil || assistant.Timeline[0].Thinking.Text != "reasoning window" {
@@ -1366,6 +1366,9 @@ func TestRichProviderTimelineSurvivesActorRestartLosslessly(t *testing.T) {
 	tool := assistant.Timeline[1].Tool
 	if tool == nil || tool.Title != "Run tests" || tool.Output != "ok" || tool.StartedAtUnixMS == 0 || tool.EndedAtUnixMS == 0 || tool.EndedAtUnixMS <= tool.StartedAtUnixMS || len(tool.Attachments) != 1 || !tool.SubagentHeader {
 		t.Fatalf("tool lifecycle was not merged losslessly: %#v", tool)
+	}
+	if final := assistant.Timeline[3]; final.At != 3 || final.Result == nil || final.Result.Start != 0 || final.Result.End != len("final answer") {
+		t.Fatalf("final answer position was not preserved: %#v", final)
 	}
 
 	store := FileStore{Path: filepath.Join(t.TempDir(), "actor.json")}

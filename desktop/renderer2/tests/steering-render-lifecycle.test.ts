@@ -5,6 +5,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer, type ViteDevServer } from 'vite';
 import type { Chat, Msg } from '../src/store/types.ts';
+import { appendAssistantChunk, fullAssistantText } from '../src/assistant-output.ts';
 
 let vite: ViteDevServer;
 let Transcript: React.ComponentType<{ chat: Chat | null }>;
@@ -127,4 +128,39 @@ test('queued rows retain their existing controls without a new Steer button', ()
   const markup = renderQueue(chat);
   assert.doesNotMatch(markup, /title="Steer"|class="qsteer"/);
   assert.match(markup, /QUEUED-DIRECTION/);
+});
+
+test('a goal checkpoint final stays before subsequent tools and commentary through terminal and hydration', () => {
+  const chat = chatWithLiveSteer();
+  const message = assistant('goal-output', '', { status: 'running' });
+  appendAssistantChunk(message, 'GOAL-OPENING.\n\n', 'commentary');
+  appendAssistantChunk(message, 'GOAL-CHECKPOINT 🧭.\n\n', 'final_answer');
+  message.events.push({ key: 'later-tool', at: message.content.length, kind: 'tool', id: 'later-tool', toolKind: 'execute', title: 'GOAL-LATER-TOOL', status: 'completed', command: 'echo goal', terminalId: null, input: null, output: null, location: null });
+  appendAssistantChunk(message, 'GOAL-CONTINUATION.\n\n', 'commentary');
+  appendAssistantChunk(message, 'GOAL-COMPLETION.', 'final_answer');
+  chat.messages = [user('goal-input', '/goal fixture'), message];
+  const verify = (subject: Chat) => {
+    const markup = renderTranscript(subject);
+    const markers = ['GOAL-OPENING', 'GOAL-CHECKPOINT', 'GOAL-LATER-TOOL', 'GOAL-CONTINUATION', 'GOAL-COMPLETION'];
+    const offsets = markers.map(marker => markup.indexOf(marker));
+    assert.ok(offsets.every((offset, index) => offset >= 0 && (index === 0 || offset > offsets[index - 1])), 'final-answer phases render at their capture boundary, followed by later work');
+    assert.equal(occurrences(markup, 'GOAL-CHECKPOINT'), 1);
+    assert.equal(occurrences(markup, 'GOAL-COMPLETION'), 1);
+    assert.equal(fullAssistantText(subject.messages[1]), 'GOAL-OPENING.\n\nGOAL-CHECKPOINT 🧭.\n\nGOAL-CONTINUATION.\n\nGOAL-COMPLETION.');
+  };
+  verify(chat);
+  message.status = 'done';
+  verify(chat);
+  verify(JSON.parse(JSON.stringify(chat)) as Chat);
+});
+
+test('a previously saved final answer advances above new continuation text without losing its phase', () => {
+  const chat = chatWithLiveSteer();
+  const message = assistant('legacy-goal-output', 'EARLIER-COMMENTARY.\n\n', { status: 'running', result: 'SAVED-GOAL-CHECKPOINT.\n\n' });
+  appendAssistantChunk(message, 'NEW-GOAL-CONTINUATION.', 'commentary');
+  chat.messages = [user('legacy-goal-input', '/goal fixture'), message];
+  const markup = renderTranscript(chat);
+  assert.ok(markup.indexOf('SAVED-GOAL-CHECKPOINT') < markup.indexOf('NEW-GOAL-CONTINUATION'));
+  assert.equal(message.result, 'SAVED-GOAL-CHECKPOINT.\n\n');
+  assert.equal(fullAssistantText(message), 'EARLIER-COMMENTARY.\n\nSAVED-GOAL-CHECKPOINT.\n\nNEW-GOAL-CONTINUATION.');
 });
