@@ -18,7 +18,11 @@ node --check "$repo_root/scripts/tests/rebuild-client-status-fixture.js"
 "$runner" --help >/dev/null
 "$runner" electron --help >/dev/null
 "$runner" daemon --help >/dev/null
-grep -q '<string>__LABEL__</string>' "$repo_root/scripts/macos/workass.launchd.plist"
+[ ! -e "$repo_root/scripts/macos/workass.launchd.plist" ]
+if grep -Eq 'launchctl (bootstrap|enable|kickstart)|KeepAlive|RunAtLoad' "$repo_root/scripts/macos/install-workass-launchd.sh" "$worker"; then
+  echo "daemon startup or rollback still installs a restart/login service" >&2
+  exit 1
+fi
 if grep -Eq '\) 2>&1 \| tee' "$runner"; then
   echo "build/test pipeline can mask a failing command" >&2
   exit 1
@@ -171,10 +175,14 @@ grep -q '^phase=healthy$' "$status_file"
 new_pid=$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -n 1)
 [ -n "$new_pid" ] && [ "$new_pid" != "$old_listener_pid" ]
 curl -kfsS --max-time 2 "https://127.0.0.1:$port/workass/health" >/dev/null
-installed_path=$(plutil -extract EnvironmentVariables.PATH raw -o - "$plist")
-case "$installed_path" in "$path_marker":*) ;; *) echo "launchd PATH marker missing: $installed_path" >&2; exit 1 ;; esac
-installed_home=$(plutil -extract EnvironmentVariables.HOME raw -o - "$plist")
-[ "$installed_home" = "$HOME" ]
+[ ! -e "$plist" ]
+if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+  echo "handoff registered a daemon service" >&2
+  exit 1
+fi
+runtime_env=$(ps eww -p "$new_pid" -o command=)
+case "$runtime_env" in *"PATH=$path_marker:"*) ;; *) echo "daemon PATH marker missing" >&2; exit 1 ;; esac
+case "$runtime_env" in *"HOME=$HOME"*) ;; *) echo "daemon HOME missing" >&2; exit 1 ;; esac
 real_daemon_after=$(lsof -nP -tiTCP:8788 -sTCP:LISTEN 2>/dev/null | head -n 1 || true)
 [ "$real_daemon_after" = "$real_daemon_before" ]
 echo "ISOLATED_DAEMON_HANDOFF_PASS old_pid=$old_listener_pid new_pid=$new_pid live_daemon_pid=${real_daemon_after:-none} client_reconnected=true path_preserved=true"

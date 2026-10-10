@@ -405,15 +405,18 @@ exit 3
       /\bWORKASS_QUIESCENT=1\b/.test(String(result.stdout || ''));
   }
   if (transaction.platform === 'darwin') {
-    const launchAgentPath = String(transaction.launchAgentPath || '');
-    const launchdDomain = String(transaction.launchdDomain || '');
-    const label = path.basename(launchAgentPath, '.plist');
-    if (!launchAgentPath || !launchdDomain || !label) return false;
-    const result = run('/bin/launchctl', ['print', `${launchdDomain}/${label}`], {
+    if (!path.isAbsolute(String(transaction.installTarget || ''))) return false;
+    const executable = path.join(transaction.installTarget, 'Contents', 'Resources', 'runtime', 'workass');
+    const result = run('/bin/ps', ['-axo', 'pid=,comm='], {
       encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     });
-    if (result.error || result.status === 0) return false;
-    return result.status === 113 || /could not find service/i.test(String(result.stderr || ''));
+    if (result.error || result.status !== 0) return false;
+    const rows = String(result.stdout || '').split('\n').filter(row => row.trim());
+    if (!rows.length) return false;
+    return rows.every(row => {
+      const match = row.match(/^\s*(\d+)\s+(.+?)\s*$/);
+      return match && match[2] !== executable;
+    });
   }
   return false;
 }
@@ -958,8 +961,8 @@ function defaultOperations(transaction, dependencies = {}) {
       return status === 200;
     },
     // Health silence is not process death: a hung live daemon can still hold
-    // Windows files and retain update admission. Only the exact executable or
-    // launchd service disappearing permits activation.
+    // Windows files and retain update admission. Require OS evidence that the
+    // exact installed daemon executable is gone on either platform.
     daemonDown: async () => exactDaemonDown(transaction),
     stopOldShell: async () => {
       if (transaction.platform === 'win32') {

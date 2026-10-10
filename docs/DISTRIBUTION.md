@@ -43,8 +43,8 @@ control to recover before deleting the previous app.
     official Claude Agent SDK (never vendor CLI binaries or credentials);
 - pinned Node.js LTS runtime bytes, fetched at build time from nodejs.org and
   checked against a committed SHA-256;
-- a first-launch user LaunchAgent bootstrap, so a clean Mac needs no clone,
-  npm, Homebrew, or terminal setup.
+- direct launch of the bundled server when the app opens, so a clean Mac needs
+  no clone, npm, Homebrew, terminal setup, or automatic background service.
 
 The release command requires an Apple `Developer ID Application` identity,
 signs nested Mach-O code from the inside out, enables the hardened runtime with
@@ -217,8 +217,10 @@ For daemon-only operation, run the sibling executable directly:
 workass-daemon.exe --prod --headless --install-service
 ```
 
-This creates a least-privilege per-user Scheduled Task on Windows or a user
-LaunchAgent on macOS. Signed upstream binaries are left byte-for-byte intact.
+This creates a least-privilege per-user Scheduled Task on Windows. macOS uses
+direct server startup when the app opens and rejects service installation;
+manual daemon-only operation uses `workass --headless`. Signed upstream binaries
+are left byte-for-byte intact.
 The bundle contains the transactional updater and emits
 `workass-windows-amd64-release.json`. Portable Windows builds update through
 GitHub without requiring Authenticode: Workass verifies the latest stable

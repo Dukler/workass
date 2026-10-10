@@ -8,60 +8,6 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { spawnSync } = require('node:child_process');
 
-function xmlEscape(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&apos;');
-}
-
-function launchAgentPlist({ label, executable, stateDir, port, bind, workingDir, logRoot, runtimePath, home, profile, dataRoot, browserControlFile }) {
-  const env = {
-    PATH: runtimePath,
-    HOME: home,
-    WORKASS_PROFILE: profile,
-    WORKASS_DATA_ROOT: dataRoot,
-    WORKASS_BROWSER_CONTROL_FILE: browserControlFile,
-  };
-  const envXML = Object.entries(env).map(([key, value]) =>
-    `    <key>${xmlEscape(key)}</key>\n    <string>${xmlEscape(value)}</string>`).join('\n');
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${xmlEscape(label)}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${xmlEscape(executable)}</string>
-    <string>--state-dir</string>
-    <string>${xmlEscape(stateDir)}</string>
-    <string>--port</string>
-    <string>${port}</string>
-    <string>--bind</string>
-    <string>${xmlEscape(bind)}</string>
-  </array>
-  <key>WorkingDirectory</key>
-  <string>${xmlEscape(workingDir)}</string>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>${xmlEscape(path.join(logRoot, 'workass.out.log'))}</string>
-  <key>StandardErrorPath</key>
-  <string>${xmlEscape(path.join(logRoot, 'workass.err.log'))}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-${envXML}
-  </dict>
-</dict>
-</plist>
-`;
-}
-
 function healthCheck(url, timeoutMs = 700, expectedVersion = '') {
   return new Promise((resolve) => {
     const parsed = new URL(url);
@@ -122,10 +68,6 @@ function healthInstanceId(url, timeoutMs = 700) {
   });
 }
 
-function runLaunchctl(args, spawn = spawnSync) {
-  return spawn('/bin/launchctl', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-}
-
 async function waitForHealth(url, { attempts = 120, delayMs = 250, check = healthCheck, expectedVersion = '', timeoutMs = Infinity } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -173,12 +115,12 @@ function portableReleaseManifest(resourcesPath) {
   }
 }
 
-function spawnPortableDaemon({ runtime, executable, platform = process.platform, childSpawn = spawn } = {}) {
+function spawnPortableDaemon({ runtime, executable, platform = process.platform, childSpawn = spawn, env = {}, workingDir } = {}) {
   if (!runtime || !executable) throw new Error('runtime and executable are required');
   fs.mkdirSync(runtime.stateDir, { recursive: true });
   fs.mkdirSync(runtime.logRoot, { recursive: true });
   const stdout = fs.openSync(path.join(runtime.logRoot, 'daemon.out.log'), 'a');
-  const stderr = fs.openSync(path.join(runtime.logRoot, 'daemon.err.log'), 'a');
+  let stderr;
   const args = [
     ...(runtime.profile === 'prod' ? ['--prod'] : []),
     '--headless',
@@ -186,19 +128,27 @@ function spawnPortableDaemon({ runtime, executable, platform = process.platform,
     '--port', String(runtime.daemonPort),
     '--bind', runtime.daemonBind,
   ];
-  const child = childSpawn(executable, args, {
-    cwd: path.dirname(executable),
-    env: {
-      ...process.env,
-      WORKASS_PROFILE: runtime.profile,
-      WORKASS_DATA_ROOT: runtime.dataRoot,
-      WORKASS_BROWSER_CONTROL_FILE: runtime.browserControlFile,
-      ...(runtime.profile === 'prod' ? { WORKASS_PROD: '1' } : {}),
-    },
-    detached: true,
-    windowsHide: platform === 'win32',
-    stdio: ['ignore', stdout, stderr],
-  });
+  let child;
+  try {
+    stderr = fs.openSync(path.join(runtime.logRoot, 'daemon.err.log'), 'a');
+    child = childSpawn(executable, args, {
+      cwd: workingDir || path.dirname(executable),
+      env: {
+        ...process.env,
+        ...env,
+        WORKASS_PROFILE: runtime.profile,
+        WORKASS_DATA_ROOT: runtime.dataRoot,
+        WORKASS_BROWSER_CONTROL_FILE: runtime.browserControlFile,
+        ...(runtime.profile === 'prod' ? { WORKASS_PROD: '1' } : {}),
+      },
+      detached: true,
+      windowsHide: platform === 'win32',
+      stdio: ['ignore', stdout, stderr],
+    });
+  } finally {
+    fs.closeSync(stdout);
+    if (stderr !== undefined) fs.closeSync(stderr);
+  }
   if (typeof child.unref === 'function') child.unref();
   return { child, args };
 }
@@ -288,7 +238,7 @@ async function restartDaemonAndRecover({
   if (wasHealthy && !oldInstanceId) throw new Error('daemon instance identity is unavailable; restart was not attempted');
   const shutdownAccepted = wasHealthy ? await shutdown(runtime.daemonURL) : false;
   if (wasHealthy && !shutdownAccepted) throw new Error('daemon refused the local recovery shutdown');
-  // launchd and Task Scheduler can restart a healthy daemon in less than our
+  // A legacy Windows Task Scheduler service can restart a healthy daemon in less than our
   // 100 ms observation interval.  Missing that tiny down window is not a
   // failure: the only user-visible requirement is a healthy daemon after the
   // accepted graceful stop.  The subsequent ensure call verifies exactly that.
@@ -303,7 +253,26 @@ async function restartDaemonAndRecover({
   return { ...receipt, shutdownAccepted, stoppedObserved, oldInstanceId: oldInstanceId || null, newInstanceId };
 }
 
-async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process.platform, home = os.homedir(), uid = process.getuid?.(), spawn = spawnSync, check = healthCheck, forceInstall = false } = {}) {
+// Compatibility cleanup only: new launches never register or enable a service.
+function removeLegacyDaemonService({ runtime, home, uid, run = spawnSync }) {
+  const plistPath = path.join(home, 'Library', 'LaunchAgents', `${runtime.launchdLabel}.plist`);
+  if (!fs.existsSync(plistPath)) return false;
+  const result = run('/bin/launchctl', ['bootout', `gui/${uid}/${runtime.launchdLabel}`], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.error || (result.status !== 0 && result.status !== 113 &&
+      !/could not find service/i.test(String(result.stderr || '')))) {
+    throw new Error('could not remove the legacy Workass background service');
+  }
+  fs.unlinkSync(plistPath);
+  return result.status === 0;
+}
+
+async function ensurePackagedDaemon({
+  runtime, resourcesPath, platform = process.platform, home = os.homedir(), uid = process.getuid?.(),
+  spawn: legacyServiceRun = spawnSync, childSpawn = spawn, check = healthCheck, forceInstall = false,
+  wait = waitForHealth, waitForDown = waitForUnhealthy, shutdown = postLocalRecoveryShutdown,
+} = {}) {
   if (platform !== 'darwin') return { status: 'unsupported-platform' };
   if (!runtime || !resourcesPath) throw new Error('runtime and resourcesPath are required');
 
@@ -322,16 +291,12 @@ async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process
   if (manifest.schemaVersion !== 1 || manifest.platform !== 'darwin' || !manifest.arch || !manifest.version || !manifest.build) {
     throw new Error('invalid bundled runtime manifest');
   }
-
   const releaseMarkerPath = path.join(runtime.dataRoot, 'runtime-release.json');
   let releaseMarker = null;
-  try { releaseMarker = JSON.parse(fs.readFileSync(releaseMarkerPath, 'utf8')); } catch { /* first self-contained launch */ }
+  try { releaseMarker = JSON.parse(fs.readFileSync(releaseMarkerPath, 'utf8')); } catch { /* first launch */ }
   const markerMatches = releaseMarker?.schemaVersion === 1 &&
     releaseMarker.version === manifest.version && String(releaseMarker.build) === String(manifest.build) &&
     releaseMarker.appRoot === appRoot;
-  if (!forceInstall && markerMatches && await check(runtime.daemonURL, 700, manifest.version)) {
-    return { status: 'already-running', manifest, releaseMarkerPath };
-  }
 
   const executable = path.join(bundledRoot, 'workass');
   const nodeBin = path.join(bundledRoot, 'node', `darwin-${manifest.arch}`, 'bin');
@@ -346,11 +311,18 @@ async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process
     if (!fs.existsSync(required)) throw new Error(`bundled runtime is incomplete: ${required}`);
   }
 
-  fs.mkdirSync(runtime.stateDir, { recursive: true });
-  fs.mkdirSync(runtime.logRoot, { recursive: true });
-  const launchAgents = path.join(home, 'Library', 'LaunchAgents');
-  fs.mkdirSync(launchAgents, { recursive: true });
-  const plistPath = path.join(launchAgents, `${runtime.launchdLabel}.plist`);
+  const removed = removeLegacyDaemonService({ runtime, home, uid, run: legacyServiceRun });
+  if (removed && !await waitForDown(runtime.daemonURL, { check })) {
+    throw new Error('legacy Workass daemon did not stop');
+  }
+  if (!forceInstall && markerMatches && await check(runtime.daemonURL, 700, manifest.version)) {
+    return { status: 'already-running', manifest, releaseMarkerPath };
+  }
+  if (!forceInstall && await check(runtime.daemonURL)) {
+    if (!await shutdown(runtime.daemonURL)) throw new Error('stale Workass daemon refused shutdown');
+    if (!await waitForDown(runtime.daemonURL, { check })) throw new Error('stale Workass daemon did not stop');
+  }
+
   const runtimePath = [
     nodeBin,
     path.join(home, '.local', 'bin'),
@@ -358,53 +330,42 @@ async function ensurePackagedDaemon({ runtime, resourcesPath, platform = process
     path.join(home, '.bun', 'bin'),
     '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin',
   ].join(':');
-  const plist = launchAgentPlist({
-    label: runtime.launchdLabel,
-    executable,
-    stateDir: runtime.stateDir,
-    port: runtime.daemonPort,
-    bind: runtime.daemonBind,
-    workingDir: bundledRoot,
-    logRoot: runtime.logRoot,
-    runtimePath,
-    home,
-    profile: runtime.profile,
-    dataRoot: runtime.dataRoot,
-    browserControlFile: runtime.browserControlFile,
+  const { child, args } = spawnPortableDaemon({
+    runtime, executable, platform, childSpawn,
+    env: { PATH: runtimePath, HOME: home },
   });
-  const incoming = `${plistPath}.incoming-${process.pid}`;
-  fs.writeFileSync(incoming, plist, { mode: 0o600 });
-  fs.renameSync(incoming, plistPath);
-
-  const domain = `gui/${uid}`;
-  runLaunchctl(['bootout', domain, plistPath], spawn);
-  const bootstrap = runLaunchctl(['bootstrap', domain, plistPath], spawn);
-  if (bootstrap.status !== 0) {
-    throw new Error(`could not install Workass LaunchAgent: ${(bootstrap.stderr || '').trim() || `exit ${bootstrap.status}`}`);
+  try {
+    if (typeof child.once === 'function') {
+      await new Promise((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+    }
+    if (!await wait(runtime.daemonURL, { check, expectedVersion: manifest.version, attempts: 480, timeoutMs: 120000 })) {
+      throw new Error('bundled Workass daemon did not become healthy');
+    }
+  } catch (error) {
+    if (child.pid && typeof child.once === 'function' && child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise(resolve => child.once('exit', resolve));
+      child.kill();
+      await exited;
+    } else {
+      child.kill?.();
+    }
+    throw error;
   }
-  const enable = runLaunchctl(['enable', `${domain}/${runtime.launchdLabel}`], spawn);
-  if (enable.status !== 0) throw new Error(`could not enable Workass LaunchAgent: ${(enable.stderr || '').trim() || `exit ${enable.status}`}`);
-  const kickstart = runLaunchctl(['kickstart', '-k', `${domain}/${runtime.launchdLabel}`], spawn);
-  if (kickstart.status !== 0) throw new Error(`could not start Workass LaunchAgent: ${(kickstart.stderr || '').trim() || `exit ${kickstart.status}`}`);
-  // Chat hydration belongs to the same 120-second recovery window used by
-  // the macOS update worker, rather than the generic 30-second startup probe.
-  if (!await waitForHealth(runtime.daemonURL, { check, expectedVersion: manifest.version, attempts: 480, timeoutMs: 120000 })) throw new Error('bundled Workass daemon did not become healthy');
-  fs.mkdirSync(runtime.dataRoot, { recursive: true });
   const markerIncoming = `${releaseMarkerPath}.incoming-${process.pid}`;
-  fs.writeFileSync(markerIncoming, `${JSON.stringify({
-    schemaVersion: 1,
-    version: manifest.version,
-    build: manifest.build,
-    appRoot,
-  }, null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(markerIncoming, JSON.stringify({
+    schemaVersion: 1, version: manifest.version, build: manifest.build, appRoot,
+  }) + '\n', { mode: 0o600 });
   fs.renameSync(markerIncoming, releaseMarkerPath);
-  return { status: 'installed-and-running', manifest, plistPath, executable, releaseMarkerPath };
+  return { status: 'started-and-running', manifest, executable, args, pid: child.pid || null, releaseMarkerPath };
 }
 
 async function restartPackagedDaemonAndRecover({
   runtime, resourcesPath, platform = process.platform, home = os.homedir(), uid = process.getuid?.(),
   check = healthCheck, waitForDown = waitForUnhealthy, shutdown = postLocalRecoveryShutdown,
-  launchctlSpawn = spawnSync, readInstanceId = healthInstanceId,
+  launchctlSpawn = spawnSync, childSpawn = spawn, wait = waitForHealth, readInstanceId = healthInstanceId,
 } = {}) {
   if (platform !== 'darwin') throw new Error('packaged daemon recovery is supported on macOS only');
   const executable = path.join(resourcesPath, 'runtime', 'workass');
@@ -415,8 +376,10 @@ async function restartPackagedDaemonAndRecover({
   const shutdownAccepted = wasHealthy ? await shutdown(runtime.daemonURL) : false;
   if (wasHealthy && !shutdownAccepted) throw new Error('daemon refused the local recovery shutdown');
   const stoppedObserved = wasHealthy ? await waitForDown(runtime.daemonURL, { check }) : true;
+  if (!stoppedObserved) throw new Error('Workass daemon did not stop for recovery');
   const receipt = await ensurePackagedDaemon({
-    runtime, resourcesPath, platform, home, uid, spawn: launchctlSpawn, check, forceInstall: true,
+    runtime, resourcesPath, platform, home, uid, spawn: launchctlSpawn, childSpawn, check, wait, forceInstall: true,
+    waitForDown, shutdown,
   });
   const newInstanceId = await readInstanceId(runtime.daemonURL);
   if (!newInstanceId || (wasHealthy && newInstanceId === oldInstanceId)) {
@@ -431,7 +394,6 @@ module.exports = {
   ensurePortableDaemon,
   healthCheck,
   healthInstanceId,
-  launchAgentPlist,
   portableDaemonCandidates,
 	portableReleaseManifest,
   postLocalRecoveryShutdown,
@@ -440,5 +402,4 @@ module.exports = {
   spawnPortableDaemon,
   waitForUnhealthy,
   waitForHealth,
-  xmlEscape,
 };

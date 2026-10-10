@@ -54,8 +54,10 @@ distribution requires Developer ID signing and notarization. See
 install or relaunch the local production profile. It produces a versioned,
 self-contained, Developer ID-signed and notarized DMG plus update ZIP. The app
 is built from a checksum-verified pinned Electron runtime and contains its
-daemon, ACP adapters, and pinned portable Node runtime; on a clean Mac, first
-launch installs the daemon as a user LaunchAgent. See
+daemon, ACP adapters, and pinned portable Node runtime. Opening the app starts
+its bundled server directly if needed, without installing a login or restart
+service. Killing the server leaves it stopped until the app is opened again or
+explicit recovery is requested. Old daemon LaunchAgents are removed on startup. See
 `docs/DISTRIBUTION.md`.
 
 ## Rebuild law

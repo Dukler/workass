@@ -105,10 +105,11 @@ test('local production install embeds native provider hosts instead of mutating 
   assert.doesNotMatch(script, /WORKASS_DATA_ROOT\/runtime\/frontier-hosts/);
 });
 
-test('manual seed install restores the prior launch agent when app health gates fail', () => {
-  assert.match(installer, /launch_agent_backup/);
+test('manual seed rollback removes the legacy service and reopens the app without registering a service', () => {
   assert.match(installer, /launchctl bootout "\$launchd_domain" "\$launch_agent_path"/);
-  assert.match(installer, /launchctl bootstrap "\$launchd_domain" "\$launch_agent_path"/);
+  assert.match(installer, /rm -f "\$launch_agent_path"/);
+  assert.match(installer, /launch_installed >\/dev\/null 2>&1/);
+  assert.doesNotMatch(installer, /launchctl (bootstrap|enable|kickstart)/);
 });
 
 test('macOS package consumes the exact audited Electron runtime', () => {

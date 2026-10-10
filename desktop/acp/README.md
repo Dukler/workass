@@ -528,7 +528,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File desktop\scripts\Rebuild-
 Do not add Electron to `desktop/package.json`; the restricted Windows environment depends on its
 vendored runtime. For daemon-only operation, use
 `workass-daemon.exe --prod --headless --install-service`; this installs a
-per-user Scheduled Task on Windows and a user LaunchAgent on macOS.
+per-user Scheduled Task on Windows. On macOS, opening Workass starts the bundled
+server directly; there is no login or restart service. A manual headless run
+uses `workass --headless`, and `--install-service` is rejected on macOS.
 
 ## Future Go Split
 

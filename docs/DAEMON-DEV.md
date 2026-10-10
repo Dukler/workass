@@ -235,19 +235,22 @@ operation, install a per-user service from the daemon itself:
 workass-daemon.exe --prod --headless --install-service
 ```
 
-Windows uses a least-privilege Scheduled Task and macOS uses a user LaunchAgent;
-both launch the same daemon with an explicit state directory, port, and bind.
+Windows uses a least-privilege Scheduled Task. macOS starts the server directly
+when the app opens and rejects `--install-service`; manual headless operation
+uses `workass --headless` with an explicit state directory, port, and bind.
 The separate Windows scheduled-task wrapper remains available for endpoint
 workflows.
 
-macOS user launchd install:
+Legacy macOS direct-start alias:
 
 ```sh
 scripts/macos/install-workass-launchd.sh /absolute/path/to/workass
 ```
 
-The template is `scripts/macos/workass.launchd.plist`; the install script writes
-`~/Library/LaunchAgents/com.workass.daemon.plist` and logs to `~/Library/Logs/Workass`.
+The historical script name is retained for existing callers. It removes a
+legacy LaunchAgent and starts the server once, without automatic respawn or
+login startup. Its direct process logs are `daemon.out.log` and `daemon.err.log`
+under `~/Library/Logs/Workass` (or the selected profile's log directory).
 
 ## Test
 
