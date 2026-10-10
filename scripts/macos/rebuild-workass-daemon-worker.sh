@@ -19,7 +19,6 @@ working_dir="${14}"
 backup="$target.previous"
 lock_dir="$repo_root/.dev/rebuild/daemon-$label.lock"
 plist="$HOME/Library/LaunchAgents/$label.plist"
-old_plist_backup="$status_file.previous.plist"
 state_parent=$(dirname -- "$state_dir")
 status_name=$(basename -- "$status_file")
 case "$status_name" in
@@ -150,7 +149,13 @@ rollback() {
   reason="$1"
   echo "[handoff] activation failed: $reason"
   status rollback "$reason"
-  launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
+  candidate_pid=$(listener_pid)
+  if [ -n "$candidate_pid" ] && [ "$candidate_pid" != "$expected_pid" ]; then
+    stop_pid="$expected_pid"
+    expected_pid="$candidate_pid"
+    stop_expected_listener
+    expected_pid="$stop_pid"
+  fi
   if [ -f "$backup" ]; then
     cp "$backup" "$target"
     chmod 755 "$target"
@@ -165,16 +170,7 @@ rollback() {
   rollback_catalog_stamp=''
   if [ "$view_port" -gt 0 ]; then rollback_catalog_stamp=$(catalog_stamp "$(client_status)"); fi
   restored=0
-  if [ -f "$old_plist_backup" ]; then
-    cp "$old_plist_backup" "$plist"
-    if launchctl bootstrap "gui/$(id -u)" "$plist" && \
-       launchctl enable "gui/$(id -u)/$label" && \
-       launchctl kickstart -k "gui/$(id -u)/$label"; then
-      restored=1
-    fi
-  elif install_launchd; then
-    restored=1
-  fi
+  if install_launchd; then restored=1; fi
   if [ "$restored" -eq 1 ] && wait_health && wait_client_ready "$rollback_catalog_stamp"; then
     restored_pid=$(listener_pid)
     if [ -e "$state_failed" ]; then rm -rf "$state_failed"; fi
@@ -213,7 +209,6 @@ if [ "${WORKASS_PROFILE:-}" = prod ]; then
       ;;
   esac
 fi
-if [ -f "$plist" ]; then cp "$plist" "$old_plist_backup"; fi
 
 baseline_catalog_stamp=''
 if [ "$view_port" -gt 0 ]; then
@@ -244,7 +239,8 @@ chmod 755 "$target"
 
 if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
   echo "[handoff] replacing existing launchd daemon"
-  launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || rollback "could not stop existing launchd daemon"
+  launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || rollback "could not stop existing launchd daemon"
+  rm -f "$plist"
   # A stale registered job may coexist with a directly launched listener.
   # Bootout cannot stop that process; only the exact preflighted listener may
   # be terminated before installing the candidate.
@@ -274,7 +270,7 @@ done
 # only the executable can strand a valid profile on a schema it cannot read.
 snapshot_state || rollback "could not snapshot state before activation"
 
-install_launchd || rollback "launchd install failed"
+install_launchd || rollback "direct daemon start failed"
 wait_health || rollback "health endpoint did not recover"
 new_pid=$(listener_pid)
 [ -n "$new_pid" ] || rollback "health passed without a listener pid"

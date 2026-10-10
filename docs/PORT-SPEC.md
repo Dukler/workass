@@ -1,5 +1,14 @@
 # PORT-SPEC — binding laws for the workass Go daemon
 
+User law 2026-10-10 (macOS server lifecycle): opening Workass starts its
+bundled server directly, as on Windows. Remove automatic daemon service
+installation, login startup, and process respawn on macOS, including development
+launch, rebuild rollback, and the headless service installer. Killing the server
+leaves it stopped until an explicit app launch or recovery. Legacy LaunchAgents
+may be unloaded and deleted, but never reinstalled or enabled. Bounded one-shot
+rebuild/update workers remain permitted; they must not supervise or respawn the
+server. This supersedes older macOS LaunchAgent bootstrap requirements below.
+
 User law 2026-09-16 (Windows updater simplification): an authorized Windows
 update downloads the release ZIP once outside the installation, cleanly closes
 the shell/daemon, replaces release-owned application files, and launches Workass.

@@ -5,11 +5,14 @@ const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
+const { spawn: spawnChild } = require('node:child_process');
+const { once } = require('node:events');
 const test = require('node:test');
-const { ensurePackagedDaemon, ensurePortableDaemon, healthCheck, healthInstanceId, launchAgentPlist, restartDaemonAndRecover, restartPackagedDaemonAndRecover, waitForHealth } = require('./runtime-bootstrap');
+const { ensurePackagedDaemon, ensurePortableDaemon, healthCheck, healthInstanceId, restartDaemonAndRecover, restartPackagedDaemonAndRecover, waitForHealth } = require('./runtime-bootstrap');
 
-function fixture() {
+function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-runtime-bootstrap-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const home = path.join(root, 'home');
   const resourcesPath = path.join(home, 'Applications', 'Workass.app', 'Contents', 'Resources');
   const runtimeRoot = path.join(resourcesPath, 'runtime');
@@ -36,8 +39,8 @@ function fixture() {
   };
 }
 
-test('packaged bootstrap is a no-op while the daemon is already healthy', async () => {
-  const { runtime, resourcesPath, home } = fixture();
+test('packaged bootstrap is a no-op while the daemon is already healthy', async (t) => {
+  const { runtime, resourcesPath, home } = fixture(t);
   fs.mkdirSync(runtime.dataRoot, { recursive: true });
   fs.writeFileSync(path.join(runtime.dataRoot, 'runtime-release.json'), JSON.stringify({
     schemaVersion: 1,
@@ -51,42 +54,136 @@ test('packaged bootstrap is a no-op while the daemon is already healthy', async 
   assert.deepEqual(calls, []);
 });
 
-test('a healthy daemon without this exact app release marker is replaced by the bundled daemon', async () => {
-  const { runtime, resourcesPath, home } = fixture();
+test('a healthy daemon without this exact release marker is replaced directly', async (t) => {
+  const { runtime, resourcesPath, home } = fixture(t);
   const calls = [];
-  let checks = 0;
+  let running = true;
+  const result = await ensurePackagedDaemon({
+    runtime, resourcesPath, home,
+    check: async () => running,
+    spawn: (...args) => { calls.push(args); throw new Error('no launchctl'); },
+    shutdown: async () => { calls.push('shutdown'); running = false; return true; },
+    childSpawn: () => { calls.push('start'); return { pid: 41, unref() {} }; },
+    wait: async () => true,
+  });
+  assert.equal(result.status, 'started-and-running');
+  assert.deepEqual(calls, ['shutdown', 'start']);
+  assert.equal(fs.existsSync(path.join(home, 'Library', 'LaunchAgents')), false);
+});
+
+test('clean-Mac bootstrap starts the bundled server directly without login startup or a restart service', async (t) => {
+  const { runtime, resourcesPath, home } = fixture(t);
+  let invocation;
   const result = await ensurePackagedDaemon({
     runtime, resourcesPath, home, uid: 501,
-    check: async (_url, _timeout, expectedVersion) => { checks += 1; return checks > 1 && expectedVersion === '1.2.3'; },
-    spawn: (_bin, args) => { calls.push(args); return { status: 0, stdout: '', stderr: '' }; },
+    check: async () => false,
+    spawn: () => { throw new Error('clean launch must not call launchctl'); },
+    childSpawn: (...args) => { invocation = args; return { pid: 42, unref() {} }; },
+    wait: async (_url, options) => { assert.equal(options.expectedVersion, '1.2.3'); return true; },
   });
-  assert.equal(result.status, 'installed-and-running');
-  assert.deepEqual(calls.map((args) => args[0]), ['bootout', 'bootstrap', 'enable', 'kickstart']);
+  assert.equal(result.status, 'started-and-running');
+  assert.equal(result.pid, 42);
+  assert.equal(invocation[0], path.join(resourcesPath, 'runtime', 'workass'));
+  assert.equal(invocation[2].detached, true);
+  assert.equal(invocation[2].env.HOME, home);
+  assert.equal(invocation[2].env.WORKASS_DATA_ROOT, runtime.dataRoot);
+  assert.equal(invocation[2].env.WORKASS_PROFILE, 'prod');
+  assert.ok(invocation[2].env.PATH.startsWith(path.join(resourcesPath, 'runtime', 'node', 'darwin-arm64', 'bin')));
+  assert.equal(fs.existsSync(path.join(home, 'Library', 'LaunchAgents')), false);
   const marker = JSON.parse(fs.readFileSync(result.releaseMarkerPath, 'utf8'));
   assert.equal(marker.version, '1.2.3');
   assert.equal(marker.build, '7');
 });
 
-test('clean-Mac bootstrap installs the bundled runtime as a user LaunchAgent', async () => {
-  const { runtime, resourcesPath, home } = fixture();
+test('Mac launch removes an existing legacy service but never enables or reinstalls it', async (t) => {
+  const { runtime, resourcesPath, home } = fixture(t);
+  const plist = path.join(home, 'Library', 'LaunchAgents', `${runtime.launchdLabel}.plist`);
+  fs.mkdirSync(path.dirname(plist), { recursive: true });
+  fs.writeFileSync(plist, 'legacy fixture');
   const calls = [];
-  let healthChecks = 0;
   const result = await ensurePackagedDaemon({
     runtime, resourcesPath, home, uid: 501,
-    check: async () => { healthChecks += 1; return healthChecks > 1; },
-    spawn: (_bin, args) => { calls.push(args); return { status: 0, stdout: '', stderr: '' }; },
+    check: async () => false,
+    spawn: (bin, args) => { calls.push([bin, args]); return { status: 0 }; },
+    childSpawn: () => ({ pid: 43, unref() {} }),
+    wait: async () => true,
   });
-  assert.equal(result.status, 'installed-and-running');
-  assert.deepEqual(calls.map((args) => args[0]), ['bootout', 'bootstrap', 'enable', 'kickstart']);
-  const plist = fs.readFileSync(result.plistPath, 'utf8');
-  assert.match(plist, /Contents\/Resources\/runtime\/workass/);
-  assert.match(plist, /Contents\/Resources\/runtime\/node\/darwin-arm64\/bin/);
-  assert.doesNotMatch(plist, /Contents\/Resources\/runtime\/adapters/);
-  assert.doesNotMatch(plist, /node_modules\/electron/);
+  assert.equal(result.status, 'started-and-running');
+  assert.deepEqual(calls, [['/bin/launchctl', ['bootout', 'gui/501/com.workass.daemon']]]);
+  assert.equal(fs.existsSync(plist), false);
+});
+
+test('failed legacy-service removal refuses to start a competing Mac server', async (t) => {
+  const { runtime, resourcesPath, home } = fixture(t);
+  const plist = path.join(home, 'Library', 'LaunchAgents', `${runtime.launchdLabel}.plist`);
+  fs.mkdirSync(path.dirname(plist), { recursive: true });
+  fs.writeFileSync(plist, 'legacy fixture');
+  await assert.rejects(ensurePackagedDaemon({
+    runtime, resourcesPath, home, uid: 501,
+    spawn: () => ({ status: 1, stderr: 'denied' }),
+    childSpawn: () => { throw new Error('must not start'); },
+  }), /could not remove the legacy/);
+  assert.equal(fs.existsSync(plist), true);
+});
+
+test('a killed Mac server stays stopped; opening Workass again starts a new process', async (t) => {
+  const { runtime, resourcesPath, home } = fixture(t);
+  runtime.profile = 'test';
+  const reservation = http.createServer();
+  await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
+  runtime.daemonPort = reservation.address().port;
+  runtime.daemonURL = `http://127.0.0.1:${runtime.daemonPort}`;
+  await new Promise(resolve => reservation.close(resolve));
+  fs.writeFileSync(path.join(resourcesPath, 'runtime', 'workass'), `#!${process.execPath}
+const http = require('node:http');
+const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+const server = http.createServer((req, res) => {
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({ app: 'workass', version: '1.2.3' }));
+});
+server.listen(port, '127.0.0.1', () => process.send({ ready: true }));
+`);
+  const children = [];
+  let ready;
+  const options = {
+    runtime, resourcesPath, home, check: healthCheck,
+    spawn: () => { throw new Error('must not install a service'); },
+    childSpawn: (executable, args, settings) => {
+      const child = spawnChild(executable, args, { ...settings, stdio: [...settings.stdio, 'ipc'] });
+      children.push(child);
+      ready = once(child, 'message');
+      return child;
+    },
+    wait: async (url, settings) => {
+      const [message] = await ready;
+      assert.deepEqual(message, { ready: true });
+      return healthCheck(url, 700, settings.expectedVersion);
+    },
+  };
+  t.after(async () => {
+    for (const child of children) {
+      if (child.exitCode !== null || child.signalCode !== null) continue;
+      const exited = once(child, 'exit');
+      child.kill('SIGKILL');
+      await exited;
+    }
+  });
+  const first = await ensurePackagedDaemon(options);
+  assert.equal(await healthCheck(runtime.daemonURL), true);
+  const exited = once(children[0], 'exit');
+  children[0].kill('SIGKILL');
+  await exited;
+  assert.equal(await healthCheck(runtime.daemonURL), false);
+  assert.equal(children.length, 1);
+  assert.equal(fs.existsSync(path.join(home, 'Library', 'LaunchAgents')), false);
+  const reopened = await ensurePackagedDaemon(options);
+  assert.notEqual(first.pid, reopened.pid);
+  assert.equal(children.length, 2);
+  assert.equal(await healthCheck(runtime.daemonURL), true);
 });
 
 test('macOS update bootstrap permits chat hydration beyond the old 30 second cutoff', async (t) => {
-  const { root, runtime, resourcesPath, home } = fixture();
+  const { root, runtime, resourcesPath, home } = fixture(t);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   let checks = 0;
@@ -98,7 +195,7 @@ test('macOS update bootstrap permits chat hydration beyond the old 30 second cut
       assert.equal(version, '1.2.3');
       return ++checks > 160;
     },
-    spawn: () => ({ status: 0, stdout: '', stderr: '' }),
+    childSpawn: () => ({ pid: 44, unref() {}, kill() {} }),
   }).then(receipt => ({ receipt }), error => ({ error })).finally(() => { settled = true; });
   for (let tick = 0; tick < 500 && !settled; tick++) {
     await new Promise(setImmediate);
@@ -106,13 +203,13 @@ test('macOS update bootstrap permits chat hydration beyond the old 30 second cut
   }
   const { receipt, error } = await installing;
   assert.equal(error, undefined, 'A healthy target at 40 seconds must not roll back at 30 seconds');
-  assert.equal(receipt.status, 'installed-and-running');
+  assert.equal(receipt.status, 'started-and-running');
   assert.equal(checks, 161);
   assert.equal(Date.now(), 40000);
 });
 
 test('macOS update bootstrap still fails closed after its bounded recovery window', async (t) => {
-  const { root, runtime, resourcesPath, home } = fixture();
+  const { root, runtime, resourcesPath, home } = fixture(t);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   let checks = 0;
@@ -127,7 +224,7 @@ test('macOS update bootstrap still fails closed after its bounded recovery windo
       checks++;
       return false;
     },
-    spawn: () => ({ status: 0, stdout: '', stderr: '' }),
+    childSpawn: () => ({ pid: 44, unref() {}, kill() {} }),
   }).then(receipt => ({ receipt }), error => ({ error })).finally(() => { settled = true; });
   for (let tick = 0; tick < 500 && !settled; tick++) {
     await new Promise(setImmediate);
@@ -165,18 +262,8 @@ test('health probes share the startup deadline when each request uses its timeou
   assert.ok(timeouts.length < 130);
 });
 
-test('launchd plist escapes paths rather than injecting XML', () => {
-  const plist = launchAgentPlist({
-    label: 'com.workass.daemon', executable: '/Applications/A&B/Workass', stateDir: '/tmp/<state>', port: 8788,
-    bind: 'localhost', workingDir: '/tmp/runtime', logRoot: '/tmp/log', runtimePath: '/usr/bin', home: '/Users/test',
-    profile: 'prod', dataRoot: '/tmp/data', browserControlFile: '/tmp/browser.json',
-  });
-  assert.match(plist, /A&amp;B/);
-  assert.match(plist, /&lt;state&gt;/);
-});
-
-test('first launch from a disk image does not install a LaunchAgent with an ephemeral path', async () => {
-  const fixtureData = fixture();
+test('first launch from a disk image does not start a server with an ephemeral path', async (t) => {
+  const fixtureData = fixture(t);
   const volumeResources = path.join(fixtureData.root, 'Volumes', 'Workass', 'Workass.app', 'Contents', 'Resources');
   fs.mkdirSync(path.dirname(volumeResources), { recursive: true });
   fs.cpSync(fixtureData.resourcesPath, volumeResources, { recursive: true });
@@ -220,7 +307,7 @@ test('loopback health exposes a bounded daemon instance id for restart confirmat
   assert.equal(await healthInstanceId('http://192.0.2.1:80'), '');
 });
 
-test('portable bootstrap starts the sibling Windows daemon when no daemon is healthy', async () => {
+test('portable bootstrap starts the sibling Windows daemon when no daemon is healthy', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-bootstrap-'));
   const executablePath = path.join(root, 'Workass.exe');
   const daemonPath = path.join(root, 'workass-daemon.exe');
@@ -253,7 +340,7 @@ test('portable bootstrap starts the sibling Windows daemon when no daemon is hea
 	assert.equal(calls[1].expectedVersion, '1.2.3');
 });
 
-test('portable Windows bootstrap replaces a stale daemon already on port 80', async () => {
+test('portable Windows bootstrap replaces a stale daemon already on port 80', async (t) => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-stale-'));
 	const daemonPath = path.join(root, 'workass-daemon.exe');
 	fs.writeFileSync(daemonPath, 'daemon');
@@ -269,7 +356,7 @@ test('portable Windows bootstrap replaces a stale daemon already on port 80', as
 		runtime, resourcesPath: path.join(root, 'resources'), executablePath: path.join(root, 'Workass.exe'), platform: 'win32',
 		check: async (url, _timeout, expectedVersion) => url === runtime.daemonURL && running && !expectedVersion,
 		shutdown: async (url) => { calls.push(['shutdown', url]); running = false; return true; },
-		waitForDown: async () => { calls.push(['down']); return true; },
+		waitForDown: async (t) => { calls.push(['down']); return true; },
 		wait: async (_url, options) => { calls.push(['wait', options.expectedVersion]); return true; },
 		childSpawn: () => { calls.push(['start']); return { pid: 81, unref() {} }; },
 	});
@@ -282,7 +369,7 @@ test('portable Windows bootstrap replaces a stale daemon already on port 80', as
 	]);
 });
 
-test('recovery stops and starts the same sibling daemon without mutating state', async () => {
+test('recovery stops and starts the same sibling daemon without mutating state', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-recovery-'));
   const daemonPath = path.join(root, 'workass-daemon.exe');
   fs.writeFileSync(daemonPath, 'daemon');
@@ -292,10 +379,10 @@ test('recovery stops and starts the same sibling daemon without mutating state',
   const identities = ['i-before', 'i-after'];
   const result = await restartDaemonAndRecover({
     runtime, resourcesPath: path.join(root, 'resources'), executablePath: path.join(root, 'Workass.exe'), platform: 'win32', daemonExecutable: daemonPath,
-    check: async () => { checks += 1; return checks === 1; },
+    check: async (t) => { checks += 1; return checks === 1; },
     readInstanceId: async () => identities.shift() || '',
-    shutdown: async () => { calls.push('shutdown'); return true; },
-    waitForDown: async () => { calls.push('down'); return true; },
+    shutdown: async (t) => { calls.push('shutdown'); return true; },
+    waitForDown: async (t) => { calls.push('down'); return true; },
     wait: async () => true,
     childSpawn: (exe, args) => { calls.push({ start: [exe, ...args] }); return { pid: 7, unref() {} }; },
   });
@@ -307,7 +394,7 @@ test('recovery stops and starts the same sibling daemon without mutating state',
   assert.equal(calls[2].start[0], daemonPath);
 });
 
-test('recovery rejects a healthy endpoint that still reports the old daemon instance', async () => {
+test('recovery rejects a healthy endpoint that still reports the old daemon instance', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-unchanged-'));
   const daemonPath = path.join(root, 'workass-daemon.exe');
   fs.writeFileSync(daemonPath, 'daemon');
@@ -324,7 +411,7 @@ test('recovery rejects a healthy endpoint that still reports the old daemon inst
   assert.equal(starts, 0, 'a healthy unchanged instance is detected without starting a duplicate');
 });
 
-test('recovery accepts a newly started instance when the exact profile was initially down', async () => {
+test('recovery accepts a newly started instance when the exact profile was initially down', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-down-'));
   const daemonPath = path.join(root, 'workass-daemon.exe');
   fs.writeFileSync(daemonPath, 'daemon');
@@ -333,7 +420,7 @@ test('recovery accepts a newly started instance when the exact profile was initi
   let checks = 0;
   const result = await restartDaemonAndRecover({
     runtime, resourcesPath: path.join(root, 'resources'), platform: 'win32', daemonExecutable: daemonPath,
-    check: async () => { checks += 1; return checks > 2; },
+    check: async (t) => { checks += 1; return checks > 2; },
     readInstanceId: async () => 'i-started',
     wait: async () => true,
     childSpawn: (executable, args, options) => { calls.push({ executable, args, options }); return { pid: 15, unref() {} }; },
@@ -345,7 +432,7 @@ test('recovery accepts a newly started instance when the exact profile was initi
   assert.equal(calls[0].options.env.WORKASS_PROFILE, 'dev');
 });
 
-test('recovery accepts an immediate supervisor replacement without observing downtime', async () => {
+test('recovery accepts an immediate supervisor replacement without observing downtime', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-portable-replaced-'));
   const daemonPath = path.join(root, 'workass-daemon.exe');
   fs.writeFileSync(daemonPath, 'daemon');
@@ -365,19 +452,34 @@ test('recovery accepts an immediate supervisor replacement without observing dow
   assert.equal(starts, 0, 'the existing supervisor replacement is reused');
 });
 
-test('packaged macOS recovery also requires a changed daemon instance', async () => {
-  const { runtime, resourcesPath, home } = fixture();
+test('packaged macOS recovery also requires a changed daemon instance', async (t) => {
+  const { runtime, resourcesPath, home } = fixture(t);
   const ids = ['i-old', 'i-new'];
-  const launchctl = [];
+  const starts = [];
   const result = await restartPackagedDaemonAndRecover({
     runtime, resourcesPath, home, uid: 501,
     check: async () => true,
     readInstanceId: async () => ids.shift() || '',
     shutdown: async () => true,
-    waitForDown: async () => false,
-    launchctlSpawn: (_bin, args) => { launchctl.push(args); return { status: 0 }; },
+    waitForDown: async () => true,
+    launchctlSpawn: () => { throw new Error('must not register a service'); },
+    childSpawn: (bin, args) => { starts.push([bin, args]); return { pid: 45, unref() {} }; },
+    wait: async () => true,
   });
   assert.equal(result.oldInstanceId, 'i-old');
   assert.equal(result.newInstanceId, 'i-new');
-  assert.equal(launchctl.at(-1)[0], 'kickstart');
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0][0], path.join(resourcesPath, 'runtime', 'workass'));
+});
+
+test('Mac recovery cannot start a competing server before the previous one stops', async (t) => {
+  const { runtime, resourcesPath, home } = fixture(t);
+  await assert.rejects(restartPackagedDaemonAndRecover({
+    runtime, resourcesPath, home,
+    check: async () => true,
+    readInstanceId: async () => 'i-old',
+    shutdown: async () => true,
+    waitForDown: async () => false,
+    childSpawn: () => { throw new Error('must not start a competing server'); },
+  }), /did not stop for recovery/);
 });

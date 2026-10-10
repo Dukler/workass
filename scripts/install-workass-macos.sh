@@ -81,7 +81,6 @@ log_file="$repo_root/.dev/package/install-$stamp.log"
 incoming="$install_root/.Workass.app.incoming-$stamp-$$"
 backup="$install_root/.Workass.app.previous-$stamp-$$"
 launch_agent_path="$HOME/Library/LaunchAgents/$WORKASS_LAUNCHD_LABEL.plist"
-launch_agent_backup="$repo_root/.dev/package/launch-agent-$stamp.previous.plist"
 : > "$log_file"
 
 installed_shell_pids() {
@@ -189,21 +188,13 @@ rollback_install() {
     rm -rf "$installed"
     mv "$backup" "$installed"
     /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$installed" >/dev/null 2>&1 || true
-    if [ -f "$launch_agent_backup" ]; then
-      cp "$launch_agent_backup" "$launch_agent_path"
-      launchctl bootstrap "$launchd_domain" "$launch_agent_path" >/dev/null 2>&1 || true
-      launchctl enable "$launchd_domain/$WORKASS_LAUNCHD_LABEL" >/dev/null 2>&1 || true
-      launchctl kickstart -k "$launchd_domain/$WORKASS_LAUNCHD_LABEL" >/dev/null 2>&1 || true
-    else
-      rm -f "$launch_agent_path"
-    fi
+    rm -f "$launch_agent_path"
     launch_installed >/dev/null 2>&1 || true
     if ! wait_for_previous_release; then
       echo "rollback could not recover the previous Workass runtime" >> "$log_file"
     fi
   fi
   rm -rf "$incoming"
-  rm -f "$launch_agent_backup"
   echo "Workass install rolled back: $reason" | tee -a "$log_file" >&2
   exit 1
 }
@@ -230,7 +221,6 @@ fi
 rm -rf "$incoming" "$backup"
 ditto "$candidate" "$incoming"
 workass_codesign_verify_stable "$incoming" true >> "$log_file" 2>&1
-if [ -f "$launch_agent_path" ]; then cp "$launch_agent_path" "$launch_agent_backup"; fi
 
 # The slow build has already finished. From here to the terminal health receipt
 # every operation is a bounded same-volume install or rollback step.
@@ -252,7 +242,6 @@ launch_installed || rollback_install "new Workass app could not be launched"
 wait_for_new_release || rollback_install "new Electron and daemon release did not pass the joint health gate"
 
 rm -rf "$backup"
-rm -f "$launch_agent_backup"
 shot_file="$repo_root/.dev/package/install-$stamp.png"
 if ! curl -fsS --max-time 12 "http://127.0.0.1:$WORKASS_VIEW_PORT/__workass-shell/screenshot" -o "$shot_file" 2>/dev/null || [ ! -s "$shot_file" ]; then
   rm -f "$shot_file"

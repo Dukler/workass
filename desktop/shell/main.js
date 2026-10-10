@@ -621,7 +621,7 @@ if (runsPrimaryRuntime) app.whenReady().then(async () => {
           type: 'info',
           title: 'Move Workass to Applications',
           message: 'Move Workass to the Applications folder before opening it.',
-          detail: 'The Workass background service needs a stable application path so it keeps working after logout and restart.',
+          detail: 'Workass needs a stable application path for its bundled server and application updates.',
         });
       }
     } catch (err) {

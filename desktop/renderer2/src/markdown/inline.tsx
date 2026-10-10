@@ -126,6 +126,7 @@ export function renderInline(text: string, keyBase = 'i', allowLinks = true, med
           target="_blank"
           rel="noreferrer"
           onClick={hosted && media?.openLink ? (event) => { if (media.openLink?.(href)) event.preventDefault(); } : undefined}
+          onAuxClick={hosted && media?.openLink ? (event) => { if (event.button === 1 && media.openLink?.(href)) event.preventDefault(); } : undefined}
         >{renderInline(label, key, allowLinks, media)}</a>);
       }
       else out.push(...renderInline(label, key, allowLinks, media));

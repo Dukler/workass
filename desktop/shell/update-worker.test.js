@@ -581,14 +581,23 @@ test('daemon exit requires exact OS process or service evidence, never a silent 
   }), false);
 
   const mac = transactionFixture();
-  mac.launchAgentPath = '/Users/test/Library/LaunchAgents/com.workass.daemon.plist';
-  mac.launchdDomain = 'gui/501';
+  const executable = path.join(mac.installTarget, 'Contents', 'Resources', 'runtime', 'workass');
   assert.equal(daemonServiceIsDown(mac, {
-    run: () => ({ status: 113, stderr: 'Could not find service' }),
+    run: (bin, args) => {
+      assert.equal(bin, '/bin/ps');
+      assert.deepEqual(args, ['-axo', 'pid=,comm=']);
+      return { status: 0, stdout: '  1 /sbin/launchd\n' };
+    },
   }), true);
   assert.equal(daemonServiceIsDown(mac, {
-    run: () => ({ status: 0, stdout: 'pid = 9123' }),
+    run: () => ({ status: 0, stdout: `  1 /sbin/launchd\n9123 ${executable}\n` }),
   }), false);
+  assert.equal(daemonServiceIsDown(mac, {
+    run: () => ({ status: 0, stdout: `9123 ${executable}-other\n` }),
+  }), true);
+  for (const result of [{ status: 1 }, { status: 0, stdout: '' }, { status: 0, stdout: 'malformed' }, { status: 0, error: new Error('failed') }]) {
+    assert.equal(daemonServiceIsDown(mac, { run: () => result }), false);
+  }
 });
 
 test('rollback path renames retry bounded transient file locks', async () => {

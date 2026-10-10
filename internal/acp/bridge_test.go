@@ -311,6 +311,38 @@ func TestMockGoalCheckpointPrecedesContinuationActivity(t *testing.T) {
 	}
 }
 
+func TestBufferedContinuationTextPrecedesActivity(t *testing.T) {
+	t.Parallel()
+	events := newEventCollector()
+	manager := NewManager(Options{Broadcast: events.Broadcast, StdoutFlushInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	bridge := newBridge("continuation-order", Options{StdoutFlushInterval: time.Hour}, manager)
+	job := &Job{ID: "continuation-order-job"}
+	bridge.setJobForSession("continuation-order-session", job)
+	t.Cleanup(func() { bridge.flushJobBuffers(job) })
+	bridge.queueStdout(job, "checkpoint", "final_answer")
+	bridge.queueStdout(job, "continuation body", "")
+	bridge.handleNotification("session/update", map[string]any{
+		"sessionId": "continuation-order-session",
+		"update":    map[string]any{"sessionUpdate": "plan", "entries": []any{}},
+	})
+	var kinds []string
+	for _, collected := range events.snapshot() {
+		payload := mapFromAny(collected.payload)
+		if collected.channel != "job:event" || payload["id"] != job.ID {
+			continue
+		}
+		if payload["type"] == "data" {
+			kinds = append(kinds, asString(payload["chunk"]))
+		} else {
+			kinds = append(kinds, asString(mapFromAny(payload["event"])["kind"]))
+		}
+	}
+	if strings.Join(kinds, ",") != "checkpoint,continuation body,plan" {
+		t.Fatalf("buffered continuation text overtook activity: %v", kinds)
+	}
+}
+
 func TestSilentAgentTurnSurfacesEmptyCompletionNotice(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)

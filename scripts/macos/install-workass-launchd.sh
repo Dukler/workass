@@ -28,12 +28,12 @@ if [ ! -x "$exe" ]; then
 fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-template="$script_dir/workass.launchd.plist"
+# Keep the historical command name/arguments for callers, but never install a
+# service. The server is started once and has no restart or login supervisor.
 case "$label" in
-  *[!A-Za-z0-9._-]*|'') echo "invalid launchd label: $label" >&2; exit 2 ;;
+  *[!A-Za-z0-9._-]*|'') echo "invalid legacy service label: $label" >&2; exit 2 ;;
 esac
-launch_agents="$HOME/Library/LaunchAgents"
-plist="$launch_agents/$label.plist"
+plist="$HOME/Library/LaunchAgents/$label.plist"
 log_dir="${WORKASS_LOG_ROOT:-$HOME/Library/Logs/Workass}"
 case "$working_dir" in
   /*) ;;
@@ -50,48 +50,28 @@ case "$runtime_home" in
 esac
 [ -n "$runtime_path" ] || { echo "workass runtime PATH must not be empty" >&2; exit 2; }
 
-mkdir -p "$launch_agents" "$state_dir" "$log_dir"
+mkdir -p "$state_dir" "$log_dir"
 
-escape_sed() {
-  printf '%s' "$1" | sed 's/[\/&]/\\&/g'
-}
-
-sed \
-  -e "s/__LABEL__/$(escape_sed "$label")/g" \
-  -e "s/__WORKASS_EXE__/$(escape_sed "$exe")/g" \
-  -e "s/__STATE_DIR__/$(escape_sed "$state_dir")/g" \
-  -e "s/__PORT__/$(escape_sed "$port")/g" \
-  -e "s/__BIND__/$(escape_sed "$bind")/g" \
-  -e "s/__WORKING_DIR__/$(escape_sed "$working_dir")/g" \
-  -e "s/__LOG_DIR__/$(escape_sed "$log_dir")/g" \
-  "$template" > "$plist"
-
-# launchd does not inherit the interactive user's PATH. Official provider CLIs
-# live in user/Homebrew locations, so binding only the system PATH
-# produces a daemon that answers /health while advertising no usable models.
-plutil -insert EnvironmentVariables -xml '<dict/>' "$plist"
-plutil -insert EnvironmentVariables.PATH -string "$runtime_path" "$plist"
-plutil -insert EnvironmentVariables.HOME -string "$runtime_home" "$plist"
-if [ -n "${WORKASS_PROFILE:-}" ]; then
-  plutil -insert EnvironmentVariables.WORKASS_PROFILE -string "$WORKASS_PROFILE" "$plist"
-fi
-if [ -n "${WORKASS_DATA_ROOT:-}" ]; then
-  plutil -insert EnvironmentVariables.WORKASS_DATA_ROOT -string "$WORKASS_DATA_ROOT" "$plist"
-fi
-if [ -n "${WORKASS_BROWSER_CONTROL_FILE:-}" ]; then
-  plutil -insert EnvironmentVariables.WORKASS_BROWSER_CONTROL_FILE -string "$WORKASS_BROWSER_CONTROL_FILE" "$plist"
-fi
-
+# Remove a legacy registration before starting an ordinary process. Never
+# re-enable the job, including labels the user explicitly disabled.
 if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
-  launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
+  launchctl bootout "gui/$(id -u)/$label"
 fi
-launchctl bootstrap "gui/$(id -u)" "$plist"
-launchctl enable "gui/$(id -u)/$label"
-launchctl kickstart -k "gui/$(id -u)/$label"
+rm -f "$plist"
 
-echo "installed launchd agent: $plist"
-echo "executable: $exe"
-echo "state dir:  $state_dir"
-echo "bind:       $bind:$port"
-echo "runtime PATH preserved"
-echo "profile:    ${WORKASS_PROFILE:-unspecified}"
+node - "$script_dir/../../desktop/shell/runtime-bootstrap.js" "$exe" "$state_dir" "$port" "$bind" "$working_dir" "$log_dir" "$runtime_path" "$runtime_home" <<'JS'
+const [bootstrapPath, executable, stateDir, port, bind, workingDir, logRoot, runtimePath, runtimeHome] = process.argv.slice(2);
+const path = require('node:path');
+const { spawnPortableDaemon } = require(bootstrapPath);
+const runtime = {
+  profile: process.env.WORKASS_PROFILE || 'dev', stateDir, daemonPort: Number(port), daemonBind: bind, logRoot,
+  dataRoot: process.env.WORKASS_DATA_ROOT || path.dirname(stateDir),
+  browserControlFile: process.env.WORKASS_BROWSER_CONTROL_FILE || path.join(path.dirname(stateDir), 'run', 'browser-control.json'),
+};
+const { child } = spawnPortableDaemon({
+  runtime, executable, platform: 'darwin', workingDir,
+  env: { PATH: runtimePath, HOME: runtimeHome },
+});
+child.once('error', () => { console.error('Workass server could not be started'); process.exitCode = 1; });
+child.once('spawn', () => { console.log(`started Workass server once: pid=${child.pid}`); });
+JS
