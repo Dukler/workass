@@ -8,6 +8,46 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
+test('mock prompt and immediate cancel preserve wire order in one input write', async () => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'workass-mock-cancel-'));
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../../desktop/acp/mock-server.mjs', import.meta.url))], {
+    cwd: temporary, env: { ...process.env, WORKASS_MOCK_ACP_DELAY_MS: '0' }, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const exited = once(child, 'exit');
+  child.stderr.resume();
+  const lines = createInterface({ input: child.stdout });
+  const pending = new Map();
+  let sequence = 0;
+  lines.on('line', line => {
+    const frame = JSON.parse(line);
+    const waiter = pending.get(frame.id);
+    if (!waiter) return;
+    pending.delete(frame.id);
+    clearTimeout(waiter.timer);
+    if (frame.error) waiter.reject(new Error(frame.error.message)); else waiter.resolve(frame.result);
+  });
+  const request = (method, params, cancel = false) => new Promise((resolve, reject) => {
+    const id = ++sequence;
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} did not settle`)); }, 2000);
+    pending.set(id, { resolve, reject, timer });
+    let wire = `${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`;
+    if (cancel) wire += `${JSON.stringify({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: params.sessionId } })}\n`;
+    child.stdin.write(wire);
+  });
+  try {
+    await request('initialize', { protocolVersion: 1, clientCapabilities: {} });
+    const session = await request('session/new', { cwd: temporary });
+    const result = await request('session/prompt', { sessionId: session.sessionId, prompt: [{ type: 'text', text: '[mock:hold-until-steer] cancel immediately' }] }, true);
+    assert.equal(result.stopReason, 'cancelled');
+  } finally {
+    for (const waiter of pending.values()) clearTimeout(waiter.timer);
+    child.kill();
+    await exited;
+    lines.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test('mock held prompt observes a release created before its directory watcher attaches', async () => {
   const root = fileURLToPath(new URL('../..', import.meta.url));
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'workass-mock-hold-'));
