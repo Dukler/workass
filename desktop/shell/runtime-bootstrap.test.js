@@ -95,7 +95,7 @@ test('clean-Mac bootstrap starts the bundled server directly without login start
   assert.equal(marker.build, '7');
 });
 
-test('Mac launch removes an existing legacy service but never enables or reinstalls it', async (t) => {
+for (const status of [0, 3, 113]) test(`Mac launch removes a legacy plist with bootout status ${status} without enabling a service`, async (t) => {
   const { runtime, resourcesPath, home } = fixture(t);
   const plist = path.join(home, 'Library', 'LaunchAgents', `${runtime.launchdLabel}.plist`);
   fs.mkdirSync(path.dirname(plist), { recursive: true });
@@ -104,7 +104,7 @@ test('Mac launch removes an existing legacy service but never enables or reinsta
   const result = await ensurePackagedDaemon({
     runtime, resourcesPath, home, uid: 501,
     check: async () => false,
-    spawn: (bin, args) => { calls.push([bin, args]); return { status: 0 }; },
+    spawn: (bin, args) => { calls.push([bin, args]); return { status }; },
     childSpawn: () => ({ pid: 43, unref() {} }),
     wait: async () => true,
   });
