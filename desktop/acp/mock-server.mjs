@@ -590,7 +590,9 @@ async function handleRequest(message) {
     return;
   }
   if (method === 'session/prompt') {
-    await runPrompt(id, params);
+    // Dispatch in wire order, but leave the long-lived turn out of the input
+    // queue so the next cancel/steer can release it.
+    void runPrompt(id, params).catch((err) => process.stderr.write(`${err.stack || err}\n`));
     return;
   }
   if (method === '_workass/context/import') {
@@ -681,7 +683,8 @@ function acceptLine(line) {
   }
   if (!message.method) return;
   if (!Object.prototype.hasOwnProperty.call(message, 'id')) {
-    handleNotification(message);
+    // Notifications must not overtake requests read in the same stdin chunk.
+    lineQueue = lineQueue.then(() => handleNotification(message)).catch((err) => process.stderr.write(`${err.stack || err}\n`));
     return;
   }
   lineQueue = lineQueue.then(() => handleRequest(message)).catch((err) => process.stderr.write(`${err.stack || err}\n`));
