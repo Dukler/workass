@@ -260,7 +260,7 @@ function removeLegacyDaemonService({ runtime, home, uid, run = spawnSync }) {
   const result = run('/bin/launchctl', ['bootout', `gui/${uid}/${runtime.launchdLabel}`], {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
   });
-  if (result.error || (result.status !== 0 && result.status !== 113 &&
+  if (result.error || (result.status !== 0 && result.status !== 3 && result.status !== 113 &&
       !/could not find service/i.test(String(result.stderr || '')))) {
     throw new Error('could not remove the legacy Workass background service');
   }
