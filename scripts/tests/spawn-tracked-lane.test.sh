@@ -82,6 +82,26 @@ case "$inject_line" in
   *) echo "unexpected sanitized injection line: $inject_line" >&2; exit 1 ;;
 esac
 
+# Reusing an output path: the previous run's receipt must not be visible while
+# the new run is still working.
+reuse_output="$temp_root/reused.output"
+printf '0\n' > "$reuse_output.done"
+reuse_gate="$temp_root/reuse.gate"
+"$runner" --label Reuse --output "$reuse_output" -- sh -c 'while [ ! -f "$1" ]; do sleep 0.05; done; exit 7' sh "$reuse_gate" >/dev/null
+if [ -f "$reuse_output.done" ]; then
+  echo "reused output still shows the previous run's receipt while the new run works" >&2
+  touch "$reuse_gate"
+  exit 1
+fi
+touch "$reuse_gate"
+attempts=80
+while [ "$attempts" -gt 0 ]; do
+  [ -f "$reuse_output.done" ] && break
+  attempts=$((attempts - 1))
+  sleep 0.1
+done
+[ "$(cat "$reuse_output.done" 2>/dev/null)" = 7 ] || { echo "reused lane did not write its own receipt" >&2; exit 1; }
+
 mkdir "$temp_root/output-dir"
 if "$runner" --label SlashPath --output "$temp_root/output-dir/" -- true >"$temp_root/slash.out" 2>"$temp_root/slash.err"; then
   echo "accepted directory-style output path" >&2
