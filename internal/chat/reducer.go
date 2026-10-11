@@ -2828,6 +2828,18 @@ func reduceTurnAdmissionFailed(state *State, command TurnAdmissionFailed) ([]Eff
 	return driveQueued(state)
 }
 
+func markLateConsumedSteer(state *State, operationID provider.OperationID) {
+	for index := len(state.Ledger) - 1; index >= 0; index-- {
+		row := &state.Ledger[index]
+		if row.OperationID == operationID && row.Role == "user" && row.TerminalState == "unconsumed" {
+			row.TerminalState = "consumed"
+			row.SteerState = "applied"
+			break
+		}
+	}
+	updateOutbox(state, steerEffectID(operationID), OutboxCompleted, "")
+}
+
 func reduceInputConsumed(state *State, command InputConsumed) error {
 	if pending := state.PendingSteerFor(command.OperationID); pending != nil {
 		if command.Thread != nil {
@@ -2873,6 +2885,13 @@ func reduceInputConsumed(state *State, command InputConsumed) error {
 		return nil
 	}
 	if command.Thread == nil && (outboxHas(state, steerEffectID(command.OperationID), OutboxConsumed) || outboxHas(state, steerEffectID(command.OperationID), OutboxCompleted)) {
+		return nil
+	}
+	if command.Thread == nil && outboxHas(state, steerEffectID(command.OperationID), OutboxAmbiguous) {
+		// The turn ended before the provider took the direction, so it was
+		// recorded unconsumed; Claude Code then ran it as its next turn. The late
+		// receipt is proof it was delivered, never a new input to admit.
+		markLateConsumedSteer(state, command.OperationID)
 		return nil
 	}
 	if state.Foreground == nil || state.Foreground.OperationID != command.OperationID {

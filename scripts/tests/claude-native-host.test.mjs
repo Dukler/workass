@@ -153,7 +153,8 @@ test('native Claude host preserves external MCP stdio configuration', async (t) 
 });
 
 test('official Claude SDK host keeps the steered turn open until the direction is answered', async (t) => {
-  const peer = startHost();
+  // A CLI without command_lifecycle frames: the priority "now" boundary model.
+  const peer = startHost({ WORKASS_CLAUDE_FIXTURE_LEGACY_STEER: '1' });
   t.after(() => peer.child.kill('SIGKILL'));
 
   peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
@@ -342,7 +343,8 @@ test('official Claude SDK host waits for the prior SDK query to release its sess
 });
 
 test('official Claude SDK host preserves image blocks on prompts and live steering', async (t) => {
-  const peer = startHost();
+  // A CLI without command_lifecycle frames: the priority "now" boundary model.
+  const peer = startHost({ WORKASS_CLAUDE_FIXTURE_LEGACY_STEER: '1' });
   t.after(() => peer.child.kill('SIGKILL'));
 
   peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
@@ -507,7 +509,8 @@ test('official Claude SDK host lets a permission outlive the plumbing timeout', 
 // took the direction with it, so the user had to retype it to get any answer
 // (user report 2026-07-27).
 test('official Claude SDK host re-asks a direction that outran the model instead of failing the turn', async (t) => {
-  const peer = startHost();
+  // A CLI without command_lifecycle frames: the priority "now" boundary model.
+  const peer = startHost({ WORKASS_CLAUDE_FIXTURE_LEGACY_STEER: '1' });
   t.after(() => peer.child.kill('SIGKILL'));
 
   peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
@@ -726,3 +729,83 @@ test('official Claude SDK host rotates the requested id when session/new collide
   peer.send({ jsonrpc: '2.0', id: 905, method: 'session/resume', params: { sessionId, cwd: repoRoot, mcpServers: [] } });
   assert.equal((await peer.waitFor(m => m.id === 905)).error, undefined);
  });
+
+async function openFixtureSession(peer) {
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  return (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+}
+
+const sessionUpdate = (kind, extra = () => true) => (message) => message.method === 'session/update'
+  && message.params.update.sessionUpdate === kind && extra(message.params.update);
+
+// Claude Code 2.1.x folds a message typed while it works into the running turn
+// at its next boundary (priority "next") and reports it by uuid; a priority
+// "now" steer aborted the tools in flight and cut the turn.
+test('Claude Code 2.1 steer folds into the running turn and settles with its one result', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  const sessionId = await openFixtureSession(peer);
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, clientUserMessageId: 'client-fold-prompt', prompt: [{ type: 'text', text: '[fixture:steer-boundary]' }],
+  } });
+  await peer.waitFor(sessionUpdate('agent_thought_chunk'));
+  peer.send({ jsonrpc: '2.0', id: 4, method: '_workass/claude/steer', params: {
+    sessionId, prompt: [{ type: 'text', text: 'redirect please' }], clientUserMessageId: 'client-fold-steer',
+  } });
+  assert.equal((await peer.waitFor((message) => message.id === 4)).result.receipt, true);
+  const receipt = await peer.waitFor(sessionUpdate('_workass_claude_steer_consumed'));
+  assert.equal(receipt.params.update.clientUserMessageId, 'client-fold-steer');
+  const settled = await peer.waitFor((message) => message.id === 3);
+  assert.equal(settled.result.stopReason, 'end_turn');
+  const answer = peer.messages.find(sessionUpdate('agent_message_chunk', (update) => String(update.content?.text || '').includes('Fixture folded answer')));
+  assert.ok(answer, 'the direction was answered inside the steered turn');
+  assert.match(answer.params.update.content.text, /\(next\)/, 'steers use Claude Code\'s own priority');
+  assert.ok(peer.messages.indexOf(answer) < peer.messages.indexOf(settled), 'answered before the turn settled');
+  const starts = peer.messages.filter(sessionUpdate('_workass_claude_turn', (update) => update.phase === 'started'));
+  assert.equal(starts.length, 1, 'a folded message is not a new turn');
+});
+
+// 2026-10-11 live incident: a prompt sent while a turn Claude Code started on
+// its own was running got folded into that turn. Its result carried the
+// harness origin, so the prompt never settled; the job ran for two hours and a
+// later steer at it was recorded as never delivered.
+test('Claude Code 2.1 prompt folded into a harness-started turn settles with that turn', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  const sessionId = await openFixtureSession(peer);
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, clientUserMessageId: 'client-before-wake', prompt: [{ type: 'text', text: 'start work [fixture:harness-open]' }],
+  } });
+  assert.equal((await peer.waitFor((message) => message.id === 3)).result.stopReason, 'end_turn');
+  await peer.waitFor(sessionUpdate('_workass_claude_turn', (update) => update.phase === 'started' && update.humanAuthored === false));
+  peer.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: {
+    sessionId, clientUserMessageId: 'client-folded', prompt: [{ type: 'text', text: 'what is the status?' }],
+  } });
+  const consumed = await peer.waitFor(sessionUpdate('_workass_input_consumed', (update) => update.clientUserMessageId === 'client-folded'));
+  assert.ok(consumed, 'the folded prompt was receipted when Claude Code took it in');
+  const settled = await peer.waitFor((message) => message.id === 5);
+  assert.equal(settled.result.stopReason, 'end_turn');
+  const ended = peer.messages.filter(sessionUpdate('_workass_claude_turn', (update) => update.phase === 'ended' && update.originKind === 'task-notification'));
+  assert.equal(ended.length, 1, 'the harness turn ended once, with the prompt');
+});
+
+test('Claude Code 2.1 accepts a steer into a turn it started itself', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  const sessionId = await openFixtureSession(peer);
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, clientUserMessageId: 'client-before-wake-2', prompt: [{ type: 'text', text: 'start work [fixture:harness-open]' }],
+  } });
+  await peer.waitFor((message) => message.id === 3);
+  await peer.waitFor(sessionUpdate('_workass_claude_turn', (update) => update.phase === 'started' && update.humanAuthored === false));
+  peer.send({ jsonrpc: '2.0', id: 4, method: '_workass/claude/steer', params: {
+    sessionId, prompt: [{ type: 'text', text: 'also check the logs' }], clientUserMessageId: 'client-harness-steer',
+  } });
+  const reply = await peer.waitFor((message) => message.id === 4);
+  assert.equal(reply.error, undefined, `steer into a harness turn was rejected: ${JSON.stringify(reply.error)}`);
+  assert.equal(reply.result.receipt, true);
+  await peer.waitFor(sessionUpdate('_workass_claude_steer_consumed', (update) => update.clientUserMessageId === 'client-harness-steer'));
+  await peer.waitFor(sessionUpdate('_workass_claude_turn', (update) => update.phase === 'ended'));
+});

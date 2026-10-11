@@ -423,6 +423,21 @@ class ClaudeSession {
     // Explicit cancel keys off it so it cannot address the previous turn.
     this.harnessTurnActive = false;
     this.steers = new SteerLedger();
+    // Claude Code reports each pushed message's fate by its uuid
+    // (command_lifecycle: queued -> started -> completed | cancelled). A
+    // message typed while a turn runs is FOLDED into that turn at its next
+    // boundary — a turn Claude Code started on its own included — so counting
+    // results cannot tell whose turn ended. Once the CLI speaks the lifecycle,
+    // it alone decides consumption and which turn a result closes; an older
+    // CLI keeps the legacy priority-"now" boundary model below.
+    this.lifecycleSeen = false;
+    // uuid -> { state, kind: 'prompt' | 'steer', owner, clientUserMessageId, reported }
+    this.commands = new Map();
+    // prompt_id of the CLI turn last announced. Claude Code fires
+    // UserPromptSubmit again for a message it folds into the running turn, with
+    // that turn's prompt_id; a new turn gets a new one. Hooks can overtake the
+    // message stream, so the turn's result cannot be what closes it here.
+    this.turnPromptId = '';
     this.startedTurns = false;
     this.queryNeedsRestart = false;
     // Turn pulse: elapsed/tokens/phase while a turn is live, plus provider
@@ -548,6 +563,12 @@ class ClaudeSession {
   }
 
   emitTurnStarted(input) {
+    // Claude Code fires UserPromptSubmit again for a message it folds into the
+    // running turn. That is the same turn: announcing a new one would end the
+    // harness turn's bookkeeping, or adopt a phantom second turn.
+    const promptId = clipTurnField(input?.prompt_id);
+    if (promptId && promptId === this.turnPromptId) return;
+    this.turnPromptId = promptId;
     this.stopEvidence = null;
     this.harnessTurnActive = this.activePrompt === null;
     if (this.harnessTurnActive) this.startTurnPulse();
@@ -840,6 +861,7 @@ class ClaudeSession {
       // that was ordered after the prompt on stdin.
       await this.ensureQuery();
       if (this.activePrompt !== active || this.closed) return response;
+      this.trackCommand(uuid, 'prompt', active, active.clientUserMessageId);
       this.input.push(message);
       active.inputSubmitted = true;
       // The original prompt must enter the SDK queue first. Steers accepted
@@ -857,6 +879,7 @@ class ClaudeSession {
   // turn must stay open across the boundary — settling on the first result
   // orphaned Claude's actual answer after the job had already ended.
   steer(blocks, clientUserMessageId) {
+    if (this.lifecycleSeen) return this.foldSteer(blocks, clientUserMessageId);
     if (!this.activePrompt) throw new Error('No active Claude turn accepts steering');
     const uuid = randomUUID();
     const message = sdkUserMessage(this.sessionId, blocks, uuid, 'now');
@@ -867,6 +890,81 @@ class ClaudeSession {
     if (this.activePrompt.inputSubmitted) this.input.push(message);
     else this.activePrompt.earlySteers.push(message);
     return { turnId: uuid, receipt: Boolean(clientUserMessageId) };
+  }
+
+  // Claude Code's own delivery for a message typed while it works: priority
+  // "next", folded into the running turn at its next tool boundary, with the
+  // tools in flight left alone ("now" aborted them and cut the turn). The
+  // consumption receipt is the lifecycle's "started" for this exact uuid. A
+  // turn Claude Code started itself accepts directions the same way.
+  foldSteer(blocks, clientUserMessageId) {
+    const owner = this.activePrompt;
+    if (!owner && !this.harnessTurnActive) throw new Error('No active Claude turn accepts steering');
+    const uuid = randomUUID();
+    const message = sdkUserMessage(this.sessionId, blocks, uuid, 'next');
+    this.trackCommand(uuid, 'steer', owner, clientUserMessageId);
+    if (owner && !owner.inputSubmitted) owner.earlySteers.push(message);
+    else this.input.push(message);
+    return { turnId: uuid, receipt: Boolean(clientUserMessageId) };
+  }
+
+  trackCommand(uuid, kind, owner, clientUserMessageId) {
+    this.commands.set(uuid, {
+      state: 'pushed', kind, owner: owner || null,
+      clientUserMessageId: String(clientUserMessageId || '').trim(), reported: false,
+    });
+  }
+
+  observeCommandLifecycle(message) {
+    this.lifecycleSeen = true;
+    const uuid = String(message.command_uuid || '');
+    const command = this.commands.get(uuid);
+    if (!command) return;
+    const state = String(message.state || '');
+    command.state = state;
+    if (state === 'started' && !command.reported) {
+      command.reported = true;
+      if (command.kind === 'prompt' && command.owner === this.activePrompt) {
+        this.reportInputConsumed(command.owner);
+        this.acceptActivePrompt(uuid);
+      } else if (command.kind === 'steer' && command.clientUserMessageId) {
+        notify(this.sessionId, { sessionUpdate: '_workass_claude_steer_consumed', clientUserMessageId: command.clientUserMessageId });
+      }
+    }
+    // A folded command can report completed BEFORE the result of the turn it
+    // joined: keep a prompt's commands until that prompt settles.
+    if ((state === 'completed' || state === 'cancelled') && !command.owner) this.commands.delete(uuid);
+  }
+
+  reportInputConsumed(active) {
+    if (!active || active.inputConsumedReported || !active.clientUserMessageId) return;
+    active.inputConsumedReported = true;
+    notify(this.sessionId, { sessionUpdate: '_workass_input_consumed', clientUserMessageId: active.clientUserMessageId });
+  }
+
+  // Claude Code has taken the active prompt (started, or already finished or
+  // dropped it), so the turn that is ending is the prompt's. Still queued
+  // means it runs after this other turn.
+  activePromptInTurn() {
+    const active = this.activePrompt;
+    const state = active ? this.commands.get(active.uuid)?.state : undefined;
+    return state === 'started' || state === 'completed' || state === 'cancelled';
+  }
+
+  // A direction that missed the ending turn's last boundary is still queued:
+  // Claude Code runs it next, and the user-visible turn continues into it.
+  activePromptHasQueuedSteer() {
+    for (const command of this.commands.values()) {
+      if (command.kind === 'steer' && command.owner === this.activePrompt
+          && (command.state === 'pushed' || command.state === 'queued')) return true;
+    }
+    return false;
+  }
+
+  forgetPromptCommands(active) {
+    for (const [uuid, command] of this.commands) {
+      if (command.owner === active) this.commands.delete(uuid);
+    }
   }
 
   // Each pushed steer costs exactly one extra terminal result: the first closes
@@ -911,6 +1009,7 @@ class ClaudeSession {
     const active = this.activePrompt;
     if (!active) return;
     this.activePrompt = null;
+    this.forgetPromptCommands(active);
     this.failOpenToolCalls('La herramienta murió con la consulta al proveedor antes de terminar.');
     if (!this.harnessTurnActive) this.stopTurnPulse();
     // Nothing can answer an outstanding direction once the turn is over; a
@@ -1042,6 +1141,7 @@ class ClaudeSession {
     try {
       await this.ensureQuery();
       if (this.activePrompt !== active || this.closed) return;
+      this.trackCommand(active.uuid, 'prompt', active, active.clientUserMessageId);
       this.input.push(active.message);
     } catch (error) {
       this.settlePrompt(null, error);
@@ -1132,6 +1232,10 @@ class ClaudeSession {
 		previousProviderSessionId, providerSessionId: announced, lineageGeneration, lineageProof,
 	  });
     }
+    if (message.type === 'command_lifecycle') {
+      this.observeCommandLifecycle(message);
+      return;
+    }
     if (message.session_id && (message.type === 'user'
         || (message.type === 'result' && message.is_error !== true))) {
       this.conversation.noteConversationSeen();
@@ -1178,9 +1282,7 @@ class ClaudeSession {
       // the receipt boundary; the terminal result of the pre-steer segment is.
 	  const echoedUUID = String(message.uuid || '');
 	  const active = this.activePrompt;
-	  if (active && active.clientUserMessageId && echoedUUID === active.uuid) {
-		notify(this.sessionId, { sessionUpdate: '_workass_input_consumed', clientUserMessageId: active.clientUserMessageId });
-	  }
+	  if (active && echoedUUID === active.uuid) this.reportInputConsumed(active);
 	  this.acceptActivePrompt(echoedUUID);
       this.completeToolResults(message);
       return;
@@ -1199,8 +1301,15 @@ class ClaudeSession {
       // Settling activePrompt or consuming a steer boundary here would end the
       // user's turn on somebody else's result. origin is authoritative;
       // harnessTurnActive covers a build that does not stamp it.
+      const lifecycle = this.lifecycleSeen;
       const originKind = String(message.origin?.kind || '');
-      if ((originKind && originKind !== 'human') || (!this.activePrompt && this.harnessTurnActive)) {
+      // With the lifecycle report a result closes the prompt exactly when the
+      // prompt was taken into this turn — folded into a turn Claude Code
+      // started on its own included, whatever origin the result carries.
+      // Otherwise it is that other turn's result and the prompt runs next.
+      if (lifecycle
+        ? !this.activePromptInTurn()
+        : ((originKind && originKind !== 'human') || (!this.activePrompt && this.harnessTurnActive))) {
         this.emitTurnEnded(message);
         return;
       }
@@ -1215,7 +1324,7 @@ class ClaudeSession {
         const active = this.activePrompt;
         // A steer that outran the model's first word: recoverable, and the turn
         // must survive it — the direction is re-asked, not lost with the job.
-        if (active && this.steers.awaitingBoundary() && isEmptyAbortResult(message)) {
+        if (!lifecycle && active && this.steers.awaitingBoundary() && isEmptyAbortResult(message)) {
           void this.redriveSteersAfterEmptyAbort(this.query, active);
           return;
         }
@@ -1240,7 +1349,7 @@ class ClaudeSession {
       this.acceptActivePrompt();
       // A steered turn is still the same user-visible turn: hand the receipt to
       // the client and keep streaming the answer to the direction into it.
-      if (this.consumeSteerBoundary()) return;
+      if (lifecycle ? this.activePromptHasQueuedSteer() : this.consumeSteerBoundary()) return;
       this.emitTurnEnded(message);
       if (message.usage) {
         const used = numeric(message.usage.input_tokens) + numeric(message.usage.cache_creation_input_tokens)

@@ -689,7 +689,19 @@ shell, NOT the daemon.
     not acknowledgement. Timeout → uncertain: never re-send, never interrupt.
     Explicit rejection only occurs when no live turn exists, so it never
     interrupts either. The `_workass_claude_steer_consumed` session update is
-    the semantic "applied" receipt. An adapter without that live capability does
+    the semantic "applied" receipt. **Claude Code 2.1 delivery (user law
+    2026-10-11, "do it how Claude Code does it"):** when the CLI reports
+    `command_lifecycle` frames, the host delivers a steer exactly as Claude
+    Code delivers a message typed while it works — priority `next`, folded into
+    the running turn at its next tool boundary without aborting tools in
+    flight — and the receipt is that uuid's lifecycle `started`. The same frame
+    receipts an ordinary prompt (`_workass_input_consumed`). A result settles
+    the prompt when the lifecycle shows the prompt was taken into the ending
+    turn, whatever the result's origin (a prompt folded into a turn the
+    provider started itself settles with it), and not while one of its steers
+    is still queued. A turn the provider started itself accepts steers the
+    same way. A CLI without lifecycle frames keeps the priority-`now` boundary
+    model. An adapter without that live capability does
     not receive an explicit steer and cannot convert it into another intent;
     (c) native OMP uses the version-gated `_workass/omp/steer` host request
     (user correction 2026-09-22), calling SDK `steer(text, images)` directly and

@@ -268,3 +268,57 @@ func TestFailedProviderSwitchReturnsToTheEstablishedLane(t *testing.T) {
 		t.Fatalf("failed switch half-switched the chat: desired=%s provider=%s model=%s", state.DesiredLaneID, state.Presentation.ProviderID, state.Presentation.CurrentModelID)
 	}
 }
+
+// 2026-10-11: Claude Code folds a direction into the running turn at its next
+// boundary; one that misses the last boundary runs as Claude Code's NEXT turn,
+// after Workass already settled the steered turn and recorded the direction
+// unconsumed. Its late receipt is proof of delivery, not an error that
+// rejects the lane's event stream.
+func TestLateSteerReceiptUpgradesTheUnconsumedRow(t *testing.T) {
+	state, _ := NewState("chat")
+	lane := testLane("chat", "claude")
+	state, _ = apply(t, state, SelectLane{Identity: lane})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "claude", RootID: "t", HeadID: "t", Lineage: 1},
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
+	})
+	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "work", Presentation: provider.TurnPresentation{Origin: "human"}})
+	state, _ = apply(t, state, TurnAdmitted{OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"}})
+	sequence := uint64(0)
+	emit := func(event provider.Event) error {
+		sequence++
+		event.Identity = provider.EventIdentity{
+			ChatID: "chat", LaneID: lane.ID, OperationID: event.Identity.OperationID, TurnID: "native-turn",
+			Sequence: sequence, ObservedAtUnixMS: 1_700_000_000_000 + int64(sequence),
+		}
+		next, _, err := Reduce(state, ProviderEventReceived{ConnectionGeneration: 1, Event: event})
+		if err == nil {
+			state = next
+		}
+		return err
+	}
+	if err := emit(provider.Event{Kind: provider.EventInputConsumed, Identity: provider.EventIdentity{OperationID: "turn"}, Input: &provider.InputEvent{OperationID: "turn"}}); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = apply(t, state, Steer{OperationID: "late-steer", Text: "also check the logs", Presentation: provider.TurnPresentation{Origin: "human"}})
+	state, _ = apply(t, state, ClaimEffect{EffectID: steerEffectID("late-steer")})
+	state, _ = apply(t, state, SteerAdmitted{OperationID: "late-steer", Accepted: true, AwaitConsumption: true})
+	if err := emit(provider.Event{Kind: provider.EventTurnTerminal, Identity: provider.EventIdentity{OperationID: "turn"}, Terminal: &provider.TerminalEvent{Status: "completed"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !outboxHas(&state, steerEffectID("late-steer"), OutboxAmbiguous) {
+		t.Fatalf("steer missing its turn was not recorded ambiguous: %#v", state.Outbox)
+	}
+	if err := emit(provider.Event{Kind: provider.EventInputConsumed, Identity: provider.EventIdentity{OperationID: "late-steer"}, Input: &provider.InputEvent{OperationID: "late-steer"}}); err != nil {
+		t.Fatalf("late steer receipt rejected: %v", err)
+	}
+	var row *LedgerEvent
+	for index := range state.Ledger {
+		if state.Ledger[index].OperationID == "late-steer" && state.Ledger[index].Role == "user" {
+			row = &state.Ledger[index]
+		}
+	}
+	if row == nil || row.TerminalState != "consumed" || row.SteerState != "applied" || !outboxHas(&state, steerEffectID("late-steer"), OutboxCompleted) {
+		t.Fatalf("late receipt did not mark the direction delivered: row=%#v", row)
+	}
+}
