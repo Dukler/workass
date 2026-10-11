@@ -2477,7 +2477,7 @@ func appendPreAdmissionCancellation(state *State, input QueueEntry) error {
 	terminal := &provider.TerminalEvent{Status: "cancelled", StopReason: "cancelled", Interrupted: true}
 	assistant := LedgerEvent{
 		EventID: fmt.Sprintf("event:%s:assistant:%s", input.OperationID, assistantID), MessageID: assistantID,
-		Sequence: state.LedgerHead() + 1, Role: "assistant", Status: "cancelled", At: input.Presentation.StartedAt,
+		Sequence: state.LedgerHead() + 1, Role: "assistant", Status: "cancelled", At: input.Presentation.StartedAt, WorkassNotice: true,
 		LaneID: input.LaneID, ProviderID: lane.Identity.Realm.ProviderID, ModelID: input.ModelID,
 		OperationID: input.OperationID, TerminalState: "cancelled_before_admission", Interrupted: true, Terminal: terminal,
 	}
@@ -2685,8 +2685,22 @@ func reduceContextImported(state *State, command ContextImported) ([]Effect, err
 		updateOutbox(state, string(command.OperationID), OutboxFailed, provider.ErrorAdmissionRejected)
 		return nil, nil
 	}
+	imported := make(map[uint64]struct{}, len(pending.Batch.Messages))
 	for _, message := range pending.Batch.Messages {
+		imported[message.LedgerSequence] = struct{}{}
 		if err := setCoverage(&lane, state, message.LedgerSequence, CoverageImported, command.OperationID); err != nil {
+			return nil, err
+		}
+	}
+	// Workass notices in the range were left out of the import on purpose.
+	for sequence := pending.From + 1; sequence <= pending.To; sequence++ {
+		if _, ok := imported[sequence]; ok {
+			continue
+		}
+		if _, covered := lane.Coverage[sequence]; covered || !state.Ledger[sequence-1].WorkassNotice {
+			continue
+		}
+		if err := setCoverage(&lane, state, sequence, CoverageExcluded, command.OperationID); err != nil {
 			return nil, err
 		}
 	}
@@ -2970,7 +2984,8 @@ func reduceTurnTerminated(state *State, command TurnTerminated) ([]Effect, error
 	if state.Foreground.AssistantContent == "" && state.Foreground.AssistantResult == "" {
 		state.Foreground.AssistantContent = strings.TrimSpace(command.Assistant)
 	}
-	if status == "failed" && state.Foreground.AssistantContent == "" && state.Foreground.AssistantResult == "" {
+	failureFallback := status == "failed" && state.Foreground.AssistantContent == "" && state.Foreground.AssistantResult == ""
+	if failureFallback {
 		if strings.TrimSpace(terminal.Error) != "" {
 			state.Foreground.AssistantContent = "Error: " + strings.TrimSpace(terminal.Error)
 		} else {
@@ -2985,6 +3000,7 @@ func reduceTurnTerminated(state *State, command TurnTerminated) ([]Effect, error
 	assistant := &state.Ledger[len(state.Ledger)-1]
 	assistant.Terminal = cloneTerminal(terminal)
 	assistant.Interrupted = terminal.Interrupted
+	assistant.WorkassNotice = failureFallback
 	if strings.TrimSpace(terminal.FinishedAt) != "" {
 		assistant.At = strings.TrimSpace(terminal.FinishedAt)
 	}
@@ -3445,8 +3461,10 @@ func terminalizeInterruptedForeground(
 	}
 
 	settleForegroundActivities(state, "failed", finishedAt, observedAtUnixMS)
+	explained := false
 	if strings.TrimSpace(foreground.AssistantContent) == "" && strings.TrimSpace(foreground.AssistantResult) == "" {
 		foreground.AssistantContent = explanation
+		explained = true
 	}
 	assistantID := strings.TrimSpace(foreground.CurrentAssistantMessageID)
 	if assistantID == "" {
@@ -3475,6 +3493,7 @@ func terminalizeInterruptedForeground(
 		LaneID:      foreground.LaneID, ProviderID: lane.Identity.Realm.ProviderID, ModelID: foreground.Input.ModelID,
 		OperationID: foreground.OperationID, NativeTurnID: foreground.Turn.NativeID, TerminalState: "failed",
 		Interrupted: true, Terminal: terminal, Timeline: cloneTimeline(foreground.Timeline), Permission: clonePermission(foreground.Permission),
+		WorkassNotice: explained,
 	}
 	if startedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(foreground.StartedAt)); err == nil {
 		assistant.TurnStartedAt = startedAt.UnixMilli()
@@ -4389,7 +4408,7 @@ func appendForegroundAdmissionFailure(state *State, kind provider.ErrorKind) err
 		Sequence: state.LedgerHead() + 1, Role: "assistant", Text: errorText, Status: "failed",
 		At: foreground.StartedAt, LaneID: foreground.LaneID, ProviderID: lane.Identity.Realm.ProviderID,
 		ModelID: foreground.Input.ModelID, OperationID: foreground.OperationID, TerminalState: "failed",
-		Interrupted: true, Terminal: terminal,
+		Interrupted: true, Terminal: terminal, WorkassNotice: true,
 	}
 	state.Ledger = append(state.Ledger, assistant)
 	return markLedgerExcluded(state, assistant, foreground.OperationID)
@@ -4916,7 +4935,7 @@ func buildInitialSeedBatch(state State, from, through uint64) (ContextBatch, err
 	eventIDs := make([]string, 0, initialSeedMaxEvents)
 	for sequence := through; sequence > from && len(messages) < initialSeedMaxEvents; sequence-- {
 		event := state.Ledger[sequence-1]
-		if event.ContextExcluded {
+		if event.ContextExcluded || event.WorkassNotice {
 			continue
 		}
 		message := contextMessageForLedgerEvent(event)
@@ -4982,6 +5001,10 @@ func buildContextBatch(state State, coveredThrough uint64, capabilities provider
 	to := from
 	for sequence := from + 1; sequence <= state.LedgerHead() && len(messages) < capabilities.MaxImportEvents; sequence++ {
 		event := state.Ledger[sequence-1]
+		if event.WorkassNotice {
+			to = sequence
+			continue
+		}
 		message := contextMessageForLedgerEvent(event)
 		candidate := append(append([]provider.ContextMessage(nil), messages...), message)
 		raw, err := json.Marshal(candidate)
@@ -5642,7 +5665,6 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 	}
 	return effects, nil
 }
-
 
 // presentationIDsAvailable rejects a turn whose public message ids are already
 // visible in this chat. The ledger requires unique message ids; admitting a

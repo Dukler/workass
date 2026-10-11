@@ -59,8 +59,13 @@ type LedgerEvent struct {
 	// has no child-lane ownership and is never imported into the fresh provider
 	// thread.
 	ContextExcluded bool
-	Timeline        []TimelineEntry
-	Permission      *provider.PermissionEvent
+	// WorkassNotice marks an assistant row whose text Workass wrote (an
+	// admission failure, an interruption explanation, a failure fallback),
+	// not the provider. UI and maintenance notices are never context events
+	// (PROVIDER-LANE-ARCHITECTURE §7): no lane is told its assistant said them.
+	WorkassNotice bool `json:",omitempty"`
+	Timeline      []TimelineEntry
+	Permission    *provider.PermissionEvent
 }
 
 // TimelineEntry is the renderer-visible, provider-neutral event sequence owned

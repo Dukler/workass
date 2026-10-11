@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"strings"
 	"testing"
 
 	"workass/internal/provider"
@@ -114,5 +115,47 @@ func TestReusedMessageIDIsRefusedAtAdmission(t *testing.T) {
 		Origin: "human", UserMessageID: "new-user", AssistantMessageID: "new-assistant",
 	}}); err != nil {
 		t.Fatalf("fresh ids were refused: %v", err)
+	}
+}
+
+// 2026-10-11 QA: a Workass failure notice ("The provider could not start this
+// turn…") was handed to the next provider as something its assistant said.
+func TestWorkassNoticesAreNeverProviderContext(t *testing.T) {
+	state, _ := NewState("chat")
+	laneA := testLane("chat", "mock")
+	state, _ = apply(t, state, SelectLane{Identity: laneA})
+	state, _ = apply(t, state, Submit{OperationID: "a1", Text: "alpha request", Presentation: provider.TurnPresentation{Origin: "human"}})
+	state, _ = apply(t, state, LaneOpenFailed{LaneID: laneA.ID, Kind: provider.ErrorUnsupportedCapability})
+	notices := 0
+	for _, row := range state.Ledger {
+		if row.WorkassNotice {
+			notices++
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("the admission failure notice is not marked: %#v", state.Ledger)
+	}
+	laneB := testLane("chat", "mock-b")
+	state, _ = apply(t, state, SelectLane{Identity: laneB})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID: laneB.ID, Identity: laneB, Thread: provider.ThreadRef{ProviderID: "mock-b", RootID: "b", HeadID: "b", Lineage: 1},
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
+	})
+	_, effects := apply(t, state, Submit{OperationID: "b1", Text: "beta request", Presentation: provider.TurnPresentation{Origin: "human"}})
+	if len(effects) != 1 {
+		t.Fatalf("turn on the second provider did not start: %#v", effects)
+	}
+	start := effects[0].(StartTurnEffect)
+	for _, message := range start.Seed.Messages {
+		if strings.Contains(message.Text, "could not start this turn") {
+			t.Fatalf("a Workass notice was sent as provider context: %#v", start.Seed.Messages)
+		}
+	}
+	found := false
+	for _, message := range start.Seed.Messages {
+		found = found || strings.Contains(message.Text, "alpha request")
+	}
+	if !found {
+		t.Fatalf("the user's own earlier request was dropped from context: %#v", start.Seed.Messages)
 	}
 }
