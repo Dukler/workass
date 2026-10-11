@@ -1148,3 +1148,27 @@ test('native Codex Stop before turn/start replies interrupts the late native tur
   } });
   assert.equal((await peer.waitFor((m) => m.id === 4, 5000)).result.stopReason, 'end_turn');
 });
+
+// 2026-10-11 review: image items await a file read. Handled concurrently, their
+// tool events were published after the turn's terminal, in reverse order.
+test('native Codex image tool events precede the turn terminal in wire order', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'workass-codex-image-order-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const png = path.join(temp, 'fixture.png');
+  await writeFile(png, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=', 'base64'));
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((m) => m.id === 1);
+  peer.send({ id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((m) => m.id === 2)).result.sessionId;
+  peer.send({ id: 3, method: 'session/prompt', params: {
+    sessionId, clientUserMessageId: 'image-order', prompt: [{ type: 'text', text: `[fixture:image-view=${png}]` }],
+  } });
+  const terminal = await peer.waitFor((m) => m.id === 3);
+  assert.equal(terminal.result?.stopReason, 'end_turn');
+  const order = peer.messages
+    .filter((m) => m.id === 3 || (m.params?.update?.toolCallId === 'fixture-image-tool'))
+    .map((m) => (m.id === 3 ? 'terminal' : m.params.update.sessionUpdate));
+  assert.deepEqual(order, ['tool_call', 'tool_call_update', 'terminal']);
+});
