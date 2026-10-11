@@ -11,6 +11,27 @@ const net = require('node:net');
 const path = require('node:path');
 const tls = require('node:tls');
 
+// The shell's control routes drive the user's real window (recover, reload,
+// take-control, synthesized clicks) and expose its DOM. Their callers are this
+// window's own renderer and local scripts (curl, node), never another site: a
+// page in any local browser could otherwise POST here without being able to
+// read the reply. Require a loopback Host (no DNS rebinding), no foreign
+// Origin, and no cross-site fetch metadata.
+function shellControlRequestAllowed(req) {
+  const host = String(req.headers.host || '').trim().toLowerCase();
+  const hostname = host.replace(/:\d+$/, '').replace(/^\[(.*)\]$/, '$1');
+  if (!['127.0.0.1', 'localhost', '::1'].includes(hostname)) return false;
+  const site = String(req.headers['sec-fetch-site'] || '').trim().toLowerCase();
+  if (site && site !== 'same-origin' && site !== 'none') return false;
+  const origin = String(req.headers.origin || '').trim();
+  if (!origin) return true;
+  try {
+    return new URL(origin).host.toLowerCase() === host;
+  } catch {
+    return false;
+  }
+}
+
 const MIME = {
   '.css': 'text/css; charset=utf-8',
   '.html': 'text/html; charset=utf-8',
@@ -207,6 +228,11 @@ function createViewServer({
   const server = http.createServer((req, res) => {
     const parsedUrl = new URL(req.url || '/', 'http://shell.local');
     const pathname = parsedUrl.pathname;
+    if (pathname.startsWith('/__workass-shell/') && !shellControlRequestAllowed(req)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('forbidden');
+      return;
+    }
     const rawPath = String(req.url || '').split('?')[0];
     if (rawPath.startsWith('/workass/connected-artifacts/') || rawPath.startsWith('/workass/artifacts/@')) {
       if (!artifactBridge) { res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('artifact bridge unavailable'); return; }

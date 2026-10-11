@@ -334,3 +334,43 @@ test('recovery endpoint invokes only the shell-owned daemon recovery transaction
   assert.deepEqual(calls, ['recover']);
   assert.equal((await fetch(view.url + '/__workass-shell/recover')).status, 405);
 });
+
+// Any page in a local browser can send a simple POST or GET to the loopback
+// shell. Control routes must refuse foreign origins, cross-site fetches and
+// rebinding hosts while still serving the window's own renderer and curl.
+test('shell control routes refuse foreign origins, cross-site fetches and rebinding hosts', async (t) => {
+  const renderer = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-view-origin-'));
+  fs.writeFileSync(path.join(renderer, 'index.html'), '<!doctype html><head></head><body>x</body>');
+  t.after(() => fs.rmSync(renderer, { recursive: true, force: true }));
+  const view = await createViewServer({ daemonURL: 'http://127.0.0.1:9', rendererDir: renderer, port: 0 });
+  t.after(() => view.close());
+  const calls = [];
+  view.setRecovery(async () => { calls.push('recover'); return { recovered: true }; });
+  view.setCapture(async (opts) => { calls.push(`click:${opts.click}`); return Buffer.from('PNG'); });
+  const { port } = new URL(view.url);
+  const send = (method, pathname, headers) => new Promise((resolve, reject) => {
+    const request = http.request({ host: '127.0.0.1', port, method, path: pathname, headers }, (res) => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode));
+    });
+    request.on('error', reject);
+    request.end();
+  });
+  const self = `127.0.0.1:${port}`;
+  for (const headers of [
+    { host: self, origin: 'https://attacker.invalid' },
+    { host: self, 'sec-fetch-site': 'cross-site' },
+    { host: self, 'sec-fetch-site': 'same-site' },
+    { host: `attacker.invalid:${port}` },
+    { host: self, origin: 'null' },
+  ]) {
+    assert.equal(await send('POST', '/__workass-shell/recover', headers), 403, JSON.stringify(headers));
+    assert.equal(await send('GET', '/__workass-shell/screenshot?click=%23stop', headers), 403, JSON.stringify(headers));
+  }
+  assert.deepEqual(calls, [], 'a refused request reached the window');
+  // The window's own renderer (same-origin fetch) and local scripts (no Origin).
+  assert.equal(await send('POST', '/__workass-shell/recover', { host: self, origin: `http://${self}`, 'sec-fetch-site': 'same-origin' }), 200);
+  assert.equal(await send('POST', '/__workass-shell/recover', { host: self }), 200);
+  assert.equal(await send('GET', '/__workass-shell/screenshot?click=%23ok', { host: `localhost:${port}` }), 200);
+  assert.deepEqual(calls, ['recover', 'recover', 'click:#ok']);
+});
