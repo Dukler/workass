@@ -258,7 +258,7 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 	if statErr != nil || !info.IsDir() {
 		return SubagentRun{}, fmt.Errorf("subagent cwd is not a readable directory: %s", cwd)
 	}
-	label := strings.TrimSpace(opts.Label)
+	label := SanitizeDisplayText(opts.Label, 80)
 	if label == "" {
 		label = compactText(prompt, 80)
 	}

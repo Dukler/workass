@@ -190,7 +190,7 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		return h.chats.providerChats.RunBackgroundAction(r.Context(), tabID, chatID, chat.BackgroundAction{
 			Kind: chat.BackgroundSpawnAgent, OperationID: providercontract.NormalizeOperationID(fieldString(params, "operation_id")),
 			Spawn: &chat.SpawnAgentAction{
-				Prompt: fieldString(params, "prompt"), Label: fieldString(params, "label"),
+				Prompt: fieldString(params, "prompt"), Label: acp.SanitizeDisplayText(fieldString(params, "label"), 80),
 				ProviderID: fieldString(params, "provider_id"), ModelID: fieldString(params, "model_id"),
 				Effort: fieldString(params, "effort"), ModeID: fieldString(params, "mode_id"),
 				CWD: fieldString(params, "cwd"), Profile: fieldString(params, "profile"),

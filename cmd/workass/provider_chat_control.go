@@ -639,14 +639,16 @@ func (r *providerChatRuntime) CreateChatWithIntentDigest(title, cwd string, cont
 }
 
 func normalizedHeadlessChatTitle(title string) string {
-	title = redactedSessionString(title)
+	title = sanitizedChatTitle(title)
 	if title == "" {
 		title = "Nuevo chat"
 	}
-	if len(title) > 200 {
-		title = title[:200]
-	}
 	return title
+}
+
+// sanitizedChatTitle is the stored and echoed form of an agent-supplied title.
+func sanitizedChatTitle(title string) string {
+	return acp.SanitizeDisplayText(title, 200)
 }
 
 func headlessChatPresentation(title, cwd string, controls resolvedChatControls) (chat.PresentationState, error) {
@@ -740,12 +742,9 @@ func stableAgentChatIdentity(prefix string, operationID providercontract.Operati
 }
 
 func (r *providerChatRuntime) RenameChat(tabID, chatID, title string, operationID providercontract.OperationID) error {
-	title = redactedSessionString(title)
+	title = sanitizedChatTitle(title)
 	if title == "" {
 		return errors.New("title is required")
-	}
-	if len(title) > 200 {
-		title = title[:200]
 	}
 	operationID = providercontract.NormalizeOperationID(string(operationID))
 	if operationID == "" {
