@@ -685,6 +685,9 @@ const (
 // dispatched provider prompt is terminalized as interrupted and never resent;
 // independently idempotent non-turn effects retain their own policies.
 type OutboxEntry struct {
+	// FailureReason is the bounded cause of a failed background action, so the
+	// agent that asked can tell a fan-out cap from a bad argument.
+	FailureReason               string `json:",omitempty"`
 	ID                          string
 	Kind                        EffectKind
 	Status                      OutboxStatus

@@ -404,6 +404,7 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 			return true, c.engine.Apply(BackgroundActionFailed{
 				OperationID: effect.Action.OperationID, Kind: providerErrorKind(err),
 				Ambiguous: provider.ErrorIs(err, provider.ErrorAcceptanceAmbiguous),
+				Reason:    err.Error(),
 			})
 		}
 		return true, c.engine.Apply(BackgroundActionCompleted{

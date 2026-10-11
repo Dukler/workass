@@ -245,6 +245,7 @@ type BackgroundActionFailed struct {
 	OperationID provider.OperationID
 	Kind        provider.ErrorKind
 	Ambiguous   bool
+	Reason      string
 }
 
 func (BackgroundActionFailed) chatCommand() {}
@@ -320,6 +321,7 @@ func reduceBackgroundActionFailed(state *State, command BackgroundActionFailed) 
 			continue
 		}
 		entry.LastError = kind
+		entry.FailureReason = boundedFailureReason(command.Reason)
 		if command.Ambiguous {
 			entry.Status = OutboxAmbiguous
 		} else {
@@ -386,4 +388,14 @@ func canonicalBackgroundSnapshot(state State, items []BackgroundState) (map[stri
 
 func sameBackgroundSnapshot(left, right map[string]BackgroundState) bool {
 	return reflect.DeepEqual(left, right)
+}
+
+const maxBackgroundFailureReason = 300
+
+func boundedFailureReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if runes := []rune(reason); len(runes) > maxBackgroundFailureReason {
+		reason = string(runes[:maxBackgroundFailureReason]) + "…"
+	}
+	return reason
 }

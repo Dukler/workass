@@ -177,7 +177,11 @@ func (r *providerChatRuntime) RunBackgroundAction(ctx context.Context, tabID, ch
 		case chat.OutboxAmbiguous:
 			return nil, &providercontract.Error{Kind: providercontract.ErrorAcceptanceAmbiguous, Operation: action.OperationID, Message: "background action acceptance is uncertain; it was not resent"}
 		case chat.OutboxFailed:
-			return nil, &providercontract.Error{Kind: entry.LastError, Operation: action.OperationID, Message: "background action failed"}
+			message := "background action failed"
+			if reason := strings.TrimSpace(acp.RedactSensitiveText(entry.FailureReason)); reason != "" {
+				message += ": " + reason
+			}
+			return nil, &providercontract.Error{Kind: entry.LastError, Operation: action.OperationID, Message: message}
 		default:
 			return nil, &providercontract.Error{Kind: providercontract.ErrorTransientTransport, Operation: action.OperationID, Message: "background action has no terminal receipt"}
 		}
