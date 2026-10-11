@@ -1075,6 +1075,31 @@ func validateAgentSendRetry(
 	return nil
 }
 
+// agentSendReplayReceipt reads back a send's current place: still queued
+// (with its position), running, or already delivered. A replay after delivery
+// used to claim queued:true at position 0.
+func agentSendReplayReceipt(state chat.State, actorOperationID, operationID providercontract.OperationID, queueID string) map[string]any {
+	for _, entry := range state.Queue {
+		if entry.OperationID == actorOperationID {
+			return queuedActorReceipt(state, actorOperationID, queueID)
+		}
+	}
+	for _, entry := range state.StagedQueue {
+		if entry.ID == queueID {
+			return queuedActorReceipt(state, operationID, queueID)
+		}
+	}
+	receipt := queuedActorReceipt(state, operationID, queueID)
+	receipt["queued"] = false
+	delete(receipt, "position")
+	if state.Foreground != nil && state.Foreground.OperationID == actorOperationID {
+		receipt["status"] = "running"
+	} else {
+		receipt["status"] = "delivered"
+	}
+	return receipt
+}
+
 func (r *providerChatRuntime) QueueAgentMessage(ctx context.Context, tabID, chatID string, operationID providercontract.OperationID, message, delivery string) (map[string]any, error) {
 	message = redactedSessionString(message)
 	if strings.TrimSpace(message) == "" {
@@ -1125,7 +1150,7 @@ func (r *providerChatRuntime) QueueAgentMessage(ctx context.Context, tabID, chat
 			actor.mu.Unlock()
 			return result, nil
 		}
-		receipt := queuedActorReceipt(state, operationID, queueID)
+		receipt := agentSendReplayReceipt(state, actorOperationID, operationID, queueID)
 		actor.mu.Unlock()
 		return receipt, nil
 	}
