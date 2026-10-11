@@ -158,3 +158,73 @@ func waitForState(t *testing.T, engine *chatstate.Engine, what string, ready fun
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// 2026-10-10 19:52 local: a first Claude turn answered without the echoed user
+// message that carries the consumption receipt. The chat ended it on a lane
+// still provisional, an invalid state, and tore the session down.
+func TestCompletedFirstTurnWithoutEchoEstablishesTheSession(t *testing.T) {
+	t.Parallel()
+	const tabID, chatID = "no-echo-tab", "no-echo-chat"
+	manager, _ := newFakeManager(t, "claude-cold-effort-stable-noreceipt-resume", Options{
+		RSSSampleInterval: time.Hour, Provider: ProviderConfig{ID: "claude"},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	engine, err := chatstate.NewEngine(chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := chatstate.NewCoordinator(engine, manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+	definition, err := manager.ProviderDefinition("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realm, err := definition.Realm.ResolveRealm(context.Background(), providercontract.RealmRequest{ProviderID: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := providercontract.LaneIdentity{
+		ChatID: chatID, Realm: realm, WorkspaceEpoch: nativeWorkspaceEpoch(manager.opts.RootDir),
+	}.Normalize()
+	if err := engine.Apply(chatstate.SelectLane{
+		Identity: identity, Owner: providercontract.AttachmentOwner{TabID: tabID}, CWD: manager.opts.RootDir,
+		Creation: providerAdapterForID("claude").creation,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Apply(chatstate.Submit{OperationID: "first", Text: "hello", Presentation: providercontract.TurnPresentation{Origin: "human"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state := waitForState(t, engine, "first turn settled", func(state chatstate.State) bool {
+		return state.Foreground == nil && len(state.Ledger) == 2
+	})
+	lane := state.Lanes[state.ActiveLaneID]
+	if lane.Thread.IsZero() || lane.Provision != nil || lane.Phase != chatstate.LaneReady {
+		t.Fatalf("a completed first turn must establish its session: %#v", lane)
+	}
+	if state.Ledger[1].Status != "done" || state.Ledger[1].Interrupted {
+		t.Fatalf("completed first turn was not settled as completed: %#v", state.Ledger[1])
+	}
+	live := manager.providerLaneForChat(tabID, chatID, "claude")
+	if live == nil {
+		t.Fatal("the first turn closed the Claude session")
+	}
+	if err := engine.Apply(chatstate.Submit{OperationID: "second", Text: "again", Presentation: providercontract.TurnPresentation{Origin: "human"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForState(t, engine, "second turn settled", func(state chatstate.State) bool {
+		return state.Foreground == nil && len(state.Ledger) == 4
+	})
+	if manager.providerLaneForChat(tabID, chatID, "claude") != live {
+		t.Fatal("the second turn needed a new session")
+	}
+}

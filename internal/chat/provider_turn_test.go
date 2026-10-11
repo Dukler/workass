@@ -211,3 +211,37 @@ func TestHostLossDuringProviderStartedTurnInterruptsWithoutResend(t *testing.T) 
 		t.Fatalf("partial provider output was not preserved: %#v", next.Ledger)
 	}
 }
+
+// 2026-10-10 19:52 local: the first turn of a deferred Claude lane ended with
+// no consumption receipt. Terminal marked the still-provisional lane ready, an
+// invalid state, and the chat tore the session down.
+func TestTerminalWithoutReceiptKeepsDeferredCandidateAndDeliversNextInputToIt(t *testing.T) {
+	state, _ := NewState("chat")
+	lane := testLane("chat", "claude")
+	creation := provider.CreationCapabilities{DeferredUntilInput: true}
+	delivery := provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true}
+	candidate := provider.ThreadRef{ProviderID: "claude", RootID: "candidate", HeadID: "candidate", Lineage: 1}
+	state, _ = apply(t, state, SelectLane{Identity: lane, Creation: creation})
+	state, _ = apply(t, state, Submit{OperationID: "first", Text: "hello", Presentation: provider.TurnPresentation{Origin: "human"}})
+	state, _ = apply(t, state, LaneProvisioned{
+		LaneID: lane.ID, Identity: lane, Candidate: candidate, ConnectionGeneration: 1,
+		Context: exactContext(provider.ContextImportUnsupported), Delivery: delivery, Creation: creation,
+	})
+	state, _ = apply(t, state, TurnAdmitted{OperationID: "first", Accepted: true, Turn: provider.TurnRef{OperationID: "first", NativeID: "job-1"}})
+	state, _ = apply(t, state, ProviderEventReceived{ConnectionGeneration: 1, Event: provider.Event{
+		Kind:     provider.EventTurnTerminal,
+		Identity: provider.EventIdentity{ChatID: "chat", LaneID: lane.ID, OperationID: "first", TurnID: "job-1", Sequence: 1, ObservedAtUnixMS: 1},
+		Terminal: &provider.TerminalEvent{Status: "failed", Error: "boom"},
+	}})
+	settled := state.Lanes[lane.ID]
+	if state.Foreground != nil || settled.Provision == nil || !settled.Provision.Equal(candidate) || !settled.Thread.IsZero() || settled.Phase != LaneCreating {
+		t.Fatalf("receiptless terminal must leave the attached candidate creating: foreground=%#v lane=%#v", state.Foreground, settled)
+	}
+	_, effects := apply(t, state, Submit{OperationID: "second", Text: "again", Presentation: provider.TurnPresentation{Origin: "human"}})
+	if len(effects) != 1 {
+		t.Fatalf("next input did not start: %#v", effects)
+	}
+	if start, ok := effects[0].(StartTurnEffect); !ok || start.Input.OperationID != "second" || start.LaneID != lane.ID {
+		t.Fatalf("next input must go to the same candidate lane: %#v", effects[0])
+	}
+}

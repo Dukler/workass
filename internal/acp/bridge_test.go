@@ -3598,7 +3598,9 @@ func (s *fakeACP) handlePrompt(id json.RawMessage, params map[string]any) {
 		_, _ = fmt.Fprint(os.Stderr, "Unauthorized: session token rejected; please login again")
 		os.Exit(1)
 	}
-	if strings.Contains(s.mode, "-stable-") {
+	// "-noreceipt" models a harness that answers the prompt without the echo
+	// that carries its consumption receipt (2026-10-10, first Claude turn).
+	if strings.Contains(s.mode, "-stable-") && !strings.Contains(s.mode, "-noreceipt") {
 		s.notify(sessionID, map[string]any{
 			"sessionUpdate": "_workass_input_consumed", "clientUserMessageId": asString(params["clientUserMessageId"]),
 			"turnId": "fake-native-turn-" + asString(params["clientUserMessageId"]),

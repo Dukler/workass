@@ -1494,6 +1494,19 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 		// Release the provider's foreground pin before publishing completion so
 		// the next queued turn can start immediately. Chat lifecycle does not
 		// capture Git snapshots or schedule filesystem scans.
+		// The harness answering this exact prompt with its own result is proof
+		// it consumed the input, echo or not. Claude's receipt rides the echoed
+		// user message; without it the first turn of a deferred lane ended
+		// still provisional and the chat tore the session down (2026-10-10).
+		// Idempotent: a turn that already acknowledged consumption is untouched.
+		if job.Status == "done" && job.StopReason != "cancelled" && job.inputWasDispatched() {
+			if err := activeBridge.acknowledgeInputConsumption(job, job.SessionID,
+				firstNonEmpty(job.startOpts.OperationID, job.startOpts.UserMessageID, job.ID), job.ID); err != nil {
+				m.opts.Logf("completed turn could not record its input receipt", map[string]any{
+					"jobId": job.ID, "error": redactSensitiveText(err.Error()),
+				})
+			}
+		}
 		activeBridge.clearJobForSession(job.SessionID, job)
 		// The provider harness's session/prompt result is the terminal clock.
 		m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})

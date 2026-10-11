@@ -2888,6 +2888,9 @@ func reduceTurnTerminated(state *State, command TurnTerminated) ([]Effect, error
 			return nil, err
 		}
 	}
+	if lane := state.Lanes[state.Foreground.LaneID]; lane.Provision != nil && !state.Foreground.UserConsumed {
+		return reduceUnreceiptedCandidateTerminal(state, command.OperationID, terminal)
+	}
 	if !state.Foreground.UserConsumed {
 		lane := state.Lanes[state.Foreground.LaneID]
 		if lane.Provision == nil {
@@ -3013,6 +3016,38 @@ func providerTurnEventDeclined(state State, event provider.Event) bool {
 		return false
 	}
 	return state.Foreground == nil || state.Foreground.OperationID != event.Identity.OperationID
+}
+
+// reduceUnreceiptedCandidateTerminal settles a turn that ended on a deferred
+// candidate before any receipt established it. Nothing proves the provider
+// kept the input, so — exactly as when the candidate's host is lost — the
+// turn ends interrupted, its rows do not count as provider-seen, and the
+// candidate stays the lane's. The host is still attached, so the lane keeps
+// creating and the next input goes to that same candidate. Marking it ready
+// claimed an established thread, an invalid state that closed the session
+// after a first Claude turn (2026-10-10).
+func reduceUnreceiptedCandidateTerminal(state *State, operationID provider.OperationID, terminal *provider.TerminalEvent) ([]Effect, error) {
+	laneID := state.Foreground.LaneID
+	if state.Foreground.AssistantContent == "" && state.Foreground.AssistantResult == "" {
+		state.Foreground.AssistantContent = strings.TrimSpace(terminal.Result)
+	}
+	explanation := strings.TrimSpace(terminal.Error)
+	if explanation == "" {
+		explanation = "The provider ended this turn without confirming it received the message."
+	}
+	stopReason := strings.TrimSpace(terminal.StopReason)
+	if stopReason == "" {
+		stopReason = "unconfirmed-input"
+	}
+	if err := terminalizeInterruptedForeground(state, provider.ErrorAcceptanceAmbiguous, explanation, stopReason, false); err != nil {
+		return nil, err
+	}
+	lane := state.Lanes[laneID]
+	lane.Phase = LaneCreating
+	lane.LastError = ""
+	state.Lanes[laneID] = lane
+	updateOutbox(state, startTurnEffectID(operationID), OutboxCompleted, "")
+	return drive(state)
 }
 
 func shouldPersistForegroundSegment(foreground *ForegroundTurn) bool {
