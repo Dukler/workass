@@ -106,6 +106,17 @@ function writeWindowsRelease(root, version = '1.2.0') {
   writeFakeWindowsPE(path.join(root, 'node', 'windows-amd64', 'node.exe'));
 }
 
+// A runnable stand-in for the bundled node. Copying process.execPath costs
+// ~115 MB per fixture when the suite runs under the app's own node runtime and
+// fills the test volume; a shim keeps fixtures tiny on POSIX hosts.
+function writeNodeRuntime(destination) {
+  if (process.platform === 'win32') {
+    fs.copyFileSync(process.execPath, destination);
+    return;
+  }
+  fs.writeFileSync(destination, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o755 });
+}
+
 function writeMacUpdaterRuntime(root) {
   const resources = path.join(root, 'Contents', 'Resources');
   const executable = path.join(root, 'Contents', 'MacOS', 'Workass');
@@ -116,7 +127,7 @@ function writeMacUpdaterRuntime(root) {
   fs.writeFileSync(path.join(resources, 'app', 'update-progress.js'), 'progress');
   const incomingNode = path.join(resources, 'runtime', 'node', 'darwin-arm64', 'bin', 'node');
   fs.mkdirSync(path.dirname(incomingNode), { recursive: true });
-  fs.copyFileSync(process.execPath, incomingNode);
+  writeNodeRuntime(incomingNode);
 }
 
 function writeStoredZip(file, entries) {
@@ -257,8 +268,8 @@ function managerFixture({
     ? path.join(resourcesPath, 'runtime', 'node', 'darwin-arm64', 'bin', 'node')
     : path.join(path.dirname(executablePath), 'node', 'windows-amd64', 'node.exe');
   fs.mkdirSync(path.dirname(nodePath), { recursive: true });
-  if (platform === 'darwin') fs.symlinkSync(process.execPath, nodePath);
-  else { fs.copyFileSync(process.execPath, nodePath); fs.chmodSync(nodePath, 0o700); }
+  writeNodeRuntime(nodePath);
+  if (platform !== 'darwin') fs.chmodSync(nodePath, 0o700);
   const calls = [];
   let quit = false;
   const manager = new UpdateManager({
@@ -677,7 +688,7 @@ function seedRecoveryTransaction({ manager, installTarget, installationIdentity 
   fs.mkdirSync(transactionRoot, { recursive: true });
   fs.writeFileSync(path.join(transactionRoot, 'update-worker.js'), 'worker');
   fs.writeFileSync(path.join(transactionRoot, 'update-progress.js'), 'progress');
-  fs.copyFileSync(process.execPath, transaction.workerRuntimePath);
+  writeNodeRuntime(transaction.workerRuntimePath);
   fs.mkdirSync(path.dirname(transaction.progressExecutable), { recursive: true });
   fs.writeFileSync(transaction.progressExecutable, 'app');
   fs.writeFileSync(transaction.journalPath, `${JSON.stringify({
