@@ -519,6 +519,16 @@ func TestRuntimeControlsCommitToActorBeforeProviderAndApplyOnlyAtTurnBoundary(t 
 	if intValue(first["runtimeControlRevision"]) != intValue(second["runtimeControlRevision"]) {
 		t.Fatalf("idempotent control receipts differ: first=%#v second=%#v", first, second)
 	}
+	// 2026-10-11 QA lanes B-7: each replay advanced and persisted the actor revision.
+	if intValue(first["actorRevision"]) != intValue(second["actorRevision"]) {
+		t.Fatalf("replayed control save advanced the actor revision: first=%v second=%v", first["actorRevision"], second["actorRevision"])
+	}
+	// 2026-10-11 QA lanes B-6: an unknown provider persisted and failed every later send.
+	unknown := copyAnyMap(raw)
+	unknown["operationId"], unknown["providerId"] = "controls-save-unknown", "no-such-provider"
+	if _, err := runtime.SaveRuntimeControls("controls-tab", "controls-chat", "controls-save-unknown", uint64(intValue(first["runtimeControlRevision"])), unknown); err == nil {
+		t.Fatal("runtime-control save accepted an unknown provider")
+	}
 	stillLive, ok := manager.LiveSession(info.SessionID)
 	if !ok {
 		t.Fatal("provider session disappeared after actor-only control save")
