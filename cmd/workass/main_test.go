@@ -2228,12 +2228,14 @@ func TestWireTraceHibernatedCheckpointKeepsTurnBaseline(t *testing.T) {
 			Enabled: true,
 			Label:   "Workass Mock ACP",
 		},
-		DefaultProviderID:      "mock",
-		Broadcast:              hub.Broadcast,
-		StdoutFlushInterval:    10 * time.Millisecond,
-		ThoughtFlushInterval:   10 * time.Millisecond,
-		HibernateTTL:           60 * time.Millisecond,
-		LifecycleCheckInterval: 10 * time.Millisecond,
+		DefaultProviderID:    "mock",
+		Broadcast:            hub.Broadcast,
+		StdoutFlushInterval:  10 * time.Millisecond,
+		ThoughtFlushInterval: 10 * time.Millisecond,
+		HibernateTTL:         60 * time.Millisecond,
+		// The reaper is swept by hand below: a ticking reaper with this TTL can
+		// also hibernate the fresh session before its first turn.
+		LifecycleCheckInterval: time.Hour,
 		RSSSampleInterval:      time.Hour,
 		CompactionEnabled:      false,
 	})
@@ -4566,6 +4568,9 @@ func waitWireProcStateForChat(t *testing.T, manager *acp.Manager, chatID string,
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
+		if state == acp.StateHibernated {
+			manager.SweepLifecycle()
+		}
 		for _, proc := range manager.Processes() {
 			if proc["chatId"] == chatID && proc["state"] == string(state) {
 				return proc
