@@ -2066,6 +2066,15 @@ func TestConfigAndSettingsPersistInStateDir(t *testing.T) {
 	if settings["chatMode"] != "ask" || settings["notifications"] != "all" || settings["prApprover"] != "reviewer" {
 		t.Fatalf("settings result = %#v", settings)
 	}
+	// A malformed replacement must not reset the stored blob to defaults.
+	for _, bad := range [][]any{{}, {"garbage-string"}, {map[string]any{}}, {nil}} {
+		if _, err := hub.Invoke("settings:set", bad); err == nil {
+			t.Fatalf("settings:set accepted a payload that would wipe every setting: %#v", bad)
+		}
+	}
+	if again, err := hub.Invoke("settings:get", nil); err != nil || !strings.Contains(fmt.Sprint(again), "reviewer") {
+		t.Fatalf("a refused settings:set still changed the stored settings: %v %v", again, err)
+	}
 	settingsPath := filepath.Join(stateDir, "app-settings.json")
 	rawSettings := readJSONFile(t, settingsPath)
 	if _, ok := rawSettings["ignored"]; ok {

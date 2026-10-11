@@ -1174,7 +1174,14 @@ func registerConfigSettingsHandlers(hub *wire.Hub, state *daemonState, manager *
 		}, nil
 	})
 	hub.Register("settings:set", func(args []any) (any, error) {
-		saved, err := state.setting.set(firstMapArg(args))
+		// settings:set replaces the whole blob. A missing, non-object or empty
+		// payload used to replace it with defaults — every score, favourite and
+		// notification setting wiped by one malformed call (2026-10-11 QA).
+		incoming, err := requiredSettingsObject(args)
+		if err != nil {
+			return nil, err
+		}
+		saved, err := state.setting.set(incoming)
 		if err != nil {
 			return nil, err
 		}
@@ -1545,6 +1552,17 @@ func replaceProviderConfig(providers []acp.ProviderConfig, provider acp.Provider
 
 func parseDetectOptions(arg map[string]any) acp.DetectOptions {
 	return acp.DetectOptions{ProviderID: fieldString(arg, "provider")}
+}
+
+func requiredSettingsObject(args []any) (map[string]any, error) {
+	if len(args) == 0 {
+		return nil, errors.New("settings:set requires the complete settings object")
+	}
+	incoming, ok := args[0].(map[string]any)
+	if !ok || len(incoming) == 0 {
+		return nil, errors.New("settings:set requires the complete settings object")
+	}
+	return incoming, nil
 }
 
 func firstMapArg(args []any) map[string]any {
