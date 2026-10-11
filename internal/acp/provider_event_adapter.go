@@ -536,6 +536,10 @@ func (m *Manager) observeProviderLaneJobEvent(payload map[string]any) error {
 
 func (m *Manager) observeProviderLaneACPEvent(payload map[string]any) error {
 	jobID := strings.TrimSpace(asString(payload["id"]))
+	if event := mapFromAny(payload["event"]); m.providerLaneClosedJob(jobID) &&
+		strings.TrimSpace(asString(event["kind"])) == "tool" && strings.TrimSpace(asString(event["subagentId"])) != "" {
+		return m.observeSettledSubagentTool(jobID, event)
+	}
 	if err := m.rejectClosedProviderLaneJob(jobID, "ACP"); err != nil {
 		return err
 	}
@@ -588,15 +592,7 @@ func (m *Manager) observeProviderLaneACPEvent(payload map[string]any) error {
 		return lane.emit(providercontract.Event{
 			Kind:     providercontract.EventToolUpdate,
 			Identity: providercontract.EventIdentity{OperationID: operationID, TurnID: jobID},
-			Tool: &providercontract.ToolEvent{
-				ToolCallID: firstNonEmpty(asString(event["id"]), asString(event["terminalId"])),
-				ToolKind:   asString(event["toolKind"]), Title: asString(event["title"]), Status: asString(event["status"]),
-				Command: asString(event["command"]), TerminalID: asString(event["terminalId"]), Input: asString(event["input"]),
-				Output: asString(event["output"]), Location: asString(event["location"]), Attachments: attachments,
-				SubagentID: asString(event["subagentId"]), SubagentLabel: asString(event["subagentLabel"]),
-				SubagentProvider: asString(event["subagentProvider"]), SubagentModel: asString(event["subagentModel"]),
-				SubagentHeader: boolFromAny(event["subagentHeader"]),
-			},
+			Tool:     providerToolEvent(event, attachments),
 		})
 	case "plan":
 		entries := make([]providercontract.PlanEntry, 0)
@@ -728,4 +724,55 @@ func intPointerFromAny(value any) *int {
 	}
 	result := numberOrZero(value)
 	return &result
+}
+
+func providerToolEvent(event map[string]any, attachments []providercontract.Attachment) *providercontract.ToolEvent {
+	return &providercontract.ToolEvent{
+		ToolCallID: firstNonEmpty(asString(event["id"]), asString(event["terminalId"])),
+		ToolKind:   asString(event["toolKind"]), Title: asString(event["title"]), Status: asString(event["status"]),
+		Command: asString(event["command"]), TerminalID: asString(event["terminalId"]), Input: asString(event["input"]),
+		Output: asString(event["output"]), Location: asString(event["location"]), Attachments: attachments,
+		SubagentID: asString(event["subagentId"]), SubagentLabel: asString(event["subagentLabel"]),
+		SubagentProvider: asString(event["subagentProvider"]), SubagentModel: asString(event["subagentModel"]),
+		SubagentHeader: boolFromAny(event["subagentHeader"]),
+	}
+}
+
+// observeSettledSubagentTool carries a subagent's progress to the settled turn
+// it is anchored to — its own recorded origin lane and operation — instead of
+// dropping it as a late event for a closed job (2026-10-11 QA: children
+// spawned while the chat was idle never updated in the transcript).
+func (m *Manager) observeSettledSubagentTool(jobID string, event map[string]any) error {
+	subagentID := strings.TrimSpace(asString(event["subagentId"]))
+	m.mu.Lock()
+	run := m.subagents[subagentID]
+	laneID, operationID := "", ""
+	if run != nil {
+		laneID, operationID = strings.TrimSpace(run.originLaneID), strings.TrimSpace(run.originOperationID)
+	}
+	m.mu.Unlock()
+	if laneID == "" || operationID == "" {
+		return nil
+	}
+	var lane *managerLane
+	m.providerLaneMu.RLock()
+	for _, candidate := range m.providerLanesBySession {
+		if candidate != nil && string(candidate.identity.ID) == laneID {
+			lane = candidate
+			break
+		}
+	}
+	m.providerLaneMu.RUnlock()
+	if lane == nil {
+		return nil
+	}
+	attachments, err := m.persistProviderEventAttachments(providerEventSlice(event["images"]))
+	if err != nil {
+		return err
+	}
+	return lane.emit(providercontract.Event{
+		Kind:     providercontract.EventToolUpdate,
+		Identity: providercontract.EventIdentity{OperationID: providercontract.OperationID(operationID), TurnID: jobID},
+		Tool:     providerToolEvent(event, attachments),
+	})
 }

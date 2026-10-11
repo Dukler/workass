@@ -709,7 +709,9 @@ func reduceJournaledProviderEvent(current State, command ProviderEventReceived) 
 }
 
 func validateJournaledProviderEventMutation(state State, event provider.Event) error {
-	if providerTurnEventDeclined(state, event) {
+	if providerTurnEventDeclined(state, event) || settledSubagentToolEvent(state, event) {
+		// Declined output changes nothing; a settled subagent update was matched
+		// to its exact ledger row by the reducer.
 		return nil
 	}
 	switch event.Kind {
@@ -3659,6 +3661,17 @@ func reduceProviderEvent(state *State, command ProviderEventReceived) ([]Effect,
 			return nil, errors.New("tool event is missing its provider identity")
 		}
 		tool := cloneToolEvent(*event.Tool)
+		if settledSubagentToolEvent(*state, event) {
+			// A subagent spawned while the chat was idle reports against the turn
+			// it was anchored to, which has already settled. Its progress row
+			// lives in that turn's ledger row (2026-10-11 QA: such events were
+			// rejected as late, so the child never updated in the transcript).
+			// Unmatched events are ignored, never a protocol failure.
+			if upsertSettledSubagentTool(state, event, &tool) {
+				state.Tools[id] = ToolState{Owner: owner}
+			}
+			return nil, nil
+		}
 		if err := requireForegroundEventOwner(state, event); err != nil {
 			return nil, err
 		}
@@ -4726,6 +4739,47 @@ func upsertToolTimeline(foreground *ForegroundTurn, incoming *provider.ToolEvent
 		merged.EndedAtUnixMS = observedAtUnixMS
 	}
 	foreground.Timeline[index].Tool = &merged
+}
+
+// settledSubagentToolEvent reports a subagent's tool update addressed to a
+// turn that is not the live foreground.
+func settledSubagentToolEvent(state State, event provider.Event) bool {
+	if event.Kind != provider.EventToolUpdate || event.Tool == nil || strings.TrimSpace(event.Tool.SubagentID) == "" {
+		return false
+	}
+	foreground := state.Foreground
+	return foreground == nil || foreground.LaneID != event.Identity.LaneID || foreground.OperationID != event.Identity.OperationID
+}
+
+// upsertSettledSubagentTool updates the subagent row in the settled turn's
+// last assistant row. The ledger slice is copied: the streamed-event path
+// shares the previous state's backing array.
+func upsertSettledSubagentTool(state *State, event provider.Event, incoming *provider.ToolEvent) bool {
+	operationID := event.Identity.OperationID
+	turnID := strings.TrimSpace(event.Identity.TurnID)
+	if operationID == "" {
+		return false
+	}
+	index := -1
+	for i := len(state.Ledger) - 1; i >= 0; i-- {
+		row := state.Ledger[i]
+		if row.Role == "assistant" && row.LaneID == event.Identity.LaneID && row.OperationID == operationID &&
+			(turnID == "" || strings.TrimSpace(row.NativeTurnID) == turnID) {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return false
+	}
+	ledger := append([]LedgerEvent(nil), state.Ledger...)
+	row := ledger[index]
+	holder := &ForegroundTurn{Timeline: cloneTimeline(row.Timeline), AssistantContent: row.Text}
+	upsertToolTimeline(holder, incoming, event.Identity.ObservedAtUnixMS)
+	row.Timeline = holder.Timeline
+	ledger[index] = row
+	state.Ledger = ledger
+	return true
 }
 
 func upsertCompactionTimeline(foreground *ForegroundTurn, kind provider.EventKind, incoming *provider.CompactionEvent) {
