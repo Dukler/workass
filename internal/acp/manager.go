@@ -1013,7 +1013,22 @@ func (m *Manager) ForgetChat(ctx context.Context, tabID, chatID string, operatio
 		delete(m.chatProviders, key)
 	}
 	m.forgetCommandCatalogChatLocked(tabID)
+	// A deleted chat's closed engine must not linger in the process list as a
+	// ghost "active / failed" row.
+	removedBridge := false
+	for key, bridge := range m.bridges {
+		if bridge == nil || !bridge.Closed() {
+			continue
+		}
+		if bridgeTab, bridgeChat := bridge.chatIdentity(); bridgeTab == tabID && bridgeChat == chatID {
+			delete(m.bridges, key)
+			removedBridge = true
+		}
+	}
 	m.mu.Unlock()
+	if removedBridge {
+		m.emit("proc:changed", map[string]any{"processes": m.Processes()})
+	}
 	return changed
 }
 
@@ -2634,6 +2649,13 @@ func (m *Manager) emit(channel string, payload any) {
 		m.opts.Logf("provider event rejected before frozen-wire publication", fields)
 		if lane := m.providerLaneForFrozenPayload(mapFromAny(payload)); lane != nil {
 			lane.rejectFrozenProtocol(err)
+		}
+		if channel == "chat:permission-resolved" {
+			// Every terminal path must clear its card by exact id (PORT-SPEC
+			// §3.10), including one the actor no longer accepts because the chat
+			// was force-deleted. The event only removes a card; it carries no
+			// state a rejected actor would have needed to own.
+			m.opts.Broadcast(channel, payload)
 		}
 		return
 	}
