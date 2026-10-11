@@ -49,6 +49,14 @@ export function normalizedPermissionLabel(value: string): string {
   return value.trim().toLocaleLowerCase().replace(/[\s_-]+/g, ' ');
 }
 
+// Generic English option names say no more than their kind; they take the
+// localized kind label so a card never mixes "Reject" with "Permitir una vez".
+// Specific names ("Yes, and don't ask again for git") are kept.
+const GENERIC_OPTION_NAMES = new Set([
+  'allow', 'allow once', 'always allow', 'allow always', 'yes',
+  'reject', 'reject once', 'always reject', 'reject always', 'deny', 'decline', 'no', 'cancel',
+]);
+
 export function permissionChoices(options: readonly PermissionOption[]): PresentedPermissionChoice[] {
   return options.map((option) => {
     const name = option.name.trim();
@@ -56,7 +64,8 @@ export function permissionChoices(options: readonly PermissionOption[]): Present
     const normalizedName = normalizedPermissionLabel(name);
     const redundant = !name ||
       normalizedName === normalizedPermissionLabel(option.kind) ||
-      normalizedName === normalizedPermissionLabel(fallback);
+      normalizedName === normalizedPermissionLabel(fallback) ||
+      (PERM_LABEL[option.kind] !== undefined && GENERIC_OPTION_NAMES.has(normalizedName));
     return { ...option, label: redundant ? fallback : name };
   });
 }

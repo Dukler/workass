@@ -113,6 +113,9 @@ var auxiliaryControlChannels = map[string]struct{}{
 // Deciding stays exclusive through `chat:permission-decide` in mutatingChannels.
 var controllerOnlyEventChannels = map[string]struct{}{
 	"lan:access-request": {},
+	// Additive: a request that timed out, was decided, or whose device left.
+	// Older renderers ignore it; newer ones drop the stale row.
+	"lan:access-request-closed": {},
 	"notify":             {},
 	"show":               {},
 }
@@ -488,7 +491,7 @@ func (h *Hub) Broadcast(channel string, payload any) {
 	defer h.broadcastMu.Unlock()
 	if _, ok := controllerOnlyEventChannels[channel]; ok && h.lease != nil {
 		delivered, enqueueElapsed := h.broadcastToController(channel, payload)
-		if channel == "lan:access-request" {
+		if channel == "lan:access-request" || channel == "lan:access-request-closed" {
 			// Pairing addresses both the controller lease and the daemon's own
 			// desktop shell. A controller on another device must not make the host
 			// screen blind to a request arriving at this machine.
@@ -1851,7 +1854,15 @@ func (h *Hub) takePendingAccess(requestID string) *pendingAccess {
 	}
 	h.mu.Unlock()
 	rec.client.clearPendingAccess(requestID)
+	h.announceAccessRequestClosed(requestID)
 	return rec
+}
+
+// announceAccessRequestClosed withdraws a request row from every screen that
+// was shown it. Asynchronous: a removal can run inside a broadcast that is
+// dropping a slow client, and Broadcast is not reentrant.
+func (h *Hub) announceAccessRequestClosed(requestID string) {
+	go h.Broadcast("lan:access-request-closed", map[string]any{"requestId": requestID})
 }
 
 func (h *Hub) denyPendingAccess(requestID, reason string) bool {
@@ -1877,7 +1888,8 @@ func (h *Hub) removePendingForClient(c *client) {
 	}
 	h.mu.Lock()
 	rec := h.pending[requestID]
-	if rec != nil && rec.client == c {
+	removed := rec != nil && rec.client == c
+	if removed {
 		delete(h.pending, requestID)
 		if rec.timer != nil {
 			rec.timer.Stop()
@@ -1885,6 +1897,9 @@ func (h *Hub) removePendingForClient(c *client) {
 	}
 	h.mu.Unlock()
 	c.clearPendingAccess(requestID)
+	if removed {
+		h.announceAccessRequestClosed(requestID)
+	}
 }
 
 func (h *Hub) drop(c *client) {

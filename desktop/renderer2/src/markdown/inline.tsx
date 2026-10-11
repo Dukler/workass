@@ -25,6 +25,16 @@ export interface InlineMediaResolver {
 // and bare-URL autolinks follow, as Claude Code's markdown renders them.
 const TOKEN = /(`[^`]+`)|(!?\[[^\]\n]*\]\((?:<[^>\n]+>|[^)\n]+)\))|(\*\*[^*]+\*\*)|((?<![\p{L}\p{N}_])__[^_]+__(?![\p{L}\p{N}_]))|(\*[^*\s][^*]*\*)|((?<![\p{L}\p{N}_])_[^_\s][^_]*_(?![\p{L}\p{N}_]))|(~~[^~\n]+~~)|(https?:\/\/[^\s<>()\[\]`]*[^\s<>()\[\]`.,;:!?'"])/u;
 
+// Schemes that execute or embed content instead of navigating. Browsers ignore
+// control characters and spaces inside a scheme ("java\tscript:"), so those
+// are removed before the check.
+const UNSAFE_LINK_SCHEME = /^(?:javascript|vbscript|data):/i;
+
+export function safeLinkHref(href: string): string {
+  const compact = String(href || '').replace(/[\u0000-\u0020]+/g, '');
+  return UNSAFE_LINK_SCHEME.test(compact) ? '' : href;
+}
+
 export function normalizeMarkdownTarget(raw: string): string {
   let target = raw.trim();
   if (target.startsWith('<') && target.endsWith('>')) target = target.slice(1, -1).trim();
@@ -117,6 +127,11 @@ export function renderInline(text: string, keyBase = 'i', allowLinks = true, med
         out.push(<span key={key} className="assistant-image-pending">{renderInline(label, key, false)}</span>);
       } else if (allowLinks) {
         const hosted = looksLikeHostedArtifact(href);
+        if (!safeLinkHref(href)) {
+          out.push(...renderInline(label, key, false));
+          rest = rest.slice(m.index + tok.length);
+          continue;
+        }
         const destination = media?.resolveLink?.(href) ?? href;
         if (!destination) {
           out.push(<span key={key} title="No se encontró el origen de la máquina remota.">{renderInline(label, key, false)} · No disponible</span>);
