@@ -4399,16 +4399,21 @@ func appendForegroundAdmissionFailure(state *State, kind provider.ErrorKind) err
 		assistantID = fmt.Sprintf("message:%s:assistant", foreground.OperationID)
 	}
 	errorText := "The provider could not start this turn."
-	if kind != "" {
+	if kind == provider.ErrorUnsupportedCapability {
+		errorText = "The provider could not start this turn: this agent does not support part of the input (for example, image attachments)."
+	} else if kind != "" {
 		errorText += " " + string(kind) + "."
 	}
-	terminal := &provider.TerminalEvent{Status: "failed", Error: string(kind), Interrupted: true}
+	// A definite rejection of the input itself is a failed turn, not a lost
+	// connection to retry; every other kind keeps its interrupted rendering.
+	interrupted := kind != provider.ErrorUnsupportedCapability && kind != provider.ErrorAdmissionRejected
+	terminal := &provider.TerminalEvent{Status: "failed", Error: string(kind), Interrupted: interrupted}
 	assistant := LedgerEvent{
 		EventID: fmt.Sprintf("event:%s:assistant:%s", foreground.OperationID, assistantID), MessageID: assistantID,
 		Sequence: state.LedgerHead() + 1, Role: "assistant", Text: errorText, Status: "failed",
 		At: foreground.StartedAt, LaneID: foreground.LaneID, ProviderID: lane.Identity.Realm.ProviderID,
 		ModelID: foreground.Input.ModelID, OperationID: foreground.OperationID, TerminalState: "failed",
-		Interrupted: true, Terminal: terminal, WorkassNotice: true,
+		Interrupted: interrupted, Terminal: terminal, WorkassNotice: true,
 	}
 	state.Ledger = append(state.Ledger, assistant)
 	return markLedgerExcluded(state, assistant, foreground.OperationID)

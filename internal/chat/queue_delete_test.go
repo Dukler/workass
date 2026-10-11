@@ -191,3 +191,21 @@ func TestFailedBackgroundActionKeepsABoundedReason(t *testing.T) {
 	}
 	t.Fatal("background action outbox entry missing")
 }
+
+// 2026-10-11 QA: an image sent to an agent without image support rendered as
+// "connection lost", inviting a retry that can never succeed.
+func TestUnsupportedInputRejectionIsAFailedTurnNotAConnectionLoss(t *testing.T) {
+	state, _ := NewState("chat")
+	lane := testLane("chat", "mock")
+	state, _ = apply(t, state, SelectLane{Identity: lane})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID: lane.ID, Identity: lane, Thread: provider.ThreadRef{ProviderID: "mock", RootID: "t", HeadID: "t", Lineage: 1},
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
+	})
+	state, _ = apply(t, state, Submit{OperationID: "img", Text: "look", Presentation: provider.TurnPresentation{Origin: "human"}})
+	state, _ = apply(t, state, TurnAdmissionFailed{OperationID: "img", Kind: provider.ErrorUnsupportedCapability})
+	row := state.Ledger[len(state.Ledger)-1]
+	if row.Interrupted || row.Terminal == nil || row.Terminal.Interrupted || !strings.Contains(row.Text, "does not support") {
+		t.Fatalf("unsupported input rejection row = %#v", row)
+	}
+}
