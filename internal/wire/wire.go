@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -987,7 +988,11 @@ func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 		return c
 	}
 
-	if h.trustLocalhost && isLocalIP(c.ip) {
+	// Loopback trust belongs to local clients, not to whatever page a local
+	// browser happens to be showing: any site can open a WebSocket to
+	// localhost, and browsers send no CORS preflight for it. A foreign Origin
+	// asks for approval like a LAN device instead of pairing silently.
+	if h.trustLocalhost && isLocalIP(c.ip) && loopbackOrigin(r.Header.Get("Origin")) {
 		device, issuedToken, err := h.lease.ApproveDevice(c.deviceName, c.ip)
 		if err != nil {
 			h.logf("[lan] localhost auto-pair failed: %v", err)
@@ -2446,6 +2451,26 @@ func clientIP(remoteAddr string) string {
 		host = strings.TrimPrefix(host, "::ffff:")
 	}
 	return host
+}
+
+// loopbackOrigin accepts a missing Origin (non-browser clients: the Workass
+// CLI, native hosts, Go clients) and http(s) origins served from this machine's
+// loopback (the daemon itself and the shell's local view server, any port).
+func loopbackOrigin(origin string) bool {
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	host := parsed.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func isLocalIP(ip string) bool {
