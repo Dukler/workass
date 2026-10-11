@@ -3107,7 +3107,14 @@ func (b *Bridge) attachSession(sessionID, cwd string, opts SessionOptions, res m
 	b.chatID = opts.ChatID
 	b.cwd = cwd
 	b.agentOwnerKey = opts.AgentOwnerKey
-	b.state = StateWarm
+	// An attached session with no job is idle, and ages out like any idle
+	// engine. Left "warm", a chat that was opened but never prompted kept its
+	// engine forever — past the idle TTL and the age recycle (2026-10-11 QA).
+	// Spares and catalog probes keep their own lifecycle.
+	b.state = StateIdle
+	if opts.Spare || b.catalogProbe {
+		b.state = StateWarm
+	}
 	b.pinned = false
 	b.lastActivity = time.Now()
 	b.sessions[sessionID] = struct{}{}

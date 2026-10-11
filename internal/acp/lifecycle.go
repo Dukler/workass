@@ -524,7 +524,7 @@ func (m *Manager) adoptSpareSession(opts SessionOptions) (SessionInfo, bool) {
 		bridge.tabID = opts.TabID
 		bridge.chatID = opts.ChatID
 		bridge.lastActivity = now
-		bridge.state = StateWarm
+		bridge.state = StateIdle
 		bridge.mu.Unlock()
 		m.bridgeChanged(bridge, "spare-adopted")
 		if rec.info.CommandCatalog != nil {

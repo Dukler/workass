@@ -2311,9 +2311,11 @@ func TestFakePromptSerializationQueuesPerBridge(t *testing.T) {
 
 func TestLifecyclePinnedNeverReapedTinyTTL(t *testing.T) {
 	t.Parallel()
+	// Sweep explicitly: an attached session is idle from the start, so a timed
+	// sweep could legitimately reap it before the test's turn begins.
 	manager, events := newFakeManager(t, "slow-prompt", Options{
 		HibernateTTL:           20 * time.Millisecond,
-		LifecycleCheckInterval: 10 * time.Millisecond,
+		LifecycleCheckInterval: time.Hour,
 		RSSSampleInterval:      time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
@@ -2322,6 +2324,7 @@ func TestLifecyclePinnedNeverReapedTinyTTL(t *testing.T) {
 	job := startAppChatJob(t, manager, session.SessionID, "pinned-tab", "slow pinned turn")
 	_ = waitProcState(t, manager, StateActive, 500*time.Millisecond)
 	time.Sleep(70 * time.Millisecond)
+	manager.SweepLifecycle()
 	if procHasState(manager, StateHibernated) {
 		t.Fatalf("active prompt was hibernated under tiny TTL: %#v", manager.Processes())
 	}

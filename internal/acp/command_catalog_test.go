@@ -107,10 +107,13 @@ func TestClaudeCommandCatalogRidesOpenReplyEmitsEventAndAnswersCommandsGet(t *te
 
 func TestClaudeCommandCatalogSurvivesHibernationAsCachedSnapshot(t *testing.T) {
 	t.Parallel()
+	// No background sweeper: an attached session is idle from the start, so a
+	// timed sweep could reap it before the test's first turn. Sweep explicitly.
 	manager, events := newFakeManager(t, "claude-commands", Options{
-		HibernateTTL:      20 * time.Millisecond,
-		RSSSampleInterval: time.Hour,
-		Provider:          ProviderConfig{ID: "claude"},
+		HibernateTTL:           20 * time.Millisecond,
+		LifecycleCheckInterval: time.Hour,
+		RSSSampleInterval:      time.Hour,
+		Provider:               ProviderConfig{ID: "claude"},
 	})
 	t.Cleanup(func() { manager.Reset() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -131,6 +134,9 @@ func TestClaudeCommandCatalogSurvivesHibernationAsCachedSnapshot(t *testing.T) {
 		t.Fatalf("start turn: %v", err)
 	}
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 3*time.Second), "done", 0, "end_turn")
+	_ = waitProcState(t, manager, StateIdle, 2*time.Second)
+	time.Sleep(30 * time.Millisecond)
+	manager.SweepLifecycle()
 	_ = waitProcState(t, manager, StateHibernated, 2*time.Second)
 
 	// D4/D6: hibernation kills the engine but keeps the cache — the chat still
