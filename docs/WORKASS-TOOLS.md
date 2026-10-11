@@ -126,6 +126,10 @@ conditions for at most 15 seconds and returns safe current state on timeout.
 final snapshot with `observe_after:true`. `workass_browser_diagnostics` reads a
 redacted in-memory warning/error cursor; page diagnostics are not persisted.
 
+Arguments are validated against the tool's input schema before any handler
+runs: unknown arguments, wrong types, out-of-range numbers and values outside an
+enum are rejected with an error naming the argument.
+
 Calls reuse the existing action handlers, remote routing, redaction, ownership,
 and durable operation receipts. Mutations require a caller-stable
 `operation_id`. An uncertain response is not permission to issue a fresh
