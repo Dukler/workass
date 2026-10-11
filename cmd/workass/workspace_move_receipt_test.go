@@ -447,3 +447,44 @@ func TestMoveWorkspaceReceiptReplayFinishesCrashWindowWithoutNewEpoch(t *testing
 		t.Fatalf("receipt replay changed the historical lane: before=%#v after=%#v", oldLane, afterReplay.Lanes[oldLane.Identity.ID])
 	}
 }
+
+// 2026-10-11 QA tooling B9 / chat-core B10: overriding only provider_id carried
+// the caller's model into a provider that does not have it, and a chat with no
+// stored model could not create or configure without an explicit model_id.
+func TestResolveControlsDefaultsTheModelWhenNoneCarriesOver(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := t.TempDir()
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev",
+		Provider: acp.ProviderConfig{
+			ID: "mock", Name: "Mock", Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")},
+			CWD: root, Enabled: true,
+		},
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	coordinator := newChatControlCoordinator(manager, nil, newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for name, tc := range map[string]struct{ current, params map[string]any }{
+		"provider override": {
+			current: map[string]any{"providerId": "claude", "modelId": "claude-opus-5-5", "modeId": "default"},
+			params:  map[string]any{"provider_id": "mock"},
+		},
+		"no stored model": {
+			current: map[string]any{"providerId": "mock", "modelId": nil, "modeId": "ask"},
+			params:  map[string]any{},
+		},
+	} {
+		controls, err := coordinator.resolveControls(ctx, tc.current, tc.params)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if controls.ProviderID != "mock" || controls.BaseModel == "" {
+			t.Fatalf("%s: controls = %#v, want the mock provider's default model", name, controls)
+		}
+	}
+	if _, err := coordinator.resolveControls(ctx, map[string]any{"providerId": "mock"}, map[string]any{"model_id": "not-a-model"}); err == nil {
+		t.Fatal("an explicit unknown model was accepted")
+	}
+}
