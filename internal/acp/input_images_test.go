@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	providercontract "workass/internal/provider"
 )
 
 func TestAcceptedImageReachesGenericProviderWithExplicitAttachmentContextOnEveryTurn(t *testing.T) {
@@ -52,6 +53,10 @@ func TestAcceptedImageNeverSilentlyDegradesToTextForUnsupportedProvider(t *testi
 	})
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "does not support image input") {
 		t.Fatalf("unsupported image failure = %v", err)
+	}
+	// A definite rejection, never classified as a lost connection to retry.
+	if !providercontract.ErrorIs(err, providercontract.ErrorUnsupportedCapability) {
+		t.Fatalf("unsupported image failure kind = %v, want unsupported capability", err)
 	}
 }
 

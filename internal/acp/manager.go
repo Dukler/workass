@@ -3852,11 +3852,13 @@ func (b *Bridge) promptImageBlocks(images []any) ([]any, error) {
 	b.mu.Lock()
 	imageSupport := b.imageSupport
 	b.mu.Unlock()
+	// Typed so the chat settles a definite rejection, not a lost connection that
+	// invites a retry which can never succeed (2026-10-11 QA).
 	if !imageSupport {
-		return nil, errors.New("the selected agent does not support image input; the attachment was not sent as a text-only turn")
+		return nil, &providercontract.Error{Kind: providercontract.ErrorUnsupportedCapability, Message: "the selected agent does not support image input; the attachment was not sent as a text-only turn"}
 	}
 	if len(images) > maxToolResultImages {
-		return nil, fmt.Errorf("too many attached images: got %d, maximum is %d", len(images), maxToolResultImages)
+		return nil, &providercontract.Error{Kind: providercontract.ErrorAdmissionRejected, Message: fmt.Sprintf("too many attached images: got %d, maximum is %d", len(images), maxToolResultImages)}
 	}
 	blocks := make([]any, 0, len(images))
 	total := 0
