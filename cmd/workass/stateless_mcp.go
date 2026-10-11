@@ -119,15 +119,23 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(400, "request must contain one JSON object")
 		return
 	}
-	known := false
+	var tool map[string]any
 	for _, t := range catalog {
 		if t["name"] == call.Name {
-			known = true
+			tool = t
 			break
 		}
 	}
-	if !known {
+	if tool == nil {
 		fail(404, "unknown Workass tool")
+		return
+	}
+	if err := validateToolArguments(tool, call.Arguments); err != nil {
+		result := agentMCPErrorResult(err.Error())
+		if strings.HasPrefix(call.Name, "workass_browser_") {
+			result = browserMCPErrorResult(err.Error())
+		}
+		writeToolJSON(w, 200, toolResponse(result))
 		return
 	}
 	// The per-request dispatcher copy avoids mutating shared routing state.
