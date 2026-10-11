@@ -21,8 +21,9 @@ export interface InlineMediaResolver {
 // Markdown, then bold and italic. Angle-bracket destinations allow normal local
 // paths with spaces: ![Preview](</workspace/calibration ready.png>).
 // Underscore emphasis is never intraword (CommonMark): snake_case_names and
-// tool ids like workass_browser_list must render verbatim.
-const TOKEN = /(`[^`]+`)|(!?\[[^\]\n]*\]\((?:<[^>\n]+>|[^)\n]+)\))|(\*\*[^*]+\*\*)|((?<![\p{L}\p{N}_])__[^_]+__(?![\p{L}\p{N}_]))|(\*[^*\s][^*]*\*)|((?<![\p{L}\p{N}_])_[^_\s][^_]*_(?![\p{L}\p{N}_]))/u;
+// tool ids like workass_browser_list must render verbatim. GFM strikethrough
+// and bare-URL autolinks follow, as Claude Code's markdown renders them.
+const TOKEN = /(`[^`]+`)|(!?\[[^\]\n]*\]\((?:<[^>\n]+>|[^)\n]+)\))|(\*\*[^*]+\*\*)|((?<![\p{L}\p{N}_])__[^_]+__(?![\p{L}\p{N}_]))|(\*[^*\s][^*]*\*)|((?<![\p{L}\p{N}_])_[^_\s][^_]*_(?![\p{L}\p{N}_]))|(~~[^~\n]+~~)|(https?:\/\/[^\s<>()\[\]`]*[^\s<>()\[\]`.,;:!?'"])/u;
 
 export function normalizeMarkdownTarget(raw: string): string {
   let target = raw.trim();
@@ -136,6 +137,13 @@ export function renderInline(text: string, keyBase = 'i', allowLinks = true, med
       out.push(<b key={key}>{renderInline(tok.slice(2, -2), key, allowLinks, media)}</b>);
     } else if (m[5] || m[6]) {
       out.push(<i key={key}>{renderInline(tok.slice(1, -1), key, allowLinks, media)}</i>);
+    } else if (m[7]) {
+      out.push(<s key={key}>{renderInline(tok.slice(2, -2), key, allowLinks, media)}</s>);
+    } else if (m[8]) {
+      // The URL is its own label: rendered as text, never re-tokenized.
+      const destination = allowLinks ? (media?.resolveLink?.(tok) ?? tok) : '';
+      if (destination) out.push(<a key={key} href={destination} target="_blank" rel="noreferrer">{tok}</a>);
+      else out.push(tok);
     }
     rest = rest.slice(m.index + tok.length);
   }

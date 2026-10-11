@@ -1,7 +1,7 @@
 import { memo, useCallback, useMemo, useSyncExternalStore } from 'react';
 import type { MessageImage, Msg, ThinkingEvent, TimelineEvent } from '../store/types';
 import { store, useApp, useMsgVersion, useClock } from '../store/store';
-import { parseBlocks, type SignedBlock } from '../markdown/blocks';
+import { parseBlocks, type SignedBlock, listTexts } from '../markdown/blocks';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
 import { StepRow, StepWords, ToolGroup, PermCard, CompactionRow, RestoredRow } from './messages';
 import { IcStampCopy, IcWarnTri, IcRetryArc } from '../icons';
@@ -19,7 +19,7 @@ function renderedImageReferences(blocks: SignedBlock[]): Array<{ label: string; 
   return blocks.flatMap(({ block }) => {
     switch (block.kind) {
       case 'p': case 'heading': case 'quote': return markdownImageReferences(block.raw);
-      case 'list': return block.items.flatMap(markdownImageReferences);
+      case 'list': return listTexts(block.items).flatMap(markdownImageReferences);
       case 'table': return [...block.header, ...block.rows.flat()].flatMap(markdownImageReferences);
       default: return [];
     }
