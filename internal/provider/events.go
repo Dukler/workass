@@ -8,11 +8,17 @@ import (
 type EventKind string
 
 const (
-	EventLaneAttached         EventKind = "lane_attached"
-	EventLaneDetached         EventKind = "lane_detached"
-	EventLaneCapabilities     EventKind = "lane_capabilities"
-	EventLineageAdvanced      EventKind = "lineage_advanced"
-	EventTurnAdmitted         EventKind = "turn_admitted"
+	EventLaneAttached     EventKind = "lane_attached"
+	EventLaneDetached     EventKind = "lane_detached"
+	EventLaneCapabilities EventKind = "lane_capabilities"
+	EventLineageAdvanced  EventKind = "lineage_advanced"
+	EventTurnAdmitted     EventKind = "turn_admitted"
+	// EventProviderTurnStarted reports a turn the provider harness began on its
+	// own — Claude Code answering a background-task notification, a scheduled
+	// wake or a peer message — with no Workass prompt behind it. The chat owns
+	// it like any other turn when it is idle and declines it otherwise; it is
+	// never a delivery and never resent.
+	EventProviderTurnStarted  EventKind = "provider_turn_started"
 	EventInputConsumed        EventKind = "input_consumed"
 	EventAssistantChunk       EventKind = "assistant_chunk"
 	EventAssistantMedia       EventKind = "assistant_media"
@@ -292,7 +298,7 @@ func (e Event) Validate() error {
 		correctPayload = payloads == 0
 	case EventLaneCapabilities:
 		correctPayload = e.Attachment != nil
-	case EventTurnAdmitted:
+	case EventTurnAdmitted, EventProviderTurnStarted:
 		correctPayload = e.Admission != nil
 	case EventInputConsumed:
 		correctPayload = e.Input != nil
@@ -330,6 +336,12 @@ func (e Event) Validate() error {
 	case EventTurnAdmitted:
 		if e.Admission.Turn.OperationID == "" || (e.Admission.Accepted && strings.TrimSpace(e.Admission.Turn.NativeID) == "") {
 			return errors.New("turn admission event is missing stable operation or native turn identity")
+		}
+	case EventProviderTurnStarted:
+		turn := e.Admission.Turn
+		if !IsProviderTurnOperation(turn.OperationID) || strings.TrimSpace(turn.NativeID) == "" ||
+			turn.OperationID != ProviderTurnOperationID(turn.NativeID) || e.Identity.OperationID != turn.OperationID {
+			return errors.New("provider-started turn is missing its derived operation or native turn identity")
 		}
 	case EventInputConsumed:
 		if e.Input.OperationID == "" {
@@ -389,4 +401,25 @@ func (e Event) Validate() error {
 		}
 	}
 	return nil
+}
+
+// providerTurnOperationPrefix namespaces operations Workass did not originate.
+// The chat reserves the derived id when it owns the turn and declines one that
+// is already reserved, so a provider-started turn never adopts a prompt's
+// operation.
+const providerTurnOperationPrefix = "provider-turn:"
+
+// ProviderTurnOperationID derives the stable actor operation for a turn the
+// provider started on its own from that turn's native identity.
+func ProviderTurnOperationID(nativeTurnID string) OperationID {
+	nativeTurnID = strings.TrimSpace(nativeTurnID)
+	if nativeTurnID == "" {
+		return ""
+	}
+	return OperationID(providerTurnOperationPrefix + nativeTurnID)
+}
+
+func IsProviderTurnOperation(operationID OperationID) bool {
+	value := strings.TrimSpace(string(operationID))
+	return strings.HasPrefix(value, providerTurnOperationPrefix) && len(value) > len(providerTurnOperationPrefix)
 }

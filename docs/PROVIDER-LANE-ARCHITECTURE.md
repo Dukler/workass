@@ -200,6 +200,7 @@ Adapters emit one typed event union. The minimum families are:
 - lane attached/detached;
 - native lineage observed/advanced with proof;
 - turn admitted;
+- provider-started turn (see §5.3);
 - user input consumed;
 - assistant commentary/final delta and terminal content;
 - tool and plan lifecycle;
@@ -296,6 +297,20 @@ state directly.
 - Permissions and background work retain their originating lane even after the
   foreground provider changes.
 - Events from stale connection generations are rejected before reduction.
+- **Provider-started turns (user law 2026-10-11).** A harness may start a turn
+  with no Workass prompt: Claude Code answering a background-task
+  notification, a scheduled wake, or a peer message. That is one live native
+  session continuing, exactly as in Claude Code itself. The adapter reports it
+  as `provider_turn_started` with the derived operation
+  `provider-turn:<native turn id>`, before any of the turn's output. If the chat
+  is idle on the active, established lane that has consumed input, it owns the
+  turn as an ordinary running foreground: it has no user row, outbox entry, or
+  delivery, it is never resent, it settles with the ordinary terminal, and it
+  counts as already seen by its lane. Otherwise the chat declines it. The
+  provider still runs the turn and its output stays on the frozen wire, but the
+  actor ignores it, and it is never a protocol failure. Human input arriving
+  during the turn queues behind it. Stop and host loss behave as for any
+  foreground turn.
 
 ## 6. Provider switching transaction
 
