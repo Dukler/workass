@@ -236,7 +236,12 @@ export class OmpSession {
   }
   async close() { this.turnAbort?.abort(); await this.native?.abort?.(); this.unsubscribe?.(); await this.native?.dispose?.(); }
 }
-async function open(params, resume) { const id = String(params?.sessionId || '').trim() || randomUUID(); if (resume && !params?.sessionFile && !params?.sessionId) throw new Error('OMP session/resume requires exact session id'); if (sessions.has(id)) return sessions.get(id); const s = new OmpSession(id, String(params?.cwd || process.cwd()), resume, params); await s.start(); if (!resume) s.id = String(s.native?.sessionManager?.getSessionId?.() || s.native?.sessionId || s.id); sessions.set(s.id, s); return s; }
+// EOF while a session is starting must not strand it: shutdown waits for
+// in-flight opens, and an open that finishes after EOF disposes its own session
+// instead of installing it and replying success.
+const opening = new Set();
+let closing = false;
+async function open(params, resume) { const id = String(params?.sessionId || '').trim() || randomUUID(); if (resume && !params?.sessionFile && !params?.sessionId) throw new Error('OMP session/resume requires exact session id'); if (sessions.has(id)) return sessions.get(id); const s = new OmpSession(id, String(params?.cwd || process.cwd()), resume, params); const starting = s.start(); opening.add(starting); try { await starting; } finally { opening.delete(starting); } if (closing) { await s.close().catch(e => diagnostic('OMP close after EOF failed', e)); throw new Error('OMP host closed while the session was starting'); } if (!resume) s.id = String(s.native?.sessionManager?.getSessionId?.() || s.native?.sessionId || s.id); sessions.set(s.id, s); return s; }
 async function request(m) {
   const { id, method, params = {} } = m;
   if (method === 'initialize') return respond(id, { protocolVersion: Number(params.protocolVersion || 1), agentInfo: { name: 'oh-my-pi', version: String((await sdk()).VERSION || 'unknown') }, agentCapabilities: { sessionCapabilities: { resume: {}, close: {} }, promptCapabilities: { image: true, audio: false, embeddedContext: false }, mcpCapabilities: { http: false, sse: false } }, authMethods: [], _meta: { workassNativeOMP: true, workassStableTurnInputV1: true, workassOMPSteerRequest: true } });
@@ -255,7 +260,7 @@ if (sdkModule) sdkPromise = Promise.resolve(sdkModule);
 protocolOutput = output;
 const lines = readline.createInterface({ input, crlfDelay: Infinity });
 lines.on('line', line => { let m; try { m = JSON.parse(line); } catch { return diagnostic('OMP host invalid JSON', 'parse failure'); } if (m && Object.hasOwn(m, 'id') && !m.method) { const p = pending.get(String(m.id)); if (p) { pending.delete(String(m.id)); p(m.result ?? null); } return; } if (m?.method && Object.hasOwn(m, 'id')) void request(m).catch(e => fail(m.id, e.rpcCode || -32603, e)); if (m?.method === 'session/cancel') { const s=sessions.get(String(m.params?.sessionId || '')); if(s) { s.turnAbort?.abort(); s.lastStopReason='cancelled'; void s.native.abort({reason:'interrupted'}).catch(e=>diagnostic('OMP cancel failed',e)); } } });
-return new Promise(resolve => lines.on('close', async () => { await Promise.allSettled([...sessions.values()].map(s => s.close())); sessions.clear(); resolve(); }));
+return new Promise(resolve => lines.on('close', async () => { closing = true; await Promise.allSettled([...opening]); await Promise.allSettled([...sessions.values()].map(s => s.close())); sessions.clear(); resolve(); }));
 
 }
 
