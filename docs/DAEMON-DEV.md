@@ -146,9 +146,10 @@ broadcasts:
 { "t":"event", "channel":"lan:controller-changed", "payload":{ "deviceId":"...", "name":"..." } }
 ```
 
-The lease is runtime-only; after restart, first approved connect wins again. Approved devices that are
-not the controller can still use read invokes, but controller-gated mutating invokes are rejected
-with `reply.error` containing JSON code `lan:not-controller`.
+The lease is runtime-only; after restart, first approved connect wins again. Hand-over is implicit
+(PORT-SPEC, user law 2026-07-26): an approved device that performs a mutating invoke takes the lease.
+Device administration (`lan:access-decide`, `lan:revoke`, fleet admin) still requires a lease granted
+by the daemon or a loopback client; a lease a remote device took for itself does not qualify.
 
 Approved devices can be listed and revoked:
 
@@ -204,9 +205,11 @@ review:open
 browser:set-active
 ```
 
-Controller-only events: `chat:permission-request`, and future `notify`/`show` event channels, are
-sent only to the current controller's active WebSocket connection(s). Timeout and fallback behavior
-remain owned by the ACP manager.
+Controller-only events: `lan:access-request` / `lan:access-request-closed`, `notify` and `show` are
+sent only to the current controller's active WebSocket connection(s) (access requests also reach the
+host's own local shell). `chat:permission-request` and `chat:permission-resolved` go to every approved
+device, since they describe what an agent is doing; deciding stays exclusive through
+`chat:permission-decide`. Timeout and fallback behavior remain owned by the ACP manager.
 
 LAN discovery probes can use unauthenticated identity only:
 
