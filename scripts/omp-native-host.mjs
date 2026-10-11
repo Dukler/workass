@@ -17,7 +17,7 @@ let protocolOutput = process.stdout;
 const write = (x) => protocolOutput.write(`${JSON.stringify(x)}\n`);
 const respond = (id, result) => write({ jsonrpc: '2.0', id, result });
 const safe = (x) => String(x?.message || x || 'OMP request failed')
-  .replace(/((?:api[_-]?key|token|secret|password|credential|bearer)\s*[:=]\s*)[^\s,;}]+/gi, '$1[redacted]')
+  .replace(/((?:api[_-]?key|token|secret(?:[_-]?(?:access[_-]?)?key)?|password|credential|bearer)["']?\s*[:=]\s*)[^\s,;}]+/gi, '$1[redacted]')
   .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]').slice(0, 2000);
 const fail = (id, code, error) => write({ jsonrpc: '2.0', id, error: { code, message: safe(error) } });
 const diagnostic = (label, error) => process.stderr.write(`${label}: ${safe(error)}\n`);

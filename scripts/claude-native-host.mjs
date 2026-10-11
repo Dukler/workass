@@ -36,7 +36,8 @@ function fail(id, code, message) {
 
 function safeErrorText(value) {
   return String(value?.message || value || 'Claude Code request failed')
-    .replace(/(api[_-]?key|token|secret|password|credential|bearer)\s*[:=]\s*\S+/gi, '$1=[redacted]')
+    .replace(/(api[_-]?key|token|secret(?:[_-]?(?:access[_-]?)?key)?|password|credential|bearer)["']?\s*[:=]\s*\S+/gi, '$1=[redacted]')
+    .replace(/Bearer\s+(?!\[redacted\])\S+/gi, 'Bearer [redacted]')
     .slice(0, 2000);
 }
 

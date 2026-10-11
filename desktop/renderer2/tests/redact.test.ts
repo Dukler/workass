@@ -18,6 +18,11 @@ const GO_PARITY: Array<[input: string, output: string]> = [
   ['no secrets aqui', 'no secrets aqui'],
   ['password=', 'password='],
   ['token:[redacted]', 'token:[redacted]'],
+  ['{"token":"tok-123","password":"hunter2","api_key":"k-9"}', '{"token":[redacted],"password":[redacted],"api_key":[redacted]}'],
+  ['{"password": "spaced"}', '{"password":[redacted]}'],
+  ['secret_key=abc AWS_SECRET_ACCESS_KEY=AKIAXYZ secret-key: zz', 'secret_key=[redacted] AWS_SECRET_ACCESS_KEY=[redacted] secret-key:[redacted]'],
+  ["client_secret='cs-1' and accessToken: at-2", 'client_secret=[redacted] and accessToken:[redacted]'],
+  ['{"token":[redacted]}', '{"token":[redacted]}'],
 ];
 
 test('renderer redaction is byte-identical to the daemon redactor', () => {

@@ -8,7 +8,7 @@ import readline from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const safe = value => String(value?.message || value || 'Pi request failed')
-  .replace(/((?:api[_-]?key|token|secret|password|credential|bearer)\s*[:=]\s*)[^\s,;}]+/gi, '$1[redacted]')
+  .replace(/((?:api[_-]?key|token|secret(?:[_-]?(?:access[_-]?)?key)?|password|credential|bearer)["']?\s*[:=]\s*)[^\s,;}]+/gi, '$1[redacted]')
   .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]').slice(0, 2000);
 const diagnostic = error => process.stderr.write(`Pi: ${safe(error)}\n`);
 console.log = console.info = console.warn = (...args) => diagnostic(args.map(String).join(' '));
