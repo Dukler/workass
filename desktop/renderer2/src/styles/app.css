@@ -441,6 +441,9 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
 }
 
 /* markdown prose blocks */
+/* Long unbroken tokens (URLs, ids) wrap inside the column instead of
+   overflowing it and adding a horizontal scrollbar, like the user bubble. */
+.p, .mdh, .mdquote, ul.doclist li, ol.doclist li { overflow-wrap: anywhere; }
 .p { margin: 0 0 14px; max-width: var(--read); }
 .p b { font-weight: 600; }
 .p code, li code { background: var(--field); border: 1px solid var(--line); border-radius: 5px; padding: .5px 5px; font-size: 11.5px; color: var(--ink2); }
