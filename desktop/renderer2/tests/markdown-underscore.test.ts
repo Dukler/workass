@@ -31,3 +31,13 @@ test('standalone underscore emphasis still renders', () => {
   assert.equal(html('this is __bold__ text'), 'this is <b>bold</b> text');
   assert.equal(html('(_aside_)'), '(<i>aside</i>)');
 });
+
+// 2026-10-11 QA L8: javascript:/data: links reached the DOM as anchors.
+test('links with executing schemes render as plain text', () => {
+  for (const target of ['javascript:window.__xss=3', 'JAVA\tSCRIPT:alert(1)', 'data:text/html,hi', 'vbscript:x']) {
+    const out = html(`[label](${target})`);
+    assert.ok(!out.includes('<a'), `${target} rendered an anchor: ${out}`);
+    assert.ok(out.includes('label'), out);
+  }
+  assert.match(html('[ok](https://example.com)'), /<a [^>]*href="https:\/\/example.com"/);
+});

@@ -216,7 +216,7 @@ const LANBridgeJS = `(() => {
     onJobEvent: (cb) => on('job:event', cb), onChatCatalog: (cb) => on('chat:catalog', cb), onChatSessionReplaced: (cb) => on('chat:session-replaced', cb), onChatCompacted: (cb) => on('chat:compacted', cb), onProcChanged: (cb) => on('proc:changed', cb), onRefreshEvent: (cb) => on('refresh:event', cb), onAgentNavigate: (cb) => on('agent:navigate', cb),
     onSettingsChanged: (cb) => on('settings:changed', cb), onConfigChanged: (cb) => on('config:changed', cb), onAgentApply: (cb) => on('agent:apply', cb), onAgentRouteRequest: (cb) => on('agent:route-request', cb),
     onChatCommands: (cb) => on('chat:commands', cb),
-    onChatPermissionRequest: (cb) => on('chat:permission-request', cb), onChatPermissionResolved: (cb) => on('chat:permission-resolved', cb), onLanControllerChanged: (cb) => on('lan:controller-changed', cb), onLanAccessState: (cb) => on('lan:access-state', cb), onLanAccessRequest: (cb) => on('lan:access-request', cb),
+    onChatPermissionRequest: (cb) => on('chat:permission-request', cb), onChatPermissionResolved: (cb) => on('chat:permission-resolved', cb), onLanControllerChanged: (cb) => on('lan:controller-changed', cb), onLanAccessState: (cb) => on('lan:access-state', cb), onLanAccessRequest: (cb) => on('lan:access-request', cb), onLanAccessRequestClosed: (cb) => on('lan:access-request-closed', cb),
     onChatCheckpointRestored: (cb) => on('chat:checkpoint-restored', cb), onChatEngineRecovered: (cb) => on('chat:engine-recovered', cb), onChatEnv: (cb) => on('chat:env', cb),
     onNotify: (cb) => on('notify', cb), onNotifyBacklog: (cb) => on('notify:backlog', cb),
     onChatPlanUsage: (cb) => on('chat:plan-usage', cb),

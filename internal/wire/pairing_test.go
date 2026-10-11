@@ -48,7 +48,8 @@ func TestAccessApprovalFlowIssuesTokenAndReconnectWorks(t *testing.T) {
 	}
 
 	sendInvoke(t, controller, 1, "lan:access-decide", map[string]any{"requestId": request.Payload["requestId"], "allow": true})
-	decide := readReply(t, controller)
+	// The request's withdrawal event may interleave with the reply.
+	decide, _ := readReplyFor(t, controller, 1)
 	if decide.Error != nil || decide.Result.(map[string]any)["allowed"] != true {
 		t.Fatalf("access decide reply = %+v", decide)
 	}
@@ -252,9 +253,21 @@ func TestAccessDenyClosesPendingClient(t *testing.T) {
 	request := readEvent(t, controller)
 
 	sendInvoke(t, controller, 1, "lan:access-decide", map[string]any{"requestId": request.Payload["requestId"], "allow": false})
-	decide := readReply(t, controller)
+	decide, interleaved := readReplyFor(t, controller, 1)
 	if decide.Error != nil || decide.Result.(map[string]any)["allowed"] != false {
 		t.Fatalf("deny reply = %+v", decide)
+	}
+	// 2026-10-11 QA L1: a settled request leaves every screen that showed it.
+	closed := false
+	for _, event := range interleaved {
+		closed = closed || (event.Channel == "lan:access-request-closed" && event.Payload["requestId"] == request.Payload["requestId"])
+	}
+	if !closed {
+		event := readEventOn(t, controller, "lan:access-request-closed")
+		closed = event.Payload["requestId"] == request.Payload["requestId"]
+	}
+	if !closed {
+		t.Fatal("decided access request was not withdrawn from the controller")
 	}
 	denied := readEvent(t, pending)
 	if denied.Channel != "lan:access-state" || denied.Payload["state"] != "denied" || denied.Payload["requestId"] != waiting.Payload["requestId"] {

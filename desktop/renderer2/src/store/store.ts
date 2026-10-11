@@ -3282,6 +3282,7 @@ export class Store {
     ));
     on('onProcChanged', (e) => this.onProcChanged(e as ProcChanged));
     on('onLanAccessRequest', (r) => this.onAccessRequest(r as AccessRequest));
+    on('onLanAccessRequestClosed', (r) => { const id = String((r as { requestId?: string })?.requestId || ''); if (id) this.clearRequest(id); });
     // Update notifications — feature-detected; the daemon replays the cached
     // providers:updates / app:update payloads to fresh clients like chat:catalog,
     // so a reload repaints the footer cards with no turn.

@@ -735,6 +735,7 @@ export interface WorkassApi {
   onProvidersList?: (cb: (providers: ProviderRecord[]) => void) => void;
   onProcChanged?: (cb: (e: ProcChanged) => void) => void;
   onLanAccessRequest?: (cb: (r: AccessRequest) => void) => void;
+  onLanAccessRequestClosed?: (cb: (r: { requestId: string }) => void) => void;
   // ---- machines (remote-plan E1/E3) --------------------------------------
   // Every one optional: a daemon built before the machine book answers "unknown
   // channel", and `has()` upstream degrades to a single-machine client.
