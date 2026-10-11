@@ -195,3 +195,25 @@ func countAgentSendOperations(state chat.State, operationID string) int {
 func stringifyAny(value any) string {
 	return fmt.Sprintf("%#v", value)
 }
+
+// 2026-10-11 QA B13: replaying a send that was delivered long ago answered
+// queued:true at position 0.
+func TestAgentSendReplayReceiptReportsWhereTheMessageIs(t *testing.T) {
+	const op = providercontract.OperationID("agent-send-replay")
+	queued := chat.State{Queue: []chat.QueueEntry{{OperationID: "other"}, {OperationID: op}}}
+	if receipt := agentSendReplayReceipt(queued, op, op, "q-1"); receipt["queued"] != true || receipt["position"] != 2 {
+		t.Fatalf("queued replay = %#v", receipt)
+	}
+	running := chat.State{Foreground: &chat.ForegroundTurn{OperationID: op}}
+	if receipt := agentSendReplayReceipt(running, op, op, "q-1"); receipt["queued"] != false || receipt["status"] != "running" {
+		t.Fatalf("running replay = %#v", receipt)
+	}
+	delivered := chat.State{}
+	receipt := agentSendReplayReceipt(delivered, op, op, "q-1")
+	if receipt["queued"] != false || receipt["status"] != "delivered" || receipt["queueId"] != "q-1" {
+		t.Fatalf("delivered replay = %#v", receipt)
+	}
+	if _, hasPosition := receipt["position"]; hasPosition {
+		t.Fatalf("delivered replay still has a queue position: %#v", receipt)
+	}
+}
