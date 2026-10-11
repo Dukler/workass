@@ -4689,3 +4689,20 @@ func TestStartJobBindRefusesSessionHibernatedAfterLivenessCheck(t *testing.T) {
 	}
 	bridge.clearJobForSession(session.SessionID, job)
 }
+
+// 2026-10-11 QA B6/B11: agent-supplied titles and labels were stored and
+// echoed with secrets, control and bidi-override characters, and labels had
+// no length bound.
+func TestSanitizeDisplayTextForTitlesAndLabels(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Ctl\u0000Chars‮bidi\n\nnewline", "CtlCharsbidi newline"},
+		{"deploy password=QAVALUE0031", "deploy password=[redacted]"},
+		{"  spaced\t\tout  ", "spaced out"},
+		{strings.Repeat("ñ", 90), strings.Repeat("ñ", 80)},
+	}
+	for _, tc := range cases {
+		if got := SanitizeDisplayText(tc.in, 80); got != tc.want {
+			t.Errorf("SanitizeDisplayText(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

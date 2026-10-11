@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"unicode"
 	"sync"
 	"syscall"
 	"time"
@@ -1736,4 +1737,34 @@ func (b *Bridge) withStderrTail(err error) error {
 		return err
 	}
 	return fmt.Errorf("%w; stderr: %s", err, tail)
+}
+
+// SanitizeDisplayText prepares agent-supplied text shown as a title or label:
+// secrets redacted, control and bidirectional-override characters dropped
+// (U+202E can make a sidebar row read backwards), whitespace runs collapsed
+// to one space, and the result clamped to maxRunes without splitting a
+// character.
+func SanitizeDisplayText(text string, maxRunes int) string {
+	text = redactSensitiveText(text)
+	var out strings.Builder
+	space := false
+	for _, r := range text {
+		switch {
+		case unicode.IsSpace(r):
+			space = out.Len() > 0
+			continue
+		case unicode.IsControl(r), r >= 0x202A && r <= 0x202E, r >= 0x2066 && r <= 0x2069, r == 0x200E, r == 0x200F, r == 0x061C:
+			continue
+		}
+		if space {
+			out.WriteByte(' ')
+			space = false
+		}
+		out.WriteRune(r)
+	}
+	runes := []rune(out.String())
+	if maxRunes > 0 && len(runes) > maxRunes {
+		runes = runes[:maxRunes]
+	}
+	return strings.TrimSpace(string(runes))
 }

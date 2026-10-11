@@ -399,7 +399,7 @@ func (c *chatControlCoordinator) rename(params map[string]any) (map[string]any, 
 		return nil, err
 	}
 	c.refresh(tabID, chatID, false)
-	return map[string]any{"ok": true, "tabId": tabID, "chatId": chatID, "title": fieldString(params, "title")}, nil
+	return map[string]any{"ok": true, "tabId": tabID, "chatId": chatID, "title": sanitizedChatTitle(fieldString(params, "title"))}, nil
 }
 
 func (c *chatControlCoordinator) configure(ctx context.Context, params map[string]any) (map[string]any, error) {
