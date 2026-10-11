@@ -63,6 +63,10 @@ case "$output" in
 esac
 
 done_file="$output.done"
+# A reused output path must not expose the previous run's receipt while this
+# run is still working: the daemon settles a lane as soon as its done file
+# exists (2026-10-11 review).
+rm -f "$done_file"
 receipt_label=$(printf '%s' "$label" | tr '\r\n\t' '   ')
 umask 077
 worker='output=$1
