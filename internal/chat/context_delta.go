@@ -16,7 +16,7 @@ func buildContextDelta(state State, lane LaneState) (ContextBatch, error) {
 	batch := ContextBatch{ProjectionVersion: semanticProjectionVersion}
 	for sequence := lane.CoveredThrough + 1; sequence <= state.LedgerHead(); sequence++ {
 		event := state.Ledger[sequence-1]
-		if _, covered := lane.Coverage[sequence]; covered || event.ContextExcluded {
+		if _, covered := lane.Coverage[sequence]; covered || event.ContextExcluded || event.WorkassNotice {
 			continue
 		}
 		batch.EventIDs = append(batch.EventIDs, event.EventID)
@@ -115,7 +115,7 @@ func commitContextDelta(state *State, lane *LaneState, input QueueEntry, status 
 				return errors.New("context delta event changed identity")
 			}
 			coverage = status
-		} else if !event.ContextExcluded {
+		} else if !event.ContextExcluded && !event.WorkassNotice {
 			return errors.New("context delta omitted unseen semantic history")
 		}
 		if err := setCoverage(lane, state, sequence, coverage, input.OperationID); err != nil {
