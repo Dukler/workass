@@ -1394,3 +1394,24 @@ func TestNativeCodexBackgroundChildOutlivesParentAndRetainsReceipt(t *testing.T)
 		t.Fatal("child crossed exact chat ownership")
 	}
 }
+
+// 2026-10-11 QA: an engine attached for a chat that was never prompted stayed
+// "warm" forever — never idle-hibernated, never age-recycled.
+func TestLifecycleHibernatesAnEngineThatWasNeverPrompted(t *testing.T) {
+	t.Parallel()
+	manager, _ := newFakeManager(t, "echo-prompt", Options{
+		HibernateTTL:                 time.Millisecond,
+		LifecycleCheckInterval:       time.Hour,
+		RSSSampleInterval:            time.Hour,
+		SpawnedWorkReconcileInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	const tabID = "never-prompted-tab"
+	session := newFakeSession(t, manager, tabID)
+	bridge := bridgeForTestSession(t, manager, session.SessionID, tabID, "chat-"+tabID)
+	setBridgeLastActivityForTest(bridge, time.Now().Add(-time.Hour))
+	manager.SweepLifecycle()
+	if !procHasState(manager, StateHibernated) {
+		t.Fatalf("a never-prompted engine past its idle TTL was not hibernated: %#v", manager.Processes())
+	}
+}
