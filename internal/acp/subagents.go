@@ -211,9 +211,14 @@ type SubagentRun struct {
 // AgentCatalog exposes the exact daemon-owned provider/model/effort/mode
 // registry to an agent. No model ids are guessed from config files.
 func (m *Manager) AgentCatalog(ctx context.Context, ownerKey, parentChatID, parentTabID string) (map[string]any, error) {
-	parent := m.runningJobForOwner(ownerKey, parentChatID, parentTabID)
-	if parent == nil {
+	// Like spawn, the catalog works for an owning chat with no running turn
+	// (e.g. one woken by a background task); its ids are the only valid ones.
+	ownerChatID, ownerTabID, parent, ownerOK := m.subagentOwnerContext(ownerKey, parentChatID, parentTabID)
+	if !ownerOK {
 		return nil, errors.New("no running Workass turn owns this agent catalog request")
+	}
+	if parent == nil {
+		parent = m.subagentParentDefaults(ownerChatID, ownerTabID)
 	}
 	return m.agentCatalogV2(ctx, parent), nil
 }
