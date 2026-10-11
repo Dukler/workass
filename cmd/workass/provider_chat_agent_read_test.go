@@ -461,3 +461,38 @@ func TestProviderChatAgentReadClampsOneHugeMessage(t *testing.T) {
 		t.Fatalf("oldest row = %#v", rows[0])
 	}
 }
+
+// 2026-10-11 QA chat-core B9 / UI L5: renderer channels kept a 100 000-char
+// title (and auto-titles with raw newlines) and 2 000 staged queue rows.
+func TestRendererPresentationAndQueueAreBounded(t *testing.T) {
+	stateDir := t.TempDir()
+	manager := acp.NewManager(acp.Options{StateDir: stateDir, RuntimeProfile: "test"})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	const tabID, chatID = "bounded-tab", "bounded-chat"
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "bounded-create", "title": "# Heading one\n\nSecond", "cwd": t.TempDir(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := runtime.Snapshot(chatID)
+	if state.Presentation.Title != "# Heading one Second" {
+		t.Fatalf("created title = %q", state.Presentation.Title)
+	}
+	if _, err := runtime.SavePresentation(tabID, chatID, "bounded-save", state.Presentation.PresentationRevision, map[string]any{
+		"tabId": tabID, "chatId": chatID, "title": strings.Repeat("t", 100000),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = runtime.Snapshot(chatID)
+	if n := utf8.RuneCountInString(state.Presentation.Title); n != 200 {
+		t.Fatalf("saved title kept %d characters", n)
+	}
+	rows := make([]any, maxStagedQueueRows+1)
+	for i := range rows {
+		rows[i] = map[string]any{"id": fmt.Sprintf("q-%d", i), "text": "row"}
+	}
+	if _, err := runtime.ReplaceStagedQueue(tabID, chatID, "bounded-queue", state.Presentation.AgentQueueRevision, rows); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("oversized queue accepted: %v", err)
+	}
+}

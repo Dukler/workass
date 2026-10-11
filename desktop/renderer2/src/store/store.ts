@@ -390,6 +390,16 @@ export interface ProviderSettingsMachine {
   providers: ProviderRecord[];
 }
 
+
+/** First-prompt chat title: whitespace collapsed, cut at a word boundary. */
+export function titleFromPrompt(text: string, max = 34): string {
+  const flat = String(text || '').replace(/\s+/g, ' ').trim();
+  if (flat.length <= max) return flat;
+  const cut = flat.slice(0, max);
+  const space = cut.lastIndexOf(' ');
+  return `${(space >= max / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
 export class Store {
   private readonly toastTimers = new Set<ReturnType<typeof setTimeout>>();
   state: AppState;
@@ -4914,7 +4924,7 @@ export class Store {
       const user: Msg = { id: userId, role: 'user', content: display, status: 'done', at: now, events: [], images: messageImages(images) };
       const asst: Msg = { id: assistantId, role: 'assistant', content: '', status: 'failed', at: now, events: [], interrupted: true };
       chat.messages.push(user, asst);
-      if (!chat.titleLocked) { chat.title = display.trim().slice(0, 34) || chat.title; chat.titleLocked = true; }
+      if (!chat.titleLocked) { chat.title = titleFromPrompt(display) || chat.title; chat.titleLocked = true; }
       this.bumpChat(chat);
       return false;
     }
@@ -4953,7 +4963,7 @@ export class Store {
     const releasePendingStart = () => {
       if (this.pendingTurnStarts.get(tabId) === pendingStart) this.pendingTurnStarts.delete(tabId);
     };
-    if (!chat.titleLocked) { chat.title = display.trim().slice(0, 34) || chat.title; chat.titleLocked = true; }
+    if (!chat.titleLocked) { chat.title = titleFromPrompt(display) || chat.title; chat.titleLocked = true; }
     this.bumpChat(chat);
 
     // A picker change can still be committing when Enter is pressed. Wait for
