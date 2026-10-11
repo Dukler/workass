@@ -224,6 +224,13 @@ func (r *providerChatRuntime) SaveRuntimeControls(tabID, chatID string, operatio
 	if providerID == "" {
 		return nil, errors.New("runtime-control save requires a provider id")
 	}
+	// An unknown provider would persist and fail every later send. Model and
+	// mode stay as given: a stale control is reconciled at the next prompt.
+	if r.manager != nil {
+		if _, err := r.manager.ProviderDefinition(string(providerID)); err != nil {
+			return nil, fmt.Errorf("runtime-control save names an unavailable provider: %w", err)
+		}
+	}
 	var modelControls json.RawMessage
 	if value, exists := raw["modelControls"]; exists && value != nil {
 		modelControls, err = json.Marshal(value)

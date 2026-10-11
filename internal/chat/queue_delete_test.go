@@ -244,3 +244,27 @@ func TestCoordinatorFailureReasonIsRedactedAndBounded(t *testing.T) {
 		t.Fatalf("reason not bounded: %d runes", len([]rune(got)))
 	}
 }
+
+// 2026-10-11 QA lanes B-9: a switch whose target provider died at boot left
+// the chat's selected provider on the dead target.
+func TestFailedProviderSwitchReturnsToTheEstablishedLane(t *testing.T) {
+	state, _ := NewState("chat")
+	state, _, err := Reduce(state, InitializeChat{Presentation: PresentationState{TabID: "tab", ProviderID: "mock"}, OperationID: "create", Digest: "d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	established := testLane("chat", "mock")
+	state, _ = apply(t, state, SelectLane{Identity: established, ModelID: "mock-model", ModeID: "ask"})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID: established.ID, Identity: established, Thread: provider.ThreadRef{ProviderID: "mock", RootID: "t", HeadID: "t", Lineage: 1},
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
+	})
+	state, _ = apply(t, state, UpdateRuntimeControls{ProviderID: "dead", ModelID: "dead-model", ReplaceModelID: true})
+	target := testLane("chat", "dead")
+	state, _ = apply(t, state, SelectLane{Identity: target})
+	state, _ = apply(t, state, ClaimEffect{EffectID: createEffectID(target.ID, 1)})
+	state, _ = apply(t, state, LaneOpenFailed{LaneID: target.ID, Kind: provider.ErrorTransientTransport, Reason: "exited at boot"})
+	if state.DesiredLaneID != established.ID || state.Presentation.ProviderID != "mock" || state.Presentation.CurrentModelID != "mock-model" {
+		t.Fatalf("failed switch half-switched the chat: desired=%s provider=%s model=%s", state.DesiredLaneID, state.Presentation.ProviderID, state.Presentation.CurrentModelID)
+	}
+}

@@ -2064,7 +2064,38 @@ func reduceLaneOpenFailed(state *State, command LaneOpenFailed) ([]Effect, error
 	if err := settleWaitingTurnAfterLaneFailure(state, command.LaneID, command.Kind, command.Reason); err != nil {
 		return nil, err
 	}
+	revertFailedProviderSwitch(state, command.LaneID)
 	return nil, nil
+}
+
+// revertFailedProviderSwitch keeps a failed switch from half-switching the
+// chat (PROVIDER-LANE-ARCHITECTURE §6): when a target lane that never
+// established fails while another lane is established, the selection returns
+// to the established lane instead of pointing the composer at a provider that
+// cannot start.
+func revertFailedProviderSwitch(state *State, failedLaneID provider.LaneID) {
+	failed := state.Lanes[failedLaneID]
+	if !failed.Thread.IsZero() || state.DesiredLaneID != failedLaneID || state.ActiveLaneID == "" || state.ActiveLaneID == failedLaneID {
+		return
+	}
+	active, ok := state.Lanes[state.ActiveLaneID]
+	if !ok || active.Thread.IsZero() {
+		return
+	}
+	state.DesiredLaneID = state.ActiveLaneID
+	if state.Presentation.ProviderID != failed.Identity.Realm.ProviderID {
+		return
+	}
+	presentation := state.Presentation.Clone()
+	presentation.ProviderID = active.Identity.Realm.ProviderID
+	if active.ModelID != "" {
+		presentation.CurrentModelID = active.ModelID
+	}
+	if active.ModeID != "" {
+		presentation.CurrentModeID = active.ModeID
+	}
+	presentation.RuntimeControlRevision++
+	state.Presentation = presentation
 }
 
 func settleWaitingTurnAfterLaneFailure(state *State, laneID provider.LaneID, kind provider.ErrorKind, reason string) error {

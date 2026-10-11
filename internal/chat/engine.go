@@ -110,6 +110,14 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 			return nil
 		}
 	}
+	if save, ok := command.(SaveRuntimeControls); ok && prepare == nil && !e.state.Deleted {
+		// An exact replay only reads its receipt; persisting it again advanced
+		// the actor revision on every retry.
+		if receipt, exists := e.state.RuntimeControlMutationReceipts[provider.NormalizeOperationID(string(save.OperationID))]; exists &&
+			receipt.Digest == strings.TrimSpace(save.Digest) {
+			return nil
+		}
+	}
 	providerStore, hasProviderStore := e.store.(providerEventStateStore)
 	providerEvent, isProviderEvent := command.(ProviderEventReceived)
 	useProviderEventJournal := prepare == nil && hasProviderStore && isProviderEvent && journalableProviderEvent(providerEvent.Event.Kind)

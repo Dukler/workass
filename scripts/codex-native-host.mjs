@@ -512,6 +512,10 @@ class CodexSession {
       // Official WarningNotification has optional threadId and NO turnId.
       // Observe within the current prompt, without claiming native turn attribution:
       // a delayed warning from this same thread cannot be distinguished here.
+      // Only while a native turn is running: a goal run keeps its prompt open
+      // after turn/completed until the goal settles, and a warning in that
+      // window belongs to no turn.
+      if (!this.activeTurnId) return;
       if (typeof params.message === 'string' && /\bfall(?:ing)?\s+back\b[^\n]*\b(?:to|using)\s+(?:HTTPS|HTTP\(S\))(?=\s|[.,:;]|$)/i.test(params.message)) {
         this.emitDiagnostic({ kind: 'fallback', transport: 'https', scope: 'thread' });
       }

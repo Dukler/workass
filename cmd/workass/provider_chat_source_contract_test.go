@@ -305,6 +305,7 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		"cmd/workass/stateless_mcp.go:ownerAuthorized:ValidateAgentOwner":                                                {1, "owner authorization after actor fencing"},
 		"cmd/workass/stateless_mcp.go:ServeHTTP:SubagentParent":                                                          {1, "an authenticated delegated agent resolves its exact parent chat"},
 		"cmd/workass/stateless_mcp.go:ServeHTTP:WithActorOwner":                                                          {1, "a delegated agent's tool call runs for its parent under a short-lived owner"},
+		"cmd/workass/provider_chat_control.go:SaveRuntimeControls:ProviderDefinition":                                    {1, "a runtime-control save must name a provider the registry can start"},
 	}
 }
 
