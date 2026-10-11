@@ -307,6 +307,8 @@ export class PiSession {
 }
 
 export async function servePi({sdkModule,input=process.stdin,output=process.stdout}={}) {
+  const opening = new Set();
+  let closing = false;
   const configured = process.env.WORKASS_PI_SDK_MODULE;
   const install = !sdkModule && !configured ? resolvePiInstallation(process.env.WORKASS_PI_EXECUTABLE) : null;
   // The subagent extension supports SDK hosts outside Pi's own package. Give
@@ -333,7 +335,13 @@ export async function servePi({sdkModule,input=process.stdin,output=process.stdo
     if (['session/new','session/resume','session/load'].includes(method)) {
       if (sessions.has(params.sessionId)) throw new Error('Pi session already attached');
       const s = new PiSession(sdk,params,notify,peerRequest);
-      try { await s.start(method !== 'session/new'); } catch (error) { await s.close().catch(diagnostic); throw error; }
+      // EOF while this session is starting must not strand it: shutdown waits
+      // for in-flight opens, and an open that finishes after EOF disposes its
+      // own session instead of installing it and replying success.
+      const starting = s.start(method !== 'session/new');
+      opening.add(starting);
+      try { await starting; } catch (error) { await s.close().catch(diagnostic); throw error; } finally { opening.delete(starting); }
+      if (closing) { await s.close().catch(diagnostic); throw new Error('Pi host closed while the session was starting'); }
       sessions.set(s.id,s);
       return {sessionId:s.id,configOptions:s.options(),availableModels:s.models.map(m=>({modelId:modelID(m),name:m.name || m.id})),_meta:{workassProviderRealm:{accountScope:'unverified-account',installScope:'pi-sdk',verified:false}}};
     }
@@ -354,6 +362,6 @@ export async function servePi({sdkModule,input=process.stdin,output=process.stdo
     if (m.method === 'session/cancel') {void sessions.get(m.params?.sessionId)?.cancel().catch(diagnostic);return}
     if (m.method && m.id !== undefined) void request(m).then(result=>write({jsonrpc:'2.0',id:m.id,result}),error=>write({jsonrpc:'2.0',id:m.id,error:{code:error.rpcCode || -32603,message:safe(error)}}));
   });
-  return new Promise(resolve=>lines.on('close',async()=>{await Promise.allSettled([...sessions.values()].map(s=>s.close()));sessions.clear();for (const finish of pending.values()) finish(null);resolve()}));
+  return new Promise(resolve=>lines.on('close',async()=>{closing=true;await Promise.allSettled([...opening]);await Promise.allSettled([...sessions.values()].map(s=>s.close()));sessions.clear();for (const finish of pending.values()) finish(null);resolve()}));
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await servePi();
