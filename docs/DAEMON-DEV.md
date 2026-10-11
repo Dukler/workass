@@ -350,7 +350,7 @@ event/reply/proc RSS counts are printed.
 - ACP engine RSS is sampled with `ps -o rss= -p <pid>` on macOS/Linux and `tasklist /FI "PID eq N" /FO CSV /NH` on Windows at `--rss-sample-interval`.
 - `proc:changed` and `proc:list` include the existing process fields plus additive `state` and `rssKb` fields for ACP engines.
 - Engines crossing `--engine-max-age` or `--engine-max-rss-kb` are marked for recycle and hibernate only at the next idle moment.
-- `--spare-sessions` keeps isolated pre-warmed ACP sessions ready; spares use `--spare-ttl` and are not treated as idle chats.
+- `--spare-sessions` is accepted but inert in the daemon (logged at startup): every chat is actor-owned and opens its provider lane with an explicit cwd, which a pre-warmed spare can never satisfy. Sessions start on demand, as in Claude Code. The ACP manager's spare pool (`--spare-ttl`) remains for direct manager use.
 - Other non-shell-local wire handlers remain P2 stubs returning documented empty/default result shapes.
 
 Not included in this phase: real Devin engines, headless non-chat jobs, full non-engine process management beyond the existing stubs, and Electron shell-local actions.
