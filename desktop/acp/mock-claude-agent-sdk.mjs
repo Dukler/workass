@@ -542,6 +542,8 @@ class FixtureQuery {
         this.emit(this.result('error_during_execution', { terminal_reason: 'api_error' }));
         continue;
       }
+      const holdMs = fixtureMarker(text, 'hold-ms');
+      if (holdMs !== null) await new Promise((resolve) => setTimeout(resolve, Number(holdMs) || 0));
       await this.endTurn(text);
       if (fixtureMarker(text, 'harness-turn') !== null) await this.harnessTurn();
       if (fixtureMarker(text, 'harness-turn-dies') !== null) await this.harnessTurn({ dies: true });
@@ -679,6 +681,12 @@ class FixtureQuery {
   interrupt() {
     if (process.env.WORKASS_CLAUDE_FIXTURE_INTERRUPT_HANG === '1') {
       return new Promise(() => {});
+    }
+    // A slow acknowledgement that emits no result: the turn it targeted may
+    // finish on its own, and the next prompt start, before it resolves.
+    const ackDelay = Number(process.env.WORKASS_CLAUDE_FIXTURE_INTERRUPT_ACK_DELAY_MS || 0);
+    if (ackDelay > 0) {
+      return new Promise((resolve) => setTimeout(() => resolve({ still_queued: [] }), ackDelay));
     }
     this.emit(this.result('error_during_execution'));
     return Promise.resolve({ still_queued: [] });

@@ -1455,6 +1455,10 @@ class ClaudeSession {
     }
     if (!this.query || !this.activePrompt) return;
     const query = this.query;
+    // Stop belongs to the prompt that was running when it was asked. If that
+    // prompt ends on its own while the interrupt is in flight, the next queued
+    // prompt may already own the query; it must not be cancelled in its place.
+    const target = this.activePrompt;
     let timer;
     const timeout = new Promise((resolve) => {
       timer = setTimeout(() => resolve({ timedOut: true }), 500);
@@ -1469,7 +1473,7 @@ class ClaudeSession {
     } finally {
       clearTimeout(timer);
     }
-    if (!this.activePrompt) return;
+    if (this.activePrompt !== target || this.query !== query) return;
     this.settlePrompt({ stop_reason: 'cancelled', subtype: 'error_during_execution', is_error: false, errors: ['interrupted by user'] }, null);
     if (outcome?.error) diagnostic('Claude interrupt failed', outcome.error);
     // If interrupt acknowledgement did not itself emit a terminal result, the
