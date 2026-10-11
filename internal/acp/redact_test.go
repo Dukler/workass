@@ -16,6 +16,18 @@ var redactionCases = [][2]string{
 	{`client_secret='cs-1' and accessToken: at-2`, `client_secret=[redacted] and accessToken:[redacted]`},
 	{`tokens: 85 y max_tokens=4096`, `tokens: 85 y max_tokens=4096`},
 	{`{"token":[redacted]}`, `{"token":[redacted]}`},
+	// Shapes without a keyword (2026-10-11 QA): vendor tokens, Basic auth, URL
+	// credentials, PEM keys; plus private_key and passwd. Negatives stay intact.
+	{"{\"private_key\":\"pk-123\"} passwd=hunter3", "{\"private_key\":[redacted]} passwd=[redacted]"},
+	{"Authorization: Basic dXNlcjpwYXNz rest", "Authorization: Basic [redacted] rest"},
+	{"postgres://admin:S3cretPw@db.local:5432/app and https://example.com/x", "postgres://admin:[redacted]@db.local:5432/app and https://example.com/x"},
+	{"-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY----- after", "[redacted] after"},
+	{"key sk-ant-api03-abcdefghijklmnopqrstuvwx end", "key [redacted] end"},
+	{"ghp_abcdefghijklmnopqrstuvwxyz0123456789 and AKIAABCDEFGHIJKLMNOP", "[redacted] and [redacted]"},
+	{"xoxb-1234567890-abcdefghij jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop", "[redacted] jwt [redacted]"},
+	{"basic understanding of https://example.com/path and email a@b.com", "basic understanding of https://example.com/path and email a@b.com"},
+	{"sk-learn is a library; the github repo; eyJ alone", "sk-learn is a library; the github repo; eyJ alone"},
+	{"postgres://admin:[redacted]@db.local/app", "postgres://admin:[redacted]@db.local/app"},
 }
 
 func TestRedactionCoversJSONKeysAndSecretKeyNames(t *testing.T) {

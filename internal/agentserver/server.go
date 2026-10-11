@@ -803,13 +803,26 @@ func asString(v any) string {
 	}
 }
 
-var secretTextRE = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:api[_-]?key|token|secret(?:[_-]?(?:access[_-]?)?key)?|password|credential)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)`)
+var secretTextRE = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:api[_-]?key|token|secret(?:[_-]?(?:access[_-]?)?key)?|private[_-]?key|passw(?:or)?d|credential)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)|(authorization\s*:\s*basic\s+)[A-Za-z0-9+/=]+|://[^\s/:@]+:[^\s/@]+@|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|\b(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{32,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[abposr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})`)
 
 func RedactSensitiveText(text string) string {
 	return secretTextRE.ReplaceAllStringFunc(text, func(match string) string {
 		lower := strings.ToLower(match)
 		if strings.HasPrefix(lower, "bearer ") {
 			return match[:7] + "[redacted]"
+		}
+		if strings.HasPrefix(lower, "authorization") {
+			if i := strings.Index(lower, "basic"); i >= 0 {
+				prefix := match[:i+5]
+				rest := match[i+5:]
+				return prefix + rest[:len(rest)-len(strings.TrimLeft(rest, " \t\n\f\r"))] + "[redacted]"
+			}
+		}
+		if strings.HasPrefix(match, "://") {
+			return match[:strings.LastIndex(match, ":")+1] + "[redacted]@"
+		}
+		if strings.HasPrefix(match, "-----") {
+			return "[redacted]"
 		}
 		if i := strings.IndexAny(match, ":="); i >= 0 {
 			return match[:i+1] + "[redacted]"

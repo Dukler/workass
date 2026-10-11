@@ -23,6 +23,16 @@ const GO_PARITY: Array<[input: string, output: string]> = [
   ['secret_key=abc AWS_SECRET_ACCESS_KEY=AKIAXYZ secret-key: zz', 'secret_key=[redacted] AWS_SECRET_ACCESS_KEY=[redacted] secret-key:[redacted]'],
   ["client_secret='cs-1' and accessToken: at-2", 'client_secret=[redacted] and accessToken:[redacted]'],
   ['{"token":[redacted]}', '{"token":[redacted]}'],
+  ["{\"private_key\":\"pk-123\"} passwd=hunter3", "{\"private_key\":[redacted]} passwd=[redacted]"],
+  ["Authorization: Basic dXNlcjpwYXNz rest", "Authorization: Basic [redacted] rest"],
+  ["postgres://admin:S3cretPw@db.local:5432/app and https://example.com/x", "postgres://admin:[redacted]@db.local:5432/app and https://example.com/x"],
+  ["-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY----- after", "[redacted] after"],
+  ["key sk-ant-api03-abcdefghijklmnopqrstuvwx end", "key [redacted] end"],
+  ["ghp_abcdefghijklmnopqrstuvwxyz0123456789 and AKIAABCDEFGHIJKLMNOP", "[redacted] and [redacted]"],
+  ["xoxb-1234567890-abcdefghij jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop", "[redacted] jwt [redacted]"],
+  ["basic understanding of https://example.com/path and email a@b.com", "basic understanding of https://example.com/path and email a@b.com"],
+  ["sk-learn is a library; the github repo; eyJ alone", "sk-learn is a library; the github repo; eyJ alone"],
+  ["postgres://admin:[redacted]@db.local/app", "postgres://admin:[redacted]@db.local/app"],
 ];
 
 test('renderer redaction is byte-identical to the daemon redactor', () => {

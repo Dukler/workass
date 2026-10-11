@@ -38,7 +38,7 @@ const (
 )
 
 var (
-	secretTextRE                          = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:api[_-]?key|token|secret(?:[_-]?(?:access[_-]?)?key)?|password|credential)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)`)
+	secretTextRE                          = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:api[_-]?key|token|secret(?:[_-]?(?:access[_-]?)?key)?|private[_-]?key|passw(?:or)?d|credential)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)|(authorization\s*:\s*basic\s+)[A-Za-z0-9+/=]+|://[^\s/:@]+:[^\s/@]+@|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|\b(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{32,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[abposr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})`)
 	secretKeyRE                           = regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|credential|bearer)`)
 	defaultProviderDetectionRetryBackoffs = []time.Duration{5 * time.Minute, 15 * time.Minute, 30 * time.Minute}
 	defaultProviderUpdateRetryBackoffs    = []time.Duration{5 * time.Minute, 15 * time.Minute, 30 * time.Minute}
@@ -846,7 +846,7 @@ func toJSON(v any) string {
 // "bearer\s+…" needs "bearer", and the key:value form needs one of
 // api[_-]?key / token / secret / password / credential. "key" stands in for the
 // api-key family, so the set over-accepts and never under-accepts.
-var secretTriggerWords = [...]string{"bearer", "token", "secret", "password", "credential", "key"}
+var secretTriggerWords = [...]string{"bearer", "token", "secret", "passw", "credential", "key"}
 
 // mayContainSecret is a conservative prefilter for redactSensitiveText: false
 // means secretTextRE provably cannot match, true means "run the regex". RE2 has
@@ -883,6 +883,55 @@ func mayContainSecret(s string) bool {
 				return true
 			}
 		}
+		// Shapes that carry no keyword: vendor token prefixes, Basic auth, PEM
+		// keys, and URL credentials. Each needs its exact literal, so ordinary
+		// prose and plain URLs still skip the regex.
+		switch s[i] | 0x20 {
+		case 's':
+			if hasFoldPrefix(s[i:], "sk-") {
+				return true
+			}
+		case 'g':
+			if hasFoldPrefix(s[i:], "github_pat_") || len(s[i:]) > 3 && s[i+1]|0x20 == 'h' && s[i+3] == '_' {
+				return true
+			}
+		case 'x':
+			if hasFoldPrefix(s[i:], "xox") {
+				return true
+			}
+		case 'a':
+			if hasFoldPrefix(s[i:], "akia") || hasFoldPrefix(s[i:], "authorization") {
+				return true
+			}
+		case 'e':
+			if hasFoldPrefix(s[i:], "eyj") {
+				return true
+			}
+		case '-':
+			if hasFoldPrefix(s[i:], "-----begin") {
+				return true
+			}
+		case ':':
+			if strings.HasPrefix(s[i:], "://") && urlCarriesCredentials(s[i+3:]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// urlCarriesCredentials reports a user:password@ authority right after "://".
+func urlCarriesCredentials(rest string) bool {
+	colon := false
+	for i := 0; i < len(rest); i++ {
+		switch c := rest[i]; {
+		case c == '@':
+			return colon
+		case c == ':':
+			colon = true
+		case c == '/' || c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			return false
+		}
 	}
 	return false
 }
@@ -909,6 +958,19 @@ func redactSensitiveText(s string) string {
 		lower := strings.ToLower(match)
 		if strings.HasPrefix(lower, "bearer ") {
 			return match[:strings.Index(strings.ToLower(match), "bearer ")+7] + "[redacted]"
+		}
+		if strings.HasPrefix(lower, "authorization") {
+			if i := strings.Index(lower, "basic"); i >= 0 {
+				prefix := match[:i+5]
+				rest := match[i+5:]
+				return prefix + rest[:len(rest)-len(strings.TrimLeft(rest, " \t\n\f\r"))] + "[redacted]"
+			}
+		}
+		if strings.HasPrefix(match, "://") {
+			return match[:strings.LastIndex(match, ":")+1] + "[redacted]@"
+		}
+		if strings.HasPrefix(match, "-----") {
+			return "[redacted]"
 		}
 		if i := strings.IndexAny(match, ":="); i >= 0 {
 			return match[:i+1] + "[redacted]"
