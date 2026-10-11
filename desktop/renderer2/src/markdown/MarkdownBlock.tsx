@@ -1,11 +1,30 @@
 import { memo } from 'react';
-import type { SignedBlock } from './blocks';
+import type { ListItem, SignedBlock } from './blocks';
 import { renderInline, type InlineMediaResolver } from './inline';
 import { CodeBlock } from './CodeBlock';
 import { VisualizeBlock } from './VisualizeBlock';
 
 // One block. Memoized on its signature so a sealed block above the streaming
 // tail never re-renders while tokens flow into the last block.
+function renderList(ordered: boolean, items: ListItem[], keyBase: string, media?: InlineMediaResolver) {
+  const Tag = ordered ? 'ol' : 'ul';
+  return (
+    <Tag className="doclist">
+      {items.map((it, idx) => {
+        // GFM task item: "[ ] text" / "[x] text" shows a read-only checkbox.
+        const task = /^\[([ xX])\]\s+/.exec(it.text);
+        return (
+        <li key={idx} className={task ? 'task' : undefined}>
+          {task ? <input type="checkbox" checked={task[1] !== ' '} disabled readOnly aria-label={task[1] !== ' ' ? 'Hecho' : 'Pendiente'} /> : null}
+          {renderInline(task ? it.text.slice(task[0].length) : it.text, `${keyBase}-${idx}`, true, media)}
+          {it.sub ? renderList(it.sub.ordered, it.sub.items, `${keyBase}-${idx}`, media) : null}
+        </li>
+        );
+      })}
+    </Tag>
+  );
+}
+
 function BlockView({ sb, media, visualizeTabId, visualizeChatId, artifactOrigin }: { sb: SignedBlock; media?: InlineMediaResolver; visualizeTabId?: string; visualizeChatId?: string; artifactOrigin?: string }) {
   // Dev-only render probe: inert unless a global collector is present. Used to
   // verify that memo keeps sealed blocks from re-rendering during streaming.
@@ -23,14 +42,8 @@ function BlockView({ sb, media, visualizeTabId, visualizeChatId, artifactOrigin 
       return <div className="mdquote">{renderInline(b.raw, 'q', true, media)}</div>;
     case 'hr':
       return <hr className="mdhr" />;
-    case 'list': {
-      const Tag = b.ordered ? 'ol' : 'ul';
-      return (
-        <Tag className="doclist">
-          {b.items.map((it, idx) => <li key={idx}>{renderInline(it, `l-${idx}`, true, media)}</li>)}
-        </Tag>
-      );
-    }
+    case 'list':
+      return renderList(b.ordered, b.items, 'l', media);
     case 'table':
       return (
         <div className="mdtable-wrap">
