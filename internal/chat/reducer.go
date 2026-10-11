@@ -709,6 +709,9 @@ func reduceJournaledProviderEvent(current State, command ProviderEventReceived) 
 }
 
 func validateJournaledProviderEventMutation(state State, event provider.Event) error {
+	if providerTurnEventDeclined(state, event) {
+		return nil
+	}
 	switch event.Kind {
 	case provider.EventThinkingUpdate, provider.EventToolUpdate, provider.EventPlanUpdate:
 		if state.Foreground == nil {
@@ -2954,6 +2957,64 @@ func reduceTurnTerminated(state *State, command TurnTerminated) ([]Effect, error
 	return drive(state)
 }
 
+// reduceProviderTurnStarted gives a turn the provider began on its own the
+// same foreground ownership a delivered prompt gets, so its output, tools and
+// terminal settle exactly like any other turn (Claude Code: one live session
+// in which a background-task notification simply starts the next turn). It
+// owns no input and no delivery: no user row, no outbox, nothing to resend.
+// The chat declines rather than fails when it cannot own the turn — a turn of
+// its own is running, the lane is not the active established one that has
+// consumed input, or the identity is already reserved — because refusing
+// provider output is not a protocol violation.
+func reduceProviderTurnStarted(state *State, event provider.Event) ([]Effect, error) {
+	turn := event.Admission.Turn
+	laneID := event.Identity.LaneID
+	if state.Foreground != nil {
+		return nil, nil
+	}
+	if _, reserved := state.Operations[turn.OperationID]; reserved {
+		return nil, nil
+	}
+	lane := state.Lanes[laneID]
+	// A lane still owing its initial seed has never consumed input, so it has
+	// launched no background work that could wake it.
+	if state.ActiveLaneID != laneID || lane.Phase != LaneReady || lane.Provision != nil || lane.Thread.IsZero() || lane.InitialSeedPending {
+		return nil, nil
+	}
+	startedAt := unixMSRFC3339(event.Identity.ObservedAtUnixMS)
+	rootAssistantID := fmt.Sprintf("message:%s:assistant", turn.OperationID)
+	input := QueueEntry{
+		OperationID: turn.OperationID, LaneID: laneID, ModelID: lane.ModelID,
+		Presentation: provider.TurnPresentation{
+			AssistantMessageID: rootAssistantID, Origin: "internal", StartedAt: startedAt,
+		},
+	}
+	state.Operations[turn.OperationID] = struct{}{}
+	if planEntriesAllCompleted(state.Presentation.PlanLatest) {
+		state.Presentation.PlanLatest = nil
+		state.Presentation.PlanLatestMessageID = rootAssistantID
+	}
+	state.Foreground = &ForegroundTurn{
+		OperationID: turn.OperationID, LaneID: laneID, Input: input, Turn: turn,
+		Status: ForegroundRunning, UserConsumed: true, StartedAt: startedAt,
+		RootAssistantMessageID: rootAssistantID, CurrentAssistantMessageID: rootAssistantID,
+	}
+	beginForegroundObligation(state, input)
+	lane.Phase = LaneRunning
+	lane.LastError = ""
+	state.Lanes[laneID] = lane
+	return nil, nil
+}
+
+// providerTurnEventDeclined reports output of a provider-started turn that is
+// not this chat's foreground: declined at start, or arriving after it settled.
+func providerTurnEventDeclined(state State, event provider.Event) bool {
+	if event.Kind == provider.EventProviderTurnStarted || !provider.IsProviderTurnOperation(event.Identity.OperationID) {
+		return false
+	}
+	return state.Foreground == nil || state.Foreground.OperationID != event.Identity.OperationID
+}
+
 func shouldPersistForegroundSegment(foreground *ForegroundTurn) bool {
 	if foreground == nil {
 		return false
@@ -3393,7 +3454,14 @@ func reduceProviderEvent(state *State, command ProviderEventReceived) ([]Effect,
 	if foreground := state.Foreground; foreground != nil && foreground.LaneID == event.Identity.LaneID && foreground.OperationID == event.Identity.OperationID {
 		ensureForegroundResultAnchor(foreground)
 	}
+	if providerTurnEventDeclined(*state, event) {
+		// The provider is running a turn this chat declined to own. It stays the
+		// provider's business: observed on the wire, never a protocol failure.
+		return nil, nil
+	}
 	switch event.Kind {
+	case provider.EventProviderTurnStarted:
+		return reduceProviderTurnStarted(state, event)
 	case provider.EventLaneAttached:
 		expectedThread := lane.Thread
 		if lane.Provision != nil {

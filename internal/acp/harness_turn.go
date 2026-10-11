@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	providercontract "workass/internal/provider"
 )
 
 // Provider harness turn evidence.
@@ -319,8 +321,38 @@ func (m *Manager) adoptHarnessTurn(bridge *Bridge, tabID, chatID, sessionID, pro
 		return
 	}
 	now := time.Now()
+	jobID := "harness-turn-" + strconv.FormatInt(now.UnixNano(), 10)
+	// An actor-owned chat must own the turn before its job is published: every
+	// later chunk, tool and terminal is checked against the chat's foreground,
+	// and an unowned terminal was a protocol failure that closed the session
+	// after each self-started turn (2026-10-10). The chat may decline (it is
+	// running its own turn); the declined turn's output is then observed only.
+	lane := m.providerLaneForSession(sessionID)
+	operationID := providercontract.ProviderTurnOperationID(jobID)
+	m.mu.Lock()
+	resetting := m.resetting
+	m.mu.Unlock()
+	if resetting {
+		return
+	}
+	if lane != nil {
+		if err := lane.emit(providercontract.Event{
+			Kind:     providercontract.EventProviderTurnStarted,
+			Identity: providercontract.EventIdentity{OperationID: operationID, TurnID: jobID},
+			Admission: &providercontract.TurnAdmission{
+				Turn: providercontract.TurnRef{OperationID: operationID, NativeID: jobID}, Accepted: true,
+			},
+		}); err != nil {
+			// Adopt anyway: an acknowledgement that timed out after the chat
+			// committed would otherwise leave it owning a turn no job can end. If
+			// the chat never took it, the turn's terminal is simply declined.
+			m.opts.Logf("provider-started turn was not handed to the chat", map[string]any{
+				"chatId": chatID, "jobId": jobID, "error": redactSensitiveText(err.Error()),
+			})
+		}
+	}
 	job := &Job{
-		ID:          "harness-turn-" + strconv.FormatInt(now.UnixNano(), 10),
+		ID:          jobID,
 		Kind:        "app-chat",
 		Title:       "Continuing on its own",
 		Status:      "running",
@@ -339,6 +371,9 @@ func (m *Manager) adoptHarnessTurn(bridge *Bridge, tabID, chatID, sessionID, pro
 	}
 	m.jobs[job.ID] = job
 	m.mu.Unlock()
+	if lane != nil {
+		m.bindProviderLaneJob(lane, job.ID, operationID)
+	}
 	bridge.setJobForSession(sessionID, job)
 	// A turn nobody asked for resumes the chat's existing obligation; it never
 	// opens a new one, because the user asked for nothing here.
@@ -361,6 +396,9 @@ func (m *Manager) endAdoptedHarnessTurn(bridge *Bridge, sessionID string) {
 		return
 	}
 	job.Status = "done"
+	if job.cancelled {
+		job.StopReason = "cancelled"
+	}
 	m.mu.Lock()
 	m.rememberFinishedJobLocked(job.ID)
 	delete(m.jobs, job.ID)

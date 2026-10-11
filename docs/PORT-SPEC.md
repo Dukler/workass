@@ -639,6 +639,13 @@ shell, NOT the daemon.
    live steer and user Stop remain direct harness operations and are never
    replayed after a daemon restart.
 
+   A provider-started turn (a harness waking itself on a background-task
+   notification, a scheduled wake, or a peer message) is the same live native
+   session continuing. It is not a Workass delivery. The chat owns it when idle
+   and declines it otherwise, and it never closes the session (user law
+   2026-10-11; PROVIDER-LANE-ARCHITECTURE §5.3). Workass itself still never
+   starts a turn when ordinary background work settles.
+
    Provider-native compaction stays inside the same native thread. Workass
    retains the full visible ledger and records only typed lane-private coverage
    and checkpoint metadata; it never overwrites visible history with a provider
