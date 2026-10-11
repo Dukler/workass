@@ -117,6 +117,9 @@ type Bridge struct {
 	sessions        map[string]struct{}
 	seededSessions  map[string]struct{}
 	jobsBySession   map[string]*Job
+	// endingJobs holds a job released from its session whose end event is not
+	// yet published, so a provider-started turn waits for it (harness_turn.go).
+	endingJobs map[string]*Job
 	loadingSessions map[string]uint64
 	promptMu        sync.Mutex
 	writeMu         sync.Mutex
@@ -1533,6 +1536,31 @@ func (b *Bridge) setJobForSession(sessionID string, job *Job) {
 			b.manager.bridgeChanged(b, "active")
 		}
 	}
+}
+
+// markJobEnding records that job is ending on sessionID until its end event
+// is published; endJobPublished clears the mark.
+func (b *Bridge) markJobEnding(sessionID string, job *Job) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.endingJobs == nil {
+		b.endingJobs = map[string]*Job{}
+	}
+	b.endingJobs[sessionID] = job
+}
+
+func (b *Bridge) endJobPublished(sessionID string, job *Job) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.endingJobs[sessionID] == job {
+		delete(b.endingJobs, sessionID)
+	}
+}
+
+func (b *Bridge) jobEnding(sessionID string) *Job {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.endingJobs[sessionID]
 }
 
 func (b *Bridge) clearJobForSession(sessionID string, job *Job) {

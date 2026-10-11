@@ -1519,9 +1519,11 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 				})
 			}
 		}
+		activeBridge.markJobEnding(job.SessionID, job)
 		activeBridge.clearJobForSession(job.SessionID, job)
 		// The provider harness's session/prompt result is the terminal clock.
 		m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})
+		activeBridge.endJobPublished(job.SessionID, job)
 		m.notifyJobEnd(job.TabID, job.ChatID)
 		if job.Status == "done" {
 			m.maybeCompactAfterTurn(context.Background(), activeBridge, job)

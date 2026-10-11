@@ -435,7 +435,10 @@ var harnessAdoptionWait = 2 * time.Second
 func (m *Manager) awaitHumanJobRelease(bridge *Bridge, sessionID string, limit time.Duration) {
 	deadline := time.Now().Add(limit)
 	for {
-		if job := bridge.jobForSession(sessionID); job == nil || job.harnessTurn {
+		// The end path releases the session before it publishes the human
+		// turn's end; adopting in that gap would reach the chat while its
+		// foreground is still the human turn, and the chat would decline it.
+		if job := bridge.jobForSession(sessionID); (job == nil || job.harnessTurn) && bridge.jobEnding(sessionID) == nil {
 			return
 		}
 		if time.Now().After(deadline) {

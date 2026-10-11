@@ -3641,14 +3641,16 @@ func (s *fakeACP) handlePrompt(id json.RawMessage, params map[string]any) {
 		return
 	}
 	if strings.Contains(fakePromptText(params["prompt"]), "[fake:claude-updates]") {
+		// The heartbeat precedes the lineage update: an unowned lineage update
+		// closes the bridge asynchronously and would race a later heartbeat.
+		s.notify(sessionID, map[string]any{
+			"sessionUpdate": "_workass_claude_turn_heartbeat",
+			"elapsedMs":     float64(2000), "outputTokens": float64(345), "phase": "thinking",
+		})
 		s.notify(sessionID, map[string]any{
 			"sessionUpdate":             "_workass_claude_provider_session",
 			"previousProviderSessionId": sessionID, "providerSessionId": sessionID + "-forked-1",
 			"lineageGeneration": float64(2), "lineageProof": "fixture-provider-attestation",
-		})
-		s.notify(sessionID, map[string]any{
-			"sessionUpdate": "_workass_claude_turn_heartbeat",
-			"elapsedMs":     float64(2000), "outputTokens": float64(345), "phase": "thinking",
 		})
 		s.notify(sessionID, map[string]any{
 			"sessionUpdate": "agent_message_chunk",
