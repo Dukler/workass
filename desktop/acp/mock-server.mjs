@@ -511,6 +511,8 @@ async function handleRequest(message) {
     return;
   }
   if (method === 'session/new') {
+    const newSessionDelayMs = Math.max(0, Number(process.env.WORKASS_MOCK_ACP_NEW_SESSION_DELAY_MS || 0));
+    if (newSessionDelayMs) await new Promise((resolve) => setTimeout(resolve, newSessionDelayMs));
     const session = {
       id: `mock-session-${process.pid}-${++sessionSeq}`,
       cwd: params.cwd || process.cwd(),
