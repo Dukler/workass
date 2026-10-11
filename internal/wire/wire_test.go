@@ -858,6 +858,12 @@ func dialWS(t *testing.T, serverURL, key string) *testWSClient {
 
 func dialWSPath(t *testing.T, serverURL, path, key string) *testWSClient {
 	t.Helper()
+	return dialWSPathWithHeaders(t, serverURL, path, key, "")
+}
+
+// dialWSPathWithHeaders adds raw "Name: value\r\n" header lines to the handshake.
+func dialWSPathWithHeaders(t *testing.T, serverURL, path, key, extraHeaders string) *testWSClient {
+	t.Helper()
 	addr := strings.TrimPrefix(serverURL, "http://")
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -866,7 +872,7 @@ func dialWSPath(t *testing.T, serverURL, path, key string) *testWSClient {
 	if path == "" {
 		path = "/"
 	}
-	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", path, addr, key)
+	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n%s\r\n", path, addr, key, extraHeaders)
 	if _, err := io.WriteString(conn, req); err != nil {
 		_ = conn.Close()
 		t.Fatalf("write handshake: %v", err)

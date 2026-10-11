@@ -806,3 +806,38 @@ func formatMessage(format string, args ...any) string {
 	}
 	return strings.TrimSpace(fmt.Sprintf(format, args...))
 }
+
+// Any page a local browser shows can open a WebSocket to localhost. Loopback
+// trust must not pair it silently: a foreign Origin waits for approval like a
+// LAN device, while the daemon's own pages and the shell's view server (any
+// loopback port) and Origin-less native clients still auto-pair.
+func TestLocalhostAutoApproveRequiresLoopbackOrigin(t *testing.T) {
+	manager, _, _ := testLeaseManager(t)
+	hub := NewHub(Options{Lease: manager, TrustLocalhost: true})
+	hub.Register("state:get", func(args []any) (any, error) {
+		return map[string]any{"ok": true}, nil
+	})
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+
+	for _, origin := range []string{"https://attacker.example", "http://127.0.0.1.attacker.example", "null", "file://"} {
+		client := dialWSPathWithHeaders(t, server.URL, "/?deviceName=page", "Zm9yZWlnbi1vcmlnaW4=", "Origin: "+origin+"\r\n")
+		access := readEvent(t, client)
+		if access.Channel != "lan:access-state" || access.Payload["state"] != "waiting" || access.Payload["deviceToken"] != nil {
+			t.Fatalf("origin %q was paired by loopback trust instead of waiting for approval: %+v", origin, access.Payload)
+		}
+		_ = client.conn.Close()
+	}
+	for _, origin := range []string{"", "https://127.0.0.1:8788", "http://127.0.0.1:8798", "https://localhost:28784", "http://[::1]:9000"} {
+		headers := ""
+		if origin != "" {
+			headers = "Origin: " + origin + "\r\n"
+		}
+		client := dialWSPathWithHeaders(t, server.URL, "/?deviceName=local", "bG9jYWwtb3JpZ2lu", headers)
+		access := readEvent(t, client)
+		if access.Payload["state"] != "approved" {
+			t.Fatalf("local origin %q lost loopback trust: %+v", origin, access.Payload)
+		}
+		_ = client.conn.Close()
+	}
+}
