@@ -135,3 +135,24 @@ func TestAttachedImageAndContextSurviveNativeSteeringForEveryFrontierProvider(t 
 		})
 	}
 }
+
+// 2026-10-11 QA: only the MIME label was checked; garbage and plain text went
+// to the provider as image blocks.
+func TestAttachedImageBytesMustBeARealRaster(t *testing.T) {
+	t.Parallel()
+	bridge := newBridge("images", Options{}, nil)
+	bridge.imageSupport = true
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII="
+	for name, data := range map[string]string{
+		"invalid base64": "!!!notbase64!!!",
+		"text as png":    "dGhpcyBpcyBwbGFpbiB0ZXh0",
+	} {
+		if _, err := bridge.promptImageBlocks([]any{map[string]any{"mimeType": "image/png", "data": data}}); err == nil {
+			t.Fatalf("%s was accepted as an image block", name)
+		}
+	}
+	blocks, err := bridge.promptImageBlocks([]any{map[string]any{"mimeType": "image/jpeg", "data": png}})
+	if err != nil || len(blocks) != 1 || mapFromAny(blocks[0])["mimeType"] != "image/png" {
+		t.Fatalf("a mislabelled PNG did not take its true type: %#v %v", blocks, err)
+	}
+}
