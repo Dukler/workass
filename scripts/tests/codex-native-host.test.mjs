@@ -1111,3 +1111,40 @@ test('legacy compaction without a turn id cannot claim diagnostic turn attributi
   peer.send({ jsonrpc: '2.0', id: 905, method: 'session/resume', params: { sessionId, cwd: repoRoot, mcpServers: [] } });
   assert.equal((await peer.waitFor(m => m.id === 905)).error, undefined);
  });
+
+// Stop before turn/start answers settles the prompt as cancelled at once. The
+// native turn that starts anyway must be interrupted, and must never become
+// the session's active turn in place of the next prompt.
+test('native Codex Stop before turn/start replies interrupts the late native turn', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'workass-codex-late-start-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const trace = path.join(temp, 'rpc.jsonl');
+  const peer = startHost({ WORKASS_CODEX_FIXTURE_RPC_TRACE: trace, WORKASS_CODEX_FIXTURE_START_DELAY_MS: '300' });
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((m) => m.id === 1);
+  peer.send({ id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((m) => m.id === 2)).result.sessionId;
+  peer.send({ id: 3, method: 'session/prompt', params: {
+    sessionId, clientUserMessageId: 'cancel-before-start', prompt: [{ type: 'text', text: 'Stop me before you start.' }],
+  } });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  peer.send({ method: 'session/cancel', params: { sessionId } });
+  assert.equal((await peer.waitFor((m) => m.id === 3)).result.stopReason, 'cancelled');
+
+  const deadline = Date.now() + 3000;
+  let calls = [];
+  while (Date.now() < deadline) {
+    calls = (await readFile(trace, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(JSON.parse);
+    if (calls.some((c) => c.method === 'turn/interrupt')) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const interrupts = calls.filter((c) => c.method === 'turn/interrupt');
+  assert.equal(interrupts.length, 1, `the late native turn was never interrupted: ${JSON.stringify(calls.map((c) => c.method))}`);
+  assert.equal(interrupts[0].turnId, 'fixture-turn-1');
+
+  peer.send({ id: 4, method: 'session/prompt', params: {
+    sessionId, clientUserMessageId: 'after-cancel', prompt: [{ type: 'text', text: 'A fresh request.' }],
+  } });
+  assert.equal((await peer.waitFor((m) => m.id === 4, 5000)).result.stopReason, 'end_turn');
+});

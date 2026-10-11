@@ -548,6 +548,7 @@ class CodexSession {
     if (!serviceTier) throw new Error('The selected Codex model does not advertise Fast mode');
     const input = codexInput(blocks);
     const promise = this.beginPrompt(clientUserMessageId);
+    const owner = this.activePrompt;
     this.emitInputDiagnostic(input, serviceTier);
     const diagnosticOwner = this.diagnosticPrompt;
     void app.request('turn/start', {
@@ -564,12 +565,25 @@ class CodexSession {
       if (this.diagnosticPrompt === diagnosticOwner) this.admitDiagnosticTurn(response?.turn?.id);
     }).then((response) => {
       const turnId = String(response?.turn?.id || '');
+      if (this.activePrompt !== owner) {
+        // Stop arrived before turn/start answered and already settled this
+        // prompt as cancelled. The native turn started anyway: interrupt it,
+        // and never let it become the session's turn — a later prompt may own
+        // the wrapper by now.
+        if (turnId) {
+          void app.request('turn/interrupt', { threadId: this.threadId, turnId })
+            .catch((error) => diagnostic('Codex late-start interrupt failed', error));
+        }
+        return;
+      }
       if (!turnId) throw new Error('Codex turn/start returned no turn id');
       this.setActiveTurn(turnId);
       this.turnStatus = response.turn.status || 'inProgress';
       const early = this.completedTurns.get(turnId);
       if (early) { this.completedTurns.delete(turnId); this.complete(early); }
-    }).catch((error) => this.failPrompt(error));
+    }).catch((error) => {
+      if (this.activePrompt === owner) this.failPrompt(error);
+    });
     return promise;
   }
 

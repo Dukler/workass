@@ -163,6 +163,9 @@ async function runTurn(id, params) {
     notify('error', { threadId: params.threadId, turnId: 'wrong-early-turn', willRetry: true, error: { codexErrorInfo: 'unauthorized' } });
     notify('thread/tokenUsage/updated', { threadId: params.threadId, turnId, tokenUsage: diagnosticUsage });
   }
+  // A slow turn/start reply: Stop can arrive before the native turn id does.
+  const startDelay = Number(process.env.WORKASS_CODEX_FIXTURE_START_DELAY_MS || 0);
+  if (startDelay > 0) await new Promise((resolve) => setTimeout(resolve, startDelay));
   respond(id, { turn: { id: turnId, status: 'inProgress', items: [] } });
   if (diagnosticScenario && turnSequence > 1) {
     const stale = `fixture-turn-${turnSequence - 1}`;
@@ -395,6 +398,7 @@ async function handle(message) {
   if (process.env.WORKASS_CODEX_FIXTURE_RPC_TRACE) {
     appendFileSync(process.env.WORKASS_CODEX_FIXTURE_RPC_TRACE, `${JSON.stringify({
       method, ...(params.threadId ? { exactThread: params.threadId === fixtureThreadId } : {}),
+      ...(method === 'turn/interrupt' ? { turnId: params.turnId } : {}),
       ...(process.env.WORKASS_CODEX_FIXTURE_LARGE_RESUME === '1' && method === 'turn/start' ? {
         inputBytes: Buffer.byteLength(JSON.stringify(params.input)),
         inputDigest: createHash('sha256').update(JSON.stringify(params.input)).digest('hex'),
