@@ -3623,6 +3623,20 @@ func (s *fakeACP) handlePrompt(id json.RawMessage, params map[string]any) {
 		s.respond(id, map[string]any{"stopReason": "end_turn"})
 		return
 	}
+	if strings.Contains(fakePromptText(params["prompt"]), "[fake:harness-after]") {
+		// The real host's order: the human prompt's reply, then — with no gap —
+		// a turn the harness starts on its own (a background task finished).
+		s.notify(sessionID, map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "human answer"}})
+		s.respond(id, map[string]any{"stopReason": "end_turn"})
+		s.notify(sessionID, map[string]any{"sessionUpdate": "_workass_claude_turn", "phase": "started", "promptId": "harness-after-1", "humanAuthored": false})
+		s.notify(sessionID, map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "harness answer"}})
+		s.notify(sessionID, map[string]any{
+			"sessionUpdate": "_workass_claude_turn", "phase": "ended", "promptId": "harness-after-1",
+			"terminalReason": "completed", "stopReason": "end_turn", "harnessEvidence": true,
+			"backgroundTasks": []any{}, "sessionCrons": []any{},
+		})
+		return
+	}
 	if strings.Contains(fakePromptText(params["prompt"]), "[fake:claude-updates]") {
 		s.notify(sessionID, map[string]any{
 			"sessionUpdate":             "_workass_claude_provider_session",
