@@ -136,7 +136,24 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(call.Name, "workass_browser_") {
 		dispatcher.kind = browserToolKind
 	}
-	value, err := dispatcher.callTool(r, call, owner, chatID, tabID)
+	var value any
+	if child {
+		// A delegated agent works for the chat that spawned it, as a Claude Code
+		// subagent works inside its parent's session. Its own capability was
+		// authenticated above for exactly this subagent; the call then runs under
+		// a short-lived owner bound to that parent. Before, every call carried the
+		// child's own pseudo-chat and failed "durable chat actor does not exist".
+		parentChatID, parentTabID, found := h.manager.SubagentParent(strings.TrimPrefix(chatID, subagentTabPrefix))
+		if !found {
+			fail(409, "this subagent's parent chat is no longer available")
+			return
+		}
+		value, err = h.manager.WithActorOwner(parentChatID, parentTabID, func(parentOwner string) (any, error) {
+			return dispatcher.callTool(r, call, parentOwner, parentChatID, parentTabID)
+		})
+	} else {
+		value, err = dispatcher.callTool(r, call, owner, chatID, tabID)
+	}
 	if err != nil {
 		fail(500, err.Error())
 		return
@@ -216,11 +233,16 @@ func workassToolMutates(kind toolKind, name string) bool {
 	}
 }
 
+// agentToolsForChild is the delegated agent's catalog: every chat-control
+// tool, acting for its parent chat. Like Claude Code subagents it cannot
+// delegate further (no subagent orchestration), and questions go to the
+// parent that owns the conversation with the user.
 func agentToolsForChild() []map[string]any {
 	tools := agentMCPTools()
-	filtered := make([]map[string]any, 0, len(tools)-1)
+	filtered := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
-		if tool["name"] == "workass_ask_user_question" {
+		name, _ := tool["name"].(string)
+		if name == "workass_ask_user_question" || strings.Contains(name, "subagent") {
 			continue
 		}
 		filtered = append(filtered, tool)

@@ -59,7 +59,10 @@ using ordinary image Markdown to deliver it to the user.
 The CLI makes one ordinary JSON request to `/workass/tools` over pinned HTTPS.
 It connects directly to loopback, does not use DNS or HTTP proxies, and refuses
 redirects. Authentication resolves the exact live session and durable chat
-actor. Delegated agents receive the control catalog without browser actions.
+actor. Delegated agents receive the control catalog without browser actions,
+questions, or subagent orchestration, and every call acts for the exact chat
+that spawned them (as a Claude Code subagent works inside its parent's
+session and cannot delegate further).
 The context file contains a private capability; never print it or paste it into
 a prompt. Its path stays stable for that process; its exact owner binding is
 refreshed before use, and a missing context file is recreated. A new attachment
