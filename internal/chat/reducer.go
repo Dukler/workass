@@ -1188,6 +1188,27 @@ func reduceReplaceStagedQueue(state *State, command ReplaceStagedQueue) error {
 		return errors.New("staged queue revision is stale")
 	}
 	entries := cloneStagedQueue(command.Entries)
+	// The visible queue also lists rows already promoted into the provider FIFO
+	// (Queue). Echoed back, they are never re-staged: that would deliver them a
+	// second time. A promoted queue row the replacement omits is one the user
+	// removed before it ran; without this the delete was a silent no-op and the
+	// row came back on the next refresh (2026-10-11). Only rows that carry a
+	// QueueID are removable: their promotion advanced AgentQueueRevision, so a
+	// replacement that never saw them fails the revision fence above.
+	promoted := make(map[string]struct{}, len(state.Queue))
+	for _, queued := range state.Queue {
+		promoted[queuedRowID(queued)] = struct{}{}
+	}
+	kept := make(map[string]struct{}, len(state.Queue))
+	staged := entries[:0]
+	for _, entry := range entries {
+		if _, ok := promoted[strings.TrimSpace(entry.ID)]; ok {
+			kept[strings.TrimSpace(entry.ID)] = struct{}{}
+			continue
+		}
+		staged = append(staged, entry)
+	}
+	entries = staged
 	if err := normalizeStagedQueue(entries); err != nil {
 		return err
 	}
@@ -1211,10 +1232,26 @@ func reduceReplaceStagedQueue(state *State, command ReplaceStagedQueue) error {
 			entries[index].Permission = previous.Permission
 		}
 	}
+	remaining := make([]QueueEntry, 0, len(state.Queue))
+	for _, queued := range state.Queue {
+		if _, keep := kept[queuedRowID(queued)]; keep || strings.TrimSpace(queued.Presentation.QueueID) == "" {
+			remaining = append(remaining, queued)
+		}
+	}
+	state.Queue = remaining
 	state.StagedQueue = entries
 	state.Presentation.AgentQueueRevision++
 	state.QueueMutationReceipts[operationID] = QueueMutationReceipt{Digest: digest, Revision: state.Presentation.AgentQueueRevision}
 	return nil
+}
+
+// queuedRowID is the public queue-row id of a provider FIFO entry, the same id
+// the session projection gives it.
+func queuedRowID(entry QueueEntry) string {
+	if id := strings.TrimSpace(entry.Presentation.QueueID); id != "" {
+		return id
+	}
+	return string(entry.OperationID)
 }
 
 func reduceUpdateRuntimeControls(state *State, command UpdateRuntimeControls) error {
