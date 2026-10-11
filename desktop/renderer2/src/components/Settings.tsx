@@ -379,12 +379,11 @@ function EnginesPanel() {
   const app = useApp();
   useProc();
   const fleet = fleetLabel(app.processes);
-  const spare = app.daemonConfig?.chat?.spareSessions;
   return (
     <section className="stgs-panel">
       <div className="phead">
         <h2>Engines</h2>
-        <p>Ciclo de vida de los motores ACP: hibernación de chats inactivos, reciclado por memoria y una reserva templada para arranques instantáneos.</p>
+        <p>Ciclo de vida de los motores ACP: hibernación de chats inactivos, y reciclado por memoria. Las sesiones arrancan bajo demanda.</p>
       </div>
 
       <div className="gtitle">Flota</div>
@@ -403,7 +402,7 @@ function EnginesPanel() {
       <div className="group">
         <EngineDefault n="TTL de hibernación" d="Tiempo inactivo antes de que un chat suspenda su engine. Los prompts en vuelo se anclan." value="20" suf="min" />
         <EngineDefault n="Umbral de reciclado de RAM" d="Cuando un engine supera este RSS, se recicla en el próximo momento ocioso." value="4" suf="GB" />
-        <EngineDefault n="Reserva templada" d="Engines pre-calentados listos para el próximo chat sin costo de arranque frío." value={String(spare ?? 0)} suf={(spare ?? 0) === 1 ? 'engine' : 'engines'} />
+        <EngineDefault n="Reserva templada" d="Inactiva: cada chat abre su sesión en su propio directorio, así que un engine pre-calentado nunca se adopta." value="0" suf="engines" />
         <EngineDefault n="Intervalo de muestreo" d="Cada cuánto el reaper muestrea RSS y barre las sesiones inactivas." value="30" suf="s" />
       </div>
       <div className="ghint">Estos valores son flags del daemon (<code>--hibernate-ttl</code>, <code>--engine-max-rss-kb</code>, <code>--spare-sessions</code>, <code>--rss-sample-interval</code>). Ningún canal los edita todavía; se muestran para referencia.</div>

@@ -261,7 +261,7 @@ func main() {
 		RSSSampleInterval:       effectiveEngine.RSSSampleInterval,
 		EngineMaxAge:            effectiveEngine.MaxAge,
 		EngineMaxRSSKB:          effectiveEngine.MaxRSSKB,
-		SpareSessions:           effectiveEngine.SpareSessions,
+		SpareSessions:           daemonSpareSessions(effectiveEngine.SpareSessions, logger.Printf),
 		DeferProviderStartup:    true,
 		SpareTTL:                *spareTTL,
 		CompactionEnabled:       effectiveEngine.CompactionEnabled,
@@ -2004,4 +2004,16 @@ func emptyPublicJob() any {
 		"stopReason":       nil,
 		"crashInterrupted": false,
 	}
+}
+
+// daemonSpareSessions returns the spare-pool size the daemon hands the ACP
+// manager. Every daemon chat is actor-owned and opens its provider lane with
+// an explicit cwd, which a pre-warmed spare can never satisfy, so spares
+// would only burn memory. Like Claude Code, sessions start on demand; the
+// --spare-sessions flag and config key stay accepted but are inert.
+func daemonSpareSessions(configured int, logf func(string, ...any)) int {
+	if configured > 0 && logf != nil {
+		logf("[acp] spare-sessions=%d ignored: actor-owned chats start sessions on demand", configured)
+	}
+	return 0
 }
