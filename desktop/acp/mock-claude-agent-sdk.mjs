@@ -117,6 +117,19 @@ class FixtureQuery {
     // The harness's own request key: one uuid per prompt, carried on every hook
     // input until the next prompt.
     this.promptId = '';
+    // Faithful to Claude Code 2.1.x: every pushed message's fate is reported by
+    // its uuid (command_lifecycle queued -> started -> completed | cancelled),
+    // and a message pushed into an open turn is FOLDED into it unless it asks
+    // for priority "now". WORKASS_CLAUDE_FIXTURE_LEGACY_STEER=1 replays an older
+    // CLI: no lifecycle frames, and every pushed message closes the open turn.
+    this.lifecycle = process.env.WORKASS_CLAUDE_FIXTURE_LEGACY_STEER !== '1';
+    // Commands taken into the open turn; its result completes them. Folded
+    // commands report completed BEFORE the result (as Claude Code 2.1 does),
+    // the command that opened the turn after it.
+    this.turnCommands = [];
+    this.foldedCommands = [];
+    // Origin stamped on the open turn's result (a harness-started turn's).
+    this.openOrigin = null;
     if (process.env.WORKASS_CLAUDE_FIXTURE_FORK_ON_RESUME === '1' && options.resume) {
       // Faithful to the real CLI's fork-on-resume family: the resumed
       // conversation continues under a NEW session id whose transcript starts
@@ -140,10 +153,26 @@ class FixtureQuery {
     this.consume();
   }
 
-  emit(message) {
+  // A turn's result settles every command it took in: completed, or cancelled
+  // when the turn was interrupted or cut ({ settle: 'cancelled' }).
+  emit(message, { settle = 'completed' } = {}) {
+    const settling = message?.type === 'result' && this.lifecycle;
+    if (settling) for (const uuid of this.foldedCommands.splice(0)) this.commandLifecycle(uuid, settle);
     const waiter = this.waiters.shift();
     if (waiter) waiter({ value: message, done: false });
     else this.events.push(message);
+    if (settling) {
+      for (const uuid of this.turnCommands.splice(0)) this.commandLifecycle(uuid, settle);
+      this.openOrigin = null;
+    }
+  }
+
+  commandLifecycle(uuid, state) {
+    if (!this.lifecycle || !uuid) return;
+    this.emit({
+      type: 'command_lifecycle', command_uuid: uuid, state,
+      uuid: randomUUID(), session_id: this.sessionId,
+    });
   }
 
   async consume() {
@@ -154,6 +183,32 @@ class FixtureQuery {
       if (process.env.WORKASS_CLAUDE_FIXTURE_FORK_ON_RESUME === '1') {
         forkTranscriptDepths.set(this.sessionId, (forkTranscriptDepths.get(this.sessionId) || 0) + 1);
       }
+      const pushedText = message.message?.content?.find?.((block) => block.type === 'text')?.text || '';
+      this.commandLifecycle(message.uuid, 'queued');
+      if (this.lifecycle && this.openTurn && message.priority !== 'now' && message.priority !== 'later') {
+        // Claude Code 2.1.x: folded into the running turn at its next boundary.
+        // UserPromptSubmit fires again, the command starts, and the one result
+        // at the end of the turn answers both.
+        await this.fireHook('UserPromptSubmit', { prompt: pushedText });
+        this.commandLifecycle(message.uuid, 'started');
+        this.foldedCommands.push(message.uuid);
+        this.emit({
+          type: 'stream_event',
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text: `Fixture folded answer (${message.priority || 'default'}): ${pushedText}` } },
+          parent_tool_use_id: null, uuid: randomUUID(), session_id: this.sessionId,
+        });
+        if (pushedText.includes('keep running')) continue;
+        this.openTurn = false;
+        await this.endTurn(pushedText, this.openOrigin ? { origin: this.openOrigin } : {});
+        continue;
+      }
+      if (this.lifecycle && this.openTurn && message.priority === 'now') {
+        // Claude Code 2.1.x: "now" aborts the tools in flight and cuts the turn
+        // (terminal_reason aborted_tools); the cut commands are cancelled and the
+        // pushed message runs as the next turn.
+        this.openTurn = false;
+        this.emit(this.result('success', { stop_reason: 'tool_use', terminal_reason: 'aborted_tools' }), { settle: 'cancelled' });
+      }
       // Also faithful: a steer carries priority "now", which makes Claude Code
       // abort the live query on the spot. If the open turn has committed
       // nothing, the conversation ends on that pushed user message with no stop
@@ -161,7 +216,7 @@ class FixtureQuery {
       // with a FAILED result carrying its own diagnostic instead of the clean
       // boundary a steer expects, and its query returns (user report
       // 2026-07-27: steering fast killed the turn and ate the direction).
-      if (message.priority === 'now' && this.openTurn && !this.turnProducedContent) {
+      if (!this.lifecycle && message.priority === 'now' && this.openTurn && !this.turnProducedContent) {
         this.openTurn = false;
         this.emit({
           ...this.result('error_during_execution'),
@@ -179,7 +234,9 @@ class FixtureQuery {
         this.emit(this.result('success'));
       }
       this.turnProducedContent = false;
-      const text = message.message?.content?.find?.((block) => block.type === 'text')?.text || '';
+      const text = pushedText;
+      this.turnCommands = [message.uuid];
+      this.commandLifecycle(message.uuid, 'started');
       this.promptId = randomUUID();
       await this.fireHook('UserPromptSubmit', { prompt: text });
       this.emit({
@@ -547,6 +604,7 @@ class FixtureQuery {
       await this.endTurn(text);
       if (fixtureMarker(text, 'harness-turn') !== null) await this.harnessTurn();
       if (fixtureMarker(text, 'harness-turn-dies') !== null) await this.harnessTurn({ dies: true });
+      if (fixtureMarker(text, 'harness-open') !== null) await this.harnessTurn({ open: true });
       if (text.includes('[fixture:transport-closes-after-result]')) {
         this.transportReady = false;
       }
@@ -615,10 +673,10 @@ class FixtureQuery {
 
   // A turn nobody asked for: the harness wakes the session when background work
   // settles. This is the shape that produced the 76-minute false park.
-  async harnessTurn({ dies = false } = {}) {
+  async harnessTurn({ dies = false, open = false } = {}) {
     // A real wake arrives while the session is idle, after the host has
     // settled the previous result.
-    if (dies) await new Promise((resolve) => setTimeout(resolve, 50));
+    if (dies || open) await new Promise((resolve) => setTimeout(resolve, 50));
     this.emit({
       type: 'system', subtype: 'task_notification', session_id: this.sessionId,
       task_id: 'fixture-bg-0', uuid: randomUUID(),
@@ -633,6 +691,16 @@ class FixtureQuery {
       event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Fixture harness-born answer' } },
       parent_tool_use_id: null, uuid: randomUUID(), session_id: this.sessionId,
     });
+    // Still working when the user writes: what they send is folded into this
+    // turn, and its one result — stamped with this turn's origin — answers both.
+    if (open) {
+      this.openTurn = true;
+      this.turnProducedContent = true;
+      this.turnCommands = [];
+      this.foldedCommands = [];
+      this.openOrigin = { kind: 'task-notification' };
+      return;
+    }
     // The provider stream dies mid-turn: no Stop hook, no terminal result.
     if (dies) {
       this.close();
@@ -688,7 +756,7 @@ class FixtureQuery {
     if (ackDelay > 0) {
       return new Promise((resolve) => setTimeout(() => resolve({ still_queued: [] }), ackDelay));
     }
-    this.emit(this.result('error_during_execution'));
+    this.emit(this.result('error_during_execution'), { settle: 'cancelled' });
     return Promise.resolve({ still_queued: [] });
   }
 

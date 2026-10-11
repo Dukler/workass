@@ -25,10 +25,14 @@ type selfStartedFixture struct {
 	sessionID   string
 }
 
-func newSelfStartedFixture(t *testing.T, name string) *selfStartedFixture {
+func newSelfStartedFixture(t *testing.T, name string, mode ...string) *selfStartedFixture {
 	t.Helper()
 	f := &selfStartedFixture{t: t, tabID: name + "-tab", chatID: name + "-chat"}
-	f.manager, _ = newFakeManager(t, "claude-cold-effort-stable-resume", Options{
+	fakeMode := "claude-cold-effort-stable-resume"
+	if len(mode) > 0 {
+		fakeMode = mode[0]
+	}
+	f.manager, _ = newFakeManager(t, fakeMode, Options{
 		RSSSampleInterval: time.Hour, Provider: ProviderConfig{ID: "claude"},
 	})
 	t.Cleanup(func() { f.manager.Reset() })
@@ -219,4 +223,29 @@ func TestProviderStartedTurnRightAfterAHumanTurnGetsItsOwnRow(t *testing.T) {
 	if !providercontract.IsProviderTurnOperation(harness.OperationID) || !strings.Contains(harness.Text, "harness answer") {
 		t.Fatalf("provider-started turn did not get its own row: %#v", harness)
 	}
+}
+
+// 2026-10-11: a direction sent while a turn Claude Code started on its own is
+// running is a steer into that turn. The adopted job never dispatched input of
+// its own, so the steer gate refused it ("no response in progress").
+func TestSteerReachesAProviderStartedTurn(t *testing.T) {
+	t.Parallel()
+	f := newSelfStartedFixture(t, "steer-adopted", "claude-steer-stable-resume")
+	if f.start("native-1") == nil {
+		t.Fatal("turn not adopted")
+	}
+	waitForState(t, f.engine, "provider-started turn owns the foreground", func(state chatstate.State) bool {
+		return state.Foreground != nil && providercontract.IsProviderTurnOperation(state.Foreground.OperationID)
+	})
+	if err := f.engine.Apply(chatstate.Steer{OperationID: "steer-into-adopted", Text: "also check the logs", Presentation: providercontract.TurnPresentation{Origin: "human"}}); err != nil {
+		t.Fatalf("the chat refused a steer into its provider-started turn: %v", err)
+	}
+	if pending := f.engine.Snapshot().PendingSteer; pending == nil || pending.Turn.NativeID == "" {
+		t.Fatalf("steer did not target the provider-started turn: %#v", pending)
+	}
+	outcome := f.manager.Steer(f.sessionID, "also check the logs", nil, "steer-into-adopted")
+	if ok, _ := outcome["ok"].(bool); !ok {
+		t.Fatalf("steer into a provider-started turn was refused: %#v", outcome)
+	}
+	f.end("native-1", "completed")
 }

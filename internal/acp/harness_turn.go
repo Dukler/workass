@@ -413,6 +413,9 @@ func (m *Manager) adoptHarnessTurn(bridge *Bridge, tabID, chatID, sessionID, pro
 		ProviderID:  bridge.ProviderID(),
 		harnessTurn: true,
 	}
+	// The harness's own input is already running: a direction the user sends
+	// into this turn is a steer, which waits on exactly this boundary.
+	job.markInputDispatched()
 	job.touchActivity()
 	m.mu.Lock()
 	if m.resetting {
