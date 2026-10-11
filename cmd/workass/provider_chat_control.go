@@ -53,7 +53,7 @@ func (r *providerChatRuntime) CreateRendererChat(raw map[string]any) (map[string
 		}
 	}
 	presentation := chat.PresentationState{
-		TabID: tabID, Title: redactedSessionString(fieldString(raw, "title")),
+		TabID: tabID, Title: sanitizedChatTitle(fieldString(raw, "title")),
 		TitleLocked: boolFieldValue(raw, "titleLocked"), Group: optionalStringPointer(raw, "group"),
 		CWD:            stringPointerValueOrNil(fieldString(raw, "cwd")),
 		ProviderID:     providercontract.NormalizeID(fieldString(raw, "providerId")),
@@ -90,6 +90,10 @@ func (r *providerChatRuntime) CreateRendererChat(raw map[string]any) (map[string
 	}, nil
 }
 
+// maxStagedQueueRows bounds one chat's editable queue; every row is
+// persisted and re-projected on each change.
+const maxStagedQueueRows = 100
+
 func (r *providerChatRuntime) ReplaceStagedQueue(tabID, chatID string, operationID providercontract.OperationID, expectedRevision uint64, rawEntries []any) (map[string]any, error) {
 	actor, _, err := r.exactActor(tabID, chatID)
 	if err != nil {
@@ -98,6 +102,9 @@ func (r *providerChatRuntime) ReplaceStagedQueue(tabID, chatID string, operation
 	operationID = providercontract.NormalizeOperationID(string(operationID))
 	if operationID == "" {
 		return nil, errors.New("queue replacement requires a stable operation id")
+	}
+	if len(rawEntries) > maxStagedQueueRows {
+		return nil, fmt.Errorf("a chat queue holds at most %d messages", maxStagedQueueRows)
 	}
 	actor.mu.Lock()
 	defer actor.mu.Unlock()
@@ -148,7 +155,7 @@ func (r *providerChatRuntime) SavePresentation(tabID, chatID string, operationID
 	state := actor.engine.Snapshot()
 	presentation := state.Presentation.Clone()
 	presentation.PresentationRevision = expectedRevision
-	presentation.Title = redactedSessionString(fieldString(raw, "title"))
+	presentation.Title = sanitizedChatTitle(fieldString(raw, "title"))
 	presentation.TitleLocked = boolFieldValue(raw, "titleLocked")
 	presentation.Group = optionalStringPointer(raw, "group")
 	var draftIntent any
