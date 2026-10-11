@@ -355,9 +355,15 @@ func (m *Manager) adoptHarnessTurn(bridge *Bridge, tabID, chatID, sessionID, pro
 	if bridge == nil || strings.TrimSpace(chatID) == "" || strings.TrimSpace(sessionID) == "" {
 		return
 	}
+	// The host reports a turn as provider-started only when no human prompt is
+	// active, so a human job still bound here has already been answered and is
+	// finishing. Wait briefly for it to release the session: adopting nothing
+	// let this turn's output stream into the finished human turn's row
+	// (2026-10-11 QA: "Fixture answerFixture harness-born answer"). The new
+	// turn's output waits in the pipe meanwhile.
+	m.awaitHumanJobRelease(bridge, sessionID, harnessAdoptionWait)
 	// A race with a human turn loses to the human turn. That is the safe
-	// direction: the cost is one un-adopted turn, i.e. exactly today's
-	// behaviour, and never two jobs on one chat.
+	// direction: the cost is one un-adopted turn, and never two jobs on one chat.
 	if _, running := m.RunningJobForChat(tabID, chatID); running {
 		return
 	}
@@ -422,6 +428,21 @@ func (m *Manager) adoptHarnessTurn(bridge *Bridge, tabID, chatID, sessionID, pro
 	// A turn nobody asked for resumes the chat's existing obligation; it never
 	// opens a new one, because the user asked for nothing here.
 	m.emit("job:event", map[string]any{"type": "start", "job": job.Public()})
+}
+
+var harnessAdoptionWait = 2 * time.Second
+
+func (m *Manager) awaitHumanJobRelease(bridge *Bridge, sessionID string, limit time.Duration) {
+	deadline := time.Now().Add(limit)
+	for {
+		if job := bridge.jobForSession(sessionID); job == nil || job.harnessTurn {
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // endAdoptedHarnessTurn closes the job adopted for this session, if any.

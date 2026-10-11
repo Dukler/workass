@@ -15,13 +15,14 @@ import (
 // selfStartedFixture is an idle actor-owned Claude chat on a live session, the
 // state in which Claude Code starts turns by itself.
 type selfStartedFixture struct {
-	t         *testing.T
-	manager   *Manager
-	engine    *chatstate.Engine
-	bridge    *Bridge
-	tabID     string
-	chatID    string
-	sessionID string
+	t           *testing.T
+	manager     *Manager
+	engine      *chatstate.Engine
+	coordinator *chatstate.Coordinator
+	bridge      *Bridge
+	tabID       string
+	chatID      string
+	sessionID   string
 }
 
 func newSelfStartedFixture(t *testing.T, name string) *selfStartedFixture {
@@ -40,6 +41,7 @@ func newSelfStartedFixture(t *testing.T, name string) *selfStartedFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+	f.coordinator = coordinator
 	definition, err := f.manager.ProviderDefinition("claude")
 	if err != nil {
 		t.Fatal(err)
@@ -192,4 +194,29 @@ func TestProviderStartedTurnEndDoesNotRaceJobReads(t *testing.T) {
 	waitForState(t, f.engine, "provider turn settled", func(state chatstate.State) bool {
 		return state.Foreground == nil && len(state.Ledger) == 3
 	})
+}
+
+// 2026-10-11 QA: a turn the harness starts right after a human prompt's reply
+// found the human job still finishing, was not adopted, and its output was
+// appended to the human turn's row ("Fixture answerFixture harness-born
+// answer"). It must get its own row.
+func TestProviderStartedTurnRightAfterAHumanTurnGetsItsOwnRow(t *testing.T) {
+	t.Parallel()
+	f := newSelfStartedFixture(t, "back-to-back")
+	if err := f.engine.Apply(chatstate.Submit{OperationID: "human-2", Text: "[fake:harness-after] go", Presentation: providercontract.TurnPresentation{Origin: "human"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.coordinator.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state := waitForState(t, f.engine, "human turn and the provider-started turn settled", func(state chatstate.State) bool {
+		return state.Foreground == nil && len(state.Ledger) == 5
+	})
+	human, harness := state.Ledger[3], state.Ledger[4]
+	if strings.Contains(human.Text, "harness answer") || !strings.Contains(human.Text, "human answer") {
+		t.Fatalf("provider-started output leaked into the human turn's row: %#v", human)
+	}
+	if !providercontract.IsProviderTurnOperation(harness.OperationID) || !strings.Contains(harness.Text, "harness answer") {
+		t.Fatalf("provider-started turn did not get its own row: %#v", harness)
+	}
 }
