@@ -159,3 +159,35 @@ func TestWorkassNoticesAreNeverProviderContext(t *testing.T) {
 		t.Fatalf("the user's own earlier request was dropped from context: %#v", start.Seed.Messages)
 	}
 }
+
+// 2026-10-11 QA: every failed background action read only "background action
+// failed"; an agent could not tell a fan-out cap from a bad argument.
+func TestFailedBackgroundActionKeepsABoundedReason(t *testing.T) {
+	state, _ := NewState("chat")
+	laneID := testLane("chat", "codex")
+	state, _ = apply(t, state, InitializeChat{Presentation: PresentationState{TabID: "tab"}, OperationID: "create:test", Digest: "create-test"})
+	state, _ = apply(t, state, SelectLane{Identity: laneID, Owner: provider.AttachmentOwner{TabID: "tab"}})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID: laneID.ID, Thread: provider.ThreadRef{ProviderID: "codex", RootID: "thread", HeadID: "thread", Lineage: 1},
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
+	})
+	state, _ = apply(t, state, Submit{OperationID: "turn", Text: "coordinate", Presentation: provider.TurnPresentation{Origin: "human"}})
+	state, _ = apply(t, state, TurnAdmitted{OperationID: "turn", Accepted: true, Turn: provider.TurnRef{OperationID: "turn", NativeID: "native-turn"}})
+	state, _ = apply(t, state, RequestBackgroundAction{Action: BackgroundAction{
+		Kind: BackgroundSpawnAgent, OperationID: "spawn-op", TabID: "tab", ChatID: "chat",
+		Owner: ProviderActivityOwner{LaneID: laneID.ID, OperationID: "turn", TurnID: "native-turn", ConnectionGeneration: 1},
+		Spawn: &SpawnAgentAction{Prompt: "review"},
+	}})
+	reason := "subagent fan-out limit reached (8 running for this turn) " + strings.Repeat("x", 500)
+	state, _ = apply(t, state, BackgroundActionFailed{OperationID: "spawn-op", Kind: provider.ErrorTransientTransport, Reason: reason})
+	for _, entry := range state.Outbox {
+		if entry.Kind != EffectBackground || entry.OperationID != "spawn-op" {
+			continue
+		}
+		if entry.Status != OutboxFailed || !strings.HasPrefix(entry.FailureReason, "subagent fan-out limit reached") || len([]rune(entry.FailureReason)) > maxBackgroundFailureReason+1 {
+			t.Fatalf("failed background action lost or did not bound its reason: %#v", entry)
+		}
+		return
+	}
+	t.Fatal("background action outbox entry missing")
+}
