@@ -409,3 +409,28 @@ test('hostile: a provider-started turn whose stream dies still ends', async (t) 
   assert.equal(next.result.stopReason, 'end_turn');
   assert.deepEqual(peer.parseFailures, []);
 });
+
+// Stop targets the prompt running when it was asked. Here that prompt finishes
+// on its own while the interrupt acknowledgement is still in flight, and the
+// next queued prompt starts. The late acknowledgement must not cancel it.
+test('hostile: a late interrupt acknowledgement never cancels the next prompt', async (t) => {
+  const peer = startHost({ WORKASS_CLAUDE_FIXTURE_INTERRUPT_ACK_DELAY_MS: '400' });
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  const sessionId = await openDefaultSession(peer);
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:hold-ms=120] first' }],
+  } });
+  await peer.waitFor((message) => message.method === 'session/update'
+    && message.params?.update?.sessionUpdate === '_workass_claude_turn' && message.params.update.phase === 'started');
+  peer.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } });
+  await peer.waitFor((message) => message.id === 3);
+
+  peer.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:hold-ms=600] second' }],
+  } });
+  const second = await peer.waitFor((message) => message.id === 4);
+  assert.equal(second.error, undefined, JSON.stringify(second));
+  assert.equal(second.result.stopReason, 'end_turn', 'the late Stop acknowledgement cancelled the next prompt');
+  assert.deepEqual(peer.parseFailures, []);
+});
