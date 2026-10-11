@@ -51,8 +51,13 @@ type Manager struct {
 	path         string
 	devices      []Device
 	controllerID string
-	logf         func(format string, args ...any)
-	now          func() time.Time
+	// controllerTaken records that the current lease was taken (explicitly or
+	// by acting) rather than granted while free. Device admission and
+	// revocation must not be reachable through a lease a device took for
+	// itself (PORT-SPEC "Controller lease").
+	controllerTaken bool
+	logf            func(format string, args ...any)
+	now             func() time.Time
 }
 
 type stateFile struct {
@@ -266,6 +271,7 @@ func (m *Manager) EnsureController(device Device) bool {
 		return false
 	}
 	m.controllerID = device.ID
+	m.controllerTaken = false
 	return true
 }
 
@@ -278,7 +284,22 @@ func (m *Manager) TakeControl(device Device) bool {
 	defer m.mu.Unlock()
 	changed := m.controllerID != device.ID
 	m.controllerID = device.ID
+	if changed {
+		m.controllerTaken = true
+	}
 	return changed
+}
+
+// ControllerGranted reports that the device holds the controller lease and
+// received it while the lease was free, rather than taking it from another
+// device.
+func (m *Manager) ControllerGranted(deviceID string) bool {
+	if deviceID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.controllerID == deviceID && !m.controllerTaken
 }
 
 // ReleaseController clears the runtime lease only when it still belongs to
@@ -296,6 +317,7 @@ func (m *Manager) ReleaseController(deviceID string) bool {
 		return false
 	}
 	m.controllerID = ""
+	m.controllerTaken = false
 	return true
 }
 

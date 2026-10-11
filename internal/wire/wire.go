@@ -1428,19 +1428,19 @@ func (h *Hub) invokeForClient(c *client, channel string, args []any) (any, error
 		return h.handleDevices(), nil
 	}
 	if channel == "lan:access-decide" {
-		if !h.lease.IsController(device.ID) {
+		if !h.mayAdministerDevices(c, device) {
 			return nil, h.notControllerError(device)
 		}
 		return h.handleAccessDecide(args)
 	}
 	if channel == "lan:revoke" {
-		if !h.lease.IsController(device.ID) {
+		if !h.mayAdministerDevices(c, device) {
 			return nil, h.notControllerError(device)
 		}
 		return h.handleRevoke(args)
 	}
 	if _, admin := fleetAdminChannels[channel]; admin {
-		if !h.lease.IsController(device.ID) {
+		if !h.mayAdministerDevices(c, device) {
 			return nil, h.notControllerError(device)
 		}
 		return h.handleFleetAdmin(c, channel, args)
@@ -1817,6 +1817,18 @@ func (h *Hub) notControllerError(device lease.Device) error {
 		fields["controllerName"] = controller.Name
 	}
 	return structuredError("lan:not-controller", "controller lease required", fields)
+}
+
+// mayAdministerDevices guards admitting, revoking and fleet administration:
+// the real security boundary. Acting anywhere takes the controller lease, so
+// holding it is not enough on its own; the holder must have been granted it
+// while it was free, or be on this machine's loopback (the desktop itself).
+// Otherwise a LAN device could take the lease and let another device in.
+func (h *Hub) mayAdministerDevices(c *client, device lease.Device) bool {
+	if !h.lease.IsController(device.ID) {
+		return false
+	}
+	return h.lease.ControllerGranted(device.ID) || isLocalIP(c.ip)
 }
 
 func (h *Hub) ensureController(device lease.Device) bool {
