@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -207,5 +208,39 @@ func TestUnsupportedInputRejectionIsAFailedTurnNotAConnectionLoss(t *testing.T) 
 	row := state.Ledger[len(state.Ledger)-1]
 	if row.Interrupted || row.Terminal == nil || row.Terminal.Interrupted || !strings.Contains(row.Text, "does not support") {
 		t.Fatalf("unsupported input rejection row = %#v", row)
+	}
+}
+
+// 2026-10-11 QA chat-core B7 / lanes B-10: a failed start said only
+// "transient_transport."; the provider's reason lived in the daemon log.
+func TestFailedTurnAdmissionShowsTheProviderReason(t *testing.T) {
+	state, _ := NewState("chat")
+	lane := testLane("chat", "mock")
+	state, _ = apply(t, state, SelectLane{Identity: lane})
+	state, _ = apply(t, state, LaneOpened{
+		LaneID: lane.ID, Identity: lane, Thread: provider.ThreadRef{ProviderID: "mock", RootID: "t", HeadID: "t", Lineage: 1},
+		ConnectionGeneration: 1, Context: exactContext(provider.ContextImportUnsupported),
+	})
+	state, _ = apply(t, state, Submit{OperationID: "big", Text: "look", Presentation: provider.TurnPresentation{Origin: "human"}})
+	state, _ = apply(t, state, TurnAdmissionFailed{OperationID: "big", Kind: provider.ErrorTransientTransport, Reason: "too many attached images; the maximum is 6"})
+	row := state.Ledger[len(state.Ledger)-1]
+	if !strings.Contains(row.Text, "too many attached images") || strings.Contains(row.Text, "transient_transport") {
+		t.Fatalf("admission failure row = %q", row.Text)
+	}
+}
+
+func TestCoordinatorFailureReasonIsRedactedAndBounded(t *testing.T) {
+	coordinator := &Coordinator{}
+	if got := coordinator.failureReason(errors.New("token=abc")); got != "" {
+		t.Fatalf("reason without a redactor = %q, want none", got)
+	}
+	if err := coordinator.SetFailureReasonRedactor(func(text string) string { return strings.ReplaceAll(text, "abc", "[redacted]") }); err != nil {
+		t.Fatal(err)
+	}
+	if got := coordinator.failureReason(errors.New("token=abc")); got != "token=[redacted]" {
+		t.Fatalf("redacted reason = %q", got)
+	}
+	if got := coordinator.failureReason(errors.New(strings.Repeat("x", 5000))); len([]rune(got)) > maxBackgroundFailureReason+1 {
+		t.Fatalf("reason not bounded: %d runes", len([]rune(got)))
 	}
 }
