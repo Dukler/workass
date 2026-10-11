@@ -623,3 +623,42 @@ func externalControlTestPath(t *testing.T, name string) string {
 	t.Cleanup(func() { os.RemoveAll(root) })
 	return filepath.Join(root, name)
 }
+
+// 2026-10-11 QA B7: replaying the exact delete that committed returned
+// "chat was deleted"; a caller that lost the reply saw a failed delete.
+func TestReplayedChatDeleteReturnsItsReceipt(t *testing.T) {
+	root := repoRoot(t)
+	stateDir := filepath.Join(t.TempDir(), "state")
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir,
+		Provider: acp.ProviderConfig{
+			ID: "mock", Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")},
+			CWD: root, Enabled: true, Label: "Workass Mock ACP",
+		},
+		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	const tabID, chatID = "replay-delete-tab", "replay-delete-chat"
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "replay-delete-create",
+		"title": "Replay delete", "cwd": root, "providerId": "mock",
+	}); err != nil {
+		t.Fatalf("create actor: %v", err)
+	}
+	coordinator := newChatControlCoordinator(manager, nil, runtime)
+	params := func(operationID string) map[string]any {
+		return map[string]any{"tab_id": tabID, "chat_id": chatID, "operation_id": operationID, "force": true}
+	}
+	first, err := coordinator.delete(params("replay-delete-op"))
+	if err != nil || first["deleted"] != true {
+		t.Fatalf("first delete = %#v err=%v", first, err)
+	}
+	replay, err := coordinator.delete(params("replay-delete-op"))
+	if err != nil || replay["deleted"] != true || replay["chatId"] != chatID {
+		t.Fatalf("replayed delete = %#v err=%v, want the committed receipt", replay, err)
+	}
+	if _, err := coordinator.delete(params("another-delete-op")); err == nil {
+		t.Fatal("a different delete operation on a deleted chat succeeded")
+	}
+}

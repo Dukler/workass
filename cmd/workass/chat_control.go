@@ -458,6 +458,9 @@ func (c *chatControlCoordinator) focus(params map[string]any) (map[string]any, e
 }
 
 func (c *chatControlCoordinator) delete(params map[string]any) (map[string]any, error) {
+	if receipt, ok := c.committedDeleteReceipt(params); ok {
+		return receipt, nil
+	}
 	tabID, chatID, operationID, err := c.validateMutation(params, "delete")
 	if err != nil {
 		return nil, err
@@ -484,6 +487,34 @@ func (c *chatControlCoordinator) delete(params map[string]any) (map[string]any, 
 	}
 	c.refresh(tabID, chatID, false)
 	return map[string]any{"ok": true, "tabId": tabID, "chatId": chatID, "deleted": true}, nil
+}
+
+// committedDeleteReceipt answers a replay of the exact delete that already
+// committed with its receipt. Every other call on a deleted chat still fails,
+// but a caller that lost the first reply must not see a failure for a delete
+// that happened.
+func (c *chatControlCoordinator) committedDeleteReceipt(params map[string]any) (map[string]any, bool) {
+	if c == nil || c.providerChats == nil {
+		return nil, false
+	}
+	tabID, chatID, err := exactAgentTarget(params)
+	if err != nil {
+		return nil, false
+	}
+	operationID, err := requiredChatOperation(params, "delete")
+	if err != nil {
+		return nil, false
+	}
+	actor, err := c.providerChats.actor(chatID)
+	if err != nil {
+		return nil, false
+	}
+	state := actor.engine.Snapshot()
+	if !state.Deleted || state.DeletionOperationID != providercontract.NormalizeOperationID(string(operationID)) ||
+		strings.TrimSpace(state.Presentation.TabID) != tabID {
+		return nil, false
+	}
+	return map[string]any{"ok": true, "tabId": tabID, "chatId": chatID, "deleted": true}, true
 }
 
 func (c *chatControlCoordinator) send(params map[string]any) (map[string]any, error) {
