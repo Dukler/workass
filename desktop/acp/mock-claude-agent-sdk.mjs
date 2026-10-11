@@ -544,6 +544,7 @@ class FixtureQuery {
       }
       await this.endTurn(text);
       if (fixtureMarker(text, 'harness-turn') !== null) await this.harnessTurn();
+      if (fixtureMarker(text, 'harness-turn-dies') !== null) await this.harnessTurn({ dies: true });
       if (text.includes('[fixture:transport-closes-after-result]')) {
         this.transportReady = false;
       }
@@ -612,7 +613,10 @@ class FixtureQuery {
 
   // A turn nobody asked for: the harness wakes the session when background work
   // settles. This is the shape that produced the 76-minute false park.
-  async harnessTurn() {
+  async harnessTurn({ dies = false } = {}) {
+    // A real wake arrives while the session is idle, after the host has
+    // settled the previous result.
+    if (dies) await new Promise((resolve) => setTimeout(resolve, 50));
     this.emit({
       type: 'system', subtype: 'task_notification', session_id: this.sessionId,
       task_id: 'fixture-bg-0', uuid: randomUUID(),
@@ -627,6 +631,11 @@ class FixtureQuery {
       event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Fixture harness-born answer' } },
       parent_tool_use_id: null, uuid: randomUUID(), session_id: this.sessionId,
     });
+    // The provider stream dies mid-turn: no Stop hook, no terminal result.
+    if (dies) {
+      this.close();
+      return;
+    }
     await this.fireHook('Stop', {
       stop_hook_active: false,
       last_assistant_message: 'Fixture harness-born answer',

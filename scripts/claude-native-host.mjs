@@ -1094,14 +1094,24 @@ class ClaudeSession {
       }
       if (this.closed || generation !== this.generation) return;
       const error = new Error('Claude SDK stream closed before a terminal result');
+      this.endOrphanedHarnessTurn();
       this.settlePrompt(null, error);
       this.retireQuery(query, false);
     } catch (error) {
       if (this.closed || generation !== this.generation) return;
       diagnostic('Claude SDK stream failed', error);
+      this.endOrphanedHarnessTurn();
       this.settlePrompt(null, error);
       this.retireQuery(query, false);
     }
+  }
+
+  // A provider-started turn has no activePrompt for settlePrompt to fail. When
+  // its stream dies it still needs its own end, or the daemon's adopted turn
+  // runs forever and every later prompt queues behind it.
+  endOrphanedHarnessTurn() {
+    if (!this.harnessTurnActive || this.activePrompt) return;
+    this.emitTurnEnded({ terminal_reason: 'stream_closed', stop_reason: 'stream_closed' });
   }
 
   handleMessage(message) {

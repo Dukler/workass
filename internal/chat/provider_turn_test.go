@@ -245,3 +245,32 @@ func TestTerminalWithoutReceiptKeepsDeferredCandidateAndDeliversNextInputToIt(t 
 		t.Fatalf("next input must go to the same candidate lane: %#v", effects[0])
 	}
 }
+
+// Work an owned provider turn started keeps its origin after the turn ends:
+// its later lifecycle must settle, not be ignored as "declined" output.
+func TestBackgroundWorkOfASettledProviderTurnStillSettles(t *testing.T) {
+	f := newProviderTurnFixture(t)
+	operationID := f.start("harness-turn-1")
+	background := func(status string) provider.Event {
+		return provider.Event{Kind: provider.EventBackgroundWork, Background: &provider.BackgroundEvent{
+			WorkID: "work-1", TaskID: "task-1", Title: "waiter", Kind: "shell", Status: status,
+		}}
+	}
+	f.emit(operationID, "harness-turn-1", background("running"))
+	f.emit(operationID, "harness-turn-1", completed())
+	if f.state.Foreground != nil {
+		t.Fatalf("provider turn did not settle: %#v", f.state.Foreground)
+	}
+	next, err := reduceJournaledProviderEvent(f.state, ProviderEventReceived{ConnectionGeneration: 1, Event: f.event(operationID, "harness-turn-1", background("exited"))})
+	if err != nil {
+		t.Fatalf("background completion of a settled provider turn failed: %v", err)
+	}
+	if got := next.Background["work-1"].Event.Status; got != "exited" {
+		t.Fatalf("background completion was ignored after its provider turn ended: status=%q", got)
+	}
+	// Live output arriving after the turn ended is still not reopened.
+	next, err = reduceJournaledProviderEvent(next, ProviderEventReceived{ConnectionGeneration: 1, Event: f.event(operationID, "harness-turn-1", chunk("late"))})
+	if err != nil || next.Foreground != nil {
+		t.Fatalf("late live output of a settled provider turn: err=%v foreground=%#v", err, next.Foreground)
+	}
+}

@@ -3009,13 +3009,28 @@ func reduceProviderTurnStarted(state *State, event provider.Event) ([]Effect, er
 	return nil, nil
 }
 
-// providerTurnEventDeclined reports output of a provider-started turn that is
-// not this chat's foreground: declined at start, or arriving after it settled.
+// providerTurnEventDeclined reports provider-turn output this chat does not
+// own: everything from a turn it declined, and live-stream output (text,
+// media, thinking, terminal) arriving after an owned turn settled. Lifecycle
+// of work an owned turn started — tools, plans, permissions, background work —
+// keeps its origin after the foreground ends and reduces like any turn's.
 func providerTurnEventDeclined(state State, event provider.Event) bool {
-	if event.Kind == provider.EventProviderTurnStarted || !provider.IsProviderTurnOperation(event.Identity.OperationID) {
+	operationID := event.Identity.OperationID
+	if event.Kind == provider.EventProviderTurnStarted || !provider.IsProviderTurnOperation(operationID) {
 		return false
 	}
-	return state.Foreground == nil || state.Foreground.OperationID != event.Identity.OperationID
+	if state.Foreground != nil && state.Foreground.OperationID == operationID {
+		return false
+	}
+	if _, owned := state.Operations[operationID]; !owned {
+		return true
+	}
+	switch event.Kind {
+	case provider.EventAssistantChunk, provider.EventAssistantMedia, provider.EventThinkingUpdate,
+		provider.EventTurnTerminal, provider.EventInputConsumed:
+		return true
+	}
+	return false
 }
 
 // reduceUnreceiptedCandidateTerminal settles a turn that ended on a deferred
