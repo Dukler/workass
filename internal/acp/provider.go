@@ -1080,6 +1080,9 @@ func (e *providerDetectionStatusError) Error() string {
 
 func (m *Manager) DetectProviders(ctx context.Context, opts DetectOptions) map[string]any {
 	pass := m.runProviderDetectionPass(ctx, []string{opts.ProviderID}, true, providerDetectionExplicit)
+	if id := strings.TrimSpace(opts.ProviderID); id != "" && len(pass.results) == 0 {
+		return map[string]any{"ok": false, "error": fmt.Sprintf("provider %q is not configured", id), "detected": pass.detected, "results": pass.results, "providers": pass.providers}
+	}
 	return map[string]any{"ok": true, "detected": pass.detected, "results": pass.results, "providers": pass.providers}
 }
 
@@ -1215,7 +1218,10 @@ func (m *Manager) providerDetectionCandidates(intent providerDetectionIntent, pr
 		if !wantAll && !wants[id] {
 			continue
 		}
-		if !isAutoDetectableProviderID(id) {
+		// Sweeps probe only providers with a built-in detector; a provider the
+		// caller names explicitly (a configured custom one included) is probed
+		// with its own configured command.
+		if !isAutoDetectableProviderID(id) && (wantAll || intent != providerDetectionExplicit) {
 			continue
 		}
 		if runtime := m.providers[id]; runtime != nil {

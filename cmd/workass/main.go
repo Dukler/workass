@@ -1481,7 +1481,13 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		return manager.DetectProviders(context.Background(), parseDetectOptions(firstMapArg(args))), nil
 	})
 	hub.Register("app-chat:detect-acp", func(args []any) (any, error) {
-		return manager.DetectProviders(context.Background(), parseDetectOptions(firstMapArg(args))), nil
+		arg := firstMapArg(args)
+		// A wire client must never make the daemon launch an arbitrary
+		// executable; probe a configured provider by id instead.
+		if fieldString(arg, "command") != "" || arg["args"] != nil {
+			return nil, errors.New("detect-acp probes configured providers only; register the command as a provider and pass its id")
+		}
+		return manager.DetectProviders(context.Background(), parseDetectOptions(arg)), nil
 	})
 	hub.Register("providers:update", func(args []any) (any, error) {
 		arg := firstMapArg(args)
@@ -1575,11 +1581,20 @@ func firstMapArg(args []any) map[string]any {
 	return map[string]any{}
 }
 
+// stringArg reads a positional scalar argument. An object or array is not a
+// string: formatting one produced ids like "map[]".
 func stringArg(args []any, idx int) string {
 	if idx < 0 || idx >= len(args) {
 		return ""
 	}
-	return strings.TrimSpace(fmt.Sprint(args[idx]))
+	switch value := args[idx].(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case json.Number, float64, int, int64:
+		return strings.TrimSpace(fmt.Sprint(value))
+	default:
+		return ""
+	}
 }
 
 func fieldString(m map[string]any, key string) string {
