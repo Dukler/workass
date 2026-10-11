@@ -2335,14 +2335,14 @@ func TestLifecycleIdleReapFires(t *testing.T) {
 	t.Parallel()
 	manager, events := newFakeManager(t, "echo-prompt", Options{
 		HibernateTTL:           25 * time.Millisecond,
-		LifecycleCheckInterval: 10 * time.Millisecond,
+		LifecycleCheckInterval: time.Hour,
 		RSSSampleInterval:      time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
 	session := newFakeSession(t, manager, "idle-reap-tab")
 	job := startAppChatJob(t, manager, session.SessionID, "idle-reap-tab", "finish and idle")
 	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "done", 0, "end_turn")
-	_ = waitProcState(t, manager, StateHibernated, time.Second)
+	_ = sweepUntilProcState(t, manager, StateHibernated, time.Second)
 }
 
 // Regression: a control write aimed at a hibernated chat must not restart the
@@ -2355,7 +2355,7 @@ func TestHibernatedControlWriteDoesNotReviveBridgeWithoutSessionRestore(t *testi
 	manager, events := newFakeManager(t, "strict-sessions", Options{
 		Provider:               ProviderConfig{ID: "codex"},
 		HibernateTTL:           25 * time.Millisecond,
-		LifecycleCheckInterval: 10 * time.Millisecond,
+		LifecycleCheckInterval: time.Hour,
 		RSSSampleInterval:      time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
@@ -2376,7 +2376,7 @@ func TestHibernatedControlWriteDoesNotReviveBridgeWithoutSessionRestore(t *testi
 		t.Fatalf("start first strict turn: %v", err)
 	}
 	assertJobStatus(t, events.waitJobEnd(t, jobID(first), 2*time.Second), "done", 0, "end_turn")
-	_ = waitProcState(t, manager, StateHibernated, time.Second)
+	_ = sweepUntilProcState(t, manager, StateHibernated, time.Second)
 
 	if _, err := manager.SetModel(ctx, session.SessionID, "fake-model[high]"); err == nil || !strings.Contains(strings.ToLower(err.Error()), "hibernat") {
 		t.Fatalf("hibernated control write error = %v, want a hibernated bridge rejection", err)
@@ -2529,7 +2529,7 @@ func TestLifecycleWithoutExactResumeFailsClosedAfterHibernation(t *testing.T) {
 	t.Parallel()
 	manager, events := newFakeManager(t, "slow-prompt", Options{
 		HibernateTTL:           80 * time.Millisecond,
-		LifecycleCheckInterval: 10 * time.Millisecond,
+		LifecycleCheckInterval: time.Hour,
 		RSSSampleInterval:      time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
@@ -2545,7 +2545,7 @@ func TestLifecycleWithoutExactResumeFailsClosedAfterHibernation(t *testing.T) {
 	}
 	idle := waitProcState(t, manager, StateIdle, 500*time.Millisecond)
 	t.Logf("trace lifecycle idle lastLine=%q", idle["lastLine"])
-	hibernated := waitProcState(t, manager, StateHibernated, time.Second)
+	hibernated := sweepUntilProcState(t, manager, StateHibernated, time.Second)
 	t.Logf("trace lifecycle hibernated pid=%v", hibernated["pid"])
 
 	_, err := manager.NewSession(context.Background(), SessionOptions{
@@ -2824,6 +2824,26 @@ func startAppChatJob(t *testing.T, manager *Manager, sessionID, tabID, prompt st
 		t.Fatalf("job routing fields = %#v", job)
 	}
 	return job
+}
+
+// sweepUntilProcState drives the lifecycle reaper by hand. A ticking reaper
+// with a tiny TTL can also hibernate a fresh session before its first prompt,
+// which is correct behaviour but not what these tests exercise.
+func sweepUntilProcState(t *testing.T, manager *Manager, state EngineState, timeout time.Duration) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		manager.SweepLifecycle()
+		for _, proc := range manager.Processes() {
+			if asString(proc["state"]) == string(state) {
+				return proc
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process never reached %s: %#v", state, manager.Processes())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func waitProcState(t *testing.T, manager *Manager, state EngineState, timeout time.Duration) map[string]any {
@@ -4637,4 +4657,35 @@ func TestNativeCodexSubagentsReachDaemonToolEvents(t *testing.T) {
 		t.Fatalf("child terminal disturbed the parent: %#v", outcome)
 	}
 	assertJobStatus(t, events.waitJobEnd(t, jobID(started), 5*time.Second), "done", 0, "end_turn")
+}
+
+// A start checks liveness before it binds its job; the reaper can hibernate
+// the engine in between. The bind itself must refuse a hibernated session so
+// the turn never writes to a reaped engine ("ACP stdin closed").
+func TestStartJobBindRefusesSessionHibernatedAfterLivenessCheck(t *testing.T) {
+	t.Parallel()
+	manager, _ := newFakeManager(t, "echo-prompt", Options{LifecycleCheckInterval: time.Hour, RSSSampleInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	session := newFakeSession(t, manager, "bind-race-tab")
+	bridge := manager.bridgeForSession(session.SessionID, SessionOptions{SessionID: session.SessionID})
+	if bridge == nil {
+		t.Fatal("no bridge for session")
+	}
+	bridge.mu.Lock()
+	bridge.state = StateHibernated
+	bridge.mu.Unlock()
+	job := &Job{ID: "bind-race-job", Status: "running"}
+	if bridge.bindLiveJobForSession(session.SessionID, job) {
+		t.Fatal("job bound to a hibernated session")
+	}
+	if got := bridge.jobForSession(session.SessionID); got != nil {
+		t.Fatalf("hibernated session owns a job: %#v", got)
+	}
+	bridge.mu.Lock()
+	bridge.state = StateIdle
+	bridge.mu.Unlock()
+	if !bridge.bindLiveJobForSession(session.SessionID, job) || bridge.jobForSession(session.SessionID) != job {
+		t.Fatal("live session refused the job")
+	}
+	bridge.clearJobForSession(session.SessionID, job)
 }
