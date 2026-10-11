@@ -106,12 +106,16 @@ type harnessTurnStore struct {
 	mu      sync.Mutex
 	latest  map[string]*harnessTurnEvidence
 	started map[string]string
+	// ended remembers the last native turn that finished per session, so a
+	// replayed start for it cannot adopt a turn that will never end again.
+	ended map[string]string
 }
 
 func newHarnessTurnStore() *harnessTurnStore {
 	return &harnessTurnStore{
 		latest:  make(map[string]*harnessTurnEvidence),
 		started: make(map[string]string),
+		ended:   make(map[string]string),
 	}
 }
 
@@ -150,6 +154,7 @@ func (s *harnessTurnStore) forget(sessionID string) {
 	defer s.mu.Unlock()
 	delete(s.latest, sessionID)
 	delete(s.started, sessionID)
+	delete(s.ended, sessionID)
 }
 
 // markStarted records the prompt id of a harness-born turn and reports whether
@@ -164,8 +169,38 @@ func (s *harnessTurnStore) markStarted(sessionID, promptID string) bool {
 	if prior, ok := s.started[sessionID]; ok && prior == promptID {
 		return false
 	}
+	if promptID != "" && s.ended[sessionID] == promptID {
+		return false
+	}
 	s.started[sessionID] = promptID
 	return true
+}
+
+// staleEnd reports an end naming a native turn that already ended and is not
+// the turn running now.
+func (s *harnessTurnStore) staleEnd(sessionID, promptID string) bool {
+	sessionID, promptID = strings.TrimSpace(sessionID), strings.TrimSpace(promptID)
+	if sessionID == "" || promptID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ended[sessionID] == promptID && s.started[sessionID] != promptID
+}
+
+// markEnded closes the started record and remembers which native turn ended.
+func (s *harnessTurnStore) markEnded(sessionID, promptID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	started := s.started[sessionID]
+	delete(s.started, sessionID)
+	if ended := firstNonEmpty(strings.TrimSpace(promptID), started); ended != "" {
+		s.ended[sessionID] = ended
+	}
 }
 
 func (s *harnessTurnStore) clearStarted(sessionID string) {
@@ -280,6 +315,15 @@ func (m *Manager) observeHarnessTurn(bridge *Bridge, tabID, chatID, sessionID st
 		}
 		m.adoptHarnessTurn(bridge, tabID, chatID, sessionID, promptID)
 	case harnessTurnPhaseEnded:
+		// A replayed end for a turn that already finished must not end the one
+		// running now. (A steered turn legitimately ends under a fresh prompt id,
+		// so only an id already seen ending is refused.)
+		if m.harnessTurns.staleEnd(sessionID, update.PromptID) {
+			m.opts.Logf("provider-started turn end ignored as a replay", map[string]any{
+				"sessionId": sessionID, "promptId": update.PromptID,
+			})
+			return
+		}
 		prior := m.harnessTurns.get(sessionID)
 		evidence := update.Evidence
 		if evidence == nil {
@@ -288,8 +332,8 @@ func (m *Manager) observeHarnessTurn(bridge *Bridge, tabID, chatID, sessionID st
 		evidence.TabID, evidence.ChatID = tabID, chatID
 		evidence.Parked, evidence.ParkNote = m.harnessParkEvidence(tabID, chatID, evidence, prior)
 		m.harnessTurns.record(sessionID, evidence)
-		m.harnessTurns.clearStarted(sessionID)
-		m.endAdoptedHarnessTurn(bridge, sessionID)
+		m.harnessTurns.markEnded(sessionID, update.PromptID)
+		m.endAdoptedHarnessTurn(bridge, sessionID, evidence)
 	case harnessTurnPhaseFailed, harnessTurnPhaseAttention:
 		// Receipts only. A `failed` can be superseded by the host's transparent
 		// OAuth retry, and a mid-turn notification is normally resolved
@@ -387,27 +431,51 @@ func (m *Manager) adoptHarnessTurn(bridge *Bridge, tabID, chatID, sessionID, pro
 // prompt is active. An adopted job that never ends would park every later human
 // prompt behind ErrChatBusy on a phantom `working` record — the stuck-queue
 // incident rebuilt inside the fix for it.
-func (m *Manager) endAdoptedHarnessTurn(bridge *Bridge, sessionID string) {
+func (m *Manager) endAdoptedHarnessTurn(bridge *Bridge, sessionID string, evidence *harnessTurnEvidence) {
 	if bridge == nil {
 		return
 	}
 	job := bridge.jobForSession(sessionID)
-	if job == nil || !job.harnessTurn || job.Status != "running" {
+	if job == nil || !job.harnessTurn {
 		return
 	}
-	job.Status = "done"
-	if job.cancelled {
-		job.StopReason = "cancelled"
+	// Output already received is part of the turn; publish it before the end.
+	bridge.flushJobBuffers(job)
+	terminalReason, stopReason := "", ""
+	if evidence != nil {
+		terminalReason, stopReason = evidence.TerminalReason, evidence.StopReason
 	}
 	m.mu.Lock()
+	if job.Status != "running" {
+		m.mu.Unlock()
+		return
+	}
+	job.Status, job.StopReason, job.Error = harnessTerminalOutcome(terminalReason, stopReason, job.cancelled)
 	m.rememberFinishedJobLocked(job.ID)
 	delete(m.jobs, job.ID)
 	m.mu.Unlock()
-	bridge.flushJobBuffers(job)
 	m.classifyDispositionForJob(job)
 	m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})
 	bridge.clearJobForSession(sessionID, job)
 	m.notifyJobEnd(job.TabID, job.ChatID)
+}
+
+// harnessTerminalOutcome maps the harness's own terminal reason onto the job
+// terminal. A provider-started turn that failed must settle as failed (its open
+// tools fail with it), never as a success.
+func harnessTerminalOutcome(terminalReason, stopReason string, cancelled bool) (status, stop, errText string) {
+	terminalReason = strings.TrimSpace(terminalReason)
+	switch {
+	case cancelled, terminalReason == "aborted_streaming", terminalReason == "aborted_tools":
+		return "done", "cancelled", ""
+	}
+	switch terminalReason {
+	case "blocking_limit", "rapid_refill_breaker", "prompt_too_long", "image_error", "model_error", "api_error",
+		"malformed_tool_use_exhausted", "budget_exhausted", "structured_output_retry_exhausted", "turn_setup_failed",
+		"stream_closed":
+		return "failed", firstNonEmpty(strings.TrimSpace(stopReason), terminalReason), "The provider ended this turn: " + terminalReason
+	}
+	return "done", strings.TrimSpace(stopReason), ""
 }
 
 // abandonAdoptedHarnessTurn is the backstop for an engine that dies mid-turn.
@@ -417,12 +485,18 @@ func (m *Manager) abandonAdoptedHarnessTurn(bridge *Bridge, sessionID string) {
 		return
 	}
 	job := bridge.jobForSession(sessionID)
-	if job == nil || !job.harnessTurn || job.Status != "running" {
+	if job == nil || !job.harnessTurn {
+		return
+	}
+	// Partial output that reached the daemon survives the crash.
+	bridge.flushJobBuffers(job)
+	m.mu.Lock()
+	if job.Status != "running" {
+		m.mu.Unlock()
 		return
 	}
 	job.Status = "failed"
 	job.StopReason = "engine-crash"
-	m.mu.Lock()
 	m.rememberFinishedJobLocked(job.ID)
 	delete(m.jobs, job.ID)
 	m.mu.Unlock()

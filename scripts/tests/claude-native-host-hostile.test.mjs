@@ -377,3 +377,35 @@ test('hostile: stderr noise interleaved with lifecycle never corrupts or leaks i
   assert.ok(!wire.includes('sk-ant-oat01-STDERR-SECRET'));
   assert.equal(peer.messages.some((message) => message.params?.sessionId === 'stderr-fake'), false);
 });
+
+// A provider-started turn (task notification while idle) whose SDK stream dies
+// before a result has no human prompt to fail. Without its own end the
+// daemon's adopted turn ran forever and every later prompt queued behind it.
+test('hostile: a provider-started turn whose stream dies still ends', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  const sessionId = await openDefaultSession(peer);
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:harness-turn-dies] wait for the job' }],
+  } });
+  const done = await peer.waitFor((message) => message.id === 3);
+  assert.equal(done.error, undefined, JSON.stringify(done));
+  const started = await peer.waitFor((message) => message.method === 'session/update'
+    && message.params?.update?.sessionUpdate === '_workass_claude_turn'
+    && message.params.update.phase === 'started' && message.params.update.humanAuthored === false);
+  assert.ok(started);
+  const ended = await peer.waitFor((message) => message.method === 'session/update'
+    && message.params?.update?.sessionUpdate === '_workass_claude_turn'
+    && message.params.update.phase === 'ended' && message.params.update.terminalReason === 'stream_closed');
+  assert.ok(ended);
+
+  // The session is not wedged behind the dead turn: the next prompt completes.
+  peer.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: 'plain turn after the dead one' }],
+  } });
+  const next = await peer.waitFor((message) => message.id === 4);
+  assert.equal(next.error, undefined, JSON.stringify(next));
+  assert.equal(next.result.stopReason, 'end_turn');
+  assert.deepEqual(peer.parseFailures, []);
+});
