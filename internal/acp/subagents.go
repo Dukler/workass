@@ -104,6 +104,23 @@ func (m *Manager) ValidateAgentOwner(ownerKey, chatID, tabID string) bool {
 	return ok && boundChat == strings.TrimSpace(chatID) && boundTab == strings.TrimSpace(tabID)
 }
 
+// SubagentParent returns the exact chat that spawned a subagent. A delegated
+// agent's tools act for that chat, as a Claude Code subagent works inside its
+// parent's session.
+func (m *Manager) SubagentParent(subagentID string) (chatID, tabID string, ok bool) {
+	subagentID = strings.TrimSpace(subagentID)
+	if m == nil || subagentID == "" {
+		return "", "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	run := m.subagents[subagentID]
+	if run == nil || strings.TrimSpace(run.parentChatID) == "" || strings.TrimSpace(run.parentTabID) == "" {
+		return "", "", false
+	}
+	return run.parentChatID, run.parentTabID, true
+}
+
 // WithActorOwner executes one already-authorized durable chat effect through
 // the existing agent/background runtime without persisting or logging a bearer
 // capability. The actor's immutable chat/lane/operation owner is the authority;

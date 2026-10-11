@@ -1489,3 +1489,17 @@ func TestSubagentEventOnlyWaitCancellationDoesNotCancelChild(t *testing.T) {
 	manager.CancelSubagent(ownerKey, session.ChatID, session.TabID, run.ID)
 	waitForSubagentTerminal(t, manager, ownerKey, session, run.ID, 5*time.Second)
 }
+
+func TestSubagentParentNamesTheSpawningChatOnly(t *testing.T) {
+	manager := NewManager(Options{StateDir: t.TempDir()})
+	t.Cleanup(func() { manager.Reset() })
+	manager.mu.Lock()
+	manager.subagents["child"] = &SubagentRun{ID: "child", parentChatID: "parent-chat", parentTabID: "parent-tab"}
+	manager.mu.Unlock()
+	if chatID, tabID, ok := manager.SubagentParent("child"); !ok || chatID != "parent-chat" || tabID != "parent-tab" {
+		t.Fatalf("subagent parent = %q %q %v", chatID, tabID, ok)
+	}
+	if _, _, ok := manager.SubagentParent("unknown"); ok {
+		t.Fatal("an unknown subagent resolved a parent")
+	}
+}

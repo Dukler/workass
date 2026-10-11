@@ -332,3 +332,23 @@ func decodeQuestionToolResult(t *testing.T, value any) map[string]any {
 	}
 	return decoded
 }
+
+// 2026-10-11: a delegated agent's catalog listed 28 tools and every call
+// failed. Like a Claude Code subagent it now works for its parent chat with
+// the chat-control tools, and cannot delegate further.
+func TestChildCatalogKeepsChatControlAndDropsDelegation(t *testing.T) {
+	names := map[string]bool{}
+	for _, tool := range agentToolsForChild() {
+		names[tool["name"].(string)] = true
+	}
+	for _, want := range []string{"workass_list_chats", "workass_read_chat", "workass_send_chat_message", "workass_host_artifact", "workass_register_external_work"} {
+		if !names[want] {
+			t.Fatalf("child catalog lost %s", want)
+		}
+	}
+	for name := range names {
+		if strings.Contains(name, "subagent") || name == "workass_ask_user_question" || strings.HasPrefix(name, "workass_browser_") {
+			t.Fatalf("child catalog exposes %s", name)
+		}
+	}
+}
