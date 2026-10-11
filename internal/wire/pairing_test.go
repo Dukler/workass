@@ -841,3 +841,47 @@ func TestLocalhostAutoApproveRequiresLoopbackOrigin(t *testing.T) {
 		_ = client.conn.Close()
 	}
 }
+
+// PORT-SPEC "Controller lease": admitting or revoking a device must not be
+// reachable through a lease a device took for itself. Acting takes the lease,
+// so a LAN device that took it may act, but may not let devices in or out.
+func TestSelfTakenLeaseCannotAdministerDevices(t *testing.T) {
+	manager, _, _ := testLeaseManager(t)
+	hub := NewHub(Options{Lease: manager, TrustLocalhost: false})
+	desktop, _, err := manager.ApproveDevice("desktop", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	phone, _, err := manager.ApproveDevice("phone", "192.168.1.50")
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := &client{ip: "127.0.0.1"}
+	lan := &client{ip: "192.168.1.50"}
+
+	manager.EnsureController(desktop)
+	if !hub.mayAdministerDevices(local, desktop) {
+		t.Fatal("the desktop holding a granted lease lost device administration")
+	}
+	if !manager.TakeControl(phone) {
+		t.Fatal("phone could not take the lease")
+	}
+	if hub.mayAdministerDevices(lan, phone) {
+		t.Fatal("a LAN device administers devices through a lease it took for itself")
+	}
+	if hub.mayAdministerDevices(local, desktop) {
+		t.Fatal("a device that no longer holds the lease administers devices")
+	}
+	// Taking it back on the desktop itself restores administration: the human
+	// is at that screen.
+	manager.TakeControl(desktop)
+	if !hub.mayAdministerDevices(local, desktop) {
+		t.Fatal("the desktop on loopback lost administration after taking the lease back")
+	}
+	// A lease granted while free (the desktop gone) is not self-taken.
+	manager.ReleaseController(desktop.ID)
+	manager.EnsureController(phone)
+	if !hub.mayAdministerDevices(lan, phone) {
+		t.Fatal("a device granted the free lease lost administration")
+	}
+}
