@@ -803,7 +803,7 @@ func asString(v any) string {
 	}
 }
 
-var secretTextRE = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:api[_-]?key|token|secret|password|credential)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)`)
+var secretTextRE = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:api[_-]?key|token|secret(?:[_-]?(?:access[_-]?)?key)?|password|credential)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)`)
 
 func RedactSensitiveText(text string) string {
 	return secretTextRE.ReplaceAllStringFunc(text, func(match string) string {

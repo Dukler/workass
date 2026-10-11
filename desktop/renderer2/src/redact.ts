@@ -6,7 +6,7 @@
 // stay byte-identical to the Go function; the parity fixtures in
 // tests/redact.test.ts are generated from the Go implementation.
 // RE2 \s is [\t\n\f\r ]; spelled out so both engines match identical spans.
-const SECRET_TEXT_RE = /(bearer[\t\n\f\r ]+)[A-Za-z0-9._~+/=-]+|((?:api[_-]?key|token|secret|password|credential)[\t\n\f\r ]*[:=][\t\n\f\r ]*)("[^"]*"|'[^']*'|[^\t\n\f\r ,;}]+)/gi;
+const SECRET_TEXT_RE = /(bearer[\t\n\f\r ]+)[A-Za-z0-9._~+/=-]+|((?:api[_-]?key|token|secret(?:[_-]?(?:access[_-]?)?key)?|password|credential)["']?[\t\n\f\r ]*[:=][\t\n\f\r ]*)("[^"]*"|'[^']*'|[^\t\n\f\r ,;}]+)/gi;
 
 export function redactSensitiveText(text: string): string {
   return text.replace(SECRET_TEXT_RE, (match) => {
