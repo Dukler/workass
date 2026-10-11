@@ -1054,7 +1054,8 @@ func (l *managerLane) emitLocked(event providercontract.Event, waitForCommit boo
 		l.mu.Unlock()
 		return errors.New("provider event lane is detached")
 	}
-	if event.Kind != providercontract.EventTurnTerminal && event.Identity.TurnID != "" &&
+	settledSubagent := event.Kind == providercontract.EventToolUpdate && event.Tool != nil && strings.TrimSpace(event.Tool.SubagentID) != ""
+	if event.Kind != providercontract.EventTurnTerminal && !settledSubagent && event.Identity.TurnID != "" &&
 		l.manager != nil && l.manager.providerLaneClosedJob(event.Identity.TurnID) {
 		l.mu.Unlock()
 		return fmt.Errorf("provider event arrived after terminal job cleanup: %s", event.Identity.TurnID)

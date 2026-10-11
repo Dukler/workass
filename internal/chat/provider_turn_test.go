@@ -274,3 +274,36 @@ func TestBackgroundWorkOfASettledProviderTurnStillSettles(t *testing.T) {
 		t.Fatalf("late live output of a settled provider turn: err=%v foreground=%#v", err, next.Foreground)
 	}
 }
+
+// 2026-10-11 QA: a subagent spawned while the chat was idle reports against the
+// settled turn it is anchored to. Its row must update there, durably, and the
+// streamed-event path must not write through the previous state's ledger.
+func TestSubagentProgressUpdatesItsSettledTurnRow(t *testing.T) {
+	f := newProviderTurnFixture(t)
+	settled := f.state
+	child := func(status string) provider.Event {
+		return provider.Event{Kind: provider.EventToolUpdate, Tool: &provider.ToolEvent{
+			ToolCallID: "child-1", ToolKind: "agent", Title: "reviewer", Status: status,
+			SubagentID: "child-1", SubagentLabel: "reviewer", SubagentHeader: true,
+		}}
+	}
+	next, err := reduceJournaledProviderEvent(f.state, ProviderEventReceived{ConnectionGeneration: 1, Event: f.event("launch", "launch-job", child("in_progress"))})
+	if err != nil {
+		t.Fatalf("subagent progress on a settled turn was refused: %v", err)
+	}
+	next, err = reduceJournaledProviderEvent(next, ProviderEventReceived{ConnectionGeneration: 1, Event: f.event("launch", "launch-job", child("completed"))})
+	if err != nil {
+		t.Fatalf("subagent completion on a settled turn was refused: %v", err)
+	}
+	row := next.Ledger[1]
+	if len(row.Timeline) != 1 || row.Timeline[0].Tool == nil || row.Timeline[0].Tool.Status != "completed" || row.Timeline[0].Tool.SubagentID != "child-1" {
+		t.Fatalf("settled turn row did not carry the subagent's progress: %#v", row.Timeline)
+	}
+	if len(settled.Ledger[1].Timeline) != 0 {
+		t.Fatal("the update wrote through the previous state's ledger")
+	}
+	// A subagent event naming an unknown operation changes nothing and is not a protocol failure.
+	if _, err := reduceJournaledProviderEvent(next, ProviderEventReceived{ConnectionGeneration: 1, Event: f.event("no-such-op", "x", child("failed"))}); err != nil {
+		t.Fatalf("unmatched subagent progress failed the lane: %v", err)
+	}
+}
