@@ -260,3 +260,17 @@ func TestOfficialNativeHostsExposeExactResumeOnly(t *testing.T) {
 		}
 	}
 }
+
+// 2026-10-11 QA B14: an agent's shell inherited the daemon's browser control
+// file, so a daemon it started would drive the live app's browser.
+func TestMergedEnvDoesNotPassDaemonPlumbingToAgents(t *testing.T) {
+	merged := mergedEnv([]string{"WORKASS_BROWSER_CONTROL_FILE=/live/run/browser-control.json", "PATH=/usr/bin"}, nil, providerEnvironmentPolicy{})
+	for _, item := range merged {
+		if strings.HasPrefix(item, "WORKASS_BROWSER_CONTROL_FILE=") {
+			t.Fatalf("agent environment inherited %s", item)
+		}
+	}
+	if !slices.Contains(merged, "PATH=/usr/bin") {
+		t.Fatalf("ordinary environment dropped: %v", merged)
+	}
+}

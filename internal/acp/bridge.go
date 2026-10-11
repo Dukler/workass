@@ -10,12 +10,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
-	"unicode"
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	providercontract "workass/internal/provider"
 )
@@ -115,12 +116,12 @@ type Bridge struct {
 	lastWorkassModelWrite map[string]string
 	durableModelSelection map[string]string
 
-	sessions        map[string]struct{}
-	seededSessions  map[string]struct{}
-	jobsBySession   map[string]*Job
+	sessions       map[string]struct{}
+	seededSessions map[string]struct{}
+	jobsBySession  map[string]*Job
 	// endingJobs holds a job released from its session whose end event is not
 	// yet published, so a provider-started turn waits for it (harness_turn.go).
-	endingJobs map[string]*Job
+	endingJobs      map[string]*Job
 	loadingSessions map[string]uint64
 	promptMu        sync.Mutex
 	writeMu         sync.Mutex
@@ -427,10 +428,15 @@ func (b *Bridge) start() error {
 	return nil
 }
 
+// daemonPrivateEnv is daemon plumbing no agent process may inherit. With the
+// browser control file in its environment, a daemon an agent starts (a dev
+// daemon, say) would drive the live app's browser shell.
+var daemonPrivateEnv = []string{"WORKASS_BROWSER_CONTROL_FILE"}
+
 func mergedEnv(inherited []string, extra map[string]string, policy providerEnvironmentPolicy) []string {
 	env := map[string]string{}
 	for _, item := range inherited {
-		if k, v, ok := strings.Cut(item, "="); ok && policy.allows(k) {
+		if k, v, ok := strings.Cut(item, "="); ok && policy.allows(k) && !slices.Contains(daemonPrivateEnv, k) {
 			env[k] = v
 		}
 	}
