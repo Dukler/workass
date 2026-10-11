@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"workass/internal/acp"
 	"workass/internal/chat"
@@ -419,5 +420,44 @@ func TestProviderChatAgentWaitFencesStalePairBeforeOwnerManager(t *testing.T) {
 	// a stale tab therefore fails without needing a live Manager owner row.
 	if _, err := runtime.WaitSubagent(context.Background(), ownerKey, "stale-tab", chatID, "agent-wait-stale", workID, time.Second); err == nil || !strings.Contains(err.Error(), "tab id") {
 		t.Fatalf("stale wait pair was accepted: %v", err)
+	}
+}
+
+// 2026-10-11 QA B12: one 3 MiB message spent the whole read budget and every
+// older row became unreachable. Each message's text is clamped instead.
+func TestProviderChatAgentReadClampsOneHugeMessage(t *testing.T) {
+	stateDir := t.TempDir()
+	manager := acp.NewManager(acp.Options{StateDir: stateDir, RuntimeProfile: "test"})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	const tabID, chatID = "huge-read-tab", "huge-read-chat"
+	messages := []chat.LedgerEvent{
+		{EventID: "e-0", MessageID: "m-0", Role: "user", Text: "older question", Status: "done", OperationID: "op-0"},
+		{EventID: "e-1", MessageID: "m-1", Role: "assistant", Text: "older answer", Status: "done", OperationID: "op-0"},
+		{EventID: "e-2", MessageID: "m-2", Role: "user", Text: strings.Repeat("é", 3*512*1024), Status: "done", OperationID: "op-1"},
+		{EventID: "e-3", MessageID: "m-3", Role: "assistant", Text: "newest", Status: "done", OperationID: "op-1"},
+	}
+	if _, err := runtime.actorForFork(chatID, chat.InitializeFork{
+		Presentation: chat.PresentationState{TabID: tabID, Title: "Huge message"},
+		SourceChatID: "huge-read-source", Messages: messages,
+		OperationID: "huge-read-fork", Digest: "huge-read-fork-digest",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := runtime.ReadChat(tabID, chatID, 200, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := anySlice(result["messages"])
+	if len(rows) != 4 {
+		t.Fatalf("read returned %d rows, want all 4 (older rows hidden behind the huge one); count=%v truncated=%v first=%.200v", len(rows), result["messageCount"], result["truncated"], rows)
+	}
+	huge := mapFromAnyMain(rows[2])
+	text := fieldString(huge, "content")
+	if huge["contentTruncated"] != true || len(text) > maxAgentChatReadMessageTextBytes+64 || !utf8.ValidString(text) {
+		t.Fatalf("huge row not clamped cleanly: truncated=%v len=%d", huge["contentTruncated"], len(text))
+	}
+	if fieldString(mapFromAnyMain(rows[0]), "content") != "older question" {
+		t.Fatalf("oldest row = %#v", rows[0])
 	}
 }
