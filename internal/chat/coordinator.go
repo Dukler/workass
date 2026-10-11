@@ -62,6 +62,9 @@ type Coordinator struct {
 	backgroundExecutor        func(context.Context, BackgroundAction) (json.RawMessage, error)
 	checkpointRestoreExecutor func(context.Context, string, int, json.RawMessage, string, provider.OperationID) (json.RawMessage, error)
 	lifecycleObserver         func(LifecycleReceipt)
+	// redactReason makes a provider's failure text safe to show in the
+	// transcript. Without it a failed admission names only the error class.
+	redactReason func(string) string
 }
 
 // BeginReplyAdmission fences the generic durable-effect claim boundary while
@@ -166,6 +169,32 @@ func (c *Coordinator) SetLifecycleObserver(observe func(LifecycleReceipt)) error
 	}
 	c.lifecycleObserver = observe
 	return nil
+}
+
+// SetFailureReasonRedactor lets a failed turn admission show the provider's
+// actual reason ("this agent does not support image input", "could not resume
+// the chat's exact thread: …") instead of only its error class.
+func (c *Coordinator) SetFailureReasonRedactor(redact func(string) string) error {
+	if c == nil || redact == nil {
+		return errors.New("chat coordinator requires a failure reason redactor")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.redactReason != nil {
+		return errors.New("chat failure reason redactor is already configured")
+	}
+	c.redactReason = redact
+	return nil
+}
+
+func (c *Coordinator) failureReason(err error) string {
+	c.mu.Lock()
+	redact := c.redactReason
+	c.mu.Unlock()
+	if redact == nil || err == nil {
+		return ""
+	}
+	return boundedFailureReason(redact(err.Error()))
 }
 
 func (c *Coordinator) publishLifecycle(receipt LifecycleReceipt) {
@@ -327,7 +356,7 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 				}
 				return true, applyErr
 			}
-			applyErr := c.engine.Apply(TurnAdmissionFailed{OperationID: effect.Input.OperationID, Kind: providerErrorKind(err)})
+			applyErr := c.engine.Apply(TurnAdmissionFailed{OperationID: effect.Input.OperationID, Kind: providerErrorKind(err), Reason: c.failureReason(err)})
 			if applyErr == nil {
 				c.publishLifecycle(LifecycleReceipt{
 					Kind: LifecycleTurnAdmissionFailed, ChatID: c.engine.Snapshot().ChatID,
@@ -876,6 +905,7 @@ func (c *Coordinator) applyLaneFailure(laneID provider.LaneID, err error) error 
 	kind := providerErrorKind(err)
 	applyErr := c.engine.Apply(LaneOpenFailed{
 		LaneID: laneID, Kind: kind, Ambiguous: provider.ErrorIs(err, provider.ErrorAcceptanceAmbiguous),
+		Reason: c.failureReason(err),
 	})
 	if applyErr != nil {
 		return errors.Join(err, applyErr)

@@ -84,6 +84,8 @@ type LaneOpenFailed struct {
 	LaneID    provider.LaneID
 	Kind      provider.ErrorKind
 	Ambiguous bool
+	// Reason is the provider's redacted, bounded explanation, when known.
+	Reason string
 }
 
 func (LaneOpenFailed) chatCommand() {}
@@ -242,6 +244,8 @@ func (TurnAdmitted) chatCommand() {}
 type TurnAdmissionFailed struct {
 	OperationID provider.OperationID
 	Kind        provider.ErrorKind
+	// Reason is the provider's redacted, bounded explanation, when known.
+	Reason string
 }
 
 func (TurnAdmissionFailed) chatCommand() {}
@@ -2057,13 +2061,13 @@ func reduceLaneOpenFailed(state *State, command LaneOpenFailed) ([]Effect, error
 		}
 		updateOutbox(state, resumeEffectID(command.LaneID, lane.ConnectionGeneration), status, command.Kind)
 	}
-	if err := settleWaitingTurnAfterLaneFailure(state, command.LaneID, command.Kind); err != nil {
+	if err := settleWaitingTurnAfterLaneFailure(state, command.LaneID, command.Kind, command.Reason); err != nil {
 		return nil, err
 	}
 	return nil, nil
 }
 
-func settleWaitingTurnAfterLaneFailure(state *State, laneID provider.LaneID, kind provider.ErrorKind) error {
+func settleWaitingTurnAfterLaneFailure(state *State, laneID provider.LaneID, kind provider.ErrorKind, reason string) error {
 	if state.Foreground != nil {
 		if state.Foreground.LaneID != laneID || state.Foreground.Status != ForegroundDispatching || state.Foreground.Turn.NativeID != "" {
 			return nil
@@ -2095,7 +2099,7 @@ func settleWaitingTurnAfterLaneFailure(state *State, laneID provider.LaneID, kin
 			RootAssistantMessageID: assistantID, CurrentAssistantMessageID: assistantID,
 		}
 	}
-	if err := appendForegroundAdmissionFailure(state, kind); err != nil {
+	if err := appendForegroundAdmissionFailure(state, kind, reason); err != nil {
 		return err
 	}
 	settleForegroundObligation(state, "failed", &provider.TerminalEvent{
@@ -2783,7 +2787,7 @@ func reduceTurnAdmissionFailed(state *State, command TurnAdmissionFailed) ([]Eff
 	lane.LastError = kind
 	state.Lanes[laneID] = lane
 	updateOutbox(state, startTurnEffectID(command.OperationID), OutboxFailed, kind)
-	if err := appendForegroundAdmissionFailure(state, kind); err != nil {
+	if err := appendForegroundAdmissionFailure(state, kind, command.Reason); err != nil {
 		return nil, err
 	}
 	settleForegroundObligation(state, "failed", &provider.TerminalEvent{
@@ -4378,7 +4382,7 @@ func appendForegroundUser(state *State) (LedgerEvent, error) {
 // them excluded instead of claiming native coverage. A different provider may
 // still import the visible semantic failure through its own verified context
 // transaction.
-func appendForegroundAdmissionFailure(state *State, kind provider.ErrorKind) error {
+func appendForegroundAdmissionFailure(state *State, kind provider.ErrorKind, reason string) error {
 	if state == nil || state.Foreground == nil {
 		return errors.New("admission failure has no foreground owner")
 	}
@@ -4412,7 +4416,9 @@ func appendForegroundAdmissionFailure(state *State, kind provider.ErrorKind) err
 		assistantID = fmt.Sprintf("message:%s:assistant", foreground.OperationID)
 	}
 	errorText := "The provider could not start this turn."
-	if kind == provider.ErrorUnsupportedCapability {
+	if reason := strings.TrimSpace(reason); reason != "" {
+		errorText = "The provider could not start this turn: " + reason
+	} else if kind == provider.ErrorUnsupportedCapability {
 		errorText = "The provider could not start this turn: this agent does not support part of the input (for example, image attachments)."
 	} else if kind != "" {
 		errorText += " " + string(kind) + "."

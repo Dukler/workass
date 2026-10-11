@@ -427,6 +427,9 @@ func (r *providerChatRuntime) configureCoordinator(coordinator *chat.Coordinator
 	if err := coordinator.SetLifecycleObserver(r.publishLifecycleReceipt); err != nil {
 		return err
 	}
+	if err := coordinator.SetFailureReasonRedactor(acp.RedactSensitiveText); err != nil {
+		return err
+	}
 	return coordinator.SetCheckpointRestoreExecutor(func(ctx context.Context, chatID string, turnSequence int, checkpoint json.RawMessage, checkpointDigest string, operationID providercontract.OperationID) (json.RawMessage, error) {
 		result, err := r.manager.RestoreChatCheckpoint(ctx, chatID, turnSequence, checkpoint, checkpointDigest, operationID)
 		if err != nil {
