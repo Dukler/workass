@@ -707,6 +707,16 @@ func (m *Manager) resolveSubagentSelection(ctx context.Context, parent *Job, opt
 		requestedModel = strings.TrimSpace(parent.startOpts.ModelID)
 	}
 	if requestedModel == "" {
+		// A different provider than the parent's, with no scored pick: start on
+		// that provider's default (first catalog) model rather than failing.
+		for _, candidate := range group.Models {
+			if !m.hidesFixtureModel(providerID, candidate) {
+				requestedModel = candidate.ModelID
+				break
+			}
+		}
+	}
+	if requestedModel == "" {
 		return "", "", "", "", errors.New("subagent model_id is required because no parent or scored recommendation is available; call workass_agent_catalog first")
 	}
 	modelID := requestedModel

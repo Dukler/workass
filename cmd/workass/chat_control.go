@@ -613,7 +613,17 @@ func (c *chatControlCoordinator) resolveControls(ctx context.Context, current, p
 	if group == nil || group.Status != "ready" {
 		return resolvedChatControls{}, fmt.Errorf("provider %q is not ready; call workass_agent_catalog", providerID)
 	}
-	requestedModel := firstNonEmptyString(fieldString(params, "model_id"), fieldString(current, "modelId"))
+	inheritable := fieldString(current, "modelId")
+	if requested := fieldString(params, "provider_id"); requested != "" && requested != fieldString(current, "providerId") {
+		// Another provider's model id means nothing here.
+		inheritable = ""
+	}
+	if inheritable == "" && fieldString(params, "model_id") == "" && len(group.Models) > 0 {
+		// No model to keep: start on the provider's default (first catalog)
+		// model, as the composer does.
+		inheritable = group.Models[0].ModelID
+	}
+	requestedModel := firstNonEmptyString(fieldString(params, "model_id"), inheritable)
 	baseModel, inheritedEffort := splitCatalogSelection(requestedModel, group.Models)
 	if explicit := fieldString(params, "model_id"); explicit != "" {
 		baseModel, inheritedEffort = splitCatalogSelection(explicit, group.Models)
