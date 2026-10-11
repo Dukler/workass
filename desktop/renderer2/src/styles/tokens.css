@@ -1,6 +1,8 @@
 /* Design tokens — extracted verbatim from
    desktop/docs/mocks/p4/designs/workass-one.html (the approved design).
-   Do not drift these values without a new approved mock. */
+   Do not drift these values without a new approved mock.
+   2026-10-11 (user-approved): text tokens raised to WCAG AA (≥4.5:1 on every
+   surface they sit on), same hues, muted/faint hierarchy kept. */
 
 :root {
   color-scheme: dark;
@@ -12,7 +14,7 @@
   --ink: #f2efe9;
   --ink2: #cfcbc4;
   --muted: #9c978f;
-  --faint: #6f6b63;
+  --faint: #908b82;
   --line: rgba(255, 255, 255, .075);
   --line2: rgba(255, 255, 255, .14);
   --acc: #4fa583;
@@ -33,14 +35,14 @@
   --field: #f1efeb;
   --ink: #23211e;
   --ink2: #47443e;
-  --muted: #7a756d;
-  --faint: #a19c93;
+  --muted: #5f5b55;
+  --faint: #6d685f;
   --line: rgba(0, 0, 0, .08);
   --line2: rgba(0, 0, 0, .15);
   --acc: #177353;
   --link: #3861b0;
-  --amber: #9a6a1d;
+  --amber: #8b5f1a;
   --add: #177347;
-  --del: #bd4436;
+  --del: #b64134;
   --shell: #eceae6;
 }
