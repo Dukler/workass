@@ -2,8 +2,10 @@ package acp
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -3882,10 +3884,39 @@ func (b *Bridge) promptImageBlocks(images []any) ([]any, error) {
 		if len(data) > maxToolResultImageBytes || total+len(data) > maxToolResultTotalBytes {
 			return nil, fmt.Errorf("attached image %d exceeds Workass's bounded image payload", index+1)
 		}
+		// Only the MIME label used to be checked: invalid base64, or plain text
+		// labelled image/png, went to the provider as an image block and
+		// typically poisoned the native thread (2026-10-11 QA). The bytes must
+		// decode to a real raster; a mislabelled raster takes its true type.
+		sniffed, err := sniffAttachedRaster(data)
+		if err != nil {
+			return nil, &providercontract.Error{Kind: providercontract.ErrorAdmissionRejected, Message: fmt.Sprintf("attached image %d %v", index+1, err)}
+		}
+		mimeType = sniffed
 		total += len(data)
 		blocks = append(blocks, map[string]any{"type": "image", "mimeType": mimeType, "data": data})
 	}
 	return blocks, nil
+}
+
+func sniffAttachedRaster(data string) (string, error) {
+	head := data
+	if len(head) > 1024 {
+		head = head[:1024]
+	}
+	head = head[:len(head)-len(head)%4]
+	decoded, err := base64.StdEncoding.DecodeString(head)
+	if err != nil || len(decoded) == 0 {
+		return "", errors.New("is not valid base64 image data")
+	}
+	if _, err := base64.StdEncoding.DecodeString(data); err != nil {
+		return "", errors.New("is not valid base64 image data")
+	}
+	mimeType := strings.ToLower(strings.TrimSpace(http.DetectContentType(decoded)))
+	if !safeToolImageMIME(mimeType) {
+		return "", errors.New("is not a PNG, JPEG, WebP or GIF raster")
+	}
+	return mimeType, nil
 }
 
 func (b *Bridge) applyConfigOptions(raw any, broadcast bool) {
