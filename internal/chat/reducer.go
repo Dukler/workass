@@ -2480,10 +2480,11 @@ func reduceCancelPendingTurn(state *State, command CancelPendingTurn) ([]Effect,
 	if !found {
 		return nil, errors.New("pending cancel does not own a queued or dispatching turn")
 	}
-	if queued && strings.TrimSpace(input.Presentation.QueueID) != "" {
-		// A queue row that never ran is removed, as Claude Code drops a queued
-		// message: writing it to the transcript now put it ahead of the turn
-		// still attaching in front of it.
+	if queued && strings.TrimSpace(input.Presentation.QueueID) != "" && input.Presentation.Origin != "agent" {
+		// A queue row the user sent that never ran is removed, as Claude Code
+		// drops a queued message: writing it to the transcript now put it ahead
+		// of the turn still attaching in front of it. Agent completions keep
+		// their record; a late re-delivery recognizes itself by it.
 		return drive(state)
 	}
 	if err := appendPreAdmissionCancellation(state, input); err != nil {
