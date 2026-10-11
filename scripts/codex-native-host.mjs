@@ -565,11 +565,12 @@ class CodexSession {
       if (this.diagnosticPrompt === diagnosticOwner) this.admitDiagnosticTurn(response?.turn?.id);
     }).then((response) => {
       const turnId = String(response?.turn?.id || '');
-      if (this.activePrompt !== owner) {
+      if (this.cancelledBeforeStart === owner) {
         // Stop arrived before turn/start answered and already settled this
         // prompt as cancelled. The native turn started anyway: interrupt it,
         // and never let it become the session's turn — a later prompt may own
         // the wrapper by now.
+        this.cancelledBeforeStart = null;
         if (turnId) {
           void app.request('turn/interrupt', { threadId: this.threadId, turnId })
             .catch((error) => diagnostic('Codex late-start interrupt failed', error));
@@ -582,7 +583,11 @@ class CodexSession {
       const early = this.completedTurns.get(turnId);
       if (early) { this.completedTurns.delete(turnId); this.complete(early); }
     }).catch((error) => {
-      if (this.activePrompt === owner) this.failPrompt(error);
+      if (this.cancelledBeforeStart === owner) {
+        this.cancelledBeforeStart = null;
+        return;
+      }
+      this.failPrompt(error);
     });
     return promise;
   }
@@ -851,7 +856,12 @@ class CodexSession {
       // prompt wrapper is still waiting for a terminal notification. A later
       // explicit Stop still owns that exact wrapper and must release it; this
       // is cancellation handling, never a steer-triggered fallback.
-      if (this.activePrompt) this.complete({ id: '', status: 'interrupted' });
+      if (this.activePrompt) {
+        // Remember exactly which prompt Stop cancelled before its native turn
+        // id arrived, so that turn is interrupted when turn/start answers.
+        if (!this.activeTurnId && this.turnStatus === 'starting') this.cancelledBeforeStart = this.activePrompt;
+        this.complete({ id: '', status: 'interrupted' });
+      }
       return;
     }
     await app.request('turn/interrupt', { threadId: this.threadId, turnId });
