@@ -217,3 +217,21 @@ func TestAgentSendReplayReceiptReportsWhereTheMessageIs(t *testing.T) {
 		t.Fatalf("delivered replay still has a queue position: %#v", receipt)
 	}
 }
+
+// 2026-10-11 QA chat-core B6: a Stop landing as the provider finished replied
+// cancelled:true for a turn that ended done/end_turn.
+func TestStopReplyKnowsATurnThatFinishedOnItsOwn(t *testing.T) {
+	const op = providercontract.OperationID("turn")
+	running := chat.State{Foreground: &chat.ForegroundTurn{OperationID: op}}
+	if settled, _ := turnSettledAsCompleted(running, op); settled {
+		t.Fatal("a running turn reported settled")
+	}
+	finished := chat.State{Ledger: []chat.LedgerEvent{{OperationID: op, Role: "assistant", Terminal: &providercontract.TerminalEvent{Status: "done", StopReason: "end_turn"}}}}
+	if settled, completed := turnSettledAsCompleted(finished, op); !settled || !completed {
+		t.Fatalf("finished turn: settled=%v completed=%v", settled, completed)
+	}
+	cancelled := chat.State{Ledger: []chat.LedgerEvent{{OperationID: op, Role: "assistant", Terminal: &providercontract.TerminalEvent{Status: "failed", StopReason: "cancelled", Interrupted: true}}}}
+	if settled, completed := turnSettledAsCompleted(cancelled, op); !settled || completed {
+		t.Fatalf("cancelled turn: settled=%v completed=%v", settled, completed)
+	}
+}
