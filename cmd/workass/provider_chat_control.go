@@ -36,6 +36,15 @@ func (r *providerChatRuntime) CreateRendererChat(raw map[string]any) (map[string
 	if tabID == "" || chatID == "" || operationID == "" {
 		return nil, errors.New("chat creation requires exact tabId, chatId, and stable operationId")
 	}
+	// Chat and tab ids become file names (state, archives, spawned-work
+	// caches). An unbounded id was accepted here, and later its cache file name
+	// was too long to remove, which stopped the daemon from booting at all
+	// (2026-10-11 QA). Same character rule as operation ids, bounded short.
+	for _, id := range []string{tabID, chatID} {
+		if err := validateChatIdentifier(id); err != nil {
+			return nil, err
+		}
+	}
 	presentation := chat.PresentationState{
 		TabID: tabID, Title: redactedSessionString(fieldString(raw, "title")),
 		TitleLocked: boolFieldValue(raw, "titleLocked"), Group: optionalStringPointer(raw, "group"),
@@ -1304,4 +1313,20 @@ func (r *providerChatRuntime) MostRecentAssistantJobID(tabID, chatID string) (st
 		}
 	}
 	return "", nil
+}
+
+const maxChatIdentifierLength = 128
+
+func validateChatIdentifier(id string) error {
+	if len(id) > maxChatIdentifierLength {
+		return fmt.Errorf("chat identifier is longer than %d characters", maxChatIdentifierLength)
+	}
+	if _, err := providercontract.ValidateOperationID(id); err != nil {
+		return fmt.Errorf("invalid chat identifier: %w", err)
+	}
+	// Narrower than operation ids: no path separators or parent references.
+	if strings.ContainsAny(id, "/+=@") || strings.Contains(id, "..") {
+		return errors.New("invalid chat identifier: path-shaped characters are not allowed")
+	}
+	return nil
 }
