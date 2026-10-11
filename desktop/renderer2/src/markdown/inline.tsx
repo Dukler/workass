@@ -20,7 +20,9 @@ export interface InlineMediaResolver {
 // Order matters: code spans first (their content is literal), then image/link
 // Markdown, then bold and italic. Angle-bracket destinations allow normal local
 // paths with spaces: ![Preview](</workspace/calibration ready.png>).
-const TOKEN = /(`[^`]+`)|(!?\[[^\]\n]*\]\((?:<[^>\n]+>|[^)\n]+)\))|(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*\s][^*]*\*)|(_[^_\s][^_]*_)/;
+// Underscore emphasis is never intraword (CommonMark): snake_case_names and
+// tool ids like workass_browser_list must render verbatim.
+const TOKEN = /(`[^`]+`)|(!?\[[^\]\n]*\]\((?:<[^>\n]+>|[^)\n]+)\))|(\*\*[^*]+\*\*)|((?<![\p{L}\p{N}_])__[^_]+__(?![\p{L}\p{N}_]))|(\*[^*\s][^*]*\*)|((?<![\p{L}\p{N}_])_[^_\s][^_]*_(?![\p{L}\p{N}_]))/u;
 
 export function normalizeMarkdownTarget(raw: string): string {
   let target = raw.trim();
