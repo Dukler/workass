@@ -2698,6 +2698,10 @@ func (r *providerChatRuntime) Cancel(ctx context.Context, jobID string) (acp.Job
 				continue
 			}
 			if result, done := cancelResultFromReceipt(entry); done {
+				if result.Cancelled && actorTurnCompletedDespiteCancel(actor, parentOperationID, cancelSettleWait) {
+					// The provider had already finished when the Stop reached it.
+					return acp.JobCancelResult{Cancelled: false, Reason: "completed"}, true, nil
+				}
 				return result, true, nil
 			}
 		}
@@ -2712,6 +2716,43 @@ func (r *providerChatRuntime) Cancel(ctx context.Context, jobID string) (acp.Job
 		}
 	}
 	return acp.JobCancelResult{Cancelled: false, Reason: "unknown"}, true, nil
+}
+
+// cancelSettleWait bounds how long a Stop reply waits to learn whether the
+// turn it targeted was cancelled or had already finished.
+const cancelSettleWait = time.Second
+
+// actorTurnCompletedDespiteCancel waits, up to limit, for the targeted turn to
+// settle and reports whether it ended normally rather than by the Stop. A Stop
+// that lands as the provider finishes must not be reported as cancelled.
+func actorTurnCompletedDespiteCancel(actor *providerChatActor, operationID providercontract.OperationID, limit time.Duration) bool {
+	if actor == nil || operationID == "" {
+		return false
+	}
+	deadline := time.Now().Add(limit)
+	for {
+		if settled, completed := turnSettledAsCompleted(actor.engine.Snapshot(), operationID); settled {
+			return completed
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func turnSettledAsCompleted(state chat.State, operationID providercontract.OperationID) (settled, completed bool) {
+	if state.Foreground != nil && state.Foreground.OperationID == operationID {
+		return false, false
+	}
+	for index := len(state.Ledger) - 1; index >= 0; index-- {
+		row := state.Ledger[index]
+		if row.OperationID != operationID || row.Role != "assistant" || row.Terminal == nil {
+			continue
+		}
+		return true, row.Terminal.Status == "done" && !row.Terminal.Interrupted && row.Terminal.StopReason != "cancelled"
+	}
+	return true, false
 }
 
 func (r *providerChatRuntime) cancelQueuedSubagentCompletionsLocked(actor *providerChatActor, tabID, chatID string, parentOperationID providercontract.OperationID) {
