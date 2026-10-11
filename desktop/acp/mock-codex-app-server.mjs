@@ -193,6 +193,15 @@ async function runTurn(id, params) {
 	}
   const text = (params.input || []).filter((item) => item.type === 'text').map((item) => item.text).join('\n');
   const images = (params.input || []).filter((item) => item.type === 'image');
+  const imageView = /\[fixture:image-view=([^\]]+)\]/.exec(text);
+  if (imageView) {
+    // An image tool item and the turn's terminal, back to back on the wire.
+    const item = { type: 'imageView', id: 'fixture-image-tool', path: imageView[1] };
+    notify('item/started', { threadId: params.threadId, turnId, item });
+    notify('item/completed', { threadId: params.threadId, turnId, item });
+    completeTurn(turnId);
+    return;
+  }
   if (text.includes('[fixture:error-category]')) {
     const error = JSON.parse(process.env.WORKASS_CODEX_FIXTURE_DIAGNOSTIC_ERROR || '{}');
     notify('error', { threadId: params.threadId, turnId, willRetry: true, error });

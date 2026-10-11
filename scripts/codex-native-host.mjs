@@ -7,6 +7,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { open, readFile } from 'node:fs/promises';
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -1217,8 +1218,8 @@ async function handleAppNotification(method, params) {
     notify(session.threadId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: '\n\n' } });
     return;
   }
-  if (method === 'item/started') { await emitItem(session, params.item, false); return; }
-  if (method === 'item/completed') { await emitItem(session, params.item, true); return; }
+  if (method === 'item/started') { emitItem(session, params.item, false); return; }
+  if (method === 'item/completed') { emitItem(session, params.item, true); return; }
   if (method === 'item/commandExecution/outputDelta') {
     notify(session.threadId, { sessionUpdate: 'tool_call_update', toolCallId: params.itemId, content: { type: 'text', text: params.delta || '' } });
     return;
@@ -1257,7 +1258,7 @@ async function handleAppNotification(method, params) {
   }
 }
 
-async function emitItem(session, item, completed) {
+function emitItem(session, item, completed) {
   if (!item || typeof item !== 'object') return;
   if (item.type === 'subAgentActivity') { observeNativeAgentActivity(session, item); return; }
   if (item.type === 'collabAgentToolCall') observeNativeAgents(session, item);
@@ -1276,7 +1277,7 @@ async function emitItem(session, item, completed) {
     notify(session.threadId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: item.summary.join('\n\n') } });
     return;
   }
-  const update = await itemUpdate(item, completed);
+  const update = itemUpdate(item, completed);
   if (update) notify(session.threadId, update);
 }
 
@@ -1396,7 +1397,7 @@ async function emitNativeAgentNotification(session, method, params) {
   if (method === 'item/started' || method === 'item/completed') {
     if (params.item?.type === 'subAgentActivity') { observeNativeAgentActivity(session, params.item); return; }
     if (params.item?.type === 'collabAgentToolCall') observeNativeAgents(session, params.item);
-    const update = await itemUpdate(params.item || {}, method === 'item/completed');
+    const update = itemUpdate(params.item || {}, method === 'item/completed');
     if (update) {
       agent.lastToolName = update.kind;
       emitNativeAgent(session, agent);
@@ -1412,7 +1413,7 @@ async function emitNativeAgentNotification(session, method, params) {
   }
 }
 
-async function itemUpdate(item, completed) {
+function itemUpdate(item, completed) {
   const base = {
     sessionUpdate: completed ? 'tool_call_update' : 'tool_call',
     toolCallId: item.id,
@@ -1449,7 +1450,7 @@ async function itemUpdate(item, completed) {
     },
   };
   if (item.type === 'imageView') {
-    const image = await inlineRaster(item.path);
+    const image = inlineRaster(item.path);
     return { ...base, kind: 'read', title: `View image ${item.path}`, rawInput: { path: item.path }, locations: [{ path: item.path }], ...(image ? { content: [image] } : {}) };
   }
   return null;
@@ -1474,23 +1475,27 @@ function normalizeCodexContent(content) {
   return out;
 }
 
-async function inlineRaster(filePath) {
-  let handle;
+// Synchronous on purpose (bounded at 6 MB): an awaited read let an image
+// item's tool events publish after the turn's terminal, in reverse order
+// (2026-10-11 review). Read inline, every item publishes within its own
+// notification, in wire order.
+function inlineRaster(filePath) {
+  let fd;
   try {
-    handle = await open(filePath, 'r');
-    const stat = await handle.stat();
+    fd = openSync(filePath, 'r');
+    const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size <= 0 || stat.size > 6 * 1024 * 1024) return null;
     const data = Buffer.allocUnsafe(stat.size);
     let offset = 0;
     while (offset < data.length) {
-      const { bytesRead } = await handle.read(data, offset, data.length - offset, offset);
+      const bytesRead = readSync(fd, data, offset, data.length - offset, offset);
       if (!bytesRead) return null;
       offset += bytesRead;
     }
     const mimeType = rasterMime(data);
     return mimeType ? { type: 'image', mimeType, data: data.toString('base64') } : null;
   } catch { return null; }
-  finally { await handle?.close().catch(() => {}); }
+  finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* already closed */ } } }
 }
 
 function rasterMime(data) {
