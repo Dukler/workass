@@ -27,6 +27,8 @@ type processTreeHandle struct {
 // provider CLI flushing its transcript — before survivors are SIGKILLed.
 var processTreeKillGrace = 5 * time.Second
 
+const processTreePollInterval = 20 * time.Millisecond
+
 func startProcessTree(cmd *exec.Cmd) (processTreeHandle, error) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
@@ -42,8 +44,12 @@ func stopProcessTree(process *os.Process, tree processTreeHandle) error {
 	if process == nil {
 		return nil
 	}
+	if tree.pgid > 1 {
+		_ = syscall.Kill(-tree.pgid, syscall.SIGTERM)
+	}
+	err := process.Kill()
 	terminateProcessGroup(tree)
-	return process.Kill()
+	return err
 }
 
 // releaseProcessTree runs after the leader was reaped. Like Windows'
@@ -54,6 +60,10 @@ func releaseProcessTree(tree processTreeHandle) error {
 	return nil
 }
 
+// terminateProcessGroup returns only once the group is gone. Teardown is
+// synchronous on purpose: a deferred SIGKILL died with the daemon when it
+// exited inside the grace, and a teardown receipt published before the group
+// was gone let a resumed attachment overlap the old provider CLI.
 func terminateProcessGroup(tree processTreeHandle) {
 	if tree.pgid <= 1 {
 		return
@@ -62,9 +72,12 @@ func terminateProcessGroup(tree processTreeHandle) {
 	if err := syscall.Kill(-pgid, syscall.SIGTERM); errors.Is(err, syscall.ESRCH) {
 		return
 	}
-	time.AfterFunc(processTreeKillGrace, func() {
-		if syscall.Kill(-pgid, 0) == nil {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	deadline := time.Now().Add(processTreeKillGrace)
+	for time.Now().Before(deadline) {
+		if errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH) {
+			return
 		}
-	})
+		time.Sleep(processTreePollInterval)
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 }
