@@ -1503,3 +1503,22 @@ func TestSubagentParentNamesTheSpawningChatOnly(t *testing.T) {
 		t.Fatal("an unknown subagent resolved a parent")
 	}
 }
+
+// 2026-10-11 QA B8: an owning chat with no running turn (woken by a background
+// task, say) could spawn but not read the catalog that is the sole source of
+// valid model ids.
+func TestAgentCatalogAnswersAnIdleOwningChat(t *testing.T) {
+	t.Parallel()
+	manager, _, session, ownerKey, root, _ := newSubagentLifecycleFixture(t, "idle-catalog")
+	catalog, err := manager.AgentCatalog(context.Background(), ownerKey, session.ChatID, session.TabID)
+	if err != nil {
+		t.Fatalf("idle catalog: %v", err)
+	}
+	active, _ := catalog["active"].(map[string]any)
+	if groups, _ := catalog["groups"].([]map[string]any); len(groups) == 0 {
+		t.Fatalf("idle catalog has no provider groups: %#v", catalog)
+	}
+	if active != nil && asString(active["cwd"]) != "" && asString(active["cwd"]) != root {
+		t.Fatalf("idle catalog active cwd = %#v", active)
+	}
+}
