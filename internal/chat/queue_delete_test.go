@@ -91,3 +91,28 @@ func TestFailedLaneOpenSettlesTheNextQueuedRowInsteadOfWedging(t *testing.T) {
 		t.Fatalf("reopen effect = %#v", effects[0])
 	}
 }
+
+// 2026-10-11 QA: a second turn reusing a message id was admitted, then every
+// projection of the chat failed with "duplicate message id" until it was
+// force-deleted. Reuse is refused at admission instead.
+func TestReusedMessageIDIsRefusedAtAdmission(t *testing.T) {
+	f := newProviderTurnFixture(t)
+	f.state, _ = apply(t, f.state, Submit{OperationID: "one", Text: "first", Presentation: provider.TurnPresentation{
+		Origin: "human", UserMessageID: "dup-user", AssistantMessageID: "dup-assistant",
+	}})
+	for _, presentation := range []provider.TurnPresentation{
+		{Origin: "human", UserMessageID: "dup-user"},
+		{Origin: "human", UserMessageID: "fresh", AssistantMessageID: "dup-assistant"},
+		{Origin: "human", UserMessageID: "dup-assistant"},
+		{Origin: "human", UserMessageID: "same", AssistantMessageID: "same"},
+	} {
+		if _, _, err := Reduce(f.state, Submit{OperationID: "two", Text: "second", Presentation: presentation}); err == nil {
+			t.Fatalf("reused message ids were admitted: %#v", presentation)
+		}
+	}
+	if _, _, err := Reduce(f.state, Submit{OperationID: "two", Text: "second", Presentation: provider.TurnPresentation{
+		Origin: "human", UserMessageID: "new-user", AssistantMessageID: "new-assistant",
+	}}); err != nil {
+		t.Fatalf("fresh ids were refused: %v", err)
+	}
+}

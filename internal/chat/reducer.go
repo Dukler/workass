@@ -1430,6 +1430,9 @@ func reducePromoteStagedQueue(state *State, command PromoteStagedQueue) ([]Effec
 	if err != nil {
 		return nil, err
 	}
+	if err := presentationIDsAvailable(*state, presentation); err != nil {
+		return nil, err
+	}
 	presentation.QueueID = queueID
 	state.StagedQueue = append(state.StagedQueue[:index:index], state.StagedQueue[index+1:]...)
 	state.Operations[operationID] = struct{}{}
@@ -2143,6 +2146,9 @@ func reduceSubmit(state *State, command Submit) ([]Effect, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := presentationIDsAvailable(*state, presentation); err != nil {
+		return nil, err
+	}
 	state.Operations[operationID] = struct{}{}
 	state.Queue = append(state.Queue, QueueEntry{
 		OperationID:  operationID,
@@ -2178,6 +2184,9 @@ func reduceSteer(state *State, command Steer) ([]Effect, error) {
 	}
 	presentation, err := normalizeTurnPresentation(command.Presentation)
 	if err != nil {
+		return nil, err
+	}
+	if err := presentationIDsAvailable(*state, presentation); err != nil {
 		return nil, err
 	}
 	pending := &PendingSteer{
@@ -5632,4 +5641,54 @@ func reduceRecoverOutbox(state *State) ([]Effect, error) {
 		effects = append(effects, driven...)
 	}
 	return effects, nil
+}
+
+
+// presentationIDsAvailable rejects a turn whose public message ids are already
+// visible in this chat. The ledger requires unique message ids; admitting a
+// reused one made every later projection of the chat fail — archive-load,
+// and session:get for every client while it was the active chat — until the
+// chat was force-deleted (2026-10-11 QA).
+func presentationIDsAvailable(state State, presentation provider.TurnPresentation) error {
+	userID := strings.TrimSpace(presentation.UserMessageID)
+	assistantID := strings.TrimSpace(presentation.AssistantMessageID)
+	if userID == "" && assistantID == "" {
+		return nil
+	}
+	if userID != "" && userID == assistantID {
+		return errors.New("turn user and assistant message ids must differ")
+	}
+	taken := func(id string) bool {
+		if id == "" {
+			return false
+		}
+		for _, event := range state.Ledger {
+			if event.MessageID == id {
+				return true
+			}
+		}
+		check := func(other provider.TurnPresentation) bool {
+			return strings.TrimSpace(other.UserMessageID) == id || strings.TrimSpace(other.AssistantMessageID) == id
+		}
+		for _, queued := range state.Queue {
+			if check(queued.Presentation) {
+				return true
+			}
+		}
+		if foreground := state.Foreground; foreground != nil {
+			if check(foreground.Input.Presentation) || foreground.RootAssistantMessageID == id || foreground.CurrentAssistantMessageID == id {
+				return true
+			}
+		}
+		for pending := state.PendingSteer; pending != nil; pending = pending.Next {
+			if check(pending.Presentation) {
+				return true
+			}
+		}
+		return false
+	}
+	if taken(userID) || taken(assistantID) {
+		return errors.New("turn message id is already used in this chat")
+	}
+	return nil
 }
