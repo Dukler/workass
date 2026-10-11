@@ -74,11 +74,20 @@ func TestStopProcessTreeTerminatesProviderChildOfTheHost(t *testing.T) {
 	if tree.pgid != cmd.Process.Pid {
 		t.Fatalf("process tree pgid = %d, want host pid %d", tree.pgid, cmd.Process.Pid)
 	}
-	if err := stopProcessTree(cmd.Process, tree); err != nil {
+	stopAndReap(t, cmd, tree)
+	waitProcessGone(t, pids[0], 200*time.Millisecond)
+}
+
+// stopAndReap mirrors the bridge: its waitChild goroutine reaps the host while
+// Close is inside stopProcessTree.
+func stopAndReap(t *testing.T, cmd *exec.Cmd, tree processTreeHandle) {
+	t.Helper()
+	stopped := make(chan error, 1)
+	go func() { stopped <- stopProcessTree(cmd.Process, tree) }()
+	_ = cmd.Wait()
+	if err := <-stopped; err != nil {
 		t.Fatalf("stopProcessTree: %v", err)
 	}
-	_ = cmd.Wait()
-	waitProcessGone(t, pids[0], 2*time.Second)
 }
 
 func TestReleaseProcessTreeTerminatesChildrenOfAHostThatDiedOnItsOwn(t *testing.T) {
@@ -102,11 +111,10 @@ func TestStopProcessTreeEscalatesWhenAChildIgnoresSIGTERM(t *testing.T) {
 	// SIG_IGN survives exec, so the sleep ignores SIGTERM like a wedged CLI.
 	cmd, tree, pids := startTreeWithChildren(t, `trap "" TERM; sleep 60 & echo $!; wait`, 1)
 	killForCleanup(t, pids...)
-	if err := stopProcessTree(cmd.Process, tree); err != nil {
-		t.Fatalf("stopProcessTree: %v", err)
-	}
-	_ = cmd.Wait()
-	waitProcessGone(t, pids[0], 2*time.Second)
+	stopAndReap(t, cmd, tree)
+	// Teardown is synchronous: when stop returns the stubborn child is gone,
+	// so a daemon exiting right after cannot leave it behind (no timer to lose).
+	waitProcessGone(t, pids[0], 200*time.Millisecond)
 }
 
 func TestStopProcessTreeSparesChildrenInTheirOwnProcessGroup(t *testing.T) {
@@ -125,10 +133,7 @@ func TestStopProcessTreeSparesChildrenInTheirOwnProcessGroup(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if err := stopProcessTree(cmd.Process, tree); err != nil {
-		t.Fatalf("stopProcessTree: %v", err)
-	}
-	_ = cmd.Wait()
+	stopAndReap(t, cmd, tree)
 	time.Sleep(300 * time.Millisecond)
 	if !processAlive(pids[0]) {
 		t.Fatal("a child in its own process group was killed with the provider tree")
