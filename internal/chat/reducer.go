@@ -1989,6 +1989,15 @@ func canonicalizeCreatingLane(
 			state.Queue[i].LaneID = canonical.ID
 		}
 	}
+	// A turn cancelled or rejected before admission already wrote its visible
+	// rows on the proposed lane. Left behind, they named a lane that no longer
+	// exists: opening failed validation, the coordinator discarded the new
+	// engine, and every queued message behind them wedged forever (2026-10-11).
+	for i := range state.Ledger {
+		if state.Ledger[i].LaneID == requestedID {
+			state.Ledger[i].LaneID = canonical.ID
+		}
+	}
 	for i := range state.Outbox {
 		if state.Outbox[i].LaneID == requestedID {
 			state.Outbox[i].LaneID = canonical.ID
@@ -2057,8 +2066,11 @@ func settleWaitingTurnAfterLaneFailure(state *State, laneID provider.LaneID, kin
 		updateOutbox(state, startTurnEffectID(state.Foreground.OperationID), OutboxFailed, kind)
 	} else {
 		index := -1
+		// The next waiting input on this lane, queued row or not: each failed
+		// open settles exactly one, so a broken provider can never wedge the
+		// FIFO behind it and never retries in a loop.
 		for candidate := range state.Queue {
-			if state.Queue[candidate].LaneID == laneID && strings.TrimSpace(state.Queue[candidate].Presentation.QueueID) == "" {
+			if state.Queue[candidate].LaneID == laneID {
 				index = candidate
 				break
 			}

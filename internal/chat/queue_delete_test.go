@@ -64,3 +64,30 @@ func TestQueueReplacementDeletesPromotedRowsAndNeverRestagesThem(t *testing.T) {
 		t.Fatalf("the deleted row or a wrong row started: %#v", effects[0])
 	}
 }
+
+// A lane that fails to open must not strand queued rows: each failure settles
+// the next waiting input, queued or not, and nothing retries on its own.
+func TestFailedLaneOpenSettlesTheNextQueuedRowInsteadOfWedging(t *testing.T) {
+	state, _ := NewState("chat")
+	lane := testLane("chat", "mock")
+	state, _ = apply(t, state, SelectLane{Identity: lane})
+	state, _ = apply(t, state, Submit{OperationID: "a", Text: "first", Presentation: provider.TurnPresentation{Origin: "agent", QueueID: "q:a"}})
+	state, _ = apply(t, state, Submit{OperationID: "b", Text: "second", Presentation: provider.TurnPresentation{Origin: "agent", QueueID: "q:b"}})
+	state, effects := apply(t, state, LaneOpenFailed{LaneID: lane.ID, Kind: provider.ErrorTransientTransport})
+	if len(effects) != 0 {
+		t.Fatalf("a failed open must not retry on its own: %#v", effects)
+	}
+	if len(state.Queue) != 1 || state.Queue[0].OperationID != "b" {
+		t.Fatalf("the failed open did not settle the next queued row: %#v", state.Queue)
+	}
+	if len(state.Ledger) != 2 || state.Ledger[0].OperationID != "a" || state.Ledger[1].Status != "failed" {
+		t.Fatalf("settled queued row is not visible as failed: %#v", state.Ledger)
+	}
+	_, effects = apply(t, state, Submit{OperationID: "c", Text: "user retries", Presentation: provider.TurnPresentation{Origin: "human"}})
+	if len(effects) != 1 {
+		t.Fatalf("the next send did not reopen the lane: %#v", effects)
+	}
+	if _, ok := effects[0].(CreateLaneEffect); !ok {
+		t.Fatalf("reopen effect = %#v", effects[0])
+	}
+}
