@@ -1215,7 +1215,17 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 		})
 		return nil, errors.New("La sesión ACP pertenece a otra conversación; se rechazó para proteger el contexto.")
 	}
-	bridge := m.bridgeForSession(opts.SessionID, SessionOptions{TabID: opts.TabID, ChatID: opts.ChatID, SessionID: opts.SessionID})
+	// The exact session's own live bridge wins when it belongs to this chat and
+	// the requested provider. The fallback lookup defaults to the chat's
+	// last-bound provider, so a turn switching back to a provider whose engine
+	// was still warm landed on the other provider's bridge and was refused as a
+	// provider switch (2026-10-11).
+	bridge := m.exactSessionBridge(opts.SessionID, SessionOptions{
+		TabID: opts.TabID, ChatID: opts.ChatID, ProviderID: normalizeProviderID(opts.ProviderID),
+	})
+	if bridge == nil {
+		bridge = m.bridgeForSession(opts.SessionID, SessionOptions{TabID: opts.TabID, ChatID: opts.ChatID, SessionID: opts.SessionID})
+	}
 	if bridge == nil {
 		return nil, errors.New("La sesión ACP expiró. Cerrá y reabrí la pestaña del chat.")
 	}
@@ -2884,6 +2894,24 @@ func (m *Manager) bridgeForSession(sessionID string, fallback SessionOptions) *B
 		return m.getBridge(fallback)
 	}
 	if bridge != nil && !bridge.Closed() {
+		return bridge
+	}
+	return nil
+}
+
+// exactSessionBridge returns the live bridge already serving sessionID for
+// this exact chat and provider, without spawning or falling back.
+func (m *Manager) exactSessionBridge(sessionID string, owner SessionOptions) *Bridge {
+	if normalizeProviderID(owner.ProviderID) == "" {
+		return nil
+	}
+	m.mu.Lock()
+	bridge := m.sessionBridge[sessionID]
+	m.mu.Unlock()
+	if bridge == nil || bridge.Closed() || bridge.Hibernated() {
+		return nil
+	}
+	if live, ok := bridge.liveSession(sessionID); ok && liveSessionMatchesOptions(live, owner) {
 		return bridge
 	}
 	return nil
