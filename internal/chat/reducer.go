@@ -2450,7 +2450,7 @@ func reduceCancelPendingTurn(state *State, command CancelPendingTurn) ([]Effect,
 		}
 	}
 	var input QueueEntry
-	found := false
+	found, queued := false, false
 	if state.Foreground != nil && state.Foreground.OperationID == operationID {
 		if state.Foreground.Status != ForegroundDispatching || state.Foreground.Turn.NativeID != "" {
 			return nil, errors.New("pending cancel lost the pre-admission boundary")
@@ -2473,12 +2473,18 @@ func reduceCancelPendingTurn(state *State, command CancelPendingTurn) ([]Effect,
 			}
 			input = state.Queue[index]
 			state.Queue = append(state.Queue[:index:index], state.Queue[index+1:]...)
-			found = true
+			found, queued = true, true
 			break
 		}
 	}
 	if !found {
 		return nil, errors.New("pending cancel does not own a queued or dispatching turn")
+	}
+	if queued && strings.TrimSpace(input.Presentation.QueueID) != "" {
+		// A queue row that never ran is removed, as Claude Code drops a queued
+		// message: writing it to the transcript now put it ahead of the turn
+		// still attaching in front of it.
+		return drive(state)
 	}
 	if err := appendPreAdmissionCancellation(state, input); err != nil {
 		return nil, err
