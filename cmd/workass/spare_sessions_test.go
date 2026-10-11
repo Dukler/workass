@@ -19,3 +19,13 @@ func TestDaemonSpareSessionsAreInertAndLogged(t *testing.T) {
 		t.Fatalf("expected one ignore log, got %v", logs)
 	}
 }
+
+// 2026-10-11 QA lanes B-12: providers:update {} reported providerId "map".
+func TestStringArgIgnoresObjects(t *testing.T) {
+	if got := stringArg([]any{map[string]any{}}, 0); got != "" {
+		t.Fatalf("object argument read as %q", got)
+	}
+	if got := stringArg([]any{" claude "}, 0); got != "claude" {
+		t.Fatalf("string argument read as %q", got)
+	}
+}

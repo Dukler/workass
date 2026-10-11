@@ -4706,3 +4706,13 @@ func TestSanitizeDisplayTextForTitlesAndLabels(t *testing.T) {
 		}
 	}
 }
+
+// 2026-10-11 QA lanes B-12: "ACP server exited (code 3); stderr: X\n; stderr: X".
+func TestStderrTailIsAppendedOnce(t *testing.T) {
+	b := &Bridge{stderrTail: []byte("boom at boot\n")}
+	once := b.withStderrTail(errors.New("ACP server exited (code 3)"))
+	twice := b.withStderrTail(once)
+	if strings.Count(twice.Error(), "boom at boot") != 1 {
+		t.Fatalf("stderr tail repeated: %q", twice.Error())
+	}
+}

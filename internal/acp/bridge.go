@@ -1739,7 +1739,9 @@ func (b *Bridge) withStderrTail(err error) error {
 	b.mu.Lock()
 	tail := redactSensitiveText(string(b.stderrTail))
 	b.mu.Unlock()
-	if strings.TrimSpace(tail) == "" {
+	// A bridge-closed cause already carries the tail; errors built from it
+	// must not repeat the block.
+	if strings.TrimSpace(tail) == "" || strings.Contains(err.Error(), "; stderr: ") {
 		return err
 	}
 	return fmt.Errorf("%w; stderr: %s", err, tail)

@@ -439,21 +439,15 @@ Workass exposes detection through both IPC and its file-based Agent API:
 { "type": "detect-acp" }
 ```
 
-With no target, it probes the mock, Qwen Code, and Devin. A specific provider or command can be
-tested instead:
+With no target, it probes the mock, Qwen Code, and Devin. A specific configured provider (a
+custom one included) can be tested instead:
 
 ```json
 { "type": "detect-acp", "provider": "mock" }
 ```
 
-```json
-{
-  "type": "detect-acp",
-  "command": "/path/to/acp-agent",
-  "args": ["--acp"],
-  "timeoutMs": 5000
-}
-```
+The daemon never launches an arbitrary `command` from a detection request; register the
+command as a provider first and detect it by id. An unknown id answers `ok:false`.
 
 Environment overrides are available for isolated launches:
 
