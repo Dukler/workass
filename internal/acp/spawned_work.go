@@ -1245,7 +1245,7 @@ func (m *Manager) commitSpawnedWorkChange(tabID, chatID string) {
 		})
 		return
 	}
-	if err := m.commitActorSpawnedWorkProjectionLocked(tabID, chatID, projection.Items); err != nil {
+	if err := m.commitActorSpawnedWorkProjectionLocked(tabID, chatID, items, projection.Items); err != nil {
 		m.opts.Logf("actor-owned background cache commit failed", map[string]any{
 			"tabId": tabID, "chatId": chatID, "error": redactSensitiveText(err.Error()),
 		})
@@ -1309,13 +1309,28 @@ func (m *Manager) CommitActorSpawnedWorkProjection(tabID, chatID string, items [
 	if err := m.persistNewSpawnedWorkReceipts(tabID, chatID, items); err != nil {
 		return err
 	}
-	return m.commitActorSpawnedWorkProjectionLocked(tabID, chatID, items)
+	return m.commitActorSpawnedWorkProjectionLocked(tabID, chatID, nil, items)
 }
 
-func (m *Manager) commitActorSpawnedWorkProjectionLocked(tabID, chatID string, items []SpawnedWorkItem) error {
+// observed names the rows the actor was shown. Only those may be dropped for
+// not being accepted: a row registered after the snapshot was listed has not
+// been judged yet. Dropping it too was how a fast second spawn vanished — the
+// commit for the previous spawn replaced the cache with its older projection,
+// deleting the new child's only record while its process kept running
+// (2026-10-11). nil means every current row was observed.
+func (m *Manager) commitActorSpawnedWorkProjectionLocked(tabID, chatID string, observed, items []SpawnedWorkItem) error {
 	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
 	if tabID == "" || chatID == "" {
 		return nil
+	}
+	var seen map[string]struct{}
+	if observed != nil {
+		seen = make(map[string]struct{}, len(observed))
+		for _, item := range observed {
+			if workID := firstNonEmpty(strings.TrimSpace(item.ID), strings.TrimSpace(item.TaskID)); workID != "" {
+				seen[workID] = struct{}{}
+			}
+		}
 	}
 	accepted := make(map[string]struct{}, len(items))
 	for _, item := range items {
@@ -1333,6 +1348,11 @@ func (m *Manager) commitActorSpawnedWorkProjectionLocked(tabID, chatID string, i
 			continue
 		}
 		workID := firstNonEmpty(strings.TrimSpace(rec.Item.ID), strings.TrimSpace(rec.Item.TaskID))
+		if seen != nil {
+			if _, judged := seen[workID]; !judged {
+				continue
+			}
+		}
 		_, owned := accepted[workID]
 		if !owned || (!strings.EqualFold(strings.TrimSpace(rec.Item.Status), "running") && rec.ReceiptWritten) {
 			delete(m.spawnedWork, key)

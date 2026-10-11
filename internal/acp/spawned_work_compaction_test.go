@@ -111,3 +111,30 @@ func containsSpawnedWorkReceipt(data []byte, receiptID string) bool {
 	}
 	return false
 }
+
+// 2026-10-11 QA: a commit for one spawn, running with a list taken before the
+// next spawn registered, replaced the cache with its older projection and
+// deleted the newer child's only record — an untracked, uncancellable ghost.
+func TestProjectionCommitKeepsRowsRegisteredAfterItsSnapshot(t *testing.T) {
+	manager := NewManager(Options{StateDir: t.TempDir()})
+	t.Cleanup(func() { manager.Reset() })
+	const tabID, chatID = "tab", "chat"
+	addExternalRecordForTest(manager, tabID, chatID, "first", "first", nil, "", "", "running", "")
+	observed := manager.ListSpawnedWork(tabID, chatID)
+	// The next spawn registers while the first commit is still in flight.
+	addExternalRecordForTest(manager, tabID, chatID, "second", "second", nil, "", "", "running", "")
+	accepted := []SpawnedWorkItem{{ID: "first", TaskID: "first", TabID: tabID, ChatID: chatID, Status: "running"}}
+	manager.spawnedWorkCommitMu.Lock()
+	err := manager.commitActorSpawnedWorkProjectionLocked(tabID, chatID, observed, accepted)
+	manager.spawnedWorkCommitMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, item := range manager.ListSpawnedWork(tabID, chatID) {
+		ids[item.TaskID] = true
+	}
+	if !ids["first"] || !ids["second"] {
+		t.Fatalf("a row registered after the snapshot was dropped by its commit: %v", ids)
+	}
+}
