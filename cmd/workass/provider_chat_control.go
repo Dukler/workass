@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"workass/internal/acp"
 	"workass/internal/chat"
@@ -19,6 +20,12 @@ import (
 // result well below the stdio relay's 4 MiB ceiling. This is a response budget,
 // not a persistence limit: the actor retains the complete semantic ledger.
 const maxAgentChatReadJSONBytes = 1 * 1024 * 1024
+
+// maxAgentChatReadMessageTextBytes bounds one message's text in a chat read,
+// as Claude Code's Read truncates an over-long line instead of dropping the
+// file: one huge message no longer spends the whole response budget and hides
+// every older row.
+const maxAgentChatReadMessageTextBytes = 64 * 1024
 
 func (r *providerChatRuntime) CreateRendererChat(raw map[string]any) (map[string]any, error) {
 	if r == nil {
@@ -458,6 +465,15 @@ func (r *providerChatRuntime) ReadChat(tabID, chatID string, limit int, includeE
 			eventSources = append(eventSources, events)
 		}
 		message["events"] = []any{}
+		if text, ok := message["content"].(string); ok && len(text) > maxAgentChatReadMessageTextBytes {
+			cut := maxAgentChatReadMessageTextBytes
+			for cut > 0 && !utf8.RuneStart(text[cut]) {
+				cut--
+			}
+			message["content"] = text[:cut] + fmt.Sprintf("\n…[%d more bytes not shown]", len(text)-cut)
+			message["contentTruncated"] = true
+			message["contentBytes"] = len(text)
+		}
 		copyMessages = append(copyMessages, message)
 	}
 	result := map[string]any{
