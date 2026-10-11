@@ -1607,7 +1607,7 @@ func (r *providerChatRuntime) admitStartReceipt(ctx context.Context, arg map[str
 	if result, handled, err := r.existingTurnReceiptLocked(actor, arg, fields, origin); handled {
 		return result, err
 	}
-	if actor.engine.Snapshot().Foreground != nil {
+	if actorTurnBusy(actor.engine.Snapshot()) {
 		if fieldString(arg, "busyMode") == "queue-v1" {
 			opts := parseSessionOptions(arg)
 			applyStagedTargetOptions(actor.engine.Snapshot(), fieldString(arg, "queueId"), &opts)
@@ -1765,6 +1765,14 @@ func (r *providerChatRuntime) queueBusyTurnLocked(
 		return actorJobReceipt(state, state.Foreground.Input, fieldString(arg, "tabId"), fieldString(arg, "chatId")), nil
 	}
 	return queuedActorReceipt(state, operationID, queueID), nil
+}
+
+// actorTurnBusy reports whether a new start would run behind other work. A
+// promoted FIFO head waiting for its provider to attach has no Foreground yet,
+// but a send in that window still queues behind it and must be answered as
+// queued, never as a running job.
+func actorTurnBusy(state chat.State) bool {
+	return state.Foreground != nil || len(state.Queue) > 0
 }
 
 func actorHasStagedQueue(state chat.State, queueID string) bool {
