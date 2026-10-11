@@ -1511,8 +1511,25 @@ func (b *Bridge) jobForSession(sessionID string) *Job {
 }
 
 func (b *Bridge) setJobForSession(sessionID string, job *Job) {
+	b.bindJobForSession(sessionID, job, false)
+}
+
+// bindLiveJobForSession binds job only if the session is still live, in the
+// same critical section the hibernation reaper rechecks under. A start that
+// checked liveness earlier cannot bind to an engine reaped in between.
+func (b *Bridge) bindLiveJobForSession(sessionID string, job *Job) bool {
+	return b.bindJobForSession(sessionID, job, true)
+}
+
+func (b *Bridge) bindJobForSession(sessionID string, job *Job, requireLive bool) bool {
 	now := time.Now()
 	b.mu.Lock()
+	if requireLive {
+		if _, ok := b.sessions[sessionID]; !ok || b.closed || b.state == StateHibernated {
+			b.mu.Unlock()
+			return false
+		}
+	}
 	// A provider-declared terminal reply seals every foreground tool from the
 	// previous turn. Keep no ownership that a delayed update could reuse while a
 	// new prompt is active on the same native session.
@@ -1536,6 +1553,7 @@ func (b *Bridge) setJobForSession(sessionID string, job *Job) {
 			b.manager.bridgeChanged(b, "active")
 		}
 	}
+	return true
 }
 
 // markJobEnding records that job is ending on sessionID until its end event

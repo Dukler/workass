@@ -1389,7 +1389,19 @@ func (m *Manager) StartJob(ctx context.Context, opts JobStartOptions) (map[strin
 		// Make the exact reserved owner discoverable before the actor commit can
 		// become visible to another control request. Bridge.Steer waits for the
 		// prompt-write boundary, so this cannot overtake the base turn.
-		bridge.setJobForSession(opts.SessionID, job)
+		if !bridge.bindLiveJobForSession(opts.SessionID, job) {
+			// Hibernated since the liveness check: behave exactly as a start
+			// that found it hibernated.
+			liveSession = false
+			if !opts.ProviderLaneManaged {
+				m.mu.Lock()
+				if m.jobs[id] == job {
+					delete(m.jobs, id)
+				}
+				m.mu.Unlock()
+				return nil, errors.New("La conexión ACP no está activa; el actor durable debe reanudar exactamente el hilo nativo antes de enviar.")
+			}
+		}
 	}
 
 	// The actor must own the immutable provider turn before a frozen event or
