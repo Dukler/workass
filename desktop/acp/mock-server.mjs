@@ -252,6 +252,24 @@ async function runPrompt(id, params) {
     await holdPromptUntilSteer(session);
   }
 
+  // A turn caught mid-work: two finished calls and one still running, held
+  // until steer/release, so live tool chrome (the Working line) can be seen.
+  if (text.includes('[mock:hold-tools]')) {
+    const calls = [
+      { id: `${toolCallId}-read`, title: 'Read', kind: 'read', rawInput: { file_path: 'tools/silver_review.py' }, locations: [{ path: 'tools/silver_review.py' }] },
+      { id: `${toolCallId}-check`, title: 'Bash', kind: 'execute', rawInput: { command: 'python -B tmp/check_floor.py --frame 3812' } },
+    ];
+    for (const call of calls) {
+      notify(session.id, { sessionUpdate: 'tool_call', toolCallId: call.id, title: call.title, kind: call.kind, status: 'in_progress', rawInput: call.rawInput, ...(call.locations ? { locations: call.locations } : {}) });
+      await pause();
+      notify(session.id, { sessionUpdate: 'tool_call_update', toolCallId: call.id, title: call.title, kind: call.kind, status: 'completed', content: { type: 'text', text: 'ok' } });
+    }
+    const liveId = `${toolCallId}-live`;
+    notify(session.id, { sessionUpdate: 'tool_call', toolCallId: liveId, title: 'Bash', kind: 'execute', status: 'in_progress', rawInput: { command: 'python render_review_panel.py --silver' } });
+    await holdPromptUntilSteer(session);
+    notify(session.id, { sessionUpdate: 'tool_call_update', toolCallId: liveId, title: 'Bash', kind: 'execute', status: 'completed', content: { type: 'text', text: 'rendered' } });
+  }
+
   if (text.includes('[mock:burst]')) {
     // Deliberately emit far faster than a display can paint. A zero-delay timer
     // between chunks gives the daemon's 16 ms coalescer a chance to flush while

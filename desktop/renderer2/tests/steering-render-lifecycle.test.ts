@@ -141,9 +141,14 @@ test('a goal checkpoint final stays before subsequent tools and commentary throu
   chat.messages = [user('goal-input', '/goal fixture'), message];
   const verify = (subject: Chat) => {
     const markup = renderTranscript(subject);
-    const markers = ['GOAL-OPENING', 'GOAL-CHECKPOINT', 'GOAL-LATER-TOOL', 'GOAL-CONTINUATION', 'GOAL-COMPLETION'];
+    // Tool calls never interleave with the prose: the Working line owns them
+    // while the turn runs, and the settled turn's closed Worked row after.
+    const running = subject.messages[1].status === 'running';
+    const markers = ['GOAL-OPENING', 'GOAL-CHECKPOINT', 'GOAL-CONTINUATION', 'GOAL-COMPLETION'];
     const offsets = markers.map(marker => markup.indexOf(marker));
     assert.ok(offsets.every((offset, index) => offset >= 0 && (index === 0 || offset > offsets[index - 1])), 'final-answer phases render at their capture boundary, followed by later work');
+    assert.equal(markup.includes('GOAL-LATER-TOOL'), false);
+    if (!running) assert.ok(markup.indexOf('>Worked<') >= 0 && markup.indexOf('>Worked<') < offsets[0], 'the settled turn opens with its Worked row');
     assert.equal(occurrences(markup, 'GOAL-CHECKPOINT'), 1);
     assert.equal(occurrences(markup, 'GOAL-COMPLETION'), 1);
     assert.equal(fullAssistantText(subject.messages[1]), 'GOAL-OPENING.\n\nGOAL-CHECKPOINT 🧭.\n\nGOAL-CONTINUATION.\n\nGOAL-COMPLETION.');

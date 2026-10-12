@@ -405,7 +405,7 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
 /* stable both-edges reserves the 9px classic-scrollbar gutter symmetrically, so
    the centered .doc stays on the same centerline as the (scrollbar-free)
    composer below it — and doesn't shift 4.5px when the scrollbar appears. */
-.transcriptviewport { position: relative; flex: 1; min-height: 0; --thinklive-h: 40px; }
+.transcriptviewport { position: relative; flex: 1; min-height: 0; --thinklive-h: 58px; }
 .transcriptviewport > .scroll { height: 100%; }
 .scroll { flex: 1; overflow-y: auto; min-height: 0; scrollbar-gutter: stable both-edges; }
 .doc { max-width: var(--read); margin: 0 auto; padding: 26px 36px var(--doc-pad-b); }
@@ -501,12 +501,53 @@ table.mdtable th { background: var(--field); font-weight: 600; }
    message. Absolute positioning against `.transcriptviewport` makes `bottom:0`
    a real physical anchor on both short and long transcripts; the live doc
    padding above reserves the same height so its final row is never obscured.
-   When the turn closes this dock disappears and the ordinary one-line "Pensó"
-   row settles into transcript chronology. */
+   When the turn closes this dock disappears and its steps settle into the
+   turn's one-line "Worked" row (.workfold). */
 .thinklive { position: absolute; left: 0; right: 0; bottom: 0; z-index: 5; margin: 0 auto;
   width: 100%; height: var(--thinklive-h); padding: 9px 36px 11px; max-width: var(--read); pointer-events: none;
   background: linear-gradient(to top, var(--bg) 62%, color-mix(in srgb, var(--bg) 88%, transparent) 86%, transparent); }
 .thinklive .steprow { margin: 0; width: 100%; }
+
+/* Working line (approved mock working-indicator v5 · option 3, 2026-10-12):
+   an orbiting dot, "Working" with counting dots, elapsed time and tool count;
+   under it the one call running now. Clicking opens the turn's tool calls,
+   growing the bottom-anchored dock upward. Animation durations stay literal
+   (see .ping): a var() in the shorthand voids the declaration. */
+.thinklive.open { height: auto; max-height: min(55%, 460px); display: flex; flex-direction: column; }
+.workhead { pointer-events: auto; display: inline-flex; align-items: center; gap: 9px; flex: none; align-self: flex-start;
+  background: none; border: 0; padding: 2px 6px 2px 0; margin: 0; font: inherit; font-size: 13.5px;
+  color: var(--ink2); cursor: pointer; border-radius: 8px; text-align: left; }
+.workhead:disabled { cursor: default; color: var(--ink2); }
+.workhead:not(:disabled):hover .worklabel { color: var(--ink); }
+.workorbit { position: relative; width: 13px; height: 13px; flex: none; }
+.workorbit::before { content: ''; position: absolute; inset: 0; border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--acc) 28%, transparent); }
+.workorbit::after { content: ''; position: absolute; width: 4px; height: 4px; border-radius: 50%; background: var(--acc);
+  top: -1px; left: 4.5px; transform-origin: 2px 7.5px; animation: workorbit 1s linear infinite; }
+@keyframes workorbit { to { transform: rotate(360deg) } }
+.workdots::after { content: '...'; display: inline-block; width: 1.2em; text-align: left; animation: workdots 1.6s steps(1) infinite; }
+@keyframes workdots { 0% { content: '' } 25% { content: '.' } 50% { content: '..' } 75% { content: '...' } }
+.workmeta { color: var(--faint); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.workchev { display: inline-block; color: var(--faint); font-size: 14px; line-height: 1; transition: transform .15s ease; }
+.workchev.open { transform: rotate(90deg); }
+.worknow { margin: 1px 0 0 22px; font-size: 12px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.worklist { pointer-events: auto; min-height: 0; overflow-y: auto; margin: 6px 0 2px 6px; padding: 2px 0 2px 14px;
+  border-left: 1px solid var(--line2); }
+.worktrail { margin-left: auto; padding-left: 10px; flex: none; display: inline-flex; align-items: center; gap: 6px;
+  font: 11.5px ui-monospace, "SF Mono", Menlo, monospace; color: var(--faint); }
+.worktrail.live { color: var(--acc); }
+.workspin { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--line2); border-top-color: var(--acc);
+  animation: workorbit .85s linear infinite; }
+/* Settled: the same head at rest, heading the turn it summarizes. */
+.workfold { margin: 2px 0 12px; display: flex; flex-direction: column; }
+.workfold .workhead { color: var(--muted); font-size: 13px; }
+.workfold .workhead:hover .worklabel { color: var(--ink2); }
+.workfold .worklist { overflow: visible; }
+.worklist .steprow { margin: 4px 0 6px; }
+@media (prefers-reduced-motion: reduce) {
+  .workorbit::after, .workspin { animation: none; }
+  .workdots::after { animation: none; content: '...'; }
+}
 
 /* Turn pulse (approved mock chat-status A «Pulso en línea», 2026-07-28): the
    live tail row grows mono vitals and, only while the provider is retrying, an

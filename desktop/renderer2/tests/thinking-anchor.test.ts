@@ -75,16 +75,16 @@ test('the running pulse is one scrollport-chrome row after the projected transcr
   appStore.state.meta = { profile: 'test' };
 
   const html = renderToStaticMarkup(React.createElement(Transcript, { chat }));
-  const pulse = html.indexOf('class="thinklive"');
+  const pulse = html.indexOf('class="thinklive');
   const lastMessage = html.lastIndexOf('data-chat-find-message=');
   assert.match(html, /class="transcriptviewport has-live"/);
-  assert.equal(html.split('class="thinklive"').length - 1, 1);
+  assert.equal(html.split('class="thinklive').length - 1, 1);
   assert.ok(lastMessage >= 0 && pulse > lastMessage, 'the pulse follows every projected transcript row');
   assert.equal(html.split('LIVE-STEER-TRANSCRIPT').length - 1, 1);
 });
 
 test('the live pulse has a physical bottom anchor independent of document height', () => {
-  assert.match(styles, /\.transcriptviewport\s*\{[^}]*position:\s*relative;[^}]*--thinklive-h:\s*40px;/s);
+  assert.match(styles, /\.transcriptviewport\s*\{[^}]*position:\s*relative;[^}]*--thinklive-h:\s*58px;/s);
   assert.match(styles, /\.thinklive\s*\{[^}]*position:\s*absolute;[^}]*bottom:\s*0;/s);
   assert.doesNotMatch(styles, /\.thinklive\s*\{[^}]*position:\s*sticky;/s);
   assert.match(styles, /\.transcriptviewport\.has-live \.doc\s*\{[^}]*padding-bottom:\s*calc\(var\(--doc-pad-b\) \+ var\(--thinklive-h\)\);/s);
@@ -112,4 +112,84 @@ test('a requested Stop replaces live work chrome immediately without claiming co
   assert.match(composer, /class="send stop stopping/);
   assert.match(composer, /class="stopspin"/);
   assert.match(composer, /disabled=""/);
+});
+
+// Approved mock working-indicator v5 · option 3 (2026-10-12): "Working" with
+// the call running now, no thinking headline, and the turn's tool rows kept
+// out of the transcript while it runs (they open from the Working line).
+test('a running turn shows Working with the current call and keeps its tool rows inside it', () => {
+  const now = Date.now();
+  const chat = {
+    id: 'tab-working-line', chatId: 'chat-working-line', sessionId: 'session-working-line',
+    title: 'Working line', titleLocked: true, group: null, cwd: '/repo',
+    providerId: 'claude', currentModelId: null, currentModeId: null,
+    pending: false, draft: '',
+    messages: [
+      user('working-user', 'do the thing'),
+      assistant('working-assistant', 'PROSE-BEFORE-TOOLS', {
+        status: 'running', jobId: 'job-working-line', turnStartedAt: now - 72_000,
+        events: [
+          { key: 'thinking-headline', at: 0, kind: 'thinking', text: 'Clarifying execution issues' },
+          { key: 'tool-done', at: 18, kind: 'tool', id: 't1', toolKind: 'read', title: 'Read', status: 'completed',
+            command: null, terminalId: null, input: null, output: null, location: '/repo/tools/silver_review.py',
+            startedAt: now - 60_000, endedAt: now - 59_800 },
+          { key: 'tool-live', at: 18, kind: 'tool', id: 't2', toolKind: 'execute', title: 'Bash', status: 'in_progress',
+            command: 'python render_review_panel.py --silver', terminalId: null, input: null, output: null, location: null,
+            startedAt: now - 14_000 },
+        ],
+      }),
+    ],
+  } as Chat;
+  appStore.state.chats = [chat];
+  appStore.state.activeId = chat.id;
+
+  const html = renderToStaticMarkup(React.createElement(Transcript, { chat }));
+  assert.match(html, /class="thinklive working"/);
+  assert.match(html, /Working<span class="workdots"/);
+  assert.match(html, /2 tools/);
+  assert.match(html, /class="worknow mono"[^>]*>.*python render_review_panel\.py --silver/);
+  assert.doesNotMatch(html, /Clarifying execution issues/, 'the thinking headline is gone from the live line');
+  assert.doesNotMatch(html, /silver_review\.py/, 'finished tool rows wait inside the Working line, not in the transcript');
+  assert.match(html, /PROSE-BEFORE-TOOLS/);
+});
+
+// Once settled, the turn's steps fold into one closed "Worked" row at its head:
+// no "Pensó" line and no tool rows interleave with the answer. Subagent task
+// rows and images a tool returned stay visible.
+test('a settled turn folds its thinking and tool calls into one Worked row', () => {
+  const now = Date.now();
+  const chat = {
+    id: 'tab-worked-row', chatId: 'chat-worked-row', sessionId: 'session-worked-row',
+    title: 'Worked row', titleLocked: true, group: null, cwd: '/repo',
+    providerId: 'claude', currentModelId: null, currentModeId: null,
+    pending: false, draft: '',
+    messages: [
+      user('worked-user', 'do the thing'),
+      assistant('worked-assistant', 'PROSE-OPENING. PROSE-ANSWER', {
+        status: 'done', at: new Date(now).toISOString(),
+        events: [
+          { key: 'thinking-settled', at: 0, kind: 'thinking', text: 'Clarifying execution issues' },
+          { key: 'tool-read', at: 14, kind: 'tool', id: 't1', toolKind: 'read', title: 'Read', status: 'completed',
+            command: null, terminalId: null, input: null, output: null, location: '/repo/tools/silver_review.py',
+            startedAt: now - 30_000, endedAt: now - 29_800 },
+          { key: 'tool-run', at: 14, kind: 'tool', id: 't2', toolKind: 'execute', title: 'Bash', status: 'completed',
+            command: 'python render_review_panel.py --silver', terminalId: null, input: null, output: null, location: null,
+            startedAt: now - 29_000, endedAt: now - 6_000 },
+          { key: 'tool-task', at: 14, kind: 'tool', id: 't3', toolKind: 'agent', title: 'SUBAGENT-TASK-ROW', status: 'completed',
+            command: null, terminalId: null, input: null, output: null, location: null,
+            subagentId: 't3', subagentHeader: true, startedAt: now - 20_000, endedAt: now - 10_000 },
+        ],
+      }),
+    ],
+  } as Chat;
+  appStore.state.chats = [chat];
+  appStore.state.activeId = chat.id;
+
+  const html = renderToStaticMarkup(React.createElement(Transcript, { chat }));
+  assert.doesNotMatch(html, /class="thinklive/);
+  assert.match(html, /class="workfold"><button type="button" class="workhead" aria-expanded="false"><span class="worklabel">Worked<\/span><span class="workmeta">24s · 3 tools<\/span>/);
+  assert.ok(html.indexOf('class="workfold"') < html.indexOf('PROSE-OPENING'), 'the Worked row heads the turn');
+  assert.doesNotMatch(html, />Pensó</, 'thinking settles inside the Worked row, not the transcript');
+  assert.doesNotMatch(html, /silver_review\.py|render_review_panel/, 'tool rows wait inside the closed Worked row');
+  assert.match(html, /SUBAGENT-TASK-ROW/, 'subagent task rows stay where they landed');
 });

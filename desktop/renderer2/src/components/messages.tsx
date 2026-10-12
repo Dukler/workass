@@ -230,6 +230,14 @@ export function groupDuration(tools: ToolEvent[], nowMs: number, running: boolea
   return fmtDur(Math.max(...ends) - start);
 }
 
+// The one-line answer to "what is it doing right now?" under the live Working
+// line: the same evidence the tool row shows (command, path), else its action.
+export function toolLiveLine(t: ToolEvent): string {
+  const act = toolPresentation(t);
+  const raw = t.command || t.location || act.evidence || null;
+  return raw ? displayDetail(raw, store.active()?.cwd ?? null) : act.label;
+}
+
 // `standalone` renders the row as its OWN status line (a single-call group has no
 // wrapper — see ToolGroupView); `trail` is the right-aligned duration/live-dot the
 // group summary used to carry, now folded into this one line.
@@ -339,7 +347,7 @@ function ToolImage({ image, tabId, alt }: { image: MessageImage; tabId: string; 
   );
 }
 
-function ToolImageGallery({ tools, tabId }: { tools: ToolEvent[]; tabId: string }) {
+export function ToolImageGallery({ tools, tabId }: { tools: ToolEvent[]; tabId: string }) {
   const images = tools.flatMap((tool) => (tool.images ?? []).map((image) => ({ image, tool })));
   if (!images.length) return null;
   return (
