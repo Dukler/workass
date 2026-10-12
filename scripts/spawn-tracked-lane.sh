@@ -82,11 +82,20 @@ else
 fi
 exit "$code"'
 
+# macOS has no setsid(1). Its /usr/bin/python3 is an Xcode stub that refuses
+# to run until the Xcode license is accepted, which silently killed every lane
+# (2026-10-12); the system perl needs no developer tools. A python3 is used
+# only after proving it actually runs.
 if command -v setsid >/dev/null 2>&1; then
   nohup setsid sh -c "$worker" workass-lane "$output" "$done_file" "$@" >>"$output" 2>&1 &
+elif command -v perl >/dev/null 2>&1 && perl -MPOSIX -e 1 >/dev/null 2>&1; then
+  nohup perl -MPOSIX -e 'POSIX::setsid(); exec { $ARGV[0] } @ARGV or die "exec: $!"' sh -c "$worker" workass-lane "$output" "$done_file" "$@" >>"$output" 2>&1 &
 else
   python3=$(command -v python3 2>/dev/null || true)
-  [ -n "$python3" ] || { echo "setsid command is unavailable and python3 fallback is missing" >&2; exit 2; }
+  if [ -z "$python3" ] || ! "$python3" -c '' >/dev/null 2>&1; then
+    echo "no session launcher: setsid, perl and a runnable python3 are all unavailable" >&2
+    exit 2
+  fi
   nohup "$python3" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' sh -c "$worker" workass-lane "$output" "$done_file" "$@" >>"$output" 2>&1 &
 fi
 pid=$!
