@@ -12,7 +12,8 @@ const styles = readFileSync(new URL('../src/styles/app.css', import.meta.url), '
 let vite: ViteDevServer;
 let Transcript: React.ComponentType<{ chat: Chat | null }>;
 let Composer: React.ComponentType<{ chat: Chat | null }>;
-let appStore: { state: Record<string, unknown>; clearToastTimers(): void };
+let appStore: { state: Record<string, unknown>; clearToastTimers(): void; applyAcp(msg: Msg, ev: unknown): void };
+let mergeLiveTimelineEvents: (authoritative: Msg['events'], live: Msg['events'], includePlan: boolean) => Msg['events'];
 
 before(async () => {
   vite = await createServer({
@@ -27,9 +28,10 @@ before(async () => {
   ({ Composer } = await vite.ssrLoadModule('/src/components/Composer.tsx') as {
     Composer: React.ComponentType<{ chat: Chat | null }>;
   });
-  appStore = (await vite.ssrLoadModule('/src/store/store.ts') as {
-    store: { state: Record<string, unknown>; clearToastTimers(): void };
-  }).store;
+  ({ store: appStore, mergeLiveTimelineEvents } = await vite.ssrLoadModule('/src/store/store.ts') as {
+    store: typeof appStore;
+    mergeLiveTimelineEvents: typeof mergeLiveTimelineEvents;
+  });
 });
 
 after(async () => { appStore.clearToastTimers(); await vite.close(); });
@@ -115,8 +117,9 @@ test('a requested Stop replaces live work chrome immediately without claiming co
 });
 
 // Approved mock working-indicator v5 · option 3 (2026-10-12): "Working" with
-// the call running now, no thinking headline, and the turn's tool rows kept
-// out of the transcript while it runs (they open from the Working line).
+// the call running now, the latest thought kept above it (thinking-v6 · B), and
+// the turn's tool rows kept out of the transcript while it runs (they open
+// from the Working line).
 test('a running turn shows Working with the current call and keeps its tool rows inside it', () => {
   const now = Date.now();
   const chat = {
@@ -148,7 +151,7 @@ test('a running turn shows Working with the current call and keeps its tool rows
   assert.match(html, /Working<span class="workdots"/);
   assert.match(html, /2 tools/);
   assert.match(html, /class="worknow mono"[^>]*>.*python render_review_panel\.py --silver/);
-  assert.doesNotMatch(html, /Clarifying execution issues/, 'the thinking headline is gone from the live line');
+  assert.match(html, /class="workthought"[^>]*>.*Clarifying execution issues.*<button type="button" class="workhead"/, 'the latest thought stays above the line');
   assert.doesNotMatch(html, /silver_review\.py/, 'finished tool rows wait inside the Working line, not in the transcript');
   assert.match(html, /PROSE-BEFORE-TOOLS/);
 });
@@ -192,4 +195,46 @@ test('a settled turn folds its thinking and tool calls into one Worked row', () 
   assert.doesNotMatch(html, />Pensó</, 'thinking settles inside the Worked row, not the transcript');
   assert.doesNotMatch(html, /silver_review\.py|render_review_panel/, 'tool rows wait inside the closed Worked row');
   assert.match(html, /SUBAGENT-TASK-ROW/, 'subagent task rows stay where they landed');
+});
+
+function thoughtTexts(msg: Msg): string[] {
+  return msg.events.filter((event) => event.kind === 'thinking').map((event) => (event as { text: string }).text);
+}
+
+// One thinking event per thought, where it happened: windows back to back
+// extend the thought in progress, a call in between starts the next one, and
+// a replayed window is dropped wherever it landed (daemon upsertThinkingTimeline).
+test('thinking windows split into thoughts around the calls between them', () => {
+  const msg = assistant('split-thoughts', '', { status: 'running' });
+  appStore.applyAcp(msg, { kind: 'thinking', text: 'Locating the review tooling.' });
+  appStore.applyAcp(msg, { kind: 'thinking', text: 'It should live under tools/.' });
+  msg.events.push({ key: 'read', at: 0, kind: 'tool', id: 'read', toolKind: 'read', title: 'Read', status: 'completed',
+    command: null, terminalId: null, input: null, output: null, location: 'tools/silver_review.py' });
+  appStore.applyAcp(msg, { kind: 'thinking', text: 'The floor mask fills the gap.' });
+  appStore.applyAcp(msg, { kind: 'thinking', text: 'Locating the review tooling.' });
+  appStore.applyAcp(msg, { kind: 'thinking', text: 'The floor mask fills the gap.' });
+  assert.deepEqual(msg.events.map((event) => event.kind), ['thinking', 'tool', 'thinking']);
+  assert.deepEqual(thoughtTexts(msg), ['Locating the review tooling.\nIt should live under tools/.', 'The floor mask fills the gap.']);
+});
+
+// A snapshot behind the live stream keeps its thoughts; live windows join the
+// thought they share a window with, and a thought it has not seen yet stays
+// its own, after the rest.
+test('live thoughts merge into the actor snapshot without collapsing into one', () => {
+  const tool = { key: 'timeline:tool:read', at: 0, kind: 'tool' as const, id: 'read', toolKind: 'read', title: 'Read', status: 'completed',
+    command: null, terminalId: null, input: null, output: null, location: null };
+  const authoritative: Msg['events'] = [
+    { key: 'timeline:thinking:a', at: 0, kind: 'thinking', text: 'First thought.' },
+    tool,
+    { key: 'timeline:thinking:a:1', at: 0, kind: 'thinking', text: 'Second thought.' },
+  ];
+  const live: Msg['events'] = [
+    { key: 't-live-1', at: 0, kind: 'thinking', text: 'First thought.' },
+    { ...tool, key: 'read' },
+    { key: 't-live-2', at: 0, kind: 'thinking', text: 'Second thought.\nIt keeps going.' },
+    { key: 't-live-3', at: 0, kind: 'thinking', text: 'Third thought.' },
+  ];
+  const merged = mergeLiveTimelineEvents(authoritative, live, false);
+  assert.deepEqual(merged.map((event) => event.kind === 'tool' ? 'tool' : event.key), ['timeline:thinking:a', 'tool', 'timeline:thinking:a:1', 't-live-3']);
+  assert.deepEqual(thoughtTexts({ ...assistant('merged', ''), events: merged }), ['First thought.', 'Second thought.\nIt keeps going.', 'Third thought.']);
 });

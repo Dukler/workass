@@ -538,12 +538,31 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .worktrail.live { color: var(--acc); }
 .workspin { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--line2); border-top-color: var(--acc);
   animation: workorbit .85s linear infinite; }
+/* Thinking (approved mock thinking-v6 · B): the latest thought stays above the
+   line, three lines at most; the dock grows with it and Transcript reserves
+   the height through --thinklive-h. In the list each thought is one line,
+   aligned with the call rows, opening to the whole reasoning. */
+.thinklive.working { height: auto; }
+.workthought { display: flex; gap: 9px; align-items: flex-start; margin: 0 0 7px; max-width: 760px;
+  font-size: 13px; line-height: 1.5; color: var(--muted); }
+.workthought .thoughtic { margin-top: 2px; }
+.workthoughttext { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.thoughtic { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; color: var(--faint); }
+.thoughtic svg { width: 14px; height: 14px; stroke-width: 1.35; display: block; }
+.thoughthead { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 2px 2px; margin: 0;
+  background: none; border: 0; font: inherit; font-size: 12px; color: var(--muted); cursor: pointer; text-align: left; }
+.thoughthead:hover { color: var(--ink2); }
+.thoughtline { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.thoughtfull { margin: 2px 0 8px 22px; padding: 1px 0 1px 12px; border-left: 2px solid var(--line); max-width: 640px;
+  font-size: 12.5px; line-height: 1.6; color: var(--ink2); }
+.thoughtfull > :first-child { margin-top: 0; }
+.thoughtfull > :last-child { margin-bottom: 0; }
+
 /* Settled: the same head at rest, heading the turn it summarizes. */
 .workfold { margin: 2px 0 12px; display: flex; flex-direction: column; }
 .workfold .workhead { color: var(--muted); font-size: 13px; }
 .workfold .workhead:hover .worklabel { color: var(--ink2); }
 .workfold .worklist { overflow: visible; }
-.worklist .steprow { margin: 4px 0 6px; }
 @media (prefers-reduced-motion: reduce) {
   .workorbit::after, .workspin { animation: none; }
   .workdots::after { animation: none; content: '...'; }
