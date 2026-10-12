@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Chatbox v10 — goal band, images, effort picker</title>
+<style>
+:root{
+  --bg:#0f0e0d; --panel:#1d1c1a; --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#908b82; --dim:#6f6a63;
+  --acc:#4fa583; --amber:#d8a05a; --del:#d96b5f;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0; background:var(--bg)}
+body{color:var(--ink); font:14px/1.6 -apple-system,BlinkMacSystemFont,system-ui,sans-serif; -webkit-font-smoothing:antialiased}
+.col{max-width:1000px; margin:0 auto; padding-left:16px; padding-right:16px; padding:26px 0 30px}
+svg{display:block}
+.ic{width:15px; height:15px; stroke:currentColor; fill:none; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round}
+.dirhead{color:var(--ink); font-size:15px; font-weight:600; margin:0 0 2px}
+.note{color:var(--dim); font-size:12.5px; margin:0 0 22px; max-width:860px}
+.sp{flex:1}
+.ph{color:var(--faint)}
+.caret{display:inline-block; width:1.5px; height:1.1em; background:var(--ink); vertical-align:-2px; margin-left:1px}
+.ctxp{margin:0 0 4px; font-size:14px; line-height:1.65}
+.stamp{color:var(--dim); font-size:12.5px; margin:0 0 22px}
+
+/* transcript bits */
+.upill{margin:0 0 18px auto; width:fit-content; max-width:620px; background:#262422; border-radius:18px; padding:10px 15px; font-size:14px; line-height:1.55}
+.upill .thumbs{margin:2px 0 8px; justify-content:flex-end}
+.live{margin:0 0 18px}
+.live .top{display:flex; align-items:center; gap:9px; font-size:13.5px; color:var(--ink2)}
+.live .top .meta{color:var(--dim); font-size:12.5px}
+.live .now{margin:2px 0 0 22px; font:12px var(--mono); color:var(--dim)}
+.orbit{position:relative; width:13px; height:13px; flex:none}
+.orbit::before{content:""; position:absolute; inset:0; border-radius:50%; border:1.5px solid rgba(79,165,131,.28)}
+.orbit::after{content:""; position:absolute; width:4px; height:4px; border-radius:50%; background:var(--acc); top:-1px; left:4.5px; transform:rotate(130deg); transform-origin:2px 7.5px}
+
+/* today's box */
+.comp{position:relative; background:var(--panel); border:1px solid var(--line2); border-radius:15px; overflow:hidden}
+.inner{position:relative; padding:11px 13px 9px}
+.ta{font-size:13.5px; line-height:1.5; padding-right:34px; min-height:20px}
+.send{position:absolute; right:9px; bottom:8px; width:26px; height:26px; border-radius:50%; background:var(--ink); color:var(--bg); display:grid; place-items:center}
+.send.off{opacity:.4}
+.send .ic{width:13px; height:13px; stroke-width:2.2}
+.thumbs{display:flex; gap:8px}
+.inner .thumbs{margin:2px 0 10px}
+.thumb{position:relative; width:46px; height:46px; border-radius:9px; overflow:hidden; box-shadow:0 0 0 1px rgba(255,255,255,.1); flex:none}
+.thumb i{position:absolute; inset:0}
+.t1 i{background:linear-gradient(160deg,#2b3a35 0 38%,#1d2624 38% 100%)}
+.t2 i{background:linear-gradient(180deg,#3a3329 0 46%,#26221d 46%)}
+.t2 i::after{content:""; position:absolute; left:14px; top:12px; width:18px; height:18px; border-radius:50%; background:rgba(216,160,90,.35)}
+.thumb .x{position:absolute; top:3px; right:3px; width:16px; height:16px; border-radius:50%; background:rgba(15,14,13,.85); color:var(--ink2); display:grid; place-items:center; font-size:9px}
+
+/* the goal band: the chat's standing state, its own shade */
+.goal{display:flex; align-items:center; gap:9px; padding:8px 12px 8px 13px; background:#161513; border-bottom:1px solid var(--line); font-size:12.5px; color:var(--ink2); min-width:0}
+.goal .tg{width:15px; height:15px; color:var(--acc); flex:none}
+.goal .lab{color:var(--muted); flex:none}
+.goal .obj{min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.goal .st{display:inline-flex; align-items:center; gap:6px; color:var(--muted); flex:none; font-variant-numeric:tabular-nums}
+.goal .st i{width:6px; height:6px; border-radius:50%; background:var(--acc)}
+.goal .act{color:var(--dim); display:flex; flex:none; padding:2px}
+.goal .act .ic{width:14px; height:14px}
+.goal.paused .tg{color:var(--muted)} .goal.paused .st i{background:var(--dim)}
+.goal.blocked .tg{color:var(--amber)} .goal.blocked .st{color:var(--amber)} .goal.blocked .st i{background:var(--amber)}
+.goal.done .tg{color:var(--muted)} .goal.done .obj{color:var(--muted)}
+
+/* t3-style row */
+.comprow{margin:8px 0 0; padding:0 2px; display:flex; align-items:center; gap:4px; font-size:12.5px}
+.t3{display:inline-flex; align-items:center; font-size:13px; color:var(--muted)}
+.t3 .it{position:relative; display:inline-flex; align-items:center; gap:7px; padding:0 9px; height:26px; border-radius:7px}
+.t3 .it .name{color:var(--ink2)}
+.t3 .it .cv{width:9px; height:9px; color:var(--dim); stroke-width:1.3}
+.t3 .it .mk{width:16px; height:16px; flex:none}
+.t3 .it .ic{width:15px; height:15px; color:var(--muted)}
+.t3 .vr{width:1px; height:16px; background:var(--line2); flex:none}
+.t3 .it.amber, .t3 .it.amber .name, .t3 .it.amber .ic{color:var(--amber)}
+.t3 .it.open{background:rgba(255,255,255,.07)}
+.cicon{color:var(--muted); display:flex; padding:0 5px}
+.cicon .ic{width:15px; height:15px}
+.ring{width:20px; height:20px; margin-left:6px}
+
+/* t3-style menu (effort picker) */
+.anchor{position:relative}
+.menu{position:absolute; right:0; bottom:calc(100% + 62px); width:250px; padding:4px; border-radius:10px; background:#232220; box-shadow:0 0 0 1px rgba(255,255,255,.1), 0 16px 36px -10px rgba(0,0,0,.85); z-index:5}
+.menu .gl{padding:6px 8px 4px; font-size:11.5px; font-weight:500; color:var(--muted)}
+.menu .ri{display:flex; align-items:center; gap:8px; min-height:30px; padding:4px 8px; border-radius:6px; font-size:13px; color:var(--ink)}
+.menu .ri.on{background:rgba(242,239,233,.08)}
+.menu .ri.hl{background:rgba(255,255,255,.05)}
+.menu .ri .d{display:block; font-size:11.5px; color:var(--muted)}
+.menu .ri .badge{font-size:10.5px; color:var(--muted); padding:0 6px; height:18px; line-height:16px; border-radius:5px; box-shadow:inset 0 0 0 1px var(--line2)}
+.menu .ri .ck{margin-left:auto; color:var(--ink2); width:13px; height:13px; stroke-width:2}
+.menu .div{height:1px; background:var(--line); margin:4px -4px}
+
+.sec{display:none}
+body:not(.one) .sec{display:block; border-bottom:1px solid rgba(255,255,255,.05)}
+body.one .sec.show{display:block}
+.label{color:#5d5952; font:11px var(--mono); letter-spacing:.05em; text-transform:uppercase; margin:0 0 10px}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="plus" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></symbol>
+    <symbol id="mic" viewBox="0 0 16 16"><rect x="5.5" y="2" width="5" height="8" rx="2.5"/><path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2"/></symbol>
+    <symbol id="up" viewBox="0 0 16 16"><path d="M8 12.5v-9M4.5 7L8 3.5 11.5 7"/></symbol>
+    <symbol id="chev" viewBox="0 0 10 10"><path d="M2.5 3.8L5 6.3l2.5-2.5"/></symbol>
+    <symbol id="check" viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7"/></symbol>
+    <symbol id="target" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6"/><circle cx="8" cy="8" r="2.6"/><circle cx="8" cy="8" r=".6" fill="currentColor"/></symbol>
+    <symbol id="pause" viewBox="0 0 16 16"><path d="M6 4.5v7M10 4.5v7"/></symbol>
+    <symbol id="play" viewBox="0 0 16 16"><path d="M5.5 4l6 4-6 4z"/></symbol>
+    <symbol id="x" viewBox="0 0 16 16"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></symbol>
+    <symbol id="lock" viewBox="0 0 16 16"><rect x="3.5" y="7" width="9" height="6.5" rx="1.6"/><path d="M5.5 7V5.3a2.5 2.5 0 0 1 4.8-1"/></symbol>
+    <symbol id="ring41" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" fill="none" stroke="rgba(255,255,255,.14)" stroke-width="2.2"/><circle cx="10" cy="10" r="7" fill="none" stroke="#4fa583" stroke-width="2.2" stroke-dasharray="18 44" stroke-linecap="round" transform="rotate(-90 10 10)"/></symbol>
+    <symbol id="claude" viewBox="0 0 20 20"><g stroke="#cc7a52" stroke-width="1.5" stroke-linecap="round"><line x1="10" y1="10" x2="10" y2="3.5"/><line x1="10" y1="10" x2="13.25" y2="4.37"/><line x1="10" y1="10" x2="15.63" y2="6.75"/><line x1="10" y1="10" x2="16.5" y2="10"/><line x1="10" y1="10" x2="15.63" y2="13.25"/><line x1="10" y1="10" x2="13.25" y2="15.63"/><line x1="10" y1="10" x2="10" y2="16.5"/><line x1="10" y1="10" x2="6.75" y2="15.63"/><line x1="10" y1="10" x2="3.5" y2="10"/><line x1="10" y1="10" x2="4.37" y2="6.75"/><line x1="10" y1="10" x2="6.75" y2="4.37"/><line x1="10" y1="10" x2="4.37" y2="13.25"/></g></symbol>
+  </defs>
+</svg>
+
+<template id="goal-active">
+  <div class="goal"><svg class="ic tg"><use href="#target"/></svg><span class="lab">Meta</span><span class="obj">finish the Gold review for all 14 frames and write the diff summary</span><span class="sp"></span><span class="st"><i></i>activa · 12m</span><span class="act" title="Pausar"><svg class="ic"><use href="#pause"/></svg></span><span class="act" title="Quitar meta"><svg class="ic"><use href="#x"/></svg></span></div>
+</template>
+<template id="row">
+  <div class="comprow">
+    <span class="t3"><span class="it amber"><svg class="ic"><use href="#lock"/></svg><span class="name">Permitir todo</span><svg class="ic cv"><use href="#chev"/></svg></span></span>
+    <span class="cicon"><svg class="ic"><use href="#plus"/></svg></span><span class="cicon"><svg class="ic"><use href="#mic"/></svg></span>
+    <span class="sp"></span>
+    <span class="t3"><span class="it"><svg class="mk"><use href="#claude"/></svg><span class="name">Opus 5.5</span><svg class="ic cv"><use href="#chev"/></svg></span><span class="vr"></span><span class="it">XHigh · Fast<svg class="ic cv"><use href="#chev"/></svg></span></span>
+    <svg class="ring"><use href="#ring41"/></svg>
+  </div>
+</template>
+
+<!-- 1 -->
+<section class="sec" id="g1"><div class="col">
+  <div class="dirhead">1 · Writing a message while a goal runs</div>
+  <div class="note">The darker band on top is the chat's goal: it was set once with /goal and stays until it's done, paused or cleared. Everything under the band is the message you're writing: the two images belong to this message only.</div>
+  <p class="ctxp">Silver is done for frame 3812. Continuing with the Gold side of the goal.</p>
+  <div class="stamp">hace 1 min</div>
+  <div class="comp">
+    <div class="gslot"></div>
+    <div class="inner">
+      <div class="thumbs"><span class="thumb t1"><i></i></span><span class="thumb t2"><i></i><span class="x">✕</span></span></div>
+      <div class="ta">use these two crops as the reference for the floor seam<span class="caret"></span></div>
+      <span class="send"><svg class="ic"><use href="#up"/></svg></span>
+    </div>
+  </div>
+  <div class="rowslot"></div>
+</div></section>
+
+<!-- 2 -->
+<section class="sec" id="g2"><div class="col">
+  <div class="dirhead">2 · Right after sending</div>
+  <div class="note">The images and the text left with the message (they're in your bubble now). The goal band is still there, because it belongs to the chat, not to any one message.</div>
+  <div class="upill"><div class="thumbs"><span class="thumb t1"><i></i></span><span class="thumb t2"><i></i></span></div>use these two crops as the reference for the floor seam</div>
+  <div class="live"><div class="top"><span class="orbit"></span><span>Working...</span><span class="meta">3s</span></div></div>
+  <div class="comp">
+    <div class="gslot"></div>
+    <div class="inner"><div class="ta"><span class="ph">Contale a tu agente qué sigue…</span></div><span class="send off"><svg class="ic"><use href="#up"/></svg></span></div>
+  </div>
+  <div class="rowslot"></div>
+</div></section>
+
+<!-- 3 -->
+<section class="sec" id="g3"><div class="col">
+  <div class="dirhead">3 · The goal band in each state</div>
+  <div class="note">Paused shows ▶ to resume; blocked or out of budget turns amber and says why; completed stays one quiet line until you clear it.</div>
+  <div class="comp" style="margin-bottom:12px"><div class="gslot"></div><div class="inner"><div class="ta"><span class="ph">Contale a tu agente qué sigue…</span></div><span class="send off"><svg class="ic"><use href="#up"/></svg></span></div></div>
+  <div class="comp" style="margin-bottom:12px"><div class="goal paused"><svg class="ic tg"><use href="#target"/></svg><span class="lab">Meta</span><span class="obj">finish the Gold review for all 14 frames and write the diff summary</span><span class="sp"></span><span class="st"><i></i>en pausa · 12m</span><span class="act" title="Reanudar"><svg class="ic"><use href="#play"/></svg></span><span class="act"><svg class="ic"><use href="#x"/></svg></span></div><div class="inner"><div class="ta"><span class="ph">Contale a tu agente qué sigue…</span></div><span class="send off"><svg class="ic"><use href="#up"/></svg></span></div></div>
+  <div class="comp" style="margin-bottom:12px"><div class="goal blocked"><svg class="ic tg"><use href="#target"/></svg><span class="lab">Meta</span><span class="obj">finish the Gold review for all 14 frames and write the diff summary</span><span class="sp"></span><span class="st"><i></i>límite de uso alcanzado</span><span class="act"><svg class="ic"><use href="#play"/></svg></span><span class="act"><svg class="ic"><use href="#x"/></svg></span></div><div class="inner"><div class="ta"><span class="ph">Contale a tu agente qué sigue…</span></div><span class="send off"><svg class="ic"><use href="#up"/></svg></span></div></div>
+  <div class="comp"><div class="goal done"><svg class="ic tg"><use href="#check"/></svg><span class="lab">Meta cumplida</span><span class="obj">finish the Gold review for all 14 frames and write the diff summary</span><span class="sp"></span><span class="st">en 41m</span><span class="act"><svg class="ic"><use href="#x"/></svg></span></div><div class="inner"><div class="ta"><span class="ph">Contale a tu agente qué sigue…</span></div><span class="send off"><svg class="ic"><use href="#up"/></svg></span></div></div>
+</div></section>
+
+<!-- 4 -->
+<section class="sec" id="e1"><div class="col">
+  <div class="dirhead">4 · Effort picker, t3code style</div>
+  <div class="note">Click "XHigh · Fast": a plain menu, one group per setting like t3code — effort levels with the default marked, then speed. Picking closes it.</div>
+  <div style="height:330px"></div>
+  <div class="comp">
+    <div class="inner"><div class="ta"><span class="ph">Contale a tu agente qué sigue…</span></div><span class="send off"><svg class="ic"><use href="#up"/></svg></span></div>
+  </div>
+  <div class="comprow">
+    <span class="t3"><span class="it amber"><svg class="ic"><use href="#lock"/></svg><span class="name">Permitir todo</span><svg class="ic cv"><use href="#chev"/></svg></span></span>
+    <span class="cicon"><svg class="ic"><use href="#plus"/></svg></span><span class="cicon"><svg class="ic"><use href="#mic"/></svg></span>
+    <span class="sp"></span>
+    <span class="t3"><span class="it"><svg class="mk"><use href="#claude"/></svg><span class="name">Opus 5.5</span><svg class="ic cv"><use href="#chev"/></svg></span><span class="vr"></span>
+      <span class="it open anchor">XHigh · Fast<svg class="ic cv"><use href="#chev"/></svg>
+        <div class="menu">
+          <div class="gl">Esfuerzo</div>
+          <div class="ri">Low</div>
+          <div class="ri">Medium</div>
+          <div class="ri hl">High <span class="badge">Default</span></div>
+          <div class="ri on">XHigh<svg class="ic ck"><use href="#check"/></svg></div>
+          <div class="ri">Max</div>
+          <div class="div"></div>
+          <div class="gl">Velocidad</div>
+          <div class="ri">Standard</div>
+          <div class="ri on"><span>Fast<span class="d">más rápido, mayor consumo</span></span><svg class="ic ck"><use href="#check"/></svg></div>
+        </div>
+      </span>
+    </span>
+    <svg class="ring"><use href="#ring41"/></svg>
+  </div>
+</div></section>
+
+<script>
+for (const el of document.querySelectorAll('.gslot')) el.replaceWith(document.getElementById('goal-active').content.cloneNode(true));
+for (const el of document.querySelectorAll('.rowslot')) el.replaceWith(document.getElementById('row').content.cloneNode(true));
+const p = new URLSearchParams(location.search);
+const s = p.get('s');
+if (s) { document.body.classList.add('one'); document.getElementById(s)?.classList.add('show'); }
+</script>
+</body>
+</html>
