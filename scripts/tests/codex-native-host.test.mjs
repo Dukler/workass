@@ -833,9 +833,16 @@ test('native /goal applies settings and context before start, spans native conti
   assert.equal(updates.filter((update) => update.content?.text?.includes('Native goal checkpoint.\n')).length, 2);
   assert.equal(updates.filter((update) => update.sessionUpdate === '_workass_input_consumed' && update.clientUserMessageId === 'goal-operation').length, 1);
   assert.ok(updates.some((update) => update.toolCallId === 'workass-native-goal' && update.content?.text.includes('Goal: complete')));
+  // The composer's goal band reads structured snapshots, not the card text.
+  const snapshots = updates.filter((update) => update.sessionUpdate === '_workass_codex_goal');
+  assert.ok(snapshots.some((update) => update.goal?.status === 'active' && update.goal.objective.includes('finish the migration')));
+  assert.equal(snapshots.at(-1).goal.status, 'complete');
   const status = await peer.goal('/goal');
   assert.equal(status.error, undefined);
   assert.equal((await peer.goal('/goal clear')).error, undefined);
+  const cleared = peer.messages.filter((message) => message.method === 'session/update').map((message) => message.params.update)
+    .filter((update) => update.sessionUpdate === '_workass_codex_goal');
+  assert.equal(cleared.at(-1).goal, null, 'clearing the goal reports it gone');
   assert.equal((await peer.goal('/goal resume')).error.code, -32603);
 });
 

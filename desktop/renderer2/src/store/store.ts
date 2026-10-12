@@ -8,7 +8,7 @@ import { loadComposerDraft, saveComposerDraft } from '../composer-drafts';
 
 import { useSyncExternalStore } from 'react';
 import type { AppState, Chat, Msg, ThinkingEvent, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
-import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, AgentRouteRequest, AgentRouteResponse, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
+import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ChatGoalEvent, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, AgentRouteRequest, AgentRouteResponse, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
 import { call, callThrow, has, on, bridgeReady } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
 import { LEAN_SESSION_SAVE_MODE, loadMirror, saveMirror, type Mirror, type MirrorMsg } from './persistence';
@@ -480,6 +480,11 @@ export class Store {
   // and in-flight promise ensure every later draft/queue/session operation waits
   // for that durable receipt rather than treating React as chat authority.
   private pendingChatCreates = new Set<string>();
+  // Local creates the daemon already confirmed while its session echo is still
+  // on the way. Without this, anything that ensured the chat in that gap (the
+  // boot flush, a first send) minted a second create operation, which the
+  // daemon rightly refused as a conflict with the existing actor.
+  private confirmedChatCreates = new Set<string>();
   // A remote chat:create receipt is durable, but an older session:get may
   // already be in flight. Keep that confirmed optimistic row until a remote
   // snapshot echoes it, without causing ensureChatCreated to send it twice.
@@ -1997,7 +2002,7 @@ export class Store {
     // become visible before daemon-global chatOrder catches up; clearing first
     // allowed that early echo to move a freshly created thread to the bottom.
     for (const id of this.pendingChatCreates) {
-      if (authoritativeChatIDs.has(id)) this.pendingChatCreates.delete(id);
+      if (authoritativeChatIDs.has(id)) { this.pendingChatCreates.delete(id); this.confirmedChatCreates.delete(id); }
     }
     for (const chat of restored.chats) {
       if (!this.pendingPresentationOperations.has(chat.id)) {
@@ -2670,7 +2675,7 @@ export class Store {
       }
       const authoritativeIDs = new Set(normalized.map((chat) => chat.id));
       for (const id of this.pendingChatCreates) {
-        if (authoritativeIDs.has(id)) this.pendingChatCreates.delete(id);
+        if (authoritativeIDs.has(id)) { this.pendingChatCreates.delete(id); this.confirmedChatCreates.delete(id); }
       }
       for (const id of this.remoteChatCreateFences) {
         if (authoritativeIDs.has(id)) this.remoteChatCreateFences.delete(id);
@@ -2865,6 +2870,7 @@ export class Store {
     this.pendingTurnStarts.delete(tabId);
     this.drainingQueues.delete(tabId);
     this.pendingChatCreates.delete(tabId);
+    this.confirmedChatCreates.delete(tabId);
     this.remoteChatCreateFences.delete(tabId);
     this.pendingChatCreateOperations.delete(tabId);
     this.pendingChatCreatePromises.delete(tabId);
@@ -3310,6 +3316,7 @@ export class Store {
       chat.commandCatalog = event.commandCatalog ?? undefined;
       this.bumpApp(false);
     });
+    on('onChatGoal', (e) => this.applyChatGoal(e as ChatGoalEvent));
     on('onAgentApply', (e) => this.onAgentApply(e as AgentApply));
     if (typeof window !== 'undefined') {
       const bootSocketGen = typeof window.__workassSocketGen === 'number' ? window.__workassSocketGen : 0;
@@ -3388,6 +3395,7 @@ export class Store {
       this.restoreDraftImages(live.chats, this.state.chats);
       this.state.meta = live.meta;
       this.state.groups = live.groups;
+      this.state.defaultProviderId = live.defaultProviderId;
       this.state.planUsageByProvider = live.planUsageByProvider;
       this.state.planUsageLoadingByProvider = live.planUsageLoadingByProvider;
       this.state.processes = live.processes;
@@ -3729,14 +3737,28 @@ export class Store {
   // modelScores — preserving every other key (models, permissionModes, chatMode,
   // …) and reconciling any concurrent edit made since the last read. If the read
   // fails we abort rather than write a blob that would wipe the other keys.
+  // A daemon that names its settingsRevision refuses the write if another
+  // window saved in between (B-8); we re-read and merge again, a few times.
   private async flushModelPreferences() {
     this.settingsSaveTimer = null;
     if (!has('setSettings') || !has('getSettings')) return;
-    const reply = await call('getSettings');
-    if (!reply || typeof reply !== 'object') return;   // can't confirm the blob — never clobber
-    const withScores = withModelScoresInSettings(settingsFromReply(reply), this.state.modelScores);
-    const merged = withModelFavoritesInSettings(withScores, this.state.modelFavorites);
-    await call('setSettings', merged);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const reply = await call('getSettings');
+      if (!reply || typeof reply !== 'object') return;   // can't confirm the blob — never clobber
+      const withScores = withModelScoresInSettings(settingsFromReply(reply), this.state.modelScores);
+      const merged = withModelFavoritesInSettings(withScores, this.state.modelFavorites);
+      const revision = (reply as { settingsRevision?: unknown }).settingsRevision;
+      if (typeof revision !== 'string' || !revision) { await call('setSettings', merged); return; }
+      try {
+        await callThrow('setSettings', merged, { expectedRevision: revision });
+        return;
+      } catch (err) {
+        if (!/settings changed since they were read/.test(String((err as Error)?.message ?? err))) {
+          console.warn('[api] setSettings threw', err);
+          return;
+        }
+      }
+    }
   }
 
   // ---- devices / access requests (real; controller-gated) --------------
@@ -3842,7 +3864,7 @@ export class Store {
     return chat;
   }
   private async ensureChatCreated(chat: Chat): Promise<boolean> {
-    if (!this.pendingChatCreates.has(chat.id)) return true;
+    if (!this.pendingChatCreates.has(chat.id) || this.confirmedChatCreates.has(chat.id)) return true;
     const tabId = chat.id;
     const chatId = chat.chatId;
     if (!chatId) {
@@ -3896,7 +3918,10 @@ export class Store {
         this.pendingChatCreates.delete(tabId);
         this.remoteChatCreateFences.add(tabId);
       }
-      else this.scheduleScopedSync(['session']);
+      else {
+        this.confirmedChatCreates.add(tabId);
+        this.scheduleScopedSync(['session']);
+      }
       return true;
     })().finally(() => {
       this.pendingChatCreatePromises.delete(tabId);
@@ -4126,7 +4151,43 @@ export class Store {
   private commandCatalogAsked = new Set<string>();
   requestCommandCatalog(chatId: string) {
     const chat = this.chat(chatId);
-    if (chat) this.maybeFetchCommandCatalog(chat);
+    if (chat) {
+      this.maybeFetchCommandCatalog(chat);
+      this.maybeFetchChatGoal(chat);
+    }
+  }
+
+  // The chat's provider goal (Codex /goal) is daemon-memory-only like the
+  // command catalog: live chat:goal events replace it, and a client that
+  // attached late asks once.
+  private chatGoalAsked = new Set<string>();
+  private maybeFetchChatGoal(chat: Chat) {
+    if (chat.goal !== undefined || !chat.chatId || this.chatGoalAsked.has(chat.id)) return;
+    this.chatGoalAsked.add(chat.id);
+    void call('chatGoalGet', chat.id, chat.chatId).then((reply) => {
+      if (reply) this.applyChatGoal({ ...reply, tabId: reply.tabId ?? chat.id });
+    }).finally(() => { this.chatGoalAsked.delete(chat.id); });
+  }
+
+  // Goal band controls (Codex /goal): the same commands a person would type,
+  // sent without touching the composer draft. While a turn runs they steer it
+  // (pause / clear); resume starts inference, so it waits for an idle chat.
+  goalCommand(chatId: string, action: 'pause' | 'resume' | 'clear'): Promise<boolean> {
+    const chat = this.chat(chatId);
+    if (!chat) return Promise.resolve(false);
+    const command = `/goal ${action}`;
+    if (this.isChatRunning(chatId)) {
+      if (action === 'resume') return Promise.resolve(false);
+      return this.steerRunning(chatId, command, undefined, this.captureDraftSubmission(chatId, '\u0000goal-control'));
+    }
+    return this._send(chat, command);
+  }
+
+  applyChatGoal(event: ChatGoalEvent) {
+    const chat = event.tabId ? this.chat(event.tabId) : null;
+    if (!chat || (event.chatId && chat.chatId && event.chatId !== chat.chatId)) return;
+    chat.goal = event.goal ? { ...event.goal, observedAt: event.observedAt ?? Date.now() } : null;
+    this.bumpChat(chat);
   }
   private maybeFetchCommandCatalog(chat: Chat) {
     if (chat.commandCatalog || !chat.chatId) return;
@@ -5775,6 +5836,7 @@ export class Store {
       } else {
         this.captureCatalogHashes(groups);
         this.state.groups = groups;
+        this.state.defaultProviderId = c.defaultProviderId ?? null;
         reportShellCatalog(groups);
       }
       // Provider names are presentation metadata only. A catalog replay does

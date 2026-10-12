@@ -360,6 +360,19 @@ func (r *providerChatRuntime) exactActor(tabID, chatID string) (*providerChatAct
 	return actor, state, nil
 }
 
+// ChatGoal reads the chat's latest provider goal (Codex /goal) once the tab is
+// proven to own the chat. The goal is live provider state, kept per chat by
+// the manager; connected clients already have it from the chat:goal event.
+func (r *providerChatRuntime) ChatGoal(tabID, chatID string) (map[string]any, error) {
+	if _, _, err := r.exactActor(tabID, chatID); err != nil {
+		return nil, err
+	}
+	if r.manager == nil {
+		return map[string]any{"tabId": tabID, "chatId": chatID, "goal": nil}, nil
+	}
+	return r.manager.ChatGoal(tabID, chatID), nil
+}
+
 // ChatCommands reads the provider capability snapshot from the durable actor.
 // The manager's command cache is executor materialization only and is never a
 // late-client or restart authority after cutover.

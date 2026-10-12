@@ -636,6 +636,19 @@ class CodexSession {
     if (goal && (!GOAL_STATUSES.has(goal.status) || typeof goal.objective !== 'string')) throw new Error('Codex returned an invalid goal state');
     this.goal = goal || null;
     this.goalRevision++;
+    // Structured goal state for the composer's goal band, on every change and
+    // whether or not a prompt is running (the card below only shows mid-turn).
+    // Workass-private: decoded by the daemon into the additive chat:goal event.
+    notify(this.threadId, {
+      sessionUpdate: '_workass_codex_goal',
+      goal: this.goal ? {
+        objective: safeErrorText(this.goal.objective),
+        status: this.goal.status,
+        tokensUsed: this.goal.tokensUsed ?? 0,
+        tokenBudget: this.goal.tokenBudget ?? null,
+        timeUsedSeconds: this.goal.timeUsedSeconds ?? 0,
+      } : null,
+    });
     if (this.activePrompt && goal?.status === 'active') this.goalRun = true;
     if (this.activePrompt) {
       notify(this.threadId, {

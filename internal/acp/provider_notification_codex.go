@@ -12,6 +12,13 @@ func (codexProviderNotificationStrategy) Decode(update, _ map[string]any) (provi
 		}
 		return providerNotification{Kind: providerNotificationSpawnedWork, SpawnedWork: &decoded}, true
 	}
+	if asString(update["sessionUpdate"]) == "_workass_codex_goal" {
+		goal, ok := decodeProviderGoal(update["goal"])
+		if !ok {
+			return providerNotification{}, false
+		}
+		return providerNotification{Kind: providerNotificationGoal, Goal: goal, GoalSet: true}, true
+	}
 	if strings.TrimSpace(asString(update["sessionUpdate"])) != "_workass_codex_steer_consumed" {
 		return providerNotification{}, false
 	}

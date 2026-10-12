@@ -2145,6 +2145,7 @@ func (m *Manager) Catalog(ctx context.Context) map[string]any {
 
 func catalogPayload(groups []CatalogGroup, defaultID string) map[string]any {
 	models, modes := []Model{}, []Mode{}
+	effectiveID := ""
 	var fallback *CatalogGroup
 	for i := range groups {
 		if groups[i].Status != providerStatusReady || len(groups[i].Models) == 0 {
@@ -2153,6 +2154,7 @@ func catalogPayload(groups []CatalogGroup, defaultID string) map[string]any {
 		if groups[i].ProviderID == defaultID {
 			models = append([]Model(nil), groups[i].Models...)
 			modes = append([]Mode(nil), groups[i].Modes...)
+			effectiveID = defaultID
 			fallback = nil
 			break
 		}
@@ -2163,12 +2165,19 @@ func catalogPayload(groups []CatalogGroup, defaultID string) map[string]any {
 	if fallback != nil {
 		models = append([]Model(nil), fallback.Models...)
 		modes = append([]Mode(nil), fallback.Modes...)
+		effectiveID = fallback.ProviderID
 	}
-	return map[string]any{
+	payload := map[string]any{
 		"models": models,
 		"modes":  modes,
 		"groups": groups,
 	}
+	// Additive: the provider a chat with no explicit provider runs on, so the
+	// composer can name its model instead of a bare "Modelo".
+	if effectiveID != "" {
+		payload["defaultProviderId"] = effectiveID
+	}
+	return payload
 }
 
 // CatalogSnapshotGroups returns the current visible catalog without probing or

@@ -2075,6 +2075,35 @@ func TestConfigAndSettingsPersistInStateDir(t *testing.T) {
 	if again, err := hub.Invoke("settings:get", nil); err != nil || !strings.Contains(fmt.Sprint(again), "reviewer") {
 		t.Fatalf("a refused settings:set still changed the stored settings: %v %v", again, err)
 	}
+	// Compare-and-swap: a writer holding the current revision saves; one
+	// holding a revision from before that save is refused and changes nothing.
+	read, err := hub.Invoke("settings:get", nil)
+	if err != nil {
+		t.Fatalf("settings:get: %v", err)
+	}
+	readRevision, _ := read.(map[string]any)["settingsRevision"].(string)
+	if readRevision == "" {
+		t.Fatalf("settings:get carries no settingsRevision: %#v", read)
+	}
+	casInput := map[string]any{}
+	for key, value := range read.(map[string]any)["settings"].(map[string]any) {
+		casInput[key] = value
+	}
+	casInput["prApprover"] = "first-writer"
+	if _, err := hub.Invoke("settings:set", []any{casInput, map[string]any{"expectedRevision": readRevision}}); err != nil {
+		t.Fatalf("settings:set with the current revision: %v", err)
+	}
+	casInput["prApprover"] = "stale-writer"
+	if _, err := hub.Invoke("settings:set", []any{casInput, map[string]any{"expectedRevision": readRevision}}); err == nil || !strings.Contains(err.Error(), "settings changed since they were read") {
+		t.Fatalf("a stale settings revision was not refused: %v", err)
+	}
+	if again, _ := hub.Invoke("settings:get", nil); !strings.Contains(fmt.Sprint(again), "first-writer") {
+		t.Fatalf("a refused stale write changed the stored settings: %v", again)
+	}
+	casInput["prApprover"] = " reviewer "
+	if _, err := hub.Invoke("settings:set", []any{casInput}); err != nil {
+		t.Fatalf("settings:set without a revision stays a plain replace: %v", err)
+	}
 	settingsPath := filepath.Join(stateDir, "app-settings.json")
 	rawSettings := readJSONFile(t, settingsPath)
 	if _, ok := rawSettings["ignored"]; ok {

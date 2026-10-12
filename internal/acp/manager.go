@@ -98,13 +98,16 @@ type Manager struct {
 	// commandCatalogs is the memory-only Claude command-catalog cache, keyed by
 	// tab/chat (commandCatalogKey). Never persisted; see command_catalog.go.
 	commandCatalogs map[string]*commandCatalogEntry
-	spareSeq        int64
-	spareGen        int64
-	bridgeSeq       int64
-	jobSeq          int64
-	permSeq         int64
-	subagentSeq     int64
-	agentOwnerSeq   int64
+	// chatGoals is the memory-only provider goal cache (Codex /goal), keyed
+	// like commandCatalogs; see chat_goal.go.
+	chatGoals     map[string]*chatGoalEntry
+	spareSeq      int64
+	spareGen      int64
+	bridgeSeq     int64
+	jobSeq        int64
+	permSeq       int64
+	subagentSeq   int64
+	agentOwnerSeq int64
 
 	jobMu                        sync.Mutex
 	jobEndMu                     sync.RWMutex
@@ -354,6 +357,7 @@ func NewManager(opts Options) *Manager {
 		spawnedWork:             make(map[string]*spawnedWorkRecord),
 		spawnedCandidates:       make(map[string]spawnedWorkCandidate),
 		commandCatalogs:         make(map[string]*commandCatalogEntry),
+		chatGoals:               make(map[string]*chatGoalEntry),
 		loopStop:                make(chan struct{}),
 		envBySession:            make(map[string]*chatEnvTracker),
 		envByChatID:             make(map[string]*chatEnvTracker),
@@ -1013,6 +1017,7 @@ func (m *Manager) ForgetChat(ctx context.Context, tabID, chatID string, operatio
 		delete(m.chatProviders, key)
 	}
 	m.forgetCommandCatalogChatLocked(tabID)
+	m.forgetChatGoalChatLocked(tabID)
 	// A deleted chat's closed engine must not linger in the process list as a
 	// ghost "active / failed" row.
 	removedBridge := false
@@ -1066,6 +1071,7 @@ func (m *Manager) Reset() bool {
 	m.usageBySession = make(map[string]contextUsage)
 	m.planUsageByProvider = make(map[string]PlanUsageSnapshot)
 	m.commandCatalogs = make(map[string]*commandCatalogEntry)
+	m.chatGoals = make(map[string]*chatGoalEntry)
 	m.mu.Unlock()
 	m.spawnedWorkMu.Lock()
 	m.spawnedWork = make(map[string]*spawnedWorkRecord)
@@ -3058,6 +3064,7 @@ func (m *Manager) forgetSession(sessionID string, bridge *Bridge) {
 	}
 	delete(m.usageBySession, sessionID)
 	m.forgetCommandCatalogSessionLocked(sessionID)
+	m.forgetChatGoalSessionLocked(sessionID)
 }
 
 // provisionAgentOwner makes the per-session bearer capability valid before

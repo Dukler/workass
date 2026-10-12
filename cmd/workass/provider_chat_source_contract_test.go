@@ -223,6 +223,7 @@ func TestPhaseCSessionStoreSurfaceIsExplicit(t *testing.T) {
 var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	"Catalog":                        {},
 	"CatalogSnapshotGroups":          {},
+	"ChatGoal":                       {},
 	"ConsumeRateLimitResetCredit":    {},
 	"DetectProviders":                {},
 	"KillAllProcesses":               {},
@@ -582,7 +583,7 @@ func phaseCChatIDChannel(channel string) bool {
 var phaseCExpectedChatHandlers = map[string]struct{}{
 	"session:get": {}, "session:save": {},
 	"chat:queue-replace": {}, "chat:queue-resume": {}, "chat:create": {}, "chat:presentation-save": {}, "chat:runtime-controls-save": {}, "chat:delete": {},
-	"chat:archive-append": {}, "chat:archive-load": {}, "chat:commands-get": {}, "chat:permission-decide": {}, "chat:permissions-pending": {},
+	"chat:archive-append": {}, "chat:archive-load": {}, "chat:commands-get": {}, "chat:goal-get": {}, "chat:permission-decide": {}, "chat:permissions-pending": {},
 	"chat:env-get": {}, "chat:checkpoints": {}, "chat:rewind": {}, "chat:diff": {},
 	"app-chat:new-session": {}, "app-chat:refresh-plan-usage": {}, "app-chat:fork": {}, "app-chat:close-session": {},
 	"app-chat:reset": {}, "app-chat:set-model": {}, "app-chat:set-mode": {}, "app-chat:steer": {}, "app-chat:use-rate-limit-reset": {}, "app-chat:detect-acp": {},

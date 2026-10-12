@@ -1900,6 +1900,38 @@ func TestUnownedClaudeProviderSessionCannotMutateNativeLineage(t *testing.T) {
 	}
 }
 
+// Text before and after a tool call are separate pieces of prose: the daemon
+// separates them with a paragraph break unless whitespace already does, so a
+// folded-away call never glues two sentences ("link:While"). A thought never
+// sets the break: it can arrive mid-sentence.
+func TestToolCallStartsANewParagraphOfText(t *testing.T) {
+	t.Parallel()
+	manager, events := newFakeManager(t, "", Options{RSSSampleInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	session, err := manager.NewSession(ctx, SessionOptions{TabID: "glue-tab", ChatID: "glue-chat"})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	job, err := manager.StartJob(ctx, JobStartOptions{Kind: "app-chat", SessionID: session.SessionID, ChatID: "glue-chat", TabID: "glue-tab", Prompt: "[fake:tool-glue] go"})
+	if err != nil {
+		t.Fatalf("start job: %v", err)
+	}
+	events.waitJobEnd(t, jobID(job), 5*time.Second)
+	var streamed strings.Builder
+	for _, event := range events.snapshot() {
+		payload, _ := event.payload.(map[string]any)
+		if event.channel == "job:event" && asString(payload["type"]) == "data" {
+			streamed.WriteString(asString(payload["chunk"]))
+		}
+	}
+	want := "First, what the daemon returns for that link:\n\nWhile that runs, half a sentence stays whole. Done. Next"
+	if got := streamed.String(); got != want {
+		t.Fatalf("streamed text = %q, want %q", got, want)
+	}
+}
+
 func TestOrdinaryPromptCarriesStableWorkassOperationID(t *testing.T) {
 	t.Parallel()
 	manager, events := newFakeManager(t, "input-receipt", Options{RSSSampleInterval: time.Hour})
@@ -3658,6 +3690,24 @@ func (s *fakeACP) handlePrompt(id json.RawMessage, params map[string]any) {
 			"terminalReason": "completed", "stopReason": "end_turn", "harnessEvidence": true,
 			"backgroundTasks": []any{}, "sessionCrons": []any{},
 		})
+		return
+	}
+	if strings.Contains(fakePromptText(params["prompt"]), "[fake:tool-glue]") {
+		text := func(value string) {
+			s.notify(sessionID, map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": value}})
+		}
+		tool := func(id string) {
+			s.notify(sessionID, map[string]any{"sessionUpdate": "tool_call", "toolCallId": id, "title": "Bash", "kind": "execute", "status": "in_progress"})
+			s.notify(sessionID, map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": id, "status": "completed"})
+		}
+		text("First, what the daemon returns for that link:")
+		tool("glue-1")
+		text("While that runs, half ")
+		s.notify(sessionID, map[string]any{"sessionUpdate": "agent_thought_chunk", "content": map[string]any{"type": "text", "text": "thinking"}})
+		text("a sentence stays whole. Done. ")
+		tool("glue-2")
+		text("Next")
+		s.respond(id, map[string]any{"stopReason": "end_turn"})
 		return
 	}
 	if strings.Contains(fakePromptText(params["prompt"]), "[fake:claude-updates]") {

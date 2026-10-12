@@ -44,9 +44,9 @@ function Topbar({ chat, onFind }: { chat: Chat | null; onFind: () => void }) {
           rows only. */}
       <span className="ticons">
         <button className="tico" title="Buscar en este chat · ⌘F" aria-label="Buscar en este chat" onClick={onFind}><IcSearch /></button>
-        <button className="tico" title="Terminal (próximamente)"><IcTerminal /></button>
-        <button className="tico" title="Cambios (próximamente)"><IcChanges /></button>
-        <button className="tico" title="Vista previa (próximamente)"><IcPreview /></button>
+        <button className="tico soon" title="Terminal (próximamente)"><IcTerminal /></button>
+        <button className="tico soon" title="Cambios (próximamente)"><IcChanges /></button>
+        <button className="tico soon" title="Vista previa (próximamente)"><IcPreview /></button>
         {app.hasBrowserChannels && chat && localBrowserOwnsChat(chat.id, chat.machineId) && (
           <button className={`tico ${pane === 'browser' ? 'on' : ''}`} title="Navegador" aria-pressed={pane === 'browser'} onClick={() => store.toggleBrowser()}><IcBrowser /></button>
         )}

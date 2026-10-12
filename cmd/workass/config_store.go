@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -360,9 +363,33 @@ func (s *appSettingsStore) get() map[string]any {
 	return normalizeSettings(s.readRawLocked())
 }
 
+// settingsRevision fingerprints the stored settings so a writer can prove it
+// read the blob it is replacing (settings:set expectedRevision).
+func settingsRevision(settings map[string]any) string {
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:8])
+}
+
+// errSettingsConflict refuses a write that would replace settings the caller
+// never read: another window or client changed them in between.
+var errSettingsConflict = errors.New("settings changed since they were read")
+
 func (s *appSettingsStore) set(input map[string]any) (map[string]any, error) {
+	return s.setExpecting(input, "")
+}
+
+// setExpecting replaces the settings; a non-empty expectedRevision must match
+// the stored blob or the write is refused (compare-and-swap).
+func (s *appSettingsStore) setExpecting(input map[string]any, expectedRevision string) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if expectedRevision != "" && settingsRevision(normalizeSettings(s.readRawLocked())) != expectedRevision {
+		return nil, errSettingsConflict
+	}
 	next := normalizeSettings(input)
 	if s.path == "" {
 		return next, nil

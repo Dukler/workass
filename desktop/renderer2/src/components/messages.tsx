@@ -230,7 +230,7 @@ export function groupDuration(tools: ToolEvent[], nowMs: number, running: boolea
   return fmtDur(Math.max(...ends) - start);
 }
 
-// The one-line answer to "what is it doing right now?" under the live Working
+// The one-line answer to "what is it doing right now?" beside the live Working
 // line: the same evidence the tool row shows (command, path), else its action.
 export function toolLiveLine(t: ToolEvent): string {
   const act = toolPresentation(t);

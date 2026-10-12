@@ -261,7 +261,7 @@ func (m *Manager) observeProviderLaneEvent(channel string, raw any) error {
 		return nil
 	case "chat:commands":
 		return m.verifyProviderLaneCommandCatalog(payload)
-	case "agent:apply", "app:update", "chat:catalog", "chat:context-limit", "chat:env", "chat:plan-usage",
+	case "agent:apply", "app:update", "chat:catalog", "chat:context-limit", "chat:env", "chat:goal", "chat:plan-usage",
 		"proc:changed", "providers:list", "providers:update-progress", "providers:updates":
 		// Explicitly non-semantic/global or derived notifications. They never
 		// mutate the actor transcript, lane identity, queue, or operation journal.

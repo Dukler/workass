@@ -1066,3 +1066,55 @@ test('a metadata acknowledgement does not invalidate an unrelated composer submi
       'only the captured edit is consumed; metadata replies do not own input');
   }
 });
+
+// A local create the daemon already confirmed is never sent again while its
+// session echo is on the way: the boot flush or a first send ensuring the
+// chat in that gap used to mint a second create the daemon refused.
+test('a confirmed local create is not sent twice before its session echo', async () => {
+  const creates: any[] = [];
+  await withWindowApi({
+    chatCreate: async (opts: any) => {
+      creates.push(opts);
+      return { ok: true, tabId: opts.tabId, chatId: opts.chatId, operationId: opts.operationId, actorRevision: 1, presentationRevision: 1, globalRevision: 1 };
+    },
+  }, async () => {
+    const subject = subjectWithChats([]);
+    const created = subject.newChat(false, '/tmp/workass-boot');
+    assert.equal(await (subject as any).ensureChatCreated(created), true);
+    assert.equal(await (subject as any).ensureChatCreated(created), true);
+    assert.equal(creates.length, 1, 'the second ensure reused the confirmed create');
+  });
+});
+
+// B-8: settings:set replaces the whole blob. A daemon that names its
+// settingsRevision refuses a write over settings another window saved after
+// our read; the save re-reads, keeps that window's change and lands ours.
+test('a settings save that loses the race re-reads and keeps the other window change', async () => {
+  let stored: Record<string, unknown> = { prApprover: 'me', modelScores: {}, modelFavorites: [] };
+  let revision = 1;
+  const writes: any[] = [];
+  let otherWindowWrites = true;
+  await withWindowApi({
+    getSettings: async () => ({ settings: structuredClone(stored), settingsRevision: `r${revision}` }),
+    setSettings: async (settings: any, options?: { expectedRevision: string }) => {
+      writes.push({ settings, options });
+      if (otherWindowWrites) {
+        // Another window saved between our read and our write.
+        otherWindowWrites = false;
+        stored = { ...stored, prApprover: 'other-window' };
+        revision++;
+      }
+      if (options && options.expectedRevision !== `r${revision}`) throw new Error('settings changed since they were read');
+      stored = settings; revision++;
+      return settings;
+    },
+  }, async () => {
+    const subject = subjectWithChats([]);
+    subject.state.modelScores = { codex: { 'gpt-test': { intelligence: 9 } } };
+    await (subject as any).flushModelPreferences();
+  });
+  assert.equal(writes.length, 2, 'the refused write was retried once');
+  assert.equal(writes[1].options.expectedRevision, 'r2');
+  assert.equal(stored.prApprover, 'other-window', 'the other window change survived');
+  assert.deepEqual((stored.modelScores as any).codex['gpt-test'].intelligence, 9, 'our change landed');
+});

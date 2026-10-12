@@ -334,7 +334,7 @@ export interface PermissionResolved {
   resolvedAt: string;
 }
 
-export interface ChatCatalog { models: ModelOption[]; modes: ModeOption[]; groups?: CatalogGroup[]; }
+export interface ChatCatalog { models: ModelOption[]; modes: ModeOption[]; groups?: CatalogGroup[]; defaultProviderId?: string; }
 
 // Additive chat:compacted event (P4/D1 auto-compaction). Feature-detected —
 // the daemon bridge may not expose onChatCompacted yet.
@@ -469,6 +469,11 @@ export interface CheckpointRestored { chatId: string; turnSeq: number; repos: un
 // ---- R7 notifications (controller-only events; bridge does not subscribe yet) -
 export interface ChatCommandsEvent { tabId?: string; chatId?: string; sessionId?: string; commandCatalog?: CommandCatalog | null; }
 export interface ChatCommandsReply { supported?: boolean; live?: boolean; commandCatalog?: CommandCatalog | null; }
+// A provider's standing goal for a chat (Codex /goal), additive chat:goal
+// event + chat:goal-get reply. goal null = none set (or never reported).
+export type ChatGoalStatus = 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
+export interface ChatGoal { objective: string; status: ChatGoalStatus; tokensUsed: number; tokenBudget: number | null; timeUsedSeconds: number; }
+export interface ChatGoalEvent { tabId?: string | null; chatId?: string | null; providerId?: string; observedAt?: number; goal: ChatGoal | null; }
 
 export interface NotifyEvent { title: string; body: string; tabId: string | null; ts?: string; }
 export interface NotifyBacklog { items: NotifyEvent[]; }
@@ -624,7 +629,9 @@ export interface WorkassApi {
   // Controller-gated write of the app-settings blob (settings:set). REPLACES the
   // stored blob, so callers round-trip getSettings and touch only their slice.
   // Feature-detected: an older bridge omits it → scores stay in-memory only.
-  setSettings?: (settings: unknown) => Promise<unknown>;
+  // expectedRevision (the settingsRevision getSettings returned) makes the write
+  // a compare-and-swap: the daemon refuses it if the blob changed since.
+  setSettings?: (settings: unknown, options?: { expectedRevision: string }) => Promise<unknown>;
   getConfig?: () => Promise<DaemonConfig>;
   getSession?: () => Promise<unknown>;
   saveSession?: (snap: unknown) => Promise<boolean | { ok: boolean; globalRevision: number }>;
@@ -780,6 +787,8 @@ export interface WorkassApi {
   // invoke (the catalog is daemon-memory-only, so hydration cannot carry it).
   onChatCommands?: (cb: (e: ChatCommandsEvent) => void) => void;
   chatCommandsGet?: (tabId: string, chatId: string) => Promise<ChatCommandsReply>;
+  onChatGoal?: (cb: (e: ChatGoalEvent) => void) => void;
+  chatGoalGet?: (tabId: string, chatId: string) => Promise<ChatGoalEvent>;
 }
 
 export interface VisualizationRegistration {
