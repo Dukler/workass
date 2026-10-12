@@ -40,6 +40,7 @@ function assistant(id: string, content: string, extra: Partial<Msg> = {}): Msg {
   return { id, role: 'assistant', content, status: 'done', at: null, events: [], ...extra };
 }
 
+// A running reply shows only finished lines (stream-reveal.ts), so live fixture text ends its line.
 function chatWithLiveSteer(): Chat {
   return {
     id: 'tab-steering-render',
@@ -58,7 +59,7 @@ function chatWithLiveSteer(): Chat {
       user('prompt', 'INITIAL-PROMPT'),
       assistant('head', 'ASSISTANT-BEFORE-DIRECTION', { turnRootId: 'head', turnTerminal: false }),
       user('steer', 'STEER-DIRECTION-TEXT', { turnRootId: 'head', steerState: 'sending' }),
-      assistant('tail', 'ASSISTANT-AFTER-DIRECTION', {
+      assistant('tail', 'ASSISTANT-AFTER-DIRECTION\n', {
         turnRootId: 'head', turnTerminal: true, status: 'running', jobId: 'job-steering-render',
       }),
     ],
@@ -137,7 +138,7 @@ test('a goal checkpoint final stays before subsequent tools and commentary throu
   appendAssistantChunk(message, 'GOAL-CHECKPOINT 🧭.\n\n', 'final_answer');
   message.events.push({ key: 'later-tool', at: message.content.length, kind: 'tool', id: 'later-tool', toolKind: 'execute', title: 'GOAL-LATER-TOOL', status: 'completed', command: 'echo goal', terminalId: null, input: null, output: null, location: null });
   appendAssistantChunk(message, 'GOAL-CONTINUATION.\n\n', 'commentary');
-  appendAssistantChunk(message, 'GOAL-COMPLETION.', 'final_answer');
+  appendAssistantChunk(message, 'GOAL-COMPLETION.\n', 'final_answer');
   chat.messages = [user('goal-input', '/goal fixture'), message];
   const verify = (subject: Chat) => {
     const markup = renderTranscript(subject);
@@ -162,7 +163,7 @@ test('a goal checkpoint final stays before subsequent tools and commentary throu
 test('a previously saved final answer advances above new continuation text without losing its phase', () => {
   const chat = chatWithLiveSteer();
   const message = assistant('legacy-goal-output', 'EARLIER-COMMENTARY.\n\n', { status: 'running', result: 'SAVED-GOAL-CHECKPOINT.\n\n' });
-  appendAssistantChunk(message, 'NEW-GOAL-CONTINUATION.', 'commentary');
+  appendAssistantChunk(message, 'NEW-GOAL-CONTINUATION.\n', 'commentary');
   chat.messages = [user('legacy-goal-input', '/goal fixture'), message];
   const markup = renderTranscript(chat);
   assert.ok(markup.indexOf('SAVED-GOAL-CHECKPOINT') < markup.indexOf('NEW-GOAL-CONTINUATION'));

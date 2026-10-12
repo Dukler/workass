@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import type { ListItem, SignedBlock } from './blocks';
 import { renderInline, type InlineMediaResolver } from './inline';
 import { CodeBlock } from './CodeBlock';
@@ -25,15 +25,31 @@ function renderList(ordered: boolean, items: ListItem[], keyBase: string, media?
   );
 }
 
-function BlockView({ sb, media, visualizeTabId, visualizeChatId, artifactOrigin }: { sb: SignedBlock; media?: InlineMediaResolver; visualizeTabId?: string; visualizeChatId?: string; artifactOrigin?: string }) {
+function BlockView({ sb, media, visualizeTabId, visualizeChatId, artifactOrigin, streaming }: { sb: SignedBlock; media?: InlineMediaResolver; visualizeTabId?: string; visualizeChatId?: string; artifactOrigin?: string; streaming?: boolean }) {
+  // The paragraph text this block showed last. While its reply streams, what
+  // a render adds at the end goes in its own .mdfresh span so only the new
+  // sentence fades in (CSS, opacity only); the rest is never re-animated.
+  const shownRaw = useRef<string | null>(null);
+  const raw = sb.block.kind === 'p' ? sb.block.raw : null;
+  useEffect(() => { shownRaw.current = raw; });
   // Dev-only render probe: inert unless a global collector is present. Used to
   // verify that memo keeps sealed blocks from re-rendering during streaming.
   const probe = (globalThis as { __blockRenders?: string[] }).__blockRenders;
   if (probe) probe.push(sb.sig.slice(0, 28));
   const b = sb.block;
   switch (b.kind) {
-    case 'p':
+    case 'p': {
+      const before = shownRaw.current;
+      if (streaming && before && b.raw.length > before.length && b.raw.startsWith(before)) {
+        return (
+          <p className="p">
+            {renderInline(before, 'p', true, media)}
+            <span className="mdfresh" key={before.length}>{renderInline(b.raw.slice(before.length), `pf${before.length}`, true, media)}</span>
+          </p>
+        );
+      }
       return <p className="p">{renderInline(b.raw, 'p', true, media)}</p>;
+    }
     case 'heading':
       return <div className={`mdh mdh${Math.min(b.level, 3)}`}>{renderInline(b.raw, 'h', true, media)}</div>;
     case 'code':
@@ -70,4 +86,5 @@ export const MarkdownBlock = memo(BlockView, (a, b) => (
   && a.visualizeTabId === b.visualizeTabId
   && a.visualizeChatId === b.visualizeChatId
   && a.artifactOrigin === b.artifactOrigin
+  && a.streaming === b.streaming
 ));

@@ -71,7 +71,7 @@ test('assistant transcript rows bind imported media to their authored Markdown p
   const source = '/workspace/preview.png';
   const msg = {
     id: 'assistant-media', role: 'assistant', content: '', status: 'running', at: null, events: [],
-    result: `[Open preview](${source})\n![Preview](${source})`,
+    result: `[Open preview](${source})\n![Preview](${source})\n`, // finished lines: a running reply shows only those
     images: [{ mimeType: 'image/png', data: 'cG5n', name: 'Preview', source }],
   };
   const html = renderToStaticMarkup(React.createElement(AssistantMessage, { tabId: 'media-tab', msg, profile: 'dev' }));

@@ -6,7 +6,7 @@ import { AssistantMessage, AssistantTurnBlock, LiveTurnPulse } from './Assistant
 import { UserPill } from './messages';
 import { IcDoc, IcTerminal, IcChanges, IcPreview, IcRail, IcBrowser, IcChevron, IcClose, IcSearch } from '../icons';
 import { normalizeWorkspacePath, rememberLastProject, workspaceName } from '../workspaces';
-import { createTranscriptPinScheduler, latestOrdinaryUserMessageId, transcriptPinnedAfterScroll } from '../transcript-scroll';
+import { createScrollSpring, createTranscriptPinScheduler, latestOrdinaryUserMessageId, transcriptPinnedAfterScroll } from '../transcript-scroll';
 import { projectSteeringPresentation } from '../chat/steering-presentation';
 import { assistantTurnBlockRanges } from '../timeline-layout';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
@@ -285,10 +285,10 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     turnBlockStarts.set(start, end);
     for (let index = start + 1; index < end; index++) turnBlockMembers.add(index);
   }
-  // While a reply streams here, the transcript follows its end with the
-  // browser's own smooth scroll (compositor-driven, no per-frame JS) instead of
-  // snapping a whole line up on every delta; reduced motion and every other
-  // moment (sending, switching chats, jumping) pin instantly.
+  // While a reply streams here, the transcript follows its end with a damped
+  // spring (createScrollSpring) instead of snapping a whole line up per delta
+  // or bobbing through one smooth scroll per finished sentence; reduced motion
+  // and every other moment (sending, switching chats, jumping) pin instantly.
   const streamFollow = useRef(false);
   streamFollow.current = !!runningMessage && !prefersReducedMotion();
   // The tallest the transcript has been during this turn. Half-written
@@ -574,13 +574,19 @@ export function Transcript({ chat }: { chat: Chat | null }) {
       setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
       clearTimer: (handle) => window.clearTimeout(handle),
     });
+    const spring = createScrollSpring({
+      el,
+      isPinned: () => stick.current,
+      requestFrame: (callback) => requestAnimationFrame(callback),
+      cancelFrame: (handle) => cancelAnimationFrame(handle),
+    });
     function follow() {
       if (!el) return;
       if (streamFollow.current) {
-        const target = el.scrollHeight - el.clientHeight;
-        if (target - el.scrollTop >= 1) el.scrollTo({ top: target, behavior: 'smooth' });
+        spring.kick();
         return;
       }
+      spring.stop();
       setScrollTop(el, el.scrollHeight);
     }
     const onResize = () => {
@@ -607,6 +613,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     scheduler.reconcile();
     return () => {
       scheduler.dispose();
+      spring.stop();
       mo.disconnect();
       ro.disconnect();
       document.removeEventListener('visibilitychange', reconcile);

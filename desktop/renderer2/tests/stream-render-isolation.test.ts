@@ -58,7 +58,8 @@ test('a live steered block renders accepted direction once in canonical order wh
   const steer = user('steer-receipt', 'STEER-RECEIPT-CONTENT', {
     turnRootId: 'assistant-head', steerState: 'applied',
   });
-  const tail = assistant('assistant-tail', 'MUTABLE-TAIL-V1', {
+  // A running reply shows only finished lines (stream-reveal.ts).
+  const tail = assistant('assistant-tail', 'MUTABLE-TAIL-V1\n', {
     turnRootId: 'assistant-head', turnTerminal: true, status: 'running', jobId: 'job-stream-isolation',
   });
   const chat = {
@@ -91,7 +92,7 @@ test('a live steered block renders accepted direction once in canonical order wh
   assert.equal(occurrences(initial, 'STEER-RECEIPT-CONTENT'), 1);
 
   const beforeSegments = buildCoalescedTurnBlockTimelineSegments([head, tail]);
-  tail.content = 'MUTABLE-TAIL-V2-LATEST';
+  tail.content = 'MUTABLE-TAIL-V2-LATEST\n';
   appStore.bump(`msg:${tail.id}`);
   const afterSegments = buildCoalescedTurnBlockTimelineSegments([head, tail]);
   assert.equal(afterSegments[0], beforeSegments[0], 'the sealed head keeps its memo input by reference');

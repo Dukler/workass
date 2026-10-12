@@ -558,6 +558,19 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .thoughtfull > :first-child { margin-top: 0; }
 .thoughtfull > :last-child { margin-bottom: 0; }
 
+/* Streaming reveal (approved demo stream-v2 · frases, 2026-10-12): while a
+   reply streams, every new block, list item, table row and sentence fades in
+   once. Opacity only — composited, no layout; nothing on screen re-animates. */
+@keyframes mdfresh { from { opacity: 0; } }
+.amsg.streaming .chatfind-text > *,
+.amsg.streaming .doclist > li,
+.amsg.streaming .mdtable tbody tr,
+.amsg.streaming .mdfresh { animation: mdfresh 280ms ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .amsg.streaming .chatfind-text > *, .amsg.streaming .doclist > li,
+  .amsg.streaming .mdtable tbody tr, .amsg.streaming .mdfresh { animation: none; }
+}
+
 /* Settled: the same head at rest, heading the turn it summarizes. */
 .workfold { margin: 2px 0 12px; display: flex; flex-direction: column; }
 .workfold .workhead { color: var(--muted); font-size: 13px; }

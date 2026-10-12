@@ -13,6 +13,7 @@ import { relTime } from '../rel-time';
 import { messageImageSrc } from '../image-drafts';
 import { connectedArtifactURL } from '../connected-artifacts';
 import { configuredModelUnavailable } from '../model-selection';
+import { revealedText } from '../stream-reveal';
 import { markdownImageReferences, normalizeMarkdownTarget, type InlineMediaResolver } from '../markdown/inline';
 
 function renderedImageReferences(blocks: SignedBlock[]): Array<{ label: string; target: string }> {
@@ -116,13 +117,27 @@ function AssistantSliceBody({
   // sentence as two spaced Markdown paragraphs.
   let segs = coalescedSegments ?? buildTranscriptTimelineSegments(msg);
   for (const event of msg.events) if (event.kind === 'thinking') segs = detachTimelineEvent(segs, event.key);
+  const running = terminal && msg.status === 'running';
+  const inlineResult = msg.result && !msg.events.some((event) => event.kind === 'result') ? msg.result : '';
+  // While the reply streams, its very end shows only up to the last finished
+  // sentence, list item, code line or table row (stream-reveal.ts): half-written
+  // markdown never renders, so nothing flips type or shrinks mid-stream. Prose
+  // that a tool call already followed is final and stays whole (a live turn's
+  // trailing tools are deferred out of the layout, so ask the events).
+  if (running && !inlineResult) {
+    const tail = segs.length - 1;
+    const last = segs[tail];
+    if (last && 'prose' in last && !msg.events.some((event) => event.kind === 'tool' && event.at >= last.end)) {
+      const prose = revealedText(last.prose);
+      if (prose !== last.prose) segs = [...segs.slice(0, tail), { ...last, prose }];
+    }
+  }
   const parsedSegments = segs.map((segment) => 'prose' in segment ? parseBlocks(segment.prose) : null);
-  const resultBlocks = msg.result && !msg.events.some(event => event.kind === 'result') ? parseBlocks(msg.result) : [];
+  const resultBlocks = inlineResult ? parseBlocks(running ? revealedText(inlineResult) : inlineResult) : [];
   const { media, gallery } = assistantMediaResolver(tabId, msg.images, parsedSegments.flatMap((blocks) => blocks ?? []).concat(resultBlocks), artifactOrigin);
   const visualizeChatId = store.chat(tabId)?.chatId ?? '';
   const blockKeys = stableMarkdownBlockKeys(msg, parsedSegments.flatMap((blocks) => blocks?.map((block) => block.sig) ?? []));
   let blockIndex = 0;
-  const running = terminal && msg.status === 'running';
   // A turn cut off by a daemon disconnect: shown as a quiet "sin conexión" row,
   // not the generic model-error stamp and never as a resend affordance.
   const interrupted = terminal && msg.status === 'failed' && !!msg.interrupted;
@@ -137,7 +152,7 @@ function AssistantSliceBody({
   const workItems = running ? [] : msg.events.filter(isWorkItem);
 
   return (
-    <div className="amsg">
+    <div className={`amsg${running ? ' streaming' : ''}`}>
       {running && <ControlsSkippedRow tabId={tabId} />}
       {workItems.length > 0 && <WorkedRow items={workItems} />}
       {segs.map((s, segmentIndex) => {
@@ -156,14 +171,14 @@ function AssistantSliceBody({
         if ('event' in s) return <EventView key={s.event.key} ev={s.event} />;
         return (
           <div className="chatfind-text" data-chat-find-text key={`prose-${segmentIndex}`}>
-            {parsedSegments[segmentIndex]!.map((sb) => <MarkdownBlock key={blockKeys[blockIndex++]} sb={sb} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} artifactOrigin={artifactOrigin} />)}
+            {parsedSegments[segmentIndex]!.map((sb) => <MarkdownBlock key={blockKeys[blockIndex++]} sb={sb} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} artifactOrigin={artifactOrigin} streaming={running} />)}
           </div>
         );
       })}
 
       {!!resultBlocks.length && (
         <div className="chatfind-text" data-chat-find-text>
-          {resultBlocks.map((block, index) => <MarkdownBlock key={`result-${index}-${block.sig}`} sb={block} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} artifactOrigin={artifactOrigin} />)}
+          {resultBlocks.map((block, index) => <MarkdownBlock key={`result-${index}`} sb={block} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} artifactOrigin={artifactOrigin} streaming={running} />)}
         </div>
       )}
       <StructuredAssistantImages images={gallery} />
