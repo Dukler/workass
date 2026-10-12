@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Thinking, the t3code way — v9 (one line, in the text)</title>
+<style>
+:root{
+  --bg:#0f0e0d; --panel:#1b1a18; --field:#1d1c1a; --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#8a857d; --dim:#6f6a63;
+  --acc:#4fa583; --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0; background:#0a0908}
+body{color:var(--ink); font:14px/1.6 -apple-system,BlinkMacSystemFont,system-ui,sans-serif; -webkit-font-smoothing:antialiased}
+svg{display:block}
+.ic{width:14px; height:14px; stroke:currentColor; fill:none; stroke-width:1.35; stroke-linecap:round; stroke-linejoin:round; flex:none}
+.sec{padding:26px 22px 30px; border-bottom:1px solid rgba(255,255,255,.05)}
+.dirhead{font-size:15px; font-weight:600; margin:0 0 2px}
+.note{color:var(--muted); font-size:12.5px; margin:0 0 16px; max-width:860px}
+.pair{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:18px}
+.pair > div{min-width:0}
+.cap{color:#6b665f; font:11px var(--mono); letter-spacing:.05em; text-transform:uppercase; margin:0 0 7px}
+.win{background:var(--bg); border:1px solid var(--line); border-radius:12px; overflow:hidden; height:330px; display:flex; flex-direction:column}
+.doc{flex:1; padding:18px 22px 0; overflow:hidden; display:flex; flex-direction:column; justify-content:flex-end}
+.doc p{margin:0 0 10px; color:var(--ink); font-size:13.5px; line-height:1.62}
+.ubub{align-self:flex-end; background:#262523; border:1px solid var(--line); border-radius:14px; padding:7px 12px; font-size:13px; margin:0 0 12px}
+/* the Working row: one fixed line, never moves */
+.dock{height:44px; padding:10px 22px; display:flex; align-items:center; gap:9px; font-size:13.5px; color:var(--ink2); white-space:nowrap; min-width:0}
+.orbit{position:relative; width:13px; height:13px; flex:none}
+.orbit::before{content:""; position:absolute; inset:0; border-radius:50%; border:1.5px solid rgba(79,165,131,.28)}
+.orbit::after{content:""; position:absolute; width:4px; height:4px; border-radius:50%; background:var(--acc); top:-1px; left:4.5px; transform-origin:2px 7.5px; animation:orb 1s linear infinite}
+@keyframes orb{to{transform:rotate(360deg)}}
+.dots::after{content:'...'; display:inline-block; width:1.2em; animation:dots 1.6s steps(1) infinite}
+@keyframes dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}}
+.meta{color:var(--faint); font-size:12.5px; flex:none}
+.chev{color:var(--faint); flex:none}
+.now{display:inline-flex; align-items:center; gap:7px; min-width:0; color:var(--faint); font-size:12px; margin-left:3px}
+.now .t{min-width:0; overflow:hidden; text-overflow:ellipsis; font-family:var(--mono)}
+.now.thought .t{font-family:inherit; font-style:italic; font-size:12.5px; color:var(--muted)}
+.comp{margin:0 14px 14px; border:1px solid var(--line2); border-radius:14px; background:var(--field); height:44px; padding:0 14px; display:flex; align-items:center; color:var(--dim); font-size:13px}
+/* C: the live thought in the reading flow, above the row */
+.flowthought{display:flex; gap:8px; margin:2px 0 6px; color:var(--muted); font-size:12.5px; line-height:1.6; font-style:italic}
+.flowthought .ic{margin-top:3px; color:var(--faint)}
+.flowthought .t{display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden}
+/* A: the open list */
+.list{margin:0 22px 4px 28px; padding:2px 0 2px 14px; border-left:1px solid var(--line2); display:flex; flex-direction:column; gap:1px}
+.row{display:flex; align-items:center; gap:8px; font-size:12px; color:var(--ink2); min-height:24px; white-space:nowrap; min-width:0}
+.row .ic{color:var(--faint)}
+.row code{font:11.5px var(--mono); color:var(--muted); overflow:hidden; text-overflow:ellipsis; min-width:0}
+.row.th{color:var(--muted)}
+.row.th .t{overflow:hidden; text-overflow:ellipsis; min-width:0}
+.row .d{margin-left:auto; font:11.5px var(--mono); color:var(--faint); flex:none; padding-left:10px}
+.row .d.live{color:var(--acc)}
+body.one .sec{display:none}
+body.one .sec.show{display:block}
+
+.thoughtline{display:flex; align-items:center; gap:9px; height:24px; margin:0 0 2px; color:var(--muted); font-size:12.5px; white-space:nowrap; min-width:0}
+.thoughtline .ic{color:var(--faint); width:13px; height:13px}
+.thoughtline .t{min-width:0; overflow:hidden; text-overflow:ellipsis}
+/* the old pinned dock (v0.1.205): whole thought, 3 lines, call on a second line */
+.olddock{padding:8px 22px 8px; background:linear-gradient(to top, var(--bg) 70%, transparent)}
+.olddock .th{display:flex; gap:9px; color:var(--muted); font-size:12.5px; line-height:1.6; margin:0 0 6px}
+.olddock .th .ic{margin-top:3px; color:var(--faint)}
+.olddock .th .t{display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden}
+.olddock .head{display:flex; align-items:center; gap:9px; font-size:13.5px; color:var(--ink2)}
+.olddock .call{margin:2px 0 0 22px; font:12px var(--mono); color:var(--faint)}
+.worked{display:flex; align-items:center; gap:9px; color:var(--muted); font-size:13px; margin:0 0 10px}
+.measure{color:#6b665f; font:11px var(--mono); margin:6px 2px 0}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute"><defs>
+  <symbol id="think" viewBox="0 0 16 16"><path d="M5.2 10.2A2.6 2.6 0 0 1 4.6 5.1 3.2 3.2 0 0 1 10.6 4a2.5 2.5 0 0 1 1.2 4.8 2.3 2.3 0 0 1-2.6 1.4z"/><circle cx="4.6" cy="12.4" r=".9"/><circle cx="2.7" cy="14.2" r=".55"/></symbol>
+  <symbol id="read" viewBox="0 0 16 16"><path d="M3.4 13.4V4a1.4 1.4 0 011.4-1.4h4l3.8 3.8v7a1.4 1.4 0 01-1.4 1.4H4.8a1.4 1.4 0 01-1.4-1.4z"/><path d="M8.6 2.8v3.4h3.8"/></symbol>
+  <symbol id="run" viewBox="0 0 16 16"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M4.6 6.4l2.2 1.9-2.2 1.9M8.6 10.6h3"/></symbol>
+</defs></svg>
+
+<section class="sec" id="a">
+  <div class="dirhead">Antes vs. C en una línea</div>
+  <div class="note">Before, the whole thought sat in the pinned box (up to 3 lines) with the call on another line under "Working", so the box grew and shrank and "Working" jumped. Now only the thought's first sentence shows, on one line, as the last line of the text. The Working line is fixed and the call sits beside it.</div>
+  <div class="pair">
+    <div><div class="cap">antes (v0.1.205)</div>
+      <div class="win"><div class="doc"><div class="ubub">revisá las etiquetas silver del frame 3812</div>
+  <p>The mask in frame 3812 fills the gap between the legs, which the spec says must stay open. I checked the original production floor first, so I know whether this is inherited.</p></div>
+        <div class="olddock">
+          <div class="th"><svg class="ic"><use href="#think"/></svg><span class="t">The original floor is clean, so the fill came from the new labeler. I'll render the review panel to confirm the correction before touching the other frames, and then check whether frames 3813 to 3820 inherited the same fill from the labeler's first pass.</span></div>
+          <div class="head"><span class="orbit"></span><span>Working<span class="dots"></span></span><span class="meta">1m 26s · 3 tools</span><span class="chev">›</span></div>
+          <div class="call">↳ python render_review_panel.py --silver</div>
+        </div>
+        <div class="comp">Contale a tu agente qué sigue…</div></div>
+      <div class="measure">thinking + Working: 5 lines</div></div>
+    <div><div class="cap">c · una línea, como t3code</div>
+      <div class="win"><div class="doc"><div class="ubub">revisá las etiquetas silver del frame 3812</div>
+  <p>The mask in frame 3812 fills the gap between the legs, which the spec says must stay open. I checked the original production floor first, so I know whether this is inherited.</p>
+          <div class="thoughtline"><svg class="ic"><use href="#think"/></svg><span class="t">The original floor is clean, so the fill came from the new labeler.</span></div></div>
+        <div class="dock"><span class="orbit"></span><span>Working<span class="dots"></span></span><span class="meta">1m 26s · 3 tools</span><span class="chev">›</span>
+          <span class="now"><svg class="ic"><use href="#run"/></svg><span class="t">python render_review_panel.py --silver</span></span></div>
+        <div class="comp">Contale a tu agente qué sigue…</div></div>
+      <div class="measure">thinking + Working: 2 lines</div></div>
+  </div>
+</section>
+
+<section class="sec" id="b">
+  <div class="dirhead">C · while it thinks, and when it's done</div>
+  <div class="note">While it thinks, there is no call beside "Working" and the thought line says what it's thinking about. The line stays until the next thought replaces it. When the turn ends, the thought and the line fold into "Worked" above the answer, and you open "Worked" to read every thought in full.</div>
+  <div class="pair">
+    <div><div class="cap">pensando</div>
+      <div class="win"><div class="doc"><div class="ubub">revisá las etiquetas silver del frame 3812</div>
+  <p>The mask in frame 3812 fills the gap between the legs, which the spec says must stay open. I checked the original production floor first, so I know whether this is inherited.</p>
+          <div class="thoughtline"><svg class="ic"><use href="#think"/></svg><span class="t">Checking whether frames 3813 to 3820 inherited the same fill.</span></div></div>
+        <div class="dock"><span class="orbit"></span><span>Working<span class="dots"></span></span><span class="meta">1m 41s · 3 tools</span><span class="chev">›</span></div>
+        <div class="comp">Contale a tu agente qué sigue…</div></div></div>
+    <div><div class="cap">terminado</div>
+      <div class="win"><div class="doc">
+          <div class="ubub">revisá las etiquetas silver del frame 3812</div>
+          <div class="worked">Worked <span class="meta">1m 58s · 4 tools</span><span class="chev">›</span></div>
+          <p>Only frame 3812 had the fill, and it came from the new labeler, not production. I cleared it in Silver; frames 3813 to 3820 are clean.</p></div>
+        <div class="dock"></div>
+        <div class="comp">Contale a tu agente qué sigue…</div></div></div>
+  </div>
+</section>
+
+<script>
+const s = new URLSearchParams(location.search).get('s');
+if (s) { document.body.classList.add('one'); document.getElementById(s)?.classList.add('show'); }
+</script>
+</body>
+</html>
