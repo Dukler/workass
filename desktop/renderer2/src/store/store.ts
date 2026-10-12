@@ -7,7 +7,7 @@ import { loadComposerDraft, saveComposerDraft } from '../composer-drafts';
 // (message list, running state, tabs, catalog) bump `app`.
 
 import { useSyncExternalStore } from 'react';
-import type { AppState, Chat, Msg, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
+import type { AppState, Chat, Msg, ThinkingEvent, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
 import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, AgentRouteRequest, AgentRouteResponse, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
 import { call, callThrow, has, on, bridgeReady } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
@@ -263,29 +263,28 @@ function monotonicSteerState(authoritative: Msg['steerState'], live: Msg['steerS
   return steerStateRank(live) >= steerStateRank(authoritative) ? live : authoritative;
 }
 
-function mergeThinkingText(authoritative: string, live: string): string {
-  if (!authoritative) return live;
-  if (!live || authoritative === live || authoritative.includes(live)) return authoritative;
-  if (live.includes(authoritative)) return live;
-  const lines = authoritative.split('\n');
-  const seen = new Set(lines);
-  for (const line of live.split('\n')) {
-    if (!seen.has(line)) {
-      seen.add(line);
-      lines.push(line);
-    }
-  }
-  return lines.join('\n');
+function thinkingHasWindow(text: string, window: string): boolean {
+  return `\n${text}\n`.includes(`\n${window}\n`);
 }
 
-function mergeLiveTimelineEvents(authoritative: Msg['events'], live: Msg['events'], includePlan: boolean): Msg['events'] {
+// Live windows the actor snapshot has not caught up with. Each live thought
+// joins the authoritative thought it shares a window with, else the last one
+// it follows; a thought the snapshot has not seen at all is kept as its own.
+function mergeLiveThinking(merged: Msg['events'], live: ThinkingEvent): void {
+  const thoughts = merged.filter((event): event is ThinkingEvent => event.kind === 'thinking');
+  const missing = live.text.split('\n').filter((line) => line && !thoughts.some((thought) => thinkingHasWindow(thought.text, line)));
+  if (!missing.length) return;
+  const owner = thoughts.find((thought) => live.text.split('\n').some((line) => line && thinkingHasWindow(thought.text, line)));
+  if (owner) owner.text = [owner.text, ...missing].filter(Boolean).join('\n');
+  else merged.push({ ...live, text: missing.join('\n') });
+}
+
+export function mergeLiveTimelineEvents(authoritative: Msg['events'], live: Msg['events'], includePlan: boolean): Msg['events'] {
   const merged = authoritative.slice();
   for (const event of live) {
     if (event.kind === 'plan' && !includePlan) continue;
     if (event.kind === 'thinking') {
-      const current = merged.find((candidate) => candidate.kind === 'thinking');
-      if (current?.kind === 'thinking') current.text = mergeThinkingText(current.text, event.text);
-      else merged.push(event);
+      mergeLiveThinking(merged, event);
       continue;
     }
     if (event.kind === 'plan') {
@@ -5712,14 +5711,16 @@ export class Store {
       // (replay-exactly-once, PORT-SPEC) — this supersedes the old endsWith
       // guard, which only caught a repeat of the tail.
       //
-      // Still ONE event, never one per window: steer boundaries capture
-      // `events.length` as an offset, so appending text is safe where pushing
-      // events would shift them.
+      // One event per thought, where it happened (daemon upsertThinkingTimeline
+      // does the same): windows back to back extend the thought in progress;
+      // once a tool call or any other event lands after it, the next window
+      // starts a new thought below it. A replayed window is dropped wherever
+      // it already landed.
       const incoming = ev.text.trim();
-      const existing = msg.events.find((e) => e.kind === 'thinking') as { text: string } | undefined;
-      if (!incoming) { /* nothing to record */ }
-      else if (!existing) msg.events.push({ key: rid('t'), at: msg.content.length, kind: 'thinking', text: incoming });
-      else if (!existing.text.split('\n').includes(incoming)) existing.text += '\n' + incoming;
+      const last = msg.events[msg.events.length - 1];
+      if (!incoming || msg.events.some((e) => e.kind === 'thinking' && thinkingHasWindow(e.text, incoming))) { /* nothing new */ }
+      else if (last?.kind === 'thinking') last.text += '\n' + incoming;
+      else msg.events.push({ key: rid('t'), at: msg.content.length, kind: 'thinking', text: incoming });
     } else if (ev.kind === 'plan') {
       const entries = ev.entries.map((en) => ({ status: String(en.status ?? ''), content: String(en.content ?? '') }));
       const existing = msg.events.find((e) => e.kind === 'plan') as { entries: unknown } | undefined;

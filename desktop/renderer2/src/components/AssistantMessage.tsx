@@ -1,10 +1,10 @@
-import { Fragment, memo, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { MessageImage, Msg, ThinkingEvent, TimelineEvent, ToolEvent } from '../store/types';
 import { store, useApp, useMsgVersion, useClock } from '../store/store';
 import { parseBlocks, type SignedBlock, listTexts } from '../markdown/blocks';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
-import { StepRow, ToolGroup, ToolDetail, ToolImageGallery, PermCard, CompactionRow, RestoredRow, toolState, fmtDur, toolLiveLine } from './messages';
-import { IcStampCopy, IcWarnTri, IcRetryArc } from '../icons';
+import { ToolGroup, ToolDetail, ToolImageGallery, PermCard, CompactionRow, RestoredRow, toolState, fmtDur, toolLiveLine } from './messages';
+import { IcStampCopy, IcWarnTri, IcRetryArc, IcThought } from '../icons';
 import { isSubagentHeader } from '../subagent-layout';
 import { buildCoalescedTurnBlockTimelineSegments, buildTranscriptTimelineSegments, detachTimelineEvent, stableMarkdownBlockKeys } from '../timeline-layout';
 import type { TranscriptTimelineSegment } from '../timeline-layout';
@@ -78,7 +78,7 @@ function StructuredAssistantImages({ images }: { images: MessageImage[] | undefi
 }
 
 function EventView({ ev }: { ev: TimelineEvent }) {
-  if (ev.kind === 'thinking') return <StepRow ev={ev} />;
+  if (ev.kind === 'thinking') return null; // thoughts live in the Working line / Worked row
   if (ev.kind === 'plan') return null; // plan lives in the Tareas rail only (no chat dupe)
   if (ev.kind === 'compaction') return <CompactionRow />;
   if (ev.kind === 'restored') return <RestoredRow ev={ev} />;
@@ -110,16 +110,12 @@ function AssistantSliceBody({
   coalescedSegments?: TranscriptTimelineSegment[];
   artifactOrigin?: string;
 }) {
-  // Thinking is displayed once at the turn tail (or in the live dock), never
-  // inline. Remove its capture marker from the prose layout too; otherwise a
+  // Thoughts never render inline (the Working line / Worked row owns them).
+  // Remove their capture markers from the prose layout too; otherwise a
   // thought arriving mid-token leaves an invisible boundary that renders one
   // sentence as two spaced Markdown paragraphs.
-  const thinkEv: ThinkingEvent | null =
-    [...msg.events].reverse().find((e): e is ThinkingEvent => e.kind === 'thinking') ?? null;
-  const segs = detachTimelineEvent(
-    coalescedSegments ?? buildTranscriptTimelineSegments(msg),
-    thinkEv?.key,
-  );
+  let segs = coalescedSegments ?? buildTranscriptTimelineSegments(msg);
+  for (const event of msg.events) if (event.kind === 'thinking') segs = detachTimelineEvent(segs, event.key);
   const parsedSegments = segs.map((segment) => 'prose' in segment ? parseBlocks(segment.prose) : null);
   const resultBlocks = msg.result && !msg.events.some(event => event.kind === 'result') ? parseBlocks(msg.result) : [];
   const { media, gallery } = assistantMediaResolver(tabId, msg.images, parsedSegments.flatMap((blocks) => blocks ?? []).concat(resultBlocks), artifactOrigin);
@@ -135,16 +131,15 @@ function AssistantSliceBody({
   // gets per-turn Deshacer/Revisar affordances, revealed on hover.
   const hasCheckpoint = terminal && turnSeq != null && (msg.status === 'done' || msg.status === 'failed');
 
-  // Once settled, the steps the turn took (its tool calls and thinking) fold
-  // into one "Worked" row at its head instead of interleaving with the answer
-  // (user 2026-10-12). While running, the Working line owns them.
-  const workTools = running ? [] : segs.flatMap((s) => 'tools' in s ? s.tools.filter(isWorkingTool) : []);
-  const workThinking = running ? null : thinkEv;
+  // Once settled, the steps the turn took (its thoughts and tool calls, in
+  // order) fold into one "Worked" row at its head instead of interleaving
+  // with the answer (user 2026-10-12). While running, the Working line owns them.
+  const workItems = running ? [] : msg.events.filter(isWorkItem);
 
   return (
     <div className="amsg">
       {running && <ControlsSkippedRow tabId={tabId} />}
-      {(workTools.length > 0 || workThinking) && <WorkedRow tools={workTools} thinking={workThinking} />}
+      {workItems.length > 0 && <WorkedRow items={workItems} />}
       {segs.map((s, segmentIndex) => {
         if ('tools' in s) {
           // Tool calls live in the Working line / Worked row, never inline.
@@ -158,7 +153,7 @@ function AssistantSliceBody({
             </Fragment>
           );
         }
-        if ('event' in s) return s.event.key === thinkEv?.key ? null : <EventView key={s.event.key} ev={s.event} />;
+        if ('event' in s) return <EventView key={s.event.key} ev={s.event} />;
         return (
           <div className="chatfind-text" data-chat-find-text key={`prose-${segmentIndex}`}>
             {parsedSegments[segmentIndex]!.map((sb) => <MarkdownBlock key={blockKeys[blockIndex++]} sb={sb} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} artifactOrigin={artifactOrigin} />)}
@@ -328,8 +323,37 @@ function isWorkingTool(t: ToolEvent): boolean {
   return !t.subagentId || isSubagentHeader(t);
 }
 
-function workingTools(msg: Msg): ToolEvent[] {
-  return msg.events.filter((e): e is ToolEvent => e.kind === 'tool' && isWorkingTool(e));
+// A step of the turn: one thought, or one call the Working line owns.
+type WorkItem = ThinkingEvent | ToolEvent;
+
+function isWorkItem(e: TimelineEvent): e is WorkItem {
+  return e.kind === 'thinking' || (e.kind === 'tool' && isWorkingTool(e));
+}
+
+function workTools(items: WorkItem[]): ToolEvent[] {
+  return items.filter((e): e is ToolEvent => e.kind === 'tool');
+}
+
+// A thought as plain text: links keep their label; headings, list marks,
+// emphasis and code ticks go.
+function thoughtPlain(markdown: string): string {
+  return markdown
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/^[ \t]*(?:#{1,6}|[-*+]|\d+\.)[ \t]+/gm, '')
+    .replace(/`+|\*\*|~~/g, '')
+    .replace(/(^|[^\w*])[*_]([^*_\n]+)[*_](?![\w*])/g, '$1$2')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// One line for a thought in the list (t3code's rule): a bold-only opening
+// line (the Codex summary heading) wins, else its first sentence.
+function thoughtPreview(markdown: string): string {
+  const heading = /^\s*\*\*([^*\r\n]+)\*\*[ \t]*\r?(?:\n|$)/.exec(markdown)?.[1];
+  const text = thoughtPlain(heading ?? markdown);
+  if (heading !== undefined) return text;
+  const end = /[.?!]["'”’)]?(?=\s)/.exec(text);
+  return end ? text.slice(0, end.index + end[0].length) : text;
 }
 
 function toolCount(n: number): string {
@@ -369,13 +393,35 @@ function WorkingTrail({ t, now, live }: { t: ToolEvent; now: number; live: boole
   return dur ? <span className="worktrail">{dur}</span> : null;
 }
 
-// The steps behind a Working/Worked line: the settled turn's thinking first,
-// then each call with its duration (a live call spins and counts up).
-function WorkList({ tools, thinking, now, live }: { tools: ToolEvent[]; thinking: ThinkingEvent | null; now: number; live: boolean }) {
+// One thought in the list: its first line, opening to the whole reasoning
+// (the row then just says "Thought", as in the approved mock thinking-v6).
+function ThoughtRow({ ev }: { ev: ThinkingEvent }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`thoughtrow${open ? ' open' : ''}`}>
+      <button type="button" className="thoughthead" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+        <span className="thoughtic" aria-hidden="true"><IcThought /></span>
+        <span className="thoughtline">{open ? 'Thought' : thoughtPreview(ev.text)}</span>
+        {open && <span className="workchev open" aria-hidden="true">›</span>}
+      </button>
+      {open && (
+        <div className="thoughtfull">
+          {parseBlocks(ev.text).map((block, index) => <MarkdownBlock key={`${index}-${block.sig}`} sb={block} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The steps behind a Working/Worked line, in the order they happened: each
+// thought, then the calls it led to, with their durations (a live call spins
+// and counts up).
+function WorkList({ items, now, live }: { items: WorkItem[]; now: number; live: boolean }) {
   return (
     <div className="worklist">
-      {thinking && <StepRow ev={thinking} />}
-      {tools.map((t) => <ToolDetail key={t.key} t={t} standalone trail={<WorkingTrail t={t} now={now} live={live} />} />)}
+      {items.map((item) => item.kind === 'thinking'
+        ? <ThoughtRow key={item.key} ev={item} />
+        : <ToolDetail key={item.key} t={item} standalone trail={<WorkingTrail t={item} now={now} live={live} />} />)}
     </div>
   );
 }
@@ -392,8 +438,9 @@ function workSpanMs(tools: ToolEvent[]): number | null {
 
 // A settled turn's Working line: the same head without the animation, closed
 // by default, opening the same list.
-function WorkedRow({ tools, thinking }: { tools: ToolEvent[]; thinking: ThinkingEvent | null }) {
+function WorkedRow({ items }: { items: WorkItem[] }) {
   const [open, setOpen] = useState(false);
+  const tools = workTools(items);
   const span = workSpanMs(tools);
   const meta: string[] = [];
   if (span != null) meta.push(fmtWorkElapsed(span));
@@ -405,25 +452,46 @@ function WorkedRow({ tools, thinking }: { tools: ToolEvent[]; thinking: Thinking
         {meta.length > 0 && <span className="workmeta">{meta.join(' · ')}</span>}
         <span className={`workchev${open ? ' open' : ''}`} aria-hidden="true">›</span>
       </button>
-      {open && <WorkList tools={tools} thinking={thinking} now={Date.now()} live={false} />}
+      {open && <WorkList items={items} now={Date.now()} live={false} />}
     </div>
   );
 }
 
 // The Working line (approved mock working-indicator v5 · option 3, 2026-10-12):
 // an orbiting dot, "Working" with counting dots, the elapsed time and how many
-// tools ran; under it, the one thing running right now. The model's thinking
-// headlines and the whimsy words are gone from here by request. Clicking opens
-// the turn's tool calls, which never interleave with the transcript; once the
-// turn settles they fold into its Worked row. Stop keeps its own honest
-// "Deteniendo…" row.
+// tools ran; under it, the one thing running right now. Above it the latest
+// thought stays in view, so a finding never hides behind the next tool call
+// (approved mock thinking-v6 · B, as t3code does). The whimsy words are gone
+// by request. Clicking opens the turn's thoughts and calls in order, which
+// never interleave with the transcript; once the turn settles they fold into
+// its Worked row. Stop keeps its own honest "Deteniendo…" row.
 function TurnPulse({ msg }: { msg: Msg }) {
   const [open, setOpen] = useState(false);
   const now = useSecondTicker();
   const pulse = store.heartbeatFor(msg.jobId);
-  if (msg.stopState) {
+  const dock = useRef<HTMLDivElement>(null);
+  const stopping = !!msg.stopState;
+  // The dock grows with the thought above the line. The transcript reserves
+  // its closed height (the doc's bottom padding and the new-messages pill read
+  // --thinklive-h), so the latest answer never hides behind it; the open list
+  // overlays the transcript instead.
+  useLayoutEffect(() => {
+    const el = dock.current;
+    const viewport = el?.parentElement;
+    if (!el || !viewport || open || stopping) return;
+    const sync = () => viewport.style.setProperty('--thinklive-h', `${Math.ceil(el.offsetHeight)}px`);
+    sync();
+    const observer = new ResizeObserver(sync);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [open, stopping]);
+  useLayoutEffect(() => {
+    const viewport = dock.current?.parentElement;
+    return () => { viewport?.style.removeProperty('--thinklive-h'); };
+  }, []);
+  if (stopping) {
     return (
-      <div className="thinklive">
+      <div className="thinklive" ref={dock}>
         <div className="pulseline">
           <div className="steprow steplive stopping" role="status" aria-live="polite">
             <span className="stmark"><span className="stopdot" aria-hidden="true" /></span>
@@ -433,7 +501,10 @@ function TurnPulse({ msg }: { msg: Msg }) {
       </div>
     );
   }
-  const tools = workingTools(msg);
+  const items = msg.events.filter(isWorkItem);
+  const tools = workTools(items);
+  const thought = [...items].reverse().find((e): e is ThinkingEvent => e.kind === 'thinking') ?? null;
+  const thoughtText = thought ? thoughtPlain(thought.text) : '';
   const current = [...tools].reverse().find((t) => toolState(t.status) === 'running') ?? null;
   const elapsedMs = pulse ? pulse.elapsedMs : typeof msg.turnStartedAt === 'number' ? now - msg.turnStartedAt : null;
   const meta: string[] = [];
@@ -443,18 +514,24 @@ function TurnPulse({ msg }: { msg: Msg }) {
     : pulse?.phase === 'compacting' ? 'compacting context'
       : null;
   return (
-    <div className={`thinklive working${open ? ' open' : ''}`}>
+    <div className={`thinklive working${open ? ' open' : ''}`} ref={dock}>
+      {!open && thoughtText && (
+        <div className="workthought" title={thoughtText}>
+          <span className="thoughtic" aria-hidden="true"><IcThought /></span>
+          <span className="workthoughttext">{thoughtText}</span>
+        </div>
+      )}
       <button
         type="button"
         className="workhead"
         aria-expanded={open}
-        disabled={!tools.length}
+        disabled={!items.length}
         onClick={() => setOpen((value) => !value)}
       >
         <span className="workorbit" aria-hidden="true" />
         <span className="worklabel" role="status" aria-live="polite">Working<span className="workdots" aria-hidden="true" /></span>
         {meta.length > 0 && <span className="workmeta">{meta.join(' · ')}</span>}
-        {tools.length > 0 && <span className={`workchev${open ? ' open' : ''}`} aria-hidden="true">›</span>}
+        {items.length > 0 && <span className={`workchev${open ? ' open' : ''}`} aria-hidden="true">›</span>}
         {pulse?.retry && (
           <span className="retrychip" role="status">
             <IcRetryArc />
@@ -463,7 +540,7 @@ function TurnPulse({ msg }: { msg: Msg }) {
         )}
       </button>
       {open ? (
-        <WorkList tools={tools} thinking={null} now={now} live />
+        <WorkList items={items} now={now} live />
       ) : nowLine ? (
         <div className="worknow mono" title={nowLine}><span aria-hidden="true">↳</span> {nowLine}</div>
       ) : null}

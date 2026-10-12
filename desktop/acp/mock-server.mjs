@@ -255,15 +255,25 @@ async function runPrompt(id, params) {
   // A turn caught mid-work: two finished calls and one still running, held
   // until steer/release, so live tool chrome (the Working line) can be seen.
   if (text.includes('[mock:hold-tools]')) {
+    // A thought before each call, the way a reasoning model works, so the
+    // Working line has a latest thought to keep above it and the list has
+    // thoughts to place between the calls.
     const calls = [
-      { id: `${toolCallId}-read`, title: 'Read', kind: 'read', rawInput: { file_path: 'tools/silver_review.py' }, locations: [{ path: 'tools/silver_review.py' }] },
-      { id: `${toolCallId}-check`, title: 'Bash', kind: 'execute', rawInput: { command: 'python -B tmp/check_floor.py --frame 3812' } },
+      { thought: 'Locating the Silver review tooling. The handoff points at tools/silver_review.py, so I will read it first.',
+        id: `${toolCallId}-read`, title: 'Read', kind: 'read', rawInput: { file_path: 'tools/silver_review.py' }, locations: [{ path: 'tools/silver_review.py' }] },
+      { thought: 'The mask in frame 3812 fills the gap between the legs, which the spec says must stay open. I want the original production floor for that frame before correcting anything.',
+        id: `${toolCallId}-check`, title: 'Bash', kind: 'execute', rawInput: { command: 'python -B tmp/check_floor.py --frame 3812' } },
     ];
+    const think = (thought) => notify(session.id, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: thought } });
     for (const call of calls) {
+      think(call.thought);
+      await pause();
       notify(session.id, { sessionUpdate: 'tool_call', toolCallId: call.id, title: call.title, kind: call.kind, status: 'in_progress', rawInput: call.rawInput, ...(call.locations ? { locations: call.locations } : {}) });
       await pause();
       notify(session.id, { sessionUpdate: 'tool_call_update', toolCallId: call.id, title: call.title, kind: call.kind, status: 'completed', content: { type: 'text', text: 'ok' } });
     }
+    think('The original floor is clean, so the fill came from the new labeler. I am rendering the review panel to confirm the correction before touching the other frames.');
+    await pause();
     const liveId = `${toolCallId}-live`;
     notify(session.id, { sessionUpdate: 'tool_call', toolCallId: liveId, title: 'Bash', kind: 'execute', status: 'in_progress', rawInput: { command: 'python render_review_panel.py --silver' } });
     await holdPromptUntilSteer(session);

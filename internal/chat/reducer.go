@@ -4680,6 +4680,11 @@ func timelineIndex(entries []TimelineEntry, key string) int {
 	return -1
 }
 
+// upsertThinkingTimeline keeps each thought where it happened. Windows that
+// arrive back to back extend the thought in progress; once a tool call or any
+// other entry lands after it, the next window starts a new thought below it.
+// The first thought keeps the historical key, so stored transcripts still
+// resolve it. A replayed window is dropped wherever it already landed.
 func upsertThinkingTimeline(foreground *ForegroundTurn, incoming *provider.ThinkingEvent, observedAtUnixMS int64) {
 	if foreground == nil || incoming == nil {
 		return
@@ -4688,30 +4693,38 @@ func upsertThinkingTimeline(foreground *ForegroundTurn, incoming *provider.Think
 	if text == "" {
 		return
 	}
-	key := "timeline:thinking:" + foreground.CurrentAssistantMessageID
-	index := timelineIndex(foreground.Timeline, key)
-	if index < 0 {
-		value := *incoming
-		value.Text = text
-		foreground.Timeline = append(foreground.Timeline, TimelineEntry{
-			Key: key, At: foregroundUTF16Offset(foreground), Kind: provider.EventThinkingUpdate, Thinking: &value,
-		})
-		return
-	}
-	existing := foreground.Timeline[index].Thinking
-	if existing == nil {
-		return
-	}
-	for _, line := range strings.Split(existing.Text, "\n") {
-		if line == text {
+	prefix := "timeline:thinking:" + foreground.CurrentAssistantMessageID
+	thoughts := 0
+	for index := range foreground.Timeline {
+		entry := foreground.Timeline[index]
+		if entry.Thinking == nil || (entry.Key != prefix && !strings.HasPrefix(entry.Key, prefix+":")) {
+			continue
+		}
+		thoughts++
+		if strings.Contains("\n"+entry.Thinking.Text+"\n", "\n"+text+"\n") {
 			return
 		}
 	}
-	if existing.Text == "" {
-		existing.Text = text
-	} else {
-		existing.Text += "\n" + text
+	if last := len(foreground.Timeline) - 1; last >= 0 {
+		entry := &foreground.Timeline[last]
+		if entry.Thinking != nil && (entry.Key == prefix || strings.HasPrefix(entry.Key, prefix+":")) {
+			if entry.Thinking.Text == "" {
+				entry.Thinking.Text = text
+			} else {
+				entry.Thinking.Text += "\n" + text
+			}
+			return
+		}
 	}
+	key := prefix
+	if thoughts > 0 {
+		key = fmt.Sprintf("%s:%d", prefix, thoughts)
+	}
+	value := *incoming
+	value.Text = text
+	foreground.Timeline = append(foreground.Timeline, TimelineEntry{
+		Key: key, At: foregroundUTF16Offset(foreground), Kind: provider.EventThinkingUpdate, Thinking: &value,
+	})
 }
 
 func upsertPlanTimeline(foreground *ForegroundTurn, incoming *provider.PlanEvent) {

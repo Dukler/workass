@@ -1297,6 +1297,39 @@ func TestConsumedSteerGetsOneSemanticOwner(t *testing.T) {
 	}
 }
 
+// Each thought stays where it happened: windows back to back extend one
+// thought, a tool call in between starts the next, and a replayed window is
+// dropped. The first thought keeps the historical key.
+func TestThinkingWindowsSplitIntoThoughtsAroundToolCalls(t *testing.T) {
+	foreground := &ForegroundTurn{CurrentAssistantMessageID: "assistant"}
+	think := func(text string) {
+		upsertThinkingTimeline(foreground, &provider.ThinkingEvent{Text: text}, 1)
+	}
+	think("Locating the review tooling.")
+	think("It should live under tools/.")
+	upsertToolTimeline(foreground, &provider.ToolEvent{ToolCallID: "read-1", Title: "Read", Status: "running"}, 2)
+	upsertToolTimeline(foreground, &provider.ToolEvent{ToolCallID: "read-1", Status: "completed"}, 3)
+	think("The floor mask fills the gap.")
+	think("Locating the review tooling.")
+	think("The floor mask fills the gap.")
+
+	var keys []string
+	var texts []string
+	for _, entry := range foreground.Timeline {
+		keys = append(keys, entry.Key)
+		if entry.Thinking != nil {
+			texts = append(texts, entry.Thinking.Text)
+		}
+	}
+	wantKeys := []string{"timeline:thinking:assistant", "timeline:tool:read-1", "timeline:thinking:assistant:1"}
+	if strings.Join(keys, ",") != strings.Join(wantKeys, ",") {
+		t.Fatalf("timeline keys = %v, want %v", keys, wantKeys)
+	}
+	if len(texts) != 2 || texts[0] != "Locating the review tooling.\nIt should live under tools/." || texts[1] != "The floor mask fills the gap." {
+		t.Fatalf("thoughts = %q", texts)
+	}
+}
+
 func TestRichProviderTimelineSurvivesActorRestartLosslessly(t *testing.T) {
 	state, _ := NewState("chat")
 	lane := testLane("chat", "codex")
