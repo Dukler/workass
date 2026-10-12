@@ -4,7 +4,8 @@ import { store, useApp, useMsgVersion, useClock } from '../store/store';
 import { parseBlocks, type SignedBlock, listTexts } from '../markdown/blocks';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
 import { ToolGroup, ToolDetail, ToolImageGallery, PermCard, CompactionRow, RestoredRow, toolState, fmtDur, toolLiveLine } from './messages';
-import { IcStampCopy, IcWarnTri, IcRetryArc, IcThought } from '../icons';
+import { IcStampCopy, IcWarnTri, IcRetryArc, IcThought, ActionGlyph } from '../icons';
+import { toolPresentation } from '../tool-names';
 import { isSubagentHeader } from '../subagent-layout';
 import { buildCoalescedTurnBlockTimelineSegments, buildTranscriptTimelineSegments, detachTimelineEvent, stableMarkdownBlockKeys } from '../timeline-layout';
 import type { TranscriptTimelineSegment } from '../timeline-layout';
@@ -509,6 +510,9 @@ function TurnPulse({ msg }: { msg: Msg }) {
   const nowLine = current ? toolLiveLine(current)
     : pulse?.phase === 'compacting' ? 'compacting context'
       : null;
+  // The live call carries its action's icon, like every row in the list (user
+  // 2026-10-12: all tool calls have icons).
+  const nowIcon = current ? toolPresentation(current).icon : null;
   return (
     <div className={`thinklive working${open ? ' open' : ''}`}>
       <button
@@ -528,7 +532,14 @@ function TurnPulse({ msg }: { msg: Msg }) {
             {`reintentando${pulse.retry.code ? ` (${pulse.retry.code})` : ''}${pulse.retry.attempt ? ` · intento ${pulse.retry.attempt}` : ''}`}
           </span>
         )}
-        {!open && nowLine && <span className="worknow mono" title={nowLine}><span aria-hidden="true">↳</span> {nowLine}</span>}
+        {!open && nowLine && (
+          <span className="worknow" title={nowLine}>
+            {nowIcon
+              ? <span className="evt-kic" aria-hidden="true"><ActionGlyph icon={nowIcon} /></span>
+              : <span aria-hidden="true">↳</span>}
+            <span className="worknowtext mono">{nowLine}</span>
+          </span>
+        )}
       </button>
       {open && <WorkList items={items} now={now} live />}
     </div>

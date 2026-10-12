@@ -1411,7 +1411,24 @@ class ClaudeSession {
 
   startTool(block) {
     const id = String(block?.id || '').trim();
-    if (!id || this.toolCalls.has(id)) return;
+    if (!id) return;
+    const tracked = this.toolCalls.get(id);
+    if (tracked) {
+      // A streamed call opens at content_block_start with an empty input; its
+      // command, path and description only arrive with the assistant message.
+      // Without this update every row read "Ejecutar un comando" with nothing
+      // after it (user 2026-10-12).
+      const input = toolInput(block.input);
+      if (Object.keys(input).length && !Object.keys(tracked.input).length) {
+        tracked.input = input;
+        notify(this.sessionId, {
+          sessionUpdate: 'tool_call_update', toolCallId: id, title: toolTitle(tracked.name, input),
+          kind: toolKind(tracked.name), status: 'in_progress', rawInput: input, ...toolLocations(input),
+          _meta: { claudeCode: { toolName: tracked.name } },
+        });
+      }
+      return;
+    }
     const name = String(block.name || 'Tool');
     this.noteTurnPhase('tool', name);
     this.acceptActivePrompt();
@@ -1420,10 +1437,11 @@ class ClaudeSession {
       this.flushPromptUpdates(active);
       active.substantiveOutput = true;
     }
-    this.toolCalls.set(id, { name, input: block.input || {} });
+    const input = toolInput(block.input);
+    this.toolCalls.set(id, { name, input });
     notify(this.sessionId, {
-      sessionUpdate: 'tool_call', toolCallId: id, title: toolTitle(name, block.input),
-      kind: toolKind(name), status: 'in_progress', rawInput: block.input || {},
+      sessionUpdate: 'tool_call', toolCallId: id, title: toolTitle(name, input),
+      kind: toolKind(name), status: 'in_progress', rawInput: input, ...toolLocations(input),
       _meta: { claudeCode: { toolName: name } },
     });
   }
@@ -1649,6 +1667,16 @@ function toolKind(name) {
   if (/edit|write|patch|replace|create|delete/.test(lower)) return 'edit';
   if (/read|grep|glob|search|view/.test(lower)) return 'read';
   return 'other';
+}
+
+function toolInput(input) {
+  return input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+}
+
+// The file a call works on, as ACP locations, so the row can show its path.
+function toolLocations(input) {
+  const target = input.file_path || input.notebook_path || input.path;
+  return typeof target === 'string' && target.trim() ? { locations: [{ path: target.trim() }] } : {};
 }
 
 function toolTitle(name, input) {

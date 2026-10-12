@@ -128,6 +128,34 @@ test('official Claude SDK host provides session, streaming, steering, and permis
   await peer.waitFor((message) => message.id === 4);
 });
 
+// The real CLI streams a tool call: content_block_start carries an empty
+// input, and the command or path only arrives with the assistant message.
+// The host must pass that input on, or every row is a bare action name.
+test('official Claude SDK host forwards the input of a streamed tool call once it arrives', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'test', version: '1' } } });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:streamed-tool] read it' }],
+  } });
+  await peer.waitFor((message) => message.id === 3);
+  const updates = peer.messages
+    .filter((message) => message.method === 'session/update' && message.params.update.toolCallId === 'fixture-streamed-tool-1')
+    .map((message) => message.params.update);
+  assert.equal(updates[0].sessionUpdate, 'tool_call');
+  assert.deepEqual(updates[0].rawInput, {});
+  const filled = updates.find((update) => update.sessionUpdate === 'tool_call_update' && update.status === 'in_progress');
+  assert.ok(filled, `no update carried the streamed input: ${JSON.stringify(updates)}`);
+  assert.deepEqual(filled.rawInput, { file_path: '/repo/tools/silver_review.py' });
+  assert.deepEqual(filled.locations, [{ path: '/repo/tools/silver_review.py' }]);
+  assert.equal(filled.title, '/repo/tools/silver_review.py');
+  assert.equal(updates.filter((update) => update.sessionUpdate === 'tool_call').length, 1, 'the call is announced once');
+  assert.equal(updates.at(-1).status, 'completed');
+});
+
 test('native Claude host preserves external MCP stdio configuration', async (t) => {
   const peer = startHost({ WORKASS_CLAUDE_FIXTURE_REQUIRE_STDIO_MCP: '1' });
   t.after(() => peer.child.kill('SIGKILL'));
