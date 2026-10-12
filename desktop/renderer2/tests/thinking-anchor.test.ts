@@ -86,12 +86,17 @@ test('the running pulse is one scrollport-chrome row after the projected transcr
 });
 
 test('the live pulse has a physical bottom anchor independent of document height', () => {
-  assert.match(styles, /\.transcriptviewport\s*\{[^}]*position:\s*relative;[^}]*--thinklive-h:\s*44px;/s);
+  assert.match(styles, /\.transcriptviewport\s*\{[^}]*position:\s*relative;[^}]*--thinklive-h:\s*32px;/s);
   assert.match(styles, /\.thinklive\s*\{[^}]*position:\s*absolute;[^}]*bottom:\s*0;/s);
   assert.doesNotMatch(styles, /\.thinklive\s*\{[^}]*position:\s*sticky;/s);
   // Reserved whether or not a turn runs: neither its start nor its end shifts
   // the text (user 2026-10-12: the line must be static).
-  assert.match(styles, /\.transcriptviewport \.doc\s*\{[^}]*padding-bottom:\s*calc\(var\(--doc-pad-b\) \+ var\(--thinklive-h\)\);/s);
+  assert.match(styles, /\.transcriptviewport \.doc\s*\{[^}]*padding-bottom:\s*calc\(var\(--live-gap\) \+ var\(--thinklive-h\)\);/s);
+  // Trimmed (mock thinking-v10): 14px above the line, the line itself 32px.
+  assert.match(styles, /\.transcriptviewport\s*\{[^}]*--live-gap:\s*14px;/s);
+  // A density preset sets only the top and sides: a padding shorthand there
+  // used to drop the reserve and let the line cover the last text.
+  assert.doesNotMatch(styles, /data-density="comfortable"\] \.doc\s*\{[^}]*padding:/s);
   assert.doesNotMatch(styles, /\.thinklive\.working\s*\{[^}]*height:\s*auto/s, 'the closed Working line keeps the fixed dock height');
 });
 
@@ -244,4 +249,39 @@ test('live thoughts merge into the actor snapshot without collapsing into one', 
   const merged = mergeLiveTimelineEvents(authoritative, live, false);
   assert.deepEqual(merged.map((event) => event.kind === 'tool' ? 'tool' : event.key), ['timeline:thinking:a', 'tool', 'timeline:thinking:a:1', 't-live-3']);
   assert.deepEqual(thoughtTexts({ ...assistant('merged', ''), events: merged }), ['First thought.', 'Second thought.\nIt keeps going.', 'Third thought.']);
+});
+
+// The latest thought is the running reply's last line (approved mocks
+// thinking-v9/v10): its first sentence only, opening on click, and gone as
+// soon as text follows it.
+test('a running reply ends with the latest thought as one line until text follows it', () => {
+  const now = Date.now();
+  const content = 'Checked the original floor first.';
+  const thinking = (text: string, at: number) => ({ key: `thought-${at}`, at, kind: 'thinking', text });
+  const running = (events: unknown[], text = content) => ({
+    id: 'tab-live-thought', chatId: 'chat-live-thought', sessionId: 'session-live-thought',
+    title: 'Live thought', titleLocked: true, group: null, cwd: '/repo',
+    providerId: 'claude', currentModelId: null, currentModeId: null,
+    pending: false, draft: '',
+    messages: [
+      user('live-thought-user', 'review the silver labels'),
+      assistant('live-thought-assistant', text, { status: 'running', jobId: 'job-live-thought', turnStartedAt: now - 30_000, events }),
+    ],
+  } as Chat);
+  const render = (chat: Chat) => {
+    appStore.state.chats = [chat];
+    appStore.state.activeId = chat.id;
+    return renderToStaticMarkup(React.createElement(Transcript, { chat }));
+  };
+  const thought = 'The original floor is clean, so the fill came from the new labeler. I will render the review panel before touching the other frames.';
+
+  const html = render(running([thinking(thought, content.length)]));
+  assert.match(html, /class="livethought" role="button"[^>]*aria-expanded="false"/);
+  assert.match(html, /<span class="ltline">The original floor is clean, so the fill came from the new labeler\.<\/span>/);
+  assert.doesNotMatch(html, /review panel before touching/, 'only the first sentence shows until it is opened');
+  assert.ok(html.indexOf('class="livethought') > html.indexOf(content), 'the thought is the last line of the reply text');
+  assert.ok(html.indexOf('class="livethought') < html.indexOf('class="thinklive'), 'it sits above the Working line, in the text');
+
+  const answered = render(running([thinking(thought, 0)], content));
+  assert.doesNotMatch(answered, /livethought/, 'text that followed the thought replaces it');
 });

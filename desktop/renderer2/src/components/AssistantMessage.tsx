@@ -183,6 +183,7 @@ function AssistantSliceBody({
         </div>
       )}
       <StructuredAssistantImages images={gallery} />
+      {running && !msg.stopState && <LiveThought msg={msg} />}
 
       {interrupted && (
         <div className="connfail" role="status">
@@ -370,6 +371,50 @@ function thoughtPreview(markdown: string): string {
   if (heading !== undefined) return text;
   const end = /[.?!]["'”’)]?(?=\s)/.exec(text);
   return end ? text.slice(0, end.index + end[0].length) : text;
+}
+
+// The thought a running reply shows as its last line: the newest one, as long
+// as no text has followed it yet (then it steps aside, as in t3code).
+export function liveThoughtFor(msg: Msg): ThinkingEvent | null {
+  for (let index = msg.events.length - 1; index >= 0; index--) {
+    const event = msg.events[index];
+    if (event.kind !== 'thinking') continue;
+    return event.text.trim() && msg.content.slice(event.at).trim() === '' ? event : null;
+  }
+  return null;
+}
+
+// The latest thought as the last line of the running reply (approved mocks
+// thinking-v9/v10, 2026-10-12, t3code's rule): its first sentence on one line,
+// in the text, so the Working line below never moves. Clicking opens the
+// whole thought in place (eight lines, then it scrolls) and it keeps following
+// the newest thought while open. When the turn settles it folds into the
+// Worked row with everything else.
+function LiveThought({ msg }: { msg: Msg }) {
+  const [open, setOpen] = useState(false);
+  const thought = liveThoughtFor(msg);
+  if (!thought) return null;
+  const toggle = () => {
+    if (window.getSelection?.()?.toString()) return;   // selecting text is not a click
+    setOpen((value) => !value);
+  };
+  return (
+    <div
+      className={`livethought${open ? ' open' : ''}`}
+      role="button"
+      tabIndex={0}
+      aria-expanded={open}
+      title={open ? undefined : 'Ver el pensamiento completo'}
+      onClick={toggle}
+      onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setOpen((value) => !value); } }}
+    >
+      <span className="thoughtic" aria-hidden="true"><IcThought /></span>
+      {open
+        ? <div className="ltfull">{parseBlocks(thought.text).map((block, index) => <MarkdownBlock key={`${index}-${block.sig}`} sb={block} />)}</div>
+        : <span className="ltline">{thoughtPreview(thought.text)}</span>}
+      <span className={`workchev${open ? ' open' : ''}`} aria-hidden="true">›</span>
+    </div>
+  );
 }
 
 function toolCount(n: number): string {
