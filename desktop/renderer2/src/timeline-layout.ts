@@ -123,7 +123,9 @@ function buildBoundaryIndex(content: string): BoundaryIndex {
     }
 
     const code = content.charCodeAt(cursor);
-    if (code === 46 || code === 33 || code === 63) {
+    // . ! ? and : (CAPTURE_PUNCTUATION): a deferred tool moved forward must
+    // stop after "link:" rather than skip into the next sentence.
+    if (code === 46 || code === 33 || code === 63 || code === 58) {
       let matchEnd = cursor + 1;
       if (matchEnd < content.length && CLOSERS.includes(content[matchEnd])) matchEnd++;
       const nextCode = content.charCodeAt(matchEnd);

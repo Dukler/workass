@@ -65,6 +65,7 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?, RemoteLane?]> = 
   ['chatPendingPermissions', 'chat:permissions-pending'],
   ['spawnedWorkList', 'spawned-work:list', (a) => [{ tabId: a[0], chatId: a[1] }]],
   ['chatCommandsGet', 'chat:commands-get', (a) => [{ tabId: a[0], chatId: a[1] }]],
+  ['chatGoalGet', 'chat:goal-get', (a) => [{ tabId: a[0], chatId: a[1] }]],
   ['spawnedWorkRead', 'spawned-work:read', (a) => [{ tabId: a[0], chatId: a[1], id: a[2], tailBytes: a[3] }]],
   // Stopping work on ANOTHER machine is the point of routing it: the row is
   // rendered here and the process runs there.
@@ -94,6 +95,7 @@ const REMOTE_EVENTS: Array<[keyof WorkassApi, string]> = [
   ['onChatPermissionResolved', 'chat:permission-resolved'],
   ['onSpawnedWorkChanged', 'spawned-work:changed'],
   ['onChatCommands', 'chat:commands'],
+  ['onChatGoal', 'chat:goal'],
   ['onProvidersList', 'providers:list'],
   ['onNotify', 'notify'],
   ['onNotifyBacklog', 'notify:backlog'],

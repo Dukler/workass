@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { MessageImage, Msg, ThinkingEvent, TimelineEvent, ToolEvent } from '../store/types';
 import { store, useApp, useMsgVersion, useClock } from '../store/store';
 import { parseBlocks, type SignedBlock, listTexts } from '../markdown/blocks';
@@ -474,39 +474,21 @@ function WorkedRow({ items }: { items: WorkItem[] }) {
 
 // The Working line (approved mock working-indicator v5 · option 3, 2026-10-12):
 // an orbiting dot, "Working" with counting dots, the elapsed time and how many
-// tools ran; under it, the one thing running right now. Above it the latest
-// thought stays in view, so a finding never hides behind the next tool call
-// (approved mock thinking-v6 · B, as t3code does). The whimsy words are gone
-// by request. Clicking opens the turn's thoughts and calls in order, which
-// never interleave with the transcript; once the turn settles they fold into
-// its Worked row. Stop keeps its own honest "Deteniendo…" row.
+// tools ran, and to its right, on the same line, the call running now. The
+// line is one fixed row that never moves (user 2026-10-12): thoughts live in
+// the list it opens, and the transcript always reserves its height
+// (--thinklive-h), so neither the turn starting nor ending shifts the text.
+// Clicking opens the turn's thoughts and calls in order, which never
+// interleave with the transcript; once the turn settles they fold into its
+// Worked row. Stop keeps its own "Deteniendo…" row.
 function TurnPulse({ msg }: { msg: Msg }) {
   const [open, setOpen] = useState(false);
   const now = useSecondTicker();
   const pulse = store.heartbeatFor(msg.jobId);
-  const dock = useRef<HTMLDivElement>(null);
   const stopping = !!msg.stopState;
-  // The dock grows with the thought above the line. The transcript reserves
-  // its closed height (the doc's bottom padding and the new-messages pill read
-  // --thinklive-h), so the latest answer never hides behind it; the open list
-  // overlays the transcript instead.
-  useLayoutEffect(() => {
-    const el = dock.current;
-    const viewport = el?.parentElement;
-    if (!el || !viewport || open || stopping) return;
-    const sync = () => viewport.style.setProperty('--thinklive-h', `${Math.ceil(el.offsetHeight)}px`);
-    sync();
-    const observer = new ResizeObserver(sync);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [open, stopping]);
-  useLayoutEffect(() => {
-    const viewport = dock.current?.parentElement;
-    return () => { viewport?.style.removeProperty('--thinklive-h'); };
-  }, []);
   if (stopping) {
     return (
-      <div className="thinklive" ref={dock}>
+      <div className="thinklive">
         <div className="pulseline">
           <div className="steprow steplive stopping" role="status" aria-live="polite">
             <span className="stmark"><span className="stopdot" aria-hidden="true" /></span>
@@ -518,24 +500,17 @@ function TurnPulse({ msg }: { msg: Msg }) {
   }
   const items = msg.events.filter(isWorkItem);
   const tools = workTools(items);
-  const thought = [...items].reverse().find((e): e is ThinkingEvent => e.kind === 'thinking') ?? null;
-  const thoughtText = thought ? thoughtPlain(thought.text) : '';
-  const current = [...tools].reverse().find((t) => toolState(t.status) === 'running') ?? null;
+
   const elapsedMs = pulse ? pulse.elapsedMs : typeof msg.turnStartedAt === 'number' ? now - msg.turnStartedAt : null;
   const meta: string[] = [];
   if (elapsedMs != null) meta.push(fmtWorkElapsed(elapsedMs));
   if (tools.length) meta.push(toolCount(tools.length));
+  const current = [...tools].reverse().find((t) => toolState(t.status) === 'running') ?? null;
   const nowLine = current ? toolLiveLine(current)
     : pulse?.phase === 'compacting' ? 'compacting context'
       : null;
   return (
-    <div className={`thinklive working${open ? ' open' : ''}`} ref={dock}>
-      {!open && thoughtText && (
-        <div className="workthought" title={thoughtText}>
-          <span className="thoughtic" aria-hidden="true"><IcThought /></span>
-          <span className="workthoughttext">{thoughtText}</span>
-        </div>
-      )}
+    <div className={`thinklive working${open ? ' open' : ''}`}>
       <button
         type="button"
         className="workhead"
@@ -553,12 +528,9 @@ function TurnPulse({ msg }: { msg: Msg }) {
             {`reintentando${pulse.retry.code ? ` (${pulse.retry.code})` : ''}${pulse.retry.attempt ? ` · intento ${pulse.retry.attempt}` : ''}`}
           </span>
         )}
+        {!open && nowLine && <span className="worknow mono" title={nowLine}><span aria-hidden="true">↳</span> {nowLine}</span>}
       </button>
-      {open ? (
-        <WorkList items={items} now={now} live />
-      ) : nowLine ? (
-        <div className="worknow mono" title={nowLine}><span aria-hidden="true">↳</span> {nowLine}</div>
-      ) : null}
+      {open && <WorkList items={items} now={now} live />}
     </div>
   );
 }

@@ -30,6 +30,15 @@ export const IcWarnTri = () => <S><path d="M8 2.8L14 13H2z" /><path d="M8 6.6v3M
 export const IcThought = () => <S><path d="M5.2 10.2A2.6 2.6 0 0 1 4.6 5.1 3.2 3.2 0 0 1 10.6 4a2.5 2.5 0 0 1 1.2 4.8 2.3 2.3 0 0 1-2.6 1.4z" /><circle cx="4.6" cy="12.4" r=".9" /><circle cx="2.7" cy="14.2" r=".55" /></S>;
 export const IcRetryArc = () => <S><path d="M13 8a5 5 0 1 1-1.5-3.6" /><path d="M13 2.8v2.7h-2.7" /></S>;
 export const IcChevron = () => <S><path d="M6 4l4 4-4 4" /></S>;
+// a padlock: the permission mode the agent runs under
+export const IcLock = () => <S><rect x="3.5" y="7" width="9" height="6.5" rx="1.6" /><path d="M5.5 7V5.3a2.5 2.5 0 0 1 4.8-1" /></S>;
+// a downward chevron: this control opens a menu
+export const IcChevDown = () => <S><path d="M4.5 6.5L8 10l3.5-3.5" /></S>;
+// a target: the chat's standing goal
+export const IcTarget = () => <S><circle cx="8" cy="8" r="5.6" /><circle cx="8" cy="8" r="2.6" /><circle cx="8" cy="8" r=".6" fill="currentColor" /></S>;
+// pause / resume the goal
+export const IcPause = () => <S><path d="M6 4.5v7M10 4.5v7" /></S>;
+export const IcPlay = () => <S><path d="M5.5 4l6 4-6 4z" /></S>;
 export const IcFolder = () => <S><path d="M2 4.5h4l1.5 1.5H14v6.5H2z" /></S>;
 export const IcGit = () => <S><circle cx="5" cy="4.5" r="1.8" /><circle cx="5" cy="11.5" r="1.8" /><circle cx="11" cy="8" r="1.8" /><path d="M5 6.3v3.4M6.8 5.2L9.5 7M6.8 10.8L9.5 9" /></S>;
 export const IcCommit = () => <S><circle cx="8" cy="8" r="2" /><path d="M8 2v4M8 10v4" /></S>;

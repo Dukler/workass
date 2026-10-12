@@ -606,6 +606,10 @@ type Job struct {
 	streamPublishMu sync.Mutex
 	stdoutBuf       strings.Builder
 	stdoutPhase     string
+	// textBreakPending is set when a tool call is announced: the next text
+	// chunk starts a new piece of prose, so it gets a paragraph break unless
+	// whitespace already separates it (see queueStdout).
+	textBreakPending bool
 	// When the current stdout batch began buffering: flush age is the delay the
 	// daemon itself adds between the agent producing text and the renderer
 	// seeing it.

@@ -86,10 +86,13 @@ test('the running pulse is one scrollport-chrome row after the projected transcr
 });
 
 test('the live pulse has a physical bottom anchor independent of document height', () => {
-  assert.match(styles, /\.transcriptviewport\s*\{[^}]*position:\s*relative;[^}]*--thinklive-h:\s*58px;/s);
+  assert.match(styles, /\.transcriptviewport\s*\{[^}]*position:\s*relative;[^}]*--thinklive-h:\s*44px;/s);
   assert.match(styles, /\.thinklive\s*\{[^}]*position:\s*absolute;[^}]*bottom:\s*0;/s);
   assert.doesNotMatch(styles, /\.thinklive\s*\{[^}]*position:\s*sticky;/s);
-  assert.match(styles, /\.transcriptviewport\.has-live \.doc\s*\{[^}]*padding-bottom:\s*calc\(var\(--doc-pad-b\) \+ var\(--thinklive-h\)\);/s);
+  // Reserved whether or not a turn runs: neither its start nor its end shifts
+  // the text (user 2026-10-12: the line must be static).
+  assert.match(styles, /\.transcriptviewport \.doc\s*\{[^}]*padding-bottom:\s*calc\(var\(--doc-pad-b\) \+ var\(--thinklive-h\)\);/s);
+  assert.doesNotMatch(styles, /\.thinklive\.working\s*\{[^}]*height:\s*auto/s, 'the closed Working line keeps the fixed dock height');
 });
 
 test('a requested Stop replaces live work chrome immediately without claiming completion', () => {
@@ -117,10 +120,10 @@ test('a requested Stop replaces live work chrome immediately without claiming co
 });
 
 // Approved mock working-indicator v5 · option 3 (2026-10-12): "Working" with
-// the call running now, the latest thought kept above it (thinking-v6 · B), and
-// the turn's tool rows kept out of the transcript while it runs (they open
-// from the Working line).
-test('a running turn shows Working with the current call and keeps its tool rows inside it', () => {
+// the call running now beside it on the same row, so the line never moves; the
+// latest thought lives in the list it opens (user 2026-10-12), and the turn's
+// tool rows stay out of the transcript while it runs.
+test('a running turn shows one Working row with the live call beside it and keeps its steps inside it', () => {
   const now = Date.now();
   const chat = {
     id: 'tab-working-line', chatId: 'chat-working-line', sessionId: 'session-working-line',
@@ -150,8 +153,9 @@ test('a running turn shows Working with the current call and keeps its tool rows
   assert.match(html, /class="thinklive working"/);
   assert.match(html, /Working<span class="workdots"/);
   assert.match(html, /2 tools/);
-  assert.match(html, /class="worknow mono"[^>]*>.*python render_review_panel\.py --silver/);
-  assert.match(html, /class="workthought"[^>]*>.*Clarifying execution issues.*<button type="button" class="workhead"/, 'the latest thought stays above the line');
+  assert.match(html, /<button[^>]*class="workhead"[^>]*>(?:(?!<\/button>).)*class="worknow mono"[^>]*>(?:(?!<\/button>).)*render_review_panel\.py --silver/s,
+    'the call running now sits inside the head row, not on a line of its own');
+  assert.doesNotMatch(html, /workthought|Clarifying execution issues/, 'thinking text stays inside the list (user 2026-10-12)');
   assert.doesNotMatch(html, /silver_review\.py/, 'finished tool rows wait inside the Working line, not in the transcript');
   assert.match(html, /PROSE-BEFORE-TOOLS/);
 });

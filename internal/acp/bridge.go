@@ -935,6 +935,11 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 		}
 	case "tool_call", "tool_call_update":
 		if b.acceptToolNotification(sessionID, job, kind, update) {
+			if kind == "tool_call" && job != nil {
+				b.manager.jobMu.Lock()
+				job.textBreakPending = true
+				b.manager.jobMu.Unlock()
+			}
 			parent := adapter.notifications.ToolParentID(mapFromAny(update["_meta"]), mapFromAny(params["_meta"]))
 			b.emitToolEvent(job, kind, update, parent)
 		}
@@ -1354,6 +1359,14 @@ func firstLocation(v any) string {
 	return path
 }
 
+func endsInSpace(text string) bool {
+	return text != "" && strings.ContainsRune(" \t\r\n", rune(text[len(text)-1]))
+}
+
+func startsWithSpace(text string) bool {
+	return text != "" && strings.ContainsRune(" \t\r\n", rune(text[0]))
+}
+
 func (b *Bridge) queueStdout(job *Job, text, phase string) {
 	text = redactSensitiveText(text)
 	// Never coalesce the last commentary bytes and first final-answer bytes into
@@ -1365,6 +1378,18 @@ func (b *Bridge) queueStdout(job *Job, text, phase string) {
 	if hasPrior && priorPhase != phase {
 		b.flushStdout(job)
 	}
+	b.manager.jobMu.Lock()
+	// Text before and after a tool call are separate pieces of prose. Providers
+	// send them back to back ("…for that link:" + "While that runs…"), so
+	// without a break they read as one glued sentence once the call is folded
+	// away. Only a tool call sets the mark — thoughts arrive mid-sentence.
+	if job.textBreakPending {
+		job.textBreakPending = false
+		if prior := job.output.Len(); prior > 0 && text != "" && !endsInSpace(job.output.String()) && !startsWithSpace(text) {
+			text = "\n\n" + text
+		}
+	}
+	b.manager.jobMu.Unlock()
 	b.recordStdoutChunk(len(text))
 	b.manager.jobMu.Lock()
 	job.output.WriteString(text)

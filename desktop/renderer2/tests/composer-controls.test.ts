@@ -5,17 +5,18 @@ import { readFileSync } from 'node:fs';
 const composer = readFileSync(new URL('../src/components/Composer.tsx', import.meta.url), 'utf8');
 const styles = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
 
-test('composer selectors use no chevrons and share one centered control row', () => {
-  assert.doesNotMatch(composer, /<span className="eff">▾<\/span>/);
+// Approved mock chatbox-v10 (t3code row, 2026-10-12): permission, model and
+// effort are quiet menu triggers — icon, label, chevron — on one row.
+test('composer selectors are menu triggers with chevrons on one centered row', () => {
   assert.match(composer, /className="selectorcluster"/);
-  assert.match(styles, /\.selectorcluster\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;[^}]*height:\s*20px;/s);
-  assert.match(styles, /\.selectorcluster \.ctxring-wrap\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;[^}]*height:\s*20px;[^}]*line-height:\s*0;/s);
-  assert.match(styles, /\.modelsel,\s*\.effortsel,\s*\.ctxring\s*\{[^}]*height:\s*20px;[^}]*align-items:\s*center;/s);
+  assert.match(composer, /className="selcv" aria-hidden="true"><IcChevDown \/>/);
+  assert.match(styles, /\.selectorcluster\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;[^}]*height:\s*26px;/s);
+  assert.match(styles, /\.permsel, \.modelsel, \.effortsel\s*\{[^}]*display:\s*inline-flex;[^}]*height:\s*26px;/s);
 });
 
-test('effort gauge is a full-size peer of the context ring', () => {
-  assert.match(styles, /\.effortsel \.egauge\s*\{[^}]*width:\s*17px;[^}]*height:\s*17px;/s);
-  assert.match(styles, /\.effortsel \.egauge svg\s*\{[^}]*width:\s*17px;[^}]*height:\s*17px;/s);
+test('the permission control is amber only when the agent may act unasked', () => {
+  assert.match(composer, /const riskyMode = modeId === 'bypass' \|\| modeId === 'bypassPermissions';/);
+  assert.match(styles, /\.permsel\.risky, \.permsel\.risky \.selic\s*\{[^}]*color:\s*var\(--amber\);/s);
 });
 
 test('composer remeasures a wrapped draft when a chat switch changes its rendered width', () => {

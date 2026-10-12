@@ -1,4 +1,4 @@
-import type { ProcessSummary, LanDevice, AccessRequest, DaemonConfig, CatalogGroup, ChatCheckpoint, ChatEnvRepo, ChatEnvPayload, ChatDiffResult, CommandCatalog, PlanUsageSnapshot, PermissionQuestion, ProviderRecord, ProviderUpdate, ProviderUpdateProgress, AppUpdate, SpawnedWorkItem, DeliveryCapabilities } from '../wire/types';
+import type { ProcessSummary, LanDevice, AccessRequest, DaemonConfig, CatalogGroup, ChatCheckpoint, ChatEnvRepo, ChatEnvPayload, ChatDiffResult, ChatGoal, CommandCatalog, PlanUsageSnapshot, PermissionQuestion, ProviderRecord, ProviderUpdate, ProviderUpdateProgress, AppUpdate, SpawnedWorkItem, DeliveryCapabilities } from '../wire/types';
 import type { ModelFavorite } from '../model-favorites';
 import type { ConnStatus } from '../wire/connection';
 import type { ModelControlMemory } from '../model-controls';
@@ -218,6 +218,9 @@ export interface Chat {
   // Provider catalog (commands + agents + styles), learned from the exact
   // attachment and never persisted beyond it.
   commandCatalog?: CommandCatalog;
+  // Runtime-only provider goal (Codex /goal) for the composer's goal band,
+  // with the time it was observed so an active goal's clock keeps counting.
+  goal?: (ChatGoal & { observedAt: number }) | null;
   // The daemon could not apply this chat's configured model/mode at session
   // startup (agent:apply action session-controls-skipped). The receipt row
   // shows while the running selection still differs from the request.
@@ -325,6 +328,9 @@ export interface AppState {
   globalRevision: number;
   // Authoritative provider-grouped catalog.
   groups: CatalogGroup[];
+  // The local daemon's default provider (additive chat:catalog field): what a
+  // chat with no explicit provider runs on.
+  defaultProviderId?: string | null;
   providers: ProviderRecord[];
   // User-authored per-model scores (Settings · Modelos). A durable PREFERENCE —
   // the user's own rating of each catalog model, not any vendor claim — keyed by

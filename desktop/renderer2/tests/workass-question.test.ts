@@ -62,7 +62,7 @@ test('pending question takes the composer input slot while controls remain below
   const dock = readFileSync(new URL('../src/components/QuestionDock.tsx', import.meta.url), 'utf8');
   assert.match(composer, /usePendingQuestion\(chat\)/);
   assert.match(composer, /<QuestionDock chatId=\{chat\.id\} pending=\{pendingQuestion\} \/>/);
-  assert.match(composer, /<div className="comp" hidden=\{!!pendingQuestion\}>/);
+  assert.match(composer, /<div className=\{`comp\$\{chat\?\.goal \? ' hasgoal' : ''\}`\} hidden=\{!!pendingQuestion\}>/);
   assert.match(dock, /export function findPendingQuestion/);
   assert.match(dock, /<PermCard key=\{pending\.perm\.id\} perm=\{pending\.perm\}/);
   assert.match(composer, /<div className="comprow">/);

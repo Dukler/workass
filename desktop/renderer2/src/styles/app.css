@@ -405,11 +405,13 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
 /* stable both-edges reserves the 9px classic-scrollbar gutter symmetrically, so
    the centered .doc stays on the same centerline as the (scrollbar-free)
    composer below it — and doesn't shift 4.5px when the scrollbar appears. */
-.transcriptviewport { position: relative; flex: 1; min-height: 0; --thinklive-h: 58px; }
+.transcriptviewport { position: relative; flex: 1; min-height: 0; --thinklive-h: 44px; }
 .transcriptviewport > .scroll { height: 100%; }
 .scroll { flex: 1; overflow-y: auto; min-height: 0; scrollbar-gutter: stable both-edges; }
 .doc { max-width: var(--read); margin: 0 auto; padding: 26px 36px var(--doc-pad-b); }
-.transcriptviewport.has-live .doc { padding-bottom: calc(var(--doc-pad-b) + var(--thinklive-h)); }
+/* The Working line's row is reserved whether or not a turn runs, so the text
+   never shifts when a turn starts or ends (user 2026-10-12: it must be static). */
+.transcriptviewport .doc { padding-bottom: calc(var(--doc-pad-b) + var(--thinklive-h)); }
 
 .userpill { display: flex; flex-direction: column; align-items: flex-end; margin: 12px 0 20px; }
 .userpill-text { background: var(--field); border: 1px solid var(--line); border-radius: 14px; padding: 7px 13px; max-width: 78%; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
@@ -513,13 +515,17 @@ table.mdtable th { background: var(--field); font-weight: 600; }
    under it the one call running now. Clicking opens the turn's tool calls,
    growing the bottom-anchored dock upward. Animation durations stay literal
    (see .ping): a var() in the shorthand voids the declaration. */
-.thinklive.open { height: auto; max-height: min(55%, 460px); display: flex; flex-direction: column; }
-.workhead { pointer-events: auto; display: inline-flex; align-items: center; gap: 9px; flex: none; align-self: flex-start;
+.thinklive.open { height: auto; max-height: min(55%, 460px); display: flex; flex-direction: column;
+  /* Opened, the list sits over the transcript: give it a solid surface so the
+     text behind never shows through (user 2026-10-12), fading into it above. */
+  background: var(--bg); box-shadow: 0 -18px 22px -6px var(--bg); }
+.workhead { pointer-events: auto; display: inline-flex; align-items: center; gap: 9px; flex: 0 1 auto; min-width: 0; max-width: 100%; align-self: flex-start;
   background: none; border: 0; padding: 2px 6px 2px 0; margin: 0; font: inherit; font-size: 13.5px;
   color: var(--ink2); cursor: pointer; border-radius: 8px; text-align: left; }
 .workhead:disabled { cursor: default; color: var(--ink2); }
 .workhead:not(:disabled):hover .worklabel { color: var(--ink); }
 .workorbit { position: relative; width: 13px; height: 13px; flex: none; }
+.worklabel, .workmeta, .workchev { flex: none; }
 .workorbit::before { content: ''; position: absolute; inset: 0; border-radius: 50%;
   border: 1.5px solid color-mix(in srgb, var(--acc) 28%, transparent); }
 .workorbit::after { content: ''; position: absolute; width: 4px; height: 4px; border-radius: 50%; background: var(--acc);
@@ -530,7 +536,7 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .workmeta { color: var(--faint); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .workchev { display: inline-block; color: var(--faint); font-size: 14px; line-height: 1; transition: transform .15s ease; }
 .workchev.open { transform: rotate(90deg); }
-.worknow { margin: 1px 0 0 22px; font-size: 12px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.worknow { flex: 0 1 auto; min-width: 0; margin-left: 3px; font-size: 12px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .worklist { pointer-events: auto; min-height: 0; overflow-y: auto; margin: 6px 0 2px 6px; padding: 2px 0 2px 14px;
   border-left: 1px solid var(--line2); }
 .worktrail { margin-left: auto; padding-left: 10px; flex: none; display: inline-flex; align-items: center; gap: 6px;
@@ -538,15 +544,9 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .worktrail.live { color: var(--acc); }
 .workspin { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--line2); border-top-color: var(--acc);
   animation: workorbit .85s linear infinite; }
-/* Thinking (approved mock thinking-v6 · B): the latest thought stays above the
-   line, three lines at most; the dock grows with it and Transcript reserves
-   the height through --thinklive-h. In the list each thought is one line,
-   aligned with the call rows, opening to the whole reasoning. */
-.thinklive.working { height: auto; }
-.workthought { display: flex; gap: 9px; align-items: flex-start; margin: 0 0 7px; max-width: 760px;
-  font-size: 13px; line-height: 1.5; color: var(--muted); }
-.workthought .thoughtic { margin-top: 2px; }
-.workthoughttext { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+/* Thinking (approved mock thinking-v6): in the Working / Worked list each
+   thought is one line, aligned with the call rows, opening to the whole
+   reasoning. Nothing shows above the line (user 2026-10-12). */
 .thoughtic { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; color: var(--faint); }
 .thoughtic svg { width: 14px; height: 14px; stroke-width: 1.35; display: block; }
 .thoughthead { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 2px 2px; margin: 0;
@@ -566,20 +566,16 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .amsg.streaming .doclist > li,
 .amsg.streaming .mdtable tbody tr,
 .amsg.streaming .mdfresh { animation: mdfresh 280ms ease-out both; }
-@media (prefers-reduced-motion: reduce) {
-  .amsg.streaming .chatfind-text > *, .amsg.streaming .doclist > li,
-  .amsg.streaming .mdtable tbody tr, .amsg.streaming .mdfresh { animation: none; }
-}
 
 /* Settled: the same head at rest, heading the turn it summarizes. */
 .workfold { margin: 2px 0 12px; display: flex; flex-direction: column; }
 .workfold .workhead { color: var(--muted); font-size: 13px; }
 .workfold .workhead:hover .worklabel { color: var(--ink2); }
 .workfold .worklist { overflow: visible; }
-@media (prefers-reduced-motion: reduce) {
-  .workorbit::after, .workspin { animation: none; }
-  .workdots::after { animation: none; content: '...'; }
-}
+/* No reduced-motion override for the orbit, the spinner, the counting dots or
+   the fades above: macOS keeps its own spinners turning under Reduce Motion
+   and swaps movement for dissolves, which is all a fade is. With them off the
+   line read as frozen on a Mac with the setting on (user 2026-10-12). */
 
 /* Turn pulse (approved mock chat-status A «Pulso en línea», 2026-07-28): the
    live tail row grows mono vitals and, only while the provider is retrying, an
@@ -989,7 +985,22 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 /* The popover-anchor wrappers must center their buttons, not baseline-align
    them — an icon in one button otherwise shifts its text 2px off its siblings. */
 .comprow > div { display: flex; align-items: center; }
-.permchip { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent); border-radius: 8px; padding: 3px 10px; font-size: 12px; cursor: pointer; border: 0; font-family: inherit; }
+/* Composer controls (approved mock chatbox-v10 · t3code row, 2026-10-12): the
+   permission mode, model and effort read as quiet menu triggers — icon, label,
+   chevron — with the permission amber only when the agent may act unasked. */
+.permsel, .modelsel, .effortsel { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 8px; margin: 0; border: 0; border-radius: 7px; background: transparent; font: inherit; font-size: 12.5px; color: var(--ink2); cursor: pointer; white-space: nowrap; }
+.permsel { margin-left: -6px; }
+.permsel:hover, .modelsel:hover, .effortsel:hover { background: var(--line); color: var(--ink); }
+.permsel:disabled { cursor: default; opacity: .55; }
+.permsel:disabled:hover { background: transparent; }
+.permsel.risky, .permsel.risky .selic { color: var(--amber); }
+.selic { display: inline-flex; color: var(--muted); }
+.selic svg, .selmk svg { width: 14px; height: 14px; display: block; }
+.selmk { display: inline-flex; width: 15px; height: 15px; align-items: center; justify-content: center; flex: none; }
+.selmk svg { width: 15px; height: 15px; }
+.selcv { display: inline-flex; color: var(--faint); margin-left: -1px; }
+.selcv svg { width: 11px; height: 11px; display: block; stroke-width: 1.4; }
+.selsep { width: 1px; height: 14px; background: var(--line2); flex: none; }
 .cicon { color: var(--muted); cursor: pointer; font-size: 13px; display: flex; align-items: center; background: transparent; border: 0; padding: 0; }
 .cicon:hover { color: var(--ink); }
 /* Dictation. The microphone in accent says "open"; the four bars say "hearing
@@ -1012,23 +1023,14 @@ table.mdtable th { background: var(--field); font-weight: 600; }
   .vmeter i { transition: none; }
 }
 .comprow .sp { flex: 1; }
-.selectorcluster { display: flex; align-items: center; height: 20px; gap: 12px; }
-.selectoranchor { position: relative; display: flex; align-items: center; height: 20px; }
+.selectorcluster { display: flex; align-items: center; height: 26px; gap: 2px; }
+.selectoranchor { position: relative; display: flex; align-items: center; height: 26px; }
 /* No line-height reset here: the popover is a DOM child of this wrapper, so a
    zero line-height would collapse every label inside it. The .ctxring button
    below carries its own line-height: 0 for the SVG. */
-.selectorcluster .ctxring-wrap { display: flex; align-items: center; height: 20px; line-height: 0; }
-.modelsel, .effortsel, .ctxring { height: 20px; align-items: center; }
-.modelsel { color: var(--ink2); font-size: 12.5px; cursor: pointer; background: transparent; border: 0; padding: 0; font-family: inherit; display: inline-flex; line-height: 20px; }
-.modelsel.unavailable { color: var(--amber); }
-/* Effort selector: same shared control box as model and context, with a full-size
-   gauge so it reads as an equal peer instead of a tiny baseline decoration. */
-.effortsel { color: var(--ink2); font-size: 12.5px; cursor: pointer; background: transparent; border: 0; padding: 0; font-family: inherit; display: inline-flex; gap: 6px; line-height: 20px; }
-.effortsel:hover { color: var(--ink); }
-.effortsel .egauge { display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; color: var(--muted); flex: none; line-height: 0; }
-.effortsel .egauge svg { display: block; width: 17px; height: 17px; }
-.effortsel:hover .egauge { color: var(--ink2); }
-.effortsel .elabel { display: inline-flex; align-items: center; height: 20px; line-height: 20px; text-align: left; }
+.selectorcluster .ctxring-wrap { display: flex; align-items: center; height: 26px; line-height: 0; margin-left: 8px; }
+.modelsel.unavailable, .modelsel.unavailable .selcv { color: var(--amber); }
+.ctxring { height: 20px; align-items: center; }
 .send { width: 26px; height: 26px; border-radius: 50%; background: var(--ink); color: var(--bg); border: 0; display: grid; place-items: center; cursor: pointer; font-size: 13px; flex: none; }
 .send:disabled { opacity: .4; cursor: default; }
 .send.stop { background: var(--del); color: #fff; }
@@ -1136,70 +1138,60 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .pop .pitem.on { color: var(--ink); }
 .pop .pitem .ck { margin-left: auto; color: var(--acc); }
 .pop .pcap { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; color: var(--faint); text-transform: uppercase; padding: 7px 9px 3px; }
-/* grouped model picker (R1): small provider-section dividers, one list */
-.pop-grouped { min-width: 220px; }
-.pop-grouped .pgroup + .pgroup { border-top: 1px solid var(--line); margin-top: 3px; }
-.pop-grouped .pfavorites { padding-bottom: 3px; }
-.pop .pcap-prov { display: flex; align-items: center; gap: 6px; }
-.pop .pcap-prov .pbadge { text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--muted); border: 1px solid var(--line2); border-radius: 5px; padding: 0 5px; font-size: 9.5px; }
-.pop .pmodelrow { display: flex; align-items: center; min-width: 0; border-radius: 7px; }
-.pop .pmodelrow:hover { background: var(--line); }
-.pop .pmodelpick { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; padding: 6px 4px 6px 9px; border: 0; background: transparent; color: var(--ink2); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
-.pop .pmodelrow:hover .pmodelpick, .pop .pmodelrow.on .pmodelpick { color: var(--ink); }
-.pop .pmodelname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pop .pmodelqual { flex: none; color: var(--muted); font-size: 9.5px; font-weight: 600; letter-spacing: .04em; border: 1px solid var(--line2); border-radius: 4px; padding: 0 4px; }
-.pop .pmodelprov { margin-left: auto; color: var(--faint); font-size: 10.5px; white-space: nowrap; }
-.pop .pmodelpick .ck { margin-left: auto; color: var(--acc); }
-.pop .pmodelprov + .ck { margin-left: 0; }
-.pop .pstar { width: 28px; height: 28px; flex: none; display: grid; place-items: center; margin-right: 2px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--faint); cursor: pointer; }
-.pop .pstar svg { width: 13px; height: 13px; }
-.pop .pstar:hover { color: var(--ink2); background: var(--line2); }
-.pop .pstar.on { color: var(--acc); }
-.pop .pstar.on svg { fill: currentColor; }
-/* effort popover (P4): Claude Code's /model effort strip. A rounded FILL STRIP
-   (quiet ink-over-panel fill, ~28px tall, radius 8px) with round DOT stops evenly
-   spaced inside — faint by default, inking to --muted as the thumb passes, the TOP
-   stop tinted --acc (accent-only). A vertical rounded PILL thumb slides over the
-   active stop. Header reads "Esfuerzo <Value>" (label muted, value in ink, display-
-   capitalized) and updates LIVE during drag; endpoint labels sit above the strip.
-   Strip width scales with the stop count (set inline: ~200px for 2, ~300px for 6). */
-.pop-effort { min-width: 0; overflow: visible; padding: 12px 14px 14px; }
-.pop-effort .pcaprow { display: flex; align-items: baseline; gap: 7px; padding: 0 1px 3px; }
-.pop-effort .effort-fast { align-self: center; display: grid; place-items: center; flex: 0 0 28px;
-  width: 28px; height: 28px; margin: -4px 8px -4px -5px; padding: 4px;
-  border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
-.pop-effort .effort-fast svg { width: 20px; height: 20px; }
-.pop-effort .effort-fast:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
-.pop-effort .effort-fast[aria-pressed="true"] { color: #3882f6; }
-.pop-effort .effort-fast:focus-visible { outline: 2px solid #3882f6; outline-offset: 2px; }
-.pop-effort .sl-lab { font-size: 12px; color: var(--muted); }
-.pop-effort .sl-value { font-size: 13px; font-weight: 500; color: var(--ink); }
-.pop-effort .pcaprow .sp { flex: 1; }
-.pop-effort .sl-help { align-self: center; width: 15px; height: 15px; border: 1px solid var(--line2);
-  border-radius: 50%; display: grid; place-items: center; font-size: 10px; line-height: 1;
-  color: var(--faint); cursor: default; }
-.pop-effort .sl-ends { display: flex; justify-content: space-between; padding: 0 1px 6px; }
-.pop-effort .sl-ends span { font-size: 11.5px; color: var(--muted); }
+/* Effort menu (approved mock chatbox-v10, t3code style): a plain menu, one
+   group per setting; the current option is tinted and checked. */
+.t3menu { min-width: 230px; padding: 4px; }
+.t3menu .t3gl { padding: 6px 8px 4px; font-size: 11.5px; font-weight: 500; color: var(--muted); }
+.t3menu .t3ri { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; font: inherit; font-size: 13px; color: var(--ink); text-align: left; cursor: pointer; }
+.t3menu .t3ri:hover, .t3menu .t3ri:focus-visible { background: var(--line); outline: none; }
+.t3menu .t3ri.on { background: color-mix(in srgb, var(--ink) 8%, transparent); }
+.t3menu .t3badge { font-size: 10.5px; color: var(--muted); padding: 0 6px; height: 18px; line-height: 16px; border-radius: 5px; border: 1px solid var(--line2); }
+.t3menu .t3ck { margin-left: auto; display: inline-flex; color: var(--ink2); }
+.t3menu .t3ck svg { width: 13px; height: 13px; }
+.t3menu .t3two { display: flex; flex-direction: column; line-height: 1.35; }
+.t3menu .t3d { font-size: 11.5px; color: var(--muted); }
+.t3menu .t3div { height: 1px; background: var(--line); margin: 4px -4px; }
 
-/* shared slider skeleton (from the mock's .sl / .sl-track / .sl-thumb) */
-.sl { position: relative; touch-action: none; outline: none; -webkit-user-select: none; user-select: none; }
-.sl-track { position: relative; }
-.sl-thumb { position: absolute; left: 0; cursor: grab; transition: left .16s cubic-bezier(.4, 0, .2, 1); }
-.sl.dragging .sl-thumb { cursor: grabbing; transition: none; }
-
-/* Claude-Code strip metrics */
-.sl-cc { padding: 0; }
-.sl-cc .sl-track { height: 28px; border-radius: 8px; background: color-mix(in srgb, var(--ink) 7%, var(--panel)); }
-.sl-cc .dot { position: absolute; top: 50%; width: 5px; height: 5px; border-radius: 50%;
-  background: var(--faint); transform: translate(-50%, -50%); transition: background .15s ease; }
-.sl-cc .dot.past { background: var(--muted); }
-.sl-cc .dot.top { background: color-mix(in srgb, var(--acc) 70%, var(--faint)); }
-.sl-cc .dot.top.past { background: var(--acc); }
-.sl-cc .sl-thumb { top: 50%; width: 14px; height: 22px; margin-top: -11px; border-radius: 6px;
-  background: color-mix(in srgb, var(--ink) 84%, var(--panel)); box-shadow: 0 1px 3px rgba(0, 0, 0, .45); }
-[data-theme="light"] .sl-cc .sl-thumb { background: var(--panel); border: 1px solid var(--line2);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .2); }
-@media (prefers-reduced-motion: reduce) { .sl-cc .sl-thumb, .sl-cc .dot { transition: none; } }
+/* Model picker (approved mock model-picker-v11, t3code style): a thin rail of
+   favourites + providers, an underline search, two-line rows (model over its
+   provider), ⌘1–⌘9 hints and a favourite star; the current model is tinted. */
+.pop.mppick { display: flex; width: 360px; max-height: 360px; padding: 0; overflow: hidden; }
+.mprail { width: 44px; flex: none; padding: 4px; display: flex; flex-direction: column; gap: 4px; background: color-mix(in srgb, var(--ink) 2.5%, transparent); overflow-y: auto; scrollbar-width: none; }
+.mprb { position: relative; width: 36px; height: 36px; flex: none; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; padding: 0; }
+.mprb:hover { background: var(--line); }
+.mprb.on { background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink); }
+.mprb.on::after { content: ''; position: absolute; right: -4px; top: 8px; width: 3px; height: 20px; border-radius: 3px 0 0 3px; background: var(--acc); }
+.mprb svg { width: 19px; height: 19px; display: block; }
+.mprb.fav svg { fill: currentColor; stroke: none; }
+.mprb.fav.on { color: var(--amber); }
+.mprdiv { height: 1px; background: var(--line); margin: 1px 2px; flex: none; }
+.mpletter { font-size: 13px; font-weight: 600; }
+.mpmain { flex: 1; min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); }
+.mpmain.full { border-left: 0; }
+.mpsearch { display: flex; align-items: center; gap: 7px; margin: 10px 12px 2px; padding-bottom: 6px; border-bottom: 1px solid var(--line); color: color-mix(in srgb, var(--muted) 65%, transparent); }
+.mpsearch svg { width: 15px; height: 15px; flex: none; }
+.mpsearch input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; font: inherit; font-size: 13px; color: var(--ink); padding: 0; }
+.mpsearch input::placeholder { color: var(--faint); }
+.mplist { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 4px 6px 8px; display: flex; flex-direction: column; gap: 2px; }
+.mpempty { padding: 14px 8px; font-size: 12px; color: var(--faint); }
+.mprow { display: flex; align-items: center; gap: 6px; border-radius: 6px; padding-right: 4px; }
+.mprow.hl { background: var(--line); }
+.mprow.cur { background: color-mix(in srgb, var(--ink) 8%, transparent); }
+.mpchoose { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 6px 4px 6px 8px; border: 0; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.mpname { display: flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; font-size: 12.5px; font-weight: 500; color: var(--ink); line-height: 1.35; }
+.mpname > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mphit { text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--ink) 45%, transparent); text-underline-offset: 2px; }
+.mpqual { flex: none; font-size: 9.5px; font-weight: 600; letter-spacing: .04em; color: var(--muted); border: 1px solid var(--line2); border-radius: 4px; padding: 0 4px; line-height: 14px; }
+.mpprov { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: color-mix(in srgb, var(--muted) 80%, transparent); }
+.mpmk { display: inline-flex; width: 12px; height: 12px; }
+.mpmk svg { width: 12px; height: 12px; display: block; }
+.mpkbd { flex: none; min-width: 22px; height: 19px; padding: 0 4px; display: inline-grid; place-items: center; border-radius: 4px; background: var(--line); font-size: 11px; color: var(--muted); }
+.mpstar { width: 24px; height: 24px; flex: none; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--faint); cursor: pointer; opacity: 0; }
+.mprow:hover .mpstar, .mprow.hl .mpstar, .mpstar.on, .mpstar:focus-visible { opacity: 1; }
+.mpstar svg { width: 13px; height: 13px; }
+.mpstar:hover { color: var(--ink2); background: var(--line2); }
+.mpstar.on { color: var(--amber); }
+.mpstar.on svg { fill: currentColor; }
 
 /* quiet provider badge in the chat header (R1). inline-flex + fixed height +
    line-height 1 so the chip's box is a known, consistent height that centers on
@@ -1796,6 +1788,31 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .slashpop .pmodel { flex: none; margin-left: auto; color: var(--faint); font-size: 11px; max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slashpop .pfoot { padding: 5px 8px 2px; font-size: 10.5px; color: var(--faint); border-top: 1px solid var(--line); margin-top: 4px; }
 .attrow { display: flex; flex-wrap: wrap; gap: 7px; width: 100%; max-width: var(--read); margin: 0 auto 9px; }
+/* Inside the box (approved mock chatbox-v10 · A1): the message's own images sit
+   above its text, under the goal band when there is one. */
+.comp .attrow { max-width: none; margin: 1px 0 10px; }
+
+/* Goal band (approved mock chatbox-v10 · A1): the chat's standing goal as the
+   box's header, a shade apart from the message being written. */
+.comp.hasgoal { padding-top: 0; }
+.goalband { display: flex; align-items: center; gap: 9px; min-width: 0; margin: 0 -13px 10px; padding: 7px 8px 7px 13px;
+  background: color-mix(in srgb, var(--bg) 55%, var(--panel)); border-bottom: 1px solid var(--line); border-radius: 14px 14px 0 0;
+  font-size: 12.5px; color: var(--ink2); }
+.goalband .goalic { display: inline-flex; color: var(--acc); flex: none; }
+.goalband .goalic svg { width: 15px; height: 15px; }
+.goalband .goallab { color: var(--muted); flex: none; }
+.goalband .goalobj { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.goalband .sp { flex: 1; }
+.goalband .goalst { display: inline-flex; align-items: center; gap: 6px; flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.goalband .goalst i { width: 6px; height: 6px; border-radius: 50%; background: var(--acc); }
+.goalband.paused .goalic { color: var(--muted); }
+.goalband.paused .goalst i { background: var(--faint); }
+.goalband.attention .goalic, .goalband.attention .goalst { color: var(--amber); }
+.goalband.attention .goalst i { background: var(--amber); }
+.goalband.done .goalic, .goalband.done .goalobj { color: var(--muted); }
+.goalact { width: 24px; height: 24px; flex: none; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--faint); cursor: pointer; }
+.goalact:hover { background: var(--line); color: var(--ink); }
+.goalact svg { width: 13px; height: 13px; }
 .attchip { position: relative; width: 46px; height: 46px; border-radius: 8px; overflow: hidden; border: 1px solid var(--line2); background: var(--field); flex: none; }
 .attchip img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .attchip .attx { position: absolute; top: 1px; right: 1px; width: 15px; height: 15px; border-radius: 50%; border: 0; background: rgba(0,0,0,.62); color: #fff; font-size: 9px; line-height: 1; cursor: pointer; display: grid; place-items: center; }
@@ -1951,6 +1968,16 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
   #root, #root.no-rail, #root.no-side, #root.no-side.no-rail,
   #root.browser, #root.rail-wide { grid-template-columns: 1fr; }
   aside.side, aside.rail, .rzh { display: none; }
+  /* The sidebar is gone at this width but its fixed toggle is not: clear it
+     like the no-side bar does, and let the title and workspace chip shrink
+     before they ever reach the icons. */
+  .tbar { padding-left: calc(var(--side-toggle-x) + 30px + 8px); padding-right: 12px; gap: 8px; }
+  .tbar b { min-width: 0; }
+  .tbar .provbadge { min-width: 0; flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; max-width: 18ch; display: inline-block; line-height: 16px; }
+  .ticons { gap: 4px; margin-left: 4px; flex: none; }
+}
+@media (max-width: 560px) {
+  .ticons .tico.soon { display: none; }
 }
 
 /* ------------------------------------------------------------------ *

@@ -1,11 +1,11 @@
 import { rememberedModelControls } from '../model-controls';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Chat } from '../store/types';
-import type { CatalogGroup, CatalogCommand, PlanUsageSnapshot, PlanUsageEntry } from '../wire/types';
+import type { CatalogGroup, CatalogCommand, ChatGoalStatus, PlanUsageSnapshot, PlanUsageEntry } from '../wire/types';
 import type { ModelFavorite } from '../model-favorites';
 import { store, useApp } from '../store/store';
 import { has } from '../wire/api';
-import { IcPlus, IcMic, IcGauge, IcStar } from '../icons';
+import { IcPlus, IcMic, IcStar, IcCheck, IcSearch, IcLock, IcChevDown, IcTarget, IcPause, IcPlay, IcClose, ModelIcon, hasModelIcon, providerIconBrand } from '../icons';
 import { configuredModelUnavailable, modelContextQualifier, resolveModelSelection } from '../model-selection';
 import { favoriteCatalogModels, isModelFavorite } from '../model-favorites';
 import { attachmentWorkBoundary, clipboardImageFiles, createDraftImages, draftImagePayloads, withoutDraftImages } from '../image-drafts';
@@ -70,125 +70,72 @@ function defaultEffort(efforts: string[]): string {
 // committed effort stays verbatim lowercase (onPick sends efforts[c] as-is).
 const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 
-// Effort control: Claude Code's /model effort popover style. A full-width rounded
-// FILL STRIP (~28px tall, quiet ink-over-panel fill) with round DOT stops evenly
-// spaced inside — one per effort level, faint by default, inking to --muted as the
-// thumb passes and the TOP stop tinted --acc (accent-only). The thumb is a vertical
-// rounded PILL that slides over the active stop. The header reads "Esfuerzo <Value>"
-// (label muted, value in ink, capitalized for display) and updates LIVE during drag;
-// endpoint labels "Más rápido" / "Más inteligente" sit above the strip.
-//
-// Interaction is unchanged from the prior control: pointer drag with snap,
-// click-track-to-jump, ArrowLeft/Right/Down/Up + Home/End, role="slider" ARIA.
-// The visual preview (thumb/dots/readout) tracks the pointer live, but effort is
-// COMMITTED only on release / click / key — never per drag-pixel — because onPick
-// routes through store.setModel (a network round-trip). Strip width scales with the
-// stop count (~200px for 2 stops, ~300px for 6). THUMB_W is the pill width and drives
-// the half-offset + travel math so the pill never overflows the strip at the extremes.
-const THUMB_W = 14;  // .sl-cc .sl-thumb pill width — drives half-offset + travel math
+// Effort as the trigger shows it: "xhigh" → "XHigh", "high" → "High".
+function effortLabel(effort: string): string {
+  return /^x[a-z]/.test(effort) ? `X${cap(effort.slice(1))}` : cap(effort);
+}
 
-function EffortPopover({ efforts, current, onPick, onClose, fastSupported, fastEnabled, onToggleFast }: {
-  efforts: string[]; current: string; onPick: (effort: string) => void; onClose: () => void;
-  fastSupported: boolean; fastEnabled: boolean; onToggleFast: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const trackRef = useRef<HTMLDivElement>(null);
-  const n = efforts.length;
-  const idx = Math.max(0, efforts.indexOf(current));
-  const [val, setVal] = useState(idx);        // visual preview index (may lead the commit)
-  const [dragging, setDragging] = useState(false);
-  const [trackW, setTrackW] = useState(0);
-  useEffect(() => { setVal(Math.max(0, efforts.indexOf(current))); }, [current, efforts]);
+// Keeps a menu's open/close contract: an outside press or Escape closes it.
+function useDismiss(ref: React.RefObject<HTMLElement | null>, onClose: () => void) {
   useEffect(() => {
     const down = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose(); };
     const key = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('mousedown', down);
     document.addEventListener('keydown', key);
     return () => { document.removeEventListener('mousedown', down); document.removeEventListener('keydown', key); };
-  }, [onClose]);
-  // Measure the track so tick fractions + thumb travel are pixel-exact; a
-  // ResizeObserver keeps it honest across theme/font settle and rail-width changes.
-  useEffect(() => {
-    const el = trackRef.current; if (!el) return;
-    const measure = () => setTrackW(el.clientWidth);
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
+  }, [ref, onClose]);
+}
 
-  const clampV = (i: number) => Math.max(0, Math.min(n - 1, i));
-  const railW = Math.round(150 + 25 * n);     // 2 stops → 200px, 6 stops → 300px (mock metrics)
-  const half = THUMB_W / 2;
-  const travel = Math.max(0, trackW - THUMB_W);
-  const center = (i: number) => half + (n < 2 ? 0 : (i / (n - 1)) * travel);
-  const pct = n < 2 ? 0 : val / (n - 1);
-  const thumbX = pct * travel;
+// Arrow keys walk a menu's items; the checked one takes focus on open.
+function menuKeys(event: React.KeyboardEvent<HTMLElement>) {
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+  const items = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
+  if (!items.length) return;
+  event.preventDefault();
+  const at = items.indexOf(document.activeElement as HTMLElement);
+  const next = event.key === 'ArrowDown' ? (at + 1) % items.length : (at - 1 + items.length) % items.length;
+  items[next]?.focus();
+}
 
-  // Snap a client X (from the track's left edge) to the nearest stop index.
-  const valueFromX = (clientX: number) => {
-    const el = trackRef.current; if (!el) return val;
-    const r = el.getBoundingClientRect();
-    const denom = r.width - THUMB_W;
-    let p = denom <= 0 ? 0 : (clientX - r.left - half) / denom;
-    p = Math.max(0, Math.min(1, p));
-    return Math.round(p * (n - 1));
-  };
-  const commit = (i: number) => { const c = clampV(i); setVal(c); onPick(efforts[c]); };
-
-  const onDown = (e: React.PointerEvent) => {
-    e.preventDefault();
-    setDragging(true);
-    (e.currentTarget as HTMLElement).focus();
-    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* noop */ }
-    setVal(valueFromX(e.clientX));             // visual preview only — commit waits for release
-  };
-  const onMove = (e: React.PointerEvent) => { if (dragging) setVal(valueFromX(e.clientX)); };
-  const onUp = (e: React.PointerEvent) => {
-    if (!dragging) return;
-    setDragging(false);
-    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* noop */ }
-    commit(valueFromX(e.clientX));             // release / click-to-jump commits here
-  };
-  const onKey = (e: React.KeyboardEvent) => {
-    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); commit(val + 1); }
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); commit(val - 1); }
-    else if (e.key === 'Home') { e.preventDefault(); commit(0); }
-    else if (e.key === 'End') { e.preventDefault(); commit(n - 1); }
-  };
-
+// Effort menu (approved mock chatbox-v10 · t3code style, 2026-10-12): a plain
+// menu with one group per setting — the model's effort levels with the default
+// marked, then speed when the model offers Fast. Picking an option closes it.
+function EffortMenu({ efforts, current, onPick, onClose, fastSupported, fastEnabled, onSetFast }: {
+  efforts: string[]; current: string; onPick: (effort: string) => void; onClose: () => void;
+  fastSupported: boolean; fastEnabled: boolean; onSetFast: (fast: boolean) => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useDismiss(ref, onClose);
+  useEffect(() => { ref.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus(); }, []);
+  const fallback = defaultEffort(efforts);
+  const check = <span className="t3ck" aria-hidden="true"><IcCheck /></span>;
   return (
-    <div className="pop pop-effort" ref={ref} style={{ bottom: '130%', right: 0 }}>
-      <div className="pcaprow">
-        {fastSupported && (
-          <button type="button" className="effort-fast" aria-label="Fast · mayor consumo" aria-pressed={fastEnabled}
-            title={`${fastEnabled ? 'Desactivar Fast' : 'Activar Fast'} · mayor consumo`} onClick={onToggleFast}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M13.3 2.5 4.5 14h6.2l-1 7.5L19.5 10h-6.2l1-7.5Z" />
-            </svg>
+    <div className="pop t3menu" ref={ref} role="menu" aria-label="Esfuerzo del modelo" style={{ bottom: '130%', right: 0 }} onKeyDown={menuKeys}>
+      <div className="t3gl">Esfuerzo</div>
+      {efforts.map((effort) => (
+        <button key={effort} type="button" role="menuitemradio" aria-checked={effort === current}
+          className={`t3ri${effort === current ? ' on' : ''}`} onClick={() => { onPick(effort); onClose(); }}>
+          <span>{effortLabel(effort)}</span>
+          {effort === fallback && <span className="t3badge">Default</span>}
+          {effort === current && check}
+        </button>
+      ))}
+      {fastSupported && (
+        <>
+          <div className="t3div" />
+          <div className="t3gl">Velocidad</div>
+          <button type="button" role="menuitemradio" aria-checked={!fastEnabled} className={`t3ri${!fastEnabled ? ' on' : ''}`}
+            onClick={() => { onSetFast(false); onClose(); }}>
+            <span>Standard</span>
+            {!fastEnabled && check}
           </button>
-        )}
-        <span className="sl-lab">Esfuerzo</span>
-        <span className="sl-value">{cap(efforts[val])}</span>
-        <span className="sp" />
-        <span className="sl-help" title="Más esfuerzo: respuestas más cuidadas pero más lentas. Menos: más rápidas.">?</span>
-      </div>
-      <div className="sl-ends" aria-hidden>
-        <span>Más rápido</span>
-        <span>Más inteligente</span>
-      </div>
-      <div className={`sl sl-cc ${dragging ? 'dragging' : ''}`} role="slider" tabIndex={0}
-        aria-valuemin={0} aria-valuemax={n - 1} aria-valuenow={val} aria-valuetext={efforts[val]}
-        aria-label="Esfuerzo del modelo" style={{ width: railW }}
-        onKeyDown={onKey} onPointerDown={onDown} onPointerMove={onMove}
-        onPointerUp={onUp} onPointerCancel={onUp}>
-        <div className="sl-track" ref={trackRef}>
-          {efforts.map((e, i) => (
-            <div key={e} className={`dot ${i <= val ? 'past' : ''} ${i === n - 1 ? 'top' : ''}`} aria-hidden style={{ left: center(i) }} />
-          ))}
-          <div className="sl-thumb" aria-hidden style={{ left: thumbX }} />
-        </div>
-      </div>
+          <button type="button" role="menuitemradio" aria-checked={fastEnabled} className={`t3ri${fastEnabled ? ' on' : ''}`}
+            onClick={() => { onSetFast(true); onClose(); }}>
+            <span className="t3two"><span>Fast</span><span className="t3d">más rápido, mayor consumo</span></span>
+            {fastEnabled && check}
+          </button>
+        </>
+      )}
     </div>
   );
 }
@@ -216,63 +163,179 @@ function Popover({ items, current, onPick, onClose, cap }: {
   );
 }
 
-// Grouped model picker (R1): one scrollable list, a small provider-section
-// divider per group, pick anything. Selecting binds the chat to the group's
-// provider (at creation) and sets the model.
-function GroupedModelPopover({ groups, currentProvider, current, favorites, onPick, onToggleFavorite, onClose }: {
+const FAVORITES_VIEW = '\u0000favorites';
+
+type PickerRow = { providerId: string; providerName: string; brand: string; model: { modelId: string; name: string }; hit?: number[] };
+
+function HitName({ name, hit }: { name: string; hit: number[] }) {
+  const marks = new Set(hit);
+  return <>{name.split('').map((ch, i) => marks.has(i) ? <span key={i} className="mphit">{ch}</span> : ch)}</>;
+}
+
+// Model picker (approved mock model-picker-v11 · t3code style, 2026-10-12): a
+// thin rail picks what the list shows — favourites or one provider — and typing
+// searches every provider at once. Each row is the model over its provider;
+// ⌘1–⌘9 pick a row, the star toggles a favourite, and the current model is the
+// tinted row. Selecting binds the chat to the row's provider and model.
+function ModelPicker({ groups, currentProvider, current, favorites, onPick, onToggleFavorite, onClose }: {
   groups: CatalogGroup[]; currentProvider: string | null; current: string | null; favorites: readonly ModelFavorite[];
   onPick: (providerId: string, modelId: string) => void;
   onToggleFavorite: (providerId: string, modelId: string) => void;
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose(); };
-    document.addEventListener('mousedown', h);
-    return () => document.removeEventListener('mousedown', h);
-  }, [onClose]);
-  const usable = groups;
-  const favoriteModels = favoriteCatalogModels(usable, favorites);
-  const modelRow = (providerId: string, providerName: string, model: { modelId: string; name: string }, showProvider = false) => {
-    const active = providerId === currentProvider && model.modelId === current;
-    const favorite = isModelFavorite(favorites, providerId, model.modelId);
-    const qualifier = modelContextQualifier(model.modelId);
-    return (
-      <div className={`pmodelrow ${active ? 'on' : ''}`} key={`${showProvider ? 'favorite:' : ''}${providerId}:${model.modelId}`}>
-        <button className="pmodelpick" onClick={() => { onPick(providerId, model.modelId); onClose(); }}>
-          <span className="pmodelname">{model.name}</span>
-          {qualifier && <span className="pmodelqual">{qualifier}</span>}
-          {showProvider && <span className="pmodelprov">{providerName}</span>}
-          {active && <span className="ck">✓</span>}
-        </button>
-        <button
-          className={`pstar ${favorite ? 'on' : ''}`}
-          aria-label={`${favorite ? 'Quitar de' : 'Agregar a'} favoritos: ${model.name}`}
-          aria-pressed={favorite}
-          title={favorite ? 'Quitar de favoritos' : 'Agregar a favoritos'}
-          onClick={() => onToggleFavorite(providerId, model.modelId)}
-        ><IcStar /></button>
-      </div>
-    );
+  const searchRef = useRef<HTMLInputElement>(null);
+  useDismiss(ref, onClose);
+  const favoriteModels = favoriteCatalogModels(groups, favorites);
+  const [view, setView] = useState<string>(() => (favoriteModels.length ? FAVORITES_VIEW
+    : groups.some((group) => group.providerId === currentProvider) ? currentProvider! : groups[0]?.providerId ?? FAVORITES_VIEW));
+  const [query, setQuery] = useState('');
+  const [highlight, setHighlight] = useState(0);
+  useEffect(() => { searchRef.current?.focus(); }, []);
+
+  const brandOf = (group: CatalogGroup) => providerIconBrand(group.providerId, group.assistantBrand);
+  const rowOf = (group: CatalogGroup, model: { modelId: string; name: string }, hit?: number[]): PickerRow => (
+    { providerId: group.providerId, providerName: group.providerName || group.providerId, brand: brandOf(group), model, hit });
+  const favoriteFirst = (a: PickerRow, b: PickerRow) => (
+    Number(isModelFavorite(favorites, b.providerId, b.model.modelId)) - Number(isModelFavorite(favorites, a.providerId, a.model.modelId)));
+  const needle = query.trim();
+  let rows: PickerRow[];
+  if (needle) {
+    rows = groups.flatMap((group) => group.models.flatMap((model) => {
+      const hit = fuzzyIndices(needle, model.name);
+      return hit ? [rowOf(group, model, hit)] : [];
+    }));
+    rows.sort((a, b) => favoriteFirst(a, b) || fuzzyRank({ name: a.model.name, hit: a.hit! }, { name: b.model.name, hit: b.hit! }));
+  } else if (view === FAVORITES_VIEW) {
+    rows = favoriteModels.flatMap((favorite) => {
+      const group = groups.find((candidate) => candidate.providerId === favorite.providerId);
+      return group ? [rowOf(group, favorite.model)] : [];
+    });
+  } else {
+    const group = groups.find((candidate) => candidate.providerId === view);
+    rows = group ? group.models.map((model) => rowOf(group, model)) : [];
+    rows.sort(favoriteFirst);
+  }
+  const at = Math.min(highlight, Math.max(0, rows.length - 1));
+  const pick = (row: PickerRow | undefined) => { if (!row) return; onPick(row.providerId, row.model.modelId); onClose(); };
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    if ((event.metaKey || event.ctrlKey) && /^[1-9]$/.test(event.key)) { event.preventDefault(); pick(rows[Number(event.key) - 1]); return; }
+    if (event.key === 'ArrowDown') { event.preventDefault(); setHighlight(Math.min(rows.length - 1, at + 1)); }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); setHighlight(Math.max(0, at - 1)); }
+    else if (event.key === 'Enter') { event.preventDefault(); pick(rows[at]); }
   };
+  const choose = (next: string) => { setView(next); setHighlight(0); };
+  const empty = needle ? 'Sin modelos' : view === FAVORITES_VIEW ? 'Todavía no hay favoritos: marcá un modelo con ★.' : 'Sin modelos';
   return (
-    <div className="pop pop-grouped" ref={ref} style={{ bottom: '130%', right: 0 }}>
-      {usable.length === 0 && <div className="pitem" style={{ color: 'var(--faint)' }}>Sin modelos</div>}
-      {favoriteModels.length > 0 && (
-        <div className="pgroup pfavorites">
-          <div className="pcap pcap-prov"><span>Favoritos</span></div>
-          {favoriteModels.map((favorite) => modelRow(favorite.providerId, favorite.providerName, favorite.model, true))}
+    <div className="pop mppick" ref={ref} style={{ bottom: '130%', right: 0 }} onKeyDown={onKeyDown}>
+      {!needle && (
+        <div className="mprail" role="tablist" aria-label="Qué mostrar">
+          <button type="button" role="tab" aria-selected={view === FAVORITES_VIEW} className={`mprb fav${view === FAVORITES_VIEW ? ' on' : ''}`}
+            title="Favoritos" onClick={() => choose(FAVORITES_VIEW)}><IcStar /></button>
+          <div className="mprdiv" />
+          {groups.map((group) => {
+            const brand = brandOf(group);
+            const label = group.providerName || group.providerId;
+            return (
+              <button key={group.providerId} type="button" role="tab" aria-selected={view === group.providerId}
+                className={`mprb${view === group.providerId ? ' on' : ''}`} title={group.badge ? `${label} · ${group.badge}` : label}
+                onClick={() => choose(group.providerId)}>
+                {hasModelIcon(brand) ? <ModelIcon provider={brand} /> : <span className="mpletter">{label.charAt(0).toUpperCase()}</span>}
+              </button>
+            );
+          })}
         </div>
       )}
-      {usable.map((g) => (
-        <div className="pgroup" key={g.providerId}>
-          <div className="pcap pcap-prov">
-            <span>{g.providerName || g.providerId}</span>
-            {g.badge && <span className="pbadge">{g.badge}</span>}
-          </div>
-          {g.models.map((m) => modelRow(g.providerId, g.providerName || g.providerId, m))}
+      <div className={`mpmain${needle ? ' full' : ''}`}>
+        <div className="mpsearch">
+          <IcSearch />
+          <input ref={searchRef} value={query} placeholder="Buscar modelos…" aria-label="Buscar modelos"
+            onChange={(event) => { setQuery(event.target.value); setHighlight(0); }} />
         </div>
-      ))}
+        <div className="mplist" role="listbox" aria-label="Modelos">
+          {rows.length === 0 && <div className="mpempty">{empty}</div>}
+          {rows.map((row, index) => {
+            const active = row.providerId === currentProvider && row.model.modelId === current;
+            const favorite = isModelFavorite(favorites, row.providerId, row.model.modelId);
+            const qualifier = modelContextQualifier(row.model.modelId);
+            return (
+              <div key={`${row.providerId}:${row.model.modelId}`} role="option" aria-selected={active}
+                className={`mprow${active ? ' cur' : ''}${index === at ? ' hl' : ''}`} onMouseEnter={() => setHighlight(index)}>
+                <button type="button" className="mpchoose" onClick={() => pick(row)}>
+                  <span className="mpname">
+                    <span>{row.hit ? <HitName name={row.model.name} hit={row.hit} /> : row.model.name}</span>
+                    {qualifier && <span className="mpqual">{qualifier}</span>}
+                  </span>
+                  <span className="mpprov">
+                    {hasModelIcon(row.brand) && <span className="mpmk"><ModelIcon provider={row.brand} /></span>}
+                    {row.providerName}
+                  </span>
+                </button>
+                {index < 9 && <span className="mpkbd" aria-hidden="true">⌘{index + 1}</span>}
+                <button type="button" className={`mpstar${favorite ? ' on' : ''}`}
+                  aria-label={`${favorite ? 'Quitar de' : 'Agregar a'} favoritos: ${row.model.name}`} aria-pressed={favorite}
+                  title={favorite ? 'Quitar de favoritos' : 'Agregar a favoritos'}
+                  onClick={() => onToggleFavorite(row.providerId, row.model.modelId)}><IcStar /></button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const GOAL_STATUS: Record<ChatGoalStatus, string> = {
+  active: 'activa',
+  paused: 'en pausa',
+  blocked: 'bloqueada',
+  usageLimited: 'límite de uso alcanzado',
+  budgetLimited: 'presupuesto agotado',
+  complete: 'cumplida',
+};
+
+function goalElapsed(goal: NonNullable<Chat['goal']>, now: number): string {
+  const seconds = Math.max(0, goal.timeUsedSeconds + (goal.status === 'active' ? (now - goal.observedAt) / 1000 : 0));
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+// The chat's standing goal (approved mock chatbox-v10 · A1, 2026-10-12): the
+// box's own header band, a shade apart from the message being written, because
+// it belongs to the chat — it stays after a send, until it is done, paused or
+// cleared. Its controls send the same /goal commands a person would type.
+function GoalBand({ goal, running, onCommand }: {
+  goal: NonNullable<Chat['goal']>; running: boolean; onCommand: (action: 'pause' | 'resume' | 'clear') => void;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (goal.status !== 'active') return;
+    const timer = window.setInterval(() => setNow(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, [goal.status]);
+  const done = goal.status === 'complete';
+  const attention = goal.status === 'blocked' || goal.status === 'usageLimited' || goal.status === 'budgetLimited';
+  const tone = done ? 'done' : attention ? 'attention' : goal.status;
+  const canResume = !running && goal.status !== 'active' && !done;
+  return (
+    <div className={`goalband ${tone}`} role="status">
+      <span className="goalic" aria-hidden="true">{done ? <IcCheck /> : <IcTarget />}</span>
+      <span className="goallab">{done ? 'Meta cumplida' : 'Meta'}</span>
+      <span className="goalobj" title={goal.objective}>{goal.objective}</span>
+      <span className="sp" />
+      <span className="goalst">
+        {!done && <i aria-hidden="true" />}
+        {done ? `en ${goalElapsed(goal, now)}` : attention ? GOAL_STATUS[goal.status] : `${GOAL_STATUS[goal.status]} · ${goalElapsed(goal, now)}`}
+      </span>
+      {goal.status === 'active' && (
+        <button type="button" className="goalact" title="Pausar la meta" aria-label="Pausar la meta" onClick={() => onCommand('pause')}><IcPause /></button>
+      )}
+      {canResume && (
+        <button type="button" className="goalact" title="Reanudar la meta" aria-label="Reanudar la meta" onClick={() => onCommand('resume')}><IcPlay /></button>
+      )}
+      <button type="button" className="goalact" title="Quitar la meta" aria-label="Quitar la meta" onClick={() => onCommand('clear')}><IcClose /></button>
     </div>
   );
 }
@@ -610,7 +673,10 @@ export function Composer({ chat }: { chat: Chat | null }) {
   const modelGroups = store.catalogGroupsForChat(chat);
   // The persisted id may be suffixed (`base[effort]`). Split it so the picker shows
   // the base name/selection and the effort control reflects the chosen stop.
-  const providerGroup = modelGroups.find((group) => group.providerId === chat?.providerId);
+  // A chat with no explicit provider runs on the daemon's default: name that
+  // provider's model rather than a bare "Modelo".
+  const effectiveProviderId = chat?.providerId ?? (chat && !chat.machineId ? app.defaultProviderId ?? null : null);
+  const providerGroup = modelGroups.find((group) => group.providerId === effectiveProviderId);
   const configuredModelId = chat?.configuredModelId ?? chat?.currentModelId;
   const modelSelection = resolveModelSelection(providerGroup ? [providerGroup] : [], [], configuredModelId);
   const { base: modelBase, effort: modelEffort } = modelSelection;
@@ -627,6 +693,11 @@ export function Composer({ chat }: { chat: Chat | null }) {
   const modeId = chat?.currentModeId ?? modes[0]?.id ?? null;
   const modeName = modes.find((m) => m.id === modeId)?.name ?? '';
   const permLabel = (modeId && MODE_LABEL[modeId]) || (modeName ? modeName : 'Preguntar permisos');
+  // Amber only when the agent may act without asking (accent law: the warning
+  // hue marks risk, not the control).
+  const riskyMode = modeId === 'bypass' || modeId === 'bypassPermissions';
+  const modelBrand = providerIconBrand(effectiveProviderId, providerGroup?.assistantBrand);
+  const fastOn = serviceTiers.includes('fast') && serviceTier === 'fast';
   const steerAvail = has('appChatSteer') && liveSteeringSupported(chat?.deliveryCapabilities);
   const stopAndSendAvail = has('chatQueueReplace') && has('cancelJob') && stopAndSendSupported(chat?.deliveryCapabilities);
 
@@ -866,21 +937,22 @@ export function Composer({ chat }: { chat: Chat | null }) {
         </div>
       )}
       {chat && <QueueList chat={chat} />}
-      {visibleAtts.length > 0 && (
-        <div className="attrow">
-          {visibleAtts.map((a) => (
-            <span key={a.id} className="attchip" title={a.name}>
-              <img src={a.url} alt={a.name} tabIndex={0} aria-keyshortcuts="Meta+C Control+C" />
-              <button className="attx" title="Quitar" onClick={() => chat && store.removeDraftImages(chat.id, [a.id])}>✕</button>
-            </span>
-          ))}
-        </div>
-      )}
-      {/* The box now holds ONLY the textarea + the round send/stop button pinned at
-          its bottom-right edge (Claude-Code style). Every control moved to the
-          external .comprow below, outside the box border. */}
+      {/* The box holds the chat's goal band (approved mock chatbox-v10 · A1), the
+          message's own images, the textarea and the round send/stop button at
+          its bottom-right edge. Every control lives in the .comprow below. */}
       {chat && pendingQuestion && <QuestionDock chatId={chat.id} pending={pendingQuestion} />}
-      <div className="comp" hidden={!!pendingQuestion}>
+      <div className={`comp${chat?.goal ? ' hasgoal' : ''}`} hidden={!!pendingQuestion}>
+        {chat?.goal && <GoalBand goal={chat.goal} running={running} onCommand={(action) => void store.goalCommand(chat.id, action)} />}
+        {visibleAtts.length > 0 && (
+          <div className="attrow">
+            {visibleAtts.map((a) => (
+              <span key={a.id} className="attchip" title={a.name}>
+                <img src={a.url} alt={a.name} tabIndex={0} aria-keyshortcuts="Meta+C Control+C" />
+                <button className="attx" title="Quitar" onClick={() => chat && store.removeDraftImages(chat.id, [a.id])}>✕</button>
+              </span>
+            ))}
+          </div>
+        )}
         <textarea
           ref={taRef} rows={1} value={text} placeholder="Contale a tu agente qué sigue…"
           onChange={(e) => change(e.target.value)} onKeyDown={keydown} onPaste={onPaste} onScroll={fade}
@@ -903,7 +975,9 @@ export function Composer({ chat }: { chat: Chat | null }) {
       </div>
       <div className="comprow">
         <div style={{ position: 'relative' }}>
-          <button className="permchip" onClick={() => setModeOpen((v) => !v)} disabled={modes.length === 0}>{permLabel}</button>
+          <button className={`permsel${riskyMode ? ' risky' : ''}`} onClick={() => setModeOpen((v) => !v)} disabled={modes.length === 0}>
+            <span className="selic" aria-hidden="true"><IcLock /></span>{permLabel}<span className="selcv" aria-hidden="true"><IcChevDown /></span>
+          </button>
           {modeOpen && (
             <Popover cap="Modo de permisos" items={modes.map((m) => ({ id: m.id, name: MODE_LABEL[m.id] ?? m.name }))}
               current={modeId} onPick={(id) => chat && void store.setModeSel(chat.id, id)} onClose={() => setModeOpen(false)} />
@@ -931,26 +1005,26 @@ export function Composer({ chat }: { chat: Chat | null }) {
         <span className="sp" />
         <div className="selectorcluster">
           <div className="selectoranchor">
-            <button className={`modelsel${modelUnavailable ? ' unavailable' : ''}`} title={modelUnavailable ? 'Elegí otro modelo para continuar' : undefined} onClick={() => setModelOpen((v) => !v)}>{modelName}</button>
-            {modelOpen && <GroupedModelPopover groups={modelGroups} currentProvider={chat?.providerId ?? null} current={modelBase || null}
+            <button className={`modelsel${modelUnavailable ? ' unavailable' : ''}`} title={modelUnavailable ? 'Elegí otro modelo para continuar' : undefined} onClick={() => setModelOpen((v) => !v)}>
+              {hasModelIcon(modelBrand) && <span className="selmk" aria-hidden="true"><ModelIcon provider={modelBrand} /></span>}
+              {modelName}<span className="selcv" aria-hidden="true"><IcChevDown /></span>
+            </button>
+            {modelOpen && <ModelPicker groups={modelGroups} currentProvider={effectiveProviderId} current={modelBase || null}
                 favorites={app.modelFavorites}
                 onPick={(providerId, modelId) => chat && void store.pickModel(chat.id, providerId, modelId)}
                 onToggleFavorite={(providerId, modelId) => store.toggleModelFavorite(providerId, modelId)}
                 onClose={() => setModelOpen(false)} />}
           </div>
+          {curEffort && <span className="selsep" aria-hidden="true" />}
           {curEffort && (
             <div className="selectoranchor">
               <button className="effortsel" onClick={() => setEffortOpen((v) => !v)} title="Esfuerzo del modelo">
-                {/* Fixed label slot sized to the model's longest effort name so
-                    changing effort never reflows the row (the model button
-                    beside this must not move). */}
-                <span className="egauge"><IcGauge /></span>
-                <span className="elabel" style={{ minWidth: `${Math.max(...efforts.map((e) => e.length))}ch` }}>{curEffort}</span>
+                {effortLabel(curEffort)}{fastOn ? ' · Fast' : ''}<span className="selcv" aria-hidden="true"><IcChevDown /></span>
               </button>
               {effortOpen && (
-                <EffortPopover efforts={efforts} current={curEffort}
-                  fastSupported={serviceTiers.includes('fast')} fastEnabled={serviceTier === 'fast'}
-                  onToggleFast={() => chat && void store.setServiceTier(chat.id, serviceTier === 'fast' ? 'default' : 'fast')}
+                <EffortMenu efforts={efforts} current={curEffort}
+                  fastSupported={serviceTiers.includes('fast')} fastEnabled={fastOn}
+                  onSetFast={(fast) => { if (chat && fast !== fastOn) void store.setServiceTier(chat.id, fast ? 'fast' : 'default'); }}
                   onPick={(eff) => chat && void store.setModel(chat.id, `${modelBase}[${eff}]`)}
                   onClose={() => setEffortOpen(false)} />
               )}

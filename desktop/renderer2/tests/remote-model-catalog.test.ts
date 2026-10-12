@@ -85,9 +85,9 @@ test('local and remote chats render and validate only their owning machine catal
   const localMarkup = renderToStaticMarkup(React.createElement(Composer, { chat: local }));
   const desktoppcMarkup = renderToStaticMarkup(React.createElement(Composer, { chat: desktoppc }));
   const sanMarkup = renderToStaticMarkup(React.createElement(Composer, { chat: san }));
-  assert.match(localMarkup, />LOCAL-ONE<\/button>/);
-  assert.match(desktoppcMarkup, />DESKTOPPC-TWO<\/button>/);
-  assert.match(sanMarkup, />SAN-ONE<\/button>/);
+  assert.match(localMarkup, />LOCAL-ONE<span class="selcv"/);
+  assert.match(desktoppcMarkup, />DESKTOPPC-TWO<span class="selcv"/);
+  assert.match(sanMarkup, />SAN-ONE<span class="selcv"/);
   assert.doesNotMatch(desktoppcMarkup, /LOCAL-ONE|SAN-ONE/);
 });
 

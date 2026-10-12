@@ -15,6 +15,7 @@ const (
 	providerNotificationLineage
 	providerNotificationHeartbeat
 	providerNotificationSteerConsumed
+	providerNotificationGoal
 )
 
 // providerNotification is the provider-neutral union emitted by a registered
@@ -29,6 +30,8 @@ type providerNotification struct {
 	Lineage        *providerLineageUpdate
 	Heartbeat      *providerHeartbeatUpdate
 	SteerConsumed  *providerSteerConsumptionUpdate
+	Goal           *providerGoalUpdate
+	GoalSet        bool
 }
 
 type providerLineageUpdate struct {
@@ -97,6 +100,12 @@ func (b *Bridge) handleProviderNotification(sessionID string, job *Job, notifica
 		}
 		tabID, chatID := b.chatIdentity()
 		b.manager.observeHarnessTurn(b, tabID, chatID, sessionID, *notification.HarnessTurn)
+	case providerNotificationGoal:
+		if !notification.GoalSet {
+			return
+		}
+		tabID, chatID := b.chatIdentity()
+		b.manager.storeChatGoal(tabID, chatID, sessionID, b.ProviderID(), notification.Goal)
 	case providerNotificationCommandCatalog:
 		if !notification.CatalogSet {
 			return

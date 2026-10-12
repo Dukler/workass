@@ -1166,11 +1166,13 @@ func registerConfigSettingsHandlers(hub *wire.Hub, state *daemonState, manager *
 			models = catalog["models"]
 			modes = catalog["modes"]
 		}
+		settings := state.setting.get()
 		return map[string]any{
-			"settings":  state.setting.get(),
-			"models":    models,
-			"modes":     modes,
-			"taskKinds": taskKinds(),
+			"settings":         settings,
+			"settingsRevision": settingsRevision(settings),
+			"models":           models,
+			"modes":            modes,
+			"taskKinds":        taskKinds(),
 		}, nil
 	})
 	hub.Register("settings:set", func(args []any) (any, error) {
@@ -1181,7 +1183,16 @@ func registerConfigSettingsHandlers(hub *wire.Hub, state *daemonState, manager *
 		if err != nil {
 			return nil, err
 		}
-		saved, err := state.setting.set(incoming)
+		// Optional second argument {expectedRevision}: the settingsRevision the
+		// caller read. A stale one is refused so two windows saving different
+		// slices never silently undo each other (B-8).
+		var expectedRevision string
+		if len(args) > 1 {
+			if options, ok := args[1].(map[string]any); ok {
+				expectedRevision = fieldString(options, "expectedRevision")
+			}
+		}
+		saved, err := state.setting.setExpecting(incoming, expectedRevision)
 		if err != nil {
 			return nil, err
 		}
@@ -1311,6 +1322,12 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 	})
 	// Read-only: the per-chat provider catalog (commands/agents/output styles)
 	// for late clients — the chat:commands event covers the live ones.
+	// Read-only: the chat's latest provider goal (Codex /goal) for late clients —
+	// the chat:goal event covers the live ones.
+	hub.Register("chat:goal-get", func(args []any) (any, error) {
+		arg := firstMapArg(args)
+		return providerChats.ChatGoal(fieldString(arg, "tabId"), fieldString(arg, "chatId"))
+	})
 	hub.Register("chat:commands-get", func(args []any) (any, error) {
 		arg := firstMapArg(args)
 		return providerChats.ChatCommands(fieldString(arg, "tabId"), fieldString(arg, "chatId"))
