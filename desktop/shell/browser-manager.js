@@ -393,6 +393,7 @@ class BrowserManager {
       entry.loading = false;
       entry.url = wc.getURL() || entry.url || DEFAULT_URL;
       this.publish(entry);
+      this.retryDeferredViewport(entry);
     });
     wc.on('did-navigate', syncURL);
     wc.on('did-navigate-in-page', syncURL);
@@ -1341,6 +1342,31 @@ class BrowserManager {
     entry.visible = preserveVisible === true;
   }
 
+  // A cross-site load swaps the page's renderer, and for a moment it refuses
+  // device emulation (or reports metrics that do not match yet). Showing the
+  // pane never waits on that: the view goes on screen at its fitted bounds and
+  // the viewport is applied again once the page stops loading. Before, the
+  // throw left the view parked in its hidden host and the pane showed only its
+  // white placeholder until something else happened to re-attach it.
+  deferViewport(entry, viewport) {
+    entry.deferredViewport = viewport || entry.deferredViewport || { ...entry.viewport };
+  }
+
+  retryDeferredViewport(entry) {
+    if (!entry.deferredViewport || entry.closed) return;
+    void this.serializePresentation(async () => {
+      const viewport = entry.deferredViewport;
+      if (!viewport || entry.closed || this.entries.get(entry.chatId) !== entry) return;
+      entry.deferredViewport = null;
+      try {
+        await this.setViewportSerialized(entry, viewport, true);
+        if (this.attachedView === entry.view) await this.attach(entry);
+      } catch {
+        if (!entry.closed) entry.deferredViewport = viewport;
+      }
+    }).catch(() => {});
+  }
+
   async attach(entry) {
     this.assertCurrentEntry(entry);
     // The capture host keeps a background page at its logical viewport size.
@@ -1349,7 +1375,11 @@ class BrowserManager {
     const fitted = entry.presentationBounds ? presentationFor(entry.viewport, entry.presentationBounds) : null;
     if (fitted) {
       entry.presentationScale = fitted.scale || 1;
-      entry.effectiveViewport = await this.applyAndReadDeviceEmulation(entry, entry.viewport, entry.presentationScale);
+      try {
+        entry.effectiveViewport = await this.applyAndReadDeviceEmulation(entry, entry.viewport, entry.presentationScale);
+      } catch {
+        this.deferViewport(entry);
+      }
       this.assertCurrentEntry(entry);
     }
     if (this.attachedView !== entry.view) {
@@ -1399,7 +1429,10 @@ class BrowserManager {
     entry.presentationBounds = safeBounds(bounds, this.win.getContentSize());
     entry.bounds = entry.presentationBounds;
     if (entry.ready && await entry.ready !== true) throw new Error(entry.error || 'browser page initialization failed');
-    if (viewport) await this.setViewportSerialized(entry, viewport, false);
+    if (viewport) {
+      validateViewport(viewport.width, viewport.height);
+      try { await this.setViewportSerialized(entry, viewport, false); } catch { this.deferViewport(entry, viewport); }
+    }
     // Opening the pane must always leave the user with a browser, so an
     // unsupported URL becomes a visible pane error instead of a failed open.
     const resolved = resolveBrowserURL(url);
