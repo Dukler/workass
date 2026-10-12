@@ -105,3 +105,60 @@ export function createTranscriptPinScheduler(options: TranscriptPinSchedulerOpti
 
   return { schedule, reconcile, dispose: cancelPending };
 }
+
+type ScrollSpringOptions = {
+  el: { scrollTop: number; scrollHeight: number; clientHeight: number };
+  isPinned: () => boolean;
+  requestFrame: (callback: (now: number) => void) => number;
+  cancelFrame: (handle: number) => void;
+};
+
+// Follows a streaming reply to its end with a critically damped spring
+// (approved demo stream-v3, 2026-10-12). Its speed ramps up and down smoothly
+// and a line landing mid-glide extends the motion instead of starting a new
+// one — a fresh smooth scroll per finished sentence bobbed. One scrollTop
+// write per frame while it moves; it stops by itself, and the moment the
+// reader is no longer pinned.
+export const TRANSCRIPT_SPRING_STIFFNESS = 7.5; // rad/s: settles in ~0.5 s
+
+export function createScrollSpring({ el, isPinned, requestFrame, cancelFrame }: ScrollSpringOptions) {
+  const w = TRANSCRIPT_SPRING_STIFFNESS;
+  let frame = 0;
+  let last = 0;
+  let x = 0;
+  let v = 0;
+  const stop = () => {
+    if (frame) cancelFrame(frame);
+    frame = 0;
+    last = 0;
+    v = 0;
+  };
+  const step = (now: number) => {
+    frame = 0;
+    if (!isPinned()) { stop(); return; }
+    const dt = last ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
+    last = now;
+    // Someone else moved it (a jump to the bottom, a send): start from there.
+    if (Math.abs(el.scrollTop - x) > 2) { x = el.scrollTop; v = 0; }
+    const target = Math.max(0, el.scrollHeight - el.clientHeight);
+    v += (w * w * (target - x) - 2 * w * v) * dt;
+    x += v * dt;
+    if (x >= target) { x = target; v = 0; }
+    el.scrollTop = x;
+    if (target - x < 0.5 && Math.abs(v) < 4) {
+      el.scrollTop = target;
+      x = target;
+      stop();
+      return;
+    }
+    frame = requestFrame(step);
+  };
+  return {
+    kick() {
+      if (frame) return;
+      x = el.scrollTop;
+      frame = requestFrame(step);
+    },
+    stop,
+  };
+}
