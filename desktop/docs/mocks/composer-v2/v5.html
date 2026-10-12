@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Working indicator v5</title>
+<style>
+:root{
+  --bg:#0f0e0d; --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#908b82; --dim:#6f6a63;
+  --acc:#4fa583; --amber:#d8a05a; --add:#4cae7f; --del:#d96b5f;
+  --surface:#1a1917; --raise:#22211f; --edge:rgba(255,255,255,.075); --hair:rgba(255,255,255,.08);
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0; background:var(--bg)}
+body{color:var(--ink); font:14px/1.6 -apple-system,BlinkMacSystemFont,system-ui,sans-serif; -webkit-font-smoothing:antialiased}
+.col{width:860px; margin:0 auto; padding:34px 0 30px}
+svg{display:block}
+.ic{width:15px; height:15px; stroke:currentColor; fill:none; stroke-width:1.55; stroke-linecap:round; stroke-linejoin:round}
+.chev{width:10px; height:10px; stroke:currentColor; fill:none; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round}
+.p{margin:0 0 16px; font-size:14.5px; line-height:1.65}
+.state{color:#5d5952; font:11.5px var(--mono); letter-spacing:.04em; text-transform:uppercase; margin:0 0 14px}
+.sp{flex:1}
+
+/* animated dots: "Working" . .. ... */
+.dots{display:inline-block; width:18px; text-align:left}
+.dots::after{content:"..."; animation:dots 1.6s steps(1) infinite}
+@keyframes dots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
+.still .dots::after{animation:none; content:"..."}
+
+/* morphing glyph (1) */
+.glyph{display:inline-block; width:16px; text-align:center; color:var(--acc); font-size:15px; line-height:1}
+.glyph::before{content:"✻"; animation:morph 1.2s steps(1) infinite}
+@keyframes morph{0%{content:"·"}16%{content:"✢"}33%{content:"✳"}50%{content:"✶"}66%{content:"✻"}83%{content:"✽"}}
+.still .glyph::before{animation:none; content:"✻"}
+
+/* shimmer (2) */
+.shim{background:linear-gradient(100deg,var(--muted) 25%,var(--ink) 50%,var(--muted) 75%); background-size:300% 100%; -webkit-background-clip:text; background-clip:text; color:transparent; animation:shim 2s linear infinite}
+@keyframes shim{from{background-position:100% 0}to{background-position:0 0}}
+.still .shim{animation:none; background-position:55% 0}
+
+/* orbit (3) */
+.orbit{position:relative; width:14px; height:14px; flex:none}
+.orbit::before{content:""; position:absolute; inset:0; border-radius:50%; border:1.5px solid rgba(79,165,131,.25)}
+.orbit::after{content:""; position:absolute; width:4px; height:4px; border-radius:50%; background:var(--acc); top:-1px; left:5px; transform-origin:2px 8px; animation:orb 1s linear infinite}
+@keyframes orb{to{transform:rotate(360deg)}}
+.still .orbit::after{animation:none; transform:rotate(130deg)}
+.spin{width:11px; height:11px; border-radius:50%; border:1.5px solid rgba(255,255,255,.12); border-top-color:var(--acc); animation:spin .85s linear infinite; display:inline-block; flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ---------- 1 · Claude Code tree ---------- */
+.w1{display:flex; align-items:center; gap:8px; font-size:14px; color:var(--ink2); cursor:pointer; width:fit-content; padding:2px 0}
+.w1 .meta{color:var(--dim); font-size:13px}
+.w1 .chev{color:var(--dim)}
+.tree{margin:4px 0 2px 7px; font:12.5px/1.95 var(--mono)}
+.tree .r{display:flex; gap:10px; color:var(--muted); white-space:nowrap}
+.tree .r .el{color:var(--dim)}
+.tree .r b{font-weight:500; color:var(--ink2); width:52px; display:inline-block}
+.tree .r .tx{overflow:hidden; text-overflow:ellipsis; max-width:520px}
+.tree .r .d{margin-left:auto; color:var(--dim)}
+.tree .r .add{color:var(--add)} .tree .r .del{color:var(--del)}
+.tree .r.live b{color:var(--ink)} .tree .r.live .d{color:var(--acc)}
+
+/* ---------- 2 · minimal shimmer + card ---------- */
+.w2{display:inline-flex; align-items:baseline; gap:10px; font-size:14px; cursor:pointer; padding:2px 0}
+.w2 .meta{color:var(--dim); font-size:13px}
+.card{margin:10px 0 2px; width:560px; background:var(--raise); border-radius:14px; box-shadow:0 0 0 1px var(--edge), 0 14px 34px rgba(0,0,0,.5); padding:6px 6px}
+.card .it{display:flex; align-items:center; gap:10px; height:34px; padding:0 10px; border-radius:9px; font-size:13px; color:var(--ink2)}
+.card .it .ic{width:14px; height:14px; color:var(--faint)}
+.card .it code{font:12.5px var(--mono); color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:330px}
+.card .it .d{margin-left:auto; font:12px var(--mono); color:var(--dim)}
+.card .it.live{background:rgba(255,255,255,.035); color:var(--ink)} .card .it.live .d{color:var(--acc)}
+.card .it .add{color:var(--add); font:12px var(--mono)} .card .it .del{color:var(--del); font:12px var(--mono)}
+
+/* ---------- 3 · ticker ---------- */
+.w3{cursor:pointer; width:fit-content}
+.w3 .top{display:flex; align-items:center; gap:9px; font-size:14px; color:var(--ink2)}
+.w3 .top .meta{color:var(--dim); font-size:13px}
+.w3 .now{margin:3px 0 0 23px; font:12.5px var(--mono); color:var(--dim); display:flex; gap:8px; align-items:center}
+.w3 .now span{color:var(--muted)}
+.w3 .now{animation:tick 3.2s ease-in-out infinite}
+@keyframes tick{0%,70%{opacity:1; transform:none}85%{opacity:0; transform:translateY(-3px)}86%{opacity:0; transform:translateY(3px)}100%{opacity:1; transform:none}}
+.still .w3 .now{animation:none}
+.list3{margin:10px 0 0 23px; border-left:1px solid var(--hair); padding-left:14px}
+.list3 .r{display:flex; align-items:center; gap:10px; height:28px; font-size:13px; color:var(--ink2)}
+.list3 .r .ic{width:14px; height:14px; color:var(--faint)}
+.list3 .r code{font:12.5px var(--mono); color:var(--muted)}
+.list3 .r .d{margin-left:auto; font:12px var(--mono); color:var(--dim)}
+.list3 .r.live{color:var(--ink)} .list3 .r.live .d{color:var(--acc)}
+
+/* chatbox (quiet, from the last round) */
+.box{margin-top:18px; background:var(--surface); border-radius:20px; box-shadow:0 0 0 1px var(--edge)}
+.ta{padding:16px 20px 2px; min-height:56px; font-size:15px; color:rgba(242,239,233,.34)}
+.row{display:flex; align-items:center; gap:4px; padding:8px 10px 10px 12px}
+.ib{width:32px; height:32px; display:grid; place-items:center; color:var(--muted)}
+.ib.lock{color:var(--amber)}
+.model{display:inline-flex; align-items:center; gap:6px; height:32px; padding:0 10px; color:var(--ink2); font-size:13px}
+.model em{font-style:normal; color:var(--faint)}
+.stopb{width:30px; height:30px; border-radius:50%; background:rgba(255,255,255,.09); display:grid; place-items:center; margin-left:2px}
+.stopb i{width:9px; height:9px; border-radius:2px; background:var(--ink)}
+
+.strip{display:flex; gap:22px; margin:0 0 18px; color:var(--dim); font:12px var(--mono)}
+.strip span{display:inline-flex; align-items:center; gap:8px}
+.strip .g{color:var(--acc); font-size:15px; font-family:-apple-system,system-ui}
+
+.sec{display:none}
+body:not(.one) .sec{display:block; border-bottom:1px solid rgba(255,255,255,.05)}
+body.one .sec.show{display:block}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="down" viewBox="0 0 10 10"><path d="M2.5 3.8L5 6.3l2.5-2.5"/></symbol>
+    <symbol id="right" viewBox="0 0 10 10"><path d="M3.8 2.5L6.3 5 3.8 7.5"/></symbol>
+    <symbol id="mic" viewBox="0 0 16 16"><rect x="5.5" y="2" width="5" height="8" rx="2.5"/><path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2"/></symbol>
+    <symbol id="plus" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></symbol>
+    <symbol id="lock" viewBox="0 0 16 16"><rect x="3.5" y="7" width="9" height="6.5" rx="1.6"/><path d="M5.5 7V5.3a2.5 2.5 0 0 1 5 0"/></symbol>
+    <symbol id="term" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M5 7l2 1.5L5 10M8.5 10.5H11"/></symbol>
+    <symbol id="read" viewBox="0 0 16 16"><path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.5v3h3"/></symbol>
+    <symbol id="edit" viewBox="0 0 16 16"><path d="M10.5 3.5l2 2L6 12H4v-2z"/></symbol>
+    <symbol id="search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4"/><path d="M10 10l3.5 3.5"/></symbol>
+  </defs>
+</svg>
+
+<template id="box"></template>
+
+<!-- 1 -->
+<section class="sec" id="a1"><div class="col">
+  <div class="state">1 · Claude Code style — closed</div>
+  <div class="strip"><span>glyph cycles:</span><span class="g">·</span><span class="g">✢</span><span class="g">✳</span><span class="g">✶</span><span class="g">✻</span><span class="g">✽</span><span>· dots: Working . .. ...</span></div>
+  <p class="p">Review found filled floor between the legs in the new Silver label. I'm checking the original floor pixels for its permitted correction.</p>
+  <div class="w1"><span class="glyph"></span><span>Working<span class="dots"></span></span><span class="meta">1m 12s · 5 tools</span><svg class="chev"><use href="#right"/></svg></div>
+  <div class="box"><div class="ta">Steer the turn…</div><div class="row"><span class="ib"><svg class="ic"><use href="#plus"/></svg></span><span class="ib lock"><svg class="ic"><use href="#lock"/></svg></span><span class="sp"></span><span class="model">Opus 5.5 <em>· xhigh</em></span><span class="ib"><svg class="ic"><use href="#mic"/></svg></span><span class="stopb"><i></i></span></div></div>
+</div></section>
+
+<section class="sec" id="a2"><div class="col">
+  <div class="state">1 · Claude Code style — clicked</div>
+  <p class="p">Review found filled floor between the legs in the new Silver label. I'm checking the original floor pixels for its permitted correction.</p>
+  <div class="w1"><span class="glyph"></span><span>Working<span class="dots"></span></span><span class="meta">1m 12s · 5 tools</span><svg class="chev"><use href="#down"/></svg></div>
+  <div class="tree">
+    <div class="r"><span class="el">⎿</span><b>Read</b><span class="tx">tools/silver_review.py</span><span class="d">0.2s</span></div>
+    <div class="r"><span class="el">⎿</span><b>Search</b><span class="tx">floor_mask  labels/silver/</span><span class="d">1.4s</span></div>
+    <div class="r"><span class="el">⎿</span><b>Bash</b><span class="tx">python -B tmp/root_original_production_bounded.py</span><span class="d">8.1s</span></div>
+    <div class="r"><span class="el">⎿</span><b>Edit</b><span class="tx">labels/silver/frame-3812.json <span class="add">+12</span> <span class="del">−4</span></span><span class="d">0.0s</span></div>
+    <div class="r live"><span class="el">⎿</span><b>Bash</b><span class="tx">python render_review_panel.py</span><span class="d">14s</span></div>
+  </div>
+  <div class="box"><div class="ta">Steer the turn…</div><div class="row"><span class="ib"><svg class="ic"><use href="#plus"/></svg></span><span class="ib lock"><svg class="ic"><use href="#lock"/></svg></span><span class="sp"></span><span class="model">Opus 5.5 <em>· xhigh</em></span><span class="ib"><svg class="ic"><use href="#mic"/></svg></span><span class="stopb"><i></i></span></div></div>
+</div></section>
+
+<!-- 2 -->
+<section class="sec" id="b1"><div class="col">
+  <div class="state">2 · Just the word — closed</div>
+  <p class="p">Review found filled floor between the legs in the new Silver label. I'm checking the original floor pixels for its permitted correction.</p>
+  <div class="w2"><span class="shim">Working</span><span class="dots" style="color:var(--muted); margin-left:-10px"></span><span class="meta">1m 12s</span></div>
+  <div class="box"><div class="ta">Steer the turn…</div><div class="row"><span class="ib"><svg class="ic"><use href="#plus"/></svg></span><span class="ib lock"><svg class="ic"><use href="#lock"/></svg></span><span class="sp"></span><span class="model">Opus 5.5 <em>· xhigh</em></span><span class="ib"><svg class="ic"><use href="#mic"/></svg></span><span class="stopb"><i></i></span></div></div>
+</div></section>
+
+<section class="sec" id="b2"><div class="col">
+  <div class="state">2 · Just the word — clicked</div>
+  <p class="p">Review found filled floor between the legs in the new Silver label. I'm checking the original floor pixels for its permitted correction.</p>
+  <div class="w2"><span class="shim">Working</span><span class="dots" style="color:var(--muted); margin-left:-10px"></span><span class="meta">1m 12s · 5 tools</span></div>
+  <div class="card">
+    <div class="it"><svg class="ic"><use href="#read"/></svg>Read<code>tools/silver_review.py</code><span class="d">0.2s</span></div>
+    <div class="it"><svg class="ic"><use href="#search"/></svg>Searched<code>floor_mask in labels/silver/</code><span class="d">1.4s</span></div>
+    <div class="it"><svg class="ic"><use href="#term"/></svg>Ran<code>python -B tmp/root_original_production…</code><span class="d">8.1s</span></div>
+    <div class="it"><svg class="ic"><use href="#edit"/></svg>Edited<code>labels/silver/frame-3812.json</code><span class="add">+12</span><span class="del">−4</span><span class="d">0.0s</span></div>
+    <div class="it live"><span class="spin"></span>Running<code>python render_review_panel.py</code><span class="d">14s</span></div>
+  </div>
+  <div class="box"><div class="ta">Steer the turn…</div><div class="row"><span class="ib"><svg class="ic"><use href="#plus"/></svg></span><span class="ib lock"><svg class="ic"><use href="#lock"/></svg></span><span class="sp"></span><span class="model">Opus 5.5 <em>· xhigh</em></span><span class="ib"><svg class="ic"><use href="#mic"/></svg></span><span class="stopb"><i></i></span></div></div>
+</div></section>
+
+<!-- 3 -->
+<section class="sec" id="c1"><div class="col">
+  <div class="state">3 · Working + what it's doing right now — closed</div>
+  <p class="p">Review found filled floor between the legs in the new Silver label. I'm checking the original floor pixels for its permitted correction.</p>
+  <div class="w3"><div class="top"><span class="orbit"></span><span>Working<span class="dots"></span></span><span class="meta">1m 12s · 5 tools</span><svg class="chev" style="color:var(--dim)"><use href="#right"/></svg></div><div class="now">↳ <span>python render_review_panel.py</span></div></div>
+  <div class="box"><div class="ta">Steer the turn…</div><div class="row"><span class="ib"><svg class="ic"><use href="#plus"/></svg></span><span class="ib lock"><svg class="ic"><use href="#lock"/></svg></span><span class="sp"></span><span class="model">Opus 5.5 <em>· xhigh</em></span><span class="ib"><svg class="ic"><use href="#mic"/></svg></span><span class="stopb"><i></i></span></div></div>
+</div></section>
+
+<section class="sec" id="c2"><div class="col">
+  <div class="state">3 · Working + what it's doing right now — clicked</div>
+  <p class="p">Review found filled floor between the legs in the new Silver label. I'm checking the original floor pixels for its permitted correction.</p>
+  <div class="w3"><div class="top"><span class="orbit"></span><span>Working<span class="dots"></span></span><span class="meta">1m 12s · 5 tools</span><svg class="chev" style="color:var(--dim)"><use href="#down"/></svg></div></div>
+  <div class="list3">
+    <div class="r"><svg class="ic"><use href="#read"/></svg>Read<code>tools/silver_review.py</code><span class="d">0.2s</span></div>
+    <div class="r"><svg class="ic"><use href="#search"/></svg>Searched<code>floor_mask in labels/silver/</code><span class="d">1.4s</span></div>
+    <div class="r"><svg class="ic"><use href="#term"/></svg>Ran<code>python -B tmp/root_original_production_bounded.py</code><span class="d">8.1s</span></div>
+    <div class="r"><svg class="ic"><use href="#edit"/></svg>Edited<code>labels/silver/frame-3812.json</code><span class="d">0.0s</span></div>
+    <div class="r live"><span class="spin"></span>Running<code>python render_review_panel.py</code><span class="d">14s</span></div>
+  </div>
+  <div class="box"><div class="ta">Steer the turn…</div><div class="row"><span class="ib"><svg class="ic"><use href="#plus"/></svg></span><span class="ib lock"><svg class="ic"><use href="#lock"/></svg></span><span class="sp"></span><span class="model">Opus 5.5 <em>· xhigh</em></span><span class="ib"><svg class="ic"><use href="#mic"/></svg></span><span class="stopb"><i></i></span></div></div>
+</div></section>
+
+<script>
+const p = new URLSearchParams(location.search);
+const s = p.get('s');
+if (s) { document.body.classList.add('one'); document.getElementById(s)?.classList.add('show'); }
+if (p.has('still')) document.body.classList.add('still');
+</script>
+</body>
+</html>

@@ -1,11 +1,11 @@
-import { memo, useCallback, useMemo, useSyncExternalStore } from 'react';
-import type { MessageImage, Msg, ThinkingEvent, TimelineEvent } from '../store/types';
+import { Fragment, memo, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import type { MessageImage, Msg, ThinkingEvent, TimelineEvent, ToolEvent } from '../store/types';
 import { store, useApp, useMsgVersion, useClock } from '../store/store';
 import { parseBlocks, type SignedBlock, listTexts } from '../markdown/blocks';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
-import { StepRow, StepWords, ToolGroup, PermCard, CompactionRow, RestoredRow } from './messages';
+import { StepRow, ToolGroup, ToolDetail, ToolImageGallery, PermCard, CompactionRow, RestoredRow, toolState, fmtDur, toolLiveLine } from './messages';
 import { IcStampCopy, IcWarnTri, IcRetryArc } from '../icons';
-import { whimsyFor } from '../turn-whimsy';
+import { isSubagentHeader } from '../subagent-layout';
 import { buildCoalescedTurnBlockTimelineSegments, buildTranscriptTimelineSegments, detachTimelineEvent, stableMarkdownBlockKeys } from '../timeline-layout';
 import type { TranscriptTimelineSegment } from '../timeline-layout';
 import { fullAssistantText } from '../assistant-output';
@@ -127,14 +127,6 @@ function AssistantSliceBody({
   const blockKeys = stableMarkdownBlockKeys(msg, parsedSegments.flatMap((blocks) => blocks?.map((block) => block.sig) ?? []));
   let blockIndex = 0;
   const running = terminal && msg.status === 'running';
-  // The settled thinking row renders at the TAIL of the turn, never inline
-  // where the event landed. While running, Transcript owns the live pulse as
-  // scrollport chrome so tool/prose growth cannot move it (user 2026-08-08).
-  //
-  // It is pulled out in BOTH states, not just while running: the store keeps a
-  // single thinking event per message anchored at `at: msg.content.length` from
-  // when it first arrived (store.ts), so letting it fall back inline on
-  // completion would snap it from the bottom of the turn up above the answer.
   // A turn cut off by a daemon disconnect: shown as a quiet "sin conexión" row,
   // not the generic model-error stamp and never as a resend affordance.
   const interrupted = terminal && msg.status === 'failed' && !!msg.interrupted;
@@ -143,11 +135,29 @@ function AssistantSliceBody({
   // gets per-turn Deshacer/Revisar affordances, revealed on hover.
   const hasCheckpoint = terminal && turnSeq != null && (msg.status === 'done' || msg.status === 'failed');
 
+  // Once settled, the steps the turn took (its tool calls and thinking) fold
+  // into one "Worked" row at its head instead of interleaving with the answer
+  // (user 2026-10-12). While running, the Working line owns them.
+  const workTools = running ? [] : segs.flatMap((s) => 'tools' in s ? s.tools.filter(isWorkingTool) : []);
+  const workThinking = running ? null : thinkEv;
+
   return (
     <div className="amsg">
       {running && <ControlsSkippedRow tabId={tabId} />}
+      {(workTools.length > 0 || workThinking) && <WorkedRow tools={workTools} thinking={workThinking} />}
       {segs.map((s, segmentIndex) => {
-        if ('tools' in s) return <ToolGroup key={s.key} tabId={tabId} tools={s.tools} revision={s.revision} />;
+        if ('tools' in s) {
+          // Tool calls live in the Working line / Worked row, never inline.
+          // Subagent task rows and the images a tool returned stay where
+          // they landed: they are results, not steps.
+          const tasks = s.tools.filter(isSubagentHeader);
+          return (
+            <Fragment key={s.key}>
+              <ToolImageGallery tools={s.tools.filter((t) => !isSubagentHeader(t))} tabId={tabId} />
+              {tasks.length > 0 && <ToolGroup tabId={tabId} tools={tasks} revision={s.revision} />}
+            </Fragment>
+          );
+        }
         if ('event' in s) return s.event.key === thinkEv?.key ? null : <EventView key={s.event.key} ev={s.event} />;
         return (
           <div className="chatfind-text" data-chat-find-text key={`prose-${segmentIndex}`}>
@@ -162,8 +172,6 @@ function AssistantSliceBody({
         </div>
       )}
       <StructuredAssistantImages images={gallery} />
-
-      {!running && thinkEv && <StepRow ev={thinkEv} />}
 
       {interrupted && (
         <div className="connfail" role="status">
@@ -304,79 +312,161 @@ export function AssistantTurnBlock({ tabId, messages, turnSeqs, artifactOrigin }
   );
 }
 
-function fmtElapsed(ms: number): string {
-  const total = Math.max(0, Math.round(ms / 1000));
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return `${minutes}:${String(seconds).padStart(2, '0')}`;
-}
-
-function fmtTokens(n: number): string {
-  if (n < 1000) return String(n);
-  return `${(n / 1000).toFixed(1).replace('.', ',')}k`;
-}
-
 // The live pulse is deliberately rendered by Transcript outside `.doc`.
-// Subscribing here preserves the message-isolated streaming path: thought,
+// Subscribing here preserves the message-isolated streaming path: tool,
 // heartbeat and phase updates repaint this one row without coupling Transcript
 // or the whole app to every token.
 export function LiveTurnPulse({ msg }: { msg: Msg }) {
   useMsgVersion(msg.id);
-  const thinkEv = [...msg.events].reverse().find((e): e is ThinkingEvent => e.kind === 'thinking') ?? null;
   if (msg.status !== 'running' || msg.turnTerminal === false) return null;
-  return <TurnPulse msg={msg} thinkEv={thinkEv} />;
+  return <TurnPulse msg={msg} />;
 }
 
-// The turn pulse: the tail row is alive for the WHOLE turn, not only while
-// thinking text streams. A max-effort turn can think silently for minutes and
-// used to be indistinguishable from a dead chat (2026-07-27) — this row is
-// where the heartbeat events land. Honest states (retry, compaction, writing)
-// override the whimsy label; step titles beat both. The tool phase deliberately
-// does NOT: `usando Bash` pasted a capitalized tool id into a lowercase sentence
-// and, since tools run for most of a turn, it swallowed the whimsy word almost
-// always (2026-07-29). The tool rows below already name the tool.
-function TurnPulse({ msg, thinkEv }: { msg: Msg; thinkEv: ThinkingEvent | null }) {
-  const pulse = store.heartbeatFor(msg.jobId);
-  const whimsy = `${whimsyFor(msg.jobId)}…`;
-  const stopping = !!msg.stopState;
-  const phase = pulse?.phase ?? '';
-  const phaseLabel = phase === 'writing' ? 'escribiendo…'
-    : phase === 'compacting' ? 'compactando contexto…'
-      : null;
-  const vitals: string[] = [];
-  if (pulse) {
-    vitals.push(fmtElapsed(pulse.elapsedMs));
-    if (pulse.outputTokens > 0) vitals.push(`${fmtTokens(pulse.outputTokens)} tokens`);
+// Tool calls the Working line and Worked row own: every main-thread call of
+// the turn, plus subagent task rows (their inner calls live in the Turnos rail).
+function isWorkingTool(t: ToolEvent): boolean {
+  return !t.subagentId || isSubagentHeader(t);
+}
+
+function workingTools(msg: Msg): ToolEvent[] {
+  return msg.events.filter((e): e is ToolEvent => e.kind === 'tool' && isWorkingTool(e));
+}
+
+function toolCount(n: number): string {
+  return `${n} ${n === 1 ? 'tool' : 'tools'}`;
+}
+
+// "1m 12s" while it counts up; whole seconds, never a decimal ticking.
+function fmtWorkElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return seconds ? `${minutes}m ${seconds}s` : `${minutes}m`;
+}
+
+function useSecondTicker(): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return now;
+}
+
+function WorkingTrail({ t, now, live }: { t: ToolEvent; now: number; live: boolean }) {
+  const running = toolState(t.status) === 'running';
+  if (running) {
+    if (!live) return null;
+    return (
+      <span className="worktrail live">
+        <span className="workspin" aria-hidden="true" />
+        {typeof t.startedAt === 'number' ? fmtWorkElapsed(now - t.startedAt) : ''}
+      </span>
+    );
   }
+  const dur = typeof t.startedAt === 'number' && typeof t.endedAt === 'number' ? fmtDur(t.endedAt - t.startedAt) : '';
+  return dur ? <span className="worktrail">{dur}</span> : null;
+}
+
+// The steps behind a Working/Worked line: the settled turn's thinking first,
+// then each call with its duration (a live call spins and counts up).
+function WorkList({ tools, thinking, now, live }: { tools: ToolEvent[]; thinking: ThinkingEvent | null; now: number; live: boolean }) {
   return (
-    <div className="thinklive">
-      <div className="pulseline">
-        {stopping ? (
+    <div className="worklist">
+      {thinking && <StepRow ev={thinking} />}
+      {tools.map((t) => <ToolDetail key={t.key} t={t} standalone trail={<WorkingTrail t={t} now={now} live={live} />} />)}
+    </div>
+  );
+}
+
+// Observed span of the work: first call started → last call ended. Old
+// history without timestamps, or a sub-second span, shows no duration.
+function workSpanMs(tools: ToolEvent[]): number | null {
+  const starts = tools.map((t) => t.startedAt).filter((x): x is number => typeof x === 'number');
+  const ends = tools.map((t) => t.endedAt).filter((x): x is number => typeof x === 'number');
+  if (!starts.length || !ends.length) return null;
+  const span = Math.max(...ends) - Math.min(...starts);
+  return span >= 1000 ? span : null;
+}
+
+// A settled turn's Working line: the same head without the animation, closed
+// by default, opening the same list.
+function WorkedRow({ tools, thinking }: { tools: ToolEvent[]; thinking: ThinkingEvent | null }) {
+  const [open, setOpen] = useState(false);
+  const span = workSpanMs(tools);
+  const meta: string[] = [];
+  if (span != null) meta.push(fmtWorkElapsed(span));
+  if (tools.length) meta.push(toolCount(tools.length));
+  return (
+    <div className={`workfold${open ? ' open' : ''}`}>
+      <button type="button" className="workhead" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+        <span className="worklabel">Worked</span>
+        {meta.length > 0 && <span className="workmeta">{meta.join(' · ')}</span>}
+        <span className={`workchev${open ? ' open' : ''}`} aria-hidden="true">›</span>
+      </button>
+      {open && <WorkList tools={tools} thinking={thinking} now={Date.now()} live={false} />}
+    </div>
+  );
+}
+
+// The Working line (approved mock working-indicator v5 · option 3, 2026-10-12):
+// an orbiting dot, "Working" with counting dots, the elapsed time and how many
+// tools ran; under it, the one thing running right now. The model's thinking
+// headlines and the whimsy words are gone from here by request. Clicking opens
+// the turn's tool calls, which never interleave with the transcript; once the
+// turn settles they fold into its Worked row. Stop keeps its own honest
+// "Deteniendo…" row.
+function TurnPulse({ msg }: { msg: Msg }) {
+  const [open, setOpen] = useState(false);
+  const now = useSecondTicker();
+  const pulse = store.heartbeatFor(msg.jobId);
+  if (msg.stopState) {
+    return (
+      <div className="thinklive">
+        <div className="pulseline">
           <div className="steprow steplive stopping" role="status" aria-live="polite">
             <span className="stmark"><span className="stopdot" aria-hidden="true" /></span>
             <span className="stbody">Deteniendo…</span>
           </div>
-        ) : phaseLabel ? (
-          <div className="steprow steplive" role="status" aria-live="polite">
-            <span className="stmark"><span className="ping" aria-hidden="true" /></span>
-            <span className="stbody"><StepWords key={phaseLabel} text={phaseLabel} /></span>
-          </div>
-        ) : thinkEv ? (
-          <StepRow ev={thinkEv} live fallbackLabel={whimsy} />
-        ) : (
-          <div className="steprow steplive" role="status" aria-live="polite">
-            <span className="stmark"><span className="ping" aria-hidden="true" /></span>
-            <span className="stbody"><StepWords key={whimsy} text={whimsy} /></span>
-          </div>
-        )}
-        {!stopping && pulse?.retry && (
+        </div>
+      </div>
+    );
+  }
+  const tools = workingTools(msg);
+  const current = [...tools].reverse().find((t) => toolState(t.status) === 'running') ?? null;
+  const elapsedMs = pulse ? pulse.elapsedMs : typeof msg.turnStartedAt === 'number' ? now - msg.turnStartedAt : null;
+  const meta: string[] = [];
+  if (elapsedMs != null) meta.push(fmtWorkElapsed(elapsedMs));
+  if (tools.length) meta.push(toolCount(tools.length));
+  const nowLine = current ? toolLiveLine(current)
+    : pulse?.phase === 'compacting' ? 'compacting context'
+      : null;
+  return (
+    <div className={`thinklive working${open ? ' open' : ''}`}>
+      <button
+        type="button"
+        className="workhead"
+        aria-expanded={open}
+        disabled={!tools.length}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="workorbit" aria-hidden="true" />
+        <span className="worklabel" role="status" aria-live="polite">Working<span className="workdots" aria-hidden="true" /></span>
+        {meta.length > 0 && <span className="workmeta">{meta.join(' · ')}</span>}
+        {tools.length > 0 && <span className={`workchev${open ? ' open' : ''}`} aria-hidden="true">›</span>}
+        {pulse?.retry && (
           <span className="retrychip" role="status">
             <IcRetryArc />
             {`reintentando${pulse.retry.code ? ` (${pulse.retry.code})` : ''}${pulse.retry.attempt ? ` · intento ${pulse.retry.attempt}` : ''}`}
           </span>
         )}
-        {!stopping && vitals.length > 0 && <span className="pulsevitals mono">{vitals.join(' · ')}</span>}
-      </div>
+      </button>
+      {open ? (
+        <WorkList tools={tools} thinking={null} now={now} live />
+      ) : nowLine ? (
+        <div className="worknow mono" title={nowLine}><span aria-hidden="true">↳</span> {nowLine}</div>
+      ) : null}
     </div>
   );
 }

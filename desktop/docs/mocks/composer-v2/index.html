@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Compositor + Trabajando · ejemplos</title>
+<style>
+/* Tokens: verbatim from desktop/renderer2/src/styles/tokens.css (dark, AA 2026-10-11). */
+:root{
+  color-scheme:dark;
+  --bg:#0f0e0d; --side:#151413; --panel:#1d1c1a; --card:#1a1918; --field:#252320;
+  --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#908b82;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --acc:#4fa583; --link:#8fb0ea; --amber:#d8a05a; --add:#4cae7f; --del:#d96b5f; --shell:#0b0a09;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased; padding:28px 40px 36px}
+.sec{max-width:1040px; margin:0 auto 34px}
+.lab{display:flex; align-items:baseline; gap:10px; margin:0 0 12px}
+.lab b{font-size:15px; font-weight:650}
+.lab span{color:var(--muted); font-size:13px}
+.lab i{color:var(--faint); font-style:normal; font-size:12px; margin-left:auto}
+svg{display:block}
+.ic{width:16px; height:16px; stroke:currentColor; fill:none; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round}
+.sm{width:13px; height:13px}
+
+/* shared bits */
+.txt{color:var(--ink); font-size:15px; line-height:1.55}
+.ph{color:var(--faint)}
+.btn{display:inline-flex; align-items:center; justify-content:center; color:var(--muted); border-radius:8px; height:30px; min-width:30px; padding:0 8px; gap:6px; font-size:13px}
+.btn:hover{background:rgba(255,255,255,.05)}
+.send{width:32px; height:32px; border-radius:50%; background:var(--ink); color:#151413; display:inline-flex; align-items:center; justify-content:center; flex:none}
+.send .ic{stroke-width:2.2}
+.stop{background:var(--ink)}
+.stop i{width:10px; height:10px; border-radius:2px; background:#151413; display:block}
+.ring{width:15px; height:15px}
+.chev{width:11px; height:11px; stroke:currentColor; fill:none; stroke-width:1.8}
+.perm{color:var(--amber); background:rgba(216,160,90,.10); border-radius:999px; padding:0 10px; height:26px; display:inline-flex; align-items:center; font-size:12.5px}
+.sp{flex:1}
+.sep{width:1px; height:16px; background:var(--line2); margin:0 2px}
+
+/* A — Codex */
+.A{background:var(--panel); border:1px solid var(--line2); border-radius:24px; padding:16px 16px 10px}
+.A .txt{min-height:48px; padding:2px 4px 10px}
+.A .bar{display:flex; align-items:center; gap:4px}
+.under{display:flex; gap:16px; color:var(--faint); font-size:12.5px; padding:8px 18px 0}
+.under span{display:inline-flex; align-items:center; gap:6px}
+
+/* B — t3code */
+.B{background:var(--card); border:1px solid var(--line2); border-radius:24px; overflow:hidden}
+.B .txt{padding:16px 18px 18px; min-height:62px}
+.B .foot{display:flex; align-items:center; gap:4px; padding:8px 10px 8px 12px; border-top:1px solid var(--line); background:rgba(255,255,255,.015)}
+.B .mdl{display:inline-flex; align-items:center; gap:7px; color:var(--ink2); font-size:13px; padding:0 8px; height:30px; border-radius:8px}
+.B .dotlogo{width:16px; height:16px; border-radius:5px; background:#3a3631; display:grid; place-items:center; font-size:10px; color:var(--ink2)}
+.B .seg{display:inline-flex; border:1px solid var(--line2); border-radius:8px; overflow:hidden; height:26px; font-size:12px}
+.B .seg span{padding:0 9px; display:flex; align-items:center; color:var(--muted)}
+.B .seg span.on{background:rgba(255,255,255,.07); color:var(--ink)}
+
+/* C — Claude desktop */
+.C{background:#211f1c; border:1px solid rgba(255,255,255,.10); border-radius:20px; padding:18px 18px 12px; box-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 8px 28px rgba(0,0,0,.35)}
+.C .txt{min-height:52px; padding:0 2px 12px}
+.C .bar{display:flex; align-items:center; gap:6px}
+.C .sq{width:32px; height:32px; border-radius:10px; background:var(--acc); color:#0f0e0d; display:inline-flex; align-items:center; justify-content:center}
+.C .sq .ic{stroke-width:2.3}
+.C .ob{border:1px solid var(--line2); border-radius:9px; height:30px; width:30px; display:inline-flex; align-items:center; justify-content:center; color:var(--muted)}
+.C .mdl{color:var(--ink2); font-size:13px; display:inline-flex; align-items:center; gap:5px; padding:0 8px}
+
+/* D — DeepSeek */
+.D{background:var(--panel); border:1px solid var(--line2); border-radius:26px; padding:14px 14px 12px}
+.D .att{display:flex; gap:8px; padding:0 4px 10px}
+.D .att span{display:inline-flex; align-items:center; gap:8px; background:var(--field); border-radius:10px; padding:6px 10px; font-size:12.5px; color:var(--ink2)}
+.D .att em{font-style:normal; color:var(--faint); font-size:11.5px}
+.D .txt{padding:0 6px 12px; min-height:46px}
+.D .bar{display:flex; align-items:center; gap:8px}
+.D .pill{display:inline-flex; align-items:center; gap:6px; height:30px; padding:0 12px; border-radius:999px; border:1px solid var(--line2); color:var(--muted); font-size:12.5px}
+.D .pill.on{border-color:rgba(79,165,131,.55); color:var(--ink); background:rgba(79,165,131,.10)}
+.D .pill.on .ic{color:var(--acc)}
+
+/* E — Fusión */
+.E{background:var(--panel); border:1px solid var(--line2); border-radius:22px; padding:14px 14px 10px; transition:border-color .2s}
+.E.focus{border-color:rgba(255,255,255,.22); box-shadow:0 0 0 4px rgba(255,255,255,.03)}
+.E .txt{padding:2px 6px 12px; min-height:44px}
+.E .bar{display:flex; align-items:center; gap:2px}
+.E .mdl{display:inline-flex; align-items:center; gap:6px; color:var(--ink2); font-size:13px; height:30px; padding:0 9px; border-radius:8px}
+.E .mdl b{font-weight:500; color:var(--muted)}
+.E .sendwrap{position:relative; width:36px; height:36px; display:grid; place-items:center; margin-left:4px}
+.E .sendwrap svg.ctx{position:absolute; inset:0; width:36px; height:36px; transform:rotate(-90deg)}
+.hint{color:var(--faint); font-size:12px; padding:7px 12px 0; display:flex; gap:14px}
+.hint kbd{font:11px var(--mono); color:var(--muted); border:1px solid var(--line2); border-radius:4px; padding:0 4px; margin-right:4px}
+.E .queued{display:flex; align-items:center; gap:8px; margin:0 6px 10px; padding:7px 10px; border-radius:10px; background:var(--field); font-size:12.5px; color:var(--ink2)}
+.E .queued em{font-style:normal; color:var(--faint)}
+.grid3{display:grid; grid-template-columns:1fr; gap:18px}
+.state{color:var(--faint); font-size:12px; margin:0 0 6px 4px}
+
+/* Hoy (current) */
+.H{background:var(--panel); border:1px solid var(--line2); border-radius:14px; padding:10px 10px 10px 16px; display:flex; align-items:center; gap:10px}
+.H + .hbar{display:flex; align-items:center; gap:10px; padding:8px 4px 0; font-size:13px; color:var(--ink2)}
+
+/* ---------- Trabajando ---------- */
+.wk{display:inline-flex; align-items:center; gap:9px; padding:6px 10px 6px 8px; margin-left:-8px; border-radius:9px; cursor:pointer; color:var(--muted); font-size:13.5px}
+.wk:hover{background:rgba(255,255,255,.045)}
+.wk .meta{color:var(--faint); font-size:12.5px}
+.wk .chev{color:var(--faint)}
+/* shimmer label */
+.shim{background:linear-gradient(100deg, var(--muted) 0%, var(--muted) 38%, var(--ink) 50%, var(--muted) 62%, var(--muted) 100%); background-size:240% 100%; -webkit-background-clip:text; background-clip:text; color:transparent; animation:shim 1.9s linear infinite}
+@keyframes shim{from{background-position:120% 0}to{background-position:-20% 0}}
+/* dots */
+.dots{display:inline-block; width:1em; margin-left:-6px; text-align:left}
+.dots::after{content:"…"; animation:dots 1.4s steps(1) infinite}
+@keyframes dots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
+/* spinners */
+.orb{width:14px; height:14px; border-radius:50%; border:1.6px solid rgba(255,255,255,.14); border-top-color:var(--acc); animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.pulse{width:8px; height:8px; border-radius:50%; background:var(--acc); margin:0 3px; animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.35; transform:scale(.8)}50%{opacity:1; transform:scale(1.15)}}
+.star{width:14px; height:14px; color:var(--acc); animation:star 2.4s ease-in-out infinite}
+@keyframes star{0%{transform:rotate(0) scale(.85)}50%{transform:rotate(90deg) scale(1.05)}100%{transform:rotate(180deg) scale(.85)}}
+.anirow{display:flex; gap:44px; flex-wrap:wrap; align-items:center}
+.anirow .k{color:var(--faint); font-size:11.5px; margin-top:2px}
+
+.msg{color:var(--ink); font-size:14.5px; line-height:1.6; margin:0 0 14px; max-width:880px}
+.umsg{margin-left:auto; max-width:520px; background:var(--field); border-radius:16px; padding:10px 14px; font-size:14.5px; margin-bottom:18px}
+
+/* expanded trajectory */
+.traj{margin:6px 0 14px; border-left:1.5px solid var(--line2); padding:2px 0 2px 16px; max-width:880px}
+.step{display:flex; align-items:center; gap:10px; padding:5px 0; font-size:13px; color:var(--ink2)}
+.step .ic{color:var(--muted)}
+.step code{font:12.5px var(--mono); color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:520px}
+.step .t{margin-left:auto; color:var(--faint); font:12px var(--mono)}
+.step.live{color:var(--ink)}
+.step.live .t{color:var(--acc)}
+.step .add{color:var(--add); font:12px var(--mono)} .step .del{color:var(--del); font:12px var(--mono)}
+.think{font-size:12.5px; color:var(--faint); padding:3px 0 3px 26px; font-style:italic}
+.done{color:var(--muted)}
+.done .ck{width:14px; height:14px; color:var(--faint)}
+.note{color:var(--faint); font-size:12.5px; margin-top:6px}
+
+/* render mode: ?s=id shows one section */
+body.one .sec{display:none}
+body.one .sec.show{display:block; margin-bottom:0}
+/* stills: freeze the dots mid-cycle so a capture never lands on an empty frame */
+body.one .dots::after{animation:none; content:"…"}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+    <symbol id="mic" viewBox="0 0 16 16"><rect x="5.5" y="2" width="5" height="8" rx="2.5"/><path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2"/></symbol>
+    <symbol id="up" viewBox="0 0 16 16"><path d="M8 13V3.5M4 7.5l4-4 4 4"/></symbol>
+    <symbol id="down" viewBox="0 0 12 12"><path d="M3 4.5l3 3 3-3"/></symbol>
+    <symbol id="right" viewBox="0 0 12 12"><path d="M4.5 3l3 3-3 3"/></symbol>
+    <symbol id="folder" viewBox="0 0 16 16"><path d="M2 4.5c0-.8.6-1.5 1.5-1.5H6l1.5 1.5h5c.8 0 1.5.7 1.5 1.5v5.5c0 .8-.7 1.5-1.5 1.5h-9c-.9 0-1.5-.7-1.5-1.5z"/></symbol>
+    <symbol id="branch" viewBox="0 0 16 16"><circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="5.5" r="1.5"/><path d="M4.5 5v6M11.5 7c0 2.5-3 2.5-7 4"/></symbol>
+    <symbol id="effort" viewBox="0 0 16 16"><path d="M2.5 11.5a5.5 5.5 0 0 1 11 0"/><path d="M8 11.5l2.6-3"/></symbol>
+    <symbol id="term" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M5 7l2 1.5L5 10M8.5 10.5H11"/></symbol>
+    <symbol id="edit" viewBox="0 0 16 16"><path d="M10.5 3.5l2 2L6 12H4v-2z"/></symbol>
+    <symbol id="read" viewBox="0 0 16 16"><path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.5v3h3"/></symbol>
+    <symbol id="search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4"/><path d="M10 10l3.5 3.5"/></symbol>
+    <symbol id="check" viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7"/></symbol>
+    <symbol id="sliders" viewBox="0 0 16 16"><path d="M3 5h6M12 5h1M3 11h1M7 11h6"/><circle cx="10.5" cy="5" r="1.5"/><circle cx="5.5" cy="11" r="1.5"/></symbol>
+    <symbol id="think" viewBox="0 0 16 16"><path d="M8 2.5a4 4 0 0 0-2.3 7.3V11.5h4.6V9.8A4 4 0 0 0 8 2.5zM6.3 13.5h3.4"/></symbol>
+    <symbol id="plan" viewBox="0 0 16 16"><path d="M3 4h10M3 8h7M3 12h5"/></symbol>
+    <symbol id="clip" viewBox="0 0 16 16"><path d="M11.5 7.5l-4.2 4.2a2.6 2.6 0 0 1-3.7-3.7l4.6-4.6a1.7 1.7 0 0 1 2.4 2.4L6.3 10.1a.8.8 0 0 1-1.1-1.1L9 5.2"/></symbol>
+    <symbol id="spark" viewBox="0 0 16 16"><path d="M8 1.5v4M8 10.5v4M1.5 8h4M10.5 8h4M3.4 3.4l2.8 2.8M9.8 9.8l2.8 2.8M3.4 12.6l2.8-2.8M9.8 6.2l2.8-2.8"/></symbol>
+  </defs>
+</svg>
+
+<!-- 0. Hoy -->
+<section class="sec" id="hoy">
+  <div class="lab"><b>Hoy</b><span>una sola línea, botón adentro, controles sueltos debajo</span></div>
+  <div class="H"><span class="txt ph" style="flex:1">Contale a tu agente qué sigue…</span><span class="send"><svg class="ic"><use href="#up"/></svg></span></div>
+  <div class="hbar"><span class="perm">Permitir todo</span><svg class="ic" style="color:var(--muted)"><use href="#mic"/></svg><span class="sp"></span><span>Opus 5.5</span><span style="display:inline-flex;gap:5px;align-items:center;color:var(--muted)"><svg class="ic sm"><use href="#effort"/></svg>xhigh</span><svg class="ring" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--amber)" stroke-width="2"/></svg></div>
+</section>
+
+<!-- A Codex -->
+<section class="sec" id="A">
+  <div class="lab"><b>A · estilo Codex</b><span>texto arriba, una barra adentro; proyecto y rama debajo, en gris</span><i>ref: Codex desktop</i></div>
+  <div class="A">
+    <div class="txt">i want to make the app look better, it has a few rough edges — first the chatbox and the tool calls</div>
+    <div class="bar">
+      <span class="btn"><svg class="ic"><use href="#plus"/></svg></span>
+      <span class="perm">Permitir todo</span>
+      <span class="sp"></span>
+      <span class="btn" style="color:var(--ink2)">Opus 5.5 <span style="color:var(--muted)">xhigh</span><svg class="chev"><use href="#down"/></svg></span>
+      <span class="btn"><svg class="ic"><use href="#mic"/></svg></span>
+      <span class="send"><svg class="ic"><use href="#up"/></svg></span>
+    </div>
+  </div>
+  <div class="under"><span><svg class="ic sm"><use href="#folder"/></svg>workass</span><span><svg class="ic sm"><use href="#branch"/></svg>main</span><span class="sp"></span><span>contexto 41%</span></div>
+</section>
+
+<!-- B t3code -->
+<section class="sec" id="B">
+  <div class="lab"><b>B · estilo t3code</b><span>caja con pie separado: proveedor y modelo, modo Chat/Plan, envío redondo</span><i>ref: t3code</i></div>
+  <div class="B">
+    <div class="txt">i want to make the app look better, it has a few rough edges — first the chatbox and the tool calls</div>
+    <div class="foot">
+      <span class="mdl"><span class="dotlogo">✳</span>Opus 5.5<svg class="chev" style="color:var(--muted)"><use href="#down"/></svg></span>
+      <span class="btn"><svg class="ic sm"><use href="#effort"/></svg>xhigh</span>
+      <span class="seg"><span class="on">Chat</span><span>Plan</span></span>
+      <span class="sp"></span>
+      <span class="btn" style="color:var(--amber)">Acceso total</span>
+      <span class="btn"><svg class="ic"><use href="#mic"/></svg></span>
+      <span class="send"><svg class="ic"><use href="#up"/></svg></span>
+    </div>
+  </div>
+</section>
+
+<!-- C Claude -->
+<section class="sec" id="C">
+  <div class="lab"><b>C · estilo Claude desktop</b><span>tarjeta cálida con sombra, botones con borde, envío cuadrado en acento</span><i>ref: Claude / Claude Code desktop</i></div>
+  <div class="C">
+    <div class="txt">i want to make the app look better, it has a few rough edges — first the chatbox and the tool calls</div>
+    <div class="bar">
+      <span class="ob"><svg class="ic"><use href="#plus"/></svg></span>
+      <span class="ob"><svg class="ic"><use href="#sliders"/></svg></span>
+      <span class="sp"></span>
+      <span class="mdl">Opus 5.5 · xhigh<svg class="chev"><use href="#down"/></svg></span>
+      <span class="sq"><svg class="ic"><use href="#up"/></svg></span>
+    </div>
+  </div>
+</section>
+
+<!-- D DeepSeek -->
+<section class="sec" id="D">
+  <div class="lab"><b>D · estilo DeepSeek</b><span>adjuntos como fichas arriba; modos como píldoras que se encienden</span><i>ref: DeepSeek Harness / chat</i></div>
+  <div class="D">
+    <div class="att"><span><svg class="ic sm"><use href="#read"/></svg>composer.png <em>212 KB</em></span></div>
+    <div class="txt">i want to make the app look better, it has a few rough edges — first the chatbox and the tool calls</div>
+    <div class="bar">
+      <span class="pill on"><svg class="ic sm"><use href="#think"/></svg>Pensar a fondo</span>
+      <span class="pill"><svg class="ic sm"><use href="#plan"/></svg>Plan</span>
+      <span class="sp"></span>
+      <span class="btn"><svg class="ic"><use href="#clip"/></svg></span>
+      <span class="send"><svg class="ic"><use href="#up"/></svg></span>
+    </div>
+  </div>
+</section>
+
+<!-- E Fusión -->
+<section class="sec" id="E">
+  <div class="lab"><b>E · Fusión (recomendada)</b><span>estructura Codex, pie t3code, calidez Claude, píldora DeepSeek; el anillo de contexto abraza el envío</span></div>
+  <div class="grid3">
+    <div>
+      <div class="state">vacío</div>
+      <div class="E">
+        <div class="txt ph">Contale a tu agente qué sigue…</div>
+        <div class="bar">
+          <span class="btn"><svg class="ic"><use href="#plus"/></svg></span>
+          <span class="perm">Permitir todo</span>
+          <span class="sp"></span>
+          <span class="mdl">Opus 5.5 <b>xhigh</b><svg class="chev" style="color:var(--muted)"><use href="#down"/></svg></span>
+          <span class="btn"><svg class="ic"><use href="#mic"/></svg></span>
+          <span class="sendwrap"><svg class="ctx" viewBox="0 0 36 36"><circle cx="18" cy="18" r="16.5" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="1.6"/><circle cx="18" cy="18" r="16.5" fill="none" stroke="var(--muted)" stroke-width="1.6" stroke-dasharray="42.5 103.7" stroke-linecap="round"/></svg><span class="send" style="width:28px;height:28px;opacity:.35"><svg class="ic"><use href="#up"/></svg></span></span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="state">escribiendo (foco)</div>
+      <div class="E focus">
+        <div class="txt">i want to make the app look better, it has a few rough edges — first the chatbox and the tool calls<br>give me some examples</div>
+        <div class="bar">
+          <span class="btn"><svg class="ic"><use href="#plus"/></svg></span>
+          <span class="perm">Permitir todo</span>
+          <span class="sp"></span>
+          <span class="mdl">Opus 5.5 <b>xhigh</b><svg class="chev" style="color:var(--muted)"><use href="#down"/></svg></span>
+          <span class="btn"><svg class="ic"><use href="#mic"/></svg></span>
+          <span class="sendwrap"><svg class="ctx" viewBox="0 0 36 36"><circle cx="18" cy="18" r="16.5" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="1.6"/><circle cx="18" cy="18" r="16.5" fill="none" stroke="var(--muted)" stroke-width="1.6" stroke-dasharray="42.5 103.7" stroke-linecap="round"/></svg><span class="send" style="width:28px;height:28px"><svg class="ic"><use href="#up"/></svg></span></span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="state">mientras trabaja: lo que escribís dirige el turno; la cola queda visible</div>
+      <div class="E">
+        <div class="queued"><svg class="ic sm"><use href="#right"/></svg>después: <span style="color:var(--ink)">revisá también el modo claro</span><span class="sp"></span><em>en cola</em></div>
+        <div class="txt">también probá el estado vacío</div>
+        <div class="bar">
+          <span class="btn"><svg class="ic"><use href="#plus"/></svg></span>
+          <span class="perm">Permitir todo</span>
+          <span class="sp"></span>
+          <span class="mdl">Opus 5.5 <b>xhigh</b><svg class="chev" style="color:var(--muted)"><use href="#down"/></svg></span>
+          <span class="btn"><svg class="ic"><use href="#mic"/></svg></span>
+          <span class="sendwrap"><svg class="ctx" viewBox="0 0 36 36"><circle cx="18" cy="18" r="16.5" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="1.6"/><circle cx="18" cy="18" r="16.5" fill="none" stroke="var(--amber)" stroke-width="1.6" stroke-dasharray="78 103.7" stroke-linecap="round"/></svg><span class="send stop" style="width:28px;height:28px"><i></i></span></span>
+        </div>
+      </div>
+      <div class="hint" style="padding-left:14px"><span><kbd>↵</kbd>dirigir el turno</span><span><kbd>⌥↵</kbd>poner en cola</span><span><kbd>esc</kbd>detener</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- W1 animations -->
+<section class="sec" id="W1">
+  <div class="lab"><b>Trabajando · en vez de las frases sueltas</b><span>una sola línea viva; tres animaciones posibles</span></div>
+  <div class="anirow">
+    <div><div class="wk"><span class="orb"></span><span class="shim">Trabajando</span><span class="dots"></span><span class="meta">1m 12s</span><svg class="chev"><use href="#right"/></svg></div><div class="k">1 · anillo + brillo (Codex / Claude.ai)</div></div>
+    <div><div class="wk"><span class="pulse"></span><span>Trabajando</span><span class="dots"></span><span class="meta">1m 12s</span><svg class="chev"><use href="#right"/></svg></div><div class="k">2 · pulso + puntos (t3code)</div></div>
+    <div><div class="wk"><svg class="star ic" style="stroke-width:1.7"><use href="#spark"/></svg><span class="shim">Trabajando</span><span class="dots"></span><span class="meta">1m 12s</span><svg class="chev"><use href="#right"/></svg></div><div class="k">3 · destello que gira (Claude Code)</div></div>
+  </div>
+</section>
+
+<!-- W2 collapsed in context -->
+<section class="sec" id="W2">
+  <div class="lab"><b>Trabajando · cerrado</b><span>las herramientas quedan adentro; se ve cuánto lleva y qué hizo</span></div>
+  <div class="umsg">first the chatbox and the tool calls, give me some examples</div>
+  <p class="msg">Voy a mirar el compositor actual y las referencias antes de armar los ejemplos.</p>
+  <div class="wk"><span class="orb"></span><span class="shim">Trabajando</span><span class="dots"></span><span class="meta">1m 12s · 4 comandos · 2 lecturas</span><svg class="chev"><use href="#right"/></svg></div>
+</section>
+
+<!-- W3 expanded -->
+<section class="sec" id="W3">
+  <div class="lab"><b>Trabajando · abierto (clic)</b><span>trayectoria paso a paso con tiempos, como el panel Trajectory de DeepSeek; el razonamiento queda adentro y tenue</span></div>
+  <div class="wk" style="color:var(--ink2)"><span class="orb"></span><span class="shim">Trabajando</span><span class="dots"></span><span class="meta">1m 12s · 4 comandos · 2 lecturas</span><svg class="chev" style="transform:rotate(90deg)"><use href="#right"/></svg></div>
+  <div class="traj">
+    <div class="step"><svg class="ic"><use href="#read"/></svg>Leyó <code>renderer2/src/components/Composer.tsx</code><span class="t">0.1s</span></div>
+    <div class="step"><svg class="ic"><use href="#read"/></svg>Leyó <code>renderer2/src/styles/tokens.css</code><span class="t">0.1s</span></div>
+    <div class="think">Compara el pie de t3code con la barra de Codex…</div>
+    <div class="step"><svg class="ic"><use href="#search"/></svg>Buscó <code>"Worked for" en pingdotgg/t3code</code><span class="t">2.4s</span></div>
+    <div class="step"><svg class="ic"><use href="#term"/></svg>Ejecutó <code>curl /__workass-shell/screenshot</code><span class="t">0.8s</span></div>
+    <div class="step"><svg class="ic"><use href="#edit"/></svg>Editó <code>docs/mocks/composer-v2/index.html</code><span class="add">+214</span><span class="del">−0</span><span class="t">0.0s</span></div>
+    <div class="step live"><span class="orb" style="margin:0 1px"></span>Ejecutando <code>brave --headless --screenshot …</code><span class="t">3s</span></div>
+  </div>
+</section>
+
+<!-- W4 done -->
+<section class="sec" id="W4">
+  <div class="lab"><b>Terminado</b><span>la línea se congela en un resumen plegado; la respuesta queda limpia debajo</span></div>
+  <div class="wk done"><svg class="ic ck"><use href="#check"/></svg><span>Trabajó 3m 14s</span><span class="meta">· 6 comandos · 2 lecturas · 1 edición</span><svg class="chev"><use href="#right"/></svg></div>
+  <p class="msg" style="margin-top:8px">Listo: armé cinco compositores y tres animaciones para la línea de trabajo. Abajo te dejo cuál recomiendo y por qué.</p>
+</section>
+
+<script>
+const s = new URLSearchParams(location.search).get('s');
+if (s) { document.body.classList.add('one'); document.getElementById(s)?.classList.add('show'); }
+</script>
+</body>
+</html>

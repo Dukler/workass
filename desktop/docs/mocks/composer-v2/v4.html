@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Compositor v4 · identidad Workass</title>
+<style>
+:root{
+  --bg:#0f0e0d; --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#908b82;
+  --acc:#4fa583; --amber:#d8a05a; --add:#4cae7f; --del:#d96b5f;
+  --surface:#1a1917; --raise:#22211f;
+  --edge:rgba(255,255,255,.075); --hair:rgba(255,255,255,.08);
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0; background:var(--bg)}
+body{color:var(--ink); font:14px/1.6 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif; -webkit-font-smoothing:antialiased}
+.col{width:860px; margin:0 auto; padding:34px 0 34px}
+svg{display:block}
+.ic{width:15px; height:15px; stroke:currentColor; fill:none; stroke-width:1.55; stroke-linecap:round; stroke-linejoin:round}
+.chev{width:10px; height:10px; stroke:currentColor; fill:none; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round}
+.p{margin:0 0 14px; font-size:14.5px; line-height:1.65}
+.state{color:#5d5952; font:11.5px var(--mono); letter-spacing:.04em; text-transform:uppercase; margin:0 0 14px}
+.sp{flex:1}
+.mono{font-family:var(--mono)}
+
+/* shared: breathing bars (Workass mark for "working") */
+.bars{display:inline-flex; align-items:flex-end; gap:2px; height:12px; width:13px; flex:none}
+.bars i{width:3px; border-radius:1.5px; background:var(--acc); animation:bar 1s ease-in-out infinite}
+.bars i:nth-child(1){height:6px; animation-delay:-.2s}
+.bars i:nth-child(2){height:12px; animation-delay:-.45s}
+.bars i:nth-child(3){height:8px; animation-delay:-.7s}
+@keyframes bar{0%,100%{transform:scaleY(.45)}50%{transform:scaleY(1)}}
+.bars i{transform-origin:bottom}
+.still .bars i:nth-child(1){transform:scaleY(.7)} .still .bars i:nth-child(2){transform:scaleY(1)} .still .bars i:nth-child(3){transform:scaleY(.55)}
+.still .bars i{animation:none}
+.dots::after{content:"…"; display:inline-block; width:14px; animation:dots 1.5s steps(1) infinite}
+@keyframes dots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
+.still .dots::after{animation:none; content:"…"}
+.spin{width:12px; height:12px; border-radius:50%; border:1.5px solid rgba(255,255,255,.12); border-top-color:var(--acc); animation:spin .85s linear infinite; flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* shared composer bits */
+.ta{padding:16px 20px 2px; min-height:58px; font-size:15px; line-height:1.55}
+.ta.ph{color:rgba(242,239,233,.34)}
+.row{display:flex; align-items:center; gap:4px; padding:10px 10px 10px 12px}
+.ib{width:32px; height:32px; border-radius:10px; display:grid; place-items:center; color:var(--muted)}
+.ib.lock{color:var(--amber)}
+.model{display:inline-flex; align-items:center; gap:6px; height:32px; padding:0 10px; border-radius:10px; color:var(--ink2); font-size:13px}
+.model em{font-style:normal; color:var(--faint)}
+.model .chev{color:var(--faint)}
+.send{position:relative; width:36px; height:36px; display:grid; place-items:center; margin-left:2px}
+.send .in{width:30px; height:30px; border-radius:50%; display:grid; place-items:center; background:rgba(255,255,255,.08); color:var(--faint)}
+.send .in.on{background:var(--ink); color:#141312}
+.send .in .ic{stroke-width:2}
+.send svg.ctx{position:absolute; inset:0; width:36px; height:36px; transform:rotate(-90deg)}
+.steps .st{display:flex; align-items:center; gap:10px; height:30px; font-size:13px; color:var(--ink2)}
+.steps .st .ic{color:var(--faint); width:14px; height:14px}
+.steps code{font:12.5px var(--mono); color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:470px}
+.steps .d{margin-left:auto; color:var(--faint); font:12px var(--mono)}
+.steps .add{color:var(--add); font:12px var(--mono)} .steps .del{color:var(--del); font:12px var(--mono)}
+.steps .st.live{color:var(--ink)} .steps .st.live .d{color:var(--acc)}
+
+/* ============ 1 · ISLA: píldora flotante centrada sobre la caja ============ */
+.I-zone{position:relative; padding-top:6px}
+.I-pillwrap{display:flex; justify-content:center; margin:0 0 -16px; position:relative; z-index:3}
+.I-pill{display:inline-flex; align-items:center; gap:9px; height:32px; padding:0 14px 0 12px; border-radius:16px;
+  background:var(--raise); box-shadow:0 0 0 1px var(--edge), 0 8px 24px rgba(0,0,0,.5); color:var(--ink2); font-size:13px; cursor:pointer}
+.I-pill .t{color:var(--faint); font-variant-numeric:tabular-nums}
+.I-pill .chev{color:var(--faint)}
+.I-pill.done{color:var(--muted)}
+.I-pill.done .ok{width:14px; height:14px; color:var(--acc)}
+.I-box{position:relative; z-index:2; background:var(--surface); border-radius:24px; box-shadow:0 0 0 1px var(--edge), inset 0 1px 0 rgba(255,255,255,.035)}
+.I-box .ta{padding-top:24px}
+.I-pop{position:relative; z-index:4; margin:0 auto 10px; width:560px; background:var(--raise); border-radius:16px; box-shadow:0 0 0 1px var(--edge), 0 18px 40px rgba(0,0,0,.6); padding:10px 14px 8px}
+.I-pop .hd{display:flex; align-items:center; gap:9px; font-size:13px; color:var(--ink2); padding:2px 0 8px; border-bottom:1px solid var(--hair); margin-bottom:4px}
+.I-pop .hd .t{color:var(--faint)}
+.I-pop .ft{display:flex; justify-content:space-between; color:var(--faint); font-size:12px; padding:8px 0 0; border-top:1px solid var(--hair); margin-top:4px}
+
+/* ============ 2 · BORDE VIVO: la caja misma trabaja ============ */
+.L-box{position:relative; background:var(--surface); border-radius:20px; box-shadow:0 0 0 1px var(--edge); overflow:hidden}
+.L-box.working::before{content:""; position:absolute; left:0; right:0; top:0; height:1.5px;
+  background:linear-gradient(90deg, transparent 0%, rgba(79,165,131,0) 20%, var(--acc) 50%, rgba(79,165,131,0) 80%, transparent 100%); background-size:50% 100%; background-repeat:no-repeat; animation:sweep 1.8s ease-in-out infinite}
+@keyframes sweep{0%{background-position:-60% 0}100%{background-position:160% 0}}
+.still .L-box.working::before{animation:none; background-position:40% 0}
+.L-head{display:flex; align-items:center; gap:9px; padding:11px 14px 10px 18px; font-size:13px; color:var(--ink2); border-bottom:1px solid var(--hair); cursor:pointer}
+.L-head .t{color:var(--faint); font-variant-numeric:tabular-nums}
+.L-head .chev{color:var(--faint)}
+.L-head .stop{display:inline-flex; align-items:center; gap:6px; height:26px; padding:0 10px; border-radius:8px; color:var(--muted); font-size:12.5px; background:rgba(255,255,255,.05)}
+.L-head .stop i{width:8px; height:8px; border-radius:2px; background:var(--muted)}
+.L-steps{padding:4px 18px 8px; border-bottom:1px solid var(--hair); background:rgba(0,0,0,.12)}
+.L-box .row{padding:8px 10px 10px 12px}
+.ctxtxt{color:var(--faint); font-size:12px; font-variant-numeric:tabular-nums; padding:0 6px}
+
+.sec{display:none}
+body:not(.one) .sec{display:block; border-bottom:1px solid rgba(255,255,255,.05)}
+body.one .sec.show{display:block}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="up" viewBox="0 0 16 16"><path d="M8 13V3.5M4 7.5l4-4 4 4"/></symbol>
+    <symbol id="down" viewBox="0 0 10 10"><path d="M2.5 3.8L5 6.3l2.5-2.5"/></symbol>
+    <symbol id="upc" viewBox="0 0 10 10"><path d="M2.5 6.2L5 3.7l2.5 2.5"/></symbol>
+    <symbol id="right" viewBox="0 0 10 10"><path d="M3.8 2.5L6.3 5 3.8 7.5"/></symbol>
+    <symbol id="mic" viewBox="0 0 16 16"><rect x="5.5" y="2" width="5" height="8" rx="2.5"/><path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2"/></symbol>
+    <symbol id="plus" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></symbol>
+    <symbol id="lock" viewBox="0 0 16 16"><rect x="3.5" y="7" width="9" height="6.5" rx="1.6"/><path d="M5.5 7V5.3a2.5 2.5 0 0 1 5 0"/></symbol>
+    <symbol id="term" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M5 7l2 1.5L5 10M8.5 10.5H11"/></symbol>
+    <symbol id="read" viewBox="0 0 16 16"><path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.5v3h3"/></symbol>
+    <symbol id="edit" viewBox="0 0 16 16"><path d="M10.5 3.5l2 2L6 12H4v-2z"/></symbol>
+    <symbol id="search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4"/><path d="M10 10l3.5 3.5"/></symbol>
+    <symbol id="check" viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7"/></symbol>
+  </defs>
+</svg>
+
+<!-- helper: one composer row -->
+<template id="row"></template>
+
+<!-- ISLA 1: trabajando, cerrada -->
+<section class="sec" id="i1"><div class="col">
+  <div class="state">1 · Isla — trabajando</div>
+  <p class="p">Review found filled floor between the legs in the new Silver label. I'm checking the original floor pixels for its permitted correction; the raw frame and its dataset role are retained.</p>
+  <div class="I-zone">
+    <div class="I-pillwrap"><div class="I-pill"><span class="bars"><i></i><i></i><i></i></span><span>Trabajando<span class="dots"></span></span><span class="t">1m 12s · 5 pasos</span><svg class="chev"><use href="#upc"/></svg></div></div>
+    <div class="I-box">
+      <div class="ta ph">Escribí para dirigir el turno…</div>
+      <div class="row">
+        <span class="ib"><svg class="ic"><use href="#plus"/></svg></span>
+        <span class="ib lock" title="Permitir todo"><svg class="ic"><use href="#lock"/></svg></span>
+        <span class="sp"></span>
+        <span class="model">Opus 5.5 <em>· xhigh</em><svg class="chev"><use href="#down"/></svg></span>
+        <span class="ib"><svg class="ic"><use href="#mic"/></svg></span>
+        <span class="send"><svg class="ctx" viewBox="0 0 36 36"><circle cx="18" cy="18" r="16.5" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="1.5"/><circle cx="18" cy="18" r="16.5" fill="none" stroke="var(--faint)" stroke-width="1.5" stroke-dasharray="42.5 103.7" stroke-linecap="round"/></svg><span class="in"><i style="width:9px;height:9px;border-radius:2px;background:var(--ink);display:block"></i></span></span>
+      </div>
+    </div>
+  </div>
+</div></section>
+
+<!-- ISLA 2: abierta -->
+<section class="sec" id="i2"><div class="col">
+  <div class="state">1 · Isla — clic en la píldora</div>
+  <p class="p">Review found filled floor between the legs in the new Silver label. I'm checking the original floor pixels for its permitted correction.</p>
+  <div class="I-pop steps">
+    <div class="hd"><span class="bars"><i></i><i></i><i></i></span><span>Trabajando<span class="dots"></span></span><span class="t">1m 12s</span><span class="sp"></span><svg class="chev" style="color:var(--faint)"><use href="#down"/></svg></div>
+    <div class="st"><svg class="ic"><use href="#read"/></svg>Leyó<code>tools/silver_review.py</code><span class="d">0.2s</span></div>
+    <div class="st"><svg class="ic"><use href="#search"/></svg>Buscó<code>floor_mask in labels/silver/</code><span class="d">1.4s</span></div>
+    <div class="st"><svg class="ic"><use href="#term"/></svg>Ejecutó<code>python -B tmp/root_original_production_bounded.py</code><span class="d">8.1s</span></div>
+    <div class="st"><svg class="ic"><use href="#edit"/></svg>Editó<code>labels/silver/frame-3812.json</code><span class="add">+12</span><span class="del">−4</span><span class="d">0.0s</span></div>
+    <div class="st live"><span class="spin"></span>Ejecutando<code>python render_review_panel.py</code><span class="d">14s</span></div>
+    <div class="ft"><span>5 pasos · 1 edición</span><span>Ver en el chat ›</span></div>
+  </div>
+  <div class="I-box">
+    <div class="ta ph">Escribí para dirigir el turno…</div>
+    <div class="row">
+      <span class="ib"><svg class="ic"><use href="#plus"/></svg></span>
+      <span class="ib lock"><svg class="ic"><use href="#lock"/></svg></span>
+      <span class="sp"></span>
+      <span class="model">Opus 5.5 <em>· xhigh</em><svg class="chev"><use href="#down"/></svg></span>
+      <span class="ib"><svg class="ic"><use href="#mic"/></svg></span>
+      <span class="send"><svg class="ctx" viewBox="0 0 36 36"><circle cx="18" cy="18" r="16.5" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="1.5"/><circle cx="18" cy="18" r="16.5" fill="none" stroke="var(--faint)" stroke-width="1.5" stroke-dasharray="42.5 103.7" stroke-linecap="round"/></svg><span class="in"><i style="width:9px;height:9px;border-radius:2px;background:var(--ink);display:block"></i></span></span>
+    </div>
+  </div>
+</div></section>
+
+<!-- ISLA 3: listo -->
+<section class="sec" id="i3"><div class="col">
+  <div class="state">1 · Isla — terminó (la píldora dice "listo" y se va)</div>
+  <p class="p">The Silver label is fixed: the floor between the legs is cleared and the frame passes review.</p>
+  <div class="I-zone">
+    <div class="I-pillwrap"><div class="I-pill done"><svg class="ic ok"><use href="#check"/></svg><span>Listo</span><span class="t">3m 14s · 9 pasos</span><svg class="chev"><use href="#upc"/></svg></div></div>
+    <div class="I-box">
+      <div class="ta">perfect, now run the gold review on the same frames</div>
+      <div class="row">
+        <span class="ib"><svg class="ic"><use href="#plus"/></svg></span>
+        <span class="ib lock"><svg class="ic"><use href="#lock"/></svg></span>
+        <span class="sp"></span>
+        <span class="model">Opus 5.5 <em>· xhigh</em><svg class="chev"><use href="#down"/></svg></span>
+        <span class="ib"><svg class="ic"><use href="#mic"/></svg></span>
+        <span class="send"><svg class="ctx" viewBox="0 0 36 36"><circle cx="18" cy="18" r="16.5" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="1.5"/><circle cx="18" cy="18" r="16.5" fill="none" stroke="var(--faint)" stroke-width="1.5" stroke-dasharray="42.5 103.7" stroke-linecap="round"/></svg><span class="in on"><svg class="ic"><use href="#up"/></svg></span></span>
+      </div>
+    </div>
+  </div>
+</div></section>
+
+<!-- BORDE VIVO 1 -->
+<section class="sec" id="l1"><div class="col">
+  <div class="state">2 · Borde vivo — trabajando</div>
+  <p class="p">Review found filled floor between the legs in the new Silver label. I'm checking the original floor pixels for its permitted correction; the raw frame and its dataset role are retained.</p>
+  <div class="L-box working">
+    <div class="L-head"><span class="bars"><i></i><i></i><i></i></span><span>Trabajando<span class="dots"></span></span><span class="t">1m 12s · 5 pasos</span><svg class="chev"><use href="#right"/></svg><span class="sp"></span><span class="stop"><i></i>Detener</span></div>
+    <div class="ta ph">Escribí para dirigir el turno…</div>
+    <div class="row">
+      <span class="ib"><svg class="ic"><use href="#plus"/></svg></span>
+      <span class="ib lock"><svg class="ic"><use href="#lock"/></svg></span>
+      <span class="sp"></span>
+      <span class="ctxtxt">41%</span>
+      <span class="model">Opus 5.5 <em>· xhigh</em><svg class="chev"><use href="#down"/></svg></span>
+      <span class="ib"><svg class="ic"><use href="#mic"/></svg></span>
+      <span class="send"><span class="in"><svg class="ic"><use href="#up"/></svg></span></span>
+    </div>
+  </div>
+</div></section>
+
+<!-- BORDE VIVO 2 -->
+<section class="sec" id="l2"><div class="col">
+  <div class="state">2 · Borde vivo — clic en la cabecera</div>
+  <p class="p">Review found filled floor between the legs in the new Silver label. I'm checking the original floor pixels for its permitted correction.</p>
+  <div class="L-box working">
+    <div class="L-head"><span class="bars"><i></i><i></i><i></i></span><span>Trabajando<span class="dots"></span></span><span class="t">1m 12s · 5 pasos</span><svg class="chev" style="transform:rotate(90deg)"><use href="#right"/></svg><span class="sp"></span><span class="stop"><i></i>Detener</span></div>
+    <div class="L-steps steps">
+      <div class="st"><svg class="ic"><use href="#read"/></svg>Leyó<code>tools/silver_review.py</code><span class="d">0.2s</span></div>
+      <div class="st"><svg class="ic"><use href="#search"/></svg>Buscó<code>floor_mask in labels/silver/</code><span class="d">1.4s</span></div>
+      <div class="st"><svg class="ic"><use href="#term"/></svg>Ejecutó<code>python -B tmp/root_original_production_bounded.py</code><span class="d">8.1s</span></div>
+      <div class="st"><svg class="ic"><use href="#edit"/></svg>Editó<code>labels/silver/frame-3812.json</code><span class="add">+12</span><span class="del">−4</span><span class="d">0.0s</span></div>
+      <div class="st live"><span class="spin"></span>Ejecutando<code>python render_review_panel.py</code><span class="d">14s</span></div>
+    </div>
+    <div class="ta ph">Escribí para dirigir el turno…</div>
+    <div class="row">
+      <span class="ib"><svg class="ic"><use href="#plus"/></svg></span>
+      <span class="ib lock"><svg class="ic"><use href="#lock"/></svg></span>
+      <span class="sp"></span>
+      <span class="ctxtxt">41%</span>
+      <span class="model">Opus 5.5 <em>· xhigh</em><svg class="chev"><use href="#down"/></svg></span>
+      <span class="ib"><svg class="ic"><use href="#mic"/></svg></span>
+      <span class="send"><span class="in"><svg class="ic"><use href="#up"/></svg></span></span>
+    </div>
+  </div>
+</div></section>
+
+<!-- BORDE VIVO 3 -->
+<section class="sec" id="l3"><div class="col">
+  <div class="state">2 · Borde vivo — en reposo (sin cabecera)</div>
+  <p class="p">The Silver label is fixed: the floor between the legs is cleared and the frame passes review.</p>
+  <div class="L-box">
+    <div class="ta">perfect, now run the gold review on the same frames</div>
+    <div class="row">
+      <span class="ib"><svg class="ic"><use href="#plus"/></svg></span>
+      <span class="ib lock"><svg class="ic"><use href="#lock"/></svg></span>
+      <span class="sp"></span>
+      <span class="ctxtxt">41%</span>
+      <span class="model">Opus 5.5 <em>· xhigh</em><svg class="chev"><use href="#down"/></svg></span>
+      <span class="ib"><svg class="ic"><use href="#mic"/></svg></span>
+      <span class="send"><span class="in on"><svg class="ic"><use href="#up"/></svg></span></span>
+    </div>
+  </div>
+</div></section>
+
+<script>
+const p = new URLSearchParams(location.search);
+const s = p.get('s');
+if (s) { document.body.classList.add('one'); document.getElementById(s)?.classList.add('show'); }
+if (p.has('still')) document.body.classList.add('still');
+</script>
+</body>
+</html>
