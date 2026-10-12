@@ -305,6 +305,27 @@ class FixtureQuery {
         });
         continue;
       }
+      // A tool call streamed the way the real CLI streams it: the block opens
+      // with an empty input, and the full input only arrives with the
+      // assistant message that closes it.
+      if (text.includes('[fixture:streamed-tool]')) {
+        const toolUse = { type: 'tool_use', id: 'fixture-streamed-tool-1', name: 'Read', input: { file_path: '/repo/tools/silver_review.py' } };
+        this.emit({
+          type: 'stream_event',
+          event: { type: 'content_block_start', index: 0, content_block: { ...toolUse, input: {} } },
+          parent_tool_use_id: null, uuid: randomUUID(), session_id: this.sessionId,
+        });
+        this.emit({
+          type: 'assistant', message: { content: [toolUse] },
+          parent_tool_use_id: null, uuid: randomUUID(), session_id: this.sessionId,
+        });
+        this.emit({
+          type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: toolUse.id, content: 'ok' }] },
+          parent_tool_use_id: null, uuid: randomUUID(), session_id: this.sessionId,
+        });
+        this.emit(this.result('success'));
+        continue;
+      }
       // Transport death mid-tool-call: the CLI opened a tool_use block and the
       // process died before any tool_result or terminal result existed.
       if (process.env.WORKASS_CLAUDE_FIXTURE_TOOL_STREAM_DEATH === '1'

@@ -153,8 +153,11 @@ test('a running turn shows one Working row with the live call beside it and keep
   assert.match(html, /class="thinklive working"/);
   assert.match(html, /Working<span class="workdots"/);
   assert.match(html, /2 tools/);
-  assert.match(html, /<button[^>]*class="workhead"[^>]*>(?:(?!<\/button>).)*class="worknow mono"[^>]*>(?:(?!<\/button>).)*render_review_panel\.py --silver/s,
+  assert.match(html, /<button[^>]*class="workhead"[^>]*>(?:(?!<\/button>).)*class="worknow"[^>]*>(?:(?!<\/button>).)*render_review_panel\.py --silver/s,
     'the call running now sits inside the head row, not on a line of its own');
+  assert.match(html, /class="worknow"[^>]*><span class="evt-kic" aria-hidden="true"><svg/,
+    'the live call carries its action icon, like every row in the list (user 2026-10-12)');
+  assert.doesNotMatch(html, /↳/, 'no bare arrow stands in for a tool icon');
   assert.doesNotMatch(html, /workthought|Clarifying execution issues/, 'thinking text stays inside the list (user 2026-10-12)');
   assert.doesNotMatch(html, /silver_review\.py/, 'finished tool rows wait inside the Working line, not in the transcript');
   assert.match(html, /PROSE-BEFORE-TOOLS/);
