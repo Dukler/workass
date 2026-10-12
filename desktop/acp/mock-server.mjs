@@ -280,6 +280,45 @@ async function runPrompt(id, params) {
     notify(session.id, { sessionUpdate: 'tool_call_update', toolCallId: liveId, title: 'Bash', kind: 'execute', status: 'completed', content: { type: 'text', text: 'rendered' } });
   }
 
+  if (text.includes('[mock:stream-md]')) {
+    // A realistic markdown answer streamed the way fast models emit it: a few
+    // characters at a time, a few milliseconds apart. Headings, a list, a code
+    // fence and a table all arrive half-written, which is what makes a renderer
+    // reflow (and the page jump) while it streams.
+    const answer = [
+      '## Gold vs Silver on frame 3812\n\n',
+      'The two labels agree everywhere except the floor seam between the legs. Gold kept the original production fill, while Silver cleared it, which matches the spec for this frame type.\n\n',
+      'What I checked:\n\n',
+      '- the raw floor pixels from the original production pass\n',
+      '- the Silver mask after the correction\n',
+      '- the Gold mask, untouched since import\n\n',
+      'The difference is confined to one region:\n\n',
+      '```python\n',
+      'diff = np.logical_xor(gold_mask, silver_mask)\n',
+      'ys, xs = np.nonzero(diff)\n',
+      'print(diff.sum(), ys.min(), ys.max(), xs.min(), xs.max())\n',
+      '```\n\n',
+      '| Frame | Gold | Silver | Differs |\n',
+      '|---|---|---|---|\n',
+      '| 3812 | filled | cleared | yes |\n',
+      '| 3815 | cleared | cleared | no |\n',
+      '| 3821 | cleared | cleared | no |\n\n',
+      'So the only frame to fix is **3812**, and the fix is on the Gold side: clear the seam the same way Silver did. Everything else already matches.',
+    ].join('');
+    let at = 0;
+    let seed = 7;
+    while (at < answer.length && !session.cancelled) {
+      seed = (seed * 9301 + 49297) % 233280;
+      const size = 1 + (seed % 6);
+      notify(session.id, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: answer.slice(at, at + size) } });
+      at += size;
+      await sleep(text.includes('[mock:slow]') ? 12 : 3);
+    }
+    session.turnStatus = session.cancelled ? 'interrupted' : 'completed';
+    respond(id, { stopReason: session.cancelled ? 'cancelled' : 'end_turn' });
+    return;
+  }
+
   if (text.includes('[mock:burst]')) {
     // Deliberately emit far faster than a display can paint. A zero-delay timer
     // between chunks gives the daemon's 16 ms coalescer a chance to flush while

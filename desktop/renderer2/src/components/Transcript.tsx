@@ -230,6 +230,10 @@ function EmptyChat({ chat }: { chat: Chat | null }) {
   );
 }
 
+function prefersReducedMotion(): boolean {
+  return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+}
+
 export function Transcript({ chat }: { chat: Chat | null }) {
   // Subscribe to app so the per-turn Deshacer/Revisar affordances appear once
   // this chat's checkpoints load (they bump `app`).
@@ -281,6 +285,18 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     turnBlockStarts.set(start, end);
     for (let index = start + 1; index < end; index++) turnBlockMembers.add(index);
   }
+  // While a reply streams here, the transcript follows its end with the
+  // browser's own smooth scroll (compositor-driven, no per-frame JS) instead of
+  // snapping a whole line up on every delta; reduced motion and every other
+  // moment (sending, switching chats, jumping) pin instantly.
+  const streamFollow = useRef(false);
+  streamFollow.current = !!runningMessage && !prefersReducedMotion();
+  // The tallest the transcript has been during this turn. Half-written
+  // markdown can briefly render shorter than what came before (a list marker,
+  // a table before its separator row); held as min-height, the page never
+  // shrinks under a reader pinned to the bottom, so it never drops and rises.
+  const heldHeight = useRef(0);
+
   // Provider receipts remain canonical in state. The presentation projection
   // keeps live directions in the composer tray and settles them after their
   // assistant turn, so a receipt never inserts a bubble into rendered prose.
@@ -529,8 +545,17 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     setScrollTop(el, el.scrollHeight);
   }, [chat?.id, latestUserMessageId]);
 
+  // A turn's held height lasts exactly as long as the turn.
+  useLayoutEffect(() => {
+    heldHeight.current = 0;
+    docRef.current?.style.removeProperty('min-height');
+  }, [chat?.id, runningMessage?.id]);
+
   // Pin to bottom whenever content grows (streaming, new cards) while stuck.
-  // Foreground updates coalesce into one pre-paint animation frame. Chromium
+  // A resize pins inside the ResizeObserver callback: it runs after layout and
+  // before paint, so a grown transcript is never painted at the old offset
+  // first (the one-frame drop-then-snap that read as a bounce while text
+  // streamed). Mutations still coalesce into one pre-paint animation frame. Chromium
   // pauses rAF in hidden/occluded windows, so background updates instead use one
   // coalesced timer and focus/visibility restoration reconciles synchronously.
   // This keeps layout work bounded without letting an alt-tabbed stream drift.
@@ -543,15 +568,36 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const scheduler = createTranscriptPinScheduler({
       isPinned: () => stick.current,
       isForeground: () => document.visibilityState === 'visible' && document.hasFocus(),
-      pin: () => setScrollTop(el, el.scrollHeight),
+      pin: () => follow(),
       requestFrame: (callback) => requestAnimationFrame(callback),
       cancelFrame: (handle) => cancelAnimationFrame(handle),
       setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
       clearTimer: (handle) => window.clearTimeout(handle),
     });
+    function follow() {
+      if (!el) return;
+      if (streamFollow.current) {
+        const target = el.scrollHeight - el.clientHeight;
+        if (target - el.scrollTop >= 1) el.scrollTo({ top: target, behavior: 'smooth' });
+        return;
+      }
+      setScrollTop(el, el.scrollHeight);
+    }
+    const onResize = () => {
+      if (streamFollow.current && doc) {
+        const height = doc.offsetHeight;
+        if (height > heldHeight.current) {
+          heldHeight.current = height;
+          doc.style.minHeight = `${height}px`;
+        }
+      }
+      if (!stick.current) return;
+      scheduler.dispose();
+      follow();
+    };
     const mo = new MutationObserver(scheduler.schedule);
     mo.observe(doc, { childList: true, subtree: true, characterData: true });
-    const ro = new ResizeObserver(scheduler.schedule);
+    const ro = new ResizeObserver(onResize);
     ro.observe(doc);
     ro.observe(el); // the composer growing/shrinking resizes the viewport, not the doc — re-pin then too
     const reconcile = () => scheduler.reconcile();
