@@ -1477,3 +1477,29 @@ test('retiring an already detached frame session does not detach it twice', asyn
   assert.equal(wc.debugger.commandCalls.filter((call) => call.method === 'Target.detachFromTarget').length, 1);
   manager.destroy();
 });
+
+// A cross-site load swaps the page's renderer, and for a moment it refuses
+// device emulation. Opening the pane must still put the page on screen (before,
+// the failure left the view parked in its hidden host and the pane showed only
+// its white placeholder), and the viewport is applied once the page settles.
+test('a page that refuses its viewport mid-load still enters the visible pane', async () => {
+  const { manager, win } = fixture({ requestOpen: () => {} });
+  await manager.browserControl('browser.open', { chatId: 'pane-busy', url: 'example.com', visible: false });
+  const entry = manager.entries.get('pane-busy');
+  const dbg = entry.view.webContents.debugger;
+  const send = dbg.sendCommand.bind(dbg);
+  let refusing = true;
+  dbg.sendCommand = async (method, params, sessionId) => {
+    if (refusing && method === 'Emulation.setDeviceMetricsOverride') throw new Error('Not attached to an active page');
+    return send(method, params, sessionId);
+  };
+  await manager.activate({ chatId: 'pane-busy', bounds: { x: 900, y: 48, width: 285, height: 700 }, viewport: { width: 320, height: 786 } });
+  assert.ok(win.contentView.children.includes(entry.view), 'the page is on screen even though its viewport is not applied yet');
+  assert.equal(entry.visible, true);
+
+  refusing = false;
+  entry.view.webContents.emit('did-stop-loading');
+  await manager.serializePresentation(async () => {});
+  assert.deepEqual({ width: entry.viewport.width, height: entry.viewport.height }, { width: 320, height: 786 });
+  assert.ok(win.contentView.children.includes(entry.view));
+});

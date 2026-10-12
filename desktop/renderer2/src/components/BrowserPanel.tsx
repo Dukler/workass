@@ -143,17 +143,30 @@ function LocalBrowserPanel({
     const layoutObserver = new MutationObserver(sync);
     if (root) layoutObserver.observe(root, { attributes: true, attributeFilter: ['class', 'style'] });
     addEventListener('resize', sync);
-    const bounds = boundsFor(el);
-    void api.activate({ chatId, conversationId, bounds, viewport: browserViewportForBounds(bounds) }).then((next) => {
-      if (disposed) return;
-      setState(next);
-      setAddress(next.url === 'about:blank' ? '' : next.url);
-      activated = true;
-      lastBounds = bounds;
-      sync();
-    });
+    // A failed activation used to be dropped on the floor: the native view
+    // stayed hidden and the pane showed its white placeholder for as long as
+    // it stayed open. Say why, and try again — a page still loading usually
+    // takes the next attempt.
+    let retryTimer = 0;
+    const activate = (attempt: number) => {
+      const bounds = boundsFor(el);
+      void api.activate({ chatId, conversationId, bounds, viewport: browserViewportForBounds(bounds) }).then((next) => {
+        if (disposed) return;
+        setState(next);
+        setAddress(next.url === 'about:blank' ? '' : next.url);
+        activated = true;
+        lastBounds = bounds;
+        sync();
+      }).catch((error: unknown) => {
+        if (disposed) return;
+        setState((current) => ({ ...current, error: error instanceof Error ? error.message : String(error) }));
+        if (attempt < 4) retryTimer = window.setTimeout(() => activate(attempt + 1), 250 * 2 ** attempt);
+      });
+    };
+    activate(0);
     return () => {
       disposed = true;
+      window.clearTimeout(retryTimer);
       observer.disconnect();
       layoutObserver.disconnect();
       removeEventListener('resize', sync);
