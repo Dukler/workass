@@ -405,13 +405,15 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
 /* stable both-edges reserves the 9px classic-scrollbar gutter symmetrically, so
    the centered .doc stays on the same centerline as the (scrollbar-free)
    composer below it — and doesn't shift 4.5px when the scrollbar appears. */
-.transcriptviewport { position: relative; flex: 1; min-height: 0; --thinklive-h: 44px; }
+.transcriptviewport { position: relative; flex: 1; min-height: 0; --thinklive-h: 32px; --live-gap: 14px; }
 .transcriptviewport > .scroll { height: 100%; }
 .scroll { flex: 1; overflow-y: auto; min-height: 0; scrollbar-gutter: stable both-edges; }
 .doc { max-width: var(--read); margin: 0 auto; padding: 26px 36px var(--doc-pad-b); }
 /* The Working line's row is reserved whether or not a turn runs, so the text
    never shifts when a turn starts or ends (user 2026-10-12: it must be static). */
-.transcriptviewport .doc { padding-bottom: calc(var(--doc-pad-b) + var(--thinklive-h)); }
+/* Trimmed (approved mock thinking-v10): 14px between the last text and the
+   line, the line's own 32px, 10px to the composer. */
+.transcriptviewport .doc { padding-bottom: calc(var(--live-gap) + var(--thinklive-h)); }
 
 .userpill { display: flex; flex-direction: column; align-items: flex-end; margin: 12px 0 20px; }
 .userpill-text { background: var(--field); border: 1px solid var(--line); border-radius: 14px; padding: 7px 13px; max-width: 78%; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
@@ -506,7 +508,7 @@ table.mdtable th { background: var(--field); font-weight: 600; }
    When the turn closes this dock disappears and its steps settle into the
    turn's one-line "Worked" row (.workfold). */
 .thinklive { position: absolute; left: 0; right: 0; bottom: 0; z-index: 5; margin: 0 auto;
-  width: 100%; height: var(--thinklive-h); padding: 9px 36px 11px; max-width: var(--read); pointer-events: none;
+  width: 100%; height: var(--thinklive-h); padding: 3px 36px; max-width: var(--read); pointer-events: none;
   background: linear-gradient(to top, var(--bg) 62%, color-mix(in srgb, var(--bg) 88%, transparent) 86%, transparent); }
 .thinklive .steprow { margin: 0; width: 100%; }
 
@@ -558,6 +560,20 @@ table.mdtable th { background: var(--field); font-weight: 600; }
   font-size: 12.5px; line-height: 1.6; color: var(--ink2); }
 .thoughtfull > :first-child { margin-top: 0; }
 .thoughtfull > :last-child { margin-bottom: 0; }
+/* The latest thought as the last line of a running reply (approved mocks
+   thinking-v9/v10): one muted line with a ›, opening in place on click. */
+.livethought { display: flex; align-items: center; gap: 9px; min-height: 24px; margin: 6px 0 0; min-width: 0;
+  color: var(--muted); font-size: 12.5px; cursor: pointer; border-radius: 6px; }
+.livethought:hover { color: var(--ink2); }
+.livethought:hover .workchev { color: var(--muted); }
+.livethought .workchev { flex: none; }
+.ltline { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.livethought.open { align-items: flex-start; }
+.livethought.open .thoughtic, .livethought.open .workchev { margin-top: 3px; }
+.ltfull { flex: 1 1 auto; min-width: 0; max-height: calc(12.5px * 1.6 * 8); overflow-y: auto; font-size: 12.5px; line-height: 1.6; color: var(--muted); }
+.ltfull > :first-child { margin-top: 0; }
+.ltfull > :last-child { margin-bottom: 0; }
+.ltfull .p { margin-bottom: 6px; }
 
 /* Streaming reveal (approved demo stream-v2 · frases, 2026-10-12): while a
    reply streams, every new block, list item, table row and sentence fades in
@@ -1947,7 +1963,9 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 
 /* ============ density (Apariencia) ============ */
 :root[data-density="comfortable"] body { line-height: 1.72; }
-:root[data-density="comfortable"] .doc { padding: 32px 40px 38px; }
+/* Top and sides only: the bottom is the Working line's reserve, which a
+   shorthand here used to override, letting the line cover the last text. */
+:root[data-density="comfortable"] .doc { padding-top: 32px; padding-left: 40px; padding-right: 40px; }
 :root[data-density="comfortable"] .p, :root[data-density="comfortable"] ul.doclist, :root[data-density="comfortable"] ol.doclist { margin-bottom: 20px; }
 :root[data-density="comfortable"] .userpill { margin: 16px 0 26px; }
 :root[data-density="comfortable"] .sess { padding-top: 7.5px; padding-bottom: 7.5px; }
