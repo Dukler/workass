@@ -183,6 +183,32 @@ test('official Claude SDK host forwards Claude Code task lifecycle system messag
   assert.equal(events[2].outputFile, '/private/tmp/claude-501/fixture/tasks/fixture-agent-1.output');
 });
 
+// Claude Code honours human-only features, the "ultracode" keyword among them,
+// only on prompts marked origin {kind:"human"}. The host marks exactly the
+// prompts the daemon says a person typed (user request 2026-10-13).
+test('official Claude SDK host marks only human-typed prompts with a human origin', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'test', version: '1' } } });
+  const initialized = await peer.waitFor((message) => message.id === 1);
+  assert.equal(initialized.result._meta.workassNativeCommandInputV1, true);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+  const echo = async (id, meta) => {
+    const before = peer.messages.length;
+    peer.send({ jsonrpc: '2.0', id, method: 'session/prompt', params: {
+      sessionId, prompt: [{ type: 'text', text: 'ultracode [fixture:echo-origin]' }], ...(meta ? { _meta: meta } : {}),
+    } });
+    await peer.waitFor((message) => message.id === id);
+    return peer.messages.slice(before)
+      .filter((message) => message.method === 'session/update' && message.params.update.sessionUpdate === 'agent_message_chunk')
+      .map((message) => message.params.update.content.text).join('');
+  };
+  assert.equal(await echo(3, { workassCommandInput: { text: 'ultracode', humanAuthored: true } }), 'origin={"kind":"human"}');
+  assert.equal(await echo(4, { workassCommandInput: { text: 'wake', humanAuthored: false } }), 'origin=null');
+  assert.equal(await echo(5, null), 'origin=null');
+});
+
 test('native Claude host preserves external MCP stdio configuration', async (t) => {
   const peer = startHost({ WORKASS_CLAUDE_FIXTURE_REQUIRE_STDIO_MCP: '1' });
   t.after(() => peer.child.kill('SIGKILL'));
