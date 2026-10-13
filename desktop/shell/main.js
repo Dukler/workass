@@ -532,8 +532,9 @@ function createWindow(url, browserReporter, isController) {
       const action = ['start', 'read', 'stop'].includes(requestedAction) ? requestedAction : 'read';
       return win.webContents.executeJavaScript(`(() => {
         const action = ${JSON.stringify(action)};
+        const switches = (window.__workassSwitchTimings || []).slice(-10);
         const summarize = (state) => {
-          if (!state) return { running: false, durationMs: 0, frameCount: 0, p95FrameGapMs: 0, maxFrameGapMs: 0, over50ms: 0, longTaskCount: 0, maxLongTaskMs: 0, assistantCount: document.querySelectorAll('.amsg').length, toolRowCount: document.querySelectorAll('.evt').length };
+          if (!state) return { running: false, durationMs: 0, frameCount: 0, p95FrameGapMs: 0, maxFrameGapMs: 0, over50ms: 0, longTaskCount: 0, maxLongTaskMs: 0, assistantCount: document.querySelectorAll('.amsg').length, toolRowCount: document.querySelectorAll('.evt').length, switches };
           const gaps = state.frameGaps.slice().sort((a, b) => a - b);
           const at = (ratio) => gaps.length ? gaps[Math.min(gaps.length - 1, Math.floor(gaps.length * ratio))] : 0;
           return {
@@ -547,6 +548,7 @@ function createWindow(url, browserReporter, isController) {
             maxLongTaskMs: Math.round((Math.max(0, ...state.longTasks)) * 1000) / 1000,
             assistantCount: document.querySelectorAll('.amsg').length,
             toolRowCount: document.querySelectorAll('.evt').length,
+            switches,
           };
         };
         if (action === 'start') {

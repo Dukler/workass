@@ -26,7 +26,8 @@ import { actorMessages } from '../chat/history';
 import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
 import { redactSensitiveText } from '../redact';
 import { resolveModelSelection } from '../model-selection';
-import { adoptsTerminalJobResult, appendAssistantChunk, ensureAssistantResultAnchor } from '../assistant-output.ts';
+import { adoptsTerminalJobResult, appendAssistantChunk, ensureAssistantResultAnchor, normalizeAssistantMessagePhase } from '../assistant-output.ts';
+import { chunkCanReveal } from '../stream-reveal';
 import {
   contextUsageIdentityMatches,
   normalizeContextUsage,
@@ -399,6 +400,19 @@ export function titleFromPrompt(text: string, max = 34): string {
   return `${(space >= max / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
+// How long a chat switch took from the click to the first frame that shows
+// it, the newest few kept on window for the shell's perf endpoint. "cold" means
+// it had to read its recent history first (2026-10-13: a slow switch could not
+// be measured after the fact).
+function recordSwitchTiming(chatId: string, clickedAt: number, cold: boolean) {
+  if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function') return;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const timings = ((window as unknown as { __workassSwitchTimings?: unknown[] }).__workassSwitchTimings ??= []);
+    timings.push({ chatId, cold, ms: Math.round(performance.now() - clickedAt), at: new Date().toISOString() });
+    if (timings.length > 20) timings.splice(0, timings.length - 20);
+  }));
+}
+
 export class Store {
   private readonly toastTimers = new Set<ReturnType<typeof setTimeout>>();
   state: AppState;
@@ -726,8 +740,24 @@ export class Store {
     if (!prior?.messages.length || prior.chatId !== next.chatId) return;
     // Selection is controller-local, while session:get chooses one daemon-global
     // row for its bounded history. Never paint that metadata-only transport
-    // shape over a resident selected tail. If the actor moved, keep the old tail
-    // only as a provisional view while a bounded recent read catches it up.
+    // shape over a resident selected tail.
+    this.retainResidentTail(prior, next);
+  }
+  // A refresh carries metadata only for every chat but one. The recent tail a
+  // chat already showed stays resident, so opening it again paints at once
+  // instead of waiting on a history read (2026-10-13: a cold chat took about a
+  // second to open). If the actor moved, the old tail is only a provisional
+  // view while a bounded recent read catches it up in the background.
+  private retainRecentHistoriesDuringRefresh(previous: Chat[], restored: Chat[]) {
+    const priorById = new Map(previous.map((chat) => [chat.id, chat]));
+    for (const next of restored) {
+      if (next.id === this.state.activeId || next.messages.length > 0) continue;
+      const prior = priorById.get(next.id);
+      if (!prior?.messages.length || prior.chatId !== next.chatId) continue;
+      this.retainResidentTail(prior, next);
+    }
+  }
+  private retainResidentTail(prior: Chat, next: Chat) {
     const actorChanged = (next.actorRevision ?? 0) !== (prior.actorRevision ?? 0)
       || (next.messageCount ?? 0) !== (prior.messageCount ?? prior.messages.length);
     next.messages = prior.messages;
@@ -1193,7 +1223,7 @@ export class Store {
       try {
         const step = await this.guardedStep(
           `recent actor history (${chatId})`,
-          () => call('archiveLoad', chatId, { tail: limit }),
+          () => call('archiveLoad', chatId, { tail: limit, deferImages: true }),
         );
         projected = step.ok ? step.value : undefined;
         if (!step.ok) return;
@@ -1220,7 +1250,7 @@ export class Store {
         const boundary = messages[0].id;
         const step = await this.guardedStep(
           `recent actor history prefix (${chatId})`,
-          () => call('archiveLoad', chatId, { beforeMessageId: boundary, limit: Math.min(limit, messageCount) - messages.length }),
+          () => call('archiveLoad', chatId, { beforeMessageId: boundary, limit: Math.min(limit, messageCount) - messages.length, deferImages: true }),
         );
         if (!step.ok || !Array.isArray(step.value)) break;
         let page: Msg[];
@@ -1311,7 +1341,7 @@ export class Store {
       try {
         const step = await this.guardedStep(
           `older actor history (${chatId})`,
-          () => call('archiveLoad', chatId, { beforeMessageId, limit }),
+          () => call('archiveLoad', chatId, { beforeMessageId, limit, deferImages: true }),
         );
         projected = step.ok ? step.value : undefined;
         if (!step.ok) return false;
@@ -1375,8 +1405,8 @@ export class Store {
     let beforeMessageId: string | undefined;
     for (;;) {
       const options = beforeMessageId
-        ? { beforeMessageId, limit: CHAT_MESSAGE_TAIL }
-        : { tail: CHAT_MESSAGE_TAIL };
+        ? { beforeMessageId, limit: CHAT_MESSAGE_TAIL, deferImages: true }
+        : { tail: CHAT_MESSAGE_TAIL, deferImages: true };
       const step = await this.guardedStep(
         `actor history (${chatId})`, () => call('archiveLoad', chatId, options),
       );
@@ -1992,6 +2022,7 @@ export class Store {
     this.preserveNewerLocalControls(previousChats, restored.chats);
     this.preserveUnchangedFullHistories(previousChats, restored.chats);
     this.retainSelectedHistoryDuringRefresh(previousChats, restored.chats);
+    this.retainRecentHistoriesDuringRefresh(previousChats, restored.chats);
     this.preserveMatchingHydratedRuntime(previousChats, restored.chats);
     this.preserveLiveTurnEvents(previousChats, restored.chats, liveEventFence, '');
     this.state.chats = this.orderChats(this.carryRemoteChats(
@@ -2663,6 +2694,7 @@ export class Store {
       this.restoreDraftImages(previousMachineChats, normalized);
       this.preserveUnchangedFullHistories(previousMachineChats, normalized);
       this.retainSelectedHistoryDuringRefresh(previousMachineChats, normalized);
+      this.retainRecentHistoriesDuringRefresh(previousMachineChats, normalized);
       this.preserveMatchingHydratedRuntime(previousMachineChats, normalized);
       this.preserveLiveTurnEvents(previousMachineChats, normalized, liveEventFence, machineId);
       for (const chat of normalized) {
@@ -4117,6 +4149,7 @@ export class Store {
     // any agent focus still waiting for its actor row to hydrate.
     this.pendingAgentFocus = null;
     const selectionVersion = ++this.chatSelectionVersion;
+    const clickedAt = typeof performance !== 'undefined' ? performance.now() : 0;
     if (this.state.activeId === id) {
       this.refreshVisibleRecentHistory(this.chat(id));
       return;
@@ -4128,6 +4161,7 @@ export class Store {
     // request, never a prerequisite for selecting a row.
     if (target.messages.length > 0 || (target.messageCount ?? 0) === 0 || !has('archiveLoad')) {
       this.activateChat(target);
+      recordSwitchTiming(id, clickedAt, false);
       return;
     }
     // Metadata-only rows retain the old transcript for the very short recent
@@ -4142,6 +4176,7 @@ export class Store {
       if (!restored || restored.chatId !== durableChatId) return;
       if (restored.messages.length === 0 && (restored.messageCount ?? 0) > 0) return;
       this.activateChat(restored);
+      recordSwitchTiming(id, clickedAt, true);
     })();
   }
 
@@ -5487,11 +5522,19 @@ export class Store {
         const ref = this.jobRef.get(e.id);
         const msg = this.resolveMsg(e.id);
         if (!msg) return;
+        const wasRunning = msg.status === 'running';
+        const before = msg.content;
         appendAssistantChunk(msg, e.chunk, e.phase);
         if (!isTerminalMessage(msg)) msg.status = 'running';
         const chat = ref ? this.chat(ref.tabId) : null;
         if (chat) this.markLiveTurnEvent(chat, e.id, 'data');
-        this.bump('msg:' + msg.id);             // <-- isolated streaming re-render
+        // A running reply shows its text only up to the last finished sentence
+        // or line (stream-reveal.ts), so a chunk that finishes neither paints
+        // the same screen: skip that render. The turn's end re-renders the
+        // whole message, so nothing is ever left unshown. final_answer chunks
+        // restructure the message and always render.
+        const commentary = normalizeAssistantMessagePhase(e.phase) !== 'final_answer';
+        if (!wasRunning || !commentary || chunkCanReveal(before, e.chunk)) this.bump('msg:' + msg.id);   // isolated streaming re-render
         break;
       }
       case 'assistant-media': {

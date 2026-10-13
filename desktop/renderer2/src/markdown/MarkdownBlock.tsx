@@ -81,7 +81,7 @@ function BlockView({ sb, media, visualizeTabId, visualizeChatId, artifactOrigin,
 }
 
 export const MarkdownBlock = memo(BlockView, (a, b) => (
-  a.sb.sig === b.sb.sig
+  (a.sb === b.sb || a.sb.sig === b.sb.sig)
   && a.media?.revision === b.media?.revision
   && a.visualizeTabId === b.visualizeTabId
   && a.visualizeChatId === b.visualizeChatId

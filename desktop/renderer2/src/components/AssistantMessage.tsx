@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { MessageImage, Msg, ThinkingEvent, TimelineEvent, ToolEvent } from '../store/types';
 import { store, useApp, useMsgVersion, useClock } from '../store/store';
-import { parseBlocks, type SignedBlock, listTexts } from '../markdown/blocks';
+import { parseBlocks, parseBlocksGrowing, type SignedBlock, listTexts } from '../markdown/blocks';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
 import { ToolGroup, ToolDetail, ToolImageGallery, PermCard, CompactionRow, RestoredRow, toolState, fmtDur, toolLiveLine } from './messages';
 import { IcStampCopy, IcWarnTri, IcRetryArc, IcThought, ActionGlyph } from '../icons';
@@ -11,7 +11,7 @@ import { buildCoalescedTurnBlockTimelineSegments, buildTranscriptTimelineSegment
 import type { TranscriptTimelineSegment } from '../timeline-layout';
 import { fullAssistantText } from '../assistant-output';
 import { relTime } from '../rel-time';
-import { messageImageSrc } from '../image-drafts';
+import { MessageImageButton, cachedImageSrc, loadImageSrc } from './MessageImage';
 import { connectedArtifactURL } from '../connected-artifacts';
 import { configuredModelUnavailable } from '../model-selection';
 import { revealedText, settleMountFades } from '../stream-reveal';
@@ -53,26 +53,29 @@ function assistantMediaResolver(tabId: string, images: MessageImage[] | undefine
     revision: images ?? null,
     resolve: (target) => {
       const image = bySource.get(normalizeMarkdownTarget(target));
-      return image ? { src: messageImageSrc(image), alt: image.name || 'Imagen' } : null;
+      if (!image) return null;
+      const src = cachedImageSrc(image);
+      return src ? { src, alt: image.name || 'Imagen' } : { src: '', alt: image.name || 'Imagen', deferred: { tabId, image } };
     },
     resolveLink: (target) => connectedArtifactURL(artifactOrigin, target, undefined, undefined, store.localMachineId()),
     openLink: (target) => store.openHostedArtifact(tabId, target, artifactOrigin),
-    open: (media) => store.openImageLightbox(media.src, media.alt),
+    open: (media) => {
+      if (media.src) { store.openImageLightbox(media.src, media.alt); return; }
+      if (media.deferred) void loadImageSrc(media.deferred.tabId, media.deferred.image).then((src) => { if (src) store.openImageLightbox(src, media.alt); });
+    },
   } };
 }
 
-function StructuredAssistantImages({ images }: { images: MessageImage[] | undefined }) {
+function StructuredAssistantImages({ tabId, images }: { tabId: string; images: MessageImage[] | undefined }) {
   const structured = images ?? [];
   if (!structured.length) return null;
   return (
     <div className="assistant-images" aria-label="Imágenes de la respuesta">
       {structured.map((image, index) => {
-        const src = messageImageSrc(image);
         const alt = image.name || `Imagen ${index + 1}`;
         return (
-          <button key={`${image.mimeType}-${index}`} type="button" className="assistant-inline-image" title="Ampliar" onClick={() => store.openImageLightbox(src, alt)}>
-            <img src={src} alt={alt} />
-          </button>
+          <MessageImageButton key={`${image.mimeType}-${index}`} tabId={tabId} image={image} alt={alt}
+            className="assistant-inline-image" onOpen={(src) => store.openImageLightbox(src, alt)} />
         );
       })}
     </div>
@@ -141,7 +144,11 @@ function AssistantSliceBody({
       if (prose !== last.prose) segs = [...segs.slice(0, tail), { ...last, prose }];
     }
   }
-  const parsedSegments = segs.map((segment) => 'prose' in segment ? parseBlocks(segment.prose) : null);
+  // A running reply reuses its settled blocks (parseBlocksGrowing); a settled one
+  // renders rarely enough to parse whole.
+  const parsedSegments = segs.map((segment, index) => 'prose' in segment
+    ? running ? parseBlocksGrowing(`${msg.id}:${index}`, segment.prose) : parseBlocks(segment.prose)
+    : null);
   const resultBlocks = inlineResult ? parseBlocks(running ? revealedText(inlineResult) : inlineResult) : [];
   const { media, gallery } = assistantMediaResolver(tabId, msg.images, parsedSegments.flatMap((blocks) => blocks ?? []).concat(resultBlocks), artifactOrigin);
   const visualizeChatId = store.chat(tabId)?.chatId ?? '';
@@ -190,7 +197,7 @@ function AssistantSliceBody({
           {resultBlocks.map((block, index) => <MarkdownBlock key={`result-${index}`} sb={block} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} artifactOrigin={artifactOrigin} streaming={running} />)}
         </div>
       )}
-      <StructuredAssistantImages images={gallery} />
+      <StructuredAssistantImages tabId={tabId} images={gallery} />
       {running && !msg.stopState && <LiveThought msg={msg} />}
 
       {interrupted && (

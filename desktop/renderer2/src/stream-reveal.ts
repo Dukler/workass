@@ -64,6 +64,17 @@ export function settleMountFades(root: Element | null): number {
   return settled;
 }
 
+// Whether appending `chunk` to `before` can change what the reveal shows. Only
+// a finished line or a finished sentence moves revealCut, so any other chunk
+// paints the very same screen; the store skips that render (t3code batches
+// deltas for the same reason; measured idea, 2026-10-13). Cheap: it looks at
+// the chunk and a few characters before it, never the whole message.
+const SENTENCE_STEP = /[.!?:…]["'”’)\]]*\s/;
+export function chunkCanReveal(before: string, chunk: string): boolean {
+  if (chunk.includes('\n')) return true;
+  return SENTENCE_STEP.test(before.slice(-6) + chunk);
+}
+
 export function revealedText(text: string): string {
   return text.slice(0, revealCut(text));
 }

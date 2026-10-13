@@ -133,8 +133,8 @@ test('switching chats keeps a bounded recent tail and loads the full ledger only
     assert.equal(first.historyComplete, true);
     assert.equal(subject.fullHistoriesLoaded.has(first.id), true);
     assert.deepEqual(archiveCalls, [
-      { tabId: first.id, options: { tail: 60 } },
-      { tabId: first.id, options: { beforeMessageId: 'message-0', limit: 60 } },
+      { tabId: first.id, options: { tail: 60, deferImages: true } },
+      { tabId: first.id, options: { beforeMessageId: 'message-0', limit: 60, deferImages: true } },
     ]);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
@@ -178,9 +178,9 @@ test('older history pages prepend by stable boundary until the canonical transcr
     assert.equal(target.messageCount, 145);
     assert.equal(target.historyComplete, true);
     assert.deepEqual(archiveCalls, [
-      { tabId: target.id, options: { beforeMessageId: 'message-85', limit: 40 } },
-      { tabId: target.id, options: { beforeMessageId: 'message-45', limit: 40 } },
-      { tabId: target.id, options: { beforeMessageId: 'message-5', limit: 40 } },
+      { tabId: target.id, options: { beforeMessageId: 'message-85', limit: 40, deferImages: true } },
+      { tabId: target.id, options: { beforeMessageId: 'message-45', limit: 40, deferImages: true } },
+      { tabId: target.id, options: { beforeMessageId: 'message-5', limit: 40, deferImages: true } },
     ]);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
@@ -276,7 +276,7 @@ test('older history paging remains compatible with a daemon that returns the ful
     assert.equal(await subject.loadOlderHistory(target.id, 40), true);
     assert.deepEqual(target.messages.map((message) => message.id), complete.map((message) => message.id));
     assert.equal(target.historyComplete, true);
-    assert.deepEqual(archiveCalls, [{ beforeMessageId: 'message-40', limit: 40 }]);
+    assert.deepEqual(archiveCalls, [{ beforeMessageId: 'message-40', limit: 40, deferImages: true }]);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
@@ -346,7 +346,7 @@ test('opening a metadata-only chat fetches ten recent rows before the no-blank h
     subject.switchChat(target.id);
     assert.equal(subject.state.activeId, first.id);
     assert.equal(first.messages.length, firstRows.length);
-    assert.deepEqual(archiveCalls, [{ tabId: target.id, options: { tail: 10 } }]);
+    assert.deepEqual(archiveCalls, [{ tabId: target.id, options: { tail: 10, deferImages: true } }]);
 
     historyReleased = true;
     releaseHistory(targetRows.slice(-10));
@@ -539,7 +539,7 @@ test('a newer metadata-only refresh reconciles a bounded recent suffix without c
     await load;
 
     assert.equal(archiveReads, 1);
-    assert.deepEqual(archiveOptions, { tail: 10 });
+    assert.deepEqual(archiveOptions, { tail: 10, deferImages: true });
     assert.equal(subject.chat(active.id)?.messages.length, complete.length);
     assert.equal(subject.chat(active.id)?.historyComplete, true);
     assert.equal(subject.fullHistoriesLoaded.has(active.id), true);
@@ -601,6 +601,47 @@ test('an unchanged metadata-only refresh preserves a selected resident tail with
     assert.equal(subject.chat(active.id)?.messages.length, 60);
     assert.equal(subject.chat(active.id)?.historyComplete, false);
     assert.equal(archiveReads, 0);
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+// A refresh carries metadata only for inactive chats. A chat the user already
+// opened keeps its recent tail, so opening it again paints at once instead of
+// waiting on a history read (2026-10-13: about a second for a cold chat). An
+// unchanged actor needs no read at all; a moved one refreshes behind the view.
+test('a chat already opened keeps its recent tail across a refresh and opens without waiting', async () => {
+  const previousWindow = (globalThis as any).window;
+  const reads: string[] = [];
+  (globalThis as any).window = { api: { archiveLoad: async (tabId: string) => { reads.push(tabId); return messages(10); } } };
+  try {
+    const subject = ownStore(new StoreCtor());
+    const active = chat('tab-reading', messages(12));
+    const quiet = chat('tab-quiet', messages(12));
+    const moved = chat('tab-moved', messages(12));
+    for (const item of [active, quiet, moved]) { item.actorRevision = 3; item.messageCount = 12; }
+    subject.state.chats = [active, quiet, moved];
+    subject.state.activeId = active.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+    const server = subject.toMirror(false);
+    for (const row of server.chats) {
+      if (row.id === active.id) continue;
+      row.messages = [];
+      row.historyComplete = false;
+      if (row.id === moved.id) { row.actorRevision = 4; row.messageCount = 13; }
+    }
+    assert.equal(subject.restoreSessionSnapshot(server), true);
+    assert.equal(subject.chat(quiet.id)?.messages.length, 12, 'an unchanged chat keeps its tail');
+    assert.equal(subject.chat(moved.id)?.messages.length, 12, 'a moved chat keeps its tail as a provisional view');
+
+    subject.switchChat(quiet.id);
+    assert.equal(subject.state.activeId, quiet.id, 'opening a resident chat paints at once');
+    subject.switchChat(moved.id);
+    assert.equal(subject.state.activeId, moved.id, 'a moved chat also paints at once');
+    await subject.recentHistoryLoads.get(moved.id);
+    assert.deepEqual(reads, [moved.id], 'only the moved chat reads its newest rows, behind the view');
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;

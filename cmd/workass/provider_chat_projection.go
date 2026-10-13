@@ -224,18 +224,34 @@ func (r *providerChatRuntime) ProjectArchiveByTab(tabID string) ([]any, bool, er
 // the navigation read: an idle chat is metadata-only in session:get, so opening
 // it must not expand every historical attachment merely to paint the current
 // viewport. The canonical ledger and the legacy full archive read are unchanged.
-func (r *providerChatRuntime) ProjectRecentArchiveByTab(tabID string, limit int) ([]any, bool, error) {
+func (r *providerChatRuntime) ProjectRecentArchiveByTab(tabID string, limit int, opts ...archiveReadOptions) ([]any, bool, error) {
 	if limit < 1 || limit > sessionProjectionMessageTail {
 		return nil, false, fmt.Errorf("recent archive limit must be between 1 and %d", sessionProjectionMessageTail)
 	}
-	return r.projectArchiveByTab(tabID, actorHistoryTail, limit)
+	return r.projectArchiveByTab(tabID, actorHistoryTail, limit, opts...)
+}
+
+// archiveReadOptions are additive archive-load options a newer renderer asks
+// for; an older one omits them and keeps the byte-identical response.
+type archiveReadOptions struct {
+	// deferMessageImages sends a message's own images (a reply's screenshots,
+	// a user's attachments) by reference, like tool images, so opening a chat
+	// is not a multi-megabyte read before its text can paint (2026-10-13: four
+	// screenshots made a ten-message read 4.8 MB).
+	deferMessageImages bool
+}
+
+func (o archiveReadOptions) apply(messages []any) {
+	if o.deferMessageImages {
+		deferArchiveMessageImages(messages)
+	}
 }
 
 // ProjectArchivePageBeforeByTab returns one bounded canonical ledger page
 // immediately before a stable resident message. It is the ordinary upward
 // history path; explicit full-history reads remain available for search and
 // legacy clients.
-func (r *providerChatRuntime) ProjectArchivePageBeforeByTab(tabID, beforeMessageID string, limit int) ([]any, bool, error) {
+func (r *providerChatRuntime) ProjectArchivePageBeforeByTab(tabID, beforeMessageID string, limit int, opts ...archiveReadOptions) ([]any, bool, error) {
 	if limit < 1 || limit > sessionProjectionMessageTail {
 		return nil, false, fmt.Errorf("archive page limit must be between 1 and %d", sessionProjectionMessageTail)
 	}
@@ -263,13 +279,16 @@ func (r *providerChatRuntime) ProjectArchivePageBeforeByTab(tabID, beforeMessage
 		return nil, false, err
 	}
 	deferArchiveToolImages(messages)
+	for _, opt := range opts {
+		opt.apply(messages)
+	}
 	if err := rehydrateExternalSessionImages(messages, filepath.Dir(r.sessions.path)); err != nil {
 		return nil, false, err
 	}
 	return messages, true, nil
 }
 
-func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHistoryProjection, tailLimit int) ([]any, bool, error) {
+func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHistoryProjection, tailLimit int, opts ...archiveReadOptions) ([]any, bool, error) {
 	matched, found, err := r.actorByTab(tabID)
 	if err != nil || !found {
 		return nil, found, err
@@ -302,10 +321,30 @@ func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHis
 		}
 	}
 	deferArchiveToolImages(messages)
+	for _, opt := range opts {
+		opt.apply(messages)
+	}
 	if err := rehydrateExternalSessionImages(messages, filepath.Dir(r.sessions.path)); err != nil {
 		return nil, false, err
 	}
 	return messages, true, nil
+}
+
+// deferArchiveMessageImages does for a message's own images what
+// deferArchiveToolImages does for tool media: the reference stays, the bytes
+// are read per image through the same authenticated archive channel.
+func deferArchiveMessageImages(messages []any) {
+	for _, raw := range messages {
+		message := mapFromAnyMain(raw)
+		for _, rawImage := range anySlice(message["images"]) {
+			image := mapFromAnyMain(rawImage)
+			if ref := fieldString(image, sessionImageDataRefField); ref != "" {
+				image["deferredImageRef"] = ref
+				image["data"] = ""
+				delete(image, sessionImageDataRefField)
+			}
+		}
+	}
 }
 
 // Tool media stays in the canonical ledger. Archive reads carry only its
@@ -357,15 +396,25 @@ func (r *providerChatRuntime) ProjectToolImageByTab(tabID, ref string) ([]any, b
 		}
 		return false
 	}
+	// A message's own images are read the same way once they are deferred.
+	ownedAttachment := func(attachments []providercontract.Attachment) bool {
+		for _, image := range attachments {
+			if image.Ref == providerSessionImageRefPrefix+ref {
+				return true
+			}
+		}
+		return false
+	}
 	allowed := false
 	for _, row := range state.Ledger {
-		if owned(row.Timeline) {
+		if owned(row.Timeline) || ownedAttachment(row.Attachments) {
 			allowed = true
 			break
 		}
 	}
 	if !allowed && state.Foreground != nil {
-		allowed = owned(state.Foreground.Timeline)
+		allowed = owned(state.Foreground.Timeline) || ownedAttachment(state.Foreground.Input.Attachments) ||
+			ownedAttachment(state.Foreground.AssistantAttachments)
 	}
 	if !allowed {
 		return nil, false, errors.New("archive image does not belong to this chat")
