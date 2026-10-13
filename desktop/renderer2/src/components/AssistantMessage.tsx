@@ -486,8 +486,21 @@ function ThoughtRow({ ev }: { ev: ThinkingEvent }) {
 // thought, then the calls it led to, with their durations (a live call spins
 // and counts up).
 function WorkList({ items, now, live }: { items: WorkItem[]; now: number; live: boolean }) {
+  // The open Working list follows its newest step, like the transcript: it
+  // opens at the bottom and stays there as calls and thoughts arrive, unless
+  // you scrolled up to read (user 2026-10-12: it did not scroll at all).
+  const list = useRef<HTMLDivElement>(null);
+  const following = useRef(true);
+  useLayoutEffect(() => {
+    const el = list.current;
+    if (live && el && following.current) el.scrollTop = el.scrollHeight;
+  }, [live, items.length]);
+  const onScroll = () => {
+    const el = list.current;
+    if (el) following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 12;
+  };
   return (
-    <div className="worklist">
+    <div className="worklist" ref={list} onScroll={live ? onScroll : undefined}>
       {items.map((item) => item.kind === 'thinking'
         ? <ThoughtRow key={item.key} ev={item} />
         : <ToolDetail key={item.key} t={item} standalone trail={<WorkingTrail t={item} now={now} live={live} />} />)}
