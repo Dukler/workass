@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { MessageImage, Msg, ThinkingEvent, TimelineEvent, ToolEvent } from '../store/types';
 import { store, useApp, useMsgVersion, useClock } from '../store/store';
 import { parseBlocks, type SignedBlock, listTexts } from '../markdown/blocks';
@@ -14,7 +14,7 @@ import { relTime } from '../rel-time';
 import { messageImageSrc } from '../image-drafts';
 import { connectedArtifactURL } from '../connected-artifacts';
 import { configuredModelUnavailable } from '../model-selection';
-import { revealedText } from '../stream-reveal';
+import { revealedText, settleMountFades } from '../stream-reveal';
 import { markdownImageReferences, normalizeMarkdownTarget, type InlineMediaResolver } from '../markdown/inline';
 
 function renderedImageReferences(blocks: SignedBlock[]): Array<{ label: string; target: string }> {
@@ -112,6 +112,14 @@ function AssistantSliceBody({
   coalescedSegments?: TranscriptTimelineSegment[];
   artifactOrigin?: string;
 }) {
+  // Text already in this reply when it mounts shows as it is; only text that
+  // arrives afterwards fades in. A reply born this instant keeps its fade.
+  const root = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const born = msg.at ? Date.parse(msg.at) : Number.NaN;
+    if (Number.isFinite(born) && Date.now() - born < 1500) return;
+    settleMountFades(root.current);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // Thoughts never render inline (the Working line / Worked row owns them).
   // Remove their capture markers from the prose layout too; otherwise a
   // thought arriving mid-token leaves an invisible boundary that renders one
@@ -153,7 +161,7 @@ function AssistantSliceBody({
   const workItems = running ? [] : msg.events.filter(isWorkItem);
 
   return (
-    <div className={`amsg${running ? ' streaming' : ''}`}>
+    <div className={`amsg${running ? ' streaming' : ''}`} ref={root}>
       {running && <ControlsSkippedRow tabId={tabId} />}
       {workItems.length > 0 && <WorkedRow items={workItems} />}
       {segs.map((s, segmentIndex) => {
