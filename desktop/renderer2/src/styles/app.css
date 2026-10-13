@@ -1172,7 +1172,9 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 /* Model picker (approved mock model-picker-v11, t3code style): a thin rail of
    favourites + providers, an underline search, two-line rows (model over its
    provider), ⌘1–⌘9 hints and a favourite star; the current model is tinted. */
-.pop.mppick { display: flex; width: 360px; max-height: 360px; padding: 0; overflow: hidden; }
+/* One fixed size whatever the list holds (user 2026-10-12): a search or a
+   provider with two models used to shrink the picker under the pointer. */
+.pop.mppick { display: flex; width: 360px; height: 360px; max-height: calc(100vh - 120px); padding: 0; overflow: hidden; }
 .mprail { width: 44px; flex: none; padding: 4px; display: flex; flex-direction: column; gap: 4px; background: color-mix(in srgb, var(--ink) 2.5%, transparent); overflow-y: auto; scrollbar-width: none; }
 .mprb { position: relative; width: 36px; height: 36px; flex: none; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; padding: 0; }
 .mprb:hover { background: var(--line); }

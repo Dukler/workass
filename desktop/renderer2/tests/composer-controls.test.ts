@@ -31,3 +31,11 @@ test('the queue shares the composer reading column', () => {
 test('draft attachments share the queue and composer reading column', () => {
   assert.match(styles, /\.attrow\s*\{[^}]*width:\s*100%;[^}]*max-width:\s*var\(--read\);[^}]*margin:\s*0 auto 9px;/s);
 });
+
+// The model picker keeps one size whatever its list holds: a search or a
+// provider with two models must not shrink it under the pointer (user
+// 2026-10-12).
+test('the model picker has a fixed height, not just a ceiling', () => {
+  assert.match(styles, /\.pop\.mppick\s*\{[^}]*[^-]height:\s*360px;/s);
+  assert.doesNotMatch(styles, /\.pop\.mppick\s*\{[^}]*max-height:\s*360px;/s);
+});

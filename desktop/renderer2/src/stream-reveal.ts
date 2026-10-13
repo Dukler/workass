@@ -49,6 +49,21 @@ export function revealCut(text: string): number {
   return Math.min(cut, text.length);
 }
 
+// The fade is for text that arrives while you watch. A reply that mounts with
+// text already in it (a chat switch, a reload, history arriving) finishes the
+// fades its blocks just started, so nothing on screen fades in a second time
+// (user 2026-10-12). Text added after the mount still fades, once.
+export function settleMountFades(root: Element | null): number {
+  if (!root || typeof root.getAnimations !== 'function') return 0;
+  let settled = 0;
+  for (const animation of root.getAnimations({ subtree: true })) {
+    if ((animation as CSSAnimation).animationName !== 'mdfresh') continue;
+    animation.finish();
+    settled++;
+  }
+  return settled;
+}
+
 export function revealedText(text: string): string {
   return text.slice(0, revealCut(text));
 }

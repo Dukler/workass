@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { revealedText } from '../src/stream-reveal.ts';
+import { revealedText, settleMountFades } from '../src/stream-reveal.ts';
 
 test('a paragraph shows only its finished sentences', () => {
   assert.equal(revealedText('The labels agree. Gold kept the fill, while Sil'), 'The labels agree.');
@@ -27,4 +27,16 @@ test('finished list items show as they complete', () => {
 test('the whole text shows once nothing is pending', () => {
   const text = 'Line one.\n\nLine two.\n';
   assert.equal(revealedText(text), text);
+});
+
+// Switching chats remounts a streaming reply: the text already on screen must
+// not fade in again (user 2026-10-12). Only the reveal fade is settled; any
+// other animation in the reply keeps running.
+test('a reply mounting with text settles its reveal fades and nothing else', () => {
+  const finished: string[] = [];
+  const animation = (animationName: string) => ({ animationName, finish: () => finished.push(animationName) });
+  const root = { getAnimations: () => [animation('mdfresh'), animation('workorbit'), animation('mdfresh')] } as unknown as Element;
+  assert.equal(settleMountFades(root), 2);
+  assert.deepEqual(finished, ['mdfresh', 'mdfresh']);
+  assert.equal(settleMountFades(null), 0);
 });
