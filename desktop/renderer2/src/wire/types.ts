@@ -368,6 +368,14 @@ export interface ProcessSummary {
 }
 export interface ProcChanged { processes: ProcessSummary[]; }
 
+// app-update:work reply: what a Workass update would stop right now. External
+// lanes and services are not counted — they outlive the daemon.
+export interface AppUpdateWork {
+  foregroundTurns: number;
+  backgroundWork: number;
+  chats: Array<{ tabId: string; foregroundTurns?: number; backgroundWork?: number }>;
+}
+
 export interface SpawnedWorkItem {
   id: string;
   taskId: string;
@@ -699,6 +707,8 @@ export interface WorkassApi {
     creditId?: string,
   ) => Promise<{ outcome: RateLimitResetOutcome; planUsage?: PlanUsageSnapshot }>;
   spawnedWorkList?: (tabId: string, chatId: string) => Promise<{ items: SpawnedWorkItem[]; obligation?: ChatObligation }>;
+  /** Read-only: what a Workass update would stop right now (local daemon only). */
+  appUpdateWork?: () => Promise<AppUpdateWork>;
   spawnedWorkRead?: (tabId: string, chatId: string, id: string, tailBytes?: number) => Promise<SpawnedWorkRead>;
   spawnedWorkStop?: (tabId: string, chatId: string, id: string) => Promise<SpawnedWorkStop>;
   startJob?: (opts: StartJobOpts) => Promise<StartJobReply>;

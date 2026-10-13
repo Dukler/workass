@@ -1332,6 +1332,12 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		arg := firstMapArg(args)
 		return providerChats.ChatCommands(fieldString(arg, "tabId"), fieldString(arg, "chatId"))
 	})
+	// Read-only: what a Workass update would stop right now, per chat, so the
+	// update button warns before the click. Never closes admission — that is
+	// BeginUpdateDrain's job once the user confirms.
+	hub.Register("app-update:work", func(args []any) (any, error) {
+		return manager.UpdateWorkInProgress(), nil
+	})
 	hub.Register("spawned-work:list", func(args []any) (any, error) {
 		arg := firstMapArg(args)
 		tabID, chatID := fieldString(arg, "tabId"), fieldString(arg, "chatId")

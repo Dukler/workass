@@ -247,6 +247,7 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	"StateDir":                       {},
 	"Stats":                          {},
 	"ToggleProvider":                 {},
+	"UpdateWorkInProgress":           {},
 }
 
 type phaseCManagerRule struct {

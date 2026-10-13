@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import type { ToolEvent, PlanEntry } from '../store/types';
 import { store, useApp, useActivity, useSpawnedWork } from '../store/store';
 import { toolState, fmtDur, extractSubagents, nodeState } from './messages';
-import { currentTurnMessages, reconcileSubagentWork } from '../subagent-layout';
+import { currentTurnMessages, nestSpawnedWork, reconcileSubagentWork, type SubagentNode } from '../subagent-layout';
 import { SubagentRow } from './SubagentRow';
-import { SpawnedWorkLive } from './SpawnedWorkCard';
+import { SpawnedWorkKids, SpawnedWorkLive } from './SpawnedWorkCard';
 import { renderInline } from '../markdown/inline';
 import { IcActivity, ActionGlyph } from '../icons';
 import { toolPresentation } from '../tool-names';
@@ -124,7 +124,10 @@ export function TareasCard() {
   // Tracked child lifetime survives foreground settlement. While the child is
   // live its spawned-work row owns activity and elapsed time; after completion
   // the grouped tool row uses the durable child result.
-  const { nodes } = reconcileSubagentWork(grouped.nodes, chat ? store.spawnedWork(chat) : []);
+  const work = chat ? store.spawnedWork(chat) : [];
+  const { nodes } = reconcileSubagentWork(grouped.nodes, work);
+  const { byParent } = nestSpawnedWork(work);
+  const kidsOf = (n: SubagentNode) => chat && n.work ? <SpawnedWorkKids chat={chat} items={byParent.get(n.work.taskId)} nowMs={nowMs} /> : null;
   const runningNodes = nodes.filter((n) => nodeState(n) === 'running');
   const doneNodes = nodes.filter((n) => nodeState(n) !== 'running');
   const runningTools = mainTools.filter((t) => toolState(t.status) === 'running');
@@ -223,8 +226,8 @@ export function TareasCard() {
           first, then settled; each still opens to its own calls. */}
       {(runningNodes.length > 0 || doneNodes.length > 0) && (
         <div className="r-subs">
-          {runningNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} />)}
-          {doneNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} />)}
+          {runningNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} kids={kidsOf(n)} />)}
+          {doneNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} kids={kidsOf(n)} />)}
         </div>
       )}
       {/* Running background processes live HERE — inline with the live call and
