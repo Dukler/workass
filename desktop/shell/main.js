@@ -308,6 +308,8 @@ function createWindow(url, browserReporter, isController) {
   ipcMain.handle('workass-browser:activate', (event, payload) => own(event) ? browserManager.activate(payload || {}) : null);
   ipcMain.handle('workass-browser:resize', (event, payload) => own(event) ? browserManager.resize(payload && payload.chatId, payload && payload.bounds, payload && payload.viewport) : false);
   ipcMain.handle('workass-browser:hide', (event, chatId) => own(event) ? browserManager.hide(chatId) : false);
+  ipcMain.handle('workass-browser:pop-out', (event, chatId) => own(event) ? browserManager.popOut(chatId) : null);
+  ipcMain.handle('workass-browser:pop-in', (event, chatId) => own(event) ? browserManager.popIn(chatId) : false);
   ipcMain.handle('workass-browser:close', (event, chatId) => own(event) ? browserManager.close(chatId) : false);
   ipcMain.handle('workass-browser:command', (event, payload) => own(event) ? browserManager.command(payload && payload.chatId, payload && payload.command, payload && payload.value) : null);
   ipcMain.handle('workass-browser:set-viewport', (event, payload) => own(event) && payload

@@ -23,6 +23,16 @@ export const IcEdit = () => <S><path d="M11 2l3 3-8.5 8.5H2.5V10.5z" /></S>;
 export const IcShield = () => <S><path d="M8 2l5 2.5v4C13 11.5 10.8 13.4 8 14 5.2 13.4 3 11.5 3 8.5v-4z" /></S>;
 export const IcExpand = () => <S><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5L9 7M2.5 13.5L7 9" /></S>;
 export const IcClose = () => <S><path d="M4 4l8 8M12 4l-8 8" /></S>;
+// Floating browser (approved mock browser-pip-v1): each mark depicts its action.
+// A small window inside a bigger one: float this page over the chat.
+export const IcPip = () => <S><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2" /><rect x="8" y="8.2" width="4.6" height="3.4" rx=".8" fill="currentColor" stroke="none" /></S>;
+// An arrow leaving a box: move the page into its own window.
+export const IcPopOut = () => <S><path d="M9 2.8h4.2V7M13.2 2.8L7.6 8.4" /><path d="M11.5 9.6v2.6a1 1 0 01-1 1H3.8a1 1 0 01-1-1V5.5a1 1 0 011-1h2.6" /></S>;
+// Four corners pulled outward / pushed inward: fill the window, and back.
+export const IcFullscreen = () => <S><path d="M2.5 6V3.5a1 1 0 011-1H6M10 2.5h2.5a1 1 0 011 1V6M13.5 10v2.5a1 1 0 01-1 1H10M6 13.5H3.5a1 1 0 01-1-1V10" /></S>;
+export const IcFullscreenExit = () => <S><path d="M6 2.5V5a1 1 0 01-1 1H2.5M13.5 6H11a1 1 0 01-1-1V2.5M10 13.5V11a1 1 0 011-1h2.5M2.5 10H5a1 1 0 011 1v2.5" /></S>;
+// Six dots: the handle you drag.
+export const IcGrip = () => <S><circle cx="6" cy="4.5" r=".9" fill="currentColor" /><circle cx="10" cy="4.5" r=".9" fill="currentColor" /><circle cx="6" cy="8" r=".9" fill="currentColor" /><circle cx="10" cy="8" r=".9" fill="currentColor" /><circle cx="6" cy="11.5" r=".9" fill="currentColor" /><circle cx="10" cy="11.5" r=".9" fill="currentColor" /></S>;
 export const IcCheck = () => <S><path d="M3.6 8.4l2.9 2.9 5.9-6.4" /></S>;
 export const IcArrowUp = () => <S><path d="M8 13V3.5M4 7.5l4-4 4 4" /></S>;
 export const IcWarnTri = () => <S><path d="M8 2.8L14 13H2z" /><path d="M8 6.6v3M8 11.4v.1" /></S>;

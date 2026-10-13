@@ -279,6 +279,10 @@ export interface Chat {
 // global flag): the info rail, the live browser, or nothing. Kept here (not in
 // right-pane.ts) so `Chat` can reference it without an import cycle.
 export type RightPane = 'rail' | 'browser';
+// A chat's browser shown outside the right column (approved mock
+// browser-pip-v1 · B + C, 2026-10-13): floating over the chat, filling the
+// window, or in its own always-on-top window.
+export type BrowserPresentation = 'float' | 'full' | 'window';
 
 // Global right-column layout preferences (shared across chats). Which occupant
 // is shown is per-chat (`Chat.pane`); these are only sizes/visibility that the
@@ -437,6 +441,8 @@ export interface AppState {
   // Transient: a chat image opened full-size in the lightbox overlay (click an
   // image in the transcript). null when closed. Never persisted.
   imageLightbox?: { src: string; alt: string } | null;
+  // Per chat (tab id). Renderer-local: a reload docks nothing and floats nothing.
+  browserPresentation?: Record<string, BrowserPresentation>;
 }
 
 export interface RewindState {

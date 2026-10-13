@@ -6,7 +6,7 @@ import {
 } from '../browser';
 import { connectedArtifactURL } from '../connected-artifacts';
 import { store, useApp } from '../store/store';
-import { IcBrowser } from '../icons';
+import { IcBrowser, IcPip } from '../icons';
 
 function boundsFor(el: HTMLElement): WorkassBrowserBounds {
   const rect = el.getBoundingClientRect();
@@ -217,6 +217,9 @@ function LocalBrowserPanel({
           aria-label="Dirección del navegador"
           spellCheck={false}
         />
+        <button type="button" className="brw2nav" title="Flotante" aria-label="Navegador flotante" onClick={() => store.floatBrowser()}>
+          <IcPip />
+        </button>
         <button type="button" className="brw2close" title="Cerrar navegador" onClick={onClose} aria-label="Cerrar navegador">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M4 4l8 8M12 4l-8 8" /></svg>
         </button>
