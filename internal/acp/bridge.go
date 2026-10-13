@@ -1163,7 +1163,7 @@ func (b *Bridge) emitToolEvent(job *Job, acpKind string, update map[string]any, 
 			SessionID: job.SessionID, TabID: job.TabID, ChatID: job.ChatID,
 			ProviderID: b.ProviderID(), ToolCallID: toolCallID, Title: title,
 			Command: execCommandFrom(rawInput), ProviderTool: signal.ProviderTool,
-			RunsInBackground: signal.RunsInBackground, FallbackTaskID: signal.FallbackTaskID,
+			RunsInBackground: signal.RunsInBackground, FallbackTaskID: signal.FallbackTaskID, ModelLabel: signal.ModelLabel,
 			FallbackOutputFile: signal.FallbackOutputFile,
 			JobID:              job.ID, OperationID: job.startOpts.OperationID,
 		})

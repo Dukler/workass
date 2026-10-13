@@ -134,14 +134,19 @@ type Manager struct {
 	spawnedWorkCommitMu          sync.Mutex
 	spawnedWork                  map[string]*spawnedWorkRecord
 	spawnedCandidates            map[string]spawnedWorkCandidate
-	spawnedWorkObserverMu        sync.RWMutex
-	spawnedWorkObserver          func(string, string, []SpawnedWorkItem) (SpawnedWorkActorProjection, error)
-	resetMu                      sync.Mutex
-	jobWG                        sync.WaitGroup
-	resetting                    bool
-	loopStop                     chan struct{}
-	loopStopOnce                 sync.Once
-	loopWG                       sync.WaitGroup
+	// spawnedWorkSettled remembers recently evicted settled items, so a late
+	// event for a finished task (Claude Code sends task_updated, then
+	// task_notification) updates that item instead of minting a blank one.
+	spawnedWorkSettled      map[string]SpawnedWorkItem
+	spawnedWorkSettledOrder []string
+	spawnedWorkObserverMu   sync.RWMutex
+	spawnedWorkObserver     func(string, string, []SpawnedWorkItem) (SpawnedWorkActorProjection, error)
+	resetMu                 sync.Mutex
+	jobWG                   sync.WaitGroup
+	resetting               bool
+	loopStop                chan struct{}
+	loopStopOnce            sync.Once
+	loopWG                  sync.WaitGroup
 	// updateGateMu is the admission barrier for an app-owned release handoff.
 	// An explicitly authorized release snapshots active work and closes new admission; it
 	// never waits for foreground or asynchronous work to become terminal. Once

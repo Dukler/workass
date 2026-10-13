@@ -15,9 +15,15 @@ func (claudeProviderSpawnedWorkStrategy) Supported() bool { return true }
 
 func (strategy claudeProviderSpawnedWorkStrategy) DecodeTool(raw providerRawToolObservation) (providerSpawnToolSignal, bool) {
 	providerMeta := mapFromAny(raw.Meta["claudeCode"])
+	tool := firstNonEmpty(asString(providerMeta["toolName"]), raw.Title)
 	signal := providerSpawnToolSignal{
-		ProviderTool:     firstNonEmpty(asString(providerMeta["toolName"]), raw.Title),
-		RunsInBackground: boolFromMap(raw.RawInput, "run_in_background"),
+		ProviderTool: tool,
+		// A Monitor watcher is background work by definition: its input has no
+		// run_in_background flag to read.
+		RunsInBackground: boolFromMap(raw.RawInput, "run_in_background") || strings.EqualFold(strings.TrimSpace(tool), "Monitor"),
+	}
+	if input, ok := raw.RawInput.(map[string]any); ok {
+		signal.ModelLabel = strings.TrimSpace(asString(input["model"]))
 	}
 	match := claudeBackgroundResultPattern.FindStringSubmatch(raw.Output)
 	if len(match) == 3 {
@@ -62,6 +68,7 @@ func (strategy claudeProviderSpawnedWorkStrategy) DecodeLifecycle(raw any) (prov
 func (strategy claudeProviderSpawnedWorkStrategy) decodeTask(raw map[string]any) (providerSpawnedWorkTask, bool) {
 	task := providerSpawnedWorkTask{
 		TaskID:       normalizeSpawnedWorkTaskID(asString(raw["taskId"])),
+		ParentTaskID: normalizeSpawnedWorkTaskID(asString(raw["parentTaskId"])),
 		ToolCallID:   strings.TrimSpace(asString(raw["toolCallId"])),
 		Description:  asString(raw["description"]),
 		TaskType:     asString(raw["taskType"]),

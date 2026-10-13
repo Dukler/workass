@@ -89,6 +89,9 @@ type SpawnedWorkItem struct {
 	AssistantBrand string `json:"assistantBrand,omitempty"`
 	Kind           string `json:"kind"`
 	Label          string `json:"label"`
+	// ParentTaskID links work an agent started to that agent's task (Claude
+	// Code's parent_task_id); empty for work the chat started itself.
+	ParentTaskID string `json:"parentTaskId,omitempty"`
 	// Role is the lifecycle, not the shape: "" is work whose completion is news,
 	// spawnedWorkRoleService is a process that is expected never to finish. It is
 	// declared at registration or inferred by classifySpawnedWorkServices, and is
@@ -137,13 +140,19 @@ type SpawnedWorkReceipt struct {
 }
 
 type spawnedWorkRecord struct {
-	Item             SpawnedWorkItem
-	SessionID        string
-	LastLevelSeen    time.Time
-	MissingSince     time.Time
-	PathlessSince    time.Time
-	SawPID           bool
-	ReceiptWritten   bool
+	Item           SpawnedWorkItem
+	SessionID      string
+	LastLevelSeen  time.Time
+	MissingSince   time.Time
+	PathlessSince  time.Time
+	SawPID         bool
+	ReceiptWritten bool
+	// An agent that stopped while its own background work still ran is
+	// waiting, not done: Claude Code resumes it when that work finishes.
+	// InterimSince marks the stop; ChildrenDoneAt starts the grace after its
+	// last child settled, in case it never resumes. Not persisted.
+	InterimSince     time.Time
+	ChildrenDoneAt   time.Time
 	ExternalDoneFile string
 	// Service classification evidence, deliberately not persisted: after a
 	// daemon restart the dwell simply restarts, which costs one window of a
@@ -195,6 +204,7 @@ type spawnedWorkCandidate struct {
 	ProviderTool      string
 	Kind              string
 	Label             string
+	ModelLabel        string
 	StartedAt         time.Time
 	OriginLaneID      string
 	OriginOperationID string
@@ -213,6 +223,7 @@ type spawnToolObservation struct {
 	RunsInBackground   bool
 	FallbackTaskID     string
 	FallbackOutputFile string
+	ModelLabel         string
 	JobID              string
 	OperationID        string
 	LaneID             string
@@ -265,6 +276,10 @@ func spawnedWorkKind(providerTool, taskType, subagentType string) string {
 	switch {
 	case strings.Contains(joined, "workflow"):
 		return "workflow"
+	// A Monitor watcher runs as a shell task (local_bash) but is a stream the
+	// agent is watching, not a command it is waiting on.
+	case strings.Contains(joined, "monitor"):
+		return "monitor"
 	// A task with a subagent type is an agent whatever the type is called:
 	// Claude Code's "general-purpose" and "Explore" never contain "agent".
 	case strings.TrimSpace(subagentType) != "":
@@ -532,7 +547,7 @@ func (m *Manager) observeSpawnToolEvent(obs spawnToolObservation) {
 			SessionID: obs.SessionID, TabID: obs.TabID, ChatID: obs.ChatID,
 			ToolCallID: obs.ToolCallID, ProviderID: obs.ProviderID,
 			ProviderTool: providerTool, Kind: spawnedWorkKind(providerTool, "", ""),
-			Label: label, StartedAt: time.Now().UTC(),
+			Label: label, ModelLabel: compactText(redactSensitiveText(obs.ModelLabel), 160), StartedAt: time.Now().UTC(),
 			OriginLaneID: strings.TrimSpace(obs.LaneID), OriginOperationID: strings.TrimSpace(obs.OperationID), OriginTurnID: strings.TrimSpace(obs.JobID),
 		}
 		m.spawnedWorkMu.Unlock()
@@ -637,10 +652,30 @@ func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerI
 			rec.Item.UpdatedAt = isoNow()
 			changed = true
 		}
+		if parent := task.ParentTaskID; parent != "" && parent != taskID && rec.Item.ParentTaskID == "" {
+			rec.Item.ParentTaskID = parent
+			rec.Item.UpdatedAt = isoNow()
+			changed = true
+		}
+		// A waiting agent that reports progress has resumed.
+		if event.Kind == "progress" || event.Kind == "started" {
+			rec.InterimSince, rec.ChildrenDoneAt = time.Time{}, time.Time{}
+		}
 		status := task.Status
 		if event.Kind == "notification" || status != "" {
 			mapped := spawnedWorkStatus(status)
-			if mapped != "running" && rec.Item.Status == "running" {
+			switch {
+			case mapped == "running" || rec.Item.Status != "running":
+			case rec.Item.Kind == "agent" && m.agentHasRunningChildLocked(rec):
+				// Stopped while its own background work runs: Claude Code will
+				// resume it when that work finishes, so it is waiting, not done.
+				if rec.InterimSince.IsZero() {
+					rec.InterimSince = now
+					rec.ChildrenDoneAt = time.Time{}
+					rec.Item.UpdatedAt = isoNow()
+					changed = true
+				}
+			default:
 				changed = m.settleSpawnedWorkLocked(rec, mapped, nil) || changed
 			}
 		}
@@ -651,6 +686,59 @@ func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerI
 	m.spawnedWorkMu.Unlock()
 	if changed && rec != nil {
 		m.commitSpawnedWorkChange(tabID, chatID)
+	}
+}
+
+// agentHasRunningChildLocked reports whether an agent task still owns running
+// background work of its own. Caller holds m.spawnedWorkMu.
+func (m *Manager) agentHasRunningChildLocked(agent *spawnedWorkRecord) bool {
+	for _, rec := range m.spawnedWork {
+		if rec != nil && rec != agent && rec.Item.Status == "running" && rec.Item.ParentTaskID == agent.Item.TaskID &&
+			rec.Item.TabID == agent.Item.TabID && rec.Item.ChatID == agent.Item.ChatID {
+			return true
+		}
+	}
+	return false
+}
+
+// waitingAgentGrace is how long an agent that stopped with its own work
+// running may take to resume once that work has finished, before it is
+// settled as done.
+var waitingAgentGrace = 90 * time.Second
+
+// settleIdleWaitingAgentLocked settles a waiting agent whose own work has all
+// finished and that has not resumed within the grace. Caller holds the lock.
+func (m *Manager) settleIdleWaitingAgentLocked(rec *spawnedWorkRecord, now time.Time) bool {
+	if rec == nil || rec.InterimSince.IsZero() || rec.Item.Status != "running" {
+		return false
+	}
+	if m.agentHasRunningChildLocked(rec) {
+		rec.ChildrenDoneAt = time.Time{}
+		return false
+	}
+	if rec.ChildrenDoneAt.IsZero() {
+		rec.ChildrenDoneAt = now
+		return false
+	}
+	if now.Sub(rec.ChildrenDoneAt) < waitingAgentGrace {
+		return false
+	}
+	return m.settleSpawnedWorkLocked(rec, "exited", nil)
+}
+
+// rememberSettledSpawnedWorkLocked keeps an evicted settled item for late
+// events about the same task. Bounded; caller holds m.spawnedWorkMu.
+func (m *Manager) rememberSettledSpawnedWorkLocked(key string, item SpawnedWorkItem) {
+	if m.spawnedWorkSettled == nil {
+		m.spawnedWorkSettled = map[string]SpawnedWorkItem{}
+	}
+	if _, known := m.spawnedWorkSettled[key]; !known {
+		m.spawnedWorkSettledOrder = append(m.spawnedWorkSettledOrder, key)
+	}
+	m.spawnedWorkSettled[key] = item
+	for len(m.spawnedWorkSettledOrder) > 512 {
+		delete(m.spawnedWorkSettled, m.spawnedWorkSettledOrder[0])
+		m.spawnedWorkSettledOrder = m.spawnedWorkSettledOrder[1:]
 	}
 }
 
@@ -674,6 +762,13 @@ func (m *Manager) upsertSpawnedWorkLocked(candidate spawnedWorkCandidate, taskID
 	key := spawnedWorkKey(candidate.TabID, candidate.ChatID, taskID)
 	rec := m.spawnedWork[key]
 	changed := false
+	// A late event for a task that already finished and left the live set
+	// (Claude Code sends task_updated, then task_notification) updates that
+	// same item: never a blank one with the raw id for a title.
+	if settled, known := m.spawnedWorkSettled[key]; rec == nil && known && sameSpawnedWorkToolCall(settled.ToolCallID, candidate.ToolCallID) {
+		rec = &spawnedWorkRecord{Item: settled, SessionID: candidate.SessionID, ReceiptWritten: true}
+		m.spawnedWork[key] = rec
+	}
 	if rec != nil && !sameSpawnedWorkToolCall(rec.Item.ToolCallID, candidate.ToolCallID) {
 		// A prose fallback may enrich only the structured record belonging to
 		// the same tool call. Never let a task-id collision rewrite another
@@ -691,7 +786,7 @@ func (m *Manager) upsertSpawnedWorkLocked(candidate spawnedWorkCandidate, taskID
 			TabID: candidate.TabID, ChatID: candidate.ChatID,
 			ProviderID: candidate.ProviderID,
 			Kind:       spawnedWorkKind(candidate.ProviderTool, firstNonEmpty(taskType, candidate.Kind), subagentType),
-			Label:      label, Status: "running",
+			Label:      label, ModelLabel: candidate.ModelLabel, Status: "running",
 			StartedAt: started.Format(time.RFC3339Nano), UpdatedAt: isoNow(),
 			OriginLaneID: candidate.OriginLaneID, OriginOperationID: candidate.OriginOperationID, OriginTurnID: candidate.OriginTurnID,
 		}
@@ -1062,7 +1157,13 @@ func (m *Manager) reconcileSpawnedWork() {
 		var tabID, chatID string
 		m.spawnedWorkMu.Lock()
 		rec := m.spawnedWork[probe.key]
-		if rec != nil && rec.Item.Status == "running" {
+		if rec != nil && rec.Item.Status == "running" && !rec.InterimSince.IsZero() {
+			// A waiting agent has no process of its own to probe: it settles
+			// only once its own work is done and it has not resumed.
+			tabID, chatID = rec.Item.TabID, rec.Item.ChatID
+			rec.MissingSince = time.Time{}
+			changed = m.settleIdleWaitingAgentLocked(rec, now)
+		} else if rec != nil && rec.Item.Status == "running" {
 			tabID, chatID = rec.Item.TabID, rec.Item.ChatID
 			if len(pids) > 0 {
 				pid := pids[len(pids)-1]
@@ -1377,7 +1478,11 @@ func (m *Manager) commitActorSpawnedWorkProjectionLocked(tabID, chatID string, o
 			}
 		}
 		_, owned := accepted[workID]
-		if !owned || (!strings.EqualFold(strings.TrimSpace(rec.Item.Status), "running") && rec.ReceiptWritten) {
+		settled := !strings.EqualFold(strings.TrimSpace(rec.Item.Status), "running") && rec.ReceiptWritten
+		if !owned || settled {
+			if owned && settled {
+				m.rememberSettledSpawnedWorkLocked(key, rec.Item)
+			}
 			delete(m.spawnedWork, key)
 		}
 	}

@@ -305,6 +305,65 @@ class FixtureQuery {
         });
         continue;
       }
+      // The DepthVision wake test (2026-10-13), replayed in the real CLI's
+      // event order: a shell task, an agent and a Monitor launched in one
+      // turn; then, while idle, the agent's own command starts (owned by the
+      // agent), the agent stops in between, each task finishes in its own
+      // wake, and the agent finishes last.
+      if (text.includes('[fixture:bg-wake-full]')) {
+        const base = { parent_tool_use_id: null, session_id: this.sessionId };
+        const system = (subtype, extra) => this.emit({ type: 'system', subtype, session_id: this.sessionId, uuid: randomUUID(), ...extra });
+        const tool = (id, name, input, result) => {
+          const toolUse = { type: 'tool_use', id, name, input };
+          this.emit({ ...base, type: 'stream_event', uuid: randomUUID(), event: { type: 'content_block_start', index: 0, content_block: { ...toolUse, input: {} } } });
+          this.emit({ ...base, type: 'assistant', uuid: randomUUID(), message: { content: [toolUse] } });
+          return () => this.emit({ ...base, type: 'user', uuid: randomUUID(), message: { content: [{ type: 'tool_result', tool_use_id: id, content: result }] } });
+        };
+        const out = (id) => `/private/tmp/claude-501/fixture/session/tasks/${id}.output`;
+        const shellDone = tool('toolu_wake_shell', 'Bash', { command: 'sleep 45; echo', description: 'Wake test: shell task', run_in_background: true },
+          `Command running in background with ID: b-wake-shell. Output is being written to: ${out('b-wake-shell')}`);
+        system('task_started', { task_id: 'b-wake-shell', tool_use_id: 'toolu_wake_shell', description: 'Wake test: shell task', task_type: 'local_bash', is_backgrounded: true });
+        shellDone();
+        const agentDone = tool('toolu_wake_agent', 'Agent', { description: 'Wake test: agent', subagent_type: 'Explore', run_in_background: true, prompt: 'sleep 40' }, 'Async agent launched successfully.\nagentId: a-wake-agent');
+        system('task_started', { task_id: 'a-wake-agent', tool_use_id: 'toolu_wake_agent', description: 'Wake test: agent', subagent_type: 'Explore', task_type: 'local_agent', is_backgrounded: true });
+        agentDone();
+        const monitorDone = tool('toolu_wake_monitor', 'Monitor', { command: 'tick', description: 'Wake test: watcher' }, 'Monitor started.');
+        system('task_started', { task_id: 'b-wake-monitor', tool_use_id: 'toolu_wake_monitor', description: 'Wake test: watcher', task_type: 'local_bash', is_backgrounded: true });
+        monitorDone();
+        // The agent's own background command, a tool call the subagent makes
+        // while the parent turn is still open, as in the real run.
+        const childUse = { type: 'tool_use', id: 'toolu_wake_child', name: 'Bash', input: { command: 'sleep 40', description: 'Sleep 40 seconds', run_in_background: true } };
+        this.emit({ ...base, parent_tool_use_id: 'toolu_wake_agent', type: 'assistant', uuid: randomUUID(), message: { content: [childUse] } });
+        system('task_progress', { task_id: 'a-wake-agent', tool_use_id: 'toolu_wake_agent', description: 'Running Sleep 40 seconds', subagent_type: 'Explore', last_tool_name: 'Bash' });
+        system('task_started', { task_id: 'b-wake-child', tool_use_id: 'toolu_wake_child', owned_by_subagent: true, parent_task_id: 'a-wake-agent', description: 'Sleep 40 seconds', task_type: 'local_bash', is_backgrounded: true });
+        await this.endTurn(text);
+        const pause = () => new Promise((resolve) => setTimeout(resolve, 120));
+        await pause();
+        await this.harnessTurn({ settles: { task_id: 'a-wake-agent', tool_use_id: 'toolu_wake_agent', status: 'completed', output_file: out('a-wake-agent'), summary: 'Stopped with background work of its own still running; may resume.' } });
+        await pause();
+        await this.harnessTurn({ settles: { task_id: 'b-wake-monitor', tool_use_id: 'toolu_wake_monitor', status: 'completed', output_file: out('b-wake-monitor'), summary: 'Monitor "Wake test: watcher" stream ended' } });
+        await pause();
+        await this.harnessTurn({ settles: { task_id: 'b-wake-shell', tool_use_id: 'toolu_wake_shell', status: 'completed', output_file: out('b-wake-shell'), summary: 'Background command "Wake test: shell task" completed' } });
+        await pause();
+        await this.harnessTurn({ settles: { task_id: 'b-wake-child', tool_use_id: 'toolu_wake_child', status: 'completed', output_file: out('b-wake-child'), summary: 'Background command "Sleep 40 seconds" completed' } });
+        await pause();
+        await this.harnessTurn({ settles: { task_id: 'a-wake-agent', tool_use_id: 'toolu_wake_agent', status: 'completed', output_file: out('a-wake-agent'), summary: 'agent wake test done' } });
+        continue;
+      }
+      // A background Agent-tool subagent launched in this turn and finishing
+      // after the turn ended, waking the idle session: the real CLI's order.
+      if (text.includes('[fixture:bg-agent-wake]')) {
+        const toolUse = { type: 'tool_use', id: 'toolu_bg_wake', name: 'Agent', input: { description: 'Wake test agent', subagent_type: 'Explore', run_in_background: true, prompt: 'wait' } };
+        const base = { parent_tool_use_id: null, session_id: this.sessionId };
+        this.emit({ ...base, type: 'stream_event', uuid: randomUUID(), event: { type: 'content_block_start', index: 0, content_block: { ...toolUse, input: {} } } });
+        this.emit({ ...base, type: 'assistant', uuid: randomUUID(), message: { content: [toolUse] } });
+        this.emit({ type: 'system', subtype: 'task_started', session_id: this.sessionId, uuid: randomUUID(), task_id: 'a-bg-wake', tool_use_id: toolUse.id, description: 'Wake test agent', subagent_type: 'Explore', task_type: 'local_agent', is_backgrounded: true });
+        this.emit({ ...base, type: 'user', uuid: randomUUID(), message: { content: [{ type: 'tool_result', tool_use_id: toolUse.id, content: 'Async agent launched successfully.\nagentId: a-bg-wake' }] } });
+        await this.endTurn(text);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await this.harnessTurn({ settles: { task_id: 'a-bg-wake', tool_use_id: toolUse.id, status: 'completed', output_file: '/private/tmp/claude-501/fixture/session/tasks/a-bg-wake.output', summary: 'Wake test agent finished' } });
+        continue;
+      }
       // Echo how the host marked this prompt, so a test can see the origin
       // Claude Code would read (human-only features such as ultracode).
       if (text.includes('[fixture:echo-origin]')) {
@@ -716,14 +775,22 @@ class FixtureQuery {
 
   // A turn nobody asked for: the harness wakes the session when background work
   // settles. This is the shape that produced the 76-minute false park.
-  async harnessTurn({ dies = false, open = false } = {}) {
+  async harnessTurn({ dies = false, open = false, settles = null } = {}) {
     // A real wake arrives while the session is idle, after the host has
     // settled the previous result.
-    if (dies || open) await new Promise((resolve) => setTimeout(resolve, 50));
-    this.emit({
-      type: 'system', subtype: 'task_notification', session_id: this.sessionId,
-      task_id: 'fixture-bg-0', uuid: randomUUID(),
-    });
+    if (dies || open || settles) await new Promise((resolve) => setTimeout(resolve, 50));
+    // `settles` replays a real background task finishing while idle, in the
+    // order the real CLI emits it (captured 2026-10-13): task_updated, then
+    // task_notification with its status, output file and summary.
+    if (settles) {
+      this.emit({ type: 'system', subtype: 'task_updated', session_id: this.sessionId, uuid: randomUUID(), task_id: settles.task_id, patch: { status: settles.status } });
+      this.emit({ type: 'system', subtype: 'task_notification', session_id: this.sessionId, uuid: randomUUID(), ...settles });
+    } else {
+      this.emit({
+        type: 'system', subtype: 'task_notification', session_id: this.sessionId,
+        task_id: 'fixture-bg-0', uuid: randomUUID(),
+      });
+    }
     this.promptId = randomUUID();
     await this.fireHook('UserPromptSubmit', { prompt: 'Background task fixture-bg-0 completed' });
     this.emit({

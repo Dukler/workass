@@ -1528,3 +1528,60 @@ func TestRealClaudeBackgroundAgentLifecycleBecomesAgentWork(t *testing.T) {
 		t.Fatalf("agent identity lost: %#v", settled[0])
 	}
 }
+
+// An agent that stopped with its own work running waits for it; if it never
+// resumes once that work is done, it settles after the grace instead of
+// staying "running" forever.
+func TestWaitingAgentSettlesWhenItDoesNotResumeAfterItsOwnWork(t *testing.T) {
+	previous := waitingAgentGrace
+	waitingAgentGrace = 0
+	t.Cleanup(func() { waitingAgentGrace = previous })
+	manager := NewManager(Options{
+		StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour,
+		SpawnedWorkPIDProbe: func([]string) (map[string][]int, bool) { return nil, false },
+	})
+	observe := func(event map[string]any) {
+		observeRawSpawnLifecycleFixture(t, manager, "tab-wait", "chat-wait", "session-wait", "claude", event)
+	}
+	observe(map[string]any{"type": "started", "taskId": "agent-w", "toolCallId": "tool-agent", "description": "Waiting agent", "subagentType": "Explore", "taskType": "local_agent"})
+	observe(map[string]any{"type": "started", "taskId": "child-w", "toolCallId": "tool-child", "description": "Its own sleep", "taskType": "local_bash", "parentTaskId": "agent-w"})
+	observe(map[string]any{"type": "notification", "taskId": "agent-w", "toolCallId": "tool-agent", "status": "completed", "summary": "stopped with background work of its own still running"})
+	status := func(id string) string {
+		for _, item := range manager.ListSpawnedWork("tab-wait", "chat-wait") {
+			if item.TaskID == id {
+				return item.Status
+			}
+		}
+		return "absent"
+	}
+	if status("agent-w") != "running" {
+		t.Fatalf("a stopped agent with running work of its own was settled: %s", status("agent-w"))
+	}
+	manager.reconcileSpawnedWork()
+	if status("agent-w") != "running" {
+		t.Fatal("a waiting agent settled while its own work still ran")
+	}
+	observe(map[string]any{"type": "notification", "taskId": "child-w", "toolCallId": "tool-child", "status": "completed"})
+	manager.reconcileSpawnedWork() // its last child is done: the grace starts
+	manager.reconcileSpawnedWork() // no resume within the grace: settled
+	if got := status("agent-w"); got != "exited" {
+		t.Fatalf("a waiting agent that never resumed stayed %q", got)
+	}
+}
+
+// A Monitor watcher is its own kind, and an Agent call's model names the agent.
+func TestClaudeMonitorKindAndAgentModelFromToolInput(t *testing.T) {
+	t.Parallel()
+	if kind := spawnedWorkKind("Monitor", "local_bash", ""); kind != "monitor" {
+		t.Fatalf("Monitor kind = %q", kind)
+	}
+	strategy := claudeProviderSpawnedWorkStrategy{}
+	monitor, ok := strategy.DecodeTool(providerRawToolObservation{Title: "Monitor", Meta: map[string]any{"claudeCode": map[string]any{"toolName": "Monitor"}}, RawInput: map[string]any{"command": "tail -f log"}})
+	if !ok || !monitor.RunsInBackground {
+		t.Fatalf("a Monitor call was not background work: %#v", monitor)
+	}
+	agent, ok := strategy.DecodeTool(providerRawToolObservation{Title: "Agent", Meta: map[string]any{"claudeCode": map[string]any{"toolName": "Agent"}}, RawInput: map[string]any{"run_in_background": true, "model": "haiku"}})
+	if !ok || agent.ModelLabel != "haiku" {
+		t.Fatalf("the Agent call's model was lost: %#v", agent)
+	}
+}

@@ -565,6 +565,7 @@ func actorBackgroundWorkItem(state chat.State, background chat.BackgroundState) 
 		OutputFile: acp.RedactSensitiveText(event.OutputFile), PID: cloneIntPointer(event.PID), ExitCode: cloneIntPointer(event.ExitCode),
 		Summary: acp.RedactSensitiveText(event.Summary), LastToolName: acp.RedactSensitiveText(event.LastToolName),
 		ModelLabel: acp.RedactSensitiveText(event.ModelLabel), ResultExcerpt: acp.RedactSensitiveText(event.ResultExcerpt),
+		ParentTaskID: event.ParentTaskID,
 		OriginLaneID: string(background.Owner.LaneID), OriginOperationID: string(background.Owner.OperationID), OriginTurnID: background.Owner.TurnID,
 	}
 }
