@@ -1362,8 +1362,14 @@ class ClaudeSession {
       this.settlePrompt(message, null);
       return;
     }
-    if (message.type === 'task_started' || message.type === 'task_progress' || message.type === 'task_updated' || message.type === 'task_notification') {
-      notify(this.sessionId, { sessionUpdate: '_workass_claude_spawned_work', event: spawnedWorkEvent(message) });
+    // Claude Code reports its subagents and background shells as
+    // {type: 'system', subtype: 'task_started' | ...}. Matching only a bare
+    // type: 'task_started' meant not one lifecycle event ever reached Workass:
+    // native subagents were invisible and background shells were found only
+    // by their result text (user report 2026-10-13).
+    const taskEvent = taskEventKind(message);
+    if (taskEvent) {
+      notify(this.sessionId, { sessionUpdate: '_workass_claude_spawned_work', event: spawnedWorkEvent(message, taskEvent) });
     }
   }
 
@@ -1684,14 +1690,21 @@ function toolTitle(name, input) {
   return String(candidate || name || 'Claude Code tool').slice(0, 240);
 }
 
-function spawnedWorkEvent(message) {
-  if (message.type === 'task_started') {
+const TASK_EVENT_KINDS = new Set(['task_started', 'task_progress', 'task_updated', 'task_notification']);
+
+function taskEventKind(message) {
+  const kind = message?.type === 'system' ? message.subtype : message?.type;
+  return TASK_EVENT_KINDS.has(kind) ? kind : null;
+}
+
+function spawnedWorkEvent(message, kind = taskEventKind(message)) {
+  if (kind === 'task_started') {
     return { type: 'started', taskId: message.task_id, toolCallId: message.tool_use_id, description: message.description, subagentType: message.subagent_type, taskType: message.task_type, workflowName: message.workflow_name };
   }
-  if (message.type === 'task_progress') {
+  if (kind === 'task_progress') {
     return { type: 'progress', taskId: message.task_id, toolCallId: message.tool_use_id, description: message.description, subagentType: message.subagent_type, lastToolName: message.last_tool_name, summary: message.summary };
   }
-  if (message.type === 'task_updated') {
+  if (kind === 'task_updated') {
     return { type: 'updated', taskId: message.task_id, patch: { status: message.patch?.status, description: message.patch?.description, error: message.patch?.error, isBackgrounded: message.patch?.is_backgrounded } };
   }
   return { type: 'notification', taskId: message.task_id, toolCallId: message.tool_use_id, status: message.status, outputFile: message.output_file, summary: message.summary };

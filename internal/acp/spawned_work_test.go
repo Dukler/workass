@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1413,5 +1414,82 @@ func TestLifecycleHibernatesAnEngineThatWasNeverPrompted(t *testing.T) {
 	manager.SweepLifecycle()
 	if !procHasState(manager, StateHibernated) {
 		t.Fatalf("a never-prompted engine past its idle TTL was not hibernated: %#v", manager.Processes())
+	}
+}
+
+// A background shell runs in the engine's process tree, so it dies with it.
+// When the engine closes, one whose process is gone is reported as stopped
+// right away; one that outlived the engine (a detached process) keeps running.
+func TestBridgeCloseReportsBackgroundShellsThatDiedWithTheEngine(t *testing.T) {
+	t.Parallel()
+	manager, _ := newFakeManager(t, "echo-prompt", Options{
+		StateDir:                     t.TempDir(),
+		LifecycleCheckInterval:       time.Hour,
+		RSSSampleInterval:            time.Hour,
+		SpawnedWorkReconcileInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	var projected []SpawnedWorkItem
+	if err := manager.InstallSpawnedWorkObserver(func(_ string, _ string, items []SpawnedWorkItem) (SpawnedWorkActorProjection, error) {
+		projected = append([]SpawnedWorkItem(nil), items...)
+		return SpawnedWorkActorProjection{ActorRevision: 1, Items: items}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const tabID, chatID = "spawn-shell-tab", "spawn-shell-chat"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	session, err := manager.NewSession(ctx, SessionOptions{TabID: tabID, ChatID: chatID})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	bridge := bridgeForTestSession(t, manager, session.SessionID, tabID, chatID)
+
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	deadPID, livePID := dead.Process.Pid, os.Getpid()
+	for _, shell := range []struct {
+		id  string
+		pid int
+	}{{"shell-dead", deadPID}, {"shell-live", livePID}} {
+		addSpawnedWorkRecordForTest(t, manager, tabID, chatID, shell.id, "bash", "running")
+		pid := shell.pid
+		manager.spawnedWorkMu.Lock()
+		rec := manager.spawnedWork[spawnedWorkKey(tabID, chatID, shell.id)]
+		rec.Item.OutputFile = "/private/tmp/claude-501/project/session/tasks/" + shell.id + ".output"
+		rec.Item.PID = &pid
+		manager.spawnedWorkMu.Unlock()
+	}
+
+	bridge.Close(true, errors.New("workass update"))
+
+	items := spawnedWorkItemsByTaskID(projected)
+	if got := items["shell-dead"]; got.Status != "orphaned" || got.Summary != "Stopped: its process ended with the ACP engine (reason: workass update)" {
+		t.Fatalf("a shell that died with the engine was not reported: %#v", got)
+	}
+	manager.spawnedWorkMu.Lock()
+	live := manager.spawnedWork[spawnedWorkKey(tabID, chatID, "shell-live")].Item.Status
+	manager.spawnedWorkMu.Unlock()
+	if live != "running" {
+		t.Fatalf("a shell that outlived the engine was settled: %s", live)
+	}
+}
+
+// Claude Code names its subagent types "general-purpose" or "Explore"; a task
+// with any subagent type is an agent row, not generic background work.
+func TestClaudeSubagentTypeMakesAnAgentWithoutAToolCandidate(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(Options{
+		StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour,
+		SpawnedWorkPIDProbe: func([]string) (map[string][]int, bool) { return nil, false },
+	})
+	observeRawSpawnLifecycleFixture(t, manager, "tab-3", "chat-3", "session-3", "claude", map[string]any{
+		"type": "started", "taskId": "a7f3544f9748d9adc", "toolCallId": "toolu_agent", "description": "Classify workspace tmp dirs", "subagentType": "general-purpose",
+	})
+	items := manager.ListSpawnedWork("tab-3", "chat-3")
+	if len(items) != 1 || items[0].Kind != "agent" || items[0].Label != "Classify workspace tmp dirs" || items[0].Status != "running" {
+		t.Fatalf("native subagent item = %#v", items)
 	}
 }

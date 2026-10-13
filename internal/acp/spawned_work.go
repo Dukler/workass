@@ -265,6 +265,10 @@ func spawnedWorkKind(providerTool, taskType, subagentType string) string {
 	switch {
 	case strings.Contains(joined, "workflow"):
 		return "workflow"
+	// A task with a subagent type is an agent whatever the type is called:
+	// Claude Code's "general-purpose" and "Explore" never contain "agent".
+	case strings.TrimSpace(subagentType) != "":
+		return "agent"
 	case strings.Contains(joined, "agent"), strings.Contains(joined, "task"):
 		return "agent"
 	case strings.Contains(joined, "bash"), strings.Contains(joined, "shell"), strings.Contains(joined, "command"):
@@ -888,17 +892,30 @@ func (m *Manager) orphanInProcessSpawnedWorkForChat(tabID, chatID, reason string
 		reason = "engine-exit"
 	}
 	summary := "Orphaned: the ACP engine exited while this ran in-process (reason: " + reason + ")"
+	// A background shell lives in the engine's process tree too. Once the
+	// engine has exited, one whose process is gone died with it: say so now,
+	// instead of letting the next reconcile call it an ordinary exit hours
+	// later (a Workass update killed one and it read "exited", 2026-10-13).
+	stoppedSummary := "Stopped: its process ended with the ACP engine (reason: " + reason + ")"
 	changed := false
 	m.spawnedWorkMu.Lock()
 	for _, rec := range m.spawnedWork {
 		if rec == nil || rec.Item.TabID != tabID || rec.Item.ChatID != chatID || rec.Item.Status != "running" {
 			continue
 		}
-		if spawnedWorkLivenessClassFor(rec.Item) != spawnedWorkLivenessInProcess {
+		recSummary := summary
+		switch spawnedWorkLivenessClassFor(rec.Item) {
+		case spawnedWorkLivenessInProcess:
+		case spawnedWorkLivenessProbed:
+			if rec.Item.PID == nil || externalPIDAlive(*rec.Item.PID) {
+				continue
+			}
+			recSummary = stoppedSummary
+		default:
 			continue
 		}
 		if m.settleSpawnedWorkLocked(rec, "orphaned", nil) {
-			rec.Item.Summary = summary
+			rec.Item.Summary = recSummary
 			rec.Item.UpdatedAt = rec.Item.FinishedAt
 			changed = true
 		}

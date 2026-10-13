@@ -305,6 +305,17 @@ class FixtureQuery {
         });
         continue;
       }
+      // A background subagent reported the way the real CLI reports it: as
+      // system messages with a task_* subtype, started → progress → finished.
+      if (text.includes('[fixture:background-agent]')) {
+        const task = { task_id: 'fixture-agent-1', tool_use_id: 'toolu_fixture_agent_1' };
+        const system = (subtype, extra) => this.emit({ type: 'system', subtype, session_id: this.sessionId, uuid: randomUUID(), ...task, ...extra });
+        system('task_started', { description: 'Classify workspace tmp dirs', subagent_type: 'general-purpose', is_backgrounded: true });
+        system('task_progress', { description: 'Classify workspace tmp dirs', last_tool_name: 'Bash', summary: 'Listed 14 dirs' });
+        system('task_notification', { status: 'completed', output_file: `/private/tmp/claude-501/fixture/tasks/${task.task_id}.output`, summary: 'Classified 14 dirs' });
+        this.emit(this.result('success'));
+        continue;
+      }
       // A tool call streamed the way the real CLI streams it: the block opens
       // with an empty input, and the full input only arrives with the
       // assistant message that closes it.
