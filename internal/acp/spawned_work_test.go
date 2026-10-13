@@ -1493,3 +1493,38 @@ func TestClaudeSubagentTypeMakesAnAgentWithoutAToolCandidate(t *testing.T) {
 		t.Fatalf("native subagent item = %#v", items)
 	}
 }
+
+// The exact lifecycle the real Claude Code CLI emitted (2026-10-13, through the
+// fixed host) for a background Agent-tool subagent. It must become one agent
+// item with its description, its output file, and a settled status.
+func TestRealClaudeBackgroundAgentLifecycleBecomesAgentWork(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(Options{
+		StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour,
+		SpawnedWorkPIDProbe: func([]string) (map[string][]int, bool) { return nil, false },
+	})
+	output := filepath.Join(os.TempDir(), "claude-501", "-private-tmp-wk-ui-agent-probe", "d60ceb2a-4fd6-4241-80c8-530dd979cc6d", "tasks", "aa48cfacd7844d6ac.output")
+	for _, event := range []map[string]any{
+		{"type": "started", "taskId": "aa48cfacd7844d6ac", "toolCallId": "toolu_01FXcAcK9iaurFSYtBfr6BaY", "description": "List current directory files", "subagentType": "Explore", "taskType": "local_agent"},
+		{"type": "progress", "taskId": "aa48cfacd7844d6ac", "toolCallId": "toolu_01FXcAcK9iaurFSYtBfr6BaY", "description": "Running List files and directories in the working directory", "subagentType": "Explore", "lastToolName": "Bash"},
+	} {
+		observeRawSpawnLifecycleFixture(t, manager, "tab-real-agent", "chat-real-agent", "session-real-agent", "claude", event)
+	}
+	running := manager.ListSpawnedWork("tab-real-agent", "chat-real-agent")
+	if len(running) != 1 || running[0].Kind != "agent" || running[0].Status != "running" || running[0].LastToolName != "Bash" {
+		t.Fatalf("running agent item = %#v", running)
+	}
+	for _, event := range []map[string]any{
+		{"type": "updated", "taskId": "aa48cfacd7844d6ac", "patch": map[string]any{"status": "completed"}},
+		{"type": "notification", "taskId": "aa48cfacd7844d6ac", "toolCallId": "toolu_01FXcAcK9iaurFSYtBfr6BaY", "status": "completed", "outputFile": output, "summary": "a.txt\nb.txt"},
+	} {
+		observeRawSpawnLifecycleFixture(t, manager, "tab-real-agent", "chat-real-agent", "session-real-agent", "claude", event)
+	}
+	settled := manager.ListSpawnedWork("tab-real-agent", "chat-real-agent")
+	if len(settled) != 1 || settled[0].Status != "exited" || settled[0].Label != "List current directory files" {
+		t.Fatalf("settled agent item = %#v", settled)
+	}
+	if settled[0].TaskID != "aa48cfacd7844d6ac" || settled[0].ToolCallID != "toolu_01FXcAcK9iaurFSYtBfr6BaY" {
+		t.Fatalf("agent identity lost: %#v", settled[0])
+	}
+}

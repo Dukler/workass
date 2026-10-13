@@ -608,9 +608,15 @@ func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerI
 		return
 	}
 	toolCallID := strings.TrimSpace(task.ToolCallID)
+	// A progress event's description is the step running now ("Running List
+	// files…"), not the task's title; the title stays what it was started as.
+	description := task.Description
+	if event.Kind == "progress" {
+		description = ""
+	}
 	m.spawnedWorkMu.Lock()
 	candidate := m.candidateForTaskLocked(sessionID, toolCallID, tabID, chatID, providerID)
-	rec, changed := m.upsertSpawnedWorkLocked(candidate, taskID, task.Description, task.TaskType, task.SubagentType, task.OutputFile)
+	rec, changed := m.upsertSpawnedWorkLocked(candidate, taskID, description, task.TaskType, task.SubagentType, task.OutputFile)
 	if rec != nil {
 		rec.LastLevelSeen = now
 		if model := compactText(redactSensitiveText(task.ModelLabel), 160); model != "" && model != rec.Item.ModelLabel {
