@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Navegador flotante (picture-in-picture) — v1</title>
+<style>
+:root{
+  --bg:#0f0e0d; --side:#141312; --panel:#1b1a18; --field:#1d1c1a; --ink:#f2efe9; --ink2:#cfcbc4; --muted:#9c978f; --faint:#8a857d; --dim:#6f6a63;
+  --acc:#4fa583; --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:#0a0908}
+body{color:var(--ink);font:14px/1.6 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+svg{display:block}
+.ic{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.sec{padding:24px 22px 30px;border-bottom:1px solid rgba(255,255,255,.05)}
+.dirhead{font-size:15px;font-weight:600;margin:0 0 2px}
+.note{color:var(--muted);font-size:12.5px;margin:0 0 14px;max-width:900px}
+/* app frame */
+.app{position:relative;height:520px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--bg);display:grid;grid-template-columns:200px 1fr}
+.side{background:var(--side);border-right:1px solid var(--line);padding:46px 12px 12px}
+.srow{height:30px;border-radius:7px;margin:0 0 4px;background:rgba(255,255,255,.03)}
+.srow.on{background:rgba(255,255,255,.08)}
+.main{position:relative;display:flex;flex-direction:column;min-width:0}
+.tbar{height:40px;display:flex;align-items:center;gap:9px;padding:0 16px;font-size:13px;font-weight:600;color:var(--ink)}
+.tbar .sp{flex:1}
+.tico{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;color:var(--muted)}
+.tico.on{background:rgba(255,255,255,.07);color:var(--ink)}
+.doc{flex:1;padding:14px 46px 0;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end}
+.doc p{margin:0 0 10px;font-size:13.5px;line-height:1.62;max-width:620px}
+.ubub{align-self:flex-end;background:#262523;border:1px solid var(--line);border-radius:14px;padding:7px 12px;font-size:13px;margin:0 0 12px}
+.working{height:32px;display:flex;align-items:center;gap:9px;padding:0 46px;color:var(--ink2);font-size:13.5px}
+.orbit{position:relative;width:13px;height:13px}
+.orbit::before{content:"";position:absolute;inset:0;border-radius:50%;border:1.5px solid rgba(79,165,131,.28)}
+.orbit::after{content:"";position:absolute;width:4px;height:4px;border-radius:50%;background:var(--acc);top:-1px;left:4.5px;transform-origin:2px 7.5px;animation:orb 1s linear infinite}
+@keyframes orb{to{transform:rotate(360deg)}}
+.meta{color:var(--faint);font-size:12.5px}
+.now{display:inline-flex;align-items:center;gap:7px;color:var(--faint);font:12px var(--mono)}
+.comp{margin:10px 24px 14px;border:1px solid var(--line2);border-radius:14px;background:var(--field);height:44px;display:flex;align-items:center;padding:0 14px;color:var(--dim);font-size:13px}
+/* fake web page shown in the browser */
+.page{position:absolute;inset:0;background:#f7f6f3;color:#1d1c1a;font-size:11px;overflow:hidden}
+.page .nav{height:30px;background:#fff;border-bottom:1px solid #e7e4de;display:flex;align-items:center;gap:10px;padding:0 12px;font-weight:600}
+.page .nav i{width:10px;height:10px;border-radius:3px;background:#4fa583;display:inline-block}
+.page .hero{margin:14px 12px 10px;height:58px;border-radius:8px;background:linear-gradient(135deg,#dfe9e4,#f1ede6);display:flex;align-items:center;padding:0 12px;font-size:14px;font-weight:600}
+.page .cards{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0 12px}
+.page .card{height:52px;border-radius:7px;background:#fff;border:1px solid #e7e4de}
+/* floating player */
+.pip{position:absolute;right:22px;bottom:104px;width:300px;border-radius:12px;box-shadow:0 18px 40px rgba(0,0,0,.45),0 0 0 1px var(--line2);overflow:hidden;background:var(--panel)}
+.pip .view{position:relative;height:188px}
+.pip .resize{position:absolute;left:-1px;top:-1px;width:14px;height:14px;cursor:nwse-resize}
+.strip{height:30px;display:flex;align-items:center;gap:6px;padding:0 6px 0 10px;font-size:12px;color:var(--ink2);cursor:grab;border-bottom:1px solid var(--line)}
+.strip .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:11.5px var(--mono);color:var(--muted)}
+.btn{width:24px;height:24px;border-radius:6px;display:grid;place-items:center;color:var(--muted)}
+.btn:hover,.btn.hl{background:rgba(255,255,255,.08);color:var(--ink)}
+/* option B: pill outside the page */
+.pipB{position:absolute;right:18px;bottom:104px;width:270px}
+.pipB .frame{border-radius:12px;overflow:hidden;box-shadow:0 18px 40px rgba(0,0,0,.45),0 0 0 1px var(--line2)}
+.pipB .frame .view{position:relative;height:170px}
+.pill{position:absolute;right:0;top:-36px;height:30px;display:flex;align-items:center;gap:2px;padding:3px;border-radius:9px;background:rgba(29,28,26,.92);border:1px solid var(--line2);box-shadow:0 8px 20px rgba(0,0,0,.35)}
+.pill .grip{width:22px;height:24px;display:grid;place-items:center;color:var(--dim);cursor:grab}
+.cap{color:#6b665f;font:11px var(--mono);letter-spacing:.05em;text-transform:uppercase;margin:0 0 7px}
+.pair{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px}
+.pair>div{min-width:0}
+/* option C: desktop */
+.desk{position:relative;height:520px;border-radius:12px;overflow:hidden;background:linear-gradient(160deg,#2b3a4a,#1b2430 60%,#151a22);border:1px solid var(--line)}
+.otherapp{position:absolute;left:30px;top:30px;right:180px;bottom:40px;border-radius:10px;background:#1e1e1e;box-shadow:0 12px 30px rgba(0,0,0,.4);overflow:hidden}
+.otherapp .bar{height:28px;background:#2a2a2a;display:flex;align-items:center;gap:6px;padding:0 10px}
+.dot{width:10px;height:10px;border-radius:50%}
+.code{padding:14px;font:12px var(--mono);color:#9cdcfe;line-height:1.8}
+.code span{color:#ce9178}
+.ospip{position:absolute;right:24px;bottom:28px;width:300px;border-radius:10px;overflow:hidden;box-shadow:0 18px 40px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.12);background:var(--panel)}
+.ospip .bar{height:28px;display:flex;align-items:center;gap:6px;padding:0 6px 0 10px;background:#232220;color:var(--muted);font:11.5px var(--mono)}
+.ospip .bar .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ospip .view{position:relative;height:190px}
+.badge{display:inline-flex;align-items:center;gap:5px;font:10.5px var(--mono);color:var(--acc)}
+/* entry point */
+.pane{position:absolute;top:0;right:0;bottom:0;width:360px;border-left:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column}
+.brbar{height:40px;display:flex;align-items:center;gap:4px;padding:0 6px;border-bottom:1px solid var(--line)}
+.url{flex:1;min-width:0;height:26px;border-radius:7px;background:var(--field);border:1px solid var(--line);display:flex;align-items:center;padding:0 9px;font:11.5px var(--mono);color:var(--muted)}
+.pane .view{position:relative;flex:1}
+.callout{position:absolute;top:44px;right:42px;background:#2b2a27;border:1px solid var(--line2);border-radius:7px;padding:4px 8px;font-size:11.5px;color:var(--ink);white-space:nowrap}
+.callout::after{content:"";position:absolute;top:-5px;right:12px;width:8px;height:8px;background:#2b2a27;border-left:1px solid var(--line2);border-top:1px solid var(--line2);transform:rotate(45deg)}
+body.one .sec{display:none}
+body.one .sec.show{display:block}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute"><defs>
+  <symbol id="pip" viewBox="0 0 16 16"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><rect x="8" y="8.2" width="4.6" height="3.4" rx=".8" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="dock" viewBox="0 0 16 16"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M10 2.8v10.4"/></symbol>
+  <symbol id="close" viewBox="0 0 16 16"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></symbol>
+  <symbol id="back" viewBox="0 0 16 16"><path d="M9.8 3.8L5.6 8l4.2 4.2"/></symbol>
+  <symbol id="fwd" viewBox="0 0 16 16"><path d="M6.2 3.8L10.4 8l-4.2 4.2"/></symbol>
+  <symbol id="grip" viewBox="0 0 16 16"><circle cx="6" cy="4.5" r=".9" fill="currentColor"/><circle cx="10" cy="4.5" r=".9" fill="currentColor"/><circle cx="6" cy="8" r=".9" fill="currentColor"/><circle cx="10" cy="8" r=".9" fill="currentColor"/><circle cx="6" cy="11.5" r=".9" fill="currentColor"/><circle cx="10" cy="11.5" r=".9" fill="currentColor"/></symbol>
+  <symbol id="out" viewBox="0 0 16 16"><path d="M9 2.8h4.2V7M13.2 2.8L7.6 8.4"/><path d="M11.5 9.6v2.6a1 1 0 01-1 1H3.8a1 1 0 01-1-1V5.5a1 1 0 011-1h2.6"/></symbol>
+  <symbol id="term" viewBox="0 0 16 16"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M4.6 6.4l2.2 1.9-2.2 1.9M8.6 10.6h3"/></symbol>
+  <symbol id="globe" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6"/><path d="M2.4 8h11.2M8 2.4c1.8 2 1.8 9.2 0 11.2M8 2.4c-1.8 2-1.8 9.2 0 11.2"/></symbol>
+  <symbol id="rail" viewBox="0 0 16 16"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M10.4 2.8v10.4"/></symbol>
+</defs></svg>
+
+<template id="page"><div class="page"><div class="nav"><i></i>Fiumba Review<span style="margin-left:auto;font-weight:400;color:#8a857d">localhost:5173</span></div><div class="hero">Frame 3812 · Silver vs Gold</div><div class="cards"><div class="card"></div><div class="card"></div><div class="card"></div><div class="card"></div></div></div></template>
+<template id="chat"><div class="tbar">Revisar etiquetas silver<span class="sp"></span><span class="tico"><svg class="ic"><use href="#globe"/></svg></span><span class="tico"><svg class="ic"><use href="#rail"/></svg></span></div>
+<div class="doc"><div class="ubub">abrí la app y mostrame el frame 3812</div><p>I started the review app on localhost:5173 and opened frame 3812. The Silver mask clears the seam between the legs; Gold still fills it. I'm checking the other frames from the same batch now.</p></div>
+<div class="working"><span class="orbit"></span>Working...<span class="meta">48s · 3 tools ›</span><span class="now"><svg class="ic" style="width:13px;height:13px"><use href="#term"/></svg>npm run dev</span></div>
+<div class="comp">Contale a tu agente qué sigue…</div></template>
+
+<section class="sec" id="entry">
+  <div class="dirhead">Cómo se entra</div>
+  <div class="note">The browser pane gets one more button, "Flotante", next to its close button. It pops the page out of the pane into a small floating player over the chat, and the pane closes. It also opens by itself when the agent opens a page while no pane is showing it (t3code does the same). The page keeps loading and running the whole time; it is the same browser, only smaller.</div>
+  <div class="app"><div class="side"><div class="srow"></div><div class="srow on"></div><div class="srow"></div></div>
+    <div class="main" style="padding-right:360px" data-chat></div>
+    <div class="pane"><div class="brbar"><span class="btn"><svg class="ic"><use href="#back"/></svg></span><span class="btn"><svg class="ic"><use href="#fwd"/></svg></span><span class="url">localhost:5173/frames/3812</span><span class="btn hl"><svg class="ic"><use href="#pip"/></svg></span><span class="btn"><svg class="ic"><use href="#close"/></svg></span></div><div class="view" data-page></div></div>
+    <div class="callout">Flotante</div>
+  </div>
+</section>
+
+<section class="sec" id="a">
+  <div class="dirhead">A · Con una barrita arriba</div>
+  <div class="note">A slim strip above the page holds the address, "Volver al panel" and close; drag the strip to move it, drag the top-left corner to resize. It snaps to the nearest corner when you let go and never covers the composer. Simple and always visible, at the cost of 30px.</div>
+  <div class="app"><div class="side"><div class="srow"></div><div class="srow on"></div><div class="srow"></div></div>
+    <div class="main" data-chat></div>
+    <div class="pip"><div class="strip"><span class="t">localhost:5173/frames/3812</span><span class="btn"><svg class="ic"><use href="#dock"/></svg></span><span class="btn"><svg class="ic"><use href="#close"/></svg></span></div><div class="view" data-page></div><span class="resize"></span></div>
+  </div>
+</section>
+
+<section class="sec" id="b">
+  <div class="dirhead">B · Como t3code: solo la página, controles al pasar el mouse</div>
+  <div class="note">Only the page, with rounded corners. Hovering it shows a small pill just above its top-right corner: a grip to move it, "Volver al panel", "Ventana aparte" (option C) and close. The pill has to sit outside the page, not over it like in t3code, because Workass's browser is a native view that nothing can be drawn on top of.</div>
+  <div class="pair">
+    <div><div class="cap">en reposo</div><div class="app" style="grid-template-columns:120px 1fr"><div class="side"><div class="srow on"></div></div><div class="main" data-chat></div>
+      <div class="pipB"><div class="frame"><div class="view" data-page></div></div></div></div></div>
+    <div><div class="cap">con el mouse encima</div><div class="app" style="grid-template-columns:120px 1fr"><div class="side"><div class="srow on"></div></div><div class="main" data-chat></div>
+      <div class="pipB"><div class="pill"><span class="grip"><svg class="ic"><use href="#grip"/></svg></span><span class="btn"><svg class="ic"><use href="#dock"/></svg></span><span class="btn"><svg class="ic"><use href="#out"/></svg></span><span class="btn"><svg class="ic"><use href="#close"/></svg></span></div><div class="frame"><div class="view" data-page></div></div></div></div></div>
+  </div>
+</section>
+
+<section class="sec" id="c">
+  <div class="dirhead">C · Ventana aparte, siempre encima</div>
+  <div class="note">From A or B, "Ventana aparte" moves the page into its own small window that stays on top of every app, like a video's picture-in-picture. You can keep watching the page while you work in your editor; closing it puts the page back in Workass. This is t3code's desktop pop-out.</div>
+  <div class="desk">
+    <div class="otherapp"><div class="bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span></div>
+      <div class="code">const <span>frame</span> = loadFrame(3812)<br/>const <span>mask</span> = silver.mask(frame)<br/>render(<span>mask</span>, { seam: <span>'open'</span> })</div></div>
+    <div class="ospip"><div class="bar"><span class="t">Workass · localhost:5173/frames/3812</span><span class="btn"><svg class="ic"><use href="#dock"/></svg></span><span class="btn"><svg class="ic"><use href="#close"/></svg></span></div><div class="view" data-page></div></div>
+  </div>
+</section>
+
+<script>
+for (const el of document.querySelectorAll('[data-chat]')) el.append(document.getElementById('chat').content.cloneNode(true));
+for (const el of document.querySelectorAll('[data-page]')) el.append(document.getElementById('page').content.cloneNode(true));
+const s = new URLSearchParams(location.search).get('s');
+if (s) { document.body.classList.add('one'); document.getElementById(s)?.classList.add('show'); }
+</script>
+</body>
+</html>
