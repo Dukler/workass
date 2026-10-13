@@ -139,14 +139,18 @@ type Manager struct {
 	// task_notification) updates that item instead of minting a blank one.
 	spawnedWorkSettled      map[string]SpawnedWorkItem
 	spawnedWorkSettledOrder []string
-	spawnedWorkObserverMu   sync.RWMutex
-	spawnedWorkObserver     func(string, string, []SpawnedWorkItem) (SpawnedWorkActorProjection, error)
-	resetMu                 sync.Mutex
-	jobWG                   sync.WaitGroup
-	resetting               bool
-	loopStop                chan struct{}
-	loopStopOnce            sync.Once
-	loopWG                  sync.WaitGroup
+	// spawnedBackgroundCalls remembers tool calls that launched background
+	// work, so the call ending never settles the work it launched.
+	spawnedBackgroundCalls     map[string]struct{}
+	spawnedBackgroundCallOrder []string
+	spawnedWorkObserverMu      sync.RWMutex
+	spawnedWorkObserver        func(string, string, []SpawnedWorkItem) (SpawnedWorkActorProjection, error)
+	resetMu                    sync.Mutex
+	jobWG                      sync.WaitGroup
+	resetting                  bool
+	loopStop                   chan struct{}
+	loopStopOnce               sync.Once
+	loopWG                     sync.WaitGroup
 	// updateGateMu is the admission barrier for an app-owned release handoff.
 	// An explicitly authorized release snapshots active work and closes new admission; it
 	// never waits for foreground or asynchronous work to become terminal. Once

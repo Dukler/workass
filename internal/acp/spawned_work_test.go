@@ -1585,3 +1585,67 @@ func TestClaudeMonitorKindAndAgentModelFromToolInput(t *testing.T) {
 		t.Fatalf("the Agent call's model was lost: %#v", agent)
 	}
 }
+
+// Claude Code reports every Bash command as a task. One the user interrupts
+// never gets its task-ended event, and with no PID or output file nothing else
+// could see it end: its row read "running" for as long as the session lived
+// (observed 2026-10-13, "Find how Claude Code presents ultracode"). The tool
+// call ending ends it. A background shell's call ending does not.
+func TestForegroundClaudeBashTaskEndsWithItsToolCall(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(Options{
+		StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour,
+		SpawnedWorkPIDProbe: func([]string) (map[string][]int, bool) { return nil, false },
+	})
+	t.Cleanup(func() { manager.Reset() })
+	b := &Bridge{providerID: "claude", manager: manager}
+	job := &Job{ID: "job-fg", TabID: "tab-fg", ChatID: "chat-fg", SessionID: "session-fg"}
+	observe := func(event map[string]any) {
+		observeRawSpawnLifecycleFixture(t, manager, "tab-fg", "chat-fg", "session-fg", "claude", event)
+	}
+	status := func(taskID string) (string, int) {
+		found, count := "absent", 0
+		for _, item := range manager.ListSpawnedWork("tab-fg", "chat-fg") {
+			if item.TaskID == taskID {
+				found, count = item.Status, count+1
+			}
+		}
+		return found, count
+	}
+	observe(map[string]any{"type": "started", "taskId": "bhboz80wh", "toolCallId": "toolu_fg", "description": "Find how Claude Code presents ultracode", "taskType": "local_bash"})
+	observe(map[string]any{"type": "started", "taskId": "bbgshell1", "toolCallId": "toolu_bg", "description": "Run the gate", "taskType": "local_bash", "outputFile": spawnedWorkTestOutput(t, "bbgshell1")})
+	if got, _ := status("bhboz80wh"); got != "running" {
+		t.Fatalf("foreground task before its call ended = %q", got)
+	}
+
+	interrupted := []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "The user doesn't want to proceed with this tool use."}}}
+	b.emitToolEvent(job, "tool_call_update", map[string]any{"toolCallId": "toolu_fg", "title": "Find how Claude Code presents ultracode", "status": "failed", "content": interrupted}, "")
+	b.emitToolEvent(job, "tool_call_update", map[string]any{"toolCallId": "toolu_bg", "title": "Run the gate", "status": "completed"}, "")
+
+	if got, _ := status("bhboz80wh"); got != "failed" {
+		t.Fatalf("an interrupted foreground task stayed %q after its call ended", got)
+	}
+	if got, _ := status("bbgshell1"); got != "running" {
+		t.Fatalf("a background shell was settled by its launching call returning: %q", got)
+	}
+
+	// Background shells with no output file yet: one the provider flags as
+	// backgrounded, one whose launch said run_in_background while its last
+	// update carries no input at all.
+	observe(map[string]any{"type": "started", "taskId": "bflagged1", "toolCallId": "toolu_flag", "description": "Flagged", "taskType": "local_bash", "backgrounded": true})
+	b.emitToolEvent(job, "tool_call", map[string]any{"toolCallId": "toolu_launch", "title": "Bash", "status": "in_progress", "rawInput": map[string]any{"command": "sleep 40", "run_in_background": true}}, "")
+	observe(map[string]any{"type": "started", "taskId": "blaunch1", "toolCallId": "toolu_launch", "description": "Sleep 40 seconds", "taskType": "local_bash"})
+	b.emitToolEvent(job, "tool_call_update", map[string]any{"toolCallId": "toolu_flag", "title": "Flagged", "status": "completed"}, "")
+	b.emitToolEvent(job, "tool_call_update", map[string]any{"toolCallId": "toolu_launch", "title": "Bash", "status": "completed"}, "")
+	for _, id := range []string{"bflagged1", "blaunch1"} {
+		if got, _ := status(id); got != "running" {
+			t.Fatalf("background shell %s was settled by its call ending: %q", id, got)
+		}
+	}
+
+	// The provider's own late ending must not revive or duplicate the row.
+	observe(map[string]any{"type": "notification", "taskId": "bhboz80wh", "toolCallId": "toolu_fg", "status": "killed"})
+	if got, count := status("bhboz80wh"); got == "running" || count != 1 {
+		t.Fatalf("late provider ending revived the foreground task: %q ×%d", got, count)
+	}
+}

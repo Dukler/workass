@@ -42,6 +42,9 @@ type providerSpawnedWorkTask struct {
 	LastToolName string
 	ModelLabel   string
 	Status       string
+	// Backgrounded is the provider saying this task runs past its tool call
+	// (Claude Code's is_backgrounded).
+	Backgrounded bool
 }
 
 type providerSpawnedWorkUpdate struct {
