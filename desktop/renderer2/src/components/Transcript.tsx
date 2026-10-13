@@ -1,3 +1,4 @@
+import { FloatingBrowser } from './FloatingBrowser';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent, type RefObject, type WheelEvent } from 'react';
 import type { Chat } from '../store/types';
 import { store, useApp, useProc } from '../store/store';
@@ -702,6 +703,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
             <span className="arr">↓</span>{newCount} {newCount === 1 ? 'mensaje nuevo' : 'mensajes nuevos'}
           </button>
         )}
+        {chat && <FloatingBrowser chat={chat} />}
       </div>
     </>
   );

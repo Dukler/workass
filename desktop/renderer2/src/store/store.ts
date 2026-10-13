@@ -7,7 +7,7 @@ import { loadComposerDraft, saveComposerDraft } from '../composer-drafts';
 // (message list, running state, tabs, catalog) bump `app`.
 
 import { useSyncExternalStore } from 'react';
-import type { AppState, Chat, Msg, ThinkingEvent, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
+import type { AppState, BrowserPresentation, Chat, Msg, ThinkingEvent, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
 import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ChatGoalEvent, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, AgentRouteRequest, AgentRouteResponse, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
 import { call, callThrow, has, on, bridgeReady } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
@@ -2506,6 +2506,7 @@ export class Store {
     void browserApi()?.command(chatId, 'navigate', url).catch((error: unknown) => {
       this.addToast('No se pudo abrir el artefacto', error instanceof Error ? error.message : 'El navegador no pudo navegar.');
     });
+    if (this.browserPresentationFor(chat.id)) this.clearBrowserPresentation(chat.id);
     chat.pane = 'browser';
     this.bumpChat(chat);
     return true;
@@ -3281,18 +3282,8 @@ export class Store {
     applyTheme(this.state.theme);
     applyDensity(this.state.density);
     this.installSystemThemeListener();
-    browserApi()?.onOpenRequest((chatId?: string) => {
-      // Opt-in + per-chat (user law 2026-07-12): an agent's explicit browser.open
-      // marks the OWNING chat's pane and nothing else. Never switch the active
-      // tab or mode, and never touch any other chat — you see the browser only
-      // when you open that chat yourself. A request with no chat context is a
-      // no-op (it must never hijack whatever chat you happen to be viewing).
-      if (!chatId) return;
-      const target = this.state.chats.find((chat) => chat.chatId === chatId || chat.id === chatId);
-      if (!target) return;
-      target.pane = 'browser';
-      this.bumpChat(target);
-    });
+    browserApi()?.onOpenRequest((chatId?: string) => this.onBrowserOpenRequest(chatId));
+    browserApi()?.onState((state) => this.onBrowserState(state));
     // Mount the machine book before hydration, so a remote machine's chats
     // arrive in the same list rather than appearing a beat later (E3).
     void this.mountMachines();
@@ -3645,7 +3636,83 @@ export class Store {
   toggleRail() { this.setActivePane('rail'); }
   closeRail() { const chat = this.active(); if (!chat) return; chat.pane = null; this.bumpChat(chat); }
   toggleRailWide() { this.state.panes.railWide = !this.state.panes.railWide; this.bumpApp(); }
-  toggleBrowser() { this.setActivePane('browser'); }
+  // An agent's explicit browser.open (opt-in + per-chat, user law 2026-07-12)
+  // marks the OWNING chat and nothing else: never the active tab, never another
+  // chat, and a request without a chat is a no-op. Unless that chat's pane
+  // already shows the browser, the page floats over it instead of taking the
+  // right column (approved mock browser-pip-v1, as t3code does).
+  onBrowserOpenRequest(chatId?: string) {
+    if (!chatId) return;
+    const target = this.state.chats.find((chat) => chat.chatId === chatId || chat.id === chatId);
+    if (!target) return;
+    if (chatPane(target) === 'browser' || this.browserPresentationFor(target.id)) return;
+    this.setBrowserPresentation(target.id, 'float');
+    this.bumpChat(target);
+  }
+  // Closing the separate window brings the page back, floating.
+  onBrowserState(state: { chatId: string; poppedOut?: boolean }) {
+    const chat = this.state.chats.find((candidate) => candidate.id === state.chatId);
+    if (!chat || state.poppedOut !== false || this.browserPresentationFor(chat.id) !== 'window') return;
+    this.setBrowserPresentation(chat.id, 'float');
+    this.bumpApp(false);
+  }
+  toggleBrowser() {
+    // The pane and the floating player never show the same page at once.
+    const chat = this.active();
+    if (chat && this.browserPresentationFor(chat.id)) this.clearBrowserPresentation(chat.id);
+    this.setActivePane('browser');
+  }
+  browserPresentationFor(tabId: string): BrowserPresentation | null {
+    return this.state.browserPresentation?.[tabId] ?? null;
+  }
+  private setBrowserPresentation(tabId: string, mode: BrowserPresentation) {
+    this.state.browserPresentation = { ...(this.state.browserPresentation ?? {}), [tabId]: mode };
+  }
+  private clearBrowserPresentation(tabId: string) {
+    const next = { ...(this.state.browserPresentation ?? {}) };
+    if (next[tabId] === 'window') void browserApi()?.popIn?.(tabId);
+    delete next[tabId];
+    this.state.browserPresentation = next;
+  }
+  // The pane's "Flotante": the page leaves the right column and floats.
+  floatBrowser() {
+    const chat = this.active(); if (!chat) return;
+    if (chatPane(chat) === 'browser') chat.pane = null;
+    this.setBrowserPresentation(chat.id, 'float');
+    this.bumpChat(chat);
+  }
+  // Full screen and back, from the floating player.
+  toggleBrowserFullscreen() {
+    const chat = this.active(); if (!chat) return;
+    this.setBrowserPresentation(chat.id, this.browserPresentationFor(chat.id) === 'full' ? 'float' : 'full');
+    this.bumpApp(false);
+  }
+  // "Volver al panel": the floating page docks into the right column again.
+  dockBrowser() {
+    const chat = this.active(); if (!chat) return;
+    this.clearBrowserPresentation(chat.id);
+    chat.pane = 'browser';
+    this.bumpChat(chat);
+  }
+  // Its own always-on-top window; closing that window floats it again.
+  popOutBrowser() {
+    const chat = this.active(); if (!chat) return;
+    const api = browserApi();
+    if (!api?.popOut) return;
+    this.setBrowserPresentation(chat.id, 'window');
+    this.bumpApp(false);
+    void api.popOut(chat.id).catch((error: unknown) => {
+      this.setBrowserPresentation(chat.id, 'float');
+      this.bumpApp(false);
+      this.addToast('No se pudo abrir la ventana aparte', error instanceof Error ? error.message : 'El navegador no pudo moverse.');
+    });
+  }
+  // Close the floating page; it stays alive like a closed pane does.
+  closeFloatingBrowser() {
+    const chat = this.active(); if (!chat) return;
+    this.clearBrowserPresentation(chat.id);
+    this.bumpApp(false);
+  }
   setMode(mode: 'assist' | 'chats') { this.state.mode = mode; this.bumpApp(); }
   // Custom pane widths (drag handles). Clamped to design bounds; persisted via
   // the mirror. Double-click on a handle resets to the default (288 / 312).

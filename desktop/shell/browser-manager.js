@@ -325,6 +325,7 @@ class BrowserManager {
       visible: entry.visible === true,
       presentationBounds: entry.presentationBounds ? { ...entry.presentationBounds } : null,
       presentationScale: entry.presentationScale,
+      poppedOut: !!(entry.pipWindow && !entry.pipWindow.isDestroyed()),
     };
   }
 
@@ -1424,6 +1425,8 @@ class BrowserManager {
     // ONE view, never a duplicate.
     if (conversationId) this.adoptBackground(id, String(conversationId));
     const entry = this.get(id);
+    // Showing the page in the app takes it back from its separate window.
+    this.releasePipWindow(entry);
     if (conversationId) entry.conversationId = String(conversationId);
     this.activeId = entry.chatId;
     entry.presentationBounds = safeBounds(bounds, this.win.getContentSize());
@@ -1465,6 +1468,98 @@ class BrowserManager {
     if (viewport) await this.setViewportSerialized(entry, viewport, false);
     if (this.attachedView === entry.view) await this.attach(entry);
     return true;
+  }
+
+  // The page in its own small window that stays above every app (approved
+  // mock browser-pip-v1 · C, 2026-10-13, after t3code's desktop pop-out). The
+  // same view moves, so the agent keeps driving the same page; it keeps its
+  // logical viewport and is fitted into the window. Closing the window brings
+  // the page back to Workass (the renderer floats it again).
+  popOut(chatId) {
+    return this.serializePresentation(() => this.popOutSerialized(chatId));
+  }
+
+  async popOutSerialized(chatId) {
+    const id = safeChatId(chatId);
+    const entry = this.entries.get(id);
+    if (!entry) throw new Error('this chat has no browser to pop out');
+    this.assertCurrentEntry(entry);
+    if (entry.pipWindow && !entry.pipWindow.isDestroyed()) {
+      try { entry.pipWindow.focus(); } catch { /* window is closing */ }
+      return this.publish(entry);
+    }
+    if (!this.BrowserWindow) throw new Error('a separate browser window is unavailable in this shell');
+    if (this.attachedView === entry.view) {
+      try { this.win.contentView.removeChildView(entry.view); } catch { /* window is already closing */ }
+      this.attachedView = null;
+      if (this.activeId === entry.chatId) this.activeId = null;
+    }
+    if (entry.captureHostAttached && entry.captureHost && !entry.captureHost.isDestroyed()) {
+      entry.captureHost.contentView.removeChildView(entry.view);
+      entry.captureHostAttached = false;
+    }
+    const aspect = entry.viewport.height / Math.max(1, entry.viewport.width);
+    const width = 420;
+    const height = Math.max(200, Math.min(640, Math.round(width * aspect)));
+    let host = 'Workass';
+    try { host = `Workass · ${new URL(entry.url || DEFAULT_URL).host || 'navegador'}`; } catch { /* about:blank */ }
+    const win = new this.BrowserWindow({
+      width, height, minWidth: 240, minHeight: 160, show: false, title: host,
+      alwaysOnTop: true, fullscreenable: true, backgroundColor: '#1b1a18',
+      webPreferences: { partition: this.partition, nodeIntegration: false, contextIsolation: true, sandbox: true },
+    });
+    try { win.setAlwaysOnTop(true, 'floating'); } catch { /* platform without levels */ }
+    entry.pipWindow = win;
+    const fit = async () => {
+      if (entry.pipWindow !== win || win.isDestroyed() || !this.isCurrentEntry(entry)) return;
+      const [contentWidth, contentHeight] = win.getContentSize();
+      const fitted = presentationFor(entry.viewport, { x: 0, y: 0, width: contentWidth, height: contentHeight });
+      entry.view.setBounds(fitted.bounds);
+      entry.presentationScale = fitted.scale || 1;
+      try {
+        entry.effectiveViewport = await this.applyAndReadDeviceEmulation(entry, entry.viewport, entry.presentationScale);
+      } catch {
+        this.deferViewport(entry);
+      }
+    };
+    win.on('resize', () => { void this.serializePresentation(fit); });
+    // The view outlives this window: detach it before the window goes, then
+    // hand it back to its hidden host so the page keeps running.
+    win.on('close', () => {
+      try { win.contentView.removeChildView(entry.view); } catch { /* already detached */ }
+    });
+    win.on('closed', () => {
+      if (entry.pipWindow !== win) return;
+      entry.pipWindow = null;
+      entry.visible = false;
+      void this.serializePresentation(async () => {
+        if (this.isCurrentEntry(entry) && entry.captureHost && !entry.captureHost.isDestroyed()) {
+          await this.attachToCaptureHost(entry, false);
+        }
+      }).finally(() => { if (this.isCurrentEntry(entry)) this.publish(entry); });
+    });
+    win.contentView.addChildView(entry.view);
+    await fit();
+    try { win.show(); } catch { /* headless fake */ }
+    entry.visible = true;
+    return this.publish(entry);
+  }
+
+  popIn(chatId) {
+    const entry = this.entries.get(safeChatId(chatId));
+    if (!entry || !entry.pipWindow || entry.pipWindow.isDestroyed()) return false;
+    try { entry.pipWindow.close(); } catch { /* already closing */ }
+    return true;
+  }
+
+  // Taking the page back for the app: forget the separate window first, so its
+  // closing never re-homes the view the app is about to show.
+  releasePipWindow(entry) {
+    const win = entry.pipWindow;
+    if (!win) return;
+    entry.pipWindow = null;
+    try { win.contentView.removeChildView(entry.view); } catch { /* already detached */ }
+    try { if (!win.isDestroyed()) win.destroy(); } catch { /* already gone */ }
   }
 
   hide(chatId) {
@@ -3854,6 +3949,7 @@ class BrowserManager {
     }
     entry.executionContexts.clear();
     entry.frames.clear();
+    this.releasePipWindow(entry);
     try { entry.view.webContents.close(); } catch { /* already gone */ }
     try { if (entry.captureHost && !entry.captureHost.isDestroyed()) entry.captureHost.destroy(); } catch { /* host teardown is idempotent */ }
     entry.captureHost = null;

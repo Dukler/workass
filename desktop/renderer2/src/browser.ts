@@ -49,6 +49,8 @@ export interface WorkassBrowserState {
   viewportGeneration?: number;
   documentGeneration?: number;
   visible?: boolean;
+  // The page sits in its own always-on-top window (popOut).
+  poppedOut?: boolean;
 }
 
 export interface WorkassBrowserApi {
@@ -56,6 +58,9 @@ export interface WorkassBrowserApi {
   activate(payload: { chatId: string; conversationId?: string; bounds: WorkassBrowserBounds; viewport?: { width: number; height: number }; url?: string }): Promise<WorkassBrowserState>;
   resize(payload: { chatId: string; bounds: WorkassBrowserBounds; viewport?: { width: number; height: number } }): Promise<boolean>;
   hide(chatId: string): Promise<boolean>;
+  // Optional: an older shell has no separate window.
+  popOut?(chatId: string): Promise<WorkassBrowserState>;
+  popIn?(chatId: string): Promise<boolean>;
   close(chatId: string): Promise<boolean>;
   command(chatId: string, command: 'navigate' | 'back' | 'forward' | 'reload' | 'stop', value?: string): Promise<WorkassBrowserState>;
   setViewport(chatId: string, width: number, height: number): Promise<WorkassBrowserState>;

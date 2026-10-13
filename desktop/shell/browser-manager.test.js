@@ -1503,3 +1503,44 @@ test('a page that refuses its viewport mid-load still enters the visible pane', 
   assert.deepEqual({ width: entry.viewport.width, height: entry.viewport.height }, { width: 320, height: 786 });
   assert.ok(win.contentView.children.includes(entry.view));
 });
+
+// The separate always-on-top window (mock browser-pip-v1 · C): the SAME page
+// moves into it, so the agent keeps driving it, and closing it puts the page
+// back alive in its hidden host. Showing the page in the app takes it back.
+class FakePipWindow extends FakeBrowserWindow {
+  setAlwaysOnTop(flag, level) { this.alwaysOnTop = { flag, level }; }
+  show() { this.shown = true; }
+  focus() { this.focused = true; }
+  close() { this.emit('close'); this.destroy(); }
+}
+
+test('a page pops out into an always-on-top window and comes back when it closes', async () => {
+  const { manager, win, states } = fixture({ BrowserWindow: FakePipWindow });
+  await manager.activate({ chatId: 'chat-pip', bounds: { x: 900, y: 80, width: 300, height: 400 }, url: 'example.com' });
+  const entry = manager.entries.get('chat-pip');
+  const webContentsId = entry.view.webContents.id;
+
+  const popped = await manager.popOut('chat-pip');
+  const pip = entry.pipWindow;
+  assert.equal(popped.poppedOut, true);
+  assert.deepEqual(pip.alwaysOnTop, { flag: true, level: 'floating' });
+  assert.equal(pip.shown, true);
+  assert.equal(win.contentView.children.includes(entry.view), false, 'the page left the app window');
+  assert.equal(pip.contentView.children[0], entry.view, 'the same page moved into the separate window');
+  assert.equal(entry.view.webContents.id, webContentsId);
+
+  assert.equal(manager.popIn('chat-pip'), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await manager.serializePresentation(async () => {});
+  assert.equal(entry.pipWindow, null);
+  assert.equal(entry.captureHostAttached, true, 'the closed window handed the page back to its hidden host');
+  assert.equal(states.at(-1).poppedOut, false);
+
+  await manager.popOut('chat-pip');
+  const second = entry.pipWindow;
+  await manager.activate({ chatId: 'chat-pip', bounds: { x: 900, y: 80, width: 300, height: 400 } });
+  assert.equal(second.isDestroyed(), true, 'showing the page in the app releases its window');
+  assert.equal(entry.pipWindow, null);
+  assert.equal(win.contentView.children.includes(entry.view), true);
+  assert.equal(manager.close('chat-pip'), true);
+});

@@ -2315,3 +2315,38 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .cmdtitle { font-size: 13.5px; font-weight: 550; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cmddetail { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cmdhint { flex: none; font-size: 11px; font-family: ui-monospace, Menlo, monospace; color: var(--muted); border: 1px solid var(--line2); border-radius: 5px; padding: 1px 5px; }
+
+/* Floating browser (approved mock browser-pip-v1 · B + C, 2026-10-13, after
+   t3code): the page floats over the transcript, clear of the Working line.
+   The native page view covers the frame, so its controls live in a pill just
+   outside it: faint at rest, full on hover (the page itself cannot report a
+   hover). The resize handle sits on the frame's free corner. */
+.fbrw-host { position: absolute; inset: 0; pointer-events: none; z-index: 6; }
+.fbrw { position: absolute; pointer-events: none; }
+.fbrw-frame { position: absolute; inset: 0; border-radius: 12px; background: var(--panel);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, .45), 0 0 0 1px var(--line2); }
+.fbrw-pill { position: absolute; right: 0; bottom: calc(100% + 6px); display: flex; align-items: center; gap: 2px; padding: 3px;
+  border-radius: 9px; background: color-mix(in srgb, var(--panel) 94%, transparent); border: 1px solid var(--line2);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .3); pointer-events: auto; opacity: .72; transition: opacity .15s ease; }
+.fbrw-pill:hover, .fbrw-pill:focus-within { opacity: 1; }
+.fbrw-pill.left { right: auto; left: 0; }
+.fbrw-pill.below { bottom: auto; top: calc(100% + 6px); }
+.fbrw-btn { width: 26px; height: 26px; display: grid; place-items: center; flex: none; border: 0; border-radius: 6px;
+  background: transparent; color: var(--muted); cursor: pointer; padding: 0; }
+.fbrw-btn:hover { background: var(--line); color: var(--ink); }
+.fbrw-btn svg { width: 15px; height: 15px; }
+.fbrw-grip { cursor: grab; touch-action: none; }
+.fbrw-grip:active { cursor: grabbing; }
+.fbrw-resize { position: absolute; width: 14px; height: 14px; pointer-events: auto; touch-action: none; }
+.fbrw-resize.at-br { left: -8px; top: -8px; cursor: nwse-resize; }
+.fbrw-resize.at-bl { right: -8px; top: -8px; cursor: nesw-resize; }
+.fbrw-resize.at-tr { left: -8px; bottom: -8px; cursor: nesw-resize; }
+.fbrw-resize.at-tl { right: -8px; bottom: -8px; cursor: nwse-resize; }
+/* Full screen: the page fills the window under one slim bar. */
+.fbrw-full { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; background: var(--bg); }
+.fbrw-fullbar { height: 40px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 10px 0 calc(var(--side-toggle-x) + 8px);
+  border-bottom: 1px solid var(--line); }
+:root.electron:not(.electron-windows) .fbrw-fullbar { -webkit-app-region: drag; }
+:root.electron .fbrw-fullbar button { -webkit-app-region: no-drag; }
+.fbrw-url { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
+.fbrw-fullview { flex: 1; position: relative; }
