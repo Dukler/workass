@@ -1706,7 +1706,7 @@ function taskEventKind(message) {
 
 function spawnedWorkEvent(message, kind = taskEventKind(message)) {
   if (kind === 'task_started') {
-    return { type: 'started', taskId: message.task_id, toolCallId: message.tool_use_id, description: message.description, subagentType: message.subagent_type, taskType: message.task_type, workflowName: message.workflow_name, parentTaskId: message.parent_task_id };
+    return { type: 'started', taskId: message.task_id, toolCallId: message.tool_use_id, description: message.description, subagentType: message.subagent_type, taskType: message.task_type, workflowName: message.workflow_name, parentTaskId: message.parent_task_id, backgrounded: message.is_backgrounded === true };
   }
   if (kind === 'task_progress') {
     return { type: 'progress', taskId: message.task_id, toolCallId: message.tool_use_id, description: message.description, subagentType: message.subagent_type, lastToolName: message.last_tool_name, summary: message.summary };

@@ -140,11 +140,14 @@ type SpawnedWorkReceipt struct {
 }
 
 type spawnedWorkRecord struct {
-	Item           SpawnedWorkItem
-	SessionID      string
-	LastLevelSeen  time.Time
-	MissingSince   time.Time
-	PathlessSince  time.Time
+	Item          SpawnedWorkItem
+	SessionID     string
+	LastLevelSeen time.Time
+	MissingSince  time.Time
+	PathlessSince time.Time
+	// Backgrounded: the provider or the launching call said this task outlives
+	// its tool call, so the call ending must never settle it.
+	Backgrounded   bool
 	SawPID         bool
 	ReceiptWritten bool
 	// An agent that stopped while its own background work still ran is
@@ -540,6 +543,11 @@ func (m *Manager) observeSpawnToolEvent(obs spawnToolObservation) {
 	}
 	providerTool := firstNonEmpty(obs.ProviderTool, obs.Title)
 	candidateKey := spawnedCandidateKey(obs.SessionID, obs.ToolCallID)
+	if obs.RunsInBackground || obs.FallbackTaskID != "" {
+		m.spawnedWorkMu.Lock()
+		m.rememberBackgroundToolCallLocked(obs.TabID, obs.ChatID, obs.ToolCallID)
+		m.spawnedWorkMu.Unlock()
+	}
 	if obs.RunsInBackground {
 		label := compactText(firstNonEmpty(obs.Command, obs.Title, providerTool, "Background work"), 240)
 		m.spawnedWorkMu.Lock()
@@ -651,6 +659,9 @@ func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerI
 			rec.Item.LastToolName = tool
 			rec.Item.UpdatedAt = isoNow()
 			changed = true
+		}
+		if task.Backgrounded {
+			rec.Backgrounded = true
 		}
 		if parent := task.ParentTaskID; parent != "" && parent != taskID && rec.Item.ParentTaskID == "" {
 			rec.Item.ParentTaskID = parent
@@ -855,6 +866,68 @@ func (m *Manager) settleSpawnedWorkLocked(rec *spawnedWorkRecord, status string,
 	rec.Item.UpdatedAt = rec.Item.FinishedAt
 	rec.Item.ExitCode = exitCode
 	return true
+}
+
+// settleForegroundToolTasks ends the provider task a foreground tool call ran
+// as, when that call ends. Claude Code reports every Bash command as a task,
+// and an interrupted one never gets its task-ended event; with no PID or
+// output file the liveness pass cannot see it end either, so its row read
+// "running" for as long as the session lived. Background work is never
+// touched: it has an output file, and its tool call returns while it runs.
+func (m *Manager) settleForegroundToolTasks(tabID, chatID, toolCallID, toolStatus string) {
+	if tabID == "" || chatID == "" || toolCallID == "" {
+		return
+	}
+	status := "exited"
+	if toolStatus == "failed" {
+		status = "failed"
+	}
+	changed := false
+	m.spawnedWorkMu.Lock()
+	for _, rec := range m.spawnedWork {
+		if rec == nil || rec.Item.Status != "running" || rec.Item.TabID != tabID || rec.Item.ChatID != chatID || rec.Item.ToolCallID != toolCallID {
+			continue
+		}
+		if rec.Item.Kind != "bash" || rec.Item.OutputFile != "" || rec.Item.PID != nil || rec.Backgrounded {
+			continue
+		}
+		if _, launched := m.spawnedBackgroundCalls[backgroundToolCallKey(tabID, chatID, toolCallID)]; launched {
+			continue
+		}
+		if m.settleSpawnedWorkLocked(rec, status, nil) {
+			changed = true
+		}
+	}
+	m.spawnedWorkMu.Unlock()
+	if changed {
+		m.commitSpawnedWorkChange(tabID, chatID)
+	}
+}
+
+func backgroundToolCallKey(tabID, chatID, toolCallID string) string {
+	return tabID + "\x00" + chatID + "\x00" + toolCallID
+}
+
+// rememberBackgroundToolCallLocked records a call that launched background
+// work. The call's last update often carries no input, so its background flag
+// has to be remembered from the launch. Bounded like spawnedWorkSettled.
+func (m *Manager) rememberBackgroundToolCallLocked(tabID, chatID, toolCallID string) {
+	if tabID == "" || chatID == "" || toolCallID == "" {
+		return
+	}
+	if m.spawnedBackgroundCalls == nil {
+		m.spawnedBackgroundCalls = map[string]struct{}{}
+	}
+	key := backgroundToolCallKey(tabID, chatID, toolCallID)
+	if _, known := m.spawnedBackgroundCalls[key]; known {
+		return
+	}
+	m.spawnedBackgroundCalls[key] = struct{}{}
+	m.spawnedBackgroundCallOrder = append(m.spawnedBackgroundCallOrder, key)
+	for len(m.spawnedBackgroundCallOrder) > 1024 {
+		delete(m.spawnedBackgroundCalls, m.spawnedBackgroundCallOrder[0])
+		m.spawnedBackgroundCallOrder = m.spawnedBackgroundCallOrder[1:]
+	}
 }
 
 func (m *Manager) registerSubagentSpawnedWork(tabID, chatID string, run SubagentRun) {

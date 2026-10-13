@@ -76,6 +76,7 @@ func (strategy claudeProviderSpawnedWorkStrategy) decodeTask(raw map[string]any)
 		Summary:      asString(raw["summary"]),
 		LastToolName: asString(raw["lastToolName"]),
 		Status:       asString(raw["status"]),
+		Backgrounded: raw["backgrounded"] == true,
 	}
 	if path := asString(raw["outputFile"]); path != "" {
 		if safe, ok := strategy.ValidateOutputPath(task.TaskID, path); ok {

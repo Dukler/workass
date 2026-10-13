@@ -1155,10 +1155,17 @@ func (b *Bridge) emitToolEvent(job *Job, acpKind string, update map[string]any, 
 	toolCallID := toolCallIDFromUpdate(update)
 	title := firstNonEmpty(asString(update["title"]), asString(toolCall["title"]), asString(update["kind"]), "tool")
 	spawnedWork := providerAdapterForID(b.ProviderID()).spawnedWork
-	if signal, ok := spawnedWork.DecodeTool(providerRawToolObservation{
+	signal, background := spawnedWork.DecodeTool(providerRawToolObservation{
 		Title: title, Command: execCommandFrom(rawInput), RawInput: rawInput,
 		Meta: mapFromAny(update["_meta"]), Output: outText,
-	}); ok {
+	})
+	if !background && acpKind == "tool_call_update" {
+		// A foreground call's task ends with the call, interrupted or not.
+		if status := firstNonEmpty(asString(update["status"]), asString(toolCall["status"])); status == "completed" || status == "failed" {
+			b.manager.settleForegroundToolTasks(job.TabID, job.ChatID, toolCallID, status)
+		}
+	}
+	if background {
 		b.manager.observeSpawnToolEvent(spawnToolObservation{
 			SessionID: job.SessionID, TabID: job.TabID, ChatID: job.ChatID,
 			ProviderID: b.ProviderID(), ToolCallID: toolCallID, Title: title,
