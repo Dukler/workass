@@ -376,8 +376,10 @@ export interface SpawnedWorkItem {
   chatId: string;
   providerId: string;
   assistantBrand?: string;
-  kind: 'bash' | 'agent' | 'workflow' | 'background' | string;
+  kind: 'bash' | 'agent' | 'workflow' | 'monitor' | 'background' | string;
   label: string;
+  // The agent task that started this work (Claude Code's parent_task_id).
+  parentTaskId?: string;
   // Lifecycle, not shape: 'service' is a process expected never to finish (a
   // dev server), and absent or 'work' is work whose completion is news. A
   // service is alive without the chat being busy, so it never drives the

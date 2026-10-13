@@ -23,10 +23,16 @@ type providerSpawnToolSignal struct {
 	RunsInBackground   bool
 	FallbackTaskID     string
 	FallbackOutputFile string
+	// ModelLabel is the model a subagent call asked for, when it named one
+	// (Claude Code's Agent tool input "model"); the task events never carry it.
+	ModelLabel string
 }
 
 type providerSpawnedWorkTask struct {
-	TaskID       string
+	TaskID string
+	// ParentTaskID is the agent task that started this one, when an agent ran
+	// its own background work (Claude Code's parent_task_id).
+	ParentTaskID string
 	ToolCallID   string
 	Description  string
 	TaskType     string

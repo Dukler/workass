@@ -210,6 +210,8 @@ type BackgroundEvent struct {
 	LastToolName   string
 	ModelLabel     string
 	ResultExcerpt  string
+	// ParentTaskID links work an agent started to that agent's task.
+	ParentTaskID string `json:",omitempty"`
 }
 
 type TransportHealthEvent struct {

@@ -359,7 +359,7 @@ func backgroundEvent(item acp.SpawnedWorkItem, workID string) providercontract.B
 		Kind: item.Kind, Role: item.Role, Status: item.Status, StartedAt: item.StartedAt,
 		UpdatedAt: item.UpdatedAt, FinishedAt: item.FinishedAt, ExitCode: item.ExitCode,
 		Summary: item.Summary, OutputFile: item.OutputFile, PID: item.PID, LastToolName: item.LastToolName,
-		ModelLabel: item.ModelLabel, ResultExcerpt: item.ResultExcerpt,
+		ModelLabel: item.ModelLabel, ResultExcerpt: item.ResultExcerpt, ParentTaskID: item.ParentTaskID,
 	}
 }
 
