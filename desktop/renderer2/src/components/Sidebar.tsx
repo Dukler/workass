@@ -2,13 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import type { Chat } from '../store/types';
 import { store, useApp, useSpawnedWork } from '../store/store';
-import { has } from '../wire/api';
+import { call, has } from '../wire/api';
 import { IcSearch, IcAssist, IcChats, IcPlus, IcActivity, IcGear, IcFolder, ModelIcon } from '../icons';
 import { buildWorkspaceGroups, normalizeWorkspacePath, type WorkspaceGroup } from '../workspaces';
 import { nextUpdatePhase, brandForProvider, DONE_HOLD_MS, EXIT_MS, type UpdatePhase } from '../update-card';
 import { availableRateLimitReset, prepareRateLimitResetAttempt, rateLimitResetExpiry, type RateLimitResetAttempt } from '../plan-usage';
 import { chatHasLiveActivity } from '../chat-activity';
-import { appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, appUpdaterReceiptIsRecent, useAppUpdater } from '../app-updater';
+import { UPDATE_ARM_MS, appUpdateWorkWarning, appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, appUpdaterReceiptIsRecent, useAppUpdater } from '../app-updater';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
 
 // What is currently being dragged in the sidebar. `id` is the chat.id for a
@@ -447,6 +447,15 @@ export function FooterUpdateCards() {
   const selfFailed = selfUpdate.phase === 'failed' || selfUpdate.phase === 'rollback_healthy';
   const [selfPhase, setSelfPhase] = useState<UpdatePhase>('hidden');
   const [selfActionBusy, setSelfActionBusy] = useState(false);
+  // Armed = the first click found running work; the card says what an update
+  // would stop and the next click proceeds anyway. Disarms on its own so a
+  // stale warning never stands in for a fresh count.
+  const [selfArmed, setSelfArmed] = useState('');
+  useEffect(() => {
+    if (!selfArmed) return undefined;
+    const timer = setTimeout(() => setSelfArmed(''), UPDATE_ARM_MS);
+    return () => clearTimeout(timer);
+  }, [selfArmed]);
 
   // Mirror the provider card's one-element lifecycle. A fresh terminal receipt
   // may seal after the updater restarts Electron; an old receipt stays hidden so
@@ -503,6 +512,8 @@ export function FooterUpdateCards() {
   const selfTitle = appUpdaterCardTitle(selfUpdate);
   const selfActionLabel = selfActionBusy
     ? 'Comprobando…'
+    : selfArmed
+    ? 'Actualizar igual'
     : selfUpdate.phase === 'busy'
     ? 'Reintentar'
     : 'Actualizar';
@@ -510,6 +521,16 @@ export function FooterUpdateCards() {
     if (!selfAction || selfActionBusy) return;
     setSelfActionBusy(true);
     try {
+      if (!selfArmed) {
+        // A daemon without the count answers undefined → update straight away,
+        // exactly as before this step existed.
+        const warning = appUpdateWorkWarning(
+          await call('appUpdateWork'),
+          (tabId) => app.chats.find((chat) => chat.id === tabId)?.title ?? '',
+        );
+        if (warning) { setSelfArmed(warning); return; }
+      }
+      setSelfArmed('');
       const next = await selfAction();
       if (next.phase === 'busy') {
         // Never restore the legacy "La actualización sigue esperando" copy:
@@ -532,10 +553,10 @@ export function FooterUpdateCards() {
               <span className="uico ufail" aria-hidden="true"><IcDownload /></span>
               <span className="ubody">
                 <span className="ut">{selfTitle}</span>
-                <span className="us">{appUpdaterPhaseText(selfUpdate)}</span>
+                <span className={`us${selfArmed ? ' us-warn' : ''}`}>{selfArmed || appUpdaterPhaseText(selfUpdate)}</span>
                 <span className="ufail-act">
                   <button className="uretry" disabled={selfActionBusy} onClick={() => void runSelfAction()}>
-                    {selfActionBusy ? 'Reintentando…' : selfUpdate.availableVersion ? 'Actualizar' : 'Reintentar'}
+                    {selfActionBusy ? 'Reintentando…' : selfArmed ? 'Actualizar igual' : selfUpdate.availableVersion ? 'Actualizar' : 'Reintentar'}
                   </button>
                 </span>
               </span>
@@ -543,7 +564,7 @@ export function FooterUpdateCards() {
           ) : (
             <button
               type="button"
-              className={`updcard${selfRunning ? ' upd-run' : ''}${selfSealing ? ' upd-run upd-done' : ''}${selfActionBusy ? ' upd-off' : ''}`}
+              className={`updcard${selfRunning ? ' upd-run' : ''}${selfSealing ? ' upd-run upd-done' : ''}${selfActionBusy ? ' upd-off' : ''}${selfArmed && !selfRunning && !selfSealing ? ' upd-warn' : ''}`}
               disabled={selfRunning || selfSealing || !selfAction || selfActionBusy}
               onClick={() => void runSelfAction()}
               title={appUpdaterPhaseText(selfUpdate)}
@@ -556,7 +577,7 @@ export function FooterUpdateCards() {
               </span>
               <span className="ubody" key={selfRunning ? selfUpdate.phase : selfSealing ? 'done' : 'rest'}>
                 <span className="ut">{selfTitle}</span>
-                <span className="us">{appUpdaterPhaseText(selfUpdate)}</span>
+                <span className={`us${selfArmed && !selfRunning ? ' us-warn' : ''}`}>{selfArmed && !selfRunning ? selfArmed : appUpdaterPhaseText(selfUpdate)}</span>
               </span>
               {selfAction && !selfRunning && !selfSealing && <span className="uarrow updo" aria-hidden="true">{selfActionLabel}</span>}
             </button>

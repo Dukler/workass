@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { ReactNode } from 'react';
 import type { Chat } from '../store/types';
 import { store } from '../store/store';
 import { nodeState, nodeDuration, ToolDetail } from './messages';
@@ -9,7 +10,9 @@ import { ActionGlyph, IcStopSquare, ModelIcon } from '../icons';
 // One subagent as a compact disclosure: model icon + label + elapsed on top, then
 // model id + a human live activity. Long labels and model ids ellipsize; the
 // elapsed is never pushed off. Exact calls stay one tap away in the body.
-export function SubagentRow({ n, nowMs, chat }: { n: SubagentNode; nowMs: number; chat?: Chat | null }) {
+// Work the agent started itself (`kids`) sits right under it, outside the
+// disclosure, so it is visible without opening the row.
+export function SubagentRow({ n, nowMs, chat, kids }: { n: SubagentNode; nowMs: number; chat?: Chat | null; kids?: ReactNode }) {
   const st = nodeState(n);
   const running = st === 'running';
   const failed = st === 'failed';
@@ -33,7 +36,7 @@ export function SubagentRow({ n, nowMs, chat }: { n: SubagentNode; nowMs: number
   const ownership = n.work?.kind === 'agent' ? 'Subagente nativo · solo lectura'
     : n.work?.kind === 'subagent' ? 'Subagente de Workass' : undefined;
   const settled = `${n.calls.length} ${n.calls.length === 1 ? 'llamada' : 'llamadas'}`;
-  return (
+  return (<>
     <details className="r-sa" data-status={st}>
       <summary>
         {/* No chevron: the model icon is the row's anchor, and it reads bigger
@@ -78,5 +81,6 @@ export function SubagentRow({ n, nowMs, chat }: { n: SubagentNode; nowMs: number
         </div>
       )}
     </details>
-  );
+    {kids}
+  </>);
 }

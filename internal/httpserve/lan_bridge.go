@@ -198,6 +198,7 @@ const LANBridgeJS = `(() => {
     appChatSteer: (sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary) => invoke('app-chat:steer', { sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary }),
     appChatUseRateLimitReset: (providerId, sessionId, idempotencyKey, creditId) => invoke('app-chat:use-rate-limit-reset', { providerId, sessionId, idempotencyKey, creditId }),
     spawnedWorkList: (tabId, chatId) => invoke('spawned-work:list', { tabId, chatId }),
+    appUpdateWork: () => invoke('app-update:work'),
     chatCommandsGet: (tabId, chatId) => invoke('chat:commands-get', { tabId, chatId }),
     chatGoalGet: (tabId, chatId) => invoke('chat:goal-get', { tabId, chatId }),
     spawnedWorkRead: (tabId, chatId, id, tailBytes) => invoke('spawned-work:read', { tabId, chatId, id, tailBytes }),

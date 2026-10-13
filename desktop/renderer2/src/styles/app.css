@@ -248,6 +248,11 @@ aside.side {
    tag replaces the chevron. */
 .updcard .uarrow.updo { font-size: 10.5px; font-weight: 600; letter-spacing: .02em; color: var(--acc); }
 .updcard:hover .uarrow.updo { color: var(--acc); }
+/* Armed: the first click found running work. The subtitle says what the next
+   click stops (wrapping, so it is read whole) and the action turns amber. */
+.updcard .us.us-warn { color: var(--amber); white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.updcard.upd-warn { border-color: color-mix(in srgb, var(--amber) 45%, var(--line2)); }
+.updcard.upd-warn .uarrow.updo, .updcard.upd-warn:hover .uarrow.updo { color: var(--amber); }
 /* Right slot brand mark (the model provider icon, replacing the "Actualizar"
    label). Reuses .mico sizing; the GPT knot follows this colour, the Claude burst
    keeps its own hue. Pushed to the trailing edge and slightly dimmed at rest. */
@@ -1496,6 +1501,10 @@ aside.rail { border-left: 1px solid var(--line); padding: 0 13px 14px; overflow-
 
 /* subagents — flush rows with model icon; overflow-safe */
 .r-subs { display: flex; flex-direction: column; gap: 1px; padding: 2px 0; }
+/* Work an agent started itself hangs off that agent's mark: a hairline from
+   under the 22px brand glyph, children indented past it. */
+.r-sa-kids { display: flex; flex-direction: column; margin: -2px 0 4px 10px; padding-left: 11px; border-left: 1px solid var(--line2); min-width: 0; }
+.r-sa-kids .bgr { padding: 6px 3px; }
 .r-sa > summary { list-style: none; display: flex; align-items: center; gap: 9px; padding: 7px 6px; margin: 0 -6px; border-radius: 8px; cursor: pointer; user-select: none; }
 .r-sa > summary::-webkit-details-marker { display: none; }
 .r-sa > summary:hover { background: var(--line); }

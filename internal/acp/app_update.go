@@ -1,5 +1,7 @@
 package acp
 
+import "sort"
+
 // AppUpdateReadiness is a bounded, content-free snapshot used only by the
 // loopback shell. It intentionally carries counts rather than chat, prompt, or
 // task data: the counts record what a user-initiated update interrupts so the
@@ -72,4 +74,64 @@ func (m *Manager) CancelUpdateDrain() {
 	m.updateGateMu.Lock()
 	m.updateDraining = false
 	m.updateGateMu.Unlock()
+}
+
+// UpdateWorkChat is one chat's share of the work an update would stop.
+type UpdateWorkChat struct {
+	TabID           string `json:"tabId"`
+	ForegroundTurns int    `json:"foregroundTurns,omitempty"`
+	BackgroundWork  int    `json:"backgroundWork,omitempty"`
+}
+
+// UpdateWork is the read-only answer to app-update:work: what a user-initiated
+// update would stop right now, so the update button can warn BEFORE the click
+// rather than only recording it in the receipt. Unlike BeginUpdateDrain it
+// never closes admission. External lanes are left out because they are
+// detached processes that outlive the daemon and are re-settled after it;
+// services are left out because they are restarted, not lost.
+type UpdateWork struct {
+	ForegroundTurns int              `json:"foregroundTurns"`
+	BackgroundWork  int              `json:"backgroundWork"`
+	Chats           []UpdateWorkChat `json:"chats"`
+}
+
+func (m *Manager) UpdateWorkInProgress() UpdateWork {
+	byTab := map[string]*UpdateWorkChat{}
+	order := []string{}
+	chat := func(tabID string) *UpdateWorkChat {
+		if entry, ok := byTab[tabID]; ok {
+			return entry
+		}
+		entry := &UpdateWorkChat{TabID: tabID}
+		byTab[tabID] = entry
+		order = append(order, tabID)
+		return entry
+	}
+	result := UpdateWork{Chats: []UpdateWorkChat{}}
+
+	m.mu.Lock()
+	for _, job := range m.jobs {
+		// A tracked subagent's Job is counted through its spawned-work row below.
+		if job != nil && job.Status == "running" && job.Kind != "subagent" {
+			result.ForegroundTurns++
+			chat(job.TabID).ForegroundTurns++
+		}
+	}
+	m.mu.Unlock()
+
+	m.spawnedWorkMu.Lock()
+	for _, record := range m.spawnedWork {
+		if record == nil || record.Item.Status != "running" || isServiceSpawnedWork(record.Item) || record.Item.Kind == "external" {
+			continue
+		}
+		result.BackgroundWork++
+		chat(record.Item.TabID).BackgroundWork++
+	}
+	m.spawnedWorkMu.Unlock()
+
+	sort.Strings(order)
+	for _, tabID := range order {
+		result.Chats = append(result.Chats, *byTab[tabID])
+	}
+	return result
 }

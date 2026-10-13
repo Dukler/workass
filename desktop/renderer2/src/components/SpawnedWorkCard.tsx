@@ -7,7 +7,7 @@ import { ActionGlyph, IcStopSquare, IcTerminal, ModelIcon } from '../icons';
 import { spawnedWorkActivity, spawnedWorkKindWord } from '../tool-names';
 import { displayDetail } from '../tool-display';
 import { startSerialPoll } from '../serial-poll';
-import { canStopSpawnedWorkItem, currentTurnMessages, extractSubagents, isAgentWork, nodeForSpawnedWork, subagentWorkId } from '../subagent-layout';
+import { canStopSpawnedWorkItem, currentTurnMessages, extractSubagents, isAgentWork, nestSpawnedWork, nodeForSpawnedWork, subagentWorkId } from '../subagent-layout';
 import { SubagentRow } from './SubagentRow';
 import type { ToolEvent } from '../store/types';
 
@@ -148,7 +148,9 @@ function RunningRow({ chat, item, nowMs }: { chat: Chat; item: SpawnedWorkItem; 
 // registry), so it renders whether or not a turn is streaming.
 export function SpawnedWorkLive({ chat }: { chat: Chat }) {
   useSpawnedWork();
-  const running = store.spawnedWork(chat).filter((item) => item.status === 'running' && !isAgentWork(item));
+  const work = store.spawnedWork(chat);
+  const { nested } = nestSpawnedWork(work);
+  const running = work.filter((item) => item.status === 'running' && !isAgentWork(item) && !nested.has(item.id));
   const [nowMs, setNowMs] = useState(Date.now());
 
   useEffect(() => {
@@ -165,6 +167,26 @@ export function SpawnedWorkLive({ chat }: { chat: Chat }) {
   );
 }
 
+// The work one agent started, under that agent's row: running items are full
+// live rows (output, stop), finished ones the fold's flat lines. Rendered as a
+// sibling of the agent's <details>, so it shows without opening the agent.
+export function SpawnedWorkKids({ chat, items, nowMs }: { chat: Chat; items: readonly SpawnedWorkItem[] | undefined; nowMs: number }) {
+  if (!items?.length) return null;
+  const running = items.filter((item) => item.status === 'running');
+  const finished = items.filter((item) => item.status !== 'running');
+  return (
+    <div className="r-sa-kids">
+      {running.map((item) => <RunningRow key={item.id} chat={chat} item={item} nowMs={nowMs} />)}
+      {finished.map((item) => (
+        <div key={item.id} className="r-dline" data-status={item.status}>
+          <span className="r-dt" title={item.label || item.taskId}>{item.label || item.taskId}</span>
+          {itemDuration(item, nowMs) && <span className="r-dl">{itemDuration(item, nowMs)}</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // FINISHED spawned work — ONE "Segundo plano" fold of flat lines (approved mock
 // f-bg2): a single tap opens title + duration rows. The old fold-inside-a-fold
 // ("N trabajos terminados" inside "Segundo plano") is gone, and running work
@@ -177,8 +199,9 @@ export function SpawnedWorkCard({ chat }: { chat: Chat }) {
     .filter((event): event is ToolEvent => event.kind === 'tool')).nodes;
   const represented = new Set(currentNodes.map((node) => node.id));
   const work = store.spawnedWork(chat);
+  const { byParent, nested } = nestSpawnedWork(work);
   for (const item of work) if (isAgentWork(item) && item.status === 'running') represented.add(subagentWorkId(item));
-  const finished = work.filter((item) => item.status !== 'running'
+  const finished = work.filter((item) => item.status !== 'running' && !nested.has(item.id)
     && (!isAgentWork(item) || !represented.has(subagentWorkId(item))));
   const [historyOpen, setHistoryOpen] = useState(false);
   const historicalNodes = new Map((historyOpen ? extractSubagents(chat.messages.flatMap((message) => message.events)
@@ -196,7 +219,8 @@ export function SpawnedWorkCard({ chat }: { chat: Chat }) {
       </summary>
       <div className="r-meta-b">
         {finished.map((item) => isAgentWork(item)
-          ? <SubagentRow key={item.id} chat={chat} n={nodeForSpawnedWork(item, historicalNodes.get(subagentWorkId(item)))} nowMs={nowMs} />
+          ? <SubagentRow key={item.id} chat={chat} n={nodeForSpawnedWork(item, historicalNodes.get(subagentWorkId(item)))} nowMs={nowMs}
+              kids={<SpawnedWorkKids chat={chat} items={byParent.get(item.taskId)} nowMs={nowMs} />} />
           : (
           <div key={item.id} className="r-dline" data-status={item.status}>
             <span className="r-dt" title={item.label || item.taskId}>{item.label || item.taskId}</span>

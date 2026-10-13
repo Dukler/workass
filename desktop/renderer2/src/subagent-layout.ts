@@ -93,6 +93,23 @@ export function reconcileSubagentWork(nodes: SubagentNode[], items: readonly Spa
   return { liveIds, nodes: reconciled };
 }
 
+// Work an agent started itself (a Claude subagent's own shell or Monitor) is
+// shown under that agent's row instead of as an unattributed top-level row.
+// Only when the parent agent is in the same list — every listed agent renders
+// somewhere, so a nested child is never hidden; an orphan stays top-level.
+export function nestSpawnedWork(items: readonly SpawnedWorkItem[]): { byParent: Map<string, SpawnedWorkItem[]>; nested: Set<string> } {
+  const agentTasks = new Set(items.filter(isAgentWork).map((item) => item.taskId).filter(Boolean));
+  const byParent = new Map<string, SpawnedWorkItem[]>();
+  const nested = new Set<string>();
+  for (const item of items) {
+    const parent = item.parentTaskId;
+    if (!parent || isAgentWork(item) || parent === item.taskId || !agentTasks.has(parent)) continue;
+    byParent.set(parent, [...(byParent.get(parent) ?? []), item]);
+    nested.add(item.id);
+  }
+  return { byParent, nested };
+}
+
 export function canStopSpawnedWorkItem(item: Pick<SpawnedWorkItem, 'kind' | 'pid' | 'outputFile'>): boolean {
   // Native agents are observed only, even if a provider includes process metadata.
   return item.kind !== 'agent' && !(item.kind === 'workflow' && !item.pid && !item.outputFile);

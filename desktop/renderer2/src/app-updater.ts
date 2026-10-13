@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import type { AppUpdateWork } from './wire/types';
 
 export type AppUpdaterPhase =
   | 'unavailable'
@@ -110,6 +111,26 @@ export function appUpdaterBlockerText(blockers: AppUpdaterBlockers | null): stri
   return parts.length
     ? `El trabajo activo no bloquea la actualización (${parts.join(' · ')}). Reintentá porque otra actualización controla la activación.`
     : 'Otra actualización ya controla la activación. Reintentá en un momento.';
+}
+
+/** How long the update card stays armed after warning about running work. */
+export const UPDATE_ARM_MS = 12_000;
+
+/** The confirm step's warning: what clicking update again will stop. Empty
+ *  means nothing is running and the first click updates straight away. This is
+ *  a heads-up, never a gate — the second click always proceeds. */
+export function appUpdateWorkWarning(work: AppUpdateWork | null | undefined, titleOf: (tabId: string) => string): string {
+  if (!work) return '';
+  const parts: string[] = [];
+  if (work.foregroundTurns) parts.push(`${work.foregroundTurns} ${work.foregroundTurns === 1 ? 'turno activo' : 'turnos activos'}`);
+  if (work.backgroundWork) parts.push(`${work.backgroundWork} ${work.backgroundWork === 1 ? 'tarea en segundo plano' : 'tareas en segundo plano'}`);
+  if (!parts.length) return '';
+  const names = [...new Set((work.chats ?? []).map((chat) => titleOf(chat.tabId).trim()).filter(Boolean))];
+  const where = names.length
+    ? ` en ${names.slice(0, 2).join(', ')}${names.length > 2 ? ` y ${names.length - 2} más` : ''}`
+    : '';
+  const verb = work.foregroundTurns + work.backgroundWork === 1 ? 'Se detendrá' : 'Se detendrán';
+  return `${verb} ${parts.join(' y ')}${where}.`;
 }
 
 export function appUpdaterPhaseText(state: AppUpdaterState): string {

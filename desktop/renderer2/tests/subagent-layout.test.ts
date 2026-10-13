@@ -134,3 +134,21 @@ test('provider-owned agents never show an unsupported process Stop control', () 
   assert.equal(canStopSpawnedWorkItem({ kind: 'subagent' }), true);
   assert.equal(canStopSpawnedWorkItem({ kind: 'agent', pid: 123, outputFile: '/fixture/output' }), false);
 });
+
+test('an agent\'s own shells and monitors nest under it; orphans and agents stay top-level', async () => {
+  const { nestSpawnedWork } = await import('../src/subagent-layout.ts');
+  const item = (id: string, kind: string, extra: Record<string, unknown> = {}) => ({
+    id, taskId: id, tabId: 't', chatId: 'c', kind, label: id, status: 'running', startedAt: '2026-10-13T00:00:00Z', ...extra,
+  }) as unknown as import('../src/wire/types.ts').SpawnedWorkItem;
+  const work = [
+    item('agent-1', 'agent'),
+    item('shell-1', 'bash', { parentTaskId: 'agent-1' }),
+    item('mon-1', 'monitor', { parentTaskId: 'agent-1', status: 'completed' }),
+    item('orphan', 'bash', { parentTaskId: 'agent-gone' }),
+    item('main-shell', 'bash'),
+    item('agent-2', 'agent', { parentTaskId: 'agent-1' }),
+  ];
+  const { byParent, nested } = nestSpawnedWork(work);
+  assert.deepEqual(byParent.get('agent-1')?.map((entry) => entry.id), ['shell-1', 'mon-1']);
+  assert.deepEqual([...nested].sort(), ['mon-1', 'shell-1']);
+});
