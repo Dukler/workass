@@ -305,6 +305,17 @@ class FixtureQuery {
         });
         continue;
       }
+      // Echo how the host marked this prompt, so a test can see the origin
+      // Claude Code would read (human-only features such as ultracode).
+      if (text.includes('[fixture:echo-origin]')) {
+        this.emit({
+          type: 'stream_event',
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text: `origin=${JSON.stringify(message.origin ?? null)}` } },
+          parent_tool_use_id: null, uuid: randomUUID(), session_id: this.sessionId,
+        });
+        this.emit(this.result('success'));
+        continue;
+      }
       // A background subagent reported the way the real CLI reports it: as
       // system messages with a task_* subtype, started → progress → finished.
       if (text.includes('[fixture:background-agent]')) {

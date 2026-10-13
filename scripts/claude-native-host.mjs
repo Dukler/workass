@@ -238,7 +238,13 @@ function promptContent(blocks) {
   return content;
 }
 
-function sdkUserMessage(sessionId, blocks, uuid = randomUUID(), priority) {
+// humanAuthored marks a prompt a person typed, the way Claude Code marks one
+// typed in its own interface (origin {kind:"human"}). Claude Code honours
+// human-only features from that mark — the "ultracode" keyword that opts a
+// prompt into Workflow orchestration among them — so without it a Workass chat
+// could never use ultracode (user request 2026-10-13). Wake-ups and messages
+// from other agents are never marked.
+function sdkUserMessage(sessionId, blocks, uuid = randomUUID(), priority, humanAuthored = false) {
   return {
     type: 'user',
     message: { role: 'user', content: promptContent(blocks) },
@@ -246,6 +252,7 @@ function sdkUserMessage(sessionId, blocks, uuid = randomUUID(), priority) {
     session_id: sessionId,
     uuid,
     ...(priority ? { priority } : {}),
+    ...(humanAuthored ? { origin: { kind: 'human' } } : {}),
   };
 }
 
@@ -827,10 +834,10 @@ class ClaudeSession {
     return { behavior: 'deny', message: 'Permission was denied', toolUseID: options.toolUseID };
   }
 
-  async enqueuePrompt(blocks, clientUserMessageId = '') {
+  async enqueuePrompt(blocks, clientUserMessageId = '', humanAuthored = false) {
 	if (this.activePrompt) throw new Error('A Claude turn is already running');
 	const uuid = stableMessageUUID(this.sessionId, clientUserMessageId);
-    const message = sdkUserMessage(this.sessionId, blocks, uuid);
+    const message = sdkUserMessage(this.sessionId, blocks, uuid, undefined, humanAuthored);
     this.startedTurns = true;
     this.turnStatus = 'active';
     this.partialTextSeen = false;
@@ -1757,6 +1764,9 @@ async function handleRequest(message) {
       authMethods: [],
       _meta: {
         workassClaudeSteerRequest: true,
+        // Ask the daemon to say which prompts a person typed
+        // (_meta.workassCommandInput.humanAuthored); see sdkUserMessage.
+        workassNativeCommandInputV1: true,
         workassClaudeSteerReceipt: true,
         workassClaudeUsageRequest: true,
 		workassStableTurnInputV1: true,
@@ -1782,7 +1792,8 @@ async function handleRequest(message) {
   const session = sessions.get(sessionId);
   if (!session) throw Object.assign(new Error('Claude session not found'), { rpcCode: -32000 });
   if (method === 'session/prompt') {
-	respond(id, await session.enqueuePrompt(params.prompt, String(params.clientUserMessageId || '').trim()));
+	respond(id, await session.enqueuePrompt(params.prompt, String(params.clientUserMessageId || '').trim(),
+	  params._meta?.workassCommandInput?.humanAuthored === true));
     return;
   }
   if (method === 'session/set_config_option') {
