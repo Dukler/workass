@@ -156,6 +156,33 @@ test('official Claude SDK host forwards the input of a streamed tool call once i
   assert.equal(updates.at(-1).status, 'completed');
 });
 
+// Claude Code reports subagents and background shells as system messages with
+// a task_* subtype. Each must reach Workass as a spawned-work event, or the
+// work is invisible (user report 2026-10-13).
+test('official Claude SDK host forwards Claude Code task lifecycle system messages', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'test', version: '1' } } });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:background-agent] go' }],
+  } });
+  await peer.waitFor((message) => message.id === 3);
+  const events = peer.messages
+    .filter((message) => message.method === 'session/update' && message.params.update.sessionUpdate === '_workass_claude_spawned_work')
+    .map((message) => message.params.update.event)
+    .filter((event) => event.taskId === 'fixture-agent-1');
+  assert.deepEqual(events.map((event) => event.type), ['started', 'progress', 'notification']);
+  assert.equal(events[0].toolCallId, 'toolu_fixture_agent_1');
+  assert.equal(events[0].description, 'Classify workspace tmp dirs');
+  assert.equal(events[0].subagentType, 'general-purpose');
+  assert.equal(events[1].lastToolName, 'Bash');
+  assert.equal(events[2].status, 'completed');
+  assert.equal(events[2].outputFile, '/private/tmp/claude-501/fixture/tasks/fixture-agent-1.output');
+});
+
 test('native Claude host preserves external MCP stdio configuration', async (t) => {
   const peer = startHost({ WORKASS_CLAUDE_FIXTURE_REQUIRE_STDIO_MCP: '1' });
   t.after(() => peer.child.kill('SIGKILL'));
