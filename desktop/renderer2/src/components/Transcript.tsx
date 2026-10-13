@@ -680,7 +680,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                   return (
                     <div className="chatfind-message" data-chat-find-message={m.id} key={m.id}>
                       {m.role === 'user' ? (
-                        <UserPill text={m.content} images={m.images} steerState={m.steerState} />
+                        <UserPill tabId={chat.id} text={m.content} images={m.images} steerState={m.steerState} />
                       ) : (
                         <AssistantMessage
                           tabId={chat.id}

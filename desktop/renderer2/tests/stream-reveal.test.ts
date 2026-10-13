@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { revealedText, settleMountFades } from '../src/stream-reveal.ts';
+import { chunkCanReveal, revealedText, settleMountFades } from '../src/stream-reveal.ts';
 
 test('a paragraph shows only its finished sentences', () => {
   assert.equal(revealedText('The labels agree. Gold kept the fill, while Sil'), 'The labels agree.');
@@ -39,4 +39,15 @@ test('a reply mounting with text settles its reveal fades and nothing else', () 
   assert.equal(settleMountFades(root), 2);
   assert.deepEqual(finished, ['mdfresh', 'mdfresh']);
   assert.equal(settleMountFades(null), 0);
+});
+
+// Only a finished line or sentence can move the reveal, so only such a chunk
+// re-renders a streaming reply; the rest paint the same screen (2026-10-13).
+test('a chunk can change the reveal only by finishing a line or a sentence', () => {
+  assert.equal(chunkCanReveal('The floor is cle', 'an and the'), false);
+  assert.equal(chunkCanReveal('The floor is clean', '. Next'), true);
+  assert.equal(chunkCanReveal('The floor is clean.', ' Next'), true, 'the space after a period ends the sentence');
+  assert.equal(chunkCanReveal('He said "done.', '" Then'), true, 'a closing quote after the period counts');
+  assert.equal(chunkCanReveal('version 3', '.5 of the'), false, 'a decimal point is not a sentence end');
+  assert.equal(chunkCanReveal('- item one', '\n- item'), true, 'a finished line');
 });

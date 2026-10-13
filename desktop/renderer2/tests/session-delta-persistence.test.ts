@@ -1118,3 +1118,21 @@ test('a settings save that loses the race re-reads and keeps the other window ch
   assert.equal(stored.prApprover, 'other-window', 'the other window change survived');
   assert.deepEqual((stored.modelScores as any).codex['gpt-test'].intelligence, 9, 'our change landed');
 });
+
+// A streaming reply re-renders only when a chunk can change what it shows
+// (a finished sentence or line); the end of the turn always renders it whole.
+test('streaming chunks re-render the reply only when they finish a sentence or a line', () => {
+  const subject = subjectWithChats([chat('tab-stream', {
+    messages: [
+      { id: 'stream-user', role: 'user', content: 'go', status: 'done', at: null, events: [] },
+      { id: 'stream-reply', role: 'assistant', content: '', status: 'running', at: null, events: [], jobId: 'job-stream' },
+    ] as unknown as Msg[],
+  })]);
+  (subject as any).jobRef.set('job-stream', { tabId: 'tab-stream', msgId: 'stream-reply' });
+  let renders = 0;
+  subject.subscribe('msg:stream-reply', () => { renders++; });
+  const data = (chunk: string) => (subject as any).onJobEvent({ type: 'data', id: 'job-stream', stream: 'stdout', chunk });
+  for (const chunk of ['The orig', 'inal floor', ' is clean', ', so the', ' fill came', ' from the', ' labeler', '. Next I', ' will', ' render', '\n']) data(chunk);
+  assert.equal(subject.chat('tab-stream').messages[1].content, 'The original floor is clean, so the fill came from the labeler. Next I will render\n');
+  assert.equal(renders, 2, 'one render when the sentence finished, one when the line did');
+});

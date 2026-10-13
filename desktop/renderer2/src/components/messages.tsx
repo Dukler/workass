@@ -4,6 +4,7 @@ import { renderInline } from '../markdown/inline';
 import { IcShield, IcCheck, IcArrowUp, IcClose, ModelIcon, ActionGlyph } from '../icons';
 import { store } from '../store/store';
 import { messageImageSrc } from '../image-drafts';
+import { useMessageImageSrc } from './MessageImage';
 import { call } from '../wire/api';
 import { isSubagentHeader, type SubagentNode } from '../subagent-layout';
 import { steerStatusLabel } from '../steering';
@@ -16,28 +17,35 @@ import { observeTranscriptImageOnce } from '../transcript-images';
 export { extractSubagents } from '../subagent-layout';
 export type { SubagentNode } from '../subagent-layout';
 
-export const UserPill = memo(function UserPill({ text, images, steerState }: { text: string; images?: MessageImage[]; steerState?: SteerState }) {
+// One attachment of a user message. Bytes sent by reference load once it is
+// in view (see MessageImage.tsx); until then a quiet placeholder holds its place.
+function UserImage({ tabId, image, alt }: { tabId: string; image: MessageImage; alt: string }) {
+  const { target, src, failed } = useMessageImageSrc(tabId, image);
+  if (!src) {
+    return <span ref={(element) => { target.current = element; }} className="assistant-image-pending">{failed ? 'Imagen no disponible' : 'Cargando imagen…'}</span>;
+  }
+  // Click to open full-size in the lightbox.
+  return (
+    <img
+      src={src}
+      alt={alt}
+      className="zoomable"
+      title="Ampliar"
+      tabIndex={0}
+      aria-keyshortcuts="Meta+C Control+C"
+      onClick={() => store.openImageLightbox(src, alt)}
+    />
+  );
+}
+
+export const UserPill = memo(function UserPill({ tabId = '', text, images, steerState }: { tabId?: string; text: string; images?: MessageImage[]; steerState?: SteerState }) {
   return (
     <div className={`userpill${steerState ? ` steer-${steerState}` : ''}`}>
       {!!images?.length && (
         <div className="user-images">
-          {images.map((image, index) => {
-            const src = messageImageSrc(image);
-            const alt = image.name || `Imagen adjunta ${index + 1}`;
-            // Click to open full-size in the lightbox.
-            return (
-              <img
-                key={`${image.mimeType}-${index}`}
-                src={src}
-                alt={alt}
-                className="zoomable"
-                title="Ampliar"
-                tabIndex={0}
-                aria-keyshortcuts="Meta+C Control+C"
-                onClick={() => store.openImageLightbox(src, alt)}
-              />
-            );
-          })}
+          {images.map((image, index) => (
+            <UserImage key={`${image.mimeType}-${index}`} tabId={tabId} image={image} alt={image.name || `Imagen adjunta ${index + 1}`} />
+          ))}
         </div>
       )}
       {!!text.trim() && <div className="userpill-text" data-chat-find-text>{renderInline(text)}</div>}

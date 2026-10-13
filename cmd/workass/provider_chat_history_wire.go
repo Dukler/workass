@@ -41,6 +41,7 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 		// byte-identical full response.
 		if len(args) > 1 {
 			options := mapFromAnyMain(args[1])
+			read := archiveReadOptions{deferMessageImages: options["deferImages"] == true}
 			if _, requested := options["imageRef"]; requested {
 				image, found, err := providerChats.ProjectToolImageByTab(stringArg(args, 0), fieldString(options, "imageRef"))
 				if err != nil {
@@ -53,7 +54,7 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 			}
 			if _, requested := options["beforeMessageId"]; requested {
 				if messages, found, err := providerChats.ProjectArchivePageBeforeByTab(
-					stringArg(args, 0), fieldString(options, "beforeMessageId"), intValue(options["limit"]),
+					stringArg(args, 0), fieldString(options, "beforeMessageId"), intValue(options["limit"]), read,
 				); err != nil {
 					return nil, err
 				} else if found {
@@ -63,7 +64,7 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 			}
 			if rawLimit, requested := options["tail"]; requested {
 				limit := intValue(rawLimit)
-				if messages, found, err := providerChats.ProjectRecentArchiveByTab(stringArg(args, 0), limit); err != nil {
+				if messages, found, err := providerChats.ProjectRecentArchiveByTab(stringArg(args, 0), limit, read); err != nil {
 					return nil, err
 				} else if found {
 					return messages, nil

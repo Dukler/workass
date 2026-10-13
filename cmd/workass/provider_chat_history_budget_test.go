@@ -193,3 +193,47 @@ func TestActorHistoryBudgetKeepsUncommittedForegroundOwnersTogether(t *testing.T
 		t.Fatalf("uncommitted owner was dropped: rows=%d err=%v", len(page), err)
 	}
 }
+
+// A reply's own screenshots made a ten-message navigation read 4.8 MB
+// (2026-10-13). A renderer that asks for deferImages gets them by reference
+// and reads each one through the archive channel; one that does not keeps the
+// byte-identical response.
+func TestNavigationReadDefersMessageImagesOnlyWhenAsked(t *testing.T) {
+	stateDir, ref, data := imageReadFixture(t)
+	engine, err := chat.NewEngine("message-image-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Apply(chat.InitializeFork{Presentation: chat.PresentationState{TabID: "message-image-tab", Title: "Screenshots"},
+		SourceChatID: "source", OperationID: "create-message-images", Digest: "fixture", Messages: []chat.LedgerEvent{{
+			EventID: "reply", MessageID: "assistant-reply", OperationID: "turn", Role: "assistant", Text: "![player close-up](player.png)", Status: "done",
+			Attachments: []providercontract.Attachment{{ID: "shot", Name: "player close-up", MIMEType: "image/png", Source: "player.png", Ref: providerSessionImageRefPrefix + ref}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &providerChatRuntime{manager: &acp.Manager{}, sessions: sharedSessionStore(stateDir), stateDir: stateDir,
+		actors: map[string]*providerChatActor{"message-image-chat": {engine: engine}}, known: map[string]struct{}{"message-image-chat": {}}}
+	hub := wire.NewHub()
+	registerArchiveHandlers(hub, nil, runtime)
+	firstImage := func(reply any) map[string]any {
+		return mapFromAnyMain(anySlice(mapFromAnyMain(anySlice(reply)[0])["images"])[0])
+	}
+
+	inline, err := hub.Invoke("chat:archive-load", []any{"message-image-tab", map[string]any{"tail": 10}})
+	if err != nil || fieldString(firstImage(inline), "data") != data {
+		t.Fatalf("a renderer that did not ask lost its inline image: err=%v", err)
+	}
+	deferred, err := hub.Invoke("chat:archive-load", []any{"message-image-tab", map[string]any{"tail": 10, "deferImages": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := firstImage(deferred)
+	if fieldString(image, "deferredImageRef") != ref || fieldString(image, "data") != "" || fieldString(image, "source") != "player.png" {
+		t.Fatalf("navigation image was not deferred: %#v", image)
+	}
+	loaded, err := hub.Invoke("chat:archive-load", []any{"message-image-tab", map[string]any{"imageRef": ref}})
+	if err != nil || fieldString(mapFromAnyMain(anySlice(loaded)[0]), "data") != data {
+		t.Fatalf("a message image could not be read by reference: err=%v", err)
+	}
+}

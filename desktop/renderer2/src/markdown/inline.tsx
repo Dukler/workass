@@ -1,10 +1,14 @@
 // Inline markdown → React nodes. Producing nodes (never innerHTML) makes this
 // XSS-safe by construction: user/agent text can only ever become text nodes.
 import type { ReactNode } from 'react';
+import type { MessageImage } from '../store/types';
+import { MessageImageButton } from '../components/MessageImage';
 
 export interface InlineMedia {
   src: string;
   alt: string;
+  // A message image sent by reference: src stays empty until it loads.
+  deferred?: { tabId: string; image: MessageImage };
 }
 
 export interface InlineMediaResolver {
@@ -94,7 +98,13 @@ export function renderInline(text: string, keyBase = 'i', allowLinks = true, med
       const href = normalizeMarkdownTarget(tok.slice(close + 2, -1));
       const resolved = media?.resolve(href) ?? null;
       if (imageSyntax) {
-        if (resolved) {
+        if (resolved && !resolved.src && resolved.deferred) {
+          const alt = label || resolved.alt;
+          out.push(
+            <MessageImageButton key={key} tabId={resolved.deferred.tabId} image={resolved.deferred.image} alt={alt}
+              className="assistant-inline-image" onOpen={(src) => media?.open({ src, alt })} />,
+          );
+        } else if (resolved) {
           out.push(
             <button key={key} type="button" className="assistant-inline-image" title="Ampliar" onClick={() => media?.open(resolved)}>
               <img src={resolved.src} alt={label || resolved.alt} />
