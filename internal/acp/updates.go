@@ -628,6 +628,11 @@ func (m *Manager) StartProviderUpdate(parent context.Context, providerID string)
 
 	update, ok := m.currentProviderUpdate(parent, id)
 	if !ok || !update.UpdateAvailable {
+		// Nothing to install usually means the CLI updated itself (Claude Code
+		// does). The card still shows the stale offer, so republish it: the
+		// renderer treats this refusal as a skip and would otherwise keep
+		// offering an update that is already installed.
+		go m.CheckProviderUpdates(context.Background())
 		fields := map[string]any{"providerId": id}
 		if ok {
 			fields["installed"] = update.Installed
@@ -1166,6 +1171,7 @@ func (m *Manager) providerUpdatesPayload(ctx context.Context) (ProviderUpdatesPa
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	m.refreshInstalledCLIVersions(ctx)
 	candidates := m.providerUpdateCandidates()
 	payload := ProviderUpdatesPayload{
 		CheckedAt: time.Now().UTC().Format(time.RFC3339Nano),
@@ -1201,6 +1207,26 @@ func (m *Manager) providerUpdatesPayload(ctx context.Context) (ProviderUpdatesPa
 		payload.Updates = append(payload.Updates, update)
 	}
 	return payload, len(candidates) > 0, hasFailures
+}
+
+// refreshInstalledCLIVersions rereads each known CLI's version before an
+// update check. The version is otherwise a discovery cache, and a vendor that
+// updates itself (Claude Code's own updater) leaves it stale: the card then
+// offers an update that is already installed until something else rereads it.
+func (m *Manager) refreshInstalledCLIVersions(ctx context.Context) {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.providerOrder))
+	for _, id := range m.providerOrder {
+		if runtime := m.providers[id]; runtime != nil && !runtime.Config.DisabledByUser && runtime.CLIVersion != nil && runtime.CLIVersion.Version != "" {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.Unlock()
+	for _, id := range ids {
+		if version := m.detectInstalledCLIVersion(ctx, id); version != nil && version.Version != "" {
+			m.setProviderCLIVersion(id, version)
+		}
+	}
 }
 
 func (m *Manager) providerUpdateCandidate(providerID string) (providerUpdateCandidate, bool) {

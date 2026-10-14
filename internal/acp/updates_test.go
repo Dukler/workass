@@ -1268,9 +1268,20 @@ func TestRealProviderUpdateInvokeQwen(t *testing.T) {
 
 func TestProviderUpdatesPayloadSkipsIncomparableInstalledVersion(t *testing.T) {
 	t.Parallel()
+	// The check rereads the installed version from the binary, so the binary
+	// itself reports the garbage (not just the cache).
+	qwenPath := filepath.Join(t.TempDir(), "qwen")
+	writeFixtureExecutable(t, qwenPath, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'garbage\\n'; exit 0; fi\nexit 1\n")
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.25.1"})
+	}))
+	t.Cleanup(registry.Close)
 	manager := NewManager(Options{
-		RootDir:           repoRoot(t),
-		RSSSampleInterval: time.Hour,
+		RootDir:               repoRoot(t),
+		RSSSampleInterval:     time.Hour,
+		Providers:             []ProviderConfig{{ID: "qwen", Name: "Qwen Code ACP", Command: qwenPath, ResolvedCommand: qwenPath, Args: []string{"--acp"}, Enabled: true, Badge: "agent"}},
+		DefaultProviderID:     "qwen",
+		ProviderUpdateSources: map[string]string{"qwen": registry.URL + "/latest"},
 	})
 	t.Cleanup(func() { manager.Reset() })
 	manager.mu.Lock()
@@ -1517,4 +1528,52 @@ func TestDetectProviderStoresRedactedCLIVersionRaw(t *testing.T) {
 	if version == nil || version.Raw != "token=[redacted] 0.58.1" || version.Version != "0.58.1" {
 		t.Fatalf("redacted cliVersion = %#v", version)
 	}
+}
+
+// A vendor CLI that updated itself (Claude Code's own updater, 2026-10-14)
+// left the card offering an update that was already installed. Clicking it
+// found nothing pending, the renderer treated that as a skip, and nothing ever
+// re-published the card, so every click flashed and did nothing.
+func TestProviderUpdateCardFollowsAVendorSelfUpdate(t *testing.T) {
+	t.Parallel()
+	pending := func(payload ProviderUpdatesPayload) bool {
+		for _, update := range payload.Updates {
+			if update.ProviderID == "qwen" && update.UpdateAvailable {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("click finds it already installed", func(t *testing.T) {
+		manager, events, versionFile := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
+		if !pending(manager.CheckProviderUpdates(context.Background())) {
+			t.Fatal("fixture should start with an update pending")
+		}
+		if err := os.WriteFile(versionFile, []byte("0.58.2\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		before := len(events.snapshot())
+		_, err := manager.StartProviderUpdate(context.Background(), "qwen")
+		if structuredErrorCode(err) != "providers:update-no-pending" {
+			t.Fatalf("click error = %v", err)
+		}
+		events.waitFor(t, 5*time.Second, func(ev collectedEvent) bool {
+			payload, ok := ev.payload.(ProviderUpdatesPayload)
+			return ev.channel == "providers:updates" && ok && !pending(payload) && len(events.snapshot()) > before
+		})
+	})
+
+	t.Run("periodic check rereads the installed version", func(t *testing.T) {
+		manager, _, versionFile := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
+		if !pending(manager.CheckProviderUpdates(context.Background())) {
+			t.Fatal("fixture should start with an update pending")
+		}
+		if err := os.WriteFile(versionFile, []byte("0.58.2\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if payload := manager.CheckProviderUpdates(context.Background()); pending(payload) {
+			t.Fatalf("the periodic check still offers an installed version: %#v", payload.Updates)
+		}
+	})
 }
