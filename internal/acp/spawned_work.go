@@ -2209,11 +2209,24 @@ func (m *Manager) loadSpawnedWorkSnapshots() {
 	}
 	orphanedPairs := map[[2]string]struct{}{}
 	for _, rec := range m.spawnedWork {
-		if rec == nil || rec.Item.Status != "running" || spawnedWorkLivenessClassFor(rec.Item) != spawnedWorkLivenessSubagent {
+		if rec == nil || rec.Item.Status != "running" {
+			continue
+		}
+		summary := ""
+		switch spawnedWorkLivenessClassFor(rec.Item) {
+		case spawnedWorkLivenessSubagent:
+			summary = "Orphaned after daemon restart: the tracked subagent process cannot survive daemon replacement."
+		case spawnedWorkLivenessInProcess:
+			// It ran inside the provider process (a Claude agent, or a command
+			// with no PID or output file), and every provider process ends with
+			// the daemon. Left running, the silence rule could not settle it
+			// while its chat kept working, so the row ran forever.
+			summary = "Orphaned after daemon restart: it ran inside the provider process, which ended with the previous daemon."
+		default:
 			continue
 		}
 		if m.settleSpawnedWorkLocked(rec, "orphaned", nil) {
-			rec.Item.Summary = "Orphaned after daemon restart: the tracked subagent process cannot survive daemon replacement."
+			rec.Item.Summary = summary
 			rec.Item.LastToolName = "orphaned"
 			rec.Item.UpdatedAt = rec.Item.FinishedAt
 			orphanedPairs[[2]string{rec.Item.TabID, rec.Item.ChatID}] = struct{}{}

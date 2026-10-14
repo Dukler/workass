@@ -279,3 +279,70 @@ func TestClaudeWakeTestEntriesKeepTheirIdentityUntilTheyFinish(t *testing.T) {
 		t.Fatalf("the agent settled before its own work finished: agent %s, child %s", agent.FinishedAt, state.Background["b-wake-child"].Event.FinishedAt)
 	}
 }
+
+// A Claude agent still running when the daemon is killed cannot survive it:
+// every provider process ends with the daemon. Reloaded as "running", it had
+// nothing left to end it while its chat kept working (observed 2026-10-14
+// after the 0.1.214 install). The restarted daemon must settle it.
+func TestClaudeAgentRunningAtDaemonKillIsOrphanedOnRestart(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	newManager := func(stateDir string) *acp.Manager {
+		return acp.NewManager(acp.Options{
+			RootDir: root, StateDir: stateDir, RuntimeProfile: "dev", DefaultProviderID: "claude", InitTimeout: 10 * time.Second,
+			RSSSampleInterval: time.Hour, SpawnedWorkReconcileInterval: time.Hour,
+			Provider: acp.ProviderConfig{ID: "claude", Command: "node", Args: []string{filepath.Join(root, "scripts", "claude-native-host.mjs")}, CWD: root, Enabled: true,
+				Env: map[string]string{
+					"WORKASS_CLAUDE_SDK_MODULE": filepath.Join(root, "desktop", "acp", "mock-claude-agent-sdk.mjs"),
+					"WORKASS_CLAUDE_EXECUTABLE": "/fixture/claude",
+					"WORKASS_CLAUDE_SESSION_ID": "fixture-stranded-session",
+				}},
+		})
+	}
+	firstDir := t.TempDir()
+	first := newManager(firstDir)
+	t.Cleanup(func() { first.Reset() })
+	runtime := newTestProviderChatRuntime(t, first, sharedSessionStore(firstDir), firstDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := runtime.CreateRendererChat(map[string]any{"tabId": "stranded-tab", "chatId": "stranded-chat", "operationId": "stranded-create", "cwd": root, "providerId": "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := runtime.Select(ctx, acp.SessionOptions{TabID: "stranded-tab", ChatID: "stranded-chat", ProviderID: "claude", CWD: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Start(ctx, map[string]any{"kind": "app-chat", "tabId": "stranded-tab", "chatId": "stranded-chat", "sessionId": info.SessionID, "operationId": "stranded-turn", "userMessageId": "stranded-user", "assistantMessageId": "stranded-assistant", "prompt": "[fixture:stranded-agent]"}, "human"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		state, _ := runtime.Snapshot("stranded-chat")
+		if state.Background["a-stranded"].Event.Status == "running" {
+			if _, busy := first.RunningJobForChat("stranded-tab", "stranded-chat"); !busy {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the agent never ran in a finished turn: %#v", state.Background)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The daemon is killed here: what is on disk at this instant is all the
+	// next daemon gets. Copy it rather than shutting down cleanly.
+	secondDir := t.TempDir()
+	if err := os.CopyFS(secondDir, os.DirFS(firstDir)); err != nil {
+		t.Fatal(err)
+	}
+	second := newManager(secondDir)
+	t.Cleanup(func() { second.Reset() })
+	restarted := newTestProviderChatRuntime(t, second, sharedSessionStore(secondDir), secondDir)
+	state, ok := restarted.Snapshot("stranded-chat")
+	if !ok {
+		t.Fatal("the restarted daemon lost the chat")
+	}
+	if got := state.Background["a-stranded"].Event.Status; got != "orphaned" {
+		t.Fatalf("an agent whose Claude process died with the daemon reads %q after restart", got)
+	}
+}

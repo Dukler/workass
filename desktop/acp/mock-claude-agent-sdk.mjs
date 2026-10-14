@@ -364,6 +364,17 @@ class FixtureQuery {
         await this.harnessTurn({ settles: { task_id: 'a-bg-wake', tool_use_id: toolUse.id, status: 'completed', output_file: '/private/tmp/claude-501/fixture/session/tasks/a-bg-wake.output', summary: 'Wake test agent finished' } });
         continue;
       }
+      // A background agent still running when Workass stops: it never
+      // finishes, because the Claude process running it dies with the daemon.
+      if (text.includes('[fixture:stranded-agent]')) {
+        const toolUse = { type: 'tool_use', id: 'toolu_stranded', name: 'Agent', input: { description: 'Stranded agent', subagent_type: 'Explore', run_in_background: true, prompt: 'wait' } };
+        const base = { parent_tool_use_id: null, session_id: this.sessionId };
+        this.emit({ ...base, type: 'assistant', uuid: randomUUID(), message: { content: [toolUse] } });
+        this.emit({ type: 'system', subtype: 'task_started', session_id: this.sessionId, uuid: randomUUID(), task_id: 'a-stranded', tool_use_id: toolUse.id, description: 'Stranded agent', subagent_type: 'Explore', task_type: 'local_agent', is_backgrounded: true });
+        this.emit({ ...base, type: 'user', uuid: randomUUID(), message: { content: [{ type: 'tool_result', tool_use_id: toolUse.id, content: 'Async agent launched successfully.\nagentId: a-stranded' }] } });
+        await this.endTurn(text);
+        continue;
+      }
       // Echo how the host marked this prompt, so a test can see the origin
       // Claude Code would read (human-only features such as ultracode).
       if (text.includes('[fixture:echo-origin]')) {
