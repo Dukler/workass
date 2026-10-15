@@ -228,7 +228,7 @@ func workassToolMutates(kind toolKind, name string) bool {
 		}
 	}
 	switch name {
-	case "workass_create_chat", "workass_rename_chat", "workass_configure_chat", "workass_focus_chat",
+	case "workass_create_chat", "workass_rename_chat", "workass_settle_chat", "workass_configure_chat", "workass_focus_chat",
 		"workass_delete_chat", "workass_send_chat_message", "workass_cancel_chat_turn", "workass_host_artifact",
 		"workass_apply_update",
 		"workass_spawn_subagent", "workass_wait_subagent", "workass_wait_subagents",

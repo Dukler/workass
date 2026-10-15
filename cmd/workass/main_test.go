@@ -607,6 +607,11 @@ func TestStateDigestIsBodyFreeAndUnder64KiBForTwoHundredChats(t *testing.T) {
 	if bytes.Contains(encoded, []byte("digest-secret")) || bytes.Contains(encoded, []byte("queued body")) {
 		t.Fatalf("state digest leaked message or queue bodies: %s", encoded)
 	}
+	// A chat with no pending permission must still send an array: the renderer
+	// reconciler reads .length on it, and null stopped every digest sync.
+	if bytes.Contains(encoded, []byte(`"pendingPermissionIds":null`)) || !bytes.Contains(encoded, []byte(`"pendingPermissionIds":[]`)) {
+		t.Fatalf("state digest sent pendingPermissionIds as null: %.400s", encoded)
+	}
 	digest := mapFromAnyMain(raw)
 	items := anySlice(digest["chats"])
 	if len(items) != 200 {

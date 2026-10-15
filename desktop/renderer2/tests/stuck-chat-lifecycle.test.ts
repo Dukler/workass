@@ -897,6 +897,41 @@ test('digest divergence schedules only the relevant scoped sync', () => {
   assert.equal(scheduled[0].has('permissions'), false);
 });
 
+// Daemons through v0.1.221 encode "no pending permission" as null. Reading
+// .length on it threw before any sync was scheduled, so an agent-sent queue
+// row the daemon had already delivered stayed under the chat as "En cola · 1".
+test('digest with null pendingPermissionIds still heals a delivered agent queue row', () => {
+  const { subject, owner } = subjectWithChat();
+  owner.queue = [{ id: 'q:agent-op', text: 'agent report', source: 'agent', delivery: 'auto', queuedAt: new Date().toISOString() }] as any;
+  const scheduled: Set<string>[] = [];
+  (subject as any).scheduleScopedSync = (scopes: Set<string>) => scheduled.push(new Set(scopes));
+  const digest = {
+    chats: [{
+      tabId: owner.id,
+      chatId: owner.chatId!,
+      runningJobId: null,
+      lastMessageId: owner.messages.at(-1)?.id ?? null,
+      messageCount: owner.messages.length,
+      queueLen: 0,
+      queueHeadId: null,
+      agentQueueRevision: owner.agentQueueRevision ?? 0,
+      runtimeControlRevision: owner.runtimeControlRevision ?? 0,
+      providerId: owner.providerId ?? null,
+      currentModelId: owner.currentModelId ?? null,
+      currentModeId: owner.currentModeId ?? null,
+      pendingPermissionIds: null,
+    }],
+    catalogHash: {},
+    settingsRevision: '',
+    procHash: '',
+  } as unknown as StateDigest;
+
+  assert.doesNotThrow(() => (subject as any).handleStateDigest(digest));
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].has('session'), true);
+  assert.equal(scheduled[0].has('permissions'), false);
+});
+
 test('mirror restore keeps an explicit local pick unless daemon control revision is strictly higher', () => {
   const { subject, owner } = subjectWithChat();
   owner.providerId = 'codex';

@@ -2221,8 +2221,11 @@ export class Store {
         scopes.add('session');
         scopes.add('background');
       }
-      if ((!chat && remote.pendingPermissionIds.length)
-        || (chat && !sameStrings(localPendingPermissionIDs(chat), remote.pendingPermissionIds))) scopes.add('permissions');
+      // Daemons through v0.1.221 send null for "none"; reading .length on it threw
+      // here and the probe swallowed it, so no digest ever scheduled a sync.
+      const remotePermissionIds = Array.isArray(remote.pendingPermissionIds) ? remote.pendingPermissionIds : [];
+      if ((!chat && remotePermissionIds.length)
+        || (chat && !sameStrings(localPendingPermissionIDs(chat), remotePermissionIds))) scopes.add('permissions');
     }
     // Only THIS daemon's chats are in its digest. Another machine's chats live in
     // that machine's mirror and are carried across every restore (carryRemoteChats),
