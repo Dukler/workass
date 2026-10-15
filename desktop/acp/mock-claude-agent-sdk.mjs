@@ -364,6 +364,23 @@ class FixtureQuery {
         await this.harnessTurn({ settles: { task_id: 'a-bg-wake', tool_use_id: toolUse.id, status: 'completed', output_file: '/private/tmp/claude-501/fixture/session/tasks/a-bg-wake.output', summary: 'Wake test agent finished' } });
         continue;
       }
+      // A background subagent's own messages, as the real CLI streams them:
+      // every one carries parent_tool_use_id (its Agent call). Its read is
+      // still open when the main turn ends and finishes afterwards.
+      if (text.includes('[fixture:subagent-reads]')) {
+        const base = { parent_tool_use_id: null, session_id: this.sessionId };
+        const agent = { type: 'tool_use', id: 'toolu_sub_agent', name: 'Agent', input: { description: 'Label clip_8', subagent_type: 'general-purpose', run_in_background: true, prompt: 'label' } };
+        this.emit({ ...base, type: 'assistant', uuid: randomUUID(), message: { content: [agent] } });
+        this.emit({ ...base, type: 'user', uuid: randomUUID(), message: { content: [{ type: 'tool_result', tool_use_id: agent.id, content: 'Async agent launched successfully.\nagentId: a-sub' }] } });
+        const sub = { parent_tool_use_id: agent.id, session_id: this.sessionId };
+        const read = { type: 'tool_use', id: 'toolu_sub_read', name: 'Read', input: { file_path: '/repo/frames/frame_1.png' } };
+        this.emit({ ...sub, type: 'stream_event', uuid: randomUUID(), event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'SUBAGENT DELTA' } } });
+        this.emit({ ...sub, type: 'assistant', uuid: randomUUID(), message: { content: [{ type: 'text', text: 'SUBAGENT TEXT' }, read] } });
+        await this.endTurn(text);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        this.emit({ ...sub, type: 'user', uuid: randomUUID(), message: { content: [{ type: 'tool_result', tool_use_id: read.id, content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } }] }] } });
+        continue;
+      }
       // A background agent still running when Workass stops: it never
       // finishes, because the Claude process running it dies with the daemon.
       if (text.includes('[fixture:stranded-agent]')) {

@@ -935,12 +935,13 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 		}
 	case "tool_call", "tool_call_update":
 		if b.acceptToolNotification(sessionID, job, kind, update) {
-			if kind == "tool_call" && job != nil {
+			parent := adapter.notifications.ToolParentID(mapFromAny(update["_meta"]), mapFromAny(params["_meta"]))
+			// A subagent's call is not a step of the main agent's prose.
+			if kind == "tool_call" && job != nil && parent == "" {
 				b.manager.jobMu.Lock()
 				job.textBreakPending = true
 				b.manager.jobMu.Unlock()
 			}
-			parent := adapter.notifications.ToolParentID(mapFromAny(update["_meta"]), mapFromAny(params["_meta"]))
 			b.emitToolEvent(job, kind, update, parent)
 		}
 	case "plan":
