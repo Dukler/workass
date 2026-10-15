@@ -106,6 +106,7 @@ function AssistantSliceBody({
   turnSeq,
   coalescedSegments,
   artifactOrigin,
+  midRun = false,
 }: {
   tabId: string;
   msg: Msg;
@@ -114,6 +115,7 @@ function AssistantSliceBody({
   turnSeq?: number;
   coalescedSegments?: TranscriptTimelineSegment[];
   artifactOrigin?: string;
+  midRun?: boolean;
 }) {
   // Text already in this reply when it mounts shows as it is; only text that
   // arrives afterwards fades in. A reply born this instant keeps its fade.
@@ -157,7 +159,12 @@ function AssistantSliceBody({
   // A turn cut off by a daemon disconnect: shown as a quiet "sin conexión" row,
   // not the generic model-error stamp and never as a resend affordance.
   const interrupted = terminal && msg.status === 'failed' && !!msg.interrupted;
-  const showStamp = terminal && (msg.status === 'done' || msg.status === 'failed' || msg.status === 'cancelled') && !interrupted;
+  const settled = terminal && (msg.status === 'done' || msg.status === 'failed' || msg.status === 'cancelled') && !interrupted;
+  // One copy/time row per run of replies, shown on hover (user 2026-10-15):
+  // a run of one-line wake replies printed a row under every line. A reply
+  // with another right after it keeps only a state word that is real news.
+  const stateWord = msg.status === 'cancelled' ? 'detenido' : msg.status === 'failed' ? 'error' : '';
+  const showStamp = settled && (!midRun || !!stateWord);
   // R4/R5: a completed turn that recorded a checkpoint (changed tracked files)
   // gets per-turn Deshacer/Revisar affordances, revealed on hover.
   const hasCheckpoint = terminal && turnSeq != null && (msg.status === 'done' || msg.status === 'failed');
@@ -214,12 +221,18 @@ function AssistantSliceBody({
       {terminal && msg.permission && !msg.permission.question && <PermCard perm={msg.permission} tabId={tabId} msgId={owner.id} />}
 
       {showStamp && (
-        <div className="stamp">
-          <span title="Copiar turno" onClick={() => { void navigator.clipboard?.writeText(fullAssistantText(owner)); }}><IcStampCopy /></span>
-          {msg.status === 'cancelled' && <span>detenido</span>}
-          {msg.status === 'failed' && <span className="turnfail">error</span>}
-          <RelStamp at={msg.at} />
-          {hasCheckpoint && (
+        <div className={`stamp${midRun ? ' stamp-quiet' : ''}`}>
+          {stateWord && <span className={`stamp-state${msg.status === 'failed' ? ' turnfail' : ''}`}>{stateWord}</span>}
+          {!midRun && (
+            <>
+              <button type="button" className="stamp-btn" title="Copiar respuesta" aria-label="Copiar respuesta"
+                onClick={() => { void navigator.clipboard?.writeText(fullAssistantText(owner)); }}>
+                <IcStampCopy />
+              </button>
+              <span className="stamp-time"><RelStamp at={msg.at} /></span>
+            </>
+          )}
+          {!midRun && hasCheckpoint && (
             <span className="turnacts">
               <button className="turnact" title="Volver a antes de este turno" onClick={() => void store.openRewind(turnSeq)}>↺ Deshacer</button>
               <button className="turnact" title="Revisar los cambios de este chat" onClick={() => void store.openReview(null)}>Revisar</button>
@@ -234,6 +247,8 @@ function AssistantSliceBody({
 interface AssistantBodyProps {
   tabId: string;
   msg: Msg;
+  /** Another reply follows this one directly: its copy/time row is the run's. */
+  midRun?: boolean;
   turnSeq?: number;
   coalescedSegments?: TranscriptTimelineSegment[];
   artifactOrigin?: string;
@@ -254,6 +269,7 @@ const AssistantRowView = memo(function AssistantRowView({
   turnSeq,
   coalescedSegments,
   artifactOrigin,
+  midRun,
 }: AssistantRowViewProps) {
   return (
     <AssistantSliceBody
@@ -264,6 +280,7 @@ const AssistantRowView = memo(function AssistantRowView({
       turnSeq={msg.turnTerminal === false ? undefined : turnSeq}
       coalescedSegments={coalescedSegments}
       artifactOrigin={artifactOrigin}
+      midRun={midRun}
     />
   );
 }, (a, b) => (
@@ -273,9 +290,10 @@ const AssistantRowView = memo(function AssistantRowView({
   && a.turnSeq === b.turnSeq
   && a.coalescedSegments === b.coalescedSegments
   && a.artifactOrigin === b.artifactOrigin
+  && a.midRun === b.midRun
 ));
 
-function AssistantBody({ tabId, msg, turnSeq, coalescedSegments, artifactOrigin }: AssistantBodyProps) {
+function AssistantBody({ tabId, msg, turnSeq, coalescedSegments, artifactOrigin, midRun }: AssistantBodyProps) {
   // Subscribe to this canonical message's topic; token streams bump only this.
   const version = useMsgVersion(msg.id);
   return (
@@ -286,6 +304,7 @@ function AssistantBody({ tabId, msg, turnSeq, coalescedSegments, artifactOrigin 
       turnSeq={turnSeq}
       coalescedSegments={coalescedSegments}
       artifactOrigin={artifactOrigin}
+      midRun={midRun}
     />
   );
 }
@@ -309,6 +328,8 @@ interface AssistantTurnBlockProps {
   messages: Msg[];
   turnSeqs: Array<number | undefined>;
   artifactOrigin?: string;
+  /** Per message: another reply follows it directly. */
+  midRun?: boolean[];
 }
 
 // A steered turn can span several canonical assistant rows. Cross-row tool
@@ -317,7 +338,7 @@ interface AssistantTurnBlockProps {
 // sole multi-row subscription owner; its pure row views receive primitive topic
 // versions, so only the changed slice reconciles. Fragments preserve the exact
 // per-message DOM shape used by ordinary singleton rows.
-export function AssistantTurnBlock({ tabId, messages, turnSeqs, artifactOrigin }: AssistantTurnBlockProps) {
+export function AssistantTurnBlock({ tabId, messages, turnSeqs, artifactOrigin, midRun }: AssistantTurnBlockProps) {
   const messageIdsKey = messages.map((message) => message.id).join('\0');
   useTurnBlockMessageVersions(messageIdsKey);
   const coalesced = buildCoalescedTurnBlockTimelineSegments(messages);
@@ -332,6 +353,7 @@ export function AssistantTurnBlock({ tabId, messages, turnSeqs, artifactOrigin }
             turnSeq={turnSeqs[index]}
             coalescedSegments={coalesced[index]}
             artifactOrigin={artifactOrigin}
+            midRun={midRun?.[index]}
           />
         </div>
       ))}
@@ -653,4 +675,5 @@ export const AssistantMessage = memo(AssistantBody, (a, b) => (
   && a.msg === b.msg
   && a.turnSeq === b.turnSeq
   && a.coalescedSegments === b.coalescedSegments
+  && a.midRun === b.midRun
 ));
