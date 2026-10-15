@@ -15,6 +15,8 @@ import { localBrowserOwnsChat } from '../browser';
 import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, transcriptWindowStart } from '../chat/residency';
 
 const HISTORY_PAGE = 40;
+// How long the streaming height hold outlives the last growth (see onResize).
+export const HELD_HEIGHT_RELEASE_MS = 700;
 const SEARCH_WINDOW = 40;
 
 // Transcript copy/export menu removed by user request (2026-07-11): agents
@@ -311,9 +313,12 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // Windowing: remember distance-from-bottom across a "ver anteriores" reveal so
   // prepending older messages keeps the read position fixed.
   const keepFromBottom = useRef<number | null>(null);
+  // The screen-filling load found nothing more for this chat; do not retry it.
+  const autoFillStalled = useRef(false);
 
   // Reset the window when switching chats.
   useEffect(() => {
+    autoFillStalled.current = false;
     setReveal(CHAT_INITIAL_HISTORY);
     setHistoryLoading(false);
     stick.current = true;
@@ -548,15 +553,25 @@ export function Transcript({ chat }: { chat: Chat | null }) {
 
   // A window shorter than the screen left a band of nothing under the newest
   // row while older messages sat behind "Ver anteriores" (user 2026-10-15).
-  // Show more of what is already loaded until the screen is full. It only
-  // grows while there is nothing to scroll, so it never moves what is read.
+  // Show more until the screen is full: first what is already loaded, then
+  // older history from disk, exactly as "Ver anteriores" would — filling only
+  // from memory left the band whenever the older rows were still on disk
+  // (user 2026-10-15). It only grows while there is nothing to scroll, so it
+  // never moves what is read; a load that brings nothing stops it for the chat.
   useLayoutEffect(() => {
     const doc = docRef.current;
     const el = scrollRef.current;
-    if (!doc || !el || selectedFindMatch || residentHidden <= 0) return;
-    if (doc.offsetHeight < el.clientHeight) {
+    if (!doc || !el || !chat || selectedFindMatch || doc.offsetHeight >= el.clientHeight) return;
+    if (residentHidden > 0) {
       setReveal((current) => Math.min(total, Math.max(current, shown.length) + CHAT_INITIAL_HISTORY));
+      return;
     }
+    if (hidden <= 0 || historyLoading || chat.historyComplete || autoFillStalled.current) return;
+    const chatID = chat.id;
+    const before = chat.messages.length;
+    void revealOlder().then(() => {
+      if ((store.chat(chatID)?.messages.length ?? 0) <= before) autoFillStalled.current = true;
+    });
   });
 
   // A turn's held height lasts exactly as long as the turn.
@@ -603,12 +618,27 @@ export function Transcript({ chat }: { chat: Chat | null }) {
       spring.stop();
       setScrollTop(el, el.scrollHeight);
     }
+    // The hold only bridges a momentary dip while text streams. Kept for the
+    // whole turn, any real shrink (a thought line stepping aside, a live row
+    // ending) stayed on screen as a band of nothing under the newest line for
+    // as long as a long-running turn lasted (user 2026-10-15). Once the
+    // transcript has stopped growing for a moment, the space goes back.
+    let holdRelease: number | null = null;
+    const releaseHoldSoon = () => {
+      if (holdRelease !== null) window.clearTimeout(holdRelease);
+      holdRelease = window.setTimeout(() => {
+        holdRelease = null;
+        heldHeight.current = 0;
+        doc?.style.removeProperty('min-height');
+      }, HELD_HEIGHT_RELEASE_MS);
+    };
     const onResize = () => {
       if (streamFollow.current && doc) {
         const height = doc.offsetHeight;
         if (height > heldHeight.current) {
           heldHeight.current = height;
           doc.style.minHeight = `${height}px`;
+          releaseHoldSoon();
         }
       }
       if (!stick.current) return;
@@ -626,6 +656,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     window.addEventListener('pageshow', reconcile);
     scheduler.reconcile();
     return () => {
+      if (holdRelease !== null) window.clearTimeout(holdRelease);
       scheduler.dispose();
       spring.stop();
       mo.disconnect();
